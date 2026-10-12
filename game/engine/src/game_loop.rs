@@ -15851,8 +15851,10 @@ impl super::GameState {
                                 // and refunded — a take and a refund the server
                                 // never saw). Single-player and joined alike.
                                 let refusal = match self.players[pidx].inventory.hotbar_placeable_id(hotbar) {
+                                    // C3d run 21 (run-18 review L4) — joined, a top
+                                    // above the world is refused too (no ghost top).
                                     Some(block::OAK_DOOR)
-                                        if self.world.get_block(place_x, place_y + 1, place_z) != block::AIR =>
+                                        if crate::strict_doors::door_headroom_refused(&self.world, [place_x, place_y, place_z], self.joined()) =>
                                     {
                                         Some(("No room for the door — needs 2 blocks of height.", 2))
                                     }

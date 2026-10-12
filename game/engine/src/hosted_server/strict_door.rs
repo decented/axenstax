@@ -119,6 +119,13 @@ impl HostedServer {
         let top = [bottom[0], bottom[1].saturating_add(1), bottom[2]];
         let cells = [bottom, top];
         let slot = usize::from(hotbar_slot);
+        // C3d run 21 (run-18 review L6) — one rule with `judge`: every typed
+        // edit on a creative world is `Unsupported` (a creative client
+        // places its door untyped), so a `DoorPlace` there is refused, not
+        // served (it used to consume a door).
+        if self.server.play_mode.is_creative() {
+            return self.refuse_door(i, action, &cells, budget, "Creative free edits await their typed class", RefusalKind::Rule);
+        }
         if slot >= 9 { return self.refuse_door(i, action, &cells, budget, "invalid action slot", RefusalKind::Rule); }
         let Some([(_, bottom_meta), (_, top_meta)]) = crate::strict_doors::door_halves(bottom, facing) else {
             return self.refuse_door(i, action, &cells, budget, "a door faces a horizontal direction", RefusalKind::Rule);
@@ -174,6 +181,9 @@ impl HostedServer {
         super::actions::commit_fault::after_commit(sp);
         self.complete_typed_result(i, action, ActionFate::Accepted, result);
         self.finish_edit_world(&lower, old, old_meta, true, false);
+        // `as_use` (the last argument) is read only when the new block is
+        // AIR (`settle_edit_attachments`, run-18 review L6): a door's top is
+        // a placement, so `true` and `false` act alike here.
         self.finish_edit_world(&upper, AIR, 0, true, true);
         self.strict_fold_holds(i, "door")
     }

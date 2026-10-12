@@ -244,7 +244,16 @@ fn reserve(
         old,
     };
     let bytes = bincode::serialize(&recipe).map_err(|e| e.to_string())?.into_boxed_slice();
-    remote.reserve_action(intent, bytes, vec![cell].into_boxed_slice())
+    // C3d run 21 (run-18 review L3) — the journal holds every cell the
+    // client predicts: a door break clears its pair too (the game loop's
+    // break arm), so the pair derived from the half's own meta is journaled
+    // beside it. The server's row carries its live pair (`edit_cells`), so
+    // the two sides' cells are the union S3 recovery reads.
+    let mut cells = vec![cell];
+    if matches!(kind, EditKind::Break) && old.0 == crate::block::OAK_DOOR && let Some(pair) = crate::strict_doors::door_pair_cell(cell, old.1) {
+        cells.push(pair);
+    }
+    remote.reserve_action(intent, bytes, cells.into_boxed_slice())
 }
 
 /// A Strict client's plain placement of `change` from hotbar `slot`: the

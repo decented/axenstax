@@ -30,6 +30,26 @@ fn other_half(cell: [i32; 3], m: u8) -> [i32; 3] {
     [cell[0], cell[1] + dy, cell[2]]
 }
 
+/// C3d run 21 (run-18 review L3) — [`other_half`] with checked arithmetic,
+/// for a cell the client names: where the matching half of a door half at
+/// `cell` with meta `m` stands, `None` past `i32`'s range.
+pub(crate) fn door_pair_cell(cell: [i32; 3], m: u8) -> Option<[i32; 3]> {
+    let dy = if crate::block_shape::door_is_top(m) { -1 } else { 1 };
+    Some([cell[0], cell[1].checked_add(dy)?, cell[2]])
+}
+
+/// C3d run 21 (run-18 review L4) — the place arm's door headroom refusal,
+/// checked before a door is taken: the cell above `bottom` isn't AIR, or,
+/// on a joined client (Mirror and Strict alike), it lies outside the
+/// world's height. The server refuses a top half above the world, and no
+/// send-back reaches a cell there, so a joined client that placed one kept
+/// a ghost top. Single-player is unchanged (the AIR check alone).
+pub fn door_headroom_refused(world: &World, bottom: [i32; 3], joined: bool) -> bool {
+    let top = bottom[1].saturating_add(1);
+    let cs = crate::chunk::CHUNK_SIZE as i32;
+    (joined && !(0..6 * cs).contains(&top)) || world.get_block(bottom[0], top, bottom[2]) != crate::block::AIR
+}
+
 /// The complete bounded footprint of a toggle click on the toggleable
 /// `primary` (a door, fence gate or trapdoor), primary first: for a door,
 /// its other half, and each horizontally adjacent door at the primary's
@@ -336,5 +356,45 @@ mod tests {
         let [(b, bm), (t, tm)] = door_halves([0, 70, 0], Facing::East.to_bits()).unwrap();
         assert_eq!((b, t), ([0, 70, 0], [0, 71, 0]));
         assert!(!crate::block_shape::door_is_top(bm) && crate::block_shape::door_is_top(tm));
+    }
+}
+
+#[cfg(test)]
+mod run21_tests {
+    use super::*;
+    use crate::block::{AIR, STONE};
+
+    /// Run-18 review L4: at the world's ceiling a joined client refuses the
+    /// door (its top would stand above the world, where no send-back
+    /// reaches); single-player keeps its AIR check alone.
+    #[test]
+    fn c3d_joined_door_headroom_refuses_a_top_above_the_world() {
+        let cs = crate::chunk::CHUNK_SIZE as i32;
+        let mut world = World::new();
+        let ceiling = [3, 6 * cs - 1, 3];
+        assert_eq!(world.get_block(3, 6 * cs, 3), AIR, "above the world reads AIR");
+        assert!(door_headroom_refused(&world, ceiling, true), "joined: refused at the ceiling");
+        assert!(!door_headroom_refused(&world, ceiling, false), "single-player: unchanged");
+        let low = [3, 70, 3];
+        assert!(!door_headroom_refused(&world, low, true), "joined, with room: placed");
+        world.set_block(3, 71, 3, STONE);
+        assert!(door_headroom_refused(&world, low, true) && door_headroom_refused(&world, low, false), "no room: refused everywhere");
+    }
+
+    /// Run-18 review L5: a SOURCE-POSITION guard on the game loop's door
+    /// wiring the server tests re-implement: the place arm sends no
+    /// `DoorUpper` coupon after a typed placement, and the toggle arm
+    /// predicts `Canonical` on a Strict seat (`toggle_joined`) and
+    /// `FlipEach` on a Mirror joiner (`reserve_toggle`).
+    #[test]
+    fn c3d_game_loop_door_wiring_is_pinned() {
+        let src = include_str!("game_loop.rs");
+        assert!(src.contains("if let Some(top) = door_top.filter(|_| !typed_place) {"), "no DoorUpper coupon after a typed placement");
+        let strict = src.find("crate::strict_doors::toggle_joined(").expect("the Strict toggle arm");
+        let mirror = strict + src[strict..].find("crate::strict_doors::reserve_toggle(").expect("the Mirror toggle arm");
+        let local = mirror + src[mirror..].find("crate::strict_doors::toggle_metas(").expect("the prediction");
+        assert!(src[..strict].rfind("} else if self.strict_remote(pidx) {").is_some_and(|at| strict - at < 400), "the Strict arm is the strict seat's");
+        assert!(src[strict..mirror].contains("Some(crate::strict_doors::OpenRule::Canonical)") && !src[strict..mirror].contains("FlipEach"), "a Strict seat predicts Canonical");
+        assert!(src[mirror..local].contains("Some(crate::strict_doors::OpenRule::FlipEach)") && !src[mirror..local].contains("Canonical"), "a Mirror joiner predicts FlipEach");
     }
 }

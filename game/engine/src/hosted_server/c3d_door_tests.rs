@@ -237,12 +237,12 @@ use crate::item::{Item, ItemStack};
 use crate::meta::Facing;
 use crate::strict_doors::{door_halves, place_door_joined, toggle_joined, toggle_metas, OpenRule};
 
-fn doors(n: u8) -> ItemStack { ItemStack { item: Item::Block(OAK_DOOR), count: n } }
+pub(super) fn doors(n: u8) -> ItemStack { ItemStack { item: Item::Block(OAK_DOOR), count: n } }
 
 impl Joined {
     /// The game loop's Strict door placement (`take_for_placement`'s door
     /// arm, then both halves in its world).
-    fn place_door(&mut self, bottom: [i32; 3], slot: usize, f: Facing) {
+    pub(super) fn place_door(&mut self, bottom: [i32; 3], slot: usize, f: Facing) {
         let facing = f.to_bits();
         let placed = place_door_joined(&mut self.rc, &mut self.ui, &mut self.inv, &mut self.armour, slot, bottom, facing, &self.reg).expect("reserved and sent");
         assert_eq!(placed, Some(OAK_DOOR), "the window gave a door");
@@ -266,7 +266,7 @@ impl Joined {
 
     /// The game loop's survival break of a door half (`break_route`, then
     /// the pair cleared in its world).
-    fn break_door(&mut self, cell: [i32; 3], slot: usize) {
+    pub(super) fn break_door(&mut self, cell: [i32; 3], slot: usize) {
         let old = (self.world.get_block(cell[0], cell[1], cell[2]), self.world.meta_at(cell[0], cell[1], cell[2]));
         let change = protocol::BlockChange { x: cell[0], y: cell[1], z: cell[2], new_block: AIR, meta: 0 };
         let routed = crate::strict_edits::route_break(Some(&mut self.rc), &mut self.ui, &mut self.inv, &mut self.armour, slot, change, old, &self.reg).expect("reserved and sent");
@@ -277,7 +277,7 @@ impl Joined {
 
     pub(super) fn server_cell(&self, c: [i32; 3]) -> (u16, u8) { (self.hs.server.world.get_block(c[0], c[1], c[2]), self.hs.server.world.meta_at(c[0], c[1], c[2])) }
     pub(super) fn client_cell(&self, c: [i32; 3]) -> (u16, u8) { (self.world.get_block(c[0], c[1], c[2]), self.world.meta_at(c[0], c[1], c[2])) }
-    fn server_doors(&self) -> u32 { self.sp().inventory.slots_iter().flatten().filter(|s| s.item == Item::Block(OAK_DOOR)).map(|s| u32::from(s.count)).sum() }
+    pub(super) fn server_doors(&self) -> u32 { self.sp().inventory.slots_iter().flatten().filter(|s| s.item == Item::Block(OAK_DOOR)).map(|s| u32::from(s.count)).sum() }
     pub(super) fn refusals(&self) -> (u32, u32, u32) { let t = self.sp().strict_refusals; (t.stale_world, t.other, t.world_fact) }
 }
 

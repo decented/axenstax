@@ -771,3 +771,5 @@ A Strict `SetAutoRefill` the server's copy can't reproduce (its digest) is a typ
   toggle (either mode); LOW-3 the held-click test paced (25 clicks / 200
   ticks, `CorrectionRate` untouched); LOW-4 an accepted toggle sends back
   the union less its footprint (ghost companions); LOW-5 notes in Spec 04.
+
+**Run 21 (2026-10-12), run-18 review L1, L3–L6.** The `NoPrediction` bracket guard now also requires each close to precede the next bracket's open and to check its own guard. A Strict door break journals both predicted cells (the union with the server row's live pair is the S3 footprint). A joined client refuses a door whose top is above the world (no ghost top). A creative world's `DoorPlace` is a corrected `Rule` refusal. A dead body's `DoorPlace` is superseded whole. The game loop's door wiring is pinned by source position.

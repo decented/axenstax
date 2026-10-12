@@ -606,7 +606,9 @@ fn c3d_strict_last_point_sword_replaced_in_flight_by_an_identical_kind_is_a_know
     // C3d run 18 (run-17 review LOW-4) — the cause named, not the catch-all.
     assert_eq!(super::actions::teardown_detail::last(), "Attack wear is ambiguous (AmbiguousWear)", "the internal reason");
     assert_eq!(cow_state(&j.hs, cow).0, health, "zero effect: no second hit");
-    assert_ne!(fate(&j, second), Some(ActionFate::Accepted), "the second swing is not served");
+    // C3d run 21 (run-18 review L6) — pinned exactly: paused at its
+    // frontier, so no row of any fate (never served, refused or superseded).
+    assert_eq!(fate(&j, second), None, "the second swing has no result row");
 }
 
 /// C3d run 18 (run-17 review LOW-4) — the no-grant twin: without the

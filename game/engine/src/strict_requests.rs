@@ -210,12 +210,22 @@ mod bracket_position_tests {
     /// game loop's joined swing branch): the swing bracket opens before
     /// `send_entity_attack` and closes after the local-hit wear block; the
     /// shot bracket encloses `send_shot`. Moving or removing either fails.
+    /// Run 21 (run-18 review L1): removing a bracket's close no longer lets
+    /// the search run on to the next bracket's.
     #[test]
     fn c3d_no_prediction_brackets_enclose_the_swing_and_the_shot() {
         let src = include_str!("game_loop.rs");
         for (what, inside) in [("\"swing\")", &["self.send_entity_attack(pidx", "inventory.use_hotbar_tool(hotbar)"][..]), ("\"shot\")", &["self.send_shot(pidx, weapon)"][..])] {
             let begin = src.find(&format!("NoPrediction::begin(self.remote_client.as_ref(), &p.crafting_ui, &p.inventory, &p.armour_slots, {what}")).unwrap_or_else(|| panic!("the {what} bracket opens in the game loop"));
             let end = begin + src[begin..].find("NoPrediction::check(").unwrap_or_else(|| panic!("the {what} bracket closes"));
+            // C3d run 21 (run-18 review L1) — the close found is THIS
+            // bracket's: it comes before the next bracket opens, and it
+            // checks this bracket's own guard.
+            let after = begin + 1;
+            if let Some(next) = src[after..].find("NoPrediction::begin(").map(|n| after + n) {
+                assert!(end < next, "the {what} bracket closes before the next bracket opens");
+            }
+            assert!(src[end..].starts_with("NoPrediction::check(no_prediction,"), "the {what} bracket checks its own guard");
             for call in inside {
                 let at = src[begin..end].find(call);
                 assert!(at.is_some(), "the {what} bracket encloses `{call}`");
