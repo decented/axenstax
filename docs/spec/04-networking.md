@@ -6141,7 +6141,17 @@ Cancel or failure past the ack ends the session the way leaving does
 (`end_recipient` takes that branch on `Prepared` or `ack_started`): the
 wait is the resumer's, the link is never handed back to the frozen host,
 and the player leaves the joined world with the line in the lobby (tested).
-The pump's quarantine arm shows the same waiting line while the wait goes
+CP16 (CP14 review LOW-5, decided): only while the wait goes on. Once a
+verified Aborted has quarantined the import (the quarantine record is
+proven on disk, `RecipientSession::import_quarantined`), the source has
+already released its freeze, so the link goes back to the joined world
+and the player keeps playing (GPU-tested); a quarantine check that can't
+be read is not proof, and the player leaves. `wait_continues` itself still
+counts an unreadable check as quarantined, so its status line fails toward
+the less hopeful one (CP14 review LOW-6, accepted). A handover failure that
+repeats every second (the hand-off of a publication whose record can't be
+made durable, or read back) is logged at most once a minute per transfer
+(`resumer::log_due`). The pump's quarantine arm shows the same waiting line while the wait goes
 on, and the quarantine line only when a verified Aborted ended it (a
 waiting line there would be false).
 

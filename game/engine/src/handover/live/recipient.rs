@@ -640,6 +640,11 @@ impl RecipientSession {
     /// CP14b (CP13b review LOW-2): past the ack with no quarantine record,
     /// the wait for Committed goes on (in the resumer) after this session
     /// ends. A verified Aborted wrote the record and ended it.
+    /// CP16 (CP14 review LOW-6): a quarantine record that can't be checked
+    /// (`exists` errs) counts as quarantined here (`unwrap_or(true)`): the
+    /// status line then fails toward the less hopeful `QUARANTINED`, though
+    /// the resumer may still be waiting. Accepted: a line that undersells the
+    /// wait strands no one, one that oversells it could.
     pub fn wait_continues(&self) -> bool {
         let t = self.transfer();
         self.ack_started
@@ -647,6 +652,13 @@ impl RecipientSession {
                 .markers
                 .as_ref()
                 .is_some_and(|m| m.exists(crate::handover::durable::MarkerKind::Quarantined, t).unwrap_or(true))
+    }
+    /// CP16 (CP14 review LOW-5): a quarantine record is PROVEN on disk (a
+    /// verified Aborted wrote it, so the source has resumed). An unreadable
+    /// check is not proof.
+    pub fn import_quarantined(&self) -> bool {
+        let t = self.transfer();
+        self.markers.as_ref().is_some_and(|m| m.exists(crate::handover::durable::MarkerKind::Quarantined, t) == Ok(true))
     }
     pub fn activation_handed(&self) -> bool {
         self.activation_handed

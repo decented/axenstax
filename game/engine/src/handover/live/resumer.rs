@@ -244,7 +244,12 @@ impl Resumer {
         // the scan resumes it at the next start).
         if let Err(e) = retired.persist_again(&store) {
             self.0.jobs.lock().unwrap_or_else(|e| e.into_inner()).remove(&(Flavour::Source, transfer));
-            log::warn!("handover: a record under {} couldn't be made durable ({e}); it is not published yet", world_dir.display());
+            // CP16 (CP14 review LOW-6): a live session retries this once a
+            // second while it keeps failing (for ever on a broken disk), so
+            // the warning is logged at most once a minute per transfer.
+            if log_due("adopt-durable", transfer) {
+                log::warn!("handover: a record under {} couldn't be made durable ({e}); it is not published yet (retrying; logged at most once a minute)", world_dir.display());
+            }
             return false;
         }
         let shared = self.0.clone();
@@ -466,6 +471,24 @@ fn retired_worlds(worlds_root: &Path) -> Vec<(PathBuf, RetiredCommit)> {
 
 /// Every world folder under `worlds_root` with a real `handover/`
 /// (bounded; it creates nothing).
+/// CP16 (CP14 review LOW-6): whether a repeating per-transfer failure may be
+/// logged now: the first time, then at most once a minute.
+pub(crate) fn log_due(site: &'static str, transfer: Id) -> bool {
+    use std::collections::HashMap;
+    use std::time::Instant;
+    static LAST: Mutex<Option<HashMap<(&'static str, Id), Instant>>> = Mutex::new(None);
+    let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    let map = last.get_or_insert_with(HashMap::new);
+    let now = Instant::now();
+    match map.get(&(site, transfer)) {
+        Some(t) if now.duration_since(*t) < Duration::from_secs(60) => false,
+        _ => {
+            map.insert((site, transfer), now);
+            true
+        }
+    }
+}
+
 /// CP16 (CP14 review LOW-2): the start-up temp sweep over every world's
 /// and every import working world's existing `handover/` (creates nothing).
 /// Returns how many temps were removed.
@@ -810,6 +833,16 @@ mod tests {
         assert!(temps.iter().all(|t| !t.exists()), "a stale temp survived the start-up sweep");
         assert!(!super::super::authority::dir(&bare).exists(), "the sweep created a handover folder");
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// CP16 (CP14 review LOW-6): a repeating failure logs once a minute.
+    #[test]
+    fn handover_repeated_failure_logs_at_most_once_a_minute() {
+        let t = [0x61; 16];
+        assert!(log_due("test", t), "the first failure wasn't logged");
+        assert!(!log_due("test", t), "a failure retried within the minute was logged again");
+        assert!(log_due("test", [0x62; 16]), "another transfer's first failure was silenced");
+        assert!(log_due("other-site", t), "another site's first failure was silenced");
     }
 
     #[test]

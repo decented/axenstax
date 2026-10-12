@@ -398,8 +398,10 @@ impl SourceSession {
             Ok(Some((false, retired))) => {
                 let ledger = crate::handover::ledger::Ledger::install();
                 self.handed = resumer.adopt(dir, retired, &ledger) || resumer.holds(t);
-                if !self.handed {
-                    log::error!("handover: the resumer couldn't take the Committed publication; retrying");
+                // CP16 (CP14 review LOW-6): tried once a second; logged at
+                // most once a minute.
+                if !self.handed && super::resumer::log_due("hand-publication", t) {
+                    log::error!("handover: the resumer couldn't take the publication; retrying (logged at most once a minute)");
                 }
             }
             // An uncertain retirement whose record never landed: nothing to
@@ -409,8 +411,9 @@ impl SourceSession {
                     log::warn!("handover: the retirement record never landed; nothing to publish");
                 }
             }
-            Ok(None) => log::error!("handover: retired, but no retirement record to publish"),
-            Err(e) => log::error!("handover: the retirement record can't be read back: {e}"),
+            Ok(None) if super::resumer::log_due("hand-missing", t) => log::error!("handover: retired, but no retirement record to publish"),
+            Err(e) if super::resumer::log_due("hand-unreadable", t) => log::error!("handover: the retirement record can't be read back: {e}"),
+            Ok(None) | Err(_) => {}
         }
         self.handed
     }

@@ -633,14 +633,20 @@ impl crate::GameState {
         // hands its wait for Committed to the resumer first (once: the pump
         // or `abort` may have already).
         s.hand_off_wait();
-        if s.stage() == RecipientStage::Prepared || s.ack_started() {
+        // CP16 (CP14 review LOW-5, decided): only while the wait goes on.
+        // After a verified Aborted quarantined the import, the source has
+        // already run `handover_release` (it unfroze), so the link goes back
+        // and the player keeps playing (below). An unreadable quarantine
+        // check is not proof the source resumed: the player leaves.
+        if (s.stage() == RecipientStage::Prepared || s.ack_started()) && !s.import_quarantined() {
             // Leaving the joined world (`handover_on_leave`), or a Cancel or
-            // failure past the ack (CP14b, CP13b review LOW-2): the resumer
-            // owns the wait, so the session ends here. Its router lease goes
-            // back (`Drop`) and its link closes with it; no Abort is sent
-            // (the ack has left). The link never goes back to the joined
-            // world: its host is frozen (or retired), so the player leaves
-            // it, with the line in the lobby.
+            // failure past the ack while the wait goes on (CP14b, CP13b
+            // review LOW-2): the resumer owns the wait, so the session ends
+            // here. Its router lease goes back (`Drop`) and its link closes
+            // with it; no Abort is sent (the ack has left). The link never
+            // goes back to the joined world: its host is frozen (or retired)
+            // while the transfer may still commit, so the player leaves it,
+            // with the line in the lobby.
             drop(s);
             if !leaving && self.remote_client.as_ref().is_some_and(|rc| rc.is_parked()) {
                 self.leave_world_with_notice(crate::world_exit::SaveChoice::Discard, msg.to_owned());

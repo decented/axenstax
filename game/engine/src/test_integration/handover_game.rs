@@ -1185,3 +1185,51 @@ fn game_harness_handover_recipient_cancel_after_the_ack_leaves_with_the_waiting_
     assert_eq!(menu.notice.as_deref(), Some(copy::waiting_after_ack(&npub).as_str()), "the Cancel after the ack has the wrong line");
     drop(src);
 }
+
+/// CP16 (CP14 review LOW-5, decided; LOW-4: the pump's Quarantined arm):
+/// past the ack, the source aborts with its live Abort carrying the sealed
+/// Aborted. The recipient verifies it and quarantines the import; the source
+/// has unfrozen, so the link goes back and the player stays in the joined
+/// world (not pushed to the lobby), with the quarantine line.
+#[test]
+#[ignore = "needs a GPU adapter holding the 506-layer atlas"]
+fn game_harness_handover_recipient_after_a_verified_abort_keeps_playing_the_resumed_world() {
+    let mut j = joined("dst-verified-abort");
+    let mut src = consented(&mut j);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    loop {
+        assert!(std::time::Instant::now() < deadline, "the recipient never reached Prepared (source {:?})", src.stage());
+        j.host.lend_tick(&mut j.hs);
+        if let Some(Handover::Recipient(s)) = j.hg.state.handover.as_mut() {
+            let _ = s.pump(now());
+        }
+        if recipient_stage(&j.hg) == Some(RecipientStage::Prepared) {
+            break;
+        }
+        if src.stage() == SourceStage::Publishing {
+            src.join_publish_worker();
+        }
+        if src.pump(&mut j.hs, live(), now()).is_err() {
+            break;
+        }
+    }
+    let Some(Handover::Recipient(s)) = &j.hg.state.handover else { panic!("no recipient session") };
+    assert!(s.ack_started(), "the ack wasn't sent at Prepared");
+    src.abort(&mut j.hs, copy::LEFT);
+    assert!(!j.hs.handover_frozen(), "the source's abort didn't unfreeze its host");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while j.hg.state.handover.is_some() {
+        assert!(std::time::Instant::now() < deadline, "the recipient never ended on the verified Aborted ({:?})", recipient_stage(&j.hg));
+        j.host.lend_tick(&mut j.hs);
+        j.hg.frames(1);
+    }
+    assert!(
+        !matches!(j.hg.state.mode, crate::GameMode::Menu(_)),
+        "a verified Aborted pushed the player out of a world that has resumed"
+    );
+    assert!(
+        j.hg.state.remote_client.as_ref().is_some_and(|rc| !rc.is_parked()),
+        "the link wasn't handed back to the joined world"
+    );
+    drop(src);
+}
