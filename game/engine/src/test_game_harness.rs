@@ -3391,13 +3391,22 @@ mod tests {
         assert!(hg.state.remote_client.as_ref().unwrap().is_connected(), "never torn down");
     }
 
-    /// C3d run 21 (run-20 review LOW-2) — a Mirror joiner's door click while
-    /// its own edits still wait to be sent is NOT sent (it would overtake
-    /// them): nothing reserved, the door stays shut, a toast. Once they have
-    /// gone, the next click is a typed `ToggleBlock` as usual.
+    /// C3d run 22 — a Mirror joiner places a door and clicks it in the same
+    /// frame, its placement still waiting to be sent: the door opens on the
+    /// clicker's screen at once, the toggle waits in the one ordered client
+    /// queue behind the placement, and the server applies the placement
+    /// THEN the toggle (were it sent first, the server would refuse it: no
+    /// door there yet). A second joiner hears both. No toast, no lost click.
+    /// (Run 21 refused the click while edits were unsent; on `bdd4fe87` the
+    /// door always opened.) Run-21 review LOW-3 — every branch of
+    /// `edits_unsent` is driven for real: an earlier edit, then a request
+    /// queued behind it (`has_queued_requests`), then the door placement,
+    /// which the order cut leaves in the input carry-over
+    /// (`has_carry_over`) while the request goes; the toggle waits for that
+    /// carry-over.
     #[test]
     #[ignore = "needs a GPU adapter holding the 506-layer atlas"]
-    fn game_harness_mirror_door_click_waits_for_unsent_edits() {
+    fn game_harness_mirror_door_click_queues_behind_unsent_edits() {
         isolate_saves();
         let mut hg = HeadlessGame::boot_into_world("harness-mirror-toggle-wait");
         hg.state.set_play_mode(crate::play_mode::PlayMode::Survival);
@@ -3409,40 +3418,73 @@ mod tests {
         let transport = server.attach_test_remote();
         hg.state.remote_client = Some(crate::remote_client::RemoteClient::from_transport(
             Box::new(transport), crate::remote_client::build_join_request_guest("Doorman", 0), None));
-        for _ in 0..5 { harness_step(&mut server, &mut hg); }
+        let mut neighbour = crate::remote_client::RemoteClient::from_transport(
+            Box::new(server.attach_test_remote()), crate::remote_client::build_join_request_guest("Neighbour", 0), None);
+        for _ in 0..5 { harness_step(&mut server, &mut hg); neighbour.poll(); }
+        assert_eq!(hg.state.remote_client.as_ref().unwrap().inventory_mode, crate::action_identity::InventoryMode::Mirror);
+        let n_slot = neighbour.player_index().expect("the neighbour joined") as usize;
         let feet = clear_pad(&mut hg, Some(&mut server));
         let bottom = [feet[0], feet[1], feet[2] - 2];
         let top = [bottom[0], bottom[1] + 1, bottom[2]];
-        for w in [&mut hg.state.world, &mut server.server.world] {
-            w.set_block(bottom[0], bottom[1], bottom[2], crate::block::OAK_DOOR);
-            w.set_meta((bottom[0], bottom[1], bottom[2]), 0);
-            w.set_block(top[0], top[1], top[2], crate::block::OAK_DOOR);
-            w.set_meta((top[0], top[1], top[2]), crate::use_edits::door_top_meta(0));
-        }
-        for _ in 0..2 { harness_step(&mut server, &mut hg); }
-        aim_at(&mut hg, glam::Vec3::new(bottom[0] as f32 + 0.5, bottom[1] as f32 + 0.5, bottom[2] as f32 + 0.5));
-        let toggles = |hg: &HeadlessGame| hg.state.remote_client.as_ref().unwrap().action_journal.as_ref().unwrap().actions()
-            .filter(|a| matches!(crate::action_wire::ActionPacket::decode(&a.intent).map(|p| p.intent), Ok(crate::action_wire::ActionIntent::ToggleBlock { cell, .. }) if cell == bottom))
-            .count();
-        // An edit of this client's still waiting to go (the floor it stands
-        // on, as it is): the click must not overtake it.
+        let cs = crate::chunk::CHUNK_SIZE as i32;
+        server.hold_column_for_test(n_slot, (bottom[0].div_euclid(cs), bottom[2].div_euclid(cs)));
+        for _ in 0..2 { harness_step(&mut server, &mut hg); neighbour.poll(); }
+        neighbour.pending_block_changes.clear();
+        // An earlier edit (the floor it stands on, as it is), then a request
+        // made behind it (a device click on a cell with no device: the
+        // server ignores it), both waiting; then the placement: both halves
+        // on the joiner's screen and waiting to be sent (the click frame runs
+        // no tick, so no input goes before the use arm, which runs after the
+        // frame's ticks).
         let floor = [feet[0], feet[1] - 1, feet[2]];
         let standing = hg.state.world.get_block(floor[0], floor[1], floor[2]);
         hg.state.pending_block_changes.push(crate::protocol::BlockChange { x: floor[0], y: floor[1], z: floor[2], new_block: standing, meta: 0 });
-        // The click frame runs no tick (so no input is sent before the use
-        // arm, which runs after the frame's ticks): the edit is still unsent.
+        hg.state.remote_client.as_mut().unwrap().queue_request(crate::window_ops::order_stamp(), crate::remote_client::Request::Device((floor[0], floor[1], floor[2])));
+        let metas = [(bottom, 0u8), (top, crate::use_edits::door_top_meta(0))];
+        for (c, m) in metas {
+            hg.state.world.set_block(c[0], c[1], c[2], crate::block::OAK_DOOR);
+            hg.state.world.set_meta((c[0], c[1], c[2]), m);
+            hg.state.pending_block_changes.push(crate::protocol::BlockChange { x: c[0], y: c[1], z: c[2], new_block: crate::block::OAK_DOOR, meta: m });
+        }
+        assert_eq!(server.server.world.get_block(bottom[0], bottom[1], bottom[2]), crate::block::AIR, "the server has no door yet");
+        aim_at(&mut hg, glam::Vec3::new(bottom[0] as f32 + 0.5, bottom[1] as f32 + 0.5, bottom[2] as f32 + 0.5));
+        let toggles = |hg: &HeadlessGame| hg.state.remote_client.as_ref().unwrap().action_journal.as_ref().unwrap().actions()
+            .filter(|a| matches!(crate::action_wire::ActionPacket::decode(&a.intent).map(|p| p.intent), Ok(crate::action_wire::ActionIntent::ToggleBlock { cell, .. }) if cell == bottom))
+            .map(|a| a.sent)
+            .collect::<Vec<_>>();
         hg.state.last_tick = std::time::Instant::now();
         hg.state.tick_accumulator = std::time::Duration::ZERO;
+        let toast_before = toast_text(&hg);
         right_click(&mut hg);
-        assert!(!hg.state.pending_block_changes.is_empty(), "the edit was still waiting at the click");
-        assert_eq!(toggles(&hg), 0, "nothing reserved while an edit waits");
-        assert!(!crate::block_shape::is_open(hg.state.world.meta_at(bottom[0], bottom[1], bottom[2])), "nothing predicted");
-        assert_eq!(toast_text(&hg).as_deref(), Some(crate::strict_doors::TOGGLE_WAITS_TOAST), "the toast asks again");
-        for _ in 0..4 { harness_step(&mut server, &mut hg); }
-        right_click(&mut hg);
-        assert_eq!(toggles(&hg), 1, "once the edits have gone, one ToggleBlock reserved");
-        for _ in 0..6 { harness_step(&mut server, &mut hg); }
-        assert!(crate::block_shape::is_open(server.server.world.meta_at(bottom[0], bottom[1], bottom[2])), "the server's door is open");
+        assert!(!hg.state.pending_block_changes.is_empty(), "the placement was still waiting at the click");
+        for c in [bottom, top] {
+            assert!(crate::block_shape::is_open(hg.state.world.meta_at(c[0], c[1], c[2])), "the door opens on the clicker's screen at once ({c:?})");
+        }
+        assert_eq!(toggles(&hg), vec![false], "one ToggleBlock reserved, not yet sent");
+        assert!(hg.state.remote_client.as_ref().unwrap().has_queued_requests(), "it waits in the ordered queue behind the placement");
+        assert_eq!(toast_text(&hg), toast_before, "no toast");
+        // The first input carries the floor edit; the order cut keeps the
+        // door placement (made after the queued request) in the carry-over,
+        // the request goes, and the toggle still waits behind the placement.
+        hg.state.network_send_input();
+        let rc = hg.state.remote_client.as_ref().unwrap();
+        assert!(rc.has_carry_over(), "the placement is carried over to the next input");
+        assert!(rc.has_queued_requests(), "the toggle still waits behind it");
+        assert_eq!(toggles(&hg), vec![false], "not sent ahead of the carried placement");
+        // The next input carries the placement; the toggle goes right after.
+        hg.state.network_send_input();
+        let rc = hg.state.remote_client.as_ref().unwrap();
+        assert!(!rc.has_carry_over() && !rc.has_queued_requests(), "the carry-over and the queue drained");
+        assert_eq!(toggles(&hg), vec![true], "sent right after the input carrying the placement");
+        for _ in 0..6 { harness_step(&mut server, &mut hg); neighbour.poll(); }
+        for c in [bottom, top] {
+            assert_eq!(server.server.world.get_block(c[0], c[1], c[2]), crate::block::OAK_DOOR, "the server applied the placement ({c:?})");
+            assert!(crate::block_shape::is_open(server.server.world.meta_at(c[0], c[1], c[2])), "then the toggle: the server's half at {c:?} is open");
+            assert!(crate::block_shape::is_open(hg.state.world.meta_at(c[0], c[1], c[2])), "and the clicker's stays open ({c:?})");
+            let heard = neighbour.pending_block_changes.iter().rev().find(|b| [b.x, b.y, b.z] == c).map(|b| (b.new_block, crate::block_shape::is_open(b.meta)));
+            assert_eq!(heard, Some((crate::block::OAK_DOOR, true)), "the neighbour hears the door, open, at {c:?}");
+        }
+        assert!(toggles(&hg).is_empty(), "the toggle retired");
         assert!(hg.state.remote_client.as_ref().unwrap().is_connected(), "never torn down");
     }
 

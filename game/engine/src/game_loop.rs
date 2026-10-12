@@ -13917,18 +13917,20 @@ impl super::GameState {
                                     None
                                 }
                             }
-                        } else if pidx == 0 && self.remote_client.is_some() && self.edits_unsent() {
-                            // C3d run 21 (run-20 review LOW-2) — a Mirror toggle is sent at
-                            // once, but this client's own edits still waiting to go (this
-                            // frame's, a carry-over, a queued request) ride a later input:
-                            // the toggle would overtake them (a door placed a moment ago
-                            // refused as stale and flickering). Nothing is sent or
-                            // predicted; a toast asks for the click again.
-                            self.toast = Some((crate::strict_doors::TOGGLE_WAITS_TOAST.to_string(), Instant::now() + Duration::from_secs(2)));
-                            None
                         } else if pidx == 0 && let Some(remote) = self.remote_client.as_mut() {
-                            match crate::strict_doors::reserve_toggle(remote, &self.world, pos, target_blk, slot) {
-                                Ok(()) => Some(crate::strict_doors::OpenRule::FlipEach),
+                            // C3d run 22 — a Mirror door click is predicted at once
+                            // and never refused for this client's own edits still
+                            // waiting to go (this frame's, a carry-over, a queued
+                            // request): the toggle joins the one ordered client
+                            // queue behind them (`send_request`) and goes right
+                            // after the input that carries them. (Run 21's
+                            // refuse-and-toast lost the click; main always opened
+                            // the door on the clicker's screen.)
+                            match crate::strict_doors::reserve_toggle_unsent(remote, &self.world, pos, target_blk, slot) {
+                                Ok(action) => {
+                                    self.send_request(crate::remote_client::Request::Action(action));
+                                    Some(crate::strict_doors::OpenRule::FlipEach)
+                                }
                                 Err(error) => {
                                     self.typed_edit_failed(error);
                                     None

@@ -306,6 +306,11 @@ pub enum Request {
     Interact(protocol::EntityInteractPacket),
     Item(protocol::ItemActionPacket),
     Device((i32, i32, i32)),
+    /// C3d run 22 — a retained typed action (today a Mirror seat's
+    /// `ToggleBlock`), reserved at the click and predicted there; sent with
+    /// [`RemoteClient::send_reserved_action`] in this one order. It claims
+    /// nothing in `JoinerActions` (its identity is the action journal's).
+    Action(crate::action_identity::ActionHeader),
 }
 
 impl Request {
@@ -317,7 +322,7 @@ impl Request {
             Request::Attack(pkt) => Some(pkt.seq),
             Request::Interact(pkt) => Some(pkt.seq),
             Request::Item(pkt) => Some(pkt.seq),
-            Request::Device(_) => None,
+            Request::Device(_) | Request::Action(_) => None,
         }
     }
 }
@@ -1595,6 +1600,11 @@ impl RemoteClient {
             Request::Interact(pkt) => self.send_entity_interact(&pkt),
             Request::Item(pkt) => self.send_item_action(&pkt),
             Request::Device(pos) => self.send_device_interact(pos),
+            Request::Action(action) => {
+                if let Err(error) = self.send_reserved_action(action) {
+                    log::warn!("Reserved action {} could not be sent: {error}", action.seq);
+                }
+            }
         }
     }
 

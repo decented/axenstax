@@ -30,11 +30,6 @@ fn other_half(cell: [i32; 3], m: u8) -> [i32; 3] {
     [cell[0], cell[1] + dy, cell[2]]
 }
 
-/// C3d run 21 (run-20 review LOW-2) — the toast a Mirror joiner sees when
-/// it clicks a door while its own earlier edits are still waiting to be
-/// sent: the toggle would overtake them, so it is not sent.
-pub const TOGGLE_WAITS_TOAST: &str = "Still sending your last changes — try the door again.";
-
 /// C3d run 21 (run-18 review L3) — [`other_half`] with checked arithmetic,
 /// for a cell the client names: where the matching half of a door half at
 /// `cell` with meta `m` stands, `None` past `i32`'s range.
@@ -215,14 +210,25 @@ pub fn toggle_joined(remote: &mut RemoteClient, ui: &mut CraftingUi, inv: &Inven
 /// and predicts [`OpenRule::FlipEach`] exactly as before; the server
 /// applies the same rule to its world and every other player hears it.
 pub fn reserve_toggle(remote: &mut RemoteClient, world: &World, primary: [i32; 3], expected: BlockId, slot: usize) -> Result<(), String> {
-    let hotbar_slot = u8::try_from(slot).ok().filter(|s| *s < 9).ok_or("A toggle needs a hotbar slot")?;
-    let cells = toggle_footprint(world, primary).into_boxed_slice();
-    let intent = crate::action_wire::ActionIntent::ToggleBlock { cell: primary, expected_block: expected, hotbar_slot };
-    let action = remote.reserve_action(intent, Box::new([]), cells)?;
+    let action = reserve_toggle_unsent(remote, world, primary, expected, slot)?;
     if let Err(error) = remote.send_reserved_action(action) {
         log::warn!("Reserved toggle {} could not be sent: {error}", action.seq);
     }
     Ok(())
+}
+
+/// C3d run 22 — [`reserve_toggle`]'s reservation alone: the retained
+/// `ToggleBlock`'s header, not yet sent. The Mirror click arm hands it to
+/// the client's one ordered queue (`Request::Action`): sent now, or — while
+/// the client's own edits still wait to go — right after the input that
+/// carries them, so it never overtakes them. The click is predicted either
+/// way (as on `bdd4fe87`, where the door always opened on the clicker's
+/// screen).
+pub fn reserve_toggle_unsent(remote: &mut RemoteClient, world: &World, primary: [i32; 3], expected: BlockId, slot: usize) -> Result<crate::action_identity::ActionHeader, String> {
+    let hotbar_slot = u8::try_from(slot).ok().filter(|s| *s < 9).ok_or("A toggle needs a hotbar slot")?;
+    let cells = toggle_footprint(world, primary).into_boxed_slice();
+    let intent = crate::action_wire::ActionIntent::ToggleBlock { cell: primary, expected_block: expected, hotbar_slot };
+    remote.reserve_action(intent, Box::new([]), cells)
 }
 
 #[cfg(test)]
@@ -390,16 +396,19 @@ mod run21_tests {
     /// wiring the server tests re-implement: the place arm sends no
     /// `DoorUpper` coupon after a typed placement, and the toggle arm
     /// predicts `Canonical` on a Strict seat (`toggle_joined`) and
-    /// `FlipEach` on a Mirror joiner (`reserve_toggle`).
+    /// `FlipEach` on a Mirror joiner (`reserve_toggle_unsent`, run 22: sent
+    /// through the client's one ordered queue, `Request::Action`).
     #[test]
     fn c3d_game_loop_door_wiring_is_pinned() {
         let src = include_str!("game_loop.rs");
         assert!(src.contains("if let Some(top) = door_top.filter(|_| !typed_place) {"), "no DoorUpper coupon after a typed placement");
         let strict = src.find("crate::strict_doors::toggle_joined(").expect("the Strict toggle arm");
-        let mirror = strict + src[strict..].find("crate::strict_doors::reserve_toggle(").expect("the Mirror toggle arm");
+        let mirror = strict + src[strict..].find("crate::strict_doors::reserve_toggle_unsent(").expect("the Mirror toggle arm");
         let local = mirror + src[mirror..].find("crate::strict_doors::toggle_metas(").expect("the prediction");
         assert!(src[..strict].rfind("} else if self.strict_remote(pidx) {").is_some_and(|at| strict - at < 400), "the Strict arm is the strict seat's");
         assert!(src[strict..mirror].contains("Some(crate::strict_doors::OpenRule::Canonical)") && !src[strict..mirror].contains("FlipEach"), "a Strict seat predicts Canonical");
         assert!(src[mirror..local].contains("Some(crate::strict_doors::OpenRule::FlipEach)") && !src[mirror..local].contains("Canonical"), "a Mirror joiner predicts FlipEach");
+        assert!(src[mirror..local].contains("self.send_request(crate::remote_client::Request::Action(action))"), "a Mirror toggle goes through the one ordered queue");
+        assert!(!src[strict..local].contains("edits_unsent()"), "a Mirror door click is never refused for the client's own waiting edits");
     }
 }
