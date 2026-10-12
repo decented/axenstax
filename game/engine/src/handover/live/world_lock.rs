@@ -115,11 +115,12 @@ pub fn acquire(world_dir: &Path) -> Result<LiveLock, LockError> {
         {
             let mut held = HELD.lock().unwrap_or_else(|e| e.into_inner());
             match held.get(&key) {
-                Some(w) => match w.upgrade() {
-                    Some(h) => return Ok(LiveLock(h)),
+                Some(w) => {
+                    if let Some(h) = w.upgrade() {
+                        return Ok(LiveLock(h));
+                    }
                     // This process's holder, still releasing: retry.
-                    None => {}
-                },
+                }
                 None => {
                     match std::fs::symlink_metadata(&key) {
                         Ok(m) if !m.is_file() => return Err(LockError::Io),
