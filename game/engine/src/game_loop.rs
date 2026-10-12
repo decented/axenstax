@@ -13882,44 +13882,30 @@ impl super::GameState {
                         }
                     } else if crate::block_shape::is_toggleable(target_blk) {
                         // Wave 2 / F1 — open/close toggle for fence gates,
-                        // trapdoors and doors. Flip the meta open bit + re-mesh
-                        // so the new shape + passability take effect.
-                        let m = self.world.meta_at(pos[0], pos[1], pos[2]);
-                        self.world
-                            .set_meta((pos[0], pos[1], pos[2]), crate::block_shape::toggled_open(m));
-                        self.rebuild_chunk_at(pos[0], pos[1], pos[2]);
-                        // Doors: toggle the other half, and any horizontally
-                        // adjacent door (+ its other half) so double doors (#29)
-                        // open together.
-                        if target_blk == block::OAK_DOOR {
-                            let toggle_half = |s: &mut Self, x: i32, y: i32, z: i32| {
-                                if s.world.get_block(x, y, z) == block::OAK_DOOR {
-                                    let hm = s.world.meta_at(x, y, z);
-                                    s.world
-                                        .set_meta((x, y, z), crate::block_shape::toggled_open(hm));
-                                    s.rebuild_chunk_at(x, y, z);
+                        // trapdoors and doors (a door's other half and any
+                        // horizontally adjacent door open together, #29).
+                        // C3d run 18 — the footprint is ONE shared rule
+                        // (`strict_doors::toggle_metas`): Mirror, the host and
+                        // single-player flip each cell exactly as before; a
+                        // Strict seat sends a typed `ToggleBlock` and predicts
+                        // the server's canonical open bit (Decision 20).
+                        let rule = if self.strict_remote(pidx) {
+                            let remote = self.remote_client.as_mut().expect("a Strict seat is joined");
+                            let p = &mut self.players[pidx];
+                            match crate::strict_doors::toggle_joined(remote, &mut p.crafting_ui, &p.inventory, &p.armour_slots, &self.world, pos, target_blk) {
+                                Ok(()) => Some(crate::strict_doors::OpenRule::Canonical),
+                                Err(error) => {
+                                    self.typed_edit_failed(error);
+                                    None
                                 }
-                            };
-                            // This door's other (top/bottom) half.
-                            let cy = if crate::block_shape::door_is_top(m) {
-                                pos[1] - 1
-                            } else {
-                                pos[1] + 1
-                            };
-                            toggle_half(self, pos[0], cy, pos[2]);
-                            // #29 — adjacent doors (both halves) open together.
-                            for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-                                let (nx, nz) = (pos[0] + dx, pos[2] + dz);
-                                if self.world.get_block(nx, pos[1], nz) == block::OAK_DOOR {
-                                    let nm = self.world.meta_at(nx, pos[1], nz);
-                                    let ncy = if crate::block_shape::door_is_top(nm) {
-                                        pos[1] - 1
-                                    } else {
-                                        pos[1] + 1
-                                    };
-                                    toggle_half(self, nx, pos[1], nz);
-                                    toggle_half(self, nx, ncy, nz);
-                                }
+                            }
+                        } else {
+                            Some(crate::strict_doors::OpenRule::FlipEach)
+                        };
+                        if let Some(rule) = rule {
+                            for (c, m) in crate::strict_doors::toggle_metas(&self.world, pos, rule) {
+                                self.world.set_meta((c[0], c[1], c[2]), m);
+                                self.rebuild_chunk_at(c[0], c[1], c[2]);
                             }
                         }
                         self.players[pidx].place_cooldown = 8;
@@ -16210,7 +16196,10 @@ impl super::GameState {
                                     // use: no cost (the bottom's placement paid
                                     // for the door), so the server and everyone
                                     // else see a whole door.
-                                    if let Some(top) = door_top {
+                                    // C3d run 18 — a Strict seat's door went as ONE
+                                    // typed `DoorPlace` (both halves); no
+                                    // `DoorUpper` coupon (Decision 20).
+                                    if let Some(top) = door_top.filter(|_| !typed_place) {
                                         let tag = crate::use_edits::tag(crate::use_edits::UseKind::DoorUpper, top, hotbar, None);
                                         self.push_use_edit(top, block::OAK_DOOR, tag, None, 0);
                                     }

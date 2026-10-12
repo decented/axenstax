@@ -74,8 +74,11 @@ pub fn judge(old: BlockId, change: &protocol::BlockChange, mined: Option<&protoc
     if creative { return StrictEdit::Unsupported("Creative free edits await their typed class"); }
     if let Some(r) = received && drifted((old, r.meta), r.seen, new, mined.is_some()) { return StrictEdit::Refuse(DRIFT); }
     if old == new { return StrictEdit::Unsupported("A same-block edit awaits the typed Noop class"); }
-    // Decision 20: a door is one compound action (DoorPlace / its pair).
-    if old == OAK_DOOR || new == OAK_DOOR { return StrictEdit::Unsupported("Doors are one compound action"); }
+    // Decision 20: a door placement is ONE compound `DoorPlace` (never a
+    // plain edit). C3d run 18: a mined door half is a Break below, whose
+    // server derives the pair once (`clear_door_pair`); any other edit of
+    // a door is untagged (refused).
+    if new == OAK_DOOR { return StrictEdit::Unsupported("A door placement is one compound DoorPlace"); }
     if let Some(m) = mined {
         if (m.x, m.y, m.z) != (change.x, change.y, change.z) { return StrictEdit::Refuse("mined tag names another cell"); }
         if crate::break_drops::yields_drops(old) && (new == AIR || crate::growth::is_crop(old)) {
@@ -101,10 +104,11 @@ pub fn judge(old: BlockId, change: &protocol::BlockChange, mined: Option<&protoc
 /// meta a Drift compares. EMPTY today: growth stages are block ids
 /// (`block.rs`, `growth.rs`), and no Place or Break outcome reads the cell's
 /// meta (`break_drops.rs`). Meta the server changes without a broadcast must
-/// never make an honest edit Drift. Doors add their half bit
-/// (`block_shape::door_is_top`) when they become typed; an open/closed bit
-/// must never be on it; any later class whose outcome reads meta adds its
-/// own entry when it is typed.
+/// never make an honest edit Drift. Doors (typed in C3d run 18) are NOT on
+/// it: a door break's pair is derived from the SERVER's own meta
+/// (`clear_door_pair`), so the client's half bit decides nothing, and an
+/// open/closed bit must never be on it; any later class whose outcome reads
+/// meta adds its own entry when it is typed.
 pub const DRIFT_META_BLOCKS: &[BlockId] = &[];
 
 /// The cells a plain placement may fill: AIR and water (`judge`'s Place
@@ -176,6 +180,23 @@ pub struct EditRecipe {
     pub sources: crate::action_wire::BoundedList<protocol::WireSlot, 50>,
 }
 
+impl EditRecipe {
+    /// The recipe of a window half staged from `raw` to `after`: the
+    /// predicted digest and the changed places' initial sources.
+    pub fn from_windows(kind: EditKind, slot: u8, raw: &crate::staged_window::MarkerWindow, after: &crate::staged_window::MarkerWindow, station: crate::window::Station) -> Result<Self, String> {
+        let (before, now) = (raw.slots(), after.slots());
+        let sources: Vec<protocol::WireSlot> = (0..crate::staged_window::PLAYER_PLACES)
+            .map(|i| if before[i] != now[i] { before[i].clone() } else { None })
+            .collect();
+        Ok(EditRecipe { kind, slot, digest: after.digest_with(station, None), sources: crate::action_wire::BoundedList::new(sources)? })
+    }
+
+    /// C3d run 18 — a door placement's recipe (one door taken).
+    pub fn new_place(slot: u8, raw: &crate::staged_window::MarkerWindow, after: &crate::staged_window::MarkerWindow, station: crate::window::Station) -> Result<Self, String> {
+        Self::from_windows(EditKind::Place, slot, raw, after, station)
+    }
+}
+
 /// Does this client send a plain placement or a mined break typed? Only a
 /// Strict session, and only for an edit its own window judges Place or Break.
 pub fn sends_typed(remote: Option<&RemoteClient>, judged: &StrictEdit) -> bool {
@@ -210,11 +231,7 @@ fn reserve(
             EditKind::Break => { break_window(view.inv, slot); }
         }
     }
-    let (before, now) = (raw.slots(), after.slots());
-    let sources: Vec<protocol::WireSlot> = (0..crate::staged_window::PLAYER_PLACES)
-        .map(|i| if before[i] != now[i] { before[i].clone() } else { None })
-        .collect();
-    let digest = after.digest_with(ui.station(), None);
+    let recipe = EditRecipe::from_windows(kind, slot_u8, &raw, &after, ui.station())?;
     let (kind_id, item_id) = inv.slot(slot).map_or((protocol::item_kind::EMPTY, 0), |s| crate::inventory::item_to_ref(&s.item).to_wire());
     let cell = [change.x, change.y, change.z];
     let intent = crate::action_wire::ActionIntent::Edit {
@@ -226,7 +243,6 @@ fn reserve(
         use_tag: None,
         old,
     };
-    let recipe = EditRecipe { kind, slot: slot_u8, digest, sources: crate::action_wire::BoundedList::new(sources)? };
     let bytes = bincode::serialize(&recipe).map_err(|e| e.to_string())?.into_boxed_slice();
     remote.reserve_action(intent, bytes, vec![cell].into_boxed_slice())
 }
@@ -390,11 +406,11 @@ impl BreakRoute {
 impl crate::GameState {
     /// The Strict session player `pidx` plays on, if any (only the joined
     /// local player, slot 0, is a remote client's).
-    fn strict_remote(&self, pidx: usize) -> bool {
+    pub(crate) fn strict_remote(&self, pidx: usize) -> bool {
         pidx == 0 && self.remote_client.as_ref().is_some_and(|r| r.inventory_mode == crate::action_identity::InventoryMode::Strict)
     }
 
-    fn typed_edit_failed(&mut self, error: String) {
+    pub(crate) fn typed_edit_failed(&mut self, error: String) {
         log::warn!("Joined block edit could not be retained: {error}");
         self.toast = Some(("Block action is waiting; try again.".into(), web_time::Instant::now() + web_time::Duration::from_secs(2)));
     }
@@ -411,6 +427,18 @@ impl crate::GameState {
         };
         let fwd = self.players[pidx].camera.forward();
         let meta = crate::placement_meta::placement_meta(new, face, fwd).unwrap_or_else(|| self.world.meta_at(cell[0], cell[1], cell[2]));
+        // C3d run 18 (Decision 20) — a door is ONE compound `DoorPlace`
+        // naming its bottom; the server derives both halves. Never a plain
+        // `Edit` (whose `judge` leaves doors to this class).
+        if new == crate::block::OAK_DOOR {
+            let facing = crate::meta::facing(meta).to_bits();
+            let p = &mut self.players[pidx];
+            let remote = self.remote_client.as_mut().expect("a Strict seat is joined");
+            return match crate::strict_doors::place_door_joined(remote, &mut p.crafting_ui, &mut p.inventory, &mut p.armour_slots, hotbar, cell, facing, &self.registry) {
+                Ok(placed) => PlaceRoute::Typed(placed),
+                Err(error) => { self.typed_edit_failed(error); PlaceRoute::Wait }
+            };
+        }
         let change = protocol::BlockChange { x: cell[0], y: cell[1], z: cell[2], new_block: new, meta };
         let seen = (existing, self.world.meta_at(cell[0], cell[1], cell[2]));
         let p = &mut self.players[pidx];

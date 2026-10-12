@@ -71,9 +71,15 @@ impl HostedServer {
             // C3d run 6 — a typed edit counts against the tick's edit budget
             // (the same `MAX_BLOCK_CHANGES_PER_TICK` legacy edits share), not
             // the item counter; past it the head waits for the next tick.
-            if matches!(packet.intent, ActionIntent::Edit { .. }) {
-                if budget.edits >= MAX_BLOCK_CHANGES_PER_TICK { return; }
-                budget.edits += 1;
+            // C3d run 18 (Decision 20) — a door placement, and a mined break
+            // of a door on the server's world, take two credits (two
+            // cells), required in full before they run.
+            let door_break = matches!(&packet.intent, ActionIntent::Edit { change, mined: Some(_), .. }
+                if self.server.world.get_block(change.x, change.y, change.z) == crate::block::OAK_DOOR);
+            let credits = if door_break || matches!(packet.intent, ActionIntent::DoorPlace { .. }) { super::strict_door::DOOR_EDIT_CREDITS } else { 1 };
+            if matches!(packet.intent, ActionIntent::Edit { .. } | ActionIntent::DoorPlace { .. }) {
+                if budget.edits + credits > MAX_BLOCK_CHANGES_PER_TICK { return; }
+                budget.edits += credits;
             } else {
                 if (is_window && *windows >= MAX_WINDOW_OPS_PER_TICK) || (!is_window && *items >= MAX_ITEM_ACTIONS_PER_TICK) { return; }
                 if is_window { *windows += 1; } else { *items += 1; }
@@ -123,6 +129,13 @@ impl HostedServer {
                         self.send_back_refused_edit(change, budget);
                         cells
                     }
+                    // C3d run 18 — a door placement's halves, a toggle's
+                    // footprint, put back as the server holds them.
+                    intent @ (ActionIntent::DoorPlace { .. } | ActionIntent::ToggleBlock { .. }) => {
+                        let cells = self.door_intent_cells(intent);
+                        self.send_back_cells(&cells, budget);
+                        cells
+                    }
                     _ => Vec::new(),
                 };
                 if !self.complete_typed_noop_at(i, packet.action, ActionFate::Superseded, &cells) { return; }
@@ -146,6 +159,13 @@ impl HostedServer {
                     if let protocol::ItemAction::Shoot { weapon, hotbar_slot, held_kind, held_id, held_full, yaw, pitch, charge } = req.action.clone() {
                         if !self.serve_strict_shot(i, packet.action, &req, weapon, hotbar_slot, (held_kind, held_id, held_full), Aim { yaw, pitch, charge }) { return; }
                     } else { return self.pause_typed_action(i, StrictTeardown::Untyped, "Typed item handler is awaiting authoritative integration"); }
+                }
+                // C3d run 18 — Decision 20 (`strict_door.rs`).
+                ActionIntent::DoorPlace { bottom, facing, hotbar_slot } if self.strict_slot(i) => {
+                    if !self.serve_strict_door_place(i, packet.action, bottom, facing, hotbar_slot, budget) { return; }
+                }
+                ActionIntent::ToggleBlock { cell, expected_block } if self.strict_slot(i) => {
+                    if !self.serve_strict_toggle(i, packet.action, cell, expected_block, budget) { return; }
                 }
                 // C3d run 15 — a swing at the server's mob (`strict_attack.rs`).
                 ActionIntent::Attack(req) if self.strict_slot(i) => {

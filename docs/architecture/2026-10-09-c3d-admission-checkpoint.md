@@ -700,3 +700,20 @@ A Strict `SetAutoRefill` the server's copy can't reproduce (its digest) is a typ
 - **LOW-4 (documented, no change):** `RemoteClient::poll` sets `refill_refused` on any Strict `InventorySync` while a `SetAutoRefill` is unretired, including one already served; the resend of an unchanged setting is served harmlessly, at the cost of one extra journaled `SetAutoRefill` per correction or death sync that lands while a setting is in flight.
 - **LOW-5:** an action right behind a world-fact refusal in the same round trip is served (`c3d_client_strict_action_behind_a_world_fact_refusal_is_served`); own-pet refusal on a signed-in seat (`c3d_client_strict_swing_at_own_pet_is_refused_uncorrected`); `strict_wear_target`'s unique fallback pinned (`c3d_wear_target_falls_back_to_the_unique_piece_elsewhere`); the dead-body test's knockback assert compares with `y0`.
 - Controls (`/tmp/c3d-run17-ctrl1.log`, one build, three disjoint mutations, SHA-256 identical after restore): early shot corrected → "the first's Take and Wear, no correction Replace left: 3 right: 2"; guard always `Ok` → "a predicted wear trips the guard: ()" and "a predicted ammo take trips the guard"; unique fallback → `None` → "the unique piece elsewhere left: None right: Some(20)".
+
+## Run 18 — doors (Decision 20)
+
+- Item 0 (finding): a door/gate/trapdoor toggle is client-local in every
+  mode; a Mirror joiner's (or a host's) toggle never reaches the server or
+  the other players. Pinned, ignored: `c3d_mirror_joiner_door_toggle_reaches_the_server`.
+  Mirror unchanged; the coordinator decides its fix.
+- The toggle footprint moved out of `game_loop.rs` into
+  `strict_doors::toggle_footprint` / `toggle_metas`: Mirror `FlipEach`
+  (byte-for-byte the old arm, nine layouts), Strict `Canonical`.
+- Strict door placement = ONE `DoorPlace` (two credits, one door, both
+  halves and one row together; no `DoorUpper`); door break = typed `Edit`
+  Break (two credits, pair permission preflighted, pair derived once);
+  toggle = typed `ToggleBlock` (every footprint cell's permission, reach to
+  the primary by the bare-hand rule). All refusals corrected (cells sent
+  back, `Refused` row, one `Replace`); a superseded door action sends its
+  cells back. Server: `hosted_server/strict_door.rs`. Spec 04 `0x44` "Doors".

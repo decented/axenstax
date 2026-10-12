@@ -28,6 +28,7 @@ mod actions;
 mod strict_container;
 mod strict_edit;
 mod strict_attack;
+mod strict_door;
 #[cfg(test)]
 mod c3d_tests;
 #[cfg(test)]

@@ -75,6 +75,14 @@ impl HostedServer {
             StrictEdit::Unsupported(why) => return self.refuse_strict_edit(i, action, change, budget, why, RefusalKind::Rule),
             StrictEdit::Place { slot } => (Box::new(move |v: &mut crate::window::WindowMut| { place_window(v.inv, slot); }), Vec::new(), false),
             StrictEdit::Break { slot, tool } => {
+                // C3d run 18 (Decision 20) — a door's break derives its pair
+                // once (`finish_edit_world` → `clear_door_pair`): the pair's
+                // existing permission is preflighted before any effect.
+                if let Some(pair) = self.live_door_pair([change.x, change.y, change.z])
+                    && let Err(why) = self.cell_permitted(i, pair)
+                {
+                    return self.refuse_strict_edit(i, action, change, budget, &format!("door pair: {why:?}"), RefusalKind::Rule);
+                }
                 // The yield's tier is the server-held tool's, never the claim.
                 let Some(y) = self.joiner_break_yield(change, old, tool) else {
                     // Decision 19 Drift: the server's cell disagrees with the break
