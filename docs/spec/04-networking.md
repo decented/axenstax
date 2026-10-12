@@ -6297,8 +6297,20 @@ scan reads `working/handover/`, so a moved import vanishes from them all,
 and an import whose Activated transfer already has a world in the worlds
 folder is never moved again (tested with a twin copy). The moved world
 keeps `handover/` with its Activated record (the guard passes it); a fork
-carries no `handover/` (tested). The import's `received/` copy and archive
-stay where they were (owner question: discard them after the move). A
+carries no `handover/` (tested). CP19 (DECIDED): once the move is durable
+(the rename, then both parent folders fsynced), the rest of the import
+folder (`received/`, the archive, the manifest and admission) is removed;
+the moved world keeps its own `handover/` with the Activated record and the
+install ledger lives elsewhere, so nothing there is needed. A failed fsync
+keeps it. A crash between the move and the removal leaves an import folder
+with no `working`: every pass first sweeps such folders and removes one
+only when a world in the worlds folder carries its transfer's Activated
+record and passes the open guard (fsyncing both folders again first); an
+import still receiving has no `working` either and is never touched
+(tests: `handover_promote_removes_the_import_folder_only_once_the_move_is_durable`,
+`handover_promote_removes_a_crashed_moves_leftovers_and_nothing_else`). A
+hand-made twin (a `working` beside a world that already carries its
+transfer) is still left alone. A
 worlds folder on another drive (`AXENSTAX_WORLDS_DIR` elsewhere, the rename
 fails with `CrossesDevices`) has no copy path: the import stays, and the
 world list shows `copy::import_on_other_drive` (what to change). Before

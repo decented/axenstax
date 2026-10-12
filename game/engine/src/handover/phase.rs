@@ -2585,4 +2585,76 @@ mod tests {
         assert_eq!(promote_until_moved(&imports).moved, vec!["far_field".to_owned()]);
         let _ = std::fs::remove_dir_all(imports.parent().unwrap());
     }
+
+    /// Promote through the given boundaries until something leaves
+    /// `working` (the resumer's wait lets go of the lock a moment after
+    /// Activated), or the deadline.
+    fn promote_io_until_gone(imports: &std::path::Path, working: &std::path::Path, rename: crate::handover::live::promote::Rename, sync: crate::handover::live::promote::SyncDir) -> crate::handover::live::promote::Promoted {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let p = crate::handover::live::promote::promote_with_io(imports, &crate::save::worlds_root(), rename, sync);
+            if !working.exists() || std::time::Instant::now() > deadline {
+                return p;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    /// The import folder's other contents, as a received import has them.
+    fn leftovers(import: &std::path::Path) {
+        std::fs::create_dir_all(import.join("received")).unwrap();
+        std::fs::write(import.join("received").join("world.dat"), b"received").unwrap();
+        std::fs::write(import.join("pack.axeworld"), b"archive").unwrap();
+    }
+
+    /// CP19: the rest of the import folder goes only once the move is
+    /// durable. A failed fsync after the rename keeps it (the world is
+    /// already listed); the next pass syncs again and removes it, and never
+    /// moves or lists the world twice.
+    #[test]
+    fn handover_promote_removes_the_import_folder_only_once_the_move_is_durable() {
+        let _root = crate::save::WorldsRootGuard::new("promote-durable");
+        let relay = crate::handover::relay_fixture::Relay::start();
+        let (imports, working, t) = prepared_world_import("durable", "Quay Side", &relay);
+        let import = working.parent().unwrap().to_path_buf();
+        leftovers(&import);
+        activate_import(&imports, &working, t);
+        let not_durable = promote_io_until_gone(&imports, &working, |a, b| std::fs::rename(a, b), |_| Err(std::io::Error::other("injected sync failure")));
+        assert_eq!(not_durable.moved, vec!["quay_side".to_owned()]);
+        assert!(import.join("received").join("world.dat").exists() && import.join("pack.axeworld").exists(), "the import folder was removed before the move was durable");
+        assert_eq!(crate::save::list_world_entries().len(), 1);
+        let next = crate::handover::live::promote::promote_activated_imports(&imports, &crate::save::worlds_root());
+        assert_eq!(next, Default::default(), "the next pass moved something");
+        assert!(!import.exists(), "the moved import's leftovers stayed once the move was durable");
+        assert_eq!(crate::save::list_world_entries().len(), 1, "the handed-over world is listed twice");
+        let _ = std::fs::remove_dir_all(imports.parent().unwrap());
+    }
+
+    /// CP19: a crash between the rename and the removal (the rename landed,
+    /// nothing after it ran): the next pass's leftover sweep removes the
+    /// import folder without moving or listing anything twice. An import
+    /// folder with no `working` that no moved world accounts for (one still
+    /// receiving) is never removed.
+    #[test]
+    fn handover_promote_removes_a_crashed_moves_leftovers_and_nothing_else() {
+        let _root = crate::save::WorldsRootGuard::new("promote-crash");
+        let relay = crate::handover::relay_fixture::Relay::start();
+        let (imports, working, t) = prepared_world_import("crash", "Mill Pond", &relay);
+        let import = working.parent().unwrap().to_path_buf();
+        leftovers(&import);
+        let receiving = imports.join(format!("handover-w-{}", hex::encode([0x5a_u8; 16])));
+        leftovers(&receiving);
+        activate_import(&imports, &working, t);
+        // The rename lands, then the process "dies": nothing after it runs.
+        let crashed = promote_io_until_gone(&imports, &working, |a, b| std::fs::rename(a, b).and(Err(std::io::Error::other("crash after rename"))), crate::fsync::sync_dir);
+        assert!(crashed.moved.is_empty() && !working.exists() && import.join("received").exists(), "the crash state wasn't reached");
+        let boot = crate::handover::live::promote::promote_activated_imports(&imports, &crate::save::worlds_root());
+        assert_eq!(boot, Default::default(), "the boot pass moved something");
+        assert!(!import.exists(), "the crashed move's leftovers stayed");
+        assert!(receiving.join("received").join("world.dat").exists(), "an import nobody moved was removed");
+        let listed = crate::save::list_world_entries();
+        assert_eq!(listed.len(), 1, "the world list: {:?}", listed.iter().map(|e| &e.folder_name).collect::<Vec<_>>());
+        assert_eq!(crate::save::world_open_refusal(&listed[0].folder_name), None);
+        let _ = std::fs::remove_dir_all(imports.parent().unwrap());
+    }
 }

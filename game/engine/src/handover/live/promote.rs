@@ -23,9 +23,17 @@
 //! - A worlds folder on a different drive (`AXENSTAX_WORLDS_DIR` elsewhere:
 //!   the rename fails with `CrossesDevices`): no copy path. The import stays
 //!   where it is and the lobby says why, with what to change.
-//! - The import's other contents (`received/`, the archive) stay where they
-//!   are; the import folder itself is never listed (no `world.dat` at its
-//!   top level).
+//! - CP19 (DECIDED, coordinator 2026-10-12): once the move is durable (the
+//!   rename, then both parent folders fsynced), the rest of the import
+//!   folder (`received/`, the archive, the manifest and admission) is
+//!   removed: the moved world keeps its own `handover/` with the Activated
+//!   record and the install ledger lives elsewhere, so nothing there is
+//!   needed. A crash between the move and the removal leaves an import
+//!   folder with no `working`; the next pass's leftover sweep finds a world
+//!   in the worlds folder carrying that import's Activated transfer, fsyncs
+//!   both folders and removes it. An import folder is removed only then:
+//!   never one that isn't Activated and moved (an import still receiving
+//!   has no `working` either, and no world carries its transfer).
 use crate::handover::Id;
 use std::path::{Path, PathBuf};
 
@@ -40,6 +48,8 @@ pub struct Promoted {
 
 /// The rename boundary (injectable so a test can force a different drive).
 pub type Rename = fn(&Path, &Path) -> std::io::Result<()>;
+/// The directory fsync (injectable so a test can make the move not durable).
+pub type SyncDir = fn(&Path) -> std::io::Result<()>;
 
 /// Move every Activated, unquarantined, unheld import under `imports` into
 /// `worlds_root`. See the module docs.
@@ -48,13 +58,18 @@ pub fn promote_activated_imports(imports: &Path, worlds_root: &Path) -> Promoted
 }
 
 pub fn promote_with(imports: &Path, worlds_root: &Path, rename: Rename) -> Promoted {
+    promote_with_io(imports, worlds_root, rename, crate::fsync::sync_dir)
+}
+
+pub fn promote_with_io(imports: &Path, worlds_root: &Path, rename: Rename, sync: SyncDir) -> Promoted {
     let mut out = Promoted::default();
+    remove_moved_leftovers(imports, worlds_root, sync);
     let mut seen = std::collections::BTreeSet::new();
     for (working, transfer) in super::resumer::import_records(imports, "activated-") {
         if !seen.insert(working.clone()) {
             continue;
         }
-        match promote_one(&working, transfer, worlds_root, rename) {
+        match promote_one(&working, transfer, worlds_root, rename, sync) {
             Ok(Some(folder)) => out.moved.push(folder),
             Ok(None) => {}
             Err(line) => out.lines.push(line),
@@ -65,7 +80,7 @@ pub fn promote_with(imports: &Path, worlds_root: &Path, rename: Rename) -> Promo
 
 /// `Ok(Some(folder))` moved; `Ok(None)` not (yet) movable, try again later;
 /// `Err(line)` stays put with a line for the lobby.
-fn promote_one(working: &Path, transfer: Id, worlds_root: &Path, rename: Rename) -> Result<Option<String>, String> {
+fn promote_one(working: &Path, transfer: Id, worlds_root: &Path, rename: Rename, sync: SyncDir) -> Result<Option<String>, String> {
     let records = super::authority::dir(working);
     if std::fs::symlink_metadata(records.join(format!("quarantined-{}.dat", hex::encode(transfer)))).is_ok() {
         return Ok(None);
@@ -114,13 +129,66 @@ fn promote_one(working: &Path, transfer: Id, worlds_root: &Path, rename: Rename)
             return Ok(None);
         }
     }
-    for dir in [working.parent(), Some(worlds_root)].into_iter().flatten() {
-        if let Err(e) = crate::fsync::sync_dir(dir) {
-            log::warn!("handover: syncing {} after moving the world in failed ({e})", dir.display());
+    log::info!("handover: the handed-over world is now in the worlds folder as {folder}");
+    if let Some(import) = working.parent() {
+        remove_once_durable(import, worlds_root, sync);
+    }
+    Ok(Some(folder))
+}
+
+/// CP19: fsync the import folder (the rename's source parent) and the
+/// worlds folder (its target parent); only when both succeed is the move
+/// durable, and only then is the rest of the import folder removed (and
+/// `imports` fsynced). A failed sync leaves it for the next pass's leftover
+/// sweep, which syncs again first.
+fn remove_once_durable(import: &Path, worlds_root: &Path, sync: SyncDir) -> bool {
+    for dir in [import, worlds_root] {
+        if let Err(e) = sync(dir) {
+            log::warn!("handover: syncing {} after moving the world in failed ({e}); the import folder is kept for now", dir.display());
+            return false;
         }
     }
-    log::info!("handover: the handed-over world is now in the worlds folder as {folder}");
-    Ok(Some(folder))
+    if let Err(e) = std::fs::remove_dir_all(import) {
+        log::warn!("handover: removing the moved import's folder {} failed ({e}); it is tried again", import.display());
+        return false;
+    }
+    if let Some(imports) = import.parent() {
+        let _ = sync(imports);
+    }
+    true
+}
+
+/// CP19: the boot pass's already-moved branch for a crash between the move
+/// and the removal. An import folder (`handover-<world>-<transfer>`) with no
+/// `working` whose transfer's Activated record a world in the worlds folder
+/// carries (and that world passes the open guard) is a moved import's
+/// leftovers: removed once durable. Anything else is left alone.
+fn remove_moved_leftovers(imports: &Path, worlds_root: &Path, sync: SyncDir) {
+    let Ok(entries) = std::fs::read_dir(imports) else { return };
+    for entry in entries.take(super::inert::SCAN_LIMIT).flatten() {
+        let import = entry.path();
+        let Some(transfer) = entry.file_name().to_str().and_then(import_transfer) else { continue };
+        if !std::fs::symlink_metadata(&import).is_ok_and(|m| m.is_dir()) {
+            continue;
+        }
+        if !matches!(std::fs::symlink_metadata(import.join("working")), Err(e) if e.kind() == std::io::ErrorKind::NotFound) {
+            continue;
+        }
+        let Some(world) = already_moved(worlds_root, transfer) else { continue };
+        if super::authority::open_guard(&world).is_err() {
+            continue;
+        }
+        if remove_once_durable(&import, worlds_root, sync) {
+            log::info!("handover: removed the leftovers of an import already moved in as {}", world.display());
+        }
+    }
+}
+
+/// The transfer id from an import folder name `handover-<world>-<transfer>`.
+fn import_transfer(name: &str) -> Option<Id> {
+    let rest = name.strip_prefix("handover-")?;
+    let (_, t) = rest.rsplit_once('-')?;
+    Id::try_from(hex::decode(t).ok()?).ok()
 }
 
 /// A world under `worlds_root` already carrying `transfer`'s Activated
