@@ -87,17 +87,6 @@ pub fn clear(imports: &Path, transfer: Id) -> Result<()> {
     }
 }
 
-/// A file or folder inside an import being discarded (a symlink is
-/// unlinked, never followed).
-fn remove_entry(path: &Path) -> Result<()> {
-    match fs::symlink_metadata(path) {
-        Ok(m) if m.is_dir() => fs::remove_dir_all(path).map_err(|_| Error::Io),
-        Ok(_) => fs::remove_file(path).map_err(|_| Error::Io),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(_) => Err(Error::Io),
-    }
-}
-
 fn remove_dir(path: &Path) -> Result<()> {
     match fs::symlink_metadata(path) {
         Ok(m) if m.file_type().is_symlink() || !m.is_dir() => Err(Error::Invalid("inert import type")),
