@@ -21924,7 +21924,15 @@ impl super::GameState {
         // applied in the one order they arrived — now, or (while we hold
         // edits not sent yet) right after the input carrying them goes out
         // (`apply_window_inbox`).
-        self.window_inbox.add(pending_outcomes, pending_grants, armour_worn);
+        if self.remote_client.as_ref().is_some_and(|remote| remote.pack_buffers_live()) {
+            let (count, bytes) = self.remote_client.as_ref().map_or((0, 0), |remote| remote.pack_retained_usage());
+            if let Err(reason) = self.window_inbox.add_bounded(pending_outcomes, pending_grants, armour_worn, (count, bytes.saturating_add(self.chunk_intake.carried_metadata_bytes()))) {
+                log::warn!("Held pack inbox refused: {reason}");
+                if let Some(remote) = &mut self.remote_client { remote.state = crate::remote_client::ConnectionState::Failed(crate::remote_client::HOST_BAD_WORLD_DATA.to_string()); }
+                self.window_inbox.clear();
+                return;
+            }
+        } else { self.window_inbox.add(pending_outcomes, pending_grants, armour_worn); }
         if !self.edits_unsent() {
             self.apply_window_inbox();
         }
@@ -23047,7 +23055,7 @@ impl super::GameState {
     /// C3b-fix-d (A-L1) — with no connection it is dropped unsent, and its
     /// claim released: nothing will ever answer it (C3b-fix-e L7:
     /// `JoinerActions::settle`).
-    fn send_request(&mut self, request: crate::remote_client::Request) {
+    pub(crate) fn send_request(&mut self, request: crate::remote_client::Request) {
         if !self.remote_client.as_ref().is_some_and(|c| c.is_connected()) {
             self.joiner_actions.settle(request.seq(), crate::joiner_actions::RequestFate::NoConnection);
             return;
@@ -23142,6 +23150,7 @@ impl super::GameState {
 
     pub(crate) fn apply_window_inbox(&mut self) {
         self.release_retired_requests();
+        if self.remote_client.as_ref().is_some_and(|remote| remote.pack_window_inbox_held() || !self.window_inbox.pack_life_ready(remote.applied_actor_respawns())) { return; }
         if self.window_inbox.is_empty() {
             return;
         }
@@ -23200,6 +23209,24 @@ impl super::GameState {
                         self.window_inbox.clear();
                         return;
                     }
+                }
+                crate::window_events::InboxItem::Outcome(crate::remote_client::RequestOutcome::Pack(packet)) => {
+                    if let Err(reason) = self.apply_pack_result(&packet) {
+                        log::warn!("Pack canonical application failed: {reason}");
+                        if let Some(remote) = &mut self.remote_client { remote.state = crate::remote_client::ConnectionState::Failed(crate::remote_client::HOST_BAD_WORLD_DATA.to_string()); }
+                        self.window_inbox.clear();
+                        return;
+                    }
+                    if let Some(remote) = &mut self.remote_client { remote.pack_carrier_applied(packet.owned_bytes()); }
+                }
+                crate::window_events::InboxItem::Outcome(crate::remote_client::RequestOutcome::PackView(packet)) => {
+                    if let Err(reason) = self.apply_pack_view(&packet) {
+                        log::warn!("Pack view application failed: {reason}");
+                        if let Some(remote) = &mut self.remote_client { remote.state = crate::remote_client::ConnectionState::Failed(crate::remote_client::HOST_BAD_WORLD_DATA.to_string()); }
+                        self.window_inbox.clear();
+                        return;
+                    }
+                    if let Some(remote) = &mut self.remote_client { remote.pack_carrier_applied(packet.owned_bytes()); }
                 }
                 crate::window_events::InboxItem::Grant(grant) => {
                     unfit.push(

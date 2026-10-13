@@ -86,16 +86,28 @@ pub fn show_container_dialog_ext(
     pos: (i32, i32, i32),
     show_remove_pack: bool,
 ) -> ChestUiResult {
+    show_container_dialog_inner(ctx, title, chest, inventory, format!("{} ({}, {}, {})", title, pos.0, pos.1, pos.2), egui::Id::new(("block-container", pos)), show_remove_pack, true)
+}
+
+/// Entity packs have their own stable identity rather than a block address.
+pub fn show_pack_dialog(ctx: &egui::Context, title: &str, chest: &ChestData, inventory: &Inventory, id: egui::Id, enabled: bool) -> ChestUiResult {
+    show_container_dialog_inner(ctx, title, chest, inventory, title.to_string(), id, true, enabled)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn show_container_dialog_inner(ctx: &egui::Context, title: &str, chest: &ChestData, inventory: &Inventory, window_title: String, id: egui::Id, show_remove_pack: bool, enabled: bool) -> ChestUiResult {
     let mut result = ChestUiResult::default();
     let mut window_open = true;
     let tier_name = title;
     let tier_rows = chest.slots.len().div_ceil(9);
 
-    egui::Window::new(format!("{} ({}, {}, {})", tier_name, pos.0, pos.1, pos.2))
+    egui::Window::new(window_title)
+        .id(id)
         .open(&mut window_open)
         .resizable(false)
         .collapsible(false)
         .show(ctx, |ui| {
+            if !enabled { ui.label("Waiting for the host…"); ui.disable(); }
             ui.label(RichText::new(tier_name).size(16.0).strong());
             ui.add_space(4.0);
             ui.label("Click moves one. Shift-click moves the whole stack. Scroll over a slot to transfer.");
@@ -191,6 +203,7 @@ pub fn show_container_dialog_ext(
             });
         });
 
+    if !enabled { result.clicks.clear(); result.remove_pack_requested = false; }
     if !window_open {
         result.close_requested = true;
     }

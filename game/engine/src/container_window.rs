@@ -1044,9 +1044,19 @@ impl ContainerData {
 /// it.
 #[derive(Clone, Debug)]
 pub struct SharedContainer {
-    pub cell: [i32; 3],
+    pub target: ContainerTarget,
+    pub pack_session: Option<PackMirrorSession>,
     pub kind: ContainerKind,
     pub contents: ContainerData,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct PackMirrorSession {
+    pub actor_respawns: u32,
+    pub incarnation: u64,
+    pub revision: u64,
+    /// Hide immediately, but send the close only after the current fence.
+    pub close_requested: bool,
 }
 
 /// A mirror's contents.
@@ -1058,6 +1068,20 @@ pub enum ContainerData {
 }
 
 impl SharedContainer {
+    pub fn block_cell(&self) -> Option<[i32; 3]> {
+        match self.target { ContainerTarget::Block(cell) => Some(cell), ContainerTarget::Entity(_) => None }
+    }
+    pub fn visible(&self) -> bool {
+        self.pack_session.is_none_or(|session| !session.close_requested)
+    }
+    pub fn from_pack(view: &crate::pack_wire::PackView, actor_respawns: u32, registry: &crate::block::BlockRegistry) -> Result<Self, String> {
+        Ok(Self {
+            target: view.target,
+            kind: ContainerKind::Chest { tier: ChestTier::Wood },
+            contents: ContainerData::Chest(view.decode_contents(registry)?),
+            pack_session: Some(PackMirrorSession { actor_respawns, incarnation: view.incarnation, revision: view.revision, close_requested: false }),
+        })
+    }
     /// The mirror an opened `ContainerOpened` describes: its slots decoded
     /// (`inventory::stack_from_wire`, a Plan as the placeholder), a furnace's
     /// progress set. `None` for a refusal.
@@ -1082,7 +1106,7 @@ impl SharedContainer {
             ContainerKind::Chest { tier } => ContainerData::Chest(ChestData { slots, tier }),
             ContainerKind::Dispenser | ContainerKind::Dropper => ContainerData::Chest(ChestData { slots, tier: ChestTier::Wood }),
         };
-        Some(SharedContainer { cell: pkt.cell, kind: pkt.kind, contents })
+        Some(SharedContainer { target: ContainerTarget::Block(pkt.cell), pack_session: None, kind: pkt.kind, contents })
     }
 
     /// The mirror as the window's container hook.
@@ -1100,7 +1124,7 @@ impl SharedContainer {
     /// player's body (eye at `eye`), by the rule the server judges the
     /// joiner's container ops with ([`container_in_reach`]).
     pub fn still_open(&self, block_at_cell: BlockId, eye: glam::Vec3) -> bool {
-        ContainerKind::of_block(block_at_cell) == Some(self.kind) && container_in_reach(eye, self.cell)
+        matches!(self.target, ContainerTarget::Block(cell) if ContainerKind::of_block(block_at_cell) == Some(self.kind) && container_in_reach(eye, cell))
     }
 }
 

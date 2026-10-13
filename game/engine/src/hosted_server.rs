@@ -6304,7 +6304,10 @@ impl HostedServer {
                 // Exact terminal receipts follow the complete preceding world
                 // prefix. Each is a coalescing barrier on this same outbox.
                 if let Some(results) = &mut sp.action_results {
-                    for receipt in results.take_unsent() { outbox.push_action_receipt(receipt); }
+                    for (receipt, carrier) in results.take_unsent_with_carriers() {
+                        if let Some(carrier) = carrier { outbox.push_pack_result(receipt.action, carrier); }
+                        outbox.push_action_receipt(receipt);
+                    }
                 }
             }
             // The last input of THIS client's that its server state includes

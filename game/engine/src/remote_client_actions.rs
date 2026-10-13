@@ -169,6 +169,11 @@ impl RemoteClient {
     pub(super) fn retire_applied_receipts(&mut self) {
         while let Some(receipt) = self.action_receipts.front().copied() {
             if receipt.included_events > self.events_applied { break; }
+            match self.pack_receipt_ready(receipt) {
+                Ok(false) => break,
+                Err(reason) => { self.state = ConnectionState::Failed(reason); break; }
+                Ok(true) => {}
+            }
             let Some(journal) = &mut self.action_journal else {
                 self.state = ConnectionState::Failed("Receipt has no joined action session".into());
                 break;
@@ -203,6 +208,7 @@ impl RemoteClient {
             }
             let ack = crate::action_wire::AppliedActionAck { session: receipt.action.session, epoch: receipt.action.epoch, life: receipt.action.life, through: receipt.action.seq, included_events: receipt.included_events };
             self.pending_action_ack = Some(ack);
+            self.retire_pack_flight(receipt);
             self.action_receipts.pop_front();
             self.queued_action_receipts -= 1;
         }

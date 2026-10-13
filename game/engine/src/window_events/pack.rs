@@ -96,6 +96,7 @@ pub fn admit_pack_staged(sp: &ServerPlayer, registry: &crate::block::BlockRegist
     let mut candidate_debt = original_debt.clone();
     let mut backing = SourceBacking::new(raw.slots());
     for waiting in &sp.window_events.waiting {
+        if matches!(&waiting.event, WindowEvent::PackCanonical { actor_respawns, .. } if *actor_respawns != sp.respawns) { continue; }
         let event = holding_event(&waiting.event, registry)?;
         let before = original.slots();
         let expected = fold(&mut original, &mut original_debt, &event);
@@ -119,9 +120,10 @@ pub fn pack_canonical_window(sp: &ServerPlayer, registry: &crate::block::BlockRe
     let mut window = pack_raw_marker(sp, registry)?;
     let mut debt = exact_debt(&sp.window_events.debt, registry)?;
     for waiting in &sp.window_events.waiting {
+        if matches!(&waiting.event, WindowEvent::PackCanonical { actor_respawns, .. } if *actor_respawns != sp.respawns) { continue; }
         match &waiting.event {
             WindowEvent::Replace { window: replaced, debt: carried, .. }
-            | WindowEvent::PackCanonical { window: replaced, debt: carried } => {
+            | WindowEvent::PackCanonical { window: replaced, debt: carried, .. } => {
                 let prefs = window.view().inv;
                 let refill = prefs.auto_refill;
                 let locks = prefs.locked_indices();
@@ -151,10 +153,10 @@ fn delta_heap_bytes(delta: &crate::container_window::ItemDelta) -> Result<usize,
 fn event_heap_bytes(event: &WindowEvent) -> Result<usize, super::strict::StrictStageError> {
     use super::strict::{item_heap_bytes, replace_heap_bytes, view_heap_bytes, StrictStageError};
     match event {
-        WindowEvent::Replace { window, debt, .. } | WindowEvent::PackCanonical { window, debt } => replace_heap_bytes(window, debt),
+        WindowEvent::Replace { window, debt, .. } | WindowEvent::PackCanonical { window, debt, .. } => replace_heap_bytes(window, debt),
         WindowEvent::Grant(stack) => item_heap_bytes(&stack.item),
         WindowEvent::Take { item, .. } => item_heap_bytes(item),
-        WindowEvent::WearArmour { .. } | WindowEvent::WearWeapon { .. } => Ok(0),
+        WindowEvent::WearArmour { .. } | WindowEvent::WearWeapon { .. } | WindowEvent::PackView => Ok(0),
         WindowEvent::ContainerView(view) => view_heap_bytes(view, &item_heap_bytes),
         WindowEvent::Correction(c) => {
             let mut bytes = std::mem::size_of::<crate::window_ops::Correction>().checked_add(delta_heap_bytes(&c.client)?).and_then(|n| n.checked_add(view_heap_bytes(&c.view, &item_heap_bytes).ok()?)).ok_or(StrictStageError::Fit)?;
@@ -265,7 +267,7 @@ mod tests {
         let bread = Item::Material(crate::item::MaterialId::Bread);
         sp.window_events.debt = CorrectionDebt::from_entries(vec![(bread.clone(), 2)]).unwrap();
         let snapshot = pack_canonical_window(&sp, &registry).unwrap();
-        let prepared = prepare_pack_events(&mut sp, vec![WindowEvent::PackCanonical { window: snapshot.window, debt: snapshot.debt }].into_boxed_slice()).unwrap();
+        let prepared = prepare_pack_events(&mut sp, vec![WindowEvent::PackCanonical { actor_respawns: 0, window: snapshot.window, debt: snapshot.debt }].into_boxed_slice()).unwrap();
         prepared.commit(&mut sp, 0);
         apply_front(&mut sp, 0, true);
         assert_eq!(sp.window_events.forced_corrections.len(), 1, "pack application cannot erase unrelated forced correction history");
@@ -282,7 +284,7 @@ mod tests {
         let mut sp = player(InventoryMode::Mirror);
         queue(&mut sp, correction(ItemDelta { take: Vec::new(), give: vec![ItemStack::new_block(crate::block::STONE, 1)] }), 0);
         let snapshot = pack_canonical_window(&sp, &registry).unwrap();
-        let prepared = prepare_pack_events(&mut sp, vec![WindowEvent::PackCanonical { window: snapshot.window, debt: snapshot.debt }].into_boxed_slice()).unwrap();
+        let prepared = prepare_pack_events(&mut sp, vec![WindowEvent::PackCanonical { actor_respawns: 0, window: snapshot.window, debt: snapshot.debt }].into_boxed_slice()).unwrap();
         assert_eq!(prepared.last_number(), 2);
         prepared.abandon(&mut sp);
         assert_eq!(sp.window_events.waiting(), 1);

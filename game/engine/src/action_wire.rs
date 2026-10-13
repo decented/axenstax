@@ -136,6 +136,7 @@ impl<T, const N: usize> BoundedList<T, N> {
     }
     pub fn into_vec(self) -> Vec<T> { self.0 }
     pub fn as_slice(&self) -> &[T] { &self.0 }
+    pub fn allocated_bytes(&self) -> usize { self.0.capacity().saturating_mul(std::mem::size_of::<T>()) }
 }
 
 impl<'de, T: Deserialize<'de>, const N: usize> Deserialize<'de> for BoundedList<T, N> {

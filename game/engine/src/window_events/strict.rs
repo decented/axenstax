@@ -46,7 +46,7 @@ fn marker_event(event: &WindowEvent, registry: &crate::block::BlockRegistry) -> 
         },
         WindowEvent::WearArmour { hits } => WindowEvent::WearArmour { hits: *hits },
         WindowEvent::WearWeapon { slot, tool } => WindowEvent::WearWeapon { slot: *slot, tool: *tool },
-        WindowEvent::ContainerView(_) => return Ok(None),
+        WindowEvent::ContainerView(_) | WindowEvent::PackView => return Ok(None),
         WindowEvent::Replace { .. } | WindowEvent::PackCanonical { .. } => return Err(StrictStageError::Replacement),
         WindowEvent::Correction(_) => return Err(StrictStageError::Debt),
     }))
@@ -289,7 +289,7 @@ fn event_heap_bytes(event: &WindowEvent) -> Result<usize, StrictStageError> {
     match event {
         WindowEvent::Grant(stack) => item_bytes(&stack.item),
         WindowEvent::Take { item, .. } => item_bytes(item),
-        WindowEvent::WearArmour { .. } | WindowEvent::WearWeapon { .. } => Ok(0),
+        WindowEvent::WearArmour { .. } | WindowEvent::WearWeapon { .. } | WindowEvent::PackView => Ok(0),
         // These require their own complete typed allocation reservation. Never
         // treat unknown correction/view allocations as a zero-byte event.
         WindowEvent::Replace { .. } | WindowEvent::PackCanonical { .. } => Err(StrictStageError::Replacement),
@@ -352,7 +352,7 @@ pub fn strict_replace_fits(sp: &ServerPlayer, event: &WindowEvent) -> bool {
     let count = waiting.waiting.len().saturating_add(1);
     if count > crate::action_journal::MAX_EVENT_ENTRIES { return false; }
     let bytes = |e: &WindowEvent| match e {
-        WindowEvent::Replace { window, debt, .. } | WindowEvent::PackCanonical { window, debt } => replace_heap_bytes(window, debt),
+        WindowEvent::Replace { window, debt, .. } | WindowEvent::PackCanonical { window, debt, .. } => replace_heap_bytes(window, debt),
         other => event_heap_bytes(other),
     };
     let mut heap = 0usize;

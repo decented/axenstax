@@ -96,7 +96,9 @@ pub enum WindowEvent {
     Replace { window: Box<EffectiveWindow>, debt: crate::container_window::CorrectionDebt, station: crate::window::Station },
     /// A sequential unpredicted pack result. Unlike a lifecycle Replace,
     /// this leaves unrelated correction history and configuration intact.
-    PackCanonical { window: Box<EffectiveWindow>, debt: crate::container_window::CorrectionDebt },
+    PackCanonical { actor_respawns: u32, window: Box<EffectiveWindow>, debt: crate::container_window::CorrectionDebt },
+    /// A numbered entity cargo view; it changes no personal holding.
+    PackView,
     /// An accepted request's owed take (`joiner_actions::take_owed_window`):
     /// `n` of `item`, from `slot` first. `how` ends the shortfall's log line.
     Take { slot: usize, item: Item, n: u8, how: &'static str },
@@ -332,7 +334,7 @@ enum Effect {
 fn apply_to(parts: &mut Parts, debt: &mut crate::container_window::CorrectionDebt, event: &WindowEvent) -> Effect {
     match event {
         WindowEvent::Replace { window: w, debt: carried, .. }
-        | WindowEvent::PackCanonical { window: w, debt: carried } => {
+        | WindowEvent::PackCanonical { window: w, debt: carried, .. } => {
             for i in 0..36 { parts.inv.set_slot(i, w.inv.slot(i).cloned()); }
             // C3d run 6 — the lock mask travels with the replacement (the
             // client installs the same); auto-refill stays the copy's own.
@@ -363,7 +365,7 @@ fn apply_to(parts: &mut Parts, debt: &mut crate::container_window::CorrectionDeb
             };
             Effect::Weapon(check)
         }
-        WindowEvent::ContainerView(_) => Effect::Viewed,
+        WindowEvent::ContainerView(_) | WindowEvent::PackView => Effect::Viewed,
         WindowEvent::Correction(c) => {
             Effect::Corrected(c.own.as_ref().map(|own| debt.apply(parts.inv, parts.grid, parts.cursor, parts.armour, own)))
         }
@@ -470,6 +472,9 @@ fn apply_front(sp: &mut ServerPlayer, now: u64, forced: bool) {
     if forced {
         sp.window_events.tally.forced = sp.window_events.tally.forced.saturating_add(1);
     }
+    // A stale pack fence still retires its number, but cannot reinstall
+    // holdings or debt from a body which has already respawned.
+    if matches!(&w.event, WindowEvent::PackCanonical { actor_respawns, .. } if *actor_respawns != sp.respawns) { return; }
     // C3d run 10 (run-8 review LOW-D) — a Mirror copy keeps its own lock mask
     // across a `Replace`, as its client does (run 7) and as `bdd4fe87` did; a
     // lock toggled before the join sync applied is never wiped.
@@ -724,6 +729,7 @@ pub fn effective_window_and_debt(sp: &ServerPlayer) -> EffectiveFold {
         let mut parts =
             Parts { inv: &mut window.inv, armour: &mut window.armour, cursor: &mut window.cursor, grid: &mut window.grid };
         for ev in &sp.window_events.waiting {
+            if matches!(&ev.event, WindowEvent::PackCanonical { actor_respawns, .. } if *actor_respawns != sp.respawns) { continue; }
             if let Effect::Corrected(Some(a)) = apply_to(&mut parts, &mut debt, &ev.event) {
                 saturated |= a.saturated;
             }
@@ -869,6 +875,8 @@ impl InboxItem {
             // mirror (0 for a refusal), a push, a correction.
             InboxItem::Outcome(RequestOutcome::SlotSet(set)) => set.window_event,
             InboxItem::Outcome(RequestOutcome::Sync(set)) => set.window_event,
+            InboxItem::Outcome(RequestOutcome::Pack(packet)) => packet.window_event,
+            InboxItem::Outcome(RequestOutcome::PackView(packet)) => packet.window_event,
             InboxItem::Outcome(RequestOutcome::ContainerOpened(o)) => o.window_event,
             InboxItem::Grant(g) => g.window_event,
             InboxItem::ArmourWorn { event, .. } => *event,
@@ -895,12 +903,62 @@ pub struct WindowInbox {
     pub debt: crate::container_window::CorrectionDebt,
 }
 
+/// All carried WireStack/WireItem fields are inline, including Plan markers.
+/// The variable ownership is the actual Vec allocation, plus boxed pack bodies.
+pub(crate) fn outcome_owned_bytes(outcome: &RequestOutcome) -> usize {
+    use std::mem::size_of;
+    match outcome {
+        RequestOutcome::ContainerOpened(packet) => packet.slots.capacity().saturating_mul(size_of::<crate::protocol::WireSlot>()),
+        RequestOutcome::SlotSet(packet) => packet.sets.capacity().saturating_mul(size_of::<(crate::protocol::WireWindowSlot, crate::protocol::WireSlot)>())
+            .saturating_add(packet.take.capacity().saturating_mul(size_of::<(u8, crate::protocol::WireStack)>()))
+            .saturating_add(packet.give.capacity().saturating_mul(size_of::<crate::protocol::WireStack>())),
+        RequestOutcome::Sync(packet) => packet.slots.capacity().saturating_mul(size_of::<(crate::protocol::WireWindowSlot, crate::protocol::WireSlot)>())
+            .saturating_add(packet.owed.capacity().saturating_mul(size_of::<(crate::protocol::WireStack, u32)>())),
+        RequestOutcome::Pack(packet) => packet.owned_bytes(),
+        RequestOutcome::PackView(packet) => packet.owned_bytes(),
+        RequestOutcome::Interact(_) | RequestOutcome::Item(_) => 0,
+    }
+}
+
+pub(crate) fn window_carrier_bytes(outcomes: &Vec<RequestOutcome>, grants: &Vec<InventoryGrantPacket>, armour_capacity: usize) -> usize {
+    std::mem::size_of::<RequestOutcome>().saturating_mul(outcomes.capacity())
+        .saturating_add(std::mem::size_of::<InventoryGrantPacket>().saturating_mul(grants.capacity()))
+        .saturating_add(std::mem::size_of::<(u8, u32)>().saturating_mul(armour_capacity))
+        .saturating_add(outcomes.iter().map(outcome_owned_bytes).fold(0usize, usize::saturating_add))
+}
+
 impl WindowInbox {
     /// Add one poll's carriers, each list in arrival order.
     pub fn add(&mut self, outcomes: Vec<RequestOutcome>, grants: Vec<InventoryGrantPacket>, armour: Vec<(u8, u32)>) {
         self.outcomes.extend(outcomes);
         self.grants.extend(grants);
         self.armour.extend(armour);
+    }
+
+    /// A held pack cannot accumulate numbered stock, wear, corrections or
+    /// views across frames without bounds. Refuse the whole addition before
+    /// publishing any carrier; the caller ends the failed-data session.
+    pub fn add_bounded(&mut self, outcomes: Vec<RequestOutcome>, grants: Vec<InventoryGrantPacket>, armour: Vec<(u8, u32)>, external: (usize, usize)) -> Result<(), String> {
+        let count = self.outcomes.len().saturating_add(self.grants.len()).saturating_add(self.armour.len())
+            .saturating_add(outcomes.len()).saturating_add(grants.len()).saturating_add(armour.len()).saturating_add(external.0);
+        let nested = self.outcomes.iter().chain(&outcomes).map(outcome_owned_bytes).fold(0usize, usize::saturating_add);
+        let fits = |outcome_capacity: usize, grant_capacity: usize, armour_capacity: usize| {
+            outcome_capacity.saturating_mul(std::mem::size_of::<RequestOutcome>())
+                .saturating_add(grant_capacity.saturating_mul(std::mem::size_of::<InventoryGrantPacket>()))
+                .saturating_add(armour_capacity.saturating_mul(std::mem::size_of::<(u8, u32)>()))
+                .saturating_add(nested).saturating_add(external.1)
+                .saturating_add(self.debt.allocated_entries().saturating_mul(std::mem::size_of::<(Item, u32)>()))
+                <= crate::action_journal::MAX_RETAINED_BYTES
+        };
+        if count > crate::action_journal::MAX_EVENT_ENTRIES || !fits(self.outcomes.capacity().max(self.outcomes.len() + outcomes.len()), self.grants.capacity().max(self.grants.len() + grants.len()), self.armour.capacity().max(self.armour.len() + armour.len())) {
+            return Err("Held pack window carriers exceed their retained limit".into());
+        }
+        self.outcomes.try_reserve_exact(outcomes.len()).map_err(|_| "Held pack outcome allocation failed")?;
+        self.grants.try_reserve_exact(grants.len()).map_err(|_| "Held pack grant allocation failed")?;
+        self.armour.try_reserve_exact(armour.len()).map_err(|_| "Held pack wear allocation failed")?;
+        if !fits(self.outcomes.capacity(), self.grants.capacity(), self.armour.capacity()) { return Err("Held pack allocation exceeds its byte limit".into()); }
+        self.add(outcomes, grants, armour);
+        Ok(())
     }
 
     /// A `StateUpdate` acknowledged every input up to `acked`.
@@ -911,6 +969,16 @@ impl WindowInbox {
     /// Nothing waits to be applied (the debt is not a carrier).
     pub fn is_empty(&self) -> bool {
         self.outcomes.is_empty() && self.grants.is_empty() && self.armour.is_empty() && self.ack.is_none()
+    }
+
+    /// A future body's views wait for real lifecycle application; socket
+    /// observation alone cannot make the new body ready.
+    pub fn pack_life_ready(&self, actor_respawns: u32) -> bool {
+        self.outcomes.iter().all(|outcome| match outcome {
+            RequestOutcome::Pack(packet) => packet.actor_respawns <= actor_respawns,
+            RequestOutcome::PackView(packet) => packet.actor_respawns <= actor_respawns,
+            _ => true,
+        })
     }
 
     /// Everything waiting, in the order it arrived: an item with an event
@@ -963,6 +1031,29 @@ mod tests {
     use crate::crafting::{ToolMaterial, ToolType};
     use crate::item::MaterialId;
     use crate::protocol::{InteractOutcomePacket, ItemActionOutcomePacket, WireItem};
+
+    #[test]
+    fn d2c2_held_inbox_bounds_all_numbered_carriers_across_frames() {
+        let mut inbox = WindowInbox::default();
+        for event in 1..=crate::action_journal::MAX_EVENT_ENTRIES as u32 {
+            inbox.add_bounded(Vec::new(), Vec::new(), vec![(1, event)], (0, 0)).unwrap();
+        }
+        assert!(inbox.add_bounded(Vec::new(), Vec::new(), vec![(1, 1025)], (0, 0)).is_err());
+        let (items, _) = inbox.take_ordered();
+        assert_eq!(items.len(), crate::action_journal::MAX_EVENT_ENTRIES, "the refused addition cannot drop existing numbered state");
+        assert_eq!(items.last().unwrap().event(), 1024);
+    }
+
+    #[test]
+    fn d2c2_held_inbox_charges_actual_nested_capacity_before_publishing() {
+        let mut inbox = WindowInbox::default();
+        let mut gives = Vec::with_capacity(crate::action_journal::MAX_RETAINED_BYTES / std::mem::size_of::<crate::protocol::WireStack>() + 1);
+        gives.push(crate::inventory::stack_to_wire(&bread(1)));
+        let outcome = RequestOutcome::SlotSet(crate::protocol::WindowSlotSetPacket { op_seq_applied: 0, reason: crate::protocol::slot_set_reason::CORRECTION, sets: Vec::new(), furnace: None, window_event: 1, take: Vec::new(), give: gives });
+        assert!(outcome_owned_bytes(&outcome) > crate::action_journal::MAX_RETAINED_BYTES, "one populated stack cannot hide an oversized Vec capacity");
+        assert!(inbox.add_bounded(vec![outcome], Vec::new(), Vec::new(), (0, 0)).is_err());
+        assert!(inbox.is_empty(), "no part of an oversized correction is published");
+    }
 
     fn joiner() -> ServerPlayer {
         let mut sp = ServerPlayer::new(glam::Vec3::new(0.0, 70.0, 0.0));

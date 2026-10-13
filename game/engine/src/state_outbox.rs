@@ -150,6 +150,7 @@ enum Delta {
     Recovery(crate::recovery_bundle::RecoveryBundle),
     /// A terminal receipt is a world boundary, not latest-wins state.
     Receipt(crate::action_wire::ActionReceipt),
+    PackResult { action: crate::action_identity::ActionHeader, packet: Box<[u8]> },
     Block(BlockChange),
     Spawn(EntitySpawn),
     Despawn(u32),
@@ -288,7 +289,7 @@ impl ClientOutbox {
                 Delta::Block(_) => self.queued_block_bytes -= e.size,
                 Delta::Chunk { .. } => self.queued_chunk_bytes -= e.size,
                 Delta::Recovery(_) => self.queued_recovery_bytes -= e.size,
-                Delta::Receipt(_) | Delta::Spawn(_) | Delta::Despawn(_) | Delta::View(_) | Delta::Refused(_) | Delta::Attachment(_) => {}
+                Delta::Receipt(_) | Delta::PackResult { .. } | Delta::Spawn(_) | Delta::Despawn(_) | Delta::View(_) | Delta::Refused(_) | Delta::Attachment(_) => {}
             }
         }
     }
@@ -390,6 +391,17 @@ impl ClientOutbox {
 
     /// All touched authoritative deltas and immediate event carriers precede
     /// this terminal boundary. Later changes cannot fold backwards across it.
+    /// The immutable canonical result leaves from the same reliable head
+    /// immediately before its receipt, after the complete earlier world.
+    pub fn push_pack_result(&mut self, action: crate::action_identity::ActionHeader, packet: Box<[u8]>) {
+        if packet.len() > crate::action_journal::MAX_PAGE_BYTES + 1 || packet.first() != Some(&(protocol::PacketType::PackResult as u8)) {
+            self.failed_receipt = Some(action);
+            return;
+        }
+        if let Some(index) = &mut self.coalesce_index { index.clear(); }
+        self.push_entry(Delta::PackResult { action, packet });
+    }
+
     pub fn push_action_receipt(&mut self, receipt: crate::action_wire::ActionReceipt) {
         if let Some(index) = &mut self.coalesce_index { index.clear(); }
         self.push_entry(Delta::Receipt(receipt));
@@ -436,6 +448,7 @@ impl ClientOutbox {
         let size = match &delta {
             Delta::Recovery(bundle) => bundle.wire_bytes(),
             Delta::Receipt(receipt) => 1 + wire_size(receipt),
+            Delta::PackResult { packet, .. } => packet.len(),
             Delta::Block(b) => wire_size(b),
             Delta::Spawn(s) => wire_size(s),
             Delta::Despawn(id) => wire_size(id),
@@ -489,7 +502,7 @@ impl ClientOutbox {
         let mut latest: HashMap<usize, BlockChange> = HashMap::new();
         let mut dead = vec![false; self.queue.len()];
         for (i, e) in self.queue.iter().enumerate() {
-            if matches!(e.delta, Delta::Recovery(_) | Delta::Receipt(_)) {
+            if matches!(e.delta, Delta::Recovery(_) | Delta::Receipt(_) | Delta::PackResult { .. }) {
                 newest.clear();
                 continue;
             }
@@ -543,7 +556,7 @@ impl ClientOutbox {
                 Delta::Chunk { coord, .. } => {
                     index.retain(|&cell, _| chunk_of_cell(cell) != *coord);
                 }
-                Delta::Recovery(_) | Delta::Receipt(_) => index.clear(),
+                Delta::Recovery(_) | Delta::Receipt(_) | Delta::PackResult { .. } => index.clear(),
                 _ => {}
             }
         }
@@ -560,8 +573,13 @@ impl ClientOutbox {
         let mut receipt_bytes = 0;
         let mut failed_receipt = self.failed_receipt;
         self.queue.retain(|entry| {
-            if let Delta::Receipt(receipt) = &entry.delta {
-                failed_receipt = Some(receipt.action);
+            let action = match &entry.delta {
+                Delta::Receipt(receipt) => Some(receipt.action),
+                Delta::PackResult { action, .. } => Some(*action),
+                _ => None,
+            };
+            if let Some(action) = action {
+                failed_receipt = Some(action);
                 receipt_bytes += entry.size;
                 false
             } else { true }
@@ -645,6 +663,17 @@ impl ClientOutbox {
                 spent += size;
                 moved = true;
                 out.push(protocol::serialize_packet(protocol::PacketType::ActionReceipt, &receipt));
+                continue;
+            }
+            if !out.is_empty()
+                && let Some(Entry { size, delta: Delta::PackResult { .. }, .. }) = self.queue.front()
+            {
+                if moved && spent + size > budget { break; }
+                let Some(Entry { size, delta: Delta::PackResult { packet, .. }, .. }) = self.queue.pop_front() else { unreachable!("front is a pack result") };
+                self.queued_bytes -= size;
+                spent += size;
+                moved = true;
+                out.push(packet.into_vec());
                 continue;
             }
             // Each carrier leaves from the SAME head; the enclosing entry
@@ -731,7 +760,7 @@ impl ClientOutbox {
             debug_assert_eq!(bytes.len(), size, "measured size is the real size");
             spent += bytes.len();
             out.push(bytes);
-            if matches!(self.queue.front(), Some(Entry { delta: Delta::Chunk { .. } | Delta::Recovery(_) | Delta::Receipt(_), .. })) {
+            if matches!(self.queue.front(), Some(Entry { delta: Delta::Chunk { .. } | Delta::Recovery(_) | Delta::Receipt(_) | Delta::PackResult { .. }, .. })) {
                 continue;
             }
             if (queue_drained && updates_drained) || !carried {
@@ -747,7 +776,7 @@ impl ClientOutbox {
     /// block change is left queued.
     fn fill_reliable(&mut self, pkt: &mut StateUpdatePacket, size: &mut usize, limit: usize) -> bool {
         while let Some(front) = self.queue.front() {
-            if *size + front.size > limit || matches!(front.delta, Delta::Chunk { .. } | Delta::Recovery(_) | Delta::Receipt(_)) {
+            if *size + front.size > limit || matches!(front.delta, Delta::Chunk { .. } | Delta::Recovery(_) | Delta::Receipt(_) | Delta::PackResult { .. }) {
                 break;
             }
             let e = self.queue.pop_front().expect("front exists");
@@ -785,6 +814,7 @@ impl ClientOutbox {
                 Delta::Chunk { .. } => unreachable!("a chunk push is never folded into a StateUpdate"),
                 Delta::Recovery(_) => unreachable!("a recovery carrier is never folded into a StateUpdate"),
                 Delta::Receipt(_) => unreachable!("a receipt is never folded into a StateUpdate"),
+                Delta::PackResult { .. } => unreachable!("a pack result is never folded into a StateUpdate"),
             }
         }
         if self.queued_block_bytes == 0 {

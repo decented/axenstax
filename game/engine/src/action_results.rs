@@ -80,6 +80,7 @@ impl ActionResults {
         if !self.owns(action) { return None; }
         self.rows.iter().find(|r| r.receipt.action.seq == action.seq).map(|r| r.receipt)
     }
+    #[cfg(test)]
     pub fn take_unsent(&mut self) -> Vec<ActionReceipt> {
         self.take_unsent_with_carriers().into_iter().map(|(receipt, _)| receipt).collect()
     }

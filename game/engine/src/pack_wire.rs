@@ -13,6 +13,8 @@ pub enum PackOperation {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PackRequest {
+    /// The actual respawn generation, separate from the retained namespace.
+    pub actor_respawns: u32,
     pub target: ContainerTarget,
     /// The actual selected place; a held item claim cannot supply payment.
     pub hotbar_slot: u8,
@@ -58,6 +60,7 @@ impl PackNote {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PackResult {
+    pub actor_respawns: u32,
     pub action: ActionHeader,
     pub fate: ActionFate,
     pub note: PackNote,
@@ -69,12 +72,20 @@ pub struct PackResult {
 /// Views change no personal place; they are still numbered and life-scoped.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PackViewPush {
+    pub actor_respawns: u32,
     pub session: [u8; 16],
+    pub epoch: u32,
     pub life: u32,
     pub window_event: u32,
     pub target: ContainerTarget,
     pub incarnation: u64,
     pub view: Option<PackView>,
+}
+
+impl PackViewPush {
+    pub fn owned_bytes(&self) -> usize {
+        std::mem::size_of::<Self>().saturating_add(self.view.as_ref().map_or(0, |view| view.slots.allocated_bytes()))
+    }
 }
 
 fn exact_slot(slot: &WireSlot, registry: &crate::block::BlockRegistry) -> Result<Option<crate::item::ItemStack>, String> {
@@ -129,6 +140,14 @@ impl PackView {
 }
 
 impl PackResult {
+    /// WireStack contains only fixed-size WireItem fields (including Plan markers).
+    /// Count Vec capacity, rather than its wire length or populated places.
+    pub fn owned_bytes(&self) -> usize {
+        std::mem::size_of::<Self>().saturating_add(self.window.slots.allocated_bytes())
+            .saturating_add(self.window.owed.allocated_bytes())
+            .saturating_add(self.view.as_ref().map_or(0, |view| view.slots.allocated_bytes()))
+    }
+
     pub fn encode(&self) -> Result<Box<[u8]>, String> {
         let bytes = bincode::serialize(self).map_err(|error| error.to_string())?;
         if self.window_event == 0 || bytes.len() > crate::action_journal::MAX_PAGE_BYTES { return Err("A pack result exceeds its carrier bound".into()); }
@@ -153,7 +172,7 @@ mod tests {
         assert_eq!(crate::protocol::PacketType::PackResult as u8, 74);
         assert_eq!(crate::protocol::PacketType::PackView as u8, 75);
         assert_eq!(crate::protocol::entity_flags::PACK, 128);
-        for (intent, tag) in [(crate::action_wire::ActionIntent::CancelledNoop, 11u32), (crate::action_wire::ActionIntent::Pack(PackRequest { target: ContainerTarget::Entity(9), hotbar_slot: 0, before: 3, operation: PackOperation::Open }), 12)] {
+        for (intent, tag) in [(crate::action_wire::ActionIntent::CancelledNoop, 11u32), (crate::action_wire::ActionIntent::Pack(PackRequest { actor_respawns: 0, target: ContainerTarget::Entity(9), hotbar_slot: 0, before: 3, operation: PackOperation::Open }), 12)] {
             let packet = crate::action_wire::ActionPacket { action: header(), intent };
             let bytes = packet.encode().unwrap();
             assert_eq!(&bytes[36..40], &tag.to_le_bytes());
@@ -173,7 +192,7 @@ mod tests {
         let body = crate::plan::PlanData::debug_3x3_stone();
         let marker = crate::plan::marker(&body);
         pack.slots[8] = Some(crate::item::ItemStack { item: crate::item::Item::Plan(body), count: 1 });
-        let result = PackResult { action: header(), fate: ActionFate::Accepted, note: PackNote::Done, window_event: 7, window: PackWindow::capture(&window, &debt, &registry).unwrap(), view: Some(PackView::capture(ContainerTarget::Entity(9), 1, 2, &pack).unwrap()) };
+        let result = PackResult { actor_respawns: 0, action: header(), fate: ActionFate::Accepted, note: PackNote::Done, window_event: 7, window: PackWindow::capture(&window, &debt, &registry).unwrap(), view: Some(PackView::capture(ContainerTarget::Entity(9), 1, 2, &pack).unwrap()) };
         let decoded = PackResult::decode(&result.encode().unwrap()).unwrap();
         assert_eq!(decoded, result);
         let personal = decoded.window.decode_window(&registry).unwrap();
