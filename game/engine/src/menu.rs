@@ -1825,8 +1825,8 @@ fn draw_stash_column(ui: &mut egui::Ui, state: &mut MenuState) -> MenuAction {
         let resp = menu_text_field(
             ui,
             &mut state.stash_input,
-            "npub / hex",
-            "npub1… / hex",
+            "Nostr address (npub)",
+            "npub1…",
             field_w,
             12.5,
         );

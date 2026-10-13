@@ -1266,7 +1266,8 @@ The lobby uses the supplied outlined wordmark, rasterised from
 and cached per egui context. World-card description, version and last-played
 metadata use the shared readable secondary text colour. Selection has a copper
 outline and raised fill, whilst keyboard/controller focus remains Lantern.
-Side columns share the Deep Frontier palette. The empty world list displays the
+Side columns share the Deep Frontier palette; the Stash address hint presents
+the player-facing npub form. The empty world list displays the
 existing mountain mark above its creation hint. Header controls wrap on narrow
 screens. Existing world actions, capability gates and responsive side-column
 breakpoints retain their behaviour.
