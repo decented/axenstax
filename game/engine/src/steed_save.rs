@@ -139,6 +139,7 @@ mod tests {
         let _guard = crate::save::WorldsRootGuard::new("d2c2-dedicated-steed");
         let name = "kept-cargo".to_string();
         let mut server = crate::server::GameServer::new(1, name.clone(), 31);
+        server.world.set_block(4, 79, 4, crate::block::STONE);
         let id = crate::entity::spawn_mob(&mut server.ecs, crate::mob::MobType::Mule, glam::Vec3::new(4.0, 80.0, 4.0));
         server.ecs.insert_one(id, crate::entity::Authored).unwrap();
         let npub = crate::hosted_server::verified_npub(Some([7; 32])).unwrap();

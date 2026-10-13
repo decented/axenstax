@@ -121,7 +121,8 @@ impl SteedKeeper {
 /// scatter marker. Guests supply no keeper; later mounts never replace one.
 pub(crate) fn keep_first_mount(ecs: &mut hecs::World, target: hecs::Entity, keeper: Option<SteedKeeper>) {
     let Some(keeper) = keeper else { return };
-    if !ecs.get::<&crate::entity::MobKind>(target).is_ok_and(|kind| matches!(kind.0, crate::mob::MobType::Horse | crate::mob::MobType::Donkey | crate::mob::MobType::Mule)) { return; }
+    // Mount admission already proved the species. HorseData identifies the
+    // steed family; other rideable species and carts do not carry it.
     let newly_kept = if let Ok(mut data) = ecs.get::<&mut HorseData>(target) && !data.is_kept() {
         data.keeper = Some(keeper.clone());
         if let SteedKeeper::LegacyLocal(slot) = keeper { data.kept_by = Some(slot); }

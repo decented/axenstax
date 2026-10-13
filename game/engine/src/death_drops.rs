@@ -163,7 +163,7 @@ mod tests {
     #[test]
     fn d2c2_colocated_pack_deaths_spill_each_live_cargo_once() {
         let mut ecs = hecs::World::new();
-        let world = crate::world::World::new(31);
+        let world = crate::world::World::new();
         let pos = glam::Vec3::new(4.0, 80.0, 4.0);
         for (kind, item, count) in [
             (crate::mob::MobType::Donkey, crate::item::Item::Material(MaterialId::Bread), 3),
