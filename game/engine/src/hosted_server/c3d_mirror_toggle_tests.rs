@@ -46,6 +46,26 @@ fn c3d_mirror_toggle_that_waits_past_a_window_boundary_move_is_served() {
     }
 }
 
+/// C3d run 23 (run-22 review LOW-1): five toggles in one burst (the item
+/// budget is four, so the fifth waits a tick), then an input breaking the
+/// door, all read in one tick: the input waits behind the deferred toggle,
+/// so every click is served on the door before the break removes it — the
+/// click is never overtaken by an edit made after it.
+#[test]
+fn c3d_mirror_deferred_toggle_is_not_overtaken_by_a_later_input() {
+    let mut m = mirror_joined("mirror-toggle-overtaken");
+    for w in [&mut m.hs.server.world, &mut m.world] { stand_door(w, [41, 80, 40], Facing::North); }
+    let i = m.rc.player_index().expect("joined") as usize;
+    for _ in 0..5 { click(&mut m, [41, 80, 40]); }
+    let air = |y: i32| protocol::BlockChange { x: 41, y, z: 40, new_block: crate::block::AIR, meta: 0 };
+    for y in [80, 81] { m.world.set_block(41, y, 40, crate::block::AIR); }
+    m.rc.send_input(&protocol::InputPacket { block_changes: vec![air(80), air(81)], health: 20.0, ..Default::default() });
+    for _ in 0..6 { m.pump(); }
+    assert!(!m.hs.disconnected[i], "never torn down");
+    assert_eq!(m.fates, vec![ActionFate::Accepted; 5], "all five clicks served before the later break");
+    for y in [80, 81] { assert_eq!(m.hs.server.world.get_block(41, y, 40), crate::block::AIR, "then the break removed the half at y={y}"); }
+}
+
 /// Run-19 review MEDIUM-1: a Mirror toggle waits behind the joiner's
 /// waiting edits, as every other Mirror request does. Six edits in one
 /// input (four stone, then a door's two halves: the edit budget is four, so

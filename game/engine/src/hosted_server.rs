@@ -3509,6 +3509,12 @@ impl HostedServer {
         }
     }
 
+    /// C3d run 23 (run-22 review LOW-1) — does slot `i` have a typed action
+    /// waiting in its server action queue (deferred past a per-tick budget)?
+    fn typed_action_waits(&self, i: usize) -> bool {
+        self.server.players.get(i).is_some_and(|sp| sp.action_queue.as_ref().is_some_and(|q| !q.is_empty()))
+    }
+
     fn run_joiner_interaction(
         &mut self,
         i: usize,
@@ -4232,6 +4238,14 @@ impl HostedServer {
                     // client's waiting edits, as a request does (FU4a): it
                     // was made after them (a door placed, then opened).
                     || (edits_waiting && self.mirror_slot(i) && self.inbound[i].front().is_some_and(|p| is_typed_action(p)))
+                    // C3d run 23 (run-22 review LOW-1) — and everything a
+                    // Mirror seat sent after a typed action still waiting in
+                    // its action queue (a fifth toggle past the item budget)
+                    // waits behind it: one ordered stream, so a later input
+                    // (an edit that breaks the door) never overtakes the
+                    // click. Next tick's `process_typed_actions` (the top of
+                    // `tick`) serves it first.
+                    || (self.mirror_slot(i) && self.typed_action_waits(i))
                 {
                     break;
                 }
