@@ -1272,6 +1272,16 @@ existing mountain mark above its creation hint. Header controls wrap on narrow
 screens. Existing world actions, capability gates and responsive side-column
 breakpoints retain their behaviour.
 
+The shared surface tones are:
+
+| UI role | Hex | Use |
+|---|---|---|
+| Raised surface | `#15262A` | Cards and windows |
+| Hovered surface | `#203437` | Hovered controls |
+| Selected surface | `#273734` | Selected cards and controls |
+| Surface boundary | `#394E4F` | Quiet panel and slot borders |
+| Secondary text | `#A6B4B1` | Descriptions and metadata |
+
 The hotbar uses translucent Deep Frontier slots and a Lantern outline for the
 selected slot. Slot geometry, viewport clipping, touch hit targets, item icons
 and survival status colours retain their existing rules.
