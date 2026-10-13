@@ -6372,7 +6372,13 @@ Committed arrives. While an
 import awaits its Committed, the native world list shows a plain line
 above the cards, "Waiting for <npub> to finish handing this world over"
 (the source persona's npub; `resumer::awaiting_statuses`, the same
-bounded, read-only scan as the start-up step). It is not a world card:
+bounded, read-only scan as the start-up step). Reading an already Activated
+import validates its record without re-persisting it: lobby status reads and
+held-import retries perform no file or directory sync for that record. Explicit
+`Receiver::restart` retains its durability check. The complete status traversal
+opens existing marker directories without creating or syncing them, including
+its retirement and damaged-abort scans. Adoption and publication still use
+their existing directory and record durability checks. It is not a world card:
 the import isn't under the worlds folder and can't be opened. There is
 no "take over anyway" (it risks two live copies; an owner question).
 

@@ -1188,6 +1188,11 @@ impl Receiver {
         Ok(true)
     }
     pub fn restart(store: &MarkerStore, transfer: Id) -> Result<Option<Self>> {
+        Self::restart_with(store, transfer, true)
+    }
+    /// `restart`, with `persist` false a read only: an Activated record is
+    /// checked but never written again (CP24, CP22 review LOW-3).
+    fn restart_with(store: &MarkerStore, transfer: Id, persist: bool) -> Result<Option<Self>> {
         let Some(bytes) = store.read(MarkerKind::Ready, transfer)? else {
             if store.exists(MarkerKind::Prepared, transfer)? || store.exists(MarkerKind::Activated, transfer)?
             {
@@ -1236,7 +1241,7 @@ impl Receiver {
                 }
                 Ok(h)
             })();
-            let persisted = checked.is_ok().then(|| store.persist(MarkerKind::Activated, transfer, &bytes));
+            let persisted = (persist && checked.is_ok()).then(|| store.persist(MarkerKind::Activated, transfer, &bytes));
             zeroize::Zeroize::zeroize(&mut bytes);
             let h = checked?;
             persisted.transpose()?;
@@ -1297,7 +1302,11 @@ impl AwaitingCommit {
         if store.exists(MarkerKind::Quarantined, transfer)? {
             return Ok(None);
         }
-        let Some(receiver) = Receiver::restart(store, transfer)? else { return Ok(None) };
+        // CP24 (CP22 review LOW-3): read only. An Activated import has
+        // nothing to wait for (`None` below), so re-persisting its record
+        // here (a signature check and two fsyncs per import, on every lobby
+        // status read and held retry) bought nothing.
+        let Some(receiver) = Receiver::restart_with(store, transfer, false)? else { return Ok(None) };
         if receiver.stage != ReceiverStage::Prepared || receiver.held.is_none() {
             return Ok(None);
         }
@@ -2607,6 +2616,32 @@ mod tests {
     /// `CrossesDevices`) leaves the import where it is, with the lobby line;
     /// another process holding the import's lock, and a quarantine record,
     /// each keep it there with no line; with neither, it moves.
+    /// CP24 (CP22 review LOW-3): the lobby's status read (and the
+    /// resumer's) never writes an Activated record again.
+    #[test]
+    fn handover_awaiting_read_never_rewrites_an_activated_record() {
+        let _root = crate::save::WorldsRootGuard::new("awaiting-read-only");
+        let relay = crate::handover::relay_fixture::Relay::start();
+        let (imports, working, t) = prepared_world_import("read-only", "Quiet Bay", &relay);
+        activate_import(&imports, &working, t);
+        let record = crate::handover::live::authority::dir(&working).join(format!("activated-{}.dat", hex::encode(t)));
+        let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        std::fs::File::options().write(true).open(&record).unwrap().set_modified(old).unwrap();
+        let store = crate::handover::live::authority::store(&working).unwrap();
+        assert!(AwaitingCommit::read(&store, t).unwrap().is_none(), "an Activated import reads as awaiting");
+        assert_eq!(std::fs::metadata(&record).unwrap().modified().unwrap(), old, "a status read wrote the Activated record again");
+
+        let worlds = crate::save::worlds_root();
+        // Exercise the world's abort/retirement scans as well as the import.
+        crate::handover::live::authority::store(&worlds.join("marker-only")).unwrap();
+        let (lines, syncs) = crate::fsync::tests::count_syncs(|| {
+            crate::handover::live::resumer::awaiting_statuses(&worlds, &imports, &crate::handover::ledger::Ledger::install())
+        });
+        assert!(lines.is_empty(), "an Activated import left a waiting line");
+        assert_eq!(syncs, 0, "a lobby status traversal synced existing directories or records");
+        assert_eq!(std::fs::metadata(&record).unwrap().modified().unwrap(), old, "the status traversal rewrote Activated");
+    }
+
     #[test]
     fn handover_promote_refuses_another_drive_a_held_lock_and_a_quarantine() {
         use crate::handover::live::{copy, promote::{promote_activated_imports, promote_with}, world_lock};

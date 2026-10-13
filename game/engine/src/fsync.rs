@@ -18,6 +18,8 @@ use std::path::Path;
 
 /// fsync the existing file at `path` (never creates or truncates it).
 pub fn sync_file(path: &Path) -> std::io::Result<()> {
+    #[cfg(test)]
+    tests::record_sync();
     #[cfg(windows)]
     let f = std::fs::OpenOptions::new().write(true).open(path)?;
     #[cfg(not(windows))]
@@ -74,6 +76,8 @@ pub fn open_written(options: &mut std::fs::OpenOptions, path: &Path) -> std::io:
 /// write access (`open_written`). Every other sync goes through
 /// `sync_file` by path, so no read-only handle is ever flushed.
 pub fn sync_written(f: &Written) -> std::io::Result<()> {
+    #[cfg(test)]
+    tests::record_sync();
     f.0.sync_all()
 }
 
@@ -89,6 +93,8 @@ pub fn sync_written(f: &Written) -> std::io::Result<()> {
 /// API), so a link planted between the check and the open is followed; the
 /// check-then-open race is closed on Unix only.
 pub fn sync_regular(path: &Path) -> std::io::Result<()> {
+    #[cfg(test)]
+    tests::record_sync();
     let bad = || std::io::Error::new(std::io::ErrorKind::InvalidInput, "not the regular file checked");
     let before = std::fs::symlink_metadata(path)?;
     if !before.is_file() {
@@ -124,6 +130,8 @@ pub fn sync_regular(path: &Path) -> std::io::Result<()> {
 /// fsync the directory at `path`, making the renames done in it durable
 /// (a no-op on Windows, see the module comment).
 pub fn sync_dir(path: &Path) -> std::io::Result<()> {
+    #[cfg(test)]
+    tests::record_sync();
     #[cfg(windows)]
     {
         let _ = path;
@@ -134,7 +142,28 @@ pub fn sync_dir(path: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    thread_local! {
+        static SYNC_COUNT: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    }
+    pub(super) fn record_sync() {
+        SYNC_COUNT.with(|n| {
+            if let Some(count) = n.get() { n.set(Some(count + 1)); }
+        });
+    }
+    /// Count sync invocations on this thread, restoring the previous counter
+    /// on both return and unwind. Fixture setup and other tests are excluded.
+    pub(crate) fn count_syncs<R>(action: impl FnOnce() -> R) -> (R, usize) {
+        struct Restore(Option<usize>);
+        impl Drop for Restore {
+            fn drop(&mut self) { SYNC_COUNT.with(|n| n.set(self.0)); }
+        }
+        let restore = Restore(SYNC_COUNT.with(|n| n.replace(Some(0))));
+        let result = action();
+        let count = SYNC_COUNT.with(|n| n.get().unwrap());
+        drop(restore);
+        (result, count)
+    }
     thread_local! {
         static SWAP: std::cell::Cell<Option<fn(&std::path::Path)>> = const { std::cell::Cell::new(None) };
     }

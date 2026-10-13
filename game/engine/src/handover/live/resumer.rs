@@ -373,6 +373,12 @@ fn existing_store(world_dir: &Path) -> crate::handover::Result<MarkerStore> {
     super::authority::store(world_dir)
 }
 
+/// Status scans neither create a directory nor repeat its durability checks.
+/// Adoption and publication keep using `existing_store` above.
+fn read_store(world_dir: &Path) -> crate::handover::Result<MarkerStore> {
+    MarkerStore::open_existing(super::authority::dir(world_dir))
+}
+
 /// CP9 review LOW-1: the job leaves `jobs` however its thread ends (a
 /// panic included), so the transfer can be taken over again.
 pub(crate) struct JobGuard(Arc<Shared>, (Flavour, Id));
@@ -446,7 +452,7 @@ pub fn awaiting_statuses(worlds_root: &Path, imports: &Path, ledger: &Ledger) ->
     let mut lines: Vec<String> = import_receipts(imports)
         .into_iter()
         .filter_map(|(working, t)| {
-            let store = existing_store(&working).ok()?;
+            let store = read_store(&working).ok()?;
             let awaiting = AwaitingCommit::read(&store, t).ok()??;
             if !ledger.lists(&awaiting.ledger_entry()) {
                 return Some(super::copy::UNLISTED_IMPORT.to_owned());
@@ -459,11 +465,11 @@ pub fn awaiting_statuses(worlds_root: &Path, imports: &Path, ledger: &Ledger) ->
     // CP15 (CP13b review LOW-6): a damaged abort record is skipped by the
     // scan; the lobby says a note was ignored (the world is unaffected).
     for world in handover_worlds(worlds_root) {
-        if existing_store(&world).is_ok_and(|s| RetiredCommit::unreadable_aborts(&s) > 0) {
+        if read_store(&world).is_ok_and(|s| RetiredCommit::unreadable_aborts(&s) > 0) {
             lines.push(super::copy::UNLISTED_ABORT.to_owned());
         }
     }
-    for (world, retired) in retired_worlds(worlds_root) {
+    for (world, retired) in retired_worlds_with(worlds_root, read_store) {
         if !ledger.lists(&retired.ledger_entry()) && retired.is_abort() {
             lines.push(super::copy::UNLISTED_ABORT.to_owned());
         } else if !ledger.lists(&retired.ledger_entry()) {
@@ -476,9 +482,16 @@ pub fn awaiting_statuses(worlds_root: &Path, imports: &Path, ledger: &Ledger) ->
 /// Every (world folder, retirement record) under `worlds_root` (bounded; it
 /// creates nothing; a world without a real `handover/` is skipped).
 fn retired_worlds(worlds_root: &Path) -> Vec<(PathBuf, RetiredCommit)> {
+    retired_worlds_with(worlds_root, existing_store)
+}
+
+fn retired_worlds_with(
+    worlds_root: &Path,
+    open: fn(&Path) -> crate::handover::Result<MarkerStore>,
+) -> Vec<(PathBuf, RetiredCommit)> {
     let mut out = Vec::new();
     for world in handover_worlds(worlds_root) {
-        let Ok(store) = existing_store(&world) else { continue };
+        let Ok(store) = open(&world) else { continue };
         match RetiredCommit::scan(&store) {
             Ok(records) => out.extend(records.into_iter().map(|r| (world.clone(), r))),
             // Unreadable: the world stays refused; nothing to publish.
