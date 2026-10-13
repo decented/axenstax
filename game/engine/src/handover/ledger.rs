@@ -150,6 +150,10 @@ impl Ledger {
         // write below seeks to the end first, and `LOCK` serialises the
         // writers in this process. Unconfirmed on Windows itself.
         let mut file = crate::fsync::open_written(&mut options, &self.path).map_err(|_| Error::Io)?;
+        // Serialise the bounds check and append across game processes too.
+        // Refuse contention or unsupported locking promptly; never append
+        // unlocked or wait on another process from the frame thread.
+        file.try_lock().map_err(|_| Error::Io)?;
         let len = file.metadata().map_err(|_| Error::Io)?.len();
         // CP13b (CP13 review MEDIUM-1): the read bound, at append time. The
         // file after this append (a torn tail's newline included) must still
@@ -228,6 +232,69 @@ fn whole_entries<F: Read + Seek>(file: &mut F, len: u64) -> Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const CHILD_LEDGER: &str = "AXENSTAX_HANDOVER_LEDGER_CHILD";
+
+    #[test]
+    fn handover_ledger_child_process_holds_a_pending_append() {
+        let Some(path) = std::env::var_os(CHILD_LEDGER) else { return };
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        let mut file = crate::fsync::open_written(&mut options, Path::new(&path)).unwrap();
+        file.try_lock().unwrap();
+        file.seek(SeekFrom::End(0)).unwrap();
+        println!("LEDGER LOCKED");
+        std::io::stdout().flush().unwrap();
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line).unwrap();
+        file.write_all(entry(2, RecordKind::Retirement).line().as_bytes()).unwrap();
+        crate::fsync::sync_written(&file).unwrap();
+    }
+
+    struct Child(std::process::Child);
+    impl Drop for Child {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    #[test]
+    fn handover_ledger_another_process_cannot_overwrite_a_pending_append() {
+        use std::io::BufRead;
+        let ledger = temp("process");
+        ledger.append(entry(1, RecordKind::Receipt)).unwrap();
+        let before = std::fs::read(ledger.path()).unwrap();
+        let mut child = Child(std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "handover::ledger::tests::handover_ledger_child_process_holds_a_pending_append", "--nocapture", "--test-threads=1"])
+            .env(CHILD_LEDGER, ledger.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn().unwrap());
+        let output = child.0.stdout.take().unwrap();
+        let (ready, waited) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let mut locked = false;
+            for line in std::io::BufReader::new(output).lines() {
+                if !locked && line.is_ok_and(|line| line.contains("LEDGER LOCKED")) {
+                    locked = true;
+                    let _ = ready.send(true);
+                }
+            }
+            if !locked { let _ = ready.send(false); }
+        });
+        assert_eq!(waited.recv_timeout(std::time::Duration::from_secs(10)), Ok(true), "the child never took the ledger lock");
+        let start = std::time::Instant::now();
+        let result = ledger.append(entry(3, RecordKind::Abort));
+        assert!(result.is_err(), "an append ignored another process's pending ledger write");
+        assert!(start.elapsed() < std::time::Duration::from_secs(1), "a held ledger blocked the frame thread");
+        assert_eq!(std::fs::read(ledger.path()).unwrap(), before, "a refused append changed the ledger");
+        child.0.stdin.take().unwrap().write_all(b"release\n").unwrap();
+        assert!(child.0.wait().unwrap().success());
+        reader.join().unwrap();
+        ledger.append(entry(3, RecordKind::Abort)).unwrap();
+        assert_eq!(ledger.entries().unwrap(), vec![entry(1, RecordKind::Receipt), entry(2, RecordKind::Retirement), entry(3, RecordKind::Abort)], "a process's durable entry was overwritten");
+    }
 
     /// CP13b (CP13 review MEDIUM-1): the append bound is the read bound.
     #[test]

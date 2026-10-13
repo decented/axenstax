@@ -5831,7 +5831,13 @@ torn or damaged line is skipped and the rest are kept (an append after a
 torn tail starts a new line first); reads are bounded (8,192 entries and
 their bytes) and fail closed past the bound (nothing listed, appends
 refused). The entry is appended and fsynced (plus a directory fsync when
-the append created the file) BEFORE the record it authorises:
+the append created the file) BEFORE the record it authorises. The open ledger
+handle holds an exclusive file lock through its bounds check, append and sync;
+another game process cannot overwrite a pending entry with a stale end offset.
+Contention and unsupported or failed locking refuse promptly, without appending
+unlocked or waiting on the frame thread. The file keeps write access on Windows;
+it uses no append-only handle. All retirement, abort and receipt appends share
+this path, and the entry/byte bounds remain unchanged:
 `phase::Source::retire` before the retirement record (a failed ledger write
 fails the step as a failed persist does: `RetirementUncertain`, no record),
 `phase::Receiver::prepared` before the Prepared receipt (no receipt, no
