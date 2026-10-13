@@ -6226,7 +6226,12 @@ file still counts as held. CP18 (CP17 review LOW-3): the probe takes a
 shared lock (`try_lock_shared`) and lets go at once, so two probes never
 collide while a live session's exclusive lock still blocks it. CP18 (CP17
 review LOW-4): the registry is keyed by the canonical `handover/` path; no
-thread sleeps while holding it; a releasing guard lets go of its file
+thread sleeps while holding it; nothing turns a registry entry into a guard while
+holding it (CP23, CP22 review MEDIUM-1: `held_here` and a releasing
+guard count the holders instead; a temporary guard made there could be
+the last one when its holder let go meanwhile, and its release would lock
+the registry again on the same thread, hanging every lock user in the
+process; test `handover_lock_held_here_survives_the_holder_letting_go_meanwhile`); a releasing guard lets go of its file
 before its entry, and a present entry with no live guard counts as this
 process (`acquire` retries, the probe answers "not elsewhere"); promotion
 moves an import only when no holder in this process remains, so the

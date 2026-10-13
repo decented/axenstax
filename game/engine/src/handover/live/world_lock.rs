@@ -48,7 +48,10 @@ impl Drop for Held {
         // and retries, never another process.
         self.file.lock().unwrap_or_else(|e| e.into_inner()).take();
         let mut held = HELD.lock().unwrap_or_else(|e| e.into_inner());
-        if held.get(&self.key).is_some_and(|w| w.upgrade().is_none()) {
+        // CP23 (CP22 review MEDIUM-1): never `upgrade` under `HELD`. The
+        // temporary `Arc` could be the last one (its other holder dropping
+        // meanwhile), and its `Drop` would lock `HELD` again on this thread.
+        if held.get(&self.key).is_some_and(|w| w.strong_count() == 0) {
             held.remove(&self.key);
         }
     }
@@ -212,9 +215,31 @@ fn take(world_dir: &Path) -> Result<LiveLock, LockError> {
 
 /// CP18: whether a holder in THIS process (a live session, the resumer's
 /// wait) still holds the world's handover lock. Read-only.
+///
+/// CP23 (CP22 review MEDIUM-1): counts the holders without upgrading. A
+/// temporary `Arc` made under `HELD` can be the last one when the holder
+/// lets go meanwhile (the lobby's held-retry polls exactly then), and its
+/// `Drop` locks `HELD` again on this thread: a self-deadlock.
 pub fn held_here(world_dir: &Path) -> bool {
     let key = lock_path(world_dir);
-    HELD.lock().unwrap_or_else(|e| e.into_inner()).get(&key).is_some_and(|w| w.upgrade().is_some())
+    let held = HELD.lock().unwrap_or_else(|e| e.into_inner());
+    held.get(&key).is_some_and(|w| {
+        let n = w.strong_count();
+        #[cfg(test)]
+        UNDER_HELD.with(|h| {
+            if let Some(f) = h.borrow_mut().as_mut() {
+                f();
+            }
+        });
+        n > 0
+    })
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Tests: run inside `held_here` while it holds `HELD` (another
+    /// thread's holder letting go at that moment).
+    static UNDER_HELD: std::cell::RefCell<Option<Box<dyn FnMut()>>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Whether another process on this computer holds the world's handover
@@ -389,6 +414,52 @@ pub(crate) mod tests {
             let _ = self.0.kill();
             let _ = self.0.wait();
         }
+    }
+
+    /// CP23 (CP22 review MEDIUM-1): the last other holder lets go while
+    /// `held_here` looks at the registry. Before, `held_here`'s temporary
+    /// `Arc` was then the last one, and its drop locked `HELD` again on the
+    /// same thread: the call never returned and every later lock user in
+    /// the process hung. Now it returns, and the lock is released.
+    #[test]
+    fn handover_lock_held_here_survives_the_holder_letting_go_meanwhile() {
+        let mut r = [0u8; 8];
+        getrandom::fill(&mut r).unwrap();
+        let world = std::env::temp_dir().join(format!("axenstax-lock-heldhere-{}", hex::encode(r)));
+        std::fs::create_dir_all(&world).unwrap();
+        let lock = acquire(&world).expect("the lock");
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let probe_world = world.clone();
+        std::thread::spawn(move || {
+            let mut holder = Some(lock);
+            UNDER_HELD.with(|h| {
+                *h.borrow_mut() = Some(Box::new(move || {
+                    // The holder (another thread in the game) lets go now.
+                    if let Some(l) = holder.take() {
+                        let t = std::thread::spawn(move || drop(l));
+                        // Its release waits for `HELD` (held here) unless
+                        // nothing else of it remains; give it a moment.
+                        let until = std::time::Instant::now() + std::time::Duration::from_millis(300);
+                        while !t.is_finished() && std::time::Instant::now() < until {
+                            std::thread::sleep(std::time::Duration::from_millis(5));
+                        }
+                    }
+                }))
+            });
+            let r = held_here(&probe_world);
+            UNDER_HELD.with(|h| h.borrow_mut().take());
+            let _ = done_tx.send(r);
+        });
+        let r = done_rx.recv_timeout(std::time::Duration::from_secs(10));
+        assert!(r.is_ok(), "held_here never returned: the thread deadlocked on its own registry lock");
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while held_here(&world) && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let f = File::open(lock_path(&world)).unwrap();
+        assert!(f.try_lock().is_ok(), "the released lock stayed held");
+        drop(f);
+        let _ = std::fs::remove_dir_all(&world);
     }
 
     #[test]
