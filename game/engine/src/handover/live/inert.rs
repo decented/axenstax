@@ -205,7 +205,12 @@ pub fn discard(imports: &Path, transfer: Id) -> Result<()> {
 /// (its holder died between the two removals, or it was taken for an
 /// import that never appeared) is removed once its lock is free; a held
 /// one (a recipient about to rename its import into place) is left.
+/// CP24 (CP23 review MEDIUM-2): on Unix only; elsewhere import lock files
+/// are never deleted (`LiveLock::remove_lock_file`).
 pub fn sweep_stale_locks(imports: &Path) -> usize {
+    if cfg!(not(unix)) {
+        return 0;
+    }
     let Ok(entries) = fs::read_dir(imports) else { return 0 };
     let mut removed = 0;
     for entry in entries.take(SCAN_LIMIT).flatten() {

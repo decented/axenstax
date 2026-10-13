@@ -67,7 +67,19 @@ impl LiveLock {
     /// while it is still held (so nobody locks it believing the import is
     /// there; whoever opened it meanwhile sees it renamed away and starts
     /// over). Only the file this guard holds is removed.
+    ///
+    /// CP24 (CP23 review MEDIUM-2, DECIDED): Unix only. Elsewhere the
+    /// "still the same file" check is by name, not by file identity, so a
+    /// lock file deleted under its holder could let two processes hold two
+    /// different files at the same name; there the file is never deleted
+    /// (it is empty, and costs one entry of the imports scan bound) and a
+    /// later holder takes the same file. Not run on Windows here.
     pub fn remove_lock_file(&self) {
+        #[cfg(unix)]
+        self.remove_lock_file_unix();
+    }
+    #[cfg(unix)]
+    fn remove_lock_file_unix(&self) {
         let key = &self.0.key;
         let g = self.0.file.lock().unwrap_or_else(|e| e.into_inner());
         if g.as_ref().is_some_and(|f| still_named(f, key))

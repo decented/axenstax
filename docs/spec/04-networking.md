@@ -6222,7 +6222,12 @@ unlinked file meanwhile sees it is no longer the file at that name
 (device and inode, Unix only) and starts over. Unlinking the lock file is
 always its holder's LAST act, after its import is gone, so an old holder
 of an unlinked file protects nothing that a new holder of the new file
-needs. The promotion and its leftover sweep
+needs. **Windows (CP24, CP23 review MEDIUM-2, DECIDED):** an import
+lock file is never deleted there (nor swept): without a device and inode
+the "same file" check is by name only, so a file deleted under its holder
+could let two processes hold two different files at the same name. The
+empty file stays and the next holder locks that same file; each costs one
+entry of the scan bound. Not compiled or run on Windows yet. The promotion and its leftover sweep
 take it too (held: the 500 ms held retry), never creating its file, and
 remove it after the import folder. A lock file whose import is gone is
 removed by the inert sweep once its lock is free (`inert::sweep_stale_locks`),
