@@ -6188,7 +6188,45 @@ right after the import's rename, and `finish` again before the Ready
 record if the worker couldn't; it was taken only at the Prepared receipt
 before, so another copy's inert sweep could discard an import at Ready)
 until the import is Activated or quarantined. Not taken: nothing is
-written and it aborts while inert. The recipient's lock is
+written and it aborts while inert. **The import's own lock (CP23, DECIDED
+2026-10-13; CP19 review MEDIUM-1, CP22 review P-4).** The recipient's
+import is covered from BEFORE it appears by a second lock: the sibling
+file `<imports>/handover-<world>-<transfer>.lock`
+(`world_lock::acquire_import`; 0600, `O_NOFOLLOW`, the same
+`File::try_lock` rules: "would block" is held, any other error is no
+lock, and the import stops before its rename and the session refuses with
+`copy::NO_FILE_LOCKING`). It is never inside a folder that is renamed
+while it is held (Windows can refuse to rename a folder with a file open
+inside it; an earlier draft locked `working/handover/.live` in the scratch
+folder before the rename and was dropped for that). The import worker
+takes it at the import's `BeforeRename` boundary and the session holds it
+through Ready, the ack and Prepared; the resumer job that takes over the
+wait holds it too, to Activated or quarantine. Within one process it is
+never shared by a second `acquire_import`: a sweep in the same process as
+the worker finds it held. `inert::discard` takes it before touching the
+import (held: skipped, logged once), makes its file only for an import
+that exists (none and no import: nothing can hold one and the import
+isn't touched), reads and removes the import's records as they are (no
+marker directory is made or synced, CP22 review P-2), removes the whole
+import, and removes the lock file last, still held; whoever locked the
+unlinked file meanwhile sees it is no longer the file at that name
+(device and inode) and starts over. The promotion and its leftover sweep
+take it too (held: the 500 ms held retry), never creating its file, and
+remove it after the import folder. A lock file whose import is gone is
+removed by the inert sweep once its lock is free (`inert::sweep_stale_locks`),
+never while held (a recipient about to rename its import in). Each import
+now costs two entries of the imports folder's 256-entry scan bound. Under
+its locks, before the receipt, the recipient also checks that the world's
+own files are present (`world.dat` and every manifest member,
+`DurableCheckpoint::world_files_present`), so a discard that won a gap is
+never acknowledged into (tests
+`handover_recipient_locks_its_import_before_it_appears`: another process's
+sweep at the very rename is refused, and
+`handover_recipient_never_acks_into_an_import_missing_its_world_files`;
+`handover_inert_import_lock_is_a_sibling_file_removed_after_its_import`).
+Once promoted, the moved world is covered by its own `handover/.live`. The
+lock registry is held only for the map check, the try-lock and the insert;
+the stat and the open happen outside it (CP22 review P-1). The recipient's lock is
 `world_lock::acquire_existing`, which never creates a missing world folder
 (only `handover/` inside an existing one, one `create_dir`): a folder
 another process removed stays removed and the recipient refuses with

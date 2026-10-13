@@ -102,6 +102,16 @@ impl MarkerStore {
         }
         Ok(Self { directory })
     }
+    /// CP23 (CP22 review P-2): an existing marker directory as it is: no
+    /// directory is made and nothing is synced (an inert discard reads and
+    /// removes; it never creates what it is about to delete).
+    pub fn open_existing(directory: PathBuf) -> Result<Self> {
+        match fs::symlink_metadata(&directory) {
+            Ok(m) if m.is_dir() && !m.file_type().is_symlink() => Ok(Self { directory }),
+            Ok(_) => Err(Error::Invalid("marker directory")),
+            Err(_) => Err(Error::Io),
+        }
+    }
     pub fn directory(&self) -> &Path {
         &self.directory
     }

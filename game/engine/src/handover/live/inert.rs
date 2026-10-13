@@ -132,35 +132,42 @@ pub fn sweep_pack_scratch(scratch: &Path) -> Result<usize> {
 /// (`authority::dir(<import>/working)`), so they go with the import.
 pub fn discard(imports: &Path, transfer: Id) -> Result<()> {
     let Some(world) = marked(imports, transfer)? else { return Ok(()) };
-    let import = imports.join(format!("handover-{}-{}", hex::encode(world), hex::encode(transfer)));
+    let folder = format!("handover-{}-{}", hex::encode(world), hex::encode(transfer));
+    let import = imports.join(&folder);
     let working = import.join("working");
-    let records = super::authority::dir(&working);
-    if fs::symlink_metadata(&records).is_ok() {
-        // CP18 (CP17 review MEDIUM-2): the import's handover lock is taken
-        // and the state re-checked under it, so another copy of the game
-        // whose receipt is landing (it holds the lock from before the
-        // receipt) is never deleted from under; held there: skipped. The
-        // lock is held while everything but `working/handover/` goes, then
-        // let go (Windows can't remove a folder with the handle open).
-        let Some(lock) = super::world_lock::unless_elsewhere(&working, "the inert discard") else {
+    // CP23 (DECIDED, coordinator 2026-10-13): the import's lock (the
+    // sibling file `<folder>.lock`) before anything of the import is
+    // touched. The recipient takes it before the rename that makes its
+    // import visible and holds it to Activated or quarantine, so an import
+    // whose receipt may be landing is skipped (another copy of the game,
+    // or this one's own worker). The lock file is made only for an import
+    // that exists (none and no import: nobody can hold one, and the import
+    // isn't touched). No file locking here: no recipient can hold one
+    // either (it refuses), so the discard goes on as before the lock.
+    let exists = fs::symlink_metadata(&import).is_ok();
+    let lock = match super::world_lock::acquire_import(imports, &folder, exists) {
+        Ok(l) => Some(l),
+        Err(super::world_lock::LockError::HeldElsewhere) => {
+            super::world_lock::log_skipped(&import, "the inert discard");
             return Err(Error::State("the import is in use by another copy of the game"));
-        };
-        MarkerStore::new(records)?.discard_inert_ready(transfer)?;
-        let entries = fs::read_dir(&import).map_err(|_| Error::Io)?;
-        for entry in entries.take(SCAN_LIMIT).flatten() {
-            if entry.file_name() == "working" {
-                for child in fs::read_dir(&working).map_err(|_| Error::Io)?.take(SCAN_LIMIT).flatten() {
-                    if child.file_name() != "handover" {
-                        remove_entry(&child.path())?;
-                    }
-                }
-            } else {
-                remove_entry(&entry.path())?;
-            }
         }
-        drop(lock);
+        Err(_) => None,
+    };
+    // Re-read under the lock: whatever let go of it may have moved on.
+    let exists = fs::symlink_metadata(&import).is_ok();
+    if exists && super::world_lock::held_elsewhere(&working) {
+        // An older copy of the game holding only the world's own lock.
+        super::world_lock::log_skipped(&import, "the inert discard");
+        return Err(Error::State("the import is in use by another copy of the game"));
     }
-    remove_dir(&import)?;
+    let records = super::authority::dir(&working);
+    if exists && fs::symlink_metadata(&records).is_ok() {
+        // CP23 (CP22 review P-2): read and removed as it is; nothing made.
+        MarkerStore::open_existing(records)?.discard_inert_ready(transfer)?;
+    }
+    if exists {
+        remove_dir(&import)?;
+    }
     let scratch = format!(".handover-receive-{}-", hex::encode(transfer));
     let mut seen = 0;
     for entry in fs::read_dir(imports).map_err(|_| Error::Io)? {
@@ -174,7 +181,36 @@ pub fn discard(imports: &Path, transfer: Id) -> Result<()> {
         }
     }
     sync(imports)?;
-    clear(imports, transfer)
+    clear(imports, transfer)?;
+    // The lock file goes last, still held, once the import has gone.
+    if let Some(lock) = lock {
+        lock.remove_lock_file();
+    }
+    Ok(())
+}
+
+/// CP23: a lock file `handover-<w>-<t>.lock` whose import folder is gone
+/// (its holder died between the two removals, or it was taken for an
+/// import that never appeared) is removed once its lock is free; a held
+/// one (a recipient about to rename its import into place) is left.
+pub fn sweep_stale_locks(imports: &Path) -> usize {
+    let Ok(entries) = fs::read_dir(imports) else { return 0 };
+    let mut removed = 0;
+    for entry in entries.take(SCAN_LIMIT).flatten() {
+        let Some(folder) = entry.file_name().to_str().and_then(|n| n.strip_suffix(".lock")).filter(|f| f.starts_with("handover-")).map(str::to_owned)
+        else {
+            continue;
+        };
+        if fs::symlink_metadata(imports.join(&folder)).is_ok() {
+            continue;
+        }
+        let Ok(lock) = super::world_lock::acquire_import(imports, &folder, false) else { continue };
+        if fs::symlink_metadata(imports.join(&folder)).is_err() {
+            lock.remove_lock_file();
+            removed += 1;
+        }
+    }
+    removed
 }
 
 /// Discard every marked inert import except `live`'s. Bounded; returns how
@@ -199,6 +235,7 @@ pub fn sweep(imports: &Path, live: Option<Id>) -> Result<usize> {
     }
     let mut removed = 0;
     let mut first_err = None;
+    sweep_stale_locks(imports);
     for t in transfers {
         match discard(imports, t) {
             Ok(()) => removed += 1,
@@ -214,6 +251,42 @@ pub fn sweep(imports: &Path, live: Option<Id>) -> Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CP23 (DECIDED): the import's lock is a sibling file. A discard of a
+    /// marked import whose lock is held (here: this process's own worker)
+    /// is skipped; once let go, the discard removes the import, then the
+    /// lock file. A lock file whose import is gone is swept when free,
+    /// never while held (a recipient about to rename its import in).
+    #[test]
+    fn handover_inert_import_lock_is_a_sibling_file_removed_after_its_import() {
+        let mut r = [0u8; 8];
+        getrandom::fill(&mut r).unwrap();
+        let imports = std::env::temp_dir().join(format!("axenstax-inert-sibling-{}", hex::encode(r)));
+        let (t, w) = ([0x71; 16], [0x72; 16]);
+        let folder = format!("handover-{}-{}", hex::encode(w), hex::encode(t));
+        let import = imports.join(&folder);
+        let working = import.join("working");
+        std::fs::create_dir_all(working.join("chunks")).unwrap();
+        std::fs::write(working.join("world.dat"), b"w").unwrap();
+        mark(&imports, t, w).unwrap();
+        let lock = super::super::world_lock::acquire_import(&imports, &folder, true).unwrap();
+        let lock_file = imports.join(format!("{folder}.lock"));
+        assert!(lock_file.is_file(), "the import's lock isn't the sibling file");
+        assert!(discard(&imports, t).is_err(), "a held import's discard reported success");
+        assert!(working.join("world.dat").exists(), "an import whose lock is held was discarded");
+        drop(lock);
+        discard(&imports, t).unwrap();
+        assert!(!import.exists(), "the import outlived its discard");
+        assert!(!lock_file.exists(), "the lock file outlived its import");
+        let stale = "handover-aa-bb";
+        let held = super::super::world_lock::acquire_import(&imports, stale, true).unwrap();
+        assert_eq!(sweep_stale_locks(&imports), 0);
+        assert!(imports.join(format!("{stale}.lock")).exists(), "a held lock file was swept");
+        drop(held);
+        assert_eq!(sweep_stale_locks(&imports), 1);
+        assert!(!imports.join(format!("{stale}.lock")).exists(), "a free lock file with no import stayed");
+        let _ = std::fs::remove_dir_all(&imports);
+    }
 
     /// CP18 (CP17 review MEDIUM-2): an inert import whose handover lock
     /// another copy of the game holds (its receipt may be landing) is never

@@ -44,7 +44,10 @@ fn lock_refusal(e: super::world_lock::LockError) -> Refusal {
 
 /// CP19 (CP18 review MEDIUM-2): with the import's handover lock, taken by
 /// the worker right after the import folder appears (its rename).
-type ImportResult = (u64, Id, crate::handover::Result<DurableCheckpoint>, Option<super::world_lock::LiveLock>);
+/// CP23: and the import's own lock (the sibling `<import>.lock`, taken
+/// before that rename), or why it couldn't be taken.
+type ImportResult = (u64, Id, crate::handover::Result<DurableCheckpoint>, Option<super::world_lock::LiveLock>, ImportLock);
+type ImportLock = Result<super::world_lock::LiveLock, Option<super::world_lock::LockError>>;
 
 /// M1: who cleans up a cancelled import. The worker decides under this lock:
 /// a worker that sees `cancelled` discards its own inert import; once it has
@@ -55,14 +58,46 @@ struct ImportFence {
     finished: bool,
 }
 /// Stops the import at its next file boundary once cancelled.
-struct CancelImport(Arc<Mutex<ImportFence>>);
+struct CancelImport {
+    fence: Arc<Mutex<ImportFence>>,
+    /// CP23 (DECIDED, coordinator 2026-10-13): the import's lock, the
+    /// sibling file `<imports>/<folder>.lock` (never inside a folder that is
+    /// renamed while held), taken BEFORE the rename that makes the import
+    /// visible, so no moment exists where another copy of the game's inert
+    /// sweep sees an unlocked import. Not taken: the import stops before
+    /// the rename (nothing appears) and the session refuses with the lock's
+    /// plain line.
+    lock: ImportLock,
+    imports: PathBuf,
+    folder: String,
+    /// Tests: run at the Renamed boundary (another process's sweep there).
+    #[cfg(test)]
+    at_renamed: Option<RenamedProbe>,
+}
+#[cfg(test)]
+type RenamedProbe = Box<dyn FnMut(&Path) + Send>;
 impl ImportObserver for CancelImport {
-    fn reached(&mut self, _: ImportBoundary, _: &Path) -> std::io::Result<()> {
-        if self.0.lock().map(|g| g.cancelled).unwrap_or(true) {
-            Err(std::io::Error::other("handover import cancelled"))
-        } else {
-            Ok(())
+    fn reached(&mut self, boundary: ImportBoundary, path: &Path) -> std::io::Result<()> {
+        if self.fence.lock().map(|g| g.cancelled).unwrap_or(true) {
+            return Err(std::io::Error::other("handover import cancelled"));
         }
+        match boundary {
+            ImportBoundary::BeforeRename if self.lock.is_err() => {
+                self.lock = super::world_lock::acquire_import(&self.imports, &self.folder, true).map_err(Some);
+                if self.lock.is_err() {
+                    return Err(std::io::Error::other("the import's lock couldn't be taken"));
+                }
+            }
+            #[cfg(test)]
+            ImportBoundary::Renamed => {
+                if let Some(probe) = self.at_renamed.as_mut() {
+                    probe(path);
+                }
+            }
+            _ => {}
+        }
+        let _ = path;
+        Ok(())
     }
 }
 
@@ -169,6 +204,8 @@ pub struct RecipientSession {
     last_beat: u64,
     #[cfg(test)]
     import_hold: Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>,
+    #[cfg(test)]
+    renamed_probe: Option<RenamedProbe>,
     /// P4: when this player consented; the whole operation must reach
     /// Activated within `source::OPERATION_SECS` of it.
     consented_at: u64,
@@ -203,6 +240,12 @@ pub struct RecipientSession {
     /// the Prepared receipt is written and held (with the resumer job that
     /// takes over the wait, which shares it) until Activated or quarantine.
     live_lock: Option<super::world_lock::LiveLock>,
+    /// CP23: the import's own lock (sibling `<import>.lock`), from before
+    /// the import appeared; handed to the resumer with the wait, so it is
+    /// held to Activated or quarantine.
+    import_lock: Option<super::world_lock::LiveLock>,
+    /// CP23: why the worker couldn't take it (the refusal's plain line).
+    import_lock_error: Option<super::world_lock::LockError>,
 }
 
 /// L5: a router mapping the joined session asked for (native: the UPnP
@@ -310,6 +353,8 @@ impl RecipientSession {
             last_beat: now,
             #[cfg(test)]
             import_hold: None,
+            #[cfg(test)]
+            renamed_probe: None,
             consented_at: now,
             lease: None,
             bearer: None,
@@ -320,6 +365,8 @@ impl RecipientSession {
             test_fail_inert_clear: false,
             resumer: None,
             live_lock: None,
+            import_lock: None,
+            import_lock_error: None,
             activation_checked: 0,
             hand_tried: 0,
         })
@@ -386,7 +433,11 @@ impl RecipientSession {
         // M1: fence off a running import worker; if it hasn't finished it
         // discards its own import when it sees the cancel.
         self.import_generation += 1;
-        self.import_rx = None;
+        // CP23 (CP19 review LOW-2): a finished worker's unread locks go
+        // before the discard below.
+        if let Some(rx) = self.import_rx.take() {
+            while rx.try_recv().is_ok() {}
+        }
         let worker_cleans = self.import_fence.take().is_some_and(|f| {
             let mut g = f.lock().unwrap_or_else(|e| e.into_inner());
             g.cancelled = true;
@@ -427,6 +478,7 @@ impl RecipientSession {
             // LOW-8: the session's own lock handle inside the import goes
             // first (Windows can't delete a folder with a handle open).
             self.live_lock = None;
+            self.import_lock = None;
             let _ = super::inert::discard(&self.imports, self.transfer());
         }
         // CP12 (CP10 review LOW-2): past the durable receipt the wait for
@@ -545,6 +597,7 @@ impl RecipientSession {
             // CP17: Activated or ended here: this session's share of the
             // lock goes (a resumer job still waiting keeps its own).
             self.live_lock = None;
+            self.import_lock = None;
             return Ok(());
         }
         if let Some(lease) = self.lease.as_mut() {
@@ -552,7 +605,14 @@ impl RecipientSession {
         }
         match self.take_import() {
             Ok(Some(r)) => {
-                if let Err(r) = r.map_err(|_| Refusal("The world couldn't be stored safely on this device.")).and_then(|c| self.finish(c, now)) {
+                // CP23: an import stopped because its lock couldn't be taken
+                // says so (`NO_FILE_LOCKING` where the folder has no file
+                // locking).
+                let lock_error = self.import_lock_error.take();
+                if let Err(r) = r
+                    .map_err(|_| lock_error.map_or(Refusal("The world couldn't be stored safely on this device."), lock_refusal))
+                    .and_then(|c| self.finish(c, now))
+                {
                     return Err(self.fail(r));
                 }
             }
@@ -652,7 +712,9 @@ impl RecipientSession {
             return false;
         };
         let (t, ledger) = (self.transfer(), crate::handover::ledger::Ledger::install());
-        self.activation_handed = resumer.adopt_import(&c.working_world(), t, &ledger) || resumer.holds_import(t);
+        // CP23: the import's own lock goes with the wait (held to Activated
+        // or quarantine).
+        self.activation_handed = resumer.adopt_import(&c.working_world(), t, &ledger, self.import_lock.clone()) || resumer.holds_import(t);
         self.activation_handed
     }
     /// CP13b (CP13 review LOW-1): the ack send has started (from here the
@@ -846,8 +908,13 @@ impl RecipientSession {
         // and the Ready record still on disk (an inert discard removes it
         // first). Otherwise this refuses while inert: no receipt, no ack,
         // and the source aborts as for any failure before the ack.
-        let intact = self.live_lock.as_ref().is_some_and(|l| l.still_at(&working))
-            && markers.read(crate::handover::durable::MarkerKind::Ready, transfer).is_ok_and(|r| r.is_some());
+        // CP23 (CP19 review MEDIUM-1): and the import's own lock is held,
+        // and the world's own files are all still there (`world.dat` and
+        // every manifest member).
+        let intact = self.import_lock.is_some()
+            && self.live_lock.as_ref().is_some_and(|l| l.still_at(&working))
+            && markers.read(crate::handover::durable::MarkerKind::Ready, transfer).is_ok_and(|r| r.is_some())
+            && self.checkpoint.as_ref().is_some_and(|c| c.world_files_present());
         if !intact {
             return Err(Refusal(super::copy::IMPORT_VANISHED));
         }
@@ -940,18 +1007,33 @@ impl RecipientSession {
         let worker_fence = fence.clone();
         #[cfg(test)]
         let hold = self.import_hold.take();
+        #[cfg(test)]
+        let probe = self.renamed_probe.take();
         let worker = std::thread::Builder::new()
             .name("handover-import".into())
             .spawn(move || {
-                let r = import.complete(now, &mut CancelImport(worker_fence.clone()));
-                // CP19 (CP18 review MEDIUM-2, DECIDED): the import's lock the
-                // moment its folder exists, held through Ready to the ack, so
-                // another copy of the game's inert sweep skips it. Never
+                let mut observer = CancelImport {
+                    fence: worker_fence.clone(),
+                    lock: Err(None),
+                    imports: imports.clone(),
+                    folder: import.folder_name(),
+                    #[cfg(test)]
+                    at_renamed: probe,
+                };
+                let r = import.complete(now, &mut observer);
+                // CP23: the import's own lock, from before the import
+                // appeared, goes with the result (a failed import lets it go
+                // here, after its scratch).
+                let import_lock = std::mem::replace(&mut observer.lock, Err(None));
+                drop(observer);
+                // CP19 (CP18 review MEDIUM-2, DECIDED): the world's own lock
+                // once its folder exists, held through Ready to the ack. Never
                 // recreates a folder (`acquire_existing`); not taken here,
                 // `finish` tries again and refuses.
                 let lock = r.as_ref().ok().and_then(|c| super::world_lock::acquire_existing(&c.working_world()).ok());
                 // A failed pre-rename import removes its own scratch here.
                 drop(import);
+                let import_lock = if r.is_ok() { import_lock } else { import_lock.and(Err(None)) };
                 #[cfg(test)]
                 if let Some((reached, release)) = hold {
                     let _ = reached.send(());
@@ -960,12 +1042,15 @@ impl RecipientSession {
                 let mut g = worker_fence.lock().unwrap_or_else(|e| e.into_inner());
                 if g.cancelled {
                     drop(g);
+                    // CP23 (CP19 review LOW-2): its own handles go first.
+                    drop(lock);
+                    drop(import_lock);
                     let _ = super::inert::discard(&imports, transfer);
                     return;
                 }
                 g.finished = true;
                 drop(g);
-                let _ = tx.send((generation, transfer, r, lock));
+                let _ = tx.send((generation, transfer, r, lock, import_lock));
             })
             .map_err(|_| Refusal("The world couldn't be stored on this device."))?;
         self.import_fence = Some(fence);
@@ -997,12 +1082,16 @@ impl RecipientSession {
             }
         };
         self.import_rx = None;
-        let (generation, transfer, result, lock) = msg;
+        let (generation, transfer, result, lock, import_lock) = msg;
         if generation != self.import_generation || transfer != self.transfer() || self.stage != RecipientStage::Importing {
             return Ok(None);
         }
         if lock.is_some() {
             self.live_lock = lock;
+        }
+        match import_lock {
+            Ok(l) => self.import_lock = Some(l),
+            Err(e) => self.import_lock_error = e,
         }
         Ok(Some(result))
     }
@@ -1013,6 +1102,11 @@ impl RecipientSession {
         let (release_tx, release_rx) = mpsc::channel();
         self.import_hold = Some((reached_tx, release_rx));
         (reached_rx, release_tx)
+    }
+    /// Tests: run `probe` at the import's Renamed boundary (on the worker).
+    #[cfg(test)]
+    pub fn probe_at_renamed(&mut self, probe: RenamedProbe) {
+        self.renamed_probe = Some(probe);
     }
     #[cfg(test)]
     pub fn join_import_worker(&mut self) {
@@ -1043,6 +1137,10 @@ impl RecipientSession {
         // CP10: the recipient's records live in the import's own working
         // world `handover/` (the open guard refuses it until Activated).
         let working = self.checkpoint.as_ref().map(|c| c.working_world()).ok_or(Refusal("No checkpoint."))?;
+        // CP23: the import's own lock, held since before the import appeared.
+        if self.import_lock.is_none() {
+            return Err(lock_refusal(super::world_lock::LockError::Missing));
+        }
         // CP19 (CP18 review MEDIUM-2): the import's lock before any record.
         if self.live_lock.is_none() {
             self.live_lock = Some(super::world_lock::acquire_existing(&working).map_err(lock_refusal)?);

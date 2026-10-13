@@ -40,8 +40,20 @@ pub struct DurableCheckpoint {
     pub(super) world: Id,
     pub(super) transfer: Id,
     pub(super) working_meta: Hash,
+    /// CP22 (CP19 review MEDIUM-1): the manifest's member paths.
+    pub(super) members: Vec<String>,
 }
 impl DurableCheckpoint {
+    /// CP22 (CP19 review MEDIUM-1, DECIDED): the working world's own files
+    /// (`world.dat` and every manifest member) are all still there as
+    /// regular files. The recipient checks this under its lock before the
+    /// ack, so a discard that emptied the import is never acknowledged into.
+    pub fn world_files_present(&self) -> bool {
+        let working = self.working_world();
+        std::iter::once("world.dat")
+            .chain(self.members.iter().map(String::as_str))
+            .all(|p| fs::symlink_metadata(working.join(p)).is_ok_and(|m| m.is_file()))
+    }
     pub fn directory(&self) -> &Path {
         &self.directory
     }
@@ -138,6 +150,11 @@ impl Import {
             renamed: false,
             limits,
         })
+    }
+    /// CP23: the import folder's name (`handover-<world>-<transfer>`),
+    /// which names its lock file.
+    pub fn folder_name(&self) -> String {
+        self.final_path.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_owned()
     }
     pub fn accept(&mut self, chunk: &Chunk, now: u64) -> Result<bool> {
         self.receiver

@@ -63,6 +63,20 @@ impl Drop for Held {
 pub struct LiveLock(#[allow(dead_code)] Arc<Held>);
 
 impl LiveLock {
+    /// CP23: the import's lock file goes, once its import folder has gone,
+    /// while it is still held (so nobody locks it believing the import is
+    /// there; whoever opened it meanwhile sees it renamed away and starts
+    /// over). Only the file this guard holds is removed.
+    pub fn remove_lock_file(&self) {
+        let key = &self.0.key;
+        let g = self.0.file.lock().unwrap_or_else(|e| e.into_inner());
+        if g.as_ref().is_some_and(|f| still_named(f, key))
+            && let Err(e) = std::fs::remove_file(key)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            log::warn!("handover: the import's lock file {} couldn't be removed ({e}); a later sweep removes it", key.display());
+        }
+    }
     /// CP19 (CP18 review MEDIUM-2): the held lock file is still the one at
     /// `world_dir`'s lock path (Unix: same device and inode; elsewhere: it
     /// still exists there), i.e. nobody removed the folder under the lock.
@@ -165,52 +179,132 @@ pub fn acquire_existing(world_dir: &Path) -> Result<LiveLock, LockError> {
 }
 
 fn take(world_dir: &Path) -> Result<LiveLock, LockError> {
-    let key = lock_path(world_dir);
+    take_key(lock_path(world_dir), InProcess::Share, true)
+}
+
+/// Whether a holder already in this process is shared or counts as held.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InProcess {
+    /// A world's `.live`: the session and the resumer share one guard.
+    Share,
+    /// An import's lock (CP23): only the guard's own clones share it, so a
+    /// sweep in this process never "takes" the lock its own import worker
+    /// holds.
+    Refuse,
+}
+
+/// The lock file opened for a take: never followed, 0600, created only
+/// when `create`.
+fn open_lock(key: &Path, create: bool) -> Result<File, LockError> {
+    match std::fs::symlink_metadata(key) {
+        Ok(m) if !m.is_file() => return Err(LockError::Io),
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && !create => return Err(LockError::Missing),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(LockError::Io),
+    }
+    let mut opts = OpenOptions::new();
+    opts.read(true).write(true).create(create).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    opts.open(key).map_err(|e| if e.kind() == std::io::ErrorKind::NotFound { LockError::Missing } else { LockError::Io })
+}
+
+/// The open file is still the one at `key` (CP23: an import's lock file is
+/// removed by its holder once the import is gone; whoever locked the
+/// unlinked file meanwhile takes the new one instead).
+fn still_named(file: &File, key: &Path) -> bool {
+    let Ok(on_disk) = std::fs::symlink_metadata(key) else { return false };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        file.metadata().is_ok_and(|m| m.dev() == on_disk.dev() && m.ino() == on_disk.ino())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = file;
+        on_disk.is_file()
+    }
+}
+
+/// CP23 (CP22 review P-1): the registry (`HELD`) is held only for the map
+/// check, the try-lock and the insert; the stat and the open (which on an
+/// encrypted home folder writes the file's header) happen outside it.
+fn take_key(key: PathBuf, in_process: InProcess, create: bool) -> Result<LiveLock, LockError> {
     // CP17 review LOW-4 (b): never sleep while holding the registry.
     for _ in 0..80 {
-        {
-            let mut held = HELD.lock().unwrap_or_else(|e| e.into_inner());
+        let releasing = {
+            let held = HELD.lock().unwrap_or_else(|e| e.into_inner());
             match held.get(&key) {
-                Some(w) => {
+                Some(w) if in_process == InProcess::Share => {
                     if let Some(h) = w.upgrade() {
                         return Ok(LiveLock(h));
                     }
-                    // This process's holder, still releasing: retry.
+                    true
                 }
-                None => {
-                    match std::fs::symlink_metadata(&key) {
-                        Ok(m) if !m.is_file() => return Err(LockError::Io),
-                        Ok(_) => {}
-                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                        Err(_) => return Err(LockError::Io),
-                    }
-                    let mut opts = OpenOptions::new();
-                    opts.read(true).write(true).create(true).truncate(false);
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::OpenOptionsExt;
-                        opts.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-                    }
-                    let file = opts.open(&key).map_err(|_| LockError::Io)?;
-                    match try_lock(&file, false) {
-                        Ok(()) => {
-                            let h = Arc::new(Held { key: key.clone(), file: Mutex::new(Some(file)) });
-                            held.insert(key, Arc::downgrade(&h));
-                            return Ok(LiveLock(h));
-                        }
-                        // Another process's holder or momentary probe.
-                        Err(TryLockError::WouldBlock) => {}
-                        Err(TryLockError::Error(e)) => {
-                            log_unsupported(&key, &e);
-                            return Err(LockError::Unsupported);
-                        }
-                    }
-                }
+                // An import's lock held in this process is held.
+                Some(w) if w.strong_count() > 0 => return Err(LockError::HeldElsewhere),
+                Some(_) => true,
+                None => false,
             }
+        };
+        if !releasing {
+            let file = open_lock(&key, create)?;
+            let mut held = HELD.lock().unwrap_or_else(|e| e.into_inner());
+            match held.get(&key) {
+                Some(w) if in_process == InProcess::Share => {
+                    if let Some(h) = w.upgrade() {
+                        drop(held);
+                        return Ok(LiveLock(h));
+                    }
+                }
+                Some(w) if w.strong_count() > 0 => return Err(LockError::HeldElsewhere),
+                Some(_) => {}
+                None => match try_lock(&file, false) {
+                    Ok(()) if still_named(&file, &key) => {
+                        let h = Arc::new(Held { key: key.clone(), file: Mutex::new(Some(file)) });
+                        held.insert(key, Arc::downgrade(&h));
+                        return Ok(LiveLock(h));
+                    }
+                    // Its holder removed it meanwhile: the next pass opens
+                    // the file now at `key` (or none, without `create`).
+                    Ok(()) => {}
+                    // Another process's holder or momentary probe.
+                    Err(TryLockError::WouldBlock) => {}
+                    Err(TryLockError::Error(e)) => {
+                        log_unsupported(&key, &e);
+                        return Err(LockError::Unsupported);
+                    }
+                },
+            }
+            drop(held);
+            drop(file);
         }
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
     Err(LockError::HeldElsewhere)
+}
+
+/// CP23 (DECIDED, coordinator 2026-10-13): the lock file of the import
+/// folder `<imports>/<folder>`, a sibling file `<folder>.lock` and never
+/// inside a folder that is renamed while it is held (Windows can refuse
+/// to rename a folder with a file open inside it).
+pub fn import_lock_path(imports: &Path, folder: &str) -> PathBuf {
+    let d = std::fs::canonicalize(imports).or_else(|_| std::path::absolute(imports)).unwrap_or_else(|_| imports.to_path_buf());
+    d.join(format!("{folder}.lock"))
+}
+
+/// CP23: take the import's lock. `create`: make the lock file if it
+/// isn't there (the recipient, before the rename that makes its import
+/// visible; a discard of an import that exists); otherwise a missing lock
+/// file is `Missing` and nothing is created. Never creates the import
+/// folder. Held anywhere else, in this process too: `HeldElsewhere` (only
+/// the guard's own clones share it).
+pub fn acquire_import(imports: &Path, folder: &str, create: bool) -> Result<LiveLock, LockError> {
+    take_key(import_lock_path(imports, folder), InProcess::Refuse, create)
 }
 
 /// CP18: whether a holder in THIS process (a live session, the resumer's
@@ -249,11 +343,11 @@ thread_local! {
 /// be mid-handover).
 pub fn held_elsewhere(world_dir: &Path) -> bool {
     let key = lock_path(world_dir);
-    let held = HELD.lock().unwrap_or_else(|e| e.into_inner());
     // This process's holder, live or still releasing (LOW-4 (a)).
-    if held.contains_key(&key) {
+    if HELD.lock().unwrap_or_else(|e| e.into_inner()).contains_key(&key) {
         return false;
     }
+    // CP23 (CP22 review P-1): the stat and the open outside the registry.
     match std::fs::symlink_metadata(&key) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return false,
         Ok(m) if m.is_file() => {}
@@ -275,18 +369,25 @@ pub fn held_elsewhere(world_dir: &Path) -> bool {
             return false;
         }
     };
-    // Probed under the registry's lock, so this process's own `acquire`
-    // never meets the probe. CP17 review LOW-3: a shared lock, so two
-    // probes never collide; another process's exclusive holder still
+    // Probed (and let go) under the registry's lock, so this process's own
+    // `acquire` never meets the probe. CP17 review LOW-3: a shared lock, so
+    // two probes never collide; another process's exclusive holder still
     // blocks it. CP17 review MEDIUM-1: only "would block" is held.
-    match try_lock(&file, true) {
+    let held = HELD.lock().unwrap_or_else(|e| e.into_inner());
+    if held.contains_key(&key) {
+        return false;
+    }
+    let r = match try_lock(&file, true) {
         Ok(()) => false,
         Err(TryLockError::WouldBlock) => true,
         Err(TryLockError::Error(e)) => {
             log_unsupported(&key, &e);
             false
         }
-    }
+    };
+    drop(file);
+    drop(held);
+    r
 }
 
 /// The resumer's and the start-up promotion's take: `None` when another

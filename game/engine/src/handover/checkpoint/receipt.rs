@@ -73,6 +73,7 @@ pub(super) fn verify_receipt(directory: &Path, a: &AdmittedManifest) -> Result<D
         world: a.manifest().world,
         transfer: a.manifest().transfer,
         working_meta: hash,
+        members: a.manifest().members.iter().map(|m| m.path.clone()).collect(),
     })
 }
 pub(super) fn durable_tree(

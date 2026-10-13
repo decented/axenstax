@@ -280,7 +280,9 @@ impl Resumer {
     /// receipt). Idempotent per transfer; nothing to do once Activated or
     /// quarantined. It never opens the world and never creates `handover/`.
     /// CP13: only a receipt whose exact digest `ledger` lists.
-    pub fn adopt_import(&self, world_dir: &Path, transfer: Id, ledger: &Ledger) -> bool {
+    /// CP23: `import_lock`, the session's import lock (sibling
+    /// `<import>.lock`), is held by the job too, to Activated or quarantine.
+    pub fn adopt_import(&self, world_dir: &Path, transfer: Id, ledger: &Ledger, import_lock: Option<super::world_lock::LiveLock>) -> bool {
         let Ok(store) = existing_store(world_dir) else { return false };
         // CP17 (CP15 review LOW-3): another process holding the import's
         // handover lock is waiting for it there. Otherwise the lock is taken
@@ -308,6 +310,7 @@ impl Resumer {
             .name("handover-activate".into())
             .spawn(move || {
                 let _lock = lock;
+                let _import_lock = import_lock;
                 run_import(shared, dir, transfer)
             });
         if spawned.is_err() {
@@ -323,7 +326,7 @@ impl Resumer {
     /// or quarantine record. Bounded; creates nothing. Returns how many waits
     /// it took over.
     pub fn resume_imports(&self, imports: &Path, ledger: &Ledger) -> usize {
-        import_receipts(imports).into_iter().filter(|(working, t)| self.adopt_import(working, *t, ledger)).count()
+        import_receipts(imports).into_iter().filter(|(working, t)| self.adopt_import(working, *t, ledger, None)).count()
     }
 
     /// Start-up: every world under `worlds_root` whose `handover/` holds a

@@ -191,6 +191,16 @@ fn promote_one(working: &Path, transfer: Id, worlds_root: &Path, rename: Rename,
     if super::world_lock::held_here(working) || super::world_lock::held_elsewhere(working) {
         return Step::Held;
     }
+    // CP23: and the import's own lock (the sibling `<import>.lock`, which
+    // the session holds to Activated): held anywhere, this process too, is
+    // held. Taken while the world moves out; its file goes after the
+    // import folder. No lock file (an import from before it existed) or no
+    // file locking: as before it.
+    let import_lock = match import_lock_of(working) {
+        Some(Err(super::world_lock::LockError::HeldElsewhere)) => return Step::Held,
+        Some(Ok(l)) => Some(l),
+        _ => None,
+    };
     // Every transfer it holds is Activated, every Activated record parses
     // and binds its receipt, and nothing is quarantined.
     if super::authority::open_guard(working).is_err() {
@@ -231,8 +241,11 @@ fn promote_one(working: &Path, transfer: Id, worlds_root: &Path, rename: Rename,
         }
     }
     log::info!("handover: the handed-over world is now in the worlds folder as {folder}");
-    if let Some(import) = working.parent() {
-        remove_once_durable(import, worlds_root, sync);
+    if let Some(import) = working.parent()
+        && remove_once_durable(import, worlds_root, sync)
+        && let Some(l) = &import_lock
+    {
+        l.remove_lock_file();
     }
     Step::Moved(folder)
 }
@@ -279,10 +292,27 @@ fn remove_moved_leftovers(imports: &Path, worlds_root: &Path, sync: SyncDir) {
         if super::authority::open_guard(&world).is_err() {
             continue;
         }
+        // CP23: under the import's lock (held: skipped); its file after.
+        let lock = match import_lock_of(&import.join("working")) {
+            Some(Err(super::world_lock::LockError::HeldElsewhere)) => continue,
+            Some(Ok(l)) => Some(l),
+            _ => None,
+        };
         if remove_once_durable(&import, worlds_root, sync) {
             log::info!("handover: removed the leftovers of an import already moved in as {}", world.display());
+            if let Some(l) = &lock {
+                l.remove_lock_file();
+            }
         }
     }
+}
+
+/// CP23: the import lock of the import folder holding `working` (never
+/// creating its file); `None` when the path has no import folder parent.
+fn import_lock_of(working: &Path) -> Option<Result<super::world_lock::LiveLock, super::world_lock::LockError>> {
+    let import = working.parent()?;
+    let folder = import.file_name()?.to_str()?;
+    Some(super::world_lock::acquire_import(import.parent()?, folder, false))
 }
 
 /// The transfer id from an import folder name `handover-<world>-<transfer>`.

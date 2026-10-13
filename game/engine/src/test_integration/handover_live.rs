@@ -1198,7 +1198,8 @@ mod session {
         let kept = imports.join("handover-00-unmarked");
         std::fs::create_dir_all(kept.join("working")).unwrap();
         assert_eq!(inert::sweep(&imports, Some(t)).unwrap(), 0, "the live session's import was swept");
-        assert_eq!(import_dirs(&p).len(), 2);
+        // CP23: the live import, its sibling lock file, the unmarked folder.
+        assert_eq!(import_dirs(&p).len(), 3, "{:?}", import_dirs(&p));
         // The process "crashes": the session is gone without an abort.
         drop(p.dst.take());
         assert_eq!(inert::sweep(&imports, None).unwrap(), 1);
@@ -1586,6 +1587,49 @@ mod session {
         assert!(!p.src.past_retirement(), "the source retired on an ack into a removed import");
         assert!(matches!(p.dst.as_ref().unwrap().stage(), RecipientStage::Aborted(_)), "{:?}", p.dst.as_ref().unwrap().stage());
         assert!(!has_record(&p.dir, "prepared", t), "a receipt was written into a removed import");
+    }
+
+    /// CP22/CP23 (CP19 review MEDIUM-1, DECIDED): the import's lock (the
+    /// sibling `<import>.lock`) is taken before the rename that makes the
+    /// import visible,
+    /// so another copy of the game's inert sweep at the very moment of the
+    /// rename skips it, and the import still reaches Ready.
+    #[test]
+    fn handover_recipient_locks_its_import_before_it_appears() {
+        let mut p = pair("lock-first");
+        consent(&mut p);
+        offer(&mut p, &seat0());
+        let imports = p.dir.0.join("imports");
+        let seen: std::sync::Arc<std::sync::Mutex<Option<String>>> = Default::default();
+        let (probe_imports, probe_seen) = (imports.clone(), seen.clone());
+        p.dst.as_mut().unwrap().probe_at_renamed(Box::new(move |_| {
+            *probe_seen.lock().unwrap() = Some(crate::handover::live::world_lock::tests::child_sweep(&probe_imports));
+        }));
+        stream(&mut p, 10_000);
+        assert_eq!(seen.lock().unwrap().as_deref(), Some("SWEEP Err"), "another process's sweep at the rename took the import");
+        assert_eq!(p.src.stage(), SourceStage::ReadyVerified);
+        let working = p.dst.as_ref().unwrap().checkpoint().unwrap().working_world();
+        assert!(working.join("world.dat").exists(), "the import lost its world");
+        // CP23 (DECIDED): the lock is the sibling file, never inside the
+        // folder that was renamed while it was held.
+        let folder = working.parent().unwrap().file_name().unwrap().to_str().unwrap().to_owned();
+        assert!(imports.join(format!("{folder}.lock")).is_file(), "the import's lock isn't the sibling file");
+    }
+
+    /// CP22/CP23 (CP19 review MEDIUM-1): Ready recorded, then the world's own
+    /// files went (a discard that won the gap): refused before the ack, so
+    /// no receipt is written and the source doesn't retire.
+    #[test]
+    fn handover_recipient_never_acks_into_an_import_missing_its_world_files() {
+        let mut p = ready_pair("no-world-dat");
+        let t = p.src.transfer();
+        let working = p.dst.as_ref().unwrap().checkpoint().unwrap().working_world();
+        std::fs::remove_file(working.join("world.dat")).unwrap();
+        assert!(has_record(&p.dir, "ready", t), "the Ready record went too");
+        drive(&mut p, SourceStage::Retired);
+        assert!(!p.src.past_retirement(), "the source retired on an ack into an import without its world");
+        assert!(matches!(p.dst.as_ref().unwrap().stage(), RecipientStage::Aborted(_)), "{:?}", p.dst.as_ref().unwrap().stage());
+        assert!(!has_record(&p.dir, "prepared", t), "a receipt was written into an import without its world");
     }
 
     /// P2: a bearer that doesn't derive the key Prepared is sealed to stops
