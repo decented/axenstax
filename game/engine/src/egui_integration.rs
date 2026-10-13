@@ -377,18 +377,18 @@ fn configure_style(ctx: &egui::Context) {
     style.visuals.window_corner_radius = egui::CornerRadius::same(8);
     style.visuals.window_fill = crate::brand::SURFACE;
     style.visuals.panel_fill = crate::brand::DEEP_FRONTIER;
-    style.visuals.window_stroke = egui::Stroke::new(1.0, crate::brand::BORDER);
+    style.visuals.window_stroke = egui::Stroke::new(1.0_f32, crate::brand::BORDER);
     style.visuals.override_text_color = Some(crate::brand::STONE);
     style.visuals.faint_bg_color = crate::brand::SURFACE;
     style.visuals.extreme_bg_color = crate::brand::DEEP_FRONTIER;
     // Copperline (brand/BRAND-GUIDELINES.md): Deep Frontier panels, Deep Rock
     // buttons. Menu text colours are contrast-checked (>= 4.5:1) against these.
     style.visuals.widgets.noninteractive.bg_fill = crate::brand::SURFACE;
-    style.visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, crate::brand::MUTED_TEXT);
-    style.visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, crate::brand::BORDER);
+    style.visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0_f32, crate::brand::MUTED_TEXT);
+    style.visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0_f32, crate::brand::BORDER);
     style.visuals.widgets.inactive.bg_fill = crate::brand::DEEP_ROCK;
-    style.visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, crate::brand::STONE);
-    style.visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, crate::brand::BORDER);
+    style.visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0_f32, crate::brand::STONE);
+    style.visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0_f32, crate::brand::BORDER);
     style.visuals.widgets.hovered.bg_fill = crate::brand::SURFACE_HOVER;
     style.visuals.widgets.active.bg_fill = crate::brand::SURFACE_SELECTED;
     // Keyboard/controller focus uses the "active" widget visuals (egui
@@ -402,9 +402,9 @@ fn configure_style(ctx: &egui::Context) {
     style.visuals.selection.bg_fill = crate::brand::FOREST;
     style.visuals.selection.stroke = egui::Stroke::new(1.0_f32, crate::brand::STONE);
 
-    style.visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, crate::brand::STONE);
-    style.visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, crate::brand::SKY);
-    style.visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, crate::brand::STONE);
+    style.visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0_f32, crate::brand::STONE);
+    style.visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0_f32, crate::brand::SKY);
+    style.visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0_f32, crate::brand::STONE);
 
     // Android gets thumb-sized hit targets. egui's defaults are mouse-sized
     // (an interact height of ~18 points); an egui point is effectively a dp
