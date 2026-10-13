@@ -14,9 +14,9 @@ use crate::reserve::{ReserveState, RichnessTier};
 use crate::screen::ViewportRect;
 
 /// Theme colours for the HUD.
-const SLOT_BG: egui::Color32 = egui::Color32::from_rgba_unmultiplied(13, 27, 30, 220);
+const SLOT_BG: egui::Color32 = egui::Color32::from_rgba_unmultiplied_const(13, 27, 30, 220);
 const SLOT_BORDER: egui::Color32 = crate::brand::BORDER;
-const SLOT_SELECTED_BG: egui::Color32 = egui::Color32::from_rgba_unmultiplied(39, 55, 52, 240);
+const SLOT_SELECTED_BG: egui::Color32 = egui::Color32::from_rgba_unmultiplied_const(39, 55, 52, 240);
 const SLOT_SELECTED_BORDER: egui::Color32 = crate::brand::LANTERN;
 const HEART_FULL: egui::Color32 = egui::Color32::from_rgb(220, 30, 30);
 const HEART_HALF: egui::Color32 = egui::Color32::from_rgb(160, 20, 20);
