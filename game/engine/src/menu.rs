@@ -14,16 +14,16 @@ use crate::save::{self, WorldEntry, WorldMeta};
 // >= 4.5:1 on BG_DARK, CARD_BG, PANEL_BG and the egui widget fills set in
 // egui_integration.rs (ratios in the commit that introduced them).
 const TITLE_COLOR: egui::Color32 = brand::COPPER;
-const SUBTITLE_COLOR: egui::Color32 = egui::Color32::from_rgb(176, 174, 164);
+const SUBTITLE_COLOR: egui::Color32 = brand::MUTED_TEXT;
 const TEXT_COLOR: egui::Color32 = brand::STONE;
-const DIM_TEXT: egui::Color32 = egui::Color32::from_rgb(158, 164, 162);
+const DIM_TEXT: egui::Color32 = brand::MUTED_TEXT;
 /// Campaign G — the rival ghost's signature colour (matches its in-world
 /// orange wireframe so "orange = the friend" reads everywhere).
 const RIVAL_ORANGE: egui::Color32 = egui::Color32::from_rgb(255, 165, 60);
 const BG_DARK: egui::Color32 = brand::DEEP_FRONTIER;
-const CARD_BG: egui::Color32 = egui::Color32::from_rgba_premultiplied(21, 38, 42, 255);
-const CARD_SELECTED_BORDER: egui::Color32 = brand::SKY;
-const CARD_BORDER: egui::Color32 = egui::Color32::from_rgb(46, 64, 68);
+const CARD_BG: egui::Color32 = brand::SURFACE;
+const CARD_SELECTED_BORDER: egui::Color32 = brand::COPPER;
+const CARD_BORDER: egui::Color32 = brand::BORDER;
 const PANEL_BG: egui::Color32 = egui::Color32::from_rgba_premultiplied(18, 32, 36, 245);
 const BADGE_SURVIVAL_BG: egui::Color32 = egui::Color32::from_rgb(45, 90, 30);
 const BADGE_SURVIVAL_TEXT: egui::Color32 = egui::Color32::from_rgb(166, 214, 128);
@@ -2692,7 +2692,7 @@ pub fn draw_main_menu(ctx: &egui::Context, state: &mut MenuState) -> MenuAction 
             .exact_size(264.0)
             .frame(
                 egui::Frame::new()
-                    .fill(egui::Color32::from_rgb(18, 20, 28))
+                    .fill(brand::DEEP_FRONTIER)
                     .inner_margin(egui::Margin::same(14)),
             )
             .show(ctx, |ui| {
@@ -2719,7 +2719,7 @@ pub fn draw_main_menu(ctx: &egui::Context, state: &mut MenuState) -> MenuAction 
             .exact_size(248.0)
             .frame(
                 egui::Frame::new()
-                    .fill(egui::Color32::from_rgb(16, 19, 26))
+                    .fill(brand::DEEP_FRONTIER)
                     .inner_margin(egui::Margin::same(14)),
             )
             .show(ctx, |ui| {
@@ -2744,7 +2744,7 @@ pub fn draw_main_menu(ctx: &egui::Context, state: &mut MenuState) -> MenuAction 
             .exact_size(272.0)
             .frame(
                 egui::Frame::new()
-                    .fill(egui::Color32::from_rgb(15, 17, 24))
+                    .fill(brand::DEEP_FRONTIER)
                     .inner_margin(egui::Margin::same(14)),
             )
             .show(ctx, |ui| draw_trials_column(ui, state))
@@ -2760,7 +2760,7 @@ pub fn draw_main_menu(ctx: &egui::Context, state: &mut MenuState) -> MenuAction 
             .resizable(false)
             .frame(
                 egui::Frame::new()
-                    .fill(egui::Color32::from_rgb(15, 17, 24))
+                    .fill(brand::DEEP_FRONTIER)
                     .inner_margin(egui::Margin::same(10)),
             )
             .show(ctx, |ui| {
@@ -2794,12 +2794,14 @@ pub fn draw_main_menu(ctx: &egui::Context, state: &mut MenuState) -> MenuAction 
             // --- Header: title (left) + Leave/Quit (right) ---
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
-                    ui.label(egui::RichText::new("AXE'N'STAX").size(30.0).color(TITLE_COLOR).strong());
+                    let wordmark_width = if ctx.content_rect().width() < 600.0 { 180.0 } else { 220.0 };
+                    brand::show_wordmark(ui, wordmark_width);
                     #[cfg(not(target_arch = "wasm32"))]
                     draw_version_line(ui);
+                    ui.add_space(6.0);
                     ui.label(egui::RichText::new("Your Worlds").size(14.0).color(SUBTITLE_COLOR));
                 });
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center).with_main_wrap(true), |ui| {
                     // #5 — WASM gets two buttons. "Log out" drops the Signet
                     // session (forces a QR re-login next time — a faff). "Exit"
                     // just leaves the game back to the entrance while keeping the
@@ -2989,7 +2991,7 @@ pub fn draw_main_menu(ctx: &egui::Context, state: &mut MenuState) -> MenuAction 
                     .min_size(egui::vec2(0.0, 40.0))
                     .fill(egui::Color32::from_rgba_premultiplied(20, 23, 31, 240))
                     .corner_radius(egui::CornerRadius::same(6))
-                    .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(42, 48, 72)));
+                    .stroke(egui::Stroke::new(1.0_f32, brand::BORDER));
                     let join_resp = ui.add(join);
                     focus_ring(ui, &join_resp);
                     if join_resp.clicked() {
@@ -3067,7 +3069,7 @@ pub fn draw_main_menu(ctx: &egui::Context, state: &mut MenuState) -> MenuAction 
                     .min_size(egui::vec2(0.0, 40.0))
                     .fill(egui::Color32::from_rgba_premultiplied(20, 23, 31, 240))
                     .corner_radius(egui::CornerRadius::same(6))
-                    .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(42, 48, 72)));
+                    .stroke(egui::Stroke::new(1.0_f32, brand::BORDER));
                     if ui.add_enabled(!dialog_pending, import_file_btn)
                         .on_hover_text("Open a single .axeworld file from anywhere on your computer")
                         .clicked()
@@ -3085,7 +3087,7 @@ pub fn draw_main_menu(ctx: &egui::Context, state: &mut MenuState) -> MenuAction 
                     .min_size(egui::vec2(0.0, 36.0))
                     .fill(egui::Color32::from_rgba_premultiplied(20, 23, 31, 220))
                     .corner_radius(egui::CornerRadius::same(6))
-                    .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(42, 48, 72)));
+                    .stroke(egui::Stroke::new(1.0_f32, brand::BORDER));
                     if ui.add_enabled(!dialog_pending, import_btn)
                         .on_hover_text("Reads every *.axeworld file in the world-transfer/ folder and imports each one")
                         .clicked()
@@ -3105,7 +3107,7 @@ pub fn draw_main_menu(ctx: &egui::Context, state: &mut MenuState) -> MenuAction 
                     .min_size(egui::vec2(0.0, 36.0))
                     .fill(egui::Color32::from_rgba_premultiplied(20, 23, 31, 220))
                     .corner_radius(egui::CornerRadius::same(6))
-                    .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(42, 48, 72)));
+                    .stroke(egui::Stroke::new(1.0_f32, brand::BORDER));
                     if ui.add_enabled(!dialog_pending, profile_btn)
                         .on_hover_text(
                             "Open an .axeprofile file — every world you saved in the browser, plus your Trials records. Worlds already here are kept: a copy arrives as \"(web)\".",
@@ -3148,7 +3150,9 @@ pub fn draw_main_menu(ctx: &egui::Context, state: &mut MenuState) -> MenuAction 
             if state.worlds.is_empty() {
                 ui.add_space(40.0);
                 ui.vertical_centered(|ui| {
-                    ui.label(egui::RichText::new("No worlds yet").size(18.0).color(SUBTITLE_COLOR));
+                    brand::show_mark(ui, 96.0, 255, 0.0);
+                    ui.add_space(16.0);
+                    ui.label(egui::RichText::new("No worlds yet").size(18.0).color(TEXT_COLOR).strong());
                     ui.add_space(6.0);
                     ui.label(egui::RichText::new("Tap \"+ Create New World\" to begin.").size(13.0).color(DIM_TEXT));
                 });
@@ -3281,7 +3285,7 @@ fn draw_world_card(
         let border_width = if is_selected { 2.0_f32 } else { 1.0_f32 };
 
         let frame = egui::Frame::new()
-            .fill(CARD_BG)
+            .fill(if is_selected { brand::SURFACE_SELECTED } else { CARD_BG })
             .corner_radius(egui::CornerRadius::same(8))
             .stroke(egui::Stroke::new(border_width, border_color))
             .inner_margin(egui::Margin::same(14));
@@ -3304,7 +3308,7 @@ fn draw_world_card(
                 ui.label(
                     egui::RichText::new(format!("v{}", entry.meta.version))
                         .size(11.0)
-                        .color(egui::Color32::from_rgb(100, 100, 120)),
+                        .color(DIM_TEXT),
                 );
             }
             // Publish flow: show a badge when this world is published to a server.
@@ -3321,14 +3325,14 @@ fn draw_world_card(
             ui.label(
                 egui::RichText::new("No description")
                     .size(12.0)
-                    .color(egui::Color32::from_rgb(85, 85, 85))
+                    .color(DIM_TEXT)
                     .italics(),
             );
         } else {
             ui.label(
                 egui::RichText::new(&entry.meta.description)
                     .size(12.0)
-                    .color(egui::Color32::from_rgb(120, 120, 120)),
+                    .color(DIM_TEXT),
             );
         }
 
@@ -3339,12 +3343,12 @@ fn draw_world_card(
             ui.label(
                 egui::RichText::new(format!("Last played: {}", save::format_relative_time(entry.last_played)))
                     .size(11.0)
-                    .color(egui::Color32::from_rgb(85, 85, 102)),
+                    .color(DIM_TEXT),
             );
             ui.label(
                 egui::RichText::new(save::format_size(entry.size_bytes))
                     .size(11.0)
-                    .color(egui::Color32::from_rgb(85, 85, 102)),
+                    .color(DIM_TEXT),
             );
         });
 
@@ -3605,11 +3609,11 @@ fn action_button_widget(label: &str) -> egui::Button<'static> {
     egui::Button::new(
         egui::RichText::new(label.to_owned())
             .size(12.0)
-            .color(egui::Color32::from_rgb(136, 144, 168)),
+            .color(TEXT_COLOR),
     )
     .min_size(egui::vec2(0.0, 34.0))
-    .fill(egui::Color32::from_rgb(37, 40, 56))
-    .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(54, 58, 78)))
+    .fill(brand::SURFACE)
+    .stroke(egui::Stroke::new(1.0_f32, brand::BORDER))
     .corner_radius(egui::CornerRadius::same(6))
 }
 
@@ -3624,9 +3628,9 @@ fn action_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
 fn lobby_header_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
     let btn = egui::Button::new(egui::RichText::new(label).size(13.0).color(DIM_TEXT))
         .min_size(egui::vec2(0.0, 32.0))
-        .fill(egui::Color32::from_rgba_premultiplied(20, 23, 31, 200))
+        .fill(brand::with_alpha(brand::SURFACE, 230))
         .corner_radius(egui::CornerRadius::same(6))
-        .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(42, 48, 72)));
+        .stroke(egui::Stroke::new(1.0_f32, brand::BORDER));
     let resp = ui.add(btn);
     focus_ring(ui, &resp);
     resp
@@ -4259,10 +4263,10 @@ fn draw_create_dialog(
             }
 
             if ui.add(
-                egui::Button::new(egui::RichText::new("Cancel").size(14.0).color(egui::Color32::from_rgb(136, 144, 168)))
+                egui::Button::new(egui::RichText::new("Cancel").size(14.0).color(TEXT_COLOR))
                     .min_size(egui::vec2(0.0, 42.0))
-                    .fill(egui::Color32::from_rgb(37, 40, 56))
-                    .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(54, 58, 78)))
+                    .fill(brand::SURFACE)
+                    .stroke(egui::Stroke::new(1.0_f32, brand::BORDER))
                     .corner_radius(egui::CornerRadius::same(6)),
             ).clicked() {
                 cancelled = true;
@@ -4334,10 +4338,10 @@ fn draw_edit_dialog(ctx: &egui::Context, name: &str, description: &str) -> Dialo
             }
 
             if ui.add(
-                egui::Button::new(egui::RichText::new("Cancel").size(14.0).color(egui::Color32::from_rgb(136, 144, 168)))
+                egui::Button::new(egui::RichText::new("Cancel").size(14.0).color(TEXT_COLOR))
                     .min_size(egui::vec2(0.0, 42.0))
-                    .fill(egui::Color32::from_rgb(37, 40, 56))
-                    .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(54, 58, 78)))
+                    .fill(brand::SURFACE)
+                    .stroke(egui::Stroke::new(1.0_f32, brand::BORDER))
                     .corner_radius(egui::CornerRadius::same(6)),
             ).clicked() {
                 cancelled = true;
@@ -4414,10 +4418,10 @@ fn draw_delete_dialog(ctx: &egui::Context, world_name: &str, confirm_text: &str)
             }
 
             if ui.add(
-                egui::Button::new(egui::RichText::new("Cancel").size(14.0).color(egui::Color32::from_rgb(136, 144, 168)))
+                egui::Button::new(egui::RichText::new("Cancel").size(14.0).color(TEXT_COLOR))
                     .min_size(egui::vec2(0.0, 42.0))
-                    .fill(egui::Color32::from_rgb(37, 40, 56))
-                    .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(54, 58, 78)))
+                    .fill(brand::SURFACE)
+                    .stroke(egui::Stroke::new(1.0_f32, brand::BORDER))
                     .corner_radius(egui::CornerRadius::same(6)),
             ).clicked() {
                 cancelled = true;
@@ -4487,10 +4491,10 @@ fn draw_join_dialog(
             }
 
             if ui.add(
-                egui::Button::new(egui::RichText::new("Cancel").size(14.0).color(egui::Color32::from_rgb(136, 144, 168)))
+                egui::Button::new(egui::RichText::new("Cancel").size(14.0).color(TEXT_COLOR))
                     .min_size(egui::vec2(0.0, 42.0))
-                    .fill(egui::Color32::from_rgb(37, 40, 56))
-                    .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(54, 58, 78)))
+                    .fill(brand::SURFACE)
+                    .stroke(egui::Stroke::new(1.0_f32, brand::BORDER))
                     .corner_radius(egui::CornerRadius::same(6)),
             ).clicked() {
                 cancelled = true;
