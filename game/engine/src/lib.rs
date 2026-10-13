@@ -3043,7 +3043,8 @@ fn sample_menu_state() -> crate::menu::MenuState {
 }
 
 /// Headless lobby screenshot mode: render the world list at several screen sizes
-/// to PNGs, for UX iteration without opening a window. `--shot-lobby [out_dir]`.
+/// to PNGs, for visual iteration without opening a window.
+/// `--shot-lobby [out_dir] [--empty]` also covers the empty world list.
 #[cfg(not(target_arch = "wasm32"))]
 fn run_shot_lobby(args: &[String]) {
     let out_dir = args
@@ -3060,6 +3061,10 @@ fn run_shot_lobby(args: &[String]) {
     for (name, w, h) in sizes {
         let mut renderer = pollster::block_on(Renderer::new_headless(w, h, &textures));
         let mut menu = sample_menu_state();
+        if args.iter().any(|arg| arg == "--empty") {
+            menu.worlds.clear();
+            menu.selected = None;
+        }
         // Campaign G — pre-expand the first race so the shots exercise the
         // expanded body (best/rival lines + Play / Export ghost / Import ghost).
         menu.expanded_trial = Some("race:sprint".to_string());
