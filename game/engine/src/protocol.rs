@@ -144,11 +144,18 @@ pub enum PacketType {
     WindowSlotSet = 66,
     /// Whole player window, applied as a numbered replacement.
     InventorySync = 67,
+    /// One bounded action identity across every inventory/world mutation.
+    Action = 68,
+    /// Exact terminal fate plus the authoritative included event boundary.
+    ActionReceipt = 69,
+    /// Session-scoped prepare/describe/bundle/fence/ACK carriers.
+    Recovery = 70,
+    /// Client → Server: applied receipt metadata, independent of movement.
+    AppliedActionAck = 71,
     /// Both ways, between a source host and ONE selected joiner only: an
     /// opaque bounded world-handover control frame (`handover::live::wire`).
-    /// PRIVATE PROVISIONAL (branch mp-handover, v90; C3d's branch holds v89
-    /// and tags 68–71): the final number is assigned at the final rebase,
-    /// never advertised as delivered.
+    /// PRIVATE PROVISIONAL (integrated mp-handover, v90; accepted C3d
+    /// v89 uses tags 68–71). Not advertised as delivered before final gates.
     Handover = 72,
 }
 
@@ -286,6 +293,11 @@ pub struct JoinAcceptPacket {
     /// does not keep columns loaded round its joiners).
     #[serde(default)]
     pub chunk_note_radius: u8,
+    /// Operator policy, immutable for this connection (Mirror is the bridge).
+    pub inventory_mode: crate::action_identity::InventoryMode,
+    /// Fresh random action namespace; reconnect never reuses an old suffix.
+    pub action_session: [u8; 16],
+    pub action_life: u32,
 }
 
 /// The rule + generation flags of a world that a joiner needs to generate and
@@ -1325,7 +1337,9 @@ pub struct WireStack {
 pub type WireSlot = Option<WireStack>;
 
 /// A whole player window: all 36 inventory, 4 armour, cursor and 9 grid slots.
-/// Client-owned locks, auto-refill and hotbar selection are not replaced.
+/// Auto-refill and hotbar selection are never replaced. The lock mask and
+/// station it carries (v89) are applied only by a Strict session; a Mirror
+/// client keeps its own locks and station (C3d run 7).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct InventorySyncPacket {
     pub window_event: u32,
@@ -1339,6 +1353,16 @@ pub struct InventorySyncPacket {
     /// (more, or any other, doesn't decode).
     #[serde(deserialize_with = "bounded_owed")]
     pub owed: Vec<(WireStack, u32)>,
+    /// v89 (C3d run 6) — the station the replaced window is at (`None`: the
+    /// player's own 2×2; `Some(cell)`: a crafting table), which the digest
+    /// covers. A Strict client adopts it; a screen its window no longer has
+    /// is closed locally, with no `Close` sent. A Mirror client ignores it.
+    pub station: Option<[i32; 3]>,
+    /// v89 (C3d run 6) — the replaced window's lock mask (bit `i` = slot `i`
+    /// locked, slots 0–35). A Strict client installs exactly it; a Mirror
+    /// client keeps its own locks. A bit past 35 doesn't apply. Auto-refill
+    /// stays each copy's own.
+    pub locks: u64,
 }
 
 /// v88 (OC) — the most owed entries an [`InventorySyncPacket`] carries (and
@@ -1391,6 +1415,9 @@ pub enum OpenRefusal {
     NotAContainer,
     /// The joiner isn't in the world, or is dead.
     NotInWorld,
+    /// C3d Strict (v89, run 5): the opened view doesn't fit the joiner's
+    /// window-event budget right now. Nothing opened.
+    TooLarge,
 }
 
 /// Server → Client (C3b-1, `PacketType::ContainerOpened`): the answer to
@@ -2735,10 +2762,17 @@ pub struct ServerAnnouncePacket {
 ///   `slots`): the correction debt the whole-window replacement carries, so a
 ///   joiner's unpaid correction debt survives a reconnect on both copies
 ///   (empty after a death).
-/// - v90 PRIVATE PROVISIONAL (branch mp-handover, never delivered as such;
-///   C3d's branch holds v89 and tags 68–71; final numbers are assigned at the
-///   final rebase): `PacketType::Handover` (tag 72), the bounded
-///   world-handover control frame between a host and one selected joiner.
+/// - v89 (2026-10-13, C3d partial delivery accepted locally; no push): Action (68),
+///   ActionReceipt (69), Recovery (70) and AppliedActionAck (71) metadata.
+///   JoinAccept appends fixed inventory
+///   mode, random128-bit action namespace and life. Recovery Describe is
+///   paginated; world-stream receipt/fence application is distinct from
+///   socket reception. Mirror remains default. Strict is PARTIAL / PARKED,
+///   internally selected only; unsupported mutations fail closed. Canonical
+///   recovery installation, durable-body release and suffix replay are pending.
+/// - v90 PRIVATE PROVISIONAL (integrated mp-handover): Handover (tag 72),
+///   alongside the accepted C3d v89 metadata above; final combined gates are
+///   required before this handover protocol is delivered.
 pub const PROTOCOL_VERSION: u32 = 90;
 
 /// The `protocol_version` of a JoinRequest payload that doesn't decode as this
@@ -2811,6 +2845,10 @@ pub fn deserialize_header(data: &[u8]) -> Option<(PacketType, &[u8])> {
         65 => PacketType::ContainerOpened,
         66 => PacketType::WindowSlotSet,
         67 => PacketType::InventorySync,
+        68 => PacketType::Action,
+        69 => PacketType::ActionReceipt,
+        70 => PacketType::Recovery,
+        71 => PacketType::AppliedActionAck,
         72 => PacketType::Handover,
         _ => return None,
     };
@@ -2913,9 +2951,9 @@ mod tests {
 
     #[test]
     fn protocol_version_bumped() {
-        // OC — v88, InventorySync carries the correction debt.
-        // v90 PRIVATE PROVISIONAL (mp-handover): the Handover control tag.
-        assert_eq!(super::PROTOCOL_VERSION, 90);
+        // C3d partial delivery accepted locally — v89, after OC's v88 debt carrier.
+        // Integrated handover appends tag 72 under private provisional v90.
+        assert_eq!(PROTOCOL_VERSION, 90);
     }
 
     #[test]
@@ -3666,8 +3704,10 @@ mod tests {
         //   OpenGrave (= 13) and GraveAt (= 7).
         // v87 (2026-10-09, Sidecar): CreativeGive (= 14).
         // v88 (2026-10-09, OC): `InventorySyncPacket.owed` (after `slots`).
-        // v90 PRIVATE PROVISIONAL (mp-handover): Handover (tag 72); v89 and
-        //   tags 68–71 are C3d's.
+        // v89 (C3d partial delivery accepted locally): Action (68), ActionReceipt (69),
+        //   Recovery (70), AppliedActionAck (71); JoinAccept
+        //   mode/namespace/life.
+        // Integrated handover appends tag 72 under private provisional v90.
         assert_eq!(PROTOCOL_VERSION, 90);
     }
 
@@ -3697,6 +3737,9 @@ mod tests {
             },
             worldgen_version: 9,
             chunk_note_radius: 0,
+            inventory_mode: crate::action_identity::InventoryMode::Mirror,
+            action_session: [7; 16],
+            action_life: 0,
         }
     }
 
@@ -4370,11 +4413,11 @@ mod tests {
         assert_eq!(PacketType::WindowOp as u8, 64);
         assert_eq!(deserialize_header(&[64, 0]).map(|(p, _)| p), Some(PacketType::WindowOp));
         // C3b-1 takes 65/66; server-owned death takes 67 (InventorySync);
-        // 68–71 are C3d's (not on this branch); the provisional handover
-        // control frame takes 72.
-        for tag in 68..=71u8 {
-            assert_eq!(deserialize_header(&[tag, 0]), None, "{tag} is C3d's, not this branch's");
-        }
+        // Accepted C3d v89 uses 68–71; handover v90 appends 72.
+        assert_eq!(deserialize_header(&[68, 0]).map(|(p, _)| p), Some(PacketType::Action));
+        assert_eq!(deserialize_header(&[69, 0]).map(|(p, _)| p), Some(PacketType::ActionReceipt));
+        assert_eq!(deserialize_header(&[70, 0]).map(|(p, _)| p), Some(PacketType::Recovery));
+        assert_eq!(deserialize_header(&[71, 0]).map(|(p, _)| p), Some(PacketType::AppliedActionAck));
         assert_eq!(PacketType::Handover as u8, 72);
         assert_eq!(deserialize_header(&[72, 0]).map(|(p, _)| p), Some(PacketType::Handover));
         assert_eq!(deserialize_header(&[73, 0]), None, "nothing past 72 yet");
@@ -4541,6 +4584,7 @@ mod tests {
             (OpenRefusal::Protected, 1),
             (OpenRefusal::NotAContainer, 2),
             (OpenRefusal::NotInWorld, 3),
+            (OpenRefusal::TooLarge, 4),
         ] {
             let pkt = ContainerOpenedPacket {
                 cell: [0, 0, 0],
@@ -4929,7 +4973,7 @@ mod tests {
 #[cfg(test)] mod death_wire_tests {
     use super::*;
     #[test] fn death_wire_tags_and_bounds_are_append_only() {
-        let sync = InventorySyncPacket { window_event: 9, slots:vec![(WireWindowSlot::Inv(0),None)], owed: vec![] };
+        let sync = InventorySyncPacket { window_event: 9, slots:vec![(WireWindowSlot::Inv(0),None)], owed: vec![], station: None, locks: 0 };
         let bytes = serialize_packet(PacketType::InventorySync,&sync);
         assert_eq!(bytes[0],67);
         let (_,payload) = deserialize_header(&bytes).unwrap();
@@ -4975,6 +5019,8 @@ mod oc_wire_tests {
             window_event: 9,
             slots: vec![(WireWindowSlot::Inv(0), None)],
             owed: vec![(stone, 70_000)],
+            station: Some([1, -2, 3]),
+            locks: 1 << 35,
         };
         let mut expect = vec![67];
         expect.extend(9u32.to_le_bytes());
@@ -4990,13 +5036,17 @@ mod oc_wire_tests {
         expect.push(1);
         expect.extend(0u32.to_le_bytes());
         expect.extend(70_000u32.to_le_bytes());
+        // v89 (C3d run 6): station `Some` (1) and its cell, then the lock mask.
+        expect.push(1);
+        for v in [1i32, -2, 3] { expect.extend(v.to_le_bytes()); }
+        expect.extend((1u64 << 35).to_le_bytes());
         assert_eq!(serialize_packet(PacketType::InventorySync, &sync), expect);
         assert_eq!(round_trip(&sync).unwrap(), sync);
     }
 
     #[test]
     fn inventory_sync_owed_bounds_refuse_the_whole_packet() {
-        let base = InventorySyncPacket { window_event: 1, slots: vec![], owed: vec![] };
+        let base = InventorySyncPacket { window_event: 1, slots: vec![], owed: vec![], station: None, locks: 0 };
         let at_cap: Vec<(WireStack, u32)> = (1..=MAX_SYNC_OWED as u16).map(|d| (tool(d), 1)).collect();
         assert_eq!(MAX_SYNC_OWED, 256);
         assert!(round_trip(&InventorySyncPacket { owed: at_cap.clone(), ..base.clone() }).is_ok(), "256 is allowed");

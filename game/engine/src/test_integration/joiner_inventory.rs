@@ -1010,3 +1010,30 @@ fn a_break_whose_tool_the_shadows_slot_lacks_is_tallied_and_accepted() {
 fn shadow_pick_material(rig: &Rig) -> Option<ToolMaterial> {
     shadow_pick(rig).map(|t| t.material)
 }
+
+/// C3d run 10 (run-9b review MEDIUM-2) — the default path (Mirror): a
+/// joiner's bare-claw break 6.7 blocks away (past the base reach of 5 + 1.37,
+/// inside the Reach Claw's +2.0) is accepted when the server's own copy of
+/// its active slot holds the claw, and refused when only its input claims
+/// one. Before run 10 the server gave a joiner no claw bonus at all, so the
+/// held-claw break was refused (a pre-existing bug, fixed deliberately).
+#[test]
+fn a_joiners_reach_claw_break_counts_from_the_servers_copy_of_its_slot() {
+    let far = (46, 81, 43);
+    let claw = crate::item::ItemStack::new_material(crate::item::MaterialId::ReachClaw, 1);
+    for held in [true, false] {
+        let what = if held { "the copy holds the claw" } else { "only claimed" };
+        let mut rig = Rig::dedicated(&format!("claw-{held}"));
+        rig.world().set_block(far.0, far.1, far.2, block::DIRT);
+        if held { rig.hs.server.players[rig.slot].inventory.set_slot(0, Some(claw.clone())); }
+        rig.send(Some(&claw.item), &[(far, block::AIR)], &[mined(far, None)]);
+        rig.tick();
+        let left = rig.world().get_block(far.0, far.1, far.2);
+        if held {
+            assert_eq!(left, block::AIR, "{what}: in the claw's reach, the break is accepted");
+            assert_eq!(rig.granted(&Item::Block(block::DIRT)), 1, "{what}: and yields");
+        } else {
+            assert_eq!(left, block::DIRT, "{what}: never on the client's word");
+        }
+    }
+}

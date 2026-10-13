@@ -167,6 +167,17 @@ impl OpLog {
         }
     }
 
+    /// C3d — the auto-refill setting last sent this session (a Strict
+    /// client sends it as a reserved `SetAutoRefill` action, never logged).
+    pub fn auto_refill_sent(&self) -> Option<bool> {
+        self.auto_refill
+    }
+
+    /// C3d — a Strict `SetAutoRefill` action for `on` was reserved and sent.
+    pub fn note_auto_refill_sent(&mut self, on: bool) {
+        self.auto_refill = Some(on);
+    }
+
     /// Log an op just applied, with the window's digest after it and the
     /// client's own verdict on it (`ClickResult::ok()`; `true` for an op
     /// that isn't a click).
@@ -212,6 +223,12 @@ impl OpLog {
     /// input, after it (`RemoteClient::note_order_cut`).
     pub fn first_stamp(&self) -> Option<u64> {
         self.pending.first().map(|l| l.stamp)
+    }
+
+    /// C3d run 14 — a Strict client's refill setting was refused: forget
+    /// that it was sent, so the next window action sends it again.
+    pub fn forget_auto_refill(&mut self) {
+        self.auto_refill = None;
     }
 
     /// Drop everything (not joined, so nothing is sent) and forget the
@@ -526,7 +543,7 @@ impl Correction {
 }
 
 /// Container slots on the wire.
-fn wire_sets(sets: &[(usize, Option<ItemStack>)]) -> Vec<(WireWindowSlot, WireSlot)> {
+pub fn wire_sets(sets: &[(usize, Option<ItemStack>)]) -> Vec<(WireWindowSlot, WireSlot)> {
     sets.iter()
         .filter_map(|(i, s)| u8::try_from(*i).ok().map(|at| (WireWindowSlot::Container(at), s.as_ref().map(crate::inventory::stack_to_wire))))
         .collect()
@@ -689,12 +706,8 @@ pub fn serve_op(
         return None;
     }
     let op = &pkt.op;
-    let eye = sp.player.eye_pos();
     let mut station = sp.station;
-    // B-L2: the server's table verdict is kinder than the client's, so it is
-    // a superset of an honest client's.
-    let lately = sp.table_gone_ticks.is_none_or(|n| n <= window::SERVER_TABLE_GRACE_TICKS);
-    let ctx = ClickCtx::new(creative, station, eye, |c| world.get_block(c[0], c[1], c[2])).with_server_slack(lately);
+    let ctx = server_click_ctx(sp, world, creative);
     if let WireWindowOp::Container(click) = op {
         let served = serve_container(sp, world, registry, &ctx.with_shared(true), click, pkt, now, creative);
         sp.last_window_op_seq = pkt.op_seq;
@@ -709,14 +722,7 @@ pub fn serve_op(
     };
     let result = match op {
         WireWindowOp::Click(click) => {
-            let result = match click {
-                WindowClick::Result if !pkt.client_ok => ClickResult::Refused,
-                // C3b-fix-c (B-M4) — a refused Autofill already moved the
-                // grid and cursor back: the rule runs without the table
-                // grace, so it moves what the client's did.
-                WindowClick::Autofill { .. } if !pkt.client_ok => window::apply(&mut view, click, &ctx.clone().with_server_slack(false)),
-                _ => window::apply(&mut view, click, &ctx),
-            };
+            let result = server_click(&mut view, click, &ctx, pkt.client_ok);
             station = window::station_after(station, click, &result);
             Some(result)
         }
@@ -727,17 +733,7 @@ pub fn serve_op(
         }
         WireWindowOp::OpenTable { cell } => {
             station = Station::Table { cell: *cell };
-            // C3b-fix-b (A-L1) — the grace is for a table that WAS there: an
-            // open at a cell that isn't a crafting table gets none (counted
-            // past it from the start; `watch_table` only counts up).
-            // C3b-fix-d (A-L5) — a table the server saw go within the grace
-            // was there: the open gets what is left of it.
-            sp.table_gone_ticks = if world.get_block(cell[0], cell[1], cell[2]) == crate::block::CRAFTING_TABLE {
-                None
-            } else {
-                tables_gone.note(world, now);
-                Some(tables_gone.gone_for(*cell, now).unwrap_or(window::SERVER_TABLE_GRACE_TICKS.saturating_add(1)))
-            };
+            sp.table_gone_ticks = open_table_grace(world, *cell, now, tables_gone);
             None
         }
         WireWindowOp::SetAutoRefill { on } => {
@@ -747,18 +743,63 @@ pub fn serve_op(
         WireWindowOp::OpenContainer { .. } | WireWindowOp::Container(_) => None,
     };
     let digest = window::digest(&view, station);
-    let closes = matches!(
-        op,
-        WireWindowOp::Click(WindowClick::Close) | WireWindowOp::OpenPlayer | WireWindowOp::OpenTable { .. }
-    );
-    if closes {
-        sp.open_container = None;
-        sp.container_sent.open_kind = None;
-        sp.container_sent.seen = None;
+    if op_closes_container_view(op) {
+        close_container_view(sp);
     }
     sp.station = station;
     sp.last_window_op_seq = pkt.op_seq;
     Some(Served::plain(result, digest))
+}
+
+/// The table grace an `OpenTable` at `cell` starts with (shared by
+/// [`serve_op`] and Strict configuration). C3b-fix-b (A-L1) — the grace is
+/// for a table that WAS there: an open at a cell that isn't a crafting table
+/// gets none (counted past it from the start; `watch_table` only counts up).
+/// C3b-fix-d (A-L5) — a table the server saw go within the grace was there:
+/// the open gets what is left of it.
+pub fn open_table_grace(world: &mut World, cell: [i32; 3], now: u64, tables_gone: &mut TablesGone) -> Option<u8> {
+    if world.get_block(cell[0], cell[1], cell[2]) == crate::block::CRAFTING_TABLE {
+        None
+    } else {
+        tables_gone.note(world, now);
+        Some(tables_gone.gone_for(cell, now).unwrap_or(window::SERVER_TABLE_GRACE_TICKS.saturating_add(1)))
+    }
+}
+
+/// The server's context for joiner `sp`'s window click — shared by the
+/// Mirror bridge ([`serve_op`]) and Strict staging (C3d review M2), so both
+/// judge by the same transition. B-L2: the server's table verdict is kinder
+/// than the client's (reach slack, and a grace for a table that just went),
+/// so it is a superset of an honest client's.
+pub fn server_click_ctx(sp: &ServerPlayer, world: &World, creative: bool) -> ClickCtx {
+    let lately = sp.table_gone_ticks.is_none_or(|n| n <= window::SERVER_TABLE_GRACE_TICKS);
+    ClickCtx::new(creative, sp.station, sp.player.eye_pos(), |c| world.get_block(c[0], c[1], c[2])).with_server_slack(lately)
+}
+
+/// The server's rule for one window click, honouring the client's own
+/// verdict (`WindowOpPacket::client_ok`) — shared by [`serve_op`] and Strict
+/// staging. A-L2: never craft a Result the client refused. B-M4: a refused
+/// Autofill already moved the grid and cursor back, so the rule runs
+/// without the table grace and moves what the client's did.
+pub fn server_click(view: &mut WindowMut, click: &WindowClick, ctx: &ClickCtx, client_ok: bool) -> ClickResult {
+    match click {
+        WindowClick::Result if !client_ok => ClickResult::Refused,
+        WindowClick::Autofill { .. } if !client_ok => window::apply(view, click, &ctx.clone().with_server_slack(false)),
+        _ => window::apply(view, click, ctx),
+    }
+}
+
+/// Whether window op `op` closes the client's container view (its own
+/// close, in its order): a Close click, or opening the 2×2 grid or a table.
+pub fn op_closes_container_view(op: &WireWindowOp) -> bool {
+    matches!(op, WireWindowOp::Click(WindowClick::Close) | WireWindowOp::OpenPlayer | WireWindowOp::OpenTable { .. })
+}
+
+/// Forget joiner `sp`'s open container and the model of its view.
+pub fn close_container_view(sp: &mut ServerPlayer) {
+    sp.open_container = None;
+    sp.container_sent.open_kind = None;
+    sp.container_sent.seen = None;
 }
 
 /// Why a container op is refused before its rule runs.
@@ -1170,6 +1211,20 @@ fn refused_container_op(
 /// server (the client closes its screen by the same rule, seeing the block
 /// go). `now`: the server tick.
 pub fn container_push(sp: &mut ServerPlayer, world: &World, now: u64) -> Option<WindowSlotSetPacket> {
+    let (sets, furnace) = container_push_sets(sp, world)?;
+    let wire = wire_sets(&sets);
+    let event = crate::window_events::queue(
+        sp,
+        crate::window_events::WindowEvent::ContainerView(ViewEvent::Sets { sets, furnace }),
+        now,
+    );
+    Some(push_packet(sp, wire, furnace, event))
+}
+
+/// [`container_push`]'s diff without queueing it: the container slots (and
+/// furnace progress) the joiner's mirror will not show. A Strict joiner's
+/// push reserves its numbered view before it is sent (C3d).
+pub fn container_push_sets(sp: &mut ServerPlayer, world: &World) -> Option<(Vec<(usize, Option<ItemStack>)>, Option<FurnaceView>)> {
     let cell = sp.open_container?;
     let kind = sp.container_sent.open_kind?;
     let Some(c) = container_window::container_at(world, cell, kind) else {
@@ -1187,21 +1242,20 @@ pub fn container_push(sp: &mut ServerPlayer, world: &World, now: u64) -> Option<
     if sets.is_empty() && furnace.is_none() {
         return None;
     }
-    let wire = wire_sets(&sets);
-    let event = crate::window_events::queue(
-        sp,
-        crate::window_events::WindowEvent::ContainerView(ViewEvent::Sets { sets, furnace }),
-        now,
-    );
-    Some(WindowSlotSetPacket {
+    Some((sets, furnace))
+}
+
+/// The `WindowSlotSet { Changed }` a push goes out as, numbered `event`.
+pub fn push_packet(sp: &ServerPlayer, sets: Vec<(WireWindowSlot, WireSlot)>, furnace: Option<FurnaceView>, event: u32) -> WindowSlotSetPacket {
+    WindowSlotSetPacket {
         op_seq_applied: sp.last_window_op_seq,
         reason: crate::protocol::slot_set_reason::CHANGED,
-        sets: wire,
+        sets,
         furnace,
         window_event: event,
         take: Vec::new(),
         give: Vec::new(),
-    })
+    }
 }
 
 /// C3b-fix-d (A-L5) — most cells a server's [`TablesGone`] remembers; past

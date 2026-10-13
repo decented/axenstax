@@ -252,8 +252,10 @@ fn protocol_version_is_the_pinned_value() {
     // v87 (sidecar): CreativeGive.
     // v88 (OC): `InventorySyncPacket.owed` — the join's replacement carries
     //   the joiner's correction debt to both copies.
-    // v90 PRIVATE PROVISIONAL (mp-handover): PacketType::Handover (tag 72);
-    //   v89 is C3d's. Final numbers are assigned at the final rebase.
+    // v89 (C3d accepted locally): typed `Action` (68), `ActionReceipt` (69),
+    //   `Recovery` (70), `AppliedActionAck` (71); JoinAccept appends the
+    //   fixed inventory mode, action namespace and life.
+    // Integrated handover uses private provisional v90 and tag 72.
     assert_eq!(protocol::PROTOCOL_VERSION, 90);
 }
 
@@ -353,6 +355,9 @@ fn join_accept_carries_spawn_and_game_mode() {
         world_rules: protocol::WorldRules::default(),
         worldgen_version: crate::world::worldgen_fingerprint(),
         chunk_note_radius: 0,
+        inventory_mode: crate::action_identity::InventoryMode::Mirror,
+        action_session: [7; 16],
+        action_life: 0,
     };
     let pkt = protocol::serialize_packet(protocol::PacketType::JoinAccept, &acc);
     let (_ptype, payload) = protocol::deserialize_header(&pkt).unwrap();

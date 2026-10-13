@@ -1252,6 +1252,44 @@ the HUD through its existing seams — no parallel HUD, no bridge code:
   (`ZOOM_FOV_MIN..=ZOOM_FOV_MAX` = 15–45°, default `DEFAULT_ZOOM_FOV` = 20°), clamped
   separately from the 60–100° personal FOV.
 
+### 8.3.2 Copperline visual treatment (2026-10-13)
+
+The live native/web UI and headless previews share one style configuration in
+`egui_integration::configure_style`. Screenshots previously used egui defaults
+rather than the live dark treatment, so they could misrepresent panel contrast
+and keyboard/controller focus. Both paths now use the same Deep Frontier,
+raised teal surfaces, Stone text and Lantern focus outline; Android retains its
+larger touch targets.
+
+The lobby uses the supplied outlined wordmark, rasterised from
+`brand/svg/axenstax-wordmark-dark.svg` by `brand/render-rasters.mjs --engine-only`
+and cached per egui context. World-card description, version and last-played
+metadata use the shared readable secondary text colour. Selection has a copper
+outline and raised fill, whilst keyboard/controller focus remains Lantern.
+Side columns share the Deep Frontier palette; the Stash address hint presents
+the player-facing npub form. The empty world list displays the
+existing mountain mark above its creation hint. Header controls wrap on narrow
+screens. The spawn selector occupies its own row, constrains its width to the remaining
+space and truncates its display text; previously it extended beyond a phone viewport and
+expanded the card grid too. Card content subtracts the frame's actual padding
+and stroke from its column width, so thicker selected outlines also stay within
+the column. Existing world actions, capability gates and responsive side-column
+breakpoints retain their behaviour.
+
+The shared surface tones are:
+
+| UI role | Hex | Use |
+|---|---|---|
+| Raised surface | `#15262A` | Cards and windows |
+| Hovered surface | `#203437` | Hovered controls |
+| Selected surface | `#273734` | Selected cards and controls |
+| Surface boundary | `#394E4F` | Quiet panel and slot borders |
+| Secondary text | `#A6B4B1` | Descriptions and metadata |
+
+The hotbar uses translucent Deep Frontier slots and a Lantern outline for the
+selected slot. Slot geometry, viewport clipping, touch hit targets, item icons
+and survival status colours retain their existing rules.
+
 ### 8.4 Resolution Independence
 
 UI scaling is handled by `egui`'s `pixels_per_point` setting:

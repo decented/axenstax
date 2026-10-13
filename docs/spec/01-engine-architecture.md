@@ -979,7 +979,7 @@ own placements reach it unflagged — and the other way round too (C1 verify
 N5): a joiner's placements reach the host client's own copy by loopback
 (`World::apply_remote_block_change`, block only, no placed bit), so a cell a
 joiner refilled or built in pure deepslate reads natural there and rolls when
-the host mines it, on the host's secret and exposure map. Single-player runs no server at all (D3 will
+the host mines it, on the host's secret and exposure map. A `--no-lend` host's own door, gate or trapdoor toggle (C3d run 19/20) reaches its server only as meta-only edits through the local-slot path (the per-tick edit budget, a refused cell sent back to the host), so whether it reaches joiners there is by reading only, untested (a test needs the GPU harness's owning-host path); it goes with the flag. Until the host's edit reaches its server, a joiner's toggle or refused-edit send-back near that door can broadcast the server copy's stale meta, which the owning host re-applies, so its own door briefly flips back on its screen (run-20 review LOW-5; more frequent since every accepted door click sends its ghosts back). Single-player runs no server at all (D3 will
 lend there too); the dedicated server always owns its world. Native only: the
 web build never hosts.
 

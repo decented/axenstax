@@ -25,6 +25,7 @@
 //
 // Rust engine (game/engine/assets/brand/, include_bytes! by src/brand.rs):
 //   mark.png          <- axenstax-mark-flat.svg, 336x246 transparent (splash + loading screens)
+//   wordmark.png      <- axenstax-wordmark-dark.svg, 440x70 transparent (lobby)
 //   app-icon-128.png  <- axenstax-app-icon-rounded.svg 128, transparent corners (native window icon)
 //
 // Uses Playwright from tools/smoke/node_modules (no rsvg/inkscape needed).
@@ -115,46 +116,52 @@ const rounded = (n, bg = 'transparent') => render(n, n, bg, img('axenstax-app-ic
 const square = (n) => render(n, n, DEEP, img('axenstax-app-icon.svg', n));
 
 try {
-  // --- website / social ---
-  write('brand/png/favicon-32.png', await favicon(32));
-  // iOS paints transparent corners black, so flatten onto the tile's own colour.
-  write('brand/png/apple-touch-icon-180.png', await rounded(180, DEEP));
-  write('brand/png/og-1200x630.png', await render(1200, 630, DEEP,
-    // stacked lockup is 740x634; 540 wide -> ~463 tall, centred.
-    `<div style="width:1200px;height:630px;display:flex;align-items:center;justify-content:center">
-       ${img('axenstax-stacked-dark.svg', 540, 463)}</div>`));
+  // --engine-only updates embedded UI assets without regenerating site icons.
+  if (!process.argv.includes('--engine-only')) {
+    // --- website / social ---
+    write('brand/png/favicon-32.png', await favicon(32));
+    // iOS paints transparent corners black, so flatten onto the tile's own colour.
+    write('brand/png/apple-touch-icon-180.png', await rounded(180, DEEP));
+    write('brand/png/og-1200x630.png', await render(1200, 630, DEEP,
+      // stacked lockup is 740x634; 540 wide -> ~463 tall, centred.
+      `<div style="width:1200px;height:630px;display:flex;align-items:center;justify-content:center">
+         ${img('axenstax-stacked-dark.svg', 540, 463)}</div>`));
 
-  // --- game PWA ---
-  const pwa = 'tools/sites/game/static/icons/';
-  const fav16 = await favicon(16), fav32 = await favicon(32), fav48 = await favicon(48);
-  write(pwa + 'favicon-32.png', fav32);
-  write(pwa + 'favicon.ico', packIco([{ size: 16, buf: fav16 }, { size: 32, buf: fav32 }, { size: 48, buf: fav48 }]));
-  write(pwa + 'favicon-180.png', await rounded(180, DEEP));
-  write(pwa + 'favicon-192.png', await square(192));
-  write(pwa + 'favicon-512.png', await square(512));
-  write(pwa + 'maskable-512.png', await render(512, 512, DEEP, markInCircle(512, 0.8)));
+    // --- game PWA ---
+    const pwa = 'tools/sites/game/static/icons/';
+    const fav16 = await favicon(16), fav32 = await favicon(32), fav48 = await favicon(48);
+    write(pwa + 'favicon-32.png', fav32);
+    write(pwa + 'favicon.ico', packIco([{ size: 16, buf: fav16 }, { size: 32, buf: fav32 }, { size: 48, buf: fav48 }]));
+    write(pwa + 'favicon-180.png', await rounded(180, DEEP));
+    write(pwa + 'favicon-192.png', await square(192));
+    write(pwa + 'favicon-512.png', await square(512));
+    write(pwa + 'maskable-512.png', await render(512, 512, DEEP, markInCircle(512, 0.8)));
 
-  // --- desktop / AppImage / Windows ---
-  const pk = 'tools/packaging/icons/';
-  write(pk + 'icon-512.png', await rounded(512));
-  write(pk + 'icon.ico', packIco([
-    { size: 16, buf: fav16 }, { size: 32, buf: fav32 },
-    { size: 48, buf: await rounded(48) }, { size: 64, buf: await rounded(64) },
-    { size: 128, buf: await rounded(128) }, { size: 256, buf: await rounded(256) },
-  ]));
+    // --- desktop / AppImage / Windows ---
+    const pk = 'tools/packaging/icons/';
+    write(pk + 'icon-512.png', await rounded(512));
+    write(pk + 'icon.ico', packIco([
+      { size: 16, buf: fav16 }, { size: 32, buf: fav32 },
+      { size: 48, buf: await rounded(48) }, { size: 64, buf: await rounded(64) },
+      { size: 128, buf: await rounded(128) }, { size: 256, buf: await rounded(256) },
+    ]));
+  }
 
   // --- Rust engine (egui mark texture + native window icon) ---
   const eng = 'game/engine/assets/brand/';
   write(eng + 'mark.png', await render(336, 246, 'transparent', img('axenstax-mark-flat.svg', 336, 246)));
   write(eng + 'app-icon-128.png', await rounded(128));
+  write(eng + 'wordmark.png', await render(440, 70, 'transparent', img('axenstax-wordmark-dark.svg', 440, 70)));
 
-  // --- Android ---
-  const dens = { mdpi: 1, hdpi: 1.5, xhdpi: 2, xxhdpi: 3, xxxhdpi: 4 };
-  for (const [d, k] of Object.entries(dens)) {
-    const dir = `tools/packaging/android/res/mipmap-${d}/`;
-    write(dir + 'ic_launcher.png', await rounded(48 * k));
-    write(dir + 'ic_launcher_foreground.png',
-      await render(108 * k, 108 * k, 'transparent', markInCircle(108 * k, 66 / 108)));
+  if (!process.argv.includes('--engine-only')) {
+    // --- Android ---
+    const dens = { mdpi: 1, hdpi: 1.5, xhdpi: 2, xxhdpi: 3, xxxhdpi: 4 };
+    for (const [d, k] of Object.entries(dens)) {
+      const dir = `tools/packaging/android/res/mipmap-${d}/`;
+      write(dir + 'ic_launcher.png', await rounded(48 * k));
+      write(dir + 'ic_launcher_foreground.png',
+        await render(108 * k, 108 * k, 'transparent', markInCircle(108 * k, 66 / 108)));
+    }
   }
 } finally {
   await browser.close();

@@ -228,6 +228,8 @@ impl Joiner {
         let before = self.intake.applied();
         for step in interleave(chunks, changes.len()) {
             match step {
+                IntakeStep::RebaseFence(cut) => self.rc.apply_recovery_fence(cut),
+                IntakeStep::ActionReceipt(receipt) => self.rc.apply_action_receipt(receipt),
                 IntakeStep::Chunk(p) => {
                     self.stream_bytes += protocol::serialize_packet(protocol::PacketType::ChunkData, &*p).len();
                     if let Some(col) = self.intake.generate_before_chunk(&p, &self.loaded, &self.world) {

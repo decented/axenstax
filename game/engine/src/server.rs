@@ -31,6 +31,11 @@ const REACH_DISTANCE: f32 = 5.0;
 
 /// Per-player server-side state.
 pub struct ServerPlayer {
+    /// Fixed at accepted join; trusted local slots retain their own policy.
+    pub inventory_mode: crate::action_identity::InventoryMode,
+    pub action_frontier: Option<crate::action_identity::ActionFrontier>,
+    pub action_queue: Option<crate::action_queue::ActionQueue>,
+    pub action_results: Option<crate::action_results::ActionResults>,
     /// Once-per-death inventory hook, reset on entering or respawning.
     pub death_handled: bool,
     pub player: Player,
@@ -221,6 +226,11 @@ pub struct ServerPlayer {
     /// (`joiner_inventory::PossessionTally`), summarised in the log when it
     /// leaves.
     pub possession: crate::joiner_inventory::PossessionTally,
+    /// C3d run 12 (S1, Q15) — this seat's Strict refusals by kind.
+    pub strict_refusals: crate::strict_admission::RefusalTally,
+    /// C3d run 13 (run-12 review LOW-3) — this seat's recent live correction
+    /// `Replace`s (`strict_admission::CorrectionRate`).
+    pub strict_corrections: crate::strict_admission::CorrectionRate,
     /// C2a — ticks until this joiner's next `Eat` is taken: the server's
     /// copy of the client's cooldown after eating
     /// (`item_actions::EAT_COOLDOWN_TICKS`), counted down every tick.
@@ -521,6 +531,10 @@ pub fn collect_player_state(sp: &ServerPlayer, idx: u32) -> crate::protocol::Pla
 impl ServerPlayer {
     pub fn new(spawn: Vec3) -> Self {
         Self {
+            inventory_mode: crate::action_identity::InventoryMode::Mirror,
+            action_frontier: None,
+            action_queue: None,
+            action_results: None,
             player: Player::new(spawn),
             inventory: Inventory::new(),
             combat: PlayerCombat::new(),
@@ -567,6 +581,8 @@ impl ServerPlayer {
             death_handled: false,
             drop_bucket: crate::item_actions::DropBucket::default(),
             possession: crate::joiner_inventory::PossessionTally::default(),
+            strict_refusals: Default::default(),
+            strict_corrections: Default::default(),
             eat_cooldown: 0,
             slept_night: None,
             progression_tracked: false,

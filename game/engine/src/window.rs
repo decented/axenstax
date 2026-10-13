@@ -800,10 +800,11 @@ fn return_grid_and_cursor(view: &mut WindowMut) -> bool {
 /// v1 fills the example's *exact* items (e.g. an Oak Log for the any-log
 /// plank recipe). Substituting a different in-set item the player happens to
 /// hold (spruce log) is a deferred nicety.
-fn autofill(view: &mut WindowMut, example: &[[CraftSlot; 3]; 3]) -> bool {
-    // Step 1 — clear the grid + cursor back into the inventory. A cell that
-    // doesn't fit stops the return there (later cells and the cursor are
-    // left alone).
+/// Autofill's step 1 (also the whole effect of a refused Autofill, C3d
+/// run-2 review LOW-2): clear the grid + cursor back into the inventory. A
+/// cell that doesn't fit stops the return there (later cells and the cursor
+/// are left alone). `false` when something didn't fit.
+pub fn autofill_return(view: &mut WindowMut) -> bool {
     for cell in view.grid.iter_mut().flatten() {
         if let Some(stack) = cell.take()
             && let Some(rem) = view.inv.add_item(stack) {
@@ -816,6 +817,14 @@ fn autofill(view: &mut WindowMut, example: &[[CraftSlot; 3]; 3]) -> bool {
             *view.cursor = Some(rem);
             return false;
         }
+    true
+}
+
+fn autofill(view: &mut WindowMut, example: &[[CraftSlot; 3]; 3]) -> bool {
+    // Step 1 — clear the grid + cursor back into the inventory.
+    if !autofill_return(view) {
+        return false;
+    }
 
     // Step 2 — tally what the example needs (exact items).
     let mut needs: Vec<(Item, u32)> = Vec::new();

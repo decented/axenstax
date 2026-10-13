@@ -32,7 +32,7 @@ impl crate::GameState {
             self.toast = Some(("You can't open that here.".to_string(), Instant::now() + Duration::from_secs(3)));
             return;
         }
-        p.crafting_ui.log_open_container(cell, &p.inventory, &p.armour_slots);
+        self.ask_open_container(pidx, cell);
     }
 
     /// C3b-1 — the server answered our `OpenContainer`. Opened: player 0's
@@ -132,9 +132,8 @@ impl crate::GameState {
         }
         let ctx = self.container_ctx(pidx, true);
         for click in &clicks {
-            let p = &mut self.players[pidx];
-            let applied =
-                p.crafting_ui.apply_container_click(&mut p.inventory, &mut p.armour_slots, mirror.as_mut(), click, &ctx);
+            // C3d — the reserving entry point (a Strict action).
+            let applied = self.apply_shared_container_click(pidx, &mut mirror, click, &ctx);
             if applied.result == crate::window::ClickResult::PlanStays {
                 let text = match click {
                     ContainerClick::Deposit { .. } => "Plans can't go in shared containers yet",
@@ -187,7 +186,7 @@ impl crate::GameState {
                 p.open_dispenser = None;
                 p.open_furnace = None;
             }
-            p.crafting_ui.close_container(&mut p.inventory, &mut p.armour_slots);
+            self.close_shared_container(pidx);
             if named && pidx == 0 {
                 self.capture_cursor();
             }

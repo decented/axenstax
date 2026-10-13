@@ -27,9 +27,52 @@ pub const STONE: Color32 = Color32::from_rgb(230, 224, 209);
 /// Copper `#D27B3E` — primary warm accent (path, selected states, bars).
 pub const COPPER: Color32 = Color32::from_rgb(210, 123, 62);
 
+/// Raised Deep Frontier surface for cards and windows.
+pub const SURFACE: Color32 = Color32::from_rgb(21, 38, 42);
+/// Hovered surface, kept quiet beside the copper accent.
+pub const SURFACE_HOVER: Color32 = Color32::from_rgb(32, 52, 55);
+/// Selected surface beneath the warm focus outline.
+pub const SURFACE_SELECTED: Color32 = Color32::from_rgb(39, 55, 52);
+/// Subtle boundary between dark surfaces.
+pub const BORDER: Color32 = Color32::from_rgb(57, 78, 79);
+/// Secondary text with readable contrast on the dark UI surfaces.
+pub const MUTED_TEXT: Color32 = Color32::from_rgb(166, 180, 177);
+
 /// `mark.png` is rendered at 336x246 (axenstax-mark-flat.svg, transparent).
 const MARK_PNG: &[u8] = include_bytes!("../assets/brand/mark.png");
 const MARK_ASPECT: f32 = 336.0 / 246.0;
+/// Outlined source wordmark rendered at twice its lobby display resolution.
+const WORDMARK_PNG: &[u8] = include_bytes!("../assets/brand/wordmark.png");
+
+/// Paint the supplied outlined wordmark without depending on installed fonts.
+pub fn show_wordmark(ui: &mut egui::Ui, width: f32) {
+    let id = Id::new("axenstax_brand_wordmark_texture");
+    let texture = ui.ctx().data(|d| d.get_temp::<TextureHandle>(id)).or_else(|| {
+        let img = image::load_from_memory(WORDMARK_PNG).ok()?.to_rgba8();
+        let texture = ui.ctx().load_texture(
+            "axenstax_brand_wordmark",
+            ColorImage::from_rgba_unmultiplied(
+                [img.width() as usize, img.height() as usize], img.as_raw(),
+            ),
+            TextureOptions::LINEAR,
+        );
+        ui.ctx().data_mut(|d| d.insert_temp(id, texture.clone()));
+        Some(texture)
+    });
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(width, width * 116.0 / 726.0), egui::Sense::hover(),
+    );
+    response.widget_info(|| egui::WidgetInfo::labeled(
+        egui::WidgetType::Label, ui.is_enabled(), "Axe’n’Stax",
+    ));
+    if let Some(texture) = texture {
+        ui.painter().image(
+            texture.id(), rect,
+            egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+            Color32::WHITE,
+        );
+    }
+}
 
 /// `c` with its alpha replaced by `a` (straight, i.e. unmultiplied, alpha).
 pub fn with_alpha(c: Color32, a: u8) -> Color32 {

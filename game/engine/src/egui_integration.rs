@@ -27,52 +27,7 @@ impl EguiIntegration {
     ) -> Self {
         let ctx = egui::Context::default();
 
-        // Configure default style: dark theme with game-appropriate colours
-        let mut style = egui::Style { visuals: egui::Visuals::dark(), ..Default::default() };
-        style.visuals.window_corner_radius = egui::CornerRadius::same(4);
-        // Copperline (brand/BRAND-GUIDELINES.md): Deep Frontier panels, Deep Rock
-        // buttons. Menu text colours are contrast-checked (>= 4.5:1) against these.
-        style.visuals.widgets.noninteractive.bg_fill = egui::Color32::from_rgba_unmultiplied(18, 32, 36, 220);
-        style.visuals.widgets.inactive.bg_fill = crate::brand::DEEP_ROCK;
-        style.visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(52, 52, 50);
-        style.visuals.widgets.active.bg_fill = egui::Color32::from_rgb(64, 62, 58);
-        // Keyboard/controller focus uses the "active" widget visuals (egui
-        // 0.34 style(): has_focus → active) — give it a visible gold stroke
-        // so d-pad navigation reads on standard widgets (Lantern `#F4C16F`; the
-        // crafting UI's PAD_FOCUS_BORDER is a separate, later pass). Buttons that override .stroke() paint their
-        // own ring via menu::focus_ring.
-        style.visuals.widgets.active.bg_stroke =
-            egui::Stroke::new(2.0_f32, crate::brand::LANTERN);
-        // Selection: Forest Green fill with Stone text (4.8:1).
-        style.visuals.selection.bg_fill = crate::brand::FOREST;
-        style.visuals.selection.stroke = egui::Stroke::new(1.0_f32, crate::brand::STONE);
-
-        // Android gets thumb-sized hit targets. egui's defaults are mouse-sized
-        // (an interact height of ~18 points); an egui point is effectively a dp
-        // here and Material's minimum touch target is 48dp, so stock widgets are
-        // under half what a thumb needs — on a 420dpi phone ~4mm of target for
-        // an 8mm finger, which reads as "the button didn't work".
-        //
-        // Android only, not every TOUCH_PLATFORM: the web build is one binary
-        // for desktop browsers AND tablets, and the live web taster's layout is
-        // not to change under its desktop users. Web tablets can opt in later
-        // off the runtime `touch_input::is_touch_device()`.
-        if cfg!(target_os = "android") {
-            style.spacing.interact_size.y = 44.0;
-            style.spacing.button_padding = egui::vec2(12.0, 10.0);
-            style.spacing.item_spacing.y = 8.0;
-            style.spacing.scroll.bar_width = 12.0;
-            style.spacing.scroll.handle_min_length = 32.0;
-            // egui 0.34 defaults scrollbars to FLOATING, where they appear only
-            // once you are already scrolling — useless as a discovery cue (and
-            // AlwaysVisible still drew nothing with floating on, verified on a
-            // Pixel 8). Non-floating reserves real width and paints the bar
-            // unconditionally: the 2026-05-21 playtest showed kids read a
-            // clipped view as "that's all there is" rather than "scroll me".
-            style.spacing.scroll.floating = false;
-        }
-
-        ctx.set_global_style(style);
+        configure_style(&ctx);
 
         let state = egui_winit::State::new(
             ctx.clone(),
@@ -112,6 +67,7 @@ impl EguiIntegration {
         _textures: &[Vec<u8>],
     ) -> Self {
         let ctx = egui::Context::default();
+        configure_style(&ctx);
 
         let renderer = egui_wgpu::Renderer::new(
             device,
@@ -413,6 +369,69 @@ fn create_egui_texture_view(
     );
 
     texture.create_view(&wgpu::TextureViewDescriptor::default())
+}
+
+/// Share the Copperline treatment between the live game and headless previews.
+fn configure_style(ctx: &egui::Context) {
+    let mut style = egui::Style { visuals: egui::Visuals::dark(), ..Default::default() };
+    style.visuals.window_corner_radius = egui::CornerRadius::same(8);
+    style.visuals.window_fill = crate::brand::SURFACE;
+    style.visuals.panel_fill = crate::brand::DEEP_FRONTIER;
+    style.visuals.window_stroke = egui::Stroke::new(1.0_f32, crate::brand::BORDER);
+    style.visuals.override_text_color = Some(crate::brand::STONE);
+    style.visuals.faint_bg_color = crate::brand::SURFACE;
+    style.visuals.extreme_bg_color = crate::brand::DEEP_FRONTIER;
+    // Copperline (brand/BRAND-GUIDELINES.md): Deep Frontier panels, Deep Rock
+    // buttons. Menu text colours are contrast-checked (>= 4.5:1) against these.
+    style.visuals.widgets.noninteractive.bg_fill = crate::brand::SURFACE;
+    style.visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0_f32, crate::brand::MUTED_TEXT);
+    style.visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0_f32, crate::brand::BORDER);
+    style.visuals.widgets.inactive.bg_fill = crate::brand::DEEP_ROCK;
+    style.visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0_f32, crate::brand::STONE);
+    style.visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0_f32, crate::brand::BORDER);
+    style.visuals.widgets.hovered.bg_fill = crate::brand::SURFACE_HOVER;
+    style.visuals.widgets.active.bg_fill = crate::brand::SURFACE_SELECTED;
+    // Keyboard/controller focus uses the "active" widget visuals (egui
+    // 0.34 style(): has_focus → active) — give it a visible gold stroke
+    // so d-pad navigation reads on standard widgets (Lantern `#F4C16F`; the
+    // crafting UI's PAD_FOCUS_BORDER is a separate, later pass). Buttons that override .stroke() paint their
+    // own ring via menu::focus_ring.
+    style.visuals.widgets.active.bg_stroke =
+        egui::Stroke::new(2.0_f32, crate::brand::LANTERN);
+    // Selection: Forest Green fill with Stone text (4.8:1).
+    style.visuals.selection.bg_fill = crate::brand::FOREST;
+    style.visuals.selection.stroke = egui::Stroke::new(1.0_f32, crate::brand::STONE);
+
+    style.visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0_f32, crate::brand::STONE);
+    style.visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0_f32, crate::brand::SKY);
+    style.visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0_f32, crate::brand::STONE);
+
+    // Android gets thumb-sized hit targets. egui's defaults are mouse-sized
+    // (an interact height of ~18 points); an egui point is effectively a dp
+    // here and Material's minimum touch target is 48dp, so stock widgets are
+    // under half what a thumb needs — on a 420dpi phone ~4mm of target for
+    // an 8mm finger, which reads as "the button didn't work".
+    //
+    // Android only, not every TOUCH_PLATFORM: the web build is one binary
+    // for desktop browsers AND tablets, and the live web taster's layout is
+    // not to change under its desktop users. Web tablets can opt in later
+    // off the runtime `touch_input::is_touch_device()`.
+    if cfg!(target_os = "android") {
+        style.spacing.interact_size.y = 44.0;
+        style.spacing.button_padding = egui::vec2(12.0, 10.0);
+        style.spacing.item_spacing.y = 8.0;
+        style.spacing.scroll.bar_width = 12.0;
+        style.spacing.scroll.handle_min_length = 32.0;
+        // egui 0.34 defaults scrollbars to FLOATING, where they appear only
+        // once you are already scrolling — useless as a discovery cue (and
+        // AlwaysVisible still drew nothing with floating on, verified on a
+        // Pixel 8). Non-floating reserves real width and paints the bar
+        // unconditionally: the 2026-05-21 playtest showed kids read a
+        // clipped view as "that's all there is" rather than "scroll me".
+        style.spacing.scroll.floating = false;
+    }
+
+    ctx.set_global_style(style);
 }
 
 #[cfg(test)]

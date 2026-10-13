@@ -7576,7 +7576,7 @@ impl super::GameState {
         }
         let Some(p) = self.players.first_mut() else { return false };
         if p.crafting_ui.open {
-            p.crafting_ui.close(&mut p.inventory, &mut p.armour_slots);
+            let _ = self.close_crafting(0);
             return true;
         }
         if p.dialogue_villager.is_some() {
@@ -8233,11 +8233,12 @@ impl super::GameState {
                 match &self.mode {
                     GameMode::Playing => {
                         // Close crafting UI for all players that have it open
-                        // (not while play is held for a handover: review LOW-5).
+                        // Both freezes hold the crafting window: handover and
+                        // C3d's pending canonical replacement/action boundary.
                         let held = self.handover_holds_play();
-                        for p in &mut self.players {
-                            if p.crafting_ui.open && !held {
-                                p.crafting_ui.close(&mut p.inventory, &mut p.armour_slots);
+                        for pidx in 0..self.players.len() {
+                            if self.players[pidx].crafting_ui.open && !held {
+                                let _ = self.close_crafting(pidx);
                             }
                         }
                         self.release_cursor();
@@ -10826,17 +10827,16 @@ impl super::GameState {
                     // No-op; the workstation UI's own 'E' handler
                     // already closed it this frame.
                 } else if self.players[pidx].crafting_ui.open {
-                    let closed = {
-                        let p = &mut self.players[pidx];
-                        p.crafting_ui.close(&mut p.inventory, &mut p.armour_slots)
-                    };
-                    if !closed {
+                    // C3d run 8 (review LOW-1) — E reaches the one gate: a
+                    // frozen Strict window sends nothing and stays open.
+                    let outcome = self.close_crafting(pidx);
+                    if outcome == crate::window_actions::CraftClose::Refused {
                         self.toast = Some((
                             "Inventory full — make room to close crafting".to_string(),
                             Instant::now() + Duration::from_secs(2),
                         ));
                     }
-                    if pidx == 0 { self.capture_cursor(); }
+                    if pidx == 0 && outcome != crate::window_actions::CraftClose::Frozen { self.capture_cursor(); }
                 } else {
                     let viewport_w = self
                         .screens
@@ -10853,8 +10853,8 @@ impl super::GameState {
                             Instant::now() + Duration::from_secs(3),
                         ));
                     } else {
-                        let p = &mut self.players[pidx];
-                        p.crafting_ui.open_player_crafting(&p.inventory, &p.armour_slots);
+                        // C3d — the reserving entry point (a Strict action).
+                        self.open_crafting(pidx, None);
                         if pidx == 0 { self.release_cursor(); }
                         // Trials: auto-show the target recipe in the right-side
                         // placement card (no recipe book needed) — but never
@@ -11302,6 +11302,13 @@ impl super::GameState {
                     }
                 };
 
+                // C3d run 17 — a Strict swing predicts nothing (checked below).
+                let no_prediction = if joined_target.is_some() {
+                    let p = &self.players[pidx];
+                    crate::strict_requests::NoPrediction::begin(self.remote_client.as_ref(), &p.crafting_ui, &p.inventory, &p.armour_slots, "swing")
+                } else {
+                    None
+                };
                 let attacked = if joined_target.is_some() && !self.players[pidx].combat.can_attack() {
                     false
                 } else if villager_grace {
@@ -11384,6 +11391,10 @@ impl super::GameState {
                 if attacked && joined_target.is_none() {
                     let info = self.players[pidx].inventory.use_hotbar_tool(hotbar);
                     self.handle_tool_use(info);
+                }
+                {
+                    let p = &self.players[pidx];
+                    crate::strict_requests::NoPrediction::check(no_prediction, &p.crafting_ui, &p.inventory, &p.armour_slots);
                 }
 
                 // If no entity was hit, try breaking a block
@@ -12109,7 +12120,16 @@ impl super::GameState {
                                     }
                                 }
 
-                                if self.players[pidx].break_progress >= break_time {
+                                // C3d run 9 — a Strict client's mined break is
+                                // a reserved typed `Edit`, reserved (its tool
+                                // worn) before the world changes; nothing goes
+                                // on the movement packet (`break_route`).
+                                let route = if self.players[pidx].break_progress >= break_time {
+                                    self.break_route(pidx, pos, blk, tool)
+                                } else {
+                                    crate::strict_edits::BreakRoute::NotYet
+                                };
+                                if route.breaks() {
                                     // Block broken!
                                     // Goal 1 — proof-of-play work accrual: a
                                     // successful can_harvest break does
@@ -12399,10 +12419,13 @@ impl super::GameState {
                                     // self-grant below.
                                     #[cfg(not(target_arch = "wasm32"))]
                                     {
+                                        // A typed break went as its own action.
+                                        if !route.is_typed() {
                                         self.pending_block_changes.push(broadcast_change(&self.world, pos[0], pos[1], pos[2], replacement));
+                                        }
                                         // C1 — and tell the server it was MINED,
                                         // with what: it yields a joiner's break.
-                                        if self.joined() {
+                                        if self.joined() && !route.is_typed() {
                                             self.pending_mined.push(crate::protocol::MinedBlock {
                                                 x: pos[0],
                                                 y: pos[1],
@@ -12525,8 +12548,15 @@ impl super::GameState {
                                             self.tick_counter,
                                         );
                                     }
-                                    let hs = self.players[pidx].hotbar_slot;
-                                    let info = self.players[pidx].inventory.use_hotbar_tool(hs);
+                                    // A typed break wore its tool at its
+                                    // reservation (the server's own rule).
+                                    let info = match route {
+                                        crate::strict_edits::BreakRoute::Typed(wear) => wear,
+                                        _ => {
+                                            let hs = self.players[pidx].hotbar_slot;
+                                            self.players[pidx].inventory.use_hotbar_tool(hs)
+                                        }
+                                    };
                                     self.handle_tool_use(info);
                                     self.audio.play_break();
                                     self.players[pidx].breaking_pos = None;
@@ -13726,11 +13756,18 @@ impl super::GameState {
                         if !self.players[pidx].shot_ready(now) {
                             fired_arrow = true;
                         } else if self.joined() {
+                            // C3d run 17 — a Strict shot predicts nothing.
+                            let no_prediction = {
+                                let p = &self.players[pidx];
+                                crate::strict_requests::NoPrediction::begin(self.remote_client.as_ref(), &p.crafting_ui, &p.inventory, &p.armour_slots, "shot")
+                            };
                             if self.send_shot(pidx, weapon) {
                                 self.players[pidx].arm_shot(now);
                                 self.players[pidx].place_cooldown = 8;
                                 fired_arrow = true;
                             }
+                            let p = &self.players[pidx];
+                            crate::strict_requests::NoPrediction::check(no_prediction, &p.crafting_ui, &p.inventory, &p.armour_slots);
                         } else if let Some(slot_idx) = crate::shot::find_ammo(&self.players[pidx].inventory, weapon)
                             && let Some(mut stack) = self.players[pidx].inventory.slot(slot_idx).cloned()
                         {
@@ -13958,51 +13995,79 @@ impl super::GameState {
                         // the rule its screen closes by (`window::table_in_reach`):
                         // a Reach Claw's longer ray would open one the screen
                         // (and a joiner's server) holds out of reach.
-                        let p = &mut self.players[pidx];
-                        if crate::window::table_in_reach(target_blk, pos, p.player.eye_pos()) {
-                            p.crafting_ui.open_table_crafting(pos, &p.inventory, &p.armour_slots);
+                        if crate::window::table_in_reach(target_blk, pos, self.players[pidx].player.eye_pos()) {
+                            // C3d — the reserving entry point (a Strict action).
+                            self.open_crafting(pidx, Some(pos));
                             if pidx == 0 { self.release_cursor(); }
                         }
                     } else if crate::block_shape::is_toggleable(target_blk) {
                         // Wave 2 / F1 — open/close toggle for fence gates,
-                        // trapdoors and doors. Flip the meta open bit + re-mesh
-                        // so the new shape + passability take effect.
-                        let m = self.world.meta_at(pos[0], pos[1], pos[2]);
-                        self.world
-                            .set_meta((pos[0], pos[1], pos[2]), crate::block_shape::toggled_open(m));
-                        self.rebuild_chunk_at(pos[0], pos[1], pos[2]);
-                        // Doors: toggle the other half, and any horizontally
-                        // adjacent door (+ its other half) so double doors (#29)
-                        // open together.
-                        if target_blk == block::OAK_DOOR {
-                            let toggle_half = |s: &mut Self, x: i32, y: i32, z: i32| {
-                                if s.world.get_block(x, y, z) == block::OAK_DOOR {
-                                    let hm = s.world.meta_at(x, y, z);
-                                    s.world
-                                        .set_meta((x, y, z), crate::block_shape::toggled_open(hm));
-                                    s.rebuild_chunk_at(x, y, z);
+                        // trapdoors and doors (a door's other half and any
+                        // horizontally adjacent door open together, #29).
+                        // C3d run 18 — the footprint is ONE shared rule
+                        // (`strict_doors::toggle_metas`); a Strict seat sends a
+                        // typed `ToggleBlock` and predicts the server's
+                        // canonical open bit (Decision 20).
+                        // C3d run 19 — the toggle reaches everyone: a Mirror
+                        // joiner sends a `ToggleBlock` too and predicts
+                        // `FlipEach` exactly as before (the server applies the
+                        // same rule); a host's (or single-player's) cells are
+                        // recorded like any of its edits, so its joiners hear
+                        // them (single-player discards them at the send).
+                        let slot = self.players[pidx].hotbar_slot;
+                        // Run-18 review M1b — a joined seat never sends a
+                        // toggle it knows the server refuses (play mode,
+                        // reach with the held item): a toast instead.
+                        let preflight = if pidx == 0 && self.joined() {
+                            let p = &self.players[pidx];
+                            crate::strict_doors::toggle_preflight(self.play_mode, p.player.eye_pos(), pos, p.inventory.hotbar_slot(slot).map(|s| &s.item))
+                        } else {
+                            Ok(())
+                        };
+                        let rule = if let Err(text) = preflight {
+                            self.toast = Some((text.to_string(), Instant::now() + Duration::from_secs(2)));
+                            None
+                        } else if self.strict_remote(pidx) {
+                            let remote = self.remote_client.as_mut().expect("a Strict seat is joined");
+                            let p = &mut self.players[pidx];
+                            match crate::strict_doors::toggle_joined(remote, &mut p.crafting_ui, &p.inventory, &p.armour_slots, &self.world, pos, target_blk, slot) {
+                                Ok(()) => Some(crate::strict_doors::OpenRule::Canonical),
+                                Err(error) => {
+                                    self.typed_edit_failed(error);
+                                    None
                                 }
-                            };
-                            // This door's other (top/bottom) half.
-                            let cy = if crate::block_shape::door_is_top(m) {
-                                pos[1] - 1
-                            } else {
-                                pos[1] + 1
-                            };
-                            toggle_half(self, pos[0], cy, pos[2]);
-                            // #29 — adjacent doors (both halves) open together.
-                            for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-                                let (nx, nz) = (pos[0] + dx, pos[2] + dz);
-                                if self.world.get_block(nx, pos[1], nz) == block::OAK_DOOR {
-                                    let nm = self.world.meta_at(nx, pos[1], nz);
-                                    let ncy = if crate::block_shape::door_is_top(nm) {
-                                        pos[1] - 1
-                                    } else {
-                                        pos[1] + 1
-                                    };
-                                    toggle_half(self, nx, pos[1], nz);
-                                    toggle_half(self, nx, ncy, nz);
+                            }
+                        } else if pidx == 0 && let Some(remote) = self.remote_client.as_mut() {
+                            // C3d run 22 — a Mirror door click is predicted at once
+                            // and never refused for this client's own edits still
+                            // waiting to go (this frame's, a carry-over, a queued
+                            // request): the toggle joins the one ordered client
+                            // queue behind them (`send_request`) and goes right
+                            // after the input that carries them. (Run 21's
+                            // refuse-and-toast lost the click; main always opened
+                            // the door on the clicker's screen.)
+                            match crate::strict_doors::reserve_toggle_unsent(remote, &self.world, pos, target_blk, slot) {
+                                Ok(action) => {
+                                    self.send_request(crate::remote_client::Request::Action(action));
+                                    Some(crate::strict_doors::OpenRule::FlipEach)
                                 }
+                                Err(error) => {
+                                    self.typed_edit_failed(error);
+                                    None
+                                }
+                            }
+                        } else {
+                            Some(crate::strict_doors::OpenRule::FlipEach)
+                        };
+                        let record = !self.joined();
+                        if let Some(rule) = rule {
+                            for (c, m) in crate::strict_doors::toggle_metas(&self.world, pos, rule) {
+                                self.world.set_meta((c[0], c[1], c[2]), m);
+                                if record {
+                                    let b = self.world.get_block(c[0], c[1], c[2]);
+                                    self.pending_block_changes.push(broadcast_change(&self.world, c[0], c[1], c[2], b));
+                                }
+                                self.rebuild_chunk_at(c[0], c[1], c[2]);
                             }
                         }
                         self.players[pidx].place_cooldown = 8;
@@ -15917,8 +15982,11 @@ impl super::GameState {
                                 // and refunded — a take and a refund the server
                                 // never saw). Single-player and joined alike.
                                 let refusal = match self.players[pidx].inventory.hotbar_placeable_id(hotbar) {
+                                    // C3d run 21 (run-18 review L4) — joined, a top
+                                    // above the world is refused too (before: a Mirror
+                                    // half door, a Strict corrected refusal per click).
                                     Some(block::OAK_DOOR)
-                                        if self.world.get_block(place_x, place_y + 1, place_z) != block::AIR =>
+                                        if crate::strict_doors::door_headroom_refused(&self.world, [place_x, place_y, place_z], self.joined()) =>
                                     {
                                         Some(("No room for the door — needs 2 blocks of height.", 2))
                                     }
@@ -15945,12 +16013,27 @@ impl super::GameState {
                                 // the same path with no behaviour change.
                                 // C3b-2-fix (M1) — a joiner places nothing a
                                 // request in flight claims (`hand_may_spend`).
+                                // C3d run 9 — a Strict client's plain placement
+                                // is a reserved typed `Edit`, its window
+                                // predicted by the server's own rule, never on
+                                // the movement packet (`take_for_placement`).
+                                let mut typed_place = false;
                                 let block_to_place = if refusal.is_some() {
                                     None
                                 } else if self.is_creative {
                                     self.players[pidx].inventory.hotbar_placeable_id(hotbar)
                                 } else if self.hand_may_spend(pidx) {
-                                    self.players[pidx].inventory.take_placeable_from_hotbar(hotbar)
+                                    match self.take_for_placement(pidx, hotbar, [place_x, place_y, place_z], existing, face) {
+                                        crate::strict_edits::PlaceRoute::Legacy(taken) => taken,
+                                        crate::strict_edits::PlaceRoute::Typed(taken) => {
+                                            typed_place = true;
+                                            taken
+                                        }
+                                        crate::strict_edits::PlaceRoute::Wait => {
+                                            self.players[pidx].place_cooldown = BLOCK_PLACE_COOLDOWN_TICKS;
+                                            None
+                                        }
+                                    }
                                 } else {
                                     None
                                 };
@@ -15962,135 +16045,18 @@ impl super::GameState {
                                     // so re-mining it earns no proof-of-play work.
                                     self.world
                                         .place_player_block(place_x, place_y, place_z, block_to_place);
-                                    // F1 — stamp shaped-block orientation (slab
-                                    // half / stair facing) from the clicked face +
-                                    // camera so it renders + collides correctly.
-                                    // The chunk re-mesh below picks up the meta.
-                                    if crate::block_shape::is_shaped(block_to_place) {
-                                        let ppos = (place_x, place_y, place_z);
-                                        let fwd = self.players[pidx].camera.forward();
-                                        let m = match crate::block_shape::shape_of(block_to_place) {
-                                            // A hand-placed snow layer starts at one
-                                            // thin layer (AUX 0 = 1/8 block).
-                                            crate::block_shape::BlockShape::SnowLayer => 0,
-                                            crate::block_shape::BlockShape::Slab => {
-                                                let f = crate::block_shape::slab_placement_facing(
-                                                    face, 0.5,
-                                                );
-                                                crate::meta::with_facing(0, f)
-                                            }
-                                            crate::block_shape::BlockShape::Stairs => {
-                                                let (f, top) = crate::block_shape::stairs_placement(
-                                                    fwd.x, fwd.z, face,
-                                                );
-                                                let base = crate::meta::with_facing(0, f);
-                                                if top {
-                                                    crate::meta::with_state(base, 1)
-                                                } else {
-                                                    base
-                                                }
-                                            }
-                                            crate::block_shape::BlockShape::FenceGate => {
-                                                // Faces the player's axis; placed closed.
-                                                let f = crate::block_shape::facing_from_forward(
-                                                    fwd.x, fwd.z,
-                                                );
-                                                crate::meta::with_facing(0, f)
-                                            }
-                                            crate::block_shape::BlockShape::Trapdoor => {
-                                                // Hinges to the wall the player faces; a
-                                                // click on a block's underside mounts it
-                                                // at the ceiling (state bit 1).
-                                                let f = crate::block_shape::facing_from_forward(
-                                                    fwd.x, fwd.z,
-                                                );
-                                                let base = crate::meta::with_facing(0, f);
-                                                if matches!(face, [0, -1, 0]) {
-                                                    crate::meta::with_state(base, 0b10)
-                                                } else {
-                                                    base
-                                                }
-                                            }
-                                            // Connecting shapes derive their
-                                            // geometry from live neighbours, so
-                                            // they store no orientation meta.
-                                            crate::block_shape::BlockShape::Pane
-                                            | crate::block_shape::BlockShape::Wall => 0,
-                                            crate::block_shape::BlockShape::Door => {
-                                                // Bottom half: faces the player,
-                                                // left hinge, closed. The top half
-                                                // is placed by the door block below.
-                                                let f = crate::block_shape::facing_from_forward(
-                                                    fwd.x, fwd.z,
-                                                );
-                                                crate::meta::with_facing(0, f)
-                                            }
-                                            // Buttons + levers mount on the face
-                                            // the player clicked (protrude along
-                                            // its outward normal); placed off.
-                                            crate::block_shape::BlockShape::Button
-                                            | crate::block_shape::BlockShape::Lever => {
-                                                let f = crate::block_shape::facing_from_face_normal(
-                                                    face,
-                                                );
-                                                crate::meta::with_facing(0, f)
-                                            }
-                                            // Pressure plates always lie on the floor.
-                                            crate::block_shape::BlockShape::PressurePlate => 0,
-                                            // Sign board faces across the player's
-                                            // view so the text reads toward them.
-                                            crate::block_shape::BlockShape::Sign => {
-                                                let f = crate::block_shape::facing_from_forward(
-                                                    fwd.x, fwd.z,
-                                                );
-                                                crate::meta::with_facing(0, f)
-                                            }
-                                            // Item frame mounts on the clicked wall.
-                                            crate::block_shape::BlockShape::ItemFrame => {
-                                                let f = crate::block_shape::facing_from_face_normal(
-                                                    face,
-                                                );
-                                                crate::meta::with_facing(0, f)
-                                            }
-                                            crate::block_shape::BlockShape::FullCube => 0,
-                                        };
-                                        self.world.set_meta(ppos, m);
+                                    // C3d run 9 — the placement's meta (a shaped block's orientation,
+                                    // a piston's, dispenser's or dropper's look facing, a directional
+                                    // power device's axis facing) is ONE pure rule, hoisted so a Strict
+                                    // client's typed `Edit` carries it before anything is predicted
+                                    // (`placement_meta`). The chunk re-mesh below picks up the meta.
+                                    if let Some(m) = crate::placement_meta::placement_meta(block_to_place, face, self.players[pidx].camera.forward()) {
+                                        self.world.set_meta((place_x, place_y, place_z), m);
                                     }
-                                    // P11 — a piston is a plain FullCube (not a
-                                    // shaped block, so the orientation pass above is
-                                    // skipped), but it must remember which way to
-                                    // push. Stamp its facing from the placer's look,
-                                    // pitch included (so up/down pistons work).
-                                    if crate::piston::is_piston(block_to_place) {
-                                        let fwd = self.players[pidx].camera.forward();
-                                        self.world.set_meta(
-                                            (place_x, place_y, place_z),
-                                            crate::meta::with_facing(
-                                                0,
-                                                crate::piston::facing_from_look(
-                                                    fwd.x, fwd.y, fwd.z,
-                                                ),
-                                            ),
-                                        );
-                                    }
-                                    // Dispenser/Dropper (2026-07-04) — same
-                                    // facing stamp as the piston, plus an
-                                    // EAGER block-entity so the power-edge
-                                    // latch exists from tick one (chests are
-                                    // lazy; the latch can't be).
-                                    if block_to_place == block::DISPENSER
-                                        || block_to_place == block::DROPPER
-                                    {
-                                        let fwd = self.players[pidx].camera.forward();
-                                        self.world.set_meta(
-                                            (place_x, place_y, place_z),
-                                            crate::meta::with_facing(
-                                                0,
-                                                crate::piston::facing_from_look(
-                                                    fwd.x, fwd.y, fwd.z,
-                                                ),
-                                            ),
-                                        );
+                                    // Dispenser/Dropper (2026-07-04) — an EAGER block-entity so the
+                                    // power-edge latch exists from tick one (chests are lazy; the latch
+                                    // can't be).
+                                    if block_to_place == block::DISPENSER || block_to_place == block::DROPPER {
                                         self.world.insert_dispenser(
                                             (place_x, place_y, place_z),
                                             crate::dispenser::DispenserData::new(),
@@ -16271,18 +16237,7 @@ impl super::GameState {
                                     if crate::block::is_power_block(block_to_place) {
                                         let ppos = (place_x, place_y, place_z);
                                         if !crate::block::is_cable(block_to_place) {
-                                            let fwd = self.players[pidx].camera.forward();
-                                            let facing = if fwd.x.abs() > fwd.z.abs() {
-                                                if fwd.x > 0.0 {
-                                                    crate::meta::Facing::East
-                                                } else {
-                                                    crate::meta::Facing::West
-                                                }
-                                            } else if fwd.z > 0.0 {
-                                                crate::meta::Facing::South
-                                            } else {
-                                                crate::meta::Facing::North
-                                            };
+                                            let facing = crate::placement_meta::device_facing(self.players[pidx].camera.forward());
                                             // The kind table is shared with the
                                             // host's apply-a-joiner's-placement
                                             // path (`hosted_server`), so a hosted
@@ -16299,20 +16254,10 @@ impl super::GameState {
                                                     crate::world::BlockEntityData::PowerDevice(data),
                                                 );
                                             }
-                                            // Wave 2c — the input devices
-                                            // (button/lever/plate) are now F1
-                                            // shapes whose meta facing was already
-                                            // set from the clicked face above, so
-                                            // their nub sits flush on that surface.
-                                            // Don't clobber it with the look-axis
-                                            // facing; that's only meaningful for
-                                            // directional devices (mirror/gate/…).
-                                            if !crate::block_shape::is_signal_input(block_to_place) {
-                                                self.world.set_meta(
-                                                    ppos,
-                                                    crate::meta::with_facing(0, facing),
-                                                );
-                                            }
+                                            // (The device's meta facing — this
+                                            // `facing`, or an input device's clicked
+                                            // face — was stamped with the placement,
+                                            // `placement_meta`.)
                                         }
                                         self.world.mark_dirty(ppos);
                                     }
@@ -16401,11 +16346,14 @@ impl super::GameState {
                                     // other client one this client had taken
                                     // back; C3c-1 checks a conflicting claim
                                     // first, so it is the placed block).
-                                    #[cfg(not(target_arch = "wasm32"))]
-                                    {
-                                        let standing =
-                                            self.world.get_block(place_x, place_y, place_z);
-                                        self.pending_block_changes.push(broadcast_change(&self.world, place_x, place_y, place_z, standing));
+                                    // A typed placement went as its own action.
+                                    if !typed_place {
+                                        #[cfg(not(target_arch = "wasm32"))]
+                                        {
+                                            let standing =
+                                                self.world.get_block(place_x, place_y, place_z);
+                                            self.pending_block_changes.push(broadcast_change(&self.world, place_x, place_y, place_z, standing));
+                                        }
                                     }
                                     // C3c-1 — and a door's top half, after its
                                     // bottom (the server judges it standing on
@@ -16413,7 +16361,10 @@ impl super::GameState {
                                     // use: no cost (the bottom's placement paid
                                     // for the door), so the server and everyone
                                     // else see a whole door.
-                                    if let Some(top) = door_top {
+                                    // C3d run 18 — a Strict seat's door went as ONE
+                                    // typed `DoorPlace` (both halves); no
+                                    // `DoorUpper` coupon (Decision 20).
+                                    if let Some(top) = door_top.filter(|_| !typed_place) {
                                         let tag = crate::use_edits::tag(crate::use_edits::UseKind::DoorUpper, top, hotbar, None);
                                         self.push_use_edit(top, block::OAK_DOOR, tag, None, 0);
                                     }
@@ -21471,23 +21422,22 @@ impl super::GameState {
         // C3a-1 — every item move is one pure window transition
         // (`window::apply`, via `CraftingUi::apply_click`) over the player's
         // inventory + armour and the screen's grid + cursor.
-        let creative = self.is_creative;
         // L3 (C2b verify) — a crafting table's screen closes when its table
         // stops being a crafting table or leaves the player's reach, as in
         // Minecraft (`window::table_in_reach`: the server's reach rule, from
         // the body's eye). The grid goes back as on any close.
-        for p in self.players.iter_mut() {
-            if p.crafting_ui.open
-                && let Some(cell) = p.crafting_ui.table
+        for pidx in 0..self.players.len() {
+            if self.players[pidx].crafting_ui.open
+                && let Some(cell) = self.players[pidx].crafting_ui.table
                 && !crate::window::table_in_reach(
                     self.world.get_block(cell[0], cell[1], cell[2]),
                     cell,
-                    p.player.eye_pos(),
+                    self.players[pidx].player.eye_pos(),
                 )
             {
                 // B-M1: a close that can't return everything waits for the
                 // next tick and a change of the window, not the next frame.
-                p.crafting_ui.force_close(&mut p.inventory, &mut p.armour_slots, ticks_run > 0);
+                self.force_close_crafting(pidx, ticks_run > 0);
             }
         }
         // C3b-1 — a joiner's shared container screen closes by the same rule
@@ -21504,19 +21454,9 @@ impl super::GameState {
                     if self.joined() && !self.joiner_actions.may_craft(&p.inventory, &p.crafting_ui) {
                         continue;
                     }
-                    let world = &self.world;
-                    let p = &mut self.players[pidx];
-                    let eye = p.player.eye_pos();
                     // UX polish sweep Task 2 — what was crafted, so a
                     // first-ever craft of a non-obvious item can teach a hint.
-                    let craft_item = match p.crafting_ui.apply_click(
-                        &mut p.inventory,
-                        &mut p.armour_slots,
-                        &crate::window::WindowClick::Result,
-                        creative,
-                        eye,
-                        |c| world.get_block(c[0], c[1], c[2]),
-                    ) {
+                    let craft_item = match self.apply_window_click(pidx, &crate::window::WindowClick::Result) {
                         crate::window::ClickResult::Crafted(stack) => Some(stack.item),
                         _ => None,
                     };
@@ -21567,12 +21507,7 @@ impl super::GameState {
                 | crate::craft_ui::ClickTarget::SortInventory
                 | crate::craft_ui::ClickTarget::ToggleLock(_) => {
                     if let Some(click) = click_target.window_click() {
-                        let world = &self.world;
-                        let p = &mut self.players[pidx];
-                        let eye = p.player.eye_pos();
-                        p.crafting_ui.apply_click(&mut p.inventory, &mut p.armour_slots, &click, creative, eye, |c| {
-                            world.get_block(c[0], c[1], c[2])
-                        });
+                        self.apply_window_click(pidx, &click);
                     }
                 }
                 crate::craft_ui::ClickTarget::OpenBook => {
@@ -21586,18 +21521,8 @@ impl super::GameState {
                         let card = &crate::crafting_catalogue::all_cards()[gidx];
                         let example = card.example_grid;
                         let name = card.name.clone();
-                        let world = &self.world;
-                        let p = &mut self.players[pidx];
-                        let eye = p.player.eye_pos();
                         let fill = crate::window::WindowClick::Autofill { example };
-                        let toast = match p.crafting_ui.apply_click(
-                            &mut p.inventory,
-                            &mut p.armour_slots,
-                            &fill,
-                            creative,
-                            eye,
-                            |c| world.get_block(c[0], c[1], c[2]),
-                        ) {
+                        let toast = match self.apply_window_click(pidx, &fill) {
                             // M3 — a 3×3 recipe can't be laid in the 2×2.
                             crate::window::ClickResult::NeedsTable => Some("Needs a crafting table".to_string()),
                             crate::window::ClickResult::Refused => Some(format!("Not enough materials for {name}")),
@@ -21625,18 +21550,8 @@ impl super::GameState {
                     }
                 }
                 crate::craft_ui::ClickTarget::TrashCursor => {
-                    let world = &self.world;
-                    let p = &mut self.players[pidx];
-                    let eye = p.player.eye_pos();
                     let trash = crate::window::WindowClick::Trash;
-                    let binned = p.crafting_ui.apply_click(
-                        &mut p.inventory,
-                        &mut p.armour_slots,
-                        &trash,
-                        creative,
-                        eye,
-                        |c| world.get_block(c[0], c[1], c[2]),
-                    );
+                    let binned = self.apply_window_click(pidx, &trash);
                     if matches!(binned, crate::window::ClickResult::Binned(_)) {
                         self.toast = Some((
                             "Binned the held item".to_string(),
@@ -22418,18 +22333,14 @@ impl super::GameState {
     /// decides, and the weapon wears when it confirms (`InteractOutcome`).
     pub(crate) fn send_entity_attack(&mut self, pidx: usize, target: crate::remote_mobs::MirrorTarget, sprint: bool, sneak: bool) {
         let (hot, held, held_kind, held_id, held_full) = self.held_for_request(pidx);
-        let next_input = self.request_input_seq();
-        let seq = self.joiner_actions.record(
-            crate::joiner_actions::Pending {
-                kind: crate::joiner_actions::Asked::Swing,
-                mob: Some(target.kind),
-                hotbar_slot: hot,
-                held,
-            },
-            next_input,
-        );
-        self.send_request(crate::remote_client::Request::Attack(crate::protocol::EntityAttackPacket {
-            seq,
+        let pending = crate::joiner_actions::Pending {
+            kind: crate::joiner_actions::Asked::Swing,
+            mob: Some(target.kind),
+            hotbar_slot: hot,
+            held,
+        };
+        let packet = crate::protocol::EntityAttackPacket {
+            seq: 0,
             entity: target.id,
             held_kind,
             held_id,
@@ -22441,7 +22352,20 @@ impl super::GameState {
             hotbar_slot: hot.min(usize::from(u8::MAX)) as u8,
             // Stamped by `RemoteClient::send_entity_attack`.
             events_applied: 0,
-        }));
+        };
+        // C3d run 15 — a Strict seat reserves ONE typed attack and predicts
+        // nothing (`strict_requests::route_attack`); Mirror sends the legacy
+        // request below, unchanged.
+        if crate::strict_requests::shot_goes_typed(self.remote_client.as_ref()) {
+            let p = &mut self.players[pidx];
+            if let Err(error) = crate::strict_requests::route_attack(self.remote_client.as_mut(), &mut p.crafting_ui, &p.inventory, &p.armour_slots, &mut self.joiner_actions, pending, packet) {
+                log::warn!("Strict attack could not be reserved: {error}");
+            }
+            return;
+        }
+        let next_input = self.request_input_seq();
+        let seq = self.joiner_actions.record(pending, next_input);
+        self.send_request(crate::remote_client::Request::Attack(crate::protocol::EntityAttackPacket { seq, ..packet }));
     }
 
     /// MP-D2b — ask the server for interaction `kind` with its mob `target`
@@ -22480,13 +22404,9 @@ impl super::GameState {
         if !self.joiner_actions.can_afford(&p.inventory, &p.crafting_ui, asked, held.as_ref()) {
             return;
         }
-        let next_input = self.request_input_seq();
-        let seq = self.joiner_actions.record(
-            crate::joiner_actions::Pending { kind: asked, mob, hotbar_slot: hot, held },
-            next_input,
-        );
-        self.send_request(crate::remote_client::Request::Interact(crate::protocol::EntityInteractPacket {
-            seq,
+        let pending = crate::joiner_actions::Pending { kind: asked, mob, hotbar_slot: hot, held };
+        let packet = crate::protocol::EntityInteractPacket {
+            seq: 0,
             entity,
             kind,
             held_kind,
@@ -22494,9 +22414,32 @@ impl super::GameState {
             held_full,
             hotbar_slot: hot as u8,
             sneak,
-            // Stamped by `RemoteClient::send_entity_interact`.
+            // Stamped by `RemoteClient::send_entity_interact` (Mirror) or
+            // `strict_requests::route_interact` (Strict).
             events_applied: 0,
-        }));
+        };
+        // C3d run 23 — nothing is predicted for an interaction on either
+        // seat, and a Strict server relies on it (a world-fact refusal is a
+        // receipt and its note alone): the bracket observes it.
+        let no_prediction = {
+            let p = &self.players[pidx];
+            crate::strict_requests::NoPrediction::begin(self.remote_client.as_ref(), &p.crafting_ui, &p.inventory, &p.armour_slots, "interaction")
+        };
+        // A Strict seat reserves ONE typed interaction
+        // (`strict_requests::route_interact`); Mirror sends the legacy
+        // request, unchanged.
+        if crate::strict_requests::shot_goes_typed(self.remote_client.as_ref()) {
+            let p = &mut self.players[pidx];
+            if let Err(error) = crate::strict_requests::route_interact(self.remote_client.as_mut(), &mut p.crafting_ui, &p.inventory, &p.armour_slots, &mut self.joiner_actions, pending, packet) {
+                log::warn!("Strict interaction could not be reserved: {error}");
+            }
+        } else {
+            let next_input = self.request_input_seq();
+            let seq = self.joiner_actions.record(pending, next_input);
+            self.send_request(crate::remote_client::Request::Interact(crate::protocol::EntityInteractPacket { seq, ..packet }));
+        }
+        let p = &self.players[pidx];
+        crate::strict_requests::NoPrediction::check(no_prediction, &p.crafting_ui, &p.inventory, &p.armour_slots);
     }
 
     /// C2a — ask the server to let player `pidx` (a joiner) eat the food in
@@ -22511,19 +22454,38 @@ impl super::GameState {
         if !self.joiner_actions.can_afford(&p.inventory, &p.crafting_ui, asked, held.as_ref()) {
             return;
         }
+        let pending = crate::joiner_actions::Pending { kind: asked, mob: None, hotbar_slot: hot, held };
+        let action = crate::protocol::ItemAction::Eat { hotbar_slot: hot as u8, held_kind, held_id, held_full };
+        // C3d run 24 — nothing is predicted for an eat on either seat (the
+        // food goes, and the body is fed, by the server's answer), and a
+        // Strict server relies on it: the bracket observes it.
+        let no_prediction = {
+            let p = &self.players[pidx];
+            crate::strict_requests::NoPrediction::begin(self.remote_client.as_ref(), &p.crafting_ui, &p.inventory, &p.armour_slots, "eat")
+        };
+        self.route_item_request(pidx, pending, action);
+        let p = &self.players[pidx];
+        crate::strict_requests::NoPrediction::check(no_prediction, &p.crafting_ui, &p.inventory, &p.armour_slots);
+    }
+
+    /// C3d run 24 — record and send player `pidx`'s (a joiner's) eat or
+    /// creative give: ONE reserved typed `ActionIntent::Item` on a Strict
+    /// seat (`strict_requests::route_item`), Mirror's legacy request,
+    /// unchanged, otherwise.
+    fn route_item_request(&mut self, pidx: usize, pending: crate::joiner_actions::Pending, action: crate::protocol::ItemAction) {
+        if crate::strict_requests::shot_goes_typed(self.remote_client.as_ref()) {
+            let packet = crate::protocol::ItemActionPacket { seq: 0, action, events_applied: 0 };
+            let p = &mut self.players[pidx];
+            if let Err(error) = crate::strict_requests::route_item(self.remote_client.as_mut(), &mut p.crafting_ui, &p.inventory, &p.armour_slots, &mut self.joiner_actions, pending, packet) {
+                log::warn!("Strict item action could not be reserved: {error}");
+            }
+            return;
+        }
         let next_input = self.request_input_seq();
-        let seq = self.joiner_actions.record(
-            crate::joiner_actions::Pending { kind: asked, mob: None, hotbar_slot: hot, held },
-            next_input,
-        );
+        let seq = self.joiner_actions.record(pending, next_input);
         self.send_request(crate::remote_client::Request::Item(crate::protocol::ItemActionPacket {
             seq,
-            action: crate::protocol::ItemAction::Eat {
-                hotbar_slot: hot as u8,
-                held_kind,
-                held_id,
-                held_full,
-            },
+            action,
             // Stamped by `RemoteClient::send_item_action`.
             events_applied: 0,
         }));
@@ -22545,6 +22507,18 @@ impl super::GameState {
         }
         let Some(held) = p.inventory.hotbar_slot(slot).map(|s| s.item.clone()) else { return };
         if !self.joiner_actions.can_spend(&p.inventory, &p.crafting_ui, &held, 1) {
+            return;
+        }
+        // C3d run 25 — a Strict seat reserves ONE typed drop BEFORE the
+        // hand changes, then takes the item (predicted; every refusal is
+        // corrected) and sends it (`strict_requests::route_drop`).
+        if crate::strict_requests::shot_goes_typed(self.remote_client.as_ref()) {
+            let p = &mut self.players[pidx];
+            match crate::strict_requests::route_drop(self.remote_client.as_mut(), &mut p.crafting_ui, &mut p.inventory, &mut p.armour_slots, slot, &self.registry) {
+                Ok(Some(_)) => p.drop_ready_tick = now + crate::item_actions::DROP_INTERVAL_TICKS,
+                Ok(None) => {}
+                Err(error) => log::warn!("Strict drop could not be reserved: {error}"),
+            }
             return;
         }
         let p = &mut self.players[pidx];
@@ -22714,23 +22688,26 @@ impl super::GameState {
     /// C2a — ask the server to let player `pidx` (a joiner) sleep in the bed
     /// at `bed`. Claims nothing; an accepted outcome sets our spawn point
     /// there (the server set its own).
+    ///
+    /// C3d run 25 — through [`Self::route_item_request`]: ONE reserved typed
+    /// `ActionIntent::Item` on a Strict seat, Mirror's legacy request,
+    /// unchanged, otherwise. Nothing is predicted (the bracket observes it).
     pub(crate) fn send_sleep_request(&mut self, pidx: usize, bed: [i32; 3]) {
         let hot = self.players[pidx].hotbar_slot;
-        let next_input = self.request_input_seq();
-        let seq = self.joiner_actions.record(
-            crate::joiner_actions::Pending {
-                kind: crate::joiner_actions::Asked::Sleep { bed },
-                mob: None,
-                hotbar_slot: hot,
-                held: None,
-            },
-            next_input,
-        );
-        self.send_request(crate::remote_client::Request::Item(crate::protocol::ItemActionPacket {
-            seq,
-            action: crate::protocol::ItemAction::Sleep { bed },
-            events_applied: 0,
-        }));
+        let pending = crate::joiner_actions::Pending {
+            kind: crate::joiner_actions::Asked::Sleep { bed },
+            mob: None,
+            hotbar_slot: hot,
+            held: None,
+        };
+        let action = crate::protocol::ItemAction::Sleep { bed };
+        let no_prediction = {
+            let p = &self.players[pidx];
+            crate::strict_requests::NoPrediction::begin(self.remote_client.as_ref(), &p.crafting_ui, &p.inventory, &p.armour_slots, "sleep")
+        };
+        self.route_item_request(pidx, pending, action);
+        let p = &self.players[pidx];
+        crate::strict_requests::NoPrediction::check(no_prediction, &p.crafting_ui, &p.inventory, &p.armour_slots);
     }
 
     /// C3b-2 — player `pidx` (a joiner) right-clicked the `kind` block at
@@ -22786,8 +22763,24 @@ impl super::GameState {
     /// Ask the authority to add an Explorer item to this window.
     fn request_creative_give(&mut self, pidx: usize, stack: &crate::item::ItemStack) {
         crate::plan_store::remember_item(&stack.item);
-        self.send_use_request(pidx, crate::joiner_actions::Asked::CreativeGive, None, 0,
-            crate::protocol::ItemAction::CreativeGive { item: crate::inventory::stack_to_wire(stack) });
+        let action = crate::protocol::ItemAction::CreativeGive { item: crate::inventory::stack_to_wire(stack) };
+        // C3d run 24 — a Strict seat reserves ONE typed give; only the
+        // routing differs from `send_use_request` (the same `can_afford`
+        // gate, the same record). Nothing is predicted: the give lands by
+        // its numbered `InventoryGrant`.
+        let asked = crate::joiner_actions::Asked::CreativeGive;
+        let p = &self.players[pidx];
+        if !self.joiner_actions.can_afford(&p.inventory, &p.crafting_ui, asked, None) {
+            return;
+        }
+        let no_prediction = {
+            let p = &self.players[pidx];
+            crate::strict_requests::NoPrediction::begin(self.remote_client.as_ref(), &p.crafting_ui, &p.inventory, &p.armour_slots, "creative give")
+        };
+        let pending = crate::joiner_actions::Pending { kind: asked, mob: None, hotbar_slot: 0, held: None };
+        self.route_item_request(pidx, pending, action);
+        let p = &self.players[pidx];
+        crate::strict_requests::NoPrediction::check(no_prediction, &p.crafting_ui, &p.inventory, &p.armour_slots);
     }
 
     /// C3c-2 — record and send player `pidx`'s (a joiner's) item action
@@ -22847,7 +22840,19 @@ impl super::GameState {
             charge: crate::shot::max_charge(weapon),
         };
         let asked = crate::joiner_actions::Asked::Shoot { weapon, material: tool.material };
-        self.send_use_request(pidx, asked, Some(ammo), hot, action)
+        // C3d run 13 — a Strict seat reserves ONE typed shot and predicts
+        // nothing (`strict_requests`); Mirror sends the legacy request.
+        let pending = crate::joiner_actions::Pending { kind: asked, mob: None, hotbar_slot: hot, held: Some(ammo.clone()) };
+        let p = &mut self.players[pidx];
+        match crate::strict_requests::route_shot(self.remote_client.as_mut(), &mut p.crafting_ui, &p.inventory, &p.armour_slots, &mut self.joiner_actions, pending, &action) {
+            Ok(crate::strict_requests::ShotRoute::Typed(_)) => true,
+            Ok(crate::strict_requests::ShotRoute::Unaffordable) => false,
+            Ok(crate::strict_requests::ShotRoute::Legacy) => self.send_use_request(pidx, asked, Some(ammo), hot, action),
+            Err(error) => {
+                log::warn!("Strict shot could not be reserved: {error}");
+                false
+            }
+        }
     }
 
     /// C3c-2 — player `pidx` (a joiner) places the cart in hand on the rail
@@ -23200,9 +23205,19 @@ impl super::GameState {
                     let fate = crate::joiner_actions::RequestFate::Sent { next_input_seq: client.next_input_seq() };
                     self.joiner_actions.settle(seq, fate);
                 }
-                let ops = match client.first_carried_stamp() {
-                    Some(cut) => p.crafting_ui.ops.take_before(Some(cut)),
-                    None => p.crafting_ui.take_ops(&p.inventory, &p.armour_slots),
+                let ops = if client.inventory_mode == crate::action_identity::InventoryMode::Strict {
+                    // C3d — a Strict client sends no legacy window op: its
+                    // settings go as reserved actions, every other op
+                    // through the reserving entry points (nothing is logged).
+                    // A logged one is a breach: it leaves the world with a
+                    // plain reason (run 4), never a silent discard.
+                    crate::remote_client::flush_strict_window_ops(client, &mut p.crafting_ui, &p.inventory, &p.armour_slots);
+                    Vec::new()
+                } else {
+                    match client.first_carried_stamp() {
+                        Some(cut) => p.crafting_ui.ops.take_before(Some(cut)),
+                        None => p.crafting_ui.take_ops(&p.inventory, &p.armour_slots),
+                    }
                 };
                 for logged in ops {
                     client.send_window_op(logged);
@@ -23279,8 +23294,24 @@ impl super::GameState {
 
     /// Wind/Copper/Electricity Task 2b — ask the host to right-click the power
     /// device at `pos` (a joiner). C3a-fix-1 — after the ops logged before it.
+    ///
+    /// C3d run 24 — a Strict seat reserves ONE typed `ActionIntent::Device`
+    /// naming player 0's hotbar slot (the server reaches with ITS copy's
+    /// item there; `strict_requests::route_device`); Mirror sends the legacy
+    /// request, unchanged. Nothing is predicted on either seat: the device
+    /// flips by the server's broadcast, and the bracket observes it.
     fn send_device_interact(&mut self, pos: (i32, i32, i32)) {
-        self.send_request(crate::remote_client::Request::Device(pos));
+        if !crate::strict_requests::shot_goes_typed(self.remote_client.as_ref()) {
+            self.send_request(crate::remote_client::Request::Device(pos));
+            return;
+        }
+        let Some(p) = self.players.first_mut() else { return };
+        let hot = u8::try_from(p.hotbar_slot).unwrap_or(u8::MAX);
+        let no_prediction = crate::strict_requests::NoPrediction::begin(self.remote_client.as_ref(), &p.crafting_ui, &p.inventory, &p.armour_slots, "device");
+        if let Err(error) = crate::strict_requests::route_device(self.remote_client.as_mut(), &mut p.crafting_ui, &p.inventory, &p.armour_slots, [pos.0, pos.1, pos.2], hot) {
+            log::warn!("Strict device right-click could not be reserved: {error}");
+        }
+        crate::strict_requests::NoPrediction::check(no_prediction, &p.crafting_ui, &p.inventory, &p.armour_slots);
     }
 
     /// C3a-fix-1 — player 0's hotbar slot and the item in it, as an edit's
@@ -23326,7 +23357,18 @@ impl super::GameState {
     /// server to apply it before that packet. The ops logged before them go
     /// out first, with the count before them. Then the acknowledgement that
     /// ends the requests' claims (joiner_actions N4). Not joined: dropped.
+    /// C3d run 17 (run-15 review LOW-2) — the typed attacks and shots whose
+    /// `Refused` or `Superseded` receipt retired are never answered: their
+    /// request records go, so a refused shot's ammo stops claiming at once.
+    fn release_retired_requests(&mut self) {
+        let Some(client) = self.remote_client.as_mut() else { return };
+        for seq in client.released_requests.drain(..) {
+            self.joiner_actions.release(seq);
+        }
+    }
+
     pub(crate) fn apply_window_inbox(&mut self) {
+        self.release_retired_requests();
         if self.window_inbox.is_empty() {
             return;
         }
@@ -23363,11 +23405,15 @@ impl super::GameState {
                 // OC (v88) — the replacement installs the correction debt it
                 // carries (the server's copy owes the same), never a reset.
                 crate::window_events::InboxItem::Outcome(crate::remote_client::RequestOutcome::Sync(pkt)) => {
+                    // C3d run 7 — only a Strict session takes the packet's
+                    // lock mask and station; Mirror keeps its own.
+                    let mode = self.remote_client.as_ref().map_or(crate::action_identity::InventoryMode::Mirror, |c| c.inventory_mode);
                     let p = &mut self.players[0];
                     let applied = crate::inventory_sync::apply(&mut crate::window::WindowMut { inv: &mut p.inventory,
                         armour: &mut p.armour_slots, cursor: &mut p.crafting_ui.cursor_item,
                         grid: &mut p.crafting_ui.grid, container: None }, &pkt, &self.registry, &mut self.sent_uses,
-                        &mut self.window_inbox.debt);
+                        &mut self.window_inbox.debt, mode);
+                    if let Ok(Some(station)) = applied { p.crafting_ui.adopt_station(station); }
                     p.crafting_ui.update_result();
                     // An owed list this client can't decode whole is a
                     // protocol error (A6): nothing was applied; leave.
@@ -23423,6 +23469,7 @@ impl super::GameState {
         if let Some(acked) = ack {
             self.joiner_actions.acknowledged(acked);
         }
+        self.release_retired_requests();
         if satori {
             self.audio.play_gem_pickup();
             self.toast = Some(("+1 Satori".to_string(), Instant::now() + std::time::Duration::from_secs(3)));

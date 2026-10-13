@@ -81,6 +81,20 @@ Use at least **0.5× the height of the capital A** around the wordmark. Around t
 | Environmental blue | Sky blue | `#3F7FBF` | World imagery and occasional informational states |
 | Supporting earth | Earth | `#8B5E3C` | Terrain/material accents |
 
+### UI surface tones
+
+These supporting shades derive from Deep Frontier. Keep body text Stone and
+secondary text readable; use copper for selected outlines, Sky for hover
+outlines and Lantern for keyboard/controller focus.
+
+| UI role | Hex | Use |
+|---|---|---|
+| Raised surface | `#15262A` | Cards and windows |
+| Hovered surface | `#203437` | Hovered controls |
+| Selected surface | `#273734` | Selected cards and controls |
+| Surface boundary | `#394E4F` | Quiet panel and slot borders |
+| Secondary text | `#A6B4B1` | Descriptions and metadata |
+
 ### Colour balance
 For brand-led screens, aim roughly for:
 - **55–70%** dark/neutral
