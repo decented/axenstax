@@ -176,9 +176,23 @@ impl HostedServer {
                     if !self.serve_strict_edit(i, packet.action, &change, hand, mined.as_ref(), old, budget) { return; }
                 }
                 ActionIntent::Item(req) if self.strict_slot(i) => {
-                    if let protocol::ItemAction::Shoot { weapon, hotbar_slot, held_kind, held_id, held_full, yaw, pitch, charge } = req.action.clone() {
-                        if !self.serve_strict_shot(i, packet.action, &req, weapon, hotbar_slot, (held_kind, held_id, held_full), Aim { yaw, pitch, charge }) { return; }
-                    } else { return self.pause_typed_action(i, StrictTeardown::Untyped, "Typed item handler is awaiting authoritative integration"); }
+                    match req.action.clone() {
+                        protocol::ItemAction::Shoot { weapon, hotbar_slot, held_kind, held_id, held_full, yaw, pitch, charge } => {
+                            if !self.serve_strict_shot(i, packet.action, &req, weapon, hotbar_slot, (held_kind, held_id, held_full), Aim { yaw, pitch, charge }) { return; }
+                        }
+                        // C3d run 24 — eating and a creative give (`strict_item.rs`).
+                        protocol::ItemAction::Eat { .. } => {
+                            if !self.serve_strict_eat(i, packet.action, &req) { return; }
+                        }
+                        protocol::ItemAction::CreativeGive { .. } => {
+                            if !self.serve_strict_creative_give(i, packet.action, &req) { return; }
+                        }
+                        _ => return self.pause_typed_action(i, StrictTeardown::Untyped, "Typed item handler is awaiting authoritative integration"),
+                    }
+                }
+                // C3d run 24 — a power device's right-click (`strict_item.rs`).
+                ActionIntent::Device { cell, hotbar_slot } if self.strict_slot(i) => {
+                    if !self.serve_strict_device(i, packet.action, cell, hotbar_slot) { return; }
                 }
                 // C3d run 18 — Decision 20 (`strict_door.rs`).
                 ActionIntent::DoorPlace { bottom, facing, hotbar_slot } if self.strict_slot(i) => {

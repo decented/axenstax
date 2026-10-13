@@ -30,6 +30,7 @@ mod strict_edit;
 mod strict_attack;
 mod strict_interact;
 mod strict_door;
+mod strict_item;
 #[cfg(test)]
 mod c3d_tests;
 #[cfg(test)]
@@ -56,6 +57,8 @@ mod c3d_client_shot_tests;
 mod c3d_client_attack_tests;
 #[cfg(test)]
 mod c3d_interact_tests;
+#[cfg(test)]
+mod c3d_item_tests;
 #[cfg(test)]
 mod c3d_wear_target_tests;
 #[cfg(test)]

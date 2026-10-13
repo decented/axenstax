@@ -202,6 +202,85 @@ pub fn route_interact(
     Ok(Some(header))
 }
 
+/// C3d run 24 — what a reserved typed eat, creative give or device
+/// right-click retains: the hotbar slot it names and the window it was made
+/// on (nothing is predicted, so also the window after it).
+#[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ItemRecipe {
+    pub slot: u8,
+    pub digest: u32,
+}
+
+/// C3d run 24 — route player 0's eat or creative give `packet` (an
+/// `ItemAction::Eat` or `ItemAction::CreativeGive`; its `events_applied` is
+/// stamped here), recorded as `pending`, as [`route_interact`] routes an
+/// interaction: on a Strict seat the refill setting, the record, ONE
+/// reserved `ActionIntent::Item`, the send, and `Some(header)`. Nothing is
+/// predicted: the food is taken only by the server's accepted outcome, a
+/// give lands only by its numbered `InventoryGrant`. `None` off a Strict
+/// seat: the caller sends the legacy `ItemAction`, unchanged.
+#[allow(clippy::too_many_arguments)]
+pub fn route_item(
+    remote: Option<&mut RemoteClient>,
+    ui: &mut CraftingUi,
+    inv: &Inventory,
+    armour: &[Option<ArmourItem>; 4],
+    actions: &mut JoinerActions,
+    pending: Pending,
+    mut packet: protocol::ItemActionPacket,
+) -> Result<Option<ActionHeader>, String> {
+    let Some(remote) = remote.filter(|r| shot_goes_typed(Some(&**r))) else { return Ok(None) };
+    debug_assert!(matches!(packet.action, protocol::ItemAction::Eat { .. } | protocol::ItemAction::CreativeGive { .. }), "route_item carries an eat or a give");
+    ui.sync_auto_refill_joined(remote, inv, armour)?;
+    let slot = u8::try_from(pending.hotbar_slot).unwrap_or(u8::MAX);
+    let recipe = ItemRecipe { slot, digest: ui.digest(inv, armour) };
+    let recipe = bincode::serialize(&recipe).map_err(|e| e.to_string())?.into_boxed_slice();
+    packet.seq = actions.record(pending, remote.next_input_seq());
+    packet.events_applied = remote.applied_window_boundary();
+    let seq = packet.seq;
+    let intent = crate::action_wire::ActionIntent::Item(packet);
+    debug_assert!(intent.predicts_nothing());
+    let header = match remote.reserve_action(intent, recipe, Box::new([])) {
+        Ok(header) => header,
+        Err(error) => {
+            actions.release(seq);
+            return Err(error);
+        }
+    };
+    if let Err(error) = remote.send_reserved_action(header) {
+        log::warn!("Reserved item action {} could not be sent: {error}", header.seq);
+    }
+    Ok(Some(header))
+}
+
+/// C3d run 24 — route player 0's right-click on the power device at `cell`
+/// made with hotbar `hotbar_slot` in hand (the server reaches with ITS
+/// copy's item there): on a Strict seat the refill setting, ONE reserved
+/// `ActionIntent::Device` (no request record: a device right-click has no
+/// outcome), the send, and `Some(header)`. Nothing is predicted: the device
+/// flips only by the server's broadcast. `None` off a Strict seat: the
+/// caller sends the legacy `DeviceInteract`, unchanged.
+pub fn route_device(
+    remote: Option<&mut RemoteClient>,
+    ui: &mut CraftingUi,
+    inv: &Inventory,
+    armour: &[Option<ArmourItem>; 4],
+    cell: [i32; 3],
+    hotbar_slot: u8,
+) -> Result<Option<ActionHeader>, String> {
+    let Some(remote) = remote.filter(|r| shot_goes_typed(Some(&**r))) else { return Ok(None) };
+    ui.sync_auto_refill_joined(remote, inv, armour)?;
+    let recipe = ItemRecipe { slot: hotbar_slot, digest: ui.digest(inv, armour) };
+    let recipe = bincode::serialize(&recipe).map_err(|e| e.to_string())?.into_boxed_slice();
+    let intent = crate::action_wire::ActionIntent::Device { cell, hotbar_slot };
+    debug_assert!(intent.predicts_nothing());
+    let header = remote.reserve_action(intent, recipe, Box::new([]))?;
+    if let Err(error) = remote.send_reserved_action(header) {
+        log::warn!("Reserved device right-click {} could not be sent: {error}", header.seq);
+    }
+    Ok(Some(header))
+}
+
 /// C3d run 17 (run-16 review LOW-1) — the observed half of
 /// `ActionIntent::predicts_nothing`: a Strict swing or shot changes nothing
 /// in the joined window before its answer, and the server relies on it (a
@@ -269,9 +348,9 @@ mod bracket_position_tests {
     /// the search run on to the next bracket's. Run 23: the interaction
     /// bracket encloses both the typed route and Mirror's legacy request.
     #[test]
-    fn c3d_no_prediction_brackets_enclose_the_swing_the_shot_and_the_interaction() {
+    fn c3d_no_prediction_brackets_enclose_the_swing_the_shot_the_interaction_the_eat_the_give_and_the_device() {
         let src = include_str!("game_loop.rs");
-        for (what, inside) in [("\"swing\")", &["self.send_entity_attack(pidx", "inventory.use_hotbar_tool(hotbar)"][..]), ("\"shot\")", &["self.send_shot(pidx, weapon)"][..]), ("\"interaction\")", &["strict_requests::route_interact(", "Request::Interact("][..])] {
+        for (what, inside) in [("\"swing\")", &["self.send_entity_attack(pidx", "inventory.use_hotbar_tool(hotbar)"][..]), ("\"shot\")", &["self.send_shot(pidx, weapon)"][..]), ("\"interaction\")", &["strict_requests::route_interact(", "Request::Interact("][..]), ("\"eat\")", &["self.route_item_request(pidx, pending, action)"][..]), ("\"creative give\")", &["self.route_item_request(pidx, pending, action)"][..]), ("\"device\")", &["strict_requests::route_device("][..])] {
             let begin = src.find(&format!("NoPrediction::begin(self.remote_client.as_ref(), &p.crafting_ui, &p.inventory, &p.armour_slots, {what}")).unwrap_or_else(|| panic!("the {what} bracket opens in the game loop"));
             let end = begin + src[begin..].find("NoPrediction::check(").unwrap_or_else(|| panic!("the {what} bracket closes"));
             // C3d run 21 (run-18 review L1) — the close found is THIS

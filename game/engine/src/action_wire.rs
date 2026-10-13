@@ -63,9 +63,17 @@ impl ActionIntent {
     /// only from the server's accepted outcome and grants
     /// (`joiner_actions::apply_outcome`); the game loop's `"interaction"`
     /// bracket observes it.
+    ///
+    /// C3d run 24 — an eat, a creative give and a power device's
+    /// right-click too: the food is taken (and the body fed) only by the
+    /// server's accepted outcome — the client's eat cooldown paces its clicks
+    /// and is not window or world state; a give lands only by its numbered
+    /// `InventoryGrant`; a device flips only by the server's broadcast. The
+    /// game loop's `"eat"`, `"creative give"` and `"device"` brackets observe
+    /// it.
     pub fn predicts_nothing(&self) -> bool {
-        matches!(self, ActionIntent::Attack(_) | ActionIntent::Interact(_))
-            || matches!(self, ActionIntent::Item(p) if matches!(p.action, protocol::ItemAction::Shoot { .. }))
+        matches!(self, ActionIntent::Attack(_) | ActionIntent::Interact(_) | ActionIntent::Device { .. })
+            || matches!(self, ActionIntent::Item(p) if matches!(p.action, protocol::ItemAction::Shoot { .. } | protocol::ItemAction::Eat { .. } | protocol::ItemAction::CreativeGive { .. }))
     }
 }
 

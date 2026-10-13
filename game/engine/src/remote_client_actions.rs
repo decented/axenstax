@@ -222,7 +222,8 @@ fn unanswered_request(intent: &[u8]) -> Option<u32> {
     match crate::action_wire::ActionPacket::decode(intent).ok()?.intent {
         crate::action_wire::ActionIntent::Attack(p) => Some(p.seq),
         crate::action_wire::ActionIntent::Interact(p) => Some(p.seq),
-        crate::action_wire::ActionIntent::Item(p) if matches!(p.action, protocol::ItemAction::Shoot { .. }) => Some(p.seq),
+        // C3d run 24 — and of a typed eat or creative give.
+        crate::action_wire::ActionIntent::Item(p) if matches!(p.action, protocol::ItemAction::Shoot { .. } | protocol::ItemAction::Eat { .. } | protocol::ItemAction::CreativeGive { .. }) => Some(p.seq),
         _ => None,
     }
 }

@@ -22288,19 +22288,38 @@ impl super::GameState {
         if !self.joiner_actions.can_afford(&p.inventory, &p.crafting_ui, asked, held.as_ref()) {
             return;
         }
+        let pending = crate::joiner_actions::Pending { kind: asked, mob: None, hotbar_slot: hot, held };
+        let action = crate::protocol::ItemAction::Eat { hotbar_slot: hot as u8, held_kind, held_id, held_full };
+        // C3d run 24 — nothing is predicted for an eat on either seat (the
+        // food goes, and the body is fed, by the server's answer), and a
+        // Strict server relies on it: the bracket observes it.
+        let no_prediction = {
+            let p = &self.players[pidx];
+            crate::strict_requests::NoPrediction::begin(self.remote_client.as_ref(), &p.crafting_ui, &p.inventory, &p.armour_slots, "eat")
+        };
+        self.route_item_request(pidx, pending, action);
+        let p = &self.players[pidx];
+        crate::strict_requests::NoPrediction::check(no_prediction, &p.crafting_ui, &p.inventory, &p.armour_slots);
+    }
+
+    /// C3d run 24 — record and send player `pidx`'s (a joiner's) eat or
+    /// creative give: ONE reserved typed `ActionIntent::Item` on a Strict
+    /// seat (`strict_requests::route_item`), Mirror's legacy request,
+    /// unchanged, otherwise.
+    fn route_item_request(&mut self, pidx: usize, pending: crate::joiner_actions::Pending, action: crate::protocol::ItemAction) {
+        if crate::strict_requests::shot_goes_typed(self.remote_client.as_ref()) {
+            let packet = crate::protocol::ItemActionPacket { seq: 0, action, events_applied: 0 };
+            let p = &mut self.players[pidx];
+            if let Err(error) = crate::strict_requests::route_item(self.remote_client.as_mut(), &mut p.crafting_ui, &p.inventory, &p.armour_slots, &mut self.joiner_actions, pending, packet) {
+                log::warn!("Strict item action could not be reserved: {error}");
+            }
+            return;
+        }
         let next_input = self.request_input_seq();
-        let seq = self.joiner_actions.record(
-            crate::joiner_actions::Pending { kind: asked, mob: None, hotbar_slot: hot, held },
-            next_input,
-        );
+        let seq = self.joiner_actions.record(pending, next_input);
         self.send_request(crate::remote_client::Request::Item(crate::protocol::ItemActionPacket {
             seq,
-            action: crate::protocol::ItemAction::Eat {
-                hotbar_slot: hot as u8,
-                held_kind,
-                held_id,
-                held_full,
-            },
+            action,
             // Stamped by `RemoteClient::send_item_action`.
             events_applied: 0,
         }));
@@ -22563,8 +22582,24 @@ impl super::GameState {
     /// Ask the authority to add an Explorer item to this window.
     fn request_creative_give(&mut self, pidx: usize, stack: &crate::item::ItemStack) {
         crate::plan_store::remember_item(&stack.item);
-        self.send_use_request(pidx, crate::joiner_actions::Asked::CreativeGive, None, 0,
-            crate::protocol::ItemAction::CreativeGive { item: crate::inventory::stack_to_wire(stack) });
+        let action = crate::protocol::ItemAction::CreativeGive { item: crate::inventory::stack_to_wire(stack) };
+        // C3d run 24 — a Strict seat reserves ONE typed give; only the
+        // routing differs from `send_use_request` (the same `can_afford`
+        // gate, the same record). Nothing is predicted: the give lands by
+        // its numbered `InventoryGrant`.
+        let asked = crate::joiner_actions::Asked::CreativeGive;
+        let p = &self.players[pidx];
+        if !self.joiner_actions.can_afford(&p.inventory, &p.crafting_ui, asked, None) {
+            return;
+        }
+        let no_prediction = {
+            let p = &self.players[pidx];
+            crate::strict_requests::NoPrediction::begin(self.remote_client.as_ref(), &p.crafting_ui, &p.inventory, &p.armour_slots, "creative give")
+        };
+        let pending = crate::joiner_actions::Pending { kind: asked, mob: None, hotbar_slot: 0, held: None };
+        self.route_item_request(pidx, pending, action);
+        let p = &self.players[pidx];
+        crate::strict_requests::NoPrediction::check(no_prediction, &p.crafting_ui, &p.inventory, &p.armour_slots);
     }
 
     /// C3c-2 — record and send player `pidx`'s (a joiner's) item action
@@ -23076,8 +23111,24 @@ impl super::GameState {
 
     /// Wind/Copper/Electricity Task 2b — ask the host to right-click the power
     /// device at `pos` (a joiner). C3a-fix-1 — after the ops logged before it.
+    ///
+    /// C3d run 24 — a Strict seat reserves ONE typed `ActionIntent::Device`
+    /// naming player 0's hotbar slot (the server reaches with ITS copy's
+    /// item there; `strict_requests::route_device`); Mirror sends the legacy
+    /// request, unchanged. Nothing is predicted on either seat: the device
+    /// flips by the server's broadcast, and the bracket observes it.
     fn send_device_interact(&mut self, pos: (i32, i32, i32)) {
-        self.send_request(crate::remote_client::Request::Device(pos));
+        if !crate::strict_requests::shot_goes_typed(self.remote_client.as_ref()) {
+            self.send_request(crate::remote_client::Request::Device(pos));
+            return;
+        }
+        let Some(p) = self.players.first_mut() else { return };
+        let hot = u8::try_from(p.hotbar_slot).unwrap_or(u8::MAX);
+        let no_prediction = crate::strict_requests::NoPrediction::begin(self.remote_client.as_ref(), &p.crafting_ui, &p.inventory, &p.armour_slots, "device");
+        if let Err(error) = crate::strict_requests::route_device(self.remote_client.as_mut(), &mut p.crafting_ui, &p.inventory, &p.armour_slots, [pos.0, pos.1, pos.2], hot) {
+            log::warn!("Strict device right-click could not be reserved: {error}");
+        }
+        crate::strict_requests::NoPrediction::check(no_prediction, &p.crafting_ui, &p.inventory, &p.armour_slots);
     }
 
     /// C3a-fix-1 — player 0's hotbar slot and the item in it, as an edit's
