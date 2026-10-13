@@ -522,11 +522,12 @@ impl MenuState {
             return;
         }
         let promoted = crate::handover_game::promote_activated_imports();
-        self.handover_poll.ran(&promoted, now);
+        let released = self.handover_poll.ran(&promoted, now);
         let awaiting = crate::handover_game::awaiting_import_statuses();
         // CP22 (CP21 review LOW-1): re-list whenever the waiting lines
-        // changed too (another process may have moved the world in).
-        if promoted.moved.is_empty() && awaiting == self.awaiting_imports {
+        // changed too (another process may have moved the world in), and
+        // CP24 (CP22 review LOW-1) once a held import is held no more.
+        if promoted.moved.is_empty() && awaiting == self.awaiting_imports && !released {
             return;
         }
         self.awaiting_imports = awaiting;

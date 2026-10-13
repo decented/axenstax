@@ -106,9 +106,15 @@ impl LobbyPoll {
         self.retry.is_some_and(|t| now.duration_since(t) >= Self::RETRY)
     }
 
-    /// Record a pass's outcome.
-    pub fn ran(&mut self, promoted: &Promoted, now: std::time::Instant) {
+    /// Record a pass's outcome. Returns whether the previous pass found a
+    /// held import and this one found none: CP24 (CP22 review LOW-1) the
+    /// lobby re-lists then, since another copy of the game may have moved
+    /// the import in meanwhile (this pass then moves nothing and no waiting
+    /// line changes).
+    pub fn ran(&mut self, promoted: &Promoted, now: std::time::Instant) -> bool {
+        let was_held = self.retry.is_some();
         self.retry = promoted.held.then_some(now);
+        was_held && !promoted.held
     }
 }
 
@@ -378,6 +384,32 @@ fn free_folder(worlds_root: &Path, display: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// CP24 (CP22 review LOW-1 + LOW-4): the lobby's poll. An activation
+    /// (on another thread) makes a pass due on the next frame; while a pass
+    /// finds a held import, passes repeat no sooner than every 500 ms; the
+    /// first pass that finds none after a held one asks for a re-list.
+    #[test]
+    fn handover_promote_lobby_poll_relists_once_a_held_import_is_let_go() {
+        use super::{LobbyPoll, Promoted};
+        use std::time::{Duration, Instant};
+        let start = Instant::now();
+        let mut poll = LobbyPoll::new(7, false, start);
+        assert!(!poll.due(7, start), "a pass ran with nothing new");
+        let seen = std::thread::spawn(|| 8u64).join().unwrap();
+        assert!(poll.due(seen, start), "another thread's activation wasn't seen on the next frame");
+        let held = Promoted { held: true, ..Default::default() };
+        assert!(!poll.ran(&held, start), "a held pass asked for a re-list");
+        assert!(!poll.due(8, start + Duration::from_millis(499)), "the held retry came before 500 ms");
+        assert!(poll.due(8, start + LobbyPoll::RETRY), "the held retry never came");
+        assert!(!poll.ran(&held, start + LobbyPoll::RETRY), "a second held pass asked for a re-list");
+        assert!(
+            poll.ran(&Promoted::default(), start + LobbyPoll::RETRY * 2),
+            "the pass after a held import was let go (moved elsewhere) didn't ask for a re-list"
+        );
+        assert!(!poll.due(8, start + LobbyPoll::RETRY * 4), "a pass ran with nothing held or new");
+        assert!(!poll.ran(&Promoted::default(), start + LobbyPoll::RETRY * 4), "an idle pass asked for a re-list");
+    }
+
     fn root(tag: &str) -> std::path::PathBuf {
         let mut r = [0u8; 8];
         getrandom::fill(&mut r).unwrap();
