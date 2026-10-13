@@ -180,6 +180,44 @@ impl HostedServer {
         true
     }
 
+    /// C3d run 25 — a Strict seat's typed `Sleep` in the bed at `bed`:
+    /// Mirror's rule (`item_actions::serve_sleep`: a living body, a bed
+    /// there, in reach, night, not slept tonight), the spawn set at the bed
+    /// and the body healed as the server already does for every joiner. No
+    /// item and no window event: the client claims nothing and predicts
+    /// nothing (its spawn is set by the accepted outcome), so every refusal
+    /// is a world fact — the outcome's note and a `Refused` row,
+    /// uncorrected. A dead body never reaches here (superseded).
+    pub(super) fn serve_strict_sleep(&mut self, i: usize, action: ActionHeader, req: &protocol::ItemActionPacket, bed: [i32; 3]) -> bool {
+        let server = &mut self.server;
+        // C2a verify L1 — show the calendar the clock first (idempotent).
+        server.night_calendar.observe(server.world_time);
+        let (world_time, tonight) = (server.world_time, server.night_calendar.tonight());
+        let sp = &server.players[i];
+        let judged = crate::item_actions::judge_sleep(
+            crate::item_actions::can_act(sp),
+            server.world.get_block(bed[0], bed[1], bed[2]),
+            crate::item_actions::bed_in_reach(sp.player.eye_pos(), bed),
+            crate::item_actions::is_night(&server.world, world_time),
+            tonight,
+            sp.slept_night,
+        );
+        if let Err(note) = judged { return self.refuse_item_world_fact(i, action, req, note); }
+        let included = self.server.players[i].window_events.last_number();
+        let outcome = protocol::ItemActionOutcomePacket { seq: req.seq, accepted: true, consume_held: 0, note: ItemNote::None.to_wire(), window_event: 0, wear_held: false, bite_after: 0 };
+        let packet = protocol::serialize_packet(protocol::PacketType::ItemActionOutcome, &outcome);
+        let Some(result) = self.prepare_typed_result(i, action, ActionFate::Accepted, included) else {
+            self.pause_typed_action(i, StrictTeardown::FellBehind, "Sleep result history is full"); return false;
+        };
+        // Judged above; Mirror's own run sets the spawn and heals.
+        let server = &mut self.server;
+        let slept = crate::item_actions::serve_sleep(&mut server.players[i], &server.world, world_time, tonight, bed);
+        debug_assert!(slept.is_ok(), "judged before the result row");
+        self.complete_typed_result(i, action, ActionFate::Accepted, result);
+        self.send_to_joined_slot(i, &packet);
+        true
+    }
+
     /// A world fact refuses joiner `i`'s eat or give: Mirror's
     /// `ItemActionOutcome { accepted: false, note }`, then the `Refused` row
     /// alone, uncorrected (the client predicted nothing).

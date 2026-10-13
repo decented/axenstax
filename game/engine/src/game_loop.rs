@@ -22343,6 +22343,18 @@ impl super::GameState {
         if !self.joiner_actions.can_spend(&p.inventory, &p.crafting_ui, &held, 1) {
             return;
         }
+        // C3d run 25 — a Strict seat reserves ONE typed drop BEFORE the
+        // hand changes, then takes the item (predicted; every refusal is
+        // corrected) and sends it (`strict_requests::route_drop`).
+        if crate::strict_requests::shot_goes_typed(self.remote_client.as_ref()) {
+            let p = &mut self.players[pidx];
+            match crate::strict_requests::route_drop(self.remote_client.as_mut(), &mut p.crafting_ui, &mut p.inventory, &mut p.armour_slots, slot, &self.registry) {
+                Ok(Some(_)) => p.drop_ready_tick = now + crate::item_actions::DROP_INTERVAL_TICKS,
+                Ok(None) => {}
+                Err(error) => log::warn!("Strict drop could not be reserved: {error}"),
+            }
+            return;
+        }
         let p = &mut self.players[pidx];
         let Some(stack) = p.inventory.take_one_from_hotbar(slot) else { return };
         p.drop_ready_tick = now + crate::item_actions::DROP_INTERVAL_TICKS;
@@ -22510,23 +22522,26 @@ impl super::GameState {
     /// C2a — ask the server to let player `pidx` (a joiner) sleep in the bed
     /// at `bed`. Claims nothing; an accepted outcome sets our spawn point
     /// there (the server set its own).
+    ///
+    /// C3d run 25 — through [`Self::route_item_request`]: ONE reserved typed
+    /// `ActionIntent::Item` on a Strict seat, Mirror's legacy request,
+    /// unchanged, otherwise. Nothing is predicted (the bracket observes it).
     pub(crate) fn send_sleep_request(&mut self, pidx: usize, bed: [i32; 3]) {
         let hot = self.players[pidx].hotbar_slot;
-        let next_input = self.request_input_seq();
-        let seq = self.joiner_actions.record(
-            crate::joiner_actions::Pending {
-                kind: crate::joiner_actions::Asked::Sleep { bed },
-                mob: None,
-                hotbar_slot: hot,
-                held: None,
-            },
-            next_input,
-        );
-        self.send_request(crate::remote_client::Request::Item(crate::protocol::ItemActionPacket {
-            seq,
-            action: crate::protocol::ItemAction::Sleep { bed },
-            events_applied: 0,
-        }));
+        let pending = crate::joiner_actions::Pending {
+            kind: crate::joiner_actions::Asked::Sleep { bed },
+            mob: None,
+            hotbar_slot: hot,
+            held: None,
+        };
+        let action = crate::protocol::ItemAction::Sleep { bed };
+        let no_prediction = {
+            let p = &self.players[pidx];
+            crate::strict_requests::NoPrediction::begin(self.remote_client.as_ref(), &p.crafting_ui, &p.inventory, &p.armour_slots, "sleep")
+        };
+        self.route_item_request(pidx, pending, action);
+        let p = &self.players[pidx];
+        crate::strict_requests::NoPrediction::check(no_prediction, &p.crafting_ui, &p.inventory, &p.armour_slots);
     }
 
     /// C3b-2 — player `pidx` (a joiner) right-clicked the `kind` block at

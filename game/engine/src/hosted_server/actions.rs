@@ -73,6 +73,17 @@ impl HostedServer {
             let Some(queued) = sp.action_queue.as_ref().and_then(|q| q.front()) else { return };
             let Ok(packet) = ActionPacket::decode(&queued.payload) else { return self.strict_bridge_teardown(i, StrictTeardown::Unreadable, "Retained action could not decode") };
             let is_window = matches!(packet.intent, ActionIntent::Window(_));
+            // C3d run 25 — a Strict seat's typed Q-drop waits at the head
+            // until the joiner's drop bucket holds a token (Mirror's pacing,
+            // `waits_for_kind_budget`), never refused for it: an honest
+            // client paced by its own `drop_ready_tick` is never corrected
+            // for clock jitter (`strict_drop.rs`).
+            if self.strict_slot(i)
+                && matches!(&packet.intent, ActionIntent::Item(req) if matches!(req.action, protocol::ItemAction::Drop { .. }))
+                && !sp.drop_bucket.ready(self.server.tick_counter)
+            {
+                return;
+            }
             // C3d run 6 — a typed edit counts against the tick's edit budget
             // (the same `MAX_BLOCK_CHANGES_PER_TICK` legacy edits share), not
             // the item counter; past it the head waits for the next tick.
@@ -186,6 +197,13 @@ impl HostedServer {
                         }
                         protocol::ItemAction::CreativeGive { .. } => {
                             if !self.serve_strict_creative_give(i, packet.action, &req) { return; }
+                        }
+                        // C3d run 25 — a Q-drop (`strict_drop.rs`) and a sleep (`strict_item.rs`).
+                        protocol::ItemAction::Drop { .. } => {
+                            if !self.serve_strict_drop(i, packet.action, &req) { return; }
+                        }
+                        protocol::ItemAction::Sleep { bed } => {
+                            if !self.serve_strict_sleep(i, packet.action, &req, bed) { return; }
                         }
                         _ => return self.pause_typed_action(i, StrictTeardown::Untyped, "Typed item handler is awaiting authoritative integration"),
                     }

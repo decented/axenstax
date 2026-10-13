@@ -31,6 +31,7 @@ mod strict_attack;
 mod strict_interact;
 mod strict_door;
 mod strict_item;
+mod strict_drop;
 #[cfg(test)]
 mod c3d_tests;
 #[cfg(test)]
@@ -59,6 +60,8 @@ mod c3d_client_attack_tests;
 mod c3d_interact_tests;
 #[cfg(test)]
 mod c3d_item_tests;
+#[cfg(test)]
+mod c3d_drop_sleep_tests;
 #[cfg(test)]
 mod c3d_wear_target_tests;
 #[cfg(test)]

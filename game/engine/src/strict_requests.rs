@@ -230,7 +230,7 @@ pub fn route_item(
     mut packet: protocol::ItemActionPacket,
 ) -> Result<Option<ActionHeader>, String> {
     let Some(remote) = remote.filter(|r| shot_goes_typed(Some(&**r))) else { return Ok(None) };
-    debug_assert!(matches!(packet.action, protocol::ItemAction::Eat { .. } | protocol::ItemAction::CreativeGive { .. }), "route_item carries an eat or a give");
+    debug_assert!(matches!(packet.action, protocol::ItemAction::Eat { .. } | protocol::ItemAction::CreativeGive { .. } | protocol::ItemAction::Sleep { .. }), "route_item carries an eat, a give or a sleep");
     ui.sync_auto_refill_joined(remote, inv, armour)?;
     let slot = u8::try_from(pending.hotbar_slot).unwrap_or(u8::MAX);
     let recipe = ItemRecipe { slot, digest: ui.digest(inv, armour) };
@@ -249,6 +249,65 @@ pub fn route_item(
     };
     if let Err(error) = remote.send_reserved_action(header) {
         log::warn!("Reserved item action {} could not be sent: {error}", header.seq);
+    }
+    Ok(Some(header))
+}
+
+/// C3d run 25 — what a reserved typed Q-drop retains: the hotbar slot,
+/// the window AFTER the predicted take and the changed places' initial
+/// sources (`strict_edits::EditRecipe`'s shape), for a recovery rebase.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct DropRecipe {
+    pub slot: u8,
+    pub digest: u32,
+    pub sources: crate::action_wire::BoundedList<protocol::WireSlot, 50>,
+}
+
+/// C3d run 25 — route player 0's Q-drop of one of what is in hotbar `slot`
+/// on a Strict seat: the refill setting, ONE reserved `ActionIntent::Item`
+/// (`ItemAction::Drop`, the claim read BEFORE the take) — then, and only
+/// then, the predicted take (`Inventory::take_one_from_hotbar`, the
+/// server stages the same) — then the send. `Some(header)`; `Ok(None)`
+/// with an empty slot or a Plan (a joined client keeps a Plan), nothing
+/// changed. A failed reservation changes nothing. `None` off a Strict seat
+/// is the caller's: it sends the legacy drop, unchanged.
+pub fn route_drop(
+    remote: Option<&mut RemoteClient>,
+    ui: &mut CraftingUi,
+    inv: &mut Inventory,
+    armour: &mut [Option<ArmourItem>; 4],
+    slot: usize,
+    registry: &crate::block::BlockRegistry,
+) -> Result<Option<ActionHeader>, String> {
+    let Some(remote) = remote.filter(|r| shot_goes_typed(Some(&**r))) else { return Ok(None) };
+    let slot_u8 = u8::try_from(slot).ok().filter(|s| *s < 9).ok_or("A drop needs a hotbar slot")?;
+    let Some(held) = inv.hotbar_slot(slot).map(|s| s.item.clone()) else { return Ok(None) };
+    if matches!(held, crate::item::Item::Plan(_)) { return Ok(None); }
+    ui.sync_auto_refill_joined(remote, inv, armour)?;
+    crate::window_prediction::retain_private_window(inv, &ui.cursor_item, &ui.grid)?;
+    let raw = crate::staged_window::MarkerWindow::capture_parts(inv, armour, &ui.cursor_item, &ui.grid, registry);
+    let mut after = raw.clone();
+    let _ = after.view().inv.take_one_from_hotbar(slot);
+    let (before, now) = (raw.slots(), after.slots());
+    let sources: Vec<protocol::WireSlot> = (0..crate::staged_window::PLAYER_PLACES)
+        .map(|i| if before[i] != now[i] { before[i].clone() } else { None })
+        .collect();
+    let recipe = DropRecipe { slot: slot_u8, digest: after.digest_with(ui.station(), None), sources: crate::action_wire::BoundedList::new(sources)? };
+    let recipe = bincode::serialize(&recipe).map_err(|e| e.to_string())?.into_boxed_slice();
+    let (held_kind, held_id) = crate::inventory::item_to_ref(&held).to_wire();
+    let held_full = crate::inventory::item_to_wire_full(&held);
+    let packet = protocol::ItemActionPacket {
+        seq: 0,
+        action: protocol::ItemAction::Drop { hotbar_slot: slot_u8, held_kind, held_id, held_full },
+        events_applied: remote.applied_window_boundary(),
+    };
+    let intent = crate::action_wire::ActionIntent::Item(packet);
+    debug_assert!(!intent.predicts_nothing(), "a drop is predicted: its refusals are corrected");
+    let header = remote.reserve_action(intent, recipe, Box::new([]))?;
+    // Reserved: now the hand changes (the same take the server stages).
+    let _ = inv.take_one_from_hotbar(slot);
+    if let Err(error) = remote.send_reserved_action(header) {
+        log::warn!("Reserved drop {} could not be sent: {error}", header.seq);
     }
     Ok(Some(header))
 }
@@ -350,7 +409,7 @@ mod bracket_position_tests {
     #[test]
     fn c3d_no_prediction_brackets_enclose_the_swing_the_shot_the_interaction_the_eat_the_give_and_the_device() {
         let src = include_str!("game_loop.rs");
-        for (what, inside) in [("\"swing\")", &["self.send_entity_attack(pidx", "inventory.use_hotbar_tool(hotbar)"][..]), ("\"shot\")", &["self.send_shot(pidx, weapon)"][..]), ("\"interaction\")", &["strict_requests::route_interact(", "Request::Interact("][..]), ("\"eat\")", &["self.route_item_request(pidx, pending, action)"][..]), ("\"creative give\")", &["self.route_item_request(pidx, pending, action)"][..]), ("\"device\")", &["strict_requests::route_device("][..])] {
+        for (what, inside) in [("\"swing\")", &["self.send_entity_attack(pidx", "inventory.use_hotbar_tool(hotbar)"][..]), ("\"shot\")", &["self.send_shot(pidx, weapon)"][..]), ("\"interaction\")", &["strict_requests::route_interact(", "Request::Interact("][..]), ("\"eat\")", &["self.route_item_request(pidx, pending, action)"][..]), ("\"creative give\")", &["self.route_item_request(pidx, pending, action)"][..]), ("\"device\")", &["strict_requests::route_device("][..]), ("\"sleep\")", &["self.route_item_request(pidx, pending, action)"][..])] {
             let begin = src.find(&format!("NoPrediction::begin(self.remote_client.as_ref(), &p.crafting_ui, &p.inventory, &p.armour_slots, {what}")).unwrap_or_else(|| panic!("the {what} bracket opens in the game loop"));
             let end = begin + src[begin..].find("NoPrediction::check(").unwrap_or_else(|| panic!("the {what} bracket closes"));
             // C3d run 21 (run-18 review L1) — the close found is THIS

@@ -71,9 +71,15 @@ impl ActionIntent {
     /// `InventoryGrant`; a device flips only by the server's broadcast. The
     /// game loop's `"eat"`, `"creative give"` and `"device"` brackets observe
     /// it.
+    ///
+    /// C3d run 25 — a sleep too: it claims nothing, and the client's spawn
+    /// is set only by the server's accepted outcome (the game loop's
+    /// `"sleep"` bracket). A Q-drop is NOT here: the client takes the item
+    /// from its hand when it reserves the drop, so every drop refusal is
+    /// corrected (`strict_drop.rs`).
     pub fn predicts_nothing(&self) -> bool {
         matches!(self, ActionIntent::Attack(_) | ActionIntent::Interact(_) | ActionIntent::Device { .. })
-            || matches!(self, ActionIntent::Item(p) if matches!(p.action, protocol::ItemAction::Shoot { .. } | protocol::ItemAction::Eat { .. } | protocol::ItemAction::CreativeGive { .. }))
+            || matches!(self, ActionIntent::Item(p) if matches!(p.action, protocol::ItemAction::Shoot { .. } | protocol::ItemAction::Eat { .. } | protocol::ItemAction::CreativeGive { .. } | protocol::ItemAction::Sleep { .. }))
     }
 }
 
