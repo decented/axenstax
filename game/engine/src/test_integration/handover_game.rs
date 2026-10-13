@@ -108,9 +108,6 @@ impl Drop for Tmp {
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
-fn recipient_env(dir: &Path) -> RecipientEnv {
-    recipient_env_at(dir.join("imports"))
-}
 fn recipient_env_at(imports: PathBuf) -> RecipientEnv {
     RecipientEnv { identity: identity(), imports }
 }
@@ -1213,7 +1210,8 @@ fn cancel_after_disclosure_rotates_the_invite(tag: &str, at: SourceStage) {
     let (old_bearer, old_link, root) = (host.live_bearer(now()), host.invite_link(), host.root_context(now()).unwrap().digest());
     assert!(old_bearer.is_some(), "no live invitation to rotate");
     hg.state.online_host = Some(host);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    let started = std::time::Instant::now();
+    let deadline = started + std::time::Duration::from_secs(120);
     while source_stage(&hg) != Some(at) && std::time::Instant::now() < deadline {
         let _ = far.dst.as_mut().unwrap().pump(now());
         if at == SourceStage::Prepared
@@ -1225,7 +1223,14 @@ fn cancel_after_disclosure_rotates_the_invite(tag: &str, at: SourceStage) {
         round(&mut hg);
     }
     // The click is handled before the next pump, so Cancel lands in `at`.
-    assert_eq!(source_stage(&hg), Some(at), "the host game never reached {at:?}");
+    // CP22 (CP21 review LOW-6): where the far recipient was, and how long.
+    assert_eq!(
+        source_stage(&hg),
+        Some(at),
+        "the host game never reached {at:?} (far recipient at {:?} after {:?})",
+        far.dst.as_ref().map(|d| d.stage()),
+        started.elapsed()
+    );
     hg.state.handover_click = Some(UiAction::Cancel);
     hg.frames(1);
     assert!(hg.state.handover.is_none(), "Cancel in {at:?} didn't end the source session");

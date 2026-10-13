@@ -2677,6 +2677,8 @@ mod session {
         // CP21: `end_aborted` makes the quarantine durable, THEN removes the
         // receipt (two writes); on a slow disk (the ecryptfs test folder)
         // the poll above lands between them.
+        // CP22 (CP21 review LOW-6): its own bound, not what the first wait left.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         while has_record(&dir, "prepared", t) {
             assert!(std::time::Instant::now() < deadline, "the published Aborted left the receipt");
             std::thread::sleep(std::time::Duration::from_millis(20));

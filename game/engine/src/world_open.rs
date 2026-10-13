@@ -293,7 +293,7 @@ pub(crate) fn server_refusal_message(name: &str, why: &str) -> String {
 #[cfg(not(target_arch = "wasm32"))]
 /// CP21 (CP19 review HIGH-1): the Trial's folder holds a handed-over world.
 pub(crate) const ARENA_HOLDS_A_HANDOVER: &str =
-    "This Trial's folder holds a world that was handed over, so the Trial won't start there. That world is safe in your world list.";
+    "This Trial's folder holds a world that was handed over or is being handed over, so the Trial won't start there. If you no longer need that world, delete it from your world list to play this Trial.";
 
 /// How a Trial arena launch treats its folder, decided from what is ON DISK and
 /// before anything is written (Spec 02 §8.4). A world is there when

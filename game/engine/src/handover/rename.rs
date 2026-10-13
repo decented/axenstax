@@ -5,7 +5,9 @@
 //! (`live::promote::rename_no_replace`).
 //!
 //! Linux and Android: `renameat2(RENAME_NOREPLACE)`, atomic (EEXIST if
-//! anything is there). macOS: `renamex_np(RENAME_EXCL)`, atomic.
+//! anything is there). macOS: `renamex_np(RENAME_EXCL)`, atomic. Windows:
+//! `MoveFileExW` with no flags, atomic (fails if anything is there; CP22,
+//! CP19 review MEDIUM-3). Other platforms: check-then-rename.
 //!
 //! CP21 (CP19 review MEDIUM-2, DECIDED): a filesystem without the
 //! no-replace flag (NFS, FUSE without rename2, ecryptfs home folders —
@@ -97,12 +99,31 @@ fn atomic(from: &Path, to: &Path) -> io::Result<()> {
     if r == 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
 }
 
+/// CP22 (CP19 review MEDIUM-3, DECIDED): `MoveFileExW(from, to, 0)`
+/// directly. std's `rename` would retry a directory target with
+/// `FileRenameInfoEx` + `REPLACE_IF_EXISTS`, which replaces an EMPTY folder
+/// on Windows 10 1607+; without `MOVEFILE_REPLACE_EXISTING` the move fails
+/// atomically if anything is at `to` (ERROR_ALREADY_EXISTS /
+/// ERROR_FILE_EXISTS, both `AlreadyExists`). No new crate: one `kernel32`
+/// declaration. Paths go over as given (no `\\?\` prefix), so a path past
+/// MAX_PATH on a system without long paths enabled fails closed. Not run on
+/// Windows here (no Windows target installed on the dev machine).
 #[cfg(target_os = "windows")]
 fn atomic(from: &Path, to: &Path) -> io::Result<()> {
-    // BRIDGE: std's rename falls back to a replacing rename for a directory
-    // target — replace with a direct MoveFileExW(from, to, 0) (CP19 review
-    // MEDIUM-3, next commit).
-    check_then_rename(from, to)
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn MoveFileExW(existing: *const u16, new: *const u16, flags: u32) -> i32;
+    }
+    let wide = |p: &Path| -> Vec<u16> { p.as_os_str().encode_wide().chain(std::iter::once(0)).collect() };
+    let (f, t) = (wide(from), wide(to));
+    if f[..f.len() - 1].contains(&0) || t[..t.len() - 1].contains(&0) {
+        return Err(io::Error::from(io::ErrorKind::InvalidInput));
+    }
+    // SAFETY: two NUL-terminated UTF-16 paths that outlive the call; flags 0
+    // (no MOVEFILE_REPLACE_EXISTING, no copy) never replaces the target.
+    let ok = unsafe { MoveFileExW(f.as_ptr(), t.as_ptr(), 0) };
+    if ok != 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos", target_os = "windows")))]

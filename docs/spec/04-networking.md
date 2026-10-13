@@ -6351,17 +6351,32 @@ case, with or without an extension), so a world called "The Workshop" lands
 in `the_workshop_2`; past `_99` the time-stamped fallback is checked too. Defence in
 depth: a Trial never opens or wipes a folder carrying `handover/`
 (`world_open::plan_arena_folder` refuses with `ARENA_HOLDS_A_HANDOVER` and the player stays
-in the lobby; the lobby's own Delete still deletes such a world — it is the player's).
+in the lobby; the lobby's own Delete still deletes such a world — it is the player's;
+CP22, CP21 review LOW-4: the line covers a world handed over FROM the arena folder too,
+and says deleting it from the world list frees the Trial). Known, not changed: a local
+world made by an older build with a display name like "Exp-Lore" already lives in
+`exp-lore`, and a Trial whose slug matches would still wipe it (pre-existing).
 Folder families the game makes under the worlds folder (CP21 grep): `the_workshop`,
 `remote_game`, `exp-*` arenas, the dedicated server's `.identity` (no slug starts with `.`).
 Tests: `handover_promote_never_names_a_reserved_folder` ("Exp-Hash-Dash"),
 `an_arena_is_planned_from_the_disk_and_planning_writes_nothing`.
 The move never replaces a folder at the target, even an empty one
 (`promote::rename_no_replace` → `handover::rename::no_replace`:
-`renameat2(RENAME_NOREPLACE)` on Linux; Windows' `MoveFileExW` never replaces a directory;
+`renameat2(RENAME_NOREPLACE)` on Linux; on Windows a direct `MoveFileExW(from, to, 0)`
+(CP22, CP19 review MEDIUM-3: std's `rename` would retry a folder target with a replacing
+`FileRenameInfoEx` and replace an EMPTY folder; with no `MOVEFILE_REPLACE_EXISTING` the
+move fails if anything is there; not run on Windows here);
 other Unix, and a filesystem that rejects the flag (EINVAL/ENOSYS on Linux and Android,
 ENOTSUP on macOS), re-check the
-target just before `rename`, a residual race). Tests:
+target just before `rename`, a residual race). CP22 (CP21 review LOW-5): that race can
+replace only an EMPTY folder, so two imports or two promoters never clobber each other (their
+sources are never empty). The larger cross-process exposure is elsewhere and the atomic path
+has it too: another game process chooses a free folder at its New World click
+(`sanitize_folder_name`) and writes it later with `create_dir_all`; a promotion landing in
+between gets that world's files written into the handed-over folder (within one process it
+can't happen: promotion runs only in the lobby, and creation leaves the lobby before it
+writes). Known residual; the longer-term fix is for local world creation to claim its folder
+with an exclusive `create_dir` at name choice. Tests:
 `handover_promote_never_names_a_reserved_folder`,
 `handover_promote_rename_never_replaces_a_folder`,
 `handover_promote_a_world_named_the_workshop_gets_its_own_folder`. After the rename both parent folders are fsynced
