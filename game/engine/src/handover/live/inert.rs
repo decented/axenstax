@@ -54,6 +54,19 @@ pub fn mark(imports: &Path, transfer: Id, world: Id) -> Result<()> {
     sync(imports)
 }
 
+/// The import folder name of `transfer`'s import of the snapshot `world`
+/// (`handover-<world>-<transfer>`, as `checkpoint::import` names it).
+pub fn import_folder(world: Id, transfer: Id) -> String {
+    format!("handover-{}-{}", hex::encode(world), hex::encode(transfer))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Tests: run inside `discard` right after its lock step (another
+    /// copy of the game's recipient trying to take the lock there).
+    pub(crate) static DISCARD_PROBE: std::cell::RefCell<Option<Box<dyn FnMut()>>> = const { std::cell::RefCell::new(None) };
+}
+
 /// The snapshot world a marked transfer imports (`None`: not marked).
 pub fn marked(imports: &Path, transfer: Id) -> Result<Option<Id>> {
     let path = imports.join(name(transfer));
@@ -121,27 +134,37 @@ pub fn sweep_pack_scratch(scratch: &Path) -> Result<usize> {
 /// (`authority::dir(<import>/working)`), so they go with the import.
 pub fn discard(imports: &Path, transfer: Id) -> Result<()> {
     let Some(world) = marked(imports, transfer)? else { return Ok(()) };
-    let folder = format!("handover-{}-{}", hex::encode(world), hex::encode(transfer));
+    let folder = import_folder(world, transfer);
     let import = imports.join(&folder);
     let working = import.join("working");
     // CP23 (DECIDED, coordinator 2026-10-13): the import's lock (the
     // sibling file `<folder>.lock`) before anything of the import is
-    // touched. The recipient takes it before the rename that makes its
-    // import visible and holds it to Activated or quarantine, so an import
-    // whose receipt may be landing is skipped (another copy of the game,
-    // or this one's own worker). The lock file is made only for an import
-    // that exists (none and no import: nobody can hold one, and the import
-    // isn't touched). No file locking here: no recipient can hold one
-    // either (it refuses), so the discard goes on as before the lock.
-    let exists = fs::symlink_metadata(&import).is_ok();
-    let lock = match super::world_lock::acquire_import(imports, &folder, exists) {
+    // touched. CP24 (CP23 review MEDIUM-1 + LOW-3, DECIDED): the recipient
+    // takes it before it marks the import inert and holds it to Activated
+    // or quarantine, so the discard ALWAYS takes it (making the file if it
+    // isn't there; it is removed at the end) and never touches the import
+    // or its scratch without it. Held: skipped (another copy of the game,
+    // or this one's own worker). Any other lock error: skipped too, left
+    // for the next sweep. Only a file system with no file locking at all
+    // goes on unlocked: no recipient can hold one there (it refuses).
+    let lock = match super::world_lock::acquire_import(imports, &folder, true) {
         Ok(l) => Some(l),
+        Err(super::world_lock::LockError::Unsupported) => None,
         Err(super::world_lock::LockError::HeldElsewhere) => {
             super::world_lock::log_skipped(&import, "the inert discard");
             return Err(Error::State("the import is in use by another copy of the game"));
         }
-        Err(_) => None,
+        Err(e) => {
+            log::warn!("handover: {}'s import lock couldn't be taken ({e:?}); its discard is left for the next sweep", import.display());
+            return Err(Error::Io);
+        }
     };
+    #[cfg(test)]
+    DISCARD_PROBE.with(|p| {
+        if let Some(probe) = p.borrow_mut().as_mut() {
+            probe();
+        }
+    });
     // Re-read under the lock: whatever let go of it may have moved on.
     let exists = fs::symlink_metadata(&import).is_ok();
     if exists && super::world_lock::held_elsewhere(&working) {
@@ -274,6 +297,54 @@ mod tests {
         drop(held);
         assert_eq!(sweep_stale_locks(&imports), 1);
         assert!(!imports.join(format!("{stale}.lock")).exists(), "a free lock file with no import stayed");
+        let _ = std::fs::remove_dir_all(&imports);
+    }
+
+    /// CP24 (CP23 review MEDIUM-1 + LOW-3, DECIDED): the discard always
+    /// takes the import's lock, even with no lock file and no import yet
+    /// (only a scratch). Another copy of the game's recipient trying to
+    /// take that lock during the discard (to rename its import in) finds it
+    /// held, and nothing a lock holder renamed in is ever deleted.
+    #[test]
+    fn handover_inert_discard_racing_a_just_renamed_import_deletes_nothing() {
+        use std::{cell::RefCell, rc::Rc};
+        let mut r = [0u8; 8];
+        getrandom::fill(&mut r).unwrap();
+        let imports = std::env::temp_dir().join(format!("axenstax-inert-race-{}", hex::encode(r)));
+        let (t, w) = ([0x81; 16], [0x82; 16]);
+        let folder = import_folder(w, t);
+        let import = imports.join(&folder);
+        std::fs::create_dir_all(&imports).unwrap();
+        mark(&imports, t, w).unwrap();
+        let scratch = imports.join(format!(".handover-receive-{}-x", hex::encode(t)));
+        std::fs::create_dir_all(scratch.join("chunks")).unwrap();
+        let lock_file = imports.join(format!("{folder}.lock"));
+        assert!(!lock_file.exists() && !import.exists());
+        // The recipient: takes the lock if it can, then renames its import in.
+        let got: Rc<RefCell<Option<super::super::world_lock::LiveLock>>> = Rc::default();
+        let (probe_got, probe_imports, probe_folder, probe_import) = (got.clone(), imports.clone(), folder.clone(), import.clone());
+        DISCARD_PROBE.with(|p| {
+            *p.borrow_mut() = Some(Box::new(move || {
+                if let Ok(l) = super::super::world_lock::acquire_import(&probe_imports, &probe_folder, true) {
+                    std::fs::create_dir_all(probe_import.join("working")).unwrap();
+                    std::fs::write(probe_import.join("working").join("world.dat"), b"w").unwrap();
+                    *probe_got.borrow_mut() = Some(l);
+                }
+            }))
+        });
+        let r = discard(&imports, t);
+        DISCARD_PROBE.with(|p| *p.borrow_mut() = None);
+        if got.borrow().is_some() {
+            assert!(
+                import.join("working").join("world.dat").exists(),
+                "the discard deleted an import renamed in by the holder of its lock"
+            );
+        }
+        assert!(got.borrow().is_none(), "a recipient took the import's lock during its discard");
+        r.unwrap();
+        assert!(!scratch.exists(), "the scratch outlived its discard");
+        assert!(!lock_file.exists(), "the discard left the lock file it made");
+        assert!(marked(&imports, t).unwrap().is_none(), "the inert marker outlived its discard");
         let _ = std::fs::remove_dir_all(&imports);
     }
 

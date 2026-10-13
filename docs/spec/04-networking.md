@@ -6198,19 +6198,31 @@ lock, and the import stops before its rename and the session refuses with
 `copy::NO_FILE_LOCKING`). It is never inside a folder that is renamed
 while it is held (Windows can refuse to rename a folder with a file open
 inside it; an earlier draft locked `working/handover/.live` in the scratch
-folder before the rename and was dropped for that). The import worker
-takes it at the import's `BeforeRename` boundary and the session holds it
-through Ready, the ack and Prepared; the resumer job that takes over the
+folder before the rename and was dropped for that). CP24 (CP23 review
+MEDIUM-1, DECIDED): the session takes it BEFORE it marks the import inert
+(`inert::mark`), i.e. before the scratch folder exists, so the stream, the
+rename and the receipt are all covered; it moves into the import worker
+(whose take at `BeforeRename` is only a fallback) and back, and the
+session holds it through Ready, the ack and Prepared; the resumer job that takes over the
 wait holds it too, to Activated or quarantine. Within one process it is
 never shared by a second `acquire_import`: a sweep in the same process as
-the worker finds it held. `inert::discard` takes it before touching the
-import (held: skipped, logged once), makes its file only for an import
-that exists (none and no import: nothing can hold one and the import
-isn't touched), reads and removes the import's records as they are (no
+the worker finds it held. `inert::discard` ALWAYS takes it before touching the
+import or its scratch, making its file if it isn't there (CP24, CP23
+review MEDIUM-1 + LOW-3, DECIDED; before, it made the file only for an
+import its first look found, so an import renamed in between, or a scratch
+mid-stream, was removed with no lock): held, skipped and logged once; any
+other lock error (the file can't be opened or made), skipped and left for
+the next sweep; only a file system with no file locking at all goes on
+unlocked, since no recipient can hold one there (it refuses). Test
+`handover_inert_discard_racing_a_just_renamed_import_deletes_nothing`. It
+reads and removes the import's records as they are (no
 marker directory is made or synced, CP22 review P-2), removes the whole
 import, and removes the lock file last, still held; whoever locked the
 unlinked file meanwhile sees it is no longer the file at that name
-(device and inode) and starts over. The promotion and its leftover sweep
+(device and inode, Unix only) and starts over. Unlinking the lock file is
+always its holder's LAST act, after its import is gone, so an old holder
+of an unlinked file protects nothing that a new holder of the new file
+needs. The promotion and its leftover sweep
 take it too (held: the 500 ms held retry), never creating its file, and
 remove it after the import folder. A lock file whose import is gone is
 removed by the inert sweep once its lock is free (`inert::sweep_stale_locks`),
@@ -6264,8 +6276,8 @@ file still counts as held. CP18 (CP17 review LOW-3): the probe takes a
 shared lock (`try_lock_shared`) and lets go at once, so two probes never
 collide while a live session's exclusive lock still blocks it. CP18 (CP17
 review LOW-4): the registry is keyed by the canonical `handover/` path; no
-thread sleeps while holding it; nothing turns a registry entry into a guard while
-holding it (CP23, CP22 review MEDIUM-1: `held_here` and a releasing
+thread sleeps while holding it; nothing drops a guard made from a registry entry while
+holding it (the shared path's guards are returned, never dropped there; CP23, CP22 review MEDIUM-1: `held_here` and a releasing
 guard count the holders instead; a temporary guard made there could be
 the last one when its holder let go meanwhile, and its release would lock
 the registry again on the same thread, hanging every lock user in the
