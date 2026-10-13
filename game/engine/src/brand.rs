@@ -59,9 +59,12 @@ pub fn show_wordmark(ui: &mut egui::Ui, width: f32) {
         ui.ctx().data_mut(|d| d.insert_temp(id, texture.clone()));
         Some(texture)
     });
-    let (rect, _) = ui.allocate_exact_size(
+    let (rect, response) = ui.allocate_exact_size(
         egui::vec2(width, width * 116.0 / 726.0), egui::Sense::hover(),
     );
+    response.widget_info(|| egui::WidgetInfo::labeled(
+        egui::WidgetType::Label, ui.is_enabled(), "Axe’n’Stax",
+    ));
     if let Some(texture) = texture {
         ui.painter().image(
             texture.id(), rect,

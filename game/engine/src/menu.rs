@@ -10,9 +10,9 @@ use crate::save::{self, WorldEntry, WorldMeta};
 // Theme
 // ---------------------------------------------------------------------------
 
-// Copperline palette (brand/BRAND-GUIDELINES.md). Every text colour below is
-// >= 4.5:1 on BG_DARK, CARD_BG, PANEL_BG and the egui widget fills set in
-// egui_integration.rs (ratios in the commit that introduced them).
+// Copperline palette (brand/BRAND-GUIDELINES.md). Stone and secondary text
+// exceed 4.5:1 on the dark, raised and selected surfaces. Copper headings
+// sit on the darker panel backgrounds; selection outlines are not text.
 const TITLE_COLOR: egui::Color32 = brand::COPPER;
 const SUBTITLE_COLOR: egui::Color32 = brand::MUTED_TEXT;
 const TEXT_COLOR: egui::Color32 = brand::STONE;

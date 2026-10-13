@@ -371,54 +371,6 @@ fn create_egui_texture_view(
     texture.create_view(&wgpu::TextureViewDescriptor::default())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn icon_upload_side_reads_32x32_pack_correctly() {
-        // A 32×32 RGBA layer — the P6 crash-loop scenario ("player picks a
-        // 32×32 pack in Settings"). Must size from the buffer, not the
-        // hard-coded 16 that used to be passed at the call site.
-        let pixels = vec![0u8; 32 * 32 * 4];
-        assert_eq!(icon_upload_side(pixels.len(), 16), 32);
-    }
-
-    #[test]
-    fn icon_upload_side_reads_16x16_pack_correctly() {
-        let pixels = vec![0u8; 16 * 16 * 4];
-        assert_eq!(icon_upload_side(pixels.len(), 16), 16);
-    }
-
-    #[test]
-    fn icon_upload_side_reads_64_and_128_packs_correctly() {
-        assert_eq!(icon_upload_side(64 * 64 * 4, 16), 64);
-        assert_eq!(icon_upload_side(128 * 128 * 4, 16), 128);
-    }
-
-    #[test]
-    fn icon_upload_side_falls_back_on_malformed_buffer_without_panicking() {
-        // Empty buffer (e.g. a decode failure upstream) must never panic —
-        // it falls back to the caller-supplied default.
-        assert_eq!(icon_upload_side(0, 16), 16);
-        // Anything under one pixel's worth of bytes (< 4) is the same
-        // "nothing usable here" case — `square_side` floors to 0 and the
-        // fallback kicks in, rather than sizing a zero-dimension texture.
-        assert_eq!(icon_upload_side(3, 16), 16);
-    }
-
-    #[test]
-    fn icon_upload_side_sizes_a_slightly_off_buffer_to_its_nearest_square_side() {
-        // A byte length that ISN'T an exact side×side×4 (71 bytes, not a
-        // multiple of 4 at all) still yields a non-zero side from
-        // `square_side`'s floor(sqrt(..)) — `icon_upload_side` only falls
-        // back to the caller's default when that floor is 0 (< 1 pixel of
-        // data), not merely "not a perfect square". This documents that
-        // boundary rather than asserting a fallback that never fires here.
-        assert_eq!(icon_upload_side(4 * 4 * 4 + 7, 16), 4);
-    }
-}
-
 /// Share the Copperline treatment between the live game and headless previews.
 fn configure_style(ctx: &egui::Context) {
     let mut style = egui::Style { visuals: egui::Visuals::dark(), ..Default::default() };
@@ -480,4 +432,52 @@ fn configure_style(ctx: &egui::Context) {
     }
 
     ctx.set_global_style(style);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn icon_upload_side_reads_32x32_pack_correctly() {
+        // A 32×32 RGBA layer — the P6 crash-loop scenario ("player picks a
+        // 32×32 pack in Settings"). Must size from the buffer, not the
+        // hard-coded 16 that used to be passed at the call site.
+        let pixels = vec![0u8; 32 * 32 * 4];
+        assert_eq!(icon_upload_side(pixels.len(), 16), 32);
+    }
+
+    #[test]
+    fn icon_upload_side_reads_16x16_pack_correctly() {
+        let pixels = vec![0u8; 16 * 16 * 4];
+        assert_eq!(icon_upload_side(pixels.len(), 16), 16);
+    }
+
+    #[test]
+    fn icon_upload_side_reads_64_and_128_packs_correctly() {
+        assert_eq!(icon_upload_side(64 * 64 * 4, 16), 64);
+        assert_eq!(icon_upload_side(128 * 128 * 4, 16), 128);
+    }
+
+    #[test]
+    fn icon_upload_side_falls_back_on_malformed_buffer_without_panicking() {
+        // Empty buffer (e.g. a decode failure upstream) must never panic —
+        // it falls back to the caller-supplied default.
+        assert_eq!(icon_upload_side(0, 16), 16);
+        // Anything under one pixel's worth of bytes (< 4) is the same
+        // "nothing usable here" case — `square_side` floors to 0 and the
+        // fallback kicks in, rather than sizing a zero-dimension texture.
+        assert_eq!(icon_upload_side(3, 16), 16);
+    }
+
+    #[test]
+    fn icon_upload_side_sizes_a_slightly_off_buffer_to_its_nearest_square_side() {
+        // A byte length that ISN'T an exact side×side×4 (71 bytes, not a
+        // multiple of 4 at all) still yields a non-zero side from
+        // `square_side`'s floor(sqrt(..)) — `icon_upload_side` only falls
+        // back to the caller's default when that floor is 0 (< 1 pixel of
+        // data), not merely "not a perfect square". This documents that
+        // boundary rather than asserting a fallback that never fires here.
+        assert_eq!(icon_upload_side(4 * 4 * 4 + 7, 16), 4);
+    }
 }

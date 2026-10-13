@@ -145,7 +145,6 @@ try {
       { size: 48, buf: await rounded(48) }, { size: 64, buf: await rounded(64) },
       { size: 128, buf: await rounded(128) }, { size: 256, buf: await rounded(256) },
     ]));
-
   }
 
   // --- Rust engine (egui mark texture + native window icon) ---
@@ -162,7 +161,7 @@ try {
       write(dir + 'ic_launcher.png', await rounded(48 * k));
       write(dir + 'ic_launcher_foreground.png',
         await render(108 * k, 108 * k, 'transparent', markInCircle(108 * k, 66 / 108)));
-  }
+    }
   }
 } finally {
   await browser.close();
