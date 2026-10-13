@@ -139,6 +139,7 @@ mod menu;
 #[cfg(not(target_arch = "wasm32"))]
 mod friends_ui;
 mod hud_ui;
+mod hud_icons;
 mod minimap;
 mod map_ui;
 mod waypoint;
@@ -3764,6 +3765,9 @@ fn run_shot_3p(args: &[String]) {
         renderer.upload_avatar_vertices(0, &skin_v);
         let mut cu = CameraUniform::from_camera(&camera);
         cu.sun_dir[3] = night_brightness;
+        let day_sky = renderer.sky_color;
+        let (r, g, b) = crate::camera::sky_color(night_brightness);
+        renderer.sky_color = [r as f32, g as f32, b as f32];
         renderer.update_camera(0, &cu);
         renderer.render_to_png(&night_path);
 
@@ -3790,6 +3794,7 @@ fn run_shot_3p(args: &[String]) {
             night_path,
             if ok { "PASS" } else { "FAIL" }
         );
+        renderer.sky_color = day_sky;
     }
 
     // ── Phase 2 — no-snap collision smoke (orbit-behind, wall right behind) ──

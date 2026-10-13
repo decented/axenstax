@@ -4,7 +4,7 @@
 **Date**: 2026-03-03
 **Depends on**: ADR-002 (Tech Stack), Platform Overview (Visual Strategy)
 
-> **AS-BUILT (audit 2026-10-04).** The following sections are **design targets, not shipped**: §4.3 smooth lighting, §4.4 ambient occlusion, §6 the procedural sky (as built, the sky is a solid clear colour interpolated by `camera::sky_color(brightness)`: no sky quad, sun/moon, stars or clouds), and §9 post-processing and bloom (no HDR `Rgba16Float` target). The `smooth_lighting` graphics setting is stored so presets round-trip, but **it is not wired into the shader and does nothing** (`graphics_settings.rs`, "not yet wired into the shader"). Light is per-face block/sky light (`shader.wgsl`).
+> **AS-BUILT (audit 2026-10-04).** The following sections are **design targets, not shipped**: §4.3 smooth lighting, §4.4 ambient occlusion, §6 the full procedural sky (as built, a camera-bound triangle grades the live horizon colour into a deeper overhead blue; no sun/moon discs, stars or clouds), and §9 post-processing and bloom (no HDR `Rgba16Float` target). The `smooth_lighting` graphics setting is stored so presets round-trip, but **it is not wired into the shader and does nothing** (`graphics_settings.rs`, "not yet wired into the shader"). Light is per-face block/sky light (`shader.wgsl`).
 
 ---
 
@@ -877,6 +877,25 @@ native-only); a sub-rAF software cap on web is a later refinement.
 
 ## 6. Sky & Atmosphere
 
+**As built — in-world polish (2026-10-13):** the opaque world pass first draws
+one oversized sky triangle per viewport, with the same scaled viewport and
+scissor as terrain. It reads only the existing camera binding, writes colour,
+and never writes depth. The headless world pass uses the same pipeline after
+its clear and before terrain. The gradient follows world altitude, reconstructed
+from perspective view-projection rows, so looking around, third-person cameras
+and split-screen do not pin the horizon to the screen. Billboard axes are not
+used because some existing preview cameras leave them at their defaults.
+`Renderer::update_camera` copies the live linear sky horizon RGB into
+`CameraUniform.params.yzw` without changing the uniform layout. Land fog
+(opaque, plants, avatars, paintings and transparent solids) reads the same
+colour, including weather and lightning; water/underwater fog keeps its existing
+colour and range. Zero supplied RGB falls back to the existing day/night formula
+for standalone uniforms. Sky and land fog use the same user brightness control;
+near-white flash colours suppress the blue gradient. The existing sky/block
+light channels, night floor, torch and emissive lighting remain unchanged.
+This adds no sky textures, HDR targets, shadows, celestial bodies or clouds.
+
+
 ### 6.1 Procedural Sky
 
 The sky is rendered as a full-screen quad behind all world geometry (using reverse-Z depth, the sky quad is placed at z = 0.0 in clip space). No skybox texture is used; the sky is fully procedural.
@@ -1286,6 +1305,15 @@ HUD loads the world colour target instead of clearing it to a menu backdrop.
 These developer previews do not simulate play or prove input behaviour.
 The optional HUD registers the live block atlas and settles egui's initial
 invisible Area sizing pass with capture-only fades disabled before saving.
+
+The survival HUD paints health as two convex heart halves and hunger as outlined
+drumsticks with separate bones, inside its existing scaled icon bounds. Full,
+half and empty states retain the existing red/brown gameplay colours. Hotbar
+counts get a dark backplate, and the held-item name is centred from measured
+text rather than an approximate character width. The free-slot/arrow label is
+anchored by its right edge inside the viewport. Slot, touch-target, status-row
+and player input geometry remain unchanged. Native `--shot-3p` sets and restores
+its actual night sky colour around the existing avatar night-dimming control.
 
 The shared surface tones are:
 

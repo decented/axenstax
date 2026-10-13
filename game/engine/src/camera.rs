@@ -565,8 +565,9 @@ pub struct CameraUniform {
     /// User-facing render tuning. x = brightness control (graphics setting):
     /// the shader applies `pow(color, 1/x)`, so 1.0 = neutral, >1 brightens,
     /// <1 darkens. The shader treats x ≤ 0 as neutral, so a zeroed uniform can
-    /// never black-screen. yzw reserved for future scalars. The live game loop
-    /// sets x from `graphics.brightness`; other paths leave the 1.0 default.
+    /// never black-screen. The renderer fills yzw with the live linear sky horizon
+    /// RGB for atmospheric sky/land fog, including weather and lightning. The
+    /// live loop sets x from `graphics.brightness`; other paths default to 1.0.
     pub params: [f32; 4],
     /// Particle billboarding (2026-07-05): the camera's world-space RIGHT
     /// vector (xyz; w unused). Per-player, so split-screen billboards face
@@ -637,7 +638,7 @@ pub fn fog_disabled() -> [f32; 4] {
 /// wrong; spawning::tests pin the actual semantics (NIGHT=0, DAY=12000).
 pub fn compute_sun(world_time: u32) -> (Vec3, f32) {
     let t = (world_time as f32 / 24000.0) * std::f32::consts::TAU;
-    // Sun elevation: peaks at noon (6000 ticks), below horizon at night
+    // Sun elevation: peaks at noon (12000 ticks), below horizon at night
     let elevation = (t - std::f32::consts::FRAC_PI_2).sin(); // noon=1, midnight=-1
     let azimuth = t.cos();
 

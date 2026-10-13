@@ -529,6 +529,8 @@ pub struct Renderer {
     /// `resize` when reconfiguring; changed live via `set_present_mode`.
     pub present_mode: wgpu::PresentMode,
     pub render_pipeline: wgpu::RenderPipeline,
+    /// One camera-bound atmospheric triangle before terrain, per viewport.
+    sky_pipeline: wgpu::RenderPipeline,
     pub depth_texture_view: wgpu::TextureView,
     pub camera_bind_group_layout: wgpu::BindGroupLayout,
     pub texture_bind_group: wgpu::BindGroup,
@@ -687,7 +689,8 @@ pub struct Renderer {
     pub egui: EguiIntegration,
     // Headless rendering target
     color_target: Option<wgpu::Texture>,
-    /// Sky clear color [r, g, b], updated each frame for day/night cycle.
+    /// Linear sky horizon RGB, updated each frame for day/night and weather.
+    /// `update_camera` shares it with the sky gradient and land fog.
     pub sky_color: [f32; 3],
 }
 
@@ -1203,6 +1206,8 @@ impl Renderer {
             immediate_size: 0,
         });
 
+        let sky_pipeline = create_sky_pipeline(&device, &shader, &camera_bind_group_layout, format);
+
         let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("chunk_render_pipeline"),
             layout: Some(&pipeline_layout),
@@ -1494,6 +1499,7 @@ impl Renderer {
             height,
             present_mode: wgpu::PresentMode::AutoVsync,
             render_pipeline,
+            sky_pipeline,
             depth_texture_view,
             camera_bind_group_layout,
             texture_bind_group,
@@ -1768,7 +1774,9 @@ impl Renderer {
         // Distinct-field split borrow: &self.queue + &mut self.player_gpu.
         let queue = &self.queue;
         if let Some(gpu) = self.player_gpu.get_mut(player_index) {
-            queue.write_buffer(&gpu.camera_buffer, 0, bytemuck::cast_slice(&[*uniform]));
+            let mut world_uniform = *uniform;
+            world_uniform.params[1..].copy_from_slice(&self.sky_color);
+            queue.write_buffer(&gpu.camera_buffer, 0, bytemuck::cast_slice(&[world_uniform]));
             // Cache the CPU-side view-proj for this frame's frustum culling (A1).
             gpu.last_view_proj = glam::Mat4::from_cols_array_2d(&uniform.view_proj);
             gpu.last_camera_pos = glam::Vec3::new(
@@ -3008,6 +3016,7 @@ impl Renderer {
                         &vp,
                         self.sky_color,
                         false, // never clear — already cleared above
+                        &self.sky_pipeline,
                         &self.render_pipeline,
                         &self.water_pipeline,
                         &self.transparent_pipeline,
@@ -3472,6 +3481,8 @@ impl Renderer {
             immediate_size: 0,
         });
 
+        let sky_pipeline = create_sky_pipeline(&device, &shader, &camera_bind_group_layout, format);
+
         let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("chunk_render_pipeline"),
             layout: Some(&pipeline_layout),
@@ -3757,6 +3768,7 @@ impl Renderer {
             height,
             present_mode: wgpu::PresentMode::AutoVsync,
             render_pipeline,
+            sky_pipeline,
             depth_texture_view,
             camera_bind_group_layout,
             texture_bind_group,
@@ -3874,13 +3886,13 @@ impl Renderer {
     ) {
         // egui Areas first run an invisible sizing pass. Settle that pass
         // before capture, without fading or compositing two visible HUDs.
-        let animation_time = self.egui.ctx.style().animation_time;
-        self.egui.ctx.style_mut(|style| style.animation_time = 0.0);
+        let animation_time = self.egui.ctx.global_style().animation_time;
+        self.egui.ctx.global_style_mut(|style| style.animation_time = 0.0);
         for _ in 0..2 {
             self.render_headless_world();
             self.render_headless_ui_to_png(path, false, |ctx, assets| run_ui(ctx, assets));
         }
-        self.egui.ctx.style_mut(|style| style.animation_time = animation_time);
+        self.egui.ctx.global_style_mut(|style| style.animation_time = animation_time);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -3923,8 +3935,10 @@ impl Renderer {
                 ..Default::default()
             });
 
-            render_pass.set_pipeline(&self.render_pipeline);
+            render_pass.set_pipeline(&self.sky_pipeline);
             render_pass.set_bind_group(0, &self.player_gpu[0].camera_bind_group, &[]);
+            render_pass.draw(0..3, 0..1);
+            render_pass.set_pipeline(&self.render_pipeline);
             render_pass.set_bind_group(1, &self.texture_bind_group, &[]);
 
             for gpu_mesh in self.chunk_meshes.values() {
@@ -4304,6 +4318,7 @@ fn render_world_viewport(
     viewport: &crate::screen::ViewportRect,
     sky_color: [f32; 3],
     clear: bool,
+    sky_pipeline: &wgpu::RenderPipeline,
     render_pipeline: &wgpu::RenderPipeline,
     water_pipeline: &wgpu::RenderPipeline,
     transparent_pipeline: &wgpu::RenderPipeline,
@@ -4413,8 +4428,10 @@ fn render_world_viewport(
 
         pass.set_viewport(vx, vy, vw, vh, 0.0, 1.0);
         pass.set_scissor_rect(viewport.x, viewport.y, viewport.width, viewport.height);
-        pass.set_pipeline(render_pipeline);
+        pass.set_pipeline(sky_pipeline);
         pass.set_bind_group(0, &gpu.camera_bind_group, &[]);
+        pass.draw(0..3, 0..1);
+        pass.set_pipeline(render_pipeline);
         pass.set_bind_group(1, texture_bind_group, &[]);
 
         for (&(cx, cy, cz), gpu_mesh) in chunk_meshes.iter() {
@@ -5418,6 +5435,51 @@ fn build_blit_resources(
         ..Default::default()
     });
     (pipeline, sampler, bgl)
+}
+
+/// Sky uses only the existing camera binding and never writes terrain depth.
+fn create_sky_pipeline(
+    device: &wgpu::Device,
+    shader: &wgpu::ShaderModule,
+    camera_layout: &wgpu::BindGroupLayout,
+    format: wgpu::TextureFormat,
+) -> wgpu::RenderPipeline {
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("sky_pipeline_layout"),
+        bind_group_layouts: &[Some(camera_layout)],
+        immediate_size: 0,
+    });
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("sky_pipeline"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_sky"),
+            compilation_options: Default::default(),
+            buffers: &[],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some("fs_sky"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: wgpu::TextureFormat::Depth32Float,
+            depth_write_enabled: Some(false),
+            depth_compare: Some(wgpu::CompareFunction::Always),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    })
 }
 
 /// Create an offscreen world render target (color + depth) at `width`×`height`
