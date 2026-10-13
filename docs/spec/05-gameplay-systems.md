@@ -2351,11 +2351,17 @@ draw_ghost_controls}`.
 
 #### Steed persistence — SHIPPED 2026-07-04 (gap-fill wave)
 
-First ride marks a Horse/Donkey/Mule as **kept** (`HorseData.kept_by`, the
-rider's slot). Kept steeds persist via `SavedTamedPetData::Steed { kind, data }`
-(APPENDED enum variant — positional bincode, never reorder) and respawn on load
-like wolves/nostriches/companions. Wild steeds still re-scatter. Previously a
-ridden horse silently despawned on save/load.
+First local ride marks a Horse/Donkey/Mule as **kept** by its genuine local
+seat. D2c-2 keeping (2026-10-13): a signed joiner's accepted first mount keeps
+a wild steed by its verified npub; guest riding creates no durable keeper.
+Later riders do not replace a keeper, and legacy local keeping is never
+automatically transferred to an npub or a reused connection slot. Kept steeds
+persist through appended `SavedTamedPetData::Steed3` (frozen HorseData gameplay
+fields, explicit Npub/LegacyLocal keeper and marker-safe cargo); old `Steed`
+and `Steed2` remain readable. Native, WASM resume and dedicated startup share
+the same saved-pet restoration helper. A kept authored steed is captured once,
+without a second wild Authored row. Wild steeds still re-scatter; first keeping
+removes `Scattered`, so ordinary column unload cannot discard kept cargo.
 
 ### 7.5 Day/Night Cycle
 
@@ -3333,9 +3339,9 @@ parrot squawks (toast + particle burst) when a hostile comes within
 (10 s) cooldown. The parrot→Electricity signal bridge stays deferred with the
 Aether design.
 
-**Donkey/Mule cargo.** `HorseData.pack: Option<ChestData>` (appended
-`#[serde(default)]`, wire shape frozen — `pack` is `serde(skip)` and persists
-via the existing `SavedTamedPetData::Steed2.pack`, no new save variant).
+**Donkey/Mule cargo.** `HorseData.pack: Option<ChestData>` is runtime-only
+(`serde(skip)`, frozen HorseData layout); Steed3 persists 27 marker-safe wooden
+slots and its explicit keeper, retaining legacy Steed2 full-body readers.
 Right-click a kept Donkey/Mule while holding a Chest to equip the pack
 (consumes the chest); sneak-right-click with an empty hand on a packed
 mount opens the 27-slot pack via `chest_ui::show_container_dialog` **if it
@@ -3350,7 +3356,9 @@ keeps its pack. **A donkey/mule that dies away from a Pet Bed now spills its
 pack's contents plus one Chest item** (hardened 2026-07-07 — previously the
 pack and everything in it were silently destroyed on death unless rescue
 happened to fire; a rescued pet still keeps its pack with zero spill, no
-double-drop). Mounting a wild Horse/Donkey/Mule for the first time now also
+double-drop). Death records retain the exact generational entity identity;
+each cargo snapshot is consumed once, so two colocated deaths cannot spill
+one pack twice or lose the other. Mounting a wild Horse/Donkey/Mule for the first time now also
 **removes the `Scattered` tag** the instant it's kept (hardened 2026-07-07 —
 previously a kept, possibly packed, steed retained `Scattered` and could be
 permanently despawned by ordinary chunk unload before the next save, unlike

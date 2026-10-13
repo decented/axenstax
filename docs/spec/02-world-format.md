@@ -2133,6 +2133,28 @@ format version in a trailing footer — see the bincode note under Migration str
 - Full-world migration tool: `axenstax-migrate` CLI that reads an entire world and
   rewrites it in the latest format. Optional but recommended before major engine updates.
 
+#### D2c-2 steed keeping and marker-safe cargo (2026-10-13)
+
+`SavedTamedPetData::Steed3` is appended after Steed2: species, the frozen
+HorseData gameplay fields, an explicit Npub/LegacyLocal keeper and an optional
+27-slot wooden pack. HorseData's runtime keeper and pack remain serde-skipped;
+the older Steed/Steed2 positional bytes and full-body local Plan readers remain
+readable. The nested variant reserves save layout revision 2 (revision 1 belongs
+to handover), independently of the future pack wire bump. Older footer-aware
+builds refuse the newer layout before decoding or writing it.
+
+Cargo uses the existing sidecar's exact SavedSlot/Plan-marker encoding, extracted
+without changing its enum/field order or golden bytes. Ordinary counts, metadata
+and slot positions must round-trip exactly; malformed/clamped values refuse the
+capture. A local Plan body is checked into the private Plan store before any
+marker-only world write; store failure fails manual save, autosave or dedicated
+capture without discarding the held body. Local reads resolve the same marker
+and recorded development when the body exists; missing or inconsistent bodies
+remain honest same-marker stubs. Dedicated reads retain markers only. These
+records authorise no network Plan-body transfer. All startup/resume paths share
+saved-pet restoration, including the dedicated server. Existing per-file world
+and player writes remain separate crash transactions; no new journal is added.
+
 ### 8.5 Sleeping Worlds (Personal Tier)
 
 When a personal world has no connected players:

@@ -439,14 +439,14 @@ impl crate::GameState {
     /// (`save::save_world_superseding_autosave`); the outcome is recorded in
     /// [`SessionSaves`].
     pub(crate) fn save_live_world(&mut self) -> Result<(), String> {
-        let result = crate::save::save_world_superseding_autosave(
+        let result = crate::save::tamed_mobs_to_saved(&self.ecs).and_then(|pets| crate::save::save_world_superseding_autosave(
             &self.world_name,
             &self.world,
             &self.players,
             self.biome_gen.seed,
             &crate::save::carts_to_saved(&self.ecs),
-            &crate::save::tamed_mobs_to_saved(&self.ecs),
-        )
+            &pets,
+        ))
         .inspect_err(|e| log::error!("Save failed: {e}"));
         let result = result.and_then(|()| self.hosted_server.as_ref().map_or(Ok(()), |h| h.server.save_joiners()));
         self.session_saves.note_save(result.is_ok());

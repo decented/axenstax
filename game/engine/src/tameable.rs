@@ -174,8 +174,8 @@ pub fn pet_owner_of(ecs: &hecs::World, target: hecs::Entity) -> Option<String> {
             return Some(d.ownership.owner_pubkey.clone());
         }
     if let Ok(d) = ecs.get::<&crate::horse_ai::HorseData>(target)
-        && let Some(slot) = d.kept_by {
-            return Some(format!("local-player-{slot}"));
+        && let Some(keeper) = d.keeper_identity() {
+            return Some(keeper.owner_key());
         }
     None
 }
@@ -226,7 +226,7 @@ pub fn is_own_pet(
     local_slot: Option<usize>,
 ) -> bool {
     if let Ok(d) = ecs.get::<&crate::horse_ai::HorseData>(target) {
-        return local_slot.is_some_and(|s| d.kept_by == Some(s as u8));
+        return d.keeper_identity().is_some_and(|keeper| keeper.matches(owner_key, local_slot));
     }
     match pet_owner_of(ecs, target) {
         Some(owner) => owner == owner_key,
@@ -364,7 +364,7 @@ pub fn owned_pet_entities(
         }
     }
     for (e, d) in ecs.query::<&crate::horse_ai::HorseData>().iter() {
-        if d.kept_by == Some(player_slot as u8) {
+        if d.keeper_identity().is_some_and(|keeper| keeper.matches(player_pubkey, Some(player_slot))) {
             out.push(e);
         }
     }

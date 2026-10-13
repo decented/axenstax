@@ -3596,7 +3596,8 @@ impl HostedServer {
     /// aboard) — it takes nothing from the hand — and the joiner is seated
     /// only when its hand is empty. Riding needs no owner and no species AI:
     /// a guest rides, on a dedicated server too; a mount's
-    /// `HorseData.kept_by` is never set (steed keeping is D2c-2).
+    /// A signed first mount keeps a wild steed by its verified persona;
+    /// guests may ride without creating persistent keeping.
     fn run_joiner_mount(
         &mut self,
         i: usize,
@@ -3640,7 +3641,9 @@ impl HostedServer {
                 return Some(crate::mob_interact::Interaction::accepted());
             }
         }
+        let keeper = self.server.players[i].pet_owner_key().map(crate::horse_ai::SteedKeeper::Npub);
         self.server.seat(i, mount);
+        crate::horse_ai::keep_first_mount(&mut self.server.ecs, mount, keeper);
         Some(crate::mob_interact::Interaction::accepted())
     }
 

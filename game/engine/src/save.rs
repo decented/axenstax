@@ -726,7 +726,7 @@ pub struct SavedArchitectPlaque {
 }
 
 /// Serializable inventory slot — supports all item types.
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub enum SavedSlot {
     Empty,
     Block { block_id: u16, count: u8 },
@@ -1013,6 +1013,14 @@ pub enum SavedTamedPetData {
         data: crate::horse_ai::HorseData,
         pack: Option<crate::chest::ChestData>,
     },
+    /// D2c-2: append-only keeper and marker-safe cargo. HorseData's older
+    /// positional layout stays frozen; old Steed/Steed2 remain readable.
+    Steed3 {
+        kind: crate::mob::MobType,
+        data: crate::horse_ai::HorseData,
+        keeper: crate::horse_ai::SteedKeeper,
+        pack: Option<crate::steed_save::SavedPack>,
+    },
 }
 
 impl SavedTamedPetData {
@@ -1026,6 +1034,7 @@ impl SavedTamedPetData {
             SavedTamedPetData::Steed { kind, .. } => *kind,
             SavedTamedPetData::Companion2 { kind, .. } => *kind,
             SavedTamedPetData::Steed2 { kind, .. } => *kind,
+            SavedTamedPetData::Steed3 { kind, .. } => *kind,
         }
     }
 }
@@ -1038,17 +1047,17 @@ impl SavedTamedPetData {
 /// Each pet's owner pubkey + AI state travel verbatim inside the per-species
 /// data, so no owner→slot remapping is needed on restore.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn tamed_mobs_to_saved(ecs: &hecs::World) -> Vec<SavedTamedPet> {
+pub fn tamed_mobs_to_saved(ecs: &hecs::World) -> Result<Vec<SavedTamedPet>, String> {
     tamed_mobs_to_saved_impl(ecs)
 }
 
 /// WASM build shares the identical extraction (PWA worlds persist pets too).
 #[cfg(target_arch = "wasm32")]
-pub fn tamed_mobs_to_saved(ecs: &hecs::World) -> Vec<SavedTamedPet> {
+pub fn tamed_mobs_to_saved(ecs: &hecs::World) -> Result<Vec<SavedTamedPet>, String> {
     tamed_mobs_to_saved_impl(ecs)
 }
 
-fn tamed_mobs_to_saved_impl(ecs: &hecs::World) -> Vec<SavedTamedPet> {
+fn tamed_mobs_to_saved_impl(ecs: &hecs::World) -> Result<Vec<SavedTamedPet>, String> {
     use crate::entity::{MobKind, Position};
     let mut out = Vec::new();
     // Tamed wolves.
@@ -1086,7 +1095,7 @@ fn tamed_mobs_to_saved_impl(ecs: &hecs::World) -> Vec<SavedTamedPet> {
     // Kept steeds (Horse/Donkey/Mule) — first ride marks them (2026-07-04).
     // The cargo pack (Task 11, 2026-07-06) is `serde(skip)` on `HorseData`
     // (wire-V1 frozen), so it's carried explicitly in the appended
-    // `Steed2` variant — the writer always emits `Steed2` now.
+    // `Steed3` variant carries the runtime keeper and marker-safe cargo.
     for (_id, (pos, kind, data)) in
         ecs.query::<(&Position, &MobKind, &crate::horse_ai::HorseData)>().iter()
     {
@@ -1100,10 +1109,11 @@ fn tamed_mobs_to_saved_impl(ecs: &hecs::World) -> Vec<SavedTamedPet> {
                 x: pos.0.x,
                 y: pos.0.y,
                 z: pos.0.z,
-                data: SavedTamedPetData::Steed2 {
+                data: SavedTamedPetData::Steed3 {
                     kind: kind.0,
-                    data: data.clone(),
-                    pack: data.pack.clone(),
+                    data: data.frozen_save_data(),
+                    keeper: data.keeper_identity().ok_or("A kept steed has no keeper identity")?,
+                    pack: data.pack.as_ref().map(crate::steed_save::capture_pack).transpose()?,
                 },
             });
         }
@@ -1131,9 +1141,12 @@ fn tamed_mobs_to_saved_impl(ecs: &hecs::World) -> Vec<SavedTamedPet> {
     // #129 — world-author PLACED wild mobs (the `Authored` marker, no owner /
     // tame state). Persist them alongside tamed pets so a `.axeworld` keeps its
     // pinned creatures (e.g. the donkey by the statue) across save/load.
-    for (_id, (pos, kind, _)) in
+    for (id, (pos, kind, _)) in
         ecs.query::<(&Position, &MobKind, &crate::entity::Authored)>().iter()
     {
+        // A statue-authored steed which was later kept already has its
+        // Steed3 record; a second Authored row would duplicate it on load.
+        if ecs.get::<&crate::horse_ai::HorseData>(id).is_ok_and(|data| data.is_kept()) { continue; }
         out.push(SavedTamedPet {
             x: pos.0.x,
             y: pos.0.y,
@@ -1141,7 +1154,7 @@ fn tamed_mobs_to_saved_impl(ecs: &hecs::World) -> Vec<SavedTamedPet> {
             data: SavedTamedPetData::Authored { kind: kind.0 },
         });
     }
-    out
+    Ok(out)
 }
 
 fn default_hunger() -> u8 { 20 }
@@ -5355,8 +5368,8 @@ mod tests {
         // Steed persistence (2026-07-04): a ridden (kept) mule must be
         // captured by tamed_mobs_to_saved and survive serde; a wild one
         // must NOT be captured (wildlife re-scatters). Task 11 (2026-07-06):
-        // the writer now always emits `Steed2` (cargo-pack carrier), never
-        // the legacy `Steed` — see `steed2_writer_emits_steed2_not_steed`
+        // the writer now emits `Steed3` (marker-safe cargo), never
+        // the legacy `Steed` — see `d2c2_writer_emits_steed3_with_marker_safe_cargo`
         // below plus `legacy_steed_bytes_still_decode_packless` for the old
         // wire-shape's continued readability.
         let mut ecs = hecs::World::new();
@@ -5373,10 +5386,10 @@ mod tests {
             crate::mob::MobType::Horse,
             glam::Vec3::new(9.0, 65.0, 9.0),
         );
-        let saved = tamed_mobs_to_saved(&ecs);
+        let saved = tamed_mobs_to_saved(&ecs).unwrap();
         let steeds: Vec<_> = saved
             .iter()
-            .filter(|p| matches!(p.data, SavedTamedPetData::Steed2 { .. }))
+            .filter(|p| matches!(p.data, SavedTamedPetData::Steed3 { .. }))
             .collect();
         assert_eq!(steeds.len(), 1, "kept mule saved, wild horse not");
         assert_eq!(steeds[0].data.mob_type(), crate::mob::MobType::Mule);
@@ -5384,9 +5397,10 @@ mod tests {
         let bytes = bincode::serialize(steeds[0]).unwrap();
         let back: SavedTamedPet = bincode::deserialize(&bytes).unwrap();
         match back.data {
-            SavedTamedPetData::Steed2 { kind, data, pack } => {
+            SavedTamedPetData::Steed3 { kind, data, pack, keeper } => {
                 assert_eq!(kind, crate::mob::MobType::Mule);
                 assert_eq!(data.kept_by, Some(0));
+                assert_eq!(keeper, crate::horse_ai::SteedKeeper::LegacyLocal(0));
                 assert!(pack.is_none(), "no chest was equipped");
             }
             other => panic!("wrong variant: {other:?}"),
@@ -5461,9 +5475,9 @@ mod tests {
     }
 
     #[test]
-    fn steed2_writer_emits_steed2_not_steed() {
+    fn d2c2_writer_emits_steed3_with_marker_safe_cargo() {
         // The writer must always snapshot a kept steed's live pack into
-        // `Steed2` — the old packless `Steed` variant is legacy-read-only.
+        // `Steed3` — the old packless `Steed` variant is legacy-read-only.
         use crate::entity::{MobKind, Position};
         use crate::mob::MobType;
         use glam::Vec3;
@@ -5472,14 +5486,14 @@ mod tests {
         hd.kept_by = Some(0);
         hd.pack = Some(crate::chest::ChestData::default());
         ecs.spawn((Position(Vec3::new(2.0, 64.0, 2.0)), MobKind(MobType::Donkey), hd));
-        let pets = tamed_mobs_to_saved(&ecs);
+        let pets = tamed_mobs_to_saved(&ecs).unwrap();
         assert_eq!(pets.len(), 1, "the kept donkey persists");
         match &pets[0].data {
-            SavedTamedPetData::Steed2 { kind, pack, .. } => {
+            SavedTamedPetData::Steed3 { kind, pack, .. } => {
                 assert_eq!(*kind, MobType::Donkey);
                 assert!(pack.is_some(), "equipped pack captured");
             }
-            other => panic!("writer must emit Steed2, got: {other:?}"),
+            other => panic!("writer must emit Steed3, got: {other:?}"),
         }
     }
 
@@ -6665,7 +6679,7 @@ mod tests {
         // A wild cow — never persisted.
         ecs.spawn((Position(Vec3::new(4.0, 64.0, 4.0)), MobKind(MobType::Cow)));
 
-        let pets = tamed_mobs_to_saved(&ecs);
+        let pets = tamed_mobs_to_saved(&ecs).unwrap();
         assert_eq!(pets.len(), 2, "only the two tamed pets persist (not the untamed wolf or the cow)");
         let kinds: Vec<MobType> = pets.iter().map(|p| p.data.mob_type()).collect();
         assert!(kinds.contains(&MobType::Wolf));
@@ -6692,7 +6706,7 @@ mod tests {
         };
         ecs.spawn((Position(Vec3::new(1.0, 64.0, 1.0)), MobKind(MobType::Wolf), tame_wolf));
 
-        let pets = tamed_mobs_to_saved(&ecs);
+        let pets = tamed_mobs_to_saved(&ecs).unwrap();
         assert_eq!(pets.len(), 1);
         match &pets[0].data {
             SavedTamedPetData::Wolf(d) => {
@@ -6775,7 +6789,7 @@ mod tests {
             MobKind(MobType::Parrot),
             crate::companion::CompanionData::untamed(),
         ));
-        let pets = tamed_mobs_to_saved(&ecs);
+        let pets = tamed_mobs_to_saved(&ecs).unwrap();
         assert_eq!(pets.len(), 1, "only the tamed cat persists (not the untamed parrot)");
         assert_eq!(pets[0].data.mob_type(), MobType::Cat, "species preserved via the stored kind");
     }
@@ -6794,7 +6808,7 @@ mod tests {
         // A wild cow with no marker — NOT persisted (re-scatters on load).
         ecs.spawn((Position(Vec3::new(4.0, 64.0, 4.0)), MobKind(MobType::Cow)));
 
-        let pets = tamed_mobs_to_saved(&ecs);
+        let pets = tamed_mobs_to_saved(&ecs).unwrap();
         assert_eq!(pets.len(), 1, "only the authored donkey persists");
         assert_eq!(pets[0].data.mob_type(), MobType::Donkey, "species preserved");
         assert!(matches!(pets[0].data, SavedTamedPetData::Authored { .. }), "tagged Authored");
@@ -6889,7 +6903,7 @@ mod tests {
         cat.ownership.owner_pubkey = "npub1writercat".to_string();
         cat.state = crate::companion::CompanionState::Stay;
         ecs.spawn((Position(Vec3::new(1.0, 64.0, 1.0)), MobKind(MobType::Cat), cat));
-        let pets = tamed_mobs_to_saved(&ecs);
+        let pets = tamed_mobs_to_saved(&ecs).unwrap();
         assert_eq!(pets.len(), 1, "the tamed cat persists");
         match &pets[0].data {
             SavedTamedPetData::Companion2 { kind, state, .. } => {

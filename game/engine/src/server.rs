@@ -1254,6 +1254,7 @@ impl GameServer {
             for s in &save_data.carts {
                 crate::cart::spawn_cart_from(&mut self.ecs, s.data.clone());
             }
+            crate::steed_save::restore_pets(&mut self.ecs, &save_data.saved_mobs, false)?;
 
             // Spec 30 — light data isn't persisted; recompute
             // from block state for every loaded column.
@@ -2034,16 +2035,16 @@ impl GameServer {
         // and the pickup pass above grants them via InventoryGrant. Kill
         // attribution / bounty / Vow stay client-side pending the dual-sim
         // rework.)
-        let drop_snaps = crate::death_drops::snapshot_before_despawn(&self.ecs);
+        let mut drop_snaps = crate::death_drops::snapshot_before_despawn(&self.ecs);
         let dying_tamed = crate::death_drops::dying_tamed_positions(&self.ecs);
         let deaths = crate::combat::despawn_dead(&mut self.ecs);
-        for (kind, pos, attacker) in deaths {
+        for death in deaths {
+            let crate::combat::MobDeath { kind, pos, attacker, .. } = death;
             crate::death_drops::spawn_drops_for_death(
                 &mut self.ecs,
                 &self.world,
-                &drop_snaps,
-                kind,
-                pos,
+                &mut drop_snaps,
+                death,
                 self.world_time,
             );
             // MP-D2b — the one attribution rule, with no local players: a
@@ -2702,6 +2703,7 @@ impl GameServer {
         crate::save::refuse_write_over_newer_save(&dir)?;
         // A committed first save cut short is published before anything below.
         crate::save::finish_staged_first_save(&dir)?;
+        let saved_mobs = crate::save::tamed_mobs_to_saved(&self.ecs)?;
         let first_save = crate::save::is_first_save(&dir);
         let chunks_dir = dir.join("chunks");
 
@@ -2913,7 +2915,7 @@ impl GameServer {
             // exact in-flight state on reload.
             carts: crate::save::carts_to_saved(&self.ecs),
             // Animals Wave 2 — persist tamed pets from this server's ECS.
-            saved_mobs: crate::save::tamed_mobs_to_saved(&self.ecs),
+            saved_mobs,
             // Satoshi onboarding — per-world guide state.
             satoshi: self.world.satoshi.clone(),
             dispensers,

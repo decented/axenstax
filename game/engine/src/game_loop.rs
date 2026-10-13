@@ -505,17 +505,7 @@ fn keep_steed_on_first_mount(
     ) {
         return;
     }
-    let newly_kept = if let Ok(mut hd) = ecs.get::<&mut crate::horse_ai::HorseData>(target)
-        && hd.kept_by.is_none()
-    {
-        hd.kept_by = Some(pidx as u8);
-        true
-    } else {
-        false
-    };
-    if newly_kept {
-        let _ = ecs.remove_one::<crate::entity::Scattered>(target);
-    }
+    crate::horse_ai::keep_first_mount(ecs, target, u8::try_from(pidx).ok().map(crate::horse_ai::SteedKeeper::LegacyLocal));
 }
 
 /// Outcome of attempting to unequip a cargo pack — see `try_unequip_pack`.
@@ -5143,11 +5133,11 @@ impl super::GameState {
         self.autosave_counter += 1;
         if self.autosave_counter >= 6000 && self.persists_locally() {
             self.autosave_counter = 0;
-            if let Err(e) = crate::save::autosave_world(
+            if let Err(e) = crate::save::tamed_mobs_to_saved(&self.ecs).and_then(|pets| crate::save::autosave_world(
                 &self.world_name, &self.world, &self.players, self.biome_gen.seed,
                 &crate::save::carts_to_saved(&self.ecs),
-                &crate::save::tamed_mobs_to_saved(&self.ecs),
-            ) {
+                &pets,
+            )) {
                 log::error!("Autosave failed: {e}");
             }
             if let Some(h) = &self.hosted_server && let Err(e) = h.server.save_joiners() { log::error!("Joiner autosave failed: {e}"); }
@@ -6892,7 +6882,7 @@ impl super::GameState {
         // by the time `despawn_dead` runs are matched against the snapshot,
         // so a Pet Bed rescue (which heals the entity and clears `is_dead()`)
         // naturally prevents a double-drop.
-        let drop_snaps = crate::death_drops::snapshot_before_despawn(&self.ecs);
+        let mut drop_snaps = crate::death_drops::snapshot_before_despawn(&self.ecs);
         // Pet Bed rescue (2026-07-06 pets wave) — snapshot dying entities
         // that are somebody's tamed pet (any of the four ownership shapes,
         // via `tameable::pet_owner_of`) BEFORE `despawn_dead` runs below. If
@@ -6955,7 +6945,8 @@ impl super::GameState {
         }
         let locals: Vec<(glam::Vec3, bool)> =
             self.players.iter().map(|p| (p.player.pos, p.combat.dead)).collect();
-        for (kind, pos, attacker) in deaths {
+        for death in deaths {
+            let crate::combat::MobDeath { kind, pos, attacker, .. } = death;
             // Loot table + wolf-specific routing + cargo-pack spill +
             // salt-lick bonus — shared with GameServer::tick via
             // `death_drops` (2026-07-11). Deterministic on
@@ -6964,9 +6955,8 @@ impl super::GameState {
             crate::death_drops::spawn_drops_for_death(
                 &mut self.ecs,
                 &self.world,
-                &drop_snaps,
-                kind,
-                pos,
+                &mut drop_snaps,
+                death,
                 self.world_time,
             );
             // v2 — a tamed Nostrich's death doesn't bring the Vow. If the
@@ -8498,58 +8488,9 @@ impl super::GameState {
                                 for s in &save_data.carts {
                                     crate::cart::spawn_cart_from(&mut self.ecs, s.data.clone());
                                 }
-                                for pet in &save_data.saved_mobs {
-                                    let kind = pet.data.mob_type();
-                                    let pos = glam::Vec3::new(pet.x, pet.y, pet.z);
-                                    let id = crate::entity::spawn_mob(&mut self.ecs, kind, pos);
-                                    match &pet.data {
-                                        crate::save::SavedTamedPetData::Wolf(d) => {
-                                            // Belt-and-braces (Task 7): sanitize
-                                            // a legacy persisted attack state
-                                            // (stale hecs entity id) on the way
-                                            // back in, same as chunk_stream.rs.
-                                            let mut d = d.clone();
-                                            d.sanitize_attack_state_for_persistence();
-                                            let _ = self.ecs.insert_one(id, d);
-                                        }
-                                        crate::save::SavedTamedPetData::Nostrich(d) => {
-                                            let _ = self.ecs.insert_one(id, d.clone());
-                                        }
-                                        crate::save::SavedTamedPetData::Companion { data, .. } => {
-                                            // Legacy save (pre-1C): no command
-                                            // state on the wire — restores as
-                                            // Follow (CompanionState Default).
-                                            let _ = self.ecs.insert_one(id, data.clone());
-                                        }
-                                        crate::save::SavedTamedPetData::Companion2 { data, state, .. } => {
-                                            // 1C save: `state` is serde(skip) on
-                                            // CompanionData — re-attach the
-                                            // carried command state.
-                                            let mut d = data.clone();
-                                            d.state = *state;
-                                            let _ = self.ecs.insert_one(id, d);
-                                        }
-                                        crate::save::SavedTamedPetData::Steed { data, .. } => {
-                                            // Legacy save (pre-Task 11): no cargo
-                                            // pack on the wire — overwrite the
-                                            // fresh wild HorseData with the saved
-                                            // one, packless.
-                                            let _ = self.ecs.insert_one(id, data.clone());
-                                        }
-                                        crate::save::SavedTamedPetData::Steed2 { data, pack, .. } => {
-                                            // Task 11 save: `pack` is serde(skip)
-                                            // on HorseData — re-attach the cargo
-                                            // pack carried alongside it.
-                                            let mut d = data.clone();
-                                            d.pack = pack.clone();
-                                            let _ = self.ecs.insert_one(id, d);
-                                        }
-                                        crate::save::SavedTamedPetData::Authored { .. } => {
-                                            // #129 — re-tag as authored so it survives
-                                            // chunk unload and is re-collected next save.
-                                            let _ = self.ecs.insert_one(id, crate::entity::Authored);
-                                        }
-                                    }
+                                if let Err(error) = crate::steed_save::restore_pets(&mut self.ecs, &save_data.saved_mobs, true) {
+                                    self.leave_world_with_notice(crate::world_exit::SaveChoice::Abandon, crate::save_format::unopenable_message(&error));
+                                    return;
                                 }
                                 // Enter the live load screen (not Playing): the
                                 // world data + players are restored above; the

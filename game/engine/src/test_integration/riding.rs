@@ -353,8 +353,8 @@ fn a_joiner_mounts_a_horse_steers_it_and_sneaks_off_and_everyone_sees_it() {
     assert_eq!(rig.riding(0), Some(horse));
     assert!(rig.ecs().get::<&Ridden>(horse).is_ok(), "the mount carries Ridden");
     assert!(
-        rig.ecs().get::<&crate::horse_ai::HorseData>(horse).unwrap().kept_by.is_none(),
-        "a joiner's ride keeps no steed (D2c-2)"
+        !rig.ecs().get::<&crate::horse_ai::HorseData>(horse).unwrap().is_kept(),
+        "a guest's ride creates no persistent keeper"
     );
     assert_eq!(rig.joiners[0].inbox.own_riding, Some(id), "own_riding: on");
     rig.assert_seated(0, horse);
@@ -573,4 +573,25 @@ fn a_rider_who_leaves_frees_its_mount() {
     rig.joiners[0].leave();
     rig.tick(2);
     assert!(rig.ecs().get::<&Ridden>(horse).is_err(), "free for the next rider");
+}
+
+#[test]
+fn d2c2_signed_mount_keeps_the_verified_persona_and_guest_riding_preserves_it() {
+    let mut rig = Rig::new("d2c2-keeping", 2);
+    let signed_slot = rig.joiners[0].slot;
+    // Join-time authentication has already established this server fact;
+    // the riding request itself supplies no ownership claim.
+    rig.hs.server.players[signed_slot].verified_pubkey = Some([7; 32]);
+    let npub = rig.hs.server.players[signed_slot].pet_owner_key().unwrap();
+    let (steed, id) = rig.spawn(MobType::Donkey, Vec3::new(0.0, 0.0, 2.0));
+    rig.ecs_mut().insert_one(steed, crate::entity::Scattered).unwrap();
+    assert!(rig.mount(0, id, None).accepted);
+    assert_eq!(rig.ecs().get::<&crate::horse_ai::HorseData>(steed).unwrap().keeper_identity(), Some(crate::horse_ai::SteedKeeper::Npub(npub.clone())));
+    assert!(rig.ecs().get::<&crate::entity::Scattered>(steed).is_err());
+    rig.joiners[0].leave();
+    rig.tick(2);
+    rig.place(steed, Vec3::new(0.0, 0.0, 2.0));
+    assert!(rig.mount(1, id, None).accepted, "a guest can ride an already-kept steed");
+    assert_eq!(crate::tameable::pet_owner_of(rig.ecs(), steed), Some(npub.clone()), "guest mounting never replaces the persistent keeper");
+    assert!(crate::tameable::is_own_pet(rig.ecs(), steed, &npub, None), "the same identity remains protected after leaving its slot");
 }
