@@ -6241,7 +6241,8 @@ own files are present (`world.dat` and every manifest member,
 `DurableCheckpoint::world_files_present`), so a discard that won a gap is
 never acknowledged into (tests
 `handover_recipient_locks_its_import_before_it_appears`: another process's
-sweep at the very rename is refused, and
+sweep just before (lock held from `mark`) and just after the rename is
+refused, CP24, CP23 review LOW-2, and
 `handover_recipient_never_acks_into_an_import_missing_its_world_files`;
 `handover_inert_import_lock_is_a_sibling_file_removed_after_its_import`).
 Once promoted, the moved world is covered by its own `handover/.live`. The

@@ -1600,13 +1600,27 @@ mod session {
         consent(&mut p);
         offer(&mut p, &seat0());
         let imports = p.dir.0.join("imports");
-        let seen: std::sync::Arc<std::sync::Mutex<Option<String>>> = Default::default();
+        // CP24 (CP23 review LOW-2): another process's sweep just before the
+        // rename (the lock is held from `mark`) and just after it; each
+        // child's own line is checked first, before any harness unwrap.
+        type Seen = std::sync::Arc<std::sync::Mutex<Vec<(ImportBoundary, String)>>>;
+        use crate::handover::checkpoint::ImportBoundary;
+        let seen: Seen = Default::default();
         let (probe_imports, probe_seen) = (imports.clone(), seen.clone());
-        p.dst.as_mut().unwrap().probe_at_renamed(Box::new(move |_| {
-            *probe_seen.lock().unwrap() = Some(crate::handover::live::world_lock::tests::child_sweep(&probe_imports));
+        p.dst.as_mut().unwrap().probe_at_renamed(Box::new(move |boundary, _| {
+            let line = crate::handover::live::world_lock::tests::child_sweep(&probe_imports);
+            probe_seen.lock().unwrap().push((boundary, line));
         }));
-        stream(&mut p, 10_000);
-        assert_eq!(seen.lock().unwrap().as_deref(), Some("SWEEP Err"), "another process's sweep at the rename took the import");
+        let streamed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| stream(&mut p, 10_000)));
+        let lines = seen.lock().unwrap().clone();
+        assert_eq!(
+            lines,
+            vec![(ImportBoundary::BeforeRename, "SWEEP Err".to_owned()), (ImportBoundary::Renamed, "SWEEP Err".to_owned())],
+            "another process's sweep around the rename took the import"
+        );
+        if let Err(e) = streamed {
+            std::panic::resume_unwind(e);
+        }
         assert_eq!(p.src.stage(), SourceStage::ReadyVerified);
         let working = p.dst.as_ref().unwrap().checkpoint().unwrap().working_world();
         assert!(working.join("world.dat").exists(), "the import lost its world");

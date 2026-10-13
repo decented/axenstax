@@ -76,7 +76,7 @@ struct CancelImport {
     at_renamed: Option<RenamedProbe>,
 }
 #[cfg(test)]
-type RenamedProbe = Box<dyn FnMut(&Path) + Send>;
+type RenamedProbe = Box<dyn FnMut(ImportBoundary, &Path) + Send>;
 impl ImportObserver for CancelImport {
     fn reached(&mut self, boundary: ImportBoundary, path: &Path) -> std::io::Result<()> {
         if self.fence.lock().map(|g| g.cancelled).unwrap_or(true) {
@@ -89,13 +89,15 @@ impl ImportObserver for CancelImport {
                     return Err(std::io::Error::other("the import's lock couldn't be taken"));
                 }
             }
-            #[cfg(test)]
-            ImportBoundary::Renamed => {
-                if let Some(probe) = self.at_renamed.as_mut() {
-                    probe(path);
-                }
-            }
             _ => {}
+        }
+        // Tests: another process's sweep just before (with the lock held)
+        // and just after the rename.
+        #[cfg(test)]
+        if matches!(boundary, ImportBoundary::BeforeRename | ImportBoundary::Renamed)
+            && let Some(probe) = self.at_renamed.as_mut()
+        {
+            probe(boundary, path);
         }
         let _ = path;
         Ok(())
@@ -1116,7 +1118,8 @@ impl RecipientSession {
         self.import_hold = Some((reached_tx, release_rx));
         (reached_rx, release_tx)
     }
-    /// Tests: run `probe` at the import's Renamed boundary (on the worker).
+    /// Tests: run `probe` at the import's BeforeRename (after its lock) and
+    /// Renamed boundaries (on the worker).
     #[cfg(test)]
     pub fn probe_at_renamed(&mut self, probe: RenamedProbe) {
         self.renamed_probe = Some(probe);
