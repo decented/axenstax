@@ -3316,6 +3316,8 @@ fn run_shot_workshop(args: &[String]) {
 }
 
 /// Headless screenshot mode: generate world, render one frame, save PNG, exit.
+/// Optional --hud uses the actual survival HUD; --time, --width and --height
+/// select bounded in-world visual previews without a window or saved world.
 #[cfg(not(target_arch = "wasm32"))]
 fn run_screenshot(args: &[String]) {
     // Parse optional output path: --screenshot [path]
@@ -3330,12 +3332,21 @@ fn run_screenshot(args: &[String]) {
     log::info!("Axe'n'Stax -- Headless screenshot mode");
     log::info!("Output: {output_path}");
 
-    let _registry = BlockRegistry::new();
+    let number = |flag: &str, fallback: u32, min: u32, max: u32| {
+        args.iter().position(|a| a == flag)
+            .and_then(|i| args.get(i + 1))
+            .and_then(|value| value.parse::<u32>().ok())
+            .unwrap_or(fallback).clamp(min, max)
+    };
+    let width = number("--width", 1280, 320, 3840);
+    let height = number("--height", 720, 240, 2160);
+    let world_time = number("--time", 6000, 0, 23_999);
+    let show_hud = args.iter().any(|a| a == "--hud");
     let mut world = World::new();
     let biome_gen = crate::biome::BiomeGenerator::new(42);
 
     let textures = crate::texture_gen::generate_textures();
-    let mut renderer = pollster::block_on(Renderer::new_headless(1280, 720, &textures));
+    let mut renderer = pollster::block_on(Renderer::new_headless(width, height, &textures));
 
     // Generate terrain around origin
     let render_dist = 6; // smaller for speed
@@ -3375,16 +3386,24 @@ fn run_screenshot(args: &[String]) {
     // Position camera looking across the terrain at a slight angle
     let eye = glam::Vec3::new(8.0, spawn_y + 12.0, 8.0);
     let target = glam::Vec3::new(0.0, spawn_y - 2.0, -20.0);
-    let aspect = 1280.0 / 720.0;
+    let aspect = width as f32 / height as f32;
 
     let view = glam::camera::rh::view::look_at_mat4(eye, target, glam::Vec3::Y);
     let proj = glam::camera::rh::proj::directx::perspective(70.0_f32.to_radians(), aspect, 0.1, 300.0);
     let view_proj = proj * view;
 
+    let sun = if args.iter().any(|a| a == "--time") {
+        let (direction, brightness) = crate::camera::compute_sun(world_time);
+        let (r, g, b) = crate::camera::sky_color(brightness);
+        renderer.sky_color = [r as f32, g as f32, b as f32];
+        [direction.x, direction.y, direction.z, brightness]
+    } else {
+        [0.3, 1.0, 0.5, 1.0]
+    };
     let camera_uniform = CameraUniform {
         view_proj: view_proj.to_cols_array_2d(),
         camera_pos: [eye.x, eye.y, eye.z, 0.0],
-        sun_dir: [0.3, 1.0, 0.5, 1.0],
+        sun_dir: sun,
         fog: crate::camera::default_fog(),
         params: [1.0, 0.0, 0.0, 0.0],
         cam_right: [1.0, 0.0, 0.0, 0.0],
@@ -3396,8 +3415,35 @@ fn run_screenshot(args: &[String]) {
     // headless screenshot's micro pass can draw them.
     renderer.sync_micro_models(&world.micro_registry);
 
-    // Render and save (headless: no egui HUD, just world + crosshair)
-    renderer.render_to_png(output_path);
+    if show_hud {
+        let mut inventory = crate::inventory::Inventory::new();
+        let mut pickaxe = crate::crafting::Tool::new(
+            crate::crafting::ToolType::Pickaxe, crate::crafting::ToolMaterial::Iron,
+        );
+        pickaxe.durability = pickaxe.durability * 3 / 5;
+        inventory.set_slot(0, Some(crate::item::ItemStack { item: crate::item::Item::Tool(pickaxe), count: 1 }));
+        for (slot, block, count) in [
+            (1, block::STONE, 64), (2, block::DIRT, 32),
+            (3, block::OAK_PLANKS, 48), (4, block::TORCH, 24),
+        ] {
+            inventory.set_slot(slot, Some(crate::item::ItemStack::new_block(block, count)));
+        }
+        inventory.set_slot(5, Some(crate::item::ItemStack::new_material(crate::item::MaterialId::Bread, 12)));
+        let viewport = crate::screen::ViewportRect { x: 0, y: 0, width, height };
+        renderer.render_to_png_with_hud(output_path, |ctx, assets| {
+            crate::hud_ui::draw_hud(
+                ctx, &viewport, 0, &inventory, 0, &registry, assets,
+                13.0, 20.0, 11, 20, 6, false, false,
+                eye, world_time, false, None, crate::hud_ui::PerfSamples::default(),
+                crate::hud_ui::DebugReadout {
+                    yaw: 0.0, biome: "Screenshot", light: None,
+                    wind: crate::wind::WindSample::CALM,
+                },
+            );
+        });
+    } else {
+        renderer.render_to_png(output_path);
+    }
     log::info!("Done.");
 }
 

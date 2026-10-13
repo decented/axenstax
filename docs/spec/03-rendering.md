@@ -1276,6 +1276,15 @@ and stroke from its column width, so thicker selected outlines also stay within
 the column. Existing world actions, capability gates and responsive side-column
 breakpoints retain their behaviour.
 
+Native in-world previews reuse `--screenshot [path]`. Optional `--hud` paints
+`hud_ui::draw_hud` with the same managed block icons and survival layout as live
+play; `--time <0..23999>` selects the existing sun/sky clock, and `--width` /
+`--height` select a bounded viewport (320–3840 by 240–2160 pixels). The default
+world-only preview retains its original camera, dimensions and sun. World and
+menu captures share the existing egui paint and PNG readback paths; adding the
+HUD loads the world colour target instead of clearing it to a menu backdrop.
+These developer previews do not simulate play or prove input behaviour.
+
 The shared surface tones are:
 
 | UI role | Hex | Use |

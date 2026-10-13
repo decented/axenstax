@@ -3859,7 +3859,25 @@ impl Renderer {
     }
 
     /// Render to the offscreen texture and save as PNG.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn render_to_png(&self, path: &str) {
+        self.render_headless_world();
+        self.save_color_target_png(path);
+    }
+
+    /// Draw the same headless world with the live HUD and its managed icons.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn render_to_png_with_hud(
+        &mut self,
+        path: &str,
+        run_ui: impl FnOnce(&egui::Context, &EguiIntegration),
+    ) {
+        self.render_headless_world();
+        self.render_headless_ui_to_png(path, false, run_ui);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn render_headless_world(&self) {
         let color_target = self.color_target.as_ref().expect("render_to_png requires headless renderer");
         let view = color_target.create_view(&wgpu::TextureViewDescriptor::default());
 
@@ -4081,67 +4099,7 @@ impl Renderer {
             render_pass.draw(0..self.crosshair_vertex_count, 0..1);
         }
 
-        // --- Copy texture to staging buffer ---
-        let bytes_per_row = (self.width * 4 + 255) & !255; // align to 256
-        let buffer_size = (bytes_per_row * self.height) as u64;
-
-        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("screenshot_staging"),
-            size: buffer_size,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-
-        encoder.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: color_target,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &staging,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(bytes_per_row),
-                    rows_per_image: Some(self.height),
-                },
-            },
-            wgpu::Extent3d {
-                width: self.width,
-                height: self.height,
-                depth_or_array_layers: 1,
-            },
-        );
-
         self.queue.submit(std::iter::once(encoder.finish()));
-
-        // Map and read pixels
-        let buffer_slice = staging.slice(..);
-        let (tx, rx) = std::sync::mpsc::channel();
-        buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
-            tx.send(result).unwrap();
-        });
-        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
-        rx.recv().unwrap().expect("Failed to map staging buffer");
-
-        let data = buffer_slice.get_mapped_range();
-
-        // Remove row padding and collect pixel data
-        let mut pixels = Vec::with_capacity((self.width * self.height * 4) as usize);
-        for y in 0..self.height {
-            let offset = (y * bytes_per_row) as usize;
-            pixels.extend_from_slice(&data[offset..offset + (self.width * 4) as usize]);
-        }
-        drop(data);
-        staging.unmap();
-
-        // Save as PNG
-        let img: image::RgbaImage =
-            image::ImageBuffer::from_raw(self.width, self.height, pixels)
-                .expect("Failed to create image buffer");
-        img.save(path).expect("Failed to save screenshot");
-        log::info!("Screenshot saved to {path}");
     }
 
     /// Render an egui menu screen (e.g. the lobby) headlessly to a PNG. Clears to
@@ -4150,14 +4108,24 @@ impl Renderer {
     /// UX without opening a window. Requires a headless renderer (`color_target`).
     #[cfg(not(target_arch = "wasm32"))]
     pub fn render_menu_to_png(&mut self, path: &str, run_ui: impl FnOnce(&egui::Context)) {
+        self.render_headless_ui_to_png(path, true, |ctx, _| run_ui(ctx));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn render_headless_ui_to_png(
+        &mut self,
+        path: &str,
+        clear_menu: bool,
+        run_ui: impl FnOnce(&egui::Context, &EguiIntegration),
+    ) {
         let color_target = self.color_target.as_ref().expect("render_menu_to_png requires headless renderer");
         let view = color_target.create_view(&wgpu::TextureViewDescriptor::default());
 
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("headless_menu_encoder"),
         });
-        // Clear to the menu backdrop.
-        {
+        // An in-world HUD loads the scene; menus start with their backdrop.
+        if clear_menu {
             let _clear = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("headless_menu_clear"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
