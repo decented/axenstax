@@ -6416,8 +6416,10 @@ in `the_workshop_2`; past `_99` the time-stamped fallback is checked too. Defenc
 depth: a Trial never opens or wipes a folder carrying `handover/`
 (`world_open::plan_arena_folder` refuses with `ARENA_HOLDS_A_HANDOVER` and the player stays
 in the lobby; the lobby's own Delete still deletes such a world — it is the player's;
-CP22, CP21 review LOW-4: the line covers a world handed over FROM the arena folder too,
-and says deleting it from the world list frees the Trial). Known, not changed: a local
+CP22, CP21 review LOW-4: the line covers a world handed over FROM the arena folder too;
+CP24, CP22 review LOW-2: it no longer suggests deleting the world — a retired world is
+refused before it (`copy::RETIRED`), so what it meets is the player's own received world
+or one whose handover may still end Aborted, and deleting either could lose it). Known, not changed: a local
 world made by an older build with a display name like "Exp-Lore" already lives in
 `exp-lore`, and a Trial whose slug matches would still wipe it (pre-existing).
 Folder families the game makes under the worlds folder (CP21 grep): `the_workshop`,

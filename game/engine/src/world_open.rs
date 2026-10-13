@@ -292,8 +292,13 @@ pub(crate) fn server_refusal_message(name: &str, why: &str) -> String {
 
 #[cfg(not(target_arch = "wasm32"))]
 /// CP21 (CP19 review HIGH-1): the Trial's folder holds a handed-over world.
+/// CP24 (CP22 review LOW-2): it never invites deleting that world. A
+/// retired world is refused before this line (`copy::RETIRED`), so what
+/// reaches it is a world handed over TO this player (their own) or one whose
+/// handover outcome may still be open (an Aborted would leave the world
+/// theirs): deleting either could lose it.
 pub(crate) const ARENA_HOLDS_A_HANDOVER: &str =
-    "This Trial's folder holds a world that was handed over or is being handed over, so the Trial won't start there. If you no longer need that world, delete it from your world list to play this Trial.";
+    "This Trial's folder holds a world that was handed over to you or is part of a handover, so the Trial won't start there. Nothing in it was changed.";
 
 /// How a Trial arena launch treats its folder, decided from what is ON DISK and
 /// before anything is written (Spec 02 §8.4). A world is there when
@@ -871,6 +876,8 @@ mod tests {
             assert_eq!(plan_arena_folder(mode, "exp-hash-dash"), Err(ARENA_HOLDS_A_HANDOVER.to_owned()), "{mode:?}");
         }
         assert_eq!(snapshot(&h), before, "a handed-over world in an arena folder was touched");
+        // CP24 (CP22 review LOW-2): the line never invites deleting it.
+        assert!(!ARENA_HOLDS_A_HANDOVER.to_lowercase().contains("delete"), "the arena line invites deleting a handover's world");
     }
 
     /// A world with chunks in several columns, several chunks tall — every
