@@ -372,7 +372,7 @@ fn create_egui_texture_view(
 }
 
 /// Share the Copperline treatment between the live game and headless previews.
-fn configure_style(ctx: &egui::Context) {
+pub(crate) fn configure_style(ctx: &egui::Context) {
     let mut style = egui::Style { visuals: egui::Visuals::dark(), ..Default::default() };
     style.visuals.window_corner_radius = egui::CornerRadius::same(8);
     style.visuals.window_fill = crate::brand::SURFACE;

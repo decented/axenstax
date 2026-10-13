@@ -2850,6 +2850,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn vital_count_text_fits_inside_each_viewport() {
+        for width in [390, 1280] {
+            let ctx = egui::Context::default();
+            crate::egui_integration::configure_style(&ctx);
+            ctx.global_style_mut(|style| style.animation_time = 0.0);
+            let viewport = ViewportRect { x: 0, y: 0, width, height: 844 };
+            let mut bounds = Vec::new();
+            for _ in 0..3 {
+                ctx.begin_pass(egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width as f32, 844.0))),
+                    ..Default::default()
+                });
+                draw_vital_counts(&ctx, &viewport, 0, 30, 40);
+                bounds = ctx.end_pass().shapes.into_iter().filter_map(|clipped| {
+                    if let egui::Shape::Text(text) = clipped.shape {
+                        Some(text.visual_bounding_rect())
+                    } else { None }
+                }).collect();
+            }
+            assert_eq!(bounds.len(), 2, "both free-slot and arrow text must be painted");
+            for rect in bounds {
+                assert!(rect.left() >= 0.0 && rect.right() <= width as f32,
+                    "complete count text must fit within the {width}-point viewport: {rect:?}");
+            }
+        }
+    }
+
+    #[test]
     fn hud_full_size_above_threshold() {
         // 1080p TV quad quadrants (960×540), 4K quads (1920×1080), and
         // any single-player full-screen viewport must stay at 1.0 scale.
