@@ -3870,10 +3870,17 @@ impl Renderer {
     pub fn render_to_png_with_hud(
         &mut self,
         path: &str,
-        run_ui: impl FnOnce(&egui::Context, &EguiIntegration),
+        mut run_ui: impl FnMut(&egui::Context, &EguiIntegration),
     ) {
-        self.render_headless_world();
-        self.render_headless_ui_to_png(path, false, run_ui);
+        // egui Areas first run an invisible sizing pass. Settle that pass
+        // before capture, without fading or compositing two visible HUDs.
+        let animation_time = self.egui.ctx.style().animation_time;
+        self.egui.ctx.style_mut(|style| style.animation_time = 0.0);
+        for _ in 0..2 {
+            self.render_headless_world();
+            self.render_headless_ui_to_png(path, false, |ctx, assets| run_ui(ctx, assets));
+        }
+        self.egui.ctx.style_mut(|style| style.animation_time = animation_time);
     }
 
     #[cfg(not(target_arch = "wasm32"))]

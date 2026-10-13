@@ -1284,6 +1284,8 @@ world-only preview retains its original camera, dimensions and sun. World and
 menu captures share the existing egui paint and PNG readback paths; adding the
 HUD loads the world colour target instead of clearing it to a menu backdrop.
 These developer previews do not simulate play or prove input behaviour.
+The optional HUD registers the live block atlas and settles egui's initial
+invisible Area sizing pass with capture-only fades disabled before saving.
 
 The shared surface tones are:
 
