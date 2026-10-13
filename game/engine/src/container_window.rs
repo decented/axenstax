@@ -975,7 +975,27 @@ pub struct DebtApplied {
     pub saturated: bool,
 }
 
+/// C3d run 5 (run-4 review LOW-2) — a Plan in `stack` becomes the body-less
+/// placeholder a joiner's mirror holds (`plan::PlanData::placeholder`; a
+/// Plan digests content-free, so every digest and slot print is unchanged).
+/// For the server's MODEL of that mirror only — never the real container.
+pub fn strip_plan_body(stack: &mut Option<ItemStack>) {
+    if let Some(ItemStack { item: Item::Plan(body), .. }) = stack {
+        *body = crate::plan::PlanData::placeholder();
+    }
+}
+
 impl ContainerData {
+    /// C3d run 5 (LOW-2) — this copy as a joiner's mirror holds it: every
+    /// Plan as its placeholder ([`strip_plan_body`]).
+    pub fn without_plan_bodies(mut self) -> Self {
+        match &mut self {
+            ContainerData::Chest(chest) => chest.slots.iter_mut().for_each(strip_plan_body),
+            ContainerData::Furnace(f) => [&mut f.input, &mut f.fuel, &mut f.output].into_iter().for_each(strip_plan_body),
+        }
+        self
+    }
+
     /// A copy of a container's contents (a chest's, dispenser's or
     /// dropper's slots, or a furnace).
     pub fn of(c: ContainerRef) -> Self {
@@ -1172,6 +1192,34 @@ pub fn container_at_mut(world: &mut World, cell: [i32; 3], kind: ContainerKind) 
         ContainerKind::Chest { .. } => world.chest_at_mut(pos).map(ContainerMut::Chest),
         ContainerKind::Dispenser | ContainerKind::Dropper => world.dispenser_at_mut(pos).map(|d| ContainerMut::Chest(&mut d.chest)),
         ContainerKind::Furnace => world.furnace_at_mut(pos).map(ContainerMut::Furnace),
+    }
+}
+
+/// C3d run 11 (run-7 item 4) — the block entity [`ensure_container`] would
+/// create for `kind`, as a value: what a container whose entity is still
+/// missing (a lazy chest) holds, so it can be viewed before anything is
+/// created.
+// A short-lived local value (one per open of a missing entity), never stored.
+#[allow(clippy::large_enum_variant)]
+pub enum FreshContainer {
+    Chest(ChestData),
+    Furnace(FurnaceData),
+}
+
+impl FreshContainer {
+    pub fn of(kind: ContainerKind) -> Self {
+        match kind {
+            ContainerKind::Chest { tier } => Self::Chest(ChestData::for_tier(tier)),
+            ContainerKind::Dispenser | ContainerKind::Dropper => Self::Chest(crate::dispenser::DispenserData::new().chest),
+            ContainerKind::Furnace => Self::Furnace(FurnaceData::default()),
+        }
+    }
+
+    pub fn view(&self) -> ContainerRef<'_> {
+        match self {
+            Self::Chest(chest) => ContainerRef::Chest(chest),
+            Self::Furnace(furnace) => ContainerRef::Furnace(furnace),
+        }
     }
 }
 

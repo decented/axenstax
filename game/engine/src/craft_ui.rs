@@ -129,13 +129,75 @@ impl CraftingUi {
         }
     }
 
+    /// Does the grid hold any item (restored behind a closed screen by a
+    /// join, death or correction sync, or left by a full bag)?
+    pub fn grid_holds_items(&self) -> bool {
+        self.grid.iter().flatten().any(Option::is_some)
+    }
+
+    /// C3d run 8 (review H1) — the default-path (Mirror) open, E or a table:
+    /// a grid holding items (restored behind a closed screen by a join,
+    /// death or correction sync) is first returned to the bag by a real
+    /// logged `Close` at the current station, digested over the real grid, so
+    /// the server's copy returns it too; then the screen opens. Before this,
+    /// the open emptied the grid locally (the pre-existing `bdd4fe87` bug: a
+    /// restored grid was lost to the client at its next E, while the server's
+    /// copy and the save kept it). A Close a full bag refused opens nothing
+    /// new: the screen shows what is left at its own station
+    /// ([`Self::show_held_grid`]). Returns whether the asked screen opened.
+    pub fn open_crafting(&mut self, table: Option<[i32; 3]>, inv: &mut Inventory, armour: &mut [Option<ArmourItem>; 4]) -> bool {
+        if self.grid_holds_items() && !self.close(inv, armour) {
+            self.show_held_grid();
+            return false;
+        }
+        match table {
+            Some(cell) => self.open_table_crafting(cell, inv, armour),
+            None => self.open_player_crafting(inv, armour),
+        }
+        true
+    }
+
+    /// C3d run 8 (review H1) — the return-the-grid `Close` an open sends
+    /// first was refused (a full bag): the screen opens at its OWN station
+    /// with what is left on it, never at the one asked for. Nothing is sent:
+    /// the server's copy is at that station already. C3d run 10 (run-8
+    /// review LOW-A) — the station can be the player's 2×2 while a table's
+    /// leftovers sit beyond it (a rejoin, or a death sync, restores a grid
+    /// but not the table); the screen then draws every cell that holds an
+    /// item ([`Self::view_grid_size`]), so nothing is hidden.
+    fn show_held_grid(&mut self) {
+        self.reset_screen(self.table);
+        self.update_result();
+    }
+
+    /// C3d run 10 (run-8 review LOW-A) — the side of the grid the screen
+    /// draws: the station's, or 3 while a cell beyond the station's 2×2
+    /// holds an item. View only: the station, the digest and the click rule
+    /// are unchanged (the server's copy is at the same station), and a cell
+    /// the station doesn't have is drawn but takes no click; a `Close` once
+    /// the bag has room returns it.
+    pub fn view_grid_size(&self) -> usize {
+        let size = self.station().grid_size();
+        let beyond = self.grid.iter().enumerate()
+            .any(|(r, row)| row.iter().enumerate().any(|(c, cell)| cell.is_some() && (r >= size || c >= size)));
+        if beyond { 3 } else { size }
+    }
+
     /// Open the player's own 2×2 grid (E). Logged as a window op
     /// (`OpenPlayer`, C3a-2a): `inv` and `armour` are the player's, for its
     /// digest.
     pub fn open_player_crafting(&mut self, inv: &Inventory, armour: &[Option<ArmourItem>; 4]) {
+        self.reset_screen(None);
+        self.log_op(crate::protocol::WireWindowOp::OpenPlayer, inv, armour);
+    }
+
+    /// The screen opens at `table` (or the player's 2×2). C3d run 8 (review
+    /// H1) — it never empties the grid: the entry points first return a
+    /// grid holding items through a real `Close` ([`Self::open_crafting`],
+    /// [`Self::open_joined`]); what a full bag couldn't take stays on screen.
+    fn reset_screen(&mut self, table: Option<[i32; 3]>) {
         self.open = true;
-        self.table = None;
-        self.grid = [[None, None, None], [None, None, None], [None, None, None]];
+        self.table = table;
         self.result = None;
         self.pad_focus = None;
         self.book_open = false;
@@ -143,23 +205,106 @@ impl CraftingUi {
         self.pinned_recipe_stack.clear();
         self.book_uses_filter = None;
         self.forced_close_refused = None;
-        self.log_op(crate::protocol::WireWindowOp::OpenPlayer, inv, armour);
+    }
+
+    /// C3d — a Strict client's auto-refill setting reaches the server as a
+    /// reserved `SetAutoRefill` action before any window action that the
+    /// setting's digest covers (the session starts by sending it, as the
+    /// Mirror op log does).
+    pub fn sync_auto_refill_joined(&mut self, remote: &mut crate::remote_client::RemoteClient, inv: &Inventory, armour: &[Option<ArmourItem>; 4]) -> Result<(), String> {
+        // Run 14 — a refused setting (its `Refused` receipt retired) is sent
+        // again: the correction `Replace` keeps each copy's refill setting.
+        if std::mem::take(&mut remote.refill_refused) {
+            self.ops.forget_auto_refill();
+        }
+        if self.ops.auto_refill_sent() == Some(inv.auto_refill) {
+            return Ok(());
+        }
+        let digest = self.digest(inv, armour);
+        let action = crate::window_prediction::reserve_op(remote, crate::protocol::WireWindowOp::SetAutoRefill { on: inv.auto_refill }, digest, true, Box::new([]))?;
+        self.ops.note_auto_refill_sent(inv.auto_refill);
+        remote.send_reserved_action(action)
+    }
+
+    /// C3d — [`Self::open_player_crafting`] / [`Self::open_table_crafting`]
+    /// for a Strict client: the open is reserved (with the digest of the
+    /// window after it) before the screen changes; nothing is logged.
+    ///
+    /// C3d run 8 (review H1) — a grid holding items is first returned by a
+    /// real reserved `Close` at the current station (digested over the real
+    /// grid), and the open digests the real grid, never an empty one: the
+    /// client never discards grid items locally. A Close a full bag refused
+    /// opens nothing new ([`Self::show_held_grid`]; `Ok(false)`).
+    pub fn open_joined(&mut self, remote: &mut crate::remote_client::RemoteClient, table: Option<[i32; 3]>, inv: &mut Inventory, armour: &mut [Option<ArmourItem>; 4], registry: &crate::block::BlockRegistry) -> Result<bool, String> {
+        self.sync_auto_refill_joined(remote, inv, armour)?;
+        if self.grid_holds_items() && !self.close_joined(remote, inv, armour, registry)? {
+            self.show_held_grid();
+            return Ok(false);
+        }
+        let station = table.map_or(Station::Player, |cell| Station::Table { cell });
+        let digest = window::digest_parts(inv, armour, &self.cursor_item, &self.grid, station);
+        let (op, cells) = match table {
+            Some(cell) => (crate::protocol::WireWindowOp::OpenTable { cell }, vec![cell].into_boxed_slice()),
+            None => (crate::protocol::WireWindowOp::OpenPlayer, Box::new([]) as Box<[[i32; 3]]>),
+        };
+        let action = crate::window_prediction::reserve_op(remote, op, digest, true, cells)?;
+        self.reset_screen(table);
+        remote.send_reserved_action(action)?;
+        Ok(true)
+    }
+
+    /// C3d — a Strict client asks to open the container at `cell`: reserved,
+    /// with the window's digest unchanged (nothing opens until the server
+    /// answers). Nothing is logged.
+    pub fn open_container_joined(&mut self, remote: &mut crate::remote_client::RemoteClient, cell: [i32; 3], inv: &Inventory, armour: &[Option<ArmourItem>; 4]) -> Result<(), String> {
+        self.sync_auto_refill_joined(remote, inv, armour)?;
+        let digest = self.digest(inv, armour);
+        let action = crate::window_prediction::reserve_op(remote, crate::protocol::WireWindowOp::OpenContainer { cell }, digest, true, vec![cell].into_boxed_slice())?;
+        remote.send_reserved_action(action)
+    }
+
+    /// C3d — [`Self::apply_container_click`] for a Strict client: the click
+    /// is staged on scratch copies first (its digest, mirror included), the
+    /// action reserved, and only then the mirror and the window change.
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_container_click_joined(
+        &mut self,
+        remote: &mut crate::remote_client::RemoteClient,
+        inv: &mut Inventory,
+        armour: &mut [Option<ArmourItem>; 4],
+        container: crate::container_window::ContainerMut,
+        cell: [i32; 3],
+        click: &crate::container_window::ContainerClick,
+        ctx: &ClickCtx,
+        registry: &crate::block::BlockRegistry,
+    ) -> Result<crate::container_window::ContainerApplied, String> {
+        self.sync_auto_refill_joined(remote, inv, armour)?;
+        crate::window_prediction::retain_private_window(inv, &self.cursor_item, &self.grid)?;
+        let raw = crate::staged_window::MarkerWindow::capture_parts(inv, armour, &self.cursor_item, &self.grid, registry);
+        let mut scratch = crate::container_window::ContainerData::of(container.as_ref());
+        let staged = crate::staged_window::stage_container(&raw, &mut scratch, click, ctx);
+        let digest = staged.after.digest_with(self.station(), Some(scratch.as_ref()));
+        let op = crate::protocol::WireWindowOp::Container(click.clone());
+        let action = crate::window_prediction::reserve_op(remote, op, digest, staged.result.ok(), vec![cell].into_boxed_slice())?;
+        let mut view = WindowMut { inv, armour, cursor: &mut self.cursor_item, grid: &mut self.grid, container: Some(container) };
+        let applied = crate::container_window::apply_container(&mut view, click, ctx);
+        self.update_result();
+        remote.send_reserved_action(action)?;
+        Ok(applied)
+    }
+
+    /// C3d — [`Self::close_container`] for a Strict client: a reserved
+    /// `WindowClick::Close`; the screen's own open state is left alone.
+    pub fn close_container_joined(&mut self, remote: &mut crate::remote_client::RemoteClient, inv: &mut Inventory, armour: &mut [Option<ArmourItem>; 4], registry: &crate::block::BlockRegistry) -> Result<ClickResult, String> {
+        let ctx = ClickCtx::new(false, self.station(), glam::Vec3::ZERO, |_| crate::block::AIR);
+        self.apply_joined_click(remote, inv, armour, &WindowClick::Close, &ctx, registry)
     }
 
     /// Open the 3×3 grid of the crafting table at `table`. The caller opens
     /// one only while it is in reach (`window::table_in_reach`, the rule its
     /// screen closes by). Logged as a window op (`OpenTable`, C3a-2a).
     pub fn open_table_crafting(&mut self, table: [i32; 3], inv: &Inventory, armour: &[Option<ArmourItem>; 4]) {
-        self.open = true;
-        self.table = Some(table);
-        self.grid = [[None, None, None], [None, None, None], [None, None, None]];
-        self.result = None;
-        self.pad_focus = None;
-        self.book_open = false;
-        self.book_search.clear();
-        self.pinned_recipe_stack.clear();
-        self.book_uses_filter = None;
-        self.forced_close_refused = None;
+        self.reset_screen(Some(table));
         self.log_op(crate::protocol::WireWindowOp::OpenTable { cell: table }, inv, armour);
     }
 
@@ -276,6 +421,19 @@ impl CraftingUi {
         self.apply_ctx(inv, armour, click, &ctx)
     }
 
+    /// The real joined transition reserves its complete marker recipe before
+    /// window::apply. At a failed reservation every holding remains unchanged.
+    pub fn apply_joined_click(&mut self, remote: &mut crate::remote_client::RemoteClient, inv: &mut Inventory, armour: &mut [Option<ArmourItem>; 4], click: &WindowClick, ctx: &ClickCtx, registry: &crate::block::BlockRegistry) -> Result<ClickResult, String> {
+        self.sync_auto_refill_joined(remote, inv, armour)?;
+        let action = crate::window_prediction::reserve_click(remote, inv, armour, &self.cursor_item, &self.grid, click, ctx, registry)?;
+        let mut view = WindowMut { inv, armour, cursor: &mut self.cursor_item, grid: &mut self.grid, container: None };
+        let result = window::apply(&mut view, click, ctx);
+        self.update_result();
+        // A send failure never releases the reserved identity or body keys.
+        remote.send_reserved_action(action)?;
+        Ok(result)
+    }
+
     /// [`Self::apply_click`] with its context built.
     fn apply_ctx(
         &mut self,
@@ -316,7 +474,22 @@ impl CraftingUi {
     pub fn close(&mut self, inventory: &mut Inventory, armour: &mut [Option<ArmourItem>; 4]) -> bool {
         let ctx = ClickCtx::new(false, self.station(), glam::Vec3::ZERO, |_| crate::block::AIR);
         let all_placed = self.apply_ctx(inventory, armour, &WindowClick::Close, &ctx).ok();
-        if all_placed {
+        if all_placed { self.finish_close(); }
+        all_placed
+    }
+
+    /// C3d run 6 — adopt the station a whole-window replacement carries: a
+    /// table screen the replaced window no longer has closes locally (its
+    /// grid and cursor were already replaced), and no `Close` is sent.
+    pub fn adopt_station(&mut self, station: Station) {
+        match station {
+            Station::Table { cell } => self.table = Some(cell),
+            Station::Player if self.table.is_some() && self.open => self.finish_close(),
+            Station::Player => self.table = None,
+        }
+    }
+
+    fn finish_close(&mut self) {
             self.open = false;
             // The station goes with the screen, as the server's does
             // (`window_ops::serve_op`).
@@ -326,8 +499,28 @@ impl CraftingUi {
             self.book_open = false;
             self.book_search.clear();
             self.pinned_recipe_stack.clear();
-        }
-        all_placed
+    }
+
+    pub fn close_joined(&mut self, remote: &mut crate::remote_client::RemoteClient, inv: &mut Inventory, armour: &mut [Option<ArmourItem>; 4], registry: &crate::block::BlockRegistry) -> Result<bool, String> {
+        let ctx = ClickCtx::new(false, self.station(), glam::Vec3::ZERO, |_| crate::block::AIR);
+        let closed = self.apply_joined_click(remote, inv, armour, &WindowClick::Close, &ctx, registry)?.ok();
+        if closed { self.finish_close(); }
+        Ok(closed)
+    }
+
+    pub fn force_close_joined(&mut self, remote: &mut crate::remote_client::RemoteClient, inv: &mut Inventory, armour: &mut [Option<ArmourItem>; 4], registry: &crate::block::BlockRegistry, new_tick: bool) -> Result<bool, String> {
+        if let Some(refused_at) = self.forced_close_refused && (!new_tick || self.digest(inv, armour) == refused_at) { return Ok(false); }
+        // Review L4 — a reservation error is paced like a refused close: the
+        // retry waits for the next tick and a change of the window.
+        let closed = match self.close_joined(remote, inv, armour, registry) {
+            Ok(closed) => closed,
+            Err(error) => {
+                self.forced_close_refused = Some(self.digest(inv, armour));
+                return Err(error);
+            }
+        };
+        self.forced_close_refused = (!closed).then(|| self.digest(inv, armour));
+        Ok(closed)
     }
 
     /// C3a-fix-2 B-M1 — close the screen because its table is gone or out of
@@ -699,7 +892,10 @@ pub fn draw_crafting_ui(
     if !any_down {
         ui_state.clear_drag();
     }
-    let grid_size = if ui_state.is_table() { 3usize } else { 2 };
+    // C3d run 10 (LOW-A) — every cell holding an item is drawn; only the
+    // station's own cells take clicks.
+    let grid_size = ui_state.view_grid_size();
+    let station_size = ui_state.station().grid_size();
     let slot_size = 48.0;
     let gap = 4.0;
     // Controller slot-cursor: rect of the focused slot, captured while
@@ -796,6 +992,9 @@ pub fn draw_crafting_ui(
                                     );
                                     if pad_focused {
                                         focused_rect = Some(response.rect);
+                                    }
+                                    if r >= station_size || c >= station_size {
+                                        continue; // shown, never clicked (LOW-A)
                                     }
                                     if response.clicked() {
                                         click_target = ClickTarget::GridSlot(r, c, false);

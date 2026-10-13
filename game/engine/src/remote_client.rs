@@ -12,6 +12,13 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use crate::protocol::{self, PacketType};
 use crate::transport::ClientTransport;
 
+#[path = "remote_client_actions.rs"]
+mod actions;
+pub use actions::flush_strict_window_ops;
+// Read by the copy lint and the stray-op test only.
+#[cfg(test)]
+pub use actions::STRICT_STRAY_CHANGE_REASON;
+
 /// A present remote player's verified identity, for the inspect view. Built from
 /// the server's `Joined` events. `npub` is the full NIP-19 npub (copyable, lets a
 /// specific person be verified beyond the grindable collision suffix) or `""` for
@@ -299,6 +306,11 @@ pub enum Request {
     Interact(protocol::EntityInteractPacket),
     Item(protocol::ItemActionPacket),
     Device((i32, i32, i32)),
+    /// C3d run 22 — a retained typed action (today a Mirror seat's
+    /// `ToggleBlock`), reserved at the click and predicted there; sent with
+    /// [`RemoteClient::send_reserved_action`] in this one order. It claims
+    /// nothing in `JoinerActions` (its identity is the action journal's).
+    Action(crate::action_identity::ActionHeader),
 }
 
 impl Request {
@@ -310,7 +322,7 @@ impl Request {
             Request::Attack(pkt) => Some(pkt.seq),
             Request::Interact(pkt) => Some(pkt.seq),
             Request::Item(pkt) => Some(pkt.seq),
-            Request::Device(_) => None,
+            Request::Device(_) | Request::Action(_) => None,
         }
     }
 }
@@ -350,6 +362,32 @@ pub fn damage_cause_from_wire(cause: protocol::WireDamageCause) -> crate::surviv
 
 /// A remote game client connected to a server.
 pub struct RemoteClient {
+    pub inventory_mode: crate::action_identity::InventoryMode,
+    pub action_journal: Option<crate::action_journal::ActionJournal>,
+    pub recovery_prepare: Option<crate::action_identity::RecoveryCut>,
+    pub recovery_assembly: Option<crate::rebase_assembly::RebaseAssembly>,
+    /// Exact receipts wait for the actual ordered world boundary.
+    pub action_receipts: std::collections::VecDeque<crate::action_wire::ActionReceipt>,
+    /// C3d run 14 — a retired `Refused` receipt named this client's
+    /// `SetAutoRefill`: its next window action sends the setting again
+    /// (`CraftingUi::sync_auto_refill_joined`). Run 16 (run-14 review
+    /// LOW-1) — set too when a Strict whole-window `InventorySync` (a
+    /// correction `Replace`) arrives while a `SetAutoRefill` is still
+    /// unretired: the `Replace` keeps each copy's refill setting, so the
+    /// setting goes again BEFORE the next digest-covered action, not only
+    /// when the receipt (held behind the chunk intake) retires. An
+    /// unchanged setting resent is served harmlessly.
+    pub refill_refused: bool,
+    /// C3d run 17 (run-15 review LOW-2) — the request `seq`s of typed
+    /// attacks and shots whose `Refused` or `Superseded` receipt retired:
+    /// no outcome will ever answer them, so the game loop releases their
+    /// `JoinerActions` records (`GameState::release_retired_requests`).
+    /// Bounded by `joiner_actions::MAX_PENDING` (the oldest goes first).
+    pub released_requests: Vec<u32>,
+    last_recovery_id: u64,
+    queued_action_receipts: usize,
+    pending_action_ack: Option<crate::action_wire::AppliedActionAck>,
+    queued_recovery_fence: Option<crate::action_identity::RecoveryCut>,
     transport: Box<dyn ClientTransport>,
     pub state: ConnectionState,
     /// The sequence number (`InputPacket.tick`) the NEXT input goes out with:
@@ -759,6 +797,17 @@ impl RemoteClient {
         transport.send_to_server(&packet);
         Self {
             transport,
+            inventory_mode: crate::action_identity::InventoryMode::Mirror,
+            action_journal: None,
+            recovery_prepare: None,
+            recovery_assembly: None,
+            action_receipts: std::collections::VecDeque::with_capacity(crate::action_journal::MAX_ACTIONS),
+            refill_refused: false,
+            released_requests: Vec::new(),
+            last_recovery_id: 0,
+            queued_action_receipts: 0,
+            pending_action_ack: None,
+            queued_recovery_fence: None,
             state: ConnectionState::Connecting,
             tick: 1,
             latest_state: None,
@@ -811,6 +860,17 @@ impl RemoteClient {
         let client_nonce = hex::decode(&base.client_nonce_hex).unwrap_or_default();
         Self {
             transport,
+            inventory_mode: crate::action_identity::InventoryMode::Mirror,
+            action_journal: None,
+            recovery_prepare: None,
+            recovery_assembly: None,
+            action_receipts: std::collections::VecDeque::with_capacity(crate::action_journal::MAX_ACTIONS),
+            refill_refused: false,
+            released_requests: Vec::new(),
+            last_recovery_id: 0,
+            queued_action_receipts: 0,
+            pending_action_ack: None,
+            queued_recovery_fence: None,
             state: ConnectionState::Connecting,
             tick: 1,
             latest_state: None,
@@ -862,6 +922,11 @@ impl RemoteClient {
             if let Some((ptype, payload)) = protocol::deserialize_header(&packet) {
                 match ptype {
                     PacketType::JoinAccept => {
+                        if !matches!(&self.state, ConnectionState::Connecting) {
+                            self.state = ConnectionState::Failed("Unexpected JoinAccept outside initial admission".into());
+                            changed = true;
+                            continue;
+                        }
                         if let Ok(accept) = protocol::safe_deserialize::<protocol::JoinAcceptPacket>(payload) {
                             // C1 — enforce the server's identity proof against the
                             // pinned operator before trusting the connection. Native
@@ -908,6 +973,8 @@ impl RemoteClient {
                                     "Joined server as player {} (seed: {}, mode: {:?})",
                                     accept.player_index, accept.seed, accept.play_mode
                                 );
+                                self.inventory_mode = accept.inventory_mode;
+                                self.action_journal = Some(crate::action_journal::ActionJournal::new(accept.action_session, accept.action_life));
                                 self.spawn_pos =
                                     Some((accept.spawn_x, accept.spawn_y, accept.spawn_z));
                                 // Queue play_mode for game loop to apply via set_play_mode.
@@ -1221,6 +1288,11 @@ impl RemoteClient {
                         match protocol::safe_deserialize::<protocol::InventorySyncPacket>(payload) {
                             Ok(sync) if sync.window_event != 0 => {
                                 self.pending_outcomes.push(RequestOutcome::Sync(sync));
+                                if self.inventory_mode == crate::action_identity::InventoryMode::Strict
+                                    && self.set_auto_refill_journaled_after(None)
+                                {
+                                    self.refill_refused = true;
+                                }
                                 changed = true;
                             }
                             Ok(_) => {}
@@ -1235,6 +1307,26 @@ impl RemoteClient {
                                 changed = true;
                             }
                         }
+                    }
+                    PacketType::ActionReceipt => {
+                        if self.queued_action_receipts == crate::action_journal::MAX_ACTIONS {
+                            self.state = ConnectionState::Failed("Action receipts exceed their pending limit".into());
+                        } else if let Ok(receipt) = protocol::safe_deserialize::<crate::action_wire::ActionReceipt>(payload) {
+                            self.queued_action_receipts += 1;
+                            self.chunk_queue.push((self.pending_block_changes.len(), crate::chunk_intake::StreamItem::ActionReceipt(receipt)));
+                        } else {
+                            self.state = ConnectionState::Failed("Invalid action receipt".into());
+                        }
+                        changed = true;
+                    }
+                    PacketType::Recovery => {
+                        match protocol::safe_deserialize::<crate::action_wire::RecoveryPacket>(payload) {
+                            Ok(packet) => {
+                                if let Err(reason) = self.receive_recovery(packet) { self.state = ConnectionState::Failed(reason); }
+                            }
+                            Err(_) => self.state = ConnectionState::Failed("Invalid recovery carrier".into()),
+                        }
+                        changed = true;
                     }
                     PacketType::KillEvent => {
                         if let Ok(kill) =
@@ -1508,6 +1600,11 @@ impl RemoteClient {
             Request::Interact(pkt) => self.send_entity_interact(&pkt),
             Request::Item(pkt) => self.send_item_action(&pkt),
             Request::Device(pos) => self.send_device_interact(pos),
+            Request::Action(action) => {
+                if let Err(error) = self.send_reserved_action(action) {
+                    log::warn!("Reserved action {} could not be sent: {error}", action.seq);
+                }
+            }
         }
     }
 
@@ -1587,6 +1684,7 @@ impl RemoteClient {
     /// (0 = none): the count every later packet reports goes up to it.
     pub fn note_window_event(&mut self, event: u32) {
         self.events_applied = self.events_applied.max(event);
+        self.retire_applied_receipts();
     }
 
     /// C3a-fix-1 — are edits waiting for a later input (trimmed off a full
@@ -2879,6 +2977,335 @@ mod tests {
             world_rules: protocol::WorldRules::default(),
             worldgen_version: crate::world::worldgen_fingerprint(),
             chunk_note_radius: 0,
+            inventory_mode: crate::action_identity::InventoryMode::Mirror,
+            action_session: [7; 16],
+            action_life: 0,
+        }
+    }
+
+    /// C3d shared containers — a Strict client's window configuration
+    /// (auto-refill first), opens, container open, container click and
+    /// container close each reserve ONE typed action, in the order made, and
+    /// no legacy `WindowOp` is logged or sent.
+    #[test]
+    fn c3d_strict_window_entry_and_shared_container_send_only_reserved_actions() {
+        use crate::protocol::WireWindowOp as Op;
+        let (srv, client) = channel_pair();
+        let mut rc = RemoteClient::from_transport(Box::new(client), build_join_request("Player", 0, None), None);
+        let accept = protocol::JoinAcceptPacket { inventory_mode: crate::action_identity::InventoryMode::Strict, ..proofless_accept() };
+        srv.send_to_client(&protocol::serialize_packet(PacketType::JoinAccept, &accept));
+        rc.poll();
+        while srv.try_recv_from_client().is_some() {}
+        let registry = crate::block::BlockRegistry::new();
+        let mut ui = crate::craft_ui::CraftingUi::new();
+        let mut inv = crate::inventory::Inventory::new();
+        inv.auto_refill = true;
+        inv.set_slot(0, Some(crate::item::ItemStack::new_block(crate::block::STONE, 5)));
+        let mut armour = [None; 4];
+        ui.open_joined(&mut rc, None, &mut inv, &mut armour, &registry).unwrap();
+        assert!(ui.open);
+        ui.close_joined(&mut rc, &mut inv, &mut armour, &registry).unwrap();
+        ui.open_container_joined(&mut rc, [1, 2, 3], &inv, &armour).unwrap();
+        let mut chest = crate::container_window::ContainerData::Chest(crate::chest::ChestData { slots: vec![None; 27], tier: Default::default() });
+        let ctx = crate::window::ClickCtx::new(false, crate::window::Station::Player, glam::Vec3::ZERO, |_| crate::block::AIR).with_shared(true);
+        let click = crate::container_window::ContainerClick::Deposit { slot: 0, all: true };
+        let applied = ui.apply_container_click_joined(&mut rc, &mut inv, &mut armour, chest.as_mut(), [1, 2, 3], &click, &ctx, &registry).unwrap();
+        assert!(applied.result.ok() && inv.slot(0).is_none(), "the deposit was predicted");
+        ui.close_container_joined(&mut rc, &mut inv, &mut armour, &registry).unwrap();
+        assert!(ui.ops.first_stamp().is_none(), "nothing logged for the legacy path");
+        let mut seen = Vec::new();
+        while let Some(pkt) = srv.try_recv_from_client() {
+            match protocol::deserialize_header(&pkt) {
+                Some((PacketType::Action, payload)) => {
+                    let packet = crate::action_wire::ActionPacket::decode(payload).unwrap();
+                    let crate::action_wire::ActionIntent::Window(op) = packet.intent else { panic!("a window action") };
+                    seen.push((packet.action.seq, op.op));
+                }
+                Some((PacketType::WindowOp, _)) => panic!("a Strict client sent a legacy WindowOp"),
+                _ => {}
+            }
+        }
+        let ops: Vec<_> = seen.iter().map(|(_, op)| op.clone()).collect();
+        assert_eq!(seen.iter().map(|(seq, _)| *seq).collect::<Vec<_>>(), (1..=6).collect::<Vec<u64>>(), "one order, no gaps");
+        assert!(matches!(&ops[..], [
+            Op::SetAutoRefill { on: true }, Op::OpenPlayer, Op::Click(crate::window::WindowClick::Close),
+            Op::OpenContainer { cell: [1, 2, 3] }, Op::Container(crate::container_window::ContainerClick::Deposit { slot: 0, all: true }),
+            Op::Click(crate::window::WindowClick::Close),
+        ]), "{ops:?}");
+    }
+
+    /// C3d review M1 — the crafting close the Esc chain routes through
+    /// (`GameState::close_crafting` → `close_joined`), on a Strict
+    /// connection: after it, exactly one action is reserved in the journal,
+    /// the grid has returned to the bag, the server receives exactly one
+    /// typed `Action` (a Close click), and no legacy `WindowOp` is logged or
+    /// sent. (It asserts the end state; that the reservation comes first is
+    /// the code order in `CraftingUi::apply_joined_click` — run-2 review
+    /// LOW-4.)
+    #[test]
+    fn c3d_strict_crafting_close_reserves_an_action_and_sends_no_legacy_window_op() {
+        let (srv, client) = channel_pair();
+        let mut rc = RemoteClient::from_transport(Box::new(client), build_join_request("Player", 0, None), None);
+        let accept = protocol::JoinAcceptPacket { inventory_mode: crate::action_identity::InventoryMode::Strict, ..proofless_accept() };
+        srv.send_to_client(&protocol::serialize_packet(PacketType::JoinAccept, &accept));
+        rc.poll();
+        while srv.try_recv_from_client().is_some() {}
+        let mut ui = crate::craft_ui::CraftingUi::new();
+        let mut inv = crate::inventory::Inventory::new();
+        let mut armour = [None; 4];
+        ui.open_player_crafting(&inv, &armour);
+        // Opening logs its own config op (typed window configuration is a
+        // later C3d milestone); this test is about the close.
+        let _ = ui.take_ops(&inv, &armour);
+        ui.grid[0][0] = Some(crate::item::ItemStack::new_block(crate::block::STONE, 3));
+        let closed = ui.close_joined(&mut rc, &mut inv, &mut armour, &crate::block::BlockRegistry::new()).unwrap();
+        assert!(closed, "the close happened");
+        assert_eq!(inv.slot(0).map(|s| s.count), Some(3), "the grid returned to the bag");
+        assert_eq!(rc.action_journal.as_ref().unwrap().len(), 1, "one action reserved for the close");
+        assert!(ui.take_ops(&inv, &armour).is_empty(), "no legacy window op is logged");
+        let mut actions = 0;
+        while let Some(pkt) = srv.try_recv_from_client() {
+            match protocol::deserialize_header(&pkt) {
+                Some((PacketType::Action, payload)) => {
+                    let packet = crate::action_wire::ActionPacket::decode(payload).unwrap();
+                    assert!(matches!(packet.intent, crate::action_wire::ActionIntent::Window(protocol::WindowOpPacket { op: protocol::WireWindowOp::Click(crate::window::WindowClick::Close), .. })));
+                    assert_eq!(packet.action.seq, 1);
+                    actions += 1;
+                }
+                Some((PacketType::WindowOp, _)) => panic!("a Strict close sent a legacy WindowOp"),
+                _ => {}
+            }
+        }
+        assert_eq!(actions, 1, "exactly one typed action reached the server");
+    }
+
+    /// Run 4 (run-3 review M1) — `JoinAccept` in one poll, the join's
+    /// window sync in a later one: the flush sends no action (the
+    /// session-start auto-refill setting waits) until the sync (event 1) is
+    /// applied; then the setting goes, at that boundary.
+    #[test]
+    fn c3d_strict_session_start_auto_refill_waits_for_the_join_sync() {
+        let (srv, client) = channel_pair();
+        let mut rc = RemoteClient::from_transport(Box::new(client), build_join_request("Player", 0, None), None);
+        let accept = protocol::JoinAcceptPacket { inventory_mode: crate::action_identity::InventoryMode::Strict, ..proofless_accept() };
+        srv.send_to_client(&protocol::serialize_packet(PacketType::JoinAccept, &accept));
+        rc.poll();
+        while srv.try_recv_from_client().is_some() {}
+        let mut ui = crate::craft_ui::CraftingUi::new();
+        let inv = crate::inventory::Inventory::new();
+        let armour = [None; 4];
+        let actions = |srv: &crate::transport::ChannelServerTransport| {
+            let mut out = Vec::new();
+            while let Some(pkt) = srv.try_recv_from_client() {
+                if let Some((PacketType::Action, payload)) = protocol::deserialize_header(&pkt) {
+                    out.push(crate::action_wire::ActionPacket::decode(payload).unwrap());
+                }
+            }
+            out
+        };
+        for _ in 0..3 { assert!(!flush_strict_window_ops(&mut rc, &mut ui, &inv, &armour)); }
+        assert!(actions(&srv).is_empty(), "nothing leaves before the join sync applies");
+        rc.note_window_event(1);
+        assert!(!flush_strict_window_ops(&mut rc, &mut ui, &inv, &armour));
+        let sent = actions(&srv);
+        assert_eq!(sent.len(), 1, "the setting goes once the sync is applied");
+        assert_eq!(sent[0].action.events_applied, 1, "at the sync's boundary");
+        assert!(matches!(&sent[0].intent, crate::action_wire::ActionIntent::Window(op) if matches!(op.op, protocol::WireWindowOp::SetAutoRefill { .. })));
+    }
+
+    /// C3d run 4 — a Strict client that finds a legacy window op in its
+    /// flush (here: the config op a non-joined open logs) never discards it
+    /// silently: there is no whole-window resync request, so it leaves the
+    /// world with a plain reason — a graceful `Disconnect`, the session
+    /// ended with [`STRICT_STRAY_CHANGE_REASON`] — and sends no `WindowOp`.
+    #[test]
+    fn c3d_strict_client_leaves_with_a_reason_on_a_stray_legacy_window_op() {
+        let (srv, client) = channel_pair();
+        let mut rc = RemoteClient::from_transport(Box::new(client), build_join_request("Player", 0, None), None);
+        let accept = protocol::JoinAcceptPacket { inventory_mode: crate::action_identity::InventoryMode::Strict, ..proofless_accept() };
+        srv.send_to_client(&protocol::serialize_packet(PacketType::JoinAccept, &accept));
+        rc.poll();
+        while srv.try_recv_from_client().is_some() {}
+        let mut ui = crate::craft_ui::CraftingUi::new();
+        let inv = crate::inventory::Inventory::new();
+        let armour = [None; 4];
+        // Nothing stray: the flush stays.
+        assert!(!flush_strict_window_ops(&mut rc, &mut ui, &inv, &armour), "a clean flush stays");
+        assert!(rc.is_connected());
+        ui.open_player_crafting(&inv, &armour);
+        assert!(ui.ops.first_stamp().is_some(), "a legacy op is logged (the breach)");
+        assert!(flush_strict_window_ops(&mut rc, &mut ui, &inv, &armour), "the breach leaves");
+        assert!(
+            matches!(&rc.state, ConnectionState::Failed(reason) if reason == STRICT_STRAY_CHANGE_REASON),
+            "the session ends with the plain reason"
+        );
+        assert_eq!(
+            crate::world_exit::remote_session_end_reason(&rc).as_deref(),
+            Some(STRICT_STRAY_CHANGE_REASON),
+            "the world exit shows it"
+        );
+        let mut disconnects = 0;
+        while let Some(pkt) = srv.try_recv_from_client() {
+            match protocol::deserialize_header(&pkt) {
+                Some((PacketType::Disconnect, _)) => disconnects += 1,
+                Some((PacketType::WindowOp, _)) => panic!("a Strict client sent a legacy WindowOp"),
+                _ => {}
+            }
+        }
+        assert_eq!(disconnects, 1, "a graceful disconnect reached the server");
+    }
+
+    #[test]
+    fn c3d_actual_receipt_poll_and_movement_ack_cannot_retire_before_world_and_events() {
+        let (srv, client) = channel_pair();
+        let mut rc = RemoteClient::from_transport(Box::new(client), build_join_request("Player", 0, None), None);
+        srv.send_to_client(&protocol::serialize_packet(PacketType::JoinAccept, &proofless_accept()));
+        rc.poll();
+        let action = rc.reserve_action(crate::action_wire::ActionIntent::CancelledNoop, Box::new([]), Box::new([])).unwrap();
+        rc.send_reserved_action(action).unwrap();
+        assert_eq!(rc.action_journal.as_ref().unwrap().len(), 1);
+        let state = protocol::StateUpdatePacket {
+            tick: 7, players: Vec::new(),
+            block_changes: vec![protocol::BlockChange::with_meta(1, 1, 1, crate::block::STONE, 0)],
+            world_time: 1000, last_acked_input: 999,
+            entity_spawns: Vec::new(), entity_updates: Vec::new(), entity_despawns: Vec::new(),
+            reserve_richness: 1.0, reserve_target_sats: 0, reserve_current_sats: 0,
+            rain_ticks_left: 0, storm_ticks_left: 0, own_hunger: 0,
+            block_views: Vec::new(), refused_uses: Vec::new(), attachment_changes: Vec::new(), own_riding: None,
+        };
+        srv.send_to_client(&protocol::serialize_packet(PacketType::StateUpdate, &state));
+        let receipt = crate::action_wire::ActionReceipt { action, fate: crate::action_identity::ActionFate::Refused, included_events: 4 };
+        srv.send_to_client(&protocol::serialize_packet(PacketType::ActionReceipt, &receipt));
+        rc.poll();
+        assert_eq!(rc.action_journal.as_ref().unwrap().len(), 1, "neither socket receipt nor movement ACK is application");
+        let changes = std::mem::take(&mut rc.pending_block_changes);
+        let chunks = std::mem::take(&mut rc.chunk_queue);
+        let mut intake = crate::chunk_intake::ChunkIntake::default();
+        let mut world = crate::world::World::new();
+        let steps = intake.plan_deltas(chunks, &changes, 1);
+        assert!(matches!(steps[0], crate::chunk_intake::Delta::Change(_)));
+        for step in steps {
+            match step {
+                crate::chunk_intake::Delta::Change(change) => { world.apply_remote_block_change(&change); }
+                crate::chunk_intake::Delta::ActionReceipt(receipt) => rc.apply_action_receipt(receipt),
+                _ => panic!("unexpected world step"),
+            }
+        }
+        assert_eq!(world.get_block(1, 1, 1), crate::block::STONE);
+        assert_eq!(rc.action_journal.as_ref().unwrap().len(), 1, "world applied but included window event4 has not");
+        rc.note_window_event(3);
+        assert_eq!(rc.action_journal.as_ref().unwrap().len(), 1);
+        rc.note_window_event(4);
+        assert!(rc.action_journal.as_ref().unwrap().is_empty());
+    }
+
+    #[test]
+    fn c3d_actual_recovery_poll_completes_pages_but_never_applies_the_fence() {
+        use crate::action_wire::{BoundedList, RebasePage, RecoveryPacket};
+        let (srv, client) = channel_pair();
+        let mut rc = RemoteClient::from_transport(Box::new(client), build_join_request("Player", 0, None), None);
+        let accept = protocol::JoinAcceptPacket { inventory_mode: crate::action_identity::InventoryMode::Strict, ..proofless_accept() };
+        srv.send_to_client(&protocol::serialize_packet(PacketType::JoinAccept, &accept));
+        rc.poll();
+        let cut = crate::action_identity::RecoveryCut { session: accept.action_session, id: 1, epoch: 1, life: 0, through: 0 };
+        let manifest = crate::rebase_assembly::RebaseManifest { cut, included_events: 0, parts: 1, encoded_bytes: 1 };
+        for packet in [RecoveryPacket::Prepare(cut), RecoveryPacket::Begin(manifest), RecoveryPacket::Page(RebasePage { cut, index: 0, bytes: BoundedList::new(vec![1]).unwrap() }), RecoveryPacket::End(cut), RecoveryPacket::Fence(cut)] {
+            srv.send_to_client(&protocol::serialize_packet(PacketType::Recovery, &packet));
+        }
+        rc.poll();
+        assert!(rc.is_connected());
+        assert!(!rc.recovery_assembly.as_ref().unwrap().ready(), "socket End/fence cannot activate");
+        let mut intake = crate::chunk_intake::ChunkIntake::default();
+        for step in intake.plan_deltas(std::mem::take(&mut rc.chunk_queue), &[], 1) {
+            match step {
+                crate::chunk_intake::Delta::RebaseFence(cut) => rc.apply_recovery_fence(cut),
+                _ => panic!("unexpected world step"),
+            }
+        }
+        assert!(rc.recovery_assembly.as_ref().unwrap().ready());
+        // Still no Ack/retirement until canonical bundle installation succeeds.
+        assert_eq!(rc.recovery_prepare, Some(cut));
+    }
+
+    /// C3d run 12 (survey §4.6) — a Mirror connection fails closed on any
+    /// recovery carrier, even a cut its (Mirror) journal would accept.
+    #[test]
+    fn c3d_s1_mirror_client_fails_closed_on_recovery() {
+        let (srv, client) = channel_pair();
+        let mut rc = RemoteClient::from_transport(Box::new(client), build_join_request("Player", 0, None), None);
+        let accept = proofless_accept();
+        assert_eq!(accept.inventory_mode, crate::action_identity::InventoryMode::Mirror);
+        srv.send_to_client(&protocol::serialize_packet(PacketType::JoinAccept, &accept));
+        rc.poll();
+        let cut = crate::action_identity::RecoveryCut { session: accept.action_session, id: 1, epoch: 1, life: 0, through: 0 };
+        srv.send_to_client(&protocol::serialize_packet(PacketType::Recovery, &crate::action_wire::RecoveryPacket::Prepare(cut)));
+        rc.poll();
+        assert!(matches!(rc.state, ConnectionState::Failed(_)), "Mirror fails closed on recovery");
+        assert!(rc.recovery_prepare.is_none());
+    }
+
+    #[test]
+    fn c3d_actual_dispatch_rejects_foreign_recovery_and_connection_mode_switch() {
+        let (srv, client) = channel_pair();
+        let mut rc = RemoteClient::from_transport(Box::new(client), build_join_request("Player", 0, None), None);
+        let accept = proofless_accept();
+        srv.send_to_client(&protocol::serialize_packet(PacketType::JoinAccept, &accept));
+        rc.poll();
+        rc.reserve_action(crate::action_wire::ActionIntent::CancelledNoop, Box::new([]), Box::new([])).unwrap();
+        let foreign = crate::action_identity::RecoveryCut { session: [99; 16], id: 1, epoch: 1, life: 0, through: 0 };
+        srv.send_to_client(&protocol::serialize_packet(PacketType::Recovery, &crate::action_wire::RecoveryPacket::Prepare(foreign)));
+        rc.poll();
+        assert!(matches!(rc.state, ConnectionState::Failed(_)));
+        assert!(rc.recovery_prepare.is_none());
+        assert_eq!(rc.action_journal.as_ref().unwrap().len(), 1);
+        let (srv, client) = channel_pair();
+        let mut rc = RemoteClient::from_transport(Box::new(client), build_join_request("Player", 0, None), None);
+        srv.send_to_client(&protocol::serialize_packet(PacketType::JoinAccept, &accept));
+        rc.poll();
+        rc.reserve_action(crate::action_wire::ActionIntent::CancelledNoop, Box::new([]), Box::new([])).unwrap();
+        let changed = protocol::JoinAcceptPacket { inventory_mode: crate::action_identity::InventoryMode::Strict, ..accept };
+        srv.send_to_client(&protocol::serialize_packet(PacketType::JoinAccept, &changed));
+        rc.poll();
+        assert!(matches!(rc.state, ConnectionState::Failed(_)));
+        assert_eq!(rc.inventory_mode, crate::action_identity::InventoryMode::Mirror);
+        assert_eq!(rc.action_journal.as_ref().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn c3d_actual_dispatch_ignores_only_known_retired_duplicate_receipts() {
+        use crate::action_identity::ActionFate;
+        use crate::action_wire::{ActionIntent, ActionReceipt};
+        for conflict in [false, true] {
+            let (srv, client) = channel_pair();
+            let mut rc = RemoteClient::from_transport(Box::new(client), build_join_request("Player", 0, None), None);
+            srv.send_to_client(&protocol::serialize_packet(PacketType::JoinAccept, &proofless_accept()));
+            rc.poll();
+            let mut allocated = Vec::new();
+            for _ in 0..4 { allocated.push(rc.reserve_action(ActionIntent::CancelledNoop, Box::new([]), Box::new([])).unwrap()); }
+            let current = ActionReceipt { action: allocated[2], fate: ActionFate::Accepted, included_events: 3 };
+            srv.send_to_client(&protocol::serialize_packet(PacketType::ActionReceipt, &current));
+            rc.poll();
+            rc.note_window_event(3);
+            let crate::chunk_intake::StreamItem::ActionReceipt(receipt) = std::mem::take(&mut rc.chunk_queue).pop().unwrap().1 else { panic!("receipt stream marker") };
+            rc.apply_action_receipt(receipt);
+            assert_eq!(rc.action_journal.as_ref().unwrap().len(), 1);
+            let duplicate = ActionReceipt { action: allocated[1], fate: ActionFate::Accepted, included_events: if conflict { 4 } else { 2 } };
+            srv.send_to_client(&protocol::serialize_packet(PacketType::ActionReceipt, &duplicate));
+            rc.poll();
+            let crate::chunk_intake::StreamItem::ActionReceipt(receipt) = std::mem::take(&mut rc.chunk_queue).pop().unwrap().1 else { panic!("receipt stream marker") };
+            rc.apply_action_receipt(receipt);
+            assert_eq!(rc.action_journal.as_ref().unwrap().len(), 1, "duplicate or conflict cannot free the surviving suffix");
+            if conflict { assert!(matches!(rc.state, ConnectionState::Failed(_))); }
+            else {
+                assert!(rc.is_connected(), "a harmless retired receipt cannot end the session");
+                let foreign = ActionReceipt { action: crate::action_identity::ActionHeader { session: [99; 16], ..duplicate.action }, ..duplicate };
+                srv.send_to_client(&protocol::serialize_packet(PacketType::ActionReceipt, &foreign));
+                rc.poll();
+                let crate::chunk_intake::StreamItem::ActionReceipt(receipt) = std::mem::take(&mut rc.chunk_queue).pop().unwrap().1 else { panic!("receipt stream marker") };
+                rc.apply_action_receipt(receipt);
+                assert!(matches!(rc.state, ConnectionState::Failed(_)));
+                assert_eq!(rc.action_journal.as_ref().unwrap().len(), 1);
+            }
         }
     }
 
@@ -3473,6 +3900,8 @@ mod tests {
                 crate::chunk_intake::StreamItem::Local((x, z), hash) => format!("L{x},{z}#{hash:x}"),
                 crate::chunk_intake::StreamItem::View(v) => format!("V{}", v.cell[0]),
                 crate::chunk_intake::StreamItem::Attachment(a) => format!("A{}", a.x),
+                crate::chunk_intake::StreamItem::RebaseFence(_) => "F".into(),
+                crate::chunk_intake::StreamItem::ActionReceipt(_) => "R".into(),
             })
             .collect();
         assert_eq!(shape, ["C1", "L5,-6#abcd", "C2"]);
@@ -3508,7 +3937,7 @@ mod tests {
         let sync = |owed: Vec<(protocol::WireStack, u32)>| {
             protocol::serialize_packet(
                 PacketType::InventorySync,
-                &protocol::InventorySyncPacket { window_event: 1, slots: Vec::new(), owed },
+                &protocol::InventorySyncPacket { window_event: 1, slots: Vec::new(), owed, station: None, locks: 0 },
             )
         };
         let (srv, client) = channel_pair();

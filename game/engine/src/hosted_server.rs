@@ -24,6 +24,52 @@
 
 mod death;
 mod sidecar;
+mod actions;
+mod strict_container;
+mod strict_edit;
+mod strict_attack;
+mod strict_interact;
+mod strict_door;
+mod strict_item;
+mod strict_drop;
+#[cfg(test)]
+mod c3d_tests;
+#[cfg(test)]
+mod c3d_strict_tests;
+#[cfg(test)]
+mod c3d_container_tests;
+#[cfg(test)]
+mod c3d_superseded_tests;
+#[cfg(test)]
+mod c3d_edit_tests;
+#[cfg(test)]
+mod c3d_correction_tests;
+#[cfg(test)]
+mod c3d_grid_tests;
+#[cfg(test)]
+mod c3d_death_client_tests;
+#[cfg(test)]
+mod c3d_client_edit_tests;
+#[cfg(test)]
+mod c3d_refusal_correction_tests;
+#[cfg(test)]
+mod c3d_client_shot_tests;
+#[cfg(test)]
+mod c3d_client_attack_tests;
+#[cfg(test)]
+mod c3d_interact_tests;
+#[cfg(test)]
+mod c3d_item_tests;
+#[cfg(test)]
+mod c3d_drop_sleep_tests;
+#[cfg(test)]
+mod c3d_wear_target_tests;
+#[cfg(test)]
+mod c3d_door_tests;
+#[cfg(test)]
+mod c3d_mirror_toggle_tests;
+#[cfg(test)]
+mod c3d_door_review_tests;
 
 use std::collections::VecDeque;
 
@@ -89,6 +135,11 @@ fn is_window_op(packet: &[u8]) -> bool {
     matches!(protocol::deserialize_header(packet), Some((protocol::PacketType::WindowOp, _)))
 }
 
+/// C3d run 20 (run-19 review MEDIUM-1) — is `packet` a typed `Action`?
+fn is_typed_action(packet: &[u8]) -> bool {
+    matches!(protocol::deserialize_header(packet), Some((protocol::PacketType::Action, _)))
+}
+
 /// Max device interactions per tick per client. A right-click is gated
 /// client-side by an 8-tick place cooldown, so legitimate play is well under
 /// one a tick; this is the `DeviceInteract` sibling of the block-change budget,
@@ -103,6 +154,14 @@ const MAX_DEVICE_INTERACTS_PER_TICK: usize = 2;
 /// server holds the look of the joiner's last input, which may lag a quick
 /// turn by a round trip.
 pub const JOINER_MIN_FACING_DOT: f32 = 0.0;
+
+/// C3d (run 4) — why Strict inventory admission can't be selected here.
+#[cfg_attr(not(test), expect(dead_code, reason = "Strict operator flag — exposed at C3d acceptance"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StrictSelectError {
+    /// A `--no-lend` host: its server mirrors the host's copy of the world.
+    NoLendHost,
+}
 
 /// D1 — where a hosted server's world lives (`crate::sim_lend`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -498,6 +557,9 @@ pub struct HostedServer {
     #[cfg_attr(not(test), allow(dead_code))]
     pub port: u16,
     pub server_name: String,
+    /// Chosen before admission (only through [`Self::select_inventory_mode`]);
+    /// each accepted connection stores its own mode.
+    inventory_mode: crate::action_identity::InventoryMode,
     difficulty: String,
 
     /// Per-client challenge nonces. The server issues one (with its origin) to
@@ -660,17 +722,24 @@ pub struct RoomStatus {
 /// full tool-aware bonus for remote players once remote inventories become
 /// server-authoritative (tracked in the CLAUDE.md known-debt list alongside
 /// the rest of the server-side inventory/crafting bridge).
+///
+/// C3d run 10 (run-9b review MEDIUM-2) — a joiner's block edit no longer
+/// passes a claim: `validate_block_edit` reads the held item from the
+/// server's own copy of the edit's slot and passes `held_is_claim = false`,
+/// so a Reach Claw the copy holds counts in both modes. `held_is_claim`
+/// (the old `server_simulated`) still forces the base cap where the item is
+/// only an input's word.
 pub(crate) fn block_change_within_reach(
     dist_sq: f32,
     held_kind: u8,
     held_id: u16,
-    server_simulated: bool,
+    held_is_claim: bool,
 ) -> bool {
     // Measured eye → block centre while the client ray-casts eye → block
     // FACE: up to sqrt(3)/2 further, plus ~0.5 of movement / queue lag
     // (review S4).
     const REACH_MARGIN: f32 = 0.87 + 0.5;
-    let bonus = if server_simulated {
+    let bonus = if held_is_claim {
         0.0
     } else {
         crate::game_loop::reach_bonus_for_item_ref(protocol::ItemRef::from_wire(
@@ -679,6 +748,10 @@ pub(crate) fn block_change_within_reach(
     };
     let limit = super::REACH_DISTANCE + REACH_MARGIN + bonus;
     dist_sq <= limit * limit
+}
+
+fn sp_inventory_is_strict(players: &[crate::server::ServerPlayer], i: usize) -> bool {
+    players.get(i).is_some_and(|sp| sp.server_simulated && sp.inventory_mode == crate::action_identity::InventoryMode::Strict)
 }
 
 impl HostedServer {
@@ -907,6 +980,7 @@ impl HostedServer {
         );
 
         Ok(HostedServer {
+            inventory_mode: crate::action_identity::InventoryMode::Mirror,
             local_transports,
             server,
             transports,
@@ -1056,6 +1130,33 @@ impl HostedServer {
             host_world,
         )
     }
+
+    /// C3d (run 4, run-3 review L3) — the internal inventory-mode selector
+    /// (no operator flag yet). Strict is refused on a `--no-lend` host: its
+    /// owning server's block entities are overwritten from the host's copy
+    /// every tick (`mirror_host_world_state`), so a committed Strict
+    /// withdrawal would be put back into the "real" chest — a duplicate. A
+    /// dedicated server (no local players) and a lending host may select it.
+    #[cfg_attr(not(test), expect(dead_code, reason = "Strict operator flag — exposed at C3d acceptance"))]
+    pub fn select_inventory_mode(&mut self, mode: crate::action_identity::InventoryMode) -> Result<(), StrictSelectError> {
+        if mode == crate::action_identity::InventoryMode::Strict && self.strict_unsupported_here() {
+            return Err(StrictSelectError::NoLendHost);
+        }
+        self.inventory_mode = mode;
+        Ok(())
+    }
+
+    /// C3d (run-3 review L3, run-4 review LOW-4) — an owning server with
+    /// local players (a `--no-lend` host) mirrors the host's copy of the
+    /// world over every commit: Strict can't run on it. Checked at selection
+    /// AND at every Strict admission (a local slot can be added later).
+    fn strict_unsupported_here(&self) -> bool {
+        self.host_world == HostWorld::Owned && self.num_local_players > 0
+    }
+
+    /// The inventory mode new connections are admitted with.
+    #[cfg_attr(not(test), expect(dead_code, reason = "Strict operator flag — exposed at C3d acceptance"))]
+    pub fn inventory_mode(&self) -> crate::action_identity::InventoryMode { self.inventory_mode }
 
     /// D1 — does this server simulate the host client's lent world (rather
     /// than a copy of its own)?
@@ -1763,6 +1864,7 @@ impl HostedServer {
             return None;
         }
         if self.handshake_done[i] && (!self.lends_host_world() || self.server.lent) { self.settle_leaving_life(i); }
+        if self.handshake_done[i] { self.note_strict_departure(i); }
         if self.handshake_done[i] && let Err(e) = self.server.save_joiner(i) { log::error!("Joiner leave save failed: {e}"); }
         let was_joined = self.handshake_done[i];
         self.disconnected[i] = true;
@@ -1783,6 +1885,12 @@ impl HostedServer {
             // C3a-fix-1 — and on its ordered window events.
             if sp.server_simulated
                 && let Some(line) = sp.window_events.summary()
+            {
+                log::info!("{} — {line}", sp.display_name);
+            }
+            // C3d run 12 (S1, Q15) — and on its Strict refusals by kind.
+            if sp.server_simulated
+                && let Some(line) = sp.strict_refusals.summary()
             {
                 log::info!("{} — {line}", sp.display_name);
             }
@@ -2004,32 +2112,56 @@ impl HostedServer {
     }
 
     fn land_joiner_swing(&mut self, i: usize, req: &protocol::EntityAttackPacket) -> bool {
-        let Some((target, _kind)) = self.joiner_target(i, req.entity) else {
+        let Some(target) = self.check_joiner_swing(i, req) else {
             return false;
         };
+        // BRIDGE: possession check — replace when phase C makes joiner
+        // inventories server-authoritative. The held item is the client's
+        // word (as a block placement's is, `validate_block_edit`): it sets
+        // the damage, so a modified client can claim a better sword than it
+        // holds. Nothing else of the swing is its word. (A Strict seat's
+        // swing takes the server copy's item: `strict_attack.rs`.)
+        let held = held_item_from_wire(req.held_kind, req.held_id, &req.held_full, &self.server.registry);
+        let base_damage = held.as_ref().map_or(1.0, crate::item::Item::attack_damage);
+        self.strike_joiner_swing(i, target, req.sprint, req.sneak, base_damage);
+        true
+    }
+
+    /// MP-D2b, split in C3d run 15 — the swing's rules, with no effect: a
+    /// living mob in reach of (and ahead of) the server's body for joiner
+    /// `i` ([`Self::joiner_target`]), never the joiner's own pet unless the
+    /// swing is a deliberate (sneaking) hit (1C no-friendly-fire), and off
+    /// the server's swing schedule (up to the jitter early). The one rule
+    /// both the Mirror swing and a Strict seat's typed attack check.
+    pub(super) fn check_joiner_swing(&self, i: usize, req: &protocol::EntityAttackPacket) -> Option<hecs::Entity> {
+        let (target, _kind) = self.joiner_target(i, req.entity)?;
         let tick = self.server.tick_counter;
         // A guest's key is empty: no pet is ever its own.
         let key = self.server.players[i].pet_owner_key().unwrap_or_default();
         // 1C no-friendly-fire: the joiner's own pet takes a swing only as a
         // deliberate (sneaking) hit, as single-player's target pick has it.
         if !req.sneak && crate::tameable::is_own_pet(&self.server.ecs, target, &key, None) {
-            return false;
+            return None;
         }
-        let sp = &mut self.server.players[i];
         // Review D2b LOW-2 — on the server's schedule: up to the jitter
-        // early, and each swing moves it a full cooldown on (never banking
-        // swings an idle client didn't make).
-        if tick + u64::from(ATTACK_COOLDOWN_JITTER_TICKS) < sp.next_swing_tick {
-            return false;
+        // early (each landed swing moves it a full cooldown on, never
+        // banking swings an idle client didn't make).
+        if tick + u64::from(ATTACK_COOLDOWN_JITTER_TICKS) < self.server.players[i].next_swing_tick {
+            return None;
         }
+        Some(target)
+    }
+
+    /// MP-D2b, split in C3d run 15 — land a swing [`Self::check_joiner_swing`]
+    /// passed: the schedule moves a full cooldown on, then `combat::strike`
+    /// and `combat::after_swing`, the single-player rule: `base_damage`, a
+    /// critical hit if the server's body is airborne, knockback, the sweep,
+    /// `LastAttacker` naming this joiner, a Nostrich's kick-back.
+    pub(super) fn strike_joiner_swing(&mut self, i: usize, target: hecs::Entity, sprint: bool, sneak: bool, base_damage: f32) {
+        let tick = self.server.tick_counter;
+        let key = self.server.players[i].pet_owner_key().unwrap_or_default();
+        let sp = &mut self.server.players[i];
         sp.next_swing_tick = sp.next_swing_tick.max(tick) + u64::from(crate::combat::ATTACK_COOLDOWN);
-        // BRIDGE: possession check — replace when phase C makes joiner
-        // inventories server-authoritative. The held item is the client's
-        // word (as a block placement's is, `validate_block_edit`): it sets
-        // the damage, so a modified client can claim a better sword than it
-        // holds. Nothing else of the swing is its word.
-        let held = held_item_from_wire(req.held_kind, req.held_id, &req.held_full, &self.server.registry);
-        let base_damage = held.as_ref().map_or(1.0, crate::item::Item::attack_damage);
         let eye = sp.player.eye_pos();
         let look_dir = crate::camera::forward_from(sp.yaw, sp.pitch);
         let crit = !sp.player.on_ground;
@@ -2042,13 +2174,13 @@ impl HostedServer {
                 eye,
                 look_dir,
                 crit,
-                sprinting: req.sprint,
-                sneaking: req.sneak,
+                sprinting: sprint,
+                sneaking: sneak,
                 base_damage,
             },
         );
         let kick =
-            crate::combat::after_swing(&mut self.server.ecs, target, &key, None, req.sneak, eye, tick);
+            crate::combat::after_swing(&mut self.server.ecs, target, &key, None, sneak, eye, tick);
         if let Some(kick) = kick {
             // Spec 28d.nostrich v2 — the kick-back lands on the joiner's body
             // (no armour, as in single-player).
@@ -2058,7 +2190,6 @@ impl HostedServer {
                 crate::survival::DamageCause::Mob(crate::mob::MobType::Nostrich),
             );
         }
-        true
     }
 
     /// MP-D2b — joiner `i` right-clicks `req.entity` for `req.kind`.
@@ -3216,6 +3347,29 @@ impl HostedServer {
         }
     }
 
+    /// Whether joiner `i` may open the container at `cell` (shared by the
+    /// Mirror open and the Strict typed open): in the world and alive, a
+    /// container block, within the server body's reach with its slack, and
+    /// a cell the play mode and plot rules let it touch.
+    pub(super) fn container_open_verdict(&self, i: usize, cell: [i32; 3]) -> Result<crate::container_window::ContainerKind, protocol::OpenRefusal> {
+        use crate::container_window::{self as cw, ContainerKind};
+        let Some(sp) = self.server.players.get(i) else { return Err(protocol::OpenRefusal::NotInWorld) };
+        let block_at = self.server.world.get_block(cell[0], cell[1], cell[2]);
+        if !sp.server_simulated || !sp.is_present_and_alive() {
+            Err(protocol::OpenRefusal::NotInWorld)
+        } else if let Some(kind) = ContainerKind::of_block(block_at) {
+            if !cw::container_in_server_reach(sp.player.eye_pos(), cell) {
+                Err(protocol::OpenRefusal::OutOfReach)
+            } else if self.remote_may_touch(sp, cell[0], cell[2]).is_err() {
+                Err(protocol::OpenRefusal::Protected)
+            } else {
+                Ok(kind)
+            }
+        } else {
+            Err(protocol::OpenRefusal::NotAContainer)
+        }
+    }
+
     /// C3b-1 — joiner `i` asks to open the container at `cell`. It opens
     /// when the joiner is in the world and alive, the cell holds a chest of
     /// any tier, a dispenser or dropper, or a furnace lit or not
@@ -3232,19 +3386,7 @@ impl HostedServer {
         use crate::container_window::{self as cw, ContainerKind};
         let Some(sp) = self.server.players.get(i) else { return };
         let block_at = self.server.world.get_block(cell[0], cell[1], cell[2]);
-        let verdict = if !sp.server_simulated || !sp.is_present_and_alive() {
-            Err(protocol::OpenRefusal::NotInWorld)
-        } else if let Some(kind) = ContainerKind::of_block(block_at) {
-            if !cw::container_in_server_reach(sp.player.eye_pos(), cell) {
-                Err(protocol::OpenRefusal::OutOfReach)
-            } else if self.remote_may_touch(sp, cell[0], cell[2]).is_err() {
-                Err(protocol::OpenRefusal::Protected)
-            } else {
-                Ok(kind)
-            }
-        } else {
-            Err(protocol::OpenRefusal::NotAContainer)
-        };
+        let verdict = self.container_open_verdict(i, cell);
         let pkt = match verdict {
             Ok(kind) => {
                 cw::ensure_container(&mut self.server.world, cell, kind);
@@ -3288,6 +3430,12 @@ impl HostedServer {
             let server = &mut self.server;
             let sp = &mut server.players[i];
             if !sp.server_simulated {
+                continue;
+            }
+            if sp.inventory_mode == crate::action_identity::InventoryMode::Strict {
+                // C3d — a Strict joiner's push reserves its numbered view
+                // (count and owned bytes) before it is sent.
+                self.push_strict_container(i);
                 continue;
             }
             let Some(pkt) = crate::window_ops::container_push(sp, &server.world, now) else { continue };
@@ -3367,18 +3515,44 @@ impl HostedServer {
         }
     }
 
+    /// C3d run 23 (run-22 review LOW-1) — does slot `i` have a typed action
+    /// waiting in its server action queue (deferred past a per-tick budget)?
+    fn typed_action_waits(&self, i: usize) -> bool {
+        self.server.players.get(i).is_some_and(|sp| sp.action_queue.as_ref().is_some_and(|q| !q.is_empty()))
+    }
+
     fn run_joiner_interaction(
         &mut self,
         i: usize,
         req: &protocol::EntityInteractPacket,
     ) -> Option<crate::mob_interact::Interaction> {
+        // BRIDGE: possession check — replace when phase C makes joiner
+        // inventories server-authoritative (C3d: a Strict seat runs
+        // `run_joiner_interaction_with` on its server copy's item,
+        // `strict_interact.rs`). The food, bucket, shears or Lead in hand
+        // is the client's word; the client gives up what an accepted
+        // outcome says it used.
+        let held = held_item_from_wire(req.held_kind, req.held_id, &req.held_full, &self.server.registry);
+        self.run_joiner_interaction_with(i, req, held)
+    }
+
+    /// [`Self::run_joiner_interaction`] with the item in hand named by the
+    /// caller: Mirror's is the claim; a Strict seat's (C3d run 23) the
+    /// server copy's item in the named hotbar slot. Mirror's rules either
+    /// way (target, `NotOnThisServer`, cooldown, then the shared run).
+    pub(super) fn run_joiner_interaction_with(
+        &mut self,
+        i: usize,
+        req: &protocol::EntityInteractPacket,
+        held: Option<crate::item::Item>,
+    ) -> Option<crate::mob_interact::Interaction> {
         // Review D2b B3 — a Lead on a fence post names a block, not a mob.
         if let protocol::InteractKind::LeadToPost { post } = req.kind {
-            return self.run_joiner_lead_to_post(i, req, post);
+            return self.run_joiner_lead_to_post(i, post, held);
         }
         // MP-D2c-1 — a mount may be a cart, which is no mob.
         if req.kind == protocol::InteractKind::Mount {
-            return self.run_joiner_mount(i, req);
+            return self.run_joiner_mount(i, req, held);
         }
         let (target, kind) = self.joiner_target(i, req.entity)?;
         // Review D2b MEDIUM-2 — what this world doesn't simulate (breeding,
@@ -3394,11 +3568,6 @@ impl HostedServer {
             return None;
         }
         sp.interact_cooldown = INTERACT_COOLDOWN_TICKS;
-        // BRIDGE: possession check — replace when phase C makes joiner
-        // inventories server-authoritative. The food, bucket, shears or Lead
-        // in hand is the client's word; the client gives up what an accepted
-        // outcome says it used.
-        let held = held_item_from_wire(req.held_kind, req.held_id, &req.held_full, &self.server.registry);
         let key = sp.pet_owner_key();
         let actor = crate::mob_interact::Actor {
             owner_key: key.as_deref(),
@@ -3432,6 +3601,7 @@ impl HostedServer {
         &mut self,
         i: usize,
         req: &protocol::EntityInteractPacket,
+        held: Option<crate::item::Item>,
     ) -> Option<crate::mob_interact::Interaction> {
         let sp = self.server.players.get(i)?;
         if !sp.server_simulated || !sp.is_present_and_alive() || sp.riding.is_some() {
@@ -3462,10 +3632,10 @@ impl HostedServer {
         if let Some(cell) = cart {
             let look = crate::camera::forward_from(sp.yaw, sp.pitch);
             crate::cart::dispatch_cart(&mut self.server.ecs, &mut self.server.world, cell, look)?;
-            // BRIDGE: possession check — the empty hand is the client's word,
-            // as every held claim is (a hand it says holds something only
-            // dispatches the freight).
-            let held = held_item_from_wire(req.held_kind, req.held_id, &req.held_full, &self.server.registry);
+            // BRIDGE: possession check — on Mirror the empty hand is the
+            // client's word, as every held claim is (a hand it says holds
+            // something only dispatches the freight); a Strict seat's is its
+            // server copy's.
             if held.is_some() {
                 return Some(crate::mob_interact::Interaction::accepted());
             }
@@ -3504,8 +3674,8 @@ impl HostedServer {
     fn run_joiner_lead_to_post(
         &mut self,
         i: usize,
-        req: &protocol::EntityInteractPacket,
         post: [i32; 3],
+        held: Option<crate::item::Item>,
     ) -> Option<crate::mob_interact::Interaction> {
         let sp = self.server.players.get(i)?;
         if !sp.server_simulated || !sp.is_present_and_alive() {
@@ -3527,9 +3697,8 @@ impl HostedServer {
             return None;
         }
         sp.interact_cooldown = INTERACT_COOLDOWN_TICKS;
-        // BRIDGE: possession check — the Lead in hand is the client's word
-        // (see `run_joiner_interaction`).
-        let held = held_item_from_wire(req.held_kind, req.held_id, &req.held_full, &self.server.registry);
+        // BRIDGE (Mirror): the Lead in hand is the client's word (see
+        // `run_joiner_interaction`).
         let actor = crate::mob_interact::Actor {
             owner_key: None,
             tether: crate::tether::TetherTarget::Player(i),
@@ -3714,6 +3883,9 @@ impl HostedServer {
         for i in 0..self.server.players.len() {
             if self.server.players[i].server_simulated {
                 crate::window_events::apply_overdue(&mut self.server.players[i], now);
+                // C3d (run 4) — a Strict short Take from any application
+                // point this tick is torn down here at the latest.
+                if !self.strict_events_hold(i) { continue; }
                 self.flush_retired_overflow(i);
             }
         }
@@ -3984,6 +4156,8 @@ impl HostedServer {
             let mut budget = EditTickBudget::default();
             // FU3 — the edits that waited past last tick's budget go first.
             self.process_waiting_edits(i, &mut budget);
+            self.process_typed_actions(i, &mut window_ops_this_tick, &mut item_actions_this_tick, &mut interacts_this_tick, &mut budget);
+            if self.disconnected[i] { continue; }
             // C2b verify M4 — whether this client is replaying a backlog
             // (more than one ordinary tick's reading waiting after the fill):
             // each `ClientInput` it reads then credits the joiner's drop
@@ -4065,6 +4239,19 @@ impl HostedServer {
                             edits_waiting,
                         )
                     })
+                    // C3d run 20 (run-19 review MEDIUM-1) — a Mirror seat's
+                    // typed action (its door toggle) waits behind this
+                    // client's waiting edits, as a request does (FU4a): it
+                    // was made after them (a door placed, then opened).
+                    || (edits_waiting && self.mirror_slot(i) && self.inbound[i].front().is_some_and(|p| is_typed_action(p)))
+                    // C3d run 23 (run-22 review LOW-1) — and everything a
+                    // Mirror seat sent after a typed action still waiting in
+                    // its action queue (a fifth toggle past the item budget)
+                    // waits behind it: one ordered stream, so a later input
+                    // (an edit that breaks the door) never overtakes the
+                    // click. Next tick's `process_typed_actions` (the top of
+                    // `tick`) serves it first.
+                    || (self.mirror_slot(i) && self.typed_action_waits(i))
                 {
                     break;
                 }
@@ -4080,6 +4267,14 @@ impl HostedServer {
                     continue;
                 };
                 match ptype {
+                    protocol::PacketType::Action => {
+                        if !self.handshake_done[i] || self.disconnected[i] { continue; }
+                        self.receive_typed_action(i, payload);
+                        self.process_typed_actions(i, &mut window_ops_this_tick, &mut item_actions_this_tick, &mut interacts_this_tick, &mut budget);
+                    }
+                    protocol::PacketType::AppliedActionAck => {
+                        if self.handshake_done[i] && !self.disconnected[i] { self.receive_applied_action_ack(i, payload); }
+                    }
                     protocol::PacketType::JoinRequest => {
                         if self.handshake_done[i] {
                             // Re-sends after handshake are dropped silently.
@@ -4296,6 +4491,22 @@ impl HostedServer {
                         }
 
                         let saved_joiner = self.server.load_joiner(i);
+                        // C3d (Decision 10, OC) — a Strict world admits only a
+                        // record that proves no carried obligation. Refused
+                        // before JoinAccept: the handshake isn't done, so
+                        // `release_slot` neither settles nor saves, and the
+                        // record's bytes stay as they are.
+                        if self.inventory_mode == crate::action_identity::InventoryMode::Strict
+                            && let Err(refusal) = if self.strict_unsupported_here() {
+                                Err(crate::strict_admission::StrictJoinRefusal::NoLendHost)
+                            } else {
+                                crate::strict_admission::check(saved_joiner.as_ref(), self.server.players[i].obligations.get())
+                            }
+                        {
+                            log::warn!("Refusing Strict join on slot {i}: {refusal:?}");
+                            let _ = self.release_slot(i, Some(&refusal.reason()));
+                            break;
+                        }
                         if let Some(saved) = &saved_joiner {
                             let sp = &mut self.server.players[i];
                             sp.spawn_pos = glam::Vec3::from_array(saved.spawn);
@@ -4335,7 +4546,22 @@ impl HostedServer {
                         });
                         #[cfg(target_arch = "wasm32")]
                         let server_identity: Option<protocol::ServerIdentityProof> = None;
+                        let mut action_session = [0; 16];
+                        if getrandom::fill(&mut action_session).is_err() {
+                            if let Some(left) = self.release_slot(i, Some("Action session randomness unavailable")) {
+                                broadcasts.push_back((i, left));
+                            }
+                            continue;
+                        }
+                        let action_life = self.server.players[i].respawns;
+                        self.server.players[i].inventory_mode = self.inventory_mode;
+                        self.server.players[i].action_frontier = Some(crate::action_identity::ActionFrontier::new(action_session, action_life));
+                        self.server.players[i].action_queue = Some(Default::default());
+                        self.server.players[i].action_results = Some(crate::action_results::ActionResults::new(self.server.players[i].action_frontier.as_ref().expect("issued frontier").header(0, 0)));
                         let accept = protocol::JoinAcceptPacket {
+                            inventory_mode: self.inventory_mode,
+                            action_session,
+                            action_life,
                             player_index: i as u32,
                             // G3 — send the world's REAL seed so the joiner
                             // generates matching terrain (was hardcoded 42,
@@ -4486,6 +4712,17 @@ impl HostedServer {
                         // undo a newer one; taken from EVERY input — one refused
                         // below (non-finite, stale, from a dead joiner) included.
                         self.take_chunk_feedback(i, &input);
+                        // C3d review L2 — a Strict movement packet carries no
+                        // mutation authority. Edits on one are never dropped
+                        // silently (the client's predicted cells would stay as
+                        // ghosts, uncounted): the session fails closed with a
+                        // reason, like every other untyped inventory arm.
+                        if sp_inventory_is_strict(&self.server.players, i)
+                            && (!input.block_changes.is_empty() || !input.mined.is_empty() || !input.use_tags.is_empty() || !input.edit_hands.is_empty())
+                        {
+                            self.reject_legacy_inventory(i);
+                            break;
+                        }
                         if !input.x.is_finite()
                             || !input.y.is_finite()
                             || !input.z.is_finite()
@@ -4510,7 +4747,8 @@ impl HostedServer {
                         // edits are processed, `process_edit_group`: they may
                         // wait behind earlier ones). Not while edits wait: the
                         // client made them before these events.
-                        if sp.server_simulated && input.block_changes.is_empty() && self.edit_queues[i].is_empty() {
+                        if sp.server_simulated && input.block_changes.is_empty() && self.edit_queues[i].is_empty()
+                            && (sp.inventory_mode != crate::action_identity::InventoryMode::Strict || (sp.action_queue.as_ref().is_none_or(|q| q.is_empty()) && sp.window_events.accepts_boundary(input.events_applied))) {
                             crate::window_events::apply_through(sp, input.events_applied, now);
                         }
                         // MP-A3 — death is server-held for a joiner. While
@@ -4595,6 +4833,9 @@ impl HostedServer {
                         // Every edit — from every packet this tick — goes
                         // through the one validator; the budget is per tick,
                         // and what is past it waits (FU3).
+                        // A Strict movement packet never carries mutation
+                        // authority: one with edits failed closed above (L2).
+                        debug_assert!(!sp_inventory_is_strict(&self.server.players, i) || input.block_changes.is_empty());
                         let edits = std::mem::take(&mut input.block_changes);
                         // C3c-1 — and its use tags, each paired with the last
                         // edit of its cell, within the same per-input limit.
@@ -4614,6 +4855,10 @@ impl HostedServer {
                         }
                     }
                     protocol::PacketType::DeviceInteract => {
+                        if self.strict_slot(i) {
+                            self.reject_legacy_inventory(i);
+                            break;
+                        }
                         if !self.handshake_done[i] || self.disconnected[i] {
                             continue;
                         }
@@ -4636,6 +4881,10 @@ impl HostedServer {
                         self.handle_respawn(i);
                     }
                     protocol::PacketType::EntityAttack | protocol::PacketType::EntityInteract => {
+                        if self.strict_slot(i) {
+                            self.reject_legacy_inventory(i);
+                            break;
+                        }
                         if !self.handshake_done[i] || self.disconnected[i] {
                             continue;
                         }
@@ -4656,6 +4905,10 @@ impl HostedServer {
                         }
                     }
                     protocol::PacketType::ItemAction => {
+                        if self.strict_slot(i) {
+                            self.reject_legacy_inventory(i);
+                            break;
+                        }
                         if !self.handshake_done[i] || self.disconnected[i] {
                             continue;
                         }
@@ -4668,6 +4921,10 @@ impl HostedServer {
                         }
                     }
                     protocol::PacketType::WindowOp => {
+                        if self.strict_slot(i) {
+                            self.reject_legacy_inventory(i);
+                            break;
+                        }
                         if !self.handshake_done[i] || self.disconnected[i] {
                             continue;
                         }
@@ -4865,7 +5122,7 @@ impl HostedServer {
     ) {
         let remote = self.server.players[i].server_simulated;
         let use_tag = tag.as_ref().and_then(|t| t.use_tag()).filter(|_| remote);
-        if let Err(why) = self.validate_block_edit(i, bc, hand) {
+        if let Err(why) = self.validate_block_edit(i, bc, hand, slot) {
             log::debug!("Refused slot {i}'s edit at ({}, {}, {}): {why:?}", bc.x, bc.y, bc.z);
             // Un-ghost the refused edit on the sender: re-send what is
             // really there.
@@ -4942,6 +5199,23 @@ impl HostedServer {
             }
             _ => None,
         };
+        self.apply_edit_world(bc, old_block, remote, break_yield.is_some());
+        if let Some(edit) = joiner_edit {
+            self.settle_joiner_edit(i, bc, slot, edit, break_yield);
+        }
+        if let Some(judged) = joiner_use {
+            self.settle_joiner_use(i, bc, judged);
+        }
+        self.finish_edit_world(bc, old_block, old_meta, remote, as_use);
+    }
+
+    /// C3d run 6 — the world half of an accepted edit that precedes its
+    /// inventory settlement: a broken container spills, an orphaned economy
+    /// entity and a released plot go, the block lands and (for a joiner) its
+    /// placed flag is set — every fill player-placed, a yielded break natural
+    /// again. Shared by the Mirror path (`process_one_edit`) and Strict
+    /// (`strict_edit`), never a second copy.
+    pub(super) fn apply_edit_world(&mut self, bc: &protocol::BlockChange, old_block: crate::block::BlockId, remote: bool, yielded: bool) {
         self.spill_container_on_change(
             (bc.x, bc.y, bc.z),
             old_block,
@@ -4983,15 +5257,16 @@ impl HostedServer {
             // the server yielded leaves the cell natural
             // again (AIR, or a harvested crop's tilled
             // soil), as single-player's break arm does.
-            let placed = bc.new_block != crate::block::AIR && break_yield.is_none();
+            let placed = bc.new_block != crate::block::AIR && !yielded;
             self.server.world.set_placed(bc.x, bc.y, bc.z, placed);
         }
-        if let Some(edit) = joiner_edit {
-            self.settle_joiner_edit(i, bc, slot, edit, break_yield);
-        }
-        if let Some(judged) = joiner_use {
-            self.settle_joiner_use(i, bc, judged);
-        }
+    }
+
+    /// C3d run 6 — the rest of an accepted edit's world half, after its
+    /// inventory settled: leaf decay, fluids, meta, power, neighbours, the
+    /// broadcast, a door's pair, a campfire, a used block's spill and
+    /// attachments. Shared by Mirror and Strict.
+    pub(super) fn finish_edit_world(&mut self, bc: &protocol::BlockChange, old_block: crate::block::BlockId, old_meta: u8, remote: bool, as_use: bool) {
         // T1-3 — a log broken by a REMOTE player queues its
         // leaves for the server's leaf-decay pass (the
         // client break arms' `on_log_broken`, server side),
@@ -5563,6 +5838,7 @@ impl HostedServer {
         i: usize,
         bc: &protocol::BlockChange,
         (held_kind, held_id): (u8, u16),
+        slot: usize,
     ) -> Result<(), EditRefusal> {
         let Some(sp) = self.server.players.get(i) else {
             return Err(EditRefusal::Malformed);
@@ -5571,7 +5847,7 @@ impl HostedServer {
             return Err(EditRefusal::Malformed);
         }
         let cs = crate::chunk::CHUNK_SIZE as i32;
-        if bc.y < 0 || bc.y >= 6 * cs {
+        if bc.y < 0 || bc.y >= crate::world::WORLD_HEIGHT {
             return Err(EditRefusal::OutOfWorld);
         }
         if !self
@@ -5589,7 +5865,17 @@ impl HostedServer {
         let dx = bc.x as f32 + 0.5 - eye.x;
         let dy = bc.y as f32 + 0.5 - eye.y;
         let dz = bc.z as f32 + 0.5 - eye.z;
-        if !block_change_within_reach(dx * dx + dy * dy + dz * dz, held_kind, held_id, sp.server_simulated) {
+        // C3d run 10 (run-9b review MEDIUM-2) — a joiner's Reach Claw counts
+        // when the server's own copy of the edit's hotbar `slot` holds it, in
+        // both modes, never on its input's word; a local slot's hand stays
+        // trusted (position-trust, the same process as the host).
+        let (reach_kind, reach_id) = if sp.server_simulated {
+            sp.inventory.slot(slot).map_or(protocol::ItemRef::Empty.to_wire(), |s| crate::inventory::item_to_ref(&s.item).to_wire())
+        } else {
+            (held_kind, held_id)
+        };
+        // `false`: the item is the server's own copy's or a trusted local hand.
+        if !block_change_within_reach(dx * dx + dy * dy + dz * dz, reach_kind, reach_id, false) {
             return Err(EditRefusal::Reach);
         }
         if sp.server_simulated {
@@ -5614,6 +5900,19 @@ impl HostedServer {
         if !self.server.play_mode.can_edit_world() {
             return Err(EditRefusal::PlayMode);
         }
+        self.remote_plot_allows(sp, x, z)
+    }
+
+    /// The plot half of [`Self::remote_may_touch`] (C3d run 20): a remote
+    /// player may not touch a cell in someone else's plot, outside
+    /// Creative. A door toggle (a use, not an edit) checks this without the
+    /// edit's play-mode gate (`strict_door.rs`).
+    pub(super) fn remote_plot_allows(
+        &self,
+        sp: &crate::server::ServerPlayer,
+        x: i32,
+        z: i32,
+    ) -> Result<(), EditRefusal> {
         let npub = verified_npub(sp.verified_pubkey);
         if !self.server.play_mode.is_creative()
             && crate::plot::is_in_foreign_plot_for_npub(&self.server.world.plots, x, z, npub.as_deref())
@@ -5697,7 +5996,7 @@ impl HostedServer {
         let cs = crate::chunk::CHUNK_SIZE as i32;
         if budget.send_backs >= MAX_SEND_BACKS_PER_CLIENT_PER_TICK
             || bc.y < 0
-            || bc.y >= 6 * cs
+            || bc.y >= crate::world::WORLD_HEIGHT
             || !self
                 .server
                 .loaded_columns
@@ -5999,6 +6298,11 @@ impl HostedServer {
                 // C3c-1-fix (M-4) — its refused uses, after this tick's block
                 // changes (each one's send-back among them), once each.
                 outbox.push_refused(&std::mem::take(&mut sp.refused_uses));
+                // Exact terminal receipts follow the complete preceding world
+                // prefix. Each is a coalescing barrier on this same outbox.
+                if let Some(results) = &mut sp.action_results {
+                    for receipt in results.take_unsent() { outbox.push_action_receipt(receipt); }
+                }
             }
             // The last input of THIS client's that its server state includes
             // — its prediction drops those and replays the rest (§5.3).
@@ -6023,6 +6327,14 @@ impl HostedServer {
                 .get(i)
                 .and_then(|sp| sp.riding)
                 .and_then(|m| self.server.ecs.get::<&crate::entity::ProtocolId>(m).ok().map(|p| p.0));
+            // A lost authoritative prefix cannot be repaired behind a terminal
+            // receipt. Settle paid events/death before the sidecar save and close
+            // the real transport; the client's old session keeps its journal.
+            let lost_boundary = outbox.take_failed_receipt().is_some() | outbox.take_failed_recovery().is_some();
+            if lost_boundary {
+                self.strict_bridge_teardown(i, crate::strict_admission::StrictTeardown::FellBehind, "authoritative action history could not be delivered");
+                continue;
+            }
             for pkt in outbox.drain_packets(&template) {
                 self.transports[i].send_to_client(&pkt);
             }
@@ -8251,7 +8563,7 @@ mod tests {
     /// disk, matching `test_integration/late_join.rs`'s "must not exist on
     /// disk" requirement. `WebSocket { port: 0 }` + 0 remote players spawns no
     /// accept thread and no socket at all.
-    fn start_room_test_server(tag: &str, num_local: usize) -> HostedServer {
+    pub(super) fn start_room_test_server(tag: &str, num_local: usize) -> HostedServer {
         let world = format!("test-room-wiring-{}-{tag}", std::process::id());
         HostedServer::start(num_local, world, 42, 0, RemoteTransport::WebSocket { port: 0 })
             .expect("hosted server starts")
@@ -8456,7 +8768,7 @@ mod tests {
     }
 
     /// Sign and send a join for `seckey` over a transport with `binding`.
-    fn send_signed_join(client: &ChannelClientTransport, seckey: [u8; 32], binding: Option<[u8; 32]>) {
+    pub(super) fn send_signed_join(client: &ChannelClientTransport, seckey: [u8; 32], binding: Option<[u8; 32]>) {
         use crate::transport::ClientTransport as _;
         let chal = loop {
             let pkt = client.try_recv_from_server().expect("challenge issued on attach");
@@ -8580,6 +8892,7 @@ mod tests {
             &registry,
             &mut crate::use_edits::SentUses::default(),
             &mut client_debt,
+            crate::action_identity::InventoryMode::Mirror,
         )
         .unwrap();
         assert_eq!(client_debt.owed(&stone), 1, "the client's Sync apply installs it");
@@ -8632,6 +8945,7 @@ mod tests {
             &crate::block::BlockRegistry::new(),
             &mut crate::use_edits::SentUses::default(),
             &mut client_debt,
+            crate::action_identity::InventoryMode::Mirror,
         )
         .unwrap();
         assert!(client_debt.is_empty(), "and the client's");

@@ -771,6 +771,16 @@ impl super::GameState {
         let mut forced_spent = 0;
         for step in self.chunk_intake.plan_deltas(chunks, changes, forced_checks) {
             match step {
+                crate::chunk_intake::Delta::RebaseFence(cut) => {
+                    if let Some(remote) = &mut self.remote_client {
+                        remote.apply_recovery_fence(cut);
+                    }
+                }
+                crate::chunk_intake::Delta::ActionReceipt(receipt) => {
+                    if let Some(remote) = &mut self.remote_client {
+                        remote.apply_action_receipt(receipt);
+                    }
+                }
                 crate::chunk_intake::Delta::Chunk(pkt) => {
                     // B2b fix D3 (review MEDIUM-1) — a chunk pushed into a
                     // column noted local but not generated yet (an overflow

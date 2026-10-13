@@ -834,6 +834,180 @@ mod tests {
         assert_eq!(server.server.world.grave_at(cell).unwrap().slots[0].as_ref().unwrap().count, 3);
     }
 
+    /// C3d run 8 (run-6 review H1, LOW-1) — a Strict joiner dies with stone
+    /// in its 2×2 grid, screen open. Through the real `GameState`: Esc on the
+    /// frozen screen pauses (never the generic panel close), E reaches the
+    /// same one gate, and nothing reaches the server (no correction is
+    /// queued); a Respawn the server hasn't answered yet still lets Esc
+    /// pause. Once the body lives, E closes and the grid ends in the bag on
+    /// both copies, never torn down.
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas"]
+    fn game_harness_strict_frozen_crafting_esc_pauses_and_e_returns_the_grid() {
+        use crate::window_actions::CraftClose;
+        isolate_saves();
+        let mut hg = HeadlessGame::boot_into_world("harness-frozen-esc");
+        hg.state.set_play_mode(crate::play_mode::PlayMode::Survival);
+        let mut server = crate::hosted_server::HostedServer::start(
+            0, format!("harness-frozen-esc-server-{}", std::process::id()), 42, 0,
+            crate::hosted_server::RemoteTransport::WebSocket { port: 0 },
+        ).expect("dedicated server starts");
+        server.select_inventory_mode(crate::action_identity::InventoryMode::Strict).expect("Strict");
+        server.server.difficulty = crate::survival::Difficulty::Peaceful;
+        let transport = server.attach_test_remote();
+        hg.state.remote_client = Some(crate::remote_client::RemoteClient::from_transport(
+            Box::new(transport), crate::remote_client::build_join_request_guest("Frozen", 0), None));
+        for _ in 0..5 { harness_step(&mut server, &mut hg); }
+        let slot = server.server.players.len() - 1;
+        assert_eq!(hg.state.remote_client.as_ref().unwrap().inventory_mode, crate::action_identity::InventoryMode::Strict);
+        let applied = hg.state.remote_client.as_ref().unwrap().applied_window_boundary();
+        crate::window_events::apply_through(&mut server.server.players[slot], applied, 0);
+        let stone = crate::item::ItemStack::new_block(crate::block::STONE, 8);
+        let refill = hg.state.players[0].inventory.auto_refill;
+        for inv in [&mut hg.state.players[0].inventory, &mut server.server.players[slot].inventory] {
+            *inv = crate::inventory::Inventory::new();
+            inv.auto_refill = refill;
+            inv.set_slot(0, Some(stone.clone()));
+        }
+        hg.state.open_crafting(0, None);
+        hg.state.apply_window_click(0, &crate::window::WindowClick::Slot { slot: 0, right: false });
+        hg.state.apply_window_click(0, &crate::window::WindowClick::Grid { row: 0, col: 0, right: false });
+        for _ in 0..3 { harness_step(&mut server, &mut hg); }
+        assert_eq!(server.server.players[slot].craft_grid[0][0].as_ref().map(|s| s.count), Some(8), "the server's copy has the grid");
+        let sp = &mut server.server.players[slot];
+        sp.combat.health = 0.0;
+        sp.combat.dead = true;
+        for _ in 0..8 {
+            harness_step(&mut server, &mut hg);
+            if hg.state.players[0].is_dead() { break; }
+        }
+        assert!(hg.state.players[0].is_dead(), "the client heard of its death");
+        for _ in 0..3 { harness_step(&mut server, &mut hg); }
+        let events = server.server.players[slot].window_events.last_number();
+        assert!(hg.state.players[0].crafting_ui.open, "the screen is open at death");
+        hg.state.esc_crafting();
+        assert!(matches!(hg.state.mode, crate::GameMode::Paused { .. }), "Esc on a frozen crafting screen pauses");
+        assert!(hg.state.players[0].crafting_ui.open && hg.state.players[0].crafting_ui.grid_holds_items(), "the screen and its grid stay");
+        assert_eq!(hg.state.close_crafting(0), CraftClose::Frozen, "E reaches the same gate");
+        hg.state.mode = crate::GameMode::Playing;
+        for _ in 0..3 { harness_step(&mut server, &mut hg); }
+        assert_eq!(server.server.players[slot].window_events.last_number(), events, "no Close reached the server: no correction queued");
+        // The Respawn, unanswered: the client asks, the server hasn't run.
+        for _ in 0..crate::server::MIN_DEAD_TICKS_BEFORE_RESPAWN { harness_step(&mut server, &mut hg); }
+        assert!(hg.state.players[0].combat.request_respawn());
+        for _ in 0..3 {
+            hg.frames(1);
+            hg.ticks(1);
+            if hg.state.remote_client.as_ref().unwrap().respawn_unanswered() { break; }
+        }
+        assert!(hg.state.remote_client.as_ref().unwrap().respawn_unanswered(), "a Respawn waits for its answer");
+        hg.state.esc_crafting();
+        assert!(matches!(hg.state.mode, crate::GameMode::Paused { .. }), "an unanswered Respawn never traps the player: Esc pauses");
+        hg.state.mode = crate::GameMode::Playing;
+        for _ in 0..40 {
+            harness_step(&mut server, &mut hg);
+            if !server.server.players[slot].combat.dead && !hg.state.players[0].is_dead()
+                && !hg.state.remote_client.as_ref().unwrap().respawn_unanswered() { break; }
+        }
+        assert!(!hg.state.players[0].is_dead() && !hg.state.remote_client.as_ref().unwrap().respawn_unanswered(), "respawned");
+        assert_eq!(hg.state.close_crafting(0), CraftClose::Closed, "E closes once the body lives");
+        for _ in 0..3 { harness_step(&mut server, &mut hg); }
+        assert!(matches!(hg.state.remote_client.as_ref().unwrap().state, crate::remote_client::ConnectionState::Connected { .. }), "never torn down");
+        let applied = hg.state.remote_client.as_ref().unwrap().applied_window_boundary();
+        let sp = &mut server.server.players[slot];
+        crate::window_events::apply_through(sp, applied, 0);
+        assert!(sp.craft_grid.iter().flatten().all(Option::is_none), "the server copy's grid went back");
+        assert_eq!(sp.inventory.slot(0).map(|s| s.count), Some(8), "into the server copy's bag");
+        assert!(!hg.state.players[0].crafting_ui.grid_holds_items(), "the client's grid went back");
+        assert_eq!(hg.state.players[0].inventory.slot(0).map(|s| s.count), Some(8), "into the client's bag");
+    }
+
+    /// C3d run 9 — a Strict joiner's survival placement and mined break
+    /// through the REAL game-loop arms (a right-click on the floor, the held
+    /// left button on the placed block): each is ONE reserved typed `Edit`
+    /// the arm reserves itself, and nothing rides the movement packet (a
+    /// Strict server closes the session on any edit there). The server
+    /// accepts both; the windows, worlds and the yield agree; the tool wore
+    /// once on both copies.
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas"]
+    fn game_harness_strict_place_and_break_go_typed() {
+        use crate::item::{Item, ItemStack};
+        isolate_saves();
+        let mut hg = HeadlessGame::boot_into_world("harness-strict-edit");
+        hg.state.set_play_mode(crate::play_mode::PlayMode::Survival);
+        let mut server = crate::hosted_server::HostedServer::start(
+            0, format!("harness-strict-edit-server-{}", std::process::id()), 42, 0,
+            crate::hosted_server::RemoteTransport::WebSocket { port: 0 },
+        ).expect("dedicated server starts");
+        server.select_inventory_mode(crate::action_identity::InventoryMode::Strict).expect("Strict");
+        server.server.difficulty = crate::survival::Difficulty::Peaceful;
+        let transport = server.attach_test_remote();
+        hg.state.remote_client = Some(crate::remote_client::RemoteClient::from_transport(
+            Box::new(transport), crate::remote_client::build_join_request_guest("Typed", 0), None));
+        for _ in 0..5 { harness_step(&mut server, &mut hg); }
+        let slot = server.server.players.len() - 1;
+        assert_eq!(hg.state.remote_client.as_ref().unwrap().inventory_mode, crate::action_identity::InventoryMode::Strict);
+        let applied = hg.state.remote_client.as_ref().unwrap().applied_window_boundary();
+        crate::window_events::apply_through(&mut server.server.players[slot], applied, 0);
+        let feet = clear_pad(&mut hg, Some(&mut server));
+        let pickaxe = crate::crafting::Tool::new(crate::crafting::ToolType::Pickaxe, crate::crafting::ToolMaterial::Stone);
+        let refill = hg.state.players[0].inventory.auto_refill;
+        for inv in [&mut hg.state.players[0].inventory, &mut server.server.players[slot].inventory] {
+            *inv = crate::inventory::Inventory::new();
+            inv.auto_refill = refill;
+            inv.set_slot(0, Some(ItemStack::new_block(crate::block::COBBLESTONE, 4)));
+            inv.set_slot(1, Some(ItemStack { item: Item::Tool(pickaxe), count: 1 }));
+        }
+        hg.state.players[0].hotbar_slot = 0;
+        for _ in 0..2 { harness_step(&mut server, &mut hg); }
+        let through = |server: &crate::hosted_server::HostedServer| server.server.players[slot].action_frontier.as_ref().map_or(0, |f| f.through());
+        let before = through(&server);
+        // The place arm: aim at the top of the floor two cells ahead.
+        let cell = [feet[0], feet[1], feet[2] - 2];
+        aim_at(&mut hg, glam::Vec3::new(cell[0] as f32 + 0.5, cell[1] as f32 - 0.02, cell[2] as f32 + 0.5));
+        right_click(&mut hg);
+        assert_eq!(hg.state.world.get_block(cell[0], cell[1], cell[2]), crate::block::COBBLESTONE, "the client placed it");
+        let reserved_edit = |hg: &HeadlessGame| hg.state.remote_client.as_ref().unwrap().action_journal.as_ref().unwrap().actions().any(|a| {
+            matches!(crate::action_wire::ActionPacket::decode(&a.intent).map(|p| p.intent), Ok(crate::action_wire::ActionIntent::Edit { change, .. }) if [change.x, change.y, change.z] == cell)
+        });
+        assert!(reserved_edit(&hg), "the place arm reserved a typed Edit of the cell");
+        assert!(hg.state.pending_block_changes.is_empty() && hg.state.pending_mined.is_empty(), "nothing waits for the movement packet");
+        for _ in 0..4 { harness_step(&mut server, &mut hg); }
+        assert_eq!(server.server.world.get_block(cell[0], cell[1], cell[2]), crate::block::COBBLESTONE, "the server accepted the placement");
+        // The break arm: the pickaxe, the button held until the block breaks.
+        hg.state.players[0].hotbar_slot = 1;
+        harness_step(&mut server, &mut hg);
+        // Run 11 (run-9b review LOW-3) — checked in the frame the block
+        // broke, before any later frame's tick could send (and so empty) the
+        // movement packet's queues: a Legacy break would still be waiting.
+        mine_joined_to_break(&mut hg, &mut server, slot, cell);
+        assert!(hg.state.pending_block_changes.is_empty() && hg.state.pending_mined.is_empty(), "the break: nothing waits for the movement packet");
+        for _ in 0..10 {
+            hg.state.tick_accumulator = crate::TICK_DURATION;
+            hg.frames(1);
+            server.tick();
+        }
+        for _ in 0..4 { harness_step(&mut server, &mut hg); }
+        let rc = hg.state.remote_client.as_ref().unwrap();
+        let reason = match &rc.state { crate::remote_client::ConnectionState::Failed(reason) => reason.clone(), _ => String::new() };
+        assert!(matches!(rc.state, crate::remote_client::ConnectionState::Connected { .. }), "never torn down: nothing rode the movement packet ({reason})");
+        assert_eq!(rc.action_journal.as_ref().map(|j| j.len()), Some(0), "every reservation retired");
+        assert!(through(&server) >= before + 2, "two typed edits accepted (through {} from {before})", through(&server));
+        assert_eq!(server.server.world.get_block(cell[0], cell[1], cell[2]), crate::block::AIR, "the server broke it");
+        assert_eq!(hg.state.world.get_block(cell[0], cell[1], cell[2]), crate::block::AIR);
+        let applied = rc.applied_window_boundary();
+        let sp = &mut server.server.players[slot];
+        crate::window_events::apply_through(sp, applied, 0);
+        let p = &hg.state.players[0];
+        let client = crate::window::digest_parts(&p.inventory, &p.armour_slots, &p.crafting_ui.cursor_item, &p.crafting_ui.grid, p.crafting_ui.station());
+        let server_digest = crate::window::digest_parts(&sp.inventory, &sp.armour, &sp.cursor, &sp.craft_grid, sp.station);
+        assert_eq!(client, server_digest, "the windows agree");
+        assert_eq!(p.inventory.slot(0).map(|s| s.count), Some(4), "the yield came back: four cobblestone");
+        let worn = |inv: &crate::inventory::Inventory| match inv.slot(1).map(|s| &s.item) { Some(Item::Tool(t)) => t.durability, _ => 0 };
+        assert_eq!((worn(&p.inventory), worn(&sp.inventory)), (pickaxe.durability - 1, pickaxe.durability - 1), "the pickaxe wore once on both copies");
+    }
+
     /// OC (v88) — the full client path: a saved joiner owing Stone 1 joins
     /// by its real signed join; the client's own `apply_window_inbox` (the
     /// `Sync` arm) installs the debt the `InventorySync` carries, the server's
@@ -901,6 +1075,8 @@ mod tests {
                 item_kind: crate::protocol::item_kind::BLOCK, item_id: u16::MAX, count: 1,
                 full_item: crate::protocol::WireItem::None,
             }, 1)],
+            station: None,
+            locks: 0,
         };
         hg.state.window_inbox.add(vec![crate::remote_client::RequestOutcome::Sync(bad)], Vec::new(), Vec::new());
         hg.state.apply_window_inbox();
@@ -2667,6 +2843,130 @@ mod tests {
         assert_eq!((sp.possession.ammo_believed, sp.possession.mismatched), (0, 0));
     }
 
+    /// C3d run 13 — a STRICT joiner holding right-click with its bow sends
+    /// each shot as ONE typed action through the real `GameState::send_shot`
+    /// (`strict_requests::route_shot`), never the legacy request: never torn
+    /// down, every reservation retired, no Strict refusal, and each shot paid
+    /// on both copies from the server's numbered Take (the client predicts
+    /// nothing).
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_strict_joiner_holding_its_bow_is_served_typed() {
+        use crate::item::{Item, MaterialId};
+        isolate_saves();
+        let mut hg = HeadlessGame::boot_into_world("harness-strict-bow");
+        hg.state.set_play_mode(crate::play_mode::PlayMode::Survival);
+        let mut server = crate::hosted_server::HostedServer::start(
+            0, format!("harness-strict-bow-server-{}", std::process::id()), 42, 0,
+            crate::hosted_server::RemoteTransport::WebSocket { port: 0 },
+        ).expect("dedicated server starts");
+        server.select_inventory_mode(crate::action_identity::InventoryMode::Strict).expect("Strict");
+        server.server.difficulty = crate::survival::Difficulty::Peaceful;
+        let transport = server.attach_test_remote();
+        hg.state.remote_client = Some(crate::remote_client::RemoteClient::from_transport(
+            Box::new(transport), crate::remote_client::build_join_request_guest("Archer", 0), None));
+        for _ in 0..5 { harness_step(&mut server, &mut hg); }
+        let slot = server.server.players.len() - 1;
+        assert_eq!(hg.state.remote_client.as_ref().unwrap().inventory_mode, crate::action_identity::InventoryMode::Strict);
+        let applied = hg.state.remote_client.as_ref().unwrap().applied_window_boundary();
+        crate::window_events::apply_through(&mut server.server.players[slot], applied, 0);
+        let refill = hg.state.players[0].inventory.auto_refill;
+        for inv in [&mut hg.state.players[0].inventory, &mut server.server.players[slot].inventory] {
+            *inv = crate::inventory::Inventory::new();
+            inv.auto_refill = refill;
+        }
+        clear_pad(&mut hg, Some(&mut server));
+        arm_bow(&mut hg, Some((&mut server, slot)), 16);
+        harness_step(&mut server, &mut hg);
+        hold_right_click(&mut hg, Some(&mut server), 60, 40);
+        settle(&mut server, &mut hg);
+        let client = hg.state.remote_client.as_ref().unwrap();
+        assert!(client.is_connected(), "an honest Strict archer is never torn down");
+        assert_eq!(client.action_journal.as_ref().map(|j| j.len()), Some(0), "every typed shot retired");
+        let arrow = Item::Material(MaterialId::Arrow);
+        let client_shots = 16 - held_units(&hg.state.players[0].inventory, &arrow);
+        let sp = &server.server.players[slot];
+        assert!(client_shots >= 2, "the held bow fired: {client_shots}");
+        assert_eq!(16 - held_units(&sp.inventory, &arrow), client_shots, "both copies paid each shot");
+        // C3d run 18 (run-17 review LOW-2) — world-fact refusals too.
+        let t = sp.strict_refusals;
+        assert_eq!((t.stale_world, t.other, t.world_fact), (0, 0, 0), "no Strict refusal");
+        // Run-17 review LOW-1 — the game loop's shot bracket really compared.
+        // Run-18 review M2: the guard is debug-only (a release run skips this).
+        #[cfg(debug_assertions)]
+        assert!(crate::strict_requests::checked::seen().contains(&"shot"), "the shot's NoPrediction bracket ran");
+    }
+
+    /// C3d run 16 — a STRICT joiner's swing through its REAL client
+    /// (`GameState::send_entity_attack` → `strict_requests::route_attack`):
+    /// ONE typed action, served from the server copy's sword; the hit lands
+    /// (the chicken dies and the client's kill attribution counts it), the
+    /// sword wears once on both copies from the server's numbered Wear, every
+    /// reservation retired, no Strict refusal, never torn down.
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_strict_joiners_swing_is_served_typed() {
+        isolate_saves();
+        let mut hg = HeadlessGame::boot_into_world("harness-strict-swing");
+        hg.state.set_play_mode(crate::play_mode::PlayMode::Survival);
+        let mut server = crate::hosted_server::HostedServer::start(
+            0, format!("harness-strict-swing-server-{}", std::process::id()), 42, 0,
+            crate::hosted_server::RemoteTransport::WebSocket { port: 0 },
+        ).expect("dedicated server starts");
+        server.select_inventory_mode(crate::action_identity::InventoryMode::Strict).expect("Strict");
+        server.server.difficulty = crate::survival::Difficulty::Peaceful;
+        let transport = server.attach_test_remote();
+        hg.state.remote_client = Some(crate::remote_client::RemoteClient::from_transport(
+            Box::new(transport), crate::remote_client::build_join_request_guest("Swinger", 0), None));
+        for _ in 0..5 { harness_step(&mut server, &mut hg); }
+        let slot = server.server.players.len() - 1;
+        assert_eq!(hg.state.remote_client.as_ref().unwrap().inventory_mode, crate::action_identity::InventoryMode::Strict);
+        let applied = hg.state.remote_client.as_ref().unwrap().applied_window_boundary();
+        crate::window_events::apply_through(&mut server.server.players[slot], applied, 0);
+        let refill = hg.state.players[0].inventory.auto_refill;
+        let hot = hg.state.players[0].hotbar_slot;
+        let iron = crate::crafting::Tool::new(crate::crafting::ToolType::Sword, crate::crafting::ToolMaterial::Iron);
+        for inv in [&mut hg.state.players[0].inventory, &mut server.server.players[slot].inventory] {
+            *inv = crate::inventory::Inventory::new();
+            inv.auto_refill = refill;
+            inv.set_slot(hot, Some(crate::item::ItemStack { item: crate::item::Item::Tool(iron), count: 1 }));
+        }
+        clear_pad(&mut hg, Some(&mut server));
+        harness_step(&mut server, &mut hg);
+        let wear = |inv: &crate::inventory::Inventory| match inv.slot(hot).map(|s| &s.item) {
+            Some(crate::item::Item::Tool(t)) => t.durability,
+            other => panic!("the sword is gone: {other:?}"),
+        };
+        // A chicken one hit from death, right in front of the joiner's body.
+        let sp = &server.server.players[slot];
+        let at = sp.player.pos + crate::camera::forward_from(sp.yaw, 0.0) * 1.5;
+        let chicken = crate::entity::spawn_mob(&mut server.server.ecs, crate::mob::MobType::Chicken, at);
+        server.server.ecs.get::<&mut crate::combat::Health>(chicken).unwrap().current = 1.0;
+        harness_step(&mut server, &mut hg);
+        let id = server.server.ecs.get::<&crate::entity::ProtocolId>(chicken).expect("broadcast").0;
+        server.server.ecs.get::<&mut crate::entity::Position>(chicken).unwrap().0 = at;
+        hg.state.send_entity_attack(
+            0,
+            crate::remote_mobs::MirrorTarget { id, kind: crate::mob::MobType::Chicken, tamed: false, baby: false, tethered: false, product_not_ready: false },
+            false,
+            false,
+        );
+        settle(&mut server, &mut hg);
+        let client = hg.state.remote_client.as_ref().unwrap();
+        assert!(client.is_connected(), "an honest Strict swing is never torn down");
+        assert_eq!(client.action_journal.as_ref().map(|j| j.len()), Some(0), "the typed swing retired");
+        assert_eq!(wear(&hg.state.players[0].inventory), iron.durability - 1, "the server's Wear applied on the client");
+        let sp = &server.server.players[slot];
+        assert_eq!(wear(&sp.inventory), iron.durability - 1, "and on the server copy");
+        assert_eq!(
+            hg.state.players[0].kill_counter.get(&crate::mob::MobType::Chicken).copied(),
+            Some(1),
+            "the hit landed: the server's KillEvent ran the joiner's kill attribution"
+        );
+        let t = sp.strict_refusals;
+        assert_eq!((t.stale_world, t.other, t.world_fact), (0, 0, 0), "no Strict refusal");
+    }
+
     // ─── C3c-1-fix ─────────────────────────────────────────────────────────
 
     /// Units of `item` in `inv`'s 36 slots.
@@ -2819,6 +3119,20 @@ mod tests {
     /// Hold the left button on `cell` until the client's own world breaks it
     /// (one tick a frame; the server body held where the client stands).
     fn mine_joined(hg: &mut HeadlessGame, server: &mut crate::hosted_server::HostedServer, slot: usize, cell: [i32; 3]) {
+        mine_joined_to_break(hg, server, slot, cell);
+        for _ in 0..10 {
+            hg.state.tick_accumulator = crate::TICK_DURATION;
+            hg.frames(1);
+            server.tick();
+        }
+    }
+
+    /// [`mine_joined`] up to and including the frame the block breaks in,
+    /// without the trailing frames: that frame's tick (and its movement
+    /// packet) ran BEFORE its break arm, so whatever the break arm left for
+    /// the movement packet is still waiting when this returns (run 11,
+    /// run-9b review LOW-3).
+    fn mine_joined_to_break(hg: &mut HeadlessGame, server: &mut crate::hosted_server::HostedServer, slot: usize, cell: [i32; 3]) {
         let p = hg.state.players[0].player.pos;
         aim_at(hg, glam::Vec3::new(cell[0] as f32 + 0.5, cell[1] as f32 + 0.5, cell[2] as f32 + 0.5));
         hg.state.input.cursor_captured = true;
@@ -2839,11 +3153,6 @@ mod tests {
         }
         hg.state.input.left_held = false;
         assert!(broke, "the joiner's client broke {cell:?}");
-        for _ in 0..10 {
-            hg.state.tick_accumulator = crate::TICK_DURATION;
-            hg.frames(1);
-            server.tick();
-        }
     }
 
     /// C3c-1-fix (M-3) — a joiner breaks one half of a door through the REAL
@@ -2971,6 +3280,212 @@ mod tests {
                 "the joiner lost {c:?}: {seen:?}"
             );
         }
+    }
+
+    /// C3d run 19 — a lending host opens its door (the REAL use arm, a
+    /// right-click): both halves reach a joiner open. (Before, the toggle
+    /// arm wrote its own world and recorded nothing: a joiner kept the door
+    /// shut.)
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_a_lending_hosts_door_toggle_reaches_a_joiner() {
+        use crate::transport::ClientTransport;
+        isolate_saves();
+        let name = "harness-lend-door-toggle";
+        let mut hg = HeadlessGame::boot_into_world(name);
+        let seed = hg.state.biome_gen.seed;
+        let hs = crate::hosted_server::HostedServer::start_host(
+            1,
+            name.to_string(),
+            seed,
+            0,
+            crate::hosted_server::RemoteTransport::WebSocket { port: 0 },
+            crate::hosted_server::HostWorld::Lent,
+        )
+        .expect("lending host starts");
+        hg.state.hosted_server = Some(hs);
+        assert!(hg.state.sim_lent());
+        let client = hg.state.hosted_server.as_mut().unwrap().attach_test_remote();
+        let req = crate::remote_client::build_join_request_guest("Visitor", 0);
+        client.send_to_server(&crate::protocol::serialize_packet(crate::protocol::PacketType::JoinRequest, &req));
+        hg.hosted_ticks(8);
+        let feet = clear_pad(&mut hg, None);
+        let bottom = [feet[0], feet[1], feet[2] - 2];
+        let top = [bottom[0], bottom[1] + 1, bottom[2]];
+        hg.state.world.set_block(bottom[0], bottom[1], bottom[2], crate::block::OAK_DOOR);
+        hg.state.world.set_block(top[0], top[1], top[2], crate::block::OAK_DOOR);
+        hg.state.world.set_meta((top[0], top[1], top[2]), crate::use_edits::door_top_meta(0));
+        let hs = hg.state.hosted_server.as_mut().unwrap();
+        let joiner = hs.server.players.len() - 1;
+        let cs = crate::chunk::CHUNK_SIZE as i32;
+        hs.hold_column_for_test(joiner, (bottom[0].div_euclid(cs), bottom[2].div_euclid(cs)));
+        hg.hosted_ticks(2);
+        while client.try_recv_from_server().is_some() {}
+        aim_at(&mut hg, glam::Vec3::new(bottom[0] as f32 + 0.5, bottom[1] as f32 + 0.5, bottom[2] as f32 + 0.5));
+        hg.state.tick_accumulator = crate::TICK_DURATION;
+        right_click(&mut hg);
+        for c in [bottom, top] {
+            assert!(crate::block_shape::is_open(hg.state.world.meta_at(c[0], c[1], c[2])), "the host opened its half at {c:?}");
+        }
+        hg.hosted_ticks(3);
+        let mut seen = Vec::new();
+        while let Some(pkt) = client.try_recv_from_server() {
+            if let Some((crate::protocol::PacketType::StateUpdate, payload)) = crate::protocol::deserialize_header(&pkt)
+                && let Ok(s) = crate::protocol::safe_deserialize::<crate::protocol::StateUpdatePacket>(payload)
+            {
+                seen.extend(s.block_changes);
+            }
+        }
+        for c in [bottom, top] {
+            assert!(
+                seen.iter().any(|b| (b.x, b.y, b.z, b.new_block) == (c[0], c[1], c[2], crate::block::OAK_DOOR) && crate::block_shape::is_open(b.meta)),
+                "the joiner hears the half at {c:?} open: {seen:?}"
+            );
+        }
+    }
+
+    /// C3d run 19 — a Mirror joiner opens a door through the REAL use arm (a
+    /// right-click): ONE typed `ToggleBlock` reserved, its own door opened
+    /// (`FlipEach`, as before), and the dedicated server's door opens too,
+    /// served and retired.
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas"]
+    fn game_harness_mirror_joiners_door_toggle_opens_the_servers_door() {
+        isolate_saves();
+        let mut hg = HeadlessGame::boot_into_world("harness-mirror-toggle");
+        hg.state.set_play_mode(crate::play_mode::PlayMode::Survival);
+        let mut server = crate::hosted_server::HostedServer::start(
+            0, format!("harness-mirror-toggle-server-{}", std::process::id()), 42, 0,
+            crate::hosted_server::RemoteTransport::WebSocket { port: 0 },
+        ).expect("dedicated server starts");
+        server.server.difficulty = crate::survival::Difficulty::Peaceful;
+        let transport = server.attach_test_remote();
+        hg.state.remote_client = Some(crate::remote_client::RemoteClient::from_transport(
+            Box::new(transport), crate::remote_client::build_join_request_guest("Doorman", 0), None));
+        for _ in 0..5 { harness_step(&mut server, &mut hg); }
+        assert_eq!(hg.state.remote_client.as_ref().unwrap().inventory_mode, crate::action_identity::InventoryMode::Mirror);
+        let feet = clear_pad(&mut hg, Some(&mut server));
+        let bottom = [feet[0], feet[1], feet[2] - 2];
+        let top = [bottom[0], bottom[1] + 1, bottom[2]];
+        for w in [&mut hg.state.world, &mut server.server.world] {
+            w.set_block(bottom[0], bottom[1], bottom[2], crate::block::OAK_DOOR);
+            w.set_meta((bottom[0], bottom[1], bottom[2]), 0);
+            w.set_block(top[0], top[1], top[2], crate::block::OAK_DOOR);
+            w.set_meta((top[0], top[1], top[2]), crate::use_edits::door_top_meta(0));
+        }
+        for _ in 0..2 { harness_step(&mut server, &mut hg); }
+        aim_at(&mut hg, glam::Vec3::new(bottom[0] as f32 + 0.5, bottom[1] as f32 + 0.5, bottom[2] as f32 + 0.5));
+        right_click(&mut hg);
+        let toggles = |hg: &HeadlessGame| hg.state.remote_client.as_ref().unwrap().action_journal.as_ref().unwrap().actions()
+            .filter(|a| matches!(crate::action_wire::ActionPacket::decode(&a.intent).map(|p| p.intent), Ok(crate::action_wire::ActionIntent::ToggleBlock { cell, .. }) if cell == bottom))
+            .count();
+        assert_eq!(toggles(&hg), 1, "one ToggleBlock reserved");
+        for c in [bottom, top] {
+            assert!(crate::block_shape::is_open(hg.state.world.meta_at(c[0], c[1], c[2])), "the joiner opened its half at {c:?}");
+        }
+        for _ in 0..6 { harness_step(&mut server, &mut hg); }
+        for c in [bottom, top] {
+            assert!(crate::block_shape::is_open(server.server.world.meta_at(c[0], c[1], c[2])), "the server's half at {c:?} is open");
+        }
+        assert_eq!(toggles(&hg), 0, "the toggle retired");
+        assert!(hg.state.remote_client.as_ref().unwrap().is_connected(), "never torn down");
+    }
+
+    /// C3d run 22 — a Mirror joiner places a door and clicks it in the same
+    /// frame, its placement still waiting to be sent: the door opens on the
+    /// clicker's screen at once, the toggle waits in the one ordered client
+    /// queue behind the placement, and the server applies the placement
+    /// THEN the toggle (were it sent first, the server would refuse it: no
+    /// door there yet). A second joiner hears both. No toast, no lost click.
+    /// (Run 21 refused the click while edits were unsent; on `bdd4fe87` the
+    /// door always opened.) Run-21 review LOW-3 — every branch of
+    /// `edits_unsent` is driven for real: an earlier edit, then a request
+    /// queued behind it (`has_queued_requests`), then the door placement,
+    /// which the order cut leaves in the input carry-over
+    /// (`has_carry_over`) while the request goes; the toggle waits for that
+    /// carry-over.
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas"]
+    fn game_harness_mirror_door_click_queues_behind_unsent_edits() {
+        isolate_saves();
+        let mut hg = HeadlessGame::boot_into_world("harness-mirror-toggle-wait");
+        hg.state.set_play_mode(crate::play_mode::PlayMode::Survival);
+        let mut server = crate::hosted_server::HostedServer::start(
+            0, format!("harness-mirror-toggle-wait-server-{}", std::process::id()), 42, 0,
+            crate::hosted_server::RemoteTransport::WebSocket { port: 0 },
+        ).expect("dedicated server starts");
+        server.server.difficulty = crate::survival::Difficulty::Peaceful;
+        let transport = server.attach_test_remote();
+        hg.state.remote_client = Some(crate::remote_client::RemoteClient::from_transport(
+            Box::new(transport), crate::remote_client::build_join_request_guest("Doorman", 0), None));
+        let mut neighbour = crate::remote_client::RemoteClient::from_transport(
+            Box::new(server.attach_test_remote()), crate::remote_client::build_join_request_guest("Neighbour", 0), None);
+        for _ in 0..5 { harness_step(&mut server, &mut hg); neighbour.poll(); }
+        assert_eq!(hg.state.remote_client.as_ref().unwrap().inventory_mode, crate::action_identity::InventoryMode::Mirror);
+        let n_slot = neighbour.player_index().expect("the neighbour joined") as usize;
+        let feet = clear_pad(&mut hg, Some(&mut server));
+        let bottom = [feet[0], feet[1], feet[2] - 2];
+        let top = [bottom[0], bottom[1] + 1, bottom[2]];
+        let cs = crate::chunk::CHUNK_SIZE as i32;
+        server.hold_column_for_test(n_slot, (bottom[0].div_euclid(cs), bottom[2].div_euclid(cs)));
+        for _ in 0..2 { harness_step(&mut server, &mut hg); neighbour.poll(); }
+        neighbour.pending_block_changes.clear();
+        // An earlier edit (the floor it stands on, as it is), then a request
+        // made behind it (a device click on a cell with no device: the
+        // server ignores it), both waiting; then the placement: both halves
+        // on the joiner's screen and waiting to be sent (the click frame runs
+        // no tick, so no input goes before the use arm, which runs after the
+        // frame's ticks).
+        let floor = [feet[0], feet[1] - 1, feet[2]];
+        let standing = hg.state.world.get_block(floor[0], floor[1], floor[2]);
+        hg.state.pending_block_changes.push(crate::protocol::BlockChange { x: floor[0], y: floor[1], z: floor[2], new_block: standing, meta: 0 });
+        hg.state.remote_client.as_mut().unwrap().queue_request(crate::window_ops::order_stamp(), crate::remote_client::Request::Device((floor[0], floor[1], floor[2])));
+        let metas = [(bottom, 0u8), (top, crate::use_edits::door_top_meta(0))];
+        for (c, m) in metas {
+            hg.state.world.set_block(c[0], c[1], c[2], crate::block::OAK_DOOR);
+            hg.state.world.set_meta((c[0], c[1], c[2]), m);
+            hg.state.pending_block_changes.push(crate::protocol::BlockChange { x: c[0], y: c[1], z: c[2], new_block: crate::block::OAK_DOOR, meta: m });
+        }
+        assert_eq!(server.server.world.get_block(bottom[0], bottom[1], bottom[2]), crate::block::AIR, "the server has no door yet");
+        aim_at(&mut hg, glam::Vec3::new(bottom[0] as f32 + 0.5, bottom[1] as f32 + 0.5, bottom[2] as f32 + 0.5));
+        let toggles = |hg: &HeadlessGame| hg.state.remote_client.as_ref().unwrap().action_journal.as_ref().unwrap().actions()
+            .filter(|a| matches!(crate::action_wire::ActionPacket::decode(&a.intent).map(|p| p.intent), Ok(crate::action_wire::ActionIntent::ToggleBlock { cell, .. }) if cell == bottom))
+            .map(|a| a.sent)
+            .collect::<Vec<_>>();
+        hg.state.last_tick = std::time::Instant::now();
+        hg.state.tick_accumulator = std::time::Duration::ZERO;
+        let toast_before = toast_text(&hg);
+        right_click(&mut hg);
+        assert!(!hg.state.pending_block_changes.is_empty(), "the placement was still waiting at the click");
+        for c in [bottom, top] {
+            assert!(crate::block_shape::is_open(hg.state.world.meta_at(c[0], c[1], c[2])), "the door opens on the clicker's screen at once ({c:?})");
+        }
+        assert_eq!(toggles(&hg), vec![false], "one ToggleBlock reserved, not yet sent");
+        assert!(hg.state.remote_client.as_ref().unwrap().has_queued_requests(), "it waits in the ordered queue behind the placement");
+        assert_eq!(toast_text(&hg), toast_before, "no toast");
+        // The first input carries the floor edit; the order cut keeps the
+        // door placement (made after the queued request) in the carry-over,
+        // the request goes, and the toggle still waits behind the placement.
+        hg.state.network_send_input();
+        let rc = hg.state.remote_client.as_ref().unwrap();
+        assert!(rc.has_carry_over(), "the placement is carried over to the next input");
+        assert!(rc.has_queued_requests(), "the toggle still waits behind it");
+        assert_eq!(toggles(&hg), vec![false], "not sent ahead of the carried placement");
+        // The next input carries the placement; the toggle goes right after.
+        hg.state.network_send_input();
+        let rc = hg.state.remote_client.as_ref().unwrap();
+        assert!(!rc.has_carry_over() && !rc.has_queued_requests(), "the carry-over and the queue drained");
+        assert_eq!(toggles(&hg), vec![true], "sent right after the input carrying the placement");
+        for _ in 0..6 { harness_step(&mut server, &mut hg); neighbour.poll(); }
+        for c in [bottom, top] {
+            assert_eq!(server.server.world.get_block(c[0], c[1], c[2]), crate::block::OAK_DOOR, "the server applied the placement ({c:?})");
+            assert!(crate::block_shape::is_open(server.server.world.meta_at(c[0], c[1], c[2])), "then the toggle: the server's half at {c:?} is open");
+            assert!(crate::block_shape::is_open(hg.state.world.meta_at(c[0], c[1], c[2])), "and the clicker's stays open ({c:?})");
+            let heard = neighbour.pending_block_changes.iter().rev().find(|b| [b.x, b.y, b.z] == c).map(|b| (b.new_block, crate::block_shape::is_open(b.meta)));
+            assert_eq!(heard, Some((crate::block::OAK_DOOR, true)), "the neighbour hears the door, open, at {c:?}");
+        }
+        assert!(toggles(&hg).is_empty(), "the toggle retired");
+        assert!(hg.state.remote_client.as_ref().unwrap().is_connected(), "never torn down");
     }
 
     // ─── C3c-3r ────────────────────────────────────────────────────────────

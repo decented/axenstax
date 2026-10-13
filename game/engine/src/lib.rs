@@ -30,6 +30,25 @@
 #![cfg_attr(target_os = "android", allow(clippy::missing_const_for_thread_local))]
 
 // Cross-platform modules
+mod action_identity;
+mod action_queue;
+mod action_results;
+mod action_journal;
+mod body_residency;
+mod window_prediction;
+mod window_actions;
+// C3d runs 7 and 9 — typed block edits: the shared rule and the client's half.
+pub(crate) mod strict_edits;
+pub(crate) mod strict_doors;
+pub(crate) mod strict_requests;
+// C3d run 9 — a hand placement's meta, one pure rule (hoisted for typed edits).
+mod placement_meta;
+mod action_capacity;
+mod action_wire;
+mod recovery_bundle;
+mod rebase_assembly;
+mod staged_window;
+mod strict_admission;
 mod audio;
 mod controls;
 mod biome;
@@ -2498,6 +2517,10 @@ impl ApplicationHandler for App {
                                         // Esc then closes the inventory.
                                         EscAction::CloseBook
                                     } else if state.players[0].crafting_ui.open {
+                                        // C3d run 8 (review LOW-1) — always the
+                                        // crafting arm, never the generic panel
+                                        // close: its one gate pauses instead
+                                        // while a Strict window is frozen.
                                         EscAction::CloseCraft
                                     } else if state.players[0].dialogue_villager.is_some() {
                                         EscAction::CloseVillager
@@ -2573,9 +2596,11 @@ impl ApplicationHandler for App {
                                     state.players[0].crafting_ui.book_open = false;
                                 }
                                 EscAction::CloseCraft => {
-                                    let p = &mut state.players[0];
-                                    p.crafting_ui.close(&mut p.inventory, &mut p.armour_slots);
-                                    state.capture_cursor();
+                                    // C3d review M1 — the reserving entry point: in
+                                    // Strict it allocates the action before the
+                                    // prediction and sends no legacy WindowOp.
+                                    // C3d run 8 — a frozen window pauses instead.
+                                    state.esc_crafting();
                                 }
                                 EscAction::CloseVillager => {
                                     state.players[0].dialogue_villager = None;

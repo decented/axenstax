@@ -356,7 +356,8 @@ impl JoinerSave {
         CorrectionDebt::from_entries(entries)
     }
 
-    #[cfg(test)]
+    /// OC — the record's obligation history (C3d's Strict admission names
+    /// the cause it refuses for, `strict_admission::check`).
     pub fn history(&self) -> ObligationHistory {
         self.obligation_history
     }
@@ -365,7 +366,6 @@ impl JoinerSave {
     /// `Complete` and it carries no debt. (An unreadable save has no
     /// `JoinerSave`: [`crate::server::ServerPlayer::obligations_proven_zero`]
     /// covers it.) For C3d's Strict admission and the handover's eligibility.
-    #[allow(dead_code)] // consumed by C3d (Strict admission) and the handover (eligibility)
     pub fn obligations_proven_zero(&self) -> bool {
         self.obligation_history == ObligationHistory::Complete && self.owed.is_empty()
     }
@@ -1027,7 +1027,7 @@ mod oc_tests {
             saved.restore_vitals(&mut s.players[0], s.run_id);
             let n = window_events::queue(
                 &mut s.players[0],
-                WindowEvent::Replace { window: Box::new(saved.window().unwrap()), debt: saved.debt().unwrap() },
+                WindowEvent::Replace { window: Box::new(saved.window().unwrap()), debt: saved.debt().unwrap(), station: crate::window::Station::Player },
                 0,
             );
             window_events::apply_through(&mut s.players[0], n, 0);

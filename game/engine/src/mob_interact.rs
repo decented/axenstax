@@ -613,6 +613,25 @@ pub fn needs_animal_life(action: InteractKind) -> bool {
     }
 }
 
+/// C3d run 23 — what an ACCEPTED interaction of kind `action` costs,
+/// whatever the mob, the roll or the hand: `consume` units of the held
+/// stack, and `give` back. A Strict seat stages exactly this on the joiner's
+/// window BEFORE the run, which decides and applies in one call
+/// (`hosted_server::strict_interact`); a run whose accepted cost differs is
+/// a fail-closed pause there. Pinned against [`run`], [`lead_to_post`] and
+/// [`Interaction::accepted`] (a mount) by a unit test. A refused
+/// interaction ([`Interaction::refused`], or `None`) costs nothing.
+pub fn accepted_cost(action: InteractKind) -> (u8, Vec<ItemStack>) {
+    match action {
+        // A tame takes the food whether the roll lands or not (`TameWary`).
+        InteractKind::Feed | InteractKind::Tame | InteractKind::LeadAttach | InteractKind::LeadToPost { .. } => (1, Vec::new()),
+        InteractKind::Milk => (1, vec![ItemStack::new_material(MaterialId::MilkBucket, 1)]),
+        InteractKind::LeadDetach => (0, vec![ItemStack::new_material(MaterialId::Lead, 1)]),
+        // Shorn wool drops at the sheep as a world item; shears don't wear.
+        InteractKind::Shear | InteractKind::SitToggle | InteractKind::Mount => (0, Vec::new()),
+    }
+}
+
 /// A joiner's `EntityInteract` of kind `action` on the mob `target`, by the
 /// same rules (`None` = it does not apply: refused). `LeadToPost` names no
 /// mob and is [`lead_to_post`]'s.
@@ -719,6 +738,58 @@ mod tests {
         assert_eq!(ecs.get::<&Tethered>(near).unwrap().target, TetherTarget::Post(post));
         assert_eq!(ecs.get::<&Tethered>(nearer_but_theirs).unwrap().target, TetherTarget::Player(1));
         assert_eq!(ecs.get::<&Tethered>(far).unwrap().target, TetherTarget::Player(0));
+    }
+
+    /// C3d run 23 — the pure cost table a Strict seat stages before the run
+    /// is what every accepted run really costs, for every kind (a tame's
+    /// failed roll too), and no refusal costs anything.
+    #[test]
+    fn c3d_accepted_cost_is_pinned_against_the_runs() {
+        let me = actor(Some("npub1owner"));
+        let at = Vec3::new(0.0, 64.0, 0.0);
+        let check = |what: &str, kind: InteractKind, r: Option<Interaction>| {
+            let r = r.unwrap_or_else(|| panic!("{what}: applies"));
+            assert!(r.done, "{what}: accepted");
+            assert_eq!((r.consume, r.give), accepted_cost(kind), "{what}: the table is the run's cost");
+        };
+        let run_on = |mob: MobType, kind: InteractKind, held: Option<Item>, setup: &dyn Fn(&mut hecs::World, hecs::Entity), tick: u64| {
+            let mut ecs = hecs::World::new();
+            let e = crate::entity::spawn_mob(&mut ecs, mob, at);
+            setup(&mut ecs, e);
+            run(&mut ecs, e, mob, kind, held.as_ref(), false, &me, tick)
+        };
+        let none = |_: &mut hecs::World, _: hecs::Entity| {};
+        let food = crate::breeding::breeding_food(MobType::Cow).expect("a cow eats");
+        check("feed", InteractKind::Feed, run_on(MobType::Cow, InteractKind::Feed, Some(mat(food)), &none, 7));
+        check("tame (a treat)", InteractKind::Tame, run_on(MobType::Cat, InteractKind::Tame, Some(mat(MaterialId::CatTreat)), &none, 7));
+        let mut rolls = std::collections::BTreeSet::new();
+        for tick in 0..64 {
+            let r = run_on(MobType::Wolf, InteractKind::Tame, Some(mat(MaterialId::Bone)), &none, tick);
+            rolls.insert(r.as_ref().map(|r| r.note.to_wire()));
+            check("tame (a roll)", InteractKind::Tame, r);
+        }
+        assert!(rolls.contains(&Some(InteractNote::Tamed.to_wire())) && rolls.contains(&Some(InteractNote::TameWary.to_wire())), "both rolls seen: {rolls:?}");
+        let shears = Item::Tool(crate::crafting::Tool::new(crate::crafting::ToolType::Shears, crate::crafting::ToolMaterial::Iron));
+        check("shear", InteractKind::Shear, run_on(MobType::Sheep, InteractKind::Shear, Some(shears), &none, 7));
+        check("milk", InteractKind::Milk, run_on(MobType::Cow, InteractKind::Milk, Some(mat(MaterialId::Bucket)), &none, 7));
+        check("lead on", InteractKind::LeadAttach, run_on(MobType::Cow, InteractKind::LeadAttach, Some(mat(MaterialId::Lead)), &none, 7));
+        let leashed = |ecs: &mut hecs::World, e: hecs::Entity| { ecs.insert_one(e, Tethered { target: TetherTarget::Player(1) }).unwrap(); };
+        check("lead off", InteractKind::LeadDetach, run_on(MobType::Cow, InteractKind::LeadDetach, None, &leashed, 7));
+        let owned = |ecs: &mut hecs::World, e: hecs::Entity| { ecs.get::<&mut crate::wolf::WolfData>(e).unwrap().ownership.owner_pubkey = "npub1owner".into(); };
+        check("sit", InteractKind::SitToggle, run_on(MobType::Wolf, InteractKind::SitToggle, None, &owned, 7));
+        let mut ecs = hecs::World::new();
+        let mut world = crate::world::World::new();
+        let post = [10, 64, 10];
+        world.set_block(post[0], post[1], post[2], crate::block::OAK_FENCE_POST);
+        let cow = crate::entity::spawn_mob(&mut ecs, MobType::Cow, Vec3::new(11.0, 64.0, 10.5));
+        ecs.insert_one(cow, Tethered { target: me.tether }).unwrap();
+        let kind = InteractKind::LeadToPost { post };
+        check("lead to a post", kind, lead_to_post(&mut ecs, &world, post, Some(&mat(MaterialId::Lead)), &me));
+        // A mount (and a dispatched cart) is `Interaction::accepted()`.
+        check("mount", InteractKind::Mount, Some(Interaction::accepted()));
+        // Refusals cost nothing.
+        let r = run_on(MobType::Cow, InteractKind::Milk, Some(mat(MaterialId::Bucket)), &|ecs, e| record_product(ecs, e, 7), 8).expect("refused with a note");
+        assert!(!r.done && r.consume == 0 && r.give.is_empty() && r.note == InteractNote::MilkNotReady);
     }
 
     #[test]

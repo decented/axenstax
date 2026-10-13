@@ -567,7 +567,7 @@ impl DropBucket {
 // ─── The server's steps ─────────────────────────────────────────────────────
 
 /// May this server player act at all: a joiner's body, in the world, alive.
-fn can_act(sp: &ServerPlayer) -> bool {
+pub(crate) fn can_act(sp: &ServerPlayer) -> bool {
     sp.server_simulated && sp.is_present_and_alive()
 }
 

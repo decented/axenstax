@@ -42,6 +42,11 @@
 //! it holds edits it has not sent yet, so every edit of an input was made at
 //! the count the input reports (`GameState::apply_window_inbox`).
 
+mod strict;
+pub use strict::{admit_staged, stage_strict_click, stage_strict_edit, stage_strict_effects, stage_strict_refused_autofill, strict_effective_marker, strict_leaves_no_unpaid_obligation, strict_raw_marker, prepare_strict_events, reserve_strict_replace, StrictStageError};
+#[cfg(test)]
+pub use strict::strict_replace_fits;
+
 use std::collections::VecDeque;
 
 use crate::armour::ArmourItem;
@@ -82,8 +87,11 @@ pub enum WindowEvent {
     /// Whole truth after join or death (`InventorySync`): the window, and
     /// the correction debt the copy owes from here (OC, v88): a join's is
     /// the restored record's (or a fresh joiner's effective debt), a death's
-    /// is empty.
-    Replace { window: Box<EffectiveWindow>, debt: crate::container_window::CorrectionDebt },
+    /// is empty. C3d run 8 (review LOW-2) — and the station the packet
+    /// carries, the same send-time snapshot: a Strict copy's apply sets
+    /// `sp.station` to it (a stale config op served before it is overwritten
+    /// on both copies, as the client adopts the packet's).
+    Replace { window: Box<EffectiveWindow>, debt: crate::container_window::CorrectionDebt, station: crate::window::Station },
     /// An accepted request's owed take (`joiner_actions::take_owed_window`):
     /// `n` of `item`, from `slot` first. `how` ends the shortfall's log line.
     Take { slot: usize, item: Item, n: u8, how: &'static str },
@@ -159,6 +167,7 @@ pub struct EventTally {
 pub struct WindowEvents {
     /// The number of the last event sent.
     last_sent: u32,
+    last_applied: u32,
     last_replace: u32,
     /// Refuse requests until the client acknowledges its death replacement.
     pub death_replace: Option<u32>,
@@ -190,16 +199,53 @@ pub struct WindowEvents {
     /// [`MAX_PENDING_EVENTS`] (the oldest go first).
     forced_corrections: VecDeque<(u32, crate::container_window::ItemDelta)>,
     pub tally: EventTally,
+    /// C3d (run 4) — the first numbered Take a Strict joiner's copy applied
+    /// short (its number): Strict never queues a Take its window can't pay,
+    /// so this is an invariant breach. `apply_front` can't close a session;
+    /// it records the number and the hosting server tears the session down
+    /// through its one BRIDGE (`HostedServer::strict_events_hold`). Never
+    /// set for a Mirror joiner, whose short Take stays log-only.
+    strict_short_take: Option<u32>,
 }
 
 impl WindowEvents {
-    /// Events sent and not applied yet.
-    #[cfg(test)]
+    /// Events sent and not applied yet (C3d run 15: also names the cap a
+    /// whole event reservation hit, `actions::reservation_detail`).
     pub fn waiting(&self) -> usize {
         self.waiting.len()
     }
 
+    /// C3d tests — the waiting events, oldest first.
+    #[cfg(test)]
+    pub fn waiting_events(&self) -> impl Iterator<Item = &WindowEvent> {
+        self.waiting.iter().map(|w| &w.event)
+    }
+
+    /// C3d tests — the waiting deque's allocated capacity (a reservation
+    /// that is given back must leave it as it was).
+    #[cfg(test)]
+    pub fn waiting_capacity(&self) -> usize {
+        self.waiting.capacity()
+    }
+
     pub fn last_number(&self) -> u32 { self.last_sent }
+    /// A whole-window replacement (join or death sync) is sent and not yet
+    /// applied: the window at any earlier boundary is about to be replaced.
+    pub fn replace_waiting(&self) -> bool { self.last_replace > self.last_applied }
+    /// C3d run 5 — was a window base `base` (a client's `events_applied`)
+    /// made before the latest whole-window `Replace` (join or death sync)?
+    /// Then what the client predicted on it is overwritten when it applies
+    /// that `Replace`.
+    pub fn predates_replace(&self, base: u32) -> bool { base < self.last_replace }
+    /// C3d (run 4) — take the number of a Take a Strict copy applied short
+    /// (`apply_front`), if one was; the caller tears the session down.
+    pub fn take_strict_short_take(&mut self) -> Option<u32> { self.strict_short_take.take() }
+
+    /// C3d tests — shrink the waiting deque to what it holds, so a
+    /// reservation that grows it is visible (and one given back is too).
+    #[cfg(test)]
+    pub fn shrink_waiting_to_fit(&mut self) { self.waiting.shrink_to_fit(); }
+    pub fn accepts_boundary(&self, reported: u32) -> bool { reported >= self.last_applied && reported <= self.last_sent }
 
     /// The number of the last event sent (0 before the first).
     #[cfg(test)]
@@ -279,8 +325,11 @@ enum Effect {
 /// client's own rule.
 fn apply_to(parts: &mut Parts, debt: &mut crate::container_window::CorrectionDebt, event: &WindowEvent) -> Effect {
     match event {
-        WindowEvent::Replace { window: w, debt: carried } => {
+        WindowEvent::Replace { window: w, debt: carried, .. } => {
             for i in 0..36 { parts.inv.set_slot(i, w.inv.slot(i).cloned()); }
+            // C3d run 6 — the lock mask travels with the replacement (the
+            // client installs the same); auto-refill stays the copy's own.
+            parts.inv.set_locked_from(&w.inv.locked_indices());
             *parts.armour = w.armour;
             *parts.cursor = w.cursor.clone();
             *parts.grid = w.grid.clone();
@@ -410,18 +459,38 @@ pub fn apply_overdue(sp: &mut ServerPlayer, now: u64) {
 /// Apply the oldest waiting event to `sp`'s window and tally it.
 fn apply_front(sp: &mut ServerPlayer, now: u64, forced: bool) {
     let Some(w) = sp.window_events.waiting.pop_front() else { return };
+    sp.window_events.last_applied = w.seq;
     if forced {
         sp.window_events.tally.forced = sp.window_events.tally.forced.saturating_add(1);
     }
+    // C3d run 10 (run-8 review LOW-D) — a Mirror copy keeps its own lock mask
+    // across a `Replace`, as its client does (run 7) and as `bdd4fe87` did; a
+    // lock toggled before the join sync applied is never wiped.
+    let strict = sp.server_simulated && sp.inventory_mode == crate::action_identity::InventoryMode::Strict;
+    let mirror_locks = (!strict && matches!(w.event, WindowEvent::Replace { .. })).then(|| sp.inventory.locked_indices());
     let mut parts =
         Parts { inv: &mut sp.inventory, armour: &mut sp.armour, cursor: &mut sp.cursor, grid: &mut sp.craft_grid };
-    match (apply_to(&mut parts, &mut sp.window_events.debt, &w.event), w.event) {
+    let effect = apply_to(&mut parts, &mut sp.window_events.debt, &w.event);
+    if let Some(locks) = mirror_locks { sp.inventory.set_locked_from(&locks); }
+    match (effect, w.event) {
         (Effect::Granted { landed }, WindowEvent::Grant(stack)) => {
             let overflow = stack.count.saturating_sub(landed);
             sp.possession.grant_overflow = sp.possession.grant_overflow.saturating_add(u32::from(overflow));
             remember_grant(&mut sp.window_events, AppliedGrant { seq: w.seq, stack, landed, returned: false });
         }
         (Effect::Took { taken }, WindowEvent::Take { item, n, how, .. }) if taken < n => {
+            // C3d (run 4) — Strict queues only Takes its window can pay
+            // (`strict::strict_obligations`): a short one is an invariant
+            // breach, never log-only. Recorded for the hosting server's
+            // reasoned teardown; the first one's number is kept.
+            if sp.server_simulated && sp.inventory_mode == crate::action_identity::InventoryMode::Strict {
+                log::error!(
+                    "Strict inventory invariant breached: {}'s window event {} took {taken} of {n} × {item:?} {how}",
+                    sp.display_name, w.seq,
+                );
+                sp.window_events.strict_short_take.get_or_insert(w.seq);
+                return;
+            }
             let due = sp.possession.note_mismatch(now);
             log::log!(
                 crate::joiner_inventory::mismatch_log_level(due),
@@ -431,7 +500,12 @@ fn apply_front(sp: &mut ServerPlayer, now: u64, forced: bool) {
                 crate::hosted_server::held_back_note(due),
             );
         }
-        (Effect::Viewed, WindowEvent::Replace { .. }) => { sp.window_events.forced_corrections.clear(); }
+        (Effect::Viewed, WindowEvent::Replace { station, .. }) => {
+            sp.window_events.forced_corrections.clear();
+            // C3d run 8 (review LOW-2) — Strict only: a Mirror client keeps its
+            // own station (run 7), so its server copy does too.
+            if strict { sp.station = station; }
+        }
         (Effect::Weapon(check), _) => sp.possession.note_wear(check),
         (Effect::Viewed, WindowEvent::ContainerView(view)) => view.apply(&mut sp.container_sent.seen),
         (Effect::Corrected(applied), WindowEvent::Correction(c)) => {
@@ -1193,7 +1267,7 @@ mod tests {
         let g = queue(&mut sp,WindowEvent::Grant(stone),0);
         let mut w = effective_window(&sp); w.inv.set_slot(0,None);
         // A death's replacement carries no debt (OC: death clears it).
-        let n = queue(&mut sp,WindowEvent::Replace { window: Box::new(w), debt: Default::default() },0);
+        let n = queue(&mut sp,WindowEvent::Replace { window: Box::new(w), debt: Default::default(), station: crate::window::Station::Player },0);
         sp.window_events.death_replace = Some(n);
         apply_overdue(&mut sp,EVENT_ACK_TIMEOUT_TICKS);
         assert_eq!(sp.window_events.death_replace,Some(n),"timeout does not acknowledge a client replacement");

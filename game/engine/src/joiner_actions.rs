@@ -582,6 +582,27 @@ pub fn where_now(inv: &crate::inventory::Inventory, slot: usize, held: &Item) ->
     (0..36).find(|&i| holds(i))
 }
 
+/// C3d run 16 (run-15 review MEDIUM-1, decided) — the ONE Strict rule for
+/// which piece a numbered `WearWeapon` wears, shared by the swing and the
+/// shot (`window_events::strict`): the named held slot `slot` when it holds
+/// one of `held`'s kind ([`same_item`]); only when it doesn't, the single
+/// piece of that kind elsewhere; `None` (ambiguous) when the named slot
+/// doesn't hold it and several others do, or none does. Every `Some` is
+/// where [`where_now`] wears (the hint first, else the only match), so both
+/// copies wear the same piece: a spare sword in the bag never makes the
+/// held one's wear ambiguous.
+pub fn strict_wear_target(inv: &crate::inventory::Inventory, slot: usize, held: &Item) -> Option<usize> {
+    let holds = |i: usize| inv.slot(i).is_some_and(|s| same_item(&s.item, held));
+    if slot < 36 && holds(slot) {
+        return Some(slot);
+    }
+    let mut found = (0..36).filter(|&i| holds(i));
+    match (found.next(), found.next()) {
+        (Some(only), None) => Some(only),
+        _ => None,
+    }
+}
+
 /// C3b-fix-c (decision 2) — THE owed-take search, one fn for every take of a
 /// joiner's window, run the same way by both copies of it (a LOCKSTEP rule:
 /// client and server must call this, or they diverge). It looks, in order:
