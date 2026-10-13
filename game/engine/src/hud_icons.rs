@@ -44,7 +44,7 @@ pub(crate) fn heart(
     outline.extend(right.into_iter().rev().skip(1).take(5));
     painter.add(Shape::closed_line(
         outline,
-        Stroke::new(1.0, Color32::from_rgb(145, 103, 96)),
+        Stroke::new(1.0_f32, Color32::from_rgb(145, 103, 96)),
     ));
 }
 
@@ -87,7 +87,7 @@ pub(crate) fn drumstick(
             point(rect, x, y),
             rect.width() * 0.10,
             bone,
-            Stroke::new(1.0, Color32::from_rgb(25, 29, 26)),
+            Stroke::new(1.0_f32, Color32::from_rgb(25, 29, 26)),
         );
     }
     painter.add(Shape::convex_polygon(body.clone(), empty, Stroke::NONE));
@@ -103,6 +103,6 @@ pub(crate) fn drumstick(
     }
     painter.add(Shape::closed_line(
         body,
-        Stroke::new(1.0, Color32::from_rgb(158, 129, 90)),
+        Stroke::new(1.0_f32, Color32::from_rgb(158, 129, 90)),
     ));
 }
