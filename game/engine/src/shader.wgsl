@@ -510,7 +510,10 @@ fn fs_transparent(in: VertexOutput) -> @location(0) vec4<f32> {
     let sun_color = vec3<f32>(1.0, 0.98, 0.9) * brightness;
     let ambient = vec3<f32>(0.12, 0.13, 0.18) + vec3<f32>(0.28, 0.29, 0.32) * brightness;
     let ndotl = max(dot(in.normal, sun_dir), 0.0);
-    let block_light = max(in.light, 0.08);
+    // Solid transparent surfaces receive the same two channels as terrain.
+    // Scale sky by daylight while keeping torch/block light independent.
+    let combined = max(in.light, in.sky_light * brightness);
+    let block_light = min(max(combined, 0.08), 1.0);
     let lit = tex_color.rgb * (ambient + sun_color * ndotl * 0.6) * block_light;
 
     let dist = distance(in.world_pos, camera.camera_pos.xyz);
