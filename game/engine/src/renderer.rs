@@ -17,19 +17,19 @@ pub struct GpuChunkMesh {
     pub index_count: u32,
 }
 
-/// #131 — the transparent-solid render pipeline (glass + future see-through
-/// blocks). Identical to the water pipeline (alpha blend, depth read-only, no
-/// back-face cull) but binds `fs_transparent`, which outputs the texture's own
-/// alpha instead of water's blue tint. Built once and called from both the
-/// native and headless renderer constructors so the two never drift.
+/// Coupled solid-transparency pipelines for native and headless worlds:
+/// opaque texels write depth without colour, then the alpha-blended colour
+/// pass uses LessEqual to paint those same texels. Holes and partial glass
+/// remain depth-read-only; water behind opaque foliage respects its depth.
 fn build_transparent_pipeline(
     device: &wgpu::Device,
     shader: &wgpu::ShaderModule,
     pipeline_layout: &wgpu::PipelineLayout,
     surface_format: wgpu::TextureFormat,
+    depth_only: bool,
 ) -> wgpu::RenderPipeline {
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("transparent_render_pipeline"),
+        label: Some(if depth_only { "solid_cutout_depth_pipeline" } else { "transparent_render_pipeline" }),
         layout: Some(pipeline_layout),
         vertex: wgpu::VertexState {
             module: shader,
@@ -39,12 +39,12 @@ fn build_transparent_pipeline(
         },
         fragment: Some(wgpu::FragmentState {
             module: shader,
-            entry_point: Some("fs_transparent"),
+            entry_point: Some(if depth_only { "fs_solid_depth" } else { "fs_transparent" }),
             compilation_options: Default::default(),
             targets: &[Some(wgpu::ColorTargetState {
                 format: surface_format,
-                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                write_mask: wgpu::ColorWrites::ALL,
+                blend: if depth_only { None } else { Some(wgpu::BlendState::ALPHA_BLENDING) },
+                write_mask: if depth_only { wgpu::ColorWrites::empty() } else { wgpu::ColorWrites::ALL },
             })],
         }),
         primitive: wgpu::PrimitiveState {
@@ -55,8 +55,8 @@ fn build_transparent_pipeline(
         },
         depth_stencil: Some(wgpu::DepthStencilState {
             format: wgpu::TextureFormat::Depth32Float,
-            depth_write_enabled: Some(false),
-            depth_compare: Some(wgpu::CompareFunction::Less),
+            depth_write_enabled: Some(depth_only),
+            depth_compare: Some(if depth_only { wgpu::CompareFunction::Less } else { wgpu::CompareFunction::LessEqual }),
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
         }),
@@ -586,6 +586,8 @@ pub struct Renderer {
     /// read-only pipeline as water but `fs_transparent` (texture's own alpha, no
     /// blue tint). Per-chunk GPU meshes, drawn in the transparent pass.
     pub transparent_pipeline: wgpu::RenderPipeline,
+    /// Opaque texels of solid transparent blocks occlude later water/solids.
+    transparent_depth_pipeline: wgpu::RenderPipeline,
     pub transparent_meshes: ahash::AHashMap<(i32, i32, i32), GpuChunkMesh>,
     // Instanced plants (flowers/grass/crops) — cross billboards
     pub plant_pipeline: wgpu::RenderPipeline,
@@ -1354,7 +1356,9 @@ impl Renderer {
 
         // #131 — transparent-solid pipeline (glass, …); mirrors water + fs_transparent.
         let transparent_pipeline =
-            build_transparent_pipeline(&device, &shader, &pipeline_layout, surface_format);
+            build_transparent_pipeline(&device, &shader, &pipeline_layout, surface_format, false);
+        let transparent_depth_pipeline =
+            build_transparent_pipeline(&device, &shader, &pipeline_layout, surface_format, true);
 
         // --- egui integration (replaces old UI pipeline, hotbar, hearts, menu rendering) ---
         let mut egui = EguiIntegration::new(&device, surface_format, &window);
@@ -1515,6 +1519,7 @@ impl Renderer {
             water_pipeline,
             water_meshes: ahash::AHashMap::new(),
             transparent_pipeline,
+            transparent_depth_pipeline,
             transparent_meshes: ahash::AHashMap::new(),
             plant_pipeline,
             plant_geo_vbuf,
@@ -3020,6 +3025,7 @@ impl Renderer {
                         &self.render_pipeline,
                         &self.water_pipeline,
                         &self.transparent_pipeline,
+                        &self.transparent_depth_pipeline,
                         &self.entity_pipeline,
                         &self.avatar_pipeline,
                         &self.wire_pipeline,
@@ -3627,7 +3633,9 @@ impl Renderer {
 
         // #131 — transparent-solid pipeline (glass, …); mirrors water + fs_transparent.
         let transparent_pipeline =
-            build_transparent_pipeline(&device, &shader, &pipeline_layout, format);
+            build_transparent_pipeline(&device, &shader, &pipeline_layout, format, false);
+        let transparent_depth_pipeline =
+            build_transparent_pipeline(&device, &shader, &pipeline_layout, format, true);
 
         // --- egui integration (headless — for consistency, though screenshots don't need interactive UI) ---
         // BRIDGE: headless egui init uses a dummy window. For screenshot mode,
@@ -3784,6 +3792,7 @@ impl Renderer {
             water_pipeline,
             water_meshes: ahash::AHashMap::new(),
             transparent_pipeline,
+            transparent_depth_pipeline,
             transparent_meshes: ahash::AHashMap::new(),
             plant_pipeline,
             plant_geo_vbuf,
@@ -3945,6 +3954,14 @@ impl Renderer {
                 render_pass.set_vertex_buffer(0, gpu_mesh.vertex_buffer.slice(..));
                 render_pass
                     .set_index_buffer(gpu_mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                render_pass.draw_indexed(0..gpu_mesh.index_count, 0, 0..1);
+            }
+            // Solid alpha texels write only depth; cutout holes and translucent
+            // glass leave it intact. Later water can then respect the foliage.
+            render_pass.set_pipeline(&self.transparent_depth_pipeline);
+            for gpu_mesh in self.transparent_meshes.values() {
+                render_pass.set_vertex_buffer(0, gpu_mesh.vertex_buffer.slice(..));
+                render_pass.set_index_buffer(gpu_mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 render_pass.draw_indexed(0..gpu_mesh.index_count, 0, 0..1);
             }
         }
@@ -4322,6 +4339,7 @@ fn render_world_viewport(
     render_pipeline: &wgpu::RenderPipeline,
     water_pipeline: &wgpu::RenderPipeline,
     transparent_pipeline: &wgpu::RenderPipeline,
+    transparent_depth_pipeline: &wgpu::RenderPipeline,
     entity_pipeline: &wgpu::RenderPipeline,
     avatar_pipeline: &wgpu::RenderPipeline,
     wire_pipeline: &wgpu::RenderPipeline,
@@ -4435,6 +4453,18 @@ fn render_world_viewport(
         pass.set_bind_group(1, texture_bind_group, &[]);
 
         for (&(cx, cy, cz), gpu_mesh) in chunk_meshes.iter() {
+            if !chunk_visible(cx, cy, cz) {
+                stats.culled += 1;
+                continue;
+            }
+            pass.set_vertex_buffer(0, gpu_mesh.vertex_buffer.slice(..));
+            pass.set_index_buffer(gpu_mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..gpu_mesh.index_count, 0, 0..1);
+            stats.draw_calls += 1;
+        }
+        // Opaque solid texels must occlude later transparent colour/water.
+        pass.set_pipeline(transparent_depth_pipeline);
+        for (&(cx, cy, cz), gpu_mesh) in transparent_meshes.iter() {
             if !chunk_visible(cx, cy, cz) {
                 stats.culled += 1;
                 continue;

@@ -485,6 +485,15 @@ fn fs_water(in: VertexOutput) -> @location(0) vec4<f32> {
     return vec4<f32>(apply_user_brightness(final_color), 0.65);
 }
 
+// Only fully opaque texels write depth. Holes and partly translucent glass
+// retain the previous terrain depth, so water behind them stays visible.
+@fragment
+fn fs_solid_depth(in: VertexOutput) -> @location(0) vec4<f32> {
+    let alpha = textureSample(block_textures, block_sampler, in.uv, i32(in.tex_layer)).a;
+    if (alpha < 0.9999) { discard; }
+    return vec4<f32>(0.0);
+}
+
 // Transparent-solid fragment (#131) — glass + other solid+transparent blocks.
 // Same lighting + fog as fs_main, but it OUTPUTS THE TEXTURE'S OWN ALPHA (so
 // glass's translucent edges read as glass) and runs in the alpha-blended,

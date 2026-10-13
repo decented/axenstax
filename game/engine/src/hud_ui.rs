@@ -1345,41 +1345,41 @@ fn draw_vital_counts(
     let vp = ViewportPts::from_physical(viewport, ctx.pixels_per_point());
     let scale = hud_scale(vp.width);
     let font = egui::FontId::proportional(13.0 * scale);
-    // Sit just above the hotbar's top edge, hugging the right margin.
-    let bottom = vp.y + vp.height;
-    let anchor = egui::pos2(vp.x + vp.width - 12.0, bottom - 16.0 - 48.0 * scale - 6.0);
-
+    // Measure both labels before positioning the Area. right_to_left layout
+    // inside a shrink-to-fit Area can paint past its measured right edge.
+    let free_colour = if free_slots == 0 {
+        egui::Color32::from_rgb(220, 70, 70)
+    } else if free_slots <= 4 {
+        egui::Color32::from_rgb(230, 180, 70)
+    } else {
+        egui::Color32::from_rgb(200, 200, 205)
+    };
+    let rows = ctx.fonts_mut(|fonts| {
+        let mut rows = Vec::new();
+        if arrows > 0 {
+            let colour = egui::Color32::from_rgb(230, 230, 235);
+            rows.push((fonts.layout_no_wrap(format!("\u{27A4} {arrows}"), font.clone(), colour), colour));
+        }
+        rows.push((fonts.layout_no_wrap(format!("\u{2756} {free_slots} free"), font, free_colour), free_colour));
+        rows
+    });
+    let gap = 2.0 * scale;
+    let width = rows.iter().map(|(row, _)| row.size().x).fold(0.0_f32, f32::max);
+    let height = rows.iter().map(|(row, _)| row.size().y).sum::<f32>() + gap * (rows.len() - 1) as f32;
+    let size = egui::vec2(width, height);
+    let origin = egui::pos2(vp.x + vp.width - 12.0 - width,
+        vp.y + vp.height - 16.0 - 48.0 * scale - 6.0 - height);
     egui::Area::new(egui::Id::new(("vital_counts", player_index)))
-        .fixed_pos(anchor)
-        .pivot(egui::Align2::RIGHT_BOTTOM)
+        .fixed_pos(origin)
         .interactable(false)
         .show(ctx, |ui| {
-            // Right-aligned stack: arrows above free-slots when present.
-            if arrows > 0 {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
-                    ui.label(
-                        egui::RichText::new(format!("\u{27A4} {arrows}"))
-                            .font(font.clone())
-                            .color(egui::Color32::from_rgb(230, 230, 235)),
-                    );
-                });
+            let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+            let mut y = rect.top();
+            for (row, colour) in rows {
+                let row_height = row.size().y;
+                ui.painter().galley(egui::pos2(rect.right() - row.size().x, y), row, colour);
+                y += row_height + gap;
             }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
-                // Warm the colour as the inventory fills, so "nearly full" reads
-                // at a glance (green → amber → red).
-                let colour = if free_slots == 0 {
-                    egui::Color32::from_rgb(220, 70, 70)
-                } else if free_slots <= 4 {
-                    egui::Color32::from_rgb(230, 180, 70)
-                } else {
-                    egui::Color32::from_rgb(200, 200, 205)
-                };
-                ui.label(
-                    egui::RichText::new(format!("\u{2756} {free_slots} free"))
-                        .font(font.clone())
-                        .color(colour),
-                );
-            });
         });
 }
 
@@ -2851,7 +2851,7 @@ mod tests {
 
     #[test]
     fn vital_count_text_fits_inside_each_viewport() {
-        for width in [390, 1280] {
+        for (width, arrows) in [(390, 0), (390, 40), (1280, 0), (1280, 40)] {
             let ctx = egui::Context::default();
             crate::egui_integration::configure_style(&ctx);
             ctx.global_style_mut(|style| style.animation_time = 0.0);
@@ -2862,14 +2862,14 @@ mod tests {
                     screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width as f32, 844.0))),
                     ..Default::default()
                 });
-                draw_vital_counts(&ctx, &viewport, 0, 30, 40);
+                draw_vital_counts(&ctx, &viewport, 0, 30, arrows);
                 bounds = ctx.end_pass().shapes.into_iter().filter_map(|clipped| {
                     if let egui::Shape::Text(text) = clipped.shape {
                         Some(text.visual_bounding_rect())
                     } else { None }
                 }).collect();
             }
-            assert_eq!(bounds.len(), 2, "both free-slot and arrow text must be painted");
+            assert_eq!(bounds.len(), if arrows > 0 { 2 } else { 1 }, "every count label must be painted");
             for rect in bounds {
                 assert!(rect.left() >= 0.0 && rect.right() <= width as f32,
                     "complete count text must fit within the {width}-point viewport: {rect:?}");
