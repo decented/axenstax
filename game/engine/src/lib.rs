@@ -3558,6 +3558,9 @@ fn run_screenshot(args: &[String]) {
     renderer.sync_micro_models(&world.micro_registry);
 
     if show_hud {
+        // Headless world captures normally need no UI icons. Register the
+        // same atlas as the live HUD only when this preview draws the HUD.
+        renderer.egui.upload_block_textures(&renderer.device, &renderer.queue, &textures, 16);
         let mut inventory = crate::inventory::Inventory::new();
         let mut pickaxe = crate::crafting::Tool::new(
             crate::crafting::ToolType::Pickaxe, crate::crafting::ToolMaterial::Iron,
