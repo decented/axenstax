@@ -37,6 +37,13 @@
 //! No egui, no GPU, no I/O.
 
 use serde::{Deserialize, Serialize};
+/// A real block container or a runtime entity; an entity's position is
+/// never manufactured into a block address.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ContainerTarget {
+    Block([i32; 3]),
+    Entity(u32),
+}
 
 use crate::armour::ArmourItem;
 use crate::block::{self, BlockId};
@@ -798,6 +805,11 @@ impl CorrectionDebt {
     /// once (exact equality), never a Plan, never 0 units.
     pub fn entries(&self) -> &[(Item, u32)] {
         &self.owed
+    }
+
+    /// Real retained allocation, including spare capacity after debt settles.
+    pub(crate) fn allocated_entries(&self) -> usize {
+        self.owed.capacity()
     }
 
     /// OC — a carried debt (a joiner save's): refused whole unless it has at

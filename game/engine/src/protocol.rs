@@ -152,6 +152,10 @@ pub enum PacketType {
     Recovery = 70,
     /// Client → Server: applied receipt metadata, independent of movement.
     AppliedActionAck = 71,
+    /// Server → Client: exact sequential pack result and canonical window.
+    PackResult = 74,
+    /// Server → Client: numbered live entity cargo view or session close.
+    PackView = 75,
 }
 
 // ─── Handshake ───────────────────────────────────────────────
@@ -1834,6 +1838,8 @@ pub mod entity_flags {
     /// cart. A second rider is refused; a joiner's click on a cart carrying
     /// one goes on to the track.
     pub const RIDDEN: u8 = 64;
+    /// v91 (D2c-2) — this steed currently carries a real cargo pack.
+    pub const PACK: u8 = 128;
 }
 
 /// Server → client: an existing entity's position/state changed.
@@ -2763,7 +2769,9 @@ pub struct ServerAnnouncePacket {
 ///   mode, random128-bit action namespace and life. Recovery Describe is
 ///   paginated; world-stream receipt/fence application is distinct from
 ///   socket reception.
-pub const PROTOCOL_VERSION: u32 = 89;
+/// - v91 (D2c-2): sequential unpredicted source-backed entity packs in
+///   both inventory modes; PackResult 74, PackView 75, explicit PACK flag.
+pub const PROTOCOL_VERSION: u32 = 91;
 
 /// The `protocol_version` of a JoinRequest payload that doesn't decode as this
 /// build's `JoinRequestPacket` (an older or newer client's shape). It is the
@@ -2839,6 +2847,8 @@ pub fn deserialize_header(data: &[u8]) -> Option<(PacketType, &[u8])> {
         69 => PacketType::ActionReceipt,
         70 => PacketType::Recovery,
         71 => PacketType::AppliedActionAck,
+        74 => PacketType::PackResult,
+        75 => PacketType::PackView,
         _ => return None,
     };
     Some((tag, &data[1..]))
@@ -2940,8 +2950,8 @@ mod tests {
 
     #[test]
     fn protocol_version_bumped() {
-        // C3d (provisional) — v89, typed actions after OC's v88 debt carrier.
-        assert_eq!(super::PROTOCOL_VERSION, 89);
+        // D2c-2 — v91, source-backed entity packs after handover's v90.
+        assert_eq!(super::PROTOCOL_VERSION, 91);
     }
 
     #[test]
@@ -3695,7 +3705,7 @@ mod tests {
         // v89 (provisional, C3d): Action (68), ActionReceipt (69),
         //   Recovery (70), AppliedActionAck (71); JoinAccept
         //   mode/namespace/life.
-        assert_eq!(PROTOCOL_VERSION, 89);
+        assert_eq!(PROTOCOL_VERSION, 91);
     }
 
     fn sample_accept() -> JoinAcceptPacket {
@@ -4404,7 +4414,7 @@ mod tests {
         // AppliedActionAck).
         assert_eq!(deserialize_header(&[68, 0]).map(|(p, _)| p), Some(PacketType::Action));
         assert_eq!(deserialize_header(&[71, 0]).map(|(p, _)| p), Some(PacketType::AppliedActionAck));
-        assert_eq!(deserialize_header(&[72, 0]), None, "nothing past 71 yet");
+        assert_eq!(deserialize_header(&[72, 0]), None, "72 remains reserved for handover before the normal merge");
     }
 
     /// C3b-1 (v77) — shared containers on the wire: `OpenContainer` (= 4)

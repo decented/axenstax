@@ -179,7 +179,10 @@ mod tests {
         let deaths = crate::combat::despawn_dead(&mut ecs);
         for death in deaths {
             super::spawn_drops_for_death(&mut ecs, &world, &mut snapshots, death, 17);
+            // Re-delivering this dead entity cannot drain its cargo again.
+            super::spawn_drops_for_death(&mut ecs, &world, &mut snapshots, death, 17);
         }
+        assert!(snapshots.packs.is_empty(), "each cargo snapshot is consumed");
         let units = |item: crate::item::Item| ecs.query::<&crate::entity::ItemEntity>().iter()
             .filter(|(_, drop)| drop.stack.item == item).map(|(_, drop)| u32::from(drop.stack.count)).sum::<u32>();
         assert_eq!(units(crate::item::Item::Material(MaterialId::Bread)), 3, "each steed's own bread, never the first colocated pack twice");

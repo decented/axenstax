@@ -131,6 +131,7 @@ mod window_events;
 // joiner's mirror and the server; and a joined client's glue for them.
 mod container_window;
 mod container_client;
+mod pack_wire;
 mod recipe_book_ui;
 mod egui_integration;
 mod menu;

@@ -89,6 +89,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn d2c2_independent_legacy_steed_bytes_restore_local_keeper_and_full_plan() {
+        // These positional fixtures encode the old carrier without using
+        // current HorseData or SavedTamedPetData serialisation. Idle was 0,
+        // Steed was 4 and Steed2 was 6; the old HorseData had four fields.
+        let old_horse = (0u32, 17u64, Some((1.0f32, 2.0f32, 3.0f32)), Some(1u8));
+        let plan = crate::plan::PlanData::debug_3x3_stone();
+        let original_body = bincode::serialize(&plan).unwrap();
+        let mut pack = ChestData::new();
+        pack.slots[8] = Some(crate::item::ItemStack { item: crate::item::Item::Plan(plan), count: 1 });
+        let old_steed = bincode::serialize(&(4.0f32, 80.0f32, 3.0f32, 4u32, crate::mob::MobType::Donkey, old_horse)).unwrap();
+        let old_packed = bincode::serialize(&(4.0f32, 80.0f32, 3.0f32, 6u32, crate::mob::MobType::Donkey, old_horse, Some(pack))).unwrap();
+        for (bytes, packed) in [(old_steed, false), (old_packed, true)] {
+            let saved: SavedTamedPet = bincode::deserialize(&bytes).unwrap();
+            assert_eq!(bincode::serialize(&saved).unwrap(), bytes, "old carrier bytes stay frozen");
+            for local in [false, true] {
+                let mut ecs = hecs::World::new();
+                restore_pets(&mut ecs, std::slice::from_ref(&saved), local).unwrap();
+                let mut query = ecs.query::<&HorseData>();
+                let (id, data) = query.iter().next().unwrap();
+                assert_eq!(data.keeper_identity(), Some(crate::horse_ai::SteedKeeper::LegacyLocal(1)));
+                assert_eq!(data.last_retarget_tick, 17);
+                assert_eq!(data.wander_target, Some((1.0, 2.0, 3.0)));
+                assert!(crate::tameable::is_own_pet(&ecs, id, &crate::tameable::local_owner_key(1), Some(1)));
+                assert!(!crate::tameable::is_own_pet(&ecs, id, &crate::tameable::local_owner_key(1), None), "a hosted numeric slot cannot claim a legacy keeper");
+                assert_eq!(data.pack.is_some(), packed);
+                if let Some(pack) = &data.pack {
+                    let crate::item::Item::Plan(body) = &pack.slots[8].as_ref().unwrap().item else { panic!("legacy Plan") };
+                    assert_eq!(bincode::serialize(body).unwrap(), original_body, "the old full body is readable in either restore mode");
+                    assert_eq!(pack.slots[8].as_ref().unwrap().count, 1);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn d2c2_boxed_saved_pack_preserves_unboxed_serde_bytes() {
         let mut pack = ChestData::new();
         pack.slots[4] = Some(crate::item::ItemStack::new_material(crate::item::MaterialId::Bread, 7));

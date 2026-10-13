@@ -43,6 +43,8 @@
 //! the count the input reports (`GameState::apply_window_inbox`).
 
 mod strict;
+mod pack;
+pub use pack::{admit_pack_staged, pack_canonical_window, pack_raw_marker, prepare_pack_events, PackStageError, PackWindowStage};
 pub use strict::{admit_staged, stage_strict_click, stage_strict_edit, stage_strict_effects, stage_strict_refused_autofill, strict_effective_marker, strict_leaves_no_unpaid_obligation, strict_raw_marker, prepare_strict_events, reserve_strict_replace, StrictStageError};
 #[cfg(test)]
 pub use strict::strict_replace_fits;
@@ -92,6 +94,9 @@ pub enum WindowEvent {
     /// `sp.station` to it (a stale config op served before it is overwritten
     /// on both copies, as the client adopts the packet's).
     Replace { window: Box<EffectiveWindow>, debt: crate::container_window::CorrectionDebt, station: crate::window::Station },
+    /// A sequential unpredicted pack result. Unlike a lifecycle Replace,
+    /// this leaves unrelated correction history and configuration intact.
+    PackCanonical { window: Box<EffectiveWindow>, debt: crate::container_window::CorrectionDebt },
     /// An accepted request's owed take (`joiner_actions::take_owed_window`):
     /// `n` of `item`, from `slot` first. `how` ends the shortfall's log line.
     Take { slot: usize, item: Item, n: u8, how: &'static str },
@@ -305,6 +310,7 @@ struct Parts<'a> {
 }
 
 /// What applying one event did, for the tallies.
+#[derive(PartialEq)]
 enum Effect {
     /// A correction: what the server's own delta did (`None`: a refused
     /// op's, which changes nothing here).
@@ -325,7 +331,8 @@ enum Effect {
 /// client's own rule.
 fn apply_to(parts: &mut Parts, debt: &mut crate::container_window::CorrectionDebt, event: &WindowEvent) -> Effect {
     match event {
-        WindowEvent::Replace { window: w, debt: carried, .. } => {
+        WindowEvent::Replace { window: w, debt: carried, .. }
+        | WindowEvent::PackCanonical { window: w, debt: carried } => {
             for i in 0..36 { parts.inv.set_slot(i, w.inv.slot(i).cloned()); }
             // C3d run 6 — the lock mask travels with the replacement (the
             // client installs the same); auto-refill stays the copy's own.
@@ -467,7 +474,7 @@ fn apply_front(sp: &mut ServerPlayer, now: u64, forced: bool) {
     // across a `Replace`, as its client does (run 7) and as `bdd4fe87` did; a
     // lock toggled before the join sync applied is never wiped.
     let strict = sp.server_simulated && sp.inventory_mode == crate::action_identity::InventoryMode::Strict;
-    let mirror_locks = (!strict && matches!(w.event, WindowEvent::Replace { .. })).then(|| sp.inventory.locked_indices());
+    let mirror_locks = (!strict && matches!(w.event, WindowEvent::Replace { .. } | WindowEvent::PackCanonical { .. })).then(|| sp.inventory.locked_indices());
     let mut parts =
         Parts { inv: &mut sp.inventory, armour: &mut sp.armour, cursor: &mut sp.cursor, grid: &mut sp.craft_grid };
     let effect = apply_to(&mut parts, &mut sp.window_events.debt, &w.event);
