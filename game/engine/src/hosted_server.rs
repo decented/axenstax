@@ -4156,7 +4156,7 @@ impl HostedServer {
             let mut budget = EditTickBudget::default();
             // FU3 — the edits that waited past last tick's budget go first.
             self.process_waiting_edits(i, &mut budget);
-            self.process_typed_actions(i, &mut window_ops_this_tick, &mut item_actions_this_tick, &mut budget);
+            self.process_typed_actions(i, &mut window_ops_this_tick, &mut item_actions_this_tick, &mut interacts_this_tick, &mut budget);
             if self.disconnected[i] { continue; }
             // C2b verify M4 — whether this client is replaying a backlog
             // (more than one ordinary tick's reading waiting after the fill):
@@ -4270,7 +4270,7 @@ impl HostedServer {
                     protocol::PacketType::Action => {
                         if !self.handshake_done[i] || self.disconnected[i] { continue; }
                         self.receive_typed_action(i, payload);
-                        self.process_typed_actions(i, &mut window_ops_this_tick, &mut item_actions_this_tick, &mut budget);
+                        self.process_typed_actions(i, &mut window_ops_this_tick, &mut item_actions_this_tick, &mut interacts_this_tick, &mut budget);
                     }
                     protocol::PacketType::AppliedActionAck => {
                         if self.handshake_done[i] && !self.disconnected[i] { self.receive_applied_action_ack(i, payload); }

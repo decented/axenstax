@@ -66,7 +66,8 @@ impl HostedServer {
             Err(_) => self.strict_bridge_teardown(i, StrictTeardown::Unreadable, "Conflicting, foreign or exhausted action history"),
         }
     }
-    pub(super) fn process_typed_actions(&mut self, i: usize, windows: &mut usize, items: &mut usize, budget: &mut EditTickBudget) {
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn process_typed_actions(&mut self, i: usize, windows: &mut usize, items: &mut usize, devices: &mut usize, budget: &mut EditTickBudget) {
         loop {
             if self.disconnected[i] { return; }
             let Some(sp) = self.server.players.get(i) else { return };
@@ -96,6 +97,12 @@ impl HostedServer {
             if matches!(packet.intent, ActionIntent::Edit { .. } | ActionIntent::DoorPlace { .. }) {
                 if budget.edits + credits > MAX_BLOCK_CHANGES_PER_TICK { return; }
                 budget.edits += credits;
+            } else if matches!(packet.intent, ActionIntent::Device { .. }) {
+                // C3d run 25 (run-24 review LOW-3) — a device right-click
+                // has Mirror's own per-tick limit (`DeviceInteract`'s
+                // counter, shared with it), not the item counter.
+                if *devices >= MAX_DEVICE_INTERACTS_PER_TICK { return; }
+                *devices += 1;
             } else {
                 if (is_window && *windows >= MAX_WINDOW_OPS_PER_TICK) || (!is_window && *items >= MAX_ITEM_ACTIONS_PER_TICK) { return; }
                 if is_window { *windows += 1; } else { *items += 1; }

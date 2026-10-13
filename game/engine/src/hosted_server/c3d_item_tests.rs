@@ -268,8 +268,12 @@ fn c3d_client_strict_seat_sending_a_legacy_packet_is_refused() {
     let (bk, bi) = crate::inventory::item_to_ref(&Item::Material(MaterialId::Bread)).to_wire();
     for (n, what) in ["device", "eat", "drop", "interact"].into_iter().enumerate() {
         let mut j = rig(&format!("item-legacy-{n}"), &[(0, mat(MaterialId::Bread, 4))]);
+        // C3d run 25 (run-24 review LOW-5) — something to change: a lever in
+        // reach, a hungry body, bread in the copy.
+        let (cell, _) = lever(&mut j, 2);
+        j.hs.server.players[j.i].combat.hunger = 2;
         match what {
-            "device" => j.rc.send_device_interact((40, 81, 40)),
+            "device" => j.rc.send_device_interact((cell[0], cell[1], cell[2])),
             "eat" => j.rc.send_item_action(&protocol::ItemActionPacket { seq: 1, action: protocol::ItemAction::Eat { hotbar_slot: 0, held_kind: bk, held_id: bi, held_full: bread_full }, events_applied: 0 }),
             "drop" => j.rc.send_item_action(&protocol::ItemActionPacket { seq: 1, action: protocol::ItemAction::Drop { hotbar_slot: 0, held_kind: bk, held_id: bi, held_full: bread_full }, events_applied: 0 }),
             _ => j.rc.send_entity_interact(&protocol::EntityInteractPacket { seq: 1, entity: 1, kind: protocol::InteractKind::Feed, held_kind: bk, held_id: bi, held_full: bread_full, hotbar_slot: 0, sneak: false, events_applied: 0 }),
@@ -277,5 +281,105 @@ fn c3d_client_strict_seat_sending_a_legacy_packet_is_refused() {
         for _ in 0..3 { j.hs.tick(); j.rc.poll(); }
         assert!(j.hs.slot_is_free(j.i), "{what}: a legacy packet refuses the Strict seat");
         assert!(matches!(&j.rc.state, ConnectionState::Failed(reason) if reason.contains(crate::strict_admission::StrictTeardown::Untyped.reason())), "{what}: with the Untyped reason: {}", match &j.rc.state { ConnectionState::Failed(r) => r.clone(), _ => "not failed".into() });
+        // Refused before any effect: the world, the window, the body.
+        assert!(!lever_on(&j, cell), "{what}: the lever never flipped");
+        let bread: u32 = j.hs.server.players[j.i].inventory.slots_iter().flatten().filter(|s| s.item == Item::Material(MaterialId::Bread)).map(|s| u32::from(s.count)).sum();
+        assert_eq!(bread, 4, "{what}: the copy's bread untouched");
+        assert_eq!(j.hs.server.players[j.i].combat.hunger, 2, "{what}: nothing eaten");
+        let thrown = j.hs.server.ecs.query::<&crate::entity::ItemEntity>().iter().count();
+        assert_eq!(thrown, 0, "{what}: nothing thrown");
     }
+}
+
+// ── C3d run 25: run-24 review LOW-1..4 ─────────────────────────────────
+
+/// LOW-1 — a toggle-class device whose interaction comes back `None` (a kind
+/// added without its arm) refuses the right-click as a world fact; the host
+/// never panics on a joiner's packet, and the seat lives.
+#[test]
+fn c3d_client_strict_device_without_an_interaction_is_refused_not_a_panic() {
+    let mut j = rig("item-device-none", &[]);
+    let (cell, _) = lever(&mut j, 2);
+    super::strict_item::device_fault::arm();
+    let action = device(&mut j, cell, 0);
+    j.pump();
+    assert_eq!(fate(&j, action), Some(ActionFate::Refused), "refused, not a panic");
+    assert!(!lever_on(&j, cell), "nothing flipped");
+    assert_eq!(tally(&j), (0, 0, 1), "a world fact");
+    j.assert_honest("a device with no interaction");
+}
+
+/// LOW-2 — room for 63 of a 64-stone give: 63 are granted (Mirror lands
+/// what fits), the rest is not.
+#[test]
+fn c3d_client_strict_creative_give_grants_what_fits() {
+    let stone = crate::block::STONE;
+    let mut full: Vec<(usize, ItemStack)> = (1..36).map(|s| (s, ItemStack::new_block(crate::block::DIRT, 64))).collect();
+    full.push((0, ItemStack::new_block(stone, 1)));
+    let mut j = rig("item-give-part", &full);
+    j.hs.server.play_mode = crate::play_mode::PlayMode::Creative;
+    let action = give(&mut j, &ItemStack::new_block(stone, 64));
+    j.pump();
+    assert_eq!(fate(&j, action), Some(ActionFate::Accepted), "served");
+    j.assert_honest("a give that partly fits");
+    assert_eq!(j.held(&Item::Block(stone)), 64, "63 granted beside the one held");
+    assert_eq!(tally(&j), (0, 0, 0));
+}
+
+/// LOW-3 — four device right-clicks in one tick: Mirror's per-tick device
+/// limit serves two this tick, two the next.
+#[test]
+fn c3d_client_strict_device_clicks_have_mirrors_per_tick_limit() {
+    let mut j = rig("item-device-limit", &[]);
+    let (cell, _) = lever(&mut j, 2);
+    let actions: Vec<_> = (0..4).map(|_| device(&mut j, cell, 0)).collect();
+    j.hs.tick();
+    let served = actions.iter().filter(|a| fate(&j, **a).is_some()).count();
+    assert_eq!(served, super::MAX_DEVICE_INTERACTS_PER_TICK, "two this tick");
+    j.rc.poll();
+    j.pump();
+    j.assert_honest("four device clicks");
+}
+
+/// LOW-4 — eating the last unit clears the slot on both copies; an eat
+/// inside the server's eating cooldown is `TooSoon`, a world fact.
+#[test]
+fn c3d_client_strict_eat_the_last_unit_then_too_soon() {
+    let bread = Item::Material(MaterialId::Bread);
+    // A different food in slot 1: auto-refill (on in this rig) would move
+    // more bread into slot 0.
+    let mut j = rig("item-eat-last", &[(0, mat(MaterialId::Bread, 1)), (1, mat(MaterialId::Carrot, 2))]);
+    j.hs.server.players[j.i].combat.hunger = 2;
+    let first = eat(&mut j, 0);
+    j.pump();
+    assert_eq!(fate(&j, first), Some(ActionFate::Accepted));
+    // The server's raw copy applies the numbered Take at the next action's
+    // boundary; its effective window (raw + pending) already holds none.
+    let effective = crate::window_events::effective_inventory(j.sp());
+    assert_eq!((j.inv.slot(0).cloned(), effective.slot(0).cloned()), (None, None), "the last unit's slot cleared on both copies");
+    let before = j.sp().window_events.last_number();
+    let second = eat(&mut j, 1);
+    assert_eq!(heard_notes(&mut j), vec![(false, ItemNote::TooSoon.to_wire())], "inside the cooldown");
+    j.pump();
+    assert_eq!(fate(&j, second), Some(ActionFate::Refused));
+    assert_eq!(j.sp().window_events.last_number(), before, "no correction");
+    assert_eq!(j.held(&Item::Material(MaterialId::Carrot)), 2);
+    assert_eq!(j.held(&bread), 0);
+    assert_eq!(tally(&j), (0, 0, 1));
+    j.assert_honest("eat the last, then too soon");
+}
+
+/// LOW-4 — a device right-click in a mode that can't edit the world
+/// (Adventure) is a world fact, uncorrected.
+#[test]
+fn c3d_client_strict_device_in_adventure_is_a_world_fact() {
+    let mut j = rig("item-device-adv", &[]);
+    let (cell, _) = lever(&mut j, 2);
+    j.hs.server.play_mode = crate::play_mode::PlayMode::Adventure;
+    let action = device(&mut j, cell, 0);
+    j.pump();
+    assert_eq!(fate(&j, action), Some(ActionFate::Refused));
+    assert!(!lever_on(&j, cell));
+    assert_eq!(tally(&j), (0, 0, 1));
+    j.assert_honest("a device in Adventure");
 }

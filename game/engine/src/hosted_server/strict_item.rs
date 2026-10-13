@@ -96,14 +96,19 @@ impl HostedServer {
         };
         let plan = matches!(stack.item, crate::item::Item::Plan(_));
         if plan && stack.count != 1 { self.refuse_typed_action(i, action); return false; }
-        // No room in the bag (Mirror's check on the effective inventory): both
-        // copies agree it is full and nothing was predicted — the client
+        // No room in the bag at all (checked on the effective inventory):
+        // both copies agree it is full and nothing was predicted — the client
         // toasts the note. Never corrected, so a held give on a full bag
         // never draws on the correction bound.
+        // C3d run 25 (run-24 review LOW-2, decided) — room for part of it:
+        // what fits is granted, as Mirror's `grant_to_joiner` lands what
+        // fits; the rest is not granted (a give is free, nothing is lost).
         let mut room = crate::window_events::effective_inventory(&self.server.players[i]);
-        if room.add_item(stack.clone()).is_some() {
+        let left = room.add_item(stack.clone()).map_or(0, |rest| rest.count);
+        if left >= stack.count {
             return self.refuse_item_world_fact(i, action, req, ItemNote::InventoryFull);
         }
+        let stack = crate::item::ItemStack { count: stack.count - left, ..stack };
         let events: Box<[WindowEvent]> = Box::new([WindowEvent::Grant(stack.clone())]);
         if let Some(stop) = self.stage_strict_item_events(i, action, &events, "creative give") { return stop; }
         let Some(included) = self.server.players[i].window_events.last_number().checked_add(1) else {
@@ -167,10 +172,21 @@ impl HostedServer {
             self.pause_typed_action(i, StrictTeardown::FellBehind, "Device result history is full"); return false;
         };
         let now = self.server.tick_counter;
-        let Some(outcome) = crate::power::interact_device(&mut self.server.world, pos, now) else {
-            // Checked toggle-class above, and `interact_device` has an arm
-            // for every one (`electricity_sources` pins it).
-            unreachable!("a toggle-class device always has an interaction")
+        #[cfg(test)]
+        let forced_none = device_fault::take();
+        #[cfg(not(test))]
+        let forced_none = false;
+        let interaction = if forced_none { None } else { crate::power::interact_device(&mut self.server.world, pos, now) };
+        let Some(outcome) = interaction else {
+            // C3d run 25 (run-24 review LOW-1) — a joiner's packet never
+            // crashes the host: a toggle-class device with no interaction
+            // (a kind added without its arm; `power.rs` returns `None` for
+            // exactly this) is refused like any world fact — the reserved
+            // row dropped, its capacity reused by the refusal's own row,
+            // nothing changed.
+            drop(result);
+            log::warn!("Strict device right-click at {cell:?}: the device has no interaction; refused");
+            return self.refuse_world_fact(i, action, &intent);
         };
         if self.lends_host_world() {
             self.lent_edit_cells.extend(outcome.changes.iter().map(|bc| (bc.x, bc.y, bc.z)));
@@ -241,4 +257,15 @@ impl HostedServer {
             Err(_) => { self.pause_typed_action(i, StrictTeardown::FellBehind, &format!("{path}: payment or pending fit is uncertain")); Some(false) }
         }
     }
+}
+
+/// C3d run 25 (run-24 review LOW-1) — a test-only fault: the next Strict
+/// device right-click's interaction comes back `None`, as a toggle-class
+/// kind added without its `interact_device` arm would.
+#[cfg(test)]
+pub(super) mod device_fault {
+    use std::cell::Cell;
+    thread_local! { static NONE_NEXT: Cell<bool> = const { Cell::new(false) }; }
+    pub fn arm() { NONE_NEXT.with(|c| c.set(true)); }
+    pub(super) fn take() -> bool { NONE_NEXT.with(|c| c.replace(false)) }
 }
