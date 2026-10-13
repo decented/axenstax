@@ -74,6 +74,9 @@ impl ActionResults {
             Some(r.receipt)
         }).collect()
     }
+    /// Every terminal result must be applied before a handover capture.
+    pub fn is_quiescent(&self) -> bool { self.rows.is_empty() && self.acked == self.terminal }
+
     pub fn acknowledge(&mut self, ack: AppliedActionAck, authoritative_events: u32) -> Result<(), ResultError> {
         if ack.session != self.owner.session || ack.epoch != self.owner.epoch || ack.life != self.owner.life { return Err(ResultError::Namespace); }
         if ack.through == 0 || ack.through > self.terminal || ack.included_events > authoritative_events { return Err(ResultError::InvalidAck); }

@@ -5,7 +5,7 @@
 //! window (`window_events::effective_window_and_debt`), and an
 //! [`ObligationHistory`] saying whether that debt is the whole story. A v1
 //! save (which held no debt) still loads, with empty debt and
-//! `Incomplete(LegacyV1)`; the writer always writes v2. The record is read by
+//! `Incomplete(LegacyV1)`; the writer always writes v3. The record is read by
 //! dispatching on its leading version byte, never by trying one layout and
 //! falling back. Spec: `docs/architecture/2026-10-09-sidecar-obligation-carrier.md`.
 use crate::{
@@ -15,9 +15,13 @@ use crate::{
     window_events::EffectiveWindow,
 };
 use serde::{Deserialize, Serialize};
+use crate::personal_value::PersonalContext;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::personal_value::LocalPersonalSave;
 
 /// The layout the writer writes (OC).
-const VERSION: u8 = 2;
+const VERSION: u8 = 3;
+const VERSION_V2: u8 = 2;
 /// The Sidecar layout (protocol v87), still read ([`JoinerSaveV1`]).
 const VERSION_V1: u8 = 1;
 /// The largest joiner save read (the bounds keep every write well under it).
@@ -85,7 +89,7 @@ impl SessionObligations {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 enum Slot {
     Saved(SavedSlot),
     Plan { marker: [u8; 32], developed: bool },
@@ -128,7 +132,7 @@ impl Slot {
 /// encoding ([`SavedSlot`], exact for every non-Plan item, durability
 /// included), always as ONE unit, and the units owed beside it (never in the
 /// slot's u8 count, which a restore clamps to the stack size).
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct OwedEntry {
     item: SavedSlot,
     units: u32,
@@ -137,8 +141,17 @@ struct OwedEntry {
 impl OwedEntry {
     fn capture(item: &Item, units: u32) -> Self {
         let mut inv = crate::inventory::Inventory::new();
-        inv.set_slot(0, Some(ItemStack { item: item.clone(), count: 1 }));
-        OwedEntry { item: crate::save::serialize_inventory_raw(&inv).remove(0), units }
+        inv.set_slot(
+            0,
+            Some(ItemStack {
+                item: item.clone(),
+                count: 1,
+            }),
+        );
+        OwedEntry {
+            item: crate::save::serialize_inventory_raw(&inv).remove(0),
+            units,
+        }
     }
 
     /// The entry back, or why the whole save is invalid: an empty slot, a
@@ -164,9 +177,8 @@ impl OwedEntry {
 /// v1 (Sidecar, protocol v87) — the retained reader of the v1 layout,
 /// field for field what v87 wrote, with its own version check. Never
 /// written (tests make golden v1 bytes from it).
-#[derive(Deserialize)]
-#[cfg_attr(test, derive(Serialize))]
-struct JoinerSaveV1 {
+#[derive(Serialize, Deserialize)]
+pub(crate) struct JoinerSaveV1 {
     version: u8,
     slots: Vec<Slot>,
     armour: [Option<crate::save::SavedArmourPiece>; 4],
@@ -179,6 +191,85 @@ struct JoinerSaveV1 {
 
 /// A joiner save as v2 lays it out (and as a v1 save loads, upgraded): the
 /// v1 fields in v1's order, then `owed` and `obligation_history`.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn capture_local(
+    slot: &crate::player_slot::PlayerSlot,
+) -> Result<Option<LocalPersonalSave>, String> {
+    let Some(binding) = &slot.personal_binding else {
+        return Ok(None);
+    };
+    let seed = crate::handover::live::capture::local0_sidecar(slot, [0; 16])
+        .map_err(|r| r.0.to_string())?;
+    let bytes = crate::handover::live::capture::local0_progress(slot, binding.context)
+        .map_err(|r| r.0.to_string())?;
+    let record = crate::handover::personal::PersonalRecord::decode(&bytes, &binding.context)
+        .map_err(|e| e.to_string())?;
+    let mut save = JoinerSave::decode(&seed)?;
+    save.personal = Some(BoundPersonal::new(binding.clone(), &record)?);
+    Ok(Some(LocalPersonalSave(save.encode()?)))
+}
+
+/// The imported authority to which a mutable personal record belongs.
+/// This binding is added after activation, never embedded in an immutable
+/// checkpoint member whose digest contributes to the manifest itself.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct PersonalBinding {
+    pub context: PersonalContext,
+    pub manifest: [u8; 32],
+    pub core: [u8; 32],
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct BoundPersonal {
+    pub binding: PersonalBinding,
+    pub bytes: Vec<u8>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl BoundPersonal {
+    pub fn new(
+        binding: PersonalBinding,
+        record: &crate::handover::personal::PersonalRecord,
+    ) -> Result<Self, String> {
+        if record.context != binding.context
+            || binding.manifest == [0; 32]
+            || binding.core == [0; 32]
+        {
+            return Err("invalid personal authority binding".into());
+        }
+        let value = Self {
+            binding,
+            bytes: record.encode().map_err(|e| format!("{e:?}"))?,
+        };
+        value.record()?;
+        Ok(value)
+    }
+    pub fn record(&self) -> Result<crate::handover::personal::PersonalRecord, String> {
+        if self.binding.manifest == [0; 32] || self.binding.core == [0; 32] {
+            return Err("invalid personal authority binding".into());
+        }
+        crate::handover::personal::PersonalRecord::decode(&self.bytes, &self.binding.context)
+            .map_err(|e| format!("invalid personal record: {e:?}"))
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct JoinerSaveV2 {
+    version: u8,
+    slots: Vec<Slot>,
+    armour: [Option<crate::save::SavedArmourPiece>; 4],
+    pub health: f32,
+    pub hunger: u8,
+    pub spawn: [f32; 3],
+    run_id: [u8; 16],
+    slept_night: Option<u32>,
+    /// v2 — the effective correction debt, in live order, at most
+    /// [`MAX_CARRIED_DEBT`] entries.
+    owed: Vec<OwedEntry>,
+    /// v2 — whether `owed` is the whole story.
+    obligation_history: ObligationHistory,
+}
+
 #[derive(Serialize, Deserialize)]
 pub(crate) struct JoinerSave {
     version: u8,
@@ -194,6 +285,8 @@ pub(crate) struct JoinerSave {
     owed: Vec<OwedEntry>,
     /// v2 — whether `owed` is the whole story.
     obligation_history: ObligationHistory,
+    /// One atomic record owns the mutable window and personal maps.
+    pub(crate) personal: Option<BoundPersonal>,
 }
 
 impl JoinerSave {
@@ -212,7 +305,13 @@ impl JoinerSave {
         let slots = (0..36)
             .map(|i| Slot::capture(window.inv.slot(i)))
             .chain(std::iter::once(Slot::capture(window.cursor.as_ref())))
-            .chain(window.grid.iter().flatten().map(|s| Slot::capture(s.as_ref())))
+            .chain(
+                window
+                    .grid
+                    .iter()
+                    .flatten()
+                    .map(|s| Slot::capture(s.as_ref())),
+            )
             .collect();
         Self {
             version: VERSION,
@@ -225,6 +324,7 @@ impl JoinerSave {
             slept_night,
             owed: Vec::new(),
             obligation_history: ObligationHistory::Complete,
+            personal: None,
         }
     }
 
@@ -251,12 +351,22 @@ impl JoinerSave {
             log::warn!(
                 "Joiner save for {}: {dropped} correction-debt entries past the {MAX_CARRIED_DEBT} a save \
                  carries left out{}; its obligations are saved incomplete",
-                crate::hosted_server::verified_npub(sp.verified_pubkey).unwrap_or_else(|| sp.display_name.clone()),
-                if fold.saturated { " (and owed units saturated)" } else { "" },
+                crate::hosted_server::verified_npub(sp.verified_pubkey)
+                    .unwrap_or_else(|| sp.display_name.clone()),
+                if fold.saturated {
+                    " (and owed units saturated)"
+                } else {
+                    ""
+                },
             );
         }
-        save.owed = carried.entries().iter().map(|(item, n)| OwedEntry::capture(item, *n)).collect();
+        save.owed = carried
+            .entries()
+            .iter()
+            .map(|(item, n)| OwedEntry::capture(item, *n))
+            .collect();
         save.obligation_history = history.get();
+        save.personal = sp.personal.clone();
         save
     }
 
@@ -276,6 +386,9 @@ impl JoinerSave {
     /// the owed list. Any failure invalidates the whole save.
     pub fn decode(bytes: &[u8]) -> Result<Self, String> {
         use bincode::Options;
+        if bytes.len() as u64 > MAX_JOINER_SAVE_BYTES {
+            return Err("joiner save exceeds 64 KiB".into());
+        }
         let options = || {
             bincode::DefaultOptions::new()
                 .with_fixint_encoding()
@@ -283,7 +396,13 @@ impl JoinerSave {
                 .reject_trailing_bytes()
         };
         let saved = match bytes.first() {
-            Some(&VERSION) => options().deserialize::<JoinerSave>(bytes).map_err(|e| e.to_string())?,
+            Some(&VERSION) => options()
+                .deserialize::<JoinerSave>(bytes)
+                .map_err(|e| e.to_string())?,
+            Some(&VERSION_V2) => {
+                let v2: JoinerSaveV2 = options().deserialize(bytes).map_err(|e| e.to_string())?;
+                Self::from_v2(v2)
+            }
             Some(&VERSION_V1) => {
                 let v1: JoinerSaveV1 = options().deserialize(bytes).map_err(|e| e.to_string())?;
                 Self::from_v1(v1)?
@@ -293,10 +412,18 @@ impl JoinerSave {
         };
         saved.window()?;
         saved.debt()?;
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(personal) = &saved.personal {
+            personal.record()?;
+        }
+        #[cfg(target_arch = "wasm32")]
+        if saved.personal.is_some() {
+            return Err("native handover personal record".into());
+        }
         Ok(saved)
     }
 
-    fn from_v1(v1: JoinerSaveV1) -> Result<Self, String> {
+    pub(crate) fn from_v1(v1: JoinerSaveV1) -> Result<Self, String> {
         if v1.version != VERSION_V1 {
             return Err("invalid v1 joiner save".into());
         }
@@ -311,7 +438,47 @@ impl JoinerSave {
             slept_night: v1.slept_night,
             owed: Vec::new(),
             obligation_history: ObligationHistory::Incomplete(IncompleteCause::LegacyV1),
+            personal: None,
         })
+    }
+
+    pub(crate) fn from_v2(v2: JoinerSaveV2) -> Self {
+        Self {
+            version: VERSION,
+            slots: v2.slots,
+            armour: v2.armour,
+            health: v2.health,
+            hunger: v2.hunger,
+            spawn: v2.spawn,
+            run_id: v2.run_id,
+            slept_night: v2.slept_night,
+            owed: v2.owed,
+            obligation_history: v2.obligation_history,
+            personal: None,
+        }
+    }
+
+    /// Frozen checkpoints retain the known v2 window seed. Personal maps
+    /// travel in their freshly rebound schema1 member; old mutable import
+    /// bindings must never be hashed into the next transfer.
+    pub fn encode_seed(&self) -> Result<Vec<u8>, String> {
+        self.window()?;
+        self.debt()?;
+        let v2 = JoinerSaveV2 {
+            version: VERSION_V2,
+            slots: self.slots.clone(),
+            armour: self.armour,
+            health: self.health,
+            hunger: self.hunger,
+            spawn: self.spawn,
+            run_id: self.run_id,
+            slept_night: self.slept_night,
+            owed: self.owed.clone(),
+            obligation_history: self.obligation_history,
+        };
+        let bytes = bincode::serialize(&v2).map_err(|e| e.to_string())?;
+        Self::decode(&bytes)?;
+        Ok(bytes)
     }
 
     pub fn window(&self) -> Result<EffectiveWindow, String> {
@@ -352,7 +519,11 @@ impl JoinerSave {
     /// (`CorrectionDebt::from_entries`: at most [`MAX_CARRIED_DEBT`]
     /// entries, at least one unit each, no Plan, no two equal items).
     pub fn debt(&self) -> Result<CorrectionDebt, String> {
-        let entries = self.owed.iter().map(OwedEntry::restore).collect::<Result<Vec<_>, _>>()?;
+        let entries = self
+            .owed
+            .iter()
+            .map(OwedEntry::restore)
+            .collect::<Result<Vec<_>, _>>()?;
         CorrectionDebt::from_entries(entries)
     }
 
@@ -393,7 +564,9 @@ impl crate::server::ServerPlayer {
     #[allow(dead_code)] // consumed by C3d (Strict admission) and the handover (eligibility)
     pub fn obligations_proven_zero(&self) -> bool {
         self.obligations.get() == ObligationHistory::Complete
-            && crate::window_events::effective_window_and_debt(self).debt.is_empty()
+            && crate::window_events::effective_window_and_debt(self)
+                .debt
+                .is_empty()
     }
 }
 
@@ -407,6 +580,27 @@ impl crate::server::GameServer {
     pub(crate) fn load_joiner(&mut self, i: usize) -> Option<JoinerSave> {
         let pk = self.players.get(i)?.verified_pubkey?;
         let path = self.joiner_path(pk);
+        match crate::handover::live::personal_adapter::proof(&crate::save::world_dir(&self.world_name)) {
+            Ok(Some(proof)) if proof.has_participant(pk) => {
+                match crate::handover::live::personal_adapter::load_or_bootstrap(&crate::save::world_dir(&self.world_name), pk, &proof) {
+                    Ok(saved) => return saved,
+                    Err(error) => {
+                        log::warn!("Personal restore for {} refused: {error}", crate::hosted_server::pubkey_to_npub(&pk));
+                        self.failed_joiner_reads.insert(pk);
+                        self.players[i].personal_read_failed = true;
+                        self.players[i].obligations.mark(IncompleteCause::Unreadable);
+                        return None;
+                    }
+                }
+            }
+            Err(error) => {
+                log::warn!("Personal authority refused: {error}");
+                self.failed_joiner_reads.insert(pk);
+                self.players[i].personal_read_failed = true;
+                return None;
+            }
+            _ => ()
+        }
         let read = std::fs::File::open(&path);
         let saved = if matches!(&read, Err(e) if e.kind() == std::io::ErrorKind::NotFound) {
             None
@@ -416,7 +610,13 @@ impl crate::server::GameServer {
                 .and_then(|file| crate::save::read_bounded(file, MAX_JOINER_SAVE_BYTES))
                 .and_then(|bytes| JoinerSave::decode(&bytes));
             match result {
-                Ok(saved) => Some(saved),
+                Ok(saved) if saved.personal.is_none() => Some(saved),
+                Ok(_) => {
+                    log::warn!("Bound personal record has no matching imported authority");
+                    self.failed_joiner_reads.insert(pk);
+                    self.players[i].personal_read_failed = true;
+                    None
+                },
                 Err(e) => {
                     log::warn!("Joiner save {} was not loaded: {e}", path.display());
                     self.failed_joiner_reads.insert(pk);
@@ -427,7 +627,9 @@ impl crate::server::GameServer {
         // OC (A1) — a joiner whose save didn't load this run can't prove
         // what it owed: its session starts `Incomplete(Unreadable)`.
         if self.failed_joiner_reads.contains(&pk) {
-            self.players[i].obligations.mark(IncompleteCause::Unreadable);
+            self.players[i]
+                .obligations
+                .mark(IncompleteCause::Unreadable);
         }
         saved
     }
@@ -442,16 +644,16 @@ impl crate::server::GameServer {
         let Some(pk) = sp.verified_pubkey else {
             return Ok(());
         };
-        if self.failed_joiner_reads.contains(&pk) {
+        if sp.personal_read_failed || self.failed_joiner_reads.contains(&pk) {
             return Err(format!(
                 "Preserving unreadable joiner save {}",
                 self.joiner_path(pk).display()
             ));
         }
-        let path = self.joiner_path(pk);
-        let bytes = JoinerSave::capture(sp, self.run_id).encode()?;
-        std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
-        crate::save::write_atomic(&path, &bytes)
+        // M-1: never written into a retired world (or a refused one).
+        crate::save::refuse_write_over_newer_save(&crate::save::world_dir(&self.world_name))?;
+        JoinerSave::capture(sp, self.run_id).encode()?;
+        crate::handover::live::personal_adapter::write(&crate::save::world_dir(&self.world_name), pk, &JoinerSave::capture(sp, self.run_id))
     }
     pub(crate) fn save_joiners(&self) -> Result<(), String> {
         let errors: Vec<_> = self
@@ -491,6 +693,55 @@ mod tests {
         sp.verified_pubkey = Some([1; 32]);
         sp.enter_world();
         s
+    }
+    /// CP6 review M-1: one retirement record beside a world refuses every
+    /// opener and writer through the `save_refusal_in` choke point (and the
+    /// direct load guards), and nothing in the folder changes.
+    #[test]
+    fn handover_retired_world_is_refused_by_every_open_and_save_path() {
+        let _g = crate::save::WorldsRootGuard::new("retired-paths");
+        let s = server();
+        let dir = crate::save::world_dir("sidecar");
+        let meta = crate::save::WorldMeta::new("sidecar");
+        crate::save::save_world_meta("sidecar", &meta).unwrap();
+        let store = crate::handover::live::authority::store(&dir).unwrap();
+        store.persist(crate::handover::durable::MarkerKind::Retired, [4; 16], b"a retirement record").unwrap();
+        let snapshot = |d: &std::path::Path| {
+            let mut v: Vec<(std::path::PathBuf, Vec<u8>)> = Vec::new();
+            let mut stack = vec![d.to_path_buf()];
+            while let Some(p) = stack.pop() {
+                for e in std::fs::read_dir(&p).unwrap() {
+                    let e = e.unwrap().path();
+                    if e.is_dir() {
+                        stack.push(e);
+                    } else {
+                        v.push((e.clone(), std::fs::read(&e).unwrap()));
+                    }
+                }
+            }
+            v.sort();
+            v
+        };
+        let before = snapshot(&dir);
+        let slot = crate::player_slot::PlayerSlot::new(0, glam::Vec3::new(0.0, 70.0, 0.0), 1.0);
+        let w = crate::world::World::new();
+        let save = crate::save::minimal_world_save_for_tests(1);
+        let paths: Vec<(&str, Result<(), String>)> = vec![
+            ("lobby/open, online host, dedicated server", crate::save::world_open_refusal("sidecar").map_or(Ok(()), Err)),
+            ("load", crate::save::load_world("sidecar", &mut crate::world::World::new()).map(|_| ())),
+            ("load autosave", crate::save::load_autosave("sidecar", &mut crate::world::World::new()).map(|_| ())),
+            ("meta", crate::save::save_world_meta("sidecar", &meta)),
+            ("world folder", crate::save::write_world_folder("sidecar", &meta, &save, &w)),
+            ("save", crate::save::save_world("sidecar", &w, std::slice::from_ref(&slot), 1, &[], &[])),
+            ("autosave", crate::save::autosave_world("sidecar", &w, std::slice::from_ref(&slot), 1, &[], &[])),
+            ("server save", s.try_save()),
+            ("joiner save", s.save_joiner(0)),
+        ];
+        for (path, r) in paths {
+            let e = r.err().unwrap_or_else(|| panic!("{path}: a retired world was not refused"));
+            assert!(e.contains(crate::handover::live::copy::AUTHORITY_UNREADABLE) || e.contains(crate::handover::live::copy::RETIRED), "{path}: {e}");
+        }
+        assert_eq!(snapshot(&dir), before, "a refused path wrote into the retired world");
     }
     #[test]
     fn sidecar_round_trips_whole_effective_window_and_run_scoped_night() {
@@ -795,7 +1046,7 @@ mod oc_tests {
         assert!(next.players[0].window_events.debt.is_empty());
         next.save_joiner(0).unwrap();
         let bytes = std::fs::read(&path).unwrap();
-        assert_eq!(bytes[0], 2, "the writer writes v2");
+        assert_eq!(bytes[0], 3, "the writer writes v3");
         let resaved = JoinerSave::decode(&bytes).unwrap();
         assert_eq!(resaved.history(), ObligationHistory::Incomplete(IncompleteCause::LegacyV1), "Incomplete is sticky");
         assert!(!next.players[0].obligations_proven_zero());

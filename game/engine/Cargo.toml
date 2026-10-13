@@ -52,6 +52,7 @@ egui-winit = { version = "0.34", default-features = false, features = ["links"] 
 # canonical_id runs on native too; `hex` is a tiny ubiquitous crate.
 sha2 = "0.11"
 hex = "0.4"
+zeroize = "1.8"  # the handover bearer is wiped on drop (already locked via the crypto crates)
 # HMAC-SHA256 for the Proof-of-Play hash (Spec 6 §2.2 / §2.2c). RustCrypto
 # canonical implementation; ~0 cost on top of `sha2` which we already pull in.
 hmac = "0.13"
@@ -77,6 +78,8 @@ chacha20poly1305 = { version = "0.11", default-features = false, features = ["al
 
 # Native-only dependencies
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Native checkpoint import uses atomic no-replace directory rename.
+libc = "0.2"
 # Native re-declares egui-winit WITH the clipboard backend (arboard) + platform
 # clipboards so Ctrl+V paste works in text fields (e.g. the Join Game address).
 # The base [dependencies] entry stays minimal (`links` only) for wasm32, where

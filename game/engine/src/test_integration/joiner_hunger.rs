@@ -447,7 +447,7 @@ fn sleeping_at_night_sets_the_spawn_heals_and_a_respawn_lands_at_the_bed() {
     rig.tick(1);
     let at = item_actions::bed_spawn(bed);
     assert!(
-        rig.inbox.events.contains(&PlayerEventType::Respawned { x: at.x, y: at.y, z: at.z }),
+        rig.inbox.events.contains(&PlayerEventType::Respawned { x: at.x, y: at.y, z: at.z, respawns: 1 }),
         "respawned standing on the bed: {:?}",
         rig.inbox.events
     );

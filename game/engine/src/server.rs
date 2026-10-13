@@ -238,6 +238,18 @@ pub struct ServerPlayer {
     /// C2a — the night (`item_actions::NightCalendar`) this joiner last slept
     /// in a bed; `None` until its first sleep. Once a night.
     pub slept_night: Option<u32>,
+    /// World handover: this seat's progression has been tracked since a
+    /// verified signed admission on THIS attach (set at JoinAccept), and how
+    /// many kill credits the server has queued for it since. A tracked seat
+    /// with no credits holds default progression for the whole session (the
+    /// joined client starts from empty maps); anything else is not proven.
+    pub progression_tracked: bool,
+    /// Mutable identity-bound maps share the canonical joiner save.
+    pub(crate) personal: Option<crate::joiner_save::BoundPersonal>,
+    pub(crate) personal_read_failed: bool,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) personal_delivery: crate::personal_sync::Delivery,
+    pub progression_credits: u32,
     /// C3a-2a — the server's copy of a joiner's four armour slots
     /// (`ArmourSlot as usize`), moved by its window ops and worn by the hits
     /// the server lands (`window::wear_armour`). Damage still uses the
@@ -578,6 +590,12 @@ impl ServerPlayer {
             strict_corrections: Default::default(),
             eat_cooldown: 0,
             slept_night: None,
+            progression_tracked: false,
+            personal: None,
+            personal_read_failed: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            personal_delivery: Default::default(),
+            progression_credits: 0,
             armour: [None; 4],
             cursor: None,
             craft_grid: Default::default(),
@@ -1056,6 +1074,8 @@ pub struct GameServer {
     /// (and at each `OpenTable`): an open at one gets the grace that is left
     /// (`window_ops::serve_op`).
     pub tables_gone: crate::window_ops::TablesGone,
+    /// The personal snapshot selected with this server's loaded world.
+    pub(crate) selected_local_personal: Option<crate::personal_value::LocalPersonalSave>,
 }
 
 impl GameServer {
@@ -1109,6 +1129,7 @@ impl GameServer {
             night_calendar: crate::item_actions::NightCalendar::default(),
             pending_bred_events: Vec::new(),
             tables_gone: Default::default(),
+            selected_local_personal: None,
             next_attach_gen: 0,
             released_joiners: Vec::new(),
             released_mounts: Vec::new(),
@@ -1232,6 +1253,7 @@ impl GameServer {
         .map_err(|why| crate::world_open::server_refusal_message(&wname, &why))?;
         if let crate::world_open::OpenedWorld::Loaded { save: save_data, chunks: chunk_count, .. } = opened {
             log::info!("Loaded saved world '{wname}'.");
+            self.selected_local_personal = save_data.local_personal.clone();
             self.restore_saved_players(&save_data);
             let p0_pos = self
                 .players
@@ -1471,6 +1493,8 @@ impl GameServer {
     /// ticks twice on the one world. Single-player runs no server at all; its
     /// client still simulates everything (CLAUDE.md known debt).
     pub fn tick(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.decay_personal();
         use crate::sim_lend::SimSystem;
         // One column-loading story per mode (`hosted_server::assign_column_loading`):
         // a lent world's columns are its host client's streamer's alone.
@@ -2515,6 +2539,10 @@ impl GameServer {
         if !self.is_joiner_of_gen(slot, generation) {
             return;
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        self.credit_personal_kill(slot, kind, pos);
+        let sp = &mut self.players[slot];
+        sp.progression_credits = sp.progression_credits.saturating_add(1);
         self.pending_kill_events.push((
             slot,
             crate::protocol::KillEventPacket {
@@ -2968,6 +2996,7 @@ impl GameServer {
             rigs: self.world.rigs.clone(),
             // #19 — index-aligned clip side table (see `WorldSave.rig_clips`).
             rig_clips: self.world.rigs.iter().map(|r| r.clip).collect(),
+            local_personal: None,
             exhibits: self.world.exhibits.clone(),
             composters: self
                 .world

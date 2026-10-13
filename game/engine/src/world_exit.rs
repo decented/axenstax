@@ -234,6 +234,11 @@ pub(crate) fn save_failed_toast(why: &str) -> String {
 /// How long the save-failure toast stays up.
 pub(crate) const SAVE_FAILED_TOAST_SECS: u64 = 10;
 
+/// CP12 (CP10 review MEDIUM-1): the most the exit function waits for a
+/// handover Committed still being published (CP9 review MEDIUM-2).
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) const EXIT_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// How long an in-world arena launch waits for the web lobby's world list
 /// before it gives up and says so (review W3 S6).
 pub(crate) const QUEUED_LAUNCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
@@ -439,6 +444,19 @@ impl crate::GameState {
     /// (`save::save_world_superseding_autosave`); the outcome is recorded in
     /// [`SessionSaves`].
     pub(crate) fn save_live_world(&mut self) -> Result<(), String> {
+        // World handover: a frozen world is never written (the copy being
+        // handed over was taken from it; nothing may land after the cut).
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.handover_freezes_world() {
+            return Err(crate::handover::live::copy::SAVE_PAUSED.to_string());
+        }
+        // D7: a world whose authority was handed over (any retirement record
+        // beside it, or one that can't be read) is never written again, so a
+        // late save can't rewrite retired authority.
+        #[cfg(not(target_arch = "wasm32"))]
+        crate::handover::live::authority::open_guard(&crate::save::world_dir(&self.world_name)).map_err(|r| r.0.to_string())?;
+        #[cfg(not(target_arch = "wasm32"))]
+        self.preflight_personal_local()?;
         let result = crate::save::save_world_superseding_autosave(
             &self.world_name,
             &self.world,
@@ -518,6 +536,20 @@ impl crate::GameState {
     /// silence). Callers that hop somewhere after leaving must not hop on
     /// `false`.
     pub(crate) fn leave_world(&mut self, save: SaveChoice, to: ExitTo) -> bool {
+        // CP7 review HIGH-1: a world this machine's handover retired is no
+        // longer its to save: the leave writes nothing and touches nothing on
+        // disk (`Abandon`, stricter than `Discard`, which deletes the
+        // autosave), and tears the world, its HostedServer and the online
+        // host down. Nothing on the way out unfreezes it.
+        #[cfg(not(target_arch = "wasm32"))]
+        let save = if self.source_handover_retired() { SaveChoice::Abandon } else { save };
+        // World handover first: a source handover is cancelled while its world
+        // and link still exist (pre-retirement, so play would resume), which
+        // also lifts the freeze before the save below.
+        #[cfg(not(target_arch = "wasm32"))]
+        let handover_notice = self.handover_on_leave();
+        #[cfg(target_arch = "wasm32")]
+        let handover_notice: Option<String> = None;
         let live = self.live_world.take();
         let joined = self.remote_client.is_some();
         // Reaching the line after this means any save it asked for landed
@@ -598,7 +630,11 @@ impl crate::GameState {
             // screen, never back to the lobby (spec §10).
             self.showcase_exited = true;
         } else {
-            self.mode = crate::GameMode::Menu(Box::new(crate::menu::MenuState::new()));
+            let mut menu = crate::menu::MenuState::new();
+            // A handover this leave cancelled is said in the lobby, where it
+            // is drawn (a toast set in the world never reaches it).
+            menu.notice = handover_notice;
+            self.mode = crate::GameMode::Menu(Box::new(menu));
         }
         true
     }
@@ -634,6 +670,32 @@ impl crate::GameState {
                 true
             }
         }
+    }
+
+    /// CP12 (CP10 review MEDIUM-1): the ONE exit function. Every way out of
+    /// the process comes here: the window's close button, the lobby's Quit,
+    /// Esc in the lobby and the updater's Restart (the lobby's two as
+    /// `MenuAction`s; the event loop then exits after the frame). Online
+    /// hosting is let go first (bounded, on this thread), then the world is
+    /// closed as the close button always did ([`Self::close_window`]: a
+    /// failed close-save keeps the window, returns false and runs no grace).
+    /// Only once the close went through, so after `leave_world`'s last-chance
+    /// hand-off of a retired publication, a handover Committed still being
+    /// published gets at most [`EXIT_GRACE`] before the process ends; a
+    /// recipient's wait for Committed never holds the exit (it resumes at
+    /// the next start either way).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn exit_app(&mut self) -> bool {
+        #[cfg(test)]
+        {
+            self.exit_calls += 1;
+        }
+        self.stop_online_on_exit();
+        if !self.close_window() {
+            return false;
+        }
+        crate::handover::live::resumer::Resumer::global().finish_within(EXIT_GRACE);
+        true
     }
 
     /// Leave a world whose session ended under the player (host quit or

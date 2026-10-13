@@ -211,8 +211,13 @@ pub fn import_profile_world(bytes: &[u8], entry_name: &str) -> Result<(String, b
     let mut world = World::new();
     let (meta, save, images) = unpack_world_for_import(bytes, &mut world)?;
 
-    let base_slug = slugify_folder_name(entry_name);
-    let final_name = keep_both_name(&base_slug, &existing_world_folders()?);
+    // CP21 (CP19 review HIGH-1): never a Trial arena's or a reserved folder.
+    let base_slug = crate::save::off_arena_folder(slugify_folder_name(entry_name));
+    let mut taken = existing_world_folders()?;
+    if crate::save::is_reserved_folder(&base_slug) {
+        taken.push(base_slug.clone());
+    }
+    let final_name = keep_both_name(&base_slug, &taken);
     let renamed = final_name != base_slug;
 
     write_unpacked_world(&final_name, &base_slug, meta, &save, &world, &images)?;
@@ -318,6 +323,58 @@ mod tests {
     ///
     /// Uses a unique world name with a fixed nonce so parallel test runs don't
     /// collide.  Both temp folders are cleaned up at the end.
+    /// CP11: an `.axeworld` import never brings a `handover/` folder (the
+    /// handover records and the bearer stay where they are): the export
+    /// carries no `handover/` entry, and an archive crafted WITH
+    /// `handover/` entries still lands without one, openable.
+    #[test]
+    fn archive_import_never_brings_handover() {
+        use std::io::{Read, Write};
+        let src_name = "__nwio_handover_src_5c19e2";
+        let mut world = World::new();
+        world.set_block(0, 0, 0, block::STONE);
+        let meta = crate::save::WorldMeta::new(src_name);
+        let save = crate::save::minimal_world_save_for_tests(78);
+        write_world_folder(src_name, &meta, &save, &world).expect("write the source world");
+        // (A source world holding a handover record is refused by the open
+        // guard before any export; the export's own allowlist is pinned by
+        // `handover_bearer_is_absent_from_every_archive_and_copy`.)
+        let src_dir = world_dir(src_name);
+        let exported = export_world_native(src_name);
+        let _ = std::fs::remove_dir_all(&src_dir);
+        let exported = exported.expect("export");
+        let mut tar_data = Vec::new();
+        flate2::read::GzDecoder::new(&exported[..]).read_to_end(&mut tar_data).unwrap();
+        let mut builder = tar::Builder::new(Vec::new());
+        for name in ["handover/prepared", "handover/activated", "handover/retired"] {
+            let data = [0x5Au8; 64];
+            let mut h = tar::Header::new_gnu();
+            h.set_size(data.len() as u64);
+            h.set_mode(0o600);
+            h.set_cksum();
+            builder.append_data(&mut h, format!("{name}-{}.dat", "5a".repeat(16)), &data[..]).unwrap();
+        }
+        let mut ar = tar::Archive::new(&tar_data[..]);
+        for e in ar.entries().unwrap() {
+            let mut e = e.unwrap();
+            let path = e.path().unwrap().into_owned();
+            assert!(!path.starts_with("handover"), "the export carried {}", path.display());
+            let mut h = e.header().clone();
+            let mut d = Vec::new();
+            e.read_to_end(&mut d).unwrap();
+            builder.append_data(&mut h, path, &d[..]).unwrap();
+        }
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gz.write_all(&builder.into_inner().unwrap()).unwrap();
+        let imported = import_world_native(&gz.finish().unwrap()).expect("the crafted archive imports");
+        let dir = world_dir(&imported);
+        let brought = dir.join("handover").exists();
+        let guard = crate::handover::live::authority::open_guard(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!brought, "an archive import brought handover/");
+        assert!(guard.is_ok(), "the imported world is refused");
+    }
+
     #[test]
     fn disk_round_trip_preserves_blocks() {
         // Use a name unlikely to collide with any real save; the nonce is fixed

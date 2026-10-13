@@ -201,6 +201,16 @@ impl SimTally {
     /// `self`: ran twice or more (a missed gate), or — an every-tick system —
     /// not at all (both sides gated it). Empty when any count went DOWN: the
     /// world was replaced mid-tick, so there is nothing to compare.
+    /// A world frozen for a handover runs no shared system at all: every
+    /// system that ran since `before` is a fault.
+    pub fn frozen_tick_faults(&self, before: &SimTally) -> Vec<(SimSystem, u64)> {
+        SimSystem::ALL
+            .iter()
+            .map(|&s| (s, self.get(s).wrapping_sub(before.get(s))))
+            .filter(|&(_, runs)| runs != 0)
+            .collect()
+    }
+
     pub fn one_tick_faults(&self, before: &SimTally) -> Vec<(SimSystem, u64)> {
         if SimSystem::ALL.iter().any(|&s| self.get(s) < before.get(s)) {
             return Vec::new();

@@ -56,6 +56,7 @@ impl RemoteClient {
     /// Must succeed BEFORE the caller changes holdings, world or local ECS.
     /// Retains the complete packet; sender/resubmission never allocates an id.
     pub fn reserve_action(&mut self, intent: crate::action_wire::ActionIntent, recipe: Box<[u8]>, cells: Box<[[i32; 3]]>) -> Result<crate::action_identity::ActionHeader, String> {
+        if !self.personal_ready() { return Err("Personal state is still being installed".into()); }
         if self.recovery_prepare.is_some() { return Err("Inventory recovery is pending".into()); }
         let journal = self.action_journal.as_mut().ok_or("No joined action session")?;
         let action = journal.next_header(self.events_applied).map_err(|e| format!("Action allocation failed: {e:?}"))?;
@@ -68,6 +69,7 @@ impl RemoteClient {
 
     /// Sends a retained identity, never allocates or retires history.
     pub fn send_reserved_action(&mut self, action: crate::action_identity::ActionHeader) -> Result<(), String> {
+        if !self.personal_ready() { return Err("Personal state is still being installed".into()); }
         if self.recovery_prepare.is_some() { return Err("Inventory recovery is pending".into()); }
         let journal = self.action_journal.as_mut().ok_or("No joined action session")?;
         let retained = journal.actions().find(|a| a.header == action).ok_or("Action was not reserved")?;

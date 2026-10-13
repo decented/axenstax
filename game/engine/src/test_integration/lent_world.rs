@@ -384,7 +384,7 @@ fn respawns_seen(client: &ChannelClientTransport) -> Vec<glam::Vec3> {
         if let Some((ptype, payload)) = protocol::deserialize_header(&pkt)
             && ptype == protocol::PacketType::PlayerEvent
             && let Ok(e) = protocol::safe_deserialize::<protocol::PlayerEventPacket>(payload)
-            && let protocol::PlayerEventType::Respawned { x, y, z } = e.event
+            && let protocol::PlayerEventType::Respawned { x, y, z, .. } = e.event
         {
             out.push(glam::Vec3::new(x, y, z));
         }

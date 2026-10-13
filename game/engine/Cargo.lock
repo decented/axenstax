@@ -474,6 +474,7 @@ dependencies = [
  "igd-next",
  "image",
  "js-sys",
+ "libc",
  "libm",
  "log",
  "lz4_flex",
@@ -503,6 +504,7 @@ dependencies = [
  "web-time",
  "wgpu",
  "winit",
+ "zeroize",
 ]
 
 [[package]]

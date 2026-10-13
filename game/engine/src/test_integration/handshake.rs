@@ -252,10 +252,11 @@ fn protocol_version_is_the_pinned_value() {
     // v87 (sidecar): CreativeGive.
     // v88 (OC): `InventorySyncPacket.owed` — the join's replacement carries
     //   the joiner's correction debt to both copies.
-    // v89 (provisional, C3d): typed `Action` (68), `ActionReceipt` (69),
+    // v89 (C3d accepted locally): typed `Action` (68), `ActionReceipt` (69),
     //   `Recovery` (70), `AppliedActionAck` (71); JoinAccept appends the
     //   fixed inventory mode, action namespace and life.
-    assert_eq!(protocol::PROTOCOL_VERSION, 89);
+    // Integrated handover uses private provisional v90 and tag 72.
+    assert_eq!(protocol::PROTOCOL_VERSION, 90);
 }
 
 #[test]
@@ -357,6 +358,7 @@ fn join_accept_carries_spawn_and_game_mode() {
         inventory_mode: crate::action_identity::InventoryMode::Mirror,
         action_session: [7; 16],
         action_life: 0,
+        has_personal_state: false,
     };
     let pkt = protocol::serialize_packet(protocol::PacketType::JoinAccept, &acc);
     let (_ptype, payload) = protocol::deserialize_header(&pkt).unwrap();

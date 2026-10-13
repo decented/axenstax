@@ -198,6 +198,14 @@ pub enum MenuAction {
     /// Campaign G — pick an `.axeghost` file; the file names its own race, so
     /// one button serves every row. Stored as that race's rival ghost.
     ImportGhost,
+    /// CP12 (CP10 review MEDIUM-1): the lobby's Quit. Ends the process only
+    /// through the game's one exit function (`GameState::exit_app`).
+    #[cfg(not(target_arch = "wasm32"))]
+    Quit,
+    /// CP12: the self-updater's Restart: the exit function first (its
+    /// handover grace included), then the relaunch.
+    #[cfg(not(target_arch = "wasm32"))]
+    RestartForUpdate,
     /// Online play by contact — host this world for friends in other houses.
     /// Native only.
     #[cfg(not(target_arch = "wasm32"))]
@@ -321,6 +329,16 @@ pub struct MenuState {
     /// operation result — success or error). Cleared on the next export/import.
     #[cfg(not(target_arch = "wasm32"))]
     pub transfer_status: Option<String>,
+    /// Native (CP11): one plain line per handover import still awaiting its
+    /// Committed ("Waiting for <npub> to finish handing this world over").
+    /// Not a world card: the import isn't under the worlds folder and can't
+    /// be opened until Activated.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub awaiting_imports: Vec<String>,
+    /// CP20 (CP18 review MEDIUM-1): when the lobby promotes again (CP22:
+    /// once per activation, and on the retry cadence only while held).
+    #[cfg(not(target_arch = "wasm32"))]
+    handover_poll: crate::handover::live::promote::LobbyPoll,
     /// Native: in-flight OS file-dialog channel. `Some` while the worker thread
     /// is running (or has a result waiting); cleared by `poll_dialog` once the
     /// result has been consumed or the channel disconnects.
@@ -403,6 +421,14 @@ pub struct MenuState {
 
 impl MenuState {
     pub fn new() -> Self {
+        // CP18: a handed-over world that has finished arriving moves into
+        // the worlds folder first, so it lists below. CP20: the activation
+        // count is read before that pass, so one landing during it is
+        // still acted on by `poll_handovers`.
+        #[cfg(not(target_arch = "wasm32"))]
+        let activations_at_entry = crate::handover::live::promote::activations();
+        #[cfg(not(target_arch = "wasm32"))]
+        let held_at_entry = crate::handover_game::promote_activated_imports().held;
         #[cfg(not(target_arch = "wasm32"))]
         let worlds = save::list_world_entries();
         #[cfg(target_arch = "wasm32")]
@@ -444,6 +470,10 @@ impl MenuState {
             #[cfg(not(target_arch = "wasm32"))]
             transfer_status: None,
             #[cfg(not(target_arch = "wasm32"))]
+            awaiting_imports: crate::handover_game::awaiting_import_statuses(),
+            #[cfg(not(target_arch = "wasm32"))]
+            handover_poll: crate::handover::live::promote::LobbyPoll::new(activations_at_entry, held_at_entry, std::time::Instant::now()),
+            #[cfg(not(target_arch = "wasm32"))]
             pending_dialog: None,
             world_page: 0,
             stash_input: String::new(),
@@ -480,10 +510,38 @@ impl MenuState {
         state
     }
 
+    /// CP20 (CP18 review MEDIUM-1, DECIDED): called every lobby frame. When
+    /// a recipient import has reached Activated since the lobby last looked,
+    /// promote and re-list in place (selection, open dialog and page kept);
+    /// while a pass finds an Activated import whose lock is still held (its
+    /// holder lets go a moment after Activated), try again twice a second.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn poll_handovers(&mut self) {
+        let now = std::time::Instant::now();
+        if !self.handover_poll.due(crate::handover::live::promote::activations(), now) {
+            return;
+        }
+        let promoted = crate::handover_game::promote_activated_imports();
+        let released = self.handover_poll.ran(&promoted, now);
+        let awaiting = crate::handover_game::awaiting_import_statuses();
+        // CP22 (CP21 review LOW-1): re-list whenever the waiting lines
+        // changed too (another process may have moved the world in), and
+        // CP24 (CP22 review LOW-1) once a held import is held no more.
+        if promoted.moved.is_empty() && awaiting == self.awaiting_imports && !released {
+            return;
+        }
+        self.awaiting_imports = awaiting;
+        let selected = self.selected.and_then(|i| self.worlds.get(i)).map(|e| e.folder_name.clone());
+        self.worlds = save::list_world_entries();
+        self.selected = selected.and_then(|f| self.worlds.iter().position(|e| e.folder_name == f));
+    }
+
     pub fn refresh(&mut self) {
         #[cfg(not(target_arch = "wasm32"))]
         {
+            crate::handover_game::promote_activated_imports();
             self.worlds = save::list_world_entries();
+            self.awaiting_imports = crate::handover_game::awaiting_import_statuses();
         }
         #[cfg(target_arch = "wasm32")]
         {
@@ -1028,7 +1086,9 @@ fn kick_off_profile_export() -> std::rc::Rc<std::cell::RefCell<Option<Result<Str
 fn handle_card_action(state: &mut MenuState, idx: usize, card_action: CardAction) -> MenuAction {
     // A world saved by a newer version is never opened or hosted (Spec 02 §8.4):
     // stay in the lobby and say why, before anything reads or writes it.
-    if matches!(card_action, CardAction::DoubleClick | CardAction::Play | CardAction::Host)
+    // CP15 (CP14 review MEDIUM-1): nor forked (a refused world is never
+    // copied into a playable one); the card says why instead.
+    if matches!(card_action, CardAction::DoubleClick | CardAction::Play | CardAction::Host | CardAction::Fork)
         && let Some(why) = save::world_open_refusal(&state.worlds[idx].folder_name)
     {
         state.notice = Some(why);
@@ -1994,7 +2054,7 @@ fn trigger_stash_download(
 /// the CREATIVE badge's blue: informational, deliberately not a warning
 /// colour.
 #[cfg(not(target_arch = "wasm32"))]
-fn draw_version_line(ui: &mut egui::Ui) {
+fn draw_version_line(ui: &mut egui::Ui, restart: &mut bool) {
     use crate::update_check::{self, UpdateState};
 
     const VERSION_SIZE: f32 = 15.0;
@@ -2070,7 +2130,7 @@ fn draw_version_line(ui: &mut egui::Ui) {
                         .strong(),
                     update_check::DOWNLOAD_PAGE,
                 );
-                draw_self_update_controls(ui, &latest, appimage, VERSION_SIZE, SUBTITLE_COLOR);
+                draw_self_update_controls(ui, &latest, appimage, VERSION_SIZE, SUBTITLE_COLOR, restart);
             });
         }
     }
@@ -2093,6 +2153,7 @@ fn draw_self_update_controls(
     appimage: Option<crate::update_check::AppImageRef>,
     size: f32,
     dim: egui::Color32,
+    restart: &mut bool,
 ) {
     use crate::self_update::{self, Progress};
 
@@ -2124,11 +2185,11 @@ fn draw_self_update_controls(
                     .size(size)
                     .color(dim),
             );
+            // CP12 (CP10 review MEDIUM-1): never a bare `process::exit`: the
+            // game's one exit function runs first, then the relaunch
+            // (`MenuAction::RestartForUpdate`).
             if ui.small_button("Restart").clicked() {
-                match self_update::relaunch(&running) {
-                    Ok(()) => std::process::exit(0),
-                    Err(e) => log::error!("relaunch after self-update failed: {e}"),
-                }
+                *restart = true;
             }
         }
         Progress::Failed(reason) => {
@@ -2408,6 +2469,7 @@ pub fn draw_main_menu(ctx: &egui::Context, state: &mut MenuState) -> MenuAction 
                     }
                     Err(e) => {
                         log::error!("Fork failed: {e}");
+                        state.notice = Some(e);
                     }
                 }
             }
@@ -2797,7 +2859,13 @@ pub fn draw_main_menu(ctx: &egui::Context, state: &mut MenuState) -> MenuAction 
                     let wordmark_width = if ctx.content_rect().width() < 600.0 { 180.0 } else { 220.0 };
                     brand::show_wordmark(ui, wordmark_width);
                     #[cfg(not(target_arch = "wasm32"))]
-                    draw_version_line(ui);
+                    {
+                        let mut restart = false;
+                        draw_version_line(ui, &mut restart);
+                        if restart {
+                            action = MenuAction::RestartForUpdate;
+                        }
+                    }
                     ui.add_space(6.0);
                     ui.label(egui::RichText::new("Your Worlds").size(14.0).color(SUBTITLE_COLOR));
                 });
@@ -2823,8 +2891,9 @@ pub fn draw_main_menu(ctx: &egui::Context, state: &mut MenuState) -> MenuAction 
                     }
                     #[cfg(not(target_arch = "wasm32"))]
                     {
+                        // CP12 (CP10 review MEDIUM-1): through the one exit function.
                         if lobby_header_button(ui, "Quit").clicked() {
-                            std::process::exit(0);
+                            action = MenuAction::Quit;
                         }
                         // Native Signet identity (right-to-left: added after Quit, so
                         // it sits to Quit's left). Guest by default; sign-in is opt-in.
@@ -3148,13 +3217,23 @@ pub fn draw_main_menu(ctx: &egui::Context, state: &mut MenuState) -> MenuAction 
                 ui.add_space(6.0);
                 ui.label(egui::RichText::new(status).size(13.0).color(egui::Color32::from_rgb(170, 190, 150)));
             }
+            // CP11: a handover import still awaiting its Committed.
+            #[cfg(not(target_arch = "wasm32"))]
+            for line in &state.awaiting_imports {
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new(line).size(13.0).color(egui::Color32::from_rgb(170, 190, 150)));
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            let nothing_awaiting = state.awaiting_imports.is_empty();
+            #[cfg(target_arch = "wasm32")]
+            let nothing_awaiting = true;
 
             ui.add_space(10.0);
             ui.separator();
             ui.add_space(8.0);
 
             // --- Worlds: responsive multi-column grid in a scroll area ---
-            if state.worlds.is_empty() {
+            if state.worlds.is_empty() && nothing_awaiting {
                 ui.add_space(40.0);
                 ui.vertical_centered(|ui| {
                     brand::show_mark(ui, 96.0, 255, 0.0);
@@ -6094,6 +6173,25 @@ mod tests {
     use super::{
         app_feature_copy, plan_lobby_settings, AppFeature, LobbySettingsPlan, SettingsPanelAction,
     };
+
+    /// CP15 (CP14 review MEDIUM-1): the lobby's Fork on a refused (retired)
+    /// world opens no fork dialog and shows the refusal line.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn handover_lobby_fork_of_a_refused_world_shows_why_and_forks_nothing() {
+        let _root = crate::save::WorldsRootGuard::new("lobby-fork-refused");
+        let name = "refused";
+        crate::save::write_world_folder(name, &crate::save::WorldMeta::new(name), &crate::save::minimal_world_save_for_tests(5), &crate::world::World::new()).unwrap();
+        let store = crate::handover::live::authority::store(&crate::save::world_dir(name)).unwrap();
+        store.persist(crate::handover::durable::MarkerKind::Retired, [9; 16], b"a retirement record").unwrap();
+        let mut state = super::MenuState::new();
+        state.worlds = crate::save::list_world_entries();
+        let idx = state.worlds.iter().position(|w| w.folder_name == name).expect("the world isn't listed");
+        let action = super::handle_card_action(&mut state, idx, super::CardAction::Fork);
+        assert!(matches!(action, super::MenuAction::None));
+        assert!(!matches!(state.dialog, super::MenuDialog::Forking { .. }), "the lobby opened a fork of a refused world");
+        assert!(state.notice.is_some(), "the lobby didn't say why the world can't be forked");
+    }
 
     #[test]
     fn lobby_settings_changed_persists_and_applies_display_only() {

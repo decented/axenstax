@@ -202,6 +202,7 @@ fn save_load_round_trip_preserves_active_raid_and_treasury() {
         satoshi: Default::default(),
         dispensers: Vec::new(),
         rig_clips: Vec::new(),
+        local_personal: None,
     };
     let bytes = bincode::serialize(&save).expect("serialize");
     let back: crate::save::WorldSave = bincode::deserialize(&bytes).expect("deserialize");
@@ -474,6 +475,7 @@ fn raid_kills_round_trip_through_world_save() {
         satoshi: Default::default(),
         dispensers: Vec::new(),
         rig_clips: Vec::new(),
+        local_personal: None,
     };
     let bytes = bincode::serialize(&save).expect("serialize");
     let back: crate::save::WorldSave = bincode::deserialize(&bytes).expect("deserialize");

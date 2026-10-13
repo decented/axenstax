@@ -104,11 +104,35 @@ impl InboundQueue {
         self.packets.iter().skip(self.packets.len().saturating_sub(n))
     }
 
+    /// Remove every waiting packet `pick` selects, oldest first, keeping the
+    /// rest in their original order (world handover: control frames are
+    /// read out of a frozen joiner's queue while its gameplay waits).
+    pub fn extract(&mut self, mut pick: impl FnMut(&Packet) -> bool) -> Vec<Packet> {
+        let mut taken = Vec::new();
+        let mut kept = VecDeque::with_capacity(self.packets.len());
+        for packet in self.packets.drain(..) {
+            if pick(&packet) {
+                self.bytes -= charge(&packet);
+                taken.push(packet);
+            } else {
+                kept.push_back(packet);
+            }
+        }
+        self.packets = kept;
+        taken
+    }
+
     /// Take the oldest packet waiting.
     pub fn pop(&mut self) -> Option<Packet> {
         let packet = self.packets.pop_front()?;
         self.bytes -= charge(&packet);
         Some(packet)
+    }
+
+    /// What the waiting packets are charged (tests).
+    #[cfg(test)]
+    pub fn charged_bytes(&self) -> usize {
+        self.bytes
     }
 
     /// Packets waiting.
@@ -246,6 +270,23 @@ impl ServerTransport for ChannelServerTransport {
 
     fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Relaxed)
+    }
+}
+
+/// A client transport that is already closed: sends go nowhere. World
+/// handover lends a joined client's live transport to its session and leaves
+/// this behind, so a later `disconnect()` cannot close the link.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct ClosedClientTransport;
+
+#[cfg(not(target_arch = "wasm32"))]
+impl ClientTransport for ClosedClientTransport {
+    fn send_to_server(&self, _data: &[u8]) {}
+    fn try_recv_from_server(&self) -> Option<Packet> {
+        None
+    }
+    fn is_closed(&self) -> bool {
+        true
     }
 }
 

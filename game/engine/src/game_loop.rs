@@ -608,7 +608,7 @@ impl super::GameState {
     }
 
     /// The signed-in persona as raw x-only bytes. `None` for a guest.
-    fn owner_persona_bytes() -> Option<[u8; 32]> {
+    pub(crate) fn owner_persona_bytes() -> Option<[u8; 32]> {
         crate::signet::native_signer::current_owner_pubkey()
             .and_then(|h| hex::decode(h).ok())
             .and_then(|b| <[u8; 32]>::try_from(b.as_slice()).ok())
@@ -930,8 +930,11 @@ impl super::GameState {
         // 2 — the host: answer whoever has called, and keep the server's access
         // policy in step with who has been admitted.
         let mut contacts_changed = false;
-        if let (Some(host), Some(server)) =
-            (self.online_host.as_mut(), self.hosted_server.as_mut())
+        // A world frozen for a handover admits nobody: no offer is answered
+        // until the handover ends (offers wait on the relay or time out).
+        let frozen = self.handover_freezes_world();
+        if let (Some(host), Some(server), false) =
+            (self.online_host.as_mut(), self.hosted_server.as_mut(), frozen)
         {
             let (players, capacity) = server.occupancy();
             let mut policy_stale = false;
@@ -971,9 +974,10 @@ impl super::GameState {
         match join.poll(now, elapsed) {
             crate::online_join::JoinStep::Waiting
             | crate::online_join::JoinStep::Connecting { .. } => {}
-            crate::online_join::JoinStep::Ready { world_name, .. } => {
+            crate::online_join::JoinStep::Ready { world_name, host_persona } => {
                 let host_name = join.display_name().to_string();
                 let contact = join.host_contact();
+                let host_runtime = join.host_runtime();
                 let transport = join.take_transport();
                 // Dropping an `OnlineJoin` drops its `MultiRelay`, whose `Drop`
                 // waits up to half a second for the relay worker to stop. That
@@ -1020,6 +1024,9 @@ impl super::GameState {
                                 None,
                             );
                         self.remote_client = Some(client);
+                        // The host this join verified: a world handover it
+                        // later proposes is checked against exactly this.
+                        self.set_joined_host(host_persona, host_runtime);
                         self.online_toast(
                             crate::friends_ui::joined_toast(&world_name, &host_name),
                             6,
@@ -1090,6 +1097,9 @@ impl super::GameState {
         if let Some(lease) = self.upnp_lease.take() {
             lease.release_within(std::time::Duration::from_millis(1500));
         }
+        self.handover_release_lease_on_exit(std::time::Duration::from_millis(1500));
+        // The handover exit grace is not here: `exit_app` runs it once the
+        // world has closed (CP12, CP10 review MEDIUM-1).
     }
 
     /// The Online panel: this world's invite link, how reachable it is, how many
@@ -1129,6 +1139,21 @@ impl super::GameState {
                     .collect()
             })
             .unwrap_or_default();
+        // World handover: one row per present, authenticated seat — the
+        // click carries the seat, which the action re-reads; never a label.
+        let drawn = self.handover_candidates();
+        let handover: Vec<(crate::friends_ui::HandoverRow, String)> = drawn
+            .iter()
+            .map(|&(slot, generation, key)| {
+                let name = self
+                    .hosted_server
+                    .as_ref()
+                    .and_then(|hs| hs.server.players.get(slot))
+                    .map(|p| p.display_name.clone())
+                    .unwrap_or_default();
+                ((slot, generation, key), crate::friends_ui::connected_label(&name, Some(&key), host.book()))
+            })
+            .collect();
         let view = crate::friends_ui::OnlinePanelView {
             invite_link: &link,
             candidates: host.candidates(),
@@ -1136,8 +1161,10 @@ impl super::GameState {
             dropped,
             warning,
             connected: &connected,
+            handover: &handover,
         };
         let mut open = true;
+        let mut hand_to = None;
         egui::Window::new("Playing online")
             .default_open(true)
             .resizable(false)
@@ -1146,9 +1173,15 @@ impl super::GameState {
             .open(&mut open)
             .interactable(!self.input.cursor_captured)
             .show(&self.renderer.egui.ctx, |ui| {
-                crate::friends_ui::draw_online_panel(ui, &view);
+                hand_to = crate::friends_ui::draw_online_panel(ui, &view);
             });
         self.show_online_panel = open;
+        // L6 / review LOW-4: the click carries the (slot, generation, key)
+        // of the row widget the press began on (rows are identified by
+        // seat), re-checked against the live seat by `begin_handover_with`.
+        if let Some(row) = hand_to {
+            self.begin_handover(row);
+        }
     }
 
     /// Put whatever the online paths staged onto the clipboard. Copying needs
@@ -2274,7 +2307,7 @@ impl super::GameState {
 
     /// Reset tick timing to prevent speed-up after pause/menu/focus loss.
     /// Call this whenever transitioning to GameMode::Playing.
-    fn reset_tick_timing(&mut self) {
+    pub(crate) fn reset_tick_timing(&mut self) {
         self.last_tick = Instant::now();
         self.tick_accumulator = Duration::ZERO;
     }
@@ -2888,6 +2921,9 @@ impl super::GameState {
         // Nothing about the last world's saves carries over (`begin_load`
         // records whether this one opened from its autosave).
         self.session_saves = crate::world_exit::SessionSaves::default();
+        #[cfg(not(target_arch = "wasm32"))]
+        { self.local_personal = None; }
+        for slot in &mut self.players { slot.personal_binding = None; }
         self.world.clear();
         // …and the per-world fields `World::clear` keeps (meta bytes, hidden
         // cells, waypoints, Workshop projects, exhibits, scheduler, power…).
@@ -4696,7 +4732,12 @@ impl super::GameState {
         // Carts advanced inside the window: re-pin any rider to the seat.
         self.apply_riding_follow();
 
-        report.faults = self.world.sim_tally.one_tick_faults(&tally_before);
+        // World handover: a frozen world runs no shared system this tick.
+        report.faults = if self.handover_freezes_world() {
+            self.world.sim_tally.frozen_tick_faults(&tally_before)
+        } else {
+            self.world.sim_tally.one_tick_faults(&tally_before)
+        };
         if !report.faults.is_empty() {
             static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
             if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
@@ -4742,6 +4783,12 @@ impl super::GameState {
     }
 
     pub(crate) fn tick(&mut self) {
+        // World handover: while this world is frozen (or the host this client
+        // joined paused play) nothing advances — no simulation, no local
+        // edits, no grants, decay or raid credit, no autosave.
+        if self.handover_holds_play() {
+            return;
+        }
         // Spec 40 — apply a pending "Reset Workshop" wipe now that the Workshop
         // world is fully loaded and we're ticking in Playing. A single platform-
         // agnostic hook: the native and WASM load paths complete at different
@@ -5143,6 +5190,8 @@ impl super::GameState {
         self.autosave_counter += 1;
         if self.autosave_counter >= 6000 && self.persists_locally() {
             self.autosave_counter = 0;
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Err(e) = self.preflight_personal_local() { log::error!("Personal autosave failed: {e}"); return; }
             if let Err(e) = crate::save::autosave_world(
                 &self.world_name, &self.world, &self.players, self.biome_gen.seed,
                 &crate::save::carts_to_saved(&self.ecs),
@@ -5398,10 +5447,9 @@ impl super::GameState {
         if self.tick_counter
             .is_multiple_of(crate::reputation::REPUTATION_DECAY_INTERVAL_TICKS)
             && self.tick_counter > 0
+            && !self.remote_client.as_ref().is_some_and(|c| c.has_personal_state())
         {
-            for slot in self.players.iter_mut() {
-                slot.reputation.decay_once();
-            }
+            for slot in self.players.iter_mut() { slot.reputation.decay_once(); }
         }
 
         // Spec 22 Phase 2 — daily raid scheduler. Runs at the same
@@ -7525,6 +7573,11 @@ impl super::GameState {
             self.skin_picker_open = false;
             return true;
         }
+        // Review LOW-5: closing crafting moves its grid and cursor items
+        // into the inventory, so while play is held it stays open.
+        if self.players.first().is_some_and(|p| p.crafting_ui.open) && self.handover_blocks_world_action() {
+            return true;
+        }
         let Some(p) = self.players.first_mut() else { return false };
         if p.crafting_ui.open {
             let _ = self.close_crafting(0);
@@ -7583,6 +7636,20 @@ impl super::GameState {
     /// over the viewport mid-play, and the player never has to "click to
     /// re-grab" after an alt-tab / focus blip. Web keeps the click-to-capture
     /// path because pointer lock can only be acquired from a user gesture.
+    /// The playing cursor must stay free: inventory/menus/chat/dialogue
+    /// (p0_ui_modal_open), the death screen, the scenario end-card and a
+    /// world-handover window with something to click (consent, Cancel).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn cursor_must_be_free(&self) -> bool {
+        self.p0_ui_modal_open()
+            || self.players.first().is_some_and(|p| p.is_dead())
+            || self
+                .scenario
+                .as_ref()
+                .is_some_and(|s| s.shows_blocking_end_card())
+            || self.handover_wants_pointer()
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     fn reconcile_native_cursor(&mut self) {
         if !matches!(self.mode, GameMode::Playing) {
@@ -7592,13 +7659,7 @@ impl super::GameState {
         // free: inventory/menus/chat/dialogue (p0_ui_modal_open), the death
         // screen, and the scenario end-card (these last two leave mode == Playing
         // but aren't modals, so they must be named explicitly).
-        let blocking = self.p0_ui_modal_open()
-            || self.players.first().is_some_and(|p| p.is_dead())
-            || self
-                .scenario
-                .as_ref()
-                .is_some_and(|s| s.shows_blocking_end_card());
-        let want_grab = self.window.has_focus() && !blocking;
+        let want_grab = self.window.has_focus() && !self.cursor_must_be_free();
         if want_grab && !self.input.cursor_captured {
             self.capture_cursor();
         } else if !want_grab && self.input.cursor_captured {
@@ -7638,6 +7699,11 @@ impl super::GameState {
         // in-game tick. Bounded and non-blocking (see `poll_online`).
         #[cfg(not(target_arch = "wasm32"))]
         self.poll_online();
+        // World handover — the independent control pump, every frame and in
+        // every mode (never from the game tick): a session outlives the
+        // joined world it started in, and the source's freeze stops the tick.
+        #[cfg(not(target_arch = "wasm32"))]
+        self.poll_handover();
 
         // Drive animated textures off the game-tick clock (Spec 03 §3.4) so they
         // advance with simulation and freeze when the game is paused. `render()`
@@ -8171,9 +8237,13 @@ impl super::GameState {
                 match &self.mode {
                     GameMode::Playing => {
                         // Close crafting UI for all players that have it open
+                        // Both freezes hold the crafting window: handover and
+                        // C3d's pending canonical replacement/action boundary.
+                        let held = self.handover_holds_play();
                         for pidx in 0..self.players.len() {
-                            // C3d run 8 — through the one gate (a frozen window stays open).
-                            if self.players[pidx].crafting_ui.open { let _ = self.close_crafting(pidx); }
+                            if self.players[pidx].crafting_ui.open && !held {
+                                let _ = self.close_crafting(pidx);
+                            }
                         }
                         self.release_cursor();
                         self.skin_panel.open = false;
@@ -8663,8 +8733,29 @@ impl super::GameState {
             {
                 menu_state.tester_feedback = crate::native_mailbox::feedback_enabled(&self.graphics);
             }
+            // CP20 (CP18 review MEDIUM-1): a handover that finished while
+            // the lobby is up lists its world without leaving the lobby.
+            #[cfg(not(target_arch = "wasm32"))]
+            menu_state.poll_handovers();
             #[allow(unused_mut)]
             let mut action = crate::menu::draw_main_menu(&self.renderer.egui.ctx, menu_state);
+            #[cfg(test)]
+            if let Some(a) = self.test_menu_action.take() {
+                action = a;
+            }
+            // A recipient's handover outlives the joined world it began in.
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let click = crate::handover_game::draw(
+                    &self.renderer.egui.ctx,
+                    self.handover.as_ref(),
+                    false,
+                    true,
+                    // Field-level (the menu is borrowed): `handover_consent_armed`.
+                    self.handover_consent_shown.is_some_and(|t| t.elapsed() >= crate::handover_game::CONSENT_ARM),
+                );
+                self.handover_click = click.or(self.handover_click);
+            }
 
             // "Your relays" window — opened from the sign-in dialog's relay
             // button, so relays can be chosen before signing in (Spec 04 §1.9).
@@ -9458,6 +9549,23 @@ impl super::GameState {
                         }
                     }
                 }
+                // CP12 (CP10 review MEDIUM-1): the lobby's Quit and the
+                // updater's Restart end the process only through the one exit
+                // function; the event loop exits after this frame.
+                #[cfg(not(target_arch = "wasm32"))]
+                crate::menu::MenuAction::Quit => {
+                    self.exit_now = self.exit_app();
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                crate::menu::MenuAction::RestartForUpdate => {
+                    if self.exit_app() {
+                        match crate::self_update::running_appimage().map(|p| crate::self_update::relaunch(&p)) {
+                            Some(Ok(())) => self.exit_now = true,
+                            Some(Err(e)) => log::error!("relaunch after self-update failed: {e}"),
+                            None => log::error!("relaunch after self-update failed: not running from an AppImage"),
+                        }
+                    }
+                }
                 crate::menu::MenuAction::None => {}
             }
 
@@ -9950,7 +10058,14 @@ impl super::GameState {
                     .scenario
                     .as_ref()
                     .is_some_and(|s| s.def().kind == crate::scenario::ScenarioKind::Challenge);
-            let clicked = crate::menu::draw_pause_menu(&self.renderer.egui.ctx, &display_name, confirm_quit, confirm_creative, &mut self.difficulty, self.is_creative, lock_creative, self.players.len(), &mut cloud_save, is_trial, kept_autosave.as_deref());
+            let mut difficulty = self.difficulty.clone();
+            let clicked = crate::menu::draw_pause_menu(&self.renderer.egui.ctx, &display_name, confirm_quit, confirm_creative, &mut difficulty, self.is_creative, lock_creative, self.players.len(), &mut cloud_save, is_trial, kept_autosave.as_deref());
+            // World handover (M-A): world settings wait while play is held.
+            #[cfg(not(target_arch = "wasm32"))]
+            let clicked = self.handover_gate_pause_click(clicked);
+            if clicked != -1 || !self.handover_holds_play() {
+                self.difficulty = difficulty;
+            }
             // T2-10: while this machine hosts a LAN game, show where friends connect.
             #[cfg(not(target_arch = "wasm32"))]
             if let (Some(access), Some(hs)) = (self.lan_host.as_ref(), self.hosted_server.as_ref()) {
@@ -10161,6 +10276,11 @@ impl super::GameState {
                 _ => {} // -1 = no click
             }
             // Over the pause menu too: a failed Save says why where it was asked.
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let click = crate::handover_game::draw(&self.renderer.egui.ctx, self.handover.as_ref(), self.host_paused, true, self.handover_consent_armed());
+                self.handover_click = click.or(self.handover_click);
+            }
             self.draw_toast();
 
             let num_players = self.players.len();
@@ -10419,7 +10539,11 @@ impl super::GameState {
         // of the 20 Hz tick rate. Frame intents drive things like raycast,
         // break/place, hotbar scroll — anything that needs to respond at
         // the framerate rather than the simulation tickrate. Cross-platform.
-        let frame_intents: Vec<PlayerIntent> = {
+        // World handover: no frame-level gameplay (break, place, attack,
+        // drops, panels) while play is held.
+        let frame_intents: Vec<PlayerIntent> = if self.handover_holds_play() {
+            Vec::new()
+        } else {
             let dt = 1.0 / 60.0;
             #[allow(unused_mut)]
             let mut kbm = self.input.to_intent();
@@ -17193,6 +17317,14 @@ impl super::GameState {
             let dialogue_satoshi_target = self.players[pidx].dialogue_satoshi;
             let pending_build = self.players[pidx].pending_build_choice.clone();
             let painter_open = pidx == 0 && self.workshop_painter.open;
+            // World handover (M-A): the ONE gate for every HUD dialog while
+            // play is held (a frozen source, a paused or parked joiner): the
+            // dialog draws as a disabled pause notice and none of its
+            // actions run, so no chest move, craft, sign edit, trade, bounty
+            // claim or payout lands, and no request is sent into a parked
+            // connection. Lifted when play resumes (a pre-Retired abort).
+            let hud_frozen =
+                self.handover_holds_play() && (painter_open || self.players[pidx].hud_dialog_open());
 
             let critical = is_dead || self.controls_card_open || (pidx == 0 && self.trial_outcome.is_some())
                 || self.scenario.as_ref().is_some_and(|s| s.shows_blocking_end_card());
@@ -17220,11 +17352,7 @@ impl super::GameState {
                     crate::trials::TrialDoneAction::BackToTrials => {
                         self.leave_world(crate::world_exit::SaveChoice::Save, crate::world_exit::ExitTo::Lobby);
                     }
-                    crate::trials::TrialDoneAction::TryAgain => {
-                        self.trial_outcome = None;
-                        self.start_trial(&outcome.trial_id);
-                        self.capture_cursor();
-                    }
+                    crate::trials::TrialDoneAction::TryAgain => self.trial_try_again(&outcome.trial_id),
                     crate::trials::TrialDoneAction::None => {}
                 }
             } else if self.scenario.as_ref().is_some_and(|s| s.shows_blocking_end_card()) {
@@ -17263,12 +17391,7 @@ impl super::GameState {
                     | crate::hud_ui::ScenarioEndAction::BackToTrials => {
                         self.leave_world(crate::world_exit::SaveChoice::Save, crate::world_exit::ExitTo::Lobby);
                     }
-                    crate::hud_ui::ScenarioEndAction::TryAgain => {
-                        // Re-run the same challenge in place (fresh progress).
-                        let def = self.scenario.as_ref().unwrap().def().clone();
-                        self.start_scenario(def);
-                        self.capture_cursor();
-                    }
+                    crate::hud_ui::ScenarioEndAction::TryAgain => self.scenario_try_again(),
                     crate::hud_ui::ScenarioEndAction::None => {}
                 }
             } else if is_dead {
@@ -17311,6 +17434,17 @@ impl super::GameState {
                     // Next tick's death loop respawns the player.
                     self.players[pidx].combat.request_respawn();
                 }
+            } else if hud_frozen {
+                #[cfg(not(target_arch = "wasm32"))]
+                egui::Window::new("World handover")
+                    .id(egui::Id::new(("handover-dialogs-paused", pidx)))
+                    .collapsible(false)
+                    .resizable(false)
+                    .interactable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .show(&self.renderer.egui.ctx, |ui| {
+                        ui.label(crate::handover::live::copy::DIALOGS_PAUSED);
+                    });
             } else if painter_open {
                 // Spec 40 — the 16×16 paint-grid panel. Painting mutates the
                 // painter buffer in-place; only Pin/Cancel surface here.
@@ -18820,12 +18954,17 @@ impl super::GameState {
                 // commit it back through the world accessor.
                 let chest_data = self.world.chest_at(chest_pos).cloned();
                 if let Some(data) = chest_data {
-                    let result = crate::chest_ui::show_chest_dialog(
+                    #[allow(unused_mut)]
+                    let mut result = crate::chest_ui::show_chest_dialog(
                         &self.renderer.egui.ctx,
                         &data,
                         &self.players[pidx].inventory,
                         chest_pos,
                     );
+                    #[cfg(test)]
+                    if let Some(crate::handover_game::TestHudClick::Chest(c)) = self.test_hud_click.take() {
+                        result.clicks.push(c);
+                    }
                     // C3b-1 — each click through the one container rule.
                     let ctx = self.container_ctx(pidx, false);
                     for click in &result.clicks {
@@ -18897,6 +19036,16 @@ impl super::GameState {
                         bitcoin_enabled,
                         charter,
                     );
+                    #[cfg(test)]
+                    let outcome = match self.test_hud_click.take() {
+                        Some(crate::handover_game::TestHudClick::Bounty(bounty_id)) => {
+                            crate::bounty_ui::BountyUiOutcome::Claim { bounty_id }
+                        }
+                        other => {
+                            self.test_hud_click = other;
+                            outcome
+                        }
+                    };
                     match outcome {
                         crate::bounty_ui::BountyUiOutcome::InProgress => {}
                         crate::bounty_ui::BountyUiOutcome::Closed => {
@@ -20691,6 +20840,14 @@ impl super::GameState {
             crate::chat_ui::ChatAction::Cancel => {
                 self.chat.close();
             }
+            #[cfg(not(target_arch = "wasm32"))]
+            crate::chat_ui::ChatAction::Submit(_) if self.handover_holds_play() => {
+                self.chat.push_log(crate::commands::ChatLine::echo(
+                    crate::handover::live::copy::COMMAND_PAUSED.to_string(),
+                    self.tick_counter,
+                ));
+                self.chat.close();
+            }
             crate::chat_ui::ChatAction::Submit(line) if !line.trim_start().starts_with('/') => {
                 // World chat Phase 2: a plain (non-`/`) line is sent to
                 // whatever server exists (host loopback or a joined remote)
@@ -21524,6 +21681,19 @@ impl super::GameState {
             crate::touch_input::draw_touch_overlay(&self.renderer.egui.ctx, &self.touch);
         }
 
+        // ── World handover window (consent / status / paused banner) ─────────
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let click = crate::handover_game::draw(
+                &self.renderer.egui.ctx,
+                self.handover.as_ref(),
+                self.host_paused,
+                !self.input.cursor_captured,
+                self.handover_consent_armed(),
+            );
+            self.handover_click = click.or(self.handover_click);
+        }
+
         // ── Toast notification ────────────────────────────────────────────────
         self.draw_toast();
 
@@ -21623,7 +21793,11 @@ impl super::GameState {
             pending_grants = std::mem::take(&mut client.pending_grants);
             pending_life_events = std::mem::take(&mut client.pending_life_events);
             pending_outcomes = std::mem::take(&mut client.pending_outcomes);
-            pending_kills = std::mem::take(&mut client.pending_kills);
+            #[cfg(not(target_arch = "wasm32"))]
+            let personal_ready = client.personal_inbox.as_ref().is_none_or(|inbox| inbox.initialised());
+            #[cfg(target_arch = "wasm32")]
+            let personal_ready = true;
+            pending_kills = if personal_ready { std::mem::take(&mut client.pending_kills) } else { Vec::new() };
             pending_refused_uses = std::mem::take(&mut client.pending_refused_uses);
             // Deltas accumulated across every StateUpdate since last frame —
             // sourced from the accumulators, NOT latest_state, so a frame
@@ -21961,7 +22135,10 @@ impl super::GameState {
                     crate::remote_client::OwnLifeEvent::ArmourWorn(hits, event) => {
                         armour_worn.push((hits, event));
                     }
-                    crate::remote_client::OwnLifeEvent::Respawned(at) => {
+                    crate::remote_client::OwnLifeEvent::Respawned { at, respawns } => {
+                        if let Some(client) = self.remote_client.as_mut() && !client.apply_actor_respawn(respawns) { continue; }
+                        #[cfg(not(target_arch = "wasm32"))]
+                        if let Some(client) = self.remote_client.as_mut() { let life = client.applied_actor_respawns(); if let Some(inbox) = &mut client.personal_inbox { inbox.life = life; } }
                         self.players[0].last_grave = None;
                         // Back at full health: nothing reported before the
                         // death still applies.
@@ -21987,6 +22164,8 @@ impl super::GameState {
         if !self.edits_unsent() {
             self.apply_window_inbox();
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        self.apply_personal_inbox();
         // The kills the server credited to us.
         for kill in &pending_kills {
             self.apply_kill_event(kill);
@@ -22074,8 +22253,11 @@ impl super::GameState {
             return;
         }
         let pos_seed = crate::death_drops::death_seed(pos, self.world_time);
-        let counter = self.players[idx].kill_counter.entry(kind).or_insert(0);
-        *counter += 1;
+        let authoritative_personal = self.remote_client.as_ref().is_some_and(|c| c.has_personal_state());
+        if !authoritative_personal {
+            let counter = self.players[idx].kill_counter.entry(kind).or_insert(0);
+            *counter += 1;
+        }
         self.fire_challenge(crate::scenario::ChallengeEvent::KillMob);
         // UX polish sweep Task 1 — smoke puff on an attributed kill.
         self.particles.burst_smoke(pos, 6, pos_seed as u64);
@@ -22109,7 +22291,7 @@ impl super::GameState {
 
         // Phase 9 — villager-kill reputation penalty (30 s cooldown so a
         // rage-loop costs rep once, not per-kill).
-        if matches!(kind, crate::mob::MobType::Villager | crate::mob::MobType::Peddler) {
+        if !authoritative_personal && matches!(kind, crate::mob::MobType::Villager | crate::mob::MobType::Peddler) {
             let now = self.tick_counter;
             let last = self.players[idx].last_villager_kill_rep_tick;
             let on_cooldown = last
@@ -23107,7 +23289,9 @@ impl super::GameState {
     /// claim released: nothing will ever answer it (C3b-fix-e L7:
     /// `JoinerActions::settle`).
     fn send_request(&mut self, request: crate::remote_client::Request) {
-        if !self.remote_client.as_ref().is_some_and(|c| c.is_connected()) {
+        // A parked connection (a handover session holds it) is not a
+        // connection for requests: settled as unsent, never written into it.
+        if !self.remote_client.as_ref().is_some_and(|c| c.is_connected() && !c.is_parked()) {
             self.joiner_actions.settle(request.seq(), crate::joiner_actions::RequestFate::NoConnection);
             return;
         }
@@ -23302,6 +23486,8 @@ impl super::GameState {
             self.joiner_actions.acknowledged(acked);
         }
         self.release_retired_requests();
+        #[cfg(not(target_arch = "wasm32"))]
+        self.apply_personal_inbox();
         if satori {
             self.audio.play_gem_pickup();
             self.toast = Some(("+1 Satori".to_string(), Instant::now() + std::time::Duration::from_secs(3)));
@@ -23310,6 +23496,10 @@ impl super::GameState {
 
     pub(crate) fn network_send_input(&mut self) {
         if self.players.is_empty() { return; }
+        // World handover: a joiner whose host paused play (or whose
+        // connection a handover session holds) sends nothing; a frozen host
+        // queues nothing for its own server.
+        if self.handover_holds_play() { return; }
         // C3a-fix-1 (B-L1) — the ops logged before this input's first edit
         // go ahead of it; the rest after it (`flush_window_ops` below).
         self.flush_ops_before_edits();

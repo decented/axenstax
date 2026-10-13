@@ -47,6 +47,10 @@ impl HostedServer {
         if !valid { self.strict_bridge_teardown(i, StrictTeardown::Unreadable, "Foreign or regressing applied action acknowledgement"); }
     }
     pub(super) fn receive_typed_action(&mut self, i: usize, payload: &[u8]) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.server.players.get(i).is_some_and(|sp| sp.personal.is_some() && !sp.personal_delivery.initialised) {
+            return self.strict_bridge_teardown(i, StrictTeardown::Unreadable, "Action arrived before personal initialisation");
+        }
         use crate::action_queue::{QueueError, QueueResult};
         let Ok(packet) = ActionPacket::decode(payload) else { return self.strict_bridge_teardown(i, StrictTeardown::Unreadable, "Invalid typed action") };
         let Some(sp) = self.server.players.get_mut(i) else { return };

@@ -267,12 +267,46 @@ impl rustls::client::danger::ServerCertVerifier for SkipServerVerification {
     }
 }
 
+// --- Liveness ---
+
+/// How a QUIC connection stays alive when the game has nothing to say. One
+/// value, set on BOTH endpoint configs by one constructor
+/// ([`transport_config`]). quinn's default is a 30 s idle timeout and no
+/// keep-alive, so a silent stretch (a world frozen for a handover, a parked
+/// recipient waiting after Ready, a paused joiner) closed every connection at
+/// 30 s (handover CP2 review H1). The keep-alive is well inside a third of
+/// the idle timeout, so two lost keep-alives still don't idle a path out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Liveness {
+    pub idle: std::time::Duration,
+    pub keep_alive: Option<std::time::Duration>,
+}
+
+impl Liveness {
+    pub const DEFAULT: Liveness = Liveness {
+        idle: std::time::Duration::from_secs(30),
+        keep_alive: Some(std::time::Duration::from_secs(5)),
+    };
+}
+
+/// The one QUIC transport config both endpoints use.
+fn transport_config(l: Liveness) -> Result<Arc<quinn::TransportConfig>, Box<dyn std::error::Error>> {
+    let mut t = quinn::TransportConfig::default();
+    t.max_idle_timeout(Some(quinn::IdleTimeout::try_from(l.idle)?));
+    t.keep_alive_interval(l.keep_alive);
+    Ok(Arc::new(t))
+}
+
 // --- Server endpoint ---
 
 /// The server-side TLS + QUIC config. Lifted out of `create_server_endpoint` so
 /// the pre-bound-socket variant is the same configuration, not a second copy of
 /// it.
 fn server_quinn_config() -> Result<quinn::ServerConfig, Box<dyn std::error::Error>> {
+    server_quinn_config_with(Liveness::DEFAULT)
+}
+
+fn server_quinn_config_with(l: Liveness) -> Result<quinn::ServerConfig, Box<dyn std::error::Error>> {
     let (cert_der, key_der) = generate_self_signed_cert();
     let cert = rustls::pki_types::CertificateDer::from(cert_der);
     let key = rustls::pki_types::PrivateKeyDer::try_from(key_der)
@@ -281,9 +315,11 @@ fn server_quinn_config() -> Result<quinn::ServerConfig, Box<dyn std::error::Erro
         .with_no_client_auth()
         .with_single_cert(vec![cert], key)?;
     server_crypto.alpn_protocols = vec![ALPN_PROTOCOL.to_vec()];
-    Ok(quinn::ServerConfig::with_crypto(Arc::new(
+    let mut config = quinn::ServerConfig::with_crypto(Arc::new(
         quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto)?,
-    )))
+    ));
+    config.transport_config(transport_config(l)?);
+    Ok(config)
 }
 
 /// The client-side QUIC config. Certificate verification stays skipped: hosts
@@ -291,14 +327,20 @@ fn server_quinn_config() -> Result<quinn::ServerConfig, Box<dyn std::error::Erro
 /// event (plus the server-identity proof where the host has one), not the TLS
 /// certificate.
 fn client_quinn_config() -> Result<quinn::ClientConfig, Box<dyn std::error::Error>> {
+    client_quinn_config_with(Liveness::DEFAULT)
+}
+
+fn client_quinn_config_with(l: Liveness) -> Result<quinn::ClientConfig, Box<dyn std::error::Error>> {
     let mut client_crypto = rustls::ClientConfig::builder()
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
         .with_no_client_auth();
     client_crypto.alpn_protocols = vec![ALPN_PROTOCOL.to_vec()];
-    Ok(quinn::ClientConfig::new(Arc::new(
+    let mut config = quinn::ClientConfig::new(Arc::new(
         quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto)?,
-    )))
+    ));
+    config.transport_config(transport_config(l)?);
+    Ok(config)
 }
 
 /// Create a QUIC server endpoint bound to the given address.
@@ -306,7 +348,15 @@ fn client_quinn_config() -> Result<quinn::ClientConfig, Box<dyn std::error::Erro
 pub fn create_server_endpoint(
     bind_addr: SocketAddr,
 ) -> Result<quinn::Endpoint, Box<dyn std::error::Error>> {
-    let endpoint = quinn::Endpoint::server(server_quinn_config()?, bind_addr)?;
+    create_server_endpoint_with(bind_addr, Liveness::DEFAULT)
+}
+
+/// [`create_server_endpoint`] with an explicit liveness (tests shorten it).
+pub fn create_server_endpoint_with(
+    bind_addr: SocketAddr,
+    liveness: Liveness,
+) -> Result<quinn::Endpoint, Box<dyn std::error::Error>> {
+    let endpoint = quinn::Endpoint::server(server_quinn_config_with(liveness)?, bind_addr)?;
     log::info!("QUIC server listening on {bind_addr}");
     Ok(endpoint)
 }
@@ -335,9 +385,14 @@ pub fn create_server_endpoint_on_socket(
 }
 
 /// Create a QUIC client endpoint (binds to 0.0.0.0:0).
+#[cfg(test)]
 pub fn create_client_endpoint() -> Result<quinn::Endpoint, Box<dyn std::error::Error>> {
+    create_client_endpoint_with(Liveness::DEFAULT)
+}
+
+fn create_client_endpoint_with(liveness: Liveness) -> Result<quinn::Endpoint, Box<dyn std::error::Error>> {
     let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse()?)?;
-    endpoint.set_default_client_config(client_quinn_config()?);
+    endpoint.set_default_client_config(client_quinn_config_with(liveness)?);
     Ok(endpoint)
 }
 
@@ -522,6 +577,14 @@ pub fn bridge_server_connection(connection: quinn::Connection) -> QuicServerTran
 pub fn connect_to_server(
     server_addr: SocketAddr,
 ) -> Result<QuicClientTransport, Box<dyn std::error::Error>> {
+    connect_to_server_with(server_addr, Liveness::DEFAULT)
+}
+
+/// [`connect_to_server`] with an explicit liveness (tests shorten it).
+pub fn connect_to_server_with(
+    server_addr: SocketAddr,
+    liveness: Liveness,
+) -> Result<QuicClientTransport, Box<dyn std::error::Error>> {
     // game thread -> network thread (outbound)
     let (game_tx, net_rx) = tokio::sync::mpsc::unbounded_channel::<Packet>();
     // network thread -> game thread (inbound)
@@ -537,7 +600,7 @@ pub fn connect_to_server(
 
         rt.block_on(async move {
             // Create endpoint inside tokio runtime (quinn needs it)
-            let endpoint = match create_client_endpoint() {
+            let endpoint = match create_client_endpoint_with(liveness) {
                 Ok(ep) => ep,
                 Err(e) => {
                     log::error!("Failed to create client endpoint: {e}");
@@ -781,6 +844,18 @@ pub fn connect_to_server_on_socket(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// H1: both endpoint configs carry an explicit idle timeout (30 s) and a
+    /// keep-alive well inside a third of it, from the one constructor.
+    #[test]
+    fn quic_liveness_keeps_alive_well_inside_the_idle_timeout() {
+        let l = Liveness::DEFAULT;
+        assert_eq!(l.idle, std::time::Duration::from_secs(30));
+        let k = l.keep_alive.expect("a keep-alive is set");
+        assert!(k * 3 < l.idle, "keep-alive {k:?} is not inside a third of the idle timeout {:?}", l.idle);
+        assert!(transport_config(l).is_ok());
+        assert!(server_quinn_config().is_ok() && client_quinn_config().is_ok());
+    }
 
     /// Open one loopback QUIC connection and return (server-side, client-side)
     /// channel bindings.

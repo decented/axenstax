@@ -290,6 +290,16 @@ pub(crate) fn server_refusal_message(name: &str, why: &str) -> String {
     format!("world '{name}'{place} couldn't be opened: {why}. Nothing was changed.")
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+/// CP21 (CP19 review HIGH-1): the Trial's folder holds a handed-over world.
+/// CP24 (CP22 review LOW-2): it never invites deleting that world. A
+/// retired world is refused before this line (`copy::RETIRED`), so what
+/// reaches it is a world handed over TO this player (their own) or one whose
+/// handover outcome may still be open (an Aborted would leave the world
+/// theirs): deleting either could lose it.
+pub(crate) const ARENA_HOLDS_A_HANDOVER: &str =
+    "This Trial's folder holds a world that was handed over to you or is part of a handover, so the Trial won't start there. Nothing in it was changed.";
+
 /// How a Trial arena launch treats its folder, decided from what is ON DISK and
 /// before anything is written (Spec 02 §8.4). A world is there when
 /// [`is_new_world`] says so — not when the lobby lists it (only folders with a
@@ -306,6 +316,13 @@ pub(crate) fn plan_arena_folder(
 ) -> Result<crate::scenario::ArenaLaunch, String> {
     if let Some(why) = crate::save::world_open_refusal(name) {
         return Err(why);
+    }
+    // CP21 (CP19 review HIGH-1, defence in depth): a folder carrying
+    // handover records is a handed-over (or handing-over) world, never an
+    // arena: the Trial refuses rather than open or wipe it.
+    if std::fs::symlink_metadata(crate::save::world_dir(name).join("handover")).is_ok() {
+        log::warn!("Trial arena '{name}' carries handover records; the Trial won't open or wipe it");
+        return Err(ARENA_HOLDS_A_HANDOVER.to_owned());
     }
     let on_disk = !is_new_world(name).map_err(|why| crate::save_format::unopenable_message(&why))?;
     Ok(crate::scenario::plan_arena_launch(mode, on_disk))
@@ -846,6 +863,21 @@ mod tests {
             assert!(err.contains("world.dat can't be read"), "{mode:?}: {err}");
         }
         assert_eq!(snapshot(&d), before);
+        // CP21 (CP19 review HIGH-1): a folder carrying handover records is
+        // never opened or wiped as an arena, whatever the mode.
+        let h = saved_world("exp-hash-dash");
+        fs::create_dir(h.join("handover")).unwrap();
+        // The lock file every handed-over world carries (an Activated
+        // world passes the open guard, so only this rule stands in the way).
+        fs::write(h.join("handover").join(".live"), b"").unwrap();
+        assert_eq!(crate::save::world_open_refusal("exp-hash-dash"), None);
+        let before = snapshot(&h);
+        for mode in [ArenaMode::Reuse, ArenaMode::Resume, ArenaMode::KeepNew] {
+            assert_eq!(plan_arena_folder(mode, "exp-hash-dash"), Err(ARENA_HOLDS_A_HANDOVER.to_owned()), "{mode:?}");
+        }
+        assert_eq!(snapshot(&h), before, "a handed-over world in an arena folder was touched");
+        // CP24 (CP22 review LOW-2): the line never invites deleting it.
+        assert!(!ARENA_HOLDS_A_HANDOVER.to_lowercase().contains("delete"), "the arena line invites deleting a handover's world");
     }
 
     /// A world with chunks in several columns, several chunks tall — every

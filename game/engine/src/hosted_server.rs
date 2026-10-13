@@ -23,6 +23,10 @@
 //! spawned (native-only).
 
 mod death;
+#[cfg(not(target_arch = "wasm32"))]
+mod personal;
+#[cfg(not(target_arch = "wasm32"))]
+mod handover;
 mod sidecar;
 mod actions;
 mod strict_container;
@@ -495,6 +499,15 @@ pub struct HostedServer {
     lent_ids_reset: bool,
     #[cfg(not(target_arch = "wasm32"))]
     deferred_kicks: Vec<[u8; 32]>,
+    /// Review LOW-2: guests that overflowed during a handover freeze whose
+    /// release came outside the lend; kicked inside the next lent tick so
+    /// their leave settles on the authoritative world.
+    #[cfg(not(target_arch = "wasm32"))]
+    deferred_overflow: Vec<usize>,
+    /// World handover: the control link to ONE selected joiner, and while
+    /// frozen, the source freeze (`hosted_server/handover.rs`).
+    #[cfg(not(target_arch = "wasm32"))]
+    handover: Option<handover::HandoverLink>,
     /// C3c-3b — has this server taken its world's attachment log in yet?
     /// The first take only drops what is there: a lending host's world keeps
     /// its log on after a server stops (nothing turns it off), so it can hold
@@ -996,6 +1009,10 @@ impl HostedServer {
             lent_ids_reset: false,
             #[cfg(not(target_arch = "wasm32"))]
             deferred_kicks: Vec::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            deferred_overflow: Vec::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            handover: None,
             attachments_started: false,
             // Local slots ride an in-process channel: unbudgeted outboxes.
             outboxes: (0..num_local_players)
@@ -3750,6 +3767,13 @@ impl HostedServer {
         let Some(sp) = self.server.players.get(i).filter(|sp| sp.server_simulated) else {
             return;
         };
+        if !sp.combat.dead || sp.dead_ticks < crate::server::MIN_DEAD_TICKS_BEFORE_RESPAWN { return; }
+        // Reserve the next physical generation before body or terrain
+        // mutation. A reused life could accept stale personal/pack data.
+        let Some(next_respawns) = sp.respawns.checked_add(1) else {
+            if let Some(left) = self.release_slot(i, Some("This player's life counter is exhausted. Rejoin to continue.")) { self.send_to_joined_except(i, &left); }
+            return;
+        };
         let column = crate::chunk_stream::column_of(sp.spawn_pos);
         // C2a — a bed spawn can be anywhere, far from every column an owning
         // server keeps loaded (its players' and the world spawn's): it loads
@@ -3767,16 +3791,22 @@ impl HostedServer {
         if let Some(at) = self.server.respawn_player(i) {
             // FU4a (FU3 verify L1) — a new life: edits still waiting from the
             // last one are sent back, not applied (`process_edit_group`).
-            self.server.players[i].respawns = self.server.players[i].respawns.wrapping_add(1);
+            self.server.players[i].respawns = next_respawns;
             let pkt = protocol::serialize_packet(
                 protocol::PacketType::PlayerEvent,
                 &protocol::PlayerEventPacket {
                     player_index: i as u32,
-                    event: protocol::PlayerEventType::Respawned { x: at.x, y: at.y, z: at.z },
+                    event: protocol::PlayerEventType::Respawned { x: at.x, y: at.y, z: at.z, respawns: self.server.players[i].respawns },
                     window_event: 0,
                 },
             );
             self.send_to_joined_slot(i, &pkt);
+            #[cfg(not(target_arch = "wasm32"))]
+            if self.server.players[i].personal.is_some() {
+                let event = self.server.players[i].window_events.last_number();
+                if let Err(error) = self.start_personal(i, event, true) { log::warn!("Respawn personal delivery refused: {error}"); }
+            }
+
         }
     }
 
@@ -3851,6 +3881,16 @@ impl HostedServer {
     /// `sim_lend::LentSim::lend(hs, parts, clock).tick()` — so every step
     /// above reads and writes the host client's own world.
     pub fn tick(&mut self) {
+        // A frozen handover source runs no tick: no admission, no inbound
+        // gameplay, no simulation, no broadcast, no discovery heartbeat. Only
+        // `handover_take_frames` reads the selected joiner's control frames.
+        // A link whose session is gone is released first.
+        #[cfg(not(target_arch = "wasm32"))]
+        self.handover_reap();
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.handover_frozen() {
+            return;
+        }
         debug_assert_eq!(
             self.lends_host_world(),
             self.server.lent,
@@ -3858,6 +3898,10 @@ impl HostedServer {
         );
         #[cfg(not(target_arch = "wasm32"))]
         { let kicks = std::mem::take(&mut self.deferred_kicks); self.kick_pubkeys(&kicks); }
+        #[cfg(not(target_arch = "wasm32"))]
+        for j in std::mem::take(&mut self.deferred_overflow) {
+            self.handover_overflow_kick(j);
+        }
         self.accept_new_remote_connections();
         let closed_before_fill = self.process_inbound_packets();
         self.reap_slots(&closed_before_fill);
@@ -3872,6 +3916,8 @@ impl HostedServer {
             self.grant_to_joiner(idx, [stack]);
         }
         self.handle_joiner_deaths();
+        #[cfg(not(target_arch = "wasm32"))]
+        self.flush_personal_updates();
         self.announce_joiner_hits_and_kills();
         // World chat §4.2 — inbound room lines, delivered under the same
         // hearing rule as an in-world speaker. No-op unless a room is attached.
@@ -4046,6 +4092,16 @@ impl HostedServer {
         self.current_remote.fetch_add(1, Ordering::Relaxed);
         self.attach_remote_transport(Box::new(server_side));
         client_side
+    }
+
+    /// Test-only: replace the accept thread's hand-over channel, so a test
+    /// can deliver a connection exactly as the accept thread does (it then
+    /// waits for `accept_new_remote_connections` inside a tick).
+    #[cfg(test)]
+    pub(crate) fn test_accept_channel(&mut self) -> mpsc::Sender<Box<dyn ServerTransport>> {
+        let (tx, rx) = mpsc::channel();
+        self.remote_rx = Some(rx);
+        tx
     }
 
     /// Test-only: like [`Self::attach_test_remote`], but the server side of the
@@ -4267,11 +4323,15 @@ impl HostedServer {
                     continue;
                 };
                 match ptype {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    protocol::PacketType::Handover => self.route_handover_frame(i, payload),
                     protocol::PacketType::Action => {
                         if !self.handshake_done[i] || self.disconnected[i] { continue; }
                         self.receive_typed_action(i, payload);
                         self.process_typed_actions(i, &mut window_ops_this_tick, &mut item_actions_this_tick, &mut interacts_this_tick, &mut budget);
                     }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    protocol::PacketType::PersonalSync => { self.personal_applied(i, payload); }
                     protocol::PacketType::AppliedActionAck => {
                         if self.handshake_done[i] && !self.disconnected[i] { self.receive_applied_action_ack(i, payload); }
                     }
@@ -4409,6 +4469,8 @@ impl HostedServer {
                                     }
                                     if let Some(sp) = self.server.players.get_mut(i) {
                                         sp.verified_pubkey = id.pubkey;
+                                        sp.progression_tracked = id.pubkey.is_some();
+                                        sp.progression_credits = 0;
                                         sp.display_name = id.display_name.clone();
                                         // World chat (Phase 3) — resolved at
                                         // join, never cached (§2.5, §3.3). A
@@ -4490,7 +4552,25 @@ impl HostedServer {
                             }
                         }
 
+                        #[cfg(not(target_arch = "wasm32"))]
+                        if let Some(key) = self.server.players[i].verified_pubkey {
+                            let directory = crate::save::world_dir(&self.server.world_name);
+                            let prepared = crate::handover::live::personal_adapter::proof(&directory).and_then(|proof| {
+                                let Some(proof) = proof else { return Ok(()); };
+                                if self.num_local_players > 0 && key == proof.core.successor_persona {
+                                    return Err("This player is already playing locally here.".to_string());
+                                }
+                                if self.num_local_players == 0 { self.server.claim_remote_personal(key, &proof)?; }
+                                Ok(())
+                            });
+                            if let Err(error) = prepared { let _ = self.release_slot(i, Some(&error)); break; }
+                        }
                         let saved_joiner = self.server.load_joiner(i);
+                        if self.server.players[i].personal_read_failed {
+                            let _ = self.release_slot(i, Some("This world's saved player state couldn't be restored. It is preserved without reset."));
+                            break;
+                        }
+                        self.server.players[i].personal = saved_joiner.as_ref().and_then(|s| s.personal.clone());
                         // C3d (Decision 10, OC) — a Strict world admits only a
                         // record that proves no carried obligation. Refused
                         // before JoinAccept: the handshake isn't done, so
@@ -4558,10 +4638,16 @@ impl HostedServer {
                         self.server.players[i].action_frontier = Some(crate::action_identity::ActionFrontier::new(action_session, action_life));
                         self.server.players[i].action_queue = Some(Default::default());
                         self.server.players[i].action_results = Some(crate::action_results::ActionResults::new(self.server.players[i].action_frontier.as_ref().expect("issued frontier").header(0, 0)));
+                        let has_personal_state = self.server.players[i].personal.is_some();
+                        #[cfg(not(target_arch = "wasm32"))]
+                        if let Some(personal) = &self.server.players[i].personal && crate::personal_sync::snapshot(personal, action_session, action_life, 1, 1).is_err() {
+                            let _ = self.release_slot(i, Some("This player's complete progress is too large to deliver. Nothing was reset.")); break;
+                        }
                         let accept = protocol::JoinAcceptPacket {
                             inventory_mode: self.inventory_mode,
                             action_session,
                             action_life,
+                            has_personal_state,
                             player_index: i as u32,
                             // G3 — send the world's REAL seed so the joiner
                             // generates matching terrain (was hardcoded 42,
@@ -4627,7 +4713,14 @@ impl HostedServer {
                                     crate::plan::PlanData::marker_placeholder(crate::plan::marker(&body), matches!(body.develop_state, crate::plan::DevelopState::Developed))), count: stack.count }));
                             }
                         }
-                        if saved_joiner.is_some() || (0..36).any(|at| kit.inv.slot(at).is_some()) { self.send_inventory_sync(i, kit, debt); }
+                        if saved_joiner.is_some() || (0..36).any(|at| kit.inv.slot(at).is_some()) {
+                            let event = self.send_inventory_sync(i, kit, debt);
+                            #[cfg(not(target_arch = "wasm32"))]
+                            if has_personal_state && let Err(error) = self.start_personal(i, event, true) {
+                                log::warn!("Initial personal delivery failed: {error}");
+                                let _ = self.release_slot(i, Some("Personal state couldn't be delivered.")); break;
+                            }
+                        }
 
                         // The operator joining without a channel binding plays
                         // normally but gets no operator tools — say so, so the
@@ -7488,7 +7581,7 @@ fn spawn_quic_accept_thread(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     // ── C3c-3-fix (M2): a held claim never decodes to a Plan ──
@@ -7710,7 +7803,7 @@ mod tests {
     };
     use secp256k1::{Keypair, Secp256k1};
 
-    fn signed_auth_event(
+    pub(crate) fn signed_auth_event(
         seckey_bytes: [u8; 32],
         challenge_hex: &str,
         origin: &str,
@@ -7781,7 +7874,7 @@ mod tests {
     }
 
     /// Build a `JoinRequestPacket` carrying the given event + credential.
-    fn join_with_auth(
+    pub(crate) fn join_with_auth(
         event: SignetAuthEvent,
         cred: Option<SignetCredential>,
     ) -> protocol::JoinRequestPacket {
@@ -9028,6 +9121,32 @@ mod tests {
         }
         let sync = sync.expect("a returning empty window still syncs");
         assert_eq!(sync.window_event, 1); assert!(sync.slots.iter().all(|(_, s)| s.is_none()));
+    }
+
+    #[test]
+    fn handover_physical_life_exhaustion_preserves_dead_record_without_respawn() {
+        let _guard = crate::save::WorldsRootGuard::new("personal-life-exhaustion");
+        let mut hs = start_room_test_server("personal-life-max", 0);
+        let client = hs.attach_test_remote_with_binding(Some([17; 32]));
+        send_signed_join(&client, [66; 32], Some([17; 32])); hs.tick();
+        let i = hs.server.players.len() - 1;
+        let key = hs.server.players[i].verified_pubkey.unwrap();
+        let sp = &mut hs.server.players[i];
+        sp.inventory.set_slot(5, Some(crate::item::ItemStack::new_block(crate::block::DIRT, 3)));
+        sp.combat.health = 0.0; sp.combat.dead = true; sp.death_handled = true;
+        sp.dead_ticks = crate::server::MIN_DEAD_TICKS_BEFORE_RESPAWN;
+        sp.respawns = u32::MAX;
+        while client.try_recv_from_server().is_some() {}
+        hs.handle_respawn(i);
+        assert!(hs.disconnected[i], "an exhausted physical life still admitted gameplay");
+        assert_eq!(hs.server.players[i].respawns, u32::MAX, "physical life wrapped and reused an old generation");
+        assert!(hs.server.players[i].combat.dead, "the body respawned before the counter reservation");
+        let bytes = std::fs::read(crate::handover::live::personal_adapter::path(&crate::save::world_dir(&hs.server.world_name), key)).unwrap();
+        let saved = crate::joiner_save::JoinerSave::decode(&bytes).unwrap();
+        assert_eq!(saved.health, 0.0);
+        assert_eq!(saved.window().unwrap().inv.slot(5).unwrap().count, 3, "exhaustion lost the retained player record");
+        let events: Vec<protocol::PlayerEventPacket> = oc_received(&client, protocol::PacketType::PlayerEvent);
+        assert!(!events.iter().any(|e| matches!(e.event, protocol::PlayerEventType::Respawned { .. })), "an exhausted life emitted Respawned");
     }
 
     #[test]

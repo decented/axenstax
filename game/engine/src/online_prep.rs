@@ -239,6 +239,12 @@ pub struct LeaseKeeper {
 }
 
 impl LeaseKeeper {
+    /// A keeper holding no mapping (tests: a lease the router already lost).
+    #[cfg(test)]
+    pub(crate) fn lost_for_test() -> LeaseKeeper {
+        LeaseKeeper { lease: Lease::Lost, schedule: LeaseSchedule::new(Instant::now()) }
+    }
+
     pub fn new(mapping: PortMapping, now: Instant) -> LeaseKeeper {
         LeaseKeeper { lease: Lease::Held(Box::new(mapping)), schedule: LeaseSchedule::new(now) }
     }
