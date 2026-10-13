@@ -22238,13 +22238,9 @@ impl super::GameState {
         if !self.joiner_actions.can_afford(&p.inventory, &p.crafting_ui, asked, held.as_ref()) {
             return;
         }
-        let next_input = self.request_input_seq();
-        let seq = self.joiner_actions.record(
-            crate::joiner_actions::Pending { kind: asked, mob, hotbar_slot: hot, held },
-            next_input,
-        );
-        self.send_request(crate::remote_client::Request::Interact(crate::protocol::EntityInteractPacket {
-            seq,
+        let pending = crate::joiner_actions::Pending { kind: asked, mob, hotbar_slot: hot, held };
+        let packet = crate::protocol::EntityInteractPacket {
+            seq: 0,
             entity,
             kind,
             held_kind,
@@ -22252,9 +22248,32 @@ impl super::GameState {
             held_full,
             hotbar_slot: hot as u8,
             sneak,
-            // Stamped by `RemoteClient::send_entity_interact`.
+            // Stamped by `RemoteClient::send_entity_interact` (Mirror) or
+            // `strict_requests::route_interact` (Strict).
             events_applied: 0,
-        }));
+        };
+        // C3d run 23 — nothing is predicted for an interaction on either
+        // seat, and a Strict server relies on it (a world-fact refusal is a
+        // receipt and its note alone): the bracket observes it.
+        let no_prediction = {
+            let p = &self.players[pidx];
+            crate::strict_requests::NoPrediction::begin(self.remote_client.as_ref(), &p.crafting_ui, &p.inventory, &p.armour_slots, "interaction")
+        };
+        // A Strict seat reserves ONE typed interaction
+        // (`strict_requests::route_interact`); Mirror sends the legacy
+        // request, unchanged.
+        if crate::strict_requests::shot_goes_typed(self.remote_client.as_ref()) {
+            let p = &mut self.players[pidx];
+            if let Err(error) = crate::strict_requests::route_interact(self.remote_client.as_mut(), &mut p.crafting_ui, &p.inventory, &p.armour_slots, &mut self.joiner_actions, pending, packet) {
+                log::warn!("Strict interaction could not be reserved: {error}");
+            }
+        } else {
+            let next_input = self.request_input_seq();
+            let seq = self.joiner_actions.record(pending, next_input);
+            self.send_request(crate::remote_client::Request::Interact(crate::protocol::EntityInteractPacket { seq, ..packet }));
+        }
+        let p = &self.players[pidx];
+        crate::strict_requests::NoPrediction::check(no_prediction, &p.crafting_ui, &p.inventory, &p.armour_slots);
     }
 
     /// C2a — ask the server to let player `pidx` (a joiner) eat the food in

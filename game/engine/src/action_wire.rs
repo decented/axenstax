@@ -56,8 +56,15 @@ impl ActionIntent {
     /// predicted until its outcome). The table is a promise; the observed
     /// guard is `strict_requests::NoPrediction`, which the game loop runs
     /// around the swing and the shot (a window change there is an error).
+    ///
+    /// C3d run 23 — every entity interaction too (feed, tame, shear, milk,
+    /// a Lead on or off or on a post, a pet command, a mount): the client
+    /// records a `Pending` and takes the held item, and adds a product,
+    /// only from the server's accepted outcome and grants
+    /// (`joiner_actions::apply_outcome`); the game loop's `"interaction"`
+    /// bracket observes it.
     pub fn predicts_nothing(&self) -> bool {
-        matches!(self, ActionIntent::Attack(_))
+        matches!(self, ActionIntent::Attack(_) | ActionIntent::Interact(_))
             || matches!(self, ActionIntent::Item(p) if matches!(p.action, protocol::ItemAction::Shoot { .. }))
     }
 }

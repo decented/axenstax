@@ -197,6 +197,11 @@ impl HostedServer {
                 ActionIntent::Attack(req) if self.strict_slot(i) => {
                     if !self.serve_strict_attack(i, packet.action, &req) { return; }
                 }
+                // C3d run 23 — feed, tame, shear, milk, a Lead on, off or
+                // on a post, a pet command, a mount (`strict_interact.rs`).
+                ActionIntent::Interact(req) if self.strict_slot(i) => {
+                    if !self.serve_strict_interact(i, packet.action, &req) { return; }
+                }
                 _ => return self.pause_typed_action(i, StrictTeardown::Untyped, "Typed mutation handler is awaiting authoritative integration"),
             }
         }

@@ -28,6 +28,7 @@ mod actions;
 mod strict_container;
 mod strict_edit;
 mod strict_attack;
+mod strict_interact;
 mod strict_door;
 #[cfg(test)]
 mod c3d_tests;
@@ -53,6 +54,8 @@ mod c3d_refusal_correction_tests;
 mod c3d_client_shot_tests;
 #[cfg(test)]
 mod c3d_client_attack_tests;
+#[cfg(test)]
+mod c3d_interact_tests;
 #[cfg(test)]
 mod c3d_wear_target_tests;
 #[cfg(test)]
@@ -3511,13 +3514,33 @@ impl HostedServer {
         i: usize,
         req: &protocol::EntityInteractPacket,
     ) -> Option<crate::mob_interact::Interaction> {
+        // BRIDGE: possession check — replace when phase C makes joiner
+        // inventories server-authoritative (C3d: a Strict seat runs
+        // `run_joiner_interaction_with` on its server copy's item,
+        // `strict_interact.rs`). The food, bucket, shears or Lead in hand
+        // is the client's word; the client gives up what an accepted
+        // outcome says it used.
+        let held = held_item_from_wire(req.held_kind, req.held_id, &req.held_full, &self.server.registry);
+        self.run_joiner_interaction_with(i, req, held)
+    }
+
+    /// [`Self::run_joiner_interaction`] with the item in hand named by the
+    /// caller: Mirror's is the claim; a Strict seat's (C3d run 23) the
+    /// server copy's item in the named hotbar slot. Mirror's rules either
+    /// way (target, `NotOnThisServer`, cooldown, then the shared run).
+    pub(super) fn run_joiner_interaction_with(
+        &mut self,
+        i: usize,
+        req: &protocol::EntityInteractPacket,
+        held: Option<crate::item::Item>,
+    ) -> Option<crate::mob_interact::Interaction> {
         // Review D2b B3 — a Lead on a fence post names a block, not a mob.
         if let protocol::InteractKind::LeadToPost { post } = req.kind {
-            return self.run_joiner_lead_to_post(i, req, post);
+            return self.run_joiner_lead_to_post(i, post, held);
         }
         // MP-D2c-1 — a mount may be a cart, which is no mob.
         if req.kind == protocol::InteractKind::Mount {
-            return self.run_joiner_mount(i, req);
+            return self.run_joiner_mount(i, req, held);
         }
         let (target, kind) = self.joiner_target(i, req.entity)?;
         // Review D2b MEDIUM-2 — what this world doesn't simulate (breeding,
@@ -3533,11 +3556,6 @@ impl HostedServer {
             return None;
         }
         sp.interact_cooldown = INTERACT_COOLDOWN_TICKS;
-        // BRIDGE: possession check — replace when phase C makes joiner
-        // inventories server-authoritative. The food, bucket, shears or Lead
-        // in hand is the client's word; the client gives up what an accepted
-        // outcome says it used.
-        let held = held_item_from_wire(req.held_kind, req.held_id, &req.held_full, &self.server.registry);
         let key = sp.pet_owner_key();
         let actor = crate::mob_interact::Actor {
             owner_key: key.as_deref(),
@@ -3571,6 +3589,7 @@ impl HostedServer {
         &mut self,
         i: usize,
         req: &protocol::EntityInteractPacket,
+        held: Option<crate::item::Item>,
     ) -> Option<crate::mob_interact::Interaction> {
         let sp = self.server.players.get(i)?;
         if !sp.server_simulated || !sp.is_present_and_alive() || sp.riding.is_some() {
@@ -3601,10 +3620,10 @@ impl HostedServer {
         if let Some(cell) = cart {
             let look = crate::camera::forward_from(sp.yaw, sp.pitch);
             crate::cart::dispatch_cart(&mut self.server.ecs, &mut self.server.world, cell, look)?;
-            // BRIDGE: possession check — the empty hand is the client's word,
-            // as every held claim is (a hand it says holds something only
-            // dispatches the freight).
-            let held = held_item_from_wire(req.held_kind, req.held_id, &req.held_full, &self.server.registry);
+            // BRIDGE: possession check — on Mirror the empty hand is the
+            // client's word, as every held claim is (a hand it says holds
+            // something only dispatches the freight); a Strict seat's is its
+            // server copy's.
             if held.is_some() {
                 return Some(crate::mob_interact::Interaction::accepted());
             }
@@ -3643,8 +3662,8 @@ impl HostedServer {
     fn run_joiner_lead_to_post(
         &mut self,
         i: usize,
-        req: &protocol::EntityInteractPacket,
         post: [i32; 3],
+        held: Option<crate::item::Item>,
     ) -> Option<crate::mob_interact::Interaction> {
         let sp = self.server.players.get(i)?;
         if !sp.server_simulated || !sp.is_present_and_alive() {
@@ -3666,9 +3685,8 @@ impl HostedServer {
             return None;
         }
         sp.interact_cooldown = INTERACT_COOLDOWN_TICKS;
-        // BRIDGE: possession check — the Lead in hand is the client's word
-        // (see `run_joiner_interaction`).
-        let held = held_item_from_wire(req.held_kind, req.held_id, &req.held_full, &self.server.registry);
+        // BRIDGE (Mirror): the Lead in hand is the client's word (see
+        // `run_joiner_interaction`).
         let actor = crate::mob_interact::Actor {
             owner_key: None,
             tether: crate::tether::TetherTarget::Player(i),

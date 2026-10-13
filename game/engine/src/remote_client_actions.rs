@@ -215,10 +215,13 @@ impl RemoteClient {
 
 /// Is a journaled intent (its encoded packet) a `SetAutoRefill`?
 /// C3d run 17 — the request `seq` of a journaled typed attack or shot (the
-/// two typed classes recorded in `JoinerActions`), else `None`.
+/// two typed classes recorded in `JoinerActions`), else `None`. C3d run 23 —
+/// and of a typed interaction (a corrected refusal sends no outcome; a
+/// world-fact one sends its note too, and a second release is a no-op).
 fn unanswered_request(intent: &[u8]) -> Option<u32> {
     match crate::action_wire::ActionPacket::decode(intent).ok()?.intent {
         crate::action_wire::ActionIntent::Attack(p) => Some(p.seq),
+        crate::action_wire::ActionIntent::Interact(p) => Some(p.seq),
         crate::action_wire::ActionIntent::Item(p) if matches!(p.action, protocol::ItemAction::Shoot { .. }) => Some(p.seq),
         _ => None,
     }

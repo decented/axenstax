@@ -147,6 +147,61 @@ pub fn route_attack(
     Ok(Some(header))
 }
 
+/// What a reserved typed interaction retains in its journal entry (C3d run
+/// 23): the hotbar slot it was made from (the server reads its own copy's
+/// item there, never the claim) and the window it was made on (nothing is
+/// predicted, so also the window after it until the outcome arrives).
+#[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct InteractRecipe {
+    pub slot: u8,
+    pub digest: u32,
+}
+
+/// C3d run 23 — route player 0's entity interaction `packet` (feed, tame,
+/// shear, milk, a Lead on, off or on a post, a pet command, a mount; its
+/// `events_applied` is stamped here), recorded as `pending` (what Mirror's
+/// `GameState::send_interaction` records): on a Strict seat, the session's
+/// refill setting, the record, ONE reserved `ActionIntent::Interact`, then
+/// the send, and `Some(header)`. Nothing is predicted: the held item is
+/// taken, and a product added, only by the server's accepted outcome and
+/// numbered grants (`joiner_actions::apply_outcome`). `None` off a Strict
+/// seat: the caller sends the legacy `EntityInteract`, unchanged. A failed
+/// reservation releases the record and changes nothing else.
+#[allow(clippy::too_many_arguments)]
+pub fn route_interact(
+    remote: Option<&mut RemoteClient>,
+    ui: &mut CraftingUi,
+    inv: &Inventory,
+    armour: &[Option<ArmourItem>; 4],
+    actions: &mut JoinerActions,
+    pending: Pending,
+    mut packet: protocol::EntityInteractPacket,
+) -> Result<Option<ActionHeader>, String> {
+    let Some(remote) = remote.filter(|r| shot_goes_typed(Some(&**r))) else { return Ok(None) };
+    ui.sync_auto_refill_joined(remote, inv, armour)?;
+    let recipe = InteractRecipe { slot: packet.hotbar_slot, digest: ui.digest(inv, armour) };
+    let recipe = bincode::serialize(&recipe).map_err(|e| e.to_string())?.into_boxed_slice();
+    packet.seq = actions.record(pending, remote.next_input_seq());
+    packet.events_applied = remote.applied_window_boundary();
+    let seq = packet.seq;
+    // The server relies on nothing predicted: a world-fact refusal (the mob
+    // gone, the cooldown, milk not ready, `NotOnThisServer`) is a receipt
+    // and its note alone (`refuse_world_fact`); the game loop's
+    // `NoPrediction` bracket checks it on the window.
+    let intent = crate::action_wire::ActionIntent::Interact(packet);
+    let header = match remote.reserve_action(intent, recipe, Box::new([])) {
+        Ok(header) => header,
+        Err(error) => {
+            actions.release(seq);
+            return Err(error);
+        }
+    };
+    if let Err(error) = remote.send_reserved_action(header) {
+        log::warn!("Reserved interaction {} could not be sent: {error}", header.seq);
+    }
+    Ok(Some(header))
+}
+
 /// C3d run 17 (run-16 review LOW-1) — the observed half of
 /// `ActionIntent::predicts_nothing`: a Strict swing or shot changes nothing
 /// in the joined window before its answer, and the server relies on it (a
@@ -211,11 +266,12 @@ mod bracket_position_tests {
     /// `send_entity_attack` and closes after the local-hit wear block; the
     /// shot bracket encloses `send_shot`. Moving or removing either fails.
     /// Run 21 (run-18 review L1): removing a bracket's close no longer lets
-    /// the search run on to the next bracket's.
+    /// the search run on to the next bracket's. Run 23: the interaction
+    /// bracket encloses both the typed route and Mirror's legacy request.
     #[test]
-    fn c3d_no_prediction_brackets_enclose_the_swing_and_the_shot() {
+    fn c3d_no_prediction_brackets_enclose_the_swing_the_shot_and_the_interaction() {
         let src = include_str!("game_loop.rs");
-        for (what, inside) in [("\"swing\")", &["self.send_entity_attack(pidx", "inventory.use_hotbar_tool(hotbar)"][..]), ("\"shot\")", &["self.send_shot(pidx, weapon)"][..])] {
+        for (what, inside) in [("\"swing\")", &["self.send_entity_attack(pidx", "inventory.use_hotbar_tool(hotbar)"][..]), ("\"shot\")", &["self.send_shot(pidx, weapon)"][..]), ("\"interaction\")", &["strict_requests::route_interact(", "Request::Interact("][..])] {
             let begin = src.find(&format!("NoPrediction::begin(self.remote_client.as_ref(), &p.crafting_ui, &p.inventory, &p.armour_slots, {what}")).unwrap_or_else(|| panic!("the {what} bracket opens in the game loop"));
             let end = begin + src[begin..].find("NoPrediction::check(").unwrap_or_else(|| panic!("the {what} bracket closes"));
             // C3d run 21 (run-18 review L1) — the close found is THIS

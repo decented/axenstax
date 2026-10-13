@@ -141,9 +141,15 @@ impl HostedServer {
 /// exactly `held`, the server copy's item (`None` = an empty hand)? The
 /// shot's claim rule, with the empty hand allowed.
 pub(super) fn claim_matches(held: Option<&Item>, req: &protocol::EntityAttackPacket) -> bool {
+    claim_parts_match(held, req.held_kind, req.held_id, &req.held_full)
+}
+
+/// C3d run 23 — [`claim_matches`] over a claim's parts (an attack's or an
+/// interaction's `held_kind`, `held_id`, `held_full`).
+pub(super) fn claim_parts_match(held: Option<&Item>, held_kind: u8, held_id: u16, held_full: &protocol::WireItem) -> bool {
     let (pair, full) = match held {
         Some(item) => (crate::inventory::item_to_ref(item).to_wire(), crate::inventory::item_to_wire_full(item)),
         None => (protocol::ItemRef::Empty.to_wire(), protocol::WireItem::None),
     };
-    pair == (req.held_kind, req.held_id) && full == req.held_full
+    pair == (held_kind, held_id) && &full == held_full
 }
