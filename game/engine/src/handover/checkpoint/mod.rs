@@ -8,6 +8,7 @@ mod files;
 mod import;
 mod pack;
 mod receipt;
+mod sync_pool;
 use super::{Error, Result};
 use crate::save::{WorldMeta, WorldSave};
 pub use admission::{AdmittedManifest, OfferContext, sign_offer};

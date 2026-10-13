@@ -5199,7 +5199,15 @@ receiver metadata transform; its new secret and verified recipient owner stamp
 have an explicit transformv1 digest in a private durable receipt bound to the
 original manifest/core/world/transfer and original admission evidence. Required
 writes, file syncs, nested-directory syncs, atomic no-replace rename and parent
-sync must succeed. Pre-rename cleanup removes only its own scratch folder;
+sync must succeed. Extraction flushes each received and working member, plus
+the admission and manifest, through four workers with an eight-handle bounded
+queue. The workers retain the original writable file handles and all join
+before the receipt is created, directory syncing, rename or Ready. Archive and
+receipt flushes remain synchronous; both complete durability scans and all
+directory syncs remain. Any worker error or panic refuses completion, and
+cleanup joins all workers before removing scratch, including cancellation,
+failed thread creation and unwind. The observer's FileSync boundary remains
+before the flush is submitted. Pre-rename cleanup removes only its own scratch folder;
 post-rename uncertainty preserves the import for exact restart/retry and late
 cleanup never deletes it. Native no-replace uses Linux renameat2 and Android SYS_renameat2 via the
 existing syscall symbol (no API30 Bionic dependency on the API24 app),

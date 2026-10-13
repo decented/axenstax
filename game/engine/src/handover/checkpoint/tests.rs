@@ -1286,3 +1286,78 @@ fn handover_checkpoint_participant_record_is_strictly_bound_to_manifest_context(
         Some(super::super::Error::Invalid("participant context"))
     );
 }
+
+#[cfg(test)]
+mod sync_pool_tests {
+    use super::super::sync_pool::SyncPool;
+    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+
+    #[cfg(unix)]
+    #[test]
+    fn handover_import_sync_pool_propagates_a_real_flush_failure() {
+        let mut pool = SyncPool::new().unwrap();
+        let file = crate::fsync::open_written(&mut std::fs::OpenOptions::new(), std::path::Path::new("/dev/null")).unwrap();
+        pool.submit(file).unwrap();
+        assert!(pool.finish().is_err(), "a real fsync failure was hidden");
+    }
+
+    #[test]
+    fn handover_import_sync_pool_drains_every_file_after_a_worker_error() {
+        let temp = super::Temp::new();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let counted = attempts.clone();
+        let mut pool = SyncPool::start(move |file| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            if file.metadata()?.len() == 1 {
+                Err(std::io::Error::other("injected worker sync error"))
+            } else {
+                crate::fsync::sync_written(file)
+            }
+        }).unwrap();
+        for i in 0..37 {
+            let file = super::files::new_written(&temp.0.join(format!("member-{i}"))).unwrap();
+            file.set_len(if i == 0 { 1 } else { 2 }).unwrap();
+            pool.submit(file).unwrap();
+        }
+        assert!(pool.finish().is_err(), "a worker sync error was lost");
+        assert_eq!(attempts.load(Ordering::SeqCst), 37, "finish returned before every worker joined");
+    }
+
+    #[test]
+    fn handover_import_sync_pool_joins_before_scratch_cleanup() {
+        // An extraction/observer error exits before finish: Drop must still
+        // drain and join, so scratch cleanup cannot race an open writer.
+        let temp = super::Temp::new();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let counted = attempts.clone();
+        let gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let blocked = gate.clone();
+        let mut pool = SyncPool::start(move |file| {
+            let (lock, wake) = &*blocked;
+            let _released = wake.wait_while(lock.lock().unwrap(), |released| !*released).unwrap();
+            counted.fetch_add(1, Ordering::SeqCst);
+            crate::fsync::sync_written(file)
+        }).unwrap();
+        for i in 0..8 {
+            pool.submit(super::files::new_written(&temp.0.join(format!("cancel-{i}"))).unwrap()).unwrap();
+        }
+        let (begun, waiting) = std::sync::mpsc::channel();
+        let (done, finished) = std::sync::mpsc::channel();
+        let cleanup = std::thread::spawn(move || {
+            begun.send(()).unwrap();
+            drop(pool);
+            done.send(()).unwrap();
+        });
+        waiting.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        let early = finished.recv_timeout(std::time::Duration::from_millis(250)).is_ok();
+        let (lock, wake) = &*gate;
+        *lock.lock().unwrap() = true;
+        wake.notify_all();
+        if !early {
+            finished.recv_timeout(std::time::Duration::from_secs(5)).expect("cleanup never joined its workers");
+        }
+        cleanup.join().unwrap();
+        assert!(!early, "scratch cleanup returned while its sync workers were still blocked");
+        assert_eq!(attempts.load(Ordering::SeqCst), 8, "scratch cleanup raced a sync worker");
+    }
+}

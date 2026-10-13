@@ -6,7 +6,7 @@ use super::super::{
     stream::{Chunk, Receiver},
 };
 use super::receipt::{durable_tree, receipt_bytes, verify_receipt};
-use super::{AdmittedManifest, files, validate_metadata};
+use super::{AdmittedManifest, files, sync_pool::SyncPool, validate_metadata};
 use sha2::{Digest, Sha256};
 use std::{
     fs,
@@ -259,6 +259,7 @@ fn write_file(
     mut reader: impl Read,
     length: u64,
     o: &mut impl ImportObserver,
+    pool: Option<&mut SyncPool>,
 ) -> Result<Hash> {
     observe(o, ImportBoundary::Write, path)?;
     let mut file = files::new_written(path)?;
@@ -279,7 +280,12 @@ fn write_file(
     if reader.read(&mut tail).map_err(|_| Error::Io)? != 0 {
         return Err(Error::Invalid("long member"));
     }
-    sync_written(&file, path, o)?;
+    if let Some(pool) = pool {
+        observe(o, ImportBoundary::FileSync, path)?;
+        pool.submit(file)?;
+    } else {
+        sync_written(&file, path, o)?;
+    }
     Ok(hash.finalize().into())
 }
 struct Limited<R> {
@@ -314,6 +320,7 @@ fn extract(
     let working = directory.join("working");
     fs::create_dir(&raw).map_err(|_| Error::Io)?;
     fs::create_dir(&working).map_err(|_| Error::Io)?;
+    let mut syncs = SyncPool::new()?;
     // Physical tar overhead is separately bounded, in addition to manifest's
     // logical512MiB sum. Raw entries prohibit hidden GNU/PAX long-name bodies.
     let cap = limits.logical + (a.manifest().members.len() as u64) * 1024 + 1024;
@@ -347,7 +354,7 @@ fn extract(
         }
         let dest = raw.join(&expected.path);
         create_parent(&raw, &dest)?;
-        let hash = write_file(&dest, &mut entry, expected.length, o)?;
+        let hash = write_file(&dest, &mut entry, expected.length, o, Some(&mut syncs))?;
         if hash != expected.digest {
             return Err(Error::Invalid("member hash"));
         }
@@ -399,9 +406,9 @@ fn extract(
                 return Err(Error::Limit("receiver metadata allocation"));
             }
             let json = encoded.inner;
-            write_file(&to, json.as_slice(), json.len() as u64, o)?;
+            write_file(&to, json.as_slice(), json.len() as u64, o, Some(&mut syncs))?;
         } else {
-            write_file(&to, files::open(&from)?, member.length, o)?;
+            write_file(&to, files::open(&from)?, member.length, o, Some(&mut syncs))?;
         }
     }
     let evidence = a.evidence();
@@ -410,6 +417,7 @@ fn extract(
         evidence,
         evidence.len() as u64,
         o,
+        Some(&mut syncs),
     )?;
     let manifest = a.manifest().encode()?;
     write_file(
@@ -417,7 +425,11 @@ fn extract(
         manifest.as_slice(),
         manifest.len() as u64,
         o,
+        Some(&mut syncs),
     )?;
+    // Every received and working file is durable and every worker has joined
+    // before the receipt is created, directory syncing or a rename can begin.
+    syncs.finish()?;
     let meta = files::digest(
         files::open(&working.join("world_meta.json"))?,
         2 * 1024 * 1024,
@@ -429,6 +441,7 @@ fn extract(
         receipt.as_slice(),
         receipt.len() as u64,
         o,
+        None,
     )?;
     Ok(())
 }
