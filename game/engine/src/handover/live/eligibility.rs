@@ -27,6 +27,17 @@ pub fn local_seats(count: usize) -> Result<(), Refusal> {
     Ok(())
 }
 
+/// Entity-bound quests and unexpired cooldowns have no schema1 carrier.
+/// Refuse both consent and frozen capture instead of silently dropping them.
+pub(crate) fn local_progress(slot: &crate::player_slot::PlayerSlot, tick: u64) -> Result<(), Refusal> {
+    if crate::nostrich_vow::is_vow_active(slot.nostrich_vow.as_ref()) || !slot.active_quests.is_empty() || !slot.kill_quest_baseline.is_empty()
+        || slot.villager_decline_until.values().any(|until| *until > tick)
+        || slot.last_villager_kill_rep_tick.is_some_and(|last| tick.saturating_sub(last) < 600) {
+        return Err(Refusal("Finish your active quests and wait for village cooldowns or curses before handing this world over. Nothing was changed."));
+    }
+    Ok(())
+}
+
 /// The signed-in identity now must be the one the host action captured.
 pub fn source_identity(captured: [u8; 32], now: Option<[u8; 32]>) -> Result<(), Refusal> {
     match now {
@@ -66,13 +77,16 @@ pub fn seats(server: &GameServer, recipient: Seat) -> Result<(), Refusal> {
     if sp.attach_gen != recipient.generation || sp.verified_pubkey != Some(recipient.key) {
         return Err(Refusal("That player reconnected. Choose them again."));
     }
-    if !sp.progression_tracked || sp.progression_credits != 0 {
+    if !sp.progression_tracked || sp.progression_credits != 0
+        || sp.personal.as_ref().is_some_and(|p| !sp.personal_delivery.quiescent(p, sp.respawns)) {
         return Err(Refusal("That player has village or hunting progress this session, which this version can't move yet."));
     }
     if sp.combat.dead {
         return Err(Refusal("That player is dead. Wait until they respawn."));
     }
-    if !sp.window_events.is_quiescent() {
+    if !sp.window_events.is_quiescent()
+        || sp.action_queue.as_ref().is_some_and(|q| !q.is_empty())
+        || sp.action_results.as_ref().is_some_and(|r| !r.is_quiescent()) {
         return Err(Refusal("That player's inventory is still settling with yours. Try again in a moment."));
     }
     // OC: every connected joiner the checkpoint includes must provably owe
@@ -227,6 +241,7 @@ pub fn neutralise(save: &mut WorldSave, source_npub: &str) -> Result<(), Refusal
     // they stay in its own world, never on the copy the recipient hosts.
     save.waypoints.clear();
     save.satoshi = Default::default();
+    save.local_personal = None;
     save.players.clear();
     save.inventory.clear();
     save.locked_slots.clear();

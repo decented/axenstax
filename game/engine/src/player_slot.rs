@@ -144,6 +144,8 @@ pub struct PlayerSlot {
     /// quest's `Kill` target. Doesn't reset between quests — each new Kill
     /// quest captures a snapshot of the current count and checks delta.
     pub kill_counter: ahash::AHashMap<crate::mob::MobType, u32>,
+    /// Identity latched by the imported-world loader; local snapshot capture only.
+    pub(crate) personal_binding: Option<crate::joiner_save::PersonalBinding>,
     /// Snapshot of `kill_counter` at the moment a Kill quest was accepted;
     /// delta = current - snapshot. None for non-Kill quests.
     pub kill_quest_baseline: ahash::AHashMap<hecs::Entity, (crate::mob::MobType, u32)>,
@@ -443,6 +445,7 @@ impl PlayerSlot {
             villager_decline_until: ahash::AHashMap::new(),
             active_quests: ahash::AHashMap::new(),
             kill_counter: ahash::AHashMap::new(),
+            personal_binding: None,
             kill_quest_baseline: ahash::AHashMap::new(),
             charter_allows_sats: false,
             charter_comms: crate::comms::CommsLevel::Approved,

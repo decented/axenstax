@@ -1883,7 +1883,7 @@ format version in a trailing footer — see the bincode note under Migration str
       have made new saves unreadable to shipped builds, and a 4-byte header magic
       collides with a legacy save's leading `seed: u32`; an 8-byte trailing magic
       at the very end of a footer-less save is not a realistic collision.
-    - **`SAVE_FORMAT_VERSION`** = `WORLD_SAVE_FIELD_COUNT` (52 today) +
+    - **`SAVE_FORMAT_VERSION`** = `WORLD_SAVE_FIELD_COUNT` (53 today) +
       `SAVE_LAYOUT_REVISION` (0). Two tripwire tests stop drift: serde's field list
       for `WorldSave` must equal `WORLD_SAVE_FIELD_COUNT` (so appending a field
       without bumping the version fails), and the tolerant reader must consume every
@@ -2440,3 +2440,17 @@ other. No upload, no server call, no identity — the same posture as `.axeworld
   visible but not necessarily simulated.
 - **Sleeping world**: A world with no connected players whose runtime has been shut down,
   persisting only as files on disk.
+
+
+### Handover local personal snapshot (private checkpoint, final gates pending)
+
+WorldSave appends `local_personal` after `rig_clips`: a bounded optional canonical
+v3 personal record, selected together with the actual primary/recovery-autosave
+world snapshot. WORLD_SAVE_FIELD_COUNT is53, SAVE_LAYOUT_REVISION remains0 and
+SAVE_FORMAT_VERSION is53. This is an appended field, not a nested old-layout
+change. Known older saves default it absent. Current version53 truncation or
+malformed trailing personal state refuses without resetting it to an absent
+field. Transfer neutralisation clears the field and captures identity-selected
+seeds/progression separately. Explicit save/autosave/discard commits local bag
+and progression with the same selected world/chest state; final execution
+controls are pending before the checkpoint is accepted.

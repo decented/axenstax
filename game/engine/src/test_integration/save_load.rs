@@ -212,6 +212,7 @@ fn legacy_single_player_save_synthesises_one_player_entry() {
         satoshi: Default::default(),
         dispensers: Vec::new(),
         rig_clips: Vec::new(),
+        local_personal: None,
     };
 
     // Round-trip via bincode to mimic the on-disk path. Defensive: a

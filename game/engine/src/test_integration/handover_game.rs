@@ -424,6 +424,18 @@ fn recipient_stage(hg: &HeadlessGame) -> Option<RecipientStage> {
 /// The game sees the proposal through its real receive path and consents
 /// with a click; the source freezes and makes its frozen capture.
 fn consented(j: &mut Joined) -> SourceSession {
+    if j._dir.0.file_name().unwrap().to_string_lossy().contains("dst-opens-activated") {
+        let sp = &mut j.hs.server.players[j.slot];
+        sp.inventory.set_slot(5, Some(crate::item::ItemStack::new_block(crate::block::DIRT, 11)));
+        let mut plan = crate::plan::PlanData::debug_3x3_stone();
+        plan.name = "Recipient latent exposure".into();
+        plan.develop_state = crate::plan::DevelopState::Latent { exposure_ticks: 12 };
+        crate::plan_store::remember_checked(&plan, crate::body_residency::allocated_body_bytes(&plan).unwrap()).unwrap();
+        sp.cursor = Some(crate::item::ItemStack { item: crate::item::Item::Plan(plan), count: 1 });
+        sp.craft_grid[1][2] = Some(crate::item::ItemStack::new_material(crate::item::MaterialId::Diamond, 2));
+        sp.armour[3] = Some(crate::armour::ArmourItem::new(crate::armour::ArmourSlot::Boots, crate::armour::ArmourMaterial::Iron));
+        sp.combat.health = 8.0; sp.combat.hunger = 9;
+    }
     let mut src = source(j);
     for _ in 0..10 {
         step(j);
@@ -451,7 +463,9 @@ fn consented(j: &mut Joined) -> SourceSession {
         src.pump(&mut j.hs, live(), now()).unwrap();
     }
     assert_eq!(src.stage(), SourceStage::Frozen);
-    let seat0 = crate::player_slot::PlayerSlot::new(0, glam::Vec3::new(3.0, 70.0, 3.0), 1.0);
+    let mut seat0 = crate::player_slot::PlayerSlot::new(0, glam::Vec3::new(3.0, 70.0, 3.0), 1.0);
+    seat0.inventory.set_slot(4, Some(crate::item::ItemStack::new_block(crate::block::GLASS, 9)));
+    seat0.kill_counter.insert(crate::mob::MobType::Pig, 7);
     let context = src.record_context(key(SOURCE_PERSONA));
     let sidecar = capture::local0_sidecar(&seat0, [9; 16]).unwrap();
     let progress = capture::local0_progress(&seat0, context).unwrap();
@@ -1102,6 +1116,52 @@ fn game_harness_handover_recipient_opens_and_hosts_the_activated_world_from_the_
         assert!(std::time::Instant::now() < deadline, "the handed-over world never opened");
     }
     assert_eq!(j.hg.state.world_name, folder);
+    let own = &j.hg.state.players[0];
+    assert_eq!(own.inventory.slot(5).unwrap().count, 11, "the promoted world lost its recipient's own bag");
+    assert!(own.inventory.slot(4).is_none(), "the source owner's bag was donated to the recipient");
+    assert_eq!(own.crafting_ui.grid[1][2].as_ref().unwrap().count, 2, "the grid was lost");
+    assert!(own.armour_slots[3].is_some(), "the recipient's armour was lost");
+    let crate::item::Item::Plan(plan) = &own.crafting_ui.cursor_item.as_ref().unwrap().item else { panic!("recipient cursor Plan lost") };
+    assert_eq!(plan.develop_state, crate::plan::DevelopState::Latent { exposure_ticks: 12 }, "resolving a marker changed its private body's identity");
+    assert!(plan.marker.is_none(), "the locally retained body was not resolved");
+    assert_eq!((own.combat.health, own.combat.hunger), (8.0,9));
+    assert!(own.kill_counter.is_empty(), "the source owner's progression was donated");
+    let chest = (3, 69, 3);
+    j.hg.state.world.set_block(chest.0,chest.1,chest.2,crate::block::CHEST);
+    j.hg.state.world.insert_chest(chest, crate::chest::ChestData::default());
+    j.hg.state.save_live_world().unwrap();
+    // Deposit, autosave, explicit discard: both bag and chest select primary.
+    let stack=j.hg.state.players[0].inventory.slot(5).cloned().unwrap();
+    j.hg.state.players[0].inventory.set_slot(5,None);
+    j.hg.state.world.chest_at_mut(chest).unwrap().slots[0]=Some(stack);
+    j.hg.state.players[0].kill_counter.insert(crate::mob::MobType::Pig,23);
+    j.hg.state.autosave_counter=5999; j.hg.ticks(1);
+    assert!(crate::save::has_autosave(&folder));
+    assert!(j.hg.state.leave_world(crate::world_exit::SaveChoice::Discard,crate::world_exit::ExitTo::Lobby));
+    open_from_lobby(&mut j.hg,&folder);
+    assert_eq!(j.hg.state.players[0].inventory.slot(5).unwrap().count,11,"discard kept an autosaved personal bag");
+    assert!(j.hg.state.world.chest_at(chest).unwrap().slots[0].is_none(),"discard kept the autosaved chest");
+    assert!(j.hg.state.players[0].kill_counter.is_empty(),"discard kept autosaved progress");
+    // The same deposit with Save & Quit selects the complete new pair.
+    let stack=j.hg.state.players[0].inventory.slot(5).cloned().unwrap();
+    j.hg.state.players[0].inventory.set_slot(5,None);
+    j.hg.state.world.chest_at_mut(chest).unwrap().slots[0]=Some(stack);
+    j.hg.state.players[0].kill_counter.insert(crate::mob::MobType::Pig,23);
+    assert!(j.hg.state.leave_world(crate::world_exit::SaveChoice::Save,crate::world_exit::ExitTo::Lobby));
+    open_from_lobby(&mut j.hg,&folder);
+    assert!(j.hg.state.players[0].inventory.slot(5).is_none(),"save replayed the frozen bag");
+    assert_eq!(j.hg.state.world.chest_at(chest).unwrap().slots[0].as_ref().unwrap().count,11);
+    assert_eq!(j.hg.state.players[0].kill_counter[&crate::mob::MobType::Pig],23,"save/reopen lost current progression");
+    // Withdraw, autosave, discard selects the saved deposit without duplication.
+    let stack=j.hg.state.world.chest_at_mut(chest).unwrap().slots[0].take().unwrap();
+    j.hg.state.players[0].inventory.set_slot(5,Some(stack));
+    j.hg.state.players[0].kill_counter.insert(crate::mob::MobType::Pig,24);
+    j.hg.state.autosave_counter=5999; j.hg.ticks(1);
+    assert!(j.hg.state.leave_world(crate::world_exit::SaveChoice::Discard,crate::world_exit::ExitTo::Lobby));
+    open_from_lobby(&mut j.hg,&folder);
+    assert!(j.hg.state.players[0].inventory.slot(5).is_none(),"discard duplicated the withdrawn bag");
+    assert_eq!(j.hg.state.world.chest_at(chest).unwrap().slots[0].as_ref().unwrap().count,11);
+    assert_eq!(j.hg.state.players[0].kill_counter[&crate::mob::MobType::Pig],23);
     // CP20 (CP18 review LOW-5): a real save of the moved world.
     assert_eq!(j.hg.state.save_live_world(), Ok(()), "the handed-over world didn't save");
     // Host it (a lent host on the in-process transport), and a joiner joins.
@@ -1347,4 +1407,14 @@ fn game_harness_handover_recipient_after_a_verified_abort_keeps_playing_the_resu
         "the link wasn't handed back to the joined world"
     );
     drop(src);
+}
+
+fn open_from_lobby(hg: &mut HeadlessGame, folder: &str) {
+    hg.state.pending_menu_action=Some((crate::menu::MenuAction::LoadWorld(folder.into(),crate::spawn_pref::SpawnPref::Default),web_time::Instant::now()));
+    let deadline=std::time::Instant::now()+std::time::Duration::from_secs(180);
+    while !matches!(hg.state.mode,crate::GameMode::Playing) {
+        hg.frames(1);
+        if let crate::GameMode::Menu(menu)=&hg.state.mode { assert!(menu.notice.is_none(),"promoted load refused: {:?}",menu.notice); }
+        assert!(std::time::Instant::now()<deadline,"promoted load never completed");
+    }
 }

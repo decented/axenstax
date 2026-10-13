@@ -11,7 +11,7 @@
 //! the manifest digest, so the record never embeds the manifest digest itself
 //! (that would be circular).
 use super::{
-    Error, Hash, Id, Result,
+    Error, Result,
     codec::{Reader, frame},
 };
 use crate::mob::MobType;
@@ -25,13 +25,7 @@ pub const CLAIMS_LIMIT: usize = 4096;
 const LOCK_BITS: u64 = (1 << 36) - 1;
 
 /// The context every record of one checkpoint shares.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct RecordContext {
-    pub participant: Hash,
-    pub lineage: Id,
-    pub generation: u64,
-    pub transfer: Id,
-}
+pub use crate::personal_value::PersonalContext as RecordContext;
 
 /// Owner-only local restore: never applied to anybody but `participant`.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -124,7 +118,11 @@ impl PersonalRecord {
             return Err(Error::Invalid("participant reputation score"));
         }
         if let Some(l) = &self.local {
-            let finite = l.pos.iter().chain([&l.yaw, &l.pitch]).all(|f| f.is_finite());
+            let finite = l
+                .pos
+                .iter()
+                .chain([&l.yaw, &l.pitch])
+                .all(|f| f.is_finite());
             if !finite || l.hotbar > 8 || l.locks & !LOCK_BITS != 0 {
                 return Err(Error::Invalid("participant local restore"));
             }
@@ -244,7 +242,7 @@ impl PersonalRecord {
     }
     /// Install ONLY this record's progression into a slot that belongs to
     /// the same participant. No reward, claim or payout routine runs.
-    pub fn install_progression(&self, slot: &mut crate::player_slot::PlayerSlot) {
+    pub(crate) fn install_progression(&self, slot: &mut crate::player_slot::PlayerSlot) {
         slot.reputation.per_village.clear();
         for (k, s) in &self.reputation {
             slot.reputation.per_village.insert(*k, *s);

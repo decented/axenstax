@@ -455,6 +455,8 @@ impl crate::GameState {
         // late save can't rewrite retired authority.
         #[cfg(not(target_arch = "wasm32"))]
         crate::handover::live::authority::open_guard(&crate::save::world_dir(&self.world_name)).map_err(|r| r.0.to_string())?;
+        #[cfg(not(target_arch = "wasm32"))]
+        self.preflight_personal_local()?;
         let result = crate::save::save_world_superseding_autosave(
             &self.world_name,
             &self.world,

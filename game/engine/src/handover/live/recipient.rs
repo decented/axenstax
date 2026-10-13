@@ -386,9 +386,11 @@ impl RecipientSession {
     pub fn proposal(&self) -> &Proposal {
         &self.proposal
     }
+    #[cfg_attr(not(test), expect(dead_code, reason = "Retained handover proof utility; the live controller uses its checked adapter"))]
     pub fn checkpoint(&self) -> Option<&DurableCheckpoint> {
         self.checkpoint.as_ref()
     }
+    #[cfg_attr(not(test), expect(dead_code, reason = "Retained handover proof utility; the live controller uses its checked adapter"))]
     pub fn listener(&self) -> Option<&LatchedListener> {
         self.listener.as_ref()
     }
@@ -506,6 +508,7 @@ impl RecipientSession {
     pub fn hold_lease(&mut self, lease: Box<dyn HeldLease>) {
         self.lease = Some(lease);
     }
+    #[cfg_attr(not(test), expect(dead_code, reason = "Retained handover proof utility; the live controller uses its checked adapter"))]
     pub fn holds_lease(&self) -> bool {
         self.lease.is_some()
     }

@@ -14,10 +14,7 @@ use crate::save::{WorldMeta, WorldSave};
 pub use admission::{AdmittedManifest, OfferContext, sign_offer};
 pub use evidence::{OfflineRecovery, RecoveredCheckpoint};
 pub use import::{DurableCheckpoint, Import, ImportBoundary, ImportObserver, NoFault};
-pub use pack::{
-    CheckpointSource, PackBinding, PackControl, PackedCheckpoint, ParticipantMember, Snapshot,
-    SnapshotSource, pack, pack_limited, pack_snapshot,
-};
+pub use pack::{CheckpointSource, PackBinding, PackControl, PackedCheckpoint, ParticipantMember, Snapshot, SnapshotSource, pack, pack_limited, pack_snapshot};
 
 /// A transfer COPY, preserving world history but carrying no source operator
 /// credentials, publication endpoint or Stash opt-in. Original is unchanged.
@@ -49,7 +46,7 @@ fn validate_metadata(meta: &WorldMeta) -> Result<()> {
     Ok(())
 }
 fn validate_neutral(save: &WorldSave) -> Result<()> {
-    if !save.players.is_empty()
+    if save.local_personal.is_some() || !save.players.is_empty()
         || !save.inventory.is_empty()
         || !save.locked_slots.is_empty()
         || save.player_x.to_bits() != 0

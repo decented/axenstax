@@ -268,7 +268,9 @@ impl super::GameState {
         // A joined session never reads a local save: an old "remote_game"
         // folder (written by builds before 2026-09-28) would otherwise restore
         // another server's inventory, position and chunks into this one.
-        let load_result = if !self.persists_locally() {
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut selected_personal_directory = crate::save::world_dir(&self.world_name);
+        let mut load_result = if !self.persists_locally() {
             None
         } else {
             match crate::world_open::open_world(
@@ -278,6 +280,8 @@ impl super::GameState {
             ) {
                 Ok(crate::world_open::OpenedWorld::New) => None,
                 Ok(crate::world_open::OpenedWorld::Loaded { save, chunks, from }) => {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if from.opened_from_autosave() { selected_personal_directory = selected_personal_directory.join("autosave"); }
                     // An autosave the world opened from is KEPT until a save lands
                     // (`world_exit::should_clear_autosave`, `pause_save`): with a
                     // damaged world.dat it is the only good copy, and deleting it
@@ -308,6 +312,39 @@ impl super::GameState {
                 }
             }
         };
+        #[cfg(not(target_arch = "wasm32"))]
+        let personal = if self.persists_locally() {
+            let selected = (|| -> Result<Option<crate::joiner_save::JoinerSave>, String> {
+                let directory = crate::save::world_dir(&self.world_name);
+                let Some(proof) = crate::handover::live::personal_adapter::proof(&directory)? else { return Ok(None); };
+                let key = self.handover_signed_in().ok_or("Sign in as this world's new host before opening it.")?;
+                if key != proof.core.successor_persona { return Err("Sign in as this world's new host before opening it.".into()); }
+                if let Some(snapshot) = load_result.as_ref().and_then(|(save, _)| save.local_personal.as_ref()) {
+                    let saved = crate::joiner_save::JoinerSave::decode(&snapshot.0)?;
+                    let bound = saved.personal.as_ref().ok_or("selected personal snapshot has no authority binding")?;
+                    if bound.binding != proof.binding(key) { return Err("selected personal snapshot belongs to another player or transfer".into()); }
+                    // This selected primary/autosave owns the local window and
+                    // maps together. Refresh its remote canonical mirror only
+                    // after complete validation, before exposing gameplay.
+                    crate::handover::live::personal_adapter::write(&directory, key, &saved)?;
+                    return Ok(Some(saved));
+                }
+                let saved = crate::handover::live::personal_adapter::load_or_bootstrap(&directory, key, &proof)?
+                    .ok_or_else(|| "This world's saved player record is missing. Nothing was changed.".to_string())?;
+                let snapshot = &mut load_result.as_mut().ok_or("imported world has no selected snapshot")?.0;
+                // Establish the initial selected snapshot before first play:
+                // explicit discard must have a personal baseline to restore.
+                snapshot.local_personal = Some(crate::personal_value::LocalPersonalSave(saved.encode()?));
+                crate::handover::live::personal_adapter::write_world_snapshot(&directory, &selected_personal_directory, snapshot)?;
+                Ok(Some(saved))
+            })();
+            match selected {
+                Ok(value) => value,
+                Err(why) => { self.leave_world_with_notice(crate::world_exit::SaveChoice::Abandon, format!("This world couldn't be opened: {why}")); return false; }
+            }
+        } else { None };
+        #[cfg(not(target_arch = "wasm32"))]
+        { self.local_personal = None; }
         // A world that opened (or is genuinely new) gets its Proof-of-Play secret
         // persisted now — deferred from the lobby so a refused world is never
         // written (`GameState::apply_world_seed`) — or, when the open had to
@@ -590,6 +627,14 @@ impl super::GameState {
                 "Resuming preloaded world '{}' — skipping fresh-world setup.",
                 self.world_name
             );
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(save) = personal {
+            match crate::handover::live::personal_adapter::install(&save, &mut self.players[0]) {
+                Ok(binding) => self.local_personal = Some(binding),
+                Err(why) => { self.leave_world_with_notice(crate::world_exit::SaveChoice::Abandon, format!("This world couldn't be opened: {why}")); return false; }
+            }
         }
 
         // ── Common tail (all paths) ─────────────────────────────────────────

@@ -358,6 +358,7 @@ fn join_accept_carries_spawn_and_game_mode() {
         inventory_mode: crate::action_identity::InventoryMode::Mirror,
         action_session: [7; 16],
         action_life: 0,
+        has_personal_state: false,
     };
     let pkt = protocol::serialize_packet(protocol::PacketType::JoinAccept, &acc);
     let (_ptype, payload) = protocol::deserialize_header(&pkt).unwrap();

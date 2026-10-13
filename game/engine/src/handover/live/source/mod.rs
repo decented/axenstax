@@ -248,6 +248,14 @@ impl SourceSession {
         if *cfg.bearer.expose() == [0; 16] {
             return Err(Refusal(super::copy::NO_LIVE_INVITE));
         }
+        let context = crate::handover::personal::RecordContext { participant: action.seat.key, lineage: cfg.lineage, generation: cfg.generation, transfer: [1; 16] };
+        let save = crate::joiner_save::JoinerSave::capture(&hs.server.players[action.seat.slot], hs.server.run_id);
+        let seed = save.encode_seed().map_err(|_| Refusal("The other player's inventory couldn't be recorded."))?;
+        let progress = if let Some(personal) = &save.personal {
+            let mut record = personal.record().map_err(|_| Refusal("The other player's progress couldn't be recorded."))?;
+            record.context = context; record.encode().map_err(|_| Refusal("The other player's progress couldn't be recorded."))?
+        } else { super::capture::default_progress(context) };
+        super::personal_adapter::preflight(&seed, &progress, context)?;
         let transfer = random_id();
         let s = action.seat;
         let lease = hs.handover_bind(s.slot, s.generation, s.key, transfer).map_err(Refusal)?;
@@ -340,16 +348,20 @@ impl SourceSession {
     pub fn stage(&self) -> SourceStage {
         self.stage
     }
+    #[cfg_attr(not(test), expect(dead_code, reason = "Retained handover proof utility; the live controller uses its checked adapter"))]
     pub fn transfer(&self) -> Id {
         self.transfer
     }
+    #[cfg_attr(not(test), expect(dead_code, reason = "Retained handover proof utility; the live controller uses its checked adapter"))]
     pub fn core(&self) -> Option<&Core> {
         self.core.as_ref()
     }
+    #[cfg_attr(not(test), expect(dead_code, reason = "Retained handover proof utility; the live controller uses its checked adapter"))]
     pub fn ready(&self) -> Option<&Event> {
         self.ready.as_ref()
     }
     /// P2: the bearer has been sent to the recipient.
+    #[cfg_attr(not(test), expect(dead_code, reason = "Retained handover proof utility; the live controller uses its checked adapter"))]
     pub fn bearer_disclosed(&self) -> bool {
         self.disclosed
     }
@@ -359,10 +371,12 @@ impl SourceSession {
         self.rotate_invite
     }
     /// The retained copy's world id (in the retirement record).
+    #[cfg_attr(not(test), expect(dead_code, reason = "Retained handover proof utility; the live controller uses its checked adapter"))]
     pub fn retained_copy(&self) -> Id {
         self.retained_copy
     }
     /// After Retired: the exact signed Commit bytes this source persisted.
+    #[cfg_attr(not(test), expect(dead_code, reason = "Retained handover proof utility; the live controller uses its checked adapter"))]
     pub fn commit_event(&self) -> Option<&Event> {
         self.commit.as_ref()
     }
@@ -459,6 +473,7 @@ impl SourceSession {
     /// CP13b (D2): aborted after disclosure, but the abort record couldn't
     /// be written: play resumed anyway, and the caller shows
     /// `copy::ABORT_UNRECORDED`.
+    #[cfg_attr(not(test), expect(dead_code, reason = "Retained handover proof utility; the live controller uses its checked adapter"))]
     pub fn abort_unrecorded(&self) -> bool {
         self.abort_unrecorded
     }

@@ -999,7 +999,12 @@ const QUARANTINED_V1: &str = "AxeNStax/handover/receiver-quarantined/v1";
 /// readable (`receipt`, its marker payload), the record must name that
 /// receipt's Prepared. Writes nothing; the bearer copy is zeroed.
 pub(crate) fn activated_record_checks(payload: &[u8], transfer: Id, receipt: Option<&[u8]>) -> bool {
-    let checked = (|| -> Result<()> {
+    activated_core(payload, transfer, receipt).is_ok()
+}
+
+/// The same full, receipt-bound decoder used by the open guard, exposing
+/// only certificate context. The bearer is zeroed before returning.
+pub(crate) fn activated_core(payload: &[u8], transfer: Id, receipt: Option<&[u8]>) -> Result<Core> {
         let mut r = Reader::new(payload, super::durable::MARKER_LIMIT)?;
         r.label(ACTIVATED_V2)?;
         let core = Core::decode(r.framed(super::certificate::CORE_LIMIT)?)?;
@@ -1017,9 +1022,7 @@ pub(crate) fn activated_record_checks(payload: &[u8], transfer: Id, receipt: Opt
                 return Err(Error::Invalid("activation binding"));
             }
         }
-        Ok(())
-    })();
-    checked.is_ok()
+        Ok(core)
 }
 
 /// The root a stored receipt names, rebuilt from its relays (`now = 0`: the

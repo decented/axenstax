@@ -11,7 +11,7 @@ pub mod context;
 pub mod crypto;
 pub mod durable;
 pub mod ledger;
-pub mod live;
+pub(crate) mod live;
 pub mod manifest;
 pub mod personal;
 pub mod phase;

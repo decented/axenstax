@@ -14,3 +14,4 @@ pub mod source;
 pub mod wire;
 pub mod world_lock;
 pub mod copy;
+pub(crate) mod personal_adapter;

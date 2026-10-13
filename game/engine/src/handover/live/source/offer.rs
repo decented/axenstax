@@ -140,14 +140,20 @@ impl SourceSession {
         let recipient_record = crate::joiner_save::JoinerSave::capture(&hs.server.players[seat.slot], hs.server.run_id);
         eligibility::recipient_record(Some(&recipient_record))?;
         let recipient_sidecar =
-            recipient_record.encode().map_err(|_| Refusal("The other player's inventory couldn't be recorded."))?;
+            recipient_record.encode_seed().map_err(|_| Refusal("The other player's inventory couldn't be recorded."))?;
         let context = |participant| RecordContext {
             participant,
             lineage: self.cfg.lineage,
             generation: self.cfg.generation,
             transfer: self.transfer,
         };
-        let recipient_progress = crate::handover::live::capture::default_progress(context(seat.key));
+        let recipient_progress = if let Some(personal) = &recipient_record.personal {
+            let mut record = personal.record().map_err(|_| Refusal("The other player's progress couldn't be recorded."))?;
+            record.context = context(seat.key);
+            record.encode().map_err(|_| Refusal("The other player's progress couldn't be recorded."))?
+        } else { crate::handover::live::capture::default_progress(context(seat.key)) };
+        super::super::personal_adapter::preflight(c.source_sidecar, c.source_progress, context(self.action.source_key))?;
+        super::super::personal_adapter::preflight(&recipient_sidecar, &recipient_progress, context(seat.key))?;
         let (src_npub, dst_npub) = (npub(self.action.source_key), npub(seat.key));
         let rows = [
             ParticipantMember { npub: &src_npub, kind: MemberKind::Sidecar, schema: 1, bytes: c.source_sidecar },

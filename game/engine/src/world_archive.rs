@@ -467,6 +467,7 @@ mod tests {
             satoshi: Default::default(),
             dispensers: Vec::new(),
             rig_clips: Vec::new(),
+            local_personal: None,
         }
     }
 

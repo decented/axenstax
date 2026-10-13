@@ -9,8 +9,10 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::JoinHandle;
 
 pub struct LatchedListener {
+    #[cfg_attr(not(test), expect(dead_code, reason = "Retained handover proof utility; the live controller uses its checked adapter"))]
     addr: SocketAddr,
     shutdown: Arc<AtomicBool>,
+    #[cfg_attr(not(test), expect(dead_code, reason = "Retained handover proof utility; the live controller uses its checked adapter"))]
     refused: Arc<AtomicUsize>,
     thread: Option<JoinHandle<()>>,
 }
@@ -62,10 +64,12 @@ impl LatchedListener {
         rx.recv().map_err(|e| e.to_string())??;
         Ok(Self { addr, shutdown, refused, thread: Some(thread) })
     }
+    #[cfg_attr(not(test), expect(dead_code, reason = "Retained handover proof utility; the live controller uses its checked adapter"))]
     pub fn local_addr(&self) -> SocketAddr {
         self.addr
     }
     /// Connections refused so far.
+    #[cfg_attr(not(test), expect(dead_code, reason = "Retained handover proof utility; the live controller uses its checked adapter"))]
     pub fn refused(&self) -> usize {
         self.refused.load(Ordering::Relaxed)
     }

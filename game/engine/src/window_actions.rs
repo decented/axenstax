@@ -28,6 +28,7 @@ impl GameState {
     /// it. Esc while frozen pauses ([`Self::esc_crafting`]): a never-answered
     /// Respawn can't trap the player in a modal with no pause menu.
     fn strict_window_frozen(&self, pidx: usize) -> bool {
+        if pidx == 0 && self.remote_client.as_ref().is_some_and(|r| !r.personal_ready()) { return true; }
         pidx == 0
             && self.strict_window_connection()
             && (self.players[0].is_dead() || self.remote_client.as_ref().is_some_and(|r| r.respawn_unanswered()))
@@ -37,6 +38,7 @@ impl GameState {
         self.toast = Some(("Inventory action is waiting; try again.".into(), web_time::Instant::now() + web_time::Duration::from_secs(2)));
     }
     pub(crate) fn apply_window_click(&mut self, pidx: usize, click: &WindowClick) -> ClickResult {
+        if pidx == 0 && self.remote_client.as_ref().is_some_and(|r| !r.personal_ready()) { return ClickResult::Refused; }
         if !self.strict_window_connection() {
             let p = &mut self.players[pidx];
             return p.crafting_ui.apply_click(&mut p.inventory, &mut p.armour_slots, click, self.is_creative, p.player.eye_pos(), |cell| self.world.get_block(cell[0], cell[1], cell[2]));

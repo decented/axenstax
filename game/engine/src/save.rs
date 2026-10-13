@@ -334,6 +334,10 @@ pub struct WorldSave {
     /// Never reorder/remove.
     #[serde(default)]
     pub rig_clips: Vec<crate::anim_set::AnimClip>,
+    /// Handover local personal state follows the exact selected world snapshot,
+    /// including explicit Save/Discard and autosave. APPEND LAST.
+    #[serde(default)]
+    pub local_personal: Option<crate::personal_value::LocalPersonalSave>,
 }
 
 /// One serialised Dispenser/Dropper. Position + DispenserData (mirrors
@@ -834,6 +838,7 @@ impl LegacyWorldSave {
             chests: Vec::new(),
             dispensers: Vec::new(),
             rig_clips: Vec::new(),
+            local_personal: None,
             // Legacy saves predate Spec 34 — no tip jars.
             tip_jars: Vec::new(),
             auctions: Vec::new(),
@@ -2065,6 +2070,7 @@ pub fn build_world_save(
         rigs: world.rigs.clone(),
         // #19 — index-aligned clip side table (see `WorldSave.rig_clips`).
         rig_clips: world.rigs.iter().map(|r| r.clip).collect(),
+        local_personal: crate::joiner_save::capture_local(&players[0]).ok()?,
         exhibits: world.exhibits.clone(),
         composters: world.iter_composters().map(|((x, y, z), data)| SavedComposter { x, y, z, data: data.clone() }).collect(),
         tip_jars,
@@ -2306,6 +2312,7 @@ pub fn save_world(
         rigs: world.rigs.clone(),
         // #19 — index-aligned clip side table (see `WorldSave.rig_clips`).
         rig_clips: world.rigs.iter().map(|r| r.clip).collect(),
+        local_personal: None,
         exhibits: world.exhibits.clone(),
         composters: world.iter_composters().map(|((x, y, z), data)| SavedComposter { x, y, z, data: data.clone() }).collect(),
         tip_jars,
@@ -2571,6 +2578,7 @@ fn deserialize_world_save_tolerant_reporting(
         // #19 — per-rig animation clip (index-aligned with `rigs`). NEWEST field;
         // read LAST.
         rig_clips: tail.field(&mut cur, "rig_clips"),
+        local_personal: tail.field(&mut cur, "local_personal"),
     };
     Ok((save, tail.failed_at, cur.position()))
 }
@@ -2609,7 +2617,12 @@ pub fn read_world_save_reporting(data: &[u8]) -> Result<(WorldSave, bool), World
         return Err(e);
     }
     match deserialize_world_save_tolerant_reporting(payload) {
-        Ok((s, failed, _)) => Ok((s, failed.is_some())),
+        Ok((s, failed, _)) => {
+            if version.is_some_and(|v| v >= 53) && (failed.is_some() || bincode::serialize(&s).map_err(|e| WorldSaveError::Undecodable(e.to_string()))?.as_slice() != payload) {
+                return Err(WorldSaveError::Undecodable("current personal snapshot is truncated or corrupt; preserved without reset".into()));
+            }
+            Ok((s, failed.is_some()))
+        },
         Err(_) => {
             let legacy: LegacyWorldSave = bincode::deserialize(payload).map_err(|e| {
                 WorldSaveError::Undecodable(format!("deserialize (legacy fallback): {e}"))
@@ -4289,6 +4302,7 @@ pub fn autosave_world(
         rigs: world.rigs.clone(),
         // #19 — index-aligned clip side table (see `WorldSave.rig_clips`).
         rig_clips: world.rigs.iter().map(|r| r.clip).collect(),
+        local_personal: crate::joiner_save::capture_local(&players[0])?,
         exhibits: world.exhibits.clone(),
         composters: world.iter_composters().map(|((x, y, z), data)| SavedComposter { x, y, z, data: data.clone() }).collect(),
         tip_jars,
@@ -4775,6 +4789,7 @@ pub(crate) fn minimal_world_save_for_tests(seed: u32) -> WorldSave {
         satoshi: Default::default(),
         dispensers: Vec::new(),
         rig_clips: Vec::new(),
+        local_personal: None,
     }
 }
 
@@ -4988,6 +5003,7 @@ mod tests {
             satoshi: Default::default(),
             dispensers: Vec::new(),
             rig_clips: Vec::new(),
+            local_personal: None,
         };
         let bytes = bincode::serialize(&save).unwrap();
         let back: WorldSave = bincode::deserialize(&bytes).unwrap();
@@ -5448,6 +5464,7 @@ mod tests {
             satoshi: Default::default(),
             dispensers: Vec::new(),
             rig_clips: Vec::new(),
+            local_personal: None,
         };
         let mut bytes = bincode::serialize(&save).unwrap();
         bytes.extend_from_slice(&[0xFFu8; 16]); // pretend: a future field's bytes
@@ -6291,6 +6308,7 @@ mod tests {
             satoshi: Default::default(),
             dispensers: Vec::new(),
             rig_clips: Vec::new(),
+            local_personal: None,
         };
         assert_eq!(save.face_overlays.len(), 1, "one wallpaper face");
         assert_eq!(save.face_blueprints.len(), 1, "one blueprint face");
@@ -6392,6 +6410,7 @@ mod tests {
             satoshi: Default::default(),
             dispensers: Vec::new(),
             rig_clips: Vec::new(),
+            local_personal: None,
         };
 
         // Encode, then decode through the REAL production path.
@@ -6568,6 +6587,7 @@ mod tests {
             satoshi: Default::default(),
             dispensers: Vec::new(),
             rig_clips: Vec::new(),
+            local_personal: None,
         };
         let bytes = bincode::serialize(&save).unwrap();
         let back: WorldSave = bincode::deserialize(&bytes).unwrap();

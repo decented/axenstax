@@ -2921,6 +2921,9 @@ impl super::GameState {
         // Nothing about the last world's saves carries over (`begin_load`
         // records whether this one opened from its autosave).
         self.session_saves = crate::world_exit::SessionSaves::default();
+        #[cfg(not(target_arch = "wasm32"))]
+        { self.local_personal = None; }
+        for slot in &mut self.players { slot.personal_binding = None; }
         self.world.clear();
         // …and the per-world fields `World::clear` keeps (meta bytes, hidden
         // cells, waypoints, Workshop projects, exhibits, scheduler, power…).
@@ -5187,6 +5190,8 @@ impl super::GameState {
         self.autosave_counter += 1;
         if self.autosave_counter >= 6000 && self.persists_locally() {
             self.autosave_counter = 0;
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Err(e) = self.preflight_personal_local() { log::error!("Personal autosave failed: {e}"); return; }
             if let Err(e) = crate::save::autosave_world(
                 &self.world_name, &self.world, &self.players, self.biome_gen.seed,
                 &crate::save::carts_to_saved(&self.ecs),
@@ -5442,10 +5447,9 @@ impl super::GameState {
         if self.tick_counter
             .is_multiple_of(crate::reputation::REPUTATION_DECAY_INTERVAL_TICKS)
             && self.tick_counter > 0
+            && !self.remote_client.as_ref().is_some_and(|c| c.has_personal_state())
         {
-            for slot in self.players.iter_mut() {
-                slot.reputation.decay_once();
-            }
+            for slot in self.players.iter_mut() { slot.reputation.decay_once(); }
         }
 
         // Spec 22 Phase 2 — daily raid scheduler. Runs at the same
@@ -21789,7 +21793,11 @@ impl super::GameState {
             pending_grants = std::mem::take(&mut client.pending_grants);
             pending_life_events = std::mem::take(&mut client.pending_life_events);
             pending_outcomes = std::mem::take(&mut client.pending_outcomes);
-            pending_kills = std::mem::take(&mut client.pending_kills);
+            #[cfg(not(target_arch = "wasm32"))]
+            let personal_ready = client.personal_inbox.as_ref().is_none_or(|inbox| inbox.initialised());
+            #[cfg(target_arch = "wasm32")]
+            let personal_ready = true;
+            pending_kills = if personal_ready { std::mem::take(&mut client.pending_kills) } else { Vec::new() };
             pending_refused_uses = std::mem::take(&mut client.pending_refused_uses);
             // Deltas accumulated across every StateUpdate since last frame —
             // sourced from the accumulators, NOT latest_state, so a frame
@@ -22127,7 +22135,10 @@ impl super::GameState {
                     crate::remote_client::OwnLifeEvent::ArmourWorn(hits, event) => {
                         armour_worn.push((hits, event));
                     }
-                    crate::remote_client::OwnLifeEvent::Respawned(at) => {
+                    crate::remote_client::OwnLifeEvent::Respawned { at, respawns } => {
+                        if let Some(client) = self.remote_client.as_mut() && !client.apply_actor_respawn(respawns) { continue; }
+                        #[cfg(not(target_arch = "wasm32"))]
+                        if let Some(client) = self.remote_client.as_mut() { let life = client.applied_actor_respawns(); if let Some(inbox) = &mut client.personal_inbox { inbox.life = life; } }
                         self.players[0].last_grave = None;
                         // Back at full health: nothing reported before the
                         // death still applies.
@@ -22153,6 +22164,8 @@ impl super::GameState {
         if !self.edits_unsent() {
             self.apply_window_inbox();
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        self.apply_personal_inbox();
         // The kills the server credited to us.
         for kill in &pending_kills {
             self.apply_kill_event(kill);
@@ -22240,8 +22253,11 @@ impl super::GameState {
             return;
         }
         let pos_seed = crate::death_drops::death_seed(pos, self.world_time);
-        let counter = self.players[idx].kill_counter.entry(kind).or_insert(0);
-        *counter += 1;
+        let authoritative_personal = self.remote_client.as_ref().is_some_and(|c| c.has_personal_state());
+        if !authoritative_personal {
+            let counter = self.players[idx].kill_counter.entry(kind).or_insert(0);
+            *counter += 1;
+        }
         self.fire_challenge(crate::scenario::ChallengeEvent::KillMob);
         // UX polish sweep Task 1 — smoke puff on an attributed kill.
         self.particles.burst_smoke(pos, 6, pos_seed as u64);
@@ -22275,7 +22291,7 @@ impl super::GameState {
 
         // Phase 9 — villager-kill reputation penalty (30 s cooldown so a
         // rage-loop costs rep once, not per-kill).
-        if matches!(kind, crate::mob::MobType::Villager | crate::mob::MobType::Peddler) {
+        if !authoritative_personal && matches!(kind, crate::mob::MobType::Villager | crate::mob::MobType::Peddler) {
             let now = self.tick_counter;
             let last = self.players[idx].last_villager_kill_rep_tick;
             let on_cooldown = last
@@ -23470,6 +23486,8 @@ impl super::GameState {
             self.joiner_actions.acknowledged(acked);
         }
         self.release_retired_requests();
+        #[cfg(not(target_arch = "wasm32"))]
+        self.apply_personal_inbox();
         if satori {
             self.audio.play_gem_pickup();
             self.toast = Some(("+1 Satori".to_string(), Instant::now() + std::time::Duration::from_secs(3)));

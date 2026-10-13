@@ -31,6 +31,9 @@ pub(super) fn verify_receipt(directory: &Path, a: &AdmittedManifest) -> Result<D
     if saved != a.manifest().encode()? {
         return Err(Error::Invalid("receipt manifest"));
     }
+    if files::read(&directory.join("working/handover/personal-manifest.dat"), super::super::manifest::MANIFEST_LIMIT)? != saved {
+        return Err(Error::Invalid("retained personal manifest"));
+    }
     // Immutable raw member evidence survives authorised metadata/player changes
     // in the working copy. This milestone's transform only changes metadata.
     for m in &a.manifest().members {
@@ -104,6 +107,11 @@ pub(super) fn durable_tree(
         observe(o, ImportBoundary::DirectorySync, &root)?;
         files::sync_dir(&root)?;
     }
+    let proof = directory.join("working/handover/personal-manifest.dat");
+    sync_existing(&proof, o)?;
+    let proof_dir = proof.parent().ok_or(Error::Io)?;
+    observe(o, ImportBoundary::DirectorySync, proof_dir)?;
+    files::sync_dir(proof_dir)?;
     for name in [
         "archive.tar.gz",
         "manifest.dat",

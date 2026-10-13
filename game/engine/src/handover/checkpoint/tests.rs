@@ -202,6 +202,7 @@ fn neutral_save(seed: u32) -> WorldSave {
         satoshi: Default::default(),
         dispensers: Vec::new(),
         rig_clips: Vec::new(),
+        local_personal: None,
     }
 }
 

@@ -258,6 +258,7 @@ impl crate::GameState {
         self.handover_freezes_world()
             || self.host_paused
             || self.remote_client.as_ref().is_some_and(|rc| rc.is_parked())
+            || self.remote_client.as_ref().is_some_and(|rc| rc.personal_inbox.as_ref().is_some_and(|inbox| !inbox.initialised()))
     }
 
     /// M-A: the one gate for pause-menu world settings while play is held
@@ -292,7 +293,7 @@ impl crate::GameState {
 
 
     /// The identity signed in now (re-read at every boundary).
-    fn handover_signed_in(&self) -> Option<[u8; 32]> {
+    pub(crate) fn handover_signed_in(&self) -> Option<[u8; 32]> {
         #[cfg(test)]
         if let Some(f) = &self.handover_fixture {
             return f.signed_in;
@@ -336,6 +337,9 @@ impl crate::GameState {
     /// The host action from the Online panel. Only an online-hosted world
     /// has an invitation to bind the handover to.
     pub(crate) fn begin_handover(&mut self, drawn: (usize, u32, [u8; 32])) {
+        if let Some(slot) = self.players.first() && let Err(r) = crate::handover::live::eligibility::local_progress(slot, self.tick_counter) {
+            self.handover_toast(r.0); return;
+        }
         let now = crate::game_loop::wardrobe_now();
         let env = self.online_host.as_ref().map(|host| (host.runtime_keys().clone(), host.root_context(now).ok(), host.live_bearer(now)));
         let Some((runtime, root, bearer)) = env else {
@@ -378,6 +382,13 @@ impl crate::GameState {
         }
         let live = self.handover_live();
         let source_key = live.signed_in.ok_or("Sign in before handing this world over.")?;
+        if let Some(slot) = self.players.first() {
+            crate::handover::live::eligibility::local_progress(slot, self.tick_counter).map_err(|r| r.0.to_string())?;
+            let context = crate::handover::personal::RecordContext { participant: source_key, lineage: root_lineage(&env.root), generation: 1, transfer: [1; 16] };
+            let seed = capture::local0_sidecar(slot, [0; 16]).map_err(|r| r.0.to_string())?;
+            let progress = capture::local0_progress(slot, context).map_err(|r| r.0.to_string())?;
+            crate::handover::live::personal_adapter::preflight(&seed, &progress, context).map_err(|r| r.0.to_string())?;
+        }
         let meta = crate::save::load_world_meta(&self.world_name);
         let world = if meta.display_name.trim().is_empty() { self.world_name.clone() } else { meta.display_name };
         let Some(hs) = self.hosted_server.as_mut() else { return Err(copy::NEEDS_ONLINE.into()) };
@@ -542,6 +553,7 @@ impl crate::GameState {
                     ecs: &self.ecs,
                     players: &self.players,
                     seed: self.biome_gen.seed,
+                    tick: self.tick_counter,
                 },
             );
         }
@@ -853,6 +865,7 @@ struct Frozen<'a> {
     ecs: &'a hecs::World,
     players: &'a [crate::player_slot::PlayerSlot],
     seed: u32,
+    tick: u64,
 }
 
 /// The frozen capture: the RAW save from the real lent world, ECS and local
@@ -872,6 +885,9 @@ fn capture_and_offer(
     let Some(seat0) = f.players.first() else {
         return fail(session, hs, Refusal("This world has no local player to hand over from."));
     };
+    if let Err(r) = crate::handover::live::eligibility::local_progress(seat0, f.tick) {
+        return fail(session, hs, r);
+    }
     let meta = match live_transfer_metadata(crate::save::load_world_meta(f.world_name), f.world) {
         Ok(m) => m,
         Err(_) => return fail(session, hs, Refusal("This world's settings couldn't be copied.")),

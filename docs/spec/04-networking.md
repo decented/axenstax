@@ -6563,3 +6563,71 @@ and deletes nothing; nothing Activated is ever deleted. A bounded sweep
 (`live::inert::sweep`, at most 256 entries) discards marked imports with no
 live session, at native start-up and before a new recipient session; an
 unmarked directory is never touched.
+
+
+### Personal continuation adapter — private v90 checkpoint, acceptance pending
+
+This source checkpoint adds `PersonalSync = 73`, the final
+`JoinAccept.has_personal_state` field, and the final authoritative
+`PlayerEventType::Respawned.respawns: u32` counter. It remains private v90;
+Handover stays tag72 and C3d remains historically accepted v89 with Strict
+partial/parked and Mirror the default. Combined regression and actual loader,
+role-transition and second-transfer execution controls remain pending. Earlier
+private checkpoint imports without the retained personal manifest are refused;
+this is not a compatibility promise for those source checkpoints.
+
+The importer durably retains the exact bounded authenticated manifest in
+`handover/personal-manifest.dat` before Ready. Activation's checked core and
+that manifest select personal records by verified npub, lineage, generation,
+transfer, member hash and admitted schema. Native loading installs the selected
+recipient's full window, armour, vitals and schema1 progression; it does not
+select positional player rows or donate the previous host's bag. A guest or
+other identity receives no transferred personal record. Missing/corrupt expected
+proof or current state refuses gameplay and preserves bytes.
+
+The canonical `joiners/<npub>.dat` writer is v3, retaining the whole window,
+correction debt and obligation history and adding bound schema1 progression.
+Known v1/v2 dispatch explicitly and preserve their prior history/debt rules.
+The whole file remains at most64KiB. Frozen transfer sidecars are explicit v2
+seeds, and each new transfer captures current progression with its new context;
+a previous mutable binding is not copied into the next seed. Combined v3 and
+actual PersonalSync packet size are checked before freeze/retirement. Oversized
+state refuses; nothing is truncated. Bootstrap atomically replaces the seed
+once, confirms file/directory durability before gameplay, and never falls back
+to a frozen seed when an existing v3 is corrupt. A later load seeing a complete
+v3 retries durability rather than treating presence as proof of a durable rename.
+
+Local primary/autosave authority is the exact selected WorldSave snapshot's
+final `local_personal` field. This uses the same bounded canonical v3 codec and
+commits with world/chest state. The first imported local snapshot gains a durable
+personal baseline before play; explicit discard restores the matching primary
+world and personal state. A selected snapshot refreshes the canonical mirror
+before play. A dedicated local-to-remote role cut saves the actual current server
+world with the local field cleared and removes old autosaves from live selection;
+a native active owner cannot attach a second simultaneous remote body of the
+same persona. These role/discard execution controls are still pending.
+
+PersonalSync carries a bounded server-selected snapshot and an exact Applied
+acknowledgement bound to action namespace, physical respawn generation, revision,
+linked numbered window event and payload hash. Actual window/life application
+precedes progression installation and Applied. Initial authorisation/prediction
+is held before installation; polling and control traffic continue. Repeats are
+inert, superseded acknowledgements cannot release a new snapshot, and queued
+respawns are observed separately from actual application. The physical counter
+reserves checked addition before any respawn mutation; exhaustion releases the
+session and retains its record without wrapping. This does not change the
+parked global Strict lifecycle.
+
+Known schema1 maps are replaced without reward/claim/payout calls. Server updates
+persist the live holder for later rejoin. Unsupported non-empty active quests,
+quest baselines and active local penalty/cooldown state refuse transfer rather
+than being silently dropped. Ordinary remote reconnect's transient villager
+penalty cooldown behaviour is inherited and is not preserved by schema1/v3;
+this checkpoint does not claim complete personal timer continuation. A verified
+Plan body is restored unchanged only when its developed boolean matches the
+saved marker stub; its latent exposure is never replaced by the stub's zero.
+
+Freeze readiness includes typed action/request FIFO, deferred edits, retained
+results/Applied fences, numbered window quiescence and exact PersonalSync
+application. Focused real-order controls and independent final review remain
+required before acceptance.

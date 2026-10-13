@@ -19,7 +19,7 @@ pub fn local0_sidecar(slot: &PlayerSlot, run_id: [u8; 16]) -> Result<Vec<u8>, Re
         run_id,
         None,
     );
-    save.encode().map_err(|_| Refusal("Your inventory couldn't be recorded for the handover."))
+    save.encode_seed().map_err(|_| Refusal("Your inventory couldn't be recorded for the handover."))
 }
 
 /// The seat's world-local progression and owner-only local restore.

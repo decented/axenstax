@@ -196,6 +196,8 @@ pub mod handover;
 // World handover — the GameState callers (host action, consent, pump, freeze).
 #[cfg(not(target_arch = "wasm32"))]
 mod handover_game;
+#[cfg(not(target_arch = "wasm32"))]
+mod personal_sync;
 mod world_room;
 #[cfg(not(target_arch = "wasm32"))]
 mod kithmoot_keeper;
@@ -261,6 +263,7 @@ mod death;
 mod starter_kit;
 mod inventory_sync;
 mod joiner_save;
+mod personal_value;
 mod plan_store;
 mod bear_ai;
 mod hyena_ai;
@@ -1281,6 +1284,9 @@ pub(crate) struct GameState {
     /// (`handover_on_leave`).
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) handover: Option<crate::handover_game::Handover>,
+    /// Imported personal identity selected at world load, latched for saves.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) local_personal: Option<crate::joiner_save::PersonalBinding>,
     /// The host this joined client verified at join (online play's verified
     /// answer and its runtime). `None` for a join that verified no host.
     #[cfg(not(target_arch = "wasm32"))]
@@ -1977,6 +1983,8 @@ impl GameState {
             online_join: None,
             #[cfg(not(target_arch = "wasm32"))]
             handover: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            local_personal: None,
             #[cfg(not(target_arch = "wasm32"))]
             joined_host: None,
             #[cfg(not(target_arch = "wasm32"))]

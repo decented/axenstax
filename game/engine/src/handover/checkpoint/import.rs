@@ -430,6 +430,16 @@ fn extract(
     // Every received and working file is durable and every worker has joined
     // before the receipt is created, directory syncing or a rename can begin.
     syncs.finish()?;
+    // Promotion removes the enclosing import. Keep the exact admitted
+    // manifest inside working so later identity-selected bootstrap can
+    // verify the immutable participant members against Activated authority.
+    let proof_dir = working.join("handover");
+    fs::create_dir(&proof_dir).map_err(|_| Error::Io)?;
+    #[cfg(unix)] {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&proof_dir, fs::Permissions::from_mode(0o700)).map_err(|_| Error::Io)?;
+    }
+    write_file(&proof_dir.join("personal-manifest.dat"), manifest.as_slice(), manifest.len() as u64, o, None)?;
     let meta = files::digest(
         files::open(&working.join("world_meta.json"))?,
         2 * 1024 * 1024,

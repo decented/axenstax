@@ -131,6 +131,18 @@ impl HostedServer {
     /// save that landed and no later save commits into that folder.
     pub fn handover_freeze(&mut self, world_dir: Option<&std::path::Path>) -> Result<(), LinkError> {
         self.handover_check()?;
+        // The cut must follow the real ordered request stream, its delayed
+        // older edits, retained terminal results and actual personal apply.
+        for (i, sp) in self.server.players.iter().enumerate() {
+            if !sp.server_simulated || !sp.is_in_world() { continue; }
+            if !self.inbound[i].is_empty() || !self.edit_queues[i].is_empty()
+                || sp.action_queue.as_ref().is_some_and(|q| !q.is_empty())
+                || sp.action_results.as_ref().is_some_and(|r| !r.is_quiescent())
+                || !sp.window_events.is_quiescent()
+                || sp.personal.as_ref().is_some_and(|p| !sp.personal_delivery.quiescent(p, sp.respawns)) {
+                return Err("players' actions or personal state are still settling; try again in a moment");
+            }
+        }
         let mut transfer = None;
         if let Some(l) = &mut self.handover {
             if !l.frozen {
@@ -193,6 +205,7 @@ impl HostedServer {
     }
 
     /// The bound seat (slot, generation, key), if any.
+    #[cfg_attr(not(test), expect(dead_code, reason = "Retained handover proof utility; the live controller uses its checked adapter"))]
     pub fn handover_link(&self) -> Option<(usize, u32, [u8; 32])> {
         self.handover.as_ref().map(|l| (l.slot, l.generation, l.key))
     }
