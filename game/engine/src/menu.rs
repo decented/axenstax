@@ -3120,8 +3120,12 @@ pub fn draw_main_menu(ctx: &egui::Context, state: &mut MenuState) -> MenuAction 
                         ));
                     }
                 }
-                ui.add_space(8.0);
-                ui.label(egui::RichText::new("Spawn:").size(13.0).color(egui::Color32::from_rgb(170, 170, 200)));
+            });
+
+            // Keep this preference out of the wrapping action row: ComboBox
+            // treats its width as a minimum and can otherwise enlarge the panel.
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Spawn:").size(13.0).color(DIM_TEXT));
                 let spawn_width = ui.available_width().clamp(80.0, 180.0);
                 egui::ComboBox::from_id_salt("spawn_pref_combo")
                     .width(spawn_width)
