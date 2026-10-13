@@ -302,3 +302,87 @@ fn c3d_client_mirror_interaction_stays_the_legacy_request() {
     assert!(outcome.accepted && outcome.consume_held == 1 && outcome.window_event > 0, "Mirror: the same outcome, its Take numbered: {outcome:?}");
     j.assert_live("Mirror: never torn down");
 }
+
+/// C3d run 24 (run-23 review MEDIUM-1, LOW-1) — on a high-latency seat the
+/// joiner feeds a cow its last wheat, then clicks a horse before it has
+/// applied the feed's `Take`: the server copy's raw slot still holds the
+/// wheat (the claim agrees), the effective slot is empty. A mount uses
+/// nothing in hand, so it is served — no correction `Replace`, the feed's
+/// `Take` the only event. Also the steed half of the mount's cost pin, end
+/// to end with an item in hand: a run that disagreed with
+/// `accepted_cost(Mount)` would be a fail-closed pause, never `Accepted`.
+#[test]
+fn c3d_client_strict_mount_after_a_feed_took_the_last_unit_is_served() {
+    let food = crate::breeding::breeding_food(MobType::Cow).unwrap();
+    let mut j = rig("interact-feed-mount", &[(0, mat(food, 1))], true);
+    let at = ahead(j.sp().player.pos, 2.0);
+    let (cow, cow_id) = spawn(&mut j, MobType::Cow, at);
+    let (horse, horse_id) = spawn(&mut j, MobType::Horse, at + Vec3::new(0.8, 0.0, 0.0));
+    let before = j.sp().window_events.last_number();
+    let feed = interact(&mut j, 0, Some(MobType::Cow), cow_id, InteractKind::Feed);
+    // The server serves the feed and waits out the cooldown; the client
+    // reads nothing (its Take not applied: it still shows the wheat).
+    for _ in 0..=super::INTERACT_COOLDOWN_TICKS {
+        place(&mut j.hs, j.i, horse, at + Vec3::new(0.8, 0.0, 0.0));
+        j.hs.tick();
+    }
+    assert!(j.hs.server.ecs.get::<&crate::breeding::InLove>(cow).is_ok(), "the cow was fed");
+    assert_eq!(j.held(&Item::Material(food)), 1, "the client hasn't applied the Take yet");
+    let mount = interact(&mut j, 0, Some(MobType::Horse), horse_id, InteractKind::Mount);
+    j.pump();
+    assert_eq!(fate(&j, feed), Some(ActionFate::Accepted), "the feed served");
+    assert_eq!(fate(&j, mount), Some(ActionFate::Accepted), "the mount served, not corrected");
+    assert_eq!(j.sp().riding, Some(horse), "seated");
+    assert_eq!(j.sp().window_events.last_number(), before + 1, "the feed's Take only: no correction Replace");
+    j.assert_honest("a mount behind a feed that took the last unit");
+    assert_eq!(j.held(&Item::Material(food)), 0);
+    let t = j.sp().strict_refusals;
+    assert_eq!((t.stale_world, t.other, t.world_fact), (0, 0, 0), "no refusal");
+}
+
+/// C3d run 24 (run-23 review LOW-1) — the in-run refusal: a cow already in
+/// love passes the gate (in reach, life simulated, no cooldown), the feed's
+/// `Take` and the result row are reserved, then the shared run refuses. The
+/// reservation is abandoned exactly: no event numbered, the food on both
+/// copies, the refusal note delivered, a world fact, never torn down.
+#[test]
+fn c3d_client_strict_feed_refused_inside_the_run_abandons_the_reservation() {
+    let food = crate::breeding::breeding_food(MobType::Cow).unwrap();
+    let mut j = rig("interact-in-run", &[(0, mat(food, 4))], true);
+    let at = ahead(j.sp().player.pos, 2.0);
+    let (cow, id) = spawn(&mut j, MobType::Cow, at);
+    j.hs.server.ecs.insert_one(cow, crate::breeding::InLove { until_tick: u64::MAX, fed_by: None }).unwrap();
+    let before = j.sp().window_events.last_number();
+    let (waiting, capacity) = (j.sp().window_events.waiting(), j.sp().window_events.waiting_capacity());
+    let action = interact(&mut j, 0, Some(MobType::Cow), id, InteractKind::Feed);
+    let notes: Vec<_> = heard_outcomes(&mut j).iter().map(|o| (o.accepted, o.consume_held)).collect();
+    assert_eq!(notes, vec![(false, 0)], "the refusal's outcome reaches the client");
+    assert_eq!(j.sp().window_events.last_number(), before, "the reserved Take was abandoned, never numbered");
+    assert_eq!((j.sp().window_events.waiting(), j.sp().window_events.waiting_capacity()), (waiting, capacity), "nothing left waiting, the deque capacity as it was");
+    j.pump();
+    assert_eq!(fate(&j, action), Some(ActionFate::Refused), "refused");
+    j.assert_honest("a feed refused inside the run");
+    assert_eq!(j.held(&Item::Material(food)), 4, "the food kept (client)");
+    assert_eq!(j.sp().inventory.slot(0).map(|s| s.count), Some(4), "the food kept (server copy)");
+    let t = j.sp().strict_refusals;
+    assert_eq!((t.stale_world, t.other, t.world_fact), (0, 0, 1), "a world fact");
+}
+
+/// C3d run 24 (run-23 review LOW-3) — a horse someone else rides, clicked
+/// inside the interaction cooldown: Strict answers Mirror's `MountTaken`
+/// (read before the cooldown), a world fact.
+#[test]
+fn c3d_client_strict_mount_taken_inside_the_cooldown_keeps_mirrors_note() {
+    let mut j = rig("interact-taken", &[], false);
+    let at = ahead(j.sp().player.pos, 2.0);
+    let (horse, id) = spawn(&mut j, MobType::Horse, at);
+    j.hs.server.ecs.insert_one(horse, crate::entity::Ridden).unwrap();
+    j.hs.server.players[j.i].interact_cooldown = super::INTERACT_COOLDOWN_TICKS;
+    let action = interact(&mut j, 0, Some(MobType::Horse), id, InteractKind::Mount);
+    let notes: Vec<_> = heard_outcomes(&mut j).iter().map(|o| (o.accepted, o.note)).collect();
+    assert_eq!(notes, vec![(false, InteractNote::MountTaken.to_wire())], "Mirror's note");
+    j.pump();
+    assert_eq!(fate(&j, action), Some(ActionFate::Refused), "refused");
+    j.assert_honest("a taken mount");
+    assert_eq!(j.sp().strict_refusals.world_fact, 1);
+}

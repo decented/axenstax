@@ -19,7 +19,9 @@
 //! gate (target, `NotOnThisServer`, cooldown); then the accepted cost from
 //! the pure per-kind table (`mob_interact::accepted_cost`, pinned against
 //! `run` by a unit test) staged on the effective window as `Take` +
-//! `Grant` (a payment the window can't cover is a corrected refusal), the
+//! `Grant` (a payment the window can't cover, or shears a pending event wore
+//! out or replaced, is a corrected refusal — no other kind is refused for
+//! what a pending event did to the hand, run-23 review MEDIUM-1), the
 //! events and the result row reserved; then the run, with the server
 //! copy's item; a refusal there abandons the reservation exactly (zero
 //! effect beyond the cooldown Mirror also starts); an accepted run whose
@@ -63,13 +65,17 @@ impl HostedServer {
             Err(StrictStageError::Unrepresentable) => { self.refuse_typed_action(i, action); return false; }
             Err(_) => { self.pause_typed_action(i, StrictTeardown::FellBehind, "Interaction item lineage is uncertain"); return false; }
         };
-        // A tool the interaction uses but doesn't spend (shears) must still
-        // be where the client saw it once the server's pending events apply.
-        if let Some(item) = &historical
-            && consume == 0
-        {
-            let held_now = effective.view().inv.slot(slot).map(|s| crate::inventory::item_to_ref(&s.item));
-            if held_now != Some(crate::inventory::item_to_ref(item)) {
+        // C3d run 24 (run-23 review MEDIUM-1) — the one tool an interaction
+        // uses without spending it, shears, must still be in the named slot
+        // once the server's pending events apply (a last-point pair worn out
+        // by a pending event can't shear). Its type is compared, not only its
+        // tier (`ItemRef` names a tool by tier). No other kind uses what is in
+        // hand without spending it: a Lead removal needs only "not a Lead"
+        // and a mount only an empty or a full hand, so a pending event that
+        // took the hand's last unit never refuses them.
+        if matches!(req.kind, protocol::InteractKind::Shear) {
+            let held_now = effective.view().inv.slot(slot).map(|s| s.item.clone());
+            if !same_tool(held_now.as_ref(), historical.as_ref()) {
                 self.refuse_typed_action(i, action);
                 return false;
             }
@@ -175,7 +181,17 @@ impl HostedServer {
             }
             protocol::InteractKind::Mount => {
                 if sp.riding.is_some() { return Some(InteractNote::None); }
-                if self.joiner_target(i, req.entity).is_none() && self.joiner_cart(i, req.entity).is_none() { return Some(InteractNote::None); }
+                let mount = match self.joiner_target(i, req.entity) {
+                    Some((e, kind)) if crate::mob::is_rideable(kind) => e,
+                    Some(_) => return Some(InteractNote::None),
+                    None => match self.joiner_cart(i, req.entity) { Some((e, _)) => e, None => return Some(InteractNote::None) },
+                };
+                // C3d run 24 (run-23 review LOW-3) — Mirror's order
+                // (`run_joiner_mount`): a steed or cart someone else rides is
+                // `MountTaken` (the toast) before the cooldown is read.
+                if let Err(crate::riding::MountRefusal::Taken) = crate::riding::may_mount(&self.server.ecs, mount) {
+                    return Some(InteractNote::MountTaken);
+                }
             }
             kind => {
                 if self.joiner_target(i, req.entity).is_none() { return Some(InteractNote::None); }
@@ -185,5 +201,14 @@ impl HostedServer {
             }
         }
         (sp.interact_cooldown > 0).then_some(InteractNote::None)
+    }
+}
+
+/// The shears' check (run-23 review MEDIUM-1): the same tool type and
+/// material in both, durability aside; anything else is not the same tool.
+fn same_tool(now: Option<&crate::item::Item>, then: Option<&crate::item::Item>) -> bool {
+    match (now, then) {
+        (Some(crate::item::Item::Tool(a)), Some(crate::item::Item::Tool(b))) => a.tool_type == b.tool_type && a.material == b.material,
+        _ => false,
     }
 }
