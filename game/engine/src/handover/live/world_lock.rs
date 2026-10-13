@@ -246,8 +246,13 @@ fn still_named(file: &File, key: &Path) -> bool {
 /// check, the try-lock and the insert; the stat and the open (which on an
 /// encrypted home folder writes the file's header) happen outside it.
 fn take_key(key: PathBuf, in_process: InProcess, create: bool) -> Result<LiveLock, LockError> {
+    take_key_passes(key, in_process, create, 80)
+}
+
+/// `take_key` in at most `passes` passes (5 ms apart), then `HeldElsewhere`.
+fn take_key_passes(key: PathBuf, in_process: InProcess, create: bool, passes: u32) -> Result<LiveLock, LockError> {
     // CP17 review LOW-4 (b): never sleep while holding the registry.
-    for _ in 0..80 {
+    for pass in 0..passes {
         let releasing = {
             let held = HELD.lock().unwrap_or_else(|e| e.into_inner());
             match held.get(&key) {
@@ -295,7 +300,9 @@ fn take_key(key: PathBuf, in_process: InProcess, create: bool) -> Result<LiveLoc
             drop(held);
             drop(file);
         }
-        std::thread::sleep(std::time::Duration::from_millis(5));
+        if pass + 1 < passes {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
     }
     Err(LockError::HeldElsewhere)
 }
@@ -317,6 +324,15 @@ pub fn import_lock_path(imports: &Path, folder: &str) -> PathBuf {
 /// the guard's own clones share it).
 pub fn acquire_import(imports: &Path, folder: &str, create: bool) -> Result<LiveLock, LockError> {
     take_key(import_lock_path(imports, folder), InProcess::Refuse, create)
+}
+
+/// CP24 (CP23 review LOW-1): `acquire_import` for the lobby's main thread
+/// (promotion and its leftover sweep): ONE try, never creating the file.
+/// Held by another process (or its probe, or a holder in this process
+/// letting go this instant) is `HeldElsewhere` at once, never a ~400 ms
+/// wait; the caller's 500 ms held retry tries again.
+pub fn try_import_once(imports: &Path, folder: &str) -> Result<LiveLock, LockError> {
+    take_key_passes(import_lock_path(imports, folder), InProcess::Refuse, false, 1)
 }
 
 /// CP18: whether a holder in THIS process (a live session, the resumer's
@@ -495,14 +511,41 @@ pub(crate) mod tests {
         let _ = std::io::stdin().read_line(&mut line);
     }
 
+    /// CP24: the env var naming the import folder whose sibling lock the
+    /// helper child takes.
+    const IMPORT_CHILD_ENV: &str = "AXENSTAX_HANDOVER_IMPORT_LOCK_CHILD";
+
+    /// Not a test on its own: a second process holding an import's lock
+    /// (`<imports>/<import>.lock`), as its live session would.
+    #[test]
+    fn handover_import_lock_child_process() {
+        let Some(dir) = std::env::var_os(IMPORT_CHILD_ENV) else { return };
+        let import = PathBuf::from(dir);
+        let folder = import.file_name().and_then(|n| n.to_str()).unwrap().to_owned();
+        let _lock = acquire_import(import.parent().unwrap(), &folder, true).expect("the child takes the import lock");
+        println!("LOCKED");
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+        let mut line = String::new();
+        let _ = std::io::stdin().read_line(&mut line);
+    }
+
     /// A second game process holding `world`'s handover lock, until killed.
     pub(crate) struct ChildHolder(std::process::Child);
     impl ChildHolder {
         pub(crate) fn hold(world: &Path) -> Self {
+            Self::spawn("handover_lock_child_process", CHILD_ENV, world)
+        }
+        /// CP24: a second game process holding the import lock of the
+        /// import folder `import` (`<imports>/<import>.lock`), until killed.
+        pub(crate) fn hold_import(import: &Path) -> Self {
+            Self::spawn("handover_import_lock_child_process", IMPORT_CHILD_ENV, import)
+        }
+        fn spawn(test: &str, env: &str, path: &Path) -> Self {
             use std::io::BufRead;
             let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "handover::live::world_lock::tests::handover_lock_child_process", "--nocapture", "--test-threads=1"])
-                .env(CHILD_ENV, world)
+                .args(["--exact", &format!("handover::live::world_lock::tests::{test}"), "--nocapture", "--test-threads=1"])
+                .env(env, path)
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::null())

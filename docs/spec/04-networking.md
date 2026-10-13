@@ -6228,7 +6228,10 @@ the "same file" check is by name only, so a file deleted under its holder
 could let two processes hold two different files at the same name. The
 empty file stays and the next holder locks that same file; each costs one
 entry of the scan bound. Not compiled or run on Windows yet. The promotion and its leftover sweep
-take it too (held: the 500 ms held retry), never creating its file, and
+take it too (held: the 500 ms held retry), never creating its file, in
+ONE try (CP24, CP23 review LOW-1: `world_lock::try_import_once`; the
+lobby's main thread never waits, ~400 ms before, for another process's
+lock; test `handover_promote_refuses_another_drive_a_held_lock_and_a_quarantine`), and
 remove it after the import folder. A lock file whose import is gone is
 removed by the inert sweep once its lock is free (`inert::sweep_stale_locks`),
 never while held (a recipient about to rename its import in). Each import

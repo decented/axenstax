@@ -2633,6 +2633,20 @@ mod tests {
             "an import another process holds was moved"
         );
         child.kill();
+        // CP24 (CP23 review LOW-1): another process holding only the
+        // import's own lock: held at once; the lobby's main thread never
+        // waits (~400 ms before) for another process's lock.
+        let child = world_lock::tests::ChildHolder::hold_import(working.parent().unwrap());
+        let started = std::time::Instant::now();
+        let pass = promote_activated_imports(&imports, &root);
+        let took = started.elapsed();
+        assert_eq!(
+            pass,
+            crate::handover::live::promote::Promoted { held: true, ..Default::default() },
+            "an import whose own lock another process holds was moved"
+        );
+        assert!(took < std::time::Duration::from_millis(300), "a promotion pass waited {took:?} for another process's import lock");
+        child.kill();
         let quarantined = crate::handover::live::authority::dir(&working).join(format!("quarantined-{}.dat", hex::encode(t)));
         std::fs::write(&quarantined, b"q").unwrap();
         assert_eq!(promote_activated_imports(&imports, &root), Default::default(), "a quarantined import was moved");

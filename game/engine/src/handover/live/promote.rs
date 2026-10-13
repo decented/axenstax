@@ -312,7 +312,9 @@ fn remove_moved_leftovers(imports: &Path, worlds_root: &Path, sync: SyncDir) {
 fn import_lock_of(working: &Path) -> Option<Result<super::world_lock::LiveLock, super::world_lock::LockError>> {
     let import = working.parent()?;
     let folder = import.file_name()?.to_str()?;
-    Some(super::world_lock::acquire_import(import.parent()?, folder, false))
+    // CP24 (CP23 review LOW-1): one try; the lobby's main thread never
+    // waits for another process's lock (held: the 500 ms held retry).
+    Some(super::world_lock::try_import_once(import.parent()?, folder))
 }
 
 /// The transfer id from an import folder name `handover-<world>-<transfer>`.
