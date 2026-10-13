@@ -3122,7 +3122,10 @@ pub fn draw_main_menu(ctx: &egui::Context, state: &mut MenuState) -> MenuAction 
                 }
                 ui.add_space(8.0);
                 ui.label(egui::RichText::new("Spawn:").size(13.0).color(egui::Color32::from_rgb(170, 170, 200)));
+                let spawn_width = ui.available_width().clamp(80.0, 180.0);
                 egui::ComboBox::from_id_salt("spawn_pref_combo")
+                    .width(spawn_width)
+                    .wrap_mode(egui::TextWrapMode::Truncate)
                     .selected_text(state.spawn_pref.label())
                     .show_ui(ui, |ui| {
                         for opt in crate::spawn_pref::SpawnPref::all() {
@@ -3290,10 +3293,11 @@ fn draw_world_card(
             .stroke(egui::Stroke::new(border_width, border_color))
             .inner_margin(egui::Margin::same(14));
 
+        let inner_width = (width - frame.total_margin().sum().x).max(0.0);
         let frame_resp = frame.show(ui, |ui| {
-        // Fix the card's inner width so a row of cards shares the area evenly and
-        // content wraps within the card instead of overflowing off-screen.
-        ui.set_width(width - 28.0);
+        // Include the stroke as well as padding: selected cards have a thicker
+        // outline, but must occupy the same column width as the other cards.
+        ui.set_width(inner_width);
 
         // Row 1: name + mode badge + version + (collapsed) Stash dot.
         ui.horizontal_wrapped(|ui| {
