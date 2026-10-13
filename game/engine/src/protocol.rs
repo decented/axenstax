@@ -2757,12 +2757,14 @@ pub struct ServerAnnouncePacket {
 ///   `slots`): the correction debt the whole-window replacement carries, so a
 ///   joiner's unpaid correction debt survives a reconnect on both copies
 ///   (empty after a death).
-/// - v89 (provisional, C3d source; not delivered): typed Action (68),
+/// - v89 (2026-10-13, C3d partial delivery accepted locally; no push): Action (68),
 ///   ActionReceipt (69), Recovery (70) and AppliedActionAck (71) metadata.
 ///   JoinAccept appends fixed inventory
 ///   mode, random128-bit action namespace and life. Recovery Describe is
 ///   paginated; world-stream receipt/fence application is distinct from
-///   socket reception.
+///   socket reception. Mirror remains default. Strict is PARTIAL / PARKED,
+///   internally selected only; unsupported mutations fail closed. Canonical
+///   recovery installation, durable-body release and suffix replay are pending.
 pub const PROTOCOL_VERSION: u32 = 89;
 
 /// The `protocol_version` of a JoinRequest payload that doesn't decode as this
@@ -2940,7 +2942,7 @@ mod tests {
 
     #[test]
     fn protocol_version_bumped() {
-        // C3d (provisional) — v89, typed actions after OC's v88 debt carrier.
+        // C3d partial delivery accepted locally — v89, after OC's v88 debt carrier.
         assert_eq!(super::PROTOCOL_VERSION, 89);
     }
 
@@ -3692,7 +3694,7 @@ mod tests {
         //   OpenGrave (= 13) and GraveAt (= 7).
         // v87 (2026-10-09, Sidecar): CreativeGive (= 14).
         // v88 (2026-10-09, OC): `InventorySyncPacket.owed` (after `slots`).
-        // v89 (provisional, C3d): Action (68), ActionReceipt (69),
+        // v89 (C3d partial delivery accepted locally): Action (68), ActionReceipt (69),
         //   Recovery (70), AppliedActionAck (71); JoinAccept
         //   mode/namespace/life.
         assert_eq!(PROTOCOL_VERSION, 89);
