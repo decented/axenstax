@@ -32,7 +32,7 @@ fn restore_pack(saved: &SavedPack, local_bodies: bool) -> Result<ChestData, Stri
     Ok(pack)
 }
 
-fn restored_steed(data: &HorseData, keeper: &crate::horse_ai::SteedKeeper, pack: &Option<SavedPack>, local_bodies: bool) -> Result<HorseData, String> {
+fn restored_steed(data: &HorseData, keeper: &crate::horse_ai::SteedKeeper, pack: &Option<Box<SavedPack>>, local_bodies: bool) -> Result<HorseData, String> {
     if let crate::horse_ai::SteedKeeper::Npub(npub) = keeper
         && (!npub.starts_with("npub1") || npub.len() != 63 || !npub.is_ascii())
     {
@@ -87,6 +87,19 @@ pub(crate) fn restore_pets(ecs: &mut hecs::World, pets: &[SavedTamedPet], local_
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn d2c2_boxed_saved_pack_preserves_unboxed_serde_bytes() {
+        let mut pack = ChestData::new();
+        pack.slots[4] = Some(crate::item::ItemStack::new_material(crate::item::MaterialId::Bread, 7));
+        let saved = capture_pack(&pack).unwrap();
+        let unboxed = Some(saved.clone());
+        let boxed = Some(Box::new(saved));
+        assert_eq!(bincode::serialize(&boxed).unwrap(), bincode::serialize(&unboxed).unwrap());
+        let decoded: Option<Box<SavedPack>> = bincode::deserialize(&bincode::serialize(&unboxed).unwrap()).unwrap();
+        assert_eq!(decoded.as_deref(), unboxed.as_ref());
+        assert_eq!(bincode::serialize(&None::<Box<SavedPack>>).unwrap(), bincode::serialize(&None::<SavedPack>).unwrap());
+    }
 
     #[test]
     fn d2c2_saved_keeper_and_pack_restore_for_server_and_local_reads() {

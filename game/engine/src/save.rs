@@ -1019,7 +1019,7 @@ pub enum SavedTamedPetData {
         kind: crate::mob::MobType,
         data: crate::horse_ai::HorseData,
         keeper: crate::horse_ai::SteedKeeper,
-        pack: Option<crate::steed_save::SavedPack>,
+        pack: Option<Box<crate::steed_save::SavedPack>>,
     },
 }
 
@@ -1113,7 +1113,7 @@ fn tamed_mobs_to_saved_impl(ecs: &hecs::World) -> Result<Vec<SavedTamedPet>, Str
                     kind: kind.0,
                     data: data.frozen_save_data(),
                     keeper: data.keeper_identity().ok_or("A kept steed has no keeper identity")?,
-                    pack: data.pack.as_ref().map(crate::steed_save::capture_pack).transpose()?,
+                    pack: data.pack.as_ref().map(crate::steed_save::capture_pack).transpose()?.map(Box::new),
                 },
             });
         }
