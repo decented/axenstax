@@ -6820,10 +6820,12 @@ origin installation's ledger; mutable bound v3 state wins after bootstrap.
 Retired original capabilities refuse before contact shortcuts, and the actual
 local-owner identity cannot attach a simultaneous second remote body.
 
-These adapters remain a reviewable private checkpoint. Full actual original
-root0→1, hand-back2, later retirement2→3, fault/restoration controls and final
-combined native/GPU/WASM regression are still required before feature acceptance;
-cold lookup tests and source inspection do not substitute for those callers.
+These adapters remain a reviewable private checkpoint. Actual original root
+0→1, hand-back 2 and later retirement 2→3, retained native fault/retry and
+representative assertion-failure/exact-restoration controls passed at their
+recorded checkpoints. The final immutable combined native/GPU/WASM and
+real-disk regression remains required before feature acceptance; cold lookup
+tests and source inspection do not substitute for those actual callers.
 
 
 Frozen source capture reads the existing regular native world_meta.json through
@@ -6833,5 +6835,7 @@ unreadable metadata refuses the transfer with the source intact; capture never
 uses display placeholders or torn-file recovery to fabricate history/genesis,
 rules or scenario settings. Archive metadata still requires the exact compact
 canonical sender codec, and ordinary local recovery is unchanged. Actual
-GameState refusal and malformed/healthy native parsing controls are authored
-but execution awaits the next serial compiler slot.
+GameState missing/torn refusal and malformed/healthy native parsing controls
+passed. Restoring the unsafe metadata fallback failed at the actual refusal
+assertion; exact source restoration returned green with the same executable
+bytes. These scoped results remain subject to the final combined regression.
