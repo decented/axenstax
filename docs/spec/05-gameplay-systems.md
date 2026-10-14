@@ -4335,3 +4335,32 @@ Authored pet carrier. Restore uses the exact identity once, never position
 matching, and an existing identity cannot change kind. A dead original giver is
 not replaced by another NPC. Live quest dialogue/acceptance/completion and full
 continuation acceptance are still pending at this checkpoint.
+
+**Native portable continuation (D2c-3 source checkpoint).** A restored portable
+quest or decline timer selects the exact live `QuestNpcId` before the legacy
+local offer route. Its saved terms, cumulative Kill baseline and original
+village reputation remain in the same bound player holder. Merely loading a
+record creates no new offer. Missing, dead, foreign or out-of-reach original
+givers cannot complete it; nearby similar villagers are not substitutes.
+Legacy local quest generation and monetary payouts keep their existing route.
+
+The portable native turn-in revalidates the current bag and exact quest/giver
+IDs, prepares the same domain candidate, and consumes only the shared ordered
+material cost from the actual bag. Armour, cursor, grid and unaffected private
+Plan bodies retain their allocations. Completion removes the accepted entry
+once, applies its frozen item/reputation reward without sats, treasury or tier
+payment, and spills only the actual item remainder at the original giver.
+Repeats and refused costs leave the player state intact. Selected saves retain
+the consumed state; they never restore a completed quest from an older canonical
+mirror.
+
+The same holder's gameplay clock anchors at actual native installation and
+observes local logical ticks. Remaining decline/penalty timers project together
+for reads, mutations and selected captures; offline time is excluded. Only
+actual expiry writes a discrete revision. Native attributed kills, the bounded
+villager penalty and daily reputation decay update that holder once, without a
+second counter or progression store. Joined authoritative counters keep their
+existing server owner and do not receive echoed local credits. Active transfer
+eligibility guards remain until frozen current-tuple settlement and original/
+retained active continuation pass their actual controls. This source checkpoint
+does not claim full quest or transfer acceptance.

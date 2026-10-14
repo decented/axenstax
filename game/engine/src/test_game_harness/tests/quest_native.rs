@@ -19,6 +19,89 @@ struct NativeCut {
     name: String,
 }
 
+fn visible_text(game: &HeadlessGame, wanted: &str) -> bool {
+    game.state.renderer.egui.last_shapes.iter().any(|shape| {
+        matches!(&shape.shape,
+        egui::Shape::Text(text) if text.galley.text().contains(wanted))
+    })
+}
+
+fn settle_dialogue_panel(game: &mut HeadlessGame) {
+    for _ in 0..20 {
+        if visible_text(game, "Blacksmith") {
+            break;
+        }
+        game.frames(1);
+    }
+    assert!(
+        visible_text(game, "Blacksmith"),
+        "the normal settled dialogue panel visibly paints its profession"
+    );
+}
+
+fn click_dialogue_text(game: &mut HeadlessGame, wanted: &str) {
+    let at = game
+        .state
+        .renderer
+        .egui
+        .last_shapes
+        .iter()
+        .find_map(|shape| match &shape.shape {
+            egui::Shape::Text(text) if text.galley.text() == wanted => {
+                Some(text.galley.rect.translate(text.pos.to_vec2()).center())
+            }
+            _ => None,
+        })
+        .expect("the real dialogue paints its requested button");
+    for pressed in [true, false] {
+        game.state.renderer.egui.headless_events = vec![
+            egui::Event::PointerMoved(at),
+            egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            },
+        ];
+        game.frames(1);
+    }
+}
+
+fn original_giver(rig: &NativeCut) -> hecs::Entity {
+    let mut query = rig.game.state.ecs.query::<&crate::quest_npcs::QuestNpcId>();
+    let mut matches = query.iter().filter(|(_, id)| id.0 == rig.quest.npc);
+    let giver = matches.next().expect("the exact original giver exists").0;
+    assert!(matches.next().is_none(), "the original giver is unique");
+    giver
+}
+
+fn native_custody(game: &HeadlessGame) -> Vec<u8> {
+    let slot = &game.state.players[0];
+    let record =
+        GameplayRecord::from_slot(slot.personal_binding.as_ref().unwrap().context(), slot).unwrap();
+    bincode::serialize(&(
+        slot.inventory.slots_iter().cloned().collect::<Vec<_>>(),
+        slot.armour_slots,
+        &slot.crafting_ui.cursor_item,
+        &slot.crafting_ui.grid,
+        record.encode().unwrap(),
+    ))
+    .unwrap()
+}
+
+fn native_plan_allocations(game: &HeadlessGame) -> [usize; 3] {
+    let slot = &game.state.players[0];
+    let ptr = |stack: &ItemStack| match &stack.item {
+        crate::item::Item::Plan(plan) => plan.cells.as_ptr() as usize,
+        _ => panic!("actual private Plan body required"),
+    };
+    [
+        ptr(slot.inventory.slot(1).unwrap()),
+        ptr(slot.crafting_ui.cursor_item.as_ref().unwrap()),
+        ptr(slot.crafting_ui.grid[0][0].as_ref().unwrap()),
+    ]
+}
+
 /// Apply an actual terminal batch in its declared physical order, then send
 /// its exact personal acknowledgement before its exact receipt frontier.
 /// This is setup evidence, distinct from the native GameState/UI subject.
@@ -534,6 +617,7 @@ fn game_harness_d2c3_native_portable_quest_uses_restored_original_giver_dialogue
         Some(giver),
         "real native RMB must hit this exact restored giver"
     );
+    settle_dialogue_panel(&mut rig.game);
     assert_eq!(
         crate::staged_window::MarkerWindow::capture_parts(
             &rig.game.state.players[0].inventory,
@@ -547,6 +631,70 @@ fn game_harness_d2c3_native_portable_quest_uses_restored_original_giver_dialogue
         "opening native dialogue does not pay the quest"
     );
     assert!(rig.game.state.renderer.egui.last_shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text().contains("Progress: 27 / 27"))), "native dialogue offered a different legacy quest instead of the restored portable progress");
+    let treasury = rig.game.state.world.village_treasuries.clone();
+    let rep = rig.game.state.players[0]
+        .reputation
+        .per_village
+        .get(&rig.quest.village)
+        .copied()
+        .unwrap_or(0);
+    rig.game.state.sats_policy.bitcoin_enabled = true;
+    rig.game.state.players[0].charter_allows_sats = true;
+    click_dialogue_text(&mut rig.game, "Turn in");
+    assert!(
+        rig.game.state.players[0].dialogue_villager.is_none(),
+        "actual button click commits the native turn-in"
+    );
+    assert!(rig.game.state.players[0].quest_progress.accepted.is_empty());
+    assert_eq!(
+        rig.game.state.players[0]
+            .inventory
+            .count_material(MaterialId::Stick),
+        0
+    );
+    assert_eq!(
+        rig.game.state.players[0]
+            .inventory
+            .count_material(MaterialId::Bread),
+        2
+    );
+    assert_eq!(
+        rig.game.state.players[0].reputation.per_village[&rig.quest.village],
+        rep + 12
+    );
+    assert_eq!(
+        rig.game.state.world.village_treasuries, treasury,
+        "portable completion never credits monetary treasury"
+    );
+    assert!(
+        rig.game
+            .state
+            .turn_in_native_quest(0, giver, rig.quest.npc, rig.quest.id)
+            .is_err(),
+        "exact repeated completion is inert"
+    );
+    assert_eq!(
+        rig.game.state.players[0]
+            .inventory
+            .count_material(MaterialId::Bread),
+        2
+    );
+    rig.game.state.save_live_world().unwrap();
+    assert!(rig.game.state.leave_world(
+        crate::world_exit::SaveChoice::Discard,
+        crate::world_exit::ExitTo::Lobby
+    ));
+    load_native(&mut rig.game, &rig.name);
+    assert!(
+        rig.game.state.players[0].quest_progress.accepted.is_empty(),
+        "saved completion stays consumed on actual native re-entry"
+    );
+    assert_eq!(
+        rig.game.state.players[0]
+            .inventory
+            .count_material(MaterialId::Bread),
+        2
+    );
 }
 
 #[test]
@@ -604,4 +752,235 @@ fn game_harness_d2c3_native_elapsed_ticks_project_selected_timer_without_offline
         restored.quests, after.quests,
         "offline/load time does not consume a saved remaining timer"
     );
+}
+
+#[test]
+#[ignore = "needs actual native role cut, payment refusal and private body custody"]
+fn game_harness_d2c3_native_payment_refusals_and_full_bag_preserve_original_custody() {
+    let mut rig = native_cut("d2c3-native-payment-custody", false);
+    let giver = original_giver(&rig);
+    let pos = rig
+        .game
+        .state
+        .ecs
+        .get::<&crate::entity::Position>(giver)
+        .unwrap()
+        .0;
+    let plan = |name: &str| ItemStack {
+        item: crate::item::Item::Plan(crate::plan::PlanData {
+            name: name.into(),
+            ..crate::plan::PlanData::debug_3x3_stone()
+        }),
+        count: 1,
+    };
+    {
+        let slot = &mut rig.game.state.players[0];
+        slot.inventory
+            .set_slot(1, Some(plan("Native bag private body")));
+        slot.crafting_ui.cursor_item = Some(plan("Native cursor private body"));
+        slot.crafting_ui.grid[0][0] = Some(plan("Native grid private body"));
+        let mut armour = crate::armour::ArmourItem::new(
+            crate::armour::ArmourSlot::Helmet,
+            crate::armour::ArmourMaterial::Iron,
+        );
+        armour.durability = 7;
+        slot.armour_slots[0] = Some(armour);
+        slot.inventory
+            .set_slot(0, Some(ItemStack::new_material(MaterialId::Stick, 26)));
+    }
+    let pointers = native_plan_allocations(&rig.game);
+    let before = native_custody(&rig.game);
+    assert!(
+        rig.game
+            .state
+            .turn_in_native_quest(0, giver, rig.quest.npc, rig.quest.id)
+            .is_err(),
+        "changed current bag cannot pay"
+    );
+    assert_eq!(native_custody(&rig.game), before);
+    rig.game.state.players[0]
+        .inventory
+        .set_slot(0, Some(ItemStack::new_material(MaterialId::Stick, 27)));
+    let wrong =
+        crate::entity::spawn_mob(&mut rig.game.state.ecs, crate::mob::MobType::Villager, pos);
+    let before = native_custody(&rig.game);
+    assert!(
+        rig.game
+            .state
+            .turn_in_native_quest(0, wrong, rig.quest.npc, rig.quest.id)
+            .is_err(),
+        "nearby same-kind replacement is not the original giver"
+    );
+    assert_eq!(native_custody(&rig.game), before);
+    let old_health = rig
+        .game
+        .state
+        .ecs
+        .get::<&crate::combat::Health>(giver)
+        .unwrap()
+        .current;
+    rig.game
+        .state
+        .ecs
+        .get::<&mut crate::combat::Health>(giver)
+        .unwrap()
+        .current = 0.0;
+    assert!(
+        rig.game
+            .state
+            .turn_in_native_quest(0, giver, rig.quest.npc, rig.quest.id)
+            .is_err(),
+        "dead original cannot complete the retained quest"
+    );
+    assert_eq!(native_custody(&rig.game), before);
+    rig.game
+        .state
+        .ecs
+        .get::<&mut crate::combat::Health>(giver)
+        .unwrap()
+        .current = old_health;
+    rig.game.state.players[0]
+        .inventory
+        .set_slot(0, Some(ItemStack::new_material(MaterialId::Stick, 28)));
+    for at in 2..36 {
+        rig.game.state.players[0]
+            .inventory
+            .set_slot(at, Some(ItemStack::new_block(crate::block::STONE, 64)));
+    }
+    let cursor = rig.game.state.players[0].crafting_ui.cursor_item.clone();
+    let grid = rig.game.state.players[0].crafting_ui.grid.clone();
+    let armour = rig.game.state.players[0].armour_slots;
+    let bag_plan = rig.game.state.players[0].inventory.slot(1).cloned();
+    let dropped_bread = |game: &HeadlessGame| {
+        game.state
+            .ecs
+            .query::<&crate::entity::ItemEntity>()
+            .iter()
+            .filter(|(_, item)| item.stack.item == crate::item::Item::Material(MaterialId::Bread))
+            .map(|(_, item)| u32::from(item.stack.count))
+            .sum::<u32>()
+    };
+    assert_eq!(dropped_bread(&rig.game), 0);
+    rig.game
+        .state
+        .turn_in_native_quest(0, giver, rig.quest.npc, rig.quest.id)
+        .unwrap();
+    assert_eq!(
+        rig.game.state.players[0]
+            .inventory
+            .count_material(MaterialId::Stick),
+        1
+    );
+    assert_eq!(
+        rig.game.state.players[0]
+            .inventory
+            .count_material(MaterialId::Bread),
+        0
+    );
+    assert_eq!(
+        dropped_bread(&rig.game),
+        2,
+        "only the actual reward remainder spills at the original giver"
+    );
+    assert_eq!(rig.game.state.players[0].crafting_ui.cursor_item, cursor);
+    assert_eq!(rig.game.state.players[0].crafting_ui.grid, grid);
+    assert_eq!(rig.game.state.players[0].armour_slots, armour);
+    assert_eq!(
+        rig.game.state.players[0].inventory.slot(1).cloned(),
+        bag_plan
+    );
+    assert_eq!(
+        native_plan_allocations(&rig.game),
+        pointers,
+        "unaffected private allocations are retained"
+    );
+    assert!(
+        rig.game
+            .state
+            .turn_in_native_quest(0, giver, rig.quest.npc, rig.quest.id)
+            .is_err()
+    );
+    assert_eq!(dropped_bread(&rig.game), 2);
+}
+
+#[test]
+#[ignore = "needs actual native death sweep, common counters and elapsed penalty expiry"]
+fn game_harness_d2c3_native_kill_and_penalty_credit_once_in_the_same_holder() {
+    let mut rig = native_cut("d2c3-native-common-kills", true);
+    let pos = rig.game.state.players[0].player.pos + glam::Vec3::X;
+    let before = rig.game.state.players[0]
+        .kill_counter
+        .get(&crate::mob::MobType::Cow)
+        .copied()
+        .unwrap_or(0);
+    let cow = crate::entity::spawn_mob(&mut rig.game.state.ecs, crate::mob::MobType::Cow, pos);
+    rig.game
+        .state
+        .ecs
+        .get::<&mut crate::combat::Health>(cow)
+        .unwrap()
+        .current = 0.0;
+    rig.game.ticks(1);
+    assert!(
+        !rig.game.state.ecs.contains(cow),
+        "the real native death sweep consumed the corpse"
+    );
+    assert_eq!(
+        rig.game.state.players[0].kill_counter[&crate::mob::MobType::Cow],
+        before + 1
+    );
+    rig.game.ticks(1);
+    assert_eq!(
+        rig.game.state.players[0].kill_counter[&crate::mob::MobType::Cow],
+        before + 1,
+        "later ticks do not re-credit the corpse"
+    );
+    let village = rig.quest.village;
+    let rep = rig.game.state.players[0]
+        .reputation
+        .per_village
+        .get(&village)
+        .copied()
+        .unwrap_or(0);
+    for n in 0..2 {
+        let victim =
+            crate::entity::spawn_mob(&mut rig.game.state.ecs, crate::mob::MobType::Villager, pos);
+        rig.game
+            .state
+            .ecs
+            .get::<&mut crate::combat::Health>(victim)
+            .unwrap()
+            .current = 0.0;
+        rig.game.ticks(1);
+        assert!(!rig.game.state.ecs.contains(victim));
+        assert_eq!(
+            rig.game.state.players[0].reputation.per_village[&village],
+            rep - 25,
+            "only one penalty is charged during the actual cooldown"
+        );
+        let binding = rig.game.state.players[0].personal_binding.as_ref().unwrap();
+        let record =
+            GameplayRecord::from_slot(binding.context(), &rig.game.state.players[0]).unwrap();
+        assert_eq!(record.quests.penalty_left, 600 - n);
+    }
+    let revision = rig.game.state.players[0].gameplay_revision;
+    rig.game.ticks(599);
+    assert_eq!(rig.game.state.players[0].quest_progress.penalty_left, 0);
+    assert_eq!(
+        rig.game.state.players[0].gameplay_revision,
+        revision + 1,
+        "actual expiry commits one revision rather than a revision per timer tick"
+    );
+    rig.game.state.save_live_world().unwrap();
+    assert!(rig.game.state.leave_world(
+        crate::world_exit::SaveChoice::Discard,
+        crate::world_exit::ExitTo::Lobby
+    ));
+    load_native(&mut rig.game, &rig.name);
+    assert_eq!(
+        rig.game.state.players[0].kill_counter[&crate::mob::MobType::Cow],
+        before + 1,
+        "same counters survive selected native save and reopen"
+    );
+    assert_eq!(rig.game.state.players[0].quest_progress.penalty_left, 0);
 }

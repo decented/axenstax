@@ -347,6 +347,7 @@ mod quest_play;
 mod quest_wire;
 mod quest_state;
 mod quest_client;
+mod quest_native;
 mod reputation;
 mod economy;
 mod raid;

@@ -65,6 +65,9 @@ impl crate::GameState {
             self.local_personal = old_local;
             return Err(error);
         }
+        if old_binding.is_none() {
+            self.players[0].gameplay_clock.restore(self.tick_counter);
+        }
         Ok(())
     }
 }

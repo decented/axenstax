@@ -4918,6 +4918,7 @@ impl super::GameState {
             }
         }
         self.tick_counter = self.tick_counter.wrapping_add(1);
+        self.advance_native_gameplay();
         // Trials (⚡ Race) — record the runner's ghost frame this tick and finish
         // the run when they reach the beacon. Runs at the sim rate so ghost
         // frames map 1:1 to elapsed ticks for replay.
@@ -5514,7 +5515,9 @@ impl super::GameState {
             && self.tick_counter > 0
             && !self.remote_client.as_ref().is_some_and(|c| c.has_personal_state())
         {
-            for slot in self.players.iter_mut() { slot.reputation.decay_once(); }
+            for pidx in 0..self.players.len() {
+                if !self.decay_native_personal(pidx) { self.players[pidx].reputation.decay_once(); }
+            }
         }
 
         // Spec 22 Phase 2 — daily raid scheduler. Runs at the same
@@ -17758,342 +17761,344 @@ impl super::GameState {
             } else if pidx == 0 && self.joined_quest_open() {
                 self.draw_joined_quest(&screen.viewport);
             } else if let Some(target) = dialogue_target {
-                // Spec 19 phase 6 — villager dialogue + quest binding.
-                let still_alive = self.ecs.contains(target);
-                if !still_alive {
-                    self.players[pidx].dialogue_villager = None;
-                } else {
-                    let (label, prof, gossip) = {
-                        let vc = self.ecs.get::<&crate::villager::VillagerComponent>(target);
-                        match vc {
-                            Ok(c) => (
-                                crate::villager_ui::villager_label(target, &c),
-                                c.profession,
-                                c.gossip_line.clone(),
-                            ),
-                            Err(_) => (
-                                format!("{:?}", target),
-                                crate::villager::Profession::None,
-                                None,
-                            ),
-                        }
-                    };
-                    // Existing active quest for this villager → show its
-                    // progress. Otherwise pick a fresh one from the pool
-                    // seeded by tick + entity bits so the offer is
-                    // stable-per-encounter and varies across visits.
-                    let existing = self.players[pidx].active_quests.get(&target).cloned();
-                    // Audit 2026-09-28 A#23 — the sats term only renders
-                    // through the one sats-UI gate (never on the web taster).
-                    let sats_visible = crate::economy::sats_ui_visible(
-                        self.sats_policy.bitcoin_enabled,
-                        self.players[pidx].charter_allows_sats,
-                    );
-                    let summary;
-                    let quest_for_dialogue;
-                    if let Some(q) = existing.clone() {
-                        let kc = match q.flavour {
-                            crate::quest::QuestFlavour::Kill { mob, .. } => {
-                                let cur = *self.players[pidx].kill_counter.get(&mob).unwrap_or(&0);
-                                let base = self.players[pidx]
-                                    .kill_quest_baseline
-                                    .get(&target)
-                                    .map(|(_, b)| *b)
-                                    .unwrap_or(0);
-                                cur.saturating_sub(base)
+                if !self.draw_native_portable_quest(pidx, target, &screen.viewport) {
+                    // Spec 19 phase 6 — villager dialogue + quest binding.
+                    let still_alive = self.ecs.contains(target);
+                    if !still_alive {
+                        self.players[pidx].dialogue_villager = None;
+                    } else {
+                        let (label, prof, gossip) = {
+                            let vc = self.ecs.get::<&crate::villager::VillagerComponent>(target);
+                            match vc {
+                                Ok(c) => (
+                                    crate::villager_ui::villager_label(target, &c),
+                                    c.profession,
+                                    c.gossip_line.clone(),
+                                ),
+                                Err(_) => (
+                                    format!("{:?}", target),
+                                    crate::villager::Profession::None,
+                                    None,
+                                ),
                             }
-                            _ => 0,
                         };
-                        let (have, need) = crate::quest::progress_against(
-                            &q,
-                            &self.players[pidx].inventory,
-                            kc,
+                        // Existing active quest for this villager → show its
+                        // progress. Otherwise pick a fresh one from the pool
+                        // seeded by tick + entity bits so the offer is
+                        // stable-per-encounter and varies across visits.
+                        let existing = self.players[pidx].active_quests.get(&target).cloned();
+                        // Audit 2026-09-28 A#23 — the sats term only renders
+                        // through the one sats-UI gate (never on the web taster).
+                        let sats_visible = crate::economy::sats_ui_visible(
+                            self.sats_policy.bitcoin_enabled,
+                            self.players[pidx].charter_allows_sats,
                         );
-                        summary = format!("{}  Progress: {} / {}.",
-                            crate::quest::summarise(&q, sats_visible), have, need);
-                        quest_for_dialogue = Some(q);
-                    } else {
-                        let seed = (self.tick_counter as u32)
-                            .wrapping_add(format!("{:?}", target).len() as u32);
-                        match crate::quest::generate_quest(prof, seed) {
-                            Some(q) => {
-                                summary = crate::quest::summarise(&q, sats_visible);
-                                quest_for_dialogue = Some(q);
-                            }
-                            None => {
-                                summary = "No quest right now. Come back when \
-                                          you've helped others.".to_string();
-                                quest_for_dialogue = None;
-                            }
-                        }
-                    }
-
-                    // Decide which control set to show.
-                    let mode = if let Some(q) = existing.as_ref() {
-                        let kc = match q.flavour {
-                            crate::quest::QuestFlavour::Kill { mob, .. } => {
-                                let cur = *self.players[pidx].kill_counter.get(&mob).unwrap_or(&0);
-                                let base = self.players[pidx]
-                                    .kill_quest_baseline
-                                    .get(&target)
-                                    .map(|(_, b)| *b)
-                                    .unwrap_or(0);
-                                cur.saturating_sub(base)
-                            }
-                            _ => 0,
-                        };
-                        if crate::quest::is_complete(q, &self.players[pidx].inventory, kc) {
-                            crate::villager_ui::DialogueMode::ReadyToTurnIn
-                        } else {
-                            crate::villager_ui::DialogueMode::InProgress
-                        }
-                    } else {
-                        crate::villager_ui::DialogueMode::Offer
-                    };
-
-                    // Spec 22 Phase 9 — if the village this villager
-                    // belongs to is under active raid, surface the
-                    // bounty offer at the top of the dialogue.
-                    let villager_pos = self
-                        .ecs
-                        .get::<&crate::entity::Position>(target)
-                        .ok()
-                        .map(|p| p.0);
-                    let raid_banner: Option<String> = villager_pos
-                        .and_then(|p| crate::reputation::village_at_position(&self.world, p))
-                        .and_then(|vid| crate::raid::active_raid_for_village(&self.world, vid).map(|r| (vid, r.clone())))
-                        .map(|(_, raid)| match raid.status {
-                            crate::raid::RaidStatus::Warning => format!(
-                                "RAID INCOMING — a {} wave hits the village in moments. \
-                                 Defenders earn a share of the {}-sat bounty.",
-                                raid.wave_kind.label(),
-                                raid.treasury_drain,
-                            ),
-                            crate::raid::RaidStatus::Active => format!(
-                                "RAID IN PROGRESS — defend the village! \
-                                 {} sats bounty splits among defenders by kill count.",
-                                raid.treasury_drain,
-                            ),
-                            _ => String::new(),
-                        })
-                        .filter(|s| !s.is_empty());
-
-                    // Spec 22 Phase 18 — surface the top-3 defenders
-                    // of this village. Only when the village has at
-                    // least one recorded raid kill (`raid_kills` is a
-                    // per-(village, player) total, so any non-empty
-                    // entry for this vid counts). Empty otherwise so
-                    // a never-raided village's dialogue stays clean.
-                    let defender_leaderboard: Option<String> = villager_pos
-                        .and_then(|p| crate::reputation::village_at_position(&self.world, p))
-                        .and_then(|vid| {
-                            let top = crate::raid::top_defenders(&self.world.raid_kills, vid, 3);
-                            if top.is_empty() {
-                                None
-                            } else {
-                                let parts: Vec<String> = top
-                                    .into_iter()
-                                    .map(|(pk, c)| format!("Player {pk} ({c} kills)"))
-                                    .collect();
-                                Some(format!("Heroes here: {}", parts.join(", ")))
-                            }
-                        });
-
-                    let action = crate::villager_ui::draw_villager_dialogue(
-                        &self.renderer.egui.ctx,
-                        &screen.viewport,
-                        pidx,
-                        &label,
-                        prof,
-                        quest_for_dialogue.as_ref().map(|_| summary.as_str()),
-                        gossip.as_deref(),
-                        mode,
-                        raid_banner.as_deref(),
-                        defender_leaderboard.as_deref(),
-                    );
-                    match action {
-                        crate::villager_ui::DialogueAction::Close => {
-                            self.players[pidx].dialogue_villager = None;
-                            if pidx == 0 {
-                                self.capture_cursor();
-                            }
-                        }
-                        crate::villager_ui::DialogueAction::Decline => {
-                            let until = self.tick_counter
-                                + crate::villager_ui::DECLINE_COOLDOWN_TICKS;
-                            self.players[pidx]
-                                .villager_decline_until
-                                .insert(target, until);
-                            self.players[pidx].dialogue_villager = None;
-                            if pidx == 0 {
-                                self.capture_cursor();
-                            }
-                        }
-                        crate::villager_ui::DialogueAction::Accept => {
-                            if let Some(mut q) = quest_for_dialogue {
-                                q.accepted_by = Some(pidx as u32);
-                                if let crate::quest::QuestFlavour::Kill { mob, .. } = q.flavour {
-                                    let cur = *self.players[pidx]
-                                        .kill_counter
-                                        .get(&mob)
-                                        .unwrap_or(&0);
-                                    self.players[pidx]
-                                        .kill_quest_baseline
-                                        .insert(target, (mob, cur));
-                                }
-                                self.players[pidx].active_quests.insert(target, q);
-                                self.toast = Some((
-                                    "Quest accepted. Come back when you've finished.".to_string(),
-                                    Instant::now() + Duration::from_secs(3),
-                                ));
-                            }
-                            self.players[pidx].dialogue_villager = None;
-                            if pidx == 0 {
-                                self.capture_cursor();
-                            }
-                        }
-                        crate::villager_ui::DialogueAction::TurnIn => {
-                            // Phase 7 payout. Re-check completion against the
-                            // CURRENT inventory/kills before paying — a quest
-                            // whose items were dropped (or whose kill was never
-                            // met) after the dialogue opened must NOT pay
-                            // (engine audit 2026-06-04, A: reward without
-                            // completion re-check).
-                            let kc = self.players[pidx].active_quests.get(&target).map(|q| match q.flavour {
+                        let summary;
+                        let quest_for_dialogue;
+                        if let Some(q) = existing.clone() {
+                            let kc = match q.flavour {
                                 crate::quest::QuestFlavour::Kill { mob, .. } => {
                                     let cur = *self.players[pidx].kill_counter.get(&mob).unwrap_or(&0);
-                                    let base = self.players[pidx].kill_quest_baseline.get(&target).map(|(_, b)| *b).unwrap_or(0);
+                                    let base = self.players[pidx]
+                                        .kill_quest_baseline
+                                        .get(&target)
+                                        .map(|(_, b)| *b)
+                                        .unwrap_or(0);
                                     cur.saturating_sub(base)
                                 }
                                 _ => 0,
-                            }).unwrap_or(0);
-                            let payable = self.players[pidx].active_quests.get(&target)
-                                .map(|q| crate::quest::may_turn_in(q, &self.players[pidx].inventory, kc))
-                                .unwrap_or(false);
-                            if !payable {
-                                if self.players[pidx].active_quests.contains_key(&target) {
-                                    self.toast = Some((
-                                        "You're missing something the quest needs".to_string(),
-                                        Instant::now() + Duration::from_secs(2),
-                                    ));
+                            };
+                            let (have, need) = crate::quest::progress_against(
+                                &q,
+                                &self.players[pidx].inventory,
+                                kc,
+                            );
+                            summary = format!("{}  Progress: {} / {}.",
+                                crate::quest::summarise(&q, sats_visible), have, need);
+                            quest_for_dialogue = Some(q);
+                        } else {
+                            let seed = (self.tick_counter as u32)
+                                .wrapping_add(format!("{:?}", target).len() as u32);
+                            match crate::quest::generate_quest(prof, seed) {
+                                Some(q) => {
+                                    summary = crate::quest::summarise(&q, sats_visible);
+                                    quest_for_dialogue = Some(q);
                                 }
-                            } else if let Some(q) = self.players[pidx].active_quests.remove(&target) {
-                                let _ = crate::quest::fetch_make_consume(
-                                    &q,
-                                    &mut self.players[pidx].inventory,
-                                );
-                                let mut full_drop_count = 0u32;
-                                // Cache villager position up front so we don't
-                                // re-borrow ecs while spawning items.
-                                let villager_pos = self
-                                    .ecs
-                                    .get::<&crate::entity::Position>(target)
-                                    .ok()
-                                    .map(|p| p.0);
-                                for stack in &q.reward.items {
-                                    if self.players[pidx].inventory.add_item(stack.clone()).is_some()
-                                        && let Some(pos) = villager_pos {
-                                            crate::entity::spawn_item(
-                                                &mut self.ecs,
-                                                pos,
-                                                stack.clone(),
-                                                self.tick_counter as u32,
-                                            );
-                                            full_drop_count += 1;
-                                        }
+                                None => {
+                                    summary = "No quest right now. Come back when \
+                                              you've helped others.".to_string();
+                                    quest_for_dialogue = None;
                                 }
-                                // Reputation-tier multiplier on the reward
-                                // (Spec 19 §9 + sat-flow-and-economy-loops §3.2).
-                                // Wary villages pay less; Friendly + Beloved
-                                // pay more. The tier read happens BEFORE the
-                                // rep update for this quest so the kid is
-                                // rewarded for their existing standing,
-                                // not their post-quest one.
-                                let villager_pos = self
-                                    .ecs
-                                    .get::<&crate::entity::Position>(target)
-                                    .ok()
-                                    .map(|p| p.0);
-                                let village_id = villager_pos.and_then(|p| {
-                                    crate::reputation::village_at_position(&self.world, p)
-                                });
-                                let tier_mult = village_id
-                                    .map(|vid| self.players[pidx].reputation.tier(vid).reward_multiplier())
-                                    .unwrap_or(1.0);
-                                let scaled_sats = ((q.reward.sats as f32) * tier_mult).round() as u64;
-
-                                // Spec 22 Phase 13 — 20 % of every quest
-                                // payout goes to the village treasury (when
-                                // the quest is attached to a village). Kid
-                                // keeps 80 %; the village uses the skim to
-                                // fund raid bounties. Without this skim
-                                // the treasury never fills on solo and the
-                                // raid scheduler never fires.
-                                // Review W4 N3 — only when sats are on
-                                // (the same gate as the payout below).
-                                let quest_charter = self.players[pidx].charter_allows_sats
-                                    && !crate::nostrich_vow::is_vow_active(self.players[pidx].nostrich_vow.as_ref());
-                                let (kid_gross, village_skim) = crate::economy::quest_payout_split(
-                                    scaled_sats,
-                                    &self.sats_policy,
-                                    quest_charter,
-                                );
-                                if village_skim > 0
-                                    && let Some(vid) = village_id {
-                                        crate::raid::credit_treasury(
-                                            &mut self.world.village_treasuries,
-                                            vid,
-                                            village_skim,
-                                        );
-                                    }
-
-                                // Unified payout — Charter-flag + server-
-                                // policy + Reserve-drain + server-tax all
-                                // routed through `economy::apply_sats_payout`.
-                                // BRIDGE: the actual Lightning settlement
-                                // flips on when Sentinel D-003 reverses;
-                                // until then the helper's `credited` value
-                                // is the player-facing payout figure and the
-                                // skim/drain are audit-trail only.
-                                let payout = crate::economy::apply_sats_payout(
-                                    kid_gross,
-                                    crate::economy::PayoutKind::QuestReward,
-                                    &self.sats_policy,
-                                    quest_charter,
-                                );
-                                self.players[pidx].kill_quest_baseline.remove(&target);
-                                // Phase 9 — apply reputation gain.
-                                if let Some(vid) = village_id {
-                                    self.players[pidx]
-                                        .reputation
-                                        .adjust(vid, q.reward.reputation);
-                                }
-                                let mut msg = format!(
-                                    "Quest complete! +{} rep",
-                                    q.reward.reputation,
-                                );
-                                // Only print the sats line if the payout
-                                // wasn't suppressed (Charter-flag / Bitcoin-
-                                // disabled-server). Suppressed kids see only
-                                // the reputation line, matching the Barter-
-                                // mode parity posture in the meta-economy doc.
-                                if payout.credited > 0 {
-                                    msg.push_str(&format!(" + {} sats (sandbox)", payout.credited));
-                                }
-                                if full_drop_count > 0 {
-                                    msg.push_str(" — bag full, items dropped at the villager");
-                                }
-                                self.toast = Some((
-                                    msg,
-                                    Instant::now() + Duration::from_secs(3),
-                                ));
-                            }
-                            self.players[pidx].dialogue_villager = None;
-                            if pidx == 0 {
-                                self.capture_cursor();
                             }
                         }
-                        crate::villager_ui::DialogueAction::None => {}
+
+                        // Decide which control set to show.
+                        let mode = if let Some(q) = existing.as_ref() {
+                            let kc = match q.flavour {
+                                crate::quest::QuestFlavour::Kill { mob, .. } => {
+                                    let cur = *self.players[pidx].kill_counter.get(&mob).unwrap_or(&0);
+                                    let base = self.players[pidx]
+                                        .kill_quest_baseline
+                                        .get(&target)
+                                        .map(|(_, b)| *b)
+                                        .unwrap_or(0);
+                                    cur.saturating_sub(base)
+                                }
+                                _ => 0,
+                            };
+                            if crate::quest::is_complete(q, &self.players[pidx].inventory, kc) {
+                                crate::villager_ui::DialogueMode::ReadyToTurnIn
+                            } else {
+                                crate::villager_ui::DialogueMode::InProgress
+                            }
+                        } else {
+                            crate::villager_ui::DialogueMode::Offer
+                        };
+
+                        // Spec 22 Phase 9 — if the village this villager
+                        // belongs to is under active raid, surface the
+                        // bounty offer at the top of the dialogue.
+                        let villager_pos = self
+                            .ecs
+                            .get::<&crate::entity::Position>(target)
+                            .ok()
+                            .map(|p| p.0);
+                        let raid_banner: Option<String> = villager_pos
+                            .and_then(|p| crate::reputation::village_at_position(&self.world, p))
+                            .and_then(|vid| crate::raid::active_raid_for_village(&self.world, vid).map(|r| (vid, r.clone())))
+                            .map(|(_, raid)| match raid.status {
+                                crate::raid::RaidStatus::Warning => format!(
+                                    "RAID INCOMING — a {} wave hits the village in moments. \
+                                     Defenders earn a share of the {}-sat bounty.",
+                                    raid.wave_kind.label(),
+                                    raid.treasury_drain,
+                                ),
+                                crate::raid::RaidStatus::Active => format!(
+                                    "RAID IN PROGRESS — defend the village! \
+                                     {} sats bounty splits among defenders by kill count.",
+                                    raid.treasury_drain,
+                                ),
+                                _ => String::new(),
+                            })
+                            .filter(|s| !s.is_empty());
+
+                        // Spec 22 Phase 18 — surface the top-3 defenders
+                        // of this village. Only when the village has at
+                        // least one recorded raid kill (`raid_kills` is a
+                        // per-(village, player) total, so any non-empty
+                        // entry for this vid counts). Empty otherwise so
+                        // a never-raided village's dialogue stays clean.
+                        let defender_leaderboard: Option<String> = villager_pos
+                            .and_then(|p| crate::reputation::village_at_position(&self.world, p))
+                            .and_then(|vid| {
+                                let top = crate::raid::top_defenders(&self.world.raid_kills, vid, 3);
+                                if top.is_empty() {
+                                    None
+                                } else {
+                                    let parts: Vec<String> = top
+                                        .into_iter()
+                                        .map(|(pk, c)| format!("Player {pk} ({c} kills)"))
+                                        .collect();
+                                    Some(format!("Heroes here: {}", parts.join(", ")))
+                                }
+                            });
+
+                        let action = crate::villager_ui::draw_villager_dialogue(
+                            &self.renderer.egui.ctx,
+                            &screen.viewport,
+                            pidx,
+                            &label,
+                            prof,
+                            quest_for_dialogue.as_ref().map(|_| summary.as_str()),
+                            gossip.as_deref(),
+                            mode,
+                            raid_banner.as_deref(),
+                            defender_leaderboard.as_deref(),
+                        );
+                        match action {
+                            crate::villager_ui::DialogueAction::Close => {
+                                self.players[pidx].dialogue_villager = None;
+                                if pidx == 0 {
+                                    self.capture_cursor();
+                                }
+                            }
+                            crate::villager_ui::DialogueAction::Decline => {
+                                let until = self.tick_counter
+                                    + crate::villager_ui::DECLINE_COOLDOWN_TICKS;
+                                self.players[pidx]
+                                    .villager_decline_until
+                                    .insert(target, until);
+                                self.players[pidx].dialogue_villager = None;
+                                if pidx == 0 {
+                                    self.capture_cursor();
+                                }
+                            }
+                            crate::villager_ui::DialogueAction::Accept => {
+                                if let Some(mut q) = quest_for_dialogue {
+                                    q.accepted_by = Some(pidx as u32);
+                                    if let crate::quest::QuestFlavour::Kill { mob, .. } = q.flavour {
+                                        let cur = *self.players[pidx]
+                                            .kill_counter
+                                            .get(&mob)
+                                            .unwrap_or(&0);
+                                        self.players[pidx]
+                                            .kill_quest_baseline
+                                            .insert(target, (mob, cur));
+                                    }
+                                    self.players[pidx].active_quests.insert(target, q);
+                                    self.toast = Some((
+                                        "Quest accepted. Come back when you've finished.".to_string(),
+                                        Instant::now() + Duration::from_secs(3),
+                                    ));
+                                }
+                                self.players[pidx].dialogue_villager = None;
+                                if pidx == 0 {
+                                    self.capture_cursor();
+                                }
+                            }
+                            crate::villager_ui::DialogueAction::TurnIn => {
+                                // Phase 7 payout. Re-check completion against the
+                                // CURRENT inventory/kills before paying — a quest
+                                // whose items were dropped (or whose kill was never
+                                // met) after the dialogue opened must NOT pay
+                                // (engine audit 2026-06-04, A: reward without
+                                // completion re-check).
+                                let kc = self.players[pidx].active_quests.get(&target).map(|q| match q.flavour {
+                                    crate::quest::QuestFlavour::Kill { mob, .. } => {
+                                        let cur = *self.players[pidx].kill_counter.get(&mob).unwrap_or(&0);
+                                        let base = self.players[pidx].kill_quest_baseline.get(&target).map(|(_, b)| *b).unwrap_or(0);
+                                        cur.saturating_sub(base)
+                                    }
+                                    _ => 0,
+                                }).unwrap_or(0);
+                                let payable = self.players[pidx].active_quests.get(&target)
+                                    .map(|q| crate::quest::may_turn_in(q, &self.players[pidx].inventory, kc))
+                                    .unwrap_or(false);
+                                if !payable {
+                                    if self.players[pidx].active_quests.contains_key(&target) {
+                                        self.toast = Some((
+                                            "You're missing something the quest needs".to_string(),
+                                            Instant::now() + Duration::from_secs(2),
+                                        ));
+                                    }
+                                } else if let Some(q) = self.players[pidx].active_quests.remove(&target) {
+                                    let _ = crate::quest::fetch_make_consume(
+                                        &q,
+                                        &mut self.players[pidx].inventory,
+                                    );
+                                    let mut full_drop_count = 0u32;
+                                    // Cache villager position up front so we don't
+                                    // re-borrow ecs while spawning items.
+                                    let villager_pos = self
+                                        .ecs
+                                        .get::<&crate::entity::Position>(target)
+                                        .ok()
+                                        .map(|p| p.0);
+                                    for stack in &q.reward.items {
+                                        if self.players[pidx].inventory.add_item(stack.clone()).is_some()
+                                            && let Some(pos) = villager_pos {
+                                                crate::entity::spawn_item(
+                                                    &mut self.ecs,
+                                                    pos,
+                                                    stack.clone(),
+                                                    self.tick_counter as u32,
+                                                );
+                                                full_drop_count += 1;
+                                            }
+                                    }
+                                    // Reputation-tier multiplier on the reward
+                                    // (Spec 19 §9 + sat-flow-and-economy-loops §3.2).
+                                    // Wary villages pay less; Friendly + Beloved
+                                    // pay more. The tier read happens BEFORE the
+                                    // rep update for this quest so the kid is
+                                    // rewarded for their existing standing,
+                                    // not their post-quest one.
+                                    let villager_pos = self
+                                        .ecs
+                                        .get::<&crate::entity::Position>(target)
+                                        .ok()
+                                        .map(|p| p.0);
+                                    let village_id = villager_pos.and_then(|p| {
+                                        crate::reputation::village_at_position(&self.world, p)
+                                    });
+                                    let tier_mult = village_id
+                                        .map(|vid| self.players[pidx].reputation.tier(vid).reward_multiplier())
+                                        .unwrap_or(1.0);
+                                    let scaled_sats = ((q.reward.sats as f32) * tier_mult).round() as u64;
+
+                                    // Spec 22 Phase 13 — 20 % of every quest
+                                    // payout goes to the village treasury (when
+                                    // the quest is attached to a village). Kid
+                                    // keeps 80 %; the village uses the skim to
+                                    // fund raid bounties. Without this skim
+                                    // the treasury never fills on solo and the
+                                    // raid scheduler never fires.
+                                    // Review W4 N3 — only when sats are on
+                                    // (the same gate as the payout below).
+                                    let quest_charter = self.players[pidx].charter_allows_sats
+                                        && !crate::nostrich_vow::is_vow_active(self.players[pidx].nostrich_vow.as_ref());
+                                    let (kid_gross, village_skim) = crate::economy::quest_payout_split(
+                                        scaled_sats,
+                                        &self.sats_policy,
+                                        quest_charter,
+                                    );
+                                    if village_skim > 0
+                                        && let Some(vid) = village_id {
+                                            crate::raid::credit_treasury(
+                                                &mut self.world.village_treasuries,
+                                                vid,
+                                                village_skim,
+                                            );
+                                        }
+
+                                    // Unified payout — Charter-flag + server-
+                                    // policy + Reserve-drain + server-tax all
+                                    // routed through `economy::apply_sats_payout`.
+                                    // BRIDGE: the actual Lightning settlement
+                                    // flips on when Sentinel D-003 reverses;
+                                    // until then the helper's `credited` value
+                                    // is the player-facing payout figure and the
+                                    // skim/drain are audit-trail only.
+                                    let payout = crate::economy::apply_sats_payout(
+                                        kid_gross,
+                                        crate::economy::PayoutKind::QuestReward,
+                                        &self.sats_policy,
+                                        quest_charter,
+                                    );
+                                    self.players[pidx].kill_quest_baseline.remove(&target);
+                                    // Phase 9 — apply reputation gain.
+                                    if let Some(vid) = village_id {
+                                        self.players[pidx]
+                                            .reputation
+                                            .adjust(vid, q.reward.reputation);
+                                    }
+                                    let mut msg = format!(
+                                        "Quest complete! +{} rep",
+                                        q.reward.reputation,
+                                    );
+                                    // Only print the sats line if the payout
+                                    // wasn't suppressed (Charter-flag / Bitcoin-
+                                    // disabled-server). Suppressed kids see only
+                                    // the reputation line, matching the Barter-
+                                    // mode parity posture in the meta-economy doc.
+                                    if payout.credited > 0 {
+                                        msg.push_str(&format!(" + {} sats (sandbox)", payout.credited));
+                                    }
+                                    if full_drop_count > 0 {
+                                        msg.push_str(" — bag full, items dropped at the villager");
+                                    }
+                                    self.toast = Some((
+                                        msg,
+                                        Instant::now() + Duration::from_secs(3),
+                                    ));
+                                }
+                                self.players[pidx].dialogue_villager = None;
+                                if pidx == 0 {
+                                    self.capture_cursor();
+                                }
+                            }
+                            crate::villager_ui::DialogueAction::None => {}
+                        }
                     }
                 }
             } else if self.players[pidx].open_commission_villager.is_some() {
@@ -22274,7 +22279,8 @@ impl super::GameState {
         }
         let pos_seed = crate::death_drops::death_seed(pos, self.world_time);
         let authoritative_personal = self.remote_client.as_ref().is_some_and(|c| c.has_personal_state());
-        if !authoritative_personal {
+        let common_personal = !authoritative_personal && self.credit_native_personal_kill(idx, kind, pos);
+        if !authoritative_personal && !common_personal {
             let counter = self.players[idx].kill_counter.entry(kind).or_insert(0);
             *counter += 1;
         }
@@ -22311,7 +22317,7 @@ impl super::GameState {
 
         // Phase 9 — villager-kill reputation penalty (30 s cooldown so a
         // rage-loop costs rep once, not per-kill).
-        if !authoritative_personal && matches!(kind, crate::mob::MobType::Villager | crate::mob::MobType::Peddler) {
+        if !authoritative_personal && !common_personal && matches!(kind, crate::mob::MobType::Villager | crate::mob::MobType::Peddler) {
             let now = self.tick_counter;
             let last = self.players[idx].last_villager_kill_rep_tick;
             let on_cooldown = last

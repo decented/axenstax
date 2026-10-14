@@ -613,7 +613,10 @@ impl super::GameState {
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(save) = personal {
             match crate::handover::live::personal_adapter::install(&save, &mut self.players[0]) {
-                Ok(binding) => self.local_personal = Some(binding),
+                Ok(binding) => {
+                    self.local_personal = Some(binding);
+                    self.players[0].gameplay_clock.restore(self.tick_counter);
+                },
                 Err(why) => { self.leave_world_with_notice(crate::world_exit::SaveChoice::Abandon, format!("This world couldn't be opened: {why}")); return false; }
             }
         }

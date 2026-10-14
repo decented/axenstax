@@ -1007,7 +1007,7 @@ impl WindowInbox {
             _ => None,
         }) else { return false; };
         let Some(first_reward) = cost.checked_add(1) else { return false; };
-        if last < first_reward || last - cost > 17 { return false; }
+        if last < first_reward || last - cost > crate::progression::REWARD_LIMIT as u32 + 1 { return false; }
         self.outcomes.iter().any(|outcome| matches!(outcome,
             RequestOutcome::PersonalSync { window_event, actor_respawns } if *window_event == last && *actor_respawns == life))
             && (first_reward..last).all(|event| self.grants.iter().any(|grant| grant.window_event == event))

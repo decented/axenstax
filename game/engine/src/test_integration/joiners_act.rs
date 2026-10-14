@@ -606,6 +606,10 @@ fn a_dedicated_servers_kill_goes_to_the_killer_alone_and_drops_loot() {
     assert_eq!(kills[0].victim, protocol::EntityKind::Chicken);
     assert_eq!(kills[0].reason, protocol::kill_reason::LAST_HIT);
     assert!(rig.joiners[1].inbox.kills.is_empty(), "nobody else is credited");
+    let own = rig.hs.server.players[rig.joiners[0].slot].personal.as_ref().unwrap().record().unwrap();
+    let other = rig.hs.server.players[rig.joiners[1].slot].personal.as_ref().unwrap().record().unwrap();
+    assert_eq!(own.kills.iter().find(|(kind, _)| *kind == MobType::Chicken).map(|(_, count)| *count), Some(1), "actual LAST_HIT credits the same personal holder");
+    assert!(!other.kills.iter().any(|(kind, _)| *kind == MobType::Chicken));
     let items = rig.ecs().query::<&crate::entity::ItemEntity>().iter().count();
     assert!(items > 0, "the kill's loot drops as world items");
 }
@@ -622,6 +626,8 @@ fn an_unstamped_death_beside_a_joiner_is_that_joiners_as_the_nearest_player() {
     let kills = &rig.joiners[0].inbox.kills;
     assert_eq!(kills.len(), 1);
     assert_eq!(kills[0].reason, protocol::kill_reason::NEAREST, "credited as the nearest, not the hitter");
+    let record = rig.hs.server.players[rig.joiners[0].slot].personal.as_ref().unwrap().record().unwrap();
+    assert_eq!(record.kills.iter().find(|(kind, _)| *kind == MobType::Cow).map(|(_, count)| *count), Some(1), "NEAREST is a single common counter credit");
 }
 
 #[test]
@@ -664,6 +670,8 @@ fn a_lent_hosts_kill_by_a_joiner_goes_to_that_joiner_and_never_to_the_host() {
     rig.tick(1);
     assert_eq!(rig.joiners[0].inbox.kills.len(), 2);
     assert_eq!(rig.joiners[0].inbox.kills[1].reason, protocol::kill_reason::NEAREST);
+    let record = rig.hs.server.players[slot].personal.as_ref().unwrap().record().unwrap();
+    assert_eq!(record.kills.iter().find(|(kind, _)| *kind == MobType::Chicken).map(|(_, count)| *count), Some(2), "lent LAST_HIT and later NEAREST each credit only the joiner's holder");
 }
 
 /// Review D2b MEDIUM-1 — a joiner hits a cow and provokes a Bear, then
@@ -728,6 +736,8 @@ fn a_reused_slot_inherits_no_kill_credit_and_no_grudge() {
     rig.tick(2);
     assert!(rig.ecs().get::<&crate::combat::Health>(chicken).is_err());
     assert!(rig.joiners[b].inbox.kills.is_empty(), "an old generation's kill credits nobody");
+    let record = rig.hs.server.players[slot].personal.as_ref().unwrap().record().unwrap();
+    assert!(!record.kills.iter().any(|(kind, _)| matches!(kind, MobType::Cow | MobType::Chicken)), "released or retained stale-generation stamps cannot donate old credit into the new guest holder");
 }
 
 /// Review D2b MEDIUM-1 on a lending host: the departed joiner's cow dies in
@@ -758,6 +768,8 @@ fn a_departed_joiners_kill_credits_neither_the_host_nor_the_slots_next_joiner() 
     );
     rig.tick(1);
     assert!(rig.joiners[b].inbox.kills.is_empty(), "nor the slot's new joiner");
+    let record = rig.hs.server.players[slot].personal.as_ref().unwrap().record().unwrap();
+    assert!(!record.kills.iter().any(|(kind, _)| *kind == MobType::Cow));
 }
 
 /// Review D2b MEDIUM-2 — a dedicated server runs no breeding, Leads or pet
