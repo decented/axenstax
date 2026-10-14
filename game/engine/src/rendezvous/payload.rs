@@ -16,6 +16,17 @@ pub const KIND_JOIN_ANSWER: u16 = 20901;
 /// field) still parses under a newer build.
 pub const PAYLOAD_VERSION: u32 = 1;
 
+/// Encrypted original-invitation authority expectation. Missing context is an
+/// ordinary contact call only; a capability call never downgrades to it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HandoverContext {
+    pub root: [u8; 32],
+    pub capability: [u8; 32],
+    pub epoch: u32,
+    pub committed: [u8; 32],
+}
+
 /// One address the peer may be reachable at.
 ///
 /// `kind` is the wire spelling of `nat::candidates::CandidateKind`
@@ -46,6 +57,8 @@ pub struct Offer {
     pub protocol: u32,
     pub candidates: Vec<Candidate>,
     pub sent_at: u64,
+    #[serde(default)]
+    pub handover: Option<HandoverContext>,
 }
 
 /// "Yes, here is where to reach me" — or a refusal, for the two refusals that
@@ -63,6 +76,8 @@ pub struct Answer {
     pub candidates: Vec<Candidate>,
     pub world_name: String,
     pub sent_at: u64,
+    #[serde(default)]
+    pub handover: Option<HandoverContext>,
 }
 
 /// A fresh 16-byte session id, lowercase hex.
@@ -187,6 +202,7 @@ mod tests {
                 Candidate { kind: "stun".to_string(), addr: "203.0.113.9:41234".to_string() },
             ],
             sent_at: 1_700_000_000,
+                handover: None,
         }
     }
 
@@ -313,6 +329,7 @@ mod tests {
                 candidates: vec![],
                 world_name: "Ivy's Hollow".to_string(),
                 sent_at: 1_700_000_000,
+                handover: None,
             };
             let ev = seal_answer(&host_rt, &joiner_rt.public_key(), &answer).await.unwrap();
             assert_eq!(ev.kind, Kind::Custom(KIND_JOIN_ANSWER));

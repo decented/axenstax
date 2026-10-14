@@ -48,6 +48,7 @@ fn acknowledgement(snapshot: &PersonalSnapshot) -> PersonalAck {
 #[derive(Default)]
 pub(crate) struct Delivery {
     pub pending: Option<PersonalSnapshot>,
+    initial_expected: Option<PersonalAck>,
     pub revision: u64,
     pub last: Option<PersonalAck>,
     pub last_bytes: [u8; 32],
@@ -57,6 +58,15 @@ pub(crate) struct Delivery {
     pub last_penalty: Option<u64>,
 }
 impl Delivery {
+    pub fn issue(&mut self, snapshot: PersonalSnapshot, tick: u64) {
+        if !self.initialised && self.initial_expected.is_none() {
+            self.initial_expected = Some(acknowledgement(&snapshot));
+        }
+        self.revision = snapshot.revision;
+        self.started_tick = tick;
+        self.sent_tick = tick;
+        self.pending = Some(snapshot);
+    }
     pub fn accept(&mut self, ack: PersonalAck) -> bool {
         if self
             .pending
@@ -67,6 +77,14 @@ impl Delivery {
             self.last = Some(ack);
             self.pending = None;
             self.initialised = true;
+            self.initial_expected = None;
+            true
+        } else if self.initial_expected == Some(ack) {
+            // A newer snapshot may have been issued but delayed in transit.
+            // The exact retained baseline proves initial installation only;
+            // it does not settle or release that newer snapshot/freeze fence.
+            self.initialised = true;
+            self.initial_expected = None;
             true
         } else {
             self.last == Some(ack)

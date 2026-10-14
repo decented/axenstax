@@ -287,8 +287,8 @@ fn handover_checkpoint_real_world_roundtrip_preserves_members_and_source() {
     a.combat.health = 13.0;
     let mut b = crate::server::ServerPlayer::new(glam::Vec3::new(4.0, 5.0, 6.0));
     b.combat.health = 9.0;
-    let row_a = bincode::serialize(&crate::joiner_save::JoinerSave::capture(&a, [7; 16])).unwrap();
-    let row_b = bincode::serialize(&crate::joiner_save::JoinerSave::capture(&b, [7; 16])).unwrap();
+    let row_a = crate::joiner_save::JoinerSave::capture(&a, [7; 16]).encode_seed().unwrap();
+    let row_b = crate::joiner_save::JoinerSave::capture(&b, [7; 16]).encode_seed().unwrap();
     let npub_a = f.source.public_key().to_bech32().unwrap();
     let npub_b = f.recipient.public_key().to_bech32().unwrap();
     let participants = [
@@ -1042,11 +1042,10 @@ fn handover_checkpoint_required_exhibit_and_sidecar_write_failures_abort_import(
             sku: None,
             price: None,
         });
-        let row = bincode::serialize(&crate::joiner_save::JoinerSave::capture(
+        let row = crate::joiner_save::JoinerSave::capture(
             &crate::server::ServerPlayer::new(glam::Vec3::ZERO),
             [7; 16],
-        ))
-        .unwrap();
+        ).encode_seed().unwrap();
         let npub = f.source.public_key().to_bech32().unwrap();
         let participants = [ParticipantMember {
             npub: &npub,
@@ -1361,4 +1360,18 @@ mod sync_pool_tests {
         assert!(!early, "scratch cleanup returned while its sync workers were still blocked");
         assert_eq!(attempts.load(Ordering::SeqCst), 8, "scratch cleanup raced a sync worker");
     }
+}
+
+
+#[test]
+fn handover_checkpoint_refuses_mutable_or_legacy_sidecars_before_ready() {
+    let saved = crate::joiner_save::JoinerSave::capture(&crate::server::ServerPlayer::new(glam::Vec3::ZERO), [7; 16]);
+    let seed = saved.encode_seed().unwrap();
+    assert_eq!(seed[0], 2);
+    super::bounded_decode::sidecar(&seed).unwrap();
+    let mutable = saved.encode().unwrap();
+    assert_eq!(mutable[0], 3);
+    assert!(super::bounded_decode::sidecar(&mutable).is_err(), "Ready accepted an unbound live v3 that cannot bootstrap");
+    let mut legacy = seed; legacy[0] = 1;
+    assert!(super::bounded_decode::sidecar(&legacy).is_err(), "private legacy checkpoint bypassed the immutable seed contract");
 }

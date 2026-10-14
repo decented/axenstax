@@ -229,6 +229,9 @@ impl Resumer {
         }
         let Ok(store) = existing_store(world_dir) else { return false };
         if retired.is_published(&store) {
+            if !retired.is_abort() && let Err(error) = super::retained::finish_retired(world_dir, &retired, ledger) {
+                log::warn!("handover: the retained copy still awaits a safe move ({error})");
+            }
             return false;
         }
         if !self.0.jobs.lock().unwrap_or_else(|e| e.into_inner()).insert((Flavour::Source, transfer)) {
@@ -251,6 +254,9 @@ impl Resumer {
                 log::warn!("handover: a record under {} couldn't be made durable ({e}); it is not published yet (retrying; logged at most once a minute)", world_dir.display());
             }
             return false;
+        }
+        if !retired.is_abort() && let Err(error) = super::retained::finish_retired(world_dir, &retired, ledger) {
+            log::warn!("handover: the retained copy still awaits a safe move ({error})");
         }
         let shared = self.0.clone();
         let dir = world_dir.to_path_buf();

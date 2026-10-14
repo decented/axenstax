@@ -80,6 +80,11 @@ pub fn open_guard(world_dir: &Path) -> Result<(), Refusal> {
         }
     }
     let Some((path, id)) = retired else {
+        match super::retained::read(world_dir) {
+            Err(crate::handover::Error::State("inactive retained copy")) => return Err(Refusal(super::copy::NOT_ACTIVATED)),
+            Err(_) => return Err(unreadable),
+            Ok(_) => {}
+        }
         recipient_guard(&d, &pending, &activated)?;
         // CP17 (CP15 review LOW-3): last, so a retired or still-arriving
         // world says so first. Read-only: the probe opens an existing

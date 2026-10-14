@@ -33,6 +33,10 @@ pub enum MarkerKind {
     /// when none is (`phase::promote_pending_aborts`). Its label is no
     /// prefix of another kind's (the scans split names on `<label>-`).
     PendingAbort,
+    /// An inactive source-retained copy; never admits gameplay.
+    RetainedInert,
+    /// Signed personal provenance for a distinct source-retained copy.
+    RetainedCopy,
 }
 impl MarkerKind {
     fn number(self) -> u8 {
@@ -46,6 +50,8 @@ impl MarkerKind {
             Self::Quarantined => 6,
             Self::Aborted => 7,
             Self::PendingAbort => 8,
+            Self::RetainedInert => 9,
+            Self::RetainedCopy => 10,
         }
     }
     fn label(self) -> &'static str {
@@ -59,6 +65,8 @@ impl MarkerKind {
             Self::Quarantined => "quarantined",
             Self::Aborted => "aborted",
             Self::PendingAbort => "pending-abort",
+            Self::RetainedInert => "retained-inert",
+            Self::RetainedCopy => "retained-copy",
         }
     }
 }
@@ -532,7 +540,7 @@ fn read_bounded(path: &Path) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>> {
 /// CP14 (CP10 review LOW-4): a record folder is owner-only (0700), so
 /// other accounts can't list the record names (the records are 0600). Its
 /// parents are created as usual; an existing folder is tightened.
-fn create_private_dir(dir: &Path) -> Result<()> {
+pub(crate) fn create_private_dir(dir: &Path) -> Result<()> {
     if let Some(parent) = dir.parent() {
         fs::create_dir_all(parent).map_err(|_| Error::Io)?;
     }

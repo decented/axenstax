@@ -89,7 +89,11 @@ pub const OPERATION_SECS: u64 = 15 * 60;
 
 /// What a pack worker hands back: its generation, the transfer it packed
 /// for, and the packed copy (whose scratch is removed when it is dropped).
-type PackResult = (u64, Id, crate::handover::Result<PackedCheckpoint>);
+type PackResult = (u64, Id, crate::handover::Result<PackProduct>);
+enum PackProduct {
+    Archive(PackedCheckpoint),
+    Retained(PackedCheckpoint, Box<super::retained::PreparedCopy>),
+}
 /// What a publish worker hands back: its generation, the transfer, the one
 /// operation `Budget` (moved back for the next publication) and the stored
 /// witness (or why not).
@@ -144,6 +148,9 @@ pub struct SourceSession {
     recipient_challenge: Id,
     acceptance: Option<String>,
     packed: Option<PackedCheckpoint>,
+    retained: Option<super::retained::PreparedCopy>,
+    retained_offer: Option<(String, String)>,
+    retained_folder: Option<String>,
     core: Option<Core>,
     file: Option<std::fs::File>,
     sender: Option<Sender>,
@@ -235,6 +242,9 @@ impl SourceSession {
     /// The host action: refusals first, then bind the exact seat and propose.
     pub fn begin(hs: &mut HostedServer, action: HostAction, cfg: SourceConfig, live: Live, now: u64) -> Result<Self, Refusal> {
         check(hs, &action, &cfg, live)?;
+        if cfg.authority.epoch() >= 4 || now >= cfg.authority.expiry() {
+            return Err(Refusal("The original invitation has expired or has no handover hops left."));
+        }
         // CP17 (CP16 review LOW-2): a world with no room for this handover's
         // records is refused now, before it freezes and streams, not after
         // the whole world has been copied (disclosure checks again).
@@ -247,6 +257,14 @@ impl SourceSession {
         // H1: no live invitation capability, no handover.
         if *cfg.bearer.expose() == [0; 16] {
             return Err(Refusal(super::copy::NO_LIVE_INVITE));
+        }
+        if let Some(directory) = &cfg.world_dir
+            && let Some(info) = super::retained::read(directory).map_err(|_| Refusal(super::copy::AUTHORITY_UNREADABLE))?
+        {
+            let capability = crypto::root_capability(&cfg.root, cfg.bearer.expose()).map_err(|_| Refusal(super::copy::NO_LIVE_INVITE))?;
+            if info.retirement.retired_roots().len() >= 64 && !info.retirement.refuses_root(capability, now) {
+                return Err(Refusal("This world's retired invitation records are full. Nothing was changed."));
+            }
         }
         let context = crate::handover::personal::RecordContext { participant: action.seat.key, lineage: cfg.lineage, generation: cfg.generation, transfer: [1; 16] };
         let save = crate::joiner_save::JoinerSave::capture(&hs.server.players[action.seat.slot], hs.server.run_id);
@@ -267,6 +285,9 @@ impl SourceSession {
             recipient_challenge: [0; 16],
             acceptance: None,
             packed: None,
+            retained: None,
+            retained_offer: None,
+            retained_folder: None,
             core: None,
             file: None,
             sender: None,
@@ -375,6 +396,7 @@ impl SourceSession {
     pub fn retained_copy(&self) -> Id {
         self.retained_copy
     }
+    pub(crate) fn retained_folder(&self) -> Option<&str> { self.retained_folder.as_deref() }
     /// After Retired: the exact signed Commit bytes this source persisted.
     #[cfg_attr(not(test), expect(dead_code, reason = "Retained handover proof utility; the live controller uses its checked adapter"))]
     pub fn commit_event(&self) -> Option<&Event> {

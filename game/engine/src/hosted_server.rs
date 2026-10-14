@@ -4557,7 +4557,7 @@ impl HostedServer {
                             let directory = crate::save::world_dir(&self.server.world_name);
                             let prepared = crate::handover::live::personal_adapter::proof(&directory).and_then(|proof| {
                                 let Some(proof) = proof else { return Ok(()); };
-                                if self.num_local_players > 0 && key == proof.core.successor_persona {
+                                if self.num_local_players > 0 && key == proof.local_owner() {
                                     return Err("This player is already playing locally here.".to_string());
                                 }
                                 if self.num_local_players == 0 { self.server.claim_remote_personal(key, &proof)?; }

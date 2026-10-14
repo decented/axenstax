@@ -316,13 +316,20 @@ impl super::GameState {
         let personal = if self.persists_locally() {
             let selected = (|| -> Result<Option<crate::joiner_save::JoinerSave>, String> {
                 let directory = crate::save::world_dir(&self.world_name);
-                let Some(proof) = crate::handover::live::personal_adapter::proof(&directory)? else { return Ok(None); };
-                let key = self.handover_signed_in().ok_or("Sign in as this world's new host before opening it.")?;
-                if key != proof.core.successor_persona { return Err("Sign in as this world's new host before opening it.".into()); }
+                let Some(proof) = crate::handover::live::personal_adapter::proof(&directory)? else {
+                    if load_result.as_ref().is_some_and(|(save, _)| save.local_personal.is_some()) || crate::handover::live::personal_adapter::has_bound_records(&directory)? {
+                        return Err("This world's saved player authority is missing. Nothing was reset.".into());
+                    }
+                    return Ok(None);
+                };
+                let key = self.handover_signed_in().ok_or("Sign in as this world's saved host before opening it.")?;
+                if key != proof.local_owner() { return Err("Sign in as this world's saved host before opening it.".into()); }
+                proof.confirm_authority_durable(&directory)?;
                 if let Some(snapshot) = load_result.as_ref().and_then(|(save, _)| save.local_personal.as_ref()) {
                     let saved = crate::joiner_save::JoinerSave::decode(&snapshot.0)?;
                     let bound = saved.personal.as_ref().ok_or("selected personal snapshot has no authority binding")?;
                     if bound.binding != proof.binding(key) { return Err("selected personal snapshot belongs to another player or transfer".into()); }
+                    crate::handover::live::personal_adapter::confirm_durable(&selected_personal_directory.join("world.dat"))?;
                     // This selected primary/autosave owns the local window and
                     // maps together. Refresh its remote canonical mirror only
                     // after complete validation, before exposing gameplay.
@@ -511,55 +518,9 @@ impl super::GameState {
             // `saved_mobs` Vec via `#[serde(default)]`, so this is a no-op for
             // pre-Wave-2 worlds. (Untamed wildlife isn't persisted — it
             // re-scatters deterministically.)
-            for pet in &save_data.saved_mobs {
-                let kind = pet.data.mob_type();
-                let pos = glam::Vec3::new(pet.x, pet.y, pet.z);
-                let id = crate::entity::spawn_mob(&mut self.ecs, kind, pos);
-                match &pet.data {
-                    crate::save::SavedTamedPetData::Wolf(d) => {
-                        // Belt-and-braces (Task 7): a save written before the
-                        // save-time fix can still have a persisted
-                        // AttackHostile/AttackRecentAttacker baked into its
-                        // bytes, carrying a stale hecs entity id — sanitize
-                        // on the way back in too.
-                        let mut d = d.clone();
-                        d.sanitize_attack_state_for_persistence();
-                        let _ = self.ecs.insert_one(id, d);
-                    }
-                    crate::save::SavedTamedPetData::Nostrich(d) => {
-                        let _ = self.ecs.insert_one(id, d.clone());
-                    }
-                    crate::save::SavedTamedPetData::Companion { data, .. } => {
-                        // Legacy save (pre-1C): no command state on the wire —
-                        // CompanionData restores with state = Follow (Default).
-                        let _ = self.ecs.insert_one(id, data.clone());
-                    }
-                    crate::save::SavedTamedPetData::Companion2 { data, state, .. } => {
-                        // 1C save: `state` is serde(skip) on CompanionData, so
-                        // re-attach the command state carried alongside it.
-                        let mut d = data.clone();
-                        d.state = *state;
-                        let _ = self.ecs.insert_one(id, d);
-                    }
-                    crate::save::SavedTamedPetData::Steed { data, .. } => {
-                        // Legacy save (pre-Task 11): no cargo pack on the wire —
-                        // spawn_mob attached a fresh wild HorseData; overwrite
-                        // with the kept state (owner slot + AI state), packless.
-                        let _ = self.ecs.insert_one(id, data.clone());
-                    }
-                    crate::save::SavedTamedPetData::Steed2 { data, pack, .. } => {
-                        // Task 11 save: `pack` is serde(skip) on HorseData, so
-                        // re-attach the cargo pack carried alongside it.
-                        let mut d = data.clone();
-                        d.pack = pack.clone();
-                        let _ = self.ecs.insert_one(id, d);
-                    }
-                    crate::save::SavedTamedPetData::Authored { .. } => {
-                        // #129 — re-tag as authored so it survives chunk unload
-                        // (no `Scattered`) and is re-collected on the next save.
-                        let _ = self.ecs.insert_one(id, crate::entity::Authored);
-                    }
-                }
+            if let Err(error) = crate::steed_save::restore_pets(&mut self.ecs, &save_data.saved_mobs, true) {
+                self.leave_world_with_notice(crate::world_exit::SaveChoice::Abandon, format!("This world's saved creatures couldn't be restored: {error}"));
+                return false;
             }
 
             // Heavy per-column work (lighting, water, gen-missing, meshing, mob

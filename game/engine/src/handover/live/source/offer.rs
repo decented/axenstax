@@ -47,14 +47,23 @@ impl SourceSession {
     /// awaited, is dropped (its `PackedCheckpoint` removes its scratch).
     pub(super) fn on_pack(&mut self, hs: &mut HostedServer, live: Live, msg: PackResult, now: u64) -> Result<(), Refusal> {
         let (generation, transfer, result) = msg;
+        if let Some(worker) = self.pack_worker.take() {
+            worker.join().map_err(|_| Refusal("The copy worker failed. Play has resumed."))?;
+        }
         if generation != self.pack_generation || transfer != self.transfer || self.stage != SourceStage::Packing {
             drop(result);
             return Ok(());
         }
-        let packed = result.map_err(|_| {
+        let product = result.map_err(|_| {
             Refusal("The world couldn't be packed for the handover (too large, or something in it can't move yet).")
         })?;
-        self.after_pack(hs, live, packed, now)
+        match product {
+            PackProduct::Archive(packed) => self.after_pack(hs, live, packed, now),
+            PackProduct::Retained(packed, retained) => {
+                self.retained = Some(*retained);
+                self.send_offer(hs, live, packed, now)
+            }
+        }
     }
 
     /// Test hook: hold the pack worker once its archive is written. The
@@ -81,12 +90,15 @@ impl SourceSession {
     /// Test hook: wait for the pack and use it, as a later pump would.
     #[cfg(test)]
     pub fn settle_pack(&mut self, hs: &mut HostedServer, live: Live, now: u64) -> Result<(), Refusal> {
-        let r = match self.take_pack(true) {
-            Ok(Some(msg)) => self.on_pack(hs, live, msg, now),
-            Ok(None) => Ok(()),
-            Err(r) => Err(r),
-        };
-        r.map_err(|r| self.fail(hs, r))
+        loop {
+            let r = match self.take_pack(true) {
+                Ok(Some(msg)) => self.on_pack(hs, live, msg, now),
+                Ok(None) => return Ok(()),
+                Err(r) => Err(r),
+            };
+            r.map_err(|r| self.fail(hs, r))?;
+            if self.stage != SourceStage::Packing { return Ok(()); }
+        }
     }
 
     /// H2: returns the recipient attestation it verified (Prepared and
@@ -218,7 +230,7 @@ impl SourceSession {
         let worker = std::thread::Builder::new()
             .name("handover-pack".into())
             .spawn(move || {
-                let r = checkpoint::pack_snapshot(&snapshot, binding, &scratch, limits, &control);
+                let r = checkpoint::pack_snapshot(&snapshot, binding, &scratch, limits, &control).map(PackProduct::Archive);
                 // A dropped session's receiver is gone: the result (and its
                 // scratch) is dropped right here.
                 let _ = tx.send((generation, transfer, r));
@@ -238,7 +250,7 @@ impl SourceSession {
         let seat = self.action.seat;
         let source_agreement = self.source_agreement.take().ok_or(Refusal("No agreement."))?;
         let manifest = packed.manifest().encode().map_err(|_| Refusal("The world's manifest is too large."))?;
-        let epoch = self.cfg.authority.epoch() + 1;
+        let epoch = self.cfg.authority.epoch().checked_add(1).ok_or(Refusal("The invitation has no handover hops left."))?;
         let core = Core {
             context: self.cfg.root.digest(),
             root_runtime: self.cfg.root.runtime(),
@@ -257,13 +269,43 @@ impl SourceSession {
             successor_persona: seat.key,
             issued_at: now,
             not_before: now,
-            expires_at: now.saturating_add(self.cfg.validity).min(self.cfg.root.expiry()),
+            expires_at: now.saturating_add(self.cfg.validity).min(self.cfg.root.expiry()).min(self.cfg.authority.expiry()),
             remaining_hops: 4u32.saturating_sub(epoch) as u8,
         };
         core.validate(&self.cfg.root, now).map_err(|_| Refusal("The invitation has expired or can't carry another handover."))?;
         let offer = pollster::block_on(checkpoint::sign_offer(&self.cfg.runtime, &core, self.recipient_challenge))
             .map_err(|_| Refusal("The checkpoint offer couldn't be signed."))?
             .as_json();
+        let admitted = checkpoint::AdmittedManifest::verify(&manifest, offer.as_bytes(), checkpoint::OfferContext {
+            core: core.clone(), root: &self.cfg.root, authority: &self.cfg.authority,
+            challenge: self.recipient_challenge, recipient_runtime: core.successor_runtime,
+            recipient_persona: core.successor_persona, now,
+        }).map_err(|_| Refusal("The retained checkpoint offer didn't verify. Play has resumed."))?;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (generation, transfer, copy, cancel) = (self.pack_generation, self.transfer, self.retained_copy, self.pack_cancel.clone());
+        let worlds = crate::save::worlds_root();
+        let worker = std::thread::Builder::new().name("handover-retained-copy".into()).spawn(move || {
+            let result = super::super::retained::prepare(&packed, admitted, copy, worlds, now, cancel)
+                .map(|retained| PackProduct::Retained(packed, Box::new(retained)));
+            let _ = tx.send((generation, transfer, result));
+        }).map_err(|_| Refusal("The retained copy couldn't start. Play has resumed."))?;
+        self.core = Some(core);
+        self.retained_offer = Some((offer, source_agreement));
+        self.pack_rx = Some(rx);
+        self.pack_worker = Some(worker);
+        self.last_beat = now;
+        Ok(())
+    }
+
+    /// The distinct source copy is durable before the recipient sees an offer
+    /// or can send Ready. The ordinary bounded stream starts only now.
+    fn send_offer(&mut self, hs: &mut HostedServer, live: Live, packed: PackedCheckpoint, now: u64) -> Result<(), Refusal> {
+        hs.handover_check().map_err(Refusal)?;
+        self.check(hs, live)?;
+        let core = self.core.clone().ok_or(Refusal("No certificate."))?;
+        core.validate(&self.cfg.root, now).map_err(|_| Refusal("The invitation expired while the safe copy was being prepared. Play has resumed."))?;
+        let (offer, source_agreement) = self.retained_offer.take().ok_or(Refusal("No retained offer."))?;
+        let manifest = packed.manifest().encode().map_err(|_| Refusal("The world's manifest is too large."))?;
         let total = manifest.len() as u32;
         for (i, part) in manifest.chunks(PART_LIMIT).enumerate() {
             let f = Frame::ManifestPart { transfer: self.transfer, total, offset: (i * PART_LIMIT) as u32, bytes: part.to_vec() };

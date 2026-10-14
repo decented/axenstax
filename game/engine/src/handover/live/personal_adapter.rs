@@ -13,6 +13,8 @@ use std::{fs, io::Write, path::Path};
 pub(crate) struct Proof {
     pub core: Core,
     manifest: Manifest,
+    retained: bool,
+    retained_copy: Option<crate::handover::Id>,
 }
 
 pub(crate) fn read_regular(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
@@ -44,6 +46,10 @@ pub(crate) fn read_regular(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
 
 pub(crate) fn proof(world: &Path) -> Result<Option<Proof>, String> {
     super::authority::open_guard(world).map_err(|r| r.0.to_string())?;
+    if let Some(info) = super::retained::read(world).map_err(|e| e.to_string())? {
+        let copy = info.retirement.retained_copy();
+        return Ok(Some(Proof { core: info.core().clone(), manifest: info.manifest, retained: true, retained_copy: Some(copy) }));
+    }
     let directory = world.join("handover");
     let entries = match fs::read_dir(&directory) {
         Ok(entries) => entries,
@@ -102,10 +108,34 @@ pub(crate) fn proof(world: &Path) -> Result<Option<Proof>, String> {
     {
         return Err("personal manifest differs from activated authority".into());
     }
-    Ok(Some(Proof { core, manifest }))
+    Ok(Some(Proof { core, manifest, retained: false, retained_copy: None }))
 }
 
 impl Proof {
+    /// Only the archive's checked offer/manifest can prepare this inactive
+    /// copy. Gameplay instead reads its final signed retained provenance.
+    pub(super) fn retained_checkpoint(admitted: &crate::handover::checkpoint::AdmittedManifest, copy: crate::handover::Id) -> Self {
+        Self { core: admitted.core().clone(), manifest: admitted.manifest().clone(), retained: true, retained_copy: Some(copy) }
+    }
+    pub(crate) fn is_retained(&self) -> bool { self.retained }
+    pub(crate) fn local_owner(&self) -> [u8; 32] {
+        if self.retained { self.core.source_persona } else { self.core.successor_persona }
+    }
+    pub(super) fn manifest(&self) -> &Manifest { &self.manifest }
+    /// A visible activation/copy release is not sufficient after an uncertain
+    /// directory sync. Retry the selected proof and its directory before play.
+    pub(crate) fn confirm_authority_durable(&self, world: &Path) -> Result<(), String> {
+        let directory = super::authority::dir(world);
+        let name = if self.retained {
+            format!("retained-copy-{}.dat", hex::encode(self.retained_copy.ok_or("missing retained copy identity")?))
+        } else { format!("activated-{}.dat", hex::encode(self.core.transfer)) };
+        crate::fsync::sync_regular(&directory.join(name)).map_err(|e| e.to_string())?;
+        crate::fsync::sync_regular(&directory.join("personal-manifest.dat")).map_err(|e| e.to_string())?;
+        crate::fsync::sync_dir(&directory).map_err(|e| e.to_string())?;
+        crate::fsync::sync_dir(world).map_err(|e| e.to_string())?;
+        if let Some(parent) = world.parent() { crate::fsync::sync_dir(parent).map_err(|e| e.to_string())?; }
+        Ok(())
+    }
     pub(crate) fn binding(&self, participant: [u8; 32]) -> PersonalBinding {
         PersonalBinding {
             context: crate::handover::personal::RecordContext {
@@ -199,12 +229,50 @@ pub(crate) fn load_or_bootstrap(
     Ok(Some(save))
 }
 
-fn confirm_durable(target: &Path) -> Result<(), String> {
+pub(crate) fn confirm_durable(target: &Path) -> Result<(), String> {
     crate::fsync::sync_regular(target).map_err(|e| e.to_string())?;
     let directory = target.parent().ok_or("missing personal directory")?;
     crate::fsync::sync_dir(directory).map_err(|e| e.to_string())?;
     crate::fsync::sync_dir(directory.parent().ok_or("missing world directory")?)
         .map_err(|e| e.to_string())
+}
+
+/// Detect a remaining live personal authority even after the dedicated role
+/// has cleared the local WorldSave field. This is read-only and bounded; a
+/// proofless bound record must never become an ordinary bag or lossy export.
+pub(crate) fn has_bound_records(world: &Path) -> Result<bool, String> {
+    let entries = match fs::read_dir(world.join("joiners")) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.to_string()),
+    };
+    for (seen, entry) in entries.enumerate() {
+        if seen >= 4096 {
+            return Err("too many personal records to verify safely".into());
+        }
+        let entry = entry.map_err(|e| e.to_string())?;
+        let name = entry.file_name();
+        let Some(npub) = name.to_str().and_then(|name| name.strip_suffix(".dat")) else {
+            continue;
+        };
+        if !npub.starts_with("npub1") {
+            continue;
+        }
+        let bytes = read_regular(&entry.path(), crate::joiner_save::MAX_JOINER_SAVE_BYTES)?;
+        if bytes.first() == Some(&3) && JoinerSave::decode(&bytes)?.personal.is_some() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Generic archives/forks omit proofs and participant files. Keep the complete
+/// world directory for backup until a proof-preserving copy format exists.
+pub(crate) fn generic_copy_guard(world: &Path) -> Result<(), String> {
+    if proof(world)?.is_some() || has_bound_records(world)? {
+        return Err("This transferred world cannot use archive/profile export or Fork. Copy the complete world directory to keep its authority and saved players.".into());
+    }
+    Ok(())
 }
 
 pub(crate) fn write(world: &Path, key: [u8; 32], save: &JoinerSave) -> Result<(), String> {
@@ -226,7 +294,9 @@ pub(crate) fn write_observed(
         Ok(_) => return Err("unsafe world directory for personal save".into()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             fs::create_dir_all(world).map_err(|e| e.to_string())?;
-            if let Some(parent) = world.parent() { crate::fsync::sync_dir(parent).map_err(|e| e.to_string())?; }
+            if let Some(parent) = world.parent() {
+                crate::fsync::sync_dir(parent).map_err(|e| e.to_string())?;
+            }
         }
         Err(e) => return Err(e.to_string()),
     }
@@ -325,7 +395,7 @@ impl crate::server::GameServer {
         key: [u8; 32],
         proof: &Proof,
     ) -> Result<(), String> {
-        if key != proof.core.successor_persona {
+        if key != proof.local_owner() {
             return Ok(());
         }
         let world = crate::save::world_dir(&self.world_name);
@@ -446,6 +516,7 @@ pub(crate) fn preflight(
     context: crate::handover::personal::RecordContext,
 ) -> Result<(), Refusal> {
     let result = (|| -> Result<(), String> {
+        if seed.first() != Some(&2) { return Err("personal transfer needs an immutable v2 seed".into()); }
         let mut save = JoinerSave::decode(seed)?;
         let record = crate::handover::personal::PersonalRecord::decode(progress, &context)
             .map_err(|e| e.to_string())?;

@@ -51,6 +51,7 @@ pub(crate) struct SourceEnv {
     pub bearer: crate::handover::live::bearer::Bearer,
     /// This runtime's player attestation (the one online play uses).
     pub attestation: nostr::Event,
+    pub continuation: Option<crate::handover::live::continuation::Resolved>,
 }
 
 /// What a recipient needs: its runtime key and that key's player
@@ -213,7 +214,11 @@ pub(crate) fn draw(ctx: &egui::Context, handover: Option<&Handover>, host_paused
                 SourceStage::ReadyVerified => (copy::source_stored(world, &who), cancel),
                 SourceStage::Publishing | SourceStage::Prepared => (copy::source_finishing(world, &who), cancel),
                 // Past retirement nothing resumes: no Cancel.
-                SourceStage::Retired => (copy::source_retired(world, &who), &[][..]),
+                SourceStage::Retired => {
+                    let mut line = copy::source_retired(world, &who);
+                    line.push_str(if session.retained_folder().is_some() { " Your separate retained copy is in the lobby." } else { " Your retained copy is stored safely and awaits a move retry from the lobby." });
+                    (line, &[][..])
+                },
                 SourceStage::RetirementUncertain => (copy::RETIREMENT_UNCERTAIN.to_string(), &[][..]),
                 SourceStage::Aborted(_) => return None,
                 _ => (copy::source_copying(world, &who), cancel),
@@ -341,8 +346,8 @@ impl crate::GameState {
             self.handover_toast(r.0); return;
         }
         let now = crate::game_loop::wardrobe_now();
-        let env = self.online_host.as_ref().map(|host| (host.runtime_keys().clone(), host.root_context(now).ok(), host.live_bearer(now)));
-        let Some((runtime, root, bearer)) = env else {
+        let env = self.online_host.as_ref().map(|host| (host.runtime_keys().clone(), host.root_context(now).ok(), host.live_bearer(now), host.continuation().cloned()));
+        let Some((runtime, root, bearer, continuation)) = env else {
             self.handover_toast(copy::NEEDS_ONLINE);
             return;
         };
@@ -368,7 +373,7 @@ impl crate::GameState {
             }
         };
         let bearer = crate::handover::live::bearer::Bearer::new(bearer);
-        if let Err(e) = self.begin_handover_with(drawn, SourceEnv { runtime, root, scratch, bearer, attestation }, now) {
+        if let Err(e) = self.begin_handover_with(drawn, SourceEnv { runtime, root, scratch, bearer, attestation, continuation }, now) {
             self.handover_toast(e);
         }
     }
@@ -399,9 +404,19 @@ impl crate::GameState {
         // The lineage is derived from the invitation (the recipient derives
         // the same from the host it verified); the authority is the root's.
         let lineage = root_lineage(&env.root);
-        let authority = Authority::root(&env.root, lineage)
-            .map_err(|_| "This world's invitation can't carry a handover.".to_string())?;
-        let checkpoint_generation = u64::from(authority.epoch()) + 1;
+        let world_dir = crate::save::world_dir(&self.world_name);
+        let installed_proof = crate::handover::live::personal_adapter::proof(&world_dir)?;
+        let (authority, checkpoint_generation, validity) = if let Some(resolved) = &env.continuation {
+            if resolved.root != env.root || resolved.bearer != env.bearer { return Err("The original invitation capability changed.".into()); }
+            let proof = installed_proof.as_ref().ok_or("The continued world has no installed authority.")?;
+            let store = crate::handover::durable::MarkerStore::open_existing(crate::handover::live::authority::dir(&world_dir)).map_err(|e| e.to_string())?;
+            let installed = crate::handover::phase::Installed::read(&store, proof.core.transfer).map_err(|e| e.to_string())?.ok_or("The installed authority is missing.")?;
+            resolved.matches_installation(&installed).map_err(|e| e.to_string())?;
+            (resolved.authority().map_err(|e| e.to_string())?, resolved.next_generation().map_err(|e| e.to_string())?, CERTIFICATE_SECS.min(resolved.expiry().saturating_sub(now)))
+        } else {
+            if installed_proof.as_ref().is_some_and(|proof| !proof.is_retained()) { return Err("This world requires its verified original invitation authority.".into()); }
+            (Authority::root(&env.root, lineage).map_err(|_| "This world's invitation can't carry a handover.".to_string())?, 1, CERTIFICATE_SECS)
+        };
         let cfg = SourceConfig {
             runtime: env.runtime,
             root: env.root,
@@ -412,7 +427,7 @@ impl crate::GameState {
             world: random_id(),
             generation: checkpoint_generation,
             scratch: env.scratch,
-            validity: CERTIFICATE_SECS,
+            validity,
             world_dir: Some(crate::save::world_dir(&self.world_name)),
             bearer: env.bearer,
             attestation: env.attestation,
@@ -504,7 +519,7 @@ impl crate::GameState {
         };
         // P3: no session is live here (a running one answers Busy above).
         let _ = crate::handover::live::inert::sweep(&env.imports, None);
-        match RecipientSession::propose(payload, host, env.identity, env.imports, now) {
+        match RecipientSession::propose_with_authority(payload, host, env.identity, env.imports, now, self.joined_continuation.as_ref()) {
             Ok(mut s) => {
                 // CP12 (CP10 review LOW-2): every end path hands its wait here.
                 s.hand_waits_to(crate::handover::live::resumer::Resumer::global().clone());
@@ -601,12 +616,16 @@ impl crate::GameState {
         {
             session.hand_publication(crate::handover::live::resumer::Resumer::global());
         }
-        let (rotate, line) = match &self.handover {
+        let (rotate, mut line) = match &self.handover {
             Some(Handover::Source { session, .. }) => (session.needs_invite_rotation(), session.end_line(msg)),
             _ => (false, msg.to_string()),
         };
         self.handover = None;
         if rotate {
+            if self.online_host.as_ref().is_some_and(|host| host.continuation().is_some()) {
+                line = line.replace(crate::handover::live::copy::INVITE_REISSUED,
+                    "The original invite is now unavailable; contacts can still join directly.");
+            }
             self.rotate_handover_invite();
         }
         line
@@ -709,6 +728,18 @@ impl crate::GameState {
         match (action, self.handover.as_mut()) {
             (UiAction::Accept, Some(Handover::Recipient(s))) if s.stage() == RecipientStage::AwaitingConsent => {
                 let p = s.proposal().clone();
+                if let Some(refusal) = self.players.first().and_then(|slot| crate::handover::live::eligibility::local_progress(slot, self.tick_counter).err()) {
+                    self.handover = None;
+                    self.decline_over_joined(p.transfer, DeclineReason::NotReady);
+                    self.handover_toast(refusal.0);
+                    return;
+                }
+                if !self.pending_block_changes.is_empty() || !self.window_inbox.is_empty()
+                    || self.players.first().is_some_and(|slot| slot.crafting_ui.ops.first_stamp().is_some())
+                    || self.remote_client.as_ref().is_some_and(|client| !client.handover_authority_settled()) {
+                    self.handover_toast("Your inventory is still settling. Try again in a moment.");
+                    return;
+                }
                 let Some(rc) = self.remote_client.as_mut() else {
                     self.handover = None;
                     return;
@@ -808,6 +839,7 @@ impl crate::GameState {
         }
         self.host_paused = false;
         self.joined_host = None;
+        self.joined_continuation = None;
         notice
     }
 
@@ -834,6 +866,7 @@ impl crate::GameState {
     /// A joined session that verified its host: online play's verified
     /// answer and the runtime it was signed by.
     pub(crate) fn set_joined_host(&mut self, persona: [u8; 32], runtime: [u8; 32]) {
+        self.joined_continuation = None;
         self.joined_host = (persona != [0; 32]).then_some(JoinedHost { persona, runtime });
     }
 }

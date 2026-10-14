@@ -52,6 +52,10 @@ impl Retirement {
     pub fn retained_copy(&self) -> Id {
         self.retained_copy
     }
+    pub(crate) fn personal_root(&self) -> Result<super::context::RootContext> {
+        self.root()
+    }
+    pub(crate) fn retired_roots(&self) -> &[RetiredRoot] { &self.roots }
     pub fn new(
         commit: &VerifiedCommit,
         prepared: &VerifiedPrepared,
@@ -261,6 +265,7 @@ impl AbortRecord {
         r.validate()?;
         Ok(r)
     }
+    pub(crate) fn core(&self) -> &Core { &self.core }
     /// The exact signed Aborted bytes this record holds.
     pub fn exact_event(&self) -> &[u8] {
         &self.exact_event
@@ -683,13 +688,14 @@ pub enum SourceStage {
 }
 /// Verified local authority context, independent of folder/autosave and player
 /// slot. Root starts at0; committed successor epoch1 is a distinct authority.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Authority {
     lineage: Id,
     epoch: u32,
     committed: Hash,
     runtime: Hash,
     persona: Hash,
+    expiry: u64,
 }
 impl Authority {
     /// The authority epoch this source holds (root is 0); its certificate
@@ -709,6 +715,9 @@ impl Authority {
     pub fn persona(&self) -> Hash {
         self.persona
     }
+    pub(crate) fn expiry(&self) -> u64 {
+        self.expiry
+    }
     pub fn root(root: &super::context::RootContext, lineage: Id) -> Result<Self> {
         if lineage == [0; 16] {
             return Err(Error::Invalid("root lineage"));
@@ -719,6 +728,7 @@ impl Authority {
             committed: [0; 32],
             runtime: root.runtime(),
             persona: root.persona(),
+            expiry: root.expiry(),
         })
     }
     pub fn successor(proof: &VerifiedCommit, prefix: &super::certificate::Prefix) -> Result<Self> {
@@ -735,6 +745,7 @@ impl Authority {
             committed: proof.event_hash(),
             runtime: proof.core().successor_runtime,
             persona: proof.core().successor_persona,
+            expiry: proof.core().expires_at,
         })
     }
     pub(crate) fn validates_source(&self, core: &Core) -> bool {
@@ -743,6 +754,7 @@ impl Authority {
             && self.committed == core.predecessor
             && self.runtime == core.source_runtime
             && self.persona == core.source_persona
+            && core.expires_at <= self.expiry
     }
 }
 pub struct Source {
@@ -1042,9 +1054,39 @@ fn stored_root(core: &Core, relays: &[String]) -> Result<super::context::RootCon
 
 /// The route the source seals to this bearer under `root`.
 fn bearer_route(core: &Core, root: &super::context::RootContext, bearer: &super::live::bearer::Bearer) -> Result<(nostr::Keys, super::stored::Route)> {
-    let keys = super::crypto::recipient(root, bearer.expose(), None)?;
+    let keys = super::crypto::recipient(root, bearer.expose(), (core.epoch > 1).then_some(core.predecessor))?;
     let route = super::stored::Route { author: core.source_runtime, recipient: keys.public_key().to_bytes(), until: root.expiry() };
     Ok((keys, route))
+}
+
+/// Checked installed receipt metadata. This is not a routing proof: a live
+/// continuation must reconstruct the committed prefix from the original relays
+/// and match its final verified certificate to this exact installation.
+pub(crate) struct Installed {
+    pub core: Core,
+    pub committed: Hash,
+    pub root: super::context::RootContext,
+    pub bearer: super::live::bearer::Bearer,
+}
+impl Installed {
+    pub(crate) fn read(store: &MarkerStore, transfer: Id) -> Result<Option<Self>> {
+        if store.exists(MarkerKind::Quarantined, transfer)? {
+            return Err(Error::State("quarantined installation"));
+        }
+        let Some(mut receiver) = Receiver::restart_with(store, transfer, false)? else {
+            return Ok(None);
+        };
+        if receiver.stage != ReceiverStage::Activated {
+            return Err(Error::State("installation is not activated"));
+        }
+        let held = receiver.held.take().ok_or(Error::State("installation has no receipt"))?;
+        Ok(Some(Self {
+            core: receiver.core,
+            committed: receiver.committed.ok_or(Error::State("installation has no commit"))?,
+            root: held.root,
+            bearer: held.bearer,
+        }))
+    }
 }
 
 impl Receiver {

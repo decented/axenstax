@@ -127,6 +127,7 @@ impl Invite {
     /// Parse a pasted link. `now` is unix seconds — injected so expiry is a
     /// pure decision the tests can pin.
     pub fn parse(s: &str, now: u64) -> Result<Invite, InviteError> {
+        if s.len() > 32 * 1024 { return Err(InviteError::BadField("link size")); }
         let s = s.trim();
         let rest = s
             .strip_prefix(SCHEME)
@@ -144,9 +145,14 @@ impl Invite {
         let mut bearer_hex: Option<String> = None;
         let mut expires_at: Option<u64> = None;
         let mut world_name = String::new();
+        let mut security_fields = std::collections::BTreeSet::new();
 
         for pair in query.split('&').filter(|p| !p.is_empty()) {
             let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+            let scalar = match k { "h" => Some("h"), "k" => Some("k"), "b" => Some("b"), "x" => Some("x"), _ => None };
+            if let Some(scalar) = scalar && !security_fields.insert(scalar) {
+                return Err(InviteError::BadField(scalar));
+            }
             match k {
                 "h" => host_persona = pct_decode(v),
                 "k" => runtime_hex = Some(v.to_string()),
@@ -168,7 +174,7 @@ impl Invite {
         if relays.len() > MAX_RELAYS {
             return Err(InviteError::TooManyRelays(relays.len()));
         }
-        if let Some(bad) = relays.iter().find(|r| !r.starts_with("wss://")) {
+        if let Some(bad) = relays.iter().find(|r| crate::handover::context::validate_relay(r).is_err()) {
             return Err(InviteError::RelayNotWss(bad.clone()));
         }
 
@@ -184,6 +190,8 @@ impl Invite {
         if now > expires_at {
             return Err(InviteError::Expired { expires_at, now });
         }
+        crate::handover::context::RootContext::new(host_runtime, &host_persona, expires_at, &relays, now)
+            .map_err(|_| InviteError::BadField("root context"))?;
 
         Ok(Invite {
             host_persona,
@@ -212,7 +220,7 @@ mod tests {
         Invite {
             host_persona: "npub1sg6plzptd64u62a878hep2kev88swjh3tw00gjsfl8f237lmu63q0uf63m"
                 .to_string(),
-            host_runtime: [0xab; 32],
+            host_runtime: nostr::Keys::parse(&format!("{:064x}", 1)).unwrap().public_key().to_bytes(),
             relays: vec!["wss://nos.lol".to_string(), "wss://relay.damus.io".to_string()],
             bearer: [7u8; 16],
             expires_at: 2_000_000_000,
@@ -315,8 +323,22 @@ mod tests {
 
     #[test]
     fn rejects_a_malformed_runtime_key() {
-        let link = sample().to_link().replace(&"ab".repeat(32), "notlongenough");
+        let link = sample().to_link().replace(&hex::encode(sample().host_runtime), "notlongenough");
         assert_eq!(Invite::parse(&link, 1_000_000_000), Err(InviteError::BadField("k")));
+    }
+
+    #[test]
+    fn handover_invite_rejects_duplicate_security_scalars_and_invalid_context() {
+        let sample = sample();
+        for (key, value) in [("h", sample.host_persona.clone()), ("k", hex::encode(sample.host_runtime)), ("b", hex::encode(sample.bearer)), ("x", sample.expires_at.to_string())] {
+            assert_eq!(Invite::parse(&format!("{}&{key}={value}", sample.to_link()), 100), Err(InviteError::BadField(key)));
+        }
+        let mut bad = sample.clone();
+        bad.host_persona = "npub1malformed".into();
+        assert_eq!(Invite::parse(&bad.to_link(), 100), Err(InviteError::BadField("root context")));
+        let mut bad = sample;
+        bad.relays.clear();
+        assert_eq!(Invite::parse(&bad.to_link(), 100), Err(InviteError::BadField("root context")));
     }
 
     #[test]

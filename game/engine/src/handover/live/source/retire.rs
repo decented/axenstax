@@ -46,7 +46,7 @@ impl SourceSession {
         let core = self.core.clone().ok_or(Refusal("No certificate."))?;
         let ready = self.ready.clone().ok_or(Refusal("No Ready."))?;
         let successor = self.recipient_attestation.clone().ok_or(Refusal("No recipient attestation."))?;
-        let keys = crypto::recipient(&self.cfg.root, self.cfg.bearer.expose(), None).map_err(|_| unsealed.clone())?;
+        let keys = crypto::recipient(&self.cfg.root, self.cfg.bearer.expose(), (core.epoch > 1).then_some(core.predecessor)).map_err(|_| unsealed.clone())?;
         let seal = Seal {
             source: &self.cfg.runtime,
             recipient: &keys,
@@ -63,16 +63,25 @@ impl SourceSession {
         };
         let world_dir = self.cfg.world_dir.as_ref().ok_or(Refusal(crate::handover::live::copy::NEVER_SAVED))?;
         let store = crate::handover::live::authority::store(world_dir).map_err(|_| Refusal(crate::handover::live::copy::AUTHORITY_UNREADABLE))?;
+        let mut roots = super::super::retained::read(world_dir).map_err(|_| Refusal(crate::handover::live::copy::AUTHORITY_UNREADABLE))?
+            .map_or_else(Vec::new, |info| info.retirement.retired_roots().to_vec());
+        roots.push(RetiredRoot { capability, expiry: self.cfg.root.expiry() });
+        roots.sort_by_key(|root| root.capability);
+        roots.dedup();
+        if roots.len() > 64 { return Err(Refusal("This world's retired invitation records are full. Nothing was changed.")); }
         let record = Retirement::new(
             &vc,
             vp,
             commit.as_json().into_bytes(),
             self.retained_copy,
             capability,
-            vec![RetiredRoot { capability, expiry: self.cfg.root.expiry() }],
+            roots,
             self.cfg.root.relays().to_vec(),
         )
         .map_err(|_| unsealed)?;
+        self.retained.as_mut().ok_or(Refusal("The source has no safe retained copy. Play has resumed."))?
+            .seal(&record, &self.cfg.runtime, &self.cfg.attestation)
+            .map_err(|_| Refusal("The retained personal proof couldn't be made durable. Play has resumed."))?;
         let phase = self.phase.as_mut().ok_or(Refusal("No Prepared."))?;
         match phase.retire(&store, &crate::handover::ledger::Ledger::install(), record) {
             Ok(permit) => {
@@ -81,6 +90,12 @@ impl SourceSession {
                 self.permit = Some(permit);
                 self.commit = Some(commit);
                 self.stage = SourceStage::Retired;
+                if let Ok(Some(retired)) = crate::handover::phase::RetiredCommit::read(&store, self.transfer) {
+                    match super::super::retained::finish_retired(world_dir, &retired, &crate::handover::ledger::Ledger::install()) {
+                        Ok(folder) => self.retained_folder = Some(folder),
+                        Err(error) => log::warn!("handover: the safe retained copy stays inactive for retry ({error})"),
+                    }
+                }
                 Ok(())
             }
             // A write that may have reached the disk: quarantined, frozen.

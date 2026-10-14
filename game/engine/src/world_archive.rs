@@ -137,6 +137,9 @@ pub fn pack_world(
     world: &World,
     exhibit_images: &[ExhibitImage],
 ) -> Result<Vec<u8>, String> {
+    if save.local_personal.is_some() {
+        return Err("A bound personal snapshot needs its complete world directory; this archive omits its authority proof.".into());
+    }
     let gz_buf = Vec::new();
     let mut gz = GzEncoder::new(gz_buf, Compression::default());
     {
@@ -322,6 +325,9 @@ fn unpack_world_inner(
 
     let meta = meta.ok_or("world_meta.json is missing")?;
     let save = save.ok_or("world.dat is missing")?;
+    if save.local_personal.is_some() {
+        return Err("This archive has personal state without its authority proof. Nothing was reset.".into());
+    }
     Ok((meta, save, images))
 }
 

@@ -2910,4 +2910,214 @@ mod session {
     fn frames_for_seat_hold_bearer(p: &Pair) -> bool {
         p.dst.as_ref().is_some_and(|d| d.bearer_received())
     }
+
+    #[test]
+    fn handover_retained_copy_restores_source_own_current_state_and_refuses_plain_proof_replanting() {
+        use crate::handover::live::personal_adapter;
+        let _worlds = crate::save::WorldsRootGuard::new("retained-source");
+        let mut p = ready_pair("retained-source");
+        drive(&mut p, SourceStage::Retired);
+        assert_eq!(p.src.stage(), SourceStage::Retired);
+        let folder = p.src.retained_folder().expect("the durable distinct copy wasn't exposed").to_string();
+        let world = crate::save::world_dir(&folder);
+        assert!(crate::handover::live::authority::open_guard(&p.dir.0.join("world")).is_err());
+        let proof = personal_adapter::proof(&world).unwrap().unwrap();
+        assert!(proof.is_retained());
+        let owner = keys(SOURCE_PERSONA).public_key().to_bytes();
+        assert_eq!(proof.local_owner(), owner);
+        proof.confirm_authority_durable(&world).unwrap();
+        let mut saved = personal_adapter::load_or_bootstrap(&world, owner, &proof).unwrap().unwrap();
+        let mut local = crate::player_slot::PlayerSlot::new(0, glam::Vec3::ZERO, 1.0);
+        personal_adapter::install(&saved, &mut local).unwrap();
+        assert_eq!(local.inventory.slot(4).unwrap().count, 9);
+        assert_eq!(local.kill_counter.get(&crate::mob::MobType::Pig), Some(&7));
+        assert!(personal_adapter::load_or_bootstrap(&world, keys(0x55).public_key().to_bytes(), &proof).unwrap().is_none(), "an unrelated persona received the source bag");
+        let metadata = crate::save::try_load_world_meta(&folder).unwrap();
+        assert_eq!(metadata.owner_pubkey, Some(hex::encode(owner)));
+        assert!(metadata.published_to.is_none() && !metadata.cloud_save && metadata.pop_secret.is_some());
+        for path in files_under(&world, &world.join("absent")) {
+            assert!(!holds(&std::fs::read(&path).unwrap(), &TEST_BEARER), "the retained world leaked its invitation bearer into {}", path.display());
+            let name = path.file_name().unwrap().to_string_lossy();
+            assert!(!["ready-", "prepared-", "activated-"].iter().any(|prefix| name.starts_with(prefix)));
+        }
+        // Mutable records win after bootstrap; reopening never replays Pig7.
+        local.inventory.set_slot(4, Some(crate::item::ItemStack::new_block(block::GLASS, 17)));
+        local.kill_counter.insert(crate::mob::MobType::Pig, 23);
+        let selected = crate::joiner_save::capture_local(&local).unwrap().unwrap();
+        saved = crate::joiner_save::JoinerSave::decode(&selected.0).unwrap();
+        personal_adapter::write(&world, owner, &saved).unwrap();
+        let reopened = personal_adapter::load_or_bootstrap(&world, owner, &personal_adapter::proof(&world).unwrap().unwrap()).unwrap().unwrap();
+        let mut fresh = crate::player_slot::PlayerSlot::new(0, glam::Vec3::ZERO, 1.0);
+        personal_adapter::install(&reopened, &mut fresh).unwrap();
+        assert_eq!(fresh.inventory.slot(4).unwrap().count, 17);
+        assert_eq!(fresh.kill_counter.get(&crate::mob::MobType::Pig), Some(&23));
+        // Change only the plaintext retired capability under the SAME valid
+        // encrypted Commit signature. Its public provenance must reject it.
+        let copy = p.src.retained_copy();
+        let store = MarkerStore::open_existing(world.join("handover")).unwrap();
+        let payload = store.read(MarkerKind::RetainedCopy, copy).unwrap().unwrap();
+        let path = world.join("handover").join(format!("retained-copy-{}.dat", hex::encode(copy)));
+        let original_file = std::fs::read(&path).unwrap();
+        let mut reader = crate::handover::codec::Reader::new(&payload, crate::handover::durable::MARKER_LIMIT).unwrap();
+        reader.label("AxeNStax/handover/retained-personal/v1").unwrap();
+        let mut record = reader.framed(crate::handover::durable::MARKER_LIMIT).unwrap().to_vec();
+        let attestation = reader.framed(crate::handover::PROOF_LIMIT).unwrap();
+        let signature = reader.framed(crate::handover::PROOF_LIMIT).unwrap();
+        reader.end().unwrap();
+        let mut decoded = crate::handover::codec::Reader::new(&record, crate::handover::durable::MARKER_LIMIT).unwrap();
+        let label = "AxeNStax/handover/retirement/v2";
+        decoded.label(label).unwrap();
+        let core_length = decoded.framed(crate::handover::certificate::CORE_LIMIT).unwrap().len();
+        decoded.array::<32>().unwrap(); decoded.array::<32>().unwrap();
+        let event_length = decoded.framed(crate::handover::EVENT_LIMIT).unwrap().len();
+        let active = 4 + label.len() + 4 + core_length + 32 + 32 + 4 + event_length + 16;
+        record[active..active+32].copy_from_slice(&[0xc7;32]);
+        record[active+36..active+68].copy_from_slice(&[0xc7;32]);
+        assert!(crate::handover::phase::Retirement::decode(&record).is_ok(), "the control must retain a structurally valid signed outer Commit");
+        let mut altered = Vec::new();
+        for value in ["AxeNStax/handover/retained-personal/v1".as_bytes(), record.as_slice(), attestation, signature] { crate::handover::codec::frame(&mut altered, value); }
+        std::fs::remove_file(&path).unwrap();
+        store.persist(MarkerKind::RetainedCopy, copy, &altered).unwrap();
+        assert!(personal_adapter::proof(&world).is_err(), "replanted retired capability was accepted beneath the same valid outer signature");
+        let before = std::fs::read(world.join("world.dat")).unwrap();
+        let mut server = crate::server::GameServer::new(0, folder.clone(), 42);
+        assert!(server.initial_load().is_err(), "invalid retained proof generated a fresh server kit");
+        assert_eq!(std::fs::read(world.join("world.dat")).unwrap(), before);
+        std::fs::write(&path, &original_file).unwrap();
+        assert!(personal_adapter::proof(&world).unwrap().is_some());
+        assert_eq!(std::fs::read(&path).unwrap(), original_file);
+    }
+
+    #[test]
+    fn handover_retained_inert_copy_is_refused_by_actual_server_open() {
+        let _worlds = crate::save::WorldsRootGuard::new("retained-inert");
+        let mut p = ready_pair("retained-inert");
+        assert_eq!(p.src.stage(), SourceStage::ReadyVerified);
+        let stage = crate::save::worlds_root().join(".handover-retained").join(hex::encode(p.src.retained_copy()));
+        let working = std::fs::read_dir(stage).unwrap().map(|entry| entry.unwrap().path().join("working")).find(|path| path.is_dir()).unwrap();
+        let destination = crate::save::world_dir("forced-inert-copy");
+        std::fs::rename(&working, &destination).unwrap();
+        assert_eq!(crate::handover::live::authority::open_guard(&destination).unwrap_err().0, crate::handover::live::copy::NOT_ACTIVATED);
+        let before = std::fs::read(destination.join("world.dat")).unwrap();
+        let mut server = crate::server::GameServer::new(0, "forced-inert-copy".into(), 42);
+        assert!(server.initial_load().is_err(), "dedicated gameplay opened the inert copy");
+        assert!(HostedServer::start(1, "forced-inert-copy".into(), 42, 0, crate::hosted_server::RemoteTransport::WebSocket { port: 0 }).is_err(), "local hosting opened the inert copy");
+        assert_eq!(std::fs::read(destination.join("world.dat")).unwrap(), before);
+        p.src.abort(&mut p.hs, "test moved inactive copy");
+        assert!(!p.src.past_retirement() && !p.hs.handover_frozen());
+    }
+
+    #[test]
+    fn handover_retained_local_owner_refuses_duplicate_remote_owner_but_admits_recipient() {
+        let _worlds = crate::save::WorldsRootGuard::new("retained-attach");
+        let mut p = ready_pair("retained-attach");
+        drive(&mut p, SourceStage::Retired);
+        let folder = p.src.retained_folder().unwrap().to_string();
+        let mut hs = HostedServer::start(1, folder, 42, 0, crate::hosted_server::RemoteTransport::WebSocket { port: 0 }).unwrap();
+        fn join(hs: &mut HostedServer, secret: u8) -> ChannelClientTransport {
+            let client = hs.attach_test_remote_with_binding(Some(BINDING));
+            let challenge = loop {
+                let packet = client.try_recv_from_server().unwrap();
+                let (kind, payload) = protocol::deserialize_header(&packet).unwrap();
+                if kind == protocol::PacketType::Challenge { break protocol::safe_deserialize::<protocol::ChallengePacket>(payload).unwrap(); }
+            };
+            let event = crate::hosted_server::tests::signed_auth_event([secret;32], &challenge.nonce_hex, &crate::signet::join_origin(Some(BINDING)), now_secs());
+            client.send_to_server(&protocol::serialize_packet(protocol::PacketType::JoinRequest, &crate::hosted_server::tests::join_with_auth(event, None)));
+            hs.tick(); client
+        }
+        let duplicate = join(&mut hs, SOURCE_PERSONA);
+        let mut rejected = false;
+        while let Some(packet) = duplicate.try_recv_from_server() {
+            let (kind, payload) = protocol::deserialize_header(&packet).unwrap();
+            assert_ne!(kind, protocol::PacketType::JoinAccept, "the local source owner received a second personal window");
+            if kind == protocol::PacketType::JoinReject { rejected = protocol::safe_deserialize::<protocol::JoinRejectPacket>(payload).unwrap().reason.contains("already playing locally"); }
+        }
+        assert!(rejected, "the duplicate owner was not explicitly refused");
+        let recipient = join(&mut hs, RECIPIENT_PERSONA);
+        let accepted = accepted(&recipient).expect("the former recipient was wrongly treated as the retained copy's local owner");
+        let slot = accepted.player_index as usize;
+        assert_eq!(hs.server.players[slot].verified_pubkey, Some(keys(RECIPIENT_PERSONA).public_key().to_bytes()));
+        assert!(hs.server.players[slot].personal.is_some(), "the recipient's own current personal record was not loaded");
+        assert!(hs.server.players[slot].inventory.slot(4).is_none(), "the source's glass was donated to the recipient");
+    }
+
+    /// Reproduce the preparation/start boundary with a real activated import,
+    /// then replace its selected directory before the final caller's check.
+    #[test]
+    fn handover_host_start_rechecks_folder_and_disclosed_abort_survives_reopen() {
+        use crate::handover::{crypto::{self, Seal, Verified}, phase::{Installed, AbortRecord}};
+        use crate::handover::live::{continuation, resumer::Resumer};
+        let _worlds = crate::save::WorldsRootGuard::new("host-start-current");
+        let mut p = ready_pair("host-start-current");
+        drive(&mut p, SourceStage::Retired);
+        let working = p.dst.as_ref().unwrap().checkpoint().unwrap().working_world();
+        let resumer = Resumer::new(FAST);
+        assert!(p.src.hand_publication(&resumer), "source publication wasn't adopted");
+        p.dst.as_mut().unwrap().hand_waits_to(resumer);
+        p.dst.as_mut().unwrap().hand_activation(now());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while import_store(&p).read(MarkerKind::Activated, p.src.transfer()).unwrap().is_none() {
+            assert!(std::time::Instant::now() < deadline, "actual recipient didn't activate");
+            p.dst.as_mut().unwrap().pump(now()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let resolved = rt.block_on(continuation::installed_world(&working, now(), &std::sync::atomic::AtomicBool::new(false))).unwrap().unwrap();
+        let owner = keys(RECIPIENT_PERSONA).public_key().to_bytes();
+        let runtime = keys(RECIPIENT_RUNTIME).public_key().to_bytes();
+        continuation::check_host_start(&working, Some(&resolved), runtime, owner, now()).unwrap();
+        assert!(continuation::check_host_start(&working, None, runtime, owner, now()).is_err(),
+            "ordinary preparation silently hosted a replaced imported world");
+        let displaced = working.with_file_name("displaced-working");
+        std::fs::rename(&working, &displaced).unwrap();
+        std::fs::create_dir(&working).unwrap();
+        assert!(continuation::check_host_start(&working, Some(&resolved), runtime, owner, now()).is_err(),
+            "stale prepared authority admitted fresh terrain after delete/recreate");
+        continuation::check_host_start(&working, None, runtime, owner, now()).unwrap();
+        std::fs::remove_dir(&working).unwrap();
+        std::fs::rename(&displaced, &working).unwrap();
+        let store = MarkerStore::open_existing(working.join("handover")).unwrap();
+        let installed = Installed::read(&store, p.src.transfer()).unwrap().unwrap();
+        let mut core = installed.core.clone();
+        core.source_runtime = installed.core.successor_runtime;
+        core.source_persona = installed.core.successor_persona;
+        core.successor_runtime = installed.core.source_runtime;
+        core.successor_persona = installed.core.source_persona;
+        core.epoch += 1;
+        core.generation += 1;
+        core.remaining_hops -= 1;
+        core.predecessor = installed.committed;
+        core.transfer = [0x63; 16];
+        core.issued_at = now(); core.not_before = now();
+        let source = identity();
+        let source_att = source.attestation;
+        let source_keys = source.runtime;
+        let successor = keys(SOURCE_RUNTIME);
+        let successor_att = source_attestation();
+        let recipient = crypto::recipient(&installed.root, installed.bearer.expose(), Some(installed.committed)).unwrap();
+        let ready = rt.block_on(crypto::sign_ready(&successor, &core, [7; 16])).unwrap();
+        let request = |prepared| Seal {
+            source: &source_keys, recipient: &recipient, core: &core,
+            ready: &ready, challenge: [7; 16], source_attestation: &source_att,
+            successor_attestation: &successor_att, prepared,
+        };
+        let prepared = rt.block_on(crypto::seal(request(None), &installed.root, now())).unwrap();
+        let Verified::Prepared(vp) = crypto::open(&prepared, &recipient, core.source_runtime, &installed.root, now(), None).unwrap() else { panic!("Prepared") };
+        let aborted = rt.block_on(crypto::seal_aborted(request(Some(&vp)), &installed.root, now())).unwrap();
+        let Verified::Aborted(va) = crypto::open(&aborted, &recipient, core.source_runtime, &installed.root, now(), Some(&vp)).unwrap() else { panic!("Aborted") };
+        let record = AbortRecord::new(&va, &vp, aborted.as_json().into_bytes(), installed.root.relays().to_vec()).unwrap();
+        crate::handover::phase::write_pending_abort(&store, src_install(), &record).unwrap();
+        // A freshly reopened preparation must reject BEFORE relay lookup,
+        // despite the old installed receipt still holding the original bearer.
+        assert!(rt.block_on(continuation::installed_world(&working, now(), &std::sync::atomic::AtomicBool::new(false))).is_err(),
+            "reopen resurrected the disclosed original capability");
+        assert!(continuation::check_host_start(&working, Some(&resolved), runtime, owner, now()).is_err(),
+            "a worker result predating the abort revived the capability");
+        crate::handover::live::authority::open_guard(&working).unwrap();
+        assert_eq!(crate::handover::phase::promote_pending_aborts(&store, src_install()).promoted, 1);
+        assert!(rt.block_on(continuation::installed_world(&working, now(), &std::sync::atomic::AtomicBool::new(false))).is_err(),
+            "terminal abort promotion revived the capability");
+        crate::handover::live::authority::open_guard(&working).unwrap();
+    }
+
 }

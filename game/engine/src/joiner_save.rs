@@ -582,6 +582,13 @@ impl crate::server::GameServer {
         let path = self.joiner_path(pk);
         match crate::handover::live::personal_adapter::proof(&crate::save::world_dir(&self.world_name)) {
             Ok(Some(proof)) if proof.has_participant(pk) => {
+                if let Err(error) = proof.confirm_authority_durable(&crate::save::world_dir(&self.world_name)) {
+                    log::warn!("Personal authority is not durable: {error}");
+                    self.failed_joiner_reads.insert(pk);
+                    self.players[i].personal_read_failed = true;
+                    self.players[i].obligations.mark(IncompleteCause::Unreadable);
+                    return None;
+                }
                 match crate::handover::live::personal_adapter::load_or_bootstrap(&crate::save::world_dir(&self.world_name), pk, &proof) {
                     Ok(saved) => return saved,
                     Err(error) => {
@@ -605,9 +612,15 @@ impl crate::server::GameServer {
         let saved = if matches!(&read, Err(e) if e.kind() == std::io::ErrorKind::NotFound) {
             None
         } else {
+            let mut current_v3 = false;
             let result = read
                 .map_err(|e| e.to_string())
-                .and_then(|file| crate::save::read_bounded(file, MAX_JOINER_SAVE_BYTES))
+                .and_then(|mut file| {
+                    let mut leading = [0];
+                    current_v3 = std::io::Read::read(&mut file, &mut leading).map_err(|e| e.to_string())? == 1 && leading[0] == 3;
+                    std::io::Seek::rewind(&mut file).map_err(|e| e.to_string())?;
+                    crate::save::read_bounded(file, MAX_JOINER_SAVE_BYTES)
+                })
                 .and_then(|bytes| JoinerSave::decode(&bytes));
             match result {
                 Ok(saved) if saved.personal.is_none() => Some(saved),
@@ -620,6 +633,9 @@ impl crate::server::GameServer {
                 Err(e) => {
                     log::warn!("Joiner save {} was not loaded: {e}", path.display());
                     self.failed_joiner_reads.insert(pk);
+                    // An unreadable current record could hold a bound personal
+                    // authority. Missing proof must not turn it into a kit.
+                    if current_v3 { self.players[i].personal_read_failed = true; }
                     None
                 }
             }

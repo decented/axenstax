@@ -107,9 +107,11 @@ pub fn parse_add_friend(text: &str, now: u64) -> Result<AddFriendInput, String> 
     if t.starts_with("npub1") && nostr::PublicKey::parse(t).is_ok() {
         return Ok(AddFriendInput::Npub(t.to_string()));
     }
-    Err("That doesn't look like an invite link or an npub. An address starts with \
+    Err(
+        "That doesn't look like an invite link or an npub. An address starts with \
          'npub1'."
-        .to_string())
+            .to_string(),
+    )
 }
 
 /// Whether this contact is close enough to offer a Join button. Exactly the
@@ -177,7 +179,10 @@ pub fn host_online_state(signed_in: bool, attested: bool) -> HostOnlineState {
             note: Some("First time: one tap on your phone links this computer to you."),
         };
     }
-    HostOnlineState { enabled: true, note: None }
+    HostOnlineState {
+        enabled: true,
+        note: None,
+    }
 }
 
 /// A one-line, address-free summary of how reachable this host is.
@@ -252,7 +257,11 @@ pub fn connected_label(display_name: &str, persona: Option<&[u8; 32]>, book: &[C
 /// from somebody who isn't in the book yet — saying it twice ("Joined Ivy's
 /// Hollow at Ivy's Hollow's.") reads as a bug, so it is said once.
 pub fn joined_toast(world_name: &str, host_name: &str) -> String {
-    let world = if world_name.trim().is_empty() { "the world" } else { world_name.trim() };
+    let world = if world_name.trim().is_empty() {
+        "the world"
+    } else {
+        world_name.trim()
+    };
     let host = host_name.trim();
     if host.is_empty() || host == world {
         format!("Joined {world}.")
@@ -269,7 +278,7 @@ pub fn joined_toast(world_name: &str, host_name: &str) -> String {
 /// rendered from the lobby or from the in-game `/online` overlay without either
 /// reaching into `OnlineHost`.
 pub struct OnlinePanelView<'a> {
-    pub invite_link: &'a str,
+    pub invite_link: Result<&'a str, &'a str>,
     pub candidates: &'a [Candidate],
     pub relays: (usize, usize),
     /// Setup events the relay layer had to throw away because the game loop
@@ -292,10 +301,17 @@ pub fn draw_online_panel(ui: &mut egui::Ui, view: &OnlinePanelView) -> Option<Ha
     let mut hand_to = None;
     ui.label(egui::RichText::new("Playing online").size(16.0).strong());
     ui.add_space(4.0);
-    crate::menu::draw_qr(ui, view.invite_link, 148.0);
-    ui.add_space(4.0);
-    if ui.button("Copy invite link").clicked() {
-        ui.ctx().copy_text(view.invite_link.to_string());
+    match view.invite_link {
+        Ok(link) => {
+            crate::menu::draw_qr(ui, link, 148.0);
+            ui.add_space(4.0);
+            if ui.button("Copy invite link").clicked() {
+                ui.ctx().copy_text(link.to_string());
+            }
+        }
+        Err(why) => {
+            ui.label(why);
+        }
     }
     ui.add_space(6.0);
     ui.label(
@@ -438,8 +454,10 @@ pub type HandoverRow = (usize, u32, [u8; 32]);
 /// since replaced it in that slot (egui credits a click only to the widget
 /// the press began on).
 pub fn handover_row_button(ui: &mut egui::Ui, row: HandoverRow, label: &str) -> egui::Response {
-    ui.push_id(("handover-row", row.0, row.1, row.2), |ui| ui.small_button(crate::handover::live::copy::hand_to(label)))
-        .inner
+    ui.push_id(("handover-row", row.0, row.1, row.2), |ui| {
+        ui.small_button(crate::handover::live::copy::hand_to(label))
+    })
+    .inner
 }
 
 #[cfg(test)]
@@ -453,7 +471,10 @@ mod tests {
         let b: super::HandoverRow = (1, 2, [8; 32]);
         let run = |events: Vec<egui::Event>, row: super::HandoverRow| -> (bool, egui::Rect) {
             let mut out = (false, egui::Rect::NOTHING);
-            let input = egui::RawInput { events, ..Default::default() };
+            let input = egui::RawInput {
+                events,
+                ..Default::default()
+            };
             let _ = ctx.run(input, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     let r = super::handover_row_button(ui, row, "x");
@@ -470,10 +491,16 @@ mod tests {
             modifiers: Default::default(),
         };
         run(vec![egui::Event::PointerMoved(pos), button(true)], a);
-        assert!(!run(vec![button(false)], b).0, "a press on one seat's row clicked the seat that replaced it");
+        assert!(
+            !run(vec![button(false)], b).0,
+            "a press on one seat's row clicked the seat that replaced it"
+        );
         run(vec![], a); // a's widget exists again before the next press
         run(vec![button(true)], a);
-        assert!(run(vec![button(false)], a).0, "an ordinary click on a row didn't register");
+        assert!(
+            run(vec![button(false)], a).0,
+            "an ordinary click on a row didn't register"
+        );
     }
 
     use super::*;
@@ -496,7 +523,14 @@ mod tests {
         let lead = your_address_lead().to_lowercase();
         // Discovery / social-network words (red lines 1 + 4) are this lint's own;
         // the money words are the shared `copy_lint::BANNED_MONEY_WORDS`.
-        for banned in ["browse", "discover", "find players", "directory", "public", "social network"] {
+        for banned in [
+            "browse",
+            "discover",
+            "find players",
+            "directory",
+            "public",
+            "social network",
+        ] {
             assert!(!lead.contains(banned), "lead copy must not say {banned:?}");
         }
         let money = crate::copy_lint::banned_in(&lead, crate::copy_lint::BANNED_MONEY_WORDS);
@@ -547,7 +581,10 @@ mod tests {
     #[test]
     fn a_nameless_contact_falls_back_to_a_short_npub_never_hex() {
         let label = contact_row_label(&contact(Tier::Kith, None));
-        assert!(label.starts_with("npub1"), "must render as an npub: {label}");
+        assert!(
+            label.starts_with("npub1"),
+            "must render as an npub: {label}"
+        );
         assert!(label.contains('\u{2026}'));
     }
 
@@ -611,12 +648,24 @@ mod tests {
     #[test]
     fn the_reachability_summary_names_places_not_protocols() {
         let s = reachability_summary(&[
-            Candidate { kind: "lan".to_string(), addr: "192.168.1.2:7700".to_string() },
-            Candidate { kind: "upnp".to_string(), addr: "198.51.100.7:7700".to_string() },
-            Candidate { kind: "stun".to_string(), addr: "203.0.113.9:41000".to_string() },
+            Candidate {
+                kind: "lan".to_string(),
+                addr: "192.168.1.2:7700".to_string(),
+            },
+            Candidate {
+                kind: "upnp".to_string(),
+                addr: "198.51.100.7:7700".to_string(),
+            },
+            Candidate {
+                kind: "stun".to_string(),
+                addr: "203.0.113.9:41000".to_string(),
+            },
         ]);
         assert_eq!(s, "Reachable: home network, router mapping, internet");
-        assert!(!s.contains("192.168"), "a summary must not leak addresses: {s}");
+        assert!(
+            !s.contains("192.168"),
+            "a summary must not leak addresses: {s}"
+        );
     }
 
     #[test]
@@ -646,8 +695,13 @@ mod tests {
         // Greying here would be a dead end: the one tap is minted BY pressing
         // the button (spec 5.1 step 2), so the button must stay pressable.
         let s = host_online_state(true, false);
-        assert!(s.enabled, "the phone tap happens after the press, not before");
-        let note = s.note.expect("warn about the tap before it interrupts them");
+        assert!(
+            s.enabled,
+            "the phone tap happens after the press, not before"
+        );
+        let note = s
+            .note
+            .expect("warn about the tap before it interrupts them");
         assert!(note.contains("phone"), "{note}");
     }
 
@@ -707,9 +761,15 @@ mod tests {
     fn the_joined_toast_does_not_say_the_same_name_twice() {
         // A pasted invite from somebody not in the book has only ONE human word
         // in it — the world's name. "Joined X at X's." reads as a bug.
-        assert_eq!(joined_toast("Ivy's Hollow", "Ivy's Hollow"), "Joined Ivy's Hollow.");
+        assert_eq!(
+            joined_toast("Ivy's Hollow", "Ivy's Hollow"),
+            "Joined Ivy's Hollow."
+        );
         assert_eq!(joined_toast("Ivy's Hollow", "  "), "Joined Ivy's Hollow.");
-        assert_eq!(joined_toast("", "Rowan"), "Joined the world at Rowan\u{2019}s.");
+        assert_eq!(
+            joined_toast("", "Rowan"),
+            "Joined the world at Rowan\u{2019}s."
+        );
     }
 
     #[test]
@@ -756,10 +816,18 @@ mod tests {
         for line in &copy {
             let lower = line.to_lowercase();
             for banned in [
-                "browse", "discover", "directory", "server list", "public",
-                "social network", "chat platform",
+                "browse",
+                "discover",
+                "directory",
+                "server list",
+                "public",
+                "social network",
+                "chat platform",
             ] {
-                assert!(!lower.contains(banned), "copy must not say {banned:?}: {line}");
+                assert!(
+                    !lower.contains(banned),
+                    "copy must not say {banned:?}: {line}"
+                );
             }
             let money = crate::copy_lint::banned_in(line, crate::copy_lint::BANNED_MONEY_WORDS);
             assert!(money.is_empty(), "copy must not say {money:?}: {line}");

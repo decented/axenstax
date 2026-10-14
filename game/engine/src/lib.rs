@@ -372,6 +372,7 @@ mod save_fence;
 #[cfg(not(target_arch = "wasm32"))]
 mod fsync;
 mod save_format;
+mod steed_save;
 mod world_open;
 mod data_dir;
 // Transport, server sim, and HostedServer are cross-platform so single-player
@@ -1291,6 +1292,8 @@ pub(crate) struct GameState {
     /// answer and its runtime). `None` for a join that verified no host.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) joined_host: Option<crate::handover::live::recipient::JoinedHost>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) joined_continuation: Option<crate::handover::live::continuation::Resolved>,
     /// The host this client joined has paused play for a handover.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) host_paused: bool,
@@ -1987,6 +1990,8 @@ impl GameState {
             local_personal: None,
             #[cfg(not(target_arch = "wasm32"))]
             joined_host: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            joined_continuation: None,
             #[cfg(not(target_arch = "wasm32"))]
             host_paused: false,
             #[cfg(not(target_arch = "wasm32"))]

@@ -34,10 +34,7 @@ impl HostedServer {
             protocol::PacketType::PersonalSync,
             &protocol::PersonalSyncPacket::Snapshot(snapshot.clone()),
         );
-        sp.personal_delivery.started_tick = self.server.tick_counter;
-        sp.personal_delivery.sent_tick = self.server.tick_counter;
-        sp.personal_delivery.revision = revision;
-        sp.personal_delivery.pending = Some(snapshot);
+        sp.personal_delivery.issue(snapshot, self.server.tick_counter);
         self.send_to_joined_slot(i, &packet);
         Ok(())
     }
@@ -114,3 +111,7 @@ impl HostedServer {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "personal_tests.rs"]
+mod tests;

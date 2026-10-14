@@ -1241,19 +1241,30 @@ impl GameServer {
 
         self.load_meta_rules();
 
-        // Check for saved world. The server reads `world.dat` only: it never
-        // clears a crash-recovery autosave, so preferring one would shadow every
-        // later server save.
+        // Ordinary servers retain the primary-only policy. An imported local
+        // persona must select its matching recovery snapshot before the durable
+        // remote role cut supersedes that autosave.
         let wname = self.world_name.clone();
+        #[cfg(not(target_arch = "wasm32"))]
+        let personal_proof = crate::handover::live::personal_adapter::proof(&crate::save::world_dir(&wname))?;
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(proof) = &personal_proof { proof.confirm_authority_durable(&crate::save::world_dir(&wname))?; }
+        let autosave_policy = crate::world_open::AutosavePolicy::Ignore;
+        #[cfg(not(target_arch = "wasm32"))]
+        let autosave_policy = if personal_proof.is_some() { crate::world_open::AutosavePolicy::Prefer } else { autosave_policy };
         let opened = crate::world_open::open_world(
             &wname,
             &mut self.world,
-            crate::world_open::AutosavePolicy::Ignore,
+            autosave_policy,
         )
         .map_err(|why| crate::world_open::server_refusal_message(&wname, &why))?;
         if let crate::world_open::OpenedWorld::Loaded { save: save_data, chunks: chunk_count, .. } = opened {
             log::info!("Loaded saved world '{wname}'.");
             self.selected_local_personal = save_data.local_personal.clone();
+            #[cfg(not(target_arch = "wasm32"))]
+            if personal_proof.is_none() && (self.selected_local_personal.is_some() || crate::handover::live::personal_adapter::has_bound_records(&crate::save::world_dir(&wname))?) {
+                return Err("This world's personal authority is missing. Nothing was reset.".into());
+            }
             self.restore_saved_players(&save_data);
             let p0_pos = self
                 .players
@@ -1275,6 +1286,13 @@ impl GameServer {
             // `#[serde(default)]` → a no-op for pre-rail worlds.
             for s in &save_data.carts {
                 crate::cart::spawn_cart_from(&mut self.ecs, s.data.clone());
+            }
+
+            #[cfg(not(target_arch = "wasm32"))]
+            if personal_proof.is_some() {
+                // Already-neutralised owner npubs stay unchanged. Restore before
+                // the role cut's save can otherwise drop the imported creatures.
+                crate::steed_save::restore_pets(&mut self.ecs, &save_data.saved_mobs, false)?;
             }
 
             // Spec 30 — light data isn't persisted; recompute
@@ -1317,6 +1335,12 @@ impl GameServer {
             }
 
             log::info!("Loaded {chunk_count} saved chunks. {} entities.", self.ecs.len());
+            #[cfg(not(target_arch = "wasm32"))]
+            if self.players.is_empty() && let Some(proof) = personal_proof {
+                // Complete the cut before simulation or any periodic/exit save
+                // can clear the selected local field ahead of remote admission.
+                self.claim_remote_personal(proof.local_owner(), &proof)?;
+            }
             return Ok(());
         }
 

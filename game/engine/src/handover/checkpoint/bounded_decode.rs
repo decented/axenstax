@@ -458,18 +458,13 @@ pub(super) fn sidecar(bytes: &[u8]) -> Result<()> {
     if bytes.len() > 65536 {
         return Err(Error::Limit("sidecar bytes"));
     }
-    use crate::joiner_save::{JoinerSave, JoinerSaveV1, JoinerSaveV2};
-    let saved = match bytes.first() {
-        Some(1) => JoinerSave::from_v1(binary::<JoinerSaveV1>(bytes, 2 * 1024 * 1024)?)
-            .map_err(|_| Error::Invalid("sidecar v1"))?,
-        Some(2) => JoinerSave::from_v2(binary::<JoinerSaveV2>(bytes, 2 * 1024 * 1024)?),
-        Some(3) => binary::<JoinerSave>(bytes, 2 * 1024 * 1024)?,
-        _ => return Err(Error::Invalid("sidecar version")),
-    };
+    use crate::joiner_save::{JoinerSave, JoinerSaveV2};
+    if bytes.first() != Some(&2) { return Err(Error::Invalid("checkpoint sidecar must be immutable v2 seed")); }
+    let saved = JoinerSave::from_v2(binary::<JoinerSaveV2>(bytes, 2 * 1024 * 1024)?);
     JoinerSave::decode(bytes).map_err(|_| Error::Invalid("sidecar validation"))?;
     saved
         .window()
-        .map_err(|_| Error::Invalid("actual joiner sidecar v1"))?;
+        .map_err(|_| Error::Invalid("actual checkpoint sidecar v2"))?;
     Ok(())
 }
 

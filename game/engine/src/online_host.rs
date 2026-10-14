@@ -23,22 +23,22 @@
 use std::collections::{HashSet, VecDeque};
 use std::net::UdpSocket;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use nostr::EventId;
 
-use crate::contacts::{upsert, AddedVia, Contact};
-use crate::invite::{mint_bearer, Invite, DEFAULT_INVITE_TTL_SECS};
+use crate::contacts::{AddedVia, Contact, upsert};
+use crate::invite::{DEFAULT_INVITE_TTL_SECS, Invite, mint_bearer};
 use crate::nat::candidates::parse_addrs;
 use crate::online_admission::{
-    admit, is_reply_worthy, refusal_wire, ActiveBearer, AdmitReason, Admission, Refusal,
+    ActiveBearer, Admission, AdmitReason, Refusal, admit, is_reply_worthy, refusal_wire,
 };
 use crate::rendezvous::payload::{
-    npub_of, seal_answer, Answer, Candidate, KIND_JOIN_ANSWER, KIND_JOIN_OFFER, PAYLOAD_VERSION,
+    Answer, Candidate, KIND_JOIN_ANSWER, KIND_JOIN_OFFER, PAYLOAD_VERSION, npub_of, seal_answer,
 };
 use crate::rendezvous::relay_client::RendezvousRelay;
-use crate::rendezvous::verify::{verify_offer, SessionGuard, MAX_SEEN};
+use crate::rendezvous::verify::{MAX_SEEN, SessionGuard, verify_offer};
 use crate::runtime_identity::RuntimeIdentity;
 
 /// Shown when a host has gathered no candidate that could work from outside the
@@ -244,6 +244,9 @@ pub struct OnlineHost {
     guard: SessionGuard,
     seen: SeenEvents,
     punch_slots: PunchSlots,
+    continuation: Option<crate::handover::live::continuation::Resolved>,
+    retired_capabilities: Vec<crate::handover::phase::RetiredRoot>,
+    continuation_revoked: bool,
 }
 
 impl OnlineHost {
@@ -303,6 +306,9 @@ impl OnlineHost {
             guard: SessionGuard::new(),
             seen: SeenEvents::default(),
             punch_slots: PunchSlots::default(),
+            continuation: None,
+            retired_capabilities: Vec::new(),
+            continuation_revoked: false,
         })
     }
 
@@ -320,8 +326,76 @@ impl OnlineHost {
         &self.persona
     }
 
-    pub fn invite_link(&self) -> String {
-        self.invite.to_link()
+    pub fn invite_link(&self, now: u64) -> Result<String, &'static str> {
+        if self.continuation.is_some() && self.live_bearer(now).is_none() {
+            return Err("The original invite is unavailable. Contacts can still join directly.");
+        }
+        Ok(self.invite.to_link())
+    }
+
+    pub(crate) fn install_continuation(
+        &mut self,
+        resolved: crate::handover::live::continuation::Resolved,
+        now: u64,
+    ) -> Result<(), String> {
+        let authority = resolved.authority().map_err(|e| e.to_string())?;
+        if authority.runtime() != self.identity.runtime_pubkey().to_bytes()
+            || authority.persona() != self.persona
+            || now > resolved.expiry()
+        {
+            return Err("This device isn't the verified host of the original invitation.".into());
+        }
+        self.invite.host_runtime = resolved.root.runtime();
+        self.invite.host_persona = npub_of(
+            &nostr::PublicKey::from_slice(&resolved.root.persona()).map_err(|e| e.to_string())?,
+        );
+        self.invite.relays = resolved.root.relays().to_vec();
+        self.invite.expires_at = resolved.root.expiry();
+        self.invite.bearer = *resolved.bearer.expose();
+        self.active_bearer = ActiveBearer {
+            bearer: self.invite.bearer,
+            expires_at: resolved.expiry(),
+        };
+        self.continuation = Some(resolved);
+        Ok(())
+    }
+
+    pub(crate) fn continuation(&self) -> Option<&crate::handover::live::continuation::Resolved> {
+        self.continuation.as_ref()
+    }
+
+    pub(crate) fn install_retained(&mut self, world: &std::path::Path) -> Result<(), String> {
+        if let Some(info) =
+            crate::handover::live::retained::read(world).map_err(|e| e.to_string())?
+        {
+            if info.core().source_persona != self.persona {
+                return Err(
+                    "Sign in as this retained world's saved host before hosting it.".into(),
+                );
+            }
+            self.retired_capabilities = info.retirement.retired_roots().to_vec();
+        }
+        Ok(())
+    }
+
+    fn handover_context(&self, now: u64) -> Option<crate::rendezvous::payload::HandoverContext> {
+        if let Some(resolved) = &self.continuation {
+            if self.continuation_revoked
+                || now > resolved.expiry()
+                || self.active_bearer.bearer != *resolved.bearer.expose()
+            {
+                return None;
+            }
+            return resolved.admission().ok();
+        }
+        let root = self.root_context(now).ok()?;
+        Some(crate::rendezvous::payload::HandoverContext {
+            root: root.digest(),
+            capability: crate::handover::crypto::root_capability(&root, &self.active_bearer.bearer)
+                .ok()?,
+            epoch: 0,
+            committed: [0; 32],
+        })
     }
 
     /// The live invitation's root fields (its `k`, `h`, `x` and `r`), the
@@ -331,6 +405,17 @@ impl OnlineHost {
         &self,
         now: u64,
     ) -> crate::handover::Result<crate::handover::context::RootContext> {
+        if let Some(resolved) = &self.continuation {
+            if self.continuation_revoked
+                || now > resolved.expiry()
+                || self.active_bearer.bearer != *resolved.bearer.expose()
+            {
+                return Err(crate::handover::Error::Invalid(
+                    "original capability is unavailable",
+                ));
+            }
+            return Ok(resolved.root.clone());
+        }
         crate::handover::context::RootContext::new(
             self.invite.host_runtime,
             &self.invite.host_persona,
@@ -421,14 +506,20 @@ impl OnlineHost {
     /// `Accept(ByInvite)`), or `None` once it has expired: a world handover
     /// needs a live invitation capability and never mints its own kind.
     pub fn live_bearer(&self, now: u64) -> Option<[u8; crate::invite::BEARER_LEN]> {
-        (self.active_bearer.expires_at >= now).then_some(self.active_bearer.bearer)
+        (!self.continuation_revoked && self.active_bearer.expires_at >= now)
+            .then_some(self.active_bearer.bearer)
     }
 
-    /// World handover P2: an abort after the bearer was disclosed replaces
-    /// ONLY the bearer. The expiry, relays and host fields stay, so the
-    /// invitation's root context (and the lineage a handover derives from
-    /// it) is unchanged; old invite strings stop admitting.
+    /// A root host replaces its disclosed bearer. A continued authority
+    /// preserves the original fields and makes that capability unavailable;
+    /// its world-local abort record prevents resurrection on restart.
     pub fn rotate_bearer(&mut self) -> &Invite {
+        // This authority inherited one immutable original capability. It
+        // cannot replace that bearer's value under the original host's key.
+        if self.continuation.is_some() {
+            self.continuation_revoked = true;
+            return &self.invite;
+        }
         let bearer = mint_bearer();
         self.invite.bearer = bearer;
         self.active_bearer.bearer = bearer;
@@ -438,13 +529,35 @@ impl OnlineHost {
     /// Test builds: what the live invitation decides for `persona` joining
     /// with the invite string `link` (the same `admit` the offer path runs).
     #[cfg(test)]
-    pub fn admission_for_link(&self, persona: &[u8; 32], link: &str, now: u64) -> crate::online_admission::Admission {
-        let offered = crate::invite::Invite::parse(link, now).ok().map(|i| i.bearer);
-        admit(persona, offered, &self.book, Some(&self.active_bearer), now)
+    pub fn admission_for_link(
+        &self,
+        persona: &[u8; 32],
+        link: &str,
+        now: u64,
+    ) -> crate::online_admission::Admission {
+        let offered = crate::invite::Invite::parse(link, now)
+            .ok()
+            .map(|i| i.bearer);
+        admit(
+            persona,
+            offered,
+            &self.book,
+            (!self.continuation_revoked).then_some(&self.active_bearer),
+            now,
+        )
     }
 
-    /// Mint a new invite, retiring the previous bearer.
-    pub fn mint_fresh_invite(&mut self, now: u64) -> &Invite {
+    /// Copy a continued original invitation unchanged, or mint a fresh
+    /// invitation for an ordinary root host.
+    pub fn mint_fresh_invite(&mut self, now: u64) -> Result<&Invite, &'static str> {
+        if self.continuation.is_some() {
+            if self.live_bearer(now).is_none() {
+                return Err(
+                    "The original invite is unavailable. Contacts can still join directly.",
+                );
+            }
+            return Ok(&self.invite);
+        }
         let bearer = mint_bearer();
         let expires_at = now + DEFAULT_INVITE_TTL_SECS;
         self.invite = Invite {
@@ -456,7 +569,7 @@ impl OnlineHost {
             world_name: self.world_name.clone(),
         };
         self.active_bearer = ActiveBearer { bearer, expires_at };
-        &self.invite
+        Ok(&self.invite)
     }
 
     /// Drain and answer what the relays have delivered, at most
@@ -516,6 +629,29 @@ impl OnlineHost {
                 .as_deref()
                 .and_then(|h| hex::decode(h).ok())
                 .and_then(|b| <[u8; 16]>::try_from(b.as_slice()).ok());
+            // Check original authority before Kith/contact admission. An
+            // invitation never sheds its expectation to become a contact call.
+            if (self.continuation_revoked
+                && (verified.offer.bearer.is_some() || verified.offer.handover.is_some()))
+                || verified
+                    .offer
+                    .handover
+                    .is_some_and(|expected| Some(expected) != self.handover_context(now))
+                || ((self.continuation.is_some() || !self.retired_capabilities.is_empty())
+                    && verified.offer.bearer.is_some()
+                    && verified.offer.handover.is_none())
+                || (verified.offer.handover.is_some() && bearer != Some(self.active_bearer.bearer))
+                || verified.offer.handover.is_some_and(|expected| {
+                    self.retired_capabilities
+                        .iter()
+                        .any(|root| root.capability == expected.capability)
+                })
+            {
+                out.push(HostEvent::Dropped(
+                    "refused: original invitation authority differs".into(),
+                ));
+                continue;
+            }
             let reason = match admit(
                 &verified.persona,
                 bearer,
@@ -658,7 +794,9 @@ impl OnlineHost {
         let answer = Answer {
             v: PAYLOAD_VERSION,
             session: session.to_string(),
-            persona: self.invite.host_persona.clone(),
+            persona: npub_of(
+                &nostr::PublicKey::from_slice(&self.persona).expect("validated host persona"),
+            ),
             attestation,
             accepted,
             reason: reason.map(str::to_string),
@@ -672,6 +810,7 @@ impl OnlineHost {
             },
             world_name: self.world_name.clone(),
             sent_at: now,
+            handover: self.handover_context(now),
         };
         let keys = self.identity.keys().clone();
         // Sealing is pure CPU (a NIP-44 encrypt and a signature) and only
@@ -694,7 +833,7 @@ impl OnlineHost {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rendezvous::payload::{new_session_id, seal_offer, Offer};
+    use crate::rendezvous::payload::{Offer, new_session_id, seal_offer};
     use crate::rendezvous::relay_client::{FakeRelayHub, RendezvousRelay};
     use nostr::Keys;
 
@@ -714,7 +853,10 @@ mod tests {
 
     impl Caller {
         fn new() -> Self {
-            Caller { persona: Keys::generate(), runtime: Keys::generate() }
+            Caller {
+                persona: Keys::generate(),
+                runtime: Keys::generate(),
+            }
         }
         async fn offer(&self, bearer: Option<String>, protocol: u32) -> Offer {
             Offer {
@@ -736,6 +878,7 @@ mod tests {
                     addr: "127.0.0.1:9".to_string(),
                 }],
                 sent_at: NOW,
+                handover: None,
             }
         }
     }
@@ -760,7 +903,10 @@ mod tests {
             host_persona.public_key().to_bytes(),
             Box::new(hub.client()),
             sock,
-            vec![Candidate { kind: "lan".to_string(), addr: "127.0.0.1:7700".to_string() }],
+            vec![Candidate {
+                kind: "lan".to_string(),
+                addr: "127.0.0.1:7700".to_string(),
+            }],
             "Ivy's Hollow".to_string(),
             vec!["wss://nos.lol".to_string()],
             book,
@@ -797,10 +943,17 @@ mod tests {
         const ME: [u8; 32] = [42; 32];
         let list = access_allowlist(&ME, &book, &[[9; 32], [1; 32]], &[]);
         assert!(list.contains(&[1; 32]) && list.contains(&[2; 32]));
-        assert!(!list.contains(&[3; 32]), "ken may be recognised but may not play");
+        assert!(
+            !list.contains(&[3; 32]),
+            "ken may be recognised but may not play"
+        );
         assert!(list.contains(&[9; 32]), "a bearer admission must survive");
         assert!(list.contains(&ME), "the host is always on its own list");
-        assert_eq!(list.len(), 4, "no duplicate for the contact who also called: {list:?}");
+        assert_eq!(
+            list.len(),
+            4,
+            "no duplicate for the contact who also called: {list:?}"
+        );
     }
 
     /// REGRESSION (whole-branch review, MINOR 11). One punch worker was spawned
@@ -881,7 +1034,10 @@ mod tests {
             added_at: 1,
             last_joined: None,
         });
-        host.set_book(vec![a_contact([1; 32], crate::comms::Tier::Kin)], Vec::new());
+        host.set_book(
+            vec![a_contact([1; 32], crate::comms::Tier::Kin)],
+            Vec::new(),
+        );
         assert!(
             crate::contacts::find(host.book(), &[1; 32]).is_some(),
             "the fresh book is in"
@@ -896,27 +1052,50 @@ mod tests {
     fn the_minted_invite_round_trips_and_names_this_host() {
         let hub = FakeRelayHub::new();
         let (host, host_runtime) = a_host(&hub, vec![]);
-        let parsed = crate::invite::Invite::parse(&host.invite_link(), NOW).unwrap();
+        let parsed = crate::invite::Invite::parse(&host.invite_link(NOW).unwrap(), NOW).unwrap();
         assert_eq!(parsed.host_runtime, host_runtime.public_key().to_bytes());
         assert_eq!(parsed.world_name, "Ivy's Hollow");
         assert_eq!(parsed.relays, vec!["wss://nos.lol".to_string()]);
-        assert_eq!(parsed.expires_at, NOW + crate::invite::DEFAULT_INVITE_TTL_SECS);
+        assert_eq!(
+            parsed.expires_at,
+            NOW + crate::invite::DEFAULT_INVITE_TTL_SECS
+        );
     }
 
     #[test]
     fn rotating_the_bearer_keeps_the_root_context_and_retires_the_old_link() {
         let hub = FakeRelayHub::new();
         let (mut host, _) = a_host(&hub, vec![]);
-        let (old_link, root) = (host.invite_link(), host.root_context(NOW).unwrap().digest());
-        let (old, expiry, relays) = (host.invite().bearer, host.invite().expires_at, host.invite().relays.clone());
+        let (old_link, root) = (
+            host.invite_link(NOW).unwrap(),
+            host.root_context(NOW).unwrap().digest(),
+        );
+        let (old, expiry, relays) = (
+            host.invite().bearer,
+            host.invite().expires_at,
+            host.invite().relays.clone(),
+        );
         let new = host.rotate_bearer().bearer;
         assert_ne!(old, new);
-        assert_eq!((host.invite().expires_at, &host.invite().relays), (expiry, &relays));
-        assert_eq!(host.root_context(NOW + 60).unwrap().digest(), root, "rotation changed the root");
+        assert_eq!(
+            (host.invite().expires_at, &host.invite().relays),
+            (expiry, &relays)
+        );
+        assert_eq!(
+            host.root_context(NOW + 60).unwrap().digest(),
+            root,
+            "rotation changed the root"
+        );
         assert_eq!(host.live_bearer(NOW + 60), Some(new));
         let stranger = [0x44; 32];
-        assert!(matches!(host.admission_for_link(&stranger, &old_link, NOW + 60), Admission::Refuse(_)));
-        assert!(matches!(host.admission_for_link(&stranger, &host.invite_link(), NOW + 60), Admission::Accept(_)));
+        assert!(matches!(
+            host.admission_for_link(&stranger, &old_link, NOW + 60),
+            Admission::Refuse(_)
+        ));
+        assert!(matches!(
+            host.admission_for_link(&stranger, &host.invite_link(NOW).unwrap(), NOW + 60),
+            Admission::Accept(_)
+        ));
     }
 
     #[test]
@@ -924,7 +1103,7 @@ mod tests {
         let hub = FakeRelayHub::new();
         let (mut host, _) = a_host(&hub, vec![]);
         let old = host.invite().bearer;
-        let new = host.mint_fresh_invite(NOW + 60).bearer;
+        let new = host.mint_fresh_invite(NOW + 60).unwrap().bearer;
         assert_ne!(old, new);
     }
 
@@ -935,7 +1114,10 @@ mod tests {
             let caller = Caller::new();
             let (mut host, host_runtime) = a_host(
                 &hub,
-                vec![a_contact(caller.persona.public_key().to_bytes(), crate::comms::Tier::Kith)],
+                vec![a_contact(
+                    caller.persona.public_key().to_bytes(),
+                    crate::comms::Tier::Kith,
+                )],
             );
             let joiner_relay = hub.client();
             let offer = caller.offer(None, crate::protocol::PROTOCOL_VERSION).await;
@@ -948,11 +1130,17 @@ mod tests {
             assert!(
                 events.iter().any(|e| matches!(
                     e,
-                    HostEvent::Admitted { reason: AdmitReason::AlreadyContact, .. }
+                    HostEvent::Admitted {
+                        reason: AdmitReason::AlreadyContact,
+                        ..
+                    }
                 )),
                 "{events:?}"
             );
-            assert!(host.allowlist().contains(&caller.persona.public_key().to_bytes()));
+            assert!(
+                host.allowlist()
+                    .contains(&caller.persona.public_key().to_bytes())
+            );
         });
     }
 
@@ -975,14 +1163,30 @@ mod tests {
         });
         host.allowlist.push([9; 32]);
         host.allowlist.push([7; 32]);
-        let fresh = vec![a_contact([1; 32], crate::comms::Tier::Kin), a_contact([9; 32], crate::comms::Tier::Kin)];
+        let fresh = vec![
+            a_contact([1; 32], crate::comms::Tier::Kin),
+            a_contact([9; 32], crate::comms::Tier::Kin),
+        ];
         host.set_book(fresh, vec![[7; 32], [9; 32]]);
 
-        assert!(crate::contacts::find(host.book(), &[7; 32]).is_none(), "blocked invitee left the book");
-        assert!(crate::contacts::find(host.book(), &[9; 32]).is_none(), "blocked contact left the book");
-        assert!(host.allowlist().is_empty(), "blocked admissions dropped: {:?}", host.allowlist());
+        assert!(
+            crate::contacts::find(host.book(), &[7; 32]).is_none(),
+            "blocked invitee left the book"
+        );
+        assert!(
+            crate::contacts::find(host.book(), &[9; 32]).is_none(),
+            "blocked contact left the book"
+        );
+        assert!(
+            host.allowlist().is_empty(),
+            "blocked admissions dropped: {:?}",
+            host.allowlist()
+        );
         let (whitelist, blocklist) = host.access_policy();
-        assert!(!whitelist.contains(&[7; 32]) && !whitelist.contains(&[9; 32]), "{whitelist:?}");
+        assert!(
+            !whitelist.contains(&[7; 32]) && !whitelist.contains(&[9; 32]),
+            "{whitelist:?}"
+        );
         assert!(whitelist.contains(&[1; 32]) && whitelist.contains(host.persona()));
         assert_eq!(blocklist, vec![[7; 32], [9; 32]]);
 
@@ -1000,7 +1204,9 @@ mod tests {
             host.set_book(Vec::new(), vec![caller.persona.public_key().to_bytes()]);
             let bearer = hex::encode(host.invite().bearer);
             let joiner_relay = hub.client();
-            let offer = caller.offer(Some(bearer), crate::protocol::PROTOCOL_VERSION).await;
+            let offer = caller
+                .offer(Some(bearer), crate::protocol::PROTOCOL_VERSION)
+                .await;
             let ev = seal_offer(&caller.runtime, &host_runtime.public_key(), &offer)
                 .await
                 .unwrap();
@@ -1024,7 +1230,9 @@ mod tests {
             let (mut host, host_runtime) = a_host(&hub, vec![]);
             let bearer = hex::encode(host.invite().bearer);
             let joiner_relay = hub.client();
-            let offer = caller.offer(Some(bearer), crate::protocol::PROTOCOL_VERSION).await;
+            let offer = caller
+                .offer(Some(bearer), crate::protocol::PROTOCOL_VERSION)
+                .await;
             let ev = seal_offer(&caller.runtime, &host_runtime.public_key(), &offer)
                 .await
                 .unwrap();
@@ -1064,8 +1272,14 @@ mod tests {
             joiner_relay.publish(&ev).unwrap();
 
             let events = host.poll(NOW, 1, 5);
-            assert!(events.iter().any(|e| matches!(e, HostEvent::Dropped(_))), "{events:?}");
-            assert!(joiner_relay.try_recv().is_none(), "SILENCE — no answer to a stranger");
+            assert!(
+                events.iter().any(|e| matches!(e, HostEvent::Dropped(_))),
+                "{events:?}"
+            );
+            assert!(
+                joiner_relay.try_recv().is_none(),
+                "SILENCE — no answer to a stranger"
+            );
             assert!(host.allowlist().is_empty());
         });
     }
@@ -1077,7 +1291,10 @@ mod tests {
             let caller = Caller::new();
             let (mut host, host_runtime) = a_host(
                 &hub,
-                vec![a_contact(caller.persona.public_key().to_bytes(), crate::comms::Tier::Ken)],
+                vec![a_contact(
+                    caller.persona.public_key().to_bytes(),
+                    crate::comms::Tier::Ken,
+                )],
             );
             let joiner_relay = hub.client();
             joiner_relay
@@ -1089,7 +1306,10 @@ mod tests {
                 .unwrap();
             joiner_relay.publish(&ev).unwrap();
             host.poll(NOW, 1, 5);
-            assert!(joiner_relay.try_recv().is_none(), "ken is hear-only, not play-with");
+            assert!(
+                joiner_relay.try_recv().is_none(),
+                "ken is hear-only, not play-with"
+            );
             assert!(host.allowlist().is_empty());
         });
     }
@@ -1101,13 +1321,18 @@ mod tests {
             let caller = Caller::new();
             let (mut host, host_runtime) = a_host(
                 &hub,
-                vec![a_contact(caller.persona.public_key().to_bytes(), crate::comms::Tier::Kin)],
+                vec![a_contact(
+                    caller.persona.public_key().to_bytes(),
+                    crate::comms::Tier::Kin,
+                )],
             );
             let joiner_relay = hub.client();
             joiner_relay
                 .subscribe(KIND_JOIN_ANSWER, &caller.runtime.public_key().to_hex())
                 .unwrap();
-            let offer = caller.offer(None, crate::protocol::PROTOCOL_VERSION + 1).await;
+            let offer = caller
+                .offer(None, crate::protocol::PROTOCOL_VERSION + 1)
+                .await;
             let ev = seal_offer(&caller.runtime, &host_runtime.public_key(), &offer)
                 .await
                 .unwrap();
@@ -1119,7 +1344,10 @@ mod tests {
                 crate::rendezvous::payload::open_answer(&caller.runtime, &answer_ev).unwrap();
             assert!(!answer.accepted);
             assert_eq!(answer.reason.as_deref(), Some("protocol-mismatch"));
-            assert!(host.allowlist().is_empty(), "an explained refusal is still a refusal");
+            assert!(
+                host.allowlist().is_empty(),
+                "an explained refusal is still a refusal"
+            );
         });
     }
 
@@ -1137,7 +1365,9 @@ mod tests {
             joiner_relay
                 .subscribe(KIND_JOIN_ANSWER, &caller.runtime.public_key().to_hex())
                 .unwrap();
-            let offer = caller.offer(None, crate::protocol::PROTOCOL_VERSION + 1).await;
+            let offer = caller
+                .offer(None, crate::protocol::PROTOCOL_VERSION + 1)
+                .await;
             let ev = seal_offer(&caller.runtime, &host_runtime.public_key(), &offer)
                 .await
                 .unwrap();
@@ -1180,7 +1410,9 @@ mod tests {
                 crate::rendezvous::payload::open_answer(&caller.runtime, &answer_ev).unwrap();
             assert_eq!(answer.reason.as_deref(), Some("protocol-mismatch"));
             assert!(
-                !events.iter().any(|e| matches!(e, HostEvent::ContactAdded(_))),
+                !events
+                    .iter()
+                    .any(|e| matches!(e, HostEvent::ContactAdded(_))),
                 "a refusal makes no contact: {events:?}"
             );
             assert!(host.allowlist().is_empty());
@@ -1197,11 +1429,16 @@ mod tests {
             let caller = Caller::new();
             let (mut host, host_runtime) = a_host(
                 &hub,
-                vec![a_contact(caller.persona.public_key().to_bytes(), crate::comms::Tier::Ken)],
+                vec![a_contact(
+                    caller.persona.public_key().to_bytes(),
+                    crate::comms::Tier::Ken,
+                )],
             );
             let bearer = hex::encode(host.invite().bearer);
             let joiner_relay = hub.client();
-            let offer = caller.offer(Some(bearer), crate::protocol::PROTOCOL_VERSION).await;
+            let offer = caller
+                .offer(Some(bearer), crate::protocol::PROTOCOL_VERSION)
+                .await;
             let ev = seal_offer(&caller.runtime, &host_runtime.public_key(), &offer)
                 .await
                 .unwrap();
@@ -1231,7 +1468,10 @@ mod tests {
             let caller = Caller::new();
             let (mut host, host_runtime) = a_host(
                 &hub,
-                vec![a_contact(caller.persona.public_key().to_bytes(), crate::comms::Tier::Kith)],
+                vec![a_contact(
+                    caller.persona.public_key().to_bytes(),
+                    crate::comms::Tier::Kith,
+                )],
             );
             let joiner_relay = hub.client();
             for _ in 0..50 {
@@ -1258,7 +1498,9 @@ mod tests {
                 "one frame must not swallow a flood: {first:?}"
             );
             assert!(
-                !first.iter().any(|e| matches!(e, HostEvent::Admitted { .. })),
+                !first
+                    .iter()
+                    .any(|e| matches!(e, HostEvent::Admitted { .. })),
                 "the genuine offer is behind 50 junk ones"
             );
 
@@ -1273,7 +1515,10 @@ mod tests {
                     }
                 }
             }
-            assert_eq!(dropped, 50, "every junk event is accounted for, across polls");
+            assert_eq!(
+                dropped, 50,
+                "every junk event is accounted for, across polls"
+            );
             assert!(admitted, "and the real offer is not starved");
         });
     }
@@ -1285,7 +1530,10 @@ mod tests {
             let caller = Caller::new();
             let (mut host, host_runtime) = a_host(
                 &hub,
-                vec![a_contact(caller.persona.public_key().to_bytes(), crate::comms::Tier::Kith)],
+                vec![a_contact(
+                    caller.persona.public_key().to_bytes(),
+                    crate::comms::Tier::Kith,
+                )],
             );
             let joiner_relay = hub.client();
             let offer = caller.offer(None, crate::protocol::PROTOCOL_VERSION).await;
@@ -1296,21 +1544,21 @@ mod tests {
             // Junk wearing the genuine offer's id, delivered first. If the id
             // were taken on trust it would be remembered, and the real offer
             // behind it silently dropped as a duplicate.
-            let mut forged = nostr::EventBuilder::new(
-                nostr::Kind::Custom(KIND_JOIN_OFFER),
-                "not-a-ciphertext",
-            )
-            .tags([nostr::Tag::public_key(host_runtime.public_key())])
-            .sign(&Keys::generate())
-            .await
-            .unwrap();
+            let mut forged =
+                nostr::EventBuilder::new(nostr::Kind::Custom(KIND_JOIN_OFFER), "not-a-ciphertext")
+                    .tags([nostr::Tag::public_key(host_runtime.public_key())])
+                    .sign(&Keys::generate())
+                    .await
+                    .unwrap();
             forged.id = genuine.id;
             joiner_relay.publish(&forged).unwrap();
             joiner_relay.publish(&genuine).unwrap();
 
             let events = host.poll(NOW, 1, 5);
             assert!(
-                events.iter().any(|e| matches!(e, HostEvent::Admitted { .. })),
+                events
+                    .iter()
+                    .any(|e| matches!(e, HostEvent::Admitted { .. })),
                 "the genuine offer must survive the squatter: {events:?}"
             );
         });
@@ -1323,7 +1571,10 @@ mod tests {
             let caller = Caller::new();
             let (mut host, host_runtime) = a_host(
                 &hub,
-                vec![a_contact(caller.persona.public_key().to_bytes(), crate::comms::Tier::Kin)],
+                vec![a_contact(
+                    caller.persona.public_key().to_bytes(),
+                    crate::comms::Tier::Kin,
+                )],
             );
             let joiner_relay = hub.client();
             joiner_relay
@@ -1350,7 +1601,10 @@ mod tests {
             let caller = Caller::new();
             let (mut host, host_runtime) = a_host(
                 &hub,
-                vec![a_contact(caller.persona.public_key().to_bytes(), crate::comms::Tier::Kith)],
+                vec![a_contact(
+                    caller.persona.public_key().to_bytes(),
+                    crate::comms::Tier::Kith,
+                )],
             );
             let joiner_relay = hub.client();
             joiner_relay
@@ -1367,7 +1621,10 @@ mod tests {
             let answer =
                 crate::rendezvous::payload::open_answer(&caller.runtime, &answer_ev).unwrap();
             assert!(answer.accepted);
-            assert_eq!(answer.session, offer.session, "the answer is tied to the offer");
+            assert_eq!(
+                answer.session, offer.session,
+                "the answer is tied to the offer"
+            );
             assert_eq!(answer.world_name, "Ivy's Hollow");
             assert_eq!(answer.candidates[0].addr, "127.0.0.1:7700");
         });
@@ -1380,7 +1637,10 @@ mod tests {
             let caller = Caller::new();
             let (mut host, host_runtime) = a_host(
                 &hub,
-                vec![a_contact(caller.persona.public_key().to_bytes(), crate::comms::Tier::Kith)],
+                vec![a_contact(
+                    caller.persona.public_key().to_bytes(),
+                    crate::comms::Tier::Kith,
+                )],
             );
             let joiner_relay = hub.client();
             let offer = caller.offer(None, crate::protocol::PROTOCOL_VERSION).await;

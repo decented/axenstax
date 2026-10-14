@@ -258,6 +258,7 @@ mod tests {
                     addr: "10.0.0.5:7700".to_string(),
                 }],
                 sent_at,
+                handover: None,
             }
         }
     }
@@ -450,6 +451,7 @@ mod tests {
                 candidates: vec![],
                 world_name: "W".to_string(),
                 sent_at: NOW,
+                handover: None,
             };
             let ev = seal_answer(&host.runtime, &joiner_rt.public_key(), &answer)
                 .await
@@ -483,6 +485,7 @@ mod tests {
                 candidates: vec![],
                 world_name: "W".to_string(),
                 sent_at: NOW,
+                handover: None,
             };
             let ev = seal_answer(&host.runtime, &joiner_rt.public_key(), &answer)
                 .await
