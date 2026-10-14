@@ -5258,8 +5258,8 @@ contains no source Proof-of-Play secret, owner stamp, publication endpoint or
 Stash opt-in, while retaining genesis, rules, authored data and gameplay history.
 Current persisted/evicted chunks override old disk files; the existing evicted
 snapshot wins over neighbour-generation spill, and current all-air removes the
-old disk member. Required referenced exhibits cannot be skipped. Actual current
-JoinerSavev1 is strictly decoded. A participant record `participants/<npub>.dat`
+old disk member. Required referenced exhibits cannot be skipped. Immutable checkpoint sidecars use explicit JoinerSavev2 seeds and are strictly
+decoded before Ready; ordinary canonical v1/v2 migration remains separate. A participant record `participants/<npub>.dat`
 (schema1, `handover::personal`) is strictly decoded by both packer and importer:
 domain-framed header binding participant key, lineage, checkpoint generation and
 transfer id (the importer takes these from the authenticated MANIFEST and the
@@ -6725,3 +6725,78 @@ frontier, including through a pack hold and actual physical-life application.
 This preserves the separate exact initial-install acknowledgement and current
 snapshot quiescence semantics on final integration; execution gates remain
 pending.
+
+
+The private adapter's subsequent source refinement refuses generic `.axeworld`,
+`.axeprofile`, export-to-folder and Fork for imported bound authority because
+those formats omit activation proofs and participant files. This guard checks
+retained proof/canonical bindings even after a dedicated role clears the local
+snapshot field. Copying the complete world directory preserves those bytes;
+export-to-folder is an archive fallback and is not a complete-directory backup.
+Ordinary unbound worlds retain their existing export/Fork behaviour. A selected
+bound local snapshot or current bound/corrupt-v3 canonical record without proof
+refuses rather than creating a fresh bag. Selected primary/recovery world.dat
+also confirms its own file/directory durability before local play.
+
+An imported dedicated loader uses the existing recovery selection policy and
+makes the remote role cut before exposing simulation or periodic/exit saves;
+ordinary dedicated loading retains primary-only selection. The selected actual
+server world, canonical personal state and superseded autosave become durable
+in that order. Imported persisted pets use the same unchanged restore fold as
+native loading before the cut saves them. Existing pet owner neutralisation and
+positional kept-steed refusals remain in force; handover adds no pet schema
+beyond the separate D2c-2 carrier.
+
+Recipient consent also checks unsupported local quest/cooldown state and waits
+for its unsent edits, window operations, queued requests and retained authority
+receipts to settle before parking. Normal polling/flushing stays active while
+consent waits. Initial PersonalSync installation and current state quiescence
+have separate proofs: one exact bounded retained initial tuple can initialise
+an attachment after a newer snapshot was issued but delayed. It cannot release
+that newer pending snapshot, advance its current payload/window proof or permit
+freeze. Only exact current Applied and the typed result/window fences do that.
+Execution controls for these refinements remain pending.
+
+
+### Original invitation and retained copy — private source checkpoint
+
+The live continuation adapter performs a bounded stored-proof lookup before an
+original-capability join or continued host preparation. All four hops share one
+deadline, byte/candidate budget and the original user-selected relay set. Each
+hop verifies its Prepared/Committed envelopes, exact predecessor and original
+context; a known local public-digest prefix cannot roll back when a relay
+withholds records. Prepared alone never routes, and conflicting commits refuse.
+The checked final authority must match the world's exact Installed receipt; no
+bearer is stored in the prefix cache. Encrypted setup Offer/Answer append an
+optional exact root/capability/epoch/commit expectation. Capability mismatches
+refuse before contact admission; an explicit contact call remains a separate
+path. No game traffic, directory or operated service is added.
+
+Repeated hosting or copying on a continued world preserves the immutable
+original invitation fields. A disclosed abort makes that capability unavailable
+instead of minting a hybrid invitation or inventing epoch0. Existing bounded
+world-local Aborted/PendingAbort records, authenticated by their exact
+install-local ledger entry and current Installed predecessor, preserve this
+refusal across restart. The final host-start caller rechecks the actual selected
+folder proof before constructing a server, refusing either direction of a
+delete/recreate or ordinary/imported preparation mismatch. Local play and
+explicit contact admission remain separate from that capability refusal.
+
+A second packing worker prepares a distinct source-owned retained world before
+Offer/irreversible retirement. It preserves genesis, authored history, Plans,
+supported identity-bound personal state and source-own local snapshot, gives
+the copy its own folder/world identity and fresh publication secret, and leaves
+it inert. A compact source-signed personal provenance binds the exact retirement
+payload, core, admitted manifest, copy identity and source attestation. The copy
+contains no bearer or inherited Prepared/Activated authority. Exact ledger-owned
+retirement durability permits non-overwriting promotion; failed release remains
+inactive or retryable. The old original folder stays retired. A complete copied
+world directory carries its checked personal provenance independently of the
+origin installation's ledger; mutable bound v3 state wins after bootstrap.
+Retired original capabilities refuse before contact shortcuts, and the actual
+local-owner identity cannot attach a simultaneous second remote body.
+
+These adapters remain a reviewable private checkpoint. Full actual original
+root0→1, hand-back2, later retirement2→3, fault/restoration controls and final
+combined native/GPU/WASM regression are still required before feature acceptance;
+cold lookup tests and source inspection do not substitute for those callers.

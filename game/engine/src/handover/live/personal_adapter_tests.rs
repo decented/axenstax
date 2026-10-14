@@ -145,7 +145,7 @@ fn fixture(tag: &str) -> Fixture {
     Fixture {
         _root: root,
         world,
-        proof: Proof { core, manifest },
+        proof: Proof { core, manifest, retained: false, retained_copy: None },
         key,
         seed,
     }
@@ -204,7 +204,7 @@ fn handover_personal_bootstrap_selects_one_identity_and_never_replays_current_v3
 }
 
 #[test]
-fn handover_personal_missing_wrong_manifest_and_second_transfer_are_checked() {
+fn handover_personal_missing_wrong_manifest_and_next_context_preflight_are_checked() {
     let f = fixture("personal-proof");
     let saved = load_or_bootstrap(&f.world, f.key, &f.proof)
         .unwrap()
@@ -296,5 +296,119 @@ fn handover_personal_atomic_failure_preserves_seed_or_complete_v3_and_retries_du
     assert!(
         syncs >= 3,
         "visible v3 admitted gameplay without confirming rename durability"
+    );
+}
+
+#[test]
+fn handover_personal_copy_refusal_and_proofless_remote_restore_preserve_bound_records() {
+    let f = fixture("personal-copy-proof");
+    assert!(generic_copy_guard(&f.world).is_err());
+    assert!(
+        crate::native_world_io::export_world_native("personal").is_err(),
+        "archive/folder/profile exporter dropped activation proof"
+    );
+    assert!(
+        crate::save::fork_world("personal", "personal").is_err(),
+        "Fork copied bound records while dropping proof"
+    );
+    assert!(!crate::save::world_dir("personal_fork").exists());
+    let current = load_or_bootstrap(&f.world, f.key, &f.proof)
+        .unwrap()
+        .unwrap();
+    let original = current.encode().unwrap();
+    fs::remove_dir_all(f.world.join("handover")).unwrap();
+    assert!(proof(&f.world).unwrap().is_none());
+    assert!(
+        has_bound_records(&f.world).unwrap(),
+        "dedicated role's absent local field hid the canonical binding"
+    );
+    assert!(generic_copy_guard(&f.world).is_err());
+    let mut server = crate::server::GameServer::new(1, "personal".into(), 42);
+    server.players[0].verified_pubkey = Some(f.key);
+    server.players[0].server_simulated = true;
+    assert!(server.load_joiner(0).is_none());
+    assert!(
+        server.players[0].personal_read_failed,
+        "missing proof donated an ordinary sidecar window"
+    );
+    assert!(server.save_joiner(0).is_err());
+    assert_eq!(
+        fs::read(path(&f.world, f.key)).unwrap(),
+        original,
+        "proofless admission/save overwrote the bound bag/maps"
+    );
+    fs::write(path(&f.world, f.key), b"\x03broken").unwrap();
+    let mut server = crate::server::GameServer::new(1, "personal".into(), 42);
+    server.players[0].verified_pubkey = Some(f.key);
+    assert!(server.load_joiner(0).is_none());
+    assert!(
+        server.players[0].personal_read_failed,
+        "corrupt current v3 became a fresh kit without proof"
+    );
+    assert_eq!(fs::read(path(&f.world, f.key)).unwrap(), b"\x03broken");
+}
+
+#[test]
+fn handover_personal_generic_copy_keeps_ordinary_unbound_worlds_available() {
+    let f = fixture("personal-copy-ordinary");
+    fs::remove_dir_all(f.world.join("handover")).unwrap();
+    fs::remove_dir_all(f.world.join("participants")).unwrap();
+    let plain = JoinerSave::decode(&f.seed).unwrap().encode().unwrap();
+    fs::write(path(&f.world, f.key), &plain).unwrap();
+    assert!(!has_bound_records(&f.world).unwrap());
+    generic_copy_guard(&f.world).unwrap();
+    let archive = crate::native_world_io::export_world_native("personal").unwrap();
+    crate::world_archive::unpack_world_for_import(&archive, &mut crate::world::World::new())
+        .unwrap();
+    assert!(crate::save::fork_world("personal", "personal").is_ok());
+    assert_eq!(fs::read(path(&f.world, f.key)).unwrap(), plain);
+}
+
+#[path = "personal_role_tests.rs"]
+mod role_tests;
+
+#[test]
+fn handover_personal_current_world_snapshot_corruption_never_defaults_to_a_seed() {
+    let f = fixture("personal-world-tail");
+    let saved = load_or_bootstrap(&f.world, f.key, &f.proof)
+        .unwrap()
+        .unwrap();
+    let mut world =
+        crate::save::read_world_save(&fs::read(f.world.join("world.dat")).unwrap()).unwrap();
+    world.local_personal = Some(crate::personal_value::LocalPersonalSave(
+        saved.encode().unwrap(),
+    ));
+    let bytes = crate::save_format::encode_world_save(&world).unwrap();
+    let (payload, version) = crate::save_format::split_save_footer(&bytes);
+    assert!(version.unwrap() >= 53);
+    let mut torn = payload[..payload.len() - 1].to_vec();
+    torn.extend_from_slice(&bytes[payload.len()..]);
+    fs::write(f.world.join("world.dat"), &torn).unwrap();
+    assert!(
+        crate::save::read_world_save(&torn).is_err(),
+        "current corrupt personal snapshot silently became an absent seed baseline"
+    );
+    assert_eq!(fs::read(f.world.join("world.dat")).unwrap(), torn);
+    // Pin a genuinely readable ancient eight-field record. Relabelling it
+    // as current must not turn a corrupt current prefix into a legacy reset.
+    let mut ancient = bincode::serialize(&(
+        42u32,
+        0.0f32,
+        70.0f32,
+        0.0f32,
+        20.0f32,
+        0usize,
+        vec![(crate::block::STONE, 9u8)],
+        Vec::<u8>::new(),
+    ))
+    .unwrap();
+    assert!(
+        crate::save::read_world_save(&ancient).is_ok(),
+        "known ancient world compatibility changed"
+    );
+    ancient.extend_from_slice(&bytes[payload.len()..]);
+    assert!(
+        crate::save::read_world_save(&ancient).is_err(),
+        "current corrupt prefix took the ancient legacy reset path"
     );
 }

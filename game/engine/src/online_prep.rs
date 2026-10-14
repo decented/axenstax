@@ -162,6 +162,7 @@ pub struct OnlinePrep {
     pub punch_socket: UdpSocket,
     pub candidates: Vec<Candidate>,
     pub mapping: Option<PortMapping>,
+    pub(crate) continuation: Option<crate::handover::live::continuation::Resolved>,
 }
 
 // A freshly minted attestation is NOT carried here: `mint_and_store` writes it
@@ -342,6 +343,8 @@ pub enum OnlineIntent {
     Join {
         host_runtime: [u8; 32],
         bearer: Option<[u8; 16]>,
+        /// Exact validated original invitation; contacts carry None.
+        invite: Option<Box<crate::invite::Invite>>,
         /// The name every message about this join is written around.
         display_name: String,
         /// The relays the invite named — where the host is actually listening.
@@ -372,6 +375,13 @@ pub struct PendingPrep {
     pub intent: OnlineIntent,
     started: Instant,
     rx: Receiver<Result<OnlinePrep, String>>,
+    _cancel: CancelPrep,
+}
+
+#[derive(Default)]
+struct CancelPrep(std::sync::Arc<std::sync::atomic::AtomicBool>);
+impl Drop for CancelPrep {
+    fn drop(&mut self) { self.0.store(true, std::sync::atomic::Ordering::Relaxed); }
 }
 
 impl PendingPrep {
@@ -408,17 +418,31 @@ pub fn spawn(
     mint_with: Option<signet_nip46_client::BunkerSession>,
 ) -> PendingPrep {
     let (tx, rx) = std::sync::mpsc::channel();
+    let cancel = CancelPrep::default();
+    let worker_cancel = cancel.0.clone();
+    let worker_intent = intent.clone();
     std::thread::spawn(move || {
         let res = (|| -> Result<OnlinePrep, String> {
             if let Some(session) = mint_with {
                 mint_and_store(&session, &runtime_pubkey)?;
             }
+            let now = nostr::Timestamp::now().as_secs();
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|e| e.to_string())?;
+            let continuation = match &worker_intent {
+                OnlineIntent::Join { invite: Some(invite), .. } => {
+                    let root = crate::handover::context::RootContext::new(invite.host_runtime, &invite.host_persona, invite.expires_at, &invite.relays, now).map_err(|e| e.to_string())?;
+                    Some(rt.block_on(crate::handover::live::continuation::cached_lookup(root, crate::handover::live::bearer::Bearer::new(invite.bearer), now, &worker_cancel)).map_err(|_| "The invitation's continuation couldn't be verified. Try the original link again.".to_string())?)
+                }
+                OnlineIntent::Host { folder } => rt.block_on(crate::handover::live::continuation::installed_world(&crate::save::world_dir(folder), now, &worker_cancel)).map_err(|_| "This world's original invitation authority couldn't be verified.".to_string())?,
+                OnlineIntent::Join { invite: None, .. } => None,
+            };
+            if worker_cancel.load(std::sync::atomic::Ordering::Relaxed) { return Err("Online preparation cancelled.".into()); }
             let (socket, punch_socket, candidates, mapping) = bind_and_gather(port)?;
-            Ok(OnlinePrep { socket, punch_socket, candidates, mapping })
+            Ok(OnlinePrep { socket, punch_socket, candidates, mapping, continuation })
         })();
         let _ = tx.send(res);
     });
-    PendingPrep { intent, started: Instant::now(), rx }
+    PendingPrep { intent, started: Instant::now(), rx, _cancel: cancel }
 }
 
 /// Ask the persona to sign the kind-30420 over this install's runtime key, and
@@ -475,6 +499,7 @@ mod tests {
         let intent = OnlineIntent::Join {
             host_runtime: [1; 32],
             bearer: Some([2; 16]),
+            invite: None,
             display_name: "Rowan".to_string(),
             relays: relays.clone(),
         };
@@ -553,6 +578,7 @@ mod tests {
             intent: OnlineIntent::Host { folder: "Ivy's Hollow".to_string() },
             started: Instant::now(),
             rx,
+            _cancel: CancelPrep::default(),
         };
         match pending.take_ready() {
             Some(Err(msg)) => assert!(msg.contains("Try again"), "{msg}"),
@@ -567,11 +593,13 @@ mod tests {
             intent: OnlineIntent::Join {
                 host_runtime: [1; 32],
                 bearer: None,
+                invite: None,
                 display_name: "Rowan".to_string(),
                 relays: Vec::new(),
             },
             started: Instant::now(),
             rx,
+            _cancel: CancelPrep::default(),
         };
         assert!(pending.take_ready().is_none());
     }
@@ -583,6 +611,7 @@ mod tests {
             intent: OnlineIntent::Host { folder: "W".to_string() },
             started: Instant::now() - (PREP_DEADLINE + Duration::from_secs(1)),
             rx,
+            _cancel: CancelPrep::default(),
         };
         match pending.take_ready() {
             Some(Err(msg)) => assert_eq!(msg, PREP_TIMED_OUT),

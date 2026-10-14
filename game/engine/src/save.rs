@@ -2637,6 +2637,9 @@ pub fn read_world_save_reporting(data: &[u8]) -> Result<(WorldSave, bool), World
             Ok((s, failed.is_some()))
         },
         Err(_) => {
+            if version.is_some_and(|v| v >= 53) {
+                return Err(WorldSaveError::Undecodable("current personal snapshot prefix is corrupt; preserved without legacy reset".into()));
+            }
             let legacy: LegacyWorldSave = bincode::deserialize(payload).map_err(|e| {
                 WorldSaveError::Undecodable(format!("deserialize (legacy fallback): {e}"))
             })?;
@@ -4101,6 +4104,7 @@ pub fn fork_world(source_folder: &str, source_display_name: &str) -> Result<Stri
     if let Some(why) = save_refusal_in(&source_dir) {
         return Err(why.to_string());
     }
+    crate::handover::live::personal_adapter::generic_copy_guard(&source_dir)?;
 
     // Load the source metadata to preserve integrity fields
     let source_meta = load_world_meta(source_folder);

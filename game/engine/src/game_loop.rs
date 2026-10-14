@@ -619,27 +619,28 @@ impl super::GameState {
             self.online_toast(crate::online_prep::PREPARING, 4);
             return;
         }
-        // Pressing "Host online" on a world that is ALREADY hosted online is
-        // not a request to start again — the socket, the router mapping and the
-        // relay subscriptions are all live. It is somebody wanting the link
-        // again, most often because the first one has been sitting in a chat
-        // for a while. Mint a fresh invite, which retires the previous bearer,
-        // and put the new link on the clipboard.
+        // Repeated hosting copies the current continued capability unchanged;
+        // an ordinary first authority may mint a fresh invitation.
         let already_hosting_this = matches!(
             (&intent, self.online_host.as_ref()),
             (OnlineIntent::Host { folder }, Some(_)) if *folder == self.world_name
         );
         if already_hosting_this {
             let now = wardrobe_now();
-            let link = self
-                .online_host
-                .as_mut()
-                .map(|h| h.mint_fresh_invite(now).to_link());
-            self.pending_clipboard = link;
-            self.online_toast(
-                "A fresh invite link is copied — the previous one no longer works.",
-                8,
-            );
+            let host = self.online_host.as_mut().expect("checked hosted world");
+            let continued = host.continuation().is_some();
+            let link = host.mint_fresh_invite(now).map(|invite| invite.to_link());
+            match link {
+                Ok(link) => {
+                    self.pending_clipboard = Some(link);
+                    self.online_toast(if continued {
+                        "The original invite link is copied."
+                    } else {
+                        "A fresh invite link is copied — the previous one no longer works."
+                    }, 8);
+                }
+                Err(why) => self.online_toast(why, 8),
+            }
             return;
         }
         let identity = match crate::runtime_identity::RuntimeIdentity::load() {
@@ -711,7 +712,7 @@ impl super::GameState {
     fn start_online_host(
         &mut self,
         folder: String,
-        prep: crate::online_prep::OnlinePrep,
+        mut prep: crate::online_prep::OnlinePrep,
     ) -> Result<(), String> {
         // Never publish an invite to a world this build refuses (Spec 02 §8.4).
         if let Some(why) = crate::save::world_open_refusal(&folder) {
@@ -732,6 +733,11 @@ impl super::GameState {
         )
         .map_err(str::to_string)?;
 
+        crate::handover::live::continuation::check_host_start(
+            &crate::save::world_dir(&folder), prep.continuation.as_ref(),
+            identity.runtime_pubkey().to_bytes(), persona, now,
+        ).map_err(|e| e.to_string())?;
+
         let host_seed = crate::save::load_world_meta(&folder).seed;
         // `require_signin` is left at the QUIC path's default (true) and the
         // allowlist is set below — an online host admits contacts and invitees,
@@ -750,8 +756,8 @@ impl super::GameState {
             crate::online_host::access_allowlist(&persona, &book, &[], &blocked),
             blocked.clone(),
         );
-        let relay =
-            crate::rendezvous::relay_client::MultiRelay::start(settings.online_relays.clone());
+        let host_relays = prep.continuation.as_ref().map_or_else(|| settings.online_relays.clone(), |resolved| resolved.root.relays().to_vec());
+        let relay = crate::rendezvous::relay_client::MultiRelay::start(host_relays.clone());
         let mut host = crate::online_host::OnlineHost::start(
             identity,
             persona,
@@ -759,7 +765,7 @@ impl super::GameState {
             prep.punch_socket,
             prep.candidates,
             folder.clone(),
-            settings.online_relays.clone(),
+            host_relays,
             book.clone(),
             now,
         )
@@ -773,8 +779,10 @@ impl super::GameState {
         // Seed the Signet blocks before the first poll, so a blocked persona
         // holding the bearer is refused from the very first offer (D8).
         host.set_book(book, blocked);
+        if let Some(resolved) = prep.continuation.take() { host.install_continuation(resolved, now)?; }
+        host.install_retained(&crate::save::world_dir(&folder))?;
 
-        let link = host.invite_link();
+        let link = host.invite_link(now).map_err(str::to_string)?;
         let warn = !crate::nat::candidates::reachable_beyond_lan(host.candidates());
         self.hosted_server = Some(server);
         // `replace`, not assignment: a previous host would be dropped here, and
@@ -849,7 +857,7 @@ impl super::GameState {
         // invite (see `online_prep::join_relays`).
         let relays = crate::online_prep::join_relays(&invite_relays, &settings.online_relays);
         let relay = crate::rendezvous::relay_client::MultiRelay::start(relays);
-        let join = crate::online_join::OnlineJoin::start(
+        let join = crate::online_join::OnlineJoin::start_resolved(
             identity,
             persona,
             Box::new(relay),
@@ -858,6 +866,7 @@ impl super::GameState {
             host_runtime,
             bearer,
             display_name,
+            prep.continuation,
             now,
         )
         .map_err(|(e, relay)| {
@@ -902,6 +911,7 @@ impl super::GameState {
                             bearer,
                             display_name,
                             relays,
+                            invite: _,
                         } => self
                             .start_online_join(host_runtime, bearer, display_name, relays, prep),
                     };
@@ -971,6 +981,7 @@ impl super::GameState {
                 let host_name = join.display_name().to_string();
                 let contact = join.host_contact();
                 let host_runtime = join.host_runtime();
+                let continuation = join.continuation().cloned();
                 let transport = join.take_transport();
                 // Dropping an `OnlineJoin` drops its `MultiRelay`, whose `Drop`
                 // waits up to half a second for the relay worker to stop. That
@@ -1020,6 +1031,7 @@ impl super::GameState {
                         // The host this join verified: a world handover it
                         // later proposes is checked against exactly this.
                         self.set_joined_host(host_persona, host_runtime);
+                        self.joined_continuation = continuation;
                         self.online_toast(
                             crate::friends_ui::joined_toast(&world_name, &host_name),
                             6,
@@ -1111,7 +1123,7 @@ impl super::GameState {
             self.show_online_panel = false;
             return;
         };
-        let link = host.invite_link();
+        let link = host.invite_link(wardrobe_now());
         let relays = host.relays_connected();
         let dropped = host.relays_dropped();
         let warning = (!crate::nat::candidates::reachable_beyond_lan(host.candidates()))
@@ -1148,7 +1160,7 @@ impl super::GameState {
             })
             .collect();
         let view = crate::friends_ui::OnlinePanelView {
-            invite_link: &link,
+            invite_link: link.as_deref().map_err(|why| *why),
             candidates: host.candidates(),
             relays,
             dropped,
@@ -9356,6 +9368,7 @@ impl super::GameState {
                                 // A contact needs no bearer: the host admits
                                 // them because of who they are.
                                 bearer: None,
+                                invite: None,
                                 display_name,
                                 // No invite, so no relay list came with it —
                                 // this machine's configured set stands.
@@ -9439,6 +9452,7 @@ impl super::GameState {
                             self.start_online_prep(crate::online_prep::OnlineIntent::Join {
                                 host_runtime: inv.host_runtime,
                                 bearer: Some(inv.bearer),
+                                invite: Some(Box::new(inv.clone())),
                                 display_name,
                                 // Where the host is actually subscribed. Our own
                                 // relay settings would lose the handshake
@@ -21167,7 +21181,7 @@ impl super::GameState {
                                         let summary = crate::friends_ui::reachability_summary(
                                             h.candidates(),
                                         );
-                                        let link = h.invite_link();
+                                        let link = h.invite_link(wardrobe_now()).unwrap_or_else(str::to_string);
                                         self.chat.push_log(crate::commands::ChatLine::system(
                                             summary,
                                             self.tick_counter,
@@ -21195,11 +21209,13 @@ impl super::GameState {
                             {
                                 match self.online_host.as_ref() {
                                     Some(h) => {
-                                        self.pending_clipboard = Some(h.invite_link());
-                                        self.chat.push_log(crate::commands::ChatLine::success(
-                                            "Invite link copied.",
-                                            self.tick_counter,
-                                        ));
+                                        match h.invite_link(wardrobe_now()) {
+                                            Ok(link) => {
+                                                self.pending_clipboard = Some(link);
+                                                self.chat.push_log(crate::commands::ChatLine::success("Invite link copied.", self.tick_counter));
+                                            }
+                                            Err(why) => self.chat.push_log(crate::commands::ChatLine::system(why, self.tick_counter)),
+                                        }
                                     }
                                     None => self.chat.push_log(crate::commands::ChatLine::system(
                                         "This world isn\u{2019}t being hosted online.",

@@ -250,7 +250,7 @@ impl EguiIntegration {
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
         screen_descriptor: egui_wgpu::ScreenDescriptor,
-        run_ui: impl FnOnce(&egui::Context),
+        run_ui: impl FnOnce(&egui::Context, &Self),
     ) {
         let ppp = screen_descriptor.pixels_per_point;
         let size_pts = egui::vec2(
@@ -262,7 +262,7 @@ impl EguiIntegration {
             ..Default::default()
         };
         self.ctx.begin_pass(raw_input);
-        run_ui(&self.ctx);
+        run_ui(&self.ctx, self);
         let full_output = self.ctx.end_pass();
         let paint_jobs = self.ctx.tessellate(full_output.shapes, full_output.pixels_per_point);
         for (id, delta) in &full_output.textures_delta.set {
@@ -372,7 +372,7 @@ fn create_egui_texture_view(
 }
 
 /// Share the Copperline treatment between the live game and headless previews.
-fn configure_style(ctx: &egui::Context) {
+pub(crate) fn configure_style(ctx: &egui::Context) {
     let mut style = egui::Style { visuals: egui::Visuals::dark(), ..Default::default() };
     style.visuals.window_corner_radius = egui::CornerRadius::same(8);
     style.visuals.window_fill = crate::brand::SURFACE;

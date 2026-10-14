@@ -37,10 +37,7 @@ impl HostedServer {
             &protocol::PersonalSyncPacket::Snapshot(snapshot.clone()),
         );
         prepared.commit(sp, self.server.tick_counter);
-        sp.personal_delivery.started_tick = self.server.tick_counter;
-        sp.personal_delivery.sent_tick = self.server.tick_counter;
-        sp.personal_delivery.revision = revision;
-        sp.personal_delivery.pending = Some(snapshot);
+        sp.personal_delivery.issue(snapshot, self.server.tick_counter);
         self.send_to_joined_slot(i, &packet);
         Ok(())
     }
@@ -59,7 +56,11 @@ impl HostedServer {
         }
         // Superseded/dead/old attaches cannot release the current tuple.
         // Exact repeats of the last applied tuple are harmless.
-        if !sp.personal_delivery.accept(ack) {
+        if sp.personal_delivery.accept(ack) {
+            // This exact snapshot tuple proves its real no-window-change
+            // fence applied; an initial tuple advances only its own prefix.
+            self.apply_window_events(i, ack.window_event);
+        } else {
             let current = sp.action_frontier.as_ref().map(|f| f.header(0, 0).session);
             if current != Some(ack.session)
                 || ack.life > sp.respawns
@@ -117,3 +118,7 @@ impl HostedServer {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "personal_tests.rs"]
+mod tests;

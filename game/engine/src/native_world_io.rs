@@ -51,6 +51,7 @@ fn read_exhibit_images_from_disk(name: &str, save: &WorldSave) -> Vec<ExhibitIma
 /// produces, so files round-trip freely between web and native builds.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn export_world_native(name: &str) -> Result<Vec<u8>, String> {
+    crate::handover::live::personal_adapter::generic_copy_guard(&crate::save::world_dir(name))?;
     let meta = load_world_meta(name);
     let mut scratch = World::new();
     let (save, _loaded_chunks) = load_world(name, &mut scratch)?;

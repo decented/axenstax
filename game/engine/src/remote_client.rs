@@ -1910,10 +1910,17 @@ impl RemoteClient {
         }
     }
 
-    /// World handover: lend this client's live connection to the independent
-    /// control session. What remains is closed, so leaving the joined world
-    /// (`disconnect`, drop) cannot touch the link, and the session isn't
-    /// treated as over while parked.
+    /// Consent cannot park unsent edits/requests or unretired authority. Keep
+    /// normal polling/flushing alive until this bounded frontier settles.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn handover_authority_settled(&self) -> bool {
+        self.personal_ready() && !self.has_carry_over() && !self.has_queued_requests()
+            && self.action_journal.as_ref().is_none_or(|journal| journal.actions().next().is_none())
+            && self.queued_action_receipts == 0
+    }
+
+    /// World handover lends this client's connection to the control session.
+    /// Leaving the joined world cannot close that link while it is parked.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn park_transport(&mut self) -> Box<dyn ClientTransport> {
         self.parked = true;

@@ -126,6 +126,7 @@ pub struct OnlineJoin {
     host_contact: Option<Contact>,
     transport: Option<Box<dyn ClientTransport>>,
     phase: Phase,
+    continuation: Option<crate::handover::live::continuation::Resolved>,
 }
 
 impl OnlineJoin {
@@ -135,6 +136,7 @@ impl OnlineJoin {
     /// `host_runtime` the key from the invite (`k=`) or from the contact's
     /// stored `runtime_pubkey` — it is the only key an answer will be accepted
     /// from.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)] // every one is a distinct dependency
     pub fn start(
         identity: RuntimeIdentity,
@@ -147,6 +149,25 @@ impl OnlineJoin {
         display_name: String,
         now: u64,
     ) -> Result<OnlineJoin, crate::online_host::StartFailed> {
+        Self::start_resolved(identity, persona, relay, socket, candidates, host_runtime, bearer, display_name, None, now)
+    }
+
+    #[allow(clippy::too_many_arguments)] // separate identity, transport and checked route
+    pub(crate) fn start_resolved(
+        identity: RuntimeIdentity, persona: [u8; 32], relay: Box<dyn RendezvousRelay>,
+        socket: UdpSocket, candidates: Vec<Candidate>, host_runtime: [u8; 32],
+        bearer: Option<[u8; 16]>, display_name: String,
+        continuation: Option<crate::handover::live::continuation::Resolved>, now: u64,
+    ) -> Result<OnlineJoin, crate::online_host::StartFailed> {
+        let (host_runtime, bearer) = if let Some(resolved) = &continuation {
+            let authority = match resolved.authority() { Ok(authority) => authority, Err(e) => return Err((e.to_string(), relay)) };
+            if now > resolved.expiry() { return Err(("The invitation's authority has expired.".into(), relay)); }
+            (authority.runtime(), Some(*resolved.bearer.expose()))
+        } else { (host_runtime, bearer) };
+        let handover = match continuation.as_ref().map(|resolved| resolved.admission()).transpose() {
+            Ok(context) => context,
+            Err(error) => return Err((error.to_string(), relay)),
+        };
         // Everything that can be rejected out of hand goes first, so a bad
         // argument cannot leave a subscription behind on the relay set. Every
         // early return hands the relay BACK rather than dropping it here — see
@@ -183,6 +204,7 @@ impl OnlineJoin {
             protocol: crate::protocol::PROTOCOL_VERSION,
             candidates,
             sent_at: now,
+            handover,
         };
         let keys = identity.keys().clone();
         // Sealing is pure CPU (a NIP-44 encrypt and a signature) and only
@@ -212,6 +234,7 @@ impl OnlineJoin {
             host_contact: None,
             transport: None,
             phase: Phase::Waiting,
+            continuation,
         })
     }
 
@@ -243,6 +266,10 @@ impl OnlineJoin {
     /// `k=` or the contact's attested runtime).
     pub fn host_runtime(&self) -> [u8; 32] {
         self.host_runtime.to_bytes()
+    }
+
+    pub(crate) fn continuation(&self) -> Option<&crate::handover::live::continuation::Resolved> {
+        self.continuation.as_ref()
     }
 
     pub fn host_contact(&self) -> Option<Contact> {
@@ -328,6 +355,11 @@ impl OnlineJoin {
 
     fn on_answer(&mut self, verified: VerifiedAnswer, now: u64) -> JoinStep {
         let answer = verified.answer;
+        if let Some(resolved) = &self.continuation {
+            let valid = resolved.authority().is_ok_and(|authority| authority.persona() == verified.persona)
+                && resolved.admission().is_ok_and(|expected| answer.handover == Some(expected));
+            if !valid { return self.fail(JoinFailure::NoAnswer); }
+        }
         if !answer.accepted {
             let failure = match answer.reason.as_deref().and_then(refusal_from_wire) {
                 Some(Refusal::ProtocolMismatch) => JoinFailure::ProtocolMismatch,
@@ -489,6 +521,7 @@ mod tests {
                 },
                 world_name: "Ivy's Hollow".to_string(),
                 sent_at: NOW,
+                handover: None,
             }
         }
     }

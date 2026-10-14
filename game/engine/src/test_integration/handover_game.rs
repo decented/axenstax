@@ -180,6 +180,7 @@ fn proposed(tag: &str, dir: &Tmp) -> (HeadlessGame, Far, usize) {
         scratch: dir.0.join("scratch"),
         bearer: bearer(),
         attestation: source_attestation(),
+        continuation: None,
     };
     assert!(hg.state.begin_handover_with((0, 0, key(SOURCE_PERSONA)), env(), now()).is_err(), "the host's own seat");
     // L6: a row drawn for an earlier attach of that seat starts nothing.
@@ -821,14 +822,14 @@ fn game_harness_handover_disclosed_abort_rotation_keeps_the_root_and_retires_the
     )
     .map_err(|(e, _)| e)
     .unwrap();
-    let (old_link, root) = (host.invite_link(), host.root_context(now()).unwrap().digest());
+    let (old_link, root) = (host.invite_link(now()).unwrap(), host.root_context(now()).unwrap().digest());
     hg.state.online_host = Some(host);
     hg.state.rotate_handover_invite();
     let host = hg.state.online_host.as_ref().unwrap();
     let stranger = [0x44; 32];
-    assert_ne!(host.invite_link(), old_link, "the invitation wasn't rotated");
+    assert_ne!(host.invite_link(now()).unwrap(), old_link, "the invitation wasn't rotated");
     assert!(matches!(host.admission_for_link(&stranger, &old_link, now()), Admission::Refuse(_)), "the old invite still admits");
-    assert!(matches!(host.admission_for_link(&stranger, &host.invite_link(), now()), Admission::Accept(_)), "the new invite doesn't admit");
+    assert!(matches!(host.admission_for_link(&stranger, &host.invite_link(now()).unwrap(), now()), Admission::Accept(_)), "the new invite doesn't admit");
     assert_eq!(host.root_context(now()).unwrap().digest(), root, "rotation changed the root");
 }
 
@@ -1267,7 +1268,7 @@ fn cancel_after_disclosure_rotates_the_invite(tag: &str, at: SourceStage) {
     )
     .map_err(|(e, _)| e)
     .unwrap();
-    let (old_bearer, old_link, root) = (host.live_bearer(now()), host.invite_link(), host.root_context(now()).unwrap().digest());
+    let (old_bearer, old_link, root) = (host.live_bearer(now()), host.invite_link(now()).unwrap(), host.root_context(now()).unwrap().digest());
     assert!(old_bearer.is_some(), "no live invitation to rotate");
     hg.state.online_host = Some(host);
     let started = std::time::Instant::now();
@@ -1303,7 +1304,7 @@ fn cancel_after_disclosure_rotates_the_invite(tag: &str, at: SourceStage) {
         "the old invite still admits after Cancel in {at:?}"
     );
     assert!(
-        matches!(host.admission_for_link(&stranger, &host.invite_link(), now()), Admission::Accept(_)),
+        matches!(host.admission_for_link(&stranger, &host.invite_link(now()).unwrap(), now()), Admission::Accept(_)),
         "the new invite doesn't admit after Cancel in {at:?}"
     );
     assert_eq!(host.root_context(now()).unwrap().digest(), root, "Cancel in {at:?} changed the root context");

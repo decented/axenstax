@@ -67,7 +67,7 @@ impl SourceSession {
         let core = self.core.clone().ok_or(Refusal("No certificate."))?;
         let ready = self.ready.clone().ok_or(Refusal("No Ready."))?;
         let successor = self.recipient_attestation.clone().ok_or(Refusal("No recipient attestation."))?;
-        let keys = crypto::recipient(&self.cfg.root, self.cfg.bearer.expose(), None).map_err(|_| unsealed.clone())?;
+        let keys = crypto::recipient(&self.cfg.root, self.cfg.bearer.expose(), (core.epoch > 1).then_some(core.predecessor)).map_err(|_| unsealed.clone())?;
         let seal = Seal {
             source: &self.cfg.runtime,
             recipient: &keys,

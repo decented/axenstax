@@ -4,7 +4,7 @@
 **Date**: 2026-03-03
 **Depends on**: ADR-002 (Tech Stack), Platform Overview (Visual Strategy)
 
-> **AS-BUILT (audit 2026-10-04).** The following sections are **design targets, not shipped**: §4.3 smooth lighting, §4.4 ambient occlusion, §6 the procedural sky (as built, the sky is a solid clear colour interpolated by `camera::sky_color(brightness)`: no sky quad, sun/moon, stars or clouds), and §9 post-processing and bloom (no HDR `Rgba16Float` target). The `smooth_lighting` graphics setting is stored so presets round-trip, but **it is not wired into the shader and does nothing** (`graphics_settings.rs`, "not yet wired into the shader"). Light is per-face block/sky light (`shader.wgsl`).
+> **AS-BUILT (audit 2026-10-04).** The following sections are **design targets, not shipped**: §4.3 smooth lighting, §4.4 ambient occlusion, §6 the full procedural sky (as built, a camera-bound triangle grades the live horizon colour into a deeper overhead blue; no sun/moon discs, stars or clouds), and §9 post-processing and bloom (no HDR `Rgba16Float` target). The `smooth_lighting` graphics setting is stored so presets round-trip, but **it is not wired into the shader and does nothing** (`graphics_settings.rs`, "not yet wired into the shader"). Light is per-face block/sky light (`shader.wgsl`).
 
 ---
 
@@ -168,7 +168,7 @@ For each block that has a visible model (air and invisible blocks are skipped), 
 
 1. **Interior face culling.** If the adjacent block in that direction is a fully opaque solid block, do not emit the face.
 2. **Chunk boundary faces.** If the adjacent block is in a different sub-chunk, load the neighbouring sub-chunk's block data to perform the same test. If the neighbour sub-chunk is not loaded, emit the face (assume visible).
-3. **Transparent block handling.** A solid + `transparent` block emits faces in the **transparent-solid mesh pass** (`mesh.rs::greedy_transparent_face`, #131), culling a face only where the neighbour is (1) a fully-opaque solid [hidden behind it] or (3) the **same** block type [glass-next-to-glass merge]. So glass shows against air / water / a different transparent type, but not against stone or more of its own kind. That geometry rides the `ChunkMeshes.transparent` bucket and draws in the alpha-blended, depth-read-only transparent pass (alongside water, §3) via the `transparent_pipeline` + `fs_transparent` shader (texture's own alpha, no water tint). The opaque greedy pass still `continue`s past `is_transparent` cells, and the non-solid small-cube pass still skips solids — the transparent pass is what catches them.
+3. **Transparent block handling.** A solid + `transparent` block emits faces in the **transparent-solid mesh pass** (`mesh.rs::greedy_transparent_face`, #131), culling a face only where the neighbour is (1) a fully-opaque solid [hidden behind it] or (3) the **same** block type [glass-next-to-glass merge]. So glass shows against air / water / a different transparent type, but not against stone or more of its own kind. That geometry rides the `ChunkMeshes.transparent` bucket. Its fully opaque sampled texels first write depth without colour (`fs_solid_depth`, alpha ≥0.9999); cutout holes and partly translucent texels discard in that prepass. Its alpha-blended colour pass then uses `LessEqual` against that depth (`transparent_pipeline` + `fs_transparent`, texture's own alpha, no water tint), before water (§3). The same paired pipelines run in live and headless worlds. This fixes distant water painting over opaque leaf pixels while keeping holes, translucent glass and nearer water visible. `fs_transparent` also uses the same combined-light factor as terrain/plants: `min(max(max(block, sky × daylight), 0.08), 1)`. Its separate sky vertex attribute had been emitted correctly but ignored, clamping un-torched noon foliage to 0.08. Torch light remains unscaled by daylight; entity/avatar lighting is unaffected. Actual matched opaque/leaf GPU references cover day, night and torch-lit night. The additional depth draws count towards the actual draw-call/cull statistics; partial-alpha face ordering remains a separate rendering limit. The opaque greedy pass still `continue`s past `is_transparent` cells, and the non-solid small-cube pass still skips solids — the transparent pass is what catches them.
 
 > **History (#130 → #131, 2026-06-22).** Before #131 there was **no pass for solid + transparent blocks at all** — the opaque greedy pass skipped `is_transparent` and the small-cube pass skipped solids, so such blocks emitted no geometry and rendered **invisible while still colliding**. This bit the five non-oak leaf species (`transparent: true` → invisible "leaves you bash through"); #130's stopgap made all leaves `transparent: false` (opaque) so they render via the greedy pass. **#131** built the transparent-solid pass above, which fixes the latent **glass** invisibility (glass = solid + transparent, alpha texture → renders see-through). **#131 fancy-leaf flip (shipped):** all six leaf species are back to `transparent: true` (solid, so still walkable-on) and their textures carry ~`LEAF_CUTOUT_PCT`% (20%) **cutout-alpha holes** (`texture_gen::gen_species_leaves`), so canopies render see-through via `fs_transparent`'s `alpha < 0.04` discard. The third-person camera passes through them automatically — `camera_occlusion::default_for(solid, transparent)` returns `PassThrough` for a transparent solid, no per-block exception needed. The pass culls leaf faces against same-type neighbours (rule 3), so a dense canopy shows its holed outer shell rather than every internal leaf face; a layered (no-same-type-cull) leaf look + cutout-density tuning are open feel-tweaks for an Axo playtest.
 
@@ -877,6 +877,26 @@ native-only); a sub-rAF software cap on web is a later refinement.
 
 ## 6. Sky & Atmosphere
 
+**As built — in-world polish (2026-10-13):** the opaque world pass first draws
+one oversized sky triangle per viewport, with the same scaled viewport and
+scissor as terrain. It reads only the existing camera binding, writes colour,
+and never writes depth. The headless world pass uses the same pipeline after
+its clear and before terrain. The gradient follows world altitude, reconstructed
+from perspective view-projection rows, so looking around, third-person cameras
+and split-screen do not pin the horizon to the screen. Billboard axes are not
+used because some existing preview cameras leave them at their defaults.
+`Renderer::update_camera` copies the live linear sky horizon RGB into
+`CameraUniform.params.yzw` without changing the uniform layout. Land fog
+(opaque, plants, avatars, paintings and transparent solids) reads the same
+colour, including weather and lightning; water/underwater fog keeps its existing
+colour and range. Zero supplied RGB falls back to the existing day/night formula
+for standalone uniforms. Sky and land fog use the same user brightness control;
+near-white flash colours suppress the blue gradient. The sky/block vertex channels,
+night floor and opaque/entity/avatar lighting remain unchanged. Solid transparent
+surfaces now consume both existing light channels correctly (§2.2).
+This adds no sky textures, HDR targets, shadows, celestial bodies or clouds.
+
+
 ### 6.1 Procedural Sky
 
 The sky is rendered as a full-screen quad behind all world geometry (using reverse-Z depth, the sky quad is placed at z = 0.0 in clip space). No skybox texture is used; the sky is fully procedural.
@@ -1275,6 +1295,31 @@ expanded the card grid too. Card content subtracts the frame's actual padding
 and stroke from its column width, so thicker selected outlines also stay within
 the column. Existing world actions, capability gates and responsive side-column
 breakpoints retain their behaviour.
+
+Native in-world previews reuse `--screenshot [path]`. Optional `--hud` paints
+`hud_ui::draw_hud` with the same managed block icons and survival layout as live
+play; `--time <0..23999>` selects the existing sun/sky clock, and `--width` /
+`--height` select a bounded viewport (320–3840 by 240–2160 pixels). The default
+world-only preview retains its original camera, dimensions and sun. World and
+menu captures share the existing egui paint and PNG readback paths; adding the
+HUD loads the world colour target instead of clearing it to a menu backdrop.
+These developer previews do not simulate play or prove input behaviour.
+The optional HUD registers the live block atlas and settles egui's initial
+invisible Area sizing pass with capture-only fades disabled before saving.
+
+The survival HUD paints health as two convex heart halves and hunger as outlined
+drumsticks with separate bones, inside its existing scaled icon bounds. Full,
+half and empty states retain the existing red/brown gameplay colours. Hotbar
+counts get a dark backplate, and the held-item name is centred from measured
+text rather than an approximate character width. The free-slot/arrow label is
+positioned from measured text widths/heights inside the viewport; shrink-to-fit
+Areas with nested right-to-left layouts previously clipped the narrow label. The measured text-boundary regression covers narrow/desktop views with and
+without arrows. Actual GPU depth controls cover opaque foliage, cutout holes,
+translucent glass and water in front; they are ignored by the ordinary CPU-only
+suite because they require the full block texture array and run with the local
+`--ignored game_harness` gate. Slot, touch-target, status-row
+and player input geometry remain unchanged. Native `--shot-3p` sets and restores
+its actual night sky colour around the existing avatar night-dimming control.
 
 The shared surface tones are:
 

@@ -11,7 +11,7 @@ struct CameraUniform {
     // pop-in bug). xy = terrain fog (start, end); zw = water fog (start, end).
     // Fog "off" pushes all four very far so nothing fades.
     fog: vec4<f32>,
-    // x = user brightness control (graphics setting). yzw reserved.
+    // x = user brightness control; yzw = live sky horizon RGB.
     params: vec4<f32>,
     // Particle billboarding (2026-07-05): the camera's world-space right/up
     // (xyz; w unused). Per-player, so split-screen billboards face each eye.
@@ -32,6 +32,48 @@ fn apply_user_brightness(c: vec3<f32>) -> vec3<f32> {
     let x = camera.params.x;
     let inv = select(1.0, 1.0 / x, x > 0.001);
     return pow(max(c, vec3<f32>(0.0)), vec3<f32>(inv));
+}
+
+// The renderer supplies the live horizon colour, including weather/lightning.
+// Standalone uniforms with no supplied colour retain the day/night fallback.
+fn sky_horizon() -> vec3<f32> {
+    let b = camera.sun_dir.w;
+    let fallback = vec3<f32>(0.01 + 0.52 * b, 0.01 + 0.71 * b, 0.05 + 0.85 * b);
+    return select(fallback, camera.params.yzw, any(camera.params.yzw != vec3<f32>(0.0)));
+}
+
+struct SkyOutput {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) ndc: vec2<f32>,
+};
+
+@vertex
+fn vs_sky(@builtin(vertex_index) vertex: u32) -> SkyOutput {
+    var out: SkyOutput;
+    let p = vec2<f32>(f32((vertex << 1u) & 2u), f32(vertex & 2u)) * 2.0 - 1.0;
+    out.clip = vec4<f32>(p, 1.0, 1.0);
+    out.ndc = p;
+    return out;
+}
+
+@fragment
+fn fs_sky(in: SkyOutput) -> @location(0) vec4<f32> {
+    // Perspective VP rows encode scaled right/up and unit forward. Recover
+    // the world ray without trusting billboard axes or adding a matrix upload.
+    let m = camera.view_proj;
+    let right = vec3<f32>(m[0][0], m[1][0], m[2][0]);
+    let up = vec3<f32>(m[0][1], m[1][1], m[2][1]);
+    let forward = vec3<f32>(m[0][3], m[1][3], m[2][3]);
+    let ray = forward + in.ndc.x * right / max(dot(right, right), 0.0001)
+                      + in.ndc.y * up / max(dot(up, up), 0.0001);
+    let altitude = ray.y / max(length(ray), 0.0001);
+    let horizon = sky_horizon();
+    // Keep the horizon continuous with land fog, with a deeper blue overhead.
+    // Near-white lightning colours remain white throughout the sky.
+    let white = smoothstep(0.8, 0.98, min(horizon.r, min(horizon.g, horizon.b)));
+    let zenith = horizon * mix(vec3<f32>(0.35, 0.55, 0.86), vec3<f32>(1.0), white);
+    let colour = mix(horizon, zenith, smoothstep(0.0, 0.85, altitude));
+    return vec4<f32>(apply_user_brightness(colour), 1.0);
 }
 
 @group(1) @binding(0)
@@ -194,7 +236,7 @@ fn fs_plant(in: VertexOutput) -> @location(0) vec4<f32> {
     } else {
         fog_start = camera.fog.x;
         fog_end = camera.fog.y;
-        fog_color = vec3<f32>(0.01 + 0.52 * brightness, 0.01 + 0.71 * brightness, 0.05 + 0.85 * brightness);
+        fog_color = sky_horizon();
     }
     let fog_factor = clamp((dist - fog_start) / (fog_end - fog_start), 0.0, 1.0);
     var final_color = mix(lit, fog_color, fog_factor);
@@ -248,7 +290,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         fog_start = camera.fog.x;
         fog_end = camera.fog.y;
         // Fog matches sky colour (transitions with day/night)
-        fog_color = vec3<f32>(0.01 + 0.52 * brightness, 0.01 + 0.71 * brightness, 0.05 + 0.85 * brightness);
+        fog_color = sky_horizon();
     }
     let fog_factor = clamp((dist - fog_start) / (fog_end - fog_start), 0.0, 1.0);
 
@@ -332,7 +374,7 @@ fn fs_avatar(in: VertexOutput) -> @location(0) vec4<f32> {
         fog_start = camera.fog.x;
         fog_end = camera.fog.y;
         // Fog matches sky colour (transitions with day/night)
-        fog_color = vec3<f32>(0.01 + 0.52 * brightness, 0.01 + 0.71 * brightness, 0.05 + 0.85 * brightness);
+        fog_color = sky_horizon();
     }
     let fog_factor = clamp((dist - fog_start) / (fog_end - fog_start), 0.0, 1.0);
 
@@ -390,7 +432,7 @@ fn fs_painting(in: VertexOutput) -> @location(0) vec4<f32> {
     let dist = distance(in.world_pos, camera.camera_pos.xyz);
     let fog_start = camera.fog.x;
     let fog_end = camera.fog.y;
-    let fog_color = vec3<f32>(0.01 + 0.52 * brightness, 0.01 + 0.71 * brightness, 0.05 + 0.85 * brightness);
+    let fog_color = sky_horizon();
     let fog_factor = clamp((dist - fog_start) / (fog_end - fog_start), 0.0, 1.0);
     let final_color = mix(lit, fog_color, fog_factor);
     return vec4<f32>(apply_user_brightness(final_color), 1.0);
@@ -416,7 +458,7 @@ fn fs_painting_alpha(in: VertexOutput) -> @location(0) vec4<f32> {
     let dist = distance(in.world_pos, camera.camera_pos.xyz);
     let fog_start = camera.fog.x;
     let fog_end = camera.fog.y;
-    let fog_color = vec3<f32>(0.01 + 0.52 * brightness, 0.01 + 0.71 * brightness, 0.05 + 0.85 * brightness);
+    let fog_color = sky_horizon();
     let fog_factor = clamp((dist - fog_start) / (fog_end - fog_start), 0.0, 1.0);
     let final_color = mix(lit, fog_color, fog_factor);
     return vec4<f32>(apply_user_brightness(final_color), tex_color.a);
@@ -443,6 +485,15 @@ fn fs_water(in: VertexOutput) -> @location(0) vec4<f32> {
     return vec4<f32>(apply_user_brightness(final_color), 0.65);
 }
 
+// Only fully opaque texels write depth. Holes and partly translucent glass
+// retain the previous terrain depth, so water behind them stays visible.
+@fragment
+fn fs_solid_depth(in: VertexOutput) -> @location(0) vec4<f32> {
+    let alpha = textureSample(block_textures, block_sampler, in.uv, i32(in.tex_layer)).a;
+    if (alpha < 0.9999) { discard; }
+    return vec4<f32>(0.0);
+}
+
 // Transparent-solid fragment (#131) — glass + other solid+transparent blocks.
 // Same lighting + fog as fs_main, but it OUTPUTS THE TEXTURE'S OWN ALPHA (so
 // glass's translucent edges read as glass) and runs in the alpha-blended,
@@ -459,13 +510,16 @@ fn fs_transparent(in: VertexOutput) -> @location(0) vec4<f32> {
     let sun_color = vec3<f32>(1.0, 0.98, 0.9) * brightness;
     let ambient = vec3<f32>(0.12, 0.13, 0.18) + vec3<f32>(0.28, 0.29, 0.32) * brightness;
     let ndotl = max(dot(in.normal, sun_dir), 0.0);
-    let block_light = max(in.light, 0.08);
+    // Solid transparent surfaces receive the same two channels as terrain.
+    // Scale sky by daylight while keeping torch/block light independent.
+    let combined = max(in.light, in.sky_light * brightness);
+    let block_light = min(max(combined, 0.08), 1.0);
     let lit = tex_color.rgb * (ambient + sun_color * ndotl * 0.6) * block_light;
 
     let dist = distance(in.world_pos, camera.camera_pos.xyz);
     let fog_start = camera.fog.x;
     let fog_end = camera.fog.y;
-    let fog_color = vec3<f32>(0.01 + 0.52 * brightness, 0.01 + 0.71 * brightness, 0.05 + 0.85 * brightness);
+    let fog_color = sky_horizon();
     let fog_factor = clamp((dist - fog_start) / (fog_end - fog_start), 0.0, 1.0);
 
     let final_color = mix(lit, fog_color, fog_factor);

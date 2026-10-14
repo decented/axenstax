@@ -124,6 +124,7 @@ pub struct Proposal {
     challenge: Id,
     root: RootContext,
     lineage: Id,
+    authority: Authority,
 }
 
 /// The player's explicit consent to exactly this proposal. Only the consent
@@ -295,12 +296,20 @@ impl RecipientSession {
     /// is shown: the invitation it names must be the host this client
     /// verified (runtime and persona), the npub it shows must be that
     /// persona's, and its lineage the one that invitation derives.
+    #[cfg(test)]
     pub fn propose(
         payload: &[u8],
         host: JoinedHost,
         identity: RecipientIdentity,
         imports: PathBuf,
         now: u64,
+    ) -> Result<Self, Refusal> {
+        Self::propose_with_authority(payload, host, identity, imports, now, None)
+    }
+
+    pub(crate) fn propose_with_authority(
+        payload: &[u8], host: JoinedHost, identity: RecipientIdentity, imports: PathBuf, now: u64,
+        continuation: Option<&super::continuation::Resolved>,
     ) -> Result<Self, Refusal> {
         let Ok(Frame::Propose {
             transfer, world_name, source_npub, challenge, root_runtime, root_persona, root_expiry, root_relays, lineage,
@@ -313,7 +322,12 @@ impl RecipientSession {
         if challenge == [0; 16] || transfer == [0; 16] {
             return Err(Refusal("The host's proposal was malformed."));
         }
-        if root.runtime() != host.runtime || root.persona() != host.persona || source_npub != npub(host.persona) {
+        let authority = match continuation {
+            Some(resolved) if resolved.root == root && now <= resolved.expiry() => resolved.authority(),
+            Some(_) => return Err(Refusal("The proposal changed the original invitation authority.")),
+            None => Authority::root(&root, lineage),
+        }.map_err(|_| Refusal("The original invitation authority didn't verify."))?;
+        if authority.runtime() != host.runtime || authority.persona() != host.persona || source_npub != npub(host.persona) {
             return Err(Refusal("This handover doesn't come from the host you joined."));
         }
         if lineage != root_lineage(&root) {
@@ -336,7 +350,7 @@ impl RecipientSession {
             persona,
             imports,
             markers: None,
-            proposal: Proposal { transfer, world_name, source_npub, challenge, root, lineage },
+            proposal: Proposal { transfer, world_name, source_npub, challenge, root, lineage, authority },
             challenge: [0; 16],
             acceptance: String::new(),
             socket: None,
@@ -870,7 +884,7 @@ impl RecipientSession {
         let p = &self.proposal;
         let core = self.core.as_ref().ok_or(Refusal("No certificate."))?;
         let bearer = self.bearer.as_ref().ok_or(Refusal("The host sent its handover record before its invitation."))?;
-        let keys = crypto::recipient(&p.root, bearer.expose(), None).map_err(|_| wrong.clone())?;
+        let keys = crypto::recipient(&p.root, bearer.expose(), (core.epoch > 1).then_some(core.predecessor)).map_err(|_| wrong.clone())?;
         let ev = Event::from_json(event).map_err(|_| Refusal("The host's handover record was malformed."))?;
         let route = Route { author: core.source_runtime, recipient: keys.public_key().to_bytes(), until: p.root.expiry() };
         if !route.matches(&ev) {
@@ -945,13 +959,12 @@ impl RecipientSession {
     fn on_offer(&mut self, core: &[u8], offer: &[u8], agreement: &str, now: u64) -> Result<(), Refusal> {
         let p = &self.proposal;
         let core = Core::decode(core).map_err(|_| Refusal("The host's certificate was malformed."))?;
-        // First hop only at this base: the invitation's own runtime and
-        // persona (already checked against the host this client verified)
-        // offer. Later hops need the verified chain (not wired yet).
-        if core.epoch != 1 || core.source_runtime != p.root.runtime() || core.source_persona != p.root.persona() {
-            return Err(Refusal("This handover needs a verified invitation chain, which this version can't follow yet."));
+        if p.authority.epoch().checked_add(1) != Some(core.epoch)
+            || core.source_runtime != p.authority.runtime() || core.source_persona != p.authority.persona()
+            || core.predecessor != p.authority.committed()
+        {
+            return Err(Refusal("This handover doesn't continue the invitation authority you verified."));
         }
-        let authority = Authority::root(&p.root, p.lineage).map_err(|_| Refusal("The world's lineage is missing."))?;
         let me = self.identity.runtime.public_key().to_bytes();
         let admitted = AdmittedManifest::verify(
             &self.manifest,
@@ -959,7 +972,7 @@ impl RecipientSession {
             OfferContext {
                 core: core.clone(),
                 root: &p.root,
-                authority: &authority,
+                authority: &p.authority,
                 challenge: self.challenge,
                 recipient_runtime: me,
                 recipient_persona: self.persona,
