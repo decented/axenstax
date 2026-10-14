@@ -14,7 +14,7 @@ pub(crate) struct QuestSession {
     pub window_digest: u32,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct GameplayClock {
     anchor: Option<u64>,
     now: u64,

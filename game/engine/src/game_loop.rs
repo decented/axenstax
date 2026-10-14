@@ -2972,7 +2972,11 @@ impl super::GameState {
         // records whether this one opened from its autosave).
         self.session_saves = crate::world_exit::SessionSaves::default();
         #[cfg(not(target_arch = "wasm32"))]
-        { self.local_personal = None; }
+        {
+            self.local_personal = None;
+            self.gameplay_preparation = None;
+            self.gameplay_preparation_generation = self.gameplay_preparation_generation.wrapping_add(1);
+        }
         for slot in &mut self.players { slot.personal_binding = None; }
         self.world.clear();
         // …and the per-world fields `World::clear` keeps (meta bytes, hidden

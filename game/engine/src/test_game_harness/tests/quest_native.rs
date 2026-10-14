@@ -271,7 +271,7 @@ impl RemoteSetup {
     }
 }
 
-fn load_native(game: &mut HeadlessGame, name: &str) {
+pub(super) fn load_native(game: &mut HeadlessGame, name: &str) {
     game.state.world_name = name.into();
     game.state.mode =
         crate::GameMode::Loading(crate::loading_screen::LoadingState::new(name.into()));
@@ -1139,6 +1139,8 @@ fn game_harness_d2c3_native_first_scope_refuses_a_failed_directory_barrier() {
             .unwrap()
             .is_none()
     );
+    let before = super::quest_preparation::live(&game);
+    let prior_saves = game.state.session_saves;
     let fault = crate::fsync::tests::fail_directory_on_match(&directory, 1);
     let prepared = game.state.prepare_local_gameplay();
     assert!(
@@ -1159,10 +1161,16 @@ fn game_harness_d2c3_native_first_scope_refuses_a_failed_directory_barrier() {
     assert!(game.state.world.quest_scope.is_none());
     assert!(game.state.players[0].personal_binding.is_none());
     assert!(game.state.local_personal.is_none());
+    assert_eq!(super::quest_preparation::live(&game), before);
+    let mut failed_saves = prior_saves;
+    failed_saves.note_save(false);
+    assert_eq!(game.state.session_saves, failed_saves);
+    let retry = super::quest_preparation::native_scope_failure_tail(&mut game, &directory, &fault);
     // A rename may already be visible: do not demand old primary bytes after
     // that commit, or mistake visibility for confirmed crash durability.
     drop(fault);
     game.state.prepare_local_gameplay().unwrap();
     assert!(game.state.world.quest_scope.is_some());
     crate::handover::live::personal_adapter::confirm_durable(&directory.join("world.dat")).unwrap();
+    super::quest_preparation::assert_native_retry(&game, &directory, retry);
 }

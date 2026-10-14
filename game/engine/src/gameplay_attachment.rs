@@ -13,24 +13,48 @@ impl crate::GameState {
             .players
             .first()
             .and_then(|slot| slot.personal_binding.clone());
-        if existing.is_some() {
-            self.preflight_personal_local()?;
+        if existing.is_some() && self.gameplay_preparation.is_none() {
             if let Some(GameplayBinding::WorldLocal { scope, .. }) = &existing
                 && self.world.quest_scope != Some(*scope)
             {
                 return Err("Saved local gameplay authority differs from its world scope".into());
             }
-            if self.world.quest_scope.is_some() {
+            if let Some(scope) = self.world.quest_scope {
+                let directory = crate::save::world_dir(&self.world_name);
+                let session = crate::gameplay_preparation::Session::Native(
+                    self.gameplay_preparation_generation,
+                );
+                let preparation = crate::gameplay_preparation::ScopePreparation::new(
+                    directory.clone(),
+                    session,
+                    scope,
+                    existing.clone(),
+                    Some(scope),
+                    existing.as_ref(),
+                );
+                if let Err(error) = preparation.validate(&directory, session, existing.as_ref()) {
+                    self.gameplay_preparation = Some(preparation);
+                    self.session_saves.note_save(false);
+                    return Err(error);
+                }
+                self.preflight_personal_local()?;
+                crate::handover::live::personal_adapter::confirm_durable(
+                    &directory.join("world.dat"),
+                )?;
+                self.gameplay_preparation_succeeded();
                 return Ok(());
             }
-        } else if self.players.iter().any(|slot| {
-            !slot.active_quests.is_empty()
-                || !slot.kill_quest_baseline.is_empty()
-                || slot
-                    .villager_decline_until
-                    .values()
-                    .any(|until| *until > self.tick_counter)
-        }) {
+        }
+        if existing.is_none()
+            && self.players.iter().any(|slot| {
+                !slot.active_quests.is_empty()
+                    || !slot.kill_quest_baseline.is_empty()
+                    || slot
+                        .villager_decline_until
+                        .values()
+                        .any(|until| *until > self.tick_counter)
+            })
+        {
             return Err(
                 "An existing quest cannot be converted without its exact original giver identity"
                     .into(),
@@ -39,8 +63,28 @@ impl crate::GameState {
         if self.players.is_empty() {
             return Err("missing local gameplay seat".into());
         }
+        let penalty = if existing.is_none() {
+            match self.players[0].last_villager_kill_rep_tick {
+                Some(last) => {
+                    let elapsed = self
+                        .tick_counter
+                        .checked_sub(last)
+                        .ok_or("The legacy villager penalty timestamp is ahead of gameplay time")?;
+                    crate::reputation::VILLAGER_KILL_REP_COOLDOWN_TICKS.saturating_sub(elapsed)
+                        as u32
+                }
+                None => 0,
+            }
+        } else {
+            self.players[0].quest_progress.penalty_left
+        };
         let old_scope = self.world.quest_scope;
-        let scope = match old_scope {
+        let scope = match self
+            .gameplay_preparation
+            .as_ref()
+            .map(|pending| pending.scope)
+            .or(old_scope)
+        {
             Some(scope) => scope,
             None => crate::quest_npcs::random_id()?,
         };
@@ -49,26 +93,91 @@ impl crate::GameState {
             .map_or(WorldPlayer::LegacyLocal(0), WorldPlayer::Npub);
         // A transferred player's proof remains its authority; the independent
         // world scope identifies givers and fresh attachments, not that proof.
+        let first_binding = existing.is_none();
+        let old_selected_binding = existing.clone();
         let binding = existing.unwrap_or(GameplayBinding::WorldLocal { scope, player });
         binding.validate()?;
+        if binding
+            .context()
+            .participant()
+            .is_some_and(|key| self.handover_signed_in() != Some(key))
+        {
+            return Err("Sign in as this world's saved player before preparing gameplay.".into());
+        }
+        let directory = crate::save::world_dir(&self.world_name);
+        let session =
+            crate::gameplay_preparation::Session::Native(self.gameplay_preparation_generation);
+        let mut preparation = match &self.gameplay_preparation {
+            Some(pending) => pending.clone(),
+            None => crate::gameplay_preparation::ScopePreparation::new(
+                directory.clone(),
+                session,
+                scope,
+                Some(binding.clone()),
+                old_scope,
+                old_selected_binding.as_ref(),
+            ),
+        };
+        if let Err(error) = preparation.validate(&directory, session, Some(&binding)) {
+            self.gameplay_preparation = Some(preparation);
+            self.session_saves.note_save(false);
+            return Err(error);
+        }
         let old_local = self.local_personal.clone();
+        let old_saves = self.session_saves;
+        let old_progress = self.players[0].quest_progress.clone();
+        let old_clock = self.players[0].gameplay_clock;
         self.world.quest_scope = Some(scope);
         let slot = self
             .players
             .first_mut()
             .ok_or("missing local gameplay seat")?;
         let old_binding = slot.personal_binding.replace(binding.clone());
+        if first_binding {
+            slot.quest_progress.penalty_left = penalty;
+            // The same holder must be anchored BEFORE the initial snapshot,
+            // so its just-migrated remaining interval is captured unchanged.
+            slot.gameplay_clock.restore(self.tick_counter);
+        }
         self.local_personal = Some(binding);
-        if let Err(error) = self.save_live_world() {
+        preparation.begin_write();
+        self.gameplay_preparation = Some(preparation);
+        let prepared = self.save_live_world().and_then(|()| {
+            self.gameplay_preparation
+                .as_ref()
+                .expect("active preparation")
+                .confirm()
+        });
+        if let Err(error) = prepared {
             self.world.quest_scope = old_scope;
             self.players[0].personal_binding = old_binding;
+            self.players[0].quest_progress = old_progress;
+            self.players[0].gameplay_clock = old_clock;
             self.local_personal = old_local;
+            self.session_saves = old_saves;
+            self.session_saves.note_save(false);
+            if !self
+                .gameplay_preparation
+                .as_mut()
+                .expect("active preparation")
+                .failed()
+            {
+                self.gameplay_preparation = None;
+            }
             return Err(error);
         }
-        if old_binding.is_none() {
-            self.players[0].gameplay_clock.restore(self.tick_counter);
-        }
+        self.gameplay_preparation = None;
+        self.session_saves.note_save(true);
+        self.gameplay_preparation_succeeded();
         Ok(())
+    }
+
+    fn gameplay_preparation_succeeded(&mut self) {
+        if let Some(host) = self.hosted_server.as_mut()
+            && host.lends_host_world()
+        {
+            host.local_gameplay_preparation = Some(Ok(()));
+        }
     }
 }
 
@@ -133,18 +242,106 @@ mod tests;
 #[cfg(not(target_arch = "wasm32"))]
 impl crate::server::GameServer {
     pub(crate) fn prepare_signed_scope(&mut self) -> Result<(), String> {
-        if self.world.quest_scope.is_some() {
+        self.prepare_signed_scope_with_native(false)
+    }
+
+    pub(crate) fn prepare_signed_scope_with_native(
+        &mut self,
+        native_prepared: bool,
+    ) -> Result<(), String> {
+        if self.lent {
+            self.refuse_pending_gameplay_cut()?;
+            let scope = self
+                .world
+                .quest_scope
+                .ok_or("The local host's gameplay scope has not been saved")?;
+            return crate::gameplay_preparation::confirm_lent_scope(
+                &crate::save::world_dir(&self.world_name),
+                scope,
+                native_prepared,
+            );
+        }
+        if let Some(scope) = self.world.quest_scope
+            && self.gameplay_preparation.is_none()
+        {
+            let directory = crate::save::world_dir(&self.world_name);
+            let session = crate::gameplay_preparation::Session::Server(self.run_id);
+            let selected = self
+                .selected_local_personal
+                .as_ref()
+                .map(|local| crate::joiner_save::JoinerSave::decode(&local.0))
+                .transpose()?;
+            let binding = selected
+                .as_ref()
+                .and_then(|saved| saved.personal.as_ref())
+                .map(|personal| &personal.binding);
+            let preparation = crate::gameplay_preparation::ScopePreparation::new(
+                directory.clone(),
+                session,
+                scope,
+                None,
+                Some(scope),
+                binding,
+            );
+            if let Err(error) = preparation.validate(&directory, session, None) {
+                self.gameplay_preparation = Some(preparation);
+                return Err(error);
+            }
+            crate::handover::live::personal_adapter::confirm_durable(&directory.join("world.dat"))?;
             return Ok(());
         }
-        if self.lent {
-            return Err("The local host's gameplay scope has not been saved".into());
-        }
-        let scope = crate::quest_npcs::random_id()?;
-        self.world.quest_scope = Some(scope);
-        if let Err(error) = self.try_save() {
-            self.world.quest_scope = None;
+        let directory = crate::save::world_dir(&self.world_name);
+        let session = crate::gameplay_preparation::Session::Server(self.run_id);
+        let mut preparation = match &self.gameplay_preparation {
+            Some(pending) => pending.clone(),
+            None => {
+                let selected = self
+                    .selected_local_personal
+                    .as_ref()
+                    .map(|local| crate::joiner_save::JoinerSave::decode(&local.0))
+                    .transpose()?;
+                let binding = selected
+                    .as_ref()
+                    .and_then(|saved| saved.personal.as_ref())
+                    .map(|personal| &personal.binding);
+                crate::gameplay_preparation::ScopePreparation::new(
+                    directory.clone(),
+                    session,
+                    crate::quest_npcs::random_id()?,
+                    None,
+                    self.world.quest_scope,
+                    binding,
+                )
+            }
+        };
+        if let Err(error) = preparation.validate(&directory, session, None) {
+            self.gameplay_preparation = Some(preparation);
             return Err(error);
         }
+        let old_scope = self.world.quest_scope;
+        let scope = preparation.scope;
+        self.world.quest_scope = Some(scope);
+        preparation.begin_write();
+        self.gameplay_preparation = Some(preparation);
+        let prepared = self.try_save().and_then(|()| {
+            self.gameplay_preparation
+                .as_ref()
+                .expect("active preparation")
+                .confirm()
+        });
+        if let Err(error) = prepared {
+            self.world.quest_scope = old_scope;
+            if !self
+                .gameplay_preparation
+                .as_mut()
+                .expect("active preparation")
+                .failed()
+            {
+                self.gameplay_preparation = None;
+            }
+            return Err(error);
+        }
+        self.gameplay_preparation = None;
         Ok(())
     }
     pub(crate) fn attach_gameplay(
@@ -177,7 +374,9 @@ impl crate::server::GameServer {
             personal.bytes = record.encode()?;
         }
         self.players[index].personal = Some(personal);
-        self.players[index].gameplay_clock.restore(self.tick_counter);
+        self.players[index]
+            .gameplay_clock
+            .restore(self.tick_counter);
         Ok(())
     }
 }

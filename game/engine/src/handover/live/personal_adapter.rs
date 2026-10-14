@@ -412,6 +412,7 @@ impl crate::server::GameServer {
         self.claim_selected_personal(key, binding.clone())
     }
     fn claim_selected_personal(&mut self, key: [u8; 32], expected: crate::progression::GameplayBinding) -> Result<(), String> {
+        self.refuse_pending_gameplay_cut()?;
         let world = crate::save::world_dir(&self.world_name);
         if self.selected_local_personal.is_none()
             && matches!(fs::symlink_metadata(world.join("autosave")), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
@@ -551,6 +552,7 @@ pub(crate) fn preflight(
 
 impl crate::GameState {
     pub(crate) fn preflight_personal_local(&self) -> Result<(), String> {
+        self.guard_gameplay_preparation_write()?;
         let Some(binding) = &self.local_personal else {
             return Ok(());
         };

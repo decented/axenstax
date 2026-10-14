@@ -272,6 +272,8 @@ mod saved_item_slot;
 mod personal_value;
 pub(crate) mod progression;
 pub(crate) mod gameplay_attachment;
+#[cfg(not(target_arch = "wasm32"))]
+mod gameplay_preparation;
 pub(crate) mod quest_npcs;
 mod plan_store;
 mod bear_ai;
@@ -1302,6 +1304,11 @@ pub(crate) struct GameState {
     /// Imported personal identity selected at world load, latched for saves.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) local_personal: Option<crate::progression::GameplayBinding>,
+    /// Non-admitted scope retry provenance, reset at world entry and exit.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) gameplay_preparation: Option<crate::gameplay_preparation::ScopePreparation>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) gameplay_preparation_generation: u64,
     /// The host this joined client verified at join (online play's verified
     /// answer and its runtime). `None` for a join that verified no host.
     #[cfg(not(target_arch = "wasm32"))]
@@ -2002,6 +2009,10 @@ impl GameState {
             handover: None,
             #[cfg(not(target_arch = "wasm32"))]
             local_personal: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            gameplay_preparation: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            gameplay_preparation_generation: 0,
             #[cfg(not(target_arch = "wasm32"))]
             joined_host: None,
             #[cfg(not(target_arch = "wasm32"))]

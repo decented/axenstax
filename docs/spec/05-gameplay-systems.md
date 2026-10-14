@@ -4364,3 +4364,26 @@ existing server owner and do not receive echoed local credits. Active transfer
 eligibility guards remain until frozen current-tuple settlement and original/
 retained active continuation pass their actual controls. This source checkpoint
 does not claim full quest or transfer acceptance.
+
+At the first unbound native-to-common cut, the live legacy villager penalty
+timestamp migrates once as `max(0, 600 - elapsed logical ticks)`. A future
+timestamp refuses before mutation; an expired interval remains zero. The same
+holder's clock anchors before the initial capture so the saved interval is
+exactly the remaining live cooldown. An already-bound holder is never
+remigrated from its legacy timestamp. A second real villager death inside the
+same interval cannot charge another penalty; a death after actual expiry starts
+one new bounded penalty in the common owner.
+
+Failed native preparation restores exact quest progress, clock, binding, world
+scope and local selection and retains the live physical bag, cursor/grid,
+armour and private Plan allocations. A post-rename candidate remains selected
+on disk without being admitted in memory. Its private retry provenance has no
+second gameplay body. Ordinary writers/cuts cannot erase it. Explicit retry
+keeps its identity but recaptures current live counters, reputation, holdings
+and the current legacy remaining interval, including gameplay since failure;
+it never installs stale selected progression or resets elapsed time. Successful
+ordinary save plus strict directory confirmation admits that current candidate
+once. Checked reopen follows the actual selected primary/autosave and existing
+owner/proof validation. Checkpoint27 source and controls still require runtime
+verification; full signed/guest isolation and active continuation remain
+separate acceptance work.

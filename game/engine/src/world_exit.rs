@@ -569,6 +569,11 @@ impl crate::GameState {
             crate::save::clear_autosave(&self.world_name);
         }
         self.session_saves = SessionSaves::default();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.gameplay_preparation = None;
+            self.gameplay_preparation_generation = self.gameplay_preparation_generation.wrapping_add(1);
+        }
         // Nothing queued by the session being left may fire later into an
         // unrelated lobby visit (callers that hop re-queue AFTER this).
         self.pending_menu_action = None;

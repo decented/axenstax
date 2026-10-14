@@ -6887,14 +6887,55 @@ quiescence remain unchanged. A personal acknowledgement alone never releases a
 Pack/Quest flight. The joined request adapter below builds on this foundation.
 
 Lending-host scope preparation saves the actual GameState world and local seats
-before external gameplay admission. A failed preparation rolls back the new live
-binding/scope and leaves local play available. Each local host instance records
+and confirms the primary file, its directory and parent directory before
+external gameplay admission. A failed preparation restores the exact live
+quest progress, clock, binding, world scope and local selection and leaves local
+play available. The final failure preserves prior session-save flags and marks
+the save failed, even if the ordinary writer had already reported success.
+Each local host instance records
 one preparation outcome. A refusal appears to the host and rejects new
 attachments after their identity/policy checks; existing polling, control
 acknowledgements and shared simulation continue. Restarting hosting begins a
 fresh preparation attempt. Expired legacy decline timers do not block it. An
 already validated Imported holder keeps its exact proof/context while an absent
 independent world scope is saved; failure restores the old scope and holder.
+
+An ordinary save may have renamed a proposed primary before a later error or
+directory barrier fails. That actual selected primary remains on disk; failure
+does not promise restoration of old primary bytes. Small private preparation
+metadata retains only the directory/session, intended scope/holder identity and
+validated actual selected hash, never another inventory, progression or timer
+body. Manual save, actual autosave, server routine save and authority-changing
+role/handover cuts refuse before effects while that preparation is unresolved.
+No-op selected-owner admission checks remain reachable so an actual signed join
+can retry the same pending operator scope. A pre-commit refusal with exact
+unchanged predecessor bytes leaves no provisional commitment. A changed,
+foreign or unreadable first-attempt selected authority stays refused and guarded
+until checked reopen, rather than becoming a fresh default or overwrite target.
+
+An explicit retry validates the same native signer/context, directory/session
+and actual selected identity/hash before writing. It reuses the same proposed
+scope and captures current live maps, holdings and honest elapsed gameplay;
+the provisional selected progression is never installed over the live owner.
+Persistent directory faults refuse repeated attempts at their own strict
+barrier. Success clears the private metadata and updates the host's preparation
+outcome only after the ordinary write and strict confirmation both pass. Entry
+and exit clear only session metadata, preserving actual selected files and the
+existing primary/autosave reopen rules. Existing bound scope shortcuts also
+confirm the barrier without remigrating their timers or replacing their proof.
+
+A lent server checks the actual selected scope against its borrowed world. A
+native prepared outcome requires a valid actual selected local holder; the
+server's dedicated selected-holder cache remains independent and is never
+filled by copying the native body. A genuinely prepared operator scope with no
+native holder uses the scope-only path and still confirms the strict barrier;
+it creates no invented native readiness or holder. Dedicated preparation keeps
+the exact existing selected-holder identity, including exact absence, and does
+not assign scope ownership to the first signed requester. WorldLocal selected
+holder and world scope must agree; Guest cannot own a local selected snapshot.
+Imported keeps its independent authenticated proof context. These are source
+checkpoint27 behaviours awaiting reviewed runtime verification, not full quest
+acceptance or a default change.
 
 Dedicated routine saves preserve an unclaimed selected local personal snapshot. A matching verified player can
 change it to remote authority only after the canonical record is written; the

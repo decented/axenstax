@@ -1091,6 +1091,9 @@ pub struct GameServer {
     pub tables_gone: crate::window_ops::TablesGone,
     /// The personal snapshot selected with this server's loaded world.
     pub(crate) selected_local_personal: Option<crate::personal_value::LocalPersonalSave>,
+    /// Non-admitted first-scope retry provenance; never a gameplay record.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) gameplay_preparation: Option<crate::gameplay_preparation::ScopePreparation>,
 }
 
 impl GameServer {
@@ -1145,6 +1148,8 @@ impl GameServer {
             pending_bred_events: Vec::new(),
             tables_gone: Default::default(),
             selected_local_personal: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            gameplay_preparation: None,
             next_attach_gen: 0,
             released_joiners: Vec::new(),
             released_mounts: Vec::new(),
@@ -2771,6 +2776,7 @@ impl GameServer {
     /// the unclaimed selected local record instead of saving a player shadow.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn try_save_selected(&self, local_personal: Option<&crate::personal_value::LocalPersonalSave>) -> Result<(), String> {
+        self.guard_gameplay_preparation_write(local_personal)?;
         let wname = self.world_name.clone();
         let dir = crate::save::world_dir(&wname);
         // A world saved by a newer build is never written (Spec 02 §8.4) — checked

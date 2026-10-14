@@ -381,6 +381,7 @@ impl crate::GameState {
     /// Start a handover to the authenticated player in `slot`: re-read its
     /// seat now, derive lineage and authority from the invitation, propose.
     pub(crate) fn begin_handover_with(&mut self, drawn: (usize, u32, [u8; 32]), env: SourceEnv, now: u64) -> Result<(), String> {
+        self.refuse_pending_gameplay_cut()?;
         let slot = drawn.0;
         if self.handover.is_some() {
             return Err(copy::BUSY.into());

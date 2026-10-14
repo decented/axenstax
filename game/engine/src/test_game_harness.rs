@@ -93,6 +93,15 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[path = "quest_native.rs"]
     mod quest_native;
+    #[cfg(not(target_arch = "wasm32"))]
+    #[path = "quest_preparation.rs"]
+    mod quest_preparation;
+    #[cfg(not(target_arch = "wasm32"))]
+    #[path = "quest_preparation_tests.rs"]
+    mod quest_preparation_tests;
+    #[cfg(not(target_arch = "wasm32"))]
+    #[path = "quest_preparation_lifecycle.rs"]
+    mod quest_preparation_lifecycle;
     use super::*;
 
     /// Point `AXENSTAX_WORLDS_DIR` at one pid-scoped temp dir shared by every

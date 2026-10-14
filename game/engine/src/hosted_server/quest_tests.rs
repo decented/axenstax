@@ -283,6 +283,7 @@ fn d2c3_fresh_signed_join_refuses_a_failed_first_scope_directory_barrier() {
     assert!(!host.server.players[i].is_in_world());
     assert!(host.server.players[i].personal.is_none());
     assert!(!canonical.exists());
+    let scope = quest_preparation_tests::signed_scope_failure_tail(&mut host, &directory, &fault);
     drop(fault);
     // Fresh retry after the actual fault is gone must prove its own directory
     // barrier even if the earlier world.dat rename is already visible.
@@ -292,6 +293,9 @@ fn d2c3_fresh_signed_join_refuses_a_failed_first_scope_directory_barrier() {
     let accepted = c3d_tests::hear(&retry);
     assert_eq!(accepted.accepts.len(), 1);
     crate::handover::live::personal_adapter::confirm_durable(&directory.join("world.dat")).unwrap();
+    assert_eq!(host.server.world.quest_scope, Some(scope));
+    assert!(host.server.gameplay_preparation.is_none());
+    quest_preparation_tests::another_signed_player_uses_the_same_scope(&mut host, scope);
 }
 
 #[test]
@@ -342,6 +346,15 @@ fn d2c3_world_local_selected_snapshot_survives_routine_save_failed_cut_and_reope
         )
         .is_err()
     );
+    let fault = crate::fsync::tests::fail_directory_on_match(&directory, 1);
+    assert!(host.server.prepare_signed_scope().is_err());
+    assert!(fault.failures() > 0, "the actual selected-holder shortcut reached its own barrier");
+    assert_eq!(host.server.selected_local_personal.as_ref().unwrap().0, selected.0);
+    assert_eq!(host.server.world.quest_scope, Some(scope));
+    assert!(host.server.gameplay_preparation.is_none(), "a failed existing-scope confirmation makes no proposed write");
+    assert_eq!(std::fs::read(directory.join("world.dat")).unwrap(), before);
+    drop(fault);
+    host.server.prepare_signed_scope().unwrap();
     crate::save_fence::raise(&directory);
     let refused = host
         .server

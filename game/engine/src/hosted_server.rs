@@ -40,6 +40,8 @@ mod pack_tests;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod quest_tests;
 #[cfg(all(test, not(target_arch = "wasm32")))]
+mod quest_preparation_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod quest_live_tests;
 mod strict_container;
 mod strict_edit;
@@ -4630,8 +4632,13 @@ impl HostedServer {
                         }
                         #[cfg(not(target_arch = "wasm32"))]
                         if self.server.players[i].verified_pubkey.is_some()
-                            && let Err(error) = self.server.prepare_signed_scope()
-                        { let _ = self.release_slot(i, Some(&error)); break; }
+                        {
+                            let native_prepared = matches!(&self.local_gameplay_preparation, Some(Ok(())));
+                            if let Err(error) = self.server.prepare_signed_scope_with_native(native_prepared) {
+                                let _ = self.release_slot(i, Some(&error));
+                                break;
+                            }
+                        }
                         let saved_joiner = self.server.load_joiner(i);
                         if self.server.players[i].personal_read_failed {
                             let _ = self.release_slot(i, Some("This world's saved player state couldn't be restored. It is preserved without reset."));
