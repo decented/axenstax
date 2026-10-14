@@ -5751,7 +5751,11 @@ stale temp) goes through `crate::fsync::sync_file`, which opens the file with
 write access on Windows (no create, no truncate): `FlushFileBuffers` refuses a
 read-only handle, so a read-only re-sync failed every time there and nothing
 was ever published. Directory syncs go through `crate::fsync::sync_dir` (a
-no-op on Windows). A source-guard test pins that no `File::open` + `sync_all`
+no-op on Windows). Plan-store checked directory creation and post-rename
+durability also use this helper: a Unix failure remains mandatory, prevents
+caching or release of the owned body, and permits a later retry. The Plan-store
+Windows branch retains its file-sync/rename policy without directory sync.
+A source-guard test pins that no `File::open` + `sync_all`
 / `sync_data` remains anywhere else in the engine. CP16 (CP15 review
 HIGH-1): that guard missed an import's receipt, which opened each received
 and working file read-only in one file and synced it in another, so on

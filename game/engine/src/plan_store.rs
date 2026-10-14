@@ -131,14 +131,8 @@ fn ensure_checked_dir(dir: &std::path::Path) -> Result<(), String> {
 /// joined history keeps its owned body and pauses instead of claiming success.
 #[cfg(all(not(target_arch = "wasm32"), not(windows)))]
 fn sync_checked_dir(dir: &std::path::Path) -> Result<(), String> {
-    #[cfg(all(test, unix))]
-    if FAIL_DIRECTORY_SYNC.with(|failure| failure.get()) { return Err("Injected Plan-store directory sync failure".into()); }
-    let file = std::fs::File::open(dir);
-    file.and_then(|file| file.sync_all()).map_err(|e| format!("Plan-store directory was not durably synced: {e}"))
+    crate::fsync::sync_dir(dir).map_err(|e| format!("Plan-store directory was not durably synced: {e}"))
 }
-
-#[cfg(all(test, unix))]
-thread_local! { static FAIL_DIRECTORY_SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 
 #[cfg(not(target_arch = "wasm32"))]
 fn load(marker: [u8; 32]) -> Option<Vec<u8>> {
@@ -185,16 +179,17 @@ mod tests {
         // A client inventory remembers a Plan body as it is set
         // (`remember_plans`): inject the failure first, so that store is
         // the failing one too and nothing is cached before the retain.
-        FAIL_DIRECTORY_SYNC.with(|failure| failure.set(true));
+        let failure = crate::fsync::tests::fail_directory_on_match(&root(), 1);
         inv.set_slot(0, Some(crate::item::ItemStack { item: crate::item::Item::Plan(body), count: 1 }));
         let failed = crate::window_prediction::retain_private_window(&inv, &None, &Default::default());
-        FAIL_DIRECTORY_SYNC.with(|failure| failure.set(false));
-        assert!(failed.is_err());
+        assert!(failure.failures() >= 2, "automatic remembering and checked retention both reached the shared directory helper");
+        assert!(failed.unwrap_err().starts_with("Plan-store directory was not durably synced:"));
         assert!(root().join(hex::encode(marker)).is_file(), "failure is after rename, not an absent-file shortcut");
         assert!(!REMEMBERED.with(|set| set.borrow().contains(&cache_key(marker))));
         let crate::item::Item::Plan(held) = &inv.slot(0).unwrap().item else { panic!("body ownership lost") };
         assert!(!held.cells.is_empty());
         assert_eq!(crate::plan::marker(held), marker);
+        drop(failure);
         crate::window_prediction::retain_private_window(&inv, &None, &Default::default()).unwrap();
         assert!(REMEMBERED.with(|set| set.borrow().contains(&cache_key(marker))));
         assert_eq!(resolve(marker).unwrap().cells, held.cells);
