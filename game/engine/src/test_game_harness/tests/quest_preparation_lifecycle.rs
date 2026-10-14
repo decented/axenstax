@@ -25,7 +25,11 @@ fn game_harness_d2c3_first_native_preparation_refuses_a_replaced_bound_primary()
         crate::world_exit::ExitTo::Lobby
     ));
     std::fs::write(directory.join("world.dat"), &old).unwrap();
-    super::quest_native::load_native(&mut game, name);
+    drop(game);
+    let mut game = HeadlessGame::boot_into_world(name);
+    assert_eq!(primary(&directory), old);
+    assert!(game.state.world.quest_scope.is_none());
+    assert!(game.state.local_personal.is_none());
     assert!(game.state.players[0].personal_binding.is_none());
     assert!(game.state.gameplay_preparation.is_none());
     let before = live(&game);

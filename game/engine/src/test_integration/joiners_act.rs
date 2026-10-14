@@ -21,8 +21,8 @@ use crate::mob_interact::InteractNote;
 use crate::protocol::{self, InteractKind, PlayerEventType, WireDamageCause};
 use crate::transport::{ChannelClientTransport, ClientTransport};
 
-use super::joiner_authority::join_guest;
-use super::lent_world::{join_guest_lent, start_lent};
+use super::joiner_authority::{send_guest_join, settle_chunk_push};
+use super::lent_world::start_lent;
 
 /// A valid x-only public key (secp256k1's generator point), so the joiner's
 /// pet-owner key is a real bech32 npub.
@@ -268,10 +268,95 @@ impl Rig {
 
     /// A guest joins and stands on the floor; returns its index in `joiners`.
     fn join(&mut self, name: &str) -> usize {
-        let (client, slot) = match self.host.as_mut() {
-            Some(host) => join_guest_lent(&mut self.hs, host, name),
-            None => join_guest(&mut self.hs, name),
-        };
+        let client = self.hs.attach_test_remote();
+        send_guest_join(&client, name);
+        self.tick(1);
+        let mut accept = None;
+        let mut sync = None;
+        let mut personal = None;
+        while let Some(bytes) = client.try_recv_from_server() {
+            match protocol::deserialize_header(&bytes) {
+                Some((protocol::PacketType::JoinAccept, body)) => {
+                    assert!(accept.is_none());
+                    accept = Some(
+                        protocol::safe_deserialize::<protocol::JoinAcceptPacket>(body).unwrap(),
+                    );
+                }
+                Some((protocol::PacketType::InventorySync, body)) => {
+                    assert!(accept.is_some());
+                    assert!(
+                        personal.is_none(),
+                        "actual physical Sync1 precedes Personal2"
+                    );
+                    assert!(sync.is_none());
+                    sync = Some(
+                        protocol::safe_deserialize::<protocol::InventorySyncPacket>(body).unwrap(),
+                    );
+                }
+                Some((protocol::PacketType::PersonalSync, body)) => {
+                    if let protocol::PersonalSyncPacket::Snapshot(snapshot) =
+                        protocol::safe_deserialize(body).unwrap()
+                    {
+                        assert!(
+                            sync.is_some(),
+                            "no personal installation before actual Sync1"
+                        );
+                        assert!(personal.is_none());
+                        personal = Some(snapshot);
+                    }
+                }
+                Some((protocol::PacketType::JoinReject, body)) => panic!(
+                    "guest initialisation rejected: {}",
+                    protocol::safe_deserialize::<protocol::JoinRejectPacket>(body)
+                        .unwrap()
+                        .reason
+                ),
+                _ => {}
+            }
+        }
+        let accept = accept.expect("guest join accepted");
+        let slot = accept.player_index as usize;
+        let sync = sync.expect("actual initial physical Sync1");
+        let personal = personal.expect("actual initial Personal2");
+        assert_eq!(sync.window_event, 1);
+        assert_eq!(personal.window_event, 2);
+        assert!(!self.hs.server.players[slot].personal_delivery.initialised);
+        let mut actor = crate::player_slot::PlayerSlot::new(slot, Vec3::ZERO, 1.0);
+        crate::inventory_sync::apply(
+            &mut crate::window::WindowMut {
+                inv: &mut actor.inventory,
+                armour: &mut actor.armour_slots,
+                cursor: &mut actor.crafting_ui.cursor_item,
+                grid: &mut actor.crafting_ui.grid,
+                container: None,
+            },
+            &sync,
+            &self.hs.server.registry,
+            &mut Default::default(),
+            &mut Default::default(),
+            accept.inventory_mode,
+        )
+        .unwrap();
+        assert!(!self.hs.server.players[slot].personal_delivery.initialised);
+        let mut inbox = crate::personal_sync::Inbox::new(accept.action_session, accept.action_life);
+        inbox.push(personal.clone()).unwrap();
+        let acknowledgements = inbox.apply(personal.window_event, &mut actor).unwrap();
+        assert_eq!(acknowledgements.len(), 1);
+        client.send_to_server(&protocol::serialize_packet(
+            protocol::PacketType::PersonalSync,
+            &protocol::PersonalSyncPacket::Applied(acknowledgements[0]),
+        ));
+        self.tick(1);
+        let sp = &self.hs.server.players[slot];
+        assert!(sp.personal_delivery.initialised);
+        assert!(
+            sp.personal_delivery
+                .quiescent(sp.personal.as_ref().unwrap(), sp.respawns)
+        );
+        match self.host.as_mut() {
+            Some(host) => settle_chunk_push(&mut self.hs, &client, |hs| host.lend_tick(hs)),
+            None => settle_chunk_push(&mut self.hs, &client, HostedServer::tick),
+        }
         let mut world = match self.host.as_mut() {
             Some(host) => std::mem::replace(&mut host.world, crate::world::World::new()),
             None => std::mem::replace(&mut self.hs.server.world, crate::world::World::new()),
@@ -281,7 +366,13 @@ impl Rig {
             Some(host) => host.world = world,
             None => self.hs.server.world = world,
         }
-        self.joiners.push(Joiner { client, slot, inbox: Inbox::default(), seq: 0, input_seq: 0 });
+        self.joiners.push(Joiner {
+            client,
+            slot,
+            inbox: Inbox::default(),
+            seq: 0,
+            input_seq: 0,
+        });
         self.joiners.len() - 1
     }
 
