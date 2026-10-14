@@ -116,22 +116,22 @@ fn authorises(kind: PacketType) -> bool {
             | PacketType::Respawn
     )
 }
-fn holdings(hg: &HeadlessGame) -> Vec<u8> {
+fn holdings(hg: &HeadlessGame) -> (Vec<u8>, crate::window::Station) {
     let p = &hg.state.players[0];
     let slots: Vec<_> = p.inventory.slots_iter().collect();
     let locks: Vec<_> = (0..crate::window::SLOTS)
         .map(|i| p.inventory.is_locked(i))
         .collect();
-    bincode::serialize(&(
+    let bytes = bincode::serialize(&(
         slots,
         locks,
         p.inventory.auto_refill,
         p.armour_slots,
         &p.crafting_ui.cursor_item,
         &p.crafting_ui.grid,
-        p.crafting_ui.station(),
     ))
-    .unwrap()
+    .unwrap();
+    (bytes, p.crafting_ui.station())
 }
 fn next_action(hg: &HeadlessGame) -> crate::action_identity::ActionHeader {
     let rc = hg.state.remote_client.as_ref().unwrap();
@@ -547,7 +547,7 @@ fn game_harness_handover_delayed_initial_personal_client_blocks_prediction_and_o
             }
             hs.tick();
             assert!(
-                !hs.disconnected[i],
+                hs.server.players[i].is_in_world(),
                 "honest client authority behind its Applied was released"
             );
             assert!(hs.server.players[i].personal_delivery.initialised);
@@ -569,7 +569,7 @@ fn game_harness_handover_delayed_initial_personal_client_blocks_prediction_and_o
                 hs.tick();
                 j.hg.frames(1);
             }
-            assert!(!hs.disconnected[i]);
+            assert!(hs.server.players[i].is_in_world());
             assert!(hs.server.players[i].inventory.slot(4).is_none());
             assert_eq!(hs.server.players[i].cursor.as_ref().unwrap().count, 9);
             assert_eq!(
@@ -595,7 +595,7 @@ fn game_harness_handover_delayed_initial_personal_client_blocks_prediction_and_o
             ));
             hs.tick();
             assert!(
-                hs.disconnected[i],
+                !hs.server.players[i].is_in_world(),
                 "fixture did not release its real signed participant"
             );
         }
