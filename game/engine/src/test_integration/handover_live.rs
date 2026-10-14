@@ -2419,8 +2419,10 @@ mod session {
         let recipient = Resumer::new(FAST);
         assert_eq!(recipient.resume_imports(&dir.0.join("imports"), dst_install()), 1, "the recipient's wait wasn't resumed");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-        while !has_record(&dir, "quarantined", t) {
-            assert!(std::time::Instant::now() < deadline, "the recipient never quarantined on the published Aborted");
+        // The marker becomes visible before its sync and receipt removal;
+        // wait for the actual import worker to finish both durable steps.
+        while !has_record(&dir, "quarantined", t) || recipient.holds_import(t) {
+            assert!(std::time::Instant::now() < deadline, "the recipient never finished quarantine on the published Aborted");
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         assert!(!has_record(&dir, "prepared", t), "the published Aborted left the receipt (and its bearer)");
