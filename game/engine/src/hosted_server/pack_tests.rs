@@ -290,3 +290,99 @@ fn d2c2_queued_request_crossing_real_death_and_replace_is_zero_effect() {
         assert!(!rig.hs.disconnected[rig.joiner.i]);
     }
 }
+
+#[test]
+fn d2c2_real_guest_pack_access_uses_any_keeper_and_never_claims_a_wild_steed() {
+    for mode in [InventoryMode::Mirror, InventoryMode::Strict] {
+        let mut rig = Rig::new("guest-access", mode);
+        let client = rig.hs.attach_test_remote();
+        client.send_to_server(&protocol::serialize_packet(protocol::PacketType::JoinRequest, &crate::remote_client::build_join_request_guest("Guest", 0)));
+        rig.hs.tick();
+        let i = rig.hs.server.players.len() - 1;
+        let accept = super::c3d_tests::hear(&client).accepts.pop().expect("an operator-open guest join");
+        let applied = rig.hs.server.players[i].window_events.last_number();
+        crate::window_events::apply_through(&mut rig.hs.server.players[i], applied, rig.hs.server.tick_counter);
+        rig.hs.server.players[i].inventory = crate::inventory::Inventory::new();
+        rig.hs.server.players[i].inventory.set_slot(0, Some(ItemStack::new_block(block::CHEST, 1)));
+        rig.hs.server.players[i].player.pos = rig.hs.server.players[rig.joiner.i].player.pos;
+        rig.hs.server.players[i].yaw = rig.hs.server.players[rig.joiner.i].yaw;
+        rig.joiner = Joiner { i, client, accept, sequence: 0, applied };
+        let (_, equipped) = rig.execute(PackOperation::Equip);
+        assert_eq!(equipped.note, PackNote::Done, "a guest can equip a genuinely kept steed under P2");
+        rig.apply(&equipped);
+        assert_eq!(rig.hs.server.ecs.get::<&crate::horse_ai::HorseData>(rig.entity).unwrap().keeper_identity(), Some(crate::horse_ai::SteedKeeper::LegacyLocal(0)), "access never transfers keeping to a guest connection slot");
+        let (_, opened) = rig.execute(PackOperation::Open);
+        assert_eq!(opened.note, PackNote::Done);
+        rig.apply(&opened);
+        let session = rig.session();
+        let (_, removed) = rig.execute(PackOperation::Remove { incarnation: session.incarnation, revision: session.revision });
+        rig.apply(&removed);
+        {
+            let mut data = rig.hs.server.ecs.get::<&mut crate::horse_ai::HorseData>(rig.entity).unwrap();
+            data.keeper = None;
+            data.kept_by = None;
+        }
+        let (_, refused) = rig.execute(PackOperation::Equip);
+        assert_eq!(refused.note, PackNote::NeedsKeeper);
+        assert!(rig.hs.server.ecs.get::<&crate::horse_ai::HorseData>(rig.entity).unwrap().keeper_identity().is_none());
+        assert_eq!(rig.bag(block::CHEST), 1, "wild refusal cannot consume the returned Chest");
+        assert!(!rig.hs.disconnected[i]);
+    }
+}
+
+#[test]
+fn d2c2_entity_cargo_at_a_real_block_chest_cell_never_changes_the_block_stock() {
+    for mode in [InventoryMode::Mirror, InventoryMode::Strict] {
+        let mut rig = Rig::new("explicit-target", mode);
+        let pos = rig.hs.server.ecs.get::<&crate::entity::Position>(rig.entity).unwrap().0;
+        let cell = (pos.x.floor() as i32, pos.y.floor() as i32, pos.z.floor() as i32);
+        rig.hs.server.world.set_block(cell.0, cell.1, cell.2, block::CHEST);
+        let mut block_stock = crate::chest::ChestData::new();
+        block_stock.slots[0] = Some(ItemStack::new_block(block::STONE, 7));
+        rig.hs.server.world.insert_chest(cell, block_stock);
+        let mut cargo = crate::chest::ChestData::new();
+        cargo.slots[0] = Some(ItemStack::new_block(block::STONE, 2));
+        rig.hs.server.ecs.get::<&mut crate::horse_ai::HorseData>(rig.entity).unwrap().pack = Some(cargo);
+        let (_, opened) = rig.execute(PackOperation::Open);
+        rig.apply(&opened);
+        let session = rig.session();
+        let (_, taken) = rig.execute(PackOperation::Click { incarnation: session.incarnation, revision: session.revision, click: ContainerClick::TakeAll });
+        assert_eq!(taken.note, PackNote::Done);
+        assert_eq!(rig.bag(block::STONE), 2);
+        assert_eq!(rig.hs.server.world.chest_at(cell).unwrap().slots[0].as_ref().unwrap().count, 7, "an entity's position is never its container address");
+        assert!(rig.contents().slots[0].is_none());
+    }
+}
+
+#[test]
+fn d2c2_removed_entity_and_reused_protocol_id_cannot_inherit_the_old_session() {
+    for mode in [InventoryMode::Mirror, InventoryMode::Strict] {
+        let mut rig = Rig::new("generation", mode);
+        let mut cargo = crate::chest::ChestData::new();
+        cargo.slots[0] = Some(ItemStack::new_block(block::STONE, 1));
+        rig.hs.server.ecs.get::<&mut crate::horse_ai::HorseData>(rig.entity).unwrap().pack = Some(cargo);
+        let (_, opened) = rig.execute(PackOperation::Open);
+        rig.apply(&opened);
+        let old = rig.session();
+        let request = rig.packet(PackOperation::Click { incarnation: old.incarnation, revision: old.revision, click: ContainerClick::TakeAll });
+        let pos = rig.hs.server.ecs.get::<&crate::entity::Position>(rig.entity).unwrap().0;
+        rig.hs.server.ecs.despawn(rig.entity).unwrap();
+        let replacement = crate::entity::spawn_mob(&mut rig.hs.server.ecs, crate::mob::MobType::Donkey, pos);
+        assert_ne!(replacement, old.entity, "hecs generation changes even if its slot is reused");
+        let ContainerTarget::Entity(id) = rig.target else { unreachable!() };
+        rig.hs.server.ecs.insert_one(replacement, crate::entity::ProtocolId(id)).unwrap();
+        {
+            let mut data = rig.hs.server.ecs.get::<&mut crate::horse_ai::HorseData>(replacement).unwrap();
+            data.keeper = Some(crate::horse_ai::SteedKeeper::LegacyLocal(0));
+            let mut pack = crate::chest::ChestData::new();
+            pack.slots[0] = Some(ItemStack::new_block(block::STONE, 5));
+            data.pack = Some(pack);
+        }
+        let terminal = rig.send(&request);
+        assert_eq!(terminal.note, PackNote::NoPack);
+        assert!(terminal.view.is_none());
+        assert_eq!(rig.bag(block::STONE), 0);
+        assert_eq!(rig.hs.server.ecs.get::<&crate::horse_ai::HorseData>(replacement).unwrap().pack.as_ref().unwrap().slots[0].as_ref().unwrap().count, 5);
+        assert!(!rig.hs.disconnected[rig.joiner.i]);
+    }
+}

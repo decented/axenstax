@@ -1143,8 +1143,8 @@ projectiles stay in its ECS.
 **Interactions (MP-D2b, v70).** A joiner's swing and its one-shot
 right-clicks on a mirrored mob go to the server, which decides them (§4.2d).
 Riding a steed or server cart is a server request (D2c-1, §4.2h).
-Fitting or opening a steed pack stays refused with "Packs work in your own
-worlds for now." (D2c-2); villager quests stay refused with "Trading isn't
+Steed packs use the sequential unpredicted entity-container path in the private
+D2c-2 draft (§4.2h.1, wire91; acceptance pending); villager quests stay refused with "Trading isn't
 available in someone else's world yet." (D2c-3). The target is the mob under the **crosshair** (`RemoteMobs::ray_target`,
 the ray from the eye within melee reach, clamped to the first solid block — a
 block in front of the mob wins), never the melee swing's wide 60° cone, which
@@ -1205,7 +1205,7 @@ alive and not in a flying mode:
 
 A joiner fights the server's mobs and does the one-shot animal interactions on
 them; the server decides every outcome, by the same code single-player runs,
-and a kill credits the joiner who made it. Riding runs on the server since D2c-1 (§4.2h); steed packs and villager quests remain D2c-2/-3.
+and a kill credits the joiner who made it. Riding runs on the server since D2c-1 (§4.2h); packs are the private D2c-2 source draft (§4.2h.1), while villager quests remain D2c-3.
 
 **The swing (`EntityAttack` → `HostedServer::handle_entity_attack`).** Read in
 `process_inbound_packets`, before the tick (on a lending host the ECS is
@@ -3609,15 +3609,93 @@ joiner's change to a container there is overwritten.
 
 ### 4.2h Server riding (D2c-1, protocol v85)
 
-A joiner right-clicks a mirrored horse, donkey, mule, Nostrich or parked cart to request `EntityInteract(Mount)`. The server validates reach, rideability and availability; an occupied mount refuses with `MountTaken` (18). Riding needs no owner. D2c-2 keeping (2026-10-13): an accepted signed first mount keeps a wild steed by the verified npub and removes `Scattered`; a guest may ride without creating a persistent keeper. Later mounts preserve the keeper. Legacy local ownership never belongs to a joiner occupying that numerical connection slot. All own-pet protection, rescue and command helpers resolve the same Npub/LegacyLocal identity. Joined pack transport remains unavailable at this foundation checkpoint; villager quests remain deferred.
+A joiner right-clicks a mirrored horse, donkey, mule, Nostrich or parked cart to request `EntityInteract(Mount)`. The server validates reach, rideability and availability; an occupied mount refuses with `MountTaken` (18). Riding needs no owner. D2c-2 keeping (2026-10-13): an accepted signed first mount keeps a wild steed by the verified npub and removes `Scattered`; a guest may ride without creating a persistent keeper. Later mounts preserve the keeper. Legacy local ownership never belongs to a joiner occupying that numerical connection slot. All own-pet protection, rescue and command helpers resolve the same Npub/LegacyLocal identity. The following private pack draft adds joined transport; villager quests remain deferred.
 
 Every seat shares `riding.rs`: steering runs once per tick immediately before entity physics, after species AI and tethers. On a lent world the host applies joiner steering before its physics, using the input accepted in the previous server tick. Horses move along camera yaw axes at 0.3 blocks per tick and jump only on ground. Nostriches use `nostrich_ride::step` with dt 1/20; sneak dismounts below `DISMOUNT_SPEED`, otherwise drifts, and insufficient speed over water forces dismount. Cart jump hops off, and arrival at a parked stop ends a ride. Empty-hand dispatch seats the rider; freight dispatch with a non-empty hand does not seat or consume that hand.
 
 After mount physics the server pins the rider's body to the shared seat. Seated players skip walking physics, speed caps, entity pushes and fall accumulation; melee and hazards still hurt them. Mount disappearance or death, rider death, respawn and disconnect release the seat and `Ridden`. Dismount settles the body on nearby ground. Only one rider may occupy a mount or cart. Other players receive the pinned body with `SEATED` and the occupied mount with `RIDDEN`; seated animation is zero (no separate sit pose yet). Each connection receives its own appended `own_riding: Option<u32>`; accepted mounts fire the client's `RideEntity` Trial action.
 
+#### 4.2h.1 Shared entity packs — private wire91 draft, acceptance pending
+
+`ActionIntent::Pack` is appended at 12; `PackResult` and `PackView` use packet
+tags 74 and 75 after handover 72/PersonalSync 73. `PACK` is entity flag 128, meaning
+actual cargo presence independently of `TAMED`. An eligible kept, unpacked
+Donkey/Mule receives an Equip request when the player holds a Chest; sneak
+with an empty hand opens its existing pack. Otherwise the normal mount
+precedence remains. The new requests are unpredicted in BOTH advertised
+inventory modes; Mirror remains the default and global Strict recovery is
+partial/parked.
+
+A target is explicitly `Block(cell)` or `Entity(protocol_id)`. Runtime sessions
+hold the resolved hecs generation, a monotonic open incarnation, current cargo
+revision and the actual actor respawn generation. Entity position supplies
+live reach and applicable plot/use policy, never a fabricated block-container
+address. Any keeper permits access; keeping is persistence/own-pet identity,
+not a new cargo ACL. Initial Open/Equip checks the current living target,
+reach and facing; subsequent clicks use its current position/reach, live
+validity, keeper, policy and revision. A lost generation, removal, death or
+out-of-reach target closes its views. Adventure pack use remains available;
+Spectator pack use refuses.
+
+Equip consumes exactly one actual Chest from the named personal place. Clicks
+run the existing shared wooden 27-slot container rule on the current authoritative
+cargo and a marker projection of the raw personal window. Every earlier
+numbered prefix is folded over both the original and staged window, including
+actual grant fit, takes, wear, correction debt and per-place effects. Initial
+source eligibility only decreases; later grants cannot fabricate an earlier
+deposit source. A lifecycle Replace cannot prove source lineage for an old
+attempt. Stale stock/body/boundary requests are exact zero-effect terminals
+with a canonical result, rather than invoking unsupported global recovery or
+tearing down an ordinary stock race. Empty removal rechecks actual emptiness
+and returns one Chest or spills only its genuine unfit unit. Private Plan
+bodies never travel in pack requests/results/views and cannot enter or leave
+a shared pack; internal legacy cargo movement retains owned bodies.
+
+The server reserves the complete canonical event and immutable response/receipt
+before any external cargo effect, then rechecks actual generation, actor,
+revision, before-image, live reach/policy and removal emptiness. The result
+carries all 50 personal places, exact whole correction debt and optional 27
+marker-only cargo places. Its `PackCanonical` event preserves unrelated
+history, forced correction obligations and Mirror preferences; it does not
+reuse lifecycle Replace cleanup. The existing retained action row re-sends
+exact original bytes on a duplicate, never a fresh stock read or another
+consumption/refund. Result intake sits in the actual world FIFO before its
+receipt. The client holds window application until that intake, then applies
+older prefix, canonical fence and later grants/wear in numbered order; physical
+prediction/spending remains held until matching actual fence plus receipt
+retirement. Close may hide the screen immediately while its operation waits.
+A separate committed-flight guard lets movement and AppliedActionAck/control
+remain readable. Ack validity is checked against retained rows before removal;
+old/future/foreign tuples cannot free a current flight.
+
+Pack requests/results/views carry the actual authoritative respawn count,
+separately from the existing ActionHeader namespace. Only actual application
+of authoritative `Respawned.respawns` advances the client count; duplicates and
+old deliveries are inert. An old result decoded before death and taken in
+after respawn may retire its terminal metadata but cannot reinstall its old
+window or view. Counter exhaustion refuses a new lifecycle before mutation.
+
+Decoded pack reservations survive transport/world FIFO/inbox ownership changes
+until actual window application. Bounds are 1024 carried entries and 2 MiB;
+accounting includes actual outer Vec/VecDeque capacities, boxed results,
+complete nested WireStack storage and whole debt/correction/sync allocations.
+PersonalSync body allocations count too while the window is held. Count/byte
+exhaustion uses reasoned refusal/backpressure or the existing failed-data
+session path, never silently drops a numbered state. Individual result/view
+payloads are bounded to 32 KiB. Changed-only numbered cargo views contain no
+per-joiner stock ledger. Local/host clicks mutate the same live ECS pack,
+advance its revision and publish current views; rendering snapshots never
+write back whole cargo.
+
+Steed3's appended marker-safe save carrier and keeper are §8.4 of Spec 02.
+Dedicated startup and local resume share saved-pet restoration. World and
+per-npub sidecar writes retain inherited separate per-file crash atomicity;
+this adds no cross-file journal or new Plan-body transfer. No operated service,
+central collection, directory or age/identity input is introduced.
+
 ### 4.2i Joiner persistence and local Plan bodies (Sidecar, protocol v87)
 
-A verified joiner has an operator-local `<world_dir>/joiners/<npub>.dat` file. Guests have no file. This contains pseudonymous gameplay state only: the effective window (36 bag slots, four armour pieces, cursor and nine crafting cells), health, hunger, spawn point, and a slept-night mark with a random per-server-run id. The independent format started with version 1 (v87) and is written as version 2 since OC (v88; see "Obligation carrier" below), using existing save item/armour forms for ordinary items and an explicit `{ marker, developed }` form for Plans. Reads are bounded to 64 KiB; dimensions, vitals, equipped armour positions and (v2) the owed list are validated. A corrupt, unreadable or unknown-version file is logged and treated as absent, retained intact, and protected from later leave/world-save overwrites for that run; since v88 the session it would have restored is obligation-incomplete (`Unreadable`).
+A verified joiner has an operator-local `<world_dir>/joiners/<npub>.dat` file. Guests have no file. The current private combined draft writes canonical v3 (known v1/v2 migration preserves window/debt/history); see the personal continuation adapter below. This contains pseudonymous gameplay state only: the effective window (36 bag slots, four armour pieces, cursor and nine crafting cells), health, hunger, spawn point, and a slept-night mark with a random per-server-run id. The independent format started with version 1 (v87) and was written as version 2 from OC (v88; see "Obligation carrier" below) before the private v3 extension, using existing save item/armour forms for ordinary items and an explicit `{ marker, developed }` form for Plans. Reads are bounded to 64 KiB; dimensions, vitals, equipped armour positions and (v2) the owed list are validated. A corrupt, unreadable or unknown-version file is logged and treated as absent, retained intact, and protected from later leave/world-save overwrites for that run; since v88 the session it would have restored is obligation-incomplete (`Unreadable`).
 
 After verified identity and any same-person reconnect eviction, the server loads this file before constructing `JoinAccept`. The body and spawn point both move to the saved spawn, with velocity and fall state reset. Restored health/hunger follow `enter_world`, which otherwise resets them. The saved window is sent as numbered `InventorySync`, event 1, even when completely empty. A returning player gets the saved window rather than another kit. A first join uses the server-built Test Lab/Workshop kit; ordinary empty first joins need no replacement. Hotbar choice, locks and auto-refill remain client preferences. A saved dead player stays dead with its already-settled grave/window. After `JoinAccept`, a `DiedOf { Generic }` restore notification puts the fresh client into its death screen; it can explicitly respawn after the normal guard, without another death/grave pass.
 
@@ -6569,8 +6647,8 @@ unmarked directory is never touched.
 
 This source checkpoint adds `PersonalSync = 73`, the final
 `JoinAccept.has_personal_state` field, and the final authoritative
-`PlayerEventType::Respawned.respawns: u32` counter. It remains private v90;
-Handover stays tag72 and C3d remains historically accepted v89 with Strict
+`PlayerEventType::Respawned.respawns: u32` counter. The combined packs source remains private v91 (the handover-only API checkpoint
+was v90); Handover stays tag72 and C3d remains historically accepted v89 with Strict
 partial/parked and Mirror the default. Combined regression and actual loader,
 role-transition and second-transfer execution controls remain pending. Earlier
 private checkpoint imports without the retained personal manifest are refused;
@@ -6631,3 +6709,13 @@ Freeze readiness includes typed action/request FIFO, deferred edits, retained
 results/Applied fences, numbered window quiescence and exact PersonalSync
 application. Focused real-order controls and independent final review remain
 required before acceptance.
+
+The combined pack draft numbers each new PersonalSync snapshot with a genuine
+no-window-change fence. Its full snapshot allocation and retained delivery
+copy count against event bounds; the client retains body ownership in the
+bounded personal inbox and orders fixed fence metadata with window carriers.
+Progression applies and acknowledges only after that actual numbered window
+frontier, including through a pack hold and actual physical-life application.
+This preserves the separate exact initial-install acknowledgement and current
+snapshot quiescence semantics on final integration; execution gates remain
+pending.

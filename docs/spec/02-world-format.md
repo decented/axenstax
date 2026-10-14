@@ -2135,12 +2135,15 @@ format version in a trailing footer — see the bincode note under Migration str
 
 #### D2c-2 steed keeping and marker-safe cargo (2026-10-13)
 
-`SavedTamedPetData::Steed3` is appended after Steed2: species, the frozen
+`SavedTamedPetData::Steed3` is appended after every existing variant (including
+Authored): species, the frozen
 HorseData gameplay fields, an explicit Npub/LegacyLocal keeper and an optional
 27-slot wooden pack. HorseData's runtime keeper and pack remain serde-skipped;
 the older Steed/Steed2 positional bytes and full-body local Plan readers remain
-readable. The nested variant reserves save layout revision 2 (revision 1 belongs
-to handover), independently of the future pack wire bump. Older footer-aware
+readable. The appended nested variant uses save layout revision 2 independently
+of the pack wire version 91. The inherited handover WorldSave is version 53 with
+53 fields; its last optional local-personal field uses layout revision 0, and its
+provisional revision 1 reservation is unused. Older footer-aware
 builds refuse the newer layout before decoding or writing it.
 
 Cargo uses the existing sidecar's exact SavedSlot/Plan-marker encoding, extracted

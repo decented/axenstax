@@ -1057,6 +1057,22 @@ mod tests {
     use crate::protocol::{InteractOutcomePacket, ItemActionOutcomePacket, WireItem};
 
     #[test]
+    fn d2c2_old_actor_canonical_retires_its_event_without_replacing_the_new_body() {
+        for mode in [crate::action_identity::InventoryMode::Mirror, crate::action_identity::InventoryMode::Strict] {
+            let mut sp = joiner();
+            sp.inventory_mode = mode;
+            sp.respawns = 2;
+            sp.inventory.set_slot(0, Some(bread(7)));
+            let old = EffectiveWindow { inv: Inventory::new(), armour: [None; 4], cursor: None, grid: Default::default() };
+            let event = queue(&mut sp, WindowEvent::PackCanonical { actor_respawns: 1, window: Box::new(old), debt: Default::default() }, 0);
+            apply_through(&mut sp, event, 1);
+            assert_eq!(sp.inventory.slot(0), Some(&bread(7)), "an old physical life cannot install its complete window");
+            assert_eq!(sp.window_events.last_applied, event, "its numbered metadata still retires");
+            assert_eq!(sp.window_events.waiting(), 0);
+        }
+    }
+
+    #[test]
     fn d2c2_held_inbox_bounds_all_numbered_carriers_across_frames() {
         let mut inbox = WindowInbox::default();
         for event in 1..=crate::action_journal::MAX_EVENT_ENTRIES as u32 {

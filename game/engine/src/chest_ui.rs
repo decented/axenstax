@@ -107,7 +107,8 @@ fn show_container_dialog_inner(ctx: &egui::Context, title: &str, chest: &ChestDa
         .resizable(false)
         .collapsible(false)
         .show(ctx, |ui| {
-            if !enabled { ui.label("Waiting for the host…"); ui.disable(); }
+            if !enabled { ui.label("Waiting for the host…"); }
+            ui.add_enabled_ui(enabled, |ui| {
             ui.label(RichText::new(tier_name).size(16.0).strong());
             ui.add_space(4.0);
             ui.label("Click moves one. Shift-click moves the whole stack. Scroll over a slot to transfer.");
@@ -195,6 +196,7 @@ fn show_container_dialog_inner(ctx: &egui::Context, title: &str, chest: &ChestDa
                 }
             }
 
+            });
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 if ui.button("Close").clicked() {

@@ -3346,13 +3346,11 @@ Aether design.
 slots and its explicit keeper, retaining legacy Steed2 full-body readers.
 Right-click a kept Donkey/Mule while holding a Chest to equip the pack
 (consumes the chest); sneak-right-click with an empty hand on a packed
-mount opens the 27-slot pack via `chest_ui::show_container_dialog` **if it
-still has contents**. Sneak-right-click with an empty hand on an **empty**
-pack instead **unequips it** (wired 2026-07-07): the pack is removed and one
-Chest is returned to the player's inventory (spawned as a world item if the
-inventory is full), toast "Pack removed."; a non-empty pack still just opens
-(with a "Empty the pack first." toast) — so a pack can always be filled and
-later emptied by hand, not only recovered via death-spill. Horse never
+mount always opens its 27-slot pack, including an empty one. The dialog's
+**Remove pack** button is enabled only for an empty pack and rechecks live
+emptiness when it executes. Successful removal returns exactly one Chest to
+the player's inventory, or spills its genuine overflow as a world item; a
+non-empty removal refuses without a refund or loss of cargo. Horse never
 carries a pack (speed vs utility niche). A packed donkey rescued by a Pet Bed
 keeps its pack. **A donkey/mule that dies away from a Pet Bed now spills its
 pack's contents plus one Chest item** (hardened 2026-07-07 — previously the
@@ -3365,6 +3363,26 @@ one pack twice or lose the other. Mounting a wild Horse/Donkey/Mule for the firs
 previously a kept, possibly packed, steed retained `Scattered` and could be
 permanently despawned by ordinary chunk unload before the next save, unlike
 every other tame path).
+
+**Joined shared packs (D2c-2, private wire91; acceptance pending).** A signed
+player's accepted first mount keeps a wild steed by npub; a guest may ride it
+without creating durable keeping. Any genuine keeper permits pack equip/open/
+use/removal under the applicable world/plot policy and current reach. Guests
+and signed players have equal access to an already-kept pack: this adds no
+keeper-only cargo ACL. Existing LegacyLocal seats keep their own-pet behaviour;
+a hosted joiner never inherits a numerical local owner's powers, and later
+mounts never claim or transfer that keeper automatically.
+
+Each joined pack operation is sequential and unpredicted, with actual named
+personal sources and the current live 27-slot cargo in either advertised
+inventory mode. During its flight, inventory movement and spending wait while
+movement, close/pause and required network controls remain usable. A stale
+revision, removal race, lost entity or old body gets an exact zero-effect
+terminal and current canonical window/view; ordinary stock races do not
+require a disconnect. Private Plans cannot cross a shared pack boundary;
+legacy local full-body Plans may still move within its cargo without losing
+the body. Host and local clicks mutate current live ECS cargo, never a stale
+rendering copy. The Mirror default and parked global Strict recovery remain.
 
 **Mule cross-breeding.** The horse family now breeds on Wheat
 (`breeding::breeding_food`). A **plain right-click with Wheat mounts** a

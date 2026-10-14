@@ -408,7 +408,8 @@ fn is_request(packet: &[u8]) -> bool {
     matches!(
         protocol::deserialize_header(packet),
         Some((P::EntityAttack | P::EntityInteract | P::DeviceInteract | P::ItemAction | P::WindowOp, _))
-    )
+    ) || matches!(protocol::deserialize_header(packet), Some((P::Action, payload))
+        if crate::action_wire::ActionPacket::decode(payload).is_ok_and(|action| matches!(action.intent, crate::action_wire::ActionIntent::Pack(_))))
 }
 
 /// C3c-1 — a joiner's use as the server judged it before its edit landed
