@@ -79,7 +79,7 @@ pub(crate) fn returned_world_local(
 ) -> Result<Option<crate::joiner_save::JoinerSave>, String> {
     use crate::handover::live::personal_adapter as adapter;
     let Some(key) = signer else {
-        if adapter.has_any_bound_records(directory)? {
+        if adapter::has_any_bound_records(directory)? {
             return Err("Sign in as this world's saved player before opening it.".into());
         }
         return Ok(None);
@@ -87,7 +87,7 @@ pub(crate) fn returned_world_local(
     let path = adapter::path(directory, key);
     match std::fs::symlink_metadata(&path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            if adapter.has_any_bound_records(directory)? {
+            if adapter::has_any_bound_records(directory)? {
                 return Err(
                     "This world's saved player authority is missing. Nothing was reset.".into(),
                 );
@@ -100,7 +100,7 @@ pub(crate) fn returned_world_local(
     let bytes = adapter::read_regular(&path, crate::joiner_save::MAX_JOINER_SAVE_BYTES)?;
     let saved = crate::joiner_save::JoinerSave::decode(&bytes)?;
     let Some(personal) = &saved.personal else {
-        if adapter.has_any_bound_records(directory)? {
+        if adapter::has_any_bound_records(directory)? {
             return Err(
                 "This world's saved player authority is missing. Nothing was reset.".into(),
             );
