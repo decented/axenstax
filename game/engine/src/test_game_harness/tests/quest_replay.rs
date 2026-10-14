@@ -20,6 +20,12 @@ struct Delivery {
     unfit: Vec<crate::protocol::ItemActionPacket>,
     // Only non-secret result metadata is retained for the actual routing trace.
     results: Vec<(crate::action_identity::ActionFate, crate::quest_wire::QuestNote, u32, u32, u32)>,
+    hold_rewards: bool,
+    hold_last: bool,
+    rewards: VecDeque<Packet>,
+    personal: VecDeque<Packet>,
+    views: Vec<u32>,
+    personal_acks: Vec<(u32, u32)>,
 }
 struct DelayedTransport {
     inner: crate::transport::ChannelClientTransport,
@@ -35,6 +41,11 @@ impl ClientTransport for DelayedTransport {
                     crate::protocol::safe_deserialize(body).unwrap();
                 if matches!(item.action, crate::protocol::ItemAction::GrantUnfit { .. }) {
                     delivery.unfit.push(item);
+                }
+            }
+            Some((crate::protocol::PacketType::PersonalSync, body)) => {
+                if let crate::protocol::PersonalSyncPacket::Applied(ack) = crate::protocol::safe_deserialize(body).unwrap() {
+                    delivery.personal_acks.push((ack.window_event, ack.life));
                 }
             }
             _ => {}
@@ -53,10 +64,38 @@ impl ClientTransport for DelayedTransport {
         {
             return Some(receipt);
         }
+        if !delivery.hold_rewards && let Some(reward) = delivery.rewards.pop_front() {
+            return Some(reward);
+        }
+        if !delivery.hold_last && let Some(personal) = delivery.personal.pop_front() {
+            return Some(personal);
+        }
         while let Some(packet) = self.inner.try_recv_from_server() {
             if let Some((crate::protocol::PacketType::QuestResult, body)) = crate::protocol::deserialize_header(&packet) {
                 let result = crate::quest_wire::QuestResult::decode(body).unwrap();
                 delivery.results.push((result.fate, result.note, result.window_event, result.included_events, result.action.events_applied));
+            }
+            if let Some((crate::protocol::PacketType::QuestView, body)) = crate::protocol::deserialize_header(&packet) {
+                let view: crate::quest_wire::QuestViewPush = crate::protocol::safe_deserialize(body).unwrap();
+                delivery.views.push(view.window_event);
+            }
+            if let Some((crate::protocol::PacketType::InventoryGrant, body)) = crate::protocol::deserialize_header(&packet)
+                && delivery.hold_rewards
+            {
+                let grant: crate::protocol::InventoryGrantPacket = crate::protocol::safe_deserialize(body).unwrap();
+                if delivery.results.last().is_some_and(|(_, _, cost, last, _)| grant.window_event > *cost && grant.window_event < *last) {
+                    delivery.rewards.push_back(packet);
+                    continue;
+                }
+            }
+            if let Some((crate::protocol::PacketType::PersonalSync, body)) = crate::protocol::deserialize_header(&packet)
+                && delivery.hold_last
+            {
+                let personal: crate::protocol::PersonalSyncPacket = crate::protocol::safe_deserialize(body).unwrap();
+                if matches!(personal, crate::protocol::PersonalSyncPacket::Snapshot(snapshot) if delivery.results.last().is_some_and(|(_, _, _, last, _)| snapshot.window_event == *last)) {
+                    delivery.personal.push_back(packet);
+                    continue;
+                }
             }
             match crate::protocol::deserialize_header(&packet) {
                 Some((crate::protocol::PacketType::QuestResult, _)) if delivery.hold_results => {
@@ -374,6 +413,157 @@ fn replay(after_application: bool, full: bool) {
             if full { 0 } else { 2 }
         );
         assert!(host.server.players[i].is_in_world());
+    }
+}
+
+struct PartialRig {
+    hg: HeadlessGame,
+    host: crate::hosted_server::HostedServer,
+    i: usize,
+    delivery: Arc<Mutex<Delivery>>,
+    target: u32,
+    before_event: u32,
+    before_window: crate::staged_window::MarkerSlots,
+    last: u32,
+}
+
+fn physical_window(hg: &HeadlessGame) -> crate::staged_window::MarkerSlots {
+    let slot = &hg.state.players[0];
+    crate::staged_window::MarkerWindow::try_capture_parts(&slot.inventory, &slot.armour_slots, &slot.crafting_ui.cursor_item, &slot.crafting_ui.grid, &hg.state.registry).unwrap().slots()
+}
+
+fn partial_setup(mode: InventoryMode, tag: &str, hold_rewards: bool, hold_last: bool) -> PartialRig {
+    let (mut hg, mut host, i, delivery, target, incarnation, id) = setup(mode, tag, false);
+    let before_event = hg.state.remote_client.as_ref().unwrap().applied_window_event();
+    let before_window = physical_window(&hg);
+    {
+        let mut d = delivery.lock().unwrap();
+        d.hold_rewards = hold_rewards;
+        d.hold_last = hold_last;
+        d.hold_receipts = true;
+        d.results.clear();
+        d.views.clear();
+        d.personal_acks.clear();
+        d.unfit.clear();
+    }
+    hg.state.request_quest(target, incarnation, QuestOperation::TurnIn { id });
+    // Actual world-ready intake is the prerequisite. The offending baseline
+    // has already drained the cost, so pending-cost presence is not a wait.
+    pack_wait(&mut host, &mut hg, |_, game| {
+        let d = delivery.lock().unwrap();
+        game.state.remote_client.as_ref().is_some_and(|client| client.quest_world_intake_observed())
+            && d.results.last().is_some_and(|(_, _, _, last, _)| d.views.iter().any(|view| view > last))
+            && (!hold_rewards || !d.rewards.is_empty())
+            && (!hold_last || !d.personal.is_empty())
+    });
+    trace("partial batch at actual world intake", &host, &hg, i, target, &delivery);
+    let (fate, note, cost, last, base) = *delivery.lock().unwrap().results.last().unwrap();
+    assert_eq!(fate, crate::action_identity::ActionFate::Accepted);
+    assert_eq!(note, crate::quest_wire::QuestNote::Completed);
+    assert_eq!(cost, before_event + 1);
+    assert_eq!(last, cost + 2, "the real fixture has one frozen reward and one personal fence");
+    assert_eq!(base, before_event);
+    assert!(host.server.players[i].personal.as_ref().unwrap().record().unwrap().quests.accepted.is_empty());
+    assert!(hg.state.pack_window_frozen(0), "held receipt still owns the existing shared flight");
+    {
+        let d = delivery.lock().unwrap();
+        if hold_rewards {
+            let (_, body) = crate::protocol::deserialize_header(d.rewards.front().unwrap()).unwrap();
+            let grant: crate::protocol::InventoryGrantPacket = crate::protocol::safe_deserialize(body).unwrap();
+            assert_eq!((grant.window_event, grant.count), (cost + 1, 2));
+        }
+        if hold_last {
+            let (_, body) = crate::protocol::deserialize_header(d.personal.front().unwrap()).unwrap();
+            let crate::protocol::PersonalSyncPacket::Snapshot(snapshot) = crate::protocol::safe_deserialize(body).unwrap() else { panic!("held carrier is the actual LAST snapshot") };
+            assert_eq!((snapshot.window_event, snapshot.life), (last, host.server.players[i].respawns));
+        }
+    }
+    PartialRig { hg, host, i, delivery, target, before_event, before_window, last }
+}
+
+fn partial(hold_rewards: bool, hold_last: bool) {
+    isolate_saves();
+    for mode in [InventoryMode::Mirror, InventoryMode::Strict] {
+        let mut rig = partial_setup(mode, &format!("partial-{hold_rewards}-{hold_last}"), hold_rewards, hold_last);
+        // Own runtime assertion: decode and world intake cannot promote a
+        // partial cost/view beyond its genuinely missing grant or LAST body.
+        assert_eq!(rig.hg.state.remote_client.as_ref().unwrap().applied_window_event(), rig.before_event, "a higher view advanced the physical prefix while the quest batch was incomplete");
+        assert_eq!(physical_window(&rig.hg), rig.before_window, "partial quest carriers spent or rewarded the actual player");
+        assert_eq!(rig.hg.state.players[0].quest_progress.accepted.len(), 1);
+        assert!(rig.delivery.lock().unwrap().personal_acks.is_empty(), "an incomplete quest batch acknowledged its progression");
+        assert!(rig.delivery.lock().unwrap().unfit.is_empty());
+        {
+            let mut d = rig.delivery.lock().unwrap();
+            d.hold_rewards = false;
+            d.hold_last = false;
+        }
+        wait_applied(&mut rig.hg, rig.last);
+        trace("partial batch completed", &rig.host, &rig.hg, rig.i, rig.target, &rig.delivery);
+        assert_eq!(bread(&rig.hg.state.players[0].inventory), 2);
+        assert!(rig.hg.state.players[0].quest_progress.accepted.is_empty());
+        assert!(rig.delivery.lock().unwrap().personal_acks.iter().any(|&(event, life)| event == rig.last && life == 0));
+        rig.delivery.lock().unwrap().hold_receipts = false;
+        pack_wait(&mut rig.host, &mut rig.hg, |server, game| !game.state.pack_window_frozen(0) && server.server.players[rig.i].pack_flight.is_none());
+        assert_eq!(bread(&crate::window_events::effective_window(&rig.host.server.players[rig.i]).inv), 2);
+        assert!(rig.host.server.players[rig.i].is_in_world());
+    }
+}
+
+#[test]
+#[ignore = "needs actual GPU window intake with partial reliable followups"]
+fn game_harness_d2c3_partial_cost_view_waits_for_reward_and_last() { partial(true, true); }
+
+#[test]
+#[ignore = "needs actual GPU window intake with partial reliable followups"]
+fn game_harness_d2c3_partial_last_waits_for_missing_reward() { partial(true, false); }
+
+#[test]
+#[ignore = "needs actual GPU window intake with partial reliable followups"]
+fn game_harness_d2c3_partial_reward_waits_for_missing_last() { partial(false, true); }
+
+#[test]
+#[ignore = "needs actual GPU death, minimum delay, respawn and current personal proof"]
+fn game_harness_d2c3_partial_old_quest_does_not_block_respawn_or_resurrect_reward() {
+    isolate_saves();
+    for mode in [InventoryMode::Mirror, InventoryMode::Strict] {
+        let mut rig = partial_setup(mode, "partial-death", true, true);
+        let old_life = rig.host.server.players[rig.i].respawns;
+        // A genuine authoritative death runs through the normal host tick.
+        // Put the respawn away from the old grave, so a real pickup cannot
+        // be mistaken for an old reward carrier reinstalling stock.
+        let sp = &mut rig.host.server.players[rig.i];
+        sp.spawn_pos = sp.player.pos + glam::Vec3::new(24.0, 0.0, 0.0);
+        sp.combat.health = 0.0;
+        sp.combat.dead = true;
+        sp.death_handled = false;
+        pack_wait(&mut rig.host, &mut rig.hg, |server, _| {
+            let sp = &server.server.players[rig.i];
+            sp.death_handled && sp.combat.dead && sp.dead_ticks >= crate::server::MIN_DEAD_TICKS_BEFORE_RESPAWN
+        });
+        rig.hg.state.remote_client.as_mut().unwrap().send_respawn();
+        let new_life = old_life.checked_add(1).unwrap();
+        pack_wait(&mut rig.host, &mut rig.hg, |server, game| {
+            let sp = &server.server.players[rig.i];
+            sp.respawns == new_life && sp.is_present_and_alive()
+                && game.state.remote_client.as_ref().is_some_and(|client| client.applied_actor_respawns() == new_life && client.personal_inbox.as_ref().is_some_and(|inbox| inbox.applied_through(rig.last, new_life)))
+                && sp.personal.as_ref().is_some_and(|personal| sp.personal_delivery.quiescent(personal, new_life))
+        });
+        assert_eq!(bread(&rig.hg.state.players[0].inventory), 0);
+        assert!(rig.hg.state.players[0].quest_progress.accepted.is_empty());
+        assert!(rig.delivery.lock().unwrap().personal_acks.iter().any(|&(event, life)| event >= rig.last && life == new_life), "only real current-life progression settles the old flight");
+        assert!(!rig.delivery.lock().unwrap().personal.is_empty(), "the old LAST is still genuinely withheld");
+        {
+            let mut d = rig.delivery.lock().unwrap();
+            d.hold_rewards = false;
+            d.hold_last = false;
+            d.hold_receipts = false;
+        }
+        pack_wait(&mut rig.host, &mut rig.hg, |server, game| !game.state.pack_window_frozen(0) && server.server.players[rig.i].pack_flight.is_none());
+        assert_eq!(bread(&rig.hg.state.players[0].inventory), 0, "late old-body rewards cannot reappear after actual respawn");
+        assert!(rig.hg.state.remote_client.as_ref().unwrap().is_connected());
+        let graves: u32 = rig.host.server.world.iter_graves().flat_map(|(_, grave)| grave.slots.iter().flatten()).filter(|stack| stack.item == crate::item::Item::Material(crate::item::MaterialId::Bread)).map(|stack| u32::from(stack.count)).sum();
+        let floor: u32 = rig.host.server.ecs.query::<&crate::entity::ItemEntity>().iter().filter(|(_, item)| item.stack.item == crate::item::Item::Material(crate::item::MaterialId::Bread)).map(|(_, item)| u32::from(item.stack.count)).sum();
+        assert_eq!(graves + floor + bread(&crate::window_events::effective_window(&rig.host.server.players[rig.i]).inv), 2, "death retains the original reward once in authoritative custody");
     }
 }
 

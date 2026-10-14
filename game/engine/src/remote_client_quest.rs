@@ -8,6 +8,12 @@ use crate::{
 use sha2::{Digest, Sha256};
 
 impl RemoteClient {
+    /// Observe actual world-FIFO intake without changing readiness or state.
+    #[cfg(test)]
+    pub(crate) fn quest_world_intake_observed(&self) -> bool {
+        self.pack_flight.as_ref().is_some_and(|flight| flight.requires_personal && flight.world_ready)
+    }
+
     pub(crate) fn reserve_quest_request(
         &mut self,
         request: QuestRequest,
