@@ -131,7 +131,10 @@ pub fn sync_regular(path: &Path) -> std::io::Result<()> {
 /// (a no-op on Windows, see the module comment).
 pub fn sync_dir(path: &Path) -> std::io::Result<()> {
     #[cfg(test)]
-    tests::record_sync();
+    {
+        tests::record_sync();
+        tests::before_directory_sync(path)?;
+    }
     #[cfg(windows)]
     {
         let _ = path;
@@ -143,6 +146,71 @@ pub fn sync_dir(path: &Path) -> std::io::Result<()> {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    struct DirectoryFailure {
+        path: std::path::PathBuf,
+        remaining: usize,
+        failed: usize,
+    }
+    thread_local! {
+        static DIRECTORY_FAILURE: std::cell::RefCell<Option<DirectoryFailure>> = const { std::cell::RefCell::new(None) };
+    }
+    /// Scoped to this thread; cannot migrate into a worker or another test.
+    pub(crate) struct DirectoryFault {
+        previous: Option<DirectoryFailure>,
+        path: std::path::PathBuf,
+        _thread: std::marker::PhantomData<std::rc::Rc<()>>,
+    }
+    impl DirectoryFault {
+        pub(crate) fn failures(&self) -> usize {
+            DIRECTORY_FAILURE.with(|active| {
+                active
+                    .borrow()
+                    .as_ref()
+                    .filter(|fault| fault.path == self.path)
+                    .map_or(0, |fault| fault.failed)
+            })
+        }
+    }
+    impl Drop for DirectoryFault {
+        fn drop(&mut self) {
+            DIRECTORY_FAILURE.with(|active| *active.borrow_mut() = self.previous.take());
+        }
+    }
+    /// Fail the nth matching directory sync and every subsequent matching call
+    /// until Drop. Paths used by other tests and earlier fixture work are inert.
+    pub(crate) fn fail_directory_on_match(path: &std::path::Path, nth: usize) -> DirectoryFault {
+        assert!(nth > 0);
+        let previous = DIRECTORY_FAILURE.with(|active| {
+            active.replace(Some(DirectoryFailure {
+                path: path.to_path_buf(),
+                remaining: nth,
+                failed: 0,
+            }))
+        });
+        DirectoryFault {
+            previous,
+            path: path.to_path_buf(),
+            _thread: std::marker::PhantomData,
+        }
+    }
+    pub(super) fn before_directory_sync(path: &std::path::Path) -> std::io::Result<()> {
+        DIRECTORY_FAILURE.with(|active| {
+            let mut active = active.borrow_mut();
+            let Some(fault) = active.as_mut().filter(|fault| fault.path == path) else {
+                return Ok(());
+            };
+            if fault.remaining > 1 {
+                fault.remaining -= 1;
+                return Ok(());
+            }
+            fault.remaining = 0;
+            fault.failed = fault.failed.saturating_add(1);
+            Err(std::io::Error::other(
+                "injected persistent directory sync failure",
+            ))
+        })
+    }
+
     thread_local! {
         static SYNC_COUNT: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
     }

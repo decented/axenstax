@@ -114,6 +114,33 @@ pub struct Ledger {
     path: PathBuf,
 }
 
+#[cfg(test)]
+thread_local! {
+    static FIXTURE_INSTALL: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+/// A different test installation on this thread, without moving or editing
+/// the process's original fixture ledger. Cannot be sent to another thread.
+#[cfg(test)]
+pub(crate) struct FixtureInstall {
+    previous: Option<PathBuf>,
+    _thread: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+#[cfg(test)]
+impl Drop for FixtureInstall {
+    fn drop(&mut self) {
+        FIXTURE_INSTALL.with(|path| *path.borrow_mut() = self.previous.take());
+    }
+}
+#[cfg(test)]
+pub(crate) fn fixture_install_path(path: &Path) -> FixtureInstall {
+    let previous = FIXTURE_INSTALL.with(|current| current.replace(Some(path.to_path_buf())));
+    FixtureInstall {
+        previous,
+        _thread: std::marker::PhantomData,
+    }
+}
+
 impl Ledger {
     pub fn at(path: PathBuf) -> Self {
         Self { path }
@@ -121,6 +148,10 @@ impl Ledger {
     /// `<data root>/handover/ledger`: beside (never inside) the imports
     /// folder, and outside every world.
     pub fn install() -> Self {
+        #[cfg(test)]
+        if let Some(path) = FIXTURE_INSTALL.with(|path| path.borrow().clone()) {
+            return Self::at(path);
+        }
         Self::at(crate::data_dir::data_root().join("handover").join("ledger"))
     }
     pub fn path(&self) -> &Path {

@@ -41,18 +41,45 @@ Additional checkpoint checks passed:
 
 These controls use a loopback stored relay, an in-memory online setup relay and
 an injected direct game channel after the real Answer is verified. They do not
-claim a two-machine router or public-relay playtest. The retained current-state
-helper and released-proof assertions remain separate from complete native
-retained-copy, fault and portability acceptance.
+claim a two-machine router or public-relay playtest. The checks below separately exercise the actual native retained-copy loader and
+real-disk fault paths.
+
+Additional retained-copy checkpoint checks passed (five exact controls):
+
+- Actual native source-owned inventory and progression, original history/genesis,
+  matching primary/autosave save and discard, deposit/withdraw conservation, and
+  current state on save/reopen. Same-install private latent-exposure and developed
+  Plan bodies restore without changing their markers.
+- A complete-directory copy opens through a fresh GameState with a genuinely
+  absent isolated installation ledger and a separate private Plan store. Unknown
+  private bodies remain exact unresolved markers/developed flags; a deliberately
+  embedded world Plan remains complete. No private profile store is exported.
+- Persistent post-rename and post-inert-unlink directory-sync failures refuse
+  actual native play; retry durably releases the copy. Repeating retirement finish
+  preserves exact bytes of the subsequently played copy. The dedicated loader
+  counterpart runs on the real ecryptfs test filesystem.
+- A destination collision preserves the existing world and prepared copy; retry
+  succeeds only after the fixture explicitly moves its other world aside.
+- Forced native open of the inactive copy before original retirement refuses,
+  preserves bytes and leaves the original playable after ordinary cancellation.
+- Known and unknown wrong personas, and a corrupt selected personal snapshot,
+  refuse without frozen-seed replay or byte repair.
+
+Native Clippy passed. Removing the native authority-durability confirmation
+produced a genuine runtime failure: a copy became live after the failed inert
+unlink directory sync. Exact source restoration returned the control green;
+the rebuilt executable SHA matched the earlier five-control executable.
 
 Still required before the concrete two-machine playtest:
 
 - [x] Checkpoint actual original-invitation 0→1, hand-back 2 and retirement 2→3.
 - [x] Strict frozen source metadata read; missing/torn metadata refusal without
       display/default recovery or changed source bytes.
-- [ ] Actual promoted/retained native load, matching save/autosave/discard,
-      dedicated role continuation, delayed authorisation and Plan restoration.
-- [ ] Retained promotion/directory-sync faults, restart retries, non-overwriting
+- [x] Actual promoted/retained native load, matching save/autosave/discard,
+      dedicated role continuation and Plan restoration.
+- [ ] Actual client first-click prediction/reservation guard and exact initial
+      acknowledgement send order with delayed Snapshot/linked Replace delivery.
+- [x] Retained promotion/directory-sync faults, native loader retries, non-overwriting
       collision handling and complete-folder portability.
 - [ ] Normal visual/packs integration, independent review and complete immutable
       native/GPU/WASM/check.sh regression.

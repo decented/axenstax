@@ -3120,4 +3120,139 @@ mod session {
         crate::handover::live::authority::open_guard(&working).unwrap();
     }
 
+    /// Run on the wrapper's real disk as well as the GPU counterpart: the
+    /// source retires durably, but a visible copy cannot play before retry.
+    #[cfg(unix)]
+    #[test]
+    fn handover_retained_directory_faults_refuse_server_and_retry_without_replacing_current_state()
+    {
+        use crate::handover::live::{personal_adapter, retained};
+        for after_unlink in [false, true] {
+            let tag = if after_unlink {
+                "retained-disk-unlink"
+            } else {
+                "retained-disk-rename"
+            };
+            let _worlds = crate::save::WorldsRootGuard::new(tag);
+            let mut p = ready_pair(tag);
+            let folder = format!("retained-{}", hex::encode(p.src.retained_copy()));
+            let world = crate::save::world_dir(&folder);
+            let fault_path = if after_unlink {
+                world.join("handover")
+            } else {
+                crate::save::worlds_root()
+            };
+            let fault = crate::fsync::tests::fail_directory_on_match(
+                &fault_path,
+                if after_unlink { 2 } else { 1 },
+            );
+            drive(&mut p, SourceStage::Retired);
+            assert_eq!(p.src.stage(), SourceStage::Retired);
+            assert!(fault.failures() > 0);
+            assert!(world.is_dir());
+            let store = MarkerStore::open_existing(world.join("handover")).unwrap();
+            assert_eq!(
+                store
+                    .exists(MarkerKind::RetainedInert, p.src.retained_copy())
+                    .unwrap(),
+                !after_unlink
+            );
+            let bytes = std::fs::read(world.join("world.dat")).unwrap();
+            let mut server = crate::server::GameServer::new(0, folder.clone(), 42);
+            assert!(
+                server.initial_load().is_err(),
+                "dedicated play began with incomplete retained directory durability"
+            );
+            assert_eq!(std::fs::read(world.join("world.dat")).unwrap(), bytes);
+            assert!(crate::handover::live::authority::open_guard(&p.dir.0.join("world")).is_err());
+            let source = MarkerStore::open_existing(p.dir.0.join("world/handover")).unwrap();
+            let retired = crate::handover::phase::RetiredCommit::read(&source, p.src.transfer())
+                .unwrap()
+                .unwrap();
+            assert!(
+                retained::finish_retired(&p.dir.0.join("world"), &retired, src_install()).is_err()
+            );
+            drop(fault);
+            retained::finish_retired(&p.dir.0.join("world"), &retired, src_install()).unwrap();
+            let proof = personal_adapter::proof(&world).unwrap().unwrap();
+            let owner = keys(SOURCE_PERSONA).public_key().to_bytes();
+            let saved = personal_adapter::load_or_bootstrap(&world, owner, &proof)
+                .unwrap()
+                .unwrap();
+            let mut local = crate::player_slot::PlayerSlot::new(0, glam::Vec3::ZERO, 1.0);
+            personal_adapter::install(&saved, &mut local).unwrap();
+            local.kill_counter.insert(crate::mob::MobType::Pig, 23);
+            // Update through the canonical codec; retry must preserve its
+            // exact bytes rather than reinstalling the frozen seed.
+            let selected = crate::joiner_save::capture_local(&local).unwrap().unwrap();
+            let current_save = crate::joiner_save::JoinerSave::decode(&selected.0).unwrap();
+            personal_adapter::write(&world, owner, &current_save).unwrap();
+            let current_path = world
+                .join("joiners")
+                .join(format!("{}.dat", npub(&keys(SOURCE_PERSONA))));
+            let current = std::fs::read(&current_path).unwrap();
+            retained::finish_retired(&p.dir.0.join("world"), &retired, src_install()).unwrap();
+            assert_eq!(std::fs::read(current_path).unwrap(), current);
+            let reopened = personal_adapter::load_or_bootstrap(&world, owner, &proof)
+                .unwrap()
+                .unwrap();
+            let mut fresh = crate::player_slot::PlayerSlot::new(0, glam::Vec3::ZERO, 1.0);
+            personal_adapter::install(&reopened, &mut fresh).unwrap();
+            assert_eq!(fresh.kill_counter[&crate::mob::MobType::Pig], 23);
+        }
+    }
+
+    #[test]
+    fn handover_retained_destination_collision_preserves_existing_world_and_prepared_copy() {
+        use crate::handover::live::retained;
+        let _worlds = crate::save::WorldsRootGuard::new("retained-no-replace");
+        let mut p = ready_pair("retained-no-replace");
+        let folder = format!("retained-{}", hex::encode(p.src.retained_copy()));
+        let world = crate::save::world_dir(&folder);
+        std::fs::create_dir(&world).unwrap();
+        let sentinel = world.join("world.dat");
+        std::fs::write(&sentinel, b"an existing world belongs here").unwrap();
+        drive(&mut p, SourceStage::Retired);
+        assert_eq!(p.src.stage(), SourceStage::Retired);
+        assert!(p.src.retained_folder().is_none());
+        assert_eq!(
+            std::fs::read(&sentinel).unwrap(),
+            b"an existing world belongs here"
+        );
+        let staging = crate::save::worlds_root()
+            .join(".handover-retained")
+            .join(hex::encode(p.src.retained_copy()));
+        let working = std::fs::read_dir(&staging)
+            .unwrap()
+            .map(|entry| entry.unwrap().path().join("working"))
+            .find(|path| path.is_dir())
+            .unwrap();
+        let pending = std::fs::read(working.join("world.dat")).unwrap();
+        let source = MarkerStore::open_existing(p.dir.0.join("world/handover")).unwrap();
+        let retired = crate::handover::phase::RetiredCommit::read(&source, p.src.transfer())
+            .unwrap()
+            .unwrap();
+        assert!(retained::finish_retired(&p.dir.0.join("world"), &retired, src_install()).is_err());
+        assert_eq!(
+            std::fs::read(&sentinel).unwrap(),
+            b"an existing world belongs here"
+        );
+        assert_eq!(std::fs::read(working.join("world.dat")).unwrap(), pending);
+        assert!(crate::handover::live::authority::open_guard(&p.dir.0.join("world")).is_err());
+        // Explicit fixture resolution preserves the existing bytes elsewhere;
+        // the retry itself never removes or overwrites that other world.
+        std::fs::rename(
+            &world,
+            crate::save::world_dir("retained-collision-preserved"),
+        )
+        .unwrap();
+        retained::finish_retired(&p.dir.0.join("world"), &retired, src_install()).unwrap();
+        assert_eq!(std::fs::read(world.join("world.dat")).unwrap(), pending);
+        assert_eq!(
+            std::fs::read(crate::save::world_dir("retained-collision-preserved").join("world.dat"))
+                .unwrap(),
+            b"an existing world belongs here"
+        );
+    }
+
 }

@@ -1470,3 +1470,717 @@ fn game_harness_handover_frozen_capture_refuses_torn_or_missing_metadata_without
         assert!(hg.state.tick_counter > counter, "ordinary source play never resumed");
     }
 }
+
+/// A real lobby load action must return a new refusal without becoming live.
+fn refused_from_lobby(hg: &mut HeadlessGame, folder: &str) {
+    if let crate::GameMode::Menu(menu) = &mut hg.state.mode {
+        menu.notice = None;
+    }
+    hg.state.pending_menu_action = Some((
+        crate::menu::MenuAction::LoadWorld(folder.into(), crate::spawn_pref::SpawnPref::Default),
+        web_time::Instant::now(),
+    ));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+    loop {
+        hg.frames(1);
+        assert!(
+            !matches!(hg.state.mode, crate::GameMode::Playing),
+            "a refused selected world became live"
+        );
+        if let crate::GameMode::Menu(menu) = &hg.state.mode
+            && menu.notice.is_some()
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "failed native open never returned an honest refusal"
+        );
+    }
+}
+
+/// The distinct released copy opens through the actual native loader with the
+/// source's identity-selected state. Saved/autosaved bag and chest choose one
+/// snapshot, and a complete directory copy remains portable without a ledger.
+/// Private held bodies stay installation-local; a fresh reader preserves their
+/// exact unresolved markers while real world-embedded Plans remain complete.
+#[test]
+#[ignore = "needs a GPU adapter holding the 506-layer atlas"]
+fn game_harness_handover_retained_source_native_save_discard_and_complete_directory_portability() {
+    let _worlds = crate::save::WorldsRootGuard::new("retained-native");
+    let dir = Tmp::new("retained-native");
+    let shared_cell = (2, 69, 2);
+    let mut shared_body = crate::plan::PlanData::debug_3x3_stone();
+    shared_body.name = "Retained explicitly embedded world blueprint".into();
+    shared_body.develop_state = crate::plan::DevelopState::Developed;
+    let (mut hg, mut far) = frozen_after("retained-native", &dir, |hg| {
+        let mut plan = crate::plan::PlanData::debug_3x3_stone();
+        plan.name = "Retained source latent exposure".into();
+        plan.develop_state = crate::plan::DevelopState::Latent { exposure_ticks: 12 };
+        crate::plan_store::remember_checked(
+            &plan,
+            crate::body_residency::allocated_body_bytes(&plan).unwrap(),
+        )
+        .unwrap();
+        hg.state.players[0].crafting_ui.cursor_item = Some(crate::item::ItemStack {
+            item: crate::item::Item::Plan(plan),
+            count: 1,
+        });
+        let mut developed = crate::plan::PlanData::debug_3x3_stone();
+        developed.name = "Retained source developed body".into();
+        developed.develop_state = crate::plan::DevelopState::Developed;
+        crate::plan_store::remember_checked(
+            &developed,
+            crate::body_residency::allocated_body_bytes(&developed).unwrap(),
+        )
+        .unwrap();
+        hg.state.players[0].crafting_ui.grid[1][2] = Some(crate::item::ItemStack {
+            item: crate::item::Item::Plan(developed),
+            count: 1,
+        });
+        hg.state.world.set_block(
+            shared_cell.0,
+            shared_cell.1,
+            shared_cell.2,
+            crate::block::STONE,
+        );
+        hg.state.world.set_face_attachment(
+            shared_cell,
+            0,
+            crate::world::FaceAttachment::Blueprint(Box::new(shared_body.clone())),
+        );
+        let mut meta = crate::save::try_load_world_meta(&hg.state.world_name).unwrap();
+        meta.genesis_block_found = true;
+        meta.description = "Exact retained authored history".into();
+        crate::save::save_world_meta(&hg.state.world_name, &meta).unwrap();
+    });
+    let original_folder = hg.state.world_name.clone();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+    while !matches!(source_stage(&hg), Some(SourceStage::Retired)) {
+        let _ = far.dst.as_mut().unwrap().pump(now());
+        round(&mut hg);
+        assert!(
+            std::time::Instant::now() < deadline,
+            "retained native source did not retire: {:?}",
+            source_stage(&hg)
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let Some(Handover::Source { session, .. }) = &hg.state.handover else {
+        panic!("source disappeared")
+    };
+    let folder = session
+        .retained_folder()
+        .expect("the retained copy was not durably released")
+        .to_string();
+    assert_ne!(folder, original_folder);
+    let world = crate::save::world_dir(&folder);
+    let proof = crate::handover::live::personal_adapter::proof(&world)
+        .unwrap()
+        .unwrap();
+    assert!(proof.is_retained());
+    assert_eq!(proof.local_owner(), key(SOURCE_PERSONA));
+    let metadata = crate::save::try_load_world_meta(&folder).unwrap();
+    assert!(metadata.genesis_block_found);
+    assert_eq!(metadata.description, "Exact retained authored history");
+    assert!(metadata.published_to.is_none() && !metadata.cloud_save);
+    assert!(hg.state.leave_world(
+        crate::world_exit::SaveChoice::Discard,
+        crate::world_exit::ExitTo::Lobby
+    ));
+    hg.state.handover_fixture = Some(Fixture {
+        signed_in: Some(key(SOURCE_PERSONA)),
+        recipient: None,
+    });
+    open_from_lobby(&mut hg, &folder);
+    assert_eq!(hg.state.players[0].inventory.slot(4).unwrap().count, 9);
+    assert_eq!(
+        hg.state.players[0].kill_counter[&crate::mob::MobType::Pig],
+        7
+    );
+    assert!(
+        hg.state.players[0].inventory.slot(5).is_none(),
+        "recipient bag donated to source"
+    );
+    let crate::item::Item::Plan(plan) = &hg.state.players[0]
+        .crafting_ui
+        .cursor_item
+        .as_ref()
+        .unwrap()
+        .item
+    else {
+        panic!("retained source Plan lost")
+    };
+    assert_eq!(
+        plan.develop_state,
+        crate::plan::DevelopState::Latent { exposure_ticks: 12 }
+    );
+    assert!(
+        plan.marker.is_none(),
+        "retained private body did not resolve"
+    );
+    assert_eq!(
+        hg.state.world.face_attachment_at(shared_cell, 0),
+        Some(&crate::world::FaceAttachment::Blueprint(Box::new(
+            shared_body.clone()
+        )))
+    );
+    let retained_plan = plan.clone();
+    let crate::item::Item::Plan(developed) = &hg.state.players[0].crafting_ui.grid[1][2]
+        .as_ref()
+        .unwrap()
+        .item
+    else {
+        panic!("retained developed body lost")
+    };
+    assert_eq!(
+        developed.develop_state,
+        crate::plan::DevelopState::Developed
+    );
+    assert!(
+        developed.marker.is_none(),
+        "developed private body did not resolve"
+    );
+    let retained_developed = developed.clone();
+    let chest = (3, 69, 3);
+    hg.state
+        .world
+        .set_block(chest.0, chest.1, chest.2, crate::block::CHEST);
+    hg.state
+        .world
+        .insert_chest(chest, crate::chest::ChestData::default());
+    hg.state.save_live_world().unwrap();
+    let stack = hg.state.players[0].inventory.slot(4).cloned().unwrap();
+    hg.state.players[0].inventory.set_slot(4, None);
+    hg.state.world.chest_at_mut(chest).unwrap().slots[0] = Some(stack);
+    hg.state.players[0]
+        .kill_counter
+        .insert(crate::mob::MobType::Pig, 23);
+    hg.state.autosave_counter = 5999;
+    hg.ticks(1);
+    assert!(crate::save::has_autosave(&folder));
+    assert!(hg.state.leave_world(
+        crate::world_exit::SaveChoice::Discard,
+        crate::world_exit::ExitTo::Lobby
+    ));
+    open_from_lobby(&mut hg, &folder);
+    assert_eq!(
+        hg.state.players[0].inventory.slot(4).unwrap().count,
+        9,
+        "discard selected later personal autosave"
+    );
+    assert!(
+        hg.state.world.chest_at(chest).unwrap().slots[0].is_none(),
+        "discard retained later chest"
+    );
+    assert_eq!(
+        hg.state.players[0].kill_counter[&crate::mob::MobType::Pig],
+        7
+    );
+    let stack = hg.state.players[0].inventory.slot(4).cloned().unwrap();
+    hg.state.players[0].inventory.set_slot(4, None);
+    hg.state.world.chest_at_mut(chest).unwrap().slots[0] = Some(stack);
+    hg.state.players[0]
+        .kill_counter
+        .insert(crate::mob::MobType::Pig, 23);
+    assert!(hg.state.leave_world(
+        crate::world_exit::SaveChoice::Save,
+        crate::world_exit::ExitTo::Lobby
+    ));
+    open_from_lobby(&mut hg, &folder);
+    assert!(
+        hg.state.players[0].inventory.slot(4).is_none(),
+        "save replayed frozen source bag"
+    );
+    assert_eq!(
+        hg.state.world.chest_at(chest).unwrap().slots[0]
+            .as_ref()
+            .unwrap()
+            .count,
+        9
+    );
+    assert_eq!(
+        hg.state.players[0].kill_counter[&crate::mob::MobType::Pig],
+        23
+    );
+    let stack = hg.state.world.chest_at_mut(chest).unwrap().slots[0]
+        .take()
+        .unwrap();
+    hg.state.players[0].inventory.set_slot(4, Some(stack));
+    hg.state.players[0]
+        .kill_counter
+        .insert(crate::mob::MobType::Pig, 24);
+    hg.state.autosave_counter = 5999;
+    hg.ticks(1);
+    assert!(hg.state.leave_world(
+        crate::world_exit::SaveChoice::Discard,
+        crate::world_exit::ExitTo::Lobby
+    ));
+    open_from_lobby(&mut hg, &folder);
+    assert!(
+        hg.state.players[0].inventory.slot(4).is_none(),
+        "discard duplicated withdrawn source bag"
+    );
+    assert_eq!(
+        hg.state.world.chest_at(chest).unwrap().slots[0]
+            .as_ref()
+            .unwrap()
+            .count,
+        9
+    );
+    assert_eq!(
+        hg.state.players[0].kill_counter[&crate::mob::MobType::Pig],
+        23
+    );
+    assert!(hg.state.leave_world(
+        crate::world_exit::SaveChoice::Save,
+        crate::world_exit::ExitTo::Lobby
+    ));
+    let portable = "retained-native-full-directory-copy";
+    let reader_worlds = dir.0.join("fresh-reader-worlds");
+    std::fs::create_dir(&reader_worlds).unwrap();
+    let portable_dir = reader_worlds.join(portable);
+    // A complete directory copy, not generic archive/profile export. Include
+    // the signed retained proof, exact manifest, participants and joiners.
+    std::fs::create_dir(&portable_dir).unwrap();
+    let mut pending = vec![world.clone()];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(directory).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            let output = portable_dir.join(path.strip_prefix(&world).unwrap());
+            assert!(!entry.file_type().unwrap().is_symlink());
+            if entry.file_type().unwrap().is_dir() {
+                std::fs::create_dir(&output).unwrap();
+                pending.push(path);
+            } else {
+                std::fs::copy(path, output).unwrap();
+            }
+        }
+    }
+    let source_world = crate::save::world_dir(&original_folder);
+    let source_store =
+        crate::handover::durable::MarkerStore::open_existing(source_world.join("handover"))
+            .unwrap();
+    let retirement =
+        crate::handover::phase::RetiredCommit::read(&source_store, proof.core.transfer)
+            .unwrap()
+            .unwrap();
+    let original_ledger = crate::handover::ledger::Ledger::install();
+    assert!(original_ledger.lists(&retirement.ledger_entry()));
+    let original_ledger_bytes = std::fs::read(original_ledger.path()).unwrap();
+    let fresh_ledger = dir.0.join("fresh-reader-install").join("ledger");
+    let missing = crate::handover::ledger::fixture_install_path(&fresh_ledger);
+    assert_eq!(
+        crate::handover::ledger::Ledger::install().path(),
+        fresh_ledger.as_path()
+    );
+    assert!(!fresh_ledger.exists());
+    assert!(!crate::handover::ledger::Ledger::install().lists(&retirement.ledger_entry()));
+    drop(hg);
+    // A new game reader under an empty installation ledger must accept the
+    // released signed personal proof; old jobs/threads cannot give this copy
+    // adoption rights, since it carries no original activation/receipt.
+    crate::save::with_worlds_root(&reader_worlds, || {
+        let private_marker = crate::plan::marker(&retained_plan);
+        let developed_marker = crate::plan::marker(&retained_developed);
+        assert!(crate::plan_store::resolve(private_marker).is_none());
+        assert!(crate::plan_store::resolve(developed_marker).is_none());
+        let mut reader = HeadlessGame::boot_into_world("retained-portable-fresh-reader");
+        assert!(reader.state.leave_world(
+            crate::world_exit::SaveChoice::Discard,
+            crate::world_exit::ExitTo::Lobby
+        ));
+        reader.state.handover_fixture = Some(Fixture {
+            signed_in: Some(key(SOURCE_PERSONA)),
+            recipient: None,
+        });
+        open_from_lobby(&mut reader, portable);
+        assert!(
+            !fresh_ledger.exists(),
+            "opening personal provenance tried to adopt original authority"
+        );
+        assert!(!crate::handover::ledger::Ledger::install().lists(&retirement.ledger_entry()));
+        assert!(
+            reader.state.players[0].inventory.slot(4).is_none(),
+            "portable copy replayed frozen bag"
+        );
+        assert_eq!(
+            reader.state.world.chest_at(chest).unwrap().slots[0]
+                .as_ref()
+                .unwrap()
+                .count,
+            9
+        );
+        assert_eq!(
+            reader.state.players[0].kill_counter[&crate::mob::MobType::Pig],
+            23
+        );
+        let crate::item::Item::Plan(plan) = &reader.state.players[0]
+            .crafting_ui
+            .cursor_item
+            .as_ref()
+            .unwrap()
+            .item
+        else {
+            panic!("portable private Plan lost")
+        };
+        assert_eq!(
+            plan.marker,
+            Some(private_marker),
+            "portable load lost or invented a private body"
+        );
+        assert!(!plan.develop_state.is_developed());
+        let crate::item::Item::Plan(developed) = &reader.state.players[0].crafting_ui.grid[1][2]
+            .as_ref()
+            .unwrap()
+            .item
+        else {
+            panic!("portable developed body lost")
+        };
+        assert_eq!(
+            developed.marker,
+            Some(developed_marker),
+            "portable load lost or invented a developed private body"
+        );
+        assert!(developed.develop_state.is_developed());
+        assert_eq!(
+            reader.state.world.face_attachment_at(shared_cell, 0),
+            Some(&crate::world::FaceAttachment::Blueprint(Box::new(
+                shared_body.clone()
+            ))),
+            "portable world lost its deliberately embedded real Plan"
+        );
+        let metadata = crate::save::try_load_world_meta(portable).unwrap();
+        assert!(metadata.genesis_block_found);
+        assert_eq!(metadata.description, "Exact retained authored history");
+        assert!(crate::handover::live::authority::open_guard(&source_world).is_err());
+        assert!(reader.state.leave_world(
+            crate::world_exit::SaveChoice::Discard,
+            crate::world_exit::ExitTo::Lobby
+        ));
+        // A different known participant and an unknown persona cannot receive
+        // the selected source-owner bag, even with complete proof files present.
+        let selected_before = snapshot(&portable_dir);
+        for actor in [RECIPIENT_PERSONA, 0x55] {
+            reader.state.handover_fixture = Some(Fixture {
+                signed_in: Some(key(actor)),
+                recipient: None,
+            });
+            refused_from_lobby(&mut reader, portable);
+            assert_eq!(
+                snapshot(&portable_dir),
+                selected_before,
+                "wrong-identity load changed portable current state"
+            );
+        }
+        reader.state.handover_fixture = Some(Fixture {
+            signed_in: Some(key(SOURCE_PERSONA)),
+            recipient: None,
+        });
+        let selected_path = portable_dir.join("world.dat");
+        let selected_bytes = std::fs::read(&selected_path).unwrap();
+        let (mut selected, defaulted) =
+            crate::save::read_world_save_reporting(&selected_bytes).unwrap();
+        assert!(!defaulted);
+        selected.local_personal.as_mut().unwrap().0[0] = 255;
+        crate::handover::live::personal_adapter::write_world_snapshot(
+            &portable_dir,
+            &portable_dir,
+            &selected,
+        )
+        .unwrap();
+        let corrupt = snapshot(&portable_dir);
+        refused_from_lobby(&mut reader, portable);
+        assert_eq!(
+            snapshot(&portable_dir),
+            corrupt,
+            "corrupt selected state was repaired or replaced by a frozen bag"
+        );
+        std::fs::write(&selected_path, &selected_bytes).unwrap();
+        if let crate::GameMode::Menu(menu) = &mut reader.state.mode {
+            menu.notice = None;
+        }
+        open_from_lobby(&mut reader, portable);
+        assert_eq!(
+            reader.state.players[0].kill_counter[&crate::mob::MobType::Pig],
+            23
+        );
+        assert!(reader.state.players[0].inventory.slot(4).is_none());
+        assert!(reader.state.leave_world(
+            crate::world_exit::SaveChoice::Discard,
+            crate::world_exit::ExitTo::Lobby
+        ));
+        drop(reader);
+    });
+    drop(missing);
+    assert_eq!(crate::handover::ledger::Ledger::install(), original_ledger);
+    assert_eq!(
+        std::fs::read(original_ledger.path()).unwrap(),
+        original_ledger_bytes
+    );
+}
+
+/// A visible copy is still inactive after a failed parent sync; after inert
+/// removal, the actual native loader must confirm its directory durability.
+#[cfg(unix)]
+#[test]
+#[ignore = "needs a GPU adapter holding the 506-layer atlas"]
+fn game_harness_handover_retained_directory_failures_refuse_native_play_and_retry_without_reset() {
+    use crate::handover::live::{personal_adapter, retained};
+    use crate::handover::{
+        durable::{MarkerKind, MarkerStore},
+        phase::RetiredCommit,
+    };
+    for after_unlink in [false, true] {
+        let tag = if after_unlink {
+            "retained-post-unlink"
+        } else {
+            "retained-post-rename"
+        };
+        let _worlds = crate::save::WorldsRootGuard::new(tag);
+        let dir = Tmp::new(tag);
+        let (mut hg, mut far) = frozen(tag, &dir);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+        while source_stage(&hg) != Some(SourceStage::ReadyVerified) {
+            far.dst.as_mut().unwrap().pump(now()).unwrap();
+            round(&mut hg);
+            assert!(
+                std::time::Instant::now() < deadline,
+                "source copy never became ready"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let Some(Handover::Source { session, .. }) = &hg.state.handover else {
+            panic!("source disappeared")
+        };
+        let (transfer, copy) = (session.transfer(), session.retained_copy());
+        let folder = format!("retained-{}", hex::encode(copy));
+        let world = crate::save::world_dir(&folder);
+        let original = crate::save::world_dir(&hg.state.world_name);
+        let before_source = snapshot(&original);
+        let path = if after_unlink {
+            world.join("handover")
+        } else {
+            crate::save::worlds_root()
+        };
+        let fault =
+            crate::fsync::tests::fail_directory_on_match(&path, if after_unlink { 2 } else { 1 });
+        while source_stage(&hg) != Some(SourceStage::Retired) {
+            let _ = far.dst.as_mut().unwrap().pump(now());
+            round(&mut hg);
+            assert!(
+                std::time::Instant::now() < deadline,
+                "source never retired at directory boundary"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(
+            fault.failures() > 0,
+            "the executing source thread escaped the injected directory boundary"
+        );
+        assert!(
+            world.is_dir(),
+            "rename did not precede the injected boundary"
+        );
+        let copy_store = MarkerStore::open_existing(world.join("handover")).unwrap();
+        assert_eq!(
+            copy_store.exists(MarkerKind::RetainedInert, copy).unwrap(),
+            !after_unlink,
+            "the fault did not land after the intended rename/unlink"
+        );
+        assert_eq!(
+            snapshot(&original),
+            before_source,
+            "a retained release failure changed original source data"
+        );
+        assert!(
+            crate::handover::live::authority::open_guard(&original).is_err(),
+            "the retired original resumed play"
+        );
+        let source_store = MarkerStore::open_existing(original.join("handover")).unwrap();
+        let retired = RetiredCommit::read(&source_store, transfer)
+            .unwrap()
+            .unwrap();
+        assert!(hg.state.leave_world(
+            crate::world_exit::SaveChoice::Discard,
+            crate::world_exit::ExitTo::Lobby
+        ));
+        hg.state.handover_fixture = Some(Fixture {
+            signed_in: Some(key(SOURCE_PERSONA)),
+            recipient: None,
+        });
+        let before_copy = snapshot(&world);
+        let prior_failures = fault.failures();
+        refused_from_lobby(&mut hg, &folder);
+        if after_unlink {
+            assert!(
+                fault.failures() > prior_failures,
+                "native durable confirmation ran outside the scoped executing thread"
+            );
+        }
+        assert_eq!(
+            snapshot(&world),
+            before_copy,
+            "a refused native open rewrote selected personal/world data"
+        );
+        drop(fault);
+        assert_eq!(
+            retained::finish_retired(
+                &original,
+                &retired,
+                &crate::handover::ledger::Ledger::install()
+            )
+            .unwrap(),
+            folder
+        );
+        assert!(!copy_store.exists(MarkerKind::RetainedInert, copy).unwrap());
+        if let crate::GameMode::Menu(menu) = &mut hg.state.mode {
+            menu.notice = None;
+        }
+        open_from_lobby(&mut hg, &folder);
+        assert_eq!(hg.state.players[0].inventory.slot(4).unwrap().count, 9);
+        assert_eq!(
+            hg.state.players[0].kill_counter[&crate::mob::MobType::Pig],
+            7
+        );
+        hg.state.players[0].inventory.set_slot(
+            4,
+            Some(crate::item::ItemStack::new_block(crate::block::GLASS, 17)),
+        );
+        hg.state.players[0]
+            .kill_counter
+            .insert(crate::mob::MobType::Pig, 23);
+        assert!(hg.state.leave_world(
+            crate::world_exit::SaveChoice::Save,
+            crate::world_exit::ExitTo::Lobby
+        ));
+        let played = snapshot(&world);
+        retained::finish_retired(
+            &original,
+            &retired,
+            &crate::handover::ledger::Ledger::install(),
+        )
+        .unwrap();
+        assert_eq!(
+            snapshot(&world),
+            played,
+            "retirement retry replaced the played copy with its old prepared snapshot"
+        );
+        open_from_lobby(&mut hg, &folder);
+        assert_eq!(hg.state.players[0].inventory.slot(4).unwrap().count, 17);
+        assert_eq!(
+            hg.state.players[0].kill_counter[&crate::mob::MobType::Pig],
+            23
+        );
+        assert!(
+            personal_adapter::proof(&world)
+                .unwrap()
+                .unwrap()
+                .is_retained()
+        );
+        assert!(hg.state.leave_world(
+            crate::world_exit::SaveChoice::Discard,
+            crate::world_exit::ExitTo::Lobby
+        ));
+        assert_eq!(snapshot(&original), before_source);
+    }
+}
+
+/// Even forcing an inactive prepared directory into the ordinary world list
+/// cannot open it. Cancelling before retirement keeps the original playable.
+#[test]
+#[ignore = "needs a GPU adapter holding the 506-layer atlas"]
+fn game_harness_handover_retained_inactive_copy_refuses_native_open_before_original_retirement() {
+    let _worlds = crate::save::WorldsRootGuard::new("retained-native-inactive");
+    let dir = Tmp::new("retained-native-inactive");
+    let (mut hg, mut far) = frozen("retained-native-inactive", &dir);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+    while source_stage(&hg) != Some(SourceStage::ReadyVerified) {
+        far.dst.as_mut().unwrap().pump(now()).unwrap();
+        round(&mut hg);
+        assert!(
+            std::time::Instant::now() < deadline,
+            "source inactive copy never reached Ready"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let Some(Handover::Source { session, .. }) = &hg.state.handover else {
+        panic!("source disappeared")
+    };
+    assert!(!session.past_retirement());
+    let copy = session.retained_copy();
+    let stage = crate::save::worlds_root()
+        .join(".handover-retained")
+        .join(hex::encode(copy));
+    let working = std::fs::read_dir(&stage)
+        .unwrap()
+        .map(|entry| entry.unwrap().path().join("working"))
+        .find(|path| path.is_dir())
+        .unwrap();
+    let forced = "retained-native-forced-inactive";
+    let destination = crate::save::world_dir(forced);
+    // Fixture-only relocation makes the candidate reach the real menu loader;
+    // it never changes its inert marker or gives it retirement provenance.
+    std::fs::rename(working, &destination).unwrap();
+    let before_copy = snapshot(&destination);
+    let copy_store =
+        crate::handover::durable::MarkerStore::open_existing(destination.join("handover")).unwrap();
+    assert!(
+        copy_store
+            .exists(crate::handover::durable::MarkerKind::RetainedInert, copy)
+            .unwrap()
+    );
+    let original_folder = hg.state.world_name.clone();
+    let original = crate::save::world_dir(&original_folder);
+    let before_source = snapshot(&original);
+    hg.state.handover_click = Some(UiAction::Cancel);
+    hg.frames(1);
+    assert!(hg.state.handover.is_none());
+    assert!(!hg.state.hosted_server.as_ref().unwrap().handover_frozen());
+    assert!(
+        crate::handover::live::authority::open_guard(&original).is_ok(),
+        "cancelling the inactive copy retired the source"
+    );
+    assert_eq!(snapshot(&original), before_source);
+    let tick = hg.state.tick_counter;
+    hg.hosted_ticks(1);
+    assert!(
+        hg.state.tick_counter > tick,
+        "the original stopped playing before retirement"
+    );
+    assert_eq!(hg.state.players[0].inventory.slot(4).unwrap().count, 9);
+    assert_eq!(
+        hg.state.players[0].kill_counter[&crate::mob::MobType::Pig],
+        7
+    );
+    assert!(hg.state.leave_world(
+        crate::world_exit::SaveChoice::Discard,
+        crate::world_exit::ExitTo::Lobby
+    ));
+    hg.state.handover_fixture = Some(Fixture {
+        signed_in: Some(key(SOURCE_PERSONA)),
+        recipient: None,
+    });
+    refused_from_lobby(&mut hg, forced);
+    assert_eq!(
+        snapshot(&destination),
+        before_copy,
+        "native opening changed an inactive prepared copy"
+    );
+    assert!(
+        copy_store
+            .exists(crate::handover::durable::MarkerKind::RetainedInert, copy)
+            .unwrap()
+    );
+    assert!(crate::handover::live::authority::open_guard(&original).is_ok());
+    if let crate::GameMode::Menu(menu) = &mut hg.state.mode {
+        menu.notice = None;
+    }
+    open_from_lobby(&mut hg, &original_folder);
+    assert!(matches!(hg.state.mode, crate::GameMode::Playing));
+    assert!(hg.state.leave_world(
+        crate::world_exit::SaveChoice::Discard,
+        crate::world_exit::ExitTo::Lobby
+    ));
+}
