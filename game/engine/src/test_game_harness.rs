@@ -4596,7 +4596,7 @@ mod tests {
         {
             let sp = &mut hg.state.hosted_server.as_mut().unwrap().server.players[slot];
             sp.player.pos = host_pos;
-            sp.player.vel = glam::Vec3::ZERO;
+            sp.player.velocity = glam::Vec3::ZERO;
         }
         let eye = hg.state.hosted_server.as_ref().unwrap().server.players[slot].player.eye_pos();
         assert!((at + glam::Vec3::Y * 0.7 - eye).length() <= crate::combat::ATTACK_REACH + crate::hosted_server::ATTACK_REACH_TOLERANCE);
