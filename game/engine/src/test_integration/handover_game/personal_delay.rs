@@ -419,9 +419,36 @@ fn game_harness_handover_delayed_initial_personal_client_blocks_prediction_and_o
                 delayed.replace_allowed = !snapshot_first;
             }
             j.hg.frames(1);
+            {
+                let trace = delayed.lock().unwrap();
+                let rc = j.hg.state.remote_client.as_ref().unwrap();
+                eprintln!(
+                    "initial-half mode={mode:?} snapshot_first={snapshot_first} connected={} has_personal={} ready={} frontier={} replace_event={} snapshot_event={} replace_allowed={} snapshot_allowed={} held_replace={} held_snapshot={} pending_personal={} client_mode={:?} sent_personal_acks={}",
+                    rc.is_connected(),
+                    accept.has_personal_state,
+                    rc.personal_ready(),
+                    rc.applied_window_boundary(),
+                    replace.window_event,
+                    snapshot.window_event,
+                    trace.replace_allowed,
+                    trace.snapshot_allowed,
+                    trace.replace.is_some(),
+                    trace.snapshot.is_some(),
+                    rc.personal_inbox
+                        .as_ref()
+                        .map_or(0, |inbox| inbox.pending_count()),
+                    j.hg.state.mode,
+                    trace
+                        .sent
+                        .iter()
+                        .filter(|p| protocol::deserialize_header(p).unwrap().0
+                            == PacketType::PersonalSync)
+                        .count()
+                );
+            }
             assert!(
                 !j.hg.state.remote_client.as_ref().unwrap().personal_ready(),
-                "one half of the initial baseline released authority"
+                "one half of the initial baseline released authority: mode={mode:?} snapshot_first={snapshot_first}"
             );
             let applied =
                 j.hg.state
