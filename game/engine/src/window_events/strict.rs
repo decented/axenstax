@@ -46,8 +46,10 @@ fn marker_event(event: &WindowEvent, registry: &crate::block::BlockRegistry) -> 
         },
         WindowEvent::WearArmour { hits } => WindowEvent::WearArmour { hits: *hits },
         WindowEvent::WearWeapon { slot, tool } => WindowEvent::WearWeapon { slot: *slot, tool: *tool },
-        WindowEvent::ContainerView(_) => return Ok(None),
-        WindowEvent::Replace { .. } => return Err(StrictStageError::Replacement),
+        WindowEvent::ContainerView(_) | WindowEvent::PackView => return Ok(None),
+        #[cfg(not(target_arch = "wasm32"))]
+        WindowEvent::PersonalSync(_) => return Ok(None),
+        WindowEvent::Replace { .. } | WindowEvent::PackCanonical { .. } => return Err(StrictStageError::Replacement),
         WindowEvent::Correction(_) => return Err(StrictStageError::Debt),
     }))
 }
@@ -277,7 +279,7 @@ pub struct PreparedEvents {
 }
 
 /// The heap one item owns beyond its inline size: a Plan's body.
-fn item_heap_bytes(item: &Item) -> Result<usize, StrictStageError> {
+pub(super) fn item_heap_bytes(item: &Item) -> Result<usize, StrictStageError> {
     match item {
         Item::Plan(body) => crate::body_residency::allocated_body_bytes(body).map(|bytes| bytes - std::mem::size_of::<crate::plan::PlanData>()).map_err(|_| StrictStageError::Fit),
         _ => Ok(0),
@@ -289,19 +291,21 @@ fn event_heap_bytes(event: &WindowEvent) -> Result<usize, StrictStageError> {
     match event {
         WindowEvent::Grant(stack) => item_bytes(&stack.item),
         WindowEvent::Take { item, .. } => item_bytes(item),
-        WindowEvent::WearArmour { .. } | WindowEvent::WearWeapon { .. } => Ok(0),
+        WindowEvent::WearArmour { .. } | WindowEvent::WearWeapon { .. } | WindowEvent::PackView => Ok(0),
         // These require their own complete typed allocation reservation. Never
         // treat unknown correction/view allocations as a zero-byte event.
-        WindowEvent::Replace { .. } => Err(StrictStageError::Replacement),
+        WindowEvent::Replace { .. } | WindowEvent::PackCanonical { .. } => Err(StrictStageError::Replacement),
         WindowEvent::Correction(_) => Err(StrictStageError::Debt),
         // C3d — a waiting view's real owned bytes count against the budget
         // (it never makes an unrelated reservation refuse).
         WindowEvent::ContainerView(view) => view_heap_bytes(view, &item_bytes),
+        #[cfg(not(target_arch = "wasm32"))]
+        WindowEvent::PersonalSync(snapshot) => snapshot.bytes.capacity().checked_mul(2).and_then(|bytes| bytes.checked_add(2 * std::mem::size_of::<crate::protocol::PersonalSnapshot>())).ok_or(StrictStageError::Fit),
     }
 }
 
 /// The heap a container view owns: its slot storage and any Plan body in it.
-fn view_heap_bytes(view: &crate::window_ops::ViewEvent, item_bytes: &dyn Fn(&Item) -> Result<usize, StrictStageError>) -> Result<usize, StrictStageError> {
+pub(super) fn view_heap_bytes(view: &crate::window_ops::ViewEvent, item_bytes: &dyn Fn(&Item) -> Result<usize, StrictStageError>) -> Result<usize, StrictStageError> {
     use crate::container_window::ContainerData;
     let mut total = 0usize;
     let mut add = |n: usize| -> Result<(), StrictStageError> { total = total.checked_add(n).ok_or(StrictStageError::Fit)?; Ok(()) };
@@ -329,12 +333,12 @@ fn view_heap_bytes(view: &crate::window_ops::ViewEvent, item_bytes: &dyn Fn(&Ite
 /// pending-window bound ([`strict_replace_fits`]) measures a `Replace` this
 /// way; staging still never crosses a waiting one ([`event_heap_bytes`]
 /// keeps refusing it, `Replacement`).
-fn replace_heap_bytes(window: &EffectiveWindow, debt: &crate::container_window::CorrectionDebt) -> Result<usize, StrictStageError> {
+pub(super) fn replace_heap_bytes(window: &EffectiveWindow, debt: &crate::container_window::CorrectionDebt) -> Result<usize, StrictStageError> {
     let mut total = std::mem::size_of::<EffectiveWindow>();
     let mut add = |n: usize| -> Result<(), StrictStageError> { total = total.checked_add(n).ok_or(StrictStageError::Fit)?; Ok(()) };
     let grid = window.grid.iter().flatten().flatten();
     for stack in window.inv.slots_iter().flatten().chain(window.cursor.iter()).chain(grid) { add(item_heap_bytes(&stack.item)?)?; }
-    add(debt.entries().len().checked_mul(std::mem::size_of::<(Item, u32)>()).ok_or(StrictStageError::Fit)?)?;
+    add(debt.allocated_entries().checked_mul(std::mem::size_of::<(Item, u32)>()).ok_or(StrictStageError::Fit)?)?;
     for (item, _) in debt.entries() { add(item_heap_bytes(item)?)?; }
     Ok(total)
 }
@@ -352,7 +356,7 @@ pub fn strict_replace_fits(sp: &ServerPlayer, event: &WindowEvent) -> bool {
     let count = waiting.waiting.len().saturating_add(1);
     if count > crate::action_journal::MAX_EVENT_ENTRIES { return false; }
     let bytes = |e: &WindowEvent| match e {
-        WindowEvent::Replace { window, debt, .. } => replace_heap_bytes(window, debt),
+        WindowEvent::Replace { window, debt, .. } | WindowEvent::PackCanonical { window, debt, .. } => replace_heap_bytes(window, debt),
         other => event_heap_bytes(other),
     };
     let mut heap = 0usize;
@@ -376,13 +380,19 @@ pub fn reserve_strict_replace(sp: &mut ServerPlayer, probe: &WindowEvent) -> boo
 }
 
 pub fn prepare_strict_events(sp: &mut ServerPlayer, events: Box<[WindowEvent]>) -> Result<PreparedEvents, StrictStageError> {
+    prepare_events_with(sp, events, event_heap_bytes)
+}
+
+/// Allocation reservation is shared; each admission path measures only the
+/// event forms it can carry. Strict's correction guards remain unchanged.
+pub(super) fn prepare_events_with(sp: &mut ServerPlayer, events: Box<[WindowEvent]>, measure: impl Fn(&WindowEvent) -> Result<usize, StrictStageError>) -> Result<PreparedEvents, StrictStageError> {
     let waiting = &mut sp.window_events;
     let count = waiting.waiting.len().checked_add(events.len()).ok_or(StrictStageError::Fit)?;
     if count > crate::action_journal::MAX_EVENT_ENTRIES { return Err(StrictStageError::Fit); }
     let last = waiting.last_sent.checked_add(u32::try_from(events.len()).map_err(|_| StrictStageError::Fit)?).ok_or(StrictStageError::Fit)?;
     let mut heap = 0usize;
     for event in waiting.waiting.iter().map(|w| &w.event).chain(events.iter()) {
-        heap = heap.checked_add(event_heap_bytes(event)?).ok_or(StrictStageError::Fit)?;
+        heap = heap.checked_add(measure(event)?).ok_or(StrictStageError::Fit)?;
     }
     let estimated_capacity = waiting.waiting.capacity().max(count);
     let staged = events.len().checked_mul(std::mem::size_of::<WindowEvent>()).ok_or(StrictStageError::Fit)?;

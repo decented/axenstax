@@ -41,10 +41,21 @@ impl HostedServer {
         let Some(current) = self.server.players.get(i).and_then(|p| p.action_frontier.as_ref()).map(|f| f.header(ack.through, ack.included_events)) else { return self.strict_bridge_teardown(i, StrictTeardown::Unreadable, "Applied action acknowledgement has no joined session") };
         if ack.session == current.session && ack.epoch <= current.epoch && ack.life <= current.life && (ack.epoch < current.epoch || ack.life < current.life) { return; }
         if ack.session != current.session || ack.epoch != current.epoch || ack.life != current.life { return self.strict_bridge_teardown(i, StrictTeardown::Unreadable, "Foreign or future applied action acknowledgement"); }
-        let valid = self.server.players.get_mut(i).is_some_and(|sp| {
-            sp.action_results.as_mut().is_some_and(|results| results.acknowledge(ack, sp.window_events.last_number()).is_ok())
+        let valid = self.server.players.get(i).is_some_and(|sp| {
+            sp.action_results.as_ref().is_some_and(|results| results.validate_ack(ack, sp.window_events.last_number()).is_ok())
         });
-        if !valid { self.strict_bridge_teardown(i, StrictTeardown::Unreadable, "Foreign or regressing applied action acknowledgement"); }
+        if !valid { self.strict_bridge_teardown(i, StrictTeardown::Unreadable, "Foreign or regressing applied action acknowledgement"); return; }
+        let sp = &mut self.server.players[i];
+        let releases_pack = sp.pack_flight.is_some_and(|flight| flight.action.session == ack.session && flight.action.epoch == ack.epoch && flight.action.life == ack.life && flight.action.seq <= ack.through && flight.event <= ack.included_events);
+        if releases_pack { crate::window_events::apply_through(sp, ack.included_events, self.server.tick_counter); }
+        sp.action_results.as_mut().expect("validated result rows").acknowledge(ack, sp.window_events.last_number()).expect("validated exact acknowledgement");
+        if releases_pack {
+            sp.pack_flight = None;
+            let feedback = std::mem::take(&mut sp.pack_unfit_feedback);
+            // The canonical snapshot has applied first; returning a landed
+            // grant before it would let that snapshot reinstall the item.
+            for (event, count) in feedback { self.return_joiner_unfit(i, event, count); }
+        }
     }
     pub(super) fn receive_typed_action(&mut self, i: usize, payload: &[u8]) {
         #[cfg(not(target_arch = "wasm32"))]
@@ -77,6 +88,15 @@ impl HostedServer {
             let Some(sp) = self.server.players.get(i) else { return };
             let Some(queued) = sp.action_queue.as_ref().and_then(|q| q.front()) else { return };
             let Ok(packet) = ActionPacket::decode(&queued.payload) else { return self.strict_bridge_teardown(i, StrictTeardown::Unreadable, "Retained action could not decode") };
+            // A committed pack waits for application, never by blocking the
+            // control FIFO. A later typed authorisation stays in this queue.
+            if sp.pack_flight.is_some() { return; }
+            if let ActionIntent::Pack(request) = &packet.intent {
+                if !self.edit_queues[i].is_empty() || *items >= MAX_ITEM_ACTIONS_PER_TICK { return; }
+                *items += 1;
+                if !self.serve_pack(i, packet.action, request) { return; }
+                continue;
+            }
             let is_window = matches!(packet.intent, ActionIntent::Window(_));
             // C3d run 25 — a Strict seat's typed Q-drop waits at the head
             // until the joiner's drop bucket holds a token (Mirror's pacing,

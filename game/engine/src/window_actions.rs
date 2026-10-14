@@ -28,6 +28,7 @@ impl GameState {
     /// it. Esc while frozen pauses ([`Self::esc_crafting`]): a never-answered
     /// Respawn can't trap the player in a modal with no pause menu.
     fn strict_window_frozen(&self, pidx: usize) -> bool {
+        if self.pack_window_frozen(pidx) { return true; }
         if pidx == 0 && self.remote_client.as_ref().is_some_and(|r| !r.personal_ready()) { return true; }
         pidx == 0
             && self.strict_window_connection()
@@ -38,6 +39,7 @@ impl GameState {
         self.toast = Some(("Inventory action is waiting; try again.".into(), web_time::Instant::now() + web_time::Duration::from_secs(2)));
     }
     pub(crate) fn apply_window_click(&mut self, pidx: usize, click: &WindowClick) -> ClickResult {
+        if self.pack_window_frozen(pidx) { return ClickResult::Refused; }
         if pidx == 0 && self.remote_client.as_ref().is_some_and(|r| !r.personal_ready()) { return ClickResult::Refused; }
         if !self.strict_window_connection() {
             let p = &mut self.players[pidx];
@@ -95,7 +97,7 @@ impl GameState {
     /// / `open_joined`); that `Close` passes the one gate, so a frozen window
     /// opens nothing.
     pub(crate) fn open_crafting(&mut self, pidx: usize, table: Option<[i32; 3]>) {
-        if self.players[pidx].crafting_ui.grid_holds_items() && self.strict_window_frozen(pidx) { return; }
+        if self.pack_window_frozen(pidx) || self.players[pidx].crafting_ui.grid_holds_items() && self.strict_window_frozen(pidx) { return; }
         let p = &mut self.players[pidx];
         if !self.remote_client.as_ref().is_some_and(|r| r.inventory_mode == InventoryMode::Strict) {
             p.crafting_ui.open_crafting(table, &mut p.inventory, &mut p.armour_slots);
@@ -107,6 +109,7 @@ impl GameState {
     /// A joiner asks to open the shared container at `cell` (logged in
     /// Mirror, a reserved action in Strict).
     pub(crate) fn ask_open_container(&mut self, pidx: usize, cell: [i32; 3]) {
+        if self.pack_window_frozen(pidx) { return; }
         let p = &mut self.players[pidx];
         if !self.remote_client.as_ref().is_some_and(|r| r.inventory_mode == InventoryMode::Strict) {
             p.crafting_ui.log_open_container(cell, &p.inventory, &p.armour_slots);
@@ -119,11 +122,17 @@ impl GameState {
     /// action is reserved before the mirror or the window changes; a failed
     /// reservation changes nothing (`Refused`).
     pub(crate) fn apply_shared_container_click(&mut self, pidx: usize, mirror: &mut crate::container_window::SharedContainer, click: &crate::container_window::ContainerClick, ctx: &ClickCtx) -> crate::container_window::ContainerApplied {
+        let refused = || crate::container_window::ContainerApplied { result: ClickResult::Refused, touched: Vec::new() };
+        if self.pack_window_frozen(pidx) { return refused(); }
+        if let Some(session) = mirror.pack_session {
+            let operation = crate::pack_wire::PackOperation::Click { incarnation: session.incarnation, revision: session.revision, click: click.clone() };
+            return if self.request_pack_action(pidx, mirror.target, operation) { crate::container_window::ContainerApplied { result: ClickResult::Done, touched: Vec::new() } } else { refused() };
+        }
+        let Some(cell) = mirror.block_cell() else { return refused() };
         let p = &mut self.players[pidx];
         if !self.remote_client.as_ref().is_some_and(|r| r.inventory_mode == InventoryMode::Strict) {
             return p.crafting_ui.apply_container_click(&mut p.inventory, &mut p.armour_slots, mirror.as_mut(), click, ctx);
         }
-        let cell = mirror.cell;
         let result = p.crafting_ui.apply_container_click_joined(self.remote_client.as_mut().expect("strict connection"), &mut p.inventory, &mut p.armour_slots, mirror.as_mut(), cell, click, ctx, &self.registry);
         match result {
             Ok(applied) => applied,
@@ -133,6 +142,8 @@ impl GameState {
     /// Player `pidx`'s shared container screen closed: a `Close` click (a
     /// reserved action in Strict).
     pub(crate) fn close_shared_container(&mut self, pidx: usize) {
+        if self.players[pidx].shared_container.as_ref().is_some_and(|mirror| mirror.pack_session.is_some()) { self.request_pack_close(pidx); return; }
+        if self.pack_window_frozen(pidx) { return; }
         let p = &mut self.players[pidx];
         if !self.remote_client.as_ref().is_some_and(|r| r.inventory_mode == InventoryMode::Strict) {
             p.crafting_ui.close_container(&mut p.inventory, &mut p.armour_slots);

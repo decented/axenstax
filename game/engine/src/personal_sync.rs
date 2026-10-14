@@ -48,6 +48,8 @@ fn acknowledgement(snapshot: &PersonalSnapshot) -> PersonalAck {
 #[derive(Default)]
 pub(crate) struct Delivery {
     pub pending: Option<PersonalSnapshot>,
+    /// Exact accepted client frontier, awaiting older server authorisations.
+    pub acknowledged_window: Option<u32>,
     initial_expected: Option<PersonalAck>,
     pub revision: u64,
     pub last: Option<PersonalAck>,
@@ -119,6 +121,14 @@ impl Inbox {
             started: web_time::Instant::now(),
         }
     }
+    pub fn pending_count(&self) -> usize { self.pending.len() }
+    pub fn owned_bytes(&self) -> usize {
+        self.pending.capacity().saturating_mul(std::mem::size_of::<PersonalSnapshot>())
+            .saturating_add(self.pending.iter().map(|snapshot| snapshot.bytes.capacity()).fold(0usize, usize::saturating_add))
+    }
+    pub fn has_pending_fence(&self, event: u32, life: u32) -> bool {
+        self.pending.iter().any(|snapshot| snapshot.window_event == event && snapshot.life == life)
+    }
     pub fn observe_respawn(&mut self, respawns: u32) -> Result<(), String> {
         if respawns <= self.observed_life {
             return Ok(());
@@ -173,6 +183,10 @@ impl Inbox {
         {
             return Err("personal snapshot order changed".into());
         }
+        let bytes = self.owned_bytes().saturating_add(value.bytes.capacity()).saturating_add(std::mem::size_of::<PersonalSnapshot>());
+        if bytes > crate::action_journal::MAX_RETAINED_BYTES { return Err("personal snapshots exceed their retained byte limit".into()); }
+        self.pending.try_reserve_exact(1).map_err(|_| "personal snapshot allocation failed")?;
+        if self.owned_bytes().saturating_add(value.bytes.capacity()) > crate::action_journal::MAX_RETAINED_BYTES { return Err("personal snapshot allocation exceeds its byte limit".into()); }
         self.context = Some(value.context);
         self.pending.push_back(value);
         Ok(None)
@@ -205,6 +219,9 @@ impl Inbox {
 
 impl crate::GameState {
     pub(crate) fn apply_personal_inbox(&mut self) {
+        // Socket receipt cannot acknowledge progression through a held pack
+        // window. Its own numbered fence must first reach actual application.
+        if self.remote_client.as_ref().is_some_and(|client| client.pack_window_inbox_held()) { return; }
         let Some(client) = self.remote_client.as_mut() else {
             return;
         };
@@ -331,6 +348,21 @@ mod tests {
         )
         .unwrap()
     }
+    #[test]
+    fn d2c2_held_personal_snapshot_counts_actual_body_capacity_and_refuses_whole() {
+        let mut value = snapshot(&bound(), [8; 16], 0, 1, 4).unwrap();
+        value.bytes.reserve_exact(crate::action_journal::MAX_RETAINED_BYTES);
+        let mut inbox = Inbox::new([8; 16], 0);
+        assert!(inbox.push(value).is_err(), "a valid small encoded record cannot hide oversized retained allocation");
+        assert_eq!(inbox.pending_count(), 0, "the failed body is never published partially");
+        assert!(!inbox.initialised());
+        let value = snapshot(&bound(), [8; 16], 0, 1, 4).unwrap();
+        let minimum = value.bytes.capacity() + std::mem::size_of::<PersonalSnapshot>();
+        inbox.push(value).unwrap();
+        assert_eq!(inbox.pending_count(), 1);
+        assert!(inbox.owned_bytes() >= minimum, "actual deque allocation plus nested body ownership is charged");
+    }
+
     #[test]
     fn handover_personal_sync_applies_only_after_real_window_and_repeats_are_inert() {
         let personal = bound();

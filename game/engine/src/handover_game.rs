@@ -930,7 +930,13 @@ fn capture_and_offer(
         Err(_) => return fail(session, hs, Refusal("This world's saved history and settings couldn't be read. Nothing moved; play has resumed.")),
     };
     let carts = crate::save::carts_to_saved(f.ecs);
-    let kept = crate::save::tamed_mobs_to_saved(f.ecs);
+    let kept = match crate::save::tamed_mobs_to_saved(f.ecs) {
+        Ok(kept) => kept,
+        Err(error) => {
+            log::warn!("Handover pet capture refused: {error}");
+            return fail(session, hs, Refusal("This world's kept animals couldn't be saved; the handover was stopped."));
+        }
+    };
     let Some(save) = crate::save::build_world_save(f.world, f.players, f.seed, &carts, &kept) else {
         return fail(session, hs, Refusal("This world has no local player to hand over from."));
     };

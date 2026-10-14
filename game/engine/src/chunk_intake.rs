@@ -80,6 +80,7 @@ pub enum StreamItem {
     /// Exact world-stream position; parsing never activates recovery.
     RebaseFence(crate::action_identity::RecoveryCut),
     ActionReceipt(crate::action_wire::ActionReceipt),
+    PackResult(Box<crate::pack_wire::PackResult>),
     /// A pushed chunk (`ChunkData`).
     Chunk(ChunkDataPacket),
     /// "Column `(cx, cz)` is local" (`ColumnLocal`, Phase B2b), with the
@@ -100,6 +101,7 @@ pub enum StreamItem {
 pub enum IntakeStep {
     RebaseFence(crate::action_identity::RecoveryCut),
     ActionReceipt(crate::action_wire::ActionReceipt),
+    PackResult(Box<crate::pack_wire::PackResult>),
     /// Apply one pushed chunk packet.
     Chunk(Box<ChunkDataPacket>),
     /// Take in a "column is local" note (Phase B2b), with its hash.
@@ -121,6 +123,7 @@ pub enum IntakeStep {
 pub enum Delta {
     RebaseFence(crate::action_identity::RecoveryCut),
     ActionReceipt(crate::action_wire::ActionReceipt),
+    PackResult(Box<crate::pack_wire::PackResult>),
     /// Apply one pushed chunk packet.
     Chunk(Box<ChunkDataPacket>),
     /// Take in a "column is local" note, with its hash.
@@ -148,6 +151,7 @@ pub fn interleave(chunks: Vec<(usize, StreamItem)>, changes: usize) -> Vec<Intak
         steps.push(match item {
             StreamItem::RebaseFence(cut) => IntakeStep::RebaseFence(cut),
             StreamItem::ActionReceipt(receipt) => IntakeStep::ActionReceipt(receipt),
+            StreamItem::PackResult(packet) => IntakeStep::PackResult(packet),
             StreamItem::Chunk(chunk) => IntakeStep::Chunk(Box::new(chunk)),
             StreamItem::Local(col, hash) => IntakeStep::Local(col, hash),
             StreamItem::View(v) => IntakeStep::View(v),
@@ -376,6 +380,7 @@ impl ChunkIntake {
             match step {
                 IntakeStep::RebaseFence(cut) => steps.push_back(Delta::RebaseFence(cut)),
                 IntakeStep::ActionReceipt(receipt) => steps.push_back(Delta::ActionReceipt(receipt)),
+                IntakeStep::PackResult(packet) => steps.push_back(Delta::PackResult(packet)),
                 IntakeStep::Chunk(p) => steps.push_back(Delta::Chunk(p)),
                 IntakeStep::Local(col, hash) => steps.push_back(Delta::Local(col, hash)),
                 IntakeStep::View(v) => steps.push_back(Delta::View(v)),
@@ -413,6 +418,10 @@ impl ChunkIntake {
         }
         run
     }
+
+    /// Pack bodies retain their decode reservation; count the actual FIFO
+    /// allocation additionally, even when earlier world checks hold it.
+    pub fn carried_metadata_bytes(&self) -> usize { self.carried.capacity().saturating_mul(std::mem::size_of::<Delta>()) }
 
     /// Steps held back to a later frame. Test-only.
     #[cfg(test)]
@@ -969,6 +978,7 @@ mod tests {
             IntakeStep::Attachment(_) => "A".to_string(),
             IntakeStep::RebaseFence(_) => "F".to_string(),
             IntakeStep::ActionReceipt(_) => "R".to_string(),
+            IntakeStep::PackResult(_) => "P".to_string(),
             IntakeStep::Local(..) => "L".to_string(),
             IntakeStep::Changes(r) => format!("{}..{}", r.start, r.end),
         })
@@ -1054,6 +1064,7 @@ mod tests {
                 IntakeStep::Attachment(a) => format!("A{}", a.x),
                 IntakeStep::RebaseFence(_) => "F".to_string(),
                 IntakeStep::ActionReceipt(_) => "R".to_string(),
+            IntakeStep::PackResult(_) => "P".to_string(),
                 IntakeStep::Changes(r) => format!("{}..{}", r.start, r.end),
             })
             .collect();
@@ -1224,7 +1235,7 @@ mod tests {
                 IntakeStep::Chunk(p) => {
                     intake.apply(&mut joiner, &mut loaded, &reg(), &p);
                 }
-                IntakeStep::Local(..) | IntakeStep::View(..) | IntakeStep::Attachment(..) | IntakeStep::RebaseFence(..) | IntakeStep::ActionReceipt(..) => unreachable!(),
+                IntakeStep::Local(..) | IntakeStep::View(..) | IntakeStep::Attachment(..) | IntakeStep::RebaseFence(..) | IntakeStep::ActionReceipt(..) | IntakeStep::PackResult(..) => unreachable!(),
                 IntakeStep::Changes(r) => {
                     for bc in &changes[r] {
                         joiner.apply_remote_block_change(bc);

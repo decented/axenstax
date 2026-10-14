@@ -85,6 +85,8 @@ fn validate_neutral(save: &WorldSave) -> Result<()> {
             Pet::Nostrich(d) => seat(&d.ownership),
             Pet::Companion { data, .. } | Pet::Companion2 { data, .. } => seat(&data.ownership),
             Pet::Steed { data, .. } | Pet::Steed2 { data, .. } => data.kept_by.is_some(),
+            Pet::Steed3 { data, keeper, .. } => data.kept_by.is_some()
+                || matches!(keeper, crate::horse_ai::SteedKeeper::LegacyLocal(_)),
             Pet::Authored { .. } => false,
         });
     if unmapped {

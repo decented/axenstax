@@ -345,6 +345,7 @@ pub fn route_place(
     old: (BlockId, u8),
     registry: &crate::block::BlockRegistry,
 ) -> Result<Routed<Option<BlockId>>, String> {
+    if remote.as_ref().is_some_and(|client| client.pack_request_pending()) { return Err("Pack action is waiting".into()); }
     let held = inv.slot(slot).map(|s| s.item.clone());
     let judged = judge(old.0, &change, None, slot, held.as_ref(), false, None);
     match remote {
@@ -368,6 +369,7 @@ pub fn route_break(
     old: (BlockId, u8),
     registry: &crate::block::BlockRegistry,
 ) -> Result<Routed<Option<ToolUseInfo>>, String> {
+    if remote.as_ref().is_some_and(|client| client.pack_request_pending()) { return Err("Pack action is waiting".into()); }
     let held = inv.slot(slot).map(|s| s.item.clone());
     let tool = match &held { Some(Item::Tool(t)) => Some(*t), _ => None };
     let mined = protocol::MinedBlock { x: change.x, y: change.y, z: change.z, tool: protocol::WireItem::None };
@@ -430,6 +432,7 @@ impl crate::GameState {
     /// a typed `Edit` (its meta hoisted, `placement_meta`) before the window
     /// is predicted, and the edit never rides the movement packet.
     pub(crate) fn take_for_placement(&mut self, pidx: usize, hotbar: usize, cell: [i32; 3], existing: BlockId, face: [i32; 3]) -> PlaceRoute {
+        if self.pack_window_frozen(pidx) { return PlaceRoute::Wait; }
         let new = self.players[pidx].inventory.hotbar_placeable_id(hotbar);
         let Some(new) = new.filter(|_| self.strict_remote(pidx)) else {
             return PlaceRoute::Legacy(self.players[pidx].inventory.take_placeable_from_hotbar(hotbar));
@@ -464,6 +467,7 @@ impl crate::GameState {
     /// its tool worn by the shared rule. A failed reservation leaves the
     /// block standing and restarts the break.
     pub(crate) fn break_route(&mut self, pidx: usize, pos: [i32; 3], blk: BlockId, tool: Option<crate::crafting::Tool>) -> BreakRoute {
+        if self.pack_window_frozen(pidx) { return BreakRoute::Wait; }
         if !self.strict_remote(pidx) { return BreakRoute::Legacy; }
         let cell = (pos[0], pos[1], pos[2]);
         // The cell's replacement (AIR, or a harvested crop's) and the meta

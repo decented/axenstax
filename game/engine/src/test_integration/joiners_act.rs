@@ -639,7 +639,7 @@ fn a_lent_hosts_kill_by_a_joiner_goes_to_that_joiner_and_never_to_the_host() {
     let host_player = (rig.at + Vec3::new(0.3, 0.0, 2.0), false);
     let deaths = crate::combat::despawn_dead(rig.ecs_mut());
     assert_eq!(deaths.len(), 1);
-    let (kind, pos, attacker) = deaths[0];
+    let crate::combat::MobDeath { kind, pos, attacker, .. } = deaths[0];
     assert_eq!(attacker, Some(rig.attacker(0)));
     let credited =
         crate::server::route_client_kill(Some(&mut rig.hs.server), attacker, kind, pos, false, &[host_player]);
@@ -748,7 +748,7 @@ fn a_departed_joiners_kill_credits_neither_the_host_nor_the_slots_next_joiner() 
 
     rig.ecs_mut().get::<&mut crate::combat::Health>(cow).unwrap().current = 0.0;
     let deaths = crate::combat::despawn_dead(rig.ecs_mut());
-    let (kind, pos, attacker) = deaths[0];
+    let crate::combat::MobDeath { kind, pos, attacker, .. } = deaths[0];
     assert_eq!(attacker, Some(crate::combat::Attacker::Departed));
     let host_beside = (pos + Vec3::new(0.3, 0.0, 0.0), false);
     assert_eq!(

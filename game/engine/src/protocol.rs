@@ -158,6 +158,10 @@ pub enum PacketType {
     /// v89 uses tags 68–71). Not advertised as delivered before final gates.
     Handover = 72,
     PersonalSync = 73,
+    /// Server → Client: exact sequential pack result and canonical window.
+    PackResult = 74,
+    /// Server → Client: numbered live entity cargo view or session close.
+    PackView = 75,
 }
 
 // ─── Handshake ───────────────────────────────────────────────
@@ -1855,6 +1859,8 @@ pub mod entity_flags {
     /// cart. A second rider is refused; a joiner's click on a cart carrying
     /// one goes on to the track.
     pub const RIDDEN: u8 = 64;
+    /// v91 (D2c-2) — this steed currently carries a real cargo pack.
+    pub const PACK: u8 = 128;
 }
 
 /// Server → client: an existing entity's position/state changed.
@@ -2789,7 +2795,10 @@ pub struct ServerAnnouncePacket {
 /// - v90 PRIVATE PROVISIONAL (integrated mp-handover): Handover (tag 72),
 ///   alongside the accepted C3d v89 metadata above; final combined gates are
 ///   required before this handover protocol is delivered.
-pub const PROTOCOL_VERSION: u32 = 90;
+///
+/// - v91 (D2c-2): sequential unpredicted source-backed entity packs in
+///   both inventory modes; PackResult 74, PackView 75, explicit PACK flag.
+pub const PROTOCOL_VERSION: u32 = 91;
 
 /// The `protocol_version` of a JoinRequest payload that doesn't decode as this
 /// build's `JoinRequestPacket` (an older or newer client's shape). It is the
@@ -2867,6 +2876,8 @@ pub fn deserialize_header(data: &[u8]) -> Option<(PacketType, &[u8])> {
         71 => PacketType::AppliedActionAck,
         72 => PacketType::Handover,
         73 => PacketType::PersonalSync,
+        74 => PacketType::PackResult,
+        75 => PacketType::PackView,
         _ => return None,
     };
     Some((tag, &data[1..]))
@@ -2968,9 +2979,8 @@ mod tests {
 
     #[test]
     fn protocol_version_bumped() {
-        // C3d partial delivery accepted locally — v89, after OC's v88 debt carrier.
-        // Integrated handover appends tag 72 under private provisional v90.
-        assert_eq!(PROTOCOL_VERSION, 90);
+        // D2c-2 — v91, source-backed entity packs after handover's v90.
+        assert_eq!(super::PROTOCOL_VERSION, 91);
     }
 
     #[test]
@@ -3724,8 +3734,7 @@ mod tests {
         // v89 (C3d partial delivery accepted locally): Action (68), ActionReceipt (69),
         //   Recovery (70), AppliedActionAck (71); JoinAccept
         //   mode/namespace/life.
-        // Integrated handover appends tag 72 under private provisional v90.
-        assert_eq!(PROTOCOL_VERSION, 90);
+        assert_eq!(PROTOCOL_VERSION, 91);
     }
 
     fn sample_accept() -> JoinAcceptPacket {
@@ -4436,9 +4445,7 @@ mod tests {
         assert_eq!(deserialize_header(&[69, 0]).map(|(p, _)| p), Some(PacketType::ActionReceipt));
         assert_eq!(deserialize_header(&[70, 0]).map(|(p, _)| p), Some(PacketType::Recovery));
         assert_eq!(deserialize_header(&[71, 0]).map(|(p, _)| p), Some(PacketType::AppliedActionAck));
-        assert_eq!(PacketType::Handover as u8, 72);
-        assert_eq!(deserialize_header(&[72, 0]).map(|(p, _)| p), Some(PacketType::Handover));
-        assert_eq!(deserialize_header(&[74, 0]), None, "nothing past 72 yet");
+        assert_eq!(deserialize_header(&[72, 0]), None, "72 remains reserved for handover before the normal merge");
     }
 
     /// C3b-1 (v77) — shared containers on the wire: `OpenContainer` (= 4)

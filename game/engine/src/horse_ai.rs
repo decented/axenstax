@@ -47,6 +47,10 @@ pub struct HorseData {
     /// wild scatter. `#[serde(default)]` keeps any older serialised form.
     #[serde(default)]
     pub kept_by: Option<u8>,
+    /// Persistent keeper identity. Runtime-only here: Steed3 carries it
+    /// separately so old HorseData bincode remains readable.
+    #[serde(skip)]
+    pub keeper: Option<SteedKeeper>,
     /// Cargo pack (2026-07-06, Task 11): a Donkey/Mule equipped with a Chest
     /// carries this inventory. RUNTIME-ONLY on this struct: `serde(skip)`
     /// keeps `HorseData`'s wire shape identical to its pre-pack form
@@ -62,7 +66,19 @@ pub struct HorseData {
 impl HorseData {
     /// Has a player ever ridden this steed? Kept steeds persist on save.
     pub fn is_kept(&self) -> bool {
-        self.kept_by.is_some()
+        self.keeper_identity().is_some()
+    }
+
+    pub fn keeper_identity(&self) -> Option<SteedKeeper> {
+        self.keeper.clone().or_else(|| self.kept_by.map(SteedKeeper::LegacyLocal))
+    }
+
+    /// Only the frozen gameplay fields enter the nested save carrier.
+    /// Do not clone cargo bodies merely to discard serde-skipped fields.
+    pub fn frozen_save_data(&self) -> Self {
+        Self { state: self.state, last_retarget_tick: self.last_retarget_tick,
+            wander_target: self.wander_target, kept_by: self.kept_by,
+            keeper: None, pack: None }
     }
 
     pub fn new() -> Self {
@@ -71,14 +87,93 @@ impl HorseData {
             last_retarget_tick: 0,
             wander_target: None,
             kept_by: None,
+            keeper: None,
             pack: None,
         }
     }
 }
 
+/// The signed persona or genuine local seat which first kept a steed.
+/// Connection slots never represent persistent ownership.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SteedKeeper {
+    Npub(String),
+    LegacyLocal(u8),
+}
+
+impl SteedKeeper {
+    pub fn owner_key(&self) -> String {
+        match self {
+            Self::Npub(key) => key.clone(),
+            Self::LegacyLocal(slot) => crate::tameable::local_owner_key(usize::from(*slot)),
+        }
+    }
+
+    pub fn matches(&self, owner_key: &str, local_slot: Option<usize>) -> bool {
+        match self {
+            Self::Npub(key) => key == owner_key,
+            Self::LegacyLocal(slot) => local_slot == Some(usize::from(*slot)),
+        }
+    }
+}
+
+/// Accepted first mount keeps eligible wildlife and removes its disposable
+/// scatter marker. Guests supply no keeper; later mounts never replace one.
+pub(crate) fn keep_first_mount(ecs: &mut hecs::World, target: hecs::Entity, keeper: Option<SteedKeeper>) {
+    let Some(keeper) = keeper else { return };
+    // Mount admission already proved the species. HorseData identifies the
+    // steed family; other rideable species and carts do not carry it.
+    let newly_kept = if let Ok(mut data) = ecs.get::<&mut HorseData>(target) && !data.is_kept() {
+        data.keeper = Some(keeper.clone());
+        if let SteedKeeper::LegacyLocal(slot) = keeper { data.kept_by = Some(slot); }
+        true
+    } else { false };
+    if newly_kept { let _ = ecs.remove_one::<crate::entity::Scattered>(target); }
+}
+
 impl Default for HorseData {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod keeper_tests {
+    use super::*;
+    use crate::mob::MobType;
+
+    #[test]
+    fn d2c2_first_signed_keep_persists_identity_and_later_mounts_do_not_transfer_it() {
+        let mut ecs = hecs::World::new();
+        let steed = crate::entity::spawn_mob(&mut ecs, MobType::Donkey, glam::Vec3::ZERO);
+        ecs.insert_one(steed, crate::entity::Scattered).unwrap();
+        let npub = crate::hosted_server::verified_npub(Some([7; 32])).unwrap();
+        keep_first_mount(&mut ecs, steed, Some(SteedKeeper::Npub(npub.clone())));
+        keep_first_mount(&mut ecs, steed, Some(SteedKeeper::LegacyLocal(4)));
+        let data = ecs.get::<&HorseData>(steed).unwrap();
+        assert_eq!(data.keeper_identity(), Some(SteedKeeper::Npub(npub.clone())), "later riders cannot seize the keeper");
+        assert!(data.is_kept());
+        assert_eq!(data.kept_by, None, "a signed keeper is never a connection slot");
+        assert!(ecs.get::<&crate::entity::Scattered>(steed).is_err(), "a kept steed survives column unload");
+        assert!(crate::tameable::is_own_pet(&ecs, steed, &npub, None), "the same npub owns it at another joined slot");
+        assert!(!crate::tameable::is_own_pet(&ecs, steed, "local-player-0", Some(0)), "slot reuse creates no keeper powers");
+        assert_eq!(crate::tameable::pet_owner_of(&ecs, steed), Some(npub));
+    }
+
+    #[test]
+    fn d2c2_guest_mount_has_no_durable_keeper_and_legacy_is_local_only() {
+        let mut ecs = hecs::World::new();
+        let steed = crate::entity::spawn_mob(&mut ecs, MobType::Mule, glam::Vec3::ZERO);
+        ecs.insert_one(steed, crate::entity::Scattered).unwrap();
+        keep_first_mount(&mut ecs, steed, None);
+        assert!(!ecs.get::<&HorseData>(steed).unwrap().is_kept(), "guest riding creates no durable ownership");
+        assert!(ecs.get::<&crate::entity::Scattered>(steed).is_ok());
+        ecs.get::<&mut HorseData>(steed).unwrap().kept_by = Some(3);
+        let npub = crate::hosted_server::verified_npub(Some([7; 32])).unwrap();
+        keep_first_mount(&mut ecs, steed, Some(SteedKeeper::Npub(npub.clone())));
+        assert_eq!(ecs.get::<&HorseData>(steed).unwrap().keeper_identity(), Some(SteedKeeper::LegacyLocal(3)), "no automatic legacy migration");
+        assert!(!crate::tameable::is_own_pet(&ecs, steed, &npub, None), "a joined slot cannot inherit LegacyLocal ownership");
+        assert!(crate::tameable::is_own_pet(&ecs, steed, "local-player-3", Some(3)));
     }
 }
 
@@ -253,6 +348,7 @@ mod tests {
             last_retarget_tick: 0,
             wander_target: None,
             kept_by: None,
+            keeper: None,
             pack: None,
         };
         let (next, _) = tick_horse(&h, (0.0, 64.0, 0.0), None, 200);
@@ -268,6 +364,7 @@ mod tests {
             last_retarget_tick: 0,
             wander_target: Some((0.0, 64.0, 0.0)),
             kept_by: None,
+            keeper: None,
             pack: None,
         };
         let (next, action) = tick_horse(&h, (0.0, 64.0, 0.0), None, 10);

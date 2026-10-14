@@ -40,6 +40,8 @@ pub enum ActionIntent {
     HoldStrike { hold: ActionHeader },
     /// A retained semantic intent invalidated by the authoritative base.
     CancelledNoop,
+    /// One unpredicted, source-backed entity pack request in either mode.
+    Pack(crate::pack_wire::PackRequest),
 }
 
 impl ActionIntent {
@@ -78,7 +80,7 @@ impl ActionIntent {
     /// from its hand when it reserves the drop, so every drop refusal is
     /// corrected (`strict_drop.rs`).
     pub fn predicts_nothing(&self) -> bool {
-        matches!(self, ActionIntent::Attack(_) | ActionIntent::Interact(_) | ActionIntent::Device { .. })
+        matches!(self, ActionIntent::Attack(_) | ActionIntent::Interact(_) | ActionIntent::Device { .. } | ActionIntent::Pack(_))
             || matches!(self, ActionIntent::Item(p) if matches!(p.action, protocol::ItemAction::Shoot { .. } | protocol::ItemAction::Eat { .. } | protocol::ItemAction::CreativeGive { .. } | protocol::ItemAction::Sleep { .. }))
     }
 }
@@ -133,6 +135,8 @@ impl<T, const N: usize> BoundedList<T, N> {
         Ok(Self(values))
     }
     pub fn into_vec(self) -> Vec<T> { self.0 }
+    pub fn as_slice(&self) -> &[T] { &self.0 }
+    pub fn allocated_bytes(&self) -> usize { self.0.capacity().saturating_mul(std::mem::size_of::<T>()) }
 }
 
 impl<'de, T: Deserialize<'de>, const N: usize> Deserialize<'de> for BoundedList<T, N> {

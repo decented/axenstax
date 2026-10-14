@@ -729,6 +729,12 @@ pub struct SentUses {
 }
 
 impl SentUses {
+    /// Borrow real private bodies without retiring their prediction records.
+    pub fn private_plans(&self) -> impl Iterator<Item = &crate::plan::PlanData> {
+        self.records.iter().filter_map(|record| record.cost.as_ref())
+            .chain(self.parked.iter().map(|stack| &stack.item))
+            .filter_map(|item| match item { Item::Plan(body) if body.marker.is_none() => Some(body), _ => None })
+    }
     /// Keep `record` (dropping the oldest past [`MAX_USE_RECORDS`]).
     pub fn record(&mut self, record: UseRecord) {
         self.records.push_back(record);

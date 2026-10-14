@@ -36,6 +36,11 @@ pub struct ServerPlayer {
     pub action_frontier: Option<crate::action_identity::ActionFrontier>,
     pub action_queue: Option<crate::action_queue::ActionQueue>,
     pub action_results: Option<crate::action_results::ActionResults>,
+    pub pack_session: Option<crate::pack_state::PackSession>,
+    pub pack_flight: Option<crate::pack_state::PackFlight>,
+    pub pack_next_incarnation: u64,
+    /// Validated overflow feedback waits for a pending canonical fence.
+    pub pack_unfit_feedback: Vec<(u32, u8)>,
     /// Once-per-death inventory hook, reset on entering or respawning.
     pub death_handled: bool,
     pub player: Player,
@@ -540,6 +545,10 @@ impl ServerPlayer {
             action_frontier: None,
             action_queue: None,
             action_results: None,
+            pack_session: None,
+            pack_flight: None,
+            pack_next_incarnation: 0,
+            pack_unfit_feedback: Vec::new(),
             player: Player::new(spawn),
             inventory: Inventory::new(),
             combat: PlayerCombat::new(),
@@ -1287,13 +1296,9 @@ impl GameServer {
             for s in &save_data.carts {
                 crate::cart::spawn_cart_from(&mut self.ecs, s.data.clone());
             }
-
-            #[cfg(not(target_arch = "wasm32"))]
-            if personal_proof.is_some() {
-                // Already-neutralised owner npubs stay unchanged. Restore before
-                // the role cut's save can otherwise drop the imported creatures.
-                crate::steed_save::restore_pets(&mut self.ecs, &save_data.saved_mobs, false)?;
-            }
+            // Restore once for ordinary and imported worlds, before a role
+            // cut can persist the selected world without its saved creatures.
+            crate::steed_save::restore_pets(&mut self.ecs, &save_data.saved_mobs, false)?;
 
             // Spec 30 — light data isn't persisted; recompute
             // from block state for every loaded column.
@@ -2082,16 +2087,16 @@ impl GameServer {
         // and the pickup pass above grants them via InventoryGrant. Kill
         // attribution / bounty / Vow stay client-side pending the dual-sim
         // rework.)
-        let drop_snaps = crate::death_drops::snapshot_before_despawn(&self.ecs);
+        let mut drop_snaps = crate::death_drops::snapshot_before_despawn(&self.ecs);
         let dying_tamed = crate::death_drops::dying_tamed_positions(&self.ecs);
         let deaths = crate::combat::despawn_dead(&mut self.ecs);
-        for (kind, pos, attacker) in deaths {
+        for death in deaths {
+            let crate::combat::MobDeath { kind, pos, attacker, .. } = death;
             crate::death_drops::spawn_drops_for_death(
                 &mut self.ecs,
                 &self.world,
-                &drop_snaps,
-                kind,
-                pos,
+                &mut drop_snaps,
+                death,
                 self.world_time,
             );
             // MP-D2b — the one attribution rule, with no local players: a
@@ -2754,6 +2759,7 @@ impl GameServer {
         crate::save::refuse_write_over_newer_save(&dir)?;
         // A committed first save cut short is published before anything below.
         crate::save::finish_staged_first_save(&dir)?;
+        let saved_mobs = crate::save::tamed_mobs_to_saved(&self.ecs)?;
         let first_save = crate::save::is_first_save(&dir);
         let chunks_dir = dir.join("chunks");
 
@@ -2965,7 +2971,7 @@ impl GameServer {
             // exact in-flight state on reload.
             carts: crate::save::carts_to_saved(&self.ecs),
             // Animals Wave 2 — persist tamed pets from this server's ECS.
-            saved_mobs: crate::save::tamed_mobs_to_saved(&self.ecs),
+            saved_mobs,
             // Satoshi onboarding — per-world guide state.
             satoshi: self.world.satoshi.clone(),
             dispensers,

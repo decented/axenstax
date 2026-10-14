@@ -2353,11 +2353,17 @@ draw_ghost_controls}`.
 
 #### Steed persistence — SHIPPED 2026-07-04 (gap-fill wave)
 
-First ride marks a Horse/Donkey/Mule as **kept** (`HorseData.kept_by`, the
-rider's slot). Kept steeds persist via `SavedTamedPetData::Steed { kind, data }`
-(APPENDED enum variant — positional bincode, never reorder) and respawn on load
-like wolves/nostriches/companions. Wild steeds still re-scatter. Previously a
-ridden horse silently despawned on save/load.
+First local ride marks a Horse/Donkey/Mule as **kept** by its genuine local
+seat. D2c-2 keeping (2026-10-13): a signed joiner's accepted first mount keeps
+a wild steed by its verified npub; guest riding creates no durable keeper.
+Later riders do not replace a keeper, and legacy local keeping is never
+automatically transferred to an npub or a reused connection slot. Kept steeds
+persist through appended `SavedTamedPetData::Steed3` (frozen HorseData gameplay
+fields, explicit Npub/LegacyLocal keeper and marker-safe cargo); old `Steed`
+and `Steed2` remain readable. Native, WASM resume and dedicated startup share
+the same saved-pet restoration helper. A kept authored steed is captured once,
+without a second wild Authored row. Wild steeds still re-scatter; first keeping
+removes `Scattered`, so ordinary column unload cannot discard kept cargo.
 
 ### 7.5 Day/Night Cycle
 
@@ -3335,28 +3341,48 @@ parrot squawks (toast + particle burst) when a hostile comes within
 (10 s) cooldown. The parrot→Electricity signal bridge stays deferred with the
 Aether design.
 
-**Donkey/Mule cargo.** `HorseData.pack: Option<ChestData>` (appended
-`#[serde(default)]`, wire shape frozen — `pack` is `serde(skip)` and persists
-via the existing `SavedTamedPetData::Steed2.pack`, no new save variant).
+**Donkey/Mule cargo.** `HorseData.pack: Option<ChestData>` is runtime-only
+(`serde(skip)`, frozen HorseData layout); Steed3 persists 27 marker-safe wooden
+slots and its explicit keeper, retaining legacy Steed2 full-body readers.
 Right-click a kept Donkey/Mule while holding a Chest to equip the pack
 (consumes the chest); sneak-right-click with an empty hand on a packed
-mount opens the 27-slot pack via `chest_ui::show_container_dialog` **if it
-still has contents**. Sneak-right-click with an empty hand on an **empty**
-pack instead **unequips it** (wired 2026-07-07): the pack is removed and one
-Chest is returned to the player's inventory (spawned as a world item if the
-inventory is full), toast "Pack removed."; a non-empty pack still just opens
-(with a "Empty the pack first." toast) — so a pack can always be filled and
-later emptied by hand, not only recovered via death-spill. Horse never
+mount always opens its 27-slot pack, including an empty one. The dialog's
+**Remove pack** button is enabled only for an empty pack and rechecks live
+emptiness when it executes. Successful removal returns exactly one Chest to
+the player's inventory, or spills its genuine overflow as a world item; a
+non-empty removal refuses without a refund or loss of cargo. Horse never
 carries a pack (speed vs utility niche). A packed donkey rescued by a Pet Bed
 keeps its pack. **A donkey/mule that dies away from a Pet Bed now spills its
 pack's contents plus one Chest item** (hardened 2026-07-07 — previously the
 pack and everything in it were silently destroyed on death unless rescue
 happened to fire; a rescued pet still keeps its pack with zero spill, no
-double-drop). Mounting a wild Horse/Donkey/Mule for the first time now also
+double-drop). Death records retain the exact generational entity identity;
+each cargo snapshot is consumed once, so two colocated deaths cannot spill
+one pack twice or lose the other. Mounting a wild Horse/Donkey/Mule for the first time now also
 **removes the `Scattered` tag** the instant it's kept (hardened 2026-07-07 —
 previously a kept, possibly packed, steed retained `Scattered` and could be
 permanently despawned by ordinary chunk unload before the next save, unlike
 every other tame path).
+
+**Joined shared packs (D2c-2, private wire91; acceptance pending).** A signed
+player's accepted first mount keeps a wild steed by npub; a guest may ride it
+without creating durable keeping. Any genuine keeper permits pack equip/open/
+use/removal under the applicable world/plot policy and current reach. Guests
+and signed players have equal access to an already-kept pack: this adds no
+keeper-only cargo ACL. Existing LegacyLocal seats keep their own-pet behaviour;
+a hosted joiner never inherits a numerical local owner's powers, and later
+mounts never claim or transfer that keeper automatically.
+
+Each joined pack operation is sequential and unpredicted, with actual named
+personal sources and the current live 27-slot cargo in either advertised
+inventory mode. During its flight, inventory movement and spending wait while
+movement, close/pause and required network controls remain usable. A stale
+revision, removal race, lost entity or old body gets an exact zero-effect
+terminal and current canonical window/view; ordinary stock races do not
+require a disconnect. Private Plans cannot cross a shared pack boundary;
+legacy local full-body Plans may still move within its cargo without losing
+the body. Host and local clicks mutate current live ECS cargo, never a stale
+rendering copy. The Mirror default and parked global Strict recovery remain.
 
 **Mule cross-breeding.** The horse family now breeds on Wheat
 (`breeding::breeding_food`). A **plain right-click with Wheat mounts** a

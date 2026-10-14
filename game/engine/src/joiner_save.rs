@@ -89,44 +89,7 @@ impl SessionObligations {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
-enum Slot {
-    Saved(SavedSlot),
-    Plan { marker: [u8; 32], developed: bool },
-}
-impl Slot {
-    fn capture(stack: Option<&ItemStack>) -> Self {
-        if let Some(ItemStack {
-            item: Item::Plan(p),
-            ..
-        }) = stack
-        {
-            return Self::Plan {
-                marker: crate::plan::marker(p),
-                developed: matches!(p.develop_state, crate::plan::DevelopState::Developed),
-            };
-        }
-        let mut inv = crate::inventory::Inventory::new();
-        inv.set_slot(0, stack.cloned());
-        Self::Saved(crate::save::serialize_inventory_raw(&inv).remove(0))
-    }
-    fn restore(&self) -> Result<Option<ItemStack>, String> {
-        match self {
-            Self::Plan { marker, developed } => Ok(Some(ItemStack {
-                item: Item::Plan(crate::plan::PlanData::marker_placeholder(
-                    *marker, *developed,
-                )),
-                count: 1,
-            })),
-            Self::Saved(SavedSlot::Plan { .. }) => Err("sidecar contains a Plan body".into()),
-            Self::Saved(saved) => {
-                let mut inv = crate::inventory::Inventory::new();
-                crate::save::restore_inventory(&mut inv, std::slice::from_ref(saved));
-                Ok(inv.slot(0).cloned())
-            }
-        }
-    }
-}
+use crate::saved_item_slot::SavedItemSlot as Slot;
 
 /// OC — one owed entry in a v2 save: the item in the save's own item
 /// encoding ([`SavedSlot`], exact for every non-Plan item, durability

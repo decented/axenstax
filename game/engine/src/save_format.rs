@@ -37,7 +37,7 @@ pub const WORLD_SAVE_FIELD_COUNT: u32 = 53;
 /// field or enum variant added inside a nested saved type, a retype. Such a change
 /// is invisible to the field-count tripwire, but an older build cannot read it
 /// either, so it must still move the version. Only ever increases.
-pub const SAVE_LAYOUT_REVISION: u32 = 0;
+pub const SAVE_LAYOUT_REVISION: u32 = 2;
 
 /// The `world.dat` format version this build writes, and the newest it opens.
 /// Monotonic: both terms only ever increase.

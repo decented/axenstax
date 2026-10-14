@@ -983,8 +983,16 @@ pub(crate) fn notify_hit_bear_or_hyena(ecs: &mut hecs::World, id: hecs::Entity, 
     }
 }
 
-/// Remove dead entities from the ECS world. Returns
-/// `(MobType, position, Option<attacker_pidx>)` for every mob that
+/// A death retains the exact entity which owned its cargo and attribution.
+#[derive(Clone, Copy, Debug)]
+pub struct MobDeath {
+    pub entity: hecs::Entity,
+    pub kind: crate::mob::MobType,
+    pub pos: Vec3,
+    pub attacker: Option<Attacker>,
+}
+
+/// Remove dead entities from the ECS world. Returns a record for every mob that
 /// died this tick, so the caller can:
 ///   1. spawn drop entities via `mob::drops_for` + `entity::spawn_item`,
 ///   2. credit the kill to the last-attacker pidx (or fall back to
@@ -992,7 +1000,7 @@ pub(crate) fn notify_hit_bear_or_hyena(ecs: &mut hecs::World, id: hecs::Entity, 
 ///
 /// Non-mob dead entities (anything with `Health` but no `MobKind`) are
 /// still despawned but produce no tuples.
-pub fn despawn_dead(ecs: &mut hecs::World) -> Vec<(crate::mob::MobType, Vec3, Option<Attacker>)> {
+pub fn despawn_dead(ecs: &mut hecs::World) -> Vec<MobDeath> {
     // First pass: find dead entities, capture (MobType, Vec3, attacker)
     // where present.
     let mut dead_with_drops: Vec<(hecs::Entity, crate::mob::MobType, Vec3, Option<Attacker>)> =
@@ -1012,10 +1020,9 @@ pub fn despawn_dead(ecs: &mut hecs::World) -> Vec<(crate::mob::MobType, Vec3, Op
         }
     }
 
-    let mut out: Vec<(crate::mob::MobType, Vec3, Option<Attacker>)> =
-        Vec::with_capacity(dead_with_drops.len());
+    let mut out = Vec::with_capacity(dead_with_drops.len());
     for (id, k, p, attacker) in dead_with_drops {
-        out.push((k, p, attacker));
+        out.push(MobDeath { entity: id, kind: k, pos: p, attacker });
         let _ = ecs.despawn(id);
     }
     for id in dead_other {
@@ -1405,7 +1412,8 @@ mod tests {
         }
         let deaths = despawn_dead(&mut ecs);
         assert_eq!(deaths.len(), 1);
-        assert_eq!(deaths[0].0, MobType::Brigand);
+        assert_eq!(deaths[0].entity, first, "the death retains the exact entity identity");
+        assert_eq!(deaths[0].kind, MobType::Brigand);
         assert_eq!(ecs.query::<&MobKind>().iter().count(), 1);
     }
 
@@ -1425,11 +1433,11 @@ mod tests {
         }
         let deaths = despawn_dead(&mut ecs);
         assert_eq!(deaths.len(), 2);
-        let kinds: Vec<MobType> = deaths.iter().map(|(k, _, _)| *k).collect();
+        let kinds: Vec<MobType> = deaths.iter().map(|death| death.kind).collect();
         assert!(kinds.contains(&MobType::Cow));
         assert!(kinds.contains(&MobType::Pig));
         // Positions preserved.
-        let positions: Vec<Vec3> = deaths.iter().map(|(_, p, _)| *p).collect();
+        let positions: Vec<Vec3> = deaths.iter().map(|death| death.pos).collect();
         assert!(positions.iter().any(|p| (p.x - 7.0).abs() < 1e-3));
         assert!(positions.iter().any(|p| (p.x + 1.0).abs() < 1e-3));
     }
@@ -1445,7 +1453,7 @@ mod tests {
         ecs.get::<&mut Health>(cow).unwrap().current = 0.0;
         let deaths = despawn_dead(&mut ecs);
         assert_eq!(deaths.len(), 1);
-        assert_eq!(deaths[0].2, Some(Attacker::Local(3)), "LastAttacker pidx should propagate");
+        assert_eq!(deaths[0].attacker, Some(Attacker::Local(3)), "LastAttacker pidx should propagate");
     }
 
     #[test]
@@ -1457,7 +1465,7 @@ mod tests {
         ecs.get::<&mut Health>(pig).unwrap().current = 0.0;
         let deaths = despawn_dead(&mut ecs);
         assert_eq!(deaths.len(), 1);
-        assert_eq!(deaths[0].2, None);
+        assert_eq!(deaths[0].attacker, None);
     }
 
     #[test]

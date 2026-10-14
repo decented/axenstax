@@ -131,6 +131,9 @@ mod window_events;
 // joiner's mirror and the server; and a joined client's glue for them.
 mod container_window;
 mod container_client;
+mod pack_wire;
+mod pack_state;
+mod pack_client;
 mod recipe_book_ui;
 mod egui_integration;
 mod menu;
@@ -264,6 +267,7 @@ mod death;
 mod starter_kit;
 mod inventory_sync;
 mod joiner_save;
+mod saved_item_slot;
 mod personal_value;
 mod plan_store;
 mod bear_ai;
@@ -291,6 +295,7 @@ mod bazaar_ui;
 mod inventory_explorer;
 mod wolf;
 mod horse_ai;
+mod steed_save;
 mod rabbit_ai;
 mod goat_ai;
 mod bee_ai;
@@ -373,7 +378,6 @@ mod save_fence;
 #[cfg(not(target_arch = "wasm32"))]
 mod fsync;
 mod save_format;
-mod steed_save;
 mod world_open;
 mod data_dir;
 // Transport, server sim, and HostedServer are cross-platform so single-player

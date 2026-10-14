@@ -457,14 +457,14 @@ impl crate::GameState {
         crate::handover::live::authority::open_guard(&crate::save::world_dir(&self.world_name)).map_err(|r| r.0.to_string())?;
         #[cfg(not(target_arch = "wasm32"))]
         self.preflight_personal_local()?;
-        let result = crate::save::save_world_superseding_autosave(
+        let result = crate::save::tamed_mobs_to_saved(&self.ecs).and_then(|pets| crate::save::save_world_superseding_autosave(
             &self.world_name,
             &self.world,
             &self.players,
             self.biome_gen.seed,
             &crate::save::carts_to_saved(&self.ecs),
-            &crate::save::tamed_mobs_to_saved(&self.ecs),
-        )
+            &pets,
+        ))
         .inspect_err(|e| log::error!("Save failed: {e}"));
         let result = result.and_then(|()| self.hosted_server.as_ref().map_or(Ok(()), |h| h.server.save_joiners()));
         self.session_saves.note_save(result.is_ok());

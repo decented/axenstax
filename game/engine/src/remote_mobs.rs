@@ -88,6 +88,8 @@ pub struct MirrorTarget {
     pub id: u32,
     pub kind: MobType,
     pub tamed: bool,
+    /// Actual live cargo presence, independent of keeping.
+    pub pack: bool,
     pub baby: bool,
     /// On a Lead (`entity_flags::TETHERED`, v70).
     pub tethered: bool,
@@ -105,9 +107,8 @@ pub enum MirrorClick {
     /// Villager trading: not yet for a joiner (D2c-3) — refused here with
     /// [`JOINED_INTERACTION_TOAST`].
     NotYet,
-    /// A steed's pack, fitted or opened: not yet for a joiner (D2c-2) —
-    /// refused here with [`JOINED_PACK_TOAST`].
-    PackNotYet,
+    PackEquip,
+    PackOpen,
 }
 
 impl MirrorTarget {
@@ -175,9 +176,8 @@ impl MirrorTarget {
         if crate::mob::is_rideable(kind) {
             if crate::mob::can_carry_pack(kind) {
                 let chest = matches!(held, Some(Item::Block(b)) if *b == crate::block::CHEST);
-                if chest || (sneak && held.is_none() && self.tamed) {
-                    return Some(MirrorClick::PackNotYet);
-                }
+                if chest && self.tamed && !self.pack { return Some(MirrorClick::PackEquip); }
+                if sneak && held.is_none() && self.tamed && self.pack { return Some(MirrorClick::PackOpen); }
             }
             return ask(InteractKind::Mount);
         }
@@ -369,6 +369,7 @@ impl RemoteMobs {
             id: m.id,
             kind,
             tamed: m.flags & entity_flags::TAMED != 0,
+            pack: m.flags & entity_flags::PACK != 0,
             baby: m.flags & entity_flags::BABY != 0,
             tethered: m.flags & entity_flags::TETHERED != 0,
             product_not_ready: m.flags & entity_flags::PRODUCT_NOT_READY != 0,
@@ -522,10 +523,6 @@ pub fn purge_private_mobs(ecs: &mut hecs::World) -> usize {
 /// The toast a joiner sees when it tries to talk to a villager on someone
 /// else's world: quests and trading need a server-side flow (D2c-3).
 pub const JOINED_INTERACTION_TOAST: &str = "Trading isn't available in someone else's world yet.";
-
-/// MP-D2c-1 — the toast a joiner sees when it tries to fit or open a steed's
-/// pack on someone else's world (D2c-2).
-pub const JOINED_PACK_TOAST: &str = "Packs work in your own worlds for now.";
 
 // C3c-3r — what a joiner sees when it tries a Plan or economy action the
 // server can't mirror yet. Each refusal changes nothing on the client.
@@ -742,7 +739,7 @@ mod tests {
         let hit = m.ray_target(eye, look, 5.0).expect("the crosshair is on the wolf");
         assert_eq!(
             hit,
-            MirrorTarget { id: 11, kind: MobType::Wolf, tamed: true, baby: false, tethered: false, product_not_ready: false }
+            MirrorTarget { id: 11, kind: MobType::Wolf, tamed: true, pack: false, baby: false, tethered: false, product_not_ready: false }
         );
         assert_eq!(m.ray_target(eye, Vec3::new(1.0, 0.0, 0.0), 5.0), None, "looking away misses");
         assert_eq!(m.ray_target(eye, look, 1.0), None, "out of reach (or behind a block)");
@@ -766,7 +763,7 @@ mod tests {
     }
 
     fn target(kind: MobType) -> MirrorTarget {
-        MirrorTarget { id: 1, kind, tamed: false, baby: false, tethered: false, product_not_ready: false }
+        MirrorTarget { id: 1, kind, tamed: false, pack: false, baby: false, tethered: false, product_not_ready: false }
     }
 
     /// MP-D2b — a right-click on a mirror asks the server for what it would
@@ -815,8 +812,12 @@ mod tests {
         // which carries none, and not on a wild one (single-player mounts it).
         let chest = Item::Block(crate::block::CHEST);
         let kept_donkey = MirrorTarget { tamed: true, ..target(MobType::Donkey) };
-        assert_eq!(target(MobType::Donkey).right_click_action(Some(&chest), false), Some(MirrorClick::PackNotYet));
-        assert_eq!(kept_donkey.right_click_action(None, true), Some(MirrorClick::PackNotYet));
+        assert_eq!(target(MobType::Donkey).right_click_action(Some(&chest), false), ask(Mount), "wild Chest click retains riding precedence");
+        assert_eq!(kept_donkey.right_click_action(Some(&chest), false), Some(MirrorClick::PackEquip));
+        assert_eq!(kept_donkey.right_click_action(None, true), ask(Mount), "keeping does not imply a pack");
+        let packed = MirrorTarget { pack: true, ..kept_donkey };
+        assert_eq!(packed.right_click_action(None, true), Some(MirrorClick::PackOpen));
+        assert_eq!(packed.right_click_action(Some(&chest), false), ask(Mount), "a second Chest cannot equip again");
         assert_eq!(target(MobType::Donkey).right_click_action(None, true), ask(Mount));
         assert_eq!(target(MobType::Horse).right_click_action(Some(&chest), false), ask(Mount));
         // Trading: D2c-3.

@@ -255,8 +255,8 @@ fn protocol_version_is_the_pinned_value() {
     // v89 (C3d accepted locally): typed `Action` (68), `ActionReceipt` (69),
     //   `Recovery` (70), `AppliedActionAck` (71); JoinAccept appends the
     //   fixed inventory mode, action namespace and life.
-    // Integrated handover uses private provisional v90 and tag 72.
-    assert_eq!(protocol::PROTOCOL_VERSION, 90);
+    // Packs use private provisional v91 after handover tags 72–73.
+    assert_eq!(protocol::PROTOCOL_VERSION, 91);
 }
 
 #[test]

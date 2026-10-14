@@ -14,6 +14,8 @@ use crate::transport::ClientTransport;
 
 #[path = "remote_client_actions.rs"]
 mod actions;
+#[path = "remote_client_pack.rs"]
+mod pack;
 pub use actions::flush_strict_window_ops;
 // Read by the copy lint and the stray-op test only.
 #[cfg(test)]
@@ -294,6 +296,10 @@ pub enum RequestOutcome {
     /// C3b-1 — the server's values for some slots of our window.
     SlotSet(protocol::WindowSlotSetPacket),
     Sync(protocol::InventorySyncPacket),
+    Pack(Box<crate::pack_wire::PackResult>),
+    PackView(Box<crate::pack_wire::PackViewPush>),
+    #[cfg(not(target_arch = "wasm32"))]
+    PersonalSync { window_event: u32, actor_respawns: u32 },
 }
 
 /// C3b-fix-b (B-M1) — a request this client sends mid-frame, in the one
@@ -384,6 +390,8 @@ pub struct RemoteClient {
     /// `JoinerActions` records (`GameState::release_retired_requests`).
     /// Bounded by `joiner_actions::MAX_PENDING` (the oldest goes first).
     pub released_requests: Vec<u32>,
+    pack_flight: Option<pack::PackFlight>,
+    pack_buffer: pack::PackBuffer,
     last_recovery_id: u64,
     queued_action_receipts: usize,
     pending_action_ack: Option<crate::action_wire::AppliedActionAck>,
@@ -831,6 +839,8 @@ impl RemoteClient {
             action_receipts: std::collections::VecDeque::with_capacity(crate::action_journal::MAX_ACTIONS),
             refill_refused: false,
             released_requests: Vec::new(),
+            pack_flight: None,
+            pack_buffer: Default::default(),
             last_recovery_id: 0,
             queued_action_receipts: 0,
             pending_action_ack: None,
@@ -904,6 +914,8 @@ impl RemoteClient {
             action_receipts: std::collections::VecDeque::with_capacity(crate::action_journal::MAX_ACTIONS),
             refill_refused: false,
             released_requests: Vec::new(),
+            pack_flight: None,
+            pack_buffer: Default::default(),
             last_recovery_id: 0,
             queued_action_receipts: 0,
             pending_action_ack: None,
@@ -1034,6 +1046,8 @@ impl RemoteClient {
                                 self.received_actor_respawns = accept.action_life;
                                 self.inventory_mode = accept.inventory_mode;
                                 self.action_journal = Some(crate::action_journal::ActionJournal::new(accept.action_session, accept.action_life));
+                                self.pack_flight = None;
+                                self.pack_buffer = Default::default();
                                 self.spawn_pos =
                                     Some((accept.spawn_x, accept.spawn_y, accept.spawn_z));
                                 // Queue play_mode for game loop to apply via set_play_mode.
@@ -1373,6 +1387,25 @@ impl RemoteClient {
                             }
                         }
                     }
+                    PacketType::PackResult => {
+                        match self.receive_pack_result(payload) {
+                            Ok(received) => changed |= received,
+                            Err(reason) => { self.pack_carrier_failed(reason); changed = true; }
+                        }
+                    }
+                    PacketType::PackView => {
+                        if payload.len() > crate::action_journal::MAX_PAGE_BYTES {
+                            self.pack_carrier_failed("Pack view exceeds its byte bound".into());
+                        } else {
+                            match protocol::safe_deserialize::<crate::pack_wire::PackViewPush>(payload) {
+                                Ok(view) if view.window_event != 0 => {
+                                    if let Err(reason) = self.receive_pack_view(view) { self.pack_carrier_failed(reason); }
+                                },
+                                _ => self.pack_carrier_failed("Pack view has no valid numbered carrier".into()),
+                            }
+                        }
+                        changed = true;
+                    }
                     PacketType::ActionReceipt => {
                         if self.queued_action_receipts == crate::action_journal::MAX_ACTIONS {
                             self.state = ConnectionState::Failed("Action receipts exceed their pending limit".into());
@@ -1441,7 +1474,17 @@ impl RemoteClient {
                     PacketType::PersonalSync => {
                         let result = protocol::safe_deserialize::<protocol::PersonalSyncPacket>(payload).map_err(|e| e.to_string()).and_then(|packet| {
                             let protocol::PersonalSyncPacket::Snapshot(value) = packet else { return Err("Unexpected personal applied packet".into()); };
-                            self.personal_inbox.as_mut().ok_or("Unexpected personal snapshot".to_string())?.push(value)
+                            let event = value.window_event;
+                            let actor_respawns = value.life;
+                            let inbox = self.personal_inbox.as_mut().ok_or("Unexpected personal snapshot".to_string())?;
+                            let was_pending = inbox.has_pending_fence(event, actor_respawns);
+                            let ack = inbox.push(value)?;
+                            if !was_pending && inbox.has_pending_fence(event, actor_respawns) {
+                                self.pending_outcomes.try_reserve_exact(1).map_err(|_| "Personal fence allocation failed")?;
+                                self.pending_outcomes.push(RequestOutcome::PersonalSync { window_event: event, actor_respawns });
+                                changed = true;
+                            }
+                            Ok(ack)
                         });
                         match result {
                             Ok(Some(ack)) => self.send_raw(&protocol::serialize_packet(PacketType::PersonalSync, &protocol::PersonalSyncPacket::Applied(ack))),
@@ -1481,6 +1524,11 @@ impl RemoteClient {
                     _ => {
                         // Unknown or unexpected packet type
                     }
+                }
+                if let Err(reason) = self.check_pack_poll_buffer() {
+                    self.pack_carrier_failed(reason);
+                    changed = true;
+                    break;
                 }
             }
         }
@@ -4066,6 +4114,7 @@ mod tests {
                 crate::chunk_intake::StreamItem::Attachment(a) => format!("A{}", a.x),
                 crate::chunk_intake::StreamItem::RebaseFence(_) => "F".into(),
                 crate::chunk_intake::StreamItem::ActionReceipt(_) => "R".into(),
+                crate::chunk_intake::StreamItem::PackResult(_) => "P".into(),
             })
             .collect();
         assert_eq!(shape, ["C1", "L5,-6#abcd", "C2"]);
