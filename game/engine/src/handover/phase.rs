@@ -2616,8 +2616,16 @@ mod tests {
             "the twin wasn't logged (or was logged on every pass)"
         );
         assert_eq!(crate::save::list_world_entries().len(), 1, "the handed-over world is listed twice");
-        let fork = crate::save::fork_world("harbour_town", "Harbour Town").expect("the moved world forks");
-        assert!(!crate::save::world_dir(&fork).join("handover").exists(), "the fork carried handover/");
+        // Generic Fork cannot carry this import's personal proofs; the
+        // explicit retained-copy path is tested through actual transfer.
+        let world_file = root.join("harbour_town/world.dat");
+        let activated_file = moved_records.join(format!("activated-{}.dat", hex::encode(t)));
+        let before_world = std::fs::read(&world_file).unwrap();
+        let before_activation = std::fs::read(&activated_file).unwrap();
+        assert!(crate::save::fork_world("harbour_town", "Harbour Town").is_err(), "a bound import was generically forked");
+        assert_eq!(crate::save::list_world_entries().len(), 1, "the refused fork created another world");
+        assert_eq!(std::fs::read(&world_file).unwrap(), before_world, "the refused fork changed the imported world");
+        assert_eq!(std::fs::read(&activated_file).unwrap(), before_activation, "the refused fork changed activation");
         let _ = std::fs::remove_dir_all(imports.parent().unwrap());
     }
 

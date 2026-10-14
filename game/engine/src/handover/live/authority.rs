@@ -166,10 +166,9 @@ mod tests {
         p
     }
 
-    /// CP14 (CP10 review LOW-4) + CP15 (CP14 review MEDIUM-1, DECIDED: a
-    /// refused world can't be forked): the fork of a retired world is
-    /// refused and makes no folder; the fork of an Activated import (which
-    /// opens) is a clean copy that carries no `handover/` and no bearer.
+    /// Generic Fork refuses both retired and imported authority: it cannot
+    /// preserve their personal proofs. Ordinary unbound worlds still fork
+    /// without carrying an authority directory or invitation bearer.
     #[test]
     fn handover_fork_carries_no_handover_folder_and_no_bearer() {
         const BEARER: [u8; 16] = [0xC3; 16];
@@ -195,6 +194,13 @@ mod tests {
             )
             .unwrap();
             store(&w).unwrap().persist(kind, id, payload).unwrap();
+            let data_before = std::fs::read(w.join("world.dat")).unwrap();
+            let meta_before = std::fs::read(w.join("world_meta.json")).unwrap();
+            let records_before: std::collections::BTreeMap<_, _> = std::fs::read_dir(dir(&w))
+                .unwrap()
+                .flatten()
+                .map(|e| (e.path(), std::fs::read(e.path()).unwrap()))
+                .collect();
             let before: Vec<_> = std::fs::read_dir(crate::save::worlds_root()).unwrap().flatten().map(|e| e.path()).collect();
             let forked = crate::save::fork_world(name, name);
             let made: Vec<_> = std::fs::read_dir(crate::save::worlds_root())
@@ -203,27 +209,39 @@ mod tests {
                 .map(|e| e.path())
                 .filter(|p| !before.contains(p))
                 .collect();
-            if name == "retired" {
-                assert!(forked.is_err(), "a retired world was forked: {forked:?}");
-                assert!(made.is_empty(), "the refused fork made a folder");
-                continue;
+            assert!(forked.is_err(), "a bound {name} world was forked: {forked:?}");
+            assert!(made.is_empty(), "the refused {name} fork made a folder");
+            assert_eq!(std::fs::read(w.join("world.dat")).unwrap(), data_before);
+            assert_eq!(std::fs::read(w.join("world_meta.json")).unwrap(), meta_before);
+            let records_after: std::collections::BTreeMap<_, _> = std::fs::read_dir(dir(&w))
+                .unwrap()
+                .flatten()
+                .map(|e| (e.path(), std::fs::read(e.path()).unwrap()))
+                .collect();
+            assert_eq!(records_after, records_before, "the refused fork changed authority bytes");
+            if name == "activated" {
+                assert!(open_guard(&w).is_ok(), "the Activated marker guard changed");
             }
-            assert!(open_guard(&w).is_ok(), "the Activated import doesn't open");
-            assert!(!made.is_empty(), "{name}: the fork made no folder ({forked:?})");
-            for f in &made {
-                assert!(!dir(f).exists(), "{name}: the fork carried handover/");
-            }
-            let f = crate::save::world_dir(&forked.expect("the fork failed"));
-            assert!(f.join("world.dat").is_file(), "{name}: the fork didn't copy the world");
-            let mut stack = made;
-            while let Some(d) = stack.pop() {
-                for e in std::fs::read_dir(&d).unwrap().flatten() {
-                    if e.path().is_dir() {
-                        stack.push(e.path());
-                    } else {
-                        let b = std::fs::read(e.path()).unwrap();
-                        assert!(!b.windows(16).any(|x| x == BEARER), "{name}: the fork carried the bearer in {:?}", e.path());
-                    }
+        }
+        crate::save::write_world_folder(
+            "ordinary",
+            &crate::save::WorldMeta::new("ordinary"),
+            &crate::save::minimal_world_save_for_tests(77),
+            &crate::world::World::new(),
+        )
+        .unwrap();
+        let fork = crate::save::fork_world("ordinary", "ordinary").expect("an unbound world still forks");
+        let copied = crate::save::world_dir(&fork);
+        assert!(copied.join("world.dat").is_file(), "the ordinary fork lost the world");
+        assert!(!dir(&copied).exists(), "the ordinary fork carried handover/");
+        let mut stack = vec![copied];
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).unwrap().flatten() {
+                if e.path().is_dir() {
+                    stack.push(e.path());
+                } else {
+                    let bytes = std::fs::read(e.path()).unwrap();
+                    assert!(!bytes.windows(16).any(|x| x == BEARER), "the ordinary fork carried the bearer");
                 }
             }
         }

@@ -110,8 +110,11 @@ fn c3d_strict_admission_refuses_a_v1_record() {
             // bytes) and `obligation_history` (`Complete`: variant 0, 4 zero
             // bytes). Dropping both and writing version 1 is the v1 record.
             let path = record_path(hs, i);
-            let mut bytes = std::fs::read(&path).unwrap();
-            assert_eq!(bytes[0], 2, "the writer writes v2");
+            // The canonical writer is v3; use its explicit retained v2
+            // seed codec to construct the genuine historical v1 layout.
+            let current = crate::joiner_save::JoinerSave::decode(&std::fs::read(&path).unwrap()).unwrap();
+            let mut bytes = current.encode_seed().unwrap();
+            assert_eq!(bytes[0], 2, "the retained seed writes v2");
             assert_eq!(&bytes[bytes.len() - 12..], &[0; 12], "empty owed + Complete");
             bytes.truncate(bytes.len() - 12);
             bytes[0] = 1;
