@@ -41,7 +41,7 @@ fn view() -> QuestView {
 }
 fn result() -> QuestResult {
     let window = crate::window_events::EffectiveWindow {
-        inv: Default::default(),
+        inv: crate::inventory::Inventory::new(),
         armour: [None; 4],
         cursor: None,
         grid: Default::default(),
