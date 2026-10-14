@@ -1,9 +1,10 @@
 # Handover source checkpoint — 14 October 2026
 
 This is a private, resumable source checkpoint after normal integration of
-visual e59b5e36 on 23752f9f, with final feature acceptance pending. Engine 0.2.27, private wire 90 (Handover 72,
+visual e59b5e36 and packs 3924651e, with final feature acceptance pending.
+Combined source checkpoint 818e2691; engine 0.2.27, wire 91 (Handover 72,
 PersonalSync 73), canonical participant save v3, WorldSave 53 fields and save
-layout revision 0. Mirror remains the default; Strict remains partial/parked.
+layout revision 2. Mirror remains the default; Strict remains partial/parked.
 
 Earlier checkpoint checks passed (87 distinct focused controls):
 
@@ -41,8 +42,8 @@ Additional checkpoint checks passed:
 
 These controls use a loopback stored relay, an in-memory online setup relay and
 an injected direct game channel after the real Answer is verified. They do not
-claim a two-machine router or public-relay playtest. The checks below separately exercise the actual native retained-copy loader and
-real-disk fault paths.
+claim a two-machine router or public-relay playtest. The checks below separately
+exercise the actual native retained-copy loader and real-disk fault paths.
 
 Additional retained-copy checkpoint checks passed (five exact controls):
 
@@ -70,6 +71,20 @@ produced a genuine runtime failure: a copy became live after the failed inert
 unlink directory sync. Exact source restoration returned the control green;
 the rebuilt executable SHA matched the earlier five-control executable.
 
+Actual client initial delivery checkpoint passed:
+
+- Real signed imported participant, occupied authoritative window, both delivery
+  orders in Mirror and Strict: no initial prediction, action allocation or spend;
+  control polling stays alive; exact Applied precedes fresh authority and a
+  blocked click is not replayed.
+- The baseline exposed Snapshot2 advancing before withheld Replace1. The narrow
+  correction requires actual successful Sync1, holds the whole initial prefix,
+  applies Sync1 before higher carriers and preserves existing owned-byte bounds.
+- Later-grant retention/order/conservation and four affected personal sync units
+  pass on the same executable. Removing only the initial personal simulation
+  hold fails at the actual held tick assertion; exact restoration returns green
+  and reproduces the original executable SHA.
+
 Still required before the concrete two-machine playtest:
 
 - [x] Checkpoint actual original-invitation 0→1, hand-back 2 and retirement 2→3.
@@ -77,12 +92,13 @@ Still required before the concrete two-machine playtest:
       display/default recovery or changed source bytes.
 - [x] Actual promoted/retained native load, matching save/autosave/discard,
       dedicated role continuation and Plan restoration.
-- [ ] Actual client first-click prediction/reservation guard and exact initial
+- [x] Actual client first-click prediction/reservation guard and exact initial
       acknowledgement send order with delayed Snapshot/linked Replace delivery.
 - [x] Retained promotion/directory-sync faults, native loader retries, non-overwriting
       collision handling and complete-folder portability.
-- [ ] Normal visual/packs integration, independent review and complete immutable
-      native/GPU/WASM/check.sh regression.
+- [x] Normal visual/packs source integration.
+- [ ] Independent final review and complete immutable native/GPU/WASM/check.sh
+      regression on the documentation-frozen combined commit.
 - [ ] Concrete native build and two-machine source→recipient→hand-back sheet.
 
 Do not use this checkpoint as an accepted-feature build or infer support for

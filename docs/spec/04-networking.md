@@ -6649,14 +6649,17 @@ live session, at native start-up and before a new recipient session; an
 unmarked directory is never touched.
 
 
-### Personal continuation adapter — private v90 checkpoint, acceptance pending
+### Personal continuation adapter — combined v91 candidate, final acceptance pending
 
 This source checkpoint adds `PersonalSync = 73`, the final
 `JoinAccept.has_personal_state` field, and the final authoritative
 `PlayerEventType::Respawned.respawns: u32` counter. The combined packs source remains private v91 (the handover-only API checkpoint
 was v90); Handover stays tag72 and C3d remains historically accepted v89 with Strict
-partial/parked and Mirror the default. Combined regression and actual loader,
-role-transition and second-transfer execution controls remain pending. Earlier
+partial/parked and Mirror the default. Focused actual loader, role-transition,
+save/discard and three original-invitation transfer controls passed at their
+recorded checkpoints. Actual initial client delivery in both orders and modes
+also passed after correcting the skipped initial Replace. Complete combined
+regression and the two-machine owner session remain pending. Earlier
 private checkpoint imports without the retained personal manifest are refused;
 this is not a compatibility promise for those source checkpoints.
 
@@ -6689,7 +6692,9 @@ world and personal state. A selected snapshot refreshes the canonical mirror
 before play. A dedicated local-to-remote role cut saves the actual current server
 world with the local field cleared and removes old autosaves from live selection;
 a native active owner cannot attach a second simultaneous remote body of the
-same persona. These role/discard execution controls are still pending.
+same persona. Focused role/discard controls passed, including selected primary
+and recovery-autosave state, future-dated autosave supersession and subsequent
+native reopen. The final combined regression remains required.
 
 PersonalSync carries a bounded server-selected snapshot and an exact Applied
 acknowledgement bound to action namespace, physical respawn generation, revision,
@@ -6722,8 +6727,9 @@ saved marker stub; its latent exposure is never replaced by the stub's zero.
 
 Freeze readiness includes typed action/request FIFO, deferred edits, retained
 results/Applied fences, numbered window quiescence and exact PersonalSync
-application. Focused real-order controls and independent final review remain
-required before acceptance.
+application. Focused actual typed/personal FIFO and applied-frontier controls
+passed. Independent final review and the complete combined gate remain required
+before acceptance.
 
 The combined pack draft numbers each new PersonalSync snapshot with a genuine
 no-window-change fence. Its full snapshot allocation and retained delivery
@@ -6736,8 +6742,8 @@ but its bounded server frontier waits for older typed/action and edit queues
 to settle. The automatic update pass then folds that acknowledged prefix;
 a free control cannot move an older paced authorisation off its valid base.
 This preserves the separate exact initial-install acknowledgement and current
-snapshot quiescence semantics on final integration; execution gates remain
-pending.
+snapshot quiescence semantics. The actual paced-authority control passed after
+fixing the acknowledged-prefix deferral; the final combined gate remains pending.
 
 
 The private adapter's subsequent source refinement refuses generic `.axeworld`,
@@ -6768,7 +6774,12 @@ have separate proofs: one exact bounded retained initial tuple can initialise
 an attachment after a newer snapshot was issued but delayed. It cannot release
 that newer pending snapshot, advance its current payload/window proof or permit
 freeze. Only exact current Applied and the typed result/window fences do that.
-Execution controls for these refinements remain pending.
+Focused execution controls for these refinements passed. The original initial
+client control exposed Personal2 application while Sync1 was still withheld;
+the corrected actual four-case control passed, and an independently scoped
+simulation-hold omission fails at its own physical tick assertion. Exact source
+restoration returns the same executable bytes and green behaviour. These scoped
+results do not replace the final combined regression or owner playtest.
 
 
 ### Original invitation and retained copy — private source checkpoint
