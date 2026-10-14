@@ -23410,6 +23410,13 @@ impl super::GameState {
             self.window_inbox.clear();
             return;
         }
+        // A personal fence received before the initial whole window cannot
+        // advance the frontier or authorise play. Ordinary window ordering is
+        // unchanged once that genuine Sync has actually succeeded.
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.remote_client.as_ref().is_some_and(|remote| remote.initial_personal_window_waits())
+            && !self.window_inbox.prioritise_initial_personal_replace()
+        { return; }
         self.flush_ops_before_edits();
         let (items, ack) = self.window_inbox.take_ordered();
         let satori_wire =
@@ -23461,6 +23468,8 @@ impl super::GameState {
                         self.window_inbox.clear();
                         return;
                     }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if let Some(client) = self.remote_client.as_mut() { client.note_initial_personal_window_applied(event); }
                 }
                 crate::window_events::InboxItem::Outcome(crate::remote_client::RequestOutcome::Pack(packet)) => {
                     if let Err(reason) = self.apply_pack_result(&packet) {

@@ -996,6 +996,17 @@ impl WindowInbox {
         self.outcomes.is_empty() && self.grants.is_empty() && self.armour.is_empty() && self.ack.is_none()
     }
 
+    /// Only an imported initial baseline uses this prerequisite: its genuine
+    /// Sync1 must precede already available higher personal/window carriers.
+    /// Rotate in place without changing owned bytes or the remaining order.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn prioritise_initial_personal_replace(&mut self) -> bool {
+        let Some(at) = self.outcomes.iter().position(|outcome| matches!(outcome,
+            RequestOutcome::Sync(packet) if packet.window_event == 1)) else { return false; };
+        self.outcomes[..=at].rotate_right(1);
+        true
+    }
+
     /// A future body's views wait for real lifecycle application; socket
     /// observation alone cannot make the new body ready.
     pub fn pack_life_ready(&self, actor_respawns: u32) -> bool {
@@ -1058,6 +1069,46 @@ mod tests {
     use crate::crafting::{ToolMaterial, ToolType};
     use crate::item::MaterialId;
     use crate::protocol::{InteractOutcomePacket, ItemActionOutcomePacket, WireItem};
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn handover_initial_replace_keeps_later_grant_owned_and_applies_it_after_baseline() {
+        let registry = crate::block::BlockRegistry::new();
+        let mut source = EffectiveWindow { inv: Inventory::new(), armour: [None; 4], cursor: None, grid: Default::default() };
+        source.inv.set_slot(4, Some(ItemStack::new_block(crate::block::GLASS, 9)));
+        let sync = crate::inventory_sync::packet(&source, &Default::default(), 1);
+        let later = InventoryGrantPacket { item_kind: crate::protocol::item_kind::BLOCK,
+            item_id: crate::block::STONE, count: 3, full_item: WireItem::None, window_event: 3 };
+        let mut inbox = WindowInbox::default();
+        inbox.add_bounded(vec![RequestOutcome::PersonalSync { window_event: 2, actor_respawns: 0 }], vec![later.clone()], Vec::new(), (1, 128)).unwrap();
+        let retained = window_carrier_bytes(&inbox.outcomes, &inbox.grants, inbox.armour.capacity());
+        assert!(!inbox.prioritise_initial_personal_replace(), "higher personal/grant metadata cannot replace missing Sync1");
+        assert_eq!(window_carrier_bytes(&inbox.outcomes, &inbox.grants, inbox.armour.capacity()), retained);
+        assert_eq!(inbox.grants, vec![later], "holding initial state shed a real later grant");
+        inbox.add_bounded(vec![RequestOutcome::Sync(sync)], Vec::new(), Vec::new(), (1, 128)).unwrap();
+        let retained = window_carrier_bytes(&inbox.outcomes, &inbox.grants, inbox.armour.capacity());
+        assert!(inbox.prioritise_initial_personal_replace());
+        assert_eq!(window_carrier_bytes(&inbox.outcomes, &inbox.grants, inbox.armour.capacity()), retained, "ordering allocated or lost owned carriers");
+        let (items, _) = inbox.take_ordered();
+        assert_eq!(items.iter().map(InboxItem::event).collect::<Vec<_>>(), vec![1, 2, 3], "late Sync must apply before the higher owned prefix");
+        let mut client = EffectiveWindow { inv: Inventory::new(), armour: [None; 4], cursor: None, grid: Default::default() };
+        let mut uses = Default::default();
+        let mut debt = Default::default();
+        for item in items {
+            match item {
+                InboxItem::Outcome(RequestOutcome::Sync(sync)) => {
+                    crate::inventory_sync::apply(&mut crate::window::WindowMut { inv: &mut client.inv, armour: &mut client.armour,
+                        cursor: &mut client.cursor, grid: &mut client.grid, container: None }, &sync, &registry,
+                        &mut uses, &mut debt, crate::action_identity::InventoryMode::Mirror).unwrap();
+                }
+                InboxItem::Outcome(RequestOutcome::PersonalSync { .. }) => (),
+                InboxItem::Grant(grant) => { assert_eq!(crate::remote_entities::apply_inventory_grant(&mut client.inv, &grant, &registry), Some(0)); }
+                _ => panic!("unexpected initial fixture carrier"),
+            }
+        }
+        assert_eq!(client.inv.slot(4).unwrap().count, 9);
+        assert_eq!(client.inv.slots_iter().flatten().filter(|s| s.item == Item::Block(crate::block::STONE)).map(|s| u32::from(s.count)).sum::<u32>(), 3, "initial Replace overwrote a later grant");
+    }
 
     #[test]
     fn d2c2_old_actor_canonical_retires_its_event_without_replacing_the_new_body() {

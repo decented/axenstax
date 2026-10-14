@@ -370,6 +370,9 @@ pub fn damage_cause_from_wire(cause: protocol::WireDamageCause) -> crate::surviv
 pub struct RemoteClient {
     pub inventory_mode: crate::action_identity::InventoryMode,
     pub action_journal: Option<crate::action_journal::ActionJournal>,
+    /// Set only after this attach's actual initial whole-window Sync succeeds.
+    #[cfg(not(target_arch = "wasm32"))]
+    personal_initial_window_applied: bool,
     pub recovery_prepare: Option<crate::action_identity::RecoveryCut>,
     pub recovery_assembly: Option<crate::rebase_assembly::RebaseAssembly>,
     /// Exact receipts wait for the actual ordered world boundary.
@@ -834,6 +837,8 @@ impl RemoteClient {
             transport,
             inventory_mode: crate::action_identity::InventoryMode::Mirror,
             action_journal: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            personal_initial_window_applied: false,
             recovery_prepare: None,
             recovery_assembly: None,
             action_receipts: std::collections::VecDeque::with_capacity(crate::action_journal::MAX_ACTIONS),
@@ -909,6 +914,8 @@ impl RemoteClient {
             transport,
             inventory_mode: crate::action_identity::InventoryMode::Mirror,
             action_journal: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            personal_initial_window_applied: false,
             recovery_prepare: None,
             recovery_assembly: None,
             action_receipts: std::collections::VecDeque::with_capacity(crate::action_journal::MAX_ACTIONS),
@@ -1041,7 +1048,10 @@ impl RemoteClient {
                                     accept.player_index, accept.seed, accept.play_mode
                                 );
                                 #[cfg(not(target_arch = "wasm32"))]
-                                { self.personal_inbox = accept.has_personal_state.then(|| crate::personal_sync::Inbox::new(accept.action_session, accept.action_life)); }
+                                {
+                                    self.personal_inbox = accept.has_personal_state.then(|| crate::personal_sync::Inbox::new(accept.action_session, accept.action_life));
+                                    self.personal_initial_window_applied = false;
+                                }
                                 self.actor_respawns = accept.action_life;
                                 self.received_actor_respawns = accept.action_life;
                                 self.inventory_mode = accept.inventory_mode;
@@ -1836,8 +1846,19 @@ impl RemoteClient {
         self.actor_respawns = respawns; true
     }
     pub(crate) fn personal_ready(&self) -> bool {
-        #[cfg(not(target_arch = "wasm32"))] { self.personal_inbox.as_ref().is_none_or(|inbox| inbox.initialised()) }
+        #[cfg(not(target_arch = "wasm32"))] { self.personal_inbox.as_ref().is_none_or(|inbox| self.personal_initial_window_applied && inbox.initialised()) }
         #[cfg(target_arch = "wasm32")] { true }
+    }
+    /// A high event number does not prove the imported initial window landed.
+    /// Polling and owned-byte checks stay live while that exact Sync is absent.
+    pub(crate) fn initial_personal_window_waits(&self) -> bool {
+        #[cfg(not(target_arch = "wasm32"))] { self.personal_inbox.is_some() && !self.personal_initial_window_applied }
+        #[cfg(target_arch = "wasm32")] { false }
+    }
+    /// Called only after inventory_sync::apply successfully installs Sync1.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn note_initial_personal_window_applied(&mut self, event: u32) {
+        if event == 1 && self.personal_inbox.is_some() { self.personal_initial_window_applied = true; }
     }
     pub(crate) fn has_personal_state(&self) -> bool {
         #[cfg(not(target_arch = "wasm32"))] { self.personal_inbox.is_some() }

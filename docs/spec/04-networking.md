@@ -6695,7 +6695,16 @@ PersonalSync carries a bounded server-selected snapshot and an exact Applied
 acknowledgement bound to action namespace, physical respawn generation, revision,
 linked numbered window event and payload hash. Actual window/life application
 precedes progression installation and Applied. Initial authorisation/prediction
-is held before installation; polling and control traffic continue. Repeats are
+is held before installation; polling and control traffic continue. The initial
+whole-window Sync1 must actually apply successfully before progression can
+install or its personal fence can advance the window frontier. If Personal2
+arrives first, its bounded carriers wait; when Sync1 arrives it moves ahead of
+those higher initial carriers in place, without changing their owned bytes or
+remaining order. Replace-first may install its physical window while waiting
+for the snapshot. A high frontier alone never proves this initial installation;
+ordinary later window ordering and the parked Strict recovery remain unchanged.
+The initial hold uses the existing aggregate count/owned-byte reservations.
+Repeats are
 inert, superseded acknowledgements cannot release a new snapshot, and queued
 respawns are observed separately from actual application. The physical counter
 reserves checked addition before any respawn mutation; exhaustion releases the

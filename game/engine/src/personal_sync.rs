@@ -221,7 +221,7 @@ impl crate::GameState {
     pub(crate) fn apply_personal_inbox(&mut self) {
         // Socket receipt cannot acknowledge progression through a held pack
         // window. Its own numbered fence must first reach actual application.
-        if self.remote_client.as_ref().is_some_and(|client| client.pack_window_inbox_held()) { return; }
+        if self.remote_client.as_ref().is_some_and(|client| client.pack_window_inbox_held() || client.initial_personal_window_waits()) { return; }
         let Some(client) = self.remote_client.as_mut() else {
             return;
         };
@@ -488,7 +488,7 @@ mod tests {
             server.try_recv_from_client().is_none(),
             "authorising packet escaped before personal installation"
         );
-        let value = snapshot(&bound(), [8; 16], 0, 1, 1).unwrap();
+        let value = snapshot(&bound(), [8; 16], 0, 1, 2).unwrap();
         server.send_to_client(&crate::protocol::serialize_packet(
             crate::protocol::PacketType::PersonalSync,
             &crate::protocol::PersonalSyncPacket::Snapshot(value.clone()),
@@ -505,11 +505,38 @@ mod tests {
                 .is_empty()
         );
         assert!(!client.personal_ready());
+        // This pure poll fixture uses the real physical replacement fold;
+        // readiness is recorded only after that successful Sync1 application.
+        let registry = crate::block::BlockRegistry::new();
+        let mut window = crate::window_events::EffectiveWindow { inv: crate::inventory::Inventory::new(),
+            armour: [None; 4], cursor: None, grid: Default::default() };
+        window.inv.set_slot(4, Some(crate::item::ItemStack::new_block(crate::block::GLASS, 9)));
+        let sync = crate::inventory_sync::packet(&window, &Default::default(), 1);
+        server.send_to_client(&crate::protocol::serialize_packet(crate::protocol::PacketType::InventorySync, &sync));
+        client.poll();
+        let received = client.pending_outcomes.iter().find_map(|outcome| match outcome {
+            crate::remote_client::RequestOutcome::Sync(sync) => Some(sync.clone()), _ => None,
+        }).expect("actual poll lost Sync1");
+        crate::inventory_sync::apply(&mut crate::window::WindowMut { inv: &mut slot.inventory,
+            armour: &mut slot.armour_slots, cursor: &mut slot.crafting_ui.cursor_item,
+            grid: &mut slot.crafting_ui.grid, container: None }, &received, &registry,
+            &mut Default::default(), &mut Default::default(), crate::action_identity::InventoryMode::Mirror).unwrap();
+        client.note_initial_personal_window_applied(received.window_event);
+        client.note_window_event(received.window_event);
+        assert_eq!(slot.inventory.slot(4).unwrap().count, 9);
+        assert!(!client.initial_personal_window_waits());
+        assert!(client.personal_inbox.as_mut().unwrap().apply(1, &mut slot).unwrap().is_empty());
+        assert!(!client.personal_ready(), "Sync1 alone released personal authorisation");
+        client.send_item_action(&packet);
+        assert!(server.try_recv_from_client().is_none());
+        assert!(client.pending_outcomes.iter().any(|outcome| matches!(outcome,
+            crate::remote_client::RequestOutcome::PersonalSync { window_event: 2, .. })), "actual snapshot poll lost its own fence");
+        client.note_window_event(2);
         let acks = client
             .personal_inbox
             .as_mut()
             .unwrap()
-            .apply(1, &mut slot)
+            .apply(2, &mut slot)
             .unwrap();
         for ack in acks {
             client.send_raw(&crate::protocol::serialize_packet(

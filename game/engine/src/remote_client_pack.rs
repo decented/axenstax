@@ -27,7 +27,11 @@ pub(super) struct PackFlight {
 }
 
 impl RemoteClient {
-    pub fn pack_buffers_live(&self) -> bool { self.pack_request_pending() || self.pack_buffer.count != 0 }
+    pub fn pack_buffers_live(&self) -> bool {
+        // Imported initial state uses the same aggregate owned-byte/count
+        // reservations while its genuine first whole window is held.
+        self.pack_request_pending() || self.pack_buffer.count != 0 || self.initial_personal_window_waits()
+    }
 
     /// Cross-frame reservation, intentionally conservative while a pack
     /// carrier is also present in the separately measured held window inbox.
