@@ -78,7 +78,7 @@ impl Inbox {
             .iter()
             .filter(|(i, _)| *i as usize == slot)
             .filter_map(|(_, e)| match e {
-                PlayerEventType::Respawned { x, y, z } => Some(Vec3::new(*x, *y, *z)),
+                PlayerEventType::Respawned { x, y, z, .. } => Some(Vec3::new(*x, *y, *z)),
                 _ => None,
             })
             .collect()

@@ -281,10 +281,15 @@ pub struct OnlinePanelView<'a> {
     /// [`connected_label`] — names or npubs, never hex, and never a list of
     /// anybody who is not actually here.
     pub connected: &'a [String],
+    /// World handover: the present, authenticated players this host may hand
+    /// the world to, by seat, already labelled like `connected`.
+    pub handover: &'a [(HandoverRow, String)],
 }
 
 /// QR + copy button + reachability + relay count + who is here + any warning.
-pub fn draw_online_panel(ui: &mut egui::Ui, view: &OnlinePanelView) {
+/// Returns the seat whose `Hand this world to …` was clicked.
+pub fn draw_online_panel(ui: &mut egui::Ui, view: &OnlinePanelView) -> Option<HandoverRow> {
+    let mut hand_to = None;
     ui.label(egui::RichText::new("Playing online").size(16.0).strong());
     ui.add_space(4.0);
     crate::menu::draw_qr(ui, view.invite_link, 148.0);
@@ -336,6 +341,15 @@ pub fn draw_online_panel(ui: &mut egui::Ui, view: &OnlinePanelView) {
                 .color(egui::Color32::from_rgb(230, 190, 120)),
         );
     }
+    if !view.handover.is_empty() {
+        ui.add_space(6.0);
+        for (row, label) in view.handover {
+            if handover_row_button(ui, *row, label).clicked() {
+                hand_to = Some(*row);
+            }
+        }
+    }
+    hand_to
 }
 
 /// The "Friends & servers" column: your address, the people you know, the paste
@@ -415,8 +429,53 @@ pub fn draw_friends_column(ui: &mut egui::Ui, state: &mut crate::menu::MenuState
     action
 }
 
+/// A host-action row: (slot, attach generation, verified key) as drawn.
+pub type HandoverRow = (usize, u32, [u8; 32]);
+
+/// Review LOW-4 (CP4 L6): each row's button is identified by its seat
+/// (slot, generation, key), not its position, so a press that began on one
+/// seat's row can never complete as a click on the row of a seat that has
+/// since replaced it in that slot (egui credits a click only to the widget
+/// the press began on).
+pub fn handover_row_button(ui: &mut egui::Ui, row: HandoverRow, label: &str) -> egui::Response {
+    ui.push_id(("handover-row", row.0, row.1, row.2), |ui| ui.small_button(crate::handover::live::copy::hand_to(label)))
+        .inner
+}
+
 #[cfg(test)]
 mod tests {
+    /// Review LOW-4: a press on seat A's row released over the row that seat
+    /// B now holds in the same slot is not a click; an ordinary click is.
+    #[test]
+    fn handover_row_press_on_one_seat_never_clicks_a_reused_slots_row() {
+        let ctx = egui::Context::default();
+        let a: super::HandoverRow = (1, 1, [7; 32]);
+        let b: super::HandoverRow = (1, 2, [8; 32]);
+        let run = |events: Vec<egui::Event>, row: super::HandoverRow| -> (bool, egui::Rect) {
+            let mut out = (false, egui::Rect::NOTHING);
+            let input = egui::RawInput { events, ..Default::default() };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let r = super::handover_row_button(ui, row, "x");
+                    out = (r.clicked(), r.rect);
+                });
+            });
+            out
+        };
+        let pos = run(vec![], a).1.center();
+        let button = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        run(vec![egui::Event::PointerMoved(pos), button(true)], a);
+        assert!(!run(vec![button(false)], b).0, "a press on one seat's row clicked the seat that replaced it");
+        run(vec![], a); // a's widget exists again before the next press
+        run(vec![button(true)], a);
+        assert!(run(vec![button(false)], a).0, "an ordinary click on a row didn't register");
+    }
+
     use super::*;
 
     const NPUB: &str = "npub1sg6plzptd64u62a878hep2kev88swjh3tw00gjsfl8f237lmu63q0uf63m";

@@ -1269,8 +1269,8 @@ outline and raised fill, whilst keyboard/controller focus remains Lantern.
 Side columns share the Deep Frontier palette; the Stash address hint presents
 the player-facing npub form. The empty world list displays the
 existing mountain mark above its creation hint. Header controls wrap on narrow
-screens. The spawn selector constrains its width to the remaining row and
-truncates its display text; previously it extended beyond a phone viewport and
+screens. The spawn selector occupies its own row, constrains its width to the remaining
+space and truncates its display text; previously it extended beyond a phone viewport and
 expanded the card grid too. Card content subtracts the frame's actual padding
 and stroke from its column width, so thicker selected outlines also stay within
 the column. Existing world actions, capability gates and responsive side-column

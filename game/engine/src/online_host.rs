@@ -324,6 +324,27 @@ impl OnlineHost {
         self.invite.to_link()
     }
 
+    /// The live invitation's root fields (its `k`, `h`, `x` and `r`), the
+    /// context a world handover from this host is bound to (Spec 04 "World
+    /// handover"). The bearer is not part of it.
+    pub fn root_context(
+        &self,
+        now: u64,
+    ) -> crate::handover::Result<crate::handover::context::RootContext> {
+        crate::handover::context::RootContext::new(
+            self.invite.host_runtime,
+            &self.invite.host_persona,
+            self.invite.expires_at,
+            &self.invite.relays,
+            now,
+        )
+    }
+
+    /// The runtime key this host answers and signs with.
+    pub fn runtime_keys(&self) -> &nostr::Keys {
+        self.identity.keys()
+    }
+
     pub fn candidates(&self) -> &[Candidate] {
         &self.candidates
     }
@@ -394,6 +415,32 @@ impl OnlineHost {
     /// access policy.
     pub fn book(&self) -> &[Contact] {
         &self.book
+    }
+
+    /// H1: the live invitation's bearer (the one `admit` checks as
+    /// `Accept(ByInvite)`), or `None` once it has expired: a world handover
+    /// needs a live invitation capability and never mints its own kind.
+    pub fn live_bearer(&self, now: u64) -> Option<[u8; crate::invite::BEARER_LEN]> {
+        (self.active_bearer.expires_at >= now).then_some(self.active_bearer.bearer)
+    }
+
+    /// World handover P2: an abort after the bearer was disclosed replaces
+    /// ONLY the bearer. The expiry, relays and host fields stay, so the
+    /// invitation's root context (and the lineage a handover derives from
+    /// it) is unchanged; old invite strings stop admitting.
+    pub fn rotate_bearer(&mut self) -> &Invite {
+        let bearer = mint_bearer();
+        self.invite.bearer = bearer;
+        self.active_bearer.bearer = bearer;
+        &self.invite
+    }
+
+    /// Test builds: what the live invitation decides for `persona` joining
+    /// with the invite string `link` (the same `admit` the offer path runs).
+    #[cfg(test)]
+    pub fn admission_for_link(&self, persona: &[u8; 32], link: &str, now: u64) -> crate::online_admission::Admission {
+        let offered = crate::invite::Invite::parse(link, now).ok().map(|i| i.bearer);
+        admit(persona, offered, &self.book, Some(&self.active_bearer), now)
     }
 
     /// Mint a new invite, retiring the previous bearer.
@@ -854,6 +901,22 @@ mod tests {
         assert_eq!(parsed.world_name, "Ivy's Hollow");
         assert_eq!(parsed.relays, vec!["wss://nos.lol".to_string()]);
         assert_eq!(parsed.expires_at, NOW + crate::invite::DEFAULT_INVITE_TTL_SECS);
+    }
+
+    #[test]
+    fn rotating_the_bearer_keeps_the_root_context_and_retires_the_old_link() {
+        let hub = FakeRelayHub::new();
+        let (mut host, _) = a_host(&hub, vec![]);
+        let (old_link, root) = (host.invite_link(), host.root_context(NOW).unwrap().digest());
+        let (old, expiry, relays) = (host.invite().bearer, host.invite().expires_at, host.invite().relays.clone());
+        let new = host.rotate_bearer().bearer;
+        assert_ne!(old, new);
+        assert_eq!((host.invite().expires_at, &host.invite().relays), (expiry, &relays));
+        assert_eq!(host.root_context(NOW + 60).unwrap().digest(), root, "rotation changed the root");
+        assert_eq!(host.live_bearer(NOW + 60), Some(new));
+        let stranger = [0x44; 32];
+        assert!(matches!(host.admission_for_link(&stranger, &old_link, NOW + 60), Admission::Refuse(_)));
+        assert!(matches!(host.admission_for_link(&stranger, &host.invite_link(), NOW + 60), Admission::Accept(_)));
     }
 
     #[test]

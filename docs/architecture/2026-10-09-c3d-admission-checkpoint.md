@@ -1,5 +1,30 @@
 # C3d source checkpoint: authoritative admission and exact replay
 
+## Current delivery status — 2026-10-13
+
+C3d partial delivery is accepted on local main at `c280f41f4385bc0b197257417b7752f2e583cce0`
+(tree `b19320815eaf5451f8075ce56488460bd223c47d`), protocol **89**. The final
+regression gate and independent focused review passed; nothing was pushed.
+**Mirror remains the default. Strict is PARTIAL / PARKED**, internally selectable
+only: the proposed operator flag remains unexposed, and no default flip is accepted.
+
+Supported Strict dispatch now covers window operations and shared containers,
+ordinary survival placements and mined breaks, doors/toggles, shots, attacks,
+entity interactions, eating, power-device interactions, creative gives, Q-drop
+and sleep. The remaining unsupported mutation classes fail closed before their
+effects. In particular, the eleven use-tagged edits and `GrantUnfit`, `UseBlock`
+(including campfire lighting), `PlaceCart`, `Cast`, `Reel`, `PlanMinted`, `Attach`,
+`Detach` and `OpenGrave` are still unsupported. Hold intents have no client sender;
+a typed one closes with `Untyped`. Canonical recovery installation, durable-body
+release and exact suffix replay remain pending. This acceptance includes the
+Mirror shared-door fixes and does not assert completion of the Strict design.
+
+The dated checkpoints and run notes below retain their original evidence and
+then-current gaps. Their provisional wire and pending-dispatch descriptions are
+historical; this status and Spec 04's current acceptance wording govern delivery.
+
+## Initial source and model checkpoint — 2026-10-09
+
 Source base: accepted smallfix `1dc5725e`, protocol 87; rebased 2026-10-10 onto local main `bdd4fe87` (OC obligation carrier, protocol 88 delivered). This is the first source
 and model checkpoint for an implementation in progress. The new modules are
 not connected to gameplay dispatch yet. The initial compile and 21 model tests

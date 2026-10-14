@@ -334,6 +334,10 @@ pub struct WorldSave {
     /// Never reorder/remove.
     #[serde(default)]
     pub rig_clips: Vec<crate::anim_set::AnimClip>,
+    /// Handover local personal state follows the exact selected world snapshot,
+    /// including explicit Save/Discard and autosave. APPEND LAST.
+    #[serde(default)]
+    pub local_personal: Option<crate::personal_value::LocalPersonalSave>,
 }
 
 /// One serialised Dispenser/Dropper. Position + DispenserData (mirrors
@@ -834,6 +838,7 @@ impl LegacyWorldSave {
             chests: Vec::new(),
             dispensers: Vec::new(),
             rig_clips: Vec::new(),
+            local_personal: None,
             // Legacy saves predate Spec 34 — no tip jars.
             tip_jars: Vec::new(),
             auctions: Vec::new(),
@@ -1257,6 +1262,16 @@ impl Drop for WorldsRootGuard {
     }
 }
 
+/// Run `f` on this thread with the worlds root at `root` (a test whose world
+/// folder isn't a [`WorldsRootGuard`]'s), restoring the previous root after.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(crate) fn with_worlds_root<T>(root: &std::path::Path, f: impl FnOnce() -> T) -> T {
+    let prev = WORLDS_ROOT_OVERRIDE.with(|o| o.replace(Some(root.to_path_buf())));
+    let out = f();
+    WORLDS_ROOT_OVERRIDE.with(|o| *o.borrow_mut() = prev);
+    out
+}
+
 /// Write `bytes` to `path` atomically: write a sibling `.tmp`, fsync it, then rename it
 /// over `path`. A crash / power-loss / disk-full can leave the `.tmp` but NEVER a
 /// half-written `path`, so a reader never sees a torn file.
@@ -1273,6 +1288,8 @@ impl Drop for WorldsRootGuard {
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
     use std::io::Write as _;
+    // Handover late-save fence: nothing is written into a frozen world.
+    crate::save_fence::check(path)?;
     // Append ".tmp" to the full path (robust for any filename, unlike with_extension).
     let tmp: PathBuf = {
         let mut t = path.as_os_str().to_owned();
@@ -1280,13 +1297,27 @@ pub(crate) fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> Result<(), S
         PathBuf::from(t)
     };
     {
-        let mut f = fs::File::create(&tmp).map_err(|e| format!("create {}: {e}", tmp.display()))?;
+        let mut f = crate::fsync::open_written(fs::OpenOptions::new().create(true).truncate(true), &tmp)
+            .map_err(|e| format!("create {}: {e}", tmp.display()))?;
         f.write_all(bytes).map_err(|e| format!("write {}: {e}", tmp.display()))?;
-        f.sync_all().map_err(|e| format!("fsync {}: {e}", tmp.display()))?;
+        crate::fsync::sync_written(&f).map_err(|e| format!("fsync {}: {e}", tmp.display()))?;
     }
-    fs::rename(&tmp, path)
-        .map_err(|e| format!("rename {} -> {}: {e}", tmp.display(), path.display()))?;
-    Ok(())
+    commit_rename(&tmp, path)
+}
+
+/// The rename that commits an atomic write, behind the late-save fence's
+/// commit-time check (`save_fence::commit`): a fenced or `handover/` commit
+/// is discarded and its temp file removed, so the world folder is exactly
+/// as it was.
+#[cfg(not(target_arch = "wasm32"))]
+fn commit_rename(tmp: &std::path::Path, path: &std::path::Path) -> Result<(), String> {
+    let committed = crate::save_fence::commit(path, || {
+        fs::rename(tmp, path).map_err(|e| format!("rename {} -> {}: {e}", tmp.display(), path.display()))
+    });
+    if committed.as_ref().is_err_and(|e| crate::save_fence::refused(e)) {
+        let _ = fs::remove_file(tmp);
+    }
+    committed
 }
 
 /// [`write_atomic`] without the per-file `fsync`: tmp + rename only. Used for
@@ -1301,17 +1332,17 @@ pub(crate) fn write_atomic_nosync(path: &std::path::Path, bytes: &[u8]) -> Resul
         t.push(".tmp");
         PathBuf::from(t)
     };
+    crate::save_fence::check(path)?;
     fs::write(&tmp, bytes).map_err(|e| format!("write {}: {e}", tmp.display()))?;
-    fs::rename(&tmp, path)
-        .map_err(|e| format!("rename {} -> {}: {e}", tmp.display(), path.display()))
+    commit_rename(&tmp, path)
 }
 
 /// fsync a directory, making the renames done in it durable. Best-effort on
 /// platforms where a directory can't be opened for sync.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn sync_dir(dir: &std::path::Path) {
-    if let Ok(f) = fs::File::open(dir)
-        && let Err(e) = f.sync_all()
+    if let Err(e) = crate::fsync::sync_dir(dir)
+        && e.kind() != std::io::ErrorKind::NotFound
     {
         log::warn!("fsync {}: {e}", dir.display());
     }
@@ -1365,7 +1396,7 @@ pub(crate) fn keep_damaged_copy_once(path: &std::path::Path) {
         done.push(path.to_path_buf());
     }
     let dest = corrupt_sibling_path(path);
-    match fs::copy(path, &dest) {
+    match crate::save_fence::commit(&dest, || fs::copy(path, &dest).map_err(|e| e.to_string())) {
         Ok(_) => log::error!(
             "{} only partly decoded; original kept as {}",
             path.display(),
@@ -1391,8 +1422,9 @@ pub(crate) fn quarantine_corrupt(path: &std::path::Path) -> Result<PathBuf, Stri
         return Err(format!("quarantine {}: injected failure", path.display()));
     }
     let dest = corrupt_sibling_path(path);
-    fs::rename(path, &dest)
-        .map_err(|e| format!("quarantine {} -> {}: {e}", path.display(), dest.display()))?;
+    crate::save_fence::commit(&dest, || {
+        fs::rename(path, &dest).map_err(|e| format!("quarantine {} -> {}: {e}", path.display(), dest.display()))
+    })?;
     log::error!(
         "damaged file kept aside for recovery: {} -> {}",
         path.display(),
@@ -1416,8 +1448,9 @@ pub(crate) fn copy_damaged_aside(path: &std::path::Path) -> Result<PathBuf, Stri
         return Err(format!("copy {}: injected failure", path.display()));
     }
     let dest = corrupt_sibling_path(path);
-    fs::copy(path, &dest)
-        .map_err(|e| format!("copy {} -> {}: {e}", path.display(), dest.display()))?;
+    crate::save_fence::commit(&dest, || {
+        fs::copy(path, &dest).map_err(|e| format!("copy {} -> {}: {e}", path.display(), dest.display()))
+    })?;
     log::error!("{} failed to load; a copy is kept as {}", path.display(), dest.display());
     Ok(dest)
 }
@@ -1739,8 +1772,9 @@ fn publish_staged_chunks(dir: &std::path::Path) -> Result<(), String> {
             quarantine_corrupt(&chunks)?;
         }
     }
-    fs::rename(dir.join(STAGED_CHUNKS), &chunks)
-        .map_err(|e| format!("publish {STAGED_CHUNKS}/ as chunks/: {e}"))?;
+    crate::save_fence::commit(&chunks, || {
+        fs::rename(dir.join(STAGED_CHUNKS), &chunks).map_err(|e| format!("publish {STAGED_CHUNKS}/ as chunks/: {e}"))
+    })?;
     sync_dir(dir);
     Ok(())
 }
@@ -1772,8 +1806,9 @@ pub(crate) fn finish_staged_first_save(dir: &std::path::Path) -> Result<(), Stri
     if let Some(file) = crate::world_open::saved_chunk_file(dir)? {
         let from = dir.join(STAGED_CHUNKS);
         let to = aside_sibling_path(&from, "stale");
-        fs::rename(&from, &to).map_err(|e| {
-            format!("stale {STAGED_CHUNKS}/ (beside {file}) can't be set aside ({e})")
+        crate::save_fence::commit(&to, || {
+            fs::rename(&from, &to)
+                .map_err(|e| format!("stale {STAGED_CHUNKS}/ (beside {file}) can't be set aside ({e})"))
         })?;
         log::warn!(
             "{}: {STAGED_CHUNKS}/ is older than the saved chunks beside world.dat ({file}); \
@@ -1908,29 +1943,21 @@ pub fn save_world(
     save_world_at(name, world, players, seed, carts, saved_mobs, AtCommit::KeepAutosave)
 }
 
-/// [`save_world`], doing `at_commit` to the autosave the moment `world.dat`
-/// commits.
+/// The positional WorldSave of a live world and its local seats, exactly as
+/// `save_world` writes it. World handover builds its transfer copy from the
+/// same builder (then neutralises the copy), so the two cannot drift.
 #[cfg(not(target_arch = "wasm32"))]
-fn save_world_at(
-    name: &str,
+pub fn build_world_save(
     world: &World,
     players: &[crate::player_slot::PlayerSlot],
     seed: u32,
     carts: &[SavedCart],
     saved_mobs: &[SavedTamedPet],
-    at_commit: AtCommit,
-) -> Result<(), String> {
+) -> Option<WorldSave> {
+    // No seat, no legacy single-player fields to fill: refused, not a panic.
     if players.is_empty() {
-        return Err("save_world: no players to save".to_string());
+        return None;
     }
-    let dir = world_dir(name);
-    // Before anything — including the stale-chunk deletes below — is touched.
-    refuse_world_write(&dir)?;
-    // A committed first save cut short is published before any delete below,
-    // so a chunk mined out since can't come back with it.
-    finish_staged_first_save(&dir)?;
-    let chunks_dir = dir.join("chunks");
-
     // Build per-player save data
     let player_saves: Vec<PlayerSaveData> = players.iter().map(|slot| {
         PlayerSaveData {
@@ -2034,7 +2061,7 @@ fn save_world_at(
         .map(|(&(x, y, z), chain)| SavedArchitectPlaque { x, y, z, chain: chain.clone() })
         .collect();
 
-    let save = WorldSave {
+    Some(WorldSave {
         seed,
         player_x: p0.x,
         player_y: p0.y,
@@ -2056,6 +2083,7 @@ fn save_world_at(
         rigs: world.rigs.clone(),
         // #19 — index-aligned clip side table (see `WorldSave.rig_clips`).
         rig_clips: world.rigs.iter().map(|r| r.clip).collect(),
+        local_personal: crate::joiner_save::capture_local(&players[0]).ok()?,
         exhibits: world.exhibits.clone(),
         composters: world.iter_composters().map(|((x, y, z), data)| SavedComposter { x, y, z, data: data.clone() }).collect(),
         tip_jars,
@@ -2105,7 +2133,34 @@ fn save_world_at(
             .iter_power_devices()
             .map(|((x, y, z), data)| SavedPowerDevice { x, y, z, data: data.clone() })
             .collect(),
-    };
+    })
+}
+
+/// [`save_world`], doing `at_commit` to the autosave the moment `world.dat`
+/// commits.
+#[cfg(not(target_arch = "wasm32"))]
+fn save_world_at(
+    name: &str,
+    world: &World,
+    players: &[crate::player_slot::PlayerSlot],
+    seed: u32,
+    carts: &[SavedCart],
+    saved_mobs: &[SavedTamedPet],
+    at_commit: AtCommit,
+) -> Result<(), String> {
+    if players.is_empty() {
+        return Err("save_world: no players to save".to_string());
+    }
+    let dir = world_dir(name);
+    // Before anything — including the stale-chunk deletes below — is touched.
+    refuse_world_write(&dir)?;
+    // A committed first save cut short is published before any delete below,
+    // so a chunk mined out since can't come back with it.
+    finish_staged_first_save(&dir)?;
+    let chunks_dir = dir.join("chunks");
+
+    let save = build_world_save(world, players, seed, carts, saved_mobs)
+        .ok_or_else(|| "save_world: no players to save".to_string())?;
 
     // Increment version counter + flush proof-of-play stats into meta BEFORE
     // the folder write so world_meta.json on disk matches the live state.
@@ -2127,7 +2182,8 @@ fn save_world_at(
     // write_world_folder then writes only the non-empty ones.
     let (_, to_delete) = partition_chunks_for_save(world);
     for (cx, cy, cz) in to_delete {
-        let _ = fs::remove_file(chunks_dir.join(format!("{cx}_{cy}_{cz}.chunk")));
+        let gone = chunks_dir.join(format!("{cx}_{cy}_{cz}.chunk"));
+        let _ = crate::save_fence::commit_quiet(&gone, || fs::remove_file(&gone).map_err(|e| e.to_string()));
     }
 
     // Delegate the actual file writes (world.dat, world_meta.json, chunks/)
@@ -2269,6 +2325,7 @@ pub fn save_world(
         rigs: world.rigs.clone(),
         // #19 — index-aligned clip side table (see `WorldSave.rig_clips`).
         rig_clips: world.rigs.iter().map(|r| r.clip).collect(),
+        local_personal: None,
         exhibits: world.exhibits.clone(),
         composters: world.iter_composters().map(|((x, y, z), data)| SavedComposter { x, y, z, data: data.clone() }).collect(),
         tip_jars,
@@ -2534,6 +2591,7 @@ fn deserialize_world_save_tolerant_reporting(
         // #19 — per-rig animation clip (index-aligned with `rigs`). NEWEST field;
         // read LAST.
         rig_clips: tail.field(&mut cur, "rig_clips"),
+        local_personal: tail.field(&mut cur, "local_personal"),
     };
     Ok((save, tail.failed_at, cur.position()))
 }
@@ -2572,7 +2630,12 @@ pub fn read_world_save_reporting(data: &[u8]) -> Result<(WorldSave, bool), World
         return Err(e);
     }
     match deserialize_world_save_tolerant_reporting(payload) {
-        Ok((s, failed, _)) => Ok((s, failed.is_some())),
+        Ok((s, failed, _)) => {
+            if version.is_some_and(|v| v >= 53) && (failed.is_some() || bincode::serialize(&s).map_err(|e| WorldSaveError::Undecodable(e.to_string()))?.as_slice() != payload) {
+                return Err(WorldSaveError::Undecodable("current personal snapshot is truncated or corrupt; preserved without reset".into()));
+            }
+            Ok((s, failed.is_some()))
+        },
         Err(_) => {
             let legacy: LegacyWorldSave = bincode::deserialize(payload).map_err(|e| {
                 WorldSaveError::Undecodable(format!("deserialize (legacy fallback): {e}"))
@@ -2588,8 +2651,17 @@ pub fn read_world_save_reporting(data: &[u8]) -> Result<(WorldSave, bool), World
 /// newer build ([`WorldSaveError::NewerVersion`]), or is there but can't be read
 /// ([`WorldSaveError::Unreadable`]: its version is unknown). Spec 02 §8.4. Reads
 /// only each file's 12-byte footer.
+///
+/// CP6 review M-1: this is also the one retirement choke point. A world whose
+/// authority was handed over (any `handover/retired-*.dat`), or whose handover
+/// record can't be read, is refused here first, so every opener and writer
+/// that passes through it (lobby/open, online host, dedicated server, save,
+/// autosave, meta, `GameServer::try_save`, joiner saves) refuses it too.
 #[cfg(not(target_arch = "wasm32"))]
-fn save_refusal_in(dir: &std::path::Path) -> Option<WorldSaveError> {
+pub(crate) fn save_refusal_in(dir: &std::path::Path) -> Option<WorldSaveError> {
+    if let Err(r) = crate::handover::live::authority::open_guard(dir) {
+        return Some(WorldSaveError::Retired(r.0));
+    }
     ["world.dat", "autosave/world.dat"].iter().find_map(|rel| {
         match crate::save_format::file_footer_version(&dir.join(rel)) {
             Ok(version) => crate::save_format::check_version(version).err(),
@@ -2622,6 +2694,8 @@ pub fn world_open_refusal(_folder_name: &str) -> Option<String> {
 /// [`world_open_refusal`] and the load-failure rule (`world_open::open_world`).
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn refuse_write_over_newer_save(dir: &std::path::Path) -> Result<(), String> {
+    // Handover late-save fence (CP14): a frozen or retired world is never written.
+    crate::save_fence::check(dir)?;
     match save_refusal_in(dir) {
         Some(e) => {
             log::error!("refusing to write to {}: {e:?}", dir.display());
@@ -2690,6 +2764,9 @@ pub fn load_world(
     world: &mut World,
 ) -> Result<(WorldSave, u32), String> {
     let dir = world_dir(name);
+    // M-1: a retired world (or an unreadable handover record) is never loaded.
+    #[cfg(not(target_arch = "wasm32"))]
+    crate::handover::live::authority::open_guard(&dir).map_err(|r| r.0.to_string())?;
 
     // Refuse a world whose info is damaged beyond recovery rather than load it
     // under default meta (seed 42, survival) — audit 2026-09-27. Read-only: a
@@ -3781,6 +3858,9 @@ pub fn load_world_meta(folder_name: &str) -> WorldMeta {
 /// Either way a write would put defaults over the world's real info.
 #[cfg(not(target_arch = "wasm32"))]
 fn meta_write_blocked(dir: &std::path::Path) -> Option<String> {
+    if crate::save_fence::is_up(dir) {
+        return Some(crate::save_fence::DISCARDED.to_string());
+    }
     // A world saved by a newer build: its meta may carry fields this build would
     // drop on re-write (Spec 02 §8.4). Or one whose world.dat can't be read.
     if let Some(e) = save_refusal_in(dir) {
@@ -3945,21 +4025,55 @@ fn slug_or_fallback(display_name: &str) -> Option<String> {
     Some(truncated.trim_end_matches('_').to_string())
 }
 
+/// CP19 (CP18 review MEDIUM-3, DECIDED): a folder name under the worlds
+/// folder that no world may be given, whether or not it exists yet: the
+/// game's own singleton folders (the Workshop, the joined-world scratch) and
+/// the Windows reserved device names (`con`, `prn`, `aux`, `nul`,
+/// `com1`–`com9`, `lpt1`–`lpt9`, any case, with or without an extension).
+pub fn is_reserved_folder(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    if is_arena_folder(&lower) {
+        return true;
+    }
+    if lower == crate::workshop::WORKSHOP_FOLDER || lower == crate::remote_client::JOINED_WORLD_FOLDER {
+        return true;
+    }
+    let stem = lower.split('.').next().unwrap_or("").trim_end_matches([' ', '_']);
+    matches!(stem, "con" | "prn" | "aux" | "nul")
+        || ((stem.starts_with("com") || stem.starts_with("lpt")) && stem.len() == 4 && matches!(stem.as_bytes()[3], b'1'..=b'9'))
+}
+
+/// CP21 (CP19 review HIGH-1, DECIDED): the Trial arena family
+/// (`scenario::experience_world_slug`: `exp-<slug>`, and KeepNew's
+/// `exp-<slug>-<seed>`), any case. A Reuse Trial wipes its folder on every
+/// launch, so no other world may ever be named into it.
+pub fn is_arena_folder(name: &str) -> bool {
+    name.get(..4).is_some_and(|p| p.eq_ignore_ascii_case("exp-"))
+}
+
+/// A slug in the arena family moves out of it (`Exp-Hash-Dash` →
+/// `Exp_Hash-Dash`), so a world with that name still gets a readable folder.
+pub fn off_arena_folder(base: String) -> String {
+    if is_arena_folder(&base) { format!("{}_{}", &base[..3], &base[4..]) } else { base }
+}
+
 /// Sanitize a display name into a valid folder name, deduplicated against the
-/// worlds directory (native) with a `_2`, `_3`, … suffix.
+/// worlds directory (native) with a `_2`, `_3`, … suffix. CP19: a reserved
+/// name (`is_reserved_folder`) counts as taken.
 pub fn sanitize_folder_name(display_name: &str) -> String {
     let Some(base) = slug_or_fallback(display_name) else {
         return "world".to_string();
     };
+    let base = off_arena_folder(base);
     #[cfg(not(target_arch = "wasm32"))]
     {
         let worlds_dir = worlds_root();
-        if !worlds_dir.join(&base).exists() {
+        if !is_reserved_folder(&base) && !worlds_dir.join(&base).exists() {
             return base;
         }
         for i in 2..100 {
             let candidate = format!("{base}_{i}");
-            if !worlds_dir.join(&candidate).exists() {
+            if !is_reserved_folder(&candidate) && !worlds_dir.join(&candidate).exists() {
                 return candidate;
             }
         }
@@ -3978,6 +4092,15 @@ pub fn fork_world(source_folder: &str, source_display_name: &str) -> Result<Stri
     if !source_dir.exists() {
         return Err(format!("Source world '{}' not found", source_folder));
     }
+    // CP15 (CP14 review MEDIUM-1, DECIDED: a refused world can't be
+    // forked): a world this build won't open (retired by a handover, an
+    // import not yet Activated, an unreadable handover record, a save from
+    // a newer build) is never copied into a playable world, exactly as
+    // `load_world` and export refuse it. A source's retained copy is the
+    // retained-copy slice's job, with its own rules, not this path.
+    if let Some(why) = save_refusal_in(&source_dir) {
+        return Err(why.to_string());
+    }
 
     // Load the source metadata to preserve integrity fields
     let source_meta = load_world_meta(source_folder);
@@ -3985,7 +4108,10 @@ pub fn fork_world(source_folder: &str, source_display_name: &str) -> Result<Stri
     let new_folder = sanitize_folder_name(&new_display_name);
     let dest_dir = world_dir(&new_folder);
 
-    copy_dir_recursive(&source_dir, &dest_dir)
+    // CP14 (CP10 review LOW-4): a fork never carries `handover/` (the
+    // retirement, Activated and receipt records and the bearer they hold):
+    // a forked copy is a new world, and duplicating them would breach H3.
+    copy_dir_recursive(&source_dir, &dest_dir, Some("handover"))
         .map_err(|e| format!("fork copy: {e}"))?;
 
     // Write new metadata for the fork
@@ -4189,6 +4315,7 @@ pub fn autosave_world(
         rigs: world.rigs.clone(),
         // #19 — index-aligned clip side table (see `WorldSave.rig_clips`).
         rig_clips: world.rigs.iter().map(|r| r.clip).collect(),
+        local_personal: crate::joiner_save::capture_local(&players[0])?,
         exhibits: world.exhibits.clone(),
         composters: world.iter_composters().map(|((x, y, z), data)| SavedComposter { x, y, z, data: data.clone() }).collect(),
         tip_jars,
@@ -4245,7 +4372,8 @@ pub fn autosave_world(
     let mut saved = 0u32;
     let (to_write, to_delete) = partition_chunks_for_save(world);
     for (cx, cy, cz) in to_delete {
-        let _ = fs::remove_file(chunks_dir.join(format!("{cx}_{cy}_{cz}.chunk")));
+        let gone = chunks_dir.join(format!("{cx}_{cy}_{cz}.chunk"));
+        let _ = crate::save_fence::commit_quiet(&gone, || fs::remove_file(&gone).map_err(|e| e.to_string()));
     }
     for (cx, cy, cz) in to_write {
         if let Some(chunk) = world.persistable_chunk(cx, cy, cz) {
@@ -4357,6 +4485,9 @@ pub fn load_autosave(
     name: &str,
     world: &mut World,
 ) -> Result<(WorldSave, u32), String> {
+    // M-1: a retired world's autosave is never loaded either.
+    #[cfg(not(target_arch = "wasm32"))]
+    crate::handover::live::authority::open_guard(&world_dir(name)).map_err(|r| r.0.to_string())?;
     let dir = world_dir(name).join("autosave");
     let dat_path = dir.join("world.dat");
     let data =
@@ -4394,9 +4525,12 @@ pub fn clear_autosave(name: &str) {
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn clear_autosave_in(folder: &std::path::Path) {
     let dir = folder.join("autosave");
-    match fs::remove_file(dir.join("world.dat")) {
+    let removed = crate::save_fence::commit(&dir, || match fs::remove_file(dir.join("world.dat")) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.to_string()),
+        _ => Ok(()),
+    });
+    match removed {
         Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => {
             log::warn!("Failed to clear autosave ({}): {e}", dir.display());
             return;
@@ -4423,6 +4557,12 @@ pub fn delete_world(folder_name: &str) -> Result<(), String> {
     if dir.exists() {
         fs::remove_dir_all(&dir).map_err(|e| format!("delete: {e}"))?;
         log::info!("Deleted world '{folder_name}'");
+    }
+    // CP15 (CP14 review MEDIUM-2): a retired world's fence never lifts, but
+    // it guards only that folder's records; with the folder gone a new
+    // world made at the same path in this process must save.
+    if !dir.exists() {
+        crate::save_fence::forget(&dir);
     }
     Ok(())
 }
@@ -4475,13 +4615,16 @@ fn dir_size(path: &std::path::Path) -> u64 {
 
 /// Recursively copy a directory.
 #[cfg(not(target_arch = "wasm32"))]
-fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+pub(crate) fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path, skip_top: Option<&str>) -> std::io::Result<()> {
     fs::create_dir_all(dst)?;
     for entry in fs::read_dir(src)? {
         let entry = entry?;
+        if skip_top.is_some_and(|n| entry.file_name() == n) {
+            continue;
+        }
         let dest_path = dst.join(entry.file_name());
         if entry.file_type()?.is_dir() {
-            copy_dir_recursive(&entry.path(), &dest_path)?;
+            copy_dir_recursive(&entry.path(), &dest_path, None)?;
         } else {
             fs::copy(entry.path(), &dest_path)?;
         }
@@ -4659,6 +4802,7 @@ pub(crate) fn minimal_world_save_for_tests(seed: u32) -> WorldSave {
         satoshi: Default::default(),
         dispensers: Vec::new(),
         rig_clips: Vec::new(),
+        local_personal: None,
     }
 }
 
@@ -4872,6 +5016,7 @@ mod tests {
             satoshi: Default::default(),
             dispensers: Vec::new(),
             rig_clips: Vec::new(),
+            local_personal: None,
         };
         let bytes = bincode::serialize(&save).unwrap();
         let back: WorldSave = bincode::deserialize(&bytes).unwrap();
@@ -5332,6 +5477,7 @@ mod tests {
             satoshi: Default::default(),
             dispensers: Vec::new(),
             rig_clips: Vec::new(),
+            local_personal: None,
         };
         let mut bytes = bincode::serialize(&save).unwrap();
         bytes.extend_from_slice(&[0xFFu8; 16]); // pretend: a future field's bytes
@@ -6176,6 +6322,7 @@ mod tests {
             satoshi: Default::default(),
             dispensers: Vec::new(),
             rig_clips: Vec::new(),
+            local_personal: None,
         };
         assert_eq!(save.face_overlays.len(), 1, "one wallpaper face");
         assert_eq!(save.face_blueprints.len(), 1, "one blueprint face");
@@ -6277,6 +6424,7 @@ mod tests {
             satoshi: Default::default(),
             dispensers: Vec::new(),
             rig_clips: Vec::new(),
+            local_personal: None,
         };
 
         // Encode, then decode through the REAL production path.
@@ -6453,6 +6601,7 @@ mod tests {
             satoshi: Default::default(),
             dispensers: Vec::new(),
             rig_clips: Vec::new(),
+            local_personal: None,
         };
         let bytes = bincode::serialize(&save).unwrap();
         let back: WorldSave = bincode::deserialize(&bytes).unwrap();

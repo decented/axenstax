@@ -101,6 +101,18 @@ A Plan body can reach about 160 KB (the packet cap is 64 KiB), so it never cross
 ## 6. Open (owner)
 - None blocks C3a. A joiner's death drops and graves follow Minecraft-like ownerless rules. Say if graves should belong to their owner; that would be a side table.
 
+### C3d partial local delivery (2026-10-13)
+
+Protocol **89** is accepted on local main at `c280f41f`; nothing was pushed.
+**Mirror remains the default. Strict is PARTIAL / PARKED**, internally selectable
+only, with the operator flag unexposed. Supported typed admission is wired through
+real dispatch (Spec 04 `Action`); remaining unsupported mutations fail closed
+before their effects. Canonical recovery installation, durable-body release and
+exact suffix replay remain pending. The phase table above describes the full
+Strict destination; this partial acceptance does not complete it or permit a
+default flip. The dated checkpoint below is historical evidence of the earlier
+implementation stage.
+
 ### C3d implementation checkpoint (2026-10-09)
 
 The source and model checkpoint in

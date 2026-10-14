@@ -192,6 +192,15 @@ mod online_join;
 // Online play by contact — the phone tap, the socket and the router, off-loop.
 #[cfg(not(target_arch = "wasm32"))]
 mod online_prep;
+// Bounded handover protocol core. Native only; gameplay/UI integration is gated
+// separately and these utilities neither publish nor start a host on their own.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod handover;
+// World handover — the GameState callers (host action, consent, pump, freeze).
+#[cfg(not(target_arch = "wasm32"))]
+mod handover_game;
+#[cfg(not(target_arch = "wasm32"))]
+mod personal_sync;
 mod world_room;
 #[cfg(not(target_arch = "wasm32"))]
 mod kithmoot_keeper;
@@ -258,6 +267,7 @@ mod starter_kit;
 mod inventory_sync;
 mod joiner_save;
 mod saved_item_slot;
+mod personal_value;
 mod plan_store;
 mod bear_ai;
 mod hyena_ai;
@@ -362,6 +372,10 @@ mod local_join;
 
 // Native-only modules
 mod save;
+mod save_fence;
+// CP15 (CP14 review HIGH-1): re-syncs of existing files and directories.
+#[cfg(not(target_arch = "wasm32"))]
+mod fsync;
 mod save_format;
 mod world_open;
 mod data_dir;
@@ -917,6 +931,42 @@ mod skin_paint_session_tests {
     }
 }
 
+/// The browser takes no part in a world handover: play is never held.
+#[cfg(target_arch = "wasm32")]
+impl GameState {
+    pub(crate) fn handover_holds_play(&self) -> bool {
+        false
+    }
+    pub(crate) fn handover_blocks_world_action(&mut self) -> bool {
+        false
+    }
+}
+
+/// Every platform: the end-card "Try again" actions, through the handover
+/// gate (native: `handover_game`; the browser never holds play).
+impl GameState {
+    /// The trial-complete "Try again" (gated, review LOW-5).
+    pub(crate) fn trial_try_again(&mut self, trial_id: &str) {
+        if self.handover_blocks_world_action() {
+            return;
+        }
+        self.trial_outcome = None;
+        self.start_trial(trial_id);
+        self.capture_cursor();
+    }
+
+    /// The scenario end-card "Try again": re-run the same challenge in place
+    /// with fresh progress (gated, review LOW-5).
+    pub(crate) fn scenario_try_again(&mut self) {
+        if self.handover_blocks_world_action() {
+            return;
+        }
+        let Some(def) = self.scenario.as_ref().map(|s| s.def().clone()) else { return };
+        self.start_scenario(def);
+        self.capture_cursor();
+    }
+}
+
 pub(crate) struct GameState {
     /// Name of the currently loaded world.
     pub(crate) world_name: String,
@@ -1233,6 +1283,44 @@ pub(crate) struct GameState {
     /// measured from there, not from a wall clock).
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) online_join: Option<(crate::online_join::OnlineJoin, Instant)>,
+    /// World handover: the one session this machine is part of. Not cleared
+    /// by leaving the world — a recipient past consent holds its own
+    /// connection; a source session is aborted before its world goes
+    /// (`handover_on_leave`).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) handover: Option<crate::handover_game::Handover>,
+    /// Imported personal identity selected at world load, latched for saves.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) local_personal: Option<crate::joiner_save::PersonalBinding>,
+    /// The host this joined client verified at join (online play's verified
+    /// answer and its runtime). `None` for a join that verified no host.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) joined_host: Option<crate::handover::live::recipient::JoinedHost>,
+    /// The host this client joined has paused play for a handover.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) host_paused: bool,
+    /// A handover window button clicked this frame, acted on by the next
+    /// `poll_handover`.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) handover_click: Option<crate::handover_game::UiAction>,
+    /// When the consent window first showed (L7: its buttons arm later).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) handover_consent_shown: Option<web_time::Instant>,
+    /// CP12 (CP10 review MEDIUM-1): the one exit function (`exit_app`) let
+    /// the process end; the event loop exits after this frame.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) exit_now: bool,
+    /// Tests: how many times the exit function ran.
+    #[cfg(test)]
+    pub(crate) exit_calls: u32,
+    /// Tests: one lobby action, in place of the egui pointer.
+    #[cfg(test)]
+    pub(crate) test_menu_action: Option<crate::menu::MenuAction>,
+    /// Tests: one HUD dialog click, in place of the egui pointer.
+    #[cfg(test)]
+    pub(crate) test_hud_click: Option<crate::handover_game::TestHudClick>,
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) handover_fixture: Option<crate::handover_game::Fixture>,
     /// The socket/router/attestation preparation running on a worker thread.
     /// Nothing about playing online blocks a frame; this is where the waiting
     /// happens.
@@ -1899,6 +1987,28 @@ impl GameState {
             #[cfg(not(target_arch = "wasm32"))]
             online_join: None,
             #[cfg(not(target_arch = "wasm32"))]
+            handover: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            local_personal: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            joined_host: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            host_paused: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            handover_click: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            handover_consent_shown: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            exit_now: false,
+            #[cfg(test)]
+            exit_calls: 0,
+            #[cfg(test)]
+            test_menu_action: None,
+            #[cfg(test)]
+            test_hud_click: None,
+            #[cfg(all(test, not(target_arch = "wasm32")))]
+            handover_fixture: None,
+            #[cfg(not(target_arch = "wasm32"))]
             online_prep: None,
             #[cfg(not(target_arch = "wasm32"))]
             upnp_lease: None,
@@ -2306,12 +2416,11 @@ impl ApplicationHandler for App {
                 // once more and quits either way, keeping the autosave.
                 #[cfg(not(target_arch = "wasm32"))]
                 {
-                    // Give the router its port back and retire the bearer with
-                    // the bounded, on-thread variant first, so `leave_world`'s
-                    // own `stop_online` finds nothing left to wait on. (Online
-                    // hosting is retired even when the close stays.)
-                    state.stop_online_on_exit();
-                    if state.close_window() {
+                    // CP12 (CP10 review MEDIUM-1): the one exit function.
+                    // It retires online hosting first (even when the close
+                    // stays), then closes, then gives a handover publication
+                    // in flight its bounded grace.
+                    if state.exit_app() {
                         event_loop.exit();
                     } else {
                         state.window.request_redraw();
@@ -2569,6 +2678,14 @@ impl ApplicationHandler for App {
                                         state.showcase_exited = true;
                                         state.release_cursor();
                                     } else {
+                                        // CP12 (CP10 review MEDIUM-1): Esc in
+                                        // the lobby leaves through the one
+                                        // exit function too.
+                                        #[cfg(not(target_arch = "wasm32"))]
+                                        if state.exit_app() {
+                                            event_loop.exit();
+                                        }
+                                        #[cfg(target_arch = "wasm32")]
                                         event_loop.exit();
                                     }
                                     return;
@@ -2601,11 +2718,11 @@ impl ApplicationHandler for App {
                                     state.players[0].crafting_ui.book_open = false;
                                 }
                                 EscAction::CloseCraft => {
-                                    // C3d review M1 — the reserving entry point: in
-                                    // Strict it allocates the action before the
-                                    // prediction and sends no legacy WindowOp.
-                                    // C3d run 8 — a frozen window pauses instead.
-                                    state.esc_crafting();
+                                    // Keep handover's pause gate and C3d's one
+                                    // reserving entry point for a crafting close.
+                                    if !state.handover_blocks_world_action() {
+                                        state.esc_crafting();
+                                    }
                                 }
                                 EscAction::CloseVillager => {
                                     state.players[0].dialogue_villager = None;
@@ -2760,6 +2877,12 @@ impl ApplicationHandler for App {
 
             WindowEvent::RedrawRequested => {
                 state.update_and_render();
+                // CP12: the lobby's Quit or the updater's Restart went through
+                // the exit function this frame.
+                #[cfg(not(target_arch = "wasm32"))]
+                if state.exit_now {
+                    event_loop.exit();
+                }
             }
 
             // winit delivers this on Android exactly as in the browser. The
@@ -2943,6 +3066,25 @@ pub fn run() {
 /// `data_dir::init_at`). One function so desktop and Android cannot drift.
 #[cfg(not(target_arch = "wasm32"))]
 fn native_boot_services() {
+    // P3: the bounded startup sweep of inert handover imports (no handover
+    // session exists yet in this process).
+    #[cfg(not(target_arch = "wasm32"))]
+    handover_game::sweep_inert_imports(None);
+    // CP9: every retired world whose Committed isn't proven published yet
+    // gets its exact retry from the record (the world itself stays refused).
+    // CP10: and every import past its PreparedAck that isn't Activated yet
+    // goes back to waiting for its Committed (from its durable receipt).
+    // CP13: both only for records this install's handover ledger lists.
+    #[cfg(not(target_arch = "wasm32"))]
+    handover::live::resumer::Resumer::global().boot(
+        &save::worlds_root(),
+        &crate::data_dir::data_root().join("handover").join("imports"),
+        &handover::ledger::Ledger::install(),
+    );
+    // CP18: an import Activated before this start (or whose move a crash
+    // interrupted) moves into the worlds folder now (main thread).
+    #[cfg(not(target_arch = "wasm32"))]
+    handover_game::promote_activated_imports();
     let identity = signet::native_signer::init_identity();
     match identity.npub() {
         Some(npub) => log::info!("Signed in as {npub} (cached identity, offline)"),

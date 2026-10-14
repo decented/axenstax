@@ -2,7 +2,7 @@
 
 **Status**: Draft
 **Date**: 2026-03-03
-**Addendum**: `_audit-2026-04-18.md` first established that `PROTOCOL_VERSION` had drifted ahead of this spec. **The current wire version is `87`** (joiner persistence and creative gives) (see the authoritative version-history comment in `game/engine/src/protocol.rs` for the per-version detail; this addendum logs the milestones, not every bump). The version bumps since v1:
+**Addendum**: `_audit-2026-04-18.md` first established that `PROTOCOL_VERSION` had drifted ahead of this spec. **The current locally accepted wire version is `89`** (C3d partial delivery accepted on 2026-10-13; no push) (see the authoritative version-history comment in `game/engine/src/protocol.rs` for the per-version detail; this addendum logs the milestones, not every bump). The version bumps since v1:
 
 - **v2** (2026-04-18): `StateUpdatePacket` gains `last_acked_input` for input-prediction reconciliation, plus `entity_spawns` / `entity_updates` / `entity_despawns` for server-authoritative entity sync. New structs `EntitySpawn`, `EntityUpdate`, `EntityKind`. `InputPacket` gains analog movement + discrete action flags. (Spec body below still describes v1 packet shapes — that's pending a fuller rewrite.)
 - **v3** (2026-05-03): `JoinRequestPacket` gains `auth_event: Option<SignetAuthEventWire>` + `handle_credential: Option<SignetCredentialWire>`; new `ChallengePacket` (packet tag 50) lands on connect. Bincode is positional, so even `Option`-only adds force a version bump. Phase 3 of the engine-Signet-auth foundation. The verify path is gated behind `signet::USE_SIGNET_AUTH` (currently `false`), so the new fields ride alongside the old `player_name` BRIDGE — see §1.8.4. *(Superseded: `USE_SIGNET_AUTH` was retired at v49 on 2026-06-16; identity is policy-driven via `hosted_server::resolve_join_identity`. See §1.8.4 and Spec 08 §9.0.1.)*
@@ -47,11 +47,11 @@
 - **v86** (2026-10-09, death): server-owned joiner graves, `InventorySync` (tag 67, numbered whole player window), `ItemAction::OpenGrave` (= 13) and `PlayerEventType::GraveAt` (= 7). Joined clients create no private graves or fresh kits; the server supplies the deterministic fresh kit and death window. Requests and window ops remain refused through death replacement acknowledgement, including after respawn.
 - **v87** (2026-10-09, Sidecar): `ItemAction::CreativeGive { item: WireStack }` (= 14), server-authorised private creative grants and per-npub joiner window restoration. No Plan body crosses the wire. See §4.2i.
 - **v88** (2026-10-09, OC — the obligation carrier): `InventorySyncPacket` appends `owed: Vec<(WireStack, u32)>` after `slots`: the correction debt the whole-window replacement carries. A joiner's unpaid correction debt now survives a reconnect on both copies (the joiner save's v2 record carries it), and a death's replacement carries none. See §4.2i "Obligation carrier".
-- **v89** (provisional, C3d source checkpoint, acceptance pending): typed `Action` (68), exact `ActionReceipt` (69), session-scoped `Recovery` (70), and applied-result metadata `AppliedActionAck` (71). JoinAccept appends fixed inventory mode, random128-bit action namespace and life. Describe is counted Begin/pages/End with at most2048 cells per page and8192 overall. Receipts/fences enter the real world FIFO and wait behind carried chunks; socket receipt and movement ACK retire no action. Mirror remains default. Typed authoritative admission, canonical installation, durable-body release and replay remain pending; this checkpoint does not ship Strict enforcement. Run 11 (2026-10-11) appends `old: (u16, u8)` (block id, meta: the cell as the client saw it) to `ActionIntent::Edit`, after `use_tag`. Run 5 (2026-10-10) appends `ActionFate::Superseded` (= 4, after `Accepted` 0, `Refused` 1, `NormalisedAcceptedNoop` 2, `CancelledNoop` 3) and `OpenRefusal::TooLarge` (= 4); pinned by `action_wire::tests::c3d_wire_fate_tags_append_superseded_last` and `protocol::tests`.
+- **v89** (2026-10-13, C3d partial delivery accepted locally at `c280f41f`; no push): typed `Action` (68), exact `ActionReceipt` (69), session-scoped `Recovery` (70), and applied-result metadata `AppliedActionAck` (71). JoinAccept appends fixed inventory mode, random128-bit action namespace and life. Describe is counted Begin/pages/End with at most2048 cells per page and8192 overall. Receipts/fences enter the real world FIFO and wait behind carried chunks; socket receipt and movement ACK retire no action. Mirror remains default. Typed authoritative admission is wired for the supported classes documented in `Action` below. Strict is **PARTIAL / PARKED**, internally selectable only; the operator flag remains unexposed and there is no default flip. Remaining unsupported mutations fail closed before their effects. Canonical recovery installation, durable-body release and exact suffix replay remain pending; this acceptance does not complete Strict. Run 11 (2026-10-11) appends `old: (u16, u8)` (block id, meta: the cell as the client saw it) to `ActionIntent::Edit`, after `use_tag`. Run 5 (2026-10-10) appends `ActionFate::Superseded` (= 4, after `Accepted` 0, `Refused` 1, `NormalisedAcceptedNoop` 2, `CancelledNoop` 3) and `OpenRefusal::TooLarge` (= 4); pinned by `action_wire::tests::c3d_wire_fate_tags_append_superseded_last` and `protocol::tests`.
 
 **Depends on**: ADR-001 (Full Custom Engine), ADR-002 (Tech Stack)
 
-> **AS-BUILT (audit 2026-10-04).** Sections 0-3, 4.1 and 10 below are the original design and read as if built; they are not. As shipped: the native transport is **QUIC (quinn)**, plus a **WebSocket** transport for the dedicated server; there is **no raw-UDP / Noise IK transport and no WebRTC** (the web build is an offline taster with no multiplayer). The wire version is a **`u32`** (`PROTOCOL_VERSION`, currently 88 as delivered (OC); 89 provisional in the C3d source checkpoint), not a `u16`. **The §4.1 chunk push is built (v69, Phase B2a; touched columns v71, Phase B2b) but not as designed below** — see §4.1 "As built": a joiner receives the world **seed, rule flags and spawn** in `JoinAccept` (v65) and builds its world from them; round its server body the server either pushes a column (`ChunkData`, when it differs from generation — or always, under `--chunk-sync all` or for a joiner with another generator), which replaces anything the joiner holds there, or tells it the column is local (`ColumnLocal`), and the joiner generates it itself; block deltas then arrive in `StateUpdate` for the chunks it has been sent or told are local. **NAT traversal (§1.7) is built** for online play by contact (`nat/`, `rendezvous/`, §1.9), but as player-run hole-punching over player-chosen Nostr relays, not the platform STUN/TURN relay described in §1.7. The matchmaker / platform-JWT auth path is retired (§9.2).
+> **AS-BUILT (audit 2026-10-04).** Sections 0-3, 4.1 and 10 below are the original design and read as if built; they are not. As shipped: the native transport is **QUIC (quinn)**, plus a **WebSocket** transport for the dedicated server; there is **no raw-UDP / Noise IK transport and no WebRTC** (the web build is an offline taster with no multiplayer). The wire version is a **`u32`** (`PROTOCOL_VERSION`, currently 89 as locally accepted (C3d partial delivery, 2026-10-13; no push); Strict remains PARTIAL / PARKED and Mirror remains default), not a `u16`. **The §4.1 chunk push is built (v69, Phase B2a; touched columns v71, Phase B2b) but not as designed below** — see §4.1 "As built": a joiner receives the world **seed, rule flags and spawn** in `JoinAccept` (v65) and builds its world from them; round its server body the server either pushes a column (`ChunkData`, when it differs from generation — or always, under `--chunk-sync all` or for a joiner with another generator), which replaces anything the joiner holds there, or tells it the column is local (`ColumnLocal`), and the joiner generates it itself; block deltas then arrive in `StateUpdate` for the chunks it has been sent or told are local. **NAT traversal (§1.7) is built** for online play by contact (`nat/`, `rendezvous/`, §1.9), but as player-run hole-punching over player-chosen Nostr relays, not the platform STUN/TURN relay described in §1.7. The matchmaker / platform-JWT auth path is retired (§9.2).
 
 > **Server-side column streaming is built (Phase B1, 2026-10-06); the chunk push is built too (Phase B2a, 2026-10-07; only touched columns since Phase B2b, §4.1 "As built").** A dedicated server loads and unloads world columns around every connected player itself, within `--sim-distance` (default 8) — its own *simulation region*, so a server-simulated joiner stands on server terrain and edits are accepted anywhere a player goes (Spec 01 §4.1.2). The chunk push sends joiners what that region holds (§4.1 "As built"). LAN / online hosts do not stream server-side; their server keeps the `initial_load` region and generates the 3×3 round each joiner as it moves (§5.3.1) — never both in one mode.
 >
@@ -543,10 +543,10 @@ Bit layout (worst case 12 bytes, typical 4-8 bytes):
 | 0x41 | `ContainerOpened` | S->C | Reliable | The answer to a joiner's `OpenContainer`: `{ cell, kind: ContainerKind, slots: Vec<WireSlot> (≤ 72), furnace: Option<FurnaceView>, refused: Option<OpenRefusal>, window_event: u32 }` (`window_event` v78: an opened view is a numbered window event; 0 for a refusal). **Implemented tag** (`PacketType::ContainerOpened = 65`, protocol v77). See §4.2g. |
 | 0x42 | `WindowSlotSet` | S->C | Reliable | Values for named container slots of a joiner's open container, and a correction's item delta: `{ op_seq_applied: u32, reason: u8, sets: Vec<(WireWindowSlot, WireSlot)> (≤ 122), furnace: Option<FurnaceView>, window_event: u32, take: Vec<(u8, WireStack)> (≤ 122), give: Vec<WireStack> (≤ 122) }` (`take` and `give` v78) — a correction of a container op, or a push of what changed in the open container. Never a whole window, never a player slot's value (v78). Every set is a numbered window event (v78; v77 numbered only a set of player slots). **Implemented tag** (`PacketType::WindowSlotSet = 66`, protocol v77). See §4.2g. |
 | 0x43 | `InventorySync` | S->C | Reliable | `{ window_event: u32, slots: Vec<(WireWindowSlot, WireSlot)>, owed: Vec<(WireStack, u32)> }`, `slots` bounded by `MAX_WINDOW_SLOTS`. A numbered whole player-window replacement: 36 inventory, 4 armour, cursor, 9 grid slots, including explicit empty slots. Protocol v86. v88 (OC) appends `owed`: the correction debt the replacement carries, in live order, each item as a one-unit `WireStack` beside its `u32` units. The deserializer refuses the whole packet past `MAX_SYNC_OWED` (256) entries, or with a 0-unit entry, a count other than 1, a Plan (by kind or by full item), or two equal entries; a Sync the client can't read whole (refused by that deserializer, an entry that doesn't decode, or two that decode to one item) is a protocol error: nothing is applied and the client leaves with a reason (§4.2i).  **v89 (C3d run 6):** appends `station: Option<[i32; 3]>` (the table cell, `None` = the player's own 2×2) and `locks: u64` (bit i = slot i locked, slots 0–35; a higher bit is a protocol error). Every `Replace` (join, death, correction) carries both; a **Strict** client installs the lock mask and adopts the station (a table screen its window no longer has closes locally, no `Close` sent); a **Mirror** client keeps its own locks and station (run 7: Mirror unchanged), and so does a Mirror joiner's server copy when it applies the `Replace` (run 10, run-8 review LOW-D: a lock the player toggled before its client applied the join sync is served on the old base and must survive the `Replace`, as it did on `bdd4fe87`, whose `set_slot` never touched locks); auto-refill stays each copy's own. The server copy's `Replace` event carries the same send-time station snapshot as the packet (run 8, run-6 review LOW-2); in Strict its apply sets the copy's station to it, so a configuration op served on a base before the `Replace` (E pressed again within one round trip, a table opened in flight at death) is overwritten on both copies. A grid the `Replace` restores behind a closed screen is returned by a real `Close` at the next open, never discarded (run 8; Spec 05 "An open never discards grid items"). |
-| 0x44 | `Action` | C->S | Reliable | C3d typed intent and `{ session: [u8;16], epoch: u32, seq: u64, life: u32, events_applied: u32 }`, maximum32 KiB. Identity is allocated before prediction. Wired in Strict (internally selected; Mirror the default): window `Click` (the server's shared `serve_op` transition staged on the raw window, result row reserved before the raw commit; a digest it doesn't reproduce, or a stack the marker projection can't carry exactly, is `Refused` with zero effect) and `Shoot` (Take and Wear reserved together, then the result row, before the one projectile). After every Strict commit the effective fold must prove zero: a breach tears the session down with a reason and is saved as it stands. Window configuration (`OpenPlayer`, `OpenTable` with the table grace, `SetAutoRefill`, which the client sends before any window action its digest covers) is staged on the raw window, digest-checked and committed after its result row. Shared containers (C3d, 2026-10-10): `OpenContainer` reserves the opened view as a numbered window event (count and owned bytes) and its result row before the container opens (a refused open is answered `OpenRefusal` with no effect and an Accepted row: the client predicted nothing); a container click runs the shared rule twice on the raw window, once on exactly the view the client predicted on (its digest must match, else `Refused`: no believed deposit, no durability swap, no claims) and once on the REAL container; the same effect commits both once, a contested slot (another player or machine changed a slot the click acts on, wholly or partly) is a terminal `NormalisedAcceptedNoop` with zero effect followed by the correction — a partial contest is whole-or-nothing (coordinator decision, 2026-10-10: conservative, the client corrects), never a partial commit; a push to a Strict joiner reserves its view first. A waiting container view counts its real bytes against the 2 MiB event budget, so it never blocks an unrelated reservation. A refused Autofill stages exactly the safe subset its client did (no change for `NeedsTable`, the grid and cursor returned for `Refused`). After every Strict commit, and at every staging, ONE predicate must hold: no correction debt, a `Complete` history, and every waiting Take payable. Edits on a Strict movement packet fail closed with a reason (never dropped silently). A numbered Take that a Strict copy applies short (at an action's boundary, an input's, the overdue valve or the cap) is an invariant breach, never log-only: the session is torn down through the one bridge with the obligation sentence (run 4). A Strict CLIENT that finds a legacy window op in its own flush (a reserving entry point was bypassed; the window may already show it) never discards it silently: no whole-window resync request exists, so it sends `Disconnect` and leaves the world with a plain sentence (`remote_client::STRICT_STRAY_CHANGE_REASON`; run 4). Window configuration touches no contents (run 4, run-3 review M1): it is staged independently of a waiting join or death replacement (the contents digest is not compared while one waits, and the obligation fold continues from the replacement's window, whose carried debt must be empty), and all of it (`SetAutoRefill`, `OpenPlayer`, `OpenTable`) is served while the player is dead or its death sync waits (run 5). **Stale-base and dead-body actions are superseded, not breaches (run 5, coordinator decision; run-4 review M1, LOW-1):** every other typed action that comes from a dead body, or whose base (`events_applied`) predates a whole-window `Replace` (the join or death sync) its client hadn't applied, gets the terminal `Superseded` fate and zero external effect — no window or container change, no projectile, no payment, no window event, no `ContainerOpened` — and is never torn down: the `Replace` overwrites what the client predicted on that base. This covers the `Close` a client sends when it dies with a chest open, any click or shot in flight at death, and a click, open or shot made before the join sync applies (tests in `hosted_server/c3d_superseded_tests.rs`). A stale base below a `Replace` the overdue valve already applied is superseded too (not `FellBehind`); any other unavailable base still is. **Every `Superseded` is corrected (run 6, coordinator rule after the run-5 review):** a stale base's correction is the `Replace` it predates; a dead body's action on a current base (after the death sync: Esc on the death screen with a crafting screen open, the table force-close after an early local Respawn) gets one fresh whole-window correction `Replace`, at most one outstanding per client. Configuration made before the latest `Replace` is served on the current copy without applying through its base, its digest skipped exactly then (run-5 LOW-2). In Strict, while the body is dead or a Respawn is unanswered, the client's crafting screen sends no `Close` (flicker only; the server rule is the guarantee). Since run 8 (run-6 review LOW-1) this is one gate inside `close_crafting` / `force_close_crafting` (and an open's return-the-grid `Close`), reached by Esc, E, the touch and gamepad pause and the table force-close; Esc on a frozen crafting screen pauses (Spec 05). Contest interleavings (run 5, run-3 review L4) are pinned with per-identity conservation over both windows, the chest, every grave and the ground: both joiners' withdrawals in one tick (one Accepted, one `NormalisedAcceptedNoop`), a deposit into a slot the other's push (still in flight) filled, and a chest broken between one joiner's commit and the other's click (`Refused`, nothing committed, the spill not repeated). **A container view counts what the client's mirror holds (run 5, run-4 review LOW-2):** the server's model of a Strict joiner's mirror (the opened view, every push, and `seen`) holds a Plan as its body-less placeholder (`container_window::strip_plan_body`; Plans stay in a shared container and digest content-free), never the real chest, so a host's large Plan costs the view its placeholder's bytes; a view that still doesn't fit the event budget is the open's typed refusal `OpenRefusal::TooLarge`, never a teardown, and conjures nothing: the open views a container whose block entity is still missing (a lazy chest) as the fresh one and creates it only after the view and the result row are reserved (run 11, `container_window::FreshContainer`; a push's view strips Plan bodies the same way, pinned by `c3d_strict_push_of_a_large_plan_counts_its_placeholder`); a Strict client sends its session-start auto-refill only once the join sync (event 1) is applied, otherwise with its first window action. Strict is selected only through `HostedServer::select_inventory_mode`, which refuses a `--no-lend` host (`StrictSelectError::NoLendHost`: its server mirrors the host's copy every tick, so a committed withdrawal would return to the chest); a dedicated server or a lending host may select it. Admission checks the same rule again (run 5, run-4 review LOW-4): an owning server that gained a local player after selecting Strict refuses a Strict join before `JoinAccept` with `StrictJoinRefusal::NoLendHost`'s plain sentence. The selector items carry `expect(dead_code)` until the operator flag is exposed at C3d acceptance. **What a refusal does (C3d run 12b, S1).** A refusal whose client prediction a `Replace` plus the cell send-back fully undoes is CORRECTED: a typed edit (every Drift), a personal click and a refused Autofill, a shot, `OpenPlayer`/`OpenTable`, and (run 14) `SetAutoRefill`: the `Replace` keeps each copy's refill setting, so the client, when its setting's `Refused` receipt retires (`RemoteClient::refill_refused`), sends the setting again on the corrected window (`CraftingUi::sync_auto_refill_joined`); since run 16 (run-14 review LOW-1) the client also sends it again as soon as a Strict whole-window `InventorySync` arrives while a `SetAutoRefill` is still unretired, so a click made between the `Replace` and its `Refused` receipt (held behind the chunk intake) is served on the corrected window instead of being refused a second time; the receipt then triggers no further resend when a later setting is already journaled. It commits nothing beyond its terminal `Refused` row, then one whole-window correction `Replace` goes to the LIVE player. That `Replace` takes no death flag (`death_replace` keeps meaning a death sync, which gates requests); the neutral "a correction waits" flag is `WindowEvents::replace_waiting`, and at most one waits. It is checked against the pending window events first (1024 events, 2 MiB; `window_events::strict_replace_fits` measures a `Replace` by its real owned heap: the boxed window, its Plan bodies and its carried debt). One that doesn't fit is never forced in: the connection is torn down (`FellBehind`). Run 13 (run-12 review LOW-1): its slot is reserved in the deque before it is measured (`window_events::reserve_strict_replace`), so queuing it can't grow the deque past 2 MiB and make the next honest action fall behind; both halves of the bound are pinned (`c3d_s1_correction_replace_past_the_pending_cap_tears_down`, `c3d_s1_correction_replace_past_the_byte_bound_tears_down`). A container `Correction` still waiting has no reservation measure, so a refusal's `Replace` beside it is a `FellBehind` teardown too (fail-closed). Run 13 (LOW-3; BRIDGE until S3 replay): at most 8 correction `Replace`s per seat in any 100 server ticks (`strict_admission::CorrectionRate`); the ninth is a `FellBehind` teardown naming the bound, with zero item effect. Run 14 (run-13 review LOW-3): a dead body's correction `Replace` shares that one per-seat bound and the reserved fit (`HostedServer::admit_correction_replace`), so a client that never respawns can't draw a whole-window sync per superseded action. Run 14 (LOW-5): every `FellBehind` teardown carries its own internal detail (logged; test builds record it and the tests assert it), the player reading the one sentence. Run 13 (LOW-2): a server window the marker projection can't carry (`StrictStageError::RawUnrepresentable`: its own raw window, or a waiting `Replace`'s) is refused, then torn down with its own sentence (`StrictTeardown::Unrepresentable`), since a `Replace` would ship the same window back; an unrepresentable result (an action's grant) is still a corrected refusal. **Still torn down**, committing nothing beyond the terminal row, through one bridge function, the player reading a plain sentence (`strict_admission::StrictTeardown`): a container open or click refusal and the contest (a `Replace` carries no container view), and a reservation at a cap (1024 pending events, 2 MiB, the unacknowledged result history). Each Strict seat counts its refusals as stale-world (a real Drift only, run 13: run-12 review LOW-5) or other (a rule, a mismatch, a typed `Unsupported` edit, a break that doesn't yield that way on the very cell the client saw; run 14, run-13 review LOW-4, decided: run 15, run-14 review LOW-2, revised: only a different block id in the server's cell makes that break stale-world, a meta-only difference is a rule refusal; the bucket follows the client's `old`, so a modified client can steer it, measurement only) in `strict_admission::RefusalTally`, logged in the departure line beside `PossessionTally` and never counted as cheating (Decision 19's measurement, Q15). Mirror never reaches any of it (every typed handler is gated on `strict_slot`), and a Mirror client fails closed on any recovery carrier (`RemoteClient::receive_recovery`). **Typed block edits (run 6):** a plain placement or a mined break is an `Edit` action, judged from the server copy of the joiner's window at the action's boundary, never from the claimed hand or `MinedBlock.tool`: a placement must be held in its historical hotbar slot (else `Refused`, zero effect: no block, no event, the predicted cell sent back); a break's drop tier is the tool in that slot (none = bare hand). The client predicts both (placement with auto-refill, the tool's wear), so their window half is staged and committed on the raw window exactly as a click is; only the break's yield is numbered (`Grant` events, reserved with their packets and the result row before the world changes). The world half is the same code Mirror runs. Untagged emptying edits are `Refused`; a typed creative, same-block, door-placing (a plain `Edit` naming a door: a door goes as one `DoorPlace`, Decision 20) or non-yielding edit is a server `Unsupported` refusal, corrected (Q11, below); only use-tagged edits still pause. **Drift first (run 10, run-9b review MEDIUM-1):** the server's `judge` (given `Received`: the cell's meta and the cell as its client saw it) runs the Decision 19 Drift check before the same-block and non-yielding checks. A client sends an edit typed only when its own world judged it Place or Break, so a received placement onto its own block, or a received mined edit onto its own result or onto a block that yields nothing (air, a fluid, fire), means the cell changed since the client acted: a leaf the server decayed, a block another player mined, a crop someone harvested. It is a Drift `Refused` (typed row, its cell sent back), never an `Untyped` pause; the client's own classification (`received = None`) is unchanged. **Drift is exact (run 11, run-10 review LOW-1, LOW-2):** the `Edit` carries the cell as its client saw it (`old`: block id and meta), and a different block id in the server's cell is Drift: gravel fallen into a mined leaf's cell, a crop replanted or grown a stage (stages are block ids), a door or another block in a placement's cell. **Ids only (run 12, after the run-11 review):** meta counts only for a block on `strict_edits::DRIFT_META_BLOCKS`, empty today (no Place or Break outcome reads the cell's meta, and meta the server changes without a broadcast, such as a leaf's, must never make an honest edit Drift; doors, typed in run 18, are not on it: a break's pair comes from the server's own meta; an open/closed bit never), and for a placement AIR and water are one replaceable class (no Drift between them). A typed crop harvest writes the server's own cell meta on its replacement, never the client's `change.meta` (Mirror still believes it: Spec 05). The `Edit` layout is pinned byte for byte (`action_wire::c3d_wire_edit_layout_is_pinned`). **Refusal correction (C3d run 12b, S1):** a refused `Edit` (every Drift included) no longer tears the session down: its send-back reaches the client, its `Refused` row is retained and ONE whole-window correction `Replace` puts the client's window back (`HostedServer::queue_live_correction_replace`). Every in-flight action after it has an older base, so it is `Superseded` with zero effect and its cell sent back (BRIDGE: the suffix is superseded, not replayed, Decision 16, until S3's recovery bundle and replay). A typed `Unsupported` edit (Q11: the server's cell or mode changed under the client) and a break whose yield can't be carried (Q12) are refusals too, corrected the same way. **Reach (run 10, MEDIUM-2):** an edit's reach bonus comes from the server copy of the edit's slot (a Reach Claw there gives +2.0), in both modes, never from the claimed hand. **The client half (run 9):** a Strict client's plain placement and mined break never ride the movement packet: the game loop's place and break arms (`GameState::take_for_placement`, `GameState::break_route`, `strict_edits.rs`) judge the edit on the client's own window with the server's rule (`strict_edits::judge`, shared) and, for a Place or Break, reserve ONE numbered `Edit` before anything is predicted (as a click is: the recipe holds the slot, the initial sources the window half changes and the digest of the window it predicts; the action's footprint is the cell), then predict with the same window halves the server stages on raw R (`place_window` = `take_placeable_from_hotbar`, auto-refill included; `break_window` = `use_tool_at`, a broken tool removed), then send. A break is reserved before its cell changes and its tool is worn there, not after. The placement's meta is one pure rule (`placement_meta::placement_meta`) computed before the reservation, and the place arm writes the same value (Mirror unchanged). A failed reservation changes nothing (the block isn't placed; the break restarts). `Edit` carries no wire digest: the client's prediction is pinned against the server's staging by a test (`c3d_client_edit_prediction_is_the_server_staging`: the recipe's digest equals the server copy's raw window right after it served the edit). Mirror goes through exactly the old path. The paused classes (creative, same-block, non-yielding manual break, use-tagged) still ride the movement packet in Strict and close the session until recovery lands; doors are typed since run 18 (`DoorPlace`, a door break as a Break `Edit`, `ToggleBlock`: see Doors below). **Run 9 (run-6 review LOW-3):** a `Superseded` `Edit` (a dead body's, or one on a stale base) also sends back its predicted cell and a door's pair (`send_back_refused_edit`), so it is corrected in the world as well as the window; every `Edit` result row (`Accepted`, `Refused`, `Superseded`) carries the edit's cell, and a door's pair, as its `cells` (Decision 12's server-known footprint). **Typed shot, client half (C3d run 13):** a Strict client's bow or slingshot shot is ONE typed `Action` (`ActionIntent::Item(Shoot)`), never the legacy `ItemAction` request: `GameState::send_shot` routes it through `strict_requests::route_shot`, which sends the session's auto-refill setting first (as before an edit), records the request in `joiner_actions` (its `seq` names the outcome; the in-flight ammo claim stays), then reserves the action BEFORE anything else changes (recipe: the weapon's hotbar slot, the weapon and the digest of the window it was made on; no cells) and sends it. Nothing is predicted: the ammo and the weapon's wear change only when the server's `ItemActionOutcome` (its numbered Take and Wear) arrives, applied through the same `joiner_actions` path as Mirror's. A shot the server's copy can't pay (`MissingPayment`: no ammo there) is a refusal, corrected by the live `Replace`, never a teardown. Mirror routes `ShotRoute::Legacy` and sends the legacy request byte for byte. Tests: `hosted_server/c3d_client_shot_tests.rs`. **A Mirror seat's deferred typed action is never overtaken (C3d run 23, run-22 review LOW-1):** while a Mirror seat's typed action (a door toggle past the item budget) waits in its server action queue, the inbound loop reads nothing more from that client this tick (`HostedServer::typed_action_waits`); the next tick serves it first, so a later input (an edit that breaks the door) never lands before the click. **Typed eat, creative give and power-device right-click (C3d run 24):** a Strict client's eat (`ItemAction::Eat`) and creative give (`ItemAction::CreativeGive`) are ONE typed `Action` each (`ActionIntent::Item`), routed by `strict_requests::route_item` from `GameState::send_eat_request` / `request_creative_give` (one `route_item_request`), and a right-click on a toggle-class power device is ONE `ActionIntent::Device { cell, hotbar_slot }` (`strict_requests::route_device`, no request record), each inside its `NoPrediction` bracket ("eat", "creative give", "device"); Mirror sends the legacy `ItemAction` / `DeviceInteract` byte for byte. None of the three predicts anything (the food goes and the body is fed by the server's answer — the client's eat cooldown only paces its clicks; a give lands by its numbered `InventoryGrant`; a device flips by the broadcast), so all three are in `predicts_nothing`, and an eat's or a give's refused receipt releases its request record. The server (`hosted_server/strict_item.rs`): an eat reads the food from the server copy's NAMED slot (slot ≥ 9, a claim that disagrees, or no food there → corrected `Rule`); Mirror's judge (`judge_eat`: not hungry, inside the eating cooldown) is a world fact — `ItemActionOutcome { accepted: false, note }` and a `Refused` row alone; else a `Take` of one from the named slot is staged and reserved with the result row before Mirror's meal (`item_actions::eat`, the cooldown). A give in a world that isn't Creative (`NotHere`; an operator can change the mode under the client) or into a bag with no room (`InventoryFull`; both copies agree and nothing was predicted, so a held give on a full bag never draws on the correction bound) is a world fact with its note; an unreadable stack or a Plan stack of more than one is a corrected `Rule`; else one `Grant` (a Plan as its private marker) is staged, reserved and sent numbered, then the outcome. A device right-click is refused as a world fact (no row correction) for Mirror's rules — play mode and plot (`remote_may_touch`), reach, no toggle-class device there — with the reach of the server copy's item in the named slot (a Reach Claw there counts; Mirror's DeviceInteract stays flat), else the shared `power::interact_device` runs on the server's world and its `Accepted` row carries the cell. A Strict seat that sends the legacy `DeviceInteract`, `ItemAction` or `EntityInteract` is still torn down with the `Untyped` reason (`c3d_client_strict_seat_sending_a_legacy_packet_is_refused`). **Run-24 review (C3d run 25):** a Strict creative give into a bag with room for only part of the stack grants what fits, as Mirror's `grant_to_joiner` lands what fits; the rest is not granted (only no room at all is the `InventoryFull` world fact). A Strict device right-click has Mirror's own per-tick limit (`MAX_DEVICE_INTERACTS_PER_TICK`, 2, the counter Mirror's `DeviceInteract` uses), not the item counter. A toggle-class device whose `power::interact_device` returns `None` (a kind added without its arm) refuses the right-click as a world fact, never panicking the host on a joiner's packet (`c3d_client_strict_device_without_an_interaction_is_refused_not_a_panic`). **Typed Q-drop and sleep (C3d run 25):** a Strict client's Q-drop is ONE typed `Action` (`ActionIntent::Item` carrying `ItemAction::Drop`, the claim read before the take), reserved by `strict_requests::route_drop` BEFORE the hand changes (recipe `DropRecipe { slot, digest-after, sources }`, no cells), then the predicted take (`Inventory::take_one_from_hotbar`), then the send; Mirror's legacy drop is unchanged. A drop is the one PREDICTED item action, so it is not in `predicts_nothing` and every refusal is corrected (one `Replace`). The server (`hosted_server/strict_drop.rs`) reads the server copy's NAMED slot: a slot ≥ 9, a claim that disagrees, an empty slot or a Plan (a joined client keeps a Plan, with a toast) is a corrected `Rule` refusal; the take is staged on the copy (`window_events::stage_strict_edit`, no numbered event: the client already made it), then the result row, then the copy committed, a drop-bucket token spent and the copy's real item (a tool whole, with its wear) thrown from the server's body. Mirror's bounded belief (the believed-units bound, `drop_believed`/`drop_refused`) is never reached from a Strict seat: the copy pays or the drop is refused. Pacing is Mirror's drop bucket by DEFERRAL: a typed drop at the queue head waits until the bucket holds a token, never refused for it (`c3d_client_strict_nine_quick_drops_wait_for_the_bucket_and_are_all_served`). A dead body's drop is superseded with a correction, as any predicted action. A Strict client's sleep is ONE typed `ActionIntent::Item` (`ItemAction::Sleep`) through `route_item` inside a `NoPrediction` "sleep" bracket: it claims and predicts nothing (the spawn is set by the accepted outcome), so `Sleep` is in `predicts_nothing`. The server (`serve_strict_sleep`) shows the night calendar the clock first, then Mirror's `judge_sleep` (no bed, out of reach, not night, slept tonight) → Mirror's outcome note and a `Refused` row, uncorrected; else the result row, then Mirror's `serve_sleep` (spawn at the bed, healed) and the accepted outcome; no window event. Tests: `hosted_server/c3d_drop_sleep_tests.rs`. **Typed entity interactions (C3d run 23):** a Strict client's feed, tame, shear, milk, Lead on, off or on a post, pet command and mount are ONE typed `Action` each (`ActionIntent::Interact`, the `EntityInteract` packet's body), never the legacy request, which tears a Strict seat down: `GameState::send_interaction` routes them through `strict_requests::route_interact` (refill setting, `joiner_actions` record, reservation with recipe `{ slot, digest }` and no cells, send) inside a `NoPrediction` "interaction" bracket; Mirror sends the legacy request byte for byte. Nothing is predicted, so `Interact` is in `predicts_nothing` and its refused/superseded receipt releases the request record (`unanswered_request`). The server (`hosted_server/strict_interact.rs`, `serve_strict_interact`) reads the item from the server copy's NAMED hotbar slot, never the claim: a slot ≥ 9 or a claim that disagrees is a corrected `Rule` refusal (one `Replace`). Then the pure world-fact gate, Mirror's rules read without changing anything (the target alive, in reach and ahead of the server's body, or a parked cart or a fence post within block reach; `NotOnThisServer` where the world runs no animal life; the joiner already riding; the interaction cooldown): a `Refused` row alone, uncorrected, with Mirror's `InteractOutcome { accepted: false, note }` beside it. Then the accepted cost from the pure table `mob_interact::accepted_cost` (Feed, Tame, LeadAttach, LeadToPost: take 1; Milk: take 1 + grant a milk bucket; LeadDetach: grant the Lead; Shear, SitToggle, Mount: nothing; pinned against the runs by `c3d_accepted_cost_is_pinned_against_the_runs`) is staged on the effective window as a numbered `Take` (from the named slot) and `Grant`s; a payment the window can't make, or a Shear whose named slot no longer holds shears of the same type and material once the pending events apply (a last-point pair worn out), is a corrected refusal; no other kind is refused for what a pending event did to the hand (run-23 review MEDIUM-1, run 24: a mount or a Lead removal right after a feed took the hand's last unit is served). A Strict mount on a steed or cart someone else rides is `MountTaken` before the cooldown is read, as Mirror answers (run-23 review LOW-3). The events and the result row are reserved, then Mirror's shared run (`run_joiner_interaction_with`, the server copy's item) decides and applies in one call: a refusal there (milk not ready, wool growing, not your pet, a mount taken, the food not wanted) abandons the reservation exactly and is the world-fact refusal above; an accepted run whose cost differs from the table is a fail-closed `FellBehind` pause. Accepted: the events commit, the `Accepted` row, Mirror's outcome naming the `Take` (0 when nothing is taken) and the grants. Tests: `hosted_server/c3d_interact_tests.rs`. **Typed entity attack (C3d run 15):** a Strict client's swing at a server mob is ONE typed `Action` (`ActionIntent::Attack`), never the legacy `EntityAttack` request: `GameState::send_entity_attack` routes it through `strict_requests::route_attack` (the refill setting first, the `joiner_actions` record, the reservation with recipe `{ slot, digest }` and no cells, then the send); nothing is predicted. The server (`hosted_server/strict_attack.rs`) takes the weapon from its own copy's item in the named hotbar slot (≥ 9 refuses, no fallback), never the claim: a claimed item that disagrees is a corrected `Rule` refusal, as a shot's is. Target, reach, facing, friendly fire and the swing schedule are the Mirror swing's rule, shared (`check_joiner_swing`); a swing it refuses has zero external effect (no damage, knockback, wear, schedule move or event) and, since run 16, is refused for a WORLD FACT the client could not know (out of reach or facing on the server's body, early on the swing schedule, a target gone or dead, its own pet without sneaking): its `Refused` receipt alone, no correction `Replace`, no tick of the correction bound and no suffix superseded, because the client predicted nothing for a swing (`ActionIntent::predicts_nothing`, the one table the server's `refuse_world_fact` requires, backed on the client by the observed `NoPrediction` guard; any other intent falls back to the corrected path). Such refusals are counted apart (`RefusalTally::world_fact`, "world fact (uncorrected)" in the departure line), never as a window mismatch, and still count against the per-tick item budget that limits typed swings (`MAX_ITEM_ACTIONS_PER_TICK`, 4, shared with shots; Mirror's swings use `MAX_ENTITY_REQUESTS_PER_TICK`, also 4). A swing from a dead body stays `Superseded` before the arm (zero effect, never torn down; a swing in flight at death predates the death sync and draws no further correction). A sword on its last point swung twice inside one round trip (the second made before the client applied the first's Wear, which broke it) names a weapon the server's effective window no longer holds: a corrected refusal (one `Replace`, numbered after the Wear, so both copies agree on the empty slot), never a teardown; the same for a bow or slingshot shot (run 16, run-15 review MEDIUM-3). A numbered `WearWeapon` resolves to the NAMED held slot when it holds the weapon's kind, and only otherwise to the single piece of that kind elsewhere (`joiner_actions::strict_wear_target`, one rule for swing and shot; run 16, run-15 review MEDIUM-1): a spare identical sword or bow in the bag never makes the wear ambiguous; it is ambiguous (fail-closed) only when the named slot doesn't hold the kind and several others do. A tool's wear is one numbered `WearWeapon`, reserved with the result row before the damage lands (`strike_joiner_swing`, shared with Mirror); a bare hand or a non-tool wears nothing. Caps tear down with zero effect, as a shot's. The answer is Mirror's `InteractOutcome` naming the Wear. Mirror is unchanged (damage from the claim, BRIDGE). Tests: `hosted_server/c3d_client_attack_tests.rs`. A typed attack or shot whose `Refused` or `Superseded` receipt retires on the client releases its `joiner_actions` record there (run 17, run-15 review LOW-2): no outcome will ever answer it, so a refused shot's ammo claim ends at once. **Run 17 (run-16 review LOW-1, LOW-2, decided):** a shot predicts nothing too, so it is in `ActionIntent::predicts_nothing` beside the attack, and a shot early on the server's shot schedule (beyond `SHOT_JITTER_TICKS`) is a world-fact refusal exactly like a swing's (its `Refused` receipt alone, no `Replace`); ammo or a bow missing from the server's copy, a claim that disagrees, a slot ≥ 9 or a non-finite aim stay corrected window-disagreement refusals. The table is backed by an observed guard: the game loop takes the joined window's digest before the swing and shot branches and checks it after them (`strict_requests::NoPrediction`, debug builds only — a release build computes no digest; a change is logged as an error and stops a debug build; the brackets' positions are pinned by `c3d_no_prediction_brackets_enclose_the_swing_and_the_shot` and the GPU bow test shows its bracket ran; the tests and the harness assertion that depend on the digests — `c3d_strict_no_prediction_guard_trips_on_a_predicted_swing_wear`, `..._on_a_predicted_shot` and the GPU bow test's bracket check — are `#[cfg(debug_assertions)]`, so `./check.sh --release` skips them rather than failing them, run-18 review M2), so a prediction added there can't ride the uncorrected path. **Known honest-client teardown until S3 replay:** a sword on its last point breaks on one swing, and before the client applies that Wear an identical-kind sword is granted into the freed slot; the next swing (claiming the old sword, which the server's raw copy still holds) passes the survivor check on the kind, but staging its Wear on raw and folding the pending Wear finds no unique piece (`AmbiguousWear`), so the seat is torn down (`FellBehind`, internal detail "Attack wear is ambiguous (AmbiguousWear)", zero effect), fail-closed by decision (`c3d_strict_last_point_sword_replaced_in_flight_by_an_identical_kind_is_a_known_teardown`; its no-grant twin is a corrected refusal). **Doors (C3d run 18, Decision 20):** on a Strict seat a door placement is ONE compound `ActionIntent::DoorPlace { bottom, facing, hotbar_slot }` (`strict_doors::place_door_joined` from `GameState::take_for_placement`, before the plain-edit route): the client reserves it with both halves as its cells and predicts one door taken (`place_window`, refill included) and both halves in its world; no `DoorUpper` coupon is sent. The server (`hosted_server/strict_door.rs`) requires TWO edit-budget credits before it runs (a door waits rather than running on the last credit; `DOOR_EDIT_CREDITS`), checks that the server copy's slot places a door (slot ≥ 9 refuses), derives both halves and their metas from the bottom and a horizontal facing (`strict_doors::door_halves`; a vertical or unknown facing refuses), checks reach and permission on the bottom from the server copy's slot (`validate_block_edit`) and permission without reach on the structurally derived top (`cell_permitted`: in the world, loaded, not bedrock, play mode, foreign plot, foreign economy block), takes ONE door, and commits both cells and one row (cells = both halves) together; any refusal has zero effect (no half, no cost). `DoorPlace` carries no `seen`, so a bottom that is no longer replaceable or a top that is no longer AIR is stale-world (an honest client sends it only after its own headroom check); every other refusal is a rule refusal. A door break is a typed `Edit` judged Break on the clicked half (`judge` no longer pauses an old door; a plain `Edit` placing a door stays a corrected `Unsupported`): it also takes two credits when the server's cell is a door, preflights the live matching pair's permission before anything (`live_door_pair`), and the shared `finish_edit_world` → `clear_door_pair` derives the pair and its attachments once (one door yielded). A door, fence gate or trapdoor click is a typed `ToggleBlock { cell, expected_block, hotbar_slot }` (a new send; on a Strict seat the refill setting first; `hotbar_slot` appended in run 19, v89 unreleased, pinned by `action_wire::tests::c3d_wire_toggle_block_carries_its_hotbar_slot`): the footprint (the primary, a door's other half, each horizontally adjacent door and its other half, at most 10 cells) is ONE shared rule (`strict_doors::toggle_footprint`/`toggle_metas`) the Mirror click, the Strict client's prediction and the server arm all call. Mirror keeps the as-built per-cell flip (`OpenRule::FlipEach`, byte-for-byte the old game-loop arm, pinned on nine layouts); a Strict seat uses the canonical bit derived once from the primary (`OpenRule::Canonical`): the two differ only where the footprint's halves already disagreed. The server preflights every footprint cell's permission (the whole click refuses if any companion is forbidden, e.g. the second door of a double door inside a foreign plot) and reach to the primary only, by an edit's rule with the server copy's item in the named slot (`validate_block_edit`: a Reach Claw there lengthens it; run 19, replacing run 18's bare-hand rule; slot ≥ 9 refuses); a different block id at the cell than `expected_block` is stale-world, anything else a rule refusal (run 15's rule). The meta changes are broadcast; the row carries the footprint; no window change, one item-action credit (`MAX_ITEM_ACTIONS_PER_TICK`). Door PLACEMENT and break refusals are corrected, NOT world-fact refusals: the client predicted the door (its halves, the door taken), so the affected cells are sent back as the server holds them and the `Refused` row is followed by one correction `Replace`. A refused TOGGLE (run 19, run-18 review M1, DECIDED) changes no window, so in both modes it is the `Refused` row plus a send-back of world cells only — the union of the server's footprint and every cell the client's own footprint could hold when it clicked a door (`strict_doors::toggle_sendback_cells`, at most 15) — with no `Replace` and no tick of the correction bound (Strict still tallies it); holding right-click on a refused door can't tear a seat down (`c3d_strict_held_toggle_in_a_foreign_plot_never_tears_down`). A superseded `DoorPlace` sends its halves back, a superseded `ToggleBlock` the same union, and a superseded toggle never queues a correction `Replace` in either mode (run 20, run-19 review LOW-2: a dead body's Strict toggle predicted no window; `c3d_strict_toggle_from_a_dead_body_costs_no_correction`). **Run 21 (run-18 review L3–L6):** a dead body's `DoorPlace` is superseded whole — both halves sent back, no door taken (`c3d_strict_door_place_from_a_dead_body_is_superseded_whole`). A Strict door break journals both cells the client predicts (the mined half and the pair derived from its own meta, `strict_doors::door_pair_cell`); the server's row carries its live pair (`edit_cells`), so journal and row hold the same union S3 recovery reads, and S3 takes that UNION as the action's footprint (`c3d_strict_door_break_journals_both_halves`). A joined client (Mirror and Strict) refuses a door whose top would stand above the world (`strict_doors::door_headroom_refused`, before the door is taken; before, `World::set_block` already wrote nothing above the world, so a Mirror client placed a bottom-only half door and sent a `DoorUpper` coupon for a cell outside it, and a Strict client's `DoorPlace` was refused `OutOfWorld` as a corrected `Rule` refusal, one correction per click (run-21 review LOW-1); the bound is `world::WORLD_HEIGHT`, never a literal, on the client and in the server's out-of-world checks (LOW-5), and the place arm's call is pinned by `c3d_game_loop_door_wiring_is_pinned` (LOW-2)); single-player keeps its AIR check alone. A `DoorPlace` on a creative world is refused as a `Rule` refusal, corrected, as every creative typed edit is (`judge`'s `Unsupported`; a creative client places its door untyped) — it used to be served and consume a door. A `DoorPlace` the server finds without room is counted stale-world by inference (an honest client sent it only with a replaceable bottom and AIR above), so a modified client can steer such refusals into that bucket — the same accepted, measurement-only steering as an `Edit`'s `old` (`RefusalTally` is not a cheating count); a top cell that became bedrock or a foreign economy block is reported `Rule`, since permission is checked before room. The game loop's door wiring is pinned by source position (`c3d_game_loop_door_wiring_is_pinned`: no `DoorUpper` coupon after a typed placement; `Canonical` on a Strict seat, `FlipEach` on a Mirror joiner). An ACCEPTED toggle also sends back the union less the footprint it broadcast (run 20, LOW-4: a door half or neighbour only the client's stale world held, flipped by its prediction, is put back; `c3d_accepted_toggle_puts_back_a_ghost_companion`); the union's neighbours are computed with checked arithmetic on the raw wire cell, so a crafted cell at the edge of `i32` can't panic a debug server (LOW-1). The held-click test is paced as the game loop paces it (a click every 8 ticks for 200 ticks, 25 refusals, no correction admitted; LOW-3). A joined client first checks what it can know (`strict_doors::toggle_preflight`: the play mode lets it toggle — every mode, run 20; the primary within an edit's reach with the held item) and shows a toast instead of sending or predicting; it does not check plots (it can't tell its own signed-in plots from others'). Doors are not on `DRIFT_META_BLOCKS`: a break's pair is derived from the server's own meta. The forbidden-companion case of a vertical pair (place or break) can't be constructed today (both halves share a column, and a door cell is no economy block), so the pinned forbidden-companion cases are an above-the-world top and a double-door toggle across a plot edge. Tests: `hosted_server/c3d_door_tests.rs`, `strict_doors::tests`. **Doors open for everyone (C3d run 19; run 18's Mirror finding fixed, the one sanctioned Mirror change):** before, a toggle was client-local in every mode (the click wrote its own world and sent nothing), so on Mirror and from a host the server and every other player kept the door as it was. Now a **Mirror joiner's** click is a typed `ToggleBlock` too (`strict_doors::reserve_toggle`, no refill setting: a Mirror seat keeps that on its own path), predicted locally by `FlipEach` exactly as before; the server (`HostedServer::serve_toggle`, the same arm as Strict, dispatched by `mirror_slot`: server-simulated and Mirror) applies the same `FlipEach` footprint to its world, validated with a joiner's block-edit checks except the play mode (run 20: `HostedServer::toggle_cell_permitted` on every cell — in the world, loaded, not bedrock, reach with the server copy's slot item on the primary only, the foreign plot and the economy owner; the play-mode rule is `strict_doors::toggle_mode_allows`, see below), broadcasts the cells to every player (and, lent, back to the host to remesh) and retires `Accepted`. A refusal sends the cells back as the server holds them (the joiner's door shuts again) and retires `Refused` with NO correction `Replace` (as Strict's now does; no Strict tally); a superseded Mirror toggle (a dead body only, run 20) sends its cells back with no `Replace` either. **A Mirror toggle is window-free (C3d run 20, run-19 review HIGH-1 and MEDIUM-1):** it reads and changes no window, so it neither checks nor moves the window boundary (no `FellBehind` teardown on its `events_applied`, no `apply_through`: the Mirror window order is exactly as before run 19, only the old paths apply events), and a live toggle whose base predates a whole-window `Replace` is SERVED, not superseded (nothing it predicted came from the window); and a Mirror seat's `Action` packet waits in its inbound queue while that joiner's legacy edits wait past the edit budget, as a FU4a request does (a door placed, then opened, is judged in that order). Known residue: a toggle already deferred on the item budget can still run after LATER edits; that touches the world only (a stale `expected_block` is refused and its cells sent back). Budgets shared (run-19 review LOW-5): Mirror toggles count against `MAX_ITEM_ACTIONS_PER_TICK` (4) with the seat's legacy `ItemAction`s (a busy tick can delay an `ItemAction` one tick; latency only), and a refused toggle's send-back (up to 15 cells) shares `MAX_SEND_BACKS_PER_CLIENT_PER_TICK` (64) with refused-edit send-backs (an unsent cell stays a ghost until it next changes). Run 21 (run-20 review LOW-1): an ACCEPTED door click costs send-backs too — its ghosts, the 15-cell union less the footprint it broadcast (at most 14: 13 beside a whole door, 14 when the server lacks the other half), sent every time even when the client already matches; they ride the shared broadcast, so every joiner hears them (about 15 cells × joiners in `StateUpdate` bytes per click), and four door clicks in one tick (the item budget) take about 56 of the 64, so a refused edit's send-back in the same tick can be skipped and stay a ghost until that cell next changes. Sending ghosts to the clicker alone is the open refinement. **A Mirror joiner's door click is never refused for its own unsent edits (run 22, replacing run 21's LOW-2 rule):** edits still waiting on the client (this frame's, an input carry-over, a queued request: `edits_unsent`) ride a later input, so a toggle sent at once would overtake them (a door placed a moment ago refused stale-world). The click is reserved and predicted (`FlipEach`) at once, exactly as on `bdd4fe87` where the door always opened on the clicker's screen, and the reserved `ToggleBlock` joins the client's ONE ordered queue (`remote_client::Request::Action`, `GameState::send_request`): sent now when nothing waits, else right after the input that carries the edits made before it (`take_queued_requests` / the order cut), never a second path. No toast, no lost click (`strict_doors::reserve_toggle_unsent`; test `game_harness_mirror_door_click_queues_behind_unsent_edits` drives a real carry-over and a queued request). Its header's `events_applied` is frozen at the click while the inbox waits; that is safe because a Mirror toggle is window-free on the server (HIGH-1). A click with no connection reserves an action that is never sent (the session is gone). The server's hold (MEDIUM-1) still covers edits already queued there. A toggle made before the client applies the join sync's whole-window `Replace` is served (`c3d_mirror_toggle_before_the_join_replace_is_applied_is_served`). Tests: `c3d_mirror_toggle_that_waits_past_a_window_boundary_move_is_served`, `c3d_mirror_toggle_made_before_a_replace_is_served`, `c3d_mirror_toggle_waits_behind_the_joiners_waiting_edits`. **A toggle is a use, not an edit (C3d run 20, coordinator 2026-10-12):** its play-mode rule is exactly the single-player toggle arm's, which has no play-mode gate (main `bdd4fe87`), so a joiner in Adventure (as in Minecraft's Adventure mode) and in Spectator opens and shuts doors, in both modes, and every player sees it; `strict_doors::toggle_mode_allows` is that one rule (exhaustive over `PlayMode`), asked by the client preflight and the server alike (run 19 had briefly refused Adventure/Spectator toggles as edits). Whether Spectator should toggle at all is an open owner question; it is kept as single-player has it. Tests: `c3d_mirror_adventure_joiner_opens_and_shuts_a_door`, `c3d_strict_adventure_joiner_opens_and_shuts_a_door`. A **host's** (and single-player's) click records each footprint cell's block and meta on its edits (`pending_block_changes`, `broadcast_change`), so a lending host's joiners hear it like any host edit (single-player discards them at the send). On a `--no-lend` host the owning server applies those meta-only edits through the local-slot path (no remote gates, the per-tick edit budget, a refused cell sent back to the host) — by reading, not tested (BRIDGE, deleted with the flag). Tests: `c3d_mirror_joiner_door_toggle_reaches_the_server` (un-ignored), `..._reaches_a_second_joiner`, `c3d_mirror_joiner_toggle_in_a_foreign_plot_is_sent_back`, `c3d_mirror_joiner_toggles_a_double_door_a_trapdoor_and_a_gate`, `c3d_strict_toggle_reach_uses_the_server_copys_slot_item`; GPU `game_harness_a_lending_hosts_door_toggle_reaches_a_joiner`, `game_harness_mirror_joiners_door_toggle_opens_the_servers_door`. Other typed classes (entity interactions, eating, devices, other uses and requests) are pending and still close a Strict session (`Untyped`). |
+| 0x44 | `Action` | C->S | Reliable | C3d typed intent and `{ session: [u8;16], epoch: u32, seq: u64, life: u32, events_applied: u32 }`, maximum32 KiB. Identity is allocated before prediction. Wired in Strict (internally selected; Mirror the default): window `Click` (the server's shared `serve_op` transition staged on the raw window, result row reserved before the raw commit; a digest it doesn't reproduce, or a stack the marker projection can't carry exactly, is `Refused` with zero effect) and `Shoot` (Take and Wear reserved together, then the result row, before the one projectile). After every Strict commit the effective fold must prove zero: a breach tears the session down with a reason and is saved as it stands. Window configuration (`OpenPlayer`, `OpenTable` with the table grace, `SetAutoRefill`, which the client sends before any window action its digest covers) is staged on the raw window, digest-checked and committed after its result row. Shared containers (C3d, 2026-10-10): `OpenContainer` reserves the opened view as a numbered window event (count and owned bytes) and its result row before the container opens (a refused open is answered `OpenRefusal` with no effect and an Accepted row: the client predicted nothing); a container click runs the shared rule twice on the raw window, once on exactly the view the client predicted on (its digest must match, else `Refused`: no believed deposit, no durability swap, no claims) and once on the REAL container; the same effect commits both once, a contested slot (another player or machine changed a slot the click acts on, wholly or partly) is a terminal `NormalisedAcceptedNoop` with zero effect followed by the correction — a partial contest is whole-or-nothing (coordinator decision, 2026-10-10: conservative, the client corrects), never a partial commit; a push to a Strict joiner reserves its view first. A waiting container view counts its real bytes against the 2 MiB event budget, so it never blocks an unrelated reservation. A refused Autofill stages exactly the safe subset its client did (no change for `NeedsTable`, the grid and cursor returned for `Refused`). After every Strict commit, and at every staging, ONE predicate must hold: no correction debt, a `Complete` history, and every waiting Take payable. Edits on a Strict movement packet fail closed with a reason (never dropped silently). A numbered Take that a Strict copy applies short (at an action's boundary, an input's, the overdue valve or the cap) is an invariant breach, never log-only: the session is torn down through the one bridge with the obligation sentence (run 4). A Strict CLIENT that finds a legacy window op in its own flush (a reserving entry point was bypassed; the window may already show it) never discards it silently: no whole-window resync request exists, so it sends `Disconnect` and leaves the world with a plain sentence (`remote_client::STRICT_STRAY_CHANGE_REASON`; run 4). Window configuration touches no contents (run 4, run-3 review M1): it is staged independently of a waiting join or death replacement (the contents digest is not compared while one waits, and the obligation fold continues from the replacement's window, whose carried debt must be empty), and all of it (`SetAutoRefill`, `OpenPlayer`, `OpenTable`) is served while the player is dead or its death sync waits (run 5). **Stale-base and dead-body actions are superseded, not breaches (run 5, coordinator decision; run-4 review M1, LOW-1):** every other typed action that comes from a dead body, or whose base (`events_applied`) predates a whole-window `Replace` (the join or death sync) its client hadn't applied, gets the terminal `Superseded` fate and zero external effect — no window or container change, no projectile, no payment, no window event, no `ContainerOpened` — and is never torn down: the `Replace` overwrites what the client predicted on that base. This covers the `Close` a client sends when it dies with a chest open, any click or shot in flight at death, and a click, open or shot made before the join sync applies (tests in `hosted_server/c3d_superseded_tests.rs`). A stale base below a `Replace` the overdue valve already applied is superseded too (not `FellBehind`); any other unavailable base still is. **Every `Superseded` is corrected (run 6, coordinator rule after the run-5 review):** a stale base's correction is the `Replace` it predates; a dead body's action on a current base (after the death sync: Esc on the death screen with a crafting screen open, the table force-close after an early local Respawn) gets one fresh whole-window correction `Replace`, at most one outstanding per client. Configuration made before the latest `Replace` is served on the current copy without applying through its base, its digest skipped exactly then (run-5 LOW-2). In Strict, while the body is dead or a Respawn is unanswered, the client's crafting screen sends no `Close` (flicker only; the server rule is the guarantee). Since run 8 (run-6 review LOW-1) this is one gate inside `close_crafting` / `force_close_crafting` (and an open's return-the-grid `Close`), reached by Esc, E, the touch and gamepad pause and the table force-close; Esc on a frozen crafting screen pauses (Spec 05). Contest interleavings (run 5, run-3 review L4) are pinned with per-identity conservation over both windows, the chest, every grave and the ground: both joiners' withdrawals in one tick (one Accepted, one `NormalisedAcceptedNoop`), a deposit into a slot the other's push (still in flight) filled, and a chest broken between one joiner's commit and the other's click (`Refused`, nothing committed, the spill not repeated). **A container view counts what the client's mirror holds (run 5, run-4 review LOW-2):** the server's model of a Strict joiner's mirror (the opened view, every push, and `seen`) holds a Plan as its body-less placeholder (`container_window::strip_plan_body`; Plans stay in a shared container and digest content-free), never the real chest, so a host's large Plan costs the view its placeholder's bytes; a view that still doesn't fit the event budget is the open's typed refusal `OpenRefusal::TooLarge`, never a teardown, and conjures nothing: the open views a container whose block entity is still missing (a lazy chest) as the fresh one and creates it only after the view and the result row are reserved (run 11, `container_window::FreshContainer`; a push's view strips Plan bodies the same way, pinned by `c3d_strict_push_of_a_large_plan_counts_its_placeholder`); a Strict client sends its session-start auto-refill only once the join sync (event 1) is applied, otherwise with its first window action. Strict is selected only through `HostedServer::select_inventory_mode`, which refuses a `--no-lend` host (`StrictSelectError::NoLendHost`: its server mirrors the host's copy every tick, so a committed withdrawal would return to the chest); a dedicated server or a lending host may select it. Admission checks the same rule again (run 5, run-4 review LOW-4): an owning server that gained a local player after selecting Strict refuses a Strict join before `JoinAccept` with `StrictJoinRefusal::NoLendHost`'s plain sentence. The selector items carry `expect(dead_code)` while the operator flag remains unexposed; the locally accepted C3d partial delivery does not expose it or change the default. **What a refusal does (C3d run 12b, S1).** A refusal whose client prediction a `Replace` plus the cell send-back fully undoes is CORRECTED: a typed edit (every Drift), a personal click and a refused Autofill, a shot, `OpenPlayer`/`OpenTable`, and (run 14) `SetAutoRefill`: the `Replace` keeps each copy's refill setting, so the client, when its setting's `Refused` receipt retires (`RemoteClient::refill_refused`), sends the setting again on the corrected window (`CraftingUi::sync_auto_refill_joined`); since run 16 (run-14 review LOW-1) the client also sends it again as soon as a Strict whole-window `InventorySync` arrives while a `SetAutoRefill` is still unretired, so a click made between the `Replace` and its `Refused` receipt (held behind the chunk intake) is served on the corrected window instead of being refused a second time; the receipt then triggers no further resend when a later setting is already journaled. It commits nothing beyond its terminal `Refused` row, then one whole-window correction `Replace` goes to the LIVE player. That `Replace` takes no death flag (`death_replace` keeps meaning a death sync, which gates requests); the neutral "a correction waits" flag is `WindowEvents::replace_waiting`, and at most one waits. It is checked against the pending window events first (1024 events, 2 MiB; `window_events::strict_replace_fits` measures a `Replace` by its real owned heap: the boxed window, its Plan bodies and its carried debt). One that doesn't fit is never forced in: the connection is torn down (`FellBehind`). Run 13 (run-12 review LOW-1): its slot is reserved in the deque before it is measured (`window_events::reserve_strict_replace`), so queuing it can't grow the deque past 2 MiB and make the next honest action fall behind; both halves of the bound are pinned (`c3d_s1_correction_replace_past_the_pending_cap_tears_down`, `c3d_s1_correction_replace_past_the_byte_bound_tears_down`). A container `Correction` still waiting has no reservation measure, so a refusal's `Replace` beside it is a `FellBehind` teardown too (fail-closed). Run 13 (LOW-3; BRIDGE until S3 replay): at most 8 correction `Replace`s per seat in any 100 server ticks (`strict_admission::CorrectionRate`); the ninth is a `FellBehind` teardown naming the bound, with zero item effect. Run 14 (run-13 review LOW-3): a dead body's correction `Replace` shares that one per-seat bound and the reserved fit (`HostedServer::admit_correction_replace`), so a client that never respawns can't draw a whole-window sync per superseded action. Run 14 (LOW-5): every `FellBehind` teardown carries its own internal detail (logged; test builds record it and the tests assert it), the player reading the one sentence. Run 13 (LOW-2): a server window the marker projection can't carry (`StrictStageError::RawUnrepresentable`: its own raw window, or a waiting `Replace`'s) is refused, then torn down with its own sentence (`StrictTeardown::Unrepresentable`), since a `Replace` would ship the same window back; an unrepresentable result (an action's grant) is still a corrected refusal. **Still torn down**, committing nothing beyond the terminal row, through one bridge function, the player reading a plain sentence (`strict_admission::StrictTeardown`): a container open or click refusal and the contest (a `Replace` carries no container view), and a reservation at a cap (1024 pending events, 2 MiB, the unacknowledged result history). Each Strict seat counts its refusals as stale-world (a real Drift only, run 13: run-12 review LOW-5) or other (a rule, a mismatch, a typed `Unsupported` edit, a break that doesn't yield that way on the very cell the client saw; run 14, run-13 review LOW-4, decided: run 15, run-14 review LOW-2, revised: only a different block id in the server's cell makes that break stale-world, a meta-only difference is a rule refusal; the bucket follows the client's `old`, so a modified client can steer it, measurement only) in `strict_admission::RefusalTally`, logged in the departure line beside `PossessionTally` and never counted as cheating (Decision 19's measurement, Q15). Mirror never reaches any of it (every typed handler is gated on `strict_slot`), and a Mirror client fails closed on any recovery carrier (`RemoteClient::receive_recovery`). **Typed block edits (run 6):** a plain placement or a mined break is an `Edit` action, judged from the server copy of the joiner's window at the action's boundary, never from the claimed hand or `MinedBlock.tool`: a placement must be held in its historical hotbar slot (else `Refused`, zero effect: no block, no event, the predicted cell sent back); a break's drop tier is the tool in that slot (none = bare hand). The client predicts both (placement with auto-refill, the tool's wear), so their window half is staged and committed on the raw window exactly as a click is; only the break's yield is numbered (`Grant` events, reserved with their packets and the result row before the world changes). The world half is the same code Mirror runs. Untagged emptying edits are `Refused`; a typed creative, same-block, door-placing (a plain `Edit` naming a door: a door goes as one `DoorPlace`, Decision 20) or non-yielding edit is a server `Unsupported` refusal, corrected (Q11, below); only use-tagged edits still pause. **Drift first (run 10, run-9b review MEDIUM-1):** the server's `judge` (given `Received`: the cell's meta and the cell as its client saw it) runs the Decision 19 Drift check before the same-block and non-yielding checks. A client sends an edit typed only when its own world judged it Place or Break, so a received placement onto its own block, or a received mined edit onto its own result or onto a block that yields nothing (air, a fluid, fire), means the cell changed since the client acted: a leaf the server decayed, a block another player mined, a crop someone harvested. It is a Drift `Refused` (typed row, its cell sent back), never an `Untyped` pause; the client's own classification (`received = None`) is unchanged. **Drift is exact (run 11, run-10 review LOW-1, LOW-2):** the `Edit` carries the cell as its client saw it (`old`: block id and meta), and a different block id in the server's cell is Drift: gravel fallen into a mined leaf's cell, a crop replanted or grown a stage (stages are block ids), a door or another block in a placement's cell. **Ids only (run 12, after the run-11 review):** meta counts only for a block on `strict_edits::DRIFT_META_BLOCKS`, empty today (no Place or Break outcome reads the cell's meta, and meta the server changes without a broadcast, such as a leaf's, must never make an honest edit Drift; doors, typed in run 18, are not on it: a break's pair comes from the server's own meta; an open/closed bit never), and for a placement AIR and water are one replaceable class (no Drift between them). A typed crop harvest writes the server's own cell meta on its replacement, never the client's `change.meta` (Mirror still believes it: Spec 05). The `Edit` layout is pinned byte for byte (`action_wire::c3d_wire_edit_layout_is_pinned`). **Refusal correction (C3d run 12b, S1):** a refused `Edit` (every Drift included) no longer tears the session down: its send-back reaches the client, its `Refused` row is retained and ONE whole-window correction `Replace` puts the client's window back (`HostedServer::queue_live_correction_replace`). Every in-flight action after it has an older base, so it is `Superseded` with zero effect and its cell sent back (BRIDGE: the suffix is superseded, not replayed, Decision 16, until S3's recovery bundle and replay). A typed `Unsupported` edit (Q11: the server's cell or mode changed under the client) and a break whose yield can't be carried (Q12) are refusals too, corrected the same way. **Reach (run 10, MEDIUM-2):** an edit's reach bonus comes from the server copy of the edit's slot (a Reach Claw there gives +2.0), in both modes, never from the claimed hand. **The client half (run 9):** a Strict client's plain placement and mined break never ride the movement packet: the game loop's place and break arms (`GameState::take_for_placement`, `GameState::break_route`, `strict_edits.rs`) judge the edit on the client's own window with the server's rule (`strict_edits::judge`, shared) and, for a Place or Break, reserve ONE numbered `Edit` before anything is predicted (as a click is: the recipe holds the slot, the initial sources the window half changes and the digest of the window it predicts; the action's footprint is the cell), then predict with the same window halves the server stages on raw R (`place_window` = `take_placeable_from_hotbar`, auto-refill included; `break_window` = `use_tool_at`, a broken tool removed), then send. A break is reserved before its cell changes and its tool is worn there, not after. The placement's meta is one pure rule (`placement_meta::placement_meta`) computed before the reservation, and the place arm writes the same value (Mirror unchanged). A failed reservation changes nothing (the block isn't placed; the break restarts). `Edit` carries no wire digest: the client's prediction is pinned against the server's staging by a test (`c3d_client_edit_prediction_is_the_server_staging`: the recipe's digest equals the server copy's raw window right after it served the edit). Mirror goes through exactly the old path. The paused classes (creative, same-block, non-yielding manual break, use-tagged) still ride the movement packet in Strict and close the session until recovery lands; doors are typed since run 18 (`DoorPlace`, a door break as a Break `Edit`, `ToggleBlock`: see Doors below). **Run 9 (run-6 review LOW-3):** a `Superseded` `Edit` (a dead body's, or one on a stale base) also sends back its predicted cell and a door's pair (`send_back_refused_edit`), so it is corrected in the world as well as the window; every `Edit` result row (`Accepted`, `Refused`, `Superseded`) carries the edit's cell, and a door's pair, as its `cells` (Decision 12's server-known footprint). **Typed shot, client half (C3d run 13):** a Strict client's bow or slingshot shot is ONE typed `Action` (`ActionIntent::Item(Shoot)`), never the legacy `ItemAction` request: `GameState::send_shot` routes it through `strict_requests::route_shot`, which sends the session's auto-refill setting first (as before an edit), records the request in `joiner_actions` (its `seq` names the outcome; the in-flight ammo claim stays), then reserves the action BEFORE anything else changes (recipe: the weapon's hotbar slot, the weapon and the digest of the window it was made on; no cells) and sends it. Nothing is predicted: the ammo and the weapon's wear change only when the server's `ItemActionOutcome` (its numbered Take and Wear) arrives, applied through the same `joiner_actions` path as Mirror's. A shot the server's copy can't pay (`MissingPayment`: no ammo there) is a refusal, corrected by the live `Replace`, never a teardown. Mirror routes `ShotRoute::Legacy` and sends the legacy request byte for byte. Tests: `hosted_server/c3d_client_shot_tests.rs`. **A Mirror seat's deferred typed action is never overtaken (C3d run 23, run-22 review LOW-1):** while a Mirror seat's typed action (a door toggle past the item budget) waits in its server action queue, the inbound loop reads nothing more from that client this tick (`HostedServer::typed_action_waits`); the next tick serves it first, so a later input (an edit that breaks the door) never lands before the click. **Typed eat, creative give and power-device right-click (C3d run 24):** a Strict client's eat (`ItemAction::Eat`) and creative give (`ItemAction::CreativeGive`) are ONE typed `Action` each (`ActionIntent::Item`), routed by `strict_requests::route_item` from `GameState::send_eat_request` / `request_creative_give` (one `route_item_request`), and a right-click on a toggle-class power device is ONE `ActionIntent::Device { cell, hotbar_slot }` (`strict_requests::route_device`, no request record), each inside its `NoPrediction` bracket ("eat", "creative give", "device"); Mirror sends the legacy `ItemAction` / `DeviceInteract` byte for byte. None of the three predicts anything (the food goes and the body is fed by the server's answer — the client's eat cooldown only paces its clicks; a give lands by its numbered `InventoryGrant`; a device flips by the broadcast), so all three are in `predicts_nothing`, and an eat's or a give's refused receipt releases its request record. The server (`hosted_server/strict_item.rs`): an eat reads the food from the server copy's NAMED slot (slot ≥ 9, a claim that disagrees, or no food there → corrected `Rule`); Mirror's judge (`judge_eat`: not hungry, inside the eating cooldown) is a world fact — `ItemActionOutcome { accepted: false, note }` and a `Refused` row alone; else a `Take` of one from the named slot is staged and reserved with the result row before Mirror's meal (`item_actions::eat`, the cooldown). A give in a world that isn't Creative (`NotHere`; an operator can change the mode under the client) or into a bag with no room (`InventoryFull`; both copies agree and nothing was predicted, so a held give on a full bag never draws on the correction bound) is a world fact with its note; an unreadable stack or a Plan stack of more than one is a corrected `Rule`; else one `Grant` (a Plan as its private marker) is staged, reserved and sent numbered, then the outcome. A device right-click is refused as a world fact (no row correction) for Mirror's rules — play mode and plot (`remote_may_touch`), reach, no toggle-class device there — with the reach of the server copy's item in the named slot (a Reach Claw there counts; Mirror's DeviceInteract stays flat), else the shared `power::interact_device` runs on the server's world and its `Accepted` row carries the cell. A Strict seat that sends the legacy `DeviceInteract`, `ItemAction` or `EntityInteract` is still torn down with the `Untyped` reason (`c3d_client_strict_seat_sending_a_legacy_packet_is_refused`). **Run-24 review (C3d run 25):** a Strict creative give into a bag with room for only part of the stack grants what fits, as Mirror's `grant_to_joiner` lands what fits; the rest is not granted (only no room at all is the `InventoryFull` world fact). A Strict device right-click has Mirror's own per-tick limit (`MAX_DEVICE_INTERACTS_PER_TICK`, 2, the counter Mirror's `DeviceInteract` uses), not the item counter. A toggle-class device whose `power::interact_device` returns `None` (a kind added without its arm) refuses the right-click as a world fact, never panicking the host on a joiner's packet (`c3d_client_strict_device_without_an_interaction_is_refused_not_a_panic`). **Typed Q-drop and sleep (C3d run 25):** a Strict client's Q-drop is ONE typed `Action` (`ActionIntent::Item` carrying `ItemAction::Drop`, the claim read before the take), reserved by `strict_requests::route_drop` BEFORE the hand changes (recipe `DropRecipe { slot, digest-after, sources }`, no cells), then the predicted take (`Inventory::take_one_from_hotbar`), then the send; Mirror's legacy drop is unchanged. A drop is the one PREDICTED item action, so it is not in `predicts_nothing` and every refusal is corrected (one `Replace`). The server (`hosted_server/strict_drop.rs`) reads the server copy's NAMED slot: a slot ≥ 9, a claim that disagrees, an empty slot or a Plan (a joined client keeps a Plan, with a toast) is a corrected `Rule` refusal; the take is staged on the copy (`window_events::stage_strict_edit`, no numbered event: the client already made it), then the result row, then the copy committed, a drop-bucket token spent and the copy's real item (a tool whole, with its wear) thrown from the server's body. Mirror's bounded belief (the believed-units bound, `drop_believed`/`drop_refused`) is never reached from a Strict seat: the copy pays or the drop is refused. Pacing is Mirror's drop bucket by DEFERRAL: a typed drop at the queue head waits until the bucket holds a token, never refused for it (`c3d_client_strict_nine_quick_drops_wait_for_the_bucket_and_are_all_served`). A dead body's drop is superseded with a correction, as any predicted action. A Strict client's sleep is ONE typed `ActionIntent::Item` (`ItemAction::Sleep`) through `route_item` inside a `NoPrediction` "sleep" bracket: it claims and predicts nothing (the spawn is set by the accepted outcome), so `Sleep` is in `predicts_nothing`. The server (`serve_strict_sleep`) shows the night calendar the clock first, then Mirror's `judge_sleep` (no bed, out of reach, not night, slept tonight) → Mirror's outcome note and a `Refused` row, uncorrected; else the result row, then Mirror's `serve_sleep` (spawn at the bed, healed) and the accepted outcome; no window event. Tests: `hosted_server/c3d_drop_sleep_tests.rs`. **Typed entity interactions (C3d run 23):** a Strict client's feed, tame, shear, milk, Lead on, off or on a post, pet command and mount are ONE typed `Action` each (`ActionIntent::Interact`, the `EntityInteract` packet's body), never the legacy request, which tears a Strict seat down: `GameState::send_interaction` routes them through `strict_requests::route_interact` (refill setting, `joiner_actions` record, reservation with recipe `{ slot, digest }` and no cells, send) inside a `NoPrediction` "interaction" bracket; Mirror sends the legacy request byte for byte. Nothing is predicted, so `Interact` is in `predicts_nothing` and its refused/superseded receipt releases the request record (`unanswered_request`). The server (`hosted_server/strict_interact.rs`, `serve_strict_interact`) reads the item from the server copy's NAMED hotbar slot, never the claim: a slot ≥ 9 or a claim that disagrees is a corrected `Rule` refusal (one `Replace`). Then the pure world-fact gate, Mirror's rules read without changing anything (the target alive, in reach and ahead of the server's body, or a parked cart or a fence post within block reach; `NotOnThisServer` where the world runs no animal life; the joiner already riding; the interaction cooldown): a `Refused` row alone, uncorrected, with Mirror's `InteractOutcome { accepted: false, note }` beside it. Then the accepted cost from the pure table `mob_interact::accepted_cost` (Feed, Tame, LeadAttach, LeadToPost: take 1; Milk: take 1 + grant a milk bucket; LeadDetach: grant the Lead; Shear, SitToggle, Mount: nothing; pinned against the runs by `c3d_accepted_cost_is_pinned_against_the_runs`) is staged on the effective window as a numbered `Take` (from the named slot) and `Grant`s; a payment the window can't make, or a Shear whose named slot no longer holds shears of the same type and material once the pending events apply (a last-point pair worn out), is a corrected refusal; no other kind is refused for what a pending event did to the hand (run-23 review MEDIUM-1, run 24: a mount or a Lead removal right after a feed took the hand's last unit is served). A Strict mount on a steed or cart someone else rides is `MountTaken` before the cooldown is read, as Mirror answers (run-23 review LOW-3). The events and the result row are reserved, then Mirror's shared run (`run_joiner_interaction_with`, the server copy's item) decides and applies in one call: a refusal there (milk not ready, wool growing, not your pet, a mount taken, the food not wanted) abandons the reservation exactly and is the world-fact refusal above; an accepted run whose cost differs from the table is a fail-closed `FellBehind` pause. Accepted: the events commit, the `Accepted` row, Mirror's outcome naming the `Take` (0 when nothing is taken) and the grants. Tests: `hosted_server/c3d_interact_tests.rs`. **Typed entity attack (C3d run 15):** a Strict client's swing at a server mob is ONE typed `Action` (`ActionIntent::Attack`), never the legacy `EntityAttack` request: `GameState::send_entity_attack` routes it through `strict_requests::route_attack` (the refill setting first, the `joiner_actions` record, the reservation with recipe `{ slot, digest }` and no cells, then the send); nothing is predicted. The server (`hosted_server/strict_attack.rs`) takes the weapon from its own copy's item in the named hotbar slot (≥ 9 refuses, no fallback), never the claim: a claimed item that disagrees is a corrected `Rule` refusal, as a shot's is. Target, reach, facing, friendly fire and the swing schedule are the Mirror swing's rule, shared (`check_joiner_swing`); a swing it refuses has zero external effect (no damage, knockback, wear, schedule move or event) and, since run 16, is refused for a WORLD FACT the client could not know (out of reach or facing on the server's body, early on the swing schedule, a target gone or dead, its own pet without sneaking): its `Refused` receipt alone, no correction `Replace`, no tick of the correction bound and no suffix superseded, because the client predicted nothing for a swing (`ActionIntent::predicts_nothing`, the one table the server's `refuse_world_fact` requires, backed on the client by the observed `NoPrediction` guard; any other intent falls back to the corrected path). Such refusals are counted apart (`RefusalTally::world_fact`, "world fact (uncorrected)" in the departure line), never as a window mismatch, and still count against the per-tick item budget that limits typed swings (`MAX_ITEM_ACTIONS_PER_TICK`, 4, shared with shots; Mirror's swings use `MAX_ENTITY_REQUESTS_PER_TICK`, also 4). A swing from a dead body stays `Superseded` before the arm (zero effect, never torn down; a swing in flight at death predates the death sync and draws no further correction). A sword on its last point swung twice inside one round trip (the second made before the client applied the first's Wear, which broke it) names a weapon the server's effective window no longer holds: a corrected refusal (one `Replace`, numbered after the Wear, so both copies agree on the empty slot), never a teardown; the same for a bow or slingshot shot (run 16, run-15 review MEDIUM-3). A numbered `WearWeapon` resolves to the NAMED held slot when it holds the weapon's kind, and only otherwise to the single piece of that kind elsewhere (`joiner_actions::strict_wear_target`, one rule for swing and shot; run 16, run-15 review MEDIUM-1): a spare identical sword or bow in the bag never makes the wear ambiguous; it is ambiguous (fail-closed) only when the named slot doesn't hold the kind and several others do. A tool's wear is one numbered `WearWeapon`, reserved with the result row before the damage lands (`strike_joiner_swing`, shared with Mirror); a bare hand or a non-tool wears nothing. Caps tear down with zero effect, as a shot's. The answer is Mirror's `InteractOutcome` naming the Wear. Mirror is unchanged (damage from the claim, BRIDGE). Tests: `hosted_server/c3d_client_attack_tests.rs`. A typed attack or shot whose `Refused` or `Superseded` receipt retires on the client releases its `joiner_actions` record there (run 17, run-15 review LOW-2): no outcome will ever answer it, so a refused shot's ammo claim ends at once. **Run 17 (run-16 review LOW-1, LOW-2, decided):** a shot predicts nothing too, so it is in `ActionIntent::predicts_nothing` beside the attack, and a shot early on the server's shot schedule (beyond `SHOT_JITTER_TICKS`) is a world-fact refusal exactly like a swing's (its `Refused` receipt alone, no `Replace`); ammo or a bow missing from the server's copy, a claim that disagrees, a slot ≥ 9 or a non-finite aim stay corrected window-disagreement refusals. The table is backed by an observed guard: the game loop takes the joined window's digest before the swing and shot branches and checks it after them (`strict_requests::NoPrediction`, debug builds only — a release build computes no digest; a change is logged as an error and stops a debug build; the brackets' positions are pinned by `c3d_no_prediction_brackets_enclose_the_swing_and_the_shot` and the GPU bow test shows its bracket ran; the tests and the harness assertion that depend on the digests — `c3d_strict_no_prediction_guard_trips_on_a_predicted_swing_wear`, `..._on_a_predicted_shot` and the GPU bow test's bracket check — are `#[cfg(debug_assertions)]`, so `./check.sh --release` skips them rather than failing them, run-18 review M2), so a prediction added there can't ride the uncorrected path. **Known honest-client teardown until S3 replay:** a sword on its last point breaks on one swing, and before the client applies that Wear an identical-kind sword is granted into the freed slot; the next swing (claiming the old sword, which the server's raw copy still holds) passes the survivor check on the kind, but staging its Wear on raw and folding the pending Wear finds no unique piece (`AmbiguousWear`), so the seat is torn down (`FellBehind`, internal detail "Attack wear is ambiguous (AmbiguousWear)", zero effect), fail-closed by decision (`c3d_strict_last_point_sword_replaced_in_flight_by_an_identical_kind_is_a_known_teardown`; its no-grant twin is a corrected refusal). **Doors (C3d run 18, Decision 20):** on a Strict seat a door placement is ONE compound `ActionIntent::DoorPlace { bottom, facing, hotbar_slot }` (`strict_doors::place_door_joined` from `GameState::take_for_placement`, before the plain-edit route): the client reserves it with both halves as its cells and predicts one door taken (`place_window`, refill included) and both halves in its world; no `DoorUpper` coupon is sent. The server (`hosted_server/strict_door.rs`) requires TWO edit-budget credits before it runs (a door waits rather than running on the last credit; `DOOR_EDIT_CREDITS`), checks that the server copy's slot places a door (slot ≥ 9 refuses), derives both halves and their metas from the bottom and a horizontal facing (`strict_doors::door_halves`; a vertical or unknown facing refuses), checks reach and permission on the bottom from the server copy's slot (`validate_block_edit`) and permission without reach on the structurally derived top (`cell_permitted`: in the world, loaded, not bedrock, play mode, foreign plot, foreign economy block), takes ONE door, and commits both cells and one row (cells = both halves) together; any refusal has zero effect (no half, no cost). `DoorPlace` carries no `seen`, so a bottom that is no longer replaceable or a top that is no longer AIR is stale-world (an honest client sends it only after its own headroom check); every other refusal is a rule refusal. A door break is a typed `Edit` judged Break on the clicked half (`judge` no longer pauses an old door; a plain `Edit` placing a door stays a corrected `Unsupported`): it also takes two credits when the server's cell is a door, preflights the live matching pair's permission before anything (`live_door_pair`), and the shared `finish_edit_world` → `clear_door_pair` derives the pair and its attachments once (one door yielded). A door, fence gate or trapdoor click is a typed `ToggleBlock { cell, expected_block, hotbar_slot }` (a new send; on a Strict seat the refill setting first; `hotbar_slot` appended in run 19, v89 unreleased, pinned by `action_wire::tests::c3d_wire_toggle_block_carries_its_hotbar_slot`): the footprint (the primary, a door's other half, each horizontally adjacent door and its other half, at most 10 cells) is ONE shared rule (`strict_doors::toggle_footprint`/`toggle_metas`) the Mirror click, the Strict client's prediction and the server arm all call. Mirror keeps the as-built per-cell flip (`OpenRule::FlipEach`, byte-for-byte the old game-loop arm, pinned on nine layouts); a Strict seat uses the canonical bit derived once from the primary (`OpenRule::Canonical`): the two differ only where the footprint's halves already disagreed. The server preflights every footprint cell's permission (the whole click refuses if any companion is forbidden, e.g. the second door of a double door inside a foreign plot) and reach to the primary only, by an edit's rule with the server copy's item in the named slot (`validate_block_edit`: a Reach Claw there lengthens it; run 19, replacing run 18's bare-hand rule; slot ≥ 9 refuses); a different block id at the cell than `expected_block` is stale-world, anything else a rule refusal (run 15's rule). The meta changes are broadcast; the row carries the footprint; no window change, one item-action credit (`MAX_ITEM_ACTIONS_PER_TICK`). Door PLACEMENT and break refusals are corrected, NOT world-fact refusals: the client predicted the door (its halves, the door taken), so the affected cells are sent back as the server holds them and the `Refused` row is followed by one correction `Replace`. A refused TOGGLE (run 19, run-18 review M1, DECIDED) changes no window, so in both modes it is the `Refused` row plus a send-back of world cells only — the union of the server's footprint and every cell the client's own footprint could hold when it clicked a door (`strict_doors::toggle_sendback_cells`, at most 15) — with no `Replace` and no tick of the correction bound (Strict still tallies it); holding right-click on a refused door can't tear a seat down (`c3d_strict_held_toggle_in_a_foreign_plot_never_tears_down`). A superseded `DoorPlace` sends its halves back, a superseded `ToggleBlock` the same union, and a superseded toggle never queues a correction `Replace` in either mode (run 20, run-19 review LOW-2: a dead body's Strict toggle predicted no window; `c3d_strict_toggle_from_a_dead_body_costs_no_correction`). **Run 21 (run-18 review L3–L6):** a dead body's `DoorPlace` is superseded whole — both halves sent back, no door taken (`c3d_strict_door_place_from_a_dead_body_is_superseded_whole`). A Strict door break journals both cells the client predicts (the mined half and the pair derived from its own meta, `strict_doors::door_pair_cell`); the server's row carries its live pair (`edit_cells`), so journal and row hold the same union S3 recovery reads, and S3 takes that UNION as the action's footprint (`c3d_strict_door_break_journals_both_halves`). A joined client (Mirror and Strict) refuses a door whose top would stand above the world (`strict_doors::door_headroom_refused`, before the door is taken; before, `World::set_block` already wrote nothing above the world, so a Mirror client placed a bottom-only half door and sent a `DoorUpper` coupon for a cell outside it, and a Strict client's `DoorPlace` was refused `OutOfWorld` as a corrected `Rule` refusal, one correction per click (run-21 review LOW-1); the bound is `world::WORLD_HEIGHT`, never a literal, on the client and in the server's out-of-world checks (LOW-5), and the place arm's call is pinned by `c3d_game_loop_door_wiring_is_pinned` (LOW-2)); single-player keeps its AIR check alone. A `DoorPlace` on a creative world is refused as a `Rule` refusal, corrected, as every creative typed edit is (`judge`'s `Unsupported`; a creative client places its door untyped) — it used to be served and consume a door. A `DoorPlace` the server finds without room is counted stale-world by inference (an honest client sent it only with a replaceable bottom and AIR above), so a modified client can steer such refusals into that bucket — the same accepted, measurement-only steering as an `Edit`'s `old` (`RefusalTally` is not a cheating count); a top cell that became bedrock or a foreign economy block is reported `Rule`, since permission is checked before room. The game loop's door wiring is pinned by source position (`c3d_game_loop_door_wiring_is_pinned`: no `DoorUpper` coupon after a typed placement; `Canonical` on a Strict seat, `FlipEach` on a Mirror joiner). An ACCEPTED toggle also sends back the union less the footprint it broadcast (run 20, LOW-4: a door half or neighbour only the client's stale world held, flipped by its prediction, is put back; `c3d_accepted_toggle_puts_back_a_ghost_companion`); the union's neighbours are computed with checked arithmetic on the raw wire cell, so a crafted cell at the edge of `i32` can't panic a debug server (LOW-1). The held-click test is paced as the game loop paces it (a click every 8 ticks for 200 ticks, 25 refusals, no correction admitted; LOW-3). A joined client first checks what it can know (`strict_doors::toggle_preflight`: the play mode lets it toggle — every mode, run 20; the primary within an edit's reach with the held item) and shows a toast instead of sending or predicting; it does not check plots (it can't tell its own signed-in plots from others'). Doors are not on `DRIFT_META_BLOCKS`: a break's pair is derived from the server's own meta. The forbidden-companion case of a vertical pair (place or break) can't be constructed today (both halves share a column, and a door cell is no economy block), so the pinned forbidden-companion cases are an above-the-world top and a double-door toggle across a plot edge. Tests: `hosted_server/c3d_door_tests.rs`, `strict_doors::tests`. **Doors open for everyone (C3d run 19; run 18's Mirror finding fixed, the one sanctioned Mirror change):** before, a toggle was client-local in every mode (the click wrote its own world and sent nothing), so on Mirror and from a host the server and every other player kept the door as it was. Now a **Mirror joiner's** click is a typed `ToggleBlock` too (`strict_doors::reserve_toggle`, no refill setting: a Mirror seat keeps that on its own path), predicted locally by `FlipEach` exactly as before; the server (`HostedServer::serve_toggle`, the same arm as Strict, dispatched by `mirror_slot`: server-simulated and Mirror) applies the same `FlipEach` footprint to its world, validated with a joiner's block-edit checks except the play mode (run 20: `HostedServer::toggle_cell_permitted` on every cell — in the world, loaded, not bedrock, reach with the server copy's slot item on the primary only, the foreign plot and the economy owner; the play-mode rule is `strict_doors::toggle_mode_allows`, see below), broadcasts the cells to every player (and, lent, back to the host to remesh) and retires `Accepted`. A refusal sends the cells back as the server holds them (the joiner's door shuts again) and retires `Refused` with NO correction `Replace` (as Strict's now does; no Strict tally); a superseded Mirror toggle (a dead body only, run 20) sends its cells back with no `Replace` either. **A Mirror toggle is window-free (C3d run 20, run-19 review HIGH-1 and MEDIUM-1):** it reads and changes no window, so it neither checks nor moves the window boundary (no `FellBehind` teardown on its `events_applied`, no `apply_through`: the Mirror window order is exactly as before run 19, only the old paths apply events), and a live toggle whose base predates a whole-window `Replace` is SERVED, not superseded (nothing it predicted came from the window); and a Mirror seat's `Action` packet waits in its inbound queue while that joiner's legacy edits wait past the edit budget, as a FU4a request does (a door placed, then opened, is judged in that order). Known residue: a toggle already deferred on the item budget can still run after LATER edits; that touches the world only (a stale `expected_block` is refused and its cells sent back). Budgets shared (run-19 review LOW-5): Mirror toggles count against `MAX_ITEM_ACTIONS_PER_TICK` (4) with the seat's legacy `ItemAction`s (a busy tick can delay an `ItemAction` one tick; latency only), and a refused toggle's send-back (up to 15 cells) shares `MAX_SEND_BACKS_PER_CLIENT_PER_TICK` (64) with refused-edit send-backs (an unsent cell stays a ghost until it next changes). Run 21 (run-20 review LOW-1): an ACCEPTED door click costs send-backs too — its ghosts, the 15-cell union less the footprint it broadcast (at most 14: 13 beside a whole door, 14 when the server lacks the other half), sent every time even when the client already matches; they ride the shared broadcast, so every joiner hears them (about 15 cells × joiners in `StateUpdate` bytes per click), and four door clicks in one tick (the item budget) take about 56 of the 64, so a refused edit's send-back in the same tick can be skipped and stay a ghost until that cell next changes. Sending ghosts to the clicker alone is the open refinement. **A Mirror joiner's door click is never refused for its own unsent edits (run 22, replacing run 21's LOW-2 rule):** edits still waiting on the client (this frame's, an input carry-over, a queued request: `edits_unsent`) ride a later input, so a toggle sent at once would overtake them (a door placed a moment ago refused stale-world). The click is reserved and predicted (`FlipEach`) at once, exactly as on `bdd4fe87` where the door always opened on the clicker's screen, and the reserved `ToggleBlock` joins the client's ONE ordered queue (`remote_client::Request::Action`, `GameState::send_request`): sent now when nothing waits, else right after the input that carries the edits made before it (`take_queued_requests` / the order cut), never a second path. No toast, no lost click (`strict_doors::reserve_toggle_unsent`; test `game_harness_mirror_door_click_queues_behind_unsent_edits` drives a real carry-over and a queued request). Its header's `events_applied` is frozen at the click while the inbox waits; that is safe because a Mirror toggle is window-free on the server (HIGH-1). A click with no connection reserves an action that is never sent (the session is gone). The server's hold (MEDIUM-1) still covers edits already queued there. A toggle made before the client applies the join sync's whole-window `Replace` is served (`c3d_mirror_toggle_before_the_join_replace_is_applied_is_served`). Tests: `c3d_mirror_toggle_that_waits_past_a_window_boundary_move_is_served`, `c3d_mirror_toggle_made_before_a_replace_is_served`, `c3d_mirror_toggle_waits_behind_the_joiners_waiting_edits`. **A toggle is a use, not an edit (C3d run 20, coordinator 2026-10-12):** its play-mode rule is exactly the single-player toggle arm's, which has no play-mode gate (main `bdd4fe87`), so a joiner in Adventure (as in Minecraft's Adventure mode) and in Spectator opens and shuts doors, in both modes, and every player sees it; `strict_doors::toggle_mode_allows` is that one rule (exhaustive over `PlayMode`), asked by the client preflight and the server alike (run 19 had briefly refused Adventure/Spectator toggles as edits). Whether Spectator should toggle at all is an open owner question; it is kept as single-player has it. Tests: `c3d_mirror_adventure_joiner_opens_and_shuts_a_door`, `c3d_strict_adventure_joiner_opens_and_shuts_a_door`. A **host's** (and single-player's) click records each footprint cell's block and meta on its edits (`pending_block_changes`, `broadcast_change`), so a lending host's joiners hear it like any host edit (single-player discards them at the send). On a `--no-lend` host the owning server applies those meta-only edits through the local-slot path (no remote gates, the per-tick edit budget, a refused cell sent back to the host) — by reading, not tested (BRIDGE, deleted with the flag). Tests: `c3d_mirror_joiner_door_toggle_reaches_the_server` (un-ignored), `..._reaches_a_second_joiner`, `c3d_mirror_joiner_toggle_in_a_foreign_plot_is_sent_back`, `c3d_mirror_joiner_toggles_a_double_door_a_trapdoor_and_a_gate`, `c3d_strict_toggle_reach_uses_the_server_copys_slot_item`; GPU `game_harness_a_lending_hosts_door_toggle_reaches_a_joiner`, `game_harness_mirror_joiners_door_toggle_opens_the_servers_door`. **Accepted scope (2026-10-13, `c280f41f`):** entity interactions, eating, devices, creative gives, Q-drop and sleep are typed too (runs 23–25 above). Strict remains PARTIAL / PARKED. The eleven use-tagged edits, `GrantUnfit`, `UseBlock` (including campfire lighting), `PlaceCart`, `Cast`, `Reel`, `PlanMinted`, `Attach`, `Detach` and `OpenGrave` remain unsupported and fail closed before their effects; the hold intents have no client sender and a typed one closes with `Untyped`. Canonical recovery installation, durable-body release and suffix replay remain pending. Mirror remains the default; its shared door fixes are included in the local delivery. |
 | 0x45 | `ActionReceipt` | S->C | Reliable | Exact action, terminal fate (`Accepted`, `Refused`, `NormalisedAcceptedNoop`, `CancelledNoop`, `Superseded`) and authoritative `included_events`. A coalescing barrier in the same world FIFO; retirement waits for actual prefix and event application. |
 | 0x46 | `Recovery` | Both | Reliable | Session-scoped Prepare; counted Describe Begin/pages/End; frozen bundle Begin/pages/End/fence; Ack and death cancellation describe. Whole bundle2 MiB, page32 KiB; parsing never applies the world fence. Full recovery integration pending. |
-| 0x47 | `AppliedActionAck` | C->S | Reliable | Session/epoch/life, terminal `through`, authoritative `included_events`. Sent after actual ordered receipt/world and event application. Releases only retained server result metadata and footprints; never settles window events. Current bounds must cover every removed result. Known superseded metadata is inert; foreign/future metadata fails closed. Admission integration remains unaccepted. |
+| 0x47 | `AppliedActionAck` | C->S | Reliable | Session/epoch/life, terminal `through`, authoritative `included_events`. Sent after actual ordered receipt/world and event application. Releases only retained server result metadata and footprints; never settles window events. Current bounds must cover every removed result. Known superseded metadata is inert; foreign/future metadata fails closed. Supported dispatch and ordinary applied-result acknowledgement are included in the locally accepted partial delivery (2026-10-13); canonical recovery installation, durable-body release and exact suffix replay remain pending. Strict remains PARTIAL / PARKED and Mirror remains default. |
 | 0x3F | `ItemActionOutcome` | S->C | Reliable | The server's decision on one item action, to the asker alone: `{ seq, accepted, consume_held: u8, note: u8, window_event: u32, wear_held: bool, bite_after: u16 }` (`item_actions::ItemNote`; `window_event` v76: an accepted eat's or block use's take, 0 for none; `wear_held` v79: an accepted block use wore the held tool — shears on a hive; v81 a shot's weapon, a catch's rod, flint and steel — as that window event; `bite_after` v81: an accepted cast's ticks until the server's bite). **Implemented tag** (`PacketType::ItemActionOutcome = 63`, protocol v73). |
 
 > The tags above are the v1 design numbering; the implemented `PacketType`
@@ -3639,7 +3639,7 @@ A joiner's correction debt (`container_window::CorrectionDebt`: what a correctio
 - **The join's replacement carries it.** `WindowEvent::Replace` carries the window and a `CorrectionDebt`, and sets each copy's debt to it; `InventorySync.owed` carries the same debt to the client, whose Sync apply installs exactly it. A join passes the restored save's debt (a fresh joiner its own, empty, effective debt); a death passes an empty debt, explicitly (accepted Mirror behaviour since v86: what the old life owed dies with it). The server sends only entries that decode back exactly on the client's registry (`CorrectionDebt::wire_safe`; a tool or armour piece at durability 0 or above its maximum, or an unregistered block, would not: a saved record can hold one, since a saved durability is restored raw); one it can't send is dropped from both copies and marks the session `Overflow`. A client that can't read the owed list whole treats the Sync as a protocol error and leaves the world with a reason (`HOST_BAD_WORLD_DATA`), applying neither window nor debt: a packet the bounded deserializer refuses ends the session in `RemoteClient::poll` (never silently dropped), and an entry that doesn't decode, or two that decode to one item, end it in the Sync apply.
 - **Units never wrap.** A short take adds with checked arithmetic and saturates at `u32::MAX` on both copies (the shared rule); the server marks the session `Overflow`.
 - **Obligation history** (`ServerPlayer::obligations`). Fresh per attach (`Complete`); it only becomes `Incomplete`, keeping the first cause: `LegacyV1` from a v1 save, `Unreadable` when the npub's save didn't load this run (`failed_joiner_reads`; its saves stay refused), `Overflow` where the server copy's live debt passes 256 entries or saturates (after each real apply: the numbered path and `apply_own_now`) or the join's sync leaves out an owed item that cannot be carried (the session is marked at these sites only). `Overflow` therefore also means "an owed item that cannot be carried was dropped". A capture does not mark the session: when its own fold passes 256 entries it writes `Overflow` into its record only. Every save the session writes records the session's history, so a session that began incomplete stays incomplete.
-- **The predicate, provided, not consumed.** `JoinerSave::obligations_proven_zero()` (history `Complete`, nothing owed) and `ServerPlayer::obligations_proven_zero()` (session history `Complete`, effective debt empty; false for an unreadable save's session). C3d's Strict admission consumes it (v89 provisional source, Strict not operator-selectable and Mirror the default bridge): in a Strict world the real join path checks the record `load_joiner` just read, before `JoinAccept` (`strict_admission::check`): no record is proven; an unreadable record, `Incomplete(LegacyV1)`, `Incomplete(Overflow)` or any owed entry is refused with a typed `StrictJoinRefusal` sentence as the `JoinReject` reason, the record's bytes untouched (no settlement, no write-off, no inference from slots). Mirror admission is unchanged. The handover's eligibility will consume it too. It means "no carried obligation", not "never had debt cleared": a death writes debt off. `JoinerSave::from_parts` builds a save with no debt and `Complete` for a window that never had any (a host's trusted local slot).
+- **The predicate, provided, not consumed.** `JoinerSave::obligations_proven_zero()` (history `Complete`, nothing owed) and `ServerPlayer::obligations_proven_zero()` (session history `Complete`, effective debt empty; false for an unreadable save's session). C3d's Strict admission consumes it (v89 accepted locally, Strict not operator-selectable and Mirror the default bridge): in a Strict world the real join path checks the record `load_joiner` just read, before `JoinAccept` (`strict_admission::check`): no record is proven; an unreadable record, `Incomplete(LegacyV1)`, `Incomplete(Overflow)` or any owed entry is refused with a typed `StrictJoinRefusal` sentence as the `JoinReject` reason, the record's bytes untouched (no settlement, no write-off, no inference from slots). Mirror admission is unchanged. The handover's eligibility consumes it too. It means "no carried obligation", not "never had debt cleared": a death writes debt off. `JoinerSave::from_parts` builds a save with no debt and `Complete` for a window that never had any (a host's trusted local slot).
 
 Each file uses `save::write_atomic`; world, chunks and joiner files are not one crash transaction. A leave save can outlive the latest chest/grave snapshot, and a failed bag/world write or an earlier recovered autosave can lose or duplicate a transfer across a restart. Errors are reported through the save outcome/log. Loose ground-item ECS entities, including genuine grant overflow outside the saved bag, are not durable across restart in the existing world format, even after a completed save. This lane adds no journal or forced world save on every departure.
 
@@ -4896,6 +4896,16 @@ QUIC is a UDP-based protocol. Firewalls that allow TCP by default (e.g., `ufw` o
 
 Quinn's default idle timeout is ~30 seconds. If neither side sends data after the TLS handshake (e.g., during development before game data sync is implemented), the connection silently times out. Solutions: (a) send application-layer keepalive packets, (b) configure `idle_timeout` in `quinn::TransportConfig` to a longer value, or (c) ensure game data (chunk sync, player state) flows continuously once the connection is established.
 
+**As built (2026-10-10, handover CP2 review H1):** both endpoint configs carry one
+explicit `quinn::TransportConfig` from one constructor (`network::transport_config`,
+`network::Liveness::DEFAULT`): `max_idle_timeout` 30 s and `keep_alive_interval`
+5 s (well inside a third of the idle timeout, pinned by a unit test). quinn's
+default (30 s idle, no keep-alive) closed every connection after 30 s of game
+silence, and a world frozen for a handover, a paused joiner and a recipient
+parked after Ready are all silent by design. A real-QUIC loopback test with a
+shortened idle timeout holds a silent freeze past it, then cancels, and the guest
+and the recipient both resume.
+
 **4. Network connection handles must be stored in long-lived state.**
 
 The `RemoteClient` struct (holding the QUIC connection) was initially created as a local variable inside the Join menu handler's `match` arm. When the match arm ended, the variable was dropped, and QUIC's Drop impl closed the connection instantly. Connection handles must be stored in `GameState` (e.g., `remote_client: Option<RemoteClient>`) so they live as long as the game session.
@@ -5066,3 +5076,1558 @@ run. An aborted write receives two bounded retries (250 ms then 1 s), clearing
 its dirty record only on successful completion; permanent failure logs that
 only the in-memory body remains. It adds no network traffic or cookies and
 makes no unconditional durability claim.
+
+### World handover protocol core (native, dormant milestone)
+
+The native `handover` library core defines a bounded checkpoint-transfer protocol;
+it has no gameplay packet allocation, lobby control, automatic publication or
+host-activation hook. The core milestone left Protocol87 unchanged; the live session below adds private provisional v90 (integrating C3d's locally accepted v89 over OC's v88). Complete
+live snapshot capture, consent, personal progression/ownership conversion and
+recipient role restoration are required before the handover feature can open.
+A joined render mirror is never a checkpoint source. Existing unsupported or
+unknown personal state cannot be inferred empty or donated to recipient slot0.
+
+The canonical root context is SHA256 of length-prefixed domain
+`AxeNStax/handover/root-context/v1`, invite version2, runtime32, persona32,
+expiry u64 and sorted/deduplicated decoded relay URLs (u32 counts/lengths,
+big-endian). Validate a curve point and canonical npub, at most8 input relays,
+each at most2048 UTF8 bytes and16384 aggregate, wss without credentials/fragment.
+Cosmetic world names do not affect authority. Standard HKDF-SHA256 derives a
+bearer-specific NIP44 recipient with distinct root/hop labels and bounded valid
+secp scalar retry; no private runtime key is copied. Retired capability identity
+also binds the root recipient public key, since context alone excludes bearer.
+
+Application stored kind1099 carries a runtime-signed NIP44v2 encrypted setup
+envelope. This is an application choice, not external registration/reservation.
+Only one opaque recipient p tag is public; no persona, world, manifest, endpoint
+or bearer tags. Runtime/time/cipher-size/route correlation remains observable.
+Exact author, tags, id/signature and bounds precede decryption. Fixed ordered
+binary certificate bytes are Base64 inside a strict versioned JSON envelope;
+Ready acceptance and both persona attestations are bounded signed proofs.
+Invitation runtime/prefix supplies delegation authority; existing attestation
+allowed-kinds fields are not claimed to grant1099. Proofs bind the exact manifest,
+transfer nonce, source/recipient, lineage, generation, epoch and expiry. At most
+four committed hops are allowed; hand-back is a new epoch, not reuse of old
+routing state. Conflicts fail closed. Restored unsigned prefix digests are only
+rollback context; fresh crypto-verified root-to-current reconstruction is needed
+for successor authority. Persisted prefix advancement cannot remove known entries
+or clear conflict state. Fresh relay withholding cannot prove latest authority
+or exclusive single-writer operation.
+
+Prepared is inert and never routable/activating. Its matching publication OK and
+independent stored readback precede terminal source retirement. Retirement stores
+exact final Committed signed bytes plus manifest/phase/epoch/capability bindings,
+with file fsync, rename and parent-directory fsync, before publication power is
+returned. A retirement failure quarantines the source until resolved; after
+durable retirement it never resumes the old authority. Receiver durable Ready
+receipt precedes Prepared receipt; durable Activated receipt follows valid
+Committed stored readback and precedes gameplay admission. Duplicate Commit is
+idempotent and late Abort cannot delete an activated import. Records live outside
+world/autosave restoration, key by transfer, and bind retired SOURCE epoch to
+certificate DESTINATION epoch minus one and exact predecessor/runtime. An actual
+verified later hand-back can create a new authority; its later retirement must
+still close it. Corrupt/unreadable markers fail closed. Retirement/activation are
+not a distributed lock or crash-backup guarantee.
+
+Bounds are plaintext16KiB, ciphertext21936 characters, event24KiB, relay frame
+32KiB before JSON parsing; each proof4KiB. A separate one-shot subscription has
+no recent-since filter and shares a25s absolute deadline,128 candidates,16 per
+relay,8 original relays,4 hops and4MiB received bytes across phases/hops. Invalid
+frames consume the budget. Publication requires matching OK and exact independent
+stored readback, not a queued send. These APIs are dormant unless explicitly
+called; ordinary rendezvous subscriptions are untouched.
+
+Manifest limits are2MiB encoded and8MiB resident member allocations,65536 members,
+240-byte paths,4096 participants,64KiB per participant member and1024 exhibit
+images of at most8MiB each. Only declared regular world metadata/data, numeric
+chunk paths, canonical npub sidecars/companions and flat exhibit paths are allowed;
+missing required world members, duplicates, traversal, unsupported schema or
+absent participant agreement refuse. Full archive decoding/extraction and agreement
+verification belong to the gated snapshot adapter. Transfer is at most128MiB
+compressed/512MiB decompressed,16KiB direct chunks with at most four unacknowledged
+chunks,300s absolute/15s progress deadlines, exact ordered offsets and final stream
+hash. Partial write failure poisons the receiver; conflicting/expired duplicates
+refuse. No archive data goes through relays. Markers cap64 records per kind and
+256 directory entries; capacity exhaustion preserves prior records and fails
+closed. Retired-capability checks precede contact shortcuts, including an expired
+old link, because legacy contact admission otherwise ignores bearer expiry.
+
+Handover marker files use a domain-separated, versioned envelope binding marker
+kind, transfer/cache id and length-prefixed payload, followed by SHA256 of that
+complete prefix. The64KiB limit includes framing/checksum and is checked before
+allocation; payload limit is reduced by the fixed envelope overhead. Corruption,
+wrong kind/id, unknown version and trailing bytes refuse with no raw legacy
+fallback. This detects accidental damage, including lineage and Activated hash
+changes; it does not authenticate records against the machine owner. Fresh
+retirement requires private crypto-bound construction; decoded markers cannot
+mint new retirement permits. Live startup integration must additionally reverify
+actual encrypted certificate context using the local runtime/#p, not infer its
+inner fields from an outer event signature.
+
+The dormant native checkpoint I/O adapter streams a compatible known-member
+USTAR+gzip archive to an owned file; it never constructs an archive-sized buffer
+or reloads a second live simulation. It accepts only an explicitly frozen,
+personally attributed transfer copy: no positional player rows, inventory or
+locks; legacy position is positive zero on each axis, health20 and hotbar0.
+Personal records must already preserve that removed state. Transfer metadata
+contains no source Proof-of-Play secret, owner stamp, publication endpoint or
+Stash opt-in, while retaining genesis, rules, authored data and gameplay history.
+Current persisted/evicted chunks override old disk files; the existing evicted
+snapshot wins over neighbour-generation spill, and current all-air removes the
+old disk member. Required referenced exhibits cannot be skipped. Actual current
+JoinerSavev1 is strictly decoded. A participant record `participants/<npub>.dat`
+(schema1, `handover::personal`) is strictly decoded by both packer and importer:
+domain-framed header binding participant key, lineage, checkpoint generation and
+transfer id (the importer takes these from the authenticated MANIFEST and the
+member path, never from the record); then sorted unique village reputation
+entries (at most2048, score−100..100), sorted unique per-mob kill counts (at most
+256 known kinds), sorted unique bounty claims (at most4096) and an optional
+owner-only local restore (finite pose/yaw/pitch, hotbar0..8, 36-bit lock mask).
+Each count is checked before allocation, the whole member is at most64KiB,
+trailing bytes/unknown schema/flags refuse, and nothing is truncated, clamped or
+reset. The kill-kind index is MobType's positional bincode discriminant, pinned
+exactly as `PlayerSaveData.kill_counter` already is. Installing a record replaces
+only that participant's reputation/kill/claim maps and calls no reward, claim or
+payout routine. The record never embeds the manifest digest (the manifest hashes
+the member, the certificate binds the manifest).
+
+Admission precedes archive transfer/Ready: a bounded source-signed direct offer
+binds the complete certificate, manifest and recipient's fresh expected challenge,
+verified source Authority, root context, recipient runtime/persona and validity.
+A digest or caller boolean cannot construct AdmittedManifest. The import uses
+the core ordered receiver/deadlines, then verifies every actual member path,
+regular type, length and digest, required exhibit cross-references, exact current
+world.dat schema/footer and complete positional payload. It refuses unknown,
+missing, duplicate, extra, traversal/link/device/GNU/PAX extension members and
+trailing compressed content. USTAR paths obey the core240-byte cap; a single
+filename exceeding USTAR's100-byte component field fails instead of emitting
+unbounded extension headers. Existing permissive local legacy readers are
+unchanged; legacy worlds must first be locally migrated to the current format.
+
+Hard limits remain128MiB compressed/512MiB logical member bytes,65536 members,
+2MiB manifest/8MiB retained manifest allocation,1024 images/eightMiB each and
+64KiB per participant. I/O additionally bounds its member/path index at8MiB
+before insertion, world.dat at64MiB input/128MiB conservative decoding budget,
+metadata at2MiB input/16MiB decoding budget, sidecar at2MiB decoding budget and
+nesting128. The focused serde adapter suppresses sequence/map allocation hints,
+charges typed elements before decode at four times inline size plus128bytes,
+and charges owned body/string copies; archive/file transfer uses16KiB buffers.
+Tar header/padding inflation has a separate finite cap of logical limit plus
+1024bytes per declared member plus1024bytes. Smaller caller limits use the same
+actual I/O paths and cannot increase these maxima.
+
+Imports are inactive wrappers outside ordinary world layout, with immutable
+`received` evidence and separate `working` members. Hashes verify BEFORE the
+receiver metadata transform; its new secret and verified recipient owner stamp
+have an explicit transformv1 digest in a private durable receipt bound to the
+original manifest/core/world/transfer and original admission evidence. Required
+writes, file syncs, nested-directory syncs, atomic no-replace rename and parent
+sync must succeed. Extraction flushes each received and working member, plus
+the admission and manifest, through four workers with an eight-handle bounded
+queue. The workers retain the original writable file handles and all join
+before the receipt is created, directory syncing, rename or Ready. Archive and
+receipt flushes remain synchronous; both complete durability scans and all
+directory syncs remain. Any worker error or panic refuses completion, and
+cleanup joins all workers before removing scratch, including cancellation,
+failed thread creation and unwind. The observer's FileSync boundary remains
+before the flush is submitted. Pre-rename cleanup removes only its own scratch folder;
+post-rename uncertainty preserves the import for exact restart/retry and late
+cleanup never deletes it. Native no-replace uses Linux renameat2 and Android SYS_renameat2 via the
+existing syscall symbol (no API30 Bionic dependency on the API24 app),
+macOS exclusive rename and Windows directory rename. CP21 (CP19 review MEDIUM-2): a
+filesystem or kernel that rejects the no-replace flag (EINVAL/ENOSYS: NFS, FUSE without
+rename2, ecryptfs-encrypted home folders, an old Android kernel; CP22, CP21 review
+MEDIUM-2: ENOTSUP/EOPNOTSUPP too, which macOS `renamex_np(RENAME_EXCL)` answers on SMB/NFS
+network homes and exFAT/FAT drives, per its man page, unverified on a Mac) falls back to checking the
+target absent just before a plain rename (a residual race: `rename(2)` may replace an EMPTY
+folder made in between, never a non-empty one or a file); any other error fails closed. One
+helper serves the import and the world-list move (`handover::rename::no_replace`; test
+`handover_rename_without_the_flag_falls_back_and_still_never_replaces`). Before CP21 every
+receipt on such a filesystem refused before Ready after the whole transfer. These platform paths still require their own platform validation and
+this milestone does not claim portable completed handover.
+
+Bounded admission evidence retains only the signed offer, public root context,
+challenge and recorded admission time, never a bearer/private/derived key.
+Historical integrity recovery returns a distinct RecoveredCheckpoint with no
+AdmittedManifest, Ready, Authority or activation permission. It rechecks genuine
+signatures, manifest/member/receipt bindings and root-first-hop source authority;
+subsequent-hop recovery requires a source Authority genuinely reconstructed by
+the controller through the existing verified chain, otherwise fails closed.
+Recorded admission time permits integrity inspection/local durability retry;
+current expiry/authority/Commit must still be checked by the live controller.
+Normal transfer retry requires a currently verified admission. Full live freeze,
+agreement/progression authority, recipient personal adapter, direct-control
+session, listener latch, Prepared/Commit and gameplay callers remain unwired.
+
+**Live source link and freeze (branch mp-handover, private provisional wire tag
+`PacketType::Handover = 72`, current protocol v90, both PROVISIONAL: the
+integrated tree also includes C3d's locally accepted v89 tags 68–71. Its
+accepted Strict scope remains partial and parked, with Mirror the default.
+The handover requires its final combined gates before delivery).**
+A source host binds one control link to an exact authenticated seat for one
+transfer: slot, attach generation and verified key, all re-checked at bind,
+freeze and every send/read; a departed, reconnected or differently keyed seat
+breaks the link. Control frames from any other seat are dropped. The link holds
+only a weak lease on its session: a session dropped without an explicit abort
+is released (the recipient sent Abort) at the top of the next
+`HostedServer::tick`. While frozen, `HostedServer::tick` returns at once, so
+there is no admission (queued accept hand-overs wait), inbound gameplay,
+simulation, grants, overdue window-event valve, broadcast or LAN heartbeat. The
+selected seat's control frames are read straight out of its queue; its other
+packets stay queued in order, and other seats' packets stay in their
+transports. Freezing tells every joined player `Notice { paused: true }` and a
+release after a freeze tells them `Notice { paused: false }`; a paused client
+sends no input. A pre-retirement release unfreezes; packets still waiting are
+judged by the ordinary path once, only while the seat is still that exact live
+seat (same generation, connection open, so its client sees the result); a
+departed, reused or closed seat's queue is discarded, never replayed. The
+window-event ack timeout counts server ticks, so a freeze cannot apply waiting
+events. The source notices a closed recipient connection on the pump after the
+one that drained its last frames.
+
+**Eligibility at this base (refusals, original untouched).** Re-run in full at
+the host action, at consent/freeze and at the frozen capture, from values the
+caller re-reads each time (`source::Live`: the signed-in identity now and the
+local seat count), never from what the host action captured. One local seat only
+(split-screen seats have no proven identity). The source persona must be the
+signed-in identity now AND the persona of the authority this machine holds
+(`phase::Authority::persona`; root: the invitation's own `h=`), so a sign-in or
+profile change cannot remap seat 0. Server-wide grants, kill and breeding events
+must be delivered. Every connected signed seat other than the recipient needs
+that player's agreement, which this version cannot request: refuse. The
+session itself reads the world folder's `joiners/` at each boundary: any record
+other than the source's and recipient's refuses (agreement), so a player who
+joins and leaves during the consent window refuses rather than being left out;
+a file that is not `<npub>.dat` (half-written, unrecognised) refuses; more than
+4096 refuses. A connected seat whose saved record was unreadable
+(`failed_joiner_reads`) refuses. The recipient must be the exact seat (slot,
+generation, key), alive, with a window that is quiescent (no unacknowledged or
+valve-forced event, no correction debt, no death replacement, no retired
+overflow: "inventory still settling") and progression tracked since a verified
+signed admission on this attach (`ServerPlayer.progression_tracked`) with zero
+server-queued kill credits (`progression_credits`), i.e. default progression;
+any credit refuses until a numbered progression authority exists. Obligations
+use OC's predicates (v88): every connected joiner the checkpoint includes must
+satisfy `ServerPlayer::obligations_proven_zero()` (a `Complete` session history
+and an empty effective debt, so a session that began from a v1 or unreadable
+record, or overflowed, refuses even with a settled window), and the recipient's
+own record, captured at the frozen boundary and about to become host seat 0,
+must satisfy `JoinerSave::obligations_proven_zero()` (no record is proven); a
+trusted local seat has no debt machinery, so converting a record with owed units
+would erase them. The source's own seat-0 record is written by OC's
+`JoinerSave::from_parts` (empty owed, `Complete`). The caller
+supplies the RAW WorldSave built from the frozen real seats, carts and kept mobs
+by the same `save::build_world_save` the ordinary save uses (which returns
+`None`, never panics, for no seats); the SESSION neutralises its copy: proven
+source seat0 `LocalPlayer(0)` owners of vendors, tip jars, auctions, plots and
+market hubs and `local-player-0` pet owners become the source npub; npub owners
+stay; any other seat number, any auction bidder, raid contribution, killing
+blow or raid kill row, a kept steed (`kept_by`) or a legacy row pet list
+refuses. Positional player rows, legacy seat0 fields, the host's waypoints and
+its Satoshi-guide state are stripped; player state travels in the source's own
+sidecar and participant records. The packer independently refuses any
+remaining seat-numbered owner, bidder, raid row, `local-player-` pet, kept
+steed, waypoint or guide state.
+
+**Live session to Ready (first live checkpoint; inert, recoverable).** The host
+action (`handover::live::source::HostAction`: exact seat, captured signed-in
+key, world name) and the recipient's consent (`RecipientConsent`, echoing the
+exact transfer, world name and source npub it was shown) are typed values only
+a caller acting on the player's own choice constructs; nothing accepts by
+default or on a timer. Control frames (`live::wire::Frame`, bincode, at most the
+ordinary 64KiB payload, text fields 8KiB, parts 16KiB, no trailing bytes) ride
+the existing authenticated direct game connection, never a relay. The joined
+`RemoteClient` routes Handover packets into a bounded inbox (32 frames,
+256KiB) for its game loop, so the recipient keeps playing while it decides.
+Order: Propose (transfer id, world name, source npub, the source's fresh
+challenge, root invitation fields, lineage). Before any consent is shown the
+recipient (`RecipientSession::propose`) checks the proposal against the host it
+VERIFIED when it joined (`recipient::JoinedHost`: the persona from online
+play's verified answer and the runtime it connected to): the root runtime and
+persona must be that host's, the displayed source npub must be that persona's
+npub, and the lineage must be the one the root derives
+(`wire::root_lineage`, a domain-separated hash of the root context digest, so
+a new invitation is a new lineage and no lineage is taken on the source's
+word). A join that verified no host identity cannot receive a handover. A
+Decline goes back over the joined connection and play continues. On consent the
+session takes the joined connection out of the `RemoteClient`, which is parked
+(it reads and sends nothing and is not treated as a lost session; leaving the
+joined world cannot reach the link), and sends Accept (recipient runtime key,
+its persona's player attestation, a runtime-signed acceptance over domain,
+transfer, source challenge, world name and source npub, plus the recipient's
+own fresh challenge). The source verifies the attestation persona equals the
+seat's verified key, re-runs eligibility, then freezes. The frozen caller
+supplies the sanitised transfer metadata, the raw save (above) and the source's
+own seat0 sidecar (`live::capture::local0_sidecar`, the sidecar's own encoder,
+markers only for private Plans) and participant record (`local0_progress`,
+with pose, view, hotbar and lock mask). Capture writes nothing on the source
+machine: the Plan bodies the record's markers name (`local0_plan_items`) are
+remembered in the Plan store at retirement, a later boundary. The session adds
+the recipient's sidecar from its server copy and a DEFAULT participant record,
+signs the source's own agreement with its runtime key over a distinct domain
+(`source-agree/v1`: transfer, source challenge, world name, recipient npub),
+binds both agreements' hashes (the recipient's is the hash of its signed
+acceptance), packs, certifies (epoch = authority epoch+1, predecessor =
+authority's committed hash, expiry clipped to the invitation) and sends the
+manifest in parts, the signed offer bound to the recipient's challenge plus
+the source agreement, then 16KiB chunks with at most four unacknowledged. The
+recipient follows the first hop only (the invitation's own runtime/persona
+offer); a later hop refuses until the verified chain lookup is wired. It
+verifies the offer, the source agreement's signature by the certificate's
+source runtime and content, and that the manifest's agreements are exactly
+those two hashes, imports into a fresh non-overwriting inactive directory,
+completes the durable checkpoint, binds a latched QUIC listener that refuses
+every connection (a connecting client gets `CONNECTION_REFUSED`; no
+broadcaster, relay subscription or admission path), signs Ready over the
+SOURCE's challenge, persists the Ready receipt and only then sends Ready. The
+source verifies Ready and stays frozen (Prepared/Commit/retirement are later
+boundaries) and keeps reading: a recipient Abort after Ready releases it. The
+source gives up and resumes if the recipient doesn't answer the proposal within
+300s or goes 60s without a message while streaming. Gameplay packets that
+reach the recipient's session before the freeze are parked (at most 4MiB). Any
+refusal, Decline or Abort before retirement releases the freeze; the recipient
+removes its own inactive checkpoint if it aborts before Ready and keeps it
+after; a pre-Ready abort hands the connection and the parked gameplay back to
+the joined client, which resumes in order (past the bound, the player rejoins).
+
+**Game callers (`handover_game`, native).** The host action is the Online
+panel's `Hand this world to …`, one row per present, authenticated seat
+(`HostedServer::handover_seat`: connected, handshake done, server-simulated,
+verified key, live attach generation); the click carries the drawn row's
+`(slot, attach generation, key)`, which `begin_handover_with` compares with the
+seat re-read at the click (a mismatch starts nothing and says the seat changed,
+review L6), never a label or a remembered npub. Only a host that lends its one
+world to its server can hand it over (`lends_host_world`; a `--no-lend` host,
+whose joiners' block-use contents live only in the server's copy, is refused
+with `copy::NO_LEND` at every boundary, review L3). Only an
+online-hosted world can offer a handover: its root context is the live
+invitation's `k`/`h`/`x`/`r` (`OnlineHost::root_context`, bearer excluded), the
+runtime key is the one the host answers with, the lineage is
+`root_lineage(root)` and the authority is the root's (epoch 0, so the first
+checkpoint generation is 1). The transfer metadata is the saved meta with the
+live world's `total_work` and `total_ticks` (review L4: the saved meta can be an
+autosave behind), then sanitised. The snapshot world id is fresh per checkpoint
+(worlds carry no UUID at this base). The signed-in identity is re-read at
+every boundary. At the frozen capture the game supplies the RAW save built
+exactly as a save would (`build_world_save` over the real lent `World`, ECS
+carts and kept mobs, and the actual `PlayerSlot`s), the world's own `chunks/`
+and `exhibits/` folders when present, and seat 0's sidecar and record from
+the real seat 0 and the hosted server's run id. A joined client remembers the
+host it verified (`GameState.joined_host`, set from online play's verified
+answer persona and the runtime its answer was verified against; a LAN join
+verifies none, so a proposal there is declined). Its game loop drains the
+`RemoteClient` handover inbox every frame: a Propose becomes the consent
+screen (copy in `handover::live::copy`, proposed and awaiting owner review:
+world name, source npub, what comes across and what may not — loose drops,
+things in flight, wild animals and monsters — that the copy is stored on this
+machine, and that once the handover finishes the world appears in their world
+list to play or host); a refused
+or unverifiable proposal is answered with a Decline. Every Decline is typed
+(`wire::DeclineReason`: `Player`, `Busy`, `UnverifiedHost`, `NotReady`,
+`Invalid`) and the source shows the reason (`copy::host_declined`), never a
+silent no. Handing over is online-hosted only in this feature version (a LAN
+host gets `NEEDS_ONLINE`); a recipient whose join verified no host declines
+`UnverifiedHost`, which the host shows as "can't check who is hosting — they
+need to join through the online invite to receive this world". The handover
+window, whenever it has something to click (consent or Cancel), joins the
+cursor-release predicate (`GameState::cursor_must_be_free`, beside
+`p0_ui_modal_open`, the death screen and the end card), so a recipient can
+answer mid-play; in Playing it is interactable exactly when the cursor is free.
+Its Accept and Decline arm 0.75 s after the window first shows
+(`CONSENT_ARM`, review L7): an earlier click is ignored, so a click already
+under way can't land on Accept. Accept parks the
+`RemoteClient` connection into the session and binds the latched listener on
+a fresh ephemeral UDP socket. The joined session's UPnP lease moves into the
+recipient session at consent (`RecipientSession::hold_lease`, renewed by its
+pump), so leaving the joined world (`stop_online`) can't release a mapping
+the parked link may rely on; it returns to the joined game if the link is
+handed back, and is given back to the router when the session ends without
+it (review L5). The control pump (`poll_handover`) runs every
+frame in every mode next to `poll_online`, never from the game tick. The
+handover session is not cleared by leaving the world: a recipient past
+consent keeps its connection and continues to Ready after its joined world,
+`RemoteClient` and HUD are gone (an unanswered proposal is declined on
+leave). A source handover is cancelled when the host leaves, before any save
+and while the world and link still exist; the lobby then says so in its
+`menu.notice` (a toast set in the world would never be drawn there). On a pre-Ready abort the
+recipient's connection and waiting gameplay go back to the parked
+`RemoteClient` (if it can't be resumed, the player leaves with a notice).
+
+While a handover freezes this machine's world, or the host a client joined
+has paused play (`Notice{paused}`), or a session holds the client's
+connection (`handover_holds_play`): `GameState::tick` returns at once (no
+simulation, local edits, grants, decay, raid credit or autosave), the frame
+path produces no gameplay intents, `network_send_input` sends nothing, chat
+commands are refused, `save_live_world` (every pause Save) refuses with "play
+is paused for a handover; cancel it first" (Save & Quit and close-save leave the
+world, which cancels the handover first and then saves), and `poll_online`
+answers no online call (no admission). HUD dialogs and world settings (review
+M-A): as a source freezes, before its capture, every HUD dialog that only points
+at the world closes (`PlayerSlot::close_hud_dialogs_for_freeze`: chests,
+furnaces, dispensers, packs, signs, vendors, bounty board, tip jar, repair bench,
+market hub, auction, bazaar, plaque, bell, inspect, Plan capture, the inventory
+explorer, villager and guide dialogue; the crafting screen stays open but gated,
+since its grid and cursor items are part of the captured window). One central
+gate in the per-screen HUD loop then holds every dialog still open while
+`handover_holds_play` (a frozen source, a paused or parked joiner): it draws a
+disabled pause notice in the dialog's place and runs none of its actions — no
+container move, craft, sign edit, trade, bounty claim or payout, Plan mint or
+creative give. The pause menu's world settings (Stash toggle, difficulty,
+creative switch, Try again, a split-screen player's leave) pass through
+`handover_gate_pause_click` and are dropped with a notice while play is held.
+A parked connection is not a connection for requests (`send_request` settles
+them as unsent, never writing into the parked transport). A pre-Retired cancel
+lifts the gate. The lent
+tick's tripwire expects zero runs of every shared system while frozen. The
+render keeps running and the handover window shows the status, Cancel, and
+for joiners the paused banner. Releasing the freeze resets the tick timing so
+no catch-up burst follows.
+
+The frozen pack runs off the frame thread (review M-B): at the capture the
+session copies the frozen cut into an owned `checkpoint::Snapshot` (loaded
+chunks as their persisted bytes, bounded by the pack's chunk count and
+logical-size limits; the neutralised save; the participant rows), then
+`pack_snapshot` (disk chunks, exhibits, hashing, gzip) runs on a
+`handover-pack` worker thread. The source stage is `Packing` meanwhile: the
+frame renders, the control pump reads frames (a recipient Abort releases),
+Cancel works, and every `HEARTBEAT_SECS` (5 s) a `Notice{paused}` keeps the
+recipient's stall deadline fed. The worker's result carries a generation and
+transfer id; the pump drains it every frame, even after an abort, and uses it
+only if both match and the stage is still `Packing` (the generation fence).
+Abort sets the worker's cancel flag (checked before every member) and bumps
+the generation, so a cancelled or superseded pack's result is dropped and its
+`PackedCheckpoint` removes its scratch; it can never be offered or sent (the
+link is also released). A dropped session drops the receiver, so the worker's
+result is dropped where it finishes. A worker that ends without a result (a
+panic) is a refusal while the session still waits for it (`Packing` has no
+stall deadline, so it must not wait forever): the source aborts and play
+resumes. While frozen, every other seat's packets
+move into its own bounded inbound queue without being processed; a seat that
+overflows the bound is read no further and is disconnected at release by the
+ordinary overflow kick (review L1). Stall deadlines (review L2): the source
+times out a silent recipient at `STALL_SECS` (60 s) while streaming and after
+Ready (`ReadyVerified`, until Prepared advances it); the recipient times out a
+silent host at the same `STALL_SECS` in Accepted, Receiving and Ready. Before
+Retired a timeout is an abort: play resumes on both sides.
+
+The recipient's import runs off the frame thread too (review M1): when the
+last byte arrives the session hands its `Import` to a `handover-import`
+worker (stream finish, extract, tree sync, receipt verify, no-replace rename,
+parent sync) and enters `Importing`; the frame, Cancel and the pump keep
+running, and every `HEARTBEAT_SECS` the recipient sends `Notice{paused}`,
+which the source accepts while `Streaming`. While streaming the source's
+stall clock advances only on progress (CP3+4 review LOW-3, CP5 review
+LOW-5): a new-data `Ack` (not a repeated one), `Ready`, and a `Notice` only
+once every chunk is acknowledged (the recipient is importing); a repeated
+Ack or an early Notice is no evidence the transfer moves, so a recipient
+that sends only those times out at `STALL_SECS`. The total deadline still
+bounds the import heartbeat. The worker's result carries a generation
+and transfer id and is used only while `Importing` (the generation fence).
+Cancelling stops the import at its next file boundary (its observer refuses);
+the worker and the session decide under one lock who discards the inert
+import, so a cancelled or superseded import never reaches Ready and leaves no
+folder, Ready marker or inert marker. A worker that ends without a result is
+a refusal and the session discards. The recipient reads waiting frames before
+its stall check, and its stall clock restarts when the import finishes.
+
+Remaining frozen-gate paths (review LOW-1/4/5): an overflowed guest's
+transport is replaced by a closed one at once (its reader and connection
+end; the leave and save still wait for release). The host-action rows are
+egui widgets identified by the seat (slot, attach generation, key), so a
+press on one seat's row cannot complete as a click on the seat that replaced
+it; the click carries that row. The trial-complete and scenario end-card
+"Try again" and every crafting-screen close (Esc, the topmost-panel close,
+the pause key) go through `handover_blocks_world_action`: while play is held
+they are dropped with the paused notice (crafting stays open; its grid and
+cursor items move nowhere).
+
+Housekeeping (CP3+4 review LOW-2/6/7): an overflowed guest whose release
+comes outside the lend (a cancel from the frame's control pump) is kicked
+inside the next lent tick (`deferred_overflow`, drained beside the deferred
+operator kicks), so its leave settles grants, window and death on the
+authoritative world before its record is saved. The source host keeps its
+pointer (mouselook, break, place, attack) while the recipient decides, since
+its world still runs; only from the freeze does the handover window free the
+pointer (`handover_game::source_wants_pointer`), and in `Proposed` its
+Cancel is reached through the pause menu. A source session dropped without
+`abort` sets its pack's cancel flag. Orphaned `.handover-pack-*` scratch
+(a crash while packing) is swept at native start-up and before every new
+source session (`live::inert::sweep_pack_scratch`, at most 256 entries, only
+that prefix, never a symlink). At process exit a recipient session's router
+lease is given back within the same 1.5 s bound as the online host's own
+(`HeldLease::give_back_within`), not on a detached thread.
+
+Whole-operation deadline (P4): heartbeats keep the per-phase stall timers fed,
+so both sides also hold one total deadline, `OPERATION_SECS` = 15 minutes,
+from the recipient's consent (the source: the verified Accept that froze it)
+to the recipient's Activated. Hitting it before Retired is an abort that
+restores play on both sides (`copy::TOO_LONG*`); after Retired only exact
+retry of the same Committed bytes or quarantine.
+
+Stored setup certificates (P1): `stored::publish_readback` (EVENT, a
+matching OK, then a fresh subscription that must return the exact bytes) and
+`stored::readback` (the same fresh-subscription readback, for an already
+verified event the caller did not publish: the recipient witnessing the
+Committed before Activated) are the only producers of `StoredProof` (its
+field and constructor are private to `stored.rs`, pinned by a source scan,
+`handover_stored_proof_has_exactly_two_producers`); both talk
+to a relay in the invitation's own `r` list (the players' "Your relays"),
+never an AxeNStax relay, and carry encrypted setup certificates only.
+Production accepts only `wss://` relays (`context::validate_relay_strict`,
+compiled into every build and pinned by a unit test refusing `ws://`
+loopback and plaintext); a test build additionally accepts the in-process
+loopback relay fixture (`handover::relay_fixture`, `ws://127.0.0.1:<port>`),
+which every stored-publication test uses. No test reaches a real relay.
+
+Recipient readback constraints (coordinator ruling, CP6; CP5 review
+MEDIUM-1): `readback` witnesses only a `Verified::Committed` (the core asks
+the receiver for no Prepared witness: `Receiver::prepared` takes none), whose
+core belongs to the root context being asked (context digest, root runtime,
+persona and expiry), by exact event id equality; it opens a NEW subscription
+on a relay that root names, charged to the caller's operation `Budget`,
+after the event is known; never a cached or locally held copy, never a
+publish connection's OK. A different stored event from the same author on
+the same route, or no relay EVENT at all, is never a witness.
+`VerifiedPrepared` and `VerifiedCommit` (both now defined in `crypto.rs`)
+have private fields: only `crypto::open`/`open_candidates` construct them in
+a production build (test builds have `VerifiedCommit::for_test` for the
+certificate-prefix tests' synthetic commits). Phase tests mint every
+`StoredProof` through the loopback relay, as production does.
+
+Authority sidecar (D7, first slice; CP6). A world's handover authority state
+lives in its own folder's `handover/` directory, a `MarkerStore` (temp file
+0600, sync, rename, directory sync, injectable boundary failures): the
+source's `retired-<transfer>.dat` is `phase::Retirement` (certificate core
+with lineage, epoch and root context, the Prepared binding, the exact signed
+Commit bytes, the retired root capabilities and, since CP9 (record v2), the
+root's relay URLs), written by `phase::Source::retire`. Nothing secret is in
+it: no bearer, no root secret, no key material. The relays are bound: with
+the core's root runtime, persona and expiry they must hash to the core's
+context digest, or the record doesn't decode. An undecodable record (a v1
+record included; the format is unreleased) reads as unreadable and is still
+refused. Beside it, once the Committed is proven stored, the resumer writes
+`published-<transfer>.dat` ("Committed published": transfer and Commit hash,
+deterministic so an exact retry lands the same bytes). No `WorldSave` field
+is added. The open guard
+(`live::authority::open_guard`) refuses on ANY retirement record there
+(`RETIRED` if it decodes, `AUTHORITY_UNREADABLE` if not) and on an
+unreadable directory (fail closed), never filtering by lineage (a new host
+session re-mints its invitation). It is read-only (CP6 review LOW-5:
+`symlink_metadata`, `read_dir` of at most 256 entries, a bounded read and a
+decode; it never creates, writes or syncs). CP6 review M-1: it sits at the one
+choke point `save::save_refusal_in` (`WorldSaveError::Retired`), which every
+opener and writer passes through: `world_open_refusal` (lobby/open, online
+host start, dedicated-server start), `refuse_write_over_newer_save`
+(`save_world`, `write_world_folder`, the five-minute `autosave_world`,
+`GameServer::try_save`) and `save_world_meta`; `load_world`, `load_autosave`,
+`GameServer::save_joiner` and `save_live_world` also check it directly. A
+late save job therefore can't rewrite retired authority.
+
+The late-save fence (CP14; `save_fence`). Every writer into a world's folder
+runs synchronously on its caller's thread: the world save (`save_world`,
+`write_world_folder`, the first save's staged chunks and their publication),
+chunk files and chunk deletions, the five-minute `autosave_world` (which
+`GameState::tick` runs with no freeze check of its own) and its meta flush,
+`save_world_meta`, `clear_autosave`, joiner sidecars (`save_joiner`, on every
+leave and autosave), the exit save (`save_live_world`, which also refuses a
+frozen world itself), `GameServer::try_save`, and the damaged-file set-asides
+a load makes (`quarantine_corrupt`, `keep_damaged_copy_once`,
+`copy_damaged_aside`). There is no save worker, so no save is in flight on
+another thread at the freeze; the fence makes that structural.
+`HostedServer::handover_freeze(world_dir)` raises a per-world fence before
+the capture is taken; raising takes the commit lock, so a commit already
+under way finishes first and the capture reflects the last save that landed.
+Every commit (`save::write_atomic`/`write_atomic_nosync`'s rename, the staged
+publication's rename, chunk and autosave deletions, the set-asides) checks the
+fence under that lock immediately before it commits; a fenced commit is
+discarded (its temp file removed, one log line) and its save returns the
+error. Writers also refuse early (`refuse_write_over_newer_save`,
+`meta_write_blocked`), before any temp file or folder. The fence lifts only in
+`handover_release` before retirement (an abort that unfreezes); a retired
+link marks it retired and it never lifts in that process; the retirement
+record keeps the world refused after a restart. CP15 (CP14 review MEDIUM-2):
+deleting the world (`save::delete_world`) forgets its fence once the folder
+is gone (`save_fence::forget`), so a new world made at the same folder name
+in the same process saves (tested: retire, delete, recreate, the save lands). A HostedServer torn down while
+frozen before retirement leaves the fence up for the process (fail closed)
+until the session aborts: the game's server-gone path calls
+`abort_without_server`, which lifts it after the abort record (CP14b).
+No save writes under a world's `handover/`: the save's commit refuses a path
+there (a world folder being a fenced folder, a child of the worlds root, or a
+folder holding `world.dat` or `world_meta.json`). Tested: a save held at its
+commit point across freeze and retirement is discarded (the retirement record
+byte-identical, the world's files unchanged since the capture, the world still
+refused); a frozen world's autosave is refused and lands after an abort.
+Windows: the marker
+and inert stores skip the directory fsync (a directory can't be opened as a
+file there; the rename is NTFS-journaled, as for ordinary saves). CP15 (CP14
+review HIGH-1): every re-sync of an EXISTING file (the identical-record
+re-persist that `Resumer::adopt` runs before any publication, and a reused
+stale temp) goes through `crate::fsync::sync_file`, which opens the file with
+write access on Windows (no create, no truncate): `FlushFileBuffers` refuses a
+read-only handle, so a read-only re-sync failed every time there and nothing
+was ever published. Directory syncs go through `crate::fsync::sync_dir` (a
+no-op on Windows). A source-guard test pins that no `File::open` + `sync_all`
+/ `sync_data` remains anywhere else in the engine. CP16 (CP15 review
+HIGH-1): that guard missed an import's receipt, which opened each received
+and working file read-only in one file and synced it in another, so on
+Windows no import could ever complete. The import's re-syncs now go by
+path through `crate::fsync::sync_file` (`checkpoint::import::sync_existing`,
+after the regular-file check), a handle the code itself opened for writing
+is synced through `crate::fsync::sync_written`, and a second guard pins
+that no `sync_all(` / `sync_data(` call exists anywhere in the engine's
+source outside `crate::fsync`. Those lines are not compiled or tested on
+this Linux-only build. CP17 (CP16 review MEDIUM-1, LOW-4, LOW-6): that
+second guard could be dodged through its own escape hatch
+(`sync_written(&File::open(p)?)` was green, as were a spaced `.sync_all (`
+and a basename-only exemption), so `sync_written` now takes
+`crate::fsync::Written`, a handle only `crate::fsync::open_written` makes
+(it forces write access onto the caller's options): a read-only handle no
+longer compiles there (CP19, CP17 review LOW-2: `Written` has no
+`DerefMut`, so its inner handle can't be swapped; a Windows caller's
+`access_mode` could still narrow it, and none sets one). The guard bans `sync_all` / `sync_data` as an
+identifier (any spacing, split lines, a path reference) everywhere but the
+exact file `src/fsync.rs`. The ledger is opened through `open_written`
+with read + write and NO `append` (CP19, CP17 review LOW-1: std's Windows
+mapping drops the write access whenever `append` is set, so CP17's
+`append` + `write` handle was still append-only there), and each write
+seeks to the end first; the ledger's process-wide lock serialises writers
+(Windows' `FlushFileBuffers` documents a write-access requirement;
+unconfirmed on Windows itself). An import's re-sync by path goes through
+`crate::fsync::sync_regular`, which opens without following a symlink
+(the last path component only) and, on Unix, with `O_NONBLOCK`, refusing
+the handle unless fstat says it is a regular file whose device and inode
+are the checked path's (CP19, CP17 review LOW-9: a FIFO or another file
+swapped in after the check is refused, never waited on; tested through a
+test-only hook between the check and the open). On Windows there is no
+identity check (std has no stable file-index API): the check-then-open race
+is closed on Unix only.
+
+Bearer, Prepared and retirement (CP7 slice A). `SourceConfig` carries the
+bearer of the online host's LIVE invitation (`OnlineHost::live_bearer`, the
+one `online_admission`'s `Accept(ByInvite)` checks; `live::bearer::Bearer`:
+zeroed on drop, `Debug` redacted, no `Display`, no `Serialize` of its own:
+serialised only inside `Frame::Bearer`, through `wire`'s private
+`bearer_field` module, CP8 review LOW-4) and the source runtime's player attestation. No live
+invitation (expired) refuses with `NO_LIVE_INVITE`; a world never saved
+stops before disclosure (`NEVER_SAVED`). `verify_accept` returns the
+recipient attestation it verified (H2); Prepared and Commit seal it as the
+successor's. On the pump after Ready verified, the source seals the inert
+Prepared to `crypto::recipient(root, bearer, None)`, sends `Frame::Bearer`
+inside the authenticated direct session (the point of no return for the
+bearer), then publishes Prepared and reads it back on a fenced
+`handover-publish` worker (its own reactor; relays in the invitation's
+order until one stores it; one `stored::Budget` for the operation, moved
+back to the session after each publication). `publish_readback` refuses a
+certificate of another root before any socket (CP6 review LOW-2). On the
+stored witness the source sends the exact Prepared event (`Frame::Prepared`).
+The recipient derives the key from the disclosed bearer and refuses
+(`WRONG_BEARER`, import still inert and discarded) unless the event's `p`
+route, decryption and core all match; it then persists Prepared, clears the
+inert marker and only then sends `Frame::PreparedAck`: an event signed by
+its runtime over `prepared_ack_content` (transfer, Prepared event hash and
+a bearer possession proof, `wire::prepared_ack_proof` =
+HKDF(bearer, C, "prepared-ack", Prepared hash); CP7 review LOW-2: the root
+capability is computable from Prepared's public `p` tag and C, so it proves
+nothing; CP8 review LOW-2: an ack the recipient's runtime signed with the
+v1 capability, another bearer's proof or a proof over another Prepared hash
+aborts, rotates and leaves the world unretired, each pinned by a test). The source verifies it (signer = recipient runtime, exact
+content), re-runs every boundary check (identity, seats, authority persona,
+saved records; also at disclosure, CP7 review LOW-3), seals the Commit locally, opens it under
+the bearer's key, and durably retires (`phase::Source::retire` into
+`<world>/handover/`) with the exact Commit bytes and the retained copy's
+fresh id, before any final bytes escape. A retirement write error leaves
+`RetirementUncertain` (frozen, quarantined). Heartbeats (`Notice`) go out in
+Packing, ReadyVerified, Publishing, Prepared and Retired; the source's
+stall clock restarts when it sends Prepared and on entering Streaming (CP6
+review LOW-4). From Retired nothing resumes the source: Cancel, a late
+Abort and every deadline (stall and the 15-minute cap) are ignored. At
+Retired (or `RetirementUncertain`) the session marks the server's link
+retired (`HostedServer::handover_mark_retired`, CP7 review HIGH-1): from
+then on `handover_release` and `handover_reap` do nothing, so dropping the
+session sends no Abort and lifts no freeze; only tearing the HostedServer
+down ends it. Leaving the world or closing the window past retirement saves
+nothing and touches nothing on disk (`SaveChoice::Abandon`, forced by
+`leave_world`) and tears down the world, its HostedServer and the online
+host; the Cancel arm ignores a click past retirement. The Committed
+publication is not stopped by any of that: see "Committed publication"
+below. The recipient stores the bearer durably before its ack and waits
+for Committed in the background: see "Recipient: durable bearer and
+activation" below (CP10, CP7 review HIGH-2). After
+Prepared the recipient never deletes the import: any failure ends its
+session `Quarantined` (import, markers and received world kept). An abort
+after the bearer was disclosed but before Retired resumes play and rotates
+the invitation: every caller that ends a source handover (Cancel, leaving,
+the pump, including a pump that finds the HostedServer gone, CP8 review
+LOW-1) goes through `GameState::end_source_handover`, which reads
+`needs_invite_rotation` and calls `OnlineHost::rotate_bearer`. Only the
+bearer changes: the expiry, relays and host fields stay, so the root
+context and lineage are unchanged (CP7 review MEDIUM-1 + LOW-7); old invite
+links stop admitting at once (no grace), and the toast says so. Tested
+in the real game (CP12, the CP9 step 3 game test): Cancel in Publishing
+and in Prepared ends the session, changes `live_bearer()`, the old invite
+is refused and the new one admitted, and the root context is unchanged. Personas
+the old bearer already admitted stay contacts. `mint_fresh_invite` (new
+expiry) stays the UI's "new invite". The handover session's own copies are
+zeroed: the bearer is wiped with `zeroize` on drop, and the buffers this
+code owns that held it (the source's encode buffer, the host's packet
+buffer in `HostedServer::handover_send`, CP8 review MEDIUM-A, and the
+recipient's received packet) are zeroed after use (CP7 review LOW-1).
+Copies that remain in this process and are not wiped: the transport's
+channel copy of each packet (`data.to_vec()`), its send queue and socket
+buffers, the QUIC/TLS stack's plaintext and the serialiser's internal
+buffers; the live invitation itself, held in memory by the online host
+while it hosts (its bearer, and every invite link string made from it: the
+Online panel, `/online` chat lines; a link copied to the OS clipboard sits
+outside this process and can outlive it, for instance in clipboard history); and the HKDF state (the
+extracted keys in `crypto::recipient` and `prepared_ack_proof`, and the
+derived recipient keys); and, on the recipient, the payload buffers that
+carried the bearer into its Prepared receipt and Activated record are
+zeroed after the write, and so (CP14, CP10 review LOW-4) are the marker
+store's encoded write buffer and every read of a record (`MarkerStore::read`
+and the open guard's bounded read return `Zeroizing<Vec<u8>>`, the raw file
+buffer included; CP16, CP14 review LOW-3: every such read, and the
+comparison read of a stale temp, fills one `Zeroizing` buffer sized to the
+file before the read starts and reads at most one byte more, so it never
+reallocates (a freed partial copy) and a read that fails part-way is zeroed
+too; a file that changed length under the read is refused; existence checks such as `Receiver::restart`'s and the
+quarantine check use `MarkerStore::exists` and decode nothing); the kernel's
+page cache is not. `handover/` and the marker folders are created 0700 (an
+existing one is tightened) and every record is 0600. `save::fork_world`
+never copies a world's top-level `handover/` (defence in depth). CP15 (CP14
+review MEDIUM-1, decided: a refused world can't be forked): `fork_world`
+refuses any world `save_refusal_in` refuses (retired, an import not yet
+Activated, an unreadable handover record, a newer save), as loading and
+export do, and the lobby's Fork is gated by `world_open_refusal` like Play
+and Host (the card shows the refusal line). A fork of an Activated import is
+a clean copy with no record and no bearer (tested; a retired world's fork is
+refused and makes no folder). Host start from the imported world and the
+retained copy are the next slices.
+
+Committed publication (CP9). One background resumer per process
+(`live::resumer::Resumer::global()`), owned by nothing a world owns:
+leaving the world and dropping `GameState` never stop it. Quitting the
+process does (a detached thread doesn't outlive `main`). Every way out goes
+through one exit function, `GameState::exit_app` (CP12, CP10 review
+MEDIUM-1): the window's close button, the lobby's Quit, Esc in the lobby and
+the self-updater's Restart (the lobby's two are `MenuAction`s and the event
+loop exits after the frame; none of them calls `process::exit`, whose only
+remaining client uses are start-up failures: an unsupported GPU and a
+failed verification run). It lets online
+hosting go (the router-lease grace), closes the world as the close button
+always did (`close_window`; a failed close-save keeps the window and runs no
+grace), and only then, after `leave_world`'s last-chance hand-off, gives a
+Committed publication in flight a bounded grace of at most 10 s
+(`Resumer::finish_within`), waking any job sleeping out its backoff so it
+attempts at once and never blocking longer. Only a source publication holds
+the exit: with none in flight it returns at once, and a recipient's wait for
+Committed never holds it (it can't finish before its source publishes, and
+resumes at the next start). The updater relaunches only after the grace.
+What isn't done then resumes at the next launch from the record (CP9 review
+MEDIUM-2). Tests: the lobby's Quit reaches the exit function; the grace
+returns at once for an import's wait and waits for a publication. At Retired (or `RetirementUncertain` whose record reads back, CP9 review
+LOW-4) the source's pump hands it the publication
+(`SourceSession::hand_publication`; handed only when the resumer took it or
+already holds it, otherwise logged and retried at most once a second, with a
+last try when the session ends; a panicking job leaves the job set through
+a drop guard, CP9 review LOW-1); at start-up
+(`native_boot_services` calls `Resumer::boot`, pinned by a test)
+`Resumer::resume_all(worlds_root)` takes over every world whose
+`handover/` holds a retirement record and no "Committed published" record
+(bounded scan over the world folders as the world list sees them, a
+symlinked folder included; `handover/` itself must be a real directory; it
+never creates `handover/` and never opens a world). CP14 (CP10 review LOW-8): nothing is published from a record that is only
+visible. `Resumer::adopt`, the one path both the live session's hand-off
+and the start-up scan take, first re-persists the identical record (retirement or abort)
+(`RetiredCommit::persist_again`: the digest must be the permit's, and
+`persist` returns Ok only after the file and the directory are fsynced
+again); if that fails nothing is taken over (the session retries, the scan
+resumes it at the next start). This covers a `RetirementUncertain` record
+that merely reads back and a record a crash left after its rename but
+before the directory fsync, so "no retirement record" at a later boot means
+no Committed was ever published (tested: a failed re-persist at start-up
+publishes nothing; the next start-up publishes). An uncertain retirement
+whose record never landed logs once, not every second; an already-published
+record is handed silently; a recipient whose import is already Activated or
+quarantined doesn't log its hand-off. CP13 (CP10 review
+MEDIUM-2 + LOW-1): **the install-local handover ledger** decides which
+records are this install's, not the runtime key. `handover::ledger::Ledger`
+is one append-only file, `<data root>/handover/ledger` (0600; beside, never
+inside, the imports folder, and outside every world, so a world zip can
+never carry it). Each line is `v1 <transfer> <s|r> <ret|abt|rcp> <SHA-256 of
+the record's exact payload bytes> <checksum>`: the transfer id, the role
+(source or recipient), the record kind (retirement, abort or receipt), the
+digest of exactly the bytes handed to `MarkerStore::persist` (what `read`
+returns), and the first 8 bytes of the SHA-256 of the rest of the line. A
+torn or damaged line is skipped and the rest are kept (an append after a
+torn tail starts a new line first); reads are bounded (8,192 entries and
+their bytes) and fail closed past the bound (nothing listed, appends
+refused). The entry is appended and fsynced (plus a directory fsync when
+the append created the file) BEFORE the record it authorises. The open ledger
+handle holds an exclusive file lock through its bounds check, append and sync;
+another game process cannot overwrite a pending entry with a stale end offset.
+Contention and unsupported or failed locking refuse promptly, without appending
+unlocked or waiting on the frame thread. The file keeps write access on Windows;
+it uses no append-only handle. All retirement, abort and receipt appends share
+this path, and the entry/byte bounds remain unchanged:
+`phase::Source::retire` before the retirement record (a failed ledger write
+fails the step as a failed persist does: `RetirementUncertain`, no record),
+`phase::Receiver::prepared` before the Prepared receipt (no receipt, no
+ack). The resumers (`resume_all`, `resume_imports`, and the in-session
+`adopt`/`adopt_import`) act only on a record whose exact digest the ledger
+lists for that transfer and role (`RetiredCommit::ledger_entry`,
+`AwaitingCommit::ledger_entry`). The runtime key is no longer the adoption
+gate, so a damaged or re-minted `runtime_key.json` strands nothing (tested:
+a re-minted key still resumes a listed retirement and a listed receipt);
+every event the recipient reads back is still signature-verified and bound
+to the source runtime its receipt names. Any record the ledger doesn't list
+(a world folder unpacked by hand into `worlds/` can carry one; the in-game
+import never brings `handover/`) is logged, never contacts a relay, and the
+world stays refused by the open guard; the world list shows one line for it
+("\"<world>\" holds a handover record this computer didn't make. It is
+ignored, and the world stays closed.", or the incoming-world form; an
+unlisted ABORT record, which the open guard ignores, says "A handover note
+on this computer can't be checked. It is ignored; the world is unaffected.",
+CP14b, CP13b review LOW-5). This
+covers LOW-1's plant, which a decode check alone could not: this install's
+own real signed Commit with `core.context` recomputed for an attacker's
+relays decodes, and is still never published (tested, against a second
+loopback relay that hears nothing). A v1 or naively tampered record
+doesn't decode, and is refused too. Both read the record through the world's `MarkerStore` into
+a `phase::RetiredCommit`, the permit a restarted source publishes with: it
+has no bearer, so it can't rebuild a `VerifiedCommit`; `RetiredCommit` is
+built only by decoding a retirement record read through that store, and
+carries the exact Commit bytes (checked to round-trip byte for byte), the
+core, the root's public context rebuilt from the stored relays, and the
+recipient key from the Commit's own signed `p` tag. `stored::publish_retired`
+accepts it (the same root binding, route, signature and size checks as
+`publish_readback`, then EVENT, matching OK and a fresh readback). Each
+attempt has a fresh `stored::Budget` bound to the one root (25 s); CP9
+review MEDIUM-1: attempt k starts at the root's relay k mod n and goes round
+the others, and each relay's publish and readback get their own share of
+the attempt (`Budget::share_deadline`, 25 s / n, at least 5 s), so a relay
+that never answers can't hold it (tested with a black-holed first relay);
+the first relay that witnesses the exact event by readback is the proof; then, in the same attempt, `stored::copy_retired` sends a
+best-effort copy (EVENT and matching OK, no readback, never a proof) to each
+other relay of the root, and the count is logged (not stored: the record
+stays deterministic). Between attempts the resumer waits 5 s, doubling to a
+300 s ceiling, and never gives up. Once proven it writes
+`published-<transfer>.dat` durably (0600; temp, fsync, rename, directory
+fsync) and drops that world. One rule reads it (CP9 review LOW-2): only a
+record of this exact Commit counts; unreadable or mismatched reads as not
+published and is rewritten (re-publishing identical bytes is safe),
+including one that can't even be compared (empty, or over the 64 KiB
+record limit): by exactly ONE fresh write per attempt, never a retry or
+recursion inside the write, so the attempt backoff paces any next one
+(CP11). A stale temporary file of any marker kind (partial, empty or
+other bytes: it was never renamed, so nothing durable claims it) is
+replaced, never jamming a write; it is compared only when its length is
+exactly the record's, and that read is bounded by the record limit
+(CP11); a temp path that isn't a regular file still refuses
+(CP9 review LOW-3); CP16 (CP14 review LOW-2): a certain failure after the
+temp exists and before its rename (write, fsync, the `TempSynced`
+boundary, the rename) removes the temp (best effort, then a directory
+fsync), so a retirement's signed Commit never lingers beside a world that
+aborted, and the start-up step (`Resumer::boot`) first sweeps every
+regular `*.tmp-*` from every world's and every import's `handover/`
+(nothing renamed them, and no session of this process runs yet; CP17,
+CP16 review LOW-3: a world or import whose handover lock another game
+process holds is skipped, since its temps may be that live session's
+records, and the lock is held here while sweeping); a world whose `handover/` has been deleted
+meanwhile has nowhere to record it and is dropped after the proof. The open
+guard still refuses the world after publication: retired is forever. The
+resumer is a detached thread, which does not outlive `main`: a publication
+cut short by quitting resumes at the next start from the record. Native
+only (the whole `handover` module is). Tests: the real game leaving a
+retired world (Save & Quit, then the close button) writes nothing, stops the
+server and online host, sends no Abort, and the resumer still publishes the
+exact bytes on the loopback relay fixture and lands the record; a restart
+between Retired and the proof resumes from the start-up scan; failed
+attempts back off and each had a fresh Budget.
+
+Recipient: durable bearer and activation (CP10, CP7 review HIGH-2). The
+recipient's records live in its import's own working world `handover/`
+(`authority::dir(<imports>/handover-<world>-<transfer>/working)`, a 0600
+`MarkerStore`: temp, fsync, rename, directory fsync), not in a shared
+folder: Ready (written once the import is durable), the Prepared receipt,
+the Activated record and a quarantine record. The import receipt checks
+only manifest members, so this extra folder doesn't disturb it, and the
+inert discard reads it there (a Prepared or Activated record refuses).
+H3, as amended: the bearer is stored only in the imported world's
+`handover/` records: the Prepared receipt, then the Activated record.
+Every archive leaves it out: the handover pack and the `.axeworld`/cloud
+export are allowlists built from the world state (meta, `world.dat`,
+chunks, exhibits, participant records), never a folder walk (pinned by a
+test that hands over a world whose own `handover/` holds another
+bearer); the retained copy (next slice) must keep it out too. Order in
+`on_prepared`: verify the bearer against Prepared, sign the ack, persist
+the Prepared receipt v2 (`AxeNStax/handover/receiver-prepared/v2`: core,
+Prepared hash, the exact Prepared event, the root's relays, the bearer;
+on read the root is rebuilt from the relays with `now = 0` and must hash
+to the core's context, the event must hash to the stored Prepared hash,
+and the bearer must derive the key the event is routed to; a v1 receipt
+no longer decodes, so it reads as unreadable), clear the inert marker,
+and only then send `PreparedAck`. A failed write sends no ack and aborts
+while the import is still inert, so the source never retires (pinned by a
+test with a stale temporary record; the control that sends the ack first
+retires the source with no durable bearer). From the ack the wait for
+Committed is the persisted "awaiting Committed" state, the Prepared
+receipt with no Activated or quarantine record: the stall, the 15-minute
+cap and a closed link end nothing (the session stays `Prepared` and still
+reads the link while it is open). The game's pump hands the wait to the
+process's one resumer (`Resumer::adopt_import` at Prepared; handed only
+when taken or already held, retried at most once a second). Every other end
+of a session whose receipt is durable hands it too, once (CP12, CP10 review
+LOW-2; `RecipientSession::hand_off_wait`): `abort` when not inert (a
+protocol error read in the same batch as the Prepared frame, a Cancel), and
+`end_recipient`, which every end of a recipient session goes through.
+Leaving the joined world ends a `Prepared` session (`handover_on_leave` ->
+`end_recipient`): the wait is handed over, the router lease goes back and
+the link closes with it, and no Abort is sent (the ack has left); a session
+before Prepared still carries on to Ready in the lobby. Tested: leaving
+while Prepared ends the session and the resumer still activates the import
+on Committed. CP13 (CP12 review MEDIUM-1): the leave can close the link
+before a slow source has read the ack, so a frozen source's
+`HostedServer::handover_take_frames` drains the bound seat's queued
+Handover frames BEFORE its liveness refusal (the transport guarantees
+"closed => its last frame is in `rx`"). It does this only for exactly the
+bound seat (same slot, attach generation and verified key, still
+authenticated and not disconnected) whose transport alone has closed; a
+broken link, a disconnect or a reconnect is refused first, and a closed
+seat with nothing queued is refused as before. A verified, bearer-proven
+`PreparedAck` read that way retires the world: the retirement re-check
+(`eligibility::seats`) accepts that seat, and never another seat, a
+reconnect, or a closed seat with no verified ack. Tested
+(`game_harness_handover_recipient_leaving_before_the_source_reads_the_ack_still_activates`):
+the recipient leaves at Prepared, the source is pumped only after the
+leave, and it retires, publishes Committed and the import activates.
+CP13 (D2, CP10 review MEDIUM-3): **the recipient's ack boundary.** The
+session sets `ack_started` the moment the PreparedAck starts to leave
+(after the receipt is durable and the inert marker is cleared). Before it,
+the recipient may abort on its own; from it on, it never does, because the
+source may already have retired: a Cancel, leave or failure (`abort`) hands
+the wait to the resumer, never sends Abort and never quarantines, and only
+the source's Committed (-> Activated) or Aborted (-> quarantine) ends the
+wait. `hand_off_wait` is keyed on `ack_started`, not on the durable
+receipt: a receipt with no ack attempt never hands off. Instead `abort`
+quarantines it locally when the receipt may be on disk with the ack unsent
+((A) it persisted and the inert clear failed; (B) its persist returned
+`UncertainDurability`, so the receiver is still at Ready but the file
+exists): the quarantine record is written first (`Receiver::quarantine`),
+then the receipt and its bearer are removed (`MarkerStore::remove`, with a
+directory fsync), so no resumer adopts it (`AwaitingCommit::read` is `None`
+once quarantined; the receipt is removed rather than rewritten without the
+bearer, which would only stop adoption by accident through the ledger
+digest). This is safe because the source can't retire without the ack. If
+the quarantine write fails, the receipt stays, and the source's published
+Aborted ends it (CP13b, below). A recipient restarted with
+only a receipt (no Activated, no quarantine) can't know whether its ack
+left, so it only waits for the source's signal (the start-up scan adopts
+it); it never quarantines on restart. A quarantined import is never
+opened; the world list shows "This handover didn't finish. The world stays
+with the sender." for each `quarantined-<transfer>.dat`. The existing sweep
+(`inert::sweep`) discards a locally quarantined import at the next start
+when its inert marker is still there (cases (A) and (B): the receipt is
+gone, so `discard_inert_ready` no longer refuses); an import quarantined
+after the ack by the source's live Abort has no inert marker (it was
+cleared before the ack), so the sweep leaves it: it stays, closed, with its
+status line. CP13b: a live Abort after the ack ends exactly like the
+published Aborted (quarantine record, then the receipt and its bearer
+removed). Tested: (A)
+ends quarantined with the bearer gone and no adoption; a recipient Cancel
+after the ack sends no Abort, quarantines nothing, and the import still
+activates on Committed.
+
+CP13b (D2 (C)/(D), CP12 review LOW-1): **the published Aborted** (provisional
+protocol v90; the handover frame tag is unchanged). When the source aborts
+after disclosing the bearer, for any reason (Cancel, a refusal, a stall, a
+closed seat with no ack read, the liveness abort included, or a session
+dropped without `abort`), it seals an Aborted over its sealed Prepared
+(`crypto::seal_aborted`): the Committed envelope and kind exactly, with the
+inner label `phase: 2` (Committed is `1`, Prepared `0`, so neither can be
+read as the other), bound like Committed to the transfer and context (the
+exact core) and to the Prepared hash, sealed at `core.issued_at` (CP15: sealed once, with the Prepared, before
+the bearer leaves; see the pending abort record below). The
+**abort record** (`aborted-<transfer>.dat`, `phase::AbortRecord`, label
+`AxeNStax/handover/abort/v1`: core, Prepared hash, Aborted hash, the exact
+signed Aborted bytes, the root's relays; nothing secret; it mirrors
+retirement record v2) is written, its ledger entry (`abt`) appended and
+fsynced first, BEFORE the source unfreezes. It never refuses the source's
+own world (the open guard reads only `retired-*`). If it can't be written
+the source unfreezes anyway (the world is the source's), logs it, and its
+line adds "The cancellation couldn't be saved. The other player's game
+will keep waiting for this handover until this game manages to save it; it
+tries again each time it starts." (CP16, CP15 review MEDIUM-1: no promise
+of the next start, since a save that keeps failing fails then too)
+(CP15: the pending abort record below is still on disk, and the next start
+promotes and publishes it) (`copy::ABORT_UNRECORDED`; CP14b, CP13b
+review LOW-3: a recipient past its ack can't cancel, so it doesn't say it
+can; the leave path's lobby notice is this composed line too,
+`SourceSession::end_line`, CP13b review LOW-5); the live Abort still
+carries the sealed Aborted. CP16 (CP14 review LOW-1): that line is said
+only when no Aborted went out (no link, the send failed, or
+`abort_without_server`); when the sealed Aborted was sent, the line is
+"The cancellation couldn't be saved here, but it was sent. If it didn't
+reach the other player, their game will keep waiting for this handover
+until this game manages to save it; it tries again each time it starts."
+(`copy::ABORT_UNRECORDED_SENT`). CP16 (CP15 review MEDIUM-1): before the
+bearer can leave, `disclose` also checks the world's `handover/` for room
+for every record the disclosed transfer may still need
+(`MarkerStore::has_room`: one more pending abort, Retired, Aborted and
+"published" record, each under the 64-per-kind cap, and three more
+entries under the 256-entry folder cap); no room, or a folder that can't
+be read, refuses the handover with nothing disclosed: "This world has no
+room for another handover record, so the handover stopped. Nothing was
+handed over. Play has resumed." (`copy::WORLD_RECORDS_FULL`). CP17 (CP16
+review LOW-1): that alone did not cover an earlier transfer's pending
+abort record still waiting for promotion (a promotion that failed at a
+start-up), which is a future Aborted and "published" record too; the rule
+(`MarkerStore::has_room_for_handover`, the one rule both checks use) now
+reserves one more of each, and two more entries, for every pending record
+already in the folder. So a disclosed transfer's abort record, and the
+promotion of any pending record the folder held at disclosure, never
+meets the cap. CP17 (LOW-2): the same rule also runs when the handover
+begins (`SourceSession::begin`, same line), so a full world is refused
+before it freezes and the whole world streams; the disclosure check stays
+the authority, since the folder can change in between. Pinned by a unit
+test at every edge (63/64 of each of the four kinds, 253/254 entries, a
+pending record's reservation). Abort and "published" records are never removed, so one
+world folder takes at most 64 handovers that got past disclosure (each
+leaves one "published" record, 63 aborted ones plus the one that
+retires it, or 64 aborted ones); the 65th is refused before disclosure.
+A handover refused before disclosure leaves no record. CP15 review LOW-1:
+the source phase is built before the pending record is written, so
+nothing can fail between that write and the disclosure and leave an
+orphan record behind. **Exclusivity:** one function
+(`phase::write_terminal`, under one process-wide lock) writes either the
+retirement record or the abort record of a transfer, and refuses when the
+other exists or can't be read: `retire` refuses on an abort record (the
+source stays aborted), and the post-disclosure abort refuses on a
+retirement record (the source stays retired, `RetirementUncertain`: frozen,
+published from its record). Whichever is durable first wins, so a
+concurrent ack and abort can never both write. The abort record reads back
+as the same publication permit as a retirement (`RetiredCommit::read_aborted`,
+ledger kind `Abort`), and the same resumer publishes it with the same
+rotation, backoff, readback proof and "published" record (payload label
+`AxeNStax/handover/aborted-published/v1`); a session that aborts hands it
+over when it ends (`end_source_handover`); CP14b (CP13b review LOW-1): a
+session dropped without `abort` writes the record in `Drop` and hands it to
+`Resumer::global()` in the same process (tested: the Aborted is published
+with no restart and the recipient quarantines), and when the hosted server
+has gone the game calls `SourceSession::abort_without_server` (the abort
+record, no link to tell, and the world's late-save fence lifted) before
+ending the session; `resume_all` scans both kinds at start-up,
+ledger-listed only. The
+live `Frame::Abort` carries the sealed Aborted after disclosure (`aborted`,
+bounded by the event limit; `None` before). The recipient checks the live
+one and the published one with ONE verification
+(`AwaitingCommit::aborted`: the stored Prepared re-opened under the
+bearer's key at `core.issued_at`, the candidate opened as an Aborted bound
+to the exact core and the stored Prepared hash); an Abort without an
+Aborted that verifies ends the session only and the wait stays with the
+resumer. On a verified Aborted (live or read back): the quarantine record,
+then the receipt and its bearer removed, and the wait drops. If one
+readback yields both a valid Committed and a valid Aborted for one transfer,
+Committed wins (a duplicate world is recoverable by hand, a lost one isn't):
+it is logged and the world list shows "This world may now exist in two
+places." (`copy::WORLD_IN_TWO_PLACES`, from the resumer's notices). CP15
+(CP13b review LOW-4): "Committed wins" holds for the transfer, not one
+relay's answer: a recipient attempt that proves an Aborted on one relay
+finishes the round over the remaining relays (within the attempt's budget)
+looking for a Committed, and only then quarantines; a Committed found later
+in the round wins with the same log and line (tested: the Aborted on the
+relay tried first and the Committed only on the next one activates).
+CP15 (CP13b review LOW-6): the start-up scan decodes abort records one at a
+time; one that can't be listed or decoded is logged and skipped
+(`RetiredCommit::unreadable_aborts`; the world list shows "A handover note
+on this computer can't be checked. It is ignored; the world is
+unaffected."), so a damaged old abort record never stops a later
+retirement's publication (a damaged retirement record still fails closed).
+Known limit (CP13b review LOW-6, open): abort and "published" records are
+never removed, and each kind is capped at 64 per world. **A
+Committed is accepted at any date:** the recipient opens it at
+`core.issued_at`, never today's clock, so the source runtime key alone
+authorises activation, however late it is read. Tested: (C) a crash between
+the receipt and the ack and (D) a dropped link after a lost ack both end
+with the source's abort record, its Aborted published by a restarted
+source's start-up scan, and the recipient quarantined with the receipt
+gone; a live Abort after the ack quarantines through the shared check, and
+one carrying the source's Committed quarantines nothing; an abort racing a
+retire leaves exactly one record; with both on the relay Committed wins
+with the line; an Aborted of another transfer or over another Prepared is
+ignored; a failed abort record still unfreezes, with the line.
+
+CP15 (CP13b review LOW-3, coordinator 2026-10-11): **the pending abort
+record.** A source killed after the bearer left and before any terminal
+record used to leave nothing that said "disclosed": the world reopened at
+the next start, no Aborted was ever sealed, and a recipient past its ack
+waited without end. Now `disclose` seals the Aborted together with the
+Prepared (same seal, `prepared` = the just-sealed Prepared, at
+`core.issued_at`) and writes it as the **pending abort record**
+(`pending-abort-<transfer>.dat`, the exact `phase::AbortRecord` bytes,
+`phase::write_pending_abort`: its ledger line, kind `abt` over those exact
+bytes, appended and fsynced first, then the file and the directory fsynced)
+BEFORE `disclosed` is set and the bearer frame is sent. If it can't be
+written nothing is disclosed: the handover stops with "The handover couldn't
+be saved on this device, so it stopped. Nothing was handed over. Play has
+resumed." (`copy::PENDING_ABORT_UNWRITTEN`), and a record that did land is
+withdrawn. Every later abort of the session writes exactly that record as its
+abort record (`record_abort` never re-seals), so the abort record's ledger
+line is the pending one's (`write_terminal` appends a line only for a record
+not yet listed: still 2 lines per handover, and the 2-entry headroom check is
+unchanged). A durable terminal record (a clean retire, a clean abort, or a
+promotion) REMOVES the pending record, inside `write_terminal`, only after
+its own persist returned Ok (file and directory fsynced): removal rather than
+a superseded record kept beside it, because each record kind is capped at 64
+per world (kept pending records would end that world's later handovers), and
+a removal needs no ledger line (the ledger lists what may be published). An
+uncertain retirement keeps it. **At start-up**, before the scan and before
+any world opens (`Resumer::resume_all`, run by `native_boot_services`), each
+world's pending abort records are promoted (`phase::promote_pending_aborts`,
+under the same process-wide lock): each is decoded on its own (one that
+doesn't decode, or whose exact digest this install's ledger doesn't list, is
+logged and ignored); one whose abort record exists is removed; otherwise it
+is written as the abort record through the choke point (`write_terminal`), so
+retire/abort exclusivity holds. **A pending abort record and a retirement
+record: the retirement wins**, the pending record is discarded, and that is
+logged. (CP17: "no retire can race a process that died" holds only for
+one process; a second live process is fenced by the per-world handover
+lock below.) The scan then publishes the promoted record through
+`Resumer::adopt` (which re-persists it first), and the recipient past its
+ack quarantines on it. The invitation needs no rotation step at start-up:
+invitations live only in memory (`OnlineHost::start` mints a fresh bearer
+each time), so the bearer a dead process disclosed admits nobody after the
+restart. This is safe only because a Committed is never published without a
+durable retirement record (CP14/CP14b: the session and the scan both
+publish only through `adopt`'s `persist_again`): no retirement record means
+no Committed left the machine. Tested: (a) a source killed after the
+recipient's (lost) ack restarts, promotes, publishes the Aborted and the
+recipient quarantines; (b) a pending abort record beside a retirement
+record publishes only the Committed and leaves no abort record; (c) a
+pending abort record that can't be written stops the handover with nothing
+disclosed.
+
+**The per-world handover lock (CP17, CP15 review LOW-3).** The process-wide
+lock above orders one process's writers only, and nothing stopped a second
+game process on the same computer (no single-instance lock exists): its
+start-up would promote a LIVE handover's pending record, so the first
+process's retire met an abort record (a live handover cancelled by a second
+launch), or, if the two interleaved, both records and both events existed
+and a recipient reading the Aborted first quarantined while the source
+retired (the world usable nowhere). So a live handover holds an exclusive
+advisory lock on `handover/.live` in the world's folder
+(`live::world_lock`, the standard library's `File::try_lock`: `flock` on
+Unix, `LockFileEx` on Windows): the source from just before its pending
+abort record is written (taken before the room check, so `.live` is
+counted; not taken: nothing is disclosed) until its retirement or abort
+record is durable; the recipient from the moment its import folder
+appears (CP19, CP18 review MEDIUM-2, DECIDED: the import worker takes it
+right after the import's rename, and `finish` again before the Ready
+record if the worker couldn't; it was taken only at the Prepared receipt
+before, so another copy's inert sweep could discard an import at Ready)
+until the import is Activated or quarantined. Not taken: nothing is
+written and it aborts while inert. **The import's own lock (CP23, DECIDED
+2026-10-13; CP19 review MEDIUM-1, CP22 review P-4).** The recipient's
+import is covered from BEFORE it appears by a second lock: the sibling
+file `<imports>/handover-<world>-<transfer>.lock`
+(`world_lock::acquire_import`; 0600, `O_NOFOLLOW`, the same
+`File::try_lock` rules: "would block" is held, any other error is no
+lock, and the import stops before its rename and the session refuses with
+`copy::NO_FILE_LOCKING`). It is never inside a folder that is renamed
+while it is held (Windows can refuse to rename a folder with a file open
+inside it; an earlier draft locked `working/handover/.live` in the scratch
+folder before the rename and was dropped for that). CP24 (CP23 review
+MEDIUM-1, DECIDED): the session takes it BEFORE it marks the import inert
+(`inert::mark`), i.e. before the scratch folder exists, so the stream, the
+rename and the receipt are all covered; it moves into the import worker
+(whose take at `BeforeRename` is only a fallback) and back, and the
+session holds it through Ready, the ack and Prepared; the resumer job that takes over the
+wait holds it too, to Activated or quarantine. Within one process it is
+never shared by a second `acquire_import`: a sweep in the same process as
+the worker finds it held. `inert::discard` ALWAYS takes it before touching the
+import or its scratch, making its file if it isn't there (CP24, CP23
+review MEDIUM-1 + LOW-3, DECIDED; before, it made the file only for an
+import its first look found, so an import renamed in between, or a scratch
+mid-stream, was removed with no lock): held, skipped and logged once; any
+other lock error (the file can't be opened or made), skipped and left for
+the next sweep; only a file system with no file locking at all goes on
+unlocked, since no recipient can hold one there (it refuses). Test
+`handover_inert_discard_racing_a_just_renamed_import_deletes_nothing`. It
+reads and removes the import's records as they are (no
+marker directory is made or synced, CP22 review P-2), removes the whole
+import, and removes the lock file last, still held; whoever locked the
+unlinked file meanwhile sees it is no longer the file at that name
+(device and inode, Unix only) and starts over. Unlinking the lock file is
+always its holder's LAST act, after its import is gone, so an old holder
+of an unlinked file protects nothing that a new holder of the new file
+needs. **Windows (CP24, CP23 review MEDIUM-2, DECIDED):** an import
+lock file is never deleted there (nor swept): without a device and inode
+the "same file" check is by name only, so a file deleted under its holder
+could let two processes hold two different files at the same name. The
+empty file stays and the next holder locks that same file; each costs one
+entry of the scan bound. Not compiled or run on Windows yet. The promotion and its leftover sweep
+take it too (held: the 500 ms held retry), never creating its file, in
+ONE try (CP24, CP23 review LOW-1: `world_lock::try_import_once`; the
+lobby's main thread never waits, ~400 ms before, for another process's
+lock; test `handover_promote_refuses_another_drive_a_held_lock_and_a_quarantine`), and
+remove it after the import folder. A lock file whose import is gone is
+removed by the inert sweep once its lock is free (`inert::sweep_stale_locks`),
+never while held (a recipient about to rename its import in). Each import
+now costs two entries of the imports folder's 256-entry scan bound. Under
+its locks, before the receipt, the recipient also checks that the world's
+own files are present (`world.dat` and every manifest member,
+`DurableCheckpoint::world_files_present`), so a discard that won a gap is
+never acknowledged into (tests
+`handover_recipient_locks_its_import_before_it_appears`: another process's
+sweep just before (lock held from `mark`) and just after the rename is
+refused, CP24, CP23 review LOW-2, and
+`handover_recipient_never_acks_into_an_import_missing_its_world_files`;
+`handover_inert_import_lock_is_a_sibling_file_removed_after_its_import`).
+Once promoted, the moved world is covered by its own `handover/.live`. The
+lock registry is held only for the map check, the try-lock and the insert;
+the stat and the open happen outside it (CP22 review P-1). The recipient's lock is
+`world_lock::acquire_existing`, which never creates a missing world folder
+(only `handover/` inside an existing one, one `create_dir`): a folder
+another process removed stays removed and the recipient refuses with
+`copy::IMPORT_VANISHED`. Before its receipt, under the lock, it also checks
+the import is still the one Ready was recorded in (`LiveLock::still_at`:
+the lock file at the path is the held one, same device and inode on Unix;
+and the Ready record is still on disk, which an inert discard removes
+first); otherwise it refuses while inert: no receipt, no ack, and the
+source aborts as for any failure before the ack (test
+`handover_recipient_never_acks_into_an_import_removed_at_ready`: another
+process's sweep at Ready is skipped; a discard's leftovers get no ack). The resumer job that takes over the
+recipient's wait shares the lock (within one process the guard is shared,
+and the OS lock goes with the last holder). Another process: its start-up
+promotion, publication scan, unfinished-record sweep and import waits skip
+a world whose lock is held (logged once; the promotion and the sweep hold
+the lock themselves while they work, so no handover starts under them); its
+open guard (`authority::open_guard`, after the retired and still-arriving
+refusals, read-only) refuses to open, host, fork or write the world with
+"Another copy of the game on this computer is handing this world over right
+now. Try again once that has finished." (`copy::HANDOVER_ELSEWHERE`), and so
+does a handover of it (`source::check`). The OS releases the lock when the
+handle closes or the process dies, so a crash leaves no stale lock; `.live`
+itself is never deleted (deleting a lock file under a holder lets two
+processes lock two files) and is one of the folder's 256 entries. CP18
+(CP17 review MEDIUM-1, DECIDED): only "would block" means held. Any other
+lock error (a file system without file locking, e.g. NFS with no lock
+daemon), or an existing regular `.live` that can't be opened, means "no
+lock here": open, save, host and the start-up work go on as before the lock
+(logged once per world), but a new handover refuses, on the source at
+disclosure and on the recipient before its receipt, with
+`copy::NO_FILE_LOCKING` ("This world's folder doesn't support the file
+locking a handover needs…"); a world never becomes unopenable or
+unsaveable because of the lock. A `.live` that exists and isn't a regular
+file still counts as held. CP18 (CP17 review LOW-3): the probe takes a
+shared lock (`try_lock_shared`) and lets go at once, so two probes never
+collide while a live session's exclusive lock still blocks it. CP18 (CP17
+review LOW-4): the registry is keyed by the canonical `handover/` path; no
+thread sleeps while holding it; nothing drops a guard made from a registry entry while
+holding it (the shared path's guards are returned, never dropped there; CP23, CP22 review MEDIUM-1: `held_here` and a releasing
+guard count the holders instead; a temporary guard made there could be
+the last one when its holder let go meanwhile, and its release would lock
+the registry again on the same thread, hanging every lock user in the
+process; test `handover_lock_held_here_survives_the_holder_letting_go_meanwhile`); a releasing guard lets go of its file
+before its entry, and a present entry with no live guard counts as this
+process (`acquire` retries, the probe answers "not elsewhere"); promotion
+moves an import only when no holder in this process remains, so the
+rename never meets this process's handle (Windows). CP18 (CP17 review
+LOW-8): a recipient aborting while inert drops its own lock handle before
+it deletes its import.
+Native only. Tested with a real second process (the test binary
+re-executed holding the lock): its promotion, publication, open and import
+wait are skipped while it lives, and all go ahead once it is killed.
+
+CP13b (CP13 review MEDIUM-1): the ledger's append
+bound is its read bound (entry 8,193 is refused at append time, before its
+record), so it holds about 4,000 handovers per install for its lifetime
+(compaction is CP14). Before the bearer is disclosed, and before a recipient
+writes its receipt, the ledger must read back with room for 2 more entries,
+or the handover stops with "This device's handover record is full or can't
+be read, so the handover stopped. Nothing was handed over." A ledger write
+error at retire means the record certainly wasn't written: the source goes
+back to Prepared and aborts (the live Abort and the abort-record rule), never
+the `RetirementUncertain` freeze. CP14b (CP13b review LOW-3): so does every
+persist error before the rename (`Io`: temp create, write or fsync, a full
+disk the likely one; `Limit`) and a failed read of the abort record; only
+`UncertainDurability` (after the rename) and an existing or unreadable
+retirement record freeze as uncertain (tested: a fault before the rename
+aborts, unfreezes, publishes the Aborted, and the world opens). CP13b (CP13 review LOW-1): a recipient's
+Cancel after its ack says "Waiting for <npub> to finish. You can leave; the
+game will keep checking.", never "cancelled". CP14b (CP13b review LOW-2): a
+Cancel or failure past the ack ends the session the way leaving does
+(`end_recipient` takes that branch on `Prepared` or `ack_started`): the
+wait is the resumer's, the link is never handed back to the frozen host,
+and the player leaves the joined world with the line in the lobby (tested).
+CP16 (CP14 review LOW-5, decided): only while the wait goes on. Once a
+verified Aborted has quarantined the import (the quarantine record is
+proven on disk, `RecipientSession::import_quarantined`), the source has
+already released its freeze, so the link goes back to the joined world
+and the player keeps playing (GPU-tested); a quarantine check that can't
+be read is not proof, and the player leaves. `wait_continues` itself still
+counts an unreadable check as quarantined, so its status line fails toward
+the less hopeful one (CP14 review LOW-6, accepted). A handover failure that
+repeats every second (the hand-off of a publication whose record can't be
+made durable, or read back) is logged at most once a minute per transfer
+(`resumer::log_due`). The pump's quarantine arm shows the same waiting line while the wait goes
+on, and the quarantine line only when a verified Aborted ended it (a
+waiting line there would be false).
+
+And
+start-up (`native_boot_services`) calls `Resumer::resume_imports(<data>/handover/imports)`,
+which takes over every import whose working world's `handover/` holds a
+Prepared receipt and no Activated or quarantine record (bounded; creates
+nothing), only for a receipt whose exact digest this install's handover
+ledger lists (CP13, above). The
+relay rotation, shares and exit grace above apply to it too. Both read the receipt through the store into a
+`phase::AwaitingCommit`, never the session's memory. Each attempt has a
+fresh `Budget`: relays in the root's order; on each, a lookup of the
+bearer's route, the stored Prepared re-opened under the bearer's key and
+each candidate opened as the Committed bound to it and to the core, then
+an independent `stored::readback` of that exact event (the proof); then
+the Activated record v2 (`AxeNStax/handover/activated/v2`: core,
+Prepared hash, Committed hash, the bearer). The same backoff as the
+source (5 s doubling to 300 s), never giving up; leaving the world,
+closing the window and restarting never end it. Only the source's
+Aborted (CP13b: live over the verified joined link or published, one
+verification) ends it: the durable quarantine record, which the resumer
+and the start-up scan skip, then the receipt removed. Expiry (CP11,
+coordinator): the recipient verifies the Committed against the root and
+attestations its Prepared receipt captured, never today's clock (the
+source authorised the transfer before expiry and the recipient already
+acked; CP10 review HIGH-1): `AwaitingCommit::committed` opens the
+stored Prepared and every candidate at `core.issued_at`, the time the
+receipt captured, where every time check passes exactly as at receipt
+(`not_before == issued_at`; both events' `created_at` is `issued_at`;
+`issued_at <= expires_at <= root expiry`; each attestation's
+`valid_from <= issued_at <= expires_at <= valid_until`). The resumer's
+clock is injectable (`Resumer::with_clock`) and is never a validity
+bound there (it only feeds a log line). The receipt v2 already holds the
+core, so there is no v3. A recipient resumed days after the
+certificate, the root and both attestations expired activates when the
+Committed arrives. While an
+import awaits its Committed, the native world list shows a plain line
+above the cards, "Waiting for <npub> to finish handing this world over"
+(the source persona's npub; `resumer::awaiting_statuses`, the same
+bounded, read-only scan as the start-up step). Reading an already Activated
+import validates its record without re-persisting it: lobby status reads and
+held-import retries perform no file or directory sync for that record. Explicit
+`Receiver::restart` retains its durability check. The complete status traversal
+opens existing marker directories without creating or syncing them, including
+its retirement and damaged-abort scans. Adoption and publication still use
+their existing directory and record durability checks. It is not a world card:
+the import isn't under the worlds folder and can't be opened. There is
+no "take over anyway" (it risks two live copies; an owner question).
+
+**The recipient opens the handed-over world (CP18, DECIDED).** Once the
+import is Activated, `handover::live::promote::promote_activated_imports`
+moves its `working` folder into the worlds folder with one `rename`, so it
+lists as an ordinary world card, and Play, Host and Fork work on it as on a
+world made here. It runs on the main thread only, at start-up (after the
+resumer's boot step), on lobby entry and every lobby refresh, before the list is read;
+never on the resumer's thread. CP20/CP21 (CP18 review MEDIUM-1): the lobby also
+refreshes itself when a handover activates while it is up. `Receiver::activate`'s real
+transition (its `Ok(true)`, never a restart or a status read that finds an import already
+Activated; CP22, CP21 review MEDIUM-1) bumps a process-wide counter
+(`promote::note_activated`); each lobby frame `MenuState::poll_handovers` asks
+`promote::LobbyPoll`, and once per new activation promotes and re-lists IN PLACE
+(the open dialog and page stay; the selection follows its folder name), also whenever the
+waiting lines changed (CP21 review LOW-1: another process may have moved the world in).
+An import skipped because its lock is still held (the session lets go a moment after
+Activated) is retried every 500 ms while held; an import that stays unmoved for any other
+reason (a twin, another drive, a failed move) costs nothing per frame and is tried again at
+the next lobby entry, refresh or activation (test
+`handover_promote_a_stuck_import_runs_no_pass_per_lobby_frame`). A player in the lobby sees the "Waiting for…" line
+replaced by the world's card without leaving the lobby. An import is moved only when it holds an
+Activated record, has no `quarantined-*` record, passes the open guard, and
+no holder in this process (`world_lock::held_here`: the live session or the
+resumer's wait, which read it at its old path) nor another process holds
+its handover lock; otherwise it is left for the next refresh. The folder
+name is the lobby's new-world naming (`save::slugify_folder_name` of the
+world's display name) with the `_2`, `_3`, … collision rule, applied to the
+"world" fallback too. CP19 (CP18 review MEDIUM-3 + LOW-1, DECIDED): a
+reserved name counts as taken whether or not it exists
+(`save::is_reserved_folder`, shared with `sanitize_folder_name`: the
+Workshop's `the_workshop`, the joined-world `remote_game`, every Trial arena folder
+(CP21, CP19 review HIGH-1: any name starting `exp-`, any case — `exp-<slug>` and KeepNew's
+`exp-<slug>-<seed>`; a slug in that family moves out of it, "Exp-Hash-Dash" →
+`exp_hash-dash`, via `save::off_arena_folder`, used by promotion, new worlds and the web-zip
+import), and the Windows
+device names `con`, `prn`, `aux`, `nul`, `com1`–`com9`, `lpt1`–`lpt9`, any
+case, with or without an extension), so a world called "The Workshop" lands
+in `the_workshop_2`; past `_99` the time-stamped fallback is checked too. Defence in
+depth: a Trial never opens or wipes a folder carrying `handover/`
+(`world_open::plan_arena_folder` refuses with `ARENA_HOLDS_A_HANDOVER` and the player stays
+in the lobby; the lobby's own Delete still deletes such a world — it is the player's;
+CP22, CP21 review LOW-4: the line covers a world handed over FROM the arena folder too;
+CP24, CP22 review LOW-2: it no longer suggests deleting the world — a retired world is
+refused before it (`copy::RETIRED`), so what it meets is the player's own received world
+or one whose handover may still end Aborted, and deleting either could lose it). Known, not changed: a local
+world made by an older build with a display name like "Exp-Lore" already lives in
+`exp-lore`, and a Trial whose slug matches would still wipe it (pre-existing).
+Folder families the game makes under the worlds folder (CP21 grep): `the_workshop`,
+`remote_game`, `exp-*` arenas, the dedicated server's `.identity` (no slug starts with `.`).
+Tests: `handover_promote_never_names_a_reserved_folder` ("Exp-Hash-Dash"),
+`an_arena_is_planned_from_the_disk_and_planning_writes_nothing`.
+The move never replaces a folder at the target, even an empty one
+(`promote::rename_no_replace` → `handover::rename::no_replace`:
+`renameat2(RENAME_NOREPLACE)` on Linux; on Windows a direct `MoveFileExW(from, to, 0)`
+(CP22, CP19 review MEDIUM-3: std's `rename` would retry a folder target with a replacing
+`FileRenameInfoEx` and replace an EMPTY folder; with no `MOVEFILE_REPLACE_EXISTING` the
+move fails if anything is there; not run on Windows here);
+other Unix, and a filesystem that rejects the flag (EINVAL/ENOSYS on Linux and Android,
+ENOTSUP on macOS), re-check the
+target just before `rename`, a residual race). CP22 (CP21 review LOW-5): that race can
+replace only an EMPTY folder, so two imports or two promoters never clobber each other (their
+sources are never empty). The larger cross-process exposure is elsewhere and the atomic path
+has it too: another game process chooses a free folder at its New World click
+(`sanitize_folder_name`) and writes it later with `create_dir_all`; a promotion landing in
+between gets that world's files written into the handed-over folder (within one process it
+can't happen: promotion runs only in the lobby, and creation leaves the lobby before it
+writes). Known residual; the longer-term fix is for local world creation to claim its folder
+with an exclusive `create_dir` at name choice. Tests:
+`handover_promote_never_names_a_reserved_folder`,
+`handover_promote_rename_never_replaces_a_folder`,
+`handover_promote_a_world_named_the_workshop_gets_its_own_folder`. After the rename both parent folders are fsynced
+(`crate::fsync::sync_dir`). Idempotent: the rename is atomic, every import
+scan reads `working/handover/`, so a moved import vanishes from them all,
+and an import whose Activated transfer already has a world in the worlds
+folder is never moved again (tested with a twin copy). The moved world
+keeps `handover/` with its Activated record (the guard passes it); a fork
+carries no `handover/` (tested). CP19 (DECIDED): once the move is durable
+(the rename, then both parent folders fsynced), the rest of the import
+folder (`received/`, the archive, the manifest and admission) is removed;
+the moved world keeps its own `handover/` with the Activated record and the
+install ledger lives elsewhere, so nothing there is needed. A failed fsync
+keeps it. A crash between the move and the removal leaves an import folder
+with no `working`: every pass first sweeps such folders and removes one
+only when a world in the worlds folder carries its transfer's Activated
+record and passes the open guard (fsyncing both folders again first); an
+import still receiving has no `working` either and is never touched
+(tests: `handover_promote_removes_the_import_folder_only_once_the_move_is_durable`,
+`handover_promote_removes_a_crashed_moves_leftovers_and_nothing_else`). A
+hand-made twin (a `working` beside a world that already carries its
+transfer) is still left alone. A
+worlds folder on another drive (`AXENSTAX_WORLDS_DIR` elsewhere, the rename
+fails with `CrossesDevices`) has no copy path: the import stays, and the
+world list shows `copy::import_on_other_drive` ("Move one of them so both are on the
+same drive"; CP20, CP18 review LOW-6: the line names no environment variable). CP20
+(CP18 review LOW-2): an Activated import that stays put says why in the world list:
+a damaged handover record (`copy::import_record_damaged`, the open guard refuses) or a
+move that failed for another reason, retried at the next lobby entry or refresh
+(`copy::import_not_moved_yet`: "…will try again when you come back to the world list"; CP22, CP21 review LOW-2); a hand-made twin of a world already moved in and a
+quarantined import show no line (the twin is logged once and never moved or deleted;
+the quarantine has the resumer's notice). Before
+activation, and on quarantine, there is no card, as above. Tests:
+`handover_promote_moves_an_activated_import_into_the_world_list_once`,
+`handover_promote_refuses_another_drive_a_held_lock_and_a_quarantine`, and
+the GPU harness `game_harness_handover_recipient_opens_and_hosts_the_activated_world_from_the_lobby`
+(Activated → listed → opened by the lobby's own load path → hosted → a
+joiner joins). The
+open guard refuses the import until it is Activated,
+whatever the inert marker says: any `ready-*`, `prepared-*` or
+`quarantined-*` record of a transfer with no `activated-<same>.dat`
+refuses (`NOT_ACTIVATED`), and an Activated record that doesn't decode
+refuses (`AUTHORITY_UNREADABLE`). CP14 (CP10 review LOW-3): "decodes" means
+the whole record, parsed read-only (`phase::activated_record_checks`): the
+label, the core (bound to the transfer), the Prepared hash, the Commit hash,
+the 16-byte bearer (its copy zeroed) and nothing after it; when the
+transfer's receipt (`prepared-<t>.dat`) is readable the record must name its
+Prepared, and a receipt that exists but doesn't decode refuses. The right
+label over a truncated payload refuses (tested). `Receiver::activate` doesn't
+look for a quarantine record; the guard fails closed on one instead
+(`NOT_ACTIVATED`). `save_refusal_in` carries it to every open and save path. Once a second the live session looks for the
+Activated record and moves to `Activated`; the game then ends the
+session and leaves the joined world (the source retired its copy) with
+"is yours now". Opening the imported world as host is the next slice.
+Tests: a recipient restarted between the ack and the proof (everything
+dropped; the source's and the recipient's start-up scans) ends Activated,
+with the bearer in both records (0600) and the import refused until then;
+the bearer reaches no archive or copy; the source's Abort after the ack
+quarantines and nothing resumes it; a recipient resumed after the root
+and attestations expired activates (records minted at t = 100 against
+today's clock, and the restart test with a clock two days on); an `.axeworld` import never brings
+`handover/` (the archive is an allowlist, and one crafted with
+`handover/` entries lands without it).
+
+Inert imports (P3): before writing any of the import the recipient durably
+writes `<data>/handover/imports/inert-<transfer>.dat` (0600; temp, sync,
+rename, directory sync) binding the transfer and snapshot world; Prepared
+clears it. An abort or timeout before Prepared (including at Ready) removes
+exactly that transfer's import: its `handover-<world>-<transfer>` directory,
+any `.handover-receive-<transfer>-*` scratch, its Ready marker
+(`MarkerStore::discard_inert_ready`, refused once a Prepared or Activated
+marker exists), then the inert marker. After Prepared a failure quarantines
+and deletes nothing; nothing Activated is ever deleted. A bounded sweep
+(`live::inert::sweep`, at most 256 entries) discards marked imports with no
+live session, at native start-up and before a new recipient session; an
+unmarked directory is never touched.
+
+
+### Personal continuation adapter — private v90 checkpoint, acceptance pending
+
+This source checkpoint adds `PersonalSync = 73`, the final
+`JoinAccept.has_personal_state` field, and the final authoritative
+`PlayerEventType::Respawned.respawns: u32` counter. It remains private v90;
+Handover stays tag72 and C3d remains historically accepted v89 with Strict
+partial/parked and Mirror the default. Combined regression and actual loader,
+role-transition and second-transfer execution controls remain pending. Earlier
+private checkpoint imports without the retained personal manifest are refused;
+this is not a compatibility promise for those source checkpoints.
+
+The importer durably retains the exact bounded authenticated manifest in
+`handover/personal-manifest.dat` before Ready. Activation's checked core and
+that manifest select personal records by verified npub, lineage, generation,
+transfer, member hash and admitted schema. Native loading installs the selected
+recipient's full window, armour, vitals and schema1 progression; it does not
+select positional player rows or donate the previous host's bag. A guest or
+other identity receives no transferred personal record. Missing/corrupt expected
+proof or current state refuses gameplay and preserves bytes.
+
+The canonical `joiners/<npub>.dat` writer is v3, retaining the whole window,
+correction debt and obligation history and adding bound schema1 progression.
+Known v1/v2 dispatch explicitly and preserve their prior history/debt rules.
+The whole file remains at most64KiB. Frozen transfer sidecars are explicit v2
+seeds, and each new transfer captures current progression with its new context;
+a previous mutable binding is not copied into the next seed. Combined v3 and
+actual PersonalSync packet size are checked before freeze/retirement. Oversized
+state refuses; nothing is truncated. Bootstrap atomically replaces the seed
+once, confirms file/directory durability before gameplay, and never falls back
+to a frozen seed when an existing v3 is corrupt. A later load seeing a complete
+v3 retries durability rather than treating presence as proof of a durable rename.
+
+Local primary/autosave authority is the exact selected WorldSave snapshot's
+final `local_personal` field. This uses the same bounded canonical v3 codec and
+commits with world/chest state. The first imported local snapshot gains a durable
+personal baseline before play; explicit discard restores the matching primary
+world and personal state. A selected snapshot refreshes the canonical mirror
+before play. A dedicated local-to-remote role cut saves the actual current server
+world with the local field cleared and removes old autosaves from live selection;
+a native active owner cannot attach a second simultaneous remote body of the
+same persona. These role/discard execution controls are still pending.
+
+PersonalSync carries a bounded server-selected snapshot and an exact Applied
+acknowledgement bound to action namespace, physical respawn generation, revision,
+linked numbered window event and payload hash. Actual window/life application
+precedes progression installation and Applied. Initial authorisation/prediction
+is held before installation; polling and control traffic continue. Repeats are
+inert, superseded acknowledgements cannot release a new snapshot, and queued
+respawns are observed separately from actual application. The physical counter
+reserves checked addition before any respawn mutation; exhaustion releases the
+session and retains its record without wrapping. This does not change the
+parked global Strict lifecycle.
+
+Known schema1 maps are replaced without reward/claim/payout calls. Server updates
+persist the live holder for later rejoin. Unsupported non-empty active quests,
+quest baselines and active local penalty/cooldown state refuse transfer rather
+than being silently dropped. Ordinary remote reconnect's transient villager
+penalty cooldown behaviour is inherited and is not preserved by schema1/v3;
+this checkpoint does not claim complete personal timer continuation. A verified
+Plan body is restored unchanged only when its developed boolean matches the
+saved marker stub; its latent exposure is never replaced by the stub's zero.
+
+Freeze readiness includes typed action/request FIFO, deferred edits, retained
+results/Applied fences, numbered window quiescence and exact PersonalSync
+application. Focused real-order controls and independent final review remain
+required before acceptance.

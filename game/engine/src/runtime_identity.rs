@@ -50,9 +50,14 @@ struct StoredKey {
 
 /// Load the runtime key, or mint and persist one (0600) on first use.
 ///
-/// A corrupt file re-mints, which costs exactly one bunker tap to re-attest —
-/// an acceptable degradation, because the key addresses nothing durable on
-/// its own.
+/// A corrupt file re-mints, which costs exactly one bunker tap to re-attest.
+/// What the key addresses: the signalling events, and the handover events
+/// this install signs (Prepared, Commit, the PreparedAck), which peers verify
+/// against it. What it doesn't: which durable handover records on this disk
+/// are this install's own. That is the install-local handover ledger
+/// (`handover::ledger`, CP13), so a re-mint strands no retirement or receipt;
+/// a re-minted recipient still verifies every event it reads back against
+/// the source runtime its receipt names.
 pub fn load_or_mint_runtime(path: &Path) -> Result<Keys, String> {
     match std::fs::read(path) {
         Ok(bytes) => {

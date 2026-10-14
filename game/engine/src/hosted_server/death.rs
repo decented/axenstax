@@ -98,6 +98,11 @@ impl HostedServer {
             // both copies. The replacement carries an empty debt, explicitly.
             let n = self.send_inventory_sync(i, window, crate::container_window::CorrectionDebt::default());
             self.server.players[i].window_events.death_replace = Some(n);
+            #[cfg(not(target_arch = "wasm32"))]
+            if self.server.players[i].personal.is_some() && let Err(error) = self.start_personal(i, n, true) {
+                log::warn!("Death personal delivery refused: {error}");
+                let _ = self.release_slot(i, Some("Personal state couldn't be delivered after death."));
+            }
         }
     }
 
@@ -151,7 +156,11 @@ impl HostedServer {
 
     pub(super) fn joiner_requests_blocked(&self, i: usize) -> bool {
         self.server.players.get(i).is_some_and(|sp| {
-            sp.server_simulated && (sp.combat.dead || sp.window_events.death_replace.is_some())
+            #[cfg(not(target_arch = "wasm32"))]
+            let personal_wait = sp.personal.is_some() && !sp.personal_delivery.initialised;
+            #[cfg(target_arch = "wasm32")]
+            let personal_wait = false;
+            sp.server_simulated && (sp.combat.dead || sp.window_events.death_replace.is_some() || personal_wait)
         })
     }
 

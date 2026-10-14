@@ -264,7 +264,7 @@ pub enum OwnLifeEvent {
     /// MP-D2b — with the cause the server recorded (the death-screen line).
     Died(crate::survival::DamageCause),
     /// The server respawned us here (after our `Respawn` request).
-    Respawned(glam::Vec3),
+    Respawned { at: glam::Vec3, respawns: u32 },
     /// MP-D2b — this many hits the server landed on our body wear our armour
     /// (`PlayerSlot::wear_armour` once per hit). C3a-fix-1 — with its window
     /// event (`PlayerEventPacket.window_event`).
@@ -481,6 +481,8 @@ pub struct RemoteClient {
     /// bounded like `pending_grants`.
     pub pending_outcomes: Vec<RequestOutcome>,
     pub pending_kills: Vec<protocol::KillEventPacket>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) personal_inbox: Option<crate::personal_sync::Inbox>,
     /// C3c-1-fix (M-4) — the server's refusals of our use-tagged edits
     /// (`StateUpdatePacket::refused_uses`), accumulated across every
     /// StateUpdate since the game loop last drained them (a delta, never read
@@ -501,6 +503,9 @@ pub struct RemoteClient {
     /// loop applies no event while it holds unsent edits or ops logged before
     /// it, so the count at sending is the count they were made at.
     events_applied: u32,
+    /// Physical respawn generation, advanced by actual GameState application.
+    pub(crate) actor_respawns: u32,
+    received_actor_respawns: u32,
     /// Entity-event and block-change DELTAS accumulated across every
     /// StateUpdate since the game loop last drained them. `latest_state` is
     /// last-write-wins, which is right for snapshot fields (players,
@@ -555,7 +560,29 @@ pub struct RemoteClient {
     /// at all (`docs/foundations/2026-09-05-world-chat.md` §6).
     #[cfg(not(target_arch = "wasm32"))]
     pub pending_chat: Vec<protocol::ChatDeliverPacket>,
+    /// World handover control frames from the host (payloads, oldest
+    /// first), drained by the game loop each frame. Bounded like
+    /// `pending_chat`; past the bound a frame is dropped and the handover it
+    /// belonged to fails its own checks.
+    #[cfg(not(target_arch = "wasm32"))]
+    handover_inbox: std::collections::VecDeque<Vec<u8>>,
+    #[cfg(not(target_arch = "wasm32"))]
+    handover_inbox_bytes: usize,
+    /// The connection is lent to a world-handover session: nothing is read
+    /// or sent here, and the session isn't over (`state` is untouched).
+    parked: bool,
+    /// Gameplay that arrived while parked, handed back with the connection
+    /// on a cancelled handover: read before the transport, in order.
+    replay: std::collections::VecDeque<Vec<u8>>,
 }
+
+/// Most handover control frames / bytes the joined client holds between
+/// frames (a proposal and the pause notices are all that arrive while it
+/// still owns the connection).
+#[cfg(not(target_arch = "wasm32"))]
+pub const HANDOVER_INBOX_FRAMES: usize = 32;
+#[cfg(not(target_arch = "wasm32"))]
+pub const HANDOVER_INBOX_BYTES: usize = 256 * 1024;
 
 /// C3c-1-fix (M-4) — most refusal notices [`RemoteClient::pending_refused_uses`]
 /// holds before the game loop drains them (an honest server sends at most a
@@ -837,10 +864,14 @@ impl RemoteClient {
             pending_life_events: Vec::new(),
             pending_outcomes: Vec::new(),
             pending_kills: Vec::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            personal_inbox: None,
             pending_refused_uses: Vec::new(),
             respawn_resend_from: None,
             window_op_seq: 0,
             events_applied: 0,
+            actor_respawns: 0,
+            received_actor_respawns: 0,
             pending_operator_snapshot_json: None,
             pending_entity_batches: Vec::new(),
             pending_block_changes: Vec::new(),
@@ -851,6 +882,12 @@ impl RemoteClient {
             queued_requests: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
             pending_chat: Vec::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            handover_inbox: Default::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            handover_inbox_bytes: 0,
+            parked: false,
+            replay: Default::default(),
         }
     }
 
@@ -902,10 +939,14 @@ impl RemoteClient {
             pending_life_events: Vec::new(),
             pending_outcomes: Vec::new(),
             pending_kills: Vec::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            personal_inbox: None,
             pending_refused_uses: Vec::new(),
             respawn_resend_from: None,
             window_op_seq: 0,
             events_applied: 0,
+            actor_respawns: 0,
+            received_actor_respawns: 0,
             pending_operator_snapshot_json: None,
             pending_entity_batches: Vec::new(),
             pending_block_changes: Vec::new(),
@@ -916,19 +957,33 @@ impl RemoteClient {
             queued_requests: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
             pending_chat: Vec::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            handover_inbox: Default::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            handover_inbox_bytes: 0,
+            parked: false,
+            replay: Default::default(),
         }
     }
 
     /// Poll for server messages. Call each frame.
     /// Returns true if state changed (e.g., join accepted, state update received).
     pub fn poll(&mut self) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.personal_inbox.as_ref().is_some_and(|inbox| inbox.timed_out()) {
+            self.state = ConnectionState::Failed("Personal state wasn't received and applied in time.".into()); return true;
+        }
+        // A connection lent to a handover session is read by that session.
+        if self.parked {
+            return false;
+        }
         let mut changed = false;
         // Read BEFORE draining: every packet the peer sent before the link
         // went (a kick's JoinReject included) is then already queued, and is
         // handled first — so its reason wins over the generic one below.
         let transport_closed = self.transport.is_closed();
 
-        while let Some(packet) = self.transport.try_recv_from_server() {
+        while let Some(packet) = self.replay.pop_front().or_else(|| self.transport.try_recv_from_server()) {
             if let Some((ptype, payload)) = protocol::deserialize_header(&packet) {
                 match ptype {
                     PacketType::JoinAccept => {
@@ -983,6 +1038,10 @@ impl RemoteClient {
                                     "Joined server as player {} (seed: {}, mode: {:?})",
                                     accept.player_index, accept.seed, accept.play_mode
                                 );
+                                #[cfg(not(target_arch = "wasm32"))]
+                                { self.personal_inbox = accept.has_personal_state.then(|| crate::personal_sync::Inbox::new(accept.action_session, accept.action_life)); }
+                                self.actor_respawns = accept.action_life;
+                                self.received_actor_respawns = accept.action_life;
                                 self.inventory_mode = accept.inventory_mode;
                                 self.action_journal = Some(crate::action_journal::ActionJournal::new(accept.action_session, accept.action_life));
                                 self.pack_flight = None;
@@ -1179,11 +1238,14 @@ impl RemoteClient {
                                         changed = true;
                                     }
                                 }
-                                protocol::PlayerEventType::Respawned { x, y, z } => {
+                                protocol::PlayerEventType::Respawned { x, y, z, respawns } => {
                                     if self.player_index() == Some(event.player_index) {
                                         // The server has answered: stop asking,
                                         // whether or not the position is usable.
-                                        self.respawn_resend_from = None;
+                                        if *respawns <= self.received_actor_respawns { continue; }
+                                        if self.received_actor_respawns.checked_add(1) != Some(*respawns) {
+                                            self.state = ConnectionState::Failed("Invalid physical respawn generation".into()); changed = true; continue;
+                                        }
                                         // Held to the same range as a JoinAccept
                                         // spawn: a hostile host could otherwise
                                         // put us anywhere finite.
@@ -1192,8 +1254,11 @@ impl RemoteClient {
                                             && join_spawn_in_range(at)
                                             && self.pending_life_events.len() < MAX_LIFE_EVENTS_PER_POLL
                                         {
-                                            self.pending_life_events
-                                                .push(OwnLifeEvent::Respawned(at));
+                                            #[cfg(not(target_arch = "wasm32"))]
+                                            if let Some(inbox) = &mut self.personal_inbox && let Err(error) = inbox.observe_respawn(*respawns) { self.state = ConnectionState::Failed(error); }
+                                            self.received_actor_respawns = *respawns;
+                                            self.respawn_resend_from = None;
+                                            self.pending_life_events.push(OwnLifeEvent::Respawned { at, respawns: *respawns });
                                             changed = true;
                                         }
                                     }
@@ -1403,6 +1468,30 @@ impl RemoteClient {
                             changed = true;
                         }
                     }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    PacketType::PersonalSync => {
+                        let result = protocol::safe_deserialize::<protocol::PersonalSyncPacket>(payload).map_err(|e| e.to_string()).and_then(|packet| {
+                            let protocol::PersonalSyncPacket::Snapshot(value) = packet else { return Err("Unexpected personal applied packet".into()); };
+                            self.personal_inbox.as_mut().ok_or("Unexpected personal snapshot".to_string())?.push(value)
+                        });
+                        match result {
+                            Ok(Some(ack)) => self.send_raw(&protocol::serialize_packet(PacketType::PersonalSync, &protocol::PersonalSyncPacket::Applied(ack))),
+                            Ok(None) => (),
+                            Err(error) => { self.state = ConnectionState::Failed(error); changed = true; }
+                        }
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    PacketType::Handover => {
+                        if self.handover_inbox.len() < HANDOVER_INBOX_FRAMES
+                            && self.handover_inbox_bytes + payload.len() <= HANDOVER_INBOX_BYTES
+                        {
+                            self.handover_inbox_bytes += payload.len();
+                            self.handover_inbox.push_back(payload.to_vec());
+                            changed = true;
+                        } else {
+                            log::warn!("Dropped a handover message: too many waiting");
+                        }
+                    }
                     PacketType::ResourcePackSuggest => {
                         // Server suggests a resource pack (Spec 03 §11.6). Store it
                         // for the game loop to prompt the player + (on accept) load.
@@ -1487,6 +1576,7 @@ impl RemoteClient {
     /// put there) — the number the server will acknowledge it by. `None`
     /// when nothing was sent (not connected).
     pub fn send_input(&mut self, input: &protocol::InputPacket) -> Option<u64> {
+        if !self.personal_ready() { return None; }
         if !matches!(self.state, ConnectionState::Connected { .. }) {
             return None;
         }
@@ -1598,6 +1688,7 @@ impl RemoteClient {
     /// ([`Self::take_queued_requests`]), so the server reads it after them.
     /// Dropped before the join completes, as a send would be.
     pub fn queue_request(&mut self, stamp: u64, request: Request) {
+        if !self.personal_ready() { return; }
         if matches!(self.state, ConnectionState::Connected { .. }) {
             self.queued_requests.push((stamp, request));
         }
@@ -1631,6 +1722,7 @@ impl RemoteClient {
     /// C3b-fix-b (B-M1) — send `request` now, stamped with the window events
     /// applied (as each `send_*` does).
     pub fn send_request(&mut self, request: Request) {
+        if !self.personal_ready() { return; }
         match request {
             Request::Attack(pkt) => self.send_entity_attack(&pkt),
             Request::Interact(pkt) => self.send_entity_interact(&pkt),
@@ -1654,6 +1746,7 @@ impl RemoteClient {
     /// is applied locally first — the host's world is the one the power sim runs
     /// in, so its broadcast is the only truth about what the switch did.
     pub fn send_device_interact(&mut self, pos: (i32, i32, i32)) {
+        if !self.personal_ready() { return; }
         if !matches!(self.state, ConnectionState::Connected { .. }) {
             return;
         }
@@ -1667,6 +1760,7 @@ impl RemoteClient {
     /// MP-D2b — ask the server to land a swing on one of its entities. No-op
     /// before the join completes — mirrors `send_input`'s guard.
     pub fn send_entity_attack(&mut self, pkt: &protocol::EntityAttackPacket) {
+        if !self.personal_ready() { return; }
         if !matches!(self.state, ConnectionState::Connected { .. }) {
             return;
         }
@@ -1678,6 +1772,7 @@ impl RemoteClient {
     /// MP-D2b — ask the server for a one-shot interaction with one of its
     /// mobs. No-op before the join completes.
     pub fn send_entity_interact(&mut self, pkt: &protocol::EntityInteractPacket) {
+        if !self.personal_ready() { return; }
         if !matches!(self.state, ConnectionState::Connected { .. }) {
             return;
         }
@@ -1690,6 +1785,7 @@ impl RemoteClient {
     /// the join completes. Not native-only: a web joiner eats and sleeps on
     /// the server too.
     pub fn send_item_action(&mut self, pkt: &protocol::ItemActionPacket) {
+        if !self.personal_ready() { return; }
         if !matches!(self.state, ConnectionState::Connected { .. }) {
             return;
         }
@@ -1708,6 +1804,7 @@ impl RemoteClient {
     /// our values before it of the player slots it acts on (both empty for
     /// any other op); C3b-fix-a — and our own verdict on it (`client_ok`).
     pub fn send_window_op(&mut self, logged: crate::window_ops::LoggedOp) {
+        if !self.personal_ready() { return; }
         if !matches!(self.state, ConnectionState::Connected { .. }) {
             return;
         }
@@ -1718,6 +1815,22 @@ impl RemoteClient {
 
     /// C3a-fix-1 — this client applied the server's window event `event`
     /// (0 = none): the count every later packet reports goes up to it.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn applied_window_event(&self) -> u32 { self.events_applied }
+    pub(crate) fn applied_actor_respawns(&self) -> u32 { self.actor_respawns }
+    /// Only a greater authoritative counter changes the applied physical life.
+    pub(crate) fn apply_actor_respawn(&mut self, respawns: u32) -> bool {
+        if respawns <= self.actor_respawns { return false; }
+        self.actor_respawns = respawns; true
+    }
+    pub(crate) fn personal_ready(&self) -> bool {
+        #[cfg(not(target_arch = "wasm32"))] { self.personal_inbox.as_ref().is_none_or(|inbox| inbox.initialised()) }
+        #[cfg(target_arch = "wasm32")] { true }
+    }
+    pub(crate) fn has_personal_state(&self) -> bool {
+        #[cfg(not(target_arch = "wasm32"))] { self.personal_inbox.is_some() }
+        #[cfg(target_arch = "wasm32")] { false }
+    }
     pub fn note_window_event(&mut self, event: u32) {
         self.events_applied = self.events_applied.max(event);
         self.retire_applied_receipts();
@@ -1768,6 +1881,49 @@ impl RemoteClient {
     /// new death screen. The next death screen's own Respawn starts it afresh.
     pub fn cancel_respawn_resend(&mut self) {
         self.respawn_resend_from = None;
+    }
+
+    /// World handover control frames the host sent since the last call.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn take_handover_frames(&mut self) -> Vec<Vec<u8>> {
+        self.handover_inbox_bytes = 0;
+        self.handover_inbox.drain(..).collect()
+    }
+
+    /// Send one packet as-is (a handover Decline while still joined).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn send_raw(&self, packet: &[u8]) {
+        if !self.parked {
+            self.transport.send_to_server(packet);
+        }
+    }
+
+    /// World handover: lend this client's live connection to the independent
+    /// control session. What remains is closed, so leaving the joined world
+    /// (`disconnect`, drop) cannot touch the link, and the session isn't
+    /// treated as over while parked.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn park_transport(&mut self) -> Box<dyn ClientTransport> {
+        self.parked = true;
+        std::mem::replace(&mut self.transport, Box::new(crate::transport::ClosedClientTransport))
+    }
+
+    /// A cancelled handover gives the connection back, with the gameplay
+    /// that arrived meanwhile; play continues from it in order.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn restore_transport(
+        &mut self,
+        transport: Box<dyn ClientTransport>,
+        replay: std::collections::VecDeque<Vec<u8>>,
+    ) {
+        self.transport = transport;
+        self.replay = replay;
+        self.parked = false;
+    }
+
+    /// Is the connection lent to a handover session?
+    pub fn is_parked(&self) -> bool {
+        self.parked
     }
 
     /// Send a graceful disconnect to the server.
@@ -3016,6 +3172,7 @@ mod tests {
             inventory_mode: crate::action_identity::InventoryMode::Mirror,
             action_session: [7; 16],
             action_life: 0,
+            has_personal_state: false,
         }
     }
 
@@ -3644,13 +3801,13 @@ mod tests {
         life_event(&srv, 3, protocol::PlayerEventType::Died);
         // Someone else's death is theirs to show, not ours to act on.
         life_event(&srv, 4, protocol::PlayerEventType::Died);
-        life_event(&srv, 3, protocol::PlayerEventType::Respawned { x: 1.5, y: 70.0, z: -2.5 });
+        life_event(&srv, 3, protocol::PlayerEventType::Respawned { x: 1.5, y: 70.0, z: -2.5, respawns: 1 });
         rc.poll();
         assert_eq!(
             std::mem::take(&mut rc.pending_life_events),
             vec![
                 OwnLifeEvent::Died(crate::survival::DamageCause::Generic),
-                OwnLifeEvent::Respawned(glam::Vec3::new(1.5, 70.0, -2.5)),
+                OwnLifeEvent::Respawned { at: glam::Vec3::new(1.5, 70.0, -2.5), respawns: 1 },
             ]
         );
     }
@@ -3697,13 +3854,13 @@ mod tests {
         rc.poll();
         assert!(rc.pending_life_events.is_empty(), "a stale Died is dropped");
         // The answer, then a genuine new death.
-        life_event(&srv, 1, protocol::PlayerEventType::Respawned { x: 0.5, y: 70.0, z: 0.5 });
+        life_event(&srv, 1, protocol::PlayerEventType::Respawned { x: 0.5, y: 70.0, z: 0.5, respawns: 1 });
         life_event(&srv, 1, protocol::PlayerEventType::DiedOf { cause: protocol::WireDamageCause::Lava });
         rc.poll();
         assert_eq!(
             std::mem::take(&mut rc.pending_life_events),
             vec![
-                OwnLifeEvent::Respawned(glam::Vec3::new(0.5, 70.0, 0.5)),
+                OwnLifeEvent::Respawned { at: glam::Vec3::new(0.5, 70.0, 0.5), respawns: 1 },
                 OwnLifeEvent::Died(crate::survival::DamageCause::Lava),
             ]
         );
@@ -3746,7 +3903,7 @@ mod tests {
     #[test]
     fn a_respawned_event_with_a_non_finite_position_is_dropped() {
         let (srv, mut rc) = joined_as(0);
-        life_event(&srv, 0, protocol::PlayerEventType::Respawned { x: f32::NAN, y: 0.0, z: 0.0 });
+        life_event(&srv, 0, protocol::PlayerEventType::Respawned { x: f32::NAN, y: 0.0, z: 0.0, respawns: 1 });
         rc.poll();
         assert!(rc.pending_life_events.is_empty());
     }
@@ -3804,13 +3961,13 @@ mod tests {
         assert_eq!(respawn_requests_seen(&srv), 2, "and every 20 after");
 
         // Someone else's respawn is not the answer.
-        life_event(&srv, 5, protocol::PlayerEventType::Respawned { x: 0.5, y: 70.0, z: 0.5 });
+        life_event(&srv, 5, protocol::PlayerEventType::Respawned { x: 0.5, y: 70.0, z: 0.5, respawns: 1 });
         rc.poll();
         input_ticks(&mut rc, 20);
         assert_eq!(respawn_requests_seen(&srv), 1, "still asking");
 
         // Ours is.
-        life_event(&srv, 2, protocol::PlayerEventType::Respawned { x: 0.5, y: 70.0, z: 0.5 });
+        life_event(&srv, 2, protocol::PlayerEventType::Respawned { x: 0.5, y: 70.0, z: 0.5, respawns: 1 });
         rc.poll();
         input_ticks(&mut rc, 60);
         assert_eq!(respawn_requests_seen(&srv), 0, "answered — no more requests");
@@ -3849,7 +4006,7 @@ mod tests {
             (0.5, 1.0e6, 0.5),
         ] {
             let (srv, mut rc) = joined_as(0);
-            life_event(&srv, 0, protocol::PlayerEventType::Respawned { x, y, z });
+            life_event(&srv, 0, protocol::PlayerEventType::Respawned { x, y, z, respawns: 1 });
             rc.poll();
             assert!(
                 rc.pending_life_events.is_empty(),
@@ -3857,11 +4014,11 @@ mod tests {
             );
         }
         let (srv, mut rc) = joined_as(0);
-        life_event(&srv, 0, protocol::PlayerEventType::Respawned { x: 25.5, y: 64.0, z: -40.5 });
+        life_event(&srv, 0, protocol::PlayerEventType::Respawned { x: 25.5, y: 64.0, z: -40.5, respawns: 1 });
         rc.poll();
         assert_eq!(
             rc.pending_life_events,
-            vec![OwnLifeEvent::Respawned(glam::Vec3::new(25.5, 64.0, -40.5))],
+            vec![OwnLifeEvent::Respawned { at: glam::Vec3::new(25.5, 64.0, -40.5), respawns: 1 }],
             "an ordinary respawn still goes through"
         );
     }

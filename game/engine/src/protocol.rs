@@ -152,6 +152,12 @@ pub enum PacketType {
     Recovery = 70,
     /// Client → Server: applied receipt metadata, independent of movement.
     AppliedActionAck = 71,
+    /// Both ways, between a source host and ONE selected joiner only: an
+    /// opaque bounded world-handover control frame (`handover::live::wire`).
+    /// PRIVATE PROVISIONAL (integrated mp-handover, v90; accepted C3d
+    /// v89 uses tags 68–71). Not advertised as delivered before final gates.
+    Handover = 72,
+    PersonalSync = 73,
     /// Server → Client: exact sequential pack result and canonical window.
     PackResult = 74,
     /// Server → Client: numbered live entity cargo view or session close.
@@ -297,7 +303,22 @@ pub struct JoinAcceptPacket {
     /// Fresh random action namespace; reconnect never reuses an old suffix.
     pub action_session: [u8; 16],
     pub action_life: u32,
+    /// A separate bounded initial snapshot follows the numbered join Replace.
+    pub has_personal_state: bool,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersonalSnapshot {
+    pub session: [u8; 16], pub life: u32, pub revision: u64, pub window_event: u32,
+    pub context: crate::personal_value::PersonalContext, pub bytes: Vec<u8>,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersonalAck {
+    pub session: [u8; 16], pub life: u32, pub revision: u64, pub window_event: u32,
+    pub snapshot: [u8; 32],
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PersonalSyncPacket { Snapshot(PersonalSnapshot), Applied(PersonalAck) }
 
 /// The rule + generation flags of a world that a joiner needs to generate and
 /// behave like the host (v65, gap-audit T2-9). Exactly the `WorldMeta` fields
@@ -2157,7 +2178,7 @@ pub enum PlayerEventType {
     /// `server::MIN_DEAD_TICKS_BEFORE_RESPAWN` ticks to honour. Sent to that
     /// player ALONE; their own client moves there (if the position is inside
     /// the join-spawn range).
-    Respawned { x: f32, y: f32, z: f32 },
+    Respawned { x: f32, y: f32, z: f32, respawns: u32 },
     /// MP-D2b (v70) — `Died`, naming what killed the body (the mob's species,
     /// lava, a fall …) for the death screen and the client's own records.
     /// The server sends this instead of `Died`. Since v86 every death,
@@ -2763,12 +2784,18 @@ pub struct ServerAnnouncePacket {
 ///   `slots`): the correction debt the whole-window replacement carries, so a
 ///   joiner's unpaid correction debt survives a reconnect on both copies
 ///   (empty after a death).
-/// - v89 (provisional, C3d source; not delivered): typed Action (68),
+/// - v89 (2026-10-13, C3d partial delivery accepted locally; no push): Action (68),
 ///   ActionReceipt (69), Recovery (70) and AppliedActionAck (71) metadata.
 ///   JoinAccept appends fixed inventory
 ///   mode, random128-bit action namespace and life. Recovery Describe is
 ///   paginated; world-stream receipt/fence application is distinct from
-///   socket reception.
+///   socket reception. Mirror remains default. Strict is PARTIAL / PARKED,
+///   internally selected only; unsupported mutations fail closed. Canonical
+///   recovery installation, durable-body release and suffix replay are pending.
+/// - v90 PRIVATE PROVISIONAL (integrated mp-handover): Handover (tag 72),
+///   alongside the accepted C3d v89 metadata above; final combined gates are
+///   required before this handover protocol is delivered.
+
 /// - v91 (D2c-2): sequential unpredicted source-backed entity packs in
 ///   both inventory modes; PackResult 74, PackView 75, explicit PACK flag.
 pub const PROTOCOL_VERSION: u32 = 91;
@@ -2847,6 +2874,8 @@ pub fn deserialize_header(data: &[u8]) -> Option<(PacketType, &[u8])> {
         69 => PacketType::ActionReceipt,
         70 => PacketType::Recovery,
         71 => PacketType::AppliedActionAck,
+        72 => PacketType::Handover,
+        73 => PacketType::PersonalSync,
         74 => PacketType::PackResult,
         75 => PacketType::PackView,
         _ => return None,
@@ -3702,7 +3731,7 @@ mod tests {
         //   OpenGrave (= 13) and GraveAt (= 7).
         // v87 (2026-10-09, Sidecar): CreativeGive (= 14).
         // v88 (2026-10-09, OC): `InventorySyncPacket.owed` (after `slots`).
-        // v89 (provisional, C3d): Action (68), ActionReceipt (69),
+        // v89 (C3d partial delivery accepted locally): Action (68), ActionReceipt (69),
         //   Recovery (70), AppliedActionAck (71); JoinAccept
         //   mode/namespace/life.
         assert_eq!(PROTOCOL_VERSION, 91);
@@ -3737,6 +3766,7 @@ mod tests {
             inventory_mode: crate::action_identity::InventoryMode::Mirror,
             action_session: [7; 16],
             action_life: 0,
+            has_personal_state: false,
         }
     }
 
@@ -4410,9 +4440,10 @@ mod tests {
         assert_eq!(PacketType::WindowOp as u8, 64);
         assert_eq!(deserialize_header(&[64, 0]).map(|(p, _)| p), Some(PacketType::WindowOp));
         // C3b-1 takes 65/66; server-owned death takes 67 (InventorySync);
-        // C3d (v89) takes 68..=71 (Action, ActionReceipt, Recovery,
-        // AppliedActionAck).
+        // Accepted C3d v89 uses 68–71; handover v90 appends 72.
         assert_eq!(deserialize_header(&[68, 0]).map(|(p, _)| p), Some(PacketType::Action));
+        assert_eq!(deserialize_header(&[69, 0]).map(|(p, _)| p), Some(PacketType::ActionReceipt));
+        assert_eq!(deserialize_header(&[70, 0]).map(|(p, _)| p), Some(PacketType::Recovery));
         assert_eq!(deserialize_header(&[71, 0]).map(|(p, _)| p), Some(PacketType::AppliedActionAck));
         assert_eq!(deserialize_header(&[72, 0]), None, "72 remains reserved for handover before the normal merge");
     }
@@ -4784,7 +4815,7 @@ mod tests {
         assert!(payload.is_empty(), "a Respawn request asserts nothing but the wish");
         for event in [
             PlayerEventType::Died,
-            PlayerEventType::Respawned { x: 1.5, y: 70.0, z: -3.5 },
+            PlayerEventType::Respawned { x: 1.5, y: 70.0, z: -3.5, respawns: 1 },
             PlayerEventType::DiedOf { cause: WireDamageCause::Mob(EntityKind::Shark) },
             PlayerEventType::ArmourWorn { hits: 3 },
             PlayerEventType::Bred { offspring: EntityKind::Mule },
