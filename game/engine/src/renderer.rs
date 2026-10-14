@@ -17,19 +17,19 @@ pub struct GpuChunkMesh {
     pub index_count: u32,
 }
 
-/// #131 — the transparent-solid render pipeline (glass + future see-through
-/// blocks). Identical to the water pipeline (alpha blend, depth read-only, no
-/// back-face cull) but binds `fs_transparent`, which outputs the texture's own
-/// alpha instead of water's blue tint. Built once and called from both the
-/// native and headless renderer constructors so the two never drift.
+/// Coupled solid-transparency pipelines for native and headless worlds:
+/// opaque texels write depth without colour, then the alpha-blended colour
+/// pass uses LessEqual to paint those same texels. Holes and partial glass
+/// remain depth-read-only; water behind opaque foliage respects its depth.
 fn build_transparent_pipeline(
     device: &wgpu::Device,
     shader: &wgpu::ShaderModule,
     pipeline_layout: &wgpu::PipelineLayout,
     surface_format: wgpu::TextureFormat,
+    depth_only: bool,
 ) -> wgpu::RenderPipeline {
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("transparent_render_pipeline"),
+        label: Some(if depth_only { "solid_cutout_depth_pipeline" } else { "transparent_render_pipeline" }),
         layout: Some(pipeline_layout),
         vertex: wgpu::VertexState {
             module: shader,
@@ -39,12 +39,12 @@ fn build_transparent_pipeline(
         },
         fragment: Some(wgpu::FragmentState {
             module: shader,
-            entry_point: Some("fs_transparent"),
+            entry_point: Some(if depth_only { "fs_solid_depth" } else { "fs_transparent" }),
             compilation_options: Default::default(),
             targets: &[Some(wgpu::ColorTargetState {
                 format: surface_format,
-                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                write_mask: wgpu::ColorWrites::ALL,
+                blend: if depth_only { None } else { Some(wgpu::BlendState::ALPHA_BLENDING) },
+                write_mask: if depth_only { wgpu::ColorWrites::empty() } else { wgpu::ColorWrites::ALL },
             })],
         }),
         primitive: wgpu::PrimitiveState {
@@ -55,8 +55,8 @@ fn build_transparent_pipeline(
         },
         depth_stencil: Some(wgpu::DepthStencilState {
             format: wgpu::TextureFormat::Depth32Float,
-            depth_write_enabled: Some(false),
-            depth_compare: Some(wgpu::CompareFunction::Less),
+            depth_write_enabled: Some(depth_only),
+            depth_compare: Some(if depth_only { wgpu::CompareFunction::Less } else { wgpu::CompareFunction::LessEqual }),
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
         }),
@@ -529,6 +529,8 @@ pub struct Renderer {
     /// `resize` when reconfiguring; changed live via `set_present_mode`.
     pub present_mode: wgpu::PresentMode,
     pub render_pipeline: wgpu::RenderPipeline,
+    /// One camera-bound atmospheric triangle before terrain, per viewport.
+    sky_pipeline: wgpu::RenderPipeline,
     pub depth_texture_view: wgpu::TextureView,
     pub camera_bind_group_layout: wgpu::BindGroupLayout,
     pub texture_bind_group: wgpu::BindGroup,
@@ -584,6 +586,8 @@ pub struct Renderer {
     /// read-only pipeline as water but `fs_transparent` (texture's own alpha, no
     /// blue tint). Per-chunk GPU meshes, drawn in the transparent pass.
     pub transparent_pipeline: wgpu::RenderPipeline,
+    /// Opaque texels of solid transparent blocks occlude later water/solids.
+    transparent_depth_pipeline: wgpu::RenderPipeline,
     pub transparent_meshes: ahash::AHashMap<(i32, i32, i32), GpuChunkMesh>,
     // Instanced plants (flowers/grass/crops) — cross billboards
     pub plant_pipeline: wgpu::RenderPipeline,
@@ -687,7 +691,8 @@ pub struct Renderer {
     pub egui: EguiIntegration,
     // Headless rendering target
     color_target: Option<wgpu::Texture>,
-    /// Sky clear color [r, g, b], updated each frame for day/night cycle.
+    /// Linear sky horizon RGB, updated each frame for day/night and weather.
+    /// `update_camera` shares it with the sky gradient and land fog.
     pub sky_color: [f32; 3],
 }
 
@@ -1203,6 +1208,8 @@ impl Renderer {
             immediate_size: 0,
         });
 
+        let sky_pipeline = create_sky_pipeline(&device, &shader, &camera_bind_group_layout, format);
+
         let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("chunk_render_pipeline"),
             layout: Some(&pipeline_layout),
@@ -1349,7 +1356,9 @@ impl Renderer {
 
         // #131 — transparent-solid pipeline (glass, …); mirrors water + fs_transparent.
         let transparent_pipeline =
-            build_transparent_pipeline(&device, &shader, &pipeline_layout, surface_format);
+            build_transparent_pipeline(&device, &shader, &pipeline_layout, surface_format, false);
+        let transparent_depth_pipeline =
+            build_transparent_pipeline(&device, &shader, &pipeline_layout, surface_format, true);
 
         // --- egui integration (replaces old UI pipeline, hotbar, hearts, menu rendering) ---
         let mut egui = EguiIntegration::new(&device, surface_format, &window);
@@ -1494,6 +1503,7 @@ impl Renderer {
             height,
             present_mode: wgpu::PresentMode::AutoVsync,
             render_pipeline,
+            sky_pipeline,
             depth_texture_view,
             camera_bind_group_layout,
             texture_bind_group,
@@ -1509,6 +1519,7 @@ impl Renderer {
             water_pipeline,
             water_meshes: ahash::AHashMap::new(),
             transparent_pipeline,
+            transparent_depth_pipeline,
             transparent_meshes: ahash::AHashMap::new(),
             plant_pipeline,
             plant_geo_vbuf,
@@ -1768,7 +1779,9 @@ impl Renderer {
         // Distinct-field split borrow: &self.queue + &mut self.player_gpu.
         let queue = &self.queue;
         if let Some(gpu) = self.player_gpu.get_mut(player_index) {
-            queue.write_buffer(&gpu.camera_buffer, 0, bytemuck::cast_slice(&[*uniform]));
+            let mut world_uniform = *uniform;
+            world_uniform.params[1..].copy_from_slice(&self.sky_color);
+            queue.write_buffer(&gpu.camera_buffer, 0, bytemuck::cast_slice(&[world_uniform]));
             // Cache the CPU-side view-proj for this frame's frustum culling (A1).
             gpu.last_view_proj = glam::Mat4::from_cols_array_2d(&uniform.view_proj);
             gpu.last_camera_pos = glam::Vec3::new(
@@ -3008,9 +3021,11 @@ impl Renderer {
                         &vp,
                         self.sky_color,
                         false, // never clear — already cleared above
+                        &self.sky_pipeline,
                         &self.render_pipeline,
                         &self.water_pipeline,
                         &self.transparent_pipeline,
+                        &self.transparent_depth_pipeline,
                         &self.entity_pipeline,
                         &self.avatar_pipeline,
                         &self.wire_pipeline,
@@ -3472,6 +3487,8 @@ impl Renderer {
             immediate_size: 0,
         });
 
+        let sky_pipeline = create_sky_pipeline(&device, &shader, &camera_bind_group_layout, format);
+
         let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("chunk_render_pipeline"),
             layout: Some(&pipeline_layout),
@@ -3616,7 +3633,9 @@ impl Renderer {
 
         // #131 — transparent-solid pipeline (glass, …); mirrors water + fs_transparent.
         let transparent_pipeline =
-            build_transparent_pipeline(&device, &shader, &pipeline_layout, format);
+            build_transparent_pipeline(&device, &shader, &pipeline_layout, format, false);
+        let transparent_depth_pipeline =
+            build_transparent_pipeline(&device, &shader, &pipeline_layout, format, true);
 
         // --- egui integration (headless — for consistency, though screenshots don't need interactive UI) ---
         // BRIDGE: headless egui init uses a dummy window. For screenshot mode,
@@ -3757,6 +3776,7 @@ impl Renderer {
             height,
             present_mode: wgpu::PresentMode::AutoVsync,
             render_pipeline,
+            sky_pipeline,
             depth_texture_view,
             camera_bind_group_layout,
             texture_bind_group,
@@ -3772,6 +3792,7 @@ impl Renderer {
             water_pipeline,
             water_meshes: ahash::AHashMap::new(),
             transparent_pipeline,
+            transparent_depth_pipeline,
             transparent_meshes: ahash::AHashMap::new(),
             plant_pipeline,
             plant_geo_vbuf,
@@ -3859,7 +3880,32 @@ impl Renderer {
     }
 
     /// Render to the offscreen texture and save as PNG.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn render_to_png(&self, path: &str) {
+        self.render_headless_world();
+        self.save_color_target_png(path);
+    }
+
+    /// Draw the same headless world with the live HUD and its managed icons.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn render_to_png_with_hud(
+        &mut self,
+        path: &str,
+        mut run_ui: impl FnMut(&egui::Context, &EguiIntegration),
+    ) {
+        // egui Areas first run an invisible sizing pass. Settle that pass
+        // before capture, without fading or compositing two visible HUDs.
+        let animation_time = self.egui.ctx.global_style().animation_time;
+        self.egui.ctx.global_style_mut(|style| style.animation_time = 0.0);
+        for _ in 0..2 {
+            self.render_headless_world();
+            self.render_headless_ui_to_png(path, false, |ctx, assets| run_ui(ctx, assets));
+        }
+        self.egui.ctx.global_style_mut(|style| style.animation_time = animation_time);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn render_headless_world(&self) {
         let color_target = self.color_target.as_ref().expect("render_to_png requires headless renderer");
         let view = color_target.create_view(&wgpu::TextureViewDescriptor::default());
 
@@ -3898,14 +3944,24 @@ impl Renderer {
                 ..Default::default()
             });
 
-            render_pass.set_pipeline(&self.render_pipeline);
+            render_pass.set_pipeline(&self.sky_pipeline);
             render_pass.set_bind_group(0, &self.player_gpu[0].camera_bind_group, &[]);
+            render_pass.draw(0..3, 0..1);
+            render_pass.set_pipeline(&self.render_pipeline);
             render_pass.set_bind_group(1, &self.texture_bind_group, &[]);
 
             for gpu_mesh in self.chunk_meshes.values() {
                 render_pass.set_vertex_buffer(0, gpu_mesh.vertex_buffer.slice(..));
                 render_pass
                     .set_index_buffer(gpu_mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                render_pass.draw_indexed(0..gpu_mesh.index_count, 0, 0..1);
+            }
+            // Solid alpha texels write only depth; cutout holes and translucent
+            // glass leave it intact. Later water can then respect the foliage.
+            render_pass.set_pipeline(&self.transparent_depth_pipeline);
+            for gpu_mesh in self.transparent_meshes.values() {
+                render_pass.set_vertex_buffer(0, gpu_mesh.vertex_buffer.slice(..));
+                render_pass.set_index_buffer(gpu_mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 render_pass.draw_indexed(0..gpu_mesh.index_count, 0, 0..1);
             }
         }
@@ -4081,67 +4137,7 @@ impl Renderer {
             render_pass.draw(0..self.crosshair_vertex_count, 0..1);
         }
 
-        // --- Copy texture to staging buffer ---
-        let bytes_per_row = (self.width * 4 + 255) & !255; // align to 256
-        let buffer_size = (bytes_per_row * self.height) as u64;
-
-        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("screenshot_staging"),
-            size: buffer_size,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-
-        encoder.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: color_target,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &staging,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(bytes_per_row),
-                    rows_per_image: Some(self.height),
-                },
-            },
-            wgpu::Extent3d {
-                width: self.width,
-                height: self.height,
-                depth_or_array_layers: 1,
-            },
-        );
-
         self.queue.submit(std::iter::once(encoder.finish()));
-
-        // Map and read pixels
-        let buffer_slice = staging.slice(..);
-        let (tx, rx) = std::sync::mpsc::channel();
-        buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
-            tx.send(result).unwrap();
-        });
-        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
-        rx.recv().unwrap().expect("Failed to map staging buffer");
-
-        let data = buffer_slice.get_mapped_range();
-
-        // Remove row padding and collect pixel data
-        let mut pixels = Vec::with_capacity((self.width * self.height * 4) as usize);
-        for y in 0..self.height {
-            let offset = (y * bytes_per_row) as usize;
-            pixels.extend_from_slice(&data[offset..offset + (self.width * 4) as usize]);
-        }
-        drop(data);
-        staging.unmap();
-
-        // Save as PNG
-        let img: image::RgbaImage =
-            image::ImageBuffer::from_raw(self.width, self.height, pixels)
-                .expect("Failed to create image buffer");
-        img.save(path).expect("Failed to save screenshot");
-        log::info!("Screenshot saved to {path}");
     }
 
     /// Render an egui menu screen (e.g. the lobby) headlessly to a PNG. Clears to
@@ -4150,14 +4146,24 @@ impl Renderer {
     /// UX without opening a window. Requires a headless renderer (`color_target`).
     #[cfg(not(target_arch = "wasm32"))]
     pub fn render_menu_to_png(&mut self, path: &str, run_ui: impl FnOnce(&egui::Context)) {
+        self.render_headless_ui_to_png(path, true, |ctx, _| run_ui(ctx));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn render_headless_ui_to_png(
+        &mut self,
+        path: &str,
+        clear_menu: bool,
+        run_ui: impl FnOnce(&egui::Context, &EguiIntegration),
+    ) {
         let color_target = self.color_target.as_ref().expect("render_menu_to_png requires headless renderer");
         let view = color_target.create_view(&wgpu::TextureViewDescriptor::default());
 
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("headless_menu_encoder"),
         });
-        // Clear to the menu backdrop.
-        {
+        // An in-world HUD loads the scene; menus start with their backdrop.
+        if clear_menu {
             let _clear = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("headless_menu_clear"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -4329,9 +4335,11 @@ fn render_world_viewport(
     viewport: &crate::screen::ViewportRect,
     sky_color: [f32; 3],
     clear: bool,
+    sky_pipeline: &wgpu::RenderPipeline,
     render_pipeline: &wgpu::RenderPipeline,
     water_pipeline: &wgpu::RenderPipeline,
     transparent_pipeline: &wgpu::RenderPipeline,
+    transparent_depth_pipeline: &wgpu::RenderPipeline,
     entity_pipeline: &wgpu::RenderPipeline,
     avatar_pipeline: &wgpu::RenderPipeline,
     wire_pipeline: &wgpu::RenderPipeline,
@@ -4438,11 +4446,25 @@ fn render_world_viewport(
 
         pass.set_viewport(vx, vy, vw, vh, 0.0, 1.0);
         pass.set_scissor_rect(viewport.x, viewport.y, viewport.width, viewport.height);
-        pass.set_pipeline(render_pipeline);
+        pass.set_pipeline(sky_pipeline);
         pass.set_bind_group(0, &gpu.camera_bind_group, &[]);
+        pass.draw(0..3, 0..1);
+        pass.set_pipeline(render_pipeline);
         pass.set_bind_group(1, texture_bind_group, &[]);
 
         for (&(cx, cy, cz), gpu_mesh) in chunk_meshes.iter() {
+            if !chunk_visible(cx, cy, cz) {
+                stats.culled += 1;
+                continue;
+            }
+            pass.set_vertex_buffer(0, gpu_mesh.vertex_buffer.slice(..));
+            pass.set_index_buffer(gpu_mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..gpu_mesh.index_count, 0, 0..1);
+            stats.draw_calls += 1;
+        }
+        // Opaque solid texels must occlude later transparent colour/water.
+        pass.set_pipeline(transparent_depth_pipeline);
+        for (&(cx, cy, cz), gpu_mesh) in transparent_meshes.iter() {
             if !chunk_visible(cx, cy, cz) {
                 stats.culled += 1;
                 continue;
@@ -5443,6 +5465,51 @@ fn build_blit_resources(
         ..Default::default()
     });
     (pipeline, sampler, bgl)
+}
+
+/// Sky uses only the existing camera binding and never writes terrain depth.
+fn create_sky_pipeline(
+    device: &wgpu::Device,
+    shader: &wgpu::ShaderModule,
+    camera_layout: &wgpu::BindGroupLayout,
+    format: wgpu::TextureFormat,
+) -> wgpu::RenderPipeline {
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("sky_pipeline_layout"),
+        bind_group_layouts: &[Some(camera_layout)],
+        immediate_size: 0,
+    });
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("sky_pipeline"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_sky"),
+            compilation_options: Default::default(),
+            buffers: &[],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some("fs_sky"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: wgpu::TextureFormat::Depth32Float,
+            depth_write_enabled: Some(false),
+            depth_compare: Some(wgpu::CompareFunction::Always),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    })
 }
 
 /// Create an offscreen world render target (color + depth) at `width`×`height`

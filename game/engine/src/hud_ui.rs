@@ -1223,22 +1223,12 @@ fn draw_hotbar(
                         // Stack count
                         if stack.count > 1 {
                             let text = format!("{}", stack.count);
-                            // Shadow
-                            ui.painter().text(
-                                rect.right_bottom() + egui::vec2(-3.0, -3.0),
-                                egui::Align2::RIGHT_BOTTOM,
-                                &text,
-                                egui::FontId::proportional(14.0),
-                                egui::Color32::from_rgb(20, 20, 20),
-                            );
-                            // Text
-                            ui.painter().text(
-                                rect.right_bottom() + egui::vec2(-4.0, -4.0),
-                                egui::Align2::RIGHT_BOTTOM,
-                                &text,
-                                egui::FontId::proportional(14.0),
-                                egui::Color32::WHITE,
-                            );
+                            let font = egui::FontId::proportional((14.0 * hud_scale(vp.width)).max(12.0));
+                            let galley = ui.painter().layout_no_wrap(text, font, egui::Color32::WHITE);
+                            let origin = rect.right_bottom() - galley.size() - egui::vec2(4.0, 4.0);
+                            let badge = egui::Rect::from_min_size(origin, galley.size()).expand(2.0);
+                            ui.painter().rect_filled(badge, 2.0, egui::Color32::from_rgba_unmultiplied(13, 27, 30, 235));
+                            ui.painter().galley(origin, galley, egui::Color32::WHITE);
                         }
 
                         // Durability bar for tools
@@ -1291,19 +1281,9 @@ fn draw_hearts(ctx: &egui::Context, viewport: &ViewportRect, player_index: usize
 
                     let hp_for_heart = (current_hp - i as f32 * 2.0).clamp(0.0, 2.0);
 
-                    // Background (empty heart)
-                    ui.painter().rect_filled(rect, 2.0, HEART_EMPTY);
-
-                    if hp_for_heart >= 2.0 {
-                        ui.painter().rect_filled(rect, 2.0, HEART_FULL);
-                    } else if hp_for_heart >= 1.0 {
-                        // Half heart
-                        let half_rect = egui::Rect::from_min_size(
-                            rect.left_top(),
-                            egui::vec2(rect.width() * 0.5, rect.height()),
-                        );
-                        ui.painter().rect_filled(half_rect, 2.0, HEART_HALF);
-                    }
+                    let fill = if hp_for_heart >= 2.0 { Some(HEART_FULL) }
+                        else if hp_for_heart >= 1.0 { Some(HEART_HALF) } else { None };
+                    crate::hud_icons::heart(ui.painter(), rect, HEART_EMPTY, fill, hp_for_heart < 2.0);
                 }
             });
         });
@@ -1342,19 +1322,10 @@ fn draw_hunger(
 
                     let h_for_icon = (hunger as i32 - i as i32 * 2).clamp(0, 2);
 
-                    // Background (empty drumstick).
-                    ui.painter().rect_filled(rect, 2.0, DRUMSTICK_EMPTY);
-
-                    if h_for_icon >= 2 {
-                        ui.painter().rect_filled(rect, 2.0, DRUMSTICK_FULL);
-                    } else if h_for_icon >= 1 {
-                        // Half drumstick — fill the left half.
-                        let half_rect = egui::Rect::from_min_size(
-                            rect.left_top(),
-                            egui::vec2(rect.width() * 0.5, rect.height()),
-                        );
-                        ui.painter().rect_filled(half_rect, 2.0, DRUMSTICK_HALF);
-                    }
+                    let fill = match h_for_icon {
+                        2 => Some(DRUMSTICK_FULL), 1 => Some(DRUMSTICK_HALF), _ => None,
+                    };
+                    crate::hud_icons::drumstick(ui.painter(), rect, DRUMSTICK_EMPTY, fill, h_for_icon < 2);
                 }
             });
         });
@@ -1374,40 +1345,41 @@ fn draw_vital_counts(
     let vp = ViewportPts::from_physical(viewport, ctx.pixels_per_point());
     let scale = hud_scale(vp.width);
     let font = egui::FontId::proportional(13.0 * scale);
-    // Sit just above the hotbar's top edge, hugging the right margin.
-    let bottom = vp.y + vp.height;
-    let anchor = egui::pos2(vp.x + vp.width - 12.0, bottom - 16.0 - 48.0 * scale - 6.0);
-
+    // Measure both labels before positioning the Area. right_to_left layout
+    // inside a shrink-to-fit Area can paint past its measured right edge.
+    let free_colour = if free_slots == 0 {
+        egui::Color32::from_rgb(220, 70, 70)
+    } else if free_slots <= 4 {
+        egui::Color32::from_rgb(230, 180, 70)
+    } else {
+        egui::Color32::from_rgb(200, 200, 205)
+    };
+    let rows = ctx.fonts_mut(|fonts| {
+        let mut rows = Vec::new();
+        if arrows > 0 {
+            let colour = egui::Color32::from_rgb(230, 230, 235);
+            rows.push((fonts.layout_no_wrap(format!("\u{27A4} {arrows}"), font.clone(), colour), colour));
+        }
+        rows.push((fonts.layout_no_wrap(format!("\u{2756} {free_slots} free"), font, free_colour), free_colour));
+        rows
+    });
+    let gap = 2.0 * scale;
+    let width = rows.iter().map(|(row, _)| row.size().x).fold(0.0_f32, f32::max);
+    let height = rows.iter().map(|(row, _)| row.size().y).sum::<f32>() + gap * (rows.len() - 1) as f32;
+    let size = egui::vec2(width, height);
+    let origin = egui::pos2(vp.x + vp.width - 12.0 - width,
+        vp.y + vp.height - 16.0 - 48.0 * scale - 6.0 - height);
     egui::Area::new(egui::Id::new(("vital_counts", player_index)))
-        .fixed_pos(anchor)
+        .fixed_pos(origin)
         .interactable(false)
         .show(ctx, |ui| {
-            // Right-aligned stack: arrows above free-slots when present.
-            if arrows > 0 {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
-                    ui.label(
-                        egui::RichText::new(format!("\u{27A4} {arrows}"))
-                            .font(font.clone())
-                            .color(egui::Color32::from_rgb(230, 230, 235)),
-                    );
-                });
+            let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+            let mut y = rect.top();
+            for (row, colour) in rows {
+                let row_height = row.size().y;
+                ui.painter().galley(egui::pos2(rect.right() - row.size().x, y), row, colour);
+                y += row_height + gap;
             }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
-                // Warm the colour as the inventory fills, so "nearly full" reads
-                // at a glance (green → amber → red).
-                let colour = if free_slots == 0 {
-                    egui::Color32::from_rgb(220, 70, 70)
-                } else if free_slots <= 4 {
-                    egui::Color32::from_rgb(230, 180, 70)
-                } else {
-                    egui::Color32::from_rgb(200, 200, 205)
-                };
-                ui.label(
-                    egui::RichText::new(format!("\u{2756} {free_slots} free"))
-                        .font(font.clone())
-                        .color(colour),
-                );
-            });
         });
 }
 
@@ -1425,24 +1397,22 @@ fn draw_block_name(
         return;
     }
 
-    // Approximate text width; centre horizontally within the viewport.
-    let approx_text_w = name.len() as f32 * 8.0;
     let vp = ViewportPts::from_physical(viewport, ctx.pixels_per_point());
-    let name_x = vp.x + vp.width / 2.0 - approx_text_w / 2.0;
-    // Above the hunger row in the shared stack (#12).
-    let name_y = hud_stack(vp, hud_scale(vp.width)).name_y;
+    let scale = hud_scale(vp.width);
+    let galley = ctx.fonts_mut(|fonts| fonts.layout_no_wrap(
+        name, egui::FontId::proportional(14.0 * scale), crate::brand::STONE,
+    ));
+    let size = galley.size() + egui::vec2(10.0, 4.0);
+    let name_x = vp.x + (vp.width - size.x) / 2.0;
+    let name_y = hud_stack(vp, scale).name_y;
 
     egui::Area::new(egui::Id::new(("block_name", player_index)))
         .fixed_pos(egui::pos2(name_x, name_y))
         .interactable(false)
         .show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new(name)
-                        .color(egui::Color32::from_rgba_premultiplied(220, 220, 220, 200))
-                        .size(14.0),
-                );
-            });
+            let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+            ui.painter().rect_filled(rect, 3.0, SLOT_BG);
+            ui.painter().galley(rect.min + egui::vec2(5.0, 2.0), galley, crate::brand::STONE);
         });
 }
 
@@ -2878,6 +2848,34 @@ pub fn draw_fund_dialog(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vital_count_text_fits_inside_each_viewport() {
+        for (width, arrows) in [(390, 0), (390, 40), (1280, 0), (1280, 40)] {
+            let ctx = egui::Context::default();
+            crate::egui_integration::configure_style(&ctx);
+            ctx.global_style_mut(|style| style.animation_time = 0.0);
+            let viewport = ViewportRect { x: 0, y: 0, width, height: 844 };
+            let mut bounds = Vec::new();
+            for _ in 0..3 {
+                ctx.begin_pass(egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width as f32, 844.0))),
+                    ..Default::default()
+                });
+                draw_vital_counts(&ctx, &viewport, 0, 30, arrows);
+                bounds = ctx.end_pass().shapes.into_iter().filter_map(|clipped| {
+                    if let egui::Shape::Text(text) = clipped.shape {
+                        Some(text.visual_bounding_rect())
+                    } else { None }
+                }).collect();
+            }
+            assert_eq!(bounds.len(), if arrows > 0 { 2 } else { 1 }, "every count label must be painted");
+            for rect in bounds {
+                assert!(rect.left() >= 0.0 && rect.right() <= width as f32,
+                    "complete count text must fit within the {width}-point viewport: {rect:?}");
+            }
+        }
+    }
 
     #[test]
     fn hud_full_size_above_threshold() {
