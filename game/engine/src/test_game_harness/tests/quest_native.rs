@@ -80,7 +80,10 @@ fn native_custody(game: &HeadlessGame) -> Vec<u8> {
     let record =
         GameplayRecord::from_slot(slot.personal_binding.as_ref().unwrap().context(), slot).unwrap();
     bincode::serialize(&(
-        slot.inventory.slots_iter().cloned().collect::<Vec<_>>(),
+        slot.inventory
+            .slots_iter()
+            .map(|stack| stack.cloned())
+            .collect::<Vec<_>>(),
         slot.armour_slots,
         &slot.crafting_ui.cursor_item,
         &slot.crafting_ui.grid,
