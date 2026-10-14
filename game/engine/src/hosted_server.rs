@@ -43,6 +43,18 @@ mod quest_tests;
 mod quest_preparation_tests;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod quest_live_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod quest_live_fixture;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod quest_lifecycle_actor;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod quest_lifecycle_actions;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod quest_lifecycle_fixture;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod quest_lifecycle_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod quest_daily_tests;
 mod strict_container;
 mod strict_edit;
 mod strict_attack;
