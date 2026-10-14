@@ -291,4 +291,35 @@ mod tests {
         prepared.abandon(&mut sp);
         assert_eq!(sp.window_events.waiting(), 1);
     }
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn d2c2_personal_fence_is_a_genuine_no_window_change_prefix_and_owned_bytes_are_bounded() {
+        let registry = crate::block::BlockRegistry::new();
+        let context = crate::personal_value::PersonalContext { participant: [7; 32], lineage: [1; 16], generation: 1, transfer: [4; 16] };
+        let record = crate::handover::personal::PersonalRecord::from_maps(context, [], [], [], None).unwrap();
+        let snapshot = crate::protocol::PersonalSnapshot { session: [8; 16], life: 0, revision: 1, window_event: 1, context, bytes: record.encode().unwrap() };
+        for mode in [InventoryMode::Mirror, InventoryMode::Strict] {
+            let mut sp = player(mode);
+            sp.inventory.set_slot(0, Some(ItemStack::new_block(crate::block::STONE, 3)));
+            let event = queue(&mut sp, WindowEvent::PersonalSync(Box::new(snapshot.clone())), 0);
+            assert_eq!(event, 1);
+            let raw = pack_raw_marker(&sp, &registry).unwrap();
+            let mut cargo = ContainerData::Chest(crate::chest::ChestData::new());
+            let staged = crate::staged_window::stage_container(&raw, &mut cargo, &ContainerClick::Deposit { slot: 0, all: false }, &ctx());
+            let admitted = admit_pack_staged(&sp, &registry, &raw, &staged).unwrap();
+            assert_eq!(admitted.window.inv.slot(0).unwrap().count, 2, "progression cannot consume or fabricate a deposit source");
+            let event = WindowEvent::PackCanonical { actor_respawns: 0, window: admitted.window, debt: admitted.debt };
+            let prepared = prepare_pack_events(&mut sp, Box::new([event])).unwrap();
+            assert_eq!(prepared.last_number(), 2, "the personal snapshot occupies its real preceding number");
+            prepared.abandon(&mut sp);
+            assert_eq!(sp.inventory.slot(0).unwrap().count, 3);
+        }
+        let mut oversized = snapshot;
+        oversized.bytes = Vec::with_capacity(crate::action_journal::MAX_RETAINED_BYTES);
+        oversized.bytes.push(1);
+        let mut sp = player(InventoryMode::Mirror);
+        assert!(prepare_pack_events(&mut sp, Box::new([WindowEvent::PersonalSync(Box::new(oversized))])).is_err(), "actual body capacity and retained delivery ownership cannot hide behind a one-byte populated snapshot");
+        assert_eq!(sp.window_events.waiting(), 0);
+    }
+
 }

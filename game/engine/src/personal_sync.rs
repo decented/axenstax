@@ -329,6 +329,21 @@ mod tests {
         .unwrap()
     }
     #[test]
+    fn d2c2_held_personal_snapshot_counts_actual_body_capacity_and_refuses_whole() {
+        let mut value = snapshot(&bound(), [8; 16], 0, 1, 4).unwrap();
+        value.bytes.reserve_exact(crate::action_journal::MAX_RETAINED_BYTES);
+        let mut inbox = Inbox::new([8; 16], 0);
+        assert!(inbox.push(value).is_err(), "a valid small encoded record cannot hide oversized retained allocation");
+        assert_eq!(inbox.pending_count(), 0, "the failed body is never published partially");
+        assert!(!inbox.initialised());
+        let value = snapshot(&bound(), [8; 16], 0, 1, 4).unwrap();
+        let minimum = value.bytes.capacity() + std::mem::size_of::<PersonalSnapshot>();
+        inbox.push(value).unwrap();
+        assert_eq!(inbox.pending_count(), 1);
+        assert!(inbox.owned_bytes() >= minimum, "actual deque allocation plus nested body ownership is charged");
+    }
+
+    #[test]
     fn handover_personal_sync_applies_only_after_real_window_and_repeats_are_inert() {
         let personal = bound();
         let value = snapshot(&personal, [8; 16], 0, 1, 4).unwrap();
