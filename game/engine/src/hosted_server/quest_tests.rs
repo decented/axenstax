@@ -234,6 +234,67 @@ fn d2c3_failed_scope_durability_does_not_publish_signed_authority_or_reset_world
 }
 
 #[test]
+fn d2c3_fresh_signed_join_refuses_a_failed_first_scope_directory_barrier() {
+    let _root = crate::save::WorldsRootGuard::new("d2c3-fresh-signed-scope-sync");
+    let mut host = tests::start_room_test_server("d2c3-fresh-signed-scope-sync", 0);
+    let directory = crate::save::world_dir(&host.server.world_name);
+    let key = expected_signed_key();
+    let canonical = directory
+        .join("joiners")
+        .join(format!("{}.dat", pubkey_to_npub(&key)));
+    assert!(
+        !directory.join("world.dat").exists(),
+        "a genuine first save is needed to reach the directory fault"
+    );
+    assert!(!canonical.exists());
+    assert!(host.server.selected_local_personal.is_none());
+    assert!(host.server.world.quest_scope.is_none());
+    assert!(
+        crate::handover::live::personal_adapter::proof(&directory)
+            .unwrap()
+            .is_none()
+    );
+    let client = host.attach_test_remote_with_binding(Some([79; 32]));
+    tests::send_signed_join(&client, c3d_tests::KEY, Some([79; 32]));
+    let fault = crate::fsync::tests::fail_directory_on_match(&directory, 1);
+    host.tick();
+    let heard = c3d_tests::hear(&client);
+    let i = host.server.players.len() - 1;
+    assert_eq!(
+        host.server.players[i].verified_pubkey,
+        Some(key),
+        "the real challenge/signature reached authenticated admission"
+    );
+    assert!(
+        fault.failures() > 0,
+        "actual first-scope publication reached the persistent world-directory fault"
+    );
+    eprintln!(
+        "fresh-signed-first-scope directory_failures={} accepts={} present={} personal={}",
+        fault.failures(),
+        heard.accepts.len(),
+        host.server.players[i].is_in_world(),
+        host.server.players[i].personal.is_some()
+    );
+    assert!(
+        heard.accepts.is_empty(),
+        "a fresh signed JoinAccept cannot publish authority without a confirmed world directory"
+    );
+    assert!(!host.server.players[i].is_in_world());
+    assert!(host.server.players[i].personal.is_none());
+    assert!(!canonical.exists());
+    drop(fault);
+    // Fresh retry after the actual fault is gone must prove its own directory
+    // barrier even if the earlier world.dat rename is already visible.
+    let retry = host.attach_test_remote_with_binding(Some([80; 32]));
+    tests::send_signed_join(&retry, c3d_tests::KEY, Some([80; 32]));
+    host.tick();
+    let accepted = c3d_tests::hear(&retry);
+    assert_eq!(accepted.accepts.len(), 1);
+    crate::handover::live::personal_adapter::confirm_durable(&directory.join("world.dat")).unwrap();
+}
+
+#[test]
 fn d2c3_world_local_selected_snapshot_survives_routine_save_failed_cut_and_reopen() {
     let _root = crate::save::WorldsRootGuard::new("d2c3-selected-local-role");
     let mut host = tests::start_room_test_server("d2c3-selected-local-role", 0);

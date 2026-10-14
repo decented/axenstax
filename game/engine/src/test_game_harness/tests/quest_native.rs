@@ -1108,3 +1108,58 @@ fn game_harness_d2c3_first_native_binding_preserves_the_live_legacy_penalty() {
         "the next actual tick consumes only one remaining tick"
     );
 }
+
+#[test]
+#[ignore = "needs genuine native first scope and persistent directory durability failure"]
+fn game_harness_d2c3_native_first_scope_refuses_a_failed_directory_barrier() {
+    let _root = crate::save::WorldsRootGuard::new("d2c3-native-first-scope-sync");
+    let mut game = HeadlessGame::boot_into_world("d2c3-native-first-scope-sync");
+    // This first scope has no private Plan write or remote canonical writer
+    // which could accidentally confirm the world directory afterwards.
+    game.state.players[0].inventory.clear();
+    assert!(game.state.players[0].crafting_ui.cursor_item.is_none());
+    assert!(
+        game.state.players[0]
+            .crafting_ui
+            .grid
+            .iter()
+            .flatten()
+            .all(Option::is_none)
+    );
+    assert!(game.state.hosted_server.is_none());
+    assert!(game.state.players[0].personal_binding.is_none());
+    assert!(game.state.local_personal.is_none());
+    assert!(game.state.world.quest_scope.is_none());
+    let directory = crate::save::world_dir(&game.state.world_name);
+    assert!(
+        crate::handover::live::personal_adapter::proof(&directory)
+            .unwrap()
+            .is_none()
+    );
+    let fault = crate::fsync::tests::fail_directory_on_match(&directory, 1);
+    let prepared = game.state.prepare_local_gameplay();
+    assert!(
+        fault.failures() > 0,
+        "the actual selected writer reached the world-directory fault"
+    );
+    eprintln!(
+        "native-first-scope directory_failures={} returned_error={} live_scope={} live_binding={}",
+        fault.failures(),
+        prepared.is_err(),
+        game.state.world.quest_scope.is_some(),
+        game.state.players[0].personal_binding.is_some()
+    );
+    assert!(
+        prepared.is_err(),
+        "first native authority must refuse an unconfirmed directory barrier"
+    );
+    assert!(game.state.world.quest_scope.is_none());
+    assert!(game.state.players[0].personal_binding.is_none());
+    assert!(game.state.local_personal.is_none());
+    // A rename may already be visible: do not demand old primary bytes after
+    // that commit, or mistake visibility for confirmed crash durability.
+    drop(fault);
+    game.state.prepare_local_gameplay().unwrap();
+    assert!(game.state.world.quest_scope.is_some());
+    crate::handover::live::personal_adapter::confirm_durable(&directory.join("world.dat")).unwrap();
+}
