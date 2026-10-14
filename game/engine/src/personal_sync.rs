@@ -48,6 +48,8 @@ fn acknowledgement(snapshot: &PersonalSnapshot) -> PersonalAck {
 #[derive(Default)]
 pub(crate) struct Delivery {
     pub pending: Option<PersonalSnapshot>,
+    /// Exact accepted client frontier, awaiting older server authorisations.
+    pub acknowledged_window: Option<u32>,
     initial_expected: Option<PersonalAck>,
     pub revision: u64,
     pub last: Option<PersonalAck>,

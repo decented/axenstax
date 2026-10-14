@@ -6722,6 +6722,10 @@ copy count against event bounds; the client retains body ownership in the
 bounded personal inbox and orders fixed fence metadata with window carriers.
 Progression applies and acknowledges only after that actual numbered window
 frontier, including through a pack hold and actual physical-life application.
+An exact accepted personal acknowledgement proves installation immediately,
+but its bounded server frontier waits for older typed/action and edit queues
+to settle. The automatic update pass then folds that acknowledged prefix;
+a free control cannot move an older paced authorisation off its valid base.
 This preserves the separate exact initial-install acknowledgement and current
 snapshot quiescence semantics on final integration; execution gates remain
 pending.
