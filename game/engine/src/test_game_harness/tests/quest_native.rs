@@ -984,3 +984,127 @@ fn game_harness_d2c3_native_kill_and_penalty_credit_once_in_the_same_holder() {
     );
     assert_eq!(rig.game.state.players[0].quest_progress.penalty_left, 0);
 }
+
+#[test]
+#[ignore = "needs genuine unbound native deaths and durable first common enrolment"]
+fn game_harness_d2c3_first_native_binding_preserves_the_live_legacy_penalty() {
+    let _root = crate::save::WorldsRootGuard::new("d2c3-first-native-penalty");
+    let name = "d2c3-first-native-penalty";
+    let mut game = HeadlessGame::boot_into_world(name);
+    clear_pad(&mut game, None);
+    assert!(
+        game.state.players[0].personal_binding.is_none(),
+        "the predecessor must genuinely start unbound"
+    );
+    assert!(game.state.world.quest_scope.is_none());
+    let pos = game.state.players[0].player.pos + glam::Vec3::X;
+    let village = (4, 5);
+    game.state
+        .world
+        .village_anchors
+        .insert(village, pos.to_array().map(|value| value.floor() as i32));
+    let victim = crate::entity::spawn_mob(&mut game.state.ecs, crate::mob::MobType::Villager, pos);
+    game.state
+        .ecs
+        .get::<&mut crate::combat::Health>(victim)
+        .unwrap()
+        .current = 0.0;
+    game.ticks(1);
+    assert!(
+        !game.state.ecs.contains(victim),
+        "the first real unbound death was swept"
+    );
+    assert!(game.state.players[0].personal_binding.is_none());
+    assert_eq!(
+        game.state.players[0].kill_counter[&crate::mob::MobType::Villager],
+        1
+    );
+    let first_score = game.state.players[0].reputation.per_village[&village];
+    assert_eq!(first_score, -25);
+    let first_tick = game.state.players[0]
+        .last_villager_kill_rep_tick
+        .expect("the legacy owner recorded its real penalty tick");
+    game.ticks(7);
+    let before_enrolment = game.state.tick_counter;
+    assert_eq!(before_enrolment - first_tick, 7);
+    game.state.prepare_local_gameplay().unwrap();
+    let scope = game
+        .state
+        .world
+        .quest_scope
+        .expect("actual first preparation durably establishes the world scope");
+    let selected = crate::save::read_world_save(
+        &std::fs::read(crate::save::world_dir(name).join("world.dat")).unwrap(),
+    )
+    .unwrap();
+    let saved = crate::joiner_save::JoinerSave::decode(
+        &selected
+            .local_personal
+            .expect("the real selected snapshot owns this initial holder")
+            .0,
+    )
+    .unwrap();
+    let binding = game.state.players[0].personal_binding.as_ref().unwrap();
+    let initial = saved.personal.as_ref().unwrap().record().unwrap();
+    assert_eq!(initial.context, binding.context());
+    assert_eq!(selected.quest_world.as_ref().unwrap().scope, scope);
+    assert_eq!(
+        initial
+            .reputation
+            .iter()
+            .find(|(id, _)| *id == village)
+            .map(|(_, score)| *score),
+        Some(first_score)
+    );
+    assert_eq!(
+        initial
+            .kills
+            .iter()
+            .find(|(kind, _)| *kind == crate::mob::MobType::Villager)
+            .map(|(_, count)| *count),
+        Some(1)
+    );
+    let second = crate::entity::spawn_mob(&mut game.state.ecs, crate::mob::MobType::Villager, pos);
+    game.state
+        .ecs
+        .get::<&mut crate::combat::Health>(second)
+        .unwrap()
+        .current = 0.0;
+    game.ticks(1);
+    assert!(
+        !game.state.ecs.contains(second),
+        "the second actual bound death reached the common owner"
+    );
+    assert_eq!(
+        game.state.players[0].kill_counter[&crate::mob::MobType::Villager],
+        2
+    );
+    let record = GameplayRecord::from_slot(
+        game.state.players[0]
+            .personal_binding
+            .as_ref()
+            .unwrap()
+            .context(),
+        &game.state.players[0],
+    )
+    .unwrap();
+    eprintln!(
+        "first-native-penalty first_tick={first_tick} enrol_tick={before_enrolment} current_tick={} initial_remaining={} current_remaining={} first_score={first_score} current_score={}",
+        game.state.tick_counter,
+        initial.quests.penalty_left,
+        record.quests.penalty_left,
+        game.state.players[0].reputation.per_village[&village]
+    );
+    assert_eq!(
+        game.state.players[0].reputation.per_village[&village], first_score,
+        "first common enrolment must not charge a second penalty within the same live cooldown"
+    );
+    assert_eq!(
+        initial.quests.penalty_left, 593,
+        "first durable snapshot carries exact remaining legacy cooldown"
+    );
+    assert_eq!(
+        record.quests.penalty_left, 592,
+        "the next actual tick consumes only one remaining tick"
+    );
+}
