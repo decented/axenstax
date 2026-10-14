@@ -44,7 +44,7 @@
 
 mod strict;
 mod pack;
-pub use pack::{admit_pack_staged, pack_canonical_window, pack_raw_marker, prepare_pack_events, PackStageError, PackWindowStage};
+pub use pack::{admit_pack_staged, pack_canonical_window, pack_raw_marker, prepare_pack_events, PackWindowStage};
 pub use strict::{admit_staged, stage_strict_click, stage_strict_edit, stage_strict_effects, stage_strict_refused_autofill, strict_effective_marker, strict_leaves_no_unpaid_obligation, strict_raw_marker, prepare_strict_events, reserve_strict_replace, StrictStageError};
 #[cfg(test)]
 pub use strict::strict_replace_fits;

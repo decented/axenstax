@@ -524,10 +524,6 @@ pub fn purge_private_mobs(ecs: &mut hecs::World) -> usize {
 /// else's world: quests and trading need a server-side flow (D2c-3).
 pub const JOINED_INTERACTION_TOAST: &str = "Trading isn't available in someone else's world yet.";
 
-/// MP-D2c-1 — the toast a joiner sees when it tries to fit or open a steed's
-/// pack on someone else's world (D2c-2).
-
-
 // C3c-3r — what a joiner sees when it tries a Plan or economy action the
 // server can't mirror yet. Each refusal changes nothing on the client.
 

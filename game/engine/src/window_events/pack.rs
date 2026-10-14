@@ -133,7 +133,7 @@ pub fn pack_canonical_window(sp: &ServerPlayer, registry: &crate::block::BlockRe
                 if sp.inventory_mode == crate::action_identity::InventoryMode::Mirror { prefs.set_locked_from(&locks); }
                 debt = exact_debt(carried, registry)?;
             }
-            event => { fold(&mut window, &mut debt, &holding_event(event, registry)?); }
+            event => { fold(&mut window, &mut debt, holding_event(event, registry)?.as_ref()); }
         }
     }
     Ok(PackWindowStage { window: into_window(window), debt: exact_debt(&debt, registry)? })

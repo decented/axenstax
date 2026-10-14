@@ -1,6 +1,6 @@
 //! Prepare one backed attempt; scratch cargo never becomes a second ledger.
 use super::*;
-use crate::{container_window::{ContainerData, ContainerTarget}, pack_state::{CargoCommit, PackSession}, pack_wire::{PackNote, PackOperation, PackRequest, PackView}, staged_window::StagedClick, window_events::PackWindowStage};
+use crate::{block, container_window::{ContainerData, ContainerTarget}, pack_state::{CargoCommit, PackSession}, pack_wire::{PackNote, PackOperation, PackRequest, PackView}, staged_window::StagedClick, window_events::PackWindowStage};
 
 pub(super) enum CargoEffect {
     None,

@@ -231,6 +231,12 @@ pub fn neutralise(save: &mut WorldSave, source_npub: &str) -> Result<(), Refusal
                     return Err(Refusal("A kept horse is held by seat number, which this version can't move yet."));
                 }
             }
+            SavedTamedPetData::Steed3 { data, keeper, .. } => {
+                // Explicit legacy keeping is never silently claimed by npub.
+                if data.kept_by.is_some() || matches!(keeper, crate::horse_ai::SteedKeeper::LegacyLocal(_)) {
+                    return Err(Refusal("A kept horse is held by seat number, which this version can't move yet."));
+                }
+            }
             SavedTamedPetData::Authored { .. } => {}
         }
     }
