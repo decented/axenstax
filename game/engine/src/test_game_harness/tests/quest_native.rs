@@ -220,7 +220,7 @@ fn native_cut(tag: &str, decline: bool) -> NativeCut {
     game.state.players[0].inventory.clear();
     game.state.players[0]
         .inventory
-        .set_slot(0, Some(ItemStack::new_material(MaterialId::Wood, 27)));
+        .set_slot(0, Some(ItemStack::new_material(MaterialId::Stick, 27)));
     game.state.prepare_local_gameplay().unwrap();
     let scope = game.state.world.quest_scope.unwrap();
     assert!(game.state.leave_world(
@@ -343,7 +343,7 @@ fn native_cut(tag: &str, decline: bool) -> NativeCut {
         .as_mut()
         .unwrap();
     offer.quest.flavour = crate::quest::QuestFlavour::Fetch {
-        item: MaterialId::Wood,
+        item: MaterialId::Stick,
         count: 27,
     };
     offer.quest.rewards = vec![
