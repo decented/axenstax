@@ -85,7 +85,9 @@ fn game_harness_d2c3_real_joined_villager_click_sends_one_server_action() {
         assert_eq!(p.reputation.per_village, reputation);
         assert_eq!(p.kill_counter, kills);
         for _ in 0..3 { harness_step(&mut host, &mut hg); }
-        assert!(!host.disconnected[slot]);
+        assert!(host.server.players[slot].is_in_world(), "the actual server attachment remains live");
+        assert!(hg.state.remote_client.as_ref().is_some_and(|client| client.is_connected()),
+            "the actual client remains connected after its honest click");
         eprintln!("ordinary NPC click {mode:?}: picked={id}, new actions={}, toast={:?}",
             actions.load(Ordering::Relaxed) - before_actions, hg.state.toast.as_ref().map(|t| &t.0));
         assert_eq!(actions.load(Ordering::Relaxed) - before_actions, 1,
