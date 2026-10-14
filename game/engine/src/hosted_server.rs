@@ -8916,7 +8916,7 @@ pub(crate) mod tests {
     }
 
     /// Sign and send a join for `seckey` over a transport with `binding`.
-    pub(super) fn send_signed_join(client: &ChannelClientTransport, seckey: [u8; 32], binding: Option<[u8; 32]>) {
+    pub(crate) fn send_signed_join(client: &ChannelClientTransport, seckey: [u8; 32], binding: Option<[u8; 32]>) {
         use crate::transport::ClientTransport as _;
         let chal = loop {
             let pkt = client.try_recv_from_server().expect("challenge issued on attach");
