@@ -408,7 +408,7 @@ fn d2c2_earlier_grant_feedback_waits_for_canonical_ack_and_returns_once_in_both_
             assert!(!rig.hs.disconnected[rig.joiner.i], "overflow feedback is control in either mode");
             assert!(rig.hs.server.players[rig.joiner.i].pack_flight.is_some());
             assert_eq!(rig.hs.server.players[rig.joiner.i].pack_unfit_feedback, vec![(event, 1)]);
-            let floor = |rig: &Rig| rig.hs.server.ecs.query::<&crate::entity::DroppedItem>().iter().filter(|(_, drop)| drop.stack.item == Item::Block(block::STONE)).map(|(_, drop)| u32::from(drop.stack.count)).sum::<u32>();
+            let floor = |rig: &Rig| rig.hs.server.ecs.query::<&crate::entity::ItemEntity>().iter().filter(|(_, drop)| drop.stack.item == Item::Block(block::STONE)).map(|(_, drop)| u32::from(drop.stack.count)).sum::<u32>();
             assert_eq!(floor(&rig), 0, "return waits until canonical custody installs");
             rig.apply(&opened);
             assert_eq!(rig.bag(block::STONE), 0, "a pending canonical snapshot cannot resurrect a returned grant");
