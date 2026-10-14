@@ -90,6 +90,9 @@ mod tests {
     mod quest_baseline;
     #[path = "quest_replay.rs"]
     mod quest_replay;
+    #[cfg(not(target_arch = "wasm32"))]
+    #[path = "quest_native.rs"]
+    mod quest_native;
     use super::*;
 
     /// Point `AXENSTAX_WORLDS_DIR` at one pid-scoped temp dir shared by every
