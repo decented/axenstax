@@ -1375,3 +1375,23 @@ fn handover_checkpoint_refuses_mutable_or_legacy_sidecars_before_ready() {
     let mut legacy = seed; legacy[0] = 1;
     assert!(super::bounded_decode::sidecar(&legacy).is_err(), "private legacy checkpoint bypassed the immutable seed contract");
 }
+
+#[test]
+fn handover_checkpoint_native_metadata_accepts_pretty_history_and_refuses_recovery() {
+    let mut original = WorldMeta::new("Authored world");
+    original.description = "History must stay exact".into();
+    original.genesis_block_found = true;
+    original.cheats_used = true;
+    original.pure_survival = false;
+    original.difficulty = "easy".into();
+    let pretty = serde_json::to_vec_pretty(&original).unwrap();
+    let parsed = source_metadata(&pretty).unwrap();
+    assert_eq!(serde_json::to_value(parsed).unwrap(), serde_json::to_value(&original).unwrap());
+    assert!(bounded_decode::metadata(&pretty).is_err(), "archive canonical validation was relaxed");
+    let mut historical = serde_json::to_value(&original).unwrap();
+    historical.as_object_mut().unwrap().remove("cloud_save");
+    assert!(!source_metadata(&serde_json::to_vec_pretty(&historical).unwrap()).unwrap().cloud_save);
+    assert!(source_metadata(&pretty[..pretty.len()/2]).is_err(), "torn JSON became recovered metadata");
+    assert!(source_metadata(&[]).is_err());
+    assert!(source_metadata(&vec![b' '; 2 * 1024 * 1024 + 1]).is_err());
+}

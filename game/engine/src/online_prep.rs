@@ -165,6 +165,16 @@ pub struct OnlinePrep {
     pub(crate) continuation: Option<crate::handover::live::continuation::Resolved>,
 }
 
+/// Inputs loaded by the game loop before hosting. Keeping relay construction
+/// separate lets local fixtures exercise the same checked host-start caller.
+pub(crate) struct HostInputs {
+    pub identity: crate::runtime_identity::RuntimeIdentity,
+    pub persona: [u8; 32],
+    pub relays: Vec<String>,
+    pub book: Vec<crate::contacts::Contact>,
+    pub blocked: Vec<[u8; 32]>,
+}
+
 // A freshly minted attestation is NOT carried here: `mint_and_store` writes it
 // to `profile/runtime_attestation.json`, and the caller rebuilds its
 // `RuntimeIdentity` from disk, so there is exactly one source of truth for what
@@ -405,6 +415,51 @@ impl PendingPrep {
     }
 }
 
+/// Verify authority before gathering sockets or publishing an online offer.
+pub(crate) async fn resolve_intent(
+    intent: &OnlineIntent,
+    now: u64,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<Option<crate::handover::live::continuation::Resolved>, String> {
+    match intent {
+        OnlineIntent::Join {
+            invite: Some(invite),
+            ..
+        } => {
+            let root = crate::handover::context::RootContext::new(
+                invite.host_runtime,
+                &invite.host_persona,
+                invite.expires_at,
+                &invite.relays,
+                now,
+            )
+            .map_err(|e| e.to_string())?;
+            crate::handover::live::continuation::cached_lookup(
+                root,
+                crate::handover::live::bearer::Bearer::new(invite.bearer),
+                now,
+                cancel,
+            )
+            .await
+            .map(Some)
+            .map_err(|_| {
+                "The invitation's continuation couldn't be verified. Try the original link again."
+                    .to_string()
+            })
+        }
+        OnlineIntent::Host { folder } => crate::handover::live::continuation::installed_world(
+            &crate::save::world_dir(folder),
+            now,
+            cancel,
+        )
+        .await
+        .map_err(|_| {
+            "This world's original invitation authority couldn't be verified.".to_string()
+        }),
+        OnlineIntent::Join { invite: None, .. } => Ok(None),
+    }
+}
+
 /// Start the worker: mint the attestation if `mint_with` is `Some`, then bind
 /// and gather. Returns immediately.
 ///
@@ -428,14 +483,7 @@ pub fn spawn(
             }
             let now = nostr::Timestamp::now().as_secs();
             let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|e| e.to_string())?;
-            let continuation = match &worker_intent {
-                OnlineIntent::Join { invite: Some(invite), .. } => {
-                    let root = crate::handover::context::RootContext::new(invite.host_runtime, &invite.host_persona, invite.expires_at, &invite.relays, now).map_err(|e| e.to_string())?;
-                    Some(rt.block_on(crate::handover::live::continuation::cached_lookup(root, crate::handover::live::bearer::Bearer::new(invite.bearer), now, &worker_cancel)).map_err(|_| "The invitation's continuation couldn't be verified. Try the original link again.".to_string())?)
-                }
-                OnlineIntent::Host { folder } => rt.block_on(crate::handover::live::continuation::installed_world(&crate::save::world_dir(folder), now, &worker_cancel)).map_err(|_| "This world's original invitation authority couldn't be verified.".to_string())?,
-                OnlineIntent::Join { invite: None, .. } => None,
-            };
+            let continuation = rt.block_on(resolve_intent(&worker_intent, now, &worker_cancel))?;
             if worker_cancel.load(std::sync::atomic::Ordering::Relaxed) { return Err("Online preparation cancelled.".into()); }
             let (socket, punch_socket, candidates, mapping) = bind_and_gather(port)?;
             Ok(OnlinePrep { socket, punch_socket, candidates, mapping, continuation })

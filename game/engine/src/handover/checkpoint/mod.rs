@@ -16,6 +16,12 @@ pub use evidence::{OfflineRecovery, RecoveredCheckpoint};
 pub use import::{DurableCheckpoint, Import, ImportBoundary, ImportObserver, NoFault};
 pub use pack::{CheckpointSource, PackBinding, PackControl, PackedCheckpoint, ParticipantMember, Snapshot, SnapshotSource, pack, pack_limited, pack_snapshot};
 
+/// Strict bounded parsing of an existing native metadata file, before live
+/// counters and transfer-only sanitisation. It performs no recovery or writes.
+pub(crate) fn source_metadata(bytes: &[u8]) -> Result<WorldMeta> {
+    bounded_decode::native_metadata(bytes)
+}
+
 /// A transfer COPY, preserving world history but carrying no source operator
 /// credentials, publication endpoint or Stash opt-in. Original is unchanged.
 pub fn transfer_metadata(original: &WorldMeta) -> Result<WorldMeta> {

@@ -921,9 +921,13 @@ fn capture_and_offer(
     if let Err(r) = crate::handover::live::eligibility::local_progress(seat0, f.tick) {
         return fail(session, hs, r);
     }
-    let meta = match live_transfer_metadata(crate::save::load_world_meta(f.world_name), f.world) {
+    let source_metadata = crate::handover::live::personal_adapter::read_regular(
+        &crate::save::world_dir(f.world_name).join("world_meta.json"), 2 * 1024 * 1024,
+    ).map_err(|_| crate::handover::Error::Io)
+        .and_then(|bytes| crate::handover::checkpoint::source_metadata(&bytes));
+    let meta = match source_metadata.and_then(|saved| live_transfer_metadata(saved, f.world)) {
         Ok(m) => m,
-        Err(_) => return fail(session, hs, Refusal("This world's settings couldn't be copied.")),
+        Err(_) => return fail(session, hs, Refusal("This world's saved history and settings couldn't be read. Nothing moved; play has resumed.")),
     };
     let carts = crate::save::carts_to_saved(f.ecs);
     let kept = match crate::save::tamed_mobs_to_saved(f.ecs) {

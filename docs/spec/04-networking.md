@@ -6804,3 +6804,14 @@ These adapters remain a reviewable private checkpoint. Full actual original
 root0→1, hand-back2, later retirement2→3, fault/restoration controls and final
 combined native/GPU/WASM regression are still required before feature acceptance;
 cold lookup tests and source inspection do not substitute for those callers.
+
+
+Frozen source capture reads the existing regular native world_meta.json through
+a 2MiB input/allocation bound and strict complete JSON parsing. Healthy pretty
+JSON and known historical field defaults remain supported. Missing, torn or
+unreadable metadata refuses the transfer with the source intact; capture never
+uses display placeholders or torn-file recovery to fabricate history/genesis,
+rules or scenario settings. Archive metadata still requires the exact compact
+canonical sender codec, and ordinary local recovery is unchanged. Actual
+GameState refusal and malformed/healthy native parsing controls are authored
+but execution awaits the next serial compiler slot.
