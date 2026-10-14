@@ -378,7 +378,6 @@ mod save_fence;
 #[cfg(not(target_arch = "wasm32"))]
 mod fsync;
 mod save_format;
-mod steed_save;
 mod world_open;
 mod data_dir;
 // Transport, server sim, and HostedServer are cross-platform so single-player
