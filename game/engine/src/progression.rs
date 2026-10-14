@@ -294,6 +294,7 @@ impl GameplayRecord {
         slot.bounties_claimed.clear();
         slot.bounties_claimed.extend(self.claims.iter().copied());
         slot.quest_progress = self.quests.clone();
+        slot.gameplay_clock = Default::default();
         slot.gameplay_revision = self.revision;
         slot.kill_tracking = self.tracking;
     }
@@ -352,6 +353,7 @@ impl GameplayRecord {
             tracking: slot.kill_tracking,
             quests: slot.quest_progress.clone(),
         };
+        let value = slot.gameplay_clock.captured(&value);
         value.validate()?;
         Ok(value)
     }

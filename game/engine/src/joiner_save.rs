@@ -304,6 +304,16 @@ impl JoinerSave {
     /// entries keeps the first ones in live order and is written
     /// `Incomplete(Overflow)` (the session itself is marked where its live
     /// debt passes the bound, `window_events`); the save never fails over it.
+    /// The live clock projects all remaining timers at this save boundary.
+    /// Failure refuses the canonical write; the current source remains intact.
+    pub(crate) fn capture_projected(sp: &crate::server::ServerPlayer, run_id: [u8; 16]) -> Result<Self, String> {
+        let mut saved = Self::capture(sp, run_id);
+        if let Some(personal) = &sp.personal {
+            let record = sp.gameplay_clock.captured(&personal.record()?);
+            saved.personal = Some(BoundPersonal::with_gameplay(personal.binding.clone(), &record)?);
+        }
+        Ok(saved)
+    }
     pub fn capture(sp: &crate::server::ServerPlayer, run_id: [u8; 16]) -> Self {
         let fold = crate::window_events::effective_window_and_debt(sp);
         let mut save = Self::from_parts(
@@ -657,8 +667,9 @@ impl crate::server::GameServer {
         }
         // M-1: never written into a retired world (or a refused one).
         crate::save::refuse_write_over_newer_save(&crate::save::world_dir(&self.world_name))?;
-        JoinerSave::capture(sp, self.run_id).encode()?;
-        crate::handover::live::personal_adapter::write(&crate::save::world_dir(&self.world_name), pk, &JoinerSave::capture(sp, self.run_id))
+        let saved = JoinerSave::capture_projected(sp, self.run_id)?;
+        saved.encode()?;
+        crate::handover::live::personal_adapter::write(&crate::save::world_dir(&self.world_name), pk, &saved)
     }
     pub(crate) fn save_joiners(&self) -> Result<(), String> {
         let errors: Vec<_> = self

@@ -42,6 +42,8 @@ pub enum ActionIntent {
     CancelledNoop,
     /// One unpredicted, source-backed entity pack request in either mode.
     Pack(crate::pack_wire::PackRequest),
+    /// One unpredicted ordinary quest operation, appended under wire 92.
+    Quest(crate::quest_wire::QuestRequest),
 }
 
 impl ActionIntent {
@@ -80,7 +82,7 @@ impl ActionIntent {
     /// from its hand when it reserves the drop, so every drop refusal is
     /// corrected (`strict_drop.rs`).
     pub fn predicts_nothing(&self) -> bool {
-        matches!(self, ActionIntent::Attack(_) | ActionIntent::Interact(_) | ActionIntent::Device { .. } | ActionIntent::Pack(_))
+        matches!(self, ActionIntent::Attack(_) | ActionIntent::Interact(_) | ActionIntent::Device { .. } | ActionIntent::Pack(_) | ActionIntent::Quest(_))
             || matches!(self, ActionIntent::Item(p) if matches!(p.action, protocol::ItemAction::Shoot { .. } | protocol::ItemAction::Eat { .. } | protocol::ItemAction::CreativeGive { .. } | protocol::ItemAction::Sleep { .. }))
     }
 }

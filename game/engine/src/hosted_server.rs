@@ -31,10 +31,16 @@ mod sidecar;
 mod actions;
 mod packs;
 mod pack_attempt;
+#[cfg(not(target_arch = "wasm32"))]
+mod quest_attempt;
+#[cfg(not(target_arch = "wasm32"))]
+mod quests;
 #[cfg(test)]
 mod pack_tests;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod quest_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod quest_live_tests;
 mod strict_container;
 mod strict_edit;
 mod strict_attack;
@@ -417,7 +423,7 @@ fn is_request(packet: &[u8]) -> bool {
         protocol::deserialize_header(packet),
         Some((P::EntityAttack | P::EntityInteract | P::DeviceInteract | P::ItemAction | P::WindowOp, _))
     ) || matches!(protocol::deserialize_header(packet), Some((P::Action, payload))
-        if crate::action_wire::ActionPacket::decode(payload).is_ok_and(|action| matches!(action.intent, crate::action_wire::ActionIntent::Pack(_))))
+        if crate::action_wire::ActionPacket::decode(payload).is_ok_and(|action| matches!(action.intent, crate::action_wire::ActionIntent::Pack(_) | crate::action_wire::ActionIntent::Quest(_))))
 }
 
 /// C3c-1 — a joiner's use as the server judged it before its edit landed
@@ -3241,16 +3247,21 @@ impl HostedServer {
     /// Return a grant to its surviving grave, otherwise to the ground.
     fn route_joiner_unfit(&mut self, i: usize, event: u32, stack: crate::item::ItemStack) {
         let cell = self.server.players[i].window_events.grave_grants.iter().find(|(n, _)| *n == event).map(|(_,cell)| *cell);
-        self.route_joiner_unfit_at(i, stack, cell);
+        let origin = crate::window_events::reward_origin(&self.server.players[i], event);
+        self.route_joiner_unfit_at(i, stack, cell, origin);
     }
 
-    fn route_joiner_unfit_at(&mut self, i: usize, mut stack: crate::item::ItemStack, cell: Option<(i32,i32,i32)>) {
+    fn route_joiner_unfit_at(&mut self, i: usize, mut stack: crate::item::ItemStack, cell: Option<(i32,i32,i32)>, origin: Option<crate::window_events::RewardOrigin>) {
         let sp = &self.server.players[i];
         // A refused private creative Plan never becomes a transferable floor item.
         if matches!(stack.item, crate::item::Item::Plan(_)) { return; }
         // C3b-fix-b (B-M2) — thrown from the joiner (it can't take it back
         // for the Q-drop delay), and only what came back.
         let feet = sp.player.pos;
+        if let Some(origin) = origin {
+            crate::window_events::spawn_unfit(&mut self.server.ecs, origin.position, stack, i);
+            return;
+        }
         if let Some(cell) = cell
             && let Some(mut grave) = self.server.world.grave_at(cell).cloned() {
             for stored in grave.slots.iter_mut().flatten() {
@@ -3969,6 +3980,8 @@ impl HostedServer {
         // C3b-1 — what others changed in the containers joiners have open.
         self.push_open_containers();
         self.push_open_packs();
+        #[cfg(not(target_arch = "wasm32"))]
+        self.push_open_quests();
         self.server_tick += 1;
         self.broadcast_state();
         // Operator Console snapshot (Spec B task 7 / B-7a): stream to the
@@ -4625,6 +4638,7 @@ impl HostedServer {
                             break;
                         }
                         self.server.players[i].personal = saved_joiner.as_ref().and_then(|s| s.personal.clone());
+                        self.server.players[i].gameplay_clock.restore(self.server.tick_counter);
                         // C3d (Decision 10, OC) — a Strict world admits only a
                         // record that proves no carried obligation. Refused
                         // before JoinAccept: the handshake isn't done, so
@@ -4906,7 +4920,7 @@ impl HostedServer {
                         // wait behind earlier ones). Not while edits wait: the
                         // client made them before these events.
                         if sp.server_simulated && input.block_changes.is_empty() && self.edit_queues[i].is_empty()
-                            && (sp.inventory_mode != crate::action_identity::InventoryMode::Strict || ((sp.action_queue.as_ref().is_none_or(|q| q.is_empty()) || sp.action_queue.as_ref().and_then(|queue| queue.front()).and_then(|head| crate::action_wire::ActionPacket::decode(&head.payload).ok()).is_some_and(|packet| matches!(packet.intent, crate::action_wire::ActionIntent::Pack(_)))) && sp.window_events.accepts_boundary(input.events_applied))) {
+                            && (sp.inventory_mode != crate::action_identity::InventoryMode::Strict || ((sp.action_queue.as_ref().is_none_or(|q| q.is_empty()) || sp.action_queue.as_ref().and_then(|queue| queue.front()).and_then(|head| crate::action_wire::ActionPacket::decode(&head.payload).ok()).is_some_and(|packet| matches!(packet.intent, crate::action_wire::ActionIntent::Pack(_) | crate::action_wire::ActionIntent::Quest(_)))) && sp.window_events.accepts_boundary(input.events_applied))) {
                             crate::window_events::apply_through(sp, input.events_applied, now);
                         }
                         // MP-A3 — death is server-held for a joiner. While
@@ -6459,8 +6473,13 @@ impl HostedServer {
                 // Exact terminal receipts follow the complete preceding world
                 // prefix. Each is a coalescing barrier on this same outbox.
                 if let Some(results) = &mut sp.action_results {
-                    for (receipt, carrier) in results.take_unsent_with_carriers() {
-                        if let Some(carrier) = carrier { outbox.push_pack_result(receipt.action, carrier); }
+                    for crate::action_results::ResultBatch { receipt, carrier, followups } in results.take_unsent_batches() {
+                        if followups.is_empty() {
+                            if let Some(carrier) = carrier { outbox.push_pack_result(receipt.action, carrier); }
+                        } else {
+                            if let Some(carrier) = carrier { outbox.push_quest_carrier(receipt.action, carrier); }
+                            for packet in followups { outbox.push_quest_carrier(receipt.action, packet); }
+                        }
                         outbox.push_action_receipt(receipt);
                     }
                 }

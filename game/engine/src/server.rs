@@ -37,6 +37,9 @@ pub struct ServerPlayer {
     pub action_queue: Option<crate::action_queue::ActionQueue>,
     pub action_results: Option<crate::action_results::ActionResults>,
     pub pack_session: Option<crate::pack_state::PackSession>,
+    pub(crate) quest_session: Option<crate::quest_state::QuestSession>,
+    pub(crate) quest_next_incarnation: u64,
+    pub(crate) gameplay_clock: crate::quest_state::GameplayClock,
     pub pack_flight: Option<crate::pack_state::PackFlight>,
     pub pack_next_incarnation: u64,
     /// Validated overflow feedback waits for a pending canonical fence.
@@ -546,6 +549,9 @@ impl ServerPlayer {
             action_queue: None,
             action_results: None,
             pack_session: None,
+            quest_session: None,
+            quest_next_incarnation: 0,
+            gameplay_clock: Default::default(),
             pack_flight: None,
             pack_next_incarnation: 0,
             pack_unfit_feedback: Vec::new(),
@@ -1528,8 +1534,6 @@ impl GameServer {
     /// ticks twice on the one world. Single-player runs no server at all; its
     /// client still simulates everything (CLAUDE.md known debt).
     pub fn tick(&mut self) {
-        #[cfg(not(target_arch = "wasm32"))]
-        self.decay_personal();
         use crate::sim_lend::SimSystem;
         // One column-loading story per mode (`hosted_server::assign_column_loading`):
         // a lent world's columns are its host client's streamer's alone.
@@ -1576,6 +1580,8 @@ impl GameServer {
             // age check (Rubber tap cooldown, future replenishers).
             self.tick_counter = self.tick_counter.wrapping_add(1);
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        { self.advance_personal_timers(); self.decay_personal(); }
         // C2a — a dusk starts the next night (once-a-night sleep).
         self.night_calendar.observe(self.world_time);
 

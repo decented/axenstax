@@ -4,7 +4,7 @@ use crate::action_identity::ActionHeader;
 use crate::action_journal::{MAX_ACTIONS, MAX_RETAINED_BYTES};
 use crate::action_wire::{ActionReceipt, AppliedActionAck};
 
-struct ResultRow { receipt: ActionReceipt, cells: Box<[[i32; 3]]>, carrier: Option<Box<[u8]>>, needs_send: bool }
+struct ResultRow { receipt: ActionReceipt, cells: Box<[[i32; 3]]>, carrier: Option<Box<[u8]>>, followups: Box<[Box<[u8]>]>, needs_send: bool }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ResultError { Namespace, Sequence, Capacity, InvalidAck }
 
@@ -18,7 +18,18 @@ pub struct ActionResults {
     carrier_bytes: usize,
 }
 
-pub struct PreparedResult { receipt: ActionReceipt, cells: Box<[[i32; 3]]>, carrier: Option<Box<[u8]>>, expected_terminal: u64 }
+pub(crate) struct ResultBatch {
+    pub receipt: ActionReceipt,
+    pub carrier: Option<Box<[u8]>>,
+    pub followups: Box<[Box<[u8]>]>,
+}
+
+pub struct PreparedResult { receipt: ActionReceipt, cells: Box<[[i32; 3]]>, carrier: Option<Box<[u8]>>, followups: Box<[Box<[u8]>]>, expected_terminal: u64 }
+
+fn followup_bytes(packets: &[Box<[u8]>]) -> Result<usize, ResultError> {
+    packets.iter().try_fold(packets.len().checked_mul(std::mem::size_of::<Box<[u8]>>()).ok_or(ResultError::Capacity)?,
+        |bytes, packet| bytes.checked_add(packet.len()).ok_or(ResultError::Capacity))
+}
 
 impl ActionResults {
     pub fn new(owner: ActionHeader) -> Self {
@@ -31,16 +42,29 @@ impl ActionResults {
     pub fn retained_cells(&self) -> impl Iterator<Item = &[i32; 3]> { self.rows.iter().flat_map(|r| r.cells.iter()) }
     pub fn retained_bytes(&self) -> usize { std::mem::size_of::<Self>() + self.rows.capacity() * std::mem::size_of::<ResultRow>() + self.cell_count * std::mem::size_of::<[i32; 3]>() + self.carrier_bytes }
     pub fn prepare(&mut self, receipt: ActionReceipt, cells: Box<[[i32; 3]]>) -> Result<PreparedResult, ResultError> {
-        self.prepare_inner(receipt, cells, None)
+        self.prepare_inner(receipt, cells, None, Box::new([]))
     }
     /// An unpredicted pack keeps its exact bounded response with the existing
     /// terminal row. A duplicate never rereads live stock or repeats an effect.
     pub fn prepare_with_carrier(&mut self, receipt: ActionReceipt, cells: Box<[[i32; 3]]>, carrier: Box<[u8]>) -> Result<PreparedResult, ResultError> {
         if carrier.len() > crate::action_journal::MAX_PAGE_BYTES + 1 || carrier.first() != Some(&(crate::protocol::PacketType::PackResult as u8)) { return Err(ResultError::Capacity); }
-        self.prepare_inner(receipt, cells, Some(carrier))
+        self.prepare_inner(receipt, cells, Some(carrier), Box::new([]))
     }
-    fn prepare_inner(&mut self, receipt: ActionReceipt, cells: Box<[[i32; 3]]>, carrier: Option<Box<[u8]>>) -> Result<PreparedResult, ResultError> {
-        let added_carrier = carrier.as_ref().map_or(0, |bytes| bytes.len());
+    /// A quest retains cost, genuine rewards and progression in one terminal
+    /// row. Repeats resend these exact bytes; they never recreate a grant.
+    pub(crate) fn prepare_quest(&mut self, receipt: ActionReceipt, carrier: Box<[u8]>, followups: Box<[Box<[u8]>]>) -> Result<PreparedResult, ResultError> {
+        if carrier.len() > crate::action_journal::MAX_PAGE_BYTES + 1
+            || carrier.first() != Some(&(crate::protocol::PacketType::QuestResult as u8))
+            || followups.is_empty() || followups.len() > crate::progression::REWARD_LIMIT + 1
+            || followups.last().and_then(|packet| packet.first()) != Some(&(crate::protocol::PacketType::PersonalSync as u8))
+            || followups.iter().enumerate().any(|(at, packet)| packet.len() > crate::protocol::MAX_WIRE_PACKET_LEN
+                || (at + 1 < followups.len() && packet.first() != Some(&(crate::protocol::PacketType::InventoryGrant as u8)))) {
+            return Err(ResultError::Capacity);
+        }
+        self.prepare_inner(receipt, Box::new([]), Some(carrier), followups)
+    }
+    fn prepare_inner(&mut self, receipt: ActionReceipt, cells: Box<[[i32; 3]]>, carrier: Option<Box<[u8]>>, followups: Box<[Box<[u8]>]>) -> Result<PreparedResult, ResultError> {
+        let added_carrier = carrier.as_ref().map_or(0, |bytes| bytes.len()).checked_add(followup_bytes(&followups)?).ok_or(ResultError::Capacity)?;
         let carrier_bytes = self.carrier_bytes.checked_add(added_carrier).ok_or(ResultError::Capacity)?;
         let cell_count = self.cell_count.checked_add(cells.len()).ok_or(ResultError::Capacity)?;
         if cell_count > crate::action_journal::MAX_CONTEXT_CELLS { return Err(ResultError::Capacity); }
@@ -56,14 +80,14 @@ impl ActionResults {
             self.rows.shrink_to(capacity_before);
             return Err(ResultError::Capacity);
         }
-        Ok(PreparedResult { receipt, cells, carrier, expected_terminal: self.terminal })
+        Ok(PreparedResult { receipt, cells, carrier, followups, expected_terminal: self.terminal })
     }
     pub fn commit(&mut self, prepared: PreparedResult) {
         assert_eq!(self.terminal, prepared.expected_terminal, "terminal result reservation changed before commit");
         self.terminal = prepared.receipt.action.seq;
         self.cell_count += prepared.cells.len();
-        self.carrier_bytes += prepared.carrier.as_ref().map_or(0, |bytes| bytes.len());
-        self.rows.push_back(ResultRow { receipt: prepared.receipt, cells: prepared.cells, carrier: prepared.carrier, needs_send: true });
+        self.carrier_bytes += prepared.carrier.as_ref().map_or(0, |bytes| bytes.len()) + followup_bytes(&prepared.followups).expect("reserved follow-up bytes");
+        self.rows.push_back(ResultRow { receipt: prepared.receipt, cells: prepared.cells, carrier: prepared.carrier, followups: prepared.followups, needs_send: true });
     }
     /// No row means no exact immutable result remains. The caller recovers or
     /// tears down; it must never invent a synthetic success/refusal/noop.
@@ -84,11 +108,20 @@ impl ActionResults {
     pub fn take_unsent(&mut self) -> Vec<ActionReceipt> {
         self.take_unsent_with_carriers().into_iter().map(|(receipt, _)| receipt).collect()
     }
+    #[cfg(test)]
     pub fn take_unsent_with_carriers(&mut self) -> Vec<(ActionReceipt, Option<Box<[u8]>>)> {
         self.rows.iter_mut().filter_map(|r| {
             if !r.needs_send { return None; }
             r.needs_send = false;
+            assert!(r.followups.is_empty(), "single-carrier test helper cannot discard a quest batch");
             Some((r.receipt, r.carrier.clone()))
+        }).collect()
+    }
+    pub(crate) fn take_unsent_batches(&mut self) -> Vec<ResultBatch> {
+        self.rows.iter_mut().filter_map(|row| {
+            if !row.needs_send { return None; }
+            row.needs_send = false;
+            Some(ResultBatch { receipt: row.receipt, carrier: row.carrier.clone(), followups: row.followups.clone() })
         }).collect()
     }
     /// Every terminal result must be applied before a handover capture.
@@ -112,7 +145,7 @@ impl ActionResults {
         while self.rows.front().is_some_and(|r| r.receipt.action.seq <= ack.through) {
             let row = self.rows.pop_front().expect("retained terminal row");
             self.cell_count -= row.cells.len();
-            self.carrier_bytes -= row.carrier.as_ref().map_or(0, |bytes| bytes.len());
+            self.carrier_bytes -= row.carrier.as_ref().map_or(0, |bytes| bytes.len()) + followup_bytes(&row.followups).expect("retained follow-up bytes");
         }
         self.acked = ack.through;
         self.acked_events = ack.included_events;
@@ -154,6 +187,43 @@ mod tests {
         results.acknowledge(ack(1, 4), 4).unwrap();
         assert_eq!(results.carrier_bytes, 0);
         assert!(results.rows.is_empty());
+    }
+
+    #[test]
+    fn d2c3_quest_terminal_batch_repeat_keeps_exact_reward_and_last_fence_bytes() {
+        let mut results = ActionResults::new(header(0));
+        let carrier = vec![crate::protocol::PacketType::QuestResult as u8, 7, 8].into_boxed_slice();
+        let followups = vec![vec![crate::protocol::PacketType::InventoryGrant as u8, 3].into_boxed_slice(),
+            vec![crate::protocol::PacketType::PersonalSync as u8, 4, 5].into_boxed_slice()].into_boxed_slice();
+        let prepared = results.prepare_quest(receipt(1, 4), carrier.clone(), followups.clone()).unwrap();
+        results.commit(prepared);
+        let retained = results.retained_bytes();
+        let first = results.take_unsent_batches().remove(0);
+        assert_eq!(first.carrier, Some(carrier.clone()));
+        assert_eq!(first.followups, followups);
+        results.repeat(receipt(1, 4).action).unwrap();
+        let repeated = results.take_unsent_batches().remove(0);
+        assert_eq!(repeated.receipt, first.receipt);
+        assert_eq!(repeated.carrier, Some(carrier));
+        assert_eq!(repeated.followups, first.followups, "a repeat never regenerates a reward or progression tuple");
+        assert_eq!(results.retained_bytes(), retained);
+        let ack = AppliedActionAck { session: header(0).session, epoch: header(0).epoch, life: header(0).life, through: 1, included_events: 4 };
+        results.acknowledge(ack, 4).unwrap();
+        assert_eq!(results.carrier_bytes, 0, "exact receipt retires every batch allocation");
+    }
+
+    #[test]
+    fn d2c3_quest_batch_requires_bounded_rewards_and_last_personal_before_reserving() {
+        let mut results = ActionResults::new(header(0));
+        let before = results.retained_bytes();
+        let carrier = vec![crate::protocol::PacketType::QuestResult as u8].into_boxed_slice();
+        assert!(matches!(results.prepare_quest(receipt(1, 4), carrier.clone(), Box::new([])), Err(ResultError::Capacity)));
+        let wrong_last = vec![vec![crate::protocol::PacketType::InventoryGrant as u8].into_boxed_slice()].into_boxed_slice();
+        assert!(matches!(results.prepare_quest(receipt(1, 4), carrier.clone(), wrong_last), Err(ResultError::Capacity)));
+        let mut too_many = vec![vec![crate::protocol::PacketType::InventoryGrant as u8].into_boxed_slice(); crate::progression::REWARD_LIMIT + 1];
+        too_many.push(vec![crate::protocol::PacketType::PersonalSync as u8].into_boxed_slice());
+        assert!(matches!(results.prepare_quest(receipt(1, 4), carrier, too_many.into_boxed_slice()), Err(ResultError::Capacity)));
+        assert_eq!(results.retained_bytes(), before, "invalid batches cannot change result retention before gameplay commit");
     }
 
     #[test]

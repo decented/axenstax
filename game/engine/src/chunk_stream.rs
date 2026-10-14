@@ -807,6 +807,23 @@ impl super::GameState {
                         remote.apply_action_receipt(receipt);
                     }
                 }
+                crate::chunk_intake::Delta::QuestResult(packet) => {
+                    let intake = self.remote_client.as_mut().map(|remote| remote.apply_quest_result_intake(&packet));
+                    match intake {
+                        Some(Ok(true)) => {
+                            let (count, bytes) = self.remote_client.as_ref().map_or((0, 0), |remote| remote.pack_retained_usage());
+                            if let Err(reason) = self.window_inbox.add_bounded(vec![crate::remote_client::RequestOutcome::Quest(packet)], Vec::new(), Vec::new(), (count, bytes.saturating_add(self.chunk_intake.carried_metadata_bytes()))) {
+                                log::warn!("Quest result inbox refused: {reason}");
+                                if let Some(remote) = &mut self.remote_client { remote.state = crate::remote_client::ConnectionState::Failed(crate::remote_client::HOST_BAD_WORLD_DATA.to_string()); }
+                            }
+                        },
+                        Some(Err(reason)) => {
+                            log::warn!("Quest result intake failed: {reason}");
+                            if let Some(remote) = &mut self.remote_client { remote.state = crate::remote_client::ConnectionState::Failed(crate::remote_client::HOST_BAD_WORLD_DATA.to_string()); }
+                        }
+                        _ => {}
+                    }
+                }
                 crate::chunk_intake::Delta::PackResult(packet) => {
                     let intake = self.remote_client.as_mut().map(|remote| remote.apply_pack_result_intake(&packet));
                     match intake {

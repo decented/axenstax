@@ -5771,6 +5771,7 @@ impl super::GameState {
         for (i, intent) in intents.iter_mut().enumerate() {
             if i >= self.players.len() { break; }
             let modal_open = self.players[i].crafting_ui.open
+                || (i == 0 && self.joined_quest_open())
                 || self.players[i].dialogue_villager.is_some()
                 || self.players[i].dialogue_satoshi.is_some()
                 || self.players[i].pending_build_choice.is_some()
@@ -7647,6 +7648,10 @@ impl super::GameState {
         }
         if self.players.first().is_some_and(|p| p.shared_container.as_ref().is_some_and(|mirror| mirror.pack_session.is_some() && mirror.visible())) {
             self.request_pack_close(0);
+            return true;
+        }
+        if let Some(view) = self.remote_client.as_ref().and_then(|remote| remote.quest_view.clone()) {
+            if !self.pack_window_frozen(0) { self.request_quest(view.target, view.incarnation, crate::quest_wire::QuestOperation::Close); }
             return true;
         }
         let Some(p) = self.players.first_mut() else { return false };
@@ -12991,12 +12996,9 @@ impl super::GameState {
                         self.players[pidx].place_cooldown = 8;
                         self.send_entity_interact(pidx, mob, kind, intent.sneak);
                     }
-                    crate::remote_mobs::MirrorClick::NotYet => {
-                        self.players[pidx].place_cooldown = 16;
-                        self.toast = Some((
-                            crate::remote_mobs::JOINED_INTERACTION_TOAST.to_string(),
-                            Instant::now() + Duration::from_secs(3),
-                        ));
+                    crate::remote_mobs::MirrorClick::QuestTalk => {
+                        self.players[pidx].place_cooldown = 8;
+                        self.request_quest(mob.id, 0, crate::quest_wire::QuestOperation::Talk);
                     }
                     crate::remote_mobs::MirrorClick::PackEquip | crate::remote_mobs::MirrorClick::PackOpen => {
                         self.players[pidx].place_cooldown = 8;
@@ -17753,6 +17755,8 @@ impl super::GameState {
                     }
                     crate::hud_ui::BuildChoice::None => {}
                 }
+            } else if pidx == 0 && self.joined_quest_open() {
+                self.draw_joined_quest(&screen.viewport);
             } else if let Some(target) = dialogue_target {
                 // Spec 19 phase 6 — villager dialogue + quest binding.
                 let still_alive = self.ecs.contains(target);
@@ -23485,6 +23489,22 @@ impl super::GameState {
                     }
                     #[cfg(not(target_arch = "wasm32"))]
                     if let Some(client) = self.remote_client.as_mut() { client.note_initial_personal_window_applied(event); }
+                }
+                crate::window_events::InboxItem::Outcome(crate::remote_client::RequestOutcome::Quest(packet)) => {
+                    if let Err(reason) = self.apply_quest_result(&packet) {
+                        log::warn!("Quest canonical application failed: {reason}");
+                        if let Some(remote) = &mut self.remote_client { remote.state = crate::remote_client::ConnectionState::Failed(crate::remote_client::HOST_BAD_WORLD_DATA.to_string()); }
+                        self.window_inbox.clear(); return;
+                    }
+                    if let Some(remote) = &mut self.remote_client { remote.pack_carrier_applied(packet.owned_bytes()); }
+                }
+                crate::window_events::InboxItem::Outcome(crate::remote_client::RequestOutcome::QuestView(packet)) => {
+                    if let Err(reason) = self.apply_quest_view(&packet) {
+                        log::warn!("Quest view application failed: {reason}");
+                        if let Some(remote) = &mut self.remote_client { remote.state = crate::remote_client::ConnectionState::Failed(crate::remote_client::HOST_BAD_WORLD_DATA.to_string()); }
+                        self.window_inbox.clear(); return;
+                    }
+                    if let Some(remote) = &mut self.remote_client { remote.pack_carrier_applied(packet.owned_bytes()); }
                 }
                 crate::window_events::InboxItem::Outcome(crate::remote_client::RequestOutcome::Pack(packet)) => {
                     if let Err(reason) = self.apply_pack_result(&packet) {

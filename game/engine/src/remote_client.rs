@@ -16,6 +16,8 @@ use crate::transport::ClientTransport;
 mod actions;
 #[path = "remote_client_pack.rs"]
 mod pack;
+#[path = "remote_client_quest.rs"]
+mod quest;
 pub use actions::flush_strict_window_ops;
 // Read by the copy lint and the stray-op test only.
 #[cfg(test)]
@@ -298,6 +300,8 @@ pub enum RequestOutcome {
     Sync(protocol::InventorySyncPacket),
     Pack(Box<crate::pack_wire::PackResult>),
     PackView(Box<crate::pack_wire::PackViewPush>),
+    Quest(Box<crate::quest_wire::QuestResult>),
+    QuestView(Box<crate::quest_wire::QuestViewPush>),
     #[cfg(not(target_arch = "wasm32"))]
     PersonalSync { window_event: u32, actor_respawns: u32 },
 }
@@ -394,6 +398,8 @@ pub struct RemoteClient {
     /// Bounded by `joiner_actions::MAX_PENDING` (the oldest goes first).
     pub released_requests: Vec<u32>,
     pack_flight: Option<pack::PackFlight>,
+    pub(crate) quest_view: Option<crate::quest_wire::QuestView>,
+    pub(crate) quest_note: Option<crate::quest_wire::QuestNote>,
     pack_buffer: pack::PackBuffer,
     last_recovery_id: u64,
     queued_action_receipts: usize,
@@ -845,6 +851,8 @@ impl RemoteClient {
             refill_refused: false,
             released_requests: Vec::new(),
             pack_flight: None,
+            quest_view: None,
+            quest_note: None,
             pack_buffer: Default::default(),
             last_recovery_id: 0,
             queued_action_receipts: 0,
@@ -922,6 +930,8 @@ impl RemoteClient {
             refill_refused: false,
             released_requests: Vec::new(),
             pack_flight: None,
+            quest_view: None,
+            quest_note: None,
             pack_buffer: Default::default(),
             last_recovery_id: 0,
             queued_action_receipts: 0,
@@ -1057,6 +1067,8 @@ impl RemoteClient {
                                 self.inventory_mode = accept.inventory_mode;
                                 self.action_journal = Some(crate::action_journal::ActionJournal::new(accept.action_session, accept.action_life));
                                 self.pack_flight = None;
+                                self.quest_view = None;
+                                self.quest_note = None;
                                 self.pack_buffer = Default::default();
                                 self.spawn_pos =
                                     Some((accept.spawn_x, accept.spawn_y, accept.spawn_z));
@@ -1395,6 +1407,18 @@ impl RemoteClient {
                                 self.state = ConnectionState::Failed(HOST_BAD_WORLD_DATA.to_string());
                                 changed = true;
                             }
+                        }
+                    }
+                    PacketType::QuestResult => {
+                        match self.receive_quest_result(payload) {
+                            Ok(received) => changed |= received,
+                            Err(reason) => { self.pack_carrier_failed(reason); changed = true; }
+                        }
+                    }
+                    PacketType::QuestView => {
+                        match protocol::safe_deserialize::<crate::quest_wire::QuestViewPush>(payload).map_err(|error| error.to_string()).and_then(|packet| self.receive_quest_view(packet)) {
+                            Ok(()) => changed = true,
+                            Err(reason) => { self.pack_carrier_failed(reason); changed = true; }
                         }
                     }
                     PacketType::PackResult => {
@@ -1843,7 +1867,8 @@ impl RemoteClient {
     /// Only a greater authoritative counter changes the applied physical life.
     pub(crate) fn apply_actor_respawn(&mut self, respawns: u32) -> bool {
         if respawns <= self.actor_respawns { return false; }
-        self.actor_respawns = respawns; true
+        self.actor_respawns = respawns;
+        self.quest_view = None; self.quest_note = None; true
     }
     pub(crate) fn personal_ready(&self) -> bool {
         #[cfg(not(target_arch = "wasm32"))] { self.personal_inbox.as_ref().is_none_or(|inbox| self.personal_initial_window_applied && inbox.initialised()) }
@@ -4136,6 +4161,7 @@ mod tests {
                 crate::chunk_intake::StreamItem::RebaseFence(_) => "F".into(),
                 crate::chunk_intake::StreamItem::ActionReceipt(_) => "R".into(),
                 crate::chunk_intake::StreamItem::PackResult(_) => "P".into(),
+                crate::chunk_intake::StreamItem::QuestResult(_) => "Q".into(),
             })
             .collect();
         assert_eq!(shape, ["C1", "L5,-6#abcd", "C2"]);

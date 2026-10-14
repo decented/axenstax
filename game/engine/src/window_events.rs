@@ -81,11 +81,20 @@ pub const RECENT_GRANTS: usize = 64;
 /// back again, round and round.
 pub const UNFIT_HOLD_TICKS: u64 = 100;
 
+/// Captured at reward authorisation. A later death, despawn or movement must
+/// never substitute another giver or move genuine overflow to the actor.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RewardOrigin {
+    pub npc: crate::progression::GameplayId,
+    pub position: glam::Vec3,
+}
+
 /// One change the server makes to a joiner's window by itself.
 #[derive(Clone, Debug)]
 pub enum WindowEvent {
     /// `InventoryGrant`: the stack is added (`Inventory::add_item`).
     Grant(ItemStack),
+    RewardGrant { stack: ItemStack, origin: RewardOrigin },
     /// Whole truth after join or death (`InventorySync`): the window, and
     /// the correction debt the copy owes from here (OC, v88): a join's is
     /// the restored record's (or a fresh joiner's effective debt), a death's
@@ -140,6 +149,7 @@ struct Waiting {
 struct AppliedGrant {
     seq: u32,
     stack: ItemStack,
+    origin: Option<RewardOrigin>,
     /// What the server's copy of the window held of it.
     landed: u8,
     /// A `GrantUnfit` named it already (one per grant).
@@ -364,7 +374,7 @@ fn apply_to(parts: &mut Parts, debt: &mut crate::container_window::CorrectionDeb
             *debt = carried.clone();
             Effect::Viewed
         }
-        WindowEvent::Grant(stack) => {
+        WindowEvent::Grant(stack) | WindowEvent::RewardGrant { stack, .. } => {
             let rest = parts.inv.add_item(stack.clone()).map_or(0, |r| r.count);
             Effect::Granted { landed: stack.count.saturating_sub(rest) }
         }
@@ -429,12 +439,14 @@ pub(crate) struct GrantOverflow {
     pub event: u32,
     pub stack: ItemStack,
     pub grave: Option<(i32, i32, i32)>,
+    pub origin: Option<RewardOrigin>,
 }
 
 fn overflow(ev: &WindowEvents, g: &AppliedGrant) -> Option<GrantOverflow> {
     let n = g.stack.count.saturating_sub(g.landed);
     (!g.returned && n > 0 && !matches!(g.stack.item, Item::Plan(_))).then(|| GrantOverflow {
         event: g.seq,
+        origin: g.origin,
         stack: ItemStack { item: g.stack.item.clone(), count: n },
         grave: ev.grave_grants.iter().find(|(n, _)| *n == g.seq).map(|(_, cell)| *cell),
     })
@@ -506,10 +518,15 @@ fn apply_front(sp: &mut ServerPlayer, now: u64, forced: bool) {
     let effect = apply_to(&mut parts, &mut sp.window_events.debt, &w.event);
     if let Some(locks) = mirror_locks { sp.inventory.set_locked_from(&locks); }
     match (effect, w.event) {
-        (Effect::Granted { landed }, WindowEvent::Grant(stack)) => {
+        (Effect::Granted { landed }, event @ (WindowEvent::Grant(_) | WindowEvent::RewardGrant { .. })) => {
+            let (stack, origin) = match event {
+                WindowEvent::Grant(stack) => (stack, None),
+                WindowEvent::RewardGrant { stack, origin } => (stack, Some(origin)),
+                _ => unreachable!("matched grant"),
+            };
             let overflow = stack.count.saturating_sub(landed);
             sp.possession.grant_overflow = sp.possession.grant_overflow.saturating_add(u32::from(overflow));
-            remember_grant(&mut sp.window_events, AppliedGrant { seq: w.seq, stack, landed, returned: false });
+            remember_grant(&mut sp.window_events, AppliedGrant { seq: w.seq, stack, origin, landed, returned: false });
         }
         (Effect::Took { taken }, WindowEvent::Take { item, n, how, .. }) if taken < n => {
             // C3d (run 4) — Strict queues only Takes its window can pay
@@ -657,7 +674,7 @@ fn note_correction_gives(sp: &mut ServerPlayer, seq: u32, c: &crate::window_ops:
                 None => 0,
             },
         };
-        remember_grant(&mut sp.window_events, AppliedGrant { seq, stack: g.clone(), landed: g.count - unfit, returned: false });
+        remember_grant(&mut sp.window_events, AppliedGrant { seq, stack: g.clone(), origin: None, landed: g.count - unfit, returned: false });
     }
 }
 
@@ -855,6 +872,12 @@ pub fn return_unfit(sp: &mut ServerPlayer, event: u32, count: u8, now: u64) -> O
     Some(ItemStack { item, count: backed })
 }
 
+/// The original giver is metadata in the SAME applied-grant ledger. Looking
+/// it up never creates entitlement; `return_unfit` remains the once-only gate.
+pub(crate) fn reward_origin(sp: &ServerPlayer, event: u32) -> Option<RewardOrigin> {
+    sp.window_events.grants.iter().find(|grant| grant.seq == event).and_then(|grant| grant.origin)
+}
+
 /// C3b-fix-b (B-M2) — put the stack [`return_unfit`] gave back on the ground
 /// at joiner `player_index`'s feet, thrown like its own Q-drop: it is the
 /// dropper, so it can't take it again for `ITEM_DROP_PICKUP_DELAY_TICKS` (a
@@ -897,6 +920,8 @@ impl InboxItem {
             InboxItem::Outcome(RequestOutcome::SlotSet(set)) => set.window_event,
             InboxItem::Outcome(RequestOutcome::Sync(set)) => set.window_event,
             InboxItem::Outcome(RequestOutcome::Pack(packet)) => packet.window_event,
+            InboxItem::Outcome(RequestOutcome::Quest(packet)) => packet.window_event,
+            InboxItem::Outcome(RequestOutcome::QuestView(packet)) => packet.window_event,
             InboxItem::Outcome(RequestOutcome::PackView(packet)) => packet.window_event,
             #[cfg(not(target_arch = "wasm32"))]
             InboxItem::Outcome(RequestOutcome::PersonalSync { window_event, .. }) => *window_event,
@@ -938,6 +963,8 @@ pub(crate) fn outcome_owned_bytes(outcome: &RequestOutcome) -> usize {
         RequestOutcome::Sync(packet) => packet.slots.capacity().saturating_mul(size_of::<(crate::protocol::WireWindowSlot, crate::protocol::WireSlot)>())
             .saturating_add(packet.owed.capacity().saturating_mul(size_of::<(crate::protocol::WireStack, u32)>())),
         RequestOutcome::Pack(packet) => packet.owned_bytes(),
+        RequestOutcome::Quest(packet) => packet.owned_bytes(),
+        RequestOutcome::QuestView(packet) => packet.owned_bytes(),
         RequestOutcome::PackView(packet) => packet.owned_bytes(),
         RequestOutcome::Interact(_) | RequestOutcome::Item(_) => 0,
         #[cfg(not(target_arch = "wasm32"))]
@@ -1012,6 +1039,8 @@ impl WindowInbox {
     pub fn pack_life_ready(&self, actor_respawns: u32) -> bool {
         self.outcomes.iter().all(|outcome| match outcome {
             RequestOutcome::Pack(packet) => packet.actor_respawns <= actor_respawns,
+            RequestOutcome::Quest(packet) => packet.actor_respawns <= actor_respawns,
+            RequestOutcome::QuestView(packet) => packet.actor_respawns <= actor_respawns,
             RequestOutcome::PackView(packet) => packet.actor_respawns <= actor_respawns,
             #[cfg(not(target_arch = "wasm32"))]
             RequestOutcome::PersonalSync { actor_respawns: life, .. } => *life <= actor_respawns,

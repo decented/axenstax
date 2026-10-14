@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 pub(super) struct PackBuffer { count: usize, bytes: usize }
 
 impl PackBuffer {
-    fn reserve(&mut self, bytes: usize) -> Result<(), String> {
+    pub(super) fn reserve(&mut self, bytes: usize) -> Result<(), String> {
         let count = self.count.checked_add(1).ok_or("Pack carrier count overflow")?;
         let total = self.bytes.checked_add(bytes).ok_or("Pack carrier bytes overflow")?;
         if count > crate::action_journal::MAX_EVENT_ENTRIES || total > crate::action_journal::MAX_RETAINED_BYTES { return Err("Pack carriers exceed their retained limit".into()); }
@@ -20,10 +20,11 @@ impl PackBuffer {
 }
 
 pub(super) struct PackFlight {
-    action: ActionHeader,
-    actor_respawns: u32,
-    received: Option<(u32, ActionFate, [u8; 32])>,
-    world_ready: bool,
+    pub(super) action: ActionHeader,
+    pub(super) actor_respawns: u32,
+    pub(super) received: Option<(u32, ActionFate, [u8; 32])>,
+    pub(super) world_ready: bool,
+    pub(super) requires_personal: bool,
 }
 
 impl RemoteClient {
@@ -87,7 +88,7 @@ impl RemoteClient {
         if request.actor_respawns != self.applied_actor_respawns() { return Err("Pack action names an old body".into()); }
         let actor_respawns = request.actor_respawns;
         let action = self.reserve_action(crate::action_wire::ActionIntent::Pack(request), Box::new([]), Box::new([]))?;
-        self.pack_flight = Some(PackFlight { action, actor_respawns, received: None, world_ready: false });
+        self.pack_flight = Some(PackFlight { action, actor_respawns, received: None, world_ready: false, requires_personal: false });
         Ok(action)
     }
 
@@ -97,7 +98,7 @@ impl RemoteClient {
 
     pub(super) fn receive_pack_result(&mut self, payload: &[u8]) -> Result<bool, String> {
         let packet = PackResult::decode(payload)?;
-        if self.pack_flight.as_ref().is_none_or(|flight| flight.action != packet.action) {
+        if self.pack_flight.as_ref().is_none_or(|flight| flight.action != packet.action || flight.requires_personal) {
             return if self.retired_pack_result(&packet) { Ok(false) } else { Err("Pack result has no matching request".into()) };
         }
         let hash: [u8; 32] = Sha256::digest(payload).into();
@@ -118,7 +119,7 @@ impl RemoteClient {
     /// window inbox is held. A stale body's state is skipped later at actual
     /// window application; its exact terminal metadata still retires.
     pub fn apply_pack_result_intake(&mut self, packet: &PackResult) -> Result<bool, String> {
-        if self.pack_flight.as_ref().is_none_or(|flight| flight.action != packet.action) {
+        if self.pack_flight.as_ref().is_none_or(|flight| flight.action != packet.action || flight.requires_personal) {
             return if self.retired_pack_result(packet) { Ok(false) } else { Err("Pack intake has no matching request".into()) };
         }
         let hash: [u8; 32] = Sha256::digest(packet.encode()?.as_ref()).into();
@@ -133,7 +134,12 @@ impl RemoteClient {
         let Some(flight) = self.pack_flight.as_ref().filter(|flight| flight.action == receipt.action) else { return Ok(true) };
         let Some((event, fate, _)) = flight.received else { return Ok(false) };
         if receipt.included_events != event || receipt.fate != fate { return Err("Pack receipt differs from its exact result".into()); }
-        Ok(flight.world_ready && self.events_applied >= event)
+        let ready = flight.world_ready && self.events_applied >= event;
+        #[cfg(not(target_arch = "wasm32"))]
+        if ready && flight.requires_personal {
+            return Ok(self.personal_inbox.as_ref().is_some_and(|inbox| inbox.applied_through(event, self.applied_actor_respawns())));
+        }
+        Ok(ready && !flight.requires_personal)
     }
 
     pub(super) fn retire_pack_flight(&mut self, receipt: ActionReceipt) {

@@ -148,6 +148,7 @@ pub struct PlayerSlot {
     pub(crate) personal_binding: Option<crate::progression::GameplayBinding>,
     pub(crate) quest_progress: crate::progression::QuestProgress,
     pub(crate) gameplay_revision: u64,
+    pub(crate) gameplay_clock: crate::quest_state::GameplayClock,
     pub(crate) kill_tracking: crate::progression::KillTracking,
     /// Snapshot of `kill_counter` at the moment a Kill quest was accepted;
     /// delta = current - snapshot. None for non-Kill quests.
@@ -451,6 +452,7 @@ impl PlayerSlot {
             personal_binding: None,
             quest_progress: Default::default(),
             gameplay_revision: 0,
+            gameplay_clock: Default::default(),
             kill_tracking: crate::progression::KillTracking::Authoritative,
             kill_quest_baseline: ahash::AHashMap::new(),
             charter_allows_sats: false,

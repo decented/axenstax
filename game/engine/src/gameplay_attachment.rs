@@ -174,6 +174,7 @@ impl crate::server::GameServer {
             personal.bytes = record.encode()?;
         }
         self.players[index].personal = Some(personal);
+        self.players[index].gameplay_clock.restore(self.tick_counter);
         Ok(())
     }
 }

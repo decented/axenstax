@@ -56,7 +56,19 @@ impl HostedServer {
         }
         // Superseded/dead/old attaches cannot release the current tuple.
         // Exact repeats of the last applied tuple are harmless.
+        // A quest's exact older progression tuple can be superseded by a
+        // later ordinary update. It proves that batch without releasing the
+        // latest/current handover fence. A new applied lifecycle tuple may
+        // also retire an old body's terminal metadata, never its old state.
+        if let Some(flight) = &mut sp.pack_flight
+            && flight.personal_ack == Some(ack) && ack.life == sp.respawns {
+            flight.requires_personal = false;
+        }
         if sp.personal_delivery.accept(ack) {
+            if let Some(flight) = &mut sp.pack_flight
+                && ack.life == sp.respawns && ack.window_event >= flight.event {
+                flight.requires_personal = false;
+            }
             // Installation proof is immediate; its server window fold must
             // not overtake older authorisations that still name the old base.
             sp.personal_delivery.acknowledged_window = Some(sp.personal_delivery.acknowledged_window.map_or(ack.window_event, |old| old.max(ack.window_event)));

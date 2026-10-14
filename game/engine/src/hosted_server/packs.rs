@@ -24,7 +24,7 @@ impl HostedServer {
     pub(super) fn pack_queue_waits(&self, i: usize) -> bool {
         self.server.players.get(i).and_then(|sp| sp.action_queue.as_ref()).and_then(|queue| queue.front())
             .and_then(|head| crate::action_wire::ActionPacket::decode(&head.payload).ok())
-            .is_some_and(|packet| matches!(packet.intent, crate::action_wire::ActionIntent::Pack(_)))
+            .is_some_and(|packet| matches!(packet.intent, crate::action_wire::ActionIntent::Pack(_) | crate::action_wire::ActionIntent::Quest(_)))
     }
 
     pub(super) fn pack_target_policy(&self, i: usize, entity: hecs::Entity) -> Result<(), PackNote> {
@@ -110,7 +110,7 @@ impl HostedServer {
             crate::window_ops::close_container_view(sp);
         }
         prepared_events.commit(sp, self.server.tick_counter);
-        sp.pack_flight = Some(PackFlight { action, event: included_events });
+        sp.pack_flight = Some(PackFlight { action, event: included_events, requires_personal: false, #[cfg(not(target_arch = "wasm32"))] personal_ack: None });
         if let Some(stack) = spill { crate::entity::spawn_thrown_item(&mut self.server.ecs, self.server.players[i].player.eye_pos(), glam::Vec3::ZERO, stack, i as u8); }
         self.complete_typed_result(i, action, fate, prepared_result);
         true

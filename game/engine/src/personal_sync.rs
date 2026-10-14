@@ -33,7 +33,7 @@ pub(crate) fn snapshot(
     }
     Ok(value)
 }
-fn acknowledgement(snapshot: &PersonalSnapshot) -> PersonalAck {
+pub(crate) fn acknowledgement(snapshot: &PersonalSnapshot) -> PersonalAck {
     PersonalAck {
         session: snapshot.session,
         life: snapshot.life,
@@ -57,7 +57,7 @@ pub(crate) struct Delivery {
     pub initialised: bool,
     pub started_tick: u64,
     pub sent_tick: u64,
-    pub last_penalty: Option<u64>,
+
 }
 impl Delivery {
     pub fn issue(&mut self, snapshot: PersonalSnapshot, tick: u64) {
@@ -128,6 +128,9 @@ impl Inbox {
     }
     pub fn has_pending_fence(&self, event: u32, life: u32) -> bool {
         self.pending.iter().any(|snapshot| snapshot.window_event == event && snapshot.life == life)
+    }
+    pub(crate) fn applied_through(&self, event: u32, life: u32) -> bool {
+        self.last.is_some_and(|ack| ack.life == life && ack.window_event >= event)
     }
     pub fn observe_respawn(&mut self, respawns: u32) -> Result<(), String> {
         if respawns <= self.observed_life {
@@ -241,6 +244,9 @@ impl crate::GameState {
                         &crate::protocol::PersonalSyncPacket::Applied(ack),
                     ));
                 }
+                // The exact PersonalACK leaves before a quest receipt can
+                // release its flight, overflow feedback or later authority.
+                client.retire_applied_receipts();
             }
             Err(error) => client.state = crate::remote_client::ConnectionState::Failed(error),
         }
@@ -248,6 +254,24 @@ impl crate::GameState {
 }
 
 impl crate::server::GameServer {
+    /// Observe gameplay without per-tick canonical rewrites. An actual expiry
+    /// is one discrete revision; normal snapshot delivery fences that change.
+    pub(crate) fn advance_personal_timers(&mut self) {
+        for sp in &mut self.players {
+            if !sp.server_simulated || !sp.is_in_world() { continue; }
+            sp.gameplay_clock.observe(self.tick_counter);
+            let Some(personal) = &mut sp.personal else { continue; };
+            let Ok(record) = personal.record() else { sp.personal_read_failed = true; continue; };
+            let (mut projected, expired) = sp.gameplay_clock.project(&record, self.tick_counter);
+            if !expired { continue; }
+            let Some(revision) = projected.revision.checked_add(1) else { sp.personal_read_failed = true; continue; };
+            projected.revision = revision;
+            match projected.encode() {
+                Ok(bytes) => { personal.bytes = bytes; sp.gameplay_clock.committed(self.tick_counter); }
+                Err(_) => sp.personal_read_failed = true,
+            }
+        }
+    }
     pub(crate) fn credit_personal_kill(
         &mut self,
         i: usize,
@@ -258,10 +282,11 @@ impl crate::server::GameServer {
         let Some(personal) = &mut sp.personal else {
             return;
         };
-        let Ok(mut record) = personal.record() else {
+        let Ok(record) = personal.record() else {
             sp.personal_read_failed = true;
             return;
         };
+        let (mut record, _) = sp.gameplay_clock.project(&record, self.tick_counter);
         let mut kills: ahash::AHashMap<_, _> = record.kills.iter().copied().collect();
         let Some(count) = kills.get(&kind).copied().unwrap_or(0).checked_add(1) else {
             sp.personal_read_failed = true;
@@ -272,16 +297,11 @@ impl crate::server::GameServer {
         reputation
             .per_village
             .extend(record.reputation.iter().copied());
-        let penalty = matches!(
-            kind,
-            crate::mob::MobType::Villager | crate::mob::MobType::Peddler
-        ) && sp.personal_delivery.last_penalty.is_none_or(|last| {
-            self.tick_counter.saturating_sub(last)
-                >= crate::reputation::VILLAGER_KILL_REP_COOLDOWN_TICKS
-        });
+        let penalty = matches!(kind, crate::mob::MobType::Villager | crate::mob::MobType::Peddler)
+            && record.quests.penalty_left == 0
+            && crate::reputation::village_at_position(&self.world, pos).is_some();
         if penalty && let Some(village) = crate::reputation::village_at_position(&self.world, pos) {
             reputation.adjust(village, crate::reputation::VILLAGER_KILL_PENALTY);
-            sp.personal_delivery.last_penalty = Some(self.tick_counter);
         }
         record.kills = kills.into_iter().collect();
         record.kills.sort_by_key(|(kind, _)| u32::from_le_bytes(bincode::serialize(kind).expect("scalar mob kind").try_into().expect("mob kind width")));
@@ -291,7 +311,7 @@ impl crate::server::GameServer {
         let Some(revision) = record.revision.checked_add(1) else { sp.personal_read_failed = true; return; };
         record.revision = revision;
         match record.encode() {
-            Ok(bytes) => personal.bytes = bytes,
+            Ok(bytes) => { personal.bytes = bytes; sp.gameplay_clock.committed(self.tick_counter); },
             Err(_) => sp.personal_read_failed = true,
         }
     }
@@ -304,18 +324,23 @@ impl crate::server::GameServer {
             return;
         };
         for sp in &mut self.players {
+            if !sp.server_simulated || !sp.is_in_world() { continue; }
             let Some(personal) = &mut sp.personal else {
                 continue;
             };
-            let Ok(mut record) = personal.record() else {
+            let Ok(record) = personal.record() else {
                 sp.personal_read_failed = true;
                 continue;
             };
+            let (mut record, _) = sp.gameplay_clock.project(&record, self.tick_counter);
+            if record.reputation.iter().all(|(_, score)| *score == 0) { continue; }
+            let Some(revision) = record.revision.checked_add(1) else { sp.personal_read_failed = true; continue; };
+            record.revision = revision;
             for (_, score) in &mut record.reputation {
                 *score -= score.signum();
             }
             match record.encode() {
-                Ok(bytes) => personal.bytes = bytes,
+                Ok(bytes) => { personal.bytes = bytes; sp.gameplay_clock.committed(self.tick_counter); },
                 Err(_) => sp.personal_read_failed = true,
             }
         }

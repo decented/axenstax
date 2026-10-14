@@ -6884,7 +6884,7 @@ InventorySync1, including an empty fresh signed or guest bag, before its numbere
 personal fence. The actual physical initial-apply proof, held-prefix byte/count
 limits, paced authorisation order, exact initial acknowledgement and latest
 quiescence remain unchanged. A personal acknowledgement alone never releases a
-Pack/Quest flight. The foundation does not enable the villager-click request yet.
+Pack/Quest flight. The joined request adapter below builds on this foundation.
 
 Lending-host scope preparation saves the actual GameState world and local seats
 before external gameplay admission. A failed preparation rolls back the new live
@@ -6915,3 +6915,38 @@ complete Quest intent/request/UI and backed completion path remain under active
 implementation. The prior accepted v91 pack/C3d bytes stay pinned. Mirror remains
 default and global Strict recovery remains parked. Neither active-quest handover
 eligibility refusal is lifted at this foundation checkpoint.
+
+#### D2c-3 joined request checkpoint (unverified feature work)
+
+Intent13 carries an unpredicted ordinary quest request. The server resolves the
+actual current actor and original live villager, checks reach/facing/permission,
+and freezes an offer for one dialogue incarnation. Accept/Decline/TurnIn name
+that server-owned offer or accepted quest; no client reward is accepted. The
+existing profession pools and reward amounts remain unchanged. Joined terms,
+previews and payouts contain no monetary or raid/treasury contribution.
+
+A completion stages only the ordered 36-slot material cost and admits its exact
+source places through the same narrow pending-prefix backing rule used by packs,
+in both inventory modes. It reserves the whole canonical cost event, genuine
+reward Grants, LAST PersonalSync fence and immutable terminal result batch before
+consuming the quest. QuestResult76 carries the cost-only window and the LAST
+ordinal; QuestView77 refreshes a bounded dialogue without changing holdings.
+The same Pack/Quest flight guards local mutation, while control and world FIFO
+intake remain readable. Receipt retirement waits for actual LAST progression
+installation; its exact personal acknowledgement precedes the receipt ACK.
+A superseded quest tuple can prove its own flight without releasing a newer
+personal delivery or handover fence.
+
+Reward origin is captured in the existing once-only applied-grant ledger. Genuine
+unfit units return beside that exact giver's captured position, including after
+the giver dies, moves or leaves interest. Ordinary grants preserve their existing
+routing. Remaining gameplay timers use a runtime anchor on the same holder;
+kill/decay/quest mutations and canonical saves project all remaining timers,
+restore re-anchors without offline decay, and actual expiry is a discrete revision.
+
+This checkpoint is source work awaiting bounded execution. The authored actual
+GameState repeat-batch controls deliberately retain the identified duplicate
+InventoryGrant intake defect for causal RED evidence before its narrow repair.
+Native portable-quest use and full original/retained active continuation are still
+pending; both common-active handover refusal guards remain enabled. None of this
+is final feature acceptance or a change to the Mirror default/global Strict scope.
