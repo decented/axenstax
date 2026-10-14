@@ -423,7 +423,7 @@ fn game_harness_handover_delayed_initial_personal_client_blocks_prediction_and_o
                 let trace = delayed.lock().unwrap();
                 let rc = j.hg.state.remote_client.as_ref().unwrap();
                 eprintln!(
-                    "initial-half mode={mode:?} snapshot_first={snapshot_first} connected={} has_personal={} ready={} frontier={} replace_event={} snapshot_event={} replace_allowed={} snapshot_allowed={} held_replace={} held_snapshot={} pending_personal={} client_mode={:?} sent_personal_acks={}",
+                    "initial-half mode={mode:?} snapshot_first={snapshot_first} connected={} has_personal={} ready={} frontier={} replace_event={} snapshot_event={} replace_allowed={} snapshot_allowed={} held_replace={} held_snapshot={} pending_personal={} client_playing={} sent_personal_acks={}",
                     rc.is_connected(),
                     accept.has_personal_state,
                     rc.personal_ready(),
@@ -437,7 +437,7 @@ fn game_harness_handover_delayed_initial_personal_client_blocks_prediction_and_o
                     rc.personal_inbox
                         .as_ref()
                         .map_or(0, |inbox| inbox.pending_count()),
-                    j.hg.state.mode,
+                    matches!(j.hg.state.mode, crate::GameMode::Playing),
                     trace
                         .sent
                         .iter()
