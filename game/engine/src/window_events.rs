@@ -923,7 +923,6 @@ impl InboxItem {
             InboxItem::Outcome(RequestOutcome::Quest(packet)) => packet.window_event,
             InboxItem::Outcome(RequestOutcome::QuestView(packet)) => packet.window_event,
             InboxItem::Outcome(RequestOutcome::PackView(packet)) => packet.window_event,
-            #[cfg(not(target_arch = "wasm32"))]
             InboxItem::Outcome(RequestOutcome::PersonalSync { window_event, .. }) => *window_event,
             InboxItem::Outcome(RequestOutcome::ContainerOpened(o)) => o.window_event,
             InboxItem::Grant(g) => g.window_event,
@@ -967,8 +966,7 @@ pub(crate) fn outcome_owned_bytes(outcome: &RequestOutcome) -> usize {
         RequestOutcome::QuestView(packet) => packet.owned_bytes(),
         RequestOutcome::PackView(packet) => packet.owned_bytes(),
         RequestOutcome::Interact(_) | RequestOutcome::Item(_) => 0,
-        #[cfg(not(target_arch = "wasm32"))]
-        RequestOutcome::PersonalSync { .. } => 0, // Body ownership stays in personal_sync::Inbox and its external reservation.
+        RequestOutcome::PersonalSync { .. } => 0, // Body ownership stays in personal_inbox::Inbox and its external reservation.
     }
 }
 
@@ -1042,7 +1040,6 @@ impl WindowInbox {
             RequestOutcome::Quest(packet) => packet.actor_respawns <= actor_respawns,
             RequestOutcome::QuestView(packet) => packet.actor_respawns <= actor_respawns,
             RequestOutcome::PackView(packet) => packet.actor_respawns <= actor_respawns,
-            #[cfg(not(target_arch = "wasm32"))]
             RequestOutcome::PersonalSync { actor_respawns: life, .. } => *life <= actor_respawns,
             _ => true,
         })

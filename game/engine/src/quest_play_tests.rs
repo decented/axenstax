@@ -214,7 +214,7 @@ fn d2c3_quest_decline_expiry_projects_all_timers_without_resetting_record_or_off
         original,
         "pure clock projection rewrote the live authority"
     );
-    remaining = GameplayRecord::decode(&remaining.encode().unwrap(), &remaining.context).unwrap();
+    remaining = GameplayRecord::decode(&remaining.encode().unwrap(), remaining.context).unwrap();
     let (restored, _) = project_timers(&remaining, 0);
     assert_eq!(
         restored, remaining,

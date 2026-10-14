@@ -447,7 +447,7 @@ fn d2c3_actual_completion_reward_overflow_uses_original_dead_giver_once_in_both_
         rig.client.send_to_server(&protocol::serialize_packet(
             protocol::PacketType::ItemAction,
             &protocol::ItemActionPacket {
-                seq: 1,
+                seq: 2,
                 action: protocol::ItemAction::GrantUnfit {
                     event: reply.grants[0].window_event,
                     count: 255,
@@ -460,6 +460,19 @@ fn d2c3_actual_completion_reward_overflow_uses_original_dead_giver_once_in_both_
             rig.record().reputation,
             reputation,
             "a repeated overflow report cannot award reputation"
+        );
+        let after_repeat: u32 = rig
+            .host
+            .server
+            .ecs
+            .query::<&crate::entity::ItemEntity>()
+            .iter()
+            .filter(|(_, item)| matches!(item.stack.item, Item::Material(MaterialId::Bread)))
+            .map(|(_, item)| u32::from(item.stack.count))
+            .sum();
+        assert_eq!(
+            after_repeat, reward_count,
+            "fresh-sequence repeated feedback cannot spill the same grant twice"
         );
         let repeat = rig.packet(opened.incarnation, QuestOperation::TurnIn { id: terms.id });
         let repeated = rig.send(&repeat);

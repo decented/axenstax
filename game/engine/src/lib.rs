@@ -202,6 +202,7 @@ pub mod handover;
 mod handover_game;
 #[cfg(not(target_arch = "wasm32"))]
 mod personal_sync;
+mod personal_inbox;
 mod world_room;
 #[cfg(not(target_arch = "wasm32"))]
 mod kithmoot_keeper;

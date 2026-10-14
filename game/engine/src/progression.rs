@@ -278,12 +278,6 @@ impl GameplayRecord {
     pub(crate) fn decode(bytes: &[u8], expected: GameplayContext) -> Result<Self, String> {
         codec::decode(bytes, expected)
     }
-    pub(crate) fn is_default(&self) -> bool {
-        self.reputation.iter().all(|(_, score)| *score == 0)
-            && self.kills.iter().all(|(_, count)| *count == 0)
-            && self.claims.is_empty()
-            && self.quests.is_empty()
-    }
     pub(crate) fn install_progression(&self, slot: &mut crate::player_slot::PlayerSlot) {
         slot.reputation.per_village.clear();
         slot.reputation

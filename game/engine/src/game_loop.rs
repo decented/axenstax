@@ -21810,10 +21810,7 @@ impl super::GameState {
             pending_grants = std::mem::take(&mut client.pending_grants);
             pending_life_events = std::mem::take(&mut client.pending_life_events);
             pending_outcomes = std::mem::take(&mut client.pending_outcomes);
-            #[cfg(not(target_arch = "wasm32"))]
             let personal_ready = client.personal_inbox.as_ref().is_none_or(|inbox| inbox.initialised());
-            #[cfg(target_arch = "wasm32")]
-            let personal_ready = true;
             pending_kills = if personal_ready { std::mem::take(&mut client.pending_kills) } else { Vec::new() };
             pending_refused_uses = std::mem::take(&mut client.pending_refused_uses);
             // Deltas accumulated across every StateUpdate since last frame —
@@ -22154,7 +22151,6 @@ impl super::GameState {
                     }
                     crate::remote_client::OwnLifeEvent::Respawned { at, respawns } => {
                         if let Some(client) = self.remote_client.as_mut() && !client.apply_actor_respawn(respawns) { continue; }
-                        #[cfg(not(target_arch = "wasm32"))]
                         if let Some(client) = self.remote_client.as_mut() { let life = client.applied_actor_respawns(); if let Some(inbox) = &mut client.personal_inbox { inbox.life = life; } }
                         self.players[0].last_grave = None;
                         // Back at full health: nothing reported before the
@@ -22189,7 +22185,6 @@ impl super::GameState {
         if !self.edits_unsent() {
             self.apply_window_inbox();
         }
-        #[cfg(not(target_arch = "wasm32"))]
         self.apply_personal_inbox();
         // The kills the server credited to us.
         for kill in &pending_kills {
@@ -23432,7 +23427,6 @@ impl super::GameState {
         // A personal fence received before the initial whole window cannot
         // advance the frontier or authorise play. Ordinary window ordering is
         // unchanged once that genuine Sync has actually succeeded.
-        #[cfg(not(target_arch = "wasm32"))]
         if self.remote_client.as_ref().is_some_and(|remote| remote.initial_personal_window_waits())
             && !self.window_inbox.prioritise_initial_personal_replace()
         { return; }
@@ -23487,7 +23481,6 @@ impl super::GameState {
                         self.window_inbox.clear();
                         return;
                     }
-                    #[cfg(not(target_arch = "wasm32"))]
                     if let Some(client) = self.remote_client.as_mut() { client.note_initial_personal_window_applied(event); }
                 }
                 crate::window_events::InboxItem::Outcome(crate::remote_client::RequestOutcome::Quest(packet)) => {
@@ -23524,7 +23517,6 @@ impl super::GameState {
                     }
                     if let Some(remote) = &mut self.remote_client { remote.pack_carrier_applied(packet.owned_bytes()); }
                 }
-                #[cfg(not(target_arch = "wasm32"))]
                 crate::window_events::InboxItem::Outcome(crate::remote_client::RequestOutcome::PersonalSync { .. }) => { /* Progression installs after the actual numbered window frontier advances below. */ }
                 crate::window_events::InboxItem::Grant(grant) => {
                     unfit.push(
@@ -23568,7 +23560,6 @@ impl super::GameState {
             self.joiner_actions.acknowledged(acked);
         }
         self.release_retired_requests();
-        #[cfg(not(target_arch = "wasm32"))]
         self.apply_personal_inbox();
         if satori {
             self.audio.play_gem_pickup();

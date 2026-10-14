@@ -302,7 +302,6 @@ pub enum RequestOutcome {
     PackView(Box<crate::pack_wire::PackViewPush>),
     Quest(Box<crate::quest_wire::QuestResult>),
     QuestView(Box<crate::quest_wire::QuestViewPush>),
-    #[cfg(not(target_arch = "wasm32"))]
     PersonalSync { window_event: u32, actor_respawns: u32 },
 }
 
@@ -375,7 +374,6 @@ pub struct RemoteClient {
     pub inventory_mode: crate::action_identity::InventoryMode,
     pub action_journal: Option<crate::action_journal::ActionJournal>,
     /// Set only after this attach's actual initial whole-window Sync succeeds.
-    #[cfg(not(target_arch = "wasm32"))]
     personal_initial_window_applied: bool,
     pub recovery_prepare: Option<crate::action_identity::RecoveryCut>,
     pub recovery_assembly: Option<crate::rebase_assembly::RebaseAssembly>,
@@ -492,8 +490,7 @@ pub struct RemoteClient {
     /// bounded like `pending_grants`.
     pub pending_outcomes: Vec<RequestOutcome>,
     pub pending_kills: Vec<protocol::KillEventPacket>,
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) personal_inbox: Option<crate::personal_sync::Inbox>,
+    pub(crate) personal_inbox: Option<crate::personal_inbox::Inbox>,
     /// C3c-1-fix (M-4) — the server's refusals of our use-tagged edits
     /// (`StateUpdatePacket::refused_uses`), accumulated across every
     /// StateUpdate since the game loop last drained them (a delta, never read
@@ -843,7 +840,6 @@ impl RemoteClient {
             transport,
             inventory_mode: crate::action_identity::InventoryMode::Mirror,
             action_journal: None,
-            #[cfg(not(target_arch = "wasm32"))]
             personal_initial_window_applied: false,
             recovery_prepare: None,
             recovery_assembly: None,
@@ -879,7 +875,6 @@ impl RemoteClient {
             pending_life_events: Vec::new(),
             pending_outcomes: Vec::new(),
             pending_kills: Vec::new(),
-            #[cfg(not(target_arch = "wasm32"))]
             personal_inbox: None,
             pending_refused_uses: Vec::new(),
             respawn_resend_from: None,
@@ -922,7 +917,6 @@ impl RemoteClient {
             transport,
             inventory_mode: crate::action_identity::InventoryMode::Mirror,
             action_journal: None,
-            #[cfg(not(target_arch = "wasm32"))]
             personal_initial_window_applied: false,
             recovery_prepare: None,
             recovery_assembly: None,
@@ -958,7 +952,6 @@ impl RemoteClient {
             pending_life_events: Vec::new(),
             pending_outcomes: Vec::new(),
             pending_kills: Vec::new(),
-            #[cfg(not(target_arch = "wasm32"))]
             personal_inbox: None,
             pending_refused_uses: Vec::new(),
             respawn_resend_from: None,
@@ -988,7 +981,6 @@ impl RemoteClient {
     /// Poll for server messages. Call each frame.
     /// Returns true if state changed (e.g., join accepted, state update received).
     pub fn poll(&mut self) -> bool {
-        #[cfg(not(target_arch = "wasm32"))]
         if self.personal_inbox.as_ref().is_some_and(|inbox| inbox.timed_out()) {
             self.state = ConnectionState::Failed("Personal state wasn't received and applied in time.".into()); return true;
         }
@@ -1057,9 +1049,8 @@ impl RemoteClient {
                                     "Joined server as player {} (seed: {}, mode: {:?})",
                                     accept.player_index, accept.seed, accept.play_mode
                                 );
-                                #[cfg(not(target_arch = "wasm32"))]
                                 {
-                                    self.personal_inbox = accept.has_personal_state.then(|| crate::personal_sync::Inbox::new(accept.action_session, accept.action_life));
+                                    self.personal_inbox = accept.has_personal_state.then(|| crate::personal_inbox::Inbox::new(accept.action_session, accept.action_life));
                                     self.personal_initial_window_applied = false;
                                 }
                                 self.actor_respawns = accept.action_life;
@@ -1278,7 +1269,6 @@ impl RemoteClient {
                                             && join_spawn_in_range(at)
                                             && self.pending_life_events.len() < MAX_LIFE_EVENTS_PER_POLL
                                         {
-                                            #[cfg(not(target_arch = "wasm32"))]
                                             if let Some(inbox) = &mut self.personal_inbox && let Err(error) = inbox.observe_respawn(*respawns) { self.state = ConnectionState::Failed(error); }
                                             self.received_actor_respawns = *respawns;
                                             self.respawn_resend_from = None;
@@ -1504,7 +1494,6 @@ impl RemoteClient {
                             changed = true;
                         }
                     }
-                    #[cfg(not(target_arch = "wasm32"))]
                     PacketType::PersonalSync => {
                         let result = protocol::safe_deserialize::<protocol::PersonalSyncPacket>(payload).map_err(|e| e.to_string()).and_then(|packet| {
                             let protocol::PersonalSyncPacket::Snapshot(value) = packet else { return Err("Unexpected personal applied packet".into()); };
@@ -1861,7 +1850,6 @@ impl RemoteClient {
 
     /// C3a-fix-1 — this client applied the server's window event `event`
     /// (0 = none): the count every later packet reports goes up to it.
-    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn applied_window_event(&self) -> u32 { self.events_applied }
     pub(crate) fn applied_actor_respawns(&self) -> u32 { self.actor_respawns }
     /// Only a greater authoritative counter changes the applied physical life.
@@ -1871,23 +1859,19 @@ impl RemoteClient {
         self.quest_view = None; self.quest_note = None; true
     }
     pub(crate) fn personal_ready(&self) -> bool {
-        #[cfg(not(target_arch = "wasm32"))] { self.personal_inbox.as_ref().is_none_or(|inbox| self.personal_initial_window_applied && inbox.initialised()) }
-        #[cfg(target_arch = "wasm32")] { true }
+        self.personal_inbox.as_ref().is_none_or(|inbox| self.personal_initial_window_applied && inbox.initialised())
     }
     /// A high event number does not prove the imported initial window landed.
     /// Polling and owned-byte checks stay live while that exact Sync is absent.
     pub(crate) fn initial_personal_window_waits(&self) -> bool {
-        #[cfg(not(target_arch = "wasm32"))] { self.personal_inbox.is_some() && !self.personal_initial_window_applied }
-        #[cfg(target_arch = "wasm32")] { false }
+        self.personal_inbox.is_some() && !self.personal_initial_window_applied
     }
     /// Called only after inventory_sync::apply successfully installs Sync1.
-    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn note_initial_personal_window_applied(&mut self, event: u32) {
         if event == 1 && self.personal_inbox.is_some() { self.personal_initial_window_applied = true; }
     }
     pub(crate) fn has_personal_state(&self) -> bool {
-        #[cfg(not(target_arch = "wasm32"))] { self.personal_inbox.is_some() }
-        #[cfg(target_arch = "wasm32")] { false }
+        self.personal_inbox.is_some()
     }
     pub fn note_window_event(&mut self, event: u32) {
         self.events_applied = self.events_applied.max(event);

@@ -39,10 +39,8 @@ impl RemoteClient {
     pub fn pack_retained_usage(&self) -> (usize, usize) {
         let count = self.pack_buffer.count;
         let bytes = self.pack_buffer.bytes.saturating_add(self.chunk_queue.capacity().saturating_mul(std::mem::size_of::<(usize, crate::chunk_intake::StreamItem)>()));
-        #[cfg(not(target_arch = "wasm32"))]
-        { let (personal_count, personal_bytes) = self.personal_inbox.as_ref().map_or((0, 0), |inbox| (inbox.pending_count(), inbox.owned_bytes())); (count.saturating_add(personal_count), bytes.saturating_add(personal_bytes)) }
-        #[cfg(target_arch = "wasm32")]
-        { (count, bytes) }
+        let (personal_count, personal_bytes) = self.personal_inbox.as_ref().map_or((0, 0), |inbox| (inbox.pending_count(), inbox.owned_bytes()));
+        (count.saturating_add(personal_count), bytes.saturating_add(personal_bytes))
     }
 
     pub fn pack_carrier_applied(&mut self, owned_bytes: usize) {
@@ -135,7 +133,6 @@ impl RemoteClient {
         let Some((event, fate, _)) = flight.received else { return Ok(false) };
         if receipt.included_events != event || receipt.fate != fate { return Err("Pack receipt differs from its exact result".into()); }
         let ready = flight.world_ready && self.events_applied >= event;
-        #[cfg(not(target_arch = "wasm32"))]
         if ready && flight.requires_personal {
             return Ok(self.personal_inbox.as_ref().is_some_and(|inbox| inbox.applied_through(event, self.applied_actor_respawns())));
         }

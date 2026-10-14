@@ -6950,3 +6950,11 @@ InventoryGrant intake defect for causal RED evidence before its narrow repair.
 Native portable-quest use and full original/retained active continuation are still
 pending; both common-active handover refusal guards remain enabled. None of this
 is final feature acceptance or a change to the Mirror default/global Strict scope.
+
+The existing browser guest transport uses the same portable common-progression
+inbox, real initial whole-window proof, bounded held-prefix accounting and exact
+PersonalACK/receipt gate as native clients. Snapshot/acknowledgement layouts and
+SHA256(snapshot bincode) bytes are unchanged. Browser play never gains native
+sign-in, an identity file store or handover authority from this client adapter;
+the public browser taster remains offline. The scoped WASM library type check
+verifies portable compilation only, not actual browser gameplay.
