@@ -1932,8 +1932,7 @@ impl RemoteClient {
         self.handover_inbox.drain(..).collect()
     }
 
-    /// Send one packet as-is (a handover Decline while still joined).
-    #[cfg(not(target_arch = "wasm32"))]
+    /// Send one packet as-is, including personal acknowledgement control.
     pub fn send_raw(&self, packet: &[u8]) {
         if !self.parked {
             self.transport.send_to_server(packet);
