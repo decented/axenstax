@@ -6937,6 +6937,17 @@ installation; its exact personal acknowledgement precedes the receipt ACK.
 A superseded quest tuple can prove its own flight without releasing a newer
 personal delivery or handover fence.
 
+Before the shared three-queue merge, numbered positions in each owned queue
+are stably ordered by their actual event number. Event-0 metadata retains its
+queue position, equal numbers retain arrival order, and ordering allocates no
+scratch buffer. This places a cost carrier delivered through the world FIFO
+before higher reward and personal/view metadata already held by the inbox.
+Immediately before applying a numbered grant, the client checks the actual
+applied window frontier. A grant at or below that frontier is inert, including
+its overflow report and pickup audio; a repeated terminal batch cannot grant
+twice. Legacy event-0 grants retain their existing behaviour. This uses the
+existing frontier and adds no inventory ledger or retained history.
+
 Reward origin is captured in the existing once-only applied-grant ledger. Genuine
 unfit units return beside that exact giver's captured position, including after
 the giver dies, moves or leaves interest. Ordinary grants preserve their existing
@@ -6944,9 +6955,10 @@ routing. Remaining gameplay timers use a runtime anchor on the same holder;
 kill/decay/quest mutations and canonical saves project all remaining timers,
 restore re-anchors without offline decay, and actual expiry is a discrete revision.
 
-This checkpoint is source work awaiting bounded execution. The authored actual
-GameState repeat-batch controls deliberately retain the identified duplicate
-InventoryGrant intake defect for causal RED evidence before its narrow repair.
+This correction is source work awaiting bounded execution. Actual GameState
+controls established separate ordering loss, duplicate reward and duplicate
+overflow feedback failures before the narrow correction; its restored runtime
+results remain pending.
 Native portable-quest use and full original/retained active continuation are still
 pending; both common-active handover refusal guards remain enabled. None of this
 is final feature acceptance or a change to the Mirror default/global Strict scope.

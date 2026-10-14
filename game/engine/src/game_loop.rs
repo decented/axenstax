@@ -23519,6 +23519,15 @@ impl super::GameState {
                 }
                 crate::window_events::InboxItem::Outcome(crate::remote_client::RequestOutcome::PersonalSync { .. }) => { /* Progression installs after the actual numbered window frontier advances below. */ }
                 crate::window_events::InboxItem::Grant(grant) => {
+                    // The same terminal batch may be retained and re-sent.
+                    // Only the actually applied prefix proves its numbered
+                    // grant inert; decode/receipt arrival never advances it.
+                    // This also suppresses duplicate overflow and audio.
+                    if grant.window_event != 0
+                        && self.remote_client.as_ref().is_some_and(|client| grant.window_event <= client.applied_window_event())
+                    {
+                        continue;
+                    }
                     unfit.push(
                         crate::remote_entities::apply_inventory_grant(
                             &mut self.players[0].inventory,

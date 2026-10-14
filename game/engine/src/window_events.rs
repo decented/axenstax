@@ -913,20 +913,39 @@ impl InboxItem {
     /// The window event this item is, 0 for none.
     pub fn event(&self) -> u32 {
         match self {
-            InboxItem::Outcome(RequestOutcome::Interact(o)) => o.window_event,
-            InboxItem::Outcome(RequestOutcome::Item(o)) => o.window_event,
-            // C3b-fix-a (v78) — every container view is an event: an opened
-            // mirror (0 for a refusal), a push, a correction.
-            InboxItem::Outcome(RequestOutcome::SlotSet(set)) => set.window_event,
-            InboxItem::Outcome(RequestOutcome::Sync(set)) => set.window_event,
-            InboxItem::Outcome(RequestOutcome::Pack(packet)) => packet.window_event,
-            InboxItem::Outcome(RequestOutcome::Quest(packet)) => packet.window_event,
-            InboxItem::Outcome(RequestOutcome::QuestView(packet)) => packet.window_event,
-            InboxItem::Outcome(RequestOutcome::PackView(packet)) => packet.window_event,
-            InboxItem::Outcome(RequestOutcome::PersonalSync { window_event, .. }) => *window_event,
-            InboxItem::Outcome(RequestOutcome::ContainerOpened(o)) => o.window_event,
+            InboxItem::Outcome(outcome) => outcome_event(outcome),
             InboxItem::Grant(g) => g.window_event,
             InboxItem::ArmourWorn { event, .. } => *event,
+        }
+    }
+}
+
+fn outcome_event(outcome: &RequestOutcome) -> u32 {
+    match outcome {
+        RequestOutcome::Interact(packet) => packet.window_event,
+        RequestOutcome::Item(packet) => packet.window_event,
+        RequestOutcome::SlotSet(packet) => packet.window_event,
+        RequestOutcome::Sync(packet) => packet.window_event,
+        RequestOutcome::Pack(packet) => packet.window_event,
+        RequestOutcome::Quest(packet) => packet.window_event,
+        RequestOutcome::QuestView(packet) => packet.window_event,
+        RequestOutcome::PackView(packet) => packet.window_event,
+        RequestOutcome::PersonalSync { window_event, .. } => *window_event,
+        RequestOutcome::ContainerOpened(packet) => packet.window_event,
+    }
+}
+
+/// A cost carrier can leave the world FIFO after higher metadata was polled.
+/// Sort only positive positions: event-0 metadata keeps its original place,
+/// equal numbers keep arrival order, and the existing allocation is unchanged.
+fn order_numbered<T>(items: &mut [T], event: impl Fn(&T) -> u32) {
+    for index in 0..items.len() {
+        if event(&items[index]) == 0 { continue; }
+        let mut at = index;
+        while let Some(previous) = (0..at).rev().find(|&pos| event(&items[pos]) != 0) {
+            if event(&items[previous]) <= event(&items[at]) { break; }
+            items.swap(previous, at);
+            at = previous;
         }
     }
 }
@@ -934,10 +953,10 @@ impl InboxItem {
 /// A joined client's window-event carriers not applied yet, and the
 /// `StateUpdate` acknowledgement that waits with them (its request claims
 /// must not end before their outcomes are applied, joiner_actions N4).
-/// `RemoteClient` decodes them into one queue per kind, each in arrival
-/// order; [`Self::take_ordered`] puts them back into the one order they
-/// arrived in by their event numbers (the server numbers and sends them in
-/// one order, on one ordered stream).
+/// `RemoteClient` decodes them into one queue per kind. World-FIFO carriers
+/// can enter after higher metadata that was already polled; [`Self::take_ordered`]
+/// normalises numbered positions before merging the queues. Unnumbered
+/// metadata retains its place among carriers of the same kind.
 #[derive(Debug, Default)]
 pub struct WindowInbox {
     outcomes: Vec<RequestOutcome>,
@@ -981,18 +1000,7 @@ impl WindowInbox {
     /// Test diagnostics expose only event numbers, never participant bytes.
     #[cfg(test)]
     pub(crate) fn diagnostic_event_queues(&self) -> (Vec<u32>, Vec<u32>, Vec<u32>) {
-        let outcomes = self.outcomes.iter().map(|outcome| match outcome {
-            RequestOutcome::Interact(packet) => packet.window_event,
-            RequestOutcome::Item(packet) => packet.window_event,
-            RequestOutcome::ContainerOpened(packet) => packet.window_event,
-            RequestOutcome::SlotSet(packet) => packet.window_event,
-            RequestOutcome::Sync(packet) => packet.window_event,
-            RequestOutcome::Pack(packet) => packet.window_event,
-            RequestOutcome::PackView(packet) => packet.window_event,
-            RequestOutcome::Quest(packet) => packet.window_event,
-            RequestOutcome::QuestView(packet) => packet.window_event,
-            RequestOutcome::PersonalSync { window_event, .. } => *window_event,
-        }).collect();
+        let outcomes = self.outcomes.iter().map(outcome_event).collect();
         (outcomes, self.grants.iter().map(|grant| grant.window_event).collect(), self.armour.iter().map(|(_, event)| *event).collect())
     }
 
@@ -1077,6 +1085,9 @@ impl WindowInbox {
     /// cursor or grid. A new unnumbered carrier that changes any of those
     /// must be numbered instead.
     pub fn take_ordered(&mut self) -> (Vec<InboxItem>, Option<u64>) {
+        order_numbered(&mut self.outcomes, outcome_event);
+        order_numbered(&mut self.grants, |grant| grant.window_event);
+        order_numbered(&mut self.armour, |(_, event)| *event);
         let mut outcomes: VecDeque<InboxItem> = self.outcomes.drain(..).map(InboxItem::Outcome).collect();
         let mut grants: VecDeque<InboxItem> = self.grants.drain(..).map(InboxItem::Grant).collect();
         let mut armour: VecDeque<InboxItem> =
@@ -1122,6 +1133,39 @@ mod tests {
     use crate::crafting::{ToolMaterial, ToolType};
     use crate::item::MaterialId;
     use crate::protocol::{InteractOutcomePacket, ItemActionOutcomePacket, WireItem};
+
+    #[test]
+    fn d2c3_late_cost_and_personal_metadata_order_without_moving_zero_slots_or_ties() {
+        let mut positions = vec![(13, "first"), (0, "zero-a"), (11, "cost"), (13, "second"), (0, "zero-b"), (12, "grant")];
+        let capacity = positions.capacity();
+        order_numbered(&mut positions, |(event, _)| *event);
+        assert_eq!(positions, vec![(11, "cost"), (0, "zero-a"), (12, "grant"), (13, "first"), (0, "zero-b"), (13, "second")]);
+        assert_eq!(positions.capacity(), capacity, "ordering must use the existing allocation");
+
+        let registry = crate::block::BlockRegistry::new();
+        let empty = EffectiveWindow { inv: Inventory::new(), armour: [None; 4], cursor: None, grid: Default::default() };
+        let cost = crate::quest_wire::QuestResult {
+            actor_respawns: 0,
+            action: crate::action_identity::ActionHeader { session: [7; 16], epoch: 0, seq: 1, life: 0, events_applied: 10 },
+            fate: crate::action_identity::ActionFate::Accepted,
+            note: crate::quest_wire::QuestNote::Completed,
+            window_event: 11,
+            included_events: 13,
+            window: crate::pack_wire::PackWindow::capture(&empty, &Default::default(), &registry).unwrap(),
+            view: None,
+        };
+        let zero = |seq| RequestOutcome::Item(ItemActionOutcomePacket { seq, accepted: false, consume_held: 0, note: 0, window_event: 0, wear_held: false, bite_after: 0 });
+        let mut inbox = WindowInbox::default();
+        inbox.add_bounded(vec![RequestOutcome::PersonalSync { window_event: 13, actor_respawns: 0 }, zero(21), RequestOutcome::Quest(Box::new(cost)), zero(22), RequestOutcome::PersonalSync { window_event: 13, actor_respawns: 1 }], vec![grant(12)], vec![(1, 10)], (0, 0)).unwrap();
+        let capacities = (inbox.outcomes.capacity(), inbox.grants.capacity(), inbox.armour.capacity());
+        let (items, _) = inbox.take_ordered();
+        assert_eq!((inbox.outcomes.capacity(), inbox.grants.capacity(), inbox.armour.capacity()), capacities);
+        assert_eq!(items.iter().map(InboxItem::event).collect::<Vec<_>>(), vec![10, 11, 0, 12, 13, 0, 13]);
+        assert!(matches!(&items[2], InboxItem::Outcome(RequestOutcome::Item(packet)) if packet.seq == 21 && packet.window_event == 0));
+        assert!(matches!(&items[5], InboxItem::Outcome(RequestOutcome::Item(packet)) if packet.seq == 22 && packet.window_event == 0));
+        assert!(matches!(&items[4], InboxItem::Outcome(RequestOutcome::PersonalSync { actor_respawns: 0, .. })));
+        assert!(matches!(&items[6], InboxItem::Outcome(RequestOutcome::PersonalSync { actor_respawns: 1, .. })), "equal numbered metadata keeps its arrival order");
+    }
 
     #[test]
     #[cfg(not(target_arch = "wasm32"))]

@@ -352,8 +352,7 @@ fn replay(after_application: bool, full: bool) {
             "repeated numbered reward applied twice at actual GameState intake"
         );
         if full {
-            let d = delivery.lock().unwrap();
-            let returned: u32 = d
+            let returned: u32 = delivery.lock().unwrap()
                 .unfit
                 .iter()
                 .filter_map(|packet| match packet.action {
