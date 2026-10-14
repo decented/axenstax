@@ -527,6 +527,8 @@ fn game_harness_d2c3_partial_old_quest_does_not_block_respawn_or_resurrect_rewar
     isolate_saves();
     for mode in [InventoryMode::Mirror, InventoryMode::Strict] {
         let mut rig = partial_setup(mode, "partial-death", true, true);
+        let i = rig.i;
+        let last = rig.last;
         let old_life = rig.host.server.players[rig.i].respawns;
         // A genuine authoritative death runs through the normal host tick.
         // Put the respawn away from the old grave, so a real pickup cannot
@@ -536,16 +538,17 @@ fn game_harness_d2c3_partial_old_quest_does_not_block_respawn_or_resurrect_rewar
         sp.combat.health = 0.0;
         sp.combat.dead = true;
         sp.death_handled = false;
-        pack_wait(&mut rig.host, &mut rig.hg, |server, _| {
-            let sp = &server.server.players[rig.i];
+        partial_death_wait(&mut rig.host, &mut rig.hg, i, last, &rig.delivery, "minimum-dead-delay", |server, _| {
+            let sp = &server.server.players[i];
             sp.death_handled && sp.combat.dead && sp.dead_ticks >= crate::server::MIN_DEAD_TICKS_BEFORE_RESPAWN
         });
-        rig.hg.state.remote_client.as_mut().unwrap().send_respawn();
+        assert!(rig.hg.state.players[0].combat.dead, "the real server death must reach the client's death-screen state");
+        assert!(rig.hg.state.players[0].combat.request_respawn(), "choose Respawn through the normal client combat/UI path");
         let new_life = old_life.checked_add(1).unwrap();
-        pack_wait(&mut rig.host, &mut rig.hg, |server, game| {
-            let sp = &server.server.players[rig.i];
+        partial_death_wait(&mut rig.host, &mut rig.hg, i, last, &rig.delivery, "current-life-personal-proof", |server, game| {
+            let sp = &server.server.players[i];
             sp.respawns == new_life && sp.is_present_and_alive()
-                && game.state.remote_client.as_ref().is_some_and(|client| client.applied_actor_respawns() == new_life && client.personal_inbox.as_ref().is_some_and(|inbox| inbox.applied_through(rig.last, new_life)))
+                && game.state.remote_client.as_ref().is_some_and(|client| client.applied_actor_respawns() == new_life && client.personal_inbox.as_ref().is_some_and(|inbox| inbox.applied_through(last, new_life)))
                 && sp.personal.as_ref().is_some_and(|personal| sp.personal_delivery.quiescent(personal, new_life))
         });
         assert_eq!(bread(&rig.hg.state.players[0].inventory), 0);
@@ -558,13 +561,43 @@ fn game_harness_d2c3_partial_old_quest_does_not_block_respawn_or_resurrect_rewar
             d.hold_last = false;
             d.hold_receipts = false;
         }
-        pack_wait(&mut rig.host, &mut rig.hg, |server, game| !game.state.pack_window_frozen(0) && server.server.players[rig.i].pack_flight.is_none());
+        partial_death_wait(&mut rig.host, &mut rig.hg, i, last, &rig.delivery, "old-carriers-and-receipt-retired", |server, game| !game.state.pack_window_frozen(0) && server.server.players[i].pack_flight.is_none());
         assert_eq!(bread(&rig.hg.state.players[0].inventory), 0, "late old-body rewards cannot reappear after actual respawn");
         assert!(rig.hg.state.remote_client.as_ref().unwrap().is_connected());
         let graves: u32 = rig.host.server.world.iter_graves().flat_map(|(_, grave)| grave.slots.iter().flatten()).filter(|stack| stack.item == crate::item::Item::Material(crate::item::MaterialId::Bread)).map(|stack| u32::from(stack.count)).sum();
         let floor: u32 = rig.host.server.ecs.query::<&crate::entity::ItemEntity>().iter().filter(|(_, item)| item.stack.item == crate::item::Item::Material(crate::item::MaterialId::Bread)).map(|(_, item)| u32::from(item.stack.count)).sum();
         assert_eq!(graves + floor + bread(&crate::window_events::effective_window(&rig.host.server.players[rig.i]).inv), 2, "death retains the original reward once in authoritative custody");
     }
+}
+
+/// Stage-tagged observation of the real lifecycle schedule. Only non-secret
+/// scalar state is printed, and no marker, acknowledgement or body is set.
+fn partial_death_wait(server: &mut crate::hosted_server::HostedServer, hg: &mut HeadlessGame, i: usize, last: u32, delivery: &Arc<Mutex<Delivery>>, stage: &str, mut ready: impl FnMut(&crate::hosted_server::HostedServer, &HeadlessGame) -> bool) {
+    for _ in 0..200 {
+        if ready(server, hg) {
+            partial_death_trace(server, hg, i, last, delivery, stage);
+            return;
+        }
+        harness_step(server, hg);
+        if !hg.state.remote_client.as_ref().is_some_and(|client| client.is_connected()) {
+            partial_death_trace(server, hg, i, last, delivery, stage);
+            panic!("partial quest lifecycle stage {stage} lost its connection");
+        }
+    }
+    partial_death_trace(server, hg, i, last, delivery, stage);
+    assert!(ready(server, hg), "partial quest lifecycle stage {stage} did not converge");
+}
+
+fn partial_death_trace(server: &crate::hosted_server::HostedServer, hg: &HeadlessGame, i: usize, last: u32, delivery: &Arc<Mutex<Delivery>>, stage: &str) {
+    let sp = &server.server.players[i];
+    let client = hg.state.remote_client.as_ref().unwrap();
+    let life = client.applied_actor_respawns();
+    let d = delivery.lock().unwrap();
+    eprintln!("Partial quest lifecycle stage={stage} server_dead={} dead_ticks={} handled={} server_life={} alive={} client_dead={} client_health={} applied_life={life} prefix={} personal_pending={:?} personal_applied={} delivery_pending={:?} quiescent={} server_flight={} held_rewards={} held_personal={} held_receipts={}",
+        sp.combat.dead, sp.dead_ticks, sp.death_handled, sp.respawns, sp.is_present_and_alive(), hg.state.players[0].combat.dead, hg.state.players[0].combat.health, client.applied_window_event(),
+        client.personal_inbox.as_ref().map(|inbox| (inbox.life, inbox.pending_count())), client.personal_inbox.as_ref().is_some_and(|inbox| inbox.applied_through(last, life)),
+        sp.personal_delivery.pending.as_ref().map(|snapshot| (snapshot.life, snapshot.window_event, snapshot.revision)), sp.personal.as_ref().is_some_and(|personal| sp.personal_delivery.quiescent(personal, sp.respawns)),
+        sp.pack_flight.is_some(), d.rewards.len(), d.personal.len(), d.receipts.len());
 }
 
 #[test]

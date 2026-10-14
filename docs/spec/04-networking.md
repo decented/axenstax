@@ -6948,6 +6948,17 @@ its overflow report and pickup audio; a repeated terminal batch cannot grant
 twice. Legacy event-0 grants retain their existing behaviour. This uses the
 existing frontier and adds no inventory ledger or retained history.
 
+A current-life quest flight holds the same bounded inbox until its actual
+world-FIFO cost carrier, every middle reward ordinal and exact LAST personal
+marker are present, alongside the validated pending LAST progression body.
+A higher view, LAST alone or reward alone cannot advance physical stock or
+the applied frontier through an incomplete batch. The check scans already owned
+carriers without another buffer or ledger. Once the actual prefix and personal
+application prove completion, drained carriers are not required again. An old
+flight superseded by an actually applied respawn does not wait for its discarded
+old personal body: the existing actual current-life window/personal proof still
+gates receipt retirement. Socket observation alone cannot supersede the life.
+
 Reward origin is captured in the existing once-only applied-grant ledger. Genuine
 unfit units return beside that exact giver's captured position, including after
 the giver dies, moves or leaves interest. Ordinary grants preserve their existing

@@ -23416,7 +23416,9 @@ impl super::GameState {
 
     pub(crate) fn apply_window_inbox(&mut self) {
         self.release_retired_requests();
-        if self.remote_client.as_ref().is_some_and(|remote| remote.pack_window_inbox_held() || !self.window_inbox.pack_life_ready(remote.applied_actor_respawns())) { return; }
+        if self.remote_client.as_ref().is_some_and(|remote| remote.pack_window_inbox_held()
+            || remote.quest_window_inbox_held(&self.window_inbox)
+            || !self.window_inbox.pack_life_ready(remote.applied_actor_respawns())) { return; }
         if self.window_inbox.is_empty() {
             return;
         }

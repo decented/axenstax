@@ -8,6 +8,25 @@ use crate::{
 use sha2::{Digest, Sha256};
 
 impl RemoteClient {
+    /// A cost carrier reaching the world FIFO does not prove its reliable
+    /// followups have arrived. Keep this life's one quest batch in the same
+    /// bounded window inbox until every reward and its validated LAST body
+    /// are owned. Polling and lifecycle/control intake remain live.
+    pub(crate) fn quest_window_inbox_held(&self, window: &crate::window_events::WindowInbox) -> bool {
+        let Some(flight) = self.pack_flight.as_ref().filter(|flight| flight.requires_personal) else { return false; };
+        let life = self.applied_actor_respawns();
+        // Only actual lifecycle application supersedes an old body's batch.
+        // Its deliberately discarded old snapshot cannot be a prerequisite
+        // for the new life's genuine window/personal proof.
+        if flight.actor_respawns < life { return false; }
+        if flight.actor_respawns > life || !flight.world_ready { return true; }
+        let Some((last, _, _)) = flight.received else { return true; };
+        let Some(personal) = &self.personal_inbox else { return true; };
+        if self.events_applied >= last && personal.applied_through(last, life) { return false; }
+        !(personal.has_pending_fence(last, life)
+            && window.has_complete_quest_batch(flight.action, life, last))
+    }
+
     /// Observe actual world-FIFO intake without changing readiness or state.
     #[cfg(test)]
     pub(crate) fn quest_world_intake_observed(&self) -> bool {

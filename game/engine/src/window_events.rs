@@ -997,6 +997,22 @@ pub(crate) fn window_carrier_bytes(outcomes: &Vec<RequestOutcome>, grants: &Vec<
 }
 
 impl WindowInbox {
+    /// Inspect already owned, bounded carriers without allocating another
+    /// batch or treating a higher event as proof of a missing reward. The
+    /// client separately requires the validated pending personal body.
+    pub(crate) fn has_complete_quest_batch(&self, action: crate::action_identity::ActionHeader, life: u32, last: u32) -> bool {
+        let Some(cost) = self.outcomes.iter().find_map(|outcome| match outcome {
+            RequestOutcome::Quest(packet) if packet.action == action
+                && packet.actor_respawns == life && packet.included_events == last => Some(packet.window_event),
+            _ => None,
+        }) else { return false; };
+        let Some(first_reward) = cost.checked_add(1) else { return false; };
+        if last < first_reward || last - cost > 17 { return false; }
+        self.outcomes.iter().any(|outcome| matches!(outcome,
+            RequestOutcome::PersonalSync { window_event, actor_respawns } if *window_event == last && *actor_respawns == life))
+            && (first_reward..last).all(|event| self.grants.iter().any(|grant| grant.window_event == event))
+    }
+
     /// Test diagnostics expose only event numbers, never participant bytes.
     #[cfg(test)]
     pub(crate) fn diagnostic_event_queues(&self) -> (Vec<u32>, Vec<u32>, Vec<u32>) {
@@ -1158,6 +1174,14 @@ mod tests {
         let mut inbox = WindowInbox::default();
         inbox.add_bounded(vec![RequestOutcome::PersonalSync { window_event: 13, actor_respawns: 0 }, zero(21), RequestOutcome::Quest(Box::new(cost)), zero(22), RequestOutcome::PersonalSync { window_event: 13, actor_respawns: 1 }], vec![grant(12)], vec![(1, 10)], (0, 0)).unwrap();
         let capacities = (inbox.outcomes.capacity(), inbox.grants.capacity(), inbox.armour.capacity());
+        let action = crate::action_identity::ActionHeader { session: [7; 16], epoch: 0, seq: 1, life: 0, events_applied: 10 };
+        assert!(inbox.has_complete_quest_batch(action, 0, 13));
+        let reward = inbox.grants.pop().unwrap();
+        assert!(!inbox.has_complete_quest_batch(action, 0, 13), "a LAST marker does not prove a missing reward arrived");
+        inbox.grants.push(reward);
+        assert!(!inbox.has_complete_quest_batch(action, 1, 13), "a later body's marker cannot certify the old cost");
+        assert!(!inbox.has_complete_quest_batch(action, 0, 14), "a higher view cannot substitute for the exact LAST");
+        assert_eq!((inbox.outcomes.capacity(), inbox.grants.capacity(), inbox.armour.capacity()), capacities, "completeness scans must retain existing allocations");
         let (items, _) = inbox.take_ordered();
         assert_eq!((inbox.outcomes.capacity(), inbox.grants.capacity(), inbox.armour.capacity()), capacities);
         assert_eq!(items.iter().map(InboxItem::event).collect::<Vec<_>>(), vec![10, 11, 0, 12, 13, 0, 13]);
