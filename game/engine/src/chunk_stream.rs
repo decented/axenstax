@@ -326,6 +326,13 @@ impl super::GameState {
                     if crate::handover::live::personal_adapter::has_bound_records(&directory)? {
                         return Err("This world's saved player authority is missing. Nothing was reset.".into());
                     }
+                    let scope = load_result.as_ref().and_then(|(save, _)| save.quest_world.as_ref()).map(|world| world.scope);
+                    if let Some(saved) = crate::gameplay_attachment::returned_world_local(&directory, scope, self.handover_signed_in())? {
+                        let snapshot = &mut load_result.as_mut().ok_or("saved player has no selected world snapshot")?.0;
+                        snapshot.local_personal = Some(crate::personal_value::LocalPersonalSave(saved.encode()?));
+                        crate::handover::live::personal_adapter::write_world_snapshot(&directory, &selected_personal_directory, snapshot)?;
+                        return Ok(Some(saved));
+                    }
                     return Ok(None);
                 };
                 let key = self.handover_signed_in().ok_or("Sign in as this world's saved host before opening it.")?;

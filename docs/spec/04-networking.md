@@ -6888,13 +6888,26 @@ Pack/Quest flight. The foundation does not enable the villager-click request yet
 
 Lending-host scope preparation saves the actual GameState world and local seats
 before external gameplay admission. A failed preparation rolls back the new live
-binding/scope and leaves local play available. Dedicated routine saves preserve
-an unclaimed selected local personal snapshot. A matching verified player can
+binding/scope and leaves local play available. Each local host instance records
+one preparation outcome. A refusal appears to the host and rejects new
+attachments after their identity/policy checks; existing polling, control
+acknowledgements and shared simulation continue. Restarting hosting begins a
+fresh preparation attempt. Expired legacy decline timers do not block it. An
+already validated Imported holder keeps its exact proof/context while an absent
+independent world scope is saved; failure restores the old scope and holder.
+
+Dedicated routine saves preserve an unclaimed selected local personal snapshot. A matching verified player can
 change it to remote authority only after the canonical record is written; the
 explicit role cut then clears the local selection and parks the superseded
 autosave. Native reopen validates the selected snapshot's scope and player rather
-than substituting a fresher remote mirror. Generic copies which omit canonical
-bound records refuse their omission. Existing imported proof/corruption guards
+than substituting a fresher remote mirror. Only when the selected snapshot explicitly
+has no holder after a remote role cut can native play select the signed-in
+player's current matching WorldLocal canonical record. Its durable world scope,
+verified npub and complete zero-obligation provenance must match before a local
+seat is installed. The selected baseline is durably written before gameplay;
+corrupt, foreign, owed or incomplete records refuse without changing their bytes.
+An older selected holder always wins over a newer canonical mirror. Generic
+copies which omit canonical bound records refuse their omission. Existing imported proof/corruption guards
 remain strict.
 
 The extension allocates protocol92 and appended QuestResult76/QuestView77; the

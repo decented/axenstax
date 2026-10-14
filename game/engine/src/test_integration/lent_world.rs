@@ -32,6 +32,19 @@ pub(super) fn start_lent(tag: &str) -> (HostedServer, OwnedSimParts) {
     (hs, host)
 }
 
+/// A hand-driven signed fixture saves the owning server's actual world
+/// before lending it, just as GameState prepares its authoritative world.
+pub(super) fn start_prepared_lent(tag: &str) -> (HostedServer, OwnedSimParts) {
+    let mut hs = start_open_server(&format!("lent-{tag}"));
+    hs.server.prepare_signed_scope().expect("actual fixture world scope was durably prepared");
+    let scope = hs.server.world.quest_scope.expect("prepared live scope");
+    let bytes = std::fs::read(crate::save::world_dir(&hs.server.world_name).join("world.dat")).unwrap();
+    assert_eq!(crate::save::read_world_save(&bytes).unwrap().quest_world.unwrap().scope, scope);
+    let host = OwnedSimParts::take_from(&mut hs);
+    assert_eq!(host.world.quest_scope, Some(scope));
+    (hs, host)
+}
+
 /// Attach + join a guest through one lent tick; returns (client, slot).
 pub(super) fn join_guest_lent(
     hs: &mut HostedServer,

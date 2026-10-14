@@ -18,6 +18,8 @@ pub(super) struct Heard {
     pub(super) accepts: Vec<protocol::JoinAcceptPacket>,
     pub(super) rejects: Vec<String>,
     pub(super) receipts: Vec<ActionReceipt>,
+    pub(super) syncs: Vec<protocol::InventorySyncPacket>,
+    pub(super) personal: Vec<protocol::PersonalSnapshot>,
 }
 
 pub(super) fn hear(client: &ChannelClientTransport) -> Heard {
@@ -29,6 +31,10 @@ pub(super) fn hear(client: &ChannelClientTransport) -> Heard {
                 out.rejects.push(protocol::safe_deserialize::<protocol::JoinRejectPacket>(p).unwrap().reason)
             }
             Some((protocol::PacketType::ActionReceipt, p)) => out.receipts.push(protocol::safe_deserialize(p).unwrap()),
+            Some((protocol::PacketType::InventorySync, p)) => out.syncs.push(protocol::safe_deserialize(p).unwrap()),
+            Some((protocol::PacketType::PersonalSync, p)) => {
+                if let protocol::PersonalSyncPacket::Snapshot(snapshot) = protocol::safe_deserialize(p).unwrap() { out.personal.push(snapshot); }
+            }
             _ => {}
         }
     }

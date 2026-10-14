@@ -4692,8 +4692,15 @@ impl super::GameState {
     ) -> LentTickReport {
         let mut report = LentTickReport::default();
         if self.hosted_server.as_ref().is_some_and(|host| host.lends_host_world())
-            && let Err(error) = self.prepare_local_gameplay()
-        { log::error!("Hosted gameplay authority could not be prepared: {error}"); return report; }
+            && self.hosted_server.as_ref().is_some_and(|host| host.local_gameplay_preparation.is_none())
+        {
+            let prepared = self.prepare_local_gameplay();
+            if let Err(error) = &prepared {
+                log::error!("Hosted gameplay authority could not be prepared: {error}");
+                self.toast = Some((format!("New players cannot join yet: {error}"), web_time::Instant::now() + std::time::Duration::from_secs(10)));
+            }
+            if let Some(host) = self.hosted_server.as_mut() { host.local_gameplay_preparation = Some(prepared); }
+        }
         let Some(hs) = self.hosted_server.as_mut() else {
             return report;
         };

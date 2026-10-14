@@ -9,18 +9,28 @@ impl crate::GameState {
         if !self.persists_locally() {
             return Err("A joined session cannot create local world authority".into());
         }
-        if self
+        let existing = self
             .players
             .first()
-            .is_some_and(|slot| slot.personal_binding.is_some())
-        {
-            return self.preflight_personal_local();
-        }
-        if self
-            .players
-            .iter()
-            .any(|slot| !slot.active_quests.is_empty() || !slot.villager_decline_until.is_empty())
-        {
+            .and_then(|slot| slot.personal_binding.clone());
+        if existing.is_some() {
+            self.preflight_personal_local()?;
+            if let Some(GameplayBinding::WorldLocal { scope, .. }) = &existing
+                && self.world.quest_scope != Some(*scope)
+            {
+                return Err("Saved local gameplay authority differs from its world scope".into());
+            }
+            if self.world.quest_scope.is_some() {
+                return Ok(());
+            }
+        } else if self.players.iter().any(|slot| {
+            !slot.active_quests.is_empty()
+                || !slot.kill_quest_baseline.is_empty()
+                || slot
+                    .villager_decline_until
+                    .values()
+                    .any(|until| *until > self.tick_counter)
+        }) {
             return Err(
                 "An existing quest cannot be converted without its exact original giver identity"
                     .into(),
@@ -37,7 +47,9 @@ impl crate::GameState {
         let player = self
             .handover_signed_in()
             .map_or(WorldPlayer::LegacyLocal(0), WorldPlayer::Npub);
-        let binding = GameplayBinding::WorldLocal { scope, player };
+        // A transferred player's proof remains its authority; the independent
+        // world scope identifies givers and fresh attachments, not that proof.
+        let binding = existing.unwrap_or(GameplayBinding::WorldLocal { scope, player });
         binding.validate()?;
         let old_local = self.local_personal.clone();
         self.world.quest_scope = Some(scope);
@@ -56,6 +68,64 @@ impl crate::GameState {
         Ok(())
     }
 }
+
+/// A dedicated role cut leaves canonical authority only when the selected
+/// world snapshot has no local holder. Never use this to override a snapshot.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn returned_world_local(
+    directory: &std::path::Path,
+    scope: Option<crate::progression::GameplayId>,
+    signer: Option<[u8; 32]>,
+) -> Result<Option<crate::joiner_save::JoinerSave>, String> {
+    use crate::handover::live::personal_adapter as adapter;
+    let Some(key) = signer else {
+        if adapter.has_any_bound_records(directory)? {
+            return Err("Sign in as this world's saved player before opening it.".into());
+        }
+        return Ok(None);
+    };
+    let path = adapter::path(directory, key);
+    match std::fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if adapter.has_any_bound_records(directory)? {
+                return Err(
+                    "This world's saved player authority is missing. Nothing was reset.".into(),
+                );
+            }
+            return Ok(None);
+        }
+        Err(error) => return Err(error.to_string()),
+        Ok(_) => (),
+    }
+    let bytes = adapter::read_regular(&path, crate::joiner_save::MAX_JOINER_SAVE_BYTES)?;
+    let saved = crate::joiner_save::JoinerSave::decode(&bytes)?;
+    let Some(personal) = &saved.personal else {
+        if adapter.has_any_bound_records(directory)? {
+            return Err(
+                "This world's saved player authority is missing. Nothing was reset.".into(),
+            );
+        }
+        return Ok(None);
+    };
+    if bytes.first() != Some(&4)
+        || !matches!(personal.binding, GameplayBinding::WorldLocal { scope: expected, player: WorldPlayer::Npub(owner) } if Some(expected) == scope && owner == key)
+    {
+        return Err(
+            "Current saved player authority differs from this world or sign-in. Nothing was reset."
+                .into(),
+        );
+    }
+    if !saved.obligations_proven_zero() {
+        return Err("This player's inventory may still owe items; it cannot become a local seat. Nothing was changed.".into());
+    }
+    personal.record()?;
+    adapter::confirm_durable(&path)?;
+    Ok(Some(saved))
+}
+
+#[cfg(test)]
+#[path = "gameplay_attachment_tests.rs"]
+mod tests;
 
 #[cfg(not(target_arch = "wasm32"))]
 impl crate::server::GameServer {

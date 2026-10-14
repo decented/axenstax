@@ -504,6 +504,10 @@ pub struct HostedServer {
     /// D1 — whether this server owns its world or borrows the host client's
     /// (`sim_lend`). Fixed at start.
     host_world: HostWorld,
+    /// One preparation attempt per local host instance. Refusal gates new
+    /// authority while the existing host's control and simulation keep running.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) local_gameplay_preparation: Option<Result<(), String>>,
     /// D1, lent only — the changes the server's own systems made to the
     /// host's world this tick (fluids, falling blocks, leaf decay, power, …),
     /// captured from `server.pending_block_changes` before the broadcast
@@ -1025,6 +1029,8 @@ impl HostedServer {
             edit_queues: (0..num_local_players).map(|_| Default::default()).collect(),
             pending_block_changes: Vec::new(),
             host_world,
+            #[cfg(not(target_arch = "wasm32"))]
+            local_gameplay_preparation: None,
             lent_sim_changes: Vec::new(),
             lent_edit_cells: Vec::new(),
             lent_ids_reset: false,
@@ -4565,6 +4571,13 @@ impl HostedServer {
                         #[cfg(target_arch = "wasm32")]
                         let (join_name, join_npub): (String, String) =
                             (req.player_name.clone(), String::new());
+
+                        #[cfg(not(target_arch = "wasm32"))]
+                        if let Some(Err(reason)) = &self.local_gameplay_preparation {
+                            let reason = format!("This host cannot admit new players yet: {reason}");
+                            let _ = self.release_slot(i, Some(&reason));
+                            break;
+                        }
 
                         // B2a — the chunk push starts afresh for this join,
                         // out to the render distance it announced.

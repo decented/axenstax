@@ -32,7 +32,8 @@ pub fn local_seats(count: usize) -> Result<(), Refusal> {
 pub(crate) fn local_progress(slot: &crate::player_slot::PlayerSlot, tick: u64) -> Result<(), Refusal> {
     if crate::nostrich_vow::is_vow_active(slot.nostrich_vow.as_ref()) || !slot.active_quests.is_empty() || !slot.kill_quest_baseline.is_empty()
         || slot.villager_decline_until.values().any(|until| *until > tick)
-        || slot.last_villager_kill_rep_tick.is_some_and(|last| tick.saturating_sub(last) < 600) {
+        || slot.last_villager_kill_rep_tick.is_some_and(|last| tick.saturating_sub(last) < 600)
+        || common_quest_pending(&slot.quest_progress) {
         return Err(Refusal("Finish your active quests and wait for village cooldowns or curses before handing this world over. Nothing was changed."));
     }
     Ok(())
@@ -81,6 +82,9 @@ pub fn seats(server: &GameServer, recipient: Seat) -> Result<(), Refusal> {
         || sp.personal.as_ref().is_some_and(|p| !sp.personal_delivery.quiescent(p, sp.respawns)) {
         return Err(Refusal("That player has village or hunting progress this session, which this version can't move yet."));
     }
+    if sp.personal.as_ref().is_some_and(|personal| personal.record().map_or(true, |record| common_quest_pending(&record.quests))) {
+        return Err(Refusal("Finish active quests and wait for village cooldowns before handing this world over. Nothing was changed."));
+    }
     if sp.combat.dead {
         return Err(Refusal("That player is dead. Wait until they respawn."));
     }
@@ -111,8 +115,14 @@ pub const OWED: Refusal = Refusal(
 pub(crate) fn recipient_record(record: Option<&crate::joiner_save::JoinerSave>) -> Result<(), Refusal> {
     match record {
         Some(r) if !r.obligations_proven_zero() => Err(OWED),
+        Some(r) if r.personal.as_ref().is_some_and(|personal| personal.record().map_or(true, |record| common_quest_pending(&record.quests))) =>
+            Err(Refusal("Finish active quests and wait for village cooldowns before handing this world over. Nothing was changed.")),
         _ => Ok(()),
     }
+}
+
+fn common_quest_pending(progress: &crate::progression::QuestProgress) -> bool {
+    !progress.accepted.is_empty() || !progress.declines.is_empty() || progress.penalty_left != 0
 }
 
 /// Saved participant records on disk (`joiners/<npub>.dat`) other than the

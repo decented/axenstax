@@ -261,6 +261,19 @@ fn game_harness_d2c3_legacy_local_quest_refusal_keeps_host_tick_and_ping_alive()
         pong,
         "free Ping control stopped behind the local authority preparation refusal"
     );
+    assert!(game.state.toast.as_ref().is_some_and(|(text, _)| text.contains("New players cannot join")));
+    client.send_to_server(&crate::protocol::serialize_packet(crate::protocol::PacketType::JoinRequest,
+        &crate::remote_client::build_join_request_guest("Visitor", 0)));
+    game.hosted_ticks(1);
+    let mut refusal = None;
+    while let Some(packet) = client.try_recv_from_server() {
+        if let Some((crate::protocol::PacketType::JoinReject, body)) = crate::protocol::deserialize_header(&packet) {
+            refusal = Some(crate::protocol::safe_deserialize::<crate::protocol::JoinRejectPacket>(body).unwrap().reason);
+        }
+    }
+    assert!(refusal.is_some_and(|reason| reason.contains("cannot admit new players")));
+    assert!(game.state.players[0].active_quests.contains_key(&giver));
+    assert!(game.state.world.quest_scope.is_none());
 }
 
 #[test]
@@ -293,6 +306,9 @@ fn game_harness_d2c3_world_local_remote_cut_returns_through_actual_native_load()
         .kill_counter
         .insert(crate::mob::MobType::Pig, 37);
     game.state.prepare_local_gameplay().unwrap();
+    let original_snapshot = crate::save::read_world_save(
+        &std::fs::read(crate::save::world_dir(name).join("world.dat")).unwrap(),
+    ).unwrap();
     let scope = game
         .state
         .world
@@ -472,4 +488,61 @@ fn game_harness_d2c3_world_local_remote_cut_returns_through_actual_native_load()
             .0,
         bytes
     );
+    // An older selected snapshot is an explicit discard authority, even
+    // while a newer remote canonical body still exists beside it.
+    crate::handover::live::personal_adapter::write_world_snapshot(&directory, &directory, &original_snapshot).unwrap();
+    game.state.mode = crate::GameMode::Loading(crate::loading_screen::LoadingState::new(name.into()));
+    assert!(game.state.begin_load());
+    assert_eq!(game.state.players[0].inventory.slot(7).unwrap().count, 5, "newer canonical body overrode the selected older holder");
+    assert_eq!(game.state.players[0].kill_counter[&crate::mob::MobType::Pig], 37);
+    assert_eq!(std::fs::read(&canonical_path).unwrap(), bytes);
+}
+
+#[test]
+#[ignore = "needs a GPU adapter holding the 506-layer atlas"]
+fn game_harness_d2c3_expired_decline_and_save_refusal_keep_host_control_and_attempt_scope() {
+    for fail_save in [false, true] {
+        let name = format!("d2c3-host-attempt-{fail_save}");
+        let _root = crate::save::WorldsRootGuard::new(&name);
+        let mut game = HeadlessGame::boot_into_world(&name);
+        // A past timer cannot hold hosting forever. It is retained as old
+        // dialogue state, while no unproven active giver is converted.
+        let giver = game.state.ecs.spawn(());
+        game.state.players[0].villager_decline_until.insert(giver, 0);
+        let directory = crate::save::world_dir(&name);
+        let before = std::fs::read(directory.join("world.dat")).ok();
+        if fail_save { crate::save_fence::raise(&directory); }
+        let mut host = crate::hosted_server::HostedServer::start_host(1, name.clone(), 42, 0,
+            crate::hosted_server::RemoteTransport::WebSocket { port: 0 }, crate::hosted_server::HostWorld::Lent).unwrap();
+        let client = host.attach_test_remote();
+        client.send_to_server(&crate::protocol::serialize_packet(crate::protocol::PacketType::Ping, &()));
+        game.state.hosted_server = Some(host);
+        game.hosted_ticks(1);
+        let host = game.state.hosted_server.as_ref().unwrap();
+        assert!(host.server.tick_counter > 0);
+        assert_eq!(host.local_gameplay_preparation.as_ref().unwrap().is_err(), fail_save);
+        let mut pong = false;
+        while let Some(packet) = client.try_recv_from_server() {
+            pong |= matches!(crate::protocol::deserialize_header(&packet), Some((crate::protocol::PacketType::Pong, _)));
+        }
+        assert!(pong, "save/preparation outcome starved free control");
+        if fail_save {
+            assert!(game.state.world.quest_scope.is_none());
+            assert!(game.state.players[0].personal_binding.is_none());
+            assert_eq!(std::fs::read(directory.join("world.dat")).ok(), before);
+            assert!(game.state.toast.as_ref().is_some_and(|(text, _)| text.contains("New players cannot join")));
+            crate::save_fence::lift(&directory);
+            // Lifting a disk fault does not silently retry this refused host
+            // instance. A new host is the explicit new admission attempt.
+            game.hosted_ticks(1);
+            assert!(game.state.world.quest_scope.is_none());
+            game.state.hosted_server = None;
+            game.state.hosted_server = Some(crate::hosted_server::HostedServer::start_host(1, name.clone(), 42, 0,
+                crate::hosted_server::RemoteTransport::WebSocket { port: 0 }, crate::hosted_server::HostWorld::Lent).unwrap());
+            game.hosted_ticks(1);
+        }
+        assert!(game.state.world.quest_scope.is_some());
+        assert!(game.state.hosted_server.as_ref().unwrap().local_gameplay_preparation.as_ref().unwrap().is_ok());
+        assert!(game.state.players[0].villager_decline_until.contains_key(&giver));
+    }
 }

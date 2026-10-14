@@ -242,6 +242,7 @@ pub(crate) fn confirm_durable(target: &Path) -> Result<(), String> {
 /// has cleared the local WorldSave field. This is read-only and bounded; a
 /// proofless bound record must never become an ordinary bag or lossy export.
 pub(crate) fn has_bound_records(world: &Path) -> Result<bool, String> { scan_bound_records(world, true) }
+pub(crate) fn has_any_bound_records(world: &Path) -> Result<bool, String> { scan_bound_records(world, false) }
 fn scan_bound_records(world: &Path, imported_only: bool) -> Result<bool, String> {
     let entries = match fs::read_dir(world.join("joiners")) {
         Ok(entries) => entries,

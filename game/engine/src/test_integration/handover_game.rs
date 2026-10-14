@@ -5,7 +5,6 @@
 //! server whose source session is driven by hand. One GPU game per test.
 use super::handover_live::{BINDING, signed_join_lent};
 use super::joiner_authority::{accepted, settle_chunk_push};
-use super::lent_world::start_lent;
 use crate::handover::{
     context::RootContext,
     live::{
@@ -359,7 +358,7 @@ fn joined_into(tag: &str, imports: Option<PathBuf>) -> Joined {
     isolate_saves();
     let dir = Tmp::new(tag);
     let mut hg = HeadlessGame::boot_into_world(&format!("harness-handover-{tag}"));
-    let (mut hs, host) = start_lent(&format!("handover-game-{tag}"));
+    let (mut hs, host) = super::lent_world::start_prepared_lent(&format!("handover-game-{tag}"));
     let sent = Arc::new(AtomicUsize::new(0));
     let inner = hs.attach_test_remote_with_binding(Some(BINDING));
     let pkt = inner.try_recv_from_server().expect("challenge issued on attach");
@@ -384,7 +383,10 @@ fn joined_into(tag: &str, imports: Option<PathBuf>) -> Joined {
     for _ in 0..400 {
         step(&mut j);
         let slot = j.hs.server.players.len().saturating_sub(1);
-        if j.hg.state.remote_client.as_ref().is_some_and(|rc| rc.is_connected()) && j.hs.handover_seat(slot).is_some() {
+        if j.hg.state.remote_client.as_ref().is_some_and(|rc| rc.is_connected() && rc.personal_ready())
+            && j.hs.handover_seat(slot).is_some()
+            && j.hs.server.players[slot].window_events.is_quiescent()
+        {
             j.slot = slot;
             break;
         }
@@ -1198,6 +1200,30 @@ fn game_harness_handover_recipient_opens_and_hosts_the_activated_world_from_the_
     assert_eq!(j.hg.state.players[0].kill_counter[&crate::mob::MobType::Pig],23);
     // CP20 (CP18 review LOW-5): a real save of the moved world.
     assert_eq!(j.hg.state.save_live_world(), Ok(()), "the handed-over world didn't save");
+    // A known imported local holder can predate the appended world scope.
+    // Exercise that preparation boundary on the genuinely activated persona,
+    // preserving its proof and selected body through a failed save and retry.
+    let imported = j.hg.state.players[0].personal_binding.clone().unwrap();
+    assert!(matches!(imported, crate::progression::GameplayBinding::Imported(_)));
+    j.hg.state.world.quest_scope = None;
+    j.hg.state.save_live_world().unwrap();
+    let imported_before = snapshot(&crate::save::world_dir(&folder));
+    crate::save_fence::raise(&crate::save::world_dir(&folder));
+    let refused = j.hg.state.prepare_local_gameplay();
+    crate::save_fence::lift(&crate::save::world_dir(&folder));
+    assert!(refused.is_err());
+    assert!(j.hg.state.world.quest_scope.is_none());
+    assert_eq!(j.hg.state.players[0].personal_binding.as_ref(), Some(&imported));
+    assert_eq!(j.hg.state.local_personal.as_ref(), Some(&imported));
+    assert_eq!(snapshot(&crate::save::world_dir(&folder)), imported_before, "failed imported scope preparation changed selected authority or proofs");
+    j.hg.state.prepare_local_gameplay().unwrap();
+    assert!(j.hg.state.world.quest_scope.is_some());
+    assert_eq!(j.hg.state.players[0].personal_binding.as_ref(), Some(&imported));
+    assert_eq!(j.hg.state.local_personal.as_ref(), Some(&imported));
+    let prepared = crate::save::read_world_save(&std::fs::read(crate::save::world_dir(&folder).join("world.dat")).unwrap()).unwrap();
+    let local = crate::joiner_save::JoinerSave::decode(&prepared.local_personal.unwrap().0).unwrap();
+    assert_eq!(local.personal.unwrap().binding, imported);
+    assert_eq!(prepared.quest_world.unwrap().scope, j.hg.state.world.quest_scope.unwrap());
     // Host it (a lent host on the in-process transport), and a joiner joins.
     let hs = HostedServer::start_host(
         1,
