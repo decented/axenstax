@@ -3666,7 +3666,13 @@ prediction/spending remains held until matching actual fence plus receipt
 retirement. Close may hide the screen immediately while its operation waits.
 A separate committed-flight guard lets movement and AppliedActionAck/control
 remain readable. Ack validity is checked against retained rows before removal;
-old/future/foreign tuples cannot free a current flight.
+old/future/foreign tuples cannot free a current flight. Validated GrantUnfit
+feedback from an earlier applied grant remains readable in both modes. During
+a committed flight, only its original event/count metadata is retained,
+bounded to 1024 entries and actual allocated bytes below 2 MiB. The exact ACK
+applies the canonical window before that feedback returns the grant through
+the existing once-only ledger; a pending snapshot cannot reinstall a returned
+item. Other legacy inventory authorisations remain refused while held.
 
 Pack requests/results/views carry the actual authoritative respawn count,
 separately from the existing ActionHeader namespace. Only actual application
