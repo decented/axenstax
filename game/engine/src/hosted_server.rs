@@ -348,10 +348,15 @@ pub const INBOUND_OVERFLOW_REASON: &str =
 /// A control packet (MP-A3): costs nothing against [`MAX_PACKETS_PER_TICK`]
 /// (up to [`FREE_CONTROL_PACKETS_PER_TICK`] a tick, FU4a).
 fn is_control_packet(packet: &[u8]) -> bool {
+    if matches!(protocol::deserialize_header(packet), Some((protocol::PacketType::ItemAction, payload)) if is_grant_unfit(payload)) { return true; }
     matches!(
         protocol::deserialize_header(packet),
         Some((protocol::PacketType::Respawn | protocol::PacketType::Disconnect | protocol::PacketType::AppliedActionAck | protocol::PacketType::PersonalSync | protocol::PacketType::Handover, _))
     )
+}
+
+fn is_grant_unfit(payload: &[u8]) -> bool {
+    protocol::safe_deserialize::<protocol::ItemActionPacket>(payload).is_ok_and(|request| matches!(request.action, protocol::ItemAction::GrantUnfit { .. }))
 }
 
 /// A pack hold preserves control and movement-only intake. Its old edit
@@ -405,6 +410,7 @@ fn waits_for_kind_budget(
 /// are sent back.)
 fn is_request(packet: &[u8]) -> bool {
     use protocol::PacketType as P;
+    if is_control_packet(packet) { return false; }
     matches!(
         protocol::deserialize_header(packet),
         Some((P::EntityAttack | P::EntityInteract | P::DeviceInteract | P::ItemAction | P::WindowOp, _))
@@ -2321,6 +2327,7 @@ impl HostedServer {
             // C3a-fix-1 (D-M2) — the part of a grant the client couldn't
             // hold comes back to the world as a real item. Never answered.
             protocol::ItemAction::GrantUnfit { event, count } => {
+                if self.defer_pack_unfit(i, *event, *count) { return; }
                 return self.return_joiner_unfit(i, *event, *count);
             }
             // C3b-2 (v79) — a right-click on a composter, drying rack,
@@ -4342,6 +4349,7 @@ impl HostedServer {
                 };
                 if self.server.players.get(i).is_some_and(|sp| sp.pack_flight.is_some())
                     && matches!(ptype, protocol::PacketType::WindowOp | protocol::PacketType::EntityAttack | protocol::PacketType::EntityInteract | protocol::PacketType::ItemAction | protocol::PacketType::DeviceInteract)
+                    && !(ptype == protocol::PacketType::ItemAction && is_grant_unfit(payload))
                 {
                     // The supported client makes no prediction while held.
                     // A contrary legacy authorisation is a protocol failure,
@@ -5032,7 +5040,7 @@ impl HostedServer {
                         }
                     }
                     protocol::PacketType::ItemAction => {
-                        if self.strict_slot(i) {
+                        if self.strict_slot(i) && !is_grant_unfit(payload) {
                             self.reject_legacy_inventory(i);
                             break;
                         }

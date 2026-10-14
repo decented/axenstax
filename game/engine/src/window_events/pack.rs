@@ -244,8 +244,7 @@ mod tests {
             let mut sp = player(mode);
             let mut old = crate::crafting::Tool::new(crate::crafting::ToolType::Bow, crate::crafting::ToolMaterial::Wood);
             old.durability = 5;
-            let mut new = old;
-            new.durability = 10;
+            let new = old;
             sp.inventory.set_slot(1, Some(ItemStack { item: Item::Tool(old), count: 1 }));
             queue(&mut sp, WindowEvent::Take { slot: 0, item: Item::Tool(old), n: 1, how: "pack tool payment" }, 0);
             let raw = pack_raw_marker(&sp, &registry).unwrap();
@@ -255,6 +254,17 @@ mod tests {
             let staged = crate::staged_window::stage_container(&raw, &mut pack, &ContainerClick::Withdraw { slot: 0, all: true }, &ctx());
             assert_eq!(admit_pack_staged(&sp, &registry, &raw, &staged).unwrap_err(), PackStageError::Obligation);
             assert_eq!(sp.inventory.slot(1).unwrap().item, Item::Tool(old));
+            // Different durability is a different exact source: withdrawing
+            // it leaves the old bow as the earlier payment, so it is allowed.
+            let mut distinct = old;
+            distinct.durability = 10;
+            let mut chest = crate::chest::ChestData::new();
+            chest.slots[0] = Some(ItemStack { item: Item::Tool(distinct), count: 1 });
+            let mut pack = ContainerData::Chest(chest);
+            let staged = crate::staged_window::stage_container(&raw, &mut pack, &ContainerClick::Withdraw { slot: 0, all: true }, &ctx());
+            let admitted = admit_pack_staged(&sp, &registry, &raw, &staged).unwrap();
+            assert_eq!(admitted.window.inv.slot(0).unwrap().item, Item::Tool(distinct));
+            assert!(admitted.window.inv.slot(1).is_none());
         }
     }
 

@@ -4,6 +4,23 @@ use crate::{action_identity::{ActionFate, ActionHeader}, container_window::Conta
 use super::pack_attempt::{Attempt, CargoEffect};
 
 impl HostedServer {
+    pub(super) fn defer_pack_unfit(&mut self, i: usize, event: u32, count: u8) -> bool {
+        let Some(sp) = self.server.players.get_mut(i).filter(|sp| sp.pack_flight.is_some()) else { return false };
+        // The request boundary already applied its preceding event. Unknown
+        // or already-returned grants remain inert under the existing ledger.
+        if !sp.window_events.has_unreturned_grant(event) { return true; }
+        let feedback = &mut sp.pack_unfit_feedback;
+        if feedback.len() >= crate::action_journal::MAX_EVENT_ENTRIES
+            || feedback.try_reserve_exact(1).is_err()
+            || feedback.capacity().saturating_mul(std::mem::size_of::<(u32, u8)>()) > crate::action_journal::MAX_RETAINED_BYTES
+        {
+            let _ = self.release_slot(i, Some("This game sent more grant feedback than its pack action could retain."));
+            return true;
+        }
+        feedback.push((event, count));
+        true
+    }
+
     pub(super) fn pack_queue_waits(&self, i: usize) -> bool {
         self.server.players.get(i).and_then(|sp| sp.action_queue.as_ref()).and_then(|queue| queue.front())
             .and_then(|head| crate::action_wire::ActionPacket::decode(&head.payload).ok())

@@ -4494,6 +4494,47 @@ mod tests {
 
     #[test]
     #[ignore = "needs a GPU adapter holding the 506-layer atlas"]
+    fn game_harness_d2c2_actual_overflowing_prefix_feedback_survives_pack_hold_and_returns_once() {
+        use crate::{action_identity::InventoryMode, container_window::ContainerTarget, pack_wire::PackOperation};
+        isolate_saves();
+        for mode in [InventoryMode::Mirror, InventoryMode::Strict] {
+            let (mut hg, mut server, slot) = joined_window_client_mode(&format!("pack-unfit-{mode:?}"), mode);
+            clear_pad(&mut hg, Some(&mut server));
+            let at = server.server.players[slot].player.pos + glam::Vec3::new(0.0, 0.0, -2.0);
+            let steed = crate::entity::spawn_mob(&mut server.server.ecs, crate::mob::MobType::Donkey, at);
+            {
+                let mut data = server.server.ecs.get::<&mut crate::horse_ai::HorseData>(steed).unwrap();
+                data.keeper = Some(crate::horse_ai::SteedKeeper::LegacyLocal(0));
+                data.pack = Some(crate::chest::ChestData::new());
+            }
+            pack_wait(&mut server, &mut hg, |server, hg| server.server.ecs.get::<&crate::entity::ProtocolId>(steed).is_ok_and(|key| hg.state.remote_mobs.position_of(key.0).is_some()));
+            aim_at(&mut hg, at + glam::Vec3::Y * 0.7);
+            pack_wait(&mut server, &mut hg, |server, hg| (server.server.players[slot].yaw - hg.state.players[0].camera.yaw).abs() < 0.01);
+            for place in 0..36 {
+                let stack = crate::item::ItemStack::new_block(crate::block::DIRT, 64);
+                hg.state.players[0].inventory.set_slot(place, Some(stack.clone()));
+                server.server.players[slot].inventory.set_slot(place, Some(stack));
+            }
+            let id = server.server.ecs.get::<&crate::entity::ProtocolId>(steed).unwrap().0;
+            server.grant_to_joiner(slot, [crate::item::ItemStack::new_block(crate::block::STONE, 1)]);
+            let grant_event = server.server.players[slot].window_events.last_number();
+            assert!(hg.state.request_pack_action(0, ContainerTarget::Entity(id), PackOperation::Open));
+            assert!(hg.state.pack_window_frozen(0));
+            let floor = |server: &crate::hosted_server::HostedServer| server.server.ecs.query::<&crate::entity::DroppedItem>().iter().filter(|(_, drop)| drop.stack.item == crate::item::Item::Block(crate::block::STONE)).map(|(_, drop)| u32::from(drop.stack.count)).sum::<u32>();
+            pack_wait(&mut server, &mut hg, |server, hg| !hg.state.pack_window_frozen(0) && server.server.players[slot].pack_flight.is_none() && floor(server) == 1);
+            assert_eq!(hg.state.players[0].inventory.slots_iter().flatten().filter(|stack| stack.item == crate::item::Item::Block(crate::block::STONE)).map(|stack| u32::from(stack.count)).sum::<u32>(), 0);
+            assert_eq!(server.server.players[slot].window_events.tally.unfit_returned, 1);
+            hg.state.remote_client.as_mut().unwrap().send_item_action(&crate::protocol::ItemActionPacket { seq: 0, action: crate::protocol::ItemAction::GrantUnfit { event: grant_event, count: 1 }, events_applied: 0 });
+            harness_step(&mut server, &mut hg);
+            assert!(hg.state.remote_client.as_ref().unwrap().is_connected());
+            assert!(!server.disconnected[slot]);
+            assert_eq!(floor(&server), 1, "actual repeated feedback cannot return the overflow twice");
+            assert_eq!(server.server.players[slot].window_events.tally.unfit_returned, 1);
+        }
+    }
+
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas"]
     fn game_harness_d2c2_local_pack_click_uses_live_cargo_without_snapshot_writeback() {
         isolate_saves();
         let mut hg = HeadlessGame::boot_into_world("harness-local-live-pack");

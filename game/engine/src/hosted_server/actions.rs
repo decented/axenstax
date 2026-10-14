@@ -49,7 +49,13 @@ impl HostedServer {
         let releases_pack = sp.pack_flight.is_some_and(|flight| flight.action.session == ack.session && flight.action.epoch == ack.epoch && flight.action.life == ack.life && flight.action.seq <= ack.through && flight.event <= ack.included_events);
         if releases_pack { crate::window_events::apply_through(sp, ack.included_events, self.server.tick_counter); }
         sp.action_results.as_mut().expect("validated result rows").acknowledge(ack, sp.window_events.last_number()).expect("validated exact acknowledgement");
-        if releases_pack { sp.pack_flight = None; }
+        if releases_pack {
+            sp.pack_flight = None;
+            let feedback = std::mem::take(&mut sp.pack_unfit_feedback);
+            // The canonical snapshot has applied first; returning a landed
+            // grant before it would let that snapshot reinstall the item.
+            for (event, count) in feedback { self.return_joiner_unfit(i, event, count); }
+        }
     }
     pub(super) fn receive_typed_action(&mut self, i: usize, payload: &[u8]) {
         #[cfg(not(target_arch = "wasm32"))]

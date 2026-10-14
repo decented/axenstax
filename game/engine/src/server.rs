@@ -39,6 +39,8 @@ pub struct ServerPlayer {
     pub pack_session: Option<crate::pack_state::PackSession>,
     pub pack_flight: Option<crate::pack_state::PackFlight>,
     pub pack_next_incarnation: u64,
+    /// Validated overflow feedback waits for a pending canonical fence.
+    pub pack_unfit_feedback: Vec<(u32, u8)>,
     /// Once-per-death inventory hook, reset on entering or respawning.
     pub death_handled: bool,
     pub player: Player,
@@ -546,6 +548,7 @@ impl ServerPlayer {
             pack_session: None,
             pack_flight: None,
             pack_next_incarnation: 0,
+            pack_unfit_feedback: Vec::new(),
             player: Player::new(spawn),
             inventory: Inventory::new(),
             combat: PlayerCombat::new(),

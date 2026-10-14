@@ -255,6 +255,9 @@ impl WindowEvents {
     /// reservation that grows it is visible (and one given back is too).
     #[cfg(test)]
     pub fn shrink_waiting_to_fit(&mut self) { self.waiting.shrink_to_fit(); }
+    pub(crate) fn has_unreturned_grant(&self, event: u32) -> bool {
+        self.grants.iter().any(|grant| grant.seq == event && !grant.returned)
+    }
     pub fn accepts_boundary(&self, reported: u32) -> bool { reported >= self.last_applied && reported <= self.last_sent }
 
     /// World handover (pre-obligation-carrier base): nothing is outstanding

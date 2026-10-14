@@ -386,3 +386,40 @@ fn d2c2_removed_entity_and_reused_protocol_id_cannot_inherit_the_old_session() {
         assert!(!rig.hs.disconnected[rig.joiner.i]);
     }
 }
+
+#[test]
+fn d2c2_earlier_grant_feedback_waits_for_canonical_ack_and_returns_once_in_both_modes() {
+    for mode in [InventoryMode::Mirror, InventoryMode::Strict] {
+        for full in [false, true] {
+            let mut rig = Rig::new(&format!("held-unfit-{full}"), mode);
+            rig.hs.server.ecs.get::<&mut crate::horse_ai::HorseData>(rig.entity).unwrap().pack = Some(crate::chest::ChestData::new());
+            if full {
+                for place in 0..36 {
+                    rig.hs.server.players[rig.joiner.i].inventory.set_slot(place, Some(ItemStack::new_block(block::DIRT, 64)));
+                }
+            }
+            rig.hs.grant_to_joiner(rig.joiner.i, [ItemStack::new_block(block::STONE, 1)]);
+            let event = rig.hs.server.players[rig.joiner.i].window_events.last_number();
+            let (_, opened) = rig.execute(PackOperation::Open);
+            let feedback = protocol::ItemActionPacket { seq: 0, action: protocol::ItemAction::GrantUnfit { event, count: 1 }, events_applied: event };
+            let bytes = protocol::serialize_packet(protocol::PacketType::ItemAction, &feedback);
+            rig.joiner.client.send_to_server(&bytes);
+            rig.hs.tick();
+            assert!(!rig.hs.disconnected[rig.joiner.i], "overflow feedback is control in either mode");
+            assert!(rig.hs.server.players[rig.joiner.i].pack_flight.is_some());
+            assert_eq!(rig.hs.server.players[rig.joiner.i].pack_unfit_feedback, vec![(event, 1)]);
+            let floor = |rig: &Rig| rig.hs.server.ecs.query::<&crate::entity::DroppedItem>().iter().filter(|(_, drop)| drop.stack.item == Item::Block(block::STONE)).map(|(_, drop)| u32::from(drop.stack.count)).sum::<u32>();
+            assert_eq!(floor(&rig), 0, "return waits until canonical custody installs");
+            rig.apply(&opened);
+            assert_eq!(rig.bag(block::STONE), 0, "a pending canonical snapshot cannot resurrect a returned grant");
+            assert_eq!(floor(&rig), 1, "the existing ledger returns exactly one backed unit");
+            assert!(rig.hs.server.players[rig.joiner.i].pack_unfit_feedback.is_empty());
+            let repeat = protocol::ItemActionPacket { events_applied: opened.window_event, ..feedback };
+            rig.joiner.client.send_to_server(&protocol::serialize_packet(protocol::PacketType::ItemAction, &repeat));
+            rig.hs.tick();
+            assert!(!rig.hs.disconnected[rig.joiner.i]);
+            assert_eq!(floor(&rig), 1, "repeated feedback cannot return the grant twice");
+            assert_eq!(rig.bag(block::STONE), 0);
+        }
+    }
+}
