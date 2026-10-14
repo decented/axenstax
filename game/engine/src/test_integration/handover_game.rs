@@ -1112,6 +1112,32 @@ fn game_harness_handover_recipient_opens_and_hosts_the_activated_world_from_the_
     let crate::GameMode::Menu(ms) = &j.hg.state.mode else { unreachable!() };
     assert!(ms.worlds.iter().any(|e| e.folder_name == folder), "the lobby doesn't list the handed-over world");
     assert_eq!(crate::save::world_open_refusal(&folder), None, "the handed-over world is refused");
+    // A signed remote attachment does not silently select the native local
+    // persona after leaving it. The ordinary loader must refuse signed-out
+    // play without changing any imported bytes.
+    assert_eq!(j.hg.state.handover_signed_in(), None);
+    let before_unsigned = snapshot(&crate::save::world_dir(&folder));
+    j.hg.state.pending_menu_action =
+        Some((crate::menu::MenuAction::LoadWorld(folder.clone(), crate::spawn_pref::SpawnPref::Default), web_time::Instant::now()));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+    loop {
+        j.hg.frames(1);
+        assert!(!matches!(j.hg.state.mode, crate::GameMode::Playing), "signed-out native play received an imported player's bag");
+        if let crate::GameMode::Menu(ms) = &mut j.hg.state.mode
+            && let Some(notice) = &ms.notice
+        {
+            assert!(notice.contains("Sign in as this world's saved host"), "unexpected unsigned refusal: {notice}");
+            ms.notice = None;
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "signed-out native open did not finish with a refusal");
+    }
+    assert_eq!(snapshot(&crate::save::world_dir(&folder)), before_unsigned, "unsigned native refusal changed imported bytes");
+    // Select the same actual persona that signed this transfer's recipient
+    // attachment; keep its recipient backend and all own-state assertions.
+    let fixture = j.hg.state.handover_fixture.as_mut().expect("recipient identity fixture disappeared");
+    fixture.signed_in = Some(key(RECIPIENT_PERSONA));
+    assert_eq!(j.hs.server.players[j.slot].verified_pubkey, fixture.signed_in);
     // Play, from the lobby.
     j.hg.state.pending_menu_action =
         Some((crate::menu::MenuAction::LoadWorld(folder.clone(), crate::spawn_pref::SpawnPref::Default), web_time::Instant::now()));
@@ -1509,6 +1535,13 @@ fn refused_from_lobby(hg: &mut HeadlessGame, folder: &str) {
 fn game_harness_handover_retained_source_native_save_discard_and_complete_directory_portability() {
     let _worlds = crate::save::WorldsRootGuard::new("retained-native");
     let dir = Tmp::new("retained-native");
+    // Isolate this complete source installation before its actual transfer
+    // writes. Another harness thread may append to its own installation;
+    // the complete original-byte comparison below remains meaningful.
+    let source_ledger = dir.0.join("source-install").join("ledger");
+    let _source_install = crate::handover::ledger::fixture_install_path(&source_ledger);
+    assert_eq!(crate::handover::ledger::Ledger::install().path(), source_ledger.as_path());
+    assert!(!source_ledger.exists());
     let shared_cell = (2, 69, 2);
     let mut shared_body = crate::plan::PlanData::debug_3x3_stone();
     shared_body.name = "Retained explicitly embedded world blueprint".into();
