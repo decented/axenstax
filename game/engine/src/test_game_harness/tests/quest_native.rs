@@ -193,6 +193,11 @@ fn load_native(game: &mut HeadlessGame, name: &str) {
         game.state.begin_load(),
         "actual native loader must accept this verified zero-obligation canonical authority"
     );
+    eprintln!(
+        "native-cut load-start actor={:?} eye={:?}",
+        game.state.players[0].player.pos,
+        game.state.players[0].player.eye_pos()
+    );
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
     while !matches!(game.state.mode, crate::GameMode::Playing) {
         game.frames(1);
@@ -202,6 +207,11 @@ fn load_native(game: &mut HeadlessGame, name: &str) {
         );
     }
     assert!(!game.state.joined());
+    eprintln!(
+        "native-cut Playing actor={:?} eye={:?}",
+        game.state.players[0].player.pos,
+        game.state.players[0].player.eye_pos()
+    );
 }
 
 fn native_cut(tag: &str, decline: bool) -> NativeCut {
@@ -223,6 +233,10 @@ fn native_cut(tag: &str, decline: bool) -> NativeCut {
         .set_slot(0, Some(ItemStack::new_material(MaterialId::Stick, 27)));
     game.state.prepare_local_gameplay().unwrap();
     let scope = game.state.world.quest_scope.unwrap();
+    eprintln!(
+        "native-cut prepared source={:?} yaw={}",
+        game.state.players[0].player.pos, game.state.players[0].camera.yaw
+    );
     assert!(game.state.leave_world(
         crate::world_exit::SaveChoice::Discard,
         crate::world_exit::ExitTo::Lobby
@@ -303,6 +317,26 @@ fn native_cut(tag: &str, decline: bool) -> NativeCut {
     ));
     host.tick();
     assert!(host.server.players[i].window_events.is_quiescent());
+    let source_local = host.server.players[i]
+        .personal
+        .as_ref()
+        .unwrap()
+        .record()
+        .unwrap()
+        .local
+        .expect("the genuine native source supplies its saved local pose");
+    eprintln!(
+        "native-cut admitted actor={:?} spawn={:?} source-local={:?} yaw={}",
+        host.server.players[i].player.pos,
+        host.server.players[i].spawn_pos,
+        source_local.pos,
+        source_local.yaw
+    );
+    // Arrange only test-world geometry before the real dialogue requests. The
+    // restored native actor uses this genuine saved pose, rather than the
+    // dedicated admission spawn. Its common holder and window stay untouched.
+    host.server.players[i].player.pos = glam::Vec3::from_array(source_local.pos);
+    host.server.players[i].yaw = source_local.yaw;
     let at = host.server.players[i].player.pos
         + crate::camera::forward_from(host.server.players[i].yaw, 0.0) * 1.5;
     host.server
@@ -392,6 +426,15 @@ fn native_cut(tag: &str, decline: bool) -> NativeCut {
             .0,
         quest.npc
     );
+    eprintln!(
+        "native-cut capture actor={:?} giver={:?}",
+        host.server.players[i].player.pos,
+        host.server
+            .ecs
+            .get::<&crate::entity::Position>(giver)
+            .unwrap()
+            .0
+    );
     host.server.save_joiners().unwrap();
     host.server.try_save().unwrap();
     let directory = crate::save::world_dir(&name);
@@ -464,6 +507,13 @@ fn game_harness_d2c3_native_portable_quest_uses_restored_original_giver_dialogue
         .get::<&crate::entity::Position>(giver)
         .unwrap()
         .0;
+    eprintln!(
+        "native-cut restored giver={:?} actor={:?} eye={:?} reach={}",
+        at,
+        rig.game.state.players[0].player.pos,
+        rig.game.state.players[0].player.eye_pos(),
+        (at - rig.game.state.players[0].player.eye_pos()).length()
+    );
     assert!(
         (at - rig.game.state.players[0].player.eye_pos()).length()
             < crate::villager_ui::INTERACT_RANGE,
