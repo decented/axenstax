@@ -1024,7 +1024,6 @@ impl WindowInbox {
     /// Only an imported initial baseline uses this prerequisite: its genuine
     /// Sync1 must precede already available higher personal/window carriers.
     /// Rotate in place without changing owned bytes or the remaining order.
-    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn prioritise_initial_personal_replace(&mut self) -> bool {
         let Some(at) = self.outcomes.iter().position(|outcome| matches!(outcome,
             RequestOutcome::Sync(packet) if packet.window_event == 1)) else { return false; };
