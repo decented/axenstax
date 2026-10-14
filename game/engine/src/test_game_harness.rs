@@ -4591,6 +4591,8 @@ mod tests {
         // The lent authority chooses the guest's spawn independently of the
         // native host's saved position. Put this interaction on the same pad.
         let host_pos = hg.state.players[0].player.pos;
+        let original = &hg.state.hosted_server.as_ref().unwrap().server.players[slot];
+        eprintln!("lent pack setup: original guest {:?}, target {:?}, eye distance {}, reach {}, alive {}, actor {}", original.player.pos, at, (at + glam::Vec3::Y * 0.7 - original.player.eye_pos()).length(), crate::combat::ATTACK_REACH + crate::hosted_server::ATTACK_REACH_TOLERANCE, original.is_present_and_alive(), original.respawns);
         {
             let sp = &mut hg.state.hosted_server.as_mut().unwrap().server.players[slot];
             sp.player.pos = host_pos;
