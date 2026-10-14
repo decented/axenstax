@@ -1225,7 +1225,7 @@ fn handover_checkpoint_participant_record_is_strictly_bound_to_manifest_context(
     let record = |c| {
         PersonalRecord::from_maps(c, rep.iter().map(|(k, v)| (k, v)), [], [], None)
             .unwrap()
-            .encode()
+            .encode_schema1()
             .unwrap()
     };
     let meta = transfer_metadata(&WorldMeta::new("source")).unwrap();

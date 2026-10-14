@@ -168,7 +168,7 @@ impl SourceSession {
         let (src_npub, dst_npub) = (npub(self.action.source_key), npub(seat.key));
         let rows = [
             ParticipantMember { npub: &src_npub, kind: MemberKind::Sidecar, schema: 1, bytes: c.source_sidecar },
-            ParticipantMember { npub: &src_npub, kind: MemberKind::Progression, schema: crate::handover::personal::PersonalRecord::declared_schema(c.source_progress)?, bytes: c.source_progress },
+            ParticipantMember { npub: &src_npub, kind: MemberKind::Progression, schema: crate::handover::personal::PersonalRecord::declared_schema(c.source_progress).map_err(|_| Refusal("Your progression record has an unsupported schema. Nothing was changed."))?, bytes: c.source_progress },
             ParticipantMember { npub: &dst_npub, kind: MemberKind::Sidecar, schema: 1, bytes: &recipient_sidecar },
             ParticipantMember { npub: &dst_npub, kind: MemberKind::Progression, schema: crate::handover::personal::SCHEMA, bytes: &recipient_progress },
         ];

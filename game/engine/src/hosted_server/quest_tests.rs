@@ -3,6 +3,12 @@ use super::*;
 use crate::action_identity::InventoryMode;
 use crate::transport::ClientTransport as _;
 
+fn expected_signed_key() -> [u8; 32] {
+    nostr::Keys::new(nostr::SecretKey::from_slice(&c3d_tests::KEY).unwrap())
+        .public_key()
+        .to_bytes()
+}
+
 fn fresh_authority(mode: InventoryMode, signed: bool) {
     let tag = format!("d2c3-authority-{mode:?}-{signed}");
     let _root = crate::save::WorldsRootGuard::new(&tag);
@@ -187,7 +193,7 @@ fn d2c3_empty_fresh_signed_and_guest_receive_real_sync1_before_personal_fence() 
                 .context();
             if signed {
                 assert!(
-                    matches!(context, crate::progression::GameplayContext::WorldLocal { scope, player: crate::progression::WorldPlayer::Npub(key) } if Some(scope) == host.server.world.quest_scope && key == c3d_tests::KEY)
+                    matches!(context, crate::progression::GameplayContext::WorldLocal { scope, player: crate::progression::WorldPlayer::Npub(key) } if Some(scope) == host.server.world.quest_scope && key == expected_signed_key())
                 );
             } else {
                 assert!(
@@ -236,7 +242,7 @@ fn d2c3_world_local_selected_snapshot_survives_routine_save_failed_cut_and_reope
     let mut local = crate::player_slot::PlayerSlot::new(0, glam::Vec3::new(2.0, 80.0, -3.0), 1.0);
     local.personal_binding = Some(crate::progression::GameplayBinding::WorldLocal {
         scope,
-        player: crate::progression::WorldPlayer::Npub(c3d_tests::KEY),
+        player: crate::progression::WorldPlayer::Npub(expected_signed_key()),
     });
     local.inventory.set_slot(
         7,
@@ -261,7 +267,7 @@ fn d2c3_world_local_selected_snapshot_survives_routine_save_failed_cut_and_reope
         crate::gameplay_attachment::selected_world_local(
             &selected,
             Some([20; 16]),
-            Some(c3d_tests::KEY),
+            Some(expected_signed_key()),
             Some(0)
         )
         .is_err()
@@ -276,7 +282,9 @@ fn d2c3_world_local_selected_snapshot_survives_routine_save_failed_cut_and_reope
         .is_err()
     );
     crate::save_fence::raise(&directory);
-    let refused = host.server.claim_remote_world_local(c3d_tests::KEY, 0);
+    let refused = host
+        .server
+        .claim_remote_world_local(expected_signed_key(), 0);
     crate::save_fence::lift(&directory);
     assert!(
         refused.is_err(),
@@ -288,7 +296,7 @@ fn d2c3_world_local_selected_snapshot_survives_routine_save_failed_cut_and_reope
     );
     assert_eq!(std::fs::read(directory.join("world.dat")).unwrap(), before);
     host.server
-        .claim_remote_world_local(c3d_tests::KEY, 0)
+        .claim_remote_world_local(expected_signed_key(), 0)
         .unwrap();
     assert!(host.server.selected_local_personal.is_none());
     let cut =
@@ -323,4 +331,108 @@ fn d2c3_world_local_selected_snapshot_survives_routine_save_failed_cut_and_reope
             .count,
         5
     );
+}
+
+fn common_quest_state(
+    accepted: bool,
+    decline: bool,
+    penalty: bool,
+) -> crate::progression::GameplayRecord {
+    let context = crate::progression::GameplayContext::WorldLocal {
+        scope: [11; 16],
+        player: crate::progression::WorldPlayer::Npub(expected_signed_key()),
+    };
+    let mut record = crate::progression::GameplayRecord::empty(context).unwrap();
+    if accepted {
+        record
+            .quests
+            .accepted
+            .push(crate::progression::AcceptedQuest {
+                id: [12; 16],
+                npc: [13; 16],
+                village: (1, -2),
+                flavour: crate::quest::QuestFlavour::Fetch {
+                    item: crate::item::MaterialId::Bread,
+                    count: 5,
+                },
+                rewards: vec![
+                    crate::saved_item_slot::SavedItemSlot::capture_exact(Some(
+                        &crate::item::ItemStack::new_material(crate::item::MaterialId::Bread, 2),
+                    ))
+                    .unwrap(),
+                ],
+                reputation: 3,
+                baseline: 0,
+            });
+    }
+    if decline {
+        record.quests.declines = vec![([13; 16], 4999)];
+    }
+    if penalty {
+        record.quests.penalty_left = 129;
+    }
+    record.validate().unwrap();
+    record
+}
+fn local_common_guard(accepted: bool, decline: bool, penalty: bool) {
+    let record = common_quest_state(accepted, decline, penalty);
+    let mut slot = crate::player_slot::PlayerSlot::new(0, glam::Vec3::ZERO, 1.0);
+    record.install_progression(&mut slot);
+    assert!(
+        slot.active_quests.is_empty()
+            && slot.kill_quest_baseline.is_empty()
+            && slot.villager_decline_until.is_empty()
+    );
+    assert!(slot.last_villager_kill_rep_tick.is_none());
+    assert!(
+        crate::handover::live::eligibility::local_progress(&slot, 100).is_err(),
+        "common accepted={accepted} decline={decline} penalty={penalty} local state passed handover before continuation acceptance"
+    );
+}
+fn remote_common_guard(accepted: bool, decline: bool, penalty: bool) {
+    let record = common_quest_state(accepted, decline, penalty);
+    let mut slot = crate::player_slot::PlayerSlot::new(0, glam::Vec3::ZERO, 1.0);
+    slot.personal_binding = Some(crate::progression::GameplayBinding::WorldLocal {
+        scope: [11; 16],
+        player: crate::progression::WorldPlayer::Npub(expected_signed_key()),
+    });
+    record.install_progression(&mut slot);
+    let save = crate::joiner_save::capture_local(&slot).unwrap().unwrap();
+    let save = crate::joiner_save::JoinerSave::decode(&save.0).unwrap();
+    assert!(
+        save.obligations_proven_zero(),
+        "the refusal must not be caused by old correction debt"
+    );
+    assert_eq!(
+        save.personal.as_ref().unwrap().record().unwrap().quests,
+        record.quests
+    );
+    assert!(
+        crate::handover::live::eligibility::recipient_record(Some(&save)).is_err(),
+        "common accepted={accepted} decline={decline} penalty={penalty} recipient state passed handover before continuation acceptance"
+    );
+}
+#[test]
+fn d2c3_local_handover_refuses_common_accepted_quest() {
+    local_common_guard(true, false, false);
+}
+#[test]
+fn d2c3_local_handover_refuses_common_decline_timer() {
+    local_common_guard(false, true, false);
+}
+#[test]
+fn d2c3_local_handover_refuses_common_penalty_timer() {
+    local_common_guard(false, false, true);
+}
+#[test]
+fn d2c3_recipient_handover_refuses_common_accepted_quest() {
+    remote_common_guard(true, false, false);
+}
+#[test]
+fn d2c3_recipient_handover_refuses_common_decline_timer() {
+    remote_common_guard(false, true, false);
+}
+#[test]
+fn d2c3_recipient_handover_refuses_common_penalty_timer() {
+    remote_common_guard(false, false, true);
 }

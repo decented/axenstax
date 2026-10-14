@@ -73,7 +73,7 @@ fn fixture(tag: &str) -> Fixture {
             kind: MemberKind::Progression,
             length: progress.len() as u64,
             digest: crate::handover::hash(&progress),
-            schema: 1,
+            schema: crate::handover::personal::SCHEMA,
         },
         Member {
             path: "world.dat".into(),

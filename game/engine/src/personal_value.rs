@@ -99,12 +99,23 @@ mod tests {
             bincode::deserialize::<LocalPersonalSave>(&huge).is_err(),
             "oversized sequence reached allocation"
         );
-        for bytes in [vec![], vec![1], vec![2], vec![4]] {
+        for bytes in [vec![], vec![1], vec![2], vec![5]] {
             assert!(
                 bincode::deserialize::<LocalPersonalSave>(&bincode::serialize(&bytes).unwrap())
                     .is_err(),
                 "unknown local record became an absent baseline"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod supported_current_validation {
+    #[test]
+    fn d2c3_supported_wrapped_v4_still_requires_a_complete_canonical_body() {
+        let malformed = vec![4u8];
+        let wrapper = bincode::deserialize::<super::LocalPersonalSave>(&bincode::serialize(&malformed).unwrap()).unwrap();
+        assert_eq!(wrapper.0, malformed, "the bounded wrapper recognises the supported version only");
+        assert!(crate::joiner_save::JoinerSave::decode(&wrapper.0).is_err(), "malformed current authority cannot be treated as a fresh seed");
     }
 }
