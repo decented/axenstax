@@ -4,7 +4,7 @@ impl HostedServer {
     pub(super) fn start_personal(
         &mut self,
         i: usize,
-        event: u32,
+        _event: u32,
         replace: bool,
     ) -> Result<(), String> {
         let sp = &mut self.server.players[i];
@@ -28,12 +28,15 @@ impl HostedServer {
             .ok_or("personal snapshot has no action namespace")?
             .header(0, 0)
             .session;
-        let snapshot =
-            crate::personal_sync::snapshot(personal, session, sp.respawns, revision, event)?;
+        let event = sp.window_events.last_number().checked_add(1).ok_or("personal event sequence exhausted")?;
+        let snapshot = crate::personal_sync::snapshot(personal, session, sp.respawns, revision, event)?;
+        let prepared = crate::window_events::prepare_pack_events(sp, Box::new([crate::window_events::WindowEvent::PersonalSync(Box::new(snapshot.clone()))])).map_err(|_| "personal fence cannot fit")?;
+        debug_assert_eq!(prepared.last_number(), event);
         let packet = protocol::serialize_packet(
             protocol::PacketType::PersonalSync,
             &protocol::PersonalSyncPacket::Snapshot(snapshot.clone()),
         );
+        prepared.commit(sp, self.server.tick_counter);
         sp.personal_delivery.started_tick = self.server.tick_counter;
         sp.personal_delivery.sent_tick = self.server.tick_counter;
         sp.personal_delivery.revision = revision;

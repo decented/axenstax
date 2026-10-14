@@ -49,4 +49,3 @@ impl<'de> Deserialize<'de> for LocalPersonalSave {
         d.deserialize_seq(V)
     }
 }
-

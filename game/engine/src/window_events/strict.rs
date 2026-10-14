@@ -47,6 +47,8 @@ fn marker_event(event: &WindowEvent, registry: &crate::block::BlockRegistry) -> 
         WindowEvent::WearArmour { hits } => WindowEvent::WearArmour { hits: *hits },
         WindowEvent::WearWeapon { slot, tool } => WindowEvent::WearWeapon { slot: *slot, tool: *tool },
         WindowEvent::ContainerView(_) | WindowEvent::PackView => return Ok(None),
+        #[cfg(not(target_arch = "wasm32"))]
+        WindowEvent::PersonalSync(_) => return Ok(None),
         WindowEvent::Replace { .. } | WindowEvent::PackCanonical { .. } => return Err(StrictStageError::Replacement),
         WindowEvent::Correction(_) => return Err(StrictStageError::Debt),
     }))
@@ -297,6 +299,8 @@ fn event_heap_bytes(event: &WindowEvent) -> Result<usize, StrictStageError> {
         // C3d — a waiting view's real owned bytes count against the budget
         // (it never makes an unrelated reservation refuse).
         WindowEvent::ContainerView(view) => view_heap_bytes(view, &item_bytes),
+        #[cfg(not(target_arch = "wasm32"))]
+        WindowEvent::PersonalSync(snapshot) => snapshot.bytes.capacity().checked_mul(2).and_then(|bytes| bytes.checked_add(2 * std::mem::size_of::<crate::protocol::PersonalSnapshot>())).ok_or(StrictStageError::Fit),
     }
 }
 

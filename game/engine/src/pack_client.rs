@@ -154,6 +154,40 @@ impl crate::GameState {
         self.install_pack_view(packet.view.clone(), packet.actor_respawns)
     }
 
+    /// Rendering never owns cargo. Mutate the real current ECS pack once
+    /// per click, then advance the changed revision for shared viewers.
+    pub(crate) fn apply_local_pack_clicks(&mut self, pidx: usize, entity: hecs::Entity, clicks: &[crate::container_window::ContainerClick]) {
+        if self.joined() || self.players[pidx].is_dead() { return; }
+        let ctx = self.container_ctx(pidx, false);
+        for click in clicks {
+            let Some(next_revision) = crate::pack_state::revision(&self.ecs, entity).checked_add(1) else { return };
+            let changed = {
+                let Ok(mut data) = self.ecs.get::<&mut crate::horse_ai::HorseData>(entity) else { return };
+                let Some(pack) = data.pack.as_mut() else { return };
+                let p = &mut self.players[pidx];
+                let mut view = WindowMut { inv: &mut p.inventory, armour: &mut p.armour_slots, cursor: &mut p.crafting_ui.cursor_item, grid: &mut p.crafting_ui.grid, container: Some(crate::container_window::ContainerMut::Chest(pack)) };
+                !crate::container_window::apply_container(&mut view, click, &ctx).touched.is_empty()
+            };
+            if changed { let _ = self.ecs.insert_one(entity, crate::pack_state::PackRevision(next_revision)); }
+        }
+    }
+
+    pub(crate) fn draw_joined_pack(&mut self, pidx: usize, mut mirror: SharedContainer) {
+        let Some(session) = mirror.pack_session else { return };
+        if session.close_requested { self.players[pidx].shared_container = Some(mirror); return; }
+        let crate::container_window::ContainerData::Chest(data) = &mirror.contents else { return };
+        let result = crate::chest_ui::show_pack_dialog(&self.renderer.egui.ctx, "Pack", data, &self.players[pidx].inventory, egui::Id::new(("joined-pack", pidx, mirror.target, session.incarnation)), !self.pack_window_frozen(pidx));
+        let ctx = self.container_ctx(pidx, true);
+        for click in &result.clicks { self.apply_shared_container_click(pidx, &mut mirror, click, &ctx); }
+        self.players[pidx].shared_container = Some(mirror);
+        if result.remove_pack_requested {
+            self.request_pack_action(pidx, self.players[pidx].shared_container.as_ref().expect("drawn mirror").target, PackOperation::Remove { incarnation: session.incarnation, revision: session.revision });
+        } else if result.close_requested {
+            self.request_pack_close(pidx);
+            if pidx == 0 { self.capture_cursor(); }
+        }
+    }
+
     pub(crate) fn request_pack_close(&mut self, pidx: usize) {
         let Some(mirror) = self.players[pidx].shared_container.as_mut() else { return };
         let Some(session) = mirror.pack_session.as_mut() else { return };

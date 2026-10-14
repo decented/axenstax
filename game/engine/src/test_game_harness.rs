@@ -625,6 +625,7 @@ mod tests {
                 id,
                 kind: crate::mob::MobType::Chicken,
                 tamed: false,
+                pack: false,
                 baby: false,
                 tethered: false,
                 product_not_ready: false,
@@ -2947,7 +2948,7 @@ mod tests {
         server.server.ecs.get::<&mut crate::entity::Position>(chicken).unwrap().0 = at;
         hg.state.send_entity_attack(
             0,
-            crate::remote_mobs::MirrorTarget { id, kind: crate::mob::MobType::Chicken, tamed: false, baby: false, tethered: false, product_not_ready: false },
+            crate::remote_mobs::MirrorTarget { id, kind: crate::mob::MobType::Chicken, tamed: false, pack: false, baby: false, tethered: false, product_not_ready: false },
             false,
             false,
         );

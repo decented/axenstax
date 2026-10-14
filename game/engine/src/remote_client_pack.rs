@@ -32,7 +32,12 @@ impl RemoteClient {
     /// Cross-frame reservation, intentionally conservative while a pack
     /// carrier is also present in the separately measured held window inbox.
     pub fn pack_retained_usage(&self) -> (usize, usize) {
-        (self.pack_buffer.count, self.pack_buffer.bytes.saturating_add(self.chunk_queue.capacity().saturating_mul(std::mem::size_of::<(usize, crate::chunk_intake::StreamItem)>())) )
+        let count = self.pack_buffer.count;
+        let bytes = self.pack_buffer.bytes.saturating_add(self.chunk_queue.capacity().saturating_mul(std::mem::size_of::<(usize, crate::chunk_intake::StreamItem)>()));
+        #[cfg(not(target_arch = "wasm32"))]
+        { let (personal_count, personal_bytes) = self.personal_inbox.as_ref().map_or((0, 0), |inbox| (inbox.pending_count(), inbox.owned_bytes())); (count.saturating_add(personal_count), bytes.saturating_add(personal_bytes)) }
+        #[cfg(target_arch = "wasm32")]
+        { (count, bytes) }
     }
 
     pub fn pack_carrier_applied(&mut self, owned_bytes: usize) {
@@ -42,14 +47,15 @@ impl RemoteClient {
 
     pub(super) fn check_pack_poll_buffer(&self) -> Result<(), String> {
         if !self.pack_buffers_live() { return Ok(()); }
-        let count = self.pack_buffer.count.saturating_add(self.pending_outcomes.len())
+        let external = self.pack_retained_usage();
+        let count = external.0.saturating_add(self.pending_outcomes.len())
             .saturating_add(self.pending_grants.len()).saturating_add(self.pending_life_events.len());
         // Conservatively charge the pack heap again while a poll still owns
         // it. Include actual outer Vec metadata in both transport/FIFO paths.
         let bytes = crate::window_events::window_carrier_bytes(&self.pending_outcomes, &self.pending_grants, 0)
-            .saturating_add(self.pack_buffer.bytes)
+            .saturating_add(external.1)
             .saturating_add(self.pending_life_events.capacity().saturating_mul(std::mem::size_of::<super::OwnLifeEvent>()))
-            .saturating_add(self.chunk_queue.capacity().saturating_mul(std::mem::size_of::<(usize, crate::chunk_intake::StreamItem)>()));
+            ;
         if count > crate::action_journal::MAX_EVENT_ENTRIES || bytes > crate::action_journal::MAX_RETAINED_BYTES { return Err("Held pack poll exceeds its retained limit".into()); }
         Ok(())
     }

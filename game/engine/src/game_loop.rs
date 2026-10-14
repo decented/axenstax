@@ -532,6 +532,7 @@ enum PackUnequip {
 /// enabled only when empty, and this re-checks defensively so a non-empty
 /// pack is a safe no-op even if the two ever disagreed.
 fn try_unequip_pack(ecs: &mut hecs::World, target: hecs::Entity) -> PackUnequip {
+    let Some(next_revision) = crate::pack_state::revision(ecs, target).checked_add(1) else { return PackUnequip::NoPack };
     let Ok(mut hd) = ecs.get::<&mut crate::horse_ai::HorseData>(target) else {
         return PackUnequip::NoPack;
     };
@@ -545,6 +546,8 @@ fn try_unequip_pack(ecs: &mut hecs::World, target: hecs::Entity) -> PackUnequip 
         return PackUnequip::NotEmpty;
     }
     hd.pack = None;
+    drop(hd);
+    let _ = ecs.insert_one(target, crate::pack_state::PackRevision(next_revision));
     PackUnequip::Removed
 }
 
@@ -7495,6 +7498,8 @@ impl super::GameState {
                 || p.open_furnace.is_some()
                 || p.open_vendor.is_some()
                 || p.open_chest.is_some()
+                || p.open_pack.is_some()
+                || p.shared_container.as_ref().is_some_and(crate::container_window::SharedContainer::visible)
                 || p.open_sign.is_some()
                 || p.explorer_state.is_some()
         })
@@ -7568,7 +7573,12 @@ impl super::GameState {
         if self.players.first().is_some_and(|p| p.crafting_ui.open) && self.handover_blocks_world_action() {
             return true;
         }
+        if self.players.first().is_some_and(|p| p.shared_container.as_ref().is_some_and(|mirror| mirror.pack_session.is_some() && mirror.visible())) {
+            self.request_pack_close(0);
+            return true;
+        }
         let Some(p) = self.players.first_mut() else { return false };
+        if p.open_pack.take().is_some() { return true; }
         if p.crafting_ui.open {
             let _ = self.close_crafting(0);
             return true;
@@ -10551,6 +10561,16 @@ impl super::GameState {
                 intent.jump_pressed = false;
             }
 
+            // A pack flight holds physical spending/prediction, while the
+            // movement and control stream continues to reach its own fence.
+            if self.pack_window_frozen(pidx) {
+                intent.break_block = false;
+                intent.place_block = false;
+                intent.drop_item = false;
+                intent.toggle_inventory = false;
+                intent.toggle_explorer = false;
+            }
+
             // Goal 1 — when the active scenario has ended (end-card showing),
             // gate gameplay interaction so the player can't mine/place behind
             // the modal. Movement is intentionally left alone.
@@ -12904,12 +12924,10 @@ impl super::GameState {
                             Instant::now() + Duration::from_secs(3),
                         ));
                     }
-                    crate::remote_mobs::MirrorClick::PackNotYet => {
-                        self.players[pidx].place_cooldown = 16;
-                        self.toast = Some((
-                            crate::remote_mobs::JOINED_PACK_TOAST.to_string(),
-                            Instant::now() + Duration::from_secs(3),
-                        ));
+                    crate::remote_mobs::MirrorClick::PackEquip | crate::remote_mobs::MirrorClick::PackOpen => {
+                        self.players[pidx].place_cooldown = 8;
+                        let operation = if click == crate::remote_mobs::MirrorClick::PackEquip { crate::pack_wire::PackOperation::Equip } else { crate::pack_wire::PackOperation::Open };
+                        self.request_pack_action(pidx, crate::container_window::ContainerTarget::Entity(mob.id), operation);
                     }
                 }
                 continue;
@@ -13309,7 +13327,7 @@ impl super::GameState {
                 let hot = self.players[pidx].hotbar_slot;
                 let held_slot = self.players[pidx].inventory.hotbar_slot(hot);
                 let held_chest = held_slot
-                    .is_some_and(|s| matches!(&s.item, crate::item::Item::Block(b) if *b == block::CHEST));
+                    .is_some_and(|s| matches!(&s.item, crate::item::Item::Block(b) if *b == block::CHEST) && s.count != 0);
                 let held_empty = held_slot.is_none();
                 if held_chest || (intent.sneak && held_empty) {
                     let look_dir = self.players[pidx].camera.forward();
@@ -13319,16 +13337,19 @@ impl super::GameState {
                         && crate::mob::can_carry_pack(kind)
                     {
                         if held_chest {
+                            let next_revision = crate::pack_state::revision(&self.ecs, target).checked_add(1);
                             let mut equipped = false;
                             if let Ok(mut hd) = self.ecs.get::<&mut crate::horse_ai::HorseData>(target)
                                 && hd.is_kept()
                                 && hd.pack.is_none()
+                                && next_revision.is_some()
+                                && self.players[pidx].inventory.take_block_from_hotbar(hot) == Some(block::CHEST)
                             {
                                 hd.pack = Some(crate::chest::ChestData::default());
                                 equipped = true;
                             }
                             if equipped {
-                                self.players[pidx].inventory.take_block_from_hotbar(hot);
+                                let _ = self.ecs.insert_one(target, crate::pack_state::PackRevision(next_revision.expect("checked before payment")));
                                 self.players[pidx].place_cooldown = 8;
                                 pack_action = true;
                                 // Task 18 — un-gated to match the wolf-sit toast
@@ -18805,7 +18826,7 @@ impl super::GameState {
                     self.players[pidx].open_dispenser = None;
                     if pidx == 0 { self.capture_cursor(); }
                 }
-            } else if let Some((pack_entity, pack_pos)) = self.players[pidx].open_pack {
+            } else if let Some((pack_entity, _pack_pos)) = self.players[pidx].open_pack {
                 // Task 11 (2026-07-06) — Donkey/Mule cargo pack UI. Entity-keyed
                 // (the pack lives on a mob, not a block), so it mirrors the
                 // dispenser pattern above but clones the ChestData out of the
@@ -18818,39 +18839,14 @@ impl super::GameState {
                     .get::<&crate::horse_ai::HorseData>(pack_entity)
                     .ok()
                     .and_then(|hd| hd.pack.clone());
-                if let Some(mut data) = pack_data {
+                if let Some(data) = pack_data {
                     // Task 20 (2026-07-07) — the pack dialog is the ONLY
                     // container that shows a "Remove pack" button (last arg
                     // `true`); it's how the chest comes back off the steed.
-                    let result = crate::chest_ui::show_container_dialog_ext(
-                        &self.renderer.egui.ctx,
-                        "Pack",
-                        &data,
-                        &self.players[pidx].inventory,
-                        pack_pos,
-                        true,
-                    );
-                    // C3b-1 — each click through the one container rule. A
-                    // pack is never a joiner's (packs are refused
-                    // on a mirrored steed until D2c), so it isn't logged as a
-                    // window op.
-                    let ctx = self.container_ctx(pidx, false);
-                    for click in &result.clicks {
-                        let p = &mut self.players[pidx];
-                        let mut view = crate::window::WindowMut {
-                            inv: &mut p.inventory,
-                            armour: &mut p.armour_slots,
-                            cursor: &mut p.crafting_ui.cursor_item,
-                            grid: &mut p.crafting_ui.grid,
-                            container: Some(crate::container_window::ContainerMut::Chest(&mut data)),
-                        };
-                        crate::container_window::apply_container(&mut view, click, &ctx);
-                    }
-                    // Commit the (possibly-mutated) slots back first, so
-                    // `try_unequip_pack` below re-reads the live emptiness.
-                    if let Ok(mut hd) = self.ecs.get::<&mut crate::horse_ai::HorseData>(pack_entity) {
-                        hd.pack = Some(data);
-                    }
+                    let result = crate::chest_ui::show_pack_dialog(&self.renderer.egui.ctx, "Pack", &data, &self.players[pidx].inventory, egui::Id::new(("local-pack", pidx, pack_entity.to_bits())), true);
+                    // The snapshot above is for drawing only. Every click
+                    // reads the current generational entity's live cargo.
+                    self.apply_local_pack_clicks(pidx, pack_entity, &result.clicks);
                     if result.remove_pack_requested {
                         // The button is enabled only when empty, and
                         // `try_unequip_pack` re-checks emptiness, so a
@@ -22297,6 +22293,7 @@ impl super::GameState {
     /// MP-D2b — swing at the server's mob `target` (a joiner): the server
     /// decides, and the weapon wears when it confirms (`InteractOutcome`).
     pub(crate) fn send_entity_attack(&mut self, pidx: usize, target: crate::remote_mobs::MirrorTarget, sprint: bool, sneak: bool) {
+        if self.pack_window_frozen(pidx) { return; }
         let (hot, held, held_kind, held_id, held_full) = self.held_for_request(pidx);
         let pending = crate::joiner_actions::Pending {
             kind: crate::joiner_actions::Asked::Swing,
@@ -22363,6 +22360,7 @@ impl super::GameState {
         kind: crate::protocol::InteractKind,
         sneak: bool,
     ) {
+        if self.pack_window_frozen(pidx) { return; }
         let (hot, held, held_kind, held_id, held_full) = self.held_for_request(pidx);
         let asked = crate::joiner_actions::Asked::Interact(kind);
         let p = &self.players[pidx];
@@ -22413,6 +22411,7 @@ impl super::GameState {
     /// taken only on an accepted `ItemActionOutcome`. Nothing is sent while
     /// every one in hand is already claimed.
     pub(crate) fn send_eat_request(&mut self, pidx: usize) {
+        if self.pack_window_frozen(pidx) { return; }
         let (hot, held, held_kind, held_id, held_full) = self.held_for_request(pidx);
         let asked = crate::joiner_actions::Asked::Eat;
         let p = &self.players[pidx];
@@ -22438,6 +22437,7 @@ impl super::GameState {
     /// seat (`strict_requests::route_item`), Mirror's legacy request,
     /// unchanged, otherwise.
     fn route_item_request(&mut self, pidx: usize, pending: crate::joiner_actions::Pending, action: crate::protocol::ItemAction) {
+        if self.pack_window_frozen(pidx) { return; }
         if crate::strict_requests::shot_goes_typed(self.remote_client.as_ref()) {
             let packet = crate::protocol::ItemActionPacket { seq: 0, action, events_applied: 0 };
             let p = &mut self.players[pidx];
@@ -22465,6 +22465,7 @@ impl super::GameState {
     /// told (`ItemAction::Drop`, never answered): it throws the item from our
     /// body as a real ground item everyone sees, which we see as its ghost.
     pub(crate) fn send_drop_request(&mut self, pidx: usize, slot: usize) {
+        if self.pack_window_frozen(pidx) { return; }
         let now = self.tick_counter;
         let p = &self.players[pidx];
         if now < p.drop_ready_tick {
@@ -22687,6 +22688,7 @@ impl super::GameState {
     /// claimed. A Plan never leaves its holder (C3 design §5): with one in
     /// hand nothing is sent.
     pub(crate) fn send_block_use(&mut self, pidx: usize, cell: [i32; 3], kind: crate::block_use::UseKind) {
+        if self.pack_window_frozen(pidx) { return; }
         self.send_block_request(pidx, cell, |held| crate::joiner_actions::Asked::UseBlock {
             cell,
             kind,
@@ -22714,6 +22716,7 @@ impl super::GameState {
         cell: [i32; 3],
         asked: impl FnOnce(Option<&crate::item::Item>) -> crate::joiner_actions::Asked,
     ) {
+        if self.pack_window_frozen(pidx) { return; }
         self.players[pidx].place_cooldown = 8;
         let (hot, held, held_kind, held_id, held_full) = self.held_for_request(pidx);
         if matches!(held, Some(crate::item::Item::Plan(_))) {
@@ -22727,6 +22730,7 @@ impl super::GameState {
 
     /// Ask the authority to add an Explorer item to this window.
     fn request_creative_give(&mut self, pidx: usize, stack: &crate::item::ItemStack) {
+        if self.pack_window_frozen(pidx) { return; }
         crate::plan_store::remember_item(&stack.item);
         let action = crate::protocol::ItemAction::CreativeGive { item: crate::inventory::stack_to_wire(stack) };
         // C3d run 24 — a Strict seat reserves ONE typed give; only the
@@ -22761,6 +22765,7 @@ impl super::GameState {
         hot: usize,
         action: crate::protocol::ItemAction,
     ) -> bool {
+        if self.pack_window_frozen(pidx) { return false; }
         let p = &self.players[pidx];
         if !self.joiner_actions.can_afford(&p.inventory, &p.crafting_ui, asked, held.as_ref()) {
             return false;
@@ -22787,6 +22792,7 @@ impl super::GameState {
     /// weapon. Returns whether the shot was asked for (otherwise the click
     /// goes on, as single-player's with no arrow does).
     pub(crate) fn send_shot(&mut self, pidx: usize, weapon: crate::protocol::ShotWeapon) -> bool {
+        if self.pack_window_frozen(pidx) { return false; }
         let (hot, held, held_kind, held_id, held_full) = self.held_for_request(pidx);
         let Some(crate::item::Item::Tool(tool)) = held else { return false };
         if crate::shot::find_ammo(&self.players[pidx].inventory, weapon).is_none() {
@@ -23266,6 +23272,7 @@ impl super::GameState {
     /// request, unchanged. Nothing is predicted on either seat: the device
     /// flips by the server's broadcast, and the bracket observes it.
     fn send_device_interact(&mut self, pos: (i32, i32, i32)) {
+        if self.pack_window_frozen(0) { return; }
         if !crate::strict_requests::shot_goes_typed(self.remote_client.as_ref()) {
             self.send_request(crate::remote_client::Request::Device(pos));
             return;
@@ -23412,6 +23419,8 @@ impl super::GameState {
                     }
                     if let Some(remote) = &mut self.remote_client { remote.pack_carrier_applied(packet.owned_bytes()); }
                 }
+                #[cfg(not(target_arch = "wasm32"))]
+                crate::window_events::InboxItem::Outcome(crate::remote_client::RequestOutcome::PersonalSync { .. }) => { /* Progression installs after the actual numbered window frontier advances below. */ }
                 crate::window_events::InboxItem::Grant(grant) => {
                     unfit.push(
                         crate::remote_entities::apply_inventory_grant(

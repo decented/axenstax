@@ -298,6 +298,8 @@ pub enum RequestOutcome {
     Sync(protocol::InventorySyncPacket),
     Pack(Box<crate::pack_wire::PackResult>),
     PackView(Box<crate::pack_wire::PackViewPush>),
+    #[cfg(not(target_arch = "wasm32"))]
+    PersonalSync { window_event: u32, actor_respawns: u32 },
 }
 
 /// C3b-fix-b (B-M1) — a request this client sends mid-frame, in the one
@@ -1472,7 +1474,17 @@ impl RemoteClient {
                     PacketType::PersonalSync => {
                         let result = protocol::safe_deserialize::<protocol::PersonalSyncPacket>(payload).map_err(|e| e.to_string()).and_then(|packet| {
                             let protocol::PersonalSyncPacket::Snapshot(value) = packet else { return Err("Unexpected personal applied packet".into()); };
-                            self.personal_inbox.as_mut().ok_or("Unexpected personal snapshot".to_string())?.push(value)
+                            let event = value.window_event;
+                            let actor_respawns = value.life;
+                            let inbox = self.personal_inbox.as_mut().ok_or("Unexpected personal snapshot".to_string())?;
+                            let was_pending = inbox.has_pending_fence(event, actor_respawns);
+                            let ack = inbox.push(value)?;
+                            if !was_pending && inbox.has_pending_fence(event, actor_respawns) {
+                                self.pending_outcomes.try_reserve_exact(1).map_err(|_| "Personal fence allocation failed")?;
+                                self.pending_outcomes.push(RequestOutcome::PersonalSync { window_event: event, actor_respawns });
+                                changed = true;
+                            }
+                            Ok(ack)
                         });
                         match result {
                             Ok(Some(ack)) => self.send_raw(&protocol::serialize_packet(PacketType::PersonalSync, &protocol::PersonalSyncPacket::Applied(ack))),

@@ -26,6 +26,7 @@ impl crate::GameState {
     /// rule asks (`container_window::container_in_reach`: a Reach Claw's
     /// longer ray would ask for one the server holds out of reach).
     pub(crate) fn request_shared_open(&mut self, pidx: usize, cell: [i32; 3]) {
+        if self.pack_window_frozen(pidx) { return; }
         let p = &mut self.players[pidx];
         p.place_cooldown = 8;
         if !crate::container_window::container_in_reach(p.player.eye_pos(), cell) {
@@ -47,7 +48,8 @@ impl crate::GameState {
             self.toast = Some(("You can't open that here.".to_string(), Instant::now() + Duration::from_secs(3)));
             return;
         };
-        let key = (mirror.cell[0], mirror.cell[1], mirror.cell[2]);
+        let Some(cell) = mirror.block_cell() else { return };
+        let key = (cell[0], cell[1], cell[2]);
         let p = &mut self.players[0];
         p.open_chest = None;
         p.open_dispenser = None;
@@ -77,7 +79,7 @@ impl crate::GameState {
             armour: &mut p.armour_slots,
             cursor: &mut p.crafting_ui.cursor_item,
             grid: &mut p.crafting_ui.grid,
-            container: p.shared_container.as_mut().map(|m| m.as_mut()),
+            container: p.shared_container.as_mut().filter(|mirror| mirror.block_cell().is_some()).map(|m| m.as_mut()),
         };
         let applied = crate::container_window::apply_slot_set(&mut view, pkt, &self.registry, &mut self.window_inbox.debt);
         p.crafting_ui.update_result();
@@ -93,7 +95,9 @@ impl crate::GameState {
     pub(crate) fn draw_shared_container(&mut self, pidx: usize, viewport: &crate::screen::ViewportRect) {
         use crate::container_window::{ContainerClick, ContainerData};
         let Some(mut mirror) = self.players[pidx].shared_container.take() else { return };
-        let key = (mirror.cell[0], mirror.cell[1], mirror.cell[2]);
+        if mirror.pack_session.is_some() { self.draw_joined_pack(pidx, mirror); return; }
+        let Some(cell) = mirror.block_cell() else { return };
+        let key = (cell[0], cell[1], cell[2]);
         let mut clicks: Vec<ContainerClick> = Vec::new();
         let mut closed = false;
         match &mirror.contents {
@@ -164,9 +168,11 @@ impl crate::GameState {
     pub(crate) fn tick_shared_container(&mut self) {
         let joined = self.joined();
         for pidx in 0..self.players.len() {
+            if self.tick_pack_mirror(pidx) { continue; }
             let p = &self.players[pidx];
             let Some(mirror) = p.shared_container.as_ref() else { continue };
-            let key = (mirror.cell[0], mirror.cell[1], mirror.cell[2]);
+            let Some(cell) = mirror.block_cell() else { continue };
+            let key = (cell[0], cell[1], cell[2]);
             let field = match mirror.kind {
                 crate::container_window::ContainerKind::Chest { .. } => p.open_chest,
                 crate::container_window::ContainerKind::Dispenser | crate::container_window::ContainerKind::Dropper => {
@@ -175,7 +181,7 @@ impl crate::GameState {
                 crate::container_window::ContainerKind::Furnace => p.open_furnace,
             };
             let named = field == Some(key);
-            let block_at = self.world.get_block(mirror.cell[0], mirror.cell[1], mirror.cell[2]);
+            let block_at = self.world.get_block(cell[0], cell[1], cell[2]);
             if named && joined && !p.is_dead() && mirror.still_open(block_at, p.player.eye_pos()) {
                 continue;
             }

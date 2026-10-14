@@ -99,6 +99,9 @@ pub enum WindowEvent {
     PackCanonical { actor_respawns: u32, window: Box<EffectiveWindow>, debt: crate::container_window::CorrectionDebt },
     /// A numbered entity cargo view; it changes no personal holding.
     PackView,
+    /// Exact imported progression fence; applying it changes no holding.
+    #[cfg(not(target_arch = "wasm32"))]
+    PersonalSync(Box<crate::protocol::PersonalSnapshot>),
     /// An accepted request's owed take (`joiner_actions::take_owed_window`):
     /// `n` of `item`, from `slot` first. `how` ends the shortfall's log line.
     Take { slot: usize, item: Item, n: u8, how: &'static str },
@@ -379,6 +382,8 @@ fn apply_to(parts: &mut Parts, debt: &mut crate::container_window::CorrectionDeb
             Effect::Weapon(check)
         }
         WindowEvent::ContainerView(_) | WindowEvent::PackView => Effect::Viewed,
+        #[cfg(not(target_arch = "wasm32"))]
+        WindowEvent::PersonalSync(_) => Effect::Viewed,
         WindowEvent::Correction(c) => {
             Effect::Corrected(c.own.as_ref().map(|own| debt.apply(parts.inv, parts.grid, parts.cursor, parts.armour, own)))
         }
@@ -890,6 +895,8 @@ impl InboxItem {
             InboxItem::Outcome(RequestOutcome::Sync(set)) => set.window_event,
             InboxItem::Outcome(RequestOutcome::Pack(packet)) => packet.window_event,
             InboxItem::Outcome(RequestOutcome::PackView(packet)) => packet.window_event,
+            #[cfg(not(target_arch = "wasm32"))]
+            InboxItem::Outcome(RequestOutcome::PersonalSync { window_event, .. }) => *window_event,
             InboxItem::Outcome(RequestOutcome::ContainerOpened(o)) => o.window_event,
             InboxItem::Grant(g) => g.window_event,
             InboxItem::ArmourWorn { event, .. } => *event,
@@ -930,6 +937,8 @@ pub(crate) fn outcome_owned_bytes(outcome: &RequestOutcome) -> usize {
         RequestOutcome::Pack(packet) => packet.owned_bytes(),
         RequestOutcome::PackView(packet) => packet.owned_bytes(),
         RequestOutcome::Interact(_) | RequestOutcome::Item(_) => 0,
+        #[cfg(not(target_arch = "wasm32"))]
+        RequestOutcome::PersonalSync { .. } => 0, // Body ownership stays in personal_sync::Inbox and its external reservation.
     }
 }
 
@@ -990,6 +999,8 @@ impl WindowInbox {
         self.outcomes.iter().all(|outcome| match outcome {
             RequestOutcome::Pack(packet) => packet.actor_respawns <= actor_respawns,
             RequestOutcome::PackView(packet) => packet.actor_respawns <= actor_respawns,
+            #[cfg(not(target_arch = "wasm32"))]
+            RequestOutcome::PersonalSync { actor_respawns: life, .. } => *life <= actor_respawns,
             _ => true,
         })
     }

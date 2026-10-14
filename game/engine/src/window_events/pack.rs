@@ -157,6 +157,8 @@ fn event_heap_bytes(event: &WindowEvent) -> Result<usize, super::strict::StrictS
         WindowEvent::Grant(stack) => item_heap_bytes(&stack.item),
         WindowEvent::Take { item, .. } => item_heap_bytes(item),
         WindowEvent::WearArmour { .. } | WindowEvent::WearWeapon { .. } | WindowEvent::PackView => Ok(0),
+        #[cfg(not(target_arch = "wasm32"))]
+        WindowEvent::PersonalSync(snapshot) => snapshot.bytes.capacity().checked_mul(2).and_then(|bytes| bytes.checked_add(2 * std::mem::size_of::<crate::protocol::PersonalSnapshot>())).ok_or(StrictStageError::Fit),
         WindowEvent::ContainerView(view) => view_heap_bytes(view, &item_heap_bytes),
         WindowEvent::Correction(c) => {
             let mut bytes = std::mem::size_of::<crate::window_ops::Correction>().checked_add(delta_heap_bytes(&c.client)?).and_then(|n| n.checked_add(view_heap_bytes(&c.view, &item_heap_bytes).ok()?)).ok_or(StrictStageError::Fit)?;

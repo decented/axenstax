@@ -284,6 +284,9 @@ fn collect_live(ecs: &hecs::World, tick: u64) -> BTreeMap<u32, LiveEntity> {
         if crate::tameable::pet_owner_of(ecs, e).is_some() {
             flags |= entity_flags::TAMED;
         }
+        if ecs.get::<&crate::horse_ai::HorseData>(e).is_ok_and(|data| data.pack.is_some()) {
+            flags |= entity_flags::PACK;
+        }
         if satoshi.is_some() {
             flags |= entity_flags::SATOSHI;
         }

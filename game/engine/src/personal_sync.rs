@@ -101,6 +101,14 @@ impl Inbox {
             started: web_time::Instant::now(),
         }
     }
+    pub fn pending_count(&self) -> usize { self.pending.len() }
+    pub fn owned_bytes(&self) -> usize {
+        self.pending.capacity().saturating_mul(std::mem::size_of::<PersonalSnapshot>())
+            .saturating_add(self.pending.iter().map(|snapshot| snapshot.bytes.capacity()).fold(0usize, usize::saturating_add))
+    }
+    pub fn has_pending_fence(&self, event: u32, life: u32) -> bool {
+        self.pending.iter().any(|snapshot| snapshot.window_event == event && snapshot.life == life)
+    }
     pub fn observe_respawn(&mut self, respawns: u32) -> Result<(), String> {
         if respawns <= self.observed_life {
             return Ok(());
@@ -155,6 +163,10 @@ impl Inbox {
         {
             return Err("personal snapshot order changed".into());
         }
+        let bytes = self.owned_bytes().saturating_add(value.bytes.capacity()).saturating_add(std::mem::size_of::<PersonalSnapshot>());
+        if bytes > crate::action_journal::MAX_RETAINED_BYTES { return Err("personal snapshots exceed their retained byte limit".into()); }
+        self.pending.try_reserve_exact(1).map_err(|_| "personal snapshot allocation failed")?;
+        if self.owned_bytes().saturating_add(value.bytes.capacity()) > crate::action_journal::MAX_RETAINED_BYTES { return Err("personal snapshot allocation exceeds its byte limit".into()); }
         self.context = Some(value.context);
         self.pending.push_back(value);
         Ok(None)
@@ -187,6 +199,9 @@ impl Inbox {
 
 impl crate::GameState {
     pub(crate) fn apply_personal_inbox(&mut self) {
+        // Socket receipt cannot acknowledge progression through a held pack
+        // window. Its own numbered fence must first reach actual application.
+        if self.remote_client.as_ref().is_some_and(|client| client.pack_window_inbox_held()) { return; }
         let Some(client) = self.remote_client.as_mut() else {
             return;
         };
