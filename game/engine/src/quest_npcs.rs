@@ -324,8 +324,8 @@ mod tests {
         restore(&mut resumed, &saved).unwrap();
         restore(&mut resumed, &saved).unwrap();
         assert_eq!(resumed.query::<&QuestNpcId>().iter().count(), 1);
-        let (_, identity) = resumed.query::<&QuestNpcId>().iter().next().unwrap();
-        assert_eq!(identity.0, id);
+        let identity = resumed.query::<&QuestNpcId>().iter().next().unwrap().1.0;
+        assert_eq!(identity, id);
         assert_eq!(
             bincode::serialize(&capture(Some(scope), &resumed).unwrap().unwrap()).unwrap(),
             bytes

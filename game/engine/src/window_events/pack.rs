@@ -307,7 +307,7 @@ mod tests {
         let registry = crate::block::BlockRegistry::new();
         let context = crate::personal_value::PersonalContext { participant: [7; 32], lineage: [1; 16], generation: 1, transfer: [4; 16] };
         let record = crate::handover::personal::PersonalRecord::from_maps(context, [], [], [], None).unwrap();
-        let snapshot = crate::protocol::PersonalSnapshot { session: [8; 16], life: 0, revision: 1, window_event: 1, context, bytes: record.encode().unwrap() };
+        let snapshot = crate::protocol::PersonalSnapshot { session: [8; 16], life: 0, revision: 1, window_event: 1, context: crate::progression::GameplayContext::Imported(context), bytes: record.to_gameplay().encode().unwrap() };
         for mode in [InventoryMode::Mirror, InventoryMode::Strict] {
             let mut sp = player(mode);
             sp.inventory.set_slot(0, Some(ItemStack::new_block(crate::block::STONE, 3)));
