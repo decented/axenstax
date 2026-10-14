@@ -282,7 +282,8 @@ mod tests {
     #[test]
     fn c3d_wire_tags_append_after_oc_v88_without_collision() {
         use protocol::{deserialize_header, serialize_packet, PacketType};
-        assert_eq!(protocol::PROTOCOL_VERSION, 89);
+        // The newest carrier pins the current protocol version. Original
+        // C3d tags stay fixed when later carriers append after them.
         let action = ActionHeader { session: [7; 16], epoch: 0, life: 0, seq: 1, events_applied: 0 };
         let tagged = [
             (serialize_packet(PacketType::Action, &ActionPacket { action, intent: ActionIntent::CancelledNoop }), PacketType::Action, 68),
@@ -295,7 +296,10 @@ mod tests {
             assert_eq!(deserialize_header(&bytes).map(|(t, _)| t), Some(tag));
         }
         assert_eq!(deserialize_header(&[67]).map(|(t, _)| t), Some(PacketType::InventorySync), "OC's v88 tag 67 is unchanged");
-        assert!(deserialize_header(&[72]).is_none(), "no tag past 71");
+        for (byte, tag) in [(72, PacketType::Handover), (73, PacketType::PersonalSync), (74, PacketType::PackResult), (75, PacketType::PackView)] {
+            assert_eq!(deserialize_header(&[byte]).map(|(t, _)| t), Some(tag), "later tag {byte} appends without changing C3d");
+        }
+        assert!(deserialize_header(&[76]).is_none(), "no tag past the delivered pack carriers");
     }
 
     /// C3d run 19 — the `ToggleBlock` layout with its appended

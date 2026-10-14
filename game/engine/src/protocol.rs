@@ -4440,12 +4440,15 @@ mod tests {
         assert_eq!(PacketType::WindowOp as u8, 64);
         assert_eq!(deserialize_header(&[64, 0]).map(|(p, _)| p), Some(PacketType::WindowOp));
         // C3b-1 takes 65/66; server-owned death takes 67 (InventorySync);
-        // Accepted C3d v89 uses 68–71; handover v90 appends 72.
+        // Accepted C3d v89 uses 68–71; handover uses 72–73 and packs 74–75.
         assert_eq!(deserialize_header(&[68, 0]).map(|(p, _)| p), Some(PacketType::Action));
         assert_eq!(deserialize_header(&[69, 0]).map(|(p, _)| p), Some(PacketType::ActionReceipt));
         assert_eq!(deserialize_header(&[70, 0]).map(|(p, _)| p), Some(PacketType::Recovery));
         assert_eq!(deserialize_header(&[71, 0]).map(|(p, _)| p), Some(PacketType::AppliedActionAck));
-        assert_eq!(deserialize_header(&[72, 0]), None, "72 remains reserved for handover before the normal merge");
+        for (byte, tag) in [(72, PacketType::Handover), (73, PacketType::PersonalSync), (74, PacketType::PackResult), (75, PacketType::PackView)] {
+            assert_eq!(deserialize_header(&[byte, 0]).map(|(p, _)| p), Some(tag), "appended carrier {byte}");
+        }
+        assert_eq!(deserialize_header(&[76, 0]), None, "no tag after the delivered pack carriers");
     }
 
     /// C3b-1 (v77) — shared containers on the wire: `OpenContainer` (= 4)

@@ -7361,15 +7361,28 @@ mod tests {
     /// footer bytes as it — which would fail the tail and flag the save damaged.
     #[test]
     fn older_version_footer_is_stripped_before_the_tail_decode() {
-        let mut bytes = bincode::serialize(&minimal_world_save_for_tests(9)).unwrap();
-        // `rig_clips` is the newest field and an empty Vec: its 8 length bytes end
-        // the payload. Drop them = a save written before `rig_clips` existed.
-        bytes.truncate(bytes.len() - 8);
-        bytes.extend_from_slice(&footer_bytes(SAVE_FORMAT_VERSION - 1));
+        // Accepted c280f41f wrote 52 fields, layout revision 0, footer 52.
+        // Its last field was rig_clips; the only later positional field is
+        // local_personal. No new nested mob carrier enters this fixture.
+        assert_eq!(crate::save_format::WORLD_SAVE_FIELD_COUNT, 53, "re-find the known 52-field fixture if another field appends");
+        let mut save = minimal_world_save_for_tests(9);
+        save.rig_clips = vec![crate::anim_set::AnimClip::Bounce];
+        assert!(save.saved_mobs.is_empty());
+        assert!(save.local_personal.is_none());
+        let appended_none = bincode::serialize(&save.local_personal).unwrap();
+        assert_eq!(appended_none, [0], "the appended optional field encodes None as one byte");
+        let mut bytes = bincode::serialize(&save).unwrap();
+        assert!(bytes.ends_with(&appended_none));
+        bytes.truncate(bytes.len() - appended_none.len());
+        let (_, failed, consumed) = deserialize_world_save_tolerant_reporting(&bytes).expect("the known legacy body decodes at a clean boundary");
+        assert!(failed.is_none());
+        assert_eq!(consumed, bytes.len() as u64, "every byte of the 52-field body is consumed");
+        bytes.extend_from_slice(&footer_bytes(52));
         let (back, partial) = read_world_save_reporting(&bytes).expect("older save loads");
         assert!(!partial, "footer bytes were decoded as a field");
         assert_eq!(back.seed, 9);
-        assert!(back.rig_clips.is_empty());
+        assert_eq!(back.rig_clips, vec![crate::anim_set::AnimClip::Bounce], "the last genuine legacy field survives");
+        assert!(back.local_personal.is_none(), "the absent appended field defaults without reading footer bytes");
     }
 
     #[test]
