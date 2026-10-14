@@ -94,7 +94,7 @@ impl ActionResults {
     /// Every terminal result must be applied before a handover capture.
     pub fn is_quiescent(&self) -> bool { self.rows.is_empty() && self.acked == self.terminal }
 
-    pub fn acknowledge(&mut self, ack: AppliedActionAck, authoritative_events: u32) -> Result<(), ResultError> {
+    pub fn validate_ack(&self, ack: AppliedActionAck, authoritative_events: u32) -> Result<(), ResultError> {
         if ack.session != self.owner.session || ack.epoch != self.owner.epoch || ack.life != self.owner.life { return Err(ResultError::Namespace); }
         if ack.through == 0 || ack.through > self.terminal || ack.included_events > authoritative_events { return Err(ResultError::InvalidAck); }
         if ack.through <= self.acked {
@@ -104,6 +104,11 @@ impl ActionResults {
         if !self.rows.iter().any(|r| r.receipt.action.seq == ack.through) { return Err(ResultError::InvalidAck); }
         let required = self.rows.iter().filter(|r| r.receipt.action.seq <= ack.through).map(|r| r.receipt.included_events).max().unwrap_or(self.acked_events);
         if ack.included_events < required { return Err(ResultError::InvalidAck); }
+        Ok(())
+    }
+    pub fn acknowledge(&mut self, ack: AppliedActionAck, authoritative_events: u32) -> Result<(), ResultError> {
+        self.validate_ack(ack, authoritative_events)?;
+        if ack.through <= self.acked { return Ok(()); }
         while self.rows.front().is_some_and(|r| r.receipt.action.seq <= ack.through) {
             let row = self.rows.pop_front().expect("retained terminal row");
             self.cell_count -= row.cells.len();

@@ -29,6 +29,10 @@ mod personal;
 mod handover;
 mod sidecar;
 mod actions;
+mod packs;
+mod pack_attempt;
+#[cfg(test)]
+mod pack_tests;
 mod strict_container;
 mod strict_edit;
 mod strict_attack;
@@ -346,8 +350,16 @@ pub const INBOUND_OVERFLOW_REASON: &str =
 fn is_control_packet(packet: &[u8]) -> bool {
     matches!(
         protocol::deserialize_header(packet),
-        Some((protocol::PacketType::Respawn | protocol::PacketType::Disconnect, _))
+        Some((protocol::PacketType::Respawn | protocol::PacketType::Disconnect | protocol::PacketType::AppliedActionAck | protocol::PacketType::PersonalSync | protocol::PacketType::Handover, _))
     )
+}
+
+/// A pack hold preserves control and movement-only intake. Its old edit
+/// prefix and later authorising packets still keep their existing order.
+fn is_pack_safe_packet(packet: &[u8]) -> bool {
+    if is_control_packet(packet) { return true; }
+    matches!(protocol::deserialize_header(packet), Some((protocol::PacketType::ClientInput, payload))
+        if protocol::safe_deserialize::<protocol::InputPacket>(payload).is_ok_and(|input| input.block_changes.is_empty() && input.mined.is_empty() && input.use_tags.is_empty() && input.edit_hands.is_empty()))
 }
 
 /// FU3 — does `packet` (at the front of a client's queue) wait for the next
@@ -3940,6 +3952,7 @@ impl HostedServer {
         }
         // C3b-1 — what others changed in the containers joiners have open.
         self.push_open_containers();
+        self.push_open_packs();
         self.server_tick += 1;
         self.broadcast_state();
         // Operator Console snapshot (Spec B task 7 / B-7a): stream to the
@@ -4310,7 +4323,8 @@ impl HostedServer {
                     // (an edit that breaks the door) never overtakes the
                     // click. Next tick's `process_typed_actions` (the top of
                     // `tick`) serves it first.
-                    || (self.mirror_slot(i) && self.typed_action_waits(i))
+                    || (self.mirror_slot(i) && self.typed_action_waits(i) && self.server.players[i].pack_flight.is_none()
+                        && !self.inbound[i].front().is_some_and(|packet| is_control_packet(packet) || (self.pack_queue_waits(i) && is_pack_safe_packet(packet))))
                 {
                     break;
                 }
@@ -4325,6 +4339,15 @@ impl HostedServer {
                 let Some((ptype, payload)) = protocol::deserialize_header(&packet) else {
                     continue;
                 };
+                if self.server.players.get(i).is_some_and(|sp| sp.pack_flight.is_some())
+                    && matches!(ptype, protocol::PacketType::WindowOp | protocol::PacketType::EntityAttack | protocol::PacketType::EntityInteract | protocol::PacketType::ItemAction | protocol::PacketType::DeviceInteract)
+                {
+                    // The supported client makes no prediction while held.
+                    // A contrary legacy authorisation is a protocol failure,
+                    // and cannot wait ahead of its own AppliedActionAck.
+                    let _ = self.release_slot(i, Some("This game sent an inventory change while its pack action was still waiting."));
+                    continue;
+                }
                 match ptype {
                     #[cfg(not(target_arch = "wasm32"))]
                     protocol::PacketType::Handover => self.route_handover_frame(i, payload),
@@ -4794,6 +4817,13 @@ impl HostedServer {
                         else {
                             continue;
                         };
+                        if self.server.players.get(i).is_some_and(|sp| sp.pack_flight.is_some()) && !input.block_changes.is_empty() {
+                            for change in &input.block_changes { self.send_back_refused_edit(change, &mut budget); }
+                            input.block_changes.clear();
+                            input.mined.clear();
+                            input.use_tags.clear();
+                            input.edit_hands.clear();
+                        }
                         // C2b verify M4 — in a catch-up, one new input is one
                         // client tick of drop-bucket credit. D-M1 — only an
                         // input whose tick advances past the last credited one
@@ -4844,7 +4874,7 @@ impl HostedServer {
                         // wait behind earlier ones). Not while edits wait: the
                         // client made them before these events.
                         if sp.server_simulated && input.block_changes.is_empty() && self.edit_queues[i].is_empty()
-                            && (sp.inventory_mode != crate::action_identity::InventoryMode::Strict || (sp.action_queue.as_ref().is_none_or(|q| q.is_empty()) && sp.window_events.accepts_boundary(input.events_applied))) {
+                            && (sp.inventory_mode != crate::action_identity::InventoryMode::Strict || ((sp.action_queue.as_ref().is_none_or(|q| q.is_empty()) || sp.action_queue.as_ref().and_then(|queue| queue.front()).and_then(|head| crate::action_wire::ActionPacket::decode(&head.payload).ok()).is_some_and(|packet| matches!(packet.intent, crate::action_wire::ActionIntent::Pack(_)))) && sp.window_events.accepts_boundary(input.events_applied))) {
                             crate::window_events::apply_through(sp, input.events_applied, now);
                         }
                         // MP-A3 — death is server-held for a joiner. While

@@ -6,6 +6,21 @@ use crate::{chest::{ChestData, ChestTier, CHEST_SLOTS}, item::{Item, ItemStack},
 #[derive(Clone, Copy, Debug)]
 pub struct PackRevision(pub u64);
 
+#[derive(Clone, Copy, Debug)]
+pub struct PackSession {
+    pub entity: hecs::Entity,
+    pub target: crate::container_window::ContainerTarget,
+    pub incarnation: u64,
+    pub revision: u64,
+    pub actor_respawns: u32,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct PackFlight {
+    pub action: crate::action_identity::ActionHeader,
+    pub event: u32,
+}
+
 pub fn revision(ecs: &hecs::World, entity: hecs::Entity) -> u64 {
     ecs.get::<&PackRevision>(entity).map_or(1, |revision| revision.0)
 }
@@ -54,6 +69,9 @@ impl CargoCommit {
         Ok(Self { before, after: candidate.slots, plan_sources })
     }
 
+    pub fn view(&self, target: crate::container_window::ContainerTarget, incarnation: u64, revision: u64) -> Result<crate::pack_wire::PackView, String> {
+        Ok(crate::pack_wire::PackView { target, incarnation, revision, slots: crate::action_wire::BoundedList::new(self.after.iter().map(|stack| stack.as_ref().map(crate::inventory::stack_to_wire)).collect()).map_err(str::to_string)? })
+    }
     pub fn changed(&self) -> bool {
         self.before.iter().zip(&self.after).any(|(before, after)| *before != after.as_ref().map(crate::inventory::stack_to_wire))
     }
