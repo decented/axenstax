@@ -478,7 +478,7 @@ fn consented(j: &mut Joined) -> SourceSession {
     let sidecar = capture::local0_sidecar(&seat0, [9; 16]).unwrap();
     let progress = capture::local0_progress(&seat0, context).unwrap();
     let meta = crate::handover::checkpoint::transfer_metadata(&crate::save::WorldMeta::new("Far")).unwrap();
-    let save = crate::save::build_world_save(&j.host.world, std::slice::from_ref(&seat0), 42, &[], &[]).unwrap();
+    let save = crate::save::build_world_save(&j.host.world, std::slice::from_ref(&seat0), 42, &[], &[], None).unwrap();
     let cap = Capture {
         meta: &meta,
         save,

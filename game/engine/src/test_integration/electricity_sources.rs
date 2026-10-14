@@ -222,7 +222,7 @@ fn a_lit_network_and_a_turning_mill_come_back_after_a_save_and_load() {
     assert_eq!(h.get_block(0, Y, 8), block::WINDMILL_TURNING, "turning before the save");
 
     let player = crate::player_slot::PlayerSlot::new(0, Vec3::new(0.0, 80.0, 0.0), 1.0);
-    crate::save::save_world(name, h.world(), &[player], 42, &[], &[]).expect("save_world");
+    crate::save::save_world(name, h.world(), &[player], 42, &[], &[], None).expect("save_world");
 
     let mut loaded = World::new();
     crate::save::load_world(name, &mut loaded).expect("load_world");

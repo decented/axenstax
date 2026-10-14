@@ -4691,6 +4691,9 @@ impl super::GameState {
         tally_before: crate::sim_lend::SimTally,
     ) -> LentTickReport {
         let mut report = LentTickReport::default();
+        if self.hosted_server.as_ref().is_some_and(|host| host.lends_host_world())
+            && let Err(error) = self.prepare_local_gameplay()
+        { log::error!("Hosted gameplay authority could not be prepared: {error}"); return report; }
         let Some(hs) = self.hosted_server.as_mut() else {
             return report;
         };
@@ -5242,10 +5245,15 @@ impl super::GameState {
             self.autosave_counter = 0;
             #[cfg(not(target_arch = "wasm32"))]
             if let Err(e) = self.preflight_personal_local() { log::error!("Personal autosave failed: {e}"); return; }
+            let quest_world = match crate::quest_npcs::capture(self.world.quest_scope, &self.ecs) {
+                Ok(saved) => saved,
+                Err(error) => { log::error!("Quest autosave failed: {error}"); return; }
+            };
             if let Err(e) = crate::save::tamed_mobs_to_saved(&self.ecs).and_then(|pets| crate::save::autosave_world(
                 &self.world_name, &self.world, &self.players, self.biome_gen.seed,
                 &crate::save::carts_to_saved(&self.ecs),
                 &pets,
+                quest_world.as_ref(),
             )) {
                 log::error!("Autosave failed: {e}");
             }

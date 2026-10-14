@@ -937,7 +937,14 @@ fn capture_and_offer(
             return fail(session, hs, Refusal("This world's kept animals couldn't be saved; the handover was stopped."));
         }
     };
-    let Some(save) = crate::save::build_world_save(f.world, f.players, f.seed, &carts, &kept) else {
+    let quest_world = match crate::quest_npcs::capture(f.world.quest_scope, f.ecs) {
+        Ok(saved) => saved,
+        Err(error) => {
+            log::warn!("Handover quest giver capture refused: {error}");
+            return fail(session, hs, Refusal("This world's quest givers couldn't be saved; the handover was stopped."));
+        }
+    };
+    let Some(save) = crate::save::build_world_save(f.world, f.players, f.seed, &carts, &kept, quest_world.as_ref()) else {
         return fail(session, hs, Refusal("This world has no local player to hand over from."));
     };
     let sidecar = match capture::local0_sidecar(seat0, hs.server.run_id) {

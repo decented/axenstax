@@ -177,12 +177,12 @@ pub(crate) fn load_or_bootstrap(
     let bytes = read_regular(&target, crate::joiner_save::MAX_JOINER_SAVE_BYTES)?;
     let mut save = JoinerSave::decode(&bytes)?;
     let binding = proof.binding(key);
-    if bytes.first() == Some(&3) {
+    if matches!(bytes.first(), Some(3 | 4)) {
         let current = save
             .personal
             .as_ref()
             .ok_or("current personal record has no binding")?;
-        if current.binding != binding {
+        if current.binding.imported() != Some(&binding) {
             return Err("current personal record belongs to another transfer".into());
         }
         current.record()?;
@@ -216,7 +216,8 @@ pub(crate) fn load_or_bootstrap(
         &world.join(&maps.path),
         crate::handover::personal::RECORD_LIMIT as u64,
     )?;
-    if maps.schema != crate::handover::personal::SCHEMA
+    if ![1, 2].contains(&maps.schema)
+        || crate::handover::personal::PersonalRecord::declared_schema(&progress).map_err(|e| e.to_string())? != maps.schema
         || maps.length != progress.len() as u64
         || maps.digest != crate::handover::hash(&progress)
     {
@@ -240,7 +241,8 @@ pub(crate) fn confirm_durable(target: &Path) -> Result<(), String> {
 /// Detect a remaining live personal authority even after the dedicated role
 /// has cleared the local WorldSave field. This is read-only and bounded; a
 /// proofless bound record must never become an ordinary bag or lossy export.
-pub(crate) fn has_bound_records(world: &Path) -> Result<bool, String> {
+pub(crate) fn has_bound_records(world: &Path) -> Result<bool, String> { scan_bound_records(world, true) }
+fn scan_bound_records(world: &Path, imported_only: bool) -> Result<bool, String> {
     let entries = match fs::read_dir(world.join("joiners")) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
@@ -259,7 +261,7 @@ pub(crate) fn has_bound_records(world: &Path) -> Result<bool, String> {
             continue;
         }
         let bytes = read_regular(&entry.path(), crate::joiner_save::MAX_JOINER_SAVE_BYTES)?;
-        if bytes.first() == Some(&3) && JoinerSave::decode(&bytes)?.personal.is_some() {
+        if matches!(bytes.first(), Some(3 | 4)) && JoinerSave::decode(&bytes)?.personal.is_some_and(|p| !imported_only || p.binding.imported().is_some()) {
             return Ok(true);
         }
     }
@@ -269,7 +271,7 @@ pub(crate) fn has_bound_records(world: &Path) -> Result<bool, String> {
 /// Generic archives/forks omit proofs and participant files. Keep the complete
 /// world directory for backup until a proof-preserving copy format exists.
 pub(crate) fn generic_copy_guard(world: &Path) -> Result<(), String> {
-    if proof(world)?.is_some() || has_bound_records(world)? {
+    if proof(world)?.is_some() || scan_bound_records(world, false)? {
         return Err("This transferred world cannot use archive/profile export or Fork. Copy the complete world directory to keep its authority and saved players.".into());
     }
     Ok(())
@@ -304,7 +306,7 @@ pub(crate) fn write_observed(
     if save
         .personal
         .as_ref()
-        .is_some_and(|p| p.binding.context.participant != key)
+        .is_some_and(|p| p.binding.context().participant() != Some(key))
     {
         return Err("personal save identity mismatch".into());
     }
@@ -395,9 +397,20 @@ impl crate::server::GameServer {
         key: [u8; 32],
         proof: &Proof,
     ) -> Result<(), String> {
-        if key != proof.local_owner() {
-            return Ok(());
-        }
+        if key != proof.local_owner() { return Ok(()); }
+        self.claim_selected_personal(key, crate::progression::GameplayBinding::Imported(proof.binding(key)))
+    }
+    pub(crate) fn claim_remote_world_local(&mut self, key: [u8; 32], local_players: usize) -> Result<(), String> {
+        let Some(snapshot) = &self.selected_local_personal else { return Ok(()); };
+        let selected = JoinerSave::decode(&snapshot.0)?;
+        let binding = &selected.personal.as_ref().ok_or("selected personal snapshot has no binding")?.binding;
+        let crate::progression::GameplayBinding::WorldLocal { scope, player: crate::progression::WorldPlayer::Npub(owner) } = binding else { return Ok(()); };
+        if *owner != key { return Ok(()); }
+        if local_players > 0 { return Err("This player is already playing locally here.".into()); }
+        if Some(*scope) != self.world.quest_scope { return Err("selected local gameplay scope differs".into()); }
+        self.claim_selected_personal(key, binding.clone())
+    }
+    fn claim_selected_personal(&mut self, key: [u8; 32], expected: crate::progression::GameplayBinding) -> Result<(), String> {
         let world = crate::save::world_dir(&self.world_name);
         if self.selected_local_personal.is_none()
             && matches!(fs::symlink_metadata(world.join("autosave")), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
@@ -413,7 +426,7 @@ impl crate::server::GameServer {
             if saved
                 .personal
                 .as_ref()
-                .is_none_or(|p| p.binding != proof.binding(key))
+                .is_none_or(|p| p.binding != expected)
             {
                 return Err("selected local personal authority differs".into());
             }
@@ -422,7 +435,7 @@ impl crate::server::GameServer {
         // This commits the actual live server world and other players, never
         // an old decoded primary. Its explicit None selects remote personal
         // authority; the canonical record was made durable before this cut.
-        self.try_save()?;
+        self.try_save_selected(None)?;
         // A role cut is rarer than a save: prove the newly written chunk
         // contents as well as the primary record before remote gameplay.
         for ((cx, cy, cz), chunk) in self.world.persistable_chunks() {
@@ -447,7 +460,7 @@ impl crate::server::GameServer {
 pub(crate) fn install(
     save: &JoinerSave,
     slot: &mut crate::player_slot::PlayerSlot,
-) -> Result<PersonalBinding, String> {
+) -> Result<crate::progression::GameplayBinding, String> {
     let personal = save
         .personal
         .as_ref()
@@ -540,7 +553,7 @@ impl crate::GameState {
         let Some(binding) = &self.local_personal else {
             return Ok(());
         };
-        if self.handover_signed_in() != Some(binding.context.participant) {
+        if binding.context().participant().is_some_and(|key| self.handover_signed_in() != Some(key)) {
             return Err(
                 "Sign in as this world's saved player before saving. Nothing was changed.".into(),
             );

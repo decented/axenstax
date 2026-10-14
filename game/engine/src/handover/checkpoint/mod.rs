@@ -11,6 +11,7 @@ mod receipt;
 mod sync_pool;
 use super::{Error, Result};
 use crate::save::{WorldMeta, WorldSave};
+pub(crate) const WORLD_DATA_BYTES: usize = bounded_decode::WORLD_BYTES;
 pub use admission::{AdmittedManifest, OfferContext, sign_offer};
 pub use evidence::{OfflineRecovery, RecoveredCheckpoint};
 pub use import::{DurableCheckpoint, Import, ImportBoundary, ImportObserver, NoFault};

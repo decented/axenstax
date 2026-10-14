@@ -338,6 +338,9 @@ pub struct WorldSave {
     /// including explicit Save/Discard and autosave. APPEND LAST.
     #[serde(default)]
     pub local_personal: Option<crate::personal_value::LocalPersonalSave>,
+    /// Durable world scope and engaged ordinary givers. APPEND LAST.
+    #[serde(default)]
+    pub quest_world: Option<crate::quest_npcs::QuestWorldSave>,
 }
 
 /// One serialised Dispenser/Dropper. Position + DispenserData (mirrors
@@ -839,6 +842,7 @@ impl LegacyWorldSave {
             dispensers: Vec::new(),
             rig_clips: Vec::new(),
             local_personal: None,
+            quest_world: None,
             // Legacy saves predate Spec 34 — no tip jars.
             tip_jars: Vec::new(),
             auctions: Vec::new(),
@@ -1151,6 +1155,7 @@ fn tamed_mobs_to_saved_impl(ecs: &hecs::World) -> Result<Vec<SavedTamedPet>, Str
     {
         // A statue-authored steed which was later kept already has its
         // Steed3 record; a second Authored row would duplicate it on load.
+        if ecs.get::<&crate::quest_npcs::QuestNpcId>(id).is_ok() { continue; }
         if ecs.get::<&crate::horse_ai::HorseData>(id).is_ok_and(|data| data.is_kept()) { continue; }
         out.push(SavedTamedPet {
             x: pos.0.x,
@@ -1939,8 +1944,10 @@ pub fn save_world(
     seed: u32,
     carts: &[SavedCart],
     saved_mobs: &[SavedTamedPet],
+    quest_world: Option<&crate::quest_npcs::QuestWorldSave>,
 ) -> Result<(), String> {
-    save_world_at(name, world, players, seed, carts, saved_mobs, AtCommit::KeepAutosave)
+    crate::quest_npcs::check_capture(world.quest_scope, quest_world)?;
+    save_world_at(name, world, players, seed, carts, saved_mobs, AtCommit::KeepAutosave, quest_world)
 }
 
 /// The positional WorldSave of a live world and its local seats, exactly as
@@ -1953,7 +1960,9 @@ pub fn build_world_save(
     seed: u32,
     carts: &[SavedCart],
     saved_mobs: &[SavedTamedPet],
+    quest_world: Option<&crate::quest_npcs::QuestWorldSave>,
 ) -> Option<WorldSave> {
+    crate::quest_npcs::check_capture(world.quest_scope, quest_world).ok()?;
     // No seat, no legacy single-player fields to fill: refused, not a panic.
     if players.is_empty() {
         return None;
@@ -2084,6 +2093,7 @@ pub fn build_world_save(
         // #19 — index-aligned clip side table (see `WorldSave.rig_clips`).
         rig_clips: world.rigs.iter().map(|r| r.clip).collect(),
         local_personal: crate::joiner_save::capture_local(&players[0]).ok()?,
+        quest_world: quest_world.cloned(),
         exhibits: world.exhibits.clone(),
         composters: world.iter_composters().map(|((x, y, z), data)| SavedComposter { x, y, z, data: data.clone() }).collect(),
         tip_jars,
@@ -2147,7 +2157,9 @@ fn save_world_at(
     carts: &[SavedCart],
     saved_mobs: &[SavedTamedPet],
     at_commit: AtCommit,
+    quest_world: Option<&crate::quest_npcs::QuestWorldSave>,
 ) -> Result<(), String> {
+    crate::quest_npcs::check_capture(world.quest_scope, quest_world)?;
     if players.is_empty() {
         return Err("save_world: no players to save".to_string());
     }
@@ -2159,7 +2171,7 @@ fn save_world_at(
     finish_staged_first_save(&dir)?;
     let chunks_dir = dir.join("chunks");
 
-    let save = build_world_save(world, players, seed, carts, saved_mobs)
+    let save = build_world_save(world, players, seed, carts, saved_mobs, quest_world)
         .ok_or_else(|| "save_world: no players to save".to_string())?;
 
     // Increment version counter + flush proof-of-play stats into meta BEFORE
@@ -2210,7 +2222,9 @@ pub fn save_world(
     seed: u32,
     carts: &[SavedCart],
     saved_mobs: &[SavedTamedPet],
+    quest_world: Option<&crate::quest_npcs::QuestWorldSave>,
 ) -> Result<(), String> {
+    crate::quest_npcs::check_capture(world.quest_scope, quest_world)?;
     if players.is_empty() {
         return Err("save_world: no players to save".to_string());
     }
@@ -2325,7 +2339,8 @@ pub fn save_world(
         rigs: world.rigs.clone(),
         // #19 — index-aligned clip side table (see `WorldSave.rig_clips`).
         rig_clips: world.rigs.iter().map(|r| r.clip).collect(),
-        local_personal: None,
+        local_personal: crate::joiner_save::capture_local(&players[0])?,
+        quest_world: quest_world.cloned(),
         exhibits: world.exhibits.clone(),
         composters: world.iter_composters().map(|((x, y, z), data)| SavedComposter { x, y, z, data: data.clone() }).collect(),
         tip_jars,
@@ -2592,6 +2607,7 @@ fn deserialize_world_save_tolerant_reporting(
         // read LAST.
         rig_clips: tail.field(&mut cur, "rig_clips"),
         local_personal: tail.field(&mut cur, "local_personal"),
+        quest_world: tail.field(&mut cur, "quest_world"),
     };
     Ok((save, tail.failed_at, cur.position()))
 }
@@ -2631,8 +2647,23 @@ pub fn read_world_save_reporting(data: &[u8]) -> Result<(WorldSave, bool), World
     }
     match deserialize_world_save_tolerant_reporting(payload) {
         Ok((s, failed, _)) => {
-            if version.is_some_and(|v| v >= 53) && (failed.is_some() || bincode::serialize(&s).map_err(|e| WorldSaveError::Undecodable(e.to_string()))?.as_slice() != payload) {
-                return Err(WorldSaveError::Undecodable("current personal snapshot is truncated or corrupt; preserved without reset".into()));
+            if version.is_some_and(|v| v >= 53) {
+                let mut exact = bincode::serialize(&s).map_err(|e| WorldSaveError::Undecodable(e.to_string()))?;
+                // Delivered 53-field bodies end at the selected personal snapshot.
+                // Its bytes remain untouched until selected authority is validated.
+                let legacy = matches!(version, Some(53 | 55)) && s.quest_world.is_none();
+                if legacy {
+                    let appended = bincode::serialize(&s.quest_world).map_err(|e| WorldSaveError::Undecodable(e.to_string()))?;
+                    if appended != [0] || !exact.ends_with(&appended) {
+                        return Err(WorldSaveError::Undecodable("invalid legacy quest suffix".into()));
+                    }
+                    exact.truncate(exact.len() - appended.len());
+                }
+                let clean_tail = failed.is_none() || (legacy && failed == Some("quest_world"));
+                if !clean_tail || exact.as_slice() != payload {
+                    return Err(WorldSaveError::Undecodable("current personal snapshot is truncated or corrupt; preserved without reset".into()));
+                }
+                return Ok((s, false));
             }
             Ok((s, failed.is_some()))
         },
@@ -2920,6 +2951,7 @@ pub fn apply_world_save_state(world: &mut World, save: &WorldSave) {
 }
 
 fn restore_world_save_state(world: &mut World, save: &WorldSave) {
+    world.quest_scope = save.quest_world.as_ref().map(|saved| saved.scope);
     // Wave 27 — restore campfire block-entity state. Old saves have an
     // empty `campfires` Vec via `#[serde(default)]`; that just leaves
     // `world.block_entities` empty (correct — no campfires existed
@@ -4198,7 +4230,9 @@ pub fn autosave_world(
     seed: u32,
     carts: &[SavedCart],
     saved_mobs: &[SavedTamedPet],
+    quest_world: Option<&crate::quest_npcs::QuestWorldSave>,
 ) -> Result<(), String> {
+    crate::quest_npcs::check_capture(world.quest_scope, quest_world)?;
     if players.is_empty() {
         return Err("autosave_world: no players to save".to_string());
     }
@@ -4320,6 +4354,7 @@ pub fn autosave_world(
         // #19 — index-aligned clip side table (see `WorldSave.rig_clips`).
         rig_clips: world.rigs.iter().map(|r| r.clip).collect(),
         local_personal: crate::joiner_save::capture_local(&players[0])?,
+        quest_world: quest_world.cloned(),
         exhibits: world.exhibits.clone(),
         composters: world.iter_composters().map(|((x, y, z), data)| SavedComposter { x, y, z, data: data.clone() }).collect(),
         tip_jars,
@@ -4416,12 +4451,14 @@ pub fn autosave_world(
     seed: u32,
     carts: &[SavedCart],
     saved_mobs: &[SavedTamedPet],
+    quest_world: Option<&crate::quest_npcs::QuestWorldSave>,
 ) -> Result<(), String> {
+    crate::quest_npcs::check_capture(world.quest_scope, quest_world)?;
     // On WASM, autosave writes to the same IndexedDB store as save_world.
     // NOTE: there is NO cloud upload here yet. The cloud-save bridge tier
     // (tools/sites/game POST /worlds/upload) exists but is not wired into this
     // path — that's Phase 5 of docs/foundations/2026-05-26-cloud-save-blossom.md.
-    save_world(name, world, players, seed, carts, saved_mobs)
+    save_world(name, world, players, seed, carts, saved_mobs, quest_world)
 }
 
 /// Save the live session's world ([`save_world`]) and drop the crash-recovery
@@ -4442,15 +4479,16 @@ pub fn save_world_superseding_autosave(
     seed: u32,
     carts: &[SavedCart],
     saved_mobs: &[SavedTamedPet],
+    quest_world: Option<&crate::quest_npcs::QuestWorldSave>,
 ) -> Result<(), String> {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        save_world_at(name, world, players, seed, carts, saved_mobs, AtCommit::DropAutosave)
+        save_world_at(name, world, players, seed, carts, saved_mobs, AtCommit::DropAutosave, quest_world)
     }
     // The web keeps no separate autosave (it writes the save itself).
     #[cfg(target_arch = "wasm32")]
     {
-        save_world(name, world, players, seed, carts, saved_mobs)
+        save_world(name, world, players, seed, carts, saved_mobs, quest_world)
     }
 }
 
@@ -4807,6 +4845,7 @@ pub(crate) fn minimal_world_save_for_tests(seed: u32) -> WorldSave {
         dispensers: Vec::new(),
         rig_clips: Vec::new(),
         local_personal: None,
+        quest_world: None,
     }
 }
 
@@ -5021,6 +5060,7 @@ mod tests {
             dispensers: Vec::new(),
             rig_clips: Vec::new(),
             local_personal: None,
+            quest_world: None,
         };
         let bytes = bincode::serialize(&save).unwrap();
         let back: WorldSave = bincode::deserialize(&bytes).unwrap();
@@ -5482,6 +5522,7 @@ mod tests {
             dispensers: Vec::new(),
             rig_clips: Vec::new(),
             local_personal: None,
+            quest_world: None,
         };
         let mut bytes = bincode::serialize(&save).unwrap();
         bytes.extend_from_slice(&[0xFFu8; 16]); // pretend: a future field's bytes
@@ -5873,7 +5914,7 @@ mod tests {
         // Indexing player_saves[0] on an empty slice panicked mid-save (engine
         // audit 2026-06-04, A). Guard early with an Err instead.
         let world = World::new();
-        let result = save_world("unused_empty_players", &world, &[], 0, &[], &[]);
+        let result = save_world("unused_empty_players", &world, &[], 0, &[], &[], None);
         assert!(result.is_err(), "empty players must Err, not panic");
     }
 
@@ -5910,13 +5951,13 @@ mod tests {
         world.set_block(2, 70, 2, crate::block::STONE);
         let players = vec![crate::player_slot::PlayerSlot::new(
             0, glam::Vec3::new(0.0, 70.0, 0.0), 1.0)];
-        save_world(name, &world, &players, 0, &[], &[]).expect("first save");
+        save_world(name, &world, &players, 0, &[], &[], None).expect("first save");
         let n_before = std::fs::read_dir(&chunks_dir).unwrap().count();
         assert_eq!(n_before, 1, "exactly the stone chunk's file is written");
 
         // Mine it out → the only loaded chunk is now all-air.
         world.set_block(2, 70, 2, crate::block::AIR);
-        save_world(name, &world, &players, 0, &[], &[]).expect("second save");
+        save_world(name, &world, &players, 0, &[], &[], None).expect("second save");
         let n_after = std::fs::read_dir(&chunks_dir).unwrap().count();
 
         let _ = std::fs::remove_dir_all(&dir); // cleanup before asserting
@@ -6327,6 +6368,7 @@ mod tests {
             dispensers: Vec::new(),
             rig_clips: Vec::new(),
             local_personal: None,
+            quest_world: None,
         };
         assert_eq!(save.face_overlays.len(), 1, "one wallpaper face");
         assert_eq!(save.face_blueprints.len(), 1, "one blueprint face");
@@ -6429,6 +6471,7 @@ mod tests {
             dispensers: Vec::new(),
             rig_clips: Vec::new(),
             local_personal: None,
+            quest_world: None,
         };
 
         // Encode, then decode through the REAL production path.
@@ -6606,6 +6649,7 @@ mod tests {
             dispensers: Vec::new(),
             rig_clips: Vec::new(),
             local_personal: None,
+            quest_world: None,
         };
         let bytes = bincode::serialize(&save).unwrap();
         let back: WorldSave = bincode::deserialize(&bytes).unwrap();
@@ -7362,15 +7406,15 @@ mod tests {
     #[test]
     fn older_version_footer_is_stripped_before_the_tail_decode() {
         // Accepted c280f41f wrote 52 fields, layout revision 0, footer 52.
-        // Its last field was rig_clips; the only later positional field is
-        // local_personal. No new nested mob carrier enters this fixture.
-        assert_eq!(crate::save_format::WORLD_SAVE_FIELD_COUNT, 53, "re-find the known 52-field fixture if another field appends");
+        // Its last field was rig_clips; the later optional positional fields are
+        // local_personal and quest_world. No new nested mob carrier enters this fixture.
+        assert_eq!(crate::save_format::WORLD_SAVE_FIELD_COUNT, 54, "re-find the known 52-field fixture if another field appends");
         let mut save = minimal_world_save_for_tests(9);
         save.rig_clips = vec![crate::anim_set::AnimClip::Bounce];
         assert!(save.saved_mobs.is_empty());
         assert!(save.local_personal.is_none());
-        let appended_none = bincode::serialize(&save.local_personal).unwrap();
-        assert_eq!(appended_none, [0], "the appended optional field encodes None as one byte");
+        let appended_none = bincode::serialize(&(&save.local_personal, &save.quest_world)).unwrap();
+        assert_eq!(appended_none, [0, 0], "the two appended optional fields each encode None as one byte");
         let mut bytes = bincode::serialize(&save).unwrap();
         assert!(bytes.ends_with(&appended_none));
         bytes.truncate(bytes.len() - appended_none.len());
@@ -7446,11 +7490,11 @@ mod tests {
             "world folder write"
         );
         assert!(
-            save_world("w", &World::new(), std::slice::from_ref(&slot), 1, &[], &[]).is_err(),
+            save_world("w", &World::new(), std::slice::from_ref(&slot), 1, &[], &[], None).is_err(),
             "save"
         );
         assert!(
-            autosave_world("w", &World::new(), std::slice::from_ref(&slot), 1, &[], &[]).is_err(),
+            autosave_world("w", &World::new(), std::slice::from_ref(&slot), 1, &[], &[], None).is_err(),
             "autosave"
         );
         assert!(
@@ -7510,10 +7554,10 @@ mod tests {
             .unwrap();
         assert_eq!(file_footer_version(&world_dir("a").join("world.dat")), current, "write_world_folder");
 
-        save_world("b", &World::new(), std::slice::from_ref(&slot), 1, &[], &[]).unwrap();
+        save_world("b", &World::new(), std::slice::from_ref(&slot), 1, &[], &[], None).unwrap();
         assert_eq!(file_footer_version(&world_dir("b").join("world.dat")), current, "save_world");
 
-        autosave_world("c", &World::new(), std::slice::from_ref(&slot), 1, &[], &[]).unwrap();
+        autosave_world("c", &World::new(), std::slice::from_ref(&slot), 1, &[], &[], None).unwrap();
         assert_eq!(
             file_footer_version(&world_dir("c").join("autosave").join("world.dat")),
             current,

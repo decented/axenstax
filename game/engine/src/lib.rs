@@ -269,6 +269,9 @@ mod inventory_sync;
 mod joiner_save;
 mod saved_item_slot;
 mod personal_value;
+pub(crate) mod progression;
+pub(crate) mod gameplay_attachment;
+pub(crate) mod quest_npcs;
 mod plan_store;
 mod bear_ai;
 mod hyena_ai;
@@ -1292,7 +1295,7 @@ pub(crate) struct GameState {
     pub(crate) handover: Option<crate::handover_game::Handover>,
     /// Imported personal identity selected at world load, latched for saves.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) local_personal: Option<crate::joiner_save::PersonalBinding>,
+    pub(crate) local_personal: Option<crate::progression::GameplayBinding>,
     /// The host this joined client verified at join (online play's verified
     /// answer and its runtime). `None` for a join that verified no host.
     #[cfg(not(target_arch = "wasm32"))]

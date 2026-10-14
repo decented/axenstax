@@ -737,7 +737,7 @@ mod session {
         let mut wolf = crate::wolf::WolfData::untamed();
         wolf.ownership.owner_pubkey = "local-player-0".into();
         let pet = crate::save::SavedTamedPet { x: 2.0, y: 70.0, z: 2.0, data: crate::save::SavedTamedPetData::Wolf(wolf) };
-        let save = crate::save::build_world_save(&p.host.world, std::slice::from_ref(seat0), 42, &carts, &[pet]).unwrap();
+        let save = crate::save::build_world_save(&p.host.world, std::slice::from_ref(seat0), 42, &carts, &[pet], None).unwrap();
         let cap = Capture {
             meta: &meta,
             save,
@@ -760,7 +760,7 @@ mod session {
         let sidecar = capture::local0_sidecar(seat0, [9; 16]).unwrap();
         let progress = capture::local0_progress(seat0, context).unwrap();
         let meta = crate::handover::checkpoint::transfer_metadata(&crate::save::WorldMeta::new("Loop")).unwrap();
-        let save = crate::save::build_world_save(&p.host.world, std::slice::from_ref(seat0), 42, &[], &[]).unwrap();
+        let save = crate::save::build_world_save(&p.host.world, std::slice::from_ref(seat0), 42, &[], &[], None).unwrap();
         let cap = Capture {
             meta: &meta,
             save,
@@ -1724,7 +1724,7 @@ mod session {
     /// The frame's five-minute autosave of the fixture's world.
     fn autosave(root: &std::path::Path) -> Result<(), String> {
         crate::save::with_worlds_root(root, || {
-            crate::save::autosave_world("world", &crate::world::World::new(), std::slice::from_ref(&seat0()), 77, &[], &[])
+            crate::save::autosave_world("world", &crate::world::World::new(), std::slice::from_ref(&seat0()), 77, &[], &[], None)
         })
     }
 

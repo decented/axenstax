@@ -8,9 +8,14 @@ fn fresh_authority(mode: InventoryMode, signed: bool) {
     let _root = crate::save::WorldsRootGuard::new(&tag);
     let mut host = tests::start_room_test_server(&tag, 0);
     host.select_inventory_mode(mode).unwrap();
-    assert!(crate::handover::live::personal_adapter::proof(
-        &crate::save::world_dir(&host.server.world_name)
-    ).unwrap().is_none(), "an ordinary world has no imported proof");
+    assert!(
+        crate::handover::live::personal_adapter::proof(&crate::save::world_dir(
+            &host.server.world_name
+        ))
+        .unwrap()
+        .is_none(),
+        "an ordinary world has no imported proof"
+    );
     let client = if signed {
         host.attach_test_remote_with_binding(Some([17; 32]))
     } else {
@@ -26,17 +31,24 @@ fn fresh_authority(mode: InventoryMode, signed: bool) {
     }
     host.tick();
     let heard = c3d_tests::hear(&client);
-    assert!(heard.rejects.is_empty(), "the genuine attachment is admitted");
+    assert!(
+        heard.rejects.is_empty(),
+        "the genuine attachment is admitted"
+    );
     let accepted = heard.accepts.first().expect("a real JoinAccept");
     let i = usize::try_from(accepted.player_index).unwrap();
     let player = &host.server.players[i];
     assert_eq!(player.verified_pubkey.is_some(), signed);
     assert!(player.is_present_and_alive());
     assert_eq!(accepted.inventory_mode, mode);
-    assert!(player.personal.is_some(),
-        "fresh {mode:?} signed={signed} attachment has no common authoritative progression");
-    assert!(accepted.has_personal_state,
-        "common authority must require its actual initial window and personal installation");
+    assert!(
+        player.personal.is_some(),
+        "fresh {mode:?} signed={signed} attachment has no common authoritative progression"
+    );
+    assert!(
+        accepted.has_personal_state,
+        "common authority must require its actual initial window and personal installation"
+    );
 }
 
 #[test]
@@ -54,4 +66,261 @@ fn d2c3_real_guest_attachment_has_common_authority_mirror() {
 #[test]
 fn d2c3_real_guest_attachment_has_common_authority_strict() {
     fresh_authority(InventoryMode::Strict, false);
+}
+
+#[test]
+fn d2c3_empty_fresh_signed_and_guest_receive_real_sync1_before_personal_fence() {
+    for mode in [InventoryMode::Mirror, InventoryMode::Strict] {
+        for signed in [false, true] {
+            let tag = format!("d2c3-empty-sync-{mode:?}-{signed}");
+            let _root = crate::save::WorldsRootGuard::new(&tag);
+            let mut host = tests::start_room_test_server(&tag, 0);
+            host.select_inventory_mode(mode).unwrap();
+            host.server.world.world_type = "normal".into();
+            host.server.world.is_workshop = false;
+            let client = if signed {
+                host.attach_test_remote_with_binding(Some([27; 32]))
+            } else {
+                host.attach_test_remote()
+            };
+            if signed {
+                tests::send_signed_join(&client, c3d_tests::KEY, Some([27; 32]));
+            } else {
+                client.send_to_server(&protocol::serialize_packet(
+                    protocol::PacketType::JoinRequest,
+                    &crate::remote_client::build_join_request_guest("Guest", 0),
+                ));
+            }
+            host.tick();
+            let mut accepted = None;
+            let mut sync = None;
+            let mut personal = None;
+            while let Some(packet) = client.try_recv_from_server() {
+                let Some((kind, body)) = protocol::deserialize_header(&packet) else {
+                    continue;
+                };
+                match kind {
+                    protocol::PacketType::JoinAccept => {
+                        accepted = Some(
+                            protocol::safe_deserialize::<protocol::JoinAcceptPacket>(body).unwrap(),
+                        )
+                    }
+                    protocol::PacketType::JoinReject => panic!(
+                        "honest fresh attachment refused: {}",
+                        protocol::safe_deserialize::<protocol::JoinRejectPacket>(body)
+                            .unwrap()
+                            .reason
+                    ),
+                    protocol::PacketType::InventorySync => {
+                        assert!(
+                            personal.is_none(),
+                            "personal fence preceded the actual physical Sync1"
+                        );
+                        sync = Some(
+                            protocol::safe_deserialize::<protocol::InventorySyncPacket>(body)
+                                .unwrap(),
+                        );
+                    }
+                    protocol::PacketType::PersonalSync => {
+                        if let protocol::PersonalSyncPacket::Snapshot(snapshot) =
+                            protocol::safe_deserialize(body).unwrap()
+                        {
+                            assert!(sync.is_some());
+                            personal = Some(snapshot);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let accepted = accepted.expect("real fresh JoinAccept");
+            assert!(accepted.has_personal_state);
+            let sync = sync.expect("empty fresh bag still receives actual Sync1");
+            assert_eq!(sync.window_event, 1);
+            assert_eq!(sync.slots.len(), 50);
+            let snapshot = personal.expect("progression has its genuine subsequent fence");
+            assert_eq!(snapshot.window_event, 2);
+            let mut slot = crate::player_slot::PlayerSlot::new(0, glam::Vec3::ZERO, 1.0);
+            slot.inventory.set_slot(
+                0,
+                Some(crate::item::ItemStack::new_block(crate::block::GLASS, 7)),
+            );
+            let mut inbox = crate::personal_sync::Inbox::new(accepted.action_session, 0);
+            inbox.push(snapshot).unwrap();
+            assert!(inbox.apply(0, &mut slot).unwrap().is_empty());
+            crate::inventory_sync::apply(
+                &mut crate::window::WindowMut {
+                    inv: &mut slot.inventory,
+                    armour: &mut slot.armour_slots,
+                    cursor: &mut slot.crafting_ui.cursor_item,
+                    grid: &mut slot.crafting_ui.grid,
+                    container: None,
+                },
+                &sync,
+                &crate::block::BlockRegistry::new(),
+                &mut Default::default(),
+                &mut Default::default(),
+                mode,
+            )
+            .unwrap();
+            assert!(
+                slot.inventory.slot(0).is_none(),
+                "Sync1 was not physically applied"
+            );
+            assert!(
+                inbox.apply(1, &mut slot).unwrap().is_empty(),
+                "Sync1 alone settled the later personal fence"
+            );
+            let ack = inbox.apply(2, &mut slot).unwrap().remove(0);
+            let index = accepted.player_index as usize;
+            assert!(!host.server.players[index].personal_delivery.initialised);
+            client.send_to_server(&protocol::serialize_packet(
+                protocol::PacketType::PersonalSync,
+                &protocol::PersonalSyncPacket::Applied(ack),
+            ));
+            host.tick();
+            assert!(host.server.players[index].personal_delivery.initialised);
+            let context = host.server.players[index]
+                .personal
+                .as_ref()
+                .unwrap()
+                .binding
+                .context();
+            if signed {
+                assert!(
+                    matches!(context, crate::progression::GameplayContext::WorldLocal { scope, player: crate::progression::WorldPlayer::Npub(key) } if Some(scope) == host.server.world.quest_scope && key == c3d_tests::KEY)
+                );
+            } else {
+                assert!(
+                    matches!(context, crate::progression::GameplayContext::Guest { session, generation } if session == accepted.action_session && generation == host.server.players[index].attach_gen)
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn d2c3_failed_scope_durability_does_not_publish_signed_authority_or_reset_world() {
+    let _root = crate::save::WorldsRootGuard::new("d2c3-scope-refusal");
+    let mut host = tests::start_room_test_server("d2c3-scope-refusal", 0);
+    let directory = crate::save::world_dir(&host.server.world_name);
+    std::fs::create_dir_all(&directory).unwrap();
+    let mut newer = Vec::new();
+    newer.extend_from_slice(&(crate::save_format::SAVE_FORMAT_VERSION + 1).to_le_bytes());
+    newer.extend_from_slice(&crate::save_format::SAVE_FOOTER_MAGIC);
+    std::fs::write(directory.join("world.dat"), &newer).unwrap();
+    assert!(host.server.world.quest_scope.is_none());
+    assert!(host.server.prepare_signed_scope().is_err());
+    assert!(
+        host.server.world.quest_scope.is_none(),
+        "failed durability published a live random authority scope"
+    );
+    assert_eq!(
+        std::fs::read(directory.join("world.dat")).unwrap(),
+        newer,
+        "failed admission rewrote the refused snapshot"
+    );
+    assert!(
+        host.server
+            .players
+            .iter()
+            .all(|player| player.personal.is_none())
+    );
+}
+
+#[test]
+fn d2c3_world_local_selected_snapshot_survives_routine_save_failed_cut_and_reopen() {
+    let _root = crate::save::WorldsRootGuard::new("d2c3-selected-local-role");
+    let mut host = tests::start_room_test_server("d2c3-selected-local-role", 0);
+    let directory = crate::save::world_dir(&host.server.world_name);
+    let scope = [19; 16];
+    let mut local = crate::player_slot::PlayerSlot::new(0, glam::Vec3::new(2.0, 80.0, -3.0), 1.0);
+    local.personal_binding = Some(crate::progression::GameplayBinding::WorldLocal {
+        scope,
+        player: crate::progression::WorldPlayer::Npub(c3d_tests::KEY),
+    });
+    local.inventory.set_slot(
+        7,
+        Some(crate::item::ItemStack::new_material(
+            crate::item::MaterialId::Bread,
+            5,
+        )),
+    );
+    local.reputation.per_village.insert((2, -4), 17);
+    local.kill_counter.insert(crate::mob::MobType::Pig, 37);
+    local.quest_progress.declines = vec![([13; 16], 4999)];
+    local.gameplay_revision = 23;
+    let selected = crate::joiner_save::capture_local(&local).unwrap().unwrap();
+    let expected = crate::joiner_save::JoinerSave::decode(&selected.0).unwrap();
+    host.server.world.quest_scope = Some(scope);
+    host.server.selected_local_personal = Some(selected.clone());
+    host.server.try_save().unwrap();
+    let before = std::fs::read(directory.join("world.dat")).unwrap();
+    let saved = crate::save::read_world_save(&before).unwrap();
+    assert_eq!(saved.local_personal.unwrap().0, selected.0);
+    assert!(
+        crate::gameplay_attachment::selected_world_local(
+            &selected,
+            Some([20; 16]),
+            Some(c3d_tests::KEY),
+            Some(0)
+        )
+        .is_err()
+    );
+    assert!(
+        crate::gameplay_attachment::selected_world_local(
+            &selected,
+            Some(scope),
+            Some([8; 32]),
+            Some(0)
+        )
+        .is_err()
+    );
+    crate::save_fence::raise(&directory);
+    let refused = host.server.claim_remote_world_local(c3d_tests::KEY, 0);
+    crate::save_fence::lift(&directory);
+    assert!(
+        refused.is_err(),
+        "a failed canonical write exposed a remote role cut"
+    );
+    assert_eq!(
+        host.server.selected_local_personal.as_ref().unwrap().0,
+        selected.0
+    );
+    assert_eq!(std::fs::read(directory.join("world.dat")).unwrap(), before);
+    host.server
+        .claim_remote_world_local(c3d_tests::KEY, 0)
+        .unwrap();
+    assert!(host.server.selected_local_personal.is_none());
+    let cut =
+        crate::save::read_world_save(&std::fs::read(directory.join("world.dat")).unwrap()).unwrap();
+    assert!(cut.local_personal.is_none());
+    assert_eq!(cut.quest_world.unwrap().scope, scope);
+    drop(host);
+    let mut reopened = tests::start_room_test_server("d2c3-selected-local-role", 0);
+    let client = reopened.attach_test_remote_with_binding(Some([38; 32]));
+    tests::send_signed_join(&client, c3d_tests::KEY, Some([38; 32]));
+    reopened.tick();
+    let heard = c3d_tests::hear(&client);
+    assert!(heard.rejects.is_empty());
+    let index = heard
+        .accepts
+        .first()
+        .expect("same verified player reopens canonical state")
+        .player_index as usize;
+    let canonical = crate::joiner_save::JoinerSave::capture(
+        &reopened.server.players[index],
+        reopened.server.run_id,
+    );
+    assert_eq!(
+        canonical.personal.unwrap().record().unwrap(),
+        expected.personal.unwrap().record().unwrap()
+    );
+    assert_eq!(
+        crate::window_events::effective_window(&reopened.server.players[index])
+            .inv
+            .slot(7)
+            .unwrap()
+            .count,
+        5
+    );
 }

@@ -10,7 +10,7 @@ pub struct PersonalContext {
     pub transfer: [u8; 16],
 }
 
-/// The selected world's local personal snapshot uses the exact canonical v3
+/// The selected world's local personal snapshot uses a known canonical v3/v4
 /// codec, bounded before allocation. It commits with that world's world.dat.
 #[derive(Clone, Serialize)]
 pub struct LocalPersonalSave(pub(crate) Vec<u8>);
@@ -37,9 +37,9 @@ impl<'de> Deserialize<'de> for LocalPersonalSave {
                     }
                     bytes.push(byte);
                 }
-                if bytes.first() != Some(&3) {
+                if !matches!(bytes.first(), Some(3 | 4)) {
                     return Err(serde::de::Error::custom(
-                        "personal snapshot is not canonical v3",
+                        "personal snapshot has an unsupported canonical version",
                     ));
                 }
                 Ok(LocalPersonalSave(bytes))

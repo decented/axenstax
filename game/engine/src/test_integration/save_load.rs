@@ -56,7 +56,7 @@ fn save_world_persists_two_players() {
     let p1 = make_slot(0, Vec3::new(10.0, 80.0, 20.0), 1.5, -0.2, 18.0);
     let p2 = make_slot(1, Vec3::new(-30.0, 65.0, 5.0), -0.5, 0.1, 12.0);
 
-    save::save_world(name, &world, &[p1, p2], 42, &[], &[]).expect("save_world");
+    save::save_world(name, &world, &[p1, p2], 42, &[], &[], None).expect("save_world");
 
     let mut loaded_world = World::new();
     let (save, _chunk_count) = save::load_world(name, &mut loaded_world).expect("load_world");
@@ -126,7 +126,7 @@ fn armour_slots_round_trip_through_save_with_full_iron_set() {
     p1.armour_slots[ArmourSlot::Boots as usize] =
         Some(ArmourItem::new(ArmourSlot::Boots, ArmourMaterial::Iron));
 
-    save::save_world(name, &world, &[p1], 7, &[], &[]).expect("save_world");
+    save::save_world(name, &world, &[p1], 7, &[], &[], None).expect("save_world");
 
     let mut loaded_world = World::new();
     let (save, _chunks) = save::load_world(name, &mut loaded_world).expect("load_world");
@@ -213,6 +213,7 @@ fn legacy_single_player_save_synthesises_one_player_entry() {
         dispensers: Vec::new(),
         rig_clips: Vec::new(),
         local_personal: None,
+        quest_world: None,
     };
 
     // Round-trip via bincode to mimic the on-disk path. Defensive: a
@@ -269,7 +270,7 @@ fn grave_block_entity_round_trips_through_save() {
     world.insert_grave((3, 64, 3), crate::grave::GraveData::from_snapshot(snapshot, 555));
 
     let p1 = make_slot(0, Vec3::new(0.0, 80.0, 0.0), 0.0, 0.0, 20.0);
-    save::save_world(name, &world, &[p1], 99, &[], &[]).expect("save_world");
+    save::save_world(name, &world, &[p1], 99, &[], &[], None).expect("save_world");
 
     let mut loaded = World::new();
     let (loaded_save, _) = save::load_world(name, &mut loaded).expect("load_world");
@@ -327,7 +328,7 @@ fn exhibits_authored_in_world_survive_save_reload() {
     });
 
     let p1 = make_slot(0, Vec3::new(0.0, 80.0, 0.0), 0.0, 0.0, 20.0);
-    save::save_world(name, &world, &[p1], 7, &[], &[]).expect("save_world");
+    save::save_world(name, &world, &[p1], 7, &[], &[], None).expect("save_world");
 
     let mut loaded = World::new();
     let (loaded_save, _) = save::load_world(name, &mut loaded).expect("load_world");
@@ -375,7 +376,7 @@ fn primed_keg_and_loaded_composter_survive_save_reload() {
     world.insert_composter((5, 64, 5), comp);
 
     let p1 = make_slot(0, Vec3::new(0.0, 80.0, 0.0), 0.0, 0.0, 20.0);
-    save::save_world(name, &world, &[p1], 7, &[], &[]).expect("save_world");
+    save::save_world(name, &world, &[p1], 7, &[], &[], None).expect("save_world");
 
     let mut loaded = World::new();
     let (loaded_save, _) = save::load_world(name, &mut loaded).expect("load_world");
@@ -425,7 +426,7 @@ fn campfire_block_entity_round_trips_through_save() {
     world.insert_campfire((5, 70, 5), cf);
 
     let p1 = make_slot(0, Vec3::new(0.0, 80.0, 0.0), 0.0, 0.0, 20.0);
-    save::save_world(name, &world, &[p1], 99, &[], &[]).expect("save_world");
+    save::save_world(name, &world, &[p1], 99, &[], &[], None).expect("save_world");
 
     let mut loaded = World::new();
     let (loaded_save, _) = save::load_world(name, &mut loaded).expect("load_world");
@@ -466,7 +467,7 @@ fn drying_rack_round_trips_through_save() {
     world.drying_racks.insert((3, 70, 4), rack);
 
     let p1 = make_slot(0, Vec3::new(0.0, 80.0, 0.0), 0.0, 0.0, 20.0);
-    save::save_world(name, &world, &[p1], 21, &[], &[]).expect("save_world");
+    save::save_world(name, &world, &[p1], 21, &[], &[], None).expect("save_world");
 
     let mut loaded = World::new();
     let (loaded_save, _) = save::load_world(name, &mut loaded).expect("load_world");
@@ -563,7 +564,7 @@ fn legacy_save_without_campfires_loads_empty_block_entities() {
 
     let world = World::new();
     let p1 = make_slot(0, Vec3::new(0.0, 80.0, 0.0), 0.0, 0.0, 20.0);
-    save::save_world(name, &world, &[p1], 1, &[], &[]).expect("save");
+    save::save_world(name, &world, &[p1], 1, &[], &[], None).expect("save");
 
     let mut loaded = World::new();
     let (loaded_save, _) = save::load_world(name, &mut loaded).expect("load");
@@ -615,7 +616,7 @@ fn four_player_save_round_trip() {
     let p3 = make_slot(2, Vec3::new(106.0, 80.0, 50.0), -0.3, -0.2, 12.0);
     let p4 = make_slot(3, Vec3::new(109.0, 80.0, 50.0), 1.2, 0.05, 8.0);
 
-    save::save_world(name, &world, &[p1, p2, p3, p4], 1234, &[], &[]).expect("save_world");
+    save::save_world(name, &world, &[p1, p2, p3, p4], 1234, &[], &[], None).expect("save_world");
 
     let mut loaded_world = World::new();
     let (save, _chunks) = save::load_world(name, &mut loaded_world).expect("load_world");
@@ -674,7 +675,7 @@ fn game_server_initial_load_restores_two_players() {
     let world = World::new();
     let p1 = make_slot(0, Vec3::new(100.0, 81.0, 200.0), 0.0, 0.0, 20.0);
     let p2 = make_slot(1, Vec3::new(-50.0, 68.0, 11.0), 0.0, 0.0, 9.0);
-    save::save_world(name, &world, &[p1, p2], 42, &[], &[]).expect("save_world");
+    save::save_world(name, &world, &[p1, p2], 42, &[], &[], None).expect("save_world");
 
     let mut server = GameServer::new(2, name.to_string(), 42);
     server.initial_load().expect("initial load");
@@ -718,7 +719,7 @@ fn chest_save_load_preserves_27_slots() {
     world.insert_chest((2, 70, 3), chest);
 
     let p1 = make_slot(0, Vec3::new(0.0, 80.0, 0.0), 0.0, 0.0, 20.0);
-    save::save_world(name, &world, &[p1], 13, &[], &[]).expect("save_world");
+    save::save_world(name, &world, &[p1], 13, &[], &[], None).expect("save_world");
 
     let mut loaded = World::new();
     let (loaded_save, _) = save::load_world(name, &mut loaded).expect("load_world");
@@ -777,7 +778,7 @@ fn flower_micro_model_survives_save_load() {
     let mut world = World::new();
     world.set_block(2, 64, 2, crate::block::CORNFLOWER);
     let p = make_slot(0, Vec3::new(0.0, 80.0, 0.0), 0.0, 0.0, 20.0);
-    save::save_world(name, &world, &[p], 42, &[], &[]).expect("save_world");
+    save::save_world(name, &world, &[p], 42, &[], &[], None).expect("save_world");
 
     let mut loaded = World::new();
     save::load_world(name, &mut loaded).expect("load_world");
@@ -804,13 +805,13 @@ fn flower_micro_model_survives_save_load() {
 /// before all three face tables. Encode the actual appended fields rather
 /// than guessing their size; nested fixed tuples add no bincode length prefix.
 fn pre_overlay_world_save_bytes(full: &WorldSave) -> Vec<u8> {
-    assert_eq!(crate::save_format::WORLD_SAVE_FIELD_COUNT, 53, "re-find the appended suffix if another world field is added");
+    assert_eq!(crate::save_format::WORLD_SAVE_FIELD_COUNT, 54, "re-find the appended suffix if another world field is added");
     assert!(full.face_overlays.is_empty() && full.face_blueprints.is_empty() && full.face_blueprint_blanks.is_empty());
-    assert!(full.local_personal.is_none());
+    assert!(full.local_personal.is_none() && full.quest_world.is_none());
     let suffix = bincode::serialize(&(
         (&full.face_overlays, &full.face_blueprints, &full.face_blueprint_blanks, &full.workshop, &full.carts, &full.graves, &full.waypoints, &full.block_meta),
         (&full.power_devices, &full.signs, &full.item_frames, &full.locked_slots, &full.hostile_acts, &full.rigs, &full.exhibits, &full.composters),
-        (&full.saved_mobs, &full.satoshi, &full.dispensers, &full.rig_clips, &full.local_personal),
+        (&full.saved_mobs, &full.satoshi, &full.dispensers, &full.rig_clips, &full.local_personal, &full.quest_world),
     )).expect("encode the actual appended suffix");
     let mut bytes = bincode::serialize(full).expect("serialize WorldSave");
     assert!(bytes.ends_with(&suffix), "the retained old fields must precede the exact appended suffix");
@@ -821,7 +822,7 @@ fn pre_overlay_world_save_bytes(full: &WorldSave) -> Vec<u8> {
     assert_eq!(decoded.bounty_last_refresh_tick, full.bounty_last_refresh_tick);
     assert_eq!(decoded.chests.len(), full.chests.len());
     assert!(decoded.face_overlays.is_empty() && decoded.face_blueprints.is_empty() && decoded.face_blueprint_blanks.is_empty());
-    assert!(decoded.local_personal.is_none());
+    assert!(decoded.local_personal.is_none() && decoded.quest_world.is_none());
     bytes
 }
 
@@ -1117,7 +1118,7 @@ fn autosave_rehydrates_overlay_chest_and_plot_into_world() {
     );
 
     let p = make_slot(0, Vec3::new(0.0, 80.0, 0.0), 0.0, 0.0, 20.0);
-    save::autosave_world(name, &world, &[p], 42, &[], &[]).expect("autosave_world");
+    save::autosave_world(name, &world, &[p], 42, &[], &[], None).expect("autosave_world");
 
     // Crash-recovery load. After the fix, the world is rehydrated — not just chunks.
     let mut loaded = World::new();
@@ -1160,7 +1161,7 @@ fn raid_kills_leaderboard_survives_save_load() {
     world.raid_kills.insert(((-5, 9), 0usize), 11u32);
 
     let p = make_slot(0, Vec3::new(0.0, 80.0, 0.0), 0.0, 0.0, 20.0);
-    save::save_world(name, &world, &[p], 42, &[], &[]).expect("save_world");
+    save::save_world(name, &world, &[p], 42, &[], &[], None).expect("save_world");
 
     let mut loaded = World::new();
     save::load_world(name, &mut loaded).expect("load_world");
@@ -1244,7 +1245,7 @@ fn cart_mid_line_survives_save_load_round_trip() {
 
     let world = World::new();
     let p = make_slot(0, Vec3::new(0.0, 80.0, 0.0), 0.0, 0.0, 20.0);
-    save::save_world(name, &world, &[p], 42, &carts, &[]).expect("save_world");
+    save::save_world(name, &world, &[p], 42, &carts, &[], None).expect("save_world");
 
     let mut loaded_world = World::new();
     let (loaded, _chunks) = save::load_world(name, &mut loaded_world).expect("load_world");
@@ -1390,7 +1391,7 @@ fn evicted_edited_column_is_saved_and_round_trips() {
     assert!(!world.has_chunk(20, 3, 0));
 
     let p1 = make_slot(0, Vec3::new(8.0, 80.0, 8.0), 0.0, 0.0, 20.0);
-    save::save_world(name, &world, &[p1], 11, &[], &[]).expect("save_world");
+    save::save_world(name, &world, &[p1], 11, &[], &[], None).expect("save_world");
 
     let mut loaded = World::new();
     save::load_world(name, &mut loaded).expect("load_world");

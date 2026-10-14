@@ -160,18 +160,17 @@ impl SourceSession {
             transfer: self.transfer,
         };
         let recipient_progress = if let Some(personal) = &recipient_record.personal {
-            let mut record = personal.record().map_err(|_| Refusal("The other player's progress couldn't be recorded."))?;
-            record.context = context(seat.key);
-            record.encode().map_err(|_| Refusal("The other player's progress couldn't be recorded."))?
+            let record = personal.record().map_err(|_| Refusal("The other player's progress couldn't be recorded."))?;
+            crate::handover::personal::PersonalRecord::from_gameplay(context(seat.key), &record).and_then(|record| record.encode()).map_err(|_| Refusal("The other player's progress couldn't be recorded."))?
         } else { crate::handover::live::capture::default_progress(context(seat.key)) };
         super::super::personal_adapter::preflight(c.source_sidecar, c.source_progress, context(self.action.source_key))?;
         super::super::personal_adapter::preflight(&recipient_sidecar, &recipient_progress, context(seat.key))?;
         let (src_npub, dst_npub) = (npub(self.action.source_key), npub(seat.key));
         let rows = [
             ParticipantMember { npub: &src_npub, kind: MemberKind::Sidecar, schema: 1, bytes: c.source_sidecar },
-            ParticipantMember { npub: &src_npub, kind: MemberKind::Progression, schema: 1, bytes: c.source_progress },
+            ParticipantMember { npub: &src_npub, kind: MemberKind::Progression, schema: crate::handover::personal::PersonalRecord::declared_schema(c.source_progress)?, bytes: c.source_progress },
             ParticipantMember { npub: &dst_npub, kind: MemberKind::Sidecar, schema: 1, bytes: &recipient_sidecar },
-            ParticipantMember { npub: &dst_npub, kind: MemberKind::Progression, schema: 1, bytes: &recipient_progress },
+            ParticipantMember { npub: &dst_npub, kind: MemberKind::Progression, schema: crate::handover::personal::SCHEMA, bytes: &recipient_progress },
         ];
         // Source consent: its runtime-signed agreement (the runtime the
         // certificate names), sent with the offer; the recipient's is its

@@ -168,7 +168,7 @@ fn handover_personal_bootstrap_selects_one_identity_and_never_replays_current_v3
     let mut saved = load_or_bootstrap(&f.world, f.key, &selected)
         .unwrap()
         .unwrap();
-    assert_eq!(saved.encode().unwrap()[0], 3);
+    assert_eq!(saved.encode().unwrap()[0], 4);
     let mut slot = crate::player_slot::PlayerSlot::new(0, glam::Vec3::ZERO, 1.0);
     install(&saved, &mut slot).unwrap();
     assert_eq!(slot.inventory.slot(4).unwrap().count, 9);

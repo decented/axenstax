@@ -271,7 +271,7 @@ mod tests {
 
     fn live_copy() -> WorldSave {
         let slot = crate::player_slot::PlayerSlot::new(0, glam::Vec3::new(4.0, 70.0, 4.0), 1.0);
-        crate::save::build_world_save(&crate::world::World::new(), &[slot], 42, &[], &[]).unwrap()
+        crate::save::build_world_save(&crate::world::World::new(), &[slot], 42, &[], &[], None).unwrap()
     }
     fn vendor(owner: VendorOwner) -> SavedVendor {
         SavedVendor { x: 1, y: 2, z: 3, data: VendorData { owner: Some(owner), ..Default::default() } }
@@ -338,7 +338,7 @@ mod tests {
 
     #[test]
     fn handover_save_builder_refuses_no_seats_without_panicking() {
-        assert!(crate::save::build_world_save(&crate::world::World::new(), &[], 42, &[], &[]).is_none());
+        assert!(crate::save::build_world_save(&crate::world::World::new(), &[], 42, &[], &[], None).is_none());
     }
 
     #[test]

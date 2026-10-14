@@ -6855,3 +6855,50 @@ GameState missing/torn refusal and malformed/healthy native parsing controls
 passed. Restoring the unsafe metadata fallback failed at the actual refusal
 assertion; exact source restoration returned green with the same executable
 bytes. These controls also passed the final combined regression recorded above.
+
+
+### D2c-3 common progression foundation (implementation checkpoint, not quest acceptance)
+
+The quest worktree extends the existing canonical holder to explicit Imported,
+WorldLocal and Guest bindings. Imported retains its authenticated transfer
+context, manifest and core. WorldLocal binds a random durable 128-bit world
+scope to a verified npub, or to a trusted local legacy seat; a folder name or
+terrain seed is never the scope. Guest binds only the current random action
+session and actual attachment generation, and canonical file reads/writes
+refuse guest state. All three use the same bounded progression codec and the
+existing window/debt carrier; no second player progression file is introduced.
+
+The mutable writer is version4. Separate exact known1/2/3 readers preserve their
+window, vitals, debt, obligation provenance and full known progression. The
+historically delivered local wrapper is version3 only; its exact bytes remain
+inside the selected old53-field/footer55 body until that body and its authority
+are validated. Known Sidecar member schema1 still carries the unchanged version2
+seed. Progression members explicitly admit authenticated schema1 or schema2,
+with declared payload schema matching the manifest before conversion. Schema2
+adds bounded quest identity, frozen exact non-Plan rewards, baselines and
+remaining gameplay timers to the same maps. It does not invent earlier kill
+history for an old window-only record.
+
+Every attachment advertising personal authority receives an actual complete
+InventorySync1, including an empty fresh signed or guest bag, before its numbered
+personal fence. The actual physical initial-apply proof, held-prefix byte/count
+limits, paced authorisation order, exact initial acknowledgement and latest
+quiescence remain unchanged. A personal acknowledgement alone never releases a
+Pack/Quest flight. The foundation does not enable the villager-click request yet.
+
+Lending-host scope preparation saves the actual GameState world and local seats
+before external gameplay admission. A failed preparation rolls back the new live
+binding/scope and leaves local play available. Dedicated routine saves preserve
+an unclaimed selected local personal snapshot. A matching verified player can
+change it to remote authority only after the canonical record is written; the
+explicit role cut then clears the local selection and parks the superseded
+autosave. Native reopen validates the selected snapshot's scope and player rather
+than substituting a fresher remote mirror. Generic copies which omit canonical
+bound records refuse their omission. Existing imported proof/corruption guards
+remain strict.
+
+The extension allocates protocol92 and appended QuestResult76/QuestView77; the
+complete Quest intent/request/UI and backed completion path remain under active
+implementation. The prior accepted v91 pack/C3d bytes stay pinned. Mirror remains
+default and global Strict recovery remains parked. Neither active-quest handover
+eligibility refusal is lifted at this foundation checkpoint.

@@ -4593,7 +4593,7 @@ impl HostedServer {
                         if let Some(key) = self.server.players[i].verified_pubkey {
                             let directory = crate::save::world_dir(&self.server.world_name);
                             let prepared = crate::handover::live::personal_adapter::proof(&directory).and_then(|proof| {
-                                let Some(proof) = proof else { return Ok(()); };
+                                let Some(proof) = proof else { return self.server.claim_remote_world_local(key, self.num_local_players); };
                                 if self.num_local_players > 0 && key == proof.local_owner() {
                                     return Err("This player is already playing locally here.".to_string());
                                 }
@@ -4602,6 +4602,10 @@ impl HostedServer {
                             });
                             if let Err(error) = prepared { let _ = self.release_slot(i, Some(&error)); break; }
                         }
+                        #[cfg(not(target_arch = "wasm32"))]
+                        if self.server.players[i].verified_pubkey.is_some()
+                            && let Err(error) = self.server.prepare_signed_scope()
+                        { let _ = self.release_slot(i, Some(&error)); break; }
                         let saved_joiner = self.server.load_joiner(i);
                         if self.server.players[i].personal_read_failed {
                             let _ = self.release_slot(i, Some("This world's saved player state couldn't be restored. It is preserved without reset."));
@@ -4675,6 +4679,10 @@ impl HostedServer {
                         self.server.players[i].action_frontier = Some(crate::action_identity::ActionFrontier::new(action_session, action_life));
                         self.server.players[i].action_queue = Some(Default::default());
                         self.server.players[i].action_results = Some(crate::action_results::ActionResults::new(self.server.players[i].action_frontier.as_ref().expect("issued frontier").header(0, 0)));
+                        #[cfg(not(target_arch = "wasm32"))]
+                        if let Err(error) = self.server.attach_gameplay(i, action_session, self.server.players[i].attach_gen, saved_joiner.is_some()) {
+                            let _ = self.release_slot(i, Some(&error)); break;
+                        }
                         let has_personal_state = self.server.players[i].personal.is_some();
                         #[cfg(not(target_arch = "wasm32"))]
                         if let Some(personal) = &self.server.players[i].personal && crate::personal_sync::snapshot(personal, action_session, action_life, 1, 1).is_err() {
@@ -4750,7 +4758,7 @@ impl HostedServer {
                                     crate::plan::PlanData::marker_placeholder(crate::plan::marker(&body), matches!(body.develop_state, crate::plan::DevelopState::Developed))), count: stack.count }));
                             }
                         }
-                        if saved_joiner.is_some() || (0..36).any(|at| kit.inv.slot(at).is_some()) {
+                        if has_personal_state || saved_joiner.is_some() || (0..36).any(|at| kit.inv.slot(at).is_some()) {
                             let event = self.send_inventory_sync(i, kit, debt);
                             #[cfg(not(target_arch = "wasm32"))]
                             if has_personal_state && let Err(error) = self.start_personal(i, event, true) {

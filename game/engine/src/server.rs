@@ -1260,7 +1260,9 @@ impl GameServer {
         if let Some(proof) = &personal_proof { proof.confirm_authority_durable(&crate::save::world_dir(&wname))?; }
         let autosave_policy = crate::world_open::AutosavePolicy::Ignore;
         #[cfg(not(target_arch = "wasm32"))]
-        let autosave_policy = if personal_proof.is_some() { crate::world_open::AutosavePolicy::Prefer } else { autosave_policy };
+        let autosave_policy = if personal_proof.is_some() || crate::gameplay_attachment::selected_world_local_present(&crate::save::world_dir(&wname))? {
+            crate::world_open::AutosavePolicy::Prefer
+        } else { autosave_policy };
         let opened = crate::world_open::open_world(
             &wname,
             &mut self.world,
@@ -1271,7 +1273,10 @@ impl GameServer {
             log::info!("Loaded saved world '{wname}'.");
             self.selected_local_personal = save_data.local_personal.clone();
             #[cfg(not(target_arch = "wasm32"))]
-            if personal_proof.is_none() && (self.selected_local_personal.is_some() || crate::handover::live::personal_adapter::has_bound_records(&crate::save::world_dir(&wname))?) {
+            if personal_proof.is_none() && (self.selected_local_personal.as_ref().is_some_and(|snapshot|
+                crate::joiner_save::JoinerSave::decode(&snapshot.0).map_or(true, |saved| saved.personal.as_ref().is_none_or(|bound|
+                    !matches!(bound.binding, crate::progression::GameplayBinding::WorldLocal { scope, .. } if Some(scope) == self.world.quest_scope))))
+                || crate::handover::live::personal_adapter::has_bound_records(&crate::save::world_dir(&wname))?) {
                 return Err("This world's personal authority is missing. Nothing was reset.".into());
             }
             self.restore_saved_players(&save_data);
@@ -1299,6 +1304,7 @@ impl GameServer {
             // Restore once for ordinary and imported worlds, before a role
             // cut can persist the selected world without its saved creatures.
             crate::steed_save::restore_pets(&mut self.ecs, &save_data.saved_mobs, false)?;
+            if let Some(saved) = &save_data.quest_world { crate::quest_npcs::restore(&mut self.ecs, saved)?; }
 
             // Spec 30 — light data isn't persisted; recompute
             // from block state for every loaded column.
@@ -2752,6 +2758,13 @@ impl GameServer {
     /// doesn't fail the save.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn try_save(&self) -> Result<(), String> {
+        self.try_save_selected(self.selected_local_personal.as_ref())
+    }
+
+    /// A role cut explicitly selects remote authority; routine saves retain
+    /// the unclaimed selected local record instead of saving a player shadow.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn try_save_selected(&self, local_personal: Option<&crate::personal_value::LocalPersonalSave>) -> Result<(), String> {
         let wname = self.world_name.clone();
         let dir = crate::save::world_dir(&wname);
         // A world saved by a newer build is never written (Spec 02 §8.4) — checked
@@ -3026,7 +3039,8 @@ impl GameServer {
             rigs: self.world.rigs.clone(),
             // #19 — index-aligned clip side table (see `WorldSave.rig_clips`).
             rig_clips: self.world.rigs.iter().map(|r| r.clip).collect(),
-            local_personal: None,
+            local_personal: local_personal.cloned(),
+            quest_world: crate::quest_npcs::capture(self.world.quest_scope, &self.ecs)?,
             exhibits: self.world.exhibits.clone(),
             composters: self
                 .world

@@ -270,8 +270,8 @@ impl SourceSession {
         let save = crate::joiner_save::JoinerSave::capture(&hs.server.players[action.seat.slot], hs.server.run_id);
         let seed = save.encode_seed().map_err(|_| Refusal("The other player's inventory couldn't be recorded."))?;
         let progress = if let Some(personal) = &save.personal {
-            let mut record = personal.record().map_err(|_| Refusal("The other player's progress couldn't be recorded."))?;
-            record.context = context; record.encode().map_err(|_| Refusal("The other player's progress couldn't be recorded."))?
+            let record = personal.record().map_err(|_| Refusal("The other player's progress couldn't be recorded."))?;
+            crate::handover::personal::PersonalRecord::from_gameplay(context, &record).and_then(|record| record.encode()).map_err(|_| Refusal("The other player's progress couldn't be recorded."))?
         } else { super::capture::default_progress(context) };
         super::personal_adapter::preflight(&seed, &progress, context)?;
         let transfer = random_id();

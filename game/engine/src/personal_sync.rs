@@ -1,7 +1,7 @@
 //! Bounded, server-selected personal snapshots. Exact applied tuples fence
 //! initial window installation and handover capture; repeats never reinstall.
 use crate::{
-    handover::personal::PersonalRecord,
+    progression::GameplayRecord,
     protocol::{PersonalAck, PersonalSnapshot},
 };
 
@@ -21,7 +21,7 @@ pub(crate) fn snapshot(
         life,
         revision,
         window_event,
-        context: personal.binding.context,
+        context: personal.binding.context(),
         bytes: personal.bytes.clone(),
     };
     let wire = crate::protocol::serialize_packet(
@@ -106,7 +106,7 @@ pub(crate) struct Inbox {
     observed_life: u32,
     pending: std::collections::VecDeque<PersonalSnapshot>,
     last: Option<PersonalAck>,
-    context: Option<crate::personal_value::PersonalContext>,
+    context: Option<crate::progression::GameplayContext>,
     started: web_time::Instant,
 }
 impl Inbox {
@@ -156,7 +156,8 @@ impl Inbox {
         if value.life < self.life {
             return Ok(None);
         }
-        PersonalRecord::decode(&value.bytes, &value.context).map_err(|e| e.to_string())?;
+        GameplayRecord::decode(&value.bytes, value.context)?;
+        if matches!(value.context, crate::progression::GameplayContext::Guest { session, .. } if session != self.session) { return Err("foreign guest progression attachment".into()); }
         if self.context.is_some_and(|c| c != value.context) {
             return Err("personal snapshot identity changed".into());
         }
@@ -207,7 +208,7 @@ impl Inbox {
             }
             let value = self.pending.pop_front().unwrap();
             let record =
-                PersonalRecord::decode(&value.bytes, &value.context).map_err(|e| e.to_string())?;
+                GameplayRecord::decode(&value.bytes, value.context)?;
             record.install_progression(slot);
             let ack = acknowledgement(&value);
             self.last = Some(ack);
@@ -257,7 +258,7 @@ impl crate::server::GameServer {
         let Some(personal) = &mut sp.personal else {
             return;
         };
-        let Ok(record) = personal.record() else {
+        let Ok(mut record) = personal.record() else {
             sp.personal_read_failed = true;
             return;
         };
@@ -282,16 +283,14 @@ impl crate::server::GameServer {
             reputation.adjust(village, crate::reputation::VILLAGER_KILL_PENALTY);
             sp.personal_delivery.last_penalty = Some(self.tick_counter);
         }
-        let claims: ahash::AHashMap<_, _> = record.claims.iter().copied().collect();
-        match PersonalRecord::from_maps(
-            record.context,
-            reputation.per_village.iter(),
-            kills.iter(),
-            claims.iter(),
-            record.local,
-        )
-        .and_then(|r| r.encode())
-        {
+        record.kills = kills.into_iter().collect();
+        record.kills.sort_by_key(|(kind, _)| u32::from_le_bytes(bincode::serialize(kind).expect("scalar mob kind").try_into().expect("mob kind width")));
+        record.reputation = reputation.per_village.into_iter().collect();
+        record.reputation.sort_by_key(|(key, _)| *key);
+        if penalty { record.quests.penalty_left = crate::reputation::VILLAGER_KILL_REP_COOLDOWN_TICKS as u32; }
+        let Some(revision) = record.revision.checked_add(1) else { sp.personal_read_failed = true; return; };
+        record.revision = revision;
+        match record.encode() {
             Ok(bytes) => personal.bytes = bytes,
             Err(_) => sp.personal_read_failed = true,
         }
@@ -325,6 +324,7 @@ impl crate::server::GameServer {
 
 #[cfg(test)]
 mod tests {
+    use crate::handover::personal::PersonalRecord;
     use super::*;
     use crate::transport::ServerTransport;
     fn bound() -> crate::joiner_save::BoundPersonal {

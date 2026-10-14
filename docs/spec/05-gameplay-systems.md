@@ -4313,3 +4313,25 @@ clips to the player's viewport and uses a local fallback when there is no
 pointer/controller anchor. Death and critical screens retain priority. A
 Plan parked behind an occupied cursor is not drawn as another carried stack;
 freeing a bag slot alone still does not trigger parked reseating (C3d OPEN).
+
+
+### D2c-3 world scope and ordinary giver carrier (foundation checkpoint)
+
+The appended optional `quest_world` is WorldSave field54, after the unchanged
+first53 fields, with save-layout revision3/footer57. It contains the random
+world scope and at most512 engaged ordinary giver snapshots, bounded to512KiB.
+Old52/footer52 bodies still end at their real rig-clip field; genuine footerless32
+bodies still end at bounty refresh before the face tables. Old snapshots default
+the absent scope/carrier. No existing VillagerComponent, authored mob or steed
+positional encoding is changed.
+
+A giver snapshot preserves its random identity, kind, actual position/velocity,
+health/timers, ordinary profession/workstation/gossip and authored flag. Builder
+commissions and Satoshi stay outside this carrier. Engagement preparation checks
+the full bounded capture before mutation; commit removes disposable Scattered
+ownership. Live saves capture their actual ECS, refuse an omitted or mismatched
+scoped carrier, and exclude identified authored givers from the older generic
+Authored pet carrier. Restore uses the exact identity once, never position
+matching, and an existing identity cannot change kind. A dead original giver is
+not replaced by another NPC. Live quest dialogue/acceptance/completion and full
+continuation acceptance are still pending at this checkpoint.

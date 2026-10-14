@@ -296,10 +296,10 @@ mod tests {
             assert_eq!(deserialize_header(&bytes).map(|(t, _)| t), Some(tag));
         }
         assert_eq!(deserialize_header(&[67]).map(|(t, _)| t), Some(PacketType::InventorySync), "OC's v88 tag 67 is unchanged");
-        for (byte, tag) in [(72, PacketType::Handover), (73, PacketType::PersonalSync), (74, PacketType::PackResult), (75, PacketType::PackView)] {
+        for (byte, tag) in [(72, PacketType::Handover), (73, PacketType::PersonalSync), (74, PacketType::PackResult), (75, PacketType::PackView), (76, PacketType::QuestResult), (77, PacketType::QuestView)] {
             assert_eq!(deserialize_header(&[byte]).map(|(t, _)| t), Some(tag), "later tag {byte} appends without changing C3d");
         }
-        assert!(deserialize_header(&[76]).is_none(), "no tag past the delivered pack carriers");
+        assert!(deserialize_header(&[78]).is_none(), "no tag past the appended quest carriers");
     }
 
     /// C3d run 19 — the `ToggleBlock` layout with its appended

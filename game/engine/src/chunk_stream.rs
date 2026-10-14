@@ -317,7 +317,13 @@ impl super::GameState {
             let selected = (|| -> Result<Option<crate::joiner_save::JoinerSave>, String> {
                 let directory = crate::save::world_dir(&self.world_name);
                 let Some(proof) = crate::handover::live::personal_adapter::proof(&directory)? else {
-                    if load_result.as_ref().is_some_and(|(save, _)| save.local_personal.is_some()) || crate::handover::live::personal_adapter::has_bound_records(&directory)? {
+                    if let Some(snapshot) = load_result.as_ref().and_then(|(save, _)| save.local_personal.as_ref()) {
+                        let selected_scope = load_result.as_ref().and_then(|(save, _)| save.quest_world.as_ref()).map(|world| world.scope);
+                        let saved = crate::gameplay_attachment::selected_world_local(snapshot, selected_scope, self.handover_signed_in(), Some(0))?;
+                        crate::handover::live::personal_adapter::confirm_durable(&selected_personal_directory.join("world.dat"))?;
+                        return Ok(Some(saved));
+                    }
+                    if crate::handover::live::personal_adapter::has_bound_records(&directory)? {
                         return Err("This world's saved player authority is missing. Nothing was reset.".into());
                     }
                     return Ok(None);
@@ -328,7 +334,7 @@ impl super::GameState {
                 if let Some(snapshot) = load_result.as_ref().and_then(|(save, _)| save.local_personal.as_ref()) {
                     let saved = crate::joiner_save::JoinerSave::decode(&snapshot.0)?;
                     let bound = saved.personal.as_ref().ok_or("selected personal snapshot has no authority binding")?;
-                    if bound.binding != proof.binding(key) { return Err("selected personal snapshot belongs to another player or transfer".into()); }
+                    if bound.binding.imported() != Some(&proof.binding(key)) { return Err("selected personal snapshot belongs to another player or transfer".into()); }
                     crate::handover::live::personal_adapter::confirm_durable(&selected_personal_directory.join("world.dat"))?;
                     // This selected primary/autosave owns the local window and
                     // maps together. Refresh its remote canonical mirror only
@@ -520,6 +526,13 @@ impl super::GameState {
             // re-scatters deterministically.)
             if let Err(error) = crate::steed_save::restore_pets(&mut self.ecs, &save_data.saved_mobs, true) {
                 self.leave_world_with_notice(crate::world_exit::SaveChoice::Abandon, format!("This world's saved creatures couldn't be restored: {error}"));
+                return false;
+            }
+
+            if let Some(saved) = &save_data.quest_world
+                && let Err(error) = crate::quest_npcs::restore(&mut self.ecs, saved)
+            {
+                self.leave_world_with_notice(crate::world_exit::SaveChoice::Abandon, format!("This world's quest givers couldn't be restored: {error}"));
                 return false;
             }
 

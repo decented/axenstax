@@ -145,7 +145,10 @@ pub struct PlayerSlot {
     /// quest captures a snapshot of the current count and checks delta.
     pub kill_counter: ahash::AHashMap<crate::mob::MobType, u32>,
     /// Identity latched by the imported-world loader; local snapshot capture only.
-    pub(crate) personal_binding: Option<crate::joiner_save::PersonalBinding>,
+    pub(crate) personal_binding: Option<crate::progression::GameplayBinding>,
+    pub(crate) quest_progress: crate::progression::QuestProgress,
+    pub(crate) gameplay_revision: u64,
+    pub(crate) kill_tracking: crate::progression::KillTracking,
     /// Snapshot of `kill_counter` at the moment a Kill quest was accepted;
     /// delta = current - snapshot. None for non-Kill quests.
     pub kill_quest_baseline: ahash::AHashMap<hecs::Entity, (crate::mob::MobType, u32)>,
@@ -446,6 +449,9 @@ impl PlayerSlot {
             active_quests: ahash::AHashMap::new(),
             kill_counter: ahash::AHashMap::new(),
             personal_binding: None,
+            quest_progress: Default::default(),
+            gameplay_revision: 0,
+            kill_tracking: crate::progression::KillTracking::Authoritative,
             kill_quest_baseline: ahash::AHashMap::new(),
             charter_allows_sats: false,
             charter_comms: crate::comms::CommsLevel::Approved,

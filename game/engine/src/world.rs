@@ -436,6 +436,8 @@ pub const MAX_TABLES_GONE_LOGGED: usize = 256;
 pub const MAX_ATTACHMENT_CHANGES_LOGGED: usize = 4096;
 
 pub struct World {
+    /// Random durable gameplay authority scope, restored from the selected snapshot.
+    pub(crate) quest_scope: Option<crate::progression::GameplayId>,
     chunks: AHashMap<(i32, i32, i32), Chunk>,
     /// Spec 02 §7.5 — the evicted-chunk store. A column streamed out of range
     /// whose chunks carry `persist` (edited after generation, or loaded from a
@@ -802,6 +804,7 @@ fn note_edit(
 impl World {
     pub fn new() -> Self {
         Self {
+            quest_scope: None,
             chunks: AHashMap::new(),
             evicted: AHashMap::new(),
             evicted_columns: ahash::AHashSet::new(),
@@ -1703,6 +1706,7 @@ impl World {
     ///   world reset.
     /// - `plan_registry`     — engine-bundled content constant across world resets.
     pub fn clear(&mut self) {
+        self.quest_scope = None;
         self.chunks.clear();
         self.evicted.clear();
         self.evicted_columns.clear();
