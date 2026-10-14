@@ -85,6 +85,9 @@ impl HeadlessGame {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(not(target_arch = "wasm32"))]
+    #[path = "quest_baseline.rs"]
+    mod quest_baseline;
     use super::*;
 
     /// Point `AXENSTAX_WORLDS_DIR` at one pid-scoped temp dir shared by every

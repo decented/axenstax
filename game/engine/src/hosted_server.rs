@@ -33,6 +33,8 @@ mod packs;
 mod pack_attempt;
 #[cfg(test)]
 mod pack_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod quest_tests;
 mod strict_container;
 mod strict_edit;
 mod strict_attack;
