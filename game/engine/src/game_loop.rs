@@ -617,7 +617,7 @@ impl super::GameState {
     /// Begin the off-loop preparation for `intent` — the one phone tap if this
     /// install has never been attested, then the socket, the router and the
     /// candidate list. Returns at once; `poll_online` picks the result up.
-    fn start_online_prep(&mut self, intent: crate::online_prep::OnlineIntent) {
+    pub(crate) fn start_online_prep(&mut self, intent: crate::online_prep::OnlineIntent) {
         use crate::online_prep::{readiness, OnlineIntent, Readiness};
 
         if self.online_prep.is_some() {
@@ -719,31 +719,72 @@ impl super::GameState {
     fn start_online_host(
         &mut self,
         folder: String,
-        mut prep: crate::online_prep::OnlinePrep,
+        prep: crate::online_prep::OnlinePrep,
     ) -> Result<(), String> {
-        // Never publish an invite to a world this build refuses (Spec 02 §8.4).
         if let Some(why) = crate::save::world_open_refusal(&folder) {
             return Err(why);
         }
         let settings = crate::graphics_settings::GraphicsSettings::load();
-        let now = self.online_now();
         let identity = crate::runtime_identity::RuntimeIdentity::load()?
             .ok_or_else(|| "no runtime identity".to_string())?;
         let persona = Self::owner_persona_bytes()
             .ok_or_else(|| crate::online_prep::NOT_SIGNED_IN.to_string())?;
+        let (book, blocked) = crate::contacts::load_local_book_with_blocks();
+        self.start_online_host_with(
+            folder,
+            prep,
+            crate::online_prep::HostInputs {
+                identity,
+                persona,
+                relays: settings.online_relays,
+                book,
+                blocked,
+            },
+            |relays| Box::new(crate::rendezvous::relay_client::MultiRelay::start(relays)),
+        )
+    }
+
+    /// Common host-start caller: current folder authority is checked before
+    /// server construction and before the supplied relay backend is started.
+    pub(crate) fn start_online_host_with(
+        &mut self,
+        folder: String,
+        mut prep: crate::online_prep::OnlinePrep,
+        inputs: crate::online_prep::HostInputs,
+        relay_backend: impl FnOnce(
+            Vec<String>,
+        ) -> Box<dyn crate::rendezvous::relay_client::RendezvousRelay>,
+    ) -> Result<(), String> {
+        if let Some(why) = crate::save::world_open_refusal(&folder) {
+            return Err(why);
+        }
+        let now = self.online_now();
+        let crate::online_prep::HostInputs {
+            identity,
+            persona,
+            relays,
+            book,
+            blocked,
+        } = inputs;
         // Not merely "is there an attestation" — is it THIS persona's. After a
         // persona switch the old one still verifies, and every offer signed
         // under it is dropped in silence by the peer.
         crate::online_prep::persona_link(
-            identity.persona(nostr::Timestamp::from(now)).map(|pk| pk.to_bytes()),
+            identity
+                .persona(nostr::Timestamp::from(now))
+                .map(|pk| pk.to_bytes()),
             &persona,
         )
         .map_err(str::to_string)?;
 
         crate::handover::live::continuation::check_host_start(
-            &crate::save::world_dir(&folder), prep.continuation.as_ref(),
-            identity.runtime_pubkey().to_bytes(), persona, now,
-        ).map_err(|e| e.to_string())?;
+            &crate::save::world_dir(&folder),
+            prep.continuation.as_ref(),
+            identity.runtime_pubkey().to_bytes(),
+            persona,
+            now,
+        )
+        .map_err(|e| e.to_string())?;
 
         let host_seed = crate::save::load_world_meta(&folder).seed;
         // `require_signin` is left at the QUIC path's default (true) and the
@@ -757,18 +798,20 @@ impl super::GameState {
             prep.socket,
             crate::hosted_server::host_world_mode(),
         )?;
-        let (book, blocked) = crate::contacts::load_local_book_with_blocks();
         server.set_access_policy(
             true,
             crate::online_host::access_allowlist(&persona, &book, &[], &blocked),
             blocked.clone(),
         );
-        let host_relays = prep.continuation.as_ref().map_or_else(|| settings.online_relays.clone(), |resolved| resolved.root.relays().to_vec());
-        let relay = crate::rendezvous::relay_client::MultiRelay::start(host_relays.clone());
+        let host_relays = prep
+            .continuation
+            .as_ref()
+            .map_or_else(|| relays, |resolved| resolved.root.relays().to_vec());
+        let relay = relay_backend(host_relays.clone());
         let mut host = crate::online_host::OnlineHost::start(
             identity,
             persona,
-            Box::new(relay),
+            relay,
             prep.punch_socket,
             prep.candidates,
             folder.clone(),
@@ -786,7 +829,9 @@ impl super::GameState {
         // Seed the Signet blocks before the first poll, so a blocked persona
         // holding the bearer is refused from the very first offer (D8).
         host.set_book(book, blocked);
-        if let Some(resolved) = prep.continuation.take() { host.install_continuation(resolved, now)?; }
+        if let Some(resolved) = prep.continuation.take() {
+            host.install_continuation(resolved, now)?;
+        }
         host.install_retained(&crate::save::world_dir(&folder))?;
 
         let link = host.invite_link(now).map_err(str::to_string)?;

@@ -629,8 +629,8 @@ impl OnlineHost {
                 .as_deref()
                 .and_then(|h| hex::decode(h).ok())
                 .and_then(|b| <[u8; 16]>::try_from(b.as_slice()).ok());
-            // Check original authority before Kith/contact admission. An
-            // invitation never sheds its expectation to become a contact call.
+            // Check continued/retained authority before Kith/contact
+            // shortcuts, including a runtime returning at a later epoch.
             if (self.continuation_revoked
                 && (verified.offer.bearer.is_some() || verified.offer.handover.is_some()))
                 || verified

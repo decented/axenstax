@@ -401,7 +401,9 @@ pub(super) fn world(bytes: &[u8]) -> Result<crate::save::WorldSave> {
     Ok(value)
 }
 
-pub(super) fn metadata(bytes: &[u8]) -> Result<crate::save::WorldMeta> {
+/// Native source metadata accepts pretty JSON and known historical field
+/// defaults, but never torn-file recovery or a default object on read failure.
+pub(super) fn native_metadata(bytes: &[u8]) -> Result<crate::save::WorldMeta> {
     if bytes.len() > 2 * 1024 * 1024 {
         return Err(Error::Limit("metadata bytes"));
     }
@@ -416,6 +418,11 @@ pub(super) fn metadata(bytes: &[u8]) -> Result<crate::save::WorldMeta> {
         .map_err(|_| Error::Invalid("bounded metadata"))?;
     d.end()
         .map_err(|_| Error::Invalid("metadata trailing bytes"))?;
+    Ok(value)
+}
+
+pub(super) fn metadata(bytes: &[u8]) -> Result<crate::save::WorldMeta> {
+    let value = native_metadata(bytes)?;
     // Exact sender codec: unknown fields/default recovery are not authorised.
     let mut check = Compare {
         expected: bytes,
@@ -459,7 +466,11 @@ pub(super) fn sidecar(bytes: &[u8]) -> Result<()> {
         return Err(Error::Limit("sidecar bytes"));
     }
     use crate::joiner_save::{JoinerSave, JoinerSaveV2};
-    if bytes.first() != Some(&2) { return Err(Error::Invalid("checkpoint sidecar must be immutable v2 seed")); }
+    if bytes.first() != Some(&2) {
+        return Err(Error::Invalid(
+            "checkpoint sidecar must be immutable v2 seed",
+        ));
+    }
     let saved = JoinerSave::from_v2(binary::<JoinerSaveV2>(bytes, 2 * 1024 * 1024)?);
     JoinerSave::decode(bytes).map_err(|_| Error::Invalid("sidecar validation"))?;
     saved

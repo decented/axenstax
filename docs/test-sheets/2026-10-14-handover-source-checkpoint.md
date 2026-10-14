@@ -1,11 +1,11 @@
 # Handover source checkpoint — 14 October 2026
 
-This is a private, resumable source checkpoint on top of 91d489f7, with final
-feature acceptance pending. Engine 0.2.27, private wire 90 (Handover 72,
+This is a private, resumable source checkpoint after normal integration of
+visual e59b5e36 on 23752f9f, with final feature acceptance pending. Engine 0.2.27, private wire 90 (Handover 72,
 PersonalSync 73), canonical participant save v3, WorldSave 53 fields and save
 layout revision 0. Mirror remains the default; Strict remains partial/parked.
 
-Automated checkpoint checks passed:
+Earlier checkpoint checks passed (87 distinct focused controls):
 
 - Native Clippy with warnings as errors.
 - Three original-invitation cold lookup/chain controls and one returned-runtime
@@ -22,15 +22,33 @@ Automated checkpoint checks passed:
   assertion; all source bytes were restored exactly and the controls passed
   again. Compiler/fixture setup diagnoses were recorded separately.
 
-The original-invitation tests reconstruct verified epoch 0→1→2→3 routing; they
-do not yet execute three complete live transfers. Retained current-state
-coverage reopens the canonical helper, and does not claim the full native
-selected-WorldSave path. Fixtures use loopback relays and direct test transport.
+Additional checkpoint checks passed:
+
+- Strict bounded native metadata parsing accepts healthy pretty JSON and known
+  historical fields, while archive metadata remains byte-canonical.
+- Actual frozen GameState capture refuses both missing and torn metadata,
+  preserves source bytes, tells the recipient and resumes the original play.
+- Three complete original-invitation controller-issued transfers: root 0→1,
+  hand-back 2 and returned-source retirement 2→3. Each hop uses the production
+  preparation resolver, common host-start folder-proof check before server
+  construction, encrypted Offer/Answer verification and before-contact authority
+  gate. Repeated Host/copy preserves the original invitation. Native promoted
+  identity-selected state survives changes, save/reopen and the next transfer.
+- Deliberately restoring the old metadata default/recovery fallback fails at the
+  actual capture-refusal assertion. All eleven candidate source hashes restore
+  exactly, Clippy passes again, and the refusal control returns green. The
+  restored executable SHA matches the earlier passing three-hop executable.
+
+These controls use a loopback stored relay, an in-memory online setup relay and
+an injected direct game channel after the real Answer is verified. They do not
+claim a two-machine router or public-relay playtest. The retained current-state
+helper and released-proof assertions remain separate from complete native
+retained-copy, fault and portability acceptance.
 
 Still required before the concrete two-machine playtest:
 
-- [ ] Full actual original-invitation 0→1, hand-back 2, later retirement 2→3.
-- [ ] Strict frozen source metadata read; missing/torn metadata refusal without
+- [x] Checkpoint actual original-invitation 0→1, hand-back 2 and retirement 2→3.
+- [x] Strict frozen source metadata read; missing/torn metadata refusal without
       display/default recovery or changed source bytes.
 - [ ] Actual promoted/retained native load, matching save/autosave/discard,
       dedicated role continuation, delayed authorisation and Plan restoration.

@@ -141,6 +141,13 @@ fn proposed(tag: &str, dir: &Tmp) -> (HeadlessGame, Far, usize) {
     let name = format!("harness-handover-{tag}");
     let mut hg = HeadlessGame::boot_into_world(&name);
     let seed = hg.state.biome_gen.seed;
+    // Establish the fresh fixture's native metadata before the transfer.
+    // Production capture never invents missing saved history/settings.
+    if !crate::save::world_dir(&name).join("world_meta.json").exists() {
+        let mut meta = crate::save::WorldMeta::new(&name);
+        meta.seed = seed;
+        crate::save::save_world_meta(&name, &meta).unwrap();
+    }
     let hs = HostedServer::start_host(
         1,
         name,
@@ -1417,5 +1424,49 @@ fn open_from_lobby(hg: &mut HeadlessGame, folder: &str) {
         hg.frames(1);
         if let crate::GameMode::Menu(menu)=&hg.state.mode { assert!(menu.notice.is_none(),"promoted load refused: {:?}",menu.notice); }
         assert!(std::time::Instant::now()<deadline,"promoted load never completed");
+    }
+}
+
+/// The real GameState frozen capture must never transfer display defaults or
+/// recovered metadata when the saved authored history/settings cannot be read.
+#[test]
+#[ignore = "needs a GPU adapter holding the 506-layer atlas"]
+fn game_harness_handover_frozen_capture_refuses_torn_or_missing_metadata_without_repair() {
+    for missing in [false, true] {
+        let tag = if missing { "capture-metadata-missing" } else { "capture-metadata-torn" };
+        let dir = Tmp::new(tag);
+        let (mut hg, mut far, _) = proposed(tag, &dir);
+        let world = crate::save::world_dir(&hg.state.world_name);
+        let path = world.join("world_meta.json");
+        let original = std::fs::read(&path).unwrap();
+        assert!(crate::handover::checkpoint::source_metadata(&original).is_ok());
+        round(&mut hg);
+        far.rc.poll();
+        let proposal = far.rc.take_handover_frames().into_iter()
+            .find(|bytes| matches!(Frame::decode(bytes), Ok(Frame::Propose { .. }))).unwrap();
+        let mut recipient = RecipientSession::propose(&proposal, joined_host(), identity(), dir.0.join("imports"), now()).unwrap();
+        if missing { std::fs::remove_file(&path).unwrap(); }
+        else { std::fs::write(&path, &original[..original.len()/2]).unwrap(); }
+        let before = snapshot(&world);
+        let proposal = recipient.proposal().clone();
+        recipient.consent(RecipientConsent { transfer: proposal.transfer, world_name: proposal.world_name, source_npub: proposal.source_npub },
+            std::net::UdpSocket::bind("127.0.0.1:0").unwrap(), far.rc.park_transport(), now()).unwrap();
+        far.dst = Some(recipient);
+        // Accept follows the actual hosted FIFO, then GameState freezes and
+        // invokes its real capture callback in the next frame.
+        round(&mut hg);
+        assert!(hg.state.handover.is_none(), "unreadable metadata entered packing instead of refusing capture");
+        assert!(!hg.state.hosted_server.as_ref().unwrap().handover_frozen());
+        assert_eq!(snapshot(&world), before, "capture repaired, quarantined or changed source bytes");
+        assert_eq!(path.exists(), !missing, "capture invented missing source metadata");
+        assert!(crate::handover::live::authority::open_guard(&world).is_ok(), "a refused capture retired the original world");
+        assert!(std::fs::read_dir(&dir.0.join("scratch")).unwrap().next().is_none(), "capture packed default metadata");
+        assert!(far.dst.as_mut().unwrap().pump(now()).is_err(), "the recipient was not told capture refused");
+        // The refusal preserves the live source; restoring its exact original
+        // file is an explicit fixture operation, not the transfer path.
+        std::fs::write(&path, &original).unwrap();
+        let counter = hg.state.tick_counter;
+        hg.ticks(1);
+        assert!(hg.state.tick_counter > counter, "ordinary source play never resumed");
     }
 }

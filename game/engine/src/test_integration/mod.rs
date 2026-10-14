@@ -52,6 +52,8 @@ pub mod lent_world;
 #[cfg(not(target_arch = "wasm32"))]
 mod handover_live;
 mod handover_game;
+#[cfg(not(target_arch = "wasm32"))]
+mod handover_chain;
 pub mod audit_cross_wave;
 pub mod trials_lint;
 pub mod packaging_copy_lint;
