@@ -800,6 +800,31 @@ fn flower_micro_model_survives_save_load() {
     scrub(name);
 }
 
+/// The genuine footerless 32-field shape ends at bounty_last_refresh_tick,
+/// before all three face tables. Encode the actual appended fields rather
+/// than guessing their size; nested fixed tuples add no bincode length prefix.
+fn pre_overlay_world_save_bytes(full: &WorldSave) -> Vec<u8> {
+    assert_eq!(crate::save_format::WORLD_SAVE_FIELD_COUNT, 53, "re-find the appended suffix if another world field is added");
+    assert!(full.face_overlays.is_empty() && full.face_blueprints.is_empty() && full.face_blueprint_blanks.is_empty());
+    assert!(full.local_personal.is_none());
+    let suffix = bincode::serialize(&(
+        (&full.face_overlays, &full.face_blueprints, &full.face_blueprint_blanks, &full.workshop, &full.carts, &full.graves, &full.waypoints, &full.block_meta),
+        (&full.power_devices, &full.signs, &full.item_frames, &full.locked_slots, &full.hostile_acts, &full.rigs, &full.exhibits, &full.composters),
+        (&full.saved_mobs, &full.satoshi, &full.dispensers, &full.rig_clips, &full.local_personal),
+    )).expect("encode the actual appended suffix");
+    let mut bytes = bincode::serialize(full).expect("serialize WorldSave");
+    assert!(bytes.ends_with(&suffix), "the retained old fields must precede the exact appended suffix");
+    bytes.truncate(bytes.len() - suffix.len());
+    assert!(bytes.ends_with(&full.bounty_last_refresh_tick.to_le_bytes()), "the actual old body ends at its last historical field");
+    let (decoded, partial) = save::read_world_save_reporting(&bytes).expect("the genuine pre-overlay body loads");
+    assert!(!partial, "the fixture ends at a clean historical boundary");
+    assert_eq!(decoded.bounty_last_refresh_tick, full.bounty_last_refresh_tick);
+    assert_eq!(decoded.chests.len(), full.chests.len());
+    assert!(decoded.face_overlays.is_empty() && decoded.face_blueprints.is_empty() && decoded.face_blueprint_blanks.is_empty());
+    assert!(decoded.local_personal.is_none());
+    bytes
+}
+
 #[test]
 fn load_world_recovers_block_entities_from_pre_overlay_save() {
     // Goal 3 / Task 1 — backward-compatible old-save load. A save written by an
@@ -816,11 +841,8 @@ fn load_world_recovers_block_entities_from_pre_overlay_save() {
     let name = "__test_pre_overlay_block_entity_recovery__";
     scrub(name);
 
-    // Build a REAL current-format WorldSave (so the field order + types are exactly
-    // the canonical bincode wire layout — not a hand-replicated mirror), carrying a
-    // chest, then drop the three trailing empty face-attachment Vecs
-    // (`face_blueprint_blanks`, `face_blueprints`, then `face_overlays`) to make the
-    // bytes look like a pre-2026-06-03 save that predates all three fields.
+    // Build the real positional layout, then retain only the known fields
+    // before all three face tables; no current footer is added to old data.
     let mut full: WorldSave = serde_json::from_str(
         r#"{ "seed": 7, "player_x": 1.0, "player_y": 64.0, "player_z": 1.0,
              "player_health": 20.0, "hotbar_slot": 0, "inventory": [] }"#,
@@ -834,36 +856,12 @@ fn load_world_recovers_block_entities_from_pre_overlay_save() {
         z: 3,
         data: chest,
     }];
+    full.bounty_last_refresh_tick = 123;
     assert!(full.face_overlays.is_empty(), "precondition: no overlays");
     assert!(full.face_blueprints.is_empty(), "precondition: no blueprints");
     assert!(full.face_blueprint_blanks.is_empty(), "precondition: no blank papers");
 
-    let mut bytes = bincode::serialize(&full).expect("serialize WorldSave");
-    // Drop the trailing empty side-table fields back to the CLEAN boundary just
-    // after `face_blueprints`, so the tolerant decoder must default the absent
-    // tail and still recover the chest (serialised much earlier) rather than
-    // EOF→LegacyWorldSave. The fields from that boundary to the end are all
-    // empty/zero: `face_blueprint_blanks` (8) + `workshop` (`WorkshopProjects` =
-    // empty Vec 8 + `next_id: u32` 4 = 12) + `carts` (8) + `graves` (8) +
-    // `waypoints` (8) + Spec 48 `block_meta` (8) + `power_devices` (8) + Wave 2c
-    // `signs` (8) + `item_frames` (8) + Wave 3 `locked_slots` (8) + Wave 5
-    // `hostile_acts` (8) = 92 trailing zero bytes. (Self-verifying: if bincode
-    // ever changed the empty-Vec/u32 encoding, or a new trailing field is
-    // appended without updating this count, the assert catches it.)
-    // …through `saved_mobs` (116 bytes) + the newest `satoshi` field. Compute
-    // the latter's default size so this self-adjusts if SatoshiState grows; the
-    // 116 still pins every field before it.
-    let satoshi_bytes =
-        bincode::serialized_size(&crate::satoshi::SatoshiState::default()).unwrap() as usize;
-    // +8: `dispensers` (2026-07-04) — one more empty-Vec prefix after satoshi.
-    // +8: `rig_clips` (#19, 2026-09-06) — the per-rig clip side table.
-    let tail = 116 + satoshi_bytes + 8 + 8;
-    assert_eq!(
-        &bytes[bytes.len() - tail..],
-        vec![0u8; tail].as_slice(),
-        "empty trailing side-tables (face_blueprint_blanks … saved_mobs, satoshi) must serialise as zero bytes"
-    );
-    bytes.truncate(bytes.len() - tail);
+    let bytes = pre_overlay_world_save_bytes(&full);
 
     // Write the crafted older bytes to the real save path; load via the real path.
     let dir = save::world_dir(name);
@@ -893,6 +891,8 @@ fn load_world_recovers_block_entities_from_pre_overlay_save() {
     assert!(loaded.face_blueprints.is_empty());
     assert!(loaded.face_blueprint_blanks.is_empty());
     assert!(loaded.carts.is_empty());
+    assert_eq!(loaded.bounty_last_refresh_tick, 123);
+    assert!(loaded.local_personal.is_none());
 
     scrub(name);
 }
@@ -958,23 +958,8 @@ fn load_autosave_recovers_block_entities_from_pre_overlay_save() {
         z: 3,
         data: chest,
     }];
-    let mut bytes = bincode::serialize(&full).expect("serialize WorldSave");
-    // Same clean-boundary truncation as the load_world recovery test: drop the 92
-    // trailing zero bytes (face_blueprint_blanks + workshop + carts + graves +
-    // waypoints + Spec 48 block_meta + power_devices + Wave 2c signs +
-    // item_frames + Wave 3 locked_slots + Wave 5 hostile_acts) so the autosave
-    // path's tolerant decode must recover the chest, not EOF→legacy-drop it.
-    let satoshi_bytes =
-        bincode::serialized_size(&crate::satoshi::SatoshiState::default()).unwrap() as usize;
-    // +8: `dispensers` (2026-07-04) — one more empty-Vec prefix after satoshi.
-    // +8: `rig_clips` (#19, 2026-09-06) — the per-rig clip side table.
-    let tail = 116 + satoshi_bytes + 8 + 8;
-    assert_eq!(
-        &bytes[bytes.len() - tail..],
-        vec![0u8; tail].as_slice(),
-        "empty trailing side-tables (face_blueprint_blanks … saved_mobs, satoshi) must serialise as zero bytes"
-    );
-    bytes.truncate(bytes.len() - tail);
+    full.bounty_last_refresh_tick = 123;
+    let bytes = pre_overlay_world_save_bytes(&full);
 
     let dir = save::world_dir(name).join("autosave");
     std::fs::create_dir_all(&dir).expect("create autosave dir");
@@ -992,6 +977,10 @@ fn load_autosave_recovers_block_entities_from_pre_overlay_save() {
         world.chest_at((2, 70, 3)).is_some(),
         "chest not rehydrated into the world via load_autosave"
     );
+    assert_eq!(world.chest_at((2, 70, 3)).unwrap().slots[0].as_ref().unwrap().count, 5);
+    assert_eq!(loaded.bounty_last_refresh_tick, 123);
+    assert!(loaded.face_overlays.is_empty() && loaded.face_blueprints.is_empty() && loaded.face_blueprint_blanks.is_empty());
+    assert!(loaded.local_personal.is_none());
 
     scrub(name);
 }
