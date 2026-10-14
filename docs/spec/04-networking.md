@@ -5163,11 +5163,14 @@ makes no unconditional durability claim.
 
 ### World handover protocol core (native, dormant milestone)
 
-The native `handover` library core defines a bounded checkpoint-transfer protocol;
-it has no gameplay packet allocation, lobby control, automatic publication or
-host-activation hook. The core milestone left Protocol87 unchanged; the live session below adds private provisional v90 (integrating C3d's locally accepted v89 over OC's v88). Complete
-live snapshot capture, consent, personal progression/ownership conversion and
-recipient role restoration are required before the handover feature can open.
+At the native core milestone, the `handover` library defined a bounded
+checkpoint-transfer protocol without gameplay packet allocation, lobby control,
+automatic publication or host-activation hooks, leaving Protocol87 unchanged.
+The live integration below supplies snapshot capture, consent, supported
+personal progression/ownership conversion and recipient role restoration in
+current protocol v91, incorporating the private handover v90 source checkpoint
+and C3d's historically accepted v89 scope over OC's v88. Combined automated
+acceptance passed; the two-machine owner session remains separate.
 A joined render mirror is never a checkpoint source. Existing unsupported or
 unknown personal state cannot be inferred empty or donated to recipient slot0.
 
@@ -5339,15 +5342,16 @@ subsequent-hop recovery requires a source Authority genuinely reconstructed by
 the controller through the existing verified chain, otherwise fails closed.
 Recorded admission time permits integrity inspection/local durability retry;
 current expiry/authority/Commit must still be checked by the live controller.
-Normal transfer retry requires a currently verified admission. Full live freeze,
-agreement/progression authority, recipient personal adapter, direct-control
-session, listener latch, Prepared/Commit and gameplay callers remain unwired.
+Normal transfer retry requires a currently verified admission. At this core
+milestone, live freeze, agreement/progression authority, the recipient personal
+adapter, direct control, listener latch and gameplay callers remained unwired;
+the live integration below now supplies these paths.
 
-**Live source link and freeze (branch mp-handover, private provisional wire tag
-`PacketType::Handover = 72`, current protocol v90, both PROVISIONAL: the
-integrated tree also includes C3d's locally accepted v89 tags 68–71. Its
-accepted Strict scope remains partial and parked, with Mirror the default.
-The handover requires its final combined gates before delivery).**
+**Live source link and freeze (current protocol v91,
+`PacketType::Handover = 72`).** The combined integration retains C3d's
+historically accepted v89 tags 68–71. Strict remains partial and parked,
+with Mirror the default. Automated combined gates passed; the two-machine
+owner session remains pending.
 A source host binds one control link to an exact authenticated seat for one
 transfer: slot, attach generation and verified key, all re-checked at bind,
 freeze and every send/read; a departed, reconnected or differently keyed seat
@@ -6653,18 +6657,26 @@ live session, at native start-up and before a new recipient session; an
 unmarked directory is never touched.
 
 
-### Personal continuation adapter — combined v91 candidate, final acceptance pending
+### Personal continuation adapter — combined v91, automated gates passed
 
 This source checkpoint adds `PersonalSync = 73`, the final
 `JoinAccept.has_personal_state` field, and the final authoritative
-`PlayerEventType::Respawned.respawns: u32` counter. The combined packs source remains private v91 (the handover-only API checkpoint
-was v90); Handover stays tag72 and C3d remains historically accepted v89 with Strict
-partial/parked and Mirror the default. Focused actual loader, role-transition,
+`PlayerEventType::Respawned.respawns: u32` counter. The combined protocol is v91
+(the handover-only API checkpoint was private v90); Handover stays tag72 and
+C3d remains historically accepted v89 with Strict partial/parked and Mirror
+the default. Focused actual loader, role-transition,
 save/discard and three original-invitation transfer controls passed at their
 recorded checkpoints. Actual initial client delivery in both orders and modes
 also passed after correcting the skipped initial Replace. Complete combined
-regression and the two-machine owner session remain pending. Earlier
-private checkpoint imports without the retained personal manifest are refused;
+regression passed on `08e031b6231a9fbb9d6a7d25795a8f5470887000` (tree
+`c663d5d37815787eecee0df3d9fcab9d7caf1930`): all 12 `./check.sh` categories,
+6,525 native tests, all 112 ignored GPU controls and all 214 real-ecryptfs
+handover controls on the same executable. Native test executable SHA-256 is
+`02bc75515cdd564e7e54d22adca3ee4f701e0b1d392be5a7ef59b204d79b8ea0`.
+The two-machine owner session remains pending. Optional website smoke and
+11 ignored measurement/fixture-generation or live external controls were not
+run. Earlier private checkpoint imports without the retained personal manifest
+are refused;
 this is not a compatibility promise for those source checkpoints.
 
 The importer durably retains the exact bounded authenticated manifest in
@@ -6698,7 +6710,7 @@ world with the local field cleared and removes old autosaves from live selection
 a native active owner cannot attach a second simultaneous remote body of the
 same persona. Focused role/discard controls passed, including selected primary
 and recovery-autosave state, future-dated autosave supersession and subsequent
-native reopen. The final combined regression remains required.
+native reopen. These paths also passed the final combined regression recorded above.
 
 PersonalSync carries a bounded server-selected snapshot and an exact Applied
 acknowledgement bound to action namespace, physical respawn generation, revision,
@@ -6747,10 +6759,10 @@ to settle. The automatic update pass then folds that acknowledged prefix;
 a free control cannot move an older paced authorisation off its valid base.
 This preserves the separate exact initial-install acknowledgement and current
 snapshot quiescence semantics. The actual paced-authority control passed after
-fixing the acknowledged-prefix deferral; the final combined gate remains pending.
+fixing the acknowledged-prefix deferral and in the final combined regression recorded above.
 
 
-The private adapter's subsequent source refinement refuses generic `.axeworld`,
+The adapter refuses generic `.axeworld`,
 `.axeprofile`, export-to-folder and Fork for imported bound authority because
 those formats omit activation proofs and participant files. This guard checks
 retained proof/canonical bindings even after a dedicated role clears the local
@@ -6783,10 +6795,10 @@ client control exposed Personal2 application while Sync1 was still withheld;
 the corrected actual four-case control passed, and an independently scoped
 simulation-hold omission fails at its own physical tick assertion. Exact source
 restoration returns the same executable bytes and green behaviour. These scoped
-results do not replace the final combined regression or owner playtest.
+results also passed the final combined regression; they do not replace the owner playtest.
 
 
-### Original invitation and retained copy — private source checkpoint
+### Original invitation and retained copy — combined v91
 
 The live continuation adapter performs a bounded stored-proof lookup before an
 original-capability join or continued host preparation. All four hops share one
@@ -6842,4 +6854,4 @@ canonical sender codec, and ordinary local recovery is unchanged. Actual
 GameState missing/torn refusal and malformed/healthy native parsing controls
 passed. Restoring the unsafe metadata fallback failed at the actual refusal
 assertion; exact source restoration returned green with the same executable
-bytes. These scoped results remain subject to the final combined regression.
+bytes. These controls also passed the final combined regression recorded above.

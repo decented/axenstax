@@ -154,8 +154,8 @@ pub enum PacketType {
     AppliedActionAck = 71,
     /// Both ways, between a source host and ONE selected joiner only: an
     /// opaque bounded world-handover control frame (`handover::live::wire`).
-    /// PRIVATE PROVISIONAL (integrated mp-handover, v90; accepted C3d
-    /// v89 uses tags 68–71). Not advertised as delivered before final gates.
+    /// Integrated in v91 after the private handover v90 source checkpoint;
+    /// C3d historically allocated tags 68–71 in its accepted v89 scope.
     Handover = 72,
     PersonalSync = 73,
     /// Server → Client: exact sequential pack result and canonical window.
@@ -2792,12 +2792,13 @@ pub struct ServerAnnouncePacket {
 ///   socket reception. Mirror remains default. Strict is PARTIAL / PARKED,
 ///   internally selected only; unsupported mutations fail closed. Canonical
 ///   recovery installation, durable-body release and suffix replay are pending.
-/// - v90 PRIVATE PROVISIONAL (integrated mp-handover): Handover (tag 72),
-///   alongside the accepted C3d v89 metadata above; final combined gates are
-///   required before this handover protocol is delivered.
-///
-/// - v91 (D2c-2): sequential unpredicted source-backed entity packs in
-///   both inventory modes; PackResult 74, PackView 75, explicit PACK flag.
+/// - v90 (private handover source checkpoint): Handover 72, PersonalSync 73,
+///   JoinAccept.has_personal_state and authoritative Respawned.respawns,
+///   alongside the historically accepted C3d v89 metadata above.
+/// - v91 (combined handover and D2c-2): integrates that personal continuation
+///   and sequential unpredicted source-backed entity packs in both inventory
+///   modes; PackResult 74, PackView 75, explicit PACK flag. Automated combined
+///   regression gates passed; owner manual sessions remain separate.
 pub const PROTOCOL_VERSION: u32 = 91;
 
 /// The `protocol_version` of a JoinRequest payload that doesn't decode as this

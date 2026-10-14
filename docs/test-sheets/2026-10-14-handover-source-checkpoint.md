@@ -1,7 +1,12 @@
 # Handover source checkpoint — 14 October 2026
 
-This is a private, resumable source checkpoint after normal integration of
-visual e59b5e36 and packs 3924651e, with final feature acceptance pending.
+This records the earlier private source checkpoint after normal integration of
+visual e59b5e36 and packs 3924651e. Automated acceptance subsequently passed at
+`08e031b6231a9fbb9d6a7d25795a8f5470887000` (tree
+`c663d5d37815787eecee0df3d9fcab9d7caf1930`): all 12 `./check.sh` categories,
+6,525 native tests, all 112 GPU controls and all 214 real-ecryptfs handover
+controls. The dated player sheets identify that tested checkpoint and binary;
+the two-machine owner session remains pending.
 Combined source checkpoint 818e2691; engine 0.2.27, wire 91 (Handover 72,
 PersonalSync 73), canonical participant save v3, WorldSave 53 fields and save
 layout revision 2. Mirror remains the default; Strict remains partial/parked.
@@ -97,10 +102,14 @@ Still required before the concrete two-machine playtest:
 - [x] Retained promotion/directory-sync faults, native loader retries, non-overwriting
       collision handling and complete-folder portability.
 - [x] Normal visual/packs source integration.
-- [ ] Independent final review and complete immutable native/GPU/WASM/check.sh
-      regression on the documentation-frozen combined commit.
-- [ ] Concrete native build and two-machine source→recipient→hand-back sheet.
+- [x] Independent source review with no outstanding HIGH or MEDIUM finding,
+      and complete immutable native/GPU/WASM/check.sh regression on the tested
+      combined checkpoint above.
+- [ ] Two-machine owner session using the concrete native build and the
+      source→recipient→hand-back sheet.
 
-Do not use this checkpoint as an accepted-feature build or infer support for
-active quests or complete personal timer continuation. The final player sheet
-will identify the exact tested integrated commit and native binary.
+Use the tested combined checkpoint identified above for the player session;
+this earlier source milestone alone is not the accepted build. Active quests
+and complete personal timer continuation remain unsupported. Optional website
+smoke and 11 ignored measurement/fixture-generation or live external controls
+were not run; owner manual checks remain pending.

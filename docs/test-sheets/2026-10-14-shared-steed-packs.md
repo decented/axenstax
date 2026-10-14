@@ -1,12 +1,21 @@
-# 14 October 2026 — shared donkey and mule packs (final acceptance pending)
+# 14 October 2026 — shared donkey and mule packs (automated gates passed)
 
-**Combined source checkpoint:** `818e2691507047508aed1e5c60bd15a8d3cfc376`. Engine v0.2.27,
-wire 91, WorldSave 53 fields, save-layout revision 2 and canonical participant
-save v3. This sheet is a documentation-only follow-up to that source checkpoint.
-The final regression report records the exact documentation-inclusive tested
-commit/tree and native executable SHA. Use that exact build for the manual
-checks; final combined acceptance remains pending until its gate and review pass.
-Mirror remains the default and Strict remains partial/parked.
+**Tested combined checkpoint:** `08e031b6231a9fbb9d6a7d25795a8f5470887000`,
+tree `c663d5d37815787eecee0df3d9fcab9d7caf1930`. Engine v0.2.27, wire 91,
+WorldSave 53 fields, save-layout revision 2 and canonical participant save v3.
+The earlier integrated source checkpoint was `818e2691`.
+
+**Automated acceptance:** `./check.sh` passed all 12 categories, including
+6,525 native tests; all 112 GPU controls and all 214 real-ecryptfs handover
+controls passed on that same checkpoint and test executable. Native game
+binary SHA-256: `8cb452573345b8ee1293ec11e5f107b0d1bc0234b81a293abb203c9a669a25e2`.
+Native test executable SHA-256:
+`02bc75515cdd564e7e54d22adca3ee4f701e0b1d392be5a7ef59b204d79b8ea0`.
+This documentation-only acceptance update follows the tested checkpoint;
+it does not claim a new executable. Optional website smoke and 11 ignored
+measurement/fixture-generation or live external relay/router/mailbox controls
+were not run. The manual checks below remain pending. Mirror remains the
+default and Strict remains partial/parked.
 
 Final tested commit / native platform / host mode / tester:
 
@@ -92,11 +101,10 @@ and exact source restorations cover backed payment, prefix conservation, held-fl
 ordering, bounded buffers and overflow feedback; the two fixture mistakes above
 receive no feature-negative credit.
 
-Final combined full library, full GPU, native durability, `./check.sh` and independent
-exact-source review remain pending at this sheet's preparation. Owner manual boxes
-above are still unchecked. The combined builder must append the actual accepted
-commit, date, executable SHA and gate results before copying this sheet into
-`docs/test-sheets/2026-10-14-shared-steed-packs.md`.
+The final combined checkpoint passed the complete library, full GPU, real-disk
+handover durability and `./check.sh` gates recorded above. Independent source
+review found no outstanding HIGH or MEDIUM issue. Owner manual boxes above
+remain unchecked; these automated results do not replace that session.
 
 New pack payments are source-backed in both advertised modes; existing unrelated
 Mirror bridges and global Strict recovery remain partial/parked, and Mirror stays
