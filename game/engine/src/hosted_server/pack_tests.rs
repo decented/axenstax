@@ -1,6 +1,6 @@
 //! Real joined pack dispatch and metadata retirement in both advertised modes.
 use super::*;
-use crate::{action_identity::{ActionHeader, InventoryMode}, action_wire::{ActionIntent, ActionPacket, AppliedActionAck}, container_window::{ContainerClick, ContainerTarget}, item::{Item, ItemStack}, pack_wire::{PackNote, PackOperation, PackRequest, PackResult}, transport::ClientTransport as _};
+use crate::{block, action_identity::{ActionHeader, InventoryMode}, action_wire::{ActionIntent, ActionPacket, AppliedActionAck}, container_window::{ContainerClick, ContainerTarget}, item::{Item, ItemStack}, pack_wire::{PackNote, PackOperation, PackRequest, PackResult}, transport::ClientTransport as _};
 
 struct Joiner { i: usize, client: ChannelClientTransport, accept: protocol::JoinAcceptPacket, sequence: u64, applied: u32 }
 struct Rig { _root: crate::save::WorldsRootGuard, hs: HostedServer, joiner: Joiner, entity: hecs::Entity, target: ContainerTarget }

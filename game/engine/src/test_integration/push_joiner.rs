@@ -230,6 +230,7 @@ impl Joiner {
             match step {
                 IntakeStep::RebaseFence(cut) => self.rc.apply_recovery_fence(cut),
                 IntakeStep::ActionReceipt(receipt) => self.rc.apply_action_receipt(receipt),
+                IntakeStep::PackResult(_) => panic!("block-push fixture received an unexpected pack result"),
                 IntakeStep::Chunk(p) => {
                     self.stream_bytes += protocol::serialize_packet(protocol::PacketType::ChunkData, &*p).len();
                     if let Some(col) = self.intake.generate_before_chunk(&p, &self.loaded, &self.world) {
