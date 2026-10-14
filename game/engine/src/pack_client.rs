@@ -1,5 +1,7 @@
 //! Joined pack entry points and checked canonical window application.
 use crate::{container_window::{ContainerTarget, SharedContainer}, item::{Item, ItemStack}, pack_wire::{PackOperation, PackResult, PackView, PackViewPush}, window::WindowMut};
+#[cfg(test)]
+mod tests;
 
 fn remember_window(view: &WindowMut, uses: &crate::use_edits::SentUses) -> Result<(), String> {
     for stack in view.inv.slots_iter().flatten().chain(view.cursor.iter()).chain(view.grid.iter().flatten().flatten()) {

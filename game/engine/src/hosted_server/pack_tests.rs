@@ -3,6 +3,8 @@ use super::*;
 use crate::{block, action_identity::{ActionHeader, InventoryMode}, action_wire::{ActionIntent, ActionPacket, AppliedActionAck}, container_window::{ContainerClick, ContainerTarget}, item::{Item, ItemStack}, pack_wire::{PackNote, PackOperation, PackRequest, PackResult}, transport::ClientTransport as _};
 
 struct Joiner { i: usize, client: ChannelClientTransport, accept: protocol::JoinAcceptPacket, sequence: u64, applied: u32 }
+mod races;
+mod keeping;
 struct Rig { _root: crate::save::WorldsRootGuard, hs: HostedServer, joiner: Joiner, entity: hecs::Entity, target: ContainerTarget }
 impl Rig {
     fn new(tag: &str, mode: InventoryMode) -> Self {
