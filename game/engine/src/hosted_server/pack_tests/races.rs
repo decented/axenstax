@@ -7,6 +7,12 @@ fn ground(rig: &Rig, block: u16) -> u32 {
         .map(|(_, drop)| u32::from(drop.stack.count)).sum()
 }
 
+fn graves(rig: &Rig, block: u16) -> u32 {
+    rig.hs.server.world.iter_graves().flat_map(|(_, grave)| grave.slots.iter().flatten())
+        .filter(|stack| stack.item == Item::Block(block))
+        .map(|stack| u32::from(stack.count)).sum()
+}
+
 #[test]
 fn d2c2_empty_remove_and_deposit_in_each_execution_order_conserve_both_modes() {
     for mode in [InventoryMode::Mirror, InventoryMode::Strict] {
@@ -110,25 +116,47 @@ fn d2c2_queued_pack_crossing_actual_respawn_never_uses_the_new_body() {
         let mut rig = Rig::new("actual-respawn", mode);
         rig.hs.server.players[rig.joiner.i].inventory.set_slot(0, Some(ItemStack::new_block(block::CHEST, 1)));
         let old = rig.packet(PackOperation::Equip);
+        assert!(matches!(&old.intent, ActionIntent::Pack(request) if request.actor_respawns == 0));
+        // Select the genuine grave branch at the loaded death cell. The
+        // Chest's custody is the grave, not an assumed floor scatter.
+        let pos = rig.hs.server.players[rig.joiner.i].player.pos;
+        let cell = (pos.x.floor() as i32, pos.y.floor() as i32, pos.z.floor() as i32);
+        assert!(rig.hs.server.loaded_columns.contains(&(cell.0.div_euclid(16), cell.2.div_euclid(16))));
+        rig.hs.server.world.set_block(cell.0, cell.1, cell.2, block::AIR);
         let sp = &mut rig.hs.server.players[rig.joiner.i];
         sp.combat.dead = true;
         sp.combat.health = 0.0;
         sp.death_handled = false;
         rig.hs.handle_joiner_deaths();
+        assert!(rig.hs.server.players[rig.joiner.i].window_events.last_number() > old.action.events_applied);
+        assert_eq!(graves(&rig, block::CHEST), 1);
+        assert_eq!(ground(&rig, block::CHEST), 0);
+        // Keep the formed request outside the transport throughout the real
+        // death-screen delay. Its first arrival will be after the new life.
+        for _ in 0..crate::server::MIN_DEAD_TICKS_BEFORE_RESPAWN { rig.hs.tick(); }
+        let sp = &rig.hs.server.players[rig.joiner.i];
+        assert!(sp.combat.dead && sp.dead_ticks >= crate::server::MIN_DEAD_TICKS_BEFORE_RESPAWN);
+        assert!(sp.action_queue.as_ref().unwrap().is_empty());
+        assert!(sp.action_results.as_ref().unwrap().peek(old.action).is_none(), "the delayed old request has never been consumed");
         rig.joiner.client.send_to_server(&protocol::serialize_packet(protocol::PacketType::Respawn, &()));
         rig.hs.tick();
         let sp = &rig.hs.server.players[rig.joiner.i];
         assert!(sp.is_present_and_alive());
         assert_eq!(sp.respawns, 1, "the actual Respawn request advances authoritative physical life");
-        let before = crate::window_events::effective_window(sp);
+        let before = crate::window_events::pack_canonical_window(sp, &rig.hs.server.registry).unwrap();
+        let before = crate::pack_wire::PackWindow::capture(&before.window, &before.debt, &rig.hs.server.registry).unwrap();
         let terminal = rig.send(&old);
         assert_eq!(terminal.note, PackNote::Dead);
         assert_eq!(terminal.fate, crate::action_identity::ActionFate::Superseded);
         assert!(rig.hs.server.ecs.get::<&crate::horse_ai::HorseData>(rig.entity).unwrap().pack.is_none());
-        assert_eq!(rig.bag(block::CHEST), count(&before.inv, block::CHEST));
-        assert_eq!(ground(&rig, block::CHEST), 1, "the original Chest stays in the actual death drops");
+        let after = crate::window_events::pack_canonical_window(&rig.hs.server.players[rig.joiner.i], &rig.hs.server.registry).unwrap();
+        assert_eq!(crate::pack_wire::PackWindow::capture(&after.window, &after.debt, &rig.hs.server.registry).unwrap(), before, "the old request leaves every new-life personal place and debt unchanged");
+        assert_eq!(rig.bag(block::CHEST) + ground(&rig, block::CHEST) + graves(&rig, block::CHEST), 1);
+        assert_eq!(graves(&rig, block::CHEST), 1, "the original Chest stays in its actual grave");
         assert_eq!(rig.send(&old), terminal);
         rig.apply(&terminal);
+        assert_eq!(rig.bag(block::CHEST) + ground(&rig, block::CHEST) + graves(&rig, block::CHEST), 1, "repeat and exact ACK cannot refund the dead body's Chest");
+        assert!(rig.hs.server.ecs.get::<&crate::horse_ai::HorseData>(rig.entity).unwrap().pack.is_none());
         assert!(!rig.hs.disconnected[rig.joiner.i]);
     }
 }
