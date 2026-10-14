@@ -4,7 +4,7 @@ use super::*;
 use crate::{
     action_identity::{ActionFate, ActionHeader},
     action_wire::ActionReceipt,
-    quest_wire::{QuestNote, QuestRequest, QuestResult},
+    quest_wire::{QuestRequest, QuestResult},
     window_events::WindowEvent,
 };
 

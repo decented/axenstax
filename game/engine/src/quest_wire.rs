@@ -170,17 +170,13 @@ impl QuestView {
                         };
                         u32::from(count) == target
                     }) =>
-            {
-                ()
-            }
+            {}
             QuestStatus::Cooldown { remaining }
                 if self.npc != [0; 16]
                     && self.terms.is_none()
                     && remaining > 0
                     && remaining <= crate::villager_ui::DECLINE_COOLDOWN_TICKS as u32 =>
-            {
-                ()
-            }
+            {}
             QuestStatus::NoQuest | QuestStatus::Unavailable if self.terms.is_none() => (),
             _ => return Err("Quest status differs from its bounded terms".into()),
         }
