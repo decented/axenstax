@@ -4588,7 +4588,16 @@ mod tests {
             data.pack = Some(crate::chest::ChestData::new());
         }
         let slot = hg.state.hosted_server.as_ref().unwrap().server.players.len() - 1;
+        // The lent authority chooses the guest's spawn independently of the
+        // native host's saved position. Put this interaction on the same pad.
+        let host_pos = hg.state.players[0].player.pos;
+        {
+            let sp = &mut hg.state.hosted_server.as_mut().unwrap().server.players[slot];
+            sp.player.pos = host_pos;
+            sp.player.vel = glam::Vec3::ZERO;
+        }
         let eye = hg.state.hosted_server.as_ref().unwrap().server.players[slot].player.eye_pos();
+        assert!((at + glam::Vec3::Y * 0.7 - eye).length() <= crate::combat::ATTACK_REACH + crate::hosted_server::ATTACK_REACH_TOLERANCE);
         let forward = (at + glam::Vec3::Y * 0.7 - eye).normalize();
         {
             let hs = hg.state.hosted_server.as_mut().unwrap();
@@ -4618,7 +4627,7 @@ mod tests {
             if opened.is_some() { break; }
         }
         let opened = opened.expect("real entity Open through the lent transport");
-        assert!(opened.view.is_some());
+        assert!(opened.view.is_some(), "live lent Open refused with {:?}; guest {:?}, target {:?}", opened.note, hg.state.hosted_server.as_ref().unwrap().server.players[slot].player.pos, hg.state.ecs.get::<&crate::entity::Position>(steed).unwrap().0);
         client.send_to_server(&crate::protocol::serialize_packet(crate::protocol::PacketType::AppliedActionAck, &AppliedActionAck { session: accept.action_session, epoch: action.epoch, life: action.life, through: action.seq, included_events: opened.window_event }));
         hg.hosted_ticks(1);
         hg.state.players[0].inventory = crate::inventory::Inventory::new();
