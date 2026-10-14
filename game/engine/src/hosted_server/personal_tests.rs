@@ -186,7 +186,7 @@ fn d2c2_personal_applied_control_keeps_older_budgeted_strict_actions_in_order() 
         let on = sequence.is_multiple_of(2);
         let mut candidate = raw.clone();
         candidate.set_auto_refill(on);
-        let op = protocol::WindowOpPacket { op_seq: sequence as u32, op: protocol::WireWindowOp::SetAutoRefill { on }, digest: candidate.digest_with(crate::window::Station::Player, None), events_applied: base };
+        let op = protocol::WindowOpPacket { op_seq: sequence as u32, op: protocol::WireWindowOp::SetAutoRefill { on }, digest: candidate.digest_with(crate::window::Station::Player, None), events_applied: base, touched: Vec::new(), claims: Vec::new(), client_ok: true };
         packets.push(ActionPacket { action, intent: ActionIntent::Window(op) });
     }
     // Genuine progression update and grant paths issue the newer fence;
