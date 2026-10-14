@@ -273,6 +273,7 @@ impl PersonalRecord {
     }
     /// Install ONLY this record's progression into a slot that belongs to
     /// the same participant. No reward, claim or payout routine runs.
+    #[cfg(test)]
     pub(crate) fn install_progression(&self, slot: &mut crate::player_slot::PlayerSlot) {
         slot.reputation.per_village.clear();
         for (k, s) in &self.reputation {

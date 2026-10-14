@@ -258,17 +258,16 @@ impl GameplayRecord {
             }
             last = Some(index);
         }
-        if let Some(local) = &self.local {
-            if !local
+        if let Some(local) = &self.local
+            && (!local
                 .pos
                 .iter()
                 .chain([&local.yaw, &local.pitch])
                 .all(|value| value.is_finite())
                 || local.hotbar > 8
-                || local.locks & !((1 << 36) - 1) != 0
-            {
-                return Err("invalid local gameplay restore".into());
-            }
+                || local.locks & !((1 << 36) - 1) != 0)
+        {
+            return Err("invalid local gameplay restore".into());
         }
         self.quests.validate()
     }
