@@ -978,6 +978,24 @@ pub(crate) fn window_carrier_bytes(outcomes: &Vec<RequestOutcome>, grants: &Vec<
 }
 
 impl WindowInbox {
+    /// Test diagnostics expose only event numbers, never participant bytes.
+    #[cfg(test)]
+    pub(crate) fn diagnostic_event_queues(&self) -> (Vec<u32>, Vec<u32>, Vec<u32>) {
+        let outcomes = self.outcomes.iter().map(|outcome| match outcome {
+            RequestOutcome::Interact(packet) => packet.window_event,
+            RequestOutcome::Item(packet) => packet.window_event,
+            RequestOutcome::ContainerOpened(packet) => packet.window_event,
+            RequestOutcome::SlotSet(packet) => packet.window_event,
+            RequestOutcome::Sync(packet) => packet.window_event,
+            RequestOutcome::Pack(packet) => packet.window_event,
+            RequestOutcome::PackView(packet) => packet.window_event,
+            RequestOutcome::Quest(packet) => packet.window_event,
+            RequestOutcome::QuestView(packet) => packet.window_event,
+            RequestOutcome::PersonalSync { window_event, .. } => *window_event,
+        }).collect();
+        (outcomes, self.grants.iter().map(|grant| grant.window_event).collect(), self.armour.iter().map(|(_, event)| *event).collect())
+    }
+
     /// Add one poll's carriers, each list in arrival order.
     pub fn add(&mut self, outcomes: Vec<RequestOutcome>, grants: Vec<InventoryGrantPacket>, armour: Vec<(u8, u32)>) {
         self.outcomes.extend(outcomes);
@@ -1077,6 +1095,16 @@ impl WindowInbox {
                 _ => armour.pop_front(),
             };
             out.extend(next);
+        }
+        #[cfg(test)]
+        if out.iter().any(|item| matches!(item, InboxItem::Outcome(RequestOutcome::Quest(_)))) {
+            let order: Vec<_> = out.iter().map(|item| (match item {
+                InboxItem::Outcome(RequestOutcome::Quest(_)) => "quest-cost",
+                InboxItem::Outcome(RequestOutcome::PersonalSync { .. }) => "personal",
+                InboxItem::Grant(_) => "grant",
+                _ => "other",
+            }, item.event())).collect();
+            eprintln!("Actual quest window drain order: {order:?}");
         }
         (out, self.ack.take())
     }

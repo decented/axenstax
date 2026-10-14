@@ -18,6 +18,8 @@ struct Delivery {
     receipts: VecDeque<Packet>,
     actions: Vec<Packet>,
     unfit: Vec<crate::protocol::ItemActionPacket>,
+    // Only non-secret result metadata is retained for the actual routing trace.
+    results: Vec<(crate::action_identity::ActionFate, crate::quest_wire::QuestNote, u32, u32, u32)>,
 }
 struct DelayedTransport {
     inner: crate::transport::ChannelClientTransport,
@@ -52,6 +54,10 @@ impl ClientTransport for DelayedTransport {
             return Some(receipt);
         }
         while let Some(packet) = self.inner.try_recv_from_server() {
+            if let Some((crate::protocol::PacketType::QuestResult, body)) = crate::protocol::deserialize_header(&packet) {
+                let result = crate::quest_wire::QuestResult::decode(body).unwrap();
+                delivery.results.push((result.fate, result.note, result.window_event, result.included_events, result.action.events_applied));
+            }
             match crate::protocol::deserialize_header(&packet) {
                 Some((crate::protocol::PacketType::QuestResult, _)) if delivery.hold_results => {
                     if let Some(result) = &delivery.result {
@@ -85,6 +91,29 @@ fn bread(inventory: &crate::inventory::Inventory) -> u32 {
         .filter(|stack| stack.item == crate::item::Item::Material(crate::item::MaterialId::Bread))
         .map(|stack| u32::from(stack.count))
         .sum()
+}
+
+fn trace(stage: &str, host: &crate::hosted_server::HostedServer, hg: &HeadlessGame, i: usize, target: u32, delivery: &Arc<Mutex<Delivery>>) {
+    let client = hg.state.remote_client.as_ref().unwrap();
+    let slot = &hg.state.players[0];
+    let sp = &host.server.players[i];
+    let raw = crate::staged_window::MarkerWindow::try_capture_parts(&slot.inventory, &slot.armour_slots, &slot.crafting_ui.cursor_item, &slot.crafting_ui.grid, &hg.state.registry).unwrap();
+    let authoritative = crate::window_events::pack_raw_marker(sp, &host.server.registry).unwrap();
+    let effective = crate::window_events::effective_window(sp);
+    let effective = crate::staged_window::MarkerWindow::try_capture_parts(&effective.inv, &effective.armour, &effective.cursor, &effective.grid, &host.server.registry).unwrap();
+    let giver = host.server.ecs.query::<(&crate::entity::ProtocolId, &crate::entity::Position)>().iter().find_map(|(_, (id, at))| (id.0 == target).then_some(at.0));
+    eprintln!("Quest replay {stage}: mode={:?} connected={} applied={} last_sent={} held={} physical_accepted={} server_accepted={} bag_places={} bread={} client_digest={} raw_digest={} effective_digest={} actor={:?} giver={giver:?} distance={:?} yaw={} result_metadata={:?} inbox_queues={:?} fifo_entries={}", sp.inventory_mode, client.is_connected(), client.applied_window_event(), sp.window_events.last_number(), client.pack_window_inbox_held(), slot.quest_progress.accepted.len(), sp.personal.as_ref().unwrap().record().unwrap().quests.accepted.len(), slot.inventory.slots_iter().flatten().count(), bread(&slot.inventory), raw.digest_with(slot.crafting_ui.station(), None), authoritative.digest_with(sp.station, None), effective.digest_with(sp.station, None), sp.player.pos, giver.map(|at| at.distance(sp.player.pos)), sp.yaw, delivery.lock().unwrap().results, hg.state.window_inbox.diagnostic_event_queues(), client.chunk_queue.len());
+}
+
+/// Wait for the genuine physical frontier, while leaving held receipts held.
+/// No server tick is needed merely to drain already received world carriers.
+fn wait_applied(hg: &mut HeadlessGame, event: u32) {
+    for _ in 0..200 {
+        if hg.state.remote_client.as_ref().is_some_and(|client| client.applied_window_event() >= event && !client.pack_window_inbox_held()) { return; }
+        hg.frames(1);
+        assert!(hg.state.remote_client.as_ref().is_some_and(|client| client.is_connected()), "actual replay application lost its connection");
+    }
+    assert!(hg.state.remote_client.as_ref().is_some_and(|client| client.applied_window_event() >= event && !client.pack_window_inbox_held()), "actual numbered quest result never reached the physical frontier");
 }
 
 fn setup(
@@ -225,13 +254,16 @@ fn setup(
     }
     // Genuine server grants align actual holdings, rather than copying a raw bag.
     host.grant_to_joiner(i, kit);
+    let kit_event = host.server.players[i].window_events.last_number();
     pack_wait(&mut host, &mut hg, |_, game| {
-        game.state.players[0]
+        game.state.remote_client.as_ref().is_some_and(|client| client.applied_window_event() >= kit_event)
+            && game.state.players[0]
             .inventory
             .slots_iter()
             .flatten()
             .any(|stack| stack.item == crate::item::Item::Material(item) && stack.count >= count)
     });
+    trace("kit physically applied", &host, &hg, i, target, &delivery);
     assert_eq!(bread(&hg.state.players[0].inventory), 0);
     (hg, host, i, delivery, target, view.incarnation, terms.id)
 }
@@ -247,12 +279,16 @@ fn replay(after_application: bool, full: bool) {
             d.hold_results = !after_application;
             d.actions.clear();
             d.unfit.clear();
+            d.results.clear();
         }
+        trace("before TurnIn", &host, &hg, i, target, &delivery);
         hg.state
             .request_quest(target, incarnation, QuestOperation::TurnIn { id });
         hg.state.network_send_input();
         host.tick();
         hg.frames(1);
+        pack_wait(&mut host, &mut hg, |_, _| !delivery.lock().unwrap().results.is_empty());
+        trace("first batch observed", &host, &hg, i, target, &delivery);
         let original = delivery
             .lock()
             .unwrap()
@@ -276,6 +312,9 @@ fn replay(after_application: bool, full: bool) {
             "held real receipt retains the shared mutation guard"
         );
         if after_application {
+            let last = delivery.lock().unwrap().results.last().expect("actual result metadata").3;
+            wait_applied(&mut hg, last);
+            trace("first batch physically applied", &host, &hg, i, target, &delivery);
             assert!(
                 hg.state.players[0].quest_progress.accepted.is_empty(),
                 "first actual PersonalSync installed before the replay"
@@ -299,10 +338,14 @@ fn replay(after_application: bool, full: bool) {
         hg.state.remote_client.as_ref().unwrap().send_raw(&original);
         host.tick();
         hg.frames(1);
+        trace("repeat while receipt held", &host, &hg, i, target, &delivery);
         if !after_application {
             delivery.lock().unwrap().hold_results = false;
             hg.frames(1);
         }
+        let last = delivery.lock().unwrap().results.last().expect("actual result metadata").3;
+        wait_applied(&mut hg, last);
+        trace("before conservation assertion", &host, &hg, i, target, &delivery);
         assert_eq!(
             bread(&hg.state.players[0].inventory),
             if full { 0 } else { 2 },
