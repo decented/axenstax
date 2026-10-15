@@ -12,7 +12,7 @@ use crate::{
 };
 use glam::Vec3;
 use std::time::{Duration, Instant};
-fn actor_tick(host: &mut HostedServer, actor: &mut Actor) {
+fn actor_input(host: &mut HostedServer, actor: &mut Actor, yaw: f32, pitch: f32) {
     actor.input_seq += 1;
     let sp = &host.server.players[actor.i()];
     let at = sp.player.pos;
@@ -23,7 +23,8 @@ fn actor_tick(host: &mut HostedServer, actor: &mut Actor) {
             x: at.x,
             y: at.y,
             z: at.z,
-            yaw: sp.yaw,
+            yaw,
+            pitch,
             health: sp.combat.health,
             events_applied: actor.applied,
             ..Default::default()
@@ -31,6 +32,45 @@ fn actor_tick(host: &mut HostedServer, actor: &mut Actor) {
     ));
     host.tick();
     actor.drain(&host.server.registry);
+}
+fn actor_tick(host: &mut HostedServer, actor: &mut Actor) {
+    let sp = &host.server.players[actor.i()];
+    let (yaw, pitch) = (sp.yaw, sp.pitch);
+    actor_input(host, actor, yaw, pitch);
+}
+#[derive(Debug)]
+struct QuestGeometry {
+    eye: Vec3,
+    position: Vec3,
+    centre: Vec3,
+    yaw: f32,
+    pitch: f32,
+    distance: f32,
+    facing: f32,
+}
+fn quest_geometry(host: &HostedServer, actor: &Actor, target: u32) -> QuestGeometry {
+    let ecs = &host.server.ecs;
+    let entity = ecs
+        .query::<&crate::entity::ProtocolId>()
+        .iter()
+        .find(|(_, id)| id.0 == target)
+        .map(|(entity, _)| entity)
+        .expect("actual quest target still exists");
+    let position = ecs.get::<&crate::entity::Position>(entity).unwrap().0;
+    let height = ecs.get::<&crate::entity::Hitbox>(entity).unwrap().height;
+    let centre = position + Vec3::Y * (height * 0.5);
+    let sp = &host.server.players[actor.i()];
+    let eye = sp.player.eye_pos();
+    let to_target = centre - eye;
+    QuestGeometry {
+        eye,
+        position,
+        centre,
+        yaw: sp.yaw,
+        pitch: sp.pitch,
+        distance: to_target.length(),
+        facing: to_target.normalize_or_zero().dot(crate::camera::forward_from(sp.yaw, sp.pitch)),
+    }
 }
 fn settle_actor(host: &mut HostedServer, actor: &mut Actor) {
     for _ in 0..32 {
@@ -54,6 +94,13 @@ fn actor_quest(
     operation: QuestOperation,
 ) -> Option<QuestView> {
     settle_actor(host, actor);
+    let target_geometry = quest_geometry(host, actor, target);
+    let direction = (target_geometry.centre - target_geometry.eye).normalize();
+    actor_input(host, actor, (-direction.x).atan2(-direction.z), direction.y.asin());
+    settle_actor(host, actor);
+    // Observe the authenticated look after ordinary settlement, rather than
+    // assigning server aim or assuming that the input has already landed.
+    let aimed = quest_geometry(host, actor, target);
     let sp = &host.server.players[actor.i()];
     let raw = crate::staged_window::MarkerWindow::try_capture_parts(
         &actor.slot.inventory,
@@ -68,11 +115,31 @@ fn actor_quest(
         target,
         before: raw.digest_with(sp.station, None),
         incarnation,
-        operation,
+        operation: operation.clone(),
     }));
     settle_actor(host, actor);
+    let after = quest_geometry(host, actor, target);
     let result = actor.results.iter().find(|r| r.action == action).unwrap();
-    assert_eq!(result.fate, ActionFate::Accepted);
+    assert_eq!(
+        result.fate,
+        ActionFate::Accepted,
+        "actual source quest operation={operation:?} note={:?} target={target} \
+         aimed eye={:?} position={:?} yaw={} pitch={} distance={} facing={} \
+         after eye={:?} position={:?} yaw={} pitch={} distance={} facing={}",
+        result.note,
+        aimed.eye,
+        aimed.position,
+        aimed.yaw,
+        aimed.pitch,
+        aimed.distance,
+        aimed.facing,
+        after.eye,
+        after.position,
+        after.yaw,
+        after.pitch,
+        after.distance,
+        after.facing,
+    );
     result.view.clone()
 }
 fn actor_giver(host: &mut HostedServer, actor: &mut Actor, distance: f32) -> u32 {
