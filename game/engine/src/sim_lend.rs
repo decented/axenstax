@@ -224,8 +224,10 @@ impl SimTally {
 }
 
 /// The host client's simulation state that is lent: exactly the seven fields
-/// `GameState` and `GameServer` both own (`lib.rs` ↔ `server.rs`).
+/// `GameState` and `GameServer` both own (`lib.rs` ↔ `server.rs`), plus the
+/// actual runtime clock owner of those borrowed parts.
 pub struct SimParts<'a> {
+    pub(crate) reputation_owner: crate::reputation_day::OwnerId,
     pub world: &'a mut World,
     pub ecs: &'a mut hecs::World,
     pub water: &'a mut WaterSystem,
@@ -244,6 +246,8 @@ pub struct SimParts<'a> {
 pub struct HostClock {
     pub world_time: u32,
     pub tick_counter: u64,
+    pub(crate) reputation_owner: crate::reputation_day::OwnerId,
+    pub(crate) reputation_offer: Option<crate::reputation_day::DayOffer>,
     pub weather: crate::weather::Weather,
 }
 
@@ -264,6 +268,12 @@ impl<'a> LentSim<'a> {
         swap_parts(server, &mut parts);
         server.world_time = clock.world_time;
         server.tick_counter = clock.tick_counter;
+        server.lent_day_owner = Some(parts.reputation_owner);
+        server.lent_day_offer = clock.reputation_offer.filter(|offer| {
+            clock.reputation_owner == parts.reputation_owner
+                && offer.run_id == server.run_id && offer.pulse.owner == parts.reputation_owner
+                && offer.pulse.tick == clock.tick_counter
+        });
         server.weather = clock.weather;
         server.lent = true;
         // Built before `on_lend`, so a panic there still swaps back.
@@ -291,6 +301,8 @@ impl Drop for LentSim<'_> {
         let server = &mut self.host.server;
         swap_parts(server, &mut self.parts);
         server.lent = false;
+        server.lent_day_offer = None;
+        server.lent_day_owner = None;
     }
 }
 
@@ -338,6 +350,7 @@ pub(crate) struct OwnedSimParts {
     pub leaf_decay: LeafDecaySystem,
     pub loaded_columns: ahash::AHashSet<(i32, i32)>,
     pub clock: HostClock,
+    pub(crate) reputation_day: crate::reputation_day::DayClock,
 }
 
 #[cfg(test)]
@@ -348,6 +361,7 @@ impl OwnedSimParts {
     /// lending server holds outside the window.
     pub(crate) fn take_from(hs: &mut HostedServer) -> Self {
         let s = &mut hs.server;
+        let reputation_day = std::mem::replace(&mut s.reputation_day, crate::reputation_day::DayClock::new());
         let parts = Self {
             world: std::mem::replace(&mut s.world, World::new()),
             ecs: std::mem::take(&mut s.ecs),
@@ -359,8 +373,11 @@ impl OwnedSimParts {
             clock: HostClock {
                 world_time: s.world_time,
                 tick_counter: s.tick_counter,
+                reputation_owner: reputation_day.owner(),
+                reputation_offer: None,
                 weather: s.weather,
             },
+            reputation_day,
         };
         hs.set_host_world_for_test(crate::hosted_server::HostWorld::Lent);
         parts
@@ -371,8 +388,10 @@ impl OwnedSimParts {
     pub(crate) fn lend_tick(&mut self, hs: &mut HostedServer) {
         self.clock.world_time = (self.clock.world_time + 1) % 24_000;
         self.clock.tick_counter = self.clock.tick_counter.wrapping_add(1);
+        self.clock.reputation_offer = self.reputation_day.advance(self.clock.tick_counter, 1).filter(|pulse| pulse.days > 0).map(|pulse| crate::reputation_day::DayOffer { run_id: hs.server.run_id, pulse });
         let clock = self.clock;
         LentSim::lend(hs, self.parts(), clock).tick();
+        self.clock.reputation_offer = None;
     }
 
     /// The host client's column stream-in / stream-out state, as its
@@ -397,6 +416,7 @@ impl OwnedSimParts {
 
     pub(crate) fn parts(&mut self) -> SimParts<'_> {
         SimParts {
+            reputation_owner: self.reputation_day.owner(),
             world: &mut self.world,
             ecs: &mut self.ecs,
             water: &mut self.water,
@@ -429,6 +449,7 @@ mod tests {
         world.set_block(3, 40, 5, crate::block::STONE);
         let mut loaded_columns = ahash::AHashSet::new();
         loaded_columns.insert((0, 0));
+        let reputation_day = crate::reputation_day::DayClock::new();
         OwnedSimParts {
             world,
             ecs: hecs::World::new(),
@@ -440,8 +461,11 @@ mod tests {
             clock: HostClock {
                 world_time: 1000,
                 tick_counter: 5000,
+                reputation_owner: reputation_day.owner(),
+                reputation_offer: None,
                 weather: crate::weather::Weather::CLEAR,
             },
+            reputation_day,
         }
     }
 

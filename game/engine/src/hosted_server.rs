@@ -46,7 +46,7 @@ mod quest_live_tests;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod quest_live_fixture;
 #[cfg(all(test, not(target_arch = "wasm32")))]
-mod quest_lifecycle_actor;
+pub(crate) mod quest_lifecycle_actor;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod quest_lifecycle_actions;
 #[cfg(all(test, not(target_arch = "wasm32")))]

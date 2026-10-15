@@ -128,17 +128,18 @@ impl crate::GameState {
         true
     }
 
-    pub(crate) fn decay_native_personal(&mut self, pidx: usize) -> bool {
+    pub(crate) fn decay_native_personal(&mut self, pidx: usize, days: u32) -> bool {
         if self.players[pidx].personal_binding.is_none() || self.joined() {
             return false;
         }
+        if days == 0 { return true; }
         let result = (|| -> Result<(), String> {
             let mut record = self.native_gameplay_record(pidx)?;
             if record.reputation.iter().all(|(_, score)| *score == 0) {
                 return Ok(());
             }
             for (_, score) in &mut record.reputation {
-                *score -= score.signum();
+                *score = crate::reputation_day::decay_score(*score, days);
             }
             record.revision = record
                 .revision

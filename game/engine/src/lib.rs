@@ -351,6 +351,7 @@ mod quest_state;
 mod quest_client;
 mod quest_native;
 mod reputation;
+mod reputation_day;
 mod economy;
 mod raid;
 mod spawn_pref;
@@ -1083,6 +1084,9 @@ pub(crate) struct GameState {
     /// World-time advance per tick. 1 = standard 20-min day; 4 = 5-min alpha day.
     /// Configurable at runtime via `/time speed <n>`.
     pub(crate) world_time_step: u32,
+    /// Runtime-only natural reputation day; never a saved player or phase clock.
+    pub(crate) reputation_day: crate::reputation_day::DayClock,
+    pub(crate) reputation_day_offer: Option<crate::reputation_day::DayOffer>,
     /// Monotonic tick counter — never wraps. Used for UI timestamps where
     /// `world_time` (5-min wrap on alpha) would alias.
     pub(crate) tick_counter: u64,
@@ -1913,6 +1917,8 @@ impl GameState {
             // "time is moving too fast." Runtime override remains available
             // via `/time speed <n>` for testing.
             world_time_step: 1,
+            reputation_day: crate::reputation_day::DayClock::new(),
+            reputation_day_offer: None,
             tick_counter: 0,
             pop_epoch_id: 0,
             chat: chat_ui::ChatState::new(),

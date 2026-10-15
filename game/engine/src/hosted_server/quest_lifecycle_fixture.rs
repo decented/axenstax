@@ -118,6 +118,12 @@ impl Room {
         if let Some(secret) = secret {
             tests::send_signed_join(&client, secret, Some(binding));
         } else {
+            let challenge = client
+                .try_recv_from_server()
+                .expect("actual guest attach challenge");
+            let (kind, body) = protocol::deserialize_header(&challenge).unwrap();
+            assert_eq!(kind, protocol::PacketType::Challenge);
+            let _: protocol::ChallengePacket = protocol::safe_deserialize(body).unwrap();
             client.send_to_server(&protocol::serialize_packet(
                 protocol::PacketType::JoinRequest,
                 &crate::remote_client::build_join_request_guest("Guest", 0),
@@ -135,7 +141,15 @@ impl Room {
             crate::personal_sync::Inbox::new(accepted.action_session, accepted.action_life);
         let mut actor = Actor::new(client, accepted, slot, personal, 0);
         actor.drain(&self.host.server.registry);
-        assert_eq!(actor.applied, 2, "actual initial Sync1 then Personal2");
+        assert_eq!(
+            actor.initial_carriers,
+            [(1, "sync"), (2, "personal")],
+            "actual initial Sync1 then Personal2 before any later day carrier"
+        );
+        assert!(
+            actor.applied >= 2,
+            "all subsequent actual carriers still apply in exact FIFO order"
+        );
         let i = actor.i();
         assert!(!self.host.server.players[i].personal_delivery.initialised);
         if let Some(secret) = secret {

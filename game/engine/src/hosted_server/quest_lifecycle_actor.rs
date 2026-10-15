@@ -8,13 +8,14 @@ use crate::{
     window_events::{InboxItem, WindowInbox},
 };
 
-pub(super) struct Actor {
+pub(crate) struct Actor {
     pub client: ChannelClientTransport,
     pub accepted: protocol::JoinAcceptPacket,
     pub slot: crate::player_slot::PlayerSlot,
     pub personal: crate::personal_sync::Inbox,
     pub physical: WindowInbox,
     pub applied: u32,
+    pub initial_carriers: Vec<(u32, &'static str)>,
     pub frontier: ActionFrontier,
     pub results: Vec<crate::quest_wire::QuestResult>,
     pub kills: Vec<protocol::KillEventPacket>,
@@ -43,6 +44,7 @@ impl Actor {
             personal,
             physical: Default::default(),
             applied,
+            initial_carriers: Vec::new(),
             results: Vec::new(),
             kills: Vec::new(),
             outcomes: Vec::new(),
@@ -168,6 +170,9 @@ impl Actor {
             let p = &mut self.slot;
             match item {
                 InboxItem::Outcome(RequestOutcome::Sync(sync)) => {
+                    if event == 1 {
+                        self.initial_carriers.push((event, "sync"));
+                    }
                     let station = crate::inventory_sync::apply(
                         &mut crate::window::WindowMut {
                             inv: &mut p.inventory,
@@ -225,6 +230,9 @@ impl Actor {
                 ),
                 InboxItem::Outcome(RequestOutcome::PersonalSync { window_event, .. }) => {
                     let acknowledgements = self.personal.apply(window_event, p).unwrap();
+                    if event == 2 {
+                        self.initial_carriers.push((event, "personal"));
+                    }
                     for ack in acknowledgements {
                         self.ack(ack);
                     }

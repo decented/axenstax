@@ -3047,6 +3047,8 @@ impl super::GameState {
         // runtime override; this reset just brings every menu → Playing
         // transition back to the canonical step.
         self.world_time_step = 1;
+        self.reputation_day = crate::reputation_day::DayClock::new();
+        self.reputation_day_offer = None;
         self.tick_counter = 0;
         // Weather is ephemeral and keyed to `tick_counter` ("a world always
         // loads clear" — `weather.rs`). Zeroing the tick without zeroing the
@@ -4695,6 +4697,16 @@ impl super::GameState {
         tally_before: crate::sim_lend::SimTally,
     ) -> LentTickReport {
         let mut report = LentTickReport::default();
+        // Take once even on an early return. Only the run present at the actual
+        // owner advance can receive this current fixed-tick capability.
+        let offer = self.reputation_day_offer.take().filter(|offer| {
+            !self.handover_holds_play()
+                && offer.pulse.owner == self.reputation_day.owner()
+                && offer.pulse.tick == self.tick_counter
+                && self.hosted_server.as_ref().is_some_and(|host| {
+                    host.lends_host_world() && host.server.run_id == offer.run_id
+                })
+        });
         if self.hosted_server.as_ref().is_some_and(|host| host.lends_host_world())
             && self.hosted_server.as_ref().is_some_and(|host| host.local_gameplay_preparation.is_none())
         {
@@ -4769,12 +4781,15 @@ impl super::GameState {
         let clock = crate::sim_lend::HostClock {
             world_time: self.world_time,
             tick_counter: self.tick_counter,
+            reputation_owner: self.reputation_day.owner(),
+            reputation_offer: offer,
             weather: crate::weather::Weather {
                 rain_until: self.weather_rain_until,
                 storm_until: self.weather_storm_until,
             },
         };
         let parts = crate::sim_lend::SimParts {
+            reputation_owner: self.reputation_day.owner(),
             world: &mut self.world,
             ecs: &mut self.ecs,
             water: &mut self.water,
@@ -4846,7 +4861,13 @@ impl super::GameState {
         primary
     }
 
+    pub(crate) fn finish_reputation_day_tick(&mut self) {
+        self.reputation_day_offer = None;
+    }
+
     pub(crate) fn tick(&mut self) {
+        // An offer belongs only to this complete native-plus-hosted fixed tick.
+        self.reputation_day_offer = None;
         // World handover: while this world is frozen (or the host this client
         // joined paused play) nothing advances — no simulation, no local
         // edits, no grants, decay or raid credit, no autosave.
@@ -5103,8 +5124,30 @@ impl super::GameState {
         // `world_time_step`'s default — flip the default to 1 pre-release.
         // The host client always owns the clock (`/time`, sleeping); on a lent
         // world the server reads it and never advances it (D1).
-        if self.sim_runs(SimSystem::Clock) {
+        let reputation_days = if self.sim_runs(SimSystem::Clock) {
             self.world_time = (self.world_time + self.world_time_step) % 24000;
+            if !self.joined() {
+                let pulse = self.reputation_day.advance(self.tick_counter, self.world_time_step);
+                #[cfg(not(target_arch = "wasm32"))]
+                if let (Some(pulse), Some(host)) = (pulse, self.hosted_server.as_ref())
+                    && pulse.days > 0 && host.lends_host_world()
+                {
+                    self.reputation_day_offer = Some(crate::reputation_day::DayOffer {
+                        run_id: host.server.run_id,
+                        pulse,
+                    });
+                }
+                pulse.map_or(0, |pulse| pulse.days)
+            } else { 0 }
+        } else { 0 };
+        // Consume the genuine day immediately: a later autosave refusal must
+        // not lose the native event while its same-tick server offer survives.
+        if reputation_days > 0 {
+            for pidx in 0..self.players.len() {
+                if !self.decay_native_personal(pidx, reputation_days) {
+                    self.players[pidx].reputation.decay_days(reputation_days);
+                }
+            }
         }
 
         // BRIDGE: live Reserve richness (`self.reserve.richness`) no longer
@@ -5512,20 +5555,8 @@ impl super::GameState {
             }
         }
 
-        // Phase 9 — natural reputation decay (one step per in-game day).
-        // Slow drift back toward zero so a kid's past mistakes fade.
-        if self.tick_counter
-            .is_multiple_of(crate::reputation::REPUTATION_DECAY_INTERVAL_TICKS)
-            && self.tick_counter > 0
-            && !self.remote_client.as_ref().is_some_and(|c| c.has_personal_state())
-        {
-            for pidx in 0..self.players.len() {
-                if !self.decay_native_personal(pidx) { self.players[pidx].reputation.decay_once(); }
-            }
-        }
-
-        // Spec 22 Phase 2 — daily raid scheduler. Runs at the same
-        // cadence as reputation decay (once per in-game day). Eligible
+        // Spec 22 Phase 2 — legacy raid scheduler, retaining its 6000-tick
+        // cadence independently of reputation's natural world day. Eligible
         // villages roll a deterministic per-(seed, vid, day) chance;
         // hits drain the treasury + schedule a Warning-state raid.
         if !joined
@@ -10547,6 +10578,7 @@ impl super::GameState {
             // world — `tick_hosted_server`). No-op when not hosting.
             #[cfg(not(target_arch = "wasm32"))]
             self.tick_hosted_server(tally_before);
+            self.finish_reputation_day_tick();
             // Saturating: a tick may RESET the timing mid-loop (e.g. a Stash
             // Column arena launch / `/scenario` calls `reset_tick_timing`, which
             // zeroes the accumulator). A plain `-= TICK_DURATION` then underflows

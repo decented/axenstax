@@ -50,7 +50,7 @@ fn natural_tick(game: &mut HeadlessGame, binding: &GameplayBinding, wraps: &mut 
 }
 
 #[test]
-#[ignore = "needs a native GPU world, real preparation and 6000 natural gameplay ticks"]
+#[ignore = "needs a native GPU world, real preparation and observed natural reputation days"]
 fn game_harness_d2c3_native_reputation_does_not_decay_before_a_real_default_world_day() {
     let _root = crate::save::WorldsRootGuard::new("d2c3-native-default-day");
     let name = "d2c3-native-default-day";
@@ -233,7 +233,6 @@ fn game_harness_d2c3_native_reputation_does_not_decay_before_a_real_default_worl
     assert!(current.context == penalised.context);
 
     // FIRST own daily-cadence assertion: a 6000-tick quarter-day cannot decay.
-    // Current production is expected to fail here with -24 versus -25.
     assert_eq!(
         score(&current, village),
         penalised_score,
@@ -244,5 +243,21 @@ fn game_harness_d2c3_native_reputation_does_not_decay_before_a_real_default_worl
         penalised_score
     );
     assert_eq!(current.revision, before.revision);
-    // This baseline does not execute full-day, offline or accelerated-clock tails.
+    while game.state.tick_counter < 23_999 {
+        natural_tick(&mut game, &binding, &mut wraps);
+        assert_eq!(score(&record(&game), village), penalised_score);
+    }
+    assert_eq!(game.state.reputation_day.remainder(), 23_999);
+    let before_day = record(&game);
+    natural_tick(&mut game, &binding, &mut wraps);
+    let day = record(&game);
+    assert_eq!(game.state.tick_counter, 24_000);
+    assert_eq!(game.state.reputation_day.remainder(), 0);
+    assert_eq!(score(&day, village), penalised_score + 1);
+    assert_eq!(day.revision, before_day.revision + 1);
+    assert_eq!(day.context, penalised.context);
+    assert_eq!(day.kills, penalised.kills);
+    natural_tick(&mut game, &binding, &mut wraps);
+    assert_eq!(record(&game).revision, day.revision);
+    assert_eq!(score(&record(&game), village), penalised_score + 1);
 }

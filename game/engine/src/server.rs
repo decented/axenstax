@@ -977,6 +977,10 @@ pub struct GameServer {
     pub lent: bool,
     pub leaf_decay: LeafDecaySystem,
     pub world_time: u32,
+    pub(crate) reputation_day: crate::reputation_day::DayClock,
+    pub(crate) lent_day_owner: Option<crate::reputation_day::OwnerId>,
+    pub(crate) lent_day_offer: Option<crate::reputation_day::DayOffer>,
+    pub(crate) lent_day_consumer: crate::reputation_day::DayConsumer,
     pub loaded_columns: ahash::AHashSet<(i32, i32)>,
     /// Phase B1 — the dedicated server's column streamer (`server_stream.rs`):
     /// loads / unloads columns around every connected player + the spawn each
@@ -1133,6 +1137,10 @@ impl GameServer {
             lent: false,
             leaf_decay: LeafDecaySystem::new(),
             world_time: 6000,
+            reputation_day: crate::reputation_day::DayClock::new(),
+            lent_day_owner: None,
+            lent_day_offer: None,
+            lent_day_consumer: crate::reputation_day::DayConsumer::default(),
             loaded_columns: ahash::AHashSet::new(),
             column_streamer: None,
             spawn_column: (0, 0),
@@ -1579,14 +1587,19 @@ impl GameServer {
         // Matches GameState::world_time_step's default of 1 (post-playtest
         // rollback from the alpha-fast 4× BRIDGE). A lent world's clock is the
         // host's: `LentSim` hands it in, already advanced for this tick.
-        if self.runs(SimSystem::Clock) {
+        let reputation_days = if self.runs(SimSystem::Clock) {
             self.world_time = (self.world_time + 1) % 24000;
             // Monotonic counter — used by anything that needs an absolute
             // age check (Rubber tap cooldown, future replenishers).
             self.tick_counter = self.tick_counter.wrapping_add(1);
-        }
+            self.reputation_day.advance(self.tick_counter, 1).map_or(0, |pulse| pulse.days)
+        } else if let Some(owner) = self.lent_day_owner {
+            self.lent_day_consumer.consume(owner, self.tick_counter, self.run_id, self.lent_day_offer.take())
+        } else { 0 };
         #[cfg(not(target_arch = "wasm32"))]
-        { self.advance_personal_timers(); self.decay_personal(); }
+        { self.advance_personal_timers(); self.decay_personal(reputation_days); }
+        #[cfg(target_arch = "wasm32")]
+        let _ = reputation_days;
         // C2a — a dusk starts the next night (once-a-night sleep).
         self.night_calendar.observe(self.world_time);
 

@@ -151,14 +151,8 @@ impl crate::server::GameServer {
             Err(_) => sp.personal_read_failed = true,
         }
     }
-    pub(crate) fn decay_personal(&mut self) {
-        if self.tick_counter == 0
-            || !self
-                .tick_counter
-                .is_multiple_of(crate::reputation::REPUTATION_DECAY_INTERVAL_TICKS)
-        {
-            return;
-        };
+    pub(crate) fn decay_personal(&mut self, days: u32) {
+        if days == 0 { return; }
         for sp in &mut self.players {
             if !sp.server_simulated || !sp.is_in_world() { continue; }
             let Some(personal) = &mut sp.personal else {
@@ -173,7 +167,7 @@ impl crate::server::GameServer {
             let Some(revision) = record.revision.checked_add(1) else { sp.personal_read_failed = true; continue; };
             record.revision = revision;
             for (_, score) in &mut record.reputation {
-                *score -= score.signum();
+                *score = crate::reputation_day::decay_score(*score, days);
             }
             match record.encode() {
                 Ok(bytes) => { personal.bytes = bytes; sp.gameplay_clock.committed(self.tick_counter); },

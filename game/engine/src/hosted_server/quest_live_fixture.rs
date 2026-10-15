@@ -3,7 +3,7 @@ use super::*;
 use crate::{
     action_identity::InventoryMode,
     action_wire::{ActionIntent, ActionPacket, AppliedActionAck},
-    item::{Item, ItemStack, MaterialId},
+    item::ItemStack,
     quest_wire::{QuestOperation, QuestRequest, QuestResult},
     transport::ClientTransport as _,
 };

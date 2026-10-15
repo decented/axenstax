@@ -7022,3 +7022,35 @@ SHA256(snapshot bincode) bytes are unchanged. Browser play never gains native
 sign-in, an identity file store or handover authority from this client adapter;
 the public browser taster remains offline. The scoped WASM library type check
 verifies portable compilation only, not actual browser gameplay.
+
+
+### D2c-3 reputation day authority (checkpoint30 source, verification pending)
+
+Reputation drifts one point toward zero per 24,000 accumulated **actual natural
+solar units** at the active world-clock owner, rather than every 6000 logical
+ticks or each visible phase rollover. Native nonjoined play counts its actual
+`world_time_step`; an owning dedicated/no-lend server counts its actual +1
+advance. Joined visual extrapolation has no reputation authority. `/time speed`
+changes subsequent natural units; `/time set` and sleeping only relocate phase
+and grant no decay. A lighting `time_lock` leaves natural raw clock advances
+running. Existing raid/treasury numerical 6000 scheduling and gossip are unchanged.
+
+A lending host consumes the same genuine native day for its local holders and
+passes one private runtime stamped offer to the lending server run that was
+already present at that advance. Only that run, owner and same complete fixed
+tick may consume it once; duplicate, stale, foreign-owner or later/new-host
+windows cannot replay a cached day. Connected in-world authoritative holders,
+including dead bodies, are eligible at actual application; server inbound
+admission and departure run before the server applies the event. Real current
+Personal snapshots and physical/Applied frontiers still settle each mutation.
+Offline holders receive neither events nor catch-up.
+
+Partial-day remainder and event provenance are runtime-only: temporary hosting,
+lending and failed leave preserve them; true world reopen or dedicated restart
+starts a fresh partial day and runtime owner while saved scores and honest
+remaining gameplay timers restore. No cyclic phase or partial-day persistence,
+new record/protocol/save schema, or dedicated persisted clock parity is claimed.
+No-lend keeps its existing owning-server+1 natural advance even when native
+accelerated phase is mirrored; matching accelerated host/server clock ownership
+remains D4. These source changes await reviewed exact runtime controls and do
+not claim final quest/carry acceptance.

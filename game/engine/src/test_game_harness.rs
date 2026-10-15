@@ -64,6 +64,7 @@ impl HeadlessGame {
     pub(crate) fn ticks(&mut self, n: u32) {
         for _ in 0..n {
             self.state.tick();
+            self.state.finish_reputation_day_tick();
         }
     }
 
@@ -77,7 +78,9 @@ impl HeadlessGame {
                 let before = self.state.world.sim_tally;
                 self.state.tick();
                 self.state.network_send_input();
-                self.state.tick_hosted_server(before)
+                let report = self.state.tick_hosted_server(before);
+                self.state.finish_reputation_day_tick();
+                report
             })
             .collect()
     }
@@ -104,6 +107,8 @@ mod tests {
     mod quest_preparation_lifecycle;
     #[path = "quest_day.rs"]
     mod quest_day;
+    #[path = "quest_day_authority.rs"]
+    mod quest_day_authority;
     use super::*;
 
     /// Point `AXENSTAX_WORLDS_DIR` at one pid-scoped temp dir shared by every

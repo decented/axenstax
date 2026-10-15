@@ -4,7 +4,6 @@ use super::*;
 use crate::{
     action_identity::{ActionFate, InventoryMode},
     quest_wire::{QuestNote, QuestOperation},
-    transport::ClientTransport as _,
 };
 const OTHER: [u8; 32] = [39; 32];
 pub(super) fn key(secret: [u8; 32]) -> [u8; 32] {
