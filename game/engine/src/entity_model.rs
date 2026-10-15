@@ -13,6 +13,7 @@ use crate::mob_ai::MobAi;
 use crate::combat::Health;
 
 mod animals;
+mod roster;
 
 /// Overlay inflation for the RIGHT ARM specifically — the one part the
 /// first-person viewmodel draws (`crate::viewmodel`). Per-part overlay inflate
@@ -241,7 +242,7 @@ pub const TEX_ITEM_HEMP_SEEDS: u32 = 256;
 /// A cuboid part of a mob model.
 #[derive(Clone, Debug)]
 pub struct ModelPart {
-    /// Offset from entity foot position (centre-bottom of part).
+    /// Part centre, relative to the entity foot position.
     pub origin: Vec3,
     /// Size in blocks (width_x, height_y, depth_z).
     pub size: Vec3,
@@ -251,7 +252,7 @@ pub struct ModelPart {
     pub animated: bool,
     /// Animation phase offset (0.0 or 0.5 for alternating legs).
     pub phase: f32,
-    /// Texture layers: [+x, -x, +y, -y, +z, -z] (right, left, top, bottom, front, back)
+    /// Texture layers: [+x, -x, +y, -y, +z, -z] (right, left, top, bottom, back, front)
     pub tex_faces: [u32; 6],
     /// Whether this part pitches up/down with the entity's look direction
     /// (player head tracking look pitch). Default false for all mobs.
@@ -262,55 +263,37 @@ pub struct ModelPart {
 static MODEL_CACHE: std::sync::LazyLock<std::collections::HashMap<MobType, Vec<ModelPart>>> =
     std::sync::LazyLock::new(|| {
         let mut m = std::collections::HashMap::new();
-        m.insert(MobType::Cow, cow_model());
-        m.insert(MobType::Chicken, chicken_model());
-        m.insert(MobType::Pig, pig_model());
-        m.insert(MobType::Sheep, sheep_model());
-        m.insert(MobType::Villager, villager_model());
-        m.insert(MobType::Peddler, peddler_model());
-        m.insert(MobType::Bear, bear_model());
-        m.insert(MobType::Hyena, hyena_model());
-        // 2026-05-27 — these seven were spawning correctly but had no
-        // model, so the renderer drew nothing (invisible animals). Each
-        // borrows the closest existing coat texture (cow = brown, sheep
-        // = sandy/cream, chicken = pale) the way Bear/Hyena do; proper
-        // bespoke textures (esp. bee-yellow + squid-blue) are a
-        // playtest-driven polish pass.
-        m.insert(MobType::Horse, horse_model());
-        m.insert(MobType::Wolf, wolf_model());
-        m.insert(MobType::Rabbit, rabbit_model());
-        m.insert(MobType::Goat, goat_model());
-        m.insert(MobType::Nostrich, nostrich_model());
-        m.insert(MobType::Bee, bee_model());
-        m.insert(MobType::Squid, squid_model());
-        // Aquatic wave — Fish + Shark get small proc meshes; Glow Squid reuses
-        // the squid mesh with its cyan tinted coat (mob-species-tint
-        // foundation, 2026-07-11 — identity really does read from
-        // MobDef.color now, baked into per-species texture layers). Bespoke
-        // textures (grey shark) are a playtest polish pass.
-        m.insert(MobType::Fish, fish_model());
-        m.insert(MobType::Shark, shark_model());
-        m.insert(MobType::GlowSquid, retint(MobType::GlowSquid, squid_model()));
+        m.insert(MobType::Cow, roster::polish(MobType::Cow, cow_model()));
+        m.insert(MobType::Chicken, roster::polish(MobType::Chicken, chicken_model()));
+        m.insert(MobType::Pig, roster::polish(MobType::Pig, pig_model()));
+        m.insert(MobType::Sheep, roster::polish(MobType::Sheep, sheep_model()));
+        m.insert(MobType::Villager, roster::polish(MobType::Villager, villager_model()));
+        m.insert(MobType::Peddler, roster::polish(MobType::Peddler, peddler_model()));
+        m.insert(MobType::Bear, roster::polish(MobType::Bear, bear_model()));
+        m.insert(MobType::Hyena, roster::polish(MobType::Hyena, hyena_model()));
+        m.insert(MobType::Horse, roster::polish(MobType::Horse, horse_model()));
+        m.insert(MobType::Wolf, roster::polish(MobType::Wolf, wolf_model()));
+        m.insert(MobType::Rabbit, roster::polish(MobType::Rabbit, rabbit_model()));
+        m.insert(MobType::Goat, roster::polish(MobType::Goat, goat_model()));
+        m.insert(MobType::Nostrich, roster::polish(MobType::Nostrich, nostrich_model()));
+        m.insert(MobType::Bee, roster::polish(MobType::Bee, bee_model()));
+        m.insert(MobType::Squid, roster::polish(MobType::Squid, squid_model()));
+        m.insert(MobType::Fish, roster::polish(MobType::Fish, fish_model()));
+        m.insert(MobType::Shark, roster::polish(MobType::Shark, shark_model()));
+        m.insert(MobType::GlowSquid, roster::polish(MobType::GlowSquid, retint(MobType::GlowSquid, squid_model())));
         // Species-specific silhouettes retain the existing coat layer addresses.
-        m.insert(MobType::Fox, retint(MobType::Fox, animals::fox()));
-        m.insert(MobType::PolarBear, retint(MobType::PolarBear, bear_model()));
-        m.insert(MobType::Reindeer, retint(MobType::Reindeer, animals::reindeer()));
-        m.insert(MobType::Cat, retint(MobType::Cat, animals::cat()));
-        m.insert(MobType::Parrot, retint(MobType::Parrot, animals::parrot()));
-        m.insert(MobType::Donkey, retint(MobType::Donkey, animals::donkey()));
-        m.insert(MobType::Mule, retint(MobType::Mule, animals::mule()));
-        // HP-3 — Brigand / Marauder / Berserker share the villager
-        // bipedal mesh; tier identity reads from `MobDef.color` (per-
-        // TOML tint: brown / grey / rust-red). When the dedicated
-        // armoured-human mesh lands post-playtest, replace these three.
-        m.insert(MobType::Brigand, villager_model());
-        m.insert(MobType::Marauder, villager_model());
-        m.insert(MobType::Berserker, villager_model());
-        // HP-4 — Knight reuses the villager mesh; identity reads from
-        // `MobDef.color` (steel grey). Dedicated armoured mesh deferred
-        // to post-playtest polish.
-        m.insert(MobType::Knight, villager_model());
-        m.insert(MobType::Crab, retint(MobType::Crab, animals::crab()));
+        m.insert(MobType::Fox, roster::polish(MobType::Fox, retint(MobType::Fox, animals::fox())));
+        m.insert(MobType::PolarBear, roster::polish(MobType::PolarBear, retint(MobType::PolarBear, bear_model())));
+        m.insert(MobType::Reindeer, roster::polish(MobType::Reindeer, retint(MobType::Reindeer, animals::reindeer())));
+        m.insert(MobType::Cat, roster::polish(MobType::Cat, retint(MobType::Cat, animals::cat())));
+        m.insert(MobType::Parrot, roster::polish(MobType::Parrot, retint(MobType::Parrot, animals::parrot())));
+        m.insert(MobType::Donkey, roster::polish(MobType::Donkey, retint(MobType::Donkey, animals::donkey())));
+        m.insert(MobType::Mule, roster::polish(MobType::Mule, retint(MobType::Mule, animals::mule())));
+        m.insert(MobType::Brigand, roster::polish(MobType::Brigand, villager_model()));
+        m.insert(MobType::Marauder, roster::polish(MobType::Marauder, villager_model()));
+        m.insert(MobType::Berserker, roster::polish(MobType::Berserker, villager_model()));
+        m.insert(MobType::Knight, roster::polish(MobType::Knight, villager_model()));
+        m.insert(MobType::Crab, roster::polish(MobType::Crab, retint(MobType::Crab, animals::crab())));
         m
     });
 
@@ -338,7 +321,7 @@ pub fn mob_model(kind: MobType) -> &'static [ModelPart] {
 /// `MobType::Villager` + a `SatoshiMarker`; `build_entity_model_vertices`
 /// swaps this in for the marker rather than keying a new `MobType`.
 static SATOSHI_MODEL: std::sync::LazyLock<Vec<ModelPart>> =
-    std::sync::LazyLock::new(satoshi_model);
+    std::sync::LazyLock::new(|| roster::sage(satoshi_model()));
 
 /// Vertex-`light` sentinel that marks a self-glowing (emissive) part. The
 /// fragment shader (`shader.wgsl` `fs_main`) renders any vertex with
@@ -2328,7 +2311,7 @@ fn build_part_vertices(
 ) {
     let tex_faces = tex_override.unwrap_or(&part.tex_faces);
     let half = part.size * 0.5 * scale;
-    // Part origin is centre-bottom of the part (scaled about the entity origin).
+    // Part origin is its centre (scaled about the entity origin).
     let centre = part.origin * scale;
 
     // 8 corners of the cuboid (local to entity, before rotation)
@@ -4196,10 +4179,16 @@ mod tests {
     #[test]
     fn mesh_reuse_species_render_their_own_tinted_coats() {
         // Species identity comes from the tinted run, not the donor coat —
-        // a Fox must share NO texture layer with the Wolf's donor coat.
+        // a Fox must share no original donor coat surface with the Wolf.
         for &(reuse, donor) in TINTED_REUSE {
-            let donor_faces: std::collections::HashSet<u32> =
-                mob_model(donor).iter().flat_map(|p| p.tex_faces).collect();
+            // Shared eyes, hooves and trim can use common paint layers. The
+            // isolation contract concerns the original donor COAT surfaces.
+            let entry = crate::texture_gen::SPECIES_TINTS.iter().find(|s| s.kind == reuse).unwrap();
+            let donor_faces: std::collections::HashSet<u32> = entry.map.iter().map(|(f, _)| *f).collect();
+            let own_faces: std::collections::HashSet<u32> = entry.map.iter()
+                .filter_map(|(f, _)| crate::texture_gen::tinted_layer(reuse, *f)).collect();
+            assert!(mob_model(reuse).iter().flat_map(|p| p.tex_faces).any(|f| own_faces.contains(&f)),
+                "{reuse:?} keeps its own registered coat surfaces");
             for part in mob_model(reuse) {
                 for f in part.tex_faces {
                     assert!(

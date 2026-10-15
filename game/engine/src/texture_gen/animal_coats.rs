@@ -20,7 +20,7 @@ enum Surface {
 pub(super) fn generate(kind: MobType, donor: u32, colour: [f32; 3]) -> Option<Vec<u8>> {
     use MobType::*;
     use Surface::*;
-    if !matches!(kind, Fox | Cat | Crab | Reindeer | Donkey | Mule | Parrot) {
+    if !matches!(kind, Fox | Cat | Crab | Reindeer | Donkey | Mule | Parrot | PolarBear) {
         return None;
     }
     let surface = match donor {
@@ -115,11 +115,14 @@ pub(super) fn generate(kind: MobType, donor: u32, colour: [f32; 3]) -> Option<Ve
                         rgb = [230 + n, 219 + n, 195 + n];
                     }
                 }
+                // Smooth pale fur replaces the cow patch pattern. Eye and
+                // muzzle geometry supplies the bear face, never a tiled mask.
+                PolarBear => {}
                 _ => unreachable!(),
             }
             // Faces have distinct eye whites/irises, dark pupils and small
             // highlights. Body, crown and rear faces never acquire eyes.
-            if surface == Face && !matches!(kind, Crab | Parrot) {
+            if surface == Face && !matches!(kind, Crab | Parrot | PolarBear) {
                 let eye = (3..=5).contains(&x) || (10..=12).contains(&x);
                 if eye && (5..=7).contains(&y) {
                     rgb = if kind == Cat {

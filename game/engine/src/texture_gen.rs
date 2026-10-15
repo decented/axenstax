@@ -4646,10 +4646,6 @@ fn gen_villager_head_side() -> Vec<u8> {
             if (7..=9).contains(&y) && (2..=3).contains(&x) {
                 (r, g, b) = (190, 155, 130);
             }
-            // Eye visible on side view (face direction = +x).
-            if (y == 7 || y == 8) && (x == 11 || x == 12) {
-                (r, g, b) = (35, 25, 15);
-            }
             px[i] = r; px[i+1] = g; px[i+2] = b; px[i+3] = 255;
         }
     }
@@ -4769,9 +4765,6 @@ fn gen_satoshi_head_side() -> Vec<u8> {
                 (clamp_u8(96 + n / 2), clamp_u8(63 + n / 2), clamp_u8(40 + n / 2));
             if x >= 11 && (4..13).contains(&y) {
                 (r, g, b) = (208, 173, 143); // face sliver
-                if (y == 6 || y == 7) && x == 12 {
-                    (r, g, b) = (44, 30, 20); // eye
-                }
                 if y >= 11 {
                     (r, g, b) = (186, 184, 180); // beard
                 }
@@ -4914,10 +4907,6 @@ fn gen_wandering_head_side() -> Vec<u8> {
             // Hood wraps top + back.
             if y < 4 || (y < 8 && x < 4) {
                 (r, g, b) = (80, 50, 115);
-            }
-            // Eye.
-            if (y == 7 || y == 8) && (x == 11 || x == 12) {
-                (r, g, b) = (35, 25, 15);
             }
             px[i] = r; px[i+1] = g; px[i+2] = b; px[i+3] = 255;
         }
@@ -6173,31 +6162,27 @@ mod tests {
         // species colour. A straight multiply can never brighten a dark donor
         // (the white polar bear stayed cow-brown); un-normalized luminance
         // keeps the donor's brightness (bear mean 127 vs donor 128). The
-        // Normalisation still applies to donor coats (polar bear/glow squid).
-        // The fox now has bespoke art; its saturation property is tested below.
-        use crate::entity_model::{TEX_COW_BODY_SIDE, TEX_SQUID_BODY};
+        // Normalisation still applies to the glow squid donor coat.
+        // Other species now have bespoke art, with visual properties below.
+        use crate::entity_model::TEX_SQUID_BODY;
         use crate::mob::MobType;
         let layers = generate_textures();
-        for (kind, donor_layer) in [
-            (MobType::GlowSquid, TEX_SQUID_BODY),
-            (MobType::PolarBear, TEX_COW_BODY_SIDE),
-        ] {
-            let donor = &layers[donor_layer as usize];
-            let idx = tinted_layer(kind, donor_layer)
-                .unwrap_or_else(|| panic!("{kind:?} tinted layer exists")) as usize;
-            let tinted = &layers[idx];
-            let c = crate::mob::mob_def(kind).color;
-            assert_eq!(donor.len(), tinted.len());
-            let lum = |p: &[u8]| 0.299 * p[0] as f32 + 0.587 * p[1] as f32 + 0.114 * p[2] as f32;
-            let mean = donor.chunks(4).map(|p| lum(p)).sum::<f32>() / (donor.len() as f32 / 4.0);
-            let scale = TINT_TARGET_LUM / mean;
-            for (i, (d, t)) in donor.chunks(4).zip(tinted.chunks(4)).enumerate() {
-                for ch in 0..3 {
-                    let want = (lum(d) * scale * c[ch]).round().clamp(0.0, 255.0) as u8;
-                    assert_eq!(t[ch], want, "{kind:?} pixel {i} channel {ch}");
-                }
-                assert_eq!(t[3], d[3], "{kind:?} alpha preserved at pixel {i}");
+        let (kind, donor_layer) = (MobType::GlowSquid, TEX_SQUID_BODY);
+        let donor = &layers[donor_layer as usize];
+        let idx = tinted_layer(kind, donor_layer)
+            .unwrap_or_else(|| panic!("{kind:?} tinted layer exists")) as usize;
+        let tinted = &layers[idx];
+        let c = crate::mob::mob_def(kind).color;
+        assert_eq!(donor.len(), tinted.len());
+        let lum = |p: &[u8]| 0.299 * p[0] as f32 + 0.587 * p[1] as f32 + 0.114 * p[2] as f32;
+        let mean = donor.chunks(4).map(|p| lum(p)).sum::<f32>() / (donor.len() as f32 / 4.0);
+        let scale = TINT_TARGET_LUM / mean;
+        for (i, (d, t)) in donor.chunks(4).zip(tinted.chunks(4)).enumerate() {
+            for ch in 0..3 {
+                let want = (lum(d) * scale * c[ch]).round().clamp(0.0, 255.0) as u8;
+                assert_eq!(t[ch], want, "{kind:?} pixel {i} channel {ch}");
             }
+            assert_eq!(t[3], d[3], "{kind:?} alpha preserved at pixel {i}");
         }
     }
 

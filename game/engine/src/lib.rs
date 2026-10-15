@@ -3470,7 +3470,7 @@ fn run_shot_workshop(args: &[String]) {
 /// Headless screenshot mode: generate world, render one frame, save PNG, exit.
 /// Optional --hud uses the actual survival HUD; --time, --width and --height
 /// select bounded in-world visual previews without a window or saved world.
-/// --mob <species> previews a live animal on a small grass pad; --angle and
+/// --mob <species|satoshi> previews a live mob on a small grass pad; --angle and
 /// --walk-tick select its facing and walk pose without running the simulation.
 #[cfg(not(target_arch = "wasm32"))]
 fn run_screenshot(args: &[String]) {
@@ -3496,9 +3496,15 @@ fn run_screenshot(args: &[String]) {
     let height = number("--height", 720, 240, 2160);
     let world_time = number("--time", 6000, 0, 23_999);
     let show_hud = args.iter().any(|a| a == "--hud");
-    let preview_mob = args.iter().position(|a| a == "--mob")
-        .map(|i| args.get(i + 1).and_then(|name| crate::mob::MobType::from_name(name))
-            .expect("--mob requires a recognised species id"));
+    let preview_name = args.iter().position(|a| a == "--mob").map(|i| {
+        args.get(i + 1).expect("--mob requires a species id or satoshi")
+    });
+    let preview_satoshi = preview_name.is_some_and(|name| name == "satoshi");
+    let preview_mob = preview_name.map(|name| {
+        if preview_satoshi { crate::mob::MobType::Villager } else {
+            crate::mob::MobType::from_name(name).expect("--mob requires a recognised species id")
+        }
+    });
     let mut world = World::new();
     let biome_gen = crate::biome::BiomeGenerator::new(42);
 
@@ -3598,6 +3604,9 @@ fn run_screenshot(args: &[String]) {
         let angle = number("--angle", 0, 0, 359) as f32;
         let mut ecs = hecs::World::new();
         let id = crate::entity::spawn_mob(&mut ecs, kind, glam::Vec3::new(0.0, 64.0, 0.0));
+        if preview_satoshi {
+            ecs.insert_one(id, crate::satoshi::SatoshiMarker).unwrap();
+        }
         ecs.get::<&mut crate::mob_ai::MobAi>(id).unwrap().facing = angle.to_radians() - std::f32::consts::FRAC_PI_2;
         if args.iter().any(|a| a == "--walk-tick") {
             ecs.get::<&mut crate::entity::Velocity>(id).unwrap().0.x = 1.0;

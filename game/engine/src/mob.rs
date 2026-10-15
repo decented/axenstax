@@ -215,12 +215,11 @@ pub struct MobDef {
     /// Species coat tint, from the per-mob TOML. LIVE since 2026-07-11
     /// (mob-species-tint foundation): `texture_gen::generate_textures` bakes
     /// species coats into the stable slots in `texture_gen::SPECIES_TINTS`.
-    /// Fox/Cat/Crab/Reindeer/Donkey/Mule/Parrot have bespoke art since
-    /// 2026-10-15; Polar Bear and Glow Squid use luminance-normalised donor
-    /// textures. `entity_model::retint` points models at that coat run. The
-    /// villager-tier humans (Brigand/Marauder/Berserker/Knight) still ignore
-    /// it — they get a bespoke armoured mesh post-playtest (layer budget:
-    /// the tint run must stay under the 512-layer device floor).
+    /// Fox/Cat/Crab/Reindeer/Donkey/Mule/Parrot/PolarBear have bespoke art
+    /// since 2026-10-15; GlowSquid uses a luminance-normalised donor texture.
+    /// Other models use authored combinations of existing coat and paint
+    /// materials, including distinct human armour; this field does not tint
+    /// those materials. Layer addresses and the 511-layer budget stay fixed.
     pub color: [f32; 3],
     pub health: u16,
     /// Movement speed in blocks/second.

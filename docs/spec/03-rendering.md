@@ -979,14 +979,49 @@ Facial textures on cats, foxes and equines appear on the front (-Z) only.
 species coat slots: tabby stripes, fox cream trim, crab shell edging, reindeer
 cream trim and bone-coloured antlers, equine pale muzzles and dark manes, and
 parrot feather bands. `MobDef.color` supplies base coats. Small feline noses use
-existing solid paint layers. Polar Bear and Glow Squid retain normalised donor
-tints. Texture registry keys, layer addresses and the **511-layer** atlas remain
+existing solid paint layers. Polar Bear now has smooth pale fur in its
+existing six coat slots; Glow Squid retains its normalised donor tint. Texture
+registry keys, layer addresses and the **511-layer** atlas remain
 unchanged, including resource-pack overrides of the legacy `_tinted` keys.
 Hitboxes, behaviour, wire/save formats, damage flashes, world lighting and baby
 scale are unchanged; antlers, tails and ears are cosmetic extents.
 
-The existing native `--screenshot` path accepts `--mob <species>` for an isolated
-grass-pad preview, with bounded `--angle`, `--zoom` (percentage), `--walk-tick`
+**Full roster follow-up (2026-10-15).** `entity_model/roster/` adds ears, horns,
+muzzles, tails, fleece locks, combs and joined feet to the farm animals; round
+bear ears and broad muzzles; a grey wolf, spotted sandy hyena, chestnut horse
+with mane and blaze, warm rabbit with pink inner ears, horned/bearded goat and
+purple Nostrich. Bee wings extend sideways, with antennae and six small legs.
+Squid and Glow Squid have eight animated arms, lateral eyes and mantle fins.
+Fish and Shark face -Z, with connected tails trailing +Z; the shark also has
+joined dorsal/pectoral fins, a pale belly, gills and a small mouth.
+
+Villagers wear an apron; peddlers have a hood, scarf and travelling pack.
+Brigands have dark hoods and face wraps; marauders have grey armour and helmets;
+berserkers have broad red shoulders and a dark chest panel; knights have steel
+armour, blue tabards, crests and a joined shield. These clothes and equipment
+are cosmetic, not combat stats or new held-item behaviour. NPC facial textures
+now point -Z to match AI movement. Cheek art has no duplicate eyes;
+head crowns and rears use eye-free hair, hood or helmet materials. The cow
+muzzle sits below its textured eyes, and the Nostrich neck is inset from the
+chest plane to prevent coplanar flicker. Satoshi's cloak is behind him (+Z), his
+amulet is on the front (-Z), and index 7 remains his only emissive part.
+
+The original part slots retain their roles; additions follow the legacy slots.
+Boots, cuffs, paws, pauldrons and the knight shield inherit their parent limb's
+pivot and phase, so walking cannot separate them. Existing per-part Workshop
+reskins apply in both the live mesh and mannequin. Shared solid paint materials
+and the fine-grained sand surface
+replace borrowed cow/sheep markings on species without dedicated coat slots.
+All texture keys and layer addresses remain valid, with no pack migration or
+new atlas layer; changing a cow/sheep texture in a resource pack now affects
+only models still using that material. These defaults use existing paint and
+neutral material keys; a pack overriding
+sand also recolours the warm neutral surfaces. Species-specific per-part coats
+can still be authored in Workshop.
+The earlier seven bespoke models and their coat keys are unchanged.
+
+The existing native `--screenshot` path accepts `--mob <species|satoshi>` for an
+isolated grass-pad preview, with bounded `--angle`, `--zoom` (percentage), `--walk-tick`
 and `--baby` controls. It spawns an in-memory entity and uses the live mesh
 builder, camera, day/night shader and PNG readback; it never loads a saved world
 or starts a simulation. Normal terrain/HUD screenshot defaults are unchanged.
