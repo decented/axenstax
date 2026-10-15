@@ -2246,3 +2246,6 @@ fn game_harness_handover_retained_inactive_copy_refuses_native_open_before_origi
 }
 
 mod personal_delay;
+
+#[cfg(not(target_arch = "wasm32"))]
+mod quest_active;
