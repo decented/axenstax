@@ -101,6 +101,19 @@ fn actor_quest(
     // Observe the authenticated look after ordinary settlement, rather than
     // assigning server aim or assuming that the input has already landed.
     let aimed = quest_geometry(host, actor, target);
+    assert!(
+        aimed.eye.is_finite()
+            && aimed.position.is_finite()
+            && aimed.centre.is_finite()
+            && aimed.yaw.is_finite()
+            && aimed.pitch.is_finite()
+            && aimed.distance.is_finite()
+            && aimed.distance > 0.0
+            && aimed.distance < crate::villager_ui::INTERACT_RANGE
+            && aimed.facing.is_finite()
+            && aimed.facing > 0.9,
+        "actual source quest aim prerequisite operation={operation:?} target={target}: {aimed:?}"
+    );
     let sp = &host.server.players[actor.i()];
     let raw = crate::staged_window::MarkerWindow::try_capture_parts(
         &actor.slot.inventory,
