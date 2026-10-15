@@ -317,6 +317,22 @@ impl DayRig {
         self.step();
         let actor = self.actor.as_ref().unwrap();
         assert!(actor.outcomes.iter().any(|out| out.entity == id && out.accepted));
+        if lent {
+            let i = actor.i();
+            let generation = self.game.state.hosted_server.as_ref().unwrap().server.players[i].attach_gen;
+            assert!(
+                self.game.state.ecs.get::<&crate::combat::Health>(entity).unwrap().is_dead(),
+                "the actual signed hit is lethal before the next native sweep"
+            );
+            let attacker = self.game.state.ecs.get::<&crate::combat::LastAttacker>(entity).unwrap().0;
+            assert!(
+                matches!(attacker, crate::combat::Attacker::Remote { slot, generation: actual } if slot == i && actual == generation),
+                "the actual current remote slot and generation own the lethal hit"
+            );
+            // Inbound attack runs after this step's native sweep. The following
+            // genuine complete host tick performs attribution and despawning.
+            self.step();
+        }
         let ecs = if lent { &self.game.state.ecs } else { &self.game.state.hosted_server.as_ref().unwrap().server.ecs };
         assert!(!ecs.contains(entity), "actual signed attack was attributed and swept");
         self.quiesce();

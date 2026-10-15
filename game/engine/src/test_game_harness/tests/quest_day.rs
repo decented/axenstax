@@ -44,7 +44,11 @@ fn natural_tick(game: &mut HeadlessGame, binding: &GameplayBinding, wraps: &mut 
     }
     assert!(
         !game.state.players[0].is_dead(),
-        "the same seat remains live"
+        "the same seat remains live: tick={} raw_phase={} health={} last_damage={:?}",
+        game.state.tick_counter,
+        game.state.world_time,
+        game.state.players[0].combat.health,
+        game.state.players[0].combat.last_damage
     );
     assert!(game.state.players[0].personal_binding.as_ref() == Some(binding));
 }
@@ -56,6 +60,7 @@ fn game_harness_d2c3_native_reputation_does_not_decay_before_a_real_default_worl
     let name = "d2c3-native-default-day";
     let mut game = HeadlessGame::boot_into_world(name);
     clear_pad(&mut game, None);
+    game.state.difficulty = "peaceful".into();
     assert!(game.state.players[0].personal_binding.is_none());
     assert!(game.state.local_personal.is_none());
     assert!(game.state.world.quest_scope.is_none());
