@@ -1,25 +1,76 @@
 //! Portable common progression intake and exact physical-window application.
 //! No sign-in, file store or native handover authority is invoked by this client.
-use crate::{
-    progression::GameplayRecord,
-    protocol::{PersonalAck, PersonalSnapshot},
-};
+use crate::protocol::{PersonalAck, PersonalSnapshot};
 use sha2::Digest;
+mod prepared;
+pub(crate) use prepared::{AppliedPersonalBatch, PersonalAdmission};
+#[cfg(any(test, not(target_arch = "wasm32")))]
+pub(crate) use prepared::{PersonalFenceIdentity, PreparedInboxApply, PreparedPersonalPush};
+#[cfg(test)]
+mod prepared_tests;
 
 pub(crate) fn acknowledgement(snapshot: &PersonalSnapshot) -> PersonalAck {
+    acknowledgement_parts(
+        snapshot.session,
+        snapshot.life,
+        snapshot.revision,
+        snapshot.window_event,
+        snapshot.context,
+        &snapshot.bytes,
+    )
+}
+
+pub(crate) fn acknowledgement_parts(
+    session: [u8; 16],
+    life: u32,
+    revision: u64,
+    window_event: u32,
+    context: crate::progression::GameplayContext,
+    bytes: &[u8],
+) -> PersonalAck {
+    #[derive(serde::Serialize)]
+    struct BorrowedSnapshot<'a> {
+        session: [u8; 16],
+        life: u32,
+        revision: u64,
+        window_event: u32,
+        context: crate::progression::GameplayContext,
+        bytes: &'a [u8],
+    }
+    let snapshot = BorrowedSnapshot {
+        session,
+        life,
+        revision,
+        window_event,
+        context,
+        bytes,
+    };
+    // Stream the identical fixed bincode layout into SHA-256 without retaining
+    // another snapshot buffer during bounded admission/application.
+    struct HashWriter(sha2::Sha256);
+    impl std::io::Write for HashWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.update(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut writer = HashWriter(sha2::Sha256::new());
+    bincode::serialize_into(&mut writer, &snapshot).expect("fixed personal snapshot codec");
     PersonalAck {
         session: snapshot.session,
         life: snapshot.life,
         revision: snapshot.revision,
         window_event: snapshot.window_event,
-        snapshot: sha2::Sha256::digest(
-            bincode::serialize(snapshot).expect("fixed personal snapshot codec"),
-        )
-        .into(),
+        snapshot: writer.0.finalize().into(),
     }
 }
 
 pub(crate) struct Inbox {
+    #[cfg(any(test, not(target_arch = "wasm32")))]
+    origin: std::sync::Arc<()>,
     session: [u8; 16],
     pub life: u32,
     observed_life: u32,
@@ -31,6 +82,8 @@ pub(crate) struct Inbox {
 impl Inbox {
     pub fn new(session: [u8; 16], life: u32) -> Self {
         Self {
+            #[cfg(any(test, not(target_arch = "wasm32")))]
+            origin: std::sync::Arc::new(()),
             session,
             life,
             observed_life: life,
@@ -80,88 +133,28 @@ impl Inbox {
         self.last.is_some()
     }
     pub fn push(&mut self, value: PersonalSnapshot) -> Result<Option<PersonalAck>, String> {
-        if value.session != self.session
-            || value.life > self.observed_life
-            || value.revision == 0
-            || value.window_event == 0
-        {
-            return Err("foreign or future personal snapshot".into());
-        }
-        if value.life < self.life {
-            return Ok(None);
-        }
-        GameplayRecord::decode(&value.bytes, value.context)?;
-        if matches!(value.context, crate::progression::GameplayContext::Guest { session, .. } if session != self.session)
-        {
-            return Err("foreign guest progression attachment".into());
-        }
-        if self.context.is_some_and(|c| c != value.context) {
-            return Err("personal snapshot identity changed".into());
-        }
-        let ack = acknowledgement(&value);
-        if let Some(last) = self.last
-            && value.revision <= last.revision
-        {
-            return if ack == last {
-                Ok(Some(last))
-            } else {
-                Ok(None)
-            };
-        }
-        if self.pending.iter().any(|s| acknowledgement(s) == ack) {
-            return Ok(None);
-        }
-        if self.pending.len() >= 8 {
-            return Err("personal snapshot queue full".into());
-        }
-        if self
-            .pending
-            .back()
-            .is_some_and(|s| value.revision <= s.revision)
-        {
-            return Err("personal snapshot order changed".into());
-        }
-        let bytes = self
-            .owned_bytes()
-            .saturating_add(value.bytes.capacity())
-            .saturating_add(std::mem::size_of::<PersonalSnapshot>());
-        if bytes > crate::action_journal::MAX_RETAINED_BYTES {
-            return Err("personal snapshots exceed their retained byte limit".into());
-        }
-        self.pending
-            .try_reserve_exact(1)
-            .map_err(|_| "personal snapshot allocation failed")?;
-        if self.owned_bytes().saturating_add(value.bytes.capacity())
-            > crate::action_journal::MAX_RETAINED_BYTES
-        {
-            return Err("personal snapshot allocation exceeds its byte limit".into());
-        }
-        self.context = Some(value.context);
-        self.pending.push_back(value);
-        Ok(None)
+        Ok(match self.prepare_push(value)?.commit() {
+            PersonalAdmission::DuplicateApplied(batch) => batch.last_ack(),
+            PersonalAdmission::Admitted(_) | PersonalAdmission::Ignored => None,
+        })
     }
     pub fn apply(
         &mut self,
         events: u32,
         slot: &mut crate::player_slot::PlayerSlot,
     ) -> Result<Vec<PersonalAck>, String> {
-        let mut applied = Vec::new();
-        while let Some(snapshot) = self.pending.front() {
-            if snapshot.life < self.life {
-                self.pending.pop_front();
-                continue;
-            }
-            if snapshot.life != self.life || snapshot.window_event > events {
-                break;
-            }
-            let value = self.pending.pop_front().unwrap();
-            let record = GameplayRecord::decode(&value.bytes, value.context)?;
-            record.install_progression(slot);
-            let ack = acknowledgement(&value);
-            self.last = Some(ack);
-            applied.push(ack);
+        if self.pending.is_empty() {
+            return Ok(Vec::new());
         }
-        Ok(applied)
+        // The public return vector and live map overlap are charged before installation.
+        let mut acks = Vec::new();
+        acks.try_reserve_exact(self.pending.len())
+            .map_err(|_| "Personal ACK allocation failed")?;
+        let external = acks.capacity() * std::mem::size_of::<PersonalAck>();
+        let prepared = self.prepare_apply(events, slot, (0, external))?;
+        let batch = prepared.commit();
+        acks.extend(batch.acks());
+        Ok(acks)
     }
 }
 
@@ -170,7 +163,9 @@ impl crate::GameState {
         // Socket receipt cannot acknowledge progression through a held pack
         // window. Its own numbered fence must first reach actual application.
         if self.remote_client.as_ref().is_some_and(|client| {
-            client.pack_window_inbox_held() || client.initial_personal_window_waits()
+            client.is_parked()
+                || client.pack_window_inbox_held()
+                || client.initial_personal_window_waits()
         }) {
             return;
         }
@@ -178,22 +173,39 @@ impl crate::GameState {
             return;
         };
         let events = client.applied_window_event();
+        let retained = client.personal_control_retained_usage();
         let Some(inbox) = &mut client.personal_inbox else {
             return;
         };
         let Some(slot) = self.players.first_mut() else {
             return;
         };
-        match inbox.apply(events, slot) {
-            Ok(acks) => {
-                for ack in acks {
-                    client.send_raw(&crate::protocol::serialize_packet(
-                        crate::protocol::PacketType::PersonalSync,
-                        &crate::protocol::PersonalSyncPacket::Applied(ack),
-                    ));
+        if inbox.pending_count() == 0 {
+            client.retire_applied_receipts();
+            return;
+        }
+        let window = self.window_inbox.retained_usage();
+        let external = (
+            retained
+                .0
+                .saturating_sub(inbox.pending_count())
+                .saturating_add(window.0),
+            retained
+                .1
+                .saturating_sub(inbox.owned_bytes())
+                .saturating_add(window.1)
+                .saturating_add(self.chunk_intake.carried_metadata_bytes()),
+        );
+        let result = inbox
+            .prepare_apply(events, slot, external)
+            .map(|prepared| prepared.commit());
+        match result {
+            Ok(batch) => {
+                for wire in batch.wires() {
+                    client.send_raw(wire);
                 }
-                // The exact PersonalACK leaves before a quest receipt can
-                // release its flight, overflow feedback or later authority.
+                // The actual prebuilt PersonalACK leaves before a quest
+                // receipt releases its flight, feedback or later authority.
                 client.retire_applied_receipts();
             }
             Err(error) => client.state = crate::remote_client::ConnectionState::Failed(error),

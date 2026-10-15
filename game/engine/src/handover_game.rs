@@ -386,6 +386,11 @@ impl crate::GameState {
         if self.handover.is_some() {
             return Err(copy::BUSY.into());
         }
+        // Existing bound authority is confirmed before any save fence rises;
+        // the legacy zero-state route is not forcibly migrated by handover.
+        if self.world.quest_scope.is_some() && self.players.first().is_some_and(|slot| slot.personal_binding.is_some()) {
+            self.prepare_local_gameplay()?;
+        }
         let live = self.handover_live();
         let source_key = live.signed_in.ok_or("Sign in before handing this world over.")?;
         if let Some(slot) = self.players.first() {
@@ -535,6 +540,12 @@ impl crate::GameState {
     }
 
     fn pump_handover_source(&mut self, now: u64) {
+        // Consent may arrive on this pump. Recheck actual selected authority
+        // before that pump can raise the fence; never save/prepare once Frozen.
+        let confirms = matches!(&self.handover, Some(Handover::Source { session, .. }) if session.stage() == SourceStage::Proposed)
+            && self.world.quest_scope.is_some()
+            && self.players.first().is_some_and(|slot| slot.personal_binding.is_some());
+        let authority_ok = !confirms || self.prepare_local_gameplay().is_ok();
         let live = self.handover_live();
         let Some(Handover::Source { session, .. }) = self.handover.as_mut() else { return };
         let Some(hs) = self.hosted_server.as_mut() else {
@@ -550,7 +561,19 @@ impl crate::GameState {
             log::info!("handover: {line}");
             return;
         };
-        let mut result = session.pump(hs, live, now);
+        let mut result = if authority_ok { session.pump(hs, live, now) } else {
+            session.abort(hs, "The selected personal authority could not be confirmed before freezing.");
+            Err(Refusal("The selected personal authority could not be confirmed before freezing."))
+        };
+        if result.is_ok() && session.stage() == SourceStage::Frozen {
+            result = if self.gameplay_preparation.is_some() {
+                Err(Refusal("Resolve the current personal preparation before handing over."))
+            } else { match self.players.first_mut() {
+                Some(local) => session.settle_current_cut(local, hs, live, self.tick_counter, self.world.quest_scope, now),
+                None => Err(Refusal("This world has no source participant.")),
+            }};
+            if let Err(refusal) = &result { session.abort(hs, refusal.0); }
+        }
         if result.is_ok() && session.wants_capture() {
             // M-A: the freeze closes every HUD dialog before the capture, so
             // nothing a dialog does can land after the cut (the central gate
@@ -633,8 +656,30 @@ impl crate::GameState {
     }
 
     fn pump_handover_recipient(&mut self, now: u64) {
+        let joined = self.joined();
+        let carried = self.chunk_intake.carried_metadata_bytes();
+        let gates = joined && self.players.len() == 1 && self.pending_block_changes.is_empty()
+            && self.remote_client.as_ref().is_some_and(|remote| !remote.pack_buffers_live())
+            && self.players.first().is_some_and(|slot| !slot.is_dead()
+                && slot.crafting_ui.ops.first_stamp().is_none()
+                && crate::handover::live::eligibility::joined_progress(slot, self.tick_counter).is_ok());
         let Some(Handover::Recipient(s)) = self.handover.as_mut() else { return };
-        let result = s.pump(now);
+        let mut result = s.pump(now);
+        if result.is_ok() {
+            // Prepared/terminal waits remain dormant inside the typed helper;
+            // only Accepted can install new current snapshots on the SAME slot.
+            if let (Some(remote), Some(slot)) = (self.remote_client.as_mut(), self.players.first_mut()) {
+                if gates {
+                    result = s.pump_personal_control(remote, &mut self.window_inbox, slot, (0, carried), now).map(|_| ());
+                } else if matches!(s.stage(), RecipientStage::Accepted | RecipientStage::Receiving | RecipientStage::Importing | RecipientStage::Ready) {
+                    s.abort("The joined personal boundary changed during handover.");
+                    result = Err(Refusal("The joined personal boundary changed during handover."));
+                }
+            } else if matches!(s.stage(), RecipientStage::Accepted | RecipientStage::Receiving | RecipientStage::Importing | RecipientStage::Ready) {
+                s.abort("The joined participant left during handover.");
+                result = Err(Refusal("The joined participant left during handover."));
+            }
+        }
         // CP10 (HIGH-2): past the ack the wait for Committed goes to the one
         // background resumer, which outlives this session, the joined world
         // and the window (and resumes at start-up from the durable receipt).
@@ -729,7 +774,7 @@ impl crate::GameState {
         match (action, self.handover.as_mut()) {
             (UiAction::Accept, Some(Handover::Recipient(s))) if s.stage() == RecipientStage::AwaitingConsent => {
                 let p = s.proposal().clone();
-                if let Some(refusal) = self.players.first().and_then(|slot| crate::handover::live::eligibility::local_progress(slot, self.tick_counter).err()) {
+                if let Some(refusal) = self.players.first().and_then(|slot| crate::handover::live::eligibility::joined_progress(slot, self.tick_counter).err()) {
                     self.handover = None;
                     self.decline_over_joined(p.transfer, DeclineReason::NotReady);
                     self.handover_toast(refusal.0);
@@ -737,7 +782,7 @@ impl crate::GameState {
                 }
                 if !self.pending_block_changes.is_empty() || !self.window_inbox.is_empty()
                     || self.players.first().is_some_and(|slot| slot.crafting_ui.ops.first_stamp().is_some())
-                    || self.remote_client.as_ref().is_some_and(|client| !client.handover_authority_settled()) {
+                    || self.remote_client.as_ref().is_some_and(|client| !client.handover_authority_settled() || client.pack_buffers_live()) {
                     self.handover_toast("Your inventory is still settling. Try again in a moment.");
                     return;
                 }
@@ -751,9 +796,12 @@ impl crate::GameState {
                     self.handover_toast("This machine couldn't open a port for the handover, so it was declined.");
                     return;
                 };
-                let link = rc.park_transport();
+                let link = match rc.park_for_personal_control(p.transfer) {
+                    Ok(link) => link,
+                    Err(error) => { self.handover_toast(error); return; }
+                };
                 let consent = RecipientConsent { transfer: p.transfer, world_name: p.world_name, source_npub: p.source_npub };
-                match s.consent(consent, socket, link, now) {
+                match s.consent_personal(consent, socket, link, now) {
                     // L5: the router lease goes with the link it serves, so
                     // leaving the joined world can't give it back early.
                     Ok(()) => {

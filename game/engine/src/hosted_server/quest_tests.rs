@@ -463,7 +463,9 @@ fn local_common_guard(accepted: bool, decline: bool, penalty: bool) {
         "common accepted={accepted} decline={decline} penalty={penalty} local state passed handover before continuation acceptance"
     );
 }
-fn remote_common_guard(accepted: bool, decline: bool, penalty: bool) {
+// A decoded carrier check only: no admission, current ACK or carry readiness
+// is manufactured by retaining these authored schema fields.
+fn remote_common_carrier(accepted: bool, decline: bool, penalty: bool) {
     let record = common_quest_state(accepted, decline, penalty);
     let mut slot = crate::player_slot::PlayerSlot::new(0, glam::Vec3::ZERO, 1.0);
     slot.personal_binding = Some(crate::progression::GameplayBinding::WorldLocal {
@@ -481,10 +483,12 @@ fn remote_common_guard(accepted: bool, decline: bool, penalty: bool) {
         save.personal.as_ref().unwrap().record().unwrap().quests,
         record.quests
     );
+    let before = save.encode_seed().unwrap();
     assert!(
-        crate::handover::live::eligibility::recipient_record(Some(&save)).is_err(),
-        "common accepted={accepted} decline={decline} penalty={penalty} recipient state passed handover before continuation acceptance"
+        crate::handover::live::eligibility::recipient_record(Some(&save)).is_ok(),
+        "valid common accepted={accepted} decline={decline} penalty={penalty} must be retained by its carrier"
     );
+    assert_eq!(save.encode_seed().unwrap(), before, "carrier validation never mutates the record");
 }
 #[test]
 fn d2c3_local_handover_refuses_common_accepted_quest() {
@@ -499,14 +503,14 @@ fn d2c3_local_handover_refuses_common_penalty_timer() {
     local_common_guard(false, false, true);
 }
 #[test]
-fn d2c3_recipient_handover_refuses_common_accepted_quest() {
-    remote_common_guard(true, false, false);
+fn d2c3_recipient_record_retains_common_accepted_quest() {
+    remote_common_carrier(true, false, false);
 }
 #[test]
-fn d2c3_recipient_handover_refuses_common_decline_timer() {
-    remote_common_guard(false, true, false);
+fn d2c3_recipient_record_retains_common_decline_timer() {
+    remote_common_carrier(false, true, false);
 }
 #[test]
-fn d2c3_recipient_handover_refuses_common_penalty_timer() {
-    remote_common_guard(false, false, true);
+fn d2c3_recipient_record_retains_common_penalty_timer() {
+    remote_common_carrier(false, false, true);
 }

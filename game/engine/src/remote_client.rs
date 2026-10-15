@@ -18,6 +18,10 @@ mod actions;
 mod pack;
 #[path = "remote_client_quest.rs"]
 mod quest;
+#[path = "remote_client_personal_control.rs"]
+pub(crate) mod personal_control;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use personal_control::{ParkedPersonalLink, PersonalControlProgress};
 pub use actions::flush_strict_window_ops;
 // Read by the copy lint and the stray-op test only.
 #[cfg(test)]
@@ -579,6 +583,8 @@ pub struct RemoteClient {
     /// The connection is lent to a world-handover session: nothing is read
     /// or sent here, and the session isn't over (`state` is untouched).
     parked: bool,
+    #[cfg(not(target_arch = "wasm32"))]
+    personal_park: Option<personal_control::PersonalParkBinding>,
     /// Gameplay that arrived while parked, handed back with the connection
     /// on a cancelled handover: read before the transport, in order.
     replay: std::collections::VecDeque<Vec<u8>>,
@@ -897,6 +903,8 @@ impl RemoteClient {
             #[cfg(not(target_arch = "wasm32"))]
             handover_inbox_bytes: 0,
             parked: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            personal_park: None,
             replay: Default::default(),
         }
     }
@@ -974,6 +982,8 @@ impl RemoteClient {
             #[cfg(not(target_arch = "wasm32"))]
             handover_inbox_bytes: 0,
             parked: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            personal_park: None,
             replay: Default::default(),
         }
     }
@@ -1495,23 +1505,13 @@ impl RemoteClient {
                         }
                     }
                     PacketType::PersonalSync => {
-                        let result = protocol::safe_deserialize::<protocol::PersonalSyncPacket>(payload).map_err(|e| e.to_string()).and_then(|packet| {
-                            let protocol::PersonalSyncPacket::Snapshot(value) = packet else { return Err("Unexpected personal applied packet".into()); };
-                            let event = value.window_event;
-                            let actor_respawns = value.life;
-                            let inbox = self.personal_inbox.as_mut().ok_or("Unexpected personal snapshot".to_string())?;
-                            let was_pending = inbox.has_pending_fence(event, actor_respawns);
-                            let ack = inbox.push(value)?;
-                            if !was_pending && inbox.has_pending_fence(event, actor_respawns) {
-                                self.pending_outcomes.try_reserve_exact(1).map_err(|_| "Personal fence allocation failed")?;
-                                self.pending_outcomes.push(RequestOutcome::PersonalSync { window_event: event, actor_respawns });
-                                changed = true;
+                        match self.receive_personal_normal(payload, packet.capacity()) {
+                            Ok((admitted, duplicate)) => {
+                                changed |= admitted;
+                                if let Some(batch) = duplicate {
+                                    for bytes in batch.wires() { self.send_raw(bytes); }
+                                }
                             }
-                            Ok(ack)
-                        });
-                        match result {
-                            Ok(Some(ack)) => self.send_raw(&protocol::serialize_packet(PacketType::PersonalSync, &protocol::PersonalSyncPacket::Applied(ack))),
-                            Ok(None) => (),
                             Err(error) => { self.state = ConnectionState::Failed(error); changed = true; }
                         }
                     }
@@ -1967,6 +1967,7 @@ impl RemoteClient {
         self.transport = transport;
         self.replay = replay;
         self.parked = false;
+        self.personal_park = None;
     }
 
     /// Is the connection lent to a handover session?

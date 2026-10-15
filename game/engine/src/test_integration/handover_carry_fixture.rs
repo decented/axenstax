@@ -27,6 +27,10 @@ mod native_setup;
 #[path = "handover_carry_fixture/observe.rs"]
 mod observe;
 use observe::Observation;
+#[path = "handover_carry_fixture/continuation.rs"]
+pub(in crate::test_integration) mod continuation;
+#[path = "handover_carry_fixture/custody.rs"]
+pub(in crate::test_integration) mod custody;
 pub(super) fn active_source(name: &str, secret: [u8; 32]) -> HeadlessGame {
     native_setup::active_source(name, secret)
 }

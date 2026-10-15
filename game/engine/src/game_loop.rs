@@ -2977,7 +2977,7 @@ impl super::GameState {
             self.gameplay_preparation = None;
             self.gameplay_preparation_generation = self.gameplay_preparation_generation.wrapping_add(1);
         }
-        for slot in &mut self.players { slot.personal_binding = None; }
+        for slot in &mut self.players { slot.reset_gameplay_holder(); }
         self.world.clear();
         // …and the per-world fields `World::clear` keeps (meta bytes, hidden
         // cells, waypoints, Workshop projects, exhibits, scheduler, power…).

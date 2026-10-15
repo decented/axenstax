@@ -4,6 +4,7 @@
 //! phase boundaries. It has no UI, automatic publication or host-start hook.
 //! Prepared records are inert; source retirement precedes committed publication.
 
+pub(crate) mod active_carry;
 pub mod certificate;
 pub mod checkpoint;
 pub(crate) mod codec;

@@ -58,10 +58,7 @@ impl HostedServer {
             && !self.disconnected.get(slot).copied().unwrap_or(true)
             && !self.transports[slot].is_closed()
             && self.server.players.get(slot).is_some_and(|sp| {
-                sp.connected
-                    && sp.server_simulated
-                    && sp.attach_gen == generation
-                    && sp.verified_pubkey == Some(key)
+                sp.connected && sp.server_simulated && sp.attach_gen == generation && sp.verified_pubkey == Some(key)
             })
     }
 
@@ -69,8 +66,7 @@ impl HostedServer {
     pub fn handover_seat(&self, slot: usize) -> Option<(u32, [u8; 32])> {
         let sp = self.server.players.get(slot)?;
         let key = sp.verified_pubkey?;
-        self.handover_seat_live(slot, sp.attach_gen, key)
-            .then_some((sp.attach_gen, key))
+        self.handover_seat_live(slot, sp.attach_gen, key).then_some((sp.attach_gen, key))
     }
 
     /// Bind the control link to one authenticated seat for one transfer.
@@ -134,12 +130,21 @@ impl HostedServer {
         // The cut must follow the real ordered request stream, its delayed
         // older edits, retained terminal results and actual personal apply.
         for (i, sp) in self.server.players.iter().enumerate() {
-            if !sp.server_simulated || !sp.is_in_world() { continue; }
-            if !self.inbound[i].is_empty() || !self.edit_queues[i].is_empty()
+            if !sp.server_simulated || !sp.is_in_world() {
+                continue;
+            }
+            if !self.inbound[i].is_empty()
+                || !self.edit_queues[i].is_empty()
+                || sp.pack_flight.is_some()
                 || sp.action_queue.as_ref().is_some_and(|q| !q.is_empty())
                 || sp.action_results.as_ref().is_some_and(|r| !r.is_quiescent())
                 || !sp.window_events.is_quiescent()
-                || sp.personal.as_ref().is_some_and(|p| !sp.personal_delivery.quiescent(p, sp.respawns)) {
+                || sp.personal.as_ref().is_some_and(|p| {
+                    sp.action_frontier.as_ref().is_none_or(|frontier| {
+                        !sp.personal_delivery.current(p, frontier.header(0, 0), &sp.window_events)
+                    })
+                })
+            {
                 return Err("players' actions or personal state are still settling; try again in a moment");
             }
         }
@@ -205,7 +210,10 @@ impl HostedServer {
     }
 
     /// The bound seat (slot, generation, key), if any.
-    #[cfg_attr(not(test), expect(dead_code, reason = "Retained handover proof utility; the live controller uses its checked adapter"))]
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "Retained handover proof utility; the live controller uses its checked adapter")
+    )]
     pub fn handover_link(&self) -> Option<(usize, u32, [u8; 32])> {
         self.handover.as_ref().map(|l| (l.slot, l.generation, l.key))
     }
@@ -261,9 +269,8 @@ impl HostedServer {
                 }
                 return Err("the recipient's connection overflowed");
             }
-            let frames = self.inbound[slot].extract(|p| {
-                matches!(protocol::deserialize_header(p), Some((PacketType::Handover, _)))
-            });
+            let frames = self.inbound[slot]
+                .extract(|p| matches!(protocol::deserialize_header(p), Some((PacketType::Handover, _))));
             out.extend(frames.into_iter().map(|mut p| {
                 p.remove(0);
                 p
@@ -274,6 +281,97 @@ impl HostedServer {
             return self.handover_check().map(|()| out);
         }
         Ok(out)
+    }
+
+    /// Only the chosen authenticated Applied control crosses a frozen cut.
+    /// Gameplay stays in its original queue and never ticks or saves here.
+    pub(crate) fn pump_handover_personal_applied(
+        &mut self,
+        ticket: &crate::handover::active_carry::CutTicket,
+        limit: usize,
+    ) -> Result<bool, LinkError> {
+        let seat = ticket.seat();
+        let link = self.handover.as_ref().ok_or("no current handover link")?;
+        if !link.frozen
+            || link.retired
+            || link.transfer != ticket.transfer()
+            || (link.slot, link.generation, link.key) != (seat.slot, seat.generation, seat.key)
+        {
+            return Err("the current personal cut belongs to another link");
+        }
+        self.handover_check()?;
+        self.inbound[seat.slot]
+            .fill_from(&*self.transports[seat.slot])
+            .map_err(|_| "current Personal control overflowed")?;
+        // Inspect without removing/reordering anything. A late ordinary
+        // request cannot be overtaken by an Applied. Handover controls wait
+        // for the existing session pump before any current capture proceeds.
+        let queued = self.inbound[seat.slot].len();
+        let mut handover_waits = false;
+        for packet in self.inbound[seat.slot].newest(queued) {
+            match protocol::deserialize_header(packet) {
+                Some((PacketType::PersonalSync, _)) => (),
+                Some((PacketType::Handover, _)) => handover_waits = true,
+                _ => return Err("ordinary recipient work arrived during current settlement"),
+            }
+        }
+        if handover_waits {
+            return Ok(false);
+        }
+        let mut count = 0;
+        let packets = self.inbound[seat.slot].extract(|packet| {
+            if count < limit.min(8)
+                && matches!(protocol::deserialize_header(packet), Some((PacketType::PersonalSync, _)))
+            {
+                count += 1;
+                true
+            } else {
+                false
+            }
+        });
+        for packet in packets {
+            let Some((_, body)) = protocol::deserialize_header(&packet) else {
+                return Err("malformed Personal control");
+            };
+            let Ok(protocol::PersonalSyncPacket::Applied(ack)) = protocol::safe_deserialize(body) else {
+                return Err("invalid current Personal acknowledgement");
+            };
+            let expected = ticket.expected().ok_or("unexpected Personal acknowledgement")?;
+            if ack != expected {
+                if ack.session != expected.session
+                    || ack.life > expected.life
+                    || ack.revision > expected.revision
+                    || ack.window_event > expected.window_event
+                {
+                    return Err("foreign or future current Personal acknowledgement");
+                }
+                continue; // An old/initial/duplicate tuple is not current proof.
+            }
+            let sp = &mut self.server.players[seat.slot];
+            if sp.personal_delivery.last == Some(expected) && sp.personal_delivery.pending.is_none() {
+                continue;
+            }
+            if sp.pack_flight.is_some()
+                || self.server.gameplay_preparation.is_some()
+                || sp.action_queue.as_ref().is_some_and(|queue| !queue.is_empty())
+                || !self.edit_queues[seat.slot].is_empty()
+                || sp.action_results.as_ref().is_some_and(|results| !results.is_quiescent())
+                || sp
+                    .personal_delivery
+                    .pending
+                    .as_ref()
+                    .is_none_or(|snapshot| crate::personal_sync::acknowledgement(snapshot) != expected)
+            {
+                return Err("current Personal authority changed while frozen");
+            }
+            if !sp.window_events.fold_only_personal(expected) {
+                return Err("current Personal fence has ordinary or missing work");
+            }
+            let accepted = sp.personal_delivery.accept(expected);
+            debug_assert!(accepted, "validated exact pending current tuple");
+            sp.personal_delivery.acknowledged_window = None;
+        }
+        Ok(self.inbound[seat.slot].is_empty())
     }
 
     /// Test only (CP13): the seat's connection closes the way the QUIC

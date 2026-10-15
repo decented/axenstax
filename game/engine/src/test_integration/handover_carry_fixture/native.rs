@@ -33,7 +33,7 @@ fn actor_input(host: &mut HostedServer, actor: &mut Actor, yaw: f32, pitch: f32)
     host.tick();
     actor.drain(&host.server.registry);
 }
-fn actor_tick(host: &mut HostedServer, actor: &mut Actor) {
+pub(super) fn actor_tick(host: &mut HostedServer, actor: &mut Actor) {
     let sp = &host.server.players[actor.i()];
     let (yaw, pitch) = (sp.yaw, sp.pitch);
     actor_input(host, actor, yaw, pitch);
@@ -72,7 +72,7 @@ fn quest_geometry(host: &HostedServer, actor: &Actor, target: u32) -> QuestGeome
         facing: to_target.normalize_or_zero().dot(crate::camera::forward_from(sp.yaw, sp.pitch)),
     }
 }
-fn settle_actor(host: &mut HostedServer, actor: &mut Actor) {
+pub(super) fn settle_actor(host: &mut HostedServer, actor: &mut Actor) {
     for _ in 0..32 {
         actor_tick(host, actor);
         let sp = &host.server.players[actor.i()];
@@ -86,7 +86,7 @@ fn settle_actor(host: &mut HostedServer, actor: &mut Actor) {
     }
     panic!("the real source-own-key initial/window/Personal/receipt boundary did not settle");
 }
-fn actor_quest(
+pub(super) fn actor_quest(
     host: &mut HostedServer,
     actor: &mut Actor,
     target: u32,
@@ -321,7 +321,7 @@ fn native_penalty(game: &mut HeadlessGame) {
     assert_eq!(game.state.players[0].reputation.score((2, 3)), -25);
 }
 
-fn original_dialogue(game: &mut HeadlessGame, npc: [u8; 16]) {
+pub(super) fn original_dialogue(game: &mut HeadlessGame, npc: [u8; 16]) {
     let entities: Vec<_> = game
         .state
         .ecs
@@ -399,4 +399,34 @@ fn original_dialogue(game: &mut HeadlessGame, npc: [u8; 16]) {
     }
     assert!(game.state.players[0].dialogue_villager.is_none());
     assert_eq!(native(game).quests.accepted, accepted, "inspection never completes or replaces the accepted quest");
+}
+
+/// Walk with genuine authenticated input; never assign server position/look.
+pub(super) fn walk_to_giver(host: &mut HostedServer, actor: &mut Actor, target: u32) {
+    for _ in 0..1000 {
+        let geometry = quest_geometry(host, actor, target);
+        if geometry.distance < 3.0 { settle_actor(host, actor); return; }
+        assert!(geometry.distance.is_finite() && geometry.distance < 128.0, "saved own giver is beyond the bounded movement fixture");
+        let direction = (geometry.centre - geometry.eye).normalize();
+        actor.input_seq += 1;
+        let sp = &host.server.players[actor.i()];
+        let at = sp.player.pos;
+        actor.client.send_to_server(&protocol::serialize_packet(PacketType::ClientInput, &protocol::InputPacket {
+            tick: actor.input_seq, x: at.x, y: at.y, z: at.z, yaw: (-direction.x).atan2(-direction.z), pitch: direction.y.asin(),
+            move_forward: 1.0, health: sp.combat.health, events_applied: actor.applied, ..Default::default()
+        }));
+        host.tick(); actor.drain(&host.server.registry);
+    }
+    panic!("actual signed movement did not reach the original durable giver");
+}
+pub(super) fn repeat_completed(host: &mut HostedServer, actor: &mut Actor, target: u32, incarnation: u64, id: [u8;16]) {
+    settle_actor(host, actor);
+    let raw = crate::staged_window::MarkerWindow::try_capture_parts(&actor.slot.inventory, &actor.slot.armour_slots,
+        &actor.slot.crafting_ui.cursor_item, &actor.slot.crafting_ui.grid, &host.server.registry).unwrap();
+    let sp = &host.server.players[actor.i()];
+    let action = actor.send(ActionIntent::Quest(QuestRequest { actor_respawns: sp.respawns, target,
+        before: raw.digest_with(sp.station, None), incarnation, operation: QuestOperation::TurnIn { id } }));
+    settle_actor(host, actor);
+    let result = actor.results.iter().find(|result| result.action == action).unwrap();
+    assert_eq!(result.fate, ActionFate::Refused, "new-sequence completion of the consumed exact quest must refuse: {:?}", result.note);
 }

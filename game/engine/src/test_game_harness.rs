@@ -109,6 +109,8 @@ mod tests {
     mod quest_day;
     #[path = "quest_day_authority.rs"]
     mod quest_day_authority;
+    #[path = "quest_carry.rs"]
+    mod quest_carry;
     use super::*;
 
     /// Point `AXENSTAX_WORLDS_DIR` at one pid-scoped temp dir shared by every

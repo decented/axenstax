@@ -26,6 +26,8 @@ mod death;
 #[cfg(not(target_arch = "wasm32"))]
 mod personal;
 #[cfg(not(target_arch = "wasm32"))]
+pub(crate) use personal::PreparedCarryPersonal;
+#[cfg(not(target_arch = "wasm32"))]
 mod handover;
 mod sidecar;
 mod actions;
@@ -50,7 +52,7 @@ pub(crate) mod quest_lifecycle_actor;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod quest_lifecycle_actions;
 #[cfg(all(test, not(target_arch = "wasm32")))]
-mod quest_lifecycle_fixture;
+pub(crate) mod quest_lifecycle_fixture;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod quest_lifecycle_tests;
 #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -59,6 +61,8 @@ mod quest_daily_tests;
 mod quest_credit_tests;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod quest_carry_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod quest_carry_failures;
 mod strict_container;
 mod strict_edit;
 mod strict_attack;

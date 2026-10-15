@@ -8,7 +8,7 @@ use crate::{
     transport::ClientTransport as _,
 };
 
-pub(super) struct Room {
+pub(crate) struct Room {
     pub root: crate::save::WorldsRootGuard,
     pub host: HostedServer,
     pub actors: Vec<Actor>,

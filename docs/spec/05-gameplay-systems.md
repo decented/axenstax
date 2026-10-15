@@ -4366,9 +4366,10 @@ cannot borrow one from another server world. Kill attribution still uses the
 same position and last-hit/nearest/current-attachment-generation rule; a valid
 credit retains the existing common-write error and legacy event/counter
 behaviour. Joined authoritative counters keep their existing server owner and
-do not receive echoed local credits. Active transfer
-eligibility guards remain until frozen current-tuple settlement and original/
-retained active continuation pass their actual controls. This source checkpoint
+do not receive echoed local credits. The checked common-holder carry path is
+specified below; its actual current-fence settlement and original/retained
+continuation controls must pass before acceptance. Unsupported legacy state
+and incomplete current holders retain their guards. This source checkpoint
 does not claim full quest or transfer acceptance.
 
 At the first unbound native-to-common cut, the live legacy villager penalty
@@ -4425,3 +4426,51 @@ No-lend keeps its existing owning-server+1 natural advance even when native
 accelerated phase is mirrored; matching accelerated host/server clock ownership
 remains D4. These source changes await reviewed exact runtime controls and do
 not claim final quest/carry acceptance.
+
+
+### D2c-3 active common carry (checkpoint37 source, verification pending)
+
+Only the actual native source and chosen cryptographically verified recipient
+project their common holders at the aligned cut. Accepted original-giver terms,
+Kill baselines, cumulative counters, reputation, claims and all remaining
+cooldowns travel in their existing owner; no offer is regenerated and no
+private bag/body is installed from another participant. Each clock anchors once
+at the real cut. Frozen or offline time consumes no remaining interval; abort
+continues from the committed cut and subsequent honest gameplay, without an old
+record/timer rollback. Guests keep their own existing runtime state and receive
+no canonical file or participant projection.
+
+The two-holder operation reserves maps, encoded records, checked revisions and
+the actual current remote delivery before either participant changes. A fresh
+fence must install through the recipient's SAME live slot and Personal Inbox,
+even while Paused, and the real returned ACK must reach the source before
+capture. Unchanged bytes with complete actual current delivery need no redundant
+fence. An old ACK, high event number or merely readable record is insufficient.
+Physical bags, armour, cursor/grid and nested private Plan allocations stay in
+place through cut and abort. A checked reopen may allocate anew but restores
+only that participant's exact own contents from its legitimate selected record
+and local Plan store. Authoring private bodies for a control does not prove
+those bodies were earned, crafted or sent across the transfer.
+
+Supported common credits do not make every legacy side effect portable. A wild
+Nostrich Vow remains outside the common carrier, including actual nearest and
+last-hit attribution; tamed exemption is unchanged. Missing or failed common
+mutation makes the SAME remote attachment permanently incomplete for this carry
+attempt/lifetime, even if a later record succeeds or is ACKed. Missing holder
+alone does not alter the existing read-failed save policy. Native failed bound
+kill/expiry/decay marks its private current-holder incomplete flag and retains
+old maps/clock with no legacy counter fallback. Same-holder success, installation,
+ACK, save and abort cannot clear it; only the real existing world/holder reset
+or new construction can. No durable completeness field or restart guarantee is
+added. Genuine stale-generation work has no mutation, event or completeness
+side effect; established current-generation legacy event ordering remains.
+
+Retained and continued own records must keep exact original giver identity,
+frozen terms/baselines and honest remaining timers through true menu entry,
+Save/Discard, full-folder movement and signed dedicated/native role return.
+Completion pays the exact frozen material cost and rewards and reputation once;
+repeat and reopen cannot pay again. Portable joined/native completion has zero
+monetary/treasury effect. The actual source37 controls and final combined gates
+are pending; full transfer acceptance is not claimed here. Reputation's actual
+natural-day runtime contract, raid/treasury6000 schedule, existing proofs and
+selected-primary guards, Mirror default and D4 qualifications are unchanged.

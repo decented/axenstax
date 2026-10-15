@@ -2634,6 +2634,11 @@ impl GameServer {
         self.credit_personal_kill_in_village(slot, kind, location.village);
         let pos = location.position;
         let sp = &mut self.players[slot];
+        // The wire effect also creates a Vow on the real client. That state
+        // is outside the common record, even after an exact common ACK.
+        if kind == crate::mob::MobType::Nostrich && !tamed {
+            sp.progression_tracked = false;
+        }
         sp.progression_credits = sp.progression_credits.saturating_add(1);
         self.pending_kill_events.push((
             slot,

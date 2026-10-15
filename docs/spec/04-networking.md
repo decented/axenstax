@@ -5393,8 +5393,10 @@ generation, key), alive, with a window that is quiescent (no unacknowledged or
 valve-forced event, no correction debt, no death replacement, no retired
 overflow: "inventory still settling") and progression tracked since a verified
 signed admission on this attach (`ServerPlayer.progression_tracked`) with zero
-server-queued kill credits (`progression_credits`), i.e. default progression;
-any credit refuses until a numbered progression authority exists. Obligations
+server-queued kill credits (`progression_credits`) in the original default-only
+foundation. The current-holder/common authority exception and its exact current
+fence requirements are specified in the checkpoint37 section below; a readable
+record alone never proves all credits portable. Obligations
 use OC's predicates (v88): every connected joiner the checkpoint includes must
 satisfy `ServerPlayer::obligations_proven_zero()` (a `Complete` session history
 and an empty effective debt, so a session that began from a v1 or unreadable
@@ -6733,11 +6735,11 @@ session and retains its record without wrapping. This does not change the
 parked global Strict lifecycle.
 
 Known schema1 maps are replaced without reward/claim/payout calls. Server updates
-persist the live holder for later rejoin. Unsupported non-empty active quests,
-quest baselines and active local penalty/cooldown state refuse transfer rather
-than being silently dropped. Ordinary remote reconnect's transient villager
-penalty cooldown behaviour is inherited and is not preserved by schema1/v3;
-this checkpoint does not claim complete personal timer continuation. A verified
+persist the live holder for later rejoin. The older schema1/v3 foundation did
+not carry non-empty active quests, baselines or active local penalty/cooldown
+state. The common schema2 holder carries these fields; checkpoint37 below
+specifies the actual cut and current-fence settlement required before transfer.
+Unsupported legacy state still refuses rather than being silently dropped. A verified
 Plan body is restored unchanged only when its developed boolean matches the
 saved marker stub; its latent exposure is never replaced by the stub's zero.
 
@@ -6954,8 +6956,9 @@ remain strict.
 The extension allocates protocol92 and appended QuestResult76/QuestView77; the
 complete Quest intent/request/UI and backed completion path remain under active
 implementation. The prior accepted v91 pack/C3d bytes stay pinned. Mirror remains
-default and global Strict recovery remains parked. Neither active-quest handover
-eligibility refusal is lifted at this foundation checkpoint.
+default and global Strict recovery remains parked. The foundation's original
+active-quest refusal is superseded only by the checked common-holder path below;
+unsupported legacy state and incomplete current holders remain ineligible.
 
 #### D2c-3 joined request checkpoint (unverified feature work)
 
@@ -7064,3 +7067,78 @@ No-lend keeps its existing owning-server+1 natural advance even when native
 accelerated phase is mirrored; matching accelerated host/server clock ownership
 remains D4. These source changes await reviewed exact runtime controls and do
 not claim final quest/carry acceptance.
+
+
+#### D2c-3 active common carry (checkpoint37 source, verification pending)
+
+A carry cuts only the source's actual native seat0 and the chosen authenticated
+recipient. Each SAME holder projects all accepted terms, cumulative baselines,
+declines and penalty timers once at one aligned native/server logical tick.
+Guest holders are neither projected nor persisted; their existing gameplay
+clocks remain honest through freeze and abort. All in-world seats must first
+settle their actual action/edit/result/window and current Personal delivery,
+including guests. Outstanding Pack/Quest flights and unresolved selected-scope
+preparation refuse. Scope/selected-directory confirmation happens before the
+save fence; ordinary save cannot be used to prepare authority under that fence.
+
+Both candidates, checked revisions, encoded records, map storage, numbered
+remote fence, delivery tuple/hash and outgoing bytes are reserved before either
+participant changes. Abandon leaves both holders, clocks, bindings and physical
+places exact. Commit performs no fallible allocation or callback between the
+participants, then anchors each SAME clock at the cut. A cut ticket retains only
+provenance and fingerprints, never another gameplay/timer/body holder. The
+preencoded output is sent only after the ticket is stored. If the projected
+remote bytes are unchanged, actual full current Delivery/window proof avoids a
+redundant fence, revision, packet or ACK; absent records and high scalar ACKs
+cannot create that proof.
+
+Capture, packing and disclosure wait for the exact current authenticated
+session/life/revision/event/context/hash Applied and the authorised zero-effect
+Personal window fold. Frozen control reads only the chosen seat's genuine
+Applied/Handover traffic; late ordinary bytes block or abort in their original
+FIFO. It performs no simulation, admission, edits, grants, general window flush
+or save. Bounded retry/deadline uses control time, not the frozen gameplay clock.
+Guest queues and the final closed-link PreparedAck/Committed paths keep their
+existing ownership and release semantics.
+
+At real recipient consent, a sealed binding moves the established transport.
+Every-mode pumping, including Paused, uses the SAME Personal Inbox, WindowInbox
+and live player slot. Joint admission reserves the actual snapshot plus its
+zero-effect marker before either publishes; sealed metadata binds the same
+move-stable Inbox origin, session/context/life/base and exact snapshot. Only a
+consecutive current-life Personal-only prefix can apply. Decodes, replacement
+maps, hashes, ACK storage and wire bytes are prepared before any prefix/body or
+frontier is removed. Commit installs once and returns only that real Inbox's
+ACKs to a typed held-link sink. No arbitrary scalar ACK, ordinary receipt
+retirement into the parked placeholder or general window drain is permitted.
+Queued send is not source settlement. Actual retained capacities and overlapping
+staging, including GameState's carried FIFO metadata, remain within the existing
+2MiB/1024-entry, eight-snapshot and parked 4MiB bounds. Abort preserves raw FIFO
+replay ownership; Prepared/terminal durable waits do not depend on live gameplay
+gates or a newly available transport.
+
+Carry completeness belongs to the current holder/attachment. After the actual
+generation check, a remote missing or failed common mutation monotonically
+clears `progression_tracked`; missing alone leaves `personal_read_failed`
+unchanged, while established decode/count/revision/encode failures retain their
+existing sticky read-failed behaviour. Later success, installation, ACK or save
+cannot upgrade this attachment. Legacy credit increments and one normal kill
+event keep their existing error ordering. Stale generations remain inert.
+An untamed Nostrich Vow is unsupported even when common credit and current ACK
+succeed; LAST_HIT/NEAREST both refuse portability, with the existing tamed
+exemption. Native lost bound credit/expiry/decay similarly marks a private
+current-holder incomplete flag, preserving old maps and clock on failure and
+never falling back to a second counter. Only the actual existing world/holder
+reset or new construction clears it. These flags add no persistent schema,
+marker or cross-process completeness promise; abort does not restore stale
+pre-cut timers or clear incompleteness.
+
+Source controls cover genuine original-link epochs0→1→2→3, retained Save/Discard,
+complete-folder proof portability and fault retry, signed dedicated/native role
+return, frozen-term completion costs/rewards/reputation once, and zero monetary
+effects. A separate explicitly authored physical fixture covers nonempty private
+Plan bodies and nested allocations across current cut/abort/retry and Prepared
+close; it is not earned quest activity or transfer of another player's body.
+All checkpoint37 source/runtime controls and the final combined gates remain
+unexecuted at this source checkpoint. Mirror default, parked global Strict
+recovery, D3 opt-in/default decisions and D4 simulation parity are unchanged.

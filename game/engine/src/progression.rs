@@ -7,6 +7,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 
 pub(crate) mod codec;
+pub(crate) mod install;
 pub(crate) type GameplayId = [u8; 16];
 pub(crate) const RECORD_LIMIT: usize = 64 * 1024;
 pub(crate) const REPUTATION_LIMIT: usize = 2048;
@@ -278,18 +279,11 @@ impl GameplayRecord {
         codec::decode(bytes, expected)
     }
     pub(crate) fn install_progression(&self, slot: &mut crate::player_slot::PlayerSlot) {
-        slot.reputation.per_village.clear();
-        slot.reputation
-            .per_village
-            .extend(self.reputation.iter().copied());
-        slot.kill_counter.clear();
-        slot.kill_counter.extend(self.kills.iter().copied());
-        slot.bounties_claimed.clear();
-        slot.bounties_claimed.extend(self.claims.iter().copied());
-        slot.quest_progress = self.quests.clone();
-        slot.gameplay_clock = Default::default();
-        slot.gameplay_revision = self.revision;
-        slot.kill_tracking = self.tracking;
+        // Existing trusted callers retain their infallible API. All allocation
+        // precedes the same shared commit used by prepared personal delivery.
+        install::PreparedProgressionInstall::prepare(self.clone())
+            .expect("trusted gameplay install allocation")
+            .commit(slot);
     }
     pub(crate) fn from_slot(
         context: GameplayContext,
