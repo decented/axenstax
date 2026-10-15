@@ -59,7 +59,7 @@ pub(in crate::test_integration) fn transfer_with_custody(
     source: &mut HeadlessGame,
     peer: &mut HeadlessGame,
     seat: Seat,
-    now: fn() -> u64,
+    _now: fn() -> u64,
     custody: Option<&custody::Custody>,
     close_prepared: bool,
 ) -> Completed {
@@ -81,10 +81,8 @@ pub(in crate::test_integration) fn transfer_with_custody(
     ));
     assert!(peer.state.remote_client.as_ref().unwrap().handover_authority_settled());
     assert!(peer.state.window_inbox.is_empty());
-    // Drain the genuine final pre-consent movement/control packets normally.
-    // The UI action then parks that SAME established transport.
-    source.hosted_ticks(1);
-    source.frames(1);
+    // The completed normal round already drained the peer before consent.
+    // Park that SAME transport without another unpaired source advance.
     peer.state.handover_consent_shown = Some(web_time::Instant::now() - Duration::from_secs(1));
     peer.state.handover_click = Some(UiAction::Accept);
     peer.frames(1);
@@ -225,8 +223,6 @@ pub(in crate::test_integration) fn abort_current_with_custody(
         round(source, peer);
         assert!(Instant::now() < deadline);
     }
-    source.hosted_ticks(1);
-    source.frames(1);
     peer.state.handover_consent_shown = Some(web_time::Instant::now() - Duration::from_secs(1));
     peer.state.handover_click = Some(UiAction::Accept);
     peer.frames(1);

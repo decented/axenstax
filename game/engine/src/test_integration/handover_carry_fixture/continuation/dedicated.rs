@@ -1,6 +1,6 @@
 //! Real signed role cut from a played retained folder and canonical return.
 use super::*;
-use crate::{hosted_server::quest_lifecycle_actor::Actor, quest_wire::QuestOperation, transport::ClientTransport as _};
+use crate::{hosted_server::quest_lifecycle_actor::Actor, quest_wire::QuestOperation};
 
 pub(in crate::test_integration) fn complete_dedicated_and_return(game: &mut HeadlessGame, secret: [u8; 32]) {
     let before = native(game);
