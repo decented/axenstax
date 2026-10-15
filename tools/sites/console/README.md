@@ -40,9 +40,41 @@ browser ──HTTPS──> Caddy (/admin*) ──> this sidecar (:8101) ──re
 It reads/writes (`identity.py`): `attestation.json` (→ operator npub), `whitelist.txt`,
 `blocklist.txt`, `require_signin`, `console.json`, `sessions.jsonl`, `kick`.
 
-**Auth:** you sign in with **your own npub** via signet-login (same flow as the game
-site). Only the npub the server's `attestation.json` chains to may log in — every
+**Auth:** you sign in with **your own npub** via the published `signet-login` npm
+package. The anonymous web game has no sign-in flow. Only the npub the server's `attestation.json` chains to may log in — every
 other identity is refused (`app.py::current_operator_npub`). No passwords.
+
+## Published SDK dependency
+
+The console ships the unmodified browser artefact from `signet-login@0.19.1`
+(published npm export `signet-login/iife`). Its exact version and tarball SHA256
+live in `../signet-login-package.mjs`; the committed bundle and licence notice
+keep local and offline console use independent of the registry.
+
+From the repository root, refresh and verify with:
+
+```bash
+node tools/sites/vendor-signet-login.mjs --strict
+node tools/sites/check-signet-login-bundle.mjs
+node --test tools/sites/test-signet-login-package.mjs tools/sites/console/test-console-login.mjs
+```
+
+The refresh downloads the published tarball with package lifecycle scripts
+disabled, verifies the checksum, and copies its browser artefact and licence
+notice. It does not build a Signet checkout. Normal deployment retains the
+committed bundle if the registry is unavailable or verification fails; strict
+refresh and compatibility checks fail instead.
+
+The compatibility workflow accepts exact **published npm versions**, including
+published prereleases. Candidate requests require
+`signet_login_package_version`; `signet_login_ref` and `signet_login_sha` remain
+request provenance only. An unpublished source candidate cannot pass this gate:
+upstream must publish a prerelease before requesting package compatibility.
+There is no mutable `latest` selection or local-built bundle override.
+
+The console consumes `login()` cancellation as `null` and the redirect callback's
+`{kind: 'session', session}` result. Every submitted proof still goes through the
+existing server verification and operator-authorisation gates.
 
 ## Run it
 

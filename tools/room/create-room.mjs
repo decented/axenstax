@@ -159,10 +159,10 @@ const identityPath = arg("identity", statePath ? `${statePath}.key` : undefined)
 // — which is the sort of thing you only discover after doing the attest dance
 // twice. So: mint once, write 0600, reuse forever, and print the npub every
 // start so it is always to hand.
-const { generateSecretKey, getPublicKey } = await import(`${KITHMOOT}/node_modules/nostr-tools/lib/esm/pure.js`);
-const { npubEncode } = await import(`${KITHMOOT}/node_modules/nostr-tools/lib/esm/nip19.js`);
+const { generateSecretKey, getPublicKey } = await import("nostr-tools/pure");
+const { npubEncode } = await import("nostr-tools/nip19");
 const { bytesToHex, hexToBytes } = await import(
-  `${KITHMOOT}/node_modules/@noble/hashes/utils.js`
+  "@noble/hashes/utils.js"
 );
 
 let skBytes;

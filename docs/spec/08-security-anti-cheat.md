@@ -1146,6 +1146,37 @@ The gaming identity pattern — persona pubkey + kind-31000 display-name credent
 
 ---
 
+### 9.0.2 Current browser SDK distribution (2026-10-15)
+
+The web taster is anonymous and offline: it neither loads Signet Login nor gains
+sign-in, cloud storage or chat through a dependency update. The operator console
+alone loads the committed browser artefact from the published `signet-login` npm
+package, pinned at `0.19.1` with its tarball SHA256 in
+`tools/sites/signet-login-package.mjs`. No upstream source checkout or SDK build
+is part of deployment or compatibility testing. The preceding historical PWA
+auth description is not the current web taster's access policy.
+
+The package consumer disables npm lifecycle scripts, verifies the reviewed pin
+(or registry integrity for an explicitly selected published candidate), checks
+package identity and the public browser export, then copies the unmodified
+artefact and its licence notice. Deployment may retain the committed offline
+copy after a fetch or verification failure; strict refresh and drift checks
+fail. All paths share the same exact default version. Compatibility candidates
+must name an already published version, including a prerelease; Git refs and
+SHAs are provenance only, never package/source selectors. Unpublished candidates
+require upstream release-flow coordination rather than a source-build fallback.
+
+Console `login()` cancellation submits no authentication request. A redirect
+result submits a proof only from the SDK's tagged `session` result. The existing
+server challenge, signed-event validation, session cookie and operator-npub
+capability checks remain authoritative. No relay defaults, identity derivation,
+secret custody, age collection, discovery or hosting policy changes are implied.
+
+Forgesworn dependency exceptions and the package audit are recorded in
+`docs/integrations/forgesworn-package-audit.md`. Native Rust libraries are not
+replaced with JavaScript packages; an unpublished primitive must not be presented
+as an installable npm dependency.
+
 ### 9.1 Authentication Methods
 
 | Method | Availability | Notes |

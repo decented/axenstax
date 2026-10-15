@@ -1,19 +1,19 @@
 name: Signet Compatibility
-run-name: Signet compatibility ${{ inputs.signet_login_ref || github.ref_name }}
+run-name: Signet compatibility ${{ inputs.signet_login_package_version || github.ref_name }}
 
 on:
   workflow_dispatch:
     inputs:
       signet_login_ref:
-        description: Signet Login ref or release tag requesting compatibility
+        description: Upstream Git ref for request provenance only; source is never fetched
         required: false
         type: string
       signet_login_sha:
-        description: Signet Login commit SHA requesting compatibility
+        description: Upstream commit SHA for request provenance only; source is never fetched
         required: false
         type: string
       signet_login_candidate:
-        description: Build and vendor the Signet Login candidate bundle
+        description: Check an exact published Signet Login npm candidate
         required: false
         default: "false"
         type: choice
@@ -21,7 +21,7 @@ on:
           - "false"
           - "true"
       signet_login_package_version:
-        description: Signet Login candidate package version
+        description: Exact published npm version (required for a candidate)
         required: false
         type: string
       request_id:
@@ -39,46 +39,25 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Check out Signet Login candidate
-        if: ${{ inputs.signet_login_candidate == 'true' }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: forgesworn/signet-login
-          ref: ${{ inputs.signet_login_sha || inputs.signet_login_ref || 'main' }}
-          path: signet-login-candidate
-          persist-credentials: false
-
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
 
-      - name: Build Signet Login candidate bundle
-        if: ${{ inputs.signet_login_candidate == 'true' }}
-        working-directory: signet-login-candidate
-        # 2026-09-28 audit fix: workflow_dispatch string inputs used to be spliced
-        # directly into this run: script (script-injection sink — an attacker who
-        # can trigger the dispatch controls signet_login_package_version). Pass
-        # through env instead, which the shell sees as an opaque value.
+      - name: Select the published Signet Login package
+        # Dispatch values remain opaque environment values, never shell source.
         env:
-          EXPECTED_VERSION: ${{ inputs.signet_login_package_version }}
+          SIGNET_LOGIN_CANDIDATE: ${{ inputs.signet_login_candidate }}
+          SIGNET_LOGIN_PACKAGE_VERSION: ${{ inputs.signet_login_package_version }}
         run: |
-          npm ci
-          npm run build
-          VERSION="$(node -p "JSON.parse(require('fs').readFileSync('package.json', 'utf8')).version")"
-          if [ -n "$EXPECTED_VERSION" ] && [ "$VERSION" != "$EXPECTED_VERSION" ]; then
-            echo "Expected signet-login $EXPECTED_VERSION, built $VERSION"
-            exit 1
-          fi
+          VERSION="$(node --input-type=module -e "import { selectedVersion } from './tools/sites/signet-login-package.mjs'; console.log(selectedVersion())")"
+          echo "SIGNET_LOGIN_PACKAGE_VERSION=$VERSION" >> "$GITHUB_ENV"
 
-      - name: Vendor Signet Login candidate bundle
+      - name: Vendor the published npm candidate (console only)
         if: ${{ inputs.signet_login_candidate == 'true' }}
-        # 2026-09-27 audit fix: the game site no longer loads signet-login at all
-        # (the web taster is login-free) — only the console (real operator login)
-        # vendors it, and only from the pinned + sha256-verified
-        # tools/sites/vendor-signet-login.mjs path on ordinary deploys. This
-        # workflow still overwrites the console copy directly to test a candidate
-        # build against this repo's WASM build.
-        run: cp signet-login-candidate/dist/signet-login.iife.js tools/sites/console/static/vendor/signet-login.iife.js
+        run: node tools/sites/vendor-signet-login.mjs --strict
+
+      - name: Check Signet Login package tooling
+        run: node --test tools/sites/test-signet-login-package.mjs tools/sites/console/test-console-login.mjs
 
       - name: Rust toolchain (wasm32)
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable (pinned 2026-09-28)
@@ -100,8 +79,6 @@ jobs:
           trunk --version
 
       - name: Check Signet Login bundle drift
-        env:
-          SIGNET_LOGIN_EXPECTED_BUNDLE: ${{ inputs.signet_login_candidate == 'true' && 'signet-login-candidate/dist/signet-login.iife.js' || '' }}
         run: node tools/sites/check-signet-login-bundle.mjs tools/sites/console/static/vendor/signet-login.iife.js
 
       - name: Build WASM bundle

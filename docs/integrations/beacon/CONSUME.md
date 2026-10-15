@@ -1,5 +1,14 @@
 # Consuming Beacon in AxeNStax — pointer brief
 
+> **Current dependency exception (15 October 2026):** `@forgesworn/beacon`
+> returns 404 from the public npm registry. Do not invent a registry dependency
+> or treat a local package version as a published release. The owner-run
+> `tools/bake-beacon.js` still supports an explicitly supplied built SDK through
+> `BEACON_SDK_PATH` until a published equivalent is available. The browser Beacon
+> integration described below is historical: the anonymous offline web taster
+> no longer loads the Beacon SDK or sharing glue. This exception does not
+> re-enable that browser integration.
+
 **Status:** ✅ **CONSUMED 2026-06-05** — the migration in this brief is **built** on branch
 `feat/workshop-beacon-share` (Spec 40 Phases D/E, `docs/goals/the-workshop-sharing.md`, `./check.sh`-green
 at 2145 engine tests). `beacon.iife.js` is vendored → `window.AxeBeacon`; `tools/sites/game/static/beacon.js`

@@ -184,6 +184,20 @@ for spec in "${site_tests[@]}"; do
     fi
 done
 
+section "published Signet npm consumer checks"
+if command -v node >/dev/null 2>&1; then
+    if node --test tools/sites/test-signet-login-package.mjs tools/sites/console/test-console-login.mjs; then
+        ok "published Signet package and console consumer contracts pass"
+        verified+=("Signet npm consumer checks")
+    else
+        fail "Signet npm consumer checks failed"
+        failures=$((failures + 1))
+    fi
+else
+    fail "node not found — Signet npm consumer checks could NOT run"
+    failures=$((failures + 1))
+fi
+
 section "cargo clippy ($PROFILE_LABEL)"
 if (cd game/engine && cargo clippy $PROFILE_FLAG -- -D warnings); then
     ok "clippy clean (-D warnings)"

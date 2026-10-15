@@ -1,5 +1,4 @@
-// Operator Console — sign-in flow (signet-login). Mirrors the game site's
-// /auth/challenge → Signet.login → /auth/verify, minus the WASM boot.
+// Operator Console — published signet-login challenge/verify flow.
 (function () {
   "use strict";
   var APP_NAME = "Axe'n'Stax Operator Console";
@@ -51,6 +50,11 @@
           challenge: challenge,
           relayUrl: RELAY_URL,
         });
+        if (!session) {
+          setStatus("Sign-in cancelled.");
+          btn.disabled = false;
+          return;
+        }
         setStatus("Verifying…");
         await postVerify(session.authEvent, session.displayName);
       } catch (e) {
@@ -65,9 +69,9 @@
     window.Signet
       .handleRedirectCallback()
       .then(function (result) {
-        if (result && result.authEvent) {
+        if (result && result.kind === "session" && result.session && result.session.authEvent) {
           setStatus("Verifying…");
-          postVerify(result.authEvent, result.displayName).catch(function (e) {
+          postVerify(result.session.authEvent, result.session.displayName).catch(function (e) {
             setStatus("Sign-in failed: " + (e && e.message ? e.message : e));
           });
         }

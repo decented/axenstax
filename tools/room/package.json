@@ -1,0 +1,16 @@
+{
+  "name": "axenstax-room-tools",
+  "private": true,
+  "type": "module",
+  "description": "Owner-run KithMoot room wrapper; published identity utilities are installed locally.",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "test": "node --test identity-dependencies.test.mjs"
+  },
+  "dependencies": {
+    "@noble/hashes": "2.0.1",
+    "nostr-tools": "2.25.2"
+  }
+}
