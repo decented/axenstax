@@ -3470,6 +3470,8 @@ fn run_shot_workshop(args: &[String]) {
 /// Headless screenshot mode: generate world, render one frame, save PNG, exit.
 /// Optional --hud uses the actual survival HUD; --time, --width and --height
 /// select bounded in-world visual previews without a window or saved world.
+/// --mob <species> previews a live animal on a small grass pad; --angle and
+/// --walk-tick select its facing and walk pose without running the simulation.
 #[cfg(not(target_arch = "wasm32"))]
 fn run_screenshot(args: &[String]) {
     // Parse optional output path: --screenshot [path]
@@ -3494,6 +3496,9 @@ fn run_screenshot(args: &[String]) {
     let height = number("--height", 720, 240, 2160);
     let world_time = number("--time", 6000, 0, 23_999);
     let show_hud = args.iter().any(|a| a == "--hud");
+    let preview_mob = args.iter().position(|a| a == "--mob")
+        .map(|i| args.get(i + 1).and_then(|name| crate::mob::MobType::from_name(name))
+            .expect("--mob requires a recognised species id"));
     let mut world = World::new();
     let biome_gen = crate::biome::BiomeGenerator::new(42);
 
@@ -3504,10 +3509,23 @@ fn run_screenshot(args: &[String]) {
     let render_dist = 6; // smaller for speed
     log::info!("Generating terrain ({} chunk radius)...", render_dist);
     let registry = crate::block::BlockRegistry::new();
-    for dx in -render_dist..=render_dist {
-        for dz in -render_dist..=render_dist {
-            world.generate_column(dx, dz, &biome_gen);
-            crate::lighting::run_initial_pass_for_column(&mut world, dx, dz, &registry);
+    if preview_mob.is_some() {
+        for x in -6..=6 {
+            for z in -6..=6 {
+                world.set_block(x, 63, z, block::GRASS);
+            }
+        }
+        for x in -1..=0 {
+            for z in -1..=0 {
+                crate::lighting::run_initial_pass_for_column(&mut world, x, z, &registry);
+            }
+        }
+    } else {
+        for dx in -render_dist..=render_dist {
+            for dz in -render_dist..=render_dist {
+                world.generate_column(dx, dz, &biome_gen);
+                crate::lighting::run_initial_pass_for_column(&mut world, dx, dz, &registry);
+            }
         }
     }
 
@@ -3536,8 +3554,16 @@ fn run_screenshot(args: &[String]) {
     let spawn_y = spawn_y as f32 + 1.0;
 
     // Position camera looking across the terrain at a slight angle
-    let eye = glam::Vec3::new(8.0, spawn_y + 12.0, 8.0);
-    let target = glam::Vec3::new(0.0, spawn_y - 2.0, -20.0);
+    let (eye, target) = if let Some(kind) = preview_mob {
+        let h = crate::mob::mob_def(kind).height.max(0.7);
+        let target = glam::Vec3::new(0.0, 64.0 + h * 0.50, 0.0);
+        let eye = glam::Vec3::new(2.0, 64.0 + h * 0.65 + 0.75, -3.3);
+        let zoom = number("--zoom", 100, 50, 300) as f32 / 100.0;
+        (target + (eye - target) / zoom, target)
+    } else {
+        (glam::Vec3::new(8.0, spawn_y + 12.0, 8.0),
+            glam::Vec3::new(0.0, spawn_y - 2.0, -20.0))
+    };
     let aspect = width as f32 / height as f32;
 
     let view = glam::camera::rh::view::look_at_mat4(eye, target, glam::Vec3::Y);
@@ -3566,6 +3592,25 @@ fn run_screenshot(args: &[String]) {
     // Owner-inbox #18 — upload the per-type baked micro-model shells so the
     // headless screenshot's micro pass can draw them.
     renderer.sync_micro_models(&world.micro_registry);
+
+    if let Some(kind) = preview_mob {
+        let ticks = number("--walk-tick", 0, 0, 10_000);
+        let angle = number("--angle", 0, 0, 359) as f32;
+        let mut ecs = hecs::World::new();
+        let id = crate::entity::spawn_mob(&mut ecs, kind, glam::Vec3::new(0.0, 64.0, 0.0));
+        ecs.get::<&mut crate::mob_ai::MobAi>(id).unwrap().facing = angle.to_radians() - std::f32::consts::FRAC_PI_2;
+        if args.iter().any(|a| a == "--walk-tick") {
+            ecs.get::<&mut crate::entity::Velocity>(id).unwrap().0.x = 1.0;
+        }
+        if args.iter().any(|a| a == "--baby") {
+            ecs.insert_one(id, crate::breeding::Baby { adult_at_tick: 100 }).unwrap();
+        }
+        let vertices = crate::entity_model::build_entity_model_vertices(
+            &ecs, ticks, eye, &crate::override_registry::OverrideRegistry::new(),
+            |_| (0.0, 1.0),
+        );
+        renderer.upload_entity_vertices(0, &vertices);
+    }
 
     if show_hud {
         // Headless world captures normally need no UI icons. Register the

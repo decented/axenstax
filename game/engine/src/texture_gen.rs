@@ -7,6 +7,8 @@
 const SIZE: u32 = 16;
 const PIXELS: usize = (SIZE * SIZE * 4) as usize; // 1024 bytes per texture
 
+mod animal_coats;
+
 /// Generate all block textures. Returns Vec of RGBA pixel data, one per layer.
 /// Index = texture array layer index (matches block::TEX_* constants).
 pub fn generate_textures() -> Vec<Vec<u8>> {
@@ -648,15 +650,16 @@ pub fn generate_textures() -> Vec<Vec<u8>> {
     textures.push(gen_pet_bed_side()); // 458: TEX_PET_BED_SIDE
 
     // Species-tint run (mob-species-tint foundation, 2026-07-11) — per-species
-    // tinted copies of donor coat layers, 459.. in SPECIES_TINTS order. The
-    // tint colour is `MobDef.color` (the per-mob TOML) so data stays the
-    // single source of truth. MUST remain the LAST run: `tinted_layer` indexes
-    // from PRE_TINT_LAYER_COUNT.
+    // Species coats, 459.. in SPECIES_TINTS order: bespoke animal art where
+    // available, otherwise luminance-normalised donor tints. MobDef.color
+    // supplies each base coat. Keep this run contiguous: tinted_layer indexes
+    // from PRE_TINT_LAYER_COUNT; newer block layers follow it.
     debug_assert_eq!(textures.len() as u32, PRE_TINT_LAYER_COUNT);
     for st in SPECIES_TINTS {
         let colour = crate::mob::mob_def(st.kind).color;
         for &donor in st.donors {
-            let tinted = tint_rgba(&textures[donor as usize], colour);
+            let tinted = animal_coats::generate(st.kind, donor, colour)
+                .unwrap_or_else(|| tint_rgba(&textures[donor as usize], colour));
             textures.push(tinted);
         }
     }
@@ -6170,12 +6173,13 @@ mod tests {
         // species colour. A straight multiply can never brighten a dark donor
         // (the white polar bear stayed cow-brown); un-normalized luminance
         // keeps the donor's brightness (bear mean 127 vs donor 128). The
-        // normalize-then-multiply keeps the fox saturated AND lifts the bear.
-        use crate::entity_model::{TEX_COW_BODY_SIDE, TEX_SHEEP_BODY_SIDE};
+        // Normalisation still applies to donor coats (polar bear/glow squid).
+        // The fox now has bespoke art; its saturation property is tested below.
+        use crate::entity_model::{TEX_COW_BODY_SIDE, TEX_SQUID_BODY};
         use crate::mob::MobType;
         let layers = generate_textures();
         for (kind, donor_layer) in [
-            (MobType::Fox, TEX_SHEEP_BODY_SIDE),
+            (MobType::GlowSquid, TEX_SQUID_BODY),
             (MobType::PolarBear, TEX_COW_BODY_SIDE),
         ] {
             let donor = &layers[donor_layer as usize];

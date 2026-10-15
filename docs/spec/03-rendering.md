@@ -964,6 +964,35 @@ Weather particles are rendered in the Particle Pass, after entities, before post
 
 ## 7. Entity Rendering
 
+**Animal presentation (2026-10-15).** `entity_model/animals.rs` supplies distinct
+cat, fox, crab, reindeer, parrot, donkey and mule silhouettes through the normal
+live entity mesh builder (also used by remote mobs). Cats have short muzzles and
+raised tails; foxes have cream-tipped brushes; crabs have low shells, eight
+walking legs, eye stalks and paired open pincers; reindeer have branched antlers;
+parrots have folded wings, hooked beaks and stepped tail feathers; pack equines
+have long ears, shorter legs, manes and switch tails. Existing body/head/limb
+part indices remain in place for Workshop reskins; new details are appended.
+The crab donor's ear and tail slots become its eye stalks and rear shell.
+Facial textures on cats, foxes and equines appear on the front (-Z) only.
+
+`texture_gen/animal_coats.rs` bakes their default markings into the existing
+species coat slots: tabby stripes, fox cream trim, crab shell edging, reindeer
+cream trim and bone-coloured antlers, equine pale muzzles and dark manes, and
+parrot feather bands. `MobDef.color` supplies base coats. Small feline noses use
+existing solid paint layers. Polar Bear and Glow Squid retain normalised donor
+tints. Texture registry keys, layer addresses and the **511-layer** atlas remain
+unchanged, including resource-pack overrides of the legacy `_tinted` keys.
+Hitboxes, behaviour, wire/save formats, damage flashes, world lighting and baby
+scale are unchanged; antlers, tails and ears are cosmetic extents.
+
+The existing native `--screenshot` path accepts `--mob <species>` for an isolated
+grass-pad preview, with bounded `--angle`, `--zoom` (percentage), `--walk-tick`
+and `--baby` controls. It spawns an in-memory entity and uses the live mesh
+builder, camera, day/night shader and PNG readback; it never loads a saved world
+or starts a simulation. Normal terrain/HUD screenshot defaults are unchanged.
+Automated geometry, layer/pack and actual GPU captures support the visual pass;
+live animal interaction acceptance is recorded separately in the player sheet.
+
 #### Current Implementation (Step 9 — Prototype)
 
 Entity rendering uses the chunk shader pipeline (same lighting, fog, textures) with a

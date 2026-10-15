@@ -12,6 +12,8 @@ use crate::item::Item;
 use crate::mob_ai::MobAi;
 use crate::combat::Health;
 
+mod animals;
+
 /// Overlay inflation for the RIGHT ARM specifically — the one part the
 /// first-person viewmodel draws (`crate::viewmodel`). Per-part overlay inflate
 /// now lives in [`crate::skin_pose`] (Minecraft-exact: head 0.03125, limbs
@@ -289,22 +291,14 @@ static MODEL_CACHE: std::sync::LazyLock<std::collections::HashMap<MobType, Vec<M
         m.insert(MobType::Fish, fish_model());
         m.insert(MobType::Shark, shark_model());
         m.insert(MobType::GlowSquid, retint(MobType::GlowSquid, squid_model()));
-        // Wild fauna wave — reuse the closest existing quadruped/canine meshes
-        // with per-species tinted coats (orange fox, white polar bear, brown
-        // reindeer — MobDef.color baked, 2026-07-11). Bespoke meshes (esp.
-        // antlers) are a polish pass.
-        m.insert(MobType::Fox, retint(MobType::Fox, wolf_model()));
+        // Species-specific silhouettes retain the existing coat layer addresses.
+        m.insert(MobType::Fox, retint(MobType::Fox, animals::fox()));
         m.insert(MobType::PolarBear, retint(MobType::PolarBear, bear_model()));
-        m.insert(MobType::Reindeer, retint(MobType::Reindeer, horse_model()));
-        // Companions wave — Cat reuses the (small) wolf canine mesh; Parrot the
-        // chicken bird mesh; both tinted (grey cat, red parrot — 2026-07-11).
-        // Bespoke meshes are a polish pass.
-        m.insert(MobType::Cat, retint(MobType::Cat, wolf_model()));
-        m.insert(MobType::Parrot, retint(MobType::Parrot, chicken_model()));
-        // Logistics wave — donkey + mule reuse the horse mesh, tinted brown
-        // (2026-07-11).
-        m.insert(MobType::Donkey, retint(MobType::Donkey, horse_model()));
-        m.insert(MobType::Mule, retint(MobType::Mule, horse_model()));
+        m.insert(MobType::Reindeer, retint(MobType::Reindeer, animals::reindeer()));
+        m.insert(MobType::Cat, retint(MobType::Cat, animals::cat()));
+        m.insert(MobType::Parrot, retint(MobType::Parrot, animals::parrot()));
+        m.insert(MobType::Donkey, retint(MobType::Donkey, animals::donkey()));
+        m.insert(MobType::Mule, retint(MobType::Mule, animals::mule()));
         // HP-3 — Brigand / Marauder / Berserker share the villager
         // bipedal mesh; tier identity reads from `MobDef.color` (per-
         // TOML tint: brown / grey / rust-red). When the dedicated
@@ -316,10 +310,7 @@ static MODEL_CACHE: std::sync::LazyLock<std::collections::HashMap<MobType, Vec<M
         // `MobDef.color` (steel grey). Dedicated armoured mesh deferred
         // to post-playtest polish.
         m.insert(MobType::Knight, villager_model());
-        // Pets wave Task 13 — Crab reuses the (small) rabbit mesh, tinted
-        // rust-red (2026-07-11). A bespoke low, wide crab mesh is a
-        // playtest-driven polish pass.
-        m.insert(MobType::Crab, retint(MobType::Crab, rabbit_model()));
+        m.insert(MobType::Crab, retint(MobType::Crab, animals::crab()));
         m
     });
 
@@ -4188,8 +4179,8 @@ mod tests {
 
     // --- species tint (mob-species-tint foundation, 2026-07-11) ----------
 
-    /// The (reuse species, donor) pairs of MODEL_CACHE. The four villager-tier
-    /// humans are deliberately absent (bespoke mesh pending; layer budget).
+    /// Species and their legacy coat donors. Silhouettes may now be bespoke;
+    /// the coat isolation guarantee still applies to every original face.
     const TINTED_REUSE: &[(MobType, MobType)] = &[
         (MobType::Fox, MobType::Wolf),
         (MobType::Cat, MobType::Wolf),
@@ -4205,7 +4196,7 @@ mod tests {
     #[test]
     fn mesh_reuse_species_render_their_own_tinted_coats() {
         // Species identity comes from the tinted run, not the donor coat —
-        // a Fox must share NO texture layer with the Wolf model it borrows.
+        // a Fox must share NO texture layer with the Wolf's donor coat.
         for &(reuse, donor) in TINTED_REUSE {
             let donor_faces: std::collections::HashSet<u32> =
                 mob_model(donor).iter().flat_map(|p| p.tex_faces).collect();
