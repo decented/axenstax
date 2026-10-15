@@ -108,11 +108,21 @@ impl crate::server::GameServer {
             }
         }
     }
+    #[cfg(test)]
     pub(crate) fn credit_personal_kill(
         &mut self,
         i: usize,
         kind: crate::mob::MobType,
         pos: glam::Vec3,
+    ) {
+        let village = crate::reputation::village_at_position(&self.world, pos);
+        self.credit_personal_kill_in_village(i, kind, village);
+    }
+    pub(crate) fn credit_personal_kill_in_village(
+        &mut self,
+        i: usize,
+        kind: crate::mob::MobType,
+        village: Option<crate::reputation::VillageId>,
     ) {
         let sp = &mut self.players[i];
         let Some(personal) = &mut sp.personal else {
@@ -135,8 +145,8 @@ impl crate::server::GameServer {
             .extend(record.reputation.iter().copied());
         let penalty = matches!(kind, crate::mob::MobType::Villager | crate::mob::MobType::Peddler)
             && record.quests.penalty_left == 0
-            && crate::reputation::village_at_position(&self.world, pos).is_some();
-        if penalty && let Some(village) = crate::reputation::village_at_position(&self.world, pos) {
+            && village.is_some();
+        if penalty && let Some(village) = village {
             reputation.adjust(village, crate::reputation::VILLAGER_KILL_PENALTY);
         }
         record.kills = kills.into_iter().collect();

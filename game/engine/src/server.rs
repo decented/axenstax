@@ -335,6 +335,25 @@ pub struct ServerPlayer {
     pub local_seated: bool,
 }
 
+/// Location resolved from the world that actually swept this death. Absence of a
+/// village is authoritative, including outside a lending server's borrow window.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DeathLocation {
+    position: Vec3,
+    village: Option<crate::reputation::VillageId>,
+}
+
+impl DeathLocation {
+    pub fn from_world(world: &World, position: Vec3) -> Self {
+        Self { position, village: crate::reputation::village_at_position(world, position) }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn village(self) -> Option<crate::reputation::VillageId> {
+        self.village
+    }
+}
+
 /// MP-D2b — a client death sweep's kill attribution (single-player, or a
 /// host, whose lent world's sweep is its client's until D4):
 /// `combat::attribute_kill` over this client's players (`locals`:
@@ -345,17 +364,17 @@ pub fn route_client_kill(
     server: Option<&mut GameServer>,
     attacker: Option<crate::combat::Attacker>,
     kind: crate::mob::MobType,
-    pos: Vec3,
+    location: DeathLocation,
     tamed: bool,
     locals: &[(Vec3, bool)],
 ) -> Option<usize> {
     // Review D2b LOW-5 — the nearest-player fallback sees the joiners too.
     let joiners = server.as_deref().map(GameServer::joiner_bodies).unwrap_or_default();
-    match crate::combat::attribute_kill(attacker, pos, locals, &joiners) {
+    match crate::combat::attribute_kill(attacker, location.position, locals, &joiners) {
         crate::combat::KillCredit::Local(idx) => Some(idx),
         crate::combat::KillCredit::Remote { slot, generation, nearest } => {
             if let Some(server) = server {
-                server.queue_kill_event(slot, generation, kind, pos, tamed, nearest);
+                server.queue_kill_event_at(slot, generation, kind, location, tamed, nearest);
             }
             None
         }
@@ -2595,11 +2614,25 @@ impl GameServer {
         tamed: bool,
         nearest: bool,
     ) {
+        let location = DeathLocation::from_world(&self.world, pos);
+        self.queue_kill_event_at(slot, generation, kind, location, tamed, nearest);
+    }
+
+    fn queue_kill_event_at(
+        &mut self,
+        slot: usize,
+        generation: u32,
+        kind: crate::mob::MobType,
+        location: DeathLocation,
+        tamed: bool,
+        nearest: bool,
+    ) {
         if !self.is_joiner_of_gen(slot, generation) {
             return;
         }
         #[cfg(not(target_arch = "wasm32"))]
-        self.credit_personal_kill(slot, kind, pos);
+        self.credit_personal_kill_in_village(slot, kind, location.village);
+        let pos = location.position;
         let sp = &mut self.players[slot];
         sp.progression_credits = sp.progression_credits.saturating_add(1);
         self.pending_kill_events.push((

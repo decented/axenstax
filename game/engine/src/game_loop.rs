@@ -7133,9 +7133,10 @@ impl super::GameState {
             // projectile), else the nearest living local player. A joiner's
             // kill (a lent world's sweep is this client's until D4) goes to
             // that joiner as a `KillEvent`, and credits no player here.
+            let location = crate::server::DeathLocation::from_world(&self.world, pos);
             let server = self.hosted_server.as_mut().map(|hs| &mut hs.server);
             if let Some(idx) =
-                crate::server::route_client_kill(server, attacker, kind, pos, was_tamed, &locals)
+                crate::server::route_client_kill(server, attacker, kind, location, was_tamed, &locals)
             {
                 self.credit_kill(idx, kind, pos, was_tamed);
             }

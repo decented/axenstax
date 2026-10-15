@@ -55,6 +55,8 @@ mod quest_lifecycle_fixture;
 mod quest_lifecycle_tests;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod quest_daily_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod quest_credit_tests;
 mod strict_container;
 mod strict_edit;
 mod strict_attack;

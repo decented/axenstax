@@ -7007,6 +7007,16 @@ routing. Remaining gameplay timers use a runtime anchor on the same holder;
 kill/decay/quest mutations and canonical saves project all remaining timers,
 restore re-anchors without offline decay, and actual expiry is a discrete revision.
 
+A remote death credit carries its position and optional village resolved from
+that death sweep's actual world. On a lending host the native death sweep runs
+outside the server's borrow window; its resolved village therefore travels with
+the credit instead of being looked up in the empty unborrowed server world.
+An explicit absent village stays absent, without fallback. Owning server sweeps
+resolve from their own actual world. The existing attachment-generation gate,
+common-holder projection/revision/encode-before-commit checks and legacy kill
+event/counter behaviour, including common-write errors, are unchanged. This
+checkpoint changes no clock, proof, save or active-transfer eligibility rule.
+
 This correction is source work awaiting bounded execution. Actual GameState
 controls established separate ordering loss, duplicate reward and duplicate
 overflow feedback failures before the narrow correction; its restored runtime

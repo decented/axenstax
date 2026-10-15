@@ -4359,8 +4359,14 @@ observes local logical ticks. Remaining decline/penalty timers project together
 for reads, mutations and selected captures; offline time is excluded. Only
 actual expiry writes a discrete revision. Native attributed kills, the bounded
 villager penalty and daily reputation decay update that holder once, without a
-second counter or progression store. Joined authoritative counters keep their
-existing server owner and do not receive echoed local credits. Active transfer
+second counter or progression store. The remote villager penalty uses the
+village resolved by the actual death-world sweep, including a lending host's
+native sweep outside the server borrow window. A death world with no village
+cannot borrow one from another server world. Kill attribution still uses the
+same position and last-hit/nearest/current-attachment-generation rule; a valid
+credit retains the existing common-write error and legacy event/counter
+behaviour. Joined authoritative counters keep their existing server owner and
+do not receive echoed local credits. Active transfer
 eligibility guards remain until frozen current-tuple settlement and original/
 retained active continuation pass their actual controls. This source checkpoint
 does not claim full quest or transfer acceptance.

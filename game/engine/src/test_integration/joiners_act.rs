@@ -738,8 +738,9 @@ fn a_lent_hosts_kill_by_a_joiner_goes_to_that_joiner_and_never_to_the_host() {
     assert_eq!(deaths.len(), 1);
     let crate::combat::MobDeath { kind, pos, attacker, .. } = deaths[0];
     assert_eq!(attacker, Some(rig.attacker(0)));
+    let location = crate::server::DeathLocation::from_world(rig.world_mut(), pos);
     let credited =
-        crate::server::route_client_kill(Some(&mut rig.hs.server), attacker, kind, pos, false, &[host_player]);
+        crate::server::route_client_kill(Some(&mut rig.hs.server), attacker, kind, location, false, &[host_player]);
     assert_eq!(credited, None, "the host's player is not credited with the joiner's kill");
 
     rig.tick(1);
@@ -749,13 +750,13 @@ fn a_lent_hosts_kill_by_a_joiner_goes_to_that_joiner_and_never_to_the_host() {
 
     // Nobody's hit: the nearest living player — the host's, beside it.
     assert_eq!(
-        crate::server::route_client_kill(Some(&mut rig.hs.server), None, kind, pos, false, &[host_player]),
+        crate::server::route_client_kill(Some(&mut rig.hs.server), None, kind, location, false, &[host_player]),
         Some(0)
     );
     // …and the joiner when the host's player is far off (review D2b LOW-5).
     let far_host = (rig.at + Vec3::new(400.0, 0.0, 0.0), false);
     assert_eq!(
-        crate::server::route_client_kill(Some(&mut rig.hs.server), None, kind, pos, false, &[far_host]),
+        crate::server::route_client_kill(Some(&mut rig.hs.server), None, kind, location, false, &[far_host]),
         None
     );
     rig.tick(1);
@@ -852,8 +853,9 @@ fn a_departed_joiners_kill_credits_neither_the_host_nor_the_slots_next_joiner() 
     let crate::combat::MobDeath { kind, pos, attacker, .. } = deaths[0];
     assert_eq!(attacker, Some(crate::combat::Attacker::Departed));
     let host_beside = (pos + Vec3::new(0.3, 0.0, 0.0), false);
+    let location = crate::server::DeathLocation::from_world(rig.world_mut(), pos);
     assert_eq!(
-        crate::server::route_client_kill(Some(&mut rig.hs.server), attacker, kind, pos, false, &[host_beside]),
+        crate::server::route_client_kill(Some(&mut rig.hs.server), attacker, kind, location, false, &[host_beside]),
         None,
         "the host's player is not credited"
     );
