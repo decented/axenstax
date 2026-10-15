@@ -124,7 +124,7 @@ pub(super) fn giver(
     peer: &mut HeadlessGame,
     profession: crate::villager::Profession,
 ) -> u32 {
-    let seat = settle(source, peer);
+    let seat = observe::positive_giver_seat(source, peer);
     let sp = &source.state.hosted_server.as_ref().unwrap().server.players[seat.0];
     let at = sp.player.pos + crate::camera::forward_from(sp.yaw, 0.0) * 1.5;
     source.state.world.village_anchors.insert((2, 3), at.to_array().map(|n| n.floor() as i32));

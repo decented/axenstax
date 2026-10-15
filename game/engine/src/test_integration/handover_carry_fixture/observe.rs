@@ -1,5 +1,5 @@
 //! Fixed diagnostic metadata around the unchanged real client transport.
-use super::{Seat, settle};
+use super::{Seat, settle, step};
 use crate::{
     action_identity::{ActionFate, ActionHeader},
     action_wire::{ActionIntent, ActionPacket},
@@ -13,6 +13,7 @@ use sha2::{Digest, Sha256};
 use std::{
     fmt,
     sync::{Arc, Mutex, MutexGuard},
+    time::{Duration, Instant},
 };
 
 const LIMIT: usize = 256;
@@ -277,6 +278,7 @@ struct Pose {
     next_input: u64,
     server_eye: Vec3,
     look: (f32, f32),
+    grounded_velocity: (bool, Vec3, bool, Vec3),
     target: TargetMeta,
     distance: Option<f32>,
     foot_distance: Option<f32>,
@@ -299,6 +301,7 @@ impl fmt::Debug for Pose {
             .field("next_input", &self.next_input)
             .field("server_eye", &self.server_eye)
             .field("look", &self.look)
+            .field("peer_server_grounded_velocity", &self.grounded_velocity)
             .field("target", &self.target)
             .field("distance", &self.distance)
             .field("foot_distance", &self.foot_distance)
@@ -334,6 +337,7 @@ fn pose(source: &HeadlessGame, peer: &HeadlessGame, seat: Seat, target: u32) -> 
         next_input: remote.next_input_seq(),
         server_eye,
         look: (sp.yaw, sp.pitch),
+        grounded_velocity: (slot.player.on_ground, slot.player.velocity, sp.player.on_ground, sp.player.velocity),
         target: TargetMeta {
             present: entity.is_some(),
             position,
@@ -379,6 +383,41 @@ fn pose(source: &HeadlessGame, peer: &HeadlessGame, seat: Seat, target: u32) -> 
         ),
     }
 }
+fn physical_ready(source: &HeadlessGame, peer: &HeadlessGame, seat: Seat) -> bool {
+    let sp = &source.state.hosted_server.as_ref().unwrap().server.players[seat.0];
+    let player = &peer.state.players[0].player;
+    let remote = peer.state.remote_client.as_ref().unwrap();
+    let still = |p: &crate::physics::Player| {
+        p.pos.is_finite() && p.velocity.is_finite() && p.on_ground && p.velocity.length_squared() <= 0.0001
+    };
+    sp.is_present_and_alive() && !peer.state.players[0].is_dead() && remote.is_connected()
+        && still(player) && still(&sp.player) && player.pos.distance(sp.player.pos) <= 0.25
+        && remote.player_index() == Some(seat.0 as u32) && remote.applied_actor_respawns() == sp.respawns
+        && sp.last_input_tick > 0 && sp.last_applied_input == sp.last_input_tick
+        && sp.pending_intent.is_none() && sp.intent_queue.is_empty()
+}
+/// Network quiescence alone does not mean the two actual bodies have landed.
+pub(super) fn positive_giver_seat(source: &mut HeadlessGame, peer: &mut HeadlessGame) -> Seat {
+    let seat = settle(source, peer);
+    let life = source.state.hosted_server.as_ref().unwrap().server.players[seat.0].respawns;
+    let deadline = Instant::now() + Duration::from_secs(180);
+    let mut stable = 0;
+    loop {
+        step(source, peer);
+        let current = settle(source, peer);
+        assert!(current == seat, "the positive fixture's signed attachment changed while landing");
+        let sp = &source.state.hosted_server.as_ref().unwrap().server.players[seat.0];
+        assert!(sp.respawns == life && peer.state.remote_client.as_ref().unwrap().applied_actor_respawns() == life,
+            "the positive fixture's actual actor life changed while landing");
+        stable = if physical_ready(source, peer, seat) { stable + 1 } else { 0 };
+        assert!(Instant::now() < deadline,
+            "positive bodies did not settle: peer={:?}/{:?}/{} server={:?}/{:?}/{} received={} applied={}",
+            peer.state.players[0].player.pos, peer.state.players[0].player.velocity,
+            peer.state.players[0].player.on_ground, sp.player.pos, sp.player.velocity, sp.player.on_ground,
+            sp.last_input_tick, sp.last_applied_input);
+        if stable == 2 { return seat; }
+    }
+}
 pub(super) fn quest(
     source: &mut HeadlessGame,
     peer: &mut HeadlessGame,
@@ -389,6 +428,16 @@ pub(super) fn quest(
 ) -> Option<QuestView> {
     let seat = settle(source, peer);
     let before = pose(source, peer, seat, target);
+    if operation == QuestOperation::Talk && before.frontier.seq == 0 {
+        assert!(physical_ready(source, peer, seat), "first positive Talk bodies are not settled: {before:?}");
+        assert!(before.target.present && before.target.health.is_some_and(|(hp, dead)| hp.is_finite() && !dead)
+            && before.target.kind == Some(crate::mob::MobType::Villager)
+            && before.target.profession == Some(crate::villager::Profession::Carpenter)
+            && before.distance.is_some_and(|n| n.is_finite() && n < before.limits.0 - 0.5)
+            && before.foot_distance.is_some_and(|n| n.is_finite() && n < before.limits.2 - 0.5)
+            && before.facing.is_some_and(|n| n.is_finite() && n > before.limits.1 + 0.1),
+            "first positive Talk target is not genuinely reachable: {before:?}");
+    }
     let remote = peer.state.remote_client.as_ref().unwrap();
     let expected = remote.action_journal.as_ref().unwrap().next_header(remote.applied_window_event()).unwrap();
     let preceding_input = trace.begin();
