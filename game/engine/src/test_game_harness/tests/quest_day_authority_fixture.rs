@@ -105,7 +105,7 @@ impl DayRig {
             let host = self.game.state.hosted_server.as_ref().unwrap();
             actor.drain(&host.server.registry);
             assert!(actor.rejects.is_empty());
-            assert!(!host.disconnected[actor.i()]);
+            assert!(!host.slot_is_free(actor.i()));
         }
     }
     /// Observe the actual clock and normal hosted window. A standalone preflight
