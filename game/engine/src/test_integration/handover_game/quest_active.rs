@@ -11,8 +11,15 @@ fn game_harness_d2c3_retained_source_preserves_active_own_quests_and_current_tim
     let mut peer = HeadlessGame::boot_into_world("active-retained-peer");
     activity::start_lent(&mut source);
     let client = source.state.hosted_server.as_mut().unwrap().attach_test_remote_with_binding(Some(BINDING));
-    activity::attach(&mut source, &mut peer, client, [RECIPIENT_PERSONA; 32], key(SOURCE_PERSONA), key(SOURCE_RUNTIME));
-    let seat = activity::active_recipient(&mut source, &mut peer);
+    let (_seat, observation) = activity::attach(
+        &mut source,
+        &mut peer,
+        client,
+        [RECIPIENT_PERSONA; 32],
+        key(SOURCE_PERSONA),
+        key(SOURCE_RUNTIME),
+    );
+    let seat = activity::active_recipient(&mut source, &mut peer, &observation);
     assert!(seat.2 == key(RECIPIENT_PERSONA), "actual recipient npub differs");
     activity::assert_boundary_ready(&source, &peer, seat);
     assert!(source.state.handover.is_none());

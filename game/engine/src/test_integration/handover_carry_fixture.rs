@@ -24,6 +24,9 @@ pub(super) fn native(game: &HeadlessGame) -> GameplayRecord {
 }
 #[path = "handover_carry_fixture/native.rs"]
 mod native_setup;
+#[path = "handover_carry_fixture/observe.rs"]
+mod observe;
+use observe::Observation;
 pub(super) fn active_source(name: &str, secret: [u8; 32]) -> HeadlessGame {
     native_setup::active_source(name, secret)
 }
@@ -66,7 +69,8 @@ pub(super) fn attach(
     secret: [u8; 32],
     source_persona: [u8; 32],
     source_runtime: [u8; 32],
-) -> Seat {
+) -> (Seat, Observation) {
+    let (client, observation) = observe::wrap(client);
     let bytes = client.try_recv_from_server().expect("actual bound attach challenge");
     let (kind, body) = protocol::deserialize_header(&bytes).unwrap();
     assert_eq!(kind, PacketType::Challenge);
@@ -86,7 +90,7 @@ pub(super) fn attach(
     assert!(matches!(peer.state.mode, crate::GameMode::Playing));
     let seat = settle(source, peer);
     assert!(seat.2 == key(secret), "actual signed participant has the wrong npub");
-    seat
+    (seat, observation)
 }
 pub(super) fn start_lent(source: &mut HeadlessGame) {
     let hs = HostedServer::start_host(
@@ -104,22 +108,12 @@ pub(super) fn start_lent(source: &mut HeadlessGame) {
 pub(super) fn quest(
     source: &mut HeadlessGame,
     peer: &mut HeadlessGame,
+    observation: &Observation,
     target: u32,
     incarnation: u64,
     op: QuestOperation,
 ) -> Option<QuestView> {
-    let seat = settle(source, peer);
-    let before =
-        source.state.hosted_server.as_ref().unwrap().server.players[seat.0].action_frontier.as_ref().unwrap().through();
-    peer.state.request_quest(target, incarnation, op);
-    settle(source, peer);
-    let remote = peer.state.remote_client.as_ref().unwrap();
-    assert!(
-        source.state.hosted_server.as_ref().unwrap().server.players[seat.0].action_frontier.as_ref().unwrap().through()
-            > before,
-        "a genuine typed quest request was processed"
-    );
-    remote.quest_view.clone()
+    observe::quest(source, peer, observation, target, incarnation, op)
 }
 pub(super) fn giver(
     source: &mut HeadlessGame,
@@ -327,18 +321,18 @@ fn remote_kill(source: &mut HeadlessGame, peer: &mut HeadlessGame, kind: crate::
     assert!(!source.state.ecs.contains(entity));
     settle(source, peer);
 }
-pub(super) fn active_recipient(source: &mut HeadlessGame, peer: &mut HeadlessGame) -> Seat {
+pub(super) fn active_recipient(source: &mut HeadlessGame, peer: &mut HeadlessGame, observation: &Observation) -> Seat {
     let target = giver(source, peer, crate::villager::Profession::Carpenter);
-    let mut offered = quest(source, peer, target, 0, QuestOperation::Talk).unwrap();
+    let mut offered = quest(source, peer, observation, target, 0, QuestOperation::Talk).unwrap();
     for attempt in 0..12 {
         if matches!(offered.terms.as_ref().unwrap().flavour, crate::quest::QuestFlavour::Kill { .. }) {
             break;
         }
-        quest(source, peer, target, offered.incarnation, QuestOperation::Close);
+        quest(source, peer, observation, target, offered.incarnation, QuestOperation::Close);
         for _ in 0..=attempt % 3 {
             step(source, peer);
         }
-        offered = quest(source, peer, target, 0, QuestOperation::Talk).unwrap();
+        offered = quest(source, peer, observation, target, 0, QuestOperation::Talk).unwrap();
     }
     let terms = offered.terms.as_ref().unwrap().clone();
     let crate::quest::QuestFlavour::Kill { mob, .. } = terms.flavour else {
@@ -349,7 +343,7 @@ pub(super) fn active_recipient(source: &mut HeadlessGame, peer: &mut HeadlessGam
     remote_kill(source, peer, mob);
     let before_accept = remote_record(source, seat).kills.iter().find(|(kind, _)| *kind == mob).unwrap().1;
     assert_eq!(before_accept, 1);
-    quest(source, peer, target, offered.incarnation, QuestOperation::Accept { id: terms.id });
+    quest(source, peer, observation, target, offered.incarnation, QuestOperation::Accept { id: terms.id });
     let accepted = remote_record(source, seat).quests.accepted.into_iter().find(|q| q.id == terms.id).unwrap();
     assert_eq!(accepted.baseline, before_accept);
     assert_eq!(accepted.npc, offered.npc);
@@ -357,12 +351,19 @@ pub(super) fn active_recipient(source: &mut HeadlessGame, peer: &mut HeadlessGam
     let record = remote_record(source, seat);
     assert_eq!(record.kills.iter().find(|(kind, _)| *kind == mob).unwrap().1, 2);
     assert_eq!(crate::quest_play::kill_progress(&record, &accepted).unwrap(), 1);
-    quest(source, peer, target, offered.incarnation, QuestOperation::Close);
+    quest(source, peer, observation, target, offered.incarnation, QuestOperation::Close);
     let second = giver(source, peer, crate::villager::Profession::Blacksmith);
-    let declined = quest(source, peer, second, 0, QuestOperation::Talk).unwrap();
+    let declined = quest(source, peer, observation, second, 0, QuestOperation::Talk).unwrap();
     assert_ne!(declined.npc, offered.npc);
-    quest(source, peer, second, declined.incarnation, QuestOperation::Decline { id: declined.terms.unwrap().id });
-    quest(source, peer, second, declined.incarnation, QuestOperation::Close);
+    quest(
+        source,
+        peer,
+        observation,
+        second,
+        declined.incarnation,
+        QuestOperation::Decline { id: declined.terms.unwrap().id },
+    );
+    quest(source, peer, observation, second, declined.incarnation, QuestOperation::Close);
     assert!(!peer.state.joined_quest_open());
     remote_kill(source, peer, crate::mob::MobType::Villager);
     let seat = settle(source, peer);

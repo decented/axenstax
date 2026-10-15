@@ -25,10 +25,11 @@ fn game_harness_d2c3_original_chain_preserves_current_active_participant_quests_
     let checked_continuation = joined.continuation().cloned();
     crate::online_prep::retire(joined);
     let client = source.state.hosted_server.as_mut().unwrap().attach_test_remote_with_binding(Some(BINDING));
-    let _seat = activity::attach(&mut source, &mut peer, client, [b.persona; 32], checked_host, checked_runtime);
+    let (_seat, observation) =
+        activity::attach(&mut source, &mut peer, client, [b.persona; 32], checked_host, checked_runtime);
     peer.state.joined_continuation = checked_continuation;
     recipient_fixture(&mut peer, b, crate::data_dir::data_root().join("handover").join("imports"));
-    let seat = activity::active_recipient(&mut source, &mut peer);
+    let seat = activity::active_recipient(&mut source, &mut peer, &observation);
     assert!(seat.2 == b.pubkey(), "actual recipient npub differs");
     activity::assert_boundary_ready(&source, &peer, seat);
     let before = activity::boundary(&source, &peer, seat);
