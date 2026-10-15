@@ -132,12 +132,14 @@ impl Inbox {
     pub fn initialised(&self) -> bool {
         self.last.is_some()
     }
+    #[cfg(test)]
     pub fn push(&mut self, value: PersonalSnapshot) -> Result<Option<PersonalAck>, String> {
         Ok(match self.prepare_push(value)?.commit() {
             PersonalAdmission::DuplicateApplied(batch) => batch.last_ack(),
             PersonalAdmission::Admitted(_) | PersonalAdmission::Ignored => None,
         })
     }
+    #[cfg(test)]
     pub fn apply(
         &mut self,
         events: u32,

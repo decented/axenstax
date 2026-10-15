@@ -99,6 +99,7 @@ impl AppliedPersonalBatch {
     pub(crate) fn identity(&self) -> &PersonalFenceIdentity {
         &self.identity
     }
+    #[cfg(test)]
     pub(crate) fn acks(&self) -> impl Iterator<Item = PersonalAck> + '_ {
         self.values.iter().map(|value| value.ack)
     }
@@ -280,6 +281,7 @@ impl Inbox {
             .find(|value| value.life == life && value.window_event == event)
             .map(|value| self.identity(super::acknowledgement(value), base))
     }
+    #[cfg(test)]
     pub(crate) fn prepare_push(
         &mut self,
         value: PersonalSnapshot,
