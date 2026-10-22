@@ -404,6 +404,12 @@ mod chunk_intake;
 mod chunk_verdict;
 #[cfg(not(target_arch = "wasm32"))]
 mod network;
+// Fray (peer-to-peer QUIC) as a ServerTransport / ClientTransport. Native only: it
+// must never enter the wasm32 build. Nothing outside its tests uses it until B-2
+// wires hosting and joining, hence the allow.
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(dead_code)]
+mod fray_transport;
 #[cfg(not(target_arch = "wasm32"))]
 mod discovery;
 // LAN play UX (gap-audit T2-10): host address + bind errors, and the
