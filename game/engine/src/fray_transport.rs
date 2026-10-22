@@ -28,7 +28,10 @@
 //!
 //! Each peer's waiting packets are charged exactly as `transport::InboundQueue`
 //! charges them (their length plus `INBOUND_ENTRY_OVERHEAD`) against
-//! `MAX_INBOUND_BYTES`; a peer that crosses it is disconnected. The charge is
+//! `MAX_INBOUND_BYTES`. The packet that crosses it is still handed over and
+//! what the peer sends after it is dropped: the server's own `InboundQueue`
+//! then overflows on its next read and disconnects the peer the game's way,
+//! with its reason and its queue cleared, as with `network.rs`. The charge is
 //! released as the game reads the packet. Fray's own queue (the same 8 MiB,
 //! counted in payload bytes with a message bound that cannot bind first) only
 //! fills if the pump thread itself stalls, so a flood is bounded twice. The
@@ -121,12 +124,57 @@ struct PeerSlot {
     /// What the waiting packets are charged (shared with the transport, which
     /// releases a packet's charge as it hands it to the game).
     charged: Arc<AtomicUsize>,
-    /// The peer crossed the inbound bound and has been disconnected: whatever
-    /// it still sends is dropped until its `PeerLeft` arrives.
+    /// The peer crossed the inbound bound: the game's `InboundQueue` will
+    /// disconnect it on its next read, and whatever it still sends is dropped.
     over: bool,
 }
 
+/// A new peer's transport and the pump's side of it.
+fn peer_pair(peer: PeerId, handle: Weak<HostHandle>, binding: Option<[u8; 32]>) -> (PeerSlot, FrayServerTransport) {
+    let (tx, rx) = mpsc::channel();
+    let closed = Arc::new(AtomicBool::new(false));
+    let charged = Arc::new(AtomicUsize::new(0));
+    let cell = OnceLock::new();
+    if let Some(value) = binding {
+        let _ = cell.set(value);
+    }
+    let transport = FrayServerTransport {
+        peer,
+        handle,
+        rx,
+        closed: closed.clone(),
+        charged: charged.clone(),
+        binding: cell,
+    };
+    (PeerSlot { tx, closed, charged, over: false }, transport)
+}
+
 impl PeerSlot {
+    /// Hand one message from the peer to its transport, charged as
+    /// `InboundQueue` would charge it. The message that takes the charge past
+    /// `cap` is still handed over, so the server's `InboundQueue` (whose bound
+    /// is the same `MAX_INBOUND_BYTES`) overflows on its next read and
+    /// disconnects the peer with the game's reason; everything after it is
+    /// dropped. Memory stays within `cap` plus one message.
+    fn deliver(&mut self, peer: PeerId, bytes: &[u8], cap: usize) {
+        if self.over || bytes.is_empty() {
+            // An empty message is network.rs's stream hello: skipped.
+            return;
+        }
+        let cost = charge(bytes.len());
+        let crossing = self.charged.load(Ordering::Relaxed) + cost > cap;
+        self.charged.fetch_add(cost, Ordering::Relaxed);
+        if self.tx.send(bytes.to_vec()).is_err() {
+            // The server dropped this transport (its Drop closes the link).
+            self.charged.fetch_sub(cost, Ordering::Relaxed);
+            return;
+        }
+        if crossing {
+            log::warn!("Fray: {peer} has too many packets waiting; dropping the rest until the server reads");
+            self.over = true;
+        }
+    }
+
     /// The connection ended: deliver the synthetic `Disconnect`, then mark the
     /// transport closed (so closed implies every earlier packet is already
     /// readable).
@@ -337,25 +385,12 @@ fn pump(
                     }
                 }
                 HostEvent::PeerJoined { peer, .. } => {
-                    let (tx, rx) = mpsc::channel();
-                    let closed = Arc::new(AtomicBool::new(false));
-                    let charged = Arc::new(AtomicUsize::new(0));
-                    let binding = OnceLock::new();
-                    if let Some(value) = handle.app_binding(peer) {
-                        let _ = binding.set(value);
-                    }
-                    let transport = FrayServerTransport {
-                        peer,
-                        handle: Arc::downgrade(&handle),
-                        rx,
-                        closed: closed.clone(),
-                        charged: charged.clone(),
-                        binding,
-                    };
+                    let (slot, transport) =
+                        peer_pair(peer, Arc::downgrade(&handle), handle.app_binding(peer));
                     // If the server is gone the transport is dropped here,
                     // which closes the link.
                     if remote_tx.send(Box::new(transport)).is_ok() {
-                        slots.insert(peer, PeerSlot { tx, closed, charged, over: false });
+                        slots.insert(peer, slot);
                     }
                 }
                 HostEvent::PeerLeft { peer, .. } => {
@@ -364,22 +399,8 @@ fn pump(
                     }
                 }
                 HostEvent::Reliable { peer, bytes } => {
-                    let Some(slot) = slots.get_mut(&peer) else { continue };
-                    if slot.over || bytes.is_empty() {
-                        // An empty message is network.rs's stream hello: skipped.
-                        continue;
-                    }
-                    let cost = charge(bytes.len());
-                    if slot.charged.load(Ordering::Relaxed) + cost > inbound_cap {
-                        log::warn!("Fray: {peer} has too many packets waiting; disconnecting it");
-                        slot.over = true;
-                        handle.disconnect(peer);
-                        continue;
-                    }
-                    slot.charged.fetch_add(cost, Ordering::Relaxed);
-                    if slot.tx.send(bytes.to_vec()).is_err() {
-                        // The server dropped this transport (its Drop closes the link).
-                        slot.charged.fetch_sub(cost, Ordering::Relaxed);
+                    if let Some(slot) = slots.get_mut(&peer) {
+                        slot.deliver(peer, &bytes, inbound_cap);
                     }
                 }
                 // The game sends and reads reliable packets only.
@@ -774,7 +795,7 @@ mod tests {
     }
 
     #[test]
-    fn a_peer_over_the_inbound_bound_is_disconnected() {
+    fn a_peer_over_the_inbound_bound_is_left_for_the_server_to_disconnect() {
         // A bound of 8 KiB: a few 1 KiB packets fit (each charged its length
         // plus the entry overhead), a flood does not.
         let cap = 8 * 1024;
@@ -784,23 +805,110 @@ mod tests {
         for _ in 0..64 {
             client.send_to_server(&[5u8; 1024]);
         }
-        // Wait for the host to cut the flooder off without ever reading from it.
-        eventually("the flooding peer is closed", || server.is_closed());
+        // What fits, then the packet that crosses the bound, then nothing.
+        let expected = cap / charge(1024) + 1;
         let mut read = 0;
-        let mut last = Vec::new();
-        while let Some(packet) = server.try_recv_from_client() {
+        eventually("the packets up to the crossing one arrive", || {
+            while server.try_recv_from_client().is_some() {
+                read += 1;
+            }
+            read >= expected
+        });
+        thread::sleep(Duration::from_millis(300));
+        while server.try_recv_from_client().is_some() {
             read += 1;
-            last = packet;
         }
-        assert!(read < 64, "the flood was cut off, {read} of 64 arrived");
-        assert_eq!(last, synthetic_disconnect());
+        assert_eq!(read, expected, "the rest of the flood is dropped");
+        // The adapter does not cut the peer off itself: the server's
+        // InboundQueue does, with its reason (see the deliver tests).
+        assert!(!server.is_closed());
         // A calm peer on the same room is not affected.
         calm_client.send_to_server(b"calm");
         assert_eq!(server_recv(calm_server.as_ref()), b"calm");
-        eventually("the flooder sees the link end", || {
-            let _ = client.try_recv_from_server();
-            client.is_closed()
+    }
+
+    #[test]
+    fn two_peers_sending_at_once_lose_and_reorder_nothing() {
+        let rig = start_rig(MAX_INBOUND_BYTES);
+        let (a, server_a) = rig.join();
+        let (b, server_b) = rig.join();
+        thread::scope(|s| {
+            for client in [&a, &b] {
+                s.spawn(move || {
+                    for i in 0..500u32 {
+                        client.send_to_server(&i.to_le_bytes());
+                    }
+                });
+            }
         });
+        for server in [&server_a, &server_b] {
+            for i in 0..500u32 {
+                assert_eq!(server_recv(server.as_ref()), i.to_le_bytes(), "packet {i} in order");
+            }
+        }
+    }
+
+    /// A peer's slot and transport with no network behind them.
+    fn bare_pair() -> (PeerSlot, FrayServerTransport) {
+        peer_pair(PeerId(1), Weak::new(), None)
+    }
+
+    fn drain(transport: &FrayServerTransport) -> Vec<Packet> {
+        std::iter::from_fn(|| transport.try_recv_from_client()).collect()
+    }
+
+    #[test]
+    fn deliver_admits_exactly_the_bound_and_hands_over_the_crossing_packet() {
+        let (mut slot, transport) = bare_pair();
+        let cap = 3 * charge(100);
+        for i in 0..3u8 {
+            slot.deliver(PeerId(1), &[i; 100], cap);
+        }
+        assert!(!slot.over, "a charge equal to the bound is admitted");
+        assert_eq!(transport.charged.load(Ordering::Relaxed), cap);
+        slot.deliver(PeerId(1), &[3], cap);
+        assert!(slot.over, "one byte more crosses it");
+        slot.deliver(PeerId(1), &[4; 100], cap);
+        let got = drain(&transport);
+        assert_eq!(got.len(), 4, "the crossing packet is handed over, the next is dropped");
+        assert_eq!(got[3], vec![3]);
+        assert_eq!(transport.charged.load(Ordering::Relaxed), 0);
+        slot.finish();
+        assert!(transport.is_closed());
+        assert_eq!(drain(&transport), vec![synthetic_disconnect()]);
+        assert_eq!(transport.charged.load(Ordering::Relaxed), 0, "nothing is left charged");
+    }
+
+    #[test]
+    fn deliver_and_read_leave_exactly_the_unread_charge() {
+        let (mut slot, transport) = bare_pair();
+        let mut unread = std::collections::VecDeque::new();
+        for i in 0..200usize {
+            let len = 1 + (i * 37) % 900;
+            slot.deliver(PeerId(1), &vec![i as u8; len], MAX_INBOUND_BYTES);
+            unread.push_back(len);
+            if i % 3 == 0 {
+                let packet = transport.try_recv_from_client().expect("a packet waits");
+                assert_eq!(packet.len(), unread.pop_front().unwrap());
+            }
+            let want: usize = unread.iter().map(|&n| charge(n)).sum();
+            assert_eq!(transport.charged.load(Ordering::Relaxed), want, "after packet {i}");
+        }
+        drain(&transport);
+        slot.finish();
+        drain(&transport);
+        assert_eq!(transport.charged.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn the_crossing_packet_overflows_the_servers_inbound_queue() {
+        let (mut slot, transport) = bare_pair();
+        let frame = vec![1u8; MAX_FRAME_LEN];
+        while !slot.over {
+            slot.deliver(PeerId(1), &frame, MAX_INBOUND_BYTES);
+        }
+        let mut queue = crate::transport::InboundQueue::default();
+        assert!(queue.fill_from(&transport).is_err(), "the server disconnects the peer the game's way");
     }
 
     #[test]
