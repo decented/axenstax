@@ -34,7 +34,9 @@
 //! with its reason and its queue cleared, as with `network.rs`. The charge is
 //! released as the game reads the packet. Fray's own queue (the same 8 MiB,
 //! counted in payload bytes with a message bound that cannot bind first) only
-//! fills if the pump thread itself stalls, so a flood is bounded twice. The
+//! fills if the pump thread itself stalls, so a flood is held by three pools (the
+//! adapter's channel, the server's `InboundQueue` and Fray's queue: about 24 MiB
+//! at most per peer, charged as above). The
 //! outbound side is Fray's `outbound_queue_bytes` (8 MiB, as
 //! `network::MAX_OUTBOUND_QUEUE_BYTES`): a peer that stops reading is closed as
 //! too slow.
@@ -361,6 +363,13 @@ impl Drop for FrayHost {
     }
 }
 
+/// Whether a joined peer may be handed to the server: only one whose connection
+/// has an exporter binding, so its Signet join is checked against that
+/// connection and never against the unbound origin.
+fn may_seat(binding: Option<&[u8; 32]>) -> bool {
+    binding.is_some()
+}
+
 /// The pump thread: drain Fray's events and route them (see the module docs).
 fn pump(
     handle: Arc<HostHandle>,
@@ -385,8 +394,17 @@ fn pump(
                     }
                 }
                 HostEvent::PeerJoined { peer, .. } => {
-                    let (slot, transport) =
-                        peer_pair(peer, Arc::downgrade(&handle), handle.app_binding(peer));
+                    let binding = handle.app_binding(peer);
+                    if !may_seat(binding.as_ref()) {
+                        // Without the connection's exporter the server would
+                        // check the join against the unbound origin, the one
+                        // the binding exists to rule out. Fray always has it
+                        // by now; if it ever does not, refuse rather than seat.
+                        log::warn!("Fray: {peer} has no channel binding; closing it unseated");
+                        handle.disconnect(peer);
+                        continue;
+                    }
+                    let (slot, transport) = peer_pair(peer, Arc::downgrade(&handle), binding);
                     // If the server is gone the transport is dropped here,
                     // which closes the link.
                     if remote_tx.send(Box::new(transport)).is_ok() {
@@ -655,6 +673,14 @@ mod tests {
             got.is_some()
         });
         got.unwrap()
+    }
+
+    /// A peer with no exporter binding is not seated: the server would check
+    /// its join against `axenstax-join:unbound` (T-JOIN-RELAY).
+    #[test]
+    fn a_peer_without_a_channel_binding_is_not_seated() {
+        assert!(!may_seat(None));
+        assert!(may_seat(Some(&[7u8; 32])));
     }
 
     #[test]
