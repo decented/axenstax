@@ -152,9 +152,9 @@ pub fn code_status_line(status: CodeStatus) -> String {
         CodeStatus::Publishing => "Putting the code on your relays... Friends on this network \
                                    can already pick this world under Join Game."
             .to_string(),
-        CodeStatus::LanOnly { tried: 0 } => "You have no relays set, so the code only works \
-                                             here: friends on this network pick this world \
-                                             under Join Game."
+        CodeStatus::LanOnly { tried: 0 } => "You have no relays set, so the code can't be used: \
+                                             only friends on this network can join, from Join \
+                                             Game."
             .to_string(),
         CodeStatus::LanOnly { .. } => "Couldn't reach any of your relays, so the code doesn't \
                                        work yet: only friends on this network can join, from \
