@@ -1115,19 +1115,26 @@ impl super::GameState {
     /// restored bunker over this connection's channel binding); one that fails
     /// says why in the lobby.
     pub(crate) fn poll_fray(&mut self) {
-        let published = match (self.lan_host.as_mut(), self.hosted_server.as_ref()) {
-            (Some(room), Some(server)) => room.take_published(server),
+        // Only while Playing: toasts draw then, and the world reset on the way
+        // in would clear one set earlier (the panel shows the code meanwhile).
+        let published = match (self.lan_host.as_mut(), self.hosted_server.as_ref(), &self.mode) {
+            (Some(room), Some(server), GameMode::Playing) => room.take_published(server),
             _ => None,
         };
         if let Some(code) = published {
             self.online_toast(crate::lan_ui::code_live_toast(&code), 8);
         }
 
+        // A join belongs to the lobby it was started from: once the player
+        // has gone into any world, a late `Connected` must not pull them into
+        // the host's. Dropping it closes the link.
+        if !matches!(self.mode, GameMode::Menu(_)) {
+            self.fray_join = None;
+        }
         let Some(join) = self.fray_join.as_mut() else {
             return;
         };
         let step = join.poll();
-        let in_lobby = matches!(self.mode, GameMode::Menu(_));
         match step {
             crate::fray_play::JoinPoll::Waiting => {}
             crate::fray_play::JoinPoll::Failed(why) => {
@@ -1136,9 +1143,6 @@ impl super::GameState {
                     menu_state.notice = Some(why);
                 }
             }
-            // The player has left the lobby since: dropping the transport
-            // closes the link.
-            crate::fray_play::JoinPoll::Connected(_) if !in_lobby => self.fray_join = None,
             crate::fray_play::JoinPoll::Connected(transport) => {
                 self.fray_join = None;
                 let transport: Box<dyn crate::transport::ClientTransport> = Box::new(transport);
