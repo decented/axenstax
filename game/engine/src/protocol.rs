@@ -2799,7 +2799,11 @@ pub struct ServerAnnouncePacket {
 ///   and sequential unpredicted source-backed entity packs in both inventory
 ///   modes; PackResult 74, PackView 75, explicit PACK flag. Automated combined
 ///   regression gates passed; owner manual sessions remain separate.
-pub const PROTOCOL_VERSION: u32 = 91;
+/// - v92 (Fray): native "Host Game" and its joins run on Fray (ALPN
+///   `axenstax/…`, Fray's hello and LAN beacon) instead of plain QUIC on
+///   7700/7705. Game packets and the join challenge are unchanged; the join
+///   origin is Fray's TLS exporter under `EXPORTER-axenstax-join-v1`.
+pub const PROTOCOL_VERSION: u32 = 92;
 
 /// The `protocol_version` of a JoinRequest payload that doesn't decode as this
 /// build's `JoinRequestPacket` (an older or newer client's shape). It is the
@@ -2981,7 +2985,8 @@ mod tests {
     #[test]
     fn protocol_version_bumped() {
         // D2c-2 — v91, source-backed entity packs after handover's v90.
-        assert_eq!(super::PROTOCOL_VERSION, 91);
+        // v92 — "Host Game" and its joins on Fray.
+        assert_eq!(super::PROTOCOL_VERSION, 92);
     }
 
     #[test]
@@ -3735,7 +3740,8 @@ mod tests {
         // v89 (C3d partial delivery accepted locally): Action (68), ActionReceipt (69),
         //   Recovery (70), AppliedActionAck (71); JoinAccept
         //   mode/namespace/life.
-        assert_eq!(PROTOCOL_VERSION, 91);
+        // v92 (Fray): "Host Game" and its joins on Fray's transport.
+        assert_eq!(PROTOCOL_VERSION, 92);
     }
 
     fn sample_accept() -> JoinAcceptPacket {

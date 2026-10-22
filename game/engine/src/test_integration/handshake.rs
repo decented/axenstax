@@ -256,7 +256,8 @@ fn protocol_version_is_the_pinned_value() {
     //   `Recovery` (70), `AppliedActionAck` (71); JoinAccept appends the
     //   fixed inventory mode, action namespace and life.
     // Packs use private provisional v91 after handover tags 72–73.
-    assert_eq!(protocol::PROTOCOL_VERSION, 91);
+    // v92 (Fray): "Host Game" and its joins on Fray's transport.
+    assert_eq!(protocol::PROTOCOL_VERSION, 92);
 }
 
 #[test]
