@@ -102,7 +102,7 @@ pub struct LanGames {
 /// keeps the `Option` on its state and drops it (freeing the beacon port) when
 /// the dialog closes.
 pub fn poll_games(browser: &mut Option<LanBrowser>) -> LanGames {
-    let b = browser.get_or_insert_with(|| decented_net::lan_browse(&crate::fray_transport::net_config(crate::data_dir::profile_dir())));
+    let b = browser.get_or_insert_with(|| decented_net::lan_browse(&crate::fray_play::play_config(&[])));
     let rooms = b.poll();
     LanGames { rooms: ordered(&rooms), listening: b.is_listening() }
 }
