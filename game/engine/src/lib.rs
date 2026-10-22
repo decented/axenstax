@@ -405,12 +405,18 @@ mod chunk_verdict;
 #[cfg(not(target_arch = "wasm32"))]
 mod network;
 // Fray (peer-to-peer QUIC) as a ServerTransport / ClientTransport. Native only: it
-// must never enter the wasm32 build. Nothing outside its tests uses it until B-2
-// wires hosting and joining, hence the allow.
+// must never enter the wasm32 build.
 #[cfg(not(target_arch = "wasm32"))]
-#[allow(dead_code)]
 mod fray_transport;
+// "Host Game" and "Join Game" over Fray: the player's relays, a join in flight,
+// the room code's status. Native only.
 #[cfg(not(target_arch = "wasm32"))]
+mod fray_play;
+// The broadcaster still serves online play's plain-QUIC host; the listener has
+// had no caller since "Games on this network" hears Fray's beacon (B-2). B8
+// removes what nothing uses.
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg_attr(not(test), allow(dead_code))]
 mod discovery;
 // LAN play UX (gap-audit T2-10): host address + bind errors, and the
 // "Games on this network" list. Native only — the web build has no multiplayer.
@@ -1269,11 +1275,15 @@ pub(crate) struct GameState {
     /// always `None` on wasm (browsers can't host), but the field's presence lets
     /// the shared network methods reference it without per-line cfg gating.
     pub(crate) hosted_server: Option<crate::hosted_server::HostedServer>,
-    /// Where joiners reach this machine while it hosts a LAN game (gap-audit
-    /// T2-10): detected once when the world card's "Host" button succeeds, shown in the pause menu,
-    /// cleared with `hosted_server`. `None` when not LAN-hosting.
+    /// The room this machine hosts through "Host Game" (gap-audit T2-10, Fray):
+    /// set when the world card's "Host" button succeeds, shown in the pause
+    /// menu, cleared with `hosted_server`. `None` when not hosting one.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) lan_host: Option<crate::lan_host::HostAccess>,
+    pub(crate) lan_host: Option<crate::fray_play::HostedRoom>,
+    /// A "Join Game" through Fray (a LAN room or a room code) still finding
+    /// its host; `poll_fray` drives it from the lobby.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fray_join: Option<crate::fray_play::PendingJoin>,
     /// The Host button's result message, held until the world goes live: the
     /// world reset clears `toast` and toasts draw only while Playing, so a toast
     /// set at click time was never seen. Delivered on Loading -> Playing.
@@ -1988,6 +1998,8 @@ impl GameState {
             hosted_server: None,
             #[cfg(not(target_arch = "wasm32"))]
             lan_host: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            fray_join: None,
             #[cfg(not(target_arch = "wasm32"))]
             entry_toast: crate::lan_host::EntryToast::default(),
             remote_client: None,

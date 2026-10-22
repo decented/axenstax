@@ -169,7 +169,12 @@ pub enum MenuAction {
     LoadWorld(String, crate::spawn_pref::SpawnPref),
     RefreshWorlds,           // re-scan worlds directory
     HostWorld(String),       // Host a world for LAN play (folder_name)
-    JoinGame(String),        // Join a remote server by IP address
+    /// Join by what the Join dialog's field holds: a room code (native, over
+    /// Fray) or a dedicated server's address (`ws://`, `wss://`, `axenstax://`).
+    JoinGame(String),
+    /// Native: join a room picked from "Games on this network" (Fray's LAN beacon).
+    #[cfg(not(target_arch = "wasm32"))]
+    JoinLanRoom(decented_net::LanRoom),
     /// Spec 40 (The Workshop) — open the player's Workshop: a blank/void authoring
     /// space, created on first entry, then loaded like any saved world.
     EnterWorkshop,
@@ -320,11 +325,12 @@ pub struct MenuState {
     /// reason it couldn't be. Shares the `import_status` line.
     #[cfg(target_arch = "wasm32")]
     pub profile_export: Option<std::rc::Rc<std::cell::RefCell<Option<Result<String, String>>>>>,
-    /// Native: the LAN discovery listener behind the Join dialog's "Games on
-    /// this network" list (gap-audit T2-10). Opened when that dialog first draws
-    /// and dropped when it closes, so UDP 7705 is not held for the whole session.
+    /// Native: the LAN beacon browser behind the Join dialog's "Games on this
+    /// network" list (gap-audit T2-10, Fray's beacon). Opened when that dialog
+    /// first draws and dropped when it closes, so the beacon port is not held
+    /// for the whole session.
     #[cfg(not(target_arch = "wasm32"))]
-    pub lan: Option<crate::discovery::ServerListener>,
+    pub lan: Option<decented_net::LanBrowser>,
     /// Native: status line shown after the Export/Import buttons (last
     /// operation result — success or error). Cleared on the next export/import.
     #[cfg(not(target_arch = "wasm32"))]
@@ -2272,7 +2278,7 @@ pub fn draw_main_menu(ctx: &egui::Context, state: &mut MenuState) -> MenuAction 
         return action;
     }
 
-    // The LAN listener only lives while the Join dialog is up (frees UDP 7705).
+    // The LAN browser only lives while the Join dialog is up (frees the beacon port).
     #[cfg(not(target_arch = "wasm32"))]
     if !matches!(state.dialog, MenuDialog::JoinDirect { .. }) {
         state.lan = None;
@@ -2481,19 +2487,30 @@ pub fn draw_main_menu(ctx: &egui::Context, state: &mut MenuState) -> MenuAction 
             // Native: poll LAN announcements for the "Games on this network" list.
             #[cfg(not(target_arch = "wasm32"))]
             let lan_games = crate::lan_ui::poll_games(&mut state.lan);
+            #[cfg(not(target_arch = "wasm32"))]
+            let mut picked = None;
             let result = draw_join_dialog(
                 ctx,
                 &address,
                 #[cfg(not(target_arch = "wasm32"))]
                 &lan_games,
+                #[cfg(not(target_arch = "wasm32"))]
+                &mut picked,
             );
+            // A click on a heard room joins it straight away.
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(room) = picked {
+                state.dialog = MenuDialog::None;
+                state.lan = None;
+                return MenuAction::JoinLanRoom(room);
+            }
             match result {
                 DialogResult::Update(new_addr, _) => {
                     state.dialog = MenuDialog::JoinDirect { address: new_addr };
                 }
                 DialogResult::Confirm(addr, _) => {
                     state.dialog = MenuDialog::None;
-                    // Free UDP 7705 now: the menu is not drawn again once a join starts.
+                    // Free the beacon port now: the menu is not drawn again once a join starts.
                     #[cfg(not(target_arch = "wasm32"))]
                     {
                         state.lan = None;
@@ -3064,7 +3081,7 @@ pub fn draw_main_menu(ctx: &egui::Context, state: &mut MenuState) -> MenuAction 
                     let join_resp = ui.add(join);
                     focus_ring(ui, &join_resp);
                     if join_resp.clicked() {
-                        state.dialog = MenuDialog::JoinDirect { address: "192.168.1.10:7700".to_string() };
+                        state.dialog = MenuDialog::JoinDirect { address: String::new() };
                     }
                 }
                 #[cfg(target_arch = "wasm32")]
@@ -4538,27 +4555,39 @@ fn draw_join_dialog(
     ctx: &egui::Context,
     address: &str,
     #[cfg(not(target_arch = "wasm32"))] lan_games: &crate::lan_ui::LanGames,
+    // A click on a heard LAN room: the caller joins it straight away.
+    #[cfg(not(target_arch = "wasm32"))] picked: &mut Option<decented_net::LanRoom>,
 ) -> DialogResult {
     let mut addr_buf = address.to_string();
     let mut confirmed = false;
     let mut cancelled = false;
-    // A click on a discovered LAN game joins its address straight away.
-    #[cfg(not(target_arch = "wasm32"))]
-    let mut picked: Option<String> = None;
 
     let _result = draw_dialog_frame(ctx, "Join Game", ACTION_BLUE, CARD_BORDER, |ui| {
         // LAN games first: the common case is a friend on the same network.
         #[cfg(not(target_arch = "wasm32"))]
         {
-            picked = crate::lan_ui::draw_lan_games(ui, lan_games);
+            *picked = crate::lan_ui::draw_lan_games(ui, lan_games);
         }
-        // Address field
-        ui.label(egui::RichText::new("SERVER ADDRESS").size(11.0).color(egui::Color32::from_rgb(136, 136, 153)).strong());
+        // The room code (native), or a server address.
+        #[cfg(not(target_arch = "wasm32"))]
+        let (heading, label, hint) =
+            (crate::lan_ui::CODE_HEADING, "Room code", crate::lan_ui::CODE_HINT);
+        #[cfg(target_arch = "wasm32")]
+        let (heading, label, hint) = ("SERVER ADDRESS", "Server address", "192.168.1.10:7700");
+        ui.label(egui::RichText::new(heading).size(11.0).color(egui::Color32::from_rgb(136, 136, 153)).strong());
         ui.add_space(4.0);
-        let addr_response =
-            menu_text_field(ui, &mut addr_buf, "Server address", "192.168.1.10:7700", 360.0, 15.0);
-        // Auto-focus address field
+        let addr_response = menu_text_field(ui, &mut addr_buf, label, hint, 360.0, 15.0);
+        // Auto-focus the field
         addr_response.request_focus();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new(crate::lan_ui::CODE_HELP)
+                    .size(12.0)
+                    .color(egui::Color32::from_rgb(150, 150, 160)),
+            );
+        }
 
         ui.add_space(20.0);
 
@@ -4591,10 +4620,6 @@ fn draw_join_dialog(
         DialogResult::Update(addr_buf.clone(), String::new())
     });
 
-    #[cfg(not(target_arch = "wasm32"))]
-    if let Some(addr) = picked {
-        return DialogResult::Confirm(addr, String::new());
-    }
     if confirmed {
         DialogResult::Confirm(addr_buf, String::new())
     } else if cancelled {

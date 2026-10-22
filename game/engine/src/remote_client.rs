@@ -700,6 +700,7 @@ impl RemoteClient {
     /// rejects this with "sign-in required"; an open server accepts it. For an
     /// authenticated join use [`RemoteClient::connect_authed`].
     #[cfg(not(target_arch = "wasm32"))]
+    #[expect(dead_code, reason = "the plain-QUIC address join; Join Game uses Fray since B-2. Goes with network.rs (B8)")]
     pub fn connect(
         server_addr: SocketAddr,
         player_name: &str,
@@ -723,6 +724,7 @@ impl RemoteClient {
     /// The live signature (a bunker round-trip) is the owner boundary; the
     /// reordered state machine itself is unit-tested with a fake driver.
     #[cfg(not(target_arch = "wasm32"))]
+    #[expect(dead_code, reason = "the plain-QUIC address join; Join Game uses Fray since B-2. Goes with network.rs (B8)")]
     pub fn connect_authed(
         server_addr: SocketAddr,
         player_name: &str,

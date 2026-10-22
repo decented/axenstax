@@ -56,11 +56,13 @@ impl HostAccess {
     }
 
     /// `ip:port` strings exactly as a joiner would type them, best first.
+    #[cfg_attr(not(test), expect(dead_code, reason = "Join Game takes a room code since B-2; B8 removes it"))]
     pub fn join_addresses(&self) -> Vec<String> {
         self.addresses.iter().map(|ip| SocketAddr::new((*ip).into(), self.port).to_string()).collect()
     }
 
     /// The best address to show first, if the machine has a network at all.
+    #[cfg_attr(not(test), expect(dead_code, reason = "Join Game takes a room code since B-2; B8 removes it"))]
     pub fn primary(&self) -> Option<String> {
         self.join_addresses().into_iter().next()
     }
@@ -93,15 +95,18 @@ pub fn bind_lan_socket(port: u16) -> Result<UdpSocket, String> {
     UdpSocket::bind((Ipv4Addr::UNSPECIFIED, port)).map_err(|e| describe_bind_error(&e, port))
 }
 
-/// Toast shown when the host starts. With an address, say what to type; without
-/// one, hosting works but nobody can reach it, which is worth saying.
-pub fn hosting_toast(access: &HostAccess) -> String {
-    match access.primary() {
-        Some(addr) => format!("Hosting on your network. Friends on the same Wi-Fi join {addr}"),
-        None => "Hosting, but no network connection was found, so nobody can join yet. \
-                 Connect to Wi-Fi or Ethernet."
-            .to_string(),
+/// Toast shown when "Host Game" starts, naming the room `code`. Without a
+/// network, hosting works but nobody can reach it, which is worth saying.
+pub fn hosting_toast(access: &HostAccess, code: &str) -> String {
+    if access.addresses.is_empty() {
+        return "Hosting, but no network connection was found, so nobody can join yet. \
+                Connect to Wi-Fi or Ethernet."
+            .to_string();
     }
+    format!(
+        "Hosting on your network. Friends on the same Wi-Fi pick this world under Join Game; \
+         the room code is {code} (pause to see it again)."
+    )
 }
 
 /// Toast shown when hosting could not start. The world still opens (solo), and
@@ -237,10 +242,10 @@ mod tests {
     #[test]
     fn toasts_name_the_address_or_the_problem() {
         let a = HostAccess { addresses: vec![ip(192, 168, 1, 23)], port: 7700 };
-        let t = hosting_toast(&a);
-        assert!(t.contains("192.168.1.23:7700"), "got {t}");
+        let t = hosting_toast(&a, "KMT RWX");
+        assert!(t.contains("KMT RWX") && t.contains("Join Game"), "got {t}");
         let none = HostAccess { addresses: vec![], port: 7700 };
-        assert!(hosting_toast(&none).contains("no network connection"));
+        assert!(hosting_toast(&none, "KMT RWX").contains("no network connection"));
 
         let f = host_failure_toast("port 7700 is already in use.");
         assert!(f.contains("already in use") && f.contains("solo play"), "got {f}");

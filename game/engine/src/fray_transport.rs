@@ -450,11 +450,13 @@ impl FrayClientTransport {
     }
 
     /// Fray has reported the host joined (seen while reading packets).
+    #[cfg_attr(not(test), expect(dead_code, reason = "Join Game waits for Connected before wrapping (fray_play)"))]
     pub fn is_connected(&self) -> bool {
         self.inner.lock().is_ok_and(|inner| inner.connected && !inner.closed)
     }
 
     /// Why the join failed, once Fray has said so (seen while reading packets).
+    #[expect(dead_code, reason = "Join Game reads the failure before wrapping (fray_play)")]
     pub fn failure(&self) -> Option<(JoinStage, FailReason)> {
         self.inner.lock().ok()?.failure.clone()
     }

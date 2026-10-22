@@ -1108,6 +1108,70 @@ impl super::GameState {
         }
     }
 
+    /// "Host Game" and "Join Game" over Fray, once a frame and never blocking:
+    /// say once when the hosted room's code reaches a relay, and drive a join
+    /// in flight. A join that reaches its host goes through exactly the
+    /// handshake a LAN join always used (the server's challenge, signed by the
+    /// restored bunker over this connection's channel binding); one that fails
+    /// says why in the lobby.
+    pub(crate) fn poll_fray(&mut self) {
+        let published = match (self.lan_host.as_mut(), self.hosted_server.as_ref()) {
+            (Some(room), Some(server)) => room.take_published(server),
+            _ => None,
+        };
+        if let Some(code) = published {
+            self.online_toast(crate::lan_ui::code_live_toast(&code), 8);
+        }
+
+        let Some(join) = self.fray_join.as_mut() else {
+            return;
+        };
+        let step = join.poll();
+        let in_lobby = matches!(self.mode, GameMode::Menu(_));
+        match step {
+            crate::fray_play::JoinPoll::Waiting => {}
+            crate::fray_play::JoinPoll::Failed(why) => {
+                self.fray_join = None;
+                if let GameMode::Menu(ref mut menu_state) = self.mode {
+                    menu_state.notice = Some(why);
+                }
+            }
+            // The player has left the lobby since: dropping the transport
+            // closes the link.
+            crate::fray_play::JoinPoll::Connected(_) if !in_lobby => self.fray_join = None,
+            crate::fray_play::JoinPoll::Connected(transport) => {
+                self.fray_join = None;
+                let transport: Box<dyn crate::transport::ClientTransport> = Box::new(transport);
+                let client = match crate::signet::native_signer::restore_signer() {
+                    Ok(Some(session)) => crate::remote_client::RemoteClient::connect_authed_on_transport(
+                        transport,
+                        "Player",
+                        native_join_sign_driver(session),
+                        None,
+                    ),
+                    // Not signed in: a guest join, which a host (sign-in
+                    // required) refuses with its reason, as before.
+                    signer => {
+                        if let Err(e) = signer {
+                            log::warn!("restore_signer failed ({e}); guest join");
+                        }
+                        crate::remote_client::RemoteClient::from_transport(
+                            transport,
+                            crate::remote_client::build_join_request_guest("Player", 0),
+                            None,
+                        )
+                    }
+                };
+                self.remote_client = Some(client);
+                if let GameMode::Menu(ref mut menu_state) = self.mode {
+                    menu_state.notice = None;
+                }
+                // Terrain is regenerated from the seed in JoinAccept.
+                self.pending_online_world = Some("remote_game".to_string());
+            }
+        }
+    }
+
     /// Stop hosting/joining online: give the router its port back, close the
     /// relay subscriptions (dropping `OnlineHost` drops the `MultiRelay`, whose
     /// `Drop` shuts the sockets down) and retire the bearer — which lives only
@@ -7756,6 +7820,10 @@ impl super::GameState {
         // in-game tick. Bounded and non-blocking (see `poll_online`).
         #[cfg(not(target_arch = "wasm32"))]
         self.poll_online();
+        // "Host Game" / "Join Game" over Fray: the code toast and a join in
+        // flight, every frame and in every mode (a join starts in the lobby).
+        #[cfg(not(target_arch = "wasm32"))]
+        self.poll_fray();
         // World handover — the independent control pump, every frame and in
         // every mode (never from the game tick): a session outlives the
         // joined world it started in, and the source's freeze stops the tick.
@@ -9018,31 +9086,33 @@ impl super::GameState {
                     let host_seed = crate::save::load_world_meta(&folder_name).seed;
                     // D1 — the host lends this client's world to the server
                     // (one world, one sim) unless started with `--no-lend`.
-                    match crate::hosted_server::HostedServer::start_host(
+                    // Through Fray: the LAN beacon, and a room code on the
+                    // player's own relays only (red line 2).
+                    match crate::hosted_server::HostedServer::start_fray_host(
                         1,  // 1 local player
                         folder_name.clone(),
                         host_seed,
                         4,  // max 4 remote players
-                        crate::hosted_server::RemoteTransport::Quic,
                         crate::hosted_server::host_world_mode(),
+                        &self.graphics.online_relays,
                     ) {
                         Ok(server) => {
+                            // T2-10: say how friends join — the toast now, the
+                            // pause menu (with the code) for as long as we host.
+                            let access = crate::lan_host::HostAccess::detect(server.port);
+                            let code = server
+                                .fray_room()
+                                .map(|room| decented_net::room::display_code(room.handle().code()))
+                                .unwrap_or_default();
+                            log::info!("Hosting over Fray on port {} (room code {code})", server.port);
                             self.hosted_server = Some(server);
-                            // T2-10: say where friends connect — the toast now, the
-                            // pause menu for as long as we host.
-                            let access = crate::lan_host::HostAccess::detect(crate::protocol::SERVER_PORT);
-                            log::info!(
-                                "LAN server started on port {} (joiners use {:?})",
-                                crate::protocol::SERVER_PORT,
-                                access.join_addresses()
-                            );
                             // Queued, not set: the world reset below clears
                             // `toast`, and toasts draw only while Playing.
                             self.entry_toast.queue(
-                                crate::lan_host::hosting_toast(&access),
+                                crate::lan_host::hosting_toast(&access, &code),
                                 std::time::Duration::from_secs(8),
                             );
-                            self.lan_host = Some(access);
+                            self.lan_host = Some(crate::fray_play::HostedRoom::new(access));
                         }
                         Err(e) => {
                             log::error!("Failed to start hosted server: {e}");
@@ -9060,62 +9130,61 @@ impl super::GameState {
                 crate::menu::MenuAction::HostWorld(folder_name) => {
                     load_world = Some(folder_name);
                 }
+                // B5 — anything but a server address is a room code: join over
+                // Fray on the player's relays. The join is held in the lobby
+                // until it reaches the host (`poll_fray`), so a wrong code or
+                // an unreachable relay is said here rather than as a lost
+                // connection. A bare `ip:port` no longer joins (decision 4:
+                // Fray's address join needs the beacon's admission token).
+                #[cfg(not(target_arch = "wasm32"))]
+                crate::menu::MenuAction::JoinGame(text)
+                    if !crate::fray_play::is_server_address(&text) =>
+                {
+                    match decented_net::room::normalize_code(&text) {
+                        Some(code) => {
+                            log::info!("Joining room {code} over Fray");
+                            let join = crate::fray_play::PendingJoin::code(&code, &self.graphics.online_relays);
+                            menu_state.notice = Some(crate::lan_ui::joining_notice(join.label()));
+                            self.fray_join = Some(join);
+                        }
+                        None => menu_state.notice = Some(crate::lan_ui::bad_code_notice(&text).to_string()),
+                    }
+                }
+                // B4 — a room picked from "Games on this network".
+                #[cfg(not(target_arch = "wasm32"))]
+                crate::menu::MenuAction::JoinLanRoom(room) => {
+                    log::info!("Joining LAN room {} over Fray", room.code);
+                    let join = crate::fray_play::PendingJoin::lan(&room, &self.graphics.online_relays);
+                    menu_state.notice = Some(crate::lan_ui::joining_notice(join.label()));
+                    self.fray_join = Some(join);
+                }
                 #[cfg(not(target_arch = "wasm32"))]
                 crate::menu::MenuAction::JoinGame(address) => {
                     log::info!("Joining server at: {address}");
                     // A `ws://`/`wss://` address → the dedicated WebSocket server
-                    // (the path the browser also uses). A bare `ip:port` → the
-                    // QUIC LAN peer-host. Phase 4: if signed in, the QUIC join is
-                    // AUTHENTICATED — it waits for the server's ChallengePacket,
+                    // (the path the browser also uses); `axenstax://` → the same,
+                    // by URL or by operator npub. Phase 4: if signed in, the join
+                    // is AUTHENTICATED — it waits for the server's ChallengePacket,
                     // signs `{nonce, origin}` with the restored bunker on a worker
                     // thread, then sends the signed JoinRequest. Not signed in →
-                    // guest (a sign-in-required host rejects it). The live bunker
-                    // round-trip is the owner boundary (2-machine LAN test).
+                    // guest (a sign-in-required host rejects it). Room codes and
+                    // LAN rooms are the arms above.
                     let trimmed = address.trim();
                     // C1 — a connect-string can pin an operator via `#op=npub`. The
                     // ws/wss/axenstax forms normalise (and strip the fragment)
-                    // through parse_connect_string; a bare `ip:port` keeps the QUIC
-                    // path with the pin split off manually. A pinned client refuses
+                    // through parse_connect_string. A pinned client refuses
                     // a server whose identity proof doesn't chain to that operator.
-                    let connect_result = if trimmed.starts_with("ws://")
-                        || trimmed.starts_with("wss://")
-                        || trimmed.starts_with("axenstax://")
-                    {
-                        match crate::server_identity::connect::parse_connect_string(trimmed) {
-                            Ok(crate::server_identity::connect::ConnectInfo::Direct {
-                                url,
-                                operator_npub,
-                            }) => connect_websocket_native(&url, operator_npub),
-                            // Resolve the operator npub to a live endpoint via
-                            // relays, then dial + remember it (Spec A task 7).
-                            Ok(crate::server_identity::connect::ConnectInfo::Resolve {
-                                operator_npub,
-                            }) => resolve_and_join_by_npub(&operator_npub, &self.graphics.online_relays),
-                            Err(e) => Err(e),
-                        }
-                    } else {
-                        let (base, op_pin) = match trimmed.split_once("#op=") {
-                            Some((b, np)) => (b.trim(), Some(np.trim().to_string())),
-                            None => (trimmed, None),
-                        };
-                        match base.parse::<std::net::SocketAddr>() {
-                            Ok(addr) => match crate::signet::native_signer::restore_signer() {
-                                Ok(Some(session)) => {
-                                    let driver = native_join_sign_driver(session);
-                                    crate::remote_client::RemoteClient::connect_authed(
-                                        addr, "Player", driver, op_pin,
-                                    )
-                                }
-                                Ok(None) => {
-                                    crate::remote_client::RemoteClient::connect(addr, "Player", op_pin)
-                                }
-                                Err(e) => {
-                                    log::warn!("restore_signer failed ({e}); guest join");
-                                    crate::remote_client::RemoteClient::connect(addr, "Player", op_pin)
-                                }
-                            },
-                            Err(e) => Err(format!("Invalid address '{address}': {e}")),
-                        }
+                    let connect_result = match crate::server_identity::connect::parse_connect_string(trimmed) {
+                        Ok(crate::server_identity::connect::ConnectInfo::Direct {
+                            url,
+                            operator_npub,
+                        }) => connect_websocket_native(&url, operator_npub),
+                        // Resolve the operator npub to a live endpoint via
+                        // relays, then dial + remember it (Spec A task 7).
+                        Ok(crate::server_identity::connect::ConnectInfo::Resolve {
+                            operator_npub,
+                        }) => resolve_and_join_by_npub(&operator_npub, &self.graphics.online_relays),
+                        Err(e) => Err(e),
                     };
                     match connect_result {
                         Ok(client) => {
@@ -10076,10 +10145,12 @@ impl super::GameState {
             if clicked != -1 || !self.handover_holds_play() {
                 self.difficulty = difficulty;
             }
-            // T2-10: while this machine hosts a LAN game, show where friends connect.
+            // T2-10: while this machine hosts a game, show its room code.
             #[cfg(not(target_arch = "wasm32"))]
-            if let (Some(access), Some(hs)) = (self.lan_host.as_ref(), self.hosted_server.as_ref()) {
-                crate::lan_ui::draw_host_panel(&self.renderer.egui.ctx, access, hs.occupancy());
+            if let (Some(room), Some(hs)) = (self.lan_host.as_ref(), self.hosted_server.as_ref())
+                && let Some(view) = room.view(hs)
+            {
+                crate::lan_ui::draw_host_panel(&self.renderer.egui.ctx, &room.access, &view, hs.occupancy());
             }
 
             match clicked {

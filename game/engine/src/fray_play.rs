@@ -1,0 +1,202 @@
+//! "Host Game" and "Join Game" over Fray (slice B-2): the network settings both
+//! use, a join still finding its host, and the room code's status for the host
+//! panel. The wording lives in `lan_ui.rs` and `lan_host.rs`.
+//!
+//! Red line 2: the only relays used are the player's own "Your relays" list
+//! (`GraphicsSettings::online_relays`), with Fray's fallback to its built-in
+//! relays switched off. Red line 1: a room code is an invite the host hands
+//! out, resolved on those relays; the "Games on this network" list is the LAN
+//! beacon, heard on this network only.
+//!
+//! Admission is unchanged: Fray only carries the game's packets, and every
+//! joiner (LAN room or code) meets the host's Signet challenge, signed over the
+//! connection's TLS exporter under `EXPORTER-axenstax-join-v1`.
+#![cfg(not(target_arch = "wasm32"))]
+
+use std::time::{Duration, Instant};
+
+use decented_net::{ClientEvent, ClientHandle, DisconnectReason, Identity, LanRoom, NetConfig};
+
+use crate::fray_transport::{net_config, FrayClientTransport};
+
+/// How long the host waits for one of its relays before the panel says the code
+/// is not out and the room is on this network only. Fray keeps trying after.
+pub const PUBLISH_GRACE: Duration = Duration::from_secs(15);
+
+/// AxeNStax's Fray settings with the player's relays: the code is published on
+/// (and looked up on) `relays` only, never on Fray's defaults. STUN is
+/// AxeNStax's own list, the one online play by contact uses.
+pub fn play_config(relays: &[String]) -> NetConfig {
+    let mut cfg = net_config(crate::data_dir::profile_dir());
+    cfg.relays = relays.to_vec();
+    cfg.relay_fallback = false;
+    cfg.stun = crate::nat::stun::STUN_SERVERS.iter().map(|s| s.to_string()).collect();
+    cfg
+}
+
+/// The Fray identity for one room or one join: a fresh key each time. Nothing
+/// in the game reads it (the Signet challenge decides who joins), and a stable
+/// key would follow a player from room to room on the relays.
+pub fn session_identity() -> Identity {
+    Identity::ephemeral()
+}
+
+/// A "Join Game" text that names a dedicated server (the WebSocket path, and
+/// `axenstax://` connect strings) rather than a room code.
+pub fn is_server_address(text: &str) -> bool {
+    let t = text.trim();
+    t.starts_with("ws://") || t.starts_with("wss://") || t.starts_with("axenstax://")
+}
+
+/// Where the room code stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CodeStatus {
+    /// Reaching the player's relays; the room is already on this network.
+    Publishing,
+    /// On `up` of the player's `total` relays: the code works from anywhere.
+    Published { up: usize, total: usize },
+    /// No relay carries the code (none set, or none reached within
+    /// [`PUBLISH_GRACE`]): only this network can join. `tried` relays.
+    LanOnly { tried: usize },
+}
+
+/// The status from Fray's `relays_connected()` and the time since hosting began.
+pub fn code_status(relays_connected: (usize, usize), since_start: Duration) -> CodeStatus {
+    let (up, total) = relays_connected;
+    if up > 0 {
+        CodeStatus::Published { up, total }
+    } else if total == 0 || since_start >= PUBLISH_GRACE {
+        CodeStatus::LanOnly { tried: total }
+    } else {
+        CodeStatus::Publishing
+    }
+}
+
+/// What the host panel shows about the room.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RoomView {
+    /// The code as players read and type it (`KMT RWX`).
+    pub code: String,
+    pub status: CodeStatus,
+}
+
+/// The room "Host Game" opened, as the game keeps it.
+#[derive(Debug)]
+pub struct HostedRoom {
+    /// This machine's LAN addresses (empty: no network, nobody can join).
+    pub access: crate::lan_host::HostAccess,
+    pub started: Instant,
+    /// The "code is live" toast has been shown.
+    pub announced: bool,
+}
+
+impl HostedRoom {
+    pub fn new(access: crate::lan_host::HostAccess) -> HostedRoom {
+        HostedRoom { access, started: Instant::now(), announced: false }
+    }
+
+    /// The panel's view of `server`'s room, if it hosts one.
+    pub fn view(&self, server: &crate::hosted_server::HostedServer) -> Option<RoomView> {
+        let room = server.fray_room()?.handle();
+        Some(RoomView {
+            code: decented_net::room::display_code(room.code()),
+            status: code_status(room.relays_connected(), self.started.elapsed()),
+        })
+    }
+
+    /// The code, once, the first time it is published.
+    pub fn take_published(&mut self, server: &crate::hosted_server::HostedServer) -> Option<String> {
+        if self.announced {
+            return None;
+        }
+        let view = self.view(server)?;
+        if !matches!(view.status, CodeStatus::Published { .. }) {
+            return None;
+        }
+        self.announced = true;
+        Some(view.code)
+    }
+}
+
+/// What a join in flight did this frame.
+pub enum JoinPoll {
+    Waiting,
+    /// The host is reached: the transport carries the game's handshake next.
+    Connected(FrayClientTransport),
+    /// The join is over; the message says why, for the lobby.
+    Failed(String),
+}
+
+/// A "Join Game" through Fray that has not reached its host yet. It is held in
+/// the lobby (not in a loading screen) so a failure can say what went wrong:
+/// a wrong code, no relay, a full room.
+pub struct PendingJoin {
+    handle: Option<ClientHandle>,
+    /// What the player picked: a room's name, or the code as typed.
+    label: String,
+}
+
+impl PendingJoin {
+    /// Join a room from the "Games on this network" list.
+    pub fn lan(room: &LanRoom, relays: &[String]) -> PendingJoin {
+        let handle = decented_net::join_lan(&play_config(relays), &session_identity(), room);
+        Self::over(handle, crate::lan_ui::room_label(room))
+    }
+
+    /// Join by room code over the player's relays.
+    pub fn code(code: &str, relays: &[String]) -> PendingJoin {
+        let handle = decented_net::join(&play_config(relays), &session_identity(), code);
+        Self::over(handle, decented_net::room::display_code(code))
+    }
+
+    /// Follow a join started elsewhere (tests start theirs on loopback).
+    pub fn over(handle: ClientHandle, label: String) -> PendingJoin {
+        PendingJoin { handle: Some(handle), label }
+    }
+
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    /// Read Fray's join events, stopping exactly at `Connected`: the host's
+    /// first game packet comes after it, so it stays queued for the transport.
+    pub fn poll(&mut self) -> JoinPoll {
+        let Some(handle) = &self.handle else {
+            return JoinPoll::Failed(self.failed("the join was already over"));
+        };
+        while let Some(event) = handle.poll() {
+            match event {
+                ClientEvent::Progress { .. } | ClientEvent::Lossy(_) => {}
+                ClientEvent::Connected { .. } => {
+                    let Some(handle) = self.handle.take() else { break };
+                    return JoinPoll::Connected(FrayClientTransport::already_connected(handle));
+                }
+                ClientEvent::Failed { stage, reason } => {
+                    log::info!("Fray: joining {} failed at {stage:?}: {reason}", self.label);
+                    self.handle = None;
+                    return JoinPoll::Failed(self.failed(&reason.to_string()));
+                }
+                ClientEvent::Disconnected { reason } => {
+                    self.handle = None;
+                    let why = match reason {
+                        DisconnectReason::Kicked => "the host turned us away".to_string(),
+                        DisconnectReason::Error(e) => e,
+                        _ => "the host left".to_string(),
+                    };
+                    return JoinPoll::Failed(self.failed(&why));
+                }
+                // The host sends nothing before seating us; never seen here.
+                ClientEvent::Reliable(_) => {}
+            }
+        }
+        JoinPoll::Waiting
+    }
+
+    fn failed(&self, reason: &str) -> String {
+        crate::lan_host::join_failure_notice(&self.label, reason)
+    }
+}
+
+#[cfg(test)]
+#[path = "fray_play_tests.rs"]
+mod tests;

@@ -242,14 +242,20 @@ fn assign_column_loading(
 
 /// Which network transport accepts remote players.
 ///
-/// Existing native LAN peer-hosting ("Host Game") uses QUIC. The dedicated
-/// Docker server uses WebSocket — the only transport a browser can speak — so
-/// both the web app and native can join one server. Local / WASM hosts spawn
-/// no accept thread at all (`max_remote_players == 0`).
+/// Native "Host Game" runs on Fray; online play by contact still uses plain
+/// QUIC on its pre-bound socket. The dedicated Docker server uses WebSocket —
+/// the only transport a browser can speak — so both the web app and native can
+/// join one server. Local / WASM hosts spawn no accept thread at all
+/// (`max_remote_players == 0`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RemoteTransport {
-    /// QUIC datagrams on `protocol::SERVER_PORT` (today's native LAN host).
+    /// QUIC datagrams on `protocol::SERVER_PORT`, or on the online path's
+    /// pre-bound socket.
     Quic,
+    /// Fray (peer-to-peer QUIC, LAN beacon and room code): native "Host Game"
+    /// ([`HostedServer::start_fray_host`]). No accept thread: the room's pump
+    /// hands joiners over on the same channel the QUIC accept thread uses.
+    Fray,
     /// Plain WebSocket on `port` (dedicated server; web + native join).
     WebSocket { port: u16 },
 }
@@ -685,6 +691,9 @@ pub struct HostedServer {
     /// Handle to the QUIC accept thread (if spawned).
     #[cfg(not(target_arch = "wasm32"))]
     quic_thread: Option<thread::JoinHandle<()>>,
+    /// The Fray room and its pump, on the [`RemoteTransport::Fray`] path.
+    #[cfg(not(target_arch = "wasm32"))]
+    fray_host: Option<crate::fray_transport::FrayHost>,
 
     /// World chat §4 — the attached room, if any (`/room join`). The room is
     /// a member of the world's conversation, not a bypass of it — mirroring
@@ -831,11 +840,14 @@ impl HostedServer {
                 .port(),
             (None, RemoteTransport::Quic) => protocol::SERVER_PORT,
             (None, RemoteTransport::WebSocket { port }) => port,
+            // Fray binds an ephemeral port; `start_fray_host` records it.
+            (None, RemoteTransport::Fray) => 0,
         };
         #[cfg(target_arch = "wasm32")]
         let port = match remote_transport {
             RemoteTransport::Quic => protocol::SERVER_PORT,
             RemoteTransport::WebSocket { port } => port,
+            RemoteTransport::Fray => 0,
         };
         // LAN "Host Game" (T2-10): bind the UDP port NOW, on this thread, and hand
         // the socket to the accept thread. Binding inside that thread meant a
@@ -968,14 +980,17 @@ impl HostedServer {
         let (broadcaster, remote_rx, current_remote, shutdown, quic_thread) = {
             // LAN UDP discovery only makes sense for the QUIC peer-host path; the
             // dedicated WebSocket server is reached by URL, not broadcast.
+            // Fray sends its own LAN beacon.
             let broadcaster = match remote_transport {
                 RemoteTransport::Quic => Some(crate::discovery::ServerBroadcaster::new(port)),
-                RemoteTransport::WebSocket { .. } => None,
+                RemoteTransport::WebSocket { .. } | RemoteTransport::Fray => None,
             };
             let current_remote = Arc::new(AtomicUsize::new(0));
             let shutdown = Arc::new(AtomicBool::new(false));
 
-            if max_remote_players > 0 {
+            // A Fray room's pump feeds the channel instead: `start_fray_host`
+            // attaches both.
+            if max_remote_players > 0 && remote_transport != RemoteTransport::Fray {
                 let (tx, rx) = mpsc::channel::<Box<dyn ServerTransport>>();
                 // `quic_thread` holds whichever accept thread we spawned (the
                 // field name is historical — it may be the QUIC or the WS one).
@@ -997,6 +1012,7 @@ impl HostedServer {
                             tx,
                         )?
                     }
+                    RemoteTransport::Fray => unreachable!("a Fray room has no accept thread"),
                 };
                 (broadcaster, Some(rx), current_remote, shutdown, Some(handle))
             } else {
@@ -1068,12 +1084,14 @@ impl HostedServer {
             difficulty,
             #[cfg(not(target_arch = "wasm32"))]
             challenges: signet::ChallengeTable::default(),
-            // QUIC LAN host requires sign-in (verified identity deliverable).
+            // QUIC and Fray hosts require sign-in (verified identity
+            // deliverable): a Fray join, by LAN room or room code, gets the
+            // same Signet challenge a LAN QUIC join always has.
             // A WebSocket host starts open only until `set_access_policy` runs;
             // the dedicated server applies its (sign-in-by-default) policy at
             // boot, before the main loop processes its first join.
             #[cfg(not(target_arch = "wasm32"))]
-            require_signin: matches!(remote_transport, RemoteTransport::Quic),
+            require_signin: matches!(remote_transport, RemoteTransport::Quic | RemoteTransport::Fray),
             // Set by the dedicated server after `start` via `set_identity`.
             #[cfg(not(target_arch = "wasm32"))]
             identity: None,
@@ -1105,6 +1123,8 @@ impl HostedServer {
             shutdown,
             #[cfg(not(target_arch = "wasm32"))]
             quic_thread,
+            #[cfg(not(target_arch = "wasm32"))]
+            fray_host: None,
             // No room attached at start. `/room join` attaches one.
             #[cfg(not(target_arch = "wasm32"))]
             world_room: None,
@@ -1146,7 +1166,9 @@ impl HostedServer {
 
     /// Start the server a host client (LAN Host Game) embeds. `host_world` is
     /// [`host_world_mode`] in the game: [`HostWorld::Lent`] unless the player
-    /// passed `--no-lend`.
+    /// passed `--no-lend`. "Host Game" itself now hosts through
+    /// [`Self::start_fray_host`]; tests still start plain hosts here.
+    #[cfg_attr(not(test), expect(dead_code, reason = "Host Game uses start_fray_host since B-2; test rigs use this"))]
     pub fn start_host(
         num_local_players: usize,
         server_name: String,
@@ -1165,6 +1187,90 @@ impl HostedServer {
             None,
             host_world,
         )
+    }
+
+    /// Start the server a host client embeds for "Host Game", hosting through
+    /// Fray: a LAN beacon on this network, and a room code published on the
+    /// player's own `relays` ("Your relays") and nowhere else (no fallback to
+    /// Fray's defaults: red line 2). Joiners go through the same Signet
+    /// challenge as every QUIC join. `Err` (with a readable reason) when the
+    /// room could not start; a code that cannot be published is not an error:
+    /// the room is then on this network only, and the host panel says so.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn start_fray_host(
+        num_local_players: usize,
+        server_name: String,
+        seed: u32,
+        max_remote_players: usize,
+        host_world: HostWorld,
+        relays: &[String],
+    ) -> Result<Self, String> {
+        let cfg = crate::fray_play::play_config(relays);
+        let id = crate::fray_play::session_identity();
+        Self::start_fray_host_with(
+            num_local_players,
+            server_name,
+            seed,
+            max_remote_players,
+            host_world,
+            |room| decented_net::host(&cfg, &id, room),
+        )
+    }
+
+    /// [`Self::start_fray_host`] with the room started by `open_room` (tests
+    /// start it on a private beacon port, or over an in-process relay).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn start_fray_host_with(
+        num_local_players: usize,
+        server_name: String,
+        seed: u32,
+        max_remote_players: usize,
+        host_world: HostWorld,
+        open_room: impl FnOnce(decented_net::RoomInfo) -> decented_net::HostHandle,
+    ) -> Result<Self, String> {
+        if max_remote_players == 0 {
+            return Err("a hosted room needs at least one remote slot".to_string());
+        }
+        let mut server = Self::start_inner(
+            num_local_players,
+            server_name.clone(),
+            seed,
+            max_remote_players,
+            RemoteTransport::Fray,
+            None,
+            host_world,
+        )?;
+        // Fray counts the host's own seat in the room's size, and refuses a
+        // joiner past it, as the QUIC accept thread did.
+        let room = decented_net::RoomInfo {
+            name: server_name,
+            max_players: u8::try_from(num_local_players + max_remote_players).unwrap_or(u8::MAX),
+        };
+        let (tx, rx) = mpsc::channel();
+        let fray = crate::fray_transport::FrayHost::start(open_room(room), tx);
+        // Listening takes milliseconds; a room that cannot start says so at
+        // once (a bad config or no socket), so the click gets an honest answer
+        // like the QUIC path's synchronous bind (T2-10).
+        let deadline = std::time::Instant::now() + FRAY_START_WAIT;
+        while !fray.is_ready() && fray.failure().is_none() && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        if let Some(why) = fray.failure() {
+            fray.shutdown();
+            return Err(why);
+        }
+        if let Some(addr) = fray.handle().local_addr() {
+            server.port = addr.port();
+        }
+        server.remote_rx = Some(rx);
+        server.fray_host = Some(fray);
+        Ok(server)
+    }
+
+    /// The Fray room this server hosts ("Host Game"), if it hosts one.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn fray_room(&self) -> Option<&crate::fray_transport::FrayHost> {
+        self.fray_host.as_ref()
     }
 
     /// C3d (run 4, run-3 review L3) — the internal inventory-mode selector
@@ -6928,6 +7034,10 @@ impl Drop for HostedServer {
             if let Some(handle) = self.quic_thread.take() {
                 let _ = handle.join();
             }
+            // Close the room so the close reaches the joiners (at most ~1 s).
+            if let Some(fray) = self.fray_host.take() {
+                fray.shutdown();
+            }
         }
     }
 }
@@ -7526,6 +7636,11 @@ fn grant_packet(stack: &crate::item::ItemStack, window_event: u32) -> Option<Vec
 /// How long one incoming QUIC connection gets to complete its handshake.
 #[cfg(not(target_arch = "wasm32"))]
 const QUIC_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long `start_fray_host` waits for the room to report listening or
+/// failed before carrying on (it reports either within milliseconds).
+#[cfg(not(target_arch = "wasm32"))]
+const FRAY_START_WAIT: Duration = Duration::from_secs(3);
 
 /// Spawn the QUIC accept thread. Native-only — QUIC/tokio isn't available on WASM.
 #[cfg(not(target_arch = "wasm32"))]
