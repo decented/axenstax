@@ -91,6 +91,11 @@ rodio = { version = "0.20", default-features = false, features = ["vorbis"] }
 gilrs = "0.11"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros"] }
 quinn = "0.11"
+# Fray, the shared peer-to-peer transport (QUIC, LAN beacon, room-code rendezvous),
+# as a path dependency. NATIVE-ONLY: it must never enter the wasm32 graph (the
+# browser has no QUIC and no sockets). The one `fray-relays` copy in the graph is
+# the one fray-net itself depends on; do not add a second.
+decented-net = { package = "fray-net", path = "../../../forgesworn/fray/crates/decented-net" }
 # WebSocket transport for the dedicated server (and a native client that joins
 # it). Plain `ws` only — TLS for the browser is terminated by the Caddy front in
 # the Docker image, so the engine never needs a TLS stack here. `futures-util`
