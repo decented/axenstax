@@ -95,12 +95,18 @@ pub fn bind_lan_socket(port: u16) -> Result<UdpSocket, String> {
     UdpSocket::bind((Ipv4Addr::UNSPECIFIED, port)).map_err(|e| describe_bind_error(&e, port))
 }
 
-/// Toast shown when "Host Game" starts, naming the room `code`. Without a
-/// network, hosting works but nobody can reach it, which is worth saying.
-pub fn hosting_toast(access: &HostAccess, code: &str) -> String {
+/// Toast shown when "Host Game" starts. With relays set it names the room
+/// `code`; with none the code can't be used, so it is left out (the pause
+/// panel says why). Without a network, hosting works but nobody can reach it,
+/// which is worth saying.
+pub fn hosting_toast(access: &HostAccess, code: &str, has_relays: bool) -> String {
     if access.addresses.is_empty() {
         return "Hosting, but no network connection was found, so nobody can join yet. \
                 Connect to Wi-Fi or Ethernet."
+            .to_string();
+    }
+    if !has_relays {
+        return "Hosting on your network. Friends on the same Wi-Fi pick this world under Join Game."
             .to_string();
     }
     format!(
@@ -242,10 +248,13 @@ mod tests {
     #[test]
     fn toasts_name_the_address_or_the_problem() {
         let a = HostAccess { addresses: vec![ip(192, 168, 1, 23)], port: 7700 };
-        let t = hosting_toast(&a, "KMT RWX");
+        let t = hosting_toast(&a, "KMT RWX", true);
         assert!(t.contains("KMT RWX") && t.contains("Join Game"), "got {t}");
         let none = HostAccess { addresses: vec![], port: 7700 };
-        assert!(hosting_toast(&none, "KMT RWX").contains("no network connection"));
+        assert!(hosting_toast(&none, "KMT RWX", true).contains("no network connection"));
+        // No relays: the code can't be used, so the toast leaves it out.
+        let no_relays = hosting_toast(&a, "KMT RWX", false);
+        assert!(!no_relays.contains("KMT RWX") && no_relays.contains("Join Game"), "got {no_relays}");
 
         let f = host_failure_toast("port 7700 is already in use.");
         assert!(f.contains("already in use") && f.contains("solo play"), "got {f}");

@@ -13,7 +13,7 @@ use decented_net::relay::FakeRelayHub;
 use decented_net::{host, host_with_relay, join_lan, join_with_relay, lan_browse, Identity, Keys};
 
 use super::*;
-use crate::hosted_server::{HostWorld, HostedServer};
+use crate::hosted_server::{FrayStart, HostWorld, HostedServer};
 use crate::remote_client::{build_join_request_guest, ConnectionState, RemoteClient, SignDriverFn, SignedJoin};
 use crate::transport::ClientTransport;
 
@@ -38,10 +38,52 @@ fn world(tag: &str) -> String {
 }
 
 fn start_host(open_room: impl FnOnce(decented_net::RoomInfo) -> decented_net::HostHandle) -> HostedServer {
-    let Ok(server) = HostedServer::start_fray_host_with(1, world("host"), 7, 4, HostWorld::Owned, open_room) else {
+    start_host_blocking(Vec::new(), open_room)
+}
+
+/// A host whose player has blocked `blocked` in Signet, listening.
+fn start_host_blocking(
+    blocked: Vec<[u8; 32]>,
+    open_room: impl FnOnce(decented_net::RoomInfo) -> decented_net::HostHandle,
+) -> HostedServer {
+    let mut server = start_unsettled(blocked, open_room);
+    wait_ready(&mut server);
+    server
+}
+
+/// The room as `start_fray_host_with` returns it: possibly still opening.
+fn start_unsettled(
+    blocked: Vec<[u8; 32]>,
+    open_room: impl FnOnce(decented_net::RoomInfo) -> decented_net::HostHandle,
+) -> HostedServer {
+    let Ok(server) = HostedServer::start_fray_host_with(1, world("host"), 7, 4, HostWorld::Owned, blocked, open_room) else {
         panic!("the Fray room starts");
     };
     server
+}
+
+/// Poll `server`'s room start until it is `Ready`.
+fn wait_ready(server: &mut HostedServer) {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        match server.poll_fray_start() {
+            FrayStart::Ready => return,
+            FrayStart::Pending => {}
+            FrayStart::Failed(why) => panic!("the room failed to start: {why}"),
+        }
+        assert!(Instant::now() < deadline, "the room never reported ready");
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Dial `server`'s room straight at its LAN address and token.
+fn dial_lan(server: &mut HostedServer, cfg: &NetConfig) -> FrayClientTransport {
+    let handle = server.fray_room().unwrap().handle();
+    let addr = handle.local_addr().expect("listening");
+    let token = handle.lan_token();
+    let dial = std::net::SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), addr.port());
+    let join = PendingJoin::over(decented_net::join_addr(cfg, &Identity::ephemeral(), dial, &token), "dial".into());
+    reach_host(server, join)
 }
 
 /// Tick the server while the join finds its host; the transport once it has.
@@ -246,4 +288,142 @@ fn a_join_signed_over_another_origin_is_refused() {
         server.server.players.iter().skip(1).all(|p| p.verified_pubkey.is_none()),
         "no joiner was verified"
     );
+}
+
+/// S3: a join signed over one connection's binding, presented on another, is
+/// refused: the origin is the connection's own exporter, so a signature cannot
+/// be carried from one link to the next.
+#[test]
+fn a_join_signed_over_another_connections_binding_is_refused() {
+    let cfg = test_cfg();
+    let mut server = start_host(|room| host(&cfg, &Identity::ephemeral(), room));
+    let first = dial_lan(&mut server, &cfg);
+    let first_binding = first.channel_binding();
+    signed_join_is_seated(&mut server, first);
+
+    let second = dial_lan(&mut server, &cfg);
+    let second_binding = second.channel_binding();
+    assert!(first_binding.is_some() && second_binding.is_some());
+    assert_ne!(first_binding, second_binding, "each Fray connection has its own binding");
+    let replayer = Keys::generate();
+    let mut client = RemoteClient::connect_authed_on_transport(
+        Box::new(second),
+        "Replayer",
+        driver(replayer.clone(), Arc::new(Mutex::new(None)), Some(crate::signet::join_origin(first_binding))),
+        None,
+    );
+    settle(&mut server, &mut client);
+    assert!(matches!(client.state, ConnectionState::Failed(_)), "{}", state_name(&client.state));
+    let replayer_key = replayer.public_key().to_bytes();
+    assert!(
+        server.server.players.iter().all(|p| p.verified_pubkey != Some(replayer_key)),
+        "the replayed join was never seated"
+    );
+
+    // The same link still admits a join signed over its own binding.
+    let third = dial_lan(&mut server, &cfg);
+    signed_join_is_seated(&mut server, third);
+}
+
+/// M1: the player's Signet blocklist applies to Host Game as it does to the
+/// online host: a blocked key that signs a valid challenge is refused, over a
+/// room code or a LAN join, and an unblocked one is seated. Sign-in stays
+/// required.
+#[test]
+fn a_blocked_key_is_refused_by_a_fray_room_and_an_unblocked_one_is_seated() {
+    let blocked = Keys::generate();
+    let hub = FakeRelayHub::new();
+    let cfg = test_cfg();
+    let mut server = start_host_blocking(vec![blocked.public_key().to_bytes()], |room| {
+        host_with_relay(&cfg, &Identity::ephemeral(), room, Some(Box::new(hub.client())))
+    });
+    let code = server.fray_room().expect("a Fray room").handle().code().to_string();
+    let typed = decented_net::room::display_code(&code);
+
+    // Over the room code.
+    let join = PendingJoin::over(join_with_relay(&cfg, &Identity::ephemeral(), &typed, Box::new(hub.client())), typed.clone());
+    let transport = reach_host(&mut server, join);
+    let mut client = RemoteClient::connect_authed_on_transport(
+        Box::new(transport),
+        "Blocked",
+        driver(blocked.clone(), Arc::new(Mutex::new(None)), None),
+        None,
+    );
+    settle(&mut server, &mut client);
+    let ConnectionState::Failed(why) = &client.state else {
+        panic!("a blocked key must be refused: {}", state_name(&client.state));
+    };
+    assert!(why.contains("blocked"), "{why}");
+
+    // Over the LAN address, with the same key.
+    let transport = dial_lan(&mut server, &cfg);
+    let mut client = RemoteClient::connect_authed_on_transport(
+        Box::new(transport),
+        "Blocked",
+        driver(blocked.clone(), Arc::new(Mutex::new(None)), None),
+        None,
+    );
+    settle(&mut server, &mut client);
+    assert!(matches!(client.state, ConnectionState::Failed(_)), "{}", state_name(&client.state));
+    let blocked_bytes = blocked.public_key().to_bytes();
+    assert!(
+        server.server.players.iter().all(|p| p.verified_pubkey != Some(blocked_bytes)),
+        "the blocked key was never seated"
+    );
+
+    // Anyone else who signs in is still seated, by code.
+    let join = PendingJoin::over(join_with_relay(&cfg, &Identity::ephemeral(), &typed, Box::new(hub.client())), typed);
+    let transport = reach_host(&mut server, join);
+    signed_join_is_seated(&mut server, transport);
+}
+
+/// S1: starting the room does not wait for it. It is `Pending` or `Ready`
+/// straight after, and `poll_fray_start` settles it on a later frame.
+#[test]
+fn the_room_start_returns_at_once_and_settles_on_a_later_poll() {
+    let cfg = test_cfg();
+    // Time only what follows the room being opened: building the world is
+    // slow in a debug build and is not the start's wait.
+    let opened = Arc::new(Mutex::new(None));
+    let mut server = start_unsettled(Vec::new(), {
+        let (cfg, opened) = (cfg.clone(), opened.clone());
+        move |room| {
+            let handle = host(&cfg, &Identity::ephemeral(), room);
+            *opened.lock().unwrap() = Some(Instant::now());
+            handle
+        }
+    });
+    let waited = opened.lock().unwrap().expect("the room was opened").elapsed();
+    assert!(waited < Duration::from_secs(1), "the start waited {waited:?} for the room");
+    assert!(server.fray_room().is_some(), "the room, and its code, exist at once");
+    wait_ready(&mut server);
+    assert_ne!(server.port, 0, "the listening port is noted once ready");
+    assert_eq!(server.poll_fray_start(), FrayStart::Ready);
+}
+
+/// S1: a room that cannot start is reported by a later poll (not by the
+/// start), and is closed.
+#[test]
+fn a_room_that_cannot_start_fails_on_a_later_poll() {
+    let mut cfg = test_cfg();
+    // A liveness pair Fray refuses.
+    cfg.idle_timeout = Duration::from_secs(2);
+    cfg.keep_alive = Duration::from_secs(3);
+    let mut server = start_unsettled(Vec::new(), |room| host(&cfg, &Identity::ephemeral(), room));
+    let deadline = Instant::now() + WAIT;
+    let why = loop {
+        match server.poll_fray_start() {
+            FrayStart::Failed(why) => break why,
+            FrayStart::Ready => panic!("a refused config cannot be ready"),
+            FrayStart::Pending => {}
+        }
+        assert!(Instant::now() < deadline, "the failure never showed");
+        thread::sleep(Duration::from_millis(5));
+    };
+    assert!(why.contains("keep_alive"), "{why}");
+    assert!(server.fray_room().is_none(), "the failed room is closed");
+    // The server carries on with nobody able to join.
+    for _ in 0..5 {
+        server.tick();
+    }
 }

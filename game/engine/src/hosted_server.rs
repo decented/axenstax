@@ -462,6 +462,18 @@ struct EditTickBudget {
 /// dropped for volume (FU4a: with nothing sent back).
 const MAX_BLOCK_CHANGES_PER_TICK: usize = 4;
 
+/// How a starting Fray room is getting on ([`HostedServer::poll_fray_start`]).
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FrayStart {
+    /// Still opening its socket and asking the network about itself.
+    Pending,
+    /// Listening: the beacon is out and the code can be shown.
+    Ready,
+    /// Could not start; the reason is readable.
+    Failed(String),
+}
+
 /// Handle to a running hosted server. Owns the `GameServer`, all client
 /// transports, and (on native with remote players enabled) the QUIC
 /// accept thread. Drop to shut down the accept thread cleanly.
@@ -840,7 +852,7 @@ impl HostedServer {
                 .port(),
             (None, RemoteTransport::Quic) => protocol::SERVER_PORT,
             (None, RemoteTransport::WebSocket { port }) => port,
-            // Fray binds an ephemeral port; `start_fray_host` records it.
+            // Fray binds an ephemeral port; `poll_fray_start` records it once the room listens.
             (None, RemoteTransport::Fray) => 0,
         };
         #[cfg(target_arch = "wasm32")]
@@ -1193,9 +1205,15 @@ impl HostedServer {
     /// Fray: a LAN beacon on this network, and a room code published on the
     /// player's own `relays` ("Your relays") and nowhere else (no fallback to
     /// Fray's defaults: red line 2). Joiners go through the same Signet
-    /// challenge as every QUIC join. `Err` (with a readable reason) when the
-    /// room could not start; a code that cannot be published is not an error:
-    /// the room is then on this network only, and the host panel says so.
+    /// challenge as every QUIC join, and `blocked` (the player's Signet
+    /// blocklist) is refused whatever they sign, as the online host does.
+    ///
+    /// Returns at once: the room reports listening, or failing, a moment later
+    /// (with relays set it first asks the router and a STUN server, which takes
+    /// seconds), so the caller reads [`Self::poll_fray_start`] each frame
+    /// instead of freezing the game here. A code that cannot be published is not
+    /// a failure: the room is then on this network only, and the host panel
+    /// says so.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn start_fray_host(
         num_local_players: usize,
@@ -1204,6 +1222,7 @@ impl HostedServer {
         max_remote_players: usize,
         host_world: HostWorld,
         relays: &[String],
+        blocked: Vec<[u8; 32]>,
     ) -> Result<Self, String> {
         let cfg = crate::fray_play::play_config(relays);
         let id = crate::fray_play::session_identity();
@@ -1213,6 +1232,7 @@ impl HostedServer {
             seed,
             max_remote_players,
             host_world,
+            blocked,
             |room| decented_net::host(&cfg, &id, room),
         )
     }
@@ -1226,6 +1246,7 @@ impl HostedServer {
         seed: u32,
         max_remote_players: usize,
         host_world: HostWorld,
+        blocked: Vec<[u8; 32]>,
         open_room: impl FnOnce(decented_net::RoomInfo) -> decented_net::HostHandle,
     ) -> Result<Self, String> {
         if max_remote_players == 0 {
@@ -1240,6 +1261,10 @@ impl HostedServer {
             None,
             host_world,
         )?;
+        // Sign-in stays required (decision 3) and nobody is allowlisted; the
+        // player's Signet blocks are refused, as the online host refuses them.
+        // Set before the room exists, so no join can be seated without it.
+        server.set_access_policy(true, Vec::new(), blocked);
         // Fray counts the host's own seat in the room's size, and refuses a
         // joiner past it, as the QUIC accept thread did.
         let room = decented_net::RoomInfo {
@@ -1247,24 +1272,33 @@ impl HostedServer {
             max_players: u8::try_from(num_local_players + max_remote_players).unwrap_or(u8::MAX),
         };
         let (tx, rx) = mpsc::channel();
-        let fray = crate::fray_transport::FrayHost::start(open_room(room), tx);
-        // Listening takes milliseconds; a room that cannot start says so at
-        // once (a bad config or no socket), so the click gets an honest answer
-        // like the QUIC path's synchronous bind (T2-10).
-        let deadline = std::time::Instant::now() + FRAY_START_WAIT;
-        while !fray.is_ready() && fray.failure().is_none() && std::time::Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(5));
-        }
+        server.remote_rx = Some(rx);
+        server.fray_host = Some(crate::fray_transport::FrayHost::start(open_room(room), tx));
+        Ok(server)
+    }
+
+    /// Where a just-started Fray room stands. Never blocks: read it once a
+    /// frame until it leaves [`FrayStart::Pending`]. On `Failed` the room is
+    /// closed and gone (the server stays, with nobody able to join); on `Ready`
+    /// `port` is the room's listening port.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn poll_fray_start(&mut self) -> FrayStart {
+        let Some(fray) = self.fray_host.as_ref() else {
+            return FrayStart::Failed("the room is closed".to_string());
+        };
         if let Some(why) = fray.failure() {
-            fray.shutdown();
-            return Err(why);
+            if let Some(fray) = self.fray_host.take() {
+                fray.shutdown();
+            }
+            return FrayStart::Failed(why);
+        }
+        if !fray.is_ready() {
+            return FrayStart::Pending;
         }
         if let Some(addr) = fray.handle().local_addr() {
-            server.port = addr.port();
+            self.port = addr.port();
         }
-        server.remote_rx = Some(rx);
-        server.fray_host = Some(fray);
-        Ok(server)
+        FrayStart::Ready
     }
 
     /// The Fray room this server hosts ("Host Game"), if it hosts one.
@@ -7636,11 +7670,6 @@ fn grant_packet(stack: &crate::item::ItemStack, window_event: u32) -> Option<Vec
 /// How long one incoming QUIC connection gets to complete its handshake.
 #[cfg(not(target_arch = "wasm32"))]
 const QUIC_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// How long `start_fray_host` waits for the room to report listening or
-/// failed before carrying on (it reports either within milliseconds).
-#[cfg(not(target_arch = "wasm32"))]
-const FRAY_START_WAIT: Duration = Duration::from_secs(3);
 
 /// Spawn the QUIC accept thread. Native-only — QUIC/tokio isn't available on WASM.
 #[cfg(not(target_arch = "wasm32"))]

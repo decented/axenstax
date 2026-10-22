@@ -88,11 +88,27 @@ pub struct HostedRoom {
     pub started: Instant,
     /// The "code is live" toast has been shown.
     pub announced: bool,
+    /// The room reported listening (it opens in the background).
+    settled: bool,
 }
 
 impl HostedRoom {
     pub fn new(access: crate::lan_host::HostAccess) -> HostedRoom {
-        HostedRoom { access, started: Instant::now(), announced: false }
+        HostedRoom { access, started: Instant::now(), announced: false, settled: false }
+    }
+
+    /// The room has finished opening.
+    pub fn settled(&self) -> bool {
+        self.settled
+    }
+
+    /// The room is listening on `port`. The wait for a relay (see
+    /// [`PUBLISH_GRACE`]) counts from now: before this the room was still
+    /// asking the router and a STUN server, and had not yet reached a relay.
+    pub fn settle(&mut self, port: u16) {
+        self.settled = true;
+        self.access.port = port;
+        self.started = Instant::now();
     }
 
     /// The panel's view of `server`'s room, if it hosts one.
@@ -106,7 +122,7 @@ impl HostedRoom {
 
     /// The code, once, the first time it is published.
     pub fn take_published(&mut self, server: &crate::hosted_server::HostedServer) -> Option<String> {
-        if self.announced {
+        if self.announced || !self.settled {
             return None;
         }
         let view = self.view(server)?;
@@ -186,7 +202,10 @@ impl PendingJoin {
                     return JoinPoll::Failed(self.failed(&why));
                 }
                 // The host sends nothing before seating us; never seen here.
-                ClientEvent::Reliable(_) => {}
+                // Dropped if it ever is, so say so.
+                ClientEvent::Reliable(_) => {
+                    log::warn!("Fray: a packet arrived before Connected; dropped");
+                }
             }
         }
         JoinPoll::Waiting

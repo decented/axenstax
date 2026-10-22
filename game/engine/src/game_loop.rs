@@ -1115,6 +1115,33 @@ impl super::GameState {
     /// restored bunker over this connection's channel binding); one that fails
     /// says why in the lobby.
     pub(crate) fn poll_fray(&mut self) {
+        // The room opens in the background (it asks the router and a STUN
+        // server first, which takes seconds). Settle it here: note its port
+        // once it listens, or say why it could not start.
+        let started = match (self.lan_host.as_mut(), self.hosted_server.as_mut()) {
+            (Some(room), Some(server)) if !room.settled() => match server.poll_fray_start() {
+                crate::hosted_server::FrayStart::Pending => None,
+                crate::hosted_server::FrayStart::Ready => {
+                    room.settle(server.port);
+                    None
+                }
+                crate::hosted_server::FrayStart::Failed(why) => Some(why),
+            },
+            _ => None,
+        };
+        if let Some(why) = started {
+            log::error!("Failed to start hosted server: {why}");
+            // The world carries on solo with nobody able to join; the panel
+            // goes, and the player is told why.
+            self.lan_host = None;
+            let message = crate::lan_host::host_failure_toast(&why);
+            if matches!(self.mode, GameMode::Playing | GameMode::Paused { .. }) {
+                self.online_toast(message, 12);
+            } else {
+                self.entry_toast.queue(message, std::time::Duration::from_secs(12));
+            }
+        }
+
         // Only while Playing: toasts draw then, and the world reset on the way
         // in would clear one set earlier (the panel shows the code meanwhile).
         let published = match (self.lan_host.as_mut(), self.hosted_server.as_ref(), &self.mode) {
@@ -9092,6 +9119,10 @@ impl super::GameState {
                     // (one world, one sim) unless started with `--no-lend`.
                     // Through Fray: the LAN beacon, and a room code on the
                     // player's own relays only (red line 2).
+                    // The player's Signet blocks are refused here as they are
+                    // when hosting online; sign-in stays required. Passed in so
+                    // the policy is on before the room can seat anybody.
+                    let (_, blocked) = crate::contacts::load_local_book_with_blocks();
                     match crate::hosted_server::HostedServer::start_fray_host(
                         1,  // 1 local player
                         folder_name.clone(),
@@ -9099,21 +9130,25 @@ impl super::GameState {
                         4,  // max 4 remote players
                         crate::hosted_server::host_world_mode(),
                         &self.graphics.online_relays,
+                        blocked,
                     ) {
                         Ok(server) => {
                             // T2-10: say how friends join — the toast now, the
                             // pause menu (with the code) for as long as we host.
-                            let access = crate::lan_host::HostAccess::detect(server.port);
+                            // The room is still opening (`poll_fray` settles
+                            // it, and replaces this toast if it fails); the
+                            // port is not known yet and is not needed here.
+                            let access = crate::lan_host::HostAccess::detect(0);
                             let code = server
                                 .fray_room()
                                 .map(|room| decented_net::room::display_code(room.handle().code()))
                                 .unwrap_or_default();
-                            log::info!("Hosting over Fray on port {} (room code {code})", server.port);
+                            log::info!("Hosting over Fray (room code {code})");
                             self.hosted_server = Some(server);
                             // Queued, not set: the world reset below clears
                             // `toast`, and toasts draw only while Playing.
                             self.entry_toast.queue(
-                                crate::lan_host::hosting_toast(&access, &code),
+                                crate::lan_host::hosting_toast(&access, &code, !self.graphics.online_relays.is_empty()),
                                 std::time::Duration::from_secs(8),
                             );
                             self.lan_host = Some(crate::fray_play::HostedRoom::new(access));
@@ -9666,6 +9701,10 @@ impl super::GameState {
                 }
                 load_world = None;
                 self.hosted_server = None;
+                // Nothing is hosted now: no panel, and no toast naming a code
+                // that is already dead.
+                self.lan_host = None;
+                self.entry_toast.discard();
             }
 
             // Online play by contact — the invite link a press staged.
