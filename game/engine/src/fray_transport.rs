@@ -70,12 +70,20 @@ pub const APP_TAG: &str = "axenstax";
 /// connection's.
 pub const JOIN_EXPORTER_LABEL: &str = "EXPORTER-axenstax-join-v1";
 
-/// How long the pump sleeps when [`HostHandle::poll`] has nothing for it.
-const PUMP_IDLE: Duration = Duration::from_millis(1);
+/// How long the pump sleeps when [`HostHandle::poll`] has nothing for it. The
+/// server ticks every 50 ms, so a few milliseconds more latency is invisible,
+/// and a phone host is not woken a thousand times a second.
+const PUMP_IDLE: Duration = Duration::from_millis(5);
+
+/// What a joiner lets wait for its frame loop before Fray closes the link as a
+/// flood. `network.rs`'s client side was unbounded; a joiner whose frame loop
+/// stops (a loading screen, a minimised window) while chunks stream in at the
+/// host's ~1 MiB/s must survive about a minute, and its memory stays bounded.
+pub const CLIENT_INBOUND_BYTES: usize = 64 * 1024 * 1024;
 
 /// Fray's network settings with AxeNStax's numbers: one reliable message per
-/// game packet (up to `MAX_FRAME_LEN`), 8 MiB of waiting inbound and queued
-/// outbound bytes per peer, the 30 s / 5 s liveness of `Liveness::DEFAULT`, the
+/// game packet (up to `MAX_FRAME_LEN`), 8 MiB of waiting inbound (64 MiB on a
+/// joiner) and queued outbound bytes per peer, the 30 s / 5 s liveness of `Liveness::DEFAULT`, the
 /// join exporter label and the `axenstax` app tag. Relays, STUN and the beacon
 /// stay at Fray's defaults: the caller sets the relay list (the player's own
 /// "Your relays") and `relay_fallback` before hosting or joining.
@@ -84,9 +92,8 @@ pub fn net_config(data_dir: impl Into<PathBuf>) -> NetConfig {
     cfg.max_reliable_len = MAX_FRAME_LEN;
     // Fray counts payload bytes only, so a bound on messages as large as the
     // byte bound can never be reached first.
-    let inbound = QueueBound { messages: MAX_INBOUND_BYTES, bytes: MAX_INBOUND_BYTES };
-    cfg.host_inbound = inbound;
-    cfg.client_inbound = inbound;
+    cfg.host_inbound = QueueBound { messages: MAX_INBOUND_BYTES, bytes: MAX_INBOUND_BYTES };
+    cfg.client_inbound = QueueBound { messages: CLIENT_INBOUND_BYTES, bytes: CLIENT_INBOUND_BYTES };
     cfg.outbound_queue_bytes = MAX_OUTBOUND_QUEUE_BYTES;
     cfg.idle_timeout = Liveness::DEFAULT.idle;
     cfg.keep_alive = Liveness::DEFAULT.keep_alive.expect("the default liveness has a keep-alive");
@@ -144,7 +151,8 @@ pub struct FrayServerTransport {
 }
 
 impl FrayServerTransport {
-    /// Close the link to this peer (Fray flushes what was already sent first).
+    /// Close the link to this peer. Fray gives what was already sent 250 ms to
+    /// flush before the close (a fixed wait, not an acknowledgement).
     fn close_link(&self) {
         if let Some(handle) = self.handle.upgrade() {
             handle.disconnect(self.peer);
@@ -209,8 +217,10 @@ impl ServerTransport for FrayServerTransport {
 }
 
 impl Drop for FrayServerTransport {
-    /// The slot was freed: close the link (Fray lets a queued `JoinReject` out
-    /// first), as dropping a `QuicServerTransport` makes its bridge flush and close.
+    /// The slot was freed: close the link, as dropping a `QuicServerTransport`
+    /// makes its bridge flush and close. Fray gives a queued `JoinReject` 250 ms
+    /// to get out first (`network.rs` waited up to 2 s for the acknowledgement),
+    /// so on a slow path the reason can be lost and the joiner sees the link end.
     fn drop(&mut self) {
         if !self.closed.load(Ordering::Relaxed) {
             self.close_link();
@@ -632,8 +642,9 @@ mod tests {
         assert_eq!(cfg.app_tag, "axenstax");
         assert_eq!(cfg.max_reliable_len, 65_537);
         assert_eq!(cfg.max_reliable_len, MAX_FRAME_LEN);
+        assert_eq!(cfg.host_inbound.bytes, 8 * 1024 * 1024);
+        assert_eq!(cfg.client_inbound.bytes, 64 * 1024 * 1024);
         for bound in [cfg.host_inbound, cfg.client_inbound] {
-            assert_eq!(bound.bytes, 8 * 1024 * 1024);
             assert!(bound.messages >= bound.bytes, "the message count cannot bind before the bytes");
         }
         assert_eq!(cfg.outbound_queue_bytes, 8 * 1024 * 1024);
