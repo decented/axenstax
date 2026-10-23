@@ -695,3 +695,6 @@ fn game_harness_handover_original_link_full_transfer_handback_and_later_epoch() 
     }
     assert_eq!(resolve(&link).authority().unwrap().epoch(), 3);
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+mod quest_active;

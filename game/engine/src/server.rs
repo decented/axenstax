@@ -37,6 +37,9 @@ pub struct ServerPlayer {
     pub action_queue: Option<crate::action_queue::ActionQueue>,
     pub action_results: Option<crate::action_results::ActionResults>,
     pub pack_session: Option<crate::pack_state::PackSession>,
+    pub(crate) quest_session: Option<crate::quest_state::QuestSession>,
+    pub(crate) quest_next_incarnation: u64,
+    pub(crate) gameplay_clock: crate::quest_state::GameplayClock,
     pub pack_flight: Option<crate::pack_state::PackFlight>,
     pub pack_next_incarnation: u64,
     /// Validated overflow feedback waits for a pending canonical fence.
@@ -332,6 +335,25 @@ pub struct ServerPlayer {
     pub local_seated: bool,
 }
 
+/// Location resolved from the world that actually swept this death. Absence of a
+/// village is authoritative, including outside a lending server's borrow window.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DeathLocation {
+    position: Vec3,
+    village: Option<crate::reputation::VillageId>,
+}
+
+impl DeathLocation {
+    pub fn from_world(world: &World, position: Vec3) -> Self {
+        Self { position, village: crate::reputation::village_at_position(world, position) }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn village(self) -> Option<crate::reputation::VillageId> {
+        self.village
+    }
+}
+
 /// MP-D2b — a client death sweep's kill attribution (single-player, or a
 /// host, whose lent world's sweep is its client's until D4):
 /// `combat::attribute_kill` over this client's players (`locals`:
@@ -342,17 +364,17 @@ pub fn route_client_kill(
     server: Option<&mut GameServer>,
     attacker: Option<crate::combat::Attacker>,
     kind: crate::mob::MobType,
-    pos: Vec3,
+    location: DeathLocation,
     tamed: bool,
     locals: &[(Vec3, bool)],
 ) -> Option<usize> {
     // Review D2b LOW-5 — the nearest-player fallback sees the joiners too.
     let joiners = server.as_deref().map(GameServer::joiner_bodies).unwrap_or_default();
-    match crate::combat::attribute_kill(attacker, pos, locals, &joiners) {
+    match crate::combat::attribute_kill(attacker, location.position, locals, &joiners) {
         crate::combat::KillCredit::Local(idx) => Some(idx),
         crate::combat::KillCredit::Remote { slot, generation, nearest } => {
             if let Some(server) = server {
-                server.queue_kill_event(slot, generation, kind, pos, tamed, nearest);
+                server.queue_kill_event_at(slot, generation, kind, location, tamed, nearest);
             }
             None
         }
@@ -546,6 +568,9 @@ impl ServerPlayer {
             action_queue: None,
             action_results: None,
             pack_session: None,
+            quest_session: None,
+            quest_next_incarnation: 0,
+            gameplay_clock: Default::default(),
             pack_flight: None,
             pack_next_incarnation: 0,
             pack_unfit_feedback: Vec::new(),
@@ -971,6 +996,10 @@ pub struct GameServer {
     pub lent: bool,
     pub leaf_decay: LeafDecaySystem,
     pub world_time: u32,
+    pub(crate) reputation_day: crate::reputation_day::DayClock,
+    pub(crate) lent_day_owner: Option<crate::reputation_day::OwnerId>,
+    pub(crate) lent_day_offer: Option<crate::reputation_day::DayOffer>,
+    pub(crate) lent_day_consumer: crate::reputation_day::DayConsumer,
     pub loaded_columns: ahash::AHashSet<(i32, i32)>,
     /// Phase B1 — the dedicated server's column streamer (`server_stream.rs`):
     /// loads / unloads columns around every connected player + the spawn each
@@ -1085,6 +1114,9 @@ pub struct GameServer {
     pub tables_gone: crate::window_ops::TablesGone,
     /// The personal snapshot selected with this server's loaded world.
     pub(crate) selected_local_personal: Option<crate::personal_value::LocalPersonalSave>,
+    /// Non-admitted first-scope retry provenance; never a gameplay record.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) gameplay_preparation: Option<crate::gameplay_preparation::ScopePreparation>,
 }
 
 impl GameServer {
@@ -1124,6 +1156,10 @@ impl GameServer {
             lent: false,
             leaf_decay: LeafDecaySystem::new(),
             world_time: 6000,
+            reputation_day: crate::reputation_day::DayClock::new(),
+            lent_day_owner: None,
+            lent_day_offer: None,
+            lent_day_consumer: crate::reputation_day::DayConsumer::default(),
             loaded_columns: ahash::AHashSet::new(),
             column_streamer: None,
             spawn_column: (0, 0),
@@ -1139,6 +1175,8 @@ impl GameServer {
             pending_bred_events: Vec::new(),
             tables_gone: Default::default(),
             selected_local_personal: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            gameplay_preparation: None,
             next_attach_gen: 0,
             released_joiners: Vec::new(),
             released_mounts: Vec::new(),
@@ -1259,8 +1297,21 @@ impl GameServer {
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(proof) = &personal_proof { proof.confirm_authority_durable(&crate::save::world_dir(&wname))?; }
         let autosave_policy = crate::world_open::AutosavePolicy::Ignore;
+        // A refusal names its cause the way `open_world` would, from the same
+        // read-only checks in its order (never by probing with `open_world`,
+        // which repairs and quarantines on success).
         #[cfg(not(target_arch = "wasm32"))]
-        let autosave_policy = if personal_proof.is_some() { crate::world_open::AutosavePolicy::Prefer } else { autosave_policy };
+        let local_present = || crate::gameplay_attachment::selected_world_local_present(&crate::save::world_dir(&wname))
+            .map_err(|why| {
+                let why = crate::save::world_open_refusal(&wname)
+                    .or_else(|| crate::save::peek_world_meta(&wname).err())
+                    .unwrap_or(why);
+                crate::world_open::server_refusal_message(&wname, &why)
+            });
+        #[cfg(not(target_arch = "wasm32"))]
+        let autosave_policy = if personal_proof.is_some() || local_present()? {
+            crate::world_open::AutosavePolicy::Prefer
+        } else { autosave_policy };
         let opened = crate::world_open::open_world(
             &wname,
             &mut self.world,
@@ -1271,7 +1322,10 @@ impl GameServer {
             log::info!("Loaded saved world '{wname}'.");
             self.selected_local_personal = save_data.local_personal.clone();
             #[cfg(not(target_arch = "wasm32"))]
-            if personal_proof.is_none() && (self.selected_local_personal.is_some() || crate::handover::live::personal_adapter::has_bound_records(&crate::save::world_dir(&wname))?) {
+            if personal_proof.is_none() && (self.selected_local_personal.as_ref().is_some_and(|snapshot|
+                crate::joiner_save::JoinerSave::decode(&snapshot.0).map_or(true, |saved| saved.personal.as_ref().is_none_or(|bound|
+                    !matches!(bound.binding, crate::progression::GameplayBinding::WorldLocal { scope, .. } if Some(scope) == self.world.quest_scope))))
+                || crate::handover::live::personal_adapter::has_bound_records(&crate::save::world_dir(&wname))?) {
                 return Err("This world's personal authority is missing. Nothing was reset.".into());
             }
             self.restore_saved_players(&save_data);
@@ -1299,6 +1353,7 @@ impl GameServer {
             // Restore once for ordinary and imported worlds, before a role
             // cut can persist the selected world without its saved creatures.
             crate::steed_save::restore_pets(&mut self.ecs, &save_data.saved_mobs, false)?;
+            if let Some(saved) = &save_data.quest_world { crate::quest_npcs::restore(&mut self.ecs, saved)?; }
 
             // Spec 30 — light data isn't persisted; recompute
             // from block state for every loaded column.
@@ -1522,8 +1577,6 @@ impl GameServer {
     /// ticks twice on the one world. Single-player runs no server at all; its
     /// client still simulates everything (CLAUDE.md known debt).
     pub fn tick(&mut self) {
-        #[cfg(not(target_arch = "wasm32"))]
-        self.decay_personal();
         use crate::sim_lend::SimSystem;
         // One column-loading story per mode (`hosted_server::assign_column_loading`):
         // a lent world's columns are its host client's streamer's alone.
@@ -1564,12 +1617,19 @@ impl GameServer {
         // Matches GameState::world_time_step's default of 1 (post-playtest
         // rollback from the alpha-fast 4× BRIDGE). A lent world's clock is the
         // host's: `LentSim` hands it in, already advanced for this tick.
-        if self.runs(SimSystem::Clock) {
+        let reputation_days = if self.runs(SimSystem::Clock) {
             self.world_time = (self.world_time + 1) % 24000;
             // Monotonic counter — used by anything that needs an absolute
             // age check (Rubber tap cooldown, future replenishers).
             self.tick_counter = self.tick_counter.wrapping_add(1);
-        }
+            self.reputation_day.advance(self.tick_counter, 1).map_or(0, |pulse| pulse.days)
+        } else if let Some(owner) = self.lent_day_owner {
+            self.lent_day_consumer.consume(owner, self.tick_counter, self.run_id, self.lent_day_offer.take())
+        } else { 0 };
+        #[cfg(not(target_arch = "wasm32"))]
+        { self.advance_personal_timers(); self.decay_personal(reputation_days); }
+        #[cfg(target_arch = "wasm32")]
+        let _ = reputation_days;
         // C2a — a dusk starts the next night (once-a-night sleep).
         self.night_calendar.observe(self.world_time);
 
@@ -2565,12 +2625,31 @@ impl GameServer {
         tamed: bool,
         nearest: bool,
     ) {
+        let location = DeathLocation::from_world(&self.world, pos);
+        self.queue_kill_event_at(slot, generation, kind, location, tamed, nearest);
+    }
+
+    fn queue_kill_event_at(
+        &mut self,
+        slot: usize,
+        generation: u32,
+        kind: crate::mob::MobType,
+        location: DeathLocation,
+        tamed: bool,
+        nearest: bool,
+    ) {
         if !self.is_joiner_of_gen(slot, generation) {
             return;
         }
         #[cfg(not(target_arch = "wasm32"))]
-        self.credit_personal_kill(slot, kind, pos);
+        self.credit_personal_kill_in_village(slot, kind, location.village);
+        let pos = location.position;
         let sp = &mut self.players[slot];
+        // The wire effect also creates a Vow on the real client. That state
+        // is outside the common record, even after an exact common ACK.
+        if kind == crate::mob::MobType::Nostrich && !tamed {
+            sp.progression_tracked = false;
+        }
         sp.progression_credits = sp.progression_credits.saturating_add(1);
         self.pending_kill_events.push((
             slot,
@@ -2752,6 +2831,14 @@ impl GameServer {
     /// doesn't fail the save.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn try_save(&self) -> Result<(), String> {
+        self.try_save_selected(self.selected_local_personal.as_ref())
+    }
+
+    /// A role cut explicitly selects remote authority; routine saves retain
+    /// the unclaimed selected local record instead of saving a player shadow.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn try_save_selected(&self, local_personal: Option<&crate::personal_value::LocalPersonalSave>) -> Result<(), String> {
+        self.guard_gameplay_preparation_write(local_personal)?;
         let wname = self.world_name.clone();
         let dir = crate::save::world_dir(&wname);
         // A world saved by a newer build is never written (Spec 02 §8.4) — checked
@@ -3026,7 +3113,8 @@ impl GameServer {
             rigs: self.world.rigs.clone(),
             // #19 — index-aligned clip side table (see `WorldSave.rig_clips`).
             rig_clips: self.world.rigs.iter().map(|r| r.clip).collect(),
-            local_personal: None,
+            local_personal: local_personal.cloned(),
+            quest_world: crate::quest_npcs::capture(self.world.quest_scope, &self.ecs)?,
             exhibits: self.world.exhibits.clone(),
             composters: self
                 .world

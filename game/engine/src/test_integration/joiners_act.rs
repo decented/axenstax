@@ -21,8 +21,8 @@ use crate::mob_interact::InteractNote;
 use crate::protocol::{self, InteractKind, PlayerEventType, WireDamageCause};
 use crate::transport::{ChannelClientTransport, ClientTransport};
 
-use super::joiner_authority::join_guest;
-use super::lent_world::{join_guest_lent, start_lent};
+use super::joiner_authority::{send_guest_join, settle_chunk_push};
+use super::lent_world::start_lent;
 
 /// A valid x-only public key (secp256k1's generator point), so the joiner's
 /// pet-owner key is a real bech32 npub.
@@ -268,10 +268,23 @@ impl Rig {
 
     /// A guest joins and stands on the floor; returns its index in `joiners`.
     fn join(&mut self, name: &str) -> usize {
-        let (client, slot) = match self.host.as_mut() {
-            Some(host) => join_guest_lent(&mut self.hs, host, name),
-            None => join_guest(&mut self.hs, name),
-        };
+        let client = self.hs.attach_test_remote();
+        send_guest_join(&client, name);
+        self.tick(1);
+        let initial = crate::hosted_server::tests::initial_packets(&client);
+        assert_eq!(initial.sync.window_event, 1, "actual physical Sync1");
+        assert_eq!(initial.personal.window_event, 2, "actual initial Personal2");
+        let slot = initial.accept.player_index as usize;
+        crate::hosted_server::tests::install_initial_personal(&mut self.hs, &client, &initial, |hs| {
+            match self.host.as_mut() {
+                Some(host) => host.lend_tick(hs),
+                None => hs.tick(),
+            }
+        });
+        match self.host.as_mut() {
+            Some(host) => settle_chunk_push(&mut self.hs, &client, |hs| host.lend_tick(hs)),
+            None => settle_chunk_push(&mut self.hs, &client, HostedServer::tick),
+        }
         let mut world = match self.host.as_mut() {
             Some(host) => std::mem::replace(&mut host.world, crate::world::World::new()),
             None => std::mem::replace(&mut self.hs.server.world, crate::world::World::new()),
@@ -281,7 +294,13 @@ impl Rig {
             Some(host) => host.world = world,
             None => self.hs.server.world = world,
         }
-        self.joiners.push(Joiner { client, slot, inbox: Inbox::default(), seq: 0, input_seq: 0 });
+        self.joiners.push(Joiner {
+            client,
+            slot,
+            inbox: Inbox::default(),
+            seq: 0,
+            input_seq: 0,
+        });
         self.joiners.len() - 1
     }
 
@@ -606,6 +625,10 @@ fn a_dedicated_servers_kill_goes_to_the_killer_alone_and_drops_loot() {
     assert_eq!(kills[0].victim, protocol::EntityKind::Chicken);
     assert_eq!(kills[0].reason, protocol::kill_reason::LAST_HIT);
     assert!(rig.joiners[1].inbox.kills.is_empty(), "nobody else is credited");
+    let own = rig.hs.server.players[rig.joiners[0].slot].personal.as_ref().unwrap().record().unwrap();
+    let other = rig.hs.server.players[rig.joiners[1].slot].personal.as_ref().unwrap().record().unwrap();
+    assert_eq!(own.kills.iter().find(|(kind, _)| *kind == MobType::Chicken).map(|(_, count)| *count), Some(1), "actual LAST_HIT credits the same personal holder");
+    assert!(!other.kills.iter().any(|(kind, _)| *kind == MobType::Chicken));
     let items = rig.ecs().query::<&crate::entity::ItemEntity>().iter().count();
     assert!(items > 0, "the kill's loot drops as world items");
 }
@@ -622,6 +645,8 @@ fn an_unstamped_death_beside_a_joiner_is_that_joiners_as_the_nearest_player() {
     let kills = &rig.joiners[0].inbox.kills;
     assert_eq!(kills.len(), 1);
     assert_eq!(kills[0].reason, protocol::kill_reason::NEAREST, "credited as the nearest, not the hitter");
+    let record = rig.hs.server.players[rig.joiners[0].slot].personal.as_ref().unwrap().record().unwrap();
+    assert_eq!(record.kills.iter().find(|(kind, _)| *kind == MobType::Cow).map(|(_, count)| *count), Some(1), "NEAREST is a single common counter credit");
 }
 
 #[test]
@@ -641,8 +666,9 @@ fn a_lent_hosts_kill_by_a_joiner_goes_to_that_joiner_and_never_to_the_host() {
     assert_eq!(deaths.len(), 1);
     let crate::combat::MobDeath { kind, pos, attacker, .. } = deaths[0];
     assert_eq!(attacker, Some(rig.attacker(0)));
+    let location = crate::server::DeathLocation::from_world(rig.world_mut(), pos);
     let credited =
-        crate::server::route_client_kill(Some(&mut rig.hs.server), attacker, kind, pos, false, &[host_player]);
+        crate::server::route_client_kill(Some(&mut rig.hs.server), attacker, kind, location, false, &[host_player]);
     assert_eq!(credited, None, "the host's player is not credited with the joiner's kill");
 
     rig.tick(1);
@@ -652,18 +678,20 @@ fn a_lent_hosts_kill_by_a_joiner_goes_to_that_joiner_and_never_to_the_host() {
 
     // Nobody's hit: the nearest living player — the host's, beside it.
     assert_eq!(
-        crate::server::route_client_kill(Some(&mut rig.hs.server), None, kind, pos, false, &[host_player]),
+        crate::server::route_client_kill(Some(&mut rig.hs.server), None, kind, location, false, &[host_player]),
         Some(0)
     );
     // …and the joiner when the host's player is far off (review D2b LOW-5).
     let far_host = (rig.at + Vec3::new(400.0, 0.0, 0.0), false);
     assert_eq!(
-        crate::server::route_client_kill(Some(&mut rig.hs.server), None, kind, pos, false, &[far_host]),
+        crate::server::route_client_kill(Some(&mut rig.hs.server), None, kind, location, false, &[far_host]),
         None
     );
     rig.tick(1);
     assert_eq!(rig.joiners[0].inbox.kills.len(), 2);
     assert_eq!(rig.joiners[0].inbox.kills[1].reason, protocol::kill_reason::NEAREST);
+    let record = rig.hs.server.players[slot].personal.as_ref().unwrap().record().unwrap();
+    assert_eq!(record.kills.iter().find(|(kind, _)| *kind == MobType::Chicken).map(|(_, count)| *count), Some(2), "lent LAST_HIT and later NEAREST each credit only the joiner's holder");
 }
 
 /// Review D2b MEDIUM-1 — a joiner hits a cow and provokes a Bear, then
@@ -728,6 +756,8 @@ fn a_reused_slot_inherits_no_kill_credit_and_no_grudge() {
     rig.tick(2);
     assert!(rig.ecs().get::<&crate::combat::Health>(chicken).is_err());
     assert!(rig.joiners[b].inbox.kills.is_empty(), "an old generation's kill credits nobody");
+    let record = rig.hs.server.players[slot].personal.as_ref().unwrap().record().unwrap();
+    assert!(!record.kills.iter().any(|(kind, _)| matches!(kind, MobType::Cow | MobType::Chicken)), "released or retained stale-generation stamps cannot donate old credit into the new guest holder");
 }
 
 /// Review D2b MEDIUM-1 on a lending host: the departed joiner's cow dies in
@@ -751,13 +781,16 @@ fn a_departed_joiners_kill_credits_neither_the_host_nor_the_slots_next_joiner() 
     let crate::combat::MobDeath { kind, pos, attacker, .. } = deaths[0];
     assert_eq!(attacker, Some(crate::combat::Attacker::Departed));
     let host_beside = (pos + Vec3::new(0.3, 0.0, 0.0), false);
+    let location = crate::server::DeathLocation::from_world(rig.world_mut(), pos);
     assert_eq!(
-        crate::server::route_client_kill(Some(&mut rig.hs.server), attacker, kind, pos, false, &[host_beside]),
+        crate::server::route_client_kill(Some(&mut rig.hs.server), attacker, kind, location, false, &[host_beside]),
         None,
         "the host's player is not credited"
     );
     rig.tick(1);
     assert!(rig.joiners[b].inbox.kills.is_empty(), "nor the slot's new joiner");
+    let record = rig.hs.server.players[slot].personal.as_ref().unwrap().record().unwrap();
+    assert!(!record.kills.iter().any(|(kind, _)| *kind == MobType::Cow));
 }
 
 /// Review D2b MEDIUM-2 — a dedicated server runs no breeding, Leads or pet

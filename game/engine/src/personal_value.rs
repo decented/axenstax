@@ -10,7 +10,7 @@ pub struct PersonalContext {
     pub transfer: [u8; 16],
 }
 
-/// The selected world's local personal snapshot uses the exact canonical v3
+/// The selected world's local personal snapshot uses a known canonical v3/v4
 /// codec, bounded before allocation. It commits with that world's world.dat.
 #[derive(Clone, Serialize)]
 pub struct LocalPersonalSave(pub(crate) Vec<u8>);
@@ -37,9 +37,9 @@ impl<'de> Deserialize<'de> for LocalPersonalSave {
                     }
                     bytes.push(byte);
                 }
-                if bytes.first() != Some(&3) {
+                if !matches!(bytes.first(), Some(3 | 4)) {
                     return Err(serde::de::Error::custom(
-                        "personal snapshot is not canonical v3",
+                        "personal snapshot has an unsupported canonical version",
                     ));
                 }
                 Ok(LocalPersonalSave(bytes))
@@ -99,12 +99,23 @@ mod tests {
             bincode::deserialize::<LocalPersonalSave>(&huge).is_err(),
             "oversized sequence reached allocation"
         );
-        for bytes in [vec![], vec![1], vec![2], vec![4]] {
+        for bytes in [vec![], vec![1], vec![2], vec![5]] {
             assert!(
                 bincode::deserialize::<LocalPersonalSave>(&bincode::serialize(&bytes).unwrap())
                     .is_err(),
                 "unknown local record became an absent baseline"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod supported_current_validation {
+    #[test]
+    fn d2c3_supported_wrapped_v4_still_requires_a_complete_canonical_body() {
+        let malformed = vec![4u8];
+        let wrapper = bincode::deserialize::<super::LocalPersonalSave>(&bincode::serialize(&malformed).unwrap()).unwrap();
+        assert_eq!(wrapper.0, malformed, "the bounded wrapper recognises the supported version only");
+        assert!(crate::joiner_save::JoinerSave::decode(&wrapper.0).is_err(), "malformed current authority cannot be treated as a fresh seed");
     }
 }

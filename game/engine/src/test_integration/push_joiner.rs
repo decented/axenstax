@@ -143,6 +143,7 @@ impl Joiner {
         };
         j.take_in();
         j.slot = j.rc.player_index().expect("joined") as usize;
+        crate::hosted_server::tests::install_client_initial_personal(&mut j.rc, hs, j.slot, &mut tick);
         j
     }
 
@@ -231,6 +232,7 @@ impl Joiner {
                 IntakeStep::RebaseFence(cut) => self.rc.apply_recovery_fence(cut),
                 IntakeStep::ActionReceipt(receipt) => self.rc.apply_action_receipt(receipt),
                 IntakeStep::PackResult(_) => panic!("block-push fixture received an unexpected pack result"),
+                IntakeStep::QuestResult(_) => panic!("block-push fixture received an unexpected quest result"),
                 IntakeStep::Chunk(p) => {
                     self.stream_bytes += protocol::serialize_packet(protocol::PacketType::ChunkData, &*p).len();
                     if let Some(col) = self.intake.generate_before_chunk(&p, &self.loaded, &self.world) {

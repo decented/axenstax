@@ -202,6 +202,7 @@ pub mod handover;
 mod handover_game;
 #[cfg(not(target_arch = "wasm32"))]
 mod personal_sync;
+mod personal_inbox;
 mod world_room;
 #[cfg(not(target_arch = "wasm32"))]
 mod kithmoot_keeper;
@@ -269,6 +270,11 @@ mod inventory_sync;
 mod joiner_save;
 mod saved_item_slot;
 mod personal_value;
+pub(crate) mod progression;
+pub(crate) mod gameplay_attachment;
+#[cfg(not(target_arch = "wasm32"))]
+mod gameplay_preparation;
+pub(crate) mod quest_npcs;
 mod plan_store;
 mod bear_ai;
 mod hyena_ai;
@@ -339,7 +345,13 @@ mod ravine_gen;
 mod mineshaft_gen;
 mod villager_ui;
 mod quest;
+mod quest_play;
+mod quest_wire;
+mod quest_state;
+mod quest_client;
+mod quest_native;
 mod reputation;
+mod reputation_day;
 mod economy;
 mod raid;
 mod spawn_pref;
@@ -1082,6 +1094,9 @@ pub(crate) struct GameState {
     /// World-time advance per tick. 1 = standard 20-min day; 4 = 5-min alpha day.
     /// Configurable at runtime via `/time speed <n>`.
     pub(crate) world_time_step: u32,
+    /// Runtime-only natural reputation day; never a saved player or phase clock.
+    pub(crate) reputation_day: crate::reputation_day::DayClock,
+    pub(crate) reputation_day_offer: Option<crate::reputation_day::DayOffer>,
     /// Monotonic tick counter — never wraps. Used for UI timestamps where
     /// `world_time` (5-min wrap on alpha) would alias.
     pub(crate) tick_counter: u64,
@@ -1306,7 +1321,12 @@ pub(crate) struct GameState {
     pub(crate) handover: Option<crate::handover_game::Handover>,
     /// Imported personal identity selected at world load, latched for saves.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) local_personal: Option<crate::joiner_save::PersonalBinding>,
+    pub(crate) local_personal: Option<crate::progression::GameplayBinding>,
+    /// Non-admitted scope retry provenance, reset at world entry and exit.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) gameplay_preparation: Option<crate::gameplay_preparation::ScopePreparation>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) gameplay_preparation_generation: u64,
     /// The host this joined client verified at join (online play's verified
     /// answer and its runtime). `None` for a join that verified no host.
     #[cfg(not(target_arch = "wasm32"))]
@@ -1911,6 +1931,8 @@ impl GameState {
             // "time is moving too fast." Runtime override remains available
             // via `/time speed <n>` for testing.
             world_time_step: 1,
+            reputation_day: crate::reputation_day::DayClock::new(),
+            reputation_day_offer: None,
             tick_counter: 0,
             pop_epoch_id: 0,
             chat: chat_ui::ChatState::new(),
@@ -2009,6 +2031,10 @@ impl GameState {
             handover: None,
             #[cfg(not(target_arch = "wasm32"))]
             local_personal: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            gameplay_preparation: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            gameplay_preparation_generation: 0,
             #[cfg(not(target_arch = "wasm32"))]
             joined_host: None,
             #[cfg(not(target_arch = "wasm32"))]

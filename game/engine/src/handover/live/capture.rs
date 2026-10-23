@@ -4,7 +4,7 @@
 //! correction-debt machinery: its record is complete with nothing owed).
 //! Capture writes nothing: an aborted handover leaves this machine as it was.
 use super::eligibility::Refusal;
-use crate::handover::personal::{LocalRestore, PersonalRecord, RecordContext};
+use crate::handover::personal::{PersonalRecord, RecordContext};
 use crate::player_slot::PlayerSlot;
 
 /// The seat's window + vitals in exactly the sidecar encoding a joiner's
@@ -24,27 +24,12 @@ pub fn local0_sidecar(slot: &PlayerSlot, run_id: [u8; 16]) -> Result<Vec<u8>, Re
 
 /// The seat's world-local progression and owner-only local restore.
 pub fn local0_progress(slot: &PlayerSlot, context: RecordContext) -> Result<Vec<u8>, Refusal> {
-    let locks = slot
-        .inventory
-        .locked_indices()
-        .iter()
-        .fold(0u64, |m, i| if *i < 36 { m | 1 << i } else { m });
-    let local = LocalRestore {
-        pos: slot.player.pos.to_array(),
-        yaw: slot.camera.yaw,
-        pitch: slot.camera.pitch,
-        hotbar: slot.hotbar_slot.min(255) as u8,
-        locks,
-    };
-    PersonalRecord::from_maps(
-        context,
-        slot.reputation.per_village.iter(),
-        slot.kill_counter.iter(),
-        slot.bounties_claimed.iter(),
-        Some(local),
-    )
-    .and_then(|r| r.encode())
-    .map_err(|_| Refusal("Your village or hunting progress is too large or malformed to move. Nothing was changed."))
+    let record = crate::progression::GameplayRecord::from_slot(
+        crate::progression::GameplayContext::Imported(context), slot,
+    ).map_err(|_| Refusal("Your progression could not be captured without loss."))?;
+    PersonalRecord::from_gameplay(context, &record)
+        .and_then(|record| record.encode())
+        .map_err(|_| Refusal("Your village or hunting progress is too large or malformed to move. Nothing was changed."))
 }
 
 /// A recipient whose progression is proven default for this session.

@@ -160,7 +160,7 @@ impl Manifest {
                     }
                 }
                 MemberKind::Sidecar | MemberKind::Progression => {
-                    if m.length > 65536 || m.schema != 1 {
+                    if m.length > 65536 || match m.kind { MemberKind::Sidecar => m.schema != 1, MemberKind::Progression => ![1, 2].contains(&m.schema), _ => true } {
                         return Err(Error::Invalid("participant schema/size"));
                     }
                     let name = m

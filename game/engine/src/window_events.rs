@@ -42,12 +42,20 @@
 //! it holds edits it has not sent yet, so every edit of an input was made at
 //! the count the input reports (`GameState::apply_window_inbox`).
 
-mod strict;
 mod pack;
-pub use pack::{admit_pack_staged, pack_canonical_window, pack_raw_marker, prepare_pack_events, PackWindowStage};
-pub use strict::{admit_staged, stage_strict_click, stage_strict_edit, stage_strict_effects, stage_strict_refused_autofill, strict_effective_marker, strict_leaves_no_unpaid_obligation, strict_raw_marker, prepare_strict_events, reserve_strict_replace, StrictStageError};
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod personal_prefix;
+mod strict;
+pub use pack::{PackWindowStage, admit_pack_staged, pack_canonical_window, pack_raw_marker, prepare_pack_events};
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use strict::PreparedEvents;
 #[cfg(test)]
 pub use strict::strict_replace_fits;
+pub use strict::{
+    StrictStageError, admit_staged, prepare_strict_events, reserve_strict_replace, stage_strict_click,
+    stage_strict_edit, stage_strict_effects, stage_strict_refused_autofill, strict_effective_marker,
+    strict_leaves_no_unpaid_obligation, strict_raw_marker,
+};
 
 use std::collections::VecDeque;
 
@@ -81,11 +89,23 @@ pub const RECENT_GRANTS: usize = 64;
 /// back again, round and round.
 pub const UNFIT_HOLD_TICKS: u64 = 100;
 
+/// Captured at reward authorisation. A later death, despawn or movement must
+/// never substitute another giver or move genuine overflow to the actor.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RewardOrigin {
+    pub npc: crate::progression::GameplayId,
+    pub position: glam::Vec3,
+}
+
 /// One change the server makes to a joiner's window by itself.
 #[derive(Clone, Debug)]
 pub enum WindowEvent {
     /// `InventoryGrant`: the stack is added (`Inventory::add_item`).
     Grant(ItemStack),
+    RewardGrant {
+        stack: ItemStack,
+        origin: RewardOrigin,
+    },
     /// Whole truth after join or death (`InventorySync`): the window, and
     /// the correction debt the copy owes from here (OC, v88): a join's is
     /// the restored record's (or a fresh joiner's effective debt), a death's
@@ -93,10 +113,18 @@ pub enum WindowEvent {
     /// carries, the same send-time snapshot: a Strict copy's apply sets
     /// `sp.station` to it (a stale config op served before it is overwritten
     /// on both copies, as the client adopts the packet's).
-    Replace { window: Box<EffectiveWindow>, debt: crate::container_window::CorrectionDebt, station: crate::window::Station },
+    Replace {
+        window: Box<EffectiveWindow>,
+        debt: crate::container_window::CorrectionDebt,
+        station: crate::window::Station,
+    },
     /// A sequential unpredicted pack result. Unlike a lifecycle Replace,
     /// this leaves unrelated correction history and configuration intact.
-    PackCanonical { actor_respawns: u32, window: Box<EffectiveWindow>, debt: crate::container_window::CorrectionDebt },
+    PackCanonical {
+        actor_respawns: u32,
+        window: Box<EffectiveWindow>,
+        debt: crate::container_window::CorrectionDebt,
+    },
     /// A numbered entity cargo view; it changes no personal holding.
     PackView,
     /// Exact imported progression fence; applying it changes no holding.
@@ -104,13 +132,23 @@ pub enum WindowEvent {
     PersonalSync(Box<crate::protocol::PersonalSnapshot>),
     /// An accepted request's owed take (`joiner_actions::take_owed_window`):
     /// `n` of `item`, from `slot` first. `how` ends the shortfall's log line.
-    Take { slot: usize, item: Item, n: u8, how: &'static str },
+    Take {
+        slot: usize,
+        item: Item,
+        n: u8,
+        how: &'static str,
+    },
     /// `hits` hits wear every worn armour piece once each
     /// (`window::wear_armour`).
-    WearArmour { hits: u8 },
+    WearArmour {
+        hits: u8,
+    },
     /// An accepted swing wears `tool` where it now is
     /// (`joiner_actions::where_now` from `slot`).
-    WearWeapon { slot: usize, tool: Tool },
+    WearWeapon {
+        slot: usize,
+        tool: Tool,
+    },
     /// C3b-fix-a (v78, C-M1) — a container view sent to the joiner (an
     /// opened container, or a push of what others changed): it changes the
     /// server's model of the client's mirror (`window_ops::ContainerViews`)
@@ -140,6 +178,7 @@ struct Waiting {
 struct AppliedGrant {
     seq: u32,
     stack: ItemStack,
+    origin: Option<RewardOrigin>,
     /// What the server's copy of the window held of it.
     landed: u8,
     /// A `GrantUnfit` named it already (one per grant).
@@ -238,27 +277,69 @@ impl WindowEvents {
         self.waiting.capacity()
     }
 
-    pub fn last_number(&self) -> u32 { self.last_sent }
+    pub fn last_number(&self) -> u32 {
+        self.last_sent
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn applied_number(&self) -> u32 {
+        self.last_applied
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn fold_only_personal(&mut self, ack: crate::protocol::PersonalAck) -> bool {
+        if self.waiting.len() != 1
+            || !self.forced_corrections.is_empty()
+            || !self.debt.is_empty()
+            || self.death_replace.is_some()
+            || !self.retired_overflow.is_empty()
+        {
+            return false;
+        }
+        let Some(waiting) = self.waiting.front() else {
+            return false;
+        };
+        if waiting.seq != ack.window_event
+            || !matches!(&waiting.event,
+            WindowEvent::PersonalSync(snapshot) if crate::personal_sync::acknowledgement(snapshot) == ack)
+        {
+            return false;
+        }
+        // This exact stored event has no physical or debt effect. No ordinary
+        // event, correction, timeout or gameplay callback runs in this fold.
+        self.waiting.pop_front();
+        self.last_applied = ack.window_event;
+        true
+    }
+
     /// A whole-window replacement (join or death sync) is sent and not yet
     /// applied: the window at any earlier boundary is about to be replaced.
-    pub fn replace_waiting(&self) -> bool { self.last_replace > self.last_applied }
+    pub fn replace_waiting(&self) -> bool {
+        self.last_replace > self.last_applied
+    }
     /// C3d run 5 — was a window base `base` (a client's `events_applied`)
     /// made before the latest whole-window `Replace` (join or death sync)?
     /// Then what the client predicted on it is overwritten when it applies
     /// that `Replace`.
-    pub fn predates_replace(&self, base: u32) -> bool { base < self.last_replace }
+    pub fn predates_replace(&self, base: u32) -> bool {
+        base < self.last_replace
+    }
     /// C3d (run 4) — take the number of a Take a Strict copy applied short
     /// (`apply_front`), if one was; the caller tears the session down.
-    pub fn take_strict_short_take(&mut self) -> Option<u32> { self.strict_short_take.take() }
+    pub fn take_strict_short_take(&mut self) -> Option<u32> {
+        self.strict_short_take.take()
+    }
 
     /// C3d tests — shrink the waiting deque to what it holds, so a
     /// reservation that grows it is visible (and one given back is too).
     #[cfg(test)]
-    pub fn shrink_waiting_to_fit(&mut self) { self.waiting.shrink_to_fit(); }
+    pub fn shrink_waiting_to_fit(&mut self) {
+        self.waiting.shrink_to_fit();
+    }
     pub(crate) fn has_unreturned_grant(&self, event: u32) -> bool {
         self.grants.iter().any(|grant| grant.seq == event && !grant.returned)
     }
-    pub fn accepts_boundary(&self, reported: u32) -> bool { reported >= self.last_applied && reported <= self.last_sent }
+    pub fn accepts_boundary(&self, reported: u32) -> bool {
+        reported >= self.last_applied && reported <= self.last_sent
+    }
 
     /// World handover (pre-obligation-carrier base): nothing is outstanding
     /// between the server's copy and the client for this window — no event
@@ -354,7 +435,9 @@ fn apply_to(parts: &mut Parts, debt: &mut crate::container_window::CorrectionDeb
     match event {
         WindowEvent::Replace { window: w, debt: carried, .. }
         | WindowEvent::PackCanonical { window: w, debt: carried, .. } => {
-            for i in 0..36 { parts.inv.set_slot(i, w.inv.slot(i).cloned()); }
+            for i in 0..36 {
+                parts.inv.set_slot(i, w.inv.slot(i).cloned());
+            }
             // C3d run 6 — the lock mask travels with the replacement (the
             // client installs the same); auto-refill stays the copy's own.
             parts.inv.set_locked_from(&w.inv.locked_indices());
@@ -364,7 +447,7 @@ fn apply_to(parts: &mut Parts, debt: &mut crate::container_window::CorrectionDeb
             *debt = carried.clone();
             Effect::Viewed
         }
-        WindowEvent::Grant(stack) => {
+        WindowEvent::Grant(stack) | WindowEvent::RewardGrant { stack, .. } => {
             let rest = parts.inv.add_item(stack.clone()).map_or(0, |r| r.count);
             Effect::Granted { landed: stack.count.saturating_sub(rest) }
         }
@@ -387,9 +470,9 @@ fn apply_to(parts: &mut Parts, debt: &mut crate::container_window::CorrectionDeb
         WindowEvent::ContainerView(_) | WindowEvent::PackView => Effect::Viewed,
         #[cfg(not(target_arch = "wasm32"))]
         WindowEvent::PersonalSync(_) => Effect::Viewed,
-        WindowEvent::Correction(c) => {
-            Effect::Corrected(c.own.as_ref().map(|own| debt.apply(parts.inv, parts.grid, parts.cursor, parts.armour, own)))
-        }
+        WindowEvent::Correction(c) => Effect::Corrected(
+            c.own.as_ref().map(|own| debt.apply(parts.inv, parts.grid, parts.cursor, parts.armour, own)),
+        ),
     }
 }
 
@@ -403,7 +486,9 @@ pub fn queue(sp: &mut ServerPlayer, event: WindowEvent, now: u64) -> u32 {
     let ev = &mut sp.window_events;
     ev.last_sent = ev.last_sent.wrapping_add(1);
     ev.tally.sent = ev.tally.sent.saturating_add(1);
-    if matches!(event, WindowEvent::Replace { .. }) { ev.last_replace = ev.last_sent; }
+    if matches!(event, WindowEvent::Replace { .. }) {
+        ev.last_replace = ev.last_sent;
+    }
     ev.waiting.push_back(Waiting { seq: ev.last_sent, sent: now, event });
     ev.last_sent
 }
@@ -415,7 +500,9 @@ pub fn apply_through(sp: &mut ServerPlayer, acked: u32, now: u64) {
     while sp.window_events.waiting.front().is_some_and(|w| w.seq <= acked) {
         apply_front(sp, now, false);
     }
-    if sp.window_events.death_replace.is_some_and(|n| acked >= n) { sp.window_events.death_replace = None; }
+    if sp.window_events.death_replace.is_some_and(|n| acked >= n) {
+        sp.window_events.death_replace = None;
+    }
     // C3b-fix-c (B-L6) — a forced correction the client has now applied
     // leaves the phantom ledger.
     sp.window_events.forced_corrections.retain(|(seq, _)| *seq > acked);
@@ -429,12 +516,14 @@ pub(crate) struct GrantOverflow {
     pub event: u32,
     pub stack: ItemStack,
     pub grave: Option<(i32, i32, i32)>,
+    pub origin: Option<RewardOrigin>,
 }
 
 fn overflow(ev: &WindowEvents, g: &AppliedGrant) -> Option<GrantOverflow> {
     let n = g.stack.count.saturating_sub(g.landed);
     (!g.returned && n > 0 && !matches!(g.stack.item, Item::Plan(_))).then(|| GrantOverflow {
         event: g.seq,
+        origin: g.origin,
         stack: ItemStack { item: g.stack.item.clone(), count: n },
         grave: ev.grave_grants.iter().find(|(n, _)| *n == g.seq).map(|(_, cell)| *cell),
     })
@@ -443,7 +532,8 @@ fn overflow(ev: &WindowEvents, g: &AppliedGrant) -> Option<GrantOverflow> {
 fn remember_grant(ev: &mut WindowEvents, grant: AppliedGrant) {
     if ev.grants.len() >= RECENT_GRANTS
         && let Some(old) = ev.grants.pop_front()
-        && let Some(unfit) = overflow(ev, &old) {
+        && let Some(unfit) = overflow(ev, &old)
+    {
         ev.retired_overflow.push(unfit);
     }
     ev.grants.push_back(grant);
@@ -458,9 +548,13 @@ pub(crate) fn settle_terminal_grants(sp: &mut ServerPlayer, now: u64) -> Vec<Gra
         returned.extend(take_retired_overflow(sp));
         let ev = &mut sp.window_events;
         for g in &ev.grants {
-            if let Some(unfit) = overflow(ev, g) { returned.push(unfit); }
+            if let Some(unfit) = overflow(ev, g) {
+                returned.push(unfit);
+            }
         }
-        for g in &mut ev.grants { g.returned = true; }
+        for g in &mut ev.grants {
+            g.returned = true;
+        }
     }
     let last = sp.window_events.last_number();
     let mut returned = Vec::new();
@@ -476,12 +570,7 @@ pub(crate) fn settle_terminal_grants(sp: &mut ServerPlayer, now: u64) -> Vec<Gra
 /// The safety valve: apply joiner `sp`'s events still waiting
 /// [`EVENT_ACK_TIMEOUT_TICKS`] after they were sent (tallied `forced`).
 pub fn apply_overdue(sp: &mut ServerPlayer, now: u64) {
-    while sp
-        .window_events
-        .waiting
-        .front()
-        .is_some_and(|w| now.saturating_sub(w.sent) >= EVENT_ACK_TIMEOUT_TICKS)
-    {
+    while sp.window_events.waiting.front().is_some_and(|w| now.saturating_sub(w.sent) >= EVENT_ACK_TIMEOUT_TICKS) {
         apply_front(sp, now, true);
     }
 }
@@ -495,21 +584,31 @@ fn apply_front(sp: &mut ServerPlayer, now: u64, forced: bool) {
     }
     // A stale pack fence still retires its number, but cannot reinstall
     // holdings or debt from a body which has already respawned.
-    if matches!(&w.event, WindowEvent::PackCanonical { actor_respawns, .. } if *actor_respawns != sp.respawns) { return; }
+    if matches!(&w.event, WindowEvent::PackCanonical { actor_respawns, .. } if *actor_respawns != sp.respawns) {
+        return;
+    }
     // C3d run 10 (run-8 review LOW-D) — a Mirror copy keeps its own lock mask
     // across a `Replace`, as its client does (run 7) and as `bdd4fe87` did; a
     // lock toggled before the join sync applied is never wiped.
     let strict = sp.server_simulated && sp.inventory_mode == crate::action_identity::InventoryMode::Strict;
-    let mirror_locks = (!strict && matches!(w.event, WindowEvent::Replace { .. } | WindowEvent::PackCanonical { .. })).then(|| sp.inventory.locked_indices());
+    let mirror_locks = (!strict && matches!(w.event, WindowEvent::Replace { .. } | WindowEvent::PackCanonical { .. }))
+        .then(|| sp.inventory.locked_indices());
     let mut parts =
         Parts { inv: &mut sp.inventory, armour: &mut sp.armour, cursor: &mut sp.cursor, grid: &mut sp.craft_grid };
     let effect = apply_to(&mut parts, &mut sp.window_events.debt, &w.event);
-    if let Some(locks) = mirror_locks { sp.inventory.set_locked_from(&locks); }
+    if let Some(locks) = mirror_locks {
+        sp.inventory.set_locked_from(&locks);
+    }
     match (effect, w.event) {
-        (Effect::Granted { landed }, WindowEvent::Grant(stack)) => {
+        (Effect::Granted { landed }, event @ (WindowEvent::Grant(_) | WindowEvent::RewardGrant { .. })) => {
+            let (stack, origin) = match event {
+                WindowEvent::Grant(stack) => (stack, None),
+                WindowEvent::RewardGrant { stack, origin } => (stack, Some(origin)),
+                _ => unreachable!("matched grant"),
+            };
             let overflow = stack.count.saturating_sub(landed);
             sp.possession.grant_overflow = sp.possession.grant_overflow.saturating_add(u32::from(overflow));
-            remember_grant(&mut sp.window_events, AppliedGrant { seq: w.seq, stack, landed, returned: false });
+            remember_grant(&mut sp.window_events, AppliedGrant { seq: w.seq, stack, origin, landed, returned: false });
         }
         (Effect::Took { taken }, WindowEvent::Take { item, n, how, .. }) if taken < n => {
             // C3d (run 4) — Strict queues only Takes its window can pay
@@ -519,7 +618,8 @@ fn apply_front(sp: &mut ServerPlayer, now: u64, forced: bool) {
             if sp.server_simulated && sp.inventory_mode == crate::action_identity::InventoryMode::Strict {
                 log::error!(
                     "Strict inventory invariant breached: {}'s window event {} took {taken} of {n} × {item:?} {how}",
-                    sp.display_name, w.seq,
+                    sp.display_name,
+                    w.seq,
                 );
                 sp.window_events.strict_short_take.get_or_insert(w.seq);
                 return;
@@ -537,7 +637,9 @@ fn apply_front(sp: &mut ServerPlayer, now: u64, forced: bool) {
             sp.window_events.forced_corrections.clear();
             // C3d run 8 (review LOW-2) — Strict only: a Mirror client keeps its
             // own station (run 7), so its server copy does too.
-            if strict { sp.station = station; }
+            if strict {
+                sp.station = station;
+            }
         }
         (Effect::Weapon(check), _) => sp.possession.note_wear(check),
         (Effect::Viewed, WindowEvent::ContainerView(view)) => view.apply(&mut sp.container_sent.seen),
@@ -587,7 +689,8 @@ pub fn note_correction_short(sp: &mut ServerPlayer, short: &[(Item, u32)], now: 
 /// tally a take that fell short ([`note_correction_short`]) and a give that
 /// paid a debt ([`note_correction_paid`], C3b-fix-e L4).
 pub fn apply_own_now(sp: &mut ServerPlayer, own: &crate::container_window::ItemDelta, now: u64) {
-    let applied = sp.window_events.debt.apply(&mut sp.inventory, &mut sp.craft_grid, &mut sp.cursor, &mut sp.armour, own);
+    let applied =
+        sp.window_events.debt.apply(&mut sp.inventory, &mut sp.craft_grid, &mut sp.cursor, &mut sp.armour, own);
     note_correction_short(sp, &applied.short, now);
     note_correction_paid(sp, &applied.paid);
     note_debt_bounds(sp, applied.saturated);
@@ -657,7 +760,10 @@ fn note_correction_gives(sp: &mut ServerPlayer, seq: u32, c: &crate::window_ops:
                 None => 0,
             },
         };
-        remember_grant(&mut sp.window_events, AppliedGrant { seq, stack: g.clone(), landed: g.count - unfit, returned: false });
+        remember_grant(
+            &mut sp.window_events,
+            AppliedGrant { seq, stack: g.clone(), origin: None, landed: g.count - unfit, returned: false },
+        );
     }
 }
 
@@ -673,12 +779,16 @@ fn note_correction_gives(sp: &mut ServerPlayer, seq: u32, c: &crate::window_ops:
 /// still holds the phantom.
 pub fn phantom(sp: &ServerPlayer) -> Vec<(Item, u32)> {
     let mut net: Vec<(Item, i64)> = Vec::new();
-    let replace = sp.window_events.waiting.iter().rev().find(|w| matches!(w.event, WindowEvent::Replace { .. })).map(|w| w.seq);
-    let waiting = sp.window_events.waiting.iter().filter(|w| replace.is_none_or(|n| w.seq > n)).filter_map(|w| match &w.event {
-        WindowEvent::Correction(c) => Some(&c.client),
-        _ => None,
-    });
-    for client in sp.window_events.forced_corrections.iter().filter(|_| replace.is_none()).map(|(_, d)| d).chain(waiting) {
+    let replace =
+        sp.window_events.waiting.iter().rev().find(|w| matches!(w.event, WindowEvent::Replace { .. })).map(|w| w.seq);
+    let waiting =
+        sp.window_events.waiting.iter().filter(|w| replace.is_none_or(|n| w.seq > n)).filter_map(|w| match &w.event {
+            WindowEvent::Correction(c) => Some(&c.client),
+            _ => None,
+        });
+    for client in
+        sp.window_events.forced_corrections.iter().filter(|_| replace.is_none()).map(|(_, d)| d).chain(waiting)
+    {
         for (item, n) in client.counts() {
             match net.iter_mut().find(|(i, _)| i == &item) {
                 Some((_, m)) => *m += n,
@@ -747,10 +857,17 @@ pub fn effective_window_and_debt(sp: &ServerPlayer) -> EffectiveFold {
     let mut debt = sp.window_events.debt.clone();
     let mut saturated = false;
     if !sp.window_events.waiting.is_empty() {
-        let mut parts =
-            Parts { inv: &mut window.inv, armour: &mut window.armour, cursor: &mut window.cursor, grid: &mut window.grid };
+        let mut parts = Parts {
+            inv: &mut window.inv,
+            armour: &mut window.armour,
+            cursor: &mut window.cursor,
+            grid: &mut window.grid,
+        };
         for ev in &sp.window_events.waiting {
-            if matches!(&ev.event, WindowEvent::PackCanonical { actor_respawns, .. } if *actor_respawns != sp.respawns) { continue; }
+            if matches!(&ev.event, WindowEvent::PackCanonical { actor_respawns, .. } if *actor_respawns != sp.respawns)
+            {
+                continue;
+            }
             if let Effect::Corrected(Some(a)) = apply_to(&mut parts, &mut debt, &ev.event) {
                 saturated |= a.saturated;
             }
@@ -855,6 +972,12 @@ pub fn return_unfit(sp: &mut ServerPlayer, event: u32, count: u8, now: u64) -> O
     Some(ItemStack { item, count: backed })
 }
 
+/// The original giver is metadata in the SAME applied-grant ledger. Looking
+/// it up never creates entitlement; `return_unfit` remains the once-only gate.
+pub(crate) fn reward_origin(sp: &ServerPlayer, event: u32) -> Option<RewardOrigin> {
+    sp.window_events.grants.iter().find(|grant| grant.seq == event).and_then(|grant| grant.origin)
+}
+
 /// C3b-fix-b (B-M2) — put the stack [`return_unfit`] gave back on the ground
 /// at joiner `player_index`'s feet, thrown like its own Q-drop: it is the
 /// dropper, so it can't take it again for `ITEM_DROP_PICKUP_DELAY_TICKS` (a
@@ -890,19 +1013,43 @@ impl InboxItem {
     /// The window event this item is, 0 for none.
     pub fn event(&self) -> u32 {
         match self {
-            InboxItem::Outcome(RequestOutcome::Interact(o)) => o.window_event,
-            InboxItem::Outcome(RequestOutcome::Item(o)) => o.window_event,
-            // C3b-fix-a (v78) — every container view is an event: an opened
-            // mirror (0 for a refusal), a push, a correction.
-            InboxItem::Outcome(RequestOutcome::SlotSet(set)) => set.window_event,
-            InboxItem::Outcome(RequestOutcome::Sync(set)) => set.window_event,
-            InboxItem::Outcome(RequestOutcome::Pack(packet)) => packet.window_event,
-            InboxItem::Outcome(RequestOutcome::PackView(packet)) => packet.window_event,
-            #[cfg(not(target_arch = "wasm32"))]
-            InboxItem::Outcome(RequestOutcome::PersonalSync { window_event, .. }) => *window_event,
-            InboxItem::Outcome(RequestOutcome::ContainerOpened(o)) => o.window_event,
+            InboxItem::Outcome(outcome) => outcome_event(outcome),
             InboxItem::Grant(g) => g.window_event,
             InboxItem::ArmourWorn { event, .. } => *event,
+        }
+    }
+}
+
+fn outcome_event(outcome: &RequestOutcome) -> u32 {
+    match outcome {
+        RequestOutcome::Interact(packet) => packet.window_event,
+        RequestOutcome::Item(packet) => packet.window_event,
+        RequestOutcome::SlotSet(packet) => packet.window_event,
+        RequestOutcome::Sync(packet) => packet.window_event,
+        RequestOutcome::Pack(packet) => packet.window_event,
+        RequestOutcome::Quest(packet) => packet.window_event,
+        RequestOutcome::QuestView(packet) => packet.window_event,
+        RequestOutcome::PackView(packet) => packet.window_event,
+        RequestOutcome::PersonalSync { window_event, .. } => *window_event,
+        RequestOutcome::ContainerOpened(packet) => packet.window_event,
+    }
+}
+
+/// A cost carrier can leave the world FIFO after higher metadata was polled.
+/// Sort only positive positions: event-0 metadata keeps its original place,
+/// equal numbers keep arrival order, and the existing allocation is unchanged.
+fn order_numbered<T>(items: &mut [T], event: impl Fn(&T) -> u32) {
+    for index in 0..items.len() {
+        if event(&items[index]) == 0 {
+            continue;
+        }
+        let mut at = index;
+        while let Some(previous) = (0..at).rev().find(|&pos| event(&items[pos]) != 0) {
+            if event(&items[previous]) <= event(&items[at]) {
+                break;
+            }
+            items.swap(previous, at);
+            at = previous;
         }
     }
 }
@@ -910,12 +1057,16 @@ impl InboxItem {
 /// A joined client's window-event carriers not applied yet, and the
 /// `StateUpdate` acknowledgement that waits with them (its request claims
 /// must not end before their outcomes are applied, joiner_actions N4).
-/// `RemoteClient` decodes them into one queue per kind, each in arrival
-/// order; [`Self::take_ordered`] puts them back into the one order they
-/// arrived in by their event numbers (the server numbers and sends them in
-/// one order, on one ordered stream).
+/// `RemoteClient` decodes them into one queue per kind. World-FIFO carriers
+/// can enter after higher metadata that was already polled; [`Self::take_ordered`]
+/// normalises numbered positions before merging the queues. Unnumbered
+/// metadata retains its place among carriers of the same kind.
 #[derive(Debug, Default)]
 pub struct WindowInbox {
+    /// Sealed provenance for parked-only Personal markers. Ordinary carriers
+    /// never mint a parked capability; no snapshot/body is duplicated here.
+    #[cfg(not(target_arch = "wasm32"))]
+    personal_fences: Vec<crate::personal_inbox::PersonalFenceIdentity>,
     outcomes: Vec<RequestOutcome>,
     grants: Vec<InventoryGrantPacket>,
     armour: Vec<(u8, u32)>,
@@ -931,28 +1082,97 @@ pub struct WindowInbox {
 pub(crate) fn outcome_owned_bytes(outcome: &RequestOutcome) -> usize {
     use std::mem::size_of;
     match outcome {
-        RequestOutcome::ContainerOpened(packet) => packet.slots.capacity().saturating_mul(size_of::<crate::protocol::WireSlot>()),
-        RequestOutcome::SlotSet(packet) => packet.sets.capacity().saturating_mul(size_of::<(crate::protocol::WireWindowSlot, crate::protocol::WireSlot)>())
+        RequestOutcome::ContainerOpened(packet) => {
+            packet.slots.capacity().saturating_mul(size_of::<crate::protocol::WireSlot>())
+        }
+        RequestOutcome::SlotSet(packet) => packet
+            .sets
+            .capacity()
+            .saturating_mul(size_of::<(crate::protocol::WireWindowSlot, crate::protocol::WireSlot)>())
             .saturating_add(packet.take.capacity().saturating_mul(size_of::<(u8, crate::protocol::WireStack)>()))
             .saturating_add(packet.give.capacity().saturating_mul(size_of::<crate::protocol::WireStack>())),
-        RequestOutcome::Sync(packet) => packet.slots.capacity().saturating_mul(size_of::<(crate::protocol::WireWindowSlot, crate::protocol::WireSlot)>())
+        RequestOutcome::Sync(packet) => packet
+            .slots
+            .capacity()
+            .saturating_mul(size_of::<(crate::protocol::WireWindowSlot, crate::protocol::WireSlot)>())
             .saturating_add(packet.owed.capacity().saturating_mul(size_of::<(crate::protocol::WireStack, u32)>())),
         RequestOutcome::Pack(packet) => packet.owned_bytes(),
+        RequestOutcome::Quest(packet) => packet.owned_bytes(),
+        RequestOutcome::QuestView(packet) => packet.owned_bytes(),
         RequestOutcome::PackView(packet) => packet.owned_bytes(),
         RequestOutcome::Interact(_) | RequestOutcome::Item(_) => 0,
-        #[cfg(not(target_arch = "wasm32"))]
-        RequestOutcome::PersonalSync { .. } => 0, // Body ownership stays in personal_sync::Inbox and its external reservation.
+        RequestOutcome::PersonalSync { .. } => 0, // Body ownership stays in personal_inbox::Inbox and its external reservation.
     }
 }
 
-pub(crate) fn window_carrier_bytes(outcomes: &Vec<RequestOutcome>, grants: &Vec<InventoryGrantPacket>, armour_capacity: usize) -> usize {
-    std::mem::size_of::<RequestOutcome>().saturating_mul(outcomes.capacity())
+pub(crate) fn window_carrier_bytes(
+    outcomes: &Vec<RequestOutcome>,
+    grants: &Vec<InventoryGrantPacket>,
+    armour_capacity: usize,
+) -> usize {
+    std::mem::size_of::<RequestOutcome>()
+        .saturating_mul(outcomes.capacity())
         .saturating_add(std::mem::size_of::<InventoryGrantPacket>().saturating_mul(grants.capacity()))
         .saturating_add(std::mem::size_of::<(u8, u32)>().saturating_mul(armour_capacity))
         .saturating_add(outcomes.iter().map(outcome_owned_bytes).fold(0usize, usize::saturating_add))
 }
 
 impl WindowInbox {
+    pub(crate) fn retained_usage(&self) -> (usize, usize) {
+        let count = self.outcomes.len().saturating_add(self.grants.len()).saturating_add(self.armour.len());
+        let bytes = window_carrier_bytes(&self.outcomes, &self.grants, self.armour.capacity()).saturating_add(
+            self.debt.allocated_entries().saturating_mul(std::mem::size_of::<(crate::item::Item, u32)>()),
+        );
+        #[cfg(not(target_arch = "wasm32"))]
+        let bytes = bytes.saturating_add(
+            self.personal_fences
+                .capacity()
+                .saturating_mul(std::mem::size_of::<crate::personal_inbox::PersonalFenceIdentity>()),
+        );
+        (count, bytes)
+    }
+
+    /// Inspect already owned, bounded carriers without allocating another
+    /// batch or treating a higher event as proof of a missing reward. The
+    /// client separately requires the validated pending personal body.
+    pub(crate) fn has_complete_quest_batch(
+        &self,
+        action: crate::action_identity::ActionHeader,
+        life: u32,
+        last: u32,
+    ) -> bool {
+        let Some(cost) = self.outcomes.iter().find_map(|outcome| match outcome {
+            RequestOutcome::Quest(packet)
+                if packet.action == action && packet.actor_respawns == life && packet.included_events == last =>
+            {
+                Some(packet.window_event)
+            }
+            _ => None,
+        }) else {
+            return false;
+        };
+        let Some(first_reward) = cost.checked_add(1) else {
+            return false;
+        };
+        if last < first_reward || last - cost > crate::progression::REWARD_LIMIT as u32 + 1 {
+            return false;
+        }
+        self.outcomes.iter().any(|outcome| matches!(outcome,
+            RequestOutcome::PersonalSync { window_event, actor_respawns } if *window_event == last && *actor_respawns == life))
+            && (first_reward..last).all(|event| self.grants.iter().any(|grant| grant.window_event == event))
+    }
+
+    /// Test diagnostics expose only event numbers, never participant bytes.
+    #[cfg(test)]
+    pub(crate) fn diagnostic_event_queues(&self) -> (Vec<u32>, Vec<u32>, Vec<u32>) {
+        let outcomes = self.outcomes.iter().map(outcome_event).collect();
+        (
+            outcomes,
+            self.grants.iter().map(|grant| grant.window_event).collect(),
+            self.armour.iter().map(|(_, event)| *event).collect(),
+        )
+    }
+
     /// Add one poll's carriers, each list in arrival order.
     pub fn add(&mut self, outcomes: Vec<RequestOutcome>, grants: Vec<InventoryGrantPacket>, armour: Vec<(u8, u32)>) {
         self.outcomes.extend(outcomes);
@@ -963,25 +1183,54 @@ impl WindowInbox {
     /// A held pack cannot accumulate numbered stock, wear, corrections or
     /// views across frames without bounds. Refuse the whole addition before
     /// publishing any carrier; the caller ends the failed-data session.
-    pub fn add_bounded(&mut self, outcomes: Vec<RequestOutcome>, grants: Vec<InventoryGrantPacket>, armour: Vec<(u8, u32)>, external: (usize, usize)) -> Result<(), String> {
-        let count = self.outcomes.len().saturating_add(self.grants.len()).saturating_add(self.armour.len())
-            .saturating_add(outcomes.len()).saturating_add(grants.len()).saturating_add(armour.len()).saturating_add(external.0);
+    pub fn add_bounded(
+        &mut self,
+        outcomes: Vec<RequestOutcome>,
+        grants: Vec<InventoryGrantPacket>,
+        armour: Vec<(u8, u32)>,
+        external: (usize, usize),
+    ) -> Result<(), String> {
+        let count = self
+            .outcomes
+            .len()
+            .saturating_add(self.grants.len())
+            .saturating_add(self.armour.len())
+            .saturating_add(outcomes.len())
+            .saturating_add(grants.len())
+            .saturating_add(armour.len())
+            .saturating_add(external.0);
         let nested = self.outcomes.iter().chain(&outcomes).map(outcome_owned_bytes).fold(0usize, usize::saturating_add);
+        #[cfg(not(target_arch = "wasm32"))]
+        let nested = nested.saturating_add(
+            self.personal_fences
+                .capacity()
+                .saturating_mul(std::mem::size_of::<crate::personal_inbox::PersonalFenceIdentity>()),
+        );
         let fits = |outcome_capacity: usize, grant_capacity: usize, armour_capacity: usize| {
-            outcome_capacity.saturating_mul(std::mem::size_of::<RequestOutcome>())
+            outcome_capacity
+                .saturating_mul(std::mem::size_of::<RequestOutcome>())
                 .saturating_add(grant_capacity.saturating_mul(std::mem::size_of::<InventoryGrantPacket>()))
                 .saturating_add(armour_capacity.saturating_mul(std::mem::size_of::<(u8, u32)>()))
-                .saturating_add(nested).saturating_add(external.1)
+                .saturating_add(nested)
+                .saturating_add(external.1)
                 .saturating_add(self.debt.allocated_entries().saturating_mul(std::mem::size_of::<(Item, u32)>()))
                 <= crate::action_journal::MAX_RETAINED_BYTES
         };
-        if count > crate::action_journal::MAX_EVENT_ENTRIES || !fits(self.outcomes.capacity().max(self.outcomes.len() + outcomes.len()), self.grants.capacity().max(self.grants.len() + grants.len()), self.armour.capacity().max(self.armour.len() + armour.len())) {
+        if count > crate::action_journal::MAX_EVENT_ENTRIES
+            || !fits(
+                self.outcomes.capacity().max(self.outcomes.len() + outcomes.len()),
+                self.grants.capacity().max(self.grants.len() + grants.len()),
+                self.armour.capacity().max(self.armour.len() + armour.len()),
+            )
+        {
             return Err("Held pack window carriers exceed their retained limit".into());
         }
         self.outcomes.try_reserve_exact(outcomes.len()).map_err(|_| "Held pack outcome allocation failed")?;
         self.grants.try_reserve_exact(grants.len()).map_err(|_| "Held pack grant allocation failed")?;
         self.armour.try_reserve_exact(armour.len()).map_err(|_| "Held pack wear allocation failed")?;
-        if !fits(self.outcomes.capacity(), self.grants.capacity(), self.armour.capacity()) { return Err("Held pack allocation exceeds its byte limit".into()); }
+        if !fits(self.outcomes.capacity(), self.grants.capacity(), self.armour.capacity()) {
+            return Err("Held pack allocation exceeds its byte limit".into());
+        }
         self.add(outcomes, grants, armour);
         Ok(())
     }
@@ -999,10 +1248,13 @@ impl WindowInbox {
     /// Only an imported initial baseline uses this prerequisite: its genuine
     /// Sync1 must precede already available higher personal/window carriers.
     /// Rotate in place without changing owned bytes or the remaining order.
-    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn prioritise_initial_personal_replace(&mut self) -> bool {
-        let Some(at) = self.outcomes.iter().position(|outcome| matches!(outcome,
-            RequestOutcome::Sync(packet) if packet.window_event == 1)) else { return false; };
+        let Some(at) = self.outcomes.iter().position(|outcome| {
+            matches!(outcome,
+            RequestOutcome::Sync(packet) if packet.window_event == 1)
+        }) else {
+            return false;
+        };
         self.outcomes[..=at].rotate_right(1);
         true
     }
@@ -1012,8 +1264,9 @@ impl WindowInbox {
     pub fn pack_life_ready(&self, actor_respawns: u32) -> bool {
         self.outcomes.iter().all(|outcome| match outcome {
             RequestOutcome::Pack(packet) => packet.actor_respawns <= actor_respawns,
+            RequestOutcome::Quest(packet) => packet.actor_respawns <= actor_respawns,
+            RequestOutcome::QuestView(packet) => packet.actor_respawns <= actor_respawns,
             RequestOutcome::PackView(packet) => packet.actor_respawns <= actor_respawns,
-            #[cfg(not(target_arch = "wasm32"))]
             RequestOutcome::PersonalSync { actor_respawns: life, .. } => *life <= actor_respawns,
             _ => true,
         })
@@ -1034,6 +1287,11 @@ impl WindowInbox {
     /// cursor or grid. A new unnumbered carrier that changes any of those
     /// must be numbered instead.
     pub fn take_ordered(&mut self) -> (Vec<InboxItem>, Option<u64>) {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.personal_fences.clear();
+        order_numbered(&mut self.outcomes, outcome_event);
+        order_numbered(&mut self.grants, |grant| grant.window_event);
+        order_numbered(&mut self.armour, |(_, event)| *event);
         let mut outcomes: VecDeque<InboxItem> = self.outcomes.drain(..).map(InboxItem::Outcome).collect();
         let mut grants: VecDeque<InboxItem> = self.grants.drain(..).map(InboxItem::Grant).collect();
         let mut armour: VecDeque<InboxItem> =
@@ -1053,6 +1311,24 @@ impl WindowInbox {
             };
             out.extend(next);
         }
+        #[cfg(test)]
+        if out.iter().any(|item| matches!(item, InboxItem::Outcome(RequestOutcome::Quest(_)))) {
+            let order: Vec<_> = out
+                .iter()
+                .map(|item| {
+                    (
+                        match item {
+                            InboxItem::Outcome(RequestOutcome::Quest(_)) => "quest-cost",
+                            InboxItem::Outcome(RequestOutcome::PersonalSync { .. }) => "personal",
+                            InboxItem::Grant(_) => "grant",
+                            _ => "other",
+                        },
+                        item.event(),
+                    )
+                })
+                .collect();
+            eprintln!("Actual quest window drain order: {order:?}");
+        }
         (out, self.ack.take())
     }
 
@@ -1071,43 +1347,185 @@ mod tests {
     use crate::protocol::{InteractOutcomePacket, ItemActionOutcomePacket, WireItem};
 
     #[test]
+    fn d2c3_late_cost_and_personal_metadata_order_without_moving_zero_slots_or_ties() {
+        let mut positions =
+            vec![(13, "first"), (0, "zero-a"), (11, "cost"), (13, "second"), (0, "zero-b"), (12, "grant")];
+        let capacity = positions.capacity();
+        order_numbered(&mut positions, |(event, _)| *event);
+        assert_eq!(
+            positions,
+            vec![(11, "cost"), (0, "zero-a"), (12, "grant"), (13, "first"), (0, "zero-b"), (13, "second")]
+        );
+        assert_eq!(positions.capacity(), capacity, "ordering must use the existing allocation");
+
+        let registry = crate::block::BlockRegistry::new();
+        let empty =
+            EffectiveWindow { inv: Inventory::new(), armour: [None; 4], cursor: None, grid: Default::default() };
+        let cost = crate::quest_wire::QuestResult {
+            actor_respawns: 0,
+            action: crate::action_identity::ActionHeader {
+                session: [7; 16],
+                epoch: 0,
+                seq: 1,
+                life: 0,
+                events_applied: 10,
+            },
+            fate: crate::action_identity::ActionFate::Accepted,
+            note: crate::quest_wire::QuestNote::Completed,
+            window_event: 11,
+            included_events: 13,
+            window: crate::pack_wire::PackWindow::capture(&empty, &Default::default(), &registry).unwrap(),
+            view: None,
+        };
+        let zero = |seq| {
+            RequestOutcome::Item(ItemActionOutcomePacket {
+                seq,
+                accepted: false,
+                consume_held: 0,
+                note: 0,
+                window_event: 0,
+                wear_held: false,
+                bite_after: 0,
+            })
+        };
+        let mut inbox = WindowInbox::default();
+        inbox
+            .add_bounded(
+                vec![
+                    RequestOutcome::PersonalSync { window_event: 13, actor_respawns: 0 },
+                    zero(21),
+                    RequestOutcome::Quest(Box::new(cost)),
+                    zero(22),
+                    RequestOutcome::PersonalSync { window_event: 13, actor_respawns: 1 },
+                ],
+                vec![grant(12)],
+                vec![(1, 10)],
+                (0, 0),
+            )
+            .unwrap();
+        let capacities = (inbox.outcomes.capacity(), inbox.grants.capacity(), inbox.armour.capacity());
+        let action =
+            crate::action_identity::ActionHeader { session: [7; 16], epoch: 0, seq: 1, life: 0, events_applied: 10 };
+        assert!(inbox.has_complete_quest_batch(action, 0, 13));
+        let reward = inbox.grants.pop().unwrap();
+        assert!(
+            !inbox.has_complete_quest_batch(action, 0, 13),
+            "a LAST marker does not prove a missing reward arrived"
+        );
+        inbox.grants.push(reward);
+        assert!(!inbox.has_complete_quest_batch(action, 1, 13), "a later body's marker cannot certify the old cost");
+        assert!(!inbox.has_complete_quest_batch(action, 0, 14), "a higher view cannot substitute for the exact LAST");
+        assert_eq!(
+            (inbox.outcomes.capacity(), inbox.grants.capacity(), inbox.armour.capacity()),
+            capacities,
+            "completeness scans must retain existing allocations"
+        );
+        let (items, _) = inbox.take_ordered();
+        assert_eq!((inbox.outcomes.capacity(), inbox.grants.capacity(), inbox.armour.capacity()), capacities);
+        assert_eq!(items.iter().map(InboxItem::event).collect::<Vec<_>>(), vec![10, 11, 0, 12, 13, 0, 13]);
+        assert!(
+            matches!(&items[2], InboxItem::Outcome(RequestOutcome::Item(packet)) if packet.seq == 21 && packet.window_event == 0)
+        );
+        assert!(
+            matches!(&items[5], InboxItem::Outcome(RequestOutcome::Item(packet)) if packet.seq == 22 && packet.window_event == 0)
+        );
+        assert!(matches!(&items[4], InboxItem::Outcome(RequestOutcome::PersonalSync { actor_respawns: 0, .. })));
+        assert!(
+            matches!(&items[6], InboxItem::Outcome(RequestOutcome::PersonalSync { actor_respawns: 1, .. })),
+            "equal numbered metadata keeps its arrival order"
+        );
+    }
+
+    #[test]
     #[cfg(not(target_arch = "wasm32"))]
     fn handover_initial_replace_keeps_later_grant_owned_and_applies_it_after_baseline() {
         let registry = crate::block::BlockRegistry::new();
-        let mut source = EffectiveWindow { inv: Inventory::new(), armour: [None; 4], cursor: None, grid: Default::default() };
+        let mut source =
+            EffectiveWindow { inv: Inventory::new(), armour: [None; 4], cursor: None, grid: Default::default() };
         source.inv.set_slot(4, Some(ItemStack::new_block(crate::block::GLASS, 9)));
         let sync = crate::inventory_sync::packet(&source, &Default::default(), 1);
-        let later = InventoryGrantPacket { item_kind: crate::protocol::item_kind::BLOCK,
-            item_id: crate::block::STONE, count: 3, full_item: WireItem::None, window_event: 3 };
+        let later = InventoryGrantPacket {
+            item_kind: crate::protocol::item_kind::BLOCK,
+            item_id: crate::block::STONE,
+            count: 3,
+            full_item: WireItem::None,
+            window_event: 3,
+        };
         let mut inbox = WindowInbox::default();
-        inbox.add_bounded(vec![RequestOutcome::PersonalSync { window_event: 2, actor_respawns: 0 }], vec![later.clone()], Vec::new(), (1, 128)).unwrap();
+        inbox
+            .add_bounded(
+                vec![RequestOutcome::PersonalSync { window_event: 2, actor_respawns: 0 }],
+                vec![later.clone()],
+                Vec::new(),
+                (1, 128),
+            )
+            .unwrap();
         let retained = window_carrier_bytes(&inbox.outcomes, &inbox.grants, inbox.armour.capacity());
-        assert!(!inbox.prioritise_initial_personal_replace(), "higher personal/grant metadata cannot replace missing Sync1");
+        assert!(
+            !inbox.prioritise_initial_personal_replace(),
+            "higher personal/grant metadata cannot replace missing Sync1"
+        );
         assert_eq!(window_carrier_bytes(&inbox.outcomes, &inbox.grants, inbox.armour.capacity()), retained);
         assert_eq!(inbox.grants, vec![later], "holding initial state shed a real later grant");
         inbox.add_bounded(vec![RequestOutcome::Sync(sync)], Vec::new(), Vec::new(), (1, 128)).unwrap();
         let retained = window_carrier_bytes(&inbox.outcomes, &inbox.grants, inbox.armour.capacity());
         assert!(inbox.prioritise_initial_personal_replace());
-        assert_eq!(window_carrier_bytes(&inbox.outcomes, &inbox.grants, inbox.armour.capacity()), retained, "ordering allocated or lost owned carriers");
+        assert_eq!(
+            window_carrier_bytes(&inbox.outcomes, &inbox.grants, inbox.armour.capacity()),
+            retained,
+            "ordering allocated or lost owned carriers"
+        );
         let (items, _) = inbox.take_ordered();
-        assert_eq!(items.iter().map(InboxItem::event).collect::<Vec<_>>(), vec![1, 2, 3], "late Sync must apply before the higher owned prefix");
-        let mut client = EffectiveWindow { inv: Inventory::new(), armour: [None; 4], cursor: None, grid: Default::default() };
+        assert_eq!(
+            items.iter().map(InboxItem::event).collect::<Vec<_>>(),
+            vec![1, 2, 3],
+            "late Sync must apply before the higher owned prefix"
+        );
+        let mut client =
+            EffectiveWindow { inv: Inventory::new(), armour: [None; 4], cursor: None, grid: Default::default() };
         let mut uses = Default::default();
         let mut debt = Default::default();
         for item in items {
             match item {
                 InboxItem::Outcome(RequestOutcome::Sync(sync)) => {
-                    crate::inventory_sync::apply(&mut crate::window::WindowMut { inv: &mut client.inv, armour: &mut client.armour,
-                        cursor: &mut client.cursor, grid: &mut client.grid, container: None }, &sync, &registry,
-                        &mut uses, &mut debt, crate::action_identity::InventoryMode::Mirror).unwrap();
+                    crate::inventory_sync::apply(
+                        &mut crate::window::WindowMut {
+                            inv: &mut client.inv,
+                            armour: &mut client.armour,
+                            cursor: &mut client.cursor,
+                            grid: &mut client.grid,
+                            container: None,
+                        },
+                        &sync,
+                        &registry,
+                        &mut uses,
+                        &mut debt,
+                        crate::action_identity::InventoryMode::Mirror,
+                    )
+                    .unwrap();
                 }
                 InboxItem::Outcome(RequestOutcome::PersonalSync { .. }) => (),
-                InboxItem::Grant(grant) => { assert_eq!(crate::remote_entities::apply_inventory_grant(&mut client.inv, &grant, &registry), Some(0)); }
+                InboxItem::Grant(grant) => {
+                    assert_eq!(
+                        crate::remote_entities::apply_inventory_grant(&mut client.inv, &grant, &registry),
+                        Some(0)
+                    );
+                }
                 _ => panic!("unexpected initial fixture carrier"),
             }
         }
         assert_eq!(client.inv.slot(4).unwrap().count, 9);
-        assert_eq!(client.inv.slots_iter().flatten().filter(|s| s.item == Item::Block(crate::block::STONE)).map(|s| u32::from(s.count)).sum::<u32>(), 3, "initial Replace overwrote a later grant");
+        assert_eq!(
+            client
+                .inv
+                .slots_iter()
+                .flatten()
+                .filter(|s| s.item == Item::Block(crate::block::STONE))
+                .map(|s| u32::from(s.count))
+                .sum::<u32>(),
+            3,
+            "initial Replace overwrote a later grant"
+        );
     }
 
     #[test]
@@ -1117,10 +1535,19 @@ mod tests {
             sp.inventory_mode = mode;
             sp.respawns = 2;
             sp.inventory.set_slot(0, Some(bread(7)));
-            let old = EffectiveWindow { inv: Inventory::new(), armour: [None; 4], cursor: None, grid: Default::default() };
-            let event = queue(&mut sp, WindowEvent::PackCanonical { actor_respawns: 1, window: Box::new(old), debt: Default::default() }, 0);
+            let old =
+                EffectiveWindow { inv: Inventory::new(), armour: [None; 4], cursor: None, grid: Default::default() };
+            let event = queue(
+                &mut sp,
+                WindowEvent::PackCanonical { actor_respawns: 1, window: Box::new(old), debt: Default::default() },
+                0,
+            );
             apply_through(&mut sp, event, 1);
-            assert_eq!(sp.inventory.slot(0), Some(&bread(7)), "an old physical life cannot install its complete window");
+            assert_eq!(
+                sp.inventory.slot(0),
+                Some(&bread(7)),
+                "an old physical life cannot install its complete window"
+            );
             assert_eq!(sp.window_events.last_applied, event, "its numbered metadata still retires");
             assert_eq!(sp.window_events.waiting(), 0);
         }
@@ -1134,17 +1561,34 @@ mod tests {
         }
         assert!(inbox.add_bounded(Vec::new(), Vec::new(), vec![(1, 1025)], (0, 0)).is_err());
         let (items, _) = inbox.take_ordered();
-        assert_eq!(items.len(), crate::action_journal::MAX_EVENT_ENTRIES, "the refused addition cannot drop existing numbered state");
+        assert_eq!(
+            items.len(),
+            crate::action_journal::MAX_EVENT_ENTRIES,
+            "the refused addition cannot drop existing numbered state"
+        );
         assert_eq!(items.last().unwrap().event(), 1024);
     }
 
     #[test]
     fn d2c2_held_inbox_charges_actual_nested_capacity_before_publishing() {
         let mut inbox = WindowInbox::default();
-        let mut gives = Vec::with_capacity(crate::action_journal::MAX_RETAINED_BYTES / std::mem::size_of::<crate::protocol::WireStack>() + 1);
+        let mut gives = Vec::with_capacity(
+            crate::action_journal::MAX_RETAINED_BYTES / std::mem::size_of::<crate::protocol::WireStack>() + 1,
+        );
         gives.push(crate::inventory::stack_to_wire(&bread(1)));
-        let outcome = RequestOutcome::SlotSet(crate::protocol::WindowSlotSetPacket { op_seq_applied: 0, reason: crate::protocol::slot_set_reason::CORRECTION, sets: Vec::new(), furnace: None, window_event: 1, take: Vec::new(), give: gives });
-        assert!(outcome_owned_bytes(&outcome) > crate::action_journal::MAX_RETAINED_BYTES, "one populated stack cannot hide an oversized Vec capacity");
+        let outcome = RequestOutcome::SlotSet(crate::protocol::WindowSlotSetPacket {
+            op_seq_applied: 0,
+            reason: crate::protocol::slot_set_reason::CORRECTION,
+            sets: Vec::new(),
+            furnace: None,
+            window_event: 1,
+            take: Vec::new(),
+            give: gives,
+        });
+        assert!(
+            outcome_owned_bytes(&outcome) > crate::action_journal::MAX_RETAINED_BYTES,
+            "one populated stack cannot hide an oversized Vec capacity"
+        );
         assert!(inbox.add_bounded(vec![outcome], Vec::new(), Vec::new(), (0, 0)).is_err());
         assert!(inbox.is_empty(), "no part of an oversized correction is published");
     }
@@ -1181,7 +1625,11 @@ mod tests {
     fn the_effective_window_has_the_waiting_events_applied() {
         let mut sp = joiner();
         sp.inventory.set_slot(3, Some(bread(1)));
-        queue(&mut sp, WindowEvent::Take { slot: 3, item: Item::Material(MaterialId::Bread), n: 1, how: "by eating" }, 0);
+        queue(
+            &mut sp,
+            WindowEvent::Take { slot: 3, item: Item::Material(MaterialId::Bread), n: 1, how: "by eating" },
+            0,
+        );
         queue(&mut sp, WindowEvent::Grant(ItemStack::new_block(crate::block::STONE, 5)), 0);
         let eff = effective_inventory(&sp);
         assert!(eff.slot(3).is_none(), "the take, then");
@@ -1210,7 +1658,11 @@ mod tests {
     fn a_take_short_of_what_it_owed_is_a_logged_mismatch() {
         let mut sp = joiner();
         sp.inventory.set_slot(0, Some(bread(1)));
-        queue(&mut sp, WindowEvent::Take { slot: 0, item: Item::Material(MaterialId::Bread), n: 2, how: "by eating" }, 0);
+        queue(
+            &mut sp,
+            WindowEvent::Take { slot: 0, item: Item::Material(MaterialId::Bread), n: 2, how: "by eating" },
+            0,
+        );
         apply_through(&mut sp, 1, 0);
         assert!(sp.inventory.slot(0).is_none());
         assert_eq!(sp.possession.mismatched, 1);
@@ -1408,7 +1860,15 @@ mod tests {
     }
 
     fn eat(seq: u32, window_event: u32) -> RequestOutcome {
-        RequestOutcome::Item(ItemActionOutcomePacket { seq, accepted: true, consume_held: 1, note: 0, window_event, wear_held: false, bite_after: 0 })
+        RequestOutcome::Item(ItemActionOutcomePacket {
+            seq,
+            accepted: true,
+            consume_held: 1,
+            note: 0,
+            window_event,
+            wear_held: false,
+            bite_after: 0,
+        })
     }
 
     fn grant(window_event: u32) -> InventoryGrantPacket {
@@ -1447,25 +1907,40 @@ mod tests {
     }
 }
 
-#[cfg(test)] mod death_replace_tests {
+#[cfg(test)]
+mod death_replace_tests {
     use super::*;
-    #[test] fn replace_clears_debt_and_blocks_unfit_for_earlier_grants() {
+    #[test]
+    fn replace_clears_debt_and_blocks_unfit_for_earlier_grants() {
         let mut sp = ServerPlayer::new(glam::Vec3::ZERO);
-        sp.inventory.auto_refill = false; sp.inventory.toggle_lock(4);
-        let stone = ItemStack::new_block(crate::block::STONE,5);
-        let delta = crate::container_window::ItemDelta { take:vec![(0,stone.clone())],give:vec![] };
-        sp.window_events.debt.apply(&mut sp.inventory,&mut sp.craft_grid,&mut sp.cursor,&mut sp.armour,&delta);
-        assert_eq!(sp.window_events.debt.owed(&stone.item),5);
-        let g = queue(&mut sp,WindowEvent::Grant(stone),0);
-        let mut w = effective_window(&sp); w.inv.set_slot(0,None);
+        sp.inventory.auto_refill = false;
+        sp.inventory.toggle_lock(4);
+        let stone = ItemStack::new_block(crate::block::STONE, 5);
+        let delta = crate::container_window::ItemDelta { take: vec![(0, stone.clone())], give: vec![] };
+        sp.window_events.debt.apply(&mut sp.inventory, &mut sp.craft_grid, &mut sp.cursor, &mut sp.armour, &delta);
+        assert_eq!(sp.window_events.debt.owed(&stone.item), 5);
+        let g = queue(&mut sp, WindowEvent::Grant(stone), 0);
+        let mut w = effective_window(&sp);
+        w.inv.set_slot(0, None);
         // A death's replacement carries no debt (OC: death clears it).
-        let n = queue(&mut sp,WindowEvent::Replace { window: Box::new(w), debt: Default::default(), station: crate::window::Station::Player },0);
+        let n = queue(
+            &mut sp,
+            WindowEvent::Replace {
+                window: Box::new(w),
+                debt: Default::default(),
+                station: crate::window::Station::Player,
+            },
+            0,
+        );
         sp.window_events.death_replace = Some(n);
-        apply_overdue(&mut sp,EVENT_ACK_TIMEOUT_TICKS);
-        assert_eq!(sp.window_events.death_replace,Some(n),"timeout does not acknowledge a client replacement");
-        assert!(sp.window_events.debt.is_empty()); assert!(phantom(&sp).is_empty());
-        assert!(return_unfit(&mut sp,g,5,201).is_none());
-        assert!(!sp.inventory.auto_refill); assert!(sp.inventory.is_locked(4));
-        apply_through(&mut sp,n,202); assert!(sp.window_events.death_replace.is_none());
+        apply_overdue(&mut sp, EVENT_ACK_TIMEOUT_TICKS);
+        assert_eq!(sp.window_events.death_replace, Some(n), "timeout does not acknowledge a client replacement");
+        assert!(sp.window_events.debt.is_empty());
+        assert!(phantom(&sp).is_empty());
+        assert!(return_unfit(&mut sp, g, 5, 201).is_none());
+        assert!(!sp.inventory.auto_refill);
+        assert!(sp.inventory.is_locked(4));
+        apply_through(&mut sp, n, 202);
+        assert!(sp.window_events.death_replace.is_none());
     }
 }

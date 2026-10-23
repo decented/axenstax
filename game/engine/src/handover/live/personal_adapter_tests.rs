@@ -73,7 +73,7 @@ fn fixture(tag: &str) -> Fixture {
             kind: MemberKind::Progression,
             length: progress.len() as u64,
             digest: crate::handover::hash(&progress),
-            schema: 1,
+            schema: crate::handover::personal::SCHEMA,
         },
         Member {
             path: "world.dat".into(),
@@ -168,7 +168,7 @@ fn handover_personal_bootstrap_selects_one_identity_and_never_replays_current_v3
     let mut saved = load_or_bootstrap(&f.world, f.key, &selected)
         .unwrap()
         .unwrap();
-    assert_eq!(saved.encode().unwrap()[0], 3);
+    assert_eq!(saved.encode().unwrap()[0], 4);
     let mut slot = crate::player_slot::PlayerSlot::new(0, glam::Vec3::ZERO, 1.0);
     install(&saved, &mut slot).unwrap();
     assert_eq!(slot.inventory.slot(4).unwrap().count, 9);
@@ -216,13 +216,15 @@ fn handover_personal_missing_wrong_manifest_and_next_context_preflight_are_check
         parsed.personal.is_none(),
         "previous import binding leaked into next seed"
     );
-    let mut record = saved.personal.as_ref().unwrap().record().unwrap();
-    record.context.transfer = [8; 16];
-    record.context.generation += 1;
-    preflight(&seed, &record.encode().unwrap(), record.context).unwrap();
-    assert!(
-        PersonalRecord::decode(&record.encode().unwrap(), &f.proof.binding(f.key).context).is_err()
-    );
+    let record = saved.personal.as_ref().unwrap().record().unwrap();
+    let crate::progression::GameplayContext::Imported(mut next_context) = record.context else {
+        panic!("authenticated imported record changed its binding class");
+    };
+    next_context.transfer = [8; 16];
+    next_context.generation += 1;
+    let progress = PersonalRecord::from_gameplay(next_context, &record).unwrap().encode().unwrap();
+    preflight(&seed, &progress, next_context).unwrap();
+    assert!(PersonalRecord::decode(&progress, &f.proof.binding(f.key).context).is_err());
     fs::remove_file(f.world.join("handover/personal-manifest.dat")).unwrap();
     assert!(
         proof(&f.world).is_err(),

@@ -88,13 +88,14 @@ impl Reputation {
 
     /// Natural decay step — every entry drifts one point toward zero.
     /// Callers throttle the cadence (Spec 19: once per in-game day).
+    #[cfg(test)]
     pub fn decay_once(&mut self) {
+        self.decay_days(1);
+    }
+
+    pub(crate) fn decay_days(&mut self, days: u32) {
         for score in self.per_village.values_mut() {
-            if *score > 0 {
-                *score -= 1;
-            } else if *score < 0 {
-                *score += 1;
-            }
+            *score = crate::reputation_day::decay_score(*score, days);
         }
     }
 }
@@ -123,9 +124,8 @@ pub const VILLAGER_KILL_PENALTY: i16 = -25;
 /// rapid kills only count once.
 pub const VILLAGER_KILL_REP_COOLDOWN_TICKS: u64 = 600;
 
-/// One Minecraft day at the engine's tick rate. Used by the natural-decay
-/// timer. With `world_time_step = 4` (alpha-fast 5-min day) the value here
-/// is the *engine* tick budget per natural day — 6000 ticks ≈ 5 min @ 20 TPS.
+/// Legacy raid/treasury scheduler interval, retained at 6000 logical ticks.
+/// Reputation uses actual natural solar units in `reputation_day` instead.
 pub const REPUTATION_DECAY_INTERVAL_TICKS: u64 = 6000;
 
 #[cfg(test)]

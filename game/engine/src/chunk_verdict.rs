@@ -433,7 +433,7 @@ mod tests {
         let world = generated(&biome, col, 1);
         let name = format!("verdict-save-load-{}", std::process::id());
         let player = crate::player_slot::PlayerSlot::new(0, glam::Vec3::new(0.0, 90.0, 0.0), 1.0);
-        crate::save::save_world(&name, &world, &[player], SEED, &[], &[]).expect("saved");
+        crate::save::save_world(&name, &world, &[player], SEED, &[], &[], None).expect("saved");
         let mut loaded = World::new();
         loaded.track_edited_columns();
         crate::save::load_world(&name, &mut loaded).expect("loaded");

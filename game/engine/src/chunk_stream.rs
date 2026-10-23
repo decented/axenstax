@@ -317,8 +317,21 @@ impl super::GameState {
             let selected = (|| -> Result<Option<crate::joiner_save::JoinerSave>, String> {
                 let directory = crate::save::world_dir(&self.world_name);
                 let Some(proof) = crate::handover::live::personal_adapter::proof(&directory)? else {
-                    if load_result.as_ref().is_some_and(|(save, _)| save.local_personal.is_some()) || crate::handover::live::personal_adapter::has_bound_records(&directory)? {
+                    if let Some(snapshot) = load_result.as_ref().and_then(|(save, _)| save.local_personal.as_ref()) {
+                        let selected_scope = load_result.as_ref().and_then(|(save, _)| save.quest_world.as_ref()).map(|world| world.scope);
+                        let saved = crate::gameplay_attachment::selected_world_local(snapshot, selected_scope, self.handover_signed_in(), Some(0))?;
+                        crate::handover::live::personal_adapter::confirm_durable(&selected_personal_directory.join("world.dat"))?;
+                        return Ok(Some(saved));
+                    }
+                    if crate::handover::live::personal_adapter::has_bound_records(&directory)? {
                         return Err("This world's saved player authority is missing. Nothing was reset.".into());
+                    }
+                    let scope = load_result.as_ref().and_then(|(save, _)| save.quest_world.as_ref()).map(|world| world.scope);
+                    if let Some(saved) = crate::gameplay_attachment::returned_world_local(&directory, scope, self.handover_signed_in())? {
+                        let snapshot = &mut load_result.as_mut().ok_or("saved player has no selected world snapshot")?.0;
+                        snapshot.local_personal = Some(crate::personal_value::LocalPersonalSave(saved.encode()?));
+                        crate::handover::live::personal_adapter::write_world_snapshot(&directory, &selected_personal_directory, snapshot)?;
+                        return Ok(Some(saved));
                     }
                     return Ok(None);
                 };
@@ -328,7 +341,7 @@ impl super::GameState {
                 if let Some(snapshot) = load_result.as_ref().and_then(|(save, _)| save.local_personal.as_ref()) {
                     let saved = crate::joiner_save::JoinerSave::decode(&snapshot.0)?;
                     let bound = saved.personal.as_ref().ok_or("selected personal snapshot has no authority binding")?;
-                    if bound.binding != proof.binding(key) { return Err("selected personal snapshot belongs to another player or transfer".into()); }
+                    if bound.binding.imported() != Some(&proof.binding(key)) { return Err("selected personal snapshot belongs to another player or transfer".into()); }
                     crate::handover::live::personal_adapter::confirm_durable(&selected_personal_directory.join("world.dat"))?;
                     // This selected primary/autosave owns the local window and
                     // maps together. Refresh its remote canonical mirror only
@@ -523,6 +536,13 @@ impl super::GameState {
                 return false;
             }
 
+            if let Some(saved) = &save_data.quest_world
+                && let Err(error) = crate::quest_npcs::restore(&mut self.ecs, saved)
+            {
+                self.leave_world_with_notice(crate::world_exit::SaveChoice::Abandon, format!("This world's quest givers couldn't be restored: {error}"));
+                return false;
+            }
+
             // Heavy per-column work (lighting, water, gen-missing, meshing, mob
             // scatter) is deferred to `step_load`, driven by the queue built at
             // the end of `begin_load`. Spec 30: light isn't persisted, so the
@@ -593,7 +613,10 @@ impl super::GameState {
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(save) = personal {
             match crate::handover::live::personal_adapter::install(&save, &mut self.players[0]) {
-                Ok(binding) => self.local_personal = Some(binding),
+                Ok(binding) => {
+                    self.local_personal = Some(binding);
+                    self.players[0].gameplay_clock.restore(self.tick_counter);
+                },
                 Err(why) => { self.leave_world_with_notice(crate::world_exit::SaveChoice::Abandon, format!("This world couldn't be opened: {why}")); return false; }
             }
         }
@@ -785,6 +808,23 @@ impl super::GameState {
                 crate::chunk_intake::Delta::ActionReceipt(receipt) => {
                     if let Some(remote) = &mut self.remote_client {
                         remote.apply_action_receipt(receipt);
+                    }
+                }
+                crate::chunk_intake::Delta::QuestResult(packet) => {
+                    let intake = self.remote_client.as_mut().map(|remote| remote.apply_quest_result_intake(&packet));
+                    match intake {
+                        Some(Ok(true)) => {
+                            let (count, bytes) = self.remote_client.as_ref().map_or((0, 0), |remote| remote.pack_retained_usage());
+                            if let Err(reason) = self.window_inbox.add_bounded(vec![crate::remote_client::RequestOutcome::Quest(packet)], Vec::new(), Vec::new(), (count, bytes.saturating_add(self.chunk_intake.carried_metadata_bytes()))) {
+                                log::warn!("Quest result inbox refused: {reason}");
+                                if let Some(remote) = &mut self.remote_client { remote.state = crate::remote_client::ConnectionState::Failed(crate::remote_client::HOST_BAD_WORLD_DATA.to_string()); }
+                            }
+                        },
+                        Some(Err(reason)) => {
+                            log::warn!("Quest result intake failed: {reason}");
+                            if let Some(remote) = &mut self.remote_client { remote.state = crate::remote_client::ConnectionState::Failed(crate::remote_client::HOST_BAD_WORLD_DATA.to_string()); }
+                        }
+                        _ => {}
                     }
                 }
                 crate::chunk_intake::Delta::PackResult(packet) => {

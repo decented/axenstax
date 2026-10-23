@@ -9,9 +9,7 @@ fn attach(hs: &mut HostedServer, signed: bool, binding: u8) -> (usize, ChannelCl
         client.send_to_server(&protocol::serialize_packet(protocol::PacketType::JoinRequest, &crate::remote_client::build_join_request_guest("Guest", 0)));
     }
     hs.tick();
-    let heard = super::super::c3d_tests::hear(&client);
-    assert!(heard.rejects.is_empty(), "the genuine join is admitted");
-    let accept = heard.accepts.into_iter().next().expect("a real JoinAccept");
+    let accept = super::super::tests::join_installed(hs, &client, HostedServer::tick);
     let i = accept.player_index as usize;
     let event = hs.server.players[i].window_events.last_number();
     crate::window_events::apply_through(&mut hs.server.players[i], event, hs.server.tick_counter);

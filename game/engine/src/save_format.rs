@@ -31,13 +31,13 @@ use crate::save::WorldSave;
 /// `world_save_field_count_tripwire` test against serde's own field list, so
 /// appending a `WorldSave` field fails the test until this is bumped — which bumps
 /// [`SAVE_FORMAT_VERSION`] with it.
-pub const WORLD_SAVE_FIELD_COUNT: u32 = 53;
+pub const WORLD_SAVE_FIELD_COUNT: u32 = 54;
 
 /// Bump by hand for a wire change that is NOT an appended `WorldSave` field: a
 /// field or enum variant added inside a nested saved type, a retype. Such a change
 /// is invisible to the field-count tripwire, but an older build cannot read it
 /// either, so it must still move the version. Only ever increases.
-pub const SAVE_LAYOUT_REVISION: u32 = 2;
+pub const SAVE_LAYOUT_REVISION: u32 = 3;
 
 /// The `world.dat` format version this build writes, and the newest it opens.
 /// Monotonic: both terms only ever increase.

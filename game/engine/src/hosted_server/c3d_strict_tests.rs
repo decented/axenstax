@@ -29,17 +29,29 @@ pub(super) struct Rig {
 }
 
 pub(super) fn strict_rig(tag: &str) -> Rig {
+    strict_rig_inner(tag, false).0
+}
+
+/// Preserve actual initial packets for a caller that tests their physical
+/// installation and exact acknowledgement itself.
+pub(super) fn strict_rig_with_initial_packets(tag: &str) -> (Rig, super::c3d_tests::Heard) {
+    strict_rig_inner(tag, true)
+}
+
+fn strict_rig_inner(tag: &str, retain_initial: bool) -> (Rig, super::c3d_tests::Heard) {
     let g = crate::save::WorldsRootGuard::new(&format!("c3d-strict-{tag}"));
     let mut hs = start_room_test_server(&format!("c3d-strict-{tag}"), 0);
     hs.select_inventory_mode(InventoryMode::Strict).expect("a dedicated server selects any mode");
-    let (i, client, heard) = join(&mut hs, 17);
-    let accept = heard.accepts.into_iter().next().expect("Strict admits a first visit");
+    let (i, client, heard) = if retain_initial { super::c3d_tests::join_raw(&mut hs, 17) } else { join(&mut hs, 17) };
+    let accept = heard.accepts.first().cloned().expect("Strict admits a first visit");
     assert_eq!(accept.inventory_mode, InventoryMode::Strict);
     let sp = &mut hs.server.players[i];
     let sent = sp.window_events.last_number();
-    crate::window_events::apply_through(sp, sent, 0);
-    assert_eq!(sp.window_events.waiting(), 0, "the join's sync is applied");
-    Rig { _g: g, hs, i, client, accept, seq: 0, applied: sent }
+    if !retain_initial {
+        crate::window_events::apply_through(sp, sent, 0);
+        assert_eq!(sp.window_events.waiting(), 0, "the join's sync is applied");
+    }
+    (Rig { _g: g, hs, i, client, accept, seq: 0, applied: sent }, heard)
 }
 
 impl Rig {

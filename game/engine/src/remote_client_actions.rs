@@ -169,7 +169,7 @@ impl RemoteClient {
         })
     }
 
-    pub(super) fn retire_applied_receipts(&mut self) {
+    pub(crate) fn retire_applied_receipts(&mut self) {
         while let Some(receipt) = self.action_receipts.front().copied() {
             if receipt.included_events > self.events_applied { break; }
             match self.pack_receipt_ready(receipt) {

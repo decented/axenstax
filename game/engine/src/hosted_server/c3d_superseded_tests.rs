@@ -163,52 +163,61 @@ fn c3d_strict_click_and_shot_in_flight_at_death_are_superseded() {
     assert_eq!(projectiles(&hs), shots, "no projectile");
     assert_eq!(hs.server.players[j.i].next_shot_tick, next_shot, "no shot cooldown");
     assert!(
-        hs.server.players[j.i].window_events.waiting_events().all(|e| matches!(e, crate::window_events::WindowEvent::Replace { .. })),
+        // The death sync, and the personal fence every death now delivers.
+        hs.server.players[j.i].window_events.waiting_events().all(|e| matches!(
+            e,
+            crate::window_events::WindowEvent::Replace { .. } | crate::window_events::WindowEvent::PersonalSync(_)
+        )),
         "no payment: only the death sync waits"
     );
     assert_eq!(all_holdings(&hs, &[j.i], cell), before, "conserved over window, grave and ground");
 }
 
-/// LOW-1 — a click, a container open and a shot made before the join sync
-/// applies: each `Superseded`, never torn down, with zero effect (no view
-/// opened, no projectile, no event); conserved.
+/// LOW-1, revised — a join is held until personal initialisation, and a real
+/// client sends no typed action before its personal state is ready
+/// (`RemoteClient::personal_ready`). A click, a container open or a shot
+/// that arrives anyway, before the join sync applies, is a protocol breach:
+/// the link is torn down (`receive_typed_action`), with zero effect (no view
+/// opened, no projectile, no chest change) and the seat released. The client
+/// half (a real client sends nothing before then) is proved by
+/// `c3d_grid_tests::c3d_mirror_lock_toggled_before_the_join_sync_reaches_the_server_once_ready`.
 #[test]
-fn c3d_strict_click_open_and_shot_before_the_join_sync_are_superseded() {
-    let _g = crate::save::WorldsRootGuard::new("c3d-superseded-join");
-    let mut hs = strict_server("c3d-superseded-join");
-    // A returning joiner: its join sync carries the saved window.
-    let first = join_as(&mut hs, KEY, 17);
-    hs.server.players[first.i].inventory.set_slot(0, Some(ItemStack::new_block(crate::block::STONE, 6)));
-    hs.release_slot(first.i, None);
-    let mut j = join_unsynced(&mut hs, KEY, 34);
-    assert!(hs.server.players[j.i].window_events.replace_waiting(), "the join sync waits");
-    let cell = place_chest(&mut hs, j.i, &[(0, ItemStack::new_block(crate::block::DIRT, 3))]);
-    let before = all_holdings(&hs, &[j.i], cell);
-    let (waiting, shots, chest) = (hs.server.players[j.i].window_events.waiting(), projectiles(&hs), chest_slots(&hs, cell));
-    let raw = server_places(&hs.server.players[j.i]);
-    let click = send_click(&mut j, &hs, WindowClick::Slot { slot: 0, right: false });
-    let digest = Joiner::digest(&hs, j.i);
-    let open = j.send_op(protocol::WireWindowOp::OpenContainer { cell }, digest, true);
-    let shot = send_shot(&mut j, super::c3d_strict_tests::bow(30));
-    hs.tick();
-    let (heard, opens) = heard_with_opens(&j.client);
-    assert!(heard.rejects.is_empty(), "nothing before the join sync is torn down: {:?}", heard.rejects);
-    for (action, what) in [(click, "click"), (open, "open"), (shot, "shot")] {
-        assert_superseded(&mut hs, &j, action, what);
+fn c3d_strict_click_open_or_shot_before_personal_initialisation_tears_the_link_down() {
+    for (n, what) in ["click", "open", "shot"].into_iter().enumerate() {
+        let tag = format!("c3d-preinit-{what}");
+        let _g = crate::save::WorldsRootGuard::new(&tag);
+        let mut hs = strict_server(&tag);
+        // A returning joiner: its join sync carries the saved window.
+        let first = join_as(&mut hs, KEY, 17);
+        hs.server.players[first.i].inventory.set_slot(0, Some(ItemStack::new_block(crate::block::STONE, 6)));
+        hs.release_slot(first.i, None);
+        let mut j = join_unsynced(&mut hs, KEY, 34 + n as u8);
+        let sp = &hs.server.players[j.i];
+        assert!(sp.window_events.replace_waiting(), "{what}: the join sync waits");
+        assert!(sp.personal.is_some() && !sp.personal_delivery.initialised, "{what}: personal initialisation hasn't completed");
+        let cell = place_chest(&mut hs, j.i, &[(0, ItemStack::new_block(crate::block::DIRT, 3))]);
+        let (shots, chest) = (projectiles(&hs), chest_slots(&hs, cell));
+        match what {
+            "click" => { send_click(&mut j, &hs, WindowClick::Slot { slot: 0, right: false }); }
+            "open" => {
+                let digest = Joiner::digest(&hs, j.i);
+                j.send_op(protocol::WireWindowOp::OpenContainer { cell }, digest, true);
+            }
+            _ => { send_shot(&mut j, super::c3d_strict_tests::bow(30)); }
+        }
+        hs.tick();
+        let (heard, opens) = heard_with_opens(&j.client);
+        assert!(
+            heard.rejects.iter().any(|m| m == crate::strict_admission::StrictTeardown::Unreadable.reason()),
+            "{what}: torn down with a reason: {:?}",
+            heard.rejects
+        );
+        assert_eq!(super::actions::teardown_detail::last(), "Action arrived before personal initialisation", "{what}: the internal reason");
+        assert!(hs.slot_is_free(j.i), "{what}: the seat is released");
+        assert!(opens.is_empty(), "{what}: no view opened");
+        assert_eq!(projectiles(&hs), shots, "{what}: no projectile");
+        assert_eq!(chest_slots(&hs, cell), chest, "{what}: no chest change");
     }
-    assert!(opens.is_empty(), "no view opened");
-    assert_eq!(hs.server.players[j.i].open_container, None);
-    assert_eq!(projectiles(&hs), shots, "no projectile");
-    assert_eq!(hs.server.players[j.i].window_events.waiting(), waiting, "no event");
-    assert_eq!(server_places(&hs.server.players[j.i]), raw, "no window change");
-    assert_eq!(chest_slots(&hs, cell), chest, "no chest change");
-    assert_eq!(all_holdings(&hs, &[j.i], cell), before, "conserved");
-    // Once the sync applies, the same click is served.
-    j.apply_all(&mut hs);
-    let digest = Joiner::digest(&hs, j.i);
-    let set = j.op(&mut hs, protocol::WireWindowOp::OpenPlayer, digest, true);
-    assert_eq!(j.row(&mut hs, set).map(|r| r.1), Some(ActionFate::Accepted));
-    assert!(hear(&j.client).rejects.is_empty());
 }
 
 /// Run-4 review LOW-2 — a host-deposited Plan whose body is far past the

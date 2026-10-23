@@ -64,6 +64,7 @@ impl HeadlessGame {
     pub(crate) fn ticks(&mut self, n: u32) {
         for _ in 0..n {
             self.state.tick();
+            self.state.finish_reputation_day_tick();
         }
     }
 
@@ -77,7 +78,9 @@ impl HeadlessGame {
                 let before = self.state.world.sim_tally;
                 self.state.tick();
                 self.state.network_send_input();
-                self.state.tick_hosted_server(before)
+                let report = self.state.tick_hosted_server(before);
+                self.state.finish_reputation_day_tick();
+                report
             })
             .collect()
     }
@@ -85,6 +88,29 @@ impl HeadlessGame {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(not(target_arch = "wasm32"))]
+    #[path = "quest_baseline.rs"]
+    mod quest_baseline;
+    #[path = "quest_replay.rs"]
+    mod quest_replay;
+    #[cfg(not(target_arch = "wasm32"))]
+    #[path = "quest_native.rs"]
+    mod quest_native;
+    #[cfg(not(target_arch = "wasm32"))]
+    #[path = "quest_preparation.rs"]
+    mod quest_preparation;
+    #[cfg(not(target_arch = "wasm32"))]
+    #[path = "quest_preparation_tests.rs"]
+    mod quest_preparation_tests;
+    #[cfg(not(target_arch = "wasm32"))]
+    #[path = "quest_preparation_lifecycle.rs"]
+    mod quest_preparation_lifecycle;
+    #[path = "quest_day.rs"]
+    mod quest_day;
+    #[path = "quest_day_authority.rs"]
+    mod quest_day_authority;
+    #[path = "quest_carry.rs"]
+    mod quest_carry;
     use super::*;
 
     /// Point `AXENSTAX_WORLDS_DIR` at one pid-scoped temp dir shared by every

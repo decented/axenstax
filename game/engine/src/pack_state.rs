@@ -19,6 +19,9 @@ pub struct PackSession {
 pub struct PackFlight {
     pub action: crate::action_identity::ActionHeader,
     pub event: u32,
+    pub requires_personal: bool,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub personal_ack: Option<crate::protocol::PersonalAck>,
 }
 
 pub fn revision(ecs: &hecs::World, entity: hecs::Entity) -> u64 {

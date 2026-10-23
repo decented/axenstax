@@ -4313,3 +4313,164 @@ clips to the player's viewport and uses a local fallback when there is no
 pointer/controller anchor. Death and critical screens retain priority. A
 Plan parked behind an occupied cursor is not drawn as another carried stack;
 freeing a bag slot alone still does not trigger parked reseating (C3d OPEN).
+
+
+### D2c-3 world scope and ordinary giver carrier (foundation checkpoint)
+
+The appended optional `quest_world` is WorldSave field54, after the unchanged
+first53 fields, with save-layout revision3/footer57. It contains the random
+world scope and at most512 engaged ordinary giver snapshots, bounded to512KiB.
+Old52/footer52 bodies still end at their real rig-clip field; genuine footerless32
+bodies still end at bounty refresh before the face tables. Old snapshots default
+the absent scope/carrier. No existing VillagerComponent, authored mob or steed
+positional encoding is changed.
+
+A giver snapshot preserves its random identity, kind, actual position/velocity,
+health/timers, ordinary profession/workstation/gossip and authored flag. Builder
+commissions and Satoshi stay outside this carrier. Engagement preparation checks
+the full bounded capture before mutation; commit removes disposable Scattered
+ownership. Live saves capture their actual ECS, refuse an omitted or mismatched
+scoped carrier, and exclude identified authored givers from the older generic
+Authored pet carrier. Restore uses the exact identity once, never position
+matching, and an existing identity cannot change kind. A dead original giver is
+not replaced by another NPC. Live quest dialogue/acceptance/completion and full
+continuation acceptance are still pending at this checkpoint.
+
+**Native portable continuation (D2c-3 source checkpoint).** A restored portable
+quest or decline timer selects the exact live `QuestNpcId` before the legacy
+local offer route. Its saved terms, cumulative Kill baseline and original
+village reputation remain in the same bound player holder. Merely loading a
+record creates no new offer. Missing, dead, foreign or out-of-reach original
+givers cannot complete it; nearby similar villagers are not substitutes.
+Legacy local quest generation and monetary payouts keep their existing route.
+
+The portable native turn-in revalidates the current bag and exact quest/giver
+IDs, prepares the same domain candidate, and consumes only the shared ordered
+material cost from the actual bag. Armour, cursor, grid and unaffected private
+Plan bodies retain their allocations. Completion removes the accepted entry
+once, applies its frozen item/reputation reward without sats, treasury or tier
+payment, and spills only the actual item remainder at the original giver.
+Repeats and refused costs leave the player state intact. Selected saves retain
+the consumed state; they never restore a completed quest from an older canonical
+mirror.
+
+The same holder's gameplay clock anchors at actual native installation and
+observes local logical ticks. Remaining decline/penalty timers project together
+for reads, mutations and selected captures; offline time is excluded. Only
+actual expiry writes a discrete revision. Native attributed kills, the bounded
+villager penalty and daily reputation decay update that holder once, without a
+second counter or progression store. The remote villager penalty uses the
+village resolved by the actual death-world sweep, including a lending host's
+native sweep outside the server borrow window. A death world with no village
+cannot borrow one from another server world. Kill attribution still uses the
+same position and last-hit/nearest/current-attachment-generation rule; a valid
+credit retains the existing common-write error and legacy event/counter
+behaviour. Joined authoritative counters keep their existing server owner and
+do not receive echoed local credits. The checked common-holder carry path is
+specified below; its actual current-fence settlement and original/retained
+continuation controls must pass before acceptance. Unsupported legacy state
+and incomplete current holders retain their guards. This source checkpoint
+does not claim full quest or transfer acceptance.
+
+At the first unbound native-to-common cut, the live legacy villager penalty
+timestamp migrates once as `max(0, 600 - elapsed logical ticks)`. A future
+timestamp refuses before mutation; an expired interval remains zero. The same
+holder's clock anchors before the initial capture so the saved interval is
+exactly the remaining live cooldown. An already-bound holder is never
+remigrated from its legacy timestamp. A second real villager death inside the
+same interval cannot charge another penalty; a death after actual expiry starts
+one new bounded penalty in the common owner.
+
+Failed native preparation restores exact quest progress, clock, binding, world
+scope and local selection and retains the live physical bag, cursor/grid,
+armour and private Plan allocations. A post-rename candidate remains selected
+on disk without being admitted in memory. Its private retry provenance has no
+second gameplay body. Ordinary writers/cuts cannot erase it. Explicit retry
+keeps its identity but recaptures current live counters, reputation, holdings
+and the current legacy remaining interval, including gameplay since failure;
+it never installs stale selected progression or resets elapsed time. Successful
+ordinary save plus strict directory confirmation admits that current candidate
+once. Checked reopen follows the actual selected primary/autosave and existing
+owner/proof validation. Checkpoint27 source and controls still require runtime
+verification; full signed/guest isolation and active continuation remain
+separate acceptance work.
+
+
+### D2c-3 reputation day authority (checkpoint30 source, verification pending)
+
+Reputation drifts one point toward zero per 24,000 accumulated **actual natural
+solar units** at the active world-clock owner, rather than every 6000 logical
+ticks or each visible phase rollover. Native nonjoined play counts its actual
+`world_time_step`; an owning dedicated/no-lend server counts its actual +1
+advance. Joined visual extrapolation has no reputation authority. `/time speed`
+changes subsequent natural units; `/time set` and sleeping only relocate phase
+and grant no decay. A lighting `time_lock` leaves natural raw clock advances
+running. Existing raid/treasury numerical 6000 scheduling and gossip are unchanged.
+
+A lending host consumes the same genuine native day for its local holders and
+passes one private runtime stamped offer to the lending server run that was
+already present at that advance. Only that run, owner and same complete fixed
+tick may consume it once; duplicate, stale, foreign-owner or later/new-host
+windows cannot replay a cached day. Connected in-world authoritative holders,
+including dead bodies, are eligible at actual application; server inbound
+admission and departure run before the server applies the event. Real current
+Personal snapshots and physical/Applied frontiers still settle each mutation.
+Offline holders receive neither events nor catch-up.
+
+Partial-day remainder and event provenance are runtime-only: temporary hosting,
+lending and failed leave preserve them; true world reopen or dedicated restart
+starts a fresh partial day and runtime owner while saved scores and honest
+remaining gameplay timers restore. No cyclic phase or partial-day persistence,
+new record/protocol/save schema, or dedicated persisted clock parity is claimed.
+No-lend keeps its existing owning-server+1 natural advance even when native
+accelerated phase is mirrored; matching accelerated host/server clock ownership
+remains D4. These source changes await reviewed exact runtime controls and do
+not claim final quest/carry acceptance.
+
+
+### D2c-3 active common carry (checkpoint37 source, verification pending)
+
+Only the actual native source and chosen cryptographically verified recipient
+project their common holders at the aligned cut. Accepted original-giver terms,
+Kill baselines, cumulative counters, reputation, claims and all remaining
+cooldowns travel in their existing owner; no offer is regenerated and no
+private bag/body is installed from another participant. Each clock anchors once
+at the real cut. Frozen or offline time consumes no remaining interval; abort
+continues from the committed cut and subsequent honest gameplay, without an old
+record/timer rollback. Guests keep their own existing runtime state and receive
+no canonical file or participant projection.
+
+The two-holder operation reserves maps, encoded records, checked revisions and
+the actual current remote delivery before either participant changes. A fresh
+fence must install through the recipient's SAME live slot and Personal Inbox,
+even while Paused, and the real returned ACK must reach the source before
+capture. Unchanged bytes with complete actual current delivery need no redundant
+fence. An old ACK, high event number or merely readable record is insufficient.
+Physical bags, armour, cursor/grid and nested private Plan allocations stay in
+place through cut and abort. A checked reopen may allocate anew but restores
+only that participant's exact own contents from its legitimate selected record
+and local Plan store. Authoring private bodies for a control does not prove
+those bodies were earned, crafted or sent across the transfer.
+
+Supported common credits do not make every legacy side effect portable. A wild
+Nostrich Vow remains outside the common carrier, including actual nearest and
+last-hit attribution; tamed exemption is unchanged. Missing or failed common
+mutation makes the SAME remote attachment permanently incomplete for this carry
+attempt/lifetime, even if a later record succeeds or is ACKed. Missing holder
+alone does not alter the existing read-failed save policy. Native failed bound
+kill/expiry/decay marks its private current-holder incomplete flag and retains
+old maps/clock with no legacy counter fallback. Same-holder success, installation,
+ACK, save and abort cannot clear it; only the real existing world/holder reset
+or new construction can. No durable completeness field or restart guarantee is
+added. Genuine stale-generation work has no mutation, event or completeness
+side effect; established current-generation legacy event ordering remains.
+
+Retained and continued own records must keep exact original giver identity,
+frozen terms/baselines and honest remaining timers through true menu entry,
+Save/Discard, full-folder movement and signed dedicated/native role return.
+Completion pays the exact frozen material cost and rewards and reputation once;
+repeat and reopen cannot pay again. Portable joined/native completion has zero
+monetary/treasury effect. The actual source37 controls and final combined gates
+are pending; full transfer acceptance is not claimed here. Reputation's actual
+natural-day runtime contract, raid/treasury6000 schedule, existing proofs and
+selected-primary guards, Mirror default and D4 qualifications are unchanged.

@@ -126,7 +126,7 @@ fn handover_personal_dedicated_load_selects_matching_snapshot_and_parks_future_a
         let mut personal = loaded.personal.clone().unwrap();
         let mut record = personal.record().unwrap();
         record.kills = vec![(crate::mob::MobType::Pig, 41)];
-        personal = BoundPersonal::new(personal.binding.clone(), &record).unwrap();
+        personal = BoundPersonal::with_gameplay(personal.binding.clone(), &record).unwrap();
         loaded.restore_vitals(&mut server.players[0], server.run_id);
         server.players[0].inventory = window.inv;
         server.players[0].cursor = window.cursor;

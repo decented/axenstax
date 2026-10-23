@@ -18,6 +18,8 @@ pub(super) struct Heard {
     pub(super) accepts: Vec<protocol::JoinAcceptPacket>,
     pub(super) rejects: Vec<String>,
     pub(super) receipts: Vec<ActionReceipt>,
+    pub(super) syncs: Vec<protocol::InventorySyncPacket>,
+    pub(super) personal: Vec<protocol::PersonalSnapshot>,
 }
 
 pub(super) fn hear(client: &ChannelClientTransport) -> Heard {
@@ -29,6 +31,10 @@ pub(super) fn hear(client: &ChannelClientTransport) -> Heard {
                 out.rejects.push(protocol::safe_deserialize::<protocol::JoinRejectPacket>(p).unwrap().reason)
             }
             Some((protocol::PacketType::ActionReceipt, p)) => out.receipts.push(protocol::safe_deserialize(p).unwrap()),
+            Some((protocol::PacketType::InventorySync, p)) => out.syncs.push(protocol::safe_deserialize(p).unwrap()),
+            Some((protocol::PacketType::PersonalSync, p)) => {
+                if let protocol::PersonalSyncPacket::Snapshot(snapshot) = protocol::safe_deserialize(p).unwrap() { out.personal.push(snapshot); }
+            }
             _ => {}
         }
     }
@@ -36,8 +42,21 @@ pub(super) fn hear(client: &ChannelClientTransport) -> Heard {
 }
 
 /// Join `KEY` on a fresh connection (binding `b`), tick, and return the slot
-/// and what the client heard.
+/// and what the client heard. An admitted client installs its initial
+/// personal state ([`super::tests::install_initial_personal`], one more
+/// tick), as a real client does before it plays.
 pub(super) fn join(hs: &mut HostedServer, b: u8) -> (usize, ChannelClientTransport, Heard) {
+    let (i, client, heard) = join_raw(hs, b);
+    if let (Some(accept), Some(sync), Some(personal)) = (heard.accepts.first(), heard.syncs.first(), heard.personal.first()) {
+        let initial = super::tests::InitialPackets { accept: accept.clone(), sync: sync.clone(), personal: personal.clone() };
+        super::tests::install_initial_personal(hs, &client, &initial, HostedServer::tick);
+    }
+    (i, client, heard)
+}
+
+/// [`join`] with nothing installed: the join's initial Sync1 and Personal2
+/// are only heard, for a test of their installation itself.
+pub(super) fn join_raw(hs: &mut HostedServer, b: u8) -> (usize, ChannelClientTransport, Heard) {
     let client = hs.attach_test_remote_with_binding(Some([b; 32]));
     send_signed_join(&client, KEY, Some([b; 32]));
     hs.tick();
@@ -195,7 +214,9 @@ fn c3d_actual_hosted_fifo_repeats_the_original_receipt_without_mutation_or_debt(
     hs.select_inventory_mode(InventoryMode::Strict).expect("a dedicated server selects any mode");
     let (i, client, heard) = join(&mut hs, 17);
     let accept = heard.accepts.first().expect("Strict admits a first visit");
-    let action = ActionHeader { session: accept.action_session, epoch: 0, seq: 1, life: accept.action_life, events_applied: 0 };
+    // The client applied the join's Sync1 and Personal2 (`join` installs them).
+    let applied = heard.personal.first().expect("the join's initial Personal2").window_event;
+    let action = ActionHeader { session: accept.action_session, epoch: 0, seq: 1, life: accept.action_life, events_applied: applied };
     let packet = protocol::serialize_packet(protocol::PacketType::Action, &ActionPacket { action, intent: ActionIntent::CancelledNoop });
     let window = |sp: &crate::server::ServerPlayer| crate::inventory_sync::packet(&crate::window_events::effective_window(sp), &Default::default(), 1);
     let window_before = window(&hs.server.players[i]);

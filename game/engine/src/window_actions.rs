@@ -95,9 +95,12 @@ impl GameState {
     /// C3d run 8 (review H1) — a grid holding items goes back to the bag
     /// first, by a real `Close` over the real grid (`CraftingUi::open_crafting`
     /// / `open_joined`); that `Close` passes the one gate, so a frozen window
-    /// opens nothing.
+    /// opens nothing. Before personal initialisation it opens nothing either,
+    /// as clicks are refused then: a Mirror open dropped before ready would
+    /// leave the client at a station the server's copy never adopted.
     pub(crate) fn open_crafting(&mut self, pidx: usize, table: Option<[i32; 3]>) {
         if self.pack_window_frozen(pidx) || self.players[pidx].crafting_ui.grid_holds_items() && self.strict_window_frozen(pidx) { return; }
+        if pidx == 0 && self.remote_client.as_ref().is_some_and(|r| !r.personal_ready()) { return; }
         let p = &mut self.players[pidx];
         if !self.remote_client.as_ref().is_some_and(|r| r.inventory_mode == InventoryMode::Strict) {
             p.crafting_ui.open_crafting(table, &mut p.inventory, &mut p.armour_slots);
@@ -110,6 +113,7 @@ impl GameState {
     /// Mirror, a reserved action in Strict).
     pub(crate) fn ask_open_container(&mut self, pidx: usize, cell: [i32; 3]) {
         if self.pack_window_frozen(pidx) { return; }
+        if pidx == 0 && self.remote_client.as_ref().is_some_and(|r| !r.personal_ready()) { return; }
         let p = &mut self.players[pidx];
         if !self.remote_client.as_ref().is_some_and(|r| r.inventory_mode == InventoryMode::Strict) {
             p.crafting_ui.log_open_container(cell, &p.inventory, &p.armour_slots);

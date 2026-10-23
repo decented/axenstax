@@ -475,7 +475,7 @@ fn validate_member(path: &Path, member: &Member, manifest: &Manifest) -> Result<
         }
         MemberKind::Sidecar => super::bounded_decode::sidecar(&files::read(path, 65536)?)?,
         MemberKind::Progression => {
-            if schema != super::super::personal::SCHEMA {
+            if ![1, 2].contains(&schema) {
                 return Err(Error::Invalid("participant schema"));
             }
             let npub = member
@@ -489,10 +489,9 @@ fn validate_member(path: &Path, member: &Member, manifest: &Manifest) -> Result<
                 generation: manifest.generation,
                 transfer: manifest.transfer,
             };
-            super::super::personal::PersonalRecord::decode(
-                &files::read(path, super::super::personal::RECORD_LIMIT)?,
-                &context,
-            )?;
+            let bytes = files::read(path, super::super::personal::RECORD_LIMIT)?;
+            if super::super::personal::PersonalRecord::declared_schema(&bytes)? != schema { return Err(Error::Invalid("participant payload schema")); }
+            super::super::personal::PersonalRecord::decode(&bytes, &context)?;
         }
         _ => {}
     }

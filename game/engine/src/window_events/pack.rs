@@ -28,6 +28,7 @@ fn holding_event<'a>(event: &'a WindowEvent, registry: &crate::block::BlockRegis
     let exact = |stack: &ItemStack| crate::staged_window::exact_marker(stack, registry).ok_or(PackStageError::Unrepresentable);
     match event {
         WindowEvent::Grant(stack) => Ok(Cow::Owned(WindowEvent::Grant(exact(stack)?))),
+        WindowEvent::RewardGrant { stack, origin } => Ok(Cow::Owned(WindowEvent::RewardGrant { stack: exact(stack)?, origin: *origin })),
         WindowEvent::Take { slot, item, n, how } => {
             let marker = exact(&ItemStack { item: marker_item(item), count: 1 })?;
             Ok(Cow::Owned(WindowEvent::Take { slot: *slot, item: marker.item, n: *n, how }))
@@ -154,7 +155,7 @@ fn event_heap_bytes(event: &WindowEvent) -> Result<usize, super::strict::StrictS
     use super::strict::{item_heap_bytes, replace_heap_bytes, view_heap_bytes, StrictStageError};
     match event {
         WindowEvent::Replace { window, debt, .. } | WindowEvent::PackCanonical { window, debt, .. } => replace_heap_bytes(window, debt),
-        WindowEvent::Grant(stack) => item_heap_bytes(&stack.item),
+        WindowEvent::Grant(stack) | WindowEvent::RewardGrant { stack, .. } => item_heap_bytes(&stack.item),
         WindowEvent::Take { item, .. } => item_heap_bytes(item),
         WindowEvent::WearArmour { .. } | WindowEvent::WearWeapon { .. } | WindowEvent::PackView => Ok(0),
         #[cfg(not(target_arch = "wasm32"))]
@@ -307,7 +308,7 @@ mod tests {
         let registry = crate::block::BlockRegistry::new();
         let context = crate::personal_value::PersonalContext { participant: [7; 32], lineage: [1; 16], generation: 1, transfer: [4; 16] };
         let record = crate::handover::personal::PersonalRecord::from_maps(context, [], [], [], None).unwrap();
-        let snapshot = crate::protocol::PersonalSnapshot { session: [8; 16], life: 0, revision: 1, window_event: 1, context, bytes: record.encode().unwrap() };
+        let snapshot = crate::protocol::PersonalSnapshot { session: [8; 16], life: 0, revision: 1, window_event: 1, context: crate::progression::GameplayContext::Imported(context), bytes: record.to_gameplay().encode().unwrap() };
         for mode in [InventoryMode::Mirror, InventoryMode::Strict] {
             let mut sp = player(mode);
             sp.inventory.set_slot(0, Some(ItemStack::new_block(crate::block::STONE, 3)));

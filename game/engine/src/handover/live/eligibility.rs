@@ -27,15 +27,40 @@ pub fn local_seats(count: usize) -> Result<(), Refusal> {
     Ok(())
 }
 
-/// Entity-bound quests and unexpired cooldowns have no schema1 carrier.
-/// Refuse both consent and frozen capture instead of silently dropping them.
-pub(crate) fn local_progress(slot: &crate::player_slot::PlayerSlot, tick: u64) -> Result<(), Refusal> {
-    if crate::nostrich_vow::is_vow_active(slot.nostrich_vow.as_ref()) || !slot.active_quests.is_empty() || !slot.kill_quest_baseline.is_empty()
+/// Legacy entity-bound state and Vows remain outside the common carrier.
+fn legacy_progress(slot: &crate::player_slot::PlayerSlot, tick: u64) -> Result<(), Refusal> {
+    if !slot.gameplay_carry_complete()
+        || crate::nostrich_vow::is_vow_active(slot.nostrich_vow.as_ref())
+        || !slot.active_quests.is_empty()
+        || !slot.kill_quest_baseline.is_empty()
         || slot.villager_decline_until.values().any(|until| *until > tick)
-        || slot.last_villager_kill_rep_tick.is_some_and(|last| tick.saturating_sub(last) < 600) {
-        return Err(Refusal("Finish your active quests and wait for village cooldowns or curses before handing this world over. Nothing was changed."));
+        || slot.last_villager_kill_rep_tick.is_some_and(|last| tick.saturating_sub(last) < 600)
+    {
+        return Err(Refusal(
+            "Finish unsupported local quests or curses before handing this world over. Nothing was changed.",
+        ));
     }
     Ok(())
+}
+pub(crate) fn local_progress(slot: &crate::player_slot::PlayerSlot, tick: u64) -> Result<(), Refusal> {
+    legacy_progress(slot, tick)?;
+    match &slot.personal_binding {
+        Some(binding)
+            if binding.validate().is_err()
+                || crate::progression::GameplayRecord::from_slot(binding.context(), slot).is_err() =>
+        {
+            Err(Refusal("Your current common progress couldn't be retained without loss."))
+        }
+        None if common_quest_pending(&slot.quest_progress) => {
+            Err(Refusal("Your active local progress has no proven common authority. Nothing was changed."))
+        }
+        _ => Ok(()),
+    }
+}
+/// The caller separately proves the actual joined Inbox/current transport
+/// namespace. A joined slot legitimately has no native proof binding.
+pub(crate) fn joined_progress(slot: &crate::player_slot::PlayerSlot, tick: u64) -> Result<(), Refusal> {
+    legacy_progress(slot, tick)
 }
 
 /// The signed-in identity now must be the one the host action captured.
@@ -49,6 +74,9 @@ pub fn source_identity(captured: [u8; 32], now: Option<[u8; 32]>) -> Result<(), 
 
 /// Live seats and server-wide deliveries.
 pub fn seats(server: &GameServer, recipient: Seat) -> Result<(), Refusal> {
+    if server.gameplay_preparation.is_some() {
+        return Err(Refusal("Resolve the current selected scope preparation before handing over."));
+    }
     if !server.pending_item_grants.is_empty()
         || !server.pending_kill_events.is_empty()
         || !server.pending_bred_events.is_empty()
@@ -63,10 +91,14 @@ pub fn seats(server: &GameServer, recipient: Seat) -> Result<(), Refusal> {
             continue; // guests persist nothing and carry no record
         };
         if server.failed_joiner_reads.contains(&key) {
-            return Err(Refusal("A player's saved record here couldn't be read. It is kept untouched; the world can't be handed over until it is repaired."));
+            return Err(Refusal(
+                "A player's saved record here couldn't be read. It is kept untouched; the world can't be handed over until it is repaired.",
+            ));
         }
         if i != recipient.slot {
-            return Err(Refusal("Another signed-in player is here. Moving their saved record needs their agreement, which this version can't ask for yet."));
+            return Err(Refusal(
+                "Another signed-in player is here. Moving their saved record needs their agreement, which this version can't ask for yet.",
+            ));
         }
     }
     let sp = server
@@ -77,16 +109,29 @@ pub fn seats(server: &GameServer, recipient: Seat) -> Result<(), Refusal> {
     if sp.attach_gen != recipient.generation || sp.verified_pubkey != Some(recipient.key) {
         return Err(Refusal("That player reconnected. Choose them again."));
     }
-    if !sp.progression_tracked || sp.progression_credits != 0
-        || sp.personal.as_ref().is_some_and(|p| !sp.personal_delivery.quiescent(p, sp.respawns)) {
-        return Err(Refusal("That player has village or hunting progress this session, which this version can't move yet."));
+    if !sp.progression_tracked || sp.personal_read_failed {
+        return Err(Refusal("That player's current progress is incomplete and can't be moved without loss."));
+    }
+    if let Some(personal) = &sp.personal {
+        let header =
+            sp.action_frontier.as_ref().ok_or(Refusal("That player's action namespace is unavailable."))?.header(0, 0);
+        if personal.record().is_err()
+            || personal.binding.context().participant() != Some(recipient.key)
+            || !sp.personal_delivery.current(personal, header, &sp.window_events)
+        {
+            return Err(Refusal("That player's current personal state is still settling."));
+        }
+    } else if sp.progression_credits != 0 {
+        return Err(Refusal("That player's hunting progress has no common holder and can't be moved."));
     }
     if sp.combat.dead {
         return Err(Refusal("That player is dead. Wait until they respawn."));
     }
     if !sp.window_events.is_quiescent()
+        || sp.pack_flight.is_some()
         || sp.action_queue.as_ref().is_some_and(|q| !q.is_empty())
-        || sp.action_results.as_ref().is_some_and(|r| !r.is_quiescent()) {
+        || sp.action_results.as_ref().is_some_and(|r| !r.is_quiescent())
+    {
         return Err(Refusal("That player's inventory is still settling with yours. Try again in a moment."));
     }
     // OC: every connected joiner the checkpoint includes must provably owe
@@ -111,15 +156,24 @@ pub const OWED: Refusal = Refusal(
 pub(crate) fn recipient_record(record: Option<&crate::joiner_save::JoinerSave>) -> Result<(), Refusal> {
     match record {
         Some(r) if !r.obligations_proven_zero() => Err(OWED),
+        Some(r) if r.personal.as_ref().is_some_and(|personal| personal.record().is_err()) => {
+            Err(Refusal("The current personal record could not be read without loss."))
+        }
         _ => Ok(()),
     }
+}
+
+fn common_quest_pending(progress: &crate::progression::QuestProgress) -> bool {
+    !progress.accepted.is_empty() || !progress.declines.is_empty() || progress.penalty_left != 0
 }
 
 /// Saved participant records on disk (`joiners/<npub>.dat`) other than the
 /// source's and the recipient's own: each needs that player's agreement.
 pub fn saved_records(saved: &[[u8; 32]], source: [u8; 32], recipient: [u8; 32]) -> Result<(), Refusal> {
     if saved.iter().any(|k| *k != source && *k != recipient) {
-        return Err(Refusal("Other players have saved records in this world. Moving them needs their agreement, which this version can't ask for yet."));
+        return Err(Refusal(
+            "Other players have saved records in this world. Moving them needs their agreement, which this version can't ask for yet.",
+        ));
     }
     Ok(())
 }
@@ -183,7 +237,9 @@ pub fn neutralise(save: &mut WorldSave, source_npub: &str) -> Result<(), Refusal
             match $o {
                 O::LocalPlayer(0) => *$o = O::Npub(source_npub.to_string()),
                 O::LocalPlayer(_) => {
-                    return Err(Refusal("Something here belongs to a split-screen player, who has no proven identity to carry it."))
+                    return Err(Refusal(
+                        "Something here belongs to a split-screen player, who has no proven identity to carry it.",
+                    ));
                 }
                 O::Npub(_) => {}
             }
@@ -201,7 +257,9 @@ pub fn neutralise(save: &mut WorldSave, source_npub: &str) -> Result<(), Refusal
     }
     for a in &mut save.auctions {
         if a.data.high_bidder.is_some() {
-            return Err(Refusal("An auction has a bid this version can't attribute to a person. Finish or cancel it first."));
+            return Err(Refusal(
+                "An auction has a bid this version can't attribute to a person. Finish or cancel it first.",
+            ));
         }
         owner!(&mut a.data.owner, crate::auction::AuctionOwner);
     }
@@ -212,10 +270,7 @@ pub fn neutralise(save: &mut WorldSave, source_npub: &str) -> Result<(), Refusal
         owner!(&mut h.owner, crate::market_hub::HubOwner);
     }
     if !save.raid_kills.is_empty()
-        || save
-            .active_raids
-            .iter()
-            .any(|r| !r.contribution_table.is_empty() || r.killing_blow.is_some())
+        || save.active_raids.iter().any(|r| !r.contribution_table.is_empty() || r.killing_blow.is_some())
     {
         return Err(Refusal("Raid records here are kept by seat, not by person, so they can't move yet."));
     }
@@ -271,7 +326,7 @@ mod tests {
 
     fn live_copy() -> WorldSave {
         let slot = crate::player_slot::PlayerSlot::new(0, glam::Vec3::new(4.0, 70.0, 4.0), 1.0);
-        crate::save::build_world_save(&crate::world::World::new(), &[slot], 42, &[], &[]).unwrap()
+        crate::save::build_world_save(&crate::world::World::new(), &[slot], 42, &[], &[], None).unwrap()
     }
     fn vendor(owner: VendorOwner) -> SavedVendor {
         SavedVendor { x: 1, y: 2, z: 3, data: VendorData { owner: Some(owner), ..Default::default() } }
@@ -338,7 +393,7 @@ mod tests {
 
     #[test]
     fn handover_save_builder_refuses_no_seats_without_panicking() {
-        assert!(crate::save::build_world_save(&crate::world::World::new(), &[], 42, &[], &[]).is_none());
+        assert!(crate::save::build_world_save(&crate::world::World::new(), &[], 42, &[], &[], None).is_none());
     }
 
     #[test]

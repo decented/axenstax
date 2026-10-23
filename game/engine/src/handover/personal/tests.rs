@@ -72,10 +72,10 @@ fn handover_personal_foreign_context_truncation_trailing_and_version_refused() {
     );
     // Schema follows the 4-byte length + domain label.
     let at = 4 + DOMAIN.len();
-    let mut v2 = bytes.clone();
-    v2[at + 3] = 2;
+    let mut unknown = bytes.clone();
+    unknown[at + 3] = 3;
     assert_eq!(
-        PersonalRecord::decode(&v2, &ctx()),
+        PersonalRecord::decode(&unknown, &ctx()),
         Err(Error::Invalid("participant schema"))
     );
 }

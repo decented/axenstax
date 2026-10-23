@@ -3,7 +3,7 @@
 //! path while control frames still flow; a pre-retirement release resumes the
 //! same seat's waiting gameplay through the ordinary path.
 use super::joiner_authority::{accepted, cell_beside, send_edits};
-use super::lent_world::start_lent;
+use super::lent_world::start_prepared_lent;
 use crate::block;
 use crate::hosted_server::HostedServer;
 use crate::protocol;
@@ -51,7 +51,7 @@ pub(super) fn signed_join_lent(
     let req = crate::hosted_server::tests::join_with_auth(ev, None);
     client.send_to_server(&protocol::serialize_packet(protocol::PacketType::JoinRequest, &req));
     host.lend_tick(hs);
-    let slot = accepted(&client).expect("signed join accepted").player_index as usize;
+    let slot = crate::hosted_server::tests::join_installed(hs, &client, |hs| host.lend_tick(hs)).player_index as usize;
     super::joiner_authority::settle_chunk_push(hs, &client, |hs| host.lend_tick(hs));
     let (generation, key) = hs.handover_seat(slot).expect("authenticated live seat");
     (client, slot, generation, key)
@@ -65,7 +65,7 @@ fn handover_frame(bytes: &[u8]) -> Vec<u8> {
 
 #[test]
 fn handover_link_binds_only_the_exact_authenticated_seat() {
-    let (mut hs, mut host) = start_lent("handover-bind");
+    let (mut hs, mut host) = start_prepared_lent("handover-bind");
     let (client, slot, generation, key) = signed_join_lent(&mut hs, &mut host, [0x51; 32]);
     assert_eq!(
         hs.handover_bind(slot, generation.wrapping_add(1), key, T).err(),
@@ -89,7 +89,7 @@ fn handover_link_binds_only_the_exact_authenticated_seat() {
 
 #[test]
 fn handover_frozen_source_runs_no_tick_admits_nobody_and_resumes_after_release() {
-    let (mut hs, mut host) = start_lent("handover-freeze");
+    let (mut hs, mut host) = start_prepared_lent("handover-freeze");
     let (client, slot, generation, key) = signed_join_lent(&mut hs, &mut host, [0x52; 32]);
     let (other, other_slot, _, _) = signed_join_lent(&mut hs, &mut host, [0x53; 32]);
     let accept = hs.test_accept_channel();
@@ -144,7 +144,7 @@ fn handover_frozen_source_runs_no_tick_admits_nobody_and_resumes_after_release()
 /// disconnected at release by the ordinary overflow kick.
 #[test]
 fn handover_frozen_guest_flood_is_bounded_and_kicked_at_release() {
-    let (mut hs, mut host) = start_lent("handover-flood");
+    let (mut hs, mut host) = start_prepared_lent("handover-flood");
     let (_client, slot, generation, key) = signed_join_lent(&mut hs, &mut host, [0x54; 32]);
     let (guest, guest_slot, _, _) = signed_join_lent(&mut hs, &mut host, [0x55; 32]);
     let _lease = hs.handover_bind(slot, generation, key, T).unwrap();
@@ -188,27 +188,29 @@ fn handover_frozen_guest_flood_is_bounded_and_kicked_at_release() {
 #[test]
 fn handover_eligibility_refuses_live_seat_state_it_cannot_carry() {
     use crate::handover::live::eligibility::{Refusal, Seat, seats};
-    let (mut hs, mut host) = start_lent("handover-elig");
+    let (mut hs, mut host) = start_prepared_lent("handover-elig");
     let (_c, slot, generation, key) = signed_join_lent(&mut hs, &mut host, [0x61; 32]);
     let seat = Seat { slot, generation, key };
     assert_eq!(seats(&hs.server, seat), Ok(()), "a fresh tracked seat with no credits");
     assert!(seats(&hs.server, Seat { generation: generation.wrapping_add(1), ..seat }).is_err());
     assert!(seats(&hs.server, Seat { key: [3; 32], ..seat }).is_err());
     // One server credit: in flight first, then delivered — both refuse.
+    // Delivered progress is carried in the common holder (D2c-3), so what
+    // refuses is its new personal snapshot, not yet applied by the client.
     hs.server.queue_kill_event(slot, generation, crate::mob::MobType::Cow, glam::Vec3::ZERO, false, false);
     assert!(seats(&hs.server, seat).is_err(), "credit still in flight");
     host.lend_tick(&mut hs);
     assert_eq!(
         seats(&hs.server, seat),
-        Err(Refusal("That player has village or hunting progress this session, which this version can't move yet."))
+        Err(Refusal("That player's current personal state is still settling."))
     );
     // An unreadable record of a connected seat refuses (kept untouched).
-    let (mut hs, mut host) = start_lent("handover-elig-read");
+    let (mut hs, mut host) = start_prepared_lent("handover-elig-read");
     let (_c, slot, generation, key) = signed_join_lent(&mut hs, &mut host, [0x62; 32]);
     hs.server.failed_joiner_reads.insert(key);
     assert!(seats(&hs.server, Seat { slot, generation, key }).is_err());
     // Another signed-in player present: their agreement can't be asked yet.
-    let (mut hs, mut host) = start_lent("handover-elig-other");
+    let (mut hs, mut host) = start_prepared_lent("handover-elig-other");
     let (_a, slot, generation, key) = signed_join_lent(&mut hs, &mut host, [0x63; 32]);
     let (_b, _, _, _) = signed_join_lent(&mut hs, &mut host, [0x64; 32]);
     assert!(seats(&hs.server, Seat { slot, generation, key }).is_err());
@@ -216,7 +218,7 @@ fn handover_eligibility_refuses_live_seat_state_it_cannot_carry() {
 
 #[test]
 fn handover_dropped_session_lease_releases_the_source_and_tells_the_recipient() {
-    let (mut hs, mut host) = start_lent("handover-lease");
+    let (mut hs, mut host) = start_prepared_lent("handover-lease");
     let (client, slot, generation, key) = signed_join_lent(&mut hs, &mut host, [0x54; 32]);
     let lease = hs.handover_bind(slot, generation, key, T).unwrap();
     hs.handover_freeze(None).unwrap();
@@ -235,7 +237,7 @@ fn handover_dropped_session_lease_releases_the_source_and_tells_the_recipient() 
 
 #[test]
 fn handover_release_discards_a_departed_recipients_waiting_edits() {
-    let (mut hs, mut host) = start_lent("handover-departed");
+    let (mut hs, mut host) = start_prepared_lent("handover-departed");
     let (client, slot, generation, key) = signed_join_lent(&mut hs, &mut host, [0x55; 32]);
     let _lease = hs.handover_bind(slot, generation, key, T).unwrap();
     hs.handover_freeze(None).unwrap();
@@ -259,16 +261,18 @@ fn handover_release_discards_a_departed_recipients_waiting_edits() {
 #[test]
 fn handover_refuses_while_the_recipients_inventory_is_still_settling() {
     use crate::handover::live::eligibility::{Refusal, Seat, seats};
-    let (mut hs, mut host) = start_lent("handover-settling");
+    let (mut hs, mut host) = start_prepared_lent("handover-settling");
     let (_c, slot, generation, key) = signed_join_lent(&mut hs, &mut host, [0x65; 32]);
     let seat = Seat { slot, generation, key };
     assert_eq!(seats(&hs.server, seat), Ok(()));
     // A grant sent to the joiner and not yet acknowledged by its client.
     let stack = crate::item::ItemStack::new_block(block::GLASS, 1);
     crate::window_events::queue(&mut hs.server.players[slot], crate::window_events::WindowEvent::Grant(stack), 1);
+    // The personal fence is current only over a quiescent window (D2c-3),
+    // so the unacknowledged grant is refused there first.
     assert_eq!(
         seats(&hs.server, seat),
-        Err(Refusal("That player's inventory is still settling with yours. Try again in a moment."))
+        Err(Refusal("That player's current personal state is still settling."))
     );
 }
 
@@ -301,6 +305,37 @@ fn signed_join_quic(
     client.send_to_server(&protocol::serialize_packet(PacketType::JoinRequest, &req));
     let acc: protocol::JoinAcceptPacket = protocol::safe_deserialize(&wait_for(hs, PacketType::JoinAccept)).unwrap();
     let slot = acc.player_index as usize;
+    // The join's initial Sync1 and Personal2 arrive over QUIC in their own
+    // time; the client installs them, and its Applied is awaited the same way.
+    let (mut sync, mut personal) = (None, None);
+    while sync.is_none() || personal.is_none() {
+        while let Some(pkt) = client.try_recv_from_server() {
+            match protocol::deserialize_header(&pkt) {
+                Some((PacketType::InventorySync, p)) if sync.is_none() => sync = Some(protocol::safe_deserialize(p).unwrap()),
+                Some((PacketType::PersonalSync, p)) => {
+                    if let protocol::PersonalSyncPacket::Snapshot(s) = protocol::safe_deserialize(p).unwrap()
+                        && personal.is_none()
+                    {
+                        personal = Some(s);
+                    }
+                }
+                _ => {}
+            }
+        }
+        if sync.is_none() || personal.is_none() {
+            assert!(std::time::Instant::now() < deadline, "no initial Sync1/Personal2 over QUIC");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            host.lend_tick(hs);
+        }
+    }
+    let initial = crate::hosted_server::tests::InitialPackets { accept: acc, sync: sync.unwrap(), personal: personal.unwrap() };
+    crate::hosted_server::tests::install_initial_personal(hs, client, &initial, |hs| {
+        while !hs.server.players[slot].personal_delivery.initialised {
+            assert!(std::time::Instant::now() < deadline, "the Applied never reached the server over QUIC");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            host.lend_tick(hs);
+        }
+    });
     let (generation, key) = hs.handover_seat(slot).expect("authenticated live seat");
     (slot, generation, key)
 }
@@ -314,7 +349,7 @@ fn handover_silent_freeze_past_the_quic_idle_timeout_keeps_guest_and_recipient()
     use crate::network::{Liveness, bridge_server_connection, connect_to_server_with, create_server_endpoint_with};
     use std::time::{Duration, Instant};
     let live = Liveness { idle: Duration::from_millis(1200), keep_alive: Some(Duration::from_millis(300)) };
-    let (mut hs, mut host) = start_lent("handover-quic-idle");
+    let (mut hs, mut host) = start_prepared_lent("handover-quic-idle");
     let accept = hs.test_accept_channel();
     let (addr_tx, addr_rx) = std::sync::mpsc::channel();
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
@@ -375,7 +410,7 @@ fn handover_silent_freeze_past_the_quic_idle_timeout_keeps_guest_and_recipient()
 fn handover_refuses_a_participant_whose_obligations_are_not_proven_zero() {
     use crate::handover::live::eligibility::{OWED, Seat, recipient_record, seats};
     use crate::joiner_save::{IncompleteCause, JoinerSave};
-    let (mut hs, mut host) = start_lent("handover-obligations");
+    let (mut hs, mut host) = start_prepared_lent("handover-obligations");
     let (_c, slot, generation, key) = signed_join_lent(&mut hs, &mut host, [0x66; 32]);
     let seat = Seat { slot, generation, key };
     assert_eq!(seats(&hs.server, seat), Ok(()));
@@ -634,7 +669,7 @@ mod session {
             std::fs::create_dir_all(dir.0.join(d)).unwrap();
         }
         plant(&dir.0.join("world"));
-        let (mut hs, mut host) = start_lent(&format!("handover-{tag}"));
+        let (mut hs, mut host) = start_prepared_lent(&format!("handover-{tag}"));
         let (client, slot, generation, key) = signed_join_lent(&mut hs, &mut host, [RECIPIENT_PERSONA; 32]);
         let forged_ready = Arc::new(Mutex::new(None));
         let forged_bearer = Arc::new(Mutex::new(None));
@@ -737,7 +772,8 @@ mod session {
         let mut wolf = crate::wolf::WolfData::untamed();
         wolf.ownership.owner_pubkey = "local-player-0".into();
         let pet = crate::save::SavedTamedPet { x: 2.0, y: 70.0, z: 2.0, data: crate::save::SavedTamedPetData::Wolf(wolf) };
-        let save = crate::save::build_world_save(&p.host.world, std::slice::from_ref(seat0), 42, &carts, &[pet]).unwrap();
+        let quest_world = crate::quest_npcs::capture(p.host.world.quest_scope, &p.host.ecs).unwrap();
+        let save = crate::save::build_world_save(&p.host.world, std::slice::from_ref(seat0), 42, &carts, &[pet], quest_world.as_ref()).unwrap();
         let cap = Capture {
             meta: &meta,
             save,
@@ -760,7 +796,8 @@ mod session {
         let sidecar = capture::local0_sidecar(seat0, [9; 16]).unwrap();
         let progress = capture::local0_progress(seat0, context).unwrap();
         let meta = crate::handover::checkpoint::transfer_metadata(&crate::save::WorldMeta::new("Loop")).unwrap();
-        let save = crate::save::build_world_save(&p.host.world, std::slice::from_ref(seat0), 42, &[], &[]).unwrap();
+        let quest_world = crate::quest_npcs::capture(p.host.world.quest_scope, &p.host.ecs).unwrap();
+        let save = crate::save::build_world_save(&p.host.world, std::slice::from_ref(seat0), 42, &[], &[], quest_world.as_ref()).unwrap();
         let cap = Capture {
             meta: &meta,
             save,
@@ -1122,7 +1159,7 @@ mod session {
 
     #[test]
     fn handover_host_action_persona_must_be_the_authority_persona() {
-        let (mut hs, mut host) = start_lent("handover-persona");
+        let (mut hs, mut host) = start_prepared_lent("handover-persona");
         let (_c, slot, generation, key) = signed_join_lent(&mut hs, &mut host, [0x66; 32]);
         let root = root();
         let lineage = root_lineage(&root);
@@ -1342,9 +1379,11 @@ mod session {
         use crate::handover::live::source::STALL_SECS;
         let mut p = pair("dupack");
         consent(&mut p);
+        // The recipient's silence counts from the offer's own clock reading
+        // (taken before the pack runs), not from when packing finished.
+        let t0 = now();
         offer(&mut p, &seat0());
         assert_eq!(p.src.stage(), SourceStage::Streaming);
-        let t0 = now();
         let dup = Frame::Ack { transfer: p.src.transfer(), through: 0 };
         p.dst.as_ref().unwrap().test_send(&dup);
         p.src.pump(&mut p.hs, p.live, t0 + STALL_SECS / 2).expect("inside the stall deadline");
@@ -1360,9 +1399,11 @@ mod session {
         use crate::handover::live::source::STALL_SECS;
         let mut p = pair("earlynotice");
         consent(&mut p);
+        // The recipient's silence counts from the offer's own clock reading
+        // (taken before the pack runs), not from when packing finished.
+        let t0 = now();
         offer(&mut p, &seat0());
         assert_eq!(p.src.stage(), SourceStage::Streaming);
-        let t0 = now();
         let beat = Frame::Notice { transfer: p.src.transfer(), paused: true };
         p.dst.as_ref().unwrap().test_send(&beat);
         p.src.pump(&mut p.hs, p.live, t0 + STALL_SECS / 2).expect("inside the stall deadline");
@@ -1724,7 +1765,7 @@ mod session {
     /// The frame's five-minute autosave of the fixture's world.
     fn autosave(root: &std::path::Path) -> Result<(), String> {
         crate::save::with_worlds_root(root, || {
-            crate::save::autosave_world("world", &crate::world::World::new(), std::slice::from_ref(&seat0()), 77, &[], &[])
+            crate::save::autosave_world("world", &crate::world::World::new(), std::slice::from_ref(&seat0()), 77, &[], &[], None)
         })
     }
 

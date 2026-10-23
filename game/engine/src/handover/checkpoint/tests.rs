@@ -203,6 +203,7 @@ fn neutral_save(seed: u32) -> WorldSave {
         dispensers: Vec::new(),
         rig_clips: Vec::new(),
         local_personal: None,
+        quest_world: None,
     }
 }
 
@@ -1224,7 +1225,7 @@ fn handover_checkpoint_participant_record_is_strictly_bound_to_manifest_context(
     let record = |c| {
         PersonalRecord::from_maps(c, rep.iter().map(|(k, v)| (k, v)), [], [], None)
             .unwrap()
-            .encode()
+            .encode_schema1()
             .unwrap()
     };
     let meta = transfer_metadata(&WorldMeta::new("source")).unwrap();
@@ -1370,7 +1371,7 @@ fn handover_checkpoint_refuses_mutable_or_legacy_sidecars_before_ready() {
     assert_eq!(seed[0], 2);
     super::bounded_decode::sidecar(&seed).unwrap();
     let mutable = saved.encode().unwrap();
-    assert_eq!(mutable[0], 3);
+    assert_eq!(mutable[0], 4);
     assert!(super::bounded_decode::sidecar(&mutable).is_err(), "Ready accepted an unbound live v3 that cannot bootstrap");
     let mut legacy = seed; legacy[0] = 1;
     assert!(super::bounded_decode::sidecar(&legacy).is_err(), "private legacy checkpoint bypassed the immutable seed contract");

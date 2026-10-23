@@ -51,7 +51,7 @@ fn power_device_and_meta_survive_save_reload() {
     world.block_meta.insert(meta_pos, 0b0000_0110);
 
     let p1 = PlayerSlot::new(0, Vec3::new(0.0, 80.0, 0.0), 1.0);
-    save::save_world(name, &world, &[p1], 7, &[], &[]).expect("save_world");
+    save::save_world(name, &world, &[p1], 7, &[], &[], None).expect("save_world");
 
     let mut loaded = World::new();
     let (saved, _chunks) = save::load_world(name, &mut loaded).expect("load_world");
@@ -106,7 +106,7 @@ fn water_wheel_device_survives_save_reload() {
     world.insert_power_device(pos, dev);
 
     let p1 = PlayerSlot::new(0, Vec3::new(0.0, 80.0, 0.0), 1.0);
-    save::save_world(name, &world, &[p1], 11, &[], &[]).expect("save_world");
+    save::save_world(name, &world, &[p1], 11, &[], &[], None).expect("save_world");
 
     let mut loaded = World::new();
     let _ = save::load_world(name, &mut loaded).expect("load_world");
@@ -141,7 +141,7 @@ fn windmill_device_survives_save_reload() {
     world.insert_power_device(pos, dev);
 
     let p1 = PlayerSlot::new(0, Vec3::new(0.0, 80.0, 0.0), 1.0);
-    save::save_world(name, &world, &[p1], 12, &[], &[]).expect("save_world");
+    save::save_world(name, &world, &[p1], 12, &[], &[], None).expect("save_world");
 
     let mut loaded = World::new();
     let _ = save::load_world(name, &mut loaded).expect("load_world");

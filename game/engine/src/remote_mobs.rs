@@ -104,9 +104,8 @@ pub struct MirrorTarget {
 pub enum MirrorClick {
     /// Ask the server for this interaction (`EntityInteract`).
     Interact(crate::protocol::InteractKind),
-    /// Villager trading: not yet for a joiner (D2c-3) — refused here with
-    /// [`JOINED_INTERACTION_TOAST`].
-    NotYet,
+    /// Ordinary villager dialogue is requested without local mutation.
+    QuestTalk,
     PackEquip,
     PackOpen,
 }
@@ -185,7 +184,7 @@ impl MirrorTarget {
             return ask(InteractKind::LeadDetach);
         }
         if matches!(kind, MobType::Villager | MobType::Peddler) {
-            return Some(MirrorClick::NotYet);
+            return Some(MirrorClick::QuestTalk);
         }
         if (kind == MobType::Wolf && mat == Some(MaterialId::Bone))
             || (kind == MobType::Nostrich && mat == Some(MaterialId::Berries))
@@ -520,10 +519,6 @@ pub fn purge_private_mobs(ecs: &mut hecs::World) -> usize {
     mobs.len()
 }
 
-/// The toast a joiner sees when it tries to talk to a villager on someone
-/// else's world: quests and trading need a server-side flow (D2c-3).
-pub const JOINED_INTERACTION_TOAST: &str = "Trading isn't available in someone else's world yet.";
-
 // C3c-3r — what a joiner sees when it tries a Plan or economy action the
 // server can't mirror yet. Each refusal changes nothing on the client.
 
@@ -821,7 +816,7 @@ mod tests {
         assert_eq!(target(MobType::Donkey).right_click_action(None, true), ask(Mount));
         assert_eq!(target(MobType::Horse).right_click_action(Some(&chest), false), ask(Mount));
         // Trading: D2c-3.
-        assert_eq!(target(MobType::Villager).right_click_action(Some(&stone), false), Some(MirrorClick::NotYet));
+        assert_eq!(target(MobType::Villager).right_click_action(Some(&stone), false), Some(MirrorClick::QuestTalk));
         // A bucket aimed past a fish scoops water, as in single-player.
         assert_eq!(target(MobType::Fish).right_click_action(Some(&mat(MaterialId::Bucket)), false), None);
     }

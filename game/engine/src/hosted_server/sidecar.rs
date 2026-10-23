@@ -60,7 +60,7 @@ impl HostedServer {
         let overflow = crate::window_events::settle_terminal_grants(sp, self.server.tick_counter);
         for unfit in overflow {
             log::debug!("Settling grant {} overflow for slot {i}", unfit.event);
-            self.route_joiner_unfit_at(i, unfit.stack, unfit.grave);
+            self.route_joiner_unfit_at(i, unfit.stack, unfit.grave, unfit.origin);
         }
     }
 
@@ -74,7 +74,7 @@ impl HostedServer {
                 "Returning retired grant {} overflow for slot {i}",
                 unfit.event
             );
-            self.route_joiner_unfit_at(i, unfit.stack, unfit.grave);
+            self.route_joiner_unfit_at(i, unfit.stack, unfit.grave, unfit.origin);
         }
     }
 

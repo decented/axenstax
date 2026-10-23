@@ -9,6 +9,8 @@
 //! latched listener, and only then persists and sends Ready. Before Ready an
 //! abort hands the connection (with any gameplay that arrived meanwhile)
 //! back, so play continues. No gameplay admission or advertisement here.
+#[path = "recipient_personal.rs"]
+mod personal_control;
 use super::bearer::Bearer;
 use super::eligibility::Refusal;
 use super::listener::LatchedListener;
@@ -175,6 +177,7 @@ pub const PARKED_BYTES: usize = 4 * 1024 * 1024;
 
 pub struct RecipientSession {
     link: Option<Box<dyn ClientTransport>>,
+    personal_binding: Option<crate::remote_client::personal_control::PersonalParkBinding>,
     parked: VecDeque<Vec<u8>>,
     parked_bytes: usize,
     parked_overflow: bool,
@@ -342,6 +345,7 @@ impl RecipientSession {
         .to_bytes();
         Ok(Self {
             link: None,
+            personal_binding: None,
             parked: VecDeque::new(),
             parked_bytes: 0,
             parked_overflow: false,
@@ -770,17 +774,21 @@ impl RecipientSession {
     }
 
     fn read_link(&mut self, now: u64) -> Result<(), Refusal> {
-        while let Some(pkt) = self.link.as_ref().and_then(|l| l.try_recv_from_server()) {
+        // Sealed Personal control must yield to deadlines even if a peer keeps
+        // replenishing the held link. Legacy consent keeps its existing drain.
+        let limit = if self.personal_binding.is_some() { 32 } else { usize::MAX };
+        self.read_link_bounded(now, limit)
+    }
+
+    fn read_link_bounded(&mut self, now: u64, limit: usize) -> Result<(), Refusal> {
+        let mut read = 0;
+        while read < limit {
+            let Some(pkt) = self.link.as_ref().and_then(|l| l.try_recv_from_server()) else { break; };
+            read += 1;
             self.last_heard = now;
             let Some(bytes) = handover_payload(&pkt) else {
                 // Gameplay sent before the host froze: kept for a resume.
-                self.parked_bytes += pkt.len();
-                if self.parked_bytes > PARKED_BYTES {
-                    self.parked_overflow = true;
-                    self.parked.clear();
-                } else if !self.parked_overflow {
-                    self.parked.push_back(pkt);
-                }
+                self.park_gameplay_packet(pkt);
                 continue;
             };
             let decoded = Frame::decode(bytes);

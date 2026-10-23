@@ -360,10 +360,13 @@ fn game_harness_handover_delayed_initial_personal_client_blocks_prediction_and_o
                 replace.window_event + 1,
                 "personal snapshot lacks its genuinely numbered linked fence"
             );
-            assert_eq!(snapshot.context.participant, key(SOURCE_PERSONA));
-            assert_eq!(snapshot.context.transfer, transfer);
-            assert_eq!(snapshot.context.lineage, proof.core.lineage);
-            assert_eq!(snapshot.context.generation, proof.core.generation);
+            let crate::progression::GameplayContext::Imported(context) = snapshot.context else {
+                panic!("authenticated imported attachment changed its progression binding class");
+            };
+            assert_eq!(context.participant, key(SOURCE_PERSONA));
+            assert_eq!(context.transfer, transfer);
+            assert_eq!(context.lineage, proof.core.lineage);
+            assert_eq!(context.generation, proof.core.generation);
             assert!(hs.server.players[i].personal.is_some());
             assert!(!hs.server.players[i].personal_delivery.initialised);
             assert!(j.hg.state.handover_holds_play());

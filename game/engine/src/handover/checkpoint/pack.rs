@@ -330,6 +330,7 @@ fn pack_parts(
                     generation: binding.generation,
                     transfer: binding.transfer,
                 };
+                if super::super::personal::PersonalRecord::declared_schema(row.bytes)? != row.schema { return Err(Error::Invalid("participant payload schema")); }
                 super::super::personal::PersonalRecord::decode(row.bytes, &context)?;
             }
             _ => {}
@@ -504,7 +505,10 @@ fn check_member(path: &str, kind: MemberKind, length: u64, schema: u32) -> Resul
         MemberKind::Chunk if schema != 1 || ![8192, 8704].contains(&length) => {
             Err(Error::Invalid("chunk size/schema"))
         }
-        MemberKind::Sidecar | MemberKind::Progression if schema != 1 || length > 65536 => {
+        MemberKind::Sidecar if schema != 1 || length > 65536 => {
+            Err(Error::Invalid("participant size/schema"))
+        }
+        MemberKind::Progression if ![1, 2].contains(&schema) || length > 65536 => {
             Err(Error::Invalid("participant size/schema"))
         }
         MemberKind::Exhibit if length > 8 * 1024 * 1024 => Err(Error::Limit("exhibit bytes")),

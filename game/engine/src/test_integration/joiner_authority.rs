@@ -37,6 +37,18 @@ pub(super) fn join_guest(hs: &mut HostedServer, name: &str) -> (ChannelClientTra
     let client = hs.attach_test_remote();
     send_guest_join(&client, name);
     hs.tick();
+    let slot = crate::hosted_server::tests::join_installed(hs, &client, HostedServer::tick).player_index as usize;
+    settle_chunk_push(hs, &client, HostedServer::tick);
+    (client, slot)
+}
+
+/// Attach + join a guest whose client installs nothing: the join's Sync1
+/// and Personal2 stay unapplied and unacknowledged, so the server still
+/// holds its requests. For what happens before a client installs them.
+pub(super) fn join_guest_uninstalled(hs: &mut HostedServer, name: &str) -> (ChannelClientTransport, usize) {
+    let client = hs.attach_test_remote();
+    send_guest_join(&client, name);
+    hs.tick();
     let slot = accepted_index(&client).expect("guest join accepted");
     settle_chunk_push(hs, &client, HostedServer::tick);
     (client, slot)
@@ -76,7 +88,7 @@ pub(super) fn join_guest_accept(
     let client = hs.attach_test_remote();
     send_guest_join(&client, name);
     hs.tick();
-    let accept = accepted(&client).expect("guest join accepted");
+    let accept = crate::hosted_server::tests::join_installed(hs, &client, HostedServer::tick);
     let slot = accept.player_index as usize;
     settle_chunk_push(hs, &client, HostedServer::tick);
     (client, slot, accept)

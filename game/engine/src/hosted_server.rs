@@ -26,13 +26,43 @@ mod death;
 #[cfg(not(target_arch = "wasm32"))]
 mod personal;
 #[cfg(not(target_arch = "wasm32"))]
+pub(crate) use personal::PreparedCarryPersonal;
+#[cfg(not(target_arch = "wasm32"))]
 mod handover;
 mod sidecar;
 mod actions;
 mod packs;
 mod pack_attempt;
+#[cfg(not(target_arch = "wasm32"))]
+mod quest_attempt;
+#[cfg(not(target_arch = "wasm32"))]
+mod quests;
 #[cfg(test)]
 mod pack_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod quest_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod quest_preparation_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod quest_live_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod quest_live_fixture;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(crate) mod quest_lifecycle_actor;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod quest_lifecycle_actions;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(crate) mod quest_lifecycle_fixture;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod quest_lifecycle_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod quest_daily_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod quest_credit_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod quest_carry_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod quest_carry_failures;
 mod strict_container;
 mod strict_edit;
 mod strict_attack;
@@ -421,7 +451,7 @@ fn is_request(packet: &[u8]) -> bool {
         protocol::deserialize_header(packet),
         Some((P::EntityAttack | P::EntityInteract | P::DeviceInteract | P::ItemAction | P::WindowOp, _))
     ) || matches!(protocol::deserialize_header(packet), Some((P::Action, payload))
-        if crate::action_wire::ActionPacket::decode(payload).is_ok_and(|action| matches!(action.intent, crate::action_wire::ActionIntent::Pack(_))))
+        if crate::action_wire::ActionPacket::decode(payload).is_ok_and(|action| matches!(action.intent, crate::action_wire::ActionIntent::Pack(_) | crate::action_wire::ActionIntent::Quest(_))))
 }
 
 /// C3c-1 — a joiner's use as the server judged it before its edit landed
@@ -520,6 +550,10 @@ pub struct HostedServer {
     /// D1 — whether this server owns its world or borrows the host client's
     /// (`sim_lend`). Fixed at start.
     host_world: HostWorld,
+    /// One preparation attempt per local host instance. Refusal gates new
+    /// authority while the existing host's control and simulation keep running.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) local_gameplay_preparation: Option<Result<(), String>>,
     /// D1, lent only — the changes the server's own systems made to the
     /// host's world this tick (fluids, falling blocks, leaf decay, power, …),
     /// captured from `server.pending_block_changes` before the broadcast
@@ -1051,6 +1085,8 @@ impl HostedServer {
             edit_queues: (0..num_local_players).map(|_| Default::default()).collect(),
             pending_block_changes: Vec::new(),
             host_world,
+            #[cfg(not(target_arch = "wasm32"))]
+            local_gameplay_preparation: None,
             lent_sim_changes: Vec::new(),
             lent_edit_cells: Vec::new(),
             lent_ids_reset: false,
@@ -3375,16 +3411,21 @@ impl HostedServer {
     /// Return a grant to its surviving grave, otherwise to the ground.
     fn route_joiner_unfit(&mut self, i: usize, event: u32, stack: crate::item::ItemStack) {
         let cell = self.server.players[i].window_events.grave_grants.iter().find(|(n, _)| *n == event).map(|(_,cell)| *cell);
-        self.route_joiner_unfit_at(i, stack, cell);
+        let origin = crate::window_events::reward_origin(&self.server.players[i], event);
+        self.route_joiner_unfit_at(i, stack, cell, origin);
     }
 
-    fn route_joiner_unfit_at(&mut self, i: usize, mut stack: crate::item::ItemStack, cell: Option<(i32,i32,i32)>) {
+    fn route_joiner_unfit_at(&mut self, i: usize, mut stack: crate::item::ItemStack, cell: Option<(i32,i32,i32)>, origin: Option<crate::window_events::RewardOrigin>) {
         let sp = &self.server.players[i];
         // A refused private creative Plan never becomes a transferable floor item.
         if matches!(stack.item, crate::item::Item::Plan(_)) { return; }
         // C3b-fix-b (B-M2) — thrown from the joiner (it can't take it back
         // for the Q-drop delay), and only what came back.
         let feet = sp.player.pos;
+        if let Some(origin) = origin {
+            crate::window_events::spawn_unfit(&mut self.server.ecs, origin.position, stack, i);
+            return;
+        }
         if let Some(cell) = cell
             && let Some(mut grave) = self.server.world.grave_at(cell).cloned() {
             for stored in grave.slots.iter_mut().flatten() {
@@ -4103,6 +4144,8 @@ impl HostedServer {
         // C3b-1 — what others changed in the containers joiners have open.
         self.push_open_containers();
         self.push_open_packs();
+        #[cfg(not(target_arch = "wasm32"))]
+        self.push_open_quests();
         self.server_tick += 1;
         self.broadcast_state();
         // Operator Console snapshot (Spec B task 7 / B-7a): stream to the
@@ -4706,6 +4749,13 @@ impl HostedServer {
                         let (join_name, join_npub): (String, String) =
                             (req.player_name.clone(), String::new());
 
+                        #[cfg(not(target_arch = "wasm32"))]
+                        if let Some(Err(reason)) = &self.local_gameplay_preparation {
+                            let reason = format!("This host cannot admit new players yet: {reason}");
+                            let _ = self.release_slot(i, Some(&reason));
+                            break;
+                        }
+
                         // B2a — the chunk push starts afresh for this join,
                         // out to the render distance it announced.
                         self.chunk_pushes[i] =
@@ -4733,7 +4783,7 @@ impl HostedServer {
                         if let Some(key) = self.server.players[i].verified_pubkey {
                             let directory = crate::save::world_dir(&self.server.world_name);
                             let prepared = crate::handover::live::personal_adapter::proof(&directory).and_then(|proof| {
-                                let Some(proof) = proof else { return Ok(()); };
+                                let Some(proof) = proof else { return self.server.claim_remote_world_local(key, self.num_local_players); };
                                 if self.num_local_players > 0 && key == proof.local_owner() {
                                     return Err("This player is already playing locally here.".to_string());
                                 }
@@ -4742,12 +4792,22 @@ impl HostedServer {
                             });
                             if let Err(error) = prepared { let _ = self.release_slot(i, Some(&error)); break; }
                         }
+                        #[cfg(not(target_arch = "wasm32"))]
+                        if self.server.players[i].verified_pubkey.is_some()
+                        {
+                            let native_prepared = matches!(&self.local_gameplay_preparation, Some(Ok(())));
+                            if let Err(error) = self.server.prepare_signed_scope_with_native(native_prepared) {
+                                let _ = self.release_slot(i, Some(&error));
+                                break;
+                            }
+                        }
                         let saved_joiner = self.server.load_joiner(i);
                         if self.server.players[i].personal_read_failed {
                             let _ = self.release_slot(i, Some("This world's saved player state couldn't be restored. It is preserved without reset."));
                             break;
                         }
                         self.server.players[i].personal = saved_joiner.as_ref().and_then(|s| s.personal.clone());
+                        self.server.players[i].gameplay_clock.restore(self.server.tick_counter);
                         // C3d (Decision 10, OC) — a Strict world admits only a
                         // record that proves no carried obligation. Refused
                         // before JoinAccept: the handshake isn't done, so
@@ -4815,6 +4875,10 @@ impl HostedServer {
                         self.server.players[i].action_frontier = Some(crate::action_identity::ActionFrontier::new(action_session, action_life));
                         self.server.players[i].action_queue = Some(Default::default());
                         self.server.players[i].action_results = Some(crate::action_results::ActionResults::new(self.server.players[i].action_frontier.as_ref().expect("issued frontier").header(0, 0)));
+                        #[cfg(not(target_arch = "wasm32"))]
+                        if let Err(error) = self.server.attach_gameplay(i, action_session, self.server.players[i].attach_gen, saved_joiner.is_some()) {
+                            let _ = self.release_slot(i, Some(&error)); break;
+                        }
                         let has_personal_state = self.server.players[i].personal.is_some();
                         #[cfg(not(target_arch = "wasm32"))]
                         if let Some(personal) = &self.server.players[i].personal && crate::personal_sync::snapshot(personal, action_session, action_life, 1, 1).is_err() {
@@ -4890,7 +4954,7 @@ impl HostedServer {
                                     crate::plan::PlanData::marker_placeholder(crate::plan::marker(&body), matches!(body.develop_state, crate::plan::DevelopState::Developed))), count: stack.count }));
                             }
                         }
-                        if saved_joiner.is_some() || (0..36).any(|at| kit.inv.slot(at).is_some()) {
+                        if has_personal_state || saved_joiner.is_some() || (0..36).any(|at| kit.inv.slot(at).is_some()) {
                             let event = self.send_inventory_sync(i, kit, debt);
                             #[cfg(not(target_arch = "wasm32"))]
                             if has_personal_state && let Err(error) = self.start_personal(i, event, true) {
@@ -5025,7 +5089,7 @@ impl HostedServer {
                         // wait behind earlier ones). Not while edits wait: the
                         // client made them before these events.
                         if sp.server_simulated && input.block_changes.is_empty() && self.edit_queues[i].is_empty()
-                            && (sp.inventory_mode != crate::action_identity::InventoryMode::Strict || ((sp.action_queue.as_ref().is_none_or(|q| q.is_empty()) || sp.action_queue.as_ref().and_then(|queue| queue.front()).and_then(|head| crate::action_wire::ActionPacket::decode(&head.payload).ok()).is_some_and(|packet| matches!(packet.intent, crate::action_wire::ActionIntent::Pack(_)))) && sp.window_events.accepts_boundary(input.events_applied))) {
+                            && (sp.inventory_mode != crate::action_identity::InventoryMode::Strict || ((sp.action_queue.as_ref().is_none_or(|q| q.is_empty()) || sp.action_queue.as_ref().and_then(|queue| queue.front()).and_then(|head| crate::action_wire::ActionPacket::decode(&head.payload).ok()).is_some_and(|packet| matches!(packet.intent, crate::action_wire::ActionIntent::Pack(_) | crate::action_wire::ActionIntent::Quest(_)))) && sp.window_events.accepts_boundary(input.events_applied))) {
                             crate::window_events::apply_through(sp, input.events_applied, now);
                         }
                         // MP-A3 — death is server-held for a joiner. While
@@ -6578,8 +6642,13 @@ impl HostedServer {
                 // Exact terminal receipts follow the complete preceding world
                 // prefix. Each is a coalescing barrier on this same outbox.
                 if let Some(results) = &mut sp.action_results {
-                    for (receipt, carrier) in results.take_unsent_with_carriers() {
-                        if let Some(carrier) = carrier { outbox.push_pack_result(receipt.action, carrier); }
+                    for crate::action_results::ResultBatch { receipt, carrier, followups } in results.take_unsent_batches() {
+                        if followups.is_empty() {
+                            if let Some(carrier) = carrier { outbox.push_pack_result(receipt.action, carrier); }
+                        } else {
+                            if let Some(carrier) = carrier { outbox.push_quest_carrier(receipt.action, carrier); }
+                            for packet in followups { outbox.push_quest_carrier(receipt.action, packet); }
+                        }
                         outbox.push_action_receipt(receipt);
                     }
                 }
@@ -9052,7 +9121,7 @@ pub(crate) mod tests {
     }
 
     /// Sign and send a join for `seckey` over a transport with `binding`.
-    pub(super) fn send_signed_join(client: &ChannelClientTransport, seckey: [u8; 32], binding: Option<[u8; 32]>) {
+    pub(crate) fn send_signed_join(client: &ChannelClientTransport, seckey: [u8; 32], binding: Option<[u8; 32]>) {
         use crate::transport::ClientTransport as _;
         let chal = loop {
             let pkt = client.try_recv_from_server().expect("challenge issued on attach");
@@ -9065,6 +9134,184 @@ pub(crate) mod tests {
         let ev = signed_auth_event(seckey, &chal.nonce_hex, &origin, current_unix_ts());
         let req = join_with_auth(ev, None);
         client.send_to_server(&protocol::serialize_packet(protocol::PacketType::JoinRequest, &req));
+    }
+
+    /// What a join sends before play can start: the `JoinAccept`, the whole
+    /// window `Sync1` and the first personal snapshot `Personal2`.
+    pub(crate) struct InitialPackets {
+        pub(crate) accept: protocol::JoinAcceptPacket,
+        pub(crate) sync: protocol::InventorySyncPacket,
+        pub(crate) personal: protocol::PersonalSnapshot,
+    }
+
+    /// Drain everything `client` has been sent (after the join's tick) and
+    /// keep the join's initial packets. A rejected join panics with its reason.
+    pub(crate) fn initial_packets(client: &dyn crate::transport::ClientTransport) -> InitialPackets {
+        let (mut accept, mut sync, mut personal) = (None, None, None);
+        while let Some(bytes) = client.try_recv_from_server() {
+            match protocol::deserialize_header(&bytes) {
+                Some((protocol::PacketType::JoinAccept, body)) => {
+                    assert!(accept.is_none(), "one JoinAccept");
+                    accept = Some(protocol::safe_deserialize::<protocol::JoinAcceptPacket>(body).unwrap());
+                }
+                Some((protocol::PacketType::InventorySync, body)) if sync.is_none() => {
+                    assert!(accept.is_some(), "Sync1 follows the JoinAccept");
+                    sync = Some(protocol::safe_deserialize::<protocol::InventorySyncPacket>(body).unwrap());
+                }
+                Some((protocol::PacketType::PersonalSync, body)) => {
+                    if let protocol::PersonalSyncPacket::Snapshot(snapshot) = protocol::safe_deserialize(body).unwrap()
+                        && personal.is_none()
+                    {
+                        personal = Some(snapshot);
+                    }
+                }
+                Some((protocol::PacketType::JoinReject, body)) => panic!(
+                    "join rejected: {}",
+                    protocol::safe_deserialize::<protocol::JoinRejectPacket>(body).unwrap().reason
+                ),
+                _ => {}
+            }
+        }
+        InitialPackets {
+            accept: accept.expect("join accepted"),
+            sync: sync.expect("the join's initial Sync1"),
+            personal: personal.expect("the join's initial Personal2"),
+        }
+    }
+
+    /// Install a joiner's initial personal state as a real client does
+    /// (Spec 04: Sync1 applies before Personal2 installs, then `Applied`),
+    /// run `tick` once and check the server's personal delivery is
+    /// initialised, so the joiner's requests are no longer held.
+    pub(crate) fn install_initial_personal(
+        hs: &mut HostedServer,
+        client: &dyn crate::transport::ClientTransport,
+        initial: &InitialPackets,
+        tick: impl FnOnce(&mut HostedServer),
+    ) {
+        let InitialPackets { accept, sync, personal } = initial;
+        let slot = accept.player_index as usize;
+        assert!(sync.window_event < personal.window_event, "Sync1 precedes Personal2");
+        assert!(!hs.server.players[slot].personal_delivery.initialised);
+        let mut actor = crate::player_slot::PlayerSlot::new(slot, glam::Vec3::ZERO, 1.0);
+        crate::inventory_sync::apply(
+            &mut crate::window::WindowMut {
+                inv: &mut actor.inventory,
+                armour: &mut actor.armour_slots,
+                cursor: &mut actor.crafting_ui.cursor_item,
+                grid: &mut actor.crafting_ui.grid,
+                container: None,
+            },
+            sync,
+            &hs.server.registry,
+            &mut Default::default(),
+            &mut Default::default(),
+            accept.inventory_mode,
+        )
+        .unwrap();
+        let mut inbox = crate::personal_sync::Inbox::new(accept.action_session, accept.action_life);
+        inbox.push(personal.clone()).unwrap();
+        let acknowledgements = inbox.apply(personal.window_event, &mut actor).unwrap();
+        assert_eq!(acknowledgements.len(), 1, "Personal2 is acknowledged once");
+        client.send_to_server(&protocol::serialize_packet(
+            protocol::PacketType::PersonalSync,
+            &protocol::PersonalSyncPacket::Applied(acknowledgements[0]),
+        ));
+        tick(hs);
+        let sp = &hs.server.players[slot];
+        assert!(sp.personal_delivery.initialised, "the server took the joiner's Applied");
+        assert!(sp.personal_delivery.quiescent(sp.personal.as_ref().expect("a personal holder"), sp.respawns));
+    }
+
+    /// The game loop's `apply_personal_inbox` for a test `RemoteClient`
+    /// (no `GameState`): once its window has applied the initial Sync1,
+    /// install what its personal inbox holds through the applied window
+    /// frontier (into a throwaway slot) and send each `Applied`.
+    pub(crate) fn client_apply_personal(rc: &mut crate::remote_client::RemoteClient) {
+        if rc.initial_personal_window_waits() {
+            return;
+        }
+        let events = rc.applied_window_event();
+        let Some(inbox) = rc.personal_inbox.as_mut() else { return };
+        if inbox.pending_count() == 0 {
+            return;
+        }
+        let mut actor = crate::player_slot::PlayerSlot::new(0, glam::Vec3::ZERO, 1.0);
+        let acks = inbox.apply(events, &mut actor).expect("the personal inbox applies");
+        for ack in acks {
+            rc.send_raw(&protocol::serialize_packet(
+                protocol::PacketType::PersonalSync,
+                &protocol::PersonalSyncPacket::Applied(ack),
+            ));
+        }
+    }
+
+    /// A test `RemoteClient`'s initial personal installation, as the game
+    /// loop does it, for a client that has polled its join but applied no
+    /// window event: Sync1 applies (and is noted), Personal2's numbered
+    /// event is noted, the personal inbox installs and `Applied` goes out.
+    /// One `tick` later the server's personal delivery is initialised.
+    pub(crate) fn install_client_initial_personal(
+        rc: &mut crate::remote_client::RemoteClient,
+        hs: &mut HostedServer,
+        slot: usize,
+        tick: impl FnOnce(&mut HostedServer),
+    ) {
+        use crate::remote_client::RequestOutcome;
+        let sync = rc
+            .pending_outcomes
+            .iter()
+            .find_map(|o| match o {
+                RequestOutcome::Sync(sync) => Some(sync.clone()),
+                _ => None,
+            })
+            .expect("the join's initial Sync1");
+        let personal = rc
+            .pending_outcomes
+            .iter()
+            .find_map(|o| match o {
+                RequestOutcome::PersonalSync { window_event, .. } => Some(*window_event),
+                _ => None,
+            })
+            .expect("the join's initial Personal2");
+        assert!(sync.window_event < personal, "Sync1 precedes Personal2");
+        rc.pending_outcomes
+            .retain(|o| !matches!(o, RequestOutcome::Sync(_) | RequestOutcome::PersonalSync { .. }));
+        let mut actor = crate::player_slot::PlayerSlot::new(0, glam::Vec3::ZERO, 1.0);
+        crate::inventory_sync::apply(
+            &mut crate::window::WindowMut {
+                inv: &mut actor.inventory,
+                armour: &mut actor.armour_slots,
+                cursor: &mut actor.crafting_ui.cursor_item,
+                grid: &mut actor.crafting_ui.grid,
+                container: None,
+            },
+            &sync,
+            &hs.server.registry,
+            &mut Default::default(),
+            &mut Default::default(),
+            rc.inventory_mode,
+        )
+        .expect("Sync1 applies");
+        rc.note_initial_personal_window_applied(sync.window_event, sync.locks);
+        rc.note_window_event(sync.window_event);
+        rc.note_window_event(personal);
+        client_apply_personal(rc);
+        assert!(rc.personal_ready(), "the client installed its personal state");
+        tick(hs);
+        assert!(hs.server.players[slot].personal_delivery.initialised, "the server took Applied");
+    }
+
+    /// After the join's tick: collect the initial packets, install them
+    /// (one more `tick`) and return the `JoinAccept`.
+    pub(crate) fn join_installed(
+        hs: &mut HostedServer,
+        client: &dyn crate::transport::ClientTransport,
+        tick: impl FnOnce(&mut HostedServer),
+    ) -> protocol::JoinAcceptPacket {
+        let initial = initial_packets(client);
+        install_initial_personal(hs, client, &initial, tick);
+        initial.accept
     }
 
     #[test]
@@ -9248,6 +9495,7 @@ pub(crate) mod tests {
         let first = hs.attach_test_remote_with_binding(Some([17; 32]));
         send_signed_join(&first, [66; 32], Some([17; 32]));
         hs.tick();
+        join_installed(&mut hs, &first, HostedServer::tick);
         let i = hs.server.players.len() - 1;
         let stone = crate::item::Item::Block(crate::block::STONE);
         let mut broken = crate::crafting::Tool::new(crate::crafting::ToolType::Pickaxe, crate::crafting::ToolMaterial::Iron);
@@ -9319,7 +9567,7 @@ pub(crate) mod tests {
         let _guard = crate::save::WorldsRootGuard::new("personal-life-exhaustion");
         let mut hs = start_room_test_server("personal-life-max", 0);
         let client = hs.attach_test_remote_with_binding(Some([17; 32]));
-        send_signed_join(&client, [66; 32], Some([17; 32])); hs.tick();
+        send_signed_join(&client, [66; 32], Some([17; 32])); hs.tick(); join_installed(&mut hs, &client, HostedServer::tick);
         let i = hs.server.players.len() - 1;
         let key = hs.server.players[i].verified_pubkey.unwrap();
         let sp = &mut hs.server.players[i];
@@ -9346,7 +9594,7 @@ pub(crate) mod tests {
         let _g = crate::save::WorldsRootGuard::new("sidecar-dead-reconnect");
         let mut hs = start_room_test_server("sidecar-dead", 0);
         let first = hs.attach_test_remote_with_binding(Some([17;32]));
-        send_signed_join(&first, [66;32], Some([17;32])); hs.tick();
+        send_signed_join(&first, [66;32], Some([17;32])); hs.tick(); join_installed(&mut hs, &first, HostedServer::tick);
         let i = hs.server.players.len()-1;
         let cell = (1,80,1);
         hs.server.world.set_block(cell.0,cell.1,cell.2,crate::block::GRAVE);
@@ -9380,7 +9628,7 @@ pub(crate) mod tests {
         let _g = crate::save::WorldsRootGuard::new("sidecar-fatal-eviction");
         let mut hs = start_room_test_server("sidecar-fatal", 0);
         let first = hs.attach_test_remote_with_binding(Some([17;32]));
-        send_signed_join(&first, [66;32], Some([17;32])); hs.tick();
+        send_signed_join(&first, [66;32], Some([17;32])); hs.tick(); join_installed(&mut hs, &first, HostedServer::tick);
         let i = hs.server.players.len()-1;
         while first.try_recv_from_server().is_some() {}
         hs.server.players[i].inventory.set_slot(0, Some(crate::item::ItemStack::new_block(crate::block::STONE, 3)));
@@ -9407,7 +9655,7 @@ pub(crate) mod tests {
         for space in [0, 2] {
             let mut hs = start_room_test_server(&format!("sidecar-unfit-{space}"),0);
             let client = hs.attach_test_remote_with_binding(Some([17;32]));
-            send_signed_join(&client,[66;32],Some([17;32])); hs.tick();
+            send_signed_join(&client,[66;32],Some([17;32])); hs.tick(); join_installed(&mut hs, &client, HostedServer::tick);
             let i = hs.server.players.len()-1;
             for at in 0..36 { hs.server.players[i].inventory.set_slot(at,Some(crate::item::ItemStack::new_block(crate::block::STONE,64))); }
             hs.server.players[i].inventory.set_slot(0,Some(crate::item::ItemStack::new_block(crate::block::STONE,64-space)));
@@ -9426,7 +9674,7 @@ pub(crate) mod tests {
         let _g = crate::save::WorldsRootGuard::new("sidecar-many-grants");
         for space in [0,2] {
             let mut hs=start_room_test_server(&format!("sidecar-many-{space}"),0);
-            let client=hs.attach_test_remote_with_binding(Some([17;32])); send_signed_join(&client,[66;32],Some([17;32])); hs.tick();
+            let client=hs.attach_test_remote_with_binding(Some([17;32])); send_signed_join(&client,[66;32],Some([17;32])); hs.tick(); join_installed(&mut hs, &client, HostedServer::tick);
             let i=hs.server.players.len()-1; let cell=(1,80,1);
             hs.server.world.set_block(cell.0,cell.1,cell.2,crate::block::GRAVE);
             hs.server.world.insert_grave(cell,crate::grave::GraveData::from_snapshot(vec![Some(crate::item::ItemStack::new_block(crate::block::STONE,1))],0));
@@ -9434,7 +9682,7 @@ pub(crate) mod tests {
             hs.server.players[i].inventory.set_slot(0,Some(crate::item::ItemStack::new_block(crate::block::STONE,64-space)));
             for grant in 0..65 {
                 hs.grant_to_joiner(i,[crate::item::ItemStack::new_block(crate::block::STONE,5)]);
-                if grant==0 { hs.server.players[i].window_events.grave_grants.push_back((1,cell)); }
+                if grant==0 { { let event = hs.server.players[i].window_events.last_number(); hs.server.players[i].window_events.grave_grants.push_back((event,cell)); } }
             }
             hs.release_slot(i,None); hs.release_slot(i,None);
             let returned=hs.server.world.grave_at(cell).unwrap().slots.iter().flatten().map(|s|s.count as u32).sum::<u32>();
@@ -9453,7 +9701,7 @@ pub(crate) mod tests {
         let _g = crate::save::WorldsRootGuard::new("sidecar-acked-grants");
         for space in [0,2] {
             let mut hs=start_room_test_server(&format!("sidecar-acked-{space}"),0);
-            let client=hs.attach_test_remote_with_binding(Some([17;32])); send_signed_join(&client,[66;32],Some([17;32])); hs.tick();
+            let client=hs.attach_test_remote_with_binding(Some([17;32])); send_signed_join(&client,[66;32],Some([17;32])); hs.tick(); join_installed(&mut hs, &client, HostedServer::tick);
             let i=hs.server.players.len()-1; let cell=(1,80,1);
             hs.server.world.set_block(cell.0,cell.1,cell.2,crate::block::GRAVE);
             hs.server.world.insert_grave(cell,crate::grave::GraveData::from_snapshot(vec![Some(crate::item::ItemStack::new_block(crate::block::STONE,1))],0));
@@ -9461,9 +9709,10 @@ pub(crate) mod tests {
             hs.server.players[i].inventory.set_slot(0,Some(crate::item::ItemStack::new_block(crate::block::STONE,64-space)));
             for grant in 0..65 {
                 hs.grant_to_joiner(i,[crate::item::ItemStack::new_block(crate::block::STONE,5)]);
-                if grant==0 { hs.server.players[i].window_events.grave_grants.push_back((1,cell)); }
+                if grant==0 { { let event = hs.server.players[i].window_events.last_number(); hs.server.players[i].window_events.grave_grants.push_back((event,cell)); } }
             }
-            let input=protocol::InputPacket { tick:1, health:20.0, events_applied:65, ..Default::default() };
+            // Every grant acknowledged (they follow the join's Sync1 and Personal2).
+            let input=protocol::InputPacket { tick:1, health:20.0, events_applied:hs.server.players[i].window_events.last_number(), ..Default::default() };
             client.send_to_server(&protocol::serialize_packet(protocol::PacketType::ClientInput,&input));
             client.send_to_server(&protocol::serialize_packet(protocol::PacketType::Disconnect,&()));
             hs.tick(); hs.release_slot(i,None);
@@ -9503,14 +9752,14 @@ pub(crate) mod tests {
         let _g = crate::save::WorldsRootGuard::new("sidecar-grave-return");
         for space in [0,2] {
             let mut hs = start_room_test_server(&format!("sidecar-grave-{space}"),0);
-            let client = hs.attach_test_remote_with_binding(Some([17;32])); send_signed_join(&client,[66;32],Some([17;32])); hs.tick();
+            let client = hs.attach_test_remote_with_binding(Some([17;32])); send_signed_join(&client,[66;32],Some([17;32])); hs.tick(); join_installed(&mut hs, &client, HostedServer::tick);
             let i=hs.server.players.len()-1; let cell=(1,80,1);
             hs.server.world.set_block(cell.0,cell.1,cell.2,crate::block::GRAVE);
             hs.server.world.insert_grave(cell,crate::grave::GraveData::from_snapshot(vec![Some(crate::item::ItemStack::new_block(crate::block::STONE,1))],0));
             for at in 0..36 {hs.server.players[i].inventory.set_slot(at,Some(crate::item::ItemStack::new_block(crate::block::STONE,64)));}
             hs.server.players[i].inventory.set_slot(0,Some(crate::item::ItemStack::new_block(crate::block::STONE,64-space)));
             hs.grant_to_joiner(i,[crate::item::ItemStack::new_block(crate::block::STONE,5)]);
-            hs.server.players[i].window_events.grave_grants.push_back((1,cell));
+            { let event = hs.server.players[i].window_events.last_number(); hs.server.players[i].window_events.grave_grants.push_back((event,cell)); }
             hs.release_slot(i,None); hs.release_slot(i,None);
             let grave=hs.server.world.grave_at(cell).unwrap();
             assert_eq!(grave.slots.iter().flatten().map(|s|s.count as u32).sum::<u32>(),u32::from(6-space));
@@ -9523,7 +9772,7 @@ pub(crate) mod tests {
         let _g = crate::save::WorldsRootGuard::new("sidecar-death-overflow");
         for space in [0,2] {
             let mut hs = start_room_test_server(&format!("sidecar-death-unfit-{space}"),0);
-            let client = hs.attach_test_remote_with_binding(Some([17;32])); send_signed_join(&client,[66;32],Some([17;32])); hs.tick();
+            let client = hs.attach_test_remote_with_binding(Some([17;32])); send_signed_join(&client,[66;32],Some([17;32])); hs.tick(); join_installed(&mut hs, &client, HostedServer::tick);
             let i = hs.server.players.len()-1;
             for at in 0..36 { hs.server.players[i].inventory.set_slot(at,Some(crate::item::ItemStack::new_block(crate::block::STONE,64))); }
             hs.server.players[i].inventory.set_slot(0,Some(crate::item::ItemStack::new_block(crate::block::STONE,64-space)));
@@ -9576,7 +9825,7 @@ pub(crate) mod tests {
         let _g = crate::save::WorldsRootGuard::new("sidecar-give");
         let mut hs = start_room_test_server("sidecar-give", 0);
         let client = hs.attach_test_remote_with_binding(Some([17;32]));
-        send_signed_join(&client, [66;32], Some([17;32])); hs.tick();
+        send_signed_join(&client, [66;32], Some([17;32])); hs.tick(); join_installed(&mut hs, &client, HostedServer::tick);
         let i = hs.server.players.len()-1;
         let item = crate::inventory::stack_to_wire(&crate::item::ItemStack::new_block(crate::block::STONE, 12));
         for (seq, mode, accepted) in [(1, crate::play_mode::PlayMode::Survival, false), (2, crate::play_mode::PlayMode::Creative, true)] {

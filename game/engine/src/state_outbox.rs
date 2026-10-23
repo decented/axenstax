@@ -402,6 +402,20 @@ impl ClientOutbox {
         self.push_entry(Delta::PackResult { action, packet });
     }
 
+    /// Exact quest batch carriers are reliable coalescing barriers, just like
+    /// a pack result. Overflow fails the whole receipt rather than dropping
+    /// a numbered reward or allowing a receipt to overtake its progression.
+    pub(crate) fn push_quest_carrier(&mut self, action: crate::action_identity::ActionHeader, packet: Box<[u8]>) {
+        let valid = match packet.first().copied() {
+            Some(tag) if tag == protocol::PacketType::QuestResult as u8 => packet.len() <= crate::action_journal::MAX_PAGE_BYTES + 1,
+            Some(tag) if tag == protocol::PacketType::InventoryGrant as u8 || tag == protocol::PacketType::PersonalSync as u8 => packet.len() <= protocol::MAX_WIRE_PACKET_LEN,
+            _ => false,
+        };
+        if !valid { self.failed_receipt = Some(action); return; }
+        if let Some(index) = &mut self.coalesce_index { index.clear(); }
+        self.push_entry(Delta::PackResult { action, packet });
+    }
+
     pub fn push_action_receipt(&mut self, receipt: crate::action_wire::ActionReceipt) {
         if let Some(index) = &mut self.coalesce_index { index.clear(); }
         self.push_entry(Delta::Receipt(receipt));

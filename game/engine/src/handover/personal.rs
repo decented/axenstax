@@ -17,7 +17,7 @@ use super::{
 use crate::mob::MobType;
 
 const DOMAIN: &str = "AxeNStax/handover/participant/v1";
-pub const SCHEMA: u32 = 1;
+pub const SCHEMA: u32 = 2;
 pub const RECORD_LIMIT: usize = 64 * 1024;
 pub const REPUTATION_LIMIT: usize = 2048;
 pub const KILL_KINDS_LIMIT: usize = 256;
@@ -28,14 +28,7 @@ const LOCK_BITS: u64 = (1 << 36) - 1;
 pub use crate::personal_value::PersonalContext as RecordContext;
 
 /// Owner-only local restore: never applied to anybody but `participant`.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct LocalRestore {
-    pub pos: [f32; 3],
-    pub yaw: f32,
-    pub pitch: f32,
-    pub hotbar: u8,
-    pub locks: u64,
-}
+pub use crate::progression::LocalRestore;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PersonalRecord {
@@ -44,6 +37,9 @@ pub struct PersonalRecord {
     pub kills: Vec<(MobType, u32)>,
     pub claims: Vec<(u32, u32)>,
     pub local: Option<LocalRestore>,
+    pub(crate) revision: u64,
+    pub(crate) tracking: crate::progression::KillTracking,
+    pub(crate) quests: crate::progression::QuestProgress,
 }
 
 fn mob_index(m: MobType) -> Result<u32> {
@@ -56,6 +52,27 @@ fn mob_from_index(i: u32) -> Result<MobType> {
 }
 
 impl PersonalRecord {
+    pub(crate) fn from_gameplay(context: RecordContext, value: &crate::progression::GameplayRecord) -> Result<Self> {
+        let record = Self { context, reputation: value.reputation.clone(), kills: value.kills.clone(),
+            claims: value.claims.clone(), local: value.local, revision: value.revision,
+            tracking: value.tracking, quests: value.quests.clone() };
+        record.validate()?; Ok(record)
+    }
+    pub(crate) fn to_gameplay(&self) -> crate::progression::GameplayRecord {
+        crate::progression::GameplayRecord { context: crate::progression::GameplayContext::Imported(self.context),
+            revision: self.revision, reputation: self.reputation.clone(), kills: self.kills.clone(),
+            claims: self.claims.clone(), local: self.local, tracking: self.tracking, quests: self.quests.clone() }
+    }
+    pub(crate) fn declared_schema(bytes: &[u8]) -> Result<u32> {
+        let mut reader = Reader::new(bytes, RECORD_LIMIT)?; reader.label(DOMAIN)?;
+        let schema = reader.u32()?;
+        if [1, 2].contains(&schema) { Ok(schema) } else { Err(Error::Invalid("participant schema")) }
+    }
+    #[cfg(test)]
+    pub(crate) fn encode_schema1(&self) -> Result<Vec<u8>> {
+        if !self.quests.is_empty() { return Err(Error::Invalid("legacy participant cannot carry quests")); }
+        self.encode_schema(1)
+    }
     /// A record from a live slot's maps. Sorting is canonicalisation, never
     /// loss: a count beyond a cap is a refusal naming the field.
     pub fn from_maps<'a>(
@@ -80,6 +97,9 @@ impl PersonalRecord {
             kills: kills.into_iter().map(|(_, k, v)| (k, v)).collect(),
             claims,
             local,
+            revision: 0,
+            tracking: crate::progression::KillTracking::LegacySnapshot,
+            quests: Default::default(),
         };
         r.validate()?;
         Ok(r)
@@ -89,6 +109,7 @@ impl PersonalRecord {
         self.reputation.iter().all(|e| e.1 == 0)
             && self.kills.iter().all(|e| e.1 == 0)
             && self.claims.is_empty()
+            && self.quests.is_empty()
     }
     fn validate(&self) -> Result<()> {
         if self.reputation.len() > REPUTATION_LIMIT {
@@ -127,13 +148,15 @@ impl PersonalRecord {
                 return Err(Error::Invalid("participant local restore"));
             }
         }
+        self.quests.validate().map_err(|_| Error::Invalid("participant quests"))?;
         Ok(())
     }
-    pub fn encode(&self) -> Result<Vec<u8>> {
+    pub fn encode(&self) -> Result<Vec<u8>> { self.encode_schema(SCHEMA) }
+    fn encode_schema(&self, schema: u32) -> Result<Vec<u8>> {
         self.validate()?;
         let mut v = Vec::new();
         frame(&mut v, DOMAIN.as_bytes());
-        v.extend_from_slice(&SCHEMA.to_be_bytes());
+        v.extend_from_slice(&schema.to_be_bytes());
         v.extend_from_slice(&self.context.participant);
         v.extend_from_slice(&self.context.lineage);
         v.extend_from_slice(&self.context.generation.to_be_bytes());
@@ -165,6 +188,11 @@ impl PersonalRecord {
                 v.extend_from_slice(&l.locks.to_be_bytes());
             }
         }
+        if schema == 2 {
+            let extra = crate::progression::encode_extras(&self.to_gameplay())
+                .map_err(|_| Error::Invalid("participant quest encoding"))?;
+            frame(&mut v, &extra);
+        }
         if v.len() > RECORD_LIMIT {
             return Err(Error::Limit("participant record"));
         }
@@ -175,9 +203,8 @@ impl PersonalRecord {
     pub fn decode(bytes: &[u8], expected: &RecordContext) -> Result<Self> {
         let mut r = Reader::new(bytes, RECORD_LIMIT)?;
         r.label(DOMAIN)?;
-        if r.u32()? != SCHEMA {
-            return Err(Error::Invalid("participant schema"));
-        }
+        let schema = r.u32()?;
+        if ![1, 2].contains(&schema) { return Err(Error::Invalid("participant schema")); }
         let context = RecordContext {
             participant: r.array()?,
             lineage: r.array()?,
@@ -229,19 +256,24 @@ impl PersonalRecord {
             }
             _ => return Err(Error::Invalid("participant flags")),
         };
+        let (revision, tracking, quests) = if schema == 2 {
+            crate::progression::decode_extras(r.framed(RECORD_LIMIT)?)
+                .map_err(|_| Error::Invalid("participant quest suffix"))?
+        } else { (0, crate::progression::KillTracking::LegacySnapshot, Default::default()) };
         r.end()?;
         let rec = Self {
             context,
             reputation,
             kills,
             claims,
-            local,
+            local, revision, tracking, quests,
         };
         rec.validate()?;
         Ok(rec)
     }
     /// Install ONLY this record's progression into a slot that belongs to
     /// the same participant. No reward, claim or payout routine runs.
+    #[cfg(test)]
     pub(crate) fn install_progression(&self, slot: &mut crate::player_slot::PlayerSlot) {
         slot.reputation.per_village.clear();
         for (k, s) in &self.reputation {

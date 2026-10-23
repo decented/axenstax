@@ -145,7 +145,14 @@ pub struct PlayerSlot {
     /// quest captures a snapshot of the current count and checks delta.
     pub kill_counter: ahash::AHashMap<crate::mob::MobType, u32>,
     /// Identity latched by the imported-world loader; local snapshot capture only.
-    pub(crate) personal_binding: Option<crate::joiner_save::PersonalBinding>,
+    pub(crate) personal_binding: Option<crate::progression::GameplayBinding>,
+    pub(crate) quest_progress: crate::progression::QuestProgress,
+    pub(crate) gameplay_revision: u64,
+    pub(crate) gameplay_clock: crate::quest_state::GameplayClock,
+    pub(crate) kill_tracking: crate::progression::KillTracking,
+    /// A bound mutation was lost in this live holder. Ordinary installation,
+    /// saving and a later successful mutation cannot establish completeness.
+    gameplay_carry_incomplete: bool,
     /// Snapshot of `kill_counter` at the moment a Kill quest was accepted;
     /// delta = current - snapshot. None for non-Kill quests.
     pub kill_quest_baseline: ahash::AHashMap<hecs::Entity, (crate::mob::MobType, u32)>,
@@ -349,6 +356,15 @@ pub struct PlayerSlot {
 }
 
 impl PlayerSlot {
+    pub(crate) fn mark_gameplay_incomplete(&mut self) { self.gameplay_carry_incomplete = true; }
+    #[cfg(any(test, not(target_arch = "wasm32")))]
+    pub(crate) fn gameplay_carry_complete(&self) -> bool { !self.gameplay_carry_incomplete }
+    /// Only the real world-change boundary establishes a new live holder.
+    pub(crate) fn reset_gameplay_holder(&mut self) {
+        self.personal_binding = None;
+        self.gameplay_carry_incomplete = false;
+    }
+
     /// World handover (CP2 review M-A): a per-screen HUD dialog is open, any
     /// surface whose clicks change the world, this seat's items or its
     /// progression (containers, signs, trades, bounties, crafting, Plans,
@@ -446,6 +462,11 @@ impl PlayerSlot {
             active_quests: ahash::AHashMap::new(),
             kill_counter: ahash::AHashMap::new(),
             personal_binding: None,
+            quest_progress: Default::default(),
+            gameplay_revision: 0,
+            gameplay_clock: Default::default(),
+            kill_tracking: crate::progression::KillTracking::Authoritative,
+            gameplay_carry_incomplete: false,
             kill_quest_baseline: ahash::AHashMap::new(),
             charter_allows_sats: false,
             charter_comms: crate::comms::CommsLevel::Approved,

@@ -489,7 +489,8 @@ fn testlab_kit_is_server_owned_at_join_and_creative_cannot_report_death() {
 fn a_testlab_death_graves_the_unacknowledged_kit_and_keeps_its_plan() {
     let mut hs = start_dedicated_server("kit-death");
     hs.server.world.world_type = "testlab".to_string();
-    let (client, slot) = join_guest(&mut hs, "KitGrave");
+    // The kit's Sync1 must stay unacknowledged: the client installs nothing.
+    let (client, slot) = super::joiner_authority::join_guest_uninstalled(&mut hs, "KitGrave");
     let at = stand_on_floor(&mut hs, slot);
     let before = crate::window_events::effective_window(&hs.server.players[slot]);
     let expected: u32 = before
@@ -535,8 +536,9 @@ fn a_testlab_death_graves_the_unacknowledged_kit_and_keeps_its_plan() {
     assert!(matches!(&retained[0].item, Item::Plan(p)
         if crate::plan::marker(p) == crate::plan::marker(&crate::satoshi::starter_hut_plan())));
     assert_eq!(inbox.syncs.len(), 1);
+    // The join's kit Sync1 (1) and its Personal2 (2), then the death's Replace.
     assert_eq!(
-        inbox.syncs[0].window_event, 2,
+        inbox.syncs[0].window_event, 3,
         "death follows the kit Replace"
     );
 }

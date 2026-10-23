@@ -2,6 +2,26 @@
 use super::*;
 use crate::transport::ClientTransport as _;
 
+/// Explicit physical installation for this test's received attachment. The
+/// packet collector never sends acknowledgements or changes server readiness.
+fn initial_installation(heard: &super::super::c3d_tests::Heard) -> (protocol::PersonalAck, crate::personal_sync::Inbox, crate::player_slot::PlayerSlot) {
+    let accept = heard.accepts.first().expect("real JoinAccept");
+    let sync = heard.syncs.first().expect("real initial Sync1");
+    let first = heard.personal.first().expect("real initial Personal2");
+    assert_eq!(sync.window_event, 1);
+    assert_eq!(first.window_event, 2);
+    let mut slot = crate::player_slot::PlayerSlot::new(0, glam::Vec3::ZERO, 1.0);
+    crate::inventory_sync::apply(&mut crate::window::WindowMut {
+        inv: &mut slot.inventory, armour: &mut slot.armour_slots,
+        cursor: &mut slot.crafting_ui.cursor_item, grid: &mut slot.crafting_ui.grid, container: None,
+    }, sync, &crate::block::BlockRegistry::new(), &mut Default::default(), &mut Default::default(), accept.inventory_mode).unwrap();
+    let mut inbox = crate::personal_sync::Inbox::new(accept.action_session, 0);
+    inbox.push(first.clone()).unwrap();
+    assert!(inbox.apply(sync.window_event, &mut slot).unwrap().is_empty());
+    let ack = inbox.apply(first.window_event, &mut slot).unwrap().remove(0);
+    (ack, inbox, slot)
+}
+
 fn snapshot_from(client: &crate::transport::ChannelClientTransport) -> protocol::PersonalSnapshot {
     while let Some(packet) = client.try_recv_from_server() {
         if let Some((protocol::PacketType::PersonalSync, bytes)) =
@@ -19,44 +39,20 @@ fn snapshot_from(client: &crate::transport::ChannelClientTransport) -> protocol:
 fn handover_personal_delayed_supersession_keeps_honest_action_and_current_freeze_fence() {
     let _root = crate::save::WorldsRootGuard::new("personal-delayed-initial");
     let mut hs = super::super::tests::start_room_test_server("personal-delayed-initial", 0);
-    let (i, client, heard) = super::super::c3d_tests::join(&mut hs, 17);
+    let (i, client, heard) = super::super::c3d_tests::join_raw(&mut hs, 17);
     let accept = heard.accepts.first().unwrap();
     assert_eq!(
         accept.inventory_mode,
         crate::action_identity::InventoryMode::Mirror
     );
     let key = hs.server.players[i].verified_pubkey.unwrap();
-    let context = crate::handover::personal::RecordContext {
-        participant: key,
-        lineage: [1; 16],
-        generation: 9,
-        transfer: [4; 16],
-    };
-    let record =
-        crate::handover::personal::PersonalRecord::from_maps(context, [], [], [], None).unwrap();
-    hs.server.players[i].personal = Some(
-        crate::joiner_save::BoundPersonal::new(
-            crate::joiner_save::PersonalBinding {
-                context,
-                manifest: [1; 32],
-                core: [2; 32],
-            },
-            &record,
-        )
-        .unwrap(),
-    );
-    // The synthetic personal holder needs the same initial Replace boundary
-    // a restored imported join has before its first personal snapshot.
-    let window = crate::window_events::effective_window(&hs.server.players[i]);
-    let first_replace = hs.send_inventory_sync(i, window, Default::default());
-    hs.start_personal(i, first_replace, false).unwrap();
-    let first = snapshot_from(&client);
+    // The real automatic initial tuple is the subject: withhold its exact
+    // Applied until after a newer snapshot, preserving initial_expected.
+    let first_replace = heard.syncs.first().unwrap().window_event;
+    let first = heard.personal.first().unwrap().clone();
     assert_eq!(first.window_event, first_replace + 1, "personal state owns its genuine preceding fence");
     let first_event = first.window_event;
-    let mut slot = crate::player_slot::PlayerSlot::new(0, glam::Vec3::ZERO, 1.0);
-    let mut inbox = crate::personal_sync::Inbox::new(accept.action_session, 0);
-    inbox.push(first.clone()).unwrap();
-    let first_ack = inbox.apply(first_event, &mut slot).unwrap().remove(0);
+    let (first_ack, mut inbox, mut slot) = initial_installation(&heard);
     // Issue a new numbered Replace/snapshot before the first ack reaches the
     // server. Its bytes are deliberately withheld from the honest client.
     let window = crate::window_events::effective_window(&hs.server.players[i]);
@@ -158,22 +154,17 @@ fn handover_personal_delayed_supersession_keeps_honest_action_and_current_freeze
 #[test]
 fn d2c2_personal_applied_control_keeps_older_budgeted_strict_actions_in_order() {
     use crate::{action_identity::ActionFate, action_wire::{ActionIntent, ActionPacket, AppliedActionAck}, item::{Item, ItemStack}};
-    let mut rig = super::super::c3d_strict_tests::strict_rig("personal-paced-authority");
+    let (mut rig, heard) = super::super::c3d_strict_tests::strict_rig_with_initial_packets("personal-paced-authority");
     let i = rig.i;
     let key = rig.hs.server.players[i].verified_pubkey.unwrap();
-    let context = crate::handover::personal::RecordContext { participant: key, lineage: [1; 16], generation: 9, transfer: [4; 16] };
-    let record = crate::handover::personal::PersonalRecord::from_maps(context, [], [], [], None).unwrap();
-    rig.hs.server.players[i].personal = Some(crate::joiner_save::BoundPersonal::new(crate::joiner_save::PersonalBinding { context, manifest: [1; 32], core: [2; 32] }, &record).unwrap());
-    rig.hs.server.players[i].inventory = crate::inventory::Inventory::new();
-    rig.hs.start_personal(i, rig.applied, false).unwrap();
-    let first = snapshot_from(&rig.client);
-    let mut slot = crate::player_slot::PlayerSlot::new(0, glam::Vec3::ZERO, 1.0);
-    let mut inbox = crate::personal_sync::Inbox::new(rig.accept.action_session, 0);
-    inbox.push(first.clone()).unwrap();
-    let first_ack = inbox.apply(first.window_event, &mut slot).unwrap().remove(0);
+    let first = heard.personal.first().unwrap().clone();
+    let (first_ack, mut inbox, mut slot) = initial_installation(&heard);
     rig.client.send_to_server(&protocol::serialize_packet(protocol::PacketType::PersonalSync, &protocol::PersonalSyncPacket::Applied(first_ack)));
     rig.hs.tick();
     assert!(rig.hs.server.players[i].personal_delivery.initialised);
+    assert!(rig.hs.server.players[i].window_events.is_quiescent());
+    rig.hs.server.players[i].inventory.clear();
+    slot.inventory.clear();
     rig.applied = first.window_event;
     let base = rig.applied;
     // The supported client may send several old-boundary configuration ops

@@ -104,8 +104,10 @@ fn a_pickup_earned_before_a_fatal_hazard_is_in_the_grave_before_replace() {
             .is_none()
     }));
     assert_eq!(inbox.syncs.len(), 1);
+    // The join's Sync1 (1) and Personal2 (2) come first, then the pickup
+    // grant (3): the replacement is the fourth window event.
     assert_eq!(
-        inbox.syncs[0].window_event, 2,
+        inbox.syncs[0].window_event, 4,
         "pickup grant precedes replacement"
     );
 }

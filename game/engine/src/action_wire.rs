@@ -42,6 +42,8 @@ pub enum ActionIntent {
     CancelledNoop,
     /// One unpredicted, source-backed entity pack request in either mode.
     Pack(crate::pack_wire::PackRequest),
+    /// One unpredicted ordinary quest operation, appended under wire 92.
+    Quest(crate::quest_wire::QuestRequest),
 }
 
 impl ActionIntent {
@@ -80,7 +82,7 @@ impl ActionIntent {
     /// from its hand when it reserves the drop, so every drop refusal is
     /// corrected (`strict_drop.rs`).
     pub fn predicts_nothing(&self) -> bool {
-        matches!(self, ActionIntent::Attack(_) | ActionIntent::Interact(_) | ActionIntent::Device { .. } | ActionIntent::Pack(_))
+        matches!(self, ActionIntent::Attack(_) | ActionIntent::Interact(_) | ActionIntent::Device { .. } | ActionIntent::Pack(_) | ActionIntent::Quest(_))
             || matches!(self, ActionIntent::Item(p) if matches!(p.action, protocol::ItemAction::Shoot { .. } | protocol::ItemAction::Eat { .. } | protocol::ItemAction::CreativeGive { .. } | protocol::ItemAction::Sleep { .. }))
     }
 }
@@ -296,10 +298,10 @@ mod tests {
             assert_eq!(deserialize_header(&bytes).map(|(t, _)| t), Some(tag));
         }
         assert_eq!(deserialize_header(&[67]).map(|(t, _)| t), Some(PacketType::InventorySync), "OC's v88 tag 67 is unchanged");
-        for (byte, tag) in [(72, PacketType::Handover), (73, PacketType::PersonalSync), (74, PacketType::PackResult), (75, PacketType::PackView)] {
+        for (byte, tag) in [(72, PacketType::Handover), (73, PacketType::PersonalSync), (74, PacketType::PackResult), (75, PacketType::PackView), (76, PacketType::QuestResult), (77, PacketType::QuestView)] {
             assert_eq!(deserialize_header(&[byte]).map(|(t, _)| t), Some(tag), "later tag {byte} appends without changing C3d");
         }
-        assert!(deserialize_header(&[76]).is_none(), "no tag past the delivered pack carriers");
+        assert!(deserialize_header(&[78]).is_none(), "no tag past the appended quest carriers");
     }
 
     /// C3d run 19 — the `ToggleBlock` layout with its appended

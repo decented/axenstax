@@ -5,7 +5,7 @@
 //! window (`window_events::effective_window_and_debt`), and an
 //! [`ObligationHistory`] saying whether that debt is the whole story. A v1
 //! save (which held no debt) still loads, with empty debt and
-//! `Incomplete(LegacyV1)`; the writer always writes v3. The record is read by
+//! `Incomplete(LegacyV1)`; the mutable writer always writes v4. The record is read by
 //! dispatching on its leading version byte, never by trying one layout and
 //! falling back. Spec: `docs/architecture/2026-10-09-sidecar-obligation-carrier.md`.
 use crate::{
@@ -16,11 +16,11 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use crate::personal_value::PersonalContext;
-#[cfg(not(target_arch = "wasm32"))]
 use crate::personal_value::LocalPersonalSave;
 
 /// The layout the writer writes (OC).
-const VERSION: u8 = 3;
+const VERSION: u8 = 4;
+const VERSION_V3: u8 = 3;
 const VERSION_V2: u8 = 2;
 /// The Sidecar layout (protocol v87), still read ([`JoinerSaveV1`]).
 const VERSION_V1: u8 = 1;
@@ -161,15 +161,18 @@ pub(crate) fn capture_local(
     let Some(binding) = &slot.personal_binding else {
         return Ok(None);
     };
-    let seed = crate::handover::live::capture::local0_sidecar(slot, [0; 16])
-        .map_err(|r| r.0.to_string())?;
-    let bytes = crate::handover::live::capture::local0_progress(slot, binding.context)
-        .map_err(|r| r.0.to_string())?;
-    let record = crate::handover::personal::PersonalRecord::decode(&bytes, &binding.context)
-        .map_err(|e| e.to_string())?;
+    if !binding.persists() { return Err("Guest progression cannot be saved".into()); }
+    let seed = crate::handover::live::capture::local0_sidecar(slot, [0; 16]).map_err(|r| r.0.to_string())?;
+    let record = crate::progression::GameplayRecord::from_slot(binding.context(), slot)?;
     let mut save = JoinerSave::decode(&seed)?;
-    save.personal = Some(BoundPersonal::new(binding.clone(), &record)?);
+    save.personal = Some(BoundPersonal::with_gameplay(binding.clone(), &record)?);
     Ok(Some(LocalPersonalSave(save.encode()?)))
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn capture_local(slot: &crate::player_slot::PlayerSlot) -> Result<Option<LocalPersonalSave>, String> {
+    if slot.personal_binding.is_some() { return Err("Local gameplay authority cannot be omitted from a web save".into()); }
+    Ok(None)
 }
 
 /// The imported authority to which a mutable personal record belongs.
@@ -184,36 +187,40 @@ pub(crate) struct PersonalBinding {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct BoundPersonal {
-    pub binding: PersonalBinding,
+    pub binding: crate::progression::GameplayBinding,
     pub bytes: Vec<u8>,
 }
-
-#[cfg(not(target_arch = "wasm32"))]
 impl BoundPersonal {
-    pub fn new(
-        binding: PersonalBinding,
-        record: &crate::handover::personal::PersonalRecord,
-    ) -> Result<Self, String> {
-        if record.context != binding.context
-            || binding.manifest == [0; 32]
-            || binding.core == [0; 32]
-        {
-            return Err("invalid personal authority binding".into());
-        }
-        let value = Self {
-            binding,
-            bytes: record.encode().map_err(|e| format!("{e:?}"))?,
-        };
-        value.record()?;
-        Ok(value)
+    pub(crate) fn with_gameplay(binding: crate::progression::GameplayBinding,
+        record: &crate::progression::GameplayRecord) -> Result<Self, String>
+    {
+        binding.validate()?;
+        if binding.context() != record.context { return Err("gameplay authority context differs".into()); }
+        let value = Self { binding, bytes: record.encode()? }; value.record()?; Ok(value)
     }
-    pub fn record(&self) -> Result<crate::handover::personal::PersonalRecord, String> {
-        if self.binding.manifest == [0; 32] || self.binding.core == [0; 32] {
-            return Err("invalid personal authority binding".into());
-        }
-        crate::handover::personal::PersonalRecord::decode(&self.bytes, &self.binding.context)
-            .map_err(|e| format!("invalid personal record: {e:?}"))
+    pub(crate) fn fresh(binding: crate::progression::GameplayBinding) -> Result<Self, String> {
+        let record = crate::progression::GameplayRecord::empty(binding.context())?;
+        Self::with_gameplay(binding, &record)
     }
+    pub(crate) fn record(&self) -> Result<crate::progression::GameplayRecord, String> {
+        self.binding.validate()?;
+        crate::progression::GameplayRecord::decode(&self.bytes, self.binding.context())
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn new(binding: PersonalBinding, record: &crate::handover::personal::PersonalRecord) -> Result<Self, String> {
+        if record.context != binding.context { return Err("invalid personal authority binding".into()); }
+        Self::with_gameplay(crate::progression::GameplayBinding::Imported(binding), &record.to_gameplay())
+    }
+}
+
+/// Exact delivered v3 body. Never decode it using the new binding enum.
+#[derive(Serialize, Deserialize)]
+struct BoundPersonalV3 { binding: PersonalBinding, bytes: Vec<u8> }
+#[derive(Serialize, Deserialize)]
+struct JoinerSaveV3 {
+    version: u8, slots: Vec<Slot>, armour: [Option<crate::save::SavedArmourPiece>; 4],
+    health: f32, hunger: u8, spawn: [f32; 3], run_id: [u8; 16], slept_night: Option<u32>,
+    owed: Vec<OwedEntry>, obligation_history: ObligationHistory, personal: Option<BoundPersonalV3>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -297,6 +304,16 @@ impl JoinerSave {
     /// entries keeps the first ones in live order and is written
     /// `Incomplete(Overflow)` (the session itself is marked where its live
     /// debt passes the bound, `window_events`); the save never fails over it.
+    /// The live clock projects all remaining timers at this save boundary.
+    /// Failure refuses the canonical write; the current source remains intact.
+    pub(crate) fn capture_projected(sp: &crate::server::ServerPlayer, run_id: [u8; 16]) -> Result<Self, String> {
+        let mut saved = Self::capture(sp, run_id);
+        if let Some(personal) = &sp.personal {
+            let record = sp.gameplay_clock.captured(&personal.record()?);
+            saved.personal = Some(BoundPersonal::with_gameplay(personal.binding.clone(), &record)?);
+        }
+        Ok(saved)
+    }
     pub fn capture(sp: &crate::server::ServerPlayer, run_id: [u8; 16]) -> Self {
         let fold = crate::window_events::effective_window_and_debt(sp);
         let mut save = Self::from_parts(
@@ -337,6 +354,7 @@ impl JoinerSave {
     /// validation ([`Self::decode`]) on them: what can't be read back is
     /// never written (an older, readable save is kept instead).
     pub fn encode(&self) -> Result<Vec<u8>, String> {
+        if self.personal.as_ref().is_some_and(|p| !p.binding.persists()) { return Err("Guest progression cannot be persisted".into()); }
         let bytes = bincode::serialize(self).map_err(|e| e.to_string())?;
         Self::decode(&bytes).map_err(|e| format!("a joiner save that wouldn't read back: {e}"))?;
         Ok(bytes)
@@ -362,6 +380,10 @@ impl JoinerSave {
             Some(&VERSION) => options()
                 .deserialize::<JoinerSave>(bytes)
                 .map_err(|e| e.to_string())?,
+            Some(&VERSION_V3) => {
+                let old: JoinerSaveV3 = options().deserialize(bytes).map_err(|e| e.to_string())?;
+                Self::from_v3(old)?
+            }
             Some(&VERSION_V2) => {
                 let v2: JoinerSaveV2 = options().deserialize(bytes).map_err(|e| e.to_string())?;
                 Self::from_v2(v2)
@@ -375,15 +397,26 @@ impl JoinerSave {
         };
         saved.window()?;
         saved.debt()?;
-        #[cfg(not(target_arch = "wasm32"))]
         if let Some(personal) = &saved.personal {
+            if !personal.binding.persists() { return Err("Persisted guest progression is not admissible".into()); }
             personal.record()?;
         }
-        #[cfg(target_arch = "wasm32")]
-        if saved.personal.is_some() {
-            return Err("native handover personal record".into());
-        }
         Ok(saved)
+    }
+
+    fn from_v3(old: JoinerSaveV3) -> Result<Self, String> {
+        if old.version != VERSION_V3 { return Err("invalid v3 joiner save".into()); }
+        let personal = match old.personal {
+            None => None,
+            Some(value) => {
+                let record = crate::progression::decode_schema1(&value.bytes, value.binding.context)?;
+                Some(BoundPersonal::with_gameplay(crate::progression::GameplayBinding::Imported(value.binding), &record)?)
+            }
+
+        };
+        Ok(Self { version: VERSION, slots: old.slots, armour: old.armour, health: old.health,
+            hunger: old.hunger, spawn: old.spawn, run_id: old.run_id, slept_night: old.slept_night,
+            owed: old.owed, obligation_history: old.obligation_history, personal })
     }
 
     pub(crate) fn from_v1(v1: JoinerSaveV1) -> Result<Self, String> {
@@ -580,13 +613,16 @@ impl crate::server::GameServer {
                 .map_err(|e| e.to_string())
                 .and_then(|mut file| {
                     let mut leading = [0];
-                    current_v3 = std::io::Read::read(&mut file, &mut leading).map_err(|e| e.to_string())? == 1 && leading[0] == 3;
+                    current_v3 = std::io::Read::read(&mut file, &mut leading).map_err(|e| e.to_string())? == 1 && matches!(leading[0], 3 | 4);
                     std::io::Seek::rewind(&mut file).map_err(|e| e.to_string())?;
                     crate::save::read_bounded(file, MAX_JOINER_SAVE_BYTES)
                 })
                 .and_then(|bytes| JoinerSave::decode(&bytes));
             match result {
                 Ok(saved) if saved.personal.is_none() => Some(saved),
+                Ok(saved) if saved.personal.as_ref().is_some_and(|personal| matches!(personal.binding,
+                    crate::progression::GameplayBinding::WorldLocal { scope, player: crate::progression::WorldPlayer::Npub(key) }
+                        if Some(scope) == self.world.quest_scope && key == pk)) => Some(saved),
                 Ok(_) => {
                     log::warn!("Bound personal record has no matching imported authority");
                     self.failed_joiner_reads.insert(pk);
@@ -631,8 +667,9 @@ impl crate::server::GameServer {
         }
         // M-1: never written into a retired world (or a refused one).
         crate::save::refuse_write_over_newer_save(&crate::save::world_dir(&self.world_name))?;
-        JoinerSave::capture(sp, self.run_id).encode()?;
-        crate::handover::live::personal_adapter::write(&crate::save::world_dir(&self.world_name), pk, &JoinerSave::capture(sp, self.run_id))
+        let saved = JoinerSave::capture_projected(sp, self.run_id)?;
+        saved.encode()?;
+        crate::handover::live::personal_adapter::write(&crate::save::world_dir(&self.world_name), pk, &saved)
     }
     pub(crate) fn save_joiners(&self) -> Result<(), String> {
         let errors: Vec<_> = self
@@ -711,8 +748,8 @@ mod tests {
             ("load autosave", crate::save::load_autosave("sidecar", &mut crate::world::World::new()).map(|_| ())),
             ("meta", crate::save::save_world_meta("sidecar", &meta)),
             ("world folder", crate::save::write_world_folder("sidecar", &meta, &save, &w)),
-            ("save", crate::save::save_world("sidecar", &w, std::slice::from_ref(&slot), 1, &[], &[])),
-            ("autosave", crate::save::autosave_world("sidecar", &w, std::slice::from_ref(&slot), 1, &[], &[])),
+            ("save", crate::save::save_world("sidecar", &w, std::slice::from_ref(&slot), 1, &[], &[], None)),
+            ("autosave", crate::save::autosave_world("sidecar", &w, std::slice::from_ref(&slot), 1, &[], &[], None)),
             ("server save", s.try_save()),
             ("joiner save", s.save_joiner(0)),
         ];
@@ -1025,7 +1062,7 @@ mod oc_tests {
         assert!(next.players[0].window_events.debt.is_empty());
         next.save_joiner(0).unwrap();
         let bytes = std::fs::read(&path).unwrap();
-        assert_eq!(bytes[0], 3, "the writer writes v3");
+        assert_eq!(bytes[0], 4, "the mutable writer writes v4; legacy readers have separate fixtures");
         let resaved = JoinerSave::decode(&bytes).unwrap();
         assert_eq!(resaved.history(), ObligationHistory::Incomplete(IncompleteCause::LegacyV1), "Incomplete is sticky");
         assert!(!next.players[0].obligations_proven_zero());
@@ -1422,5 +1459,104 @@ mod oc_tests {
         assert!(pkt.len() <= crate::protocol::MAX_WIRE_PACKET_LEN);
         let back: crate::protocol::InventorySyncPacket = crate::protocol::safe_deserialize(&pkt[1..]).unwrap();
         assert_eq!(back.owed.len(), 256);
+    }
+}
+
+/// Genuine delivered v3 envelope and schema1 body for historical save fixtures.
+#[cfg(test)]
+pub(crate) fn encode_delivered_v3(save: &JoinerSave) -> Result<Vec<u8>, String> {
+    let personal = save.personal.as_ref().map(|value| {
+        let binding = value.binding.imported().ok_or("v3 only carried Imported authority")?.clone();
+        let record = value.record()?;
+        let old = crate::handover::personal::PersonalRecord::from_gameplay(binding.context, &record)
+            .map_err(|e| e.to_string())?;
+        Ok::<_, String>(BoundPersonalV3 { binding, bytes: old.encode_schema1().map_err(|e| e.to_string())? })
+    }).transpose()?;
+    bincode::serialize(&JoinerSaveV3 { version: 3, slots: save.slots.clone(), armour: save.armour,
+        health: save.health, hunger: save.hunger, spawn: save.spawn, run_id: save.run_id,
+        slept_night: save.slept_night, owed: save.owed.clone(), obligation_history: save.obligation_history, personal })
+        .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod quest_codec_tests {
+    use super::*;
+    fn imported() -> JoinerSave {
+        let mut window = EffectiveWindow { inv: crate::inventory::Inventory::new(), armour: [None; 4], cursor: None, grid: Default::default() };
+        window.inv.set_slot(7, Some(ItemStack::new_block(crate::block::GLASS, 9)));
+        let mut save = JoinerSave::from_parts(&window, 13.0, 17, [2.0, 7.0, -3.0], [8; 16], Some(123));
+        save.owed.push(OwedEntry::capture(&Item::Block(crate::block::GLASS), 7));
+        save.obligation_history = ObligationHistory::Incomplete(IncompleteCause::Overflow);
+        let context = PersonalContext { participant: [7; 32], lineage: [3; 16], generation: 41, transfer: [9; 16] };
+        let record = crate::handover::personal::PersonalRecord::from_maps(context,
+            [(&(2, -8), &23)], [(&crate::mob::MobType::Pig, &19)], [(&17, &456)],
+            Some(crate::progression::LocalRestore { pos: [1.0, 2.0, 3.0], yaw: 0.3, pitch: -0.2, hotbar: 6, locks: 1 << 9 })).unwrap();
+        save.personal = Some(BoundPersonal::new(PersonalBinding { context, manifest: [4; 32], core: [5; 32] }, &record).unwrap());
+        save
+    }
+    #[test]
+    fn d2c3_delivered_v3_preserves_full_personal_window_debt_and_history() {
+        let original = imported();
+        let bytes = encode_delivered_v3(&original).unwrap();
+        assert_eq!(bytes[0], 3);
+        let back = JoinerSave::decode(&bytes).unwrap();
+        assert_eq!(back.version, 4);
+        assert_eq!(bincode::serialize(&back.slots).unwrap(), bincode::serialize(&original.slots).unwrap());
+        assert_eq!(bincode::serialize(&back.owed).unwrap(), bincode::serialize(&original.owed).unwrap());
+        assert_eq!(back.obligation_history, original.obligation_history);
+        let actual = back.personal.as_ref().unwrap().record().unwrap();
+        assert_eq!(actual, original.personal.as_ref().unwrap().record().unwrap());
+        assert_eq!(actual.tracking, crate::progression::KillTracking::LegacySnapshot);
+        assert!(actual.quests.is_empty());
+        let mut tailed = bytes.clone(); tailed.push(0);
+        assert!(JoinerSave::decode(&tailed).is_err());
+        let mut corrupt = bytes; corrupt.truncate(corrupt.len() - 1);
+        assert!(JoinerSave::decode(&corrupt).is_err());
+    }
+    #[test]
+    fn d2c3_genuine_v1_v2_dispatch_retains_obligation_provenance() {
+        let mut save = imported(); save.personal = None;
+        let seed = save.encode_seed().unwrap(); assert_eq!(seed[0], 2);
+        let v2 = JoinerSave::decode(&seed).unwrap();
+        assert_eq!(v2.obligation_history, save.obligation_history);
+        assert_eq!(bincode::serialize(&v2.owed).unwrap(), bincode::serialize(&save.owed).unwrap());
+        let v1 = JoinerSaveV1 { version: 1, slots: save.slots.clone(), armour: save.armour,
+            health: save.health, hunger: save.hunger, spawn: save.spawn, run_id: save.run_id, slept_night: save.slept_night };
+        let back = JoinerSave::decode(&bincode::serialize(&v1).unwrap()).unwrap();
+        assert_eq!(back.obligation_history, ObligationHistory::Incomplete(IncompleteCause::LegacyV1));
+        assert!(back.owed.is_empty());
+        assert_eq!(bincode::serialize(&back.slots).unwrap(), bincode::serialize(&save.slots).unwrap());
+    }
+    #[test]
+    fn d2c3_guest_record_is_runtime_only_and_cannot_enter_any_canonical_file() {
+        let binding = crate::progression::GameplayBinding::Guest { session: [9; 16], generation: 13 };
+        let personal = BoundPersonal::fresh(binding).unwrap();
+        personal.record().unwrap();
+        let mut save = imported(); save.personal = Some(personal);
+        assert!(save.encode().is_err());
+        assert!(JoinerSave::decode(&bincode::serialize(&save).unwrap()).is_err());
+    }
+    #[test]
+    fn d2c3_selected_wrapped_v3_footer55_migrates_only_after_exact_body_validation() {
+        let personal = imported();
+        let wrapped = encode_delivered_v3(&personal).unwrap();
+        let mut selected = crate::save::minimal_world_save_for_tests(31);
+        selected.local_personal = Some(LocalPersonalSave(wrapped.clone()));
+        selected.rig_clips = vec![crate::anim_set::AnimClip::Bounce];
+        assert!(selected.quest_world.is_none());
+        let mut body = bincode::serialize(&selected).unwrap();
+        let appended = bincode::serialize(&selected.quest_world).unwrap(); assert_eq!(appended, [0]);
+        assert!(body.ends_with(&appended)); body.truncate(body.len() - appended.len());
+        body.extend_from_slice(&55u32.to_le_bytes()); body.extend_from_slice(&crate::save_format::SAVE_FOOTER_MAGIC);
+        let (old, partial) = crate::save::read_world_save_reporting(&body).unwrap();
+        assert!(!partial); assert!(old.quest_world.is_none());
+        assert_eq!(old.rig_clips, selected.rig_clips);
+        assert_eq!(old.local_personal.as_ref().unwrap().0, wrapped);
+        let migrated = JoinerSave::decode(&old.local_personal.unwrap().0).unwrap();
+        assert_eq!(migrated.personal.unwrap().record().unwrap(), personal.personal.unwrap().record().unwrap());
+        // A current body cannot disguise a missing selected-authority suffix.
+        let mut broken = body[..body.len() - crate::save_format::SAVE_FOOTER_LEN].to_vec(); broken.pop();
+        broken.extend_from_slice(&55u32.to_le_bytes()); broken.extend_from_slice(&crate::save_format::SAVE_FOOTER_MAGIC);
+        assert!(crate::save::read_world_save_reporting(&broken).is_err());
     }
 }

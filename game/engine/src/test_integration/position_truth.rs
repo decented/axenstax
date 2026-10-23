@@ -166,6 +166,7 @@ impl Joiner {
         let ConnectionState::Connected { player_index, .. } = rc.state else {
             panic!("the join did not complete");
         };
+        crate::hosted_server::tests::install_client_initial_personal(&mut rc, hs, player_index as usize, HostedServer::tick);
         rc.latest_state = None;
         Self::joined(hs, Link::Client(Box::new(rc)), player_index as usize, start, latency)
     }

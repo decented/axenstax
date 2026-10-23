@@ -140,6 +140,7 @@ pub struct Capture<'a> {
 
 pub struct SourceSession {
     stage: SourceStage,
+    current_cut: Option<crate::handover::active_carry::CutTicket>,
     action: HostAction,
     cfg: SourceConfig,
     transfer: Id,
@@ -270,8 +271,8 @@ impl SourceSession {
         let save = crate::joiner_save::JoinerSave::capture(&hs.server.players[action.seat.slot], hs.server.run_id);
         let seed = save.encode_seed().map_err(|_| Refusal("The other player's inventory couldn't be recorded."))?;
         let progress = if let Some(personal) = &save.personal {
-            let mut record = personal.record().map_err(|_| Refusal("The other player's progress couldn't be recorded."))?;
-            record.context = context; record.encode().map_err(|_| Refusal("The other player's progress couldn't be recorded."))?
+            let record = personal.record().map_err(|_| Refusal("The other player's progress couldn't be recorded."))?;
+            crate::handover::personal::PersonalRecord::from_gameplay(context, &record).and_then(|record| record.encode()).map_err(|_| Refusal("The other player's progress couldn't be recorded."))?
         } else { super::capture::default_progress(context) };
         super::personal_adapter::preflight(&seed, &progress, context)?;
         let transfer = random_id();
@@ -279,6 +280,7 @@ impl SourceSession {
         let lease = hs.handover_bind(s.slot, s.generation, s.key, transfer).map_err(Refusal)?;
         let mut session = Self {
             stage: SourceStage::Proposed,
+            current_cut: None,
             transfer,
             challenge: random_id(),
             recipient_runtime: None,
@@ -725,7 +727,7 @@ impl SourceSession {
         // has heard the end (its own stall clock waits on the source).
         let beats = matches!(
             self.stage,
-            SourceStage::Packing | SourceStage::ReadyVerified | SourceStage::Publishing | SourceStage::Prepared | SourceStage::Retired
+            SourceStage::Frozen | SourceStage::Packing | SourceStage::ReadyVerified | SourceStage::Publishing | SourceStage::Prepared | SourceStage::Retired
         );
         if beats && now.saturating_sub(self.last_beat) >= HEARTBEAT_SECS {
             self.last_beat = now;
@@ -746,6 +748,38 @@ impl SourceSession {
             return Err(self.fail(hs, r));
         }
         Ok(())
+    }
+
+    /// One actual cut followed by bounded current tuple settlement. Calls
+    /// after Prepared/retirement are deliberately dormant for durable waits.
+    pub(crate) fn settle_current_cut(&mut self, local: &mut crate::player_slot::PlayerSlot,
+        hs: &mut HostedServer, live: Live, tick: u64, scope: Option<crate::progression::GameplayId>, now: u64) -> Result<(), Refusal> {
+        if self.stage != SourceStage::Frozen { return Ok(()); }
+        let result = (|| {
+            if self.current_cut.is_none() {
+                self.check(hs, live)?;
+                let identity = crate::handover::active_carry::CutIdentity::checked(self.transfer, hs, live,
+                    self.action.seat, tick, scope)?;
+                let (ticket, output) = crate::handover::active_carry::prepare_cut(local, hs, identity, now)?.commit();
+                let slot = ticket.seat().slot;
+                self.current_cut = Some(ticket);
+                // Postcommit transport uncertainty cannot lose the already
+                // stored provenance; retries use its actual pending tuple.
+                if let Some(wire) = output { hs.send_carry_personal(slot, &wire); }
+            }
+            let ticket = self.current_cut.as_mut().expect("prepared actual cut");
+            ticket.check(local, hs, live, tick, scope)?;
+            ticket.check_deadline(now)?;
+            if hs.pump_handover_personal_applied(ticket, 8).map_err(Refusal)? {
+                ticket.confirm(local, hs, live, tick, scope, now)?;
+            }
+            if ticket.retry_due(now) {
+                hs.resend_carry_personal(ticket).map_err(|_| Refusal("Current personal snapshot couldn't be retried."))?;
+                ticket.sent(now);
+            }
+            Ok(())
+        })();
+        result.map_err(|refusal| self.fail(hs, refusal))
     }
 
     /// Every boundary re-reads identity, seats, live seat state and the
@@ -776,7 +810,7 @@ impl SourceSession {
                 Ok(())
             }
             // M1: the recipient's heartbeat while its import runs on a worker.
-            (SourceStage::Streaming, Frame::Notice { .. }) => Ok(()),
+            (SourceStage::Frozen | SourceStage::Streaming, Frame::Notice { .. }) => Ok(()),
             (SourceStage::Streaming, Frame::Ack { transfer, through }) => {
                 let sender = self.sender.as_mut().ok_or(Refusal("No transfer is running."))?;
                 if sender

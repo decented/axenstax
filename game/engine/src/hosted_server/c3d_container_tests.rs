@@ -30,7 +30,13 @@ pub(super) struct Joiner {
 }
 
 pub(super) fn join_as(hs: &mut HostedServer, key: [u8; 32], b: u8) -> Joiner {
-    let mut j = join_unsynced(hs, key, b);
+    let (mut j, heard) = join_heard(hs, key, b);
+    let initial = super::tests::InitialPackets {
+        accept: j.accept.clone(),
+        sync: heard.syncs.first().cloned().expect("the join's initial Sync1"),
+        personal: heard.personal.first().cloned().expect("the join's initial Personal2"),
+    };
+    super::tests::install_initial_personal(hs, &j.client, &initial, HostedServer::tick);
     j.apply_all(hs);
     j
 }
@@ -38,13 +44,18 @@ pub(super) fn join_as(hs: &mut HostedServer, key: [u8; 32], b: u8) -> Joiner {
 /// Run 5 — a joined Strict client that has applied NO window event yet (its
 /// join sync, when there is one, still waits).
 pub(super) fn join_unsynced(hs: &mut HostedServer, key: [u8; 32], b: u8) -> Joiner {
+    join_heard(hs, key, b).0
+}
+
+fn join_heard(hs: &mut HostedServer, key: [u8; 32], b: u8) -> (Joiner, Heard) {
     let client = hs.attach_test_remote_with_binding(Some([b; 32]));
     send_signed_join(&client, key, Some([b; 32]));
     hs.tick();
     let i = hs.server.players.len() - 1;
-    let accept = hear(&client).accepts.into_iter().next().expect("Strict admits a first visit");
+    let heard = hear(&client);
+    let accept = heard.accepts.first().cloned().expect("Strict admits a first visit");
     assert_eq!(accept.inventory_mode, InventoryMode::Strict);
-    Joiner { i, client, accept, seq: 0, applied: 0 }
+    (Joiner { i, client, accept, seq: 0, applied: 0 }, heard)
 }
 
 impl Joiner {

@@ -122,7 +122,7 @@ impl Rig {
             armour: [None; 4],
             seq: 0,
             worn: 0,
-            events: 0,
+            events: 2,
             inbox: VecDeque::new(),
             latency: 0,
             now: 0,

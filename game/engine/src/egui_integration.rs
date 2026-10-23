@@ -11,6 +11,9 @@ pub struct EguiIntegration {
     /// Harness observation of the real completed headless paint pass.
     #[cfg(test)]
     pub(crate) last_shapes: Vec<egui::epaint::ClippedShape>,
+    /// Real headless input events, consumed by the ordinary frame entry.
+    #[cfg(test)]
+    pub(crate) headless_events: Vec<egui::Event>,
     /// None in headless mode (no window for event handling).
     state: Option<egui_winit::State>,
     renderer: egui_wgpu::Renderer,
@@ -53,6 +56,8 @@ impl EguiIntegration {
             ctx,
             #[cfg(test)]
             last_shapes: Vec::new(),
+            #[cfg(test)]
+            headless_events: Vec::new(),
             state: Some(state),
             renderer,
             block_texture_ids: Vec::new(),
@@ -85,6 +90,8 @@ impl EguiIntegration {
             #[cfg(test)]
             last_shapes: Vec::new(),
             state: None,
+            #[cfg(test)]
+            headless_events: Vec::new(),
             renderer,
             block_texture_ids: Vec::new(),
         }
@@ -166,7 +173,15 @@ impl EguiIntegration {
         if let (Some(state), Some(window)) = (&mut self.state, window) {
             state.take_egui_input(window)
         } else {
-            egui::RawInput::default()
+            #[cfg(test)]
+            {
+                egui::RawInput {
+                    events: std::mem::take(&mut self.headless_events),
+                    ..Default::default()
+                }
+            }
+            #[cfg(not(test))]
+            { egui::RawInput::default() }
         }
     }
 

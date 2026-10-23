@@ -134,13 +134,27 @@ impl SourceSession {
         if self.stage != SourceStage::Frozen || !hs.handover_frozen() {
             return Err(Refusal("The world isn't frozen for a handover."));
         }
+        if self.current_cut.as_ref().is_some_and(|cut| !cut.settled()) {
+            return Err(Refusal("Current personal state has not settled for capture."));
+        }
+        // The low-level zero-state protocol fixture has no native holder.
+        // Active common records must always arrive through the real cut.
+        if self.current_cut.is_none() {
+            let active = |record: &crate::progression::GameplayRecord| !record.quests.accepted.is_empty()
+                || !record.quests.declines.is_empty() || record.quests.penalty_left != 0;
+            let source = crate::handover::personal::PersonalRecord::decode(capture.source_progress,
+                &self.record_context(self.action.source_key)).map_err(|_| Refusal("The source common record couldn't be checked."))?;
+            if active(&source.to_gameplay()) || hs.server.players[self.action.seat.slot].personal.as_ref().is_some_and(|p| p.record().map_or(true, |r| active(&r))) {
+                return Err(Refusal("Active personal state needs its actual two-participant cut."));
+            }
+        }
         let r = self.offer_inner(hs, live, capture, now);
         r.map_err(|r| self.fail(hs, r))
     }
 
     /// Is the session waiting for the frozen capture?
     pub fn wants_capture(&self) -> bool {
-        self.stage == SourceStage::Frozen
+        self.stage == SourceStage::Frozen && self.current_cut.as_ref().is_some_and(|cut| cut.settled())
     }
 
     pub(super) fn offer_inner(&mut self, hs: &mut HostedServer, live: Live, c: Capture<'_>, now: u64) -> Result<(), Refusal> {
@@ -160,18 +174,17 @@ impl SourceSession {
             transfer: self.transfer,
         };
         let recipient_progress = if let Some(personal) = &recipient_record.personal {
-            let mut record = personal.record().map_err(|_| Refusal("The other player's progress couldn't be recorded."))?;
-            record.context = context(seat.key);
-            record.encode().map_err(|_| Refusal("The other player's progress couldn't be recorded."))?
+            let record = personal.record().map_err(|_| Refusal("The other player's progress couldn't be recorded."))?;
+            crate::handover::personal::PersonalRecord::from_gameplay(context(seat.key), &record).and_then(|record| record.encode()).map_err(|_| Refusal("The other player's progress couldn't be recorded."))?
         } else { crate::handover::live::capture::default_progress(context(seat.key)) };
         super::super::personal_adapter::preflight(c.source_sidecar, c.source_progress, context(self.action.source_key))?;
         super::super::personal_adapter::preflight(&recipient_sidecar, &recipient_progress, context(seat.key))?;
         let (src_npub, dst_npub) = (npub(self.action.source_key), npub(seat.key));
         let rows = [
             ParticipantMember { npub: &src_npub, kind: MemberKind::Sidecar, schema: 1, bytes: c.source_sidecar },
-            ParticipantMember { npub: &src_npub, kind: MemberKind::Progression, schema: 1, bytes: c.source_progress },
+            ParticipantMember { npub: &src_npub, kind: MemberKind::Progression, schema: crate::handover::personal::PersonalRecord::declared_schema(c.source_progress).map_err(|_| Refusal("Your progression record has an unsupported schema. Nothing was changed."))?, bytes: c.source_progress },
             ParticipantMember { npub: &dst_npub, kind: MemberKind::Sidecar, schema: 1, bytes: &recipient_sidecar },
-            ParticipantMember { npub: &dst_npub, kind: MemberKind::Progression, schema: 1, bytes: &recipient_progress },
+            ParticipantMember { npub: &dst_npub, kind: MemberKind::Progression, schema: crate::handover::personal::SCHEMA, bytes: &recipient_progress },
         ];
         // Source consent: its runtime-signed agreement (the runtime the
         // certificate names), sent with the offer; the recipient's is its

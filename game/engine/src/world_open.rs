@@ -597,7 +597,7 @@ mod tests {
         let mut w = World::new();
         w.set_block(3, 64, 5, crate::block::BEDROCK);
         let slot = crate::player_slot::PlayerSlot::new(0, glam::Vec3::new(0.5, 64.0, 0.5), 1.0);
-        crate::save::autosave_world("w", &w, std::slice::from_ref(&slot), 1, &[], &[]).unwrap();
+        crate::save::autosave_world("w", &w, std::slice::from_ref(&slot), 1, &[], &[], None).unwrap();
         let dir = world_dir("w");
         let before = snapshot(&dir);
         let err = open_world("w", &mut World::new(), AutosavePolicy::Ignore).unwrap_err();
@@ -722,7 +722,7 @@ mod tests {
         w.set_block(3, 64, 5, crate::block::BEDROCK);
         w.set_block(3, 64, 5, crate::block::AIR);
         assert!(w.persistable_chunks().any(|(k, c)| k == (0, 4, 0) && c.is_empty()));
-        crate::save::save_world("w", &w, std::slice::from_ref(&slot()), 1, &[], &[]).unwrap();
+        crate::save::save_world("w", &w, std::slice::from_ref(&slot()), 1, &[], &[], None).unwrap();
         assert_eq!(fs::read(dir.join("chunks/0_4_0.chunk")).unwrap(), before, "left alone");
     }
 
@@ -739,11 +739,11 @@ mod tests {
         ));
         // A chunk this session writes, then mines out.
         world.set_block(40, 64, 5, crate::block::BEDROCK); // chunk 2_4_0
-        crate::save::save_world("w", &world, std::slice::from_ref(&slot()), 1, &[], &[]).unwrap();
+        crate::save::save_world("w", &world, std::slice::from_ref(&slot()), 1, &[], &[], None).unwrap();
         assert!(dir.join("chunks/2_4_0.chunk").is_file());
         world.set_block(3, 64, 5, crate::block::AIR); // the loaded chunk, mined out
         world.set_block(40, 64, 5, crate::block::AIR); // the written chunk, mined out
-        crate::save::save_world("w", &world, std::slice::from_ref(&slot()), 1, &[], &[]).unwrap();
+        crate::save::save_world("w", &world, std::slice::from_ref(&slot()), 1, &[], &[], None).unwrap();
         assert!(!dir.join("chunks/0_4_0.chunk").exists(), "read-in chunk deleted");
         assert!(!dir.join("chunks/2_4_0.chunk").exists(), "written chunk deleted");
         let mut back = World::new();
@@ -761,7 +761,7 @@ mod tests {
         let before = snapshot(&dir);
         let mut w = World::new();
         w.set_block(3, 64, 5, crate::block::STONE);
-        assert!(crate::save::save_world("w", &w, std::slice::from_ref(&slot()), 1, &[], &[]).is_err());
+        assert!(crate::save::save_world("w", &w, std::slice::from_ref(&slot()), 1, &[], &[], None).is_err());
         assert!(crate::save::write_world_folder(
             "w",
             &WorldMeta::new("w"),
@@ -814,7 +814,7 @@ mod tests {
             .flatten()
             .any(|e| e.file_name().to_string_lossy().starts_with("world_meta.json.corrupt-")));
         // A later save is no longer refused.
-        crate::save::save_world("w", &world, std::slice::from_ref(&slot()), 77, &[], &[]).unwrap();
+        crate::save::save_world("w", &world, std::slice::from_ref(&slot()), 77, &[], &[], None).unwrap();
     }
 
     /// A Trial arena is planned from what is ON DISK, not from the lobby list
@@ -840,7 +840,7 @@ mod tests {
         assert_eq!(snapshot(&dir), before, "planning writes nothing");
         // An autosave alone counts as saved too.
         let slot = slot();
-        crate::save::autosave_world("exp-b", &World::new(), std::slice::from_ref(&slot), 1, &[], &[])
+        crate::save::autosave_world("exp-b", &World::new(), std::slice::from_ref(&slot), 1, &[], &[], None)
             .unwrap();
         assert_eq!(plan_arena_folder(ArenaMode::Resume, "exp-b"), Ok(ArenaLaunch::Resume));
         // Nothing here (a meta alone is a new world): fresh, nothing to wipe.
@@ -937,7 +937,7 @@ mod tests {
                 server.world = many_chunk_world().0;
                 let save = |w: &World, server: &crate::server::GameServer| {
                     if writer == "client" {
-                        crate::save::save_world(&name, w, std::slice::from_ref(&slot()), 5, &[], &[])
+                        crate::save::save_world(&name, w, std::slice::from_ref(&slot()), 5, &[], &[], None)
                     } else {
                         server.try_save()
                     }
@@ -981,7 +981,7 @@ mod tests {
         let (w, all) = many_chunk_world();
         crate::save::save_world_meta("w", &WorldMeta::new("w")).unwrap();
         FIRST_SAVE_CUT.with(|c| c.set(Some(FirstSaveCut::BeforePublish)));
-        assert!(crate::save::save_world("w", &w, std::slice::from_ref(&slot()), 5, &[], &[]).is_err());
+        assert!(crate::save::save_world("w", &w, std::slice::from_ref(&slot()), 5, &[], &[], None).is_err());
         FIRST_SAVE_CUT.with(|c| c.set(None));
         let dir = world_dir("w");
         assert!(dir.join("world.dat").is_file(), "committed");
@@ -1005,7 +1005,7 @@ mod tests {
         let dir = world_dir("w");
         fs::create_dir_all(dir.join("chunks")).unwrap();
         fs::write(dir.join("chunks/0_4_0.chunk.tmp"), b"half").unwrap();
-        crate::save::save_world("w", &w, std::slice::from_ref(&slot()), 5, &[], &[]).unwrap();
+        crate::save::save_world("w", &w, std::slice::from_ref(&slot()), 5, &[], &[], None).unwrap();
         assert_eq!(reopened("w"), Some(all));
         let kept: Vec<_> = fs::read_dir(&dir)
             .unwrap()
@@ -1030,7 +1030,7 @@ mod tests {
         generated.set(3, 0, 5, crate::block::STONE);
         assert!(!generated.persist());
         w.insert_chunk(0, 4, 0, generated);
-        crate::save::save_world("w", &w, std::slice::from_ref(&slot()), 1, &[], &[]).unwrap();
+        crate::save::save_world("w", &w, std::slice::from_ref(&slot()), 1, &[], &[], None).unwrap();
         let dir = world_dir("w");
         let before = fs::read(dir.join("chunks/0_4_0.chunk")).unwrap();
         assert!(w.knows_disk_chunk((0, 4, 0)));
@@ -1040,7 +1040,7 @@ mod tests {
         w.set_block(3, 64, 5, crate::block::AIR);
         let (_, delete) = crate::save::partition_chunks_for_save(&w);
         assert!(!delete.contains(&(0, 4, 0)), "a conjured empty chunk is not a mined-out one");
-        crate::save::save_world("w", &w, std::slice::from_ref(&slot()), 1, &[], &[]).unwrap();
+        crate::save::save_world("w", &w, std::slice::from_ref(&slot()), 1, &[], &[], None).unwrap();
         assert_eq!(fs::read(dir.join("chunks/0_4_0.chunk")).unwrap(), before, "the real file stays");
         // The dedicated server shares the rule.
         let mut server = crate::server::GameServer::new(0, "w".into(), 1);
@@ -1060,17 +1060,17 @@ mod tests {
         let s = slot();
         let mut w = World::new();
         w.set_block(3, 64, 5, crate::block::STONE);
-        crate::save::autosave_world("w", &w, std::slice::from_ref(&s), 77, &[], &[]).unwrap();
+        crate::save::autosave_world("w", &w, std::slice::from_ref(&s), 77, &[], &[], None).unwrap();
         assert!(crate::save::autosave_age("w").is_some());
         let good_meta = fs::read(dir.join("world_meta.json")).unwrap();
         fs::write(dir.join("world_meta.json"), b"{ torn").unwrap();
         assert!(
-            crate::save::save_world_superseding_autosave("w", &w, std::slice::from_ref(&s), 77, &[], &[])
+            crate::save::save_world_superseding_autosave("w", &w, std::slice::from_ref(&s), 77, &[], &[], None)
                 .is_err()
         );
         assert!(dir.join("autosave/world.dat").is_file(), "a failed save keeps the autosave");
         fs::write(dir.join("world_meta.json"), good_meta).unwrap();
-        crate::save::save_world_superseding_autosave("w", &w, std::slice::from_ref(&s), 77, &[], &[])
+        crate::save::save_world_superseding_autosave("w", &w, std::slice::from_ref(&s), 77, &[], &[], None)
             .unwrap();
         assert!(!dir.join("autosave").exists(), "a landed save drops it");
         assert_eq!(crate::save::autosave_age("w"), None);
@@ -1097,7 +1097,7 @@ mod tests {
         ));
         fs::create_dir_all(dir.join("chunks/0_4_0.chunk.tmp")).unwrap();
         world.set_block(4, 64, 5, crate::block::STONE);
-        assert!(crate::save::save_world("w", &world, std::slice::from_ref(&slot()), 1, &[], &[])
+        assert!(crate::save::save_world("w", &world, std::slice::from_ref(&slot()), 1, &[], &[], None)
             .is_err());
         assert_eq!(fs::read(dir.join("world.dat")).unwrap(), before, "world.dat untouched");
     }
@@ -1131,11 +1131,11 @@ mod tests {
         let s = slot();
         let mut w = World::new();
         w.set_block(3, 64, 5, crate::block::STONE);
-        crate::save::autosave_world("w", &w, std::slice::from_ref(&s), 77, &[], &[]).unwrap();
+        crate::save::autosave_world("w", &w, std::slice::from_ref(&s), 77, &[], &[], None).unwrap();
         // The session goes on, then saves; the meta write fails after world.dat.
         w.set_block(3, 64, 5, crate::block::DIRT);
         fs::create_dir_all(dir.join("world_meta.json.tmp")).unwrap();
-        let err = crate::save::save_world_superseding_autosave("w", &w, std::slice::from_ref(&s), 77, &[], &[])
+        let err = crate::save::save_world_superseding_autosave("w", &w, std::slice::from_ref(&s), 77, &[], &[], None)
             .unwrap_err();
         assert!(err.contains("world_meta.json"), "{err}");
         assert!(!dir.join("autosave").exists(), "world.dat committed: the older autosave is superseded");
@@ -1155,9 +1155,9 @@ mod tests {
         // An autosave from before, holding a chunk the save no longer has.
         let mut older = many_chunk_world().0;
         older.set_block(200, 64, 200, crate::block::STONE);
-        crate::save::autosave_world("w", &older, std::slice::from_ref(&slot()), 5, &[], &[]).unwrap();
+        crate::save::autosave_world("w", &older, std::slice::from_ref(&slot()), 5, &[], &[], None).unwrap();
         FIRST_SAVE_CUT.with(|c| c.set(Some(FirstSaveCut::BeforePublish)));
-        let err = crate::save::save_world_superseding_autosave("w", &w, std::slice::from_ref(&slot()), 5, &[], &[])
+        let err = crate::save::save_world_superseding_autosave("w", &w, std::slice::from_ref(&slot()), 5, &[], &[], None)
             .unwrap_err();
         FIRST_SAVE_CUT.with(|c| c.set(None));
         assert!(err.contains("cut short"), "{err}");
@@ -1184,7 +1184,7 @@ mod tests {
         let dir = world_dir("w");
         crate::save::save_world_meta("w", &WorldMeta::new("w")).unwrap();
         FIRST_SAVE_CUT.with(|c| c.set(Some(FirstSaveCut::BeforePublish)));
-        assert!(crate::save::save_world("w", &w, std::slice::from_ref(&slot()), 5, &[], &[]).is_err());
+        assert!(crate::save::save_world("w", &w, std::slice::from_ref(&slot()), 5, &[], &[], None).is_err());
         FIRST_SAVE_CUT.with(|c| c.set(None));
         assert!(dir.join(crate::save::STAGED_CHUNKS).join("5_5_5.chunk").is_file(), "staged");
         // The session goes on: chunk (5, 5, 5)'s only solid block is mined out.
@@ -1193,7 +1193,7 @@ mod tests {
         assert!(all.contains(&mined) && !solid_chunks(&w).contains(&mined));
         // The next save — no open in between — publishes the staged chunks and
         // deletes the mined-out one.
-        crate::save::save_world("w", &w, std::slice::from_ref(&slot()), 5, &[], &[]).unwrap();
+        crate::save::save_world("w", &w, std::slice::from_ref(&slot()), 5, &[], &[], None).unwrap();
         assert!(!dir.join(crate::save::STAGED_CHUNKS).exists(), "published by the save");
         assert!(dir.join("chunks/0_1_0.chunk").is_file(), "published as chunks/");
         assert!(!dir.join("chunks/5_5_5.chunk").exists(), "the mined-out chunk stays gone");
@@ -1212,7 +1212,7 @@ mod tests {
         let dir = saved_world("w");
         let mut a = World::new();
         a.set_block(3, 64, 5, crate::block::STONE);
-        crate::save::autosave_world("w", &a, std::slice::from_ref(&slot()), 77, &[], &[]).unwrap();
+        crate::save::autosave_world("w", &a, std::slice::from_ref(&slot()), 77, &[], &[], None).unwrap();
         let (dat, autosave) = (dir.join("world.dat"), dir.join("autosave/world.dat"));
 
         // Written after world.dat (a crash since): crash recovery.
@@ -1247,7 +1247,7 @@ mod tests {
         let dir = saved_world("w");
         let mut a = World::new();
         a.set_block(3, 64, 5, crate::block::STONE);
-        crate::save::autosave_world("w", &a, std::slice::from_ref(&slot()), 77, &[], &[]).unwrap();
+        crate::save::autosave_world("w", &a, std::slice::from_ref(&slot()), 77, &[], &[], None).unwrap();
         fs::write(dir.join("world.dat"), b"\x01not a world save").unwrap();
         written_ago(&dir.join("autosave/world.dat"), 120);
         written_ago(&dir.join("world.dat"), 60);
@@ -1274,7 +1274,7 @@ mod tests {
         let dir = saved_world("w");
         let mut a = World::new();
         a.set_block(3, 64, 5, crate::block::STONE);
-        crate::save::autosave_world("w", &a, std::slice::from_ref(&slot()), 77, &[], &[]).unwrap();
+        crate::save::autosave_world("w", &a, std::slice::from_ref(&slot()), 77, &[], &[], None).unwrap();
         fs::write(dir.join("world.dat"), b"\x01not a world save").unwrap();
         written_ago(&dir.join("autosave/world.dat"), 120);
         written_ago(&dir.join("world.dat"), 60);
@@ -1324,7 +1324,7 @@ mod tests {
         stage(&dir);
         let mut w = World::new();
         w.set_block(3, 64, 5, crate::block::DIRT);
-        crate::save::save_world("w", &w, std::slice::from_ref(&slot()), 77, &[], &[]).unwrap();
+        crate::save::save_world("w", &w, std::slice::from_ref(&slot()), 77, &[], &[], None).unwrap();
         assert!(!dir.join(crate::save::STAGED_CHUNKS).exists());
         assert_eq!(kept(&dir).len(), 2);
         assert_eq!(opened_block("w"), (OpenedFrom::LastSave, crate::block::DIRT));

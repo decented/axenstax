@@ -162,6 +162,8 @@ pub enum PacketType {
     PackResult = 74,
     /// Server → Client: numbered live entity cargo view or session close.
     PackView = 75,
+    QuestResult = 76,
+    QuestView = 77,
 }
 
 // ─── Handshake ───────────────────────────────────────────────
@@ -310,7 +312,7 @@ pub struct JoinAcceptPacket {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PersonalSnapshot {
     pub session: [u8; 16], pub life: u32, pub revision: u64, pub window_event: u32,
-    pub context: crate::personal_value::PersonalContext, pub bytes: Vec<u8>,
+    pub context: crate::progression::GameplayContext, pub bytes: Vec<u8>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PersonalAck {
@@ -2799,11 +2801,14 @@ pub struct ServerAnnouncePacket {
 ///   and sequential unpredicted source-backed entity packs in both inventory
 ///   modes; PackResult 74, PackView 75, explicit PACK flag. Automated combined
 ///   regression gates passed; owner manual sessions remain separate.
-/// - v92 (Fray): native "Host Game" and its joins run on Fray (ALPN
+/// - v92 (D2c-3 foundation): explicit common progression contexts, mandatory
+///   empty initial personal Sync1, appended QuestResult76/QuestView77. Live
+///   quest intent/request delivery is implemented in the following slice.
+/// - v93 (Fray): native "Host Game" and its joins run on Fray (ALPN
 ///   `axenstax/…`, Fray's hello and LAN beacon) instead of plain QUIC on
 ///   7700/7705. Game packets and the join challenge are unchanged; the join
 ///   origin is Fray's TLS exporter under `EXPORTER-axenstax-join-v1`.
-pub const PROTOCOL_VERSION: u32 = 92;
+pub const PROTOCOL_VERSION: u32 = 93;
 
 /// The `protocol_version` of a JoinRequest payload that doesn't decode as this
 /// build's `JoinRequestPacket` (an older or newer client's shape). It is the
@@ -2883,6 +2888,8 @@ pub fn deserialize_header(data: &[u8]) -> Option<(PacketType, &[u8])> {
         73 => PacketType::PersonalSync,
         74 => PacketType::PackResult,
         75 => PacketType::PackView,
+        76 => PacketType::QuestResult,
+        77 => PacketType::QuestView,
         _ => return None,
     };
     Some((tag, &data[1..]))
@@ -2985,8 +2992,8 @@ mod tests {
     #[test]
     fn protocol_version_bumped() {
         // D2c-2 — v91, source-backed entity packs after handover's v90.
-        // v92 — "Host Game" and its joins on Fray.
-        assert_eq!(super::PROTOCOL_VERSION, 92);
+        // v92 — D2c-3 quest foundation; v93 — "Host Game" and its joins on Fray.
+        assert_eq!(super::PROTOCOL_VERSION, 93);
     }
 
     #[test]
@@ -3740,8 +3747,9 @@ mod tests {
         // v89 (C3d partial delivery accepted locally): Action (68), ActionReceipt (69),
         //   Recovery (70), AppliedActionAck (71); JoinAccept
         //   mode/namespace/life.
-        // v92 (Fray): "Host Game" and its joins on Fray's transport.
-        assert_eq!(PROTOCOL_VERSION, 92);
+        // v92 (D2c-3 foundation): QuestResult (76), QuestView (77).
+        // v93 (Fray): "Host Game" and its joins on Fray's transport.
+        assert_eq!(PROTOCOL_VERSION, 93);
     }
 
     fn sample_accept() -> JoinAcceptPacket {
@@ -4452,10 +4460,10 @@ mod tests {
         assert_eq!(deserialize_header(&[69, 0]).map(|(p, _)| p), Some(PacketType::ActionReceipt));
         assert_eq!(deserialize_header(&[70, 0]).map(|(p, _)| p), Some(PacketType::Recovery));
         assert_eq!(deserialize_header(&[71, 0]).map(|(p, _)| p), Some(PacketType::AppliedActionAck));
-        for (byte, tag) in [(72, PacketType::Handover), (73, PacketType::PersonalSync), (74, PacketType::PackResult), (75, PacketType::PackView)] {
+        for (byte, tag) in [(72, PacketType::Handover), (73, PacketType::PersonalSync), (74, PacketType::PackResult), (75, PacketType::PackView), (76, PacketType::QuestResult), (77, PacketType::QuestView)] {
             assert_eq!(deserialize_header(&[byte, 0]).map(|(p, _)| p), Some(tag), "appended carrier {byte}");
         }
-        assert_eq!(deserialize_header(&[76, 0]), None, "no tag after the delivered pack carriers");
+        assert_eq!(deserialize_header(&[78, 0]), None, "no tag after the appended quest carriers");
     }
 
     /// C3b-1 (v77) — shared containers on the wire: `OpenContainer` (= 4)

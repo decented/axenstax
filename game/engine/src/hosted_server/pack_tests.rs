@@ -179,7 +179,7 @@ fn d2c2_real_two_joiners_contest_one_unit_without_duplication() {
         super::tests::send_signed_join(&client, [67; 32], Some([34; 32]));
         rig.hs.tick();
         let j = rig.hs.server.players.len() - 1;
-        let accept = super::c3d_tests::hear(&client).accepts.pop().unwrap();
+        let accept = super::tests::join_installed(&mut rig.hs, &client, HostedServer::tick);
         let applied = rig.hs.server.players[j].window_events.last_number();
         crate::window_events::apply_through(&mut rig.hs.server.players[j], applied, rig.hs.server.tick_counter);
         rig.hs.server.players[j].inventory = crate::inventory::Inventory::new();
@@ -301,7 +301,7 @@ fn d2c2_real_guest_pack_access_uses_any_keeper_and_never_claims_a_wild_steed() {
         client.send_to_server(&protocol::serialize_packet(protocol::PacketType::JoinRequest, &crate::remote_client::build_join_request_guest("Guest", 0)));
         rig.hs.tick();
         let i = rig.hs.server.players.len() - 1;
-        let accept = super::c3d_tests::hear(&client).accepts.pop().expect("an operator-open guest join");
+        let accept = super::tests::join_installed(&mut rig.hs, &client, HostedServer::tick);
         let applied = rig.hs.server.players[i].window_events.last_number();
         crate::window_events::apply_through(&mut rig.hs.server.players[i], applied, rig.hs.server.tick_counter);
         rig.hs.server.players[i].inventory = crate::inventory::Inventory::new();

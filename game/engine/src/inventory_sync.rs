@@ -136,8 +136,7 @@ pub fn apply(
     if mode != crate::action_identity::InventoryMode::Strict { return Ok(None); }
     // C3d run 6 — a Strict session's lock mask is the replacement's (the
     // digest covers it); run 7 — Mirror's stays its own.
-    let locked: Vec<u32> = (0..36u32).filter(|i| pkt.locks & (1u64 << i) != 0).collect();
-    w.inv.set_locked_from(&locked);
+    w.inv.set_locked_mask(pkt.locks);
     Ok(Some(station(pkt)))
 }
 

@@ -466,6 +466,13 @@ impl Inventory {
         }
     }
 
+    /// C3d — set the lock set from a wire lock mask (bit `i` locks slot
+    /// `i`; `InventorySyncPacket.locks`), clearing existing locks first.
+    /// Bits past slot 35 are ignored.
+    pub fn set_locked_mask(&mut self, mask: u64) {
+        self.locked = std::array::from_fn(|i| mask & (1u64 << i) != 0);
+    }
+
     /// #45 — sort the half-open slot range `[start, end)` in place: merge partial
     /// stacks of the same item and order by `Item::sort_key`, keeping locked
     /// slots fixed. Used by the inventory Sort button (main region 9..36) and the

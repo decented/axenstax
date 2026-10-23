@@ -41,6 +41,7 @@ fn raw_marker(sp: &ServerPlayer, registry: &crate::block::BlockRegistry) -> Resu
 fn marker_event(event: &WindowEvent, registry: &crate::block::BlockRegistry) -> Result<Option<WindowEvent>, StrictStageError> {
     Ok(Some(match event {
         WindowEvent::Grant(stack) => WindowEvent::Grant(marker_stack(stack, registry)?),
+        WindowEvent::RewardGrant { stack, origin } => WindowEvent::RewardGrant { stack: marker_stack(stack, registry)?, origin: *origin },
         WindowEvent::Take { slot, item, n, how } => WindowEvent::Take {
             slot: *slot, item: marker_item(item), n: *n, how,
         },
@@ -217,7 +218,7 @@ fn stage_strict_effects_on(sp: &ServerPlayer, registry: &crate::block::BlockRegi
                 sources[at] = before[at].clone();
             }
             WindowEvent::WearArmour { .. } => { sources[36..40].clone_from_slice(&before[36..40]); }
-            WindowEvent::Grant(_) => {},
+            WindowEvent::Grant(_) | WindowEvent::RewardGrant { .. } => {},
             _ => return Err(StrictStageError::Replacement),
         }
     }
@@ -289,7 +290,7 @@ pub(super) fn item_heap_bytes(item: &Item) -> Result<usize, StrictStageError> {
 fn event_heap_bytes(event: &WindowEvent) -> Result<usize, StrictStageError> {
     let item_bytes = item_heap_bytes;
     match event {
-        WindowEvent::Grant(stack) => item_bytes(&stack.item),
+        WindowEvent::Grant(stack) | WindowEvent::RewardGrant { stack, .. } => item_bytes(&stack.item),
         WindowEvent::Take { item, .. } => item_bytes(item),
         WindowEvent::WearArmour { .. } | WindowEvent::WearWeapon { .. } | WindowEvent::PackView => Ok(0),
         // These require their own complete typed allocation reservation. Never

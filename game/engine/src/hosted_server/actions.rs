@@ -47,6 +47,10 @@ impl HostedServer {
         if !valid { self.strict_bridge_teardown(i, StrictTeardown::Unreadable, "Foreign or regressing applied action acknowledgement"); return; }
         let sp = &mut self.server.players[i];
         let releases_pack = sp.pack_flight.is_some_and(|flight| flight.action.session == ack.session && flight.action.epoch == ack.epoch && flight.action.life == ack.life && flight.action.seq <= ack.through && flight.event <= ack.included_events);
+        #[cfg(not(target_arch = "wasm32"))]
+        if releases_pack && sp.pack_flight.is_some_and(|flight| flight.requires_personal) {
+            return self.strict_bridge_teardown(i, StrictTeardown::Unreadable, "Quest acknowledgement arrived before progression application");
+        }
         if releases_pack { crate::window_events::apply_through(sp, ack.included_events, self.server.tick_counter); }
         sp.action_results.as_mut().expect("validated result rows").acknowledge(ack, sp.window_events.last_number()).expect("validated exact acknowledgement");
         if releases_pack {
@@ -95,6 +99,13 @@ impl HostedServer {
                 if !self.edit_queues[i].is_empty() || *items >= MAX_ITEM_ACTIONS_PER_TICK { return; }
                 *items += 1;
                 if !self.serve_pack(i, packet.action, request) { return; }
+                continue;
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            if let ActionIntent::Quest(request) = &packet.intent {
+                if !self.edit_queues[i].is_empty() || *items >= MAX_ITEM_ACTIONS_PER_TICK { return; }
+                *items += 1;
+                if !self.serve_quest(i, packet.action, request) { return; }
                 continue;
             }
             let is_window = matches!(packet.intent, ActionIntent::Window(_));

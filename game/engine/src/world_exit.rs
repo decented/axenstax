@@ -457,6 +457,7 @@ impl crate::GameState {
         crate::handover::live::authority::open_guard(&crate::save::world_dir(&self.world_name)).map_err(|r| r.0.to_string())?;
         #[cfg(not(target_arch = "wasm32"))]
         self.preflight_personal_local()?;
+        let quest_world = crate::quest_npcs::capture(self.world.quest_scope, &self.ecs)?;
         let result = crate::save::tamed_mobs_to_saved(&self.ecs).and_then(|pets| crate::save::save_world_superseding_autosave(
             &self.world_name,
             &self.world,
@@ -464,6 +465,7 @@ impl crate::GameState {
             self.biome_gen.seed,
             &crate::save::carts_to_saved(&self.ecs),
             &pets,
+            quest_world.as_ref(),
         ))
         .inspect_err(|e| log::error!("Save failed: {e}"));
         let result = result.and_then(|()| self.hosted_server.as_ref().map_or(Ok(()), |h| h.server.save_joiners()));
@@ -567,6 +569,11 @@ impl crate::GameState {
             crate::save::clear_autosave(&self.world_name);
         }
         self.session_saves = SessionSaves::default();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.gameplay_preparation = None;
+            self.gameplay_preparation_generation = self.gameplay_preparation_generation.wrapping_add(1);
+        }
         // Nothing queued by the session being left may fire later into an
         // unrelated lobby visit (callers that hop re-queue AFTER this).
         self.pending_menu_action = None;
@@ -1220,7 +1227,7 @@ mod tests {
         let name = harness_world("exit-save-fails");
         let mut hg = crate::test_game_harness::HeadlessGame::boot_into_world(&name);
         let s = &hg.state;
-        crate::save::autosave_world(&name, &s.world, &s.players, s.biome_gen.seed, &[], &[]).unwrap();
+        crate::save::autosave_world(&name, &s.world, &s.players, s.biome_gen.seed, &[], &[], None).unwrap();
         make_saves_fail(&name);
 
         hg.state.mode = crate::GameMode::Paused { confirm_quit: false, confirm_creative: false };
@@ -1268,7 +1275,7 @@ mod tests {
         let dir = crate::save::world_dir(&name);
         let autosave = |hg: &crate::test_game_harness::HeadlessGame| {
             let s = &hg.state;
-            crate::save::autosave_world(&name, &s.world, &s.players, s.biome_gen.seed, &[], &[]).unwrap();
+            crate::save::autosave_world(&name, &s.world, &s.players, s.biome_gen.seed, &[], &[], None).unwrap();
         };
         autosave(&hg);
         let good_meta = std::fs::read(dir.join("world_meta.json")).ok();
@@ -1305,7 +1312,7 @@ mod tests {
         let mut hg = crate::test_game_harness::HeadlessGame::boot_into_world(&name);
         let dir = crate::save::world_dir(&name);
         let s = &hg.state;
-        crate::save::autosave_world(&name, &s.world, &s.players, s.biome_gen.seed, &[], &[]).unwrap();
+        crate::save::autosave_world(&name, &s.world, &s.players, s.biome_gen.seed, &[], &[], None).unwrap();
         let good_meta = std::fs::read(dir.join("world_meta.json")).ok();
         make_saves_fail(&name);
 
@@ -1347,7 +1354,7 @@ mod tests {
         )
         .unwrap();
         let slot = crate::player_slot::PlayerSlot::new(0, glam::Vec3::new(0.5, 80.0, 0.5), 1.0);
-        crate::save::autosave_world(&name, &w, std::slice::from_ref(&slot), 7, &[], &[]).unwrap();
+        crate::save::autosave_world(&name, &w, std::slice::from_ref(&slot), 7, &[], &[], None).unwrap();
         // The last manual save is damaged (no footer, so the open isn't refused).
         std::fs::write(dir.join("world.dat"), b"\x01not a world save").unwrap();
 

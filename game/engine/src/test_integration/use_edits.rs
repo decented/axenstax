@@ -697,6 +697,7 @@ fn through_the_real_send_path_uses_keep_their_tags_and_their_order() {
     }
     assert!(rc.is_connected());
     let slot = rc.player_index().expect("joined") as usize;
+    crate::hosted_server::tests::install_client_initial_personal(&mut rc, &mut hs, slot, HostedServer::tick);
     hs.server.column_streamer = None;
     hs.server.column_refill_per_tick = 0;
     let mut world = std::mem::replace(&mut hs.server.world, crate::world::World::new());
