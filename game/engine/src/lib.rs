@@ -521,6 +521,10 @@ mod replay_player;
 // The money-word lint's single word list + shared scanner (see `copy_lint.rs`).
 #[cfg(test)]
 mod copy_lint;
+// CPU-only world benchmark (`#[ignore]`; see the module doc).
+#[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
+mod perf_bench;
 #[cfg(test)]
 #[cfg(not(target_arch = "wasm32"))]
 mod test_harness;
