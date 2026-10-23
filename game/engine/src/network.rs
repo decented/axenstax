@@ -15,11 +15,6 @@ use crate::transport::{ClientTransport, Packet, ServerTransport};
 
 // --- Configuration ---
 
-/// Default server port for QUIC connections. No consumer references this
-/// named constant — the literal `7700` is used directly wherever needed.
-#[allow(dead_code)]
-pub const DEFAULT_PORT: u16 = 7700;
-
 /// ALPN protocol identifier.
 const ALPN_PROTOCOL: &[u8] = b"axenstax-v1";
 
@@ -390,6 +385,7 @@ pub fn create_client_endpoint() -> Result<quinn::Endpoint, Box<dyn std::error::E
     create_client_endpoint_with(Liveness::DEFAULT)
 }
 
+#[cfg(test)]
 fn create_client_endpoint_with(liveness: Liveness) -> Result<quinn::Endpoint, Box<dyn std::error::Error>> {
     let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse()?)?;
     endpoint.set_default_client_config(client_quinn_config_with(liveness)?);
@@ -571,16 +567,14 @@ pub fn bridge_server_connection(connection: quinn::Connection) -> QuicServerTran
     }
 }
 
-/// Connect to a remote server and return a client transport.
+/// Connect to a remote server at one address and return a client transport,
+/// with an explicit liveness (tests shorten it). Plain-QUIC joining by address
+/// is retired: the game joins through Fray, or through
+/// [`connect_to_server_on_socket`] on the online path. The live handover tests
+/// still dial this way.
 ///
 /// Spawns a background thread with a tokio runtime that manages the QUIC connection.
-pub fn connect_to_server(
-    server_addr: SocketAddr,
-) -> Result<QuicClientTransport, Box<dyn std::error::Error>> {
-    connect_to_server_with(server_addr, Liveness::DEFAULT)
-}
-
-/// [`connect_to_server`] with an explicit liveness (tests shorten it).
+#[cfg(test)]
 pub fn connect_to_server_with(
     server_addr: SocketAddr,
     liveness: Liveness,
@@ -660,7 +654,7 @@ const ATTEMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// A client transport plus a one-shot report of how the connect race went.
 ///
-/// The transport is returned immediately (like `connect_to_server`) because the
+/// The transport is returned immediately (like `connect_to_server_with`) because the
 /// game loop wants a handle straight away; `outcome` is how the caller learns
 /// whether any candidate actually won, which is what decides between "you're
 /// in" and the "couldn't reach" copy.
@@ -967,7 +961,7 @@ mod tests {
             .unwrap();
         let addr = server.local_addr().unwrap();
 
-        let client = connect_to_server(addr).unwrap();
+        let client = connect_to_server_with(addr, Liveness::DEFAULT).unwrap();
         let conn = rt.block_on(async { server.accept().await.unwrap().await.unwrap() });
         let server_side = bridge_server_connection(conn);
 

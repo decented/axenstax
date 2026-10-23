@@ -5,7 +5,6 @@
 //! this module manages the network session.
 
 #[cfg(not(target_arch = "wasm32"))]
-use std::net::SocketAddr;
 use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, TryRecvError};
 
@@ -695,60 +694,13 @@ impl RemoteClient {
         )
     }
 
-    /// Connect to a remote server as a **guest** (QUIC) — sends the JoinRequest
-    /// immediately, no Signet auth. A sign-in-required host (`require_signin`)
-    /// rejects this with "sign-in required"; an open server accepts it. For an
-    /// authenticated join use [`RemoteClient::connect_authed`].
-    #[cfg(not(target_arch = "wasm32"))]
-    #[expect(dead_code, reason = "the plain-QUIC address join; Join Game uses Fray since B-2. Goes with network.rs (B8)")]
-    pub fn connect(
-        server_addr: SocketAddr,
-        player_name: &str,
-        pinned_op_npub: Option<String>,
-    ) -> Result<Self, String> {
-        let transport = crate::network::connect_to_server(server_addr)
-            .map_err(|e| format!("Connection failed: {e}"))?;
-        log::info!("Connecting to server at {server_addr} (QUIC, guest)...");
-        Ok(Self::from_transport(
-            Box::new(transport),
-            build_join_request_guest(player_name, 0),
-            pinned_op_npub,
-        ))
-    }
-
-    /// Connect to a remote server with **verified identity** (QUIC). Does NOT
-    /// send the JoinRequest on connect: it waits for the server's
-    /// `ChallengePacket`, runs `driver(nonce, origin)` (origin built client-side by
-    /// `signet::client_join_origin` from the transport's channel binding) to sign a kind-21236 auth
-    /// event off the main loop, then sends the JoinRequest with the signed event.
-    /// The live signature (a bunker round-trip) is the owner boundary; the
-    /// reordered state machine itself is unit-tested with a fake driver.
-    #[cfg(not(target_arch = "wasm32"))]
-    #[expect(dead_code, reason = "the plain-QUIC address join; Join Game uses Fray since B-2. Goes with network.rs (B8)")]
-    pub fn connect_authed(
-        server_addr: SocketAddr,
-        player_name: &str,
-        driver: SignDriverFn,
-        pinned_op_npub: Option<String>,
-    ) -> Result<Self, String> {
-        let transport = crate::network::connect_to_server(server_addr)
-            .map_err(|e| format!("Connection failed: {e}"))?;
-        log::info!("Connecting to server at {server_addr} (QUIC, authed)...");
-        Ok(Self::from_transport_authed(
-            Box::new(transport),
-            build_join_request_guest(player_name, 0),
-            driver,
-            pinned_op_npub,
-        ))
-    }
-
     /// Authenticated join over a transport the caller already built.
     ///
     /// The online path needs this because the connection is not made by dialling
     /// one address: it is the winner of a race across several candidates on a
     /// pre-bound socket (`network::connect_to_server_on_socket`). Everything
-    /// after that — challenge, sign, JoinRequest — is the SAME handshake
-    /// `connect_authed` runs, unchanged.
+    /// after that — challenge, sign, JoinRequest — is the one authenticated
+    /// handshake every join runs.
     #[cfg(not(target_arch = "wasm32"))]
     #[allow(dead_code)] // Driven by the online join loop (later task).
     pub fn connect_authed_on_transport(
