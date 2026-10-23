@@ -285,8 +285,30 @@ neighbours in `rebuild_chunk_at` also defer. **The edited block's own chunk stil
 rebuilds immediately** so the edit is visually instant; only neighbour/lighting
 chunks lag a frame or two (light values are already correct, just the baked-in
 mesh trails), which is imperceptible next to the old hard stall. Unloaded chunks
-are dropped from the queue without a wasted upload. Full off-thread meshing
-remains the larger, later win:
+are dropped from the queue without a wasted upload.
+
+**As-built, streaming batches (perf pass, 2026-10-23).** Column streaming
+(`chunk_stream.rs`: `stream_chunks`, `step_load`, `finish_pushed_columns`) no
+longer meshes column by column. Each frame's batch of columns is generated and
+lit first, then meshed once through `stream_mesh::mesh_stream_batch`
+(`plan_stream_meshes`, a pure planner):
+
+- every section is built at most once per batch (previously a neighbour that
+  loaded in the same batch was re-meshed each time one of its neighbours
+  arrived: up to ~30 builds per column);
+- all-air and absent sections are skipped (`build_chunk_meshes` also returns
+  at once for an empty `Chunk`); a stale mesh at a section the push emptied is
+  removed (`StreamMeshPlan::vacated`);
+- in play (`MeshPolicy::STREAMING`) at most 18 of the batch's own sections are
+  built in the frame it loads; the rest, and the already-loaded neighbours'
+  seam sections, go onto `dirty_mesh_chunks` and drain nearest first under the
+  existing `MESH_REBUILD_BUDGET`. The seam on a neighbour that has not caught
+  up is a face now buried in terrain, so the lag is invisible. Behind the
+  loading screen (`MeshPolicy::LOADING`) everything is built inline.
+
+The 4-columns-per-frame load budget (`STREAM_BUDGET`) is unchanged and remains
+the outer bound. Off-thread meshing remains the larger, later win:
+
 
 **Native (multi-threaded):**
 

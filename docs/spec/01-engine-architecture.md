@@ -603,6 +603,23 @@ Every tick, the server executes the following pipeline in order:
 
 **Tick timing**: The server uses a fixed-timestep accumulator. If a tick completes early, it sleeps for the remainder. If a tick overruns, the next tick runs immediately. If the server falls behind by more than 5 ticks (250ms), it drops ticks and logs a warning — it never "catches up" by running physics at accelerated speed, as that would cause desyncs and exploits.
 
+**As-built, client/host frame loop (perf pass, 2026-10-23).** The client's
+20 Hz loop (`game_loop.rs`, `tick_catchup.rs`) follows the same rule, with two
+pure checks: `clamp_backlog` caps the accumulator at 5 ticks (250 ms) each frame
+and drops the excess (one rate-limited `warn!` line per 10 s), and
+`may_run_another_tick` stops catching up once the frame has spent 100 ms on
+ticks (it always runs at least one; the old limit of 10 per frame still
+applies). Before this a tick over 50 ms let the backlog grow without bound, so
+every frame ran ten ticks and the game sank into slow motion. Dropped time
+only slows the simulation: `tick_counter` and every "ticks since" counter
+advance per executed tick, and a hosted server ticks once per client tick, so
+host and joiners stay in step. The per-tick world passes were also made
+independent of world size: pistons and hoppers read each chunk's maintained
+piston/hopper counter (`Chunk::has_pistons` / `has_hoppers`, kept in
+`Chunk::set` and `from_bytes`) and read cells only in chunks that hold one,
+instead of every cell of every loaded chunk (`World::chunks_with_pistons`,
+`chunks_with_hoppers`).
+
 ```rust
 const TICK_RATE: u32 = 20;
 const TICK_DURATION: Duration = Duration::from_millis(1000 / TICK_RATE as u64); // 50ms
