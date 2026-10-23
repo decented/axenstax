@@ -210,6 +210,7 @@ fn a_room_from_the_lan_list_joins_through_the_signet_challenge() {
         thread::sleep(Duration::from_millis(20));
     };
     assert_eq!(room.max_players, 5, "the host and four joiners");
+    assert_eq!(room.name, ROOM_NAME, "the beacon names no world");
     let join = PendingJoin::over(join_lan(&cfg, &Identity::ephemeral(), &room), room.name.clone());
     let transport = reach_host(&mut server, join);
     signed_join_is_seated(&mut server, transport);
@@ -225,6 +226,42 @@ fn a_room_code_joins_through_the_signet_challenge() {
     let join = PendingJoin::over(join_with_relay(&cfg, &Identity::ephemeral(), &typed, Box::new(hub.client())), typed);
     let transport = reach_host(&mut server, join);
     signed_join_is_seated(&mut server, transport);
+}
+
+/// A code holder learns nothing that names the world before the Signet
+/// challenge: the room Fray is asked to open, and the name it sends a joiner on
+/// connecting, are the neutral one, not the world's folder name.
+#[test]
+fn a_code_holder_is_told_no_world_name_before_the_challenge() {
+    let hub = FakeRelayHub::new();
+    let cfg = test_cfg();
+    let announced = Arc::new(Mutex::new(None));
+    let seen = announced.clone();
+    let server = start_host(|room| {
+        *seen.lock().unwrap() = Some(room.name.clone());
+        host_with_relay(&cfg, &Identity::ephemeral(), room, Some(Box::new(hub.client())))
+    });
+    let folder = server.server_name.clone();
+    assert!(folder.starts_with("fray-b2-"), "the game still knows the world as {folder}");
+    assert_eq!(announced.lock().unwrap().as_deref(), Some(ROOM_NAME));
+
+    let mut server = server;
+    let code = server.fray_room().expect("a Fray room").handle().code().to_string();
+    let typed = decented_net::room::display_code(&code);
+    let handle = join_with_relay(&cfg, &Identity::ephemeral(), &typed, Box::new(hub.client()));
+    let deadline = Instant::now() + WAIT;
+    let told = loop {
+        server.tick();
+        match handle.poll() {
+            Some(ClientEvent::Connected { host_name, .. }) => break host_name,
+            Some(ClientEvent::Failed { reason, .. }) => panic!("the join failed: {reason}"),
+            _ => {}
+        }
+        assert!(Instant::now() < deadline, "the join never connected");
+        thread::sleep(Duration::from_millis(5));
+    };
+    assert_eq!(told, ROOM_NAME);
+    assert!(!told.contains(&folder), "the world's name must not reach a code holder: {told}");
 }
 
 #[test]

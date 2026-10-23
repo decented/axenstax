@@ -1254,7 +1254,7 @@ impl HostedServer {
         }
         let mut server = Self::start_inner(
             num_local_players,
-            server_name.clone(),
+            server_name,
             seed,
             max_remote_players,
             RemoteTransport::Fray,
@@ -1267,8 +1267,10 @@ impl HostedServer {
         server.set_access_policy(true, Vec::new(), blocked);
         // Fray counts the host's own seat in the room's size, and refuses a
         // joiner past it, as the QUIC accept thread did.
+        // Not the world's folder name: Fray hands the room's name to anyone
+        // who reaches it, code holders included, before the Signet challenge.
         let room = decented_net::RoomInfo {
-            name: server_name,
+            name: crate::fray_play::ROOM_NAME.to_string(),
             max_players: u8::try_from(num_local_players + max_remote_players).unwrap_or(u8::MAX),
         };
         let (tx, rx) = mpsc::channel();

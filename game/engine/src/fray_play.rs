@@ -23,6 +23,13 @@ use crate::fray_transport::{net_config, FrayClientTransport};
 /// is not out and the room is on this network only. Fray keeps trying after.
 pub const PUBLISH_GRACE: Duration = Duration::from_secs(15);
 
+/// The name every Fray room announces, in the LAN beacon and to a joiner on
+/// connecting, before the Signet challenge. Fray sends one name for both and
+/// cannot send the world's folder name to the LAN only, so a code holder would
+/// learn "Emma's world" before proving who they are. The real name reaches a
+/// joiner after the challenge, in the game's own handshake.
+pub const ROOM_NAME: &str = "AxeNStax world";
+
 /// AxeNStax's Fray settings with the player's relays: the code is published on
 /// (and looked up on) `relays` only, never on Fray's defaults. STUN is
 /// AxeNStax's own list, the one online play by contact uses.
