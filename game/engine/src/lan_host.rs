@@ -1,4 +1,4 @@
-//! LAN hosting helpers (gap-audit T2-10): the address a joiner types, a
+//! LAN hosting helpers (gap-audit T2-10): the machine's LAN addresses, a
 //! synchronous port bind that fails *honestly*, and the human wording for both.
 //!
 //! Pure functions (no egui) so the wording and the address rules are testable;
@@ -11,7 +11,7 @@
 #![cfg(not(target_arch = "wasm32"))]
 
 use std::io;
-use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
+use std::net::{Ipv4Addr, UdpSocket};
 use std::time::{Duration, Instant};
 
 /// Keep only addresses a neighbour on this network could dial, private (RFC 1918)
@@ -42,29 +42,16 @@ pub fn detect_lan_addresses() -> Vec<Ipv4Addr> {
     lan_addresses_from(&found)
 }
 
-/// What a joiner needs to reach this host: its LAN address(es) and the port.
+/// What this machine can be reached on: its LAN address(es).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostAccess {
     pub addresses: Vec<Ipv4Addr>,
-    pub port: u16,
 }
 
 impl HostAccess {
-    /// Detect the addresses now and pair them with `port`.
-    pub fn detect(port: u16) -> Self {
-        Self { addresses: detect_lan_addresses(), port }
-    }
-
-    /// `ip:port` strings exactly as a joiner would type them, best first.
-    #[cfg_attr(not(test), expect(dead_code, reason = "Join Game takes a room code since B-2; B8 removes it"))]
-    pub fn join_addresses(&self) -> Vec<String> {
-        self.addresses.iter().map(|ip| SocketAddr::new((*ip).into(), self.port).to_string()).collect()
-    }
-
-    /// The best address to show first, if the machine has a network at all.
-    #[cfg_attr(not(test), expect(dead_code, reason = "Join Game takes a room code since B-2; B8 removes it"))]
-    pub fn primary(&self) -> Option<String> {
-        self.join_addresses().into_iter().next()
+    /// Detect the addresses now.
+    pub fn detect() -> Self {
+        Self { addresses: detect_lan_addresses() }
     }
 }
 
@@ -207,15 +194,6 @@ mod tests {
     }
 
     #[test]
-    fn join_addresses_are_what_a_joiner_types() {
-        let a = HostAccess { addresses: vec![ip(192, 168, 1, 23), ip(10, 0, 0, 5)], port: 7700 };
-        assert_eq!(a.join_addresses(), ["192.168.1.23:7700", "10.0.0.5:7700"]);
-        assert_eq!(a.primary().as_deref(), Some("192.168.1.23:7700"));
-        let none = HostAccess { addresses: vec![], port: 7700 };
-        assert_eq!(none.primary(), None);
-    }
-
-    #[test]
     fn bind_errors_read_as_plain_english() {
         let in_use = describe_bind_error(&io::Error::from(io::ErrorKind::AddrInUse), 7700);
         assert!(in_use.contains("7700") && in_use.contains("already in use"), "got {in_use}");
@@ -247,10 +225,10 @@ mod tests {
 
     #[test]
     fn toasts_name_the_address_or_the_problem() {
-        let a = HostAccess { addresses: vec![ip(192, 168, 1, 23)], port: 7700 };
+        let a = HostAccess { addresses: vec![ip(192, 168, 1, 23)] };
         let t = hosting_toast(&a, "KMT RWX", true);
         assert!(t.contains("KMT RWX") && t.contains("Join Game"), "got {t}");
-        let none = HostAccess { addresses: vec![], port: 7700 };
+        let none = HostAccess { addresses: vec![] };
         assert!(hosting_toast(&none, "KMT RWX", true).contains("no network connection"));
         // No relays: the code can't be used, so the toast leaves it out.
         let no_relays = hosting_toast(&a, "KMT RWX", false);

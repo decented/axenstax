@@ -1122,7 +1122,7 @@ impl super::GameState {
             (Some(room), Some(server)) if !room.settled() => match server.poll_fray_start() {
                 crate::hosted_server::FrayStart::Pending => None,
                 crate::hosted_server::FrayStart::Ready => {
-                    room.settle(server.port);
+                    room.settle();
                     None
                 }
                 crate::hosted_server::FrayStart::Failed(why) => Some(why),
@@ -9138,7 +9138,7 @@ impl super::GameState {
                             // The room is still opening (`poll_fray` settles
                             // it, and replaces this toast if it fails); the
                             // port is not known yet and is not needed here.
-                            let access = crate::lan_host::HostAccess::detect(0);
+                            let access = crate::lan_host::HostAccess::detect();
                             let code = server
                                 .fray_room()
                                 .map(|room| decented_net::room::display_code(room.handle().code()))

@@ -109,12 +109,11 @@ impl HostedRoom {
         self.settled
     }
 
-    /// The room is listening on `port`. The wait for a relay (see
-    /// [`PUBLISH_GRACE`]) counts from now: before this the room was still
-    /// asking the router and a STUN server, and had not yet reached a relay.
-    pub fn settle(&mut self, port: u16) {
+    /// The room is listening. The wait for a relay (see [`PUBLISH_GRACE`])
+    /// counts from now: before this the room was still asking the router and a
+    /// STUN server, and had not yet reached a relay.
+    pub fn settle(&mut self) {
         self.settled = true;
-        self.access.port = port;
         self.started = Instant::now();
     }
 

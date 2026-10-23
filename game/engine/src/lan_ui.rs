@@ -337,8 +337,8 @@ mod tests {
             CodeStatus::LanOnly { tried: 3 },
         ];
         for access in [
-            HostAccess { addresses: vec![Ipv4Addr::new(192, 0, 2, 23)], port: 40_000 },
-            HostAccess { addresses: vec![], port: 40_000 },
+            HostAccess { addresses: vec![Ipv4Addr::new(192, 0, 2, 23)] },
+            HostAccess { addresses: vec![] },
         ] {
             for status in statuses {
                 ctx.begin_pass(egui::RawInput {
