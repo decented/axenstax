@@ -4,7 +4,6 @@
 //! The actual game rendering and input collection happen in the game loop;
 //! this module manages the network session.
 
-#[cfg(not(target_arch = "wasm32"))]
 use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, TryRecvError};
 
