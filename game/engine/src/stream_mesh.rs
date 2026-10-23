@@ -73,6 +73,7 @@ pub struct StreamMeshPlan {
 
 impl StreamMeshPlan {
     /// Total `build_chunk_meshes` calls this plan will cost, now or later.
+    #[cfg(test)]
     pub fn builds(&self) -> usize {
         self.now.len() + self.later.len()
     }
