@@ -378,6 +378,12 @@ pub fn build_chunk_meshes(
         Some(c) => c,
         None => return ChunkMeshes { opaque: empty(), water: empty(), transparent: empty(), plants: vec![], decals: vec![], micro_instances: vec![], micro_billboards: vec![] },
     };
+    // An all-air section has no geometry of any kind (every pass below reads
+    // the section's own cells; decals need a solid block in it), and
+    // `Chunk::is_empty` is O(1): skip ~25k cells x 6 faces of neighbour lookups.
+    if chunk.is_empty() {
+        return ChunkMeshes { opaque: empty(), water: empty(), transparent: empty(), plants: vec![], decals: vec![], micro_instances: vec![], micro_billboards: vec![] };
+    }
 
     let mut vertices = Vec::new();
     let mut indices = Vec::new();

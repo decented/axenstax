@@ -1,7 +1,6 @@
 //! Chunk streaming: incremental loading/unloading and initial bulk load.
 
 use crate::chunk::CHUNK_SIZE;
-use crate::mesh::build_chunk_meshes;
 use super::{MAX_CHUNK_Y, STREAM_BUDGET};
 
 impl super::GameState {
@@ -123,34 +122,15 @@ impl super::GameState {
             // from the store; only a never-kept column is (re)generated. This
             // also covers the void self-heal: it never regenerates over an
             // evicted column. The rest mirrors the save-load path (light,
-            // fluid/fire rescan, mesh).
+            // fluid/fire rescan; the meshes follow for the whole batch).
             self.column_sims().stream_in(cx, cz);
             // B2b — a column noted local has its check queued.
             self.chunk_intake.column_held((cx, cz));
-
-            // Mesh new chunks in this column
-            for cy in 0..=MAX_CHUNK_Y {
-                if self.world.has_chunk(cx, cy, cz) {
-                    let meshes = build_chunk_meshes(cx, cy, cz, &self.world, &self.registry);
-                    self.renderer.upload_chunk((cx, cy, cz), &meshes);
-                }
-            }
-
-            // Re-mesh neighbouring columns' boundary chunks (so hidden faces cull properly)
-            for &(ndx, ndz) in &[(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
-                let nx = cx + ndx;
-                let nz = cz + ndz;
-                if self.loaded_columns.contains(&(nx, nz)) {
-                    for cy in 0..=MAX_CHUNK_Y {
-                        if self.world.has_chunk(nx, cy, nz) {
-                            let meshes =
-                                build_chunk_meshes(nx, cy, nz, &self.world, &self.registry);
-                            self.renderer.upload_chunk((nx, cy, nz), &meshes);
-                        }
-                    }
-                }
-            }
         }
+        // Mesh the whole batch once: each section built at most once, all-air
+        // sections skipped, the neighbours' seams and any over-budget section
+        // left to the dirty-mesh queue (`stream_mesh`).
+        self.mesh_stream_batch(&step.load, crate::stream_mesh::MeshPolicy::STREAMING);
 
         // Unload columns that are outside ALL anchors' radius (+
         // `UNLOAD_HYSTERESIS`) — the players' render distance, and a lent
@@ -722,6 +702,9 @@ impl super::GameState {
     /// the remaining queue length.
     pub(crate) fn step_load(&mut self, budget: usize) -> usize {
         let mut done = 0;
+        // The columns this call brings in are meshed together, once, after
+        // all of them are generated and lit (`stream_mesh`).
+        let mut batch = Vec::new();
         while done < budget {
             let Some((cx, cz)) = self.load_queue.pop_front() else { break };
             // B2a — a column the server is pushing is the server's: never
@@ -732,9 +715,11 @@ impl super::GameState {
                 done += 1;
                 continue;
             }
-            self.load_one_column(cx, cz);
+            self.load_column_unmeshed(cx, cz);
+            batch.push((cx, cz));
             done += 1;
         }
+        self.mesh_stream_batch(&batch, crate::stream_mesh::MeshPolicy::LOADING);
         self.load_queue.len()
     }
 
@@ -748,6 +733,14 @@ impl super::GameState {
     /// (`ChunkIntake::column_held`); a caller about to land a server change
     /// on it checks it first (`check_column_now`).
     pub(crate) fn load_one_column(&mut self, cx: i32, cz: i32) {
+        self.load_column_unmeshed(cx, cz);
+        self.mesh_stream_batch(&[(cx, cz)], crate::stream_mesh::MeshPolicy::LOADING);
+    }
+
+    /// [`Self::load_one_column`] without the meshing: restore or generate,
+    /// light, register fluids and fire, scatter wildlife, mark loaded. The
+    /// caller meshes the column (alone or with its batch) afterwards.
+    fn load_column_unmeshed(&mut self, cx: i32, cz: i32) {
         // Spec 02 §7.5 — restore an evicted column first (it wins over any
         // world-gen spill a neighbour left); generate only if neither.
         load_column_blocks(&mut self.world, cx, cz, &self.biome_gen, false);
@@ -756,22 +749,6 @@ impl super::GameState {
         self.lava.register_column_sources(cx, cz, &self.world);
         self.fire.register_column_fires(cx, cz, &self.world, self.tick_counter);
         crate::entity::scatter_mobs_in_column(&mut self.ecs, cx, cz, &self.world, &self.biome_gen);
-        for cy in 0..=MAX_CHUNK_Y {
-            if self.world.has_chunk(cx, cy, cz) {
-                let meshes = build_chunk_meshes(cx, cy, cz, &self.world, &self.registry);
-                self.renderer.upload_chunk((cx, cy, cz), &meshes);
-            }
-        }
-        for &(nx, nz) in &[(cx - 1, cz), (cx + 1, cz), (cx, cz - 1), (cx, cz + 1)] {
-            if self.loaded_columns.contains(&(nx, nz)) {
-                for cy in 0..=MAX_CHUNK_Y {
-                    if self.world.has_chunk(nx, cy, nz) {
-                        let meshes = build_chunk_meshes(nx, cy, nz, &self.world, &self.registry);
-                        self.renderer.upload_chunk((nx, cy, nz), &meshes);
-                    }
-                }
-            }
-        }
         self.loaded_columns.insert((cx, cz));
         self.chunk_intake.column_held((cx, cz));
     }
@@ -995,6 +972,7 @@ impl super::GameState {
     /// chunk is in the world (physics stands on it) from the moment it is
     /// applied; until its column comes up here the previous mesh shows.
     pub(crate) fn finish_pushed_columns(&mut self, budget: usize) {
+        let mut batch = Vec::new();
         for (cx, cz) in self.chunk_intake.take_relight(budget) {
             crate::lighting::run_initial_pass_for_column(&mut self.world, cx, cz, &self.registry);
             self.water.forget_column(cx, cz);
@@ -1002,18 +980,11 @@ impl super::GameState {
             self.lava.forget_column(cx, cz);
             self.lava.register_column_sources(cx, cz, &self.world);
             self.fire.register_column_fires(cx, cz, &self.world, self.tick_counter);
-            for (mx, mz) in [(cx, cz), (cx - 1, cz), (cx + 1, cz), (cx, cz - 1), (cx, cz + 1)] {
-                if (mx, mz) != (cx, cz) && !self.loaded_columns.contains(&(mx, mz)) {
-                    continue;
-                }
-                for cy in 0..=MAX_CHUNK_Y {
-                    if self.world.has_chunk(mx, cy, mz) {
-                        let meshes = build_chunk_meshes(mx, cy, mz, &self.world, &self.registry);
-                        self.renderer.upload_chunk((mx, cy, mz), &meshes);
-                    }
-                }
-            }
+            batch.push((cx, cz));
         }
+        // One mesh per section for the whole batch; an all-air section that
+        // the push emptied loses its old mesh (`StreamMeshPlan::vacated`).
+        self.mesh_stream_batch(&batch, crate::stream_mesh::MeshPolicy::STREAMING);
     }
 
     /// B2a — a joined session's loading screen: take in what the server has

@@ -237,6 +237,8 @@ mod entity_model;
 mod viewmodel;
 mod game_loop;
 mod chunk_stream;
+// Batch meshing for freshly streamed columns (Spec 03 §10.2).
+mod stream_mesh;
 // Fixed-rate tick catch-up policy: backlog clamp + per-frame tick-time budget.
 mod tick_catchup;
 mod prediction; // Spec 04 §5.3 — a joiner's prediction + reconciliation of its own body.
