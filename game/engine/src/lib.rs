@@ -412,11 +412,9 @@ mod fray_transport;
 // the room code's status. Native only.
 #[cfg(not(target_arch = "wasm32"))]
 mod fray_play;
-// The broadcaster still serves online play's plain-QUIC host; the listener has
-// had no caller since "Games on this network" hears Fray's beacon (B-2). B8
-// removes what nothing uses.
+// The broadcaster serves online play's plain-QUIC host; nothing listens for it,
+// since "Games on this network" hears Fray's beacon.
 #[cfg(not(target_arch = "wasm32"))]
-#[cfg_attr(not(test), allow(dead_code))]
 mod discovery;
 // LAN play UX (gap-audit T2-10): host address + bind errors, and the
 // "Games on this network" list. Native only — the web build has no multiplayer.
