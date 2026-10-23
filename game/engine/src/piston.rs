@@ -161,10 +161,12 @@ pub fn retract(world: &mut World, piston: Pos, meta: u8, sticky: bool) -> Vec<Po
     changed
 }
 
-/// Find every piston block (plain or sticky) in the loaded chunks.
+/// Find every piston block (plain or sticky) in the loaded chunks. Only
+/// chunks whose maintained piston counter is non-zero are read cell by cell
+/// (`World::chunks_with_pistons`); this runs every tick.
 pub fn collect_piston_positions(world: &World) -> Vec<Pos> {
     let mut out = Vec::new();
-    for ((cx, cy, cz), chunk) in world.iter_chunks() {
+    for ((cx, cy, cz), chunk) in world.chunks_with_pistons() {
         for ly in 0..crate::chunk::CHUNK_SIZE {
             for lz in 0..crate::chunk::CHUNK_SIZE {
                 for lx in 0..crate::chunk::CHUNK_SIZE {

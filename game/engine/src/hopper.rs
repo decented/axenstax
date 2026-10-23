@@ -90,7 +90,8 @@ pub fn container_at_mut(world: &mut World, pos: (i32, i32, i32)) -> Option<&mut 
 /// `(above_pos, below_pos)` transfer pairs.
 pub fn collect_hopper_transfers(world: &World) -> Vec<((i32, i32, i32), (i32, i32, i32))> {
     let mut out = Vec::new();
-    for ((cx, cy, cz), chunk) in world.iter_chunks() {
+    // Only chunks whose maintained hopper counter is non-zero are read cell by cell.
+    for ((cx, cy, cz), chunk) in world.chunks_with_hoppers() {
         for ly in 0..crate::chunk::CHUNK_SIZE {
             for lz in 0..crate::chunk::CHUNK_SIZE {
                 for lx in 0..crate::chunk::CHUNK_SIZE {
