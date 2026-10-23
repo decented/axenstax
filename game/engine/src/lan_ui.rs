@@ -66,19 +66,32 @@ pub fn room_label(r: &LanRoom) -> String {
     if r.name.is_empty() { "Unnamed world".to_string() } else { r.name.clone() }
 }
 
+/// The names the lobby shows for `rooms`, in the order given. Every Fray room
+/// announces the same neutral name ([`crate::fray_play::ROOM_NAME`]), so rooms
+/// of one name are told apart by a number: "AxeNStax world", "AxeNStax world (2)".
+/// The room code is not shown here: it works over the internet, and this list
+/// is everyone on the network.
+pub fn row_names(rooms: &[LanRoom]) -> Vec<String> {
+    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    rooms
+        .iter()
+        .map(|r| {
+            let label = room_label(r);
+            let n = seen.entry(label.to_lowercase()).or_insert(0);
+            *n += 1;
+            if *n == 1 { label } else { format!("{label} ({n})") }
+        })
+        .collect()
+}
+
 /// One row's text: `World name  ·  2 of 5 players`, with the reason appended
 /// when the room cannot be joined.
-pub fn entry_label(r: &LanRoom) -> String {
-    let mut out = format!("{}  \u{b7}  {} of {} players", room_label(r), r.player_count, r.max_players);
+pub fn entry_label(name: &str, r: &LanRoom) -> String {
+    let mut out = format!("{name}  \u{b7}  {} of {} players", r.player_count, r.max_players);
     if let Some(why) = unavailable_reason(r) {
         out.push_str(&format!("  \u{b7}  {why}"));
     }
     out
-}
-
-/// The row's second line: the room's code, as the host's panel shows it.
-pub fn entry_code(r: &LanRoom) -> String {
-    format!("Room code {}", decented_net::room::display_code(&r.code))
 }
 
 /// Stable display order: joinable rooms first, then by name, then code — so
@@ -124,11 +137,11 @@ pub fn draw_lan_games(ui: &mut egui::Ui, games: &LanGames) -> Option<LanRoom> {
         ui.label(egui::RichText::new(GAMES_SEARCHING).size(12.0).color(egui::Color32::from_rgb(150, 150, 160)));
     } else {
         egui::ScrollArea::vertical().max_height(150.0).auto_shrink([true, true]).show(ui, |ui| {
-            for r in &games.rooms {
+            let names = row_names(&games.rooms);
+            for (r, name) in games.rooms.iter().zip(&names) {
                 let joinable = unavailable_reason(r).is_none();
-                let text = format!("{}\n{}", entry_label(r), entry_code(r));
-                let btn = egui::Button::new(egui::RichText::new(text).size(13.0))
-                    .min_size(egui::vec2(360.0, 40.0))
+                let btn = egui::Button::new(egui::RichText::new(entry_label(name, r)).size(13.0))
+                    .min_size(egui::vec2(360.0, 28.0))
                     .corner_radius(egui::CornerRadius::same(6));
                 let resp = ui.add_enabled(joinable, btn);
                 if resp.clicked() {
@@ -221,22 +234,47 @@ mod tests {
     }
 
     #[test]
-    fn a_row_reads_name_players_and_code() {
+    fn a_row_reads_name_and_players_and_never_the_room_code() {
         let r = room("Axo's World", "KMTRWX", 23, 2, 5);
-        assert_eq!(entry_label(&r), "Axo's World  \u{b7}  2 of 5 players");
-        assert_eq!(entry_code(&r), "Room code KMT RWX");
+        let label = entry_label(&room_label(&r), &r);
+        assert_eq!(label, "Axo's World  \u{b7}  2 of 5 players");
+        // The code works over the internet; the LAN list is everyone nearby.
+        for rooms in [vec![r.clone()], vec![room("a", "KMTRWX", 1, 5, 5)]] {
+            for (r, name) in rooms.iter().zip(row_names(&rooms)) {
+                let shown = entry_label(&name, r);
+                let code = decented_net::room::display_code(&r.code);
+                assert!(!shown.contains(&r.code) && !shown.contains(&code), "{shown}");
+                assert!(!shown.to_lowercase().contains("code"), "{shown}");
+            }
+        }
+    }
+
+    #[test]
+    fn rooms_with_one_name_are_numbered_in_list_order() {
+        let list = ordered(&[
+            room(crate::fray_play::ROOM_NAME, "BBBBBB", 2, 1, 5),
+            room(crate::fray_play::ROOM_NAME, "AAAAAA", 1, 1, 5),
+            room(&crate::fray_play::ROOM_NAME.to_uppercase(), "CCCCCC", 3, 1, 5),
+        ]);
+        assert_eq!(
+            row_names(&list),
+            ["AxeNStax world", "AxeNStax world (2)", "AXENSTAX WORLD (3)"]
+        );
+        assert_eq!(row_names(&[]), Vec::<String>::new());
     }
 
     #[test]
     fn an_unnamed_world_still_gets_a_row_label() {
-        assert!(entry_label(&room("", "KMTRWX", 1, 0, 5)).starts_with("Unnamed world"));
+        let r = room("", "KMTRWX", 1, 0, 5);
+        assert!(entry_label(&room_label(&r), &r).starts_with("Unnamed world"));
     }
 
     #[test]
     fn a_full_room_says_why_it_cannot_be_joined() {
         assert_eq!(unavailable_reason(&room("a", "KMTRWX", 1, 5, 5)), Some("full"));
         assert_eq!(unavailable_reason(&room("a", "KMTRWX", 1, 1, 5)), None);
-        assert!(entry_label(&room("a", "KMTRWX", 1, 5, 5)).ends_with("full"));
+        let r = room("a", "KMTRWX", 1, 5, 5);
+        assert!(entry_label(&room_label(&r), &r).ends_with("full"));
     }
 
     #[test]
