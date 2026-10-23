@@ -39,7 +39,7 @@ fn snapshot_from(client: &crate::transport::ChannelClientTransport) -> protocol:
 fn handover_personal_delayed_supersession_keeps_honest_action_and_current_freeze_fence() {
     let _root = crate::save::WorldsRootGuard::new("personal-delayed-initial");
     let mut hs = super::super::tests::start_room_test_server("personal-delayed-initial", 0);
-    let (i, client, heard) = super::super::c3d_tests::join(&mut hs, 17);
+    let (i, client, heard) = super::super::c3d_tests::join_raw(&mut hs, 17);
     let accept = heard.accepts.first().unwrap();
     assert_eq!(
         accept.inventory_mode,

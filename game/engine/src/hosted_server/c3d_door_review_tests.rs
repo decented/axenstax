@@ -79,7 +79,17 @@ fn c3d_strict_door_place_from_a_dead_body_is_superseded_whole() {
         assert_eq!(j.server_cell([41, y, 40]).0, AIR, "no half on the server at y={y}");
         assert_eq!(j.client_cell([41, y, 40]).0, AIR, "the client's predicted half at y={y} put back");
     }
-    assert_eq!(j.server_doors(), 1, "no door taken from the server's copy");
+    // The dead body's death hook graves the door; the DoorPlace took none.
+    let graved: u32 = j
+        .hs
+        .server
+        .world
+        .iter_graves()
+        .flat_map(|(_, grave)| grave.slots.iter().flatten())
+        .filter(|s| s.item == Item::Block(OAK_DOOR))
+        .map(|s| u32::from(s.count))
+        .sum();
+    assert_eq!(j.server_doors() + graved, 1, "no door taken from the server's copy");
 }
 
 /// Run-18 review L6: a `DoorPlace` on a creative world is refused as every

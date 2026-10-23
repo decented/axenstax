@@ -15,7 +15,7 @@
 //! what a joiner meets, with no mirror in between.
 
 use super::joiner_authority::{
-    accepted, block_changes_seen, bones_in_ecs, cell_beside, chest_of_bones, send_edits,
+    block_changes_seen, bones_in_ecs, cell_beside, chest_of_bones, send_edits,
     send_guest_join, send_host_edits, start_open_server,
 };
 use crate::block;
@@ -54,7 +54,7 @@ pub(super) fn join_guest_lent(
     let client = hs.attach_test_remote();
     send_guest_join(&client, name);
     host.lend_tick(hs);
-    let slot = accepted(&client).expect("guest join accepted").player_index as usize;
+    let slot = crate::hosted_server::tests::join_installed(hs, &client, |hs| host.lend_tick(hs)).player_index as usize;
     // B2a — settle the join's chunk push (`joiner_authority::settle_chunk_push`).
     super::joiner_authority::settle_chunk_push(hs, &client, |hs| host.lend_tick(hs));
     (client, slot)

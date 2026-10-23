@@ -271,88 +271,16 @@ impl Rig {
         let client = self.hs.attach_test_remote();
         send_guest_join(&client, name);
         self.tick(1);
-        let mut accept = None;
-        let mut sync = None;
-        let mut personal = None;
-        while let Some(bytes) = client.try_recv_from_server() {
-            match protocol::deserialize_header(&bytes) {
-                Some((protocol::PacketType::JoinAccept, body)) => {
-                    assert!(accept.is_none());
-                    accept = Some(
-                        protocol::safe_deserialize::<protocol::JoinAcceptPacket>(body).unwrap(),
-                    );
-                }
-                Some((protocol::PacketType::InventorySync, body)) => {
-                    assert!(accept.is_some());
-                    assert!(
-                        personal.is_none(),
-                        "actual physical Sync1 precedes Personal2"
-                    );
-                    assert!(sync.is_none());
-                    sync = Some(
-                        protocol::safe_deserialize::<protocol::InventorySyncPacket>(body).unwrap(),
-                    );
-                }
-                Some((protocol::PacketType::PersonalSync, body)) => {
-                    if let protocol::PersonalSyncPacket::Snapshot(snapshot) =
-                        protocol::safe_deserialize(body).unwrap()
-                    {
-                        assert!(
-                            sync.is_some(),
-                            "no personal installation before actual Sync1"
-                        );
-                        assert!(personal.is_none());
-                        personal = Some(snapshot);
-                    }
-                }
-                Some((protocol::PacketType::JoinReject, body)) => panic!(
-                    "guest initialisation rejected: {}",
-                    protocol::safe_deserialize::<protocol::JoinRejectPacket>(body)
-                        .unwrap()
-                        .reason
-                ),
-                _ => {}
+        let initial = crate::hosted_server::tests::initial_packets(&client);
+        assert_eq!(initial.sync.window_event, 1, "actual physical Sync1");
+        assert_eq!(initial.personal.window_event, 2, "actual initial Personal2");
+        let slot = initial.accept.player_index as usize;
+        crate::hosted_server::tests::install_initial_personal(&mut self.hs, &client, &initial, |hs| {
+            match self.host.as_mut() {
+                Some(host) => host.lend_tick(hs),
+                None => hs.tick(),
             }
-        }
-        let accept = accept.expect("guest join accepted");
-        let slot = accept.player_index as usize;
-        let sync = sync.expect("actual initial physical Sync1");
-        let personal = personal.expect("actual initial Personal2");
-        assert_eq!(sync.window_event, 1);
-        assert_eq!(personal.window_event, 2);
-        assert!(!self.hs.server.players[slot].personal_delivery.initialised);
-        let mut actor = crate::player_slot::PlayerSlot::new(slot, Vec3::ZERO, 1.0);
-        crate::inventory_sync::apply(
-            &mut crate::window::WindowMut {
-                inv: &mut actor.inventory,
-                armour: &mut actor.armour_slots,
-                cursor: &mut actor.crafting_ui.cursor_item,
-                grid: &mut actor.crafting_ui.grid,
-                container: None,
-            },
-            &sync,
-            &self.hs.server.registry,
-            &mut Default::default(),
-            &mut Default::default(),
-            accept.inventory_mode,
-        )
-        .unwrap();
-        assert!(!self.hs.server.players[slot].personal_delivery.initialised);
-        let mut inbox = crate::personal_sync::Inbox::new(accept.action_session, accept.action_life);
-        inbox.push(personal.clone()).unwrap();
-        let acknowledgements = inbox.apply(personal.window_event, &mut actor).unwrap();
-        assert_eq!(acknowledgements.len(), 1);
-        client.send_to_server(&protocol::serialize_packet(
-            protocol::PacketType::PersonalSync,
-            &protocol::PersonalSyncPacket::Applied(acknowledgements[0]),
-        ));
-        self.tick(1);
-        let sp = &self.hs.server.players[slot];
-        assert!(sp.personal_delivery.initialised);
-        assert!(
-            sp.personal_delivery
-                .quiescent(sp.personal.as_ref().unwrap(), sp.respawns)
-        );
+        });
         match self.host.as_mut() {
             Some(host) => settle_chunk_push(&mut self.hs, &client, |hs| host.lend_tick(hs)),
             None => settle_chunk_push(&mut self.hs, &client, HostedServer::tick),

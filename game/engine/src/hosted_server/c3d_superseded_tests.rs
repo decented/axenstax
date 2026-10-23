@@ -163,7 +163,11 @@ fn c3d_strict_click_and_shot_in_flight_at_death_are_superseded() {
     assert_eq!(projectiles(&hs), shots, "no projectile");
     assert_eq!(hs.server.players[j.i].next_shot_tick, next_shot, "no shot cooldown");
     assert!(
-        hs.server.players[j.i].window_events.waiting_events().all(|e| matches!(e, crate::window_events::WindowEvent::Replace { .. })),
+        // The death sync, and the personal fence every death now delivers.
+        hs.server.players[j.i].window_events.waiting_events().all(|e| matches!(
+            e,
+            crate::window_events::WindowEvent::Replace { .. } | crate::window_events::WindowEvent::PersonalSync(_)
+        )),
         "no payment: only the death sync waits"
     );
     assert_eq!(all_holdings(&hs, &[j.i], cell), before, "conserved over window, grave and ground");

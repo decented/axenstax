@@ -61,6 +61,8 @@ fn joined_from(tag: &str, mode: InventoryMode, record: Option<Record>) -> Joined
         if j.rc.player_index().is_some() && (!saved || j.rc.applied_window_boundary() >= 1) { break; }
     }
     j.pumps(2);
+    // `syncs` counts what follows the join: every join's own Sync1 is applied.
+    j.syncs = 0;
     j.place();
     j
 }
@@ -142,6 +144,7 @@ impl Joined {
                     let mut w = crate::window::WindowMut { inv: &mut self.inv, armour: &mut self.armour, cursor: &mut self.ui.cursor_item, grid: &mut self.ui.grid, container: None };
                     let station = crate::inventory_sync::apply(&mut w, &pkt, &self.reg, &mut crate::use_edits::SentUses::default(), &mut self.inbox.debt, self.rc.inventory_mode).expect("a readable sync");
                     if let Some(station) = station { self.ui.adopt_station(station); }
+                    self.rc.note_initial_personal_window_applied(event);
                     self.syncs += 1;
                 }
                 InboxItem::Grant(grant) => { crate::remote_entities::apply_inventory_grant(&mut self.inv, &grant, &self.reg); }
@@ -149,6 +152,8 @@ impl Joined {
             }
             self.rc.note_window_event(event);
         }
+        // The game loop's `apply_personal_inbox`, past the applied events.
+        super::tests::client_apply_personal(&mut self.rc);
         // Mirror: the op log goes out as the game loop sends it.
         if self.rc.inventory_mode == InventoryMode::Mirror {
             for logged in self.ui.take_ops(&self.inv, &self.armour) { self.rc.send_window_op(logged); }

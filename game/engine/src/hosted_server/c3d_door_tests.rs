@@ -40,6 +40,7 @@ pub(super) fn mirror_joined(tag: &str) -> MirrorJoined {
         if m.rc.player_index().is_some() { break; }
     }
     let i = m.rc.player_index().expect("the guest joined") as usize;
+    super::tests::install_client_initial_personal(&mut m.rc, &mut m.hs, i, HostedServer::tick);
     assert_eq!(m.rc.inventory_mode, InventoryMode::Mirror, "the session is Mirror");
     m.hs.hold_column_for_test(i, col);
     let p = &mut m.hs.server.players[i].player;

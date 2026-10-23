@@ -143,6 +143,7 @@ impl Joiner {
         };
         j.take_in();
         j.slot = j.rc.player_index().expect("joined") as usize;
+        crate::hosted_server::tests::install_client_initial_personal(&mut j.rc, hs, j.slot, &mut tick);
         j
     }
 

@@ -364,6 +364,7 @@ fn a_block_a_joiner_places_gets_its_device_and_its_facing_on_the_host() {
     let client = hs.attach_test_remote();
     send_guest_join(&client);
     hs.tick();
+    crate::hosted_server::tests::join_installed(&mut hs, &client, HostedServer::tick);
 
     // A joined remote player is server-simulated, so the reach check runs
     // against the position the SERVER holds for them — place next door to it.
@@ -679,6 +680,7 @@ fn a_meta_only_lever_flip_latches_the_servers_own_device() {
     let client = hs.attach_test_remote();
     send_guest_join(&client);
     hs.tick();
+    crate::hosted_server::tests::join_installed(&mut hs, &client, HostedServer::tick);
     let (_idx, at) = guest_slot(&hs);
 
     let origin = (at.x.floor() as i32 + 1, at.y.floor() as i32, at.z.floor() as i32);

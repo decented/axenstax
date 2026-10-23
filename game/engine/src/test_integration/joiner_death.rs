@@ -582,7 +582,7 @@ fn a_frame_that_lands_after_the_fill_is_read_before_its_closed_slot_is_freed() {
     let (client, late) = hs.attach_test_remote_late_frame();
     send_guest_join(&client, "Late");
     hs.tick();
-    let slot = super::joiner_authority::accepted(&client).expect("joined").player_index as usize;
+    let slot = crate::hosted_server::tests::join_installed(&mut hs, &client, HostedServer::tick).player_index as usize;
     super::joiner_authority::settle_chunk_push(&mut hs, &client, HostedServer::tick);
     let at = stand_on_floor(&mut hs, slot);
     let cell = (at.x.floor() as i32 + 1, at.y as i32, at.z.floor() as i32);

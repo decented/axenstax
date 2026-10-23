@@ -42,7 +42,7 @@ fn strict_rig_inner(tag: &str, retain_initial: bool) -> (Rig, super::c3d_tests::
     let g = crate::save::WorldsRootGuard::new(&format!("c3d-strict-{tag}"));
     let mut hs = start_room_test_server(&format!("c3d-strict-{tag}"), 0);
     hs.select_inventory_mode(InventoryMode::Strict).expect("a dedicated server selects any mode");
-    let (i, client, heard) = join(&mut hs, 17);
+    let (i, client, heard) = if retain_initial { super::c3d_tests::join_raw(&mut hs, 17) } else { join(&mut hs, 17) };
     let accept = heard.accepts.first().cloned().expect("Strict admits a first visit");
     assert_eq!(accept.inventory_mode, InventoryMode::Strict);
     let sp = &mut hs.server.players[i];
