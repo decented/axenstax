@@ -144,7 +144,7 @@ impl Joined {
                     let mut w = crate::window::WindowMut { inv: &mut self.inv, armour: &mut self.armour, cursor: &mut self.ui.cursor_item, grid: &mut self.ui.grid, container: None };
                     let station = crate::inventory_sync::apply(&mut w, &pkt, &self.reg, &mut crate::use_edits::SentUses::default(), &mut self.inbox.debt, self.rc.inventory_mode).expect("a readable sync");
                     if let Some(station) = station { self.ui.adopt_station(station); }
-                    self.rc.note_initial_personal_window_applied(event);
+                    self.rc.note_initial_personal_window_applied(event, pkt.locks);
                     self.syncs += 1;
                 }
                 InboxItem::Grant(grant) => { crate::remote_entities::apply_inventory_grant(&mut self.inv, &grant, &self.reg); }
@@ -154,8 +154,10 @@ impl Joined {
         }
         // The game loop's `apply_personal_inbox`, past the applied events.
         super::tests::client_apply_personal(&mut self.rc);
-        // Mirror: the op log goes out as the game loop sends it.
+        // Mirror: the op log goes out as the game loop sends it, the window's
+        // settings first once its personal state is ready.
         if self.rc.inventory_mode == InventoryMode::Mirror {
+            if let Some(locks) = self.rc.take_initial_lock_reconcile() { self.ui.log_settings_for_server(&self.inv, &self.armour, locks); }
             for logged in self.ui.take_ops(&self.inv, &self.armour) { self.rc.send_window_op(logged); }
         }
     }
@@ -397,12 +399,16 @@ fn c3d_grid_refused_return_close_shows_every_held_cell_in_both_modes() {
 }
 
 /// C3d run 10 (run-8 review LOW-D) — a Mirror joiner locks a slot before its
-/// client applies the join sync: the op is served on the server's copy at
-/// the old base, then the join `Replace` applies there. The copy keeps the
-/// lock (a Mirror client keeps its own locks, run 7, and `bdd4fe87`'s
-/// `set_slot` never touched them), so the two windows agree.
+/// client applies the join sync. Window ops made before the personal state
+/// is ready are never sent (the join `Replace` overwrites the contents), so
+/// the server's copy doesn't have the lock yet. A Mirror client keeps its
+/// own locks across that `Replace`, so once its personal state is installed
+/// it logs fresh ops that bring the server's copy to its window's settings
+/// (`RemoteClient::take_initial_lock_reconcile`,
+/// `CraftingUi::log_settings_for_server`): both copies end with the lock,
+/// and the two windows agree.
 #[test]
-fn c3d_mirror_lock_toggled_before_the_join_sync_survives_its_replace() {
+fn c3d_mirror_lock_toggled_before_the_join_sync_reaches_the_server_once_ready() {
     let mut j = start("lock-race", InventoryMode::Mirror, Some((&[], None)));
     for _ in 0..20 {
         j.hs.tick();
@@ -411,13 +417,15 @@ fn c3d_mirror_lock_toggled_before_the_join_sync_survives_its_replace() {
     }
     j.place();
     assert_eq!(j.rc.applied_window_boundary(), 0, "the join sync is heard, not applied");
+    assert!(!j.rc.personal_ready(), "the personal state isn't installed yet");
     j.ui.apply_click(&mut j.inv, &mut j.armour, &WindowClick::ToggleLock { slot: 3 }, false, glam::Vec3::ZERO, |_| AIR);
     for logged in j.ui.take_ops(&j.inv, &j.armour) { j.rc.send_window_op(logged); }
     j.hs.tick();
-    assert!(j.hs.server.players[j.i].inventory.is_locked(3), "the lock is served on the old base");
+    assert!(!j.hs.server.players[j.i].inventory.is_locked(3), "an op made before the personal state is ready isn't sent");
     j.pumps(3);
     assert!(j.rc.applied_window_boundary() >= 1 && j.syncs == 1, "the client applied the join sync");
+    assert!(j.rc.personal_ready(), "the client installed its personal state");
     assert!(j.inv.is_locked(3), "the Mirror client keeps its lock");
-    assert!(j.server_settled().inventory.is_locked(3), "the join Replace kept the server copy's lock");
+    assert!(j.server_settled().inventory.is_locked(3), "the server's copy has the lock once the client is ready");
     j.assert_agree("after the join sync");
 }

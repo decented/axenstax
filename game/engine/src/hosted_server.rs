@@ -9147,7 +9147,7 @@ pub(crate) mod tests {
             rc.inventory_mode,
         )
         .expect("Sync1 applies");
-        rc.note_initial_personal_window_applied(sync.window_event);
+        rc.note_initial_personal_window_applied(sync.window_event, sync.locks);
         rc.note_window_event(sync.window_event);
         rc.note_window_event(personal);
         client_apply_personal(rc);

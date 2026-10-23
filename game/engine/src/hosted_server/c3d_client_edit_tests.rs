@@ -125,7 +125,7 @@ impl Joined {
                     let mut w = crate::window::WindowMut { inv: &mut self.inv, armour: &mut self.armour, cursor: &mut self.ui.cursor_item, grid: &mut self.ui.grid, container: None };
                     let station = crate::inventory_sync::apply(&mut w, &pkt, &self.reg, &mut crate::use_edits::SentUses::default(), &mut self.inbox.debt, self.rc.inventory_mode).expect("a readable sync");
                     if let Some(station) = station { self.ui.adopt_station(station); }
-                    self.rc.note_initial_personal_window_applied(event);
+                    self.rc.note_initial_personal_window_applied(event, pkt.locks);
                 }
                 InboxItem::Grant(grant) => {
                     crate::remote_entities::apply_inventory_grant(&mut self.inv, &grant, &self.reg);

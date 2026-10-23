@@ -379,6 +379,10 @@ pub struct RemoteClient {
     pub action_journal: Option<crate::action_journal::ActionJournal>,
     /// Set only after this attach's actual initial whole-window Sync succeeds.
     personal_initial_window_applied: bool,
+    /// The lock mask that initial Sync carried (the server copy's locks), kept
+    /// for a Mirror session until its personal state is ready
+    /// ([`Self::take_initial_lock_reconcile`]).
+    initial_window_locks: Option<u64>,
     pub recovery_prepare: Option<crate::action_identity::RecoveryCut>,
     pub recovery_assembly: Option<crate::rebase_assembly::RebaseAssembly>,
     /// Exact receipts wait for the actual ordered world boundary.
@@ -847,6 +851,7 @@ impl RemoteClient {
             inventory_mode: crate::action_identity::InventoryMode::Mirror,
             action_journal: None,
             personal_initial_window_applied: false,
+            initial_window_locks: None,
             recovery_prepare: None,
             recovery_assembly: None,
             action_receipts: std::collections::VecDeque::with_capacity(crate::action_journal::MAX_ACTIONS),
@@ -926,6 +931,7 @@ impl RemoteClient {
             inventory_mode: crate::action_identity::InventoryMode::Mirror,
             action_journal: None,
             personal_initial_window_applied: false,
+            initial_window_locks: None,
             recovery_prepare: None,
             recovery_assembly: None,
             action_receipts: std::collections::VecDeque::with_capacity(crate::action_journal::MAX_ACTIONS),
@@ -1062,6 +1068,7 @@ impl RemoteClient {
                                 {
                                     self.personal_inbox = accept.has_personal_state.then(|| crate::personal_inbox::Inbox::new(accept.action_session, accept.action_life));
                                     self.personal_initial_window_applied = false;
+                                    self.initial_window_locks = None;
                                 }
                                 self.actor_respawns = accept.action_life;
                                 self.received_actor_respawns = accept.action_life;
@@ -1835,6 +1842,11 @@ impl RemoteClient {
     /// move). Never answered. Not native-only: a web joiner's window is
     /// mirrored too.
     ///
+    /// Also dropped before [`Self::personal_ready`]: the join `Replace`
+    /// overwrites the window's contents anyway. Its settings (locks,
+    /// auto-refill) a Mirror client keeps across that `Replace`, so they are
+    /// sent again once it is ready ([`Self::take_initial_lock_reconcile`]).
+    ///
     /// C3b-1 — with a container op, the slots it changed on our side and
     /// our values before it of the player slots it acts on (both empty for
     /// any other op); C3b-fix-a — and our own verdict on it (`client_ok`).
@@ -1866,9 +1878,26 @@ impl RemoteClient {
     pub(crate) fn initial_personal_window_waits(&self) -> bool {
         self.personal_inbox.is_some() && !self.personal_initial_window_applied
     }
-    /// Called only after inventory_sync::apply successfully installs Sync1.
-    pub(crate) fn note_initial_personal_window_applied(&mut self, event: u32) {
-        if event == 1 && self.personal_inbox.is_some() { self.personal_initial_window_applied = true; }
+    /// Called only after inventory_sync::apply successfully installs Sync1;
+    /// `locks` is the lock mask that Sync carried.
+    pub(crate) fn note_initial_personal_window_applied(&mut self, event: u32, locks: u64) {
+        if event == 1 && self.personal_inbox.is_some() {
+            self.personal_initial_window_applied = true;
+            self.initial_window_locks = Some(locks);
+        }
+    }
+    /// A Mirror session whose personal state just became ready: the lock mask
+    /// the server's copy holds (its initial Sync's), once. A Mirror client
+    /// keeps its own locks and auto-refill across that `Replace`, and its
+    /// window ops made before now were never sent, so the caller logs fresh
+    /// ops that bring the server's copy to this window
+    /// (`CraftingUi::log_settings_for_server`). `None` otherwise (a Strict
+    /// session installs the Sync's mask, and logs no op).
+    pub(crate) fn take_initial_lock_reconcile(&mut self) -> Option<u64> {
+        if self.inventory_mode != crate::action_identity::InventoryMode::Mirror || !self.personal_ready() {
+            return None;
+        }
+        self.initial_window_locks.take()
     }
     pub(crate) fn has_personal_state(&self) -> bool {
         self.personal_inbox.is_some()

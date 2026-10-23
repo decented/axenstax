@@ -340,6 +340,31 @@ impl CraftingUi {
         self.ops.take(inv.auto_refill, now)
     }
 
+    /// A Mirror joiner's personal state just became ready
+    /// (`RemoteClient::take_initial_lock_reconcile`): log the ops that bring
+    /// the server's copy, which holds the lock mask `server_locks`, to this
+    /// window's settings. Its auto-refill first (one logged before now was
+    /// never sent), then a `ToggleLock` for each slot whose lock differs. Each
+    /// is logged with the digest the server's copy has after it (this
+    /// window's contents, the locks toggled so far), so the last one's is
+    /// this window's own. Fresh ops, never the dropped ones replayed: those
+    /// were digested against the window before the join `Replace`.
+    pub fn log_settings_for_server(&mut self, inv: &Inventory, armour: &[Option<ArmourItem>; 4], server_locks: u64) {
+        let mut server_copy = inv.clone();
+        let locked: Vec<u32> = (0..36u32).filter(|&i| server_locks & (1u64 << i) != 0).collect();
+        server_copy.set_locked_from(&locked);
+        let digest = self.digest(&server_copy, armour);
+        self.ops.forget_auto_refill();
+        self.ops.sync_auto_refill(inv.auto_refill, || digest);
+        for slot in 0..36 {
+            if server_copy.is_locked(slot) != inv.is_locked(slot) {
+                server_copy.toggle_lock(slot);
+                let digest = self.digest(&server_copy, armour);
+                self.ops.record(crate::protocol::WireWindowOp::Click(WindowClick::ToggleLock { slot }), digest, true);
+            }
+        }
+    }
+
     /// C3a-fix-1 — the window's digest now (`window::digest_parts`), at this
     /// screen's station.
     pub fn digest(&self, inv: &Inventory, armour: &[Option<ArmourItem>; 4]) -> u32 {

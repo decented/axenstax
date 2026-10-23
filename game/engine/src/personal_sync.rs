@@ -436,7 +436,7 @@ mod tests {
             crate::action_identity::InventoryMode::Mirror,
         )
         .unwrap();
-        client.note_initial_personal_window_applied(received.window_event);
+        client.note_initial_personal_window_applied(received.window_event, received.locks);
         client.note_window_event(received.window_event);
         assert_eq!(slot.inventory.slot(4).unwrap().count, 9);
         assert!(!client.initial_personal_window_waits());
