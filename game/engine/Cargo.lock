@@ -1682,6 +1682,7 @@ dependencies = [
 [[package]]
 name = "fray-net"
 version = "0.1.0"
+source = "git+https://github.com/forgesworn/fray?rev=ff6d60331ffd8e3501085765fe597354c0b7056d#ff6d60331ffd8e3501085765fe597354c0b7056d"
 dependencies = [
  "argon2",
  "bytes",
@@ -1707,6 +1708,7 @@ dependencies = [
 [[package]]
 name = "fray-relays"
 version = "0.1.0"
+source = "git+https://github.com/forgesworn/fray?rev=ff6d60331ffd8e3501085765fe597354c0b7056d#ff6d60331ffd8e3501085765fe597354c0b7056d"
 dependencies = [
  "log",
 ]
