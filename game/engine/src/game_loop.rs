@@ -10624,8 +10624,21 @@ impl super::GameState {
             }
         }
 
+        // Tick catch-up policy (`tick_catchup`): never carry more than a few
+        // ticks of debt (a slow tick used to spiral into ever-longer frames),
+        // and stop catching up once this frame has spent its tick-time budget.
+        crate::tick_catchup::note_dropped(
+            crate::tick_catchup::clamp_backlog(&mut self.tick_accumulator, TICK_DURATION),
+            now,
+        );
         let mut ticks_run = 0;
-        while self.tick_accumulator >= TICK_DURATION && ticks_run < 10 {
+        let mut tick_time_spent = Duration::ZERO;
+        while crate::tick_catchup::may_run_another_tick(
+            self.tick_accumulator,
+            TICK_DURATION,
+            ticks_run,
+            tick_time_spent,
+        ) {
             let tick_start = Instant::now();
             // D1 tripwire baseline: the world's sim tally before this logical
             // tick (the client's half here, the lent server's half below).
@@ -10703,6 +10716,7 @@ impl super::GameState {
             // accumulator at zero, so the `>= TICK_DURATION` guard exits the loop.
             self.tick_accumulator = self.tick_accumulator.saturating_sub(TICK_DURATION);
             ticks_run += 1;
+            tick_time_spent += tick_start.elapsed();
         }
 
         // Footstep sounds for all local players
