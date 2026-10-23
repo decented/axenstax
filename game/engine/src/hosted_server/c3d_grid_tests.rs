@@ -129,8 +129,16 @@ impl Joined {
     }
 
     /// One server tick, then the client reads and applies what it was sent,
-    /// in event order (the game loop's `apply_window_inbox`).
+    /// in event order (the game loop's `apply_window_inbox`), then flushes
+    /// its window ops.
     fn pump(&mut self) {
+        self.receive();
+        self.flush();
+    }
+
+    /// One server tick, then the client reads and applies what it was sent
+    /// (the game loop's `network_receive`), sending nothing.
+    fn receive(&mut self) {
         self.hs.tick();
         self.rc.poll();
         let outcomes = std::mem::take(&mut self.rc.pending_outcomes);
@@ -152,12 +160,18 @@ impl Joined {
             }
             self.rc.note_window_event(event);
         }
-        // The game loop's `apply_personal_inbox`, past the applied events.
+        // The game loop's `apply_personal_inbox`, past the applied events:
+        // the personal state may become ready here, and a Mirror window's
+        // settings are logged at once.
         super::tests::client_apply_personal(&mut self.rc);
-        // Mirror: the op log goes out as the game loop sends it, the window's
-        // settings first once its personal state is ready.
+        self.ui.settle_initial_settings(&mut self.rc, &self.inv, &self.armour);
+    }
+
+    /// Mirror: the op log goes out as the game loop sends it with no edit
+    /// waiting (`flush_ops_before_edits`, then `flush_window_ops`).
+    fn flush(&mut self) {
         if self.rc.inventory_mode == InventoryMode::Mirror {
-            if let Some(locks) = self.rc.take_initial_lock_reconcile() { self.ui.log_settings_for_server(&self.inv, &self.armour, locks); }
+            for logged in self.ui.ops.take_before(None) { self.rc.send_window_op(logged); }
             for logged in self.ui.take_ops(&self.inv, &self.armour) { self.rc.send_window_op(logged); }
         }
     }
@@ -404,8 +418,7 @@ fn c3d_grid_refused_return_close_shows_every_held_cell_in_both_modes() {
 /// the server's copy doesn't have the lock yet. A Mirror client keeps its
 /// own locks across that `Replace`, so once its personal state is installed
 /// it logs fresh ops that bring the server's copy to its window's settings
-/// (`RemoteClient::take_initial_lock_reconcile`,
-/// `CraftingUi::log_settings_for_server`): both copies end with the lock,
+/// (`CraftingUi::settle_initial_settings`): both copies end with the lock,
 /// and the two windows agree.
 #[test]
 fn c3d_mirror_lock_toggled_before_the_join_sync_reaches_the_server_once_ready() {
@@ -427,5 +440,84 @@ fn c3d_mirror_lock_toggled_before_the_join_sync_reaches_the_server_once_ready() 
     assert!(j.rc.personal_ready(), "the client installed its personal state");
     assert!(j.inv.is_locked(3), "the Mirror client keeps its lock");
     assert!(j.server_settled().inventory.is_locked(3), "the server's copy has the lock once the client is ready");
+    j.assert_agree("after the join sync");
+}
+
+impl Joined {
+    /// A rejoin heard (nothing applied), its body placed: the client's
+    /// personal state is not ready yet.
+    fn heard(tag: &str, bag: Option<ItemStack>) -> Joined {
+        let mut j = start(tag, InventoryMode::Mirror, Some((&[], bag)));
+        for _ in 0..20 {
+            j.hs.tick();
+            j.rc.poll();
+            if j.rc.player_index().is_some() { break; }
+        }
+        j.place();
+        assert!(!j.rc.personal_ready(), "the personal state isn't installed yet");
+        j
+    }
+
+    /// Receive (no flush) until the personal state is ready, then flush
+    /// through both of the game loop's send paths and let it settle.
+    fn ready_then_flush(&mut self) {
+        for _ in 0..20 {
+            if self.rc.personal_ready() { break; }
+            self.receive();
+        }
+        assert!(self.rc.personal_ready(), "the client installed its personal state");
+        assert_eq!(self.syncs, 1, "the client applied the join sync");
+        self.flush();
+        self.pumps(2);
+    }
+
+    /// Every op the server served matched the client's digest, the first
+    /// (the baseline) included, and none was refused.
+    fn assert_lockstep(&self, what: &str) {
+        let sp = &self.hs.server.players[self.i];
+        assert_eq!(sp.window_events.baseline, Some(true), "{what}: the first op served matched");
+        assert_eq!(sp.possession.window_mismatch, 0, "{what}: no digest mismatch counted");
+        assert_eq!(sp.possession.window_refused, 0, "{what}: no op refused");
+    }
+}
+
+/// Review D1 — a Mirror joiner locks a slot in the frame before its personal
+/// state becomes ready, with no flush between: the op is still waiting when
+/// the state installs. It must never go out (it was digested against the
+/// window before the join `Replace`); the settings logged at the flip bring
+/// the lock to the server's copy exactly once, ahead of everything else,
+/// through both send paths (`flush_ops_before_edits` takes everything first).
+#[test]
+fn c3d_mirror_lock_waiting_when_the_personal_state_installs_reaches_the_server_once() {
+    let mut j = Joined::heard("lock-waiting", None);
+    j.ui.apply_click(&mut j.inv, &mut j.armour, &WindowClick::ToggleLock { slot: 3 }, false, glam::Vec3::ZERO, |_| AIR);
+    j.ready_then_flush();
+    assert!(j.inv.is_locked(3), "the Mirror client keeps its lock");
+    assert!(j.server_settled().inventory.is_locked(3), "the server's copy has the lock, toggled once");
+    j.assert_lockstep("after the join sync");
+    j.assert_agree("after the join sync");
+}
+
+/// Review D1 — two locks, a lock toggled on and off again, and a content op,
+/// all waiting when the personal state installs. The content op is dropped
+/// with the rest (the join `Replace` already undid it on the client); the
+/// server's copy ends with exactly the two locks.
+#[test]
+fn c3d_mirror_two_locks_and_a_content_op_waiting_at_ready_converge() {
+    let mut j = Joined::heard("two-locks", Some(stone(4)));
+    // Before the join sync, the client's own window still holds what it had.
+    j.inv.set_slot(0, Some(stone(2)));
+    for slot in [3, 7, 12, 12] {
+        j.ui.apply_click(&mut j.inv, &mut j.armour, &WindowClick::ToggleLock { slot }, false, glam::Vec3::ZERO, |_| AIR);
+    }
+    j.ui.apply_click(&mut j.inv, &mut j.armour, &WindowClick::Slot { slot: 0, right: false }, false, glam::Vec3::ZERO, |_| AIR);
+    j.ready_then_flush();
+    let locked = |inv: &crate::inventory::Inventory| (0..36).filter(|&i| inv.is_locked(i)).collect::<Vec<_>>();
+    assert_eq!(locked(&j.inv), vec![3, 7], "the client's locks");
+    assert!(j.ui.cursor_item.is_none() && j.inv.slot(0).map(|s| s.count) == Some(4), "the join Replace undid the client's pickup");
+    let sp = j.server_settled();
+    assert_eq!(locked(&sp.inventory), vec![3, 7], "the server's copy holds the same two locks");
+    assert!(sp.cursor.is_none() && sp.inventory.slot(0).map(|s| s.count) == Some(4), "the waiting pickup never reached the server");
+    j.assert_lockstep("after the join sync");
     j.assert_agree("after the join sync");
 }

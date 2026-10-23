@@ -23303,12 +23303,8 @@ impl super::GameState {
                     crate::remote_client::flush_strict_window_ops(client, &mut p.crafting_ui, &p.inventory, &p.armour_slots);
                     Vec::new()
                 } else {
-                    // Mirror: once the personal state is ready, the window's
-                    // settings (kept across the join Replace; ops made before
-                    // now were never sent) go to the server's copy.
-                    if let Some(locks) = client.take_initial_lock_reconcile() {
-                        p.crafting_ui.log_settings_for_server(&p.inventory, &p.armour_slots, locks);
-                    }
+                    // Mirror: the window's settings were logged when the
+                    // personal state became ready (`apply_personal_inbox`).
                     match client.first_carried_stamp() {
                         Some(cut) => p.crafting_ui.ops.take_before(Some(cut)),
                         None => p.crafting_ui.take_ops(&p.inventory, &p.armour_slots),

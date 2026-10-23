@@ -381,7 +381,7 @@ pub struct RemoteClient {
     personal_initial_window_applied: bool,
     /// The lock mask that initial Sync carried (the server copy's locks), kept
     /// for a Mirror session until its personal state is ready
-    /// ([`Self::take_initial_lock_reconcile`]).
+    /// ([`Self::take_initial_settings_reconcile`]).
     initial_window_locks: Option<u64>,
     pub recovery_prepare: Option<crate::action_identity::RecoveryCut>,
     pub recovery_assembly: Option<crate::rebase_assembly::RebaseAssembly>,
@@ -1845,7 +1845,7 @@ impl RemoteClient {
     /// Also dropped before [`Self::personal_ready`]: the join `Replace`
     /// overwrites the window's contents anyway. Its settings (locks,
     /// auto-refill) a Mirror client keeps across that `Replace`, so they are
-    /// sent again once it is ready ([`Self::take_initial_lock_reconcile`]).
+    /// sent again once it is ready ([`Self::take_initial_settings_reconcile`]).
     ///
     /// C3b-1 — with a container op, the slots it changed on our side and
     /// our values before it of the player slots it acts on (both empty for
@@ -1890,10 +1890,10 @@ impl RemoteClient {
     /// the server's copy holds (its initial Sync's), once. A Mirror client
     /// keeps its own locks and auto-refill across that `Replace`, and its
     /// window ops made before now were never sent, so the caller logs fresh
-    /// ops that bring the server's copy to this window
-    /// (`CraftingUi::log_settings_for_server`). `None` otherwise (a Strict
-    /// session installs the Sync's mask, and logs no op).
-    pub(crate) fn take_initial_lock_reconcile(&mut self) -> Option<u64> {
+    /// ops that bring the server's copy to this window's settings, its locks
+    /// and auto-refill (`CraftingUi::settle_initial_settings`). `None`
+    /// otherwise (a Strict session installs the Sync's mask, and logs no op).
+    pub(crate) fn take_initial_settings_reconcile(&mut self) -> Option<u64> {
         if self.inventory_mode != crate::action_identity::InventoryMode::Mirror || !self.personal_ready() {
             return None;
         }

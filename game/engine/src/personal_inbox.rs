@@ -209,6 +209,13 @@ impl crate::GameState {
                 // The actual prebuilt PersonalACK leaves before a quest
                 // receipt releases its flight, feedback or later authority.
                 client.retire_applied_receipts();
+                // The personal state becomes ready only here: a Mirror
+                // window's settings are logged now, with every op logged
+                // before dropped, so nothing made before ready goes out and
+                // they precede any later click. A death fence still pending
+                // on the server drops them, as it drops any Mirror op while
+                // dead.
+                slot.crafting_ui.settle_initial_settings(client, &slot.inventory, &slot.armour_slots);
             }
             Err(error) => client.state = crate::remote_client::ConnectionState::Failed(error),
         }

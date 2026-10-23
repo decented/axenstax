@@ -340,23 +340,33 @@ impl CraftingUi {
         self.ops.take(inv.auto_refill, now)
     }
 
+    /// Called right after the personal inbox is applied, the one place a
+    /// joiner's personal state becomes ready: a Mirror session that just
+    /// became ready logs its window's settings for the server's copy
+    /// ([`Self::log_settings_for_server`]); otherwise nothing.
+    pub fn settle_initial_settings(&mut self, remote: &mut crate::remote_client::RemoteClient, inv: &Inventory, armour: &[Option<ArmourItem>; 4]) {
+        if let Some(locks) = remote.take_initial_settings_reconcile() {
+            self.log_settings_for_server(inv, armour, locks);
+        }
+    }
+
     /// A Mirror joiner's personal state just became ready
-    /// (`RemoteClient::take_initial_lock_reconcile`): log the ops that bring
+    /// (`RemoteClient::take_initial_settings_reconcile`): drop every op still
+    /// waiting (all logged before now, digested against the window before
+    /// the join `Replace`, so none may go out), then log the ops that bring
     /// the server's copy, which holds the lock mask `server_locks`, to this
     /// window's settings. Its auto-refill first (one logged before now was
     /// never sent), then a `ToggleLock` for each slot whose lock differs. Each
     /// is logged with the digest the server's copy has after it (this
     /// window's contents, the locks toggled so far), so the last one's is
-    /// this window's own. Fresh ops, never the dropped ones replayed: those
-    /// were digested against the window before the join `Replace`.
+    /// this window's own.
     pub fn log_settings_for_server(&mut self, inv: &Inventory, armour: &[Option<ArmourItem>; 4], server_locks: u64) {
         let mut server_copy = inv.clone();
-        let locked: Vec<u32> = (0..36u32).filter(|&i| server_locks & (1u64 << i) != 0).collect();
-        server_copy.set_locked_from(&locked);
+        server_copy.set_locked_mask(server_locks);
         let digest = self.digest(&server_copy, armour);
-        self.ops.forget_auto_refill();
+        self.ops.discard();
         self.ops.sync_auto_refill(inv.auto_refill, || digest);
-        for slot in 0..36 {
+        for slot in 0..window::SLOTS {
             if server_copy.is_locked(slot) != inv.is_locked(slot) {
                 server_copy.toggle_lock(slot);
                 let digest = self.digest(&server_copy, armour);
