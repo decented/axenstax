@@ -1371,7 +1371,7 @@ fn handover_checkpoint_refuses_mutable_or_legacy_sidecars_before_ready() {
     assert_eq!(seed[0], 2);
     super::bounded_decode::sidecar(&seed).unwrap();
     let mutable = saved.encode().unwrap();
-    assert_eq!(mutable[0], 3);
+    assert_eq!(mutable[0], 4);
     assert!(super::bounded_decode::sidecar(&mutable).is_err(), "Ready accepted an unbound live v3 that cannot bootstrap");
     let mut legacy = seed; legacy[0] = 1;
     assert!(super::bounded_decode::sidecar(&legacy).is_err(), "private legacy checkpoint bypassed the immutable seed contract");

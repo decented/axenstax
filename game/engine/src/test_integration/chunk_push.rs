@@ -109,7 +109,15 @@ fn a_tick_never_sends_past_the_budget_or_the_credit_window() {
         let mut bytes = 0usize;
         while let Some(pkt) = client.try_recv_from_server() {
             let (t, payload) = protocol::deserialize_header(&pkt).unwrap();
-            if !matches!(t, protocol::PacketType::JoinAccept | protocol::PacketType::Challenge) {
+            // The join handshake is not the push: its JoinAccept, and the
+            // mandatory initial Sync1 and Personal2 every join now sends.
+            if !matches!(
+                t,
+                protocol::PacketType::JoinAccept
+                    | protocol::PacketType::Challenge
+                    | protocol::PacketType::InventorySync
+                    | protocol::PacketType::PersonalSync
+            ) {
                 bytes += pkt.len();
             }
             if t == protocol::PacketType::ChunkData {

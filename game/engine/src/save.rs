@@ -5781,7 +5781,14 @@ mod tests {
         // `dispensers` (2026-07-04) and `rig_clips` (#19, 2026-09-06) appended
         // after `satoshi`: two more 8-byte empty-Vec prefixes to drop before the
         // truncation lands mid-workshop.
-        bytes.truncate(bytes.len() - (8 * 15 + 2 + satoshi_bytes));
+        // `local_personal` and `quest_world` (D2c-3) close the tail: both
+        // `None` here, one tag byte each. Computed, like `satoshi`.
+        let option_tail_bytes = bincode::serialized_size(&(
+            None::<crate::personal_value::LocalPersonalSave>,
+            None::<crate::quest_npcs::QuestWorldSave>,
+        ))
+        .unwrap() as usize;
+        bytes.truncate(bytes.len() - (8 * 15 + 2 + satoshi_bytes + option_tail_bytes));
         assert!(
             deserialize_world_save_tolerant(&bytes).is_err(),
             "mid-field EOF on a `?` tail field must propagate, not be swallowed"
