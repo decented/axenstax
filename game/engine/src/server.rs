@@ -1297,8 +1297,19 @@ impl GameServer {
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(proof) = &personal_proof { proof.confirm_authority_durable(&crate::save::world_dir(&wname))?; }
         let autosave_policy = crate::world_open::AutosavePolicy::Ignore;
+        // A refusal names its cause the way `open_world` would, from the same
+        // read-only checks in its order (never by probing with `open_world`,
+        // which repairs and quarantines on success).
         #[cfg(not(target_arch = "wasm32"))]
-        let autosave_policy = if personal_proof.is_some() || crate::gameplay_attachment::selected_world_local_present(&crate::save::world_dir(&wname))? {
+        let local_present = || crate::gameplay_attachment::selected_world_local_present(&crate::save::world_dir(&wname))
+            .map_err(|why| {
+                let why = crate::save::world_open_refusal(&wname)
+                    .or_else(|| crate::save::peek_world_meta(&wname).err())
+                    .unwrap_or(why);
+                crate::world_open::server_refusal_message(&wname, &why)
+            });
+        #[cfg(not(target_arch = "wasm32"))]
+        let autosave_policy = if personal_proof.is_some() || local_present()? {
             crate::world_open::AutosavePolicy::Prefer
         } else { autosave_policy };
         let opened = crate::world_open::open_world(

@@ -381,21 +381,27 @@ impl crate::server::GameServer {
     }
 }
 
+/// Does the saved `world.dat` carry a world-local personal snapshot? Read-only.
+/// An `Err` uses `open_world`'s wording for the same failure: a read failure is
+/// "world.dat can't be read (…)", a decode failure "world.dat is damaged (…)".
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn selected_world_local_present(directory: &std::path::Path) -> Result<bool, String> {
+    let unreadable = |e: String| format!("world.dat can't be read ({e})");
+    let damaged = |e: String| format!("world.dat is damaged ({e})");
     let path = directory.join("world.dat");
     let bytes = match std::fs::File::open(path) {
         Ok(file) => {
-            crate::save::read_bounded(file, crate::handover::checkpoint::WORLD_DATA_BYTES as u64)?
+            crate::save::read_bounded(file, crate::handover::checkpoint::WORLD_DATA_BYTES as u64)
+                .map_err(unreadable)?
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error.to_string()),
+        Err(error) => return Err(unreadable(error.to_string())),
     };
-    let save = crate::save::read_world_save(&bytes).map_err(|e| e.to_string())?;
+    let save = crate::save::read_world_save(&bytes).map_err(|e| damaged(e.to_string()))?;
     let Some(local) = save.local_personal else {
         return Ok(false);
     };
-    let record = crate::joiner_save::JoinerSave::decode(&local.0)?;
+    let record = crate::joiner_save::JoinerSave::decode(&local.0).map_err(damaged)?;
     Ok(record
         .personal
         .is_some_and(|bound| matches!(bound.binding, GameplayBinding::WorldLocal { .. })))
