@@ -410,11 +410,9 @@ mod tests {
         assert!(!poll.ran(&Promoted::default(), start + LobbyPoll::RETRY * 4), "an idle pass asked for a re-list");
     }
 
-    fn root(tag: &str) -> std::path::PathBuf {
-        let mut r = [0u8; 8];
-        getrandom::fill(&mut r).unwrap();
-        let d = std::env::temp_dir().join(format!("axenstax-promote-{tag}-{}", hex::encode(r)));
-        std::fs::create_dir_all(&d).unwrap();
+    fn root(tag: &str) -> crate::handover::durable::tests::TestDir {
+        let d = crate::handover::durable::tests::TestDir::random(&format!("axenstax-promote-{tag}"));
+        std::fs::create_dir_all(&*d).unwrap();
         d
     }
 
@@ -437,7 +435,6 @@ mod tests {
             assert!(!crate::save::is_arena_folder(&got), "{display} landed on a Trial arena folder: {got}");
         }
         assert!(crate::save::is_reserved_folder("EXP-hash-dash") && crate::save::is_reserved_folder("exp-hash-dash-0000beef"));
-        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// CP19 (CP18 review LOW-1): the move never replaces an existing folder
@@ -452,6 +449,5 @@ mod tests {
         assert!(d.join("from").join("world.dat").exists());
         super::rename_no_replace(&d.join("from"), &d.join("free")).unwrap();
         assert!(d.join("free").join("world.dat").exists());
-        let _ = std::fs::remove_dir_all(&d);
     }
 }

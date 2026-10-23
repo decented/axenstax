@@ -610,35 +610,62 @@ pub(crate) mod tests {
             }
         };
         for kind in [MarkerKind::PendingAbort, MarkerKind::Retired, MarkerKind::Aborted, MarkerKind::Published] {
-            let (s, p) = store("room-kind");
+            let (s, _p) = store("room-kind");
             fill(&s, kind.label(), 63);
             assert_eq!(s.has_room_for_handover(), Ok(true), "63 {} left no room", kind.label());
             fill(&s, &format!("{}-x", kind.label()), 1);
             assert_eq!(s.has_room_for_handover(), Ok(false), "64 {} still left room", kind.label());
-            std::fs::remove_dir_all(p).unwrap();
         }
-        let (s, p) = store("room-entries");
+        let (s, _p) = store("room-entries");
         fill(&s, "other", 253);
         assert_eq!(s.has_room_for_handover(), Ok(true), "253 entries left no room for 3 more");
         fill(&s, "another", 1);
         assert_eq!(s.has_room_for_handover(), Ok(false), "254 entries still left room for 3 more");
-        std::fs::remove_dir_all(p).unwrap();
         // LOW-1: 62 Aborted + one earlier pending record: its promotion
         // takes the 63rd, this handover's abort the 64th: room. 63 Aborted
         // + one pending: no room (the promotion would meet the cap).
-        let (s, p) = store("room-pending");
+        let (s, _p) = store("room-pending");
         fill(&s, MarkerKind::Aborted.label(), 62);
         fill(&s, MarkerKind::PendingAbort.label(), 1);
         assert_eq!(s.has_room_for_handover(), Ok(true));
         fill(&s, "aborted-x", 1);
         assert_eq!(s.has_room_for_handover(), Ok(false), "an earlier pending record's Aborted wasn't reserved");
-        std::fs::remove_dir_all(p).unwrap();
     }
-    pub(crate) fn store(tag: &str) -> (MarkerStore, PathBuf) {
-        let mut random = [0; 16];
-        getrandom::fill(&mut random).unwrap();
-        let p = std::env::temp_dir().join(format!("axe_handover_{tag}_{}", hex::encode(random)));
-        (MarkerStore::new(p.clone()).unwrap(), p)
+    /// A test dir (or planted file) removed on drop, so a panicking test leaks nothing.
+    pub(crate) struct TestDir(PathBuf);
+    impl TestDir {
+        pub(crate) fn new(path: PathBuf) -> Self {
+            Self(path)
+        }
+        /// A fresh random-named path under the temp dir (not yet created).
+        pub(crate) fn random(prefix: &str) -> Self {
+            let mut random = [0; 16];
+            getrandom::fill(&mut random).unwrap();
+            Self(std::env::temp_dir().join(format!("{prefix}_{}", hex::encode(random))))
+        }
+    }
+    impl std::ops::Deref for TestDir {
+        type Target = Path;
+        fn deref(&self) -> &Path {
+            &self.0
+        }
+    }
+    impl AsRef<Path> for TestDir {
+        fn as_ref(&self) -> &Path {
+            &self.0
+        }
+    }
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            // A dir, or a file a test planted in one's place.
+            if std::fs::remove_dir_all(&self.0).is_err() {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+    }
+    pub(crate) fn store(tag: &str) -> (MarkerStore, TestDir) {
+        let dir = TestDir::random(&format!("axe_handover_{tag}"));
+        (MarkerStore::new(dir.to_path_buf()).unwrap(), dir)
     }
     struct Fault(WriteBoundary);
     impl BoundaryObserver for Fault {
@@ -685,14 +712,13 @@ pub(crate) mod tests {
                 s.persist(MarkerKind::Retired, [1; 16], b"different")
                     .is_err()
             );
-            let reopened = MarkerStore::new(p.clone()).unwrap();
+            let reopened = MarkerStore::new(p.to_path_buf()).unwrap();
             assert_eq!(reopened.retirements().unwrap().len(), 1);
-            fs::remove_dir_all(p).unwrap();
         }
     }
     #[test]
     fn handover_durable_cap_refuses_new_record_without_eviction() {
-        let (s, p) = store("cap");
+        let (s, _p) = store("cap");
         for n in 1..=64u8 {
             s.persist(MarkerKind::Retired, [n; 16], b"unchanged old record")
                 .unwrap();
@@ -706,7 +732,6 @@ pub(crate) mod tests {
             s.read(MarkerKind::Retired, [1; 16]).unwrap().unwrap().as_slice(),
             b"unchanged old record"
         );
-        fs::remove_dir_all(p).unwrap();
     }
     #[test]
     fn handover_marker_full_size_kind_id_version_trailing_and_corruption() {
@@ -733,7 +758,7 @@ pub(crate) mod tests {
         let checksum = super::super::hash(&future[..end]);
         future[end..].copy_from_slice(&checksum);
         assert!(decode_marker(&future, MarkerKind::Activated, [1; 16]).is_err());
-        let (s, p) = store("all-kind-corruption");
+        let (s, _p) = store("all-kind-corruption");
         for kind in [
             MarkerKind::Retired,
             MarkerKind::Ready,
@@ -754,11 +779,10 @@ pub(crate) mod tests {
             fs::write(&path, bytes).unwrap();
             assert!(s.read(kind, id).is_err());
         }
-        fs::remove_dir_all(p).unwrap();
     }
     #[test]
     fn handover_durable_read_distinguishes_missing_empty_oversize() {
-        let (s, p) = store("read");
+        let (s, _p) = store("read");
         assert_eq!(s.read(MarkerKind::Retired, [1; 16]).unwrap(), None);
         fs::write(s.path(MarkerKind::Retired, [1; 16]), []).unwrap();
         assert!(s.read(MarkerKind::Retired, [1; 16]).is_err());
@@ -768,7 +792,6 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert!(s.retirements().is_err());
-        fs::remove_dir_all(p).unwrap();
     }
 
     /// CP11: an undecodable "Committed published" record (garbage, empty or
@@ -786,7 +809,7 @@ pub(crate) mod tests {
                 Ok(())
             }
         }
-        let (s, p) = store("published-replace");
+        let (s, _p) = store("published-replace");
         let id = [7; 16];
         let payload = b"committed published".to_vec();
         for planted in [b"garbage".to_vec(), Vec::new(), vec![0xAB; MARKER_LIMIT + 1]] {
@@ -800,14 +823,13 @@ pub(crate) mod tests {
         fs::remove_file(s.path(MarkerKind::Published, id)).unwrap();
         fs::create_dir(s.path(MarkerKind::Published, id)).unwrap();
         assert!(s.persist(MarkerKind::Published, id, &payload).is_err(), "a directory at the record's path was replaced");
-        fs::remove_dir_all(p).unwrap();
     }
 
     /// CP16 (CP14 review LOW-3): the bounded reads fill one buffer sized
     /// before the read (never reallocated); a stale temp is read zeroised.
     #[test]
     fn handover_bounded_reads_never_reallocate() {
-        let (s, p) = store("zeroized");
+        let (s, _p) = store("zeroized");
         let id = [10; 16];
         s.persist(MarkerKind::Ready, id, b"ready record").unwrap();
         let path = s.path(MarkerKind::Ready, id);
@@ -819,14 +841,13 @@ pub(crate) mod tests {
         let stale: zeroize::Zeroizing<Vec<u8>> = read_stale_temp(&temp, 10).unwrap();
         assert_eq!(stale.capacity(), 11, "the stale-temp read reallocated its buffer");
         assert!(read_stale_temp(&temp, 9).is_none(), "a temp longer than its metadata said was accepted");
-        fs::remove_dir_all(p).unwrap();
     }
 
     /// CP16 (CP14 review LOW-2): the start-up sweep removes every regular
     /// `*.tmp-*` and leaves records, and anything that isn't a regular file.
     #[test]
     fn handover_start_up_sweep_removes_stale_temps_only() {
-        let (s, p) = store("sweep");
+        let (s, _p) = store("sweep");
         let id = [9; 16];
         s.persist(MarkerKind::Ready, id, b"ready record").unwrap();
         let retired = s.directory.join(format!("{}.tmp-{}", MarkerKind::Retired.label(), hex::encode(id)));
@@ -839,20 +860,18 @@ pub(crate) mod tests {
         assert!(!retired.exists() && !prepared.exists(), "a stale temp survived the sweep");
         assert!(odd.is_dir(), "the sweep removed something that isn't a regular file");
         assert_eq!(s.read(MarkerKind::Ready, id).unwrap().unwrap().as_slice(), b"ready record");
-        fs::remove_dir_all(p).unwrap();
     }
 
     /// CP11: a stale temp larger than any record is never compared (its
     /// length differs) and is replaced; the record lands.
     #[test]
     fn handover_oversized_stale_temp_is_replaced_and_the_record_lands() {
-        let (s, p) = store("stale-oversized");
+        let (s, _p) = store("stale-oversized");
         let id = [8; 16];
         let temp = s.directory.join(format!("{}.tmp-{}", MarkerKind::Ready.label(), hex::encode(id)));
         fs::write(&temp, vec![0xCD; MARKER_LIMIT * 4]).unwrap();
         s.persist(MarkerKind::Ready, id, b"ready record").unwrap();
         assert_eq!(s.read(MarkerKind::Ready, id).unwrap().unwrap().as_slice(), b"ready record");
         assert!(!temp.exists(), "the stale temp outlived the write");
-        fs::remove_dir_all(p).unwrap();
     }
 }

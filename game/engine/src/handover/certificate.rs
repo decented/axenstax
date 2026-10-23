@@ -355,7 +355,7 @@ pub(crate) mod tests {
             100,
         )
         .unwrap();
-        let (store, dir) = crate::handover::durable::tests::store("prefix");
+        let (store, _dir) = crate::handover::durable::tests::store("prefix");
         p.persist(&store, [1; 16]).unwrap();
         let old = p.clone();
         let mut next = c;
@@ -383,7 +383,6 @@ pub(crate) mod tests {
             Prefix::restore(&bytes).unwrap().checkpoint(),
             p.checkpoint()
         );
-        std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
     fn handover_core_checked_time_and_binding_boundaries() {

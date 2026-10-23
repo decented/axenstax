@@ -464,9 +464,7 @@ pub(crate) mod tests {
     /// only `handover/`, and notices the folder removed under it.
     #[test]
     fn handover_lock_on_an_import_never_recreates_a_vanished_folder() {
-        let mut r = [0u8; 8];
-        getrandom::fill(&mut r).unwrap();
-        let base = std::env::temp_dir().join(format!("axenstax-lock-vanish-{}", hex::encode(r)));
+        let base = crate::handover::durable::tests::TestDir::random("axenstax-lock-vanish");
         let gone = base.join("import").join("working");
         assert!(matches!(acquire_existing(&gone), Err(LockError::Missing)));
         assert!(!base.join("import").exists(), "taking the lock recreated a vanished import folder");
@@ -476,7 +474,6 @@ pub(crate) mod tests {
         std::fs::remove_dir_all(base.join("import")).unwrap();
         assert!(!lock.still_at(&gone), "a folder removed under the lock still reads as there");
         drop(lock);
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     const SWEEP_ENV: &str = "AXENSTAX_HANDOVER_SWEEP_CHILD";
@@ -579,13 +576,11 @@ pub(crate) mod tests {
     /// the process hung. Now it returns, and the lock is released.
     #[test]
     fn handover_lock_held_here_survives_the_holder_letting_go_meanwhile() {
-        let mut r = [0u8; 8];
-        getrandom::fill(&mut r).unwrap();
-        let world = std::env::temp_dir().join(format!("axenstax-lock-heldhere-{}", hex::encode(r)));
+        let world = crate::handover::durable::tests::TestDir::random("axenstax-lock-heldhere");
         std::fs::create_dir_all(&world).unwrap();
         let lock = acquire(&world).expect("the lock");
         let (done_tx, done_rx) = std::sync::mpsc::channel();
-        let probe_world = world.clone();
+        let probe_world = world.to_path_buf();
         std::thread::spawn(move || {
             let mut holder = Some(lock);
             UNDER_HELD.with(|h| {
@@ -615,14 +610,11 @@ pub(crate) mod tests {
         let f = File::open(lock_path(&world)).unwrap();
         assert!(f.try_lock().is_ok(), "the released lock stayed held");
         drop(f);
-        let _ = std::fs::remove_dir_all(&world);
     }
 
     #[test]
     fn handover_lock_another_process_holds_until_it_dies() {
-        let mut r = [0u8; 8];
-        getrandom::fill(&mut r).unwrap();
-        let tmp = std::env::temp_dir().join(format!("axenstax-lock-{}", hex::encode(r)));
+        let tmp = crate::handover::durable::tests::TestDir::random("axenstax-lock");
         let world = tmp.join("w");
         std::fs::create_dir_all(&world).unwrap();
         assert!(!held_elsewhere(&world), "no lock file is no holder");
@@ -641,7 +633,6 @@ pub(crate) mod tests {
         let f = File::open(lock_path(&world)).unwrap();
         assert!(f.try_lock().is_ok(), "dropping the last guard didn't release the lock");
         drop(f);
-        let _ = std::fs::remove_dir_all(&tmp);
     }
     /// CP18 (CP17 review MEDIUM-1): on a file system with no file locking
     /// (any lock error but "would block") a world that has a `.live` still
@@ -649,9 +640,7 @@ pub(crate) mod tests {
     /// handover is refused (`acquire` says `Unsupported`).
     #[test]
     fn handover_lock_no_file_locking_never_makes_a_world_unopenable() {
-        let mut r = [0u8; 8];
-        getrandom::fill(&mut r).unwrap();
-        let world = std::env::temp_dir().join(format!("axenstax-nolock-{}", hex::encode(r)));
+        let world = crate::handover::durable::tests::TestDir::random("axenstax-nolock");
         std::fs::create_dir_all(&world).unwrap();
         drop(acquire(&world).expect("an ordinary lock"));
         assert!(world.join("handover").join(LOCK_FILE).exists());
@@ -661,6 +650,5 @@ pub(crate) mod tests {
         assert_eq!(acquire(&world).err(), Some(LockError::Unsupported), "a handover could start with no file lock");
         assert!(matches!(unless_elsewhere(&world, "test"), Some(None)), "the start-up work was skipped");
         NO_LOCKING.with(|c| c.set(false));
-        let _ = std::fs::remove_dir_all(&world);
     }
 }

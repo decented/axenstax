@@ -142,9 +142,9 @@ mod tests {
         Err(io::Error::from_raw_os_error(libc::EACCES))
     }
 
-    fn dir(tag: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("axenstax-rename-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
+    fn dir(tag: &str) -> crate::handover::durable::tests::TestDir {
+        let d = crate::handover::durable::tests::TestDir::new(std::env::temp_dir().join(format!("axenstax-rename-{tag}-{}", std::process::id())));
+        let _ = std::fs::remove_dir_all(&*d);
         std::fs::create_dir_all(d.join("from")).unwrap();
         std::fs::write(d.join("from/world.dat"), b"w").unwrap();
         d
@@ -172,7 +172,6 @@ mod tests {
             at = to;
         }
         assert!(no_replace_with(&at, &d.join("free"), eacces).is_err() && !d.join("free").exists(), "EACCES fell back");
-        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
@@ -192,6 +191,5 @@ mod tests {
         // The real call on this filesystem never replaces an empty folder.
         assert!(no_replace(&d.join("to"), &d.join("taken")).is_err());
         no_replace(&d.join("to"), &d.join("free")).unwrap();
-        let _ = std::fs::remove_dir_all(&d);
     }
 }

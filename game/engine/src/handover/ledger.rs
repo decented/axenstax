@@ -293,7 +293,7 @@ mod tests {
     #[test]
     fn handover_ledger_another_process_cannot_overwrite_a_pending_append() {
         use std::io::BufRead;
-        let ledger = temp("process");
+        let (ledger, _dir) = temp("process");
         ledger.append(entry(1, RecordKind::Receipt)).unwrap();
         let before = std::fs::read(ledger.path()).unwrap();
         let mut child = Child(std::process::Command::new(std::env::current_exe().unwrap())
@@ -330,7 +330,7 @@ mod tests {
     /// CP13b (CP13 review MEDIUM-1): the append bound is the read bound.
     #[test]
     fn handover_ledger_refuses_entry_8193_before_its_record_and_reports_headroom() {
-        let l = temp("full");
+        let (l, _dir) = temp("full");
         std::fs::create_dir_all(l.path().parent().unwrap()).unwrap();
         std::fs::write(l.path(), entry(1, RecordKind::Retirement).line().repeat(MAX_ENTRIES - 2)).unwrap();
         assert!(l.has_room(2) && !l.has_room(3), "the headroom check is off");
@@ -341,10 +341,10 @@ mod tests {
         assert_eq!(l.entries().unwrap().len(), MAX_ENTRIES, "the full ledger no longer reads back");
         assert!(l.lists(&entry(3, RecordKind::Abort)));
     }
-    fn temp(tag: &str) -> Ledger {
-        let dir = std::env::temp_dir().join(format!("axenstax-ledger-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        Ledger::at(dir.join("handover").join("ledger"))
+    fn temp(tag: &str) -> (Ledger, crate::handover::durable::tests::TestDir) {
+        let dir = crate::handover::durable::tests::TestDir::new(std::env::temp_dir().join(format!("axenstax-ledger-{tag}-{}", std::process::id())));
+        let _ = std::fs::remove_dir_all(&*dir);
+        (Ledger::at(dir.join("handover").join("ledger")), dir)
     }
     fn entry(n: u8, kind: RecordKind) -> Entry {
         Entry::of([n; 16], Role::Source, kind, &[n; 7])
@@ -354,7 +354,7 @@ mod tests {
     /// next append stays whole; the file is 0600.
     #[test]
     fn handover_ledger_a_damaged_line_skips_only_that_entry() {
-        let l = temp("damaged");
+        let (l, _dir) = temp("damaged");
         for n in 1..=3 {
             l.append(entry(n, RecordKind::Retirement)).unwrap();
         }
@@ -383,7 +383,7 @@ mod tests {
     /// append is refused.
     #[test]
     fn handover_ledger_past_its_bound_fails_closed() {
-        let l = temp("bound");
+        let (l, _dir) = temp("bound");
         l.append(entry(1, RecordKind::Retirement)).unwrap();
         let mut bytes = std::fs::read(l.path()).unwrap();
         bytes.resize(MAX_BYTES as usize + 1, b'\n');

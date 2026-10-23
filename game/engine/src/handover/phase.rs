@@ -1659,8 +1659,8 @@ mod tests {
             let stored = publish(relay.url(), &pe, &vp, None).await.unwrap();
             assert_eq!(stored.event_hash(), p.event_hash());
             assert_eq!(relay.queries(), queries + 1, "no independent readback subscription");
-            let (store, dir) = crate::handover::durable::tests::store("fixture-source");
-            let (receiver_store, receiver_dir) = crate::handover::durable::tests::store("fixture-receiver");
+            let (store, _dir) = crate::handover::durable::tests::store("fixture-source");
+            let (receiver_store, _receiver_dir) = crate::handover::durable::tests::store("fixture-receiver");
             let mut source = Source::frozen(c.clone(), &Authority::root(&root, c.lineage).unwrap()).unwrap();
             source.prepared(&p, &stored).unwrap();
             let mut receiver = Receiver::checkpoint_ready(&receiver_store, &c, &ready, [8; 16], &root, 100).unwrap();
@@ -1698,8 +1698,6 @@ mod tests {
             assert!(receiver.activate(&receiver_store, &cv, &witnessed).unwrap());
             assert!(receiver.gameplay_admitted());
             assert_eq!(relay.stored().len(), 2, "exactly Prepared and Committed are stored");
-            std::fs::remove_dir_all(dir).unwrap();
-            std::fs::remove_dir_all(receiver_dir).unwrap();
         });
     }
 
@@ -1740,9 +1738,7 @@ mod tests {
             let (p, _, ce, pe) = pair(&a, &b, &aa, &ab, &c, &root).await;
             (root, c, b, ready, pe, ce, p, a.public_key().to_bech32().unwrap())
         });
-        let mut random = [0u8; 8];
-        getrandom::fill(&mut random).unwrap();
-        let base = std::env::temp_dir().join(format!("axe_handover_expired_{}", hex::encode(random)));
+        let base = crate::handover::durable::tests::TestDir::random("axe_handover_expired");
         let imports = base.join("imports");
         let working = imports.join(format!("handover-w-{}", hex::encode(c.transfer))).join("working");
         std::fs::create_dir_all(&working).unwrap();
@@ -1772,7 +1768,6 @@ mod tests {
         }
         assert!(Receiver::restart(&store, c.transfer).unwrap().unwrap().gameplay_admitted());
         assert!(awaiting_statuses(&imports.join("no-worlds"), &imports, &crate::handover::ledger::Ledger::install()).is_empty(), "an activated import still shows as awaiting");
-        std::fs::remove_dir_all(base).unwrap();
     }
 
     /// The recipient's readback fixture: a root naming `relay`, the
@@ -1985,8 +1980,8 @@ mod tests {
             else {
                 panic!("Commit")
             };
-            let (store, dir) = crate::handover::durable::tests::store("source");
-            let (receiver_store, receiver_dir) = crate::handover::durable::tests::store("receiver");
+            let (store, _dir) = crate::handover::durable::tests::store("source");
+            let (receiver_store, _receiver_dir) = crate::handover::durable::tests::store("receiver");
             let mut source =
                 Source::frozen(c.clone(), &Authority::root(&root, c.lineage).unwrap()).unwrap();
             assert!(!source.gameplay_admitted());
@@ -2007,7 +2002,7 @@ mod tests {
             let bearer = crate::handover::live::bearer::Bearer::new([1; 16]);
             // CP13: the ledger entry comes BEFORE the record it authorises. A
             // ledger that can't be written leaves no record and fails the step.
-            let blocker = std::env::temp_dir().join(format!("axenstax-ledger-blocked-{}", std::process::id()));
+            let blocker = crate::handover::durable::tests::TestDir::new(std::env::temp_dir().join(format!("axenstax-ledger-blocked-{}", std::process::id())));
             std::fs::write(&blocker, b"a file, not a folder").unwrap();
             let blocked = crate::handover::ledger::Ledger::at(blocker.join("ledger"));
             assert!(receiver.prepared(&receiver_store, &blocked, &p, PreparedReceipt { event: &p_event, root: &root, bearer: &bearer }).is_err(), "a failed ledger write still stored the receipt");
@@ -2106,8 +2101,6 @@ mod tests {
                     .unwrap()
                     .gameplay_admitted()
             );
-            std::fs::remove_dir_all(dir).unwrap();
-            std::fs::remove_dir_all(receiver_dir).unwrap();
         });
     }
     #[test]
@@ -2154,7 +2147,7 @@ mod tests {
             )
             .await
             .unwrap();
-            let (store, dir) = crate::handover::durable::tests::store("handback");
+            let (store, _dir) = crate::handover::durable::tests::store("handback");
             let capability = crypto::root_capability(&root, &[1; 16]).unwrap();
             let old = Authority::root(&root, c.lineage).unwrap();
             let (p1, proof1, event1, pe1) = pair(&a, &b, &aa, &ab, &c, &root).await;
@@ -2241,7 +2234,6 @@ mod tests {
             let mut wrong = handback;
             wrong.committed = [99; 32];
             assert!(Source::restart(&store, &wrong).is_err());
-            std::fs::remove_dir_all(dir).unwrap();
         });
     }
     #[test]
@@ -2326,7 +2318,6 @@ mod tests {
                 Source::restart(&store, &authority).is_err(),
                 "corrupted retirement must fail closed, never look absent"
             );
-            std::fs::remove_dir_all(dir).unwrap();
         });
     }
     #[test]
@@ -2336,13 +2327,12 @@ mod tests {
             Source::frozen(c.clone(), &Authority::root(&root, c.lineage).unwrap()).unwrap();
         source.abort().unwrap();
         assert!(source.gameplay_admitted());
-        let (store, dir) = crate::handover::durable::tests::store("corrupt");
+        let (store, _dir) = crate::handover::durable::tests::store("corrupt");
         store
             .persist(MarkerKind::Retired, c.lineage, b"broken")
             .unwrap();
         assert!(Source::restart(&store, &Authority::root(&root, c.lineage).unwrap()).is_err());
         assert!(store.retirements().is_ok());
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// CP13b fixture: a root on `relay`, the core, and its verified
@@ -2469,9 +2459,7 @@ mod tests {
         let relay = crate::handover::relay_fixture::Relay::start();
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let e = rt.block_on(ends(&relay));
-        let mut random = [0u8; 8];
-        getrandom::fill(&mut random).unwrap();
-        let base = std::env::temp_dir().join(format!("axe_handover_both_{}", hex::encode(random)));
+        let base = crate::handover::durable::tests::TestDir::random("axe_handover_both");
         let imports = base.join("imports");
         let working = imports.join(format!("handover-w-{}", hex::encode(e.c.transfer))).join("working");
         std::fs::create_dir_all(&working).unwrap();
@@ -2497,7 +2485,6 @@ mod tests {
         }
         assert_eq!(store.read(MarkerKind::Quarantined, e.c.transfer).unwrap(), None, "the Aborted quarantined beside the Committed");
         assert!(resumer.notices().contains(&crate::handover::live::copy::WORLD_IN_TWO_PLACES.to_owned()), "no player-visible line: {:?}", resumer.notices());
-        std::fs::remove_dir_all(base).unwrap();
     }
 
     /// CP15 (CP13b review LOW-6): a damaged abort record of another
@@ -2524,12 +2511,11 @@ mod tests {
     /// An import past its PreparedAck whose working world is a real saved
     /// world named `name` (written under the test's worlds root, then moved
     /// into the import); its Committed waits on `relay`.
-    fn prepared_world_import(tag: &str, name: &str, relay: &crate::handover::relay_fixture::Relay) -> (std::path::PathBuf, std::path::PathBuf, crate::handover::Id) {
+    fn prepared_world_import(tag: &str, name: &str, relay: &crate::handover::relay_fixture::Relay) -> (crate::handover::durable::tests::TestDir, std::path::PathBuf, std::path::PathBuf, crate::handover::Id) {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let e = rt.block_on(ends(relay));
-        let mut random = [0u8; 8];
-        getrandom::fill(&mut random).unwrap();
-        let imports = std::env::temp_dir().join(format!("axe_handover_promote_{tag}_{}", hex::encode(random))).join("imports");
+        let base = crate::handover::durable::tests::TestDir::random(&format!("axe_handover_promote_{tag}"));
+        let imports = base.join("imports");
         let import = imports.join(format!("handover-w-{}", hex::encode(e.c.transfer)));
         std::fs::create_dir_all(&import).unwrap();
         crate::save::write_world_folder("arriving", &crate::save::WorldMeta::new(name), &crate::save::minimal_world_save_for_tests(7), &crate::world::World::new()).unwrap();
@@ -2540,7 +2526,7 @@ mod tests {
         let bearer = crate::handover::live::bearer::Bearer::new([1; 16]);
         receiver.prepared(&store, &crate::handover::ledger::Ledger::install(), &e.p, PreparedReceipt { event: &e.pe, root: &e.root, bearer: &bearer }).unwrap();
         relay.insert(e.ce.clone());
-        (imports, working, e.c.transfer)
+        (base, imports, working, e.c.transfer)
     }
 
     /// The wait for Committed, run to Activated.
@@ -2579,7 +2565,7 @@ mod tests {
         use crate::handover::live::{promote::promote_activated_imports, world_lock};
         let _root = crate::save::WorldsRootGuard::new("promote-once");
         let relay = crate::handover::relay_fixture::Relay::start();
-        let (imports, working, t) = prepared_world_import("once", "Harbour Town", &relay);
+        let (_base, imports, working, t) = prepared_world_import("once", "Harbour Town", &relay);
         let root = crate::save::worlds_root();
         let before = promote_activated_imports(&imports, &root);
         assert!(before.moved.is_empty() && working.exists(), "an import was moved before it was Activated");
@@ -2626,7 +2612,6 @@ mod tests {
         assert_eq!(crate::save::list_world_entries().len(), 1, "the refused fork created another world");
         assert_eq!(std::fs::read(&world_file).unwrap(), before_world, "the refused fork changed the imported world");
         assert_eq!(std::fs::read(&activated_file).unwrap(), before_activation, "the refused fork changed activation");
-        let _ = std::fs::remove_dir_all(imports.parent().unwrap());
     }
 
     /// CP22 (CP21 review MEDIUM-1, DECIDED): an Activated import that stays
@@ -2639,7 +2624,7 @@ mod tests {
         use crate::handover::live::promote::{activations_on_this_thread, promote_activated_imports, LobbyPoll};
         let _root = crate::save::WorldsRootGuard::new("promote-stuck");
         let relay = crate::handover::relay_fixture::Relay::start();
-        let (imports, working, t) = prepared_world_import("stuck", "Still Pond", &relay);
+        let (_base, imports, working, t) = prepared_world_import("stuck", "Still Pond", &relay);
         activate_import(&imports, &working, t);
         assert_eq!(promote_until_moved(&imports).moved, vec!["still_pond".to_owned()]);
         let root = crate::save::worlds_root();
@@ -2662,7 +2647,6 @@ mod tests {
         }
         assert_eq!(passes, 0, "a stuck Activated import ran a promotion pass on {passes} of 30 lobby frames");
         assert!(working.join("handover").exists(), "the twin was touched");
-        let _ = std::fs::remove_dir_all(imports.parent().unwrap());
     }
 
     /// CP18: a worlds folder on another drive (the rename fails with
@@ -2675,7 +2659,7 @@ mod tests {
     fn handover_awaiting_read_never_rewrites_an_activated_record() {
         let _root = crate::save::WorldsRootGuard::new("awaiting-read-only");
         let relay = crate::handover::relay_fixture::Relay::start();
-        let (imports, working, t) = prepared_world_import("read-only", "Quiet Bay", &relay);
+        let (_base, imports, working, t) = prepared_world_import("read-only", "Quiet Bay", &relay);
         activate_import(&imports, &working, t);
         let record = crate::handover::live::authority::dir(&working).join(format!("activated-{}.dat", hex::encode(t)));
         let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
@@ -2700,7 +2684,7 @@ mod tests {
         use crate::handover::live::{copy, promote::{promote_activated_imports, promote_with}, world_lock};
         let _root = crate::save::WorldsRootGuard::new("promote-refused");
         let relay = crate::handover::relay_fixture::Relay::start();
-        let (imports, working, t) = prepared_world_import("refused", "Far Field", &relay);
+        let (_base, imports, working, t) = prepared_world_import("refused", "Far Field", &relay);
         activate_import(&imports, &working, t);
         let root = crate::save::worlds_root();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -2753,7 +2737,6 @@ mod tests {
         assert!(damaged.moved.is_empty() && working.exists(), "an import with a damaged record moved");
         std::fs::write(&record, &intact).unwrap();
         assert_eq!(promote_until_moved(&imports).moved, vec!["far_field".to_owned()]);
-        let _ = std::fs::remove_dir_all(imports.parent().unwrap());
     }
 
     /// Promote through the given boundaries until something leaves
@@ -2785,7 +2768,7 @@ mod tests {
     fn handover_promote_removes_the_import_folder_only_once_the_move_is_durable() {
         let _root = crate::save::WorldsRootGuard::new("promote-durable");
         let relay = crate::handover::relay_fixture::Relay::start();
-        let (imports, working, t) = prepared_world_import("durable", "Quay Side", &relay);
+        let (_base, imports, working, t) = prepared_world_import("durable", "Quay Side", &relay);
         let import = working.parent().unwrap().to_path_buf();
         leftovers(&import);
         activate_import(&imports, &working, t);
@@ -2797,7 +2780,6 @@ mod tests {
         assert_eq!(next, Default::default(), "the next pass moved something");
         assert!(!import.exists(), "the moved import's leftovers stayed once the move was durable");
         assert_eq!(crate::save::list_world_entries().len(), 1, "the handed-over world is listed twice");
-        let _ = std::fs::remove_dir_all(imports.parent().unwrap());
     }
 
     /// CP19: a crash between the rename and the removal (the rename landed,
@@ -2809,7 +2791,7 @@ mod tests {
     fn handover_promote_removes_a_crashed_moves_leftovers_and_nothing_else() {
         let _root = crate::save::WorldsRootGuard::new("promote-crash");
         let relay = crate::handover::relay_fixture::Relay::start();
-        let (imports, working, t) = prepared_world_import("crash", "Mill Pond", &relay);
+        let (_base, imports, working, t) = prepared_world_import("crash", "Mill Pond", &relay);
         let import = working.parent().unwrap().to_path_buf();
         leftovers(&import);
         let receiving = imports.join(format!("handover-w-{}", hex::encode([0x5a_u8; 16])));
@@ -2825,7 +2807,6 @@ mod tests {
         let listed = crate::save::list_world_entries();
         assert_eq!(listed.len(), 1, "the world list: {:?}", listed.iter().map(|e| &e.folder_name).collect::<Vec<_>>());
         assert_eq!(crate::save::world_open_refusal(&listed[0].folder_name), None);
-        let _ = std::fs::remove_dir_all(imports.parent().unwrap());
     }
 
     /// CP19 (CP18 review MEDIUM-3): a handed-over world called "The
@@ -2835,13 +2816,12 @@ mod tests {
     fn handover_promote_a_world_named_the_workshop_gets_its_own_folder() {
         let _root = crate::save::WorldsRootGuard::new("promote-workshop");
         let relay = crate::handover::relay_fixture::Relay::start();
-        let (imports, working, t) = prepared_world_import("workshop", "The Workshop", &relay);
+        let (_base, imports, working, t) = prepared_world_import("workshop", "The Workshop", &relay);
         activate_import(&imports, &working, t);
         assert_eq!(promote_until_moved(&imports).moved, vec!["the_workshop_2".to_owned()]);
         let root = crate::save::worlds_root();
         assert!(!root.join(crate::workshop::WORKSHOP_FOLDER).exists(), "the handed-over world landed on the Workshop folder");
         let listed = crate::save::list_world_entries();
         assert_eq!(listed.iter().map(|e| e.folder_name.as_str()).collect::<Vec<_>>(), vec!["the_workshop_2"]);
-        let _ = std::fs::remove_dir_all(imports.parent().unwrap());
     }
 }

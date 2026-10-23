@@ -157,12 +157,12 @@ fn read_bounded(path: &Path) -> Option<zeroize::Zeroizing<Vec<u8>>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::handover::durable::MarkerKind;
+    use crate::handover::durable::{tests::TestDir, MarkerKind};
 
-    fn world(tag: &str) -> PathBuf {
-        let p = std::env::temp_dir().join(format!("handover-authority-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&p);
-        std::fs::create_dir_all(&p).unwrap();
+    fn world(tag: &str) -> TestDir {
+        let p = TestDir::new(std::env::temp_dir().join(format!("handover-authority-{tag}-{}", std::process::id())));
+        let _ = std::fs::remove_dir_all(&*p);
+        std::fs::create_dir_all(&*p).unwrap();
         p
     }
 
@@ -263,7 +263,8 @@ mod tests {
         // CP14 (CP10 review LOW-3): the right label over a truncated
         // payload refuses (the full parse, not the label, decides). A whole
         // Activated record opening is pinned end to end in handover_live.
-        let a = store(&world("guard-activated")).unwrap();
+        let a_world = world("guard-activated");
+        let a = store(&a_world).unwrap();
         let mut v = Vec::new();
         crate::handover::codec::frame(&mut v, b"AxeNStax/handover/activated/v2");
         a.persist(MarkerKind::Activated, [5; 16], &v).unwrap();
@@ -274,7 +275,6 @@ mod tests {
         );
         a.persist(MarkerKind::Quarantined, [5; 16], b"quarantined").unwrap();
         assert_eq!(open_guard(a.directory().parent().unwrap()).unwrap_err().0, crate::handover::live::copy::NOT_ACTIVATED);
-        let _ = std::fs::remove_dir_all(a.directory().parent().unwrap());
         s.persist(MarkerKind::Retired, [4; 16], b"any retirement, even one that doesn't decode").unwrap();
         assert_eq!(open_guard(&w).unwrap_err().0, crate::handover::live::copy::AUTHORITY_UNREADABLE, "a retired world opened");
         #[cfg(unix)]
@@ -290,11 +290,8 @@ mod tests {
         let r = world("guard-ro");
         assert!(open_guard(&r).is_ok());
         assert!(!dir(&r).exists(), "the guard created the authority directory");
-        let _ = std::fs::remove_dir_all(&r);
         let v = world("guard-file");
         std::fs::write(dir(&v), b"not a directory").unwrap();
         assert_eq!(open_guard(&v).unwrap_err().0, crate::handover::live::copy::AUTHORITY_UNREADABLE);
-        let _ = std::fs::remove_dir_all(&w);
-        let _ = std::fs::remove_dir_all(&v);
     }
 }
