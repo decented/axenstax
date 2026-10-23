@@ -49,7 +49,28 @@ struct Row {
     piston_us: f64,
     hopper_us: f64,
     collect_pistons_us: f64,
+    /// The pre-index full-cell scan, timed in the same process for comparison.
+    legacy_scan_us: f64,
     chunks: usize,
+}
+
+/// The piston / hopper scan as it was before the per-chunk counters: read
+/// every cell of every loaded chunk. Kept here only to time against.
+fn legacy_full_scan(world: &World) -> usize {
+    let mut found = 0;
+    for (_, chunk) in world.iter_chunks() {
+        for ly in 0..CHUNK_SIZE {
+            for lz in 0..CHUNK_SIZE {
+                for lx in 0..CHUNK_SIZE {
+                    let b = chunk.get(lx, ly, lz);
+                    if b == block::PISTON || b == block::STICKY_PISTON || b == block::HOPPER {
+                        found += 1;
+                    }
+                }
+            }
+        }
+    }
+    found
 }
 
 fn run(rd: i32) -> Row {
@@ -114,6 +135,11 @@ fn run(rd: i32) -> Row {
     let collect = t.elapsed() / SCAN_REPEATS;
     let t = Instant::now();
     for _ in 0..SCAN_REPEATS {
+        std::hint::black_box(legacy_full_scan(&world));
+    }
+    let legacy = t.elapsed() / SCAN_REPEATS;
+    let t = Instant::now();
+    for _ in 0..SCAN_REPEATS {
         std::hint::black_box(crate::piston::tick_pistons(&mut world));
     }
     let pistons = t.elapsed() / SCAN_REPEATS;
@@ -136,6 +162,7 @@ fn run(rd: i32) -> Row {
         piston_us: pistons.as_secs_f64() * 1e6,
         hopper_us: hoppers.as_secs_f64() * 1e6,
         collect_pistons_us: collect.as_secs_f64() * 1e6,
+        legacy_scan_us: legacy.as_secs_f64() * 1e6,
         chunks: world.iter_chunks().count(),
     }
 }
@@ -151,6 +178,7 @@ fn world_cpu_bench() {
         "rd", "cols", "chunks", "gen us/col", "light us/c", "mesh us/sec", "n", "air us/sec", "n",
         "collect_pis", "tick_pistons", "tick_hopper"
     );
+    eprintln!("    (legacy full-cell scan of the same world, for comparison, in the last table)");
     for r in &rows {
         eprintln!(
             "{:>3} {:>6} {:>7} | {:>10.0} {:>10.0} | {:>10.0} {:>5} {:>10.1} {:>5} | {:>10.0}us {:>10.0}us {:>10.0}us",
@@ -158,4 +186,74 @@ fn world_cpu_bench() {
             r.mesh_air_sections, r.collect_pistons_us, r.piston_us, r.hopper_us
         );
     }
+    eprintln!("\nfull-cell scan (the pre-counter piston/hopper pass) vs indexed pass, same process:");
+    for r in &rows {
+        eprintln!(
+            "rd {:>2}: legacy scan {:>9.0}us   indexed collect_piston_positions {:>7.0}us   ({:.0}x)",
+            r.rd, r.legacy_scan_us, r.collect_pistons_us, r.legacy_scan_us / r.collect_pistons_us.max(0.1)
+        );
+    }
+    stream_batch_report();
+}
+
+/// Mesh work for a 2x2 batch of columns streaming in next to a loaded ring:
+/// the old per-column algorithm against the batch plan, both timed here.
+fn stream_batch_report() {
+    use crate::stream_mesh::{build_sections, plan_stream_meshes, section_kind, MeshPolicy, SectionKind};
+    let registry = BlockRegistry::new();
+    let biome_gen = BiomeGenerator::new(SEED);
+    let mut world = World::new();
+    let area: Vec<(i32, i32)> = (0..4).flat_map(|x| (0..4).map(move |z| (x, z))).collect();
+    let batch = [(1, 1), (2, 1), (1, 2), (2, 2)];
+    for &(cx, cz) in &area {
+        world.generate_column(cx, cz, &biome_gen);
+        crate::lighting::run_initial_pass_for_column(&mut world, cx, cz, &registry);
+    }
+    let preloaded = |x: i32, z: i32| area.contains(&(x, z)) && !batch.contains(&(x, z));
+
+    // Old: per column, mesh every present section, then every present section
+    // of each loaded 4-neighbour (a batch column counts once it has been meshed).
+    let t = Instant::now();
+    let mut legacy_builds = 0usize;
+    let mut done: Vec<(i32, i32)> = Vec::new();
+    for &(cx, cz) in &batch {
+        done.push((cx, cz));
+        for cy in 0..=MAX_CHUNK_Y {
+            if world.has_chunk(cx, cy, cz) {
+                std::hint::black_box(build_chunk_meshes(cx, cy, cz, &world, &registry));
+                legacy_builds += 1;
+            }
+        }
+        for (nx, nz) in [(cx - 1, cz), (cx + 1, cz), (cx, cz - 1), (cx, cz + 1)] {
+            if done.contains(&(nx, nz)) || preloaded(nx, nz) {
+                for cy in 0..=MAX_CHUNK_Y {
+                    if world.has_chunk(nx, cy, nz) {
+                        std::hint::black_box(build_chunk_meshes(nx, cy, nz, &world, &registry));
+                        legacy_builds += 1;
+                    }
+                }
+            }
+        }
+    }
+    let legacy_t = t.elapsed();
+
+    let kind = |p| section_kind(&world, p);
+    let t = Instant::now();
+    let plan = plan_stream_meshes(&batch, MeshPolicy::STREAMING, preloaded, kind);
+    let mut sink = 0usize;
+    let inline = build_sections(&world, &registry, &plan.now, |_, m| sink += m.opaque.indices.len());
+    let inline_t = t.elapsed();
+    let queued = build_sections(&world, &registry, &plan.later, |_, m| sink += m.opaque.indices.len());
+    let total_t = t.elapsed();
+    std::hint::black_box(sink);
+    let empty = (0..=MAX_CHUNK_Y).filter(|&cy| batch.iter().all(|&(cx, cz)| kind((cx, cy, cz)) != SectionKind::Solid)).count();
+    eprintln!(
+        "\nstream batch (4 columns beside a loaded ring), mesh builds and CPU time:\n  \
+         per-column algorithm: {legacy_builds} builds, {:.1} ms (all inline, one frame)\n  \
+         batched plan:         {} builds ({inline} inline = {:.1} ms; {queued} queued for the 8/frame dirty pass), {:.1} ms total  [{empty} all-air levels]",
+        legacy_t.as_secs_f64() * 1e3,
+        inline + queued,
+        inline_t.as_secs_f64() * 1e3,
+        total_t.as_secs_f64() * 1e3,
+    );
 }
