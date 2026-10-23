@@ -1379,9 +1379,11 @@ mod session {
         use crate::handover::live::source::STALL_SECS;
         let mut p = pair("dupack");
         consent(&mut p);
+        // The recipient's silence counts from the offer's own clock reading
+        // (taken before the pack runs), not from when packing finished.
+        let t0 = now();
         offer(&mut p, &seat0());
         assert_eq!(p.src.stage(), SourceStage::Streaming);
-        let t0 = now();
         let dup = Frame::Ack { transfer: p.src.transfer(), through: 0 };
         p.dst.as_ref().unwrap().test_send(&dup);
         p.src.pump(&mut p.hs, p.live, t0 + STALL_SECS / 2).expect("inside the stall deadline");
@@ -1397,9 +1399,11 @@ mod session {
         use crate::handover::live::source::STALL_SECS;
         let mut p = pair("earlynotice");
         consent(&mut p);
+        // The recipient's silence counts from the offer's own clock reading
+        // (taken before the pack runs), not from when packing finished.
+        let t0 = now();
         offer(&mut p, &seat0());
         assert_eq!(p.src.stage(), SourceStage::Streaming);
-        let t0 = now();
         let beat = Frame::Notice { transfer: p.src.transfer(), paused: true };
         p.dst.as_ref().unwrap().test_send(&beat);
         p.src.pump(&mut p.hs, p.live, t0 + STALL_SECS / 2).expect("inside the stall deadline");
