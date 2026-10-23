@@ -27,7 +27,7 @@ impl HostedServer {
                 if grave.iter().any(Option::is_some) {
                     let cell = crate::grave::find_safe_grave_pos(
                         |x, y, z| {
-                            (0..96).contains(&y)
+                            (0..crate::world::WORLD_HEIGHT).contains(&y)
                                 && self
                                     .server
                                     .loaded_columns

@@ -114,7 +114,7 @@ fn scatter_mobs_produces_no_spawns_when_mobs_disabled() {
         }
     }
 
-    let biome_gen = BiomeGenerator::new(42);
+    let biome_gen = BiomeGenerator::new(42, crate::biome::Generator::V2);
 
     // Call scatter for every column in a 4×4 patch — none should spawn.
     for cx in 0..4_i32 {
@@ -143,7 +143,7 @@ fn scatter_mobs_can_spawn_when_mobs_enabled() {
     world.mobs_enabled = true;
 
     // Use the real biome generator so terrain_height matches actual blocks.
-    let biome_gen = BiomeGenerator::new(42);
+    let biome_gen = BiomeGenerator::new(42, crate::biome::Generator::V2);
 
     // Generate terrain for a 16×16 patch of columns so scatter has real
     // surface blocks to land on (not AIR from ungenerated chunks).

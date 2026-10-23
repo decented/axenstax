@@ -299,7 +299,7 @@ fn village_gen_anchors_register_after_column_generation() {
     use crate::chunk::CHUNK_SIZE;
 
     // Generate a column we know has a village by searching the grid.
-    let bg = BiomeGenerator::new(42);
+    let bg = BiomeGenerator::new(42, crate::biome::Generator::V2);
     let mut layout = None;
     'search: for gx in -10..10 {
         for gz in -10..10 {
@@ -344,7 +344,7 @@ fn village_with_bundled_registry_drops_at_least_one_procgen_plaque() {
     use crate::biome::BiomeGenerator;
     use crate::chunk::CHUNK_SIZE;
 
-    let bg = BiomeGenerator::new(42);
+    let bg = BiomeGenerator::new(42, crate::biome::Generator::V2);
     // Find an actual village cell that the layout function approves.
     let mut found: Option<crate::village_gen::VillageLayout> = None;
     'search: for gx in -10..10 {
@@ -395,7 +395,7 @@ fn build_house_with_empty_registry_falls_back_to_hardcoded_shape() {
     use crate::biome::BiomeGenerator;
     use crate::chunk::CHUNK_SIZE;
 
-    let bg = BiomeGenerator::new(42);
+    let bg = BiomeGenerator::new(42, crate::biome::Generator::V2);
     let mut found: Option<crate::village_gen::VillageLayout> = None;
     'search: for gx in -10..10 {
         for gz in -10..10 {
@@ -442,7 +442,7 @@ fn build_house_with_empty_registry_falls_back_to_hardcoded_shape() {
 fn village_layout_carries_workshop_slots_for_alpha_professions() {
     use crate::biome::BiomeGenerator;
 
-    let bg = BiomeGenerator::new(42);
+    let bg = BiomeGenerator::new(42, crate::biome::Generator::V2);
     let mut found: Option<crate::village_gen::VillageLayout> = None;
     'search: for gx in -20..20 {
         for gz in -20..20 {

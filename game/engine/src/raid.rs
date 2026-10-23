@@ -1362,7 +1362,7 @@ mod tests {
         // No villagers → no eligibility. But the test is whether the
         // scheduler stamps last_rolled_day, so call once + once and
         // check the field updates only on day-2.
-        let bg = crate::biome::BiomeGenerator::new(42);
+        let bg = crate::biome::BiomeGenerator::new(42, crate::biome::Generator::V2);
         let mut ecs = hecs::World::new();
         let _ = tick_scheduler_daily(&mut world, &ecs, &bg, 5, 100);
         assert_eq!(world.raid_scheduler.last_rolled_day, 5);
@@ -1379,7 +1379,7 @@ mod tests {
     fn tick_scheduler_ignores_villages_below_eligibility_threshold() {
         // 5 houses, but only 2 villagers (under the 5-villager gate).
         let mut world = make_world_with_one_village([10000, 64, 10000], (-100, -100), 5_000);
-        let bg = crate::biome::BiomeGenerator::new(42);
+        let bg = crate::biome::BiomeGenerator::new(42, crate::biome::Generator::V2);
         let mut ecs = hecs::World::new();
         populate_villagers(&mut ecs, [10000, 64, 10000], 2);
         let scheduled = tick_scheduler_daily(&mut world, &ecs, &bg, 1, 100);
@@ -1390,7 +1390,7 @@ mod tests {
     fn tick_scheduler_ignores_villages_with_zero_treasury() {
         // Even with enough villagers, zero treasury means no raid.
         let mut world = make_world_with_one_village([10000, 64, 10000], (-100, -100), 0);
-        let bg = crate::biome::BiomeGenerator::new(42);
+        let bg = crate::biome::BiomeGenerator::new(42, crate::biome::Generator::V2);
         let mut ecs = hecs::World::new();
         populate_villagers(&mut ecs, [10000, 64, 10000], 10);
         let scheduled = tick_scheduler_daily(&mut world, &ecs, &bg, 1, 100);

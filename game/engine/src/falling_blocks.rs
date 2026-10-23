@@ -50,7 +50,10 @@ pub fn tick_falling_blocks(
         let pz = p_pos.z.floor() as i32;
         for x in (px - SCAN_RADIUS)..=(px + SCAN_RADIUS) {
             for z in (pz - SCAN_RADIUS)..=(pz + SCAN_RADIUS) {
-                for y in 1..max_y {
+                // Only up to the column's highest block section: above it is
+                // air, and the world's full height would cost every tick.
+                let top = max_y.min(world.column_top_y(x, z) + 1);
+                for y in 1..top {
                     if !seen.insert((x, y, z)) {
                         continue;
                     }

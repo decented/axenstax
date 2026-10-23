@@ -92,3 +92,5 @@ pub mod touched_columns;
 // The joiner harness the chunk-push suites share.
 pub mod push_joiner;
 pub mod render_depth;
+// Terrain T1 — the 256-block world and the per-world terrain generator.
+pub mod tall_world;

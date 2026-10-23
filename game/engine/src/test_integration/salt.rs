@@ -62,7 +62,7 @@ fn snowfall_drifts_over_session() {
     // the world (which one is deterministic but depends on the per-
     // chunk hash). For test-time speed, we step at SNOWFALL_PERIOD_TICKS.
     const SEED: u32 = 42;
-    let biome_gen = BiomeGenerator::new(SEED);
+    let biome_gen = BiomeGenerator::new(SEED, crate::biome::Generator::V2);
     let mut world = World::new();
     let _patch = snowy_tundra_grass_patch(&mut world, &biome_gen);
     let mut placed = 0u32;
@@ -82,7 +82,7 @@ fn salt_path_blocks_snowfall_locally() {
     // Same patch but converted to SALT_PATH. After many painter passes
     // no SNOW lands in the patch (the per-tile gate skips non-GRASS/DIRT).
     const SEED: u32 = 42;
-    let biome_gen = BiomeGenerator::new(SEED);
+    let biome_gen = BiomeGenerator::new(SEED, crate::biome::Generator::V2);
     let mut world = World::new();
     let (cx, cz) = snowy_tundra_grass_patch(&mut world, &biome_gen);
     // Convert the patch to SALT_PATH at the actual surface y.

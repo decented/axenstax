@@ -977,16 +977,20 @@ impl super::GameState {
     /// Remove every mesh of column `col` from the renderer.
     fn drop_column_meshes(&mut self, col: (i32, i32)) {
         for cy in 0..=MAX_CHUNK_Y {
-            let key = (col.0, cy, col.1);
-            self.renderer.chunk_meshes.remove(&key);
-            self.renderer.water_meshes.remove(&key);
-            self.renderer.plant_meshes.remove(&key);
-            self.renderer.decal_meshes.remove(&key);
-            // Owner-inbox #18 — the per-type micro-model instance buffers and
-            // far-LOD billboards too (else they leak and render stale).
-            self.renderer.micro_meshes.remove(&key);
-            self.renderer.micro_billboard_meshes.remove(&key);
+            self.drop_chunk_meshes((col.0, cy, col.1));
         }
+    }
+
+    /// Remove every mesh of chunk `key` from the renderer.
+    fn drop_chunk_meshes(&mut self, key: (i32, i32, i32)) {
+        self.renderer.chunk_meshes.remove(&key);
+        self.renderer.water_meshes.remove(&key);
+        self.renderer.plant_meshes.remove(&key);
+        self.renderer.decal_meshes.remove(&key);
+        // Owner-inbox #18 — the per-type micro-model instance buffers and
+        // far-LOD billboards too (else they leak and render stale).
+        self.renderer.micro_meshes.remove(&key);
+        self.renderer.micro_billboard_meshes.remove(&key);
     }
 
     /// B2a — the light pass, fluid/fire rescan and meshing of up to `budget`
@@ -1010,6 +1014,10 @@ impl super::GameState {
                     if self.world.has_chunk(mx, cy, mz) {
                         let meshes = build_chunk_meshes(mx, cy, mz, &self.world, &self.registry);
                         self.renderer.upload_chunk((mx, cy, mz), &meshes);
+                    } else if (mx, mz) == (cx, cz) {
+                        // A pushed all-air chunk leaves its section absent
+                        // (`ChunkIntake::apply`): its old mesh goes too.
+                        self.drop_chunk_meshes((mx, cy, mz));
                     }
                 }
             }
@@ -1551,7 +1559,7 @@ mod tests {
     /// the pre-fix wiring (drop on unload, regenerate on re-entry).
     #[test]
     fn stream_unload_and_reentry_keeps_an_edited_column() {
-        let bg = BiomeGenerator::new(42);
+        let bg = BiomeGenerator::new(42, crate::biome::Generator::V2);
         let mut world = crate::world::World::new();
         let mut loaded: ahash::AHashSet<(i32, i32)> = ahash::AHashSet::new();
         let rd = 2;
@@ -1603,7 +1611,7 @@ mod tests {
     /// is not generated over, but an evicted one is restored first.
     #[test]
     fn step_load_variant_restores_and_never_regens_present_columns() {
-        let bg = BiomeGenerator::new(42);
+        let bg = BiomeGenerator::new(42, crate::biome::Generator::V2);
         let mut world = crate::world::World::new();
         load_column_blocks(&mut world, 0, 0, &bg, false);
         world.set_block(3, 20, 3, block::AIR);
@@ -1750,7 +1758,7 @@ mod tests {
     /// column and drops a pristine one.
     #[test]
     fn column_sims_stream_in_and_out_round_trip_an_edited_column() {
-        let bg = BiomeGenerator::new(42);
+        let bg = BiomeGenerator::new(42, crate::biome::Generator::V2);
         let registry = crate::block::BlockRegistry::new();
         let mut world = crate::world::World::new();
         let mut loaded = ahash::AHashSet::new();
@@ -1776,7 +1784,7 @@ mod tests {
         assert!(!is_void_column(sims.world, 0, 0));
         // The light pass ran: the highest air cell inside a present chunk
         // (fresh chunks start dark) is open to the sky.
-        let lit = (0..96).rev().find(|&y| {
+        let lit = (0..crate::world::WORLD_HEIGHT).rev().find(|&y| {
             sims.world.has_chunk(0, y / 16, 0) && sims.world.get_block(3, y, 3) == block::AIR
         });
         let y = lit.expect("an air cell inside a generated chunk");
@@ -1810,7 +1818,7 @@ mod tests {
     impl SimsFixture {
         fn new() -> Self {
             Self {
-                bg: BiomeGenerator::new(42),
+                bg: BiomeGenerator::new(42, crate::biome::Generator::V2),
                 registry: crate::block::BlockRegistry::new(),
                 world: crate::world::World::new(),
                 loaded: ahash::AHashSet::new(),
@@ -2036,7 +2044,7 @@ mod tests {
         // y=80, so on a tree column it landed on the leaves. find_surface_spawn
         // must skip leaves/logs/water, require air head-room, and step off the
         // origin column when a trunk sits there.
-        let bg = BiomeGenerator::new(42);
+        let bg = BiomeGenerator::new(42, crate::biome::Generator::V2);
         let mut world = crate::world::World::new();
         let base = bg.terrain_height(0, 0);
         // Grass platform around the origin (built relative to the generator's

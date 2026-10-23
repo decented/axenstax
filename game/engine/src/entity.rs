@@ -576,7 +576,7 @@ pub fn despawn_mobs_in_column(ecs: &mut hecs::World, cx: i32, cz: i32) -> usize 
 /// night / hostile spawner (`spawning.rs`). Returns 0 for an all-air column
 /// (the caller's AIR-surface guard then rejects it).
 pub fn real_surface_y(world: &World, wx: i32, wz: i32) -> i32 {
-    let mut sy = (crate::world::MAX_CHUNK_Y + 1) * crate::chunk::CHUNK_SIZE as i32 - 1;
+    let mut sy = world.column_top_y(wx, wz).max(0);
     while sy > 0 && world.get_block(wx, sy, wz) == crate::block::AIR {
         sy -= 1;
     }
@@ -1633,7 +1633,7 @@ mod tests {
         // terrain heights, at least one of the new 28d species (Horse,
         // Rabbit, Goat, Bee) must appear somewhere — a definitive
         // sign that the biome-driven dispatch is wired.
-        let bg = crate::biome::BiomeGenerator::new(42);
+        let bg = crate::biome::BiomeGenerator::new(42, crate::biome::Generator::V2);
         let world = fixture_following_terrain(crate::block::STONE, &bg, 16);
         let kinds = sweep_scatter_kinds(&world, &bg, 16);
         let new_28d = [
@@ -1649,7 +1649,7 @@ mod tests {
     #[test]
     fn scatter_never_produces_mob_for_unsupported_surface() {
         // AIR-surface columns must spawn nothing (no surface to stand on).
-        let bg = crate::biome::BiomeGenerator::new(42);
+        let bg = crate::biome::BiomeGenerator::new(42, crate::biome::Generator::V2);
         let world = crate::world::World::new(); // empty → every column is air
         let kinds = sweep_scatter_kinds(&world, &bg, 5);
         assert!(kinds.is_empty(),
@@ -1664,7 +1664,7 @@ mod tests {
     #[test]
     fn scatter_rejects_submerged_column_with_water_above_surface() {
         use crate::biome::{Biome, SEA_LEVEL};
-        let bg = crate::biome::BiomeGenerator::new(42);
+        let bg = crate::biome::BiomeGenerator::new(42, crate::biome::Generator::V2);
         let cs = crate::chunk::CHUNK_SIZE as i32;
 
         // Find a chunk scatter will actually spawn in: hash%4==0, a non-Ocean
@@ -1729,7 +1729,7 @@ mod tests {
         // When it does the pack-spawn arm fires 2-4 hyenas. Across the
         // sweep: if any hyenas appear, the count must be ≥ 2 (a single
         // hyena would mean the pack arm wasn't wired correctly).
-        let bg = crate::biome::BiomeGenerator::new(7);
+        let bg = crate::biome::BiomeGenerator::new(7, crate::biome::Generator::V2);
         let world = fixture_following_terrain(crate::block::STONE, &bg, 16);
         let kinds = sweep_scatter_kinds(&world, &bg, 16);
         let hyena_count = kinds.iter().filter(|k| **k == MobType::Hyena).count();

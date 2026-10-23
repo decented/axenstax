@@ -86,7 +86,7 @@ pub const MAX_JOIN_SPAWN_HORIZONTAL: f32 = 30_000_000.0;
 pub const MIN_JOIN_SPAWN_Y: f32 = -64.0;
 
 /// Highest y a host may place a joiner at: the world's top
-/// (`(world::MAX_CHUNK_Y + 1) * CHUNK_SIZE`, Y 0..=95) plus headroom.
+/// (`(world::MAX_CHUNK_Y + 1) * CHUNK_SIZE`, Y 0..=255) plus headroom.
 pub const MAX_JOIN_SPAWN_Y: f32 = ((crate::world::MAX_CHUNK_Y + 1) * crate::chunk::CHUNK_SIZE as i32) as f32 + 64.0;
 
 /// Shown when the host sends world data this game cannot read where it
@@ -117,6 +117,19 @@ pub fn join_spawn_refusal(accept: &protocol::JoinAcceptPacket) -> Option<&'stati
     (spawn.is_finite() && !join_spawn_in_range(spawn)).then_some(HOST_BAD_SPAWN)
 }
 
+/// Why a `JoinAccept` must be refused over its terrain generator (v94), if it
+/// must: one this build does not have. Never a silent fall-back to another
+/// generator — that would show the joiner different terrain from the host's.
+pub fn join_generator_refusal(accept: &protocol::JoinAcceptPacket) -> Option<String> {
+    crate::biome::Generator::from_version(accept.generator)
+        .err()
+        .map(|_| format!("{HOST_NEWER_GENERATOR} (terrain generator v{})", accept.generator))
+}
+
+/// Shown when the host's world uses a terrain generator this build lacks.
+pub const HOST_NEWER_GENERATOR: &str =
+    "This world was made by a newer version of the game. Update to join it";
+
 /// Toast for a joiner whose terrain generator differs from the host's.
 pub const WORLDGEN_MISMATCH_NOTICE: &str = "This world was made with a different version of the game. Some terrain may look different until you update.";
 
@@ -131,8 +144,12 @@ pub const JOINED_WORLD_FOLDER: &str = "remote_game";
 pub struct JoinedWorld {
     pub seed: u32,
     pub rules: protocol::WorldRules,
-    /// The host's `worldgen_fingerprint()`.
+    /// The host's `worldgen_fingerprint_for` the world's generator.
     pub worldgen_version: u32,
+    /// The world's terrain generator (v94, `JoinAccept.generator`). A
+    /// generator this build lacks is refused before this is built
+    /// ([`join_generator_refusal`]).
+    pub generator: crate::biome::Generator,
     /// Where the host placed us. `None` when the host sent a non-finite
     /// position (NaN/inf would poison every f32→i32 cast downstream).
     pub spawn: Option<glam::Vec3>,
@@ -148,6 +165,10 @@ impl JoinedWorld {
             seed: accept.seed,
             rules: accept.world_rules.clone(),
             worldgen_version: accept.worldgen_version,
+            // Refused at the accept when unknown (`join_generator_refusal`);
+            // v2 only for a packet that skipped that gate (tests).
+            generator: crate::biome::Generator::from_version(accept.generator)
+                .unwrap_or(crate::biome::Generator::V2),
             spawn: spawn.is_finite().then_some(spawn),
             chunk_note_radius: accept.chunk_note_radius,
         }
@@ -158,13 +179,14 @@ impl JoinedWorld {
     pub fn to_meta(&self) -> crate::save::WorldMeta {
         let mut meta = crate::save::WorldMeta::new(JOINED_WORLD_FOLDER);
         meta.seed = self.seed;
+        meta.worldgen_version = self.generator.version();
         self.rules.apply_to_meta(&mut meta);
         meta
     }
 
     /// The toast to show when the host's generator differs from ours.
     pub fn worldgen_mismatch_notice(&self) -> Option<&'static str> {
-        (self.worldgen_version != crate::world::worldgen_fingerprint())
+        (self.worldgen_version != crate::world::worldgen_fingerprint_for(self.generator))
             .then_some(WORLDGEN_MISMATCH_NOTICE)
     }
 }
@@ -644,6 +666,7 @@ pub fn build_join_request_guest(player_name: &str, skin_key: u64) -> protocol::J
         worldgen_version: crate::world::worldgen_fingerprint(),
         ws_host: String::new(),
         render_distance: join_render_distance(),
+        generator_fingerprints: crate::protocol::GeneratorFingerprint::ours(),
     }
 }
 
@@ -692,6 +715,7 @@ pub fn build_join_request(
         worldgen_version: crate::world::worldgen_fingerprint(),
         ws_host: String::new(),
         render_distance: join_render_distance(),
+        generator_fingerprints: crate::protocol::GeneratorFingerprint::ours(),
     }
 }
 
@@ -1008,6 +1032,9 @@ impl RemoteClient {
                             // anything is derived from it (chunk coordinates).
                             let refusal =
                                 refusal.or_else(|| join_spawn_refusal(&accept).map(str::to_string));
+                            // A world made with a terrain generator this build
+                            // doesn't have would generate with the wrong one.
+                            let refusal = refusal.or_else(|| join_generator_refusal(&accept));
 
                             if let Some(reason) = refusal {
                                 log::warn!("Refusing server (identity): {reason}");
@@ -3184,6 +3211,19 @@ mod tests {
         );
     }
 
+    /// Terrain T1 (v94) — a host world on a terrain generator this build
+    /// lacks refuses the join; it never falls back to another generator.
+    #[test]
+    fn an_unknown_generator_refuses_the_join() {
+        let mut accept = proofless_accept();
+        assert_eq!(join_generator_refusal(&accept), None, "v2");
+        accept.generator = 3;
+        assert_eq!(join_generator_refusal(&accept), None, "v3");
+        accept.generator = 99;
+        let why = join_generator_refusal(&accept).expect("refused");
+        assert!(why.contains("v99"), "{why}");
+    }
+
     fn proofless_accept() -> protocol::JoinAcceptPacket {
         protocol::JoinAcceptPacket {
             player_index: 0,
@@ -3204,6 +3244,7 @@ mod tests {
             action_session: [7; 16],
             action_life: 0,
             has_personal_state: false,
+            generator: crate::biome::Generator::V2.version(),
         }
     }
 
@@ -3565,6 +3606,7 @@ mod tests {
                 seed: 4242,
                 rules: flat_sand_rules(),
                 worldgen_version: crate::world::worldgen_fingerprint(),
+                generator: crate::biome::Generator::V2,
                 spawn: Some(glam::Vec3::new(100.5, 41.0, -7.5)),
                 chunk_note_radius: 0,
             })

@@ -175,7 +175,7 @@ fn d2c3_quest_reward_plan_and_mismatched_view_identity_refuse() {
 
 #[test]
 fn d2c3_quest_wire_appends_intent13_and_result76_view77_without_changing_pack_bytes() {
-    assert_eq!(crate::protocol::PROTOCOL_VERSION, 93);
+    assert_eq!(crate::protocol::PROTOCOL_VERSION, 94);
     assert_eq!(crate::protocol::PacketType::QuestResult as u8, 76);
     assert_eq!(crate::protocol::PacketType::QuestView as u8, 77);
     let intent = crate::action_wire::ActionIntent::Quest(QuestRequest {

@@ -81,10 +81,69 @@ pub const DEEPSLATE_TRANSITION_DEPTH: i32 = 8;
 /// changes generation output: bump `world::WORLDGEN_VERSION`.
 pub const WORLDGEN_RESERVE_RICHNESS: f32 = 0.75;
 
+/// The terrain generator a world was made with (Spec 02 §5.2). Every world
+/// records it (`WorldMeta.worldgen_version` / `WorldSave.worldgen_version`) and
+/// keeps it forever, so an old world never changes by a block: v2 worlds keep
+/// v2, new worlds get [`NEW_WORLD_GENERATOR`]. Selected by
+/// [`BiomeGenerator::new`]; everything that asks a `BiomeGenerator` (terrain
+/// height, biome, caves, structures, spawn, snowfall, mobs) and
+/// `World::generate_column` dispatch on it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Generator {
+    /// The as-built generator up to 2026-10-23 (`world::WORLDGEN_VERSION` 2):
+    /// one 2D heightmap, y 0..=95. Pinned by the v2 golden.
+    V2,
+    /// "Dramatic terrain" (docs/foundations/2026-10-23-terrain-overhaul.md).
+    // BRIDGE: v3 terrain — replace when lane T2 lands the v3 generator. Until
+    // then every v3 stage delegates to the v2 code, so a v3 world generates
+    // v2 terrain.
+    V3,
+}
+
+/// The generator every newly created world is stamped with.
+pub const NEW_WORLD_GENERATOR: u32 = 3;
+
+/// The generator a world that recorded none was made with (every world saved
+/// before the field existed).
+pub const LEGACY_GENERATOR: u32 = 2;
+
+impl Generator {
+    /// Every generator this build can run, oldest first.
+    pub const ALL: [Generator; 2] = [Generator::V2, Generator::V3];
+
+    /// The recorded number (`worldgen_version`) of this generator.
+    pub const fn version(self) -> u32 {
+        match self {
+            Generator::V2 => 2,
+            Generator::V3 => 3,
+        }
+    }
+
+    /// The generator a recorded `worldgen_version` names. A number this build
+    /// does not know is an error, never a silent fall-back: the world was made
+    /// by a newer build, and generating its missing terrain with another
+    /// generator would seam it.
+    pub fn from_version(version: u32) -> Result<Self, String> {
+        Self::ALL.into_iter().find(|g| g.version() == version).ok_or_else(|| {
+            format!(
+                "this world was made with terrain generator v{version}, which this version \
+                 of the game does not have: update the game to open it"
+            )
+        })
+    }
+
+    /// The generator for a brand-new world.
+    pub fn for_new_world() -> Self {
+        Self::from_version(NEW_WORLD_GENERATOR).expect("NEW_WORLD_GENERATOR is a known generator")
+    }
+}
+
 pub struct BiomeGenerator {
     /// The world seed this generator was initialised with. Surfaced for
     /// commands like `/seed` and for save migrations.
     pub seed: u32,
+    /// Which terrain generator this world uses.
+    generator: Generator,
     temp_noise: OpenSimplex,
     humidity_noise: OpenSimplex,
     height_noise: OpenSimplex,
@@ -93,15 +152,35 @@ pub struct BiomeGenerator {
 }
 
 impl BiomeGenerator {
-    pub fn new(seed: u32) -> Self {
+    /// The generator for a world of `seed` made with `generator` (a world
+    /// meta's `worldgen_version`, through [`Generator::from_version`]).
+    pub fn new(seed: u32, generator: Generator) -> Self {
         Self {
             seed,
+            generator,
             temp_noise: OpenSimplex::new(seed),
             humidity_noise: OpenSimplex::new(seed.wrapping_add(1000)),
             height_noise: OpenSimplex::new(seed.wrapping_add(2000)),
             detail_noise: OpenSimplex::new(seed.wrapping_add(3000)),
             cave_noise: OpenSimplex::new(seed.wrapping_add(4000)),
         }
+    }
+
+    /// The highest Y this generator ever writes a block at. World-gen writes
+    /// above it are dropped (`World::generate_column`) and the sections above it
+    /// are never filled.
+    pub fn max_generated_height(&self) -> i32 {
+        match self.generator {
+            Generator::V2 => crate::world::V2_WORLD_TOP,
+            // BRIDGE: v3 terrain — replace when lane T2 lands the v3 generator
+            // (peaks to ~200, capped at 240: Spec 02 §3.1).
+            Generator::V3 => crate::world::V2_WORLD_TOP,
+        }
+    }
+
+    /// Which terrain generator this is.
+    pub fn generator(&self) -> Generator {
+        self.generator
     }
 
     /// Continentalness / elevation field — a broad, low-frequency noise
@@ -124,6 +203,14 @@ impl BiomeGenerator {
     /// temperature is what frees the cold-climate band to become Taiga /
     /// Snowy Tundra — previously `temp < -0.3` swallowed all of it.
     pub fn biome_at(&self, x: i32, z: i32) -> Biome {
+        match self.generator {
+            Generator::V2 => self.biome_at_v2(x, z),
+            // BRIDGE: v3 terrain — replace when lane T2 lands the v3 generator.
+            Generator::V3 => self.biome_at_v2(x, z),
+        }
+    }
+
+    fn biome_at_v2(&self, x: i32, z: i32) -> Biome {
         let cont = self.continentalness(x, z);
         // Terrain-shape biomes first — decided by elevation, not climate.
         if cont < -0.45 {
@@ -143,7 +230,15 @@ impl BiomeGenerator {
 
     /// Terrain height at world position. Multi-octave noise, shaped by biome.
     pub fn terrain_height(&self, x: i32, z: i32) -> i32 {
-        let biome = self.biome_at(x, z);
+        match self.generator {
+            Generator::V2 => self.terrain_height_v2(x, z),
+            // BRIDGE: v3 terrain — replace when lane T2 lands the v3 generator.
+            Generator::V3 => self.terrain_height_v2(x, z),
+        }
+    }
+
+    fn terrain_height_v2(&self, x: i32, z: i32) -> i32 {
+        let biome = self.biome_at_v2(x, z);
 
         // Base continent shape (low frequency)
         let base = self.height_noise.get([x as f64 * 0.002, z as f64 * 0.002]);
@@ -352,6 +447,14 @@ impl BiomeGenerator {
 
     /// Returns true if a cave should exist at this 3D position.
     pub fn is_cave(&self, x: i32, y: i32, z: i32) -> bool {
+        match self.generator {
+            Generator::V2 => self.is_cave_v2(x, y, z),
+            // BRIDGE: v3 terrain — replace when lane T2 lands the v3 generator.
+            Generator::V3 => self.is_cave_v2(x, y, z),
+        }
+    }
+
+    fn is_cave_v2(&self, x: i32, y: i32, z: i32) -> bool {
         if y <= 1 || y >= 55 {
             return false;
         }
@@ -813,7 +916,7 @@ mod tests {
 
     #[test]
     fn ore_at_is_deterministic() {
-        let g = BiomeGenerator::new(42);
+        let g = BiomeGenerator::new(42, crate::biome::Generator::V2);
         let a = g.ore_at(10, 20, -5);
         let b = g.ore_at(10, 20, -5);
         assert_eq!(a, b);
@@ -824,7 +927,7 @@ mod tests {
         // Engine audit 2026-06-04, E: the diamond band (y<15) is entirely below
         // the deepslate threshold (y<22), so plain DIAMOND_ORE never generates.
         // Lock it: scan the band and assert deepslate-only.
-        let g = BiomeGenerator::new(20260604);
+        let g = BiomeGenerator::new(20260604, crate::biome::Generator::V2);
         let mut found_deepslate_diamond = false;
         for y in 0..15 {
             for x in 0..400 {
@@ -842,7 +945,7 @@ mod tests {
 
     #[test]
     fn diamond_only_below_y15() {
-        let g = BiomeGenerator::new(99);
+        let g = BiomeGenerator::new(99, crate::biome::Generator::V2);
         // Above 15: scan a chunk's worth of positions, no diamond should spawn
         // (stone-tier or deepslate-tier).
         for x in 0..32 {
@@ -860,7 +963,7 @@ mod tests {
 
     #[test]
     fn iron_only_below_y50() {
-        let g = BiomeGenerator::new(7);
+        let g = BiomeGenerator::new(7, crate::biome::Generator::V2);
         for x in 0..32 {
             for z in 0..32 {
                 for y in 50..100 {
@@ -876,7 +979,7 @@ mod tests {
 
     #[test]
     fn deepslate_substrate_only_below_y_dp() {
-        let g = BiomeGenerator::new(42);
+        let g = BiomeGenerator::new(42, crate::biome::Generator::V2);
         for x in 0..32 {
             for z in 0..32 {
                 for y in Y_DP..(Y_DP + 20) {
@@ -896,7 +999,7 @@ mod tests {
     fn deepslate_transition_zone_is_mixed() {
         // In the transition zone, sample a row and verify we see BOTH
         // stone and deepslate substrate. (Deterministic from seed.)
-        let g = BiomeGenerator::new(123);
+        let g = BiomeGenerator::new(123, crate::biome::Generator::V2);
         let mut saw_stone = false;
         let mut saw_deepslate = false;
         let y = Y_DP - DEEPSLATE_TRANSITION_DEPTH / 2; // mid-transition
@@ -919,7 +1022,7 @@ mod tests {
     fn ore_variant_matches_substrate() {
         // Sample ore positions and verify deepslate-variant matches
         // is_deepslate_substrate for the same position.
-        let g = BiomeGenerator::new(55);
+        let g = BiomeGenerator::new(55, crate::biome::Generator::V2);
         for x in 0..32 {
             for z in 0..32 {
                 for y in 0..50 {
@@ -940,7 +1043,7 @@ mod tests {
 
     #[test]
     fn base_rock_picks_pure_deepslate_when_substrate_is_deepslate() {
-        let g = BiomeGenerator::new(99);
+        let g = BiomeGenerator::new(99, crate::biome::Generator::V2);
         // Sample a column from y=0 up to Y_DP+5 and verify base_rock
         // returns a PURE_DEEPSLATE-family member in the deepslate band
         // and STONE elsewhere. Spec 16 Phase 3b — the canonical and
@@ -1018,7 +1121,7 @@ mod tests {
 
     #[test]
     fn coal_appears_at_some_density() {
-        let g = BiomeGenerator::new(123);
+        let g = BiomeGenerator::new(123, crate::biome::Generator::V2);
         let mut coal = 0;
         let mut total = 0;
         for x in 0..50 {
@@ -1042,7 +1145,7 @@ mod tests {
 
     #[test]
     fn brimstone_appears_in_deep_stone_band() {
-        let g = BiomeGenerator::new(4949);
+        let g = BiomeGenerator::new(4949, crate::biome::Generator::V2);
         let mut found = false;
         'scan: for x in 0..80 {
             for y in Y_DP..48 {
@@ -1059,7 +1162,7 @@ mod tests {
 
     #[test]
     fn nitre_appears_underground() {
-        let g = BiomeGenerator::new(4950);
+        let g = BiomeGenerator::new(4950, crate::biome::Generator::V2);
         let mut found = false;
         'scan: for x in 0..80 {
             for y in Y_DP..SEA_LEVEL {
@@ -1079,7 +1182,7 @@ mod tests {
         // The two new ores have no deepslate variant, so they must never
         // generate in the deepslate substrate (keeps `ore_variant_matches_substrate`
         // and the demolition-vs-mining invariants honest).
-        let g = BiomeGenerator::new(4951);
+        let g = BiomeGenerator::new(4951, crate::biome::Generator::V2);
         for x in 0..40 {
             for y in 0..50 {
                 for z in 0..40 {
@@ -1100,7 +1203,7 @@ mod tests {
 
     #[test]
     fn copper_appears_in_mid_band() {
-        let g = BiomeGenerator::new(4902);
+        let g = BiomeGenerator::new(4902, crate::biome::Generator::V2);
         let mut found = false;
         'scan: for x in 0..80 {
             for y in Y_DP..(SEA_LEVEL + 8) {
@@ -1119,7 +1222,7 @@ mod tests {
     fn copper_only_inside_band() {
         // No copper below Y_DP (deepslate territory — copper has no deepslate
         // variant) and none above SEA_LEVEL + 8 (above the mid-depth band).
-        let g = BiomeGenerator::new(4903);
+        let g = BiomeGenerator::new(4903, crate::biome::Generator::V2);
         for x in 0..40 {
             for z in 0..40 {
                 for y in 0..Y_DP {
@@ -1147,7 +1250,7 @@ mod tests {
         // The Copper band (Y_DP..SEA_LEVEL+8) sits entirely at/above Y_DP, where
         // `is_deepslate_substrate` is always false, but lock the invariant
         // directly so a future band-widening trips this test first.
-        let g = BiomeGenerator::new(4904);
+        let g = BiomeGenerator::new(4904, crate::biome::Generator::V2);
         for x in 0..40 {
             for y in 0..(SEA_LEVEL + 8) {
                 for z in 0..40 {
@@ -1187,7 +1290,7 @@ mod tests {
 
     #[test]
     fn rock_salt_appears_in_mountains_or_desert_band() {
-        let g = BiomeGenerator::new(123);
+        let g = BiomeGenerator::new(123, crate::biome::Generator::V2);
         // Search a wide radius: post-Spec-28a-wire-up, Mountains are
         // elevation-driven (coarse continentalness, ~666-block period),
         // so a small window near origin can be entirely mid-elevation
@@ -1219,7 +1322,7 @@ mod tests {
 
     #[test]
     fn rock_salt_does_not_appear_in_plains() {
-        let g = BiomeGenerator::new(123);
+        let g = BiomeGenerator::new(123, crate::biome::Generator::V2);
         let (wx, wz) = find_biome_column(&g, &[Biome::Plains], 32)
             .expect("expected at least one Plains column in -32..32");
         for dx in 0..16 {
@@ -1247,7 +1350,7 @@ mod tests {
         // grid and confirm every biome — the 8 climate biomes plus the
         // two terrain-shape biomes — is now reachable.
         use std::collections::HashSet;
-        let g = BiomeGenerator::new(42);
+        let g = BiomeGenerator::new(42, crate::biome::Generator::V2);
         let mut seen: HashSet<Biome> = HashSet::new();
         for x in (-4000..=4000).step_by(32) {
             for z in (-4000..=4000).step_by(32) {

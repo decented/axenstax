@@ -277,10 +277,12 @@ fn unpack_world_inner(
             .map_err(|e| format!("read {path}: {e}"))?;
 
         if path == "world_meta.json" {
-            meta = Some(
-                serde_json::from_slice(&data)
-                    .map_err(|e| format!("world_meta.json is damaged ({e})"))?,
-            );
+            let m: WorldMeta = serde_json::from_slice(&data)
+                .map_err(|e| format!("world_meta.json is damaged ({e})"))?;
+            // A world made by a terrain generator this build doesn't have is
+            // refused, never generated with another one.
+            m.generator()?;
+            meta = Some(m);
         } else if path == "world.dat" {
             // Tolerant decode shared with the native load paths. Cloud/Stash
             // blobs are byte-identical to local saves, so this protects
@@ -475,6 +477,7 @@ mod tests {
             rig_clips: Vec::new(),
             local_personal: None,
             quest_world: None,
+            worldgen_version: None,
         }
     }
 

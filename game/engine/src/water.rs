@@ -250,9 +250,11 @@ impl WaterSystem {
     /// Called after world generation for each column.
     pub fn register_column_sources(&mut self, cx: i32, cz: i32, world: &World) {
         let cs = crate::chunk::CHUNK_SIZE as i32;
-        let max_y = 6 * cs;
         let base_x = cx * cs;
         let base_z = cz * cs;
+        // Only the sections that hold blocks (a v2 column: at most the old
+        // 96-block world), never the world's whole height.
+        let max_y = world.column_top_y(base_x, base_z) + 1;
 
         for lx in 0..cs {
             for lz in 0..cs {

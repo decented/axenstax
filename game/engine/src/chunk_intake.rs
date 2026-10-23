@@ -700,7 +700,14 @@ impl ChunkIntake {
         // The column now holds server data: nothing left to check it by
         // (the caller checked it first, `check_before_chunk`).
         self.unverified.remove(&col);
-        world.insert_chunk(pkt.cx, pkt.cy, pkt.cz, chunk);
+        // An all-air chunk (most of a column above its terrain) replaces what
+        // this client held there by leaving the section absent: it reads as
+        // air and open sky, and costs no memory, light or mesh.
+        if chunk.is_empty() {
+            world.remove_chunk(pkt.cx, pkt.cy, pkt.cz);
+        } else {
+            world.insert_chunk(pkt.cx, pkt.cy, pkt.cz, chunk);
+        }
         clear_side_data(world, coord);
         apply_side_data(world, registry, coord, pkt);
         rebuild_power_devices(world, coord);
@@ -1081,7 +1088,7 @@ mod tests {
     /// A host world with an edit + side data in chunk (0, 1, 0), and the
     /// joiner's own (different) generation of it.
     fn host_and_joiner() -> (World, World) {
-        let biome = crate::biome::BiomeGenerator::new(42);
+        let biome = crate::biome::BiomeGenerator::new(42, crate::biome::Generator::V2);
         let mut host = World::new();
         host.generate_column(0, 0, &biome);
         host.set_block(3, 20, 3, block::GLASS);
@@ -1090,7 +1097,7 @@ mod tests {
         sign.set_text("hello joiner");
         host.insert_sign((4, 20, 4), sign);
         let mut joiner = World::new();
-        joiner.generate_column(0, 0, &crate::biome::BiomeGenerator::new(7));
+        joiner.generate_column(0, 0, &crate::biome::BiomeGenerator::new(7, crate::biome::Generator::V2));
         joiner.set_meta((5, 21, 5), 3); // stale: not in the host's chunk
         joiner.block_entities.insert(
             (6, 22, 6),
@@ -1148,11 +1155,13 @@ mod tests {
     fn a_pushed_all_air_chunk_clears_terrain_the_joiner_generated() {
         let host = World::new(); // nothing at (0, 0, 0): dug out
         let mut joiner = World::new();
-        joiner.generate_column(0, 0, &crate::biome::BiomeGenerator::new(42));
+        joiner.generate_column(0, 0, &crate::biome::BiomeGenerator::new(42, crate::biome::Generator::V2));
         assert_ne!(joiner.get_block(8, 0, 8), block::AIR);
         let mut intake = ChunkIntake::default();
         intake.apply(&mut joiner, &mut ahash::AHashSet::new(), &reg(), &packet_of(&host, (0, 0, 0)));
-        assert!(joiner.get_chunk(0, 0, 0).is_some_and(Chunk::is_empty));
+        // Left absent (terrain T1): it reads as air and open sky.
+        assert!(joiner.get_chunk(0, 0, 0).is_none_or(Chunk::is_empty));
+        assert_eq!(joiner.get_block(8, 0, 8), block::AIR);
     }
 
     #[test]
@@ -1270,7 +1279,7 @@ mod tests {
         assert!(!joiner.is_column_evicted(2, 3), "never kept in the evicted store");
         assert_eq!(joiner.meta_at(40, 3, 50), 0);
         assert!(!intake.holds_pushed((2, 3)));
-        assert_eq!(intake.drops_for_input(1, 16), vec![ChunkDrop { cx: 2, cz: 3, as_of: 6 }]);
+        assert_eq!(intake.drops_for_input(1, 16), vec![ChunkDrop { cx: 2, cz: 3, as_of: MAX_CHUNK_Y as u32 + 1 }]);
         intake.confirm_drops(1);
         assert!(intake.drops_for_input(2, 16).is_empty());
         // A continuation for it arriving after is counted, not applied.
@@ -1284,7 +1293,7 @@ mod tests {
             attachments: Vec::<PushedFaceAttachment>::new(),
         };
         assert!(!intake.apply(&mut joiner, &mut loaded, &reg(), &cont));
-        assert_eq!(intake.applied(), 7);
+        assert_eq!(intake.applied(), MAX_CHUNK_Y as u32 + 2);
         assert_eq!(joiner.meta_at(32, 0, 48), 0);
     }
 
@@ -1314,7 +1323,7 @@ mod tests {
         let mut intake = ChunkIntake::default();
         intake.expect_notes(8, (0, 0));
         let mut joiner = World::new();
-        joiner.generate_column(2, 2, &crate::biome::BiomeGenerator::new(42));
+        joiner.generate_column(2, 2, &crate::biome::BiomeGenerator::new(42, crate::biome::Generator::V2));
         intake.let_go(&mut joiner, (2, 2));
         assert_eq!(intake.pending_drops(), 0, "never reported");
         assert!(joiner.has_chunk(2, 0, 2), "left to the streamer's own unload (evict or drop)");
@@ -1322,7 +1331,7 @@ mod tests {
 
     #[test]
     fn a_local_columns_generation_is_checked_against_its_notes_hash() {
-        let biome = crate::biome::BiomeGenerator::new(42);
+        let biome = crate::biome::BiomeGenerator::new(42, crate::biome::Generator::V2);
         let mut world = World::new();
         let mut intake = ChunkIntake::default();
         intake.expect_notes(8, (0, 0));
@@ -1364,7 +1373,7 @@ mod tests {
         // (its snowfall, its fluids, its player's edit) before the note came.
         // Generation agrees — a scratch generation hashes as the note — so it
         // is no determinism bug: no switch, no report, the column kept.
-        let biome = crate::biome::BiomeGenerator::new(42);
+        let biome = crate::biome::BiomeGenerator::new(42, crate::biome::Generator::V2);
         let mut server = World::new();
         server.generate_column(1, 0, &biome);
         let note = crate::chunk_verdict::column_hash(&server, (1, 0));
@@ -1394,7 +1403,7 @@ mod tests {
     #[test]
     fn pending_checks_run_within_a_frame_budget_and_a_scratch_counts_against_it() {
         // B2b fix LOW-3.
-        let biome = crate::biome::BiomeGenerator::new(42);
+        let biome = crate::biome::BiomeGenerator::new(42, crate::biome::Generator::V2);
         let mut world = World::new();
         let mut loaded = ahash::AHashSet::new();
         let mut intake = ChunkIntake::default();
@@ -1433,7 +1442,7 @@ mod tests {
     fn a_push_into_a_column_with_a_pending_check_checks_it_first() {
         // B2b fix LOW-2: an overflow resync used to clear the pending check
         // unchecked.
-        let biome = crate::biome::BiomeGenerator::new(42);
+        let biome = crate::biome::BiomeGenerator::new(42, crate::biome::Generator::V2);
         let host = World::new();
         let mut world = World::new();
         let mut loaded = ahash::AHashSet::new();
@@ -1505,7 +1514,7 @@ mod tests {
         let mut intake = ChunkIntake::default();
         intake.expect_notes(8, (0, 0));
         let mut joiner = World::new();
-        let biome = crate::biome::BiomeGenerator::new(42);
+        let biome = crate::biome::BiomeGenerator::new(42, crate::biome::Generator::V2);
         intake.note_local((1, 2), 0);
         joiner.generate_column(1, 2, &biome);
         joiner.set_block(20, 90, 40, block::GLASS); // a server change applied on top
@@ -1522,7 +1531,7 @@ mod tests {
     #[test]
     fn a_push_into_an_evicted_column_brings_the_column_back_first() {
         let mut joiner = World::new();
-        joiner.generate_column(0, 0, &crate::biome::BiomeGenerator::new(42));
+        joiner.generate_column(0, 0, &crate::biome::BiomeGenerator::new(42, crate::biome::Generator::V2));
         joiner.set_block(1, 70, 1, block::GLASS); // the joiner's own edit: kept on eviction
         assert!(joiner.evict_column(0, 0));
         let host = World::new();
@@ -1659,7 +1668,7 @@ mod tests {
         // B2b fix-2 N3: five noted columns, a change for each, then a second
         // change for the first: with a cap of 2 a frame, the third column's
         // change and everything after it wait, and nothing overtakes it.
-        let biome = crate::biome::BiomeGenerator::new(42);
+        let biome = crate::biome::BiomeGenerator::new(42, crate::biome::Generator::V2);
         let mut world = World::new();
         let mut intake = ChunkIntake::default();
         intake.expect_notes(8, (0, 0));
@@ -1732,7 +1741,7 @@ mod tests {
 
     #[test]
     fn no_check_is_forced_once_the_switch_is_set() {
-        let biome = crate::biome::BiomeGenerator::new(42);
+        let biome = crate::biome::BiomeGenerator::new(42, crate::biome::Generator::V2);
         let mut world = World::new();
         world.generate_column(1, 0, &biome);
         let mut intake = ChunkIntake::default();

@@ -219,7 +219,7 @@ pub(crate) fn column_matches(live: &World, pristine: &World, col: (i32, i32)) ->
 }
 
 /// The hash a "local" note carries for column `col` of `world`
-/// (`ColumnLocalPacket.hash`): SHA-256 over its six chunks' block arrays and
+/// (`ColumnLocalPacket.hash`): SHA-256 over its sixteen chunks' block arrays and
 /// player-placed masks (the `Chunk::as_bytes` byte stream: each `u16` block,
 /// then each `u64` placed word, little-endian — fed straight to the hasher
 /// by `Chunk::feed_bytes`, no allocation), each chunk preceded by a presence
@@ -378,7 +378,7 @@ mod tests {
 
     #[test]
     fn a_fresh_column_is_untouched_whatever_its_neighbours() {
-        let biome = BiomeGenerator::new(SEED);
+        let biome = BiomeGenerator::new(SEED, crate::biome::Generator::V2);
         let world = generated(&biome, (0, 0), 2);
         for dx in -1..=1 {
             for dz in -1..=1 {
@@ -389,7 +389,7 @@ mod tests {
 
     #[test]
     fn one_edit_makes_a_column_touched_and_is_tracked() {
-        let biome = BiomeGenerator::new(SEED);
+        let biome = BiomeGenerator::new(SEED, crate::biome::Generator::V2);
         let mut world = generated(&biome, (0, 0), 1);
         world.track_edited_columns();
         // World-gen writes are never edits.
@@ -410,7 +410,7 @@ mod tests {
 
     #[test]
     fn a_looted_worldgen_chest_is_touched() {
-        let biome = BiomeGenerator::new(SEED);
+        let biome = BiomeGenerator::new(SEED, crate::biome::Generator::V2);
         let (col, cell) = mineshaft_chest(&biome);
         let mut world = generated(&biome, col, 1);
         assert!(world.chest_at(cell).is_some_and(|c| c.slots.iter().any(Option::is_some)), "a loot chest");
@@ -428,7 +428,7 @@ mod tests {
     #[test]
     fn an_unedited_column_saved_and_loaded_is_untouched() {
         let _guard = crate::save::WorldsRootGuard::new("verdict-save-load");
-        let biome = BiomeGenerator::new(SEED);
+        let biome = BiomeGenerator::new(SEED, crate::biome::Generator::V2);
         let (col, cell) = mineshaft_chest(&biome);
         let world = generated(&biome, col, 1);
         let name = format!("verdict-save-load-{}", std::process::id());
@@ -445,7 +445,7 @@ mod tests {
 
     #[test]
     fn decide_never_passes_its_count_and_skips_what_it_knows() {
-        let biome = BiomeGenerator::new(SEED);
+        let biome = BiomeGenerator::new(SEED, crate::biome::Generator::V2);
         let world = generated(&biome, (0, 0), 2);
         let mut v = Verdicts::default();
         v.touch((0, 0));
@@ -466,7 +466,7 @@ mod tests {
     fn an_untouched_verdict_caches_the_hash_its_notes_carry() {
         // B2b fix LOW-3: hashed once, from the verdict's scratch — equal to
         // the live column — and read by every note after.
-        let biome = BiomeGenerator::new(SEED);
+        let biome = BiomeGenerator::new(SEED, crate::biome::Generator::V2);
         let mut world = generated(&biome, (0, 0), 1);
         world.set_block(3, 90, 3, block::GLASS); // column (0, 0): touched
         let mut v = Verdicts::default();
@@ -484,7 +484,7 @@ mod tests {
     fn a_scratch_generation_leaves_out_what_the_world_holds() {
         // B2b fix HIGH-1: a joiner confirms a mismatch against generation,
         // not against its own column.
-        let biome = BiomeGenerator::new(SEED);
+        let biome = BiomeGenerator::new(SEED, crate::biome::Generator::V2);
         let mut world = generated(&biome, (0, 0), 1);
         let pristine = column_hash(&world, (0, 0));
         world.set_block(3, 90, 3, block::GLASS);
@@ -523,10 +523,11 @@ mod tests {
         world.set_placed(1, 2, 3, true);
         assert_ne!(column_hash(&world, (0, 0)), stone, "a placed bit changes it");
         // Pinned, so a change to the definition (or a platform difference)
-        // fails here, not on a joiner: SHA-256 of six `0` presence bytes.
-        assert_eq!(empty, 0xdc6a_f6b0, "the empty column's hash");
+        // fails here, not on a joiner: SHA-256 of sixteen `0` presence bytes
+        // (six, `0xdc6a_f6b0`, before the 256-block world, protocol v94).
+        assert_eq!(empty, 0xff08_4737, "the empty column's hash");
         // And a generated column hashes the same wherever it is generated.
-        let biome = BiomeGenerator::new(SEED);
+        let biome = BiomeGenerator::new(SEED, crate::biome::Generator::V2);
         let a = generated(&biome, (0, 0), 1);
         let mut b = World::new();
         b.generate_column(0, 0, &biome);
@@ -548,7 +549,7 @@ mod tests {
         assert_eq!(column_hash(&a, (0, 0)), u32::from_le_bytes([d[0], d[1], d[2], d[3]]), "same byte stream");
     }
 
-    /// B2b fix-2 N2: the empty-column pin above hashes six presence bytes and
+    /// B2b fix-2 N2: the empty-column pin above hashes only presence bytes and
     /// never reaches `feed_bytes`, so it proves nothing about the byte stream.
     /// This one pins a hand-built column — distinct block ids in several
     /// chunks, placed bits among them, no worldgen — so a change to the byte
@@ -574,7 +575,8 @@ mod tests {
         world.set_placed(5, 48, 5, true);
         world.set_placed(2, 80, 13, true);
         let pinned = column_hash(&world, (0, 0));
-        assert_eq!(pinned, 0xb9b5_de81, "the hand-built column's hash");
+        // `0xb9b5_de81` over six sections before the 256-block world (v94).
+        assert_eq!(pinned, 0x29b6_1f31, "the hand-built column's hash");
         // The same column built in the opposite order hashes the same.
         let mut reversed = World::new();
         reversed.set_block(2, 80, 13, block::OAK_LOG);
@@ -605,7 +607,7 @@ mod tests {
         let mut touched = Vec::new();
         let mut times = Vec::new();
         for seed in [1u32, 42, 1234, 99_999, 7_777_777] {
-            let biome = BiomeGenerator::new(seed);
+            let biome = BiomeGenerator::new(seed, crate::biome::Generator::V2);
             let centre = ((seed % 97) as i32 - 48, (seed % 89) as i32 - 44);
             let world = generated(&biome, centre, 5);
             for dx in -4..=4 {
@@ -664,7 +666,7 @@ mod tests {
         };
         let (mut verdict, mut verdict_big, mut hash, mut scratch) = (vec![], vec![], vec![], vec![]);
         for seed in [1u32, 42, 1234, 99_999, 7_777_777] {
-            let biome = BiomeGenerator::new(seed);
+            let biome = BiomeGenerator::new(seed, crate::biome::Generator::V2);
             let centre = ((seed % 97) as i32 - 48, (seed % 89) as i32 - 44);
             let mut world = generated(&biome, centre, 5);
             let cols: Vec<(i32, i32)> = (-4..=4)

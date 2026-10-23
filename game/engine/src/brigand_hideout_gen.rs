@@ -676,7 +676,7 @@ mod tests {
     use crate::item::{Item, MaterialId};
 
     fn bg(seed: u32) -> BiomeGenerator {
-        BiomeGenerator::new(seed)
+        BiomeGenerator::new(seed, crate::biome::Generator::V2)
     }
 
     #[test]

@@ -284,14 +284,14 @@ mod tests {
 
     #[test]
     fn nearest_village_returns_some_for_seed_42() {
-        let bg = BiomeGenerator::new(42);
+        let bg = BiomeGenerator::new(42, crate::biome::Generator::V2);
         let pos = nearest_village_anchor(42, &bg, Vec3::ZERO, 32);
         assert!(pos.is_some(), "expected at least one village within 32 cells of origin");
     }
 
     #[test]
     fn resolve_default_returns_saved_position() {
-        let bg = BiomeGenerator::new(42);
+        let bg = BiomeGenerator::new(42, crate::biome::Generator::V2);
         let saved = Vec3::new(123.0, 80.0, 456.0);
         let resolved = resolve_spawn(SpawnPref::Default, 42, &bg, saved);
         assert_eq!(resolved, saved);
@@ -299,7 +299,7 @@ mod tests {
 
     #[test]
     fn resolve_at_origin_returns_origin_at_surface() {
-        let bg = BiomeGenerator::new(42);
+        let bg = BiomeGenerator::new(42, crate::biome::Generator::V2);
         let resolved = resolve_spawn(SpawnPref::AtOrigin, 42, &bg, Vec3::new(999.0, 999.0, 999.0));
         assert_eq!(resolved.x, 0.5);
         assert_eq!(resolved.z, 0.5);
@@ -308,7 +308,7 @@ mod tests {
 
     #[test]
     fn resolve_near_village_finds_a_village_position() {
-        let bg = BiomeGenerator::new(42);
+        let bg = BiomeGenerator::new(42, crate::biome::Generator::V2);
         let saved = Vec3::new(0.0, 80.0, 0.0);
         let resolved = resolve_spawn(SpawnPref::NearVillage, 42, &bg, saved);
         // If the search worked, resolved should differ from saved (or
@@ -326,7 +326,7 @@ mod tests {
 
     #[test]
     fn biome_searches_find_matching_terrain() {
-        let bg = BiomeGenerator::new(42);
+        let bg = BiomeGenerator::new(42, crate::biome::Generator::V2);
         // For each biome-keyed pref, the resolved position's biome should
         // match. Search budget is generous so we expect a hit for each
         // major biome within reach of origin on seed 42.
@@ -349,7 +349,7 @@ mod tests {
 
     #[test]
     fn far_from_villages_actually_finds_a_village_free_cell() {
-        let bg = BiomeGenerator::new(42);
+        let bg = BiomeGenerator::new(42, crate::biome::Generator::V2);
         let resolved = resolve_spawn(SpawnPref::FarFromVillages, 42, &bg, Vec3::ZERO);
         // Predicate is cell_radius=0 — spawn cell itself has no village
         // (neighbour cells may; alpha village density makes stricter

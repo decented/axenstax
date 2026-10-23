@@ -73,6 +73,15 @@ impl Chunk {
         }
     }
 
+    /// An all-air chunk lit as open sky (sky light 15 in every cell, no block
+    /// light): what an absent section reads as. For a section a write conjures
+    /// above a column's terrain (`World::conjured_chunk`).
+    pub fn new_open_sky() -> Self {
+        let mut c = Self::new();
+        c.light = [15 << 4; CHUNK_VOLUME];
+        c
+    }
+
     /// Spec 02 §7.5 — must this chunk survive an unload? See the field doc.
     #[inline]
     pub fn persist(&self) -> bool {

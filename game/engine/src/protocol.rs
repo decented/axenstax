@@ -241,9 +241,42 @@ pub struct JoinRequestPacket {
     /// The joiner's render distance in columns (v69, Phase B2a). The server
     /// pushes chunks out to `min(this, its own limit)` round the joiner's
     /// body (`chunk_push`). `0` = not said: the server's limit applies.
-    /// Read once, at join. APPEND-ONLY: stays last.
+    /// Read once, at join.
     #[serde(default)]
     pub render_distance: u8,
+    /// The joiner's [`crate::world::worldgen_fingerprint_for`] for every
+    /// terrain generator it has other than v2 (v94; v2's is
+    /// [`Self::worldgen_version`] above, unchanged). The joiner does not yet
+    /// know the world's generator, so the host looks up its world's here
+    /// (`hosted_server::joiner_worldgen_fingerprint`); a generator missing
+    /// from the list reads as a mismatch (the host pushes real chunks).
+    /// APPEND-ONLY: stays last.
+    #[serde(default)]
+    pub generator_fingerprints: Vec<GeneratorFingerprint>,
+}
+
+/// One terrain generator's fingerprint a joiner announces
+/// (`JoinRequestPacket::generator_fingerprints`, v94).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GeneratorFingerprint {
+    /// `biome::Generator::version`.
+    pub generator: u32,
+    /// `world::worldgen_fingerprint_for` that generator.
+    pub fingerprint: u32,
+}
+
+impl GeneratorFingerprint {
+    /// This build's fingerprints for every generator after v2.
+    pub fn ours() -> Vec<GeneratorFingerprint> {
+        crate::biome::Generator::ALL
+            .into_iter()
+            .filter(|&g| g != crate::biome::Generator::V2)
+            .map(|g| GeneratorFingerprint {
+                generator: g.version(),
+                fingerprint: crate::world::worldgen_fingerprint_for(g),
+            })
+            .collect()
+    }
 }
 
 /// Server accepts a join request.
@@ -307,6 +340,13 @@ pub struct JoinAcceptPacket {
     pub action_life: u32,
     /// A separate bounded initial snapshot follows the numbered join Replace.
     pub has_personal_state: bool,
+    /// The world's terrain generator (v94; `biome::Generator::version`, the
+    /// host world's `WorldMeta.worldgen_version`). The joiner builds its
+    /// `BiomeGenerator` with it, and refuses the join when it does not have
+    /// that generator (`remote_client::join_generator_refusal`).
+    /// [`Self::worldgen_version`] is the host's fingerprint FOR this
+    /// generator. APPEND-ONLY: stays last.
+    pub generator: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -2808,7 +2848,18 @@ pub struct ServerAnnouncePacket {
 ///   `axenstax/…`, Fray's hello and LAN beacon) instead of plain QUIC on
 ///   7700/7705. Game packets and the join challenge are unchanged; the join
 ///   origin is Fray's TLS exporter under `EXPORTER-axenstax-join-v1`.
-pub const PROTOCOL_VERSION: u32 = 93;
+/// - v94 (2026-10-23, terrain T1): the world is 256 blocks tall (sections
+///   cy 0..=15; a pushed column is 16 chunks) and records its terrain
+///   generator. [`JoinAcceptPacket`] appends `generator: u32` (after
+///   `has_personal_state`): the world's generator, which the joiner builds
+///   its terrain with; its `worldgen_version` is now the host's fingerprint
+///   for that generator. [`JoinRequestPacket`] appends
+///   `generator_fingerprints: Vec<GeneratorFingerprint>` (after
+///   `render_distance`; `{ generator, fingerprint: u32 }`): the joiner's
+///   fingerprint for every generator after v2 (v2's stays in
+///   `worldgen_version`, the same value as before). A `ColumnLocal` hash
+///   covers 16 chunks.
+pub const PROTOCOL_VERSION: u32 = 94;
 
 /// The `protocol_version` of a JoinRequest payload that doesn't decode as this
 /// build's `JoinRequestPacket` (an older or newer client's shape). It is the
@@ -2993,7 +3044,8 @@ mod tests {
     fn protocol_version_bumped() {
         // D2c-2 — v91, source-backed entity packs after handover's v90.
         // v92 — D2c-3 quest foundation; v93 — "Host Game" and its joins on Fray.
-        assert_eq!(super::PROTOCOL_VERSION, 93);
+        // v94 — terrain T1: 256-block world, per-world terrain generator.
+        assert_eq!(super::PROTOCOL_VERSION, 94);
     }
 
     #[test]
@@ -3749,7 +3801,8 @@ mod tests {
         //   mode/namespace/life.
         // v92 (D2c-3 foundation): QuestResult (76), QuestView (77).
         // v93 (Fray): "Host Game" and its joins on Fray's transport.
-        assert_eq!(PROTOCOL_VERSION, 93);
+        // v94 (terrain T1): JoinAccept.generator, JoinRequest.generator_fingerprints.
+        assert_eq!(PROTOCOL_VERSION, 94);
     }
 
     fn sample_accept() -> JoinAcceptPacket {
@@ -3782,6 +3835,7 @@ mod tests {
             action_session: [7; 16],
             action_life: 0,
             has_personal_state: false,
+            generator: crate::biome::Generator::V2.version(),
         }
     }
 
@@ -4870,6 +4924,7 @@ mod tests {
             worldgen_version: crate::world::worldgen_fingerprint(),
             ws_host: String::new(),
             render_distance: 0,
+            generator_fingerprints: crate::protocol::GeneratorFingerprint::ours(),
         };
         let bytes = serialize_packet(PacketType::JoinRequest, &req);
         let (ptype, payload) = deserialize_header(&bytes).unwrap();
@@ -4935,6 +4990,7 @@ mod tests {
             worldgen_version: crate::world::worldgen_fingerprint(),
             ws_host: "play.example.org:6767".to_string(),
             render_distance: 0,
+            generator_fingerprints: crate::protocol::GeneratorFingerprint::ours(),
         };
         let bytes = serialize_packet(PacketType::JoinRequest, &req);
         let (_ptype, payload) = deserialize_header(&bytes).unwrap();

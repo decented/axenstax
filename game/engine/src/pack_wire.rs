@@ -168,7 +168,7 @@ mod tests {
 
     #[test]
     fn d2c2_pack_wire_pins_tags_and_appended_unpredicted_intent() {
-        assert_eq!(crate::protocol::PROTOCOL_VERSION, 93);
+        assert_eq!(crate::protocol::PROTOCOL_VERSION, 94);
         assert_eq!(crate::protocol::PacketType::PackResult as u8, 74);
         assert_eq!(crate::protocol::PacketType::PackView as u8, 75);
         assert_eq!(crate::protocol::entity_flags::PACK, 128);
