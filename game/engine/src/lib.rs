@@ -62,6 +62,8 @@ mod block_update;
 mod power;
 mod beam;
 mod graphics_settings;
+mod quality_governor;
+mod draw_order;
 mod input;
 mod item;
 mod inventory;
@@ -240,6 +242,10 @@ mod entity_model;
 mod viewmodel;
 mod game_loop;
 mod chunk_stream;
+// Batch meshing for freshly streamed columns (Spec 03 §10.2).
+mod stream_mesh;
+// Fixed-rate tick catch-up policy: backlog clamp + per-frame tick-time budget.
+mod tick_catchup;
 mod prediction; // Spec 04 §5.3 — a joiner's prediction + reconciliation of its own body.
 mod block_interact;
 mod falling_blocks;
@@ -524,6 +530,10 @@ mod replay_player;
 // The money-word lint's single word list + shared scanner (see `copy_lint.rs`).
 #[cfg(test)]
 mod copy_lint;
+// CPU-only world benchmark (`#[ignore]`; see the module doc).
+#[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
+mod perf_bench;
 #[cfg(test)]
 #[cfg(not(target_arch = "wasm32"))]
 mod test_harness;
@@ -1006,8 +1016,15 @@ pub(crate) struct GameState {
     pub(crate) last_tick: Instant,
     pub(crate) tick_accumulator: Duration,
     /// Wall-clock time the last frame was paced (Spec 39 A3 frame cap). Native
-    /// only; WASM is paced by requestAnimationFrame.
+    /// sleeps off the remainder; WASM (paced by requestAnimationFrame) skips a
+    /// render that comes sooner than the cap interval.
     pub(crate) frame_pace_instant: Instant,
+    /// Web frame-cap deadline (Perf B1); `frame_pace_instant` is its epoch.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) frame_cap: crate::graphics_settings::FrameCap,
+    /// The display's period as seen by rAF ticks (web; feeds the governor's target).
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) raf_period: crate::quality_governor::RafPeriod,
     pub(crate) show_debug: bool,
     /// #6 — minimap render state (explored-map cache + last baked texture +
     /// refresh throttle). Empty/None until the first frame paints it.
@@ -1496,6 +1513,12 @@ pub(crate) struct GameState {
     /// by `update_and_render`, consumed by the #44 debug-HUD FPS line (native +
     /// WASM).
     pub(crate) frame_samples: std::collections::VecDeque<f32>,
+    /// Auto-quality governor (Spec 03 §10.3): the temporary offset below the
+    /// player's graphics values. Never persisted; see `quality_governor`.
+    pub(crate) governor: crate::quality_governor::Governor,
+    /// The display's refresh rate (millihertz) as last read from the window,
+    /// and when; re-read every couple of seconds (the window may move monitors).
+    pub(crate) display_refresh: (Option<u32>, Option<Instant>),
     /// Last observed frame start timestamp, used to compute the next frame
     /// delta. None on the first frame.
     pub(crate) last_frame_instant: Option<Instant>,
@@ -1845,12 +1868,36 @@ impl GameState {
 
         let input = InputState::new();
         let mut audio = crate::audio::AudioEngine::new();
+        // Graphics settings for this device. A first run (nothing persisted yet,
+        // real window only) starts on the preset the adapter and platform call
+        // for, with auto quality on; an existing file is loaded as it stands.
+        let graphics = {
+            let first_run = if window.is_some()
+                && crate::graphics_settings::GraphicsSettings::is_first_run()
+            {
+                let is_touch =
+                    cfg!(target_os = "android") || crate::touch_input::is_touch_device();
+                let class = renderer.adapter_device_type();
+                let preset = crate::graphics_settings::recommend_preset(
+                    class,
+                    is_touch,
+                    cfg!(target_arch = "wasm32"),
+                );
+                log::info!(
+                    "First run: adapter {class:?}, touch {is_touch} -> {} preset, auto quality on",
+                    preset.label()
+                );
+                Some(preset)
+            } else {
+                None
+            };
+            crate::graphics_settings::GraphicsSettings::load_or_first_run(first_run)
+        };
         // Persisted master volume + mute (per-device, native and web).
         {
-            let saved = crate::graphics_settings::GraphicsSettings::load();
-            audio.set_master(saved.master_volume, saved.audio_muted);
+            audio.set_master(graphics.master_volume, graphics.audio_muted);
             // B2a — every JoinRequest announces this machine's render distance.
-            crate::remote_client::set_join_render_distance(saved.render_distance);
+            crate::remote_client::set_join_render_distance(graphics.render_distance);
         }
 
         // Create a single PlayerSlot for player 0
@@ -1889,6 +1936,10 @@ impl GameState {
             last_tick: Instant::now(),
             tick_accumulator: Duration::ZERO,
             frame_pace_instant: Instant::now(),
+            #[cfg(target_arch = "wasm32")]
+            frame_cap: crate::graphics_settings::FrameCap::new(),
+            #[cfg(target_arch = "wasm32")]
+            raf_period: crate::quality_governor::RafPeriod::new(),
             show_debug: false,
             minimap: crate::minimap::MinimapView::default(),
             map_screen: crate::minimap::MapScreen::default(),
@@ -1967,17 +2018,16 @@ impl GameState {
                 // Alpha-tester gate: /bug, /idea, /mailbox stay hidden unless
                 // the player unlocked them in Settings (native only).
                 #[cfg(not(target_arch = "wasm32"))]
-                crate::native_mailbox::apply_gate(
-                    &mut r,
-                    &crate::graphics_settings::GraphicsSettings::load(),
-                );
+                crate::native_mailbox::apply_gate(&mut r, &graphics);
                 r
             },
             autosave_counter: 0,
             weather_rain_until: 0,
             weather_lock_applied: None,
             wind: crate::wind::WindSample::CALM,
-            graphics: crate::graphics_settings::GraphicsSettings::load(),
+            graphics,
+            governor: crate::quality_governor::Governor::new(),
+            display_refresh: (None, None),
             play_mode: crate::play_mode::PlayMode::Survival,
             is_creative: false,
             is_commands_enabled: true,

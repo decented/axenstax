@@ -5677,6 +5677,10 @@ pub fn plan_lobby_settings(
 #[derive(Default)]
 pub struct SettingsPanelState {
     pub open: bool,
+    /// Set by the game loop each frame the panel is drawn: what the auto-quality
+    /// governor is currently holding below the player's values (`None` when it
+    /// is not holding anything). Read-only here.
+    pub governor_note: Option<String>,
     #[cfg(not(target_arch = "wasm32"))]
     pub relays: crate::relays_ui::RelaysUiState,
     /// Tap counter behind the version line — seven quick taps switch alpha-
@@ -5740,7 +5744,10 @@ pub fn draw_settings_panel(
                     .fill(PANEL_BG)
                     .corner_radius(egui::CornerRadius::same(4))
                     .stroke(stroke);
-                    if ui.add(btn).clicked() && !selected {
+                    // Clicking the preset already shown still applies it: the
+                    // pixel budget and Leaves: Fast are set by a pick but are
+                    // not part of the label, so an old Low file picks them up here.
+                    if ui.add(btn).clicked() {
                         gfx.apply_preset(p);
                         changed = true;
                     }
@@ -5928,6 +5935,36 @@ pub fn draw_settings_panel(
                 .changed()
             {
                 changed = true;
+            }
+            // Perf B2 — "Leaves: Fast": solid-looking leaves that skip the see-through
+            // pass and every hidden inner face. A preset dial (Potato and Low on).
+            if ui
+                .checkbox(&mut gfx.leaves_fast, "Leaves: Fast")
+                .on_hover_text(
+                    "Draws leaves as solid blocks with no see-through gaps. \
+                     Treetops look flatter but the game runs faster, most on \
+                     slower machines. The Low and Potato presets turn it on.",
+                )
+                .changed()
+            {
+                changed = true;
+            }
+            // Perf B1 — auto quality (Spec 03 §10.3): lowers distance, then scale,
+            // then particles while frames run long, and restores them when they
+            // recover. Never changes or saves the values above.
+            if ui
+                .checkbox(&mut gfx.auto_quality, "Auto quality")
+                .on_hover_text(
+                    "If the game runs slowly, temporarily lowers render distance, \
+                     then render scale, then particles - and puts them back when \
+                     it speeds up. Your own settings are never changed.",
+                )
+                .changed()
+            {
+                changed = true;
+            }
+            if let Some(note) = state.governor_note.as_deref() {
+                ui.label(egui::RichText::new(note).size(11.0).color(SUBTITLE_COLOR));
             }
             // #44 — make the F3 debug overlay discoverable for players who don't
             // know the key. This is the on-load default; F3 still toggles live.

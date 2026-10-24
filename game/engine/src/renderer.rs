@@ -380,6 +380,10 @@ pub struct PlayerGpuResources {
     /// with (`CameraUniform::camera_pos`, what the fog measures from), cached by
     /// `update_camera` for the chunk draw-distance cull (`render_world_viewport`).
     pub last_camera_pos: glam::Vec3,
+    /// Cached nearest-first order of the opaque section draws for this player's
+    /// camera (Perf B2), rebuilt only when the camera crosses a section boundary
+    /// or `Renderer::chunk_mesh_epoch` moves.
+    pub opaque_order: crate::draw_order::SectionOrder,
 }
 
 /// Per-frame draw/culling counters, surfaced in the F3 overlay (Spec 39 A1).
@@ -500,6 +504,24 @@ fn choose_surface_formats(
     (config_format, render_format, view_formats)
 }
 
+/// Applies `$body` to each of the renderer's per-section mesh maps (`$m` is the
+/// map, `&mut`), keyed by section position: the ONE list of them.
+/// [`Renderer::drop_section`] and [`Renderer::clear_world_meshes`] both go
+/// through it, so a new per-section map is added here and nowhere else.
+/// (`$body` is expanded once per map, so it may differ in type each time.)
+macro_rules! per_section_mesh_maps {
+    ($r:expr, |$m:ident| $body:expr) => {{
+        let r = &mut *$r;
+        { let $m = &mut r.chunk_meshes; $body; }
+        { let $m = &mut r.water_meshes; $body; }
+        { let $m = &mut r.transparent_meshes; $body; }
+        { let $m = &mut r.plant_meshes; $body; }
+        { let $m = &mut r.decal_meshes; $body; }
+        { let $m = &mut r.micro_meshes; $body; }
+        { let $m = &mut r.micro_billboard_meshes; $body; }
+    }};
+}
+
 pub struct Renderer {
     pub surface: Option<wgpu::Surface<'static>>,
     /// Retained so the surface can be REBUILT, not just dropped.
@@ -559,6 +581,10 @@ pub struct Renderer {
     /// `tick_counter`, so animation pauses exactly when the game does.
     anim_clock: u64,
     pub chunk_meshes: ahash::AHashMap<(i32, i32, i32), GpuChunkMesh>,
+    /// Bumped whenever a key is added to or removed from `chunk_meshes` (not
+    /// when a mesh is replaced under an existing key): the cache key of every
+    /// player's `opaque_order`.
+    chunk_mesh_epoch: u64,
     /// Per-frame draw/cull counters (Spec 39 A1) — read by the F3 overlay.
     pub last_draw_stats: DrawStats,
     /// Crosshair vertex buffers keyed by viewport `(width, height)` (Spec 39 A2).
@@ -571,6 +597,13 @@ pub struct Renderer {
     /// size then upscale-blit to the surface — the biggest weak-GPU lever (UI
     /// still draws crisp at native res on top).
     pub render_scale: f32,
+    /// The scale the settings ask for, before the pixel budget caps it.
+    /// `render_scale` above is `budgeted_scale(requested, pixel_budget, w, h)`.
+    requested_render_scale: f32,
+    /// Cap on the world's physical pixel count (`GraphicsSettings.pixel_budget`).
+    pixel_budget: Option<u32>,
+    /// What kind of adapter this is (first-run default detection).
+    adapter_device_type: wgpu::DeviceType,
     /// Offscreen world target (color view, depth view) + the blit bind group,
     /// present only when `render_scale < 1.0`.
     offscreen_color_view: Option<wgpu::TextureView>,
@@ -993,6 +1026,8 @@ impl Renderer {
         let adapter = adapter.expect("Failed to find a suitable GPU adapter");
 
         log::info!("GPU adapter: {:?}", adapter.get_info().name);
+        let adapter_device_type = adapter.get_info().device_type;
+        log::info!("GPU adapter class: {adapter_device_type:?}");
 
         // Native capability gate — mirrors the web pre-flight probe's floor.
         // The block-texture atlas needs one array layer per registered block
@@ -1516,6 +1551,7 @@ impl Renderer {
             block_mipmaps,
             anim_clock: 0,
             chunk_meshes: ahash::AHashMap::new(),
+            chunk_mesh_epoch: 0,
             water_pipeline,
             water_meshes: ahash::AHashMap::new(),
             transparent_pipeline,
@@ -1590,10 +1626,14 @@ impl Renderer {
                 viewmodel_camera_bind_group: vm_cam_bg,
                 last_view_proj: glam::Mat4::IDENTITY,
                 last_camera_pos: glam::Vec3::ZERO,
+                opaque_order: crate::draw_order::SectionOrder::new(),
             }],
             last_draw_stats: DrawStats::default(),
             crosshair_cache: ahash::AHashMap::new(),
             render_scale: 1.0,
+            requested_render_scale: 1.0,
+            pixel_budget: None,
+            adapter_device_type,
             offscreen_color_view: None,
             offscreen_depth_view: None,
             offscreen_bind_group: None,
@@ -1693,7 +1733,9 @@ impl Renderer {
                 surface.configure(&self.device, &config);
             }
             self.depth_texture_view = create_depth_texture(&self.device, width, height);
-            // Render-scale offscreen target follows the surface size (Spec 39 P5).
+            // Render-scale offscreen target follows the surface size (Spec 39 P5);
+            // the pixel budget makes the scale itself depend on that size.
+            self.render_scale = self.budgeted_render_scale();
             self.recreate_offscreen();
         }
     }
@@ -1742,12 +1784,52 @@ impl Renderer {
     /// smaller offscreen target then upscales it — the biggest weak-GPU lever.
     /// Recreates the offscreen target at the new size; UI still draws at native.
     pub fn set_render_scale(&mut self, scale: f32) {
-        let scale = scale.clamp(crate::graphics_settings::RENDER_SCALE_MIN, 1.0);
+        self.requested_render_scale =
+            scale.clamp(crate::graphics_settings::RENDER_SCALE_MIN, 1.0);
+        self.apply_render_scale();
+    }
+
+    /// Set the pixel budget that caps the render scale (`None` = uncapped).
+    pub fn set_pixel_budget(&mut self, budget: Option<u32>) {
+        self.pixel_budget = budget;
+        self.apply_render_scale();
+    }
+
+    /// The largest render scale the pixel budget allows on this surface (1.0
+    /// with no budget). The auto-quality governor skips scale steps this
+    /// already swallows and shows the scale actually drawn.
+    pub fn budget_scale_cap(&self) -> f32 {
+        crate::graphics_settings::budgeted_scale(
+            crate::graphics_settings::RENDER_SCALE_MAX,
+            self.pixel_budget,
+            self.width,
+            self.height,
+        )
+    }
+
+    /// The scale actually in use for the surface size now: the requested scale
+    /// held under the pixel budget.
+    fn budgeted_render_scale(&self) -> f32 {
+        crate::graphics_settings::budgeted_scale(
+            self.requested_render_scale,
+            self.pixel_budget,
+            self.width,
+            self.height,
+        )
+    }
+
+    fn apply_render_scale(&mut self) {
+        let scale = self.budgeted_render_scale();
         if (scale - self.render_scale).abs() < 1e-4 {
             return;
         }
         self.render_scale = scale;
         self.recreate_offscreen();
+    }
+
+    /// The adapter class wgpu reports (`Other` on most browsers).
+    pub fn adapter_device_type(&self) -> wgpu::DeviceType {
+        self.adapter_device_type
     }
 
     /// (Re)build the offscreen world target to match the current size + scale.
@@ -1852,12 +1934,15 @@ impl Renderer {
             viewmodel_camera_bind_group,
             last_view_proj: glam::Mat4::IDENTITY,
             last_camera_pos: glam::Vec3::ZERO,
+            opaque_order: crate::draw_order::SectionOrder::new(),
         }
     }
 
     pub fn upload_chunk_mesh(&mut self, pos: (i32, i32, i32), mesh: &ChunkMesh) {
         if mesh.vertices.is_empty() {
-            self.chunk_meshes.remove(&pos);
+            if self.chunk_meshes.remove(&pos).is_some() {
+                self.chunk_mesh_epoch += 1;
+            }
             return;
         }
 
@@ -1877,7 +1962,7 @@ impl Renderer {
                 usage: wgpu::BufferUsages::INDEX,
             });
 
-        self.chunk_meshes.insert(
+        let replaced = self.chunk_meshes.insert(
             pos,
             GpuChunkMesh {
                 vertex_buffer,
@@ -1885,6 +1970,9 @@ impl Renderer {
                 index_count: mesh.indices.len() as u32,
             },
         );
+        if replaced.is_none() {
+            self.chunk_mesh_epoch += 1;
+        }
     }
 
     pub fn upload_water_mesh(&mut self, pos: (i32, i32, i32), mesh: &ChunkMesh) {
@@ -1991,9 +2079,30 @@ impl Renderer {
         );
     }
 
-    /// Upload all three GPU representations for a chunk at once — opaque
-    /// mesh, water mesh, and instanced plants. Single entry point so no
-    /// call site can forget the plant instances (added 2026-05-30).
+    /// Drop every GPU mesh held for one section: the inverse of
+    /// [`Self::upload_chunk`]. Shares [`per_section_mesh_maps`] with
+    /// [`Self::clear_world_meshes`], the one list of every per-section mesh map.
+    pub fn drop_section(&mut self, pos: (i32, i32, i32)) {
+        let had_opaque = self.chunk_meshes.contains_key(&pos);
+        per_section_mesh_maps!(self, |m| {
+            m.remove(&pos);
+        });
+        if had_opaque {
+            self.chunk_mesh_epoch += 1;
+        }
+    }
+
+    /// Drop every per-section GPU mesh (a world change): opaque, water,
+    /// transparent (leaves, glass), plants, decals, micro-models and their far
+    /// billboards. Both world-change sites call this, so no map can be
+    /// forgotten at one of them (transparent meshes were: the last world's
+    /// canopies and glass hung in the next world's sky). The per-type baked
+    /// micro shell geometry is not per-section; see [`Self::clear_micro_geo`].
+    pub fn clear_world_meshes(&mut self) {
+        per_section_mesh_maps!(self, |m| m.clear());
+        self.chunk_mesh_epoch += 1;
+    }
+
     pub fn upload_chunk(&mut self, pos: (i32, i32, i32), meshes: &crate::mesh::ChunkMeshes) {
         self.upload_chunk_mesh(pos, &meshes.opaque);
         self.upload_water_mesh(pos, &meshes.water);
@@ -3001,6 +3110,18 @@ impl Renderer {
                 let crate::screen::ScreenContent::LocalPlayer(player_index) = screen.content;
                 let crosshair_buf =
                     &self.crosshair_cache[&(screen.viewport.width, screen.viewport.height)];
+                // Perf B2 — refresh this player's nearest-first order of the opaque
+                // section draws (a re-sort only when the camera crosses a section
+                // boundary or the set of meshes changes).
+                {
+                    let epoch = self.chunk_mesh_epoch;
+                    let meshes = &self.chunk_meshes;
+                    if let Some(g) = self.player_gpu.get_mut(player_index) {
+                        let cam = g.last_camera_pos;
+                        g.opaque_order
+                            .nearest_first(cam, epoch, || meshes.keys().copied().collect());
+                    }
+                }
                 if let Some(gpu) = self.player_gpu.get(player_index) {
                     // Build this player's culling frustum from the cached view-proj (A1).
                     let frustum = crate::camera::Frustum::from_view_proj(gpu.last_view_proj);
@@ -3333,6 +3454,7 @@ impl Renderer {
         };
 
         log::info!("Headless adapter: {:?}", adapter.get_info().name);
+        let adapter_device_type = adapter.get_info().device_type;
 
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
@@ -3789,6 +3911,7 @@ impl Renderer {
             block_mipmaps,
             anim_clock: 0,
             chunk_meshes: ahash::AHashMap::new(),
+            chunk_mesh_epoch: 0,
             water_pipeline,
             water_meshes: ahash::AHashMap::new(),
             transparent_pipeline,
@@ -3863,10 +3986,14 @@ impl Renderer {
                 viewmodel_camera_bind_group: vm_cam_bg,
                 last_view_proj: glam::Mat4::IDENTITY,
                 last_camera_pos: glam::Vec3::ZERO,
+                opaque_order: crate::draw_order::SectionOrder::new(),
             }],
             last_draw_stats: DrawStats::default(),
             crosshair_cache: ahash::AHashMap::new(),
             render_scale: 1.0,
+            requested_render_scale: 1.0,
+            pixel_budget: None,
+            adapter_device_type,
             offscreen_color_view: None,
             offscreen_depth_view: None,
             offscreen_bind_group: None,
@@ -4452,15 +4579,36 @@ fn render_world_viewport(
         pass.set_pipeline(render_pipeline);
         pass.set_bind_group(1, texture_bind_group, &[]);
 
-        for (&(cx, cy, cz), gpu_mesh) in chunk_meshes.iter() {
-            if !chunk_visible(cx, cy, cz) {
-                stats.culled += 1;
-                continue;
+        // Nearest section first (Perf B2): the depth test then rejects the
+        // fragments of everything behind before they are shaded. The cached order
+        // is trusted only while it covers exactly the uploaded meshes; otherwise
+        // (it cannot happen through `render`, which refreshes it) fall back to the
+        // map's own order so nothing is ever left undrawn.
+        let ordered = gpu.opaque_order.current();
+        if ordered.len() == chunk_meshes.len() {
+            for key in ordered {
+                let Some(gpu_mesh) = chunk_meshes.get(key) else { continue };
+                let (cx, cy, cz) = *key;
+                if !chunk_visible(cx, cy, cz) {
+                    stats.culled += 1;
+                    continue;
+                }
+                pass.set_vertex_buffer(0, gpu_mesh.vertex_buffer.slice(..));
+                pass.set_index_buffer(gpu_mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..gpu_mesh.index_count, 0, 0..1);
+                stats.draw_calls += 1;
             }
-            pass.set_vertex_buffer(0, gpu_mesh.vertex_buffer.slice(..));
-            pass.set_index_buffer(gpu_mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..gpu_mesh.index_count, 0, 0..1);
-            stats.draw_calls += 1;
+        } else {
+            for (&(cx, cy, cz), gpu_mesh) in chunk_meshes.iter() {
+                if !chunk_visible(cx, cy, cz) {
+                    stats.culled += 1;
+                    continue;
+                }
+                pass.set_vertex_buffer(0, gpu_mesh.vertex_buffer.slice(..));
+                pass.set_index_buffer(gpu_mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..gpu_mesh.index_count, 0, 0..1);
+                stats.draw_calls += 1;
+            }
         }
         // Opaque solid texels must occlude later transparent colour/water.
         pass.set_pipeline(transparent_depth_pipeline);

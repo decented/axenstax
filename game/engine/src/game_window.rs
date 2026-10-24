@@ -50,6 +50,20 @@ impl GameWindow {
         }
     }
 
+    /// The refresh rate of the monitor the window is on, in millihertz, where
+    /// winit reports it (native only; a browser hides it). The auto-quality
+    /// governor will not judge frames against a target faster than this.
+    pub(crate) fn refresh_rate_millihertz(&self) -> Option<u32> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.winit()?.current_monitor()?.refresh_rate_millihertz()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            None
+        }
+    }
+
     pub(crate) fn request_redraw(&self) {
         if let Self::Real(w) = self {
             w.request_redraw();

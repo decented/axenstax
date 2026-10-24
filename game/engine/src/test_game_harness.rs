@@ -195,6 +195,124 @@ mod tests {
         hg.frames(3);
     }
 
+    /// Perf A review S1: a section vacated by a chunk push, and a column
+    /// unloaded, must lose their transparent (leaves, glass) mesh too, not
+    /// just the opaque, water, plant, decal and micro ones.
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_dropping_a_section_or_column_clears_its_transparent_mesh() {
+        isolate_saves();
+        let mut hg = HeadlessGame::boot_into_world("harness-drop-transparent");
+        hg.frames(3);
+        let st = &mut hg.state;
+        let pos = (0, crate::world::MAX_CHUNK_Y, 0);
+        let stamp = |st: &mut crate::GameState, block| {
+            st.world.set_block(5, pos.1 * 16 + 5, 5, block);
+            let meshes = crate::mesh::build_chunk_meshes(pos.0, pos.1, pos.2, &st.world, &st.registry);
+            st.renderer.upload_chunk(pos, &meshes);
+        };
+        // Section vacated.
+        stamp(st, crate::block::GLASS);
+        assert!(st.renderer.transparent_meshes.contains_key(&pos), "glass must mesh as transparent");
+        st.drop_section_meshes(pos);
+        assert!(!st.renderer.transparent_meshes.contains_key(&pos), "section drop leaked the transparent mesh");
+        // Column unloaded.
+        stamp(st, crate::block::OAK_LEAVES);
+        assert!(st.renderer.transparent_meshes.contains_key(&pos), "leaves must mesh as transparent");
+        st.drop_column_meshes((pos.0, pos.2));
+        assert!(!st.renderer.transparent_meshes.contains_key(&pos), "column drop leaked the transparent mesh");
+    }
+
+    /// Perf review X2: a joined client (push-only or not) must never let the
+    /// governor shorten its streamed distance; its server pushes at the
+    /// distance it announces and would re-send the ring in between.
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_a_joined_client_never_has_its_distance_shortened_by_the_governor() {
+        isolate_saves();
+        let mut hg = HeadlessGame::boot_into_world("harness-governor-joined");
+        hg.state.graphics.auto_quality = true;
+        assert!(hg.state.governor_may_shrink_distance(), "its own world: it may");
+        let mut server = crate::hosted_server::HostedServer::start(
+            0,
+            format!("harness-governor-joined-server-{}", std::process::id()),
+            42,
+            0,
+            crate::hosted_server::RemoteTransport::WebSocket { port: 0 },
+        )
+        .expect("dedicated server starts");
+        let transport = server.attach_test_remote();
+        hg.state.remote_client = Some(crate::remote_client::RemoteClient::from_transport(
+            Box::new(transport),
+            crate::remote_client::build_join_request_guest("Governed", 0),
+            None,
+        ));
+        assert!(!hg.state.joined_push_only, "a normal joiner, not a worldgen-mismatch one");
+        assert!(!hg.state.governor_may_shrink_distance());
+        let rd = hg.state.graphics.render_distance;
+        let max = crate::quality_governor::max_level(&hg.state.graphics, false, crate::quality_governor::NO_SCALE_CAP);
+        for _ in 0..4000 {
+            let dt = 0.200 * 0.8f32.powi(hg.state.governor.level() as i32);
+            hg.state.governor.update(dt, 1.0 / 60.0, max);
+        }
+        assert!(hg.state.governor.level() > 0, "the machine is slow: it stepped down");
+        assert_eq!(hg.state.effective_render_distance(), rd, "but never the distance");
+    }
+
+    /// Perf review S4: leaving a world must drop EVERY per-section mesh map,
+    /// transparent (leaves, glass) included, or the last world's canopies and
+    /// glass hang in the next world's sky (an all-air section never uploads or
+    /// drops anything, so nothing else clears them).
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_a_world_change_drops_every_per_section_mesh_map() {
+        isolate_saves();
+        let mut hg = HeadlessGame::boot_into_world("harness-world-change-meshes");
+        hg.frames(3);
+        let all_empty = |r: &crate::renderer::Renderer| {
+            r.chunk_meshes.is_empty()
+                && r.water_meshes.is_empty()
+                && r.transparent_meshes.is_empty()
+                && r.plant_meshes.is_empty()
+                && r.decal_meshes.is_empty()
+                && r.micro_meshes.is_empty()
+                && r.micro_billboard_meshes.is_empty()
+        };
+        // Stamp one section with stone, glass, leaves, water and a plant, high
+        // in the world where no terrain meshes, and upload it.
+        let pos = (0, crate::world::MAX_CHUNK_Y, 0);
+        let st = &mut hg.state;
+        for (i, b) in [
+            crate::block::STONE,
+            crate::block::GLASS,
+            crate::block::OAK_LEAVES,
+            crate::block::WATER,
+            crate::block::TALL_GRASS,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            st.world.set_block(2 + 2 * i as i32, pos.1 * 16 + 5, 5, b);
+        }
+        let meshes = crate::mesh::build_chunk_meshes(pos.0, pos.1, pos.2, &st.world, &st.registry);
+        st.renderer.upload_chunk(pos, &meshes);
+        assert!(st.renderer.chunk_meshes.contains_key(&pos), "opaque meshed");
+        assert!(st.renderer.transparent_meshes.contains_key(&pos), "glass and leaves meshed");
+        assert!(!all_empty(&st.renderer));
+        // The real world-change reset.
+        st.reset_for_world_change();
+        assert!(st.renderer.transparent_meshes.is_empty(), "the last world's leaves and glass stayed");
+        assert!(all_empty(&st.renderer), "a per-section mesh map survived the world change");
+        // And the Workshop reset: re-stamp, make it a Workshop, reset the room.
+        st.world.set_block(2, pos.1 * 16 + 5, 5, crate::block::GLASS);
+        let meshes = crate::mesh::build_chunk_meshes(pos.0, pos.1, pos.2, &st.world, &st.registry);
+        st.renderer.upload_chunk(pos, &meshes);
+        assert!(st.renderer.transparent_meshes.contains_key(&pos));
+        st.world.is_workshop = true;
+        st.reset_workshop_space();
+        assert!(all_empty(&st.renderer), "the Workshop reset left a mesh map behind");
+    }
+
     #[test]
     #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
     fn game_harness_raid_kill_attribution_settles_through_the_live_game_loop() {

@@ -46,6 +46,25 @@ impl Frustum {
     pub fn contains_aabb(&self, min: Vec3, max: Vec3) -> bool {
         frustum_contains_aabb(&self.planes, min, max)
     }
+
+    /// True if the sphere is at least partially inside the frustum.
+    /// Conservative like [`Self::contains_aabb`]: a sphere just outside a
+    /// corner may be kept, one that is visible never culled. The planes are
+    /// not unit length (they are matrix-row sums), so each distance is
+    /// normalised before it is compared with the radius.
+    pub fn contains_sphere(&self, centre: Vec3, radius: f32) -> bool {
+        for p in &self.planes {
+            let n = Vec3::new(p.x, p.y, p.z);
+            let len = n.length();
+            if len <= f32::EPSILON {
+                continue; // degenerate plane: cannot cull on it
+            }
+            if (n.dot(centre) + p.w) / len < -radius {
+                return false;
+            }
+        }
+        true
+    }
 }
 
 /// Pure frustum-vs-AABB test (Spec 03 §5.2). Returns `false` only when the box
@@ -692,18 +711,45 @@ pub fn chunk_draw_columns(render_distance: i32) -> i32 {
     render_distance.max(0).saturating_add(1)
 }
 
+/// Is a column `(dx, dz)` columns from the centre within a ROUND range of
+/// `radius` columns (Euclidean on column indices: `dx² + dz² <= radius²`)?
+/// The one range test the client's draw and its own streaming share (Perf B2:
+/// a circle covers ~21% fewer columns than the square it replaces, and the
+/// distance fog is circular anyway). `i32::MAX` = no limit; a negative radius
+/// is treated as zero. Pure; exact in `i64` so a far offset cannot overflow.
+pub fn column_in_round_range(dx: i32, dz: i32, radius: i32) -> bool {
+    column_in_round_range_wide(i64::from(dx), i64::from(dz), radius)
+}
+
+/// [`column_in_round_range`] for offsets that may not fit an `i32` (the
+/// difference of two far-apart column indices).
+pub fn column_in_round_range_wide(dx: i64, dz: i64, radius: i32) -> bool {
+    if radius == i32::MAX {
+        return true;
+    }
+    let r = i64::from(radius.max(0));
+    dx * dx + dz * dz <= r * r
+}
+
 /// Final review fix 3 — is the chunk column `(cx, cz)` within `max_cols`
 /// columns of the camera at `eye`, horizontally? (A chunk's height never
-/// matters: a column is drawn whole or not at all.) Pure + tested; the
-/// renderer asks it of every chunk-keyed draw loop beside the frustum test.
+/// matters: a column is drawn whole or not at all.) Round since Perf B2: the
+/// distance is measured from the camera's column centre
+/// ([`column_in_round_range`]), so the square's corners — which the circular
+/// fog already hides — are skipped. Pure + tested; the renderer asks it of
+/// every chunk-keyed draw loop beside the frustum test.
 pub fn chunk_in_draw_range(eye: Vec3, cx: i32, cz: i32, max_cols: i32) -> bool {
     let cs = crate::chunk::CHUNK_SIZE as i32;
     let (ex, ez) = (
         (eye.x.floor() as i32).div_euclid(cs),
         (eye.z.floor() as i32).div_euclid(cs),
     );
-    let max = max_cols.max(0) as u32;
-    cx.abs_diff(ex) <= max && cz.abs_diff(ez) <= max
+    // Column offsets can exceed i32 (a far joiner's columns): widen first.
+    column_in_round_range_wide(
+        i64::from(cx) - i64::from(ex),
+        i64::from(cz) - i64::from(ez),
+        max_cols,
+    )
 }
 
 /// The unit look direction for a camera `yaw` / `pitch` (radians) — what
@@ -1383,7 +1429,10 @@ mod tests {
         assert_eq!(cols, 5, "render distance + 1");
         assert!(chunk_in_draw_range(eye, 0, 0, cols));
         assert!(chunk_in_draw_range(eye, 5, 0, cols), "on the edge: drawn");
-        assert!(chunk_in_draw_range(eye, -5, 5, cols), "a corner is within a square");
+        assert!(!chunk_in_draw_range(eye, -5, 5, cols), "a square's corner is outside the circle");
+        assert!(chunk_in_draw_range(eye, -3, 4, cols), "3-4-5: exactly on the circle is drawn");
+        assert!(!chunk_in_draw_range(eye, -4, 4, cols), "32 > 25");
+        assert!(chunk_in_draw_range(eye, 4, 3, cols));
         assert!(!chunk_in_draw_range(eye, 6, 0, cols), "one past: culled");
         assert!(!chunk_in_draw_range(eye, 0, -6, cols));
         assert!(!chunk_in_draw_range(eye, 40, 40, cols), "a far joiner's columns");
@@ -1394,7 +1443,9 @@ mod tests {
         assert!(chunk_in_draw_range(eye, -6, -2, cols));
         assert!(!chunk_in_draw_range(eye, -7, -2, cols));
         assert!(chunk_in_draw_range(eye, -1, 3, cols));
-        assert!(!chunk_in_draw_range(eye, -1, 4, cols));
+        assert!(!chunk_in_draw_range(eye, -1, 4, cols), "(0, 6) from the camera column");
+        assert!(chunk_in_draw_range(eye, 2, 1, cols), "(3, 3): 18 <= 25");
+        assert!(!chunk_in_draw_range(eye, 3, 2, cols), "(4, 4): 32 > 25");
         // No limit keeps everything (also at the extremes, without overflow).
         assert!(chunk_in_draw_range(eye, 1_000_000, -1_000_000, i32::MAX));
         assert!(chunk_in_draw_range(eye, -2_000_000_000, 2_000_000_000, i32::MAX));
@@ -1404,14 +1455,105 @@ mod tests {
         assert_eq!(chunk_draw_columns(i32::MAX), i32::MAX, "saturates");
     }
 
-    /// The cull never takes anything the fog still shows: a chunk past the draw
-    /// range is at least (range columns) of blocks away, beyond the fog's end.
+    /// The load and draw circles lie beyond the fog, on the diagonals too
+    /// (Perf review S1). For every eye position inside the anchor's column (its
+    /// four corners, where the circle is tightest) and every render distance,
+    /// ground within the fog end of the eye must be in a column that is both
+    /// loaded (the client's own round anchor) and drawn.
+    ///
+    /// Strictly that holds on the axes. On a diagonal the circle of radius
+    /// `rd + 1` can leave the last ground a few blocks short of the fog end: at
+    /// most `SLACK` blocks, where the linear fog (a ramp two chunks = 32 blocks
+    /// long) is at least 78% opaque. (With the load radius at `rd`, as first
+    /// built, the same ground was 45..236 blocks from the eye against a fog
+    /// end of 64..256, about half fogged, a jagged edge against the sky.)
     #[test]
-    fn the_draw_range_lies_beyond_the_fog() {
+    fn the_load_and_draw_range_lie_beyond_the_fog_on_the_diagonals() {
+        use crate::chunk_stream::{round_load_columns, StreamAnchor};
+        const SLACK: f32 = 7.0;
+        let cs = crate::chunk::CHUNK_SIZE as f32;
         for rd in 2..=32 {
-            let (_, fog_end) = crate::graphics_settings::fog_distances(rd);
-            let range_blocks = chunk_draw_columns(rd) as f32 * crate::chunk::CHUNK_SIZE as f32;
-            assert!(range_blocks > fog_end, "rd {rd}: range {range_blocks} <= fog end {fog_end}");
+            let (fog_start, fog_end) = crate::graphics_settings::fog_distances(rd);
+            let load = round_load_columns(rd);
+            assert!(load >= chunk_draw_columns(rd), "rd {rd}: the draw circle must cover the load circle");
+            let anchor = StreamAnchor::round((0, 0), load);
+            let mut worst = f32::INFINITY;
+            // Corners of column (0, 0), just inside it.
+            for (ex, ez) in [(0.0, 0.0), (15.99, 0.0), (0.0, 15.99), (15.99, 15.99), (8.0, 8.0)] {
+                let eye = Vec3::new(ex, 70.0, ez);
+                for cx in -load - 4..=load + 4 {
+                    for cz in -load - 4..=load + 4 {
+                        let loaded = anchor.wants(cx, cz);
+                        let drawn = chunk_in_draw_range(eye, cx, cz, chunk_draw_columns(rd));
+                        if loaded {
+                            assert!(drawn, "rd {rd}: loaded column ({cx},{cz}) is not drawn from ({ex},{ez})");
+                        }
+                        if loaded && drawn {
+                            continue;
+                        }
+                        // Horizontal distance from the eye to the column's nearest ground.
+                        let (x0, z0) = (cx as f32 * cs, cz as f32 * cs);
+                        let gx = (x0 - ex).max(ex - (x0 + cs)).max(0.0);
+                        let gz = (z0 - ez).max(ez - (z0 + cs)).max(0.0);
+                        worst = worst.min((gx * gx + gz * gz).sqrt());
+                    }
+                }
+            }
+            assert!(
+                worst >= fog_end - SLACK,
+                "rd {rd}: ground {worst} blocks away is neither loaded nor drawn (fog {fog_start}..{fog_end})"
+            );
+            // And the axes are strict: nothing the fog still shows is missing.
+            let axis = chunk_draw_columns(rd) as f32 * cs;
+            assert!(axis > fog_end, "rd {rd}: range {axis} <= fog end {fog_end}");
+        }
+    }
+
+    /// The shared round-range predicate: a table, the extremes and symmetry.
+    #[test]
+    fn round_range_table() {
+        // (dx, dz, radius, expected)
+        for (dx, dz, r, want) in [
+            (0, 0, 0, true),
+            (1, 0, 0, false),
+            (0, 0, 3, true),
+            (3, 0, 3, true),
+            (0, -3, 3, true),
+            (2, 2, 3, true),   // 8 <= 9
+            (3, 3, 3, false),  // 18 > 9
+            (2, 3, 3, false),  // 13 > 9
+            (1, 3, 3, false),  // 10 > 9
+            (3, 4, 5, true),   // exactly on the circle
+            (4, 4, 5, false),
+            (-4, 3, 5, true),
+            (5, 1, 5, false),
+            (7, 7, 10, true),  // 98 <= 100
+            (8, 7, 10, false), // 113 > 100
+            (1, 0, -4, false), // negative radius = zero
+            (0, 0, -4, true),
+            (2_000_000_000, -2_000_000_000, 10, false),
+            (2_000_000_000, -2_000_000_000, i32::MAX, true),
+        ] {
+            assert_eq!(column_in_round_range(dx, dz, r), want, "({dx},{dz}) r={r}");
+            assert_eq!(column_in_round_range(-dx, -dz, r), want, "symmetric ({dx},{dz})");
+            assert_eq!(column_in_round_range(dz, dx, r), want, "swapped ({dx},{dz})");
+        }
+    }
+
+    /// A circle draws fewer columns than the square it replaced: 49 of 81 at
+    /// radius 4, ~72% at radius 10, tending to pi/4 as the radius grows.
+    #[test]
+    fn the_round_range_is_a_fraction_of_the_square() {
+        for r in [4, 8, 12, 16] {
+            let mut n = 0;
+            for dx in -r..=r {
+                for dz in -r..=r {
+                    n += usize::from(column_in_round_range(dx, dz, r));
+                }
+            }
+            let square = ((2 * r + 1) * (2 * r + 1)) as f32;
+            let ratio = n as f32 / square;
+            assert!((0.58..0.80).contains(&ratio), "r {r}: {ratio}");
         }
     }
 }

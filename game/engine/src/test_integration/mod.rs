@@ -93,3 +93,4 @@ pub mod touched_columns;
 pub mod push_joiner;
 pub mod render_depth;
 pub mod building_variants; // Building variants — every wood's and stone's slab, stairs, door, trapdoor, gate and wall.
+pub mod machine_index;

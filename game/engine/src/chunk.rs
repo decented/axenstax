@@ -39,6 +39,14 @@ pub struct Chunk {
     /// private, so those two are the only places it can change; the
     /// `non_air_count_*` tests pin the count against a full recount.
     non_air: u16,
+    /// How many cells hold a piston (plain or sticky), and how many a hopper.
+    /// Maintained exactly like `non_air` (in `set` and `from_bytes`, the only
+    /// writers of `blocks`), so the per-tick machine passes can skip every
+    /// chunk that has none instead of reading all 4096 cells of every loaded
+    /// chunk (`World::chunks_with_pistons` / `chunks_with_hoppers`). The
+    /// `machine_counts_*` tests pin both against a full recount.
+    pistons: u16,
+    hoppers: u16,
     /// Spec 30 — packed per-voxel light: `(sky_light << 4) | block_light`.
     /// Each nibble is 0..15. Initialised to 0 (dark); world-gen + place
     /// hooks fill in via the `lighting` BFS module. Not persisted on
@@ -66,6 +74,8 @@ impl Chunk {
         Self {
             blocks: [AIR; CHUNK_VOLUME],
             non_air: 0,
+            pistons: 0,
+            hoppers: 0,
             light: [0; CHUNK_VOLUME],
             placed: [0; PLACED_WORDS],
             mesh_dirty: true,
@@ -101,14 +111,58 @@ impl Chunk {
     #[inline]
     pub fn set(&mut self, x: usize, y: usize, z: usize, block: BlockId) {
         let slot = &mut self.blocks[Self::index(x, y, z)];
-        let was_air = *slot == AIR;
+        let old = *slot;
+        let was_air = old == AIR;
         *slot = block;
         match (was_air, block == AIR) {
             (true, false) => self.non_air += 1,
             (false, true) => self.non_air -= 1,
             _ => {}
         }
+        if old != block {
+            self.track_machine(old, false);
+            self.track_machine(block, true);
+        }
         self.mesh_dirty = true;
+    }
+
+    /// Keep the piston / hopper counters in step with a cell gaining
+    /// (`add`) or losing a block.
+    #[inline]
+    fn track_machine(&mut self, block: BlockId, add: bool) {
+        let counter = match block {
+            crate::block::PISTON | crate::block::STICKY_PISTON => &mut self.pistons,
+            crate::block::HOPPER => &mut self.hoppers,
+            _ => return,
+        };
+        if add {
+            *counter += 1;
+        } else {
+            *counter -= 1;
+        }
+    }
+
+    /// Does this chunk hold at least one piston (plain or sticky)? O(1).
+    #[inline]
+    pub(crate) fn has_pistons(&self) -> bool {
+        self.pistons != 0
+    }
+
+    /// Does this chunk hold at least one hopper? O(1).
+    #[inline]
+    pub(crate) fn has_hoppers(&self) -> bool {
+        self.hoppers != 0
+    }
+
+    /// Full recount of (pistons, hoppers) — the oracle the maintained
+    /// counters are tested against. Test-only.
+    #[cfg(test)]
+    pub(crate) fn recount_machines(&self) -> (usize, usize) {
+        let count = |f: fn(BlockId) -> bool| self.blocks.iter().filter(|&&b| f(b)).count();
+        (
+            count(|b| b == crate::block::PISTON || b == crate::block::STICKY_PISTON),
+            count(|b| b == crate::block::HOPPER),
+        )
     }
 
     /// Check if chunk is entirely air. O(1): reads the maintained
@@ -282,9 +336,15 @@ impl Chunk {
         };
         let mut blocks = [AIR; CHUNK_VOLUME];
         let mut non_air = 0u16;
+        let (mut pistons, mut hoppers) = (0u16, 0u16);
         for (i, chunk) in data[..block_bytes].as_chunks::<2>().0.iter().enumerate() {
             blocks[i] = u16::from_le_bytes(*chunk);
             non_air += u16::from(blocks[i] != AIR);
+            match blocks[i] {
+                crate::block::PISTON | crate::block::STICKY_PISTON => pistons += 1,
+                crate::block::HOPPER => hoppers += 1,
+                _ => {}
+            }
         }
         let mut placed = [0u64; PLACED_WORDS];
         if has_mask {
@@ -295,6 +355,8 @@ impl Chunk {
         Some(Self {
             blocks,
             non_air,
+            pistons,
+            hoppers,
             light: [0; CHUNK_VOLUME],
             placed,
             mesh_dirty: true,
@@ -567,5 +629,59 @@ mod tests {
         empty.set(0, 0, 0, STONE);
         assert_count_exact(&empty, "edit after load");
         assert_eq!(empty.non_air_count(), 1);
+    }
+
+    // ── maintained piston / hopper counters ──────────────────────────
+
+    fn assert_machines_exact(c: &Chunk, what: &str) {
+        let (pistons, hoppers) = c.recount_machines();
+        assert_eq!(c.has_pistons(), pistons > 0, "{what}: has_pistons != (recount > 0)");
+        assert_eq!(c.has_hoppers(), hoppers > 0, "{what}: has_hoppers != (recount > 0)");
+        assert_eq!(usize::from(c.pistons), pistons, "{what}: piston counter");
+        assert_eq!(usize::from(c.hoppers), hoppers, "{what}: hopper counter");
+    }
+
+    #[test]
+    fn machine_counts_match_a_full_recount_after_random_edits() {
+        use crate::block::{HOPPER, PISTON, PISTON_HEAD, STICKY_PISTON};
+        let palette = [AIR, STONE, PISTON, STICKY_PISTON, HOPPER, PISTON_HEAD, DIRT];
+        let mut c = Chunk::new();
+        assert_machines_exact(&c, "new");
+        let mut rng = 0xD1B5_4A32_D192_ED03u64;
+        for step in 0..20_000 {
+            let r = next(&mut rng);
+            let (x, y, z) = ((r & 15) as usize, ((r >> 4) & 15) as usize, ((r >> 8) & 15) as usize);
+            c.set(x, y, z, palette[((r >> 16) % palette.len() as u64) as usize]);
+            if step % 89 == 0 {
+                assert_machines_exact(&c, &format!("step {step}"));
+            }
+        }
+        assert_machines_exact(&c, "after 20,000 random edits");
+        // A byte round trip rebuilds the counters from the cells.
+        let back = Chunk::from_bytes(&c.as_bytes()).expect("round trip");
+        assert_machines_exact(&back, "from_bytes");
+        assert_eq!(back.recount_machines(), c.recount_machines());
+        // Overwriting a machine with itself, or with another machine kind, stays exact.
+        let mut d = Chunk::new();
+        d.set(1, 1, 1, PISTON);
+        d.set(1, 1, 1, PISTON);
+        assert_machines_exact(&d, "same block again");
+        d.set(1, 1, 1, STICKY_PISTON);
+        assert_machines_exact(&d, "piston -> sticky");
+        d.set(1, 1, 1, HOPPER);
+        assert_machines_exact(&d, "sticky -> hopper");
+        d.set(1, 1, 1, AIR);
+        assert_machines_exact(&d, "hopper -> air");
+        assert!(!d.has_hoppers() && !d.has_pistons());
+        // Fully packed with pistons: 4096 fits the u16 counter.
+        for y in 0..CHUNK_SIZE {
+            for z in 0..CHUNK_SIZE {
+                for x in 0..CHUNK_SIZE {
+                    d.set(x, y, z, PISTON);
+                }
+            }
+        }
+        assert_machines_exact(&d, "all pistons");
+        assert_eq!(d.recount_machines().0, CHUNK_VOLUME);
     }
 }

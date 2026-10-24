@@ -15,7 +15,7 @@
 //! ## Presets vs personal prefs
 //!
 //! **Quality** dials (render distance/scale, fog, mipmaps, particles, frame
-//! limit, smooth lighting) define the GPU load and therefore the *preset*. FOV
+//! limit) define the GPU load and therefore the *preset*. FOV
 //! and mouse sensitivity are **personal preferences** that don't change GPU
 //! load, so they are deliberately excluded from preset detection — changing
 //! your FOV does not knock you off "High". The `preset()` label is *derived*
@@ -120,7 +120,7 @@ pub enum ParticleLevel {
 
 pub const RENDER_DISTANCE_MIN: i32 = 4;
 pub const RENDER_DISTANCE_MAX: i32 = 16;
-pub const RENDER_SCALE_MIN: f32 = 0.5;
+pub const RENDER_SCALE_MIN: f32 = 0.25;
 pub const RENDER_SCALE_MAX: f32 = 1.0;
 pub const FOV_MIN: f32 = 60.0;
 pub const FOV_MAX: f32 = 100.0;
@@ -188,6 +188,126 @@ pub const AUTO_CENTRE_SPEED_MAX: f32 = 8.0;
 /// `main.rs` and `server.rs`.
 pub const DEFAULT_RENDER_DISTANCE: i32 = 10;
 
+/// Pixel budgets (physical pixels of the 3D world) the presets carry. High and
+/// Ultra carry none (uncapped). 0.9 M is roughly 1280x720; 1.3 M a little
+/// under 1600x900; 2.1 M about 1920x1080.
+pub const POTATO_PIXEL_BUDGET: u32 = 900_000;
+pub const LOW_PIXEL_BUDGET: u32 = 1_300_000;
+pub const MEDIUM_PIXEL_BUDGET: u32 = 2_100_000;
+/// Floor for a hand-edited budget: below this even a 0.25 scale of a small
+/// window would be pointless, and `0` would divide by nothing.
+pub const PIXEL_BUDGET_MIN: u32 = 100_000;
+
+/// Pure: the render scale actually used for the 3D world.
+/// `min(render_scale, sqrt(budget / physical_pixels))`, clamped into
+/// `RENDER_SCALE_MIN..=RENDER_SCALE_MAX`. `physical_pixels` is the surface size
+/// in device pixels (so a DPR-3 phone counts 9x its CSS area). `None` budget =
+/// the user's scale unchanged (clamped).
+pub fn budgeted_scale(render_scale: f32, pixel_budget: Option<u32>, width: u32, height: u32) -> f32 {
+    let wanted = render_scale.clamp(RENDER_SCALE_MIN, RENDER_SCALE_MAX);
+    let Some(budget) = pixel_budget else {
+        return wanted;
+    };
+    let pixels = (width.max(1) as f64) * (height.max(1) as f64);
+    let cap = ((budget as f64) / pixels).sqrt() as f32;
+    wanted.min(cap).clamp(RENDER_SCALE_MIN, RENDER_SCALE_MAX)
+}
+
+/// Pure: the preset a first run starts on, from what the platform reveals.
+/// Order matters: a software rasteriser is Potato whatever else is true; a touch
+/// device (Android, or a browser reporting touch points) is Low; an integrated
+/// GPU is Low in a browser and Medium natively; a discrete GPU is High; anything
+/// unreported (a browser usually hides the adapter class, so `Other`) or a
+/// virtual GPU is Medium.
+pub fn recommend_preset(device_type: wgpu::DeviceType, is_touch: bool, is_web: bool) -> GraphicsPreset {
+    use wgpu::DeviceType;
+    if device_type == DeviceType::Cpu {
+        return GraphicsPreset::Potato;
+    }
+    if is_touch {
+        return GraphicsPreset::Low;
+    }
+    match device_type {
+        DeviceType::IntegratedGpu if is_web => GraphicsPreset::Low,
+        DeviceType::IntegratedGpu => GraphicsPreset::Medium,
+        DeviceType::DiscreteGpu => GraphicsPreset::High,
+        _ => GraphicsPreset::Medium,
+    }
+}
+
+/// Web frame-cap slack: rAF fires on the display's own cadence, so a frame that
+/// arrives a hair early (rAF jitter) still counts as due. Without it a 60 FPS
+/// cap on a 60 Hz display would skip every other frame.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub const WEB_CAP_SLACK: std::time::Duration = std::time::Duration::from_millis(2);
+
+/// The web frame cap (Perf B1, deadline form). The browser paces by
+/// requestAnimationFrame, so a `Cap(n)` is honoured by skipping any render that
+/// arrives before the next DEADLINE and asking for another redraw.
+///
+/// The deadline advances by exactly one `interval` per render
+/// (`next_due += interval`), not from the moment the frame was drawn, so the
+/// time a skipped rAF tick leaves over is not thrown away: on a display whose
+/// period does not divide the interval (75, 90, 100, 144, 165 Hz) the average
+/// rate is the cap (or the display rate, if that is lower), not a lower
+/// multiple of the display period. A frame is due `slack` early
+/// (`min(WEB_CAP_SLACK, interval / 8)`) so rAF jitter does not skip it; the
+/// slack never moves the deadline. If the clock is more than one interval
+/// behind (a stall, a hidden tab, a cap raised mid-run) the deadline is
+/// re-anchored to now instead of firing a burst to catch up.
+///
+/// Pure: times are `Duration`s since any fixed epoch the caller keeps.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FrameCap {
+    next_due: Option<std::time::Duration>,
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+impl FrameCap {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Forget the deadline (the cap was off, or this mode is exempt): the next
+    /// frame renders at once and sets a fresh one.
+    pub fn reset(&mut self) {
+        self.next_due = None;
+    }
+
+    /// Should the frame arriving at `now` render under a cap of `interval`?
+    /// `true` consumes the deadline; `false` leaves it for the next tick.
+    pub fn due(&mut self, now: std::time::Duration, interval: std::time::Duration) -> bool {
+        let Some(due) = self.next_due else {
+            self.next_due = Some(now + interval);
+            return true;
+        };
+        let slack = WEB_CAP_SLACK.min(interval / 8);
+        if now + slack < due {
+            return false;
+        }
+        self.next_due = Some(if now.saturating_sub(due) > interval {
+            now + interval
+        } else {
+            due + interval
+        });
+        true
+    }
+}
+
+/// Pure: the interval the web frame cap enforces this frame, or `None` for no
+/// cap. The world load (`loading`) is exempt: it drains a per-frame budget, so a
+/// cap only makes it take longer (on a 144 Hz display a Cap(60) preset tripled
+/// the load time before the cap was exempted).
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub fn web_cap_interval(limit: FrameLimit, loading: bool) -> Option<std::time::Duration> {
+    if loading {
+        None
+    } else {
+        limit.software_cap_interval()
+    }
+}
+
 /// Per-device graphics settings. The single source of truth for all quality
 /// dials. Default = the **High** preset, i.e. today's look, so a fresh install
 /// or an old/partial settings file behaves exactly as before.
@@ -200,7 +320,7 @@ pub const DEFAULT_RENDER_DISTANCE: i32 = 10;
 pub struct GraphicsSettings {
     /// View radius in chunks (4..=16). Drives chunk streaming + fog.
     pub render_distance: i32,
-    /// Internal-resolution multiplier (0.5..=1.0). Renders the world to an
+    /// Internal-resolution multiplier (0.25..=1.0). Renders the world to an
     /// offscreen target at this scale then blits up — the biggest weak-GPU lever.
     pub render_scale: f32,
     /// Vertical field of view in degrees (60..=100). Personal pref.
@@ -221,9 +341,31 @@ pub struct GraphicsSettings {
     pub mipmaps: bool,
     /// Particle density.
     pub particles: ParticleLevel,
-    /// Smooth lighting / ambient occlusion. Future shader hook — stored now so
-    /// presets round-trip; not yet wired into the shader.
-    pub smooth_lighting: bool,
+    /// Cap on the 3D world's rendered pixel count (physical pixels, so it
+    /// includes the display scale factor). `None` = uncapped, exactly today's
+    /// behaviour, which is what an old settings file (no key) deserialises to.
+    /// The effective render scale is `min(render_scale, sqrt(budget / physical
+    /// pixels))` (see [`budgeted_scale`]). Set when a preset is applied (first
+    /// run, or picked in settings: Potato 0.9 M, Low 1.3 M, Medium 2.1 M, High
+    /// and Ultra none) but NOT part of preset equality. A file with no such key
+    /// loads with `None`, so an existing player's picture does not change.
+    #[serde(default)]
+    pub pixel_budget: Option<u32>,
+    /// "Leaves: Fast" (Perf B2): leaves render as opaque cubes, with interior
+    /// faces culled and their cutout holes filled with a darkened leaf colour,
+    /// instead of the see-through cutout pass. Set when a preset is applied
+    /// (Potato and Low on; Medium, High and Ultra off) but NOT part of preset
+    /// equality. A file with no such key loads with it off. Toggling remeshes
+    /// the loaded world.
+    #[serde(default)]
+    pub leaves_fast: bool,
+    /// Auto quality (Spec 03 §10.3): a runtime governor may hold render
+    /// distance, render scale and particles temporarily BELOW the values above
+    /// when frames run long. It never raises past them and never writes its
+    /// offset to the file. Off for any existing player (an old file has no key);
+    /// switched on when first-run detection picks a device-aware default.
+    #[serde(default)]
+    pub auto_quality: bool,
     /// Phase 3 (third-person camera) — fade the self-avatar to a screen-door
     /// stipple when the camera is pulled in close, so the body never hides the
     /// crosshair target. On by default; a comfort toggle (not a quality dial), so
@@ -381,7 +523,7 @@ impl GraphicsSettings {
     /// current FOV/sensitivity (see [`apply_preset`]). This pure function exists
     /// so preset detection has a canonical comparison target.
     pub fn from_preset(preset: GraphicsPreset) -> Self {
-        let (render_distance, render_scale, frame_limit, fog, mipmaps, particles, smooth_lighting) =
+        let (render_distance, render_scale, frame_limit, fog, mipmaps, particles, pixel_budget, leaves_fast) =
             match preset {
                 GraphicsPreset::Potato => (
                     4,
@@ -390,7 +532,8 @@ impl GraphicsSettings {
                     false,
                     false,
                     ParticleLevel::Off,
-                    false,
+                    Some(POTATO_PIXEL_BUDGET),
+                    true,
                 ),
                 GraphicsPreset::Low => (
                     5,
@@ -399,7 +542,8 @@ impl GraphicsSettings {
                     true,
                     false,
                     ParticleLevel::Reduced,
-                    false,
+                    Some(LOW_PIXEL_BUDGET),
+                    true,
                 ),
                 GraphicsPreset::Medium => (
                     7,
@@ -408,6 +552,7 @@ impl GraphicsSettings {
                     true,
                     false,
                     ParticleLevel::Full,
+                    Some(MEDIUM_PIXEL_BUDGET),
                     false,
                 ),
                 // High == today's values → default look is unchanged.
@@ -418,7 +563,8 @@ impl GraphicsSettings {
                     true,
                     false,
                     ParticleLevel::Full,
-                    true,
+                    None,
+                    false,
                 ),
                 GraphicsPreset::Ultra => (
                     14,
@@ -427,7 +573,8 @@ impl GraphicsSettings {
                     true,
                     false,
                     ParticleLevel::Full,
-                    true,
+                    None,
+                    false,
                 ),
             };
         Self {
@@ -439,7 +586,9 @@ impl GraphicsSettings {
             fog,
             mipmaps,
             particles,
-            smooth_lighting,
+            pixel_budget,
+            leaves_fast,
+            auto_quality: false,
             // Comfort toggle — on for every preset (Phase-6 panel flips it).
             avatar_fade: true,
             // Phase 6 — camera prefs are preset-independent; defaults preserve
@@ -486,7 +635,8 @@ impl GraphicsSettings {
         self.fog = p.fog;
         self.mipmaps = p.mipmaps;
         self.particles = p.particles;
-        self.smooth_lighting = p.smooth_lighting;
+        self.pixel_budget = p.pixel_budget;
+        self.leaves_fast = p.leaves_fast;
     }
 
     /// Derive the preset label from the **quality** dials. Returns `Custom` when
@@ -502,6 +652,11 @@ impl GraphicsSettings {
     }
 
     /// Compare only the quality-load fields (everything except FOV + sensitivity).
+    /// `pixel_budget` and `leaves_fast` are deliberately NOT among them: they are
+    /// set when a preset is applied (first run, or the player picking it in
+    /// settings) but are not what makes a profile that preset. So a file written
+    /// before they existed keeps its label, and toggling Leaves: Fast on Low
+    /// leaves the label Low.
     fn quality_eq(&self, other: &Self) -> bool {
         self.render_distance == other.render_distance
             && (self.render_scale - other.render_scale).abs() < 1e-4
@@ -509,7 +664,6 @@ impl GraphicsSettings {
             && self.fog == other.fog
             && self.mipmaps == other.mipmaps
             && self.particles == other.particles
-            && self.smooth_lighting == other.smooth_lighting
     }
 
     /// Clamp every dial into its valid range. Run on load so a hand-edited or
@@ -519,6 +673,7 @@ impl GraphicsSettings {
             .render_distance
             .clamp(RENDER_DISTANCE_MIN, RENDER_DISTANCE_MAX);
         self.render_scale = self.render_scale.clamp(RENDER_SCALE_MIN, RENDER_SCALE_MAX);
+        self.pixel_budget = self.pixel_budget.map(|b| b.max(PIXEL_BUDGET_MIN));
         self.fov_y = self.fov_y.clamp(FOV_MIN, FOV_MAX);
         self.mouse_sensitivity = self
             .mouse_sensitivity
@@ -582,12 +737,36 @@ impl GraphicsSettings {
     /// Load persisted settings, falling back to the default (High) when absent
     /// or unparseable. Migrated (see [`migrate`]), then always clamped.
     pub fn load() -> Self {
-        let mut s = load_raw()
-            .and_then(|json| serde_json::from_str::<GraphicsSettings>(&json).ok())
-            .unwrap_or_default();
+        Self::load_or_first_run(None)
+    }
+
+    /// Load persisted settings; when none have ever been stored (no file on
+    /// native, no `localStorage` key on web) and a `first_run` preset is given,
+    /// start from that preset with `auto_quality` on instead of High. A file
+    /// that exists but cannot be READ (an I/O error, non-UTF-8 bytes) counts as
+    /// none, so it is a first run too; a file that reads but does not parse
+    /// falls back to High without re-defaulting. Either way nothing is written
+    /// until the player changes a setting.
+    pub fn load_or_first_run(first_run: Option<GraphicsPreset>) -> Self {
+        let raw = load_raw();
+        let mut s = match (&raw, first_run) {
+            (None, Some(preset)) => {
+                let mut s = Self::from_preset(preset);
+                s.auto_quality = true;
+                s
+            }
+            _ => raw
+                .and_then(|json| parse_persisted(&json))
+                .unwrap_or_default(),
+        };
         migrate(&mut s);
         s.clamp();
         s
+    }
+
+    /// True when nothing has been persisted yet (a first run).
+    pub fn is_first_run() -> bool {
+        load_raw().is_none()
     }
 
     /// Persist these settings (best-effort — persistence failure never breaks
@@ -650,6 +829,15 @@ fn migrate(settings: &mut GraphicsSettings) {
     if (settings.mouse_sensitivity - LEGACY_SENSITIVITY_DEFAULT).abs() < 1e-6 {
         settings.mouse_sensitivity = DEFAULT_SENSITIVITY;
     }
+}
+
+/// Parse a persisted settings blob. `pixel_budget` and `leaves_fast` are taken
+/// as written; a file without those keys (written before they existed) loads
+/// with no budget and slow leaves, exactly the picture it always had, and keeps
+/// its preset label (they are not part of preset equality). They are set only
+/// when a preset is applied.
+fn parse_persisted(json: &str) -> Option<GraphicsSettings> {
+    serde_json::from_str(json).ok()
 }
 
 #[cfg(test)]
@@ -1148,5 +1336,366 @@ mod tests {
         s.online_relays = vec!["wss://mine.example".to_string()];
         s.online_port = 0;
         assert_eq!(s.preset(), GraphicsPreset::High);
+    }
+
+    // -- Perf B1: device-aware defaults, pixel budget, auto quality ---------
+
+    #[test]
+    fn recommend_preset_table() {
+        use wgpu::DeviceType as D;
+        use GraphicsPreset as P;
+        // (device, touch, web) -> preset
+        let table = [
+            // Software rasterisers are Potato whatever else is true.
+            (D::Cpu, false, false, P::Potato),
+            (D::Cpu, false, true, P::Potato),
+            (D::Cpu, true, true, P::Potato),
+            // Touch / Android / mobile web are Low.
+            (D::IntegratedGpu, true, false, P::Low),
+            (D::IntegratedGpu, true, true, P::Low),
+            (D::DiscreteGpu, true, true, P::Low),
+            (D::Other, true, true, P::Low),
+            // Integrated: Low on web, Medium native.
+            (D::IntegratedGpu, false, true, P::Low),
+            (D::IntegratedGpu, false, false, P::Medium),
+            // Unknown class (typical in a browser) and virtual GPUs: Medium.
+            (D::Other, false, true, P::Medium),
+            (D::Other, false, false, P::Medium),
+            (D::VirtualGpu, false, false, P::Medium),
+            (D::VirtualGpu, false, true, P::Medium),
+            // Discrete: High.
+            (D::DiscreteGpu, false, false, P::High),
+            (D::DiscreteGpu, false, true, P::High),
+        ];
+        for (d, touch, web, want) in table {
+            assert_eq!(
+                recommend_preset(d, touch, web),
+                want,
+                "device {d:?} touch {touch} web {web}"
+            );
+        }
+    }
+
+    #[test]
+    fn pixel_budget_scale_maths() {
+        // No budget: the user's scale, clamped.
+        assert_eq!(budgeted_scale(1.0, None, 3840, 2160), 1.0);
+        assert_eq!(budgeted_scale(0.1, None, 1920, 1080), RENDER_SCALE_MIN);
+        // 1920x1080 = 2.0736 M pixels: a 2.1 M budget does not bind.
+        assert_eq!(budgeted_scale(1.0, Some(MEDIUM_PIXEL_BUDGET), 1920, 1080), 1.0);
+        // 4K (8.2944 M): sqrt(2.1 / 8.2944) = 0.5032.
+        let s = budgeted_scale(1.0, Some(MEDIUM_PIXEL_BUDGET), 3840, 2160);
+        assert!((s - 0.5032).abs() < 1e-3, "{s}");
+        // The result times the surface never exceeds the budget (within rounding).
+        let px = (3840.0 * s) * (2160.0 * s);
+        assert!(px <= MEDIUM_PIXEL_BUDGET as f32 * 1.0001, "{px}");
+        // A DPR-3 phone: 390x844 CSS = 1170x2532 = 2.96 M physical.
+        let s = budgeted_scale(0.75, Some(LOW_PIXEL_BUDGET), 1170, 2532);
+        assert!((s - (1.3e6_f32 / 2_962_440.0).sqrt()).abs() < 1e-3, "{s}");
+        // Never raises above the user's scale.
+        assert_eq!(budgeted_scale(0.5, Some(MEDIUM_PIXEL_BUDGET), 640, 480), 0.5);
+        // Never drops below the floor, however large the surface.
+        assert_eq!(
+            budgeted_scale(1.0, Some(POTATO_PIXEL_BUDGET), 16000, 9000),
+            RENDER_SCALE_MIN
+        );
+        // A zero-size surface cannot divide by zero.
+        assert!(budgeted_scale(1.0, Some(LOW_PIXEL_BUDGET), 0, 0).is_finite());
+    }
+
+    #[test]
+    fn preset_budgets_match_the_decision() {
+        let b = |p| GraphicsSettings::from_preset(p).pixel_budget;
+        assert_eq!(b(GraphicsPreset::Potato), Some(900_000));
+        assert_eq!(b(GraphicsPreset::Low), Some(1_300_000));
+        assert_eq!(b(GraphicsPreset::Medium), Some(2_100_000));
+        assert_eq!(b(GraphicsPreset::High), None);
+        assert_eq!(b(GraphicsPreset::Ultra), None);
+        // The default is still the High preset with nothing new switched on.
+        let d = GraphicsSettings::default();
+        assert_eq!(d.pixel_budget, None);
+        assert!(!d.auto_quality);
+    }
+
+    #[test]
+    fn render_scale_floor_is_a_quarter() {
+        assert_eq!(RENDER_SCALE_MIN, 0.25);
+        let mut s = GraphicsSettings::default();
+        s.render_scale = 0.3;
+        s.clamp();
+        assert_eq!(s.render_scale, 0.3);
+    }
+
+    /// Parse through the loader's own path (`parse_persisted`) and clamp.
+    fn load_json(json: &str) -> GraphicsSettings {
+        let mut s = parse_persisted(json).expect("parses");
+        s.clamp();
+        s
+    }
+
+    #[test]
+    fn an_old_low_file_is_still_low_with_no_budget_and_slow_leaves() {
+        // Written before pixel_budget / leaves_fast / auto_quality existed, and
+        // while smooth_lighting was still a (dead) key.
+        let s = load_json(
+            r#"{
+            "render_distance": 5,
+            "render_scale": 0.75,
+            "frame_limit": { "Cap": 60 },
+            "fog": true,
+            "mipmaps": false,
+            "particles": "Reduced",
+            "smooth_lighting": false,
+            "fov_y": 85.0
+        }"#,
+        );
+        assert_eq!(s.preset(), GraphicsPreset::Low, "label must not become Custom");
+        assert_eq!(s.pixel_budget, None, "an existing player's picture does not change");
+        assert!(!s.leaves_fast, "an existing player's leaves do not change");
+        assert!(!s.auto_quality, "no key = governor off");
+        assert_eq!(s.fov_y, 85.0, "personal prefs untouched");
+    }
+
+    #[test]
+    fn every_old_preset_file_keeps_its_label_and_gains_no_budget_or_fast_leaves() {
+        for p in GraphicsPreset::ALL {
+            let new = GraphicsSettings::from_preset(p);
+            // An old file: today's JSON minus the three new keys.
+            let mut v = serde_json::to_value(&new).unwrap();
+            for k in ["pixel_budget", "leaves_fast", "auto_quality"] {
+                v.as_object_mut().unwrap().remove(k);
+            }
+            let s = load_json(&v.to_string());
+            assert_eq!(s.preset(), p, "{p:?}");
+            assert_eq!(s.pixel_budget, None, "{p:?}");
+            assert!(!s.leaves_fast, "{p:?}");
+            assert!(!s.auto_quality, "{p:?}");
+        }
+    }
+
+    #[test]
+    fn picking_a_preset_in_settings_sets_its_budget_and_leaves() {
+        // An old Low file, then the player picks Low in settings.
+        let mut s = load_json(
+            r#"{ "render_distance": 5, "render_scale": 0.75, "frame_limit": { "Cap": 60 },
+                 "fog": true, "mipmaps": false, "particles": "Reduced" }"#,
+        );
+        assert_eq!(s.pixel_budget, None);
+        s.apply_preset(GraphicsPreset::Low);
+        assert_eq!(s.pixel_budget, Some(LOW_PIXEL_BUDGET));
+        assert!(s.leaves_fast);
+        assert_eq!(s.preset(), GraphicsPreset::Low);
+        // Every preset carries its own on apply.
+        for p in GraphicsPreset::ALL {
+            let mut s = GraphicsSettings::default();
+            s.apply_preset(p);
+            let want = GraphicsSettings::from_preset(p);
+            assert_eq!(s.pixel_budget, want.pixel_budget, "{p:?}");
+            assert_eq!(s.leaves_fast, want.leaves_fast, "{p:?}");
+        }
+    }
+
+    #[test]
+    fn leaves_fast_is_on_for_potato_and_low_only() {
+        for (p, want) in [
+            (GraphicsPreset::Potato, true),
+            (GraphicsPreset::Low, true),
+            (GraphicsPreset::Medium, false),
+            (GraphicsPreset::High, false),
+            (GraphicsPreset::Ultra, false),
+        ] {
+            assert_eq!(GraphicsSettings::from_preset(p).leaves_fast, want, "{p:?}");
+        }
+        assert!(!GraphicsSettings::default().leaves_fast, "the default look is unchanged");
+    }
+
+    #[test]
+    fn leaves_fast_and_the_budget_are_not_part_of_the_preset_label() {
+        // Toggling Leaves: Fast, or hand-picking a budget, keeps the label.
+        for p in GraphicsPreset::ALL {
+            let mut s = GraphicsSettings::from_preset(p);
+            s.leaves_fast = !s.leaves_fast;
+            assert_eq!(s.preset(), p, "{p:?} after toggling leaves");
+            s.pixel_budget = Some(1_700_000);
+            assert_eq!(s.preset(), p, "{p:?} after a hand-picked budget");
+        }
+        // Applying a preset sets leaves, and an unrelated dial change does not.
+        let mut s = GraphicsSettings::default();
+        s.apply_preset(GraphicsPreset::Low);
+        assert!(s.leaves_fast);
+        s.leaves_fast = false;
+        assert_eq!(s.preset(), GraphicsPreset::Low, "toggling leaves after picking Low keeps Low");
+        s.apply_preset(GraphicsPreset::Medium);
+        assert!(!s.leaves_fast);
+        s.fov_y = 95.0;
+        assert_eq!(s.preset(), GraphicsPreset::Medium);
+    }
+
+    #[test]
+    fn a_stored_leaves_fast_key_is_taken_as_written() {
+        // Low dials with the key written false: the player turned it off. The
+        // label is still Low.
+        let low = GraphicsSettings::from_preset(GraphicsPreset::Low);
+        let mut v = serde_json::to_value(&low).unwrap();
+        v["leaves_fast"] = serde_json::Value::Bool(false);
+        let s = load_json(&v.to_string());
+        assert!(!s.leaves_fast);
+        assert_eq!(s.preset(), GraphicsPreset::Low);
+        // And true on High dials stays true.
+        let mut v = serde_json::to_value(GraphicsSettings::default()).unwrap();
+        v["leaves_fast"] = serde_json::Value::Bool(true);
+        let s = load_json(&v.to_string());
+        assert!(s.leaves_fast);
+        assert_eq!(s.preset(), GraphicsPreset::High);
+    }
+
+    #[test]
+    fn an_old_custom_file_stays_custom_with_no_budget() {
+        let s = load_json(
+            r#"{ "render_distance": 9, "render_scale": 0.6, "particles": "Reduced" }"#,
+        );
+        assert_eq!(s.preset(), GraphicsPreset::Custom);
+        assert_eq!(s.pixel_budget, None);
+        assert!(!s.auto_quality);
+        // The bare minimum file is the High default, uncapped.
+        let s = load_json("{}");
+        assert_eq!(s.preset(), GraphicsPreset::High);
+        assert_eq!(s.pixel_budget, None);
+    }
+
+    #[test]
+    fn a_stored_budget_key_is_taken_as_written() {
+        // Low dials with the key present and null: the player's file says no
+        // budget. The label is still Low (the budget is not part of it).
+        let s = load_json(
+            r#"{ "render_distance": 5, "render_scale": 0.75, "frame_limit": { "Cap": 60 },
+                 "particles": "Reduced", "pixel_budget": null }"#,
+        );
+        assert_eq!(s.pixel_budget, None);
+        assert_eq!(s.preset(), GraphicsPreset::Low);
+        let s = load_json(r#"{ "pixel_budget": 1500000 }"#);
+        assert_eq!(s.pixel_budget, Some(1_500_000));
+    }
+
+    #[test]
+    fn a_saved_new_file_round_trips_through_the_loader() {
+        let mut s = GraphicsSettings::from_preset(GraphicsPreset::Medium);
+        s.auto_quality = true;
+        let back = load_json(&serde_json::to_string(&s).unwrap());
+        assert_eq!(back, s);
+        // High has no budget: saved as null, loaded as None, still High.
+        let high = GraphicsSettings::default();
+        let back = load_json(&serde_json::to_string(&high).unwrap());
+        assert_eq!(back.preset(), GraphicsPreset::High);
+        assert_eq!(back.pixel_budget, None);
+    }
+
+    #[test]
+    fn new_fields_round_trip_and_hand_edits_clamp() {
+        let mut s = GraphicsSettings::from_preset(GraphicsPreset::Medium);
+        s.auto_quality = true;
+        let back: GraphicsSettings =
+            serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back.pixel_budget, Some(MEDIUM_PIXEL_BUDGET));
+        assert!(back.auto_quality);
+        let mut tiny = back;
+        tiny.pixel_budget = Some(1);
+        tiny.clamp();
+        assert_eq!(tiny.pixel_budget, Some(PIXEL_BUDGET_MIN));
+    }
+
+    /// Drive a `FrameCap` with a simulated rAF clock ticking every `period_us`
+    /// microseconds (plus a deterministic jitter of up to `jitter_us` either
+    /// way) for `secs` seconds. Returns the number of rendered frames.
+    fn simulate_cap(period_us: u64, jitter_us: i64, cap: u16, secs: u64) -> u64 {
+        use std::time::Duration as D;
+        let interval = FrameLimit::Cap(cap).software_cap_interval().unwrap();
+        let mut fc = FrameCap::new();
+        let mut rendered = 0u64;
+        let ticks = secs * 1_000_000 / period_us;
+        for i in 0..ticks {
+            // Jitter in a fixed pseudo-random pattern, never moving the grid.
+            let j = if jitter_us == 0 { 0 } else { ((i * 7919) % (2 * jitter_us as u64 + 1)) as i64 - jitter_us };
+            let t = ((i * period_us) as i64 + j).max(0) as u64;
+            if fc.due(D::from_micros(t), interval) {
+                rendered += 1;
+            }
+        }
+        rendered
+    }
+
+    #[test]
+    fn the_web_cap_averages_the_cap_on_every_common_refresh_rate() {
+        // The average rate is min(cap, display rate), within 1%, whatever the
+        // rAF period does to the interval (it used to be 37.5 fps for Cap(60)
+        // on 75 Hz, 48 on 144 Hz, 55 on 165 Hz).
+        const SECS: u64 = 60;
+        for hz in [60u64, 75, 90, 100, 120, 144, 165] {
+            let period_us = 1_000_000 / hz;
+            let display = 1_000_000.0 / period_us as f64;
+            for cap in [30u16, 60, 120] {
+                let n = simulate_cap(period_us, 0, cap, SECS);
+                let fps = n as f64 / SECS as f64;
+                let want = display.min(cap as f64);
+                assert!(
+                    (fps - want).abs() <= want * 0.01 + 0.2,
+                    "{hz} Hz display, Cap({cap}): {fps:.2} fps, want {want:.2}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_web_cap_tolerates_raf_jitter() {
+        // +-1.5 ms of rAF jitter on the display's grid: still the cap, never a
+        // skipped frame that costs a whole tick (60 Hz) or drifts (others).
+        const SECS: u64 = 60;
+        for hz in [60u64, 75, 90, 120, 144] {
+            let period_us = 1_000_000 / hz;
+            for cap in [30u16, 60] {
+                let n = simulate_cap(period_us, 1_500, cap, SECS);
+                let fps = n as f64 / SECS as f64;
+                let want = (1_000_000.0 / period_us as f64).min(cap as f64);
+                assert!(
+                    fps >= want * 0.97 && fps <= want * 1.03 + 0.2,
+                    "{hz} Hz display, Cap({cap}), jittered: {fps:.2} fps, want {want:.2}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_web_cap_is_exempt_while_the_world_loads() {
+        for limit in [FrameLimit::Cap(30), FrameLimit::Cap(60), FrameLimit::Cap(120)] {
+            assert!(web_cap_interval(limit, false).is_some());
+            assert_eq!(web_cap_interval(limit, true), None, "{limit:?}");
+        }
+        assert_eq!(web_cap_interval(FrameLimit::VSync, false), None);
+        assert_eq!(web_cap_interval(FrameLimit::Uncapped, false), None);
+    }
+
+    #[test]
+    fn the_web_cap_first_frame_renders_and_a_stall_reanchors() {
+        use std::time::Duration as D;
+        let i60 = FrameLimit::Cap(60).software_cap_interval().unwrap();
+        let mut fc = FrameCap::new();
+        assert!(fc.due(D::from_secs(5), i60), "the first frame always renders");
+        assert!(!fc.due(D::from_secs(5) + D::from_millis(4), i60));
+        // A two-second stall: one frame, then the cap resumes from now (no burst).
+        let t = D::from_secs(8);
+        assert!(fc.due(t, i60));
+        assert!(!fc.due(t + D::from_millis(5), i60), "no catch-up burst after a stall");
+        assert!(fc.due(t + D::from_micros(16_700), i60));
+        // reset() forgets the deadline.
+        fc.reset();
+        assert!(fc.due(t + D::from_micros(16_800), i60));
+    }
+
+    #[test]
+    fn first_run_preset_enables_auto_quality_only_through_the_loader() {
+        // The pure builder never switches the governor on by itself.
+        for p in GraphicsPreset::ALL {
+            assert!(!GraphicsSettings::from_preset(p).auto_quality);
+        }
     }
 }

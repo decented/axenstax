@@ -917,6 +917,82 @@ pub(crate) fn combined_light(channels: (f32, f32), sky_brightness: f32) -> f32 {
     channels.0.max(channels.1 * sky_brightness)
 }
 
+/// Mobs this close to the viewer (blocks) are never culled by the frustum:
+/// the animal under the saddle, the pet at the heel, anything the third-person
+/// camera pulls back past.
+pub const ENTITY_NEVER_CULL_RADIUS: f32 = 4.0;
+
+/// What a viewport can see, for [`build_entity_model_vertices_culled`]: skip
+/// mobs wholly beyond the draw range or wholly outside the view frustum before
+/// any of their vertices are baked (Perf B2). Per viewport, so split-screen
+/// players each cull against their own camera. The eye is the RENDER camera's
+/// (the point chunks are drawn from: [`Self::for_camera`]), not the player's
+/// head, so a Director camera flown to a far joiner still shows the mobs there.
+#[derive(Clone, Copy, Debug)]
+pub struct EntityCull {
+    /// The render camera's position (the draw range and the never-cull ring are
+    /// measured from it).
+    pub eye: Vec3,
+    /// The draw range in blocks (render distance, in blocks, plus the one-column
+    /// margin the chunk draw uses: `camera::chunk_draw_columns`).
+    pub max_dist: f32,
+    pub frustum: crate::camera::Frustum,
+}
+
+impl EntityCull {
+    pub fn new(eye: Vec3, render_distance: i32, frustum: crate::camera::Frustum) -> Self {
+        let cols = crate::camera::chunk_draw_columns(render_distance);
+        let max_dist = if cols == i32::MAX {
+            f32::INFINITY
+        } else {
+            cols as f32 * crate::chunk::CHUNK_SIZE as f32
+        };
+        Self { eye, max_dist, frustum }
+    }
+
+    /// The cull for a viewport drawn with this camera uniform: the eye is its
+    /// `camera_pos` (the render eye, the position `Renderer::last_camera_pos`
+    /// draws the chunks from; `w` is the underwater flag, ignored) and the
+    /// frustum its `view_proj`. Never the player's head: with the Cinematic
+    /// Director active the two are hundreds of blocks apart.
+    pub fn for_camera(
+        camera_pos: [f32; 4],
+        view_proj: [[f32; 4]; 4],
+        render_distance: i32,
+    ) -> Self {
+        Self::new(
+            Vec3::new(camera_pos[0], camera_pos[1], camera_pos[2]),
+            render_distance,
+            crate::camera::Frustum::from_view_proj(glam::Mat4::from_cols_array_2d(&view_proj)),
+        )
+    }
+}
+
+/// A generous bounding-sphere radius for a mob from its hitbox: models can
+/// reach past the hitbox (heads, tails, fins, held items), so this errs large.
+pub fn entity_cull_radius(hitbox: &Hitbox) -> f32 {
+    hitbox.width.max(hitbox.height) * 1.5 + 2.0
+}
+
+/// Should a mob whose bounding sphere is `(centre, radius)` be baked this
+/// frame? Pure. Never culled: a `never_cull` entity (one being ridden), and
+/// anything within [`ENTITY_NEVER_CULL_RADIUS`] of the eye. Otherwise culled
+/// when its sphere lies wholly beyond the draw range or wholly outside the view
+/// frustum.
+pub fn entity_in_view(cull: &EntityCull, centre: Vec3, radius: f32, never_cull: bool) -> bool {
+    if never_cull {
+        return true;
+    }
+    let dist = centre.distance(cull.eye);
+    if dist <= ENTITY_NEVER_CULL_RADIUS + radius {
+        return true;
+    }
+    if dist - radius > cull.max_dist {
+        return false;
+    }
+    cull.frustum.contains_sphere(centre, radius)
+}
+
 /// Build textured vertices for all entities. Uses the chunk Vertex format so
 /// entities render with the same pipeline (lighting, fog, textures).
 ///
@@ -933,10 +1009,23 @@ pub fn build_entity_model_vertices(
     overrides: &crate::override_registry::OverrideRegistry,
     light_at: impl Fn(Vec3) -> (f32, f32),
 ) -> Vec<Vertex> {
+    build_entity_model_vertices_culled(ecs, time_ticks, player_pos, overrides, light_at, None)
+}
+
+/// [`build_entity_model_vertices`], skipping (before any vertex is baked) every
+/// mob `cull` says no viewer can see. `None` bakes them all, as before.
+pub fn build_entity_model_vertices_culled(
+    ecs: &hecs::World,
+    time_ticks: u32,
+    player_pos: Vec3,
+    overrides: &crate::override_registry::OverrideRegistry,
+    light_at: impl Fn(Vec3) -> (f32, f32),
+    cull: Option<&EntityCull>,
+) -> Vec<Vertex> {
     let mut verts = Vec::new();
     let anim_time = time_ticks as f32 / 20.0; // seconds
 
-    for (_id, (pos, vel, kind, _hitbox, ai, health, baby, satoshi)) in ecs
+    for (_id, (pos, vel, kind, hitbox, ai, health, baby, satoshi, ridden)) in ecs
         .query::<(
             &Position,
             &Velocity,
@@ -946,6 +1035,7 @@ pub fn build_entity_model_vertices(
             &Health,
             Option<&crate::breeding::Baby>,
             Option<&crate::satoshi::SatoshiMarker>,
+            Option<&crate::entity::Ridden>,
         )>()
         .iter()
     {
@@ -954,6 +1044,13 @@ pub fn build_entity_model_vertices(
         let dist_sq = (pos.0 - player_pos).length_squared();
         if dist_sq < 0.25 {
             continue;
+        }
+        // Perf B2 — skip what no viewer can see before baking any vertices.
+        if let Some(cull) = cull {
+            let centre = pos.0 + Vec3::new(0.0, hitbox.height * 0.5, 0.0);
+            if !entity_in_view(cull, centre, entity_cull_radius(hitbox), ridden.is_some()) {
+                continue;
+            }
         }
         // P5 — babies render at a reduced scale so juveniles read as juveniles.
         let model_scale = if baby.is_some() {
@@ -4438,5 +4535,131 @@ mod tests {
         };
         assert!(extent(&squashed, 1) < extent(&flat, 1), "bounce squashes on Y");
         assert!(extent(&squashed, 0) > extent(&flat, 0), "and widens on X");
+    }
+
+    // ---- Perf B2: entity culling ----
+
+    /// A camera at `eye` looking along -Z, 70 degrees, near 0.1, far 500.
+    fn cull_looking_down_neg_z(eye: Vec3, render_distance: i32) -> EntityCull {
+        let view = glam::Mat4::look_to_rh(eye, Vec3::NEG_Z, Vec3::Y);
+        let proj = glam::Mat4::perspective_rh(70f32.to_radians(), 16.0 / 9.0, 0.1, 500.0);
+        EntityCull::new(eye, render_distance, crate::camera::Frustum::from_view_proj(proj * view))
+    }
+
+    #[test]
+    fn entity_in_view_table() {
+        let eye = Vec3::new(0.0, 70.0, 0.0);
+        let cull = cull_looking_down_neg_z(eye, 4); // range (4 + 1) * 16 = 80
+        assert_eq!(cull.max_dist, 80.0);
+        let r = 2.0;
+        // (centre, expected, why)
+        for (c, want, why) in [
+            (Vec3::new(0.0, 70.0, -30.0), true, "in front, in range"),
+            (Vec3::new(10.0, 70.0, -40.0), true, "in front, off to one side, in the cone"),
+            (Vec3::new(0.0, 70.0, 30.0), false, "behind the camera"),
+            (Vec3::new(0.0, 70.0, -200.0), false, "in front but past the draw range"),
+            (Vec3::new(0.0, 70.0, -81.5), true, "its near edge is within range (80 + radius)"),
+            (Vec3::new(0.0, 70.0, -83.5), false, "wholly past the range"),
+            (Vec3::new(200.0, 70.0, -10.0), false, "far to the side"),
+            (Vec3::new(0.0, 170.0, -20.0), false, "high above the view"),
+            (Vec3::new(0.0, 70.0, 3.0), true, "behind, but within the never-cull radius of the eye"),
+            (Vec3::new(0.0, 70.0, 5.9), true, "behind: sphere edge reaches the never-cull ring (4 + 2)"),
+            (Vec3::new(0.0, 70.0, 6.5), false, "behind, past the never-cull ring"),
+        ] {
+            assert_eq!(entity_in_view(&cull, c, r, false), want, "{why}: {c:?}");
+        }
+    }
+
+    #[test]
+    fn the_cull_is_centred_on_the_render_camera_not_the_players_head() {
+        // Perf review S6: the Director camera is flown 300 blocks from the
+        // player. A mob next to the CAMERA is drawn; one next to the player's
+        // head (behind the camera, out of its range) is not.
+        let player_eye = Vec3::new(0.0, 70.0, 0.0);
+        let cam_eye = Vec3::new(300.0, 90.0, 0.0);
+        let view = glam::Mat4::look_to_rh(cam_eye, Vec3::NEG_Z, Vec3::Y);
+        let proj = glam::Mat4::perspective_rh(70f32.to_radians(), 16.0 / 9.0, 0.1, 500.0);
+        let cull = EntityCull::for_camera(
+            [cam_eye.x, cam_eye.y, cam_eye.z, 1.0],
+            (proj * view).to_cols_array_2d(),
+            4,
+        );
+        assert_eq!(cull.eye, cam_eye, "the underwater flag in w is not part of the eye");
+        // 40 blocks in front of the camera, nowhere near the player: drawn.
+        assert!(entity_in_view(&cull, Vec3::new(300.0, 90.0, -40.0), 2.0, false));
+        // Within the never-cull ring of the camera, even behind it: drawn.
+        assert!(entity_in_view(&cull, Vec3::new(300.0, 90.0, 3.0), 2.0, false));
+        // At the player's head, 300 blocks away: culled, as the old eye-based
+        // cull would NOT have (it would have kept it, and dropped the camera's).
+        assert!(!entity_in_view(&cull, player_eye, 2.0, false));
+        let from_head = cull_looking_down_neg_z(player_eye, 4);
+        assert!(
+            !entity_in_view(&from_head, Vec3::new(300.0, 90.0, -40.0), 2.0, false),
+            "the old cull, centred on the head, dropped the mob next to the camera"
+        );
+    }
+
+    #[test]
+    fn a_ridden_entity_is_never_culled() {
+        let cull = cull_looking_down_neg_z(Vec3::new(0.0, 70.0, 0.0), 4);
+        // Behind the camera and past the range: still drawn when ridden.
+        let far_behind = Vec3::new(0.0, 70.0, 500.0);
+        assert!(!entity_in_view(&cull, far_behind, 2.0, false));
+        assert!(entity_in_view(&cull, far_behind, 2.0, true));
+    }
+
+    #[test]
+    fn unlimited_range_and_a_wide_sphere() {
+        let eye = Vec3::new(0.0, 70.0, 0.0);
+        let cull = cull_looking_down_neg_z(eye, i32::MAX);
+        assert!(cull.max_dist.is_infinite());
+        // Far in front is in range; still frustum-tested.
+        assert!(entity_in_view(&cull, Vec3::new(0.0, 70.0, -300.0), 2.0, false));
+        assert!(!entity_in_view(&cull, Vec3::new(0.0, 70.0, 300.0), 2.0, false));
+        // A big sphere straddling a side plane stays.
+        let cull = cull_looking_down_neg_z(eye, 10);
+        let off = Vec3::new(60.0, 70.0, -30.0); // well outside the right plane
+        assert!(!entity_in_view(&cull, off, 2.0, false));
+        assert!(entity_in_view(&cull, off, 30.0, false), "big enough to reach in");
+    }
+
+    #[test]
+    fn the_cull_radius_covers_the_hitbox_and_then_some() {
+        for (w, h) in [(0.4, 0.4), (0.9, 1.4), (0.6, 1.95), (3.0, 4.0)] {
+            let r = entity_cull_radius(&Hitbox { width: w, height: h });
+            let half_diag = ((w * 0.5) * (w * 0.5) * 2.0 + h * h).sqrt();
+            assert!(r >= half_diag, "({w},{h}): {r} < {half_diag}");
+        }
+    }
+
+    #[test]
+    fn culled_baking_drops_only_what_cannot_be_seen() {
+        let empty = crate::override_registry::OverrideRegistry::new();
+        let mut ecs = hecs::World::new();
+        let eye = Vec3::new(0.0, 70.0, 0.0);
+        let ahead = crate::entity::spawn_mob(&mut ecs, MobType::Cow, Vec3::new(0.0, 64.0, -20.0));
+        let _behind = crate::entity::spawn_mob(&mut ecs, MobType::Cow, Vec3::new(0.0, 64.0, 40.0));
+        let _far = crate::entity::spawn_mob(&mut ecs, MobType::Cow, Vec3::new(0.0, 64.0, -400.0));
+        let cull = cull_looking_down_neg_z(eye, 4);
+
+        let all = build_entity_model_vertices(&ecs, 0, eye, &empty, |_| (1.0, 1.0));
+        let kept = build_entity_model_vertices_culled(&ecs, 0, eye, &empty, |_| (1.0, 1.0), Some(&cull));
+        assert!(!kept.is_empty());
+        assert_eq!(kept.len() * 3, all.len(), "three identical cows, one in view");
+        // `None` is exactly the old behaviour.
+        let none = build_entity_model_vertices_culled(&ecs, 0, eye, &empty, |_| (1.0, 1.0), None);
+        assert_eq!(none.len(), all.len());
+
+        // Riding the one behind the camera keeps it (and the one in front).
+        let _ = ahead;
+        let behind_cow = ecs
+            .query::<(&Position, &MobKind)>()
+            .iter()
+            .find(|(_, (p, _))| p.0.z > 0.0)
+            .map(|(e, _)| e)
+            .unwrap();
+        ecs.insert_one(behind_cow, crate::entity::Ridden).unwrap();
+        let ridden = build_entity_model_vertices_culled(&ecs, 0, eye, &empty, |_| (1.0, 1.0), Some(&cull));
+        assert_eq!(ridden.len(), kept.len() * 2, "the ridden mount is never culled");
     }
 }

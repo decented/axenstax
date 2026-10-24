@@ -1681,9 +1681,12 @@ impl super::GameState {
     /// The world-independent slice of `sync_graphics_to_engine`: present mode and
     /// render scale touch only the renderer's surface/offscreen target, so they
     /// are safe with no world loaded (the lobby Settings panel calls this alone).
+    /// `render_scale` is the scale to ask for: the player's own, or the
+    /// governor's lower one (the pixel budget then caps it inside the renderer).
     pub(crate) fn sync_display_settings(
         renderer: &mut crate::renderer::Renderer,
         gfx: &crate::graphics_settings::GraphicsSettings,
+        render_scale: f32,
     ) {
         // Present mode: VSync vs no-vsync. The software FPS cap (`Cap(n)`) is
         // applied by the frame pacer (Phase 6); both Cap and Uncapped run the
@@ -1694,8 +1697,119 @@ impl super::GameState {
         };
         renderer.set_present_mode(mode);
         // Render scale (Spec 39 P5) — the biggest weak-GPU lever. < 1.0 renders
-        // the world to a smaller offscreen target then upscales it.
-        renderer.set_render_scale(gfx.render_scale);
+        // the world to a smaller offscreen target then upscales it. The pixel
+        // budget (Perf B1) caps the scale on large or high-DPR surfaces.
+        renderer.set_pixel_budget(gfx.pixel_budget);
+        renderer.set_render_scale(render_scale);
+    }
+
+    /// Can the governor shorten the streamed distance in this session? Not for
+    /// any joined client (`quality_governor::may_shrink_distance`): the server
+    /// keeps pushing at the distance it announces, so a shorter one would drop
+    /// and re-send the ring in between every few seconds.
+    pub(crate) fn governor_may_shrink_distance(&self) -> bool {
+        crate::quality_governor::may_shrink_distance(self.joined())
+    }
+
+    /// The dials the frame actually uses: the player's values, held lower by
+    /// the auto-quality governor when it has stepped down (Spec 03 §10.3).
+    pub(crate) fn effective_quality(&self) -> crate::quality_governor::Effective {
+        self.governor.effective(
+            &self.graphics,
+            self.governor_may_shrink_distance(),
+            self.renderer.budget_scale_cap(),
+        )
+    }
+
+    /// The effective render distance (chunks): what streaming, fog and the draw
+    /// range use. Hosting and the join announcement keep the player's own.
+    pub(crate) fn effective_render_distance(&self) -> i32 {
+        self.effective_quality().render_distance
+    }
+
+    /// Push the renderer-side effect of the effective quality (render scale,
+    /// micro-model LOD, draw range). Shared by the settings sync and by every
+    /// governor step; saves nothing and touches no setting.
+    pub(crate) fn sync_effective_quality(&mut self) {
+        let eff = self.effective_quality();
+        Self::sync_display_settings(&mut self.renderer, &self.graphics, eff.render_scale);
+        // Micro-model LOD (owner-inbox #18 Phase D) — flowers within ~55% of the
+        // render distance draw their 3D shell; beyond that, the cheap billboard.
+        // Tracks the live render distance so it scales with the player's setting.
+        let lod = eff.render_distance as f32 * crate::chunk::CHUNK_SIZE as f32 * 0.55;
+        self.renderer.set_micro_lod_dist(lod);
+        // Chunk draw range (final review fix 3) — columns past the render distance
+        // + 1 are wholly fogged out; every viewport skips them, so a lending
+        // host's far-joiner columns cost the GPU nothing. Tracks the live setting.
+        self.renderer
+            .set_chunk_draw_columns(crate::camera::chunk_draw_columns(eff.render_distance));
+    }
+
+    /// The display's refresh rate in millihertz, where the window reports it
+    /// (native), re-read every two seconds.
+    fn display_refresh_mhz(&mut self) -> Option<u32> {
+        let stale = self
+            .display_refresh
+            .1
+            .is_none_or(|at| at.elapsed() >= Duration::from_secs(2));
+        if stale {
+            self.display_refresh = (self.window.refresh_rate_millihertz(), Some(Instant::now()));
+        }
+        self.display_refresh.0
+    }
+
+    /// Feed one in-world frame to the auto-quality governor and apply a step if
+    /// it takes one. No-op while `auto_quality` is off.
+    fn tick_quality_governor(&mut self, dt: f32) {
+        if !self.graphics.auto_quality {
+            return;
+        }
+        let shrink = self.governor_may_shrink_distance();
+        let cap = self.renderer.budget_scale_cap();
+        // Judge frames against the display's own period where it is known: a
+        // 30 or 40 Hz panel can never beat it, and under a frame cap the
+        // longest gap the cap itself schedules on this display is the target
+        // (`target_frame_time_for_period`). Native reads the rate from winit;
+        // the web estimates the period from requestAnimationFrame ticks.
+        #[cfg_attr(not(target_arch = "wasm32"), allow(unused_mut))]
+        let mut period = self
+            .display_refresh_mhz()
+            .and_then(crate::quality_governor::period_from_millihertz);
+        #[cfg(target_arch = "wasm32")]
+        {
+            period = period.or_else(|| self.raf_period.period());
+        }
+        let change = self.governor.update(
+            dt,
+            crate::quality_governor::target_frame_time_for_period(self.graphics.frame_limit, period),
+            crate::quality_governor::max_level(&self.graphics, shrink, cap),
+        );
+        if let Some(change) = change {
+            let eff = self.effective_quality();
+            log::info!(
+                "Auto quality {change:?}: level {}, render distance {} (set {}), scale {:.2} (set {:.2}), particles {:?}",
+                self.governor.level(),
+                eff.render_distance,
+                self.graphics.render_distance,
+                eff.render_scale,
+                self.graphics.render_scale,
+                eff.particles
+            );
+            self.sync_effective_quality();
+        }
+    }
+
+    /// The settings panel's one-line note: what the governor is holding below
+    /// the player's values, if anything.
+    pub(crate) fn governor_note(&self) -> Option<String> {
+        if !self.graphics.auto_quality {
+            return None;
+        }
+        self.governor.note(
+            &self.graphics,
+            self.governor_may_shrink_distance(),
+            self.renderer.budget_scale_cap(),
+        )
     }
 
     /// Push the current `graphics` settings into live engine state (Spec 39)
@@ -1723,7 +1837,6 @@ impl super::GameState {
         // B2a — the render distance the next JoinRequest announces (a joined
         // session sends its current one in every input).
         crate::remote_client::set_join_render_distance(self.graphics.render_distance);
-        Self::sync_display_settings(&mut self.renderer, &self.graphics);
         // Master volume + mute (audio.rs) — both targets, applied live.
         self.audio.set_master(self.graphics.master_volume, self.graphics.audio_muted);
         // Mipmaps (Spec 39 A6) — opt-in; flipping the dial rebuilds the block
@@ -1733,22 +1846,41 @@ impl super::GameState {
             self.graphics.mipmaps,
             self.world.override_registry.appended_layers(),
         );
-        // Micro-model LOD (owner-inbox #18 Phase D) — flowers within ~55% of the
-        // render distance draw their 3D shell; beyond that, the cheap billboard.
-        // Tracks the live render distance so it scales with the player's setting.
-        let lod = self.graphics.render_distance as f32 * crate::chunk::CHUNK_SIZE as f32 * 0.55;
-        self.renderer.set_micro_lod_dist(lod);
-        // Chunk draw range (final review fix 3) — columns past the render distance
-        // + 1 are wholly fogged out; every viewport skips them, so a lending
-        // host's far-joiner columns cost the GPU nothing. Tracks the live setting.
-        self.renderer
-            .set_chunk_draw_columns(crate::camera::chunk_draw_columns(self.graphics.render_distance));
+        // "Leaves: Fast" (Perf B2) — a registry-level render flag; flipping it
+        // remeshes the loaded world.
+        self.sync_leaves_fast();
+        // Render scale, micro-model LOD and draw range follow the EFFECTIVE
+        // quality (the governor's offset below the player's values).
+        self.sync_effective_quality();
+    }
+
+    /// Make the render registry's "Leaves: Fast" flag follow the setting. A
+    /// change re-queues every loaded section for meshing (sections holding only
+    /// leaves have no opaque mesh in one mode and no transparent one in the
+    /// other, so both buckets are consulted); the dirty queue spreads the
+    /// rebuilds over the next frames. Idempotent.
+    pub(crate) fn sync_leaves_fast(&mut self) {
+        let want = self.graphics.leaves_fast;
+        if self.registry.leaves_fast() == want {
+            return;
+        }
+        self.registry.set_leaves_fast(want);
+        let mut loaded: ahash::AHashSet<(i32, i32, i32)> =
+            self.renderer.chunk_meshes.keys().copied().collect();
+        loaded.extend(self.renderer.transparent_meshes.keys().copied());
+        for pos in loaded {
+            self.mark_chunk_dirty(pos);
+        }
     }
 
     /// Apply the current `graphics` settings to live engine state (Spec 39) and
     /// persist them per-device. Called whenever the settings panel moves a dial,
     /// so changes take effect with no reload.
     pub(crate) fn apply_graphics_settings(&mut self) {
+        // Moving a quality slider or picking a preset hands control back to the
+        // player: the governor's offset is dropped and its history starts over
+        // (an unrelated change, such as volume, leaves it alone).
+        self.governor.rebase(&self.graphics);
         self.sync_graphics_to_engine();
         self.graphics.save();
         // The tester-feedback unlock lives in these settings: re-gate the
@@ -2759,8 +2891,14 @@ impl super::GameState {
         // we don't borrow-conflict on `self.world` mid-iteration.
         let mut void: Vec<(i32, i32)> = Vec::new();
         let (mut had_chunk, mut was_loaded) = (0u32, 0u32);
-        for dx in -rd..=rd {
-            for dz in -rd..=rd {
+        // Round, as `stream_chunks` loads (Perf B2); a joiner's ground is a square.
+        let round = !self.joined();
+        let reach = if round { crate::chunk_stream::round_load_columns(rd) } else { rd };
+        for dx in -reach..=reach {
+            for dz in -reach..=reach {
+                if round && !crate::camera::column_in_round_range(dx, dz, reach) {
+                    continue;
+                }
                 let (cx, cz) = (pcx + dx, pcz + dz);
                 let floor = self.world.get_block(cx * cs + 8, 0, cz * cs + 8);
                 // B2a — a column the server pushed is the server's, as it is.
@@ -3059,7 +3197,7 @@ impl super::GameState {
         };
     }
 
-    fn reset_for_world_change(&mut self) {
+    pub(crate) fn reset_for_world_change(&mut self) {
         // Nothing is live until this load finishes (a close mid-load must not
         // save the half-built world over the real one).
         self.live_world = None;
@@ -3108,17 +3246,14 @@ impl super::GameState {
         self.trial_outcome = None;
         // Drop queued rebuilds from the previous world (Spec 39 A4).
         self.dirty_mesh_chunks.clear();
-        self.renderer.chunk_meshes.clear();
-        self.renderer.water_meshes.clear();
-        self.renderer.plant_meshes.clear();
-        self.renderer.decal_meshes.clear();
-        // Owner-inbox #18 — wipe per-chunk micro-model instance buffers and the
-        // per-type baked shell geometry so a new world never renders the prior
-        // world's micro-models. micro_geo re-syncs idempotently at next
-        // initial_load; clearing it also keeps this "wipe every per-world map"
-        // contract honest if registries ever become world-specific (Stash assets).
-        self.renderer.micro_meshes.clear();
-        self.renderer.micro_billboard_meshes.clear();
+        // Every per-section mesh map (opaque, water, transparent, plants,
+        // decals, micro-models and billboards) in one call, so a new world never
+        // renders the prior world's leaves, glass or micro-models. The per-type
+        // baked micro shell geometry goes too: micro_geo re-syncs idempotently
+        // at next initial_load; clearing it also keeps this "wipe every
+        // per-world map" contract honest if registries ever become
+        // world-specific (Stash assets).
+        self.renderer.clear_world_meshes();
         self.renderer.clear_micro_geo();
         // Authored exhibits are per-world. Tear them down here so the next world
         // rebuilds from a clean slate. The lazy per-tick teardown in
@@ -3213,7 +3348,10 @@ impl super::GameState {
         }
         // Spec 39 — push persisted graphics settings (present mode, hosted-server
         // render distance, FOV) into live state on world entry, so a per-device
-        // settings file takes effect without opening the panel.
+        // settings file takes effect without opening the panel. A new world
+        // starts the auto-quality governor from the player's own values.
+        self.governor.reset();
+        self.governor.rebase(&self.graphics);
         self.sync_graphics_to_engine();
         // #44 — apply the persisted debug-overlay default on world entry. F3
         // still toggles it live within the session.
@@ -3361,7 +3499,7 @@ impl super::GameState {
     /// the chunk streamer regenerate the bedrock floor next frame, and forcing the
     /// autosave counter persists the cleared room immediately (so closing the tab
     /// right after Reset can't resurrect the old build). No-op off the Workshop.
-    fn reset_workshop_space(&mut self) {
+    pub(crate) fn reset_workshop_space(&mut self) {
         self.pending_workshop_reset = false;
         if !self.world.is_workshop {
             return;
@@ -3370,12 +3508,7 @@ impl super::GameState {
         self.world.workshop.clear();
         self.loaded_columns.clear();
         self.dirty_mesh_chunks.clear();
-        self.renderer.chunk_meshes.clear();
-        self.renderer.water_meshes.clear();
-        self.renderer.plant_meshes.clear();
-        self.renderer.decal_meshes.clear();
-        self.renderer.micro_meshes.clear();
-        self.renderer.micro_billboard_meshes.clear();
+        self.renderer.clear_world_meshes();
         self.renderer.clear_micro_geo();
         // Force the next autosave (counter check is `>= 6000` after a +1).
         self.autosave_counter = 6000;
@@ -7997,7 +8130,8 @@ impl super::GameState {
         // any time left in this frame's budget. This also yields the CPU, fixing
         // the native `ControlFlow::Poll` busy-spin for capped modes. VSync is
         // paced by the swapchain `present`; Uncapped is deliberately unlimited;
-        // WASM is paced by requestAnimationFrame (this block is native-only).
+        // WASM is paced by requestAnimationFrame and skips early frames instead
+        // (the block below this one; this block is native-only).
         #[cfg(not(target_arch = "wasm32"))]
         {
             let mut interval = self.graphics.frame_limit.software_cap_interval();
@@ -8021,6 +8155,34 @@ impl super::GameState {
                 }
             }
             self.frame_pace_instant = Instant::now();
+        }
+        // Web frame cap (Perf B1): the browser paces by requestAnimationFrame,
+        // so a `Cap(n)` is honoured by skipping any render that arrives before
+        // the cap's next DEADLINE and asking for another redraw
+        // (`FrameCap`: the average rate is the cap on 75/90/100/144/165 Hz
+        // displays too). Idle screens already throttle themselves above, and
+        // the world load (`GameMode::Loading`) is exempt: it drains a per-frame
+        // budget, so capping it only makes the load slower.
+        #[cfg(target_arch = "wasm32")]
+        {
+            // Every rAF tick, the ones the cap skips included, tells the
+            // governor the display's period (`quality_governor::RafPeriod`).
+            self.raf_period
+                .tick(self.frame_pace_instant.elapsed().as_secs_f32());
+            let interval = crate::graphics_settings::web_cap_interval(
+                self.graphics.frame_limit,
+                matches!(self.mode, GameMode::Loading(_)),
+            );
+            match interval {
+                Some(interval) => {
+                    // `frame_pace_instant` is the epoch (set once, never reset here).
+                    if !self.frame_cap.due(self.frame_pace_instant.elapsed(), interval) {
+                        self.window.request_redraw();
+                        return;
+                    }
+                }
+                None => self.frame_cap.reset(),
+            }
         }
 
         // Expire the transient wardrobe (import/refresh) toast after a few
@@ -8962,6 +9124,9 @@ impl super::GameState {
                 let ctx = self.renderer.egui.ctx.clone();
                 #[cfg(not(target_arch = "wasm32"))]
                 let relays_before = self.graphics.online_relays.clone();
+                // No world is running here, so there is nothing for the governor to
+                // report.
+                self.settings_panel.governor_note = None;
                 let panel_action = crate::menu::draw_settings_panel(
                     &ctx,
                     &mut self.settings_panel,
@@ -8990,7 +9155,16 @@ impl super::GameState {
                     crate::native_mailbox::apply_gate(&mut self.cmd_registry, &self.graphics);
                 }
                 if plan.apply_display {
-                    Self::sync_display_settings(&mut self.renderer, &self.graphics);
+                    // A lobby change is the player's own: drop any governor offset.
+                    // (Field-wise: `menu_state` borrows `self.mode`.)
+                    self.governor.rebase(&self.graphics);
+                    let eff = self.governor.effective(
+                        &self.graphics,
+                        // (Field-wise, like the rebase above: `menu_state` borrows `self.mode`.)
+                        crate::quality_governor::may_shrink_distance(self.remote_client.is_some()),
+                        self.renderer.budget_scale_cap(),
+                    );
+                    Self::sync_display_settings(&mut self.renderer, &self.graphics, eff.render_scale);
                 }
                 #[cfg(not(target_arch = "wasm32"))]
                 {
@@ -10188,6 +10362,7 @@ impl super::GameState {
             // mirrors the "Your look" panel above (Spec 39). Apply-on-change.
             if self.settings_panel.open {
                 let ctx = self.renderer.egui.ctx.clone();
+                self.settings_panel.governor_note = self.governor_note();
                 match crate::menu::draw_settings_panel(&ctx, &mut self.settings_panel, &mut self.graphics) {
                     crate::menu::SettingsPanelAction::Changed => {
                         self.apply_graphics_settings();
@@ -10619,14 +10794,43 @@ impl super::GameState {
                         self.frame_samples.pop_front();
                     }
                     self.frame_samples.push_back(dt);
+                    // Auto quality (Spec 03 §10.3) judges in-world frames only:
+                    // menus, pauses and loading screens have their own pacing.
+                    if matches!(self.mode, GameMode::Playing) {
+                        self.tick_quality_governor(dt);
+                    }
                 }
             } else {
                 self.last_frame_instant = Some(now);
             }
         }
 
+        // Tick catch-up policy (`tick_catchup`): never carry more than a few
+        // ticks of debt (a slow tick used to spiral into ever-longer frames),
+        // and stop catching up once this frame has spent its tick-time budget.
+        // Not while a remote joiner is connected: its inputs are consumed one
+        // per server tick, so dropped host ticks would leave standing lag.
+        let hosting_joiners = self
+            .hosted_server
+            .as_ref()
+            .is_some_and(|hs| hs.has_remote_clients());
+        crate::tick_catchup::note_dropped(
+            crate::tick_catchup::clamp_backlog(
+                &mut self.tick_accumulator,
+                TICK_DURATION,
+                hosting_joiners,
+            ),
+            now,
+        );
         let mut ticks_run = 0;
-        while self.tick_accumulator >= TICK_DURATION && ticks_run < 10 {
+        let mut tick_time_spent = Duration::ZERO;
+        while crate::tick_catchup::may_run_another_tick(
+            self.tick_accumulator,
+            TICK_DURATION,
+            ticks_run,
+            tick_time_spent,
+            hosting_joiners,
+        ) {
             let tick_start = Instant::now();
             // D1 tripwire baseline: the world's sim tally before this logical
             // tick (the client's half here, the lent server's half below).
@@ -10704,6 +10908,7 @@ impl super::GameState {
             // accumulator at zero, so the `>= TICK_DURATION` guard exits the loop.
             self.tick_accumulator = self.tick_accumulator.saturating_sub(TICK_DURATION);
             ticks_run += 1;
+            tick_time_spent += tick_start.elapsed();
         }
 
         // Footstep sounds for all local players
@@ -16668,7 +16873,7 @@ impl super::GameState {
         // its own eye in vs_particle). Gated by the graphics setting; dt is
         // clamped so a hitch or tab-switch can't teleport particles.
         {
-            self.particles.set_cap(self.graphics.particles);
+            self.particles.set_cap(self.effective_quality().particles);
             let now = Instant::now();
             let dt = (now - self.last_particle_frame).as_secs_f32().min(0.1);
             self.last_particle_frame = now;
@@ -16920,7 +17125,7 @@ impl super::GameState {
             // Spec 39 — fog derived from the live render distance (fixes pop-in
             // when the render-distance dial moves); off pushes fog far away.
             camera_uniform.fog = if self.graphics.fog {
-                crate::camera::fog_vec(self.graphics.render_distance)
+                crate::camera::fog_vec(self.effective_render_distance())
             } else {
                 crate::camera::fog_disabled()
             };
@@ -16936,12 +17141,24 @@ impl super::GameState {
             // mobs/loot/arrows/carts dim at night and in caves like terrain.
             let world_light = &self.world;
             let light_at = |p: glam::Vec3| world_light.light_channels_at(p.x, p.y, p.z);
-            let mut entity_verts = crate::entity_model::build_entity_model_vertices(
+            // Perf B2 — mobs beyond the draw range or outside this viewport's
+            // frustum are not baked (the ridden mount and anything within a few
+            // blocks of the eye never are culled).
+            // Centred on the RENDER camera (the point the chunks are drawn
+            // from), not the player's head: with the Director flown away from
+            // the body the two differ by hundreds of blocks.
+            let entity_cull = crate::entity_model::EntityCull::for_camera(
+                camera_uniform.camera_pos,
+                camera_uniform.view_proj,
+                self.effective_render_distance(),
+            );
+            let mut entity_verts = crate::entity_model::build_entity_model_vertices_culled(
                 &self.ecs,
                 self.falling_tick_counter,
                 self.players[pidx].player.eye_pos(),
                 &self.world.override_registry,
                 light_at,
+                Some(&entity_cull),
             );
             entity_verts.extend(crate::entity_model::build_item_entity_vertices(
                 &self.ecs,
@@ -16985,12 +17202,13 @@ impl super::GameState {
             // (their own render-only ECS; empty unless joined). The same
             // builders draw them as draw the host's.
             if !self.remote_mobs.is_empty() {
-                entity_verts.extend(crate::entity_model::build_entity_model_vertices(
+                entity_verts.extend(crate::entity_model::build_entity_model_vertices_culled(
                     self.remote_mobs.ecs(),
                     self.falling_tick_counter,
                     self.players[pidx].player.eye_pos(),
                     &self.world.override_registry,
                     light_at,
+                    Some(&entity_cull),
                 ));
                 entity_verts.extend(crate::entity_model::build_cart_vertices(
                     self.remote_mobs.ecs(),
@@ -20357,7 +20575,7 @@ impl super::GameState {
                         &screen.viewport,
                         self.tick_counter,
                     
-                        self.graphics.particles == crate::graphics_settings::ParticleLevel::Off,
+                        self.effective_quality().particles == crate::graphics_settings::ParticleLevel::Off,
                     );
                 }
                 } // end hud_suppressed guard (Cinematic Director hide-HUD)

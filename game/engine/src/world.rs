@@ -1771,6 +1771,23 @@ impl World {
         self.chunks.iter().map(|(&k, c)| (k, c))
     }
 
+    /// The loaded chunks that hold at least one piston (plain or sticky).
+    /// Reads each chunk's maintained counter (`Chunk::has_pistons`), so the
+    /// per-tick piston pass costs one flag check per loaded chunk instead of
+    /// a read of every cell. Correct on every write path by construction: the
+    /// counter lives in the chunk, which `Chunk::set` / `from_bytes` alone can
+    /// change, so chunk loads, restores, pushed chunks, paste and eviction
+    /// cannot desynchronise it.
+    pub(crate) fn chunks_with_pistons(&self) -> impl Iterator<Item = ((i32, i32, i32), &Chunk)> {
+        self.chunks.iter().filter(|(_, c)| c.has_pistons()).map(|(&k, c)| (k, c))
+    }
+
+    /// The loaded chunks that hold at least one hopper (see
+    /// [`Self::chunks_with_pistons`]).
+    pub(crate) fn chunks_with_hoppers(&self) -> impl Iterator<Item = ((i32, i32, i32), &Chunk)> {
+        self.chunks.iter().filter(|(_, c)| c.has_hoppers()).map(|(&k, c)| (k, c))
+    }
+
     /// Get block at world-space position.
     /// Spec 40 §5 — is this world cell currently render-hidden (skipped by the
     /// mesher)? Cheap: short-circuits on the common empty set so the per-cell
