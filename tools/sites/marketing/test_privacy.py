@@ -42,7 +42,7 @@ def test_privacy_page_covers_every_data_flow_named_in_the_audit():
 
 
 def test_every_marketing_page_footer_links_privacy():
-    for path in ("/", "/roadmap", "/experiences", "/support", "/safety", "/will-it-run"):
+    for path in ("/", "/roadmap", "/experiences", "/more-games", "/support", "/safety", "/will-it-run"):
         r = client.get(path)
         assert r.status_code == 200, path
         assert 'href="/privacy"' in r.text, f"{path} footer is missing a /privacy link"
@@ -112,3 +112,11 @@ def test_privacy_page_does_not_overstate_what_reports_or_the_web_game_send():
     text = client.get("/privacy").text
     assert "position in the world" not in text
     assert "technical error message" not in text
+
+
+def test_every_marketing_page_except_roadmap_links_more_games():
+    """The owner is editing roadmap.html, so it is the one page left out."""
+    for path in ("/", "/experiences", "/more-games", "/support", "/safety", "/will-it-run", "/privacy"):
+        r = client.get(path)
+        assert r.status_code == 200, path
+        assert 'href="/more-games"' in r.text, f"{path} is missing a /more-games link"
