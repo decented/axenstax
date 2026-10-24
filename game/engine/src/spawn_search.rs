@@ -229,6 +229,18 @@ mod tests {
         }
     }
 
+    /// A v4 world takes the v3 path: same column as v3 (same terrain), and its
+    /// spawn is dry with headroom in the cave-carved blocks too.
+    #[test]
+    fn v4_world_spawn_takes_the_v3_path() {
+        for seed in [1u32, 42, 777] {
+            let bg = BiomeGenerator::new(seed, Generator::V4);
+            assert_eq!(world_spawn_column(&bg), search(&v3(seed)), "seed {seed}");
+            let world = world_with_spawn_columns(&bg);
+            assert_standing(&world, world_spawn_point(&world, &bg), &format!("v4 seed {seed}"));
+        }
+    }
+
     /// "In the mountains" lands on the surface with headroom, not in the rock.
     #[test]
     fn in_mountains_on_v3_lands_on_the_surface_not_in_rock() {
