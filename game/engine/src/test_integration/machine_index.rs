@@ -109,7 +109,7 @@ fn the_machine_index_equals_a_full_scan_through_edits_loads_and_evictions() {
     assert_index_matches_scan(&world, "empty world");
 
     // Natural terrain first (seed 42): generation writes through the same setters.
-    let biome_gen = BiomeGenerator::new(42);
+    let biome_gen = BiomeGenerator::new(42, crate::biome::Generator::V2);
     for cx in 0..2 {
         for cz in 0..2 {
             world.generate_column(cx, cz, &biome_gen);

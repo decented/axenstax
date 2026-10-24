@@ -285,7 +285,7 @@ mod tests {
     #[test]
     fn a_real_stream_batch_builds_far_fewer_meshes_than_per_column_streaming() {
         let registry = BlockRegistry::new();
-        let biome_gen = BiomeGenerator::new(42);
+        let biome_gen = BiomeGenerator::new(42, crate::biome::Generator::V2);
         let mut world = World::new();
         // 4x4 columns: the outer ring is already loaded, the 2x2 middle streams in.
         let area: Vec<(i32, i32)> = (0..4).flat_map(|x| (0..4).map(move |z| (x, z))).collect();

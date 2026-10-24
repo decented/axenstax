@@ -75,7 +75,7 @@ fn legacy_full_scan(world: &World) -> usize {
 
 fn run(rd: i32) -> Row {
     let registry = BlockRegistry::new();
-    let biome_gen = BiomeGenerator::new(SEED);
+    let biome_gen = BiomeGenerator::new(SEED, crate::biome::Generator::V2);
     let mut world = World::new();
 
     let mut cols = Vec::new();
@@ -201,7 +201,7 @@ fn world_cpu_bench() {
 fn stream_batch_report() {
     use crate::stream_mesh::{build_sections, plan_stream_meshes, section_kind, MeshPolicy, SectionKind};
     let registry = BlockRegistry::new();
-    let biome_gen = BiomeGenerator::new(SEED);
+    let biome_gen = BiomeGenerator::new(SEED, crate::biome::Generator::V2);
     let mut world = World::new();
     let area: Vec<(i32, i32)> = (0..4).flat_map(|x| (0..4).map(move |z| (x, z))).collect();
     let batch = [(1, 1), (2, 1), (1, 2), (2, 2)];
