@@ -100,6 +100,16 @@ pub enum Generator {
     V3,
 }
 
+/// Output revision of the **v3** generator, folded into its protocol
+/// fingerprint ([`crate::world::worldgen_fingerprint_for`]).
+///
+/// **Bump this whenever v3 output changes** (the bridge-to-real swap, then any
+/// later tweak to its terrain, caves, ore, trees or structures). A peer whose
+/// v3 revision differs then reads as a fingerprint mismatch and is pushed real
+/// chunks instead of being trusted to regenerate seam-free terrain. v2 has its
+/// own counter (`world::WORLDGEN_VERSION`); this never touches it. Spec 02 §5.2.
+pub const V3_REVISION: u32 = 0;
+
 /// The generator every newly created world is stamped with.
 pub const NEW_WORLD_GENERATOR: u32 = 3;
 

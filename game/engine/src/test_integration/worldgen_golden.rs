@@ -347,6 +347,38 @@ fn worldgen_fingerprint_folds_version_and_bundled_plans() {
     assert_ne!(worldgen_fingerprint(), 0, "0 is what a peer that sent nothing decodes as");
 }
 
+/// B1 (terrain T1 review): v3's fingerprint carries its own output revision, so
+/// the bridge-to-real swap (a `V3_REVISION` bump) changes it, while v2's value
+/// stays exactly the one every build since protocol v65 has exchanged.
+#[test]
+fn v3_fingerprint_hashes_its_revision_and_v2_is_unchanged() {
+    use crate::biome::{Generator, V3_REVISION};
+    use crate::world::{v3_output_version, worldgen_fingerprint_for};
+    let plans = PlanRegistry::bundled().content_hash();
+
+    // v2: pinned to the value it has always had. This changes only when the
+    // bundled plans or WORLDGEN_VERSION do, and then so does the golden.
+    assert_eq!(worldgen_fingerprint_for(Generator::V2), V2_FINGERPRINT_PIN);
+    assert_eq!(worldgen_fingerprint(), V2_FINGERPRINT_PIN);
+
+    // v3: the live value is the revision folded in...
+    assert_eq!(worldgen_fingerprint_for(Generator::V3), worldgen_fingerprint_of(v3_output_version(V3_REVISION), &plans));
+    // ...a bump changes it, and no revision of v3 collides with v2's.
+    for rev in 0..64 {
+        assert_ne!(
+            worldgen_fingerprint_of(v3_output_version(rev), &plans),
+            worldgen_fingerprint_of(v3_output_version(rev + 1), &plans),
+            "v3 revision {rev} -> {}",
+            rev + 1
+        );
+        assert_ne!(v3_output_version(rev), WORLDGEN_VERSION);
+    }
+    assert_ne!(worldgen_fingerprint_for(Generator::V3), worldgen_fingerprint_for(Generator::V2));
+}
+
+/// The v2 generator's fingerprint (`WORLDGEN_VERSION` 2 + the bundled plans).
+const V2_FINGERPRINT_PIN: u32 = 2_302_712_996;
+
 #[test]
 fn worldgen_output_matches_golden_for_this_version() {
     assert_eq!(
