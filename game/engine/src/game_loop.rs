@@ -3188,7 +3188,7 @@ impl super::GameState {
         };
     }
 
-    fn reset_for_world_change(&mut self) {
+    pub(crate) fn reset_for_world_change(&mut self) {
         // Nothing is live until this load finishes (a close mid-load must not
         // save the half-built world over the real one).
         self.live_world = None;
@@ -3237,17 +3237,14 @@ impl super::GameState {
         self.trial_outcome = None;
         // Drop queued rebuilds from the previous world (Spec 39 A4).
         self.dirty_mesh_chunks.clear();
-        self.renderer.clear_chunk_meshes();
-        self.renderer.water_meshes.clear();
-        self.renderer.plant_meshes.clear();
-        self.renderer.decal_meshes.clear();
-        // Owner-inbox #18 — wipe per-chunk micro-model instance buffers and the
-        // per-type baked shell geometry so a new world never renders the prior
-        // world's micro-models. micro_geo re-syncs idempotently at next
-        // initial_load; clearing it also keeps this "wipe every per-world map"
-        // contract honest if registries ever become world-specific (Stash assets).
-        self.renderer.micro_meshes.clear();
-        self.renderer.micro_billboard_meshes.clear();
+        // Every per-section mesh map (opaque, water, transparent, plants,
+        // decals, micro-models and billboards) in one call, so a new world never
+        // renders the prior world's leaves, glass or micro-models. The per-type
+        // baked micro shell geometry goes too: micro_geo re-syncs idempotently
+        // at next initial_load; clearing it also keeps this "wipe every
+        // per-world map" contract honest if registries ever become
+        // world-specific (Stash assets).
+        self.renderer.clear_world_meshes();
         self.renderer.clear_micro_geo();
         // Authored exhibits are per-world. Tear them down here so the next world
         // rebuilds from a clean slate. The lazy per-tick teardown in
@@ -3493,7 +3490,7 @@ impl super::GameState {
     /// the chunk streamer regenerate the bedrock floor next frame, and forcing the
     /// autosave counter persists the cleared room immediately (so closing the tab
     /// right after Reset can't resurrect the old build). No-op off the Workshop.
-    fn reset_workshop_space(&mut self) {
+    pub(crate) fn reset_workshop_space(&mut self) {
         self.pending_workshop_reset = false;
         if !self.world.is_workshop {
             return;
@@ -3502,12 +3499,7 @@ impl super::GameState {
         self.world.workshop.clear();
         self.loaded_columns.clear();
         self.dirty_mesh_chunks.clear();
-        self.renderer.clear_chunk_meshes();
-        self.renderer.water_meshes.clear();
-        self.renderer.plant_meshes.clear();
-        self.renderer.decal_meshes.clear();
-        self.renderer.micro_meshes.clear();
-        self.renderer.micro_billboard_meshes.clear();
+        self.renderer.clear_world_meshes();
         self.renderer.clear_micro_geo();
         // Force the next autosave (counter check is `>= 6000` after a +1).
         self.autosave_counter = 6000;

@@ -256,6 +256,60 @@ mod tests {
         assert_eq!(hg.state.effective_render_distance(), rd, "but never the distance");
     }
 
+    /// Perf review S4: leaving a world must drop EVERY per-section mesh map,
+    /// transparent (leaves, glass) included, or the last world's canopies and
+    /// glass hang in the next world's sky (an all-air section never uploads or
+    /// drops anything, so nothing else clears them).
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_a_world_change_drops_every_per_section_mesh_map() {
+        isolate_saves();
+        let mut hg = HeadlessGame::boot_into_world("harness-world-change-meshes");
+        hg.frames(3);
+        let all_empty = |r: &crate::renderer::Renderer| {
+            r.chunk_meshes.is_empty()
+                && r.water_meshes.is_empty()
+                && r.transparent_meshes.is_empty()
+                && r.plant_meshes.is_empty()
+                && r.decal_meshes.is_empty()
+                && r.micro_meshes.is_empty()
+                && r.micro_billboard_meshes.is_empty()
+        };
+        // Stamp one section with stone, glass, leaves, water and a plant, high
+        // in the world where no terrain meshes, and upload it.
+        let pos = (0, crate::world::MAX_CHUNK_Y, 0);
+        let st = &mut hg.state;
+        for (i, b) in [
+            crate::block::STONE,
+            crate::block::GLASS,
+            crate::block::OAK_LEAVES,
+            crate::block::WATER,
+            crate::block::TALL_GRASS,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            st.world.set_block(2 + 2 * i as i32, pos.1 * 16 + 5, 5, b);
+        }
+        let meshes = crate::mesh::build_chunk_meshes(pos.0, pos.1, pos.2, &st.world, &st.registry);
+        st.renderer.upload_chunk(pos, &meshes);
+        assert!(st.renderer.chunk_meshes.contains_key(&pos), "opaque meshed");
+        assert!(st.renderer.transparent_meshes.contains_key(&pos), "glass and leaves meshed");
+        assert!(!all_empty(&st.renderer));
+        // The real world-change reset.
+        st.reset_for_world_change();
+        assert!(st.renderer.transparent_meshes.is_empty(), "the last world's leaves and glass stayed");
+        assert!(all_empty(&st.renderer), "a per-section mesh map survived the world change");
+        // And the Workshop reset: re-stamp, make it a Workshop, reset the room.
+        st.world.set_block(2, pos.1 * 16 + 5, 5, crate::block::GLASS);
+        let meshes = crate::mesh::build_chunk_meshes(pos.0, pos.1, pos.2, &st.world, &st.registry);
+        st.renderer.upload_chunk(pos, &meshes);
+        assert!(st.renderer.transparent_meshes.contains_key(&pos));
+        st.world.is_workshop = true;
+        st.reset_workshop_space();
+        assert!(all_empty(&st.renderer), "the Workshop reset left a mesh map behind");
+    }
+
     #[test]
     #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
     fn game_harness_raid_kill_attribution_settles_through_the_live_game_loop() {

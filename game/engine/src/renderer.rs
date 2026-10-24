@@ -504,6 +504,24 @@ fn choose_surface_formats(
     (config_format, render_format, view_formats)
 }
 
+/// Applies `$body` to each of the renderer's per-section mesh maps (`$m` is the
+/// map, `&mut`), keyed by section position: the ONE list of them.
+/// [`Renderer::drop_section`] and [`Renderer::clear_world_meshes`] both go
+/// through it, so a new per-section map is added here and nowhere else.
+/// (`$body` is expanded once per map, so it may differ in type each time.)
+macro_rules! per_section_mesh_maps {
+    ($r:expr, |$m:ident| $body:expr) => {{
+        let r = &mut *$r;
+        { let $m = &mut r.chunk_meshes; $body; }
+        { let $m = &mut r.water_meshes; $body; }
+        { let $m = &mut r.transparent_meshes; $body; }
+        { let $m = &mut r.plant_meshes; $body; }
+        { let $m = &mut r.decal_meshes; $body; }
+        { let $m = &mut r.micro_meshes; $body; }
+        { let $m = &mut r.micro_billboard_meshes; $body; }
+    }};
+}
+
 pub struct Renderer {
     pub surface: Option<wgpu::Surface<'static>>,
     /// Retained so the surface can be REBUILT, not just dropped.
@@ -1957,12 +1975,6 @@ impl Renderer {
         }
     }
 
-    /// Drop every opaque section mesh (a world change).
-    pub fn clear_chunk_meshes(&mut self) {
-        self.chunk_meshes.clear();
-        self.chunk_mesh_epoch += 1;
-    }
-
     pub fn upload_water_mesh(&mut self, pos: (i32, i32, i32), mesh: &ChunkMesh) {
         if mesh.vertices.is_empty() {
             self.water_meshes.remove(&pos);
@@ -2067,23 +2079,28 @@ impl Renderer {
         );
     }
 
-    /// Upload all three GPU representations for a chunk at once — opaque
-    /// mesh, water mesh, and instanced plants. Single entry point so no
-    /// call site can forget the plant instances (added 2026-05-30).
     /// Drop every GPU mesh held for one section: the inverse of
-    /// [`Self::upload_chunk`], and the one place that lists every per-section
-    /// mesh map (opaque, water, transparent, plants, decals, micro-models and
-    /// their far billboards). A new per-section map belongs in both.
+    /// [`Self::upload_chunk`]. Shares [`per_section_mesh_maps`] with
+    /// [`Self::clear_world_meshes`], the one list of every per-section mesh map.
     pub fn drop_section(&mut self, pos: (i32, i32, i32)) {
-        if self.chunk_meshes.remove(&pos).is_some() {
+        let had_opaque = self.chunk_meshes.contains_key(&pos);
+        per_section_mesh_maps!(self, |m| {
+            m.remove(&pos);
+        });
+        if had_opaque {
             self.chunk_mesh_epoch += 1;
         }
-        self.water_meshes.remove(&pos);
-        self.transparent_meshes.remove(&pos);
-        self.plant_meshes.remove(&pos);
-        self.decal_meshes.remove(&pos);
-        self.micro_meshes.remove(&pos);
-        self.micro_billboard_meshes.remove(&pos);
+    }
+
+    /// Drop every per-section GPU mesh (a world change): opaque, water,
+    /// transparent (leaves, glass), plants, decals, micro-models and their far
+    /// billboards. Both world-change sites call this, so no map can be
+    /// forgotten at one of them (transparent meshes were: the last world's
+    /// canopies and glass hung in the next world's sky). The per-type baked
+    /// micro shell geometry is not per-section; see [`Self::clear_micro_geo`].
+    pub fn clear_world_meshes(&mut self) {
+        per_section_mesh_maps!(self, |m| m.clear());
+        self.chunk_mesh_epoch += 1;
     }
 
     pub fn upload_chunk(&mut self, pos: (i32, i32, i32), meshes: &crate::mesh::ChunkMeshes) {
