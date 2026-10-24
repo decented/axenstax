@@ -1012,7 +1012,8 @@ pub(crate) struct GameState {
     pub(crate) last_tick: Instant,
     pub(crate) tick_accumulator: Duration,
     /// Wall-clock time the last frame was paced (Spec 39 A3 frame cap). Native
-    /// only; WASM is paced by requestAnimationFrame.
+    /// sleeps off the remainder; WASM (paced by requestAnimationFrame) skips a
+    /// render that comes sooner than the cap interval.
     pub(crate) frame_pace_instant: Instant,
     pub(crate) show_debug: bool,
     /// #6 — minimap render state (explored-map cache + last baked texture +

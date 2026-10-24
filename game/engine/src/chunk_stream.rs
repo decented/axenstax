@@ -237,6 +237,10 @@ impl super::GameState {
         }
         #[cfg(target_arch = "wasm32")]
         self.kick_off_wardrobe_load();
+        // A new world starts from the player's own quality values: an auto-quality
+        // offset left over from the last world must not shrink this load.
+        self.governor.reset();
+        self.governor.rebase(&self.graphics);
         // Live render distance (Spec 39 — was the `RENDER_DISTANCE` const).
         let rd = self.effective_render_distance();
         // One-shot resume intent from the WASM poll branch (see the field doc
