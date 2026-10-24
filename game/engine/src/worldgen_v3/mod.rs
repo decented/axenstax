@@ -5,7 +5,7 @@
 //! 2D height (`height2d`) through piecewise-linear splines; a 3D density noise
 //! on a 4×8×4 lattice adds overhangs and cliffs; surface rules paint the top;
 //! biomes are labels read off the same fields. Selected per world by
-//! `biome::Generator::V3`; v2 worlds never reach this code.
+//! `biome::Generator::V3` (and V4, which adds caves); v2 worlds never reach this code.
 //!
 //! Determinism (§0.2): f64; only `+ - * /`, `sqrt`, `abs`, `floor`/`ceil`,
 //! `min`/`max` and comparisons; column-clipped and order-independent; the
@@ -14,8 +14,12 @@
 //! Frozen as shipped (2026-10-24, `biome::V3_REVISION` 1): shape, surface and
 //! labels are v3's own; caves are v2's flooded noise caves (`fill::solid_block`)
 //! and trees, vegetation and structures v2's decoration (`World::generate_column`).
-//! Do not change v3 output: the dry caves and v3 trees go in the next generator.
+//! Do not change v3 output. The dry caves of design §7 now exist for
+//! `biome::Generator::V4` only (`caves`, built by [`Terrain::new_v4`]; v3 builds
+//! no cave noise); v4 is v3 plus those caves and is not yet stamped on new
+//! worlds. The v3 trees and spawn of §9–§10 will land in v4 too, before it ships.
 
+pub mod caves;
 pub mod climate;
 pub mod density;
 pub mod fill;
@@ -25,11 +29,16 @@ pub mod spline;
 pub mod surface;
 
 #[cfg(test)]
+mod cave_metrics;
+#[cfg(test)]
 mod metrics;
+#[cfg(test)]
+mod v4_tests;
 #[cfg(test)]
 mod tests;
 
 use crate::biome::Biome;
+use caves::Caves;
 use density::Density;
 use lattice::{Lattice, Sample};
 use noise::{NoiseFn, OpenSimplex};
@@ -38,16 +47,31 @@ use noise::{NoiseFn, OpenSimplex};
 pub struct Terrain {
     pub lattice: Lattice,
     pub density: Density,
+    /// The dry caves of §7: `Some` only for a v4 world (v3 is frozen with
+    /// v2's caves and never builds any cave noise).
+    caves: Option<Caves>,
     detail: OpenSimplex,
 }
 
 impl Terrain {
+    /// The v3 terrain (no dry caves).
     pub fn new(seed: u32) -> Self {
         Self {
             lattice: Lattice::new(seed),
             density: Density::new(seed),
+            caves: None,
             detail: OpenSimplex::new(seed.wrapping_add(31_201)),
         }
+    }
+
+    /// The v4 terrain: v3's, plus the dry caves of §7.
+    pub fn new_v4(seed: u32) -> Self {
+        Self { caves: Some(Caves::new(seed)), ..Self::new(seed) }
+    }
+
+    /// The dry-cave noise; `None` for v3.
+    pub fn caves(&self) -> Option<&Caves> {
+        self.caves.as_ref()
     }
 
     pub fn seed(&self) -> u32 {

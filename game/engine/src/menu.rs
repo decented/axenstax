@@ -6281,7 +6281,9 @@ mod tests {
         let _root = save::WorldsRootGuard::new("lobby-newer-generator");
         let name = "from-the-future";
         let mut meta = save::WorldMeta::new(name);
-        meta.worldgen_version = 4;
+        // One past the newest generator this build has, so it stays unknown as
+        // generators are added.
+        meta.worldgen_version = crate::biome::Generator::ALL.iter().map(|g| g.version()).max().unwrap() + 1;
         meta.seed = 777;
         save::write_world_folder(name, &meta, &save::minimal_world_save_for_tests(5), &crate::world::World::new())
             .unwrap();
