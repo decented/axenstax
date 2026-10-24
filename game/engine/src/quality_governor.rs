@@ -144,6 +144,18 @@ fn plan(user: &GraphicsSettings, shrink_distance: bool) -> ([Step; MAX_STEPS], u
     (steps, n)
 }
 
+/// Pure: may the governor shorten the streamed distance? Only a client that
+/// streams its own world. ANY joined client keeps scale and particle steps
+/// only: it announces the player's render distance in every input, so the
+/// server's push radius stays the player's, and a client that unloaded the
+/// pushed ring between its lower distance and that radius would be re-sent it
+/// (or told to regenerate it) every few seconds, on the machine that is
+/// already too slow. (Not just a push-only joiner: a joiner that can generate
+/// its own ground is in the same loop.)
+pub fn may_shrink_distance(joined: bool) -> bool {
+    !joined
+}
+
 /// Pure: the deepest level the player's own values allow. `shrink_distance` is
 /// false where lowering the streamed distance would strand data (a joiner holds
 /// only what its server pushed, and never reloads a column it let go): the plan
@@ -485,6 +497,35 @@ mod tests {
             assert_eq!(effective(&u, l, false).render_distance, u.render_distance);
         }
         assert!(effective(&u, 1, false).render_scale < u.render_scale);
+    }
+
+    #[test]
+    fn only_a_client_streaming_its_own_world_may_shrink_the_distance() {
+        assert!(may_shrink_distance(false));
+        assert!(!may_shrink_distance(true), "a joined client keeps the player's distance");
+        // The plan a joined client gets keeps the distance at every level,
+        // for every distance the player can set, however far the governor goes.
+        for rd in crate::graphics_settings::RENDER_DISTANCE_MIN..=crate::graphics_settings::RENDER_DISTANCE_MAX {
+            let mut u = user();
+            u.render_distance = rd;
+            let shrink = may_shrink_distance(true);
+            for l in 0..=max_level(&u, shrink) + 2 {
+                assert_eq!(effective(&u, l, shrink).render_distance, rd, "rd {rd} level {l}");
+            }
+        }
+        // And driven by a machine too slow to ever recover, a joined client
+        // still steps down (scale, particles) but its distance never moves.
+        let u = user();
+        let shrink = may_shrink_distance(true);
+        let mut g = Governor::new();
+        let mut t = 0.0;
+        while t < 120.0 {
+            g.update(0.050, T60, max_level(&u, shrink));
+            t += 0.050;
+            assert_eq!(effective(&u, g.level(), shrink).render_distance, u.render_distance);
+        }
+        assert_eq!(g.level(), max_level(&u, shrink));
+        assert!(effective(&u, g.level(), shrink).render_scale < u.render_scale);
     }
 
     #[test]

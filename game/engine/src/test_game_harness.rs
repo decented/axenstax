@@ -220,6 +220,41 @@ mod tests {
         assert!(!st.renderer.transparent_meshes.contains_key(&pos), "column drop leaked the transparent mesh");
     }
 
+    /// Perf review X2: a joined client (push-only or not) must never let the
+    /// governor shorten its streamed distance; its server pushes at the
+    /// distance it announces and would re-send the ring in between.
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_a_joined_client_never_has_its_distance_shortened_by_the_governor() {
+        isolate_saves();
+        let mut hg = HeadlessGame::boot_into_world("harness-governor-joined");
+        hg.state.graphics.auto_quality = true;
+        assert!(hg.state.governor_may_shrink_distance(), "its own world: it may");
+        let mut server = crate::hosted_server::HostedServer::start(
+            0,
+            format!("harness-governor-joined-server-{}", std::process::id()),
+            42,
+            0,
+            crate::hosted_server::RemoteTransport::WebSocket { port: 0 },
+        )
+        .expect("dedicated server starts");
+        let transport = server.attach_test_remote();
+        hg.state.remote_client = Some(crate::remote_client::RemoteClient::from_transport(
+            Box::new(transport),
+            crate::remote_client::build_join_request_guest("Governed", 0),
+            None,
+        ));
+        assert!(!hg.state.joined_push_only, "a normal joiner, not a worldgen-mismatch one");
+        assert!(!hg.state.governor_may_shrink_distance());
+        let rd = hg.state.graphics.render_distance;
+        let max = crate::quality_governor::max_level(&hg.state.graphics, false);
+        for _ in 0..4000 {
+            hg.state.governor.update(0.050, 1.0 / 60.0, max);
+        }
+        assert!(hg.state.governor.level() > 0, "the machine is slow: it stepped down");
+        assert_eq!(hg.state.effective_render_distance(), rd, "but never the distance");
+    }
+
     #[test]
     #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
     fn game_harness_raid_kill_attribution_settles_through_the_live_game_loop() {

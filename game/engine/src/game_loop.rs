@@ -1703,11 +1703,12 @@ impl super::GameState {
         renderer.set_render_scale(render_scale);
     }
 
-    /// Can the governor shorten the streamed distance in this session? Not for a
-    /// joiner that only holds what its server pushed: it generates nothing, so a
-    /// column it lets go is never reloaded.
-    fn governor_may_shrink_distance(&self) -> bool {
-        !self.joined_push_only
+    /// Can the governor shorten the streamed distance in this session? Not for
+    /// any joined client (`quality_governor::may_shrink_distance`): the server
+    /// keeps pushing at the distance it announces, so a shorter one would drop
+    /// and re-send the ring in between every few seconds.
+    pub(crate) fn governor_may_shrink_distance(&self) -> bool {
+        crate::quality_governor::may_shrink_distance(self.joined())
     }
 
     /// The dials the frame actually uses: the player's values, held lower by
