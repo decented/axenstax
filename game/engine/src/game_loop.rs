@@ -12002,7 +12002,7 @@ impl super::GameState {
                                 self.world.set_block(pos[0], pos[1], pos[2], block::AIR);
                                 // F1 Wave 2 — breaking one door half removes the
                                 // other (no dupe / no orphan).
-                                if _prev == block::OAK_DOOR {
+                                if crate::block_shape::is_door(_prev) {
                                     let dm = self.world.meta_at(pos[0], pos[1], pos[2]);
                                     let cy = if crate::block_shape::door_is_top(dm) {
                                         pos[1] - 1
@@ -12010,7 +12010,7 @@ impl super::GameState {
                                         pos[1] + 1
                                     };
                                     self.world.set_meta((pos[0], pos[1], pos[2]), 0);
-                                    if self.world.get_block(pos[0], cy, pos[2]) == block::OAK_DOOR {
+                                    if crate::block_shape::is_door(self.world.get_block(pos[0], cy, pos[2])) {
                                         self.world.set_block(pos[0], cy, pos[2], block::AIR);
                                         self.world.set_meta((pos[0], cy, pos[2]), 0);
                                         // Joined authority derives the matching half from
@@ -12023,7 +12023,7 @@ impl super::GameState {
                                         crate::lighting::update_for_block_change(
                                             &mut self.world,
                                             (pos[0], cy, pos[2]),
-                                            block::OAK_DOOR,
+                                            _prev,
                                             block::AIR,
                                             &self.registry,
                                         );
@@ -12407,7 +12407,7 @@ impl super::GameState {
                                     self.world.set_block(pos[0], pos[1], pos[2], replacement);
                                     // F1 Wave 2 — breaking one door half removes the
                                     // other (no dupe / no orphan).
-                                    if blk == block::OAK_DOOR {
+                                    if crate::block_shape::is_door(blk) {
                                         let dm = self.world.meta_at(pos[0], pos[1], pos[2]);
                                         let cy = if crate::block_shape::door_is_top(dm) {
                                             pos[1] - 1
@@ -12415,7 +12415,7 @@ impl super::GameState {
                                             pos[1] + 1
                                         };
                                         self.world.set_meta((pos[0], pos[1], pos[2]), 0);
-                                        if self.world.get_block(pos[0], cy, pos[2]) == block::OAK_DOOR
+                                        if crate::block_shape::is_door(self.world.get_block(pos[0], cy, pos[2]))
                                         {
                                             self.world.set_block(pos[0], cy, pos[2], block::AIR);
                                             self.world.set_meta((pos[0], cy, pos[2]), 0);
@@ -12429,7 +12429,7 @@ impl super::GameState {
                                             crate::lighting::update_for_block_change(
                                                 &mut self.world,
                                                 (pos[0], cy, pos[2]),
-                                                block::OAK_DOOR,
+                                                blk,
                                                 block::AIR,
                                                 &self.registry,
                                             );
@@ -16199,8 +16199,8 @@ impl super::GameState {
                                     // C3d run 21 (run-18 review L4) — joined, a top
                                     // above the world is refused too (before: a Mirror
                                     // half door, a Strict corrected refusal per click).
-                                    Some(block::OAK_DOOR)
-                                        if crate::strict_doors::door_headroom_refused(&self.world, [place_x, place_y, place_z], self.joined()) =>
+                                    Some(door)
+                                        if crate::block_shape::is_door(door) && crate::strict_doors::door_headroom_refused(&self.world, [place_x, place_y, place_z], self.joined()) =>
                                     {
                                         Some(("No room for the door — needs 2 blocks of height.", 2))
                                     }
@@ -16281,18 +16281,18 @@ impl super::GameState {
                                     // the top half above. C3c-1 — the headroom was
                                     // checked before the door was taken (a door
                                     // without it never gets here).
-                                    let door_top = (block_to_place == block::OAK_DOOR
+                                    let door_top = (crate::block_shape::is_door(block_to_place)
                                         && self.world.get_block(place_x, place_y + 1, place_z) == block::AIR)
                                         .then_some([place_x, place_y + 1, place_z]);
                                     if let Some([ax, ay, az]) = door_top {
                                         let bottom_m = self.world.meta_at(place_x, place_y, place_z);
-                                        self.world.place_player_block(ax, ay, az, block::OAK_DOOR);
+                                        self.world.place_player_block(ax, ay, az, block_to_place);
                                         self.world.set_meta((ax, ay, az), crate::use_edits::door_top_meta(bottom_m));
                                         crate::lighting::update_for_block_change(
                                             &mut self.world,
                                             (ax, ay, az),
                                             block::AIR,
-                                            block::OAK_DOOR,
+                                            block_to_place,
                                             &self.registry,
                                         );
                                         self.rebuild_chunks_for_lighting(ax, ay, az);
@@ -16580,7 +16580,7 @@ impl super::GameState {
                                     // `DoorUpper` coupon (Decision 20).
                                     if let Some(top) = door_top.filter(|_| !typed_place) {
                                         let tag = crate::use_edits::tag(crate::use_edits::UseKind::DoorUpper, top, hotbar, None);
-                                        self.push_use_edit(top, block::OAK_DOOR, tag, None, 0);
+                                        self.push_use_edit(top, block_to_place, tag, None, 0);
                                     }
                                     self.rebuild_chunk_at(place_x, place_y, place_z);
                                     self.audio.play_place();

@@ -397,7 +397,7 @@ pub fn explains(kind: UseKind, new: BlockId, meta: u8) -> bool {
         UseKind::Salt => new == block::SALT_PATH,
         UseKind::TapRubber => new == block::RUBBER_LOG_TAPPED,
         UseKind::Till => new == block::TILLED_SOIL,
-        UseKind::DoorUpper => new == block::OAK_DOOR && crate::block_shape::door_is_top(meta),
+        UseKind::DoorUpper => crate::block_shape::is_door(new) && crate::block_shape::door_is_top(meta),
         UseKind::HangPrint => new == block::CYANOTYPE_PRINT,
     }
 }
@@ -447,7 +447,7 @@ fn no_cost_drift(kind: UseKind, old: BlockId) -> bool {
         UseKind::Erase => erases(old),
         UseKind::TapRubber => crate::rubber::is_tappable(old) || old == block::RUBBER_LOG_TAPPED,
         UseKind::Till => tills(old) || old == block::TILLED_SOIL,
-        UseKind::DoorUpper => old == block::AIR || old == block::OAK_DOOR,
+        UseKind::DoorUpper => old == block::AIR || crate::block_shape::is_door(old),
         _ => true,
     }
 }
@@ -514,7 +514,7 @@ pub fn judge(kind: UseKind, used: Option<&Item>, bc: &BlockChange, before: Befor
         }
         UseKind::Till => tills(old) && new == block::TILLED_SOIL,
         UseKind::DoorUpper => {
-            new == block::OAK_DOOR
+            crate::block_shape::is_door(new)
                 && old == block::AIR
                 && crate::block_shape::door_is_top(bc.meta)
                 && below_holds_a_door_bottom(world, bc)
@@ -913,7 +913,7 @@ pub fn undo_refused(
 /// A door's top half stands on a bottom half only, never on another top half
 /// (a column of free door tops).
 pub fn below_holds_a_door_bottom(world: &World, bc: &BlockChange) -> bool {
-    world.get_block(bc.x, bc.y - 1, bc.z) == block::OAK_DOOR
+    crate::block_shape::is_door(world.get_block(bc.x, bc.y - 1, bc.z))
         && !crate::block_shape::door_is_top(world.meta_at(bc.x, bc.y - 1, bc.z))
 }
 

@@ -69,7 +69,7 @@ pub enum StrictEdit {
 /// block another player mined, a crop someone harvested) is a Drift
 /// `Refuse`, its cell sent back, never a paused class.
 pub fn judge(old: BlockId, change: &protocol::BlockChange, mined: Option<&protocol::MinedBlock>, slot: usize, held: Option<&Item>, creative: bool, received: Option<Received>) -> StrictEdit {
-    use crate::block::{AIR, OAK_DOOR};
+    use crate::block::AIR;
     let new = change.new_block;
     if creative { return StrictEdit::Unsupported("Creative free edits await their typed class"); }
     if let Some(r) = received && drifted((old, r.meta), r.seen, new, mined.is_some()) { return StrictEdit::Refuse(DRIFT); }
@@ -78,7 +78,7 @@ pub fn judge(old: BlockId, change: &protocol::BlockChange, mined: Option<&protoc
     // plain edit). C3d run 18: a mined door half is a Break below, whose
     // server derives the pair once (`clear_door_pair`); any other edit of
     // a door is untagged (refused).
-    if new == OAK_DOOR { return StrictEdit::Unsupported("A door placement is one compound DoorPlace"); }
+    if crate::block_shape::is_door(new) { return StrictEdit::Unsupported("A door placement is one compound DoorPlace"); }
     if let Some(m) = mined {
         if (m.x, m.y, m.z) != (change.x, change.y, change.z) { return StrictEdit::Refuse("mined tag names another cell"); }
         if crate::break_drops::yields_drops(old) && (new == AIR || crate::growth::is_crop(old)) {
@@ -250,7 +250,7 @@ fn reserve(
     // beside it. The server's row carries its live pair (`edit_cells`), so
     // the two sides' cells are the union S3 recovery reads.
     let mut cells = vec![cell];
-    if matches!(kind, EditKind::Break) && old.0 == crate::block::OAK_DOOR && let Some(pair) = crate::strict_doors::door_pair_cell(cell, old.1) {
+    if matches!(kind, EditKind::Break) && crate::block_shape::is_door(old.0) && let Some(pair) = crate::strict_doors::door_pair_cell(cell, old.1) {
         cells.push(pair);
     }
     remote.reserve_action(intent, bytes, cells.into_boxed_slice())
@@ -442,7 +442,7 @@ impl crate::GameState {
         // C3d run 18 (Decision 20) — a door is ONE compound `DoorPlace`
         // naming its bottom; the server derives both halves. Never a plain
         // `Edit` (whose `judge` leaves doors to this class).
-        if new == crate::block::OAK_DOOR {
+        if crate::block_shape::is_door(new) {
             let facing = crate::meta::facing(meta).to_bits();
             let p = &mut self.players[pidx];
             let remote = self.remote_client.as_mut().expect("a Strict seat is joined");

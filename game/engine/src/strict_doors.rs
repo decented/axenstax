@@ -5,7 +5,8 @@
 //! the Mirror joiner's `ToggleBlock`.
 use crate::{
     armour::ArmourItem,
-    block::{BlockId, OAK_DOOR},
+    block::BlockId,
+    block_shape::is_door,
     craft_ui::CraftingUi,
     inventory::Inventory,
     remote_client::RemoteClient,
@@ -58,13 +59,13 @@ pub fn door_headroom_refused(world: &World, bottom: [i32; 3], joined: bool) -> b
 /// `primary` (a door, fence gate or trapdoor), primary first: for a door,
 /// its other half, and each horizontally adjacent door at the primary's
 /// height with ITS other half (#29, double doors open together). Only
-/// `OAK_DOOR` companions count; a missing one is skipped (the shared
+/// Door companions of any material count; a missing one is skipped (the shared
 /// structural rule). At most 10 cells, none repeated. Moved verbatim from
 /// the game loop's toggle arm (C3d run 18).
 pub fn toggle_footprint(world: &World, primary: [i32; 3]) -> Vec<[i32; 3]> {
     let mut cells = vec![primary];
-    if world.get_block(primary[0], primary[1], primary[2]) != OAK_DOOR { return cells; }
-    let door = |c: [i32; 3]| world.get_block(c[0], c[1], c[2]) == OAK_DOOR;
+    if !is_door(world.get_block(primary[0], primary[1], primary[2])) { return cells; }
+    let door = |c: [i32; 3]| is_door(world.get_block(c[0], c[1], c[2]));
     let pair = other_half(primary, world.meta_at(primary[0], primary[1], primary[2]));
     if door(pair) { cells.push(pair); }
     for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
@@ -86,7 +87,7 @@ pub fn toggle_footprint(world: &World, primary: [i32; 3]) -> Vec<[i32; 3]> {
 /// put back too. A toggle changes no window: this send-back undoes it whole.
 pub fn toggle_sendback_cells(world: &World, primary: [i32; 3], expected: BlockId) -> Vec<[i32; 3]> {
     let mut cells = toggle_footprint(world, primary);
-    if expected == OAK_DOOR {
+    if is_door(expected) {
         for (dx, dz) in [(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)] {
             for dy in [0, -1, 1] {
                 // Run 20 (run-19 review LOW-1): the primary is the client's
@@ -238,7 +239,7 @@ pub fn reserve_toggle_unsent(remote: &mut RemoteClient, world: &World, primary: 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::block::{AIR, OAK_FENCE_GATE, STONE};
+    use crate::block::{AIR, OAK_DOOR, OAK_FENCE_GATE, STONE};
     use crate::meta::Facing;
 
     /// The game loop's toggle arm as it stood before run 18 moved it (the

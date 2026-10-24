@@ -5707,8 +5707,8 @@ impl HostedServer {
         // Joined break packets name the selected half only. Derive the
         // matching half once; another mined tag then finds AIR and yields nothing.
         if remote
-            && old_block == crate::block::OAK_DOOR
-            && bc.new_block != crate::block::OAK_DOOR
+            && crate::block_shape::is_door(old_block)
+            && !crate::block_shape::is_door(bc.new_block)
         {
             self.clear_door_pair(cell, old_meta);
         }
@@ -5758,13 +5758,13 @@ impl HostedServer {
     /// spending the existing send-back credits for each cell separately.
     fn send_back_refused_edit(&mut self, bc: &protocol::BlockChange, budget: &mut EditTickBudget) {
         self.send_back_authoritative_block(bc, budget);
-        if bc.new_block == crate::block::OAK_DOOR
-            || self.server.world.get_block(bc.x, bc.y, bc.z) != crate::block::OAK_DOOR {
+        if crate::block_shape::is_door(bc.new_block)
+            || !crate::block_shape::is_door(self.server.world.get_block(bc.x, bc.y, bc.z)) {
             return;
         }
         let top = crate::block_shape::door_is_top(self.server.world.meta_at(bc.x, bc.y, bc.z));
         let Some(y) = bc.y.checked_add(if top { -1 } else { 1 }) else { return };
-        if self.server.world.get_block(bc.x, y, bc.z) == crate::block::OAK_DOOR
+        if crate::block_shape::is_door(self.server.world.get_block(bc.x, y, bc.z))
             && crate::block_shape::door_is_top(self.server.world.meta_at(bc.x, y, bc.z)) != top {
             let pair = protocol::BlockChange { x: bc.x, y, z: bc.z, new_block: crate::block::AIR, meta: 0 };
             self.send_back_authoritative_block(&pair, budget);
@@ -5776,13 +5776,14 @@ impl HostedServer {
         let top = crate::block_shape::door_is_top(old_meta);
         let pair = (x, if top { y - 1 } else { y + 1 }, z);
         let world = &mut self.server.world;
-        if world.get_block(pair.0, pair.1, pair.2) != crate::block::OAK_DOOR
+        let pair_block = world.get_block(pair.0, pair.1, pair.2);
+        if !crate::block_shape::is_door(pair_block)
             || crate::block_shape::door_is_top(world.meta_at(pair.0, pair.1, pair.2)) == top
         {
             return;
         }
         // The paired half has the same attachment recovery as the primary.
-        self.settle_edit_attachments(pair, crate::block::OAK_DOOR, crate::block::AIR, false);
+        self.settle_edit_attachments(pair, pair_block, crate::block::AIR, false);
         let world = &mut self.server.world;
         world.set_block(pair.0, pair.1, pair.2, crate::block::AIR);
         world.set_meta(pair, 0);
@@ -5795,7 +5796,7 @@ impl HostedServer {
             pair.0,
             pair.1,
             pair.2,
-            crate::block::OAK_DOOR,
+            pair_block,
             crate::block::AIR,
         );
         self.pending_block_changes.push(protocol::BlockChange { x: pair.0, y: pair.1, z: pair.2, new_block: crate::block::AIR, meta: 0 });
