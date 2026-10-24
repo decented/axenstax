@@ -5744,7 +5744,10 @@ pub fn draw_settings_panel(
                     .fill(PANEL_BG)
                     .corner_radius(egui::CornerRadius::same(4))
                     .stroke(stroke);
-                    if ui.add(btn).clicked() && !selected {
+                    // Clicking the preset already shown still applies it: the
+                    // pixel budget and Leaves: Fast are set by a pick but are
+                    // not part of the label, so an old Low file picks them up here.
+                    if ui.add(btn).clicked() {
                         gfx.apply_preset(p);
                         changed = true;
                     }

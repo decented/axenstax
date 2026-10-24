@@ -288,18 +288,18 @@ pub struct GraphicsSettings {
     /// includes the display scale factor). `None` = uncapped, exactly today's
     /// behaviour, which is what an old settings file (no key) deserialises to.
     /// The effective render scale is `min(render_scale, sqrt(budget / physical
-    /// pixels))` (see [`budgeted_scale`]); a quality dial set by the presets
-    /// (Potato 0.9 M, Low 1.3 M, Medium 2.1 M, High and Ultra none). A file
-    /// with no such key takes the budget of the preset its other dials match
-    /// (`parse_persisted`).
+    /// pixels))` (see [`budgeted_scale`]). Set when a preset is applied (first
+    /// run, or picked in settings: Potato 0.9 M, Low 1.3 M, Medium 2.1 M, High
+    /// and Ultra none) but NOT part of preset equality. A file with no such key
+    /// loads with `None`, so an existing player's picture does not change.
     #[serde(default)]
     pub pixel_budget: Option<u32>,
     /// "Leaves: Fast" (Perf B2): leaves render as opaque cubes, with interior
     /// faces culled and their cutout holes filled with a darkened leaf colour,
-    /// instead of the see-through cutout pass. A quality dial set by the presets
-    /// (Potato and Low on; Medium, High and Ultra off). A file with no such key
-    /// takes the value of the preset its other dials match, else off
-    /// (`parse_persisted`). Toggling remeshes the loaded world.
+    /// instead of the see-through cutout pass. Set when a preset is applied
+    /// (Potato and Low on; Medium, High and Ultra off) but NOT part of preset
+    /// equality. A file with no such key loads with it off. Toggling remeshes
+    /// the loaded world.
     #[serde(default)]
     pub leaves_fast: bool,
     /// Auto quality (Spec 03 §10.3): a runtime governor may hold render
@@ -595,18 +595,12 @@ impl GraphicsSettings {
     }
 
     /// Compare only the quality-load fields (everything except FOV + sensitivity).
-    /// The pixel budget and "Leaves: Fast" are among them: a preset means its
-    /// budget and its leaves too.
+    /// `pixel_budget` and `leaves_fast` are deliberately NOT among them: they are
+    /// set when a preset is applied (first run, or the player picking it in
+    /// settings) but are not what makes a profile that preset. So a file written
+    /// before they existed keeps its label, and toggling Leaves: Fast on Low
+    /// leaves the label Low.
     fn quality_eq(&self, other: &Self) -> bool {
-        self.dials_eq(other)
-            && self.pixel_budget == other.pixel_budget
-            && self.leaves_fast == other.leaves_fast
-    }
-
-    /// The quality dials a settings file written before `pixel_budget` /
-    /// `leaves_fast` existed can have: everything `quality_eq` compares except
-    /// those two.
-    fn dials_eq(&self, other: &Self) -> bool {
         self.render_distance == other.render_distance
             && (self.render_scale - other.render_scale).abs() < 1e-4
             && self.frame_limit == other.frame_limit
@@ -691,8 +685,11 @@ impl GraphicsSettings {
 
     /// Load persisted settings; when none have ever been stored (no file on
     /// native, no `localStorage` key on web) and a `first_run` preset is given,
-    /// start from that preset with `auto_quality` on instead of High. An
-    /// existing file, even an unparseable one, is never re-defaulted.
+    /// start from that preset with `auto_quality` on instead of High. A file
+    /// that exists but cannot be READ (an I/O error, non-UTF-8 bytes) counts as
+    /// none, so it is a first run too; a file that reads but does not parse
+    /// falls back to High without re-defaulting. Either way nothing is written
+    /// until the player changes a setting.
     pub fn load_or_first_run(first_run: Option<GraphicsPreset>) -> Self {
         let raw = load_raw();
         let mut s = match (&raw, first_run) {
@@ -777,33 +774,13 @@ fn migrate(settings: &mut GraphicsSettings) {
     }
 }
 
-/// Parse a persisted settings blob. A file written before `pixel_budget` or
-/// `leaves_fast` existed (no such key) takes that dial from the preset its
-/// other dials match (an old Low file is Low, 1.3 M and fast leaves included, so
-/// its label does not change), or off / no budget when it matches none. A file
-/// that has the key is taken as written.
-///
-/// A file that has `pixel_budget` but not `leaves_fast` (written between the two
-/// dials) matches a preset on its dials AND its budget, so a budget the player
-/// chose by hand does not borrow a preset's leaves.
+/// Parse a persisted settings blob. `pixel_budget` and `leaves_fast` are taken
+/// as written; a file without those keys (written before they existed) loads
+/// with no budget and slow leaves, exactly the picture it always had, and keeps
+/// its preset label (they are not part of preset equality). They are set only
+/// when a preset is applied.
 fn parse_persisted(json: &str) -> Option<GraphicsSettings> {
-    let value: serde_json::Value = serde_json::from_str(json).ok()?;
-    let had_budget = value.get("pixel_budget").is_some();
-    let had_leaves = value.get("leaves_fast").is_some();
-    let mut s: GraphicsSettings = serde_json::from_value(value).ok()?;
-    let matching = |s: &GraphicsSettings, with_budget: bool| {
-        GraphicsPreset::ALL
-            .into_iter()
-            .map(GraphicsSettings::from_preset)
-            .find(|p| s.dials_eq(p) && (!with_budget || s.pixel_budget == p.pixel_budget))
-    };
-    if !had_budget {
-        s.pixel_budget = matching(&s, false).and_then(|p| p.pixel_budget);
-    }
-    if !had_leaves {
-        s.leaves_fast = matching(&s, had_budget).is_some_and(|p| p.leaves_fast);
-    }
-    Some(s)
+    serde_json::from_str(json).ok()
 }
 
 #[cfg(test)]
@@ -1400,9 +1377,9 @@ mod tests {
     }
 
     #[test]
-    fn an_old_low_file_is_still_low_and_takes_lows_budget() {
-        // Written before pixel_budget / auto_quality existed, and while
-        // smooth_lighting was still a (dead) key.
+    fn an_old_low_file_is_still_low_with_no_budget_and_slow_leaves() {
+        // Written before pixel_budget / leaves_fast / auto_quality existed, and
+        // while smooth_lighting was still a (dead) key.
         let s = load_json(
             r#"{
             "render_distance": 5,
@@ -1416,24 +1393,48 @@ mod tests {
         }"#,
         );
         assert_eq!(s.preset(), GraphicsPreset::Low, "label must not become Custom");
-        assert_eq!(s.pixel_budget, Some(LOW_PIXEL_BUDGET));
+        assert_eq!(s.pixel_budget, None, "an existing player's picture does not change");
+        assert!(!s.leaves_fast, "an existing player's leaves do not change");
         assert!(!s.auto_quality, "no key = governor off");
         assert_eq!(s.fov_y, 85.0, "personal prefs untouched");
     }
 
     #[test]
-    fn every_old_preset_file_keeps_its_label_and_its_presets_budget() {
+    fn every_old_preset_file_keeps_its_label_and_gains_no_budget_or_fast_leaves() {
         for p in GraphicsPreset::ALL {
-            let mut new = GraphicsSettings::from_preset(p);
-            new.auto_quality = false;
-            // An old file: today's JSON minus the two new keys.
+            let new = GraphicsSettings::from_preset(p);
+            // An old file: today's JSON minus the three new keys.
             let mut v = serde_json::to_value(&new).unwrap();
-            v.as_object_mut().unwrap().remove("pixel_budget");
-            v.as_object_mut().unwrap().remove("auto_quality");
+            for k in ["pixel_budget", "leaves_fast", "auto_quality"] {
+                v.as_object_mut().unwrap().remove(k);
+            }
             let s = load_json(&v.to_string());
             assert_eq!(s.preset(), p, "{p:?}");
-            assert_eq!(s.pixel_budget, new.pixel_budget, "{p:?}");
-            assert!(!s.auto_quality);
+            assert_eq!(s.pixel_budget, None, "{p:?}");
+            assert!(!s.leaves_fast, "{p:?}");
+            assert!(!s.auto_quality, "{p:?}");
+        }
+    }
+
+    #[test]
+    fn picking_a_preset_in_settings_sets_its_budget_and_leaves() {
+        // An old Low file, then the player picks Low in settings.
+        let mut s = load_json(
+            r#"{ "render_distance": 5, "render_scale": 0.75, "frame_limit": { "Cap": 60 },
+                 "fog": true, "mipmaps": false, "particles": "Reduced" }"#,
+        );
+        assert_eq!(s.pixel_budget, None);
+        s.apply_preset(GraphicsPreset::Low);
+        assert_eq!(s.pixel_budget, Some(LOW_PIXEL_BUDGET));
+        assert!(s.leaves_fast);
+        assert_eq!(s.preset(), GraphicsPreset::Low);
+        // Every preset carries its own on apply.
+        for p in GraphicsPreset::ALL {
+            let mut s = GraphicsSettings::default();
+            s.apply_preset(p);
+            let want = GraphicsSettings::from_preset(p);
+            assert_eq!(s.pixel_budget, want.pixel_budget, "{p:?}");
+            assert_eq!(s.leaves_fast, want.leaves_fast, "{p:?}");
         }
     }
 
@@ -1452,22 +1453,21 @@ mod tests {
     }
 
     #[test]
-    fn leaves_fast_is_part_of_the_preset() {
-        // Flipping it takes a preset to Custom; flipping back restores the label.
+    fn leaves_fast_and_the_budget_are_not_part_of_the_preset_label() {
+        // Toggling Leaves: Fast, or hand-picking a budget, keeps the label.
         for p in GraphicsPreset::ALL {
-            if p == GraphicsPreset::Custom {
-                continue;
-            }
             let mut s = GraphicsSettings::from_preset(p);
             s.leaves_fast = !s.leaves_fast;
-            assert_eq!(s.preset(), GraphicsPreset::Custom, "{p:?}");
-            s.leaves_fast = !s.leaves_fast;
-            assert_eq!(s.preset(), p, "{p:?}");
+            assert_eq!(s.preset(), p, "{p:?} after toggling leaves");
+            s.pixel_budget = Some(1_700_000);
+            assert_eq!(s.preset(), p, "{p:?} after a hand-picked budget");
         }
-        // Applying a preset sets it, and an unrelated dial change does not.
+        // Applying a preset sets leaves, and an unrelated dial change does not.
         let mut s = GraphicsSettings::default();
         s.apply_preset(GraphicsPreset::Low);
         assert!(s.leaves_fast);
+        s.leaves_fast = false;
+        assert_eq!(s.preset(), GraphicsPreset::Low, "toggling leaves after picking Low keeps Low");
         s.apply_preset(GraphicsPreset::Medium);
         assert!(!s.leaves_fast);
         s.fov_y = 95.0;
@@ -1475,59 +1475,21 @@ mod tests {
     }
 
     #[test]
-    fn an_old_file_takes_leaves_fast_from_the_preset_its_dials_match() {
-        // Today's JSON minus every key this and the last wave added.
-        for p in GraphicsPreset::ALL {
-            let new = GraphicsSettings::from_preset(p);
-            let mut v = serde_json::to_value(&new).unwrap();
-            for k in ["pixel_budget", "leaves_fast", "auto_quality"] {
-                v.as_object_mut().unwrap().remove(k);
-            }
-            let s = load_json(&v.to_string());
-            assert_eq!(s.leaves_fast, new.leaves_fast, "{p:?}");
-            assert_eq!(s.preset(), p, "an old {p:?} file keeps its label");
-        }
-        // Dials that match no preset: off.
-        let s = load_json(r#"{ "render_distance": 9, "render_scale": 0.6, "particles": "Reduced" }"#);
-        assert!(!s.leaves_fast);
-        assert_eq!(s.preset(), GraphicsPreset::Custom);
-        // The bare file is High: off.
-        assert!(!load_json("{}").leaves_fast);
-    }
-
-    #[test]
     fn a_stored_leaves_fast_key_is_taken_as_written() {
-        // Low dials with the key written false: the player turned it off.
+        // Low dials with the key written false: the player turned it off. The
+        // label is still Low.
         let low = GraphicsSettings::from_preset(GraphicsPreset::Low);
         let mut v = serde_json::to_value(&low).unwrap();
         v["leaves_fast"] = serde_json::Value::Bool(false);
         let s = load_json(&v.to_string());
         assert!(!s.leaves_fast);
-        assert_eq!(s.preset(), GraphicsPreset::Custom);
+        assert_eq!(s.preset(), GraphicsPreset::Low);
         // And true on High dials stays true.
         let mut v = serde_json::to_value(GraphicsSettings::default()).unwrap();
         v["leaves_fast"] = serde_json::Value::Bool(true);
         let s = load_json(&v.to_string());
         assert!(s.leaves_fast);
-        assert_eq!(s.preset(), GraphicsPreset::Custom);
-    }
-
-    #[test]
-    fn a_file_with_a_hand_picked_budget_does_not_borrow_a_presets_leaves() {
-        // Written between the budget wave and this one: has pixel_budget, no
-        // leaves_fast. Low dials but a budget of the player's own: Custom, off.
-        let low = GraphicsSettings::from_preset(GraphicsPreset::Low);
-        let mut v = serde_json::to_value(&low).unwrap();
-        v["pixel_budget"] = serde_json::json!(1_700_000u32);
-        v.as_object_mut().unwrap().remove("leaves_fast");
-        let s = load_json(&v.to_string());
-        assert!(!s.leaves_fast);
-        // The preset's own budget does match.
-        let mut v = serde_json::to_value(&low).unwrap();
-        v.as_object_mut().unwrap().remove("leaves_fast");
-        let s = load_json(&v.to_string());
-        assert!(s.leaves_fast);
-        assert_eq!(s.preset(), GraphicsPreset::Low);
+        assert_eq!(s.preset(), GraphicsPreset::High);
     }
 
     #[test]
@@ -1547,13 +1509,13 @@ mod tests {
     #[test]
     fn a_stored_budget_key_is_taken_as_written() {
         // Low dials with the key present and null: the player's file says no
-        // budget, so it is not re-derived (and reads as Custom, as saved).
+        // budget. The label is still Low (the budget is not part of it).
         let s = load_json(
             r#"{ "render_distance": 5, "render_scale": 0.75, "frame_limit": { "Cap": 60 },
                  "particles": "Reduced", "pixel_budget": null }"#,
         );
         assert_eq!(s.pixel_budget, None);
-        assert_eq!(s.preset(), GraphicsPreset::Custom);
+        assert_eq!(s.preset(), GraphicsPreset::Low);
         let s = load_json(r#"{ "pixel_budget": 1500000 }"#);
         assert_eq!(s.pixel_budget, Some(1_500_000));
     }
