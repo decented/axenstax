@@ -3,7 +3,7 @@
 
 Public-facing product front door. Lives on axenstax.com in production. Routes:
 `/` (pitch + Play), `/will-it-run` (WebGPU check), `/roadmap` (product roadmap),
-`/safety` (for parents), `/support` ("Support the project" — Lightning tip, merch,
+`/more-games` (Android downloads), `/safety` (for parents), `/support` ("Support the project" — Lightning tip, merch,
 contribute). Points out at the game, learn, wiki, and docs/project. The in-person
 merch claim site is deliberately UNLINKED — reachable only by direct code URL.
 """
@@ -82,6 +82,32 @@ app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="stat
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
 
+# "More games" page: one place to edit on each release. size_bytes is the APK's
+# exact size; the page shows it rounded to whole MB.
+MORE_GAMES = [
+    {
+        "name": "Stampede",
+        "tagline": "Laser-eyed ostrich racing: an arcade kart racer.",
+        "version": "0.4.12",
+        "package": "org.decented.stampede",
+        "url": "https://nostr.download/b3b38cfb0b35d661de1973becbda8680bd6bfdaaf584f289653d82b3bb4f00a3.apk",
+        "sha256": "b3b38cfb0b35d661de1973becbda8680bd6bfdaaf584f289653d82b3bb4f00a3",
+        "size_bytes": 12573546,
+        "icon": "/static/games/stampede.png",
+    },
+    {
+        "name": "Twang Thang",
+        "tagline": "A neon-space energy-band party game.",
+        "version": "0.8.18",
+        "package": "org.decented.twangthang",
+        "url": "https://nostr.download/cfbe2fabca932f6c0e1d2d13afe126879d0c912faa90fa77ab9f0f026dc22926.apk",
+        "sha256": "cfbe2fabca932f6c0e1d2d13afe126879d0c912faa90fa77ab9f0f026dc22926",
+        "size_bytes": 12045165,
+        "icon": "/static/games/twangthang.png",
+    },
+]
+
+
 def _base_context() -> dict:
     return {
         "game_url": GAME_URL, "docs_url": DOCS_URL, "learn_url": LEARN_URL,
@@ -144,6 +170,15 @@ async def experiences(request: Request):
     """Experiences — what they are, the two official ones (Hash Dash, Satori Rush),
     and the coming create-and-share. Product-side showcase of the scenario layer."""
     return templates.TemplateResponse(request=request, name="experiences.html", context=_base_context())
+
+
+@app.get("/more-games", response_class=HTMLResponse)
+async def more_games(request: Request):
+    """More games — Android APK downloads for Stampede and Twang Thang.
+    Edit MORE_GAMES on each release."""
+    ctx = _base_context()
+    ctx["games"] = [dict(g, size_mb=round(g["size_bytes"] / 1_000_000)) for g in MORE_GAMES]
+    return templates.TemplateResponse(request=request, name="more_games.html", context=ctx)
 
 
 @app.get("/roadmap", response_class=HTMLResponse)

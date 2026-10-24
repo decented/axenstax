@@ -115,6 +115,10 @@ Ores keep `ore_at` / `base_rock_at` unchanged (bands are absolute Y and sea leve
 
 ## 7. Caves (v3) — dry, walkable, a few mouths
 
+> **Landed as v4, not v3** (2026-10-24): v3 shipped frozen with v2's caves, so these caves are
+> `Generator::V4` (v3 + this section; Spec 02 §5.2, §5.3.8). Thresholds as built: cheese `> 0.58`,
+> spaghetti `a² + b² < 0.014` (the values below measured 4.6 %, under the 5 % target).
+
 - **Cheese** (caverns): `fbm3(x/96, y/64, z/96, 2 oct) > 0.62`, y in 8..min(top − 10, 120).
 - **Spaghetti** (tunnels): two 3D fields a, b at (x/48, y/32, z/48); carve where `a² + b² < 0.012`.
   Spaghetti may break the surface on dry land (top ≥ 65), which makes cave mouths.

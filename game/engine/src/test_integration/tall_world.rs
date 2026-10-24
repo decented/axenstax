@@ -169,9 +169,12 @@ fn a_world_with_no_meta_takes_its_generator_from_world_dat() {
     assert_eq!(save::peek_world_meta("pre-field").unwrap().generator(), Ok(Generator::V2), "an old save is v2");
 
     // A generator this build lacks refuses the world: no guessing v2.
-    make("recorded-v4", Some(4));
-    let err = save::peek_world_meta("recorded-v4").expect_err("an unknown generator must refuse");
-    assert!(err.contains("generator v4"), "{err}");
+    // (One past the newest generator, so it stays unknown as generators are added.)
+    let unknown = Generator::ALL.iter().map(|g| g.version()).max().unwrap() + 1;
+    let name = format!("recorded-v{unknown}");
+    make(&name, Some(unknown));
+    let err = save::peek_world_meta(&name).expect_err("an unknown generator must refuse");
+    assert!(err.contains(&format!("generator v{unknown}")), "{err}");
 }
 
 #[test]

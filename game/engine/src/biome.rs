@@ -120,6 +120,14 @@ pub enum Generator {
     /// v3 caves and the v3 trees and spawn land as a new generator, not as a
     /// change here, so worlds created with v3 never get seams. Spec 02 §5.2.
     V3,
+    /// v3 plus the dry caves of design §7 (`worldgen_v3::caves`): cheese
+    /// caverns and spaghetti tunnels, air above y 10 and lava below, never
+    /// flooded. Everything else (shape, surface, labels, height 256, v2's
+    /// decoration, structures, spawn) is exactly v3's. **Not stamped on new
+    /// worlds yet** ([`NEW_WORLD_GENERATOR`] is still 3) and **unfrozen**: the
+    /// v3 trees and spawn of §9–§10 will land here before v4 ships, each change
+    /// bumping [`V4_REVISION`].
+    V4,
 }
 
 /// Output revision of the **v3** generator, folded into its protocol
@@ -134,6 +142,16 @@ pub enum Generator {
 /// own counter (`world::WORLDGEN_VERSION`); this never touches it. Spec 02 §5.2.
 pub const V3_REVISION: u32 = 1;
 
+/// Output revision of the **v4** generator, folded into its protocol
+/// fingerprint ([`crate::world::worldgen_fingerprint_for`]).
+///
+/// v4 is **unfrozen and unreleased**: nothing stamps it on a world yet
+/// ([`NEW_WORLD_GENERATOR`] is 3), and the v3 trees and spawn (§9–§10) will
+/// land in it before it ships. Any change to v4 output bumps this and
+/// regenerates the v4 golden (`test_integration/worldgen_v4_golden.rs`); the
+/// first release freezes it, like [`V3_REVISION`]. Spec 02 §5.2.
+pub const V4_REVISION: u32 = 0;
+
 /// The generator every newly created world is stamped with.
 pub const NEW_WORLD_GENERATOR: u32 = 3;
 
@@ -143,13 +161,14 @@ pub const LEGACY_GENERATOR: u32 = 2;
 
 impl Generator {
     /// Every generator this build can run, oldest first.
-    pub const ALL: [Generator; 2] = [Generator::V2, Generator::V3];
+    pub const ALL: [Generator; 3] = [Generator::V2, Generator::V3, Generator::V4];
 
     /// The recorded number (`worldgen_version`) of this generator.
     pub const fn version(self) -> u32 {
         match self {
             Generator::V2 => 2,
             Generator::V3 => 3,
+            Generator::V4 => 4,
         }
     }
 
@@ -183,7 +202,8 @@ pub struct BiomeGenerator {
     height_noise: OpenSimplex,
     detail_noise: OpenSimplex,
     cave_noise: OpenSimplex,
-    /// The v3 terrain; `Some` exactly when `generator` is `V3`.
+    /// The v3 terrain (v4 shares it, with its cave noise built); `Some`
+    /// exactly when `generator` is `V3` or `V4`.
     v3: Option<Box<crate::worldgen_v3::Terrain>>,
     /// The world spawn column, searched once (`spawn_search`).
     pub(crate) spawn_search: std::sync::OnceLock<crate::spawn_search::SpawnColumn>,
@@ -201,18 +221,23 @@ impl BiomeGenerator {
             height_noise: OpenSimplex::new(seed.wrapping_add(2000)),
             detail_noise: OpenSimplex::new(seed.wrapping_add(3000)),
             cave_noise: OpenSimplex::new(seed.wrapping_add(4000)),
-            v3: (generator == Generator::V3).then(|| Box::new(crate::worldgen_v3::Terrain::new(seed))),
+            v3: match generator {
+                Generator::V2 => None,
+                Generator::V3 => Some(Box::new(crate::worldgen_v3::Terrain::new(seed))),
+                Generator::V4 => Some(Box::new(crate::worldgen_v3::Terrain::new_v4(seed))),
+            },
             spawn_search: std::sync::OnceLock::new(),
         }
     }
 
-    /// The v3 terrain of a v3 world (`None` for every other generator).
+    /// The v3 terrain of a v3 or v4 world (`None` for v2; only a v4 world's
+    /// carries cave noise).
     pub fn v3(&self) -> Option<&crate::worldgen_v3::Terrain> {
         self.v3.as_deref()
     }
 
     fn v3_terrain(&self) -> &crate::worldgen_v3::Terrain {
-        self.v3.as_deref().expect("a V3 generator carries its v3 terrain")
+        self.v3.as_deref().expect("a V3 or V4 generator carries its v3 terrain")
     }
 
     /// The real top solid y of column `(x, z)` before caves. v2 terrain is a
@@ -222,7 +247,7 @@ impl BiomeGenerator {
     pub fn surface_y(&self, x: i32, z: i32) -> i32 {
         match self.generator {
             Generator::V2 => self.terrain_height(x, z),
-            Generator::V3 => self.v3_terrain().surface_y(x, z),
+            Generator::V3 | Generator::V4 => self.v3_terrain().surface_y(x, z),
         }
     }
 
@@ -234,7 +259,7 @@ impl BiomeGenerator {
             Generator::V2 => crate::world::V2_WORLD_TOP,
             // Terrain stops at `worldgen_v3::density::HEIGHT_CAP` (240); the
             // rest of the world's height is left for trees on the peaks.
-            Generator::V3 => crate::world::WORLD_HEIGHT - 1,
+            Generator::V3 | Generator::V4 => crate::world::WORLD_HEIGHT - 1,
         }
     }
 
@@ -265,7 +290,7 @@ impl BiomeGenerator {
     pub fn biome_at(&self, x: i32, z: i32) -> Biome {
         match self.generator {
             Generator::V2 => self.biome_at_v2(x, z),
-            Generator::V3 => self.v3_terrain().biome_at(x, z),
+            Generator::V3 | Generator::V4 => self.v3_terrain().biome_at(x, z),
         }
     }
 
@@ -293,7 +318,7 @@ impl BiomeGenerator {
             Generator::V2 => self.terrain_height_v2(x, z),
             // `height2d` (§4): the 2D estimate. The real surface (3D noise)
             // is `surface_y`.
-            Generator::V3 => self.v3_terrain().terrain_height(x, z),
+            Generator::V3 | Generator::V4 => self.v3_terrain().terrain_height(x, z),
         }
     }
 
@@ -537,6 +562,11 @@ impl BiomeGenerator {
             // v3 is frozen with v2's flooded noise caves; the dry caves of
             // design §7 belong to the next generator.
             Generator::V3 => self.is_cave_v2(x, y, z),
+            // v4: the dry caves of §7, exactly the cells its fill carved
+            // (density-solid cells `caves::carve` takes). Production never
+            // asks (the v4 fill makes this decision itself); kept so the
+            // answer is right for any caller.
+            Generator::V4 => crate::worldgen_v3::caves::is_carved(self.v3_terrain(), x, y, z),
         }
     }
 
