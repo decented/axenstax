@@ -90,8 +90,7 @@ fn hash(w: &World, cols: &[(i32, i32)]) -> u64 {
 }
 
 /// The pinned v3 output. When the v3 golden changes, bump this AND
-/// biome::V3_REVISION to match. The session wires the equality assert after
-/// merging.
+/// biome::V3_REVISION to match (`v3_golden_revision_matches_the_fingerprint_revision`).
 const V3_GOLDEN: u64 = 0x246c_26bb_8a18_55fc;
 const V3_GOLDEN_REVISION: u32 = 1;
 
@@ -143,6 +142,17 @@ fn v3_golden_set_reaches_the_mountains() {
         });
         panic!("only {tall} columns of the mountain chunk reach y 150; nearest tall chunk: {found:?}");
     }
+}
+
+/// A re-pinned golden without a `V3_REVISION` bump would let peers with
+/// different v3 output trust each other's terrain (Spec 02 §5.2).
+#[test]
+fn v3_golden_revision_matches_the_fingerprint_revision() {
+    assert_eq!(
+        crate::biome::V3_REVISION,
+        V3_GOLDEN_REVISION,
+        "bump biome::V3_REVISION and V3_GOLDEN_REVISION together"
+    );
 }
 
 #[test]

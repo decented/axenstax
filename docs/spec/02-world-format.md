@@ -934,7 +934,7 @@ saves.
 (v2: `WORLDGEN_VERSION` = 2) with the bundled-plans hash, so **v2's wire value is exactly the
 pre-v94 value** (pinned by `v3_fingerprint_hashes_its_revision_and_v2_is_unchanged`) and v3's
 differs (a v2 and a v3 world never agree by accident). **v3 carries its own output revision,
-`biome::V3_REVISION` (currently 0): bump it whenever v3 output changes** — the bridge-to-real swap
+`biome::V3_REVISION` (currently 1, matching the v3 golden's `V3_GOLDEN_REVISION` by test): bump both whenever v3 output changes** — the bridge-to-real swap
 in lane T2 is the first bump, then every later change to its terrain, caves, ore, trees or
 structures. It is hashed in as `(V3_REVISION << 8) | 3` (`world::v3_output_version`; unchanged value
 at revision 0), so a build with different v3 output reads as a fingerprint mismatch and its joiner
