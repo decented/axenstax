@@ -1455,16 +1455,57 @@ mod tests {
         assert_eq!(chunk_draw_columns(i32::MAX), i32::MAX, "saturates");
     }
 
-    /// The cull never takes anything the fog still shows along an axis: a
-    /// chunk past the draw range is at least (range columns) of blocks away,
-    /// beyond the fog's end. (On a diagonal the circle trims the last column's
-    /// corner, the same ground the round streamer does not load.)
+    /// The load and draw circles lie beyond the fog, on the diagonals too
+    /// (Perf review S1). For every eye position inside the anchor's column (its
+    /// four corners, where the circle is tightest) and every render distance,
+    /// ground within the fog end of the eye must be in a column that is both
+    /// loaded (the client's own round anchor) and drawn.
+    ///
+    /// Strictly that holds on the axes. On a diagonal the circle of radius
+    /// `rd + 1` can leave the last ground a few blocks short of the fog end: at
+    /// most `SLACK` blocks, where the linear fog (a ramp two chunks = 32 blocks
+    /// long) is at least 78% opaque. (With the load radius at `rd`, as first
+    /// built, the same ground was 45..236 blocks from the eye against a fog
+    /// end of 64..256, about half fogged, a jagged edge against the sky.)
     #[test]
-    fn the_draw_range_lies_beyond_the_fog() {
+    fn the_load_and_draw_range_lie_beyond_the_fog_on_the_diagonals() {
+        use crate::chunk_stream::{round_load_columns, StreamAnchor};
+        const SLACK: f32 = 7.0;
+        let cs = crate::chunk::CHUNK_SIZE as f32;
         for rd in 2..=32 {
-            let (_, fog_end) = crate::graphics_settings::fog_distances(rd);
-            let range_blocks = chunk_draw_columns(rd) as f32 * crate::chunk::CHUNK_SIZE as f32;
-            assert!(range_blocks > fog_end, "rd {rd}: range {range_blocks} <= fog end {fog_end}");
+            let (fog_start, fog_end) = crate::graphics_settings::fog_distances(rd);
+            let load = round_load_columns(rd);
+            assert!(load >= chunk_draw_columns(rd), "rd {rd}: the draw circle must cover the load circle");
+            let anchor = StreamAnchor::round((0, 0), load);
+            let mut worst = f32::INFINITY;
+            // Corners of column (0, 0), just inside it.
+            for (ex, ez) in [(0.0, 0.0), (15.99, 0.0), (0.0, 15.99), (15.99, 15.99), (8.0, 8.0)] {
+                let eye = Vec3::new(ex, 70.0, ez);
+                for cx in -load - 4..=load + 4 {
+                    for cz in -load - 4..=load + 4 {
+                        let loaded = anchor.wants(cx, cz);
+                        let drawn = chunk_in_draw_range(eye, cx, cz, chunk_draw_columns(rd));
+                        if loaded {
+                            assert!(drawn, "rd {rd}: loaded column ({cx},{cz}) is not drawn from ({ex},{ez})");
+                        }
+                        if loaded && drawn {
+                            continue;
+                        }
+                        // Horizontal distance from the eye to the column's nearest ground.
+                        let (x0, z0) = (cx as f32 * cs, cz as f32 * cs);
+                        let gx = (x0 - ex).max(ex - (x0 + cs)).max(0.0);
+                        let gz = (z0 - ez).max(ez - (z0 + cs)).max(0.0);
+                        worst = worst.min((gx * gx + gz * gz).sqrt());
+                    }
+                }
+            }
+            assert!(
+                worst >= fog_end - SLACK,
+                "rd {rd}: ground {worst} blocks away is neither loaded nor drawn (fog {fog_start}..{fog_end})"
+            );
+            // And the axes are strict: nothing the fog still shows is missing.
+            let axis = chunk_draw_columns(rd) as f32 * cs;
+            assert!(axis > fog_end, "rd {rd}: range {axis} <= fog end {fog_end}");
         }
     }
 

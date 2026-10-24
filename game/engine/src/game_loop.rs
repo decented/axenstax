@@ -2863,9 +2863,10 @@ impl super::GameState {
         let (mut had_chunk, mut was_loaded) = (0u32, 0u32);
         // Round, as `stream_chunks` loads (Perf B2); a joiner's ground is a square.
         let round = !self.joined();
-        for dx in -rd..=rd {
-            for dz in -rd..=rd {
-                if round && !crate::camera::column_in_round_range(dx, dz, rd) {
+        let reach = if round { crate::chunk_stream::round_load_columns(rd) } else { rd };
+        for dx in -reach..=reach {
+            for dz in -reach..=reach {
+                if round && !crate::camera::column_in_round_range(dx, dz, reach) {
                     continue;
                 }
                 let (cx, cz) = (pcx + dx, pcz + dz);

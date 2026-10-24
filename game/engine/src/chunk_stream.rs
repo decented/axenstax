@@ -654,9 +654,10 @@ impl super::GameState {
         // A client on its own world loads the same circle `stream_chunks` keeps
         // (Perf B2); a joiner's ground is the server's square.
         let round = !self.joined();
-        for dx in -rd..=rd {
-            for dz in -rd..=rd {
-                if round && !crate::camera::column_in_round_range(dx, dz, rd) {
+        let reach = if round { round_load_columns(rd) } else { rd };
+        for dx in -reach..=reach {
+            for dz in -reach..=reach {
+                if round && !crate::camera::column_in_round_range(dx, dz, reach) {
                     continue;
                 }
                 set.insert((fpx + dx, fpz + dz));
@@ -1157,8 +1158,11 @@ pub(crate) struct StreamStep {
 /// square (Chebyshev, in columns) or, for `round`, a circle (Euclidean on
 /// column indices, [`crate::camera::column_in_round_range`]).
 ///
-/// Round is for a client's OWN players only (Perf B2): a circle loads ~21%
-/// fewer columns and the fog is circular anyway. A joiner's pushed columns are
+/// Round is for a client's OWN players only (Perf B2): a circle loads ~14-28%
+/// fewer columns and the fog is circular anyway. Its radius is
+/// [`round_load_columns`] (the render distance + 1, the radius the draw range
+/// uses), so the circle never loads less than is drawn and the world's edge
+/// stays inside the fog on the diagonals. A joiner's pushed columns are
 /// the server's square, and the lent joiners' sim blocks and the dedicated
 /// server's streamer keep their squares, so those anchors stay square.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1181,7 +1185,7 @@ impl StreamAnchor {
     }
 
     /// Is column `(cx, cz)` inside this anchor's load range?
-    fn wants(&self, cx: i32, cz: i32) -> bool {
+    pub(crate) fn wants(&self, cx: i32, cz: i32) -> bool {
         let (dx, dz) = (i64::from(cx) - i64::from(self.col.0), i64::from(cz) - i64::from(self.col.1));
         if self.round {
             crate::camera::column_in_round_range_wide(dx, dz, self.radius)
@@ -1229,8 +1233,19 @@ pub(crate) const LENT_JOINER_SIM_DISTANCE: i32 = crate::server_stream::DEFAULT_S
 /// body anchors the full [`LENT_JOINER_SIM_DISTANCE`] block.
 pub(crate) const RESPAWN_ANCHOR_RADIUS: i32 = 1;
 
+/// The load radius (in columns) of a client's own round anchor for a render
+/// distance: the draw range's radius ([`crate::camera::chunk_draw_columns`],
+/// `rd + 1`), never less. With the radius at `rd` the nearest unloaded ground
+/// on a diagonal was 45..236 blocks from an eye on a column corner against a
+/// fog end of 64..256, a half-fogged jagged edge; at `rd + 1` it is within
+/// about 7 blocks of the fog end (at least 78% fogged), and the circle still
+/// loads ~14% fewer columns than the square at rd 10.
+pub(crate) fn round_load_columns(render_distance: i32) -> i32 {
+    crate::camera::chunk_draw_columns(render_distance)
+}
+
 /// The anchors a client's streamer keeps loaded round: every local player's
-/// column at the render distance (a circle when `round_local`: not on a joined
+/// column at the render distance (a circle of `round_load_columns` when `round_local`: not on a joined
 /// client, whose pushed columns are the server's square) and — on a world it lends its server (D1;
 /// `joiner_cols` is empty otherwise, see `HostedServer::lent_joiner_columns`)
 /// — every joiner's server-body column at [`LENT_JOINER_SIM_DISTANCE`], and
@@ -1248,7 +1263,11 @@ pub(crate) fn client_stream_anchors(
 ) -> Vec<StreamAnchor> {
     local_cols
         .iter()
-        .map(|&col| StreamAnchor { col, radius: render_distance, round: round_local })
+        .map(|&col| StreamAnchor {
+            col,
+            radius: if round_local { round_load_columns(render_distance) } else { render_distance },
+            round: round_local,
+        })
         .chain(
             joiner_cols
                 .iter()
@@ -1797,7 +1816,11 @@ mod tests {
         let joiner = (50, 0);
         let spawn = (80, 0);
         let anchors = client_stream_anchors(&[host], 6, true, &[joiner], &[spawn]);
-        assert!(anchors.contains(&StreamAnchor::round(host, 6)));
+        assert!(
+            anchors.contains(&StreamAnchor::round(host, round_load_columns(6))),
+            "a round anchor loads the draw range's radius, rd + 1"
+        );
+        assert_eq!(round_load_columns(6), 7);
         assert!(anchors.contains(&StreamAnchor::square(joiner, LENT_JOINER_SIM_DISTANCE)));
         assert!(anchors.contains(&StreamAnchor::square(spawn, RESPAWN_ANCHOR_RADIUS)));
         let joined = client_stream_anchors(&[host], 6, false, &[], &[]);
@@ -1807,7 +1830,7 @@ mod tests {
         let step = plan_stream_step_for(&joined, &[host], 0, &loaded, |_, _| false);
         assert_eq!(step.unload, vec![(6 + UNLOAD_HYSTERESIS + 1, 0)]);
         // ...where the round one would have let it go.
-        let step = plan_stream_step_for(&[StreamAnchor::round(host, 6)], &[host], 0, &loaded, |_, _| false);
+        let step = plan_stream_step_for(&[StreamAnchor::round(host, round_load_columns(6))], &[host], 0, &loaded, |_, _| false);
         assert!(step.unload.contains(&(6, 6)));
     }
 
