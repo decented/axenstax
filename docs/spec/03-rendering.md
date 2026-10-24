@@ -1652,7 +1652,8 @@ If the average is significantly below the target (< 50% of budget), quality is r
 > (x0.8, x0.64, x0.5 of the player's value, floor `min(value, 0.5)`), then
 > particles (Full, Reduced, Off); there is no bloom/shadow/LOD step. Rules:
 > judged on the p90 of the last second of in-world frames, every 0.25 s;
-> target frame time = the frame cap, else 1/60 s; step down when p90 > 1.25x
+> target frame time = the frame cap (the longest gap the cap schedules on this
+> display, see N1 below), else 1/60 s; step down when p90 > 1.25x
 > target for 3 s; step up when p90 <= 1.05x target for 10 s (Perf B2; was
 > < 0.7x, which a vsync-pinned 60 Hz display can never reach; between the two:
 > nothing); at most one step per second; the first 5 s after a world entry or
@@ -1687,8 +1688,25 @@ If the average is significantly below the target (< 50% of budget), quality is r
 > display's period (`target_frame_time_for`, winit
 > `MonitorHandle::refresh_rate_millihertz`, re-read every 2 s; a missing or
 > absurd rate, outside 20..1000 Hz, changes nothing), so a 30 Hz panel is
-> judged against 33 ms. The web build cannot read the rate and relies on the
-> revert rule alone.
+> judged against 33 ms. The web build cannot read the rate; it estimates it
+> (below) and otherwise relies on the revert rule alone.
+>
+> *A reverted step is skipped, not final (N2).* The first cut stopped at the
+> first reverted step, so on a fill-bound machine (an integrated GPU at high
+> resolution: a shorter distance barely changes the pixel work) the governor
+> never reached the render-scale steps that would help. Now a reverted step is
+> marked skipped for the rest of the world session (`Governor::skipped`, one bit
+> per plan position; `level` counts the steps applied, which are the first
+> `level` positions not skipped; `effective_skipping`) and, after the usual
+> hold-off, the NEXT step of the plan is tried. The hold-off still doubles per
+> revert (30 s, 60, 120, then 160), so a fill-bound machine reaches its scale
+> steps after the distance steps have each been tried once. A skipped step is
+> not retried; stepping back up undoes only applied steps; a reset (entering a
+> world, or the player touching a quality dial) forgets the marks. A display
+> pinned at 24, 30 or 40 fps therefore tries each step of the plan once over
+> some minutes (every try undone) and then holds still, rather than probing
+> forever. The first skipped distance step means a later distance step is
+> applied as an absolute value (8 skipped, then 6 sets 6 directly).
 >
 > *Full window (S5).* The window is capped at 240 samples; `p90` waited for 0.75 s
 > of them, so above about 320 fps the governor never judged anything and a level
@@ -1714,6 +1732,38 @@ If the average is significantly below the target (< 50% of budget), quality is r
 > per-frame budget). Tested with a simulated rAF clock, with and without
 > jitter. Native pacing is unchanged. Also: the brightness `pow` in
 > `shader.wgsl` is skipped at 1.0.
+>
+> *The governor's target under a cap (N1).* The governor's `dt` is the gap
+> between RENDERED frames, and a cap on a display whose period does not divide
+> the cap interval renders them unevenly (Cap(60) on 75 Hz: 26.7 / 13.3 / 13.3 /
+> 13.3 ms, p90 26.7 ms; on 165 Hz 18.2 / 24.2 ms). Judged against 16.7 ms, that
+> read as a slow machine: the governor probed down, reverted, and repeated for
+> the whole session. With a cap active the target for a frame gap is now the
+> longest gap the cap itself schedules at the display's rate
+> (`capped_frame_target`: `ceil(cap_interval / display_period) * display_period`,
+> less the cap's own 2 ms slack in the ceiling): Cap(60) is 26.7 ms on 75 Hz,
+> 20.8 ms on 144 Hz, 16.7 ms on 60 and 120 Hz, with the usual 1.25x down
+> tolerance on top. Without a cap the target is as before (1/60 s, raised to the
+> display's period). Native takes the period from winit
+> (`target_frame_time_for_period`); the web estimates it from requestAnimationFrame
+> (`RafPeriod`): every tick the frame cap sees, the skipped ones included (their
+> handlers are cheap, so their intervals are the display's period), goes in; the
+> estimate is the 20th percentile of the last 120 intervals, answered once 30 are
+> in, and intervals over 20 ms (a hidden tab, a stall, or a frame slower than the
+> display: rAF cannot fire during one) or under 2 ms are ignored. Until then, and
+> for a display slower than 50 Hz, it falls back to the plain cap target and the
+> revert rule. A machine slower than every tick produces no good samples, so it
+> is never mistaken for a slow display. Limits: on a 75 Hz display under
+> Cap(60) a GPU needing under 27 ms per frame (1.6x the cap interval) delivers
+> the same gaps the cap schedules and is not seen as late; and where every rAF
+> tick is consumed by a frame (no skipped ticks), a machine delivering more than
+> 50 fps cannot be told from a display of that rate, so it is judged against its
+> own pace (e.g. 100 Hz under Cap(120) with a 15 ms GPU). Tested natively with simulated capped frame series
+> (60/75/90/100/120/144/165 Hz x Cap 30/60/120, +-1.5 ms jitter): never a step
+> down while the GPU keeps up, a step down when it needs 1.5x the capped gap,
+> and the same with the estimated period. Only the wiring (the tick hook before
+> the cap, `GameState::raf_period`) is wasm-only and compiled by the trunk
+> build.
 
 ### 10.4 GPU Memory Budget
 
