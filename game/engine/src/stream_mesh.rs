@@ -37,7 +37,9 @@ impl MeshPolicy {
     /// In play: three columns' worth of own sections inline (the 4-column
     /// load budget stays the outer bound), seams and the rest queued.
     pub const STREAMING: Self = Self { now_budget: 18, seams_now: false };
-    /// Behind the loading screen: everything inline.
+    /// Everything inline. Used behind the loading screen, and in play by
+    /// `load_one_column` (a local column a server change lands on), where the
+    /// whole cost falls in one frame.
     pub const LOADING: Self = Self { now_budget: usize::MAX, seams_now: true };
 }
 

@@ -723,8 +723,12 @@ impl super::GameState {
         self.load_queue.len()
     }
 
-    /// Load one column the way the loading screen does: restore it if
-    /// evicted, else generate it; light it, register its water, lava and
+    /// Load one column the way the loading screen does (meshing everything
+    /// inline, `MeshPolicy::LOADING`). That is not only behind the loading
+    /// screen: `apply_world_deltas` calls it in play for a local column a
+    /// block change or pushed chunk lands on, so the whole cost (generation,
+    /// lighting and up to 30 section meshes) falls in that one frame. It
+    /// restores the column if evicted, else generates it; light it, register its water, lava and
     /// fire, scatter its wildlife, mesh it and the seams of its loaded
     /// neighbours, and mark it loaded. Shared by `step_load`, the spawn
     /// ring's local columns (`join_ring_pending`) and a block change or a
