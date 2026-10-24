@@ -1545,7 +1545,9 @@ mod quest_codec_tests {
         selected.rig_clips = vec![crate::anim_set::AnimClip::Bounce];
         assert!(selected.quest_world.is_none());
         let mut body = bincode::serialize(&selected).unwrap();
-        let appended = bincode::serialize(&selected.quest_world).unwrap(); assert_eq!(appended, [0]);
+        // A real footer-55 writer stopped at 53 fields (`local_personal`): neither
+        // `quest_world` nor `worldgen_version`, one `None` byte each, was written.
+        let appended = bincode::serialize(&(&selected.quest_world, &selected.worldgen_version)).unwrap(); assert_eq!(appended, [0, 0]);
         assert!(body.ends_with(&appended)); body.truncate(body.len() - appended.len());
         body.extend_from_slice(&55u32.to_le_bytes()); body.extend_from_slice(&crate::save_format::SAVE_FOOTER_MAGIC);
         let (old, partial) = crate::save::read_world_save_reporting(&body).unwrap();

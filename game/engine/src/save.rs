@@ -2475,9 +2475,26 @@ fn read_tail<T: serde::de::DeserializeOwned + Default>(
 #[derive(Default)]
 struct TailReader {
     failed_at: Option<&'static str>,
+    /// Appended fields (8 on) that had bytes in the stream and decoded. A field
+    /// never encodes to zero bytes, so this is exactly the number the writer put.
+    read: u32,
 }
 
 impl TailReader {
+    /// A propagate-on-error appended field (see [`read_tail`]), counted when it
+    /// was present in the stream rather than defaulted at a clean end.
+    fn strict<T: serde::de::DeserializeOwned + Default>(
+        &mut self,
+        cur: &mut std::io::Cursor<&[u8]>,
+    ) -> Result<T, bincode::Error> {
+        let present = cur.position() < cur.get_ref().len() as u64;
+        let v = read_tail(cur)?;
+        if present {
+            self.read += 1;
+        }
+        Ok(v)
+    }
+
     fn field<T: serde::de::DeserializeOwned + Default>(
         &mut self,
         cur: &mut std::io::Cursor<&[u8]>,
@@ -2486,8 +2503,14 @@ impl TailReader {
         if self.failed_at.is_some() {
             return T::default();
         }
+        let present = cur.position() < cur.get_ref().len() as u64;
         match read_tail(cur) {
-            Ok(v) => v,
+            Ok(v) => {
+                if present {
+                    self.read += 1;
+                }
+                v
+            }
             Err(e) => {
                 log::warn!(
                     "world.dat: tail field `{name}` failed to decode ({e}); it and every \
@@ -2518,16 +2541,19 @@ impl TailReader {
 /// `WorldSave`'s declaration order (= the bincode wire order).
 #[cfg(test)]
 fn deserialize_world_save_tolerant(data: &[u8]) -> Result<WorldSave, bincode::Error> {
-    deserialize_world_save_tolerant_reporting(data).map(|(s, _, _)| s)
+    deserialize_world_save_tolerant_reporting(data).map(|(s, ..)| s)
 }
 
 /// [`deserialize_world_save_tolerant`], also returning the tail field that failed
 /// (if any) so a loader can keep the damaged original (review S5), and how many
 /// bytes the decode consumed (the reader-side field-count tripwire checks a current
-/// save is read to its last byte).
+/// save is read to its last byte), and how many positional fields the stream
+/// actually carried before its clean end (the 7 required ones plus every appended
+/// field that had bytes). The strict check in [`read_world_save_reporting`] needs
+/// that last number: a body from an older build stops at a field boundary.
 fn deserialize_world_save_tolerant_reporting(
     data: &[u8],
-) -> Result<(WorldSave, Option<&'static str>, u64), bincode::Error> {
+) -> Result<(WorldSave, Option<&'static str>, u64, u32), bincode::Error> {
     let mut cur = std::io::Cursor::new(data);
     // Fields from `carts` on are decoded "stop at first failure": see `TailReader`.
     let mut tail = TailReader::default();
@@ -2544,36 +2570,36 @@ fn deserialize_world_save_tolerant_reporting(
         inventory: bincode::deserialize_from(&mut cur)?,
         // Appended tail — fields 8-35, in declaration order. Each defaults to empty
         // if the older writer's stream ends before it.
-        players: read_tail(&mut cur)?,
-        campfires: read_tail(&mut cur)?,
-        furnaces: read_tail(&mut cur)?,
-        vendors: read_tail(&mut cur)?,
-        drying_racks: read_tail(&mut cur)?,
-        hives: read_tail(&mut cur)?,
-        chests: read_tail(&mut cur)?,
-        tip_jars: read_tail(&mut cur)?,
-        plots: read_tail(&mut cur)?,
-        market_hubs: read_tail(&mut cur)?,
-        auctions: read_tail(&mut cur)?,
-        latent_prints: read_tail(&mut cur)?,
-        construction_anchors: read_tail(&mut cur)?,
-        architect_plaques: read_tail(&mut cur)?,
-        village_anchors: read_tail(&mut cur)?,
-        populated_villages: read_tail(&mut cur)?,
-        village_bells: read_tail(&mut cur)?,
-        village_treasuries: read_tail(&mut cur)?,
-        active_raids: read_tail(&mut cur)?,
-        raid_scheduler: read_tail(&mut cur)?,
-        raid_kills: read_tail(&mut cur)?,
-        brigand_hideouts: read_tail(&mut cur)?,
-        bounties: read_tail(&mut cur)?,
-        bounty_next_id: read_tail(&mut cur)?,
-        bounty_last_refresh_tick: read_tail(&mut cur)?,
-        face_overlays: read_tail(&mut cur)?,
-        face_blueprints: read_tail(&mut cur)?,
-        face_blueprint_blanks: read_tail(&mut cur)?,
+        players: tail.strict(&mut cur)?,
+        campfires: tail.strict(&mut cur)?,
+        furnaces: tail.strict(&mut cur)?,
+        vendors: tail.strict(&mut cur)?,
+        drying_racks: tail.strict(&mut cur)?,
+        hives: tail.strict(&mut cur)?,
+        chests: tail.strict(&mut cur)?,
+        tip_jars: tail.strict(&mut cur)?,
+        plots: tail.strict(&mut cur)?,
+        market_hubs: tail.strict(&mut cur)?,
+        auctions: tail.strict(&mut cur)?,
+        latent_prints: tail.strict(&mut cur)?,
+        construction_anchors: tail.strict(&mut cur)?,
+        architect_plaques: tail.strict(&mut cur)?,
+        village_anchors: tail.strict(&mut cur)?,
+        populated_villages: tail.strict(&mut cur)?,
+        village_bells: tail.strict(&mut cur)?,
+        village_treasuries: tail.strict(&mut cur)?,
+        active_raids: tail.strict(&mut cur)?,
+        raid_scheduler: tail.strict(&mut cur)?,
+        raid_kills: tail.strict(&mut cur)?,
+        brigand_hideouts: tail.strict(&mut cur)?,
+        bounties: tail.strict(&mut cur)?,
+        bounty_next_id: tail.strict(&mut cur)?,
+        bounty_last_refresh_tick: tail.strict(&mut cur)?,
+        face_overlays: tail.strict(&mut cur)?,
+        face_blueprints: tail.strict(&mut cur)?,
+        face_blueprint_blanks: tail.strict(&mut cur)?,
         // Spec 40 — defaults to empty for pre-Workshop saves.
-        workshop: read_tail(&mut cur)?,
+        workshop: tail.strict(&mut cur)?,
         // Rail freight Phase 1 — newest appended field; defaults to empty for
         // pre-rail saves. MUST stay last to match `WorldSave`'s wire order.
         //
@@ -2619,7 +2645,62 @@ fn deserialize_world_save_tolerant_reporting(
         quest_world: tail.field(&mut cur, "quest_world"),
         worldgen_version: tail.field(&mut cur, "worldgen_version"),
     };
-    Ok((save, tail.failed_at, cur.position()))
+    Ok((save, tail.failed_at, cur.position(), 7 + tail.read))
+}
+
+/// Encoded size of the appended fields after the first `read` of `s`, i.e. of the
+/// fields an older writer did not write (they hold their defaults in `s`). `None`
+/// for a field this table of arms does not cover, which refuses the load. A new
+/// appended field needs an arm here; `strict_check_accepts_every_footer_table_body`
+/// fails through the older footers until it has one.
+fn absent_tail_encoded_len(s: &WorldSave, read: u32) -> Option<usize> {
+    use crate::save_format::WORLD_SAVE_FIELD_COUNT;
+    let size = |r: bincode::Result<u64>| r.ok().map(|n| n as usize);
+    (read + 1..=WORLD_SAVE_FIELD_COUNT).try_fold(0usize, |total, index| {
+        let n = match index {
+            53 => size(bincode::serialized_size(&s.local_personal))?,
+            54 => size(bincode::serialized_size(&s.quest_world))?,
+            55 => size(bincode::serialized_size(&s.worldgen_version))?,
+            _ => return None,
+        };
+        Some(total + n)
+    })
+}
+
+/// The strict check for a footer >= 53 (a current-snapshot save): accept iff the
+/// tail decoded cleanly, the number of positional fields the body actually carries
+/// is one that footer was ever written with
+/// ([`crate::save_format::FOOTER_FIELD_COUNTS`]), and the body is byte-for-byte the
+/// encoding of exactly those fields. The absent fields hold their defaults in `s`,
+/// so they are the tail of `bincode::serialize(s)`; dropping them must leave
+/// `payload` exactly.
+///
+/// Regression (save-footer hotfix): the check used to re-encode ALL fields and
+/// demand equality, so any save written before the newest appended field (footer
+/// 57, 58) carried one default byte too few and was refused as "truncated". A
+/// payload cut at a field boundary below the footer's allowed counts, cut mid-field,
+/// padded, or under an unknown footer is still refused.
+fn verify_current_body_is_exact(
+    s: &WorldSave,
+    failed: Option<&'static str>,
+    fields_read: u32,
+    version: u32,
+    payload: &[u8],
+) -> Result<(), WorldSaveError> {
+    let refuse = || {
+        WorldSaveError::Undecodable(
+            "current personal snapshot is truncated or corrupt; preserved without reset".into(),
+        )
+    };
+    if failed.is_some() || !crate::save_format::allowed_field_counts(version).contains(&fields_read) {
+        return Err(refuse());
+    }
+    let exact = bincode::serialize(s).map_err(|e| WorldSaveError::Undecodable(e.to_string()))?;
+    let absent = absent_tail_encoded_len(s, fields_read).ok_or_else(refuse)?;
+    match exact.len().checked_sub(absent) {
+        Some(len) if exact[..len] == *payload => Ok(()),
+        _ => Err(refuse()),
+    }
 }
 
 /// Decode a `world.dat` byte stream into a `WorldSave`. Single source of truth for
@@ -2656,23 +2737,9 @@ pub fn read_world_save_reporting(data: &[u8]) -> Result<(WorldSave, bool), World
         return Err(e);
     }
     match deserialize_world_save_tolerant_reporting(payload) {
-        Ok((s, failed, _)) => {
-            if version.is_some_and(|v| v >= 53) {
-                let mut exact = bincode::serialize(&s).map_err(|e| WorldSaveError::Undecodable(e.to_string()))?;
-                // Delivered 53-field bodies end at the selected personal snapshot.
-                // Its bytes remain untouched until selected authority is validated.
-                let legacy = matches!(version, Some(53 | 55)) && s.quest_world.is_none();
-                if legacy {
-                    let appended = bincode::serialize(&s.quest_world).map_err(|e| WorldSaveError::Undecodable(e.to_string()))?;
-                    if appended != [0] || !exact.ends_with(&appended) {
-                        return Err(WorldSaveError::Undecodable("invalid legacy quest suffix".into()));
-                    }
-                    exact.truncate(exact.len() - appended.len());
-                }
-                let clean_tail = failed.is_none() || (legacy && failed == Some("quest_world"));
-                if !clean_tail || exact.as_slice() != payload {
-                    return Err(WorldSaveError::Undecodable("current personal snapshot is truncated or corrupt; preserved without reset".into()));
-                }
+        Ok((s, failed, _, fields_read)) => {
+            if let Some(v) = version.filter(|v| *v >= 53) {
+                verify_current_body_is_exact(&s, failed, fields_read, v, payload)?;
                 return Ok((s, false));
             }
             Ok((s, failed.is_some()))
@@ -7499,10 +7566,10 @@ mod tests {
         let mut with_footer = payload.clone();
         with_footer.extend_from_slice(&footer_bytes(SAVE_FORMAT_VERSION));
 
-        let (old_build, failed, _) = deserialize_world_save_tolerant_reporting(&with_footer)
+        let (old_build, failed, ..) = deserialize_world_save_tolerant_reporting(&with_footer)
             .expect("a pre-footer build must still decode a footer-bearing save");
         assert!(failed.is_none(), "the footer must not trip the tail reader");
-        let (plain, _, _) = deserialize_world_save_tolerant_reporting(&payload).unwrap();
+        let (plain, ..) = deserialize_world_save_tolerant_reporting(&payload).unwrap();
         assert_eq!(
             bincode::serialize(&old_build).unwrap(),
             bincode::serialize(&plain).unwrap(),
@@ -7541,7 +7608,7 @@ mod tests {
         let mut bytes = bincode::serialize(&save).unwrap();
         assert!(bytes.ends_with(&appended_none));
         bytes.truncate(bytes.len() - appended_none.len());
-        let (_, failed, consumed) = deserialize_world_save_tolerant_reporting(&bytes).expect("the known legacy body decodes at a clean boundary");
+        let (_, failed, consumed, _) = deserialize_world_save_tolerant_reporting(&bytes).expect("the known legacy body decodes at a clean boundary");
         assert!(failed.is_none());
         assert_eq!(consumed, bytes.len() as u64, "every byte of the 52-field body is consumed");
         bytes.extend_from_slice(&footer_bytes(52));
@@ -7572,13 +7639,137 @@ mod tests {
     #[test]
     fn tolerant_reader_reads_every_byte_of_a_current_save() {
         let payload = bincode::serialize(&minimal_world_save_for_tests(4)).unwrap();
-        let (_, failed, consumed) = deserialize_world_save_tolerant_reporting(&payload).unwrap();
+        let (_, failed, consumed, _) = deserialize_world_save_tolerant_reporting(&payload).unwrap();
         assert!(failed.is_none());
         assert_eq!(
             consumed,
             payload.len() as u64,
             "the tolerant reader skipped a WorldSave field (bytes left unread)"
         );
+    }
+
+    // ---- Regression: save-footer hotfix. The strict check for a footer >= 53
+    // re-encoded EVERY field and demanded equality, so a world saved before the
+    // newest appended field (footer 57 or 58, no `worldgen_version`) came back one
+    // default byte short and was refused as "truncated". These drive the real
+    // loader (`read_world_save_reporting`), not the tolerant reader.
+
+    /// A save with every field from 52 on populated, so a cut anywhere in the
+    /// tail removes real bytes.
+    fn save_with_populated_tail(seed: u32) -> WorldSave {
+        let mut save = minimal_world_save_for_tests(seed);
+        save.rig_clips = vec![crate::anim_set::AnimClip::Bounce];
+        save.local_personal = Some(crate::personal_value::LocalPersonalSave(vec![3, 9, 8, 7]));
+        save.quest_world = Some(crate::quest_npcs::QuestWorldSave { scope: [7; 16], npcs: Vec::new() });
+        save.worldgen_version = Some(3);
+        save
+    }
+
+    /// `save` with every field after the first `n` reset to its default, and the
+    /// bytes a writer that only knew `n` fields would have produced (no footer).
+    /// Built from each field's own encoding, independent of the production check.
+    fn writer_with_fields(seed: u32, n: u32) -> (WorldSave, Vec<u8>) {
+        let save = save_with_populated_tail(seed);
+        let mut expected = save_with_populated_tail(seed);
+        let mut body = bincode::serialize(&save).unwrap();
+        for index in (n + 1..=55).rev() {
+            let len = match index {
+                55 => { expected.worldgen_version = None; bincode::serialize(&save.worldgen_version).unwrap().len() }
+                54 => { expected.quest_world = None; bincode::serialize(&save.quest_world).unwrap().len() }
+                53 => { expected.local_personal = None; bincode::serialize(&save.local_personal).unwrap().len() }
+                52 => { expected.rig_clips = Vec::new(); bincode::serialize(&save.rig_clips).unwrap().len() }
+                other => panic!("fixture only knows fields 52..=55, not {other}"),
+            };
+            body.truncate(body.len() - len);
+        }
+        (expected, body)
+    }
+
+    fn with_footer(mut body: Vec<u8>, version: u32) -> Vec<u8> {
+        body.extend_from_slice(&footer_bytes(version));
+        body
+    }
+
+    #[test]
+    fn regression_saves_from_every_footer_in_the_table_load_on_this_build() {
+        let seed = 21;
+        for (version, counts) in crate::save_format::FOOTER_FIELD_COUNTS {
+            for n in *counts {
+                let (expected, body) = writer_with_fields(seed, *n);
+                let (back, damaged) = read_world_save_reporting(&with_footer(body, *version))
+                    .unwrap_or_else(|e| panic!("footer {version} written with {n} fields must load: {e}"));
+                assert!(!damaged, "footer {version}/{n} fields: no damage may be reported");
+                assert_eq!(
+                    bincode::serialize(&back).unwrap(),
+                    bincode::serialize(&expected).unwrap(),
+                    "footer {version}/{n} fields: same data, absent fields defaulted"
+                );
+                assert_eq!(back.seed, 21);
+            }
+        }
+    }
+
+    #[test]
+    fn regression_a_current_version_save_still_round_trips_through_the_strict_check() {
+        let save = save_with_populated_tail(22);
+        let bytes = crate::save_format::encode_world_save(&save).unwrap();
+        let (back, damaged) = read_world_save_reporting(&bytes).expect("current save loads");
+        assert!(!damaged);
+        assert_eq!(bincode::serialize(&back).unwrap(), bincode::serialize(&save).unwrap());
+        assert_eq!(back.worldgen_version, Some(3));
+    }
+
+    fn assert_refused_as_truncated(bytes: &[u8], what: &str) {
+        match read_world_save_reporting(bytes) {
+            Err(WorldSaveError::Undecodable(why)) => {
+                assert!(why.contains("preserved without"), "{what}: wrong refusal: {why}");
+            }
+            other => panic!("{what}: must be refused, got {:?}", other.map(|(_, d)| d)),
+        }
+    }
+
+    #[test]
+    fn regression_truncated_bodies_are_still_refused_under_every_table_footer() {
+        let seed = 23;
+        for (version, counts) in crate::save_format::FOOTER_FIELD_COUNTS {
+            let smallest = *counts.iter().min().unwrap();
+            // Cut cleanly at the field boundary just below the smallest allowed count.
+            let (_, below) = writer_with_fields(seed, smallest - 1);
+            assert_refused_as_truncated(
+                &with_footer(below, *version),
+                &format!("footer {version}, cut at a field boundary below {smallest} fields"),
+            );
+            // Cut inside the last field the footer promises.
+            let (_, mut mid) = writer_with_fields(seed, smallest);
+            mid.pop();
+            assert_refused_as_truncated(
+                &with_footer(mid, *version),
+                &format!("footer {version}, cut mid-field inside field {smallest}"),
+            );
+            // A field count this footer was never written with, even though valid.
+            for n in 52..=55u32 {
+                if !counts.contains(&n) {
+                    let (_, body) = writer_with_fields(seed, n);
+                    assert_refused_as_truncated(
+                        &with_footer(body, *version),
+                        &format!("footer {version} with {n} fields"),
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn regression_padded_or_unknown_footer_bodies_are_still_refused() {
+        let seed = 24;
+        let (_, body) = writer_with_fields(seed, 55);
+        // Trailing bytes past the last field (not the footer) are not a clean body.
+        let mut padded = body.clone();
+        padded.push(0);
+        assert_refused_as_truncated(&with_footer(padded, crate::save_format::SAVE_FORMAT_VERSION), "padded body");
+        // Footer 56 was never written by any commit on main: no table row.
+        assert!(crate::save_format::allowed_field_counts(56).is_empty());
+        assert_refused_as_truncated(&with_footer(body, 56), "unknown footer 56");
     }
 
     #[test]
