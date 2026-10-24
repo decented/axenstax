@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="referrer" content="no-referrer">
+    <title>More games — Axe'n'Stax</title>
+    <meta name="description" content="Two more games we make, for Android phones: Stampede and Twang Thang. Download the APK.">
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="stylesheet" href="/static/marketing.css">
+    <link rel="icon" type="image/svg+xml" href="/static/brand/axenstax-favicon.svg">
+    <link rel="icon" type="image/png" sizes="32x32" href="/static/brand/favicon-32.png">
+    <link rel="apple-touch-icon" sizes="180x180" href="/static/brand/apple-touch-icon-180.png">
+    <meta name="theme-color" content="#0D1B1E">
+</head>
+<body class="marketing">
+    <nav class="marketing-nav">
+        <a href="/" class="nav-brand"><img class="brand-mark" src="/static/brand/axenstax-mark-flat.svg" alt="" width="68" height="50"><img class="brand-wordmark" src="/static/brand/axenstax-wordmark-dark.svg" alt="Axe'n'Stax" width="163" height="26"></a>
+        <div class="nav-links">
+            <a href="{{ game_url }}/">Play</a>
+            <a href="{{ learn_url }}">Learn</a>
+            <a href="{{ wiki_url }}">Wiki</a>
+            <a href="/experiences">Experiences</a>
+            <a href="/more-games">More games</a>
+            <a href="/roadmap">What's coming</a>
+            <a href="/support">Support</a>
+            <a href="{{ docs_url }}/download">Download</a>
+        </div>
+    </nav>
+
+    <header class="hero hero-marketing">
+        <h1>More games.</h1>
+        <p class="tagline">Two more games we make, for Android phones.</p>
+    </header>
+
+    <section class="features-grid">
+        {% for g in games %}
+        <div class="feature-card">
+            <img src="{{ g.icon }}" alt="" width="72" height="72" style="border-radius:16px;margin-bottom:0.9rem;">
+            <h3>{{ g.name }}</h3>
+            <p>{{ g.tagline }}</p>
+            <p class="hint" style="margin-top:0.6rem;">Version {{ g.version }} · Android 7 or later (64-bit ARM) · {{ g.size_mb }} MB</p>
+            <p style="margin-top:1rem;"><a href="{{ g.url }}" class="cta" rel="noopener">Download APK</a></p>
+            <p class="hint" style="margin-top:0.8rem;font-size:0.72rem;word-break:break-all;color:var(--stone-muted);">SHA-256: {{ g.sha256 }}</p>
+        </div>
+        {% endfor %}
+    </section>
+
+    <section style="max-width:760px;margin:0 auto;padding:0.5rem 2rem 2rem;">
+        <h2>Installing</h2>
+        <p style="color:var(--stone);">Your browser will ask to allow installs from it the first time. After that, the game updates itself.</p>
+        <p style="color:var(--stone-muted);">Downloads come from nostr.download, a public file host.</p>
+    </section>
+
+    <footer class="marketing-footer">
+        <p>
+            <a href="{{ game_url }}/">Play</a> ·
+            <a href="{{ learn_url }}">Learn</a> ·
+            <a href="{{ wiki_url }}">Wiki</a> ·
+            <a href="/experiences">Experiences</a> ·
+            <a href="/more-games">More games</a> ·
+            <a href="/roadmap">What's coming</a> ·
+            <a href="/safety">Parents</a> ·
+            <a href="/support">Support</a> ·
+            <a href="{{ docs_url }}/download">Download</a> ·
+            <a href="{{ project_url }}">Project</a> ·
+            <a href="/privacy">Privacy</a>
+        </p>
+        <p class="hint">Built by Staxolottle &amp; Axolittle. Open source under the moonshot.</p>
+    </footer>
+</body>
+</html>
