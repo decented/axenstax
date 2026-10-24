@@ -61,6 +61,7 @@ mod block_update;
 mod power;
 mod beam;
 mod graphics_settings;
+mod quality_governor;
 mod input;
 mod item;
 mod inventory;
