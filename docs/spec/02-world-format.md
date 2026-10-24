@@ -1944,8 +1944,9 @@ format version in a trailing footer — see the bincode note under Migration str
       have made new saves unreadable to shipped builds, and a 4-byte header magic
       collides with a legacy save's leading `seed: u32`; an 8-byte trailing magic
       at the very end of a footer-less save is not a realistic collision.
-    - **`SAVE_FORMAT_VERSION`** = `WORLD_SAVE_FIELD_COUNT` (53 today) +
-      `SAVE_LAYOUT_REVISION` (0). Two tripwire tests stop drift: serde's field list
+    - **`SAVE_FORMAT_VERSION`** = `WORLD_SAVE_FIELD_COUNT` (55 since terrain T1,
+      2026-10-23: `quest_world` was 54, `worldgen_version` 55) +
+      `SAVE_LAYOUT_REVISION` (3). Two tripwire tests stop drift: serde's field list
       for `WorldSave` must equal `WORLD_SAVE_FIELD_COUNT` (so appending a field
       without bumping the version fails), and the tolerant reader must consume every
       byte of a current save (so a field listed in its struct literal without a read
@@ -2540,3 +2541,12 @@ field. Transfer neutralisation clears the field and captures identity-selected
 seeds/progression separately. Explicit save/autosave/discard commits local bag
 and progression with the same selected world/chest state; final execution
 controls are pending before the checkpoint is accepted.
+
+### Terrain generator in world.dat (terrain T1, 2026-10-23)
+
+WorldSave appends `worldgen_version: Option<u32>` after `quest_world` (field 55;
+`WORLD_SAVE_FIELD_COUNT` 54 → 55, so a pre-T1 build refuses a save that carries it).
+`None` — every save written before it, which ends before the field — reads as
+generator v2. It mirrors `WorldMeta.worldgen_version` (`world_meta.json`, serde default
+2) so a torn meta's rebuild (`save::recovered_meta`) keeps the world's generator.
+See §5.2 "Per-world generator".

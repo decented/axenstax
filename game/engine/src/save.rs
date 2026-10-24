@@ -3547,7 +3547,7 @@ impl WorldMeta {
             satoshi_enabled: false,
             pop_secret: Some(crate::proof_of_play::gen_world_secret()),
             // A brand-new world gets the newest terrain generator.
-            worldgen_version: crate::biome::NEW_WORLD_GENERATOR,
+            worldgen_version: crate::biome::Generator::for_new_world().version(),
         }
     }
 

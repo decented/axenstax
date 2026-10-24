@@ -1831,6 +1831,7 @@ impl World {
         self.evicted.clear();
         self.evicted_columns.clear();
         self.worldgen_depth = 0;
+        self.worldgen_top = WORLD_HEIGHT - 1;
         // `disk_chunks` is deliberately KEPT: it describes the world folder, which
         // a Workshop reset clears in memory but keeps saving to — forgetting it
         // would leave the old build's chunk files to resurrect. A world change
@@ -2188,7 +2189,8 @@ impl World {
     /// playable range — leaking a chunk that height/lighting/topmost queries
     /// never expect and that nothing ever streams out. Drop the write instead.
     pub fn set_block(&mut self, x: i32, y: i32, z: i32, block: BlockId) {
-        if y < 0 || y >= WORLD_HEIGHT || y > self.worldgen_top {
+        // `worldgen_top` is `WORLD_HEIGHT - 1` outside world-gen.
+        if !(0..=self.worldgen_top.min(WORLD_HEIGHT - 1)).contains(&y) {
             return;
         }
         let cx = x.div_euclid(CHUNK_SIZE as i32);

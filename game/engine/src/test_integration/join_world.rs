@@ -162,6 +162,7 @@ fn joiner_of_a_v3_world_generates_with_v3() {
     crate::save::save_world_meta(&name, &meta).expect("meta written");
     let mut hs = start_open_server(&name, 2026);
     assert_eq!(hs.server.biome_gen.generator(), crate::biome::Generator::V3, "taken from the meta");
+    assert_eq!(hs.server.world.generator, crate::biome::Generator::V3, "and kept through the world's open");
 
     let joined = join(&mut hs);
     assert_eq!(joined.generator, crate::biome::Generator::V3);
