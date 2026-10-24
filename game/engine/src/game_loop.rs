@@ -1681,9 +1681,12 @@ impl super::GameState {
     /// The world-independent slice of `sync_graphics_to_engine`: present mode and
     /// render scale touch only the renderer's surface/offscreen target, so they
     /// are safe with no world loaded (the lobby Settings panel calls this alone).
+    /// `render_scale` is the scale to ask for: the player's own, or the
+    /// governor's lower one (the pixel budget then caps it inside the renderer).
     pub(crate) fn sync_display_settings(
         renderer: &mut crate::renderer::Renderer,
         gfx: &crate::graphics_settings::GraphicsSettings,
+        render_scale: f32,
     ) {
         // Present mode: VSync vs no-vsync. The software FPS cap (`Cap(n)`) is
         // applied by the frame pacer (Phase 6); both Cap and Uncapped run the
@@ -1694,8 +1697,88 @@ impl super::GameState {
         };
         renderer.set_present_mode(mode);
         // Render scale (Spec 39 P5) — the biggest weak-GPU lever. < 1.0 renders
-        // the world to a smaller offscreen target then upscales it.
-        renderer.set_render_scale(gfx.render_scale);
+        // the world to a smaller offscreen target then upscales it. The pixel
+        // budget (Perf B1) caps the scale on large or high-DPR surfaces.
+        renderer.set_pixel_budget(gfx.pixel_budget);
+        renderer.set_render_scale(render_scale);
+    }
+
+    /// Can the governor shorten the streamed distance in this session? Not for a
+    /// joiner that only holds what its server pushed: it generates nothing, so a
+    /// column it lets go is never reloaded.
+    fn governor_may_shrink_distance(&self) -> bool {
+        !self.joined_push_only
+    }
+
+    /// The dials the frame actually uses: the player's values, held lower by
+    /// the auto-quality governor when it has stepped down (Spec 03 §10.3).
+    pub(crate) fn effective_quality(&self) -> crate::quality_governor::Effective {
+        crate::quality_governor::effective(
+            &self.graphics,
+            self.governor.level(),
+            self.governor_may_shrink_distance(),
+        )
+    }
+
+    /// The effective render distance (chunks): what streaming, fog and the draw
+    /// range use. Hosting and the join announcement keep the player's own.
+    pub(crate) fn effective_render_distance(&self) -> i32 {
+        self.effective_quality().render_distance
+    }
+
+    /// Push the renderer-side effect of the effective quality (render scale,
+    /// micro-model LOD, draw range). Shared by the settings sync and by every
+    /// governor step; saves nothing and touches no setting.
+    pub(crate) fn sync_effective_quality(&mut self) {
+        let eff = self.effective_quality();
+        Self::sync_display_settings(&mut self.renderer, &self.graphics, eff.render_scale);
+        // Micro-model LOD (owner-inbox #18 Phase D) — flowers within ~55% of the
+        // render distance draw their 3D shell; beyond that, the cheap billboard.
+        // Tracks the live render distance so it scales with the player's setting.
+        let lod = eff.render_distance as f32 * crate::chunk::CHUNK_SIZE as f32 * 0.55;
+        self.renderer.set_micro_lod_dist(lod);
+        // Chunk draw range (final review fix 3) — columns past the render distance
+        // + 1 are wholly fogged out; every viewport skips them, so a lending
+        // host's far-joiner columns cost the GPU nothing. Tracks the live setting.
+        self.renderer
+            .set_chunk_draw_columns(crate::camera::chunk_draw_columns(eff.render_distance));
+    }
+
+    /// Feed one in-world frame to the auto-quality governor and apply a step if
+    /// it takes one. No-op while `auto_quality` is off.
+    fn tick_quality_governor(&mut self, dt: f32) {
+        if !self.graphics.auto_quality {
+            return;
+        }
+        let shrink = self.governor_may_shrink_distance();
+        let change = self.governor.update(
+            dt,
+            crate::quality_governor::target_frame_time(self.graphics.frame_limit),
+            crate::quality_governor::max_level(&self.graphics, shrink),
+        );
+        if let Some(change) = change {
+            let eff = self.effective_quality();
+            log::info!(
+                "Auto quality {change:?}: level {}, render distance {} (set {}), scale {:.2} (set {:.2}), particles {:?}",
+                self.governor.level(),
+                eff.render_distance,
+                self.graphics.render_distance,
+                eff.render_scale,
+                self.graphics.render_scale,
+                eff.particles
+            );
+            self.sync_effective_quality();
+        }
+    }
+
+    /// The settings panel's one-line note: what the governor is holding below
+    /// the player's values, if anything.
+    pub(crate) fn governor_note(&self) -> Option<String> {
+        if !self.graphics.auto_quality {
+            return None;
+        }
+        self.governor
+            .note(&self.graphics, self.governor_may_shrink_distance())
     }
 
     /// Push the current `graphics` settings into live engine state (Spec 39)
@@ -1723,7 +1806,6 @@ impl super::GameState {
         // B2a — the render distance the next JoinRequest announces (a joined
         // session sends its current one in every input).
         crate::remote_client::set_join_render_distance(self.graphics.render_distance);
-        Self::sync_display_settings(&mut self.renderer, &self.graphics);
         // Master volume + mute (audio.rs) — both targets, applied live.
         self.audio.set_master(self.graphics.master_volume, self.graphics.audio_muted);
         // Mipmaps (Spec 39 A6) — opt-in; flipping the dial rebuilds the block
@@ -1733,22 +1815,19 @@ impl super::GameState {
             self.graphics.mipmaps,
             self.world.override_registry.appended_layers(),
         );
-        // Micro-model LOD (owner-inbox #18 Phase D) — flowers within ~55% of the
-        // render distance draw their 3D shell; beyond that, the cheap billboard.
-        // Tracks the live render distance so it scales with the player's setting.
-        let lod = self.graphics.render_distance as f32 * crate::chunk::CHUNK_SIZE as f32 * 0.55;
-        self.renderer.set_micro_lod_dist(lod);
-        // Chunk draw range (final review fix 3) — columns past the render distance
-        // + 1 are wholly fogged out; every viewport skips them, so a lending
-        // host's far-joiner columns cost the GPU nothing. Tracks the live setting.
-        self.renderer
-            .set_chunk_draw_columns(crate::camera::chunk_draw_columns(self.graphics.render_distance));
+        // Render scale, micro-model LOD and draw range follow the EFFECTIVE
+        // quality (the governor's offset below the player's values).
+        self.sync_effective_quality();
     }
 
     /// Apply the current `graphics` settings to live engine state (Spec 39) and
     /// persist them per-device. Called whenever the settings panel moves a dial,
     /// so changes take effect with no reload.
     pub(crate) fn apply_graphics_settings(&mut self) {
+        // Moving a quality slider or picking a preset hands control back to the
+        // player: the governor's offset is dropped and its history starts over
+        // (an unrelated change, such as volume, leaves it alone).
+        self.governor.rebase(&self.graphics);
         self.sync_graphics_to_engine();
         self.graphics.save();
         // The tester-feedback unlock lives in these settings: re-gate the
@@ -3213,7 +3292,10 @@ impl super::GameState {
         }
         // Spec 39 — push persisted graphics settings (present mode, hosted-server
         // render distance, FOV) into live state on world entry, so a per-device
-        // settings file takes effect without opening the panel.
+        // settings file takes effect without opening the panel. A new world
+        // starts the auto-quality governor from the player's own values.
+        self.governor.reset();
+        self.governor.rebase(&self.graphics);
         self.sync_graphics_to_engine();
         // #44 — apply the persisted debug-overlay default on world entry. F3
         // still toggles it live within the session.
@@ -8022,6 +8104,21 @@ impl super::GameState {
             }
             self.frame_pace_instant = Instant::now();
         }
+        // Web frame cap (Perf B1): the browser paces by requestAnimationFrame,
+        // so a `Cap(n)` is honoured by skipping any render that arrives sooner
+        // than the cap interval (less a small slack) and asking for another
+        // redraw. Idle screens already throttle themselves above.
+        #[cfg(target_arch = "wasm32")]
+        {
+            if let Some(interval) = self.graphics.frame_limit.software_cap_interval() {
+                let elapsed = self.frame_pace_instant.elapsed();
+                if !crate::graphics_settings::cap_frame_due(elapsed, interval) {
+                    self.window.request_redraw();
+                    return;
+                }
+            }
+            self.frame_pace_instant = Instant::now();
+        }
 
         // Expire the transient wardrobe (import/refresh) toast after a few
         // seconds so it doesn't pin forever while the panel stays open. Cleared
@@ -8089,21 +8186,6 @@ impl super::GameState {
                 }
                 Some(Err(TryRecvError::Empty)) | None => {}
             }
-        }
-        // Web frame cap (Perf B1): the browser paces by requestAnimationFrame,
-        // so a `Cap(n)` is honoured by skipping any render that arrives sooner
-        // than the cap interval (less a small slack) and asking for another
-        // redraw. Idle screens already throttle themselves above.
-        #[cfg(target_arch = "wasm32")]
-        {
-            if let Some(interval) = self.graphics.frame_limit.software_cap_interval() {
-                let elapsed = self.frame_pace_instant.elapsed();
-                if !crate::graphics_settings::cap_frame_due(elapsed, interval) {
-                    self.window.request_redraw();
-                    return;
-                }
-            }
-            self.frame_pace_instant = Instant::now();
         }
 
         #[cfg(target_arch = "wasm32")]
@@ -8977,6 +9059,9 @@ impl super::GameState {
                 let ctx = self.renderer.egui.ctx.clone();
                 #[cfg(not(target_arch = "wasm32"))]
                 let relays_before = self.graphics.online_relays.clone();
+                // No world is running here, so there is nothing for the governor to
+                // report.
+                self.settings_panel.governor_note = None;
                 let panel_action = crate::menu::draw_settings_panel(
                     &ctx,
                     &mut self.settings_panel,
@@ -9005,7 +9090,15 @@ impl super::GameState {
                     crate::native_mailbox::apply_gate(&mut self.cmd_registry, &self.graphics);
                 }
                 if plan.apply_display {
-                    Self::sync_display_settings(&mut self.renderer, &self.graphics);
+                    // A lobby change is the player's own: drop any governor offset.
+                    // (Field-wise: `menu_state` borrows `self.mode`.)
+                    self.governor.rebase(&self.graphics);
+                    let eff = crate::quality_governor::effective(
+                        &self.graphics,
+                        self.governor.level(),
+                        !self.joined_push_only,
+                    );
+                    Self::sync_display_settings(&mut self.renderer, &self.graphics, eff.render_scale);
                 }
                 #[cfg(not(target_arch = "wasm32"))]
                 {
@@ -10203,6 +10296,7 @@ impl super::GameState {
             // mirrors the "Your look" panel above (Spec 39). Apply-on-change.
             if self.settings_panel.open {
                 let ctx = self.renderer.egui.ctx.clone();
+                self.settings_panel.governor_note = self.governor_note();
                 match crate::menu::draw_settings_panel(&ctx, &mut self.settings_panel, &mut self.graphics) {
                     crate::menu::SettingsPanelAction::Changed => {
                         self.apply_graphics_settings();
@@ -10634,6 +10728,11 @@ impl super::GameState {
                         self.frame_samples.pop_front();
                     }
                     self.frame_samples.push_back(dt);
+                    // Auto quality (Spec 03 §10.3) judges in-world frames only:
+                    // menus, pauses and loading screens have their own pacing.
+                    if matches!(self.mode, GameMode::Playing) {
+                        self.tick_quality_governor(dt);
+                    }
                 }
             } else {
                 self.last_frame_instant = Some(now);
@@ -16691,7 +16790,7 @@ impl super::GameState {
         // its own eye in vs_particle). Gated by the graphics setting; dt is
         // clamped so a hitch or tab-switch can't teleport particles.
         {
-            self.particles.set_cap(self.graphics.particles);
+            self.particles.set_cap(self.effective_quality().particles);
             let now = Instant::now();
             let dt = (now - self.last_particle_frame).as_secs_f32().min(0.1);
             self.last_particle_frame = now;
@@ -16943,7 +17042,7 @@ impl super::GameState {
             // Spec 39 — fog derived from the live render distance (fixes pop-in
             // when the render-distance dial moves); off pushes fog far away.
             camera_uniform.fog = if self.graphics.fog {
-                crate::camera::fog_vec(self.graphics.render_distance)
+                crate::camera::fog_vec(self.effective_render_distance())
             } else {
                 crate::camera::fog_disabled()
             };
@@ -20380,7 +20479,7 @@ impl super::GameState {
                         &screen.viewport,
                         self.tick_counter,
                     
-                        self.graphics.particles == crate::graphics_settings::ParticleLevel::Off,
+                        self.effective_quality().particles == crate::graphics_settings::ParticleLevel::Off,
                     );
                 }
                 } // end hud_suppressed guard (Cinematic Director hide-HUD)

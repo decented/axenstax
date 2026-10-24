@@ -4,7 +4,7 @@
 **Date**: 2026-03-03
 **Depends on**: ADR-002 (Tech Stack), Platform Overview (Visual Strategy)
 
-> **AS-BUILT (audit 2026-10-04).** The following sections are **design targets, not shipped**: §4.3 smooth lighting, §4.4 ambient occlusion, §6 the full procedural sky (as built, a camera-bound triangle grades the live horizon colour into a deeper overhead blue; no sun/moon discs, stars or clouds), and §9 post-processing and bloom (no HDR `Rgba16Float` target). The `smooth_lighting` graphics setting is stored so presets round-trip, but **it is not wired into the shader and does nothing** (`graphics_settings.rs`, "not yet wired into the shader"). Light is per-face block/sky light (`shader.wgsl`).
+> **AS-BUILT (audit 2026-10-04).** The following sections are **design targets, not shipped**: §4.3 smooth lighting, §4.4 ambient occlusion, §6 the full procedural sky (as built, a camera-bound triangle grades the live horizon colour into a deeper overhead blue; no sun/moon discs, stars or clouds), and §9 post-processing and bloom (no HDR `Rgba16Float` target). The `smooth_lighting` graphics setting was **removed** (Perf B1, 2026-10-24): nothing ever read it, and the mesher has no smooth-light or AO path to switch (light is per quad). An old settings file that still carries the key loads fine (unknown keys are ignored). Light is per-face block/sky light (`shader.wgsl`).
 
 ---
 
@@ -1573,6 +1573,33 @@ The renderer maintains a rolling average of the last 60 frame times. If the aver
 
 If the average is significantly below the target (< 50% of budget), quality is restored in reverse order. Changes are made at most once per second to avoid oscillation.
 
+> **AS-BUILT (Perf B1, 2026-10-24) -- `quality_governor.rs`.** Setting
+> `auto_quality` (default off; on after first-run detection; a checkbox in the
+> graphics panel). Differences from the text above: it is a temporary *offset
+> below the player's own values*, never written to the settings file and never
+> above them; steps are render distance (2 chunks, to 4), then render scale
+> (x0.8, x0.64, x0.5 of the player's value, floor `min(value, 0.5)`), then
+> particles (Full, Reduced, Off); there is no bloom/shadow/LOD step. Rules:
+> judged on the p90 of the last second of in-world frames, every 0.25 s;
+> target frame time = the frame cap, else 1/60 s; step down when p90 > 1.25x
+> target for 3 s; step up when p90 < 0.7x target for 10 s (between the two:
+> nothing); at most one step per second; the first 5 s after a world entry or
+> reset are ignored. Anti-flap: a step down within 30 s of a step up doubles the
+> next step-up hold (10 s, 20, 40 ... capped at 160 s). Changing a quality
+> dial, preset or the toggle resets the offset (`Governor::rebase`); unrelated
+> settings do not. A joiner (push-only) skips the distance steps, since it
+> never reloads a column it let go. The host's own server radius and the
+> distance a joiner announces stay the player's values. The settings panel
+> shows a line such as "Auto quality is holding render distance 6 (set 10)"
+> while it is holding below. Limit: with vsync on a 60 Hz display frames can
+> never be faster than 0.7x of a 60 fps target, so the offset only recovers on
+> faster displays, or after a slider change or restart.
+>
+> Web frame cap: `Cap(30/60)` is honoured on wasm by skipping a render that
+> arrives sooner than the cap interval (less `min(2 ms, interval/8)`,
+> `graphics_settings::cap_frame_due`) and re-requesting a redraw. Native pacing
+> is unchanged. Also: the brightness `pow` in `shader.wgsl` is skipped at 1.0.
+
 ### 10.4 GPU Memory Budget
 
 | Resource | Estimated Size | Notes |
@@ -2263,14 +2290,15 @@ Nothing in the struct is AxeNStax-specific; it lifts to any Decented voxel game.
 | Dial | Type / range | Wires to |
 |------|--------------|----------|
 | `render_distance` | `i32`, 4–16 | chunk streaming (`chunk_stream.rs`) + server gen (`GameServer.render_distance`) + fog |
-| `render_scale` | `f32`, 0.5–1.0 | offscreen render target + blit (Phase 5) |
+| `render_scale` | `f32`, 0.25–1.0 | offscreen render target + blit (Phase 5). Floor lowered from 0.5 in Perf B1 |
+| `pixel_budget` | `Option<u32>` (serde default `None` = uncapped) | caps the world's physical pixel count: effective scale = `min(render_scale, sqrt(budget / (w*h)))`, applied on native and web (§9.4d) |
+| `auto_quality` | `bool` (serde default `false`) | the runtime governor (§10.3); on after first-run detection |
 | `fov_y` | `f32`, 60–100° | `Camera.fov_y` (personal pref) |
 | `mouse_sensitivity` | `f32` | mouse-look multiplier (personal pref) |
 | `frame_limit` | `VSync` / `Uncapped` / `Cap(n)` | `PresentMode` + frame pacer (Phase 6) |
 | `fog` | `bool` | fog uniform derived from render distance (Phase 6) |
 | `mipmaps` | `bool` | block texture-array mip chain + mip filtering (§9.4b, A6). **Opt-in: off in every preset** |
 | `particles` | `Off` / `Reduced` / `Full` | particle spawn rate |
-| `smooth_lighting` | `bool` | AO shader hook (future) |
 
 ### 9.2 Presets
 
@@ -2281,13 +2309,17 @@ quality dial that no longer matches a named preset reports `Custom`. **FOV and
 mouse sensitivity are personal preferences excluded from preset detection** —
 changing them never knocks you off a preset, and `apply_preset` preserves them.
 
-| Preset | dist | scale | frame_limit | fog | mipmaps | particles |
-|--------|:----:|:-----:|-------------|:---:|:-------:|-----------|
-| Potato | 4 | 0.5 | Cap(30) | off | off | Off |
-| Low | 5 | 0.75 | Cap(60) | on | off | Reduced |
-| Medium | 7 | 1.0 | Cap(60) | on | off | Full |
-| **High** | **10** | **1.0** | **VSync** | **on** | **off** | **Full** |
-| Ultra | 14 | 1.0 | Uncapped | on | off | Full |
+| Preset | dist | scale | frame_limit | fog | mipmaps | particles | pixel budget |
+|--------|:----:|:-----:|-------------|:---:|:-------:|-----------|:------------:|
+| Potato | 4 | 0.5 | Cap(30) | off | off | Off | 0.9 M |
+| Low | 5 | 0.75 | Cap(60) | on | off | Reduced | 1.3 M |
+| Medium | 7 | 1.0 | Cap(60) | on | off | Full | 2.1 M |
+| **High** | **10** | **1.0** | **VSync** | **on** | **off** | **Full** | none |
+| Ultra | 14 | 1.0 | Uncapped | on | off | Full | none |
+
+`pixel_budget` is applied by the presets but is **not** compared by preset
+detection: a Potato/Low/Medium file saved before the budget existed (no key =
+uncapped) keeps its label and its old behaviour.
 
 `mipmaps` is **off in every preset, High and Ultra included** (A6, 2026-09-06).
 It is a *look* change at distance, not a cost dial, so it stays opt-in until a
@@ -2304,6 +2336,38 @@ when the store is absent or unparseable and clamps every dial into range; an
 old/partial JSON file loads cleanly (`#[serde(default)]` fills missing fields
 from the High default). `save()` is best-effort — a write failure never breaks
 the game.
+
+### 9.3a First-run defaults (AS-BUILT, Perf B1, 2026-10-24)
+
+When **nothing has ever been persisted** (no `settings.json` / no
+`axenstax_gfx` key) and there is a real window, `GameState::new` asks the pure
+`graphics_settings::recommend_preset(device_type, is_touch, is_web)` for a
+preset, builds the settings from it and sets `auto_quality = true`. The table
+(first match wins):
+
+| Adapter / platform | Preset |
+|---|---|
+| `DeviceType::Cpu` (software rasteriser) | Potato |
+| touch device (Android; a browser reporting touch points) | Low |
+| integrated GPU, web | Low |
+| integrated GPU, native | Medium |
+| discrete GPU | High |
+| unknown (`Other`, usual in a browser) or virtual GPU | Medium |
+
+An existing file (even an unparseable one) is never re-defaulted, and nothing
+is written until the player changes something. Headless harness boots skip the
+detection.
+
+### 9.4d Pixel budget (AS-BUILT, Perf B1, 2026-10-24)
+
+`graphics_settings::budgeted_scale(scale, budget, w, h)` =
+`clamp(min(scale, sqrt(budget / (w*h))), 0.25, 1.0)` with `w*h` the surface in
+**physical** pixels (so DPR counts). `Renderer` keeps the requested scale and
+the budget (`set_render_scale`, `set_pixel_budget`) and recomputes the
+effective scale on every `resize`. The canvas backing store on web is still
+full DPR size; only the 3D world is rendered smaller (the UI and the blit stay
+native). `render_scale` has no UI control for the budget: pick High or Ultra to
+drop it.
 
 ### 9.4a Settings panel (IMPLEMENTED, Phase 4, 2026-06-03)
 

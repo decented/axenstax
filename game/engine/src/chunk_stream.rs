@@ -10,7 +10,7 @@ impl super::GameState {
     /// stream incrementally.
     pub(crate) fn stream_chunks(&mut self) {
         // Live render distance (Spec 39 — was the `RENDER_DISTANCE` const).
-        let rd = self.graphics.render_distance;
+        let rd = self.effective_render_distance();
 
         // ── Part G: Union chunk streaming — needed columns across all players ──
         let player_cols: Vec<(i32, i32)> =
@@ -238,7 +238,7 @@ impl super::GameState {
         #[cfg(target_arch = "wasm32")]
         self.kick_off_wardrobe_load();
         // Live render distance (Spec 39 — was the `RENDER_DISTANCE` const).
-        let rd = self.graphics.render_distance;
+        let rd = self.effective_render_distance();
         // One-shot resume intent from the WASM poll branch (see the field doc
         // on `GameState.world_preloaded`) — consumed here so it can never leak
         // into a later world entry.

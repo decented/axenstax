@@ -571,6 +571,13 @@ pub struct Renderer {
     /// size then upscale-blit to the surface — the biggest weak-GPU lever (UI
     /// still draws crisp at native res on top).
     pub render_scale: f32,
+    /// The scale the settings ask for, before the pixel budget caps it.
+    /// `render_scale` above is `budgeted_scale(requested, pixel_budget, w, h)`.
+    requested_render_scale: f32,
+    /// Cap on the world's physical pixel count (`GraphicsSettings.pixel_budget`).
+    pixel_budget: Option<u32>,
+    /// What kind of adapter this is (first-run default detection).
+    adapter_device_type: wgpu::DeviceType,
     /// Offscreen world target (color view, depth view) + the blit bind group,
     /// present only when `render_scale < 1.0`.
     offscreen_color_view: Option<wgpu::TextureView>,
@@ -993,6 +1000,8 @@ impl Renderer {
         let adapter = adapter.expect("Failed to find a suitable GPU adapter");
 
         log::info!("GPU adapter: {:?}", adapter.get_info().name);
+        let adapter_device_type = adapter.get_info().device_type;
+        log::info!("GPU adapter class: {adapter_device_type:?}");
 
         // Native capability gate — mirrors the web pre-flight probe's floor.
         // The block-texture atlas needs one array layer per registered block
@@ -1594,6 +1603,9 @@ impl Renderer {
             last_draw_stats: DrawStats::default(),
             crosshair_cache: ahash::AHashMap::new(),
             render_scale: 1.0,
+            requested_render_scale: 1.0,
+            pixel_budget: None,
+            adapter_device_type,
             offscreen_color_view: None,
             offscreen_depth_view: None,
             offscreen_bind_group: None,
@@ -1693,7 +1705,9 @@ impl Renderer {
                 surface.configure(&self.device, &config);
             }
             self.depth_texture_view = create_depth_texture(&self.device, width, height);
-            // Render-scale offscreen target follows the surface size (Spec 39 P5).
+            // Render-scale offscreen target follows the surface size (Spec 39 P5);
+            // the pixel budget makes the scale itself depend on that size.
+            self.render_scale = self.budgeted_render_scale();
             self.recreate_offscreen();
         }
     }
@@ -1742,12 +1756,40 @@ impl Renderer {
     /// smaller offscreen target then upscales it — the biggest weak-GPU lever.
     /// Recreates the offscreen target at the new size; UI still draws at native.
     pub fn set_render_scale(&mut self, scale: f32) {
-        let scale = scale.clamp(crate::graphics_settings::RENDER_SCALE_MIN, 1.0);
+        self.requested_render_scale =
+            scale.clamp(crate::graphics_settings::RENDER_SCALE_MIN, 1.0);
+        self.apply_render_scale();
+    }
+
+    /// Set the pixel budget that caps the render scale (`None` = uncapped).
+    pub fn set_pixel_budget(&mut self, budget: Option<u32>) {
+        self.pixel_budget = budget;
+        self.apply_render_scale();
+    }
+
+    /// The scale actually in use for the surface size now: the requested scale
+    /// held under the pixel budget.
+    fn budgeted_render_scale(&self) -> f32 {
+        crate::graphics_settings::budgeted_scale(
+            self.requested_render_scale,
+            self.pixel_budget,
+            self.width,
+            self.height,
+        )
+    }
+
+    fn apply_render_scale(&mut self) {
+        let scale = self.budgeted_render_scale();
         if (scale - self.render_scale).abs() < 1e-4 {
             return;
         }
         self.render_scale = scale;
         self.recreate_offscreen();
+    }
+
+    /// The adapter class wgpu reports (`Other` on most browsers).
+    pub fn adapter_device_type(&self) -> wgpu::DeviceType {
+        self.adapter_device_type
     }
 
     /// (Re)build the offscreen world target to match the current size + scale.
@@ -3347,6 +3389,7 @@ impl Renderer {
         };
 
         log::info!("Headless adapter: {:?}", adapter.get_info().name);
+        let adapter_device_type = adapter.get_info().device_type;
 
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
@@ -3881,6 +3924,9 @@ impl Renderer {
             last_draw_stats: DrawStats::default(),
             crosshair_cache: ahash::AHashMap::new(),
             render_scale: 1.0,
+            requested_render_scale: 1.0,
+            pixel_budget: None,
+            adapter_device_type,
             offscreen_color_view: None,
             offscreen_depth_view: None,
             offscreen_bind_group: None,
