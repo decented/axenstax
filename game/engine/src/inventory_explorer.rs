@@ -322,6 +322,47 @@ pub fn all_tool_combos() -> Vec<(ToolType, ToolMaterial)> {
     out
 }
 
+/// The building variants grouped under the original block of their shape.
+struct VariantGroups {
+    /// Original id (stone slab, oak door, …) -> the new ids listed after it.
+    after: Vec<(BlockId, Vec<BlockId>)>,
+    first_new: BlockId,
+    end_new: BlockId,
+}
+
+impl VariantGroups {
+    fn is_new(&self, id: BlockId) -> bool {
+        (self.first_new..self.end_new).contains(&id)
+    }
+    fn after(&self, anchor: BlockId) -> impl Iterator<Item = BlockId> + '_ {
+        self.after.iter().filter(move |(a, _)| *a == anchor).flat_map(|(_, ids)| ids.iter().copied())
+    }
+}
+
+fn variant_groups(registry_len: BlockId) -> VariantGroups {
+    use crate::building_variants::{self as bv, VShape};
+    let anchor = |shape: VShape| match shape {
+        VShape::Slab => crate::block::STONE_SLAB,
+        VShape::Stairs => crate::block::STONE_STAIRS,
+        VShape::Door => crate::block::OAK_DOOR,
+        VShape::Trapdoor => crate::block::OAK_TRAPDOOR,
+        VShape::FenceGate => crate::block::OAK_FENCE_GATE,
+        VShape::Wall => crate::block::COBBLESTONE_WALL,
+    };
+    let mut after: Vec<(BlockId, Vec<BlockId>)> = Vec::new();
+    for (id, _, shape) in bv::all() {
+        if id < bv::FIRST_NEW_ID || id >= registry_len {
+            continue;
+        }
+        let a = anchor(shape);
+        match after.iter_mut().find(|(x, _)| *x == a) {
+            Some((_, ids)) => ids.push(id),
+            None => after.push((a, vec![id])),
+        }
+    }
+    VariantGroups { after, first_new: bv::FIRST_NEW_ID, end_new: bv::END_NEW_ID.min(registry_len) }
+}
+
 /// Enumerate every item that the explorer can show: every block (minus
 /// AIR), every MaterialId, every valid (ToolType, ToolMaterial) combo.
 /// Pure — no UI, no IO. Result ordered Blocks → Materials → Tools so the
@@ -331,17 +372,23 @@ pub fn enumerate_all_items(registry: &BlockRegistry) -> Vec<ExplorerEntry> {
 
     // Blocks. Iterate by id rather than slice so a future sparse registry
     // (skipped ids) still produces the right block id in the entry.
+    // Building variants (every wood's and stone's slab, stairs, door, …) are
+    // listed right after the original of their shape, not at the end of the
+    // list: a builder looking at "Stone Slab" sees the other slabs beside it.
+    let variants = variant_groups(registry.len() as BlockId);
     for id in 0u16..registry.len() as u16 {
-        if id == AIR {
+        if id == AIR || variants.is_new(id) {
             continue;
         }
-        let item = Item::Block(id as BlockId);
-        let label = item.name(registry);
-        entries.push(ExplorerEntry {
-            label,
-            category: ExplorerCategory::Blocks,
-            item,
-        });
+        for id in std::iter::once(id).chain(variants.after(id)) {
+            let item = Item::Block(id as BlockId);
+            let label = item.name(registry);
+            entries.push(ExplorerEntry {
+                label,
+                category: ExplorerCategory::Blocks,
+                item,
+            });
+        }
     }
 
     // Materials.

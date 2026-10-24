@@ -217,7 +217,11 @@ fn block_by_name(key: &str) -> Option<BlockId> {
         "furnace_lit" | "lit_furnace" => Some(block::FURNACE_LIT),
         "piston" => Some(block::PISTON),
         "sticky_piston" | "stickypiston" => Some(block::STICKY_PISTON),
-        _ => None,
+        // Building variants: `spruce_stairs`, `sandstone_slab`, `dark_oak_door`,
+        // `granite_wall`, … for every wood and stone (the table in
+        // `building_variants`). The short `slab`/`stairs`/`door`/`trapdoor`/
+        // `wall` aliases above stay the stone / oak / cobblestone originals.
+        _ => crate::building_variants::id_by_name(key),
     }
 }
 
