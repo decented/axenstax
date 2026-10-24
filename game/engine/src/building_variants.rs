@@ -307,9 +307,14 @@ pub fn min_tier(id: BlockId) -> Option<ToolMaterial> {
     info(id).and_then(|(m, _)| m.min_tier)
 }
 
-/// Can fire consume it? Wood variants burn, like their planks.
+/// Can fire consume it? Wood slabs, stairs and fence gates burn, like their
+/// planks. Doors and trapdoors do not (Minecraft Java): a door is two blocks,
+/// and fire burning one half would leave the other half orphaned. They still
+/// burn as fuel (`fuel_ticks`).
 pub fn flammable(id: BlockId) -> bool {
-    info(id).is_some_and(|(m, _)| m.family == Family::Wood)
+    info(id).is_some_and(|(m, shape)| {
+        m.family == Family::Wood && !matches!(shape, VShape::Door | VShape::Trapdoor)
+    })
 }
 
 /// Burn time as furnace/campfire fuel, in 20-TPS ticks. A slab is half a
@@ -376,5 +381,19 @@ mod tests {
         for (i, s) in block::ALL_WOOD_SPECIES.iter().enumerate() {
             assert_eq!(MATERIALS[i].base, block::planks_block_for(*s));
         }
+    }
+
+    #[test]
+    fn doors_and_trapdoors_do_not_burn_but_other_wood_does_and_all_wood_fuels() {
+        for (id, m, shape) in all() {
+            let wood = m.family == Family::Wood;
+            let burns = !matches!(shape, VShape::Door | VShape::Trapdoor) && wood;
+            assert_eq!(flammable(id), burns, "{} {:?} flammable", m.key, shape);
+            assert_eq!(fuel_ticks(id).is_some(), wood, "{} {:?} fuel", m.key, shape);
+        }
+        // The original oak ids follow the same rule.
+        assert!(!flammable(block::OAK_DOOR) && !flammable(block::OAK_TRAPDOOR));
+        assert!(flammable(block::OAK_FENCE_GATE));
+        assert_eq!(fuel_ticks(block::OAK_DOOR), Some(12 * 20));
     }
 }

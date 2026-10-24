@@ -460,4 +460,37 @@ mod tests {
         assert_eq!(w.get_block(16, 10, 1), block::FIRE, "evicted fire is frozen, not burnt out");
         assert_eq!(fs.active(), 0, "evicted fire cell dropped from the sim");
     }
+
+    #[test]
+    fn fire_next_to_a_door_never_removes_a_door_half() {
+        // A door is two stacked blocks of one id. Fire burning one half would
+        // orphan the other, so no wooden door or trapdoor is flammable.
+        let doors: Vec<_> = crate::building_variants::all()
+            .into_iter()
+            .filter(|(_, _, s)| {
+                matches!(
+                    s,
+                    crate::building_variants::VShape::Door
+                        | crate::building_variants::VShape::Trapdoor
+                )
+            })
+            .map(|(id, _, _)| id)
+            .collect();
+        assert!(doors.len() >= 14, "every wood's door and trapdoor");
+        for door in doors {
+            let mut w = World::new();
+            stone_pad(&mut w);
+            w.set_block(1, 10, 0, door);
+            w.set_block(1, 11, 0, door);
+            let mut fs = FireSystem::new();
+            assert!(fs.ignite(&mut w, 0, 10, 0, 0), "light the air cell beside the door");
+            assert!(fs.ignite(&mut w, 0, 11, 0, 0));
+            assert!(!fs.ignite(&mut w, 1, 10, 0, 0), "can't set the door itself alight");
+            for t in 1..5 * (FIRE_EVENT_INTERVAL + 10) {
+                fs.tick(&mut w, t, false, true);
+            }
+            assert_eq!(w.get_block(1, 10, 0), door, "lower half survives");
+            assert_eq!(w.get_block(1, 11, 0), door, "upper half survives");
+        }
+    }
 }

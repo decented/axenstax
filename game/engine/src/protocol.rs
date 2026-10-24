@@ -2808,7 +2808,13 @@ pub struct ServerAnnouncePacket {
 ///   `axenstax/…`, Fray's hello and LAN beacon) instead of plain QUIC on
 ///   7700/7705. Game packets and the join challenge are unchanged; the join
 ///   origin is Fray's TLS exporter under `EXPORTER-axenstax-join-v1`.
-pub const PROTOCOL_VERSION: u32 = 93;
+/// - v94 (building variants): new block ids 320..=372 (wood and stone
+///   slabs, stairs, doors, trapdoors, fence gates and walls). No packet shape
+///   changed. A client without them would render the ids as AIR (the registry
+///   fallback), drawing voids and predicting walks through the shapes, and its
+///   inventory window would drop the items, so bumping forces clean rejection
+///   of stale clients.
+pub const PROTOCOL_VERSION: u32 = 94;
 
 /// The `protocol_version` of a JoinRequest payload that doesn't decode as this
 /// build's `JoinRequestPacket` (an older or newer client's shape). It is the
@@ -2992,8 +2998,9 @@ mod tests {
     #[test]
     fn protocol_version_bumped() {
         // D2c-2 — v91, source-backed entity packs after handover's v90.
-        // v92 — D2c-3 quest foundation; v93 — "Host Game" and its joins on Fray.
-        assert_eq!(super::PROTOCOL_VERSION, 93);
+        // v92 — D2c-3 quest foundation; v93 — "Host Game" and its joins on Fray;
+        // v94 — building variants, block ids 320..=372.
+        assert_eq!(super::PROTOCOL_VERSION, 94);
     }
 
     #[test]
@@ -3749,7 +3756,8 @@ mod tests {
         //   mode/namespace/life.
         // v92 (D2c-3 foundation): QuestResult (76), QuestView (77).
         // v93 (Fray): "Host Game" and its joins on Fray's transport.
-        assert_eq!(PROTOCOL_VERSION, 93);
+        // v94 (building variants): new block ids 320..=372, no packet change.
+        assert_eq!(PROTOCOL_VERSION, 94);
     }
 
     fn sample_accept() -> JoinAcceptPacket {

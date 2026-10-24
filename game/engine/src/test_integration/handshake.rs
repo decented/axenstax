@@ -259,7 +259,8 @@ fn protocol_version_is_the_pinned_value() {
     // v92 (D2c-3 foundation): `QuestResult` (76), `QuestView` (77); every
     //   join gets a mandatory initial Sync1 before its Personal2 fence.
     // v93 (Fray): "Host Game" and its joins on Fray's transport.
-    assert_eq!(protocol::PROTOCOL_VERSION, 93);
+    // v94 (building variants): new block ids 320..=372, no packet change.
+    assert_eq!(protocol::PROTOCOL_VERSION, 94);
 }
 
 #[test]

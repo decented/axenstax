@@ -104,7 +104,8 @@ fn every_variant_drops_itself_to_the_right_tool() {
         assert_eq!((drop.item.clone(), drop.count), (Item::Block(id), 1), "{} {shape:?}", m.key);
         match m.family {
             Family::Wood => {
-                assert!(block::flammable(id));
+                // Doors and trapdoors never burn (fire would orphan a door half).
+                assert_eq!(block::flammable(id), !matches!(shape, VShape::Door | VShape::Trapdoor));
                 assert_eq!(crate::crafting::best_tool_for(id), Some(ToolType::Axe));
                 assert!(crate::crafting::can_harvest(id, None), "a wooden door drops for a fist");
             }
@@ -250,12 +251,13 @@ fn every_variant_has_a_give_alias_and_a_creative_entry_beside_its_sibling() {
 }
 
 #[test]
-fn only_wood_burns_and_fuels() {
+fn only_wood_fuels_and_doors_and_trapdoors_do_not_burn() {
     for (id, m, shape) in bv::all() {
         let fuel = crate::campfire::fuel_value(None, Some(id));
         match m.family {
             Family::Wood => {
-                assert!(block::flammable(id), "{} {shape:?} burns", m.key);
+                let burns = !matches!(shape, VShape::Door | VShape::Trapdoor);
+                assert_eq!(block::flammable(id), burns, "{} {shape:?} burns", m.key);
                 assert_eq!(fuel, Some(if shape == VShape::Slab { 120 } else { 240 }));
             }
             Family::Stone => {
