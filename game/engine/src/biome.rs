@@ -114,17 +114,21 @@ pub enum Generator {
     V2,
     /// "Dramatic terrain" (docs/foundations/2026-10-23-terrain-overhaul.md,
     /// `crate::worldgen_v3`): continents, deep oceans, rivers, mountains to
-    /// ~200 with cliffs and overhangs, y 0..=255. Its caves are still v2's
-    /// (`is_cave`, BRIDGE for lane T2b) and its trees, vegetation and
-    /// structures run v2's decoration (BRIDGE for lane T3).
+    /// ~200 with cliffs and overhangs, y 0..=255. **Frozen as shipped
+    /// (2026-10-24, revision 1):** its caves are v2's (`is_cave_v2`) and its
+    /// trees, vegetation and structures v2's decoration, permanently. The dry
+    /// v3 caves and the v3 trees and spawn land as a new generator, not as a
+    /// change here, so worlds created with v3 never get seams. Spec 02 §5.2.
     V3,
 }
 
 /// Output revision of the **v3** generator, folded into its protocol
 /// fingerprint ([`crate::world::worldgen_fingerprint_for`]).
 ///
-/// **Bump this whenever v3 output changes** (the bridge-to-real swap, then any
-/// later tweak to its terrain, caves, ore, trees or structures). A peer whose
+/// v3 is **frozen** at revision 1 (it shipped 2026-10-24): its output must not
+/// change, so a later terrain change is a new generator, not a bump here.
+/// The revision stays in the fingerprint so a pre-release build with
+/// different v3 output (revision 0) is still told apart. A peer whose
 /// v3 revision differs then reads as a fingerprint mismatch and is pushed real
 /// chunks instead of being trusted to regenerate seam-free terrain. v2 has its
 /// own counter (`world::WORLDGEN_VERSION`); this never touches it. Spec 02 §5.2.
@@ -527,8 +531,8 @@ impl BiomeGenerator {
     pub fn is_cave(&self, x: i32, y: i32, z: i32) -> bool {
         match self.generator {
             Generator::V2 => self.is_cave_v2(x, y, z),
-            // BRIDGE: v3 caves — replace when lane T2b lands the dry v3 caves
-            // (§7); until then a v3 world carves v2's flooded noise caves.
+            // v3 is frozen with v2's flooded noise caves; the dry caves of
+            // design §7 belong to the next generator.
             Generator::V3 => self.is_cave_v2(x, y, z),
         }
     }

@@ -1,6 +1,9 @@
 # Terrain overhaul — generator v3 ("dramatic terrain")
 
-Status: DESIGN, building 2026-10-23 on branch `overnight/terrain`. Owner ask (2026-10-23): terrain should feel
+Status: §1–§6 and §8 SHIPPED as generator v3 (2026-10-24), **frozen** with v2's caves and decoration
+(Spec 02 §5.2, §5.3.8). §7 (dry caves) and §9–§10 (trees, structures, spawn) are NOT built and will land as
+the next generator (v4), never as a change to v3. A partial §7 attempt is on branch `overnight/terrain-caves`
+(WIP, untested; it edits v3 in place and must be re-targeted at v4). Owner ask (2026-10-23): terrain should feel
 closer to modern Minecraft — cliffs, mountains, savannas, deep oceans, rivers, caves; "at the moment AxeNStax
 just seems to be a lot of trees".
 

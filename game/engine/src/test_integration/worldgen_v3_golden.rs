@@ -7,8 +7,8 @@
 //! normal-terrain patch at the origin plus a mountain patch (peaks above y
 //! 150, so the 3D overhangs and the tall sections are covered).
 //!
-//! NOTE for lane T2b (v3 caves) and T3 (trees, structures): your lanes change
-//! v3 output, so re-pin `V3_GOLDEN` (and bump `V3_GOLDEN_REVISION`).
+//! v3 is FROZEN (shipped 2026-10-24): this golden must never be re-pinned.
+//! A terrain change is a new generator with its own golden.
 
 use crate::biome::{BiomeGenerator, Generator};
 use crate::chunk::CHUNK_SIZE;

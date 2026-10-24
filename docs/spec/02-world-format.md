@@ -934,13 +934,14 @@ saves.
 (v2: `WORLDGEN_VERSION` = 2) with the bundled-plans hash, so **v2's wire value is exactly the
 pre-v94 value** (pinned by `v3_fingerprint_hashes_its_revision_and_v2_is_unchanged`) and v3's
 differs (a v2 and a v3 world never agree by accident). **v3 carries its own output revision,
-`biome::V3_REVISION` (currently 1, matching the v3 golden's `V3_GOLDEN_REVISION` by test): bump both whenever v3 output changes** — the bridge-to-real swap
-in lane T2 is the first bump, then every later change to its terrain, caves, ore, trees or
-structures. It is hashed in as `(V3_REVISION << 8) | 3` (`world::v3_output_version`; unchanged value
+`biome::V3_REVISION` = 1, matching the v3 golden's `V3_GOLDEN_REVISION` by test. **v3 is frozen as
+shipped (2026-10-24)**: like v2, its output never changes again, because worlds created with it would
+otherwise get seams where newly generated chunks meet old ones. Any later terrain change (the dry caves
+of the design's §7, the v3 trees and spawn of §9–§10) is a NEW generator with its own selector value and
+golden, not a revision bump. Revision 0 (pre-release builds whose v3 was the v2 bridge) stays told apart. It is hashed in as `(V3_REVISION << 8) | 3` (`world::v3_output_version`; unchanged value
 at revision 0), so a build with different v3 output reads as a fingerprint mismatch and its joiner
 is pushed real chunks instead of being trusted to regenerate seam-free terrain. v2 keeps its own
-counter, `WORLDGEN_VERSION`, and its golden. `NEW_WORLD_GENERATOR` is 3 while v3 is still the v2
-bridge; terrain T1 must not reach `main` or a release before T2 lands the real v3.
+counter, `WORLDGEN_VERSION`, and its golden. `NEW_WORLD_GENERATOR` is 3.
 `worldgen_fingerprint()` is v2's. Protocol v94 (Spec 04): `JoinAccept` carries `generator` and the
 host's fingerprint *for that generator*; `JoinRequest.worldgen_version` stays the joiner's v2
 fingerprint (it announces before it knows the world) and `generator_fingerprints` lists its
@@ -1308,9 +1309,10 @@ p90 36; slope ≥ 6 on 1.78 % of land; mountains 6.5 % of land; of land excludin
 19.5, Forest 15.9, Savanna 12.3, Desert 10.3, Taiga 10.4, SnowyTundra 7.0, BirchForest 6.6,
 Jungle 6.8, River 6.1, Beach 5.1 %. A fast sparse version of these bounds runs in `check.sh`.
 
-**Bridges.** Caves: v2's flooded noise caves (`BiomeGenerator::is_cave`, lane T2b replaces with
-§7 of the design). Decoration (trees, vegetation, villages, hideouts, ravines, mineshafts): v2's
-passes, with trees and vegetation on `surface_y` (lane T3). `max_generated_height` is 255 (terrain
+**Frozen with v2's caves and decoration.** Caves: v2's flooded noise caves
+(`BiomeGenerator::is_cave`). Decoration (trees, vegetation, villages, hideouts, ravines,
+mineshafts): v2's passes, with trees and vegetation on `surface_y`. These are permanent for v3; the
+design's dry caves (§7) and v3 trees/spawn (§9–§10) belong to the next generator. `max_generated_height` is 255 (terrain
 stops at 240; the rest is room for trees on peaks).
 
 **Lighting above the old roof.** `lighting::initial_sky_light_for_column` also seeds sky light

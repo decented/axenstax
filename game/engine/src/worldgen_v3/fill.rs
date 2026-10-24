@@ -22,9 +22,9 @@ fn fluid(y: i32) -> BlockId {
 /// A solid cell `depth` (capped at [`MAX_DEPTH`]) solid cells below its local
 /// surface.
 fn solid_block(bg: &BiomeGenerator, col: &Column, x: i32, y: i32, z: i32, depth: i32) -> BlockId {
-    // BRIDGE: v3 caves — lane T2b replaces this with the dry cheese/spaghetti
-    // caves of §7. Until then a v3 world carves v2's flooded noise caves
-    // (`BiomeGenerator::is_cave`, y 2..=54), with v2's lava/water fill.
+    // v3 is frozen with v2's flooded noise caves (`BiomeGenerator::is_cave`,
+    // y 2..=54) and v2's lava/water fill; design §7's dry caves belong to the
+    // next generator.
     if y > 1 && y < col.top - 1 && bg.is_cave(x, y, z) {
         return if y <= LAVA_CAVE_LEVEL {
             block::LAVA

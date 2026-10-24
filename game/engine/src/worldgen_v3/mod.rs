@@ -11,10 +11,10 @@
 //! `min`/`max` and comparisons; column-clipped and order-independent; the
 //! thread-local memos are lookup-only.
 //!
-//! Lane status: shape, surface and labels are v3 (lane T2a). Caves still run
-//! v2's flooded noise caves (`fill::solid_block`, BRIDGE for lane T2b); trees,
-//! vegetation and structures run v2's decoration (`World::generate_column`,
-//! BRIDGE for lane T3).
+//! Frozen as shipped (2026-10-24, `biome::V3_REVISION` 1): shape, surface and
+//! labels are v3's own; caves are v2's flooded noise caves (`fill::solid_block`)
+//! and trees, vegetation and structures v2's decoration (`World::generate_column`).
+//! Do not change v3 output: the dry caves and v3 trees go in the next generator.
 
 pub mod climate;
 pub mod density;

@@ -2681,10 +2681,10 @@ impl World {
             }
             crate::biome::Generator::V3 => {
                 self.fill_column_v3(cx, cz, biome_gen);
-                // BRIDGE: v3 decoration — replace when lane T3 lands the v3
-                // trees, vegetation, villages and spawn (§9, §10). Until then
-                // a v3 world decorates with v2's passes (trees root on the
-                // real surface, `BiomeGenerator::surface_y`).
+                // v3 is frozen with v2's decoration passes (trees root on the
+                // real surface, `BiomeGenerator::surface_y`); the v3 trees,
+                // villages and spawn of design §9–§10 belong to the next
+                // generator. `decorate_column_v2` is therefore frozen twice.
                 self.decorate_column_v2(cx, cz, biome_gen);
             }
         }
