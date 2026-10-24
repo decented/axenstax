@@ -5954,6 +5954,7 @@ impl super::GameState {
                 intent.break_block = false;
                 intent.place_block = false;
                 intent.drop_item = false;
+                intent.pick_block = false;
                 // Gamepad X is the crafting UI's "split stack" button — without
                 // this it would also cycle the camera behind the panel.
                 intent.camera_cycle = false;
@@ -10784,6 +10785,7 @@ impl super::GameState {
                 intent.break_block = false;
                 intent.place_block = false;
                 intent.drop_item = false;
+                intent.pick_block = false;
                 intent.toggle_inventory = false;
                 intent.toggle_explorer = false;
                 intent.toggle_debug = false;
@@ -10800,6 +10802,7 @@ impl super::GameState {
                 intent.break_block = false;
                 intent.place_block = false;
                 intent.drop_item = false;
+                intent.pick_block = false;
                 intent.toggle_inventory = false;
                 intent.toggle_explorer = false;
             }
@@ -10810,6 +10813,7 @@ impl super::GameState {
             if self.scenario.as_ref().is_some_and(|s| s.shows_blocking_end_card()) {
                 intent.break_block = false;
                 intent.place_block = false;
+                intent.pick_block = false;
             }
 
             // Skip input for dead players (death screen is drawn in HUD section)
@@ -11416,8 +11420,22 @@ impl super::GameState {
                 intent.place_block = false;
                 intent.drop_item = false;
                 intent.toggle_inventory = false;
+                intent.pick_block = false;
             }
             // ── end Phase 8 ghost handler ──────────────────────────────────
+
+            // Pick block (Spec 05 §8.2) — middle-click puts the aimed block's
+            // item in hand. Uses `target_block`, the ray break and place use.
+            // The cursor must be captured and no chat, inventory, crafting
+            // screen or other panel may be up (the swap borrows the crafting
+            // window's cursor item).
+            if intent.pick_block
+                && intent.cursor_captured
+                && !self.players[pidx].crafting_ui.open
+                && !(pidx == 0 && self.p0_ui_modal_open())
+            {
+                self.pick_block_at_target(pidx);
+            }
 
             // Block breaking / entity attack
             // Spec 40 blow-up Phase 3 — a left-click on a locked Workshop balloon
@@ -22961,7 +22979,7 @@ impl super::GameState {
     }
 
     /// Ask the authority to add an Explorer item to this window.
-    fn request_creative_give(&mut self, pidx: usize, stack: &crate::item::ItemStack) {
+    pub(crate) fn request_creative_give(&mut self, pidx: usize, stack: &crate::item::ItemStack) {
         if self.pack_window_frozen(pidx) { return; }
         crate::plan_store::remember_item(&stack.item);
         let action = crate::protocol::ItemAction::CreativeGive { item: crate::inventory::stack_to_wire(stack) };

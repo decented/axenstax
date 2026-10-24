@@ -111,6 +111,9 @@ pub struct InputState {
     pub workshop_grid: bool,
     /// Third-person camera (Phase 1): F5 press → cycle perspective. Edge-triggered.
     pub camera_cycle: bool,
+    /// Pick block: middle-click → put the aimed block's item in hand.
+    /// Edge-triggered (once/press); client-local, never over the wire.
+    pub pick_block: bool,
     /// #6: M press → toggle the full-screen map. Edge-triggered. Overloads the
     /// Workshop "cycle symmetry" M (mutually-exclusive contexts — game_loop only
     /// acts on this outside the Workshop).
@@ -183,6 +186,7 @@ impl InputState {
             workshop_fill: false,
             workshop_grid: false,
             camera_cycle: false,
+            pick_block: false,
             map_toggle: false,
             challenge_board_toggle: false,
             rig_studio_toggle: false,
@@ -393,6 +397,7 @@ impl InputState {
         match button {
             MouseButton::Left => { self.left_click = true; self.left_held = true; }
             MouseButton::Right => { self.right_click = true; self.right_held = true; }
+            MouseButton::Middle => self.pick_block = true,
             _ => {}
         }
     }
@@ -447,6 +452,7 @@ impl InputState {
         self.satoshi_summon = false;
         self.help_panel = false;
         self.camera_cycle = false;
+        self.pick_block = false;
         self.director_toggle = false;
         self.director_mode_next = false;
         self.director_hud_toggle = false;
@@ -557,6 +563,7 @@ impl InputState {
             workshop_grid: self.workshop_grid,
             shift_down: self.shift_held(),
             camera_cycle: self.camera_cycle,
+            pick_block: self.pick_block,
         }
     }
 }
@@ -573,6 +580,21 @@ mod tests {
         assert!(input.to_intent().camera_cycle, "F5 cycles the camera perspective");
         input.end_frame();
         assert!(!input.to_intent().camera_cycle, "edge cleared at end of frame");
+    }
+
+    #[test]
+    fn middle_click_sets_the_pick_block_edge_and_clears_each_frame() {
+        let mut input = InputState::new();
+        assert!(!input.to_intent().pick_block, "idle → no pick");
+        input.mouse_button_pressed(MouseButton::Middle);
+        let i = input.to_intent();
+        assert!(i.pick_block, "middle click picks the aimed block");
+        assert!(!i.break_block && !i.place_block, "and neither breaks nor places");
+        assert!(!input.left_click && !input.right_click);
+        input.mouse_button_released(MouseButton::Middle);
+        assert!(input.to_intent().pick_block, "release does not clear the edge");
+        input.end_frame();
+        assert!(!input.to_intent().pick_block, "edge-triggered, one frame only");
     }
 
     #[test]

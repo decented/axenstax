@@ -111,6 +111,9 @@ mod tests {
     mod quest_day_authority;
     #[path = "quest_carry.rs"]
     mod quest_carry;
+    #[cfg(not(target_arch = "wasm32"))]
+    #[path = "pick_block.rs"]
+    mod pick_block;
     use super::*;
 
     /// Point `AXENSTAX_WORLDS_DIR` at one pid-scoped temp dir shared by every
