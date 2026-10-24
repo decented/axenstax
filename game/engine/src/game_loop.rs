@@ -17114,12 +17114,13 @@ impl super::GameState {
             // Perf B2 — mobs beyond the draw range or outside this viewport's
             // frustum are not baked (the ridden mount and anything within a few
             // blocks of the eye never are culled).
-            let entity_cull = crate::entity_model::EntityCull::new(
-                self.players[pidx].player.eye_pos(),
+            // Centred on the RENDER camera (the point the chunks are drawn
+            // from), not the player's head: with the Director flown away from
+            // the body the two differ by hundreds of blocks.
+            let entity_cull = crate::entity_model::EntityCull::for_camera(
+                camera_uniform.camera_pos,
+                camera_uniform.view_proj,
                 self.effective_render_distance(),
-                crate::camera::Frustum::from_view_proj(glam::Mat4::from_cols_array_2d(
-                    &camera_uniform.view_proj,
-                )),
             );
             let mut entity_verts = crate::entity_model::build_entity_model_vertices_culled(
                 &self.ecs,
