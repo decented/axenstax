@@ -3734,7 +3734,19 @@ fn read_world_meta(folder_name: &str) -> Result<(WorldMeta, Option<MetaDamage>),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             if !has_quarantined_sibling(&dir, "world_meta.json") {
                 // Legacy world with no meta file at all. Don't write to disk yet.
-                return Ok((WorldMeta::from_folder(folder_name, &dat_path), None));
+                // Its generator is the one world.dat recorded, when it did (a v3
+                // world that lost its meta must not open as v2 and seam), else v2;
+                // an unknown one refuses the world.
+                let mut meta = WorldMeta::from_folder(folder_name, &dat_path);
+                let recorded = fs::read(&dat_path)
+                    .ok()
+                    .and_then(|data| read_world_save(&data).ok())
+                    .and_then(|save| save.worldgen_version);
+                if let Some(version) = recorded {
+                    meta.worldgen_version = version;
+                }
+                meta.generator()?;
+                return Ok((meta, None));
             }
             if let Some(newer) = save_refusal_in(&dir) {
                 return Err(newer.to_string());
