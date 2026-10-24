@@ -15,7 +15,9 @@
 //!
 //! 1. render distance, 2 chunks per step, down to `RENDER_DISTANCE_MIN`;
 //! 2. render scale, ×0.8 / ×0.64 / ×0.5 of the player's scale, never below
-//!    `min(scale, 0.5)`;
+//!    `min(scale, 0.5)`, skipping any step the pixel budget would swallow (when
+//!    the budget already holds the scale below the step, the step changes
+//!    nothing on screen);
 //! 3. particles, `Full → Reduced → Off`.
 //!
 //! A step that would change nothing (already at the floor) is not in the plan.
@@ -39,6 +41,14 @@
 //!   up doubles the hold needed for the next step up (capped at [`UP_HOLD_MAX`]),
 //!   so a machine that can run level N-1 but not level N settles instead of
 //!   bouncing every few seconds.
+//! * Ineffective-step rule: a step down must improve the p90 by at least
+//!   [`INEFFECTIVE_GAIN`] (10%) once the window has refilled. If it does not,
+//!   the machine is not limited by what the step lowers (a 30 or 40 Hz
+//!   display, a throttled browser, a CPU-bound frame), so the step is reverted
+//!   ([`Change::Reverted`]) and further steps down are held off for the
+//!   anti-flap back-off period ([`BACKOFF_WINDOW`], doubling per revert up to
+//!   [`UP_HOLD_MAX`]). Where the display rate is known (native, from winit) the
+//!   target is also at least the display's period ([`target_frame_time_for`]).
 //! * The first [`WARMUP`] seconds after a reset are ignored (world load hitches).
 //!
 //! A frame-capped (vsync) machine cannot show frames faster than its refresh
@@ -61,6 +71,8 @@ pub const UP_HOLD: f32 = 10.0;
 pub const UP_HOLD_MAX: f32 = 160.0;
 /// A step down this soon after a step up counts as a bounce and doubles the hold.
 pub const BACKOFF_WINDOW: f32 = 30.0;
+/// A step down must lower the p90 by at least this fraction, or it is reverted.
+pub const INEFFECTIVE_GAIN: f32 = 0.10;
 /// Minimum seconds between any two steps.
 pub const MIN_STEP_INTERVAL: f32 = 1.0;
 /// Seconds of frames the percentile is taken over.
@@ -110,7 +122,11 @@ impl Effective {
     }
 }
 
-fn plan(user: &GraphicsSettings, shrink_distance: bool) -> ([Step; MAX_STEPS], usize) {
+/// `scale_cap` value for "the pixel budget holds the scale nowhere" (tests).
+#[cfg(test)]
+pub const NO_SCALE_CAP: f32 = f32::INFINITY;
+
+fn plan(user: &GraphicsSettings, shrink_distance: bool, scale_cap: f32) -> ([Step; MAX_STEPS], usize) {
     let mut steps = [Step::Distance(0); MAX_STEPS];
     let mut n = 0;
     let mut push = |s: Step, n: &mut usize| {
@@ -126,10 +142,16 @@ fn plan(user: &GraphicsSettings, shrink_distance: bool) -> ([Step; MAX_STEPS], u
     }
     let floor = user.render_scale.min(SCALE_FLOOR);
     let mut cur = user.render_scale;
+    // What the renderer actually draws at is min(step, cap): a step whose value
+    // is no lower than the cap, from a value already at or above it, changes
+    // nothing (it would only cost three seconds and mislabel the settings note).
+    let shown = |v: f32| v.min(scale_cap);
     for m in SCALE_STEPS {
         let next = (user.render_scale * m).max(floor);
         if next < cur - 1e-3 {
-            push(Step::Scale(next), &mut n);
+            if shown(next) < shown(cur) - 1e-3 {
+                push(Step::Scale(next), &mut n);
+            }
             cur = next;
         }
     }
@@ -157,18 +179,19 @@ pub fn may_shrink_distance(joined: bool) -> bool {
 }
 
 /// Pure: the deepest level the player's own values allow. `shrink_distance` is
-/// false where lowering the streamed distance would strand data (a joiner holds
-/// only what its server pushed, and never reloads a column it let go): the plan
-/// then starts at render scale.
-pub fn max_level(user: &GraphicsSettings, shrink_distance: bool) -> usize {
-    plan(user, shrink_distance).1
+/// false where lowering the streamed distance would strand data (a joined
+/// client: [`may_shrink_distance`]): the plan then starts at render scale.
+/// `scale_cap` is the largest scale the pixel budget allows on this surface
+/// (`f32::INFINITY` for none).
+pub fn max_level(user: &GraphicsSettings, shrink_distance: bool, scale_cap: f32) -> usize {
+    plan(user, shrink_distance, scale_cap).1
 }
 
 /// Pure: the dials at `level` (clamped to the plan), derived from the player's
 /// values. Level 0 is exactly the player's values, and no level ever exceeds
 /// them.
-pub fn effective(user: &GraphicsSettings, level: usize, shrink_distance: bool) -> Effective {
-    let (steps, n) = plan(user, shrink_distance);
+pub fn effective(user: &GraphicsSettings, level: usize, shrink_distance: bool, scale_cap: f32) -> Effective {
+    let (steps, n) = plan(user, shrink_distance, scale_cap);
     let mut e = Effective::of(user);
     for s in &steps[..level.min(n)] {
         match *s {
@@ -188,11 +211,30 @@ pub fn target_frame_time(limit: crate::graphics_settings::FrameLimit) -> f32 {
     }
 }
 
+/// Pure: [`target_frame_time`], raised to the display's own period where the
+/// platform reports the refresh rate (native: winit's `refresh_rate_millihertz`).
+/// A 30 or 40 Hz panel can never show frames faster than that, so judging it
+/// against 16.7 ms would send the governor to its floor for nothing. A
+/// missing or absurd rate (outside 20..1000 Hz) leaves the target alone.
+pub fn target_frame_time_for(
+    limit: crate::graphics_settings::FrameLimit,
+    display_millihertz: Option<u32>,
+) -> f32 {
+    let target = target_frame_time(limit);
+    match display_millihertz {
+        Some(mhz) if (20_000..=1_000_000).contains(&mhz) => target.max(1000.0 / mhz as f32),
+        _ => target,
+    }
+}
+
 /// A change the caller must apply.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Change {
     Down,
     Up,
+    /// A step down that did not help was undone (the level went back up by
+    /// one); further steps down are held off for a while.
+    Reverted,
 }
 
 /// The player's values the offset was built from. A change to any of them is
@@ -233,6 +275,13 @@ pub struct Governor {
     since_step: f32,
     since_up: f32,
     up_hold: f32,
+    /// The p90 the last step down was taken at, until the window after it has
+    /// refilled and the step has been judged.
+    probe: Option<f32>,
+    /// Seconds left before another step down is allowed (after a revert).
+    down_off: f32,
+    /// The next revert's hold-off length: [`BACKOFF_WINDOW`], doubling.
+    hold_off: f32,
     basis: Option<Basis>,
 }
 
@@ -255,6 +304,9 @@ impl Governor {
             since_step: f32::INFINITY,
             since_up: f32::INFINITY,
             up_hold: UP_HOLD,
+            probe: None,
+            down_off: 0.0,
+            hold_off: BACKOFF_WINDOW,
             basis: None,
         }
     }
@@ -324,6 +376,7 @@ impl Governor {
         self.age += dt;
         self.since_step += dt;
         self.since_up += dt;
+        self.down_off = (self.down_off - dt).max(0.0);
         if self.age < WARMUP {
             return None;
         }
@@ -343,6 +396,22 @@ impl Governor {
         self.since_eval = 0.0;
         let p90 = self.p90()?;
 
+        // Judge the last step down once its window has refilled: it must have
+        // bought a real gain, or it is undone and the machine left alone.
+        // (Not inside the minimum gap between steps: the one-step-per-second
+        // rule covers an undo as much as a step.)
+        if self.since_step >= MIN_STEP_INTERVAL
+            && let Some(before) = self.probe.take()
+            && p90 > before * (1.0 - INEFFECTIVE_GAIN)
+            && self.level > 0
+        {
+            self.level -= 1;
+            self.down_off = self.hold_off;
+            self.hold_off = (self.hold_off * 2.0).min(UP_HOLD_MAX);
+            self.after_step();
+            return Some(Change::Reverted);
+        }
+
         if p90 > DOWN_RATIO * target {
             self.slow_for += elapsed;
             self.fast_for = 0.0;
@@ -356,11 +425,12 @@ impl Governor {
         if self.since_step < MIN_STEP_INTERVAL {
             return None;
         }
-        if self.slow_for >= DOWN_HOLD && self.level < max_level {
+        if self.slow_for >= DOWN_HOLD && self.level < max_level && self.down_off <= 0.0 {
             if self.since_up < BACKOFF_WINDOW {
                 self.up_hold = (self.up_hold * 2.0).min(UP_HOLD_MAX);
             }
             self.level += 1;
+            self.probe = Some(p90);
             self.after_step();
             return Some(Change::Down);
         }
@@ -380,11 +450,11 @@ impl Governor {
 
     /// One line for the settings panel when the governor is holding below the
     /// player's values, else `None`.
-    pub fn note(&self, user: &GraphicsSettings, shrink_distance: bool) -> Option<String> {
+    pub fn note(&self, user: &GraphicsSettings, shrink_distance: bool, scale_cap: f32) -> Option<String> {
         if self.level == 0 {
             return None;
         }
-        let e = effective(user, self.level, shrink_distance);
+        let e = effective(user, self.level, shrink_distance, scale_cap);
         let mut parts = Vec::new();
         if e.render_distance != user.render_distance {
             parts.push(format!(
@@ -392,11 +462,11 @@ impl Governor {
                 e.render_distance, user.render_distance
             ));
         }
-        if (e.render_scale - user.render_scale).abs() > 1e-3 {
-            parts.push(format!(
-                "render scale {:.2} (set {:.2})",
-                e.render_scale, user.render_scale
-            ));
+        // The scale actually drawn: the pixel budget may already hold it lower
+        // than the step ("render scale 0.80 (set 1.00)" while it renders at 0.50).
+        let (shown, was) = (e.render_scale.min(scale_cap), user.render_scale.min(scale_cap));
+        if (shown - was).abs() > 1e-3 {
+            parts.push(format!("render scale {shown:.2} (was {was:.2})"));
         }
         if e.particles != user.particles {
             parts.push("fewer particles".to_string());
@@ -414,6 +484,13 @@ mod tests {
     use crate::graphics_settings::FrameLimit;
 
     const T60: f32 = 1.0 / 60.0;
+
+    /// A genuinely GPU-bound machine: 200 ms at the player's values, each step
+    /// down buys 20%, so every step clears the ineffective-step test. (A flat
+    /// "slow whatever the level" series is the NOT-GPU-bound case, below.)
+    fn gpu_bound(level: usize) -> f32 {
+        0.200 * 0.8f32.powi(level as i32)
+    }
 
     fn user() -> GraphicsSettings {
         GraphicsSettings::default() // rd 10, scale 1.0, particles Full
@@ -433,7 +510,7 @@ mod tests {
         while t < t0 + secs {
             let dt = frame(g.level(), t);
             t += dt;
-            if let Some(c) = g.update(dt, T60, max_level(u, true)) {
+            if let Some(c) = g.update(dt, T60, max_level(u, true, NO_SCALE_CAP)) {
                 out.push((t, c));
             }
         }
@@ -443,12 +520,12 @@ mod tests {
     #[test]
     fn plan_is_distance_then_scale_then_particles_and_never_raises() {
         let u = user();
-        assert_eq!(max_level(&u, true), 3 + 3 + 2);
-        let mut prev = effective(&u, 0, true);
+        assert_eq!(max_level(&u, true, NO_SCALE_CAP), 3 + 3 + 2);
+        let mut prev = effective(&u, 0, true, NO_SCALE_CAP);
         assert_eq!(prev, Effective::of(&u));
-        let kinds: Vec<_> = (1..=max_level(&u, true))
+        let kinds: Vec<_> = (1..=max_level(&u, true, NO_SCALE_CAP))
             .map(|l| {
-                let e = effective(&u, l, true);
+                let e = effective(&u, l, true, NO_SCALE_CAP);
                 assert!(e.render_distance <= prev.render_distance);
                 assert!(e.render_scale <= prev.render_scale);
                 assert!(e.render_distance <= u.render_distance);
@@ -466,7 +543,7 @@ mod tests {
             })
             .collect();
         assert!(kinds.windows(2).all(|w| w[0] <= w[1]), "{kinds:?}");
-        let last = effective(&u, 99, true);
+        let last = effective(&u, 99, true, NO_SCALE_CAP);
         assert_eq!(last.render_distance, RENDER_DISTANCE_MIN);
         assert_eq!(last.render_scale, 0.5);
         assert_eq!(last.particles, ParticleLevel::Off);
@@ -478,28 +555,28 @@ mod tests {
         u.render_distance = RENDER_DISTANCE_MIN;
         u.render_scale = 0.4;
         u.particles = ParticleLevel::Off;
-        assert_eq!(max_level(&u, true), 0);
-        assert_eq!(effective(&u, 5, true), Effective::of(&u));
+        assert_eq!(max_level(&u, true, NO_SCALE_CAP), 0);
+        assert_eq!(effective(&u, 5, true, NO_SCALE_CAP), Effective::of(&u));
         u.render_scale = 0.75;
         u.particles = ParticleLevel::Reduced;
         // 0.75: ×0.8 = 0.6, then the floor 0.5 → 2 steps; plus 1 particle step.
-        assert_eq!(max_level(&u, true), 3);
-        assert!((effective(&u, 1, true).render_scale - 0.6).abs() < 1e-6);
-        assert!((effective(&u, 2, true).render_scale - 0.5).abs() < 1e-6);
-        assert_eq!(effective(&u, 3, true).particles, ParticleLevel::Off);
+        assert_eq!(max_level(&u, true, NO_SCALE_CAP), 3);
+        assert!((effective(&u, 1, true, NO_SCALE_CAP).render_scale - 0.6).abs() < 1e-6);
+        assert!((effective(&u, 2, true, NO_SCALE_CAP).render_scale - 0.5).abs() < 1e-6);
+        assert_eq!(effective(&u, 3, true, NO_SCALE_CAP).particles, ParticleLevel::Off);
         // An odd distance steps by two and lands on the minimum.
         u.render_distance = 5;
-        assert_eq!(effective(&u, 1, true).render_distance, 4);
+        assert_eq!(effective(&u, 1, true, NO_SCALE_CAP).render_distance, 4);
     }
 
     #[test]
     fn a_joiner_plan_never_shrinks_the_streamed_distance() {
         let u = user();
-        assert_eq!(max_level(&u, false), 3 + 2);
-        for l in 0..=max_level(&u, false) {
-            assert_eq!(effective(&u, l, false).render_distance, u.render_distance);
+        assert_eq!(max_level(&u, false, NO_SCALE_CAP), 3 + 2);
+        for l in 0..=max_level(&u, false, NO_SCALE_CAP) {
+            assert_eq!(effective(&u, l, false, NO_SCALE_CAP).render_distance, u.render_distance);
         }
-        assert!(effective(&u, 1, false).render_scale < u.render_scale);
+        assert!(effective(&u, 1, false, NO_SCALE_CAP).render_scale < u.render_scale);
     }
 
     #[test]
@@ -512,8 +589,8 @@ mod tests {
             let mut u = user();
             u.render_distance = rd;
             let shrink = may_shrink_distance(true);
-            for l in 0..=max_level(&u, shrink) + 2 {
-                assert_eq!(effective(&u, l, shrink).render_distance, rd, "rd {rd} level {l}");
+            for l in 0..=max_level(&u, shrink, NO_SCALE_CAP) + 2 {
+                assert_eq!(effective(&u, l, shrink, NO_SCALE_CAP).render_distance, rd, "rd {rd} level {l}");
             }
         }
         // And driven by a machine too slow to ever recover, a joined client
@@ -523,12 +600,13 @@ mod tests {
         let mut g = Governor::new();
         let mut t = 0.0;
         while t < 120.0 {
-            g.update(0.050, T60, max_level(&u, shrink));
-            t += 0.050;
-            assert_eq!(effective(&u, g.level(), shrink).render_distance, u.render_distance);
+            let dt = gpu_bound(g.level());
+            g.update(dt, T60, max_level(&u, shrink, NO_SCALE_CAP));
+            t += dt;
+            assert_eq!(effective(&u, g.level(), shrink, NO_SCALE_CAP).render_distance, u.render_distance);
         }
-        assert_eq!(g.level(), max_level(&u, shrink));
-        assert!(effective(&u, g.level(), shrink).render_scale < u.render_scale);
+        assert_eq!(g.level(), max_level(&u, shrink, NO_SCALE_CAP));
+        assert!(effective(&u, g.level(), shrink, NO_SCALE_CAP).render_scale < u.render_scale);
     }
 
     #[test]
@@ -543,10 +621,10 @@ mod tests {
     fn steady_slow_steps_down_at_a_bounded_rate_then_holds() {
         let u = user();
         let mut g = Governor::new();
-        let (_, steps) = run(&mut g, &u, 0.0, 120.0, |_, _| 0.050); // 20 fps
+        let (_, steps) = run(&mut g, &u, 0.0, 120.0, |l, _| gpu_bound(l)); // 20 fps
         assert!(steps.iter().all(|(_, c)| *c == Change::Down));
-        assert_eq!(steps.len(), max_level(&u, true), "reaches the floor and stops");
-        assert_eq!(g.level(), max_level(&u, true));
+        assert_eq!(steps.len(), max_level(&u, true, NO_SCALE_CAP), "reaches the floor and stops");
+        assert_eq!(g.level(), max_level(&u, true, NO_SCALE_CAP));
         // Nothing before the warm-up, and never faster than the hold allows.
         assert!(steps[0].0 >= WARMUP + DOWN_HOLD - 0.3, "{:?}", steps[0]);
         for w in steps.windows(2) {
@@ -560,7 +638,7 @@ mod tests {
     fn steady_fast_recovers_to_zero_and_never_goes_below() {
         let u = user();
         let mut g = Governor::new();
-        let (t, down) = run(&mut g, &u, 0.0, 20.0, |_, _| 0.050);
+        let (t, down) = run(&mut g, &u, 0.0, 20.0, |l, _| gpu_bound(l));
         assert!(!down.is_empty());
         let start = g.level();
         assert!(start >= 2);
@@ -587,7 +665,7 @@ mod tests {
         }
         // Inside the band after a drop: it holds, neither up nor down.
         let mut g = Governor::new();
-        let (t, _) = run(&mut g, &u, 0.0, 10.0, |_, _| 0.050);
+        let (t, _) = run(&mut g, &u, 0.0, 10.0, |l, _| gpu_bound(l));
         let held = g.level();
         let (_, steps) = run(&mut g, &u, t, 120.0, |_, _| T60 * 1.15);
         assert!(steps.is_empty());
@@ -653,13 +731,141 @@ mod tests {
         assert!(late <= 5, "{late} late steps");
     }
 
+    /// Frame times from the series, driven for `secs`; returns every change with
+    /// its time and the deepest level reached.
+    fn drive(secs: f32, u: &GraphicsSettings, target: f32, mut frame: impl FnMut(usize) -> f32) -> (Vec<(f32, Change)>, usize) {
+        let mut g = Governor::new();
+        let (mut t, mut deepest, mut out) = (0.0f32, 0usize, Vec::new());
+        while t < secs {
+            let dt = frame(g.level());
+            t += dt;
+            if let Some(c) = g.update(dt, target, max_level(u, true, NO_SCALE_CAP)) {
+                out.push((t, c));
+            }
+            deepest = deepest.max(g.level());
+        }
+        (out, deepest)
+    }
+
+    #[test]
+    fn a_display_pinned_series_never_walks_to_the_floor() {
+        // A 30 Hz and a 40 Hz panel (and a throttled 24 fps browser): the frame
+        // time is the display's whatever the quality, so a step down buys
+        // nothing. It is tried, undone, and not tried again for a while.
+        let u = user();
+        for hz in [30.0f32, 40.0, 24.0] {
+            let (changes, deepest) = drive(1200.0, &u, T60, |_| 1.0 / hz);
+            assert!(deepest <= 1, "{hz} Hz walked to level {deepest}");
+            let downs = changes.iter().filter(|(_, c)| *c == Change::Down).count();
+            let reverts = changes.iter().filter(|(_, c)| *c == Change::Reverted).count();
+            assert!(downs >= 1, "{hz} Hz: it should have tried a step");
+            assert_eq!(downs, reverts, "{hz} Hz: every step tried is undone");
+            // Back-off: the tries get further apart (30, 60, 120, then 160 s).
+            assert!(downs <= 12, "{hz} Hz: {downs} tries in 20 min");
+            let tries: Vec<f32> = changes.iter().filter(|(_, c)| *c == Change::Down).map(|(t, _)| *t).collect();
+            let gaps: Vec<f32> = tries.windows(2).map(|w| w[1] - w[0]).collect();
+            assert!(gaps.windows(2).all(|w| w[1] >= w[0] - 1.0), "{hz} Hz: {gaps:?}");
+            assert!(gaps.first().copied().unwrap_or(BACKOFF_WINDOW) >= BACKOFF_WINDOW - 0.5, "{hz} Hz: {gaps:?}");
+        }
+    }
+
+    #[test]
+    fn a_genuinely_gpu_bound_series_still_steps_down() {
+        let u = user();
+        // 200 ms at the player's values, 20% faster per step: every step counts.
+        let (changes, deepest) = drive(120.0, &u, T60, gpu_bound);
+        assert_eq!(deepest, max_level(&u, true, NO_SCALE_CAP), "reaches the floor");
+        assert!(changes.iter().all(|(_, c)| *c == Change::Down), "{changes:?}");
+        // A step that buys 11% is kept; one that buys 9% is not.
+        let (changes, deepest) = drive(120.0, &u, T60, |l| 0.200 * 0.89f32.powi(l as i32));
+        assert_eq!(deepest, max_level(&u, true, NO_SCALE_CAP));
+        assert!(changes.iter().all(|(_, c)| *c == Change::Down));
+        let (changes, deepest) = drive(120.0, &u, T60, |l| 0.200 * 0.91f32.powi(l as i32));
+        assert_eq!(deepest, 1, "9% is not enough");
+        assert!(changes.iter().any(|(_, c)| *c == Change::Reverted));
+    }
+
+    #[test]
+    fn a_reverted_step_holds_off_the_next_one() {
+        let u = user();
+        let (changes, _) = drive(400.0, &u, T60, |_| 1.0 / 30.0);
+        let mut last_revert = None;
+        for (t, c) in &changes {
+            match c {
+                Change::Reverted => last_revert = Some(*t),
+                Change::Down => {
+                    if let Some(r) = last_revert {
+                        assert!(*t - r >= BACKOFF_WINDOW - 0.5, "stepped down {}s after a revert", t - r);
+                    }
+                }
+                Change::Up => {}
+            }
+        }
+        assert!(last_revert.is_some());
+    }
+
+    #[test]
+    fn the_target_is_at_least_the_displays_period() {
+        use crate::graphics_settings::FrameLimit;
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-4;
+        // A 30 Hz and a 40 Hz panel raise a 60 fps target.
+        assert!(near(target_frame_time_for(FrameLimit::Cap(60), Some(30_000)), 1.0 / 30.0));
+        assert!(near(target_frame_time_for(FrameLimit::VSync, Some(40_000)), 1.0 / 40.0));
+        // A 60 or 144 Hz panel leaves it (a vsync 144 Hz machine is still judged at 60).
+        assert!(near(target_frame_time_for(FrameLimit::VSync, Some(59_940)), 1.0 / 59.94));
+        assert!(near(target_frame_time_for(FrameLimit::VSync, Some(144_000)), T60));
+        // A slower cap wins over a faster panel.
+        assert!(near(target_frame_time_for(FrameLimit::Cap(30), Some(144_000)), 1.0 / 30.0));
+        // Unknown or absurd rates change nothing.
+        for mhz in [None, Some(0), Some(1), Some(5_000_000)] {
+            assert!(near(target_frame_time_for(FrameLimit::VSync, mhz), T60), "{mhz:?}");
+        }
+        // And a governor given that target leaves a 30 Hz-pinned panel alone.
+        let u = user();
+        let target = target_frame_time_for(FrameLimit::VSync, Some(30_000));
+        let (changes, deepest) = drive(300.0, &u, target, |_| 1.0 / 30.0);
+        assert!(changes.is_empty() && deepest == 0, "{changes:?}");
+    }
+
+    #[test]
+    fn scale_steps_the_pixel_budget_would_swallow_are_skipped() {
+        let mut u = user();
+        u.particles = ParticleLevel::Off;
+        u.render_distance = RENDER_DISTANCE_MIN;
+        // Scale 1.0: steps 0.8, 0.64, 0.5. With nothing capping it: three.
+        assert_eq!(max_level(&u, true, NO_SCALE_CAP), 3);
+        // A budget holding the scale at 0.5 swallows all three.
+        assert_eq!(max_level(&u, true, 0.5), 0);
+        assert_eq!(effective(&u, 3, true, 0.5), Effective::of(&u));
+        // At 0.7: the 0.8 step changes nothing (still 0.7); 0.64 and 0.5 do.
+        assert_eq!(max_level(&u, true, 0.7), 2);
+        assert!((effective(&u, 1, true, 0.7).render_scale - 0.64).abs() < 1e-6);
+        assert!((effective(&u, 2, true, 0.7).render_scale - 0.5).abs() < 1e-6);
+        // The note shows what is drawn: 0.64 against 0.70, never "set 1.00".
+        let mut g = Governor::new();
+        run_capped(&mut g, &u, 0.7);
+        assert_eq!(g.level(), 2);
+        let n = g.note(&u, true, 0.7).expect("holding below");
+        assert!(n.contains("render scale 0.50 (was 0.70)"), "{n}");
+        assert!(!n.contains("1.00"), "{n}");
+    }
+
+    fn run_capped(g: &mut Governor, u: &GraphicsSettings, cap: f32) {
+        let mut t = 0.0;
+        while t < 60.0 {
+            let dt = gpu_bound(g.level());
+            t += dt;
+            g.update(dt, T60, max_level(u, true, cap));
+        }
+    }
+
     #[test]
     fn a_very_high_frame_rate_still_steps_up_after_a_step_down() {
         // 400 fps: 240 samples cover 0.6 s, under the 0.75 s the window used
         // to need, so the governor froze wherever it was.
         let u = user();
         let mut g = Governor::new();
-        let (t, down) = run(&mut g, &u, 0.0, 20.0, |_, _| 0.050);
+        let (t, down) = run(&mut g, &u, 0.0, 20.0, |l, _| gpu_bound(l));
         assert!(!down.is_empty());
         let start = g.level();
         assert!(start >= 2);
@@ -668,7 +874,7 @@ mod tests {
         assert_eq!(ups.len(), start, "steps all the way back up");
         assert_eq!(g.level(), 0);
         // And it can still step down at that rate: 400 fps is judged, not skipped.
-        let (_, down) = run(&mut g, &u, t, 60.0, |_, _| 0.050);
+        let (_, down) = run(&mut g, &u, t, 60.0, |l, _| gpu_bound(l));
         assert!(!down.is_empty());
         // A uniformly slow 1200 fps-class series (the cap fills in 0.2 s) judges too.
         let mut g = Governor::new();
@@ -682,7 +888,7 @@ mod tests {
         // offset must still come back down to 0, one notch per UP_HOLD.
         let u = user();
         let mut g = Governor::new();
-        let (t, down) = run(&mut g, &u, 0.0, 20.0, |_, _| 0.050);
+        let (t, down) = run(&mut g, &u, 0.0, 20.0, |l, _| gpu_bound(l));
         assert!(!down.is_empty());
         let start = g.level();
         assert!(start >= 2);
@@ -695,7 +901,7 @@ mod tests {
         }
         // 1.04x of the target still counts as fast; 1.10x is inside the band.
         let mut g = Governor::new();
-        let (t, _) = run(&mut g, &u, 0.0, 20.0, |_, _| 0.050);
+        let (t, _) = run(&mut g, &u, 0.0, 20.0, |l, _| gpu_bound(l));
         let held = g.level();
         let (_, ups) = run(&mut g, &u, t, 120.0, |_, _| T60 * 1.10);
         assert!(ups.is_empty());
@@ -746,15 +952,15 @@ mod tests {
     fn reset_returns_to_the_players_values() {
         let u = user();
         let mut g = Governor::new();
-        run(&mut g, &u, 0.0, 30.0, |_, _| 0.050);
+        run(&mut g, &u, 0.0, 30.0, |l, _| gpu_bound(l));
         assert!(g.level() > 0);
-        assert!(g.note(&u, true).is_some());
+        assert!(g.note(&u, true, NO_SCALE_CAP).is_some());
         g.reset();
         assert_eq!(g.level(), 0);
-        assert_eq!(effective(&u, g.level(), true), Effective::of(&u));
-        assert!(g.note(&u, true).is_none());
+        assert_eq!(effective(&u, g.level(), true, NO_SCALE_CAP), Effective::of(&u));
+        assert!(g.note(&u, true, NO_SCALE_CAP).is_none());
         // And it has to warm up again.
-        let (_, steps) = run(&mut g, &u, 0.0, WARMUP - 0.5, |_, _| 0.050);
+        let (_, steps) = run(&mut g, &u, 0.0, WARMUP - 0.5, |l, _| gpu_bound(l));
         assert!(steps.is_empty());
     }
 
@@ -763,7 +969,7 @@ mod tests {
         let mut u = user();
         let mut g = Governor::new();
         assert!(!g.rebase(&u), "first sight just records");
-        run(&mut g, &u, 0.0, 30.0, |_, _| 0.050);
+        run(&mut g, &u, 0.0, 30.0, |l, _| gpu_bound(l));
         let held = g.level();
         assert!(held > 0);
         // Volume, FOV, brightness: not quality dials.
@@ -776,7 +982,7 @@ mod tests {
         u.render_distance = 8;
         assert!(g.rebase(&u));
         assert_eq!(g.level(), 0);
-        run(&mut g, &u, 0.0, 30.0, |_, _| 0.050);
+        run(&mut g, &u, 0.0, 30.0, |l, _| gpu_bound(l));
         assert!(g.level() > 0);
         u.apply_preset(crate::graphics_settings::GraphicsPreset::Low);
         assert!(g.rebase(&u));
@@ -787,8 +993,8 @@ mod tests {
     fn note_names_what_it_is_holding() {
         let u = user();
         let mut g = Governor::new();
-        run(&mut g, &u, 0.0, 14.0, |_, _| 0.050);
-        let n = g.note(&u, true).expect("holding below");
+        run(&mut g, &u, 0.0, 14.0, |l, _| gpu_bound(l));
+        let n = g.note(&u, true, NO_SCALE_CAP).expect("holding below");
         assert!(n.contains("render distance"), "{n}");
         assert!(n.contains("(set 10)"), "{n}");
     }

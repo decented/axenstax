@@ -247,9 +247,10 @@ mod tests {
         assert!(!hg.state.joined_push_only, "a normal joiner, not a worldgen-mismatch one");
         assert!(!hg.state.governor_may_shrink_distance());
         let rd = hg.state.graphics.render_distance;
-        let max = crate::quality_governor::max_level(&hg.state.graphics, false);
+        let max = crate::quality_governor::max_level(&hg.state.graphics, false, crate::quality_governor::NO_SCALE_CAP);
         for _ in 0..4000 {
-            hg.state.governor.update(0.050, 1.0 / 60.0, max);
+            let dt = 0.200 * 0.8f32.powi(hg.state.governor.level() as i32);
+            hg.state.governor.update(dt, 1.0 / 60.0, max);
         }
         assert!(hg.state.governor.level() > 0, "the machine is slow: it stepped down");
         assert_eq!(hg.state.effective_render_distance(), rd, "but never the distance");

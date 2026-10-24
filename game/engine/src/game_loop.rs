@@ -1718,6 +1718,7 @@ impl super::GameState {
             &self.graphics,
             self.governor.level(),
             self.governor_may_shrink_distance(),
+            self.renderer.budget_scale_cap(),
         )
     }
 
@@ -1745,6 +1746,19 @@ impl super::GameState {
             .set_chunk_draw_columns(crate::camera::chunk_draw_columns(eff.render_distance));
     }
 
+    /// The display's refresh rate in millihertz, where the window reports it
+    /// (native), re-read every two seconds.
+    fn display_refresh_mhz(&mut self) -> Option<u32> {
+        let stale = self
+            .display_refresh
+            .1
+            .is_none_or(|at| at.elapsed() >= Duration::from_secs(2));
+        if stale {
+            self.display_refresh = (self.window.refresh_rate_millihertz(), Some(Instant::now()));
+        }
+        self.display_refresh.0
+    }
+
     /// Feed one in-world frame to the auto-quality governor and apply a step if
     /// it takes one. No-op while `auto_quality` is off.
     fn tick_quality_governor(&mut self, dt: f32) {
@@ -1752,10 +1766,14 @@ impl super::GameState {
             return;
         }
         let shrink = self.governor_may_shrink_distance();
+        let cap = self.renderer.budget_scale_cap();
+        // Judge frames against the display's own period where it is known: a
+        // 30 or 40 Hz panel can never beat it, whatever the quality.
+        let display = self.display_refresh_mhz();
         let change = self.governor.update(
             dt,
-            crate::quality_governor::target_frame_time(self.graphics.frame_limit),
-            crate::quality_governor::max_level(&self.graphics, shrink),
+            crate::quality_governor::target_frame_time_for(self.graphics.frame_limit, display),
+            crate::quality_governor::max_level(&self.graphics, shrink, cap),
         );
         if let Some(change) = change {
             let eff = self.effective_quality();
@@ -1778,8 +1796,11 @@ impl super::GameState {
         if !self.graphics.auto_quality {
             return None;
         }
-        self.governor
-            .note(&self.graphics, self.governor_may_shrink_distance())
+        self.governor.note(
+            &self.graphics,
+            self.governor_may_shrink_distance(),
+            self.renderer.budget_scale_cap(),
+        )
     }
 
     /// Push the current `graphics` settings into live engine state (Spec 39)
@@ -9134,7 +9155,9 @@ impl super::GameState {
                     let eff = crate::quality_governor::effective(
                         &self.graphics,
                         self.governor.level(),
-                        !self.joined_push_only,
+                        // (Field-wise, like the rebase above: `menu_state` borrows `self.mode`.)
+                        crate::quality_governor::may_shrink_distance(self.remote_client.is_some()),
+                        self.renderer.budget_scale_cap(),
                     );
                     Self::sync_display_settings(&mut self.renderer, &self.graphics, eff.render_scale);
                 }

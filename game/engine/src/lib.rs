@@ -1510,6 +1510,9 @@ pub(crate) struct GameState {
     /// Auto-quality governor (Spec 03 §10.3): the temporary offset below the
     /// player's graphics values. Never persisted; see `quality_governor`.
     pub(crate) governor: crate::quality_governor::Governor,
+    /// The display's refresh rate (millihertz) as last read from the window,
+    /// and when; re-read every couple of seconds (the window may move monitors).
+    pub(crate) display_refresh: (Option<u32>, Option<Instant>),
     /// Last observed frame start timestamp, used to compute the next frame
     /// delta. None on the first frame.
     pub(crate) last_frame_instant: Option<Instant>,
@@ -2016,6 +2019,7 @@ impl GameState {
             wind: crate::wind::WindSample::CALM,
             graphics,
             governor: crate::quality_governor::Governor::new(),
+            display_refresh: (None, None),
             play_mode: crate::play_mode::PlayMode::Survival,
             is_creative: false,
             is_commands_enabled: true,

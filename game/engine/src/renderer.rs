@@ -1777,6 +1777,18 @@ impl Renderer {
         self.apply_render_scale();
     }
 
+    /// The largest render scale the pixel budget allows on this surface (1.0
+    /// with no budget). The auto-quality governor skips scale steps this
+    /// already swallows and shows the scale actually drawn.
+    pub fn budget_scale_cap(&self) -> f32 {
+        crate::graphics_settings::budgeted_scale(
+            crate::graphics_settings::RENDER_SCALE_MAX,
+            self.pixel_budget,
+            self.width,
+            self.height,
+        )
+    }
+
     /// The scale actually in use for the surface size now: the requested scale
     /// held under the pixel budget.
     fn budgeted_render_scale(&self) -> f32 {
