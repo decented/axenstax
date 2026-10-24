@@ -160,8 +160,17 @@ pub fn shape_of(id: BlockId) -> BlockShape {
         block::PRESSURE_PLATE => BlockShape::PressurePlate,
         block::OAK_SIGN => BlockShape::Sign,
         block::ITEM_FRAME => BlockShape::ItemFrame,
-        _ => BlockShape::FullCube,
+        // Building variants (320..): one shape per (material, shape) pair, from
+        // the `building_variants` table. O(1); the six pre-table variants keep
+        // their arms above.
+        id => crate::building_variants::new_block_shape(id).unwrap_or(BlockShape::FullCube),
     }
+}
+
+/// True for any door block (every wood's door, both halves). Callers that used
+/// to compare against `OAK_DOOR` ask this instead.
+pub fn is_door(id: BlockId) -> bool {
+    shape_of(id) == BlockShape::Door
 }
 
 /// True for the signal-input shapes (button, lever, pressure plate). The power

@@ -1346,6 +1346,65 @@ fn push_gap_close_cards(out: &mut Vec<RecipeCard>) {
     }
 }
 
+/// Cards for the building variants (`building_variants` table): every wood's
+/// slab, stairs, door, trapdoor and fence gate, every stone's slab, stairs and
+/// wall. The six that predate the table have the authored cards above.
+fn push_building_variant_cards(out: &mut Vec<RecipeCard>) {
+    use crate::building_variants::{self as bv, VShape};
+    for (id, m, shape) in bv::all() {
+        if id < bv::FIRST_NEW_ID {
+            continue;
+        }
+        let b = CraftSlot::Block(m.base);
+        let key_words: Vec<String> = m
+            .key
+            .split('_')
+            .map(|w| {
+                let mut c = w.chars();
+                c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
+            })
+            .collect();
+        let shape_words = match shape {
+            VShape::Slab => "Slab",
+            VShape::Stairs => "Stairs",
+            VShape::Door => "Door",
+            VShape::Trapdoor => "Trapdoor",
+            VShape::FenceGate => "Fence Gate",
+            VShape::Wall => "Wall",
+        };
+        let name = format!("{} {}", key_words.join(" "), shape_words);
+        let (count, ingredients, g) = match shape {
+            VShape::Slab => (6, vec![blk(m.base, 3)], grid(&[(0, 0, b), (0, 1, b), (0, 2, b)])),
+            VShape::Stairs => (
+                4,
+                vec![blk(m.base, 6)],
+                grid(&[(0, 0, b), (1, 0, b), (1, 1, b), (2, 0, b), (2, 1, b), (2, 2, b)]),
+            ),
+            VShape::Door => (
+                3,
+                vec![blk(m.base, 6)],
+                grid(&[(0, 0, b), (0, 1, b), (1, 0, b), (1, 1, b), (2, 0, b), (2, 1, b)]),
+            ),
+            VShape::Trapdoor => (
+                2,
+                vec![blk(m.base, 6)],
+                grid(&[(0, 0, b), (0, 1, b), (0, 2, b), (1, 0, b), (1, 1, b), (1, 2, b)]),
+            ),
+            VShape::FenceGate => (
+                1,
+                vec![mat(MaterialId::Stick, 4), blk(m.base, 2)],
+                grid(&[(0, 0, STICK), (0, 1, b), (0, 2, STICK), (1, 0, STICK), (1, 1, b), (1, 2, STICK)]),
+            ),
+            VShape::Wall => (
+                6,
+                vec![blk(m.base, 6)],
+                grid(&[(0, 0, b), (0, 1, b), (0, 2, b), (1, 0, b), (1, 1, b), (1, 2, b)]),
+            ),
+        };
+        out.push(card(&name, ItemStack::new_block(id, count), ingredients, g, RecipeCategory::Building));
+    }
+}
+
 // ── Catalogue assembly + query API ──────────────────────────────────────────
 
 static CATALOGUE: LazyLock<Vec<RecipeCard>> = LazyLock::new(|| {
@@ -1357,6 +1416,7 @@ static CATALOGUE: LazyLock<Vec<RecipeCard>> = LazyLock::new(|| {
     push_generated_literals(&mut out);
     push_literal_cards(&mut out);
     push_gap_close_cards(&mut out);
+    push_building_variant_cards(&mut out);
     out
 });
 

@@ -183,7 +183,8 @@ pub fn fuel_value(material: Option<MaterialId>, block: Option<BlockId>) -> Optio
             // inventory (pre-Wave-29). New mines drop GreenLog material.
             // Both burn the same 60 s for old-save players.
             block::OAK_LOG => Some(60 * 20),      // 60 s — standard fuel
-            _ => None,
+            // Wooden slabs, stairs, doors, trapdoors and gates burn too.
+            b => crate::building_variants::fuel_ticks(b),
         };
     }
     if let Some(m) = material {
