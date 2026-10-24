@@ -88,6 +88,7 @@ mod texture_gen;
 mod texture_packs_web;
 mod texture_registry;
 mod world;
+mod worldgen_v3;
 mod campfire_ui;
 mod power_ui;
 mod leaf_decay;

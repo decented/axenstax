@@ -207,15 +207,19 @@ fn is_far_from_villages(seed: u32, biome_gen: &BiomeGenerator, x: i32, z: i32, c
 /// edge above the sea.
 fn is_beach(biome_gen: &BiomeGenerator, x: i32, z: i32) -> bool {
     let here = biome_gen.biome_at(x, z);
-    if !matches!(here, Biome::Plains | Biome::Desert) {
+    if !matches!(here, Biome::Plains | Biome::Desert | Biome::Beach) {
         return false;
     }
     let y = biome_gen.terrain_height(x, z);
     if (y - SEA_LEVEL).abs() > 4 {
         return false;
     }
+    // A v3 world labels its coastal sand itself (the v2 generator never does).
+    if here == Biome::Beach {
+        return true;
+    }
     for (dx, dz) in [(8, 0), (-8, 0), (0, 8), (0, -8)] {
-        if biome_gen.biome_at(x + dx, z + dz) == Biome::Ocean {
+        if matches!(biome_gen.biome_at(x + dx, z + dz), Biome::Ocean | Biome::DeepOcean) {
             return true;
         }
     }

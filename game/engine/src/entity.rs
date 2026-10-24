@@ -632,7 +632,7 @@ pub fn scatter_mobs_in_column(
     if weights.is_empty() {
         return;
     }
-    let is_aquatic_biome = matches!(biome, Biome::Ocean);
+    let is_aquatic_biome = matches!(biome, Biome::Ocean | Biome::DeepOcean | Biome::River);
 
     // #129 — pick the spawn surface. Land animals use the REAL column top
     // (`real_surface_y` scans down from the ceiling) so they stand on

@@ -66,6 +66,7 @@ pub mod block_machines; // T1-3 — dedicated server ticks the block machines.
 pub mod survival;
 // T2-9 — worldgen golden hash + determinism (WORLDGEN_VERSION).
 pub mod worldgen_golden;
+pub mod worldgen_v3_golden;
 // T2-9 — a joiner builds the host's world (seed + rules + spawn) from JoinAccept.
 pub mod join_world;
 // MP-A3 — server-side projectiles reach joiners; a dead joiner stays dead.

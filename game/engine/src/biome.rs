@@ -23,9 +23,25 @@ pub enum Biome {
     Jungle,
     Savanna,
     SnowyTundra,
+    // Terrain v3 (docs/foundations/2026-10-23-terrain-overhaul.md §8) —
+    // appended so every index-serialised biome keeps its value. The v2
+    // generator never produces these.
+    /// Ocean deeper than continentalness −0.5 (floors ~30–40).
+    DeepOcean,
+    /// A river channel (bed at y 57, water to sea level).
+    River,
+    /// The sandy coastal band between ocean and land.
+    Beach,
 }
 
 impl Biome {
+    /// Every biome, in declaration (index) order.
+    pub const ALL: [Biome; 13] = [
+        Biome::Plains, Biome::Forest, Biome::Desert, Biome::Mountains, Biome::Ocean,
+        Biome::BirchForest, Biome::Taiga, Biome::Jungle, Biome::Savanna, Biome::SnowyTundra,
+        Biome::DeepOcean, Biome::River, Biome::Beach,
+    ];
+
     /// Human-readable label for the HUD/debug overlay (#44). UK English;
     /// multi-word biomes are spaced (e.g. "Birch Forest", "Snowy Tundra").
     pub fn name(&self) -> &'static str {
@@ -40,6 +56,9 @@ impl Biome {
             Biome::Jungle => "Jungle",
             Biome::Savanna => "Savanna",
             Biome::SnowyTundra => "Snowy Tundra",
+            Biome::DeepOcean => "Deep Ocean",
+            Biome::River => "River",
+            Biome::Beach => "Beach",
         }
     }
 }
@@ -93,10 +112,11 @@ pub enum Generator {
     /// The as-built generator up to 2026-10-23 (`world::WORLDGEN_VERSION` 2):
     /// one 2D heightmap, y 0..=95. Pinned by the v2 golden.
     V2,
-    /// "Dramatic terrain" (docs/foundations/2026-10-23-terrain-overhaul.md).
-    // BRIDGE: v3 terrain — replace when lane T2 lands the v3 generator. Until
-    // then every v3 stage delegates to the v2 code, so a v3 world generates
-    // v2 terrain.
+    /// "Dramatic terrain" (docs/foundations/2026-10-23-terrain-overhaul.md,
+    /// `crate::worldgen_v3`): continents, deep oceans, rivers, mountains to
+    /// ~200 with cliffs and overhangs, y 0..=255. Its caves are still v2's
+    /// (`is_cave`, BRIDGE for lane T2b) and its trees, vegetation and
+    /// structures run v2's decoration (BRIDGE for lane T3).
     V3,
 }
 
@@ -149,6 +169,8 @@ pub struct BiomeGenerator {
     height_noise: OpenSimplex,
     detail_noise: OpenSimplex,
     cave_noise: OpenSimplex,
+    /// The v3 terrain; `Some` exactly when `generator` is `V3`.
+    v3: Option<Box<crate::worldgen_v3::Terrain>>,
 }
 
 impl BiomeGenerator {
@@ -163,6 +185,27 @@ impl BiomeGenerator {
             height_noise: OpenSimplex::new(seed.wrapping_add(2000)),
             detail_noise: OpenSimplex::new(seed.wrapping_add(3000)),
             cave_noise: OpenSimplex::new(seed.wrapping_add(4000)),
+            v3: (generator == Generator::V3).then(|| Box::new(crate::worldgen_v3::Terrain::new(seed))),
+        }
+    }
+
+    /// The v3 terrain of a v3 world (`None` for every other generator).
+    pub fn v3(&self) -> Option<&crate::worldgen_v3::Terrain> {
+        self.v3.as_deref()
+    }
+
+    fn v3_terrain(&self) -> &crate::worldgen_v3::Terrain {
+        self.v3.as_deref().expect("a V3 generator carries its v3 terrain")
+    }
+
+    /// The real top solid y of column `(x, z)` before caves. v2 terrain is a
+    /// pure heightmap, so this is `terrain_height`; v3 adds overhangs and
+    /// cliffs from 3D noise, so its real top can sit a few blocks off the 2D
+    /// estimate (`terrain_height`).
+    pub fn surface_y(&self, x: i32, z: i32) -> i32 {
+        match self.generator {
+            Generator::V2 => self.terrain_height(x, z),
+            Generator::V3 => self.v3_terrain().surface_y(x, z),
         }
     }
 
@@ -172,9 +215,9 @@ impl BiomeGenerator {
     pub fn max_generated_height(&self) -> i32 {
         match self.generator {
             Generator::V2 => crate::world::V2_WORLD_TOP,
-            // BRIDGE: v3 terrain — replace when lane T2 lands the v3 generator
-            // (peaks to ~200, capped at 240: Spec 02 §3.1).
-            Generator::V3 => crate::world::V2_WORLD_TOP,
+            // Terrain stops at `worldgen_v3::density::HEIGHT_CAP` (240); the
+            // rest of the world's height is left for trees on the peaks.
+            Generator::V3 => crate::world::WORLD_HEIGHT - 1,
         }
     }
 
@@ -205,8 +248,7 @@ impl BiomeGenerator {
     pub fn biome_at(&self, x: i32, z: i32) -> Biome {
         match self.generator {
             Generator::V2 => self.biome_at_v2(x, z),
-            // BRIDGE: v3 terrain — replace when lane T2 lands the v3 generator.
-            Generator::V3 => self.biome_at_v2(x, z),
+            Generator::V3 => self.v3_terrain().biome_at(x, z),
         }
     }
 
@@ -232,8 +274,9 @@ impl BiomeGenerator {
     pub fn terrain_height(&self, x: i32, z: i32) -> i32 {
         match self.generator {
             Generator::V2 => self.terrain_height_v2(x, z),
-            // BRIDGE: v3 terrain — replace when lane T2 lands the v3 generator.
-            Generator::V3 => self.terrain_height_v2(x, z),
+            // `height2d` (§4): the 2D estimate. The real surface (3D noise)
+            // is `surface_y`.
+            Generator::V3 => self.v3_terrain().terrain_height(x, z),
         }
     }
 
@@ -280,6 +323,10 @@ impl BiomeGenerator {
             Biome::Jungle => SEA_LEVEL + 5 + scale_lake(14.0),
             Biome::Savanna => SEA_LEVEL + scale_lake(8.0),
             Biome::SnowyTundra => SEA_LEVEL + scale_lake(6.0),
+            // Terrain v3 labels: `biome_at_v2` never returns them.
+            Biome::DeepOcean | Biome::River | Biome::Beach => {
+                unreachable!("the v2 generator labels no {biome:?}")
+            }
         }
     }
 
@@ -431,6 +478,27 @@ impl BiomeGenerator {
         if y < 60 || y > self.terrain_height(x, z) {
             return None;
         }
+        self.rock_salt_gate(x, y, z)
+    }
+
+    /// [`Self::base_rock_at`] for a column whose biome and `terrain_height`
+    /// the caller already holds (the v3 column fill computes them once per
+    /// column instead of once per voxel). Same answer.
+    pub fn base_rock_with(&self, x: i32, y: i32, z: i32, biome: Biome, surface: i32) -> crate::block::BlockId {
+        if self.is_deepslate_substrate(x, y, z) {
+            return pick_deepslate_variant(x, y, z, self.seed, WORLDGEN_RESERVE_RICHNESS);
+        }
+        if matches!(biome, Biome::Mountains | Biome::Desert)
+            && (60..=surface).contains(&y)
+            && let Some(b) = self.rock_salt_gate(x, y, z)
+        {
+            return b;
+        }
+        crate::block::STONE
+    }
+
+    /// The rock-salt vein hash gate, once the biome and depth gates passed.
+    fn rock_salt_gate(&self, x: i32, y: i32, z: i32) -> Option<crate::block::BlockId> {
         // Two-axis hash gate. Horizontal noise (x, z) clusters veins
         // into deposits; vertical noise (y, x) shapes the vein depth
         // band so a deposit isn't a single solid column.
@@ -449,7 +517,8 @@ impl BiomeGenerator {
     pub fn is_cave(&self, x: i32, y: i32, z: i32) -> bool {
         match self.generator {
             Generator::V2 => self.is_cave_v2(x, y, z),
-            // BRIDGE: v3 terrain — replace when lane T2 lands the v3 generator.
+            // BRIDGE: v3 caves — replace when lane T2b lands the dry v3 caves
+            // (§7); until then a v3 world carves v2's flooded noise caves.
             Generator::V3 => self.is_cave_v2(x, y, z),
         }
     }
@@ -580,6 +649,18 @@ pub fn biome_properties(biome: Biome) -> BiomeProperties {
             surface_block: B::GRASS, subsurface_block: B::DIRT,
             tree_species: &[W::Oak], tree_density: 0.5,
             temperature: 0.5, grass_tint: [0.55, 0.83, 0.30],
+        },
+        // Terrain v3 water biomes: sand floors, no trees (§8).
+        Biome::DeepOcean | Biome::River => BiomeProperties {
+            surface_block: B::SAND, subsurface_block: B::SAND,
+            tree_species: &[], tree_density: 0.0,
+            temperature: 0.5, grass_tint: [0.55, 0.83, 0.30],
+        },
+        // Terrain v3 beach: sand over sandstone, no trees (§8).
+        Biome::Beach => BiomeProperties {
+            surface_block: B::SAND, subsurface_block: B::SANDSTONE,
+            tree_species: &[], tree_density: 0.0,
+            temperature: 0.8, grass_tint: [0.55, 0.83, 0.30],
         },
     }
 }
@@ -1370,13 +1451,10 @@ mod tests {
     fn every_biome_has_a_display_name() {
         // The #44 debug HUD reads Biome::name() — every variant must map to a
         // non-empty, human-readable label (UK English, multi-word spaced).
-        for b in [
-            Biome::Plains, Biome::Forest, Biome::Desert, Biome::Mountains,
-            Biome::Ocean, Biome::BirchForest, Biome::Taiga, Biome::Jungle,
-            Biome::Savanna, Biome::SnowyTundra,
-        ] {
+        for b in Biome::ALL {
             assert!(!b.name().is_empty(), "biome {:?} has empty name", b);
         }
+        assert_eq!(Biome::DeepOcean.name(), "Deep Ocean");
         assert_eq!(Biome::BirchForest.name(), "Birch Forest");
         assert_eq!(Biome::SnowyTundra.name(), "Snowy Tundra");
     }

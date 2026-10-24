@@ -9,7 +9,7 @@ use crate::commands::registry::{Command, OpLevel};
 const ALL: &[Biome] = &[
     Biome::Plains, Biome::Forest, Biome::BirchForest, Biome::Taiga,
     Biome::Jungle, Biome::Savanna, Biome::Desert, Biome::SnowyTundra,
-    Biome::Mountains, Biome::Ocean,
+    Biome::Mountains, Biome::Ocean, Biome::DeepOcean, Biome::River, Biome::Beach,
 ];
 
 pub struct BiomesCommand;

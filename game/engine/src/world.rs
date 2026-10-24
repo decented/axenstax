@@ -2668,9 +2668,12 @@ impl World {
                 self.fill_column_v2(cx, cz, biome_gen);
                 self.decorate_column_v2(cx, cz, biome_gen);
             }
-            // BRIDGE: v3 terrain — replace when lane T2 lands the v3 generator.
             crate::biome::Generator::V3 => {
-                self.fill_column_v2(cx, cz, biome_gen);
+                self.fill_column_v3(cx, cz, biome_gen);
+                // BRIDGE: v3 decoration — replace when lane T3 lands the v3
+                // trees, vegetation, villages and spawn (§9, §10). Until then
+                // a v3 world decorates with v2's passes (trees root on the
+                // real surface, `BiomeGenerator::surface_y`).
                 self.decorate_column_v2(cx, cz, biome_gen);
             }
         }
@@ -2712,6 +2715,36 @@ impl World {
                 }
             }
 
+            if !chunk.is_empty() {
+                self.insert_chunk(cx, cy, cz, chunk);
+            }
+        }
+    }
+
+    /// The v3 terrain fill (`worldgen_v3::fill`): 2D climate splines, 3D
+    /// density, surface rules, ore. Like v2 it skips a section that already
+    /// holds real blocks and never stores an all-air one.
+    fn fill_column_v3(&mut self, cx: i32, cz: i32, biome_gen: &BiomeGenerator) {
+        let terrain = biome_gen.v3().expect("a V3 generator carries its v3 terrain");
+        let blocks = crate::worldgen_v3::fill::column_blocks(biome_gen, terrain, cx, cz);
+        let h = crate::worldgen_v3::fill::HEIGHT;
+        for cy in 0..=MAX_CHUNK_Y {
+            if self.chunks.get(&(cx, cy, cz)).is_some_and(|c| !c.is_empty()) {
+                continue;
+            }
+            let mut chunk = Chunk::new();
+            let base_y = (cy * CHUNK_SIZE as i32) as usize;
+            for lz in 0..CHUNK_SIZE {
+                for lx in 0..CHUNK_SIZE {
+                    let col = (lz * CHUNK_SIZE + lx) * h + base_y;
+                    for ly in 0..CHUNK_SIZE {
+                        let blk = blocks[col + ly];
+                        if blk != AIR {
+                            chunk.set(lx, ly, lz, blk);
+                        }
+                    }
+                }
+            }
             if !chunk.is_empty() {
                 self.insert_chunk(cx, cy, cz, chunk);
             }
@@ -2874,7 +2907,7 @@ impl World {
             for lx in 0..cs {
                 let wx = col_min_x + lx;
                 let wz = col_min_z + lz;
-                let surface = biome_gen.terrain_height(wx, wz);
+                let surface = biome_gen.surface_y(wx, wz);
                 // Nothing grows below the waterline.
                 if surface <= SEA_LEVEL {
                     continue;
@@ -2949,6 +2982,9 @@ impl World {
 /// can ask about a neighbour column that has not been generated yet and get
 /// the same answer it would after (Phase B0 worldgen purity).
 pub(crate) fn terrain_block_at(biome_gen: &BiomeGenerator, x: i32, y: i32, z: i32) -> BlockId {
+    if let Some(t) = biome_gen.v3() {
+        return crate::worldgen_v3::fill::block_at(biome_gen, t, x, y, z);
+    }
     let surface = biome_gen.terrain_height(x, z);
     biome_block_at(y, surface, biome_gen.biome_at(x, z), biome_gen, x, z)
 }
@@ -2984,7 +3020,9 @@ pub(crate) fn tree_at_column_cell(
     if props.tree_species.is_empty() {
         return None;
     }
-    let surface = biome_gen.terrain_height(wx, wz);
+    // v2: `terrain_height`. v3: the real top (3D noise), so a tree neither
+    // floats nor roots inside a bank.
+    let surface = biome_gen.surface_y(wx, wz);
     // Reject only genuinely submerged surfaces. A surface *at* SEA_LEVEL is
     // dry land at the waterline — water fills `y > surface && y <= SEA_LEVEL`,
     // which is empty there — so a tree roots fine on it. The earlier `<=`
@@ -2995,7 +3033,9 @@ pub(crate) fn tree_at_column_cell(
     }
     // Surface block must be the biome's land surface (GRASS/SAND/SNOW…),
     // computed purely so neighbour columns can be consulted pre-generation.
-    if biome_block_at(surface, surface, biome, biome_gen, wx, wz) != props.surface_block {
+    // (For v2 `terrain_block_at` is exactly `biome_block_at(surface, surface,
+    // biome, ..)`: `surface` is `terrain_height` and `biome` is `biome_at`.)
+    if terrain_block_at(biome_gen, wx, surface, wz) != props.surface_block {
         return None;
     }
     let species_idx = species_pick_for(wx, wz, biome_gen.seed, props.tree_species.len());
@@ -3035,6 +3075,7 @@ pub(crate) fn tree_threshold_for_biome(biome: Biome) -> Option<i32> {
         Biome::Savanna => Some(80),
         Biome::SnowyTundra => Some(80),
         Biome::Desert | Biome::Ocean | Biome::Mountains => None,
+        Biome::DeepOcean | Biome::River | Biome::Beach => None,
     }
 }
 
