@@ -147,8 +147,8 @@ fn standable(biome_gen: &BiomeGenerator, x: i32, z: i32) -> bool {
         return true;
     }
     !matches!(biome_gen.biome_at(x, z), Biome::Ocean | Biome::DeepOcean | Biome::River)
-        && biome_gen.terrain_height(x, z) >= SEA_LEVEL + 1
-        && biome_gen.surface_y(x, z) >= SEA_LEVEL + 1
+        && biome_gen.terrain_height(x, z) > SEA_LEVEL
+        && biome_gen.surface_y(x, z) > SEA_LEVEL
 }
 
 /// The estimated feet y for a player placed on column `(x, z)`: two above the

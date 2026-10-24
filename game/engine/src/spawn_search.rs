@@ -60,6 +60,7 @@ impl SpawnColumn {
     }
 
     /// Chebyshev distance from the origin in chunks, rounded up.
+    #[cfg(test)]
     pub fn distance_chunks(&self) -> i32 {
         let cs = CHUNK_SIZE as i32;
         (self.x.abs().max(self.z.abs()) + cs - 1) / cs
