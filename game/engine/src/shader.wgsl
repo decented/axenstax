@@ -30,8 +30,13 @@ var<uniform> camera: CameraUniform;
 // (crack/decal) are left alone.
 fn apply_user_brightness(c: vec3<f32>) -> vec3<f32> {
     let x = camera.params.x;
-    let inv = select(1.0, 1.0 / x, x > 0.001);
-    return pow(max(c, vec3<f32>(0.0)), vec3<f32>(inv));
+    let lit = max(c, vec3<f32>(0.0));
+    // Neutral (the default) and unset uniforms skip the per-fragment pow. The
+    // branch is on a uniform, so it is coherent across the whole draw.
+    if (abs(x - 1.0) < 0.0001 || x <= 0.001) {
+        return lit;
+    }
+    return pow(lit, vec3<f32>(1.0 / x));
 }
 
 // The renderer supplies the live horizon colour, including weather/lightning.
