@@ -1714,9 +1714,8 @@ impl super::GameState {
     /// The dials the frame actually uses: the player's values, held lower by
     /// the auto-quality governor when it has stepped down (Spec 03 §10.3).
     pub(crate) fn effective_quality(&self) -> crate::quality_governor::Effective {
-        crate::quality_governor::effective(
+        self.governor.effective(
             &self.graphics,
-            self.governor.level(),
             self.governor_may_shrink_distance(),
             self.renderer.budget_scale_cap(),
         )
@@ -1768,11 +1767,21 @@ impl super::GameState {
         let shrink = self.governor_may_shrink_distance();
         let cap = self.renderer.budget_scale_cap();
         // Judge frames against the display's own period where it is known: a
-        // 30 or 40 Hz panel can never beat it, whatever the quality.
-        let display = self.display_refresh_mhz();
+        // 30 or 40 Hz panel can never beat it, and under a frame cap the
+        // longest gap the cap itself schedules on this display is the target
+        // (`target_frame_time_for_period`). Native reads the rate from winit;
+        // the web estimates the period from requestAnimationFrame ticks.
+        #[cfg_attr(not(target_arch = "wasm32"), allow(unused_mut))]
+        let mut period = self
+            .display_refresh_mhz()
+            .and_then(crate::quality_governor::period_from_millihertz);
+        #[cfg(target_arch = "wasm32")]
+        {
+            period = period.or_else(|| self.raf_period.period());
+        }
         let change = self.governor.update(
             dt,
-            crate::quality_governor::target_frame_time_for(self.graphics.frame_limit, display),
+            crate::quality_governor::target_frame_time_for_period(self.graphics.frame_limit, period),
             crate::quality_governor::max_level(&self.graphics, shrink, cap),
         );
         if let Some(change) = change {
@@ -8155,6 +8164,10 @@ impl super::GameState {
         // budget, so capping it only makes the load slower.
         #[cfg(target_arch = "wasm32")]
         {
+            // Every rAF tick, the ones the cap skips included, tells the
+            // governor the display's period (`quality_governor::RafPeriod`).
+            self.raf_period
+                .tick(self.frame_pace_instant.elapsed().as_secs_f32());
             let interval = crate::graphics_settings::web_cap_interval(
                 self.graphics.frame_limit,
                 matches!(self.mode, GameMode::Loading(_)),
@@ -9144,9 +9157,8 @@ impl super::GameState {
                     // A lobby change is the player's own: drop any governor offset.
                     // (Field-wise: `menu_state` borrows `self.mode`.)
                     self.governor.rebase(&self.graphics);
-                    let eff = crate::quality_governor::effective(
+                    let eff = self.governor.effective(
                         &self.graphics,
-                        self.governor.level(),
                         // (Field-wise, like the rebase above: `menu_state` borrows `self.mode`.)
                         crate::quality_governor::may_shrink_distance(self.remote_client.is_some()),
                         self.renderer.budget_scale_cap(),

@@ -44,11 +44,17 @@
 //! * Ineffective-step rule: a step down must improve the p90 by at least
 //!   [`INEFFECTIVE_GAIN`] (10%) once the window has refilled. If it does not,
 //!   the machine is not limited by what the step lowers (a 30 or 40 Hz
-//!   display, a throttled browser, a CPU-bound frame), so the step is reverted
-//!   ([`Change::Reverted`]) and further steps down are held off for the
-//!   anti-flap back-off period ([`BACKOFF_WINDOW`], doubling per revert up to
-//!   [`UP_HOLD_MAX`]). Where the display rate is known (native, from winit) the
-//!   target is also at least the display's period ([`target_frame_time_for`]).
+//!   display, a throttled browser, a CPU-bound frame, a fill-bound GPU that
+//!   a shorter distance does not help), so the step is reverted
+//!   ([`Change::Reverted`]), MARKED SKIPPED for the rest of the world session,
+//!   and further steps down are held off for the anti-flap back-off period
+//!   ([`BACKOFF_WINDOW`], doubling per revert up to [`UP_HOLD_MAX`]). After the
+//!   hold-off the NEXT step of the plan is tried. A skipped step is not
+//!   retried until the governor is reset (a world change, or the player
+//!   touching a quality dial). Where the display's period is known
+//!   ([`target_frame_time_for`]) the target is also at least that period; under
+//!   a frame cap it is the longest gap the cap itself schedules there
+//!   ([`capped_frame_target`]).
 //! * The first [`WARMUP`] seconds after a reset are ignored (world load hitches).
 //!
 //! A frame-capped (vsync) machine cannot show frames faster than its refresh
@@ -191,9 +197,27 @@ pub fn max_level(user: &GraphicsSettings, shrink_distance: bool, scale_cap: f32)
 /// values. Level 0 is exactly the player's values, and no level ever exceeds
 /// them.
 pub fn effective(user: &GraphicsSettings, level: usize, shrink_distance: bool, scale_cap: f32) -> Effective {
+    effective_skipping(user, level, 0, shrink_distance, scale_cap)
+}
+
+/// Pure: [`effective`] with some plan steps marked skipped (bit `i` of
+/// `skipped` is plan position `i`, as [`Governor::skipped`] reports it). The
+/// first `level` steps that are NOT skipped are applied, in plan order.
+pub fn effective_skipping(
+    user: &GraphicsSettings,
+    level: usize,
+    skipped: u16,
+    shrink_distance: bool,
+    scale_cap: f32,
+) -> Effective {
     let (steps, n) = plan(user, shrink_distance, scale_cap);
     let mut e = Effective::of(user);
-    for s in &steps[..level.min(n)] {
+    let live = steps[..n]
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| skipped & (1 << i) == 0)
+        .map(|(_, s)| s);
+    for s in live.take(level) {
         match *s {
             Step::Distance(d) => e.render_distance = d,
             Step::Scale(v) => e.render_scale = v,
@@ -211,19 +235,117 @@ pub fn target_frame_time(limit: crate::graphics_settings::FrameLimit) -> f32 {
     }
 }
 
-/// Pure: [`target_frame_time`], raised to the display's own period where the
-/// platform reports the refresh rate (native: winit's `refresh_rate_millihertz`).
-/// A 30 or 40 Hz panel can never show frames faster than that, so judging it
-/// against 16.7 ms would send the governor to its floor for nothing. A
-/// missing or absurd rate (outside 20..1000 Hz) leaves the target alone.
+/// Pure: a display's refresh period in seconds from winit's millihertz, or
+/// `None` for a missing or absurd rate (outside 20..1000 Hz).
+pub fn period_from_millihertz(mhz: u32) -> Option<f32> {
+    (20_000..=1_000_000).contains(&mhz).then(|| 1000.0 / mhz as f32)
+}
+
+/// Pure: the longest gap between two rendered frames that a software cap of
+/// `interval` seconds itself schedules on a display of `period` seconds
+/// (`FrameCap`: rAF ticks arrive every `period`, a frame is due `slack` early,
+/// so the frame lands on tick `ceil((interval - slack) / period)`). That is
+/// `ceil(interval / period) * period` up to the cap's own slack: Cap(60) on a
+/// 75 Hz display is 26.7 ms (13.3 / 13.3 / 13.3 / 26.7 pattern), on 144 Hz
+/// 20.8 ms, on 60 or 120 Hz 16.7 ms. A cap below the display's rate is the
+/// display's own period. Judging such a series against the plain cap interval
+/// would read the cap's pacing as a slow machine.
+pub fn capped_frame_target(interval: f32, period: f32) -> f32 {
+    let slack = crate::graphics_settings::WEB_CAP_SLACK.as_secs_f32().min(interval / 8.0);
+    let ticks = ((interval - slack) / period - 1e-3).ceil().max(1.0);
+    ticks * period
+}
+
+/// Pure: the frame time (seconds) the governor aims at for a frame limit on a
+/// display of `display_period` seconds, where that is known (native: winit;
+/// web: [`RafPeriod`]). With a software cap it is [`capped_frame_target`];
+/// otherwise [`target_frame_time`] raised to the display's period (a 30 or
+/// 40 Hz panel can never show frames faster than that, so judging it against
+/// 16.7 ms would send the governor to its floor for nothing). Without a
+/// period the target is [`target_frame_time`] alone.
+pub fn target_frame_time_for_period(
+    limit: crate::graphics_settings::FrameLimit,
+    display_period: Option<f32>,
+) -> f32 {
+    let target = target_frame_time(limit);
+    let Some(period) = display_period.filter(|p| p.is_finite() && *p > 0.0) else {
+        return target;
+    };
+    match limit.software_cap_interval() {
+        Some(i) => capped_frame_target(i.as_secs_f32(), period),
+        None => target.max(period),
+    }
+}
+
+/// Pure: [`target_frame_time_for_period`] for a rate in millihertz; a missing
+/// or absurd rate (outside 20..1000 Hz) leaves the target alone.
 pub fn target_frame_time_for(
     limit: crate::graphics_settings::FrameLimit,
     display_millihertz: Option<u32>,
 ) -> f32 {
-    let target = target_frame_time(limit);
-    match display_millihertz {
-        Some(mhz) if (20_000..=1_000_000).contains(&mhz) => target.max(1000.0 / mhz as f32),
-        _ => target,
+    target_frame_time_for_period(limit, display_millihertz.and_then(period_from_millihertz))
+}
+
+/// Longest rAF-to-rAF interval [`RafPeriod`] accepts as a display period:
+/// 1/50 s. A longer one is a hidden tab, a stall, or a frame slower than the
+/// display (rAF cannot fire while one is being drawn), none of which says
+/// what the display's rate is; reading them as a slow display would hide a
+/// slow machine from the governor. Displays below 50 Hz fall back to the plain
+/// cap target and the ineffective-step rule.
+const RAF_MAX_INTERVAL: f32 = 1.0 / 50.0;
+/// Shortest interval accepted (coalesced callbacks): 2 ms.
+const RAF_MIN_INTERVAL: f32 = 0.002;
+/// rAF intervals kept.
+const RAF_SAMPLES: usize = 120;
+/// Samples needed before [`RafPeriod::period`] answers.
+const RAF_MIN_SAMPLES: usize = 30;
+
+/// The display's refresh period on the web, estimated from requestAnimationFrame
+/// ticks (the browser exposes no refresh rate). Feed it EVERY tick, including
+/// the ones a frame cap skips: those handlers are cheap, so their intervals are
+/// the display period, whatever the game's frame time. The estimate is the 20th
+/// percentile of the last [`RAF_SAMPLES`] intervals (a low, robust value: late
+/// ticks only ever make an interval longer); intervals outside
+/// `RAF_MIN_INTERVAL..=RAF_MAX_INTERVAL` are ignored, and nothing is answered
+/// until [`RAF_MIN_SAMPLES`] are in. Pure: times are seconds since any fixed
+/// epoch.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+#[derive(Clone, Debug, Default)]
+pub struct RafPeriod {
+    last: Option<f32>,
+    samples: VecDeque<f32>,
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+impl RafPeriod {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// An rAF tick arrived at `now` seconds.
+    pub fn tick(&mut self, now: f32) {
+        if !now.is_finite() {
+            return;
+        }
+        if let Some(prev) = self.last.replace(now) {
+            let dt = now - prev;
+            if (RAF_MIN_INTERVAL..=RAF_MAX_INTERVAL).contains(&dt) {
+                if self.samples.len() == RAF_SAMPLES {
+                    self.samples.pop_front();
+                }
+                self.samples.push_back(dt);
+            }
+        }
+    }
+
+    /// The display period in seconds, once enough ticks have been seen.
+    pub fn period(&self) -> Option<f32> {
+        if self.samples.len() < RAF_MIN_SAMPLES {
+            return None;
+        }
+        let mut v: Vec<f32> = self.samples.iter().copied().collect();
+        v.sort_by(|a, b| a.total_cmp(b));
+        Some(v[(v.len() - 1) / 5])
     }
 }
 
@@ -282,6 +404,10 @@ pub struct Governor {
     down_off: f32,
     /// The next revert's hold-off length: [`BACKOFF_WINDOW`], doubling.
     hold_off: f32,
+    /// Plan positions reverted as ineffective (bit `i` = position `i`); never
+    /// retried until a reset. `level` counts the steps APPLIED, which are the
+    /// first `level` plan positions not in this set.
+    skipped: u16,
     basis: Option<Basis>,
 }
 
@@ -307,13 +433,26 @@ impl Governor {
             probe: None,
             down_off: 0.0,
             hold_off: BACKOFF_WINDOW,
+            skipped: 0,
             basis: None,
         }
     }
 
-    /// Current level (0 = the player's own values).
+    /// Current level: the number of plan steps applied (0 = the player's own
+    /// values). Steps reverted as ineffective ([`Governor::skipped`]) are not
+    /// counted; the steps applied are the first `level` of the rest.
     pub fn level(&self) -> usize {
         self.level
+    }
+
+    /// The plan positions marked skipped (bit `i` = position `i`).
+    pub fn skipped(&self) -> u16 {
+        self.skipped
+    }
+
+    /// The dials in force now: the player's values with the applied steps.
+    pub fn effective(&self, user: &GraphicsSettings, shrink_distance: bool, scale_cap: f32) -> Effective {
+        effective_skipping(user, self.level, self.skipped, shrink_distance, scale_cap)
     }
 
     /// Back to the player's values with a clean history. Called when the player
@@ -395,6 +534,8 @@ impl Governor {
         let elapsed = self.since_eval;
         self.since_eval = 0.0;
         let p90 = self.p90()?;
+        // Steps left to try: the plan minus the ones reverted as ineffective.
+        let max_level = max_level.saturating_sub(self.skipped.count_ones() as usize);
 
         // Judge the last step down once its window has refilled: it must have
         // bought a real gain, or it is undone and the machine left alone.
@@ -405,6 +546,11 @@ impl Governor {
             && p90 > before * (1.0 - INEFFECTIVE_GAIN)
             && self.level > 0
         {
+            // Mark the reverted step (the `level`-th applied one) skipped.
+            let pos = (0..16).filter(|i| self.skipped & (1 << i) == 0).nth(self.level - 1);
+            if let Some(pos) = pos {
+                self.skipped |= 1 << pos;
+            }
             self.level -= 1;
             self.down_off = self.hold_off;
             self.hold_off = (self.hold_off * 2.0).min(UP_HOLD_MAX);
@@ -454,7 +600,7 @@ impl Governor {
         if self.level == 0 {
             return None;
         }
-        let e = effective(user, self.level, shrink_distance, scale_cap);
+        let e = self.effective(user, shrink_distance, scale_cap);
         let mut parts = Vec::new();
         if e.render_distance != user.render_distance {
             parts.push(format!(
@@ -780,9 +926,106 @@ mod tests {
         let (changes, deepest) = drive(120.0, &u, T60, |l| 0.200 * 0.89f32.powi(l as i32));
         assert_eq!(deepest, max_level(&u, true, NO_SCALE_CAP));
         assert!(changes.iter().all(|(_, c)| *c == Change::Down));
-        let (changes, deepest) = drive(120.0, &u, T60, |l| 0.200 * 0.91f32.powi(l as i32));
-        assert_eq!(deepest, 1, "9% is not enough");
-        assert!(changes.iter().any(|(_, c)| *c == Change::Reverted));
+        // The 9% step is reverted and marked skipped; the NEXT step of the plan is
+        // then tried (and, buying 9% too, is reverted in its turn): every step of
+        // the plan is tried exactly once, none is kept, and the machine ends up
+        // at level 0 with nothing left to try.
+        let mut g = Governor::new();
+        let (mut t, mut downs, mut reverts) = (0.0f32, 0usize, 0usize);
+        let mut deepest = 0;
+        let max = max_level(&u, true, NO_SCALE_CAP);
+        while t < 1500.0 {
+            let dt = 0.200 * 0.91f32.powi(g.level() as i32);
+            t += dt;
+            match g.update(dt, T60, max) {
+                Some(Change::Down) => downs += 1,
+                Some(Change::Reverted) => reverts += 1,
+                _ => {}
+            }
+            deepest = deepest.max(g.level());
+        }
+        assert_eq!(deepest, 1, "9% is not enough to keep a step");
+        assert_eq!(downs, max, "the next step is tried after each revert: all {max} of them");
+        assert_eq!(reverts, max);
+        assert_eq!(g.skipped().count_ones() as usize, max, "every step is marked skipped");
+        assert_eq!(g.level(), 0);
+        // A world change (reset) forgets the marks.
+        g.reset();
+        assert_eq!(g.skipped(), 0);
+    }
+
+    /// Run a governor against a series that depends on the dials in force
+    /// (`frame(&Effective)` seconds), for `secs`. Returns the changes and the
+    /// final governor.
+    fn drive_effective(
+        secs: f32,
+        u: &GraphicsSettings,
+        mut frame: impl FnMut(&Effective) -> f32,
+    ) -> (Vec<(f32, Change)>, Governor) {
+        let mut g = Governor::new();
+        let (mut t, mut out) = (0.0f32, Vec::new());
+        let max = max_level(u, true, NO_SCALE_CAP);
+        while t < secs {
+            let dt = frame(&g.effective(u, true, NO_SCALE_CAP));
+            t += dt;
+            if let Some(c) = g.update(dt, T60, max) {
+                out.push((t, c));
+            }
+        }
+        (out, g)
+    }
+
+    #[test]
+    fn a_fill_bound_machine_gets_past_the_distance_steps_to_the_scale_steps() {
+        // Pixel work dominates: render scale squared sets the frame time, the
+        // distance changes it by 1% per chunk. Every distance step is reverted
+        // (and skipped); the scale steps behind them are then reached and kept.
+        let u = user();
+        let fill_bound = |e: &Effective| 0.080 * e.render_scale * e.render_scale * (1.0 + 0.01 * e.render_distance as f32);
+        let (changes, g) = drive_effective(900.0, &u, fill_bound);
+        let reverts: Vec<f32> = changes
+            .iter()
+            .filter(|(_, c)| *c == Change::Reverted)
+            .map(|(t, _)| *t)
+            .collect();
+        // The three distance steps, then the two particle steps (fill-bound:
+        // particles do not help either); the scale steps in between are kept.
+        assert_eq!(reverts.len(), 5, "{changes:?}");
+        let e = g.effective(&u, true, NO_SCALE_CAP);
+        assert_eq!(e.render_distance, u.render_distance, "the distance is left alone");
+        assert!(e.render_scale < u.render_scale, "the scale steps were reached");
+        assert!((e.render_scale - 0.5).abs() < 1e-6, "{e:?}");
+        // The reverts are spaced by the doubling hold-off, and the first scale
+        // step comes only after them.
+        let first_scale_down = changes
+            .iter()
+            .filter(|(_, c)| *c == Change::Down)
+            .map(|(t, _)| *t)
+            .nth(3)
+            .expect("a fourth step down");
+        let last_revert = reverts[2];
+        assert!(first_scale_down - last_revert >= BACKOFF_WINDOW * 4.0 - 1.0, "{first_scale_down} {last_revert}");
+        // Stepping back up undoes the applied steps, never a skipped one.
+        let mut g = g;
+        let mut t = 0.0;
+        while t < 600.0 {
+            t += 0.006;
+            g.update(0.006, T60, max_level(&u, true, NO_SCALE_CAP));
+        }
+        assert_eq!(g.level(), 0);
+        assert_eq!(g.effective(&u, true, NO_SCALE_CAP), Effective::of(&u));
+        assert_eq!(g.skipped().count_ones(), 5, "the skipped steps stay skipped");
+    }
+
+    #[test]
+    fn a_skipped_step_is_not_retried_and_the_note_names_the_applied_ones() {
+        let mut u = user();
+        u.particles = ParticleLevel::Off;
+        let fill_bound = |e: &Effective| 0.080 * e.render_scale * e.render_scale;
+        let (_, g) = drive_effective(900.0, &u, fill_bound);
+        let n = g.note(&u, true, NO_SCALE_CAP).expect("holding below");
+        assert!(n.contains("render scale 0.50"), "{n}");
+        assert!(!n.contains("render distance"), "{n}");
     }
 
     #[test]
@@ -814,8 +1057,10 @@ mod tests {
         // A 60 or 144 Hz panel leaves it (a vsync 144 Hz machine is still judged at 60).
         assert!(near(target_frame_time_for(FrameLimit::VSync, Some(59_940)), 1.0 / 59.94));
         assert!(near(target_frame_time_for(FrameLimit::VSync, Some(144_000)), T60));
-        // A slower cap wins over a faster panel.
-        assert!(near(target_frame_time_for(FrameLimit::Cap(30), Some(144_000)), 1.0 / 30.0));
+        // A slower cap on a faster panel: the longest gap the cap schedules
+        // (Cap(30) on 144 Hz lands on the 5th tick: 34.7 ms).
+        assert!(near(target_frame_time_for(FrameLimit::Cap(30), Some(144_000)), 5.0 / 144.0));
+        assert!(near(target_frame_time_for(FrameLimit::Cap(30), Some(60_000)), 1.0 / 30.0));
         // Unknown or absurd rates change nothing.
         for mhz in [None, Some(0), Some(1), Some(5_000_000)] {
             assert!(near(target_frame_time_for(FrameLimit::VSync, mhz), T60), "{mhz:?}");
@@ -997,6 +1242,222 @@ mod tests {
         let n = g.note(&u, true, NO_SCALE_CAP).expect("holding below");
         assert!(n.contains("render distance"), "{n}");
         assert!(n.contains("(set 10)"), "{n}");
+    }
+
+    // ---- capped frame series (N1) ------------------------------------------
+
+    /// Rendered-frame start times of a `FrameCap`-paced rAF loop: ticks every
+    /// `1/hz` s with deterministic jitter of up to `jitter` s either way, a frame
+    /// costing `gpu` s (no tick fires while one is being drawn). Every tick,
+    /// rendered or skipped, is also handed to `on_tick`.
+    fn capped_frames(
+        hz: f32,
+        cap: u16,
+        gpu: f32,
+        jitter: f32,
+        secs: f32,
+        mut on_tick: impl FnMut(f32),
+    ) -> Vec<f32> {
+        use std::time::Duration as D;
+        let period = 1.0 / hz;
+        let interval = FrameLimit::Cap(cap).software_cap_interval().unwrap();
+        let mut fc = crate::graphics_settings::FrameCap::new();
+        let (mut busy_until, mut frames) = (0.0f32, Vec::<f32>::new());
+        let mut i = 0u64;
+        while (i as f32) * period < secs {
+            let j = (((i * 7919) % 2001) as f32 / 1000.0 - 1.0) * jitter;
+            let t = (i as f32 * period + j).max(0.0);
+            i += 1;
+            if t < busy_until {
+                continue; // rAF cannot fire during a frame
+            }
+            let rendered = fc.due(D::from_secs_f32(t), interval);
+            // The hook sees the tick before the cap decides (as in game_loop).
+            on_tick(t);
+            if rendered {
+                frames.push(t);
+                busy_until = t + gpu;
+            }
+        }
+        frames
+    }
+
+    /// Feed a rendered-frame series to a governor, judged against `target(i)`;
+    /// returns the changes.
+    fn judge(frames: &[f32], mut target: impl FnMut(usize) -> f32) -> Vec<Change> {
+        let u = user();
+        let mut g = Governor::new();
+        let max = max_level(&u, true, NO_SCALE_CAP);
+        frames
+            .windows(2)
+            .enumerate()
+            .filter_map(|(i, w)| g.update(w[1] - w[0], target(i), max))
+            .collect()
+    }
+
+    const RATES: [f32; 7] = [60.0, 75.0, 90.0, 100.0, 120.0, 144.0, 165.0];
+    const CAPS: [u16; 3] = [30, 60, 120];
+
+    #[test]
+    fn the_capped_target_is_the_longest_gap_the_cap_schedules() {
+        let near = |a: f32, b: f32| (a - b).abs() < 5e-4;
+        let c60 = 1.0 / 60.0;
+        assert!(near(capped_frame_target(c60, 1.0 / 75.0), 2.0 / 75.0), "26.7 ms");
+        assert!(near(capped_frame_target(c60, 1.0 / 144.0), 3.0 / 144.0), "20.8 ms");
+        assert!(near(capped_frame_target(c60, 1.0 / 60.0), c60));
+        assert!(near(capped_frame_target(c60, 1.0 / 120.0), c60));
+        assert!(near(capped_frame_target(c60, 1.0 / 90.0), 2.0 / 90.0));
+        assert!(near(capped_frame_target(c60, 1.0 / 165.0), 3.0 / 165.0));
+        // A cap above the display's rate is the display's own period.
+        assert!(near(capped_frame_target(1.0 / 120.0, 1.0 / 60.0), c60));
+        assert!(near(capped_frame_target(1.0 / 30.0, 1.0 / 60.0), 1.0 / 30.0));
+        // Through the public target: a cap names the pattern, no cap the old rule.
+        assert!(near(target_frame_time_for(FrameLimit::Cap(60), Some(75_000)), 2.0 / 75.0));
+        assert!(near(target_frame_time_for(FrameLimit::Cap(60), Some(144_000)), 3.0 / 144.0));
+        assert!(near(target_frame_time_for(FrameLimit::Cap(60), None), c60));
+        assert!(near(target_frame_time_for(FrameLimit::Uncapped, Some(75_000)), c60));
+        assert!(near(target_frame_time_for_period(FrameLimit::Cap(60), Some(f32::NAN)), c60));
+        // Never below the cap interval and never a whole display period over it.
+        for hz in RATES {
+            for cap in CAPS {
+                let i = 1.0 / cap as f32;
+                let t = capped_frame_target(i, 1.0 / hz);
+                assert!(t >= (i - 0.0021).max(1.0 / hz) - 1e-5, "{hz} Hz Cap({cap}): {t}");
+                assert!(t < i + 1.0 / hz + 1e-5, "{hz} Hz Cap({cap}): {t}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_capped_client_never_steps_down_while_the_gpu_keeps_up() {
+        for hz in RATES {
+            for cap in CAPS {
+                let interval = 1.0 / cap as f32;
+                // Half the cap interval of GPU work, ticks jittered by 1.5 ms.
+                let frames = capped_frames(hz, cap, interval * 0.5, 0.0015, 240.0, |_| {});
+                let target = target_frame_time_for_period(FrameLimit::Cap(cap), Some(1.0 / hz));
+                let changes = judge(&frames, |_| target);
+                assert!(
+                    !changes.contains(&Change::Down) && !changes.contains(&Change::Reverted),
+                    "{hz} Hz, Cap({cap}): {changes:?}"
+                );
+            }
+        }
+        // The old target (the plain cap interval) DID read the cap's own pacing as
+        // slow on a 75 Hz display: the bug this fixes.
+        let frames = capped_frames(75.0, 60, 0.008, 0.0015, 240.0, |_| {});
+        let changes = judge(&frames, |_| target_frame_time(FrameLimit::Cap(60)));
+        assert!(changes.contains(&Change::Down), "{changes:?}");
+    }
+
+    #[test]
+    fn a_capped_client_still_steps_down_when_frames_are_truly_late() {
+        for hz in RATES {
+            for cap in CAPS {
+                let target = target_frame_time_for_period(FrameLimit::Cap(cap), Some(1.0 / hz));
+                // The GPU needs 1.5x what the cap allows: the longest gap the cap
+                // itself schedules (on 75 Hz Cap(60) that is 26.7 ms, which a GPU
+                // needing 25 ms delivers too, so 1.5x the cap interval alone would
+                // be invisible there).
+                let gpu = 1.5 * target.max(1.0 / cap as f32);
+                let frames = capped_frames(hz, cap, gpu, 0.0015, 120.0, |_| {});
+                let changes = judge(&frames, |_| target);
+                assert!(changes.contains(&Change::Down), "{hz} Hz, Cap({cap}): {changes:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_raf_period_estimate_tracks_the_display_through_skipped_ticks() {
+        for hz in RATES {
+            for cap in CAPS {
+                let mut est = RafPeriod::new();
+                assert_eq!(est.period(), None, "nothing before the samples");
+                let _ = capped_frames(hz, cap, 0.002, 0.0005, 10.0, |t| est.tick(t));
+                let p = est.period().expect("10 s of ticks");
+                assert!((p - 1.0 / hz).abs() <= 0.1 / hz, "{hz} Hz Cap({cap}): {p}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_raf_period_ignores_hidden_tab_gaps_and_slow_frames() {
+        let mut est = RafPeriod::new();
+        let p = 1.0 / 75.0;
+        let mut t = 0.0;
+        for i in 0..200 {
+            // A hidden tab (3 s), a stall (0.4 s) and some frames that took three
+            // ticks: none of them is the display's period.
+            t += match i {
+                50 => 3.0,
+                90 => 0.4,
+                i if i % 7 == 0 => 3.0 * p,
+                _ => p,
+            };
+            est.tick(t);
+        }
+        let got = est.period().unwrap();
+        assert!((got - p).abs() < 1e-4, "{got}");
+        // A machine slower than every tick (rAF fires once per frame: 25 ms
+        // intervals) gives no period at all, so the governor judges it against
+        // the plain cap target instead of a "display" as slow as itself.
+        let mut est = RafPeriod::new();
+        for i in 0..300 {
+            est.tick(i as f32 * 0.025);
+        }
+        assert_eq!(est.period(), None);
+        assert!(!f32::is_nan(target_frame_time_for_period(FrameLimit::Cap(60), est.period())));
+        // NaN and backwards ticks are harmless.
+        est.tick(f32::NAN);
+        est.tick(1.0);
+        est.tick(0.5);
+        assert_eq!(est.period(), None);
+    }
+
+    #[test]
+    fn the_governor_driven_by_the_estimated_period_keeps_up_and_falls_behind_correctly() {
+        for hz in RATES {
+            for cap in CAPS {
+                let interval = 1.0 / cap as f32;
+                // Keeping up, 1.5 ms of jitter on the ticks.
+                let mut est = RafPeriod::new();
+                let mut ticks = Vec::new();
+                let frames = capped_frames(hz, cap, interval * 0.5, 0.0015, 240.0, |t| {
+                    est.tick(t);
+                    ticks.push((t, est.period()));
+                });
+                // The target for the frame that began at `frames[i + 1]` comes from
+                // the estimate as it stood then (plain cap target until it exists).
+                let target_at = |t: f32| {
+                    let idx = ticks.partition_point(|(tt, _)| *tt < t);
+                    let period = ticks.get(idx).and_then(|(_, p)| *p);
+                    target_frame_time_for_period(FrameLimit::Cap(cap), period)
+                };
+                let changes = judge(&frames, |i| target_at(frames[i + 1]));
+                assert!(
+                    !changes.contains(&Change::Down),
+                    "{hz} Hz, Cap({cap}), estimated: {changes:?}"
+                );
+                // Truly late: the GPU needs 1.5x the longest capped gap.
+                let true_target = target_frame_time_for_period(FrameLimit::Cap(cap), Some(1.0 / hz));
+                // (Frames delivered faster than 50 fps cannot be told from a
+                // display that slow when every tick is consumed: `RAF_MAX_INTERVAL`.)
+                let gpu = 1.5 * true_target.max(interval).max(RAF_MAX_INTERVAL);
+                let mut est = RafPeriod::new();
+                let mut ticks = Vec::new();
+                let frames = capped_frames(hz, cap, gpu, 0.0005, 120.0, |t| {
+                    est.tick(t);
+                    ticks.push((t, est.period()));
+                });
+                let target_at = |t: f32| {
+                    let idx = ticks.partition_point(|(tt, _)| *tt < t);
+                    let period = ticks.get(idx).and_then(|(_, p)| *p);
+                    target_frame_time_for_period(FrameLimit::Cap(cap), period)
+                };
+                let changes = judge(&frames, |i| target_at(frames[i + 1]));
+                assert!(changes.contains(&Change::Down), "{hz} Hz, Cap({cap}), estimated, late: {changes:?}");
+            }
+        }
     }
 
     #[test]

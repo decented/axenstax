@@ -1019,6 +1019,9 @@ pub(crate) struct GameState {
     /// Web frame-cap deadline (Perf B1); `frame_pace_instant` is its epoch.
     #[cfg(target_arch = "wasm32")]
     pub(crate) frame_cap: crate::graphics_settings::FrameCap,
+    /// The display's period as seen by rAF ticks (web; feeds the governor's target).
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) raf_period: crate::quality_governor::RafPeriod,
     pub(crate) show_debug: bool,
     /// #6 — minimap render state (explored-map cache + last baked texture +
     /// refresh throttle). Empty/None until the first frame paints it.
@@ -1932,6 +1935,8 @@ impl GameState {
             frame_pace_instant: Instant::now(),
             #[cfg(target_arch = "wasm32")]
             frame_cap: crate::graphics_settings::FrameCap::new(),
+            #[cfg(target_arch = "wasm32")]
+            raf_period: crate::quality_governor::RafPeriod::new(),
             show_debug: false,
             minimap: crate::minimap::MinimapView::default(),
             map_screen: crate::minimap::MapScreen::default(),
