@@ -173,7 +173,8 @@ For each block that has a visible model (air and invisible blocks are skipped), 
 > **History (#130 → #131, 2026-06-22).** Before #131 there was **no pass for solid + transparent blocks at all** — the opaque greedy pass skipped `is_transparent` and the small-cube pass skipped solids, so such blocks emitted no geometry and rendered **invisible while still colliding**. This bit the five non-oak leaf species (`transparent: true` → invisible "leaves you bash through"); #130's stopgap made all leaves `transparent: false` (opaque) so they render via the greedy pass. **#131** built the transparent-solid pass above, which fixes the latent **glass** invisibility (glass = solid + transparent, alpha texture → renders see-through). **#131 fancy-leaf flip (shipped):** all six leaf species are back to `transparent: true` (solid, so still walkable-on) and their textures carry ~`LEAF_CUTOUT_PCT`% (20%) **cutout-alpha holes** (`texture_gen::gen_species_leaves`), so canopies render see-through via `fs_transparent`'s `alpha < 0.04` discard. The third-person camera passes through them automatically — `camera_occlusion::default_for(solid, transparent)` returns `PassThrough` for a transparent solid, no per-block exception needed. The pass culls leaf faces against same-type neighbours (rule 3), so a dense canopy shows its holed outer shell rather than every internal leaf face; a layered (no-same-type-cull) leaf look + cutout-density tuning are open feel-tweaks for an Axo playtest.
 
 > **AS-BUILT (Perf B2, 2026-10-24) -- "Leaves: Fast".** Setting
-> `leaves_fast` (preset dial: Potato and Low on, Medium/High/Ultra off).
+> `leaves_fast` (set by a preset: Potato and Low on, Medium/High/Ultra off; not
+> part of preset equality, §9.2).
 > `BlockRegistry::set_leaves_fast` is a render-only flag: the mesher asks
 > `renders_transparent(id)` (`transparent` unless fast and the block is any
 > leaf species) where it used to ask `is_transparent`, so every leaf takes the
@@ -749,28 +750,39 @@ counts (`DrawStats`) are surfaced in the **F3 overlay** ("Draws: N (culled M / T
 > *Draw range.* `camera::chunk_in_draw_range` is a circle on column indices
 > measured from the camera's column centre: a column is drawn when
 > `dx^2 + dz^2 <= (render_distance + 1)^2` (`camera::column_in_round_range`,
-> exact in `i64`; `i32::MAX` = no limit), in place of the old square. Along an
-> axis the range still lies beyond the fog's end; on a diagonal the circle trims
-> the last column's corner, which is the ground the round streamer does not
-> load either (49 of 81 columns at radius 4, about 72% at 10, tending to pi/4).
+> exact in `i64`; `i32::MAX` = no limit), in place of the old square (49 of 81
+> columns at radius 4, about 72% at 10, tending to pi/4).
 > *Streaming.* `chunk_stream::StreamAnchor` carries `round`. A client's OWN
-> players anchor round at the render distance: columns load when
-> `dx^2 + dz^2 <= r^2` and unload past `r + 1`
-> (`ROUND_UNLOAD_HYSTERESIS`, one column; a loaded column in that one-column
-> band is neither loaded nor let go, so the edge does not thrash). `begin_load`'s
-> queue and the void-column repair scan use the same circle. Everything the
-> server shapes stays square: a lent joiner's sim block and respawn ring, the
-> dedicated server's streamer, and a JOINED client's own anchors (its pushed
-> columns are the server's square, and `ChunkIntake::keeps_near_server_body`
-> keeps its square `UNLOAD_HYSTERESIS`). The chunk push, interest radii and
-> `entity_broadcast` radii are unchanged.
+> players anchor round at `round_load_columns(rd)`, which is the draw radius
+> `rd + 1`: columns load when `dx^2 + dz^2 <= (rd + 1)^2`, so the draw circle
+> always covers the load circle. (Review fix S1: at radius `rd` the nearest
+> unloaded ground on a diagonal, seen from a column corner, was 45..236 blocks
+> away against a fog end of 64..256, about half fogged. At `rd + 1` it is on
+> the axes beyond the fog end and on a diagonal within about 7 blocks of it,
+> at least 78% fogged; the test `the_load_and_draw_range_lie_beyond_the_fog_on_
+> the_diagonals` pins both. The circle still loads about 14% fewer columns than
+> the square at rd 10.) A column unloads past `(r + 1.5)^2`
+> (`round_beyond_unload_reach`, in integers `4(dx^2 + dz^2) > (2r + 3)^2`); a
+> column in that band is neither loaded nor let go. (Review fix S2: the first
+> margin of one column was shorter than a diagonal step, sqrt 2, so pacing over
+> a column corner unloaded and reloaded 2..8 columns each crossing; 1.5 covers
+> a step in any of the eight directions, tested for every radius up to 24.)
+> `begin_load`'s queue and the void-column repair scan use the same circle.
+> Everything the server shapes stays square: a lent joiner's sim block and
+> respawn ring, the dedicated server's streamer, and a JOINED client's own
+> anchors (its pushed columns are the server's square, and
+> `ChunkIntake::keeps_near_server_body` keeps its square `UNLOAD_HYSTERESIS`).
+> The chunk push, interest radii and `entity_broadcast` radii are unchanged.
 > *Entities.* `entity_model::build_entity_model_vertices_culled` skips a mob
 > before any vertex is baked when its bounding sphere (hitbox-based, generous:
 > `1.5 * max(width, height) + 2`) is wholly beyond the draw range
-> (`(render_distance + 1) * 16` blocks from the eye) or wholly outside this
+> (`(render_distance + 1) * 16` blocks from the RENDER camera,
+> `EntityCull::for_camera`: the camera uniform's `camera_pos`, the point chunks
+> are drawn from, not the player's head; review fix S6, so a Director camera
+> flown to a far joiner still shows the mobs there) or wholly outside this
 > viewport's frustum (`Frustum::contains_sphere`, per player, so split-screen
 > viewports cull against their own cameras). Never culled: a ridden mount
-> (`Ridden`), any mob within 4 blocks of the eye, and the player's own avatar,
+> (`Ridden`), any mob within 4 blocks of the render camera, and the player's own avatar,
 > the held viewmodel and remote-player avatars (they do not go through this
 > builder). No setting. Carts, item entities and projectiles are not culled yet.
 
@@ -1647,9 +1659,13 @@ If the average is significantly below the target (< 50% of budget), quality is r
 > reset are ignored. Anti-flap: a step down within 30 s of a step up doubles the
 > next step-up hold (10 s, 20, 40 ... capped at 160 s). Changing a quality
 > dial, preset or the toggle resets the offset (`Governor::rebase`); unrelated
-> settings do not. A joiner (push-only) skips the distance steps, since it
-> never reloads a column it let go. The host's own server radius and the
-> distance a joiner announces stay the player's values. The settings panel
+> settings do not. ANY joined client skips the distance steps
+> (`quality_governor::may_shrink_distance(joined)`; review fix X2): it announces
+> the player's render distance in every input, so the server's push radius stays
+> the player's, and a client that unloaded the ring between a lowered distance
+> and that radius would be re-sent it every ~5 s. It keeps scale and particle
+> steps. The host's own server radius and the distance a joiner announces stay
+> the player's values. The settings panel
 > shows a line such as "Auto quality is holding render distance 6 (set 10)"
 > while it is holding below. Vsync (Perf B2): a 60 Hz display can never show a
 > frame in under 16.7 ms, so the step-up rule is "p90 at or below 1.05x the
@@ -1659,10 +1675,45 @@ If the average is significantly below the target (< 50% of budget), quality is r
 > series recovers after a stall; a machine that holds 60 fps only below level 0
 > settles within the back-off.
 >
-> Web frame cap: `Cap(30/60)` is honoured on wasm by skipping a render that
-> arrives sooner than the cap interval (less `min(2 ms, interval/8)`,
-> `graphics_settings::cap_frame_due`) and re-requesting a redraw. Native pacing
-> is unchanged. Also: the brightness `pow` in `shader.wgsl` is skipped at 1.0.
+> *Slow display versus slow GPU (review fix S3).* A step down must lower the p90
+> by at least 10% once the window has refilled (`INEFFECTIVE_GAIN`). If it does
+> not, the step is undone (`Change::Reverted`, the level goes back up by one) and
+> further steps down are held off for 30 s, doubling per revert up to 160 s (the
+> anti-flap back-off constants). So a 24, 30 or 40 fps series that does not move
+> with the quality dials (a 30 or 40 Hz panel, a browser throttled by Energy
+> Saver or Low Power Mode) tries one step now and then and never walks to the
+> floor; a genuinely GPU-bound series, where each step buys more than 10%,
+> still steps down to the end. On native the target is also at least the
+> display's period (`target_frame_time_for`, winit
+> `MonitorHandle::refresh_rate_millihertz`, re-read every 2 s; a missing or
+> absurd rate, outside 20..1000 Hz, changes nothing), so a 30 Hz panel is
+> judged against 33 ms. The web build cannot read the rate and relies on the
+> revert rule alone.
+>
+> *Full window (S5).* The window is capped at 240 samples; `p90` waited for 0.75 s
+> of them, so above about 320 fps the governor never judged anything and a level
+> reached in a dense area stuck for the session. A window at its sample cap now
+> counts as full.
+>
+> *Scale steps the budget swallows.* The plan skips a render-scale step that the
+> pixel budget would swallow (`scale_cap` = `Renderer::budget_scale_cap`, the
+> largest scale the budget allows on this surface; Medium on 4K draws at 0.50, so
+> the 0.8 and 0.64 steps changed nothing for three seconds each). The settings
+> note shows the scale actually drawn, e.g. "render scale 0.50 (was 0.70)".
+>
+> Web frame cap (review fix X1): `Cap(30/60)` is honoured on wasm against a
+> DEADLINE (`graphics_settings::FrameCap`): a render goes ahead when
+> `now >= next_due - min(2 ms, interval/8)`, then `next_due += interval`, and the
+> deadline is re-anchored to now when more than one interval behind (a stall, a
+> cap changed mid-run); a skipped rAF tick re-requests a redraw. So the average
+> rate is the cap (or the display rate, if lower) on 60/75/90/100/120/144/165 Hz
+> alike. The first cut measured time since the last rendered frame, which threw
+> away the leftover of a skipped tick: Cap(60) ran at 37.5 fps on 75 Hz, 48 on
+> 144 Hz, 55 on 165 Hz, and the governor then walked to its floor judging those
+> frames. `GameMode::Loading` is exempt (`web_cap_interval`; the load drains a
+> per-frame budget). Tested with a simulated rAF clock, with and without
+> jitter. Native pacing is unchanged. Also: the brightness `pow` in
+> `shader.wgsl` is skipped at 1.0.
 
 ### 10.4 GPU Memory Budget
 
@@ -2355,8 +2406,8 @@ Nothing in the struct is AxeNStax-specific; it lifts to any Decented voxel game.
 |------|--------------|----------|
 | `render_distance` | `i32`, 4–16 | chunk streaming (`chunk_stream.rs`) + server gen (`GameServer.render_distance`) + fog |
 | `render_scale` | `f32`, 0.25–1.0 | offscreen render target + blit (Phase 5). Floor lowered from 0.5 in Perf B1 |
-| `pixel_budget` | `Option<u32>` (serde default `None` = uncapped) | caps the world's physical pixel count: effective scale = `min(render_scale, sqrt(budget / (w*h)))`, applied on native and web (§9.4d) |
-| `leaves_fast` | `bool` (serde default via the preset match, else `false`) | "Leaves: Fast": leaves render as opaque cubes with a shader cutout fill (§2.2); a preset dial |
+| `pixel_budget` | `Option<u32>` (serde default `None` = uncapped) | caps the world's physical pixel count: effective scale = `min(render_scale, sqrt(budget / (w*h)))`, applied on native and web (§9.4d); set by a preset, not part of preset equality (§9.2) |
+| `leaves_fast` | `bool` (serde default `false`) | "Leaves: Fast": leaves render as opaque cubes with a shader cutout fill (§2.2); set by a preset, not part of preset equality (§9.2) |
 | `auto_quality` | `bool` (serde default `false`) | the runtime governor (§10.3); on after first-run detection |
 | `fov_y` | `f32`, 60–100° | `Camera.fov_y` (personal pref) |
 | `mouse_sensitivity` | `f32` | mouse-look multiplier (personal pref) |
@@ -2382,19 +2433,18 @@ changing them never knocks you off a preset, and `apply_preset` preserves them.
 | **High** | **10** | **1.0** | **VSync** | **on** | **off** | **Full** | none | **off** |
 | Ultra | 14 | 1.0 | Uncapped | on | off | Full | none | off |
 
-`pixel_budget` is one of the preset-defining dials. A settings file written
-before it existed (no `pixel_budget` key) takes the budget of the preset its
-other dials match, so an old Low file is still Low (1.3 M) and its label does
-not turn into Custom; a file matching no preset gets `None` (uncapped). A file
-that has the key (even `null`) is taken as written. `leaves_fast` follows the
-same rule (Perf B2): a file without the key takes the value of the preset its
-other dials match (an old Low file is Low with fast leaves, its label unchanged,
-so an old Low/Potato player now gets them), else `false`; a file that has
-`pixel_budget` but not `leaves_fast` must match the preset's budget as well, so a
-hand-picked budget does not borrow a preset's leaves; a file that has the key is
-taken as written. `leaves_fast` IS part of preset equality (flipping it reads as
-`Custom`). `auto_quality` is not part of preset equality and is `false` for an
-old file.
+`pixel_budget` and `leaves_fast` are set when a preset is APPLIED (first run, or
+the player picking it in settings; clicking the preset already shown applies it
+again) and are NOT part of preset equality. The label is derived from the other
+dials only, so toggling Leaves: Fast on Low keeps the label Low. A settings file
+written before they existed (no key) loads with `pixel_budget = None` and
+`leaves_fast = false` and keeps its preset label, so an existing player's
+picture does not change at all: an old Low file is Low, uncapped, with the
+cutout leaves it always had, until the player picks Low (then 1.3 M and fast
+leaves). A file that has either key is taken as written, `null` included.
+(Perf review, 2026-10-24; this replaces the first cut, where an old file took
+its matched preset's budget and leaves.) `auto_quality` is not part of preset
+equality and is `false` for an old file.
 
 `mipmaps` is **off in every preset, High and Ultra included** (A6, 2026-09-06).
 It is a *look* change at distance, not a cost dial, so it stays opt-in until a
