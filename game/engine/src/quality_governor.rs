@@ -196,6 +196,7 @@ pub fn max_level(user: &GraphicsSettings, shrink_distance: bool, scale_cap: f32)
 /// Pure: the dials at `level` (clamped to the plan), derived from the player's
 /// values. Level 0 is exactly the player's values, and no level ever exceeds
 /// them.
+#[cfg(test)]
 pub fn effective(user: &GraphicsSettings, level: usize, shrink_distance: bool, scale_cap: f32) -> Effective {
     effective_skipping(user, level, 0, shrink_distance, scale_cap)
 }
@@ -279,6 +280,7 @@ pub fn target_frame_time_for_period(
 
 /// Pure: [`target_frame_time_for_period`] for a rate in millihertz; a missing
 /// or absurd rate (outside 20..1000 Hz) leaves the target alone.
+#[cfg(test)]
 pub fn target_frame_time_for(
     limit: crate::graphics_settings::FrameLimit,
     display_millihertz: Option<u32>,
@@ -446,6 +448,7 @@ impl Governor {
     }
 
     /// The plan positions marked skipped (bit `i` = position `i`).
+    #[cfg(test)]
     pub fn skipped(&self) -> u16 {
         self.skipped
     }
