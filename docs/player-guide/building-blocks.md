@@ -23,8 +23,13 @@ You can grab any of them for testing from the chat (**T** or **/**) with
 
 | Block | Recipe | Yield |
 |---|---|---|
-| **Stone Slab** | **3 Stone** in a row | 6 |
-| **Stone Stairs** | 6 Stone in a **staircase** shape (left- or right-hand) | 4 |
+| **Slab** (any material below) | **3** of the material in a row | 6 |
+| **Stairs** (any material below) | **6** of the material in a **staircase** shape (left- or right-hand) | 4 |
+
+Every **wood** (oak, birch, spruce, jungle, acacia, dark oak, rubber) and every
+**stone** (stone, cobblestone, sandstone, granite, marble, limestone, slate,
+deepslate) comes as a slab and as stairs: craft from that material's planks or
+stone. Mixed materials don't craft, so keep each batch to one kind.
 
 - **Slabs** fill **half a block**. *Where you click decides which half:*
   - Click the **top** of a block → the slab rests on the **floor** (bottom slab).
@@ -43,14 +48,18 @@ You can grab any of them for testing from the chat (**T** or **/**) with
 
 | Block | Recipe | Yield | Open with |
 |---|---|---|---|
-| **Oak Door** | a **2-wide × 3-tall** column of Oak Planks | 3 | right-click |
-| **Oak Trapdoor** | **6 Oak Planks** (a full 2×3) | 2 | right-click |
-| **Oak Fence Gate** | **Sticks · Plank · Sticks** over **Sticks · Plank · Sticks** (2×3) | 1 | right-click |
+| **Door** | a **2-wide × 3-tall** column of **one wood's** planks | 3 | right-click |
+| **Trapdoor** | **6 planks** of one wood (a full 2×3) | 2 | right-click |
+| **Fence Gate** | **Sticks · Plank · Sticks** over **Sticks · Plank · Sticks** (2×3) | 1 | right-click |
+
+Doors, trapdoors and fence gates come in all **seven woods**: oak, birch, spruce,
+jungle, acacia, dark oak and rubber. The wood of the planks you use is the wood
+of the result, and it looks like those planks.
 
 - A **door** is **two blocks tall** and fills the whole doorway when shut. **Right-click**
   swings it open against the side wall so you can walk through; right-click again
   to shut it. Build **two doors side by side** and they make a **double door**
-  that opens as a pair.
+  that opens as a pair — even if the two doors are different woods.
 - A **trapdoor** is a thin flap. Shut, it's a lid on the floor (or the ceiling,
   depending how you place it); open, it swings flat against the wall. Great for
   hatches, hidden holes, and chicken coops.
@@ -62,7 +71,7 @@ You can grab any of them for testing from the chat (**T** or **/**) with
 
 | Block | Recipe | Yield |
 |---|---|---|
-| **Cobblestone Wall** | a **3-wide × 2-tall** block of Cobblestone | 6 |
+| **Wall** (any stone) | a **3-wide × 2-tall** block of one stone | 6 |
 | **Glass Pane** | **6 Glass** (a full 2×3) | 16 |
 | **Iron Bars** | **6 Iron Ingots** (a full 2×3) | 16 |
 
@@ -77,8 +86,10 @@ grille** — with no fiddling, they just connect.
   per block than full glass for windows.
 - **Iron Bars** are the metal version — a see-through barrier you can't walk or
   shoot through.
-- **Cobblestone Walls** are knee-to-chest height with a fat post — fences for
-  castles and gardens.
+- **Walls** are knee-to-chest height with a fat post — fences for castles and
+  gardens. There's one for every stone: stone, cobblestone, sandstone, granite,
+  marble, limestone, slate and deepslate. Walls of different stones join each
+  other.
 
 ## Signs & item frames — labels and display
 
@@ -105,19 +116,33 @@ Electricity page.
 
 ## Everything at a glance — `/give` names
 
+Every wood and stone follows one pattern: **material, underscore, shape**.
+
+| Shape | Woods (`oak`, `birch`, `spruce`, `jungle`, `acacia`, `dark_oak`, `rubber`) | Stones (`stone`, `cobblestone`, `sandstone`, `granite`, `marble`, `limestone`, `slate`, `deepslate`) |
+|---|---|---|
+| Slab | `spruce_slab` | `sandstone_slab` |
+| Stairs | `spruce_stairs` | `granite_stairs` |
+| Door | `dark_oak_door` | not made in stone |
+| Trapdoor | `birch_trapdoor` | not made in stone |
+| Fence gate | `acacia_fence_gate` (or `acacia_gate`) | not made in stone |
+| Wall | not made in wood | `marble_wall` |
+
+The short names still give the originals: `slab` and `stairs` are the stone ones,
+`door`, `trapdoor` and `fence_gate` the oak ones, and `wall` the cobblestone one
+(`gate` alone gives the Electricity **Logic Gate**, not a fence gate).
+
+Other blocks:
+
 | Block | `/give` name(s) |
 |---|---|
-| Stone Slab | `slab`, `stone_slab` |
-| Stone Stairs | `stairs`, `stone_stairs` |
-| Oak Door | `door`, `oak_door` |
-| Oak Trapdoor | `trapdoor`, `oak_trapdoor` |
-| Oak Fence Gate | `fence_gate`, `oak_fence_gate` (note: `gate` alone gives the Electricity **Logic Gate**, not this) |
-| Cobblestone Wall | `wall`, `cobble_wall`, `cobblestone_wall` |
 | Glass Pane | `pane`, `glass_pane` |
 | Iron Bars | `bars`, `iron_bars` |
 | Oak Sign | `sign`, `oak_sign` |
 | Item Frame | `frame`, `item_frame` |
 
-> **One family, oak & stone for now.** Doors, gates, trapdoors and signs come in
-> **oak**; slabs and stairs in **stone** — more woods and stones are coming. The
-> way they place, open and connect is the same whatever they're made of.
+> **Breaking them.** Wooden pieces break fastest with an axe and drop themselves
+> to any tool. Stone pieces need a **pickaxe** to drop (a wooden one will do for
+> most; deepslate wants a stone one), and drop themselves. Wooden pieces burn: fire
+> will eat them like planks, and they work as fuel in a furnace or campfire.
+> You won't find any of these generated in the world or in villages; you
+> make them.
