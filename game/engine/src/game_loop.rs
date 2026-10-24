@@ -8132,19 +8132,28 @@ impl super::GameState {
             self.frame_pace_instant = Instant::now();
         }
         // Web frame cap (Perf B1): the browser paces by requestAnimationFrame,
-        // so a `Cap(n)` is honoured by skipping any render that arrives sooner
-        // than the cap interval (less a small slack) and asking for another
-        // redraw. Idle screens already throttle themselves above.
+        // so a `Cap(n)` is honoured by skipping any render that arrives before
+        // the cap's next DEADLINE and asking for another redraw
+        // (`FrameCap`: the average rate is the cap on 75/90/100/144/165 Hz
+        // displays too). Idle screens already throttle themselves above, and
+        // the world load (`GameMode::Loading`) is exempt: it drains a per-frame
+        // budget, so capping it only makes the load slower.
         #[cfg(target_arch = "wasm32")]
         {
-            if let Some(interval) = self.graphics.frame_limit.software_cap_interval() {
-                let elapsed = self.frame_pace_instant.elapsed();
-                if !crate::graphics_settings::cap_frame_due(elapsed, interval) {
-                    self.window.request_redraw();
-                    return;
+            let interval = crate::graphics_settings::web_cap_interval(
+                self.graphics.frame_limit,
+                matches!(self.mode, GameMode::Loading(_)),
+            );
+            match interval {
+                Some(interval) => {
+                    // `frame_pace_instant` is the epoch (set once, never reset here).
+                    if !self.frame_cap.due(self.frame_pace_instant.elapsed(), interval) {
+                        self.window.request_redraw();
+                        return;
+                    }
                 }
+                None => self.frame_cap.reset(),
             }
-            self.frame_pace_instant = Instant::now();
         }
 
         // Expire the transient wardrobe (import/refresh) toast after a few

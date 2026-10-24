@@ -1016,6 +1016,9 @@ pub(crate) struct GameState {
     /// sleeps off the remainder; WASM (paced by requestAnimationFrame) skips a
     /// render that comes sooner than the cap interval.
     pub(crate) frame_pace_instant: Instant,
+    /// Web frame-cap deadline (Perf B1); `frame_pace_instant` is its epoch.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) frame_cap: crate::graphics_settings::FrameCap,
     pub(crate) show_debug: bool,
     /// #6 — minimap render state (explored-map cache + last baked texture +
     /// refresh throttle). Empty/None until the first frame paints it.
@@ -1924,6 +1927,8 @@ impl GameState {
             last_tick: Instant::now(),
             tick_accumulator: Duration::ZERO,
             frame_pace_instant: Instant::now(),
+            #[cfg(target_arch = "wasm32")]
+            frame_cap: crate::graphics_settings::FrameCap::new(),
             show_debug: false,
             minimap: crate::minimap::MinimapView::default(),
             map_screen: crate::minimap::MapScreen::default(),

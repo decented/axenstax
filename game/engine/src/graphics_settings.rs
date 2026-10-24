@@ -241,14 +241,71 @@ pub fn recommend_preset(device_type: wgpu::DeviceType, is_touch: bool, is_web: b
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub const WEB_CAP_SLACK: std::time::Duration = std::time::Duration::from_millis(2);
 
-/// Pure: should a render that arrives `elapsed` after the previous one go ahead
-/// under a software cap of `interval`? `false` = skip it and ask for another
-/// redraw. The slack is `min(WEB_CAP_SLACK, interval / 8)` so tiny intervals
-/// keep a proportionate margin.
+/// The web frame cap (Perf B1, deadline form). The browser paces by
+/// requestAnimationFrame, so a `Cap(n)` is honoured by skipping any render that
+/// arrives before the next DEADLINE and asking for another redraw.
+///
+/// The deadline advances by exactly one `interval` per render
+/// (`next_due += interval`), not from the moment the frame was drawn, so the
+/// time a skipped rAF tick leaves over is not thrown away: on a display whose
+/// period does not divide the interval (75, 90, 100, 144, 165 Hz) the average
+/// rate is the cap (or the display rate, if that is lower), not a lower
+/// multiple of the display period. A frame is due `slack` early
+/// (`min(WEB_CAP_SLACK, interval / 8)`) so rAF jitter does not skip it; the
+/// slack never moves the deadline. If the clock is more than one interval
+/// behind (a stall, a hidden tab, a cap raised mid-run) the deadline is
+/// re-anchored to now instead of firing a burst to catch up.
+///
+/// Pure: times are `Duration`s since any fixed epoch the caller keeps.
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
-pub fn cap_frame_due(elapsed: std::time::Duration, interval: std::time::Duration) -> bool {
-    let slack = WEB_CAP_SLACK.min(interval / 8);
-    elapsed + slack >= interval
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FrameCap {
+    next_due: Option<std::time::Duration>,
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+impl FrameCap {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Forget the deadline (the cap was off, or this mode is exempt): the next
+    /// frame renders at once and sets a fresh one.
+    pub fn reset(&mut self) {
+        self.next_due = None;
+    }
+
+    /// Should the frame arriving at `now` render under a cap of `interval`?
+    /// `true` consumes the deadline; `false` leaves it for the next tick.
+    pub fn due(&mut self, now: std::time::Duration, interval: std::time::Duration) -> bool {
+        let Some(due) = self.next_due else {
+            self.next_due = Some(now + interval);
+            return true;
+        };
+        let slack = WEB_CAP_SLACK.min(interval / 8);
+        if now + slack < due {
+            return false;
+        }
+        self.next_due = Some(if now.saturating_sub(due) > interval {
+            now + interval
+        } else {
+            due + interval
+        });
+        true
+    }
+}
+
+/// Pure: the interval the web frame cap enforces this frame, or `None` for no
+/// cap. The world load (`loading`) is exempt: it drains a per-frame budget, so a
+/// cap only makes it take longer (on a 144 Hz display a Cap(60) preset tripled
+/// the load time before the cap was exempted).
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub fn web_cap_interval(limit: FrameLimit, loading: bool) -> Option<std::time::Duration> {
+    if loading {
+        None
+    } else {
+        limit.software_cap_interval()
+    }
 }
 
 /// Per-device graphics settings. The single source of truth for all quality
@@ -1547,25 +1604,91 @@ mod tests {
         assert_eq!(tiny.pixel_budget, Some(PIXEL_BUDGET_MIN));
     }
 
+    /// Drive a `FrameCap` with a simulated rAF clock ticking every `period_us`
+    /// microseconds (plus a deterministic jitter of up to `jitter_us` either
+    /// way) for `secs` seconds. Returns the number of rendered frames.
+    fn simulate_cap(period_us: u64, jitter_us: i64, cap: u16, secs: u64) -> u64 {
+        use std::time::Duration as D;
+        let interval = FrameLimit::Cap(cap).software_cap_interval().unwrap();
+        let mut fc = FrameCap::new();
+        let mut rendered = 0u64;
+        let ticks = secs * 1_000_000 / period_us;
+        for i in 0..ticks {
+            // Jitter in a fixed pseudo-random pattern, never moving the grid.
+            let j = if jitter_us == 0 { 0 } else { ((i * 7919) % (2 * jitter_us as u64 + 1)) as i64 - jitter_us };
+            let t = ((i * period_us) as i64 + j).max(0) as u64;
+            if fc.due(D::from_micros(t), interval) {
+                rendered += 1;
+            }
+        }
+        rendered
+    }
+
     #[test]
-    fn web_cap_interval_decision() {
+    fn the_web_cap_averages_the_cap_on_every_common_refresh_rate() {
+        // The average rate is min(cap, display rate), within 1%, whatever the
+        // rAF period does to the interval (it used to be 37.5 fps for Cap(60)
+        // on 75 Hz, 48 on 144 Hz, 55 on 165 Hz).
+        const SECS: u64 = 60;
+        for hz in [60u64, 75, 90, 100, 120, 144, 165] {
+            let period_us = 1_000_000 / hz;
+            let display = 1_000_000.0 / period_us as f64;
+            for cap in [30u16, 60, 120] {
+                let n = simulate_cap(period_us, 0, cap, SECS);
+                let fps = n as f64 / SECS as f64;
+                let want = display.min(cap as f64);
+                assert!(
+                    (fps - want).abs() <= want * 0.01 + 0.2,
+                    "{hz} Hz display, Cap({cap}): {fps:.2} fps, want {want:.2}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_web_cap_tolerates_raf_jitter() {
+        // +-1.5 ms of rAF jitter on the display's grid: still the cap, never a
+        // skipped frame that costs a whole tick (60 Hz) or drifts (others).
+        const SECS: u64 = 60;
+        for hz in [60u64, 75, 90, 120, 144] {
+            let period_us = 1_000_000 / hz;
+            for cap in [30u16, 60] {
+                let n = simulate_cap(period_us, 1_500, cap, SECS);
+                let fps = n as f64 / SECS as f64;
+                let want = (1_000_000.0 / period_us as f64).min(cap as f64);
+                assert!(
+                    fps >= want * 0.97 && fps <= want * 1.03 + 0.2,
+                    "{hz} Hz display, Cap({cap}), jittered: {fps:.2} fps, want {want:.2}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_web_cap_is_exempt_while_the_world_loads() {
+        for limit in [FrameLimit::Cap(30), FrameLimit::Cap(60), FrameLimit::Cap(120)] {
+            assert!(web_cap_interval(limit, false).is_some());
+            assert_eq!(web_cap_interval(limit, true), None, "{limit:?}");
+        }
+        assert_eq!(web_cap_interval(FrameLimit::VSync, false), None);
+        assert_eq!(web_cap_interval(FrameLimit::Uncapped, false), None);
+    }
+
+    #[test]
+    fn the_web_cap_first_frame_renders_and_a_stall_reanchors() {
         use std::time::Duration as D;
         let i60 = FrameLimit::Cap(60).software_cap_interval().unwrap();
-        let i30 = FrameLimit::Cap(30).software_cap_interval().unwrap();
-        // 60 Hz display, 60 FPS cap: a frame 16.4 ms after the last (rAF
-        // jitter) is still due; one at 8 ms is not.
-        assert!(cap_frame_due(D::from_micros(16_400), i60));
-        assert!(!cap_frame_due(D::from_millis(8), i60));
-        // 60 Hz display, 30 FPS cap: alternate rAF ticks are skipped.
-        assert!(!cap_frame_due(D::from_micros(16_700), i30));
-        assert!(cap_frame_due(D::from_micros(33_300), i30));
-        // 120 Hz display, 60 FPS cap: every second tick (8.3 ms) is skipped.
-        assert!(!cap_frame_due(D::from_micros(8_300), i60));
-        assert!(cap_frame_due(D::from_micros(16_700), i60));
-        // Slack is bounded: a frame 5 ms early under a 33 ms cap is not due.
-        assert!(!cap_frame_due(D::from_millis(28), i30));
-        // A zero elapsed time is never due.
-        assert!(!cap_frame_due(D::ZERO, i60));
+        let mut fc = FrameCap::new();
+        assert!(fc.due(D::from_secs(5), i60), "the first frame always renders");
+        assert!(!fc.due(D::from_secs(5) + D::from_millis(4), i60));
+        // A two-second stall: one frame, then the cap resumes from now (no burst).
+        let t = D::from_secs(8);
+        assert!(fc.due(t, i60));
+        assert!(!fc.due(t + D::from_millis(5), i60), "no catch-up burst after a stall");
+        assert!(fc.due(t + D::from_micros(16_700), i60));
+        // reset() forgets the deadline.
+        fc.reset();
+        assert!(fc.due(t + D::from_micros(16_800), i60));
     }
 
     #[test]
