@@ -2317,9 +2317,12 @@ changing them never knocks you off a preset, and `apply_preset` preserves them.
 | **High** | **10** | **1.0** | **VSync** | **on** | **off** | **Full** | none |
 | Ultra | 14 | 1.0 | Uncapped | on | off | Full | none |
 
-`pixel_budget` is applied by the presets but is **not** compared by preset
-detection: a Potato/Low/Medium file saved before the budget existed (no key =
-uncapped) keeps its label and its old behaviour.
+`pixel_budget` is one of the preset-defining dials. A settings file written
+before it existed (no `pixel_budget` key) takes the budget of the preset its
+other dials match, so an old Low file is still Low (1.3 M) and its label does
+not turn into Custom; a file matching no preset gets `None` (uncapped). A file
+that has the key (even `null`) is taken as written. `auto_quality` is not part
+of preset equality and is `false` for an old file.
 
 `mipmaps` is **off in every preset, High and Ultra included** (A6, 2026-09-06).
 It is a *look* change at distance, not a cost dial, so it stays opt-in until a

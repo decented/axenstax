@@ -238,12 +238,14 @@ pub fn recommend_preset(device_type: wgpu::DeviceType, is_touch: bool, is_web: b
 /// Web frame-cap slack: rAF fires on the display's own cadence, so a frame that
 /// arrives a hair early (rAF jitter) still counts as due. Without it a 60 FPS
 /// cap on a 60 Hz display would skip every other frame.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub const WEB_CAP_SLACK: std::time::Duration = std::time::Duration::from_millis(2);
 
 /// Pure: should a render that arrives `elapsed` after the previous one go ahead
 /// under a software cap of `interval`? `false` = skip it and ask for another
 /// redraw. The slack is `min(WEB_CAP_SLACK, interval / 8)` so tiny intervals
 /// keep a proportionate margin.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub fn cap_frame_due(elapsed: std::time::Duration, interval: std::time::Duration) -> bool {
     let slack = WEB_CAP_SLACK.min(interval / 8);
     elapsed + slack >= interval
@@ -287,7 +289,9 @@ pub struct GraphicsSettings {
     /// behaviour, which is what an old settings file (no key) deserialises to.
     /// The effective render scale is `min(render_scale, sqrt(budget / physical
     /// pixels))` (see [`budgeted_scale`]); a quality dial set by the presets
-    /// (Potato 0.9 M, Low 1.3 M, Medium 2.1 M, High and Ultra none).
+    /// (Potato 0.9 M, Low 1.3 M, Medium 2.1 M, High and Ultra none). A file
+    /// with no such key takes the budget of the preset its other dials match
+    /// (`parse_persisted`).
     #[serde(default)]
     pub pixel_budget: Option<u32>,
     /// Auto quality (Spec 03 §10.3): a runtime governor may hold render
@@ -576,10 +580,14 @@ impl GraphicsSettings {
     }
 
     /// Compare only the quality-load fields (everything except FOV + sensitivity).
-    /// `pixel_budget` is deliberately NOT compared: a saved Potato/Low/Medium
-    /// file from before the budget existed (key absent = `None`) must keep its
-    /// label, and the budget is a cap on top of the visible dials, not a dial.
+    /// The pixel budget is one of them: a preset means its budget too.
     fn quality_eq(&self, other: &Self) -> bool {
+        self.dials_eq(other) && self.pixel_budget == other.pixel_budget
+    }
+
+    /// The quality dials a settings file written before `pixel_budget` existed
+    /// can have: everything `quality_eq` compares except the budget.
+    fn dials_eq(&self, other: &Self) -> bool {
         self.render_distance == other.render_distance
             && (self.render_scale - other.render_scale).abs() < 1e-4
             && self.frame_limit == other.frame_limit
@@ -675,7 +683,7 @@ impl GraphicsSettings {
                 s
             }
             _ => raw
-                .and_then(|json| serde_json::from_str::<GraphicsSettings>(&json).ok())
+                .and_then(|json| parse_persisted(&json))
                 .unwrap_or_default(),
         };
         migrate(&mut s);
@@ -748,6 +756,24 @@ fn migrate(settings: &mut GraphicsSettings) {
     if (settings.mouse_sensitivity - LEGACY_SENSITIVITY_DEFAULT).abs() < 1e-6 {
         settings.mouse_sensitivity = DEFAULT_SENSITIVITY;
     }
+}
+
+/// Parse a persisted settings blob. A file written before `pixel_budget`
+/// existed (no such key) takes the budget of the preset its other dials match
+/// (an old Low file is Low, 1.3 M included, so its label does not change), or
+/// no budget when it matches none. A file that has the key is taken as written.
+fn parse_persisted(json: &str) -> Option<GraphicsSettings> {
+    let value: serde_json::Value = serde_json::from_str(json).ok()?;
+    let had_budget = value.get("pixel_budget").is_some();
+    let mut s: GraphicsSettings = serde_json::from_value(value).ok()?;
+    if !had_budget {
+        s.pixel_budget = GraphicsPreset::ALL
+            .into_iter()
+            .map(GraphicsSettings::from_preset)
+            .find(|p| s.dials_eq(p))
+            .and_then(|p| p.pixel_budget);
+    }
+    Some(s)
 }
 
 #[cfg(test)]
@@ -1336,32 +1362,90 @@ mod tests {
         assert_eq!(s.render_scale, 0.3);
     }
 
+    /// Parse through the loader's own path (`parse_persisted`) and clamp.
+    fn load_json(json: &str) -> GraphicsSettings {
+        let mut s = parse_persisted(json).expect("parses");
+        s.clamp();
+        s
+    }
+
     #[test]
-    fn an_old_settings_file_loads_with_todays_behaviour() {
-        // A file written before pixel_budget / auto_quality existed, and while
-        // smooth_lighting still did (nothing): it must load, keep every value,
-        // and come back uncapped with the governor off.
-        let json = r#"{
+    fn an_old_low_file_is_still_low_and_takes_lows_budget() {
+        // Written before pixel_budget / auto_quality existed, and while
+        // smooth_lighting was still a (dead) key.
+        let s = load_json(
+            r#"{
             "render_distance": 5,
             "render_scale": 0.75,
             "frame_limit": { "Cap": 60 },
             "fog": true,
             "mipmaps": false,
             "particles": "Reduced",
-            "smooth_lighting": false
-        }"#;
-        let mut s: GraphicsSettings = serde_json::from_str(json).unwrap();
-        s.clamp();
-        assert_eq!(s.render_distance, 5);
-        assert_eq!(s.render_scale, 0.75);
-        assert_eq!(s.pixel_budget, None, "no key = uncapped, as today");
-        assert!(!s.auto_quality, "no key = governor off, as today");
-        // Dials unchanged, so the label is unchanged: this was the Low look.
-        assert_eq!(s.preset(), GraphicsPreset::Low);
-        // The budget is not a preset dial: a budgeted Low still reads as Low.
-        let mut budgeted = GraphicsSettings::from_preset(GraphicsPreset::Low);
-        budgeted.pixel_budget = None;
-        assert_eq!(budgeted.preset(), GraphicsPreset::Low);
+            "smooth_lighting": false,
+            "fov_y": 85.0
+        }"#,
+        );
+        assert_eq!(s.preset(), GraphicsPreset::Low, "label must not become Custom");
+        assert_eq!(s.pixel_budget, Some(LOW_PIXEL_BUDGET));
+        assert!(!s.auto_quality, "no key = governor off");
+        assert_eq!(s.fov_y, 85.0, "personal prefs untouched");
+    }
+
+    #[test]
+    fn every_old_preset_file_keeps_its_label_and_its_presets_budget() {
+        for p in GraphicsPreset::ALL {
+            let mut new = GraphicsSettings::from_preset(p);
+            new.auto_quality = false;
+            // An old file: today's JSON minus the two new keys.
+            let mut v = serde_json::to_value(&new).unwrap();
+            v.as_object_mut().unwrap().remove("pixel_budget");
+            v.as_object_mut().unwrap().remove("auto_quality");
+            let s = load_json(&v.to_string());
+            assert_eq!(s.preset(), p, "{p:?}");
+            assert_eq!(s.pixel_budget, new.pixel_budget, "{p:?}");
+            assert!(!s.auto_quality);
+        }
+    }
+
+    #[test]
+    fn an_old_custom_file_stays_custom_with_no_budget() {
+        let s = load_json(
+            r#"{ "render_distance": 9, "render_scale": 0.6, "particles": "Reduced" }"#,
+        );
+        assert_eq!(s.preset(), GraphicsPreset::Custom);
+        assert_eq!(s.pixel_budget, None);
+        assert!(!s.auto_quality);
+        // The bare minimum file is the High default, uncapped.
+        let s = load_json("{}");
+        assert_eq!(s.preset(), GraphicsPreset::High);
+        assert_eq!(s.pixel_budget, None);
+    }
+
+    #[test]
+    fn a_stored_budget_key_is_taken_as_written() {
+        // Low dials with the key present and null: the player's file says no
+        // budget, so it is not re-derived (and reads as Custom, as saved).
+        let s = load_json(
+            r#"{ "render_distance": 5, "render_scale": 0.75, "frame_limit": { "Cap": 60 },
+                 "particles": "Reduced", "pixel_budget": null }"#,
+        );
+        assert_eq!(s.pixel_budget, None);
+        assert_eq!(s.preset(), GraphicsPreset::Custom);
+        let s = load_json(r#"{ "pixel_budget": 1500000 }"#);
+        assert_eq!(s.pixel_budget, Some(1_500_000));
+    }
+
+    #[test]
+    fn a_saved_new_file_round_trips_through_the_loader() {
+        let mut s = GraphicsSettings::from_preset(GraphicsPreset::Medium);
+        s.auto_quality = true;
+        let back = load_json(&serde_json::to_string(&s).unwrap());
+        assert_eq!(back, s);
+        // High has no budget: saved as null, loaded as None, still High.
+        let high = GraphicsSettings::default();
+        let back = load_json(&serde_json::to_string(&high).unwrap());
+        assert_eq!(back.preset(), GraphicsPreset::High);
+        assert_eq!(back.pixel_budget, None);
     }
 
     #[test]
