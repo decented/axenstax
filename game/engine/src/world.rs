@@ -103,6 +103,7 @@ pub fn worldgen_fingerprint_for(generator: crate::biome::Generator) -> u32 {
                         // The v2 generator's output version (the golden's).
                         crate::biome::Generator::V2 => WORLDGEN_VERSION,
                         crate::biome::Generator::V3 => v3_output_version(crate::biome::V3_REVISION),
+                        crate::biome::Generator::V4 => v4_output_version(crate::biome::V4_REVISION),
                     };
                     (g, worldgen_fingerprint_of(version, &plans))
                 })
@@ -118,6 +119,14 @@ pub fn worldgen_fingerprint_for(generator: crate::biome::Generator) -> u32 {
 /// equal.
 pub(crate) const fn v3_output_version(revision: u32) -> u32 {
     (revision << 8) | crate::biome::Generator::V3.version()
+}
+
+/// The version number hashed into v4's fingerprint: the generator's number
+/// (4) in the low byte and its output revision ([`crate::biome::V4_REVISION`])
+/// above it, like [`v3_output_version`]. The low byte differs from v3's, so v3
+/// and v4 never agree whatever their revisions.
+pub(crate) const fn v4_output_version(revision: u32) -> u32 {
+    (revision << 8) | crate::biome::Generator::V4.version()
 }
 
 /// Pure core of [`worldgen_fingerprint`]: the first four bytes (LE) of
@@ -2696,7 +2705,9 @@ impl World {
                 self.fill_column_v2(cx, cz, biome_gen);
                 self.decorate_column_v2(cx, cz, biome_gen);
             }
-            crate::biome::Generator::V3 => {
+            crate::biome::Generator::V3 | crate::biome::Generator::V4 => {
+                // v4 is v3 plus the dry caves, which the v3 fill applies when
+                // the generator's terrain carries cave noise.
                 self.fill_column_v3(cx, cz, biome_gen);
                 // v3 is frozen with v2's decoration passes (trees root on the
                 // real surface, `BiomeGenerator::surface_y`); the v3 trees,
@@ -2753,7 +2764,7 @@ impl World {
     /// density, surface rules, ore. Like v2 it skips a section that already
     /// holds real blocks and never stores an all-air one.
     fn fill_column_v3(&mut self, cx: i32, cz: i32, biome_gen: &BiomeGenerator) {
-        let terrain = biome_gen.v3().expect("a V3 generator carries its v3 terrain");
+        let terrain = biome_gen.v3().expect("a V3 or V4 generator carries its v3 terrain");
         let blocks = crate::worldgen_v3::fill::column_blocks(biome_gen, terrain, cx, cz);
         let h = crate::worldgen_v3::fill::HEIGHT;
         for cy in 0..=MAX_CHUNK_Y {

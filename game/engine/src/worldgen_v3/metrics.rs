@@ -267,12 +267,12 @@ fn bench_v3_column_vs_v2() {
     use crate::world::World;
     // An 8×8 block of columns each (the memo warms as neighbours share
     // lattice points, as in streaming), full `generate_column` and fill only.
-    for generator in [Generator::V2, Generator::V3] {
+    for generator in [Generator::V2, Generator::V3, Generator::V4] {
         let bg = BiomeGenerator::new(42, generator);
         // A mountain region for v3's worst case, the origin for the average.
         let origins = match generator {
             Generator::V2 => vec![(0, 0)],
-            Generator::V3 => vec![(0, 0), super::tests::find_column_above(bg.v3().unwrap(), 150.0)],
+            Generator::V3 | Generator::V4 => vec![(0, 0), super::tests::find_column_above(bg.v3().unwrap(), 150.0)],
         };
         for (ox, oz) in origins {
             let mut w = World::new();
