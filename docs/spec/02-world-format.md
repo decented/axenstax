@@ -906,11 +906,22 @@ before it = 2; field 55, so older builds refuse the new saves), the latter so a 
 (`save::recovered_meta`) keeps it. Every new world is stamped `biome::NEW_WORLD_GENERATOR` (3):
 the menu's Create, a dedicated server's first run, the Workshop (void, so moot). Exceptions: an
 experience arena with a fixed `arena_seed` (Hash Dash, Satori Rush, the scavenger hunt) is stamped
-2, so its map stays the one it was tuned on; a folder with no `world_meta.json` is legacy (2); a
+2, so its map stays the one it was tuned on; a folder with no `world_meta.json` takes the generator
+`world.dat` recorded, else it is legacy (2); a
 `TestHost` stays seed-42 v2 (opt in with `TestConfig.generator`). **A version this build does not
 have refuses the world at load** — `save::read_world_meta` (so `peek_world_meta`, `load_world` and
 the lobby), `world_archive::unpack_world` (web / cloud / `.axeworld`) and a joiner's `JoinAccept`
 (`remote_client::join_generator_refusal`) — never a fall-back to another generator.
+
+**A newer build's world is read-only in the lobby (review S1).** A meta that parses but names a
+generator this build lacks must never be overwritten or copied under placeholder defaults (seed 42,
+v2, no PoP secret). So `save::meta_write_blocked` refuses any `save_world_meta` over it;
+`fork_world` reads its source with the strict `peek_world_meta` (an unreadable or unrunnable source
+is refused, not forked from `load_world_meta`'s defaults); and `save::world_open_refusal` — the one
+lobby gate — reports it, so the card's Play, Host, Edit, Fork and Stash all stop with the reason
+(`menu::handle_card_action`). The card keeps the world's real info and is labelled "needs a newer
+version", not "(world info damaged)". Tests: a rename, a Stash toggle and a fork of a
+`worldgen_version: 4` world leave `world_meta.json` byte-identical and create no fork.
 
 `BiomeGenerator::new(seed, generator)` carries the selector, so every `&BiomeGenerator` consumer
 (terrain height, biome, caves, structures, spawn, snowfall, mob scatter) dispatches inside it, and
@@ -921,7 +932,15 @@ saves.
 
 **Fingerprint rule.** `world::worldgen_fingerprint_for(generator)` folds the generator's version
 (v2: `WORLDGEN_VERSION` = 2) with the bundled-plans hash, so **v2's wire value is exactly the
-pre-v94 value** and v3's differs (a v2 and a v3 world never agree by accident).
+pre-v94 value** (pinned by `v3_fingerprint_hashes_its_revision_and_v2_is_unchanged`) and v3's
+differs (a v2 and a v3 world never agree by accident). **v3 carries its own output revision,
+`biome::V3_REVISION` (currently 0): bump it whenever v3 output changes** — the bridge-to-real swap
+in lane T2 is the first bump, then every later change to its terrain, caves, ore, trees or
+structures. It is hashed in as `(V3_REVISION << 8) | 3` (`world::v3_output_version`; unchanged value
+at revision 0), so a build with different v3 output reads as a fingerprint mismatch and its joiner
+is pushed real chunks instead of being trusted to regenerate seam-free terrain. v2 keeps its own
+counter, `WORLDGEN_VERSION`, and its golden. `NEW_WORLD_GENERATOR` is 3 while v3 is still the v2
+bridge; terrain T1 must not reach `main` or a release before T2 lands the real v3.
 `worldgen_fingerprint()` is v2's. Protocol v94 (Spec 04): `JoinAccept` carries `generator` and the
 host's fingerprint *for that generator*; `JoinRequest.worldgen_version` stays the joiner's v2
 fingerprint (it announces before it knows the world) and `generator_fingerprints` lists its

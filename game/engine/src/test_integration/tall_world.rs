@@ -146,6 +146,34 @@ fn a_block_at_y200_is_pushed_to_a_joiner() {
     }
 }
 
+/// Terrain T1 review S3: a world that lost its `world_meta.json` takes its
+/// generator from the one `world.dat` recorded, not a hard-coded v2.
+#[test]
+fn a_world_with_no_meta_takes_its_generator_from_world_dat() {
+    let _root = save::WorldsRootGuard::new("t1-metaless-generator");
+    let make = |name: &str, recorded: Option<u32>| {
+        let mut dat = save::minimal_world_save_for_tests(5);
+        dat.worldgen_version = recorded;
+        save::write_world_folder(name, &save::WorldMeta::new(name), &dat, &World::new()).unwrap();
+        std::fs::remove_file(save::world_dir(name).join("world_meta.json")).unwrap();
+    };
+
+    make("recorded-v3", Some(3));
+    assert_eq!(save::peek_world_meta("recorded-v3").unwrap().generator(), Ok(Generator::V3));
+    assert_eq!(save::load_world_meta("recorded-v3").generator(), Ok(Generator::V3));
+
+    make("recorded-v2", Some(2));
+    assert_eq!(save::peek_world_meta("recorded-v2").unwrap().generator(), Ok(Generator::V2));
+
+    make("pre-field", None);
+    assert_eq!(save::peek_world_meta("pre-field").unwrap().generator(), Ok(Generator::V2), "an old save is v2");
+
+    // A generator this build lacks refuses the world: no guessing v2.
+    make("recorded-v4", Some(4));
+    let err = save::peek_world_meta("recorded-v4").expect_err("an unknown generator must refuse");
+    assert!(err.contains("generator v4"), "{err}");
+}
+
 #[test]
 fn a_new_world_is_v3_and_an_old_one_v2() {
     let fresh = save::WorldMeta::new("fresh");

@@ -74,7 +74,10 @@ pub fn tick_mob_spawning(
                     let sx = px + (angle.cos() * dist) as i32;
                     let sz = pz + (angle.sin() * dist) as i32;
 
-                    let mut sy = 90;
+                    // From the column's real top, not a fixed height: terrain
+                    // solid at 90 would otherwise spawn mobs inside it, and a
+                    // build above 90 would spawn them under it (T1 review S2).
+                    let mut sy = world.column_top_y(sx, sz);
                     while sy > 0 && world.get_block(sx, sy, sz) == block::AIR {
                         sy -= 1;
                     }
@@ -193,6 +196,26 @@ mod tests {
             }
         }
         world
+    }
+
+    /// Terrain T1 review S2: the night scan started at a fixed y 90, so a
+    /// column solid up to y 150 spawned its mobs at 91, inside the rock. It
+    /// starts at the column's top now and spawns on top, at 151.
+    #[test]
+    fn night_spawns_land_on_top_of_terrain_taller_than_90() {
+        let mut world = World::new();
+        for x in -80..=80 {
+            for z in -80..=80 {
+                for y in 85..=150 {
+                    world.set_block(x, y, z, STONE);
+                }
+            }
+        }
+        let mut ecs = hecs::World::new();
+        tick_mob_spawning(&mut ecs, &world, NIGHT, &[Vec3::new(0.0, 152.0, 0.0)]);
+        let ys: Vec<f32> = ecs.query::<(&MobKind, &entity::Position)>().iter().map(|(_, (_, p))| p.0.y).collect();
+        assert!(!ys.is_empty(), "the spawner placed nothing");
+        assert!(ys.iter().all(|&y| y == 151.0), "spawned inside or under the terrain: {ys:?}");
     }
 
     #[test]

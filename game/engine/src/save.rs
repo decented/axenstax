@@ -2720,7 +2720,11 @@ pub(crate) fn save_refusal_in(dir: &std::path::Path) -> Option<WorldSaveError> {
 /// a freshly generated one, and never written.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn world_open_refusal(folder_name: &str) -> Option<String> {
-    save_refusal_in(&world_dir(folder_name)).map(|e| e.to_string())
+    let dir = world_dir(folder_name);
+    // A world whose meta parses but names a terrain generator this build lacks
+    // is a newer build's world: the lobby must not edit, Stash, fork or open it
+    // (terrain T1 review S1).
+    save_refusal_in(&dir).map(|e| e.to_string()).or_else(|| unrunnable_generator_in(&dir).map(|(_, why)| why))
 }
 
 /// Web: the IndexedDB / cloud blob is checked as it is unpacked
@@ -3730,7 +3734,19 @@ fn read_world_meta(folder_name: &str) -> Result<(WorldMeta, Option<MetaDamage>),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             if !has_quarantined_sibling(&dir, "world_meta.json") {
                 // Legacy world with no meta file at all. Don't write to disk yet.
-                return Ok((WorldMeta::from_folder(folder_name, &dat_path), None));
+                // Its generator is the one world.dat recorded, when it did (a v3
+                // world that lost its meta must not open as v2 and seam), else v2;
+                // an unknown one refuses the world.
+                let mut meta = WorldMeta::from_folder(folder_name, &dat_path);
+                let recorded = fs::read(&dat_path)
+                    .ok()
+                    .and_then(|data| read_world_save(&data).ok())
+                    .and_then(|save| save.worldgen_version);
+                if let Some(version) = recorded {
+                    meta.worldgen_version = version;
+                }
+                meta.generator()?;
+                return Ok((meta, None));
             }
             if let Some(newer) = save_refusal_in(&dir) {
                 return Err(newer.to_string());
@@ -3932,6 +3948,18 @@ pub fn load_world_meta(folder_name: &str) -> WorldMeta {
 /// the existing file is unreadable/unparseable (it hasn't been quarantined yet),
 /// or it is missing because a damaged copy was quarantined and not recovered.
 /// Either way a write would put defaults over the world's real info.
+/// The world's parsed `world_meta.json`, with why this build can't run its
+/// terrain generator, when it parses but names one this build lacks (a world
+/// from a newer build). `None` for a meta that is missing, unreadable, torn or
+/// runnable — those have their own paths.
+#[cfg(not(target_arch = "wasm32"))]
+fn unrunnable_generator_in(dir: &std::path::Path) -> Option<(WorldMeta, String)> {
+    let data = fs::read(dir.join("world_meta.json")).ok()?;
+    let meta = serde_json::from_slice::<WorldMeta>(&data).ok()?;
+    let why = meta.generator().err()?;
+    Some((meta, why))
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn meta_write_blocked(dir: &std::path::Path) -> Option<String> {
     if crate::save_fence::is_up(dir) {
@@ -3944,9 +3972,12 @@ fn meta_write_blocked(dir: &std::path::Path) -> Option<String> {
     }
     let meta_path = dir.join("world_meta.json");
     match fs::read(&meta_path) {
-        Ok(data) => serde_json::from_slice::<WorldMeta>(&data)
-            .err()
-            .map(|e| format!("existing world_meta.json is damaged ({e})")),
+        Ok(data) => match serde_json::from_slice::<WorldMeta>(&data) {
+            Err(e) => Some(format!("existing world_meta.json is damaged ({e})")),
+            // A newer build's world: this build would replace its meta with one
+            // it can only fill from placeholders (seed 42, v2, no PoP secret).
+            Ok(meta) => meta.generator().err(),
+        },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             has_quarantined_sibling(dir, "world_meta.json")
                 .then(|| "world info damaged (quarantined world_meta.json, not recovered)".to_string())
@@ -4021,7 +4052,9 @@ pub fn list_world_entries() -> Vec<WorldEntry> {
             // refuses to open it.
             let meta = if let Some(refusal) = save_refusal_in(&world_dir(&folder_name)) {
                 let mut m = peek_world_meta(&folder_name)
-                    .unwrap_or_else(|_| WorldMeta::from_folder(&folder_name, &dat_path));
+                    .ok()
+                    .or_else(|| unrunnable_generator_in(&world_dir(&folder_name)).map(|(m, _)| m))
+                    .unwrap_or_else(|| WorldMeta::from_folder(&folder_name, &dat_path));
                 let label = if refusal.is_newer_version() {
                     "needs a newer version"
                 } else {
@@ -4029,6 +4062,12 @@ pub fn list_world_entries() -> Vec<WorldEntry> {
                 };
                 m.display_name = format!("{} ({label})", m.display_name);
                 m.description = refusal.to_string();
+                m
+            } else if let Some((mut m, why)) = unrunnable_generator_in(&world_dir(&folder_name)) {
+                // A newer build's terrain generator: the card keeps the world's
+                // real info (its meta is intact) and says why it can't be used.
+                m.display_name = format!("{} (needs a newer version)", m.display_name);
+                m.description = why;
                 m
             } else {
                 match peek_world_meta(&folder_name) {
@@ -4179,8 +4218,10 @@ pub fn fork_world(source_folder: &str, source_display_name: &str) -> Result<Stri
     }
     crate::handover::live::personal_adapter::generic_copy_guard(&source_dir)?;
 
-    // Load the source metadata to preserve integrity fields
-    let source_meta = load_world_meta(source_folder);
+    // Load the source metadata to preserve integrity fields. Strictly: a source
+    // whose info is damaged, or whose generator this build lacks, is refused,
+    // never forked under placeholder defaults (seed 42, v2) over copied chunks.
+    let source_meta = peek_world_meta(source_folder)?;
     let new_display_name = format!("{source_display_name} (fork)");
     let new_folder = sanitize_folder_name(&new_display_name);
     let dest_dir = world_dir(&new_folder);

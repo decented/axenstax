@@ -89,7 +89,9 @@ pub fn worldgen_fingerprint() -> u32 {
 /// for the world's generator (`JoinAcceptPacket.worldgen_version`); a joiner
 /// announces one per generator it has. v2's value is exactly the one every
 /// build since v65 exchanged (`WORLDGEN_VERSION` is 2), and v3's differs, so
-/// a v2 and a v3 world never agree by accident.
+/// a v2 and a v3 world never agree by accident. v3's also folds in
+/// [`crate::biome::V3_REVISION`] (bump it whenever v3 output changes), so a
+/// build with different v3 output never reads as matching.
 pub fn worldgen_fingerprint_for(generator: crate::biome::Generator) -> u32 {
     static FINGERPRINTS: std::sync::LazyLock<Vec<(crate::biome::Generator, u32)>> =
         std::sync::LazyLock::new(|| {
@@ -100,13 +102,22 @@ pub fn worldgen_fingerprint_for(generator: crate::biome::Generator) -> u32 {
                     let version = match g {
                         // The v2 generator's output version (the golden's).
                         crate::biome::Generator::V2 => WORLDGEN_VERSION,
-                        crate::biome::Generator::V3 => g.version(),
+                        crate::biome::Generator::V3 => v3_output_version(crate::biome::V3_REVISION),
                     };
                     (g, worldgen_fingerprint_of(version, &plans))
                 })
                 .collect()
         });
     FINGERPRINTS.iter().find(|(g, _)| *g == generator).map(|&(_, fp)| fp).expect("every generator has a fingerprint")
+}
+
+/// The version number hashed into v3's fingerprint: the generator's number
+/// (3) in the low byte and its output revision ([`crate::biome::V3_REVISION`])
+/// above it. At revision 0 this is 3, so the value is unchanged until the
+/// first bump; any bump gives a value no other generator's plain number can
+/// equal.
+pub(crate) const fn v3_output_version(revision: u32) -> u32 {
+    (revision << 8) | crate::biome::Generator::V3.version()
 }
 
 /// Pure core of [`worldgen_fingerprint`]: the first four bytes (LE) of
