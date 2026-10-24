@@ -172,3 +172,56 @@ fn a_world_on_an_unknown_generator_is_refused_at_load() {
     assert!(save::load_world(&name, &mut w).is_err(), "the world does not open");
     let _ = save::delete_world(&name);
 }
+
+/// Column (0, 0) roofed at y 150 over x 8..=15 with a wall at x 8, so the
+/// space under the roof opens only onto column (1, 0) across x = 15 | 16.
+fn roof_over_the_border(w: &mut World) {
+    for z in 0..16 {
+        for x in 8..16 {
+            w.set_block(x, 150, z, block::STONE);
+        }
+        for y in V2_WORLD_TOP + 1..150 {
+            w.set_block(8, y, z, block::STONE);
+        }
+    }
+}
+
+#[test]
+fn sky_reaches_an_overhang_above_the_old_roof_from_a_lower_neighbour() {
+    // Terrain v3 lighting gap: the neighbour's sections stop at y 95, so the
+    // open sky beside the overhang is absent sections — read as sky, never a
+    // light source — and the overhang stayed dark. Both lighting orders.
+    let reg = BlockRegistry::new();
+    let bg = BiomeGenerator::new(7, Generator::V2);
+    for neighbour_first in [true, false] {
+        let mut w = World::new();
+        w.generate_column(0, 0, &bg);
+        if neighbour_first {
+            w.generate_column(1, 0, &bg);
+            crate::lighting::run_initial_pass_for_column(&mut w, 1, 0, &reg);
+        }
+        roof_over_the_border(&mut w);
+        crate::lighting::run_initial_pass_for_column(&mut w, 0, 0, &reg);
+        if !neighbour_first {
+            assert_eq!(w.sky_light_at(15, 120, 8), 0, "no lit neighbour yet: dark under the roof");
+            w.generate_column(1, 0, &bg);
+            crate::lighting::run_initial_pass_for_column(&mut w, 1, 0, &reg);
+        }
+        assert_eq!(w.sky_light_at(16, 120, 8), 15, "the neighbour's open sky");
+        assert_eq!(w.sky_light_at(15, 120, 8), 14, "neighbour first: {neighbour_first}");
+        assert_eq!(w.sky_light_at(12, 120, 8), 11, "and on inwards");
+        assert_eq!(w.sky_light_at(15, 151, 8), 15, "open sky on the roof");
+        assert!(!w.has_chunk(1, 7, 0), "nothing conjured in the neighbour");
+    }
+}
+
+#[test]
+fn an_ungenerated_neighbour_lends_no_sky() {
+    // An absent neighbour column may yet generate solid there.
+    let reg = BlockRegistry::new();
+    let mut w = World::new();
+    w.generate_column(0, 0, &BiomeGenerator::new(7, Generator::V2));
+    roof_over_the_border(&mut w);
+    crate::lighting::run_initial_pass_for_column(&mut w, 0, 0, &reg);
+    assert_eq!(w.sky_light_at(15, 120, 8), 0);
+}

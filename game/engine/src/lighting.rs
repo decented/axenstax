@@ -182,12 +182,76 @@ pub fn initial_sky_light_for_column(
             }
         }
     }
+    seed_across_borders_above_old_roof(world, cx, cz, y_range, registry, &mut seeds);
     // BFS spread sideways so open sky reaches under overhangs.
     let mut queue: VecDeque<((i32, i32, i32), u8)> = VecDeque::new();
     for s in seeds {
         queue.push_back((s, 15));
     }
     bfs_propagate(world, &mut queue, registry, /* block_light */ false);
+}
+
+/// Terrain v3 (2026-10-24): open sky reaching sideways across a column border
+/// above the old 96-block roof. A section that is absent reads as open sky
+/// (`sky_light_at` = 15) but is never a BFS source, so without this an
+/// overhang or cliff ledge above y 95 that opens onto a lower neighbour (whose
+/// sections stop below it) stayed dark, as did one facing a neighbour's open
+/// sky that was lit before it. For every border cell pair above
+/// [`crate::world::V2_WORLD_TOP`], up to the higher of the two columns' light
+/// tops, this seeds at 15:
+/// - the neighbour's cell when its section is absent or it holds full sky, and
+/// - our own cell when our section is absent and the neighbour's is present
+///   (so the order the two columns are lit in does not matter).
+///
+/// Only a *generated* neighbour (it holds its bedrock section) counts: an
+/// ungenerated one may turn out solid there. Nothing at or below y 95 is
+/// touched, so a v2 column is lit exactly as before.
+fn seed_across_borders_above_old_roof(
+    world: &World,
+    cx: i32,
+    cz: i32,
+    (min_y, max_y): (i32, i32),
+    registry: &BlockRegistry,
+    seeds: &mut Vec<(i32, i32, i32)>,
+) {
+    let cs = CHUNK_SIZE as i32;
+    let lo = (crate::world::V2_WORLD_TOP + 1).max(min_y);
+    for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+        let (ncx, ncz) = (cx + dx, cz + dz);
+        if !world.has_chunk(ncx, 0, ncz) || world.is_evicted_at(ncx * cs, ncz * cs) {
+            continue;
+        }
+        let hi = max_y.max(world.light_top(ncx, ncz));
+        if hi < lo {
+            continue;
+        }
+        for k in 0..cs {
+            // Our border cell and the neighbour's cell across the border.
+            let (ox, oz, nx, nz) = match (dx, dz) {
+                (-1, _) => (cx * cs, cz * cs + k, cx * cs - 1, cz * cs + k),
+                (1, _) => (cx * cs + cs - 1, cz * cs + k, cx * cs + cs, cz * cs + k),
+                (_, -1) => (cx * cs + k, cz * cs, cx * cs + k, cz * cs - 1),
+                _ => (cx * cs + k, cz * cs + cs - 1, cx * cs + k, cz * cs + cs),
+            };
+            for y in lo..=hi {
+                let cy = y.div_euclid(cs);
+                let ours = world.has_chunk(cx, cy, cz);
+                let theirs = world.has_chunk(ncx, cy, ncz);
+                if !theirs {
+                    if ours {
+                        seeds.push((nx, y, nz));
+                    }
+                } else if !ours {
+                    seeds.push((ox, y, oz));
+                } else if y <= max_y
+                    && world.sky_light_at(nx, y, nz) == 15
+                    && registry.light_absorption(world.get_block(nx, y, nz)) < 15
+                {
+                    seeds.push((nx, y, nz));
+                }
+            }
+        }
+    }
 }
 
 /// Compute initial block-light for a column. Walks every voxel in
