@@ -77,6 +77,7 @@ mod workshop_painter;
 mod physics;
 mod placement;
 mod pick_block;
+mod pick_block_play;
 mod play_mode;
 mod rail;
 mod cart;
