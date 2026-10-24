@@ -7996,7 +7996,8 @@ impl super::GameState {
         // any time left in this frame's budget. This also yields the CPU, fixing
         // the native `ControlFlow::Poll` busy-spin for capped modes. VSync is
         // paced by the swapchain `present`; Uncapped is deliberately unlimited;
-        // WASM is paced by requestAnimationFrame (this block is native-only).
+        // WASM is paced by requestAnimationFrame and skips early frames instead
+        // (the block below this one; this block is native-only).
         #[cfg(not(target_arch = "wasm32"))]
         {
             let mut interval = self.graphics.frame_limit.software_cap_interval();
@@ -8088,6 +8089,21 @@ impl super::GameState {
                 }
                 Some(Err(TryRecvError::Empty)) | None => {}
             }
+        }
+        // Web frame cap (Perf B1): the browser paces by requestAnimationFrame,
+        // so a `Cap(n)` is honoured by skipping any render that arrives sooner
+        // than the cap interval (less a small slack) and asking for another
+        // redraw. Idle screens already throttle themselves above.
+        #[cfg(target_arch = "wasm32")]
+        {
+            if let Some(interval) = self.graphics.frame_limit.software_cap_interval() {
+                let elapsed = self.frame_pace_instant.elapsed();
+                if !crate::graphics_settings::cap_frame_due(elapsed, interval) {
+                    self.window.request_redraw();
+                    return;
+                }
+            }
+            self.frame_pace_instant = Instant::now();
         }
 
         #[cfg(target_arch = "wasm32")]
