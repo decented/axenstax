@@ -1,5 +1,5 @@
 //! Terrain generator v3, "dramatic terrain"
-//! (docs/foundations/2026-10-23-terrain-overhaul.md; as-built: Spec 02 §5.3.6).
+//! (docs/foundations/2026-10-23-terrain-overhaul.md; as-built: Spec 02 §5.3.8).
 //!
 //! Continuous climate fields (C, E, W, T, H, R) on a 4-block lattice give a
 //! 2D height (`height2d`) through piecewise-linear splines; a 3D density noise

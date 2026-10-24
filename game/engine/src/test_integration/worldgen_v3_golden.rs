@@ -92,7 +92,7 @@ fn hash(w: &World, cols: &[(i32, i32)]) -> u64 {
 /// The pinned v3 output. When the v3 golden changes, bump this AND
 /// biome::V3_REVISION to match. The session wires the equality assert after
 /// merging.
-const V3_GOLDEN: u64 = 0;
+const V3_GOLDEN: u64 = 0x246c_26bb_8a18_55fc;
 const V3_GOLDEN_REVISION: u32 = 1;
 
 #[test]

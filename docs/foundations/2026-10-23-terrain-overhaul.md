@@ -80,11 +80,20 @@ Piecewise-linear splines (linear interpolation between knots; smoothstep only vi
 
 Knots are a starting point. Tune them so the acceptance numbers in §11 hold.
 
+**As tuned (lane T2a, 2026-10-24; full as-built in Spec 02 §5.3.8):** field scale `NORM` 1.539 /
+1.378 / 1.345 / 1.336 (1–4 octaves, measured). `base(C)`: −1 → 28, −0.6 → 32, −0.5 → 37, −0.45 → 44,
+−0.25 → 52, −0.15 → 58, −0.08 → 62, −0.02 → 65, 0.2 → 67, 0.6 → 72, 1 → 78. `A(E)`: −1 → 160,
+−0.6 → 140, −0.3 → 70, 0 → 28, 0.4 → 9, 1 → 4. **Added: escarpments.** A seventh field S (2 octaves,
+wavelength 256) adds `44 · clamp01((0.3 − E)/0.5) · smoothstep(−0.008, 0.008, S)` inside the
+`inland ·` term: cliff lines along S's zero contour, none on eroded plains. Without it the 2D slope
+≥ 6 share was 0.06–0.1 % (a 2D slope of 6 needs a 24-block step between neighbouring lattice
+points, which smooth splines never make). River width, bed and the 95/110 fade are as above.
+
 ## 5. 3D shape — overhangs and cliffs
 
 `density(x, y, z) = (h − y) + J · n3(x/32, y/24, z/32)`; solid where `density > 0`.
 Jaggedness (blocks): `J = inland · (18 · clamp01((−E − 0.2)/0.5) · clamp01(PV) + 2)`, so it is near 18 in mountains and 2 in plains.
-`n3` is sampled on a 4×8×4 lattice (x, z every 4, y every 8, globally aligned) and trilinearly
+`n3` (one OpenSimplex 3D, ×2.6, clamped to [-1, 1]) is sampled on a 4×8×4 lattice (x, z every 4, y every 8, globally aligned) and trilinearly
 interpolated. Only the y-band `[min_h − J_max − 2, max_h + J_max + 2]` of a column needs density; below is solid,
 above is air. A pure `solid_at(x, y, z)` (lattice lookup + interpolation) must equal the column result
 (`terrain_block_at` purity contract).
@@ -95,7 +104,7 @@ Slope `s` = max |height2d(x±1, z) − h|, |height2d(x, z±1) − h| (pure 2D, c
 
 1. top ≥ snow line (165 + 8·n) → SNOW top over stone.
 2. top ≥ 140, or `s ≥ 3` (cliff face) → stone (gravel patches by noise). Exposed cliffs read as rock.
-3. Beach: `−0.15 ≤ C ≤ −0.02` and top in 59..=65 and not mountainous → SAND ×3 over sandstone; cold (T < −0.45)
+3. Beach: `−0.15 ≤ C ≤ −0.02` (tuned to `−0.12 ≤ C ≤ −0.08`: the wide band made 11 % of land beach) and top in 59..=65 and not mountainous → SAND ×3 over sandstone; cold (T < −0.45)
    → GRAVEL.
 4. Underwater (top < 62): ocean/river floor SAND, GRAVEL patches, occasional CLAY if that block exists.
 5. Biome default: Desert SAND/sandstone, SnowyTundra SNOW over dirt, else GRASS over 3–4 DIRT.
@@ -122,7 +131,11 @@ Order of decision:
 4. h > 120, or (inland and E < −0.35 and PV > 0.4) → Mountains.
 5. Otherwise a Whittaker table on T/H. Thresholds are tuned so land (excluding mountains) splits roughly
    Plains 22 %, Forest 18 %, Savanna 12 %, Desert 10 %, Taiga 10 %, SnowyTundra 7 %, BirchForest 6 %,
-   Jungle 6 % (±5 points each).
+   Jungle 6 % (±5 points each). As tuned: T edges −0.32 / 0.02 / 0.27; cold: SnowyTundra if H < −0.20
+   else Taiga; cool: Plains < −0.13 ≤ Forest < 0.22 ≤ BirchForest; warm: Savanna < −0.25 ≤ Plains
+   < 0.07 ≤ Forest < 0.40 ≤ Jungle; hot: Desert < 0 ≤ Savanna < 0.30 ≤ Jungle. Measured (3 seeds,
+   8192², every 8): Plains 19.5, Forest 15.9, Savanna 12.3, Desert 10.3, Taiga 10.4, SnowyTundra 7.0,
+   BirchForest 6.6, Jungle 6.8, River 6.1, Beach 5.1 % of land excluding mountains.
 New variants map onto existing behaviour: DeepOcean and River use Ocean's mobs (fish/squid; sharks only in
 DeepOcean if that's a one-line change), Beach uses no trees and Plains' passive table minus large animals.
 v2 never produces the new variants.
