@@ -165,6 +165,11 @@ v2 never produces the new variants.
 - **Spawn:** for v3 worlds, spiral outward from the origin (up to 64 chunks) to the first column that is dry,
   not Ocean/River/Beach, has h in 63..=110, slope < 2, and real ground with headroom. Raise
   `ground_with_headroom`'s scan start to `terrain_height + 32` (overhangs).
+  **As built (2026-10-24, `spawn_search.rs`):** candidates every 8 blocks in square rings, decided on pure
+  queries (`biome_at`, `terrain_height`, `surface_y`, lattice slope); the chosen column's 3×3 chunks are
+  generated, then the ±6-block headroom search runs there (scan start `surface_y + 32`). It fixed a bug where the
+  old ±6-block search at the origin left the player on the sea or lake floor (the origin sits in the deepest
+  valley, every field's first octave being zero). v2 keeps its old spawn; spawn preferences snap onto real ground.
 - `SpawnPref` finders work unchanged on labels. Their tests may need larger radii.
 
 ## 11. Acceptance (measured by tests; numbers are for v3, over ≥ 3 seeds)

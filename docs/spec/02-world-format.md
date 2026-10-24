@@ -1334,8 +1334,23 @@ Jungle 6.8, River 6.1, Beach 5.1 %. A fast sparse version of these bounds runs i
 **Frozen with v2's caves and decoration.** Caves: v2's flooded noise caves
 (`BiomeGenerator::is_cave`). Decoration (trees, vegetation, villages, hideouts, ravines,
 mineshafts): v2's passes, with trees and vegetation on `surface_y`. These are permanent for v3; the
-design's dry caves (§7) and v3 trees/spawn (§9–§10) belong to the next generator. `max_generated_height` is 255 (terrain
+design's dry caves (§7) and v3 trees (§9) belong to the next generator. `max_generated_height` is 255 (terrain
 stops at 240; the rest is room for trees on peaks).
+
+**World spawn (as built, design §10; no terrain output changes).** The old ±6-block search round the origin
+(`chunk_stream::find_surface_spawn`) put the player on the sea or lake floor in a large share of v3 worlds: the
+origin's climate fields are all near zero (the first octave of every field is zero there, so it sits in the deepest
+valley), and the fallback was `terrain_height + 1`. For every generator that is not v2, `spawn_search`
+spirals outward from the origin (square rings, a candidate every 8 blocks, up to 64 chunks) to the first column
+that is dry, not Ocean / DeepOcean / River / Beach, with `terrain_height` in 63..=110, real `surface_y` in 63..=118,
+and lattice slope < 2, decided on pure queries only. `world_spawn_point` and `GameServer::world_spawn` then
+generate that column's 3×3 chunks (`chunk_stream::spawn_pregen_columns`) and run the ±6-block
+`ground_with_headroom` search there; its scan now starts at `surface_y + 32`. If no column qualifies the nearest dry
+non-river column is used, else the origin (both logged). The result is cached per generator and deterministic for a
+seed. A v2 world keeps its exact spawn (±6 round the origin, scan start `terrain_height + 24`). Spawn preferences
+(`spawn_pref`) skip wet columns on v3, estimate y from `surface_y`, and `snap_spawn_to_ground` settles the player on
+the generated blocks (v2 untouched); "At origin" uses the world-spawn column. A saved world keeps its saved player
+position and spawn point: the search runs only for a fresh world and for a dedicated server's new joiner.
 
 **Lighting above the old roof.** `lighting::initial_sky_light_for_column` also seeds sky light
 across a column border above y 95 from a generated neighbour (its absent or full-sky cells, and
