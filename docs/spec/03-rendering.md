@@ -172,6 +172,26 @@ For each block that has a visible model (air and invisible blocks are skipped), 
 
 > **History (#130 → #131, 2026-06-22).** Before #131 there was **no pass for solid + transparent blocks at all** — the opaque greedy pass skipped `is_transparent` and the small-cube pass skipped solids, so such blocks emitted no geometry and rendered **invisible while still colliding**. This bit the five non-oak leaf species (`transparent: true` → invisible "leaves you bash through"); #130's stopgap made all leaves `transparent: false` (opaque) so they render via the greedy pass. **#131** built the transparent-solid pass above, which fixes the latent **glass** invisibility (glass = solid + transparent, alpha texture → renders see-through). **#131 fancy-leaf flip (shipped):** all six leaf species are back to `transparent: true` (solid, so still walkable-on) and their textures carry ~`LEAF_CUTOUT_PCT`% (20%) **cutout-alpha holes** (`texture_gen::gen_species_leaves`), so canopies render see-through via `fs_transparent`'s `alpha < 0.04` discard. The third-person camera passes through them automatically — `camera_occlusion::default_for(solid, transparent)` returns `PassThrough` for a transparent solid, no per-block exception needed. The pass culls leaf faces against same-type neighbours (rule 3), so a dense canopy shows its holed outer shell rather than every internal leaf face; a layered (no-same-type-cull) leaf look + cutout-density tuning are open feel-tweaks for an Axo playtest.
 
+> **AS-BUILT (Perf B2, 2026-10-24) -- "Leaves: Fast".** Setting
+> `leaves_fast` (preset dial: Potato and Low on, Medium/High/Ultra off).
+> `BlockRegistry::set_leaves_fast` is a render-only flag: the mesher asks
+> `renders_transparent(id)` (`transparent` unless fast and the block is any
+> leaf species) where it used to ask `is_transparent`, so every leaf takes the
+> OPAQUE greedy pass (the #130 path) and its interior faces cull against any
+> opaque neighbour, other species included. Light, physics, raycast and the
+> third-person camera still read the authored `transparent` (a leaf stays
+> see-through for light and walkable-through for the camera). The transparent
+> depth pipeline draw is left alone: it is what keeps water from painting
+> through glass and fancy canopies. Cutout holes: the opaque shader has nothing
+> to discard to, so the mesher sets bit 16 on a fast leaf face's `tex_layer`
+> (`mesh::LEAF_FILL_FLAG`, texture layers are < 512) and `fs_main` masks it
+> off, then replaces a texel with alpha < 0.5 by 0.6x the texture's smallest
+> mip (the alpha-weighted average leaf colour when mipmaps are on, else the
+> texel's own colour; a near-black result falls back to a dark green). No new
+> texture layers. Toggling (`GameState::sync_leaves_fast`) flips the flag and
+> queues every loaded section (opaque and transparent meshes both) on the
+> dirty-mesh queue, so the rebuild spreads over the next frames.
+
 ### 2.3 Greedy Meshing
 
 After determining which faces to emit, greedy meshing reduces quad count:
@@ -361,6 +381,16 @@ Chunks within the view frustum are sorted:
 
 1. **Opaque chunks**: sorted front-to-back (for early-Z rejection).
 2. **Transparent chunks**: sorted back-to-front (for correct alpha blending).
+
+> **AS-BUILT (Perf B2, 2026-10-24).** Only (1) is built. `draw_order.rs`
+> keeps, per player, a cached nearest-first list of the opaque section keys
+> (squared distance to the section centre, ties by key). It is rebuilt only when
+> the camera's section changes or the set of opaque meshes changes
+> (`Renderer::chunk_mesh_epoch`, bumped when a key is added or removed, not when
+> a mesh is replaced), never per frame; `render_world_viewport` walks that list
+> (falling back to the map's order if the cache does not cover the meshes). The
+> water and transparent-solid passes still iterate in hash order: they are not
+> sorted back-to-front (partial-alpha ordering remains the known limit in §2.2).
 
 Each chunk is one draw call: `render_pass.draw_indexed(0..index_count, 0, 0..1)`. With a 16-chunk render distance, the maximum number of opaque chunk draw calls is approximately `(16*2+1)^2 * 16 = ~17,424` sub-chunks visible in theory, but frustum culling and emptiness checks reduce this to typically 2,000--4,000. The target is under 5,000 draw calls per frame.
 
@@ -714,6 +744,35 @@ from the `(cx,cy,cz)` map key). The per-player view-proj is cached CPU-side in
 `PlayerGpuResources.last_view_proj` by `update_camera`. Per-frame draw/cull
 counts (`DrawStats`) are surfaced in the **F3 overlay** ("Draws: N (culled M / T)")
 — they drop sharply when the camera faces a wall, making the win visible.
+
+> **AS-BUILT (Perf B2, 2026-10-24) -- round range and entity culling.**
+> *Draw range.* `camera::chunk_in_draw_range` is a circle on column indices
+> measured from the camera's column centre: a column is drawn when
+> `dx^2 + dz^2 <= (render_distance + 1)^2` (`camera::column_in_round_range`,
+> exact in `i64`; `i32::MAX` = no limit), in place of the old square. Along an
+> axis the range still lies beyond the fog's end; on a diagonal the circle trims
+> the last column's corner, which is the ground the round streamer does not
+> load either (49 of 81 columns at radius 4, about 72% at 10, tending to pi/4).
+> *Streaming.* `chunk_stream::StreamAnchor` carries `round`. A client's OWN
+> players anchor round at the render distance: columns load when
+> `dx^2 + dz^2 <= r^2` and unload past `r + 1`
+> (`ROUND_UNLOAD_HYSTERESIS`, one column; a loaded column in that one-column
+> band is neither loaded nor let go, so the edge does not thrash). `begin_load`'s
+> queue and the void-column repair scan use the same circle. Everything the
+> server shapes stays square: a lent joiner's sim block and respawn ring, the
+> dedicated server's streamer, and a JOINED client's own anchors (its pushed
+> columns are the server's square, and `ChunkIntake::keeps_near_server_body`
+> keeps its square `UNLOAD_HYSTERESIS`). The chunk push, interest radii and
+> `entity_broadcast` radii are unchanged.
+> *Entities.* `entity_model::build_entity_model_vertices_culled` skips a mob
+> before any vertex is baked when its bounding sphere (hitbox-based, generous:
+> `1.5 * max(width, height) + 2`) is wholly beyond the draw range
+> (`(render_distance + 1) * 16` blocks from the eye) or wholly outside this
+> viewport's frustum (`Frustum::contains_sphere`, per player, so split-screen
+> viewports cull against their own cameras). Never culled: a ridden mount
+> (`Ridden`), any mob within 4 blocks of the eye, and the player's own avatar,
+> the held viewmodel and remote-player avatars (they do not go through this
+> builder). No setting. Carts, item entities and projectiles are not culled yet.
 
 ### 5.3 Occlusion Culling (Optional, Future)
 
@@ -1582,7 +1641,8 @@ If the average is significantly below the target (< 50% of budget), quality is r
 > particles (Full, Reduced, Off); there is no bloom/shadow/LOD step. Rules:
 > judged on the p90 of the last second of in-world frames, every 0.25 s;
 > target frame time = the frame cap, else 1/60 s; step down when p90 > 1.25x
-> target for 3 s; step up when p90 < 0.7x target for 10 s (between the two:
+> target for 3 s; step up when p90 <= 1.05x target for 10 s (Perf B2; was
+> < 0.7x, which a vsync-pinned 60 Hz display can never reach; between the two:
 > nothing); at most one step per second; the first 5 s after a world entry or
 > reset are ignored. Anti-flap: a step down within 30 s of a step up doubles the
 > next step-up hold (10 s, 20, 40 ... capped at 160 s). Changing a quality
@@ -1591,9 +1651,13 @@ If the average is significantly below the target (< 50% of budget), quality is r
 > never reloads a column it let go. The host's own server radius and the
 > distance a joiner announces stay the player's values. The settings panel
 > shows a line such as "Auto quality is holding render distance 6 (set 10)"
-> while it is holding below. Limit: with vsync on a 60 Hz display frames can
-> never be faster than 0.7x of a 60 fps target, so the offset only recovers on
-> faster displays, or after a slider change or restart.
+> while it is holding below. Vsync (Perf B2): a 60 Hz display can never show a
+> frame in under 16.7 ms, so the step-up rule is "p90 at or below 1.05x the
+> target" rather than a margin below it; the anti-flap back-off above is what
+> stops a machine that is genuinely too slow one notch up from bouncing (the
+> attempts are 10, 20, 40, 80, then every 160 s). Tests: a vsync-pinned
+> series recovers after a stall; a machine that holds 60 fps only below level 0
+> settles within the back-off.
 >
 > Web frame cap: `Cap(30/60)` is honoured on wasm by skipping a render that
 > arrives sooner than the cap interval (less `min(2 ms, interval/8)`,
@@ -2292,6 +2356,7 @@ Nothing in the struct is AxeNStax-specific; it lifts to any Decented voxel game.
 | `render_distance` | `i32`, 4–16 | chunk streaming (`chunk_stream.rs`) + server gen (`GameServer.render_distance`) + fog |
 | `render_scale` | `f32`, 0.25–1.0 | offscreen render target + blit (Phase 5). Floor lowered from 0.5 in Perf B1 |
 | `pixel_budget` | `Option<u32>` (serde default `None` = uncapped) | caps the world's physical pixel count: effective scale = `min(render_scale, sqrt(budget / (w*h)))`, applied on native and web (§9.4d) |
+| `leaves_fast` | `bool` (serde default via the preset match, else `false`) | "Leaves: Fast": leaves render as opaque cubes with a shader cutout fill (§2.2); a preset dial |
 | `auto_quality` | `bool` (serde default `false`) | the runtime governor (§10.3); on after first-run detection |
 | `fov_y` | `f32`, 60–100° | `Camera.fov_y` (personal pref) |
 | `mouse_sensitivity` | `f32` | mouse-look multiplier (personal pref) |
@@ -2309,20 +2374,27 @@ quality dial that no longer matches a named preset reports `Custom`. **FOV and
 mouse sensitivity are personal preferences excluded from preset detection** —
 changing them never knocks you off a preset, and `apply_preset` preserves them.
 
-| Preset | dist | scale | frame_limit | fog | mipmaps | particles | pixel budget |
-|--------|:----:|:-----:|-------------|:---:|:-------:|-----------|:------------:|
-| Potato | 4 | 0.5 | Cap(30) | off | off | Off | 0.9 M |
-| Low | 5 | 0.75 | Cap(60) | on | off | Reduced | 1.3 M |
-| Medium | 7 | 1.0 | Cap(60) | on | off | Full | 2.1 M |
-| **High** | **10** | **1.0** | **VSync** | **on** | **off** | **Full** | none |
-| Ultra | 14 | 1.0 | Uncapped | on | off | Full | none |
+| Preset | dist | scale | frame_limit | fog | mipmaps | particles | pixel budget | leaves fast |
+|--------|:----:|:-----:|-------------|:---:|:-------:|-----------|:------------:|:-----------:|
+| Potato | 4 | 0.5 | Cap(30) | off | off | Off | 0.9 M | on |
+| Low | 5 | 0.75 | Cap(60) | on | off | Reduced | 1.3 M | on |
+| Medium | 7 | 1.0 | Cap(60) | on | off | Full | 2.1 M | off |
+| **High** | **10** | **1.0** | **VSync** | **on** | **off** | **Full** | none | **off** |
+| Ultra | 14 | 1.0 | Uncapped | on | off | Full | none | off |
 
 `pixel_budget` is one of the preset-defining dials. A settings file written
 before it existed (no `pixel_budget` key) takes the budget of the preset its
 other dials match, so an old Low file is still Low (1.3 M) and its label does
 not turn into Custom; a file matching no preset gets `None` (uncapped). A file
-that has the key (even `null`) is taken as written. `auto_quality` is not part
-of preset equality and is `false` for an old file.
+that has the key (even `null`) is taken as written. `leaves_fast` follows the
+same rule (Perf B2): a file without the key takes the value of the preset its
+other dials match (an old Low file is Low with fast leaves, its label unchanged,
+so an old Low/Potato player now gets them), else `false`; a file that has
+`pixel_budget` but not `leaves_fast` must match the preset's budget as well, so a
+hand-picked budget does not borrow a preset's leaves; a file that has the key is
+taken as written. `leaves_fast` IS part of preset equality (flipping it reads as
+`Custom`). `auto_quality` is not part of preset equality and is `false` for an
+old file.
 
 `mipmaps` is **off in every preset, High and Ultra included** (A6, 2026-09-06).
 It is a *look* change at distance, not a cost dial, so it stays opt-in until a

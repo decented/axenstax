@@ -5933,6 +5933,19 @@ pub fn draw_settings_panel(
             {
                 changed = true;
             }
+            // Perf B2 — "Leaves: Fast": solid-looking leaves that skip the see-through
+            // pass and every hidden inner face. A preset dial (Potato and Low on).
+            if ui
+                .checkbox(&mut gfx.leaves_fast, "Leaves: Fast")
+                .on_hover_text(
+                    "Draws leaves as solid blocks with no see-through gaps. \
+                     Treetops look flatter but the game runs faster, most on \
+                     slower machines. The Low and Potato presets turn it on.",
+                )
+                .changed()
+            {
+                changed = true;
+            }
             // Perf B1 — auto quality (Spec 03 §10.3): lowers distance, then scale,
             // then particles while frames run long, and restores them when they
             // recover. Never changes or saves the values above.

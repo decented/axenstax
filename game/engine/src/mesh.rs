@@ -254,6 +254,12 @@ pub fn plant_unit_cross() -> (Vec<PlantGeoVertex>, Vec<u32>) {
     (verts, indices)
 }
 
+/// Bit set in a vertex's `tex_layer` on a "Leaves: Fast" leaf face (Perf B2).
+/// The shader (`fs_main`) masks it off the layer index and, where the leaf
+/// texture is cut out (alpha < 0.5), draws a darkened leaf colour instead of the
+/// hole. Texture layers are < 512, so the bit is clear of every real layer.
+pub const LEAF_FILL_FLAG: u32 = 1 << 16;
+
 /// Dual mesh output: opaque geometry + transparent water geometry, plus the
 /// chunk's instanced plants (flowers/grass/crops — drawn as cross billboards
 /// in a dedicated instanced pass rather than baked into `opaque`).
@@ -1569,7 +1575,7 @@ fn greedy_transparent_face(
                 let cwy = origin_y + ly as i32;
                 let cwz = origin_z + lz as i32;
                 if block == AIR
-                    || !(registry.is_solid(block) && registry.is_transparent(block))
+                    || !(registry.is_solid(block) && registry.renders_transparent(block))
                     || crate::block_shape::is_shaped(block)
                     || world.micro_registry.contains(block)
                     || world.is_render_hidden(cwx, cwy, cwz)
@@ -1582,7 +1588,7 @@ fn greedy_transparent_face(
                 let adj = world.get_block(wx, wy, wz);
                 let same_type = adj == block;
                 let occludes = registry.is_solid(adj)
-                    && !registry.is_transparent(adj)
+                    && !registry.renders_transparent(adj)
                     && !world.is_render_hidden(wx, wy, wz);
                 if !same_type && !occludes {
                     let bl = world.block_light_at(wx, wy, wz);
@@ -1680,7 +1686,7 @@ fn greedy_face(
                 // as micro-models). They're also `transparent` today, but key
                 // off the shape so the binding doesn't depend on that flag.
                 if block == AIR
-                    || registry.is_transparent(block)
+                    || registry.renders_transparent(block)
                     || crate::block_shape::is_shaped(block)
                     || world.micro_registry.contains(block)
                     || world.is_render_hidden(cwx, cwy, cwz)
@@ -1699,7 +1705,7 @@ fn greedy_face(
                 // render-hidden neighbour (§5) is treated as AIR too, so the
                 // faces around a blown-up block stay visible.
                 if adj == AIR
-                    || registry.is_transparent(adj)
+                    || registry.renders_transparent(adj)
                     || world.micro_registry.contains(adj)
                     || world.is_render_hidden(wx, wy, wz)
                 {
@@ -1757,6 +1763,15 @@ fn greedy_face(
                         Face::Bottom => registry.tex_bottom(block),
                         _ => registry.tex_side(block),
                     });
+
+                // "Leaves: Fast" — the leaf texture's cutout holes have no
+                // transparent pass to show through, so flag the quad and the
+                // shader fills them with the leaf's own (darkened) colour.
+                let tex_layer = if registry.is_fast_leaf(block) {
+                    tex_layer | LEAF_FILL_FLAG
+                } else {
+                    tex_layer
+                };
 
                 let (bl_f, sl_f) = (bl as f32 / 15.0, sl as f32 / 15.0);
                 emit_quad(
@@ -2236,6 +2251,93 @@ mod tests {
             "glass-glass shared faces culled, outer shell kept: got {}",
             m3.transparent.vertices.len()
         );
+    }
+
+    /// Perf B2 — "Leaves: Fast": leaf faces go to the OPAQUE mesh (flagged for
+    /// the shader's cutout fill), the transparent pass is empty of them, and
+    /// leaf-leaf interior faces are culled like any opaque block's.
+    #[test]
+    fn leaves_fast_puts_leaf_faces_in_the_opaque_mesh_and_culls_interior_faces() {
+        let leaf_cube = |reg: &BlockRegistry, id| {
+            let mut w = World::new();
+            for x in 2..5 {
+                for y in 2..5 {
+                    for z in 2..5 {
+                        w.set_block(x, y, z, id);
+                    }
+                }
+            }
+            build_chunk_meshes(0, 0, 0, &w, reg)
+        };
+        let leaf_layer = |m: &ChunkMesh| -> Vec<u32> {
+            m.vertices.iter().map(|v| v.tex_layer).collect()
+        };
+
+        // Default (fancy): leaves ride the transparent bucket, nothing opaque.
+        let fancy = BlockRegistry::new();
+        let m = leaf_cube(&fancy, block::OAK_LEAVES);
+        assert!(m.opaque.vertices.is_empty(), "fancy leaves are not opaque");
+        assert!(!m.transparent.vertices.is_empty());
+        assert!(leaf_layer(&m.transparent).iter().all(|&l| l & LEAF_FILL_FLAG == 0));
+
+        // Fast: the 3x3x3 cube's six exposed sides merge to six quads (24 verts),
+        // all in the opaque mesh, every one flagged and on the leaf texture.
+        let mut fast = BlockRegistry::new();
+        fast.set_leaves_fast(true);
+        let m = leaf_cube(&fast, block::OAK_LEAVES);
+        assert!(m.transparent.vertices.is_empty(), "no leaf in the transparent pass");
+        assert_eq!(m.opaque.vertices.len(), 24, "interior faces culled, sides merged");
+        for l in leaf_layer(&m.opaque) {
+            assert_ne!(l & LEAF_FILL_FLAG, 0, "flagged for the shader fill");
+            assert_eq!(l & !LEAF_FILL_FLAG, block::TEX_OAK_LEAVES);
+        }
+
+        // Every species is a fast leaf; a different species next to it culls too.
+        for id in [
+            block::OAK_LEAVES, block::BIRCH_LEAVES, block::SPRUCE_LEAVES,
+            block::JUNGLE_LEAVES, block::ACACIA_LEAVES, block::DARK_OAK_LEAVES,
+            block::RUBBER_LEAVES,
+        ] {
+            let mut w = World::new();
+            w.set_block(2, 2, 2, id);
+            let m = build_chunk_meshes(0, 0, 0, &w, &fast);
+            assert_eq!(m.opaque.vertices.len(), 24, "lone fast leaf {id}: six faces");
+            assert!(m.transparent.vertices.is_empty());
+        }
+        let mut w = World::new();
+        w.set_block(2, 2, 2, block::OAK_LEAVES);
+        w.set_block(3, 2, 2, block::BIRCH_LEAVES);
+        let m = build_chunk_meshes(0, 0, 0, &w, &fast);
+        assert_eq!(m.opaque.vertices.len(), 40, "two leaves: shared faces culled (10 faces)");
+
+        // Only leaves change: stone is untouched and not flagged, and a stone
+        // face against a fast leaf is hidden (the leaf is now an occluder).
+        let mut w = World::new();
+        w.set_block(2, 2, 2, block::STONE);
+        w.set_block(3, 2, 2, block::OAK_LEAVES);
+        let m = build_chunk_meshes(0, 0, 0, &w, &fast);
+        assert_eq!(m.opaque.vertices.len(), 40, "stone + leaf share one hidden face pair");
+        let flagged = m.opaque.vertices.iter().filter(|v| v.tex_layer & LEAF_FILL_FLAG != 0).count();
+        assert_eq!(flagged, 20, "five leaf faces flagged, the stone's five are not");
+        let mut w = World::new();
+        w.set_block(2, 2, 2, block::STONE);
+        w.set_block(3, 2, 2, block::OAK_LEAVES);
+        let fancy_m = build_chunk_meshes(0, 0, 0, &w, &fancy);
+        assert_eq!(fancy_m.opaque.vertices.len(), 24, "fancy: the stone keeps its face toward a leaf");
+
+        // Glass next to a fast leaf is culled against it (it is opaque now).
+        let mut w = World::new();
+        w.set_block(2, 2, 2, block::GLASS);
+        w.set_block(3, 2, 2, block::OAK_LEAVES);
+        let m = build_chunk_meshes(0, 0, 0, &w, &fast);
+        assert_eq!(m.transparent.vertices.len(), 20);
+
+        // Gameplay still reads the authored flag.
+        assert!(fast.is_transparent(block::OAK_LEAVES), "light/camera/physics unchanged");
+        assert!(fast.is_solid(block::OAK_LEAVES));
+        assert!(!fast.renders_transparent(block::OAK_LEAVES));
+        assert!(fast.renders_transparent(block::GLASS), "glass is not a leaf");
+        assert!(fast.renders_transparent(block::AIR));
     }
 
     fn empty_world_with_chunk() -> (World, BlockRegistry) {

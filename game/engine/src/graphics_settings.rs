@@ -294,6 +294,14 @@ pub struct GraphicsSettings {
     /// (`parse_persisted`).
     #[serde(default)]
     pub pixel_budget: Option<u32>,
+    /// "Leaves: Fast" (Perf B2): leaves render as opaque cubes, with interior
+    /// faces culled and their cutout holes filled with a darkened leaf colour,
+    /// instead of the see-through cutout pass. A quality dial set by the presets
+    /// (Potato and Low on; Medium, High and Ultra off). A file with no such key
+    /// takes the value of the preset its other dials match, else off
+    /// (`parse_persisted`). Toggling remeshes the loaded world.
+    #[serde(default)]
+    pub leaves_fast: bool,
     /// Auto quality (Spec 03 §10.3): a runtime governor may hold render
     /// distance, render scale and particles temporarily BELOW the values above
     /// when frames run long. It never raises past them and never writes its
@@ -458,7 +466,7 @@ impl GraphicsSettings {
     /// current FOV/sensitivity (see [`apply_preset`]). This pure function exists
     /// so preset detection has a canonical comparison target.
     pub fn from_preset(preset: GraphicsPreset) -> Self {
-        let (render_distance, render_scale, frame_limit, fog, mipmaps, particles, pixel_budget) =
+        let (render_distance, render_scale, frame_limit, fog, mipmaps, particles, pixel_budget, leaves_fast) =
             match preset {
                 GraphicsPreset::Potato => (
                     4,
@@ -468,6 +476,7 @@ impl GraphicsSettings {
                     false,
                     ParticleLevel::Off,
                     Some(POTATO_PIXEL_BUDGET),
+                    true,
                 ),
                 GraphicsPreset::Low => (
                     5,
@@ -477,6 +486,7 @@ impl GraphicsSettings {
                     false,
                     ParticleLevel::Reduced,
                     Some(LOW_PIXEL_BUDGET),
+                    true,
                 ),
                 GraphicsPreset::Medium => (
                     7,
@@ -486,6 +496,7 @@ impl GraphicsSettings {
                     false,
                     ParticleLevel::Full,
                     Some(MEDIUM_PIXEL_BUDGET),
+                    false,
                 ),
                 // High == today's values → default look is unchanged.
                 GraphicsPreset::High | GraphicsPreset::Custom => (
@@ -496,6 +507,7 @@ impl GraphicsSettings {
                     false,
                     ParticleLevel::Full,
                     None,
+                    false,
                 ),
                 GraphicsPreset::Ultra => (
                     14,
@@ -505,6 +517,7 @@ impl GraphicsSettings {
                     false,
                     ParticleLevel::Full,
                     None,
+                    false,
                 ),
             };
         Self {
@@ -517,6 +530,7 @@ impl GraphicsSettings {
             mipmaps,
             particles,
             pixel_budget,
+            leaves_fast,
             auto_quality: false,
             // Comfort toggle — on for every preset (Phase-6 panel flips it).
             avatar_fade: true,
@@ -565,6 +579,7 @@ impl GraphicsSettings {
         self.mipmaps = p.mipmaps;
         self.particles = p.particles;
         self.pixel_budget = p.pixel_budget;
+        self.leaves_fast = p.leaves_fast;
     }
 
     /// Derive the preset label from the **quality** dials. Returns `Custom` when
@@ -580,13 +595,17 @@ impl GraphicsSettings {
     }
 
     /// Compare only the quality-load fields (everything except FOV + sensitivity).
-    /// The pixel budget is one of them: a preset means its budget too.
+    /// The pixel budget and "Leaves: Fast" are among them: a preset means its
+    /// budget and its leaves too.
     fn quality_eq(&self, other: &Self) -> bool {
-        self.dials_eq(other) && self.pixel_budget == other.pixel_budget
+        self.dials_eq(other)
+            && self.pixel_budget == other.pixel_budget
+            && self.leaves_fast == other.leaves_fast
     }
 
-    /// The quality dials a settings file written before `pixel_budget` existed
-    /// can have: everything `quality_eq` compares except the budget.
+    /// The quality dials a settings file written before `pixel_budget` /
+    /// `leaves_fast` existed can have: everything `quality_eq` compares except
+    /// those two.
     fn dials_eq(&self, other: &Self) -> bool {
         self.render_distance == other.render_distance
             && (self.render_scale - other.render_scale).abs() < 1e-4
@@ -758,20 +777,31 @@ fn migrate(settings: &mut GraphicsSettings) {
     }
 }
 
-/// Parse a persisted settings blob. A file written before `pixel_budget`
-/// existed (no such key) takes the budget of the preset its other dials match
-/// (an old Low file is Low, 1.3 M included, so its label does not change), or
-/// no budget when it matches none. A file that has the key is taken as written.
+/// Parse a persisted settings blob. A file written before `pixel_budget` or
+/// `leaves_fast` existed (no such key) takes that dial from the preset its
+/// other dials match (an old Low file is Low, 1.3 M and fast leaves included, so
+/// its label does not change), or off / no budget when it matches none. A file
+/// that has the key is taken as written.
+///
+/// A file that has `pixel_budget` but not `leaves_fast` (written between the two
+/// dials) matches a preset on its dials AND its budget, so a budget the player
+/// chose by hand does not borrow a preset's leaves.
 fn parse_persisted(json: &str) -> Option<GraphicsSettings> {
     let value: serde_json::Value = serde_json::from_str(json).ok()?;
     let had_budget = value.get("pixel_budget").is_some();
+    let had_leaves = value.get("leaves_fast").is_some();
     let mut s: GraphicsSettings = serde_json::from_value(value).ok()?;
-    if !had_budget {
-        s.pixel_budget = GraphicsPreset::ALL
+    let matching = |s: &GraphicsSettings, with_budget: bool| {
+        GraphicsPreset::ALL
             .into_iter()
             .map(GraphicsSettings::from_preset)
-            .find(|p| s.dials_eq(p))
-            .and_then(|p| p.pixel_budget);
+            .find(|p| s.dials_eq(p) && (!with_budget || s.pixel_budget == p.pixel_budget))
+    };
+    if !had_budget {
+        s.pixel_budget = matching(&s, false).and_then(|p| p.pixel_budget);
+    }
+    if !had_leaves {
+        s.leaves_fast = matching(&s, had_budget).is_some_and(|p| p.leaves_fast);
     }
     Some(s)
 }
@@ -1405,6 +1435,99 @@ mod tests {
             assert_eq!(s.pixel_budget, new.pixel_budget, "{p:?}");
             assert!(!s.auto_quality);
         }
+    }
+
+    #[test]
+    fn leaves_fast_is_on_for_potato_and_low_only() {
+        for (p, want) in [
+            (GraphicsPreset::Potato, true),
+            (GraphicsPreset::Low, true),
+            (GraphicsPreset::Medium, false),
+            (GraphicsPreset::High, false),
+            (GraphicsPreset::Ultra, false),
+        ] {
+            assert_eq!(GraphicsSettings::from_preset(p).leaves_fast, want, "{p:?}");
+        }
+        assert!(!GraphicsSettings::default().leaves_fast, "the default look is unchanged");
+    }
+
+    #[test]
+    fn leaves_fast_is_part_of_the_preset() {
+        // Flipping it takes a preset to Custom; flipping back restores the label.
+        for p in GraphicsPreset::ALL {
+            if p == GraphicsPreset::Custom {
+                continue;
+            }
+            let mut s = GraphicsSettings::from_preset(p);
+            s.leaves_fast = !s.leaves_fast;
+            assert_eq!(s.preset(), GraphicsPreset::Custom, "{p:?}");
+            s.leaves_fast = !s.leaves_fast;
+            assert_eq!(s.preset(), p, "{p:?}");
+        }
+        // Applying a preset sets it, and an unrelated dial change does not.
+        let mut s = GraphicsSettings::default();
+        s.apply_preset(GraphicsPreset::Low);
+        assert!(s.leaves_fast);
+        s.apply_preset(GraphicsPreset::Medium);
+        assert!(!s.leaves_fast);
+        s.fov_y = 95.0;
+        assert_eq!(s.preset(), GraphicsPreset::Medium);
+    }
+
+    #[test]
+    fn an_old_file_takes_leaves_fast_from_the_preset_its_dials_match() {
+        // Today's JSON minus every key this and the last wave added.
+        for p in GraphicsPreset::ALL {
+            let new = GraphicsSettings::from_preset(p);
+            let mut v = serde_json::to_value(&new).unwrap();
+            for k in ["pixel_budget", "leaves_fast", "auto_quality"] {
+                v.as_object_mut().unwrap().remove(k);
+            }
+            let s = load_json(&v.to_string());
+            assert_eq!(s.leaves_fast, new.leaves_fast, "{p:?}");
+            assert_eq!(s.preset(), p, "an old {p:?} file keeps its label");
+        }
+        // Dials that match no preset: off.
+        let s = load_json(r#"{ "render_distance": 9, "render_scale": 0.6, "particles": "Reduced" }"#);
+        assert!(!s.leaves_fast);
+        assert_eq!(s.preset(), GraphicsPreset::Custom);
+        // The bare file is High: off.
+        assert!(!load_json("{}").leaves_fast);
+    }
+
+    #[test]
+    fn a_stored_leaves_fast_key_is_taken_as_written() {
+        // Low dials with the key written false: the player turned it off.
+        let low = GraphicsSettings::from_preset(GraphicsPreset::Low);
+        let mut v = serde_json::to_value(&low).unwrap();
+        v["leaves_fast"] = serde_json::Value::Bool(false);
+        let s = load_json(&v.to_string());
+        assert!(!s.leaves_fast);
+        assert_eq!(s.preset(), GraphicsPreset::Custom);
+        // And true on High dials stays true.
+        let mut v = serde_json::to_value(GraphicsSettings::default()).unwrap();
+        v["leaves_fast"] = serde_json::Value::Bool(true);
+        let s = load_json(&v.to_string());
+        assert!(s.leaves_fast);
+        assert_eq!(s.preset(), GraphicsPreset::Custom);
+    }
+
+    #[test]
+    fn a_file_with_a_hand_picked_budget_does_not_borrow_a_presets_leaves() {
+        // Written between the budget wave and this one: has pixel_budget, no
+        // leaves_fast. Low dials but a budget of the player's own: Custom, off.
+        let low = GraphicsSettings::from_preset(GraphicsPreset::Low);
+        let mut v = serde_json::to_value(&low).unwrap();
+        v["pixel_budget"] = serde_json::json!(1_700_000u32);
+        v.as_object_mut().unwrap().remove("leaves_fast");
+        let s = load_json(&v.to_string());
+        assert!(!s.leaves_fast);
+        // The preset's own budget does match.
+        let mut v = serde_json::to_value(&low).unwrap();
+        v.as_object_mut().unwrap().remove("leaves_fast");
+        let s = load_json(&v.to_string());
+        assert!(s.leaves_fast);
+        assert_eq!(s.preset(), GraphicsPreset::Low);
     }
 
     #[test]

@@ -1815,9 +1815,31 @@ impl super::GameState {
             self.graphics.mipmaps,
             self.world.override_registry.appended_layers(),
         );
+        // "Leaves: Fast" (Perf B2) — a registry-level render flag; flipping it
+        // remeshes the loaded world.
+        self.sync_leaves_fast();
         // Render scale, micro-model LOD and draw range follow the EFFECTIVE
         // quality (the governor's offset below the player's values).
         self.sync_effective_quality();
+    }
+
+    /// Make the render registry's "Leaves: Fast" flag follow the setting. A
+    /// change re-queues every loaded section for meshing (sections holding only
+    /// leaves have no opaque mesh in one mode and no transparent one in the
+    /// other, so both buckets are consulted); the dirty queue spreads the
+    /// rebuilds over the next frames. Idempotent.
+    pub(crate) fn sync_leaves_fast(&mut self) {
+        let want = self.graphics.leaves_fast;
+        if self.registry.leaves_fast() == want {
+            return;
+        }
+        self.registry.set_leaves_fast(want);
+        let mut loaded: ahash::AHashSet<(i32, i32, i32)> =
+            self.renderer.chunk_meshes.keys().copied().collect();
+        loaded.extend(self.renderer.transparent_meshes.keys().copied());
+        for pos in loaded {
+            self.mark_chunk_dirty(pos);
+        }
     }
 
     /// Apply the current `graphics` settings to live engine state (Spec 39) and
@@ -2838,8 +2860,13 @@ impl super::GameState {
         // we don't borrow-conflict on `self.world` mid-iteration.
         let mut void: Vec<(i32, i32)> = Vec::new();
         let (mut had_chunk, mut was_loaded) = (0u32, 0u32);
+        // Round, as `stream_chunks` loads (Perf B2); a joiner's ground is a square.
+        let round = !self.joined();
         for dx in -rd..=rd {
             for dz in -rd..=rd {
+                if round && !crate::camera::column_in_round_range(dx, dz, rd) {
+                    continue;
+                }
                 let (cx, cz) = (pcx + dx, pcz + dz);
                 let floor = self.world.get_block(cx * cs + 8, 0, cz * cs + 8);
                 // B2a — a column the server pushed is the server's, as it is.
@@ -3187,7 +3214,7 @@ impl super::GameState {
         self.trial_outcome = None;
         // Drop queued rebuilds from the previous world (Spec 39 A4).
         self.dirty_mesh_chunks.clear();
-        self.renderer.chunk_meshes.clear();
+        self.renderer.clear_chunk_meshes();
         self.renderer.water_meshes.clear();
         self.renderer.plant_meshes.clear();
         self.renderer.decal_meshes.clear();
@@ -3452,7 +3479,7 @@ impl super::GameState {
         self.world.workshop.clear();
         self.loaded_columns.clear();
         self.dirty_mesh_chunks.clear();
-        self.renderer.chunk_meshes.clear();
+        self.renderer.clear_chunk_meshes();
         self.renderer.water_meshes.clear();
         self.renderer.plant_meshes.clear();
         self.renderer.decal_meshes.clear();
@@ -17058,12 +17085,23 @@ impl super::GameState {
             // mobs/loot/arrows/carts dim at night and in caves like terrain.
             let world_light = &self.world;
             let light_at = |p: glam::Vec3| world_light.light_channels_at(p.x, p.y, p.z);
-            let mut entity_verts = crate::entity_model::build_entity_model_vertices(
+            // Perf B2 — mobs beyond the draw range or outside this viewport's
+            // frustum are not baked (the ridden mount and anything within a few
+            // blocks of the eye never are culled).
+            let entity_cull = crate::entity_model::EntityCull::new(
+                self.players[pidx].player.eye_pos(),
+                self.effective_render_distance(),
+                crate::camera::Frustum::from_view_proj(glam::Mat4::from_cols_array_2d(
+                    &camera_uniform.view_proj,
+                )),
+            );
+            let mut entity_verts = crate::entity_model::build_entity_model_vertices_culled(
                 &self.ecs,
                 self.falling_tick_counter,
                 self.players[pidx].player.eye_pos(),
                 &self.world.override_registry,
                 light_at,
+                Some(&entity_cull),
             );
             entity_verts.extend(crate::entity_model::build_item_entity_vertices(
                 &self.ecs,
@@ -17107,12 +17145,13 @@ impl super::GameState {
             // (their own render-only ECS; empty unless joined). The same
             // builders draw them as draw the host's.
             if !self.remote_mobs.is_empty() {
-                entity_verts.extend(crate::entity_model::build_entity_model_vertices(
+                entity_verts.extend(crate::entity_model::build_entity_model_vertices_culled(
                     self.remote_mobs.ecs(),
                     self.falling_tick_counter,
                     self.players[pidx].player.eye_pos(),
                     &self.world.override_registry,
                     light_at,
+                    Some(&entity_cull),
                 ));
                 entity_verts.extend(crate::entity_model::build_cart_vertices(
                     self.remote_mobs.ecs(),

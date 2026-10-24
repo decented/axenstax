@@ -1622,6 +1622,12 @@ impl CameraOcclusion {
 /// Block registry — indexed by BlockId for O(1) lookup.
 pub struct BlockRegistry {
     blocks: Vec<BlockDef>,
+    /// "Leaves: Fast" (Perf B2): render every leaf block as an opaque cube (the
+    /// opaque greedy pass, interior faces culled) instead of the cutout-alpha
+    /// transparent pass. A RENDER flag only: physics, lighting, camera
+    /// occlusion and gameplay still read `transparent` as authored. Set per
+    /// client from the graphics settings; false on a server.
+    leaves_fast: bool,
 }
 
 impl BlockRegistry {
@@ -3304,7 +3310,7 @@ impl BlockRegistry {
             tex_side: TEX_WINDMILL_TURNING,
         });
 
-        Self { blocks }
+        Self { blocks, leaves_fast: false }
     }
 
     /// What an item-stack is dropped when this block is mined. Most blocks
@@ -3560,6 +3566,30 @@ impl BlockRegistry {
 
     pub fn is_transparent(&self, id: BlockId) -> bool {
         self.get(id).transparent
+    }
+
+    /// Turn "Leaves: Fast" on or off (see the field). The caller remeshes.
+    pub fn set_leaves_fast(&mut self, on: bool) {
+        self.leaves_fast = on;
+    }
+
+    /// Is "Leaves: Fast" on?
+    pub fn leaves_fast(&self) -> bool {
+        self.leaves_fast
+    }
+
+    /// Does this block take the transparent mesh pass? `transparent`, except
+    /// that with "Leaves: Fast" on every leaf block renders opaque. The
+    /// mesher asks this; everything else (light, camera, raycast) keeps asking
+    /// [`Self::is_transparent`].
+    pub fn renders_transparent(&self, id: BlockId) -> bool {
+        self.get(id).transparent && !(self.leaves_fast && is_any_leaves(id))
+    }
+
+    /// Does the mesher render this block's faces opaque *because of* "Leaves:
+    /// Fast"? Its cutout holes are then filled in the shader.
+    pub fn is_fast_leaf(&self, id: BlockId) -> bool {
+        self.leaves_fast && is_any_leaves(id)
     }
 
     /// Phase 4 — the third-person camera-occlusion class for a block, derived

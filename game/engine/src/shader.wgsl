@@ -251,10 +251,32 @@ fn fs_plant(in: VertexOutput) -> @location(0) vec4<f32> {
     return vec4<f32>(apply_user_brightness(final_color), 1.0);
 }
 
+// "Leaves: Fast" (Perf B2): the mesher sets bit 16 of `tex_layer` on a leaf face
+// it draws in this opaque pass (`mesh::LEAF_FILL_FLAG`). The leaf texture has
+// cutout holes (alpha 0) that the transparent pass would discard; here there is
+// nothing behind them, so a hole shows a darkened leaf colour instead of a
+// stray texel (the texture's own rgb under alpha 0 is not guaranteed to be leaf
+// coloured). Uses the texture's smallest mip (the alpha-weighted average leaf
+// colour when mipmaps are on, else the texel itself); a near-black result falls
+// back to a dark leaf green so a hole is never a black spot.
+const LEAF_FILL_FLAG: u32 = 0x10000u;
+const LEAF_LAYER_MASK: u32 = 0xFFFFu;
+
+fn fast_leaf_fill(uv: vec2<f32>, layer: i32) -> vec3<f32> {
+    let avg = textureSampleLevel(block_textures, block_sampler, uv, layer, 4.0).rgb;
+    let dark = max(avg.r, max(avg.g, avg.b)) < 0.02;
+    return select(avg, vec3<f32>(0.05, 0.14, 0.04), dark) * 0.6;
+}
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Sample block texture
-    let tex_color = textureSample(block_textures, block_sampler, in.uv, i32(in.tex_layer));
+    let layer = i32(in.tex_layer & LEAF_LAYER_MASK);
+    let tex_sample = textureSample(block_textures, block_sampler, in.uv, layer);
+    var tex_color = tex_sample;
+    if ((in.tex_layer & LEAF_FILL_FLAG) != 0u && tex_sample.a < 0.5) {
+        tex_color = vec4<f32>(fast_leaf_fill(in.uv, layer), 1.0);
+    }
 
     // Dynamic sun light from uniform
     let sun_dir = normalize(camera.sun_dir.xyz);
