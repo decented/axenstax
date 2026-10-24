@@ -27,9 +27,12 @@
 //!
 //! * Step DOWN when that p90 stays above [`DOWN_RATIO`] × the target frame time
 //!   for [`DOWN_HOLD`] seconds.
-//! * Step UP when it stays below [`UP_RATIO`] × the target for [`UP_HOLD`]
-//!   seconds (the gap between the two ratios is the hysteresis band: inside it
-//!   nothing happens and both timers restart).
+//! * Step UP when it stays at or below [`UP_RATIO`] × the target for
+//!   [`UP_HOLD`] seconds (the gap between the two ratios is the hysteresis band:
+//!   inside it nothing happens and both timers restart). The up ratio is just
+//!   above 1.0 so a vsync-pinned display (frame time can never fall below the
+//!   refresh interval) still recovers after a stall; the back-off below is
+//!   what stops that from oscillating.
 //! * At most one step per [`MIN_STEP_INTERVAL`] second, and after any step the
 //!   one-second window must refill before the next judgement.
 //! * Anti-flap back-off: a step down within [`BACKOFF_WINDOW`] seconds of a step
@@ -39,17 +42,17 @@
 //! * The first [`WARMUP`] seconds after a reset are ignored (world load hitches).
 //!
 //! A frame-capped (vsync) machine cannot show frames faster than its refresh
-//! interval, so on a 60 Hz display the up rule (below 0.7 × the 60 fps target)
-//! can never fire: the offset holds until a slider/preset change or a restart.
-//! That is the spec's rule, kept as written.
+//! interval; with the up ratio at 1.05 a 60 Hz display pinned at 16.7 ms still
+//! steps back up after a stall, and a machine that is genuinely too slow one
+//! notch higher bounces at most once per (doubling) hold.
 
 use crate::graphics_settings::{GraphicsSettings, ParticleLevel, RENDER_DISTANCE_MIN};
 use std::collections::VecDeque;
 
 /// Step down when the p90 frame time exceeds this multiple of the target.
 pub const DOWN_RATIO: f32 = 1.25;
-/// Step up when the p90 frame time is below this multiple of the target.
-pub const UP_RATIO: f32 = 0.7;
+/// Step up when the p90 frame time is at or below this multiple of the target.
+pub const UP_RATIO: f32 = 1.05;
 /// Seconds the "too slow" condition must hold before a step down.
 pub const DOWN_HOLD: f32 = 3.0;
 /// Seconds the "fast" condition must hold before a step up (first time).
@@ -328,7 +331,7 @@ impl Governor {
         if p90 > DOWN_RATIO * target {
             self.slow_for += elapsed;
             self.fast_for = 0.0;
-        } else if p90 < UP_RATIO * target {
+        } else if p90 <= UP_RATIO * target {
             self.fast_for += elapsed;
             self.slow_for = 0.0;
         } else {
@@ -532,6 +535,7 @@ mod tests {
     #[test]
     fn frames_inside_the_hysteresis_band_change_nothing() {
         let u = user();
+        // At level 0 there is nothing to step up to, so fast and in-band both hold.
         for ft in [T60 * 0.75, T60, T60 * 1.2] {
             let mut g = Governor::new();
             let (_, steps) = run(&mut g, &u, 0.0, 120.0, |_, _| ft);
@@ -541,7 +545,7 @@ mod tests {
         let mut g = Governor::new();
         let (t, _) = run(&mut g, &u, 0.0, 10.0, |_, _| 0.050);
         let held = g.level();
-        let (_, steps) = run(&mut g, &u, t, 120.0, |_, _| T60 * 0.9);
+        let (_, steps) = run(&mut g, &u, t, 120.0, |_, _| T60 * 1.15);
         assert!(steps.is_empty());
         assert_eq!(g.level(), held);
     }
@@ -603,6 +607,58 @@ mod tests {
         // And the last 300 s see at most a handful of steps.
         let late = steps.iter().filter(|(t, _)| *t > 600.0).count();
         assert!(late <= 5, "{late} late steps");
+    }
+
+    #[test]
+    fn a_vsync_pinned_display_recovers_after_a_stall() {
+        // 60 Hz vsync: the frame time can never beat 16.7 ms. After a stall the
+        // offset must still come back down to 0, one notch per UP_HOLD.
+        let u = user();
+        let mut g = Governor::new();
+        let (t, down) = run(&mut g, &u, 0.0, 20.0, |_, _| 0.050);
+        assert!(!down.is_empty());
+        let start = g.level();
+        assert!(start >= 2);
+        let (_, ups) = run(&mut g, &u, t, 300.0, |_, _| T60);
+        assert!(ups.iter().all(|(_, c)| *c == Change::Up), "{ups:?}");
+        assert_eq!(ups.len(), start);
+        assert_eq!(g.level(), 0);
+        for w in ups.windows(2) {
+            assert!(w[1].0 - w[0].0 >= UP_HOLD - 0.3, "up gap {}", w[1].0 - w[0].0);
+        }
+        // 1.04x of the target still counts as fast; 1.10x is inside the band.
+        let mut g = Governor::new();
+        let (t, _) = run(&mut g, &u, 0.0, 20.0, |_, _| 0.050);
+        let held = g.level();
+        let (_, ups) = run(&mut g, &u, t, 120.0, |_, _| T60 * 1.10);
+        assert!(ups.is_empty());
+        assert_eq!(g.level(), held);
+    }
+
+    #[test]
+    fn a_machine_too_slow_at_the_higher_notch_settles_on_a_vsync_display() {
+        // Level 0 runs at 25 fps, every lower quality holds the vsync-pinned
+        // 16.7 ms: each step up is tried and fails again. The back-off must
+        // stretch the gaps (10, 20, 40, 80, then 160 s) so it settles.
+        let u = user();
+        let mut g = Governor::new();
+        let (_, steps) = run(&mut g, &u, 0.0, 1200.0, |lvl, _| if lvl == 0 { 0.040 } else { T60 });
+        let ups: Vec<f32> = steps
+            .iter()
+            .filter(|(_, c)| *c == Change::Up)
+            .map(|(t, _)| *t)
+            .collect();
+        // 10, 20, 40, 80, then 160 s apart: 10 attempts; without the back-off it
+        // would be ~90 (one every ~13 s).
+        assert!(ups.len() <= 11, "{} step-up attempts in 20 min", ups.len());
+        let gaps: Vec<f32> = ups.windows(2).map(|w| w[1] - w[0]).collect();
+        assert!(gaps.windows(2).all(|w| w[1] >= w[0] - 1.0), "{gaps:?}");
+        assert!(
+            gaps.last().copied().unwrap_or(UP_HOLD_MAX) >= 100.0,
+            "the hold should have grown: {gaps:?}"
+        );
+        // Settled below level 0 at the end.
+        assert!(g.level() <= 1);
     }
 
     #[test]
