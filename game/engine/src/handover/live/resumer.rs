@@ -863,9 +863,7 @@ mod tests {
     /// and every import working world's `handover/`, and creates nothing.
     #[test]
     fn handover_boot_sweep_reaches_worlds_and_imports() {
-        let mut random = [0u8; 8];
-        getrandom::fill(&mut random).unwrap();
-        let root = std::env::temp_dir().join(format!("axenstax-sweep-{}", hex::encode(random)));
+        let root = crate::handover::durable::tests::TestDir::random("axenstax-sweep");
         let worlds = root.join("worlds");
         let imports = root.join("imports");
         let world = worlds.join("w");
@@ -882,7 +880,6 @@ mod tests {
         assert_eq!(sweep_temps(&worlds, &imports), 2);
         assert!(temps.iter().all(|t| !t.exists()), "a stale temp survived the start-up sweep");
         assert!(!super::super::authority::dir(&bare).exists(), "the sweep created a handover folder");
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// CP17 (CP16 review LOW-3): a world whose handover lock another
@@ -890,9 +887,7 @@ mod tests {
     /// records being written); the sweep reaches it once the holder dies.
     #[test]
     fn handover_lock_boot_sweep_leaves_a_held_worlds_temps_alone() {
-        let mut random = [0u8; 8];
-        getrandom::fill(&mut random).unwrap();
-        let root = std::env::temp_dir().join(format!("axenstax-sweep-held-{}", hex::encode(random)));
+        let root = crate::handover::durable::tests::TestDir::random("axenstax-sweep-held");
         let (worlds, imports) = (root.join("worlds"), root.join("imports"));
         let world = worlds.join("w");
         let store = super::super::authority::store(&world).unwrap();
@@ -903,7 +898,6 @@ mod tests {
         assert!(temp.exists(), "a held world's temp was swept");
         other.kill();
         assert_eq!(sweep_temps(&worlds, &imports), 1, "the sweep skipped a world once its holder died");
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// CP16 (CP14 review LOW-6): a repeating failure logs once a minute.

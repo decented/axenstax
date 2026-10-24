@@ -276,9 +276,7 @@ mod tests {
     /// never while held (a recipient about to rename its import in).
     #[test]
     fn handover_inert_import_lock_is_a_sibling_file_removed_after_its_import() {
-        let mut r = [0u8; 8];
-        getrandom::fill(&mut r).unwrap();
-        let imports = std::env::temp_dir().join(format!("axenstax-inert-sibling-{}", hex::encode(r)));
+        let imports = crate::handover::durable::tests::TestDir::random("axenstax-inert-sibling");
         let (t, w) = ([0x71; 16], [0x72; 16]);
         let folder = format!("handover-{}-{}", hex::encode(w), hex::encode(t));
         let import = imports.join(&folder);
@@ -302,7 +300,6 @@ mod tests {
         drop(held);
         assert_eq!(sweep_stale_locks(&imports), 1);
         assert!(!imports.join(format!("{stale}.lock")).exists(), "a free lock file with no import stayed");
-        let _ = std::fs::remove_dir_all(&imports);
     }
 
     /// CP24 (CP23 review MEDIUM-1 + LOW-3, DECIDED): the discard always
@@ -313,9 +310,7 @@ mod tests {
     #[test]
     fn handover_inert_discard_racing_a_just_renamed_import_deletes_nothing() {
         use std::{cell::RefCell, rc::Rc};
-        let mut r = [0u8; 8];
-        getrandom::fill(&mut r).unwrap();
-        let imports = std::env::temp_dir().join(format!("axenstax-inert-race-{}", hex::encode(r)));
+        let imports = crate::handover::durable::tests::TestDir::random("axenstax-inert-race");
         let (t, w) = ([0x81; 16], [0x82; 16]);
         let folder = import_folder(w, t);
         let import = imports.join(&folder);
@@ -327,7 +322,7 @@ mod tests {
         assert!(!lock_file.exists() && !import.exists());
         // The recipient: takes the lock if it can, then renames its import in.
         let got: Rc<RefCell<Option<super::super::world_lock::LiveLock>>> = Rc::default();
-        let (probe_got, probe_imports, probe_folder, probe_import) = (got.clone(), imports.clone(), folder.clone(), import.clone());
+        let (probe_got, probe_imports, probe_folder, probe_import) = (got.clone(), imports.to_path_buf(), folder.clone(), import.clone());
         DISCARD_PROBE.with(|p| {
             *p.borrow_mut() = Some(Box::new(move || {
                 if let Ok(l) = super::super::world_lock::acquire_import(&probe_imports, &probe_folder, true) {
@@ -350,7 +345,6 @@ mod tests {
         assert!(!scratch.exists(), "the scratch outlived its discard");
         assert!(!lock_file.exists(), "the discard left the lock file it made");
         assert!(marked(&imports, t).unwrap().is_none(), "the inert marker outlived its discard");
-        let _ = std::fs::remove_dir_all(&imports);
     }
 
     /// CP18 (CP17 review MEDIUM-2): an inert import whose handover lock
@@ -358,9 +352,7 @@ mod tests {
     /// discarded by this one's sweep; once that copy has gone, it is.
     #[test]
     fn handover_inert_sweep_leaves_an_import_another_process_holds() {
-        let mut r = [0u8; 8];
-        getrandom::fill(&mut r).unwrap();
-        let imports = std::env::temp_dir().join(format!("axenstax-inert-held-{}", hex::encode(r)));
+        let imports = crate::handover::durable::tests::TestDir::random("axenstax-inert-held");
         let (t, w) = ([0x61; 16], [0x62; 16]);
         let import = imports.join(format!("handover-{}-{}", hex::encode(w), hex::encode(t)));
         let working = import.join("working");
@@ -375,6 +367,5 @@ mod tests {
         child.kill();
         assert_eq!(sweep(&imports, None).unwrap(), 1);
         assert!(!import.exists(), "the import outlived its discard");
-        let _ = std::fs::remove_dir_all(&imports);
     }
 }
