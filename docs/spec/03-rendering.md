@@ -1555,6 +1555,13 @@ If the frame time exceeds the hard floor for 5 consecutive seconds, the engine l
 | Present + buffer swap | 0.5 ms | Driver overhead |
 | **Headroom** | **1.6 ms** | Safety margin |
 
+> **As-built:** the "max 4 uploads" row is superseded by §2.7: the dirty-mesh
+> queue drains 8 sections a frame, and a stream batch builds up to 18 of its own
+> sections inline. A far column's over-budget sections share that queue with the
+> neighbour seams, so at a render-distance boundary a few far sections can
+> appear a dozen frames late (raise `MeshPolicy::STREAMING.now_budget` to 24 to
+> make only the seams wait).
+
 ### 10.3 Dynamic Quality Scaling
 
 The renderer maintains a rolling average of the last 60 frame times. If the average exceeds the target frame time:
