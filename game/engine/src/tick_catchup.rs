@@ -6,7 +6,8 @@
 //! frame then runs the per-frame maximum, takes ten times as long, and the
 //! backlog never drains (the "spiral of death": slow motion, frozen UI).
 //!
-//! Two pure rules stop that:
+//! Two pure rules stop that, both **only while no remote joiner is connected**
+//! (`hosting_joiners` below):
 //!
 //! * [`clamp_backlog`] — the accumulator never holds more than
 //!   [`MAX_BACKLOG_TICKS`] ticks of debt; the excess is dropped (the world
@@ -17,8 +18,15 @@
 //!
 //! Nothing else reads wall time for the simulation: `tick_counter` and every
 //! "ticks since" counter advance per executed tick, so dropped time is
-//! invisible to them. A hosted server ticks once per client tick (1:1), so
-//! host and joiners stay in step.
+//! invisible to them.
+//!
+//! **Joiners are the exception.** A hosted server ticks once per client tick,
+//! but a joiner's inputs keep arriving at its own steady 20 Hz and are consumed
+//! one per server tick. Dropping host ticks after a stall would leave the
+//! unconsumed inputs queued for good (standing latency, then dropped movement
+//! and rubber-banding), so while a hosted server has a remote client the old
+//! behaviour applies exactly: no backlog cap, no per-frame time guard, up to
+//! [`MAX_TICKS_PER_FRAME`] ticks a frame to repay the debt.
 
 use std::cell::RefCell;
 use web_time::{Duration, Instant};
@@ -33,10 +41,11 @@ pub const MAX_TICK_TIME_PER_FRAME: Duration = Duration::from_millis(100);
 const LOG_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Cap `accumulator` at [`MAX_BACKLOG_TICKS`] of `tick`; returns the dropped
-/// excess (zero when nothing was dropped).
-pub fn clamp_backlog(accumulator: &mut Duration, tick: Duration) -> Duration {
+/// excess (zero when nothing was dropped). With `hosting_joiners` nothing is
+/// ever dropped: the joiners' queued inputs need every tick repaid.
+pub fn clamp_backlog(accumulator: &mut Duration, tick: Duration, hosting_joiners: bool) -> Duration {
     let cap = tick * MAX_BACKLOG_TICKS;
-    if *accumulator > cap {
+    if !hosting_joiners && *accumulator > cap {
         let dropped = *accumulator - cap;
         *accumulator = cap;
         dropped
@@ -46,16 +55,20 @@ pub fn clamp_backlog(accumulator: &mut Duration, tick: Duration) -> Duration {
 }
 
 /// May the frame start another catch-up tick? `spent` is the wall time this
-/// frame's ticks have taken so far.
+/// frame's ticks have taken so far. Without joiners a frame stops once it has
+/// spent [`MAX_TICK_TIME_PER_FRAME`] (after at least one tick); with
+/// `hosting_joiners` only [`MAX_TICKS_PER_FRAME`] bounds it (the pre-clamp
+/// rule).
 pub fn may_run_another_tick(
     accumulator: Duration,
     tick: Duration,
     ticks_run: u32,
     spent: Duration,
+    hosting_joiners: bool,
 ) -> bool {
     accumulator >= tick
         && ticks_run < MAX_TICKS_PER_FRAME
-        && (ticks_run == 0 || spent < MAX_TICK_TIME_PER_FRAME)
+        && (hosting_joiners || ticks_run == 0 || spent < MAX_TICK_TIME_PER_FRAME)
 }
 
 /// Rolling record of what was dropped, for the rate-limited log line.
@@ -83,7 +96,7 @@ pub fn note_dropped(dropped: Duration, now: Instant) {
         if due {
             log::warn!(
                 "tick backlog clamped: dropped {} ms of simulation time over {} frame(s) \
-                 (the machine cannot sustain 20 ticks/s)",
+                 (a stall, or a machine that cannot sustain 20 ticks/s)",
                 log.dropped.as_millis(),
                 log.events
             );
@@ -103,25 +116,25 @@ mod tests {
     #[test]
     fn a_small_backlog_is_kept_whole() {
         let mut acc = TICK * 3 + Duration::from_millis(20);
-        assert_eq!(clamp_backlog(&mut acc, TICK), Duration::ZERO);
+        assert_eq!(clamp_backlog(&mut acc, TICK, false), Duration::ZERO);
         assert_eq!(acc, TICK * 3 + Duration::from_millis(20));
     }
 
     #[test]
     fn a_big_backlog_is_cut_to_the_cap_and_the_excess_reported() {
         let mut acc = Duration::from_secs(3);
-        let dropped = clamp_backlog(&mut acc, TICK);
+        let dropped = clamp_backlog(&mut acc, TICK, false);
         assert_eq!(acc, TICK * MAX_BACKLOG_TICKS);
         assert_eq!(dropped, Duration::from_secs(3) - TICK * MAX_BACKLOG_TICKS);
     }
 
     #[test]
     fn a_frame_always_runs_one_tick_but_stops_catching_up_when_over_time() {
-        assert!(may_run_another_tick(TICK, TICK, 0, Duration::from_secs(5)));
-        assert!(!may_run_another_tick(TICK * 4, TICK, 1, MAX_TICK_TIME_PER_FRAME));
-        assert!(may_run_another_tick(TICK * 4, TICK, 1, Duration::from_millis(10)));
-        assert!(!may_run_another_tick(Duration::from_millis(49), TICK, 0, Duration::ZERO));
-        assert!(!may_run_another_tick(TICK * 20, TICK, MAX_TICKS_PER_FRAME, Duration::ZERO));
+        assert!(may_run_another_tick(TICK, TICK, 0, Duration::from_secs(5), false));
+        assert!(!may_run_another_tick(TICK * 4, TICK, 1, MAX_TICK_TIME_PER_FRAME, false));
+        assert!(may_run_another_tick(TICK * 4, TICK, 1, Duration::from_millis(10), false));
+        assert!(!may_run_another_tick(Duration::from_millis(49), TICK, 0, Duration::ZERO, false));
+        assert!(!may_run_another_tick(TICK * 20, TICK, MAX_TICKS_PER_FRAME, Duration::ZERO, false));
     }
 
     /// Simulate the frame loop for `frames` frames. Every tick costs
@@ -139,13 +152,13 @@ mod tests {
         for _ in 0..frames {
             acc += last_frame;
             if clamped {
-                clamp_backlog(&mut acc, TICK);
+                clamp_backlog(&mut acc, TICK, false);
             }
             max_backlog = max_backlog.max(acc);
             let (mut ran, mut spent) = (0u32, Duration::ZERO);
             loop {
                 let go = if clamped {
-                    may_run_another_tick(acc, TICK, ran, spent)
+                    may_run_another_tick(acc, TICK, ran, spent, false)
                 } else {
                     acc >= TICK && ran < MAX_TICKS_PER_FRAME
                 };
@@ -194,13 +207,64 @@ mod tests {
         // A 30 s freeze (backgrounded tab / long load): next frame runs a few
         // ticks, not 600.
         let mut acc = Duration::from_secs(30);
-        let dropped = clamp_backlog(&mut acc, TICK);
+        let dropped = clamp_backlog(&mut acc, TICK, false);
         assert!(dropped > Duration::from_secs(29));
         let mut ran = 0;
-        while may_run_another_tick(acc, TICK, ran, Duration::ZERO) {
+        while may_run_another_tick(acc, TICK, ran, Duration::ZERO, false) {
             acc = acc.saturating_sub(TICK);
             ran += 1;
         }
         assert_eq!(ran, MAX_BACKLOG_TICKS);
+    }
+
+    #[test]
+    fn hosting_joiners_keeps_the_old_catch_up_exactly() {
+        // Table: (accumulator, ticks_run, spent) -> may run another tick, for
+        // the two branches. With joiners only the accumulator and the
+        // 10-per-frame limit matter, as before the clamp.
+        let ms = Duration::from_millis;
+        let table = [
+            // acc,        run, spent,        alone, with joiners
+            (TICK,         0, ms(5_000),      true,  true),
+            (TICK * 4,     1, ms(10),         true,  true),
+            (TICK * 4,     1, ms(100),        false, true),   // time guard off with joiners
+            (TICK * 4,     3, ms(400),        false, true),
+            (TICK * 20,    9, ms(900),        false, true),
+            (TICK * 20,   10, ms(0),          false, false),  // per-frame limit stays
+            (ms(49),       0, ms(0),          false, false),
+        ];
+        for (acc, run, spent, alone, joiners) in table {
+            assert_eq!(may_run_another_tick(acc, TICK, run, spent, false), alone, "alone {acc:?} {run} {spent:?}");
+            assert_eq!(may_run_another_tick(acc, TICK, run, spent, true), joiners, "joiners {acc:?} {run} {spent:?}");
+        }
+    }
+
+    #[test]
+    fn hosting_joiners_never_drops_a_stall() {
+        // A 400 ms host stall: alone, the backlog is cut to 250 ms (5 ticks);
+        // with a joiner connected it is kept whole and fully repaid.
+        let mut alone = Duration::from_millis(400);
+        assert_eq!(clamp_backlog(&mut alone, TICK, false), Duration::from_millis(150));
+        assert_eq!(alone, TICK * 5);
+
+        let mut with = Duration::from_millis(400);
+        assert_eq!(clamp_backlog(&mut with, TICK, true), Duration::ZERO);
+        assert_eq!(with, Duration::from_millis(400));
+        let mut ran = 0;
+        while may_run_another_tick(with, TICK, ran, Duration::from_millis(200), true) {
+            with = with.saturating_sub(TICK);
+            ran += 1;
+        }
+        assert_eq!(ran, 8, "all eight ticks of the stall are repaid, one per queued input");
+        assert!(with < TICK);
+        // Even a long freeze is bounded per frame by the old 10-tick limit.
+        let mut long = Duration::from_secs(30);
+        assert_eq!(clamp_backlog(&mut long, TICK, true), Duration::ZERO);
+        let mut ran = 0;
+        while may_run_another_tick(long, TICK, ran, Duration::ZERO, true) {
+            long = long.saturating_sub(TICK);
+            ran += 1;
+        }
+        assert_eq!(ran, MAX_TICKS_PER_FRAME);
     }
 }

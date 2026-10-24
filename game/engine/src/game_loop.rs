@@ -10627,8 +10627,18 @@ impl super::GameState {
         // Tick catch-up policy (`tick_catchup`): never carry more than a few
         // ticks of debt (a slow tick used to spiral into ever-longer frames),
         // and stop catching up once this frame has spent its tick-time budget.
+        // Not while a remote joiner is connected: its inputs are consumed one
+        // per server tick, so dropped host ticks would leave standing lag.
+        let hosting_joiners = self
+            .hosted_server
+            .as_ref()
+            .is_some_and(|hs| hs.has_remote_clients());
         crate::tick_catchup::note_dropped(
-            crate::tick_catchup::clamp_backlog(&mut self.tick_accumulator, TICK_DURATION),
+            crate::tick_catchup::clamp_backlog(
+                &mut self.tick_accumulator,
+                TICK_DURATION,
+                hosting_joiners,
+            ),
             now,
         );
         let mut ticks_run = 0;
@@ -10638,6 +10648,7 @@ impl super::GameState {
             TICK_DURATION,
             ticks_run,
             tick_time_spent,
+            hosting_joiners,
         ) {
             let tick_start = Instant::now();
             // D1 tripwire baseline: the world's sim tally before this logical

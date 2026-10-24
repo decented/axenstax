@@ -1680,6 +1680,21 @@ impl HostedServer {
         (active, self.num_local_players + self.max_remote_players)
     }
 
+    /// True while at least one remote client is connected. The frame loop's
+    /// tick catch-up (`tick_catchup`) drops nothing in that case, so the
+    /// joiners' queued inputs are all consumed. Allocation-free; always false
+    /// on WASM (no LAN host there).
+    pub fn has_remote_clients(&self) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.server.players.iter().any(|p| p.connected && p.server_simulated)
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            false
+        }
+    }
+
     /// The remote players in the world right now, as
     /// `(display handle, verified persona)`, for the Online panel's connected
     /// list. Local players are excluded (they are the person reading it), and

@@ -612,8 +612,15 @@ ticks (it always runs at least one; the old limit of 10 per frame still
 applies). Before this a tick over 50 ms let the backlog grow without bound, so
 every frame ran ten ticks and the game sank into slow motion. Dropped time
 only slows the simulation: `tick_counter` and every "ticks since" counter
-advance per executed tick, and a hosted server ticks once per client tick, so
-host and joiners stay in step. The per-tick world passes were also made
+advance per executed tick. **The clamp and the 100 ms guard apply only while no
+remote joiner is connected** (`HostedServer::has_remote_clients`, passed to the
+pure `clamp_backlog` / `may_run_another_tick` as `hosting_joiners`): a joiner's
+inputs arrive at its own 20 Hz and are consumed one per server tick, so ticks
+dropped after a host stall would leave them queued for good (standing latency,
+then dropped movement). While a hosted server has a remote client the old
+catch-up applies exactly: nothing is dropped and a frame runs up to
+`MAX_TICKS_PER_FRAME` (10) ticks to repay the debt. (The cost: a host that is
+slower than 20 ticks/s with joiners connected can still spiral, as before.) The per-tick world passes were also made
 independent of world size: pistons and hoppers read each chunk's maintained
 piston/hopper counter (`Chunk::has_pistons` / `has_hoppers`, kept in
 `Chunk::set` and `from_bytes`) and read cells only in chunks that hold one,
