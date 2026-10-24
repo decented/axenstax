@@ -1910,12 +1910,11 @@ pub fn match_recipe(grid: &[[CraftSlot; 3]; 3]) -> Option<ItemStack> {
 
     // Door (every wood): a 2-wide × 3-tall column of one species' planks → 3
     // doors (Minecraft pattern). All six cells must be the same planks.
-    if h == 3 && w == 2 {
-        if let CraftSlot::Block(plank) = grid[min_r][min_c]
-            && (0..3).all(|r| grid[min_r + r][min_c] == grid[min_r][min_c] && grid[min_r + r][min_c + 1] == grid[min_r][min_c])
-            && let Some(door) = crate::building_variants::id_for_base(plank, crate::building_variants::VShape::Door) {
-            return Some(ItemStack::new_block(door, 3));
-        }
+    if h == 3 && w == 2
+        && let CraftSlot::Block(plank) = grid[min_r][min_c]
+        && (0..3).all(|r| grid[min_r + r][min_c] == grid[min_r][min_c] && grid[min_r + r][min_c + 1] == grid[min_r][min_c])
+        && let Some(door) = crate::building_variants::id_for_base(plank, crate::building_variants::VShape::Door) {
+        return Some(ItemStack::new_block(door, 3));
     }
 
     // F1 Wave 2c — Oak Sign: six planks (3×2) over a centred stick → 3 signs
@@ -1954,12 +1953,11 @@ pub fn match_recipe(grid: &[[CraftSlot; 3]; 3]) -> Option<ItemStack> {
 
     // Wall (every stone): a 3-wide × 2-tall block of one stone → 6 walls
     // (Minecraft pattern). All six cells must be the same stone.
-    if h == 2 && w == 3 {
-        if let CraftSlot::Block(stone) = grid[min_r][min_c]
-            && (0..3).all(|col| grid[min_r][min_c + col] == grid[min_r][min_c] && grid[min_r + 1][min_c + col] == grid[min_r][min_c])
-            && let Some(wall) = crate::building_variants::id_for_base(stone, crate::building_variants::VShape::Wall) {
-            return Some(ItemStack::new_block(wall, 6));
-        }
+    if h == 2 && w == 3
+        && let CraftSlot::Block(stone) = grid[min_r][min_c]
+        && (0..3).all(|col| grid[min_r][min_c + col] == grid[min_r][min_c] && grid[min_r + 1][min_c + col] == grid[min_r][min_c])
+        && let Some(wall) = crate::building_variants::id_for_base(stone, crate::building_variants::VShape::Wall) {
+        return Some(ItemStack::new_block(wall, 6));
     }
 
     // --- 1-tall recipes (Wave 26 farming bread + Spec 23 papyrus) ---

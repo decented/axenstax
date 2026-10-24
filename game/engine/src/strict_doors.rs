@@ -407,7 +407,7 @@ mod run21_tests {
         let src = include_str!("game_loop.rs");
         assert!(src.contains("if let Some(top) = door_top.filter(|_| !typed_place) {"), "no DoorUpper coupon after a typed placement");
         // Run-21 review LOW-2 — the place arm asks the joined ceiling rule.
-        assert!(src.contains("if crate::strict_doors::door_headroom_refused(&self.world, [place_x, place_y, place_z], self.joined()) =>"), "the place arm refuses a joined door above the world");
+        assert!(src.contains("if crate::block_shape::is_door(door) && crate::strict_doors::door_headroom_refused(&self.world, [place_x, place_y, place_z], self.joined()) =>"), "the place arm refuses a joined door (any wood) above the world");
         let strict = src.find("crate::strict_doors::toggle_joined(").expect("the Strict toggle arm");
         let mirror = strict + src[strict..].find("crate::strict_doors::reserve_toggle_unsent(").expect("the Mirror toggle arm");
         let local = mirror + src[mirror..].find("crate::strict_doors::toggle_metas(").expect("the prediction");

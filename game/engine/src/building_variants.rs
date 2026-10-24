@@ -219,7 +219,7 @@ pub fn new_block_shape(id: BlockId) -> Option<BlockShape> {
 /// The block id for (material index, shape); `None` if the family has no such
 /// shape.
 pub fn id_of(mat: usize, shape: VShape) -> Option<BlockId> {
-    if !MATERIALS[mat].family.shapes().iter().any(|s| *s == shape) {
+    if !MATERIALS[mat].family.shapes().contains(&shape) {
         return None;
     }
     if let Some(id) = existing_id(mat, shape) {
@@ -262,8 +262,8 @@ pub fn material_for_base(base: BlockId) -> Option<usize> {
     MATERIALS.iter().position(|m| m.base == base)
 }
 
-/// The variant of `shape` made from the full-cube block `base`: spruce planks
-/// + `Stairs` gives spruce stairs; `None` if `base` is not a table material or
+/// The variant of `shape` made from the full-cube block `base`. Spruce planks
+/// and `Stairs` give spruce stairs; `None` if `base` is not a table material or
 /// its family has no such shape. The recipe matcher's one lookup.
 pub fn id_for_base(base: BlockId, shape: VShape) -> Option<BlockId> {
     id_of(material_for_base(base)?, shape)

@@ -1613,7 +1613,10 @@ mod tests {
         // caught its spec'd recipe never having been wired into match_recipe).
         // Bump deliberately when adding recipes — a silent drop means a family
         // stopped generating.
-        assert_eq!(all_cards().len(), 295, "catalogue size changed to {}", all_cards().len());
+        // 348 as of 2026-10-24: 295 + 53, one generated card per building-variant
+        // id (every wood's slab/stairs/door/trapdoor/gate, every stone's
+        // slab/stairs/wall) that had no authored card.
+        assert_eq!(all_cards().len(), 348, "catalogue size changed to {}", all_cards().len());
     }
 
     /// UX polish sweep Task 3 — the non-obvious craftables (a kid can't

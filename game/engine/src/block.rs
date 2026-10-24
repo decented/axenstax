@@ -3876,7 +3876,10 @@ mod tests {
         // when a new block is appended to the registry.
         assert!(reg.is_known(WINDMILL));
         assert!(reg.is_known(WINDMILL_TURNING));
-        assert!(!reg.is_known(WINDMILL_TURNING + 1));
+        // The building variants (320..=372) follow the Windmill; the first id past them is unknown.
+        assert!(reg.is_known(WINDMILL_TURNING + 1));
+        assert!(reg.is_known(crate::building_variants::END_NEW_ID - 1));
+        assert!(!reg.is_known(crate::building_variants::END_NEW_ID));
         assert!(!reg.is_known(u16::MAX));
     }
 
