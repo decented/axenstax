@@ -299,9 +299,12 @@ impl Governor {
     }
 
     /// 90th percentile of the window (seconds), or `None` until it holds most
-    /// of a full window.
+    /// of a full window. A window at its sample cap is full however short it
+    /// is in time: above ~320 fps 240 samples cover less than 0.75 s, and
+    /// waiting for the time would freeze the governor for good.
     fn p90(&self) -> Option<f32> {
-        if self.window_sum < WINDOW * 0.75 || self.window.is_empty() {
+        let full = self.window.len() >= MAX_WINDOW_SAMPLES;
+        if (self.window_sum < WINDOW * 0.75 && !full) || self.window.is_empty() {
             return None;
         }
         let mut v: Vec<f32> = self.window.iter().copied().collect();
@@ -648,6 +651,29 @@ mod tests {
         // And the last 300 s see at most a handful of steps.
         let late = steps.iter().filter(|(t, _)| *t > 600.0).count();
         assert!(late <= 5, "{late} late steps");
+    }
+
+    #[test]
+    fn a_very_high_frame_rate_still_steps_up_after_a_step_down() {
+        // 400 fps: 240 samples cover 0.6 s, under the 0.75 s the window used
+        // to need, so the governor froze wherever it was.
+        let u = user();
+        let mut g = Governor::new();
+        let (t, down) = run(&mut g, &u, 0.0, 20.0, |_, _| 0.050);
+        assert!(!down.is_empty());
+        let start = g.level();
+        assert!(start >= 2);
+        let (t, ups) = run(&mut g, &u, t, 300.0, |_, _| 1.0 / 400.0);
+        assert!(ups.iter().all(|(_, c)| *c == Change::Up), "{ups:?}");
+        assert_eq!(ups.len(), start, "steps all the way back up");
+        assert_eq!(g.level(), 0);
+        // And it can still step down at that rate: 400 fps is judged, not skipped.
+        let (_, down) = run(&mut g, &u, t, 60.0, |_, _| 0.050);
+        assert!(!down.is_empty());
+        // A uniformly slow 1200 fps-class series (the cap fills in 0.2 s) judges too.
+        let mut g = Governor::new();
+        let (_, steps) = run(&mut g, &u, 0.0, 60.0, |_, _| 1.0 / 1200.0);
+        assert!(steps.is_empty(), "fast stays put at level 0");
     }
 
     #[test]
