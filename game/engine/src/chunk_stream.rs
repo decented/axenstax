@@ -540,21 +540,26 @@ impl super::GameState {
             // ── Fresh world: nothing saved here yet, or a joined session. A world
             // that is saved here but failed to load never reaches this branch
             // (refused above). ──
-            // Generate the small spawn-placement area (3×3 columns around origin,
-            // covering find_surface_spawn's block-radius-6 spiral) so the player
+            // Generate the small spawn-placement area (3×3 columns around the
+            // world spawn column, covering find_surface_spawn's block-radius-6
+            // spiral) so the player
             // can be placed on real ground. Lighting too, so the first mesh built
             // for these columns isn't dark. The rest of the render distance is
             // generated + meshed by `step_load` from the queue.
             // (A push-only joiner (B2a) generates nothing: its spawn is the
             // host's, and its ground is what the host pushes.)
-            let pregen: &[i32] = if self.joined_push_only { &[] } else { &[-1, 0, 1] };
-            for &dx in pregen {
-                for &dz in pregen {
-                    self.world.generate_column(dx, dz, &self.biome_gen);
-                    crate::lighting::run_initial_pass_for_column(&mut self.world, dx, dz, &self.registry);
-                    self.loaded_columns.insert((dx, dz));
-                    self.chunk_intake.column_held((dx, dz));
-                }
+            // On a later generator the spawn is a dry column searched outward
+            // from the origin, so the 3×3 is round that column.
+            let pregen: Vec<(i32, i32)> = if self.joined_push_only {
+                Vec::new()
+            } else {
+                spawn_pregen_columns(&self.world, &self.biome_gen).to_vec()
+            };
+            for (dx, dz) in pregen {
+                self.world.generate_column(dx, dz, &self.biome_gen);
+                crate::lighting::run_initial_pass_for_column(&mut self.world, dx, dz, &self.registry);
+                self.loaded_columns.insert((dx, dz));
+                self.chunk_intake.column_held((dx, dz));
             }
 
             // Place the player on solid ground — never on tree canopy (#9) or in
@@ -641,6 +646,17 @@ impl super::GameState {
                     self.pending_spawn_pref, saved, new_pos,
                 );
                 self.place_player0_and_pregen(new_pos);
+                // The resolved y is an estimate from the 2D height; on a v3
+                // world the real top can be ~20 blocks off (inside rock, or a
+                // drop). The columns round it are generated now, so stand on
+                // real ground with headroom (a v2 world is left as resolved).
+                if !self.joined_push_only {
+                    let snapped = snap_spawn_to_ground(&self.world, &self.biome_gen, new_pos);
+                    if snapped != new_pos {
+                        log::info!("Spawn override snapped onto ground: {new_pos:?} -> {snapped:?}");
+                        self.players[0].player.pos = snapped;
+                    }
+                }
             }
             self.pending_spawn_pref = crate::spawn_pref::SpawnPref::Default;
         }
@@ -1528,9 +1544,11 @@ pub(crate) fn fresh_setup_wanted(load_succeeded: bool, world_preloaded: bool) ->
 /// A world's spawn point: where a fresh world places its player, and where a
 /// dedicated server starts a joiner (`GameServer::world_spawn`) — one
 /// rule, so both agree. Flat/Workshop worlds use the known fixed floor (the
-/// biome-height scan would start below y=79 and miss it); every other world
-/// the nearest clear ground to the origin. The columns around the origin must
-/// be generated first.
+/// biome-height scan would start below y=79 and miss it). A v2 world takes the
+/// nearest clear ground to the origin; any later generator searches outward
+/// for dry land first ([`crate::spawn_search`], terrain design §10) and takes
+/// the nearest clear ground to the column it finds. The columns
+/// [`spawn_pregen_columns`] names must be generated first.
 pub(crate) fn world_spawn_point(
     world: &crate::world::World,
     biome_gen: &crate::biome::BiomeGenerator,
@@ -1538,9 +1556,35 @@ pub(crate) fn world_spawn_point(
     let (sx, sy, sz) = if world.is_workshop || world.has_flat_floor() {
         (8, crate::workshop::WORKSHOP_FLOOR_Y + 1, 8)
     } else {
-        find_surface_spawn(world, biome_gen, 0, 0)
+        let col = crate::spawn_search::world_spawn_column(biome_gen);
+        find_surface_spawn(world, biome_gen, col.x, col.z)
     };
     glam::Vec3::new(sx as f32 + 0.5, sy as f32, sz as f32 + 0.5)
+}
+
+/// The nine chunk columns round the world spawn that [`world_spawn_point`]
+/// reads (the +-6 block clear-ground search stays inside them). Generate these
+/// before asking for the spawn. A flat/Workshop world and a v2 world: the 3x3
+/// round the origin, as ever. A later generator: the 3x3 round the dry column
+/// the spawn search chose.
+pub(crate) fn spawn_pregen_columns(
+    world: &crate::world::World,
+    biome_gen: &crate::biome::BiomeGenerator,
+) -> [(i32, i32); 9] {
+    let (cx, cz) = if world.is_workshop || world.has_flat_floor() {
+        (0, 0)
+    } else {
+        crate::spawn_search::world_spawn_column(biome_gen).chunk()
+    };
+    let mut out = [(0, 0); 9];
+    let mut i = 0;
+    for dx in -1..=1 {
+        for dz in -1..=1 {
+            out[i] = (cx + dx, cz + dz);
+            i += 1;
+        }
+    }
+    out
 }
 
 /// Find a safe standing position near `(ox, oz)`: solid, walkable ground with
@@ -1548,12 +1592,35 @@ pub(crate) fn world_spawn_point(
 /// Spirals outward from the origin column so a trunk or a lake sitting exactly
 /// at the origin doesn't strand the player — we just step to the nearest clear
 /// column. Returns `(x, feet_y, z)` in world coords. Owner inbox #9.
+///
+/// The spiral is block-radius 6, so it only steps off a trunk or a pond; the
+/// choice of a dry region on a v3 world is [`crate::spawn_search`]'s.
 fn find_surface_spawn(
     world: &crate::world::World,
     biome_gen: &crate::biome::BiomeGenerator,
     ox: i32,
     oz: i32,
 ) -> (i32, i32, i32) {
+    if let Some(found) = find_clear_ground_near(world, biome_gen, ox, oz) {
+        return found;
+    }
+    // Nothing clear within the spiral — drop in just above the generator's
+    // terrain height at the origin and let physics settle. A later generator
+    // uses its real top (its 3D noise can lift it well off the estimate).
+    let top = match biome_gen.generator() {
+        crate::biome::Generator::V2 => biome_gen.terrain_height(ox, oz),
+        _ => biome_gen.surface_y(ox, oz),
+    };
+    (ox, top.max(1) + 1, oz)
+}
+
+/// The spiral of [`find_surface_spawn`] without its fallback.
+fn find_clear_ground_near(
+    world: &crate::world::World,
+    biome_gen: &crate::biome::BiomeGenerator,
+    ox: i32,
+    oz: i32,
+) -> Option<(i32, i32, i32)> {
     const MAX_RING: i32 = 6;
     for ring in 0..=MAX_RING {
         for dz in -ring..=ring {
@@ -1564,14 +1631,33 @@ fn find_surface_spawn(
                 }
                 let (x, z) = (ox + dx, oz + dz);
                 if let Some(feet_y) = ground_with_headroom(world, biome_gen, x, z) {
-                    return (x, feet_y, z);
+                    return Some((x, feet_y, z));
                 }
             }
         }
     }
-    // Nothing clear within the spiral — drop in just above the generator's
-    // terrain height at the origin and let physics settle.
-    (ox, biome_gen.terrain_height(ox, oz).max(1) + 1, oz)
+    None
+}
+
+/// Snap a spawn-preference position (`spawn_pref::resolve_spawn`, estimated
+/// from the 2D height) onto real ground. On a v3 world the real top can sit up
+/// to ~20 blocks off the estimate (rock above it, or a drop below), so the
+/// player would start inside a mountain. Reads the world, so the 5x5 columns
+/// round `pos` must be generated first. The exact column if it has ground with
+/// headroom, else the nearest clear column within block-radius 6, else the
+/// column's real top. A v2 world is returned unchanged (its height is exact and
+/// its results are pinned).
+pub(crate) fn snap_spawn_to_ground(
+    world: &crate::world::World,
+    biome_gen: &crate::biome::BiomeGenerator,
+    pos: glam::Vec3,
+) -> glam::Vec3 {
+    if matches!(biome_gen.generator(), crate::biome::Generator::V2) {
+        return pos;
+    }
+    let (x, z) = (pos.x.floor() as i32, pos.z.floor() as i32);
+    let (sx, sy, sz) = find_surface_spawn(world, biome_gen, x, z);
+    glam::Vec3::new(sx as f32 + 0.5, sy as f32, sz as f32 + 0.5)
 }
 
 /// Scan a single column for solid ground with two air cells above. Returns the
@@ -1584,8 +1670,13 @@ fn ground_with_headroom(
     z: i32,
 ) -> Option<i32> {
     use crate::block;
-    // Start clear of any canopy, then walk down to the first solid ground.
-    let mut y = biome_gen.terrain_height(x, z).max(0) + 24;
+    // Start clear of any canopy, then walk down to the first solid ground. A
+    // later generator's real top (overhangs, cliffs) can sit well above its 2D
+    // estimate, so it starts above that, with design §10's 32 of margin.
+    let mut y = match biome_gen.generator() {
+        crate::biome::Generator::V2 => biome_gen.terrain_height(x, z).max(0) + 24,
+        _ => biome_gen.surface_y(x, z).max(biome_gen.terrain_height(x, z)).max(0) + 32,
+    };
     while y > 1 {
         let b = world.get_block(x, y, z);
         let is_ground = b != block::AIR

@@ -1263,16 +1263,16 @@ impl GameServer {
     ///
     /// Computed on this server's world by the rule a fresh single-player world
     /// places its player by (`chunk_stream::world_spawn_point`: the fixed floor
-    /// on flat/Workshop worlds, else the nearest clear ground to the origin —
-    /// never a buried or in-air cell), after generating the 3x3 columns it
-    /// searches if they are not loaded yet (hence `&mut self`). Records the
+    /// on flat/Workshop worlds; on a v2 world the nearest clear ground to the
+    /// origin; on a v3 world the nearest clear ground to the dry column
+    /// `spawn_search` finds — never a buried, wet or in-air cell), after
+    /// generating the 3x3 columns it searches if they are not loaded yet
+    /// (hence `&mut self`). Records the
     /// spawn's column as the dedicated streamer's spawn anchor
     /// ([`Self::spawn_column`]), so the anchor follows the spawn.
     pub fn world_spawn(&mut self) -> Vec3 {
-        for dx in -1..=1 {
-            for dz in -1..=1 {
-                self.ensure_column_loaded(dx, dz);
-            }
+        for (cx, cz) in crate::chunk_stream::spawn_pregen_columns(&self.world, &self.biome_gen) {
+            self.ensure_column_loaded(cx, cz);
         }
         let spawn = crate::chunk_stream::world_spawn_point(&self.world, &self.biome_gen);
         self.spawn_column = crate::chunk_stream::column_of(spawn);

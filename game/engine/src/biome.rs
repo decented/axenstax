@@ -185,6 +185,8 @@ pub struct BiomeGenerator {
     cave_noise: OpenSimplex,
     /// The v3 terrain; `Some` exactly when `generator` is `V3`.
     v3: Option<Box<crate::worldgen_v3::Terrain>>,
+    /// The world spawn column, searched once (`spawn_search`).
+    pub(crate) spawn_search: std::sync::OnceLock<crate::spawn_search::SpawnColumn>,
 }
 
 impl BiomeGenerator {
@@ -200,6 +202,7 @@ impl BiomeGenerator {
             detail_noise: OpenSimplex::new(seed.wrapping_add(3000)),
             cave_noise: OpenSimplex::new(seed.wrapping_add(4000)),
             v3: (generator == Generator::V3).then(|| Box::new(crate::worldgen_v3::Terrain::new(seed))),
+            spawn_search: std::sync::OnceLock::new(),
         }
     }
 

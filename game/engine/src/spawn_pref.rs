@@ -11,7 +11,7 @@
 
 use glam::Vec3;
 
-use crate::biome::{Biome, BiomeGenerator, SEA_LEVEL};
+use crate::biome::{Biome, BiomeGenerator, Generator, SEA_LEVEL};
 use crate::chunk::CHUNK_SIZE;
 use crate::village_gen;
 
@@ -136,6 +136,33 @@ fn anchor_world(layout: &village_gen::VillageLayout) -> Vec3 {
     Vec3::new(ax as f32 + 0.5, ay as f32 + 2.0, az as f32 + 0.5)
 }
 
+/// Whether a spawn preference may stand on column `(x, z)`. v2 terrain is a
+/// pure heightmap that the finders already read exactly, so every column
+/// qualifies there (its results are pinned). On a later generator a column
+/// must be dry land: not Ocean, DeepOcean or River, and with a real top above
+/// the sea (`spawn_search`'s rule), so a wet or sea-floor candidate is skipped
+/// rather than snapped to the bottom.
+fn standable(biome_gen: &BiomeGenerator, x: i32, z: i32) -> bool {
+    if matches!(biome_gen.generator(), Generator::V2) {
+        return true;
+    }
+    !matches!(biome_gen.biome_at(x, z), Biome::Ocean | Biome::DeepOcean | Biome::River)
+        && biome_gen.terrain_height(x, z) >= SEA_LEVEL + 1
+        && biome_gen.surface_y(x, z) >= SEA_LEVEL + 1
+}
+
+/// The estimated feet y for a player placed on column `(x, z)`: two above the
+/// top solid block. v2: its heightmap, exact. A later generator: its real top
+/// (3D noise included); `chunk_stream::snap_spawn_to_ground` then settles the
+/// player on the generated blocks.
+fn spawn_y(biome_gen: &BiomeGenerator, x: i32, z: i32) -> f32 {
+    let top = match biome_gen.generator() {
+        Generator::V2 => biome_gen.terrain_height(x, z),
+        _ => biome_gen.surface_y(x, z),
+    };
+    top as f32 + 2.0
+}
+
 /// Search outward from a reference world position on a per-block spiral
 /// for a coordinate satisfying `predicate(x, z)`. Returns the world
 /// position (centred + surface + 2 above for safe spawn) of the first
@@ -153,9 +180,8 @@ where
 {
     let ref_x = reference.x as i32;
     let ref_z = reference.z as i32;
-    if predicate(ref_x, ref_z) {
-        let y = biome_gen.terrain_height(ref_x, ref_z);
-        return Some(Vec3::new(ref_x as f32 + 0.5, y as f32 + 2.0, ref_z as f32 + 0.5));
+    if standable(biome_gen, ref_x, ref_z) && predicate(ref_x, ref_z) {
+        return Some(Vec3::new(ref_x as f32 + 0.5, spawn_y(biome_gen, ref_x, ref_z), ref_z as f32 + 0.5));
     }
     let rings = max_radius_blocks / stride;
     for r in 1..=rings {
@@ -164,9 +190,8 @@ where
             for dz in [-edge, edge] {
                 let x = ref_x + dx;
                 let z = ref_z + dz;
-                if predicate(x, z) {
-                    let y = biome_gen.terrain_height(x, z);
-                    return Some(Vec3::new(x as f32 + 0.5, y as f32 + 2.0, z as f32 + 0.5));
+                if standable(biome_gen, x, z) && predicate(x, z) {
+                    return Some(Vec3::new(x as f32 + 0.5, spawn_y(biome_gen, x, z), z as f32 + 0.5));
                 }
             }
         }
@@ -174,9 +199,8 @@ where
             for dx in [-edge, edge] {
                 let x = ref_x + dx;
                 let z = ref_z + dz;
-                if predicate(x, z) {
-                    let y = biome_gen.terrain_height(x, z);
-                    return Some(Vec3::new(x as f32 + 0.5, y as f32 + 2.0, z as f32 + 0.5));
+                if standable(biome_gen, x, z) && predicate(x, z) {
+                    return Some(Vec3::new(x as f32 + 0.5, spawn_y(biome_gen, x, z), z as f32 + 0.5));
                 }
             }
         }
@@ -240,8 +264,16 @@ pub fn resolve_spawn(
         SpawnPref::NearVillage => nearest_village_anchor(seed, biome_gen, saved_position, 32)
             .unwrap_or(saved_position),
         SpawnPref::AtOrigin => {
-            let surface = biome_gen.terrain_height(0, 0);
-            Vec3::new(0.5, surface as f32 + 2.0, 0.5)
+            // v2: the origin column. A later generator: the world spawn
+            // search's dry column ("origin" is where the search starts).
+            let (x, z) = match biome_gen.generator() {
+                Generator::V2 => (0, 0),
+                _ => {
+                    let col = crate::spawn_search::world_spawn_column(biome_gen);
+                    (col.x, col.z)
+                }
+            };
+            Vec3::new(x as f32 + 0.5, spawn_y(biome_gen, x, z), z as f32 + 0.5)
         }
         SpawnPref::FarFromVillages => find_position_matching(
             biome_gen, saved_position, 32, 2048,
