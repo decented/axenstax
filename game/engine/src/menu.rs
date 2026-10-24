@@ -727,6 +727,8 @@ impl MenuState {
                                 published_to: None,
                                 satoshi_enabled: false,
                                 pop_secret: None,
+                                // Display-only, like `seed`: the real generator comes from the blob meta.
+                                worldgen_version: crate::biome::LEGACY_GENERATOR,
                             });
                         }
                     });
@@ -774,6 +776,8 @@ impl MenuState {
                             published_to: None,
                             satoshi_enabled: false,
                             pop_secret: None,
+                            // Display-only, like `seed`: the real generator comes from the blob meta.
+                            worldgen_version: crate::biome::LEGACY_GENERATOR,
                         },
                         size_bytes: e.size,
                         cloud_only: false,
@@ -899,6 +903,8 @@ impl MenuState {
                                 published_to: None,
                                 satoshi_enabled: false,
                                 pop_secret: None,
+                                // Display-only, like `seed`: the real generator comes from the blob meta.
+                                worldgen_version: crate::biome::LEGACY_GENERATOR,
                             },
                             size_bytes: e.size,
                             cloud_only: true,
