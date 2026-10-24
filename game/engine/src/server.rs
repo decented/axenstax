@@ -941,6 +941,19 @@ fn column_loaded(loaded: &ahash::AHashSet<(i32, i32)>, pos: Vec3) -> bool {
     loaded.contains(&(cx, cz))
 }
 
+/// Feet height for a player placed on the terrain of block column `(x, z)`:
+/// one above its topmost non-air block. The scan starts at the column's real
+/// top ([`World::column_top_y`]), never a fixed height, so terrain above 80
+/// can't swallow the player (terrain T1 review S2). An empty column puts the
+/// player at y 1, as it always did.
+fn terrain_stand_y(world: &World, x: i32, z: i32) -> f32 {
+    let mut sy = world.column_top_y(x, z).max(0);
+    while sy > 0 && world.get_block(x, sy, z) == block::AIR {
+        sy -= 1;
+    }
+    sy as f32 + 1.0
+}
+
 /// The authoritative game server.
 pub struct GameServer {
     pub(crate) run_id: [u8; 16],
@@ -1436,11 +1449,7 @@ impl GameServer {
         for p in &mut self.players {
             let px = p.player.pos.x.floor() as i32;
             let pz = p.player.pos.z.floor() as i32;
-            let mut sy = 80;
-            while sy > 0 && self.world.get_block(px, sy, pz) == block::AIR {
-                sy -= 1;
-            }
-            p.player.pos.y = sy as f32 + 1.0;
+            p.player.pos.y = terrain_stand_y(&self.world, px, pz);
             p.player.velocity = Vec3::ZERO;
             p.player.reset_fall();
         }
@@ -3251,6 +3260,21 @@ pub fn use_seed_from(key: &[u8; 32], salt: u64, tick: u64, slot: u64) -> u64 {
 mod tests {
     use super::*;
     use std::time::Instant;
+
+    /// Terrain T1 review S2: `initial_load` placed a player from a fixed y 80,
+    /// inside any terrain solid at 80. It now scans down from the column's top.
+    #[test]
+    fn a_player_is_placed_on_top_of_terrain_taller_than_80() {
+        let mut world = World::new();
+        for y in 0..=150 {
+            world.set_block(5, y, 5, block::STONE);
+        }
+        assert_eq!(terrain_stand_y(&world, 5, 5), 151.0, "on top, not inside");
+        // Low terrain and a column with nothing keep their old answers.
+        world.set_block(9, 40, 9, block::STONE);
+        assert_eq!(terrain_stand_y(&world, 9, 9), 41.0);
+        assert_eq!(terrain_stand_y(&world, 100, 100), 1.0);
+    }
 
     /// C3c-2-fix (L1) — a use roll's seed is HMAC-SHA256 under a sub-key
     /// derived from the Proof-of-Play secret, never the secret itself in a
