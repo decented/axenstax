@@ -380,6 +380,7 @@ mod tests {
             action_session: [8; 16],
             action_life: 0,
             has_personal_state: true,
+            generator: crate::biome::Generator::V2.version(),
         };
         server.send_to_client(&crate::protocol::serialize_packet(crate::protocol::PacketType::JoinAccept, &accept));
         client.poll();

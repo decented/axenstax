@@ -9,8 +9,19 @@ use crate::biome::{Biome, BiomeGenerator, LAVA_CAVE_LEVEL, SEA_LEVEL};
 use crate::block::{self, BlockId, AIR};
 use crate::chunk::{Chunk, CHUNK_SIZE};
 
-/// Maximum chunk Y coordinate for terrain generation.
-pub const MAX_CHUNK_Y: i32 = 5;
+/// Highest chunk-section Y (`cy`) a world holds: sections `0..=MAX_CHUNK_Y`,
+/// cells Y `0..WORLD_HEIGHT` (0..=255, Spec 02 §3.1). Raised from 5 (a 96-block
+/// world) on 2026-10-23 for terrain generator v3; global, not per world, so an
+/// old world just gains sky. Most columns hold far fewer sections: absent
+/// sections are never stored, generated, lit, meshed or saved
+/// ([`World::light_top`], [`World::column_top_y`]).
+pub const MAX_CHUNK_Y: i32 = 15;
+
+/// The top cell (Y) of the old 96-block world (`MAX_CHUNK_Y` 5): the most the v2
+/// generator ever writes, and the floor of the sky-light pass
+/// ([`World::light_top`]), so a v2 column is lit exactly as before the ceiling
+/// was raised.
+pub const V2_WORLD_TOP: i32 = 95;
 
 /// The world's height in blocks: cells `0..WORLD_HEIGHT` exist
 /// (`World::set_block` writes nothing above). C3d run 22 (run-21 review
@@ -18,7 +29,10 @@ pub const MAX_CHUNK_Y: i32 = 5;
 /// out-of-world checks read, never a literal.
 pub const WORLD_HEIGHT: i32 = (MAX_CHUNK_Y + 1) * CHUNK_SIZE as i32;
 
-/// Version of the terrain generator's output (gap-audit T2-9, Spec 02 §5).
+/// Version of the **v2** terrain generator's output (gap-audit T2-9, Spec 02
+/// §5) — `biome::Generator::V2`. A world records which generator made it
+/// (`WorldMeta.worldgen_version`, 2026-10-23); this number is the v2 one, and
+/// v3 is a separate generator (`biome::Generator::V3`), never a bump of this.
 ///
 /// **Bump this whenever generation output for a given seed + world flags
 /// changes** — terrain shape, biomes, caves, ore, trees, vegetation, villages,
@@ -62,14 +76,48 @@ pub const WORLDGEN_VERSION: u32 = 2;
 /// both their generator version and their bundled plans match, so a plan edit
 /// with no code change still reads as "terrain may differ". Never 0 (a peer
 /// that sent no value decodes as 0, which must read as a mismatch).
+///
+/// This is the **v2** generator's value ([`worldgen_fingerprint_for`]`(V2)`),
+/// unchanged since protocol v65: what `JoinRequestPacket.worldgen_version`
+/// carries (a joiner announces before it knows the world's generator).
 pub fn worldgen_fingerprint() -> u32 {
-    static FINGERPRINT: std::sync::LazyLock<u32> = std::sync::LazyLock::new(|| {
-        worldgen_fingerprint_of(
-            WORLDGEN_VERSION,
-            &crate::plan_registry::PlanRegistry::bundled().content_hash(),
-        )
-    });
-    *FINGERPRINT
+    worldgen_fingerprint_for(crate::biome::Generator::V2)
+}
+
+/// [`worldgen_fingerprint`] for one terrain generator: its version folded with
+/// the bundled plan registry's content hash. A world's host sends the value
+/// for the world's generator (`JoinAcceptPacket.worldgen_version`); a joiner
+/// announces one per generator it has. v2's value is exactly the one every
+/// build since v65 exchanged (`WORLDGEN_VERSION` is 2), and v3's differs, so
+/// a v2 and a v3 world never agree by accident. v3's also folds in
+/// [`crate::biome::V3_REVISION`] (bump it whenever v3 output changes), so a
+/// build with different v3 output never reads as matching.
+pub fn worldgen_fingerprint_for(generator: crate::biome::Generator) -> u32 {
+    static FINGERPRINTS: std::sync::LazyLock<Vec<(crate::biome::Generator, u32)>> =
+        std::sync::LazyLock::new(|| {
+            let plans = crate::plan_registry::PlanRegistry::bundled().content_hash();
+            crate::biome::Generator::ALL
+                .into_iter()
+                .map(|g| {
+                    let version = match g {
+                        // The v2 generator's output version (the golden's).
+                        crate::biome::Generator::V2 => WORLDGEN_VERSION,
+                        crate::biome::Generator::V3 => v3_output_version(crate::biome::V3_REVISION),
+                    };
+                    (g, worldgen_fingerprint_of(version, &plans))
+                })
+                .collect()
+        });
+    FINGERPRINTS.iter().find(|(g, _)| *g == generator).map(|&(_, fp)| fp).expect("every generator has a fingerprint")
+}
+
+/// The version number hashed into v3's fingerprint: the generator's number
+/// (3) in the low byte and its output revision ([`crate::biome::V3_REVISION`])
+/// above it. At revision 0 this is 3, so the value is unchanged until the
+/// first bump; any bump gives a value no other generator's plain number can
+/// equal.
+pub(crate) const fn v3_output_version(revision: u32) -> u32 {
+    (revision << 8) | crate::biome::Generator::V3.version()
 }
 
 /// Pure core of [`worldgen_fingerprint`]: the first four bytes (LE) of
@@ -456,6 +504,13 @@ pub struct World {
     /// trees, villages, structures — including spill into neighbouring chunks)
     /// don't mark a chunk `persist`. Runtime-only.
     worldgen_depth: u32,
+    /// The highest Y a block write may land on: [`WORLD_HEIGHT`]` - 1`, except
+    /// while `generate_column` runs, when it is the generator's
+    /// `BiomeGenerator::max_generated_height` — so a v2 tree, village or
+    /// hideout piece running off the old 96-block roof is still clipped there
+    /// exactly as before the ceiling was raised (the v2 golden pins this).
+    /// Runtime-only.
+    worldgen_top: i32,
     /// Phase B2b (Spec 04 §4.1 "Touched columns") — the columns written
     /// outside world-gen since the last [`World::take_edited_columns`]:
     /// blocks, metadata, player-placed bits, block entities (a `&mut` handed
@@ -635,6 +690,12 @@ pub struct World {
     /// leaves the inventory intact and creates no grave (default `false` =
     /// graves). Set from meta at every load/entry seam, mirroring `mobs_enabled`.
     pub keep_inventory: bool,
+    /// The terrain generator this world was made with (its meta's
+    /// `worldgen_version`), mirrored on world entry (`apply_meta_rules`,
+    /// `GameState::apply_world_seed`) so a save writes it into `world.dat`
+    /// (`WorldSave.worldgen_version`). Generation itself reads the
+    /// `BiomeGenerator` it is handed, which carries the same selector.
+    pub generator: crate::biome::Generator,
     /// #6 — map waypoints (manual pins + rolling death markers). Persisted per
     /// world in `WorldSave.waypoints` (append-only, serde-default).
     pub waypoints: Vec<crate::waypoint::Waypoint>,
@@ -809,6 +870,7 @@ impl World {
             evicted: AHashMap::new(),
             evicted_columns: ahash::AHashSet::new(),
             worldgen_depth: 0,
+            worldgen_top: WORLD_HEIGHT - 1,
             edited_columns: None,
             tables_gone: None,
             attachment_log: None,
@@ -838,6 +900,7 @@ impl World {
             time_lock: "cycle".to_string(),
             mobs_enabled: true,
             keep_inventory: false,
+            generator: crate::biome::Generator::V2,
             waypoints: Vec::new(),
             exhibits: Vec::new(),
             beacon_browse_cache: Vec::new(),
@@ -1009,6 +1072,65 @@ impl World {
 
     pub fn has_chunk(&self, cx: i32, cy: i32, cz: i32) -> bool {
         self.chunks.contains_key(&(cx, cy, cz))
+    }
+
+    /// Drop the live chunk at `(cx, cy, cz)`, if any (side tables are the
+    /// caller's). A joiner taking in a pushed all-air chunk removes its own
+    /// copy rather than store an empty one: an absent section reads as open
+    /// sky and costs nothing (`chunk_intake`).
+    pub fn remove_chunk(&mut self, cx: i32, cy: i32, cz: i32) {
+        self.chunks.remove(&(cx, cy, cz));
+    }
+
+    /// The highest section of column `(cx, cz)` holding a real block (live or
+    /// evicted), if any. Above it every cell is air.
+    pub fn top_block_section(&self, cx: i32, cz: i32) -> Option<i32> {
+        (0..=MAX_CHUNK_Y).rev().find(|&cy| {
+            self.chunks
+                .get(&(cx, cy, cz))
+                .or_else(|| self.evicted.get(&(cx, cy, cz)))
+                .is_some_and(|c| !c.is_empty())
+        })
+    }
+
+    /// The top cell (Y) of the highest section holding a real block in the
+    /// column containing block `(x, z)`, or `-1` when it holds none. Every
+    /// top-down block scan starts here instead of at `WORLD_HEIGHT - 1`, so a
+    /// column costs what it holds, not the world's height (a v2 column is never
+    /// above [`V2_WORLD_TOP`]).
+    pub fn column_top_y(&self, x: i32, z: i32) -> i32 {
+        let cs = CHUNK_SIZE as i32;
+        self.top_block_section(x.div_euclid(cs), z.div_euclid(cs))
+            .map_or(-1, |cy| (cy + 1) * cs - 1)
+    }
+
+    /// The top cell (Y) the sky-light pass covers in column `(cx, cz)`: the
+    /// top of its highest live section (empty or not), but never below
+    /// [`V2_WORLD_TOP`] — so a column of the old 96-block world gets exactly
+    /// the sections and light it always did, and only a column built or
+    /// generated higher pays for more. Above it every section is absent and
+    /// reads as open sky (`sky_light_at` = 15).
+    pub fn light_top(&self, cx: i32, cz: i32) -> i32 {
+        let cs = CHUNK_SIZE as i32;
+        (0..=MAX_CHUNK_Y)
+            .rev()
+            .find(|&cy| self.chunks.contains_key(&(cx, cy, cz)))
+            .map_or(V2_WORLD_TOP, |cy| ((cy + 1) * cs - 1).max(V2_WORLD_TOP))
+    }
+
+    /// The chunk a write conjures at `(cx, cy, cz)` outside world-gen. Above
+    /// every live section of an already-present column it is open sky (sky
+    /// light 15 everywhere — what the absent section read as a moment ago), so
+    /// a torch or a glass pane placed in the open air above the terrain does
+    /// not sit in a dark box; the light update re-runs the column's sky pass if
+    /// the write blocks the sky. Otherwise (world-gen, a gap below the top, an
+    /// empty column) it starts dark, as before: the sky pass relies on that
+    /// below the first opaque block.
+    fn conjured_chunk(&self, cx: i32, cy: i32, cz: i32) -> Chunk {
+        let above_column = self.worldgen_depth == 0
+            && (0..cy).any(|y| self.chunks.contains_key(&(cx, y, cz)))
+            && !(cy + 1..=MAX_CHUNK_Y).any(|y| self.chunks.contains_key(&(cx, y, cz)));
+        if above_column { Chunk::new_open_sky() } else { Chunk::new() }
     }
 
     /// Record that the `.chunk` file for `key` was read in or written by this
@@ -1218,7 +1340,11 @@ impl World {
         if self.evicted_columns.contains(&(cx, cz)) {
             self.evicted.entry((cx, cy, cz)).or_insert_with(Chunk::new)
         } else {
-            self.chunks.entry((cx, cy, cz)).or_insert_with(Chunk::new)
+            if !self.chunks.contains_key(&(cx, cy, cz)) {
+                let fresh = self.conjured_chunk(cx, cy, cz);
+                self.chunks.insert((cx, cy, cz), fresh);
+            }
+            self.chunks.get_mut(&(cx, cy, cz)).expect("inserted above")
         }
     }
 
@@ -1265,6 +1391,10 @@ impl World {
         self.time_lock = meta.time_lock.clone();
         self.mobs_enabled = meta.mobs_enabled;
         self.keep_inventory = meta.keep_inventory;
+        // Every load path refuses an unknown generator before its meta gets
+        // here (`save::read_world_meta`, `world_archive::unpack_world`,
+        // `JoinedWorld::from_accept`).
+        self.generator = meta.generator().expect("a world with an unknown generator is refused at load");
     }
 
     /// Phase B2b — a fresh, empty world with this one's generation inputs
@@ -1277,6 +1407,7 @@ impl World {
         twin.world_type = self.world_type.clone();
         twin.ground = self.ground.clone();
         twin.water_depth = self.water_depth;
+        twin.generator = self.generator;
         twin
     }
 
@@ -1711,6 +1842,7 @@ impl World {
         self.evicted.clear();
         self.evicted_columns.clear();
         self.worldgen_depth = 0;
+        self.worldgen_top = WORLD_HEIGHT - 1;
         // `disk_chunks` is deliberately KEPT: it describes the world folder, which
         // a Workshop reset clears in memory but keeps saving to — forgetting it
         // would leave the old build's chunk files to resurrect. A world change
@@ -1817,7 +1949,7 @@ impl World {
     /// (#6) and the spawn-proof overlay (#8). Delegates the scan to the pure
     /// `minimap::topmost_map_block` so there is one source of truth.
     pub fn highest_block(&self, x: i32, z: i32) -> Option<(i32, BlockId)> {
-        let max_y = (MAX_CHUNK_Y + 1) * CHUNK_SIZE as i32 - 1;
+        let max_y = self.column_top_y(x, z);
         crate::minimap::topmost_map_block(
             max_y,
             0,
@@ -2077,15 +2209,16 @@ impl World {
 
     /// Set block at world-space position. Creates chunk if needed.
     ///
-    /// Vertical bounds guard (Spec 02 — fixed-height column, Y `0..=95`, i.e.
-    /// `MAX_CHUNK_Y+1` chunks tall). Horizontal `(x, z)` is unbounded by design,
+    /// Vertical bounds guard (Spec 02 — fixed-height column, Y `0..WORLD_HEIGHT`
+    /// (0..=255), i.e. `MAX_CHUNK_Y+1` chunks tall). Horizontal `(x, z)` is unbounded by design,
     /// but `Y` is not: without this guard an out-of-range structure write (a
     /// mineshaft/ravine/village piece that runs off the top or bottom of the
     /// column) would `or_insert_with` a *phantom* chunk at a `cy` outside the
     /// playable range — leaking a chunk that height/lighting/topmost queries
     /// never expect and that nothing ever streams out. Drop the write instead.
     pub fn set_block(&mut self, x: i32, y: i32, z: i32, block: BlockId) {
-        if y < 0 || y >= (MAX_CHUNK_Y + 1) * CHUNK_SIZE as i32 {
+        // `worldgen_top` is `WORLD_HEIGHT - 1` outside world-gen.
+        if !(0..=self.worldgen_top.min(WORLD_HEIGHT - 1)).contains(&y) {
             return;
         }
         let cx = x.div_euclid(CHUNK_SIZE as i32);
@@ -2231,7 +2364,11 @@ impl World {
         if self.light_write_dropped(cx, cz) {
             return; // Spec 02 §7.5 — no light-only strays for evicted columns
         }
-        let chunk = self.chunks.entry((cx, cy, cz)).or_insert_with(Chunk::new);
+        if !self.chunks.contains_key(&(cx, cy, cz)) {
+            let fresh = self.conjured_chunk(cx, cy, cz);
+            self.chunks.insert((cx, cy, cz), fresh);
+        }
+        let chunk = self.chunks.get_mut(&(cx, cy, cz)).expect("inserted above");
         chunk.set_block_light_at(lx, ly, lz, v);
     }
 
@@ -2246,7 +2383,11 @@ impl World {
         if self.light_write_dropped(cx, cz) {
             return; // Spec 02 §7.5 — no light-only strays for evicted columns
         }
-        let chunk = self.chunks.entry((cx, cy, cz)).or_insert_with(Chunk::new);
+        if !self.chunks.contains_key(&(cx, cy, cz)) {
+            let fresh = self.conjured_chunk(cx, cy, cz);
+            self.chunks.insert((cx, cy, cz), fresh);
+        }
+        let chunk = self.chunks.get_mut(&(cx, cy, cz)).expect("inserted above");
         chunk.set_sky_light_at(lx, ly, lz, v);
     }
 
@@ -2525,7 +2666,9 @@ impl World {
     /// existing `persist` flag is left as it was.
     pub fn generate_column(&mut self, cx: i32, cz: i32, biome_gen: &BiomeGenerator) {
         self.worldgen_depth += 1;
+        let top = std::mem::replace(&mut self.worldgen_top, biome_gen.max_generated_height());
         self.generate_column_inner(cx, cz, biome_gen);
+        self.worldgen_top = top;
         self.worldgen_depth -= 1;
     }
 
@@ -2548,7 +2691,29 @@ impl World {
             self.generate_flat_column(cx, cz);
             return;
         }
-        for cy in 0..=MAX_CHUNK_Y {
+        match biome_gen.generator() {
+            crate::biome::Generator::V2 => {
+                self.fill_column_v2(cx, cz, biome_gen);
+                self.decorate_column_v2(cx, cz, biome_gen);
+            }
+            crate::biome::Generator::V3 => {
+                self.fill_column_v3(cx, cz, biome_gen);
+                // v3 is frozen with v2's decoration passes (trees root on the
+                // real surface, `BiomeGenerator::surface_y`); the v3 trees,
+                // villages and spawn of design §9–§10 belong to the next
+                // generator. `decorate_column_v2` is therefore frozen twice.
+                self.decorate_column_v2(cx, cz, biome_gen);
+            }
+        }
+    }
+
+    /// The v2 terrain fill: one pure per-voxel function (`biome_block_at`) of
+    /// the 2D heightmap, caves and ore, section by section.
+    fn fill_column_v2(&mut self, cx: i32, cz: i32, biome_gen: &BiomeGenerator) {
+        // Sections above the generator's height are all air: never visited, so
+        // raising the world's ceiling costs a v2 column nothing.
+        let top_cy = biome_gen.max_generated_height().div_euclid(CHUNK_SIZE as i32).min(MAX_CHUNK_Y);
+        for cy in 0..=top_cy {
             // Skip a cy only if its chunk already holds REAL blocks. An *empty*
             // existing chunk — a phantom born when a `set_block(AIR)` (e.g. a
             // structure carve) touches an ungenerated column and `or_insert`s a
@@ -2582,7 +2747,41 @@ impl World {
                 self.insert_chunk(cx, cy, cz, chunk);
             }
         }
+    }
 
+    /// The v3 terrain fill (`worldgen_v3::fill`): 2D climate splines, 3D
+    /// density, surface rules, ore. Like v2 it skips a section that already
+    /// holds real blocks and never stores an all-air one.
+    fn fill_column_v3(&mut self, cx: i32, cz: i32, biome_gen: &BiomeGenerator) {
+        let terrain = biome_gen.v3().expect("a V3 generator carries its v3 terrain");
+        let blocks = crate::worldgen_v3::fill::column_blocks(biome_gen, terrain, cx, cz);
+        let h = crate::worldgen_v3::fill::HEIGHT;
+        for cy in 0..=MAX_CHUNK_Y {
+            if self.chunks.get(&(cx, cy, cz)).is_some_and(|c| !c.is_empty()) {
+                continue;
+            }
+            let mut chunk = Chunk::new();
+            let base_y = (cy * CHUNK_SIZE as i32) as usize;
+            for lz in 0..CHUNK_SIZE {
+                for lx in 0..CHUNK_SIZE {
+                    let col = (lz * CHUNK_SIZE + lx) * h + base_y;
+                    for ly in 0..CHUNK_SIZE {
+                        let blk = blocks[col + ly];
+                        if blk != AIR {
+                            chunk.set(lx, ly, lz, blk);
+                        }
+                    }
+                }
+            }
+            if !chunk.is_empty() {
+                self.insert_chunk(cx, cy, cz, chunk);
+            }
+        }
+    }
+
+    /// The v2 decoration stages, in order: trees, vegetation, villages,
+    /// brigand hideouts, ravines, mineshafts.
+    fn decorate_column_v2(&mut self, cx: i32, cz: i32, biome_gen: &BiomeGenerator) {
         // Decorate: scatter oak trees
         self.place_trees(cx, cz, biome_gen);
 
@@ -2736,7 +2935,7 @@ impl World {
             for lx in 0..cs {
                 let wx = col_min_x + lx;
                 let wz = col_min_z + lz;
-                let surface = biome_gen.terrain_height(wx, wz);
+                let surface = biome_gen.surface_y(wx, wz);
                 // Nothing grows below the waterline.
                 if surface <= SEA_LEVEL {
                     continue;
@@ -2811,6 +3010,9 @@ impl World {
 /// can ask about a neighbour column that has not been generated yet and get
 /// the same answer it would after (Phase B0 worldgen purity).
 pub(crate) fn terrain_block_at(biome_gen: &BiomeGenerator, x: i32, y: i32, z: i32) -> BlockId {
+    if let Some(t) = biome_gen.v3() {
+        return crate::worldgen_v3::fill::block_at(biome_gen, t, x, y, z);
+    }
     let surface = biome_gen.terrain_height(x, z);
     biome_block_at(y, surface, biome_gen.biome_at(x, z), biome_gen, x, z)
 }
@@ -2846,7 +3048,9 @@ pub(crate) fn tree_at_column_cell(
     if props.tree_species.is_empty() {
         return None;
     }
-    let surface = biome_gen.terrain_height(wx, wz);
+    // v2: `terrain_height`. v3: the real top (3D noise), so a tree neither
+    // floats nor roots inside a bank.
+    let surface = biome_gen.surface_y(wx, wz);
     // Reject only genuinely submerged surfaces. A surface *at* SEA_LEVEL is
     // dry land at the waterline — water fills `y > surface && y <= SEA_LEVEL`,
     // which is empty there — so a tree roots fine on it. The earlier `<=`
@@ -2857,7 +3061,9 @@ pub(crate) fn tree_at_column_cell(
     }
     // Surface block must be the biome's land surface (GRASS/SAND/SNOW…),
     // computed purely so neighbour columns can be consulted pre-generation.
-    if biome_block_at(surface, surface, biome, biome_gen, wx, wz) != props.surface_block {
+    // (For v2 `terrain_block_at` is exactly `biome_block_at(surface, surface,
+    // biome, ..)`: `surface` is `terrain_height` and `biome` is `biome_at`.)
+    if terrain_block_at(biome_gen, wx, surface, wz) != props.surface_block {
         return None;
     }
     let species_idx = species_pick_for(wx, wz, biome_gen.seed, props.tree_species.len());
@@ -2897,6 +3103,7 @@ pub(crate) fn tree_threshold_for_biome(biome: Biome) -> Option<i32> {
         Biome::Savanna => Some(80),
         Biome::SnowyTundra => Some(80),
         Biome::Desert | Biome::Ocean | Biome::Mountains => None,
+        Biome::DeepOcean | Biome::River | Biome::Beach => None,
     }
 }
 
@@ -3251,7 +3458,7 @@ mod tests {
         // never laid its terrain — and for cy=0 that meant no bedrock floor, so
         // the player dropped through forever. The fix skips a cy only when its
         // chunk is NON-empty, so an empty phantom is refilled.
-        let biome_gen = crate::biome::BiomeGenerator::new(1);
+        let biome_gen = crate::biome::BiomeGenerator::new(1, crate::biome::Generator::V2);
         let mut w = World::new();
         let (cx, cz) = (5, 5);
         let (sx, sz) = (cx * CHUNK_SIZE as i32 + 4, cz * CHUNK_SIZE as i32 + 4);
@@ -3276,7 +3483,7 @@ mod tests {
         // floor at y=0. A "fall-forever" void column = a missing or bedrock-less
         // bottom chunk. Several seeds because structures are sparse + seed-driven.
         for seed in [1u32, 7, 42, 1337, 90210] {
-            let biome_gen = crate::biome::BiomeGenerator::new(seed);
+            let biome_gen = crate::biome::BiomeGenerator::new(seed, crate::biome::Generator::V2);
             let mut w = World::new();
             let r = 12; // 25×25 columns ≈ 400×400 blocks — wide enough for structures
             for cx in -r..=r {
@@ -3474,7 +3681,7 @@ mod tests {
         let mut w = World::new();
         w.is_workshop = true;
         // biome_gen is unused on the workshop path, but the signature needs one.
-        let biome_gen = crate::biome::BiomeGenerator::new(1);
+        let biome_gen = crate::biome::BiomeGenerator::new(1, crate::biome::Generator::V2);
         w.generate_column(0, 0, &biome_gen);
 
         // Exactly one chunk in the column (the one holding the floor layer).
@@ -3503,7 +3710,7 @@ mod tests {
         // clear that dropped it would lose the skins for the session).
         let mut w = World::new();
         w.is_workshop = true;
-        let biome_gen = crate::biome::BiomeGenerator::new(1);
+        let biome_gen = crate::biome::BiomeGenerator::new(1, crate::biome::Generator::V2);
         w.generate_column(0, 0, &biome_gen);
         let floor_y = crate::workshop::WORKSHOP_FLOOR_Y;
         assert_eq!(w.get_block(0, floor_y, 0), block::SAND, "room has a floor");
@@ -3796,7 +4003,7 @@ mod tests {
         // vegetation, so fresh worlds had bare grass — no tufts, no
         // berries. Generate a 5×5 chunk area and confirm both appear on
         // the grassy surface.
-        let bg = BiomeGenerator::new(42);
+        let bg = BiomeGenerator::new(42, crate::biome::Generator::V2);
         let mut world = World::new();
         for cx in 0..5 {
             for cz in 0..5 {
@@ -3827,7 +4034,7 @@ mod tests {
         // density drives both visual clutter and frame cost. Guard that
         // flower coverage of grassy surface stays modest — the original
         // 4% roll read as "too many" to Axolittle.
-        let bg = BiomeGenerator::new(42);
+        let bg = BiomeGenerator::new(42, crate::biome::Generator::V2);
         let mut world = World::new();
         for cx in 0..6 {
             for cz in 0..6 {
@@ -3864,7 +4071,7 @@ mod tests {
         // Every plant must rest on the surface block, never float. Spot
         // check: wherever a tall-grass/berry block exists, the block
         // directly below it is non-air.
-        let bg = BiomeGenerator::new(7);
+        let bg = BiomeGenerator::new(7, crate::biome::Generator::V2);
         let mut world = World::new();
         for cx in 0..3 {
             for cz in 0..3 {
@@ -3894,7 +4101,7 @@ mod tests {
         // cell whose surface is strictly *below* the waterline is ever
         // tree-eligible. Surface *at* SEA_LEVEL is dry waterline land and is
         // allowed (it carries no water above it).
-        let bg = BiomeGenerator::new(42);
+        let bg = BiomeGenerator::new(42, crate::biome::Generator::V2);
         let mut submerged_cells = 0;
         for wx in -200..200 {
             for wz in -200..200 {
@@ -3917,7 +4124,7 @@ mod tests {
         // baseline lift the bulk of jungle should be dry land (surface at or
         // above the waterline) so its Rubber/Jungle trees actually grow,
         // while deeper dips remain real lakes.
-        let bg = BiomeGenerator::new(42);
+        let bg = BiomeGenerator::new(42, crate::biome::Generator::V2);
         let mut jungle = 0u32;
         let mut dry = 0u32;
         for wx in (-1200..1200).step_by(7) {
@@ -3939,7 +4146,7 @@ mod tests {
     fn no_tree_logs_at_or_below_the_waterline() {
         // End-to-end form of the same bug: generate a region and confirm
         // no tree-log block exists at or below SEA_LEVEL.
-        let bg = BiomeGenerator::new(42);
+        let bg = BiomeGenerator::new(42, crate::biome::Generator::V2);
         let mut world = World::new();
         for cx in -2..3 {
             for cz in -2..3 {
@@ -3966,7 +4173,7 @@ mod tests {
         // in the inner 3×3 chunks of a generated 5×5 area (all neighbours
         // present), every block of its pure shape must be present in the
         // world — no leaf silently dropped at a chunk seam.
-        let bg = BiomeGenerator::new(42);
+        let bg = BiomeGenerator::new(42, crate::biome::Generator::V2);
         let cs = CHUNK_SIZE as i32;
         let mut world = World::new();
         for cx in 0..5 {
@@ -4044,7 +4251,7 @@ mod tests {
         // Spec 32 follow-on: confirm the Jungle wedge in `biome_at` is
         // reachable so Rubber trees actually have somewhere to spawn.
         // Sample a large range; assert ≥1 Jungle column.
-        let biome_gen = BiomeGenerator::new(42);
+        let biome_gen = BiomeGenerator::new(42, crate::biome::Generator::V2);
         let mut seen_jungle = false;
         'scan: for x in (-2000..=2000).step_by(50) {
             for z in (-2000..=2000).step_by(50) {
@@ -4098,7 +4305,7 @@ mod tests {
         // submerged trees — i.e. it was asserting the very trees-in-water
         // bug we fixed. Require above-water jungle so it tests the real
         // Rubber wiring rather than a worldgen artefact.
-        let biome_gen = BiomeGenerator::new(42);
+        let biome_gen = BiomeGenerator::new(42, crate::biome::Generator::V2);
         let cs = CHUNK_SIZE as i32;
 
         // Find chunks whose centre classifies as above-water Jungle.
@@ -4188,7 +4395,7 @@ mod tests {
         w.world_type = "flat".to_string();
         w.ground = ground.to_string();
         w.water_depth = water_depth;
-        let biome_gen = crate::biome::BiomeGenerator::new(1); // unused on flat path
+        let biome_gen = crate::biome::BiomeGenerator::new(1, crate::biome::Generator::V2); // unused on flat path
         w.generate_column(0, 0, &biome_gen);
         w
     }
@@ -4309,7 +4516,7 @@ mod tests {
         w.is_workshop = true;
         w.world_type = "flat".to_string(); // even if flat is also set, workshop wins
         w.ground = "stone".to_string();    // different ground; must be ignored
-        let biome_gen = crate::biome::BiomeGenerator::new(1);
+        let biome_gen = crate::biome::BiomeGenerator::new(1, crate::biome::Generator::V2);
         w.generate_column(0, 0, &biome_gen);
         // Workshop's sand-over-bedrock must be intact.
         assert_eq!(w.get_block(0, floor_y,     0), block::SAND,    "workshop floor is still sand, not stone");
@@ -4340,7 +4547,7 @@ mod tests {
 
     #[test]
     fn worldgen_leaves_persist_false() {
-        let bg = crate::biome::BiomeGenerator::new(7);
+        let bg = crate::biome::BiomeGenerator::new(7, crate::biome::Generator::V2);
         let mut w = World::new();
         for cx in -1..=1 {
             for cz in -1..=1 {
@@ -4355,7 +4562,7 @@ mod tests {
 
     #[test]
     fn light_only_writes_do_not_set_persist() {
-        let bg = crate::biome::BiomeGenerator::new(7);
+        let bg = crate::biome::BiomeGenerator::new(7, crate::biome::Generator::V2);
         let mut w = World::new();
         w.generate_column(0, 0, &bg);
         w.set_block_light_at(3, 70, 3, 12);
@@ -4369,7 +4576,7 @@ mod tests {
 
     #[test]
     fn block_change_after_generation_sets_persist_same_value_does_not() {
-        let bg = crate::biome::BiomeGenerator::new(7);
+        let bg = crate::biome::BiomeGenerator::new(7, crate::biome::Generator::V2);
         let mut w = World::new();
         w.generate_column(0, 0, &bg);
         let b = w.get_block(2, 1, 2);
@@ -4384,7 +4591,7 @@ mod tests {
 
     #[test]
     fn pristine_column_unload_is_dropped_not_evicted() {
-        let bg = crate::biome::BiomeGenerator::new(7);
+        let bg = crate::biome::BiomeGenerator::new(7, crate::biome::Generator::V2);
         let mut w = World::new();
         w.generate_column(0, 0, &bg);
         assert!(!w.evict_column(0, 0));
@@ -4396,7 +4603,7 @@ mod tests {
 
     #[test]
     fn edited_column_evicts_and_restores_with_its_edit() {
-        let bg = crate::biome::BiomeGenerator::new(7);
+        let bg = crate::biome::BiomeGenerator::new(7, crate::biome::Generator::V2);
         let mut w = World::new();
         w.generate_column(0, 0, &bg);
         w.set_block(4, 40, 4, crate::block::GLASS);
@@ -4429,7 +4636,7 @@ mod tests {
 
     #[test]
     fn loaded_chunk_is_persist_and_evicts() {
-        let bg = crate::biome::BiomeGenerator::new(7);
+        let bg = crate::biome::BiomeGenerator::new(7, crate::biome::Generator::V2);
         let mut src = World::new();
         src.generate_column(0, 0, &bg);
         let bytes = src.get_chunk(0, 0, 0).unwrap().as_bytes();
@@ -4462,7 +4669,7 @@ mod tests {
     // ── Spec 02 §7.5 — read-through / write-through to evicted chunks ──
 
     fn evicted_world() -> World {
-        let bg = crate::biome::BiomeGenerator::new(7);
+        let bg = crate::biome::BiomeGenerator::new(7, crate::biome::Generator::V2);
         let mut w = World::new();
         w.generate_column(0, 0, &bg);
         w.place_player_block(4, 40, 4, crate::block::GLASS);
@@ -4556,7 +4763,7 @@ mod tests {
 
     /// A flat world with column (0, 0) generated.
     fn flat_world_with_one_column() -> World {
-        let bg = crate::biome::BiomeGenerator::new(1);
+        let bg = crate::biome::BiomeGenerator::new(1, crate::biome::Generator::V2);
         let mut w = World::new();
         w.world_type = "flat".to_string();
         w.generate_column(0, 0, &bg);
@@ -4607,7 +4814,7 @@ mod tests {
     fn chunk_counts_stay_exact_through_worldgen() {
         // Biome terrain (trees and vegetation spill into the neighbours),
         // a flat world, and the Workshop floor — every bulk writer.
-        let bg = crate::biome::BiomeGenerator::new(11);
+        let bg = crate::biome::BiomeGenerator::new(11, crate::biome::Generator::V2);
         let mut normal = World::new();
         normal.generate_column(0, 0, &bg);
         normal.generate_column(1, 0, &bg);
@@ -4628,7 +4835,7 @@ mod tests {
         // set_block / place_player_block over generated, empty-phantom and
         // never-loaded columns, with AIR and non-air writes. Schematic pastes and
         // `/we` reach cells only through these setters (`Chunk::blocks` is private).
-        let bg = crate::biome::BiomeGenerator::new(5);
+        let bg = crate::biome::BiomeGenerator::new(5, crate::biome::Generator::V2);
         let mut w = World::new();
         w.generate_column(0, 0, &bg);
         let mut rng = 0x1234_5678_9ABC_DEF1u64;
@@ -4660,7 +4867,7 @@ mod tests {
     fn chunk_counts_stay_exact_through_load_from_bytes_and_decompression() {
         // The wire path a joiner takes (game_loop's chunk packet handler):
         // as_bytes -> LZ4 compress -> decompress -> from_bytes -> insert_chunk.
-        let bg = crate::biome::BiomeGenerator::new(7);
+        let bg = crate::biome::BiomeGenerator::new(7, crate::biome::Generator::V2);
         let mut src = World::new();
         src.generate_column(0, 0, &bg);
         src.set_block(4, 40, 4, crate::block::GLASS);

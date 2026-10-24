@@ -251,7 +251,7 @@ mod tests {
     use crate::biome::SEA_LEVEL;
 
     fn any_mineshaft(seed: u32) -> (MineshaftLayout, BiomeGenerator) {
-        let bg = BiomeGenerator::new(seed);
+        let bg = BiomeGenerator::new(seed, crate::biome::Generator::V2);
         for gx in 0..300 {
             for gz in 0..3 {
                 if let Some(l) = layout_for_mineshaft_cell(seed, gx, gz, &bg) {
@@ -264,7 +264,7 @@ mod tests {
 
     #[test]
     fn layout_is_deterministic() {
-        let bg = BiomeGenerator::new(11);
+        let bg = BiomeGenerator::new(11, crate::biome::Generator::V2);
         assert_eq!(
             layout_for_mineshaft_cell(11, 5, 2, &bg),
             layout_for_mineshaft_cell(11, 5, 2, &bg),

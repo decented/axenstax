@@ -27,6 +27,12 @@ pub struct TestConfig {
     /// When true, runs `GameServer::initial_load()` which generates terrain.
     /// Slow (seconds). Default false — most tests don't need real chunks.
     pub do_initial_load: bool,
+    /// The terrain generator the host's world uses. Default v2, so every
+    /// integration test keeps the seed-42 v2 terrain it was written against;
+    /// opt in to v3 with `Generator::V3`. (With `do_initial_load` the world's
+    /// meta decides the first 3x3 columns, as on a real server: none on disk
+    /// reads as v2.)
+    pub generator: crate::biome::Generator,
 }
 
 impl Default for TestConfig {
@@ -39,6 +45,7 @@ impl Default for TestConfig {
             play_mode: crate::play_mode::PlayMode::Survival,
             world_name: "test-world".to_string(),
             do_initial_load: false,
+            generator: crate::biome::Generator::V2,
         }
     }
 }
@@ -69,7 +76,10 @@ impl TestHost {
         let mut server = GameServer::new(num_players, config.world_name.clone(), 42);
         if config.do_initial_load {
             server.initial_load().expect("TestHost initial load");
-        } else {
+        }
+        server.biome_gen = crate::biome::BiomeGenerator::new(42, config.generator);
+        server.world.generator = config.generator;
+        if !config.do_initial_load {
             // The blocks a test sets ARE this world's terrain: count the test
             // area (±64 blocks) as loaded, as `initial_load` would, so a
             // server-simulated body may move in it (`tick_player_physics`

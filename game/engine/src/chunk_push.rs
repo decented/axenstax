@@ -111,9 +111,12 @@ use crate::state_outbox::{chunk_of_cell, ChunkCoord, CHUNK_PACKET_MAX_BYTES};
 use crate::world::{BlockEntityData, FaceAttachment, World, MAX_CHUNK_Y};
 
 /// Most chunk packets in flight (queued or sent, not yet acknowledged) to one
-/// client. At least the spawn ring (3×3 columns × 6 chunks = 54), which a
-/// loading joiner must get before it sends any acknowledgement.
-pub const CHUNK_WINDOW_PACKETS: u32 = 64;
+/// client: about eleven whole columns. At least the spawn ring (3×3 columns ×
+/// 16 chunks = 144), which a loading joiner must get before it sends any
+/// acknowledgement. Was 64 when a column was 6 chunks (2026-10-23: scaled with
+/// the ceiling so as many columns are in flight as before; the sections above
+/// a column's terrain are empty and travel as a few bytes each).
+pub const CHUNK_WINDOW_PACKETS: u32 = 11 * (MAX_CHUNK_Y as u32 + 1);
 
 /// Most chunk-packet bytes in flight to one client. A terrain chunk is about
 /// 2.3 KB (max about 4.4 KB, measured 2026-10-07), so the packet bound is the
@@ -1057,7 +1060,7 @@ mod tests {
             planned.len()
         );
         assert_eq!(planned.len() % column, 0, "only whole columns");
-        let ring: Vec<_> = planned[..54].iter().map(|(c, _)| (c.0, c.2)).collect();
+        let ring: Vec<_> = planned[..9 * column].iter().map(|(c, _)| (c.0, c.2)).collect();
         assert!(ring.iter().all(|&(x, z)| x.abs() <= 1 && z.abs() <= 1), "the 3×3 first: {ring:?}");
         assert_eq!(planned[0].0, (0, 0, 0), "the body's own column, bottom up");
         // Nothing more until the client acknowledges.
@@ -1158,7 +1161,7 @@ mod tests {
             push.ack(push.pushed());
             all.extend(got.into_iter().map(|(c, _)| c));
         }
-        assert_eq!(all.len(), 25 * 6);
+        assert_eq!(all.len(), 25 * (MAX_CHUNK_Y as usize + 1));
         assert!(all.iter().all(|c| c.0.abs() <= 2 && c.2.abs() <= 2));
     }
 
@@ -1498,7 +1501,7 @@ mod tests {
     #[ignore = "measurement"]
     fn measure_generated_chunk_sizes() {
         for seed in [1u32, 42, 600_000, 123_456_789] {
-            let biome = crate::biome::BiomeGenerator::new(seed);
+            let biome = crate::biome::BiomeGenerator::new(seed, crate::biome::Generator::V2);
             let mut world = World::new();
             let mut sizes = Vec::new();
             for cx in -4..=4 {

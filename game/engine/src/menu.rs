@@ -727,6 +727,8 @@ impl MenuState {
                                 published_to: None,
                                 satoshi_enabled: false,
                                 pop_secret: None,
+                                // Display-only, like `seed`: the real generator comes from the blob meta.
+                                worldgen_version: crate::biome::LEGACY_GENERATOR,
                             });
                         }
                     });
@@ -774,6 +776,8 @@ impl MenuState {
                             published_to: None,
                             satoshi_enabled: false,
                             pop_secret: None,
+                            // Display-only, like `seed`: the real generator comes from the blob meta.
+                            worldgen_version: crate::biome::LEGACY_GENERATOR,
                         },
                         size_bytes: e.size,
                         cloud_only: false,
@@ -899,6 +903,8 @@ impl MenuState {
                                 published_to: None,
                                 satoshi_enabled: false,
                                 pop_secret: None,
+                                // Display-only, like `seed`: the real generator comes from the blob meta.
+                                worldgen_version: crate::biome::LEGACY_GENERATOR,
                             },
                             size_bytes: e.size,
                             cloud_only: true,
@@ -1094,8 +1100,17 @@ fn handle_card_action(state: &mut MenuState, idx: usize, card_action: CardAction
     // stay in the lobby and say why, before anything reads or writes it.
     // CP15 (CP14 review MEDIUM-1): nor forked (a refused world is never
     // copied into a playable one); the card says why instead.
-    if matches!(card_action, CardAction::DoubleClick | CardAction::Play | CardAction::Host | CardAction::Fork)
-        && let Some(why) = save::world_open_refusal(&state.worlds[idx].folder_name)
+    // Edit and Stash rewrite world_meta.json: a world from a newer build (unknown
+    // terrain generator) must not be renamed or toggled from this build.
+    if matches!(
+        card_action,
+        CardAction::DoubleClick
+            | CardAction::Play
+            | CardAction::Host
+            | CardAction::Fork
+            | CardAction::Edit
+            | CardAction::ToggleStash
+    ) && let Some(why) = save::world_open_refusal(&state.worlds[idx].folder_name)
     {
         state.notice = Some(why);
         return MenuAction::None;
@@ -6253,6 +6268,59 @@ mod tests {
         assert!(matches!(action, super::MenuAction::None));
         assert!(!matches!(state.dialog, super::MenuDialog::Forking { .. }), "the lobby opened a fork of a refused world");
         assert!(state.notice.is_some(), "the lobby didn't say why the world can't be forked");
+    }
+
+    /// Terrain T1 review S1: a world from a newer build (its meta parses but names
+    /// a terrain generator this build lacks) is never rewritten or forked by the
+    /// lobby. Rename, Stash and Fork all leave its `world_meta.json` byte for
+    /// byte as it was and create nothing; the card says "needs a newer version".
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn lobby_edit_stash_and_fork_leave_a_newer_generators_world_untouched() {
+        use crate::save;
+        let _root = save::WorldsRootGuard::new("lobby-newer-generator");
+        let name = "from-the-future";
+        let mut meta = save::WorldMeta::new(name);
+        meta.worldgen_version = 4;
+        meta.seed = 777;
+        save::write_world_folder(name, &meta, &save::minimal_world_save_for_tests(5), &crate::world::World::new())
+            .unwrap();
+        let meta_path = save::world_dir(name).join("world_meta.json");
+        let before = std::fs::read(&meta_path).expect("the meta was written");
+        let folders = |root: &std::path::Path| std::fs::read_dir(root).unwrap().count();
+        let root_dir = save::world_dir(name).parent().unwrap().to_path_buf();
+        assert_eq!(folders(&root_dir), 1);
+
+        let mut state = super::MenuState::new();
+        state.worlds = save::list_world_entries();
+        let idx = state.worlds.iter().position(|w| w.folder_name == name).expect("the world isn't listed");
+        let card = &state.worlds[idx].meta;
+        assert!(card.display_name.contains("needs a newer version"), "{}", card.display_name);
+        assert!(!card.display_name.contains("damaged"), "{}", card.display_name);
+        assert_eq!(card.seed, 777, "the card shows the world's real info, not placeholders");
+
+        // Rename (Edit).
+        let action = super::handle_card_action(&mut state, idx, super::CardAction::Edit);
+        assert!(matches!(action, super::MenuAction::None));
+        assert!(!matches!(state.dialog, super::MenuDialog::Edit { .. }), "the lobby opened a rename");
+        assert!(state.notice.take().is_some(), "no reason shown for Edit");
+        // ...and the write the Edit dialog would make is refused by the saver itself.
+        assert!(save::save_world_meta(name, &state.worlds[idx].meta).is_err());
+
+        // Stash toggle.
+        let stash_before = state.worlds[idx].meta.cloud_save;
+        super::handle_card_action(&mut state, idx, super::CardAction::ToggleStash);
+        assert_eq!(state.worlds[idx].meta.cloud_save, stash_before, "the card's Stash flag flipped");
+        assert!(state.notice.take().is_some(), "no reason shown for Stash");
+
+        // Fork.
+        super::handle_card_action(&mut state, idx, super::CardAction::Fork);
+        assert!(!matches!(state.dialog, super::MenuDialog::Forking { .. }), "the lobby opened a fork");
+        assert!(state.notice.take().is_some(), "no reason shown for Fork");
+        assert!(save::fork_world(name, "From the future").is_err(), "fork_world copied it");
+
+        assert_eq!(std::fs::read(&meta_path).unwrap(), before, "world_meta.json changed");
+        assert_eq!(folders(&root_dir), 1, "a fork was created");
     }
 
     #[test]

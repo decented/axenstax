@@ -207,15 +207,19 @@ fn is_far_from_villages(seed: u32, biome_gen: &BiomeGenerator, x: i32, z: i32, c
 /// edge above the sea.
 fn is_beach(biome_gen: &BiomeGenerator, x: i32, z: i32) -> bool {
     let here = biome_gen.biome_at(x, z);
-    if !matches!(here, Biome::Plains | Biome::Desert) {
+    if !matches!(here, Biome::Plains | Biome::Desert | Biome::Beach) {
         return false;
     }
     let y = biome_gen.terrain_height(x, z);
     if (y - SEA_LEVEL).abs() > 4 {
         return false;
     }
+    // A v3 world labels its coastal sand itself (the v2 generator never does).
+    if here == Biome::Beach {
+        return true;
+    }
     for (dx, dz) in [(8, 0), (-8, 0), (0, 8), (0, -8)] {
-        if biome_gen.biome_at(x + dx, z + dz) == Biome::Ocean {
+        if matches!(biome_gen.biome_at(x + dx, z + dz), Biome::Ocean | Biome::DeepOcean) {
             return true;
         }
     }
@@ -284,14 +288,14 @@ mod tests {
 
     #[test]
     fn nearest_village_returns_some_for_seed_42() {
-        let bg = BiomeGenerator::new(42);
+        let bg = BiomeGenerator::new(42, crate::biome::Generator::V2);
         let pos = nearest_village_anchor(42, &bg, Vec3::ZERO, 32);
         assert!(pos.is_some(), "expected at least one village within 32 cells of origin");
     }
 
     #[test]
     fn resolve_default_returns_saved_position() {
-        let bg = BiomeGenerator::new(42);
+        let bg = BiomeGenerator::new(42, crate::biome::Generator::V2);
         let saved = Vec3::new(123.0, 80.0, 456.0);
         let resolved = resolve_spawn(SpawnPref::Default, 42, &bg, saved);
         assert_eq!(resolved, saved);
@@ -299,7 +303,7 @@ mod tests {
 
     #[test]
     fn resolve_at_origin_returns_origin_at_surface() {
-        let bg = BiomeGenerator::new(42);
+        let bg = BiomeGenerator::new(42, crate::biome::Generator::V2);
         let resolved = resolve_spawn(SpawnPref::AtOrigin, 42, &bg, Vec3::new(999.0, 999.0, 999.0));
         assert_eq!(resolved.x, 0.5);
         assert_eq!(resolved.z, 0.5);
@@ -308,7 +312,7 @@ mod tests {
 
     #[test]
     fn resolve_near_village_finds_a_village_position() {
-        let bg = BiomeGenerator::new(42);
+        let bg = BiomeGenerator::new(42, crate::biome::Generator::V2);
         let saved = Vec3::new(0.0, 80.0, 0.0);
         let resolved = resolve_spawn(SpawnPref::NearVillage, 42, &bg, saved);
         // If the search worked, resolved should differ from saved (or
@@ -326,7 +330,7 @@ mod tests {
 
     #[test]
     fn biome_searches_find_matching_terrain() {
-        let bg = BiomeGenerator::new(42);
+        let bg = BiomeGenerator::new(42, crate::biome::Generator::V2);
         // For each biome-keyed pref, the resolved position's biome should
         // match. Search budget is generous so we expect a hit for each
         // major biome within reach of origin on seed 42.
@@ -349,7 +353,7 @@ mod tests {
 
     #[test]
     fn far_from_villages_actually_finds_a_village_free_cell() {
-        let bg = BiomeGenerator::new(42);
+        let bg = BiomeGenerator::new(42, crate::biome::Generator::V2);
         let resolved = resolve_spawn(SpawnPref::FarFromVillages, 42, &bg, Vec3::ZERO);
         // Predicate is cell_radius=0 — spawn cell itself has no village
         // (neighbour cells may; alpha village density makes stricter

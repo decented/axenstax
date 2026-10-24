@@ -204,6 +204,7 @@ fn neutral_save(seed: u32) -> WorldSave {
         rig_clips: Vec::new(),
         local_personal: None,
         quest_world: None,
+        worldgen_version: None,
     }
 }
 

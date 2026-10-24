@@ -179,7 +179,7 @@ Collision uses **AABB (Axis-Aligned Bounding Box) vs voxel grid** intersection.
 - **Doors**: any wood's door pairs with a neighbouring door of ANY wood as a double door; a door breaks, places and toggles as the oak door does on every seat (single-player, host, Mirror and Strict joiners).
 - **Creative / `/give`**: variants sit in the Blocks tab right after the original of their shape; `/give spruce_stairs`, `sandstone_slab`, `dark_oak_door`, `granite_wall`, `birch_fence_gate` (also `birch_gate`). The short `slab`, `stairs`, `door`, `trapdoor`, `wall` keep meaning the stone, oak and cobblestone originals.
 - **World generation** places none of them; villages keep their current blocks. Schematic import still maps Minecraft stairs, slabs and doors to full blocks (it keeps no orientation).
-- **Save compatibility**: the save footer format version moved to 58 with these ids, so older builds refuse such worlds (Spec 02 §8.4).
+- **Save compatibility**: the save footer format version moved to 58 with these ids (59 combined with terrain T1's field), so older builds refuse such worlds (Spec 02 §8.4).
 
 
 **Wave 2c interactions (2026-06-19).** The building-detail family completed:

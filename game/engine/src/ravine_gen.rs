@@ -244,7 +244,7 @@ mod tests {
     use super::*;
 
     fn any_ravine(seed: u32) -> (RavineLayout, BiomeGenerator) {
-        let bg = BiomeGenerator::new(seed);
+        let bg = BiomeGenerator::new(seed, crate::biome::Generator::V2);
         // Scan grid cells until we find one hosting a ravine.
         for gx in 0..200 {
             for gz in 0..3 {
@@ -258,7 +258,7 @@ mod tests {
 
     #[test]
     fn layout_is_deterministic_for_a_cell() {
-        let bg = BiomeGenerator::new(7);
+        let bg = BiomeGenerator::new(7, crate::biome::Generator::V2);
         let a = layout_for_ravine_cell(7, 3, 4, &bg);
         let b = layout_for_ravine_cell(7, 3, 4, &bg);
         assert_eq!(a, b, "same seed+cell must give the same ravine");
@@ -270,7 +270,7 @@ mod tests {
         // gate admits 45% of cells; the land gate only *reduces* that, so the
         // observed rate must sit above zero (land cells host ravines) and at or
         // below the 45% ceiling.
-        let bg = BiomeGenerator::new(123);
+        let bg = BiomeGenerator::new(123, crate::biome::Generator::V2);
         let mut present = 0;
         let side = 40;
         let n = side * side;

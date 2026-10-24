@@ -3694,7 +3694,7 @@ mod tests {
         let biomes = [
             Biome::Plains, Biome::Forest, Biome::BirchForest, Biome::Taiga,
             Biome::Jungle, Biome::Savanna, Biome::Desert, Biome::SnowyTundra,
-            Biome::Mountains, Biome::Ocean,
+            Biome::Mountains, Biome::Ocean, Biome::DeepOcean, Biome::River, Biome::Beach,
         ];
         for b in biomes {
             for (kind, _weight) in crate::mob::biome_passive_spawn_weights(b) {

@@ -16,10 +16,7 @@ use crate::leaf_decay::LeafDecaySystem;
 use crate::physics::Player;
 use crate::lava::LavaSystem;
 use crate::water::WaterSystem;
-use crate::world::World;
-
-/// Maximum chunk Y coordinate for world generation.
-const MAX_CHUNK_Y: i32 = 5;
+use crate::world::{World, MAX_CHUNK_Y};
 // BRIDGE: `REACH_DISTANCE` (server-authoritative reach check) is declared but
 // not enforced here — the joiner reach check lives in `hosted_server.rs`
 // (`block_change_within_reach`) and the local one in block_interact.rs. Wire
@@ -162,12 +159,14 @@ pub struct ServerPlayer {
     /// World chat (Phase 2) — this player's per-minute chat token bucket.
     /// See `crate::comms::RateLimiter`.
     pub chat_rate: crate::comms::RateLimiter,
-    /// The `worldgen_fingerprint()` this player's client announced in its
-    /// `JoinRequest` (gap-audit T2-9). A joiner regenerates terrain locally,
-    /// so a different version means its terrain may differ from the host's.
-    /// Local players run this build, so they start at ours. Read through
+    /// Does this player's client generate this world's terrain differently
+    /// (gap-audit T2-9)? Set at join from the fingerprint its `JoinRequest`
+    /// announced for the world's generator (v95,
+    /// `hosted_server::joiner_worldgen_fingerprint`): a joiner regenerates
+    /// terrain locally, so a different one means its terrain may differ from
+    /// the host's. Local players run this build: `false`. Read through
     /// [`ServerPlayer::worldgen_mismatch`].
-    pub client_worldgen_version: u32,
+    pub worldgen_mismatch: bool,
     /// Where this player respawns (MP-A3): the position they were created at,
     /// which for a joiner is the spawn its `JoinAccept` named. The joiner's
     /// bed / `/spawnpoint` spawns are client-side only, so the server's
@@ -605,7 +604,7 @@ impl ServerPlayer {
             // Phase 4 fills this in from Signet/Kenspeckle contacts.
             contacts: std::collections::HashMap::new(),
             chat_rate: crate::comms::RateLimiter::new(),
-            client_worldgen_version: crate::world::worldgen_fingerprint(),
+            worldgen_mismatch: false,
             spawn_pos: spawn,
             dead_ticks: 0,
             respawns: 0,
@@ -673,10 +672,10 @@ impl ServerPlayer {
     }
 
     /// Does this player's client generate terrain differently from this
-    /// server (another `worldgen_fingerprint()`)? Such a client needs real chunks
+    /// server (another fingerprint for this world's generator)? Such a client needs real chunks
     /// pushed rather than regenerating them from the seed (Phase B).
     pub fn worldgen_mismatch(&self) -> bool {
-        self.client_worldgen_version != crate::world::worldgen_fingerprint()
+        self.worldgen_mismatch
     }
 
     /// Can a mob target this player, or a pressure plate feel them? Not when
@@ -942,6 +941,19 @@ fn column_loaded(loaded: &ahash::AHashSet<(i32, i32)>, pos: Vec3) -> bool {
     loaded.contains(&(cx, cz))
 }
 
+/// Feet height for a player placed on the terrain of block column `(x, z)`:
+/// one above its topmost non-air block. The scan starts at the column's real
+/// top ([`World::column_top_y`]), never a fixed height, so terrain above 80
+/// can't swallow the player (terrain T1 review S2). An empty column puts the
+/// player at y 1, as it always did.
+fn terrain_stand_y(world: &World, x: i32, z: i32) -> f32 {
+    let mut sy = world.column_top_y(x, z).max(0);
+    while sy > 0 && world.get_block(x, sy, z) == block::AIR {
+        sy -= 1;
+    }
+    sy as f32 + 1.0
+}
+
 /// The authoritative game server.
 pub struct GameServer {
     pub(crate) run_id: [u8; 16],
@@ -1128,7 +1140,9 @@ impl GameServer {
         // + cheap (parses ~20 JSON blobs once).
         world.load_bundled_plans();
         // #8 — seed from the caller (the world's real seed), not a hardcoded 42.
-        let biome_gen = BiomeGenerator::new(seed);
+        // v2 until the world's meta is read (`load_meta_rules`, run by both
+        // initial loads), which installs the world's own generator.
+        let biome_gen = BiomeGenerator::new(seed, crate::biome::Generator::V2);
 
         let mut players = Vec::new();
         for i in 0..num_players {
@@ -1435,11 +1449,7 @@ impl GameServer {
         for p in &mut self.players {
             let px = p.player.pos.x.floor() as i32;
             let pz = p.player.pos.z.floor() as i32;
-            let mut sy = 80;
-            while sy > 0 && self.world.get_block(px, sy, pz) == block::AIR {
-                sy -= 1;
-            }
-            p.player.pos.y = sy as f32 + 1.0;
+            p.player.pos.y = terrain_stand_y(&self.world, px, pz);
             p.player.velocity = Vec3::ZERO;
             p.player.reset_fall();
         }
@@ -1483,6 +1493,10 @@ impl GameServer {
         self.set_play_mode(crate::play_mode::PlayMode::from_meta_str(&meta.game_mode));
         self.difficulty = crate::survival::Difficulty::from_meta_str(&meta.difficulty);
         self.world.apply_meta_rules(&meta);
+        // The world's own terrain generator (v2 for a world with no meta yet
+        // or one saved before the field; a dedicated server's fresh world is
+        // bootstrapped with the newest). The seed stays the caller's.
+        self.biome_gen = BiomeGenerator::new(self.biome_gen.seed, self.world.generator);
         self.fire_spread_enabled = meta.fire_spread_enabled;
         self.explosives_enabled = meta.explosives_enabled;
         // C1 — the world's own secret rolls its joiners' Satori drops. A meta
@@ -2760,11 +2774,12 @@ impl GameServer {
     /// with a damaging fall. `spawn` unchanged when the column is empty.
     fn standing_spot(&self, spawn: Vec3) -> Vec3 {
         let (x, z) = (spawn.x.floor() as i32, spawn.z.floor() as i32);
-        let top = (MAX_CHUNK_Y + 1) * CHUNK_SIZE as i32 - 1;
-        let mut y = (spawn.y.floor() as i32).clamp(0, top);
+        // Above the column's highest block section every cell is air.
+        let top = self.world.column_top_y(x, z).max(0);
+        let mut y = (spawn.y.floor() as i32).clamp(0, top + 1);
         let air = |y: i32| self.world.get_block(x, y, z) == block::AIR;
         if !air(y) {
-            while y < top && !air(y) {
+            while y <= top && !air(y) {
                 y += 1;
             }
             return Vec3::new(spawn.x, y as f32, spawn.z);
@@ -3115,6 +3130,7 @@ impl GameServer {
             rig_clips: self.world.rigs.iter().map(|r| r.clip).collect(),
             local_personal: local_personal.cloned(),
             quest_world: crate::quest_npcs::capture(self.world.quest_scope, &self.ecs)?,
+            worldgen_version: Some(self.world.generator.version()),
             exhibits: self.world.exhibits.clone(),
             composters: self
                 .world
@@ -3244,6 +3260,21 @@ pub fn use_seed_from(key: &[u8; 32], salt: u64, tick: u64, slot: u64) -> u64 {
 mod tests {
     use super::*;
     use std::time::Instant;
+
+    /// Terrain T1 review S2: `initial_load` placed a player from a fixed y 80,
+    /// inside any terrain solid at 80. It now scans down from the column's top.
+    #[test]
+    fn a_player_is_placed_on_top_of_terrain_taller_than_80() {
+        let mut world = World::new();
+        for y in 0..=150 {
+            world.set_block(5, y, 5, block::STONE);
+        }
+        assert_eq!(terrain_stand_y(&world, 5, 5), 151.0, "on top, not inside");
+        // Low terrain and a column with nothing keep their old answers.
+        world.set_block(9, 40, 9, block::STONE);
+        assert_eq!(terrain_stand_y(&world, 9, 9), 41.0);
+        assert_eq!(terrain_stand_y(&world, 100, 100), 1.0);
+    }
 
     /// C3c-2-fix (L1) — a use roll's seed is HMAC-SHA256 under a sub-key
     /// derived from the Proof-of-Play secret, never the secret itself in a
@@ -3618,7 +3649,7 @@ mod tests {
     fn worldgen_mismatch_reads_the_announced_version() {
         let mut sp = ServerPlayer::new(Vec3::ZERO);
         assert!(!sp.worldgen_mismatch());
-        sp.client_worldgen_version = crate::world::worldgen_fingerprint() ^ 1;
+        sp.worldgen_mismatch = true;
         assert!(sp.worldgen_mismatch());
     }
 

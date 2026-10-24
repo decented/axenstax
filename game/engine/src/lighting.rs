@@ -41,8 +41,11 @@ pub fn run_initial_pass_for_column(
     cz: i32,
     registry: &BlockRegistry,
 ) {
-    let max_y = (crate::world::MAX_CHUNK_Y + 1) * crate::chunk::CHUNK_SIZE as i32 - 1;
-    let y_range = (0, max_y);
+    // Up to the column's highest section, never below the old 96-block roof
+    // (`World::light_top`): a v2 column is lit exactly as before the ceiling
+    // was raised, and the absent sections above read as open sky without
+    // being conjured.
+    let y_range = (0, world.light_top(cx, cz));
     initial_sky_light_for_column(world, cx, cz, y_range, registry);
     initial_block_light_for_column(world, cx, cz, y_range, registry);
 }
@@ -155,27 +158,100 @@ pub fn initial_sky_light_for_column(
             let mut sky_blocked = false;
             for y in (min_y..=max_y).rev() {
                 let b = world.get_block(wx, y, wz);
-                if !sky_blocked {
-                    // Above (or in) the highest opaque block.
-                    if registry.light_absorption(b) >= 15 {
-                        sky_blocked = true;
-                        // The opaque block itself absorbs sky; below
-                        // stays dark until BFS spreads sideways from
-                        // a still-open column.
-                        continue;
+                if sky_blocked {
+                    // Above the old 96-block roof a section may have been
+                    // conjured as open sky (`World::conjured_chunk`): what lies
+                    // under the column's first opaque block there is dark
+                    // until the spread below reaches it. Below the old roof
+                    // nothing is conjured lit, so a v2 column pays nothing.
+                    if y > crate::world::V2_WORLD_TOP && world.sky_light_at(wx, y, wz) != 0 {
+                        world.set_sky_light_at(wx, y, wz, 0);
                     }
-                    world.set_sky_light_at(wx, y, wz, 15);
-                    seeds.push((wx, y, wz));
+                    continue;
                 }
+                // Above (or in) the highest opaque block.
+                if registry.light_absorption(b) >= 15 {
+                    sky_blocked = true;
+                    // The opaque block itself absorbs sky; below
+                    // stays dark until BFS spreads sideways from
+                    // a still-open column.
+                    continue;
+                }
+                world.set_sky_light_at(wx, y, wz, 15);
+                seeds.push((wx, y, wz));
             }
         }
     }
+    seed_across_borders_above_old_roof(world, cx, cz, y_range, registry, &mut seeds);
     // BFS spread sideways so open sky reaches under overhangs.
     let mut queue: VecDeque<((i32, i32, i32), u8)> = VecDeque::new();
     for s in seeds {
         queue.push_back((s, 15));
     }
     bfs_propagate(world, &mut queue, registry, /* block_light */ false);
+}
+
+/// Terrain v3 (2026-10-24): open sky reaching sideways across a column border
+/// above the old 96-block roof. A section that is absent reads as open sky
+/// (`sky_light_at` = 15) but is never a BFS source, so without this an
+/// overhang or cliff ledge above y 95 that opens onto a lower neighbour (whose
+/// sections stop below it) stayed dark, as did one facing a neighbour's open
+/// sky that was lit before it. For every border cell pair above
+/// [`crate::world::V2_WORLD_TOP`], up to the higher of the two columns' light
+/// tops, this seeds at 15:
+/// - the neighbour's cell when its section is absent or it holds full sky, and
+/// - our own cell when our section is absent and the neighbour's is present
+///   (so the order the two columns are lit in does not matter).
+///
+/// Only a *generated* neighbour (it holds its bedrock section) counts: an
+/// ungenerated one may turn out solid there. Nothing at or below y 95 is
+/// touched, so a v2 column is lit exactly as before.
+fn seed_across_borders_above_old_roof(
+    world: &World,
+    cx: i32,
+    cz: i32,
+    (min_y, max_y): (i32, i32),
+    registry: &BlockRegistry,
+    seeds: &mut Vec<(i32, i32, i32)>,
+) {
+    let cs = CHUNK_SIZE as i32;
+    let lo = (crate::world::V2_WORLD_TOP + 1).max(min_y);
+    for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+        let (ncx, ncz) = (cx + dx, cz + dz);
+        if !world.has_chunk(ncx, 0, ncz) || world.is_evicted_at(ncx * cs, ncz * cs) {
+            continue;
+        }
+        let hi = max_y.max(world.light_top(ncx, ncz));
+        if hi < lo {
+            continue;
+        }
+        for k in 0..cs {
+            // Our border cell and the neighbour's cell across the border.
+            let (ox, oz, nx, nz) = match (dx, dz) {
+                (-1, _) => (cx * cs, cz * cs + k, cx * cs - 1, cz * cs + k),
+                (1, _) => (cx * cs + cs - 1, cz * cs + k, cx * cs + cs, cz * cs + k),
+                (_, -1) => (cx * cs + k, cz * cs, cx * cs + k, cz * cs - 1),
+                _ => (cx * cs + k, cz * cs + cs - 1, cx * cs + k, cz * cs + cs),
+            };
+            for y in lo..=hi {
+                let cy = y.div_euclid(cs);
+                let ours = world.has_chunk(cx, cy, cz);
+                let theirs = world.has_chunk(ncx, cy, ncz);
+                if !theirs {
+                    if ours {
+                        seeds.push((nx, y, nz));
+                    }
+                } else if !ours {
+                    seeds.push((ox, y, oz));
+                } else if y <= max_y
+                    && world.sky_light_at(nx, y, nz) == 15
+                    && registry.light_absorption(world.get_block(nx, y, nz)) < 15
+                {
+                    seeds.push((nx, y, nz));
+                }
+            }
+        }
+    }
 }
 
 /// Compute initial block-light for a column. Walks every voxel in
@@ -192,11 +268,16 @@ pub fn initial_block_light_for_column(
     let world_x_min = cx * cs;
     let world_z_min = cz * cs;
     let mut sources: Vec<(i32, i32, i32)> = Vec::new();
+    // An absent section holds no emitter: only the present ones are read.
+    let spans: Vec<(i32, i32)> = (min_y.div_euclid(cs)..=max_y.div_euclid(cs))
+        .filter(|&cy| world.has_chunk(cx, cy, cz))
+        .map(|cy| ((cy * cs).max(min_y), (cy * cs + cs - 1).min(max_y)))
+        .collect();
     for lz in 0..cs {
         for lx in 0..cs {
             let wx = world_x_min + lx;
             let wz = world_z_min + lz;
-            for y in min_y..=max_y {
+            for y in spans.iter().flat_map(|&(lo, hi)| lo..=hi) {
                 let b = world.get_block(wx, y, wz);
                 if registry.light_emission(b) > 0 {
                     sources.push((wx, y, wz));
@@ -238,7 +319,7 @@ pub fn update_for_block_change(
     if prev_opaque != new_opaque {
         let cx = pos.0.div_euclid(CHUNK_SIZE as i32);
         let cz = pos.2.div_euclid(CHUNK_SIZE as i32);
-        let max_y = (crate::world::MAX_CHUNK_Y + 1) * crate::chunk::CHUNK_SIZE as i32 - 1;
+        let max_y = world.light_top(cx, cz);
         // Clear sky-light in the column before re-running the seed pass
         // so the recompute doesn't see stale 15s above a newly-placed
         // opaque block.

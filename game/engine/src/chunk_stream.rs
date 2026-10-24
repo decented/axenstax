@@ -992,6 +992,16 @@ impl super::GameState {
             self.fire.register_column_fires(cx, cz, &self.world, self.tick_counter);
             batch.push((cx, cz));
         }
+        // A pushed all-air chunk leaves its section absent
+        // (`ChunkIntake::apply`), which the mesh plan skips: its old mesh goes
+        // here, whatever the kind of the sections that are present.
+        for &(cx, cz) in &batch {
+            for cy in 0..=MAX_CHUNK_Y {
+                if !self.world.has_chunk(cx, cy, cz) {
+                    self.drop_section_meshes((cx, cy, cz));
+                }
+            }
+        }
         // One mesh per section for the whole batch; an all-air section that
         // the push emptied loses its old mesh (`StreamMeshPlan::vacated`).
         self.mesh_stream_batch(&batch, crate::stream_mesh::MeshPolicy::STREAMING);
@@ -1610,7 +1620,7 @@ mod tests {
     /// the pre-fix wiring (drop on unload, regenerate on re-entry).
     #[test]
     fn stream_unload_and_reentry_keeps_an_edited_column() {
-        let bg = BiomeGenerator::new(42);
+        let bg = BiomeGenerator::new(42, crate::biome::Generator::V2);
         let mut world = crate::world::World::new();
         let mut loaded: ahash::AHashSet<(i32, i32)> = ahash::AHashSet::new();
         let rd = 2;
@@ -1662,7 +1672,7 @@ mod tests {
     /// is not generated over, but an evicted one is restored first.
     #[test]
     fn step_load_variant_restores_and_never_regens_present_columns() {
-        let bg = BiomeGenerator::new(42);
+        let bg = BiomeGenerator::new(42, crate::biome::Generator::V2);
         let mut world = crate::world::World::new();
         load_column_blocks(&mut world, 0, 0, &bg, false);
         world.set_block(3, 20, 3, block::AIR);
@@ -1947,7 +1957,7 @@ mod tests {
     /// column and drops a pristine one.
     #[test]
     fn column_sims_stream_in_and_out_round_trip_an_edited_column() {
-        let bg = BiomeGenerator::new(42);
+        let bg = BiomeGenerator::new(42, crate::biome::Generator::V2);
         let registry = crate::block::BlockRegistry::new();
         let mut world = crate::world::World::new();
         let mut loaded = ahash::AHashSet::new();
@@ -1973,7 +1983,7 @@ mod tests {
         assert!(!is_void_column(sims.world, 0, 0));
         // The light pass ran: the highest air cell inside a present chunk
         // (fresh chunks start dark) is open to the sky.
-        let lit = (0..96).rev().find(|&y| {
+        let lit = (0..crate::world::WORLD_HEIGHT).rev().find(|&y| {
             sims.world.has_chunk(0, y / 16, 0) && sims.world.get_block(3, y, 3) == block::AIR
         });
         let y = lit.expect("an air cell inside a generated chunk");
@@ -2007,7 +2017,7 @@ mod tests {
     impl SimsFixture {
         fn new() -> Self {
             Self {
-                bg: BiomeGenerator::new(42),
+                bg: BiomeGenerator::new(42, crate::biome::Generator::V2),
                 registry: crate::block::BlockRegistry::new(),
                 world: crate::world::World::new(),
                 loaded: ahash::AHashSet::new(),
@@ -2233,7 +2243,7 @@ mod tests {
         // y=80, so on a tree column it landed on the leaves. find_surface_spawn
         // must skip leaves/logs/water, require air head-room, and step off the
         // origin column when a trunk sits there.
-        let bg = BiomeGenerator::new(42);
+        let bg = BiomeGenerator::new(42, crate::biome::Generator::V2);
         let mut world = crate::world::World::new();
         let base = bg.terrain_height(0, 0);
         // Grass platform around the origin (built relative to the generator's

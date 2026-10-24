@@ -491,7 +491,25 @@ pub fn biome_passive_spawn_weights(biome: crate::biome::Biome) -> Vec<(MobType, 
             (MobType::Sheep, 20),
             (MobType::Rabbit, 10),
         ],
-        Biome::Ocean => vec![
+        // Terrain v3 (§8): a river is Ocean's water life without the Shark
+        // (shallow, 5 deep); a deep ocean is Ocean's table (Shark included).
+        Biome::River => biome_passive_spawn_weights(Biome::Ocean)
+            .into_iter()
+            .filter(|&(kind, _)| kind != MobType::Shark)
+            .collect(),
+        // Terrain v3 (§8): a beach is Plains' table minus the large animals,
+        // plus the shoreline Crab (gated to sand near sea level).
+        Biome::Beach => {
+            let mut w: Vec<(MobType, u8)> = biome_passive_spawn_weights(Biome::Plains)
+                .into_iter()
+                .filter(|&(kind, _)| {
+                    !matches!(kind, MobType::Cow | MobType::Horse | MobType::Donkey | MobType::Mule)
+                })
+                .collect();
+            w.push((MobType::Crab, 10));
+            w
+        }
+        Biome::Ocean | Biome::DeepOcean => vec![
             // Aquatic wave — schooling Fish dominate; Squid + Glow Squid drift;
             // the Shark is the rare apex predator (deep water → real stakes).
             (MobType::Fish, 50),

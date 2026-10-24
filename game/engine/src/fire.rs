@@ -110,9 +110,11 @@ impl FireSystem {
     pub fn register_column_fires(&mut self, cx: i32, cz: i32, world: &World, now: u64) {
         let cs = crate::chunk::CHUNK_SIZE as i32;
         let (base_x, base_z) = (cx * cs, cz * cs);
+        // Only the sections that hold blocks, never the world's whole height.
+        let max_y = world.column_top_y(base_x, base_z) + 1;
         for lx in 0..cs {
             for lz in 0..cs {
-                for y in 0..6 * cs {
+                for y in 0..max_y {
                     let (wx, wz) = (base_x + lx, base_z + lz);
                     if world.get_block(wx, y, wz) == block::FIRE {
                         self.cells.entry((wx, y, wz)).or_insert(FireCell {

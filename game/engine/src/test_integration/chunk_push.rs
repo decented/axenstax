@@ -146,7 +146,7 @@ fn a_tick_never_sends_past_the_budget_or_the_credit_window() {
             client.send_to_server(&protocol::serialize_packet(protocol::PacketType::ClientInput, &input));
         }
     }
-    assert_eq!(first_packets, 17 * 17 * 6, "the whole radius-8 range arrived");
+    assert_eq!(first_packets, 17 * 17 * (MAX_CHUNK_Y as usize + 1), "the whole radius-8 range arrived");
 }
 
 #[test]
@@ -186,7 +186,7 @@ fn the_sent_set_dies_with_the_connection_and_a_new_joiner_starts_afresh() {
     let mut j = Joiner::join(&mut hs, 2, false);
     j.settle(&mut hs);
     let slot = j.slot;
-    assert_eq!(hs.chunk_push_for_test(slot).sent_len(), 25 * 6);
+    assert_eq!(hs.chunk_push_for_test(slot).sent_len(), 25 * (MAX_CHUNK_Y as usize + 1));
     j.rc.disconnect();
     hs.tick();
     assert!(hs.slot_is_free(slot));
@@ -195,7 +195,7 @@ fn the_sent_set_dies_with_the_connection_and_a_new_joiner_starts_afresh() {
     let mut next = Joiner::join(&mut hs, 2, false);
     assert_eq!(next.slot, slot, "the freed slot is reused");
     next.settle(&mut hs);
-    assert_eq!(next.intake.applied() as usize, 25 * 6, "everything again, from the start");
+    assert_eq!(next.intake.applied() as usize, 25 * (MAX_CHUNK_Y as usize + 1), "everything again, from the start");
     assert!(next.intake.column_complete(next.column(&hs)));
 }
 
@@ -462,11 +462,13 @@ fn an_outbox_overflow_is_healed_by_pushing_the_chunks_again() {
     j.settle(&mut hs);
     let me = j.column(&hs);
     let cs = CHUNK_SIZE as i32;
-    // One tick changes every cell of the ring's upper four chunks: ~147,000
-    // changes, past the queue's 2 MiB bound.
+    // One tick changes every cell of four chunks of each ring column (the
+    // upper four of the old 96-block world): ~147,000 changes, past the
+    // queue's 2 MiB bound (all fourteen above cy 1 of the 256-block world
+    // would also pass the transport's 8 MiB close).
     let mut burst = Vec::new();
     for col in columns_within(me, 1) {
-        for cy in 2..=MAX_CHUNK_Y {
+        for cy in 2..=5 {
             for x in col.0 * cs..(col.0 + 1) * cs {
                 for y in cy * cs..(cy + 1) * cs {
                     for z in col.1 * cs..(col.1 + 1) * cs {

@@ -3000,7 +3000,7 @@ impl super::GameState {
     /// + water), or a sea-level fallback when the column is empty. Drops Trial
     ///   markers + the start teleport onto whatever ground a world has.
     fn surface_y(&self, x: i32, z: i32) -> i32 {
-        let top = (crate::world::MAX_CHUNK_Y + 1) * crate::chunk::CHUNK_SIZE as i32 - 1;
+        let top = self.world.column_top_y(x, z);
         for y in (1..=top).rev() {
             let b = self.world.get_block(x, y, z);
             if b != crate::block::AIR && b != crate::block::WATER {
@@ -3419,17 +3419,18 @@ impl super::GameState {
                 .expect_notes(joined.chunk_note_radius, crate::chunk_stream::column_of(spawn));
         }
         log::info!(
-            "Joined world: seed {}, type '{}', worldgen {:#010x} (ours {:#010x})",
+            "Joined world: seed {}, type '{}', generator {:?}, worldgen {:#010x} (ours {:#010x})",
             joined.seed,
             joined.rules.world_type,
+            joined.generator,
             joined.worldgen_version,
-            crate::world::worldgen_fingerprint()
+            crate::world::worldgen_fingerprint_for(joined.generator)
         );
         if let Some(notice) = joined.worldgen_mismatch_notice() {
             log::warn!(
                 "Host worldgen {:#010x} differs from ours ({:#010x}): terrain may differ",
                 joined.worldgen_version,
-                crate::world::worldgen_fingerprint()
+                crate::world::worldgen_fingerprint_for(joined.generator)
             );
             self.toast = Some((
                 notice.to_string(),
@@ -3457,7 +3458,13 @@ impl super::GameState {
         #[cfg_attr(not(target_arch = "wasm32"), allow(unused_variables))] folder: &str,
         meta: &mut crate::save::WorldMeta,
     ) {
-        self.biome_gen = crate::biome::BiomeGenerator::new(meta.seed);
+        // The world's own terrain generator (v2 for every world saved before
+        // the field existed). Every load path refuses a world whose generator
+        // this build does not have before it gets here (`save::read_world_meta`,
+        // `world_archive::unpack_world`, `JoinedWorld::from_accept`).
+        let generator = meta.generator().expect("a world with an unknown generator is refused at load");
+        self.biome_gen = crate::biome::BiomeGenerator::new(meta.seed, generator);
+        self.world.generator = generator;
         let (secret, generated) = crate::proof_of_play::ensure_world_secret(&mut meta.pop_secret);
         self.pop_server_secret = secret;
         #[cfg(target_arch = "wasm32")]
@@ -5484,7 +5491,7 @@ impl super::GameState {
             let sz = eye.z + (((h >> 16) % 49) as f32 - 24.0);
             let (bx, bz) = (sx.floor() as i32, sz.floor() as i32);
             let mut surface_y = 0;
-            for y in (0..(crate::world::MAX_CHUNK_Y + 1) * 16).rev() {
+            for y in (0..=self.world.column_top_y(bx, bz)).rev() {
                 if self.world.get_block(bx, y, bz) != block::AIR {
                     surface_y = y;
                     break;
@@ -7562,7 +7569,7 @@ impl super::GameState {
                         // a build, never lands in the void/in lava).
                         let safe = crate::grave::find_safe_grave_pos(
                             |x, y, z| {
-                                (0..96).contains(&y)
+                                (0..crate::world::WORLD_HEIGHT).contains(&y)
                                     && self.world.get_block(x, y, z) == crate::block::AIR
                             },
                             bx, by, bz,
@@ -9581,6 +9588,13 @@ impl super::GameState {
                             }
                         let mut meta = crate::save::WorldMeta::new(&dname);
                         meta.seed = seed;
+                        // A fixed arena seed (Hash Dash, Satori Rush, the
+                        // scavenger hunt) was picked for the v2 terrain it makes:
+                        // keep that map. An arena with no fixed seed is just a
+                        // new world.
+                        if launch.def.arena_seed.is_some() {
+                            meta.worldgen_version = crate::biome::LEGACY_GENERATOR;
+                        }
                         meta.commands_enabled = true;
                         // Data-driven world shape from the def. Hash Dash / Satori
                         // Rush leave all of these None (normal survival world); The

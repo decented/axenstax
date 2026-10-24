@@ -31,7 +31,7 @@ use crate::save::WorldSave;
 /// `world_save_field_count_tripwire` test against serde's own field list, so
 /// appending a `WorldSave` field fails the test until this is bumped — which bumps
 /// [`SAVE_FORMAT_VERSION`] with it.
-pub const WORLD_SAVE_FIELD_COUNT: u32 = 54;
+pub const WORLD_SAVE_FIELD_COUNT: u32 = 55;
 
 /// Bump by hand for a wire change that is NOT an appended `WorldSave` field: a
 /// field or enum variant added inside a nested saved type, a retype. Such a change
@@ -308,21 +308,21 @@ mod tests {
         assert_eq!(SAVE_FORMAT_VERSION, WORLD_SAVE_FIELD_COUNT + SAVE_LAYOUT_REVISION);
     }
 
-    /// Building variants (block ids 320..=372) moved the format version from 57
-    /// to 58 so builds that don't know the ids refuse the world instead of
+    /// Building variants (block ids 320..=372) moved the format version one step
+    /// (to 58; terrain's field 55 then made it 59) so builds that don't know the ids refuse the world instead of
     /// loading them as AIR and saving the holes back.
     #[test]
     fn a_world_written_now_carries_the_building_variants_version() {
-        assert_eq!(SAVE_FORMAT_VERSION, 58, "54 fields + layout revision 4");
+        assert_eq!(SAVE_FORMAT_VERSION, 59, "55 fields + layout revision 4");
         // The world holds no new block, and still carries the new version.
         let bytes = encode_world_save(&minimal_world_save_for_tests(5)).unwrap();
-        assert_eq!(split_save_footer(&bytes).1, Some(58));
+        assert_eq!(split_save_footer(&bytes).1, Some(59));
         assert!(check_version(split_save_footer(&bytes).1).is_ok(), "this build opens its own save");
-        // A build that stopped at 57 refuses this footer (58 > 57) the same
-        // way this build refuses 59: `check_version` is the one rule.
+        // A build that stopped at 58 refuses this footer (59 > 58) the same
+        // way this build refuses 60: `check_version` is the one rule.
         assert_eq!(
-            check_version(Some(58 + 1)),
-            Err(WorldSaveError::NewerVersion { found: 59, supported: 58 }),
+            check_version(Some(59 + 1)),
+            Err(WorldSaveError::NewerVersion { found: 60, supported: 59 }),
             "a footer one version past this build is refused"
         );
         let mut next = bincode::serialize(&minimal_world_save_for_tests(5)).unwrap();

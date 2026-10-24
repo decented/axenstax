@@ -204,6 +204,7 @@ fn save_load_round_trip_preserves_active_raid_and_treasury() {
         rig_clips: Vec::new(),
         local_personal: None,
         quest_world: None,
+        worldgen_version: None,
     };
     let bytes = bincode::serialize(&save).expect("serialize");
     let back: crate::save::WorldSave = bincode::deserialize(&bytes).expect("deserialize");
@@ -229,7 +230,7 @@ fn scheduler_does_not_double_schedule_when_active_raid_exists() {
     // A village already under raid should NOT receive a second raid
     // the same day even if the roll would hit.
     let (mut world, ecs) = make_eligible_world([10000, 64, 10000], (-100, -100), 100_000, 10);
-    let bg = BiomeGenerator::new(42);
+    let bg = BiomeGenerator::new(42, crate::biome::Generator::V2);
 
     // Force-push an active raid first.
     world.active_raids.push(Raid::new_warning(
@@ -478,6 +479,7 @@ fn raid_kills_round_trip_through_world_save() {
         rig_clips: Vec::new(),
         local_personal: None,
         quest_world: None,
+        worldgen_version: None,
     };
     let bytes = bincode::serialize(&save).expect("serialize");
     let back: crate::save::WorldSave = bincode::deserialize(&bytes).expect("deserialize");

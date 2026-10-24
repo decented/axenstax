@@ -4783,13 +4783,15 @@ impl HostedServer {
                         // themselves are delivered out-of-band (gated).
                         if let Some(sp) = self.server.players.get_mut(i) {
                             sp.skin_key = req.skin_key;
-                            // T2-9 — whose terrain generator differs from ours.
-                            sp.client_worldgen_version = req.worldgen_version;
+                            // T2-9 — whose terrain generator differs from ours
+                            // (v95: compared for this world's generator).
+                            let generator = self.server.biome_gen.generator();
+                            let theirs = joiner_worldgen_fingerprint(&req, generator);
+                            let ours = crate::world::worldgen_fingerprint_for(generator);
+                            sp.worldgen_mismatch = theirs != ours;
                             if sp.worldgen_mismatch() {
                                 log::warn!(
-                                    "Slot {i} generates terrain with worldgen {:#010x} (host {:#010x}): its terrain may differ",
-                                    req.worldgen_version,
-                                    crate::world::worldgen_fingerprint()
+                                    "Slot {i} generates {generator:?} terrain with worldgen {theirs:#010x} (host {ours:#010x}): its terrain may differ",
                                 );
                             }
                         }
@@ -4924,7 +4926,9 @@ impl HostedServer {
                             // T2-9 — the flags + generator version a joiner
                             // needs to build the same world before any terrain.
                             world_rules: self.server.world_rules(),
-                            worldgen_version: crate::world::worldgen_fingerprint(),
+                            worldgen_version: crate::world::worldgen_fingerprint_for(
+                                self.server.biome_gen.generator(),
+                            ),
                             // B2b — how far round its body this joiner hears
                             // a push or a "local" note for every column.
                             chunk_note_radius: if self.sends_notes(i) {
@@ -4932,6 +4936,9 @@ impl HostedServer {
                             } else {
                                 0
                             },
+                            // v95 — the world's terrain generator: the joiner
+                            // builds its terrain with it.
+                            generator: self.server.biome_gen.generator().version(),
                         };
                         let pkt = protocol::serialize_packet(protocol::PacketType::JoinAccept, &accept);
                         self.transports[i].send_to_client(&pkt);
@@ -6800,7 +6807,7 @@ impl HostedServer {
             m.cz,
             m.client_hash,
             m.server_hash,
-            crate::world::worldgen_fingerprint(),
+            crate::world::worldgen_fingerprint_for(self.server.biome_gen.generator()),
         );
     }
 
@@ -7261,6 +7268,24 @@ pub(crate) fn damage_cause_to_wire(cause: crate::survival::DamageCause) -> proto
         D::Explosion => W::Explosion,
         D::Mob(kind) => W::Mob(crate::entity_broadcast::wire_kind_for(kind)),
     }
+}
+
+
+/// The joiner's announced worldgen fingerprint for `generator` (v95): v2's is
+/// `JoinRequestPacket::worldgen_version`, every later one is listed in
+/// `generator_fingerprints`. `0` (never a real fingerprint) when the joiner
+/// did not announce that generator — it reads as a mismatch.
+pub(crate) fn joiner_worldgen_fingerprint(
+    req: &protocol::JoinRequestPacket,
+    generator: crate::biome::Generator,
+) -> u32 {
+    if generator == crate::biome::Generator::V2 {
+        return req.worldgen_version;
+    }
+    req.generator_fingerprints
+        .iter()
+        .find(|f| f.generator == generator.version())
+        .map_or(0, |f| f.fingerprint)
 }
 
 /// The verified npub of a player, bech32 — the form economy owners are stored
@@ -8164,6 +8189,7 @@ pub(crate) mod tests {
             worldgen_version: crate::world::worldgen_fingerprint(),
             ws_host: String::new(),
             render_distance: 0,
+            generator_fingerprints: crate::protocol::GeneratorFingerprint::ours(),
         }
     }
 
@@ -8223,6 +8249,7 @@ pub(crate) mod tests {
             worldgen_version: crate::world::worldgen_fingerprint(),
             ws_host: String::new(),
             render_distance: 0,
+            generator_fingerprints: crate::protocol::GeneratorFingerprint::ours(),
         };
         let err = verify_join_signet_auth(0, &req, &mut chals, TEST_ORIGIN).unwrap_err();
         assert!(err.contains("missing auth_event"));
@@ -8331,6 +8358,7 @@ pub(crate) mod tests {
             worldgen_version: crate::world::worldgen_fingerprint(),
             ws_host: String::new(),
             render_distance: 0,
+            generator_fingerprints: crate::protocol::GeneratorFingerprint::ours(),
         };
         let err = verify_join_signet_auth(0, &req, &mut chals, TEST_ORIGIN).unwrap_err();
         assert!(err.contains("signature length invalid"));
@@ -8448,6 +8476,7 @@ pub(crate) mod tests {
             worldgen_version: crate::world::worldgen_fingerprint(),
             ws_host: String::new(),
             render_distance: 0,
+            generator_fingerprints: crate::protocol::GeneratorFingerprint::ours(),
         };
         let err = resolve_join_identity(0, &req, true, &mut chals, TEST_ORIGIN, &[], &[], &[], Vec::new).unwrap_err();
         assert!(err.to_lowercase().contains("sign"), "got {err}");
@@ -8466,6 +8495,7 @@ pub(crate) mod tests {
             worldgen_version: crate::world::worldgen_fingerprint(),
             ws_host: String::new(),
             render_distance: 0,
+            generator_fingerprints: crate::protocol::GeneratorFingerprint::ours(),
         };
         let id = resolve_join_identity(0, &req, false, &mut chals, TEST_ORIGIN, &[], &[], &[], Vec::new)
             .expect("open server allows guests");
@@ -8522,6 +8552,7 @@ pub(crate) mod tests {
             worldgen_version: crate::world::worldgen_fingerprint(),
             ws_host: String::new(),
             render_distance: 0,
+            generator_fingerprints: crate::protocol::GeneratorFingerprint::ours(),
         };
         // require_signin=false, but a non-empty whitelist forces sign-in.
         let allow = vec![xonly_of([0x42; 32])];
@@ -8770,6 +8801,7 @@ pub(crate) mod tests {
             worldgen_version: crate::world::worldgen_fingerprint(),
             ws_host: String::new(),
             render_distance: 0,
+            generator_fingerprints: crate::protocol::GeneratorFingerprint::ours(),
         };
         let id = resolve_join_identity(0, &req, false, &mut chals, TEST_ORIGIN, &[], &[], &[], Vec::new)
             .expect("open server allows guests");
@@ -8809,6 +8841,7 @@ pub(crate) mod tests {
             worldgen_version: crate::world::worldgen_fingerprint(),
             ws_host: String::new(),
             render_distance: 0,
+            generator_fingerprints: crate::protocol::GeneratorFingerprint::ours(),
         };
         resolve_join_identity(0, &guest, false, &mut chals, TEST_ORIGIN, &[], &[], &[], loader)
             .expect("guest");

@@ -871,7 +871,7 @@ mod tests {
 
     #[test]
     fn layout_only_built_in_plains_or_forest() {
-        let bg = BiomeGenerator::new(world_seed());
+        let bg = BiomeGenerator::new(world_seed(), crate::biome::Generator::V2);
         // Sample many cells; for every cell with a layout, the biome at the
         // anchor must be Plains or Forest.
         for gx in -10..10 {
@@ -890,7 +890,7 @@ mod tests {
 
     #[test]
     fn layout_has_three_to_six_houses() {
-        let bg = BiomeGenerator::new(world_seed());
+        let bg = BiomeGenerator::new(world_seed(), crate::biome::Generator::V2);
         let mut min_h = u32::MAX;
         let mut max_h = 0u32;
         let mut seen = 0;
@@ -913,7 +913,7 @@ mod tests {
 
     #[test]
     fn layout_anchor_well_and_campfire_are_distinct() {
-        let bg = BiomeGenerator::new(world_seed());
+        let bg = BiomeGenerator::new(world_seed(), crate::biome::Generator::V2);
         for gx in -10..10 {
             for gz in -10..10 {
                 if let Some(layout) = layout_for_cell(world_seed(), gx, gz, &bg) {
@@ -928,7 +928,7 @@ mod tests {
 
     #[test]
     fn place_villages_writes_at_least_campfire_when_anchor_is_in_column() {
-        let bg = BiomeGenerator::new(world_seed());
+        let bg = BiomeGenerator::new(world_seed(), crate::biome::Generator::V2);
         // Find an actual village.
         let mut found: Option<VillageLayout> = None;
         'search: for gx in -10..10 {

@@ -93,6 +93,7 @@ mod texture_gen;
 mod texture_packs_web;
 mod texture_registry;
 mod world;
+mod worldgen_v3;
 mod campfire_ui;
 mod power_ui;
 mod leaf_decay;
@@ -593,8 +594,9 @@ use crate::leaf_decay::LeafDecaySystem;
 /// Tick rate: 20 TPS (Spec 05 Section 1.8)
 const TICK_DURATION: Duration = Duration::from_millis(50);
 
-/// Maximum chunk Y coordinate for world generation
-const MAX_CHUNK_Y: i32 = 5;
+/// Highest chunk-section Y — the one world constant (`world::MAX_CHUNK_Y`),
+/// re-exported for the modules that reach it through `super::`.
+use crate::world::MAX_CHUNK_Y;
 
 /// Block reach distance (Spec 05 Section 2.5: 4.5 blocks survival)
 const REACH_DISTANCE: f32 = 5.0;
@@ -1843,7 +1845,7 @@ impl GameState {
         // block is bound (Phase C); the renderer uploads the per-type geometry via
         // `sync_micro_models` on first chunk load.
         world.load_bundled_micro_models(&registry);
-        let biome_gen = crate::biome::BiomeGenerator::new(42);
+        let biome_gen = crate::biome::BiomeGenerator::new(42, crate::biome::Generator::V2);
 
         #[cfg(target_arch = "wasm32")]
         Self::set_status("Generating textures...");
@@ -3466,7 +3468,7 @@ fn run_shot_workshop(args: &[String]) {
     let mut renderer = pollster::block_on(Renderer::new_headless(1280, 720, &textures));
 
     // Void floor around origin.
-    let biome_gen = crate::biome::BiomeGenerator::new(1);
+    let biome_gen = crate::biome::BiomeGenerator::new(1, crate::biome::Generator::V2);
     for dx in -3..=3 {
         for dz in -3..=3 {
             world.generate_column(dx, dz, &biome_gen);
@@ -3601,7 +3603,7 @@ fn run_screenshot(args: &[String]) {
         }
     });
     let mut world = World::new();
-    let biome_gen = crate::biome::BiomeGenerator::new(42);
+    let biome_gen = crate::biome::BiomeGenerator::new(42, crate::biome::Generator::V2);
 
     let textures = crate::texture_gen::generate_textures();
     let mut renderer = pollster::block_on(Renderer::new_headless(width, height, &textures));
@@ -3775,7 +3777,7 @@ fn run_shot_3p(args: &[String]) {
 
     let registry = crate::block::BlockRegistry::new();
     let mut world = World::new();
-    let biome_gen = crate::biome::BiomeGenerator::new(42);
+    let biome_gen = crate::biome::BiomeGenerator::new(42, crate::biome::Generator::V2);
     let textures = crate::texture_gen::generate_textures();
     let mut renderer = pollster::block_on(Renderer::new_headless(1280, 720, &textures));
 

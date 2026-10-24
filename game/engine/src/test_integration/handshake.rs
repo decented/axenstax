@@ -260,7 +260,9 @@ fn protocol_version_is_the_pinned_value() {
     //   join gets a mandatory initial Sync1 before its Personal2 fence.
     // v93 (Fray): "Host Game" and its joins on Fray's transport.
     // v94 (building variants): new block ids 320..=372, no packet change.
-    assert_eq!(protocol::PROTOCOL_VERSION, 94);
+    // v95 (terrain T1): 256-block world, JoinAccept.generator,
+    //   JoinRequest.generator_fingerprints.
+    assert_eq!(protocol::PROTOCOL_VERSION, 95);
 }
 
 #[test]
@@ -275,6 +277,7 @@ fn join_request_round_trips_bincode() {
         worldgen_version: crate::world::worldgen_fingerprint(),
         ws_host: String::new(),
         render_distance: 0,
+        generator_fingerprints: crate::protocol::GeneratorFingerprint::ours(),
     };
     let pkt = protocol::serialize_packet(protocol::PacketType::JoinRequest, &req);
     let (ptype, payload) = protocol::deserialize_header(&pkt).unwrap();
@@ -363,6 +366,7 @@ fn join_accept_carries_spawn_and_game_mode() {
         action_session: [7; 16],
         action_life: 0,
         has_personal_state: false,
+        generator: crate::biome::Generator::V2.version(),
     };
     let pkt = protocol::serialize_packet(protocol::PacketType::JoinAccept, &acc);
     let (_ptype, payload) = protocol::deserialize_header(&pkt).unwrap();

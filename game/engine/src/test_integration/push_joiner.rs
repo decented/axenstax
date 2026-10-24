@@ -205,7 +205,7 @@ impl Joiner {
         self.rc.poll();
         if let Some(joined) = self.rc.pending_joined_world.take() {
             self.world.apply_meta_rules(&joined.to_meta());
-            self.biome = Some(BiomeGenerator::new(joined.seed));
+            self.biome = Some(BiomeGenerator::new(joined.seed, joined.generator));
             if joined.worldgen_mismatch_notice().is_none()
                 && let Some(spawn) = joined.spawn
             {

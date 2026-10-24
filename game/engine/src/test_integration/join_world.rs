@@ -45,7 +45,7 @@ fn joiner_world(joined: &JoinedWorld) -> (World, BiomeGenerator) {
     let mut w = World::new();
     w.load_bundled_plans(); // as `GameState::new` does for every client world
     w.apply_meta_rules(&meta);
-    (w, BiomeGenerator::new(meta.seed))
+    (w, BiomeGenerator::new(meta.seed, meta.generator().expect("a known generator")))
 }
 
 fn host_generate(hs: &mut HostedServer, cx: i32, cz: i32) {
@@ -146,9 +146,71 @@ fn host_records_a_joiners_worldgen_version() {
     client.send_to_server(&protocol::serialize_packet(protocol::PacketType::JoinRequest, &req));
     hs.tick();
     let slot = hs.server.players.len() - 1;
-    assert_eq!(hs.server.players[slot].client_worldgen_version, worldgen_fingerprint() ^ 1);
     assert!(hs.server.players[slot].worldgen_mismatch());
 }
+
+/// Terrain T1 (v95) — a host whose world meta records generator v3 (as a
+/// dedicated server's freshly bootstrapped world does) sends it in
+/// `JoinAccept`, with its fingerprint for v3; the joiner builds its terrain
+/// with v3 and generates what the host does.
+#[test]
+fn joiner_of_a_v3_world_generates_with_v3() {
+    let name = format!("t1-join-v3-{}", std::process::id());
+    let mut meta = crate::save::WorldMeta::new(&name);
+    meta.seed = 2026;
+    assert_eq!(meta.worldgen_version, crate::biome::NEW_WORLD_GENERATOR, "a new world is v3");
+    crate::save::save_world_meta(&name, &meta).expect("meta written");
+    let mut hs = start_open_server(&name, 2026);
+    assert_eq!(hs.server.biome_gen.generator(), crate::biome::Generator::V3, "taken from the meta");
+    assert_eq!(hs.server.world.generator, crate::biome::Generator::V3, "and kept through the world's open");
+
+    let joined = join(&mut hs);
+    assert_eq!(joined.generator, crate::biome::Generator::V3);
+    assert_eq!(joined.worldgen_version, crate::world::worldgen_fingerprint_for(crate::biome::Generator::V3));
+    assert_ne!(joined.worldgen_version, worldgen_fingerprint(), "v3 and v2 never agree by accident");
+    assert!(joined.worldgen_mismatch_notice().is_none());
+    let slot = hs.server.players.len() - 1;
+    assert!(!hs.server.players[slot].worldgen_mismatch(), "same build: same v3 fingerprint");
+
+    let (mut jw, jbg) = joiner_world(&joined);
+    assert_eq!(jbg.generator(), crate::biome::Generator::V3);
+    assert_eq!(jw.generator, crate::biome::Generator::V3);
+    let (cx, cz) = (41, -9);
+    host_generate(&mut hs, cx, cz);
+    jw.generate_column(cx, cz, &jbg);
+    assert_column_matches(&hs.server.world, &jw, cx, cz);
+    let _ = crate::save::delete_world(&name);
+}
+
+/// Terrain T1 (v95) — a world with no recorded generator (here: none on disk)
+/// stays v2 for its host and its joiners.
+#[test]
+fn joiner_of_a_v2_world_generates_with_v2() {
+    let mut hs = start_open_server(&format!("t1-join-v2-{}", std::process::id()), 7);
+    assert_eq!(hs.server.biome_gen.generator(), crate::biome::Generator::V2);
+    let joined = join(&mut hs);
+    assert_eq!(joined.generator, crate::biome::Generator::V2);
+    assert_eq!(joined.worldgen_version, worldgen_fingerprint(), "v2's fingerprint, as before v95");
+    let (_, jbg) = joiner_world(&joined);
+    assert_eq!(jbg.generator(), crate::biome::Generator::V2);
+}
+
+/// Terrain T1 (v95) — on a v3 world the host compares the joiner's v3
+/// fingerprint, not its v2 one: a joiner that did not announce v3 is pushed
+/// real chunks.
+#[test]
+fn a_joiner_without_the_worlds_generator_is_a_mismatch() {
+    let mut hs = start_open_server(&format!("t1-join-nov3-{}", std::process::id()), 7);
+    hs.server.biome_gen = BiomeGenerator::new(7, crate::biome::Generator::V3);
+    let client = hs.attach_test_remote();
+    let mut req = build_join_request_guest("NoV3", 0);
+    req.generator_fingerprints.clear();
+    client.send_to_server(&protocol::serialize_packet(protocol::PacketType::JoinRequest, &req));
+    hs.tick();
+    let slot = hs.server.players.len() - 1;
+    assert!(hs.server.players[slot].worldgen_mismatch());
+}
+
 
 #[test]
 fn an_older_clients_join_request_gets_the_mismatch_reason_not_silence() {

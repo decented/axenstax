@@ -23,7 +23,7 @@
 use crate::biome::BiomeGenerator;
 use crate::chunk::CHUNK_SIZE;
 use crate::plan_registry::PlanRegistry;
-use crate::world::{worldgen_fingerprint, worldgen_fingerprint_of, World, MAX_CHUNK_Y, WORLDGEN_VERSION};
+use crate::world::{worldgen_fingerprint, worldgen_fingerprint_of, World, MAX_CHUNK_Y, V2_WORLD_TOP, WORLDGEN_VERSION};
 
 const SEED: u32 = 20_261_006;
 
@@ -119,7 +119,10 @@ fn side_tables(w: &World) -> Vec<(&'static str, Vec<String>)> {
 /// naming the first differing cell / table.
 fn assert_same_world(a: &World, b: &World, cols: &[(i32, i32)], what: &str) {
     let cs = CHUNK_SIZE as i32;
-    let top = (MAX_CHUNK_Y + 1) * cs;
+    // The v2 generator's whole height (the old 96-block world): what the
+    // GOLDEN was pinned over. Nothing may exist above it
+    // (`v2_writes_nothing_above_the_old_roof`).
+    let top = V2_WORLD_TOP + 1;
     let mut diffs = 0usize;
     let mut first = None;
     for &(cx, cz) in cols {
@@ -158,7 +161,10 @@ fn assert_order_independent(cols: &[(i32, i32)], bg: &BiomeGenerator) {
 /// chunk map's iteration order): block id, then the per-cell meta byte.
 fn hash_columns(w: &World, cols: &[(i32, i32)], h: &mut u64) {
     let cs = CHUNK_SIZE as i32;
-    let top = (MAX_CHUNK_Y + 1) * cs;
+    // The v2 generator's whole height (the old 96-block world): what the
+    // GOLDEN was pinned over. Nothing may exist above it
+    // (`v2_writes_nothing_above_the_old_roof`).
+    let top = V2_WORLD_TOP + 1;
     for &(cx, cz) in cols {
         for x in cx * cs..(cx + 1) * cs {
             for z in cz * cs..(cz + 1) * cs {
@@ -201,7 +207,7 @@ fn hash_structure_positions(w: &World, h: &mut u64) {
 /// must reproduce (flat grass, flat water, the Workshop void), and the
 /// village + hideout structure set.
 fn golden_hash() -> u64 {
-    let bg = BiomeGenerator::new(SEED);
+    let bg = BiomeGenerator::new(SEED, crate::biome::Generator::V2);
     let mut h: u64 = 0xCBF2_9CE4_8422_2325;
 
     let mut normal = World::new();
@@ -227,7 +233,7 @@ fn golden_hash() -> u64 {
     generate(&mut void, &flat_cols, &bg);
     hash_columns(&void, &flat_cols, &mut h);
 
-    let sbg = BiomeGenerator::new(STRUCTURE_SEED);
+    let sbg = BiomeGenerator::new(STRUCTURE_SEED, crate::biome::Generator::V2);
     let mut structures = World::new();
     generate(&mut structures, &structure_columns(), &sbg);
     hash_columns(&structures, &structure_columns(), &mut h);
@@ -251,6 +257,25 @@ const GOLDEN_VERSION: u32 = 2;
 const GOLDEN_PLANS: u64 = 0x0e0e_c249_b9fa_f9b8;
 
 #[test]
+fn v2_writes_nothing_above_the_old_roof() {
+    // The GOLDEN hashes Y 0..=95; this is the other half of "v2 did not move":
+    // with the ceiling at 255, no v2 column (terrain, trees, villages,
+    // hideouts) holds a section above the old 96-block world's top.
+    let old_top_cy = V2_WORLD_TOP / CHUNK_SIZE as i32;
+    for (seed, cols) in [(SEED, normal_columns()), (STRUCTURE_SEED, structure_columns())] {
+        let mut w = World::new();
+        generate(&mut w, &cols, &BiomeGenerator::new(seed, crate::biome::Generator::V2));
+        let high: Vec<_> = w.iter_chunks().map(|(k, _)| k).filter(|&(_, cy, _)| cy > old_top_cy).collect();
+        assert!(high.is_empty(), "seed {seed}: v2 sections above cy {old_top_cy}: {high:?}");
+        for &(cx, cz) in &cols {
+            for cy in old_top_cy + 1..=MAX_CHUNK_Y {
+                assert!(!w.has_chunk(cx, cy, cz));
+            }
+        }
+    }
+}
+
+#[test]
 fn worldgen_is_deterministic_within_a_process() {
     assert_eq!(
         golden_hash(),
@@ -263,12 +288,12 @@ fn worldgen_is_deterministic_within_a_process() {
 fn terrain_does_not_depend_on_column_order() {
     // Host and joiner stream columns in different orders (each from its own
     // spawn), so the order must not change a single block.
-    assert_order_independent(&normal_columns(), &BiomeGenerator::new(SEED));
+    assert_order_independent(&normal_columns(), &BiomeGenerator::new(SEED, crate::biome::Generator::V2));
 }
 
 #[test]
 fn structures_do_not_depend_on_column_order() {
-    assert_order_independent(&structure_columns(), &BiomeGenerator::new(STRUCTURE_SEED));
+    assert_order_independent(&structure_columns(), &BiomeGenerator::new(STRUCTURE_SEED, crate::biome::Generator::V2));
 }
 
 #[test]
@@ -277,7 +302,7 @@ fn structure_set_holds_a_village_a_placed_hideout_and_a_rejected_one() {
     // seed no longer has them, re-run `find_seed_with_village_and_hideouts`
     // and re-pin the constants above.
     let mut w = World::new();
-    generate(&mut w, &structure_columns(), &BiomeGenerator::new(STRUCTURE_SEED));
+    generate(&mut w, &structure_columns(), &BiomeGenerator::new(STRUCTURE_SEED, crate::biome::Generator::V2));
     assert!(w.village_anchors.contains_key(&V_CELL), "village V missing");
     assert!(w.brigand_hideouts.contains_key(&H_CELL), "hideout H missing");
     assert!(
@@ -291,7 +316,7 @@ fn structure_set_holds_a_village_a_placed_hideout_and_a_rejected_one() {
 fn worldgen_ignores_the_worlds_runtime_plan_registry() {
     // `/importschem` adds plans to `World::plan_registry` at runtime; village
     // generation must not see them (it samples `PlanRegistry::bundled()`).
-    let bg = BiomeGenerator::new(STRUCTURE_SEED);
+    let bg = BiomeGenerator::new(STRUCTURE_SEED, crate::biome::Generator::V2);
     let mut cols = Vec::new();
     patch(V_CHUNK, 3, &mut cols);
     let mut bundled = World::new();
@@ -321,6 +346,38 @@ fn worldgen_fingerprint_folds_version_and_bundled_plans() {
     );
     assert_ne!(worldgen_fingerprint(), 0, "0 is what a peer that sent nothing decodes as");
 }
+
+/// B1 (terrain T1 review): v3's fingerprint carries its own output revision, so
+/// the bridge-to-real swap (a `V3_REVISION` bump) changes it, while v2's value
+/// stays exactly the one every build since protocol v65 has exchanged.
+#[test]
+fn v3_fingerprint_hashes_its_revision_and_v2_is_unchanged() {
+    use crate::biome::{Generator, V3_REVISION};
+    use crate::world::{v3_output_version, worldgen_fingerprint_for};
+    let plans = PlanRegistry::bundled().content_hash();
+
+    // v2: pinned to the value it has always had. This changes only when the
+    // bundled plans or WORLDGEN_VERSION do, and then so does the golden.
+    assert_eq!(worldgen_fingerprint_for(Generator::V2), V2_FINGERPRINT_PIN);
+    assert_eq!(worldgen_fingerprint(), V2_FINGERPRINT_PIN);
+
+    // v3: the live value is the revision folded in...
+    assert_eq!(worldgen_fingerprint_for(Generator::V3), worldgen_fingerprint_of(v3_output_version(V3_REVISION), &plans));
+    // ...a bump changes it, and no revision of v3 collides with v2's.
+    for rev in 0..64 {
+        assert_ne!(
+            worldgen_fingerprint_of(v3_output_version(rev), &plans),
+            worldgen_fingerprint_of(v3_output_version(rev + 1), &plans),
+            "v3 revision {rev} -> {}",
+            rev + 1
+        );
+        assert_ne!(v3_output_version(rev), WORLDGEN_VERSION);
+    }
+    assert_ne!(worldgen_fingerprint_for(Generator::V3), worldgen_fingerprint_for(Generator::V2));
+}
+
+/// The v2 generator's fingerprint (`WORLDGEN_VERSION` 2 + the bundled plans).
+const V2_FINGERPRINT_PIN: u32 = 2_302_712_996;
 
 #[test]
 fn worldgen_output_matches_golden_for_this_version() {
@@ -354,7 +411,7 @@ fn find_seed_with_village_and_hideouts() {
     use crate::brigand_hideout_gen::{hideout_site, layout_for_hideout_cell};
     use crate::village_gen::village_site;
     for seed in 0u32..3000 {
-        let bg = BiomeGenerator::new(seed);
+        let bg = BiomeGenerator::new(seed, crate::biome::Generator::V2);
         let mut villages = Vec::new();
         for gx in -2..=2 {
             for gz in -2..=2 {
