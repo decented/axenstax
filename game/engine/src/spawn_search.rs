@@ -262,11 +262,11 @@ mod tests {
             let cols = spawn_pregen_columns(&world, &bg);
             assert_eq!(cols[0], (-1, -1), "v2 pregens the 3x3 round the origin");
             let spawn = world_spawn_point(&world, &bg);
-            println!("V2PIN {seed} {:?}", [spawn.x, spawn.y, spawn.z]); let _ = expected;
+            assert_eq!([spawn.x, spawn.y, spawn.z], expected, "v2 seed {seed}");
             assert_eq!(world_spawn_column(&bg).kind, SpawnKind::Origin);
         }
     }
 
     /// Pinned from the unmodified v2 spawn (seed, [x, feet y, z]).
-    const V2_SPAWNS: [(u32, [f32; 3]); 3] = [(1, [0.0; 3]), (42, [0.0; 3]), (777, [0.0; 3])];
+    const V2_SPAWNS: [(u32, [f32; 3]); 3] = [(1, [0.5, 63.0, 0.5]), (42, [0.5, 63.0, 0.5]), (777, [0.5, 63.0, 0.5])];
 }
