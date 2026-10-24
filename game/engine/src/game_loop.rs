@@ -11426,12 +11426,13 @@ impl super::GameState {
 
             // Pick block (Spec 05 §8.2) — middle-click puts the aimed block's
             // item in hand. Uses `target_block`, the ray break and place use.
-            // The cursor must be captured (no chat, inventory or panel), and
-            // the crafting screen must be shut (its window owns the cursor
-            // item the swap borrows).
+            // The cursor must be captured and no chat, inventory, crafting
+            // screen or other panel may be up (the swap borrows the crafting
+            // window's cursor item).
             if intent.pick_block
                 && intent.cursor_captured
                 && !self.players[pidx].crafting_ui.open
+                && !(pidx == 0 && self.p0_ui_modal_open())
             {
                 self.pick_block_at_target(pidx);
             }

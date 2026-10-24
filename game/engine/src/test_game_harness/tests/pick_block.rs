@@ -81,17 +81,28 @@ fn game_harness_pick_block_in_survival_selects_or_swaps_and_never_conjures() {
         assert_eq!(hotbar(&hg), sel);
     }
 
-    // No pick while a UI holds the cursor, nor when dead.
+    // No pick while a UI is up (chat, the crafting screen, the item search),
+    // nor when dead.
     aim_at_block(&mut hg, None, block::STONE);
     hg.state.players[0].hotbar_slot = 0;
-    hg.state.input.cursor_captured = false;
-    hg.state.input.mouse_button_pressed(winit::event::MouseButton::Middle);
-    hg.frames(1);
-    assert_eq!(hotbar(&hg), 0, "cursor free (chat, a panel): no pick");
-    hg.state.input.end_frame();
+    hg.state.chat.open = true;
+    middle_click(&mut hg);
+    assert_eq!(hotbar(&hg), 0, "chat open: no pick");
+    hg.state.chat.open = false;
+    hg.state.players[0].crafting_ui.open = true;
+    middle_click(&mut hg);
+    assert_eq!(hotbar(&hg), 0, "inventory open: no pick");
+    hg.state.players[0].crafting_ui.open = false;
+    hg.state.players[0].explorer_state = Some(crate::inventory_explorer::ExplorerState::new());
+    middle_click(&mut hg);
+    assert_eq!(hotbar(&hg), 0, "item search open: no pick");
+    hg.state.players[0].explorer_state = None;
     hg.state.players[0].combat.dead = true;
     middle_click(&mut hg);
     assert_eq!(hotbar(&hg), 0, "dead: no pick");
+    hg.state.players[0].combat.dead = false;
+    middle_click(&mut hg);
+    assert_eq!(hotbar(&hg), 5, "and with everything shut it picks again");
 }
 
 #[test]
