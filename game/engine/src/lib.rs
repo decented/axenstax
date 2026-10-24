@@ -57,6 +57,7 @@ mod camera;
 mod chunk;
 mod meta;
 mod block_shape;
+mod building_variants;
 mod block_update;
 mod power;
 mod beam;

@@ -30,18 +30,18 @@ impl HostedServer {
     /// door's pair — the live matching half when the server's cell is a door
     /// (`send_back_refused_edit`'s rule), the cell above for a door placement.
     pub(super) fn edit_cells(&self, bc: &protocol::BlockChange) -> Vec<[i32; 3]> {
-        use crate::block::OAK_DOOR;
+        use crate::block_shape::is_door;
         let world = &self.server.world;
         let mut cells = vec![[bc.x, bc.y, bc.z]];
-        if world.get_block(bc.x, bc.y, bc.z) == OAK_DOOR {
+        if is_door(world.get_block(bc.x, bc.y, bc.z)) {
             let top = crate::block_shape::door_is_top(world.meta_at(bc.x, bc.y, bc.z));
             if let Some(y) = bc.y.checked_add(if top { -1 } else { 1 })
-                && world.get_block(bc.x, y, bc.z) == OAK_DOOR
+                && is_door(world.get_block(bc.x, y, bc.z))
                 && crate::block_shape::door_is_top(world.meta_at(bc.x, y, bc.z)) != top
             {
                 cells.push([bc.x, y, bc.z]);
             }
-        } else if bc.new_block == OAK_DOOR && let Some(y) = bc.y.checked_add(1) {
+        } else if is_door(bc.new_block) && let Some(y) = bc.y.checked_add(1) {
             cells.push([bc.x, y, bc.z]);
         }
         cells

@@ -911,7 +911,10 @@ pub fn is_any_planks(id: BlockId) -> bool {
 /// `light_emission` idiom — never a hardcoded list inside `fire::FireSystem`,
 /// so a future mod-API / new block family extends it in one place).
 pub fn flammable(id: BlockId) -> bool {
-    is_any_log_block(id) || is_any_leaves(id) || is_any_planks(id)
+    is_any_log_block(id)
+        || is_any_leaves(id)
+        || is_any_planks(id)
+        || crate::building_variants::flammable(id)
 }
 
 /// Predicate: is this BlockId any species' log?
@@ -3304,6 +3307,24 @@ impl BlockRegistry {
             tex_side: TEX_WINDMILL_TURNING,
         });
 
+        // Building variants (320..): slabs, stairs, doors, trapdoors, fence
+        // gates and walls in every wood and stone. Generated from the
+        // `building_variants` table; each copies its material's base block
+        // (planks / the stone) for texture and colour, so no new layers.
+        // Shaped like the originals above: solid + transparent, drawn by the
+        // shaped-emit path.
+        for id in crate::building_variants::FIRST_NEW_ID..crate::building_variants::END_NEW_ID {
+            debug_assert_eq!(blocks.len(), id as usize, "variant ids are registered in order");
+            let base = &blocks[crate::building_variants::new_material(id).base as usize];
+            let (color, tex_top, tex_bottom, tex_side) =
+                (base.color, base.tex_top, base.tex_bottom, base.tex_side);
+            blocks.push(BlockDef {
+                name: crate::building_variants::new_name(id),
+                solid: true, transparent: true, gravity: false,
+                color, tex_top, tex_bottom, tex_side,
+            });
+        }
+
         Self { blocks }
     }
 
@@ -3855,7 +3876,10 @@ mod tests {
         // when a new block is appended to the registry.
         assert!(reg.is_known(WINDMILL));
         assert!(reg.is_known(WINDMILL_TURNING));
-        assert!(!reg.is_known(WINDMILL_TURNING + 1));
+        // The building variants (320..=372) follow the Windmill; the first id past them is unknown.
+        assert!(reg.is_known(WINDMILL_TURNING + 1));
+        assert!(reg.is_known(crate::building_variants::END_NEW_ID - 1));
+        assert!(!reg.is_known(crate::building_variants::END_NEW_ID));
         assert!(!reg.is_known(u16::MAX));
     }
 

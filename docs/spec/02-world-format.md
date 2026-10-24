@@ -64,6 +64,28 @@ At runtime, each namespaced ID is assigned a **numeric block ID** for compact st
 - IDs 1..1023 are reserved for built-in `genesis:*` blocks.
 - IDs 1024..65535 are available for plugins, assigned at world load time.
 
+**As-built id ranges (2026-10-24).** The shipped engine mints its built-in ids by
+appending to one registry (`BlockRegistry::new`, `game/engine/src/block.rs`); a minted id
+is never renumbered or reused, because a saved chunk stores the bare `u16`. Today:
+
+| Range | What |
+|---|---|
+| `0` | `genesis:air` |
+| `1..=282` | Terrain, wood families, workstations, economy blocks, electricity (`electricity:*`), signals and sensors |
+| `283..=319` | F1 shaped blocks (`STONE_SLAB` 283, `STONE_STAIRS` 284, `OAK_FENCE_GATE` 285, `OAK_TRAPDOOR` 286, `GLASS_PANE` 287, `IRON_BARS` 288, `OAK_DOOR` 289, `COBBLESTONE_WALL` 290, sign, frame), Spec 49 explosives, pistons, saplings, snow layer, pet bed, water wheel, windmill (`WINDMILL_TURNING` 319) |
+| `320..=372` | **Building variants** (53 ids): the slab, stairs, door, trapdoor, fence gate and wall of every wood and stone that did not have one. Generated from one table (`game/engine/src/building_variants.rs`); see Spec 05 §1.4 |
+
+The variants table is **append-only**: a variant's id is its position, so a new material
+is a new row at the END of the table (new ids after 372), and a new shape for a family is
+a new entry at the end of that family's shape list only if the ids it shifts are all
+unminted. The six variants that predate the table keep their original ids. The world
+generator places none of these 53 ids (the v2 worldgen golden pins it); a world holds one
+only if a player crafted, `/give`n or imported it.
+
+An id the running build does not know reads back as AIR (`BlockRegistry::get` falls back
+to id 0), and a later save writes the hole back. Introducing ids therefore bumps the save
+footer version, so builds that lack them refuse the world (§8.4, "Forward compatibility").
+
 The mapping from namespaced ID to numeric ID is stored in the **Block ID Table** within
 the world metadata (Section 9). This table is written on every save and read on every
 load, so the numeric IDs can be reassigned if plugins change between sessions.
@@ -1883,14 +1905,26 @@ format version in a trailing footer — see the bincode note under Migration str
       have made new saves unreadable to shipped builds, and a 4-byte header magic
       collides with a legacy save's leading `seed: u32`; an 8-byte trailing magic
       at the very end of a footer-less save is not a realistic collision.
-    - **`SAVE_FORMAT_VERSION`** = `WORLD_SAVE_FIELD_COUNT` (53 today) +
-      `SAVE_LAYOUT_REVISION` (0). Two tripwire tests stop drift: serde's field list
+    - **`SAVE_FORMAT_VERSION`** = `WORLD_SAVE_FIELD_COUNT` (54 today) +
+      `SAVE_LAYOUT_REVISION` (4 today; see the block-ids bullet below) = 58. Two tripwire tests stop drift: serde's field list
       for `WorldSave` must equal `WORLD_SAVE_FIELD_COUNT` (so appending a field
       without bumping the version fails), and the tolerant reader must consume every
       byte of a current save (so a field listed in its struct literal without a read
       fails). A wire change that is **not** an appended field (a field or enum variant
       inside a nested saved type, a retype) is invisible to both tripwires and must
       bump `SAVE_LAYOUT_REVISION` by hand.
+    - **Block ids move the version too (2026-10-24).** `SAVE_LAYOUT_REVISION` went 3 → 4
+      (`SAVE_FORMAT_VERSION` 57 → 58) when the 53 building-variant ids (320..=372) landed,
+      with no `WorldSave` field change. Reason: a build that does not know an id reads it as
+      AIR, so a world holding a spruce stair opened in the previous build would show a hole
+      and the next save would write the hole back, deleting the player's stairs. Bumping
+      the footer makes that build take its existing "needs a newer version" refusal
+      instead. It is bumped for EVERY world the new build writes, not only worlds that
+      hold a new block (the writer cannot cheaply know, and a world may gain a variant
+      at any moment). Pinned by
+      `save_format::tests::a_world_written_now_carries_the_building_variants_version`.
+      **Rule for every future block-id addition:** bump `SAVE_LAYOUT_REVISION` in the same
+      commit as the first new id.
     - **Read** (`save::read_world_save`): no footer → the legacy path, unchanged.
       Footer version ≤ ours → the footer is stripped *before* the tolerant decode
       (left on, an older save's footer would be decoded as the field it lacks), then

@@ -11,7 +11,8 @@
 //! a door opens for everyone.
 use super::*;
 use crate::action_identity::{ActionFate, ActionHeader};
-use crate::block::{AIR, OAK_DOOR};
+use crate::block::AIR;
+use crate::block_shape::is_door;
 use crate::strict_admission::{RefusalKind, StrictTeardown};
 use crate::window_events::StrictStageError;
 
@@ -75,10 +76,10 @@ impl HostedServer {
     /// pair a break derives, `clear_door_pair`'s rule).
     pub(super) fn live_door_pair(&self, cell: [i32; 3]) -> Option<[i32; 3]> {
         let world = &self.server.world;
-        if world.get_block(cell[0], cell[1], cell[2]) != OAK_DOOR { return None; }
+        if !is_door(world.get_block(cell[0], cell[1], cell[2])) { return None; }
         let top = crate::block_shape::door_is_top(world.meta_at(cell[0], cell[1], cell[2]));
         let y = cell[1].checked_add(if top { -1 } else { 1 })?;
-        (world.get_block(cell[0], y, cell[2]) == OAK_DOOR && crate::block_shape::door_is_top(world.meta_at(cell[0], y, cell[2])) != top)
+        (is_door(world.get_block(cell[0], y, cell[2])) && crate::block_shape::door_is_top(world.meta_at(cell[0], y, cell[2])) != top)
             .then_some([cell[0], y, cell[2]])
     }
 
@@ -131,12 +132,12 @@ impl HostedServer {
             return self.refuse_door(i, action, &cells, budget, "a door faces a horizontal direction", RefusalKind::Rule);
         };
         let held = self.server.players[i].inventory.slot(slot).map(|s| s.item.clone());
-        if held.as_ref().and_then(crate::joiner_inventory::placeable_block) != Some(OAK_DOOR) {
+        let Some(door) = held.as_ref().and_then(crate::joiner_inventory::placeable_block).filter(|b| is_door(*b)) else {
             return self.refuse_door(i, action, &cells, budget, "the server's copy of the slot doesn't hold a door", RefusalKind::Rule);
-        }
+        };
         let held_wire = held.as_ref().map_or((protocol::item_kind::EMPTY, 0), |item| crate::inventory::item_to_ref(item).to_wire());
-        let lower = protocol::BlockChange { x: bottom[0], y: bottom[1], z: bottom[2], new_block: OAK_DOOR, meta: bottom_meta };
-        let upper = protocol::BlockChange { x: top[0], y: top[1], z: top[2], new_block: OAK_DOOR, meta: top_meta };
+        let lower = protocol::BlockChange { x: bottom[0], y: bottom[1], z: bottom[2], new_block: door, meta: bottom_meta };
+        let upper = protocol::BlockChange { x: top[0], y: top[1], z: top[2], new_block: door, meta: top_meta };
         // Reach (the server copy's slot) and permission for the bottom;
         // permission without reach for the structurally derived top.
         if let Err(why) = self.validate_block_edit(i, &lower, held_wire, slot) {

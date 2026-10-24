@@ -127,7 +127,7 @@ impl HostedServer {
             // of a door on the server's world, take two credits (two
             // cells), required in full before they run.
             let door_break = matches!(&packet.intent, ActionIntent::Edit { change, mined: Some(_), .. }
-                if self.server.world.get_block(change.x, change.y, change.z) == crate::block::OAK_DOOR);
+                if crate::block_shape::is_door(self.server.world.get_block(change.x, change.y, change.z)));
             let credits = if door_break || matches!(packet.intent, ActionIntent::DoorPlace { .. }) { super::strict_door::DOOR_EDIT_CREDITS } else { 1 };
             if matches!(packet.intent, ActionIntent::Edit { .. } | ActionIntent::DoorPlace { .. }) {
                 if budget.edits + credits > MAX_BLOCK_CHANGES_PER_TICK { return; }

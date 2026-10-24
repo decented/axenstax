@@ -385,6 +385,42 @@ fn c3d_strict_door_break_derives_the_pair_once() {
     assert_eq!(j.refusals(), (0, 0, 0), "no Strict refusal");
 }
 
+/// Building variants: the Strict compound place takes the door the slot HOLDS
+/// (here spruce), both halves are that door, and breaking one half derives the
+/// pair once and yields one spruce door — as the oak door does.
+#[test]
+fn c3d_strict_spruce_door_place_and_break_use_the_held_door() {
+    let spruce = crate::building_variants::id_of(2, crate::building_variants::VShape::Door).unwrap();
+    assert_eq!(crate::building_variants::MATERIALS[2].key, "spruce");
+    let held = ItemStack { item: Item::Block(spruce), count: 3 };
+    let mut j = joined("spruce-door", &[(0, held)], false);
+    let bottom = [41, 80, 40];
+    let facing = Facing::West.to_bits();
+    let placed = place_door_joined(&mut j.rc, &mut j.ui, &mut j.inv, &mut j.armour, 0, bottom, facing, &j.reg).expect("reserved and sent");
+    assert_eq!(placed, Some(spruce), "the window gave the spruce door");
+    for (c, m) in door_halves(bottom, facing).unwrap() {
+        j.world.place_player_block(c[0], c[1], c[2], spruce);
+        j.world.set_meta((c[0], c[1], c[2]), m);
+    }
+    j.assert_honest("spruce place");
+    for (c, m) in door_halves(bottom, facing).unwrap() { assert_eq!(j.server_cell(c), (spruce, m), "the server derived the spruce half at {c:?}"); }
+    assert_eq!(j.held(&Item::Block(spruce)), 2, "exactly one spruce door consumed");
+    // The doors pair across woods: an oak door beside it opens with it.
+    j.hs.server.world.set_block(42, 80, 40, OAK_DOOR);
+    j.hs.server.world.set_block(42, 81, 40, OAK_DOOR);
+    j.hs.server.world.set_meta((42, 81, 40), crate::use_edits::door_top_meta(0));
+    assert_eq!(crate::strict_doors::toggle_footprint(&j.hs.server.world, [41, 80, 40]).len(), 4, "both doors, both halves");
+    j.hs.server.world.set_block(42, 80, 40, AIR);
+    j.hs.server.world.set_block(42, 81, 40, AIR);
+    j.break_door([41, 81, 40], 1);
+    j.assert_honest("spruce break");
+    for y in [80, 81] { assert_eq!(j.server_cell([41, y, 40]).0, AIR, "both halves gone at y={y}"); }
+    assert_eq!(j.held(&Item::Block(spruce)), 3, "one spruce door back, once");
+    let ground: u32 = j.hs.server.ecs.query::<&crate::entity::ItemEntity>().iter().filter(|(_, e)| e.stack.item == Item::Block(spruce)).map(|(_, e)| u32::from(e.stack.count)).sum();
+    assert_eq!(ground, 0, "no second door on the ground");
+    assert_eq!(j.refusals(), (0, 0, 0), "no Strict refusal");
+}
+
 /// Decision 20, a forbidden upper cell: the top is above the world, so the
 /// whole placement refuses — zero effect (no half, no door taken) — and is
 /// corrected (the client's predicted door and window put back).

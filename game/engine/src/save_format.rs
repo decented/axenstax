@@ -37,7 +37,14 @@ pub const WORLD_SAVE_FIELD_COUNT: u32 = 54;
 /// field or enum variant added inside a nested saved type, a retype. Such a change
 /// is invisible to the field-count tripwire, but an older build cannot read it
 /// either, so it must still move the version. Only ever increases.
-pub const SAVE_LAYOUT_REVISION: u32 = 3;
+///
+/// 4 (building variants, block ids 320..=372): a block id the build does not
+/// know reads back as AIR (`BlockRegistry::get`), so an older build opening a
+/// world with a spruce stair in it would show a hole and save the hole back.
+/// The version moves with the first new block id, for EVERY world this build
+/// writes (whether or not it holds a new block), so old builds take their
+/// existing "needs a newer version" refusal instead.
+pub const SAVE_LAYOUT_REVISION: u32 = 4;
 
 /// The `world.dat` format version this build writes, and the newest it opens.
 /// Monotonic: both terms only ever increase.
@@ -299,6 +306,29 @@ mod tests {
              instead of truncating them, and add the field to the tolerant reader."
         );
         assert_eq!(SAVE_FORMAT_VERSION, WORLD_SAVE_FIELD_COUNT + SAVE_LAYOUT_REVISION);
+    }
+
+    /// Building variants (block ids 320..=372) moved the format version from 57
+    /// to 58 so builds that don't know the ids refuse the world instead of
+    /// loading them as AIR and saving the holes back.
+    #[test]
+    fn a_world_written_now_carries_the_building_variants_version() {
+        assert_eq!(SAVE_FORMAT_VERSION, 58, "54 fields + layout revision 4");
+        // The world holds no new block, and still carries the new version.
+        let bytes = encode_world_save(&minimal_world_save_for_tests(5)).unwrap();
+        assert_eq!(split_save_footer(&bytes).1, Some(58));
+        assert!(check_version(split_save_footer(&bytes).1).is_ok(), "this build opens its own save");
+        // A build that stopped at 57 refuses this footer (58 > 57) the same
+        // way this build refuses 59: `check_version` is the one rule.
+        assert_eq!(
+            check_version(Some(58 + 1)),
+            Err(WorldSaveError::NewerVersion { found: 59, supported: 58 }),
+            "a footer one version past this build is refused"
+        );
+        let mut next = bincode::serialize(&minimal_world_save_for_tests(5)).unwrap();
+        next.extend_from_slice(&footer_bytes(SAVE_FORMAT_VERSION + 1));
+        let (_, v) = split_save_footer(&next);
+        assert!(check_version(v).unwrap_err().is_newer_version());
     }
 
     #[cfg(not(target_arch = "wasm32"))]

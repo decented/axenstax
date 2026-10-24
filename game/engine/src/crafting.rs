@@ -324,7 +324,8 @@ pub fn block_hardness(block_id: BlockId) -> f32 {
         block::BED => 0.2,
         block::GLASS => 0.3,
         block::TORCH => 0.0,
-        _ => 1.0,
+        // Building variants (slabs, stairs, doors, …): the table's per-material number.
+        id => crate::building_variants::hardness(id).unwrap_or(1.0),
     }
 }
 
@@ -375,7 +376,8 @@ pub fn best_tool_for(block_id: BlockId) -> Option<ToolType> {
         id if block::is_pure_deepslate_family(id) => Some(ToolType::Pickaxe),
         block::DIRT | block::GRASS | block::SAND | block::GRAVEL | block::SNOW => Some(ToolType::Shovel),
         block::OAK_LOG | block::OAK_PLANKS | block::CRAFTING_TABLE => Some(ToolType::Axe),
-        _ => None,
+        // Building variants: woods want an axe, stones a pickaxe.
+        id => crate::building_variants::best_tool(id),
     }
 }
 
@@ -429,10 +431,12 @@ pub fn min_tool_tier(block_id: BlockId) -> Option<ToolMaterial> {
         // Satori storage block: same Iron-tier requirement as the diamond
         // storage block.
         block::SATORI_BLOCK => Some(ToolMaterial::Iron),
+        // Building variants: a stone slab/stair/wall needs a pickaxe of the
+        // material's tier to drop (wood variants: any tool).
         // Everything else (dirt, sand, wood, glass, bed, torch, …) any tool
         // (or fist) can harvest. Bedrock is a separate concern — it's never
         // actually broken in the mining handler.
-        _ => None,
+        id => crate::building_variants::min_tier(id),
     }
 }
 
@@ -992,17 +996,21 @@ pub fn match_recipe(grid: &[[CraftSlot; 3]; 3]) -> Option<ItemStack> {
                             3,
                         ));
                     }
-        // F1 Wave 2 — Oak Fence Gate: SPS / SPS (sticks outside, plank rail
+        // Fence Gate (every wood): SPS / SPS (sticks outside, plank rail
         // between — the inverse of the fence-post motif above, so the two
-        // grids stay distinct). 2×3 → 1 gate. v1 oak only.
-        let plank_b = CraftSlot::Block(block::OAK_PLANKS);
-        if r0 == [stick_2x3, plank_b, stick_2x3] && r1 == [stick_2x3, plank_b, stick_2x3] {
-            return Some(ItemStack::new_block(block::OAK_FENCE_GATE, 1));
+        // grids stay distinct). 2×3 → 1 gate of that plank's species.
+        if let CraftSlot::Block(plank) = r0[1]
+            && r0 == [stick_2x3, r0[1], stick_2x3] && r1 == [stick_2x3, r0[1], stick_2x3]
+            && let Some(gate) = crate::building_variants::id_for_base(plank, crate::building_variants::VShape::FenceGate) {
+            return Some(ItemStack::new_block(gate, 1));
         }
-        // F1 Wave 2 — Oak Trapdoor: PPP / PPP (6 planks, the Minecraft motif)
-        // → 2 trapdoors. Distinct from BED (top row wool) + the gate/post grids.
-        if r0 == [plank_b, plank_b, plank_b] && r1 == [plank_b, plank_b, plank_b] {
-            return Some(ItemStack::new_block(block::OAK_TRAPDOOR, 2));
+        // Trapdoor (every wood): PPP / PPP (6 planks of one species, the
+        // Minecraft motif) → 2 trapdoors. Distinct from BED (top row wool) +
+        // the gate/post grids.
+        if let CraftSlot::Block(plank) = r0[0]
+            && r0 == [r0[0]; 3] && r1 == [r0[0]; 3]
+            && let Some(trap) = crate::building_variants::id_for_base(plank, crate::building_variants::VShape::Trapdoor) {
+            return Some(ItemStack::new_block(trap, 2));
         }
         // F1 Wave 2 — Glass Pane: GGG / GGG (6 glass) → 16 panes (Minecraft).
         let glass_pane_b = CraftSlot::Block(block::GLASS);
@@ -1181,20 +1189,25 @@ pub fn match_recipe(grid: &[[CraftSlot; 3]; 3]) -> Option<ItemStack> {
             }
         }
 
-        // F1 — Stone Stairs: 6 stone in a staircase (either handedness) → 4
-        // stairs (Minecraft pattern). Row 0 is the top of the grid.
+        // Stairs (every wood and stone): 6 of one material in a staircase
+        // (either handedness) → 4 stairs (Minecraft pattern). Row 0 is the
+        // top of the grid.
         {
-            let s = CraftSlot::Block(block::STONE);
-            let e = CraftSlot::Empty;
             let g = [
                 [grid[min_r][min_c], grid[min_r][min_c + 1], grid[min_r][min_c + 2]],
                 [grid[min_r + 1][min_c], grid[min_r + 1][min_c + 1], grid[min_r + 1][min_c + 2]],
                 [grid[min_r + 2][min_c], grid[min_r + 2][min_c + 1], grid[min_r + 2][min_c + 2]],
             ];
-            let left_hand = g == [[s, e, e], [s, s, e], [s, s, s]];
-            let right_hand = g == [[e, e, s], [e, s, s], [s, s, s]];
-            if left_hand || right_hand {
-                return Some(ItemStack::new_block(block::STONE_STAIRS, 4));
+            // The bottom-left cell is filled in both handednesses.
+            if let CraftSlot::Block(base) = g[2][0] {
+                let s = g[2][0];
+                let e = CraftSlot::Empty;
+                let left_hand = g == [[s, e, e], [s, s, e], [s, s, s]];
+                let right_hand = g == [[e, e, s], [e, s, s], [s, s, s]];
+                if (left_hand || right_hand)
+                    && let Some(stairs) = crate::building_variants::id_for_base(base, crate::building_variants::VShape::Stairs) {
+                    return Some(ItemStack::new_block(stairs, 4));
+                }
             }
         }
 
@@ -1895,16 +1908,13 @@ pub fn match_recipe(grid: &[[CraftSlot; 3]; 3]) -> Option<ItemStack> {
         }
     }
 
-    // F1 Wave 2 — Oak Door: a 2-wide × 3-tall column of planks → 3 doors
-    // (Minecraft pattern). All six cells must be oak planks.
-    if h == 3 && w == 2 {
-        let p = CraftSlot::Block(block::OAK_PLANKS);
-        let all_planks = (0..3).all(|r| {
-            grid[min_r + r][min_c] == p && grid[min_r + r][min_c + 1] == p
-        });
-        if all_planks {
-            return Some(ItemStack::new_block(block::OAK_DOOR, 3));
-        }
+    // Door (every wood): a 2-wide × 3-tall column of one species' planks → 3
+    // doors (Minecraft pattern). All six cells must be the same planks.
+    if h == 3 && w == 2
+        && let CraftSlot::Block(plank) = grid[min_r][min_c]
+        && (0..3).all(|r| grid[min_r + r][min_c] == grid[min_r][min_c] && grid[min_r + r][min_c + 1] == grid[min_r][min_c])
+        && let Some(door) = crate::building_variants::id_for_base(plank, crate::building_variants::VShape::Door) {
+        return Some(ItemStack::new_block(door, 3));
     }
 
     // F1 Wave 2c — Oak Sign: six planks (3×2) over a centred stick → 3 signs
@@ -1941,16 +1951,13 @@ pub fn match_recipe(grid: &[[CraftSlot; 3]; 3]) -> Option<ItemStack> {
         }
     }
 
-    // F1 Wave 2c — Cobblestone Wall: a 3-wide × 2-tall block of cobblestone →
-    // 6 walls (Minecraft pattern). All six cells must be cobblestone.
-    if h == 2 && w == 3 {
-        let c = CraftSlot::Block(block::COBBLESTONE);
-        let all_cobble = (0..3).all(|col| {
-            grid[min_r][min_c + col] == c && grid[min_r + 1][min_c + col] == c
-        });
-        if all_cobble {
-            return Some(ItemStack::new_block(block::COBBLESTONE_WALL, 6));
-        }
+    // Wall (every stone): a 3-wide × 2-tall block of one stone → 6 walls
+    // (Minecraft pattern). All six cells must be the same stone.
+    if h == 2 && w == 3
+        && let CraftSlot::Block(stone) = grid[min_r][min_c]
+        && (0..3).all(|col| grid[min_r][min_c + col] == grid[min_r][min_c] && grid[min_r + 1][min_c + col] == grid[min_r][min_c])
+        && let Some(wall) = crate::building_variants::id_for_base(stone, crate::building_variants::VShape::Wall) {
+        return Some(ItemStack::new_block(wall, 6));
     }
 
     // --- 1-tall recipes (Wave 26 farming bread + Spec 23 papyrus) ---
@@ -1961,10 +1968,13 @@ pub fn match_recipe(grid: &[[CraftSlot; 3]; 3]) -> Option<ItemStack> {
         if r == [wheat, wheat, wheat] {
             return Some(ItemStack::new_material(MaterialId::Bread, 1));
         }
-        // F1 — Stone Slab: 3 stone horizontal → 6 slabs (Minecraft pattern).
-        let stone_b = CraftSlot::Block(block::STONE);
-        if r == [stone_b, stone_b, stone_b] {
-            return Some(ItemStack::new_block(block::STONE_SLAB, 6));
+        // Slab (every wood and stone): 3 of one material horizontal → 6 slabs
+        // (Minecraft pattern). A slab placed on a side face stands as a
+        // vertical slab, so there is no separate recipe for those.
+        if let CraftSlot::Block(base) = r[0]
+            && r == [r[0]; 3]
+            && let Some(slab) = crate::building_variants::id_for_base(base, crate::building_variants::VShape::Slab) {
+            return Some(ItemStack::new_block(slab, 6));
         }
         // Spec 23 — Papyrus Sheets: 3 reeds horizontal → 3 sheets
         // (Minecraft sugarcane → paper pattern). High-yield: a single
