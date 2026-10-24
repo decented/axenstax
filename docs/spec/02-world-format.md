@@ -2105,6 +2105,29 @@ format version in a trailing footer — see the bincode note under Migration str
       (left on, an older save's footer would be decoded as the field it lacks), then
       decoded as before. Footer version > ours → `WorldSaveError::NewerVersion`,
       nothing decoded.
+    - **Strict check for footers >= 53 (save-footer hotfix, 2026-10-24).** From footer 53
+      (the personal-snapshot era) a save must be byte-exact, not merely decodable: the
+      reader refuses a body that is truncated, padded or corrupt instead of defaulting
+      it. **Rule: the strict check accepts a body of any field count that footer was
+      written with, and nothing else.** `save_format::FOOTER_FIELD_COUNTS` maps each
+      footer to its allowed positional field counts (53 -> 53, 54 -> 52, 55 -> 53,
+      57 -> 54, 58 -> 54 or 55, 59 -> 55; one footer can come from two field counts
+      because it is count + layout revision), each row sourced from the commit that
+      wrote it. The tolerant decode reports how many fields it read before a clean end;
+      the body is accepted iff the tail is clean, that count is in the footer's row, and
+      the body equals the encoding of exactly those fields (the absent fields are the
+      default-valued end of the re-encode). **Bug this fixed:** the check used to
+      re-encode every field and require equality, so a world saved at footer 57 or 58
+      (before `worldgen_version`, field 55) failed with "truncated or corrupt" on the
+      terrain build though its data was intact. **Every future appended field must add a
+      row** for the new version (tripwire:
+      `save_format::tests::footer_table_tripwire_newest_entry_is_this_build`) **and an
+      arm in `save::absent_tail_encoded_len`**. All `world.dat` loads funnel through
+      `read_world_save_reporting` (native load, autosave, damaged-meta recovery,
+      `world_archive::unpack_world`, retained handover state, gameplay preparation, the
+      server's player restore), so one fix covers them; the handover checkpoint decoder
+      (`bounded_decode::world`) is a separate, stricter reader that accepts only the
+      current footer with every field present, so it is not affected.
     - **Refusal is total**: `save::world_open_refusal` (reads only the 12-byte
       footers of `world.dat` and `autosave/world.dat`) is checked before a world is
       entered from every path — world card Play/Host, "Host online" (before any port

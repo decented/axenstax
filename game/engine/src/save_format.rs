@@ -50,6 +50,55 @@ pub const SAVE_LAYOUT_REVISION: u32 = 4;
 /// Monotonic: both terms only ever increase.
 pub const SAVE_FORMAT_VERSION: u32 = WORLD_SAVE_FIELD_COUNT + SAVE_LAYOUT_REVISION;
 
+/// Which positional `WorldSave` field counts a footer version was ever written
+/// with, for every footer the strict current-snapshot check covers (>= 53).
+///
+/// A footer is `WORLD_SAVE_FIELD_COUNT + SAVE_LAYOUT_REVISION`, so one footer
+/// number can come from more than one field count (58 was written by two branches
+/// with different splits), and a build that appends a field leaves every older
+/// footer's saves one field short. `save::read_world_save_reporting` accepts a
+/// body iff the fields it actually carries are in this list for its footer and its
+/// bytes are exactly those fields' encoding. Regression: a world saved on footer
+/// 57 or 58 was refused on the terrain build, which re-encoded the missing
+/// `worldgen_version` and found one byte too many.
+///
+/// Derived from `git log -p main -- game/engine/src/save_format.rs` plus the
+/// `WorldSave` field list at each commit (`WORLD_SAVE_FIELD_COUNT` = fields,
+/// `SAVE_LAYOUT_REVISION` = revision; footer = their sum):
+///
+/// | footer | fields | revision | source commit(s)                                  | last field        |
+/// |--------|--------|----------|---------------------------------------------------|-------------------|
+/// | 53     | 53     | 0        | 91d489f7 (personal continuation)                  | `local_personal`  |
+/// | 54     | 52     | 2        | ab03ee65 (D2c-2 WIP; never compiled, kept to be safe) | `rig_clips`   |
+/// | 55     | 53     | 2        | 11be0aac (handover merge)                         | `local_personal`  |
+/// | 57     | 54     | 3        | 84ff0c1a (common progression)                     | `quest_world`     |
+/// | 58     | 55     | 3        | c31080c1 (y 255 + terrain generator record)       | `worldgen_version`|
+/// | 58     | 54     | 4        | fbf2fd87 (building variants, block ids)           | `quest_world`     |
+/// | 59     | 55     | 4        | ed9678f7 (merge of the two; the current build)    | `worldgen_version`|
+///
+/// Footers 52 and below are not strictly checked. Sorted by footer, ascending.
+/// The newest entry is written as literals on purpose: bumping
+/// [`WORLD_SAVE_FIELD_COUNT`] or [`SAVE_LAYOUT_REVISION`] fails
+/// `footer_table_tripwire_newest_entry_is_this_build` until a row for the new
+/// version is added, so an append can't skip the table.
+pub const FOOTER_FIELD_COUNTS: &[(u32, &[u32])] = &[
+    (53, &[53]),
+    (54, &[52]),
+    (55, &[53]),
+    (57, &[54]),
+    (58, &[54, 55]),
+    (59, &[55]),
+];
+
+/// The field counts a footer `version` was written with (empty for a footer the
+/// table does not know, which the strict check refuses).
+pub fn allowed_field_counts(version: u32) -> &'static [u32] {
+    FOOTER_FIELD_COUNTS
+        .iter()
+        .find(|(v, _)| *v == version)
+        .map_or(&[], |(_, counts)| *counts)
+}
+
 /// Last 8 bytes of every footer-bearing `world.dat`. The `v1` names this footer
 /// layout, not the save format (that is the `u32` before it).
 pub const SAVE_FOOTER_MAGIC: [u8; 8] = *b"AXSAVEv1";
@@ -329,6 +378,33 @@ mod tests {
         next.extend_from_slice(&footer_bytes(SAVE_FORMAT_VERSION + 1));
         let (_, v) = split_save_footer(&next);
         assert!(check_version(v).unwrap_err().is_newer_version());
+    }
+
+    /// TRIPWIRE: the newest table row is this build's own footer and field count.
+    /// Appending a `WorldSave` field (or bumping the layout revision) moves
+    /// `SAVE_FORMAT_VERSION`; this fails until `FOOTER_FIELD_COUNTS` gains a row
+    /// for the new version, so saves of the previous version keep loading.
+    #[test]
+    fn footer_table_tripwire_newest_entry_is_this_build() {
+        let (version, counts) = *FOOTER_FIELD_COUNTS.last().unwrap();
+        assert_eq!(
+            (version, counts),
+            (SAVE_FORMAT_VERSION, &[WORLD_SAVE_FIELD_COUNT][..]),
+            "SAVE_FORMAT_VERSION / WORLD_SAVE_FIELD_COUNT moved: add a row to \
+             FOOTER_FIELD_COUNTS for the new version and keep the old rows"
+        );
+        assert!(
+            FOOTER_FIELD_COUNTS.windows(2).all(|w| w[0].0 < w[1].0),
+            "rows must be strictly ascending by footer version"
+        );
+        for (v, counts) in FOOTER_FIELD_COUNTS {
+            assert!(*v >= 53, "footers below 53 are not strictly checked");
+            assert!(!counts.is_empty());
+            assert!(counts.iter().all(|c| *c <= WORLD_SAVE_FIELD_COUNT));
+            assert!(counts.windows(2).all(|w| w[0] < w[1]));
+        }
+        assert_eq!(allowed_field_counts(SAVE_FORMAT_VERSION), &[WORLD_SAVE_FIELD_COUNT]);
+        assert!(allowed_field_counts(56).is_empty(), "no commit on main ever wrote footer 56");
     }
 
     #[cfg(not(target_arch = "wasm32"))]
