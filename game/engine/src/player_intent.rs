@@ -126,6 +126,13 @@ pub struct PlayerIntent {
     /// player's perspective (FP → over-shoulder → orbit → FP). Edge-triggered
     /// (once/press). Client-local render concern — never sent over the wire.
     pub camera_cycle: bool,
+
+    /// Pick block: middle-click → put the item of the block under the
+    /// crosshair in hand (Spec 05 §8.2). Edge-triggered (once/press).
+    /// Client-local: the resulting inventory change travels as the window
+    /// clicks / creative give the inventory screen already sends, so there
+    /// is no wire field. Keyboard + mouse only (gamepad parked, no touch).
+    pub pick_block: bool,
 }
 
 impl PlayerIntent {
@@ -184,6 +191,8 @@ impl PlayerIntent {
             // Camera perspective is purely client-side render; the server never
             // toggles it on a player's behalf.
             camera_cycle: false,
+            // Pick block is purely client-local (see the field doc).
+            pick_block: false,
         }
     }
 
@@ -226,6 +235,7 @@ impl PlayerIntent {
         self.workshop_grid = self.workshop_grid || other.workshop_grid;
         self.shift_down = self.shift_down || other.shift_down;
         self.camera_cycle = self.camera_cycle || other.camera_cycle;
+        self.pick_block = self.pick_block || other.pick_block;
         if other.hotbar_select.is_some() {
             self.hotbar_select = other.hotbar_select;
         }

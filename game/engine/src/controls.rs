@@ -96,6 +96,7 @@ pub const KEYBOARD_SECTIONS: &[ControlSection] = &[
         rows: &[
             row("Left click (hold)", "Break blocks: hold until it breaks", "input.rs mouse_button_pressed Left -> break_block"),
             row("Right click", "Place a block, use what you hold, open things", "input.rs mouse_button_pressed Right -> place_block"),
+            row("Middle click", "Pick the block you're looking at into your hand (in Survival, only if you're carrying it)", "input.rs mouse_button_pressed Middle -> pick_block"),
             row("1 to 9, or scroll wheel", "Choose the item in your hand", "input.rs key_pressed Digit1..9; lib.rs MouseWheel -> scroll"),
             row("E", "Open your inventory and crafting", "input.rs key_pressed KeyE -> inventory_toggle"),
             row("Q", "Drop one of the item in your hand", "input.rs key_pressed KeyQ -> drop_item"),
@@ -360,6 +361,8 @@ mod tests {
         assert!(i.satoshi_summon, "N calls Satoshi");
         i.key_pressed(KeyCode::F5);
         assert!(i.camera_cycle, "F5 cycles the camera");
+        i.mouse_button_pressed(winit::event::MouseButton::Middle);
+        assert!(i.pick_block, "middle click picks the aimed block");
 
         // Movement + modifiers.
         let mut i = InputState::new();

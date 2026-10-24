@@ -479,6 +479,7 @@ impl TouchInput {
             workshop_grid: false, // BRIDGE: ditto
             shift_down: false, // BRIDGE: touch has no modifier key
             camera_cycle: self.camera_cycle,
+            pick_block: false, // BRIDGE: no touch binding — keyboard + mouse only
         }
     }
 
