@@ -59,7 +59,7 @@ impl super::GameState {
             .as_ref()
             .map(|hs| hs.lent_respawn_columns())
             .unwrap_or_default();
-        let anchors = client_stream_anchors(&player_cols, rd, &joiner_cols, &respawn_cols);
+        let anchors = client_stream_anchors(&player_cols, rd, !self.joined(), &joiner_cols, &respawn_cols);
         let mut nearest_to = vec![(pcx0, pcz0)];
         nearest_to.extend_from_slice(&joiner_cols);
         nearest_to.extend_from_slice(&respawn_cols);
@@ -651,8 +651,14 @@ impl super::GameState {
         let fpx = (self.players[0].player.pos.x.floor() as i32).div_euclid(cs);
         let fpz = (self.players[0].player.pos.z.floor() as i32).div_euclid(cs);
         let mut set: ahash::AHashSet<(i32, i32)> = self.loaded_columns.iter().copied().collect();
+        // A client on its own world loads the same circle `stream_chunks` keeps
+        // (Perf B2); a joiner's ground is the server's square.
+        let round = !self.joined();
         for dx in -rd..=rd {
             for dz in -rd..=rd {
+                if round && !crate::camera::column_in_round_range(dx, dz, rd) {
+                    continue;
+                }
                 set.insert((fpx + dx, fpz + dz));
             }
         }
@@ -1147,13 +1153,67 @@ pub(crate) struct StreamStep {
     pub unload: Vec<(i32, i32)>,
 }
 
-/// A streaming anchor: a column, and how far round it (Chebyshev, in
-/// columns) is kept loaded.
+/// A streaming anchor: a column, and how far round it is kept loaded: in a
+/// square (Chebyshev, in columns) or, for `round`, a circle (Euclidean on
+/// column indices, [`crate::camera::column_in_round_range`]).
+///
+/// Round is for a client's OWN players only (Perf B2): a circle loads ~21%
+/// fewer columns and the fog is circular anyway. A joiner's pushed columns are
+/// the server's square, and the lent joiners' sim blocks and the dedicated
+/// server's streamer keep their squares, so those anchors stay square.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct StreamAnchor {
     pub col: (i32, i32),
     pub radius: i32,
+    pub round: bool,
 }
+
+impl StreamAnchor {
+    /// Kept loaded in a square of `radius` columns.
+    pub(crate) fn square(col: (i32, i32), radius: i32) -> Self {
+        Self { col, radius, round: false }
+    }
+
+    /// Kept loaded in a circle of `radius` columns.
+    #[cfg(test)]
+    pub(crate) fn round(col: (i32, i32), radius: i32) -> Self {
+        Self { col, radius, round: true }
+    }
+
+    /// Is column `(cx, cz)` inside this anchor's load range?
+    fn wants(&self, cx: i32, cz: i32) -> bool {
+        let (dx, dz) = (i64::from(cx) - i64::from(self.col.0), i64::from(cz) - i64::from(self.col.1));
+        if self.round {
+            crate::camera::column_in_round_range_wide(dx, dz, self.radius)
+        } else {
+            dx.abs() <= i64::from(self.radius) && dz.abs() <= i64::from(self.radius)
+        }
+    }
+
+    /// Is column `(cx, cz)` beyond this anchor's unload reach: its load range
+    /// plus `slack` columns (a round anchor uses [`ROUND_UNLOAD_HYSTERESIS`]
+    /// instead, one column, so the circle's edge does not thrash)?
+    fn lets_go(&self, cx: i32, cz: i32, slack: i32) -> bool {
+        let (dx, dz) = (i64::from(cx) - i64::from(self.col.0), i64::from(cz) - i64::from(self.col.1));
+        if self.round {
+            !crate::camera::column_in_round_range_wide(
+                dx,
+                dz,
+                self.radius.saturating_add(ROUND_UNLOAD_HYSTERESIS),
+            )
+        } else {
+            let reach = i64::from(self.radius) + i64::from(slack);
+            dx.abs() > reach || dz.abs() > reach
+        }
+    }
+}
+
+/// How many columns past a round anchor's load circle a loaded column survives
+/// before it is unloaded. The load radius `r` and the unload radius `r + 1`
+/// leave a one-column band where a column is neither loaded nor let go, so a
+/// player pacing along the edge does not load and unload the same columns.
+/// (The square anchors keep [`UNLOAD_HYSTERESIS`].)
+pub(crate) const ROUND_UNLOAD_HYSTERESIS: i32 = 1;
 
 /// How far round each joiner's server body a LENDING host's client streamer
 /// keeps its world loaded (D1 review fix 1): the dedicated server's default
@@ -1170,7 +1230,8 @@ pub(crate) const LENT_JOINER_SIM_DISTANCE: i32 = crate::server_stream::DEFAULT_S
 pub(crate) const RESPAWN_ANCHOR_RADIUS: i32 = 1;
 
 /// The anchors a client's streamer keeps loaded round: every local player's
-/// column at the render distance and — on a world it lends its server (D1;
+/// column at the render distance (a circle when `round_local`: not on a joined
+/// client, whose pushed columns are the server's square) and — on a world it lends its server (D1;
 /// `joiner_cols` is empty otherwise, see `HostedServer::lent_joiner_columns`)
 /// — every joiner's server-body column at [`LENT_JOINER_SIM_DISTANCE`], and
 /// every dead joiner's spawn column (`respawn_cols`, see
@@ -1181,21 +1242,22 @@ pub(crate) const RESPAWN_ANCHOR_RADIUS: i32 = 1;
 pub(crate) fn client_stream_anchors(
     local_cols: &[(i32, i32)],
     render_distance: i32,
+    round_local: bool,
     joiner_cols: &[(i32, i32)],
     respawn_cols: &[(i32, i32)],
 ) -> Vec<StreamAnchor> {
     local_cols
         .iter()
-        .map(|&col| StreamAnchor { col, radius: render_distance })
+        .map(|&col| StreamAnchor { col, radius: render_distance, round: round_local })
         .chain(
             joiner_cols
                 .iter()
-                .map(|&col| StreamAnchor { col, radius: LENT_JOINER_SIM_DISTANCE }),
+                .map(|&col| StreamAnchor::square(col, LENT_JOINER_SIM_DISTANCE)),
         )
         .chain(
             respawn_cols
                 .iter()
-                .map(|&col| StreamAnchor { col, radius: RESPAWN_ANCHOR_RADIUS }),
+                .map(|&col| StreamAnchor::square(col, RESPAWN_ANCHOR_RADIUS)),
         )
         .collect()
 }
@@ -1213,7 +1275,7 @@ pub(crate) fn plan_stream_step(
     needs_reload: impl FnMut(i32, i32) -> bool,
 ) -> StreamStep {
     let anchors: Vec<StreamAnchor> =
-        anchors.iter().map(|&col| StreamAnchor { col, radius }).collect();
+        anchors.iter().map(|&col| StreamAnchor::square(col, radius)).collect();
     plan_stream_step_for(&anchors, nearest_to, budget, loaded, needs_reload)
 }
 
@@ -1240,10 +1302,14 @@ pub(crate) fn plan_stream_step_for(
     mut needs_reload: impl FnMut(i32, i32) -> bool,
 ) -> StreamStep {
     let mut needed = ahash::AHashSet::new();
-    for &StreamAnchor { col: (ax, az), radius } in anchors {
+    for anchor in anchors {
+        let (ax, az) = anchor.col;
+        let radius = anchor.radius;
         for dx in -radius..=radius {
             for dz in -radius..=radius {
-                needed.insert((ax + dx, az + dz));
+                if anchor.wants(ax + dx, az + dz) {
+                    needed.insert((ax + dx, az + dz));
+                }
             }
         }
     }
@@ -1369,8 +1435,10 @@ pub(crate) fn apply_remote_change_to_unloaded_column(
     unload_column_blocks(world, cx, cz);
 }
 
-/// Columns in `loaded` that are more than their anchor's `radius + slack`
-/// (Chebyshev, per axis) from EVERY anchor — the ones a streamer unloads.
+/// Columns in `loaded` that are beyond their anchor's reach from EVERY anchor
+/// — the ones a streamer unloads. A square anchor's reach is `radius + slack`
+/// (Chebyshev, per axis); a round anchor's is `radius +`
+/// [`ROUND_UNLOAD_HYSTERESIS`] (Euclidean).
 pub(crate) fn columns_outside_anchors(
     loaded: &ahash::AHashSet<(i32, i32)>,
     anchors: &[StreamAnchor],
@@ -1378,12 +1446,7 @@ pub(crate) fn columns_outside_anchors(
 ) -> Vec<(i32, i32)> {
     loaded
         .iter()
-        .filter(|&&(cx, cz)| {
-            anchors.iter().all(|&StreamAnchor { col: (ax, az), radius }| {
-                let dist = radius + slack;
-                (cx - ax).abs() > dist || (cz - az).abs() > dist
-            })
-        })
+        .filter(|&&(cx, cz)| anchors.iter().all(|a| a.lets_go(cx, cz, slack)))
         .copied()
         .collect()
 }
@@ -1546,7 +1609,7 @@ mod tests {
             }
         }
         // Walk > 200 blocks away: every column is out of range.
-        let far = [StreamAnchor { col: (20, 0), radius: rd }];
+        let far = [StreamAnchor::square((20, 0), rd)];
         let gone = columns_outside_anchors(&loaded, &far, UNLOAD_HYSTERESIS);
         assert!(gone.contains(&(1, 1)));
         for &(cx, cz) in &gone {
@@ -1555,7 +1618,7 @@ mod tests {
         }
         assert!(!world.has_chunk(1, 2, 1), "unloaded column leaves `chunks`");
         // Walk back: the stream load branch re-enters the column.
-        let home = [StreamAnchor { col: (0, 0), radius: rd }];
+        let home = [StreamAnchor::square((0, 0), rd)];
         assert!(columns_outside_anchors(&loaded, &home, UNLOAD_HYSTERESIS).is_empty());
         for cx in -rd..=rd {
             for cz in -rd..=rd {
@@ -1648,14 +1711,114 @@ mod tests {
         assert!(step.load.is_empty(), "a zero budget loads nothing");
     }
 
+    /// Perf B2 — a round anchor loads the circle, not the square: the corners
+    /// the fog hides are never generated.
+    #[test]
+    fn a_round_anchor_loads_a_circle() {
+        let r = 4;
+        let anchors = [StreamAnchor::round((0, 0), r)];
+        let step = plan_stream_step_for(&anchors, &[(0, 0)], usize::MAX, &set_of(&[]), |_, _| false);
+        let mut want = 0;
+        for dx in -r..=r {
+            for dz in -r..=r {
+                let inside = dx * dx + dz * dz <= r * r;
+                assert_eq!(step.load.contains(&(dx, dz)), inside, "({dx},{dz})");
+                want += usize::from(inside);
+            }
+        }
+        assert_eq!(step.pending, want);
+        assert_eq!(want, 49, "radius 4: 49 columns, not the square's 81");
+        // Nearest first still holds (the anchor's own column leads).
+        assert_eq!(step.load[0], (0, 0));
+        // The same anchor as a square is the old behaviour.
+        let sq = [StreamAnchor::square((0, 0), r)];
+        let step = plan_stream_step_for(&sq, &[(0, 0)], usize::MAX, &set_of(&[]), |_, _| false);
+        assert_eq!(step.pending, 81);
+    }
+
+    /// Perf B2 — a round anchor's unload circle is one column wider than its
+    /// load circle: between the two a column is neither loaded nor let go, so
+    /// the edge does not thrash. Table over the 3-4-5 style offsets at r = 5.
+    #[test]
+    fn a_round_anchor_unloads_one_column_past_its_load_circle() {
+        let r = 5;
+        let anchors = [StreamAnchor::round((0, 0), r)];
+        // (col, loads when absent, unloads when present)
+        for ((cx, cz), loads, unloads) in [
+            ((0, 0), true, false),
+            ((5, 0), true, false),   // on the load circle
+            ((6, 0), false, false),  // hysteresis band: kept if present, not loaded
+            ((7, 0), false, true),   // past r + 1
+            ((3, 4), true, false),   // 25
+            ((4, 4), false, false),  // 32: past load (25), within 36
+            ((4, 5), false, true),   // 41 > 36
+            ((5, 5), false, true),   // the square's corner: gone
+            ((0, -6), false, false),
+            ((0, -7), false, true),
+        ] {
+            let step = plan_stream_step_for(&anchors, &[(0, 0)], usize::MAX, &set_of(&[]), |_, _| false);
+            assert_eq!(step.load.contains(&(cx, cz)), loads, "load ({cx},{cz})");
+            let step = plan_stream_step_for(&anchors, &[(0, 0)], 0, &set_of(&[(cx, cz)]), |_, _| false);
+            assert_eq!(step.unload.contains(&(cx, cz)), unloads, "unload ({cx},{cz})");
+        }
+    }
+
+    /// Perf B2 — no thrash: walking one column at a time along the edge never
+    /// unloads a column that the next step would load again.
+    #[test]
+    fn walking_with_a_round_anchor_does_not_reload_what_it_unloaded() {
+        let r = 6;
+        let mut loaded = set_of(&[]);
+        let mut unloaded_then_wanted = 0;
+        let mut ever_unloaded = ahash::AHashSet::new();
+        for step_x in 0..40 {
+            let anchors = [StreamAnchor::round((step_x, step_x / 2), r)];
+            let step = plan_stream_step_for(&anchors, &[(step_x, step_x / 2)], usize::MAX, &loaded, |_, _| false);
+            for c in &step.load {
+                if ever_unloaded.contains(c) {
+                    unloaded_then_wanted += 1;
+                }
+                loaded.insert(*c);
+            }
+            for c in &step.unload {
+                loaded.remove(c);
+                ever_unloaded.insert(*c);
+            }
+        }
+        assert_eq!(unloaded_then_wanted, 0, "a one-way walk never reloads");
+    }
+
+    /// Perf B2 — only a client's OWN players are round: lent joiners' sim
+    /// blocks and respawn rings stay square, and a joined client is square
+    /// throughout (its pushed columns are the server's square).
+    #[test]
+    fn only_local_anchors_are_round_and_never_on_a_joined_client() {
+        let host = (0, 0);
+        let joiner = (50, 0);
+        let spawn = (80, 0);
+        let anchors = client_stream_anchors(&[host], 6, true, &[joiner], &[spawn]);
+        assert!(anchors.contains(&StreamAnchor::round(host, 6)));
+        assert!(anchors.contains(&StreamAnchor::square(joiner, LENT_JOINER_SIM_DISTANCE)));
+        assert!(anchors.contains(&StreamAnchor::square(spawn, RESPAWN_ANCHOR_RADIUS)));
+        let joined = client_stream_anchors(&[host], 6, false, &[], &[]);
+        assert_eq!(joined, vec![StreamAnchor::square(host, 6)]);
+        // A pushed corner column (6, 6) of a joined client's square is kept...
+        let loaded = set_of(&[(6, 6), (6 + UNLOAD_HYSTERESIS + 1, 0)]);
+        let step = plan_stream_step_for(&joined, &[host], 0, &loaded, |_, _| false);
+        assert_eq!(step.unload, vec![(6 + UNLOAD_HYSTERESIS + 1, 0)]);
+        // ...where the round one would have let it go.
+        let step = plan_stream_step_for(&[StreamAnchor::round(host, 6)], &[host], 0, &loaded, |_, _| false);
+        assert!(step.unload.contains(&(6, 6)));
+    }
+
     /// D1 review fix 1 — each anchor keeps its OWN radius: a far anchor with a
     /// smaller radius loads and keeps only its own square, and a column inside
     /// any anchor's radius + hysteresis is never unloaded.
     #[test]
     fn plan_keeps_each_anchor_at_its_own_radius() {
         let anchors = [
-            StreamAnchor { col: (0, 0), radius: 3 },
-            StreamAnchor { col: (40, 0), radius: 1 },
+            StreamAnchor::square((0, 0), 3),
+            StreamAnchor::square((40, 0), 1),
         ];
         let all = set_of(&[]);
         let step = plan_stream_step_for(&anchors, &[(0, 0), (40, 0)], usize::MAX, &all, |_, _| false);
@@ -1679,13 +1842,13 @@ mod tests {
         let host = (rd + UNLOAD_HYSTERESIS + 1, 0);
         let loaded = set_of(&[joiner, (1, 0), host]);
         // Negative control: the host's own anchors alone drop the joiner's column.
-        let host_only = client_stream_anchors(&[host], rd, &[], &[]);
+        let host_only = client_stream_anchors(&[host], rd, false, &[], &[]);
         let step = plan_stream_step_for(&host_only, &[host], 0, &loaded, |_, _| false);
         assert!(step.unload.contains(&joiner), "pre-fix: the joiner's column unloads");
 
-        let anchors = client_stream_anchors(&[host], rd, &[joiner], &[]);
-        assert!(anchors.contains(&StreamAnchor { col: host, radius: rd }));
-        assert!(anchors.contains(&StreamAnchor { col: joiner, radius: LENT_JOINER_SIM_DISTANCE }));
+        let anchors = client_stream_anchors(&[host], rd, false, &[joiner], &[]);
+        assert!(anchors.contains(&StreamAnchor::square(host, rd)));
+        assert!(anchors.contains(&StreamAnchor::square(joiner, LENT_JOINER_SIM_DISTANCE)));
         let step = plan_stream_step_for(&anchors, &[host, joiner], 0, &loaded, |_, _| false);
         assert!(step.unload.is_empty(), "nothing near the joiner unloads: {:?}", step.unload);
         // And a joiner standing in an unloaded column has it loaded first.
@@ -1701,9 +1864,9 @@ mod tests {
     fn a_dead_joiners_spawn_column_anchors_at_a_one_column_ring() {
         let rd = 4;
         let (host, body, spawn) = ((100, 0), (60, 0), (0, 0));
-        let anchors = client_stream_anchors(&[host], rd, &[body], &[spawn]);
-        assert!(anchors.contains(&StreamAnchor { col: spawn, radius: 1 }), "{anchors:?}");
-        assert!(anchors.contains(&StreamAnchor { col: body, radius: LENT_JOINER_SIM_DISTANCE }));
+        let anchors = client_stream_anchors(&[host], rd, false, &[body], &[spawn]);
+        assert!(anchors.contains(&StreamAnchor::square(spawn, 1)), "{anchors:?}");
+        assert!(anchors.contains(&StreamAnchor::square(body, LENT_JOINER_SIM_DISTANCE)));
 
         let loaded = set_of(&[host, body]);
         let step = plan_stream_step_for(&anchors, &[host, body, spawn], 64, &loaded, |_, _| false);
@@ -1714,7 +1877,7 @@ mod tests {
         }
         assert!(!step.load.contains(&(2, 0)), "and no further: a ring of one");
         // Without it (no dead joiner) the spawn area is not wanted at all.
-        let none = client_stream_anchors(&[host], rd, &[body], &[]);
+        let none = client_stream_anchors(&[host], rd, false, &[body], &[]);
         let step = plan_stream_step_for(&none, &[host, body], 64, &loaded, |_, _| false);
         assert!(!step.load.contains(&spawn));
     }

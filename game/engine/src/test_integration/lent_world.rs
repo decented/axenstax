@@ -316,13 +316,13 @@ fn a_joiners_columns_stay_loaded_when_the_host_walks_away() {
     // The host walks off, beyond its render distance + hysteresis.
     let rd = 4;
     let host_col = (joiner_col.0 + rd + UNLOAD_HYSTERESIS + 1, joiner_col.1);
-    let host_only = client_stream_anchors(&[host_col], rd, &[], &[]);
+    let host_only = client_stream_anchors(&[host_col], rd, false, &[], &[]);
     let pre_fix = plan_stream_step_for(&host_only, &[host_col], 0, &host.loaded_columns, |_, _| false);
     assert!(pre_fix.unload.contains(&joiner_col), "control: host anchors alone drop it");
     for _ in 0..3 {
         // Frames of the host's streamer, as `stream_chunks` runs it.
         let joiners = hs.lent_joiner_columns();
-        let anchors = client_stream_anchors(&[host_col], rd, &joiners, &[]);
+        let anchors = client_stream_anchors(&[host_col], rd, false, &joiners, &[]);
         let mut nearest = vec![host_col];
         nearest.extend_from_slice(&joiners);
         let step = plan_stream_step_for(&anchors, &nearest, 2, &host.loaded_columns, |_, _| false);
@@ -373,7 +373,7 @@ fn stream_frame(
     use crate::chunk_stream::{client_stream_anchors, plan_stream_step_for};
     let joiners = hs.lent_joiner_columns();
     let respawns = hs.lent_respawn_columns();
-    let anchors = client_stream_anchors(&[host_col], rd, &joiners, &respawns);
+    let anchors = client_stream_anchors(&[host_col], rd, false, &joiners, &respawns);
     let mut nearest = vec![host_col];
     nearest.extend_from_slice(&joiners);
     nearest.extend_from_slice(&respawns);
