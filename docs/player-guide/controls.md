@@ -30,6 +30,7 @@ Mining/placing reach is about 5 blocks; attack reach (melee on mobs) is shorter,
 | **Left-click (hold)** | Continuously break — the block cracks and shatters |
 | **Right-click** | Place block / use item / talk to villager / open crafting table / open campfire |
 | **Right-click (food in hotbar + hungry)** | Eat |
+| **Middle-click** | **Pick block** — look at a block and middle-click to put its item in your hand. **Creative:** you get a full stack (or just switch to it if it's already on your hotbar). **Survival / Adventure:** it only works if you're already carrying that item. If it's on your hotbar you switch to it; if it's in your bag it swaps with the hotbar slot you're holding. Air and water do nothing. Not available on gamepad or touch. |
 | **Scroll wheel** | Cycle hotbar selection |
 
 ## Hotbar

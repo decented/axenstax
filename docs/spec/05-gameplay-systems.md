@@ -2501,8 +2501,21 @@ The four modes below are the **target**. What's wired in the engine today:
 - **Flying**: Enabled by default (double-tap jump). See section 1.7.
 - **No fall damage, no fire damage, no drowning**: The player takes no environmental damage.
 - **Mob AI**: Hostile mobs do not target creative players. The player can still attack mobs.
-- **Pick block (middle-click)**: Adds the targeted block to the hotbar, even if not currently in inventory.
+- **Pick block (middle-click)** *(BUILT, all play modes; `pick_block.rs` + `pick_block_play.rs`)*: puts the targeted block's item in hand. See §8.2.1.
 - **Reach**: 5.0 blocks, the same as survival (the code has one `REACH_DISTANCE`).
+
+#### 8.2.1 Pick block (BUILT)
+
+Middle mouse button, native and web; keyboard + mouse only (no gamepad or touch binding, and the binding is not rebindable because the game has no rebinding system; it is listed on the controls card, H help sheet and the player guide's controls page). The press is the edge flag `InputState::pick_block` -> `PlayerIntent::pick_block`, client-local and never on the wire (`from_input_packet` sets it false).
+
+- **Target**: the block `PlayerSlot::target_block` holds, the same ray break and place use (`effective_reach`: `REACH_DISTANCE` 5.0 plus any Reach Claw bonus). Fluids are never a ray target.
+- **Gating**: only with the cursor captured, so not while chat, the inventory or crafting screen, the Explorer, a container or any other panel is open (they free the cursor); not when dead; not during a Director shot, the scenario end card, a ghost (plan) preview or a frozen pack window.
+- **Item** (`pick_block::pick_item_for(block) -> Option<Item>`): the block's item form, built from the engine's existing mappings and not a parallel table. A crop stage gives the item that sows it (`use_edits::sown_crop` inverted: wheat seeds, carrot, potato, corn/cotton/hemp/flower seeds; papyrus gives the reed); a mature wild flower gives the flower block; a sapling or economy block gives the material that places as it (`item::material_as_placeable_block` inverted); lit and animated variants give the idle block (campfire to unlit campfire, lit furnace/cable/lamp/steam generator, turning wheel/windmill, deepslate variants, tapped rubber log), matching the normalisations `BlockRegistry::mine_drop` already makes; ore, log, leaves and stone give the block itself (not the raw drop). Doors, beds and torches are one block id each (half or facing is placement metadata), so the block is the item.
+- **Picks nothing** (`pick_block::PICKS_NOTHING`, each with its reason): air, water, lava, fire, campfire smoke, the brigand hideout banner, the transient piston head, latent and cyanotype prints (they place from a per-instance Plan), and the worldgen-only crops that have no planting item (sugar beet, beetroot, pumpkin stems, berry bushes). A table test pins both directions over every registered block.
+- **Survival and Adventure**: only if the item is already carried (an item that places as the same block counts, so green logs answer for an oak log). In the hotbar: select that slot (the selected slot first, then the lowest). In the bag: swap it with the selected hotbar slot, the old hotbar item going where the picked one came from. Not carried: nothing happens.
+- **Creative**: item already in the hotbar: select it. Otherwise a full stack goes into the selected slot if it is empty; else the selection moves to the first empty hotbar slot and the stack goes there; with a full hotbar the stack replaces the selected slot's item.
+- **Spectator**: nothing.
+- **Multiplayer**: no protocol change. The survival swap is three left clicks on the inventory window (bag slot, selected hotbar slot, bag slot) through `GameState::apply_window_click`, the entry point the inventory screen's slot clicks use, so in Strict they are three reserved window actions and in Mirror three logged window ops. The creative take is the Inventory Explorer's give: a joiner sends `ItemAction::CreativeGive` (`request_creative_give`) and the server's `InventoryGrant` lands the stack in the lowest empty slot; single-player and a host write the slot directly. Consequence for a joiner in Creative: the selection moves to the lowest empty hotbar slot where the grant will land; with a full hotbar the grant goes to the bag instead of replacing the selected slot (that replace needs a new wire operation), and an item already partly in the bag stacks there.
 
 ### 8.3 Spectator Mode Details
 
