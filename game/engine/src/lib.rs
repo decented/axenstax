@@ -62,6 +62,7 @@ mod power;
 mod beam;
 mod graphics_settings;
 mod quality_governor;
+mod draw_order;
 mod input;
 mod item;
 mod inventory;

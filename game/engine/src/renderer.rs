@@ -380,6 +380,10 @@ pub struct PlayerGpuResources {
     /// with (`CameraUniform::camera_pos`, what the fog measures from), cached by
     /// `update_camera` for the chunk draw-distance cull (`render_world_viewport`).
     pub last_camera_pos: glam::Vec3,
+    /// Cached nearest-first order of the opaque section draws for this player's
+    /// camera (Perf B2), rebuilt only when the camera crosses a section boundary
+    /// or `Renderer::chunk_mesh_epoch` moves.
+    pub opaque_order: crate::draw_order::SectionOrder,
 }
 
 /// Per-frame draw/culling counters, surfaced in the F3 overlay (Spec 39 A1).
@@ -559,6 +563,10 @@ pub struct Renderer {
     /// `tick_counter`, so animation pauses exactly when the game does.
     anim_clock: u64,
     pub chunk_meshes: ahash::AHashMap<(i32, i32, i32), GpuChunkMesh>,
+    /// Bumped whenever a key is added to or removed from `chunk_meshes` (not
+    /// when a mesh is replaced under an existing key): the cache key of every
+    /// player's `opaque_order`.
+    chunk_mesh_epoch: u64,
     /// Per-frame draw/cull counters (Spec 39 A1) — read by the F3 overlay.
     pub last_draw_stats: DrawStats,
     /// Crosshair vertex buffers keyed by viewport `(width, height)` (Spec 39 A2).
@@ -1525,6 +1533,7 @@ impl Renderer {
             block_mipmaps,
             anim_clock: 0,
             chunk_meshes: ahash::AHashMap::new(),
+            chunk_mesh_epoch: 0,
             water_pipeline,
             water_meshes: ahash::AHashMap::new(),
             transparent_pipeline,
@@ -1599,6 +1608,7 @@ impl Renderer {
                 viewmodel_camera_bind_group: vm_cam_bg,
                 last_view_proj: glam::Mat4::IDENTITY,
                 last_camera_pos: glam::Vec3::ZERO,
+                opaque_order: crate::draw_order::SectionOrder::new(),
             }],
             last_draw_stats: DrawStats::default(),
             crosshair_cache: ahash::AHashMap::new(),
@@ -1894,12 +1904,15 @@ impl Renderer {
             viewmodel_camera_bind_group,
             last_view_proj: glam::Mat4::IDENTITY,
             last_camera_pos: glam::Vec3::ZERO,
+            opaque_order: crate::draw_order::SectionOrder::new(),
         }
     }
 
     pub fn upload_chunk_mesh(&mut self, pos: (i32, i32, i32), mesh: &ChunkMesh) {
         if mesh.vertices.is_empty() {
-            self.chunk_meshes.remove(&pos);
+            if self.chunk_meshes.remove(&pos).is_some() {
+                self.chunk_mesh_epoch += 1;
+            }
             return;
         }
 
@@ -1919,7 +1932,7 @@ impl Renderer {
                 usage: wgpu::BufferUsages::INDEX,
             });
 
-        self.chunk_meshes.insert(
+        let replaced = self.chunk_meshes.insert(
             pos,
             GpuChunkMesh {
                 vertex_buffer,
@@ -1927,6 +1940,15 @@ impl Renderer {
                 index_count: mesh.indices.len() as u32,
             },
         );
+        if replaced.is_none() {
+            self.chunk_mesh_epoch += 1;
+        }
+    }
+
+    /// Drop every opaque section mesh (a world change).
+    pub fn clear_chunk_meshes(&mut self) {
+        self.chunk_meshes.clear();
+        self.chunk_mesh_epoch += 1;
     }
 
     pub fn upload_water_mesh(&mut self, pos: (i32, i32, i32), mesh: &ChunkMesh) {
@@ -2041,7 +2063,9 @@ impl Renderer {
     /// mesh map (opaque, water, transparent, plants, decals, micro-models and
     /// their far billboards). A new per-section map belongs in both.
     pub fn drop_section(&mut self, pos: (i32, i32, i32)) {
-        self.chunk_meshes.remove(&pos);
+        if self.chunk_meshes.remove(&pos).is_some() {
+            self.chunk_mesh_epoch += 1;
+        }
         self.water_meshes.remove(&pos);
         self.transparent_meshes.remove(&pos);
         self.plant_meshes.remove(&pos);
@@ -3057,6 +3081,18 @@ impl Renderer {
                 let crate::screen::ScreenContent::LocalPlayer(player_index) = screen.content;
                 let crosshair_buf =
                     &self.crosshair_cache[&(screen.viewport.width, screen.viewport.height)];
+                // Perf B2 — refresh this player's nearest-first order of the opaque
+                // section draws (a re-sort only when the camera crosses a section
+                // boundary or the set of meshes changes).
+                {
+                    let epoch = self.chunk_mesh_epoch;
+                    let meshes = &self.chunk_meshes;
+                    if let Some(g) = self.player_gpu.get_mut(player_index) {
+                        let cam = g.last_camera_pos;
+                        g.opaque_order
+                            .nearest_first(cam, epoch, || meshes.keys().copied().collect());
+                    }
+                }
                 if let Some(gpu) = self.player_gpu.get(player_index) {
                     // Build this player's culling frustum from the cached view-proj (A1).
                     let frustum = crate::camera::Frustum::from_view_proj(gpu.last_view_proj);
@@ -3846,6 +3882,7 @@ impl Renderer {
             block_mipmaps,
             anim_clock: 0,
             chunk_meshes: ahash::AHashMap::new(),
+            chunk_mesh_epoch: 0,
             water_pipeline,
             water_meshes: ahash::AHashMap::new(),
             transparent_pipeline,
@@ -3920,6 +3957,7 @@ impl Renderer {
                 viewmodel_camera_bind_group: vm_cam_bg,
                 last_view_proj: glam::Mat4::IDENTITY,
                 last_camera_pos: glam::Vec3::ZERO,
+                opaque_order: crate::draw_order::SectionOrder::new(),
             }],
             last_draw_stats: DrawStats::default(),
             crosshair_cache: ahash::AHashMap::new(),
@@ -4512,15 +4550,36 @@ fn render_world_viewport(
         pass.set_pipeline(render_pipeline);
         pass.set_bind_group(1, texture_bind_group, &[]);
 
-        for (&(cx, cy, cz), gpu_mesh) in chunk_meshes.iter() {
-            if !chunk_visible(cx, cy, cz) {
-                stats.culled += 1;
-                continue;
+        // Nearest section first (Perf B2): the depth test then rejects the
+        // fragments of everything behind before they are shaded. The cached order
+        // is trusted only while it covers exactly the uploaded meshes; otherwise
+        // (it cannot happen through `render`, which refreshes it) fall back to the
+        // map's own order so nothing is ever left undrawn.
+        let ordered = gpu.opaque_order.current();
+        if ordered.len() == chunk_meshes.len() {
+            for key in ordered {
+                let Some(gpu_mesh) = chunk_meshes.get(key) else { continue };
+                let (cx, cy, cz) = *key;
+                if !chunk_visible(cx, cy, cz) {
+                    stats.culled += 1;
+                    continue;
+                }
+                pass.set_vertex_buffer(0, gpu_mesh.vertex_buffer.slice(..));
+                pass.set_index_buffer(gpu_mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..gpu_mesh.index_count, 0, 0..1);
+                stats.draw_calls += 1;
             }
-            pass.set_vertex_buffer(0, gpu_mesh.vertex_buffer.slice(..));
-            pass.set_index_buffer(gpu_mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..gpu_mesh.index_count, 0, 0..1);
-            stats.draw_calls += 1;
+        } else {
+            for (&(cx, cy, cz), gpu_mesh) in chunk_meshes.iter() {
+                if !chunk_visible(cx, cy, cz) {
+                    stats.culled += 1;
+                    continue;
+                }
+                pass.set_vertex_buffer(0, gpu_mesh.vertex_buffer.slice(..));
+                pass.set_index_buffer(gpu_mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..gpu_mesh.index_count, 0, 0..1);
+                stats.draw_calls += 1;
+            }
         }
         // Opaque solid texels must occlude later transparent colour/water.
         pass.set_pipeline(transparent_depth_pipeline);
