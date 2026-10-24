@@ -192,6 +192,34 @@ mod tests {
         hg.frames(3);
     }
 
+    /// Perf A review S1: a section vacated by a chunk push, and a column
+    /// unloaded, must lose their transparent (leaves, glass) mesh too, not
+    /// just the opaque, water, plant, decal and micro ones.
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_dropping_a_section_or_column_clears_its_transparent_mesh() {
+        isolate_saves();
+        let mut hg = HeadlessGame::boot_into_world("harness-drop-transparent");
+        hg.frames(3);
+        let st = &mut hg.state;
+        let pos = (0, crate::world::MAX_CHUNK_Y, 0);
+        let stamp = |st: &mut crate::GameState, block| {
+            st.world.set_block(5, pos.1 * 16 + 5, 5, block);
+            let meshes = crate::mesh::build_chunk_meshes(pos.0, pos.1, pos.2, &st.world, &st.registry);
+            st.renderer.upload_chunk(pos, &meshes);
+        };
+        // Section vacated.
+        stamp(st, crate::block::GLASS);
+        assert!(st.renderer.transparent_meshes.contains_key(&pos), "glass must mesh as transparent");
+        st.drop_section_meshes(pos);
+        assert!(!st.renderer.transparent_meshes.contains_key(&pos), "section drop leaked the transparent mesh");
+        // Column unloaded.
+        stamp(st, crate::block::OAK_LEAVES);
+        assert!(st.renderer.transparent_meshes.contains_key(&pos), "leaves must mesh as transparent");
+        st.drop_column_meshes((pos.0, pos.2));
+        assert!(!st.renderer.transparent_meshes.contains_key(&pos), "column drop leaked the transparent mesh");
+    }
+
     #[test]
     #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
     fn game_harness_raid_kill_attribution_settles_through_the_live_game_loop() {

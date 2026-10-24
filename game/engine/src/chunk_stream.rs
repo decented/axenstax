@@ -952,17 +952,12 @@ impl super::GameState {
     }
 
     /// Remove every mesh of column `col` from the renderer.
-    fn drop_column_meshes(&mut self, col: (i32, i32)) {
+    pub(crate) fn drop_column_meshes(&mut self, col: (i32, i32)) {
+        // Every mesh kind, including the transparent one (leaves, glass) and
+        // the micro-model instance buffers and far billboards: else they leak
+        // GPU buffers and render stale until the column reloads.
         for cy in 0..=MAX_CHUNK_Y {
-            let key = (col.0, cy, col.1);
-            self.renderer.chunk_meshes.remove(&key);
-            self.renderer.water_meshes.remove(&key);
-            self.renderer.plant_meshes.remove(&key);
-            self.renderer.decal_meshes.remove(&key);
-            // Owner-inbox #18 — the per-type micro-model instance buffers and
-            // far-LOD billboards too (else they leak and render stale).
-            self.renderer.micro_meshes.remove(&key);
-            self.renderer.micro_billboard_meshes.remove(&key);
+            self.renderer.drop_section((col.0, cy, col.1));
         }
     }
 

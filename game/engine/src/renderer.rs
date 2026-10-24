@@ -1994,6 +1994,20 @@ impl Renderer {
     /// Upload all three GPU representations for a chunk at once — opaque
     /// mesh, water mesh, and instanced plants. Single entry point so no
     /// call site can forget the plant instances (added 2026-05-30).
+    /// Drop every GPU mesh held for one section: the inverse of
+    /// [`Self::upload_chunk`], and the one place that lists every per-section
+    /// mesh map (opaque, water, transparent, plants, decals, micro-models and
+    /// their far billboards). A new per-section map belongs in both.
+    pub fn drop_section(&mut self, pos: (i32, i32, i32)) {
+        self.chunk_meshes.remove(&pos);
+        self.water_meshes.remove(&pos);
+        self.transparent_meshes.remove(&pos);
+        self.plant_meshes.remove(&pos);
+        self.decal_meshes.remove(&pos);
+        self.micro_meshes.remove(&pos);
+        self.micro_billboard_meshes.remove(&pos);
+    }
+
     pub fn upload_chunk(&mut self, pos: (i32, i32, i32), meshes: &crate::mesh::ChunkMeshes) {
         self.upload_chunk_mesh(pos, &meshes.opaque);
         self.upload_water_mesh(pos, &meshes.water);

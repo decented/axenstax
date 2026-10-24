@@ -167,14 +167,10 @@ impl super::GameState {
         self.dirty_mesh_chunks.extend(plan.later);
     }
 
-    /// Remove every mesh held for one section.
-    fn drop_section_meshes(&mut self, key: SectionPos) {
-        self.renderer.chunk_meshes.remove(&key);
-        self.renderer.water_meshes.remove(&key);
-        self.renderer.plant_meshes.remove(&key);
-        self.renderer.decal_meshes.remove(&key);
-        self.renderer.micro_meshes.remove(&key);
-        self.renderer.micro_billboard_meshes.remove(&key);
+    /// Remove every mesh held for one section (all kinds, leaves and glass
+    /// included: a vacated section must not keep floating geometry).
+    pub(crate) fn drop_section_meshes(&mut self, key: SectionPos) {
+        self.renderer.drop_section(key);
     }
 }
 
