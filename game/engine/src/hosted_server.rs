@@ -288,6 +288,10 @@ pub enum RemoteTransport {
     Fray,
     /// Plain WebSocket on `port` (dedicated server; web + native join).
     WebSocket { port: u16 },
+    /// `--keep-world`: no socket at all. The home Keep owns the room, and its
+    /// pipe (`keep_pipe`) hands joiners over on the accept channel
+    /// ([`HostedServer::start_keep_world`]).
+    KeepPipe,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -675,6 +679,17 @@ pub struct HostedServer {
     #[cfg(not(target_arch = "wasm32"))]
     identity: Option<crate::server_identity::ServerIdentity>,
 
+    /// `--keep-world` ([`Self::start_keep_world`]): every verified join waits
+    /// for the home Keep's gate before it is seated.
+    #[cfg(not(target_arch = "wasm32"))]
+    keep_world: bool,
+    /// `--keep-world`: the joins held for the Keep's gate, by slot. While a
+    /// hold is unanswered the slot is sent nothing and nothing it sends is
+    /// read; on a yes its `JoinRequest` is read again, with the identity
+    /// already verified from it (the challenge was spent verifying it).
+    #[cfg(not(target_arch = "wasm32"))]
+    keep_holds: std::collections::BTreeMap<usize, KeepHold>,
+
     /// v66 — the public addresses this server answers to (`--public-host`,
     /// `AXENSTAX_PUBLIC_HOST`, `AXENSTAX_DOMAIN`). A WebSocket join whose
     /// declared dialled host isn't one of them is refused, so a relayed
@@ -888,12 +903,14 @@ impl HostedServer {
             (None, RemoteTransport::WebSocket { port }) => port,
             // Fray binds an ephemeral port; `poll_fray_start` records it once the room listens.
             (None, RemoteTransport::Fray) => 0,
+            // A Keep world listens on nothing.
+            (None, RemoteTransport::KeepPipe) => 0,
         };
         #[cfg(target_arch = "wasm32")]
         let port = match remote_transport {
             RemoteTransport::Quic => protocol::SERVER_PORT,
             RemoteTransport::WebSocket { port } => port,
-            RemoteTransport::Fray => 0,
+            RemoteTransport::Fray | RemoteTransport::KeepPipe => 0,
         };
         // LAN "Host Game" (T2-10): bind the UDP port NOW, on this thread, and hand
         // the socket to the accept thread. Binding inside that thread meant a
@@ -1029,14 +1046,16 @@ impl HostedServer {
             // Fray sends its own LAN beacon.
             let broadcaster = match remote_transport {
                 RemoteTransport::Quic => Some(crate::discovery::ServerBroadcaster::new(port)),
-                RemoteTransport::WebSocket { .. } | RemoteTransport::Fray => None,
+                RemoteTransport::WebSocket { .. } | RemoteTransport::Fray | RemoteTransport::KeepPipe => None,
             };
             let current_remote = Arc::new(AtomicUsize::new(0));
             let shutdown = Arc::new(AtomicBool::new(false));
 
             // A Fray room's pump feeds the channel instead: `start_fray_host`
-            // attaches both.
-            if max_remote_players > 0 && remote_transport != RemoteTransport::Fray {
+            // attaches both. So does a Keep's pipe (`start_keep_world`).
+            if max_remote_players > 0
+                && !matches!(remote_transport, RemoteTransport::Fray | RemoteTransport::KeepPipe)
+            {
                 let (tx, rx) = mpsc::channel::<Box<dyn ServerTransport>>();
                 // `quic_thread` holds whichever accept thread we spawned (the
                 // field name is historical — it may be the QUIC or the WS one).
@@ -1058,7 +1077,9 @@ impl HostedServer {
                             tx,
                         )?
                     }
-                    RemoteTransport::Fray => unreachable!("a Fray room has no accept thread"),
+                    RemoteTransport::Fray | RemoteTransport::KeepPipe => {
+                        unreachable!("a Fray room or a Keep's pipe has no accept thread")
+                    }
                 };
                 (broadcaster, Some(rx), current_remote, shutdown, Some(handle))
             } else {
@@ -1137,9 +1158,17 @@ impl HostedServer {
             // same Signet challenge a LAN QUIC join always has.
             // A WebSocket host starts open only until `set_access_policy` runs;
             // the dedicated server applies its (sign-in-by-default) policy at
-            // boot, before the main loop processes its first join.
+            // boot, before the main loop processes its first join. A Keep
+            // world requires it too: its gate needs a verified persona.
             #[cfg(not(target_arch = "wasm32"))]
-            require_signin: matches!(remote_transport, RemoteTransport::Quic | RemoteTransport::Fray),
+            require_signin: matches!(
+                remote_transport,
+                RemoteTransport::Quic | RemoteTransport::Fray | RemoteTransport::KeepPipe
+            ),
+            #[cfg(not(target_arch = "wasm32"))]
+            keep_world: remote_transport == RemoteTransport::KeepPipe,
+            #[cfg(not(target_arch = "wasm32"))]
+            keep_holds: std::collections::BTreeMap::new(),
             // Set by the dedicated server after `start` via `set_identity`.
             #[cfg(not(target_arch = "wasm32"))]
             identity: None,
@@ -1313,6 +1342,84 @@ impl HostedServer {
         server.remote_rx = Some(rx);
         server.fray_host = Some(crate::fray_transport::FrayHost::start(open_room(room), tx));
         Ok(server)
+    }
+
+    /// `--keep-world` (`keep_world`): the world of a home Keep. The server owns
+    /// its world and has no local player, as the dedicated server, but opens
+    /// no socket: the Keep's pipe hands each joiner over on `joiners` (a
+    /// `keep_pipe::PipeServerTransport` whose channel binding is the one the
+    /// Keep passed). Every join goes through the same Signet challenge and
+    /// verification as a Fray join, over that binding, and then waits for the
+    /// Keep's gate (`ServerTransport::ask_gate`). Sign-in is required, and the
+    /// server's own allowlist and blocklist are empty: the Keep decides who plays.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn start_keep_world(
+        world: String,
+        seed: u32,
+        max_players: usize,
+        joiners: mpsc::Receiver<Box<dyn ServerTransport>>,
+    ) -> Result<Self, String> {
+        let mut server = Self::start_inner(
+            0,
+            world,
+            seed,
+            max_players.max(1),
+            RemoteTransport::KeepPipe,
+            None,
+            HostWorld::Owned,
+        )?;
+        server.set_access_policy(true, Vec::new(), Vec::new());
+        server.remote_rx = Some(joiners);
+        Ok(server)
+    }
+
+    /// `--keep-world`: take the Keep's answers to the joins held for its gate.
+    /// A yes puts the held `JoinRequest` back at the front of the slot's queue
+    /// (read this tick, with the identity verified from it); a no frees the
+    /// slot with the gate's reason, which the joiner is told as any refused
+    /// join is.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn take_keep_gate_answers(&mut self) {
+        let waiting: Vec<usize> =
+            self.keep_holds.iter().filter(|(_, hold)| !hold.admitted).map(|(&slot, _)| slot).collect();
+        for i in waiting {
+            if self.disconnected.get(i).copied().unwrap_or(true) {
+                self.keep_holds.remove(&i);
+                continue;
+            }
+            match self.transports[i].gate_verdict() {
+                None => {}
+                Some(Ok(())) => {
+                    log::info!("Slot {i}: the Keep's gate let the join in");
+                    if let Some(hold) = self.keep_holds.get_mut(&i) {
+                        hold.admitted = true;
+                        let packet = hold.packet.clone();
+                        self.inbound[i].push_front(packet);
+                    }
+                }
+                Some(Err(reason)) => {
+                    log::info!("Slot {i}: the Keep's gate refused the join: {reason}");
+                    self.keep_holds.remove(&i);
+                    let _ = self.release_slot(i, Some(&reason));
+                }
+            }
+        }
+    }
+
+    /// `--keep-world`: the identity verified for slot `i`'s held join, if the
+    /// Keep's gate has let it in (taken: the hold ends here).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn take_keep_admission(&mut self, i: usize) -> Option<JoinIdentity> {
+        if !self.keep_holds.get(&i).is_some_and(|hold| hold.admitted) {
+            return None;
+        }
+        self.keep_holds.remove(&i).map(|hold| hold.identity)
+    }
+
+    /// `--keep-world`: whether slot `i`'s join is held, waiting for the gate.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn keep_hold_waiting(&self, i: usize) -> bool {
+        self.keep_holds.get(&i).is_some_and(|hold| !hold.admitted)
     }
 
     /// Where a just-started Fray room stands. Never blocks: read it once a
@@ -2092,6 +2199,9 @@ impl HostedServer {
         if self.disconnected.get(i).copied().unwrap_or(true) {
             return None;
         }
+        // `--keep-world`: a join held for the Keep's gate goes with its slot.
+        #[cfg(not(target_arch = "wasm32"))]
+        self.keep_holds.remove(&i);
         if self.handshake_done[i] && (!self.lends_host_world() || self.server.lent) { self.settle_leaving_life(i); }
         if self.handshake_done[i] { self.note_strict_departure(i); }
         if self.handshake_done[i] && let Err(e) = self.server.save_joiner(i) { log::error!("Joiner leave save failed: {e}"); }
@@ -4124,6 +4234,11 @@ impl HostedServer {
             self.handover_overflow_kick(j);
         }
         self.accept_new_remote_connections();
+        // `--keep-world` only (no holds otherwise): the Keep's gate answers.
+        #[cfg(not(target_arch = "wasm32"))]
+        if !self.keep_holds.is_empty() {
+            self.take_keep_gate_answers();
+        }
         let closed_before_fill = self.process_inbound_packets();
         self.reap_slots(&closed_before_fill);
         self.server.tick();
@@ -4276,6 +4391,8 @@ impl HostedServer {
                 self.transports.len() - 1
             }
         };
+        // `--keep-world`: no hold outlives its connection.
+        self.keep_holds.remove(&slot);
 
         // Phase 4: issue a fresh per-connection challenge and push it
         // immediately. No origin rides with it (v63): the client builds the
@@ -4417,6 +4534,17 @@ impl HostedServer {
                     continue;
                 }
             };
+            // `--keep-world` — a join held for the Keep's gate: nothing it sent
+            // after its JoinRequest is read until the gate answers (it waits in
+            // the queue, bounded as ever). A joiner gone meanwhile is let go.
+            #[cfg(not(target_arch = "wasm32"))]
+            if self.keep_hold_waiting(i) {
+                if closed_before_fill[i] || self.transports[i].is_closed() {
+                    log::info!("Slot {i}: left while its join waited for the Keep's gate");
+                    let _ = self.release_slot(i, None);
+                }
+                continue;
+            }
             // FU3 — a client catching up on a stall gets a bigger read budget
             // this tick (chosen once, from what waits after the fill). FU4a
             // (M2) — not one whose edit queue is full: no honest client is.
@@ -4660,21 +4788,54 @@ impl HostedServer {
                                 .filter(|s| !s.is_empty())
                                 .collect();
                             let present_refs: Vec<&str> = present.iter().map(String::as_str).collect();
-                            match resolve_join_identity(
-                                i,
-                                &req,
-                                self.require_signin,
-                                &mut self.challenges,
-                                &expected_origin,
-                                &present_refs,
-                                &self.whitelist,
-                                &self.blocklist,
-                                // T2-8: the host's own contacts book names a known
-                                // joiner. Read per verified join (rare), never
-                                // cached — a Signet sync can change it mid-session.
-                                crate::contacts::load_local_book,
-                            ) {
+                            // `--keep-world` — a join the Keep's gate has let in
+                            // was verified when it first came (its challenge is
+                            // spent): it goes on with that identity.
+                            let admitted = self.take_keep_admission(i);
+                            let gate_said_yes = admitted.is_some();
+                            let verdict = match admitted {
+                                Some(identity) => Ok(identity),
+                                None => resolve_join_identity(
+                                    i,
+                                    &req,
+                                    self.require_signin,
+                                    &mut self.challenges,
+                                    &expected_origin,
+                                    &present_refs,
+                                    &self.whitelist,
+                                    &self.blocklist,
+                                    // T2-8: the host's own contacts book names a known
+                                    // joiner. Read per verified join (rare), never
+                                    // cached — a Signet sync can change it mid-session.
+                                    crate::contacts::load_local_book,
+                                ),
+                            };
+                            match verdict {
                                 Ok(id) => {
+                                    // `--keep-world` — the Keep decides who
+                                    // plays. The join verified; now its persona
+                                    // goes to the Keep's gate, and the slot is
+                                    // held (sent nothing: no JoinAccept, no world)
+                                    // until the gate answers. Nothing about the
+                                    // slot changes before then, so a refusal
+                                    // leaves no trace (and evicts no twin). A
+                                    // join with no verified persona is refused
+                                    // before any question.
+                                    if self.keep_world && !gate_said_yes {
+                                        let Some(persona) = id.pubkey else {
+                                            log::warn!("Refusing slot {i}: a Keep world seats signed-in players only");
+                                            let _ = self.release_slot(i, Some("A signed-in player is needed."));
+                                            break;
+                                        };
+                                        if !self.transports[i].ask_gate(&persona) {
+                                            log::warn!("Refusing slot {i}: its connection cannot ask the Keep's gate");
+                                            let _ = self.release_slot(i, Some("This world could not check your place."));
+                                            break;
+                                        }
+                                        log::info!("Slot {i}: join verified; waiting for the Keep's gate");
+                                        self.keep_holds.insert(i, KeepHold { packet: packet.clone(), identity: id, admitted: false });
+                                        break;
+                                    }
                                     // One seat per verified identity. Without
                                     // a channel binding (WS) a relayed
                                     // signature can't be told from a real
@@ -5028,6 +5189,15 @@ impl HostedServer {
                                 &suggest,
                             );
                             self.transports[i].send_to_client(&s);
+                        }
+
+                        // `--keep-world` — the player is in: the Keep lists
+                        // them under the persona its gate let in.
+                        #[cfg(not(target_arch = "wasm32"))]
+                        if self.keep_world
+                            && let Some(persona) = self.server.players[i].verified_pubkey
+                        {
+                            self.transports[i].seated(&persona, &join_name);
                         }
 
                         // Queue a join-event broadcast for every other
@@ -7648,6 +7818,19 @@ struct JoinIdentity {
     display_name: String,
     /// Verified Signet pubkey, or `None` for a guest join on an open server.
     pubkey: Option<[u8; 32]>,
+}
+
+/// `--keep-world`: a join held for the home Keep's gate
+/// (`HostedServer::keep_holds`).
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+struct KeepHold {
+    /// The `JoinRequest` packet, read again once the gate lets it in.
+    packet: transport::Packet,
+    /// What verifying it found (its challenge is spent).
+    identity: JoinIdentity,
+    /// The gate has said yes; the packet waits at the front of the queue.
+    admitted: bool,
 }
 
 /// Phase 4 join-identity policy (the layer above the crypto in

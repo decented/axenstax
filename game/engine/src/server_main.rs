@@ -768,7 +768,7 @@ pub fn run_show_connect(args: &[String]) {
 ///   repair rolled on a secret that died with it, and the veins moved once).
 /// - It has none (saved before per-world secrets): write back this run's,
 ///   so the veins stay put across restarts.
-fn settle_pop_secret(world: &str, server: &mut crate::server::GameServer) {
+pub(crate) fn settle_pop_secret(world: &str, server: &mut crate::server::GameServer) {
     let mut meta = match crate::save::try_load_world_meta(world) {
         Ok(meta) => meta,
         Err(e) => {

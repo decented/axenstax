@@ -123,7 +123,11 @@ pub fn init() {
 /// `/`, which is not writable. There is also nothing to migrate: no pre-data-dir
 /// APK ever shipped. Private storage needs no permission and is removed on
 /// uninstall, which is the right lifetime for saves.
-#[cfg(target_os = "android")]
+///
+/// `--keep-world` (`keep_world::run`) uses it too: a Keep's world keeps the
+/// engine's state inside the Keep's data, beside its worlds, with nothing
+/// migrated from the current directory and nothing written under `$HOME`.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn init_at(root: PathBuf) {
     if let Err(e) = std::fs::create_dir_all(&root) {
         log::warn!("could not create data dir {}: {e}", root.display());

@@ -471,6 +471,12 @@ mod ws_transport_web;
 // creates a window/renderer, so it runs on a GPU-less Docker host.
 #[cfg(not(target_arch = "wasm32"))]
 mod server_main;
+// `--keep-world`: the world of a home Keep, run as its child process and spoken
+// to over stdin/stdout only (`keep_pipe`). Native-only; opens no socket.
+#[cfg(not(target_arch = "wasm32"))]
+mod keep_pipe;
+#[cfg(not(target_arch = "wasm32"))]
+mod keep_world;
 // Heartwood-backed server identity: delegated runtime key authorised by an
 // operator's NIP-46 bunker. Native-only (uses `nostr`/`signet-nip46-client`).
 #[cfg(not(target_arch = "wasm32"))]
@@ -3053,6 +3059,17 @@ impl ApplicationHandler for App {
 pub fn run() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .init();
+
+    // `--keep-world`: a home Keep's world. Dispatched before anything below
+    // runs: it fixes its own data root inside the Keep's data (no migration of
+    // the current directory, nothing under $HOME) and starts none of the
+    // client's boot services. It never returns.
+    {
+        let args: Vec<String> = std::env::args().collect();
+        if args.iter().any(|a| a == "--keep-world") {
+            keep_world::run(&args);
+        }
+    }
 
     // Offline-first identity (login contract, Decision 2): load the cached Signet
     // identity with ZERO network, so who-you-are is known before any connection.
