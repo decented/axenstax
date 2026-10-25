@@ -69,7 +69,7 @@ use std::io::{self, Read, Write};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::network::MAX_FRAME_LEN;
 use crate::protocol;
@@ -313,53 +313,51 @@ enum Outgoing {
 }
 
 /// What may wait in the writer's queue: 32 MiB, as the Keep's own bound on what
-/// it holds for this child. A frame that finds the queue at or over this is
-/// dropped, so memory stays bounded while the Keep is not reading.
+/// it holds for this child. A frame that would take the queue past this is not
+/// queued, and the server stops ([`PipeOut::overflowed`]): the Keep has stopped
+/// reading, and no frame is ever dropped while the server carries on.
 pub const OUT_QUEUE_CAP: usize = 32 << 20;
-/// How long the queue may stay over [`OUT_QUEUE_CAP`] before the loop is told
-/// the Keep has stopped reading (`PipeOut::stalled`): as the Keep's own wait.
-pub const OUT_STALL: Duration = Duration::from_secs(30);
 
-/// What the senders and the writer share: the bytes waiting, and since when
-/// the queue has been full.
+/// What the senders and the writer share: the bytes waiting, and whether the
+/// cap was crossed.
 struct OutQueue {
     cap: usize,
-    stall: Duration,
     /// Bytes of the frames queued and not yet written.
     queued: AtomicUsize,
-    /// When a frame was first dropped for a full queue, until the writer next
-    /// brings the queue back under the cap.
-    over_since: Mutex<Option<Instant>>,
+    /// A frame would have taken the queue past `cap`. Never reset: the server
+    /// is stopping.
+    overflowed: AtomicBool,
 }
 
 impl OutQueue {
-    /// Make room for a frame of `len` bytes: `false` if the queue is full (the
-    /// frame is dropped). The frame that crosses the cap is still taken, so
-    /// the queue holds at most the cap plus one frame.
+    /// Make room for a frame of `len` bytes: `false` if it would take the queue
+    /// past the cap, which is then latched as overflowed (the frame, and every
+    /// one after it, is not queued; the server saves and exits).
     fn admit(&self, len: usize) -> bool {
-        let mut over_since = self.over_since.lock().unwrap_or_else(|e| e.into_inner());
-        if self.queued.load(Ordering::Relaxed) >= self.cap {
-            if over_since.is_none() {
-                log::warn!(
-                    "keep pipe: the Keep is not reading ({} bytes waiting); new frames are dropped",
-                    self.queued.load(Ordering::Relaxed)
-                );
-                *over_since = Some(Instant::now());
-            }
+        if self.overflowed.load(Ordering::Relaxed) {
             return false;
         }
-        self.queued.fetch_add(len, Ordering::Relaxed);
-        true
+        // One step: no sender can slip a frame in between the check and the add.
+        let taken = self
+            .queued
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |queued| {
+                queued.checked_add(len).filter(|total| *total <= self.cap)
+            })
+            .is_ok();
+        if !taken && !self.overflowed.swap(true, Ordering::Relaxed) {
+            log::error!(
+                "keep pipe: the Keep is not reading ({} bytes waiting, cap {}); the server will save and stop",
+                self.queued.load(Ordering::Relaxed),
+                self.cap
+            );
+        }
+        taken
     }
 
     /// The writer is done with a frame of `len` bytes (written, or discarded
     /// because stdout is gone).
     fn written(&self, len: usize) {
-        let mut over_since = self.over_since.lock().unwrap_or_else(|e| e.into_inner());
-        let left = self.queued.fetch_sub(len, Ordering::Relaxed).saturating_sub(len);
-        if left < self.cap {
-            *over_since = None;
-        }
+        self.queued.fetch_sub(len, Ordering::Relaxed);
     }
 }
 
@@ -372,8 +370,9 @@ pub struct PipeOut {
 }
 
 impl PipeOut {
-    /// Queue `message` for the Keep. Never blocks. Dropped, with a warning,
-    /// while the queue is full ([`OUT_QUEUE_CAP`]).
+    /// Queue `message` for the Keep. Never blocks. A message that would take
+    /// the queue past [`OUT_QUEUE_CAP`] is not queued, and [`Self::overflowed`]
+    /// is true from then on.
     pub fn send(&self, message: &FromChild) {
         match encode_from_child(message) {
             Ok(frame) => {
@@ -390,12 +389,11 @@ impl PipeOut {
         }
     }
 
-    /// The Keep has not read for [`OUT_STALL`]: the queue has been full, with
-    /// frames dropped, the whole time. The loop then saves the world and exits
-    /// non-zero, so the Keep can start it again.
-    pub fn stalled(&self) -> bool {
-        let over_since = self.queue.over_since.lock().unwrap_or_else(|e| e.into_inner());
-        over_since.is_some_and(|since| since.elapsed() >= self.queue.stall)
+    /// The Keep is not reading: a frame would have taken the queue past its
+    /// cap. The loop then saves the world and exits non-zero, so the Keep can
+    /// start it again.
+    pub fn overflowed(&self) -> bool {
+        self.queue.overflowed.load(Ordering::Relaxed)
     }
 
     /// Bytes of frames queued and not yet written.
@@ -419,14 +417,13 @@ impl PipeOut {
 /// bounds. The server itself starts it through [`spawn_writer_bounded`].
 #[cfg(test)]
 pub fn spawn_writer(out: impl Write + Send + 'static) -> io::Result<PipeOut> {
-    spawn_writer_bounded(out, OUT_QUEUE_CAP, OUT_STALL)
+    spawn_writer_bounded(out, OUT_QUEUE_CAP)
 }
 
-/// [`spawn_writer`] with its queue's cap and stall time given (short ones in
-/// tests).
-pub fn spawn_writer_bounded(out: impl Write + Send + 'static, cap: usize, stall: Duration) -> io::Result<PipeOut> {
+/// [`spawn_writer`] with its queue's cap given (a small one in tests).
+pub fn spawn_writer_bounded(out: impl Write + Send + 'static, cap: usize) -> io::Result<PipeOut> {
     let (tx, rx) = mpsc::channel();
-    let queue = Arc::new(OutQueue { cap, stall, queued: AtomicUsize::new(0), over_since: Mutex::new(None) });
+    let queue = Arc::new(OutQueue { cap, queued: AtomicUsize::new(0), overflowed: AtomicBool::new(false) });
     let writer_queue = queue.clone();
     thread::Builder::new().name("keep-pipe-out".into()).spawn(move || write_loop(out, rx, &writer_queue))?;
     Ok(PipeOut { tx, queue })

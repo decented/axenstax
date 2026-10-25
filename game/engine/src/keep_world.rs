@@ -223,20 +223,18 @@ enum Stop {
 /// exit status. `input` is stdin and `output` the pipe (a test's streams in
 /// tests); `world` is a folder under the worlds root, already locked.
 pub(crate) fn serve(world: &str, input: impl Read + Send + 'static, output: impl Write + Send + 'static, autosave: Duration) -> i32 {
-    serve_bounded(world, input, output, autosave, keep_pipe::OUT_QUEUE_CAP, keep_pipe::OUT_STALL)
+    serve_bounded(world, input, output, autosave, keep_pipe::OUT_QUEUE_CAP)
 }
 
-/// [`serve`] with the output queue's cap and stall time given (short ones in
-/// tests).
+/// [`serve`] with the output queue's cap given (a small one in tests).
 pub(crate) fn serve_bounded(
     world: &str,
     input: impl Read + Send + 'static,
     output: impl Write + Send + 'static,
     autosave: Duration,
     out_cap: usize,
-    out_stall: Duration,
 ) -> i32 {
-    let out = match keep_pipe::spawn_writer_bounded(output, out_cap, out_stall) {
+    let out = match keep_pipe::spawn_writer_bounded(output, out_cap) {
         Ok(out) => out,
         Err(e) => {
             log::error!("keep world: cannot start the pipe's writer: {e}");
@@ -291,7 +289,7 @@ pub(crate) fn serve_bounded(
             Ok(Control::Hello { .. }) => break Stop::Fatal("a second Hello".to_string()),
             Err(mpsc::TryRecvError::Empty) => {}
         }
-        if out.stalled() {
+        if out.overflowed() {
             break Stop::Stalled;
         }
         let now = Instant::now();

@@ -223,7 +223,7 @@ fn a_second_joined_for_a_live_peer_is_a_clean_exit_non_zero() {
 }
 
 #[test]
-fn a_keep_that_stops_reading_gets_the_world_saved_and_a_non_zero_exit_with_no_wait_to_flush() {
+fn a_keep_that_stops_reading_gets_the_world_saved_and_a_non_zero_exit_at_once_with_no_wait_to_flush() {
     let dir = scratch("stalled");
     let root = dir.join("axenstax").join("worlds");
     let (mut pipe, feed, capture) = TestPipe::new();
@@ -231,11 +231,11 @@ fn a_keep_that_stops_reading_gets_the_world_saved_and_a_non_zero_exit_with_no_wa
     let blocked = Blocked { gate, into: capture };
     let server = {
         let root = root.clone();
-        // A queue that holds a single frame and a 200 ms stall time (the real
-        // ones are 32 MiB and 30 s).
+        // A queue that holds 20 bytes: Ready (9) fits, nothing bigger does (the
+        // real cap is 32 MiB).
         std::thread::spawn(move || {
             crate::save::with_worlds_root(&root, || {
-                serve_bounded("keep", feed, blocked, Duration::from_secs(3_600), 1, Duration::from_millis(200))
+                serve_bounded("keep", feed, blocked, Duration::from_secs(3_600), 20)
             })
         })
     };
@@ -250,13 +250,14 @@ fn a_keep_that_stops_reading_gets_the_world_saved_and_a_non_zero_exit_with_no_wa
     }
     let at_ready = std::fs::metadata(&dat).unwrap().modified().unwrap();
     std::thread::sleep(Duration::from_millis(50));
-    // The server's challenge to this joiner finds the queue full and is dropped.
+    // The server's challenge to this joiner would take the queue past its cap:
+    // the server stops at once.
     pipe.send(&ToChild::Joined { peer: 5, binding: [5; 32] });
     assert_eq!(server.join().unwrap(), EXIT_STALLED);
     let at_stop = std::fs::metadata(&dat).unwrap().modified().unwrap();
     assert!(at_stop > at_ready, "the world was saved on the way out ({at_ready:?} -> {at_stop:?})");
     // The Keep reads again, much too late: all it gets is what was queued
-    // before the stall, with no Saved (it would have had to wait to say it).
+    // before the cap was crossed, with no Saved (it would have had to wait to say it).
     drop(open);
     let end = Instant::now() + Duration::from_secs(10);
     while pipe.all().is_empty() {

@@ -561,47 +561,43 @@ fn a_packet_over_the_frame_cap_closes_the_link_instead_of_vanishing() {
 }
 
 #[test]
-fn a_keep_that_stops_reading_bounds_the_queue_then_reports_a_stall_and_recovers_when_it_reads() {
+fn a_frame_that_would_cross_the_queue_cap_stops_the_server_and_none_is_dropped_before_that() {
     let (open, gate) = mpsc::channel::<()>();
     let into = Capture::default();
-    let out = spawn_writer_bounded(Blocked { gate, into: into.clone() }, 1_000, Duration::from_millis(150)).unwrap();
+    let out = spawn_writer_bounded(Blocked { gate, into: into.clone() }, 1_000).unwrap();
     let frame = FromChild::SendReliable { peer: 1, bytes: vec![7; 400] };
-    // A frame is 409 bytes: the queue takes frames until it holds the cap, so
-    // three go in (0, 409, 818 bytes held), and every later one is dropped.
-    for _ in 0..200 {
+    // A frame is 409 bytes, and the Keep reads none: two fit (818 bytes held).
+    out.send(&frame);
+    out.send(&frame);
+    assert_eq!(out.queued_bytes(), 2 * 409);
+    assert!(!out.overflowed(), "nothing was dropped, nothing is wrong yet");
+    // The third would take the queue past the cap: not queued, and the stop is
+    // reported at once (no timer), for the loop to save and exit.
+    out.send(&frame);
+    assert!(out.overflowed());
+    assert_eq!(out.queued_bytes(), 2 * 409, "the crossing frame was not queued");
+    // Memory stays bounded however much more the server says on its way out.
+    for _ in 0..100 {
         out.send(&frame);
     }
-    assert_eq!(out.queued_bytes(), 3 * 409, "memory is bounded, not 200 frames");
-    // Over the cap for the stall time, with nothing written: stalled.
-    let end = Instant::now() + Duration::from_secs(10);
-    while !out.stalled() {
-        assert!(Instant::now() < end, "never reported the stall");
-        thread::sleep(Duration::from_millis(5));
-    }
+    assert_eq!(out.queued_bytes(), 2 * 409);
     assert!(into.0.lock().unwrap().is_empty(), "nothing was written while blocked");
-    // The Keep reads again: the three queued frames are written, the queue is
-    // under the cap, the stall is over, and new frames go out.
+    // Late, the Keep reads: it gets exactly the two frames that were accepted.
     drop(open);
     assert!(out.flush(Duration::from_secs(10)));
-    assert!(!out.stalled());
-    assert_eq!(out.queued_bytes(), 0);
-    out.send(&FromChild::Saved { ok: true });
-    assert!(out.flush(Duration::from_secs(10)));
-    let written = decode_all(&into.0.lock().unwrap());
-    assert_eq!(written.len(), 4, "the three queued, then the new one: {written:?}");
-    assert_eq!(written[3], FromChild::Saved { ok: true });
+    assert_eq!(decode_all(&into.0.lock().unwrap()), vec![frame.clone(), frame]);
+    assert!(out.overflowed(), "once over, always over");
 }
 
 #[test]
-fn a_queue_that_keeps_draining_is_never_reported_as_stalled() {
-    // Under the cap nothing is dropped and there is no stall, however long.
-    let capture = Capture::default();
-    let out = spawn_writer_bounded(capture, 1_000_000, Duration::ZERO).unwrap();
+fn a_queue_that_keeps_draining_never_overflows_and_a_frame_exactly_filling_it_fits() {
+    let out = spawn_writer_bounded(Capture::default(), 409).unwrap();
+    let frame = FromChild::SendReliable { peer: 1, bytes: vec![1; 400] };
     for _ in 0..100 {
-        out.send(&FromChild::SendReliable { peer: 1, bytes: vec![1; 400] });
-        assert!(!out.stalled());
+        out.send(&frame);
+        assert!(out.flush(Duration::from_secs(10)));
+        assert!(!out.overflowed());
     }
-    assert!(out.flush(Duration::from_secs(10)));
     assert_eq!(out.queued_bytes(), 0);
 }
 
