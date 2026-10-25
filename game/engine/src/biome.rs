@@ -205,6 +205,8 @@ pub struct BiomeGenerator {
     /// The v3 terrain (v4 shares it, with its cave noise built); `Some`
     /// exactly when `generator` is `V3` or `V4`.
     v3: Option<Box<crate::worldgen_v3::Terrain>>,
+    /// The world spawn column, searched once (`spawn_search`).
+    pub(crate) spawn_search: std::sync::OnceLock<crate::spawn_search::SpawnColumn>,
 }
 
 impl BiomeGenerator {
@@ -224,6 +226,7 @@ impl BiomeGenerator {
                 Generator::V3 => Some(Box::new(crate::worldgen_v3::Terrain::new(seed))),
                 Generator::V4 => Some(Box::new(crate::worldgen_v3::Terrain::new_v4(seed))),
             },
+            spawn_search: std::sync::OnceLock::new(),
         }
     }
 
