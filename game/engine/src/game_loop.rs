@@ -9447,7 +9447,7 @@ impl super::GameState {
                 // A Keep not in My Keeps asks first. See `keeps::route_join`.
                 #[cfg(not(target_arch = "wasm32"))]
                 crate::menu::MenuAction::JoinGame(text) if crate::keeps::is_keep_text(&text) => {
-                    let signed_in = crate::signet::native_signer::load_identity().npub().is_some();
+                    let signed_in = crate::keeps::signed_in();
                     let saved = crate::keeps::load_list(&crate::keeps::path());
                     let is_saved = |key: &[u8; 32]| fray_keep::keeps::contains(&saved, &fray_keep::hex_encode(key));
                     match crate::keeps::route_join(&text, signed_in, is_saved) {
@@ -9471,7 +9471,7 @@ impl super::GameState {
                 // checked again here: a list row has not been through `route_join`.
                 #[cfg(not(target_arch = "wasm32"))]
                 crate::menu::MenuAction::JoinKeep(invite) => {
-                    if crate::signet::native_signer::load_identity().npub().is_none() {
+                    if !crate::keeps::signed_in() {
                         menu_state.notice = Some(crate::keeps::SIGN_IN_FIRST.to_string());
                     } else {
                         let join = crate::fray_play::PendingJoin::invite(&invite, &self.graphics.online_relays);

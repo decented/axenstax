@@ -27,8 +27,10 @@ pub const LINK_PREFIX: &str = "axenstax://keep/";
 /// The saved Keeps' file, in the data root beside `my_servers.json`.
 pub const FILE: &str = "keeps.json";
 
-/// Most passes the client holds before the game saves them. A Keep sends one.
-pub const MAX_HELD_PASSES: usize = 4;
+/// Most passes one connection to a Keep may have accepted, for the life of the
+/// connection. A Keep sends one; a host reached by room code could send a stream, each
+/// a new secret, and every accepted pass is a write of `keeps.json` on the game thread.
+pub const MAX_PASSES_PER_CONNECTION: usize = 4;
 
 /// What Join Game says to a signed-out player who pasted a Keep link. A Keep's world
 /// refuses guests, so nothing is dialled.
@@ -56,9 +58,11 @@ pub const FORGET_CONFIRM: &str = "Forget this Keep? You'll need a new invite to 
 /// The heading of the block in the friends column (hidden while the list is empty).
 pub const MY_KEEPS: &str = "My Keeps";
 
-/// How a Keep is named before it has told us its own name: `Keep AB12CD`.
+/// How a Keep is named before it has told us its own name: the crate's spelling,
+/// `Keep ab12cd`, the same one My Keeps shows. The confirm, the joining notice and
+/// the failure sentences all use it.
 pub fn label(host_key: &[u8; 32]) -> String {
-    format!("Keep {}", fray_keep::keep_id(host_key))
+    fray_keep::display_name(None, host_key)
 }
 
 /// The saved-Keeps file.
@@ -76,6 +80,21 @@ pub fn load_list(path: &Path) -> Vec<Keep> {
             Vec::new()
         }
     }
+}
+
+/// Is the player signed in for a Keep? A Keep's world refuses guests, so this needs a stored
+/// Signet session as well as the cached npub: the cache alone can outlive a session that
+/// is gone or damaged, and a link would then be dialled only to be turned away after the
+/// Keep has seen the secret. A session file that cannot be read counts as no session.
+pub fn signed_in_with(identity: &Path, session: &Path) -> bool {
+    use crate::signet::native_signer::{load_identity_from, load_session_from};
+    load_identity_from(identity).npub().is_some() && matches!(load_session_from(session), Ok(Some(_)))
+}
+
+/// [`signed_in_with`] over the player's own files.
+pub fn signed_in() -> bool {
+    use crate::signet::native_signer::{identity_path, session_path};
+    signed_in_with(&identity_path(), &session_path())
 }
 
 /// Seconds since the Unix epoch.
@@ -158,7 +177,7 @@ pub enum Offer {
     Kept,
     /// Already held.
     Repeated,
-    /// Four are held already.
+    /// This connection has had four passes accepted already: dropped.
     Full,
     /// Names a Keep other than the one the link proved (or none was proved): dropped.
     OtherHost,
@@ -166,10 +185,18 @@ pub enum Offer {
     Unreadable,
 }
 
-/// Passes a Keep sent this connection, held until the game saves them in My Keeps.
+/// Passes a Keep sent this connection. One inbox lives as long as its connection: at
+/// most [`MAX_PASSES_PER_CONNECTION`] passes are accepted in all, whatever the game
+/// does between frames (taking the held ones does not reopen the count), so a host that
+/// streams passes costs at most that many saves of `keeps.json`.
 #[derive(Default)]
 pub struct PassInbox {
+    /// Accepted and not yet taken, to be saved.
     held: Vec<KeepPass>,
+    /// Every pass accepted on this connection, taken or not. Never emptied.
+    accepted: Vec<KeepPass>,
+    /// The drop after the cap has been logged (once: a stream must not flood the log).
+    full_logged: bool,
 }
 
 impl PassInbox {
@@ -186,13 +213,20 @@ impl PassInbox {
             log::warn!("[client] a Keep pass naming Keep {} was ignored: it is not the host this link proved", fray_keep::describe(&pass.host_key));
             return Offer::OtherHost;
         }
-        if self.held.contains(&pass) {
+        if self.accepted.contains(&pass) {
             Offer::Repeated
-        } else if self.held.len() >= MAX_HELD_PASSES {
-            log::warn!("[client] a Keep pass was dropped: {MAX_HELD_PASSES} are held already");
+        } else if self.accepted.len() >= MAX_PASSES_PER_CONNECTION {
+            if !self.full_logged {
+                self.full_logged = true;
+                log::warn!(
+                    "[client] Keep {} sent more than {MAX_PASSES_PER_CONNECTION} return passes on one connection; the rest are dropped",
+                    fray_keep::describe(&pass.host_key)
+                );
+            }
             Offer::Full
         } else {
             log::info!("[client] a return pass from Keep {} was received", fray_keep::describe(&pass.host_key));
+            self.accepted.push(pass.clone());
             self.held.push(pass);
             Offer::Kept
         }

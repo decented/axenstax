@@ -114,6 +114,9 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[path = "pick_block.rs"]
     mod pick_block;
+    #[cfg(not(target_arch = "wasm32"))]
+    #[path = "keep_join.rs"]
+    mod keep_join;
     use super::*;
 
     /// Point `AXENSTAX_WORLDS_DIR` at one pid-scoped temp dir shared by every

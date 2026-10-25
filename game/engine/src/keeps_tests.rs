@@ -3,7 +3,7 @@
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use super::*;
 use crate::protocol::PacketType;
@@ -198,17 +198,69 @@ fn passes_are_capped_at_four_and_a_repeat_is_ignored() {
         assert_eq!(inbox.offer(Some(HOST), &pass_payload(HOST, [n; 32])), Offer::Kept);
     }
     assert_eq!(inbox.offer(Some(HOST), &pass_payload(HOST, [9; 32])), Offer::Full);
-    assert_eq!(inbox.offer(Some(HOST), &pass_payload(HOST, [3; 32])), Offer::Repeated, "a held one is still a repeat when full");
-    assert_eq!(inbox.take().len(), MAX_HELD_PASSES);
+    assert_eq!(inbox.offer(Some(HOST), &pass_payload(HOST, [3; 32])), Offer::Repeated, "an accepted one is still a repeat when full");
+    assert_eq!(inbox.take().len(), MAX_PASSES_PER_CONNECTION);
     // A short or empty payload is not a pass.
     assert_eq!(inbox.offer(Some(HOST), &[1, 2, 3]), Offer::Unreadable);
     assert_eq!(inbox.offer(Some(HOST), &[]), Offer::Unreadable);
 }
 
+#[test]
+fn the_cap_is_for_the_life_of_the_connection_not_for_each_take() {
+    let mut inbox = PassInbox::default();
+    for n in 0..4u8 {
+        assert_eq!(inbox.offer(Some(HOST), &pass_payload(HOST, [n; 32])), Offer::Kept);
+    }
+    // The game takes what is held, as it does every frame. That does not reopen the count.
+    assert_eq!(inbox.take().len(), 4);
+    assert_eq!(inbox.offer(Some(HOST), &pass_payload(HOST, [4; 32])), Offer::Full);
+    assert_eq!(inbox.offer(Some(HOST), &pass_payload(HOST, [5; 32])), Offer::Full);
+    assert!(inbox.take().is_empty(), "nothing past the cap is held");
+    // One already accepted and saved is a repeat, not a new write.
+    assert_eq!(inbox.offer(Some(HOST), &pass_payload(HOST, [2; 32])), Offer::Repeated);
+    assert!(inbox.take().is_empty());
+}
+
+#[test]
+fn a_host_that_streams_passes_across_frames_is_saved_at_most_four_times() {
+    // Two new secrets a frame for twenty frames, the game settling each frame as it does in play.
+    let stream = |queue: &Mutex<VecDeque<Packet>>, frame: u8| {
+        for n in 0..2u8 {
+            queue.lock().unwrap().push_back(pass_packet(HOST, [frame * 2 + n + 1; 32]));
+        }
+    };
+
+    // Counted at the client: four passes over the whole connection, however many frames.
+    let (mut rc, queue) = client_fed(Some(ProvenHost { key: HOST, name: "Ada's Keep".into() }), vec![]);
+    let mut taken = 0;
+    for frame in 0..20u8 {
+        stream(&queue, frame);
+        rc.poll();
+        taken += rc.take_keep_passes().len();
+    }
+    assert_eq!(taken, MAX_PASSES_PER_CONNECTION);
+
+    // And at the file, through `settle`: secrets 1 and 2 arrive on frame 0, 3 and 4 on frame 1,
+    // and the file is last written on frame 1 with the fourth. Nothing later reached it.
+    let dir = Dir::new("stream");
+    let path = dir.file();
+    let (mut rc, queue) = client_fed(Some(ProvenHost { key: HOST, name: "Ada's Keep".into() }), vec![]);
+    let mut pending: Option<Invite> = None;
+    for frame in 0..20u8 {
+        stream(&queue, frame);
+        rc.poll();
+        settle(&mut rc, &mut pending, &path, 1_000 + u64::from(frame));
+    }
+    let list = load_list(&path);
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].keys(), Some((HOST, [4; 32])), "the fourth accepted secret is the last one saved");
+    assert_eq!(list[0].last_joined, 1_001, "written on the frame the fourth arrived and never again");
+}
+
 /// A transport that hands a `RemoteClient` the packets it is given and names the host it proved.
 struct Proved {
     host: Option<ProvenHost>,
-    incoming: Mutex<VecDeque<Packet>>,
+    incoming: Arc<Mutex<VecDeque<Packet>>>,
 }
 
 impl ClientTransport for Proved {
@@ -222,8 +274,15 @@ impl ClientTransport for Proved {
 }
 
 fn client(host: Option<ProvenHost>, packets: Vec<Packet>) -> RemoteClient {
-    let transport = Proved { host, incoming: Mutex::new(packets.into()) };
-    RemoteClient::from_transport(Box::new(transport), crate::remote_client::build_join_request_guest("Player", 0), None)
+    client_fed(host, packets).0
+}
+
+/// A client, and the queue its transport reads, for a test that sends more packets later.
+fn client_fed(host: Option<ProvenHost>, packets: Vec<Packet>) -> (RemoteClient, Arc<Mutex<VecDeque<Packet>>>) {
+    let incoming = Arc::new(Mutex::new(VecDeque::from(packets)));
+    let transport = Proved { host, incoming: incoming.clone() };
+    let rc = RemoteClient::from_transport(Box::new(transport), crate::remote_client::build_join_request_guest("Player", 0), None);
+    (rc, incoming)
 }
 
 fn pass_packet(host_key: [u8; 32], secret: [u8; 32]) -> Packet {
@@ -381,11 +440,51 @@ fn forget_needs_a_second_tap_on_the_same_keep() {
 #[test]
 fn a_keep_that_does_not_answer_or_will_not_let_us_in_is_one_plain_sentence() {
     for reason in [FailReason::NoAnswer, FailReason::NotAdmitted, FailReason::NoLinkAnswer] {
-        assert_eq!(invite_failure_text(&reason, "Keep AB12CD"), UNREACHABLE, "{reason:?}");
+        assert_eq!(invite_failure_text(&reason, "Keep ab12cd"), UNREACHABLE, "{reason:?}");
     }
     // Anything else keeps its own words, with the Keep named.
-    let said = invite_failure_text(&FailReason::VersionMismatch, "Keep AB12CD");
-    assert!(said.starts_with("Couldn't join Keep AB12CD:") && said.contains("different version"), "{said}");
+    let said = invite_failure_text(&FailReason::VersionMismatch, "Keep ab12cd");
+    assert!(said.starts_with("Couldn't join Keep ab12cd:") && said.contains("different version"), "{said}");
     assert!(!UNREACHABLE.contains("code"), "a Keep is never called a missing room code");
-    assert_eq!(label(&HOST), "Keep ABABAB");
+}
+
+#[test]
+fn a_nameless_keep_has_one_spelling_everywhere() {
+    // The confirm, the joining notice and the failure sentences use `label`; My Keeps shows a
+    // Keep with no name by the crate's `display_name`. They are the same text.
+    assert_eq!(label(&HOST), "Keep ababab");
+    assert_eq!(label(&HOST), fray_keep::display_name(None, &HOST));
+    let list = vec![Keep::new(&HOST, &SECRET, None, 0)];
+    assert_eq!(rows(&list, 10)[0].name, label(&HOST), "My Keeps");
+}
+
+// ─── Signed in: a stored session as well as the cached npub ──────────────────
+
+#[test]
+fn signed_in_needs_a_stored_session_as_well_as_the_cached_identity() {
+    use crate::signet::native_signer::{cache_identity_to, clear_session_at, save_session_to};
+    use signet_nip46_client::PersistedSession;
+    let dir = Dir::new("signed-in");
+    let identity = dir.0.join("signet_identity.json");
+    let session = dir.0.join("signet_session.json");
+    let stored = PersistedSession {
+        app_secret_key: "a".repeat(64),
+        bunker_uri: "bunker://79dff8f82963424e0bb02708a22e44b4980893e3a4be0fa3cb60a43b946764e3?relay=wss://relay.example.org".to_string(),
+    };
+
+    assert!(!signed_in_with(&identity, &session), "neither file");
+    cache_identity_to(&identity, &"1".repeat(64)).unwrap();
+    assert!(!signed_in_with(&identity, &session), "the cached npub alone is not a session");
+    save_session_to(&session, &stored).unwrap();
+    assert!(signed_in_with(&identity, &session), "both");
+    // A session file that is damaged is no session.
+    std::fs::write(&session, b"{ torn").unwrap();
+    assert!(!signed_in_with(&identity, &session), "a damaged session");
+    save_session_to(&session, &stored).unwrap();
+    assert!(signed_in_with(&identity, &session));
+    // A session with no cached identity is not signed in either (nothing to name the player by).
+    std::fs::remove_file(&identity).unwrap();
+    assert!(!signed_in_with(&identity, &session), "the session alone");
+    clear_session_at(&session).unwrap();
+    assert!(!signed_in_with(&identity, &session));
 }
