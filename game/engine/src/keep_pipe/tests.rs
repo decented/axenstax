@@ -19,6 +19,7 @@ pub(crate) fn encode_to_child(message: &ToChild) -> Vec<u8> {
             frame(GATE_ANSWER, &[&peer.to_le_bytes(), &[u8::from(*ok)], reason.as_bytes()])
         }
         ToChild::Shutdown => frame(SHUTDOWN, &[]),
+        ToChild::Pass { peer, host_key, secret } => frame(PASS, &[&peer.to_le_bytes(), host_key, secret]),
     };
     framed.expect("a test frame fits")
 }
@@ -28,7 +29,11 @@ pub(crate) fn decode_from_child(body: &[u8]) -> Result<FromChild, FrameError> {
     let (&tag, payload) = body.split_first().ok_or(FrameError::BadLength(0))?;
     let mut c = Cursor { tag, rest: payload };
     let message = match tag {
-        READY => FromChild::Ready { protocol: c.u32()? },
+        READY => {
+            let protocol = c.u32()?;
+            let pipe = if c.rest.is_empty() { 1 } else { c.u16()? };
+            FromChild::Ready { protocol, pipe }
+        }
         SEND_RELIABLE => FromChild::SendReliable { peer: c.u32()?, bytes: c.bytes() },
         DISCONNECT => FromChild::Disconnect { peer: c.u32()?, reason: c.text()? },
         GATE_ASK => FromChild::GateAsk { peer: c.u32()?, persona: c.key()? },
@@ -205,11 +210,58 @@ fn a_joined_frame_has_the_exact_bytes_of_the_plan() {
     assert_eq!(encode_to_child(&ToChild::Joined { peer: PEER, binding: [9; 32] }), golden);
     assert_eq!(decode_one(&golden).unwrap(), Some(ToChild::Joined { peer: PEER, binding: [9; 32] }));
     // And the other way: Ready, Saved and GateAsk as the Keep reads them.
-    assert_eq!(encode_from_child(&FromChild::Ready { protocol: 95 }).unwrap(), vec![5, 0, 0, 0, 64, 95, 0, 0, 0]);
+    assert_eq!(
+        encode_from_child(&FromChild::Ready { protocol: 95, pipe: PROTO }).unwrap(),
+        vec![7, 0, 0, 0, 64, 95, 0, 0, 0, 2, 0]
+    );
+    // A server of protocol 1 said nothing more: the bytes an older Keep reads.
+    assert_eq!(
+        encode_from_child(&FromChild::Ready { protocol: 95, pipe: 1 }).unwrap(),
+        vec![5, 0, 0, 0, 64, 95, 0, 0, 0]
+    );
     assert_eq!(encode_from_child(&FromChild::Saved { ok: true }).unwrap(), vec![2, 0, 0, 0, 71, 1]);
     let mut ask = vec![37, 0, 0, 0, 68, 0x01, 0x02, 0x03, 0x04];
     ask.extend_from_slice(&[7; 32]);
     assert_eq!(encode_from_child(&FromChild::GateAsk { peer: PEER, persona: [7; 32] }).unwrap(), ask);
+}
+
+/// The Pass frame as Ingle's side of the pipe asserts it, byte for byte: the same string
+/// is in both repos' tests.
+const PASS_VECTOR_HEX: &str = "450000000801020304000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f";
+
+fn unhex(text: &str) -> Vec<u8> {
+    (0..text.len()).step_by(2).map(|i| u8::from_str_radix(&text[i..i + 2], 16).unwrap()).collect()
+}
+
+#[test]
+fn the_pass_frame_is_the_shared_vector_and_reads_back_and_hides_its_secret() {
+    let host_key: [u8; 32] = std::array::from_fn(|i| i as u8);
+    let secret: [u8; 32] = std::array::from_fn(|i| 32 + i as u8);
+    let message = ToChild::Pass { peer: PEER, host_key, secret };
+    let bytes = encode_to_child(&message);
+    assert_eq!(bytes, unhex(PASS_VECTOR_HEX));
+    assert_eq!(decode_one(&bytes).unwrap(), Some(message));
+    // Short and long are refused.
+    assert!(matches!(decode_to_child(&bytes[4..bytes.len() - 1]), Err(FrameError::Short { tag: 8 })));
+    let mut long = bytes[4..].to_vec();
+    long.push(0);
+    assert!(matches!(decode_to_child(&long), Err(FrameError::Trailing { tag: 8 })));
+    let shown = format!("{:?} {:#?}", ToChild::Pass { peer: 7, host_key: [0x11; 32], secret: [0x9e; 32] }, ToChild::Pass { peer: 7, host_key: [0x11; 32], secret: [0x9e; 32] });
+    assert!(!shown.contains("158") && shown.contains("hidden"), "{shown}");
+}
+
+#[test]
+fn a_pass_for_a_peer_that_is_not_here_or_not_seated_is_ignored_and_says_nothing_to_the_keep() {
+    let input = stream(&[
+        hello(),
+        ToChild::Joined { peer: 1, binding: [1; 32] },
+        ToChild::Pass { peer: 1, host_key: [3; 32], secret: [4; 32] },
+        ToChild::Pass { peer: 9, host_key: [3; 32], secret: [4; 32] },
+    ]);
+    let (controls, joined, capture, out) = run_reader(&input, 1 << 20);
+    assert_eq!(controls, vec![Control::Hello { max_players: 8 }, Control::Ended]);
+    assert!(frames_of(&capture, &out).is_empty(), "no packet for a peer the server has not seated");
+    drop(joined);
 }
 
 #[test]
@@ -224,6 +276,7 @@ fn every_frame_to_the_server_decodes_as_it_was_sent() {
         ToChild::GateAnswer { peer: PEER, ok: true, reason: String::new() },
         ToChild::GateAnswer { peer: PEER, ok: false, reason: "No entry, \u{1f6ab}".into() },
         ToChild::Shutdown,
+        ToChild::Pass { peer: PEER, host_key: [5; 32], secret: [6; 32] },
     ];
     let bytes = stream(&messages);
     let mut input = &bytes[..];
@@ -273,7 +326,7 @@ fn a_fixed_size_frame_that_is_short_or_long_is_refused() {
 
 #[test]
 fn an_unknown_tag_a_bad_flag_or_bad_text_is_refused() {
-    for tag in [0u8, 8, 63, READY, SEND_RELIABLE, SAVED, 255] {
+    for tag in [0u8, 9, 63, READY, SEND_RELIABLE, SAVED, 255] {
         assert!(matches!(decode_to_child(&[tag, 0, 0, 0, 0]), Err(FrameError::UnknownTag(t)) if t == tag), "tag {tag}");
     }
     assert!(matches!(decode_to_child(&[GATE_ANSWER, 1, 0, 0, 0, 2]), Err(FrameError::BadFlag { tag: GATE_ANSWER })));
@@ -336,8 +389,15 @@ fn hello_must_come_first_once_and_in_this_protocol() {
     let (controls, joined, _, _) = run_reader(&stream(&[ToChild::Joined { peer: 1, binding: [0; 32] }]), 1 << 20);
     assert!(matches!(&controls[..], [Control::Fatal(why)] if why.contains("first frame must be Hello")), "{controls:?}");
     assert!(joined.is_empty());
-    let (controls, _, _, _) = run_reader(&stream(&[ToChild::Hello { proto: 2, max_players: 8 }]), 1 << 20);
-    assert!(matches!(&controls[..], [Control::Fatal(why)] if why.contains("protocol 2")), "{controls:?}");
+    let (controls, _, _, _) = run_reader(&stream(&[ToChild::Hello { proto: 3, max_players: 8 }]), 1 << 20);
+    assert!(matches!(&controls[..], [Control::Fatal(why)] if why.contains("protocol 3")), "{controls:?}");
+    let (controls, _, _, _) = run_reader(&stream(&[ToChild::Hello { proto: 0, max_players: 8 }]), 1 << 20);
+    assert!(matches!(&controls[..], [Control::Fatal(why)] if why.contains("protocol 0")), "{controls:?}");
+    // Both of the protocols this server speaks are accepted, as an older Keep says 1.
+    for proto in [1, 2] {
+        let (controls, _, _, _) = run_reader(&stream(&[ToChild::Hello { proto, max_players: 8 }]), 1 << 20);
+        assert_eq!(controls, vec![Control::Hello { max_players: 8 }, Control::Ended], "proto {proto}");
+    }
     let (controls, _, _, _) = run_reader(&stream(&[hello(), hello()]), 1 << 20);
     assert!(matches!(&controls[..], [Control::Hello { max_players: 8 }, Control::Fatal(why)] if why.contains("second Hello")));
     let (controls, _, _, _) = run_reader(&stream(&[hello(), ToChild::Shutdown]), 1 << 20);
@@ -604,7 +664,7 @@ fn a_queue_that_keeps_draining_never_overflows_and_a_frame_exactly_filling_it_fi
 #[test]
 fn a_closed_stdout_is_survived_and_reported_as_flushed() {
     let out = spawn_writer(Closed).unwrap();
-    out.send(&FromChild::Ready { protocol: 95 });
+    out.send(&FromChild::Ready { protocol: 95, pipe: PROTO });
     out.send(&FromChild::Saved { ok: true });
     assert!(out.flush(Duration::from_secs(5)), "the writer lives on, discarding");
 }

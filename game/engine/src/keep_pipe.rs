@@ -15,19 +15,27 @@
 //!
 //! | tag | frame        | payload                                          |
 //! |-----|--------------|--------------------------------------------------|
-//! | 1   | `Hello`      | `proto: u16` (1), `max_players: u8`              |
+//! | 1   | `Hello`      | `proto: u16` (1 or 2), `max_players: u8`          |
 //! | 2   | `Joined`     | `peer: u32`, `binding: [u8; 32]`                 |
 //! | 3   | `Reliable`   | `peer: u32`, `bytes` (to the end)                |
 //! | 4   | `Lossy`      | `peer: u32`, `bytes` (to the end)                |
 //! | 5   | `Left`       | `peer: u32`                                      |
 //! | 6   | `GateAnswer` | `peer: u32`, `ok: u8` (0 or 1), `reason` (UTF-8) |
 //! | 7   | `Shutdown`   | none                                             |
+//! | 8   | `Pass`       | `peer: u32`, `host_key: [u8; 32]`, `secret: [u8; 32]` |
+//!
+//! `Pass` (pipe protocol 2) is the Keep's return pass for a player who joined by
+//! room code. The server sends it to that peer as a [`protocol::PacketType::KeepPass`]
+//! packet (`KeepPass { host_key, secret }`), reliably, once the peer is seated (its
+//! join was accepted, so the pass follows the accept); for a peer that is not here or
+//! not seated it does nothing and logs the peer only. The secret is a bearer
+//! credential: it is never logged, and `Debug` of a `Pass` hides it.
 //!
 //! This server to the Keep (stdout):
 //!
 //! | tag | frame          | payload                                          |
 //! |-----|----------------|--------------------------------------------------|
-//! | 64  | `Ready`        | `protocol: u32` (the engine protocol)            |
+//! | 64  | `Ready`        | `protocol: u32` (the engine protocol), then `pipe: u16` (2) |
 //! | 65  | `SendReliable` | `peer: u32`, `bytes` (to the end)                |
 //! | 66  | `SendLossy`    | `peer: u32`, `bytes` (never sent: the game is reliable only) |
 //! | 67  | `Disconnect`   | `peer: u32`, `reason` (UTF-8)                    |
@@ -35,6 +43,14 @@
 //! | 69  | `Seated`       | `peer: u32`, `persona: [u8; 32]`, `name` (UTF-8) |
 //! | 70  | `Unseated`     | `peer: u32`                                      |
 //! | 71  | `Saved`        | `ok: u8` (0 or 1)                                |
+//!
+//! # Versions
+//!
+//! The Keep's `Hello` says protocol 1 (every Keep) or 2; this server accepts both
+//! ([`MIN_PROTO`] to [`PROTO`]). It says which it speaks by ending `Ready` with
+//! `pipe: 2` ([`PROTO`]); a Keep that never saw that number (an older one) reads a
+//! `Ready` of protocol 1 as it always did, and the Keep sends `Pass` only to a server
+//! that said 2.
 //!
 //! The decoder is strict: an unknown tag, a payload that is short, or longer
 //! than a frame of fixed size, text that is not UTF-8, a flag byte other than 0
@@ -77,8 +93,10 @@ use crate::transport::{Packet, ServerTransport, INBOUND_ENTRY_OVERHEAD, MAX_INBO
 
 /// The most a frame's length field may say: 1 MiB.
 pub const MAX_FRAME: usize = 1 << 20;
-/// The pipe protocol this server speaks (the Keep says its own in `Hello`).
-pub const PROTO: u16 = 1;
+/// The highest pipe protocol this server speaks, and what it says in `Ready`.
+pub const PROTO: u16 = 2;
+/// The lowest `Hello` protocol this server accepts.
+pub const MIN_PROTO: u16 = 1;
 
 const HELLO: u8 = 1;
 const JOINED: u8 = 2;
@@ -87,6 +105,7 @@ const LOSSY: u8 = 4;
 const LEFT: u8 = 5;
 const GATE_ANSWER: u8 = 6;
 const SHUTDOWN: u8 = 7;
+const PASS: u8 = 8;
 
 const READY: u8 = 64;
 const SEND_RELIABLE: u8 = 65;
@@ -102,8 +121,8 @@ const LET_GO: &str = "The world let this player go.";
 /// Told to a joiner past `Hello`'s `max_players`.
 pub const WORLD_FULL: &str = "This world is full.";
 
-/// A frame the Keep sends to this server.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// A frame the Keep sends to this server. `Debug` hides a `Pass`'s secret.
+#[derive(Clone, PartialEq, Eq)]
 pub enum ToChild {
     Hello { proto: u16, max_players: u8 },
     Joined { peer: u32, binding: [u8; 32] },
@@ -112,6 +131,38 @@ pub enum ToChild {
     Left { peer: u32 },
     GateAnswer { peer: u32, ok: bool, reason: String },
     Shutdown,
+    /// Protocol 2: the Keep's return pass for this peer.
+    Pass { peer: u32, host_key: [u8; 32], secret: [u8; 32] },
+}
+
+impl std::fmt::Debug for ToChild {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ToChild::Hello { proto, max_players } => {
+                f.debug_struct("Hello").field("proto", proto).field("max_players", max_players).finish()
+            }
+            ToChild::Joined { peer, binding } => {
+                f.debug_struct("Joined").field("peer", peer).field("binding", binding).finish()
+            }
+            ToChild::Reliable { peer, bytes } => {
+                f.debug_struct("Reliable").field("peer", peer).field("bytes", bytes).finish()
+            }
+            ToChild::Lossy { peer, bytes } => {
+                f.debug_struct("Lossy").field("peer", peer).field("bytes", bytes).finish()
+            }
+            ToChild::Left { peer } => f.debug_struct("Left").field("peer", peer).finish(),
+            ToChild::GateAnswer { peer, ok, reason } => {
+                f.debug_struct("GateAnswer").field("peer", peer).field("ok", ok).field("reason", reason).finish()
+            }
+            ToChild::Shutdown => f.write_str("Shutdown"),
+            ToChild::Pass { peer, host_key, .. } => f
+                .debug_struct("Pass")
+                .field("peer", peer)
+                .field("host_key", host_key)
+                .field("secret", &"<hidden>")
+                .finish(),
+        }
+    }
 }
 
 impl ToChild {
@@ -124,6 +175,7 @@ impl ToChild {
             ToChild::Left { .. } => "Left",
             ToChild::GateAnswer { .. } => "GateAnswer",
             ToChild::Shutdown => "Shutdown",
+            ToChild::Pass { .. } => "Pass",
         }
     }
 }
@@ -131,7 +183,8 @@ impl ToChild {
 /// A frame this server sends to the Keep. (`SendLossy`, tag 66, is never sent.)
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FromChild {
-    Ready { protocol: u32 },
+    /// `pipe` is the pipe protocol this server speaks ([`PROTO`]).
+    Ready { protocol: u32, pipe: u16 },
     SendReliable { peer: u32, bytes: Vec<u8> },
     Disconnect { peer: u32, reason: String },
     GateAsk { peer: u32, persona: [u8; 32] },
@@ -196,7 +249,10 @@ fn frame(tag: u8, payload: &[&[u8]]) -> Result<Vec<u8>, FrameError> {
 /// Encode a frame for the Keep: the length, the tag and the payload.
 pub fn encode_from_child(message: &FromChild) -> Result<Vec<u8>, FrameError> {
     match message {
-        FromChild::Ready { protocol } => frame(READY, &[&protocol.to_le_bytes()]),
+        FromChild::Ready { protocol, pipe } if *pipe >= 2 => {
+            frame(READY, &[&protocol.to_le_bytes(), &pipe.to_le_bytes()])
+        }
+        FromChild::Ready { protocol, .. } => frame(READY, &[&protocol.to_le_bytes()]),
         FromChild::SendReliable { peer, bytes } => frame(SEND_RELIABLE, &[&peer.to_le_bytes(), bytes]),
         FromChild::Disconnect { peer, reason } => frame(DISCONNECT, &[&peer.to_le_bytes(), reason.as_bytes()]),
         FromChild::GateAsk { peer, persona } => frame(GATE_ASK, &[&peer.to_le_bytes(), persona]),
@@ -272,6 +328,7 @@ pub fn decode_to_child(body: &[u8]) -> Result<ToChild, FrameError> {
         LEFT => ToChild::Left { peer: c.u32()? },
         GATE_ANSWER => ToChild::GateAnswer { peer: c.u32()?, ok: c.flag()?, reason: c.text()? },
         SHUTDOWN => ToChild::Shutdown,
+        PASS => ToChild::Pass { peer: c.u32()?, host_key: c.key()?, secret: c.key()? },
         other => return Err(FrameError::UnknownTag(other)),
     };
     c.end()?;
@@ -467,6 +524,10 @@ struct PeerShared {
     /// `Release` after the synthetic `Disconnect` is queued, read with
     /// `Acquire`: closed implies every packet the peer sent is readable.
     left: AtomicBool,
+    /// The server has seated this peer (its join was accepted and the Keep was told
+    /// `Seated`): a `Pass` is sent to it only from then on, so it follows the accept.
+    /// Also what `Unseated` is said for when the server lets go of the peer.
+    seated: AtomicBool,
     /// What the waiting packets are charged, as `InboundQueue` charges them.
     charged: AtomicUsize,
     gate: Mutex<GateState>,
@@ -537,6 +598,7 @@ fn peer_pair(peer: u32, binding: [u8; 32], out: PipeOut) -> (PeerSlot, PipeServe
     let (tx, rx) = mpsc::channel();
     let shared = Arc::new(PeerShared {
         left: AtomicBool::new(false),
+        seated: AtomicBool::new(false),
         charged: AtomicUsize::new(0),
         gate: Mutex::new(GateState::NotAsked),
     });
@@ -547,7 +609,6 @@ fn peer_pair(peer: u32, binding: [u8; 32], out: PipeOut) -> (PeerSlot, PipeServe
         shared: shared.clone(),
         out,
         reason: Mutex::new(None),
-        seated: AtomicBool::new(false),
         cut: AtomicBool::new(false),
     };
     (PeerSlot { tx, shared, over: false }, transport)
@@ -564,8 +625,6 @@ pub struct PipeServerTransport {
     /// The reason the server last refused this peer with (its `JoinReject`),
     /// told to the Keep with the `Disconnect`.
     reason: Mutex<Option<String>>,
-    /// Seated: `Unseated` is said when the server lets go of it.
-    seated: AtomicBool,
     /// This side has said `Disconnect` already (an over-long packet).
     cut: AtomicBool,
 }
@@ -645,7 +704,7 @@ impl ServerTransport for PipeServerTransport {
     }
 
     fn seated(&self, persona: &[u8; 32], name: &str) {
-        if !self.seated.swap(true, Ordering::Relaxed) {
+        if !self.shared.seated.swap(true, Ordering::AcqRel) {
             self.out.send(&FromChild::Seated { peer: self.peer, persona: *persona, name: name.to_string() });
         }
     }
@@ -655,7 +714,7 @@ impl Drop for PipeServerTransport {
     /// The server let go of this peer: say so to the Keep, which closes the
     /// link (a `Left` then follows, for a peer this server no longer holds).
     fn drop(&mut self) {
-        if self.seated.load(Ordering::Relaxed) {
+        if self.shared.seated.load(Ordering::Acquire) {
             self.out.send(&FromChild::Unseated { peer: self.peer });
         }
         if !self.shared.left.load(Ordering::Acquire) {
@@ -718,16 +777,18 @@ fn read_loop(
         };
         let Some(max) = max_players else {
             match message {
-                ToChild::Hello { proto: PROTO, max_players: 0 } => {
+                ToChild::Hello { proto, max_players: 0 } if (MIN_PROTO..=PROTO).contains(&proto) => {
                     break Control::Fatal("the Keep's Hello gives the world no seats (max_players is 0)".to_string());
                 }
-                ToChild::Hello { proto: PROTO, max_players: seats } => {
+                ToChild::Hello { proto, max_players: seats } if (MIN_PROTO..=PROTO).contains(&proto) => {
                     max_players = Some(usize::from(seats));
                     let _ = control.send(Control::Hello { max_players: seats });
                     continue;
                 }
                 ToChild::Hello { proto, .. } => {
-                    break Control::Fatal(format!("the Keep speaks pipe protocol {proto}; this server speaks {PROTO}"));
+                    break Control::Fatal(format!(
+                        "the Keep speaks pipe protocol {proto}; this server speaks {MIN_PROTO} to {PROTO}"
+                    ));
                 }
                 other => break Control::Fatal(format!("the first frame must be Hello, not {}", other.name())),
             }
@@ -766,6 +827,20 @@ fn read_loop(
                     slot.finish();
                 }
             }
+            ToChild::Pass { peer, host_key, secret } => match peers.get(&peer) {
+                // Seated: the join accept is already in the writer's queue, so the pass
+                // goes out after it. Never logged: the secret.
+                Some(slot) if slot.shared.seated.load(Ordering::Acquire) => {
+                    let packet = protocol::serialize_packet(
+                        protocol::PacketType::KeepPass,
+                        &protocol::KeepPass { host_key, secret },
+                    );
+                    out.send(&FromChild::SendReliable { peer, bytes: packet });
+                    log::info!("keep pipe: sent peer {peer} the Keep's return pass");
+                }
+                Some(_) => log::info!("keep pipe: a pass for peer {peer}, who is not seated, is ignored"),
+                None => log::info!("keep pipe: a pass for peer {peer}, who is not here, is ignored"),
+            },
             ToChild::GateAnswer { peer, ok, reason } => match peers.get(&peer) {
                 Some(slot) => slot.answer(peer, ok, reason),
                 None => log::info!("keep pipe: a gate answer for peer {peer}, who is not here, is ignored"),

@@ -115,7 +115,7 @@ fn hello_gets_ready_and_shutdown_saves_the_world_says_saved_and_exits_zero() {
     pipe.send(&ToChild::Hello { proto: PROTO, max_players: 8 });
     let mut seen = Vec::new();
     let ready = wait_for(&mut pipe, &mut seen, |f| matches!(f, FromChild::Ready { .. }));
-    assert_eq!(ready, FromChild::Ready { protocol: protocol::PROTOCOL_VERSION });
+    assert_eq!(ready, FromChild::Ready { protocol: protocol::PROTOCOL_VERSION, pipe: PROTO });
     assert_eq!(seen.len(), 1, "Ready is the first frame");
     // The new world was created and saved at tick 0, before Ready.
     let dat = world_dat(&root, "keep");
@@ -158,7 +158,7 @@ fn the_end_of_stdin_saves_and_exits_zero_and_a_restart_opens_the_same_world() {
 fn a_pipe_that_does_not_start_with_a_usable_hello_makes_serve_exit_non_zero_before_it_opens_the_world() {
     for first in [
         ToChild::Shutdown,
-        ToChild::Hello { proto: 2, max_players: 8 },
+        ToChild::Hello { proto: 3, max_players: 8 },
         ToChild::Hello { proto: PROTO, max_players: 0 },
     ] {
         let dir = scratch("nohello");
@@ -265,7 +265,7 @@ fn a_keep_that_stops_reading_gets_the_world_saved_and_a_non_zero_exit_at_once_wi
         std::thread::sleep(Duration::from_millis(5));
     }
     std::thread::sleep(Duration::from_millis(100));
-    assert_eq!(pipe.all(), vec![FromChild::Ready { protocol: protocol::PROTOCOL_VERSION }]);
+    assert_eq!(pipe.all(), vec![FromChild::Ready { protocol: protocol::PROTOCOL_VERSION, pipe: PROTO }]);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -487,6 +487,59 @@ fn a_held_join_is_sent_nothing_until_the_gate_says_yes_then_joins_and_is_seated(
     rig.tick_until(100, |f| matches!(f, FromChild::Unseated { peer: 2 }));
     let rest = rig.tick_for(5);
     assert!(!rig.frames.iter().any(|f| matches!(f, FromChild::Disconnect { peer: 2, .. })), "{rest:?}");
+}
+
+#[test]
+fn a_pass_frame_sends_a_keep_pass_to_a_seated_peer_after_its_accept_and_to_no_one_else() {
+    let mut rig = rig("pass");
+    let (ann, bea) = (keys(41), keys(42));
+    rig.seat(1, [0xa1; 32], &ann);
+    // Bea is connected and held at the gate: not seated. Peer 9 does not exist.
+    rig.join(2, [0xb2; 32], &bea, [0xb2; 32]);
+    rig.tick_until(100, |f| matches!(f, FromChild::GateAsk { peer: 2, .. }));
+    let (host_key, secret) = ([0x11; 32], [0x9e; 32]);
+    for peer in [2, 9, 1] {
+        rig.pipe.send(&ToChild::Pass { peer, host_key, secret });
+    }
+    // Ann's comes (it was last in the pipe, so the others were handled before it).
+    rig.tick_until(100, |f| keep_pass_to(f, 1).is_some());
+    rig.tick_for(30);
+    let passes: Vec<(u32, protocol::KeepPass)> = rig
+        .frames
+        .iter()
+        .filter_map(|f| {
+            let FromChild::SendReliable { peer, .. } = f else { return None };
+            keep_pass_to(f, *peer).map(|pass| (*peer, pass))
+        })
+        .collect();
+    assert_eq!(passes, vec![(1, protocol::KeepPass { host_key, secret })], "one pass, for the seated peer only");
+    // It is a reliable packet of exactly 1 + 64 bytes, tag 78.
+    let FromChild::SendReliable { bytes, .. } = rig.frames.iter().find(|f| keep_pass_to(f, 1).is_some()).unwrap() else {
+        unreachable!()
+    };
+    assert_eq!((bytes.len(), bytes[0]), (65, 78));
+    // And it follows Ann's join accept.
+    let accept = rig
+        .frames
+        .iter()
+        .position(|f| matches!(f, FromChild::SendReliable { peer: 1, bytes } if bytes[0] == PacketType::JoinAccept as u8))
+        .expect("Ann's accept");
+    let pass = rig.frames.iter().position(|f| keep_pass_to(f, 1).is_some()).unwrap();
+    assert!(accept < pass, "the pass comes after the accept ({accept} < {pass})");
+    // Bea was sent no pass of any kind while held.
+    assert!(!Rig::packets_to(&rig.frames, 2).contains(&PacketType::KeepPass));
+    // Seated later, a pass reaches her too.
+    rig.pipe.send(&ToChild::GateAnswer { peer: 2, ok: true, reason: String::new() });
+    rig.tick_until(100, |f| matches!(f, FromChild::Seated { peer: 2, .. }));
+    rig.pipe.send(&ToChild::Pass { peer: 2, host_key, secret });
+    rig.tick_until(100, |f| keep_pass_to(f, 2).is_some());
+}
+
+/// The `KeepPass` in `frame`, if it is one sent to `peer`.
+fn keep_pass_to(frame: &FromChild, peer: u32) -> Option<protocol::KeepPass> {
+    let FromChild::SendReliable { peer: p, bytes } = frame else { return None };
+    let (PacketType::KeepPass, payload) = protocol::deserialize_header(bytes)? else { return None };
+    (*p == peer).then(|| protocol::safe_deserialize::<protocol::KeepPass>(payload).ok())?
 }
 
 #[test]

@@ -164,6 +164,28 @@ pub enum PacketType {
     PackView = 75,
     QuestResult = 76,
     QuestView = 77,
+    /// Server → Client only: a home Keep's return pass (`KeepPass`), sent to a player
+    /// who joined by room code so that they can come back without it. Appended with no
+    /// `PROTOCOL_VERSION` bump: a client that does not know the tag drops the packet
+    /// (`deserialize_header` returns `None`, and the client's packet loop ignores it).
+    /// A server never acts on one a client sends.
+    KeepPass = 78,
+}
+
+/// The payload of [`PacketType::KeepPass`]: the Keep's runtime public key and the
+/// secret of a return pass bound to the player. Fixed size: 64 bytes after the tag
+/// (bincode writes each array as its bytes, with no length). The secret is a bearer
+/// credential, so `Debug` never shows it.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeepPass {
+    pub host_key: [u8; 32],
+    pub secret: [u8; 32],
+}
+
+impl std::fmt::Debug for KeepPass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KeepPass").field("host_key", &self.host_key).field("secret", &"<hidden>").finish()
+    }
 }
 
 // ─── Handshake ───────────────────────────────────────────────
@@ -2947,6 +2969,7 @@ pub fn deserialize_header(data: &[u8]) -> Option<(PacketType, &[u8])> {
         75 => PacketType::PackView,
         76 => PacketType::QuestResult,
         77 => PacketType::QuestView,
+        78 => PacketType::KeepPass,
         _ => return None,
     };
     Some((tag, &data[1..]))
@@ -4525,7 +4548,27 @@ mod tests {
         for (byte, tag) in [(72, PacketType::Handover), (73, PacketType::PersonalSync), (74, PacketType::PackResult), (75, PacketType::PackView), (76, PacketType::QuestResult), (77, PacketType::QuestView)] {
             assert_eq!(deserialize_header(&[byte, 0]).map(|(p, _)| p), Some(tag), "appended carrier {byte}");
         }
-        assert_eq!(deserialize_header(&[78, 0]), None, "no tag after the appended quest carriers");
+        assert_eq!(deserialize_header(&[78, 0]).map(|(p, _)| p), Some(PacketType::KeepPass), "the Keep's return pass");
+        assert_eq!(deserialize_header(&[79, 0]), None, "no tag after the Keep's return pass");
+    }
+
+    /// The Keep's return pass (tag 78): 64 bytes after the tag, host key then secret, and
+    /// `Debug` shows no secret. No `PROTOCOL_VERSION` bump goes with it.
+    #[test]
+    fn keep_pass_is_the_tag_then_the_host_key_then_the_secret_and_hides_its_secret() {
+        let pass = KeepPass { host_key: [0x11; 32], secret: [0x9e; 32] };
+        let bytes = serialize_packet(PacketType::KeepPass, &pass);
+        assert_eq!(bytes.len(), 1 + 64);
+        assert_eq!(bytes[0], 78);
+        assert_eq!(&bytes[1..33], &[0x11; 32]);
+        assert_eq!(&bytes[33..], &[0x9e; 32]);
+        let (tag, payload) = deserialize_header(&bytes).unwrap();
+        assert_eq!(tag, PacketType::KeepPass);
+        assert_eq!(safe_deserialize::<KeepPass>(payload).unwrap(), pass);
+        // Short or long is not a pass.
+        assert!(safe_deserialize::<KeepPass>(&bytes[1..64]).is_err());
+        let shown = format!("{pass:?} {pass:#?}");
+        assert!(!shown.contains("158") && shown.contains("hidden"), "{shown}");
     }
 
     /// C3b-1 (v77) — shared containers on the wire: `OpenContainer` (= 4)

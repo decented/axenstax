@@ -271,7 +271,7 @@ pub(crate) fn serve_bounded(
             return EXIT_WORLD;
         }
     };
-    out.send(&FromChild::Ready { protocol: crate::protocol::PROTOCOL_VERSION });
+    out.send(&FromChild::Ready { protocol: crate::protocol::PROTOCOL_VERSION, pipe: keep_pipe::PROTO });
     log::info!(
         "keep world '{world}' is ready: {max_players} players, engine protocol {}, no sockets of its own",
         crate::protocol::PROTOCOL_VERSION
