@@ -231,15 +231,7 @@ impl PendingJoin {
                 }
                 ClientEvent::Disconnected { reason } => {
                     self.handle = None;
-                    if self.invite && matches!(reason, DisconnectReason::Kicked) {
-                        return JoinPoll::Failed(crate::keeps::UNREACHABLE.to_string());
-                    }
-                    let why = match reason {
-                        DisconnectReason::Kicked => "the host turned us away".to_string(),
-                        DisconnectReason::Error(e) => e,
-                        _ => "the host left".to_string(),
-                    };
-                    return JoinPoll::Failed(self.failed(&why));
+                    return JoinPoll::Failed(self.disconnected(reason));
                 }
                 // The host sends nothing before seating us; never seen here.
                 // Dropped if it ever is, so say so.
@@ -249,6 +241,20 @@ impl PendingJoin {
             }
         }
         JoinPoll::Waiting
+    }
+
+    /// What the lobby says when the host closed the link before the join was seated. A Keep
+    /// that turns an invite join away says the same one sentence as a Keep that never answers.
+    fn disconnected(&self, reason: DisconnectReason) -> String {
+        if self.invite && matches!(reason, DisconnectReason::Kicked) {
+            return crate::keeps::UNREACHABLE.to_string();
+        }
+        let why = match reason {
+            DisconnectReason::Kicked => "the host turned us away".to_string(),
+            DisconnectReason::Error(e) => e,
+            _ => "the host left".to_string(),
+        };
+        self.failed(&why)
     }
 
     fn failed(&self, reason: &str) -> String {

@@ -506,3 +506,22 @@ fn an_invite_and_a_code_join_both_hand_the_client_the_hosts_proven_key_and_name(
     let transport = reach_host(&mut server, join);
     assert_eq!(transport.proven_host(), Some(proven));
 }
+
+/// A Keep that turns an invite join away (a kick, before the join is seated) reads as the one
+/// sentence a Keep that never answers does; every other join, and every other reason, keeps
+/// its own words.
+#[test]
+fn a_kicked_invite_join_folds_into_the_one_unreachable_sentence() {
+    let host_key = [0x5a; 32];
+    let invite = PendingJoin { handle: None, label: crate::keeps::label(&host_key), invite: true };
+    assert_eq!(invite.disconnected(DisconnectReason::Kicked), crate::keeps::UNREACHABLE);
+    // Another reason on an invite join is not folded.
+    assert_eq!(
+        invite.disconnected(DisconnectReason::HostLeft),
+        crate::lan_host::join_failure_notice("Keep 5a5a5a", "the host left")
+    );
+    // A code join that is kicked says so in its own words.
+    let code = PendingJoin { handle: None, label: "KMT RWX".into(), invite: false };
+    assert_eq!(code.disconnected(DisconnectReason::Kicked), crate::lan_host::join_failure_notice("KMT RWX", "the host turned us away"));
+    assert_ne!(code.disconnected(DisconnectReason::Kicked), crate::keeps::UNREACHABLE);
+}
