@@ -102,7 +102,7 @@ pub fn run(args: &[String]) -> ! {
     // The rest of the engine's native state (profile, settings) lives beside
     // the worlds, inside the Keep's data, never under $HOME.
     crate::data_dir::init_at(world.data_root);
-    let code = serve(&world.name, std::io::stdin(), pipe, AUTOSAVE);
+    let code = serve(&world.name, std::io::stdin(), pipe, AUTOSAVE, keep_pipe::pipe_level_from_env());
     std::process::exit(code);
 }
 
@@ -222,8 +222,14 @@ enum Stop {
 /// The world, served over the pipe until the Keep asks it to stop. Returns the
 /// exit status. `input` is stdin and `output` the pipe (a test's streams in
 /// tests); `world` is a folder under the worlds root, already locked.
-pub(crate) fn serve(world: &str, input: impl Read + Send + 'static, output: impl Write + Send + 'static, autosave: Duration) -> i32 {
-    serve_bounded(world, input, output, autosave, keep_pipe::OUT_QUEUE_CAP)
+pub(crate) fn serve(
+    world: &str,
+    input: impl Read + Send + 'static,
+    output: impl Write + Send + 'static,
+    autosave: Duration,
+    pipe: u16,
+) -> i32 {
+    serve_bounded(world, input, output, autosave, keep_pipe::OUT_QUEUE_CAP, pipe)
 }
 
 /// [`serve`] with the output queue's cap given (a small one in tests).
@@ -233,6 +239,7 @@ pub(crate) fn serve_bounded(
     output: impl Write + Send + 'static,
     autosave: Duration,
     out_cap: usize,
+    pipe: u16,
 ) -> i32 {
     let out = match keep_pipe::spawn_writer_bounded(output, out_cap) {
         Ok(out) => out,
@@ -242,7 +249,7 @@ pub(crate) fn serve_bounded(
         }
     };
     let (joiners, joined) = mpsc::channel();
-    let control = match keep_pipe::spawn_reader(input, out.clone(), joiners) {
+    let control = match keep_pipe::spawn_reader(input, out.clone(), joiners, pipe) {
         Ok(control) => control,
         Err(e) => {
             log::error!("keep world: cannot start the pipe's reader: {e}");
@@ -271,7 +278,7 @@ pub(crate) fn serve_bounded(
             return EXIT_WORLD;
         }
     };
-    out.send(&FromChild::Ready { protocol: crate::protocol::PROTOCOL_VERSION, pipe: keep_pipe::PROTO });
+    out.send(&FromChild::Ready { protocol: crate::protocol::PROTOCOL_VERSION, pipe });
     log::info!(
         "keep world '{world}' is ready: {max_players} players, engine protocol {}, no sockets of its own",
         crate::protocol::PROTOCOL_VERSION

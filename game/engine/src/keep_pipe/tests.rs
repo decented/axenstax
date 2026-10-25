@@ -171,11 +171,20 @@ impl TestPipe {
 /// The reader run to the end of `input` on this thread: its control messages,
 /// the transports it handed over, and what it wrote.
 fn run_reader(input: &[u8], cap: usize) -> (Vec<Control>, Vec<Box<dyn ServerTransport>>, Capture, PipeOut) {
+    run_reader_at(input, cap, PROTO)
+}
+
+/// [`run_reader`] for a server that speaks pipe protocol `pipe`.
+fn run_reader_at(
+    input: &[u8],
+    cap: usize,
+    pipe: u16,
+) -> (Vec<Control>, Vec<Box<dyn ServerTransport>>, Capture, PipeOut) {
     let capture = Capture::default();
     let out = spawn_writer(capture.clone()).unwrap();
     let (jtx, jrx) = mpsc::channel();
     let (ctx, crx) = mpsc::channel();
-    read_loop(input, &out, &jtx, &ctx, cap);
+    read_loop(input, &out, &jtx, &ctx, cap, pipe);
     let controls = crx.try_iter().collect();
     let joined = jrx.try_iter().collect();
     (controls, joined, capture, out)
@@ -667,4 +676,35 @@ fn a_closed_stdout_is_survived_and_reported_as_flushed() {
     out.send(&FromChild::Ready { protocol: 95, pipe: PROTO });
     out.send(&FromChild::Saved { ok: true });
     assert!(out.flush(Duration::from_secs(5)), "the writer lives on, discarding");
+}
+
+#[test]
+fn the_pipe_protocol_is_2_only_when_the_keep_says_2_or_more() {
+    assert_eq!(pipe_level(None), 1);
+    for no in ["", "0", "1", "x", "-1", "2x", " "] {
+        assert_eq!(pipe_level(Some(no)), 1, "{no:?}");
+    }
+    for yes in ["2", " 2\n", "3", "65535"] {
+        assert_eq!(pipe_level(Some(yes)), 2, "{yes:?}");
+    }
+}
+
+#[test]
+fn a_server_of_pipe_protocol_1_says_ready_as_it_always_did_and_refuses_a_pass() {
+    // Byte for byte protocol 1: length 5, tag 64, the engine protocol, nothing more.
+    let ready = encode_from_child(&FromChild::Ready { protocol: 95, pipe: 1 }).unwrap();
+    assert_eq!(ready, [5, 0, 0, 0, 64, 95, 0, 0, 0]);
+    // A pipe-1 server has no Pass frame: it is a protocol error, as an unknown tag was.
+    let input = stream(&[
+        hello(),
+        ToChild::Joined { peer: 1, binding: [1; 32] },
+        ToChild::Pass { peer: 1, host_key: [3; 32], secret: [4; 32] },
+    ]);
+    let (controls, joined, capture, out) = run_reader_at(&input, 1 << 20, 1);
+    assert_eq!(controls.len(), 2, "{controls:?}");
+    assert_eq!(controls[0], Control::Hello { max_players: 8 });
+    let Control::Fatal(why) = &controls[1] else { panic!("expected Fatal, got {controls:?}") };
+    assert!(why.contains("Pass") && !why.contains("04"), "{why}");
+    assert!(frames_of(&capture, &out).is_empty());
+    drop(joined);
 }

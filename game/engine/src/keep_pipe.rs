@@ -35,7 +35,7 @@
 //!
 //! | tag | frame          | payload                                          |
 //! |-----|----------------|--------------------------------------------------|
-//! | 64  | `Ready`        | `protocol: u32` (the engine protocol), then `pipe: u16` (2) |
+//! | 64  | `Ready`        | `protocol: u32` (the engine protocol), then, only when [`PIPE_ENV`] says 2, `pipe: u16` (2) |
 //! | 65  | `SendReliable` | `peer: u32`, `bytes` (to the end)                |
 //! | 66  | `SendLossy`    | `peer: u32`, `bytes` (never sent: the game is reliable only) |
 //! | 67  | `Disconnect`   | `peer: u32`, `reason` (UTF-8)                    |
@@ -47,10 +47,12 @@
 //! # Versions
 //!
 //! The Keep's `Hello` says protocol 1 (every Keep) or 2; this server accepts both
-//! ([`MIN_PROTO`] to [`PROTO`]). It says which it speaks by ending `Ready` with
-//! `pipe: 2` ([`PROTO`]); a Keep that never saw that number (an older one) reads a
-//! `Ready` of protocol 1 as it always did, and the Keep sends `Pass` only to a server
-//! that said 2.
+//! ([`MIN_PROTO`] to [`PROTO`]). It speaks 2 only when the Keep says so in its
+//! environment ([`PIPE_ENV`] is 2 or more), by ending `Ready` with `pipe: 2`
+//! ([`PROTO`]) and accepting `Pass` frames. Otherwise its `Ready` is that of protocol 1,
+//! byte for byte, and a `Pass` is a protocol error: a Keep from before the pass (which
+//! never sets the variable and reads no `pipe`) works as it always did, and the Keep
+//! sends `Pass` only to a server that said 2.
 //!
 //! The decoder is strict: an unknown tag, a payload that is short, or longer
 //! than a frame of fixed size, text that is not UTF-8, a flag byte other than 0
@@ -97,6 +99,25 @@ pub const MAX_FRAME: usize = 1 << 20;
 pub const PROTO: u16 = 2;
 /// The lowest `Hello` protocol this server accepts.
 pub const MIN_PROTO: u16 = 1;
+/// The environment variable by which the Keep says it speaks pipe protocol 2: the server
+/// ends `Ready` with its pipe number, and accepts `Pass` frames, only when it says 2 or
+/// more. Without it the server is protocol 1, byte for byte, which is what a Keep from
+/// before the pass reads.
+pub const PIPE_ENV: &str = "AXENSTAX_KEEP_PIPE";
+
+/// The pipe protocol this server speaks, from the value of [`PIPE_ENV`]: [`PROTO`] for 2
+/// or more, [`MIN_PROTO`] for anything else (unset, 0, 1 or not a number).
+pub fn pipe_level(value: Option<&str>) -> u16 {
+    match value.and_then(|v| v.trim().parse::<u16>().ok()) {
+        Some(n) if n >= PROTO => PROTO,
+        _ => MIN_PROTO,
+    }
+}
+
+/// [`pipe_level`] of this process's environment.
+pub fn pipe_level_from_env() -> u16 {
+    pipe_level(std::env::var(PIPE_ENV).ok().as_deref())
+}
 
 const HELLO: u8 = 1;
 const JOINED: u8 = 2;
@@ -742,16 +763,18 @@ pub enum Control {
 
 /// Start the reader thread on `input` (stdin, or a test's stream): new peers
 /// go to `joiners` (the server's accept channel), everything else that is not
-/// a peer's message to the returned channel.
+/// a peer's message to the returned channel. `pipe` is the protocol the server speaks
+/// ([`pipe_level`]): a `Pass` frame is fatal below 2.
 pub fn spawn_reader(
     input: impl Read + Send + 'static,
     out: PipeOut,
     joiners: mpsc::Sender<Box<dyn ServerTransport>>,
+    pipe: u16,
 ) -> io::Result<mpsc::Receiver<Control>> {
     let (tx, rx) = mpsc::channel();
     thread::Builder::new()
         .name("keep-pipe-in".into())
-        .spawn(move || read_loop(input, &out, &joiners, &tx, MAX_INBOUND_BYTES))?;
+        .spawn(move || read_loop(input, &out, &joiners, &tx, MAX_INBOUND_BYTES, pipe))?;
     Ok(rx)
 }
 
@@ -761,6 +784,7 @@ fn read_loop(
     joiners: &mpsc::Sender<Box<dyn ServerTransport>>,
     control: &mpsc::Sender<Control>,
     inbound_cap: usize,
+    pipe: u16,
 ) {
     let mut input = io::BufReader::new(input);
     let mut peers: HashMap<u32, PeerSlot> = HashMap::new();
@@ -826,6 +850,10 @@ fn read_loop(
                 if let Some(slot) = peers.remove(&peer) {
                     slot.finish();
                 }
+            }
+            // A server of protocol 1 has no such frame, as before the pass existed.
+            ToChild::Pass { .. } if pipe < 2 => {
+                break Control::Fatal("a Pass frame, which pipe protocol 1 does not have".to_string());
             }
             ToChild::Pass { peer, host_key, secret } => match peers.get(&peer) {
                 // Seated: the join accept is already in the writer's queue, so the pass

@@ -80,9 +80,14 @@ fn a_second_process_on_the_same_world_is_refused_and_touches_nothing() {
 
 /// `serve` on its own thread, with the worlds root at `root`.
 fn serve_on(root: &Path, world: &str, feed: Feed, capture: Capture) -> std::thread::JoinHandle<i32> {
+    serve_on_at(root, world, feed, capture, PROTO)
+}
+
+/// [`serve_on`] for a server that speaks pipe protocol `pipe`.
+fn serve_on_at(root: &Path, world: &str, feed: Feed, capture: Capture, pipe: u16) -> std::thread::JoinHandle<i32> {
     let (root, world) = (root.to_path_buf(), world.to_string());
     std::thread::spawn(move || {
-        crate::save::with_worlds_root(&root, || serve(&world, feed, capture, Duration::from_secs(3_600)))
+        crate::save::with_worlds_root(&root, || serve(&world, feed, capture, Duration::from_secs(3_600), pipe))
     })
 }
 
@@ -127,6 +132,22 @@ fn hello_gets_ready_and_shutdown_saves_the_world_says_saved_and_exits_zero() {
     assert_eq!(all.last(), Some(&FromChild::Saved { ok: true }), "{all:?}");
     let at_stop = std::fs::metadata(&dat).unwrap().modified().unwrap();
     assert!(at_stop > at_ready, "Shutdown wrote world.dat again ({at_ready:?} -> {at_stop:?})");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_server_of_pipe_protocol_1_says_ready_without_a_pipe_number_and_exits_on_a_pass_frame() {
+    let dir = scratch("pipe1");
+    let root = dir.join("axenstax").join("worlds");
+    let (mut pipe, feed, capture) = TestPipe::new();
+    let server = serve_on_at(&root, "keep", feed, capture, 1);
+    pipe.send(&ToChild::Hello { proto: 1, max_players: 8 });
+    let mut seen = Vec::new();
+    let ready = wait_for(&mut pipe, &mut seen, |f| matches!(f, FromChild::Ready { .. }));
+    assert_eq!(ready, FromChild::Ready { protocol: protocol::PROTOCOL_VERSION, pipe: 1 });
+    pipe.send(&ToChild::Joined { peer: 3, binding: [3; 32] });
+    pipe.send(&ToChild::Pass { peer: 3, host_key: [1; 32], secret: [2; 32] });
+    assert_eq!(server.join().unwrap(), EXIT_PROTOCOL, "a protocol-1 server has no Pass frame");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -235,7 +256,7 @@ fn a_keep_that_stops_reading_gets_the_world_saved_and_a_non_zero_exit_at_once_wi
         // real cap is 32 MiB).
         std::thread::spawn(move || {
             crate::save::with_worlds_root(&root, || {
-                serve_bounded("keep", feed, blocked, Duration::from_secs(3_600), 20)
+                serve_bounded("keep", feed, blocked, Duration::from_secs(3_600), 20, PROTO)
             })
         })
     };
@@ -285,7 +306,7 @@ fn rig(tag: &str) -> Rig {
     let (pipe, feed, capture) = TestPipe::new();
     let out = keep_pipe::spawn_writer(capture).unwrap();
     let (joiners, joined) = mpsc::channel();
-    let control = keep_pipe::spawn_reader(feed, out.clone(), joiners).unwrap();
+    let control = keep_pipe::spawn_reader(feed, out.clone(), joiners, PROTO).unwrap();
     pipe.send(&ToChild::Hello { proto: PROTO, max_players: 8 });
     assert_eq!(control.recv().unwrap(), Control::Hello { max_players: 8 });
     let hs = open_world("keep", 8, joined).expect("the world opens");
