@@ -146,6 +146,7 @@ Horizons, each one line. None is scheduled.
 - **Texture-pack distribution** and WASM plugins for sandboxed server-side mods.
 - **A Bitcoin-enabled server layer** — design only; see the red lines for the rules it would have to follow.
 - **Historical-pivot and Genesis storylines** — the founding-myth arc (worthiness, not riches).
+- **VR** — a reminder to explore headset play some day. Nothing planned, no date.
 
 ---
 
