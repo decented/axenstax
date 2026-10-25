@@ -548,6 +548,11 @@ mod test_harness;
 #[cfg(test)]
 #[cfg(not(target_arch = "wasm32"))]
 mod test_integration;
+// A headless Keep-world join probe: one `#[ignore]`d, env-driven test that joins a
+// Keep's AxeNStax world by room code through the real client path (see the module doc).
+#[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
+mod keep_join_probe;
 
 // `touch_input` is cross-platform: the menu's text fields call `is_touch_device()`
 // / `os_keyboard_prompt()` on every target (native gets cheap no-op stubs), so the
