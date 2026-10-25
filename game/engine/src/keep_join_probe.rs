@@ -1,6 +1,8 @@
 //! A headless join probe for a Keep's AxeNStax world: test tooling, not part of the
 //! game. One `#[ignore]`d test, driven by environment variables, that joins a Keep's
-//! world by room code through the engine's real client path and prints one JSON line.
+//! world by room code, or by invite (the Keep's key and a secret, as a pass or an
+//! `axenstax://keep/` link carries them), through the engine's real client path and
+//! prints one JSON line.
 //!
 //! The path is the game's own, with no protocol of its own: the code is looked up on
 //! the relays and the room dialled over Fray QUIC (`fray_play::PendingJoin`), the
@@ -18,7 +20,15 @@
 //! ```
 //!
 //! Environment:
-//! * `PROBE_CODE` (required): the room code, spaces and case ignored by the lookup.
+//! * `PROBE_CODE`: the room code, spaces and case ignored by the lookup. Joins by code.
+//! * `PROBE_HOST_KEY` and `PROBE_SECRET` (both, 64 hex characters each; instead of
+//!   `PROBE_CODE`): joins by invite. The persona must be the one the invite is bound to
+//!   (a return pass is bound to the persona that got it: use the same `PROBE_KEY_FILE`).
+//! * `PROBE_PASS_FILE`: where a return pass the Keep sends is written, as JSON
+//!   `{"host_key":..,"secret":..}`, mode 0600, so a later run can join by it. The pass's
+//!   secret is never in the result line, the log or the test output.
+//! * `PROBE_JOIN_TIMEOUT_SECS`: most to wait for the Keep to answer (default 60); a join
+//!   that is refused or finds no one waits this long before it reports.
 //! * `PROBE_KEY_FILE`: the persona's secret key as hex; created if absent, so a rejoin
 //!   with the same file is the same persona. Absent: a fresh key for this run.
 //! * `PROBE_NAME`: the player name sent (default `Probe`).
@@ -33,8 +43,11 @@
 //! * `PROBE_SETTLE_SECS`: most to wait for the chunk push to go quiet (default 15).
 //! * `PROBE_OUT`: a file the JSON line is also appended to.
 //!
-//! The result line has `joined`, `reason`, `reject_via`, `chunks`, `local_notes`,
-//! `persona_npub`, `inventory_mode`, `spawn`, timings in ms, `reads`, `place`.
+//! The result line has `joined`, `joined_by` (`code` or `invite`), `reason`, `reject_via`,
+//! `chunks`, `local_notes`, `persona_npub`, `inventory_mode`, `spawn`, `host` (the host's
+//! proven key's first six hex characters, and the name it gave), `passes` (the first six
+//! hex characters of each return pass's key, never the secret), timings in ms, `reads`,
+//! `place`.
 //! The test fails (non-zero exit) unless the join succeeded and every requested
 //! read or place got its answer.
 
@@ -59,6 +72,27 @@ fn env(name: &str) -> Option<String> {
 
 fn env_secs(name: &str, default: u64) -> Duration {
     Duration::from_secs(env(name).and_then(|v| v.trim().parse().ok()).unwrap_or(default))
+}
+
+/// A 32-byte value from a variable that holds 64 hex characters.
+fn env_key(name: &str) -> Option<[u8; 32]> {
+    let text = env(name)?;
+    Some(fray_keep::parse_hex32(text.trim()).unwrap_or_else(|| panic!("{name} is 64 hex characters")))
+}
+
+/// Write a return pass to `path` for a later run to join by, private to this user.
+fn write_pass_file(path: &str, pass: &protocol::KeepPass) {
+    use std::io::Write;
+    let text = json!({ "host_key": fray_keep::hex_encode(&pass.host_key), "secret": fray_keep::hex_encode(&pass.secret) }).to_string();
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).write(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path).expect("the pass file is writable");
+    file.write_all(text.as_bytes()).expect("the pass file is writable");
 }
 
 fn parse_cell(text: &str) -> Option<[i32; 3]> {
@@ -103,6 +137,8 @@ struct Session {
     inbox: WindowInbox,
     chunks: u32,
     local_notes: u32,
+    /// Return passes the Keep sent (held here, never printed).
+    passes: Vec<protocol::KeepPass>,
     spawn: Option<glam::Vec3>,
     render_distance: u8,
     /// The latest word the server sent about each cell that changed.
@@ -125,6 +161,7 @@ impl Session {
             inbox: Default::default(),
             chunks: 0,
             local_notes: 0,
+            passes: Vec::new(),
             spawn: None,
             render_distance,
             changes: HashMap::new(),
@@ -138,6 +175,7 @@ impl Session {
     /// a movement packet every 100 ms, which also acknowledges the chunks.
     fn step(&mut self) {
         self.rc.poll();
+        self.passes.extend(self.rc.take_keep_passes());
         if let Some(joined) = self.rc.pending_joined_world.take() {
             self.spawn = joined.spawn;
             if let Some(spawn) = joined.spawn {
@@ -276,7 +314,16 @@ fn fail(mut result: Value, reason: String, via: &str) -> ! {
 fn probe() {
     let started = Instant::now();
     let ms = |t: Instant| t.duration_since(started).as_millis() as u64;
-    let code = env("PROBE_CODE").expect("PROBE_CODE is the Keep world's room code");
+    // By room code, or by invite (the Keep's key and a secret).
+    let invite = env_key("PROBE_HOST_KEY").map(|host_key| {
+        let secret = env_key("PROBE_SECRET").expect("PROBE_SECRET goes with PROBE_HOST_KEY");
+        fray_keep::Invite { host_key, secret }
+    });
+    let code = env("PROBE_CODE");
+    assert!(
+        invite.is_some() != code.is_some(),
+        "give PROBE_CODE (join by code) or PROBE_HOST_KEY and PROBE_SECRET (join by invite), not both or neither"
+    );
     let keys = persona(env("PROBE_KEY_FILE"));
     let npub = crate::hosted_server::pubkey_to_npub(&keys.public_key().to_bytes());
     let render_distance = env("PROBE_RD").and_then(|v| v.parse::<u8>().ok()).unwrap_or(2);
@@ -290,11 +337,26 @@ fn probe() {
         cfg.relay_fallback = false;
     }
 
-    let mut result = json!({ "joined": false, "persona_npub": npub, "code": code, "render_distance": render_distance });
-    // 1. Look the code up and reach the room.
-    let handle = decented_net::join(&cfg, &Identity::ephemeral(), &code);
-    let mut pending = PendingJoin::over(handle, code.clone());
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut result = json!({
+        "joined": false, "persona_npub": npub, "render_distance": render_distance,
+        "joined_by": if invite.is_some() { "invite" } else { "code" },
+    });
+    // 1. Look the code (or the invite) up and reach the room.
+    let (handle, label) = match (&invite, &code) {
+        (Some(invite), _) => {
+            result["keep"] = json!(fray_keep::describe(&invite.host_key));
+            (decented_net::join_invite(&cfg, &Identity::ephemeral(), &invite.secret, invite.host_key), crate::keeps::label(&invite.host_key))
+        }
+        (None, Some(code)) => {
+            result["code"] = json!(code);
+            (decented_net::join(&cfg, &Identity::ephemeral(), code), code.clone())
+        }
+        (None, None) => unreachable!("checked above"),
+    };
+    let mut pending = PendingJoin::over(handle, label);
+    pending.set_invite(invite.is_some());
+    let wait = env_secs("PROBE_JOIN_TIMEOUT_SECS", 60);
+    let deadline = Instant::now() + wait;
     let transport = loop {
         match pending.poll() {
             JoinPoll::Waiting => {}
@@ -302,7 +364,7 @@ fn probe() {
             JoinPoll::Failed(why) => fail(result, why, "fray"),
         }
         if Instant::now() > deadline {
-            fail(result, "no answer from the room within 60 s".into(), "fray");
+            fail(result, format!("no answer from the room within {} s", wait.as_secs()), "fray");
         }
         std::thread::sleep(Duration::from_millis(5));
     };
@@ -313,6 +375,9 @@ fn probe() {
     let name = env("PROBE_NAME").unwrap_or_else(|| "Probe".into());
     let rc = RemoteClient::connect_authed_on_transport(Box::new(transport), &name, driver(keys), None);
     let mut s = Session::new(rc, render_distance);
+    if let Some(host) = s.rc.proven_host() {
+        result["host"] = json!({ "key": fray_keep::describe(&host.key), "name": host.name });
+    }
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         s.step();
@@ -415,10 +480,17 @@ fn probe() {
         s.run_for(hold);
     }
     ok &= s.rc.is_connected();
+    // A pass can arrive after the join settles: take what is waiting before leaving.
+    s.step();
+    let passes = std::mem::take(&mut s.passes);
+    if let (Some(path), Some(pass)) = (env("PROBE_PASS_FILE"), passes.first()) {
+        write_pass_file(&path, pass);
+    }
     s.rc.disconnect();
     // A moment for the goodbye to leave before the link is dropped.
     std::thread::sleep(Duration::from_millis(500));
     drop(s);
+    result["passes"] = json!(passes.iter().map(|p| fray_keep::describe(&p.host_key)).collect::<Vec<_>>());
     result["held_secs"] = json!(hold.as_secs());
     result["t_left_ms"] = json!(ms(Instant::now()));
     result["ok"] = json!(ok);
