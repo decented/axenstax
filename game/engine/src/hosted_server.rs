@@ -291,6 +291,7 @@ pub enum RemoteTransport {
     /// `--keep-world`: no socket at all. The home Keep owns the room, and its
     /// pipe (`keep_pipe`) hands joiners over on the accept channel
     /// ([`HostedServer::start_keep_world`]).
+    #[cfg(not(target_arch = "wasm32"))]
     KeepPipe,
 }
 
@@ -910,7 +911,7 @@ impl HostedServer {
         let port = match remote_transport {
             RemoteTransport::Quic => protocol::SERVER_PORT,
             RemoteTransport::WebSocket { port } => port,
-            RemoteTransport::Fray | RemoteTransport::KeepPipe => 0,
+            RemoteTransport::Fray => 0,
         };
         // LAN "Host Game" (T2-10): bind the UDP port NOW, on this thread, and hand
         // the socket to the accept thread. Binding inside that thread meant a

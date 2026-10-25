@@ -124,8 +124,10 @@ impl InboundQueue {
 
     /// Put a packet taken by [`Self::pop`] back at the front, charged again
     /// (`--keep-world`: a join held for the Keep's gate is read again once the
-    /// gate has answered). Never crosses the bound by more than that packet,
-    /// which was charged before it was taken.
+    /// gate has answered). Not bound-checked: a held client that had nearly
+    /// filled [`MAX_INBOUND_BYTES`] while it waited is pushed past it by this
+    /// packet, and the next fill releases it right after the gate said yes.
+    /// Only a client that floods while held gets there.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn push_front(&mut self, packet: Packet) {
         self.bytes += charge(&packet);
@@ -211,16 +213,19 @@ pub trait ServerTransport: MaybeSend {
     /// [`Self::gate_verdict`] answers. `false` when there is no gate to ask (or
     /// it was asked already): a Keep world then refuses the join. Default
     /// `false`; only the Keep's pipe transport has a gate.
+    #[cfg(not(target_arch = "wasm32"))]
     fn ask_gate(&self, _persona: &[u8; 32]) -> bool {
         false
     }
     /// The gate's answer to [`Self::ask_gate`] once it has come, given once:
     /// `Err` carries the gate's reason for the refusal.
+    #[cfg(not(target_arch = "wasm32"))]
     fn gate_verdict(&self) -> Option<Result<(), String>> {
         None
     }
     /// `--keep-world`: the player is in the world, as `name`, with the persona
     /// the gate was asked about (for the Keep's list of who is playing).
+    #[cfg(not(target_arch = "wasm32"))]
     fn seated(&self, _persona: &[u8; 32], _name: &str) {}
 }
 

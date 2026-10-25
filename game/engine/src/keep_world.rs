@@ -26,7 +26,9 @@
 //!   the Keep decides who plays. Sign-in is required.
 //! - `Shutdown`, or stdin ending, saves the world and exits 0 (`Saved` is sent
 //!   first). Autosave is the dedicated server's own (every 60 s). A malformed
-//!   frame saves too, then exits non-zero.
+//!   frame saves too, then exits non-zero. So does a Keep that stops reading
+//!   its end of the pipe (see `keep_pipe::OUT_QUEUE_CAP`): the world is saved,
+//!   nothing more can be said to the Keep, and the exit is non-zero.
 
 #![cfg(not(target_arch = "wasm32"))]
 
@@ -50,6 +52,8 @@ const EXIT_PROTOCOL: i32 = 2;
 const EXIT_LOCKED: i32 = 3;
 /// Exit status: the world could not be opened.
 const EXIT_WORLD: i32 = 4;
+/// Exit status: the Keep stopped reading the pipe.
+const EXIT_STALLED: i32 = 5;
 
 /// Autosave, as the dedicated server's default.
 const AUTOSAVE: Duration = Duration::from_secs(60);
@@ -211,13 +215,28 @@ enum Stop {
     Shutdown,
     Ended,
     Fatal(String),
+    /// The Keep stopped reading its end of the pipe.
+    Stalled,
 }
 
 /// The world, served over the pipe until the Keep asks it to stop. Returns the
 /// exit status. `input` is stdin and `output` the pipe (a test's streams in
 /// tests); `world` is a folder under the worlds root, already locked.
 pub(crate) fn serve(world: &str, input: impl Read + Send + 'static, output: impl Write + Send + 'static, autosave: Duration) -> i32 {
-    let out = match keep_pipe::spawn_writer(output) {
+    serve_bounded(world, input, output, autosave, keep_pipe::OUT_QUEUE_CAP, keep_pipe::OUT_STALL)
+}
+
+/// [`serve`] with the output queue's cap and stall time given (short ones in
+/// tests).
+pub(crate) fn serve_bounded(
+    world: &str,
+    input: impl Read + Send + 'static,
+    output: impl Write + Send + 'static,
+    autosave: Duration,
+    out_cap: usize,
+    out_stall: Duration,
+) -> i32 {
+    let out = match keep_pipe::spawn_writer_bounded(output, out_cap, out_stall) {
         Ok(out) => out,
         Err(e) => {
             log::error!("keep world: cannot start the pipe's writer: {e}");
@@ -272,6 +291,9 @@ pub(crate) fn serve(world: &str, input: impl Read + Send + 'static, output: impl
             Ok(Control::Hello { .. }) => break Stop::Fatal("a second Hello".to_string()),
             Err(mpsc::TryRecvError::Empty) => {}
         }
+        if out.stalled() {
+            break Stop::Stalled;
+        }
         let now = Instant::now();
         if now >= next_tick {
             hs.tick();
@@ -291,6 +313,9 @@ pub(crate) fn serve(world: &str, input: impl Read + Send + 'static, output: impl
         Stop::Shutdown => log::info!("keep world: the Keep asked for a stop; saving '{world}'"),
         Stop::Ended => log::info!("keep world: the pipe ended; saving '{world}'"),
         Stop::Fatal(why) => log::error!("keep world: protocol error: {why}; saving '{world}' and exiting"),
+        Stop::Stalled => {
+            log::error!("keep world: the Keep stopped reading; saving '{world}' and exiting");
+        }
     }
     hs.shutdown();
     let saved = hs.server.try_save();
@@ -303,12 +328,14 @@ pub(crate) fn serve(world: &str, input: impl Read + Send + 'static, output: impl
     drop(hs);
     let code = match stop {
         Stop::Fatal(_) => EXIT_PROTOCOL,
+        Stop::Stalled => EXIT_STALLED,
         Stop::Shutdown | Stop::Ended => {
             out.send(&FromChild::Saved { ok: saved.is_ok() });
             0
         }
     };
-    if !out.flush(FLUSH_WAIT) {
+    // A Keep that is not reading would only make the flush wait out its time.
+    if code != EXIT_STALLED && !out.flush(FLUSH_WAIT) {
         log::warn!("keep world: the last frames did not reach the Keep in {} s", FLUSH_WAIT.as_secs());
     }
     code

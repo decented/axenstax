@@ -77,6 +77,25 @@ impl Write for Closed {
     }
 }
 
+/// A stdout that does not take a byte until the test lets go of `gate` (drops
+/// its sender): the Keep that has stopped reading. Everything written after
+/// that lands in `into`.
+pub(crate) struct Blocked {
+    pub gate: mpsc::Receiver<()>,
+    pub into: Capture,
+}
+
+impl Write for Blocked {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        // Blocks until the sender is dropped; then returns at once, every time.
+        let _ = self.gate.recv();
+        self.into.write(buf)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 /// A stdin the test writes into while the reader runs; dropping the sender
 /// is the Keep closing it.
 pub(crate) struct Feed {
@@ -376,17 +395,56 @@ fn left_closes_the_peer_after_its_packets_and_unknown_peers_are_ignored() {
 }
 
 #[test]
-fn a_joiner_past_hello_max_players_is_disconnected_and_a_second_joined_is_ignored() {
+fn a_joiner_past_hello_max_players_is_disconnected_and_a_second_joined_for_a_live_peer_is_fatal() {
     let input = stream(&[
         ToChild::Hello { proto: PROTO, max_players: 2 },
         ToChild::Joined { peer: 1, binding: [1; 32] },
-        ToChild::Joined { peer: 1, binding: [9; 32] },
         ToChild::Joined { peer: 2, binding: [2; 32] },
         ToChild::Joined { peer: 3, binding: [3; 32] },
     ]);
     let (_, joined, capture, out) = run_reader(&input, 1 << 20);
     assert_eq!(joined.iter().map(|t| t.channel_binding()).collect::<Vec<_>>(), vec![Some([1; 32]), Some([2; 32])]);
     assert_eq!(frames_of(&capture, &out), vec![FromChild::Disconnect { peer: 3, reason: WORLD_FULL.to_string() }]);
+
+    // The same id joined again while it is live: a protocol error. The second
+    // connection is never given a transport, its packets never reach the
+    // first's, and the first leaves with the pipe.
+    let input = stream(&[
+        ToChild::Hello { proto: PROTO, max_players: 2 },
+        ToChild::Joined { peer: 1, binding: [1; 32] },
+        ToChild::Reliable { peer: 1, bytes: vec![1] },
+        ToChild::Joined { peer: 1, binding: [9; 32] },
+        ToChild::Reliable { peer: 1, bytes: vec![2] },
+    ]);
+    let (controls, joined, _, _) = run_reader(&input, 1 << 20);
+    assert!(matches!(controls.last(), Some(Control::Fatal(why)) if why.contains("joined twice")), "{controls:?}");
+    assert_eq!(joined.len(), 1, "no transport for the second");
+    assert_eq!(joined[0].channel_binding(), Some([1; 32]));
+    assert_eq!(joined[0].try_recv_from_client(), Some(vec![1]));
+    assert_eq!(joined[0].try_recv_from_client(), Some(protocol::serialize_packet(PacketType::Disconnect, &())));
+    assert_eq!(joined[0].try_recv_from_client(), None, "nothing of the second connection arrived");
+    assert!(joined[0].is_closed());
+
+    // After a Left, the id is free again.
+    let input = stream(&[
+        hello(),
+        ToChild::Joined { peer: 1, binding: [1; 32] },
+        ToChild::Left { peer: 1 },
+        ToChild::Joined { peer: 1, binding: [9; 32] },
+    ]);
+    let (controls, joined, _, _) = run_reader(&input, 1 << 20);
+    assert_eq!(controls.last(), Some(&Control::Ended));
+    assert_eq!(joined.iter().map(|t| t.channel_binding()).collect::<Vec<_>>(), vec![Some([1; 32]), Some([9; 32])]);
+}
+
+#[test]
+fn a_hello_with_no_seats_is_a_protocol_error() {
+    let (controls, joined, _, _) = run_reader(
+        &stream(&[ToChild::Hello { proto: PROTO, max_players: 0 }, ToChild::Joined { peer: 1, binding: [1; 32] }]),
+        1 << 20,
+    );
+    assert!(matches!(&controls[..], [Control::Fatal(why)] if why.contains("max_players is 0")), "{controls:?}");
+    assert!(joined.is_empty());
 }
 
 #[test]
@@ -500,6 +558,51 @@ fn a_packet_over_the_frame_cap_closes_the_link_instead_of_vanishing() {
     slot.finish();
     drop(t);
     assert!(matches!(&frames_of(&capture, &out)[..], [FromChild::SendReliable { bytes, .. }] if bytes.len() == MAX_FRAME_LEN));
+}
+
+#[test]
+fn a_keep_that_stops_reading_bounds_the_queue_then_reports_a_stall_and_recovers_when_it_reads() {
+    let (open, gate) = mpsc::channel::<()>();
+    let into = Capture::default();
+    let out = spawn_writer_bounded(Blocked { gate, into: into.clone() }, 1_000, Duration::from_millis(150)).unwrap();
+    let frame = FromChild::SendReliable { peer: 1, bytes: vec![7; 400] };
+    // A frame is 409 bytes: the queue takes frames until it holds the cap, so
+    // three go in (0, 409, 818 bytes held), and every later one is dropped.
+    for _ in 0..200 {
+        out.send(&frame);
+    }
+    assert_eq!(out.queued_bytes(), 3 * 409, "memory is bounded, not 200 frames");
+    // Over the cap for the stall time, with nothing written: stalled.
+    let end = Instant::now() + Duration::from_secs(10);
+    while !out.stalled() {
+        assert!(Instant::now() < end, "never reported the stall");
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(into.0.lock().unwrap().is_empty(), "nothing was written while blocked");
+    // The Keep reads again: the three queued frames are written, the queue is
+    // under the cap, the stall is over, and new frames go out.
+    drop(open);
+    assert!(out.flush(Duration::from_secs(10)));
+    assert!(!out.stalled());
+    assert_eq!(out.queued_bytes(), 0);
+    out.send(&FromChild::Saved { ok: true });
+    assert!(out.flush(Duration::from_secs(10)));
+    let written = decode_all(&into.0.lock().unwrap());
+    assert_eq!(written.len(), 4, "the three queued, then the new one: {written:?}");
+    assert_eq!(written[3], FromChild::Saved { ok: true });
+}
+
+#[test]
+fn a_queue_that_keeps_draining_is_never_reported_as_stalled() {
+    // Under the cap nothing is dropped and there is no stall, however long.
+    let capture = Capture::default();
+    let out = spawn_writer_bounded(capture, 1_000_000, Duration::ZERO).unwrap();
+    for _ in 0..100 {
+        out.send(&FromChild::SendReliable { peer: 1, bytes: vec![1; 400] });
+        assert!(!out.stalled());
+    }
+    assert!(out.flush(Duration::from_secs(10)));
+    assert_eq!(out.queued_bytes(), 0);
 }
 
 #[test]

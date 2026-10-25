@@ -4,7 +4,7 @@
 //! sent, and is seated, refused or let go as the gate and the Keep say.
 
 use super::*;
-use crate::keep_pipe::tests::{Capture, Feed, TestPipe};
+use crate::keep_pipe::tests::{Blocked, Capture, Feed, TestPipe};
 use crate::keep_pipe::{FromChild, ToChild, PROTO};
 use crate::protocol::{self, PacketType};
 
@@ -155,16 +155,24 @@ fn the_end_of_stdin_saves_and_exits_zero_and_a_restart_opens_the_same_world() {
 }
 
 #[test]
-fn a_pipe_that_does_not_start_with_hello_in_this_protocol_exits_non_zero_before_the_world_opens() {
-    for first in [ToChild::Shutdown, ToChild::Hello { proto: 2, max_players: 8 }] {
+fn a_pipe_that_does_not_start_with_a_usable_hello_makes_serve_exit_non_zero_before_it_opens_the_world() {
+    for first in [
+        ToChild::Shutdown,
+        ToChild::Hello { proto: 2, max_players: 8 },
+        ToChild::Hello { proto: PROTO, max_players: 0 },
+    ] {
         let dir = scratch("nohello");
         let root = dir.join("axenstax").join("worlds");
+        // As the binary does before `serve`: the world's folder and its lock
+        // file exist already (`lock_world`). `serve` adds nothing to them.
+        let _lock = lock_world(&root, "keep").expect("the lock");
         let (pipe, feed, capture) = TestPipe::new();
         let server = serve_on(&root, "keep", feed, capture);
         pipe.send(&first);
         assert_eq!(server.join().unwrap(), EXIT_PROTOCOL, "{first:?}");
         assert!(pipe.all().is_empty(), "no Ready");
-        assert!(!root.join("keep").exists(), "nothing of the world was written");
+        let kept: Vec<_> = std::fs::read_dir(root.join("keep")).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(kept, vec![std::ffi::OsString::from(LOCK_FILE)], "serve opened and wrote no world");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
@@ -199,6 +207,67 @@ fn a_joiner_that_comes_before_ready_waits_and_is_challenged_once_the_world_is_op
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn a_second_joined_for_a_live_peer_is_a_clean_exit_non_zero() {
+    let dir = scratch("twice");
+    let root = dir.join("axenstax").join("worlds");
+    let (mut pipe, feed, capture) = TestPipe::new();
+    let server = serve_on(&root, "keep", feed, capture);
+    pipe.send(&ToChild::Hello { proto: PROTO, max_players: 8 });
+    wait_for(&mut pipe, &mut Vec::new(), |f| matches!(f, FromChild::Ready { .. }));
+    pipe.send(&ToChild::Joined { peer: 5, binding: [5; 32] });
+    pipe.send(&ToChild::Joined { peer: 5, binding: [6; 32] });
+    assert_eq!(server.join().unwrap(), EXIT_PROTOCOL);
+    assert!(!pipe.all().contains(&FromChild::Saved { ok: true }), "no Saved after a protocol error");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_keep_that_stops_reading_gets_the_world_saved_and_a_non_zero_exit_with_no_wait_to_flush() {
+    let dir = scratch("stalled");
+    let root = dir.join("axenstax").join("worlds");
+    let (mut pipe, feed, capture) = TestPipe::new();
+    let (open, gate) = mpsc::channel::<()>();
+    let blocked = Blocked { gate, into: capture };
+    let server = {
+        let root = root.clone();
+        // A queue that holds a single frame and a 200 ms stall time (the real
+        // ones are 32 MiB and 30 s).
+        std::thread::spawn(move || {
+            crate::save::with_worlds_root(&root, || {
+                serve_bounded("keep", feed, blocked, Duration::from_secs(3_600), 1, Duration::from_millis(200))
+            })
+        })
+    };
+    pipe.send(&ToChild::Hello { proto: PROTO, max_players: 8 });
+    // `world.dat` is written at tick 0, before Ready is queued (and then the
+    // writer blocks on it: the Keep is not reading).
+    let dat = world_dat(&root, "keep");
+    let end = Instant::now() + Duration::from_secs(60);
+    while !dat.exists() {
+        assert!(Instant::now() < end, "the world never opened");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let at_ready = std::fs::metadata(&dat).unwrap().modified().unwrap();
+    std::thread::sleep(Duration::from_millis(50));
+    // The server's challenge to this joiner finds the queue full and is dropped.
+    pipe.send(&ToChild::Joined { peer: 5, binding: [5; 32] });
+    assert_eq!(server.join().unwrap(), EXIT_STALLED);
+    let at_stop = std::fs::metadata(&dat).unwrap().modified().unwrap();
+    assert!(at_stop > at_ready, "the world was saved on the way out ({at_ready:?} -> {at_stop:?})");
+    // The Keep reads again, much too late: all it gets is what was queued
+    // before the stall, with no Saved (it would have had to wait to say it).
+    drop(open);
+    let end = Instant::now() + Duration::from_secs(10);
+    while pipe.all().is_empty() {
+        assert!(Instant::now() < end, "the queued Ready never came");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(pipe.all(), vec![FromChild::Ready { protocol: protocol::PROTOCOL_VERSION }]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // --- the gate, over a server ticked here ---
 
 /// A Keep world's server, ticked on this thread, and the Keep's end of its pipe.
@@ -224,17 +293,18 @@ fn rig(tag: &str) -> Rig {
 
 impl Rig {
     /// Tick until a frame `want` picks has come (at most `ticks` ticks), keeping
-    /// every frame in `self.frames`.
+    /// every frame in `self.frames`: the whole batch of the tick it came in, not
+    /// only what came before it, so nothing the server wrote after it in that
+    /// tick is lost to the assertions.
     fn tick_until(&mut self, ticks: usize, want: impl Fn(&FromChild) -> bool) -> FromChild {
         for _ in 0..ticks {
             self.hs.tick();
             assert!(self.out.flush(Duration::from_secs(5)));
-            for frame in self.pipe.take() {
-                let hit = want(&frame);
-                self.frames.push(frame.clone());
-                if hit {
-                    return frame;
-                }
+            let batch = self.pipe.take();
+            let hit = batch.iter().find(|f| want(f)).cloned();
+            self.frames.extend(batch);
+            if let Some(frame) = hit {
+                return frame;
             }
             std::thread::sleep(Duration::from_millis(1));
         }
@@ -384,9 +454,20 @@ fn a_held_join_is_sent_nothing_until_the_gate_says_yes_then_joins_and_is_seated(
     rig.seat(1, [0xa1; 32], &ann);
     rig.join(2, [0xb2; 32], &bea, [0xb2; 32]);
     rig.tick_until(100, |f| matches!(f, FromChild::GateAsk { peer: 2, .. }));
-    let challenge_only = Rig::packets_to(&rig.frames, 2);
+    // From the question on, the held joiner is sent nothing at all: not in the
+    // tick that asked (the rest of that tick's frames are kept, too), and not
+    // while the gate thinks.
+    let ask_at = rig.frames.iter().position(|f| matches!(f, FromChild::GateAsk { peer: 2, .. })).unwrap();
+    let challenge_only = Rig::packets_to(&rig.frames[..ask_at], 2);
     assert_eq!(challenge_only, vec![PacketType::Challenge], "before the question");
     let held = rig.tick_for(60);
+    let since_ask = about(&rig.frames[ask_at..], 2);
+    assert_eq!(
+        since_ask,
+        vec![FromChild::GateAsk { peer: 2, persona: persona(&bea) }],
+        "from the question until the answer, nothing else to or about the held joiner: {:?}",
+        since_ask.iter().map(short).collect::<Vec<_>>()
+    );
     assert!(about(&held, 2).is_empty(), "nothing to the held joiner: {:?}", about(&held, 2).iter().map(short).collect::<Vec<_>>());
     assert!(!Rig::packets_to(&held, 1).is_empty(), "while Ann is sent the world");
     assert!(!rig.hs.slot_is_free(1), "the slot is held, not freed");
@@ -405,6 +486,53 @@ fn a_held_join_is_sent_nothing_until_the_gate_says_yes_then_joins_and_is_seated(
     rig.tick_until(100, |f| matches!(f, FromChild::Unseated { peer: 2 }));
     let rest = rig.tick_for(5);
     assert!(!rig.frames.iter().any(|f| matches!(f, FromChild::Disconnect { peer: 2, .. })), "{rest:?}");
+}
+
+#[test]
+fn a_held_peers_own_packets_are_neither_answered_nor_acted_on_during_the_hold() {
+    let mut rig = rig("held-packets");
+    let (ann, bea) = (keys(41), keys(42));
+    rig.seat(1, [0xa1; 32], &ann);
+    rig.join(2, [0xb2; 32], &bea, [0xb2; 32]);
+    rig.tick_until(100, |f| matches!(f, FromChild::GateAsk { peer: 2, .. }));
+    let ask_at = rig.frames.iter().position(|f| matches!(f, FromChild::GateAsk { peer: 2, .. })).unwrap();
+    // The held peer talks: a keepalive, an input, a chat line.
+    rig.says(2, protocol::serialize_packet(PacketType::Ping, &()));
+    let input = protocol::InputPacket { tick: 5, health: 20.0, ..Default::default() };
+    rig.says(2, protocol::serialize_packet(PacketType::ClientInput, &input));
+    rig.says(2, protocol::serialize_packet(PacketType::ChatSay, &protocol::ChatSayPacket { text: "hello".into() }));
+    let held = rig.tick_for(60);
+    let since_ask = about(&rig.frames[ask_at + 1..], 2);
+    assert!(since_ask.is_empty(), "no Pong, nothing: {:?}", since_ask.iter().map(short).collect::<Vec<_>>());
+    assert_eq!(rig.hs.server.players[1].last_input_tick, 0, "its input was not acted on");
+    assert!(!Rig::packets_to(&held, 1).contains(&PacketType::ChatDeliver), "its chat line reached no one");
+    assert!(!rig.hs.slot_is_free(1), "and it is still held");
+}
+
+#[test]
+fn a_second_connection_of_a_seated_persona_is_asked_about_afresh_and_replaces_the_first_only_on_a_yes() {
+    let mut rig = rig("twin");
+    let ann = keys(41);
+    rig.seat(1, [0xa1; 32], &ann);
+    // Ann again, over another connection: its own question, with her persona.
+    rig.join(2, [0xb2; 32], &ann, [0xb2; 32]);
+    let ask = rig.tick_until(100, |f| matches!(f, FromChild::GateAsk { peer: 2, .. }));
+    assert_eq!(ask, FromChild::GateAsk { peer: 2, persona: persona(&ann) });
+    assert_eq!(rig.frames.iter().filter(|f| matches!(f, FromChild::GateAsk { .. })).count(), 2, "one per connection");
+    // The first yes does not carry over: nothing is seated or sent until this
+    // connection's own answer, and the first seat stands meanwhile.
+    let waiting = rig.tick_for(30);
+    assert!(!Rig::packets_to(&rig.frames, 2).contains(&PacketType::JoinAccept));
+    assert!(!rig.frames.iter().any(|f| matches!(f, FromChild::Seated { peer: 2, .. })));
+    assert!(!waiting.iter().any(|f| matches!(f, FromChild::Unseated { peer: 1 } | FromChild::Disconnect { peer: 1, .. })));
+    assert!(!rig.hs.slot_is_free(0));
+    // Its own yes seats it, and the older connection of the same persona goes.
+    rig.pipe.send(&ToChild::GateAnswer { peer: 2, ok: true, reason: String::new() });
+    rig.tick_until(100, |f| matches!(f, FromChild::Seated { peer: 2, .. }));
+    let at = |rig: &Rig, want: fn(&FromChild) -> bool| rig.frames.iter().position(want);
+    let unseated = at(&rig, |f| matches!(f, FromChild::Unseated { peer: 1 })).expect("the first seat was given up");
+    let seated = at(&rig, |f| matches!(f, FromChild::Seated { peer: 2, .. })).unwrap();
+    assert!(unseated < seated, "the old seat goes before the new one is taken");
 }
 
 #[test]

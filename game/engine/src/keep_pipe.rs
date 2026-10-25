@@ -46,7 +46,7 @@
 //! [`spawn_reader`] reads stdin on its own thread and routes each frame at
 //! once (a peer's messages to its transport's queue, the rest to the server's
 //! loop as a [`Control`]), so the Keep is never kept waiting by a tick or a
-//! save. [`spawn_writer`] owns stdout: every frame from every thread goes
+//! save. [`spawn_writer_bounded`] owns stdout: every frame from every thread goes
 //! through its one queue and is written whole, one at a time, in the order
 //! it was sent.
 //!
@@ -69,7 +69,7 @@ use std::io::{self, Read, Write};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::network::MAX_FRAME_LEN;
 use crate::protocol;
@@ -312,23 +312,96 @@ enum Outgoing {
     Flush(mpsc::Sender<()>),
 }
 
+/// What may wait in the writer's queue: 32 MiB, as the Keep's own bound on what
+/// it holds for this child. A frame that finds the queue at or over this is
+/// dropped, so memory stays bounded while the Keep is not reading.
+pub const OUT_QUEUE_CAP: usize = 32 << 20;
+/// How long the queue may stay over [`OUT_QUEUE_CAP`] before the loop is told
+/// the Keep has stopped reading (`PipeOut::stalled`): as the Keep's own wait.
+pub const OUT_STALL: Duration = Duration::from_secs(30);
+
+/// What the senders and the writer share: the bytes waiting, and since when
+/// the queue has been full.
+struct OutQueue {
+    cap: usize,
+    stall: Duration,
+    /// Bytes of the frames queued and not yet written.
+    queued: AtomicUsize,
+    /// When a frame was first dropped for a full queue, until the writer next
+    /// brings the queue back under the cap.
+    over_since: Mutex<Option<Instant>>,
+}
+
+impl OutQueue {
+    /// Make room for a frame of `len` bytes: `false` if the queue is full (the
+    /// frame is dropped). The frame that crosses the cap is still taken, so
+    /// the queue holds at most the cap plus one frame.
+    fn admit(&self, len: usize) -> bool {
+        let mut over_since = self.over_since.lock().unwrap_or_else(|e| e.into_inner());
+        if self.queued.load(Ordering::Relaxed) >= self.cap {
+            if over_since.is_none() {
+                log::warn!(
+                    "keep pipe: the Keep is not reading ({} bytes waiting); new frames are dropped",
+                    self.queued.load(Ordering::Relaxed)
+                );
+                *over_since = Some(Instant::now());
+            }
+            return false;
+        }
+        self.queued.fetch_add(len, Ordering::Relaxed);
+        true
+    }
+
+    /// The writer is done with a frame of `len` bytes (written, or discarded
+    /// because stdout is gone).
+    fn written(&self, len: usize) {
+        let mut over_since = self.over_since.lock().unwrap_or_else(|e| e.into_inner());
+        let left = self.queued.fetch_sub(len, Ordering::Relaxed).saturating_sub(len);
+        if left < self.cap {
+            *over_since = None;
+        }
+    }
+}
+
 /// The one way to stdout. A frame sent here from any thread is queued, in the
 /// order of the `send` calls, and the writer thread writes it whole.
 #[derive(Clone)]
 pub struct PipeOut {
     tx: mpsc::Sender<Outgoing>,
+    queue: Arc<OutQueue>,
 }
 
 impl PipeOut {
-    /// Queue `message` for the Keep. Never blocks.
+    /// Queue `message` for the Keep. Never blocks. Dropped, with a warning,
+    /// while the queue is full ([`OUT_QUEUE_CAP`]).
     pub fn send(&self, message: &FromChild) {
         match encode_from_child(message) {
             Ok(frame) => {
+                let len = frame.len();
+                if !self.queue.admit(len) {
+                    return;
+                }
                 // The writer is gone only when the process is ending.
-                let _ = self.tx.send(Outgoing::Frame(frame));
+                if self.tx.send(Outgoing::Frame(frame)).is_err() {
+                    self.queue.queued.fetch_sub(len, Ordering::Relaxed);
+                }
             }
             Err(e) => log::error!("keep pipe: a frame was not sent: {e}"),
         }
+    }
+
+    /// The Keep has not read for [`OUT_STALL`]: the queue has been full, with
+    /// frames dropped, the whole time. The loop then saves the world and exits
+    /// non-zero, so the Keep can start it again.
+    pub fn stalled(&self) -> bool {
+        let over_since = self.queue.over_since.lock().unwrap_or_else(|e| e.into_inner());
+        over_since.is_some_and(|since| since.elapsed() >= self.queue.stall)
+    }
+
+    /// Bytes of frames queued and not yet written.
+    #[cfg(test)]
+    pub(crate) fn queued_bytes(&self) -> usize {
+        self.queue.queued.load(Ordering::Relaxed)
     }
 
     /// Wait, up to `wait`, until everything queued before this call has been
@@ -342,28 +415,36 @@ impl PipeOut {
     }
 }
 
-/// Start the writer thread on `out` (stdout, or a test's buffer).
+/// Start the writer thread on `out` (a test's buffer), with the real queue
+/// bounds. The server itself starts it through [`spawn_writer_bounded`].
+#[cfg(test)]
 pub fn spawn_writer(out: impl Write + Send + 'static) -> io::Result<PipeOut> {
-    let (tx, rx) = mpsc::channel();
-    thread::Builder::new().name("keep-pipe-out".into()).spawn(move || write_loop(out, rx))?;
-    Ok(PipeOut { tx })
+    spawn_writer_bounded(out, OUT_QUEUE_CAP, OUT_STALL)
 }
 
-fn write_loop(mut out: impl Write, rx: mpsc::Receiver<Outgoing>) {
+/// [`spawn_writer`] with its queue's cap and stall time given (short ones in
+/// tests).
+pub fn spawn_writer_bounded(out: impl Write + Send + 'static, cap: usize, stall: Duration) -> io::Result<PipeOut> {
+    let (tx, rx) = mpsc::channel();
+    let queue = Arc::new(OutQueue { cap, stall, queued: AtomicUsize::new(0), over_since: Mutex::new(None) });
+    let writer_queue = queue.clone();
+    thread::Builder::new().name("keep-pipe-out".into()).spawn(move || write_loop(out, rx, &writer_queue))?;
+    Ok(PipeOut { tx, queue })
+}
+
+fn write_loop(mut out: impl Write, rx: mpsc::Receiver<Outgoing>, queue: &OutQueue) {
     let mut broken = false;
     for item in rx {
         match item {
             Outgoing::Frame(frame) => {
-                if broken {
-                    continue;
-                }
-                if let Err(e) = out.write_all(&frame).and_then(|()| out.flush()) {
+                if !broken && let Err(e) = out.write_all(&frame).and_then(|()| out.flush()) {
                     // The Keep is gone (a closed stdout is `BrokenPipe`: Rust
                     // ignores SIGPIPE). Nothing more can reach it; the server
                     // still saves on its way out.
                     log::warn!("keep pipe: stdout is closed ({e}); nothing more is sent");
                     broken = true;
                 }
+                queue.written(frame.len());
             }
             Outgoing::Flush(done) => {
                 let _ = done.send(());
@@ -398,8 +479,10 @@ struct PeerShared {
 struct PeerSlot {
     tx: mpsc::Sender<Packet>,
     shared: Arc<PeerShared>,
-    /// Over the inbound bound: the server's `InboundQueue` disconnects the
-    /// peer on its next read, and what it still sends is dropped.
+    /// Over the inbound bound, for good: the message that crossed it was still
+    /// handed over, so the server's own `InboundQueue::push` overflows and
+    /// releases the peer, and everything the peer sends after that is dropped
+    /// here. It is never reset: a released peer has no later use for it.
     over: bool,
 }
 
@@ -426,7 +509,7 @@ impl PeerSlot {
             return;
         }
         if crossing {
-            log::warn!("keep pipe: peer {peer} has too many packets waiting; dropping the rest until the server reads");
+            log::warn!("keep pipe: peer {peer} has too many packets waiting; dropping the rest");
             self.over = true;
         }
     }
@@ -638,9 +721,12 @@ fn read_loop(
         };
         let Some(max) = max_players else {
             match message {
+                ToChild::Hello { proto: PROTO, max_players: 0 } => {
+                    break Control::Fatal("the Keep's Hello gives the world no seats (max_players is 0)".to_string());
+                }
                 ToChild::Hello { proto: PROTO, max_players: seats } => {
-                    max_players = Some(usize::from(seats.max(1)));
-                    let _ = control.send(Control::Hello { max_players: seats.max(1) });
+                    max_players = Some(usize::from(seats));
+                    let _ = control.send(Control::Hello { max_players: seats });
                     continue;
                 }
                 ToChild::Hello { proto, .. } => {
@@ -653,7 +739,10 @@ fn read_loop(
             ToChild::Hello { .. } => break Control::Fatal("a second Hello".to_string()),
             ToChild::Joined { peer, binding } => {
                 if peers.contains_key(&peer) {
-                    log::warn!("keep pipe: peer {peer} joined twice; the second is ignored");
+                    // Two live connections under one id would put the second's
+                    // packets into the first's transport, binding and seat.
+                    // Neither is served: the server saves and exits.
+                    break Control::Fatal(format!("peer {peer} joined twice without leaving"));
                 } else if peers.len() >= max {
                     log::info!("keep pipe: peer {peer} joined a full world ({max} players)");
                     out.send(&FromChild::Disconnect { peer, reason: WORLD_FULL.to_string() });
