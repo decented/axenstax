@@ -39,3 +39,9 @@ def test_more_games_icons_are_served():
         r = client.get(game["icon"])
         assert r.status_code == 200
         assert r.headers["content-type"] == "image/png"
+
+
+def test_every_marketing_page_links_more_games_in_its_nav_and_footer():
+    for path in ("/", "/will-it-run", "/experiences", "/roadmap", "/safety", "/support", "/privacy", "/more-games"):
+        text = client.get(path).text
+        assert text.count('href="/more-games"') == 2, path
