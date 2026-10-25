@@ -70,6 +70,10 @@ echo ">>> [1/5] cargo ndk build ($PROFILE)"
 export ANDROID_NDK_HOME="$NDK"
 export RUSTFLAGS="${RUSTFLAGS:-} -Clink-arg=-lc++abi"
 
+# Build against the manifest's minSdkVersion (24). cargo-ndk otherwise targets API 21,
+# where libc has no getifaddrs, and the link fails on it.
+export CARGO_NDK_PLATFORM="${CARGO_NDK_PLATFORM:-24}"
+
 # Keep Android objects OUT of the engine's default target dir, so an Android
 # build never invalidates the host/WASM caches (and vice versa) — they use
 # different target triples and would otherwise thrash each other on a machine
