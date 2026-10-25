@@ -95,7 +95,7 @@ quinn = "0.11"
 # pinned to a commit on its public repo. NATIVE-ONLY: it must never enter the wasm32 graph (the
 # browser has no QUIC and no sockets). The one `fray-relays` copy in the graph is
 # the one fray-net itself depends on; do not add a second.
-decented-net = { package = "fray-net", git = "https://github.com/forgesworn/fray", rev = "ff6d60331ffd8e3501085765fe597354c0b7056d" }
+decented-net = { package = "fray-net", git = "https://github.com/forgesworn/fray", rev = "c1afae016fd159cc130f8157b556c15b14f04fc9" }
 # WebSocket transport for the dedicated server (and a native client that joins
 # it). Plain `ws` only — TLS for the browser is terminated by the Caddy front in
 # the Docker image, so the engine never needs a TLS stack here. `futures-util`
