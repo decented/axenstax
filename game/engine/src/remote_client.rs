@@ -432,6 +432,9 @@ pub struct RemoteClient {
     pending_action_ack: Option<crate::action_wire::AppliedActionAck>,
     queued_recovery_fence: Option<crate::action_identity::RecoveryCut>,
     transport: Box<dyn ClientTransport>,
+    /// Return passes a Keep sent this connection, until the game saves them in My Keeps.
+    #[cfg(not(target_arch = "wasm32"))]
+    keep_passes: crate::keeps::PassInbox,
     pub state: ConnectionState,
     /// The sequence number (`InputPacket.tick`) the NEXT input goes out with:
     /// 1, 2, 3… per connection. The ONE input counter of a joined session —
@@ -852,6 +855,8 @@ impl RemoteClient {
             pending_difficulty: None,
             pending_world_time: None,
             pending_exhibits: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            keep_passes: Default::default(),
             pending_joined_world: None,
             join: JoinFlow::Sent,
             roster: HashMap::new(),
@@ -932,6 +937,8 @@ impl RemoteClient {
             pending_difficulty: None,
             pending_world_time: None,
             pending_exhibits: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            keep_passes: Default::default(),
             pending_joined_world: None,
             join: JoinFlow::AwaitingChallenge { base, driver: Some(driver) },
             roster: HashMap::new(),
@@ -1531,6 +1538,14 @@ impl RemoteClient {
                             changed = true;
                         }
                     }
+                    // A Keep's return pass: believed only from the host this link proved
+                    // (`keeps::PassInbox::offer`). The web build never joins a Keep, so a
+                    // pass there falls through to the unknown arm below.
+                    #[cfg(not(target_arch = "wasm32"))]
+                    PacketType::KeepPass => {
+                        let proven = self.transport.proven_host().map(|host| host.key);
+                        self.keep_passes.offer(proven, payload);
+                    }
                     _ => {
                         // Unknown or unexpected packet type
                     }
@@ -1991,6 +2006,20 @@ impl RemoteClient {
         self.respawn_resend_from = None;
         self.state = ConnectionState::Disconnected;
         log::info!("Disconnected from server");
+    }
+
+    /// The Keep's return passes received since the last call, for the game to save in
+    /// My Keeps. Each names the host this link proved (anything else was dropped).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn take_keep_passes(&mut self) -> Vec<protocol::KeepPass> {
+        self.keep_passes.take()
+    }
+
+    /// The host this client's link proved (its key and the name it gave), when the
+    /// transport knows it: a join through Fray does, whether by code or by invite.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn proven_host(&self) -> Option<crate::transport::ProvenHost> {
+        self.transport.proven_host()
     }
 
     /// Whether the client is connected and playing.

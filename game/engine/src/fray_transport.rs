@@ -62,7 +62,7 @@ use decented_net::{
 
 use crate::network::{Liveness, MAX_FRAME_LEN, MAX_OUTBOUND_QUEUE_BYTES};
 use crate::transport::{
-    ClientTransport, Packet, ServerTransport, INBOUND_ENTRY_OVERHEAD, MAX_INBOUND_BYTES,
+    ClientTransport, Packet, ProvenHost, ServerTransport, INBOUND_ENTRY_OVERHEAD, MAX_INBOUND_BYTES,
 };
 
 /// The app tag that namespaces AxeNStax's Fray room codes, QUIC ALPN and LAN
@@ -471,6 +471,10 @@ impl ClientInner {
 pub struct FrayClientTransport {
     inner: Mutex<ClientInner>,
     binding: OnceLock<[u8; 32]>,
+    /// The host Fray proved when it reported `Connected`: set by
+    /// [`FrayClientTransport::already_connected_to`] or, for a join still in
+    /// progress, when that event is read.
+    proven: OnceLock<Box<ProvenHost>>,
 }
 
 impl FrayClientTransport {
@@ -486,6 +490,7 @@ impl FrayClientTransport {
                 closed: false,
             }),
             binding: OnceLock::new(),
+            proven: OnceLock::new(),
         }
     }
 
@@ -495,6 +500,14 @@ impl FrayClientTransport {
         if let Ok(mut inner) = transport.inner.lock() {
             inner.connected = true;
         }
+        transport
+    }
+
+    /// [`already_connected`](FrayClientTransport::already_connected) for a
+    /// caller that read `Connected` and keeps the host it proved.
+    pub fn already_connected_to(handle: ClientHandle, host: ProvenHost) -> FrayClientTransport {
+        let transport = Self::already_connected(handle);
+        let _ = transport.proven.set(Box::new(host));
         transport
     }
 
@@ -545,7 +558,8 @@ impl ClientTransport for FrayClientTransport {
             let event = inner.handle.as_ref()?.poll()?;
             match event {
                 ClientEvent::Progress { .. } | ClientEvent::Lossy(_) => {}
-                ClientEvent::Connected { .. } => {
+                ClientEvent::Connected { host_pubkey, host_name, .. } => {
+                    let _ = self.proven.set(Box::new(ProvenHost { key: host_pubkey.to_bytes(), name: host_name }));
                     inner.connected = true;
                     inner.held_bytes = 0;
                     if let Some(handle) = &inner.handle {
@@ -589,6 +603,10 @@ impl ClientTransport for FrayClientTransport {
     /// `RemoteClient::poll` expects (it reads this before it drains).
     fn is_closed(&self) -> bool {
         self.inner.lock().map_or(true, |inner| inner.closed)
+    }
+
+    fn proven_host(&self) -> Option<ProvenHost> {
+        self.proven.get().map(|host| (**host).clone())
     }
 }
 

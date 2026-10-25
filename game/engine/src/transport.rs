@@ -253,6 +253,23 @@ pub trait ClientTransport: MaybeSend {
     fn is_closed(&self) -> bool {
         false
     }
+    /// The host this link proved to be the one it dialled (the key the host's
+    /// signed welcome was made with, and the name it gave), once known. Fray
+    /// transports know it from `ClientEvent::Connected`; a return pass is
+    /// believed only from this key. `None` for transports that prove none. Native
+    /// only: the web build never joins a Keep.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn proven_host(&self) -> Option<ProvenHost> {
+        None
+    }
+}
+
+/// A host a transport has proved: its runtime public key and its display name.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProvenHost {
+    pub key: [u8; 32],
+    pub name: String,
 }
 
 // --- Channel transport (in-process, zero-latency) ---

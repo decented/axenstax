@@ -96,6 +96,10 @@ pub fn parse_add_friend(text: &str, now: u64) -> Result<AddFriendInput, String> 
     if t.is_empty() {
         return Err("Paste an invite link or a friend's npub.".to_string());
     }
+    // A Keep link is for Join Game: it is not a friend's invite and never reaches that parser.
+    if crate::keeps::is_keep_text(t) {
+        return Err(crate::keeps::NOT_A_FRIEND_LINK.to_string());
+    }
     if t.starts_with("axenstax://") {
         return crate::invite::Invite::parse(t, now)
             .map(|i| AddFriendInput::Invite(Box::new(i)))
@@ -439,6 +443,10 @@ pub fn draw_friends_column(ui: &mut egui::Ui, state: &mut crate::menu::MenuState
             let servers_action = crate::menu::draw_my_servers_column_inner(ui, state);
             if !matches!(servers_action, MenuAction::None) {
                 action = servers_action;
+            }
+            let keeps_action = crate::menu::draw_my_keeps_column_inner(ui, state);
+            if !matches!(keeps_action, MenuAction::None) {
+                action = keeps_action;
             }
         });
 

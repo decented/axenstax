@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 use decented_net::{ClientEvent, ClientHandle, DisconnectReason, Identity, LanRoom, NetConfig};
 
 use crate::fray_transport::{net_config, FrayClientTransport};
+use crate::transport::ProvenHost;
 
 /// How long the host waits for one of its relays before the panel says the code
 /// is not out and the room is on this network only. Fray keeps trying after.
@@ -49,9 +50,14 @@ pub fn session_identity() -> Identity {
 }
 
 /// A "Join Game" text that names a dedicated server (the WebSocket path, and
-/// `axenstax://` connect strings) rather than a room code.
+/// `axenstax://` connect strings) rather than a room code. A Keep invite link
+/// (`axenstax://keep/...`, in any case, or cut short) is not one: it joins a
+/// Keep and never reaches the WebSocket path.
 pub fn is_server_address(text: &str) -> bool {
     let t = text.trim();
+    if crate::keeps::is_keep_text(t) {
+        return false;
+    }
     t.starts_with("ws://") || t.starts_with("wss://") || t.starts_with("axenstax://")
 }
 
@@ -156,6 +162,9 @@ pub struct PendingJoin {
     handle: Option<ClientHandle>,
     /// What the player picked: a room's name, or the code as typed.
     label: String,
+    /// A Keep invite join: a Keep says nothing to an invite it does not honour,
+    /// so its failures are worded for that (`keeps::invite_failure_text`).
+    invite: bool,
 }
 
 impl PendingJoin {
@@ -171,13 +180,29 @@ impl PendingJoin {
         Self::over(handle, decented_net::room::display_code(code))
     }
 
+    /// Join a Keep by invite: the Keep's runtime key and the invite's secret
+    /// (from an `axenstax://keep/` link or a saved Keep), found over the
+    /// player's relays. The host must prove it is that key or the join fails.
+    pub fn invite(invite: &fray_keep::Invite, relays: &[String]) -> PendingJoin {
+        let handle = decented_net::join_invite(&play_config(relays), &session_identity(), &invite.secret, invite.host_key);
+        let mut join = Self::over(handle, crate::keeps::label(&invite.host_key));
+        join.invite = true;
+        join
+    }
+
     /// Follow a join started elsewhere (tests start theirs on loopback).
     pub fn over(handle: ClientHandle, label: String) -> PendingJoin {
-        PendingJoin { handle: Some(handle), label }
+        PendingJoin { handle: Some(handle), label, invite: false }
     }
 
     pub fn label(&self) -> &str {
         &self.label
+    }
+
+    /// Word this join's failures as a Keep invite join's (the probe starts its own handle).
+    #[cfg(test)]
+    pub fn set_invite(&mut self, invite: bool) {
+        self.invite = invite;
     }
 
     /// Read Fray's join events, stopping exactly at `Connected`: the host's
@@ -189,17 +214,26 @@ impl PendingJoin {
         while let Some(event) = handle.poll() {
             match event {
                 ClientEvent::Progress { .. } | ClientEvent::Lossy(_) => {}
-                ClientEvent::Connected { .. } => {
+                ClientEvent::Connected { host_pubkey, host_name, .. } => {
                     let Some(handle) = self.handle.take() else { break };
-                    return JoinPoll::Connected(FrayClientTransport::already_connected(handle));
+                    // The host's proof travels with the link: a return pass is
+                    // believed only from this key.
+                    let host = ProvenHost { key: host_pubkey.to_bytes(), name: host_name };
+                    return JoinPoll::Connected(FrayClientTransport::already_connected_to(handle, host));
                 }
                 ClientEvent::Failed { stage, reason } => {
                     log::info!("Fray: joining {} failed at {stage:?}: {reason}", self.label);
                     self.handle = None;
+                    if self.invite {
+                        return JoinPoll::Failed(crate::keeps::invite_failure_text(&reason, &self.label));
+                    }
                     return JoinPoll::Failed(self.failed(&reason.to_string()));
                 }
                 ClientEvent::Disconnected { reason } => {
                     self.handle = None;
+                    if self.invite && matches!(reason, DisconnectReason::Kicked) {
+                        return JoinPoll::Failed(crate::keeps::UNREACHABLE.to_string());
+                    }
                     let why = match reason {
                         DisconnectReason::Kicked => "the host turned us away".to_string(),
                         DisconnectReason::Error(e) => e,

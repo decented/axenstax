@@ -27,7 +27,7 @@ pub const GAMES_NOT_LISTENING: &str =
 pub const CODE_HEADING: &str = "ROOM CODE";
 pub const CODE_HINT: &str = "KMT RWX";
 pub const CODE_HELP: &str =
-    "The host's code is in their pause menu. A server address (axenstax://...) works here too.";
+    "The host's code is in their pause menu. A Keep invite link or a server address (axenstax://...) works here too.";
 
 /// Said when the Join field holds an `ip:port`, which no longer joins anything.
 pub const ADDRESS_JOIN_RETIRED: &str =

@@ -1155,8 +1155,8 @@ impl super::GameState {
         // A join belongs to the lobby it was started from: once the player
         // has gone into any world, a late `Connected` must not pull them into
         // the host's. Dropping it closes the link.
-        if !matches!(self.mode, GameMode::Menu(_)) {
-            self.fray_join = None;
+        if !matches!(self.mode, GameMode::Menu(_)) && self.fray_join.take().is_some() {
+            self.pending_keep = None;
         }
         let Some(join) = self.fray_join.as_mut() else {
             return;
@@ -1166,6 +1166,7 @@ impl super::GameState {
             crate::fray_play::JoinPoll::Waiting => {}
             crate::fray_play::JoinPoll::Failed(why) => {
                 self.fray_join = None;
+                self.pending_keep = None;
                 if let GameMode::Menu(ref mut menu_state) = self.mode {
                     menu_state.notice = Some(why);
                 }
@@ -1173,7 +1174,18 @@ impl super::GameState {
             crate::fray_play::JoinPoll::Connected(transport) => {
                 self.fray_join = None;
                 let transport: Box<dyn crate::transport::ClientTransport> = Box::new(transport);
-                let client = match crate::signet::native_signer::restore_signer() {
+                let signer = crate::signet::native_signer::restore_signer();
+                // A Keep's world refuses guests: with no Signet session at the last moment
+                // (the player signed out while the join was finding the Keep), say so and
+                // leave, rather than join as a guest and be turned away.
+                if self.pending_keep.is_some() && !matches!(signer, Ok(Some(_))) {
+                    self.pending_keep = None;
+                    if let GameMode::Menu(ref mut menu_state) = self.mode {
+                        menu_state.notice = Some(crate::keeps::SIGN_IN_FIRST.to_string());
+                    }
+                    return;
+                }
+                let client = match signer {
                     Ok(Some(session)) => crate::remote_client::RemoteClient::connect_authed_on_transport(
                         transport,
                         "Player",
@@ -1201,6 +1213,22 @@ impl super::GameState {
                 self.pending_online_world = Some("remote_game".to_string());
             }
         }
+    }
+
+    /// My Keeps learns from the connection, every frame and in every mode (a pass can
+    /// arrive while the world loads): the return pass a Keep sends a player who joined by
+    /// room code, and the Keep a player joined by invite once they are seated. A Keep
+    /// that cannot be saved is logged and does not stop the game.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn poll_keeps(&mut self) {
+        let Some(client) = self.remote_client.as_mut() else {
+            // The join is over (or was never a Keep's) unless it is still finding its host.
+            if self.fray_join.is_none() {
+                self.pending_keep = None;
+            }
+            return;
+        };
+        crate::keeps::settle(client, &mut self.pending_keep, &crate::keeps::path(), crate::keeps::unix_now());
     }
 
     /// Stop hosting/joining online: give the router its port back, close the
@@ -8055,6 +8083,9 @@ impl super::GameState {
         // flight, every frame and in every mode (a join starts in the lobby).
         #[cfg(not(target_arch = "wasm32"))]
         self.poll_fray();
+        // My Keeps: save a return pass a Keep sent, and a Keep joined by invite once seated.
+        #[cfg(not(target_arch = "wasm32"))]
+        self.poll_keeps();
         // World handover — the independent control pump, every frame and in
         // every mode (never from the game tick): a session outlives the
         // joined world it started in, and the source's freeze stops the tick.
@@ -9410,6 +9441,46 @@ impl super::GameState {
                 crate::menu::MenuAction::HostWorld(folder_name) => {
                     load_world = Some(folder_name);
                 }
+                // A Keep invite link (`axenstax://keep/...`, alone or in a message): checked
+                // before every other reading of an `axenstax://` text, so it never reaches the
+                // WebSocket, npub or friend-invite paths. Signed out: say so, dial nothing.
+                // A Keep not in My Keeps asks first. See `keeps::route_join`.
+                #[cfg(not(target_arch = "wasm32"))]
+                crate::menu::MenuAction::JoinGame(text) if crate::keeps::is_keep_text(&text) => {
+                    let signed_in = crate::signet::native_signer::load_identity().npub().is_some();
+                    let saved = crate::keeps::load_list(&crate::keeps::path());
+                    let is_saved = |key: &[u8; 32]| fray_keep::keeps::contains(&saved, &fray_keep::hex_encode(key));
+                    match crate::keeps::route_join(&text, signed_in, is_saved) {
+                        crate::keeps::JoinRoute::NotKeep => {}
+                        crate::keeps::JoinRoute::BadLink => menu_state.notice = Some(crate::keeps::NOT_A_KEEP_LINK.to_string()),
+                        crate::keeps::JoinRoute::SignInFirst => menu_state.notice = Some(crate::keeps::SIGN_IN_FIRST.to_string()),
+                        crate::keeps::JoinRoute::Confirm(invite) => {
+                            menu_state.notice = None;
+                            menu_state.dialog = crate::menu::MenuDialog::JoinKeep { invite };
+                        }
+                        crate::keeps::JoinRoute::Join(invite) => {
+                            let join = crate::fray_play::PendingJoin::invite(&invite, &self.graphics.online_relays);
+                            log::info!("Joining {} by invite over Fray", join.label());
+                            menu_state.notice = Some(crate::lan_ui::joining_notice(join.label()));
+                            self.fray_join = Some(join);
+                            self.pending_keep = Some(invite);
+                        }
+                    }
+                }
+                // From the confirm that follows a pasted link, or a row of My Keeps. Signed out is
+                // checked again here: a list row has not been through `route_join`.
+                #[cfg(not(target_arch = "wasm32"))]
+                crate::menu::MenuAction::JoinKeep(invite) => {
+                    if crate::signet::native_signer::load_identity().npub().is_none() {
+                        menu_state.notice = Some(crate::keeps::SIGN_IN_FIRST.to_string());
+                    } else {
+                        let join = crate::fray_play::PendingJoin::invite(&invite, &self.graphics.online_relays);
+                        log::info!("Joining {} by invite over Fray", join.label());
+                        menu_state.notice = Some(crate::lan_ui::joining_notice(join.label()));
+                        self.fray_join = Some(join);
+                        self.pending_keep = Some(invite);
+                    }
+                }
                 // B5 — anything but a server address is a room code: join over
                 // Fray on the player's relays. The join is held in the lobby
                 // until it reaches the host (`poll_fray`), so a wrong code or
@@ -9426,6 +9497,7 @@ impl super::GameState {
                             let join = crate::fray_play::PendingJoin::code(&code, &self.graphics.online_relays);
                             menu_state.notice = Some(crate::lan_ui::joining_notice(join.label()));
                             self.fray_join = Some(join);
+                            self.pending_keep = None;
                         }
                         None => menu_state.notice = Some(crate::lan_ui::bad_code_notice(&text).to_string()),
                     }
@@ -9437,6 +9509,7 @@ impl super::GameState {
                     let join = crate::fray_play::PendingJoin::lan(&room, &self.graphics.online_relays);
                     menu_state.notice = Some(crate::lan_ui::joining_notice(join.label()));
                     self.fray_join = Some(join);
+                    self.pending_keep = None;
                 }
                 #[cfg(not(target_arch = "wasm32"))]
                 crate::menu::MenuAction::JoinGame(address) => {

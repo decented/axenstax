@@ -10,7 +10,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use decented_net::relay::FakeRelayHub;
-use decented_net::{host, host_with_relay, join_lan, join_with_relay, lan_browse, Identity, Keys};
+use decented_net::{host, host_with_relay, join_invite_with_relay, join_lan, join_with_relay, lan_browse, Identity, Keys};
 
 use super::*;
 use crate::hosted_server::{FrayStart, HostWorld, HostedServer};
@@ -463,4 +463,46 @@ fn a_room_that_cannot_start_fails_on_a_later_poll() {
     for _ in 0..5 {
         server.tick();
     }
+}
+
+/// A Keep join by invite carries the host's proof with it: the key the signed welcome was
+/// made with is the one the invite named, and the connected client can read it (a return
+/// pass is believed only from that key). A code join carries it too.
+#[test]
+fn an_invite_and_a_code_join_both_hand_the_client_the_hosts_proven_key_and_name() {
+    let hub = FakeRelayHub::new();
+    let cfg = test_cfg();
+    let mut server = start_host(|room| host_with_relay(&cfg, &Identity::ephemeral(), room, Some(Box::new(hub.client()))));
+    let secret = [0x5a; 32];
+    let (host_key, code) = {
+        let handle = server.fray_room().expect("a Fray room").handle();
+        handle.add_invite(secret).expect("the room takes an invite");
+        (handle.runtime_key().to_bytes(), handle.code().to_string())
+    };
+
+    let mut join = PendingJoin::over(
+        join_invite_with_relay(&cfg, &Identity::ephemeral(), &secret, host_key, Box::new(hub.client())),
+        crate::keeps::label(&host_key),
+    );
+    join.invite = true;
+    let transport = reach_host(&mut server, join);
+    let proven = transport.proven_host().expect("the invite join proved the host");
+    assert_eq!(proven.key, host_key, "the key the invite named");
+    assert_eq!(proven.name, ROOM_NAME, "the name Fray's welcome carries");
+    let keys = Keys::generate();
+    let mut client = RemoteClient::connect_authed_on_transport(
+        Box::new(transport),
+        "Joiner",
+        driver(keys, Arc::new(Mutex::new(None)), None),
+        None,
+    );
+    settle(&mut server, &mut client);
+    assert!(client.is_connected(), "joined: {}", state_name(&client.state));
+    assert_eq!(client.proven_host(), Some(proven.clone()), "the client holds what the link proved");
+
+    // By room code the proof is the same, so a pass can arrive after a code join.
+    let typed = decented_net::room::display_code(&code);
+    let join = PendingJoin::over(join_with_relay(&cfg, &Identity::ephemeral(), &typed, Box::new(hub.client())), typed);
+    let transport = reach_host(&mut server, join);
+    assert_eq!(transport.proven_host(), Some(proven));
 }

@@ -70,6 +70,11 @@ pub enum MenuDialog {
     /// the web build is the anonymous local taster and has no contacts book.
     #[cfg(not(target_arch = "wasm32"))]
     AddFriend { input: String, error: Option<String> },
+    /// A pasted Keep link for a Keep that is not in My Keeps: asked before anything is
+    /// dialled, so a link from any app cannot make the game connect and show the player's
+    /// identity to its maker without a yes. Native only. (`Invite`'s `Debug` hides the secret.)
+    #[cfg(not(target_arch = "wasm32"))]
+    JoinKeep { invite: crate::keeps::Invite },
     /// Web-only: an explainer popup for a capability that lives in the native
     /// desktop app (Stash / Join / Host). The web build is a local sandbox, so
     /// these are shown as clickable explainers that point at the free app.
@@ -228,6 +233,10 @@ pub enum MenuAction {
     /// A pasted npub: adds a contact to call later.
     #[cfg(not(target_arch = "wasm32"))]
     AddFriendNpub(String),
+    /// Join a Keep by its invite: from the confirm that follows a pasted link, or a row
+    /// of My Keeps (no confirm: the Keep is already one the player joined).
+    #[cfg(not(target_arch = "wasm32"))]
+    JoinKeep(crate::keeps::Invite),
 }
 
 /// One typed item in the Stash Column — a browsed (or embedded) Beacon item the
@@ -387,6 +396,13 @@ pub struct MenuState {
     /// which the web taster never mounts (no multiplayer there).
     #[cfg(not(target_arch = "wasm32"))]
     pub my_servers: crate::my_servers::MyServers,
+    /// My Keeps: the Keeps the player has been let into, newest first. Read when the lobby
+    /// is built (the lobby is built each time the player comes back to it) and after a Forget.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub keeps: Vec<crate::keeps::Keep>,
+    /// The Keep (its host key) whose Forget has had its first tap.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub keep_forget_armed: Option<String>,
     /// Why the player just landed back in the lobby when it wasn't their
     /// choice ("Disconnected from host", a kick, a Trial that couldn't open).
     /// Shown as a banner until dismissed.
@@ -493,6 +509,10 @@ impl MenuState {
             stash_sync_msg: None,
             #[cfg(not(target_arch = "wasm32"))]
             my_servers: crate::my_servers::MyServers::load(),
+            #[cfg(not(target_arch = "wasm32"))]
+            keeps: crate::keeps::load_list(&crate::keeps::path()),
+            #[cfg(not(target_arch = "wasm32"))]
+            keep_forget_armed: None,
             notice: None,
             expanded_trial: None,
             trial_info: None,
@@ -1351,6 +1371,65 @@ pub(crate) fn draw_my_servers_column_inner(
     if let Some(npub) = remove_npub {
         state.my_servers.remove(&npub);
         state.my_servers.save();
+    }
+    action
+}
+
+/// My Keeps: the Keeps the player has been let into, under My Servers in the friends
+/// column. A row's Join dials the Keep with the invite it saved (no confirm: the player
+/// already agreed to this Keep); Forget needs a second tap. Hidden while the list is empty.
+/// Visual placement/feel = playtest boundary.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn draw_my_keeps_column_inner(ui: &mut egui::Ui, state: &mut MenuState) -> MenuAction {
+    let mut action = MenuAction::None;
+    if state.keeps.is_empty() {
+        return action;
+    }
+    let now = crate::keeps::unix_now();
+    let rows = crate::keeps::rows(&state.keeps, now);
+
+    ui.add_space(8.0);
+    ui.label(egui::RichText::new(crate::keeps::MY_KEEPS).size(18.0).color(TITLE_COLOR).strong());
+    ui.add_space(6.0);
+    ui.separator();
+
+    let mut forget: Option<String> = None;
+    for row in &rows {
+        ui.add_space(6.0);
+        ui.label(egui::RichText::new(row.name.as_str()).size(14.0).color(TEXT_COLOR).strong());
+        ui.label(egui::RichText::new(row.when.as_str()).size(10.0).color(DIM_TEXT));
+        let armed = state.keep_forget_armed.as_deref() == Some(row.host_key.as_str());
+        ui.horizontal(|ui| {
+            if ui.button(egui::RichText::new("Join").size(12.0)).clicked() {
+                let invite = state
+                    .keeps
+                    .iter()
+                    .find(|k| k.host_key == row.host_key)
+                    .and_then(|k| k.keys())
+                    .map(|(host_key, secret)| crate::keeps::Invite { host_key, secret });
+                if let Some(invite) = invite {
+                    state.keep_forget_armed = None;
+                    action = MenuAction::JoinKeep(invite);
+                }
+            }
+            let forget_label = if armed { "Forget for sure" } else { "Forget" };
+            if ui.button(egui::RichText::new(forget_label).size(12.0)).clicked()
+                && crate::keeps::tap_forget(&mut state.keep_forget_armed, &row.host_key)
+            {
+                forget = Some(row.host_key.clone());
+            }
+        });
+        if armed {
+            ui.label(egui::RichText::new(crate::keeps::FORGET_CONFIRM).size(11.0).color(DIM_TEXT));
+        }
+        ui.separator();
+    }
+
+    if let Some(host_hex) = forget
+        && let Some(host_key) = fray_keep::parse_hex32(&host_hex)
+    {
+        crate::keeps::forget(&crate::keeps::path(), &host_key);
+        state.keeps = crate::keeps::load_list(&crate::keeps::path());
     }
     action
 }
@@ -2537,6 +2616,30 @@ pub fn draw_main_menu(ctx: &egui::Context, state: &mut MenuState) -> MenuAction 
                 }
                 _ => {}
             }
+            return action;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        MenuDialog::JoinKeep { invite } => {
+            egui::Window::new(crate::keeps::CONFIRM_TITLE)
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .show(ctx, |ui| {
+                    ui.set_max_width(380.0);
+                    ui.label(egui::RichText::new(crate::keeps::label(&invite.host_key)).strong());
+                    ui.add_space(6.0);
+                    ui.label(crate::keeps::CONFIRM_BODY);
+                    ui.add_space(14.0);
+                    ui.horizontal(|ui| {
+                        if ui.button(egui::RichText::new("Join").strong()).clicked() {
+                            action = MenuAction::JoinKeep(invite);
+                            state.dialog = MenuDialog::None;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            state.dialog = MenuDialog::None;
+                        }
+                    });
+                });
             return action;
         }
         MenuDialog::ResetWorkshop => {

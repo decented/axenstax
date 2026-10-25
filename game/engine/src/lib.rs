@@ -179,6 +179,10 @@ mod guardian_copy;
 // the web build is the anonymous local sandbox and carries no online surface.
 #[cfg(not(target_arch = "wasm32"))]
 mod invite;
+// Keep invite links, return passes and My Keeps. Native only: the web build is the
+// anonymous local taster (`tools/smoke/forbidden-symbol.mjs` checks).
+#[cfg(not(target_arch = "wasm32"))]
+mod keeps;
 // Online play by contact — the per-install runtime key + its persona
 // attestation. Native only (bunker signing, profile/ files).
 #[cfg(not(target_arch = "wasm32"))]
@@ -1331,6 +1335,10 @@ pub(crate) struct GameState {
     /// its host; `poll_fray` drives it from the lobby.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fray_join: Option<crate::fray_play::PendingJoin>,
+    /// The Keep the player is joining by its invite (a pasted link or a saved Keep),
+    /// until they are seated and it is saved in My Keeps (`poll_keeps`).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) pending_keep: Option<crate::keeps::Invite>,
     /// The Host button's result message, held until the world goes live: the
     /// world reset clears `toast` and toasts draw only while Playing, so a toast
     /// set at click time was never seen. Delivered on Loading -> Playing.
@@ -2087,6 +2095,8 @@ impl GameState {
             lan_host: None,
             #[cfg(not(target_arch = "wasm32"))]
             fray_join: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            pending_keep: None,
             #[cfg(not(target_arch = "wasm32"))]
             entry_toast: crate::lan_host::EntryToast::default(),
             remote_client: None,

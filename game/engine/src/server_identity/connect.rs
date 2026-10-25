@@ -44,6 +44,10 @@ pub fn build_npub_connect_string(operator_npub: &str) -> String {
 /// Parse a connect-string into a [`ConnectInfo`].
 #[allow(dead_code)] // consumed by the client join path; unit-tested
 pub fn parse_connect_string(s: &str) -> Result<ConnectInfo, String> {
+    // A Keep invite link joins a Keep (Join Game checks for it first); it is not a server.
+    if crate::keeps::is_keep_text(s) {
+        return Err("That is a Keep invite link, not a server address.".to_string());
+    }
     // npub-only form: `axenstax://npub1…` with no host separators ⇒ Resolve.
     if let Some(rest) = s.strip_prefix("axenstax://")
         && rest.starts_with("npub1")
