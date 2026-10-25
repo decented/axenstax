@@ -474,6 +474,7 @@ dependencies = [
  "egui-winit",
  "env_logger",
  "flate2",
+ "fray-keep",
  "fray-net",
  "futures-util",
  "getrandom 0.2.17",
@@ -1680,9 +1681,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "fray-keep"
+version = "0.1.0"
+source = "git+https://github.com/forgesworn/fray?rev=7462eee5a1908ed5a492278eb775c524e8b694eb#7462eee5a1908ed5a492278eb775c524e8b694eb"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "fray-net"
 version = "0.1.0"
-source = "git+https://github.com/forgesworn/fray?rev=c1afae016fd159cc130f8157b556c15b14f04fc9#c1afae016fd159cc130f8157b556c15b14f04fc9"
+source = "git+https://github.com/forgesworn/fray?rev=7462eee5a1908ed5a492278eb775c524e8b694eb#7462eee5a1908ed5a492278eb775c524e8b694eb"
 dependencies = [
  "argon2",
  "bytes",
@@ -1709,7 +1719,7 @@ dependencies = [
 [[package]]
 name = "fray-relays"
 version = "0.1.0"
-source = "git+https://github.com/forgesworn/fray?rev=c1afae016fd159cc130f8157b556c15b14f04fc9#c1afae016fd159cc130f8157b556c15b14f04fc9"
+source = "git+https://github.com/forgesworn/fray?rev=7462eee5a1908ed5a492278eb775c524e8b694eb#7462eee5a1908ed5a492278eb775c524e8b694eb"
 dependencies = [
  "log",
 ]
@@ -1717,7 +1727,7 @@ dependencies = [
 [[package]]
 name = "fray-session"
 version = "0.1.0"
-source = "git+https://github.com/forgesworn/fray?rev=c1afae016fd159cc130f8157b556c15b14f04fc9#c1afae016fd159cc130f8157b556c15b14f04fc9"
+source = "git+https://github.com/forgesworn/fray?rev=7462eee5a1908ed5a492278eb775c524e8b694eb#7462eee5a1908ed5a492278eb775c524e8b694eb"
 dependencies = [
  "getrandom 0.3.4",
  "nostr",

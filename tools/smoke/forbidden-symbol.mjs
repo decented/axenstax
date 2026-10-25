@@ -65,6 +65,7 @@ const FORBIDDEN = [
   ["/room invite", "room commands are native only"],
   ["haft-owner-proof", "agent ownership proof — native only"],
   ["axenstax://invite/", "online play by contact is native only — the web build is the anonymous local taster"],
+  ["axenstax://keep", "Keep invite links and My Keeps are native only — the web build is the anonymous local taster"],
   ["signet:contacts:proj:", "Signet contacts sync (signet/contacts_wire) is native only"],
   ["signet-contacts:pairing-code:v1", "Signet contacts pairing is native only"],
   // The web feedback channel — removed 2026-10-01. Native keeps its mailbox.

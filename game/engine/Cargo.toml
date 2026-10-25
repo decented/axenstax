@@ -95,7 +95,11 @@ quinn = "0.11"
 # pinned to a commit on its public repo. NATIVE-ONLY: it must never enter the wasm32 graph (the
 # browser has no QUIC and no sockets). The one `fray-relays` copy in the graph is
 # the one fray-net itself depends on; do not add a second.
-decented-net = { package = "fray-net", git = "https://github.com/forgesworn/fray", rev = "c1afae016fd159cc130f8157b556c15b14f04fc9" }
+decented-net = { package = "fray-net", git = "https://github.com/forgesworn/fray", rev = "7462eee5a1908ed5a492278eb775c524e8b694eb" }
+# The Keep invite link, finding it in pasted text, the saved-Keeps file (keeps.json) and the rule for
+# believing a return pass: one crate shared with the other games, from the same Fray revision as
+# `decented-net`. NATIVE-ONLY like `decented-net` (the web build has no Keeps); keep both on one rev.
+fray-keep = { git = "https://github.com/forgesworn/fray", rev = "7462eee5a1908ed5a492278eb775c524e8b694eb" }
 # WebSocket transport for the dedicated server (and a native client that joins
 # it). Plain `ws` only — TLS for the browser is terminated by the Caddy front in
 # the Docker image, so the engine never needs a TLS stack here. `futures-util`
