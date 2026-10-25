@@ -92,6 +92,13 @@ fn write_pass_file(path: &str, pass: &protocol::KeepPass) {
         options.mode(0o600);
     }
     let mut file = options.open(path).expect("the pass file is writable");
+    // `mode` above applies only when the file is created: a file that was already there keeps
+    // its old mode, so narrow it before the secret goes in.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600)).expect("the pass file is private");
+    }
     file.write_all(text.as_bytes()).expect("the pass file is writable");
 }
 
@@ -496,4 +503,31 @@ fn probe() {
     result["ok"] = json!(ok);
     emit(&result);
     assert!(ok, "the probe's reads, placement or seat did not all hold; see the JSON line");
+}
+
+#[cfg(all(test, unix))]
+mod pass_file_tests {
+    use std::os::unix::fs::PermissionsExt;
+
+    use super::*;
+
+    #[test]
+    fn the_pass_file_is_private_whether_or_not_it_was_already_there() {
+        let dir = std::env::temp_dir().join(format!("axenstax-probe-pass-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pass.json");
+        let path_str = path.to_str().unwrap();
+        let pass = protocol::KeepPass { host_key: [0xab; 32], secret: [0x01; 32] };
+        let mode = || std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+
+        write_pass_file(path_str, &pass);
+        assert_eq!(mode(), 0o600, "a new file");
+        // A file left from an earlier run with a wider mode is narrowed before the secret goes in.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_pass_file(path_str, &pass);
+        assert_eq!(mode(), 0o600, "an existing file");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains(&fray_keep::hex_encode(&pass.secret)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
