@@ -634,6 +634,25 @@ const STREAM_BUDGET: usize = 4;
 // real world-management menu and item/inventory system) were removed here —
 // zero references anywhere.
 
+/// Escape (the Android Back key) while the Settings panel is open: close it and clear the flag,
+/// returning to where it was opened from (the lobby menu, or the pause menu in a game). True
+/// when it did, in which case Escape does nothing else; false leaves the usual Escape chain
+/// (resume from the pause menu, quit from the bare lobby) to run.
+pub(crate) fn escape_closes_settings(mode: &mut GameMode, panel: &mut crate::menu::SettingsPanelState) -> bool {
+    match mode {
+        GameMode::Menu(menu) if menu.show_settings => {
+            menu.show_settings = false;
+            panel.open = false;
+            true
+        }
+        GameMode::Paused { .. } if panel.open => {
+            panel.open = false;
+            true
+        }
+        _ => false,
+    }
+}
+
 pub(crate) enum GameMode {
     Splash(crate::splash_ui::SplashState),
     /// Boxed — `MenuState` is by far the largest variant's payload (488 bytes),
@@ -2739,7 +2758,11 @@ impl ApplicationHandler for App {
                             // which would conflict with that match's mutable
                             // borrow of the `mode` field if called from inside it.
                             let any_panel_open = state.p0_ui_modal_open();
-                            let esc_action = match &mut state.mode {
+                            // Escape (Android Back) while Settings is open closes Settings and
+                            // nothing else: back to the lobby menu or the pause menu it was opened
+                            // from. It never quits the app or resumes the game from Settings.
+                            let settings_closed = escape_closes_settings(&mut state.mode, &mut state.settings_panel);
+                            let esc_action = if settings_closed { EscAction::Ignore } else { match &mut state.mode {
                                 GameMode::Splash(_) => EscAction::SkipSplash,
                                 // #7 — Loading is a single transient frame; ESC does nothing.
                                 GameMode::Loading(_) => EscAction::Ignore,
@@ -2795,7 +2818,7 @@ impl ApplicationHandler for App {
                                         EscAction::Pause
                                     }
                                 }
-                            };
+                            } };
                             match esc_action {
                                 EscAction::Ignore => {}
                                 EscAction::SkipSplash => {

@@ -354,3 +354,62 @@ fn a_tall_window_keeps_the_pause_menu_as_it_was() {
     let stash_y = texts(&rig.output).iter().find(|(t, _)| t.contains("Stash")).expect("no Stash button").1.y;
     assert!(y("Difficulty") < stash_y && stash_y < y("Resume"));
 }
+
+// ---- Escape (Android Back) with Settings open -----------------------------------------------
+
+use crate::{escape_closes_settings, GameMode};
+
+#[test]
+fn escape_in_the_lobbys_settings_closes_settings_and_returns_to_the_lobby_menu() {
+    let mut menu = MenuState::new();
+    menu.show_settings = true;
+    let mut mode = GameMode::Menu(Box::new(menu));
+    let mut panel = SettingsPanelState { open: true, ..Default::default() };
+    // True means Escape was spent on closing Settings: the Escape chain after it (which would
+    // quit the app from the bare lobby) does not run.
+    assert!(escape_closes_settings(&mut mode, &mut panel));
+    match &mode {
+        GameMode::Menu(menu) => assert!(!menu.show_settings, "Settings is still open"),
+        _ => panic!("Escape left the lobby menu"),
+    }
+    assert!(!panel.open);
+}
+
+#[test]
+fn escape_in_the_lobby_with_nothing_open_is_left_to_the_usual_chain() {
+    let mut mode = GameMode::Menu(Box::new(MenuState::new()));
+    let mut panel = SettingsPanelState::default();
+    assert!(!escape_closes_settings(&mut mode, &mut panel), "a bare lobby's Escape was swallowed");
+}
+
+#[test]
+fn escape_in_a_games_settings_returns_to_the_pause_menu_and_does_not_resume() {
+    let mut mode = GameMode::Paused { confirm_quit: false, confirm_creative: false };
+    let mut panel = SettingsPanelState { open: true, ..Default::default() };
+    assert!(escape_closes_settings(&mut mode, &mut panel));
+    assert!(matches!(mode, GameMode::Paused { .. }), "Escape from Settings left the pause menu");
+    assert!(!panel.open, "the Settings flag is still set");
+}
+
+#[test]
+fn the_next_pause_after_escaping_out_of_settings_shows_the_pause_menu_not_settings() {
+    let mut panel = SettingsPanelState { open: true, ..Default::default() };
+    let mut mode = GameMode::Paused { confirm_quit: false, confirm_creative: false };
+    assert!(escape_closes_settings(&mut mode, &mut panel));
+    // A second Escape is the pause menu's own: resume (the usual chain runs).
+    assert!(!escape_closes_settings(&mut mode, &mut panel), "a second Escape was swallowed");
+    // Play, pause again: the game draws Settings only while the flag is set.
+    mode = GameMode::Playing;
+    assert!(!escape_closes_settings(&mut mode, &mut panel));
+    mode = GameMode::Paused { confirm_quit: false, confirm_creative: false };
+    assert!(!panel.open, "the next pause would open Settings instead of the pause menu");
+    assert!(!escape_closes_settings(&mut mode, &mut panel));
+}
+
+#[test]
+fn escape_while_playing_or_paused_without_settings_is_left_to_the_usual_chain() {
+    let mut panel = SettingsPanelState::default();
+    for mut mode in [GameMode::Playing, GameMode::Paused { confirm_quit: false, confirm_creative: false }] {
+        assert!(!escape_closes_settings(&mut mode, &mut panel));
+    }
+}
