@@ -253,6 +253,13 @@ pub trait ClientTransport: MaybeSend {
     fn is_closed(&self) -> bool {
         false
     }
+    /// The words the host sent when it ended the link (a Keep telling a player why it let
+    /// them go), cleaned and short, once the link is closed. `None` when the host sent none
+    /// (an older host, a plain disconnect, a link lost without one) or the transport has no
+    /// such channel. The text is the host's, so it is shown, never acted on.
+    fn close_text(&self) -> Option<String> {
+        None
+    }
     /// The host this link proved to be the one it dialled (the key the host's
     /// signed welcome was made with, and the name it gave), once known. Fray
     /// transports know it from `ClientEvent::Connected`; a return pass is

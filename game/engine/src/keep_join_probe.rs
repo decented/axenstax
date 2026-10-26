@@ -41,13 +41,17 @@
 //! * `PROBE_READ`: `x,y,z` cells (`;` between several) to read from the pushed chunks.
 //! * `PROBE_HOLD_SECS`: stay seated this long after the above (default 0).
 //! * `PROBE_SETTLE_SECS`: most to wait for the chunk push to go quiet (default 15).
+//! * `PROBE_EXPECT_END`: text the player must be shown when the Keep ends the session
+//!   during the hold (the world restarting under them, say). The probe then passes only
+//!   if the session failed with a message containing it, and fails if it stayed up.
 //! * `PROBE_OUT`: a file the JSON line is also appended to.
 //!
 //! The result line has `joined`, `joined_by` (`code` or `invite`), `reason`, `reject_via`,
 //! `chunks`, `local_notes`, `persona_npub`, `inventory_mode`, `spawn`, `host` (the host's
 //! proven key's first six hex characters, and the name it gave), `passes` (the first six
 //! hex characters of each return pass's key, never the secret), timings in ms, `reads`,
-//! `place`.
+//! `place`, and `ended_with`, the message the player is shown when the session ended
+//! before the probe left (what the lobby or world would show).
 //! The test fails (non-zero exit) unless the join succeeded and every requested
 //! read or place got its answer.
 
@@ -486,7 +490,14 @@ fn probe() {
         eprintln!("PROBE seated, holding {} s", hold.as_secs());
         s.run_for(hold);
     }
-    ok &= s.rc.is_connected();
+    let ended_with = match &s.rc.state {
+        ConnectionState::Failed(why) => Some(why.clone()),
+        _ => None,
+    };
+    match env("PROBE_EXPECT_END") {
+        Some(expected) => ok &= ended_with.as_deref().is_some_and(|shown| shown.contains(expected.trim())),
+        None => ok &= s.rc.is_connected(),
+    }
     // A pass can arrive after the join settles: take what is waiting before leaving.
     s.step();
     let passes = std::mem::take(&mut s.passes);
@@ -499,6 +510,7 @@ fn probe() {
     drop(s);
     result["passes"] = json!(passes.iter().map(|p| fray_keep::describe(&p.host_key)).collect::<Vec<_>>());
     result["held_secs"] = json!(hold.as_secs());
+    result["ended_with"] = json!(ended_with);
     result["t_left_ms"] = json!(ms(Instant::now()));
     result["ok"] = json!(ok);
     emit(&result);

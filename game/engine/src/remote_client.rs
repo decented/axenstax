@@ -59,6 +59,10 @@ pub enum ConnectionState {
 pub const HOST_CONNECTION_LOST: &str = "Disconnected from host";
 /// Shown when the link closes before the join completed.
 pub const HOST_UNREACHABLE: &str = "Couldn't reach the host";
+/// Shown when the link closes while the join waits on the player's signer and the host
+/// said nothing (a Keep cuts off a joiner it was never asked about after its wait). The
+/// Keep's own words for the same case are this sentence too.
+pub const SIGNER_DID_NOT_APPROVE: &str = "Your signer didn't approve in time; try again.";
 
 /// Shown when the host never lets us in (no `JoinAccept`, no refusal) within
 /// [`JOIN_ACCEPT_TIMEOUT_SECS`] — e.g. a host on another protocol version
@@ -222,11 +226,18 @@ pub fn join_gate(
 }
 
 /// What a closed transport means for a session in `state`: `None` when the
-/// session already ended (its own reason stands).
-fn transport_closed_reason(state: &ConnectionState) -> Option<String> {
+/// session already ended (its own reason stands). The host's own words
+/// (`text`, from `ClientTransport::close_text`) replace the generic ones; with none,
+/// a join that was waiting on the player's signer says so (`awaiting_signer`)
+/// instead of "couldn't reach the host".
+fn transport_closed_reason(state: &ConnectionState, awaiting_signer: bool, text: Option<String>) -> Option<String> {
     match state {
-        ConnectionState::Connecting => Some(HOST_UNREACHABLE.to_string()),
-        ConnectionState::Connected { .. } => Some(HOST_CONNECTION_LOST.to_string()),
+        ConnectionState::Connecting => Some(match text {
+            Some(text) => text,
+            None if awaiting_signer => SIGNER_DID_NOT_APPROVE.to_string(),
+            None => HOST_UNREACHABLE.to_string(),
+        }),
+        ConnectionState::Connected { .. } => Some(text.unwrap_or_else(|| HOST_CONNECTION_LOST.to_string())),
         ConnectionState::Failed(_) | ConnectionState::Disconnected => None,
     }
 }
@@ -1592,7 +1603,10 @@ impl RemoteClient {
             }
         }
 
-        if transport_closed && let Some(reason) = transport_closed_reason(&self.state) {
+        if transport_closed
+            && let Some(reason) =
+                transport_closed_reason(&self.state, self.awaiting_signer(), self.transport.close_text())
+        {
             log::warn!("Server link closed: {reason}");
             self.state = ConnectionState::Failed(reason);
             changed = true;
@@ -3137,6 +3151,8 @@ mod tests {
     struct ClosingClient {
         inner: crate::transport::ChannelClientTransport,
         closed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        /// What the host said as it closed the link (a Keep's sentence), if anything.
+        said: Option<String>,
     }
     impl ClientTransport for ClosingClient {
         fn send_to_server(&self, data: &[u8]) {
@@ -3148,6 +3164,9 @@ mod tests {
         fn is_closed(&self) -> bool {
             self.closed.load(std::sync::atomic::Ordering::Relaxed)
         }
+        fn close_text(&self) -> Option<String> {
+            self.said.clone()
+        }
     }
 
     fn closing_client() -> (
@@ -3155,14 +3174,117 @@ mod tests {
         RemoteClient,
         std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) {
+        closing_client_told(None)
+    }
+
+    /// As [`closing_client`], with the host saying `said` as it closes the link.
+    fn closing_client_told(
+        said: Option<&str>,
+    ) -> (
+        crate::transport::ChannelServerTransport,
+        RemoteClient,
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) {
         let (srv, client) = channel_pair();
         let closed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let rc = RemoteClient::from_transport(
-            Box::new(ClosingClient { inner: client, closed: closed.clone() }),
+            Box::new(ClosingClient { inner: client, closed: closed.clone(), said: said.map(String::from) }),
             build_join_request_guest("Me", 0),
             None,
         );
         (srv, rc, closed)
+    }
+
+    /// Why the session failed, if it did.
+    fn failed_with(rc: &RemoteClient) -> Option<String> {
+        match &rc.state {
+            ConnectionState::Failed(why) => Some(why.clone()),
+            _ => None,
+        }
+    }
+
+    const KEEP_SAID: &str = "The world restarted; join again with the same code.";
+
+    #[test]
+    fn the_hosts_words_replace_the_generic_ones_in_the_world_and_while_the_join_is_pending() {
+        // In the world.
+        let (_srv, mut rc, closed) = closing_client_told(Some(KEEP_SAID));
+        rc.state = ConnectionState::Connected { player_index: 1, seed: 7 };
+        closed.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(rc.poll());
+        assert_eq!(failed_with(&rc).as_deref(), Some(KEEP_SAID));
+
+        // Connected, the join not yet accepted.
+        let (_srv, mut rc, closed) = closing_client_told(Some(KEEP_SAID));
+        closed.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(rc.poll());
+        assert_eq!(failed_with(&rc).as_deref(), Some(KEEP_SAID));
+        // The loading screen leaves with it.
+        assert_eq!(join_gate(&rc.state, None, 0.0), JoinGate::Ended(KEEP_SAID.to_string()));
+    }
+
+    #[test]
+    fn an_older_host_that_says_nothing_leaves_the_generic_words_as_before() {
+        let (_srv, mut rc, closed) = closing_client_told(None);
+        rc.state = ConnectionState::Connected { player_index: 1, seed: 7 };
+        closed.store(true, std::sync::atomic::Ordering::Relaxed);
+        rc.poll();
+        assert!(matches!(&rc.state, ConnectionState::Failed(r) if r == HOST_CONNECTION_LOST));
+    }
+
+    /// A signed join whose challenge is with the signer, on a transport that closes on demand.
+    fn closing_client_signing(
+        said: Option<&str>,
+    ) -> (
+        crate::transport::ChannelServerTransport,
+        RemoteClient,
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+        std::sync::mpsc::Sender<Result<SignedJoin, String>>,
+    ) {
+        let (srv, client) = channel_pair();
+        let closed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let driver: SignDriverFn = Box::new(move |_nonce, _origin| rx);
+        let mut rc = RemoteClient::from_transport_authed(
+            Box::new(ClosingClient { inner: client, closed: closed.clone(), said: said.map(String::from) }),
+            build_join_request_guest("Axo", 0),
+            driver,
+            None,
+        );
+        let chal = protocol::ChallengePacket { nonce_hex: "b".repeat(64) };
+        srv.send_to_client(&protocol::serialize_packet(PacketType::Challenge, &chal));
+        rc.poll();
+        assert!(rc.awaiting_signer(), "the challenge is with the signer");
+        (srv, rc, closed, tx)
+    }
+
+    #[test]
+    fn a_link_that_closes_while_the_signer_is_awaited_says_the_signer_did_not_approve() {
+        let (_srv, mut rc, closed, _tx) = closing_client_signing(None);
+        closed.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(rc.poll());
+        assert_eq!(failed_with(&rc).as_deref(), Some(SIGNER_DID_NOT_APPROVE), "not 'Couldn't reach the host'");
+    }
+
+    #[test]
+    fn the_hosts_words_win_over_the_signer_sentence() {
+        let (_srv, mut rc, closed, _tx) = closing_client_signing(Some("The Keep is too busy to open this world right now; try again later."));
+        closed.store(true, std::sync::atomic::Ordering::Relaxed);
+        rc.poll();
+        assert_eq!(
+            failed_with(&rc).as_deref(),
+            Some("The Keep is too busy to open this world right now; try again later.")
+        );
+    }
+
+    #[test]
+    fn a_link_that_closes_when_no_signer_is_awaited_still_says_unreachable() {
+        // Not signing: a guest join, or the signed request already sent.
+        let (_srv, mut rc, closed) = closing_client_told(None);
+        assert!(!rc.awaiting_signer());
+        closed.store(true, std::sync::atomic::Ordering::Relaxed);
+        rc.poll();
+        assert!(matches!(&rc.state, ConnectionState::Failed(r) if r == HOST_UNREACHABLE));
     }
 
     #[test]

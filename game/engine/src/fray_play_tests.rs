@@ -525,3 +525,21 @@ fn a_kicked_invite_join_folds_into_the_one_unreachable_sentence() {
     assert_eq!(code.disconnected(DisconnectReason::Kicked), crate::lan_host::join_failure_notice("KMT RWX", "the host turned us away"));
     assert_ne!(code.disconnected(DisconnectReason::Kicked), crate::keeps::UNREACHABLE);
 }
+
+/// A Keep that says why it let a joiner go is believed before the fold: both kinds of join show
+/// its sentence, in the lobby's usual failure line.
+#[test]
+fn a_join_let_go_with_words_shows_the_hosts_sentence() {
+    let said = "The Keep is too busy to open this world right now; try again later.";
+    let invite = PendingJoin { handle: None, label: crate::keeps::label(&[0x5a; 32]), invite: true };
+    assert_eq!(
+        invite.disconnected(DisconnectReason::KickedWith(said.into())),
+        crate::lan_host::join_failure_notice("Keep 5a5a5a", said)
+    );
+    let code = PendingJoin { handle: None, label: "KMT RWX".into(), invite: false };
+    assert_eq!(
+        code.disconnected(DisconnectReason::KickedWith(said.into())),
+        crate::lan_host::join_failure_notice("KMT RWX", said)
+    );
+    assert_ne!(invite.disconnected(DisconnectReason::KickedWith(said.into())), crate::keeps::UNREACHABLE);
+}

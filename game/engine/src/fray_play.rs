@@ -251,6 +251,9 @@ impl PendingJoin {
         }
         let why = match reason {
             DisconnectReason::Kicked => "the host turned us away".to_string(),
+            // The host's own sentence (a Keep says why it let the joiner go), already cleaned
+            // and cut by Fray; an invite join shows it too, where a plain kick is folded.
+            DisconnectReason::KickedWith(text) => text,
             DisconnectReason::Error(e) => e,
             _ => "the host left".to_string(),
         };

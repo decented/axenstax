@@ -56,7 +56,7 @@ use std::thread;
 use std::time::Duration;
 
 use decented_net::{
-    Bytes, ClientEvent, ClientHandle, FailReason, HostEvent, HostHandle, JoinStage, NetConfig,
+    Bytes, ClientEvent, ClientHandle, DisconnectReason, FailReason, HostEvent, HostHandle, JoinStage, NetConfig,
     PeerId, QueueBound,
 };
 
@@ -447,6 +447,9 @@ struct ClientInner {
     held_bytes: usize,
     failure: Option<(JoinStage, FailReason)>,
     closed: bool,
+    /// What the host said when it disconnected us (`DisconnectReason::KickedWith`). Boxed so
+    /// the transport stays under clippy's size gap with the other `JoinPoll` variants.
+    close_text: Option<Box<str>>,
 }
 
 impl ClientInner {
@@ -488,6 +491,7 @@ impl FrayClientTransport {
                 held_bytes: 0,
                 failure: None,
                 closed: false,
+                close_text: None,
             }),
             binding: OnceLock::new(),
             proven: OnceLock::new(),
@@ -582,6 +586,9 @@ impl ClientTransport for FrayClientTransport {
                 }
                 ClientEvent::Disconnected { reason } => {
                     log::info!("Fray: disconnected: {reason:?}");
+                    if let DisconnectReason::KickedWith(text) = reason {
+                        inner.close_text = Some(text.into_boxed_str());
+                    }
                     inner.close();
                     return None;
                 }
@@ -603,6 +610,11 @@ impl ClientTransport for FrayClientTransport {
     /// `RemoteClient::poll` expects (it reads this before it drains).
     fn is_closed(&self) -> bool {
         self.inner.lock().map_or(true, |inner| inner.closed)
+    }
+
+    /// Set with the close, so it is there whenever [`Self::is_closed`] is.
+    fn close_text(&self) -> Option<String> {
+        self.inner.lock().ok()?.close_text.as_deref().map(String::from)
     }
 
     fn proven_host(&self) -> Option<ProvenHost> {
@@ -691,6 +703,31 @@ mod tests {
             got.is_some()
         });
         got.unwrap()
+    }
+
+    /// A host that says why it let a player go: the words arrive with the close, on the transport
+    /// the game reads; a plain disconnect has none.
+    #[test]
+    fn the_hosts_reason_for_a_disconnect_is_held_with_the_close() {
+        let rig = start_rig(MAX_INBOUND_BYTES);
+        let (client, _server) = rig.join();
+        assert_eq!(client.close_text(), None, "nothing said while the link is up");
+        rig.host
+            .handle()
+            .disconnect_with_reason(PeerId(1), "The world restarted; join again with the same code.");
+        eventually("the link to close", || {
+            let _ = client.try_recv_from_server();
+            client.is_closed()
+        });
+        assert_eq!(client.close_text().as_deref(), Some("The world restarted; join again with the same code."));
+
+        let (plain, _server) = rig.join();
+        rig.host.handle().disconnect(PeerId(2));
+        eventually("the link to close", || {
+            let _ = plain.try_recv_from_server();
+            plain.is_closed()
+        });
+        assert_eq!(plain.close_text(), None, "a plain disconnect has no words");
     }
 
     /// A peer with no exporter binding is not seated: the server would check
