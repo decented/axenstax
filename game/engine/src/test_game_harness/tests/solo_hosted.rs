@@ -128,13 +128,16 @@ fn game_harness_solo_hosted_seats_come_and_go_keeping_indices_and_clearing_rides
     assert_one_sim(&game.logical_ticks(1));
     assert_eq!(game.state.hosted_server.as_ref().unwrap().server.players.len(), 3);
 
-    // Seat 1 rides a cart.
+    // Seat 1 sits in a cart. (Not ticked while seated: a cart off a rail
+    // lets its rider off at once.) The server hears which seats ride the
+    // way every lent tick tells it.
     let at = game.state.players[1].player.pos;
     let cart = crate::cart::spawn_cart(&mut game.state.ecs, (at.x.floor() as i32, at.y.floor() as i32, at.z.floor() as i32));
     crate::riding::mount(&mut game.state.ecs, cart, &mut game.state.players[1].ride);
     game.state.players[1].riding = Some(cart);
-    assert_one_sim(&game.logical_ticks(1));
-    assert!(game.state.players[1].riding.is_some(), "still seated after a tick");
+    let seated: Vec<bool> = game.state.players.iter().map(crate::player_slot::PlayerSlot::seated).collect();
+    assert_eq!(seated, [false, true, false]);
+    game.state.hosted_server.as_mut().unwrap().sync_local_seats(&seated);
     assert!(game.state.hosted_server.as_ref().unwrap().server.players[1].local_seated);
 
     // Seat 1 leaves while riding.
