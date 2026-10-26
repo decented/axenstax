@@ -1385,58 +1385,95 @@ pub(crate) fn draw_my_servers_column_inner(
 /// My Keeps: the Keeps the player has been let into, under My Servers in the friends
 /// column. A row's Join dials the Keep with the invite it saved (no confirm: the player
 /// already agreed to this Keep); Forget needs a second tap. Hidden while the list is empty.
-/// Visual placement/feel = playtest boundary.
+/// The same block sits under the text box of the Join Game dialog (`draw_my_keeps`), which is
+/// the only place a phone shows it. Visual placement/feel = playtest boundary.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn draw_my_keeps_column_inner(ui: &mut egui::Ui, state: &mut MenuState) -> MenuAction {
+    ui.add_space(8.0);
+    draw_my_keeps(ui, &mut state.keeps, &mut state.keep_forget_armed, &crate::keeps::path(), None)
+}
+
+/// The My Keeps block: a heading, then a row per Keep (name, age, Join, Forget). Shared by the
+/// friends column and the Join Game dialog. `max_height` puts the rows in a scroll area of that
+/// height (the dialog on a tall window; a compact dialog already scrolls as a whole, and the
+/// column scrolls as a whole). Returns `JoinKeep` when a Join was tapped, else `None`. A
+/// Forget that completes removes the Keep from `file` and from `keeps`.
+#[cfg(not(target_arch = "wasm32"))]
+fn draw_my_keeps(
+    ui: &mut egui::Ui,
+    keeps: &mut Vec<crate::keeps::Keep>,
+    forget_armed: &mut Option<String>,
+    file: &std::path::Path,
+    max_height: Option<f32>,
+) -> MenuAction {
     let mut action = MenuAction::None;
-    if state.keeps.is_empty() {
+    if keeps.is_empty() {
         return action;
     }
     let now = crate::keeps::unix_now();
-    let rows = crate::keeps::rows(&state.keeps, now);
+    let rows = crate::keeps::rows(keeps, now);
 
-    ui.add_space(8.0);
     ui.label(egui::RichText::new(crate::keeps::MY_KEEPS).size(18.0).color(TITLE_COLOR).strong());
     ui.add_space(6.0);
     ui.separator();
 
     let mut forget: Option<String> = None;
-    for row in &rows {
-        ui.add_space(6.0);
-        ui.label(egui::RichText::new(row.name.as_str()).size(14.0).color(TEXT_COLOR).strong());
-        ui.label(egui::RichText::new(row.when.as_str()).size(10.0).color(DIM_TEXT));
-        let armed = state.keep_forget_armed.as_deref() == Some(row.host_key.as_str());
-        ui.horizontal(|ui| {
-            if ui.button(egui::RichText::new("Join").size(12.0)).clicked() {
-                let invite = state
-                    .keeps
-                    .iter()
-                    .find(|k| k.host_key == row.host_key)
-                    .and_then(|k| k.keys())
-                    .map(|(host_key, secret)| crate::keeps::Invite { host_key, secret });
-                if let Some(invite) = invite {
-                    state.keep_forget_armed = None;
-                    action = MenuAction::JoinKeep(invite);
+    let mut draw_rows = |ui: &mut egui::Ui| {
+        for row in &rows {
+            ui.add_space(6.0);
+            ui.label(egui::RichText::new(row.name.as_str()).size(14.0).color(TEXT_COLOR).strong());
+            ui.label(egui::RichText::new(row.when.as_str()).size(10.0).color(DIM_TEXT));
+            let armed = forget_armed.as_deref() == Some(row.host_key.as_str());
+            ui.horizontal(|ui| {
+                if ui.button(egui::RichText::new("Join").size(12.0)).clicked() {
+                    let invite = keeps
+                        .iter()
+                        .find(|k| k.host_key == row.host_key)
+                        .and_then(|k| k.keys())
+                        .map(|(host_key, secret)| crate::keeps::Invite { host_key, secret });
+                    if let Some(invite) = invite {
+                        *forget_armed = None;
+                        action = MenuAction::JoinKeep(invite);
+                    }
                 }
+                let forget_label = if armed { "Forget for sure" } else { "Forget" };
+                if ui.button(egui::RichText::new(forget_label).size(12.0)).clicked()
+                    && crate::keeps::tap_forget(forget_armed, &row.host_key)
+                {
+                    forget = Some(row.host_key.clone());
+                }
+            });
+            // The sentence appears under the buttons the player has just tapped, which can be
+            // the bottom edge of a scrolled area: scroll it into view once, when it appears.
+            let seen = egui::Id::new(("keep-forget-seen", row.host_key.as_str()));
+            if armed {
+                let said = ui.label(egui::RichText::new(crate::keeps::FORGET_CONFIRM).size(11.0).color(DIM_TEXT));
+                if !ui.data(|d| d.get_temp::<bool>(seen).unwrap_or(false)) {
+                    ui.data_mut(|d| d.insert_temp(seen, true));
+                    said.scroll_to_me(None);
+                }
+            } else {
+                ui.data_mut(|d| d.remove_temp::<bool>(seen));
             }
-            let forget_label = if armed { "Forget for sure" } else { "Forget" };
-            if ui.button(egui::RichText::new(forget_label).size(12.0)).clicked()
-                && crate::keeps::tap_forget(&mut state.keep_forget_armed, &row.host_key)
-            {
-                forget = Some(row.host_key.clone());
-            }
-        });
-        if armed {
-            ui.label(egui::RichText::new(crate::keeps::FORGET_CONFIRM).size(11.0).color(DIM_TEXT));
+            ui.separator();
         }
-        ui.separator();
+    };
+    match max_height {
+        Some(h) => {
+            egui::ScrollArea::vertical()
+                .id_salt("my_keeps_rows")
+                .max_height(h)
+                .auto_shrink([false, true])
+                .show(ui, draw_rows);
+        }
+        None => draw_rows(ui),
     }
 
     if let Some(host_hex) = forget
         && let Some(host_key) = fray_keep::parse_hex32(&host_hex)
     {
-        crate::keeps::forget(&crate::keeps::path(), &host_key);
-        state.keeps = crate::keeps::load_list(&crate::keeps::path());
+        crate::keeps::forget(file, &host_key);
+        *keeps = crate::keeps::load_list(file);
     }
     action
 }
@@ -2595,6 +2632,11 @@ pub fn draw_main_menu(ctx: &egui::Context, state: &mut MenuState) -> MenuAction 
             let lan_games = crate::lan_ui::poll_games(&mut state.lan);
             #[cfg(not(target_arch = "wasm32"))]
             let mut picked = None;
+            // My Keeps, under the text box: a Join there is the friends column's Join.
+            #[cfg(not(target_arch = "wasm32"))]
+            let mut keep_join = MenuAction::None;
+            #[cfg(not(target_arch = "wasm32"))]
+            let keeps_file = crate::keeps::path();
             let result = draw_join_dialog(
                 ctx,
                 &address,
@@ -2602,6 +2644,13 @@ pub fn draw_main_menu(ctx: &egui::Context, state: &mut MenuState) -> MenuAction 
                 &lan_games,
                 #[cfg(not(target_arch = "wasm32"))]
                 &mut picked,
+                #[cfg(not(target_arch = "wasm32"))]
+                JoinKeepsPane {
+                    keeps: &mut state.keeps,
+                    forget_armed: &mut state.keep_forget_armed,
+                    file: &keeps_file,
+                    join: &mut keep_join,
+                },
             );
             // A click on a heard room joins it straight away.
             #[cfg(not(target_arch = "wasm32"))]
@@ -2609,6 +2658,13 @@ pub fn draw_main_menu(ctx: &egui::Context, state: &mut MenuState) -> MenuAction 
                 state.dialog = MenuDialog::None;
                 state.lan = None;
                 return MenuAction::JoinLanRoom(room);
+            }
+            // A Join on a saved Keep closes the dialog and dials it, with no confirm.
+            #[cfg(not(target_arch = "wasm32"))]
+            if matches!(keep_join, MenuAction::JoinKeep(_)) {
+                state.dialog = MenuDialog::None;
+                state.lan = None;
+                return keep_join;
             }
             match result {
                 DialogResult::Update(new_addr, _) => {
@@ -4683,12 +4739,29 @@ fn draw_delete_dialog(ctx: &egui::Context, world_name: &str, confirm_text: &str)
     }
 }
 
+/// What the Join Game dialog needs to show My Keeps and hand back a Join (native only).
+#[cfg(not(target_arch = "wasm32"))]
+struct JoinKeepsPane<'a> {
+    keeps: &'a mut Vec<crate::keeps::Keep>,
+    forget_armed: &'a mut Option<String>,
+    /// The saved-Keeps file a completed Forget removes the Keep from.
+    file: &'a std::path::Path,
+    /// Set to `JoinKeep` when a row's Join was tapped; the caller closes the dialog and dials.
+    join: &'a mut MenuAction,
+}
+
+/// The tallest the My Keeps rows grow in the dialog on a window tall enough not to scroll the
+/// whole card; past it they scroll on their own.
+#[cfg(not(target_arch = "wasm32"))]
+const JOIN_KEEPS_MAX_HEIGHT: f32 = 190.0;
+
 fn draw_join_dialog(
     ctx: &egui::Context,
     address: &str,
     #[cfg(not(target_arch = "wasm32"))] lan_games: &crate::lan_ui::LanGames,
     // A click on a heard LAN room: the caller joins it straight away.
     #[cfg(not(target_arch = "wasm32"))] picked: &mut Option<decented_net::LanRoom>,
+    #[cfg(not(target_arch = "wasm32"))] keeps_pane: JoinKeepsPane<'_>,
 ) -> DialogResult {
     let mut addr_buf = address.to_string();
     let mut confirmed = false;
@@ -4719,6 +4792,17 @@ fn draw_join_dialog(
                     .size(12.0)
                     .color(egui::Color32::from_rgb(150, 150, 160)),
             );
+            // My Keeps, at every width. A compact dialog scrolls as a whole, so only a tall
+            // window gives the rows a scroll area of their own.
+            if !keeps_pane.keeps.is_empty() {
+                ui.add_space(14.0);
+                let compact = cfg!(target_os = "android") || ctx.content_rect().height() < 620.0;
+                let own_scroll = (!compact).then_some(JOIN_KEEPS_MAX_HEIGHT);
+                let action = draw_my_keeps(ui, keeps_pane.keeps, keeps_pane.forget_armed, keeps_pane.file, own_scroll);
+                if matches!(action, MenuAction::JoinKeep(_)) {
+                    *keeps_pane.join = action;
+                }
+            }
         }
 
         ui.add_space(20.0);
@@ -7167,3 +7251,7 @@ pub(crate) fn draw_qr(ui: &mut egui::Ui, data: &str, size_px: f32) {
         }
     }
 }
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "menu_keeps_tests.rs"]
+mod keeps_dialog_tests;
