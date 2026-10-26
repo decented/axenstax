@@ -2,8 +2,9 @@
 //! no GPU is needed): the saved Keeps are listed at every screen width, the block is absent
 //! when there are none, Join hands back the Keep's invite with no confirm and closes the
 //! dialog, and Forget takes two taps. Click positions come from the text each frame drew.
-//! On a compact (phone) card My Keeps is drawn first, in a scroll area of about three rows,
-//! so a saved Keep's Join is on screen without scrolling however many Keeps there are.
+//! On a compact (phone) card My Keeps is drawn first with the newest three rows and a More
+//! Keeps / Fewer Keeps button, and no scroll area of its own: a swipe anywhere on the card
+//! scrolls the card, and the code field is reachable however many Keeps there are.
 use super::*;
 use crate::keeps::{Invite, FORGET_CONFIRM, MY_KEEPS};
 
@@ -51,7 +52,7 @@ pub(super) fn texts(output: &egui::FullOutput) -> Vec<(String, egui::Pos2)> {
 }
 
 /// Where a text was drawn: its rectangle and the clip rectangle it was drawn under (the
-/// card's visible area, or the My Keeps rows' own, whichever scroll area holds it).
+/// card's visible area, or that of whichever scroll area holds it).
 pub(super) fn placed(output: &egui::FullOutput, label: &str) -> Option<(egui::Rect, egui::Rect)> {
     fn walk(shape: &egui::epaint::Shape, clip: egui::Rect, label: &str, out: &mut Option<(egui::Rect, egui::Rect)>) {
         match shape {
@@ -77,6 +78,7 @@ struct Rig {
     size: egui::Vec2,
     keeps: Vec<crate::keeps::Keep>,
     armed: Option<String>,
+    expanded: bool,
     join: MenuAction,
     file: TempFile,
     seen: Vec<(String, egui::Pos2)>,
@@ -120,7 +122,7 @@ impl Rig {
         if let Some(on) = compact {
             ctx.data_mut(|d| d.insert_temp(egui::Id::new("test-force-compact-dialog"), on));
         }
-        let mut rig = Rig { ctx, size, keeps, armed: None, join: MenuAction::None, file, seen: Vec::new(), rooms, output: Default::default() };
+        let mut rig = Rig { ctx, size, keeps, armed: None, expanded: false, join: MenuAction::None, file, seen: Vec::new(), rooms, output: Default::default() };
         // egui lays a widget out one frame before it can be hit, and a card that shrinks to its
         // content (centred on the screen) takes a few frames to settle: draw several first.
         for _ in 0..6 {
@@ -151,9 +153,9 @@ impl Rig {
             events,
             ..Default::default()
         };
-        let (keeps, armed, join, file) = (&mut self.keeps, &mut self.armed, &mut self.join, &self.file.0);
+        let (keeps, armed, expanded, join, file) = (&mut self.keeps, &mut self.armed, &mut self.expanded, &mut self.join, &self.file.0);
         let output = self.ctx.run(input, |ctx| {
-            let _ = draw_join_dialog(ctx, "", &lan, &mut picked, JoinKeepsPane { keeps, forget_armed: armed, file, join });
+            let _ = draw_join_dialog(ctx, "", &lan, &mut picked, JoinKeepsPane { keeps, forget_armed: armed, expanded, file, join });
         });
         self.seen = texts(&output);
         self.output = output;
@@ -274,7 +276,7 @@ fn a_join_from_the_dialog_closes_it_and_dials_through_the_lobby() {
     assert!(state.lan.is_none(), "and the LAN beacon port was freed");
 }
 
-// ---- The compact card: My Keeps first, rows in a scroll area of about three rows ----
+// ---- The compact card: My Keeps first, the newest three rows, More Keeps for the rest ----
 
 /// A phone held upright, standard density (a Pixel 8 is 412 x 915 points).
 const PORTRAIT: egui::Vec2 = egui::vec2(412.0, 915.0);
@@ -314,19 +316,97 @@ fn a_saved_keeps_join_is_on_screen_with_no_scrolling_on_a_phone() {
 }
 
 #[test]
-fn twenty_saved_keeps_do_not_push_the_code_field_off_a_phone() {
+fn up_to_three_saved_keeps_show_every_row_and_no_button() {
+    for n in [1usize, 3] {
+        let rig = Rig::with("few", PORTRAIT, n, 2, Some(true));
+        for i in 1..=n {
+            let name = format!("Fray test host {i}");
+            assert!(rig.on_screen(&name), "{n} Keeps: {name:?} missing: {:?}", rig.seen);
+        }
+        let joins = rig.seen.iter().filter(|(t, _)| t == "Join").count();
+        assert_eq!(joins, n, "{n} Keeps: {:?}", rig.seen);
+        assert!(!rig.seen.iter().any(|(t, _)| t.starts_with("More Keeps") || t == "Fewer Keeps"), "{n} Keeps drew a button: {:?}", rig.seen);
+    }
+}
+
+#[test]
+fn twenty_saved_keeps_show_three_rows_a_more_button_and_the_code_field() {
     let rig = Rig::with("twenty", PORTRAIT, 20, 2, Some(true));
     // Newest first: the newest Keep (the last saved) is the first row, and it is on screen.
     assert!(rig.on_screen("Fray test host 20"), "{:?}", rig.seen);
     assert!(rig.y("Fray test host 20") < rig.y(crate::lan_ui::CODE_HEADING));
-    assert!(rig.on_screen("Join"), "the first row's Join: {:?}", rig.seen);
+    for want in ["Fray test host 20", "Fray test host 19", "Fray test host 18"] {
+        assert!(rig.on_screen(want), "{want:?}: {:?}", rig.seen);
+    }
+    assert!(!has(&rig.seen, "Fray test host 17"), "a fourth row is drawn: {:?}", rig.seen);
+    assert_eq!(rig.seen.iter().filter(|(t, _)| t == "Join").count(), 3);
+    // The button counts the hidden Keeps, sits under the rows and above the code field.
+    assert!(rig.on_screen("More Keeps (17)"), "{:?}", rig.seen);
+    assert!(rig.y("Fray test host 18") < rig.y("More Keeps (17)") && rig.y("More Keeps (17)") < rig.y(crate::lan_ui::CODE_HEADING));
+    // The code field and the rest are on screen with no scrolling at all.
     for want in [MY_KEEPS, "LAN world 1  \u{b7}  1 of 5 players", "LAN world 2  \u{b7}  1 of 5 players", crate::lan_ui::CODE_HEADING, crate::lan_ui::CODE_HELP, "Connect", "Cancel"] {
         assert!(rig.on_screen(want), "{want:?} is off the visible area with 20 Keeps: {:?}", rig.seen);
     }
-    // The rows have a scroll area of their own: only about three are drawn, the rest wait inside it.
-    let drawn = rig.seen.iter().filter(|(t, _)| t == "Join").count();
-    assert!((3..=4).contains(&drawn), "{drawn} Join buttons drawn: the rows are not capped near three");
-    assert!(!has(&rig.seen, "Fray test host 1"), "the oldest Keep is below the rows' scroll area");
+}
+
+#[test]
+fn the_compact_my_keeps_rows_have_no_scroll_area_of_their_own() {
+    // A nested scroll area clips its rows to its own rectangle and catches a swipe that starts
+    // on them. With none, every row, the button and the code field share the card's clip.
+    for expanded in [false, true] {
+        let mut rig = Rig::with("no-nested", egui::vec2(412.0, 3000.0), 20, 2, Some(true));
+        if expanded {
+            rig.tap("More Keeps (17)");
+        }
+        let card = placed(&rig.output, crate::lan_ui::CODE_HEADING).expect("the code heading").1;
+        let must_share = [MY_KEEPS, "Fray test host 20", "Fray test host 18", "Join", "Forget", if expanded { "Fewer Keeps" } else { "More Keeps (17)" }];
+        for label in must_share {
+            let clip = placed(&rig.output, label).unwrap_or_else(|| panic!("{label:?} not drawn: {:?}", rig.seen)).1;
+            assert_eq!(clip, card, "expanded={expanded}: {label:?} is clipped by a scroll area of its own");
+        }
+    }
+}
+
+#[test]
+fn more_keeps_shows_all_twenty_rows_and_fewer_keeps_folds_them_back() {
+    // A screen tall enough to hold every row, so each one is drawn.
+    let mut rig = Rig::with("expand", egui::vec2(412.0, 3000.0), 20, 2, Some(true));
+    assert_eq!(rig.seen.iter().filter(|(t, _)| t == "Join").count(), 3);
+    rig.tap("More Keeps (17)");
+    assert_eq!(rig.seen.iter().filter(|(t, _)| t == "Join").count(), 20, "{:?}", rig.seen);
+    for i in 1..=20 {
+        let name = format!("Fray test host {i}");
+        assert!(has(&rig.seen, &name), "{name:?} missing after More Keeps");
+    }
+    assert!(has(&rig.seen, "Fewer Keeps") && !rig.seen.iter().any(|(t, _)| t.starts_with("More Keeps")), "{:?}", rig.seen);
+    assert!(rig.expanded, "the state is kept for as long as the dialog is open");
+    // It stays expanded across frames, and folds back on the second tap.
+    for _ in 0..3 {
+        rig.frame(vec![]);
+    }
+    assert_eq!(rig.seen.iter().filter(|(t, _)| t == "Join").count(), 20);
+    rig.tap("Fewer Keeps");
+    assert_eq!(rig.seen.iter().filter(|(t, _)| t == "Join").count(), 3, "{:?}", rig.seen);
+    assert!(has(&rig.seen, "More Keeps (17)"));
+}
+
+#[test]
+fn an_expanded_list_scrolls_with_the_card_down_to_the_code_field() {
+    // On a phone, twenty rows do not fit: the card scrolls as a whole, so a wheel/swipe over a
+    // row moves the card and the code field comes into view.
+    let mut rig = Rig::with("expand-scroll", PORTRAIT, 20, 2, Some(true));
+    rig.tap("More Keeps (17)");
+    assert!(!rig.on_screen("Connect"), "twenty rows should push Connect off a phone: {:?}", rig.seen);
+    let over_a_row = rig.seen.iter().find(|(t, _)| t == "Fray test host 20").unwrap().1;
+    rig.frame(vec![egui::Event::PointerMoved(over_a_row)]);
+    for _ in 0..8 {
+        rig.frame(vec![egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, -400.0), phase: egui::TouchPhase::Move, modifiers: Default::default() }]);
+    }
+    for _ in 0..3 {
+        rig.frame(vec![]);
+    }
+    assert!(rig.on_screen("Connect"), "swiping over the rows did not reach the code field: {:?}", rig.seen);
+    assert!(rig.on_screen(crate::lan_ui::CODE_HEADING), "{:?}", rig.seen);
 }
 
 #[test]
@@ -336,16 +416,6 @@ fn twenty_saved_keeps_leave_the_first_rows_join_on_a_landscape_phone() {
     let rig = Rig::with("twenty-landscape", PHONE, 20, 2, None);
     assert!(rig.on_screen("Fray test host 20"), "{:?}", rig.seen);
     assert!(rig.on_screen("Join"), "{:?}", rig.seen);
-}
-
-#[test]
-fn a_keeps_row_is_no_taller_than_the_constant_the_cap_is_made_from() {
-    let rig = Rig::with("pitch", PORTRAIT, 3, 0, Some(true));
-    let joins: Vec<f32> = rig.seen.iter().filter(|(t, _)| t == "Join").map(|(_, p)| p.y).collect();
-    assert_eq!(joins.len(), 3, "{:?}", rig.seen);
-    let pitch = joins[1] - joins[0];
-    assert!(pitch <= JOIN_KEEPS_ROW_HEIGHT, "a row is {pitch} points tall, more than {JOIN_KEEPS_ROW_HEIGHT}");
-    assert!(pitch > JOIN_KEEPS_ROW_HEIGHT - 8.0, "a row is {pitch} points: the constant {JOIN_KEEPS_ROW_HEIGHT} is far too generous");
 }
 
 #[test]

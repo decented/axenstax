@@ -403,6 +403,10 @@ pub struct MenuState {
     /// The Keep (its host key) whose Forget has had its first tap.
     #[cfg(not(target_arch = "wasm32"))]
     pub keep_forget_armed: Option<String>,
+    /// The compact Join Game card shows all My Keeps (the "More Keeps" button was tapped)
+    /// rather than the newest few. Lasts while the dialog is open.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub keeps_expanded: bool,
     /// When the "Join this Keep?" confirm first drew; Join does nothing until
     /// `keeps::CONFIRM_ARM` has passed, so a tap already under way (a link from another app
     /// brings the game to the front) cannot accept it. Cleared when the confirm is gone.
@@ -518,6 +522,8 @@ impl MenuState {
             keeps: crate::keeps::load_list(&crate::keeps::path()),
             #[cfg(not(target_arch = "wasm32"))]
             keep_forget_armed: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            keeps_expanded: false,
             #[cfg(not(target_arch = "wasm32"))]
             keep_confirm_shown: None,
             notice: None,
@@ -1390,21 +1396,34 @@ pub(crate) fn draw_my_servers_column_inner(
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn draw_my_keeps_column_inner(ui: &mut egui::Ui, state: &mut MenuState) -> MenuAction {
     ui.add_space(8.0);
-    draw_my_keeps(ui, &mut state.keeps, &mut state.keep_forget_armed, &crate::keeps::path(), None)
+    draw_my_keeps(ui, &mut state.keeps, &mut state.keep_forget_armed, &crate::keeps::path(), KeepsLayout::Whole)
+}
+
+/// How the My Keeps rows are laid out.
+#[cfg(not(target_arch = "wasm32"))]
+enum KeepsLayout<'a> {
+    /// Every row inline; the container scrolls as a whole (the friends column).
+    Whole,
+    /// Every row in a scroll area of this height (the Join Game dialog on a tall window).
+    Scroll(f32),
+    /// The newest `JOIN_KEEPS_COMPACT_SHOWN` rows inline, with a More Keeps / Fewer Keeps
+    /// button under them for the rest, drawn inline too (the compact Join Game card, which
+    /// scrolls as a whole: a swipe on the rows must never be caught by a scroll area of
+    /// their own).
+    Folded(&'a mut bool),
 }
 
 /// The My Keeps block: a heading, then a row per Keep (name, age, Join, Forget). Shared by the
-/// friends column and the Join Game dialog. `max_height` puts the rows in a scroll area of that
-/// height (the Join Game dialog, on a tall window and, first in the card, on a phone; the
-/// friends column scrolls as a whole). Returns `JoinKeep` when a Join was tapped, else `None`. A
-/// Forget that completes removes the Keep from `file` and from `keeps`.
+/// friends column and the Join Game dialog; `layout` says how the rows sit (see `KeepsLayout`).
+/// Returns `JoinKeep` when a Join was tapped, else `None`. A Forget that completes removes the
+/// Keep from `file` and from `keeps`.
 #[cfg(not(target_arch = "wasm32"))]
 fn draw_my_keeps(
     ui: &mut egui::Ui,
     keeps: &mut Vec<crate::keeps::Keep>,
     forget_armed: &mut Option<String>,
     file: &std::path::Path,
-    max_height: Option<f32>,
+    layout: KeepsLayout<'_>,
 ) -> MenuAction {
     let mut action = MenuAction::None;
     if keeps.is_empty() {
@@ -1418,8 +1437,12 @@ fn draw_my_keeps(
     ui.separator();
 
     let mut forget: Option<String> = None;
+    let shown = match &layout {
+        KeepsLayout::Folded(expanded) if !**expanded => JOIN_KEEPS_COMPACT_SHOWN,
+        _ => rows.len(),
+    };
     let mut draw_rows = |ui: &mut egui::Ui| {
-        for row in &rows {
+        for row in rows.iter().take(shown) {
             ui.add_space(6.0);
             ui.label(egui::RichText::new(row.name.as_str()).size(14.0).color(TEXT_COLOR).strong());
             ui.label(egui::RichText::new(row.when.as_str()).size(10.0).color(DIM_TEXT));
@@ -1458,15 +1481,29 @@ fn draw_my_keeps(
             ui.separator();
         }
     };
-    match max_height {
-        Some(h) => {
+    match layout {
+        KeepsLayout::Scroll(h) => {
             egui::ScrollArea::vertical()
                 .id_salt("my_keeps_rows")
                 .max_height(h)
                 .auto_shrink([false, true])
                 .show(ui, draw_rows);
         }
-        None => draw_rows(ui),
+        KeepsLayout::Whole => draw_rows(ui),
+        KeepsLayout::Folded(expanded) => {
+            draw_rows(ui);
+            if rows.len() > JOIN_KEEPS_COMPACT_SHOWN {
+                ui.add_space(6.0);
+                let label = if *expanded {
+                    "Fewer Keeps".to_string()
+                } else {
+                    format!("More Keeps ({})", rows.len() - JOIN_KEEPS_COMPACT_SHOWN)
+                };
+                if ui.button(egui::RichText::new(label).size(12.0)).clicked() {
+                    *expanded = !*expanded;
+                }
+            }
+        }
     }
 
     if let Some(host_hex) = forget
@@ -2420,6 +2457,7 @@ pub fn draw_main_menu(ctx: &egui::Context, state: &mut MenuState) -> MenuAction 
     #[cfg(not(target_arch = "wasm32"))]
     if !matches!(state.dialog, MenuDialog::JoinDirect { .. }) {
         state.lan = None;
+        state.keeps_expanded = false;
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -2648,6 +2686,7 @@ pub fn draw_main_menu(ctx: &egui::Context, state: &mut MenuState) -> MenuAction 
                 JoinKeepsPane {
                     keeps: &mut state.keeps,
                     forget_armed: &mut state.keep_forget_armed,
+                    expanded: &mut state.keeps_expanded,
                     file: &keeps_file,
                     join: &mut keep_join,
                 },
@@ -4760,6 +4799,8 @@ fn draw_delete_dialog(ctx: &egui::Context, world_name: &str, confirm_text: &str)
 struct JoinKeepsPane<'a> {
     keeps: &'a mut Vec<crate::keeps::Keep>,
     forget_armed: &'a mut Option<String>,
+    /// A compact card shows only the newest Keeps until this is set (More Keeps / Fewer Keeps).
+    expanded: &'a mut bool,
     /// The saved-Keeps file a completed Forget removes the Keep from.
     file: &'a std::path::Path,
     /// Set to `JoinKeep` when a row's Join was tapped; the caller closes the dialog and dials.
@@ -4771,15 +4812,12 @@ struct JoinKeepsPane<'a> {
 #[cfg(not(target_arch = "wasm32"))]
 const JOIN_KEEPS_MAX_HEIGHT: f32 = 190.0;
 
-/// One My Keeps row in the dialog (name, age, buttons, separator), measured; a test fails if
-/// the drawn rows grow past it.
+/// A compact (phone) dialog puts My Keeps first and shows this many of the newest, so twenty
+/// saved Keeps never push the room code field off the screen. The rest wait behind a "More
+/// Keeps" button; there is no scroll area of their own (a swipe on the rows would be caught
+/// by it instead of scrolling the card).
 #[cfg(not(target_arch = "wasm32"))]
-const JOIN_KEEPS_ROW_HEIGHT: f32 = 72.0;
-
-/// A compact (phone) dialog puts My Keeps first, in a scroll area this tall: three rows, so
-/// twenty saved Keeps never push the room code field off the screen.
-#[cfg(not(target_arch = "wasm32"))]
-const JOIN_KEEPS_COMPACT_MAX_HEIGHT: f32 = 3.0 * JOIN_KEEPS_ROW_HEIGHT;
+const JOIN_KEEPS_COMPACT_SHOWN: usize = 3;
 
 fn draw_join_dialog(
     ctx: &egui::Context,
@@ -4795,8 +4833,8 @@ fn draw_join_dialog(
 
     let _result = draw_dialog_frame(ctx, "Join Game", ACTION_BLUE, CARD_BORDER, |ui| {
         // A phone's card is short: a saved Keep is the quickest way in, so on a compact card
-        // My Keeps comes first (its rows scroll on their own), above the LAN rooms and the
-        // code field. A tall window keeps them under the text box.
+        // My Keeps comes first (the newest few, then a More Keeps button), above the LAN rooms
+        // and the code field. A tall window keeps them under the text box.
         #[cfg(not(target_arch = "wasm32"))]
         let compact = dialog_is_compact(ctx);
         #[cfg(not(target_arch = "wasm32"))]
@@ -4806,7 +4844,7 @@ fn draw_join_dialog(
                 keeps_pane.keeps,
                 keeps_pane.forget_armed,
                 keeps_pane.file,
-                Some(JOIN_KEEPS_COMPACT_MAX_HEIGHT),
+                KeepsLayout::Folded(&mut *keeps_pane.expanded),
             );
             if matches!(action, MenuAction::JoinKeep(_)) {
                 *keeps_pane.join = action;
@@ -4845,7 +4883,7 @@ fn draw_join_dialog(
                     keeps_pane.keeps,
                     keeps_pane.forget_armed,
                     keeps_pane.file,
-                    Some(JOIN_KEEPS_MAX_HEIGHT),
+                    KeepsLayout::Scroll(JOIN_KEEPS_MAX_HEIGHT),
                 );
                 if matches!(action, MenuAction::JoinKeep(_)) {
                     *keeps_pane.join = action;
