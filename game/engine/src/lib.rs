@@ -183,6 +183,12 @@ mod invite;
 // anonymous local taster (`tools/smoke/forbidden-symbol.mjs` checks).
 #[cfg(not(target_arch = "wasm32"))]
 mod keeps;
+// A link tapped outside the game (Android: `axenstax://keep/...` in a message or a browser),
+// held until the player is at the menu, and the JNI read of the Activity's intent.
+#[cfg(not(target_arch = "wasm32"))]
+mod launch_links;
+#[cfg(target_os = "android")]
+mod android_intent;
 // Online play by contact — the per-install runtime key + its persona
 // attestation. Native only (bunker signing, profile/ files).
 #[cfg(not(target_arch = "wasm32"))]
@@ -1339,6 +1345,9 @@ pub(crate) struct GameState {
     /// until they are seated and it is saved in My Keeps (`poll_keeps`).
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) pending_keep: Option<crate::keeps::Invite>,
+    /// Links tapped outside the game, held until the player is at the menu (`launch_links`).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) launch_links: crate::launch_links::LaunchLinks,
     /// The Host button's result message, held until the world goes live: the
     /// world reset clears `toast` and toasts draw only while Playing, so a toast
     /// set at click time was never seen. Delivered on Loading -> Playing.
@@ -2097,6 +2106,8 @@ impl GameState {
             fray_join: None,
             #[cfg(not(target_arch = "wasm32"))]
             pending_keep: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            launch_links: crate::launch_links::LaunchLinks::new(),
             #[cfg(not(target_arch = "wasm32"))]
             entry_toast: crate::lan_host::EntryToast::default(),
             remote_client: None,

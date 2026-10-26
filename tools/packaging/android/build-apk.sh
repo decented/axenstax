@@ -2,9 +2,11 @@
 #
 # Build the Axe'n'Stax Android APK — WITHOUT Gradle.
 #
-# The APK contains no Java at all (NativeActivity + hasCode="false"), so the
-# whole pipeline is cargo-ndk -> aapt2 link -> zip in the .so -> zipalign ->
-# apksigner. Four SDK tools, no Gradle daemon, no build.gradle to drift.
+# The APK carries one tiny Java class (AxenstaxActivity, a NativeActivity
+# subclass that keeps the newest intent so a tapped axenstax: link reaches the
+# game), so the pipeline is cargo-ndk -> aapt2 link -> javac + d8 -> zip in the
+# .so and classes.dex -> zipalign -> apksigner. SDK tools and a JDK, no Gradle
+# daemon, no build.gradle to drift.
 #
 # CPU/RAM NOTE: the engine is a large build. The cargo step is `nice`d and
 # capped with -j ($JOBS, default 4) so a laptop stays usable. Do NOT run another
@@ -28,7 +30,7 @@
 #
 # Then:
 #   adb install -r out/axenstax.apk
-#   adb shell am start -n com.axenstax.game/android.app.NativeActivity
+#   adb shell am start -n com.axenstax.game/.AxenstaxActivity
 #   adb logcat -s axenstax:V
 
 set -euo pipefail
@@ -43,6 +45,9 @@ NDK="${ANDROID_NDK_HOME:-$(ls -d "$SDK"/ndk/* 2>/dev/null | sort -V | tail -1)}"
 BUILD_TOOLS="${BUILD_TOOLS:-$(ls -d "$SDK"/build-tools/* 2>/dev/null | sort -V | tail -1)}"
 PLATFORM="${PLATFORM:-$(ls -d "$SDK"/platforms/* 2>/dev/null | sort -V | tail -1)}"
 ABI="${ABI:-arm64-v8a}"
+# d8 desugars for the manifest's minSdkVersion.
+MIN_SDK="$(sed -n 's/.*minSdkVersion="\([0-9]*\)".*/\1/p' "$HERE/AndroidManifest.xml" | head -1)"
+[ -n "$MIN_SDK" ] || { echo "ERROR: no minSdkVersion in $HERE/AndroidManifest.xml" >&2; exit 1; }
 PROFILE="${PROFILE:-debug}"
 JOBS="${JOBS:-4}"
 NICE="${NICE:-10}"
@@ -50,6 +55,8 @@ NICE="${NICE:-10}"
 for tool in aapt2 zipalign apksigner; do
     [ -x "$BUILD_TOOLS/$tool" ] || { echo "ERROR: $tool not in $BUILD_TOOLS" >&2; exit 1; }
 done
+command -v javac >/dev/null || { echo "ERROR: javac not on PATH (a JDK is needed for AxenstaxActivity)" >&2; exit 1; }
+[ -x "$BUILD_TOOLS/d8" ] || { echo "ERROR: d8 not in $BUILD_TOOLS (install Android build-tools with d8, or set BUILD_TOOLS)" >&2; exit 1; }
 [ -f "$PLATFORM/android.jar" ] || { echo "ERROR: no android.jar in $PLATFORM" >&2; exit 1; }
 [ -d "$NDK" ] || { echo "ERROR: NDK not found (set ANDROID_NDK_HOME)" >&2; exit 1; }
 
@@ -66,7 +73,7 @@ mkdir -p "$STAGE/lib/$ABI"
 # std::terminate / __cxa_guard_acquire / __cxa_guard_release. This mirrors
 # game/engine/.cargo/config.toml, which is .gitignore'd and so cannot be relied
 # on to exist on a fresh clone.
-echo ">>> [1/5] cargo ndk build ($PROFILE)"
+echo ">>> [1/6] cargo ndk build ($PROFILE)"
 export ANDROID_NDK_HOME="$NDK"
 export RUSTFLAGS="${RUSTFLAGS:-} -Clink-arg=-lc++abi"
 
@@ -113,9 +120,9 @@ if [ "$V_MIN" -ge 1000 ] || [ "$V_PAT" -ge 1000 ]; then
 fi
 VERSION_CODE=$(( V_MAJ * 1000000 + V_MIN * 1000 + V_PAT ))
 
-echo ">>> [2/5] aapt2 compile res/ + link (versionCode=$VERSION_CODE versionName=$VERSION)"
-# res/ holds only the launcher icon (mipmap-*) and its background colour. The APK
-# still has no Java/Gradle; aapt2 compiles the resources straight into the package.
+echo ">>> [2/6] aapt2 compile res/ + link (versionCode=$VERSION_CODE versionName=$VERSION)"
+# res/ holds only the launcher icon (mipmap-*) and its background colour; aapt2
+# compiles it straight into the package, with no Gradle.
 "$BUILD_TOOLS/aapt2" compile --dir "$HERE/res" -o "$OUT/res.zip"
 "$BUILD_TOOLS/aapt2" link \
     -I "$PLATFORM/android.jar" \
@@ -126,15 +133,29 @@ echo ">>> [2/5] aapt2 compile res/ + link (versionCode=$VERSION_CODE versionName
     -o "$OUT/unaligned.apk" \
     --auto-add-overlay
 
-# ── 3. Add the native library ──────────────────────────────────────────────
-echo ">>> [3/5] adding lib/$ABI/libaxenstax_engine.so"
-( cd "$STAGE" && zip -q -r "$OUT/unaligned.apk" "lib" )
+# ── 3. Java -> classes.dex ─────────────────────────────────────────────────
+# One class (AxenstaxActivity). --release 11 is the lowest javac 21 accepts
+# without a warning; d8 desugars for minSdk.
+echo ">>> [3/6] javac + d8 (tools/packaging/android/java -> classes.dex, minSdk=$MIN_SDK)"
+mkdir -p "$STAGE/classes" "$STAGE/dex"
+find "$HERE/java" -name '*.java' | sort > "$STAGE/sources.txt"
+[ -s "$STAGE/sources.txt" ] || { echo "ERROR: no Java sources under $HERE/java" >&2; exit 1; }
+javac --release 11 -Xlint:all -d "$STAGE/classes" -cp "$PLATFORM/android.jar" @"$STAGE/sources.txt"
+mapfile -t CLASS_FILES < <(find "$STAGE/classes" -name '*.class' | sort)
+"$BUILD_TOOLS/d8" --release --min-api "$MIN_SDK" --lib "$PLATFORM/android.jar" \
+    --output "$STAGE/dex" "${CLASS_FILES[@]}"
+[ -f "$STAGE/dex/classes.dex" ] || { echo "ERROR: d8 produced no classes.dex" >&2; exit 1; }
 
-# ── 4. Align ───────────────────────────────────────────────────────────────
-echo ">>> [4/5] zipalign"
+# ── 4. Add the native library and the dex ──────────────────────────────────
+echo ">>> [4/6] adding lib/$ABI/libaxenstax_engine.so and classes.dex"
+( cd "$STAGE" && zip -q -r "$OUT/unaligned.apk" "lib" )
+zip -q -j "$OUT/unaligned.apk" "$STAGE/dex/classes.dex"
+
+# ── 5. Align ───────────────────────────────────────────────────────────────
+echo ">>> [5/6] zipalign"
 "$BUILD_TOOLS/zipalign" -f -p 4 "$OUT/unaligned.apk" "$OUT/aligned.apk"
 
-# ── 5. Sign ────────────────────────────────────────────────────────────────
+# ── 6. Sign ────────────────────────────────────────────────────────────────
 # ANDROID_KEYSTORE selects the real release key (kept OUTSIDE the repo). With it
 # unset we self-sign with a throwaway debug key so a dev build still installs.
 # The debug keystore is .gitignore'd; the release one must never be in the repo
@@ -179,7 +200,7 @@ fi
 # ($VERSION was read from Cargo.toml in step 2, where it also sets versionCode.)
 APK="$OUT/axenstax-engine_${VERSION}_${ABI}.apk"
 
-echo ">>> [5/5] apksigner ($SIGNED_WITH)"
+echo ">>> [6/6] apksigner ($SIGNED_WITH)"
 "$BUILD_TOOLS/apksigner" sign \
     --ks "$KS" --ks-pass "$KS_PASS" --key-pass "$KS_PASS" \
     --ks-key-alias "$KEY_ALIAS" \
@@ -198,5 +219,5 @@ echo "SIGNED WITH: $SIGNED_WITH"
 "$BUILD_TOOLS/apksigner" verify --print-certs "$APK" | grep -i 'SHA-256 digest\|DN:' || true
 echo
 echo "  adb install -r $OUT/axenstax.apk"
-echo "  adb shell am start -n com.axenstax.game/android.app.NativeActivity"
+echo "  adb shell am start -n com.axenstax.game/.AxenstaxActivity"
 echo "  adb logcat -s axenstax:V"

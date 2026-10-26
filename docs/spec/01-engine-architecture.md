@@ -534,7 +534,7 @@ with all code under `src/lib.rs`. One source tree, three entry points:
 |---|---|---|
 | Desktop (Linux/Windows/macOS) | `src/main.rs` shim → `axenstax_engine::run()` | `cargo build` / cargo-packager |
 | Web (wasm32) | `#[wasm_bindgen(start)]` in `web_main.rs` (the cdylib) | Trunk, `index.html` uses `data-target-name="axenstax_engine"` — **never `data-bin`**, which builds the shim and yields an engine-less ~1.5 MB wasm |
-| Android (aarch64-linux-android) | `#[unsafe(no_mangle)] android_main(AndroidApp)` in `lib.rs`; `NativeActivity` dlopen()s `libaxenstax_engine.so` | `tools/packaging/android/build-apk.sh` (cargo-ndk → aapt2 → zipalign → apksigner, no Gradle) |
+| Android (aarch64-linux-android) | `#[unsafe(no_mangle)] android_main(AndroidApp)` in `lib.rs`; `AxenstaxActivity` (a one-class `NativeActivity` subclass: `onNewIntent` keeps the tapped `axenstax:` link) dlopen()s `libaxenstax_engine.so` | `tools/packaging/android/build-apk.sh` (cargo-ndk → aapt2 → javac + d8 → zipalign → apksigner, no Gradle) |
 
 `run()` and `android_main` share `native_boot_services()` and `drive_event_loop()`
 so desktop and Android cannot drift. Tests are library tests: `cargo test --lib`

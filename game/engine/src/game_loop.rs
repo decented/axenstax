@@ -8086,6 +8086,10 @@ impl super::GameState {
         // My Keeps: save a return pass a Keep sent, and a Keep joined by invite once seated.
         #[cfg(not(target_arch = "wasm32"))]
         self.poll_keeps();
+        // A link tapped outside the game (Android): taken from the Activity's intent in every mode,
+        // handled only at the menu (`launch_links`).
+        #[cfg(not(target_arch = "wasm32"))]
+        self.launch_links.poll_device(Instant::now());
         // World handover — the independent control pump, every frame and in
         // every mode (never from the game tick): a session outlives the
         // joined world it started in, and the source's freeze stops the tick.
@@ -9109,6 +9113,25 @@ impl super::GameState {
             #[cfg(test)]
             if let Some(a) = self.test_menu_action.take() {
                 action = a;
+            }
+            // A tapped `axenstax:` link, held since it arrived (a cold start, or a world it must
+            // not interrupt): handled now that the menu is up, as a paste is. Not while a join
+            // is under way or a hop is queued.
+            #[cfg(not(target_arch = "wasm32"))]
+            if matches!(action, crate::menu::MenuAction::None) {
+                // The hops are the queued world launches that fire on a lobby's first frame (the
+                // Workshop, a Trial, an online world): offered earlier, the link would be lost or
+                // would cancel the player's choice (`launch_links::Busy`).
+                let busy = crate::launch_links::Busy {
+                    fray_join: self.fray_join.is_some(),
+                    seated: self.remote_client.is_some(),
+                    online: self.online_join.is_some() || self.online_prep.is_some(),
+                    world_hop: self.pending_workshop_for_skin
+                        || self.pending_menu_action.is_some()
+                        || self.pending_online_world.is_some(),
+                    handover: self.handover.is_some(),
+                };
+                action = self.launch_links.offer(&mut menu_state.dialog, !busy.any());
             }
             // A recipient's handover outlives the joined world it began in.
             #[cfg(not(target_arch = "wasm32"))]

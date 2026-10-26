@@ -2,9 +2,25 @@
 <!--
   Axe'n'Stax Android APK manifest.
 
-  android:hasCode="false"   — there is no Java/Kotlin in this APK. The whole
-                              game is libaxenstax_engine.so, so the build needs
-                              no dx/d8 step and therefore no Gradle.
+  android:hasCode="true"    — the APK carries one tiny Java class, AxenstaxActivity
+                              (java/com/axenstax/game/), compiled to classes.dex by
+                              build-apk.sh with javac + d8. No Gradle. The game
+                              itself is still libaxenstax_engine.so.
+  AxenstaxActivity          — a NativeActivity subclass whose only job is
+                              onNewIntent -> setIntent. Stock NativeActivity drops
+                              onNewIntent, so a link tapped while the game runs
+                              would leave getIntent() on the launch intent.
+  launchMode="singleTask"   — one game instance: tapping an axenstax: link while the
+                              game runs brings it forward and delivers onNewIntent
+                              rather than starting a second copy.
+  VIEW filters              — axenstax: links open the game: axenstax://keep/...
+                              (a Keep invite, the case this is for) and the other
+                              axenstax:// forms (a friend invite, a server). The
+                              engine reads getIntent().getDataString() over JNI
+                              (src/launch_links.rs) and routes the text as Join
+                              Game does. The scheme-only filter already matches
+                              every axenstax: URL; the host=keep one names the
+                              Keep links so they stay claimed if it is narrowed.
   android.app.lib_name      — NativeActivity dlopen()s "libaxenstax_engine.so"
                               from this value and calls `android_main`. MUST
                               match [lib] name in game/engine/Cargo.toml.
@@ -33,8 +49,7 @@
                               mid-world. Opting out restores the key-event path
                               that lib.rs folds onto Escape (layered close).
                               The real migration is OnBackInvokedDispatcher, which
-                              needs JNI — there is no Java in this APK — so it
-                              waits until android-activity exposes it.
+                              needs JNI, so it waits until android-activity exposes it.
                               See developer.android.com/about/versions/16/behavior-changes-16.
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
@@ -49,13 +64,14 @@
         android:allowBackup="false"
         android:label="Axe'n'Stax"
         android:icon="@mipmap/ic_launcher"
-        android:hasCode="false"
+        android:hasCode="true"
         android:enableOnBackInvokedCallback="false"
         android:extractNativeLibs="true">
 
         <activity
-            android:name="android.app.NativeActivity"
+            android:name=".AxenstaxActivity"
             android:exported="true"
+            android:launchMode="singleTask"
             android:label="Axe'n'Stax"
             android:theme="@android:style/Theme.NoTitleBar.Fullscreen"
             android:screenOrientation="sensorLandscape"
@@ -68,6 +84,22 @@
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!-- Any axenstax: link: a Keep invite, a friend invite, a server address. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="axenstax" />
+            </intent-filter>
+
+            <!-- Keep invite: axenstax://keep/<host key>/<secret>. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="axenstax" android:host="keep" />
             </intent-filter>
         </activity>
     </application>

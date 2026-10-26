@@ -52,6 +52,16 @@ pub const CONFIRM_TITLE: &str = "Join this Keep?";
 /// What the confirm says under its title.
 pub const CONFIRM_BODY: &str = "Only join a Keep from someone you trust. It will see who you are.";
 
+/// How long the confirm shows before its Join button works. A link tapped in another app brings
+/// the game to the front and the confirm appears under the finger; a tap already under way must
+/// not accept it (as `handover_game::CONSENT_ARM` does for a handover).
+pub const CONFIRM_ARM: std::time::Duration = std::time::Duration::from_millis(700);
+
+/// Does Join work yet, `shown` after the confirm first drew?
+pub fn confirm_armed(shown: std::time::Duration) -> bool {
+    shown >= CONFIRM_ARM
+}
+
 /// The second tap of Forget.
 pub const FORGET_CONFIRM: &str = "Forget this Keep? You'll need a new invite to return.";
 
