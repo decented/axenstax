@@ -2514,6 +2514,7 @@ impl HostedServer {
         let tick = self.server.tick_counter;
         let key = self.server.players[i].pet_owner_key().unwrap_or_default();
         let sp = &mut self.server.players[i];
+        crate::spawn_protection::disarm(sp);
         sp.next_swing_tick = sp.next_swing_tick.max(tick) + u64::from(crate::combat::ATTACK_COOLDOWN);
         let eye = sp.player.eye_pos();
         let look_dir = crate::camera::forward_from(sp.yaw, sp.pitch);
@@ -3024,6 +3025,7 @@ impl HostedServer {
         let believed = if ammo_short > 0 && views.believed_ammo.try_take(ammo_short, now) { ammo_short } else { 0 };
         let tool_believed = if weapon_short > 0 && views.believed.try_take(weapon_short, now) { weapon_short } else { 0 };
         sp.next_shot_tick = sp.next_shot_tick.max(now) + crate::shot::SHOT_COOLDOWN_TICKS;
+        crate::spawn_protection::disarm(sp);
         let shooter = crate::entity::Shooter {
             who: crate::combat::Attacker::Remote { slot: i, generation: sp.attach_gen },
             owner_key: sp.pet_owner_key().unwrap_or_default(),
@@ -5035,8 +5037,12 @@ impl HostedServer {
                             break;
                         }
                         if let Some(saved) = &saved_joiner {
+                            // Stand the saved spawn on clear ground, as the
+                            // world spawn is (`spawn_safety`).
+                            let owns = !self.lends_host_world();
+                            let spawn = self.server.safe_spawn_loading(glam::Vec3::from_array(saved.spawn), owns);
                             let sp = &mut self.server.players[i];
-                            sp.spawn_pos = glam::Vec3::from_array(saved.spawn);
+                            sp.spawn_pos = spawn;
                             sp.player.pos = sp.spawn_pos;
                             sp.player.velocity = glam::Vec3::ZERO;
                             sp.player.reset_fall();
@@ -9591,7 +9597,8 @@ pub(crate) mod tests {
         hs.server.players[i].cursor = Some(crate::item::ItemStack::new_block(crate::block::DIRT, 2));
         hs.server.players[i].craft_grid[1][2] = Some(crate::item::ItemStack::new_material(crate::item::MaterialId::Diamond, 3));
         hs.server.players[i].combat.health = 8.0; hs.server.players[i].combat.hunger = 9;
-        let spawn = glam::Vec3::new(10.5, 80.0, 20.5); hs.server.players[i].spawn_pos = spawn;
+        // A spot a body can stand on: the restore keeps it as it is (`spawn_safety`).
+        let spawn = hs.server.safe_spawn_loading(glam::Vec3::new(10.5, 80.0, 20.5), true); hs.server.players[i].spawn_pos = spawn;
         let expected = crate::inventory_sync::packet(&crate::window_events::effective_window(&hs.server.players[i]),&Default::default(),1);
         let second = hs.attach_test_remote_with_binding(Some([34;32]));
         send_signed_join(&second, [66;32], Some([34;32])); hs.tick();

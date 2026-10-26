@@ -1604,9 +1604,13 @@ fn find_surface_spawn(
     if let Some(found) = find_clear_ground_near(world, biome_gen, ox, oz) {
         return found;
     }
-    // Nothing clear within the spiral — drop in just above the generator's
-    // terrain height at the origin and let physics settle. A later generator
-    // uses its real top (its 3D noise can lift it well off the estimate).
+    // Nothing clear within the spiral — drop in just above the column's real
+    // loaded top (never inside terrain the estimate below misses) and let
+    // physics settle. Only a column that is not loaded falls back to the
+    // generator's estimate.
+    if let Some(feet) = crate::spawn_safety::above_column_top(world, ox, oz) {
+        return (ox, feet, oz);
+    }
     let top = match biome_gen.generator() {
         crate::biome::Generator::V2 => biome_gen.terrain_height(ox, oz),
         _ => biome_gen.surface_y(ox, oz),

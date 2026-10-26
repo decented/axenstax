@@ -1122,6 +1122,8 @@ fn server_landed_hits_wear_armour_and_a_death_names_its_cause() {
     let mut rig = Rig::new("armour-cause", 1);
     rig.hs.server.difficulty = crate::survival::Difficulty::Normal;
     let slot = rig.joiners[0].slot;
+    // Past its spawn protection (`spawn_protection`), as after 15 s in the world.
+    crate::spawn_protection::disarm(&mut rig.hs.server.players[slot]);
     let (brigand, _) = rig.spawn(MobType::Brigand, Vec3::new(0.6, 0.0, 0.0));
     let worn: u32 = rig.joiners[0]
         .inbox

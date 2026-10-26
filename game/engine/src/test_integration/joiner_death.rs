@@ -311,6 +311,8 @@ fn a_respawn_request_from_a_living_joiner_is_ignored() {
 fn mobs_do_not_target_a_dead_joiner() {
     let mut hs = start_dedicated_server("mobs");
     let (client, slot) = join_guest(&mut hs, "Bait");
+    // Past its spawn protection (`spawn_protection`), as after 15 s in the world.
+    crate::spawn_protection::disarm(&mut hs.server.players[slot]);
     let mut inbox = Inbox::default();
     let at = stand_on_floor(&mut hs, slot);
     let mob = crate::entity::spawn_mob(

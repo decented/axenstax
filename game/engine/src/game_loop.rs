@@ -17512,8 +17512,9 @@ impl super::GameState {
                     // vertex buffer. Mirrors the host-path finite filter.
                     if !(rp.x.is_finite() && rp.y.is_finite() && rp.z.is_finite()) { continue; }
                     let avatar_pos = glam::Vec3::new(rp.x, rp.y, rp.z);
-                    // Skip if too close to camera (inside the model)
-                    if (avatar_pos - eye).length_squared() < 0.5 { continue; }
+                    // Skip if too close to camera (inside the model): also a
+                    // body on the same spawn cell, eye inside its head.
+                    if crate::spawn_safety::camera_inside_avatar(avatar_pos, eye) { continue; }
                     // Right-arm swing progress from the per-player swing window.
                     // `remaining` counts down SWING_TICKS..=1 while active (armed
                     // to SWING_TICKS on the rising edge), then 0. Map across the
@@ -17572,7 +17573,7 @@ impl super::GameState {
                         continue;
                     }
                     // Skip if too close to this viewport's camera (inside the model).
-                    if (pos - eye).length_squared() < 0.5 {
+                    if crate::spawn_safety::camera_inside_avatar(pos, eye) {
                         continue;
                     }
                     // Per-player swing: read player j's own local-swing window

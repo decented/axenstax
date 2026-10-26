@@ -375,6 +375,8 @@ mod reputation_day;
 mod economy;
 mod raid;
 mod spawn_pref;
+mod spawn_protection;
+mod spawn_safety;
 mod spawn_search;
 mod spawning;
 mod screen;
