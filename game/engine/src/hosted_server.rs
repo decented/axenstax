@@ -316,6 +316,12 @@ use std::time::Duration;
 /// round-trip timeout is 60 s), so a shorter window would refuse real joins.
 const PRE_AUTH_TIMEOUT_TICKS: u64 = 30 * 20;
 
+/// The refusal text for a slot that did not complete its join in time when the host cannot
+/// say why (no join challenge went out). One that was waiting for a signed join request is
+/// refused with `remote_client::SIGNER_DID_NOT_APPROVE` instead. A client that is awaiting its
+/// own signer shows an older host's "Join timed out" as that sentence (`remote_client`).
+pub const JOIN_TIMED_OUT: &str = "Join timed out";
+
 /// What a kicked player is told before their connection closes.
 const KICK_REASON: &str = "You were removed from this world by its operator.";
 
@@ -690,6 +696,11 @@ pub struct HostedServer {
     /// already verified from it (the challenge was spent verifying it).
     #[cfg(not(target_arch = "wasm32"))]
     keep_holds: std::collections::BTreeMap<usize, KeepHold>,
+    /// Remote slots the join challenge was sent to and no `JoinRequest` has come from yet: the
+    /// slot is waiting for a signed join request. If the pre-auth wait runs out the refusal says
+    /// the signer did not approve (`reap_slots`). Cleared when the request arrives, on release,
+    /// and when the slot is attached again.
+    awaiting_join_request: std::collections::BTreeSet<usize>,
 
     /// v66 — the public addresses this server answers to (`--public-host`,
     /// `AXENSTAX_PUBLIC_HOST`, `AXENSTAX_DOMAIN`). A WebSocket join whose
@@ -1170,6 +1181,7 @@ impl HostedServer {
             keep_world: remote_transport == RemoteTransport::KeepPipe,
             #[cfg(not(target_arch = "wasm32"))]
             keep_holds: std::collections::BTreeMap::new(),
+            awaiting_join_request: std::collections::BTreeSet::new(),
             // Set by the dedicated server after `start` via `set_identity`.
             #[cfg(not(target_arch = "wasm32"))]
             identity: None,
@@ -2203,6 +2215,7 @@ impl HostedServer {
         // `--keep-world`: a join held for the Keep's gate goes with its slot.
         #[cfg(not(target_arch = "wasm32"))]
         self.keep_holds.remove(&i);
+        self.awaiting_join_request.remove(&i);
         if self.handshake_done[i] && (!self.lends_host_world() || self.server.lent) { self.settle_leaving_life(i); }
         if self.handshake_done[i] { self.note_strict_departure(i); }
         if self.handshake_done[i] && let Err(e) = self.server.save_joiner(i) { log::error!("Joiner leave save failed: {e}"); }
@@ -4169,7 +4182,14 @@ impl HostedServer {
                 && self.server_tick.saturating_sub(self.attached_tick[i]) >= PRE_AUTH_TIMEOUT_TICKS
             {
                 log::info!("Slot {i}: no completed join in time — freeing it");
-                let _ = self.release_slot(i, Some("Join timed out"));
+                // Waiting for a signed join request (the challenge went out and no request
+                // came) is the player's signer not answering; say so.
+                let reason = if self.awaiting_join_request.contains(&i) {
+                    crate::remote_client::SIGNER_DID_NOT_APPROVE
+                } else {
+                    JOIN_TIMED_OUT
+                };
+                let _ = self.release_slot(i, Some(reason));
             }
         }
     }
@@ -4179,6 +4199,13 @@ impl HostedServer {
     #[cfg(test)]
     pub(crate) fn advance_clock_for_test(&mut self, ticks: u64) {
         self.server_tick += ticks;
+    }
+
+    /// Test-only: forget that slot `slot` was sent a join challenge (as if the table had been
+    /// full when it attached), so the pre-auth timeout cannot blame its signer.
+    #[cfg(test)]
+    pub(crate) fn forget_join_challenge_for_test(&mut self, slot: usize) {
+        self.awaiting_join_request.remove(&slot);
     }
 
     /// Test-only: how many of slot `slot`'s packets wait in its inbound queue.
@@ -4394,6 +4421,7 @@ impl HostedServer {
         };
         // `--keep-world`: no hold outlives its connection.
         self.keep_holds.remove(&slot);
+        self.awaiting_join_request.remove(&slot);
 
         // Phase 4: issue a fresh per-connection challenge and push it
         // immediately. No origin rides with it (v63): the client builds the
@@ -4410,6 +4438,7 @@ impl HostedServer {
             };
             let bytes = protocol::serialize_packet(protocol::PacketType::Challenge, &pkt);
             self.transports[slot].send_to_client(&bytes);
+            self.awaiting_join_request.insert(slot);
         } else {
             log::warn!(
                 "Challenge table full ({} entries) — refusing nonce for new slot {slot}",
@@ -4704,6 +4733,8 @@ impl HostedServer {
                             // Re-sends after handshake are dropped silently.
                             continue;
                         }
+                        // The request is here: from now a wait is not on the signer.
+                        self.awaiting_join_request.remove(&i);
                         let Ok(req) = protocol::safe_deserialize::<protocol::JoinRequestPacket>(payload)
                         else {
                             // Another version's JoinRequest shape doesn't

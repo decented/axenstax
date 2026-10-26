@@ -60,9 +60,23 @@ pub const HOST_CONNECTION_LOST: &str = "Disconnected from host";
 /// Shown when the link closes before the join completed.
 pub const HOST_UNREACHABLE: &str = "Couldn't reach the host";
 /// Shown when the link closes while the join waits on the player's signer and the host
-/// said nothing (a Keep cuts off a joiner it was never asked about after its wait). The
-/// Keep's own words for the same case are this sentence too.
+/// said nothing (a Keep cuts off a joiner it was never asked about after its wait), and when
+/// the host's own refusal for that wait is "Join timed out" (an older host's words for it).
+/// A current host says this sentence itself: it refuses a slot that sat past its pre-auth
+/// wait after the join challenge went out with the same constant
+/// (`hosted_server::reap_slots`).
 pub const SIGNER_DID_NOT_APPROVE: &str = "Your signer didn't approve in time; try again.";
+
+/// The words a host's refusal or close text is shown in. A client that was awaiting its
+/// signer and is told exactly "Join timed out" (an older host, which did not know why the
+/// slot was idle) says the signer sentence instead; any other text is shown as it came.
+fn host_refusal_text(text: String, awaiting_signer: bool) -> String {
+    if awaiting_signer && text == crate::hosted_server::JOIN_TIMED_OUT {
+        SIGNER_DID_NOT_APPROVE.to_string()
+    } else {
+        text
+    }
+}
 
 /// Shown when the host never lets us in (no `JoinAccept`, no refusal) within
 /// [`JOIN_ACCEPT_TIMEOUT_SECS`] — e.g. a host on another protocol version
@@ -73,10 +87,13 @@ pub const HOST_NO_ANSWER: &str = "The host didn't let us in. Try joining again."
 /// gives up. This is the *client's* patience, and it is longer than the host's:
 /// a host frees a slot that has not completed its join after 30 s
 /// (`hosted_server::PRE_AUTH_TIMEOUT_TICKS`, the join challenge's lifetime) and
-/// refuses it with "Join timed out". So a signed-in join that waits on a slow
-/// signer (possibly a phone) is cut off by the host at about 30 s, well before
-/// this clock; 90 s is only the backstop for a host that neither accepts nor
-/// refuses — e.g. one on another protocol version that can't read our request.
+/// refuses it, with "Your signer didn't approve in time; try again." when it had sent
+/// the join challenge and was waiting for the signed request (an older host says "Join
+/// timed out", which the client maps to the same sentence while it awaits its signer).
+/// So a signed-in join that waits on a slow signer (possibly a phone) is cut off by the
+/// host at about 30 s, well before this clock; 90 s is only the backstop for a host that
+/// neither accepts nor refuses — e.g. one on another protocol version that can't read
+/// our request.
 pub const JOIN_ACCEPT_TIMEOUT_SECS: f32 = 90.0;
 
 /// Furthest a host may place a joiner horizontally (blocks, either side of the
@@ -240,7 +257,7 @@ fn transport_closed_reason(
 ) -> Option<String> {
     match state {
         ConnectionState::Connecting => Some(match text {
-            Some(text) => text,
+            Some(text) => host_refusal_text(text, awaiting_signer),
             None if awaiting_signer && host_closed => SIGNER_DID_NOT_APPROVE.to_string(),
             None => HOST_UNREACHABLE.to_string(),
         }),
@@ -1106,7 +1123,8 @@ impl RemoteClient {
                     PacketType::JoinReject => {
                         if let Ok(reject) = protocol::safe_deserialize::<protocol::JoinRejectPacket>(payload) {
                             log::warn!("Join rejected: {}", reject.reason);
-                            self.state = ConnectionState::Failed(reject.reason);
+                            let reason = host_refusal_text(reject.reason, self.awaiting_signer());
+                            self.state = ConnectionState::Failed(reason);
                             changed = true;
                         }
                     }
@@ -3296,6 +3314,50 @@ mod tests {
         closed.store(true, std::sync::atomic::Ordering::Relaxed);
         assert!(rc.poll());
         assert_eq!(failed_with(&rc).as_deref(), Some(HOST_UNREACHABLE));
+    }
+
+    fn refuse(srv: &crate::transport::ChannelServerTransport, reason: &str) {
+        let reject = protocol::JoinRejectPacket { reason: reason.to_string() };
+        srv.send_to_client(&protocol::serialize_packet(PacketType::JoinReject, &reject));
+    }
+
+    #[test]
+    fn an_older_hosts_join_timed_out_while_the_signer_is_awaited_says_the_signer_did_not_approve() {
+        let (srv, mut rc, _closed, _tx) = closing_client_signing(None, false);
+        refuse(&srv, "Join timed out");
+        assert!(rc.poll());
+        assert_eq!(failed_with(&rc).as_deref(), Some(SIGNER_DID_NOT_APPROVE));
+    }
+
+    #[test]
+    fn a_join_timed_out_that_comes_as_the_close_text_while_the_signer_is_awaited_maps_the_same() {
+        let (_srv, mut rc, closed, _tx) = closing_client_signing(Some("Join timed out"), true);
+        closed.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(rc.poll());
+        assert_eq!(failed_with(&rc).as_deref(), Some(SIGNER_DID_NOT_APPROVE));
+    }
+
+    #[test]
+    fn join_timed_out_with_no_signer_awaited_and_any_other_refusal_are_shown_as_they_came() {
+        // Not awaiting the signer (a guest join, or the request already sent): the host's words.
+        let (srv, client) = channel_pair();
+        let mut rc = RemoteClient::from_transport(Box::new(client), build_join_request_guest("Me", 0), None);
+        assert!(!rc.awaiting_signer());
+        refuse(&srv, "Join timed out");
+        assert!(rc.poll());
+        assert_eq!(failed_with(&rc).as_deref(), Some("Join timed out"));
+
+        // Awaiting the signer, but the host says something else: that is shown.
+        let (srv, mut rc, _closed, _tx) = closing_client_signing(None, false);
+        refuse(&srv, "This world is full.");
+        assert!(rc.poll());
+        assert_eq!(failed_with(&rc).as_deref(), Some("This world is full."));
+
+        // Only the exact text maps.
+        assert_eq!(host_refusal_text("Join timed out.".into(), true), "Join timed out.");
+        assert_eq!(host_refusal_text("join timed out".into(), true), "join timed out");
+        // And the current host's own sentence passes through unchanged.
+        assert_eq!(host_refusal_text(SIGNER_DID_NOT_APPROVE.into(), true), SIGNER_DID_NOT_APPROVE);
     }
 
     #[test]

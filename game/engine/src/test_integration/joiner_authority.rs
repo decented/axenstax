@@ -367,7 +367,36 @@ fn a_connection_that_never_joins_is_freed_after_the_pre_auth_timeout() {
     hs.advance_clock_for_test(30 * 20);
     hs.tick();
     assert!(hs.slot_is_free(slot), "a silent connection doesn't hold a seat for ever");
+    // The join challenge went out and no signed request came: the player's signer did not answer.
+    assert_eq!(
+        got_reject(&client).as_deref(),
+        Some("Your signer didn't approve in time; try again."),
+        "a slot that was waiting for a signed join request says the signer did not approve"
+    );
+}
+
+#[test]
+fn a_connection_that_was_never_challenged_is_refused_with_plain_join_timed_out() {
+    let mut hs = start_open_server("preauth-plain");
+    let client = hs.attach_test_remote();
+    let slot = hs.server.players.len() - 1;
+    hs.tick();
+    // The challenge table was full when it attached: nothing was sent, so the host cannot say why.
+    hs.forget_join_challenge_for_test(slot);
+    hs.advance_clock_for_test(30 * 20);
+    hs.tick();
+    assert!(hs.slot_is_free(slot));
     assert_eq!(got_reject(&client).as_deref(), Some("Join timed out"));
+}
+
+#[test]
+fn the_host_and_the_client_say_the_same_signer_sentence() {
+    // One constant: the host's refusal and the client's own wording cannot drift apart.
+    assert_eq!(
+        crate::remote_client::SIGNER_DID_NOT_APPROVE,
+        "Your signer didn't approve in time; try again."
+    );
+    assert_eq!(crate::hosted_server::JOIN_TIMED_OUT, "Join timed out");
 }
 
 #[test]
