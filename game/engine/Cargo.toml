@@ -189,10 +189,15 @@ rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
 #
 # winit 0.30 pulls `android-activity` in transitively, and that crate refuses to
 # compile (`compile_error!`) until the app picks an activity backend.
-# `native-activity` keeps us on the pure-C NativeActivity path: no Java in the
-# APK and no libc++_shared.so to ship.
+# `native-activity` keeps us on the pure-C NativeActivity path: no libc++_shared.so
+# to ship, and the only Java is the one-class AxenstaxActivity (onNewIntent).
 [target.'cfg(target_os = "android")'.dependencies]
 android-activity = { version = "0.6", features = ["native-activity"] }
+# The tapped-link reader (src/android_intent.rs): `getIntent().getDataString()` over
+# JNI. Both are already in the lock through android-activity (jni 0.21, not the
+# 0.22 another dependency uses); `ndk-context` holds the VM and the Activity.
+jni = "0.21"
+ndk-context = "0.1"
 # logcat sink — `env_logger` writes to a stdout nothing reads inside an APK.
 android_logger = "0.14"
 

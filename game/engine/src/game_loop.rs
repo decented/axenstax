@@ -8086,6 +8086,10 @@ impl super::GameState {
         // My Keeps: save a return pass a Keep sent, and a Keep joined by invite once seated.
         #[cfg(not(target_arch = "wasm32"))]
         self.poll_keeps();
+        // A link tapped outside the game (Android): taken from the Activity's intent in every mode,
+        // handled only at the menu (`launch_links`).
+        #[cfg(not(target_arch = "wasm32"))]
+        self.launch_links.poll_device(Instant::now());
         // World handover — the independent control pump, every frame and in
         // every mode (never from the game tick): a session outlives the
         // joined world it started in, and the source's freeze stops the tick.
@@ -9109,6 +9113,14 @@ impl super::GameState {
             #[cfg(test)]
             if let Some(a) = self.test_menu_action.take() {
                 action = a;
+            }
+            // A tapped `axenstax:` link, held since it arrived (a cold start, or a world it must
+            // not interrupt): handled now that the menu is up, as a paste is. Not while a join
+            // is finding its host or is seated.
+            #[cfg(not(target_arch = "wasm32"))]
+            if matches!(action, crate::menu::MenuAction::None) {
+                let idle = self.fray_join.is_none() && self.remote_client.is_none();
+                action = self.launch_links.offer(&mut menu_state.dialog, idle);
             }
             // A recipient's handover outlives the joined world it began in.
             #[cfg(not(target_arch = "wasm32"))]
