@@ -424,6 +424,29 @@ fn the_rows_read_in_plain_words_newest_first() {
 }
 
 #[test]
+fn keeps_with_the_same_name_show_their_keep_id_and_others_do_not() {
+    let list = vec![
+        Keep::new(&[0xab; 32], &[1; 32], Some("Fray test host"), 100),
+        Keep::new(&[0xcd; 32], &[2; 32], Some("Fray test host"), 90),
+        Keep::new(&[0xef; 32], &[3; 32], Some("Ada's Keep"), 80),
+    ];
+    let rows = rows(&list, 200);
+    assert_eq!(
+        rows.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
+        ["Fray test host \u{b7} ABABAB", "Fray test host \u{b7} CDCDCD", "Ada's Keep"]
+    );
+    // The saved name itself is not touched.
+    assert_eq!(list[0].name, "Fray test host");
+}
+
+#[test]
+fn names_that_differ_only_in_case_count_as_the_same() {
+    let list = vec![Keep::new(&[0xab; 32], &[1; 32], Some("Ada"), 100), Keep::new(&[0xcd; 32], &[2; 32], Some("ADA"), 90)];
+    let names: Vec<String> = rows(&list, 200).into_iter().map(|r| r.name).collect();
+    assert_eq!(names, ["Ada \u{b7} ABABAB", "ADA \u{b7} CDCDCD"]);
+}
+
+#[test]
 fn forget_needs_a_second_tap_on_the_same_keep() {
     let mut armed = None;
     assert!(!tap_forget(&mut armed, "aa"), "the first tap only arms it");

@@ -339,9 +339,23 @@ pub struct Row {
     pub when: String,
 }
 
-/// The rows for `list` as of `now`, in the list's order (newest play first).
+/// The rows for `list` as of `now`, in the list's order (newest play first). Keeps whose
+/// names read the same (cleaned, ignoring case) each show their Keep ID after the name, so
+/// they can be told apart; a name no other Keep shares is left as it is.
 pub fn rows(list: &[Keep], now: u64) -> Vec<Row> {
-    list.iter().map(|k| Row { host_key: k.host_key.clone(), name: k.name.clone(), when: fray_keep::ago(k.last_joined, now) }).collect()
+    let same = |k: &Keep| fray_keep::display_name_hex(Some(&k.name), &k.host_key).to_lowercase();
+    let names: Vec<String> = list.iter().map(same).collect();
+    list.iter()
+        .zip(&names)
+        .map(|(k, key)| {
+            let name = if names.iter().filter(|n| *n == key).count() > 1 {
+                format!("{} \u{b7} {}", k.name, fray_keep::keep_id_hex(&k.host_key))
+            } else {
+                k.name.clone()
+            };
+            Row { host_key: k.host_key.clone(), name, when: fray_keep::ago(k.last_joined, now) }
+        })
+        .collect()
 }
 
 /// Forget needs a second tap on the same row: the first arms it (and disarms any other),
