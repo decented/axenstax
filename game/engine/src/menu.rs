@@ -4940,6 +4940,10 @@ const PAUSE_COLORS: &[egui::Color32] = &[
 /// button and its warning then say so rather than promise a discard.
 pub fn draw_pause_menu(ctx: &egui::Context, world_name: &str, confirm_quit: &mut bool, confirm_creative: &mut bool, difficulty: &mut String, is_creative: bool, lock_creative: bool, num_players: usize, cloud_save: &mut bool, is_trial: bool, kept_autosave: Option<&str>) -> i32 {
     let mut clicked = -1i32;
+    // On a phone (the card rule of the dialogs) the leave buttons stay pinned at the top and
+    // the other controls scroll under them, so nothing that leaves the menu is off screen.
+    let compact = dialog_is_compact(ctx);
+    let confirming = *confirm_quit || *confirm_creative;
 
     // Semi-transparent overlay
     egui::Area::new(egui::Id::new("pause_overlay"))
@@ -4958,11 +4962,11 @@ pub fn draw_pause_menu(ctx: &egui::Context, world_name: &str, confirm_quit: &mut
         .frame(egui::Frame::new().fill(egui::Color32::TRANSPARENT))
         .show(ctx, |ui| {
             ui.vertical_centered(|ui| {
-                ui.add_space(100.0);
+                ui.add_space(if compact { 8.0 } else { 100.0 });
 
                 ui.label(
                     egui::RichText::new("Paused")
-                        .size(36.0)
+                        .size(if compact { 26.0 } else { 36.0 })
                         .color(egui::Color32::from_rgb(220, 220, 220))
                         .strong(),
                 );
@@ -4972,14 +4976,36 @@ pub fn draw_pause_menu(ctx: &egui::Context, world_name: &str, confirm_quit: &mut
                         .size(14.0)
                         .color(SUBTITLE_COLOR),
                 );
-                ui.add_space(16.0);
+                ui.add_space(if compact { 8.0 } else { 16.0 });
+
+                // One body, drawn in two parts on a compact screen: the buttons that leave the
+                // pause menu (`Leave`), pinned above, and the rest (`Rest`: difficulty, Stash,
+                // Controls, Graphics, Your look, split-screen, creative), which scrolls under
+                // them. A tall window draws both parts, in the order they always had (`All`).
+                let button_width = 260.0;
+                let mut body = |ui: &mut egui::Ui, part: PausePart| {
+                let leave = part != PausePart::Rest;
+                let rest = part != PausePart::Leave;
 
                 // Difficulty selector — hidden during a Trial (the scenario fixes it).
-                if !is_trial {
+                if !is_trial && rest {
                 ui.add_space(10.0);
                 ui.label(egui::RichText::new("Difficulty").size(13.0).color(egui::Color32::from_rgb(140, 140, 155)));
                 ui.add_space(6.0);
-                ui.horizontal(|ui| {
+                // The row's own width, centred, on a compact screen: a bare `horizontal` in a
+                // centred column starts at the screen's left edge and ran off it on a phone.
+                let difficulty_row = |ui: &mut egui::Ui, add: &mut dyn FnMut(&mut egui::Ui)| {
+                    if compact {
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(PAUSE_DIFFICULTY_ROW_WIDTH, 30.0),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| add(ui),
+                        );
+                    } else {
+                        ui.horizontal(|ui| add(ui));
+                    }
+                };
+                difficulty_row(ui, &mut |ui| {
                     for &(label, color) in &[
                         ("Peaceful", egui::Color32::from_rgb(120, 200, 120)),
                         ("Easy", egui::Color32::from_rgb(180, 200, 100)),
@@ -5003,9 +5029,8 @@ pub fn draw_pause_menu(ctx: &egui::Context, world_name: &str, confirm_quit: &mut
                 ui.add_space(16.0);
                 }
 
-                let button_width = 260.0;
-
                 if *confirm_quit {
+                    if leave {
                     // "Are you sure?" confirmation
                     ui.label(
                         egui::RichText::new(crate::world_exit::quit_no_save_warning(kept_autosave))
@@ -5041,7 +5066,9 @@ pub fn draw_pause_menu(ctx: &egui::Context, world_name: &str, confirm_quit: &mut
                     if ui.add(no_btn).clicked() {
                         *confirm_quit = false;
                     }
+                    }
                 } else if *confirm_creative {
+                    if leave {
                     // Creative mode confirmation
                     ui.label(
                         egui::RichText::new("This world will be permanently marked as creative-touched.")
@@ -5077,7 +5104,9 @@ pub fn draw_pause_menu(ctx: &egui::Context, world_name: &str, confirm_quit: &mut
                     if ui.add(no_btn).clicked() {
                         *confirm_creative = false;
                     }
+                    }
                 } else if is_trial {
+                    if leave {
                     // A Trial is an ephemeral, retryable run — there's nothing to
                     // save. Collapse the menu to Resume / Try Again / Leave.
                     let resume_btn = egui::Button::new(
@@ -5134,13 +5163,14 @@ pub fn draw_pause_menu(ctx: &egui::Context, world_name: &str, confirm_quit: &mut
                     if ui.add(controls_btn).clicked() {
                         clicked = PAUSE_OPEN_CONTROLS;
                     }
+                    }
                 } else {
                     // Stash toggle — flip whether this world also saves online.
                     // Native-only: web is a local sandbox with no Stash (the lobby
                     // nudges to the desktop app). On web the Save buttons below just
                     // save locally and *cloud_save stays false.
                     #[cfg(not(target_arch = "wasm32"))]
-                    {
+                    if rest {
                         let stash_label = if *cloud_save {
                             "📦 Stash: ON — also saved online (tap for off)"
                         } else {
@@ -5164,6 +5194,7 @@ pub fn draw_pause_menu(ctx: &egui::Context, world_name: &str, confirm_quit: &mut
 
                     // Normal pause menu buttons. Save / Save and Quit reflect the
                     // Stash state so the player sees exactly what will happen.
+                    if leave {
                     for (i, (&base_label, &color)) in PAUSE_LABELS.iter().zip(PAUSE_COLORS.iter()).enumerate() {
                         let label: String = if i as i32 == PAUSE_SAVE {
                             if *cloud_save { "Save & Stash" } else { "Save" }.to_string()
@@ -5193,7 +5224,9 @@ pub fn draw_pause_menu(ctx: &egui::Context, world_name: &str, confirm_quit: &mut
                         }
                         ui.add_space(4.0);
                     }
+                    }
 
+                    if rest {
                     // Controls — reopens the controls card (first-spawn card +
                     // H help sheet share one table: `controls.rs`). Cross-platform.
                     {
@@ -5295,12 +5328,47 @@ pub fn draw_pause_menu(ctx: &egui::Context, world_name: &str, confirm_quit: &mut
                             *confirm_creative = true;
                         }
                     }
+                    }
+                }
+                };
+
+                if compact {
+                    body(ui, PausePart::Leave);
+                    // The rest scrolls in what is left of the screen; a confirm prompt has
+                    // nothing under it.
+                    if !confirming {
+                        ui.add_space(6.0);
+                        egui::ScrollArea::vertical()
+                            .max_height((ui.available_height() - 8.0).max(60.0))
+                            .auto_shrink([false, true])
+                            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
+                            .show(ui, |ui| {
+                                ui.vertical_centered(|ui| body(ui, PausePart::Rest));
+                            });
+                    }
+                } else {
+                    body(ui, PausePart::All);
                 }
             });
         });
 
     clicked
 }
+
+/// Which of the pause menu's two parts to draw (see `draw_pause_menu`).
+#[derive(Clone, Copy, PartialEq)]
+enum PausePart {
+    /// The buttons that leave the pause menu: Resume, Save, Save and Quit, Quit Without
+    /// Saving, the confirm prompts, and the Trial's buttons.
+    Leave,
+    /// Everything else.
+    Rest,
+    /// Both, in the order a desktop window always drew them.
+    All,
+}
+
+/// The width of the difficulty row on a compact screen: four buttons and their gaps.
+const PAUSE_DIFFICULTY_ROW_WIDTH: f32 = 290.0;
 
 // ---------------------------------------------------------------------------
 // "Your look" panel — BYO 64×64 skin (Phase 2 cosmetics)
@@ -5953,6 +6021,10 @@ pub struct SettingsPanelState {
     pub taps: crate::tester_gate::TapCounter,
 }
 
+/// What a compact Settings Window spends on everything but its scroll area: its title bar,
+/// frame, the pinned Back button and the margin to the screen edges.
+const SETTINGS_COMPACT_CHROME: f32 = 150.0;
+
 /// Draw the Graphics settings panel. Mutates `gfx` in place and returns
 /// `Changed` when any dial/preset moved (caller applies live + persists), or
 /// `Back` when the player closes it. Pure egui, mirrors `draw_skin_panel`.
@@ -5976,6 +6048,12 @@ pub fn draw_settings_panel(
     let mut changed = false;
     let mut pack_changed = false;
 
+    // On a compact (phone) screen the dials sit in a scroll area, capped so the Window with
+    // its title and the pinned Back button fits the screen; Back stays outside the scroll
+    // area, so it is always reachable. A tall window keeps the panel as it was.
+    let compact = dialog_is_compact(ctx);
+    let settings_scroll_h = (ctx.content_rect().height() - SETTINGS_COMPACT_CHROME).max(120.0);
+
     egui::Window::new("Graphics")
         .collapsible(false)
         .resizable(false)
@@ -5983,6 +6061,7 @@ pub fn draw_settings_panel(
         .show(ctx, |ui| {
             ui.set_min_width(340.0);
 
+            let mut settings_body = |ui: &mut egui::Ui| {
             // Preset row — highlight the derived current preset.
             let current = gfx.preset();
             ui.label(
@@ -6463,6 +6542,20 @@ pub fn draw_settings_panel(
                     .size(11.0)
                     .color(DIM_TEXT),
             );
+            };
+            if compact {
+                // `min_scrolled_height`, as in `draw_dialog_frame`: a Window's UI may only use
+                // the size it had last frame, so without it the panel never grows past its
+                // first, small size.
+                egui::ScrollArea::vertical()
+                    .max_height(settings_scroll_h)
+                    .min_scrolled_height(settings_scroll_h)
+                    .auto_shrink([false, true])
+                    .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
+                    .show(ui, |ui| settings_body(ui));
+            } else {
+                settings_body(ui);
+            }
 
             ui.add_space(10.0);
             let back = egui::Button::new(egui::RichText::new("Back").size(15.0).color(DIM_TEXT))
@@ -7303,3 +7396,7 @@ pub(crate) fn draw_qr(ui: &mut egui::Ui, data: &str, size_px: f32) {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 #[path = "menu_keeps_tests.rs"]
 mod keeps_dialog_tests;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "menu_phone_panels_tests.rs"]
+mod phone_panels_tests;

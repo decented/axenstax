@@ -37,7 +37,7 @@ fn saved(file: &TempFile) -> Vec<crate::keeps::Keep> {
 }
 
 /// Every piece of text a frame drew, with where its middle is.
-fn texts(output: &egui::FullOutput) -> Vec<(String, egui::Pos2)> {
+pub(super) fn texts(output: &egui::FullOutput) -> Vec<(String, egui::Pos2)> {
     fn walk(shape: &egui::epaint::Shape, out: &mut Vec<(String, egui::Pos2)>) {
         match shape {
             egui::epaint::Shape::Text(t) => out.push((t.galley.text().to_string(), t.pos + t.galley.rect.center().to_vec2())),
@@ -52,7 +52,7 @@ fn texts(output: &egui::FullOutput) -> Vec<(String, egui::Pos2)> {
 
 /// Where a text was drawn: its rectangle and the clip rectangle it was drawn under (the
 /// card's visible area, or the My Keeps rows' own, whichever scroll area holds it).
-fn placed(output: &egui::FullOutput, label: &str) -> Option<(egui::Rect, egui::Rect)> {
+pub(super) fn placed(output: &egui::FullOutput, label: &str) -> Option<(egui::Rect, egui::Rect)> {
     fn walk(shape: &egui::epaint::Shape, clip: egui::Rect, label: &str, out: &mut Option<(egui::Rect, egui::Rect)>) {
         match shape {
             egui::epaint::Shape::Text(t) if t.galley.text() == label && out.is_none() => {
