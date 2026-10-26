@@ -228,13 +228,20 @@ pub fn join_gate(
 /// What a closed transport means for a session in `state`: `None` when the
 /// session already ended (its own reason stands). The host's own words
 /// (`text`, from `ClientTransport::close_text`) replace the generic ones; with none,
-/// a join that was waiting on the player's signer says so (`awaiting_signer`)
-/// instead of "couldn't reach the host".
-fn transport_closed_reason(state: &ConnectionState, awaiting_signer: bool, text: Option<String>) -> Option<String> {
+/// a join that was waiting on the player's signer (`awaiting_signer`) and was ended by the
+/// host (`host_closed`, from `ClientTransport::host_closed_link`: what an older Keep does to
+/// a peer it never heard an answer for) says the signer did not approve, instead of "couldn't
+/// reach the host". A network error or a timeout keeps the generic words.
+fn transport_closed_reason(
+    state: &ConnectionState,
+    awaiting_signer: bool,
+    host_closed: bool,
+    text: Option<String>,
+) -> Option<String> {
     match state {
         ConnectionState::Connecting => Some(match text {
             Some(text) => text,
-            None if awaiting_signer => SIGNER_DID_NOT_APPROVE.to_string(),
+            None if awaiting_signer && host_closed => SIGNER_DID_NOT_APPROVE.to_string(),
             None => HOST_UNREACHABLE.to_string(),
         }),
         ConnectionState::Connected { .. } => Some(text.unwrap_or_else(|| HOST_CONNECTION_LOST.to_string())),
@@ -1604,8 +1611,12 @@ impl RemoteClient {
         }
 
         if transport_closed
-            && let Some(reason) =
-                transport_closed_reason(&self.state, self.awaiting_signer(), self.transport.close_text())
+            && let Some(reason) = transport_closed_reason(
+                &self.state,
+                self.awaiting_signer(),
+                self.transport.host_closed_link(),
+                self.transport.close_text(),
+            )
         {
             log::warn!("Server link closed: {reason}");
             self.state = ConnectionState::Failed(reason);
@@ -3153,6 +3164,8 @@ mod tests {
         closed: std::sync::Arc<std::sync::atomic::AtomicBool>,
         /// What the host said as it closed the link (a Keep's sentence), if anything.
         said: Option<String>,
+        /// The host sent the disconnect itself (not a network error or a timeout).
+        host_closed: bool,
     }
     impl ClientTransport for ClosingClient {
         fn send_to_server(&self, data: &[u8]) {
@@ -3166,6 +3179,9 @@ mod tests {
         }
         fn close_text(&self) -> Option<String> {
             self.said.clone()
+        }
+        fn host_closed_link(&self) -> bool {
+            self.host_closed
         }
     }
 
@@ -3188,7 +3204,12 @@ mod tests {
         let (srv, client) = channel_pair();
         let closed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let rc = RemoteClient::from_transport(
-            Box::new(ClosingClient { inner: client, closed: closed.clone(), said: said.map(String::from) }),
+            Box::new(ClosingClient {
+                inner: client,
+                closed: closed.clone(),
+                said: said.map(String::from),
+                host_closed: said.is_some(),
+            }),
             build_join_request_guest("Me", 0),
             None,
         );
@@ -3235,6 +3256,7 @@ mod tests {
     /// A signed join whose challenge is with the signer, on a transport that closes on demand.
     fn closing_client_signing(
         said: Option<&str>,
+        host_closed: bool,
     ) -> (
         crate::transport::ChannelServerTransport,
         RemoteClient,
@@ -3246,7 +3268,7 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         let driver: SignDriverFn = Box::new(move |_nonce, _origin| rx);
         let mut rc = RemoteClient::from_transport_authed(
-            Box::new(ClosingClient { inner: client, closed: closed.clone(), said: said.map(String::from) }),
+            Box::new(ClosingClient { inner: client, closed: closed.clone(), said: said.map(String::from), host_closed }),
             build_join_request_guest("Axo", 0),
             driver,
             None,
@@ -3259,16 +3281,26 @@ mod tests {
     }
 
     #[test]
-    fn a_link_that_closes_while_the_signer_is_awaited_says_the_signer_did_not_approve() {
-        let (_srv, mut rc, closed, _tx) = closing_client_signing(None);
+    fn a_link_the_host_closed_without_words_while_the_signer_is_awaited_says_the_signer_did_not_approve() {
+        let (_srv, mut rc, closed, _tx) = closing_client_signing(None, true);
         closed.store(true, std::sync::atomic::Ordering::Relaxed);
         assert!(rc.poll());
         assert_eq!(failed_with(&rc).as_deref(), Some(SIGNER_DID_NOT_APPROVE), "not 'Couldn't reach the host'");
     }
 
     #[test]
+    fn a_link_lost_to_the_network_or_a_timeout_while_the_signer_is_awaited_keeps_the_generic_words() {
+        // The transport cannot say the host closed the link: the player's signer may be fine.
+        let (_srv, mut rc, closed, _tx) = closing_client_signing(None, false);
+        assert!(rc.awaiting_signer());
+        closed.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(rc.poll());
+        assert_eq!(failed_with(&rc).as_deref(), Some(HOST_UNREACHABLE));
+    }
+
+    #[test]
     fn the_hosts_words_win_over_the_signer_sentence() {
-        let (_srv, mut rc, closed, _tx) = closing_client_signing(Some("The Keep is too busy to open this world right now; try again later."));
+        let (_srv, mut rc, closed, _tx) = closing_client_signing(Some("The Keep is too busy to open this world right now; try again later."), true);
         closed.store(true, std::sync::atomic::Ordering::Relaxed);
         rc.poll();
         assert_eq!(

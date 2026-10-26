@@ -494,10 +494,7 @@ fn probe() {
         ConnectionState::Failed(why) => Some(why.clone()),
         _ => None,
     };
-    match env("PROBE_EXPECT_END") {
-        Some(expected) => ok &= ended_with.as_deref().is_some_and(|shown| shown.contains(expected.trim())),
-        None => ok &= s.rc.is_connected(),
-    }
+    ok &= end_as_expected(env("PROBE_EXPECT_END").as_deref(), ended_with.as_deref(), s.rc.is_connected());
     // A pass can arrive after the join settles: take what is waiting before leaving.
     s.step();
     let passes = std::mem::take(&mut s.passes);
@@ -515,6 +512,40 @@ fn probe() {
     result["ok"] = json!(ok);
     emit(&result);
     assert!(ok, "the probe's reads, placement or seat did not all hold; see the JSON line");
+}
+
+/// Whether how the session stood at the end of the hold is what the run asked for: with an
+/// expected ending (`PROBE_EXPECT_END`), the session must have failed with a message that
+/// contains it; with none, it must still be connected. An empty or blank expectation counts as
+/// none, for every string contains the empty one and it would pass any failure.
+fn end_as_expected(expected: Option<&str>, ended_with: Option<&str>, connected: bool) -> bool {
+    match expected.map(str::trim).filter(|text| !text.is_empty()) {
+        Some(expected) => ended_with.is_some_and(|shown| shown.contains(expected)),
+        None => connected,
+    }
+}
+
+#[cfg(test)]
+mod end_tests {
+    use super::*;
+
+    #[test]
+    fn an_expected_ending_must_be_in_what_the_player_was_shown() {
+        let shown = Some("The world restarted; join again with the same code.");
+        assert!(end_as_expected(Some("world restarted"), shown, false));
+        assert!(!end_as_expected(Some("signer"), shown, false));
+        assert!(!end_as_expected(Some("world restarted"), None, true), "it stayed up");
+    }
+
+    #[test]
+    fn an_empty_or_blank_expectation_is_unset_not_a_pass_for_any_failure() {
+        for blank in ["", " ", "\t\n"] {
+            assert!(!end_as_expected(Some(blank), Some("Couldn't reach the host"), false), "{blank:?}");
+            assert!(end_as_expected(Some(blank), None, true), "{blank:?}: still connected is the pass");
+            assert!(!end_as_expected(Some(blank), None, false));
+        }
+        assert!(end_as_expected(None, None, true) && !end_as_expected(None, None, false));
+    }
 }
 
 #[cfg(all(test, unix))]

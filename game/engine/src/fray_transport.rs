@@ -450,6 +450,9 @@ struct ClientInner {
     /// What the host said when it disconnected us (`DisconnectReason::KickedWith`). Boxed so
     /// the transport stays under clippy's size gap with the other `JoinPoll` variants.
     close_text: Option<Box<str>>,
+    /// The host sent the disconnect (`Kicked`, with words or without), as against a network
+    /// error, a timeout or the host leaving.
+    host_closed: bool,
 }
 
 impl ClientInner {
@@ -492,6 +495,7 @@ impl FrayClientTransport {
                 failure: None,
                 closed: false,
                 close_text: None,
+                host_closed: false,
             }),
             binding: OnceLock::new(),
             proven: OnceLock::new(),
@@ -586,8 +590,13 @@ impl ClientTransport for FrayClientTransport {
                 }
                 ClientEvent::Disconnected { reason } => {
                     log::info!("Fray: disconnected: {reason:?}");
-                    if let DisconnectReason::KickedWith(text) = reason {
-                        inner.close_text = Some(text.into_boxed_str());
+                    match reason {
+                        DisconnectReason::KickedWith(text) => {
+                            inner.close_text = Some(text.into_boxed_str());
+                            inner.host_closed = true;
+                        }
+                        DisconnectReason::Kicked => inner.host_closed = true,
+                        _ => {}
                     }
                     inner.close();
                     return None;
@@ -615,6 +624,11 @@ impl ClientTransport for FrayClientTransport {
     /// Set with the close, so it is there whenever [`Self::is_closed`] is.
     fn close_text(&self) -> Option<String> {
         self.inner.lock().ok()?.close_text.as_deref().map(String::from)
+    }
+
+    /// Set with the close, like [`Self::close_text`].
+    fn host_closed_link(&self) -> bool {
+        self.inner.lock().is_ok_and(|inner| inner.host_closed)
     }
 
     fn proven_host(&self) -> Option<ProvenHost> {
@@ -728,6 +742,23 @@ mod tests {
             plain.is_closed()
         });
         assert_eq!(plain.close_text(), None, "a plain disconnect has no words");
+        // Either way it was the host that ended the link, which the signer wording relies on.
+        assert!(client.host_closed_link() && plain.host_closed_link());
+    }
+
+    /// A host that goes away is not a host that turned the player away: the transport says the
+    /// link closed, but not that the host closed it.
+    #[test]
+    fn a_link_that_ends_because_the_host_shut_down_is_not_a_host_kick() {
+        let rig = start_rig(MAX_INBOUND_BYTES);
+        let (client, _server) = rig.join();
+        assert!(!client.host_closed_link(), "nothing closed yet");
+        rig.host.shutdown();
+        eventually("the link to close", || {
+            let _ = client.try_recv_from_server();
+            client.is_closed()
+        });
+        assert!(!client.host_closed_link() && client.close_text().is_none());
     }
 
     /// A peer with no exporter binding is not seated: the server would check

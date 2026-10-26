@@ -260,6 +260,12 @@ pub trait ClientTransport: MaybeSend {
     fn close_text(&self) -> Option<String> {
         None
     }
+    /// Whether the host itself ended the link (a disconnect it sent, with words or without),
+    /// as against a network error, a timeout or this end closing it. Only a transport that can
+    /// tell says so; the default is `false`, which keeps the generic wording of a closed link.
+    fn host_closed_link(&self) -> bool {
+        false
+    }
     /// The host this link proved to be the one it dialled (the key the host's
     /// signed welcome was made with, and the name it gave), once known. Fray
     /// transports know it from `ClientEvent::Connected`; a return pass is
