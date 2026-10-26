@@ -3339,6 +3339,9 @@ impl super::GameState {
             // started server. Hosted/remote lifecycle is managed at the
             // quit-to-menu transition (see PAUSE_*_QUIT handlers) instead.
         }
+        // D3 — the last world's local-only authority never carries over
+        // (a staged LAN / online server, started for this load, does).
+        self.drop_local_authority();
         self.toast = None;
         self.autosave_counter = 0;
         // Players reset to a single default slot at the engine spawn —
@@ -4970,7 +4973,9 @@ impl super::GameState {
                     host.lends_host_world() && host.server.run_id == offer.run_id
                 })
         });
-        if self.hosted_server.as_ref().is_some_and(|host| host.lends_host_world())
+        // The quest preparation only gates admitting joiners (and saves the
+        // world to do it): a local-only authority (D3) admits nobody.
+        if self.hosted_server.as_ref().is_some_and(|host| host.lends_host_world() && !host.local_only())
             && self.hosted_server.as_ref().is_some_and(|host| host.local_gameplay_preparation.is_none())
         {
             let prepared = self.prepare_local_gameplay();
@@ -4995,6 +5000,10 @@ impl super::GameState {
         // MP-D2c-1 — which of our seats ride, for the joiners' view.
         let seated: Vec<bool> = self.players.iter().map(crate::player_slot::PlayerSlot::seated).collect();
         hs.sync_local_seats(&seated);
+        // D3 — a local-only authority follows this client's live rules.
+        if hs.local_only() {
+            hs.align_local_rules(self.play_mode, &self.difficulty, self.explosives_enabled, self.fire_spread_enabled);
+        }
         // C1 — the server rolls joiners' Satori drops with this world's
         // Proof-of-Play secret: the host client's, which it adopts from the
         // world's meta on load (`persist_pop_secret_if_missing`).
@@ -8796,6 +8805,13 @@ impl super::GameState {
                 self.repair_void_columns_after_load();
                 self.reset_tick_timing();
                 self.mode = GameMode::Playing;
+                // D3 — the completed local-world entry: a `--solo-hosted`
+                // game starts its local authority before the first tick. A
+                // failed start has already left for the lobby.
+                if !self.enter_local_world() {
+                    self.window.request_redraw();
+                    return;
+                }
                 // The Host button's result ("Hosting on your network…" or why it
                 // failed), queued before this world's load cleared the toast.
                 #[cfg(not(target_arch = "wasm32"))]
@@ -10689,48 +10705,7 @@ impl super::GameState {
                     if leave_idx < self.players.len() && self.players.len() > 1 {
                         log::info!("Player {} leaving", leave_idx + 1);
 
-                        // Remove the player
-                        self.players.remove(leave_idx);
-
-                        // Remove GPU resources
-                        if leave_idx < self.renderer.player_gpu.len() {
-                            self.renderer.player_gpu.remove(leave_idx);
-                        }
-
-                        // If P1 left and was on a gamepad, P2 inherits
-                        // If P1 left and was on keyboard, remaining player keeps their controller
-                        if leave_idx == 0 {
-                            // The old Player 2 is now Player 1
-                            // If old P1 was keyboard, new P1 (old P2) keeps their controller
-                            // p1_gamepad should point to whatever the remaining player uses
-                            // Find the first connected gamepad for the remaining player
-                            #[cfg(not(target_arch = "wasm32"))]
-                            {
-                                let remaining_gp = self.gamepad.gamepads().iter().enumerate()
-                                    .find(|(_, gp)| gp.connected)
-                                    .map(|(idx, _)| idx);
-                                self.p1_gamepad = remaining_gp;
-                            }
-                            #[cfg(target_arch = "wasm32")]
-                            {
-                                self.p1_gamepad = None;
-                            }
-                        }
-
-                        // Recompute screen layout (back to single screen)
-                        self.screens = crate::screen::compute_screen_layout(
-                            self.players.len(),
-                            self.renderer.width,
-                            self.renderer.height,
-                        );
-                        for screen in &self.screens {
-                            let pidx = match &screen.content {
-                                crate::screen::ScreenContent::LocalPlayer(idx) => *idx,
-                            };
-                            if let Some(p) = self.players.get_mut(pidx) {
-                                p.camera.aspect = screen.viewport.aspect();
-                            }
-                        }
+                        self.remove_local_seat(leave_idx);
 
                         // Resume the game
                         self.mode = GameMode::Playing;
@@ -10791,7 +10766,9 @@ impl super::GameState {
             let press = |idx: usize| -> Option<(bool, bool)> {
                 gamepads.get(idx).map(|gp| (gp.connected, gp.a_pressed))
             };
-            let networked = self.hosted_server.is_some() || self.remote_client.is_some();
+            // D3 — network exposure, not authority presence: a solo-hosted
+            // world grows its seats like single-player.
+            let networked = self.networked();
             let decision = crate::local_join::try_join_next_player(
                 self.players.len(),
                 self.p1_gamepad,
@@ -21654,7 +21631,7 @@ impl super::GameState {
                         crate::commands::CommandResult::RoomJoin(link) => {
                             #[cfg(not(target_arch = "wasm32"))]
                             {
-                                if let Some(hs) = self.hosted_server.as_mut() {
+                                if let Some(hs) = self.network_host_mut() {
                                     let name = hs.server_name.clone();
                                     match hs.room_join(&link, &name) {
                                         Ok(()) => {
@@ -21685,7 +21662,7 @@ impl super::GameState {
                         }
                         crate::commands::CommandResult::RoomLeave => {
                             #[cfg(not(target_arch = "wasm32"))]
-                            if let Some(hs) = self.hosted_server.as_mut() {
+                            if let Some(hs) = self.network_host_mut() {
                                 let line = match hs.room_leave() {
                                     Ok(()) => "Room detached.".to_string(),
                                     Err(e) => e.message(),
@@ -21699,7 +21676,7 @@ impl super::GameState {
                         crate::commands::CommandResult::RoomStatus => {
                             #[cfg(not(target_arch = "wasm32"))]
                             {
-                                let line = if let Some(hs) = self.hosted_server.as_ref() {
+                                let line = if let Some(hs) = self.network_host() {
                                     let st = hs.room_status();
                                     if st.attached {
                                         format!(
@@ -21724,7 +21701,7 @@ impl super::GameState {
                         crate::commands::CommandResult::RoomInvite => {
                             #[cfg(not(target_arch = "wasm32"))]
                             {
-                                let line = match self.hosted_server.as_ref().map(|hs| hs.room_status()) {
+                                let line = match self.network_host().map(|hs| hs.room_status()) {
                                     Some(st) => match st.link {
                                         Some(link) => link,
                                         None => "No room attached. Use /room join <link> to attach one."
@@ -24301,7 +24278,10 @@ impl super::GameState {
     /// today's sensible web behaviour, not a silent drop.
     #[cfg(not(target_arch = "wasm32"))]
     fn send_chat_line(&mut self, text: &str) -> bool {
+        // D3 — a local-only authority has nobody to deliver to: the caller
+        // keeps single-player's local echo.
         if let Some(ref server) = self.hosted_server
+            && !server.local_only()
             && !server.local_transports.is_empty()
         {
             let pkt = crate::protocol::serialize_packet(
@@ -24554,7 +24534,7 @@ impl super::GameState {
     /// The ride of local seat `i` on `mount` is over: the seat empty, the
     /// mount free (`riding::unmount`) and the body on its feet
     /// (`riding::settle`).
-    fn dismount(&mut self, i: usize, mount: hecs::Entity) {
+    pub(crate) fn dismount(&mut self, i: usize, mount: hecs::Entity) {
         self.players[i].riding = None;
         crate::riding::unmount(&mut self.ecs, mount, &mut self.players[i].ride);
         crate::riding::settle(&mut self.players[i].player, &self.world, &self.registry);

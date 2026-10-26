@@ -425,6 +425,10 @@ mod block_use; // C3b-2 — composters, drying racks, campfires, item frames and
 mod shot; // C3c-2 — a bow's or slingshot's shot: one rule for every seat, the server's for a joiner.
 mod block_views; // C3b-2 — what joiners are shown of those blocks (`BlockEntityView`).
 mod hosted_server;
+// D3 — the single-player routing option (`--solo-hosted`) and the session kinds.
+mod local_routing;
+// Split-screen seats leaving a world in progress.
+mod local_seats;
 // FU3 — a client's block edits waiting past the server's per-tick budget.
 mod edit_queue;
 mod sim_lend;
@@ -1351,6 +1355,10 @@ pub(crate) struct GameState {
     /// always `None` on wasm (browsers can't host), but the field's presence lets
     /// the shared network methods reference it without per-line cfg gating.
     pub(crate) hosted_server: Option<crate::hosted_server::HostedServer>,
+    /// D3 — how single-player runs: standalone (the default) or through a
+    /// local, transport-less server (`--solo-hosted`). Injected at
+    /// construction ([`GameState::new`]); never a process-global read.
+    pub(crate) local_routing: crate::local_routing::LocalRouting,
     /// The room this machine hosts through "Host Game" (gap-audit T2-10, Fray):
     /// set when the world card's "Host" button succeeds, shown in the pause
     /// menu, cleared with `hosted_server`. `None` when not hosting one.
@@ -1852,8 +1860,8 @@ impl GameState {
         }
     }
 
-    async fn new(window: Arc<Window>) -> Self {
-        Self::new_inner(Some(window), (0, 0)).await
+    async fn new(window: Arc<Window>, local_routing: crate::local_routing::LocalRouting) -> Self {
+        Self::new_inner(Some(window), (0, 0), local_routing).await
     }
 
     /// Headless GameState harness (2026-07-11) — the full game (world, chunks,
@@ -1865,10 +1873,24 @@ impl GameState {
     /// cfg when a non-test flow, e.g. screenshot tooling, adopts it.)
     #[cfg(all(test, not(target_arch = "wasm32")))]
     pub(crate) async fn new_headless(width: u32, height: u32) -> Self {
-        Self::new_inner(None, (width, height)).await
+        Self::new_headless_routed(width, height, crate::local_routing::LocalRouting::Standalone).await
     }
 
-    async fn new_inner(window: Option<Arc<Window>>, headless_size: (u32, u32)) -> Self {
+    /// [`Self::new_headless`] with an injected single-player routing option.
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) async fn new_headless_routed(
+        width: u32,
+        height: u32,
+        local_routing: crate::local_routing::LocalRouting,
+    ) -> Self {
+        Self::new_inner(None, (width, height), local_routing).await
+    }
+
+    async fn new_inner(
+        window: Option<Arc<Window>>,
+        headless_size: (u32, u32),
+        local_routing: crate::local_routing::LocalRouting,
+    ) -> Self {
         let size = match &window {
             Some(w) => w.inner_size(),
             None => winit::dpi::PhysicalSize::new(headless_size.0, headless_size.1),
@@ -2119,6 +2141,7 @@ impl GameState {
             own_prediction: crate::prediction::OwnPrediction::new(),
             net_local_intent: crate::player_intent::PlayerIntent::default(),
             hosted_server: None,
+            local_routing,
             #[cfg(not(target_arch = "wasm32"))]
             lan_host: None,
             #[cfg(not(target_arch = "wasm32"))]
@@ -2320,14 +2343,17 @@ impl GameState {
 
 struct App {
     state: Option<GameState>,
+    /// D3 — handed to the `GameState` this app builds.
+    local_routing: crate::local_routing::LocalRouting,
     #[cfg(target_arch = "wasm32")]
     pending_state: std::rc::Rc<std::cell::RefCell<Option<GameState>>>,
 }
 
 impl App {
-    fn new() -> Self {
+    fn new(local_routing: crate::local_routing::LocalRouting) -> Self {
         Self {
             state: None,
+            local_routing,
             #[cfg(target_arch = "wasm32")]
             pending_state: std::rc::Rc::new(std::cell::RefCell::new(None)),
         }
@@ -2375,7 +2401,7 @@ impl ApplicationHandler for App {
 
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let state = pollster::block_on(GameState::new(window));
+            let state = pollster::block_on(GameState::new(window, self.local_routing));
             self.state = Some(state);
         }
 
@@ -2446,9 +2472,10 @@ impl ApplicationHandler for App {
             // result in a shared cell that we check each frame.
             let pending = self.pending_state.clone();
             let window_clone = window.clone();
+            let local_routing = self.local_routing;
             wasm_bindgen_futures::spawn_local(async move {
                 log::info!("WASM: starting GameState init...");
-                let state = GameState::new(window).await;
+                let state = GameState::new(window, local_routing).await;
                 log::info!("WASM: GameState init complete!");
                 *pending.borrow_mut() = Some(state);
                 // Trigger a redraw so the event loop picks up the new state
@@ -3134,6 +3161,20 @@ pub fn run() {
     // D1 — `--no-lend`: a host's embedded server keeps its own copy of the
     // world instead of borrowing the host's (`sim_lend`). The one-release
     // escape hatch if lending misbehaves; the dedicated server is unaffected.
+    // D3 — `--solo-hosted`: single-player runs through a local, network-silent
+    // server (opt-in; the default stays standalone). Refused with `--no-lend`
+    // before anything starts.
+    let local_routing = match local_routing::from_args(&args) {
+        Ok(routing) => routing,
+        Err(why) => {
+            log::error!("{why}");
+            eprintln!("axenstax-engine: {why}");
+            std::process::exit(2);
+        }
+    };
+    if local_routing == local_routing::LocalRouting::SoloHosted {
+        log::info!("--solo-hosted: single-player runs through a local server");
+    }
     if args.iter().any(|a| a == "--no-lend") {
         hosted_server::set_no_lend(true);
         log::warn!("--no-lend: hosting keeps a second copy of the world (pre-D1 behaviour)");
@@ -3227,7 +3268,7 @@ pub fn run() {
     update_check::start_once(crate::graphics_settings::GraphicsSettings::load().online_relays);
 
     let event_loop = EventLoop::new().unwrap();
-    drive_event_loop(event_loop);
+    drive_event_loop(event_loop, local_routing);
 }
 
 /// Boot steps every native CLIENT entry point shares, run once the data root is
@@ -3279,9 +3320,9 @@ fn native_boot_services() {
 /// constructed — Android must thread the `AndroidApp` through
 /// `with_android_app`.
 #[cfg(not(target_arch = "wasm32"))]
-fn drive_event_loop(event_loop: EventLoop<()>) {
+fn drive_event_loop(event_loop: EventLoop<()>, local_routing: crate::local_routing::LocalRouting) {
     event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
-    let mut app = App::new();
+    let mut app = App::new(local_routing);
     event_loop.run_app(&mut app).unwrap();
 }
 
@@ -3346,7 +3387,8 @@ pub fn android_main(app: android_activity::AndroidApp) {
         .with_android_app(app)
         .build()
         .expect("failed to build Android event loop");
-    drive_event_loop(event_loop);
+    // No argument dispatch on Android: always standalone single-player.
+    drive_event_loop(event_loop, crate::local_routing::LocalRouting::Standalone);
 }
 
 

@@ -30,6 +30,11 @@ impl super::GameState {
             // (= begin_load + drain) guards any path that reaches Playing with
             // no columns loaded.
             self.initial_load(pcx0, pcz0);
+            // D3 — the completed local-world entry on this path too (a
+            // refused load is already back in the lobby, and starts nothing).
+            if matches!(self.mode, crate::GameMode::Playing) && !self.loaded_columns.is_empty() {
+                self.enter_local_world();
+            }
             return;
         }
 

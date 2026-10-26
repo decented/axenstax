@@ -402,7 +402,8 @@ impl crate::GameState {
         }
         let meta = crate::save::load_world_meta(&self.world_name);
         let world = if meta.display_name.trim().is_empty() { self.world_name.clone() } else { meta.display_name };
-        let Some(hs) = self.hosted_server.as_mut() else { return Err(copy::NEEDS_ONLINE.into()) };
+        // D3: a local-only authority hosts nobody to hand over to.
+        let Some(hs) = self.hosted_server.as_mut().filter(|hs| !hs.local_only()) else { return Err(copy::NEEDS_ONLINE.into()) };
         let (generation, key) = hs.handover_seat(slot).ok_or("That player is no longer signed in to this world.")?;
         if (generation, key) != (drawn.1, drawn.2) {
             return Err(copy::SEAT_CHANGED.into());
