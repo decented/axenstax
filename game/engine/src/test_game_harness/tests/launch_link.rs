@@ -65,9 +65,22 @@ fn game_harness_a_tapped_keep_link_waits_for_the_menu_then_asks() {
     pump(&mut state, 3);
     assert!(state.launch_links.has_held(), "held while paused");
 
-    // Back at the menu (a fresh menu, as leaving a world builds one): the first frame that draws
-    // it hands the link to Join Game's arm. The Keep is not saved, so it asks.
+    // Back at the menu (a fresh menu, as leaving a world builds one) with a launch queued that
+    // fires on the lobby's first frame (as the Workshop and Trial hops do). The link must not be
+    // offered on that frame, when it would be lost or cancel the player's choice: the queued
+    // launch (a no-op here) fires first, and the link is still held after it.
     state.mode = GameMode::Menu(Box::new(crate::menu::MenuState::new()));
+    state.pending_menu_action = Some((crate::menu::MenuAction::None, std::time::Instant::now()));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while state.pending_menu_action.is_some() {
+        assert!(state.launch_links.has_held(), "held while the hop is queued");
+        state.update_and_render();
+        assert!(std::time::Instant::now() < deadline, "the queued launch never fired");
+    }
+    assert!(state.launch_links.has_held(), "held through the hop's own frame");
+
+    // Nothing queued: the first frame that draws the menu hands the link to Join Game's arm. The
+    // Keep is not saved, so it asks.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     while state.launch_links.has_held() {
         state.update_and_render();

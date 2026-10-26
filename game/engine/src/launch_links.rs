@@ -8,7 +8,9 @@
 //! (still on the splash) and a link tapped mid-game (Playing, Paused, loading) are the same
 //! case: held, then handled the first time the player is back at the menu. A player in a
 //! world is never dropped out of it. Several held links come out in the order they arrived,
-//! one at a time.
+//! one at a time. The link last handed over is remembered, and the same text arriving
+//! again (a second tap) is dropped, so it cannot bring the confirm back, or dial a Keep the
+//! player has just saved, later.
 //!
 //! What a held link does is what pasting it does:
 //! - a Keep link goes to Join Game's own arm (`keeps::route_join`: sign in first, a first-time
@@ -85,10 +87,37 @@ pub fn dialog_takes_link(dialog: &MenuDialog) -> bool {
     matches!(dialog, MenuDialog::None | MenuDialog::JoinDirect { .. } | MenuDialog::AddFriend { .. })
 }
 
+/// What else the menu frame is in the middle of. A link waits while any of it is going on: each
+/// is a hop or a join that the frame's own actions finish (a Workshop or Trial hop fires on the
+/// first lobby frame and would drop the link or be cancelled by it), or one a second join would
+/// cut across.
+#[derive(Clone, Copy, Default)]
+pub struct Busy {
+    /// A Join Game through Fray is finding its host.
+    pub fray_join: bool,
+    /// A seat on a host (`remote_client`).
+    pub seated: bool,
+    /// An Online-by-contact join or host is being set up.
+    pub online: bool,
+    /// A world hop is queued: the Workshop (`pending_workshop_for_skin`), a Trial launched from the
+    /// lobby (`pending_menu_action`) or an online world about to load (`pending_online_world`).
+    pub world_hop: bool,
+    /// A world handover is in progress (its consent window is on screen, or the move is under way).
+    pub handover: bool,
+}
+
+impl Busy {
+    pub fn any(self) -> bool {
+        self.fray_join || self.seated || self.online || self.world_hop || self.handover
+    }
+}
+
 /// The links taken from the intent and not yet handled.
 #[derive(Default)]
 pub struct LaunchLinks {
     held: VecDeque<String>,
+    /// The link last handed over. Not held again while it stays the last.
+    last_offered: Option<String>,
     /// A link `setData(null)` could not remove: not taken again while it stays the same.
     stuck: Option<String>,
     last_poll: Option<Instant>,
@@ -133,6 +162,10 @@ impl LaunchLinks {
             log::info!("launch link: dropped (not an axenstax: link, or too long)");
             return;
         }
+        if self.last_offered.as_ref() == Some(&text) {
+            log::info!("launch link: dropped (the one just handled)");
+            return;
+        }
         // Only the length is logged: a Keep link carries a secret.
         log::info!("launch link: held ({} chars)", text.len());
         self.held.retain(|x| x != &text);
@@ -157,6 +190,7 @@ impl LaunchLinks {
             return MenuAction::None;
         }
         let Some(text) = self.held.pop_front() else { return MenuAction::None };
+        self.last_offered = Some(text.clone());
         match route(&text) {
             Some(LaunchRoute::Keep) => MenuAction::JoinGame(text),
             Some(LaunchRoute::FriendInvite) => {

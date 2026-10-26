@@ -44,7 +44,10 @@ fn rust_string(env: &mut JNIEnv, obj: JObject) -> jni::errors::Result<Option<Str
 }
 
 /// Read `getIntent()`'s data and consume it. A Java exception is cleared and a panic caught: a
-/// link that cannot be read must never take the game down.
+/// link that cannot be read must never take the game down. The `catch_unwind` is live: the engine
+/// sets no `panic = "abort"` (not in `Cargo.toml`, nor in `build-apk.sh`'s `RUSTFLAGS`), so a panic
+/// here unwinds to it and the poll reports "unavailable"; without it, android-activity's guard
+/// around `android_main` would abort the process.
 pub fn read_launch_link() -> IntentRead {
     let run = std::panic::AssertUnwindSafe(|| -> IntentRead {
         let Some((vm, activity)) = vm_and_activity() else {

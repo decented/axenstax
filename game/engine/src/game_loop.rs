@@ -9116,11 +9116,22 @@ impl super::GameState {
             }
             // A tapped `axenstax:` link, held since it arrived (a cold start, or a world it must
             // not interrupt): handled now that the menu is up, as a paste is. Not while a join
-            // is finding its host or is seated.
+            // is under way or a hop is queued.
             #[cfg(not(target_arch = "wasm32"))]
             if matches!(action, crate::menu::MenuAction::None) {
-                let idle = self.fray_join.is_none() && self.remote_client.is_none();
-                action = self.launch_links.offer(&mut menu_state.dialog, idle);
+                // The hops are the queued world launches that fire on a lobby's first frame (the
+                // Workshop, a Trial, an online world): offered earlier, the link would be lost or
+                // would cancel the player's choice (`launch_links::Busy`).
+                let busy = crate::launch_links::Busy {
+                    fray_join: self.fray_join.is_some(),
+                    seated: self.remote_client.is_some(),
+                    online: self.online_join.is_some() || self.online_prep.is_some(),
+                    world_hop: self.pending_workshop_for_skin
+                        || self.pending_menu_action.is_some()
+                        || self.pending_online_world.is_some(),
+                    handover: self.handover.is_some(),
+                };
+                action = self.launch_links.offer(&mut menu_state.dialog, !busy.any());
             }
             // A recipient's handover outlives the joined world it began in.
             #[cfg(not(target_arch = "wasm32"))]

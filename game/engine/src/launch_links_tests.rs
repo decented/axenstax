@@ -76,10 +76,53 @@ fn a_link_that_could_not_be_consumed_is_not_taken_again_while_it_stays() {
     let mut dialog = MenuDialog::None;
     assert!(is_join_game(&links.offer(&mut dialog, true), &text));
     assert!(!links.has_held(), "one link, however many reads saw it");
-    // Once the intent is clear, the same link tapped again is new.
+    // Tapped again once the intent is clear: still the link just handled, so dropped.
     links.poll(at(start, 3), || IntentRead::NoLink);
     links.poll(at(start, 4), stuck);
-    assert!(links.has_held());
+    assert!(!links.has_held());
+}
+
+#[test]
+fn a_repeat_of_the_link_just_handled_is_dropped_but_a_different_one_is_not() {
+    let start = Instant::now();
+    let mut links = LaunchLinks::new();
+    let first = keep();
+    let other = fray_keep::format_invite_link(crate::keeps::LINK_PREFIX, &[0xcd; 32], &SECRET);
+    let mut dialog = MenuDialog::None;
+    links.poll(start, || link(&first));
+    assert!(is_join_game(&links.offer(&mut dialog, true), &first));
+    // A second tap while the confirm is up, then after the join: nothing is held to replay.
+    links.poll(at(start, 1), || link(&first));
+    assert!(!links.has_held());
+    links.poll(at(start, 20), || link(&first));
+    assert!(!links.has_held());
+    assert!(matches!(links.offer(&mut dialog, true), MenuAction::None));
+    // Another link is new, and after it the first is allowed again.
+    links.poll(at(start, 21), || link(&other));
+    assert!(is_join_game(&links.offer(&mut dialog, true), &other));
+    links.poll(at(start, 22), || link(&first));
+    assert!(is_join_game(&links.offer(&mut dialog, true), &first));
+}
+
+#[test]
+fn a_link_waits_while_a_hop_a_join_or_a_consent_is_under_way() {
+    let text = keep();
+    let flags: [(&str, Busy); 5] = [
+        ("fray join", Busy { fray_join: true, ..Busy::default() }),
+        ("seated", Busy { seated: true, ..Busy::default() }),
+        ("online by contact", Busy { online: true, ..Busy::default() }),
+        ("world hop queued", Busy { world_hop: true, ..Busy::default() }),
+        ("handover", Busy { handover: true, ..Busy::default() }),
+    ];
+    assert!(!Busy::default().any());
+    for (what, busy) in flags {
+        let mut links = hold(&text);
+        let mut dialog = MenuDialog::None;
+        assert!(busy.any(), "{what}");
+        // The game loop offers with `idle = !busy.any()`.
+        assert!(matches!(links.offer(&mut dialog, !busy.any()), MenuAction::None), "{what}");
+        assert!(links.has_held(), "{what}: held, not lost");
+    }
 }
 
 #[test]

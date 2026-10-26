@@ -488,3 +488,12 @@ fn signed_in_needs_a_stored_session_as_well_as_the_cached_identity() {
     clear_session_at(&session).unwrap();
     assert!(!signed_in_with(&identity, &session));
 }
+
+#[test]
+fn join_in_the_confirm_works_only_after_the_arming_delay() {
+    use std::time::Duration;
+    assert!(!confirm_armed(Duration::ZERO), "a tap under way when the confirm appears");
+    assert!(!confirm_armed(CONFIRM_ARM - Duration::from_millis(1)));
+    assert!(confirm_armed(CONFIRM_ARM));
+    assert!(confirm_armed(Duration::from_secs(5)));
+}

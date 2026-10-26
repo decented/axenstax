@@ -403,6 +403,11 @@ pub struct MenuState {
     /// The Keep (its host key) whose Forget has had its first tap.
     #[cfg(not(target_arch = "wasm32"))]
     pub keep_forget_armed: Option<String>,
+    /// When the "Join this Keep?" confirm first drew; Join does nothing until
+    /// `keeps::CONFIRM_ARM` has passed, so a tap already under way (a link from another app
+    /// brings the game to the front) cannot accept it. Cleared when the confirm is gone.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub keep_confirm_shown: Option<web_time::Instant>,
     /// Why the player just landed back in the lobby when it wasn't their
     /// choice ("Disconnected from host", a kick, a Trial that couldn't open).
     /// Shown as a banner until dismissed.
@@ -513,6 +518,8 @@ impl MenuState {
             keeps: crate::keeps::load_list(&crate::keeps::path()),
             #[cfg(not(target_arch = "wasm32"))]
             keep_forget_armed: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            keep_confirm_shown: None,
             notice: None,
             expanded_trial: None,
             trial_info: None,
@@ -2378,6 +2385,11 @@ pub fn draw_main_menu(ctx: &egui::Context, state: &mut MenuState) -> MenuAction 
         state.lan = None;
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    if !matches!(state.dialog, MenuDialog::JoinKeep { .. }) {
+        state.keep_confirm_shown = None;
+    }
+
     // Draw any active dialog on top
     match state.dialog.clone() {
         MenuDialog::Create { name, seed, creative, commands_enabled, cloud_save,
@@ -2620,6 +2632,8 @@ pub fn draw_main_menu(ctx: &egui::Context, state: &mut MenuState) -> MenuAction 
         }
         #[cfg(not(target_arch = "wasm32"))]
         MenuDialog::JoinKeep { invite } => {
+            let shown = *state.keep_confirm_shown.get_or_insert_with(web_time::Instant::now);
+            let armed = crate::keeps::confirm_armed(shown.elapsed());
             egui::Window::new(crate::keeps::CONFIRM_TITLE)
                 .collapsible(false)
                 .resizable(false)
@@ -2631,7 +2645,7 @@ pub fn draw_main_menu(ctx: &egui::Context, state: &mut MenuState) -> MenuAction 
                     ui.label(crate::keeps::CONFIRM_BODY);
                     ui.add_space(14.0);
                     ui.horizontal(|ui| {
-                        if ui.button(egui::RichText::new("Join").strong()).clicked() {
+                        if ui.add_enabled(armed, egui::Button::new(egui::RichText::new("Join").strong())).clicked() {
                             action = MenuAction::JoinKeep(invite);
                             state.dialog = MenuDialog::None;
                         }
