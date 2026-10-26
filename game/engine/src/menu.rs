@@ -1395,8 +1395,8 @@ pub(crate) fn draw_my_keeps_column_inner(ui: &mut egui::Ui, state: &mut MenuStat
 
 /// The My Keeps block: a heading, then a row per Keep (name, age, Join, Forget). Shared by the
 /// friends column and the Join Game dialog. `max_height` puts the rows in a scroll area of that
-/// height (the dialog on a tall window; a compact dialog already scrolls as a whole, and the
-/// column scrolls as a whole). Returns `JoinKeep` when a Join was tapped, else `None`. A
+/// height (the Join Game dialog, on a tall window and, first in the card, on a phone; the
+/// friends column scrolls as a whole). Returns `JoinKeep` when a Join was tapped, else `None`. A
 /// Forget that completes removes the Keep from `file` and from `keeps`.
 #[cfg(not(target_arch = "wasm32"))]
 fn draw_my_keeps(
@@ -4173,6 +4173,16 @@ fn menu_text_field(
     }
 }
 
+/// Whether dialogs draw as the height-capped, scrolling phone card: always on Android, else
+/// when the window is under 620 points tall. A test can force it on a window of any size.
+fn dialog_is_compact(ctx: &egui::Context) -> bool {
+    #[cfg(test)]
+    if let Some(forced) = ctx.data(|d| d.get_temp::<bool>(egui::Id::new("test-force-compact-dialog"))) {
+        return forced;
+    }
+    cfg!(target_os = "android") || ctx.content_rect().height() < 620.0
+}
+
 fn draw_dialog_frame(ctx: &egui::Context, title: &str, title_color: egui::Color32, border_color: egui::Color32, inner: impl FnOnce(&mut egui::Ui) -> DialogResult) -> DialogResult {
     let mut result = DialogResult::Update(String::new(), String::new());
 
@@ -4199,7 +4209,7 @@ fn draw_dialog_frame(ctx: &egui::Context, title: &str, title_color: egui::Color3
     // content_rect(), not the deprecated screen_rect(): egui 0.34 split the
     // two, and on a phone the CONTENT area excludes the notch / nav-bar insets.
     let screen = ctx.content_rect();
-    let compact = cfg!(target_os = "android") || screen.height() < 620.0;
+    let compact = dialog_is_compact(ctx);
     let short_screen = screen.height() < 620.0;
     let max_dialog_h = (screen.height() - 48.0).max(200.0);
     // The -40 nudge is a desktop nicety (optical centring above the midline);
@@ -4244,8 +4254,14 @@ fn draw_dialog_frame(ctx: &egui::Context, title: &str, title_color: egui::Color3
                         // AlwaysVisible: the 2026-05-21 playtest found kids did
                         // not notice a scroll affordance — an always-drawn bar
                         // is the cheapest "there is more below" signal.
+                        //
+                        // `min_scrolled_height`: an Area's UI may only use the size it had last
+                        // frame (the first frame, egui's 600 x 400 default), so without it the
+                        // card could never grow past that and a long card (the Join Game
+                        // dialog with saved Keeps) was cut off at about 300 points on any screen.
                         egui::ScrollArea::vertical()
                             .max_height(max_dialog_h)
+                            .min_scrolled_height(max_dialog_h)
                             .auto_shrink([false, true])
                             .scroll_bar_visibility(
                                 egui::scroll_area::ScrollBarVisibility::AlwaysVisible,
@@ -4751,9 +4767,19 @@ struct JoinKeepsPane<'a> {
 }
 
 /// The tallest the My Keeps rows grow in the dialog on a window tall enough not to scroll the
-/// whole card; past it they scroll on their own.
+/// whole card (under the text box); past it they scroll on their own.
 #[cfg(not(target_arch = "wasm32"))]
 const JOIN_KEEPS_MAX_HEIGHT: f32 = 190.0;
+
+/// One My Keeps row in the dialog (name, age, buttons, separator), measured; a test fails if
+/// the drawn rows grow past it.
+#[cfg(not(target_arch = "wasm32"))]
+const JOIN_KEEPS_ROW_HEIGHT: f32 = 72.0;
+
+/// A compact (phone) dialog puts My Keeps first, in a scroll area this tall: three rows, so
+/// twenty saved Keeps never push the room code field off the screen.
+#[cfg(not(target_arch = "wasm32"))]
+const JOIN_KEEPS_COMPACT_MAX_HEIGHT: f32 = 3.0 * JOIN_KEEPS_ROW_HEIGHT;
 
 fn draw_join_dialog(
     ctx: &egui::Context,
@@ -4768,7 +4794,26 @@ fn draw_join_dialog(
     let mut cancelled = false;
 
     let _result = draw_dialog_frame(ctx, "Join Game", ACTION_BLUE, CARD_BORDER, |ui| {
-        // LAN games first: the common case is a friend on the same network.
+        // A phone's card is short: a saved Keep is the quickest way in, so on a compact card
+        // My Keeps comes first (its rows scroll on their own), above the LAN rooms and the
+        // code field. A tall window keeps them under the text box.
+        #[cfg(not(target_arch = "wasm32"))]
+        let compact = dialog_is_compact(ctx);
+        #[cfg(not(target_arch = "wasm32"))]
+        if compact && !keeps_pane.keeps.is_empty() {
+            let action = draw_my_keeps(
+                ui,
+                keeps_pane.keeps,
+                keeps_pane.forget_armed,
+                keeps_pane.file,
+                Some(JOIN_KEEPS_COMPACT_MAX_HEIGHT),
+            );
+            if matches!(action, MenuAction::JoinKeep(_)) {
+                *keeps_pane.join = action;
+            }
+            ui.add_space(14.0);
+        }
+        // LAN games: the common case is a friend on the same network.
         #[cfg(not(target_arch = "wasm32"))]
         {
             *picked = crate::lan_ui::draw_lan_games(ui, lan_games);
@@ -4792,13 +4837,16 @@ fn draw_join_dialog(
                     .size(12.0)
                     .color(egui::Color32::from_rgb(150, 150, 160)),
             );
-            // My Keeps, at every width. A compact dialog scrolls as a whole, so only a tall
-            // window gives the rows a scroll area of their own.
-            if !keeps_pane.keeps.is_empty() {
+            // My Keeps on a tall window: under the text box, rows in a scroll area of their own.
+            if !compact && !keeps_pane.keeps.is_empty() {
                 ui.add_space(14.0);
-                let compact = cfg!(target_os = "android") || ctx.content_rect().height() < 620.0;
-                let own_scroll = (!compact).then_some(JOIN_KEEPS_MAX_HEIGHT);
-                let action = draw_my_keeps(ui, keeps_pane.keeps, keeps_pane.forget_armed, keeps_pane.file, own_scroll);
+                let action = draw_my_keeps(
+                    ui,
+                    keeps_pane.keeps,
+                    keeps_pane.forget_armed,
+                    keeps_pane.file,
+                    Some(JOIN_KEEPS_MAX_HEIGHT),
+                );
                 if matches!(action, MenuAction::JoinKeep(_)) {
                     *keeps_pane.join = action;
                 }
