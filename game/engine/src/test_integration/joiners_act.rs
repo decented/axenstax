@@ -1202,8 +1202,9 @@ fn a_species_hit_lands_on_a_joiners_body_wears_its_armour_and_names_the_species(
     assert!(rig.hs.server.players[slot].player.velocity.x > 0.0, "knocked back");
     rig.tick(1);
     assert!(rig.joiners[0].inbox.events.contains(&PlayerEventType::ArmourWorn { hits: 1 }));
-    // Lethal: the joiner is told it died, and of what.
+    // After spawn protection, a lethal hit names its cause to the joiner.
     rig.hs.server.players[slot].combat.invincible_timer = 0;
+    crate::spawn_protection::disarm(&mut rig.hs.server.players[slot]);
     assert!(rig.hs.server.land_hit_on_joiner(
         slot,
         50.0,
