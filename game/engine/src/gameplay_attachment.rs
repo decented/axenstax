@@ -177,6 +177,7 @@ impl crate::GameState {
             && host.lends_host_world()
         {
             host.local_gameplay_preparation = Some(Ok(()));
+            host.local_gameplay_waiting_deaths = false;
         }
     }
 }

@@ -205,6 +205,7 @@ pub fn tick_summon(world: &World, ecs: &mut hecs::World, player_pos: Vec3) {
     let Some(id) = ecs.query::<&SatoshiMarker>().iter().next().map(|(id, _)| id) else {
         return;
     };
+    if crate::combat::entity_is_dead(ecs, id) { return; }
     let summoned = ecs.get::<&Summoned>(id).is_ok();
     let (tx, tz) = if summoned {
         (player_pos.x, player_pos.z)

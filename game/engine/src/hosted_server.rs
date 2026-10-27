@@ -577,6 +577,10 @@ pub struct HostedServer {
     /// authority while the existing host's control and simulation keep running.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) local_gameplay_preparation: Option<Result<(), String>>,
+    /// Only unresolved deaths allow automatic preparation retry; ordinary
+    /// disk/policy refusals remain latched for this host instance.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) local_gameplay_waiting_deaths: bool,
     /// D1, lent only — the changes the server's own systems made to the
     /// host's world this tick (fluids, falling blocks, leaf decay, power, …),
     /// captured from `server.pending_block_changes` before the broadcast
@@ -1167,6 +1171,8 @@ impl HostedServer {
             host_world,
             #[cfg(not(target_arch = "wasm32"))]
             local_gameplay_preparation: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            local_gameplay_waiting_deaths: false,
             lent_sim_changes: Vec::new(),
             lent_edit_cells: Vec::new(),
             lent_ids_reset: false,
@@ -2457,7 +2463,8 @@ impl HostedServer {
             );
             self.send_to_joined_slot(i, &pkt);
         }
-        for (slot, kill) in std::mem::take(&mut self.server.pending_kill_events) {
+        for (slot, kill, generation) in std::mem::take(&mut self.server.pending_kill_events) {
+            if !self.server.is_joiner_of_gen(slot, generation) { continue; }
             let pkt = protocol::serialize_packet(protocol::PacketType::KillEvent, &kill);
             self.send_to_joined_slot(slot, &pkt);
         }

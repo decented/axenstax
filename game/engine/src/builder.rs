@@ -561,6 +561,7 @@ pub fn process_builder_commissions(
         .query::<(&crate::entity::Position, &crate::villager::VillagerComponent)>()
         .iter()
     {
+        if crate::combat::entity_is_dead(ecs, id) { continue; }
         if let Some(c) = vc.commission.as_ref() {
             snaps.push((id, pos.0, c.clone()));
         }

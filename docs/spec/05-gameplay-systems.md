@@ -3152,12 +3152,24 @@ Mob drops are defined by **loot tables** — data-driven JSON structures that sp
 
 > **Implementation note (2026-07-11).** The live drop routing is
 > `death_drops.rs` — a shared free function (`spawn_drops_for_death`) called
-> by BOTH simulation sides: the client-side `GameState` death sweep and
-> `GameServer::tick`. It covers the per-species table (`mob::drops_for`), the
+> by the shared `sim_death` pass (D4 slice 4): standalone/offline play and
+> every server use the same rescue, despawn and loot rules. It covers the per-species table (`mob::drops_for`), the
 > wolf tamed/untamed table, a dead steed's cargo-pack spill, and the
 > salt-lick bonus, seeded deterministically on (x, z, world_time). Before
 > this, `GameServer::tick` **discarded** `despawn_dead`'s result, so a mob
 > killed in the hosted/dedicated-server sim dropped nothing at all.
+>
+> **Death/rescue contract (D4 slice 4, 2026-10-27).** Eligible Pet Bed rescue
+> happens before any real-death drop, kill credit, hideout or raid decrement;
+> a deliberate owner cull retains its original eligibility while delivery waits.
+> Tame flags and cargo snapshots use generational entity IDs, so colocated wild
+> and tamed mobs cannot share flags or packs. Dead victims waiting behind the
+> bounded 32-candidate phase cannot heal, breed, produce eggs, move, attack or
+> have their attacker replaced by later hits. Save/capture waits for pending
+> deaths rather than restoring them alive. Local credit drains at the early
+> pre-projectile boundary; client projectile deaths wait until the next tick.
+> Owned-server projectile deaths retain their same-tick late sweep. No new
+> raid monetary policy or joiner settlement is introduced.
 >
 > **Phase 2 closed the wire (2026-07-11, protocol v57+v58).** Server-side
 > drops now broadcast as `EntityKind::Item` spawns (stack payload in the

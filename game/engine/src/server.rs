@@ -360,12 +360,12 @@ impl DeathLocation {
     }
 }
 
-/// MP-D2b — a client death sweep's kill attribution (single-player, or a
-/// host, whose lent world's sweep is its client's until D4):
+/// Legacy test adapter for the pre-D4 client death attribution seam:
 /// `combat::attribute_kill` over this client's players (`locals`:
 /// `(position, dead)` per slot). A joiner's kill is queued as a `KillEvent`
 /// on the host's server (`server`; `None` in single-player, where no joiner
 /// exists) and credits nobody here. Returns the local player to credit.
+#[cfg(test)]
 pub fn route_client_kill(
     server: Option<&mut GameServer>,
     attacker: Option<crate::combat::Attacker>,
@@ -1002,6 +1002,7 @@ pub struct GameServer {
     /// ([`Self::run_clock_phase`]) and the lent world phase has not closed it
     /// yet. A second phase while it is open is refused.
     pub(crate) clock_phase_open: bool,
+    pub(crate) death_phase_open: bool,
     /// D4 slice 2 — the strike the clock phase rolled this tick, landed by
     /// the world phase ([`Self::land_strike`]), which needs the world.
     pub(crate) pending_strike: Option<u64>,
@@ -1068,11 +1069,11 @@ pub struct GameServer {
     /// packet is what actually lands the stack in front of the player.
     pub pending_item_grants: Vec<(usize, crate::item::ItemStack)>,
     /// MP-D2b — kills credited to joiners, by server player slot, waiting to
-    /// go out as `KillEvent`s: queued by this server's own death sweep, or —
+    /// go out as `KillEvent`s: queued by the shared death phase, or —
     /// on a lent world, whose sweep is its host client's until D4 — by that
     /// sweep through [`Self::queue_kill_event`]. Drained by `HostedServer`
     /// after each tick.
-    pub pending_kill_events: Vec<(usize, crate::protocol::KillEventPacket)>,
+    pub pending_kill_events: Vec<(usize, crate::protocol::KillEventPacket, u32)>,
     /// C2a — the count of nights, for a joiner's once-a-night sleep: shown
     /// the raw clock every tick, after it advances (in the clock phase,
     /// `sim_clock::phase`, on every kind of world).
@@ -1192,6 +1193,7 @@ impl GameServer {
             weather_lock_applied: None,
             clock_adopted: false,
             clock_phase_open: false,
+            death_phase_open: false,
             pending_strike: None,
             lent_strike: None,
             rolls_lightning: true,
@@ -1655,6 +1657,7 @@ impl GameServer {
     pub(crate) fn forget_host_clock(&mut self) {
         self.clock_adopted = false;
         self.clock_phase_open = false;
+        self.death_phase_open = false;
         self.pending_strike = None;
         self.lent_strike = None;
     }
@@ -2296,10 +2299,9 @@ impl GameServer {
             }
         }
 
-        // The death sweep. A lent world's is the host client's: its single
-        // kill-attribution site (kill counters, the Vow, raids, challenges)
-        // needs the attacker this sweep would discard (Q1 trap 2).
-        if self.runs(SimSystem::DespawnDead) {
+        // Lent deaths ran at the early host boundary, before its projectile
+        // pass. Owned worlds keep this late, post-projectile boundary.
+        if !self.lent && self.runs(SimSystem::DespawnDead) {
             self.despawn_dead_with_drops();
         }
 
@@ -2319,64 +2321,6 @@ impl GameServer {
             if sp.combat.dead && sp.riding.is_some() {
                 sp.dismount(&mut self.ecs, &self.world, &self.registry);
             }
-        }
-    }
-
-    /// `despawn_dead` with its drops and hideout bookkeeping — the server's
-    /// death sweep.
-    fn despawn_dead_with_drops(&mut self) {
-        // HP-3 — snapshot HomeHideout anchors on dying brigands so the
-        // post-despawn population decrement runs against the right
-        // hideout.
-        let mut dying_brigand_homes: Vec<[i32; 3]> = Vec::new();
-        for (_e, (health, kind, home)) in self.ecs.query::<(
-            &crate::combat::Health,
-            &crate::entity::MobKind,
-            &crate::brigand::HomeHideout,
-        )>().iter() {
-            if health.is_dead() && crate::brigand::Tier::from_mob_type(kind.0).is_some() {
-                dying_brigand_homes.push(home.anchor);
-            }
-        }
-
-        // Wave-hardening backlog (2026-07-11) — this used to DISCARD
-        // `despawn_dead`'s return, so a mob killed in the server sim dropped
-        // NOTHING (no loot table, no wolf routing, no cargo-pack spill).
-        // Snapshot ownership/cargo state first, then run the same
-        // `death_drops` routing the client-side sweep uses. (Phase 2 closed
-        // the wire: the entity diff (`entity_broadcast`) sends these drops to remote clients,
-        // and the pickup pass above grants them via InventoryGrant. Kill
-        // attribution / bounty / Vow stay client-side pending the dual-sim
-        // rework.)
-        let mut drop_snaps = crate::death_drops::snapshot_before_despawn(&self.ecs);
-        let dying_tamed = crate::death_drops::dying_tamed_positions(&self.ecs);
-        let deaths = crate::combat::despawn_dead(&mut self.ecs);
-        for death in deaths {
-            let crate::combat::MobDeath { kind, pos, attacker, .. } = death;
-            crate::death_drops::spawn_drops_for_death(
-                &mut self.ecs,
-                &self.world,
-                &mut drop_snaps,
-                death,
-                self.world_time,
-            );
-            // MP-D2b — the one attribution rule, with no local players: a
-            // joiner's kill goes to that joiner as a `KillEvent` (the server
-            // keeps no kill counters).
-            // Review D2b LOW-5 — no player's hit: the nearest living joiner,
-            // as single-player credits its nearest player.
-            let joiners = self.joiner_bodies();
-            if let crate::combat::KillCredit::Remote { slot, generation, nearest } =
-                crate::combat::attribute_kill(attacker, pos, &[], &joiners)
-            {
-                let tamed = dying_tamed.iter().any(|p| (*p - pos).abs().max_element() < 0.5);
-                self.queue_kill_event(slot, generation, kind, pos, tamed, nearest);
-            }
-        }
-
-        // HP-3 — apply the population decrements after despawn.
-        for home in &dying_brigand_homes {
-            crate::brigand_hideout_gen::on_brigand_killed(&mut self.world, *home);
         }
     }
 
@@ -2753,7 +2697,7 @@ impl GameServer {
                     let meta = self.world.meta_at(x, y, z);
                     self.pending_block_changes.push(crate::protocol::BlockChange::with_meta(x, y, z, block, meta));
                 }
-                other @ (SimEvent::ParrotAlarm { .. } | SimEvent::Seat(_) | SimEvent::HostileContacts { .. }) => {
+                other @ (SimEvent::ParrotAlarm { .. } | SimEvent::Seat(_) | SimEvent::HostileContacts { .. } | SimEvent::Deaths(_)) => {
                     if self.lent {
                         self.sim_events.push(other);
                     }
@@ -2896,26 +2840,32 @@ impl GameServer {
     /// the top of [`Self::tick`]: on
     /// a lending host that is inside the window, on the host's real ECS.
     pub fn forget_released_joiners(&mut self) {
+        let released = std::mem::take(&mut self.released_joiners);
+        Self::forget_released_in(&mut self.ecs, &released);
+    }
+
+    /// The early lent death boundary borrows the actual ECS before the full
+    /// lend window, so departures must be forgotten there too.
+    pub(crate) fn forget_released_in(ecs: &mut hecs::World, released: &[(usize, u32)]) {
         use crate::combat::{Attacker, LastAttacker};
-        if self.released_joiners.is_empty() {
+        if released.is_empty() {
             return;
         }
-        let released = std::mem::take(&mut self.released_joiners);
         let gone = |a: Attacker| {
             matches!(a, Attacker::Remote { slot, generation } if released.contains(&(slot, generation)))
         };
-        for (_, la) in self.ecs.query_mut::<&mut LastAttacker>() {
+        for (_, la) in ecs.query_mut::<&mut LastAttacker>() {
             if gone(la.0) {
                 la.0 = Attacker::Departed;
             }
         }
-        for (_, love) in self.ecs.query_mut::<&mut crate::breeding::InLove>() {
+        for (_, love) in ecs.query_mut::<&mut crate::breeding::InLove>() {
             if love.fed_by.is_some_and(gone) {
                 love.fed_by = Some(Attacker::Departed);
             }
         }
         // C3c-2 — a departed joiner's shots still in flight credit nobody.
-        for (_, shot) in self.ecs.query_mut::<&mut crate::entity::ProjectileEntity>() {
+        for (_, shot) in ecs.query_mut::<&mut crate::entity::ProjectileEntity>() {
             if let Some(shooter) = shot.owner.as_mut()
                 && gone(shooter.who)
             {
@@ -2923,14 +2873,14 @@ impl GameServer {
             }
         }
         let slot_gone = |pidx: usize| released.iter().any(|&(s, _)| s == pidx);
-        for (_, bear) in self.ecs.query_mut::<&mut crate::bear_ai::BearData>() {
+        for (_, bear) in ecs.query_mut::<&mut crate::bear_ai::BearData>() {
             if let crate::bear_ai::BearAiState::Aggro { attacker_pidx, .. } = bear.state
                 && slot_gone(attacker_pidx)
             {
                 bear.state = crate::bear_ai::BearAiState::Wander;
             }
         }
-        for (_, hyena) in self.ecs.query_mut::<&mut crate::hyena_ai::HyenaData>() {
+        for (_, hyena) in ecs.query_mut::<&mut crate::hyena_ai::HyenaData>() {
             if let crate::hyena_ai::HyenaAiState::Aggro { attacker_pidx, .. } = hyena.state
                 && slot_gone(attacker_pidx)
             {
@@ -2939,7 +2889,7 @@ impl GameServer {
         }
         // An angry bee keeps its target's slot too, and stings whoever holds
         // it when its window closes, at any distance: it calms down.
-        for (_, bee) in self.ecs.query_mut::<&mut crate::bee_ai::BeeData>() {
+        for (_, bee) in ecs.query_mut::<&mut crate::bee_ai::BeeData>() {
             if let crate::bee_ai::BeeAiState::Sting { target_id, .. } = bee.state
                 && slot_gone(target_id as usize)
             {
@@ -2955,6 +2905,7 @@ impl GameServer {
     /// player, no player's hit). A slot that isn't a joiner, or is held by
     /// another connection than the one that earned the kill (review D2b
     /// MEDIUM-1), is ignored.
+    #[cfg(test)]
     pub fn queue_kill_event(
         &mut self,
         slot: usize,
@@ -2968,7 +2919,7 @@ impl GameServer {
         self.queue_kill_event_at(slot, generation, kind, location, tamed, nearest);
     }
 
-    fn queue_kill_event_at(
+    pub(crate) fn queue_kill_event_at(
         &mut self,
         slot: usize,
         generation: u32,
@@ -3004,6 +2955,7 @@ impl GameServer {
                 z: pos.z,
                 victim_flags: if tamed { crate::protocol::entity_flags::TAMED } else { 0 },
             },
+            generation,
         ));
     }
 
@@ -3186,9 +3138,9 @@ impl GameServer {
         // A world saved by a newer build is never written (Spec 02 §8.4) — checked
         // before the first chunk, since chunks are written before `world.dat`.
         crate::save::refuse_write_over_newer_save(&dir)?;
-        // A committed first save cut short is published before anything below.
-        crate::save::finish_staged_first_save(&dir)?;
         let saved_mobs = crate::save::tamed_mobs_to_saved(&self.ecs)?;
+        // A committed first save cut short is published after death preflight.
+        crate::save::finish_staged_first_save(&dir)?;
         let first_save = crate::save::is_first_save(&dir);
         let chunks_dir = dir.join("chunks");
 

@@ -136,15 +136,17 @@ const MAX_RISE: f32 = 0.12;
 
 /// Run one physics tick for all entities. Call at 20 TPS.
 pub fn tick_entities(ecs: &mut hecs::World, world: &World, registry: &BlockRegistry) {
-    for (_id, (pos, vel, hitbox, on_ground, flying)) in ecs
+    for (_id, (pos, vel, hitbox, on_ground, flying, health)) in ecs
         .query_mut::<(
             &mut Position,
             &mut Velocity,
             &Hitbox,
             &mut OnGround,
             Option<&Flying>,
+            Option<&crate::combat::Health>,
         )>()
     {
+        if health.is_some_and(|h| h.is_dead()) { continue; }
         // Phase B1 review — an entity whose column is not present (never
         // loaded, dropped or evicted) is frozen where it stands until the
         // column streams back in: it used to fall through the missing terrain
@@ -347,7 +349,8 @@ pub fn push_player_from_entities(
 ) {
     let player_hw = 0.3; // Player half-width
 
-    for (_id, (pos, hitbox)) in ecs.query::<(&Position, &Hitbox)>().iter() {
+    for (id, (pos, hitbox)) in ecs.query::<(&Position, &Hitbox)>().iter() {
+        if crate::combat::entity_is_dead(ecs, id) { continue; }
         let mob_hw = hitbox.width / 2.0;
         let combined_hw = player_hw + mob_hw;
 
@@ -550,12 +553,14 @@ pub fn despawn_mobs_in_column(ecs: &mut hecs::World, cx: i32, cz: i32) -> usize 
     let mut ids: Vec<hecs::Entity> = ecs
         .query::<(&Position, &Scattered)>()
         .iter()
+        .filter(|(id, _)| !crate::combat::entity_is_dead(ecs, *id))
         .filter(|(_, (pos, _))| in_column(pos))
         .map(|(id, _)| id)
         .collect();
     ids.extend(
         ecs.query::<(&Position, &NightSpawn)>()
             .iter()
+            .filter(|(id, _)| !crate::combat::entity_is_dead(ecs, *id))
             .filter(|(_, (pos, _))| in_column(pos))
             .map(|(id, _)| id),
     );
@@ -844,6 +849,7 @@ pub fn tick_projectiles(
     let mob_data: Vec<(hecs::Entity, Vec3, f32, f32)> = ecs
         .query::<(&Position, &Hitbox, &MobKind)>()
         .iter()
+        .filter(|(id, _)| !crate::combat::entity_is_dead(ecs, *id))
         .map(|(id, (p, h, _))| (id, p.0, h.width, h.height))
         .collect();
 
@@ -903,6 +909,7 @@ pub fn tick_projectiles(
         }
     }
     for (mob_id, dmg, is_blunt, owner) in hits {
+        if crate::combat::entity_is_dead(ecs, mob_id) { continue; }
         // 1C no-friendly-fire — an arrow that reaches the shooter's own
         // tamed pet/steed does nothing unless they were sneaking when it
         // landed (a deliberate hit). Ownerless projectiles (mob-fired /

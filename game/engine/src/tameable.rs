@@ -349,11 +349,13 @@ pub fn owned_pet_entities(
 ) -> Vec<hecs::Entity> {
     let mut out = Vec::new();
     for (e, d) in ecs.query::<&crate::wolf::WolfData>().iter() {
+        if crate::combat::entity_is_dead(ecs, e) { continue; }
         if d.ownership.is_owned_by(player_pubkey) {
             out.push(e);
         }
     }
     for (e, d) in ecs.query::<&crate::companion::CompanionData>().iter() {
+        if crate::combat::entity_is_dead(ecs, e) { continue; }
         if d.ownership.is_owned_by(player_pubkey)
             && d.state != crate::companion::CompanionState::Perch
         {
@@ -361,11 +363,13 @@ pub fn owned_pet_entities(
         }
     }
     for (e, d) in ecs.query::<&crate::nostrich::NostrichData>().iter() {
+        if crate::combat::entity_is_dead(ecs, e) { continue; }
         if d.ownership.is_owned_by(player_pubkey) {
             out.push(e);
         }
     }
     for (e, d) in ecs.query::<&crate::horse_ai::HorseData>().iter() {
+        if crate::combat::entity_is_dead(ecs, e) { continue; }
         if d.keeper_identity().is_some_and(|keeper| keeper.matches(player_pubkey, Some(player_slot))) {
             out.push(e);
         }

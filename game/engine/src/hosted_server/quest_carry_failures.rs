@@ -74,7 +74,8 @@ fn dispatch(room: &mut Room, seat: eligibility::Seat, kind: MobType) {
         before + 1
     );
     assert_eq!(room.host.server.pending_kill_events.len(), queued + 1);
-    let (recipient, event) = &room.host.server.pending_kill_events[queued];
+    let (recipient, event, generation) = &room.host.server.pending_kill_events[queued];
+    assert_eq!(*generation, seat.generation);
     assert_eq!(*recipient, seat.slot);
     assert_eq!(event.reason, protocol::kill_reason::LAST_HIT);
     assert_eq!(event.victim, crate::entity_broadcast::wire_kind_for(kind));

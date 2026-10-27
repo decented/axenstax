@@ -135,9 +135,9 @@ pub enum KillCredit {
     Nobody,
 }
 
-/// The ONE kill-attribution rule (MP-D2b), shared by the client's death sweep
-/// (single-player; a host, whose lent world's sweep is its client's until D4)
-/// and a server's own sweep (dedicated, `--no-lend`; `locals` empty).
+/// The one attribution rule, used by the shared `sim_death` pass. Early
+/// host/standalone phases supply trusted locals and joiners; an owned server
+/// supplies joiners (the legacy --no-lend client credits its separate locals).
 ///
 /// - A joiner's hit (`Attacker::Remote`) credits that joiner, always: never
 ///   the nearest local player, even when the joiner has since died or left.
@@ -191,6 +191,9 @@ pub struct Health {
     pub flash_timer: u32,
     /// Ticks remaining on invincibility after being hit.
     pub invincible_timer: u32,
+    /// First death-boundary decision, retained while delivery is blocked.
+    /// Runtime only; snapshots wait for unresolved deaths.
+    pub rescue_eligible: Option<bool>,
 }
 
 impl Health {
@@ -200,6 +203,7 @@ impl Health {
             max,
             flash_timer: 0,
             invincible_timer: 0,
+            rescue_eligible: None,
         }
     }
 
@@ -208,7 +212,7 @@ impl Health {
     }
 
     pub fn take_damage(&mut self, amount: f32) -> bool {
-        if self.invincible_timer > 0 {
+        if self.is_dead() || self.invincible_timer > 0 {
             return false;
         }
         self.current = (self.current - amount).max(0.0);
@@ -679,6 +683,7 @@ fn find_attack_target_impl(
 ) -> Option<(hecs::Entity, Option<crate::mob::MobType>)> {
     let mut best: Option<(hecs::Entity, f32)> = None;
     for (id, (pos, hitbox)) in ecs.query::<(&Position, &Hitbox)>().iter() {
+        if entity_is_dead(ecs, id) { continue; }
         let to_entity = pos.0 + Vec3::new(0.0, hitbox.height * 0.5, 0.0) - player_pos;
         let dist = to_entity.length();
         if dist > ATTACK_REACH {
@@ -983,8 +988,14 @@ pub(crate) fn notify_hit_bear_or_hyena(ecs: &mut hecs::World, id: hecs::Entity, 
     }
 }
 
+/// Missing Health is supported by lightweight species/test entities.
+/// A real dead body stays inert while its bounded death delivery waits.
+pub(crate) fn entity_is_dead(ecs: &hecs::World, entity: hecs::Entity) -> bool {
+    ecs.get::<&Health>(entity).is_ok_and(|health| health.is_dead())
+}
+
 /// A death retains the exact entity which owned its cargo and attribution.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MobDeath {
     pub entity: hecs::Entity,
     pub kind: crate::mob::MobType,
@@ -1000,35 +1011,22 @@ pub struct MobDeath {
 ///
 /// Non-mob dead entities (anything with `Health` but no `MobKind`) are
 /// still despawned but produce no tuples.
+#[cfg(test)]
 pub fn despawn_dead(ecs: &mut hecs::World) -> Vec<MobDeath> {
-    // First pass: find dead entities, capture (MobType, Vec3, attacker)
-    // where present.
-    let mut dead_with_drops: Vec<(hecs::Entity, crate::mob::MobType, Vec3, Option<Attacker>)> =
-        Vec::new();
-    let mut dead_other: Vec<hecs::Entity> = Vec::new();
-    for (id, h) in ecs.query::<&Health>().iter() {
-        if !h.is_dead() {
-            continue;
-        }
-        // Try to fetch MobKind + Position + LastAttacker alongside.
-        let kind = ecs.get::<&MobKind>(id).map(|k| k.0).ok();
-        let pos = ecs.get::<&Position>(id).map(|p| p.0).ok();
-        let attacker = ecs.get::<&LastAttacker>(id).map(|la| la.0).ok();
-        match (kind, pos) {
-            (Some(k), Some(p)) => dead_with_drops.push((id, k, p, attacker)),
-            _ => dead_other.push(id),
-        }
-    }
+    let dead: Vec<_> = ecs.query::<&Health>().iter()
+        .filter(|(_, h)| h.is_dead()).map(|(entity, _)| entity).collect();
+    dead.into_iter().filter_map(|entity| despawn_one_dead(ecs, entity)).collect()
+}
 
-    let mut out = Vec::with_capacity(dead_with_drops.len());
-    for (id, k, p, attacker) in dead_with_drops {
-        out.push(MobDeath { entity: id, kind: k, pos: p, attacker });
-        let _ = ecs.despawn(id);
-    }
-    for id in dead_other {
-        let _ = ecs.despawn(id);
-    }
-    out
+/// Remove one still-dead candidate. Rescued entities are left untouched;
+/// non-mobs are removed without producing a kill record.
+pub(crate) fn despawn_one_dead(ecs: &mut hecs::World, entity: hecs::Entity) -> Option<MobDeath> {
+    if !ecs.get::<&Health>(entity).ok()?.is_dead() { return None; }
+    let kind = ecs.get::<&MobKind>(entity).ok().map(|k| k.0);
+    let pos = ecs.get::<&Position>(entity).ok().map(|p| p.0);
+    let attacker = ecs.get::<&LastAttacker>(entity).ok().map(|a| a.0);
+    let _ = ecs.despawn(entity);
+    Some(MobDeath { entity, kind: kind?, pos: pos?, attacker })
 }
 
 /// Hostile mob contact damage on one player body — every
@@ -1074,6 +1072,7 @@ pub struct MeleeContact {
 pub fn hostiles_in_reach(ecs: &hecs::World, player_pos: Vec3) -> Vec<MeleeContact> {
     let mut out = Vec::new();
     for (id, (pos, kind, _hitbox)) in ecs.query::<(&Position, &MobKind, &Hitbox)>().iter() {
+        if entity_is_dead(ecs, id) { continue; }
         if mob::mob_def(kind.0).category != MobCategory::Hostile {
             continue;
         }

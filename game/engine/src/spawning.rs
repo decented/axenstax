@@ -154,6 +154,7 @@ fn reclaim_stranded_night_spawns(ecs: &mut hecs::World, world: &World) {
     let stranded: Vec<hecs::Entity> = ecs
         .query::<(&entity::Position, &entity::NightSpawn)>()
         .iter()
+        .filter(|(id, _)| !crate::combat::entity_is_dead(ecs, *id))
         .filter(|(_, (p, _))| !world.is_column_present_at(p.0.x.floor() as i32, p.0.z.floor() as i32))
         .map(|(id, _)| id)
         .collect();

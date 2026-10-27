@@ -168,6 +168,7 @@ pub fn tick_brigand_overrides(
         .query::<(&MobKind, &Position, &MobAi, &Health)>()
         .iter()
     {
+        if health.is_dead() { continue; }
         let Some(tier) = Tier::from_mob_type(kind.0) else {
             continue;
         };
@@ -244,7 +245,7 @@ mod tests {
     const DAY_TICK: u32 = 12_000;
 
     fn make_health(current: f32, max: f32) -> Health {
-        Health { current, max, flash_timer: 0, invincible_timer: 0 }
+        Health { current, max, flash_timer: 0, invincible_timer: 0, rescue_eligible: None }
     }
 
     #[test]
@@ -313,7 +314,7 @@ mod tests {
         let id = spawn_mob(ecs, kind, pos);
         let max = crate::mob::mob_def(kind).health as f32;
         ecs.insert(id, (
-            Health { current: health_current, max, flash_timer: 0, invincible_timer: 0 },
+            Health { current: health_current, max, flash_timer: 0, invincible_timer: 0, rescue_eligible: None },
             BrigandTier { tier },
             HomeHideout { anchor: home },
         )).unwrap();
@@ -422,7 +423,7 @@ mod tests {
         let max = crate::mob::mob_def(kind).health as f32;
         // Insert Health (low) + BrigandTier — NO HomeHideout.
         ecs.insert(id, (
-            Health { current: 2.0, max, flash_timer: 0, invincible_timer: 0 },
+            Health { current: 2.0, max, flash_timer: 0, invincible_timer: 0, rescue_eligible: None },
             BrigandTier { tier: Tier::Brigand },
         )).unwrap();
         // Player within 10 blocks → Brigand's detect range (16) covers.
