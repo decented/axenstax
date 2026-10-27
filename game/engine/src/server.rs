@@ -191,6 +191,13 @@ pub struct ServerPlayer {
     /// by [`ServerPlayer::enter_world`] when the handshake completes. `false`
     /// for every other player (local ones never handshake).
     pub awaiting_join: bool,
+    /// Spawn protection (`crate::spawn_protection`): server ticks left in
+    /// which hostile melee does not hurt this body and (on an owning server)
+    /// hostile mobs do not target it; blasts are not shielded, and a lending
+    /// host's mob targeting is not gated (see that module's doc). Armed by
+    /// [`ServerPlayer::enter_world`] and `GameServer::respawn_player`, ended
+    /// early by a hit on a mob; 0 otherwise.
+    pub spawn_protection: u32,
     /// MP-D2a — the armour points this joiner's latest input says it wears
     /// (`InputPacket.armour_points`). Its armour lives in its client's
     /// inventory (known debt); the server only needs the total to soak the
@@ -609,6 +616,7 @@ impl ServerPlayer {
             dead_ticks: 0,
             respawns: 0,
             awaiting_join: false,
+            spawn_protection: 0,
             armour_points: 0,
             armour_wear_hits: 0,
             interact_cooldown: 0,
@@ -702,6 +710,7 @@ impl ServerPlayer {
         self.dead_ticks = 0;
         self.armour_wear_hits = 0;
         self.player.reset_fall();
+        crate::spawn_protection::arm(self);
     }
 }
 
@@ -1275,6 +1284,7 @@ impl GameServer {
             self.ensure_column_loaded(cx, cz);
         }
         let spawn = crate::chunk_stream::world_spawn_point(&self.world, &self.biome_gen);
+        let spawn = crate::spawn_safety::fix_up(&self.world, &self.registry, spawn);
         self.spawn_column = crate::chunk_stream::column_of(spawn);
         spawn
     }
@@ -1816,7 +1826,7 @@ impl GameServer {
             .players
             .iter()
             .filter(|sp| sp.is_present_and_alive())
-            .map(|sp| sp.player.pos)
+            .map(crate::spawn_protection::targetable_pos)
             .collect();
         // HP-3 — brigand AI pre-pass runs BEFORE the main dispatcher so
         // tier-specific detect-range + flee-gate + day/night chase-gate
@@ -2085,6 +2095,7 @@ impl GameServer {
             let creative = self.play_mode.is_creative();
             let sp = &mut self.players[i];
             sp.combat.tick_timers();
+            crate::spawn_protection::tick(sp);
             if sp.server_simulated && sp.is_present_and_alive() {
                 sp.combat.starvation_floor = floor;
                 sp.combat.tick_metabolism();
@@ -2479,7 +2490,7 @@ impl GameServer {
             // MP-D2b — every hit that lands wears the joiner's armour once
             // (reported as `ArmourWorn`), the single-player rule
             // (`combat::tick_mob_attacks`, `take_damage_with_armour_from`).
-            if hostiles_attack {
+            if hostiles_attack && !crate::spawn_protection::shielded(sp) {
                 let pos = sp.player.pos;
                 let landed = crate::combat::hostile_melee_tick(
                     &self.ecs,
@@ -2744,6 +2755,7 @@ impl GameServer {
     /// health (its own resend covers an honest quick click).
     pub fn respawn_player(&mut self, idx: usize) -> Option<Vec3> {
         let spawn = self.standing_spot(self.players.get(idx)?.spawn_pos);
+        let spawn = crate::spawn_safety::fix_up(&self.world, &self.registry, spawn);
         let sp = &mut self.players[idx];
         if !sp.combat.dead || sp.dead_ticks < MIN_DEAD_TICKS_BEFORE_RESPAWN {
             return None;
@@ -2755,6 +2767,7 @@ impl GameServer {
             crate::riding::unmount(&mut self.ecs, mount, &mut sp.ride);
         }
         sp.combat.respawn();
+        crate::spawn_protection::arm(sp);
         sp.death_handled = false;
         sp.combat.just_died = false;
         sp.dead_ticks = 0;

@@ -4,6 +4,7 @@
 pub mod smoke;
 pub mod handshake;
 pub mod mobs;
+pub mod spawn_protection;
 pub mod blocks;
 pub mod physics;
 pub mod save_load;

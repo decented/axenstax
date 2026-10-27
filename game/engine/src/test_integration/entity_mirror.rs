@@ -256,6 +256,8 @@ fn a_resting_mob_sends_no_updates_until_it_changes() {
 #[test]
 fn a_hostile_next_to_a_joiner_hurts_it_server_side_and_its_health_follows() {
     let mut rig = Rig::new("melee");
+    // Past its spawn protection (`spawn_protection`), as after 15 s in the world.
+    crate::spawn_protection::disarm(&mut rig.hs.server.players[rig.slot]);
     assert_eq!(rig.server_health(), 20.0);
     let brigand = rig.spawn(MobType::Brigand, rig.at + Vec3::new(0.6, 0.0, 0.0));
     rig.tick(1);
@@ -319,6 +321,7 @@ fn lava_contact_hurts_a_joiner_server_side() {
 #[test]
 fn a_lethal_hit_on_the_server_kills_the_joiner_through_the_died_event() {
     let mut rig = Rig::new("lethal");
+    crate::spawn_protection::disarm(&mut rig.hs.server.players[rig.slot]);
     rig.hs.server.players[rig.slot].combat.health = 1.0;
     rig.spawn(MobType::Berserker, rig.at + Vec3::new(0.5, 0.0, 0.0));
     rig.tick(2);

@@ -2610,6 +2610,7 @@ impl HostedServer {
         let tick = self.server.tick_counter;
         let key = self.server.players[i].pet_owner_key().unwrap_or_default();
         let sp = &mut self.server.players[i];
+        crate::spawn_protection::disarm(sp);
         sp.next_swing_tick = sp.next_swing_tick.max(tick) + u64::from(crate::combat::ATTACK_COOLDOWN);
         let eye = sp.player.eye_pos();
         let look_dir = crate::camera::forward_from(sp.yaw, sp.pitch);
@@ -3120,6 +3121,7 @@ impl HostedServer {
         let believed = if ammo_short > 0 && views.believed_ammo.try_take(ammo_short, now) { ammo_short } else { 0 };
         let tool_believed = if weapon_short > 0 && views.believed.try_take(weapon_short, now) { weapon_short } else { 0 };
         sp.next_shot_tick = sp.next_shot_tick.max(now) + crate::shot::SHOT_COOLDOWN_TICKS;
+        crate::spawn_protection::disarm(sp);
         let shooter = crate::entity::Shooter {
             who: crate::combat::Attacker::Remote { slot: i, generation: sp.attach_gen },
             owner_key: sp.pet_owner_key().unwrap_or_default(),
@@ -5130,16 +5132,28 @@ impl HostedServer {
                             let _ = self.release_slot(i, Some(&refusal.reason()));
                             break;
                         }
+                        let mut restored_at = None;
                         if let Some(saved) = &saved_joiner {
+                            // Stand the body on clear ground, as the world
+                            // spawn is (`spawn_safety`), but keep the saved
+                            // spawn point as it was: a bed under a low
+                            // ceiling must not move onto the roof for good.
+                            let owns = !self.lends_host_world();
+                            let saved_spawn = glam::Vec3::from_array(saved.spawn);
+                            let body_at = self.server.safe_spawn_loading(saved_spawn, owns);
                             let sp = &mut self.server.players[i];
-                            sp.spawn_pos = glam::Vec3::from_array(saved.spawn);
-                            sp.player.pos = sp.spawn_pos;
+                            sp.spawn_pos = saved_spawn;
+                            sp.player.pos = body_at;
                             sp.player.velocity = glam::Vec3::ZERO;
                             sp.player.reset_fall();
+                            restored_at = Some(body_at);
                         }
-                        // The spawn point this slot was created at
-                        // (`join_spawn`) — also where it respawns.
-                        let spawn = if let Some(sp) = self.server.players.get(i) {
+                        // Where this slot starts: a restored body's spot, else
+                        // the spawn point it was created at (`join_spawn`) —
+                        // which is also where it respawns.
+                        let spawn = if let Some(at) = restored_at {
+                            at
+                        } else if let Some(sp) = self.server.players.get(i) {
                             sp.spawn_pos
                         } else {
                             self.server.world_spawn()
@@ -9687,7 +9701,8 @@ pub(crate) mod tests {
         hs.server.players[i].cursor = Some(crate::item::ItemStack::new_block(crate::block::DIRT, 2));
         hs.server.players[i].craft_grid[1][2] = Some(crate::item::ItemStack::new_material(crate::item::MaterialId::Diamond, 3));
         hs.server.players[i].combat.health = 8.0; hs.server.players[i].combat.hunger = 9;
-        let spawn = glam::Vec3::new(10.5, 80.0, 20.5); hs.server.players[i].spawn_pos = spawn;
+        // A spot a body can stand on: the restore keeps it as it is (`spawn_safety`).
+        let spawn = hs.server.safe_spawn_loading(glam::Vec3::new(10.5, 80.0, 20.5), true); hs.server.players[i].spawn_pos = spawn;
         let expected = crate::inventory_sync::packet(&crate::window_events::effective_window(&hs.server.players[i]),&Default::default(),1);
         let second = hs.attach_test_remote_with_binding(Some([34;32]));
         send_signed_join(&second, [66;32], Some([34;32])); hs.tick();
@@ -9708,6 +9723,38 @@ pub(crate) mod tests {
         assert_eq!(sync.unwrap(), expected);
         assert_eq!(crate::inventory_sync::packet(&crate::window_events::effective_window(&hs.server.players[i]),&Default::default(),1), expected);
         assert!((hs.server.players[i].combat.health - 8.0).abs() < 0.01);
+    }
+
+    /// A returning joiner whose saved spawn point needs a fix-up (a bed under
+    /// a low ceiling, say) is stood on clear ground, but the saved spawn point
+    /// itself is kept: it is not moved for good (`spawn_safety`).
+    #[test]
+    fn a_restore_that_fixes_up_the_body_keeps_the_saved_spawn_point() {
+        use crate::transport::ClientTransport as _;
+        let _g = crate::save::WorldsRootGuard::new("sidecar-restore-keeps-spawn");
+        let mut hs = start_room_test_server("sidecar-keeps-spawn", 0);
+        hs.server.difficulty = crate::survival::Difficulty::Peaceful;
+        let first = hs.attach_test_remote_with_binding(Some([18;32]));
+        send_signed_join(&first, [67;32], Some([18;32])); hs.tick();
+        let i = hs.server.players.len()-1;
+        // Deep in the ground: no body can stand there.
+        let saved = glam::Vec3::new(10.5, 3.0, 20.5);
+        assert_ne!(hs.server.safe_spawn_loading(saved, true), saved, "the spot needs a fix-up");
+        hs.server.players[i].spawn_pos = saved;
+        let second = hs.attach_test_remote_with_binding(Some([35;32]));
+        send_signed_join(&second, [67;32], Some([35;32])); hs.tick();
+        let i = hs.server.players.len()-1;
+        let body = hs.server.players[i].player.pos;
+        assert_ne!(body, saved, "the body was stood on clear ground");
+        assert_eq!(hs.server.players[i].spawn_pos, saved, "the saved spawn point is unchanged");
+        let mut accept = None;
+        while let Some(pkt) = second.try_recv_from_server() {
+            if let Some((protocol::PacketType::JoinAccept, bytes)) = protocol::deserialize_header(&pkt) {
+                accept = Some(protocol::safe_deserialize::<protocol::JoinAcceptPacket>(bytes).unwrap());
+            }
+        }
+        let accept = accept.unwrap();
+        assert_eq!([accept.spawn_x, accept.spawn_y, accept.spawn_z], body.to_array(), "the client starts where the body stands");
     }
 
     /// The packets of `kind` waiting for `client`, decoded.
