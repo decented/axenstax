@@ -514,3 +514,26 @@ fn game_harness_mob_melee_on_a_local_player_lands_once_in_both_routings() {
     }
     assert!((outcomes[0] - outcomes[1]).abs() < 1e-4, "the same hit: {outcomes:?}");
 }
+
+/// The REAL `/time set` and `/time speed` commands (the chat box's command
+/// path, `submit_command_line`) on a solo-hosted world reach the authority
+/// through `write_clock`, and the next tick steps from them.
+#[test]
+#[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+fn game_harness_solo_hosted_real_time_commands_reach_the_authority() {
+    let (_name, mut game) = solo("time-cmd");
+    assert_one_sim(&game.logical_ticks(1));
+    game.state.submit_command_line("/time set 18000".to_string());
+    assert_eq!(authority(&game).world_time, 18_000, "/time set wrote the authority");
+    game.state.submit_command_line("/time speed 8".to_string());
+    assert_eq!(authority(&game).world_time_step, 8, "/time speed wrote the authority");
+    assert_eq!((game.state.world_time, game.state.world_time_step), (18_000, 8), "and this client's copy");
+    assert_one_sim(&game.logical_ticks(1));
+    assert_eq!(authority(&game).world_time, 18_008);
+    assert_eq!(game.state.world_time, 18_008, "the client reads the stepped clock back");
+    game.state.submit_command_line("/time set night".to_string());
+    let night = authority(&game).world_time;
+    assert_ne!(night, 18_008, "a keyword set lands too");
+    assert_one_sim(&game.logical_ticks(1));
+    assert_eq!(authority(&game).world_time, (night + 8) % 24_000);
+}

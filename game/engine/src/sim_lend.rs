@@ -413,6 +413,14 @@ impl OwnedSimParts {
     /// server's clock is the world's), read back into this stand-in's
     /// `clock`, then lend and tick the server.
     pub(crate) fn lend_tick(&mut self, hs: &mut HostedServer) {
+        // A frozen handover source runs no tick at all, its clock included
+        // (`GameState::tick` returns before the phase while play is held).
+        #[cfg(not(target_arch = "wasm32"))]
+        if hs.handover_frozen() {
+            let clock = self.clock;
+            LentSim::lend(hs, self.parts(), clock).tick();
+            return;
+        }
         let seed = crate::sim_clock::ClockSeed {
             world_time: self.clock.world_time,
             world_time_step: 1,
