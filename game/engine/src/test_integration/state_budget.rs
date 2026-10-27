@@ -37,6 +37,9 @@ const MARK_X: i32 = 1_000_000;
 fn start_open_server(world: &str) -> HostedServer {
     let mut hs = HostedServer::start(1, world.to_string(), 42, 0, RemoteTransport::WebSocket { port: 0 })
         .expect("hosted server starts");
+    // Only authored entities contribute to these queue budgets and counts;
+    // worldgen animals can otherwise lay eggs outside the interest radius.
+    hs.server.ecs.clear();
     hs.without_chunk_push_for_test();
     hs
 }

@@ -224,6 +224,12 @@ impl Rig {
         hs.server.column_streamer = None;
         hs.server.column_refill_per_tick = 0;
         hs.server.difficulty = crate::survival::Difficulty::Peaceful;
+        // Remove worldgen wildlife and its products before accounting for
+        // the test's container contents, drops and grants.
+        match host.as_mut() {
+            Some(h) => h.ecs.clear(),
+            None => hs.server.ecs.clear(),
+        }
         let world = match host.as_mut() {
             Some(h) => &mut h.world,
             None => &mut hs.server.world,

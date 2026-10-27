@@ -9286,8 +9286,12 @@ pub(crate) mod tests {
     /// accept thread and no socket at all.
     pub(super) fn start_room_test_server(tag: &str, num_local: usize) -> HostedServer {
         let world = format!("test-room-wiring-{}-{tag}", std::process::id());
-        HostedServer::start(num_local, world, 42, 0, RemoteTransport::WebSocket { port: 0 })
-            .expect("hosted server starts")
+        let mut hs = HostedServer::start(num_local, world, 42, 0, RemoteTransport::WebSocket { port: 0 })
+            .expect("hosted server starts");
+        // These fixtures exercise room, session and inventory contracts.
+        // Worldgen wildlife and its eggs are unrelated conservation inputs.
+        hs.server.ecs.clear();
+        hs
     }
 
     /// A room whose members are the speaker's own kin: the line IS posted.
