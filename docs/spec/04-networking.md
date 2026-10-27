@@ -1276,20 +1276,22 @@ fastens anchors to `TetherTarget::Player(slot)`; `who` is its
 | `SitToggle` | empty hand on the joiner's **own** pet: wolf / Nostrich sit ↔ follow, a companion's command cycle | consume 0; someone else's pet: refused, "That's not your pet." |
 | `LeadToPost { post }` (review D2b B3) | a Lead on the fence post at `post` (`mob_interact::lead_to_post`, single-player's Path B): the joiner's own leashed mob (`Tethered { Player(slot) }`) nearest the post, within `POST_TRANSFER_RADIUS` (4) blocks horizontally, is tied to the post. Names no entity (`entity` is ignored): validated as a block — the post within the block-edit reach of the server body's eye (`block_change_within_reach`, no item bonus), and a fence post in the server's world | consume 1 (as single-player); no mob of the joiner's near the post: refused, nothing taken |
 
-**What the server doesn't simulate is refused (review D2b MEDIUM-2).**
-Breeding (`breeding::tick_breeding`), Leads (`tether::tick_tethers`) and pets
-following, sitting and perching (the species dispatch) run only in a host
-client's sim — on a lending host, the one world it lends. `GameServer::tick`
-runs none of them yet (D4). So `GameServer::animal_life_simulated` is set only
-on a lending host (`HostedServer::start_inner`: `host_world == Lent`), and
-where it is clear — a dedicated server, a `--no-lend` host — `Feed`, `Tame`,
-`LeadAttach`, `SitToggle` and `LeadToPost` (`mob_interact::needs_animal_life`)
-are refused with `InteractNote::NotOnThisServer` ("This server doesn't support
-that yet."): nothing is used and nothing changes. Before, they were accepted
-and charged — the wheat taken, the Lead taken, a tame landed — and nothing
-ever came of it (no baby, a Lead that never pulled, a pet that never
-followed). `Shear`, `Milk` and `LeadDetach` need nothing that runs over time
-and work everywhere.
+**What the server doesn't simulate is refused (review D2b MEDIUM-2; D4
+slice 3).** Breeding, Leads and pets following, sitting and perching are the
+server's on every world since D4 slice 3: `GameServer::tick` runs the shared
+mob simulation (`sim_mobs`, Spec 01 §4.1.3) on the world it owns (dedicated,
+`--no-lend`) or is lent (a host, `--solo-hosted`), so
+`GameServer::animal_life_simulated` is set on every server
+(`HostedServer::start_inner`) and a joiner's `Feed`, `Tame`, `LeadAttach`,
+`SitToggle` and `LeadToPost` are served there, a dedicated server included. The
+gate stays: a server with the flag clear refuses them
+(`mob_interact::needs_animal_life`) with `InteractNote::NotOnThisServer`
+("This server doesn't support that yet."), using and changing nothing — before
+D2b they were accepted and charged with nothing ever coming of it. A tamed
+pet's owner (its npub) is saved with the world (`save::tamed_mobs_to_saved`)
+and restored on a dedicated server's restart (`steed_save::restore_pets`),
+where its species AI walks it to that owner when they are back. `Shear`,
+`Milk` and `LeadDetach` need nothing that runs over time and work everywhere.
 
 **A Strict seat's interactions are typed (C3d run 23).** On a Strict seat
 every kind above, and `Mount`, rides an `ActionIntent::Interact` (§3, 0x44):
@@ -1526,9 +1528,10 @@ Where the sweep runs:
 
 **Breeding credit (review D2b B2).** A fed animal records its feeder
 (`breeding::InLove::fed_by`, the `mob_interact::Actor::who` of the feed), and
-`breeding::NewBaby` carries both parents' feeders. The lending host's client
-breeding step (`breeding::client_step`, called from `GameState::tick`: pair,
-credit, spawn) routes each baby through `server::route_client_breed`: every
+`breeding::NewBaby` carries both parents' feeders. The breeding step
+(`breeding::step`, run by the shared mob simulation `sim_mobs::breed` — in the
+server's tick on every server since D4 slice 3) credits each baby
+(`breeding::breed_credit`), and the server routes it: every
 joiner who fed a parent gets one `PlayerEvent::Bred { offspring }` (v70,
 appended; queued with the same generation check as a kill), on which its
 client fires `BreedAnimals { offspring }`; the host client fires its own
@@ -1538,8 +1541,9 @@ unknown). A breed only joiners fed never completes the host's trial step.
 Closed by C3c-2 (v81): a joiner's bow or slingshot shot is the server's
 projectile, owned by the joiner (`entity::Shooter`, `Attacker::Remote`), so
 it lands on the server's mobs and credits the joiner (§4.2f "Use requests").
-Not closed (open): a dedicated server runs no species AI, breeding or Leads, so feeding, taming, Leads and pet commands are refused
-there (above) until D4 moves those systems into `GameServer::tick`.
+Closed by D4 slice 3: a dedicated server runs species AI, breeding and Leads
+(`sim_mobs` in `GameServer::tick`), so feeding, taming, Leads and pet commands
+are served there (above).
 
 
 ### 4.2e A joiner's inventory: what the server computes (as built, protocol v72, C1; v74, C2b)
@@ -4909,9 +4913,8 @@ refuses a damaged `world.dat` itself (leaving the world drops the server). Each 
 runs the block/entity housekeeping (fluids, fire, leaf decay, falling blocks, spawning, power,
 carts, item lifetimes, entity health timers, snowfall, rubber, salt lick, bounties, hideouts,
 the active-tick total `ActiveTicks`, and since C3c-3b laid Blueprints developing, `Develop`;
-since D4 slice 2 the clock and weather, below); the host client keeps the mob-locomotion block (species AI overrides
-sit between `mob_ai` and entity physics) with the joiners as extra targets, and the death sweep
-(single kill-attribution site). A per-world tally (`World::sim_tally`) checked after every lent
+since D4 slice 2 the clock and weather, below; since D4 slice 3 the mob simulation, below); the
+host client keeps the death sweep (single kill-attribution site). A per-world tally (`World::sim_tally`) checked after every lent
 tick (`SimTally::one_tick_faults`) catches a system that ran twice or not at all, and a
 GPU-free predicate-table test pins one owner per world in every mode (lent host, owning host,
 dedicated, single-player).
@@ -4931,6 +4934,23 @@ joiner, else the world-spawn column) in a loaded column, lights and relights the
 it for joiners; the host only presents the bolt after the window. Joiners still get the window
 as ticks-left on every `StateUpdate` (unchanged) and roll their own presentation-only bolts from
 it. Why no bump: no packet or save field changed. Spec 01 §4.1.3.
+
+**The mob simulation is the server's (D4 slice 3, 2026-10-27; no wire change).** A lent world's
+whole mob tick — the animals' products, a village's population, the brigand pre-pass, the generic
+AI, breeding, wolf follow, every species' own AI, Leads, the seats' steering and entity physics —
+runs once, inside the window, from the one implementation standalone single-player calls in its
+own tick (`sim_mobs`); the host client runs none of it. Its seats' input reaches the server's
+steering pass before physics (`GameServer::lent_local_seats`, handed over by the host client with
+this tick's intent). What the mobs did to the host's own players (a species hit, the hostile
+mobs in melee reach of its bodies, a birth, a parrot's alarm, a steered seat) comes back through
+a typed outbox (`GameServer::sim_events`), drained straight after the window and landed by the
+host client's own rules (armour, i-frames, wear, the pets' revenge); a joiner's hits land on its
+server body at once, and a feeding joiner's credit is its `PlayerEventType::Bred`, as before. The
+generic AI's targets come from the server's player slots, through spawn protection
+(`spawn_protection::targetable_pos`), so on a lending host a protected joiner is no target, and
+no blast lands on it either (`explosion::apply_joiner_blast_damage`). A dedicated server runs the
+same phases (not a village's population), so its joiners' animals breed, follow and obey Leads.
+Why no bump: no packet or save field changed. Spec 01 §4.1.3.
 
 **Columns round joiners (review fix 1).** The lent world is the only one the server simulates a
 joiner on, so the host client's streamer anchors on every connected joiner's server body too

@@ -23,13 +23,16 @@
 //! host client asks for at the point of its tick where it used to step its
 //! own (`GameServer::run_clock_phase`, phase-token guarded; `sim_clock`), and
 //! read back by the client; `/time`, the bed and a trial's weather lock write
-//! the server's. The client keeps the mob locomotion block (brigand pre-pass → `mob_ai` →
-//! entity physics: the client's species AI, wolf follow, tethers and the rest
-//! overwrite `mob_ai`'s velocities BETWEEN those two passes, so splitting them
-//! across the two ticks would erase every override), and the death sweep
-//! (the client's single kill-attribution site feeds kill counters, the Vow,
-//! raids and challenges). Each row moves to the server as the client-only
-//! systems around it do (D4).
+//! the server's. D4 slice 3 — and the mob simulation: the whole locomotion
+//! block (brigand pre-pass → `mob_ai` → breeding → wolf follow → species AI
+//! → tethers → seat steering → entity physics), the animals' products and a
+//! village's population run once, in the server's tick, from the one shared
+//! implementation a standalone game calls in its own (`sim_mobs`); the host
+//! client hands its seats' input over before the window and drains what the
+//! mobs did to its players from the server's outbox after it
+//! (`GameServer::sim_events`). The client keeps the death sweep (its single
+//! kill-attribution site feeds kill counters, the Vow, raids and
+//! challenges); it moves to the server with D4's next slice.
 //!
 //! Native only in practice: the web build has no hosted-server tick, so the
 //! lend window is never opened there (the module still compiles, since
@@ -85,9 +88,11 @@ pub enum SimSystem {
     SaltLick,
     /// Bounty-board rotation.
     Bounties,
-    /// Brigand AI pre-pass + `mob_ai::tick_mob_ai`.
+    /// The brigand pre-pass, the defenders' swings and `mob_ai::tick_mob_ai`
+    /// (`sim_mobs::pre_pass`, `golems`, `mob_ai`).
     MobAi,
-    /// `entity::tick_entities`.
+    /// The seats' steering and `entity::tick_entities`, then Satoshi's walk
+    /// (`sim_mobs::steer_local_seats`, `physics`, `summon`).
     EntityPhysics,
     /// Item lifetimes + pickup delay.
     ItemLifetimes,
@@ -104,10 +109,23 @@ pub enum SimSystem {
     /// `tick_develop`). A joined client runs none (C3c-3r): its copies are
     /// render stubs, and the flips reach it through the attachment stream.
     Develop,
+    /// D4 slice 3 — the animals' products: Nostrich eggs and feathers,
+    /// chicken eggs (`sim_mobs::products`).
+    Products,
+    /// D4 slice 3 — a village's population (`sim_mobs::population`, once a
+    /// second).
+    Population,
+    /// D4 slice 3 — breeding (`sim_mobs::breed`).
+    Breeding,
+    /// D4 slice 3 — tamed wolves following and every species' own AI
+    /// (`sim_mobs::species`).
+    Species,
+    /// D4 slice 3 — Lead tethers (`sim_mobs::tethers`).
+    Tethers,
 }
 
 impl SimSystem {
-    pub const COUNT: usize = 20;
+    pub const COUNT: usize = 25;
 
     pub const ALL: [SimSystem; Self::COUNT] = [
         SimSystem::ActiveTicks,
@@ -130,15 +148,25 @@ impl SimSystem {
         SimSystem::EntityHealth,
         SimSystem::DespawnDead,
         SimSystem::Develop,
+        SimSystem::Products,
+        SimSystem::Population,
+        SimSystem::Breeding,
+        SimSystem::Species,
+        SimSystem::Tethers,
     ];
 
     /// The side that runs this system while the world is lent (module docs).
     pub const fn lent_owner(self) -> SimSide {
         match self {
+            SimSystem::DespawnDead => SimSide::HostClient,
             SimSystem::MobAi
             | SimSystem::EntityPhysics
-            | SimSystem::DespawnDead => SimSide::HostClient,
-            SimSystem::ActiveTicks
+            | SimSystem::Products
+            | SimSystem::Population
+            | SimSystem::Breeding
+            | SimSystem::Species
+            | SimSystem::Tethers
+            | SimSystem::ActiveTicks
             | SimSystem::Clock
             | SimSystem::Weather
             | SimSystem::MobSpawning
@@ -169,6 +197,7 @@ impl SimSystem {
                 | SimSystem::Fluids
                 | SimSystem::LeafDecay
                 | SimSystem::Hideouts
+                | SimSystem::Population
         )
     }
 
@@ -312,6 +341,8 @@ impl Drop for LentSim<'_> {
         server.lent = false;
         // The window ends the logical tick: its phase token never outlives it.
         server.clock_phase_open = false;
+        // D4 slice 3 — this tick's seats were this tick's only.
+        server.lent_local_seats.clear();
         server.lent_day_offer = None;
         server.lent_day_owner = None;
     }
@@ -327,28 +358,6 @@ fn swap_parts(server: &mut crate::server::GameServer, parts: &mut SimParts<'_>) 
     std::mem::swap(&mut server.loaded_columns, parts.loaded_columns);
 }
 
-/// MP-D2c-1 — the host client's entity-physics step ([`SimSystem::EntityPhysics`],
-/// the host client's on a lent world): the joiners' seats the server holds
-/// steer their mounts from their latest input
-/// ([`HostedServer::steer_joiner_seats`]) right before `entity::tick_entities`
-/// moves them — after every velocity writer the client ran before it (mob
-/// AI, species AI, tethers) — so a joiner's steering lands before the
-/// physics step that integrates it, as on a world the server owns
-/// (`GameServer::tick`). `hs`: the embedded server, steered only while it
-/// lends this world. The client's own seats are steered by its caller just
-/// before (`GameState::steer_own_seats`).
-pub(crate) fn host_entity_physics(
-    hs: Option<&mut HostedServer>,
-    ecs: &mut hecs::World,
-    world: &World,
-    registry: &crate::block::BlockRegistry,
-) {
-    if let Some(hs) = hs.filter(|hs| hs.lends_host_world()) {
-        hs.steer_joiner_seats(ecs, world);
-    }
-    crate::entity::tick_entities(ecs, world, registry);
-}
-
 /// An owned set of [`SimParts`] — a stand-in for the host client's fields in
 /// tests that drive a lending `HostedServer` without a `GameState`.
 #[cfg(test)]
@@ -362,6 +371,10 @@ pub(crate) struct OwnedSimParts {
     pub loaded_columns: ahash::AHashSet<(i32, i32)>,
     pub clock: HostClock,
     pub(crate) reputation_day: crate::reputation_day::DayClock,
+    /// D4 slice 3 — what the server's mob simulation did to the host's
+    /// players, drained from its outbox after each window as the host client
+    /// drains it (`GameState::tick_hosted_server`), oldest first.
+    pub events: Vec<crate::sim_mobs::SimEvent>,
 }
 
 #[cfg(test)]
@@ -389,6 +402,7 @@ impl OwnedSimParts {
                 weather: s.weather,
             },
             reputation_day,
+            events: Vec::new(),
         };
         hs.set_host_world_for_test(crate::hosted_server::HostWorld::Lent);
         parts
@@ -417,6 +431,7 @@ impl OwnedSimParts {
         self.clock.reputation_offer = self.reputation_day.advance(self.clock.tick_counter, 1).filter(|pulse| pulse.days > 0).map(|pulse| crate::reputation_day::DayOffer { run_id: hs.server.run_id, pulse });
         let clock = self.clock;
         LentSim::lend(hs, self.parts(), clock).tick();
+        self.events.extend(hs.server.sim_events.take());
         self.clock.reputation_offer = None;
         self.clock.weather = hs.server.weather;
     }
@@ -493,18 +508,25 @@ mod tests {
                 weather: crate::weather::Weather::CLEAR,
             },
             reputation_day,
+            events: Vec::new(),
         }
     }
 
     #[test]
-    fn the_ownership_table_gives_the_clock_to_the_server_and_keeps_ai_and_deaths_on_the_host_client() {
+    fn the_ownership_table_gives_the_clock_and_the_mobs_to_the_server_and_keeps_deaths_on_the_host_client() {
         use SimSide::*;
         for (s, side) in [
             // D4 slice 2 — the server's clock and weather are the world's.
             (SimSystem::Clock, Server),
             (SimSystem::Weather, Server),
-            (SimSystem::MobAi, HostClient),
-            (SimSystem::EntityPhysics, HostClient),
+            // D4 slice 3 — the mob simulation is the server's.
+            (SimSystem::MobAi, Server),
+            (SimSystem::EntityPhysics, Server),
+            (SimSystem::Products, Server),
+            (SimSystem::Population, Server),
+            (SimSystem::Breeding, Server),
+            (SimSystem::Species, Server),
+            (SimSystem::Tethers, Server),
             (SimSystem::DespawnDead, HostClient),
             (SimSystem::Fluids, Server),
             (SimSystem::Power, Server),

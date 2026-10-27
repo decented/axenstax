@@ -668,7 +668,7 @@ pub fn server_loop(server: &mut Server) {
 ### 4.1.1 As-built: who ticks the block machines (T1-3, 2026-10-05)
 
 `GameServer::tick` (`server.rs`) runs world time, weather, mob spawning, falling
-blocks, water / lava / fire, **leaf decay**, player physics, mob AI, entity
+blocks, water / lava / fire, **leaf decay**, player physics, the mob simulation (`sim_mobs`, §4.1.3: AI, breeding, species, Leads), entity
 physics, item pickup, power, carts and combat on every hosted and dedicated
 world. Leaf decay's result is *applied*: each decayed cell is queued as a
 `BlockChange` and its sapling drops spawn (it used to be computed and thrown
@@ -902,16 +902,77 @@ the server holds an empty world and ECS; nothing reads them.
 
 | Side when lent | Systems |
 |---|---|
-| **Server** (`GameServer::tick`, inside the window; the clock phase just before it) | the day clock + `tick_counter` + night calendar (`SimSystem::Clock`) and the weather window, trial lock and lightning (`SimSystem::Weather`) — D4 slice 2, below; the active-tick total (`tick_world_clock`, `SimSystem::ActiveTicks` — not the day/night clock), mob spawning, falling blocks, fluids (water + lava + fire), leaf decay + saplings, hideout replenisher, snowfall, rubber cooldowns, salt lick, bounty rotation, item lifetimes, power, carts, entity `Health` timers |
-| **Host client** (`GameState::tick`) | the mob-locomotion block — brigand pre-pass → `mob_ai` → entity physics — and the death sweep (`despawn_dead`, the single kill-attribution site: kill counters, the Vow, raids, challenges) |
+| **Server** (`GameServer::tick`, inside the window; the clock phase just before it) | the day clock + `tick_counter` + night calendar (`SimSystem::Clock`) and the weather window, trial lock and lightning (`SimSystem::Weather`) — D4 slice 2, below; the mob simulation — D4 slice 3, below (`MobAi`, `EntityPhysics`, `Products`, `Population`, `Breeding`, `Species`, `Tethers`); the active-tick total (`tick_world_clock`, `SimSystem::ActiveTicks` — not the day/night clock), mob spawning, falling blocks, fluids (water + lava + fire), leaf decay + saplings, hideout replenisher, snowfall, rubber cooldowns, salt lick, bounty rotation, item lifetimes, power, carts, entity `Health` timers |
+| **Host client** (`GameState::tick`) | the death sweep (`despawn_dead`, the single kill-attribution site: kill counters, the Vow, raids, challenges) |
 
-Why the client keeps mob locomotion: the client's species AI, wolf follow,
-tethers, builder NPCs and Satoshi overwrite `mob_ai`'s velocities **between**
-`mob_ai` and `tick_entities`; splitting that block across the two ticks would
-erase every override. Its targets include the joiners' server-held bodies
-(`lent_joiner_positions`). It moves server-side, with the death sweep (behind
-a `SimEvents` outbox for attribution), as the client-only systems around it
-do (D4). A lent server never runs `despawn_dead`.
+A lent server never runs `despawn_dead`; the death sweep moves server-side
+with D4's next slice (behind the same outbox, for attribution).
+
+**The mob simulation (D4 slice 3, 2026-10-27).** One implementation,
+`sim_mobs` (pure phases over an ECS, a world and the player bodies), in this
+fixed order: `products` (Nostrich lay/feather timers, chicken eggs) →
+`population` (every 20 ticks: a village's first villagers, Satoshi's place,
+knights, wanderers) → `pre_pass` (brigand overrides) → `golems` → `mob_ai` →
+`breed` (`breeding::step`) → `species` (tamed wolves follow, then every
+species' own AI: rabbits, bees, goats, horses, pets, Nostriches, parrot
+alarms, squids, hyenas, sharks, bears) → `tethers` → seat steering
+(`server::steer_seats` for joiners, `steer_local_seats` for local seats) →
+`physics` (`tick_entities`) → `summon` (Satoshi). Exactly one owner per world:
+
+- *Standalone* (default, web) and *joined*: the client calls each phase at the
+  place the old inline code stood (the local player physics and the block
+  machines sit between some of them), so the cadence is unchanged.
+- *Lent* (LAN / online host, `--solo-hosted`): `GameServer::tick` runs them
+  back to back inside the window, once; the host client runs none. Bodies are
+  slot-indexed (`GameServer::mob_bodies`: a connected local slot or a joiner
+  in the world at its body, any other slot `species_ai::ABSENT_PLAYER`, the
+  slot's yaw, each joiner's pet-owner npub); the generic AI's targets are
+  every living body (`mob_targets`: a local slot at its body, a joiner
+  through `spawn_protection::targetable_pos`). The host client hands its
+  seats over before the window (`GameServer::lent_local_seats`: mount,
+  `SeatInput` from this tick's intent and camera yaw, ride state), so a local
+  rider's intent reaches the steering pass before physics.
+- *Dedicated* (and `--no-lend`'s owning server): `GameServer::tick` runs the
+  same phases on its own world, except `population` (a dedicated server's
+  villages stay as worldgen left them; villager quests are not served to
+  joiners yet) and `summon` (no local player to summon Satoshi).
+  `animal_life_simulated` is true on every server, so a joiner's feed, tame,
+  Lead and pet command are served there.
+
+**The outbox (`sim_mobs::SimEvent`).** A phase never touches a `PlayerSlot`.
+What it does to a player comes out as a typed event keyed by slot: `Hit`
+(bee, goat, shark: damage before armour, knockback), `HostileContacts` (the
+hostile mobs in melee reach of a lent world's local body, found after the
+server's physics, `combat::hostiles_in_reach`), `BabyBorn` (with
+`breeding::breed_credit`: this world's own players, and each feeding joiner
+once), `ParrotAlarm`, `CellChanged` (a bear ate a crop) and `Seat` (a local
+seat steered, its ride state and any dismount; the mount is already unmounted
+before physics). Standalone applies each phase's events right after the
+phase (`GameState::apply_sim_events`). A server lands a joiner's hit on its
+body at once (`land_hit_on_joiner`), queues each feeding joiner's
+`PlayerEventType::Bred` (`queue_bred_event`, the existing remote wire path —
+no second credit path), turns a changed cell into a block change, and, on a
+lent world only, queues everything for its local players in
+`GameServer::sim_events`. The host client drains that outbox straight after
+the window (`tick_hosted_server`), before the ride follow, the next catch-up
+tick, its next input or a save, and lands each event through the rules the
+old inline code used: `take_damage_with_armour_from` + knockback + the
+parrots' dismount; `combat::land_mob_attacks` (armour, i-frames, one wear per
+landed hit) + the wolves' revenge pivot; the challenge only if its own player
+fed a parent, the poof and toast for every birth. Its own hostile-melee pass
+(`combat::tick_mob_attacks`) runs only when not lent. Cosmetic differences
+accepted on a lent world: the brigand pre-pass sees post-player-physics
+positions; a Builder NPC's position writes (client) happen before the
+server's physics; a mob killed by its own physics (a fall) is swept by the
+client's death sweep the next tick. In a standalone game a species hit's
+parrot dismount now lands after the whole species phase rather than inside
+it.
+
+**Spawn protection** (`spawn_protection`) covers joiners on every server,
+lent or owned: no hostile melee, no target for the mob AI or the brigand
+pre-pass, no blast (`explosion::apply_joiner_blast_damage`). A host's local
+players are unprotected, as in a standalone game. No wire or save field
+changed (`PROTOCOL_VERSION` unchanged).
 
 **The clock and weather (D4 slice 2, 2026-10-27).** One implementation,
 `sim_clock` (pure): the counter (`next_tick`), the day clock
@@ -994,8 +1055,9 @@ health-trusted (`hosted_server.rs` ClientInput): the host's player on the
 host's machine, simulated by the client that owns the world. `ServerPlayer`
 and `PlayerSlot` stay dual for local slots. Pickups stay complementary (local
 players in the client tick, server-simulated joiners in the server tick).
-Mob-on-player contact damage still applies to local players only (joiners
-take none until D2a).
+Mob-on-player contact damage on a local player is landed by its own client
+(from the server's outbox on a lent world, D4 slice 3); a joiner's by the
+server (D2a).
 
 **Columns (review fix 1, B1b).** The lent world is the only one the server
 simulates a joiner on, so the host client's streamer keeps the joiners'
@@ -1110,9 +1172,9 @@ changes: ordinary single-player is still `GameState::tick` alone.
   mode); each caught-up tick is one whole logical tick of both halves.
 
 Remaining before the default flips (owner call after a playtest): D4 moves
-the client-owned rows (mob locomotion, the death sweep) into
-`GameServer::tick` behind a `SimEvents` outbox. The clock and weather moved in
-D4 slice 2 (above).
+the last client-owned row (the death sweep) into `GameServer::tick` behind the
+`SimEvents` outbox. The clock and weather moved in D4 slice 2, the mob
+simulation in D4 slice 3 (above).
 
 
 ### 4.2 Client Frame Loop

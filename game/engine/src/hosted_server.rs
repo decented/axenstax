@@ -1004,9 +1004,12 @@ impl HostedServer {
         // its own and sends the fires as edits. A lent world's strikes are the
         // server's whatever this says (`GameServer::run_clock_phase`).
         server.rolls_lightning = num_local_players == 0;
-        // Review D2b MEDIUM-2 — breeding, Leads and pets following run only
-        // in a host client's sim, so only on the world a host lends.
-        server.animal_life_simulated = host_world == HostWorld::Lent;
+        // Review D2b MEDIUM-2 — is the animal life a joiner's interactions
+        // rely on (breeding, Leads, pets following) simulated on this
+        // server's world? D4 slice 3: yes, on every kind — the server's tick
+        // runs the shared mob simulation (`sim_mobs`) on the world it owns
+        // or is lent.
+        server.animal_life_simulated = true;
         assign_column_loading(&mut server, num_local_players, host_world);
         match host_world {
             // A world on disk that fails to load is refused here — before the
@@ -1720,19 +1723,6 @@ impl HostedServer {
         }
     }
 
-    /// MP-D2c-1 — steer the joiners' mounts one tick from their latest input
-    /// (`server::steer_seats`) on the lent world `ecs` / `world`: called by
-    /// the host client, whose entity physics this world's is, right before
-    /// it runs (`GameState::tick`), so a joiner's steering lands before the
-    /// physics step that moves the mount — the same place a world the
-    /// server owns steers it (`GameServer::tick`). The input it steers with
-    /// was applied in the previous server tick (the host client ticks
-    /// first).
-    pub fn steer_joiner_seats(&mut self, ecs: &mut hecs::World, world: &crate::world::World) {
-        let server = &mut self.server;
-        crate::server::steer_seats(&mut server.players, ecs, world, &server.registry);
-    }
-
     /// One more local slot, set up as `start_inner` sets up its local slots
     /// (handshake done, unbudgeted outbox), behind a [`transport::NullServerTransport`]:
     /// the host client feeds it through [`Self::sync_local_slots`] and never
@@ -1760,7 +1750,6 @@ impl HostedServer {
     #[cfg(test)]
     pub(crate) fn set_host_world_for_test(&mut self, host_world: HostWorld) {
         self.host_world = host_world;
-        self.server.animal_life_simulated = host_world == HostWorld::Lent;
         assign_column_loading(&mut self.server, self.num_local_players, host_world);
     }
 

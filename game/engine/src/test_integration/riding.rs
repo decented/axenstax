@@ -17,7 +17,7 @@ use std::collections::HashMap;
 
 use glam::Vec3;
 
-use crate::block::{self, BlockRegistry};
+use crate::block;
 use crate::entity::{Position, ProtocolId, Ridden};
 use crate::hosted_server::{HostedServer, RemoteTransport};
 use crate::item::Item;
@@ -175,7 +175,6 @@ struct Rig {
     hs: HostedServer,
     host: Option<OwnedSimParts>,
     joiners: Vec<Joiner>,
-    registry: BlockRegistry,
 }
 
 impl Rig {
@@ -197,7 +196,7 @@ impl Rig {
     }
 
     fn seat_joiners(hs: HostedServer, host: Option<OwnedSimParts>, n: usize) -> Self {
-        let mut rig = Rig { hs, host, joiners: Vec::new(), registry: BlockRegistry::new() };
+        let mut rig = Rig { hs, host, joiners: Vec::new() };
         for k in 0..n {
             let (client, slot) = match rig.host.as_mut() {
                 Some(host) => join_guest_lent(&mut rig.hs, host, &format!("R{k}")),
@@ -232,21 +231,13 @@ impl Rig {
         sp.player.reset_fall();
     }
 
-    /// One logical tick. Lent: the host client's tick first — its species
-    /// AI, then its entity-physics step (which steers the joiners' mounts
-    /// right before it moves them) — then the lend window.
+    /// One logical tick. Lent: the lend window, whose server runs the mob
+    /// simulation (species AI, then the seats' steering right before entity
+    /// physics moves the mounts) on the host's world (D4 slice 3).
     fn tick(&mut self, n: u32) {
         for _ in 0..n {
             match self.host.as_mut() {
-                Some(host) => {
-                    let bodies: Vec<Vec3> = self.hs.server.players.iter().map(|sp| sp.player.pos).collect();
-                    let tick = host.clock.tick_counter;
-                    crate::mob_ai::tick_mob_ai(&mut host.ecs, &host.world, &self.registry, &bodies);
-                    crate::species_ai::dispatch_horses(&mut host.ecs, tick);
-                    crate::species_ai::dispatch_nostriches(&mut host.ecs, &bodies, tick, &[]);
-                    crate::sim_lend::host_entity_physics(Some(&mut self.hs), &mut host.ecs, &host.world, &self.registry);
-                    host.lend_tick(&mut self.hs);
-                }
+                Some(host) => host.lend_tick(&mut self.hs),
                 None => self.hs.tick(),
             }
             for j in &mut self.joiners {
@@ -343,9 +334,10 @@ impl Rig {
 
 #[test]
 fn a_joiner_mounts_a_horse_steers_it_and_sneaks_off_and_everyone_sees_it() {
-    // A dedicated server: no species AI, and a guest rides all the same.
+    // A dedicated server: a guest rides, with the server's species AI
+    // running round it (D4 slice 3).
     let mut rig = Rig::new("horse", 2);
-    assert!(!rig.hs.server.animal_life_simulated, "a dedicated server runs no species AI");
+    assert!(rig.hs.server.animal_life_simulated, "a dedicated server runs the animals' life");
     let (horse, id) = rig.spawn(MobType::Horse, Vec3::new(0.0, 0.0, 2.0));
     let out = rig.mount(0, id, None);
     assert!(out.accepted && out.kind == Some(InteractKind::Mount), "{out:?}");
