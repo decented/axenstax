@@ -498,7 +498,9 @@ fn a_second_rider_on_an_occupied_mount_is_refused_and_a_rider_mounts_nothing_els
 fn a_lent_world_steers_a_joiners_mount_after_the_hosts_species_ai_and_before_its_physics() {
     let mut rig = Rig::new_lent("lent", 1);
     let (bird, id) = rig.spawn(MobType::Nostrich, Vec3::new(0.0, 0.0, 2.0));
-    let owner = format!("local-player-{}", rig.joiners[0].slot);
+    let slot = rig.joiners[0].slot;
+    rig.hs.server.players[slot].verified_pubkey = Some([7; 32]);
+    let owner = rig.hs.server.players[slot].pet_owner_key().expect("the signed joiner's npub");
     {
         let mut d = rig.ecs_mut().get::<&mut crate::nostrich::NostrichData>(bird).unwrap();
         d.ownership.owner_pubkey = owner;
