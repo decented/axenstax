@@ -120,7 +120,7 @@ pub struct NewBaby {
     pub pos: Vec3,
     pub genetics: crate::genetics::Genetics,
     /// Who fed each parent (their `InLove::fed_by`) — who the breed credits
-    /// (`server::route_client_breed`, review D2b B2).
+    /// ([`breed_credit`], review D2b B2).
     pub feeders: [Option<crate::combat::Attacker>; 2],
 }
 
@@ -218,33 +218,56 @@ pub fn tick_breeding(ecs: &mut hecs::World, tick: u64) -> Vec<NewBaby> {
     babies
 }
 
-/// One baby born in a [`client_step`]: the new entity, its species, where,
-/// and whether the sim's own players are credited with the breed.
-#[derive(Clone, Copy, Debug)]
+/// One baby born in a [`step`]: the new entity, its species, where, and who
+/// its breed credits.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Born {
     pub entity: hecs::Entity,
     pub kind: MobType,
     pub pos: Vec3,
-    /// Fire this sim's `BreedAnimals` challenge (`server::route_client_breed`):
-    /// one of its own players fed a parent, or a feeder is unknown.
+    /// Fire this sim's `BreedAnimals` challenge ([`breed_credit`]): one of its
+    /// own players fed a parent, or a feeder is unknown.
     pub credit_here: bool,
+    /// The joiners (slot, connection generation) who fed a parent, each once:
+    /// a `PlayerEventType::Bred` each, queued on the server
+    /// (`GameServer::queue_bred_event`, review D2b B2).
+    pub joiners: [Option<(usize, u32)>; 2],
 }
 
-/// A client sim's breeding step (single-player, or a host, whose lent
-/// world's breeding is its client's until D4): [`tick_breeding`], each baby's
-/// credit routed to whoever fed its parents (`server::route_client_breed`: a
-/// joiner's feed queues a `PlayerEventType::Bred` on the host's `server`,
-/// review D2b B2), and the babies spawned (grow timer, breed cooldown, the
-/// parents' genetics). Toasts, particles and the challenge event stay with
-/// the caller (`GameState::tick`), which owns them.
-pub fn client_step(
-    ecs: &mut hecs::World,
-    tick: u64,
-    mut server: Option<&mut crate::server::GameServer>,
-) -> Vec<Born> {
+/// Review D2b B2 — who one baby's breed credits, from its parents' feeders
+/// (`InLove::fed_by`): this sim's own players when one of them fed a parent
+/// or a feeder is unknown (an animal put in love before the feeder was
+/// recorded) — never for a breed only joiners fed; each joiner who fed a
+/// parent once; a departed joiner nobody.
+pub fn breed_credit(feeders: [Option<crate::combat::Attacker>; 2]) -> (bool, [Option<(usize, u32)>; 2]) {
+    use crate::combat::Attacker;
+    let mut credit_here = false;
+    let mut joiners = [None; 2];
+    for (n, feeder) in feeders.iter().enumerate() {
+        match *feeder {
+            None | Some(Attacker::Local(_)) => credit_here = true,
+            Some(Attacker::Departed) => {}
+            Some(Attacker::Remote { slot, generation }) => {
+                // The same joiner fed both parents: one credit.
+                if n == 1 && feeders[0] == *feeder {
+                    continue;
+                }
+                joiners[n] = Some((slot, generation));
+            }
+        }
+    }
+    (credit_here, joiners)
+}
+
+/// The breeding step (D4 slice 3: ONE step for every kind of world, run by
+/// the shared mob pass `sim_mobs::breed`): [`tick_breeding`], then the babies
+/// spawned (grow timer, breed cooldown, the parents' genetics), each with its
+/// credit ([`breed_credit`]). The caller routes the joiners' credit to the
+/// server and owns the toasts, particles and the challenge event.
+pub fn step(ecs: &mut hecs::World, tick: u64) -> Vec<Born> {
     let mut born = Vec::new();
     for spec in tick_breeding(ecs, tick) {
-        let credit_here = crate::server::route_client_breed(server.as_deref_mut(), spec.feeders, spec.kind);
+        let (credit_here, joiners) = breed_credit(spec.feeders);
         let baby = crate::entity::spawn_mob(ecs, spec.kind, spec.pos);
         let _ = ecs.insert_one(baby, Baby { adult_at_tick: tick + BABY_GROW_TICKS });
         // A newborn can't itself breed until it's grown.
@@ -253,7 +276,7 @@ pub fn client_step(
         // wild genetics spawn_mob attached: a bred baby's traits come from its
         // parents, not the wild distribution).
         let _ = ecs.insert_one(baby, spec.genetics);
-        born.push(Born { entity: baby, kind: spec.kind, pos: spec.pos, credit_here });
+        born.push(Born { entity: baby, kind: spec.kind, pos: spec.pos, credit_here, joiners });
     }
     born
 }

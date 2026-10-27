@@ -435,6 +435,7 @@ mod local_seats;
 mod edit_queue;
 mod sim_clock;
 mod sim_lend;
+mod sim_mobs;
 // T1-5 — per-client bounded StateUpdate queue (split, budget, coalesce, resync).
 mod state_outbox;
 // B2a — server → joiner chunk push (sent-sets, pacing, chunk snapshots).
