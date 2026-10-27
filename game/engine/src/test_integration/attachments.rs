@@ -361,10 +361,12 @@ fn a_develop_flip_on_the_server_reaches_a_joiner() {
         plan.develop_state = crate::plan::DevelopState::Latent { exposure_ticks: crate::plan::DEVELOP_THRESHOLD_TICKS - 2 };
         rig.lay(floor, TOP, FaceAttachment::Blueprint(Box::new(plan)));
         rig.world().set_sky_light_at(floor[0], floor[1] + 1, floor[2], 15);
-        match rig.host.as_mut() {
-            Some(h) => h.clock.world_time = 11_000,
-            None => rig.hs.server.world_time = 11_000,
+        // The server's clock is the world's (D4 slice 2); the lent host's
+        // copy is set too, in case the server has not taken it yet.
+        if let Some(h) = rig.host.as_mut() {
+            h.clock.world_time = 11_000;
         }
+        rig.hs.server.world_time = 11_000;
         assert_eq!(rig.cs[0].sees(floor, TOP).map(|a| crate::chunk_push::pushed_attachment(a)), Some(PushedAttachment::Blueprint { developed: false }));
         rig.ticks(4);
         assert!(

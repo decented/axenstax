@@ -999,6 +999,11 @@ impl HostedServer {
         // WebSocket dedicated path) starts with 0. A lent world's machines
         // are the host client's, so this is never set on a lending server.
         server.simulates_block_machines = num_local_players == 0;
+        // D4 slice 2 — an owned world's lightning is its server's only with no
+        // host client (dedicated); an owning `--no-lend` host's client rolls
+        // its own and sends the fires as edits. A lent world's strikes are the
+        // server's whatever this says (`GameServer::run_clock_phase`).
+        server.rolls_lightning = num_local_players == 0;
         // Review D2b MEDIUM-2 — breeding, Leads and pets following run only
         // in a host client's sim, so only on the world a host lends.
         server.animal_life_simulated = host_world == HostWorld::Lent;

@@ -3320,6 +3320,12 @@ impl super::GameState {
         self.weather_lock_applied = None;
         self.lightning_flash = 0.0;
         self.falling_tick_counter = 0;
+        // D4 slice 2 — a lending server staged for this load outlives the
+        // reset: it takes THIS world's clock (morning, tick 0, clear) at its
+        // first phase, never the last world's time and storm.
+        if let Some(hs) = self.hosted_server.as_mut() {
+            hs.server.forget_host_clock();
+        }
         // Goal 1 — clear any active scenario + reset the per-world stat
         // accumulators on world change. The loaded world re-seeds them from its
         // WorldMeta in the load path below; a NEW world correctly starts at zero.
@@ -4932,6 +4938,78 @@ impl super::GameState {
         }
     }
 
+    /// D4 slice 2 — a lent world's clock phase, run by its server at the
+    /// point of [`Self::tick`] where this client used to step its own counter
+    /// (`GameServer::run_clock_phase`), and read back here: the counter, the
+    /// day clock and its step, the weather window and the lock it pinned. The
+    /// trial lock and the Workshop exclusion are this client's (its world and
+    /// scenario). `None` — this client steps its own clock — when the world
+    /// is not lent (standalone, joined, `--no-lend`), or when the phase was
+    /// refused (a second one in a logical tick: the tally reports it).
+    fn authority_clock_phase(&mut self) -> Option<crate::sim_clock::ClockReadback> {
+        if !self.sim_lent() {
+            return None;
+        }
+        let has_weather = crate::weather::world_has_weather(self.world.is_workshop);
+        let lock: Option<String> = self
+            .scenario
+            .as_ref()
+            .filter(|_| has_weather)
+            .and_then(|sc| sc.def().weather_lock.clone());
+        let seed = crate::sim_clock::ClockSeed {
+            world_time: self.world_time,
+            world_time_step: self.world_time_step,
+            tick_counter: self.tick_counter,
+            weather: crate::weather::Weather {
+                rain_until: self.weather_rain_until,
+                storm_until: self.weather_storm_until,
+            },
+            weather_lock_applied: self.weather_lock_applied.clone(),
+        };
+        let hs = self.hosted_server.as_mut()?;
+        let back = hs.server.run_clock_phase(&seed, has_weather, lock.as_deref(), &mut self.world.sim_tally)?;
+        self.mirror_authority_clock(&back);
+        Some(back)
+    }
+
+    /// D4 slice 2 — this client's copy of the authority's clock: what its
+    /// sky, HUD, crops and own rules read.
+    fn mirror_authority_clock(&mut self, back: &crate::sim_clock::ClockReadback) {
+        self.world_time = back.world_time;
+        self.world_time_step = back.world_time_step;
+        self.tick_counter = back.tick_counter;
+        self.weather_rain_until = back.weather.rain_until;
+        self.weather_storm_until = back.weather.storm_until;
+        self.weather_lock_applied.clone_from(&back.weather_lock_applied);
+    }
+
+    /// D4 slice 2 — the ONE write path for the day clock outside the tick
+    /// (`/time set`, `/time speed`, the bed): on a lent world the
+    /// authority's clock — which the next phase steps from and reads back —
+    /// and this client's copy in every mode.
+    pub(crate) fn write_clock(&mut self, world_time: u32, world_time_step: u32) {
+        self.world_time = world_time;
+        self.world_time_step = world_time_step;
+        if let Some(hs) = self.hosted_server.as_mut().filter(|hs| hs.lends_host_world()) {
+            // A server that has not taken this client's clock yet will, at
+            // its first phase, from these very fields.
+            hs.server.world_time = world_time;
+            hs.server.world_time_step = world_time_step;
+        }
+    }
+
+    /// The bolt, the flash and the thunder of a strike (this client's own, or
+    /// — on a lent world — the one its server landed), and the remesh round
+    /// the fire's light when one took. Presentation only: it rolls nothing.
+    fn present_strike(&mut self, strike: crate::sim_clock::StrikeEvent) {
+        self.lightning_flash = 1.0;
+        self.particles.bolt(strike.ground, 40.0, strike.hash);
+        self.audio.play_thunder();
+        if strike.ignited {
+            self.rebuild_chunks_for_lighting(strike.cell.0, strike.cell.1, strike.cell.2);
+        }
+    }
+
     /// One tick of the embedded hosted server (LAN / online host), run right
     /// after this client's own [`Self::tick`] and its input send. No-op when
     /// not hosting.
@@ -5050,6 +5128,8 @@ impl super::GameState {
             let batch = self.region_broadcast_queue.next_batch(&self.world, budget);
             hs.queue_host_broadcast(batch);
         }
+        // D4 slice 2 — the clock fields are a seed only (the server took this
+        // client's clock at its first phase); the day offer is this tick's.
         let clock = crate::sim_lend::HostClock {
             world_time: self.world_time,
             tick_counter: self.tick_counter,
@@ -5072,6 +5152,8 @@ impl super::GameState {
         };
         crate::sim_lend::LentSim::lend(&mut *hs, parts, clock).tick();
         let (sim_changes, edit_cells) = hs.take_lent_changes();
+        // D4 slice 2 — the strike the server's weather landed in this world.
+        let lent_strike = hs.server.take_lent_strike();
 
         report.remeshed = self.remesh_lent_cells(
             sim_changes
@@ -5080,6 +5162,9 @@ impl super::GameState {
                 .chain(edit_cells.iter().copied()),
         );
         self.fire_power_challenges(&sim_changes);
+        if let Some(strike) = lent_strike {
+            self.present_strike(strike);
+        }
         // Carts advanced inside the window: re-pin any rider to the seat.
         self.apply_riding_follow();
 
@@ -5214,7 +5299,16 @@ impl super::GameState {
                 }
             }
         }
-        self.tick_counter = self.tick_counter.wrapping_add(1);
+        // D4 slice 2 — the clock phase. Standalone (and joined) steps its own
+        // counter here and its day clock and weather further down, where they
+        // always were. On a lent world the server owns the clock: its whole
+        // phase (counter, day clock, night calendar, weather) runs now, at
+        // this same point, and is read back, so every reader of the counter
+        // below sees the tick it always saw, and nothing below steps it again.
+        let authority_clock = self.authority_clock_phase();
+        if authority_clock.is_none() {
+            self.tick_counter = crate::sim_clock::next_tick(self.tick_counter);
+        }
         self.advance_native_gameplay();
         // Trials (⚡ Race) — record the runner's ghost frame this tick and finish
         // the run when they reach the beacon. Runs at the sim rate so ghost
@@ -5394,12 +5488,20 @@ impl super::GameState {
         // Default step is set on world load (alpha=4, standard=1). Runtime
         // override via `/time speed <n>`. The old `+ 4` BRIDGE is folded into
         // `world_time_step`'s default — flip the default to 1 pre-release.
-        // The host client always owns the clock (`/time`, sleeping); on a lent
-        // world the server reads it and never advances it (D1).
-        let reputation_days = if self.sim_runs(SimSystem::Clock) {
-            self.world_time = (self.world_time + self.world_time_step) % 24000;
+        // D4 slice 2 — on a lent world the server stepped the clock in its
+        // phase above (`authority_clock`, read back); the reputation day here
+        // still counts that step, once, as it counted this client's own.
+        let stepped = match &authority_clock {
+            Some(back) => Some(back.stepped),
+            None if self.sim_runs(SimSystem::Clock) => {
+                self.world_time = crate::sim_clock::next_world_time(self.world_time, self.world_time_step);
+                Some(self.world_time_step)
+            }
+            None => None,
+        };
+        let reputation_days = if let Some(step) = stepped {
             if !self.joined() {
-                let pulse = self.reputation_day.advance(self.tick_counter, self.world_time_step);
+                let pulse = self.reputation_day.advance(self.tick_counter, step);
                 #[cfg(not(target_arch = "wasm32"))]
                 if let (Some(pulse), Some(host)) = (pulse, self.hosted_server.as_ref())
                     && pulse.days > 0 && host.lends_host_world()
@@ -5437,127 +5539,82 @@ impl super::GameState {
         // Workshop exclusion) lives in `weather` — see that module for why the
         // Workshop is always clear.
         let has_weather = crate::weather::world_has_weather(self.world.is_workshop);
-        let advanced = if self.remote_client.is_some() {
-            // P9 weather sync — a joined client does NOT roll its own
-            // window. `network_receive` already wrote `weather_*_until`
-            // from the server's `StateUpdatePacket` (ticks-remaining,
-            // reconstructed relative to our own `tick_counter`), so just
-            // read it back here — rolling locally would immediately
-            // diverge from what the server (and its fire-dousing) actually
-            // simulates. Lightning strikes are still rolled below, from
-            // this synced window: presentation only (flash/bolt/thunder +
-            // the local ignite-through-FireSystem call) — the ignition
-            // itself stays client-side dual-sim debt (CLAUDE.md "Single-
-            // player bypasses GameServer"), tracked there, not fixed here.
-            crate::weather::Weather {
-                rain_until: self.weather_rain_until,
-                storm_until: self.weather_storm_until,
-            }
-        } else if self.sim_runs(SimSystem::Weather) {
-            // A host's own roll (D1: the host client keeps the weather; a
-            // lent server reads this window and never re-rolls it).
-            crate::weather::advance(
+        // D4 slice 2 — one weather step (`sim_clock::step_weather`): the roll,
+        // then a running trial's lock. Skipped on a lent world, whose window
+        // the server's clock phase stepped above and this client read back.
+        //
+        // The roll: a joined client does NOT roll its own window (P9 weather
+        // sync) — `network_receive` already wrote `weather_*_until` from the
+        // server's `StateUpdatePacket` (ticks-remaining, reconstructed
+        // relative to our own `tick_counter`); rolling locally would diverge
+        // from what the server (and its fire-dousing) simulates.
+        //
+        // The lock (Wind, Copper & Electricity wave §4): a running trial may
+        // PIN the weather (`ScenarioDef.weather_lock`), re-applied every tick
+        // well before the power sim samples the wind, so a storm-locked trial
+        // really does turn a windmill, on both launch paths (the fresh Trials
+        // arena and `/scenario <token>` in your own world). `has_weather`
+        // still wins: the Workshop is an indoor room and never has weather.
+        // Releasing the lock is as immediate as taking it: the pinned window
+        // is stamped a minute ahead every tick, so `weather_lock_applied`
+        // remembers last tick's pin and its residue is dropped the moment the
+        // lock goes or names a different sky.
+        let strike = if authority_clock.is_none() {
+            let joined = self.remote_client.is_some();
+            // A host's own roll; never a joiner's (above).
+            let roll = !joined && self.sim_runs(SimSystem::Weather);
+            let active_lock: Option<String> = self
+                .scenario
+                .as_ref()
+                .filter(|_| has_weather)
+                .and_then(|sc| sc.def().weather_lock.clone());
+            let after_lock = crate::sim_clock::step_weather(
                 crate::weather::Weather {
                     rain_until: self.weather_rain_until,
                     storm_until: self.weather_storm_until,
                 },
                 self.tick_counter,
-                has_weather,
-            )
+                crate::sim_clock::WeatherRules { has_weather, roll, lock: active_lock.as_deref() },
+                &mut self.weather_lock_applied,
+            );
+            self.weather_rain_until = after_lock.rain_until;
+            self.weather_storm_until = after_lock.storm_until;
+            // Lightning (2026-07-05): while storming, roll a strike every 8 s,
+            // from the POST-lock window, so a storm-locked trial gets its
+            // lightning from its very first tick and a released lock stops
+            // throwing bolts on the tick it is released. A joined client
+            // rolls from its synced window for presentation only (FU4b, Q9
+            // row 3: its fire would be pushed to the server as an edit, where
+            // it fights the server's own fire sim); its own bolts are not the
+            // server's (no strike is on the wire; CLAUDE.md debt).
+            crate::sim_clock::strike_roll(after_lock, self.tick_counter, has_weather)
+                .map(|h| (h, !joined))
         } else {
-            crate::weather::Weather {
-                rain_until: self.weather_rain_until,
-                storm_until: self.weather_storm_until,
-            }
+            None
         };
-        self.weather_rain_until = advanced.rain_until;
-        self.weather_storm_until = advanced.storm_until;
-        // Wind, Copper & Electricity wave §4 — a running trial may PIN the local
-        // weather (`ScenarioDef.weather_lock`). This is the one place the live
-        // window is written, and it runs well before the power sim samples the
-        // wind later in this same tick, so a storm-locked trial really does turn
-        // a windmill. Re-applied every tick, so the pinned window never elapses
-        // and it covers BOTH launch paths (the fresh Trials arena and
-        // `/scenario <token>` in your own world).
-        // `has_weather` still wins: the Workshop is an indoor room and never has
-        // weather at all, so a trial run in one can't conjure a storm indoors.
-        // Releasing the lock has to be as immediate as taking it: the pinned
-        // window is stamped LOCK_HORIZON (a full in-game minute) ahead every
-        // tick, so the last stamp before the trial ends is still live long after
-        // it. `weather_lock_applied` remembers what we pinned last tick so
-        // `apply_lock` can drop that residue the moment the lock goes away or
-        // names a different sky, instead of letting the player stand in the
-        // trial's storm for the next 60 s.
-        let active_lock: Option<String> = self
-            .scenario
-            .as_ref()
-            .filter(|_| has_weather)
-            .and_then(|sc| sc.def().weather_lock.clone());
-        let lock_changed = active_lock != self.weather_lock_applied;
-        let after_lock = crate::weather::apply_lock(
-            crate::weather::Weather {
-                rain_until: self.weather_rain_until,
-                storm_until: self.weather_storm_until,
-            },
-            active_lock.as_deref(),
-            lock_changed,
-            self.tick_counter,
-        );
-        self.weather_rain_until = after_lock.rain_until;
-        self.weather_storm_until = after_lock.storm_until;
-        self.weather_lock_applied = active_lock;
         if !has_weather {
             // Kill a flash carried in from the world you just left, so entering
             // the Workshop mid-storm doesn't strobe the sky on the way in.
             self.lightning_flash = 0.0;
         }
 
-        // Lightning (2026-07-05): while storming, roll a strike every 8 s.
-        // Client-side (the single-player sim owner); the bolt/flash/thunder
-        // are pure presentation, the ignition goes through FireSystem like
-        // any other fire so burnout/toggle rules hold.
-        // Rolled from the POST-lock window, so a storm-locked trial gets its
-        // lightning from its very first tick and a released lock stops throwing
-        // bolts on the tick it is released — the same window the rest of this
-        // tick reads.
-        if let Some(h) = crate::weather::strike_roll(after_lock, self.tick_counter, has_weather)
+        // The strike this client rolled: the bolt, flash and thunder, and —
+        // standalone, the sim owner — the fire, through the normal fire path
+        // so the world toggle/burnout/cap all apply (`sim_clock`). A lent
+        // world's strikes are the server's: rolled in its phase, landed in
+        // its world phase, presented after the window (`tick_hosted_server`).
+        if let Some((h, owns_fire)) = strike
             && !self.players.is_empty()
         {
             let eye = self.players[0].player.eye_pos();
-            let sx = eye.x + (((h >> 8) % 49) as f32 - 24.0);
-            let sz = eye.z + (((h >> 16) % 49) as f32 - 24.0);
-            let (bx, bz) = (sx.floor() as i32, sz.floor() as i32);
-            let mut surface_y = 0;
-            for y in (0..=self.world.column_top_y(bx, bz)).rev() {
-                if self.world.get_block(bx, y, bz) != block::AIR {
-                    surface_y = y;
-                    break;
-                }
-            }
-            let ground = glam::Vec3::new(bx as f32 + 0.5, surface_y as f32 + 1.0, bz as f32 + 0.5);
-            self.lightning_flash = 1.0;
-            self.particles.bolt(ground, 40.0, h);
-            self.audio.play_thunder();
-            // Strikes start fires (MC parity) — through the normal fire
-            // path, so the world toggle/burnout/cap all apply.
-            // FU4b (Q9 row 3) — a JOINED client's own weather only flashes and
-            // thunders: its fire is pushed to the server as an edit, where it
-            // fights the server's own fire sim (the world's fire is the
-            // server's). BRIDGE until D4 moves weather into `GameServer::tick`.
-            if self.remote_client.is_none()
-                && self.fire.ignite(&mut self.world, bx, surface_y + 1, bz, self.tick_counter)
-            {
-                crate::lighting::update_for_block_change(
-                    &mut self.world,
-                    (bx, surface_y + 1, bz),
-                    block::AIR,
-                    block::FIRE,
-                    &self.registry,
-                );
-                self.rebuild_chunks_for_lighting(bx, surface_y + 1, bz);
-                #[cfg(not(target_arch = "wasm32"))]
+            let (cell, ground) = crate::sim_clock::strike_ground(&self.world, eye, h);
+            let ignited = owns_fire
+                && crate::sim_clock::ignite_strike(&mut self.world, &mut self.fire, &self.registry, cell, self.tick_counter);
+            self.present_strike(crate::sim_clock::StrikeEvent { hash: h, ground, cell, ignited });
+            #[cfg(not(target_arch = "wasm32"))]
+            if ignited {
                 self.pending_block_changes.push(broadcast_change(
-                    &self.world, bx, surface_y + 1, bz, block::FIRE,
+                    &self.world, cell.0, cell.1, cell.2, block::FIRE,
                 ));
             }
         }
@@ -16152,7 +16209,7 @@ impl super::GameState {
                             // 12000 = noon. So 7000 lands shortly after sunrise
                             // — past the brightness > 0.3 daylight threshold,
                             // so right-clicking again can't re-trigger sleep.
-                            self.world_time = 7000;
+                            self.write_clock(7000, self.world_time_step);
                             self.players[pidx].spawn_pos = crate::item_actions::bed_spawn(pos);
                             let max = self.players[pidx].combat.max_health;
                             self.players[pidx].combat.heal(max);
@@ -21376,11 +21433,14 @@ impl super::GameState {
                 let current_tick = self.tick_counter; // monotonic; safe across day-cycle wrap
                 let seed = self.biome_gen.seed;
                 let world_name = self.world_name.clone();
+                // D4 slice 2 — `/time set|speed` write the clock through the
+                // one write path (`write_clock`): on a lent world, the server's.
+                let (mut clock_time, mut clock_step) = (self.world_time, self.world_time_step);
                 {
                     let mut ctx = crate::commands::CommandContext {
                         world: &mut self.world,
-                        world_time: &mut self.world_time,
-                        world_time_step: &mut self.world_time_step,
+                        world_time: &mut clock_time,
+                        world_time_step: &mut clock_step,
                         is_creative: &mut self.is_creative,
                         play_mode: &mut self.play_mode,
                         seed,
@@ -21897,6 +21957,9 @@ impl super::GameState {
                         }
                         _ => {}
                     }
+                }
+                if (clock_time, clock_step) != (self.world_time, self.world_time_step) {
+                    self.write_clock(clock_time, clock_step);
                 }
                 self.chat.extend_log(local_log);
                 self.chat.close();

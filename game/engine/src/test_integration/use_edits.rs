@@ -1265,12 +1265,12 @@ fn the_servers_rubber_clock_regrows_a_tapped_log_for_everyone() {
         rig.use_at(UseKind::TapRubber, ABOVE, block::RUBBER_LOG_TAPPED, 0);
         assert_eq!(rig.block(ABOVE), block::RUBBER_LOG_TAPPED);
         let _ = super::joiner_authority::block_changes_seen(&other);
+        // The server's clock is the world's (D4 slice 2), lent or not.
         if let Some(h) = rig.host.as_mut() {
             let _ = rig.hs.take_lent_changes();
             h.clock.tick_counter += crate::rubber::TAP_COOLDOWN_TICKS;
-        } else {
-            rig.hs.server.tick_counter += crate::rubber::TAP_COOLDOWN_TICKS;
         }
+        rig.hs.server.tick_counter += crate::rubber::TAP_COOLDOWN_TICKS;
         rig.tick();
         assert_eq!(rig.block(ABOVE), block::RUBBER_LOG, "the server's clock restored it (lent: {lent})");
         let regrown = |b: &protocol::BlockChange| (b.x, b.y, b.z, b.new_block) == (ABOVE[0], ABOVE[1], ABOVE[2], block::RUBBER_LOG);
