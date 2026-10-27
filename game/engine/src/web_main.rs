@@ -49,7 +49,8 @@ pub fn start_engine() {
 
     let event_loop = winit::event_loop::EventLoop::new().expect("event loop");
     event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
-    let app = super::App::new();
+    // The web taster is always standalone single-player (D3).
+    let app = super::App::new(crate::local_routing::LocalRouting::Standalone);
     event_loop.spawn_app(app);
     log::info!("engine event loop spawned");
 }

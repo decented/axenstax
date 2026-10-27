@@ -25,7 +25,25 @@ impl HeadlessGame {
     /// `AXENSTAX_WORLDS_DIR` at a temp dir first so tests never touch real
     /// saves.
     pub(crate) fn boot_into_world(world_name: &str) -> Self {
-        let mut state = pollster::block_on(crate::GameState::new_headless(1280, 720));
+        Self::boot_into_world_routed(world_name, crate::local_routing::LocalRouting::Standalone)
+    }
+
+    /// [`Self::boot_into_world`] with an injected single-player routing
+    /// option (D3: `SoloHosted` enters through a local, transport-less server).
+    pub(crate) fn boot_into_world_routed(
+        world_name: &str,
+        routing: crate::local_routing::LocalRouting,
+    ) -> Self {
+        let state = pollster::block_on(crate::GameState::new_headless_routed(1280, 720, routing));
+        let mut game = Self { state };
+        game.enter_world(world_name);
+        game
+    }
+
+    /// Drive the REAL world-entry flow into `world_name` from wherever this
+    /// game is (fresh boot, or the lobby after a leave: a reopen).
+    pub(crate) fn enter_world(&mut self, world_name: &str) {
+        let state = &mut self.state;
         state.world_name = world_name.to_string();
         // No first-spawn controls card in headless runs: it is a modal that
         // freezes player 0 and frees the cursor, and the persisted
@@ -49,7 +67,22 @@ impl HeadlessGame {
                 "world load never reached Playing (mode stuck after {frames} frames)"
             );
         }
-        Self { state }
+    }
+
+    /// From the lobby, open `world_name` again through the lobby's own
+    /// "Play" (a queued `MenuAction::LoadWorld`, the real reopen path: world
+    /// reset, meta, Loading) and pump frames until Playing.
+    pub(crate) fn reopen_world(&mut self, world_name: &str) {
+        assert!(matches!(self.state.mode, GameMode::Menu(_)), "reopen starts in the lobby");
+        self.state.pending_menu_action = Some((
+            crate::menu::MenuAction::LoadWorld(world_name.to_string(), crate::spawn_pref::SpawnPref::Default),
+            web_time::Instant::now(),
+        ));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+        while !matches!(self.state.mode, GameMode::Playing) {
+            self.state.update_and_render();
+            assert!(std::time::Instant::now() < deadline, "the reopen never reached Playing");
+        }
     }
 
     /// Pump `n` real frames (UI logic + time-based ticks, no paint).
@@ -65,6 +98,21 @@ impl HeadlessGame {
         for _ in 0..n {
             self.state.tick();
             self.state.finish_reputation_day_tick();
+        }
+    }
+
+    /// D3 — run `n` whole logical ticks the way the main loop runs them in
+    /// THIS session: with a server (solo-hosted, or hosting) the client's
+    /// tick, its input send and the server's lent tick ([`Self::hosted_ticks`]);
+    /// without one the client's tick alone ([`Self::ticks`]). Standalone
+    /// tests that mean "client only" keep calling `ticks` explicitly.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn logical_ticks(&mut self, n: u32) -> Vec<crate::game_loop::LentTickReport> {
+        if self.state.hosted_server.is_some() {
+            self.hosted_ticks(n)
+        } else {
+            self.ticks(n);
+            Vec::new()
         }
     }
 
@@ -120,6 +168,9 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[path = "launch_link.rs"]
     mod launch_link;
+    #[cfg(not(target_arch = "wasm32"))]
+    #[path = "solo_hosted.rs"]
+    mod solo_hosted;
     use super::*;
 
     /// Point `AXENSTAX_WORLDS_DIR` at one pid-scoped temp dir shared by every

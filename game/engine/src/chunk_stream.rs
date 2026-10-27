@@ -30,6 +30,17 @@ impl super::GameState {
             // (= begin_load + drain) guards any path that reaches Playing with
             // no columns loaded.
             self.initial_load(pcx0, pcz0);
+            // D3 — the completed local-world entry on this path too (a
+            // refused load is already back in the lobby, and starts nothing).
+            // A start that fails leaves for the lobby the way a refused load
+            // does (`leave_world_with_notice`: no live world, no authority,
+            // nothing queued); the frame then stops (`update_and_render`).
+            if matches!(self.mode, crate::GameMode::Playing)
+                && !self.loaded_columns.is_empty()
+                && !self.enter_local_world()
+            {
+                debug_assert!(self.hosted_server.is_none() && self.live_world.is_none());
+            }
             return;
         }
 

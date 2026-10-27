@@ -40,6 +40,8 @@ mod quests;
 #[cfg(test)]
 mod pack_tests;
 #[cfg(all(test, not(target_arch = "wasm32")))]
+mod solo_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod quest_tests;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod quest_preparation_tests;
@@ -293,6 +295,13 @@ pub enum RemoteTransport {
     /// ([`HostedServer::start_keep_world`]).
     #[cfg(not(target_arch = "wasm32"))]
     KeepPipe,
+    /// D3 `--solo-hosted`: no network at all. No socket, no pre-bind, no LAN
+    /// broadcaster, no accept thread or runtime, no room, and no identity,
+    /// contacts or comms setup; no remote slot can ever exist. The server is
+    /// a local authority for this machine's own seats only
+    /// ([`HostedServer::start_solo`]). Built on every target (the web keeps
+    /// its standalone path, but this must compile there).
+    None,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -525,6 +534,9 @@ pub struct HostedServer {
     /// added after start (`sync_local_slots`) has no loopback, so this may be
     /// shorter than `num_local_players`.
     pub local_transports: Vec<ChannelClientTransport>,
+    /// D3 — started on [`RemoteTransport::None`]: a local authority with no
+    /// network exposure ([`Self::local_only`]).
+    local_only: bool,
     /// Server simulation. Owned here so `tick()` can advance it inline
     /// from the main loop.
     pub server: crate::server::GameServer,
@@ -900,6 +912,20 @@ impl HostedServer {
         if host_world == HostWorld::Lent && num_local_players == 0 {
             return Err("a lent-world server needs a host client (at least one local player)".to_string());
         }
+        // D3 — a local-only authority takes no remote seat and no socket.
+        if remote_transport == RemoteTransport::None {
+            if max_remote_players > 0 {
+                return Err("a local-only server takes no remote players".to_string());
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            if prebound.is_some() {
+                return Err("a local-only server takes no socket".to_string());
+            }
+            if num_local_players == 0 {
+                return Err("a local-only server needs at least one local seat".to_string());
+            }
+        }
+        let local_only = remote_transport == RemoteTransport::None;
         // Effective listening port. An online host bound its own socket before
         // gathering candidates, so the port is whatever the OS gave it — and it
         // MUST be that one, because that is the port already inside the
@@ -917,12 +943,14 @@ impl HostedServer {
             (None, RemoteTransport::Fray) => 0,
             // A Keep world listens on nothing.
             (None, RemoteTransport::KeepPipe) => 0,
+            // A local-only authority (D3) listens on nothing.
+            (None, RemoteTransport::None) => 0,
         };
         #[cfg(target_arch = "wasm32")]
         let port = match remote_transport {
             RemoteTransport::Quic => protocol::SERVER_PORT,
             RemoteTransport::WebSocket { port } => port,
-            RemoteTransport::Fray => 0,
+            RemoteTransport::Fray | RemoteTransport::None => 0,
         };
         // LAN "Host Game" (T2-10): bind the UDP port NOW, on this thread, and hand
         // the socket to the accept thread. Binding inside that thread meant a
@@ -1020,10 +1048,14 @@ impl HostedServer {
         #[cfg(not(target_arch = "wasm32"))]
         let operator_comms = crate::comms::CommsLevel::Anyone;
 
-        if let (Some(pk), Some(sp)) = (
-            crate::server::local_identity_pubkey(crate::save::current_owner_pubkey().as_deref()),
-            server.players.get_mut(0),
-        ) {
+        // D3 — a local-only authority reads no identity, Charter or contacts
+        // book: nobody can join it, and solo chat stays a local echo.
+        if !local_only
+            && let (Some(pk), Some(sp)) = (
+                crate::server::local_identity_pubkey(crate::save::current_owner_pubkey().as_deref()),
+                server.players.get_mut(0),
+            )
+        {
             sp.verified_pubkey = Some(pk);
             // World chat (Phase 3) — resolved at join, never cached (§2.5,
             // §3.3): the Charter ceiling for this verified pubkey, tightened
@@ -1058,7 +1090,10 @@ impl HostedServer {
             // Fray sends its own LAN beacon.
             let broadcaster = match remote_transport {
                 RemoteTransport::Quic => Some(crate::discovery::ServerBroadcaster::new(port)),
-                RemoteTransport::WebSocket { .. } | RemoteTransport::Fray | RemoteTransport::KeepPipe => None,
+                RemoteTransport::WebSocket { .. }
+                | RemoteTransport::Fray
+                | RemoteTransport::KeepPipe
+                | RemoteTransport::None => None,
             };
             let current_remote = Arc::new(AtomicUsize::new(0));
             let shutdown = Arc::new(AtomicBool::new(false));
@@ -1066,7 +1101,10 @@ impl HostedServer {
             // A Fray room's pump feeds the channel instead: `start_fray_host`
             // attaches both. So does a Keep's pipe (`start_keep_world`).
             if max_remote_players > 0
-                && !matches!(remote_transport, RemoteTransport::Fray | RemoteTransport::KeepPipe)
+                && !matches!(
+                    remote_transport,
+                    RemoteTransport::Fray | RemoteTransport::KeepPipe | RemoteTransport::None
+                )
             {
                 let (tx, rx) = mpsc::channel::<Box<dyn ServerTransport>>();
                 // `quic_thread` holds whichever accept thread we spawned (the
@@ -1089,8 +1127,8 @@ impl HostedServer {
                             tx,
                         )?
                     }
-                    RemoteTransport::Fray | RemoteTransport::KeepPipe => {
-                        unreachable!("a Fray room or a Keep's pipe has no accept thread")
+                    RemoteTransport::Fray | RemoteTransport::KeepPipe | RemoteTransport::None => {
+                        unreachable!("a Fray room, a Keep's pipe or a local-only server has no accept thread")
                     }
                 };
                 (broadcaster, Some(rx), current_remote, shutdown, Some(handle))
@@ -1107,6 +1145,7 @@ impl HostedServer {
         );
 
         Ok(HostedServer {
+            local_only,
             inventory_mode: crate::action_identity::InventoryMode::Mirror,
             local_transports,
             server,
@@ -1277,6 +1316,63 @@ impl HostedServer {
             None,
             host_world,
         )
+    }
+
+    /// D3 `--solo-hosted` — the local authority single-player runs through:
+    /// [`RemoteTransport::None`] on [`HostWorld::Lent`], so the client lends
+    /// its one world every tick exactly as a LAN host does, with no network
+    /// effect at all. One loopback seat (seat 0, the input/loopback a host
+    /// client already drives); split-screen seats 2-4 are added behind a
+    /// [`transport::NullServerTransport`] by the first
+    /// [`Self::sync_local_slots`], so no seat has an unread channel.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))] // the web never routes through one
+    pub fn start_solo(server_name: String, seed: u32) -> Result<Self, String> {
+        Self::start_inner(
+            1,
+            server_name,
+            seed,
+            0,
+            RemoteTransport::None,
+            #[cfg(not(target_arch = "wasm32"))]
+            None,
+            HostWorld::Lent,
+        )
+    }
+
+    /// D3 — a local-only authority ([`RemoteTransport::None`]): no remote
+    /// slot can exist, nothing listens, and nothing is announced. Predicates
+    /// that mean "is this session networked" read this; ones that mean "is
+    /// there an authority" read the server's presence.
+    pub fn local_only(&self) -> bool {
+        self.local_only
+    }
+
+    /// Test-only: how many ticks this server has run.
+    #[cfg(test)]
+    pub(crate) fn server_tick_for_test(&self) -> u64 {
+        self.server_tick
+    }
+
+    /// D3 — a local-only authority takes its host client's live rules (play
+    /// mode, difficulty, explosives, fire spread) rather than the meta's: the
+    /// pause menu and scenarios change them in the client first.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))] // the web never routes through one
+    pub fn align_local_rules(
+        &mut self,
+        play_mode: crate::play_mode::PlayMode,
+        difficulty: &str,
+        explosives_enabled: bool,
+        fire_spread_enabled: bool,
+    ) {
+        if self.server.play_mode != play_mode {
+            self.server.set_play_mode(play_mode);
+        }
+        if self.difficulty != difficulty {
+            self.difficulty = difficulty.to_string();
+            self.server.difficulty = crate::survival::Difficulty::from_meta_str(difficulty);
+        }
+        self.server.explosives_enabled = explosives_enabled;
+        self.server.fire_spread_enabled = fire_spread_enabled;
     }
 
     /// Start the server a host client embeds for "Host Game", hosting through

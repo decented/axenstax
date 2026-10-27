@@ -718,7 +718,8 @@ impl crate::GameState {
     /// Returns true if the player stays in this world (overlay or refusal),
     /// false if they left for the arena.
     pub(crate) fn launch_scenario_from_world(&mut self, def: ScenarioDef) -> bool {
-        let networked = self.hosted_server.is_some() || self.remote_client.is_some();
+        // D3 — network exposure: a solo-hosted world launches like single-player.
+        let networked = self.networked();
         match challenge_launch_mode(&def, networked) {
             LaunchMode::InWorld => {
                 self.start_scenario(def);

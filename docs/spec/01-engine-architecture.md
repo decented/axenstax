@@ -1003,9 +1003,68 @@ own placements reach it unflagged — and the other way round too (C1 verify
 N5): a joiner's placements reach the host client's own copy by loopback
 (`World::apply_remote_block_change`, block only, no placed bit), so a cell a
 joiner refilled or built in pure deepslate reads natural there and rolls when
-the host mines it, on the host's secret and exposure map. A `--no-lend` host's own door, gate or trapdoor toggle (C3d run 19/20) reaches its server only as meta-only edits through the local-slot path (the per-tick edit budget, a refused cell sent back to the host), so whether it reaches joiners there is by reading only, untested (a test needs the GPU harness's owning-host path); it goes with the flag. Until the host's edit reaches its server, a joiner's toggle or refused-edit send-back near that door can broadcast the server copy's stale meta, which the owning host re-applies, so its own door briefly flips back on its screen (run-20 review LOW-5; more frequent since every accepted door click sends its ghosts back). Single-player runs no server at all (D3 will
-lend there too); the dedicated server always owns its world. Native only: the
-web build never hosts.
+the host mines it, on the host's secret and exposure map. A `--no-lend` host's own door, gate or trapdoor toggle (C3d run 19/20) reaches its server only as meta-only edits through the local-slot path (the per-tick edit budget, a refused cell sent back to the host), so whether it reaches joiners there is by reading only, untested (a test needs the GPU harness's owning-host path); it goes with the flag. Until the host's edit reaches its server, a joiner's toggle or refused-edit send-back near that door can broadcast the server copy's stale meta, which the owning host re-applies, so its own door briefly flips back on its screen (run-20 review LOW-5; more frequent since every accepted door click sends its ghosts back). Default single-player runs no server at
+all (opt-in `--solo-hosted` lends there too, below); the dedicated server
+always owns its world. Native only: the web build never hosts.
+
+**Opt-in single-player through a local authority (D3, built 2026-10-26; default
+NOT flipped).** `--solo-hosted` (native command line) routes single-player
+through a local, transport-less `HostedServer`, with the same one fixed tick
+sequence a lending host runs (client tick → input send → lent server tick →
+loopback receive) and the same ownership table: D3 changes no `SimSystem`
+owner row, no wire version and no save version. Without the flag nothing
+changes: ordinary single-player is still `GameState::tick` alone.
+
+- *Routing.* `local_routing::LocalRouting` (`Standalone`, the default, or
+  `SoloHosted`) is injected when the `GameState` is built (`App` →
+  `GameState::new`; tests use `new_headless_routed`), never read from a
+  process global. `--solo-hosted` with `--no-lend` is a startup error. Android
+  and the web are always standalone.
+- *Session kinds.* `local_routing::SessionMode`: `LocalStandalone`,
+  `LocalAuthority` (solo-hosted), `ExternallyHosted` (LAN, Fray, online,
+  Keep) and `Joined`. Authority presence is not network exposure: checks that
+  mean "is this networked" (split-screen seats joining, an arena Trial's
+  refusal, world chat versus a local echo, `/room` commands, starting a world
+  handover) read `GameState::networked()` / `network_host()`; checks that mean
+  "is there an authority" (input send, the lend, remeshing what the server
+  changed, the tally) still read the server's presence.
+- *Transport.* `RemoteTransport::None` (`HostedServer::start_solo`): no
+  socket, no pre-bind, no LAN broadcaster, no accept thread or runtime, no
+  Fray room or world room, no identity, Charter or contacts read for seat 0,
+  remote capacity 0. `start_inner` refuses it with remote capacity, a
+  pre-bound socket or no local seat. It compiles on wasm32. Seat 0 keeps its
+  loopback (the input the client already sends); seats 2-4 are added by the
+  first `sync_local_slots` behind a `NullServerTransport`, so no seat has an
+  unread channel.
+- *Entry.* One completed-local-world-entry step,
+  `GameState::enter_local_world`, starts the authority after a successful
+  load: at the Loading→Playing hand-off and after the blocking
+  `initial_load` fallback. Every entry path (lobby create/open, Workshop,
+  Trials, harness loads) reaches one of the two. It does nothing when a server
+  was staged before the load (LAN / online Host), when joined, or with the
+  default routing. It hands the server the client's live rules (play mode,
+  difficulty, explosives, fire spread; re-applied before every lent tick of a
+  local-only server) and its seats. A start that fails leaves for the lobby
+  with the reason, writing nothing (`SaveChoice::Abandon`).
+  `reset_for_world_change` drops a previous local-only authority (a staged
+  LAN / online server survives, as before), so a reopen starts fresh.
+- *Saves.* `save_live_world` and the autosave still write the client's
+  `World` / ECS and full `PlayerSlot`s (quests, pets, packs): local seats
+  have no joiner sidecar (`save_joiners` writes server-simulated joiners
+  only). The join-admission quest preparation that a lending host runs on its
+  first tick (`prepare_local_gameplay`, which saves the world) is skipped for
+  a local-only server: it admits nobody. A failed save keeps the world and the
+  authority; leaving after a save that lands drops it.
+- *Seats.* A seat that leaves (pause menu, `GameState::remove_local_seat`)
+  gets off what it rides first (both routings: the mount used to keep
+  `Ridden`); the server keeps its slot indices and marks that slot out of
+  the world.
+- *Pause and catch-up.* Pause returns before both halves (as for every
+  mode); each caught-up tick is one whole logical tick of both halves.
+
+Remaining before the default flips (owner call after a playtest): D4 moves
+the client-owned rows (clock, weather, mob locomotion, the death sweep) into
+`GameServer::tick` behind a `SimEvents` outbox.
 
 
 ### 4.2 Client Frame Loop

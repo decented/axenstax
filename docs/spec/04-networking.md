@@ -4961,6 +4961,18 @@ and weather and kept live by `mirror_host_world_state` (a BRIDGE that goes with 
 generates the 3×3 round each joiner (`column_refill_per_tick`) and its host loopback keeps the
 generate-apply-evict path for a server change in a column the host client has not loaded.
 
+**Opt-in single-player through the same window (D3, built 2026-10-26; NO wire change, default
+NOT flipped).** `--solo-hosted` runs single-player through a lending `HostedServer` on
+`RemoteTransport::None` (`HostedServer::start_solo`): the lend window, the tally and the one
+fixed tick sequence above, with no network effect at all — no socket, pre-bind, LAN broadcaster,
+accept thread, Fray / world room, identity, contacts or relay setup, and remote capacity 0
+(refused at start). Seat 0 sends input on its local channel as a host's does; extra seats are
+added by `sync_local_slots` behind a `NullServerTransport`. A local-only server is not
+networked (`HostedServer::local_only`, `local_routing::SessionMode::LocalAuthority`), so world
+chat keeps single-player's local echo, split-screen seats may join, and `/room` commands answer
+"This world isn't hosted". It admits nobody, so the first-tick join-admission quest preparation
+is skipped. Without the flag single-player runs no server (Spec 01 §4.1.3).
+
 ### What Is Deferred to Phase 2+
 
 The following items from the main spec are explicitly out of scope for Phase 1 LAN and will be addressed when the target scenario demands them:
