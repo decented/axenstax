@@ -1049,6 +1049,55 @@ pub fn hostile_melee_tick(
     armour_points: u8,
     difficulty: crate::survival::Difficulty,
 ) -> Vec<hecs::Entity> {
+    if combat.dead {
+        return Vec::new();
+    }
+    let contacts = hostiles_in_reach(ecs, player_pos);
+    land_hostile_contacts(&contacts, player_vel, combat, armour_points, difficulty)
+}
+
+/// D4 slice 3 — one hostile mob in melee reach of a player body: the mob,
+/// its species (the cause of the hit) and the horizontal-ish offset from it
+/// to the body (the knockback's direction).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MeleeContact {
+    pub mob: hecs::Entity,
+    pub kind: crate::mob::MobType,
+    pub to_player: Vec3,
+}
+
+/// Every `MobCategory::Hostile` mob within melee reach of the body at
+/// `player_pos`, in ECS order — the half of [`hostile_melee_tick`] that reads
+/// the mobs. On a lent world the server finds a local body's contacts after
+/// its entity physics and the host client lands them on its `PlayerSlot`
+/// (`sim_mobs::SimEvent::HostileContacts`).
+pub fn hostiles_in_reach(ecs: &hecs::World, player_pos: Vec3) -> Vec<MeleeContact> {
+    let mut out = Vec::new();
+    for (id, (pos, kind, _hitbox)) in ecs.query::<(&Position, &MobKind, &Hitbox)>().iter() {
+        if mob::mob_def(kind.0).category != MobCategory::Hostile {
+            continue;
+        }
+        let to_player = player_pos - pos.0;
+        let horiz_dist = Vec3::new(to_player.x, 0.0, to_player.z).length();
+        let vert_overlap = to_player.y >= 0.0 && to_player.y < 1.8; // Player height
+        if horiz_dist < HOSTILE_MELEE_RANGE && vert_overlap {
+            out.push(MeleeContact { mob: id, kind: kind.0, to_player });
+        }
+    }
+    out
+}
+
+/// The other half of [`hostile_melee_tick`]: each contact hits for the
+/// baseline melee damage (difficulty-scaled, armour-soaked) while the
+/// i-frame window lets it, and a hit that lands knocks the body back.
+/// Returns the mobs whose hit landed.
+pub fn land_hostile_contacts(
+    contacts: &[MeleeContact],
+    player_vel: &mut Vec3,
+    combat: &mut PlayerCombat,
+    armour_points: u8,
+    difficulty: crate::survival::Difficulty,
+) -> Vec<hecs::Entity> {
     let mut landed: Vec<hecs::Entity> = Vec::new();
     if combat.dead {
         return landed;
@@ -1057,23 +1106,14 @@ pub fn hostile_melee_tick(
         crate::survival::scale_mob_damage(HOSTILE_MELEE_DAMAGE, difficulty),
         armour_points,
     );
-    for (id, (pos, kind, _hitbox)) in ecs.query::<(&Position, &MobKind, &Hitbox)>().iter() {
-        if mob::mob_def(kind.0).category != MobCategory::Hostile {
-            continue;
-        }
-        let to_player = player_pos - pos.0;
-        let horiz_dist = Vec3::new(to_player.x, 0.0, to_player.z).length();
-        let vert_overlap = to_player.y >= 0.0 && to_player.y < 1.8; // Player height
-        if horiz_dist < HOSTILE_MELEE_RANGE
-            && vert_overlap
-            && combat.take_damage_from(damage, crate::survival::DamageCause::Mob(kind.0))
-        {
+    for c in contacts {
+        if combat.take_damage_from(damage, crate::survival::DamageCause::Mob(c.kind)) {
             // Knockback away from the attacker.
-            let kb_dir = Vec3::new(to_player.x, 0.0, to_player.z).normalize_or_zero();
+            let kb_dir = Vec3::new(c.to_player.x, 0.0, c.to_player.z).normalize_or_zero();
             player_vel.x += kb_dir.x * KNOCKBACK_BASE;
             player_vel.y += 0.3;
             player_vel.z += kb_dir.z * KNOCKBACK_BASE;
-            landed.push(id);
+            landed.push(c.mob);
         }
     }
     landed
@@ -1090,10 +1130,22 @@ pub fn tick_mob_attacks(
     slot: &mut crate::player_slot::PlayerSlot,
     difficulty: crate::survival::Difficulty,
 ) -> Vec<hecs::Entity> {
+    if slot.combat.dead {
+        return Vec::new();
+    }
+    let contacts = hostiles_in_reach(ecs, slot.player.pos);
+    land_mob_attacks(&contacts, slot, difficulty)
+}
+
+/// [`tick_mob_attacks`] from contacts found already ([`hostiles_in_reach`]):
+/// a local player's armour soaks each landed hit and wears once per hit.
+pub fn land_mob_attacks(
+    contacts: &[MeleeContact],
+    slot: &mut crate::player_slot::PlayerSlot,
+    difficulty: crate::survival::Difficulty,
+) -> Vec<hecs::Entity> {
     let points = slot.total_armour_points();
-    let pos = slot.player.pos;
-    let landed =
-        hostile_melee_tick(ecs, pos, &mut slot.player.velocity, &mut slot.combat, points, difficulty);
+    let landed = land_hostile_contacts(contacts, &mut slot.player.velocity, &mut slot.combat, points, difficulty);
     for _ in &landed {
         slot.wear_armour();
     }

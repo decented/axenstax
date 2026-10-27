@@ -1813,15 +1813,29 @@ joiner any more (Spec 04 §4.2c).
   MEDIUM-1).
 - **Server-landed hits wear the joiner's armour** (v70, `ArmourWorn`): one
   durability per worn piece per landed hit (keg blasts included), the
-  single-player rule. On a
-  lending host, species-AI attacks (bee sting, goat charge, shark bite) reach
-  joiners as well as the host's players, a Bear or Hyena a joiner provoked
-  charges it, and a joiner's pet follows it.
+  single-player rule. On every server
+  (a lending host and, since D4 slice 3, a dedicated one), species-AI attacks
+  (bee sting, goat charge, shark bite) reach joiners as well as the host's
+  players, a Bear or Hyena a joiner provoked charges it, and a joiner's pet
+  follows it.
+- **One mob simulation, one order (D4 slice 3).** Every world runs the same
+  mob tick, in this order: the animals' products (Nostrich eggs and feathers,
+  chicken eggs) → a village's population (once a second) → the brigand
+  overrides → the village defenders → the generic AI (chase the nearest
+  living player) → breeding → tamed wolves follow → every species' own AI →
+  Leads → each rider steers its mount → entity physics → Satoshi's walk. A
+  later step wins over an earlier one's velocity (a Lead over a species' wander,
+  a rider over everything). Single-player runs it in its own tick; a host or a
+  `--solo-hosted` game runs it once in its server; a dedicated server in its
+  own tick, without a village's population. A player who just joined is not
+  chased by hostile mobs and not hurt by their melee or by a blast for 15
+  seconds (spawn protection), on every server. This includes the shark, hyena and
+  bear species overrides; pets and Leads still see their owners' real
+  positions. Local mounted melee uses the moved seat's position and lands
+  after seat follow, preserving the hit's knockback and one armour wear.
 - **Not yet on a joiner:** mob push-out and knockback are not predicted (each
-  shows as a position correction); a dedicated server runs no species AI,
-  breeding or Leads, so it refuses those interactions (above) until D4. (A
-  joiner's bow and slingshot shots are the server's since C3c-2: they reach
-  the server's mobs.)
+  shows as a position correction). (A joiner's bow and slingshot shots are
+  the server's since C3c-2: they reach the server's mobs.)
 
 ### 6.5 Ranged Combat
 

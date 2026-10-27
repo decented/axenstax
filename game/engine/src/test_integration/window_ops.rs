@@ -104,6 +104,12 @@ impl Rig {
         hs.server.column_streamer = None;
         hs.server.column_refill_per_tick = 0;
         hs.server.difficulty = crate::survival::Difficulty::Peaceful;
+        // This fixture accounts for its own items and grants. Worldgen
+        // animals now lay eggs on every server, including during joining.
+        match host.as_mut() {
+            Some(h) => h.ecs.clear(),
+            None => hs.server.ecs.clear(),
+        }
         let world = match host.as_mut() {
             Some(h) => &mut h.world,
             None => &mut hs.server.world,

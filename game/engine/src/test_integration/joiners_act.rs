@@ -793,24 +793,26 @@ fn a_departed_joiners_kill_credits_neither_the_host_nor_the_slots_next_joiner() 
     assert!(!record.kills.iter().any(|(kind, _)| *kind == MobType::Cow));
 }
 
-/// Review D2b MEDIUM-2 — a dedicated server runs no breeding, Leads or pet
-/// AI (D4), so feeding, taming, a Lead on a mob or a post and a pet command
-/// are refused with "not on this server", and nothing is used or changed.
-/// No baby ever comes of it.
+/// Review D2b MEDIUM-2 — a server that does not simulate the animal life a
+/// joiner's interaction needs (`animal_life_simulated` off: no world the
+/// server runs since D4 slice 3, so this switches it off by hand) refuses
+/// feeding, taming, a Lead on a mob or a post and a pet command with "not on
+/// this server", and nothing is used or changed. No baby ever comes of it.
 #[test]
-fn a_dedicated_server_refuses_what_it_does_not_simulate_and_takes_nothing() {
-    refuses_what_it_does_not_simulate(Rig::new("not-here", 1));
+fn a_server_without_animal_life_refuses_what_it_does_not_simulate_and_takes_nothing() {
+    let mut rig = Rig::new("not-here", 1);
+    rig.hs.server.animal_life_simulated = false;
+    refuses_what_it_does_not_simulate(rig);
 }
 
-/// Review D2b MEDIUM-2 — likewise a `--no-lend` host: its server owns a
-/// second copy of the world, whose animals nothing breeds, leashes or walks
-/// (the host client runs those systems on its own copy).
+/// D4 slice 3 — every kind of world a server runs simulates the animals'
+/// life now: a dedicated server, an owning `--no-lend` host and a lending
+/// host.
 #[test]
-fn a_no_lend_host_refuses_what_its_server_does_not_simulate_and_takes_nothing() {
-    let rig = Rig::new_no_lend("not-here-owned", 1);
-    assert!(!rig.hs.server.animal_life_simulated);
-    refuses_what_it_does_not_simulate(rig);
-    assert!(Rig::new_lent("here-lent", 0).hs.server.animal_life_simulated, "a lending host's world has it");
+fn every_server_simulates_animal_life() {
+    assert!(Rig::new("life-dedicated", 0).hs.server.animal_life_simulated, "a dedicated server has it");
+    assert!(Rig::new_no_lend("life-owned", 0).hs.server.animal_life_simulated, "a --no-lend host's server has it");
+    assert!(Rig::new_lent("life-lent", 0).hs.server.animal_life_simulated, "a lending host's world has it");
 }
 
 fn refuses_what_it_does_not_simulate(mut rig: Rig) {
@@ -856,21 +858,45 @@ fn refuses_what_it_does_not_simulate(mut rig: Rig) {
     );
 }
 
-/// On a lending host (whose client breeds the lent world's animals) a
-/// joiner's feeding takes: two fed cows breed in the host client's breeding
-/// step, and — review D2b B2 — the breed is the FEEDER's: a `Bred` event to
-/// the joiner, and no `BreedAnimals` for the host's players.
+/// A joiner's feeding takes, on a lending host and on a dedicated server
+/// (D4 slice 3: both servers breed in their own tick, `sim_mobs::breed`):
+/// two fed cows breed once, and — review D2b B2 — the breed is the FEEDER's:
+/// a `Bred` event to the joiner, and on the lending host no `BreedAnimals`
+/// for the host's players (the birth reaches the host only as its toast).
 #[test]
 fn feeding_two_cows_on_a_lending_host_breeds_and_credits_the_feeder() {
-    let mut rig = Rig::new_lent("feed", 1);
+    feeding_two_cows_breeds_once_and_credits_the_feeder(Rig::new_lent("feed", 1));
+}
+
+#[test]
+fn feeding_two_cows_on_a_dedicated_server_breeds_and_credits_the_feeder() {
+    feeding_two_cows_breeds_once_and_credits_the_feeder(Rig::new("feed-dedicated", 1));
+}
+
+fn cows(rig: &Rig) -> Vec<hecs::Entity> {
+    rig.ecs()
+        .query::<&crate::entity::MobKind>()
+        .iter()
+        .filter(|(_, k)| k.0 == MobType::Cow)
+        .map(|(e, _)| e)
+        .collect()
+}
+
+fn feeding_two_cows_breeds_once_and_credits_the_feeder(mut rig: Rig) {
     let (a, ida) = rig.spawn(MobType::Cow, Vec3::new(1.0, 0.0, 1.0));
     let (b, idb) = rig.spawn(MobType::Cow, Vec3::new(-1.0, 0.0, 1.0));
     let wheat = mat(MaterialId::Wheat);
     rig.place(a, Vec3::new(1.0, 0.0, 1.0));
     let s1 = rig.joiners[0].interact(ida, InteractKind::Feed, Some(&wheat));
     rig.tick(crate::hosted_server::INTERACT_COOLDOWN_TICKS);
+    let feeder = rig.attacker(0);
+    let love = *rig.ecs().get::<&crate::breeding::InLove>(a).expect("in love");
+    assert_eq!(love.fed_by, Some(feeder), "the feeder is recorded");
+    assert_eq!(cows(&rig).len(), 2, "one fed cow alone makes nothing");
     rig.place(b, Vec3::new(-1.0, 0.0, 1.0));
     let s2 = rig.joiners[0].interact(idb, InteractKind::Feed, Some(&wheat));
+    // The tick that reads the second feed breeds the pair, in the server's
+    // own mob simulation.
     rig.tick(1);
     for s in [s1, s2] {
         let out = rig.joiners[0].inbox.outcome(s);
@@ -878,34 +904,40 @@ fn feeding_two_cows_on_a_lending_host_breeds_and_credits_the_feeder() {
         assert_eq!(out.consume_held, 1, "one wheat each");
         assert_eq!(note(out), InteractNote::Fed);
     }
-    let feeder = rig.attacker(0);
+    rig.tick(20);
+    let calves: Vec<hecs::Entity> =
+        cows(&rig).into_iter().filter(|e| rig.ecs().get::<&crate::breeding::Baby>(*e).is_ok()).collect();
+    assert_eq!(calves.len(), 1, "one feed pair, one calf");
+    assert_eq!(cows(&rig).len(), 3);
     for cow in [a, b] {
-        let love = *rig.ecs().get::<&crate::breeding::InLove>(cow).expect("in love");
-        assert_eq!(love.fed_by, Some(feeder), "the feeder is recorded");
+        assert!(rig.ecs().get::<&crate::breeding::InLove>(cow).is_err(), "the parents are out of love");
+        assert!(rig.ecs().get::<&crate::breeding::BreedCooldown>(cow).is_ok());
     }
-    // The host client's breeding step — `breeding::client_step`, the call
-    // `GameState::tick` makes on the world it lends: the two fed adults pair
-    // and the baby is born there.
-    rig.place(a, Vec3::new(0.5, 0.0, 1.0));
-    rig.place(b, Vec3::new(-0.5, 0.0, 1.0));
-    let tick = rig.tick_counter();
-    let host = rig.host.as_mut().unwrap();
-    let born = crate::breeding::client_step(&mut host.ecs, tick, Some(&mut rig.hs.server));
-    assert_eq!(born.len(), 1, "two fed adults breed");
-    assert_eq!(born[0].kind, MobType::Cow);
-    assert!(rig.ecs().get::<&crate::breeding::Baby>(born[0].entity).is_ok(), "the calf is in the lent world");
-    assert!(!born[0].credit_here, "a joiner's breed is never the host's");
-    rig.tick(1);
-    assert!(
-        rig.joiners[0].inbox.events.contains(&PlayerEventType::Bred { offspring: protocol::EntityKind::Cow }),
-        "the feeder is told"
-    );
-    // A host player's own feed is the host's.
-    assert!(crate::server::route_client_breed(
-        Some(&mut rig.hs.server),
-        [Some(crate::combat::Attacker::Local(0)), Some(feeder)],
-        MobType::Cow
-    ));
+    let bred = rig.joiners[0]
+        .inbox
+        .events
+        .iter()
+        .filter(|e| **e == PlayerEventType::Bred { offspring: protocol::EntityKind::Cow })
+        .count();
+    assert_eq!(bred, 1, "the feeder is told, once");
+    if let Some(host) = rig.host.as_ref() {
+        let births: Vec<&crate::breeding::Born> = host
+            .events
+            .iter()
+            .filter_map(|e| match e {
+                crate::sim_mobs::SimEvent::BabyBorn(b) => Some(b),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(births.len(), 1, "the host hears of the birth once");
+        assert!(!births[0].credit_here, "a joiner's breed is never the host's");
+        assert_eq!(births[0].joiners, [None, None], "the server routed the joiner's credit itself");
+    }
+    // A host player's own feed is the host's (and the joiner's its own).
+    let (here, joiners) = crate::breeding::breed_credit([Some(crate::combat::Attacker::Local(0)), Some(feeder)]);
+    assert!(here);
+    let crate::combat::Attacker::Remote { slot, generation } = feeder else { unreachable!() };
+    assert_eq!(joiners, [None, Some((slot, generation))]);
 }
 
 #[test]
@@ -1170,8 +1202,9 @@ fn a_species_hit_lands_on_a_joiners_body_wears_its_armour_and_names_the_species(
     assert!(rig.hs.server.players[slot].player.velocity.x > 0.0, "knocked back");
     rig.tick(1);
     assert!(rig.joiners[0].inbox.events.contains(&PlayerEventType::ArmourWorn { hits: 1 }));
-    // Lethal: the joiner is told it died, and of what.
+    // After spawn protection, a lethal hit names its cause to the joiner.
     rig.hs.server.players[slot].combat.invincible_timer = 0;
+    crate::spawn_protection::disarm(&mut rig.hs.server.players[slot]);
     assert!(rig.hs.server.land_hit_on_joiner(
         slot,
         50.0,
@@ -1345,3 +1378,5 @@ fn a_swing_wears_the_weapon_where_it_now_is_on_both_sides() {
         "the windows agree"
     );
 }
+
+mod animal_life;

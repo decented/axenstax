@@ -388,41 +388,6 @@ pub fn route_client_kill(
     }
 }
 
-/// Review D2b B2 — a client breeding step's credit for one baby (single-
-/// player; a host, whose lent world's breeding is its client's until D4):
-/// `feeders` are the two parents' `breeding::InLove::fed_by`. Each joiner
-/// who fed a parent gets one `PlayerEventType::Bred`, queued on the host's
-/// server (`server`; `None` in single-player); a departed joiner's feed
-/// credits nobody. Returns whether this client's own `BreedAnimals`
-/// challenge fires: when one of its players fed a parent, or a parent's
-/// feeder is unknown (an animal put in love before the feeder was
-/// recorded) — never for a breed only joiners fed.
-pub fn route_client_breed(
-    server: Option<&mut GameServer>,
-    feeders: [Option<crate::combat::Attacker>; 2],
-    offspring: crate::mob::MobType,
-) -> bool {
-    use crate::combat::Attacker;
-    let mut credit_here = false;
-    let mut server = server;
-    for (n, feeder) in feeders.iter().enumerate() {
-        match *feeder {
-            None | Some(Attacker::Local(_)) => credit_here = true,
-            Some(Attacker::Departed) => {}
-            Some(Attacker::Remote { slot, generation }) => {
-                // The same joiner fed both parents: one credit.
-                if n == 1 && feeders[0] == *feeder {
-                    continue;
-                }
-                if let Some(server) = server.as_deref_mut() {
-                    server.queue_bred_event(slot, generation, offspring);
-                }
-            }
-        }
-    }
-    credit_here
-}
-
 /// Where `initial_load` centres a world with no player to centre it on (a
 /// dedicated server): the chunk round the origin. Only a place to START
 /// loading — never a spawn point; that is [`GameServer::world_spawn`].
@@ -1143,6 +1108,18 @@ pub struct GameServer {
     /// dedicated or `--no-lend` server refuses feeding, taming, Leads and pet
     /// commands rather than take the item for nothing.
     pub animal_life_simulated: bool,
+    /// D4 slice 3 — a lent world's host players' seats for this logical
+    /// tick (mount, input from this tick's intent, ride state), handed over
+    /// by the host client before the window (`GameState::tick`) and steered
+    /// by this tick's entity-physics step (`sim_mobs::steer_local_seats`).
+    /// Empty outside the window.
+    pub(crate) lent_local_seats: Vec<crate::sim_mobs::LocalSeat>,
+    /// D4 slice 3 — the outbox: what this tick's mob simulation did to a lent
+    /// world's local players (`sim_mobs::SimEvent`), drained by the host
+    /// client straight after the window (`GameState::tick_hosted_server`).
+    /// Only a lent world queues here; a joiner's effects land on its server
+    /// body at once.
+    pub(crate) sim_events: crate::sim_mobs::SimEvents,
     /// Server-side view radius in chunks (Spec 39 — was the `RENDER_DISTANCE`
     /// const). Defaults to the High preset; in hosted single-player the client
     /// keeps it in sync with the player's render-distance dial.
@@ -1243,6 +1220,8 @@ impl GameServer {
             released_joiners: Vec::new(),
             released_mounts: Vec::new(),
             animal_life_simulated: false,
+            lent_local_seats: Vec::new(),
+            sim_events: crate::sim_mobs::SimEvents::default(),
             render_distance: crate::graphics_settings::DEFAULT_RENDER_DISTANCE,
             difficulty: crate::survival::Difficulty::Normal,
             // Random until the meta's is read: never a guessable default.
@@ -1982,32 +1961,55 @@ impl GameServer {
         // their position set directly from InputPacket by hosted_server.rs.
         self.tick_player_physics();
 
-        // Mob AI — targets nearest player. Rebuild positions — player_physics
-        // may have moved server_simulated players. Living, present players
-        // only (MP-A3): a dead joiner's body is no target.
-        let player_positions: Vec<Vec3> = self
-            .players
-            .iter()
-            .filter(|sp| sp.is_present_and_alive())
-            .map(crate::spawn_protection::targetable_pos)
-            .collect();
-        // HP-3 — brigand AI pre-pass runs BEFORE the main dispatcher so
-        // tier-specific detect-range + flee-gate + day/night chase-gate
-        // overrides land first. A lent world's host client runs both (with
-        // the joiners' positions), around its own species AI.
+        // D4 slice 3 — the mob simulation (`sim_mobs`), phases 1-7 here and
+        // 8-9 at the entity-physics step below: the ONE implementation a
+        // standalone game runs in its client tick. On a lent world the host
+        // client runs none of it, so it runs once, here; a dedicated (or
+        // `--no-lend`) server runs it on the world it owns. Rebuilt after
+        // `tick_player_physics`, which may have moved server-simulated bodies.
+        // What lands on a local slot's player (a lent world's host players)
+        // is queued in `sim_events` for its client; a joiner's lands now.
+        let bodies = self.mob_bodies();
+        let targets = self.mob_targets();
+        if self.runs(SimSystem::Products) {
+            crate::sim_mobs::products(&mut self.ecs, self.tick_counter);
+        }
+        // Village population follows a host client's world only: a
+        // dedicated server's villages stay as worldgen left them (villager
+        // quests are not served to joiners yet, D2c-3).
+        if self.lent
+            && crate::sim_mobs::population_due(self.tick_counter)
+            && self.runs(SimSystem::Population)
+        {
+            crate::sim_mobs::population(&mut self.world, &self.biome_gen, &mut self.ecs, self.tick_counter);
+        }
+        // HP-3 — the brigand pre-pass, then the defenders, then the generic
+        // AI, all chasing `targets` (living bodies; a spawn-protected joiner
+        // is no target, `spawn_protection::targetable_pos`).
         if self.runs(SimSystem::MobAi) {
-            crate::brigand::tick_brigand_overrides(
+            crate::sim_mobs::pre_pass(&mut self.ecs, &targets, eff_world_time);
+            crate::sim_mobs::golems(&mut self.ecs);
+            crate::sim_mobs::mob_ai(&mut self.ecs, &self.world, &self.registry, &targets);
+        }
+        let mut mob_events = crate::sim_mobs::SimEvents::default();
+        if self.runs(SimSystem::Breeding) {
+            crate::sim_mobs::breed(&mut self.ecs, self.tick_counter, &mut mob_events);
+        }
+        if self.runs(SimSystem::Species) {
+            crate::sim_mobs::species(
                 &mut self.ecs,
-                &player_positions,
-                eff_world_time,
-            );
-            crate::mob_ai::tick_mob_ai(
-                &mut self.ecs,
-                &self.world,
-                &self.registry,
-                &player_positions,
+                &mut self.world,
+                &bodies,
+                self.tick_counter,
+                self.world_time,
+                self.difficulty,
+                &mut mob_events,
             );
         }
+        if self.runs(SimSystem::Tethers) {
+            crate::sim_mobs::tethers(&mut self.ecs, &bodies);
+        }
+        self.route_mob_events(mob_events);
         // HP-3 — Brigand Hideout replenisher. Throttled internally on
         // the per-hideout 24 000-tick cooldown; safe to call every tick
         // (the heavy lift only runs when a hideout needs topping up).
@@ -2071,14 +2073,24 @@ impl GameServer {
             );
         }
 
-        // Entity physics (the host client's, on a lent world — see MobAi).
+        // Entity physics (the server's on every world since D4 slice 3).
         // MP-D2c-1 — the joiners' seats steer their mounts first, from their
         // latest input: right before physics integrates the velocity, after
-        // every system above that writes one (`steer_seats`). A lent world's
-        // are steered by its host client, before its own physics step.
+        // every system above that writes one (`steer_seats`).
+        // D4 slice 3 — and a lent world's local seats (its host players'
+        // rides), handed over by the host client with this tick's intent
+        // (`lent_local_seats`), steered here by the same rule; their ride
+        // state and any dismount go back through the outbox.
+        let mut local_seats = Vec::new();
         if self.runs(SimSystem::EntityPhysics) {
             steer_seats(&mut self.players, &mut self.ecs, &self.world, &self.registry);
-            crate::entity::tick_entities(&mut self.ecs, &self.world, &self.registry);
+            let seats = std::mem::take(&mut self.lent_local_seats);
+            let mut seat_events = crate::sim_mobs::SimEvents::default();
+            local_seats = crate::sim_mobs::steer_local_seats(&mut self.ecs, &self.world, seats, &mut seat_events);
+            self.route_mob_events(seat_events);
+            crate::sim_mobs::physics(&mut self.ecs, &self.world, &self.registry);
+            let anchor = self.summon_anchor();
+            crate::sim_mobs::summon(&self.world, &mut self.ecs, anchor);
         }
 
         // Item-entity housekeeping (death-drops phase 2b) — mirror of the
@@ -2213,6 +2225,7 @@ impl GameServer {
         // physics, here or on the host client; the cart roll above): the
         // body pinned to the seat, and the rides that are over ended.
         self.follow_seats();
+        self.follow_local_seats(local_seats);
 
         // C3c-3b — laid Blueprints develop in the sun on the server's world
         // (on a lent one, here rather than on the host client: one owner,
@@ -2232,7 +2245,7 @@ impl GameServer {
         for i in 0..self.players.len() {
             // A dead body runs no physics (MP-A3): nothing shoves it. Nor a
             // seated one: its mount holds it (D2c-1).
-            if !self.players[i].combat.dead && self.players[i].riding.is_none() {
+            if self.players[i].server_simulated && !self.players[i].combat.dead && !self.players[i].seated() {
                 let player = &mut self.players[i].player;
                 crate::entity::push_player_from_entities(
                     &self.ecs,
@@ -2530,6 +2543,23 @@ impl GameServer {
         }
     }
 
+    /// Follow the host's steered seats for this tick's contact queries. These
+    /// are trusted body shadows, never server-simulated rides: the outbox
+    /// returns ride state and dismounts to the local PlayerSlots themselves.
+    fn follow_local_seats(&mut self, seats: Vec<crate::sim_mobs::LocalSeat>) {
+        for seat in seats {
+            let Some(sp) = self.players.get_mut(seat.slot).filter(|sp| !sp.server_simulated) else { continue };
+            if seat.off.is_none() && !sp.combat.dead
+                && matches!(crate::riding::follow(&self.ecs, seat.mount, &mut sp.player), crate::riding::Follow::Seated { .. })
+            {
+                sp.local_seated = true;
+            } else {
+                sp.local_seated = false;
+                crate::riding::settle(&mut sp.player, &self.world, &self.registry);
+            }
+        }
+    }
+
     /// MP-D2c-1 — seat joiner `i` on `mount` (checked: `riding::may_mount`,
     /// reach): `Ridden` on the mount, a fresh ride, held keys forgotten. The
     /// body is pinned to the seat at once, so this tick's broadcast already
@@ -2633,6 +2663,105 @@ impl GameServer {
         }
     }
 
+    /// D4 slice 3 — the bodies the species AI, pet follow and the Leads see
+    /// (`sim_mobs::MobBodies`), by player slot: a joiner in the world (dead
+    /// or alive, as a dead player's body stays listed) or a connected local
+    /// slot (a lent world's host players, whose bodies their client synced
+    /// before the window) at its body, any other slot
+    /// `species_ai::ABSENT_PLAYER`; with each slot's look yaw, and the
+    /// pet-owner key of every joiner in the world that has one.
+    fn mob_bodies(&self) -> crate::sim_mobs::MobBodies {
+        let mut bodies = crate::sim_mobs::MobBodies::default();
+        for (slot, sp) in self.players.iter().enumerate() {
+            let here = if sp.server_simulated { sp.is_in_world() } else { sp.connected };
+            bodies.positions.push(if here { sp.player.pos } else { crate::species_ai::ABSENT_PLAYER });
+            bodies.yaws.push(sp.yaw);
+            bodies.spawn_protected.push(sp.server_simulated && crate::spawn_protection::shielded(sp));
+            if here && !sp.server_simulated {
+                bodies.local_slots.push(slot);
+            }
+            if here
+                && sp.server_simulated
+                && let Some(key) = sp.pet_owner_key()
+            {
+                bodies.remote_owners.push((key, slot));
+            }
+        }
+        bodies
+    }
+
+    /// D4 slice 3 — what the generic mob AI and the brigand pre-pass chase:
+    /// every living body in the world, where mob AI may see it
+    /// (`spawn_protection::targetable_pos`: a protected joiner is no target).
+    /// A lent world's local slots are its host players, listed as their
+    /// client always listed them (every connected seat, at its body).
+    fn mob_targets(&self) -> Vec<Vec3> {
+        self.players
+            .iter()
+            .filter_map(|sp| {
+                if self.lent && !sp.server_simulated {
+                    sp.connected.then_some(sp.player.pos)
+                } else {
+                    sp.is_present_and_alive().then(|| crate::spawn_protection::targetable_pos(sp))
+                }
+            })
+            .collect()
+    }
+
+    /// D4 slice 3 — whom Satoshi walks to when summoned: a lent world's
+    /// first local player (slot 0, the host); nobody on a world the server
+    /// owns.
+    fn summon_anchor(&self) -> Option<Vec3> {
+        self.players
+            .first()
+            .filter(|sp| self.lent && !sp.server_simulated && sp.connected)
+            .map(|sp| sp.player.pos)
+    }
+
+    /// D4 slice 3 — deliver what one mob phase did (`sim_mobs::SimEvent`):
+    /// a hit on a joiner lands on its server body now
+    /// ([`Self::land_hit_on_joiner`]); a baby's joiner credit becomes a
+    /// `Bred` event for each feeder ([`Self::queue_bred_event`]); a cell a
+    /// mob changed is a block change every client hears of (and, through
+    /// `take_lent_changes`, the host remeshes). On a lent world everything
+    /// for its local players — their hits, every birth (its toast; the
+    /// challenge only if theirs), alarms, seats — goes to the outbox for the
+    /// host client; elsewhere a local slot's share is dropped (an owning
+    /// `--no-lend` server's local slots are shadows of a client that runs
+    /// its own copy).
+    fn route_mob_events(&mut self, events: crate::sim_mobs::SimEvents) {
+        use crate::sim_mobs::SimEvent;
+        let mut events = events;
+        for event in events.take() {
+            match event {
+                SimEvent::Hit { slot, damage, cause, knock } => {
+                    if self.players.get(slot).is_some_and(|sp| sp.server_simulated) {
+                        self.land_hit_on_joiner(slot, damage, cause, knock);
+                    } else if self.lent {
+                        self.sim_events.push(SimEvent::Hit { slot, damage, cause, knock });
+                    }
+                }
+                SimEvent::BabyBorn(mut baby) => {
+                    for (slot, generation) in std::mem::take(&mut baby.joiners).into_iter().flatten() {
+                        self.queue_bred_event(slot, generation, baby.kind);
+                    }
+                    if self.lent {
+                        self.sim_events.push(SimEvent::BabyBorn(baby));
+                    }
+                }
+                SimEvent::CellChanged { x, y, z, block } => {
+                    let meta = self.world.meta_at(x, y, z);
+                    self.pending_block_changes.push(crate::protocol::BlockChange::with_meta(x, y, z, block, meta));
+                }
+                other @ (SimEvent::ParrotAlarm { .. } | SimEvent::Seat(_) | SimEvent::HostileContacts { .. }) => {
+                    if self.lent {
+                        self.sim_events.push(other);
+                    }
+                }
+            }
+        }
+    }
+
     /// MP-D2a — the hits the world lands on every joiner's (server-simulated)
     /// body: hostile melee contact (`combat::hostile_melee_tick`, unless the
     /// difficulty keeps hostiles from attacking) and lava / fire contact
@@ -2642,6 +2771,22 @@ impl GameServer {
     /// `just_died` one-shot for `HostedServer` to turn into a
     /// `PlayerEventType::Died`. Local slots are their client's own.
     fn tick_player_hazards(&mut self) {
+        // D4 slice 3 — a lent world's local bodies: their client lands the
+        // hostile contacts on its own `PlayerSlot` (its rules: creative,
+        // difficulty, armour, i-frames, wear, the pets' revenge), found here,
+        // after this tick's mob physics, as its own tick found them after its
+        // physics.
+        if self.lent {
+            for (slot, sp) in self.players.iter().enumerate() {
+                if sp.server_simulated || !sp.connected {
+                    continue;
+                }
+                let contacts = crate::combat::hostiles_in_reach(&self.ecs, sp.player.pos);
+                if !contacts.is_empty() {
+                    self.sim_events.push(crate::sim_mobs::SimEvent::HostileContacts { slot, contacts });
+                }
+            }
+        }
         if self.play_mode.flies() {
             return;
         }
@@ -2702,6 +2847,12 @@ impl GameServer {
             return false;
         };
         if !sp.server_simulated || !sp.is_present_and_alive() {
+            return false;
+        }
+        if crate::spawn_protection::shielded(sp)
+            && matches!(cause, crate::survival::DamageCause::Mob(kind)
+                if crate::mob::mob_def(kind).category == crate::mob::MobCategory::Hostile)
+        {
             return false;
         }
         let damage = crate::armour::damage_after_armour(raw, sp.armour_points);

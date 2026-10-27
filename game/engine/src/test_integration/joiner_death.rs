@@ -21,14 +21,18 @@ use crate::transport::{ChannelClientTransport, ClientTransport};
 use super::joiner_authority::{join_guest, join_guest_accept, send_guest_join, start_open_server};
 
 pub(super) fn start_dedicated_server(tag: &str) -> HostedServer {
-    HostedServer::start(
+    let mut hs = HostedServer::start(
         0,
         format!("joiner-death-{tag}-{}", std::process::id()),
         42,
         0,
         RemoteTransport::WebSocket { port: 0 },
     )
-    .expect("dedicated server starts")
+    .expect("dedicated server starts");
+    // These fixtures account for authored drops and graves, independently
+    // of the world's wildlife and the products its timers now create.
+    hs.server.ecs.clear();
+    hs
 }
 
 /// What the joiner has been sent that these tests care about.

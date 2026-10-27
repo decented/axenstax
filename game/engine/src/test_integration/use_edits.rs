@@ -98,6 +98,12 @@ impl Rig {
         hs.server.column_streamer = None;
         hs.server.column_refill_per_tick = 0;
         hs.server.difficulty = crate::survival::Difficulty::Peaceful;
+        // The inventory ledger covers this test's uses and spills; exclude
+        // worldgen animals and eggs laid during the join handshake.
+        match host.as_mut() {
+            Some(h) => h.ecs.clear(),
+            None => hs.server.ecs.clear(),
+        }
         let world = match host.as_mut() {
             Some(h) => &mut h.world,
             None => &mut hs.server.world,

@@ -4839,19 +4839,6 @@ impl super::GameState {
         run
     }
 
-    /// D1 — where the joiners stand in a lent world: every server-simulated
-    /// slot present and alive. Read from the server's player slots, which are
-    /// never lent. Empty unless the world is lent. The host's mob AI chases
-    /// them (it stays client-side; see the brigand pre-pass in `tick`).
-    /// MP-D2b — the player bodies the host client's species AI, pet follow
-    /// and Leads see, indexed by player slot: this client's players first
-    /// (their slots ARE their server slots on a lending host), then — on a
-    /// lending host — every further server slot: the body of a joiner in the
-    /// world (dead or alive, as a dead local player's stays listed), or
-    /// `species_ai::ABSENT_PLAYER` for a slot whose joiner has left or not
-    /// finished joining. With each slot's look yaw, and the pet-owner key
-    /// (verified npub) → slot of every joiner in the world that has one (a
-    /// departed joiner's pets have no owner here to walk to).
     /// C3c-2 — every shooter's live sneak by slot, for the projectiles this
     /// client ticks (`entity::tick_projectiles`' 1C shield): its own seats'
     /// (`local_sneak`) and, on a lending host, every joiner's at its server
@@ -4866,50 +4853,184 @@ impl super::GameState {
         map
     }
 
-    fn species_bodies(&self) -> (Vec<glam::Vec3>, Vec<f32>, Vec<(String, usize)>) {
-        let mut bodies: Vec<glam::Vec3> = self.players.iter().map(|s| s.player.pos).collect();
-        let mut yaws: Vec<f32> = self.players.iter().map(|s| s.camera.yaw).collect();
-        let mut owners = Vec::new();
-        if let Some(hs) = self.hosted_server.as_ref().filter(|hs| hs.lends_host_world()) {
-            for (slot, sp) in hs.server.players.iter().enumerate().skip(self.players.len()) {
-                let here = sp.server_simulated && sp.is_in_world();
-                bodies.push(if here { sp.player.pos } else { crate::species_ai::ABSENT_PLAYER });
-                yaws.push(sp.yaw);
-                if here
-                    && let Some(key) = sp.pet_owner_key()
-                {
-                    owners.push((key, slot));
+    /// The player bodies this client's own mob phases see (`sim_mobs`, in a
+    /// standalone or joined game): its players at their slots, with their
+    /// look yaws. A lent world's mob phases run in its server, which lists
+    /// its joiners too (`GameServer::mob_bodies`).
+    fn species_bodies(&self) -> crate::sim_mobs::MobBodies {
+        crate::sim_mobs::MobBodies {
+            positions: self.players.iter().map(|s| s.player.pos).collect(),
+            yaws: self.players.iter().map(|s| s.camera.yaw).collect(),
+            local_slots: (0..self.players.len()).collect(),
+            ..Default::default()
+        }
+    }
+
+    /// D4 slice 3 — this client's seats for this tick's steering
+    /// (`sim_mobs::steer_local_seats`): each living rider's mount, its input
+    /// from this tick's intent and its camera's yaw, and its ride state. A
+    /// dead rider is the follow's to get off.
+    fn local_seats(&self, intents: &[PlayerIntent]) -> Vec<crate::sim_mobs::LocalSeat> {
+        intents
+            .iter()
+            .enumerate()
+            .take(self.players.len())
+            .filter_map(|(i, intent)| {
+                let p = &self.players[i];
+                let mount = p.riding?;
+                if p.combat.dead {
+                    return None;
+                }
+                Some(crate::sim_mobs::LocalSeat {
+                    slot: i,
+                    mount,
+                    input: crate::riding::SeatInput::from_intent(intent, p.camera.yaw),
+                    ride: p.ride,
+                    off: None,
+                })
+            })
+            .collect()
+    }
+
+    /// D4 slice 3 — land what the mob simulation did to this client's players
+    /// and world (`sim_mobs::SimEvent`), through the rules the old inline code
+    /// used, once each: a standalone game's right after each phase, a lent
+    /// world's from its server's outbox straight after the lend window
+    /// (`tick_hosted_server`). A slot with no player here (a joiner's, on a
+    /// lent world) is the server's to land.
+    pub(crate) fn apply_sim_events(&mut self, events: Vec<crate::sim_mobs::SimEvent>) {
+        use crate::sim_mobs::SimEvent;
+        for event in events {
+            match event {
+                SimEvent::Hit { slot, damage, cause, knock } => {
+                    let mut landed = false;
+                    if let Some(p) = self.players.get_mut(slot) {
+                        landed = p.take_damage_with_armour_from(damage, cause);
+                        p.player.velocity += knock;
+                    }
+                    if landed {
+                        self.dismount_parrots_on_owner_damage(slot);
+                    }
+                }
+                SimEvent::HostileContacts { slot, contacts } => {
+                    let difficulty = crate::survival::Difficulty::from_meta_str(&self.difficulty);
+                    if slot < self.players.len()
+                        && !self.joined()
+                        && !self.is_creative
+                        && difficulty.rules().hostiles_attack
+                    {
+                        let attackers = crate::combat::land_mob_attacks(&contacts, &mut self.players[slot], difficulty);
+                        self.after_mob_attacks(slot, attackers);
+                    }
+                }
+                SimEvent::BabyBorn(baby) => {
+                    // A joiner's feed is that joiner's breed (a
+                    // `PlayerEventType::Bred` through the host's server); a
+                    // lent world's server routed it already.
+                    if baby.joiners.iter().any(Option::is_some)
+                        && let Some(hs) = self.hosted_server.as_mut()
+                    {
+                        for (slot, generation) in baby.joiners.iter().flatten() {
+                            hs.server.queue_bred_event(*slot, *generation, baby.kind);
+                        }
+                    }
+                    // Task 19 — one event per baby, carrying its species, so a
+                    // species-filtered trial (e.g. "breed a Mule") can tell a
+                    // hybrid foal apart from an everyday same-species baby;
+                    // only when this client's player fed a parent (review D2b B2).
+                    if baby.credit_here {
+                        self.fire_challenge(crate::scenario::ChallengeEvent::BreedAnimals {
+                            offspring: Some(baby.kind),
+                        });
+                    }
+                    // UX polish sweep Task 1 — a green poof + toast so the
+                    // moment actually reads to the player.
+                    self.particles.poof_green(
+                        baby.pos,
+                        6,
+                        self.tick_counter ^ (baby.entity.id() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15),
+                    );
+                    self.toast = Some((
+                        format!("A baby {} was born!", crate::mob::mob_def(baby.kind).name),
+                        Instant::now() + Duration::from_secs(3),
+                    ));
+                }
+                SimEvent::ParrotAlarm { pet, pos } => {
+                    self.toast = Some((
+                        "Your parrot squawks - danger nearby!".to_string(),
+                        Instant::now() + Duration::from_secs(3),
+                    ));
+                    self.particles.puff(pos, glam::Vec3::Y, 6, self.tick_counter ^ (pet.to_bits().get() << 8));
+                }
+                SimEvent::CellChanged { x, y, z, .. } => self.rebuild_chunk_at(x, y, z),
+                SimEvent::Seat(seat) => {
+                    let Some(p) = self.players.get_mut(seat.slot) else { continue };
+                    // The seat it was steered as (a ride that ended since
+                    // keeps its own end).
+                    if p.riding != Some(seat.mount) {
+                        continue;
+                    }
+                    p.ride = seat.ride;
+                    if let Some(why) = seat.off {
+                        // `GameState::dismount`, its unmount already done.
+                        p.riding = None;
+                        crate::riding::settle(&mut p.player, &self.world, &self.registry);
+                        if why == crate::riding::Dismount::Sank && seat.slot == 0 {
+                            self.toast = Some((
+                                crate::riding::SANK_TOAST.to_string(),
+                                Instant::now() + Duration::from_secs(3),
+                            ));
+                        }
+                    }
                 }
             }
         }
-        (bodies, yaws, owners)
     }
 
-    /// MP-D2b — a species attack the host client's AI landed on a joiner's
-    /// body (server slot `slot` of a lending host): `GameServer::
-    /// land_hit_on_joiner`, armour-soaked and worn, `DiedOf` on a kill.
-    fn land_hit_on_lent_joiner(
-        &mut self,
-        slot: usize,
-        damage: f32,
-        cause: crate::survival::DamageCause,
-        knock: glam::Vec3,
-    ) {
-        if let Some(hs) = self.hosted_server.as_mut().filter(|hs| hs.lends_host_world()) {
-            hs.server.land_hit_on_joiner(slot, damage, cause, knock);
+    /// Local slots remain trusted: after landing this tick's effects and
+    /// following seats, refresh the authority's shadows before another
+    /// catch-up tick, input or save. No remote damage/death event is queued.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn refresh_lent_local_shadows(players: &[crate::player_slot::PlayerSlot], hs: &mut crate::hosted_server::HostedServer) {
+        if !hs.lends_host_world() { return; }
+        for (local, sp) in players.iter().zip(&mut hs.server.players) {
+            if sp.server_simulated { continue; }
+            sp.player.pos = local.player.pos;
+            sp.player.velocity = local.player.velocity;
+            sp.player.on_ground = local.player.on_ground;
+            sp.player.flying = local.player.flying;
+            sp.player.in_water = local.player.in_water;
+            sp.player.fall_distance = local.player.fall_distance;
+            sp.player.pending_landing = local.player.pending_landing;
+            sp.combat.health = local.combat.health;
+            sp.combat.dead = local.combat.dead;
+            sp.local_seated = local.seated();
         }
     }
 
-    fn lent_joiner_positions(&self) -> Vec<glam::Vec3> {
-        match self.hosted_server.as_ref().filter(|hs| hs.lends_host_world()) {
-            Some(hs) => hs
-                .server
-                .players
-                .iter()
-                .filter(|sp| sp.server_simulated && sp.is_present_and_alive())
-                .map(|sp| sp.player.pos)
-                .collect(),
-            None => Vec::new(),
+    /// After hostile melee landed on local player `i` (`attackers`, the mobs
+    /// whose hit landed): Task 11 — a landed hit dismounts that player's
+    /// perched parrots; Task 8b — every attacker rallies the player's tamed
+    /// wolves into their revenge pivot (no friendly fire, Sit holds, an
+    /// active fight is not interrupted: wolf.rs / tameable.rs).
+    fn after_mob_attacks(&mut self, i: usize, attackers: Vec<hecs::Entity>) {
+        if !attackers.is_empty() {
+            self.dismount_parrots_on_owner_damage(i);
+        }
+        for attacker in attackers {
+            let attacker_is_own_pet = crate::tameable::is_players_own_pet(
+                &self.ecs,
+                attacker,
+                &format!("local-player-{i}"),
+                i,
+            );
+            crate::block_interact::pivot_owner_wolves_to_revenge(
+                &mut self.ecs,
+                &format!("local-player-{i}"),
+                attacker,
+                attacker_is_own_pet,
+                self.tick_counter,
+            );
         }
     }
 
@@ -5646,6 +5767,9 @@ impl super::GameState {
         // MP-D2c-1 — which of our seats ride, for the joiners' view.
         let seated: Vec<bool> = self.players.iter().map(crate::player_slot::PlayerSlot::seated).collect();
         hs.sync_local_seats(&seated);
+        // A respawn or local rule change may have happened since the last
+        // window; the authority must see the current trusted body now too.
+        Self::refresh_lent_local_shadows(&self.players, hs);
         // D3 — a local-only authority follows this client's live rules.
         if hs.local_only() {
             hs.align_local_rules(self.play_mode, &self.difficulty, self.explosives_enabled, self.fire_spread_enabled);
@@ -5722,6 +5846,11 @@ impl super::GameState {
         let (sim_changes, edit_cells) = hs.take_lent_changes();
         // D4 slice 2 — the strike the server's weather landed in this world.
         let lent_strike = hs.server.take_lent_strike();
+        // D4 slice 3 — what the server's mob simulation did to this client's
+        // players this tick: landed now, before the ride follow below and
+        // before any further catch-up tick, input or save.
+        let (contacts, mob_events): (Vec<_>, Vec<_>) = hs.server.sim_events.take().into_iter()
+            .partition(|e| matches!(e, crate::sim_mobs::SimEvent::HostileContacts { .. }));
 
         report.remeshed = self.remesh_lent_cells(
             sim_changes
@@ -5733,8 +5862,16 @@ impl super::GameState {
         if let Some(strike) = lent_strike {
             self.present_strike(strike);
         }
-        // Carts advanced inside the window: re-pin any rider to the seat.
+        self.apply_sim_events(mob_events);
+        // Carts and mounts advanced inside the window: re-pin any rider to
+        // the seat (after its steered seat came back, so a dismount stands).
         self.apply_riding_follow();
+        // Hostile melee originally landed after seat follow. Preserve that
+        // order: following a mount clears velocity and would erase the hit.
+        self.apply_sim_events(contacts);
+        if let Some(hs) = self.hosted_server.as_mut() {
+            Self::refresh_lent_local_shadows(&self.players, hs);
+        }
 
         // World handover: a frozen world runs no shared system this tick.
         report.faults = if self.handover_freezes_world() {
@@ -5976,81 +6113,11 @@ impl super::GameState {
                 }
             }
         }
-        // Spec 28d.nostrich v2 — per-entity lay + feather timers.
-        // v1 used a global tick stagger; v2 ticks each Nostrich's
-        // own NostrichData component down and spawns eggs/feathers
-        // when timers hit 0. Tamed Nostriches shed feathers; wild
-        // ones only spawn feathers via the kill drop table.
-        let world_tick_for_drops = self.tick_counter;
-        let mut nostrich_egg_drops: Vec<(glam::Vec3, u32)> = Vec::new();
-        let mut nostrich_feather_drops: Vec<(glam::Vec3, u32)> = Vec::new();
-        for (_e, (data, pos)) in self.ecs
-            .query::<(&mut crate::nostrich::NostrichData, &crate::entity::Position)>()
-            .iter()
-        {
-            // Decrement timers. Lay applies to both wild + tamed;
-            // feather shed applies only to tamed.
-            if data.lay_ticks_remaining > 0 {
-                data.lay_ticks_remaining -= 1;
-            }
-            if data.lay_ticks_remaining == 0 {
-                let seed = ((pos.0.x as i32 as u32).wrapping_mul(374761393))
-                    .wrapping_add((pos.0.z as i32 as u32).wrapping_mul(668265263))
-                    .wrapping_add(world_tick_for_drops as u32);
-                nostrich_egg_drops.push((pos.0, seed));
-                data.lay_ticks_remaining = crate::nostrich::LAY_PERIOD_TICKS;
-            }
-            if data.is_tamed() {
-                if data.feather_ticks_remaining > 0 {
-                    data.feather_ticks_remaining -= 1;
-                }
-                if data.feather_ticks_remaining == 0 {
-                    let seed = ((pos.0.z as i32 as u32).wrapping_mul(374761393))
-                        .wrapping_add((pos.0.x as i32 as u32).wrapping_mul(668265263))
-                        .wrapping_add(world_tick_for_drops as u32);
-                    nostrich_feather_drops.push((pos.0, seed));
-                    data.feather_ticks_remaining = crate::nostrich::FEATHER_PERIOD_TICKS;
-                }
-            }
-        }
-        for (pos, seed) in nostrich_egg_drops {
-            let stack = crate::item::ItemStack::new_material(
-                crate::item::MaterialId::NostrichEgg, 1,
-            );
-            crate::entity::spawn_item(&mut self.ecs, pos, stack, seed);
-        }
-        for (pos, seed) in nostrich_feather_drops {
-            let stack = crate::item::ItemStack::new_material(
-                crate::item::MaterialId::NostrichFeather, 1,
-            );
-            crate::entity::spawn_item(&mut self.ecs, pos, stack, seed);
-        }
-        // Animals Wave 2 — chicken egg laying. The animal_products cadence
-        // shipped long ago but was never wired; each chicken's
-        // AnimalProductState now times the lay + drops an Egg at its feet.
-        let mut chicken_egg_drops: Vec<(glam::Vec3, u32)> = Vec::new();
-        for (_e, (state, pos, kind)) in self
-            .ecs
-            .query::<(
-                &mut crate::animal_products::AnimalProductState,
-                &crate::entity::Position,
-                &crate::entity::MobKind,
-            )>()
-            .iter()
-        {
-            if kind.0 == crate::mob::MobType::Chicken
-                && crate::animal_products::should_lay_egg(*state, world_tick_for_drops)
-            {
-                let seed = ((pos.0.x as i32 as u32).wrapping_mul(2_246_822_519))
-                    .wrapping_add((pos.0.z as i32 as u32).wrapping_mul(668_265_263))
-                    .wrapping_add(world_tick_for_drops as u32);
-                chicken_egg_drops.push((pos.0, seed));
-                crate::animal_products::record_action(state, world_tick_for_drops);
-            }
-        }
-        for (pos, seed) in chicken_egg_drops {
-            let stack = crate::item::ItemStack::new_material(crate::item::MaterialId::Egg, 1);
-            crate::entity::spawn_item(&mut self.ecs, pos, stack, seed);
+        // Spec 28d.nostrich v2 — per-entity lay + feather timers, and Animals
+        // Wave 2 chicken eggs (`sim_mobs::products`). D4 slice 3 — a lent
+        // world's are its server's, in its tick (`SimSystem::Products`).
+        if self.sim_runs(SimSystem::Products) {
+            crate::sim_mobs::products(&mut self.ecs, self.tick_counter);
         }
         // Advance world time (24000 ticks per day cycle).
         // Default step is set on world load (alpha=4, standard=1). Runtime
@@ -6263,30 +6330,13 @@ impl super::GameState {
         // whose population hasn't been instantiated yet. Idempotent;
         // `populated_villages` marks each cell after spawn so we don't
         // duplicate when the player walks away and back.
-        if !joined && self.tick_counter.is_multiple_of(20) {
-            crate::village_gen::spawn_initial_villagers(
-                &mut self.world,
-                &self.biome_gen,
-                &mut self.ecs,
-            );
-            // Satoshi onboarding — place the guide in his house near spawn on
-            // first entry, then re-spawn him there on reload (idempotent).
-            crate::satoshi::tick_spawn(&mut self.world, &mut self.ecs);
-            // HP-6 (2026-05-23) — Iron Golem auto-spawn retired by the
-            // historical-pivot cutover; the fantasy roster was excised
-            // entirely in the open-source IP cleanup. The Knight (HP-4)
-            // is now the sole village defender.
-            crate::village_gen::tick_knight_spawn(
-                &self.world,
-                &self.biome_gen,
-                &mut self.ecs,
-            );
-            // Phase 10 — Wandering Villager spawn + migration toward bells.
-            crate::village_gen::tick_wanderer_migration(
-                &mut self.world,
-                &mut self.ecs,
-                self.tick_counter,
-            );
+        // D4 slice 3 — `sim_mobs::population`: a village's first villagers,
+        // Satoshi's place, knights, wanderers. A lent world's are its
+        // server's (`SimSystem::Population`).
+        if !joined && crate::sim_mobs::population_due(self.tick_counter) {
+            if self.sim_runs(SimSystem::Population) {
+                crate::sim_mobs::population(&mut self.world, &self.biome_gen, &mut self.ecs, self.tick_counter);
+            }
             // HP-3 — Brigand Hideout replenisher. Same 20-tick cadence
             // as the village checks; respects the per-hideout 24 000-
             // tick cooldown internally.
@@ -6305,23 +6355,14 @@ impl super::GameState {
         // for day/night gating. Uses eff_world_time so time-locked
         // worlds see the correct day/night state for AI.
         //
-        // D1 — the mob-locomotion block (this pre-pass, `mob_ai` below, then
-        // entity physics) stays on the host client even on a lent world: its
-        // species AI, wolf follow, tethers, builders and Satoshi overwrite
-        // `mob_ai`'s velocities BETWEEN `mob_ai` and `tick_entities`, so
-        // splitting the block across the two ticks would erase every
-        // override. Its targets therefore include the joiners' server-held
-        // bodies (`lent_joiner_positions`). Moves server-side with D4.
+        // D4 slice 3 — the mob simulation's phases (`sim_mobs`) run here in
+        // a standalone or joined game, at the places they always stood; a
+        // lent world runs them all once, in its server's tick
+        // (`SimSystem::MobAi` … `Tethers` are the server's), so none runs
+        // here.
         let runs_mob_ai = self.sim_runs(SimSystem::MobAi);
-        let joiner_targets = self.lent_joiner_positions();
         if runs_mob_ai {
-            let targets: Vec<glam::Vec3> =
-                player_positions.iter().chain(&joiner_targets).copied().collect();
-            crate::brigand::tick_brigand_overrides(
-                &mut self.ecs,
-                &targets,
-                eff_world_time,
-            );
+            crate::sim_mobs::pre_pass(&mut self.ecs, &player_positions, eff_world_time);
         }
         // Salt feature — snowfall painter. Self-throttled on
         // SNOWFALL_PERIOD_TICKS so cheap on intermediate ticks. Runs
@@ -6407,8 +6448,10 @@ impl super::GameState {
         }
         // Phase 8 — Iron Golem combat tick. Runs every frame so the village
         // gets defended in real time; rate-limit is inside the function via
-        // the per-golem attack cooldown.
-        crate::mob_ai::tick_golem_combat(&mut self.ecs);
+        // the per-golem attack cooldown. With the mob AI (D4 slice 3).
+        if runs_mob_ai {
+            crate::sim_mobs::golems(&mut self.ecs);
+        }
 
         // Spec 19 village-discovery toast — first time the player walks
         // within ~24 blocks of a village anchor, toast a one-shot
@@ -7412,50 +7455,22 @@ impl super::GameState {
             }
         }
 
-        // Mob AI — targets nearest player (the joiners too, on a lent world:
-        // see the brigand pre-pass above for why this stays on the client).
-        // Re-snapshotted after this tick's player physics; the species
-        // dispatch below reads the LOCAL players' positions only.
+        // Mob AI — targets nearest player. Re-snapshotted after this tick's
+        // player physics. (A lent world's runs in its server, with the
+        // joiners as targets.)
         let player_positions: Vec<glam::Vec3> = self.players.iter().map(|s| s.player.pos).collect();
         if runs_mob_ai {
-            let targets: Vec<glam::Vec3> =
-                player_positions.iter().chain(&joiner_targets).copied().collect();
-            crate::mob_ai::tick_mob_ai(
-                &mut self.ecs,
-                &self.world,
-                &self.registry,
-                &targets,
-            );
+            crate::sim_mobs::mob_ai(&mut self.ecs, &self.world, &self.registry, &player_positions);
         }
 
         // P5 — animal breeding: pair in-love adults into babies + grow
-        // juveniles, and spawn the babies (`breeding::client_step`, the
-        // GPU-free step a test drives on a lent world).
-        let server = self.hosted_server.as_mut().map(|hs| &mut hs.server);
-        let born = crate::breeding::client_step(&mut self.ecs, self.tick_counter, server);
-        for baby in born {
-            // Task 19 — one event per baby, carrying its species, so a
-            // species-filtered trial (e.g. "breed a Mule") can tell a hybrid
-            // foal apart from an everyday same-species baby. Review D2b B2 —
-            // only when this client's player fed a parent: a joiner's feed is
-            // that joiner's breed (a `PlayerEventType::Bred` through the
-            // host's server), never this client's players'.
-            if baby.credit_here {
-                self.fire_challenge(crate::scenario::ChallengeEvent::BreedAnimals {
-                    offspring: Some(baby.kind),
-                });
-            }
-            // UX polish sweep Task 1 — baby-born was 100% silent; a green
-            // poof + toast so the moment actually reads to the player.
-            self.particles.poof_green(
-                baby.pos,
-                6,
-                self.tick_counter ^ (baby.entity.id() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15),
-            );
-            self.toast = Some((
-                format!("A baby {} was born!", crate::mob::mob_def(baby.kind).name),
-                Instant::now() + Duration::from_secs(3),
-            ));
+        // juveniles, and spawn the babies (`sim_mobs::breed`); each birth's
+        // toast, poof and — when this client's player fed a parent — its
+        // challenge event (`apply_sim_events`).
+        if self.sim_runs(SimSystem::Breeding) {
+            let mut events = crate::sim_mobs::SimEvents::default();
+            crate::sim_mobs::breed(&mut self.ecs, self.tick_counter, &mut events);
+            self.apply_sim_events(events.take());
         }
 
         // P7 — hoppers: on the transfer cadence, move one item from the chest
@@ -7488,186 +7503,34 @@ impl super::GameState {
                 }
         }
 
-        // MP-D2b — the bodies the species AI, pet follow and the Lead see:
-        // this client's players at their slots and, on a lending host, every
-        // joiner at its server slot (`species_bodies`), so a bee, goat or
-        // shark reaches a joiner, a Bear or Hyena a joiner provoked charges
-        // it, and a joiner's pet follows it and its Lead pulls.
-        let (bodies, body_yaws, remote_owners) = self.species_bodies();
-        let num_local = self.players.len();
-        let owners = crate::tameable::OwnerBodies { positions: &bodies, remote_owners: &remote_owners };
-
-        // P3 — tamed-wolf companion follow. Runs after mob_ai (so it wins
-        // over the generic wander for tamed wolves) but BEFORE the tether
-        // pass, so an explicitly-leashed wolf's tether still takes priority
-        // over auto-follow.
-        self.tick_wolf_companions(&owners);
-
-        // Living-world species dispatch (species_ai) — wakes the dormant
-        // per-species AIs. Runs after mob_ai so it owns locomotion during the
-        // generic Idle/Wander states but yields to Flee/Chase/Investigate.
-        // Rabbits hop; goats charge and gore a player who's too close.
-        crate::species_ai::dispatch_rabbits(&mut self.ecs, &bodies, self.tick_counter);
-        // W2 — neutral-mob bites scale with the difficulty table too.
-        let difficulty = crate::survival::Difficulty::from_meta_str(&self.difficulty);
-        let bee_stings =
-            crate::species_ai::dispatch_bees(&mut self.ecs, &bodies, self.tick_counter);
-        for sting in bee_stings {
-            let damage =
-                crate::survival::scale_mob_damage(crate::species_ai::BEE_STING_DAMAGE, difficulty);
-            let cause = crate::survival::DamageCause::Mob(crate::mob::MobType::Bee);
-            if sting.target_slot >= num_local {
-                self.land_hit_on_lent_joiner(sting.target_slot, damage, cause, glam::Vec3::ZERO);
-            } else {
-                let landed = self.players.get_mut(sting.target_slot).is_some_and(|slot| {
-                    slot.take_damage_with_armour_from(damage, cause)
-                });
-                if landed {
-                    self.dismount_parrots_on_owner_damage(sting.target_slot);
-                }
-            }
-            // The bee dies after stinging (Minecraft parity).
-            let _ = self.ecs.despawn(sting.bee);
-        }
-        let goat_impacts =
-            crate::species_ai::dispatch_goats(&mut self.ecs, &bodies, self.tick_counter);
-        for imp in goat_impacts {
-            let damage = crate::survival::scale_mob_damage(crate::goat_ai::CHARGE_DAMAGE, difficulty);
-            let cause = crate::survival::DamageCause::Mob(crate::mob::MobType::Goat);
-            let Some(&p) = bodies.get(imp.target_slot) else { continue };
-            let push = glam::Vec3::new(p.x - imp.goat_pos.x, 0.0, p.z - imp.goat_pos.z)
-                .normalize_or_zero();
-            let knock = glam::Vec3::new(
-                push.x * crate::species_ai::GOAT_KNOCKBACK,
-                crate::species_ai::GOAT_KNOCKBACK_UP,
-                push.z * crate::species_ai::GOAT_KNOCKBACK,
-            );
-            if imp.target_slot >= num_local {
-                self.land_hit_on_lent_joiner(imp.target_slot, damage, cause, knock);
-                continue;
-            }
-            let mut landed = false;
-            if let Some(slot) = self.players.get_mut(imp.target_slot) {
-                landed = slot.take_damage_with_armour_from(damage, cause);
-                slot.player.velocity += knock;
-            }
-            if landed {
-                self.dismount_parrots_on_owner_damage(imp.target_slot);
-            }
-        }
-
-        // Animals Wave 2 — the remaining dormant species AIs, now dispatched:
-        // horse herd-wander (skips ridden), squid aquatic drift + suffocation,
-        // hyena day/night pack temperament, and bear food-raiding.
-        crate::species_ai::dispatch_horses(&mut self.ecs, self.tick_counter);
-        // Task 9 — the perched shoulder anchor needs the owner's yaw to stay
-        // pinned in body space (see `companion::shoulder_offset`).
-        crate::species_ai::dispatch_companions(
-            &mut self.ecs,
-            &bodies,
-            &body_yaws,
-            self.tick_counter,
-            &remote_owners,
-        );
-        // Wave-hardening backlog (2026-07-11) — the tamed-Nostrich Follow/Sit
-        // machine (`nostrich::advance_state`) shipped with Spec 28d.nostrich v2
-        // but was never ticked; tamed Nostriches didn't follow at all.
-        crate::species_ai::dispatch_nostriches(
-            &mut self.ecs,
-            &bodies,
-            self.tick_counter,
-            &remote_owners,
-        );
-        // Pets wave Task 10 — a tamed parrot squawks an alarm when a hostile
-        // wanders within PARROT_ALARM_RADIUS, gated by AlarmCooldown so it
-        // doesn't spam every tick. `parrot_alarms` is a pure query in
-        // companion.rs; this call site is the only place that mutates the
-        // ECS (inserts the cooldown) and reaches outside it (toast +
-        // particle burst).
-        for (id, pos) in crate::companion::parrot_alarms(&self.ecs, self.tick_counter) {
-            let _ = self.ecs.insert_one(
-                id,
-                crate::companion::AlarmCooldown {
-                    until_tick: self.tick_counter + crate::companion::PARROT_ALARM_COOLDOWN,
-                },
-            );
-            self.toast = Some((
-                "Your parrot squawks - danger nearby!".to_string(),
-                Instant::now() + Duration::from_secs(3),
-            ));
-            self.particles.puff(
-                pos,
-                glam::Vec3::Y,
-                6,
-                self.tick_counter ^ (id.to_bits().get() << 8),
-            );
-        }
-        crate::species_ai::dispatch_squids(&mut self.ecs, &self.world, self.tick_counter);
-        crate::species_ai::dispatch_hyenas(&mut self.ecs, &bodies, self.world_time);
-        // Aquatic wave — the Shark hunts players in deep water + drips teeth.
-        let shark_bites = crate::species_ai::dispatch_sharks(
-            &mut self.ecs,
-            &self.world,
-            &bodies,
-            self.tick_counter,
-        );
-        for bite in shark_bites {
-            let damage =
-                crate::survival::scale_mob_damage(crate::species_ai::SHARK_BITE_DAMAGE, difficulty);
-            let cause = crate::survival::DamageCause::Mob(crate::mob::MobType::Shark);
-            let Some(&p) = bodies.get(bite.target_slot) else { continue };
-            let push = glam::Vec3::new(p.x - bite.shark_pos.x, 0.0, p.z - bite.shark_pos.z)
-                .normalize_or_zero();
-            let knock = glam::Vec3::new(push.x * 0.4, 0.0, push.z * 0.4);
-            if bite.target_slot >= num_local {
-                self.land_hit_on_lent_joiner(bite.target_slot, damage, cause, knock);
-                continue;
-            }
-            let mut landed = false;
-            if let Some(slot) = self.players.get_mut(bite.target_slot) {
-                landed = slot.take_damage_with_armour_from(damage, cause);
-                slot.player.velocity += knock;
-            }
-            if landed {
-                self.dismount_parrots_on_owner_damage(bite.target_slot);
-            }
-        }
-        let bear_effects = crate::species_ai::dispatch_bears(
-            &mut self.ecs,
-            &self.world,
-            &bodies,
-            self.tick_counter,
-        );
-        for eff in bear_effects {
-            match eff {
-                crate::species_ai::BearWorldEffect::ConsumeCrop { x, y, z } => {
-                    // A raided crop reverts to tilled soil (the bear ate it).
-                    self.world.set_block(x, y, z, crate::block::TILLED_SOIL);
-                    self.rebuild_chunk_at(x, y, z);
-                }
-                crate::species_ai::BearWorldEffect::RaidChest { x, y, z } => {
-                    if let Some(c) = self.world.chest_at_mut((x, y, z)) {
-                        c.take_one_food();
-                    }
-                }
-            }
-        }
-
-        // Spec 36 Lead tether — runs AFTER mob_ai so the override
-        // wins on tethered mobs (slack ones keep their AI velocity).
-        // Snapped tethers return the mob entity + drop position; we
-        // drop a Lead ItemEntity at the snap site + remove the
-        // Tethered component so subsequent ticks don't keep trying
-        // to pull a vanished anchor.
-        let snapped = crate::tether::tick_tethers(&mut self.ecs, &bodies);
-        for (mob_entity, drop_pos) in snapped {
-            let _ = self.ecs.remove_one::<crate::tether::Tethered>(mob_entity);
-            crate::entity::spawn_item(
+        // The bodies the species AI, pet follow and the Lead see: this
+        // client's players at their slots (a lent world's server lists its
+        // joiners too, `GameServer::mob_bodies`).
+        let bodies = self.species_bodies();
+        // P3 tamed-wolf follow, then the living-world species dispatch
+        // (`sim_mobs::species`): after mob_ai, so it owns locomotion during
+        // the generic Idle/Wander states but yields to Flee/Chase/Investigate.
+        // Its hits on this client's players land through `apply_sim_events`.
+        if self.sim_runs(SimSystem::Species) {
+            // W2 — neutral-mob bites scale with the difficulty table too.
+            let difficulty = crate::survival::Difficulty::from_meta_str(&self.difficulty);
+            let mut events = crate::sim_mobs::SimEvents::default();
+            crate::sim_mobs::species(
                 &mut self.ecs,
-                drop_pos + glam::Vec3::new(0.0, 0.5, 0.0),
-                crate::item::ItemStack::new_material(crate::item::MaterialId::Lead, 1),
-                (drop_pos.x as i32 * 31 + drop_pos.z as i32 * 17) as u32,
+                &mut self.world,
+                &bodies,
+                self.tick_counter,
+                self.world_time,
+                difficulty,
+                &mut events,
             );
+            self.apply_sim_events(events.take());
+        }
+
+        // Spec 36 Lead tether — runs AFTER the species AI so the override
+        // wins on tethered mobs (slack ones keep their AI velocity).
+        if self.sim_runs(SimSystem::Tethers) {
+            crate::sim_mobs::tethers(&mut self.ecs, &bodies);
         }
 
         // Spec 26 — Builder NPC commission lifecycle. Drives pathfind +
@@ -7676,28 +7539,30 @@ impl super::GameState {
         // matches the local slots (always online in single-player).
         self.tick_builder_commissions();
 
-        // Entity physics (every tick, not just every 4th). The host client's
-        // on a lent world, with `mob_ai` (D1).
+        // Entity physics (every tick, not just every 4th). The server's on a
+        // lent world (D4 slice 3), which steers this client's seats from the
+        // input handed over here (`GameServer::lent_local_seats`).
         if self.sim_runs(SimSystem::EntityPhysics) {
             // MP-D2c-1 — the seats steer their mounts first: after every
             // system above that writes a mob's velocity (mob AI, species AI,
             // tethers) and right before physics integrates it, so the rider
-            // has the last word. One rule for every seat (`riding::steer`):
-            // our own seats, and — on a lent world, whose entity physics this
-            // is — the joiners' seats the server holds, from their latest
-            // input (`sim_lend::host_entity_physics`).
-            self.steer_own_seats(&intents);
-            crate::sim_lend::host_entity_physics(
-                self.hosted_server.as_mut(),
-                &mut self.ecs,
-                &self.world,
-                &self.registry,
-            );
+            // has the last word (`riding::steer`, one rule for every seat).
+            let seats = self.local_seats(&intents);
+            let mut events = crate::sim_mobs::SimEvents::default();
+            crate::sim_mobs::steer_local_seats(&mut self.ecs, &self.world, seats, &mut events);
+            self.apply_sim_events(events.take());
+            crate::sim_mobs::physics(&mut self.ecs, &self.world, &self.registry);
+            // Satoshi co-presence — move him toward you (summoned via H) or
+            // back to his hut, AFTER the AI + physics passes so this is the
+            // last word on his position.
+            let anchor = self.players[0].player.pos;
+            crate::sim_mobs::summon(&self.world, &mut self.ecs, Some(anchor));
+        } else if self.sim_lent() {
+            let seats = self.local_seats(&intents);
+            if let Some(hs) = self.hosted_server.as_mut() {
+                hs.server.lent_local_seats = seats;
+            }
         }
-        // Satoshi co-presence — move him toward you (summoned via H) or back to
-        // his hut, AFTER the AI + physics passes so this is the last word on his
-        // position. No-op in worlds without Satoshi.
-        crate::satoshi::tick_summon(&self.world, &mut self.ecs, self.players[0].player.pos);
 
         // Spec 48 (Electricity) — power & logic sim, beside the furnace sweep.
         // Same slot as GameServer::tick (after entity physics, before carts) so
@@ -7848,40 +7713,14 @@ impl super::GameState {
         // (Peaceful: no) and scales the hits that land.
         let difficulty = crate::survival::Difficulty::from_meta_str(&self.difficulty);
         // A joiner's attackers are the server's mobs, landing on the server's
-        // body (MP-D2a, `GameServer::tick_player_hazards`).
-        if !joined && !self.is_creative && difficulty.rules().hostiles_attack {
+        // body (MP-D2a, `GameServer::tick_player_hazards`). D4 slice 3 — a
+        // lent world's mobs move in its server, which finds the contacts on
+        // this client's bodies after its physics; they land here from its
+        // outbox (`apply_sim_events`), by these same rules.
+        if !joined && !self.is_creative && difficulty.rules().hostiles_attack && !self.sim_lent() {
             for i in 0..self.players.len() {
-                let attackers = {
-                    let p = &mut self.players[i];
-                    crate::combat::tick_mob_attacks(&self.ecs, p, difficulty)
-                };
-                // Task 11 (design P6) — a landed mob melee hit dismounts any
-                // of this player's perched parrots (a shoulder-ride doesn't
-                // fit a hostile clawing at you).
-                if !attackers.is_empty() {
-                    self.dismount_parrots_on_owner_damage(i);
-                }
-                // Task 8b — pets avenge their owner: every mob that landed
-                // contact damage on this player rallies the player's tamed
-                // wolves into their revenge pivot. Decision logic (no
-                // friendly fire, Sit holds, don't interrupt an active
-                // fight) lives in wolf.rs/tameable.rs; this only feeds
-                // the events.
-                for attacker in attackers {
-                    let attacker_is_own_pet = crate::tameable::is_players_own_pet(
-                        &self.ecs,
-                        attacker,
-                        &format!("local-player-{i}"),
-                        i,
-                    );
-                    crate::block_interact::pivot_owner_wolves_to_revenge(
-                        &mut self.ecs,
-                        &format!("local-player-{i}"),
-                        attacker,
-                        attacker_is_own_pet,
-                        self.tick_counter,
-                    );
-                }
+                let attackers = crate::combat::tick_mob_attacks(&self.ecs, &mut self.players[i], difficulty);
+                self.after_mob_attacks(i, attackers);
             }
         }
         // Spec 28d.nostrich v2 — snapshot tamed-Nostrich ownership
@@ -24515,31 +24354,6 @@ impl super::GameState {
             ),
             Instant::now() + Duration::from_secs(5),
         ));
-    }
-
-    /// MP-D2c-1 — steer every local seat's mount one tick (`riding::steer`)
-    /// from this tick's intent and its camera's yaw. Runs right before entity
-    /// physics, after every system that writes a mob's velocity, so the
-    /// rider has the last word. A dismount gesture gets the rider off and
-    /// onto its feet; a Nostrich that sinks says so.
-    fn steer_own_seats(&mut self, intents: &[PlayerIntent]) {
-        for (i, intent) in intents.iter().enumerate().take(self.players.len()) {
-            let Some(mount) = self.players[i].riding else { continue };
-            if self.players[i].combat.dead {
-                continue; // the follow gets a dead rider off
-            }
-            let input = crate::riding::SeatInput::from_intent(intent, self.players[i].camera.yaw);
-            let off = crate::riding::steer(&mut self.ecs, &self.world, mount, &input, &mut self.players[i].ride);
-            if let Some(why) = off {
-                self.dismount(i, mount);
-                if why == crate::riding::Dismount::Sank && i == 0 {
-                    self.toast = Some((
-                        crate::riding::SANK_TOAST.to_string(),
-                        Instant::now() + Duration::from_secs(3),
-                    ));
-                }
-            }
-        }
     }
 
     /// MP-D2c-1 — the seat follow, once per tick after entity physics and the

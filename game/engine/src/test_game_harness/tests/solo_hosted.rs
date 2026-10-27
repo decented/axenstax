@@ -378,6 +378,168 @@ fn game_harness_a_storm_strikes_once_in_both_routings() {
     assert_eq!(game.state.lightning_flash, 1.0, "standalone rolls and presents its own bolt");
 }
 
+/// D4 slice 3 — the mob systems a lent world's server owns, all every-tick.
+const MOB_SYSTEMS: [crate::sim_lend::SimSystem; 6] = [
+    crate::sim_lend::SimSystem::MobAi,
+    crate::sim_lend::SimSystem::EntityPhysics,
+    crate::sim_lend::SimSystem::Products,
+    crate::sim_lend::SimSystem::Breeding,
+    crate::sim_lend::SimSystem::Species,
+    crate::sim_lend::SimSystem::Tethers,
+];
+
+/// A stone strip under player 0 running 16 blocks along -z (the way a yaw-0
+/// look points), cleared above: room to ride on, whatever the terrain.
+fn ride_strip(game: &mut HeadlessGame) -> glam::Vec3 {
+    let p = game.state.players[0].player.pos;
+    let feet = [p.x.floor() as i32, p.y.floor() as i32 + 12, p.z.floor() as i32];
+    for x in feet[0] - 2..=feet[0] + 2 {
+        for z in feet[2] - 18..=feet[2] + 2 {
+            game.state.world.set_block(x, feet[1] - 1, z, crate::block::STONE);
+            for y in feet[1]..feet[1] + 4 {
+                game.state.world.set_block(x, y, z, crate::block::AIR);
+            }
+        }
+    }
+    let at = glam::Vec3::new(feet[0] as f32 + 0.5, feet[1] as f32, feet[2] as f32 + 0.5);
+    let player = &mut game.state.players[0].player;
+    player.pos = at;
+    player.velocity = glam::Vec3::ZERO;
+    player.reset_fall();
+    at
+}
+
+/// D4 slice 3 — one logical tick runs each mob phase once on the world in
+/// both routings: standalone in the client's tick, solo-hosted in its
+/// server's (the host client runs none; the tripwire sees no fault).
+#[test]
+#[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+fn game_harness_one_mob_pass_per_logical_tick_in_both_routings() {
+    for routing in [LocalRouting::Standalone, LocalRouting::SoloHosted] {
+        isolate_saves();
+        let name = unique(&format!("mob-pass-{routing:?}"));
+        let _ = std::fs::remove_dir_all(crate::save::world_dir(&name));
+        let mut game = HeadlessGame::boot_into_world_routed(&name, routing);
+        for _ in 0..3 {
+            let before = game.state.world.sim_tally;
+            let reports = game.logical_ticks(1);
+            assert_one_sim(&reports);
+            let after = game.state.world.sim_tally;
+            for s in MOB_SYSTEMS {
+                assert_eq!(after.get(s) - before.get(s), 1, "{routing:?}: {s:?} once a logical tick");
+            }
+        }
+    }
+}
+
+/// D4 slice 3 — a ridden horse steers the same in both routings: the seat's
+/// input reaches the steering pass before physics wherever it runs (the
+/// client's tick standalone, the server's when solo-hosted).
+#[test]
+#[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+fn game_harness_a_ridden_horse_steers_the_same_in_both_routings() {
+    use winit::keyboard::KeyCode;
+    let mut paths = Vec::new();
+    for routing in [LocalRouting::Standalone, LocalRouting::SoloHosted] {
+        isolate_saves();
+        let name = unique(&format!("ride-{routing:?}"));
+        let _ = std::fs::remove_dir_all(crate::save::world_dir(&name));
+        let mut game = HeadlessGame::boot_into_world_routed(&name, routing);
+        game.state.set_play_mode(crate::play_mode::PlayMode::Survival);
+        let at = ride_strip(&mut game);
+        let horse = crate::entity::spawn_mob(&mut game.state.ecs, crate::mob::MobType::Horse, at);
+        crate::riding::mount(&mut game.state.ecs, horse, &mut game.state.players[0].ride);
+        game.state.players[0].riding = Some(horse);
+        game.state.players[0].camera.yaw = 0.0;
+        game.state.input.cursor_captured = true;
+        game.state.input.key_pressed(KeyCode::KeyW);
+        let mut path = Vec::new();
+        for _ in 0..8 {
+            assert_one_sim(&game.logical_ticks(1));
+            path.push(game.state.ecs.get::<&crate::entity::Position>(horse).unwrap().0 - at);
+        }
+        let end = *path.last().unwrap();
+        assert!(-end.z > 1.5, "{routing:?}: held forward gallops along the look: {end}");
+        assert_eq!(game.state.players[0].riding, Some(horse), "{routing:?}: still seated");
+        let body = game.state.players[0].player.pos - at;
+        assert!((body.x - end.x).abs() < 1e-3 && (body.z - end.z).abs() < 1e-3, "{routing:?}: the rider is on the seat");
+        // Sneak gets the rider off, once, onto its feet.
+        game.state.input.key_released(KeyCode::KeyW);
+        game.state.input.key_pressed(KeyCode::ShiftLeft);
+        assert_one_sim(&game.logical_ticks(2));
+        game.state.input.key_released(KeyCode::ShiftLeft);
+        assert!(game.state.players[0].riding.is_none(), "{routing:?}: sneak dismounts");
+        assert!(game.state.ecs.get::<&crate::entity::Ridden>(horse).is_err(), "{routing:?}");
+        paths.push(path);
+    }
+    for (i, (a, b)) in paths[0].iter().zip(&paths[1]).enumerate() {
+        assert!((*a - *b).length() < 1e-3, "tick {i}: standalone {a} vs solo-hosted {b}");
+    }
+}
+
+/// D4 slice 3 — hostile melee on a solo-hosted game's own player: its mobs
+/// move in the server, which hands the contact over through the outbox, and
+/// the client lands it once on its `PlayerSlot` — health, knockback and one
+/// point of armour wear — as a standalone game lands it in its own tick.
+#[test]
+#[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+fn game_harness_mob_melee_on_a_local_player_lands_once_in_both_routings() {
+    check_local_mob_melee(false);
+}
+
+#[test]
+#[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+fn game_harness_mob_melee_on_a_mounted_local_player_lands_once_in_both_routings() {
+    check_local_mob_melee(true);
+}
+
+fn check_local_mob_melee(mounted: bool) {
+    let mut outcomes = Vec::new();
+    for routing in [LocalRouting::Standalone, LocalRouting::SoloHosted] {
+        isolate_saves();
+        let name = unique(&format!("melee-{routing:?}-{mounted}"));
+        let _ = std::fs::remove_dir_all(crate::save::world_dir(&name));
+        let mut game = HeadlessGame::boot_into_world_routed(&name, routing);
+        game.state.set_play_mode(crate::play_mode::PlayMode::Survival);
+        game.state.difficulty = "normal".to_string();
+        if let Some(hs) = game.state.hosted_server.as_mut() {
+            hs.server.difficulty = crate::survival::Difficulty::Normal;
+        }
+        let at = ride_strip(&mut game);
+        if mounted {
+            let horse = crate::entity::spawn_mob(&mut game.state.ecs, crate::mob::MobType::Horse, at);
+            crate::riding::mount(&mut game.state.ecs, horse, &mut game.state.players[0].ride);
+            game.state.players[0].riding = Some(horse);
+            crate::riding::follow(&game.state.ecs, horse, &mut game.state.players[0].player);
+        }
+        let helmet = crate::armour::ArmourItem::new(crate::armour::ArmourSlot::Helmet, crate::armour::ArmourMaterial::Iron);
+        game.state.players[0].armour_slots[crate::armour::ArmourSlot::Helmet as usize] = Some(helmet);
+        game.state.players[0].combat.invincible_timer = 0;
+        let reach = if mounted { 1.0 } else { 0.6 };
+        let mob = crate::entity::spawn_mob(&mut game.state.ecs, crate::mob::MobType::Berserker, at + glam::Vec3::new(0.0, 0.0, reach));
+        let health = game.state.players[0].combat.health;
+        let reports = game.logical_ticks(1);
+        assert_one_sim(&reports);
+        let slot = &game.state.players[0];
+        let durability = slot.armour_slots[crate::armour::ArmourSlot::Helmet as usize].map(|a| a.durability);
+        assert!(slot.combat.health < health, "{routing:?}: the hit lands");
+        assert_eq!(durability, Some(helmet.durability - 1), "{routing:?}: the armour wears once");
+        assert!(slot.player.velocity.y > 0.0, "{routing:?}: knocked back (up)");
+        assert_eq!(slot.combat.last_damage, crate::survival::DamageCause::Mob(crate::mob::MobType::Berserker));
+        if let Some(hs) = game.state.hosted_server.as_ref() {
+            let shadow = &hs.server.players[0];
+            assert_eq!(shadow.player.pos, slot.player.pos, "the trusted shadow follows the final body");
+            assert_eq!(shadow.player.velocity, slot.player.velocity, "the shadow keeps the landed knockback");
+            assert_eq!(shadow.combat.health, slot.combat.health, "health is current before another tick or save");
+            assert_eq!(shadow.combat.dead, slot.combat.dead);
+            assert_eq!(shadow.local_seated, slot.seated());
+        }
+        outcomes.push(health - slot.combat.health);
+        let _ = mob;
+    }
+    assert!((outcomes[0] - outcomes[1]).abs() < 1e-4, "the same hit: {outcomes:?}");
+}
+
 /// The REAL `/time set` and `/time speed` commands (the chat box's command
 /// path, `submit_command_line`) on a solo-hosted world reach the authority
 /// through `write_clock`, and the next tick steps from them.

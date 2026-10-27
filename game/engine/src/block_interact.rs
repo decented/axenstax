@@ -178,73 +178,78 @@ fn pivot_owner_wolves(
     }
 }
 
-impl super::GameState {
-    /// P3 — tamed-wolf companion follow. For each tamed Wolf, map its owner
-    /// pubkey (`"local-player-{slot}"`) to that player's position and run the
-    /// pure [`crate::wolf::tick_wolf`], applying the resulting follow/stop
-    /// velocity. Runs after `tick_mob_ai` so it overrides the generic wander
-    /// for tamed wolves; untamed wolves are left to wander. Task 8 wires
-    /// `WolfAction::AttackTarget` into real movement + contact damage via
-    /// `tick_wolf_attack`; a resting/idle companion still just holds position.
-    pub(crate) fn tick_wolf_companions(&mut self, owners: &crate::tameable::OwnerBodies) {
-        use crate::entity::{MobKind, Position, Velocity};
-        use crate::wolf::{self, WolfAction, WolfData};
-        let tick = self.tick_counter;
-        // Gather tamed wolves first (immutable borrow), then apply (mutable),
-        // so we don't alias the ECS while reading.
-        let mut wolves: Vec<(hecs::Entity, glam::Vec3, WolfData)> = Vec::new();
-        for (id, (pos, kind, data)) in
-            self.ecs.query::<(&Position, &MobKind, &WolfData)>().iter()
-        {
-            if kind.0 == crate::mob::MobType::Wolf && data.is_tamed() {
-                wolves.push((id, pos.0, data.clone()));
-            }
+/// P3 — tamed-wolf companion follow (D4 slice 3: a free function, so the
+/// shared mob pass `sim_mobs::species` runs it on whichever side owns the
+/// world). For each tamed Wolf, map its owner
+/// pubkey (`"local-player-{slot}"`) to that player's position and run the
+/// pure [`crate::wolf::tick_wolf`], applying the resulting follow/stop
+/// velocity. Runs after `tick_mob_ai` so it overrides the generic wander
+/// for tamed wolves; untamed wolves are left to wander. Task 8 wires
+/// `WolfAction::AttackTarget` into real movement + contact damage via
+/// `tick_wolf_attack`; a resting/idle companion still just holds position.
+pub(crate) fn tick_wolf_companions(
+    ecs: &mut hecs::World,
+    owners: &crate::tameable::OwnerBodies,
+    tick: u64,
+) {
+    use crate::entity::{MobKind, Position, Velocity};
+    use crate::wolf::{self, WolfAction, WolfData};
+    // Gather tamed wolves first (immutable borrow), then apply (mutable),
+    // so we don't alias the ECS while reading.
+    let mut wolves: Vec<(hecs::Entity, glam::Vec3, WolfData)> = Vec::new();
+    for (id, (pos, kind, data)) in
+        ecs.query::<(&Position, &MobKind, &WolfData)>().iter()
+    {
+        if kind.0 == crate::mob::MobType::Wolf && data.is_tamed() {
+            wolves.push((id, pos.0, data.clone()));
         }
-        if wolves.is_empty() {
-            return;
+    }
+    if wolves.is_empty() {
+        return;
+    }
+    let speed = crate::mob::mob_def(crate::mob::MobType::Wolf).speed / 20.0;
+    for (id, pos, data) in wolves {
+        // MP-D2b — a joiner's wolf (owner key = its npub) follows that
+        // joiner's body, listed at its server slot on a lending host.
+        let owner_pos = owners.position_of(data.owner_pubkey()).map(|v| (v.x, v.y, v.z));
+        let (next, action) =
+            wolf::tick_wolf(&data, (pos.x, pos.y, pos.z), owner_pos, tick);
+        if let Ok(mut d) = ecs.get::<&mut WolfData>(id) {
+            *d = next;
         }
-        let speed = crate::mob::mob_def(crate::mob::MobType::Wolf).speed / 20.0;
-        for (id, pos, data) in wolves {
-            // MP-D2b — a joiner's wolf (owner key = its npub) follows that
-            // joiner's body, listed at its server slot on a lending host.
-            let owner_pos = owners.position_of(data.owner_pubkey()).map(|v| (v.x, v.y, v.z));
-            let (next, action) =
-                wolf::tick_wolf(&data, (pos.x, pos.y, pos.z), owner_pos, tick);
-            if let Ok(mut d) = self.ecs.get::<&mut WolfData>(id) {
-                *d = next;
+        match action {
+            WolfAction::MoveToward { x, z, .. } => {
+                let dir =
+                    glam::Vec3::new(x - pos.x, 0.0, z - pos.z).normalize_or_zero();
+                if let Ok(mut vel) = ecs.get::<&mut Velocity>(id) {
+                    vel.0.x = dir.x * speed;
+                    vel.0.z = dir.z * speed;
+                }
+                if dir.length_squared() > 1e-6
+                    && let Ok(mut ai) = ecs.get::<&mut crate::mob_ai::MobAi>(id) {
+                        ai.facing = dir.z.atan2(dir.x);
+                    }
             }
-            match action {
-                WolfAction::MoveToward { x, z, .. } => {
-                    let dir =
-                        glam::Vec3::new(x - pos.x, 0.0, z - pos.z).normalize_or_zero();
-                    if let Ok(mut vel) = self.ecs.get::<&mut Velocity>(id) {
-                        vel.0.x = dir.x * speed;
-                        vel.0.z = dir.z * speed;
-                    }
-                    if dir.length_squared() > 1e-6
-                        && let Ok(mut ai) = self.ecs.get::<&mut crate::mob_ai::MobAi>(id) {
-                            ai.facing = dir.z.atan2(dir.x);
-                        }
+            // At rest by the owner, sitting, or waiting out a stale
+            // command: stand still rather than drift on the leftover
+            // wander velocity.
+            WolfAction::NoOp | WolfAction::GiveUpFollow => {
+                if let Ok(mut vel) = ecs.get::<&mut Velocity>(id) {
+                    vel.0.x = 0.0;
+                    vel.0.z = 0.0;
                 }
-                // At rest by the owner, sitting, or waiting out a stale
-                // command: stand still rather than drift on the leftover
-                // wander velocity.
-                WolfAction::NoOp | WolfAction::GiveUpFollow => {
-                    if let Ok(mut vel) = self.ecs.get::<&mut Velocity>(id) {
-                        vel.0.x = 0.0;
-                        vel.0.z = 0.0;
-                    }
-                }
-                // Combat-assist / revenge: close on the target and land
-                // periodic contact damage. See `tick_wolf_attack` for the
-                // resolve-by-id + despawn-fallback details.
-                WolfAction::AttackTarget { entity_id } => {
-                    tick_wolf_attack(&mut self.ecs, id, pos, entity_id, speed * WOLF_ATTACK_SPEED_MULT, tick);
-                }
+            }
+            // Combat-assist / revenge: close on the target and land
+            // periodic contact damage. See `tick_wolf_attack` for the
+            // resolve-by-id + despawn-fallback details.
+            WolfAction::AttackTarget { entity_id } => {
+                tick_wolf_attack(ecs, id, pos, entity_id, speed * WOLF_ATTACK_SPEED_MULT, tick);
             }
         }
     }
+}
 
+impl super::GameState {
     /// Spec 40 §5 (2026-06-18) — reconcile the render-hidden set with the
     /// Workshop's currently blown-up blocks. A block being blown up must not
     /// also render in place (its original texture would z-fight through the cage

@@ -425,7 +425,9 @@ pub fn apply_joiner_blast_damage(
     }
     let c = (center.0 as f32 + 0.5, center.1 as f32 + 0.5, center.2 as f32 + 0.5);
     for (i, sp) in players.iter_mut().enumerate() {
-        if !sp.server_simulated || !sp.is_present_and_alive() {
+        // D4 slice 3 — a spawn-protected joiner is not blasted
+        // (`spawn_protection`), on every kind of world.
+        if !sp.server_simulated || !sp.is_present_and_alive() || crate::spawn_protection::shielded(sp) {
             continue;
         }
         let ep = (sp.player.pos.x, sp.player.pos.y, sp.player.pos.z);
