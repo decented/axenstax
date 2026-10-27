@@ -6156,7 +6156,6 @@ impl super::GameState {
             // it fights the server's own fire sim); its own bolts are not the
             // server's (no strike is on the wire; CLAUDE.md debt).
             crate::sim_clock::strike_roll(after_lock, self.tick_counter, has_weather)
-                .map(|h| (h, !joined))
         } else {
             None
         };
@@ -6171,12 +6170,13 @@ impl super::GameState {
         // so the world toggle/burnout/cap all apply (`sim_clock`). A lent
         // world's strikes are the server's: rolled in its phase, landed in
         // its world phase, presented after the window (`tick_hosted_server`).
-        if let Some((h, owns_fire)) = strike
+        if let Some(h) = strike
             && !self.players.is_empty()
         {
             let eye = self.players[0].player.eye_pos();
             let (cell, ground) = crate::sim_clock::strike_ground(&self.world, eye, h);
-            let ignited = owns_fire
+            // Only the sim owner lights it: never a joined client (FU4b).
+            let ignited = self.remote_client.is_none()
                 && crate::sim_clock::ignite_strike(&mut self.world, &mut self.fire, &self.registry, cell, self.tick_counter);
             self.present_strike(crate::sim_clock::StrikeEvent { hash: h, ground, cell, ignited });
             #[cfg(not(target_arch = "wasm32"))]

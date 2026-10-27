@@ -464,7 +464,7 @@ fn a_joiner_client_runs_no_machine_sim_that_pushes_edits_to_the_server() {
         ("crate::dispenser::tick_dispensers(", 4),
         ("crate::piston::tick_pistons(", 3),
         ("crate::power::tick_keg_fuses(", 4),
-        ("self.fire.ignite(&mut self.world, bx, surface_y + 1, bz", 3),
+        ("crate::sim_clock::ignite_strike(&mut self.world", 2),
         ("crate::furnace::tick_all(&mut self.world)", 3),
     ];
     for (needle, back) in sites {
