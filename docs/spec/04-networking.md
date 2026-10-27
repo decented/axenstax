@@ -4897,7 +4897,7 @@ refuses a damaged `world.dat` itself (leaving the world drops the server). Each 
 1. the host client ticks (`GameState::tick`) and sends its input on the local channel;
 2. `GameState::tick_hosted_server` opens the lend window —
    `LentSim::lend(hs, SimParts{world, ecs, water, lava, fire, leaf_decay, loaded_columns},
-   HostClock{world_time, tick_counter, weather}).tick()` — an RAII guard that swaps the seven
+   HostClock{..}).tick()` (the clock in `HostClock` is a seed only since D4 slice 2) — an RAII guard that swaps the seven
    fields into `hs.server` and back on drop (panic-safe);
 3. inside the window `HostedServer::tick` runs unchanged: accept, inbound packets (joiner edits
    validated against, and applied to, the host's world), `GameServer::tick`, the entity diff
@@ -4908,13 +4908,29 @@ refuses a damaged `world.dat` itself (leaving the world drops the server). Each 
 **Who runs what** is one table (`sim_lend::SimSystem::lent_owner`, Spec 01 §4.1.3): the server
 runs the block/entity housekeeping (fluids, fire, leaf decay, falling blocks, spawning, power,
 carts, item lifetimes, entity health timers, snowfall, rubber, salt lick, bounties, hideouts,
-the active-tick total `ActiveTicks`, and since C3c-3b laid Blueprints developing, `Develop`); the host client keeps its clock and weather (it owns `/time` and sleeping — the
-server reads `HostClock` and never advances it), the mob-locomotion block (species AI overrides
+the active-tick total `ActiveTicks`, and since C3c-3b laid Blueprints developing, `Develop`;
+since D4 slice 2 the clock and weather, below); the host client keeps the mob-locomotion block (species AI overrides
 sit between `mob_ai` and entity physics) with the joiners as extra targets, and the death sweep
 (single kill-attribution site). A per-world tally (`World::sim_tally`) checked after every lent
 tick (`SimTally::one_tick_faults`) catches a system that ran twice or not at all, and a
 GPU-free predicate-table test pins one owner per world in every mode (lent host, owning host,
 dedicated, single-player).
+
+**The clock and weather are the server's (D4 slice 2, 2026-10-27; no wire change).** A lent
+world's day clock, `tick_counter`, night calendar and weather window (with a trial's weather
+lock) are the embedded server's, stepped once per logical tick by one shared implementation
+(`sim_clock`, which standalone single-player and the dedicated server also call). The host
+client asks for the phase at the point of its tick where it used to step its own counter
+(`GameServer::run_clock_phase`, before the window, phase-token guarded — a second phase in one
+logical tick is refused) and reads the result back; `GameServer::tick` in the window never steps
+it again. `/time set|speed` and the local bed write the server's clock (`GameState::write_clock`);
+the lend no longer copies the client's clock over it (the server adopts its host's once, and
+again after a world change). Lightning is the server's: it rolls the strike, lands it round its
+lowest-index body in the world (the host's slot 0 on a host; a dedicated server's lowest-index
+joiner, else the world-spawn column) in a loaded column, lights and relights the fire and queues
+it for joiners; the host only presents the bolt after the window. Joiners still get the window
+as ticks-left on every `StateUpdate` (unchanged) and roll their own presentation-only bolts from
+it. Why no bump: no packet or save field changed. Spec 01 §4.1.3.
 
 **Columns round joiners (review fix 1).** The lent world is the only one the server simulates a
 joiner on, so the host client's streamer anchors on every connected joiner's server body too

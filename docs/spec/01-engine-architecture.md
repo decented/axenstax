@@ -882,8 +882,9 @@ host client's `GameState::tick`, sends its input, then opens the **lend
 window** (`GameState::tick_hosted_server`):
 
 ```rust
+hs.server.run_clock_phase(seed, has_weather, lock, &mut world.sim_tally); // in GameState::tick (D4 slice 2)
 LentSim::lend(hs, SimParts { world, ecs, water, lava, fire, leaf_decay, loaded_columns },
-              HostClock { world_time, tick_counter, weather }).tick();
+              HostClock { world_time, tick_counter, weather, reputation_offer }).tick();
 ```
 
 `sim_lend::LentSim` is an RAII guard: it `mem::swap`s those seven fields into
@@ -901,8 +902,8 @@ the server holds an empty world and ECS; nothing reads them.
 
 | Side when lent | Systems |
 |---|---|
-| **Server** (`GameServer::tick`, inside the window) | the active-tick total (`tick_world_clock`, `SimSystem::ActiveTicks` — not the day/night clock), mob spawning, falling blocks, fluids (water + lava + fire), leaf decay + saplings, hideout replenisher, snowfall, rubber cooldowns, salt lick, bounty rotation, item lifetimes, power, carts, entity `Health` timers |
-| **Host client** (`GameState::tick`) | `world_time` + `tick_counter` (it owns `/time`, sleeping), weather (and a trial's weather lock), the mob-locomotion block — brigand pre-pass → `mob_ai` → entity physics — and the death sweep (`despawn_dead`, the single kill-attribution site: kill counters, the Vow, raids, challenges) |
+| **Server** (`GameServer::tick`, inside the window; the clock phase just before it) | the day clock + `tick_counter` + night calendar (`SimSystem::Clock`) and the weather window, trial lock and lightning (`SimSystem::Weather`) — D4 slice 2, below; the active-tick total (`tick_world_clock`, `SimSystem::ActiveTicks` — not the day/night clock), mob spawning, falling blocks, fluids (water + lava + fire), leaf decay + saplings, hideout replenisher, snowfall, rubber cooldowns, salt lick, bounty rotation, item lifetimes, power, carts, entity `Health` timers |
+| **Host client** (`GameState::tick`) | the mob-locomotion block — brigand pre-pass → `mob_ai` → entity physics — and the death sweep (`despawn_dead`, the single kill-attribution site: kill counters, the Vow, raids, challenges) |
 
 Why the client keeps mob locomotion: the client's species AI, wolf follow,
 tethers, builder NPCs and Satoshi overwrite `mob_ai`'s velocities **between**
@@ -910,8 +911,54 @@ tethers, builder NPCs and Satoshi overwrite `mob_ai`'s velocities **between**
 erase every override. Its targets include the joiners' server-held bodies
 (`lent_joiner_positions`). It moves server-side, with the death sweep (behind
 a `SimEvents` outbox for attribution), as the client-only systems around it
-do (D4). A lent server never advances `world_time` (it reads the host's clock
-from `HostClock`) and never runs `despawn_dead`.
+do (D4). A lent server never runs `despawn_dead`.
+
+**The clock and weather (D4 slice 2, 2026-10-27).** One implementation,
+`sim_clock` (pure): the counter (`next_tick`), the day clock
+(`next_world_time`, at `world_time_step`), the night calendar, the weather
+window (`step_weather`: `weather::advance`, then a trial's `weather_lock`,
+released the tick it goes), the strike roll from the post-lock window, the
+strike's ground (`strike_ground`) and its fire + relight (`ignite_strike`).
+Exactly one owner per world:
+
+- *Standalone* (default, and web): the client, at the places it always ran
+  them — the counter at the top of `GameState::tick` (every reader below sees
+  the stepped tick), the day clock, weather and strike at the day-clock site.
+  Unchanged cadence; strikes land round player 0.
+- *Lent* (LAN / online host, `--solo-hosted`): the server's clock is the
+  world's. `GameState::tick` asks for the whole phase (`sim_clock::phase`:
+  counter, day clock, night calendar, weather, strike roll) at the point where
+  it used to step its own counter — `GameServer::run_clock_phase`, outside the
+  window, tallied on the host's world — and reads it back
+  (`ClockReadback` → its `world_time`, step, `tick_counter`, rain/storm, lock).
+  The world phase in the window does not step it again: the phase token
+  (`clock_phase_open`) is closed there (and by the lend's `Drop`), and a second
+  phase while it is open is refused, stepping and tallying nothing. The strike
+  the phase rolled lands in the window (`GameServer::land_strike`): round the
+  lowest-index body in the world — slot 0, the host's own player, so a host's
+  bolts land round it as before — in a loaded column only, the fire queued for
+  joiners and the host's remesh; the host only presents it after the window
+  (`take_lent_strike` → flash, bolt, thunder, relight remesh) and rolls none of
+  its own. The reputation day still counts on the host client from the
+  read-back step (its offer to the server unchanged).
+- *Dedicated* (and `--no-lend`): `GameServer::tick` runs the same phase inline.
+  A dedicated server's bolts land round its lowest-index body in the world,
+  else the centre of the world-spawn column (`sim_clock::strike_anchor`,
+  deterministic); an owning host's server rolls none (`rolls_lightning`: its
+  host client rolls them and sends the fires as edits).
+
+Writes: `/time set|speed` and the local bed go through one path,
+`GameState::write_clock` — the client's copy and, lent, the server's. A lent
+server adopts its host's clock once (`adopt_host_clock`, at its first phase or
+lend, and again after the host's `reset_for_world_change` calls
+`forget_host_clock` — a staged LAN server outlives the load); the lend never
+copies the client's clock over it again. Preserved: client start 7500, step 1
+on every world change, a dedicated server's 6000; the Workshop never has
+weather (and so no bolts); bed policy (local bed → 7000 + spawn + heal; a
+joiner's Sleep heals and sets its spawn once a night by the server's clock and
+never skips the night). A joined client still rolls its own bolts from its
+synced window for presentation only (no strike event on the wire). No wire or
+save field changed (`PROTOCOL_VERSION` unchanged).
 
 **Tripwire.** Each run is tallied on the world it ran on
 (`World::sim_tally`, never persisted). The game loop snapshots the tally
@@ -1063,8 +1110,9 @@ changes: ordinary single-player is still `GameState::tick` alone.
   mode); each caught-up tick is one whole logical tick of both halves.
 
 Remaining before the default flips (owner call after a playtest): D4 moves
-the client-owned rows (clock, weather, mob locomotion, the death sweep) into
-`GameServer::tick` behind a `SimEvents` outbox.
+the client-owned rows (mob locomotion, the death sweep) into
+`GameServer::tick` behind a `SimEvents` outbox. The clock and weather moved in
+D4 slice 2 (above).
 
 
 ### 4.2 Client Frame Loop
