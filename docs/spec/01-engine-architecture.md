@@ -942,13 +942,14 @@ Exactly one owner per world:
   its own. The reputation day still counts on the host client from the
   read-back step (its offer to the server unchanged).
 - *Dedicated* (and `--no-lend`): `GameServer::tick` runs the same phase inline.
-  A dedicated server's bolts land round its lowest-index body in the world,
-  else the centre of the world-spawn column (`sim_clock::strike_anchor`,
-  deterministic); an owning host's server rolls none (`rolls_lightning`: its
+  A dedicated server's bolts land round its lowest-index body in the world
+  (`sim_clock::strike_anchor`, deterministic); with nobody in the world it
+  throws none (an empty server must not burn its spawn overnight). An owning
+  host's server rolls none (`rolls_lightning`: its
   host client rolls them and sends the fires as edits).
 
-Writes: `/time set|speed` and the local bed go through one path,
-`GameState::write_clock` — the client's copy and, lent, the server's. A lent
+Writes: `/time set|speed` (the chat box's `GameState::submit_command_line`)
+and the local bed go through one path, `GameState::write_clock` — the client's copy and, lent, the server's. A lent
 server adopts its host's clock once (`adopt_host_clock`, at its first phase or
 lend, and again after the host's `reset_for_world_change` calls
 `forget_host_clock` — a staged LAN server outlives the load); the lend never

@@ -51,30 +51,20 @@ impl DayRig {
         let sp = &host.server.players[self.actor.as_ref().unwrap().i()];
         sp.gameplay_clock.project(&sp.personal.as_ref().unwrap().record().unwrap(), host.server.tick_counter).0
     }
+    /// The real chat command path (`GameState::submit_command_line`): on a
+    /// lent world `/time` lands on the authority through `write_clock` (D4
+    /// slice 2), so the next tick steps at the new speed.
     pub fn command(&mut self, line: &str) {
         let s = &mut self.game.state;
         let before = (s.tick_counter, s.world.total_ticks, s.reputation_day.remainder());
-        let mut log = Vec::new();
-        let (mut cheats, mut creative, mut broken) = (false, false, false);
-        let mut ctx = crate::commands::CommandContext {
-            world: &mut s.world,
-            world_time: &mut s.world_time,
-            world_time_step: &mut s.world_time_step,
-            is_creative: &mut s.is_creative,
-            play_mode: &mut s.play_mode,
-            seed: s.biome_gen.seed,
-            world_name: &s.world_name,
-            players: &mut s.players,
-            player_idx: 0,
-            op_level: crate::world_exit::local_command_op_level(s.remote_client.is_some()),
-            current_tick: s.tick_counter,
-            log: &mut log,
-            registry: &s.cmd_registry,
-            cheats_used_marker: &mut cheats,
-            ever_creative_marker: &mut creative,
-            pure_survival_broken_marker: &mut broken,
-        };
-        assert_eq!(crate::commands::dispatch(line, &mut ctx, &s.cmd_registry), crate::commands::CommandResult::Success);
+        s.submit_command_line(line.to_string());
+        if let Some(speed) = line.strip_prefix("/time speed ") {
+            let speed: u32 = speed.trim().parse().unwrap();
+            assert_eq!(s.world_time_step, speed, "the command ran");
+            if let Some(host) = s.hosted_server.as_ref().filter(|h| h.lends_host_world()) {
+                assert_eq!(host.server.world_time_step, speed, "a lent world's authority took it");
+            }
+        }
         assert_eq!(
             (s.tick_counter, s.world.total_ticks, s.reputation_day.remainder()),
             before,

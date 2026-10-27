@@ -4983,6 +4983,574 @@ impl super::GameState {
         self.weather_lock_applied.clone_from(&back.weather_lock_applied);
     }
 
+    /// A `/` line from the chat box: dispatched to the local command
+    /// registry, with its engine-side effects, the log, and the World
+    /// Integrity Ledger flags. D4 slice 2: `/time set|speed` reach the clock
+    /// through [`Self::write_clock`] (on a lent world, the server's).
+    pub(crate) fn submit_command_line(&mut self, line: String) {
+        self.chat.push_history(line.clone());
+        let mut cheats_marker = false;
+        let mut ever_creative_marker = false;
+        let mut pure_survival_broken_marker = false;
+        let mut local_log: Vec<crate::commands::ChatLine> = Vec::new();
+        let current_tick = self.tick_counter; // monotonic; safe across day-cycle wrap
+        let seed = self.biome_gen.seed;
+        let world_name = self.world_name.clone();
+        // D4 slice 2 — `/time set|speed` write the clock through the
+        // one write path (`write_clock`): on a lent world, the server's.
+        let (mut clock_time, mut clock_step) = (self.world_time, self.world_time_step);
+        {
+            let mut ctx = crate::commands::CommandContext {
+                world: &mut self.world,
+                world_time: &mut clock_time,
+                world_time_step: &mut clock_step,
+                is_creative: &mut self.is_creative,
+                play_mode: &mut self.play_mode,
+                seed,
+                world_name: &world_name,
+                players: &mut self.players,
+                player_idx: 0,
+                // Own world: op (chat only opens when the world's
+                // Commands setting allows). Someone else's world: an
+                // ordinary player — no cheat tier (audit P7).
+                op_level: crate::world_exit::local_command_op_level(
+                    self.remote_client.is_some(),
+                ),
+                current_tick,
+                log: &mut local_log,
+                registry: &self.cmd_registry,
+                cheats_used_marker: &mut cheats_marker,
+                ever_creative_marker: &mut ever_creative_marker,
+                pure_survival_broken_marker: &mut pure_survival_broken_marker,
+            };
+            let result = crate::commands::dispatch(&line, &mut ctx, &self.cmd_registry);
+            // Side-effect handling: dispatch result variants that
+            // need engine-side ECS work after the command returns.
+            match result {
+                crate::commands::CommandResult::KillAllMobs => {
+                    // Zero Health on every mob; the next despawn_dead
+                    // sweep will drop them + spawn drop entities normally.
+                    crate::world_exit::kill_all_mobs(&mut self.ecs);
+                    // Hosting with `--no-lend`: the server's own mob sim
+                    // is what joiners see (dual-sim), so clear it too. A
+                    // lent world (D1) has one ECS — this one.
+                    if let Some(hs) =
+                        self.hosted_server.as_mut().filter(|hs| !hs.lends_host_world())
+                    {
+                        crate::world_exit::kill_all_mobs(&mut hs.server.ecs);
+                    }
+                }
+                crate::commands::CommandResult::SpawnMob(kind, pos) => {
+                    crate::entity::spawn_mob(&mut self.ecs, kind, pos);
+                }
+                crate::commands::CommandResult::PlaceAuthoredMob(kind, pos) => {
+                    // #129 — place a permanent authored mob: spawn it +
+                    // tag `Authored` (no `Scattered`) so it persists in
+                    // the world and respawns on load (pin the donkey).
+                    let id = crate::entity::spawn_mob(&mut self.ecs, kind, pos);
+                    let _ = self.ecs.insert_one(id, crate::entity::Authored);
+                }
+                crate::commands::CommandResult::SpawnCart => {
+                    // Rail freight (Phase 1) — raycast from the
+                    // dispatching player (single-player always player 0,
+                    // matching the dispatch player_idx) and spawn a cart
+                    // on the targeted TRACK cell. Refuse anything else.
+                    let eye = self.players[0].player.eye_pos();
+                    let dir = self.players[0].camera.forward();
+                    match cast_ray(eye, dir, self.effective_reach(0), &self.world, &self.registry) {
+                        Some(hit) if hit.block == crate::rail::TRACK => {
+                            let cell = (
+                                hit.block_pos[0],
+                                hit.block_pos[1],
+                                hit.block_pos[2],
+                            );
+                            crate::cart::spawn_cart(&mut self.ecs, cell);
+                            self.chat.push_log(crate::commands::ChatLine::success(
+                                format!(
+                                    "Spawned cart on track at ({}, {}, {})",
+                                    cell.0, cell.1, cell.2
+                                ),
+                                self.tick_counter,
+                            ));
+                        }
+                        _ => {
+                            self.chat.push_log(crate::commands::ChatLine::error(
+                                "Look at a rail track to spawn a cart".to_string(),
+                                self.tick_counter,
+                            ));
+                        }
+                    }
+                }
+                crate::commands::CommandResult::ClearItems => {
+                    // Despawn every floating-item entity. Mob entities
+                    // are untouched (use /killall for those).
+                    let item_ids: Vec<hecs::Entity> = self.ecs
+                        .query::<&crate::entity::ItemEntity>()
+                        .iter()
+                        .map(|(id, _)| id)
+                        .collect();
+                    for id in item_ids {
+                        let _ = self.ecs.despawn(id);
+                    }
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                crate::commands::CommandResult::FeedbackQueued => {
+                    // Wind, Copper & Electricity wave §4 — `/bug` or
+                    // `/idea` went to the makers. The report is already
+                    // away (native outbox); this is the local Trial
+                    // counter, fired because the command hands off
+                    // before it returns.
+                    self.fire_challenge(crate::scenario::ChallengeEvent::SendFeedback);
+                }
+                crate::commands::CommandResult::RebuildRegion { min, max, changed } => {
+                    // #7 — a /we edit changed blocks in a cuboid; re-mesh
+                    // every chunk it touched so the world updates visually.
+                    for cc in crate::worldedit::affected_chunks(min, max) {
+                        self.mark_chunk_dirty(cc);
+                    }
+                    // Hosting: queue the region for broadcast (and, with
+                    // `--no-lend`, copy it into the server's own world —
+                    // a lent world (D1) already has it, being this one).
+                    // Not via `pending_block_changes` — that rides the
+                    // input packet, where an owning server's per-tick
+                    // budget (4) and reach gate would drop almost all of
+                    // a region. The broadcast is queued and drained a
+                    // batch a tick (one huge StateUpdate is dropped whole
+                    // by every joiner — review W3 B2).
+                    if let Some(hs) = self.hosted_server.as_mut() {
+                        if !hs.lends_host_world() {
+                            let edits =
+                                crate::world_exit::region_broadcast(&self.world, &changed);
+                            for bc in &edits {
+                                hs.server.world.apply_remote_block_change(bc);
+                            }
+                        }
+                        self.region_broadcast_queue.push(&changed);
+                    }
+                }
+                crate::commands::CommandResult::StartBuildGuide { name, origin, mode } => {
+                    // #9 — look the plan up in the registry, clone its cells,
+                    // and arm the build-guide (the validity was checked by the
+                    // command, so a miss here just no-ops).
+                    if let Some(entry) = self.world.plan_registry.find_by_plan_name(&name) {
+                        let cells = entry.plan.cells.clone();
+                        self.build_guide = Some(crate::build_guide::BuildGuide::new(
+                            name, origin, cells, mode,
+                        ));
+                    }
+                }
+                crate::commands::CommandResult::StopBuildGuide => {
+                    self.build_guide = None;
+                }
+                crate::commands::CommandResult::SetBuildGuideMode(mode) => {
+                    // Mode picker on a live guide — re-sequences in place;
+                    // the next verify pass walks the cursor back to the
+                    // first unfinished step, so no progress is lost.
+                    if let Some(guide) = self.build_guide.as_mut() {
+                        guide.set_mode(mode);
+                    }
+                }
+                crate::commands::CommandResult::StartScenario { def } => {
+                    // Goal 1 — provision + arm the scenario runner in the
+                    // current world. Factored into `start_scenario` so the
+                    // Stash Column arena launch (Prague) shares the exact
+                    // path (kit-all-players, resumable-persist, toast).
+                    // Same routing as the J board: inventory-touching
+                    // scenarios launch into their arena, never in place.
+                    self.launch_scenario_from_world(def);
+                }
+                crate::commands::CommandResult::ApplyWorkshopOverrides => {
+                    // Spec 40 — a reskin was pinned via `/ws pin` (power-user path),
+                    // or `/ws revert` cleared the player wardrobe. Rebuild the DERIVED
+                    // render registry from the three appearance layers and re-sync the
+                    // micro_registry so shape designs are never left stale.
+                    self.reapply_overrides();
+                    self.wardrobe_dirty = true;
+                    self.wardrobe_user_acted = true;
+                }
+                crate::commands::CommandResult::CommitLockedBalloon(id) => {
+                    // Spec 40 blow-up Phase 4 — `/ws pin` on a locked,
+                    // edited working copy routes here (the in-world bake),
+                    // the same path the P key uses.
+                    self.commit_locked_balloon(id);
+                }
+                crate::commands::CommandResult::ApplyWorkshopReshape { block_id, plan } => {
+                    // Spec 40 Phase F — bake the captured form into a 16³
+                    // coloured micro-model and append it as a SHAPE design in
+                    // this block's wardrobe (Phase 5), then apply it live.
+                    // Routing through the library (not a direct micro_registry
+                    // register) keeps the reshape from being clobbered by a later
+                    // `apply_active_designs` and lets the Wardrobe manage it.
+                    match crate::micro_model::MicroModelData::from_plan(
+                        &plan,
+                        crate::micro_model::MICRO_SCALE_16,
+                    ) {
+                        Ok(data) => {
+                            let base = crate::texture_gen::texture_count();
+                            let lib_len = self
+                                .world
+                                .player_wardrobe
+                                .set()
+                                .block_designs
+                                .iter()
+                                .find(|(b, _)| *b == block_id)
+                                .map(|(_, l)| l.designs.len())
+                                .unwrap_or(0);
+                            let design = crate::override_registry::NamedDesign {
+                                id: 0,
+                                name: format!("Design {}", lib_len + 1),
+                                faces: None,
+                                micro_model: Some(data),
+                                author_npub: String::new(),
+                                derivation_chain: vec![],
+                            };
+                            self.world
+                                .player_wardrobe
+                                .add_block_design(block_id, design, base);
+                            self.reapply_overrides();
+                            self.wardrobe_dirty = true;
+                            self.wardrobe_user_acted = true;
+                        }
+                        Err(e) => {
+                            log::warn!("workshop reshape bake refused: {e:?}");
+                        }
+                    }
+                }
+                crate::commands::CommandResult::OpenWorkshopPainter { target } => {
+                    // Seed the paint-grid from the asset's current textures
+                    // and open the panel (single editor, player 0). Free the
+                    // pointer so the grid is clickable.
+                    let textures = crate::texture_gen::generate_textures();
+                    self.workshop_painter.open_for(target, &textures, &self.registry);
+                    self.release_cursor();
+                }
+                crate::commands::CommandResult::SetWorkshopPlay(on) => {
+                    self.workshop_play = on;
+                }
+                crate::commands::CommandResult::OpenWardrobe => {
+                    // Workshop Phase 5 Task 6 — `/ws gallery` opens the
+                    // Wardrobe panel and releases the cursor.
+                    self.wardrobe_open = true;
+                    self.release_cursor();
+                }
+                crate::commands::CommandResult::StartTrial(_)
+                    if self.remote_client.is_some() =>
+                {
+                    // A Race teleports and places beacons locally —
+                    // never in someone else's world (review W3 S2).
+                    // `/trial` is op-only, so this is belt-and-braces.
+                    self.toast = Some((
+                        crate::world_exit::ARENA_ONLINE_REFUSAL.to_string(),
+                        Instant::now() + Duration::from_secs(5),
+                    ));
+                }
+                crate::commands::CommandResult::StartTrial(id) => {
+                    self.start_trial(&id);
+                }
+                crate::commands::CommandResult::StopTrial => {
+                    self.active_trial = None;
+                    self.toast = Some((
+                        "Trial cancelled.".to_string(),
+                        Instant::now() + std::time::Duration::from_secs(2),
+                    ));
+                }
+                // World chat §4.5 — the room lives on `HostedServer`,
+                // which `CommandContext` has no access to; these four
+                // arms are where the command's decision is actually
+                // applied. Native only in effect (no room, no chat at
+                // all, on web) — the wasm side just consumes the
+                // payload so the match stays exhaustive.
+                crate::commands::CommandResult::RoomJoin(link) => {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        if let Some(hs) = self.network_host_mut() {
+                            let name = hs.server_name.clone();
+                            match hs.room_join(&link, &name) {
+                                Ok(()) => {
+                                    self.chat.push_log(crate::commands::ChatLine::system(
+                                        "Room attached.".to_string(),
+                                        self.tick_counter,
+                                    ));
+                                }
+                                Err(e) => {
+                                    self.chat.push_log(crate::commands::ChatLine::system(
+                                        e.message(),
+                                        self.tick_counter,
+                                    ));
+                                }
+                            }
+                        } else {
+                            self.chat.push_log(crate::commands::ChatLine::system(
+                                "This world isn't hosted, so there's no room to attach."
+                                    .to_string(),
+                                self.tick_counter,
+                            ));
+                        }
+                    }
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        let _ = link;
+                    }
+                }
+                crate::commands::CommandResult::RoomLeave => {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if let Some(hs) = self.network_host_mut() {
+                        let line = match hs.room_leave() {
+                            Ok(()) => "Room detached.".to_string(),
+                            Err(e) => e.message(),
+                        };
+                        self.chat.push_log(crate::commands::ChatLine::system(
+                            line,
+                            self.tick_counter,
+                        ));
+                    }
+                }
+                crate::commands::CommandResult::RoomStatus => {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        let line = if let Some(hs) = self.network_host() {
+                            let st = hs.room_status();
+                            if st.attached {
+                                format!(
+                                    "Room attached — {} member(s) via {} relay(s) ({}).",
+                                    st.member_count,
+                                    st.relays.len(),
+                                    st.relays.join(", ")
+                                )
+                            } else {
+                                "No room attached. Use /room join <link> to attach one."
+                                    .to_string()
+                            }
+                        } else {
+                            "This world isn't hosted, so there's no room.".to_string()
+                        };
+                        self.chat.push_log(crate::commands::ChatLine::system(
+                            line,
+                            self.tick_counter,
+                        ));
+                    }
+                }
+                crate::commands::CommandResult::RoomInvite => {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        let line = match self.network_host().map(|hs| hs.room_status()) {
+                            Some(st) => match st.link {
+                                Some(link) => link,
+                                None => "No room attached. Use /room join <link> to attach one."
+                                    .to_string(),
+                            },
+                            None => "This world isn't hosted, so there's no room.".to_string(),
+                        };
+                        self.chat.push_log(crate::commands::ChatLine::system(
+                            line,
+                            self.tick_counter,
+                        ));
+                    }
+                }
+                crate::commands::CommandResult::OnlineStatus => {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        match self.online_host.as_ref() {
+                            Some(h) => {
+                                let (up, total) = h.relays_connected();
+                                let summary = crate::friends_ui::reachability_summary(
+                                    h.candidates(),
+                                );
+                                let link = h.invite_link(wardrobe_now()).unwrap_or_else(str::to_string);
+                                self.chat.push_log(crate::commands::ChatLine::system(
+                                    summary,
+                                    self.tick_counter,
+                                ));
+                                self.chat.push_log(crate::commands::ChatLine::system(
+                                    format!("Relays connected: {up}/{total}"),
+                                    self.tick_counter,
+                                ));
+                                self.chat.push_log(crate::commands::ChatLine::system(
+                                    link,
+                                    self.tick_counter,
+                                ));
+                                self.show_online_panel = true;
+                            }
+                            None => self.chat.push_log(crate::commands::ChatLine::system(
+                                "This world isn\u{2019}t being hosted online. Open it from \
+                                 the lobby with \u{2018}Host online\u{2019}.",
+                                self.tick_counter,
+                            )),
+                        }
+                    }
+                }
+                crate::commands::CommandResult::OnlineCopyInvite => {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        match self.online_host.as_ref() {
+                            Some(h) => {
+                                match h.invite_link(wardrobe_now()) {
+                                    Ok(link) => {
+                                        self.pending_clipboard = Some(link);
+                                        self.chat.push_log(crate::commands::ChatLine::success("Invite link copied.", self.tick_counter));
+                                    }
+                                    Err(why) => self.chat.push_log(crate::commands::ChatLine::system(why, self.tick_counter)),
+                                }
+                            }
+                            None => self.chat.push_log(crate::commands::ChatLine::system(
+                                "This world isn\u{2019}t being hosted online.",
+                                self.tick_counter,
+                            )),
+                        }
+                    }
+                }
+                crate::commands::CommandResult::PublishOverrideSet { name, bytes } => {
+                    // Phase 3 — coverage-challenge WorkshopPublish event (the player
+                    // confirmed a share; fires on both targets regardless of Beacon outcome).
+                    if let Some(scenario) = &mut self.scenario {
+                        scenario.on_event(crate::scenario::ChallengeEvent::WorkshopPublish);
+                    }
+                    // Spec 40 Phase D2 — the player confirmed a PUBLIC share. Live Beacon is
+                    // PWA-only (CONSUMING.md §5), like cloud save: fire the signed publish from
+                    // the browser; the native build only ships the baked official catalogue.
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        if crate::open_stash::beacon_available() {
+                            wasm_bindgen_futures::spawn_local(async move {
+                                match crate::open_stash::beacon_publish(&name, "override-set", &bytes).await {
+                                    Ok(hash) => log::info!("published override set '{name}' -> {hash}"),
+                                    Err(e) => log::warn!("publish '{name}' failed: {e}"),
+                                }
+                            });
+                        } else {
+                            log::warn!("publish: Beacon unavailable — sign in to share");
+                        }
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        let _ = bytes;
+                        self.toast = Some((
+                            format!("Sharing “{name}” is web-only — open the game in your browser to publish."),
+                            Instant::now() + std::time::Duration::from_secs(5),
+                        ));
+                    }
+                }
+                crate::commands::CommandResult::BeaconFollow { pubkey_hex, follow } => {
+                    // Spec 40 Phase D3 — toggle a follow on the player's own Beacon
+                    // contact list (PWA-only; native ignores). Fire-and-forget.
+                    #[cfg(target_arch = "wasm32")]
+                    if crate::open_stash::beacon_available() {
+                        wasm_bindgen_futures::spawn_local(async move {
+                            let r = if follow {
+                                crate::open_stash::beacon_follow(&pubkey_hex).await
+                            } else {
+                                crate::open_stash::beacon_unfollow(&pubkey_hex).await
+                            };
+                            if let Err(e) = r {
+                                log::warn!("follow toggle failed: {e}");
+                            }
+                        });
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        let _ = (pubkey_hex, follow);
+                    }
+                }
+                crate::commands::CommandResult::BeaconFollowing => {
+                    // Spec 40 Phase D3 — list who the player follows (npub, display-ready).
+                    #[cfg(target_arch = "wasm32")]
+                    if crate::open_stash::beacon_available() {
+                        let slot = self.beacon_following_slot.clone();
+                        wasm_bindgen_futures::spawn_local(async move {
+                            let r = crate::open_stash::beacon_following().await.map(|hexes| {
+                                hexes.iter().map(|h| crate::npub::hex_to_npub(h)).collect()
+                            });
+                            *slot.borrow_mut() = Some(r);
+                        });
+                    }
+                }
+                crate::commands::CommandResult::BeaconBrowse { pubkey_hex } => {
+                    // Spec 40 Phase D3 — list override-set shares from one named
+                    // publisher, or from everyone the player follows.
+                    #[cfg(target_arch = "wasm32")]
+                    if crate::open_stash::beacon_available() {
+                        let slot = self.beacon_browse_slot.clone();
+                        wasm_bindgen_futures::spawn_local(async move {
+                            let publishers: Vec<String> = match pubkey_hex {
+                                Some(p) => vec![p],
+                                None => crate::open_stash::beacon_following()
+                                    .await
+                                    .unwrap_or_default(),
+                            };
+                            let mut rows = Vec::new();
+                            for pk in publishers {
+                                if let Ok(items) = crate::open_stash::beacon_list(&pk).await {
+                                    let npub = crate::npub::hex_to_npub(&pk);
+                                    for it in items
+                                        .into_iter()
+                                        .filter(|i| i.content_type == "override-set")
+                                    {
+                                        rows.push(crate::world::BrowseEntry {
+                                            label: it.name,
+                                            author_npub: npub.clone(),
+                                            blob_hash: it.blob_hash,
+                                            size: it.size,
+                                        });
+                                    }
+                                }
+                            }
+                            *slot.borrow_mut() = Some(Ok(rows));
+                        });
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        let _ = pubkey_hex;
+                    }
+                }
+                crate::commands::CommandResult::BeaconAdopt { blob_hash } => {
+                    // Spec 40 Phase D3 — download the chosen shared blob; the drain
+                    // applies it beneath the texture-array cap + re-meshes.
+                    #[cfg(target_arch = "wasm32")]
+                    if crate::open_stash::beacon_available() {
+                        let slot = self.beacon_adopt_slot.clone();
+                        wasm_bindgen_futures::spawn_local(async move {
+                            *slot.borrow_mut() =
+                                Some(crate::open_stash::beacon_download(&blob_hash).await);
+                        });
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        let _ = blob_hash;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if (clock_time, clock_step) != (self.world_time, self.world_time_step) {
+            self.write_clock(clock_time, clock_step);
+        }
+        self.chat.extend_log(local_log);
+        self.chat.close();
+        // Persist World Integrity Ledger flags if any cheat ran. Both
+        // targets: on web `save_world_meta` writes the meta cache that
+        // `save_world` packs into the blob, so `/gm c` and the ledger
+        // flags survive a reload. Never into a joined session's
+        // (nonexistent) local save.
+        if self.persists_locally()
+            && (cheats_marker || ever_creative_marker || pure_survival_broken_marker)
+        {
+            let mut meta = crate::save::load_world_meta(&self.world_name);
+            if cheats_marker {
+                meta.cheats_used = true;
+            }
+            if ever_creative_marker {
+                meta.ever_creative = true;
+            }
+            if pure_survival_broken_marker {
+                meta.pure_survival = false;
+            }
+            meta.game_mode = self.play_mode.as_meta_str().to_string();
+            if let Err(e) = crate::save::save_world_meta(&self.world_name, &meta) {
+                log::warn!("Failed to persist world meta after command: {e}");
+            }
+        }
+    }
+
     /// D4 slice 2 — the ONE write path for the day clock outside the tick
     /// (`/time set`, `/time speed`, the bed): on a lent world the
     /// authority's clock — which the next phase steps from and reads back —
@@ -21425,567 +21993,7 @@ impl super::GameState {
                 self.chat.close();
             }
             crate::chat_ui::ChatAction::Submit(line) => {
-                self.chat.push_history(line.clone());
-                let mut cheats_marker = false;
-                let mut ever_creative_marker = false;
-                let mut pure_survival_broken_marker = false;
-                let mut local_log: Vec<crate::commands::ChatLine> = Vec::new();
-                let current_tick = self.tick_counter; // monotonic; safe across day-cycle wrap
-                let seed = self.biome_gen.seed;
-                let world_name = self.world_name.clone();
-                // D4 slice 2 — `/time set|speed` write the clock through the
-                // one write path (`write_clock`): on a lent world, the server's.
-                let (mut clock_time, mut clock_step) = (self.world_time, self.world_time_step);
-                {
-                    let mut ctx = crate::commands::CommandContext {
-                        world: &mut self.world,
-                        world_time: &mut clock_time,
-                        world_time_step: &mut clock_step,
-                        is_creative: &mut self.is_creative,
-                        play_mode: &mut self.play_mode,
-                        seed,
-                        world_name: &world_name,
-                        players: &mut self.players,
-                        player_idx: 0,
-                        // Own world: op (chat only opens when the world's
-                        // Commands setting allows). Someone else's world: an
-                        // ordinary player — no cheat tier (audit P7).
-                        op_level: crate::world_exit::local_command_op_level(
-                            self.remote_client.is_some(),
-                        ),
-                        current_tick,
-                        log: &mut local_log,
-                        registry: &self.cmd_registry,
-                        cheats_used_marker: &mut cheats_marker,
-                        ever_creative_marker: &mut ever_creative_marker,
-                        pure_survival_broken_marker: &mut pure_survival_broken_marker,
-                    };
-                    let result = crate::commands::dispatch(&line, &mut ctx, &self.cmd_registry);
-                    // Side-effect handling: dispatch result variants that
-                    // need engine-side ECS work after the command returns.
-                    match result {
-                        crate::commands::CommandResult::KillAllMobs => {
-                            // Zero Health on every mob; the next despawn_dead
-                            // sweep will drop them + spawn drop entities normally.
-                            crate::world_exit::kill_all_mobs(&mut self.ecs);
-                            // Hosting with `--no-lend`: the server's own mob sim
-                            // is what joiners see (dual-sim), so clear it too. A
-                            // lent world (D1) has one ECS — this one.
-                            if let Some(hs) =
-                                self.hosted_server.as_mut().filter(|hs| !hs.lends_host_world())
-                            {
-                                crate::world_exit::kill_all_mobs(&mut hs.server.ecs);
-                            }
-                        }
-                        crate::commands::CommandResult::SpawnMob(kind, pos) => {
-                            crate::entity::spawn_mob(&mut self.ecs, kind, pos);
-                        }
-                        crate::commands::CommandResult::PlaceAuthoredMob(kind, pos) => {
-                            // #129 — place a permanent authored mob: spawn it +
-                            // tag `Authored` (no `Scattered`) so it persists in
-                            // the world and respawns on load (pin the donkey).
-                            let id = crate::entity::spawn_mob(&mut self.ecs, kind, pos);
-                            let _ = self.ecs.insert_one(id, crate::entity::Authored);
-                        }
-                        crate::commands::CommandResult::SpawnCart => {
-                            // Rail freight (Phase 1) — raycast from the
-                            // dispatching player (single-player always player 0,
-                            // matching the dispatch player_idx) and spawn a cart
-                            // on the targeted TRACK cell. Refuse anything else.
-                            let eye = self.players[0].player.eye_pos();
-                            let dir = self.players[0].camera.forward();
-                            match cast_ray(eye, dir, self.effective_reach(0), &self.world, &self.registry) {
-                                Some(hit) if hit.block == crate::rail::TRACK => {
-                                    let cell = (
-                                        hit.block_pos[0],
-                                        hit.block_pos[1],
-                                        hit.block_pos[2],
-                                    );
-                                    crate::cart::spawn_cart(&mut self.ecs, cell);
-                                    self.chat.push_log(crate::commands::ChatLine::success(
-                                        format!(
-                                            "Spawned cart on track at ({}, {}, {})",
-                                            cell.0, cell.1, cell.2
-                                        ),
-                                        self.tick_counter,
-                                    ));
-                                }
-                                _ => {
-                                    self.chat.push_log(crate::commands::ChatLine::error(
-                                        "Look at a rail track to spawn a cart".to_string(),
-                                        self.tick_counter,
-                                    ));
-                                }
-                            }
-                        }
-                        crate::commands::CommandResult::ClearItems => {
-                            // Despawn every floating-item entity. Mob entities
-                            // are untouched (use /killall for those).
-                            let item_ids: Vec<hecs::Entity> = self.ecs
-                                .query::<&crate::entity::ItemEntity>()
-                                .iter()
-                                .map(|(id, _)| id)
-                                .collect();
-                            for id in item_ids {
-                                let _ = self.ecs.despawn(id);
-                            }
-                        }
-                        #[cfg(not(target_arch = "wasm32"))]
-                        crate::commands::CommandResult::FeedbackQueued => {
-                            // Wind, Copper & Electricity wave §4 — `/bug` or
-                            // `/idea` went to the makers. The report is already
-                            // away (native outbox); this is the local Trial
-                            // counter, fired because the command hands off
-                            // before it returns.
-                            self.fire_challenge(crate::scenario::ChallengeEvent::SendFeedback);
-                        }
-                        crate::commands::CommandResult::RebuildRegion { min, max, changed } => {
-                            // #7 — a /we edit changed blocks in a cuboid; re-mesh
-                            // every chunk it touched so the world updates visually.
-                            for cc in crate::worldedit::affected_chunks(min, max) {
-                                self.mark_chunk_dirty(cc);
-                            }
-                            // Hosting: queue the region for broadcast (and, with
-                            // `--no-lend`, copy it into the server's own world —
-                            // a lent world (D1) already has it, being this one).
-                            // Not via `pending_block_changes` — that rides the
-                            // input packet, where an owning server's per-tick
-                            // budget (4) and reach gate would drop almost all of
-                            // a region. The broadcast is queued and drained a
-                            // batch a tick (one huge StateUpdate is dropped whole
-                            // by every joiner — review W3 B2).
-                            if let Some(hs) = self.hosted_server.as_mut() {
-                                if !hs.lends_host_world() {
-                                    let edits =
-                                        crate::world_exit::region_broadcast(&self.world, &changed);
-                                    for bc in &edits {
-                                        hs.server.world.apply_remote_block_change(bc);
-                                    }
-                                }
-                                self.region_broadcast_queue.push(&changed);
-                            }
-                        }
-                        crate::commands::CommandResult::StartBuildGuide { name, origin, mode } => {
-                            // #9 — look the plan up in the registry, clone its cells,
-                            // and arm the build-guide (the validity was checked by the
-                            // command, so a miss here just no-ops).
-                            if let Some(entry) = self.world.plan_registry.find_by_plan_name(&name) {
-                                let cells = entry.plan.cells.clone();
-                                self.build_guide = Some(crate::build_guide::BuildGuide::new(
-                                    name, origin, cells, mode,
-                                ));
-                            }
-                        }
-                        crate::commands::CommandResult::StopBuildGuide => {
-                            self.build_guide = None;
-                        }
-                        crate::commands::CommandResult::SetBuildGuideMode(mode) => {
-                            // Mode picker on a live guide — re-sequences in place;
-                            // the next verify pass walks the cursor back to the
-                            // first unfinished step, so no progress is lost.
-                            if let Some(guide) = self.build_guide.as_mut() {
-                                guide.set_mode(mode);
-                            }
-                        }
-                        crate::commands::CommandResult::StartScenario { def } => {
-                            // Goal 1 — provision + arm the scenario runner in the
-                            // current world. Factored into `start_scenario` so the
-                            // Stash Column arena launch (Prague) shares the exact
-                            // path (kit-all-players, resumable-persist, toast).
-                            // Same routing as the J board: inventory-touching
-                            // scenarios launch into their arena, never in place.
-                            self.launch_scenario_from_world(def);
-                        }
-                        crate::commands::CommandResult::ApplyWorkshopOverrides => {
-                            // Spec 40 — a reskin was pinned via `/ws pin` (power-user path),
-                            // or `/ws revert` cleared the player wardrobe. Rebuild the DERIVED
-                            // render registry from the three appearance layers and re-sync the
-                            // micro_registry so shape designs are never left stale.
-                            self.reapply_overrides();
-                            self.wardrobe_dirty = true;
-                            self.wardrobe_user_acted = true;
-                        }
-                        crate::commands::CommandResult::CommitLockedBalloon(id) => {
-                            // Spec 40 blow-up Phase 4 — `/ws pin` on a locked,
-                            // edited working copy routes here (the in-world bake),
-                            // the same path the P key uses.
-                            self.commit_locked_balloon(id);
-                        }
-                        crate::commands::CommandResult::ApplyWorkshopReshape { block_id, plan } => {
-                            // Spec 40 Phase F — bake the captured form into a 16³
-                            // coloured micro-model and append it as a SHAPE design in
-                            // this block's wardrobe (Phase 5), then apply it live.
-                            // Routing through the library (not a direct micro_registry
-                            // register) keeps the reshape from being clobbered by a later
-                            // `apply_active_designs` and lets the Wardrobe manage it.
-                            match crate::micro_model::MicroModelData::from_plan(
-                                &plan,
-                                crate::micro_model::MICRO_SCALE_16,
-                            ) {
-                                Ok(data) => {
-                                    let base = crate::texture_gen::texture_count();
-                                    let lib_len = self
-                                        .world
-                                        .player_wardrobe
-                                        .set()
-                                        .block_designs
-                                        .iter()
-                                        .find(|(b, _)| *b == block_id)
-                                        .map(|(_, l)| l.designs.len())
-                                        .unwrap_or(0);
-                                    let design = crate::override_registry::NamedDesign {
-                                        id: 0,
-                                        name: format!("Design {}", lib_len + 1),
-                                        faces: None,
-                                        micro_model: Some(data),
-                                        author_npub: String::new(),
-                                        derivation_chain: vec![],
-                                    };
-                                    self.world
-                                        .player_wardrobe
-                                        .add_block_design(block_id, design, base);
-                                    self.reapply_overrides();
-                                    self.wardrobe_dirty = true;
-                                    self.wardrobe_user_acted = true;
-                                }
-                                Err(e) => {
-                                    log::warn!("workshop reshape bake refused: {e:?}");
-                                }
-                            }
-                        }
-                        crate::commands::CommandResult::OpenWorkshopPainter { target } => {
-                            // Seed the paint-grid from the asset's current textures
-                            // and open the panel (single editor, player 0). Free the
-                            // pointer so the grid is clickable.
-                            let textures = crate::texture_gen::generate_textures();
-                            self.workshop_painter.open_for(target, &textures, &self.registry);
-                            self.release_cursor();
-                        }
-                        crate::commands::CommandResult::SetWorkshopPlay(on) => {
-                            self.workshop_play = on;
-                        }
-                        crate::commands::CommandResult::OpenWardrobe => {
-                            // Workshop Phase 5 Task 6 — `/ws gallery` opens the
-                            // Wardrobe panel and releases the cursor.
-                            self.wardrobe_open = true;
-                            self.release_cursor();
-                        }
-                        crate::commands::CommandResult::StartTrial(_)
-                            if self.remote_client.is_some() =>
-                        {
-                            // A Race teleports and places beacons locally —
-                            // never in someone else's world (review W3 S2).
-                            // `/trial` is op-only, so this is belt-and-braces.
-                            self.toast = Some((
-                                crate::world_exit::ARENA_ONLINE_REFUSAL.to_string(),
-                                Instant::now() + Duration::from_secs(5),
-                            ));
-                        }
-                        crate::commands::CommandResult::StartTrial(id) => {
-                            self.start_trial(&id);
-                        }
-                        crate::commands::CommandResult::StopTrial => {
-                            self.active_trial = None;
-                            self.toast = Some((
-                                "Trial cancelled.".to_string(),
-                                Instant::now() + std::time::Duration::from_secs(2),
-                            ));
-                        }
-                        // World chat §4.5 — the room lives on `HostedServer`,
-                        // which `CommandContext` has no access to; these four
-                        // arms are where the command's decision is actually
-                        // applied. Native only in effect (no room, no chat at
-                        // all, on web) — the wasm side just consumes the
-                        // payload so the match stays exhaustive.
-                        crate::commands::CommandResult::RoomJoin(link) => {
-                            #[cfg(not(target_arch = "wasm32"))]
-                            {
-                                if let Some(hs) = self.network_host_mut() {
-                                    let name = hs.server_name.clone();
-                                    match hs.room_join(&link, &name) {
-                                        Ok(()) => {
-                                            self.chat.push_log(crate::commands::ChatLine::system(
-                                                "Room attached.".to_string(),
-                                                self.tick_counter,
-                                            ));
-                                        }
-                                        Err(e) => {
-                                            self.chat.push_log(crate::commands::ChatLine::system(
-                                                e.message(),
-                                                self.tick_counter,
-                                            ));
-                                        }
-                                    }
-                                } else {
-                                    self.chat.push_log(crate::commands::ChatLine::system(
-                                        "This world isn't hosted, so there's no room to attach."
-                                            .to_string(),
-                                        self.tick_counter,
-                                    ));
-                                }
-                            }
-                            #[cfg(target_arch = "wasm32")]
-                            {
-                                let _ = link;
-                            }
-                        }
-                        crate::commands::CommandResult::RoomLeave => {
-                            #[cfg(not(target_arch = "wasm32"))]
-                            if let Some(hs) = self.network_host_mut() {
-                                let line = match hs.room_leave() {
-                                    Ok(()) => "Room detached.".to_string(),
-                                    Err(e) => e.message(),
-                                };
-                                self.chat.push_log(crate::commands::ChatLine::system(
-                                    line,
-                                    self.tick_counter,
-                                ));
-                            }
-                        }
-                        crate::commands::CommandResult::RoomStatus => {
-                            #[cfg(not(target_arch = "wasm32"))]
-                            {
-                                let line = if let Some(hs) = self.network_host() {
-                                    let st = hs.room_status();
-                                    if st.attached {
-                                        format!(
-                                            "Room attached — {} member(s) via {} relay(s) ({}).",
-                                            st.member_count,
-                                            st.relays.len(),
-                                            st.relays.join(", ")
-                                        )
-                                    } else {
-                                        "No room attached. Use /room join <link> to attach one."
-                                            .to_string()
-                                    }
-                                } else {
-                                    "This world isn't hosted, so there's no room.".to_string()
-                                };
-                                self.chat.push_log(crate::commands::ChatLine::system(
-                                    line,
-                                    self.tick_counter,
-                                ));
-                            }
-                        }
-                        crate::commands::CommandResult::RoomInvite => {
-                            #[cfg(not(target_arch = "wasm32"))]
-                            {
-                                let line = match self.network_host().map(|hs| hs.room_status()) {
-                                    Some(st) => match st.link {
-                                        Some(link) => link,
-                                        None => "No room attached. Use /room join <link> to attach one."
-                                            .to_string(),
-                                    },
-                                    None => "This world isn't hosted, so there's no room.".to_string(),
-                                };
-                                self.chat.push_log(crate::commands::ChatLine::system(
-                                    line,
-                                    self.tick_counter,
-                                ));
-                            }
-                        }
-                        crate::commands::CommandResult::OnlineStatus => {
-                            #[cfg(not(target_arch = "wasm32"))]
-                            {
-                                match self.online_host.as_ref() {
-                                    Some(h) => {
-                                        let (up, total) = h.relays_connected();
-                                        let summary = crate::friends_ui::reachability_summary(
-                                            h.candidates(),
-                                        );
-                                        let link = h.invite_link(wardrobe_now()).unwrap_or_else(str::to_string);
-                                        self.chat.push_log(crate::commands::ChatLine::system(
-                                            summary,
-                                            self.tick_counter,
-                                        ));
-                                        self.chat.push_log(crate::commands::ChatLine::system(
-                                            format!("Relays connected: {up}/{total}"),
-                                            self.tick_counter,
-                                        ));
-                                        self.chat.push_log(crate::commands::ChatLine::system(
-                                            link,
-                                            self.tick_counter,
-                                        ));
-                                        self.show_online_panel = true;
-                                    }
-                                    None => self.chat.push_log(crate::commands::ChatLine::system(
-                                        "This world isn\u{2019}t being hosted online. Open it from \
-                                         the lobby with \u{2018}Host online\u{2019}.",
-                                        self.tick_counter,
-                                    )),
-                                }
-                            }
-                        }
-                        crate::commands::CommandResult::OnlineCopyInvite => {
-                            #[cfg(not(target_arch = "wasm32"))]
-                            {
-                                match self.online_host.as_ref() {
-                                    Some(h) => {
-                                        match h.invite_link(wardrobe_now()) {
-                                            Ok(link) => {
-                                                self.pending_clipboard = Some(link);
-                                                self.chat.push_log(crate::commands::ChatLine::success("Invite link copied.", self.tick_counter));
-                                            }
-                                            Err(why) => self.chat.push_log(crate::commands::ChatLine::system(why, self.tick_counter)),
-                                        }
-                                    }
-                                    None => self.chat.push_log(crate::commands::ChatLine::system(
-                                        "This world isn\u{2019}t being hosted online.",
-                                        self.tick_counter,
-                                    )),
-                                }
-                            }
-                        }
-                        crate::commands::CommandResult::PublishOverrideSet { name, bytes } => {
-                            // Phase 3 — coverage-challenge WorkshopPublish event (the player
-                            // confirmed a share; fires on both targets regardless of Beacon outcome).
-                            if let Some(scenario) = &mut self.scenario {
-                                scenario.on_event(crate::scenario::ChallengeEvent::WorkshopPublish);
-                            }
-                            // Spec 40 Phase D2 — the player confirmed a PUBLIC share. Live Beacon is
-                            // PWA-only (CONSUMING.md §5), like cloud save: fire the signed publish from
-                            // the browser; the native build only ships the baked official catalogue.
-                            #[cfg(target_arch = "wasm32")]
-                            {
-                                if crate::open_stash::beacon_available() {
-                                    wasm_bindgen_futures::spawn_local(async move {
-                                        match crate::open_stash::beacon_publish(&name, "override-set", &bytes).await {
-                                            Ok(hash) => log::info!("published override set '{name}' -> {hash}"),
-                                            Err(e) => log::warn!("publish '{name}' failed: {e}"),
-                                        }
-                                    });
-                                } else {
-                                    log::warn!("publish: Beacon unavailable — sign in to share");
-                                }
-                            }
-                            #[cfg(not(target_arch = "wasm32"))]
-                            {
-                                let _ = bytes;
-                                self.toast = Some((
-                                    format!("Sharing “{name}” is web-only — open the game in your browser to publish."),
-                                    Instant::now() + std::time::Duration::from_secs(5),
-                                ));
-                            }
-                        }
-                        crate::commands::CommandResult::BeaconFollow { pubkey_hex, follow } => {
-                            // Spec 40 Phase D3 — toggle a follow on the player's own Beacon
-                            // contact list (PWA-only; native ignores). Fire-and-forget.
-                            #[cfg(target_arch = "wasm32")]
-                            if crate::open_stash::beacon_available() {
-                                wasm_bindgen_futures::spawn_local(async move {
-                                    let r = if follow {
-                                        crate::open_stash::beacon_follow(&pubkey_hex).await
-                                    } else {
-                                        crate::open_stash::beacon_unfollow(&pubkey_hex).await
-                                    };
-                                    if let Err(e) = r {
-                                        log::warn!("follow toggle failed: {e}");
-                                    }
-                                });
-                            }
-                            #[cfg(not(target_arch = "wasm32"))]
-                            {
-                                let _ = (pubkey_hex, follow);
-                            }
-                        }
-                        crate::commands::CommandResult::BeaconFollowing => {
-                            // Spec 40 Phase D3 — list who the player follows (npub, display-ready).
-                            #[cfg(target_arch = "wasm32")]
-                            if crate::open_stash::beacon_available() {
-                                let slot = self.beacon_following_slot.clone();
-                                wasm_bindgen_futures::spawn_local(async move {
-                                    let r = crate::open_stash::beacon_following().await.map(|hexes| {
-                                        hexes.iter().map(|h| crate::npub::hex_to_npub(h)).collect()
-                                    });
-                                    *slot.borrow_mut() = Some(r);
-                                });
-                            }
-                        }
-                        crate::commands::CommandResult::BeaconBrowse { pubkey_hex } => {
-                            // Spec 40 Phase D3 — list override-set shares from one named
-                            // publisher, or from everyone the player follows.
-                            #[cfg(target_arch = "wasm32")]
-                            if crate::open_stash::beacon_available() {
-                                let slot = self.beacon_browse_slot.clone();
-                                wasm_bindgen_futures::spawn_local(async move {
-                                    let publishers: Vec<String> = match pubkey_hex {
-                                        Some(p) => vec![p],
-                                        None => crate::open_stash::beacon_following()
-                                            .await
-                                            .unwrap_or_default(),
-                                    };
-                                    let mut rows = Vec::new();
-                                    for pk in publishers {
-                                        if let Ok(items) = crate::open_stash::beacon_list(&pk).await {
-                                            let npub = crate::npub::hex_to_npub(&pk);
-                                            for it in items
-                                                .into_iter()
-                                                .filter(|i| i.content_type == "override-set")
-                                            {
-                                                rows.push(crate::world::BrowseEntry {
-                                                    label: it.name,
-                                                    author_npub: npub.clone(),
-                                                    blob_hash: it.blob_hash,
-                                                    size: it.size,
-                                                });
-                                            }
-                                        }
-                                    }
-                                    *slot.borrow_mut() = Some(Ok(rows));
-                                });
-                            }
-                            #[cfg(not(target_arch = "wasm32"))]
-                            {
-                                let _ = pubkey_hex;
-                            }
-                        }
-                        crate::commands::CommandResult::BeaconAdopt { blob_hash } => {
-                            // Spec 40 Phase D3 — download the chosen shared blob; the drain
-                            // applies it beneath the texture-array cap + re-meshes.
-                            #[cfg(target_arch = "wasm32")]
-                            if crate::open_stash::beacon_available() {
-                                let slot = self.beacon_adopt_slot.clone();
-                                wasm_bindgen_futures::spawn_local(async move {
-                                    *slot.borrow_mut() =
-                                        Some(crate::open_stash::beacon_download(&blob_hash).await);
-                                });
-                            }
-                            #[cfg(not(target_arch = "wasm32"))]
-                            {
-                                let _ = blob_hash;
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                if (clock_time, clock_step) != (self.world_time, self.world_time_step) {
-                    self.write_clock(clock_time, clock_step);
-                }
-                self.chat.extend_log(local_log);
-                self.chat.close();
-                // Persist World Integrity Ledger flags if any cheat ran. Both
-                // targets: on web `save_world_meta` writes the meta cache that
-                // `save_world` packs into the blob, so `/gm c` and the ledger
-                // flags survive a reload. Never into a joined session's
-                // (nonexistent) local save.
-                if self.persists_locally()
-                    && (cheats_marker || ever_creative_marker || pure_survival_broken_marker)
-                {
-                    let mut meta = crate::save::load_world_meta(&self.world_name);
-                    if cheats_marker {
-                        meta.cheats_used = true;
-                    }
-                    if ever_creative_marker {
-                        meta.ever_creative = true;
-                    }
-                    if pure_survival_broken_marker {
-                        meta.pure_survival = false;
-                    }
-                    meta.game_mode = self.play_mode.as_meta_str().to_string();
-                    if let Err(e) = crate::save::save_world_meta(&self.world_name, &meta) {
-                        log::warn!("Failed to persist world meta after command: {e}");
-                    }
-                }
+                self.submit_command_line(line);
             }
             crate::chat_ui::ChatAction::None => {}
         }

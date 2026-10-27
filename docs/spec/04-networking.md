@@ -4927,10 +4927,15 @@ it again. `/time set|speed` and the local bed write the server's clock (`GameSta
 the lend no longer copies the client's clock over it (the server adopts its host's once, and
 again after a world change). Lightning is the server's: it rolls the strike, lands it round its
 lowest-index body in the world (the host's slot 0 on a host; a dedicated server's lowest-index
-joiner, else the world-spawn column) in a loaded column, lights and relights the fire and queues
-it for joiners; the host only presents the bolt after the window. Joiners still get the window
-as ticks-left on every `StateUpdate` (unchanged) and roll their own presentation-only bolts from
-it. Why no bump: no packet or save field changed. Spec 01 §4.1.3.
+joiner; an empty dedicated server throws none) in a loaded column, lights and relights the fire
+and queues it for joiners; the host only presents the bolt after the window. Joiners still get
+the window as ticks-left on every `StateUpdate` (unchanged) and roll their own presentation-only
+bolts from it. Why no bump: no packet or save field changed. Spec 01 §4.1.3.
+**Known gap (accepted, no wire event):** no strike event is on the wire, so a joiner sees the
+server's fire appear with no bolt, and its own presentation-only bolts (rolled round its own eye
+from the synced window, its own `tick_counter`) start no fire and do not match the server's. On a
+dedicated server this is new (it threw no lightning before); on a lending host it is as before
+D4 slice 2. Closing it means a strike event and a `PROTOCOL_VERSION` bump.
 
 **Columns round joiners (review fix 1).** The lent world is the only one the server simulates a
 joiner on, so the host client's streamer anchors on every connected joiner's server body too

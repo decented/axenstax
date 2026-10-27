@@ -1722,16 +1722,17 @@ impl GameServer {
     /// D4 slice 2 — land this tick's strike (rolled by the clock phase): its
     /// ground round the strike anchor (`sim_clock::strike_anchor`: the
     /// lowest-index body in the world — a hosting server's slot 0 is its
-    /// host — else the world-spawn column), and the fire it starts, relit and
+    /// host; nobody in the world, no bolt), and the fire it starts, relit and
     /// queued for every joiner. Only in a loaded column (a server must not
     /// conjure chunks, `World::set_block`). On a lent world the host client
     /// presents it ([`Self::take_lent_strike`]).
     fn land_strike(&mut self) {
         let Some(hash) = self.pending_strike.take() else { return };
-        let anchor = crate::sim_clock::strike_anchor(
+        let Some(anchor) = crate::sim_clock::strike_anchor(
             self.players.iter().map(|sp| (sp.is_in_world(), sp.player.eye_pos())),
-            self.spawn_column,
-        );
+        ) else {
+            return;
+        };
         let (cell, ground) = crate::sim_clock::strike_ground(&self.world, anchor, hash);
         let column = crate::chunk_stream::column_of(glam::Vec3::new(cell.0 as f32, 0.0, cell.2 as f32));
         let ignited = self.loaded_columns.contains(&column)

@@ -164,38 +164,46 @@ fn a_lent_worlds_strike_is_the_servers_landed_round_the_host() {
 }
 
 /// A dedicated server has no host: its bolts land round the lowest-index
-/// body in the world, or the world-spawn column when nobody is in it —
-/// deterministically (two servers, the same strike).
+/// body in the world, deterministically (two servers, the same strike).
 #[test]
-fn a_dedicated_servers_strike_anchor_is_deterministic() {
-    let strike_cell = |with_joiner: bool, tag: &str| {
+fn a_dedicated_servers_strike_lands_round_its_lowest_body_deterministically() {
+    let strike_cell = |tag: &str| {
         let mut hs = dedicated(tag);
-        let joiner = with_joiner.then(|| join_guest(&mut hs, "Anchor"));
+        let (_client, slot) = join_guest(&mut hs, "Anchor");
         let (storm, t) = storm_and_strike_tick(hs.server.tick_counter + 1);
         hs.server.weather = storm;
         hs.server.tick_counter = t - 1;
         let fire_before = hs.server.fire.active();
         hs.tick();
         let h = crate::weather::strike_roll(storm, t, true).unwrap();
-        let anchor = match &joiner {
-            Some((_, slot)) => hs.server.players[*slot].player.eye_pos(),
-            None => crate::sim_clock::strike_anchor(std::iter::empty(), hs.server.spawn_column),
-        };
+        let anchor = hs.server.players[slot].player.eye_pos();
         // Read after the strike: a fire that took now tops the column, one
         // below the cell `strike_ground` names.
         let (cell, _) = crate::sim_clock::strike_ground(&hs.server.world, anchor, h);
         let lit = hs.server.world.get_block(cell.0, cell.1 - 1, cell.2) == crate::block::FIRE;
-        let cell = (cell.0, cell.2);
         assert!(hs.server.take_lent_strike().is_none(), "a dedicated server presents to nobody");
-        (cell, lit, hs.server.fire.active() > fire_before)
+        ((cell.0, cell.2), lit, hs.server.fire.active() > fire_before)
     };
-    let a = strike_cell(true, "anchor-a");
-    let b = strike_cell(true, "anchor-b");
+    let a = strike_cell("anchor-a");
+    let b = strike_cell("anchor-b");
     assert_eq!(a.0, b.0, "the same world, the same body, the same bolt");
-    assert_eq!(a.1, a.2, "a lit cell is a fire the server tracks");
-    let none = strike_cell(false, "anchor-none");
-    let none2 = strike_cell(false, "anchor-none2");
-    assert_eq!(none.0, none2.0, "nobody in the world: the spawn column, deterministically");
-    assert_eq!(none.1, none.2);
-    assert!(a.2 && none.2, "the dedicated server lit both bolts: {a:?} {none:?}");
+    assert!(a.1 && a.2, "the bolt lit a fire the server tracks: {a:?}");
+}
+
+/// An empty dedicated server throws no bolt at all: no fallback anchor, so
+/// a server nobody is on never burns its spawn overnight — through a whole
+/// storm, every strike tick.
+#[test]
+fn an_empty_dedicated_server_throws_no_bolt() {
+    let mut hs = dedicated("empty-storm");
+    assert!(hs.server.players.iter().all(|sp| !sp.is_in_world()), "nobody is in the world");
+    let (storm, t) = storm_and_strike_tick(hs.server.tick_counter + 1);
+    hs.server.weather = storm;
+    hs.server.tick_counter = t - 1;
+    for _ in 0..1_000 {
+        hs.tick();
+        assert_eq!(hs.server.fire.active(), 0, "no fire on an empty server (tick {})", hs.server.tick_counter);
+    }
+    let strike_ticks = (t..t + 1_000).filter(|&k| crate::weather::strike_roll(storm, k, true).is_some()).count();
+    assert!(strike_ticks >= 2, "the storm rolled bolts on {strike_ticks} ticks");
 }

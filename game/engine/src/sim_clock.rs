@@ -153,24 +153,12 @@ pub fn phase(view: ClockView<'_>, rules: WeatherRules<'_>) -> PhaseOutcome {
 
 /// Where a strike rolled by a server lands: round the lowest-index player
 /// body in the world (dead or alive; on a hosting server slot 0 is the host's
-/// own player, so a host's strikes land round the host as they always did),
-/// else — nobody in the world — round the centre of the world-spawn column.
-/// `bodies`: `(in_world, eye position)` by slot.
-pub fn strike_anchor(
-    bodies: impl IntoIterator<Item = (bool, glam::Vec3)>,
-    spawn_column: (i32, i32),
-) -> glam::Vec3 {
-    bodies
-        .into_iter()
-        .find_map(|(in_world, eye)| in_world.then_some(eye))
-        .unwrap_or_else(|| {
-            let cs = crate::chunk::CHUNK_SIZE as f32;
-            glam::Vec3::new(
-                spawn_column.0 as f32 * cs + cs / 2.0,
-                0.0,
-                spawn_column.1 as f32 * cs + cs / 2.0,
-            )
-        })
+/// own player, so a host's strikes land round the host as they always did).
+/// `None` — nobody in the world — throws no bolt at all: an empty dedicated
+/// server must not burn its spawn overnight. `bodies`: `(in_world, eye
+/// position)` by slot.
+pub fn strike_anchor(bodies: impl IntoIterator<Item = (bool, glam::Vec3)>) -> Option<glam::Vec3> {
+    bodies.into_iter().find_map(|(in_world, eye)| in_world.then_some(eye))
 }
 
 /// A strike's ground: the column the hash picks round `anchor` and its top
@@ -313,14 +301,13 @@ mod tests {
     }
 
     #[test]
-    fn the_anchor_is_the_lowest_slot_in_the_world_else_the_spawn_column() {
+    fn the_anchor_is_the_lowest_slot_in_the_world_and_nobody_means_no_bolt() {
         let a = glam::Vec3::new(1.0, 70.0, 2.0);
         let b = glam::Vec3::new(-40.0, 64.0, 9.0);
-        assert_eq!(strike_anchor([(false, a), (true, b)], (0, 0)), b, "slot 0 left: slot 1");
-        assert_eq!(strike_anchor([(true, a), (true, b)], (0, 0)), a);
-        let none = strike_anchor([(false, a)], (2, -1));
-        assert_eq!((none.x, none.z), (40.0, -8.0), "spawn column (2,-1)'s centre");
-        assert_eq!(strike_anchor(std::iter::empty(), (2, -1)), none, "deterministic");
+        assert_eq!(strike_anchor([(false, a), (true, b)]), Some(b), "slot 0 left: slot 1");
+        assert_eq!(strike_anchor([(true, a), (true, b)]), Some(a));
+        assert_eq!(strike_anchor([(false, a)]), None, "nobody in the world");
+        assert_eq!(strike_anchor(std::iter::empty()), None);
     }
 
     #[test]
