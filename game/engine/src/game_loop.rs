@@ -10748,6 +10748,14 @@ impl super::GameState {
 
         // Stream chunks around all players (union streaming)
         self.stream_chunks();
+        // Its blocking `initial_load` fallback can leave the world (a refused
+        // load, or a solo-hosted authority that did not start): the lobby is
+        // drawn next frame, and nothing below may tick the world just left.
+        if !matches!(self.mode, GameMode::Playing) {
+            self.input.end_frame();
+            self.window.request_redraw();
+            return;
+        }
 
         // ── Rule 2: Press A on any unassigned controller to join ─────────────
         //

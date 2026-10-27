@@ -3158,9 +3158,6 @@ pub fn run() {
 
     let args: Vec<String> = std::env::args().collect();
 
-    // D1 — `--no-lend`: a host's embedded server keeps its own copy of the
-    // world instead of borrowing the host's (`sim_lend`). The one-release
-    // escape hatch if lending misbehaves; the dedicated server is unaffected.
     // D3 — `--solo-hosted`: single-player runs through a local, network-silent
     // server (opt-in; the default stays standalone). Refused with `--no-lend`
     // before anything starts.
@@ -3175,6 +3172,9 @@ pub fn run() {
     if local_routing == local_routing::LocalRouting::SoloHosted {
         log::info!("--solo-hosted: single-player runs through a local server");
     }
+    // D1 — `--no-lend`: a host's embedded server keeps its own copy of the
+    // world instead of borrowing the host's (`sim_lend`). The one-release
+    // escape hatch if lending misbehaves; the dedicated server is unaffected.
     if args.iter().any(|a| a == "--no-lend") {
         hosted_server::set_no_lend(true);
         log::warn!("--no-lend: hosting keeps a second copy of the world (pre-D1 behaviour)");
