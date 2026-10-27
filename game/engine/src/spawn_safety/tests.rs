@@ -191,3 +191,31 @@ fn a_camera_on_the_same_spawn_cell_is_inside_the_other_avatar() {
     assert!(!camera_inside_avatar(feet, eye(0.0, 3.0, 0.0)), "above the head it is drawn");
     assert!(!camera_inside_avatar(feet, eye(0.0, -1.5, 0.0)), "below the feet it is drawn");
 }
+
+/// A saved spawn is any finite float: at the `i32` limits the block maths
+/// saturates (a debug build would panic on overflow), and the answer is the
+/// input unchanged (nothing is loaded there) or a sane spot.
+#[test]
+fn a_saved_spawn_at_the_coordinate_limits_does_not_overflow() {
+    let mut s = keep_like(PHONE_SEEDS[0]);
+    load_square(&mut s, (0, 0), 1);
+    let limit = i32::MAX as f32;
+    let extremes = [f32::MAX, f32::MIN, limit, -limit, 3.0e9, -3.0e9, 1.0e30];
+    for &a in &extremes {
+        for &b in &extremes {
+            for pos in [Vec3::new(a, b, 0.5), Vec3::new(0.5, b, a), Vec3::new(a, 70.0, b), Vec3::new(a, a, a)] {
+                let fixed = fix_up(&s.world, &s.registry, pos);
+                assert!(fixed.is_finite(), "{pos:?} -> {fixed:?}");
+                assert_eq!(fixed, pos, "nothing is loaded out there: unchanged");
+                assert_eq!(s.safe_spawn_loading(pos, false), pos);
+            }
+        }
+    }
+    // The block helpers themselves, at the integer limits.
+    for (x, y, z) in [(i32::MAX, i32::MAX, i32::MAX), (i32::MIN, i32::MIN, i32::MIN), (i32::MAX, i32::MIN, 0)] {
+        assert!(!stands_clear(&s.world, &s.registry, x, y, z));
+    }
+    // Non-finite stays as it was.
+    let nan = Vec3::new(f32::NAN, 70.0, 0.5);
+    assert!(fix_up(&s.world, &s.registry, nan).x.is_nan());
+}

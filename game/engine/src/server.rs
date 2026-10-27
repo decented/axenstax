@@ -192,7 +192,9 @@ pub struct ServerPlayer {
     /// for every other player (local ones never handshake).
     pub awaiting_join: bool,
     /// Spawn protection (`crate::spawn_protection`): server ticks left in
-    /// which hostile mobs neither hurt nor target this body. Armed by
+    /// which hostile melee does not hurt this body and (on an owning server)
+    /// hostile mobs do not target it; blasts are not shielded, and a lending
+    /// host's mob targeting is not gated (see that module's doc). Armed by
     /// [`ServerPlayer::enter_world`] and `GameServer::respawn_player`, ended
     /// early by a hit on a mob; 0 otherwise.
     pub spawn_protection: u32,

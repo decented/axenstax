@@ -1,9 +1,21 @@
 //! Spawn protection: for [`PROTECTION_SECS`] after a player enters the world
-//! and after each respawn, hostile mobs neither hurt nor target that player,
-//! so a join or a respawn at night is not a death at the spawn point. Hitting
-//! a mob (or loosing a shot) ends it early. Fall, drowning, lava, fire,
-//! hunger and every other non-mob harm are unchanged. Server-side only: no
-//! protocol field, no client indicator.
+//! and after each respawn, a join or a respawn at night is not a death at the
+//! spawn point. What it covers depends on who runs the world:
+//!
+//! - On an owning server (a dedicated server, or a Keep that does not lend its
+//!   world to the host client) hostile melee does not hurt the player and
+//!   hostile mobs do not target it. A blast still hurts it: an explosion
+//!   (a creeper, or a keg) is not shielded, even one set off near the player
+//!   by a mob chasing someone else.
+//! - On a lending host (the host client runs the mob AI) only hostile melee is
+//!   blocked. Mob targeting is not gated there (the host's mob AI reads the
+//!   joiner's real position) and creeper blasts are not shielded, so a mob can
+//!   still chase a protected joiner and blow up next to it. A known gap, not
+//!   yet closed.
+//!
+//! Hitting a mob (or loosing a shot) ends the window early. Fall, drowning,
+//! lava, fire, hunger and every other non-mob harm are unchanged. Server-side
+//! only: no protocol field, no client indicator.
 //!
 //! The state is one countdown on `ServerPlayer` (`spawn_protection`, in
 //! ticks): [`arm`] sets it, [`tick`] counts it down once per server tick,
@@ -36,8 +48,9 @@ pub fn tick(sp: &mut ServerPlayer) {
     sp.spawn_protection = sp.spawn_protection.saturating_sub(1);
 }
 
-/// Is the player inside the window: no hostile melee lands on it and no mob
-/// picks it as a target.
+/// Is the player inside the window: no hostile melee lands on it and, on an
+/// owning server, no mob picks it as a target (blasts are not shielded; see the
+/// module doc for the lending host).
 pub fn shielded(sp: &ServerPlayer) -> bool {
     sp.spawn_protection > 0
 }

@@ -34,8 +34,8 @@ pub fn stands_clear(world: &World, registry: &BlockRegistry, x: i32, feet_y: i32
         let b = world.get_block(x, y, z);
         !registry.is_solid(b) && !block::is_fluid(b)
     };
-    let below = world.get_block(x, feet_y - 1, z);
-    open(feet_y) && open(feet_y + 1) && below != block::AIR && !block::is_fluid(below)
+    let below = world.get_block(x, feet_y.saturating_sub(1), z);
+    open(feet_y) && open(feet_y.saturating_add(1)) && below != block::AIR && !block::is_fluid(below)
 }
 
 /// The surface of the loaded column `(x, z)`: walk down from its real top
@@ -83,7 +83,8 @@ pub fn above_column_top(world: &World, x: i32, z: i32) -> Option<i32> {
 /// column within [`SEARCH_RADIUS`] (rings outward, a fixed order, so every
 /// joiner given the same spot gets the same answer); else just above its own
 /// column's top. `pos` unchanged when it is not finite or its column is not
-/// loaded (nothing to read).
+/// loaded (nothing to read). A saved spawn can be any finite float, so the
+/// block maths saturates at the `i32` limits rather than overflowing.
 pub fn fix_up(world: &World, registry: &BlockRegistry, pos: Vec3) -> Vec3 {
     if !pos.is_finite() {
         return pos;
@@ -93,7 +94,7 @@ pub fn fix_up(world: &World, registry: &BlockRegistry, pos: Vec3) -> Vec3 {
         return pos;
     }
     for step in 1..=NUDGE {
-        for y in [fy + step, fy - step] {
+        for y in [fy.saturating_add(step), fy.saturating_sub(step)] {
             if stands_clear(world, registry, x, y, z) {
                 return Vec3::new(pos.x, y as f32, pos.z);
             }
@@ -108,8 +109,9 @@ pub fn fix_up(world: &World, registry: &BlockRegistry, pos: Vec3) -> Vec3 {
                 if dx.abs().max(dz.abs()) != ring {
                     continue;
                 }
-                if let Some(y) = surface_feet(world, registry, x + dx, z + dz) {
-                    return Vec3::new((x + dx) as f32 + 0.5, y as f32, (z + dz) as f32 + 0.5);
+                let (nx, nz) = (x.saturating_add(dx), z.saturating_add(dz));
+                if let Some(y) = surface_feet(world, registry, nx, nz) {
+                    return Vec3::new(nx as f32 + 0.5, y as f32, nz as f32 + 0.5);
                 }
             }
         }

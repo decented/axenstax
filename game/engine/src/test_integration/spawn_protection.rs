@@ -1,6 +1,8 @@
 //! Spawn protection on a joiner's server body (`crate::spawn_protection`):
-//! for 15 s after it enters the world and after each respawn, hostile mobs
-//! neither hurt nor target it; a hit on a mob ends it; other harm still lands.
+//! for 15 s after it enters the world and after each respawn, hostile melee
+//! does not hurt it and hostile mobs do not target it (owning server; blasts
+//! and a lending host's mob targeting are not covered); a hit on a mob ends it;
+//! other harm still lands.
 
 use glam::Vec3;
 
