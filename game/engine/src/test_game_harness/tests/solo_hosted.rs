@@ -484,10 +484,20 @@ fn game_harness_a_ridden_horse_steers_the_same_in_both_routings() {
 #[test]
 #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
 fn game_harness_mob_melee_on_a_local_player_lands_once_in_both_routings() {
+    check_local_mob_melee(false);
+}
+
+#[test]
+#[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+fn game_harness_mob_melee_on_a_mounted_local_player_lands_once_in_both_routings() {
+    check_local_mob_melee(true);
+}
+
+fn check_local_mob_melee(mounted: bool) {
     let mut outcomes = Vec::new();
     for routing in [LocalRouting::Standalone, LocalRouting::SoloHosted] {
         isolate_saves();
-        let name = unique(&format!("melee-{routing:?}"));
+        let name = unique(&format!("melee-{routing:?}-{mounted}"));
         let _ = std::fs::remove_dir_all(crate::save::world_dir(&name));
         let mut game = HeadlessGame::boot_into_world_routed(&name, routing);
         game.state.set_play_mode(crate::play_mode::PlayMode::Survival);
@@ -496,10 +506,17 @@ fn game_harness_mob_melee_on_a_local_player_lands_once_in_both_routings() {
             hs.server.difficulty = crate::survival::Difficulty::Normal;
         }
         let at = ride_strip(&mut game);
+        if mounted {
+            let horse = crate::entity::spawn_mob(&mut game.state.ecs, crate::mob::MobType::Horse, at);
+            crate::riding::mount(&mut game.state.ecs, horse, &mut game.state.players[0].ride);
+            game.state.players[0].riding = Some(horse);
+            crate::riding::follow(&game.state.ecs, horse, &mut game.state.players[0].player);
+        }
         let helmet = crate::armour::ArmourItem::new(crate::armour::ArmourSlot::Helmet, crate::armour::ArmourMaterial::Iron);
         game.state.players[0].armour_slots[crate::armour::ArmourSlot::Helmet as usize] = Some(helmet);
         game.state.players[0].combat.invincible_timer = 0;
-        let mob = crate::entity::spawn_mob(&mut game.state.ecs, crate::mob::MobType::Berserker, at + glam::Vec3::new(0.0, 0.0, 0.6));
+        let reach = if mounted { 1.0 } else { 0.6 };
+        let mob = crate::entity::spawn_mob(&mut game.state.ecs, crate::mob::MobType::Berserker, at + glam::Vec3::new(0.0, 0.0, reach));
         let health = game.state.players[0].combat.health;
         let reports = game.logical_ticks(1);
         assert_one_sim(&reports);
@@ -509,6 +526,14 @@ fn game_harness_mob_melee_on_a_local_player_lands_once_in_both_routings() {
         assert_eq!(durability, Some(helmet.durability - 1), "{routing:?}: the armour wears once");
         assert!(slot.player.velocity.y > 0.0, "{routing:?}: knocked back (up)");
         assert_eq!(slot.combat.last_damage, crate::survival::DamageCause::Mob(crate::mob::MobType::Berserker));
+        if let Some(hs) = game.state.hosted_server.as_ref() {
+            let shadow = &hs.server.players[0];
+            assert_eq!(shadow.player.pos, slot.player.pos, "the trusted shadow follows the final body");
+            assert_eq!(shadow.player.velocity, slot.player.velocity, "the shadow keeps the landed knockback");
+            assert_eq!(shadow.combat.health, slot.combat.health, "health is current before another tick or save");
+            assert_eq!(shadow.combat.dead, slot.combat.dead);
+            assert_eq!(shadow.local_seated, slot.seated());
+        }
         outcomes.push(health - slot.combat.health);
         let _ = mob;
     }

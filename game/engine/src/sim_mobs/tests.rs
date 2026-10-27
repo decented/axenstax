@@ -30,7 +30,7 @@ fn a_lead_pull_overrides_the_mobs_own_velocity() {
     let cow = crate::entity::spawn_mob(&mut ecs, MobType::Cow, Vec3::new(6.5, 80.0, 0.5));
     ecs.insert_one(cow, crate::tether::Tethered { target: crate::tether::TetherTarget::Player(0) }).unwrap();
     ecs.get::<&mut crate::entity::Velocity>(cow).unwrap().0 = Vec3::new(0.2, 0.0, 0.0);
-    let bodies = MobBodies { positions: vec![Vec3::new(0.5, 80.0, 0.5)], yaws: vec![0.0], remote_owners: vec![] };
+    let bodies = MobBodies { positions: vec![Vec3::new(0.5, 80.0, 0.5)], yaws: vec![0.0], ..Default::default() };
     tethers(&mut ecs, &bodies);
     let v = ecs.get::<&crate::entity::Velocity>(cow).unwrap().0;
     assert!(v.x < 0.0, "pulled toward the holder: {v}");

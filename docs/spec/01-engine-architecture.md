@@ -954,8 +954,12 @@ body at once (`land_hit_on_joiner`), queues each feeding joiner's
 no second credit path), turns a changed cell into a block change, and, on a
 lent world only, queues everything for its local players in
 `GameServer::sim_events`. The host client drains that outbox straight after
-the window (`tick_hosted_server`), before the ride follow, the next catch-up
-tick, its next input or a save, and lands each event through the rules the
+the window (`tick_hosted_server`), before the next catch-up tick, its next
+input or a save. Species and seat events land before ride follow; hostile
+melee contacts land afterwards so the follow cannot clear their knockback.
+The server follows the steered local seats' shadows before finding contacts,
+and never collides trusted local bodies a second time. The client refreshes
+their body, health, death and seat shadows after draining. Each event uses the rules the
 old inline code used: `take_damage_with_armour_from` + knockback + the
 parrots' dismount; `combat::land_mob_attacks` (armour, i-frames, one wear per
 landed hit) + the wolves' revenge pivot; the challenge only if its own player

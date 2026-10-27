@@ -37,8 +37,9 @@
 //! joiner's server body at once (`GameServer::land_hit_on_joiner`) and queues
 //! a local slot's — a lent world's host players — in its outbox
 //! (`GameServer::sim_events`), which the host client drains straight after
-//! the lend window (`GameState::tick_hosted_server`), before the ride follow,
-//! the next catch-up tick, its next input or a save. Remote kill and breed
+//! the lend window (`GameState::tick_hosted_server`), before the next catch-up
+//! tick, its next input or a save. Seat follow precedes hostile melee hits
+//! so it cannot clear their knockback. Remote kill and breed
 //! credit keep their wire path (`pending_bred_events`); the outbox carries
 //! only this machine's players' effects, so no credit is counted twice.
 #![cfg_attr(target_arch = "wasm32", allow(dead_code))]
@@ -57,12 +58,21 @@ use crate::world::World;
 pub struct MobBodies {
     pub positions: Vec<Vec3>,
     pub yaws: Vec<f32>,
+    /// Actual local seats; a local pet key cannot resolve to a joiner slot.
+    pub local_slots: Vec<usize>,
     pub remote_owners: Vec<(String, usize)>,
+    /// Slot-indexed protection: hostile species see no body in these slots.
+    /// Pet follow and Leads keep using the unfiltered positions.
+    pub spawn_protected: Vec<bool>,
 }
 
 impl MobBodies {
     pub fn owners(&self) -> crate::tameable::OwnerBodies<'_> {
-        crate::tameable::OwnerBodies { positions: &self.positions, remote_owners: &self.remote_owners }
+        crate::tameable::OwnerBodies {
+            positions: &self.positions,
+            local_slots: &self.local_slots,
+            remote_owners: &self.remote_owners,
+        }
     }
 }
 
@@ -287,9 +297,9 @@ pub fn species(
     // Animals Wave 2 — horse herd-wander (skips ridden).
     crate::species_ai::dispatch_horses(ecs, tick);
     // Task 9 — the perched shoulder anchor needs the owner's yaw.
-    crate::species_ai::dispatch_companions(ecs, positions, &bodies.yaws, tick, &bodies.remote_owners);
+    crate::species_ai::dispatch_companions(ecs, &bodies.owners(), &bodies.yaws, tick);
     // The tamed-Nostrich Follow/Sit machine.
-    crate::species_ai::dispatch_nostriches(ecs, positions, tick, &bodies.remote_owners);
+    crate::species_ai::dispatch_nostriches(ecs, &bodies.owners(), tick);
     // Pets wave Task 10 — a tamed parrot squawks when a hostile is near,
     // gated by its AlarmCooldown.
     for (pet, pos) in crate::companion::parrot_alarms(ecs, tick) {
@@ -300,9 +310,16 @@ pub fn species(
         out.push(SimEvent::ParrotAlarm { pet, pos });
     }
     crate::species_ai::dispatch_squids(ecs, world, tick);
-    crate::species_ai::dispatch_hyenas(ecs, positions, world_time);
+    let hostile_positions: Vec<Vec3> = positions.iter().enumerate().map(|(slot, &pos)| {
+        if bodies.spawn_protected.get(slot).copied().unwrap_or(false) {
+            crate::species_ai::ABSENT_PLAYER
+        } else {
+            pos
+        }
+    }).collect();
+    crate::species_ai::dispatch_hyenas(ecs, &hostile_positions, world_time);
     // Aquatic wave — the Shark hunts players in deep water.
-    for bite in crate::species_ai::dispatch_sharks(ecs, world, positions, tick) {
+    for bite in crate::species_ai::dispatch_sharks(ecs, world, &hostile_positions, tick) {
         let Some(&p) = positions.get(bite.target_slot) else { continue };
         let push = Vec3::new(p.x - bite.shark_pos.x, 0.0, p.z - bite.shark_pos.z).normalize_or_zero();
         out.push(SimEvent::Hit {
@@ -312,7 +329,7 @@ pub fn species(
             knock: Vec3::new(push.x * 0.4, 0.0, push.z * 0.4),
         });
     }
-    for eff in crate::species_ai::dispatch_bears(ecs, world, positions, tick) {
+    for eff in crate::species_ai::dispatch_bears(ecs, world, &hostile_positions, tick) {
         match eff {
             crate::species_ai::BearWorldEffect::ConsumeCrop { x, y, z } => {
                 // A raided crop reverts to tilled soil (the bear ate it).
@@ -348,14 +365,19 @@ pub fn tethers(ecs: &mut hecs::World, bodies: &MobBodies) {
 /// after every phase that writes a mob's velocity, so the rider has the last
 /// word. A dismount gesture unmounts here, before physics moves the mount;
 /// each seat comes back as a [`SimEvent::Seat`] (its ride state, and `off`).
-pub fn steer_local_seats(ecs: &mut hecs::World, world: &World, seats: Vec<LocalSeat>, out: &mut SimEvents) {
+/// The returned snapshots also let the authority follow trusted local body
+/// shadows after physics, before finding melee contacts.
+pub fn steer_local_seats(ecs: &mut hecs::World, world: &World, seats: Vec<LocalSeat>, out: &mut SimEvents) -> Vec<LocalSeat> {
+    let mut steered = Vec::with_capacity(seats.len());
     for mut seat in seats {
         if let Some(why) = crate::riding::steer(ecs, world, seat.mount, &seat.input, &mut seat.ride) {
             crate::riding::unmount(ecs, seat.mount, &mut seat.ride);
             seat.off = Some(why);
         }
         out.push(SimEvent::Seat(seat));
+        steered.push(seat);
     }
+    steered
 }
 
 /// Phase 8 — entity physics (every tick).

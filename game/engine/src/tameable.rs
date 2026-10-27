@@ -191,17 +191,19 @@ pub fn local_owner_key(slot: usize) -> String {
 /// pulls a mob after its holder: `positions[slot]` is player `slot`'s body
 /// (local slots first; on a lending host, every joiner at its server slot),
 /// and `remote_owners` maps a joiner's pet-owner key (its verified npub) to
-/// its slot. A local key (`"local-player-{slot}"`) resolves by its number.
+/// its slot. A local key (`"local-player-{slot}"`) resolves only when that
+/// slot is in `local_slots`, never to a joiner reusing the number.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct OwnerBodies<'a> {
     pub positions: &'a [glam::Vec3],
+    pub local_slots: &'a [usize],
     pub remote_owners: &'a [(String, usize)],
 }
 
 impl<'a> OwnerBodies<'a> {
     /// The slot of the player whose pet-owner key is `owner_key`, if present.
     pub fn slot_of(&self, owner_key: &str) -> Option<usize> {
-        crate::wolf::owner_slot_from_pubkey(owner_key).or_else(|| {
+        crate::wolf::owner_slot_from_pubkey(owner_key).filter(|s| self.local_slots.contains(s)).or_else(|| {
             self.remote_owners.iter().find(|(k, _)| k == owner_key).map(|&(_, s)| s)
         })
     }

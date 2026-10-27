@@ -2081,11 +2081,12 @@ impl GameServer {
         // rides), handed over by the host client with this tick's intent
         // (`lent_local_seats`), steered here by the same rule; their ride
         // state and any dismount go back through the outbox.
+        let mut local_seats = Vec::new();
         if self.runs(SimSystem::EntityPhysics) {
             steer_seats(&mut self.players, &mut self.ecs, &self.world, &self.registry);
             let seats = std::mem::take(&mut self.lent_local_seats);
             let mut seat_events = crate::sim_mobs::SimEvents::default();
-            crate::sim_mobs::steer_local_seats(&mut self.ecs, &self.world, seats, &mut seat_events);
+            local_seats = crate::sim_mobs::steer_local_seats(&mut self.ecs, &self.world, seats, &mut seat_events);
             self.route_mob_events(seat_events);
             crate::sim_mobs::physics(&mut self.ecs, &self.world, &self.registry);
             let anchor = self.summon_anchor();
@@ -2224,6 +2225,7 @@ impl GameServer {
         // physics, here or on the host client; the cart roll above): the
         // body pinned to the seat, and the rides that are over ended.
         self.follow_seats();
+        self.follow_local_seats(local_seats);
 
         // C3c-3b — laid Blueprints develop in the sun on the server's world
         // (on a lent one, here rather than on the host client: one owner,
@@ -2243,7 +2245,7 @@ impl GameServer {
         for i in 0..self.players.len() {
             // A dead body runs no physics (MP-A3): nothing shoves it. Nor a
             // seated one: its mount holds it (D2c-1).
-            if !self.players[i].combat.dead && self.players[i].riding.is_none() {
+            if self.players[i].server_simulated && !self.players[i].combat.dead && !self.players[i].seated() {
                 let player = &mut self.players[i].player;
                 crate::entity::push_player_from_entities(
                     &self.ecs,
@@ -2541,6 +2543,23 @@ impl GameServer {
         }
     }
 
+    /// Follow the host's steered seats for this tick's contact queries. These
+    /// are trusted body shadows, never server-simulated rides: the outbox
+    /// returns ride state and dismounts to the local PlayerSlots themselves.
+    fn follow_local_seats(&mut self, seats: Vec<crate::sim_mobs::LocalSeat>) {
+        for seat in seats {
+            let Some(sp) = self.players.get_mut(seat.slot).filter(|sp| !sp.server_simulated) else { continue };
+            if seat.off.is_none() && !sp.combat.dead
+                && matches!(crate::riding::follow(&self.ecs, seat.mount, &mut sp.player), crate::riding::Follow::Seated { .. })
+            {
+                sp.local_seated = true;
+            } else {
+                sp.local_seated = false;
+                crate::riding::settle(&mut sp.player, &self.world, &self.registry);
+            }
+        }
+    }
+
     /// MP-D2c-1 — seat joiner `i` on `mount` (checked: `riding::may_mount`,
     /// reach): `Ridden` on the mount, a fresh ride, held keys forgotten. The
     /// body is pinned to the seat at once, so this tick's broadcast already
@@ -2657,6 +2676,10 @@ impl GameServer {
             let here = if sp.server_simulated { sp.is_in_world() } else { sp.connected };
             bodies.positions.push(if here { sp.player.pos } else { crate::species_ai::ABSENT_PLAYER });
             bodies.yaws.push(sp.yaw);
+            bodies.spawn_protected.push(sp.server_simulated && crate::spawn_protection::shielded(sp));
+            if here && !sp.server_simulated {
+                bodies.local_slots.push(slot);
+            }
             if here
                 && sp.server_simulated
                 && let Some(key) = sp.pet_owner_key()
@@ -2824,6 +2847,12 @@ impl GameServer {
             return false;
         };
         if !sp.server_simulated || !sp.is_present_and_alive() {
+            return false;
+        }
+        if crate::spawn_protection::shielded(sp)
+            && matches!(cause, crate::survival::DamageCause::Mob(kind)
+                if crate::mob::mob_def(kind).category == crate::mob::MobCategory::Hostile)
+        {
             return false;
         }
         let damage = crate::armour::damage_after_armour(raw, sp.armour_points);

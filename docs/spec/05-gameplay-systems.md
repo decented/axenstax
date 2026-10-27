@@ -1829,7 +1829,10 @@ joiner any more (Spec 04 §4.2c).
   `--solo-hosted` game runs it once in its server; a dedicated server in its
   own tick, without a village's population. A player who just joined is not
   chased by hostile mobs and not hurt by their melee or by a blast for 15
-  seconds (spawn protection), on every server.
+  seconds (spawn protection), on every server. This includes the shark, hyena and
+  bear species overrides; pets and Leads still see their owners' real
+  positions. Local mounted melee uses the moved seat's position and lands
+  after seat follow, preserving the hit's knockback and one armour wear.
 - **Not yet on a joiner:** mob push-out and knockback are not predicted (each
   shows as a position correction). (A joiner's bow and slingshot shots are
   the server's since C3c-2: they reach the server's mobs.)

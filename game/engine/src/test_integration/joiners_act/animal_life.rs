@@ -36,6 +36,100 @@ impl Rig {
     }
 }
 
+/// Saved local-seat owners never acquire a joiner's body with the same slot
+/// number, whether the server owns the world or borrows a host's world.
+#[test]
+fn local_pet_keys_never_resolve_to_joiner_slots() {
+    for mut rig in [Rig::new("local-pet-owner-dedicated", 1), Rig::new_lent("local-pet-owner-lent", 1)] {
+        let slot = rig.joiners[0].slot;
+        rig.sign_in(0);
+        let key = crate::tameable::local_owner_key(slot);
+        let mut pets = Vec::new();
+        for kind in [MobType::Wolf, MobType::Cat, MobType::Parrot, MobType::Nostrich] {
+            let (pet, _) = rig.spawn(kind, Vec3::new(6.0, 0.0, 0.0));
+            pets.push((kind, pet));
+        }
+        for &(kind, pet) in &pets {
+            rig.place(pet, Vec3::new(6.0, 0.0, 0.0));
+            rig.ecs_mut().get::<&mut crate::mob_ai::MobAi>(pet).unwrap().state =
+                crate::mob_ai::AiState::Idle { timer: 100 };
+            match kind {
+                MobType::Wolf => {
+                    rig.ecs_mut().get::<&mut crate::wolf::WolfData>(pet).unwrap().ownership.owner_pubkey = key.clone();
+                }
+                MobType::Nostrich => {
+                    let mut data = rig.ecs_mut().get::<&mut crate::nostrich::NostrichData>(pet).unwrap();
+                    data.ownership.owner_pubkey = key.clone();
+                    data.state = crate::nostrich::NostrichAiState::Follow;
+                }
+                _ => {
+                    let mut data = rig.ecs_mut().get::<&mut crate::companion::CompanionData>(pet).unwrap();
+                    data.ownership.owner_pubkey = key.clone();
+                    data.state = if kind == MobType::Parrot {
+                        crate::companion::CompanionState::Perch
+                    } else {
+                        crate::companion::CompanionState::Follow
+                    };
+                }
+            }
+        }
+        rig.tick(1);
+        for (kind, pet) in pets {
+            let pos = rig.pos(pet);
+            assert!((pos.x - rig.at.x - 6.0).abs() < 0.01, "{kind:?} must not follow or perch on joiner slot {slot}: {pos}");
+            let velocity = rig.ecs().get::<&crate::entity::Velocity>(pet).unwrap().0;
+            assert_eq!((velocity.x, velocity.z), (0.0, 0.0), "{kind:?}: absent owner holds still");
+        }
+    }
+}
+
+/// Hostile species overrides must use the same protected targets as generic
+/// mob AI; raw owner/Lead bodies remain available to the other species.
+#[test]
+fn spawn_protection_blocks_shark_bites_and_hostile_species_hunts() {
+    for mut rig in [Rig::new("species-shield-dedicated", 1), Rig::new_lent("species-shield-lent", 1)] {
+        rig.hs.server.difficulty = crate::survival::Difficulty::Normal;
+        rig.hs.server.world_time = 0;
+        let slot = rig.joiners[0].slot;
+        if slot > 0 {
+            rig.hs.server.players[0].connected = false;
+        }
+        let at = rig.at;
+        for x in 40..=42 {
+            for z in 40..=41 {
+                rig.world_mut().set_block(x, 80, z, block::WATER);
+                rig.world_mut().set_block(x, 81, z, block::WATER);
+            }
+        }
+        let shark = crate::entity::spawn_mob(rig.ecs_mut(), MobType::Shark, at + Vec3::X);
+        let hyena = crate::entity::spawn_mob(rig.ecs_mut(), MobType::Hyena, at + 4.0 * Vec3::X);
+        let bear = crate::entity::spawn_mob(rig.ecs_mut(), MobType::Bear, at + 6.0 * Vec3::X);
+        rig.ecs_mut().get::<&mut crate::bear_ai::BearData>(bear).unwrap().state =
+            crate::bear_ai::BearAiState::Aggro { attacker_pidx: slot, ticks_remaining: 100 };
+        for mob in [shark, hyena, bear] {
+            rig.ecs_mut().get::<&mut crate::mob_ai::MobAi>(mob).unwrap().state =
+                crate::mob_ai::AiState::Idle { timer: 100 };
+        }
+        crate::spawn_protection::arm(&mut rig.hs.server.players[slot]);
+        rig.tick(1);
+        assert_eq!(rig.hs.server.players[slot].combat.health, 20.0, "a protected swimmer takes no shark bite");
+        for mob in [hyena, bear] {
+            let velocity = rig.ecs().get::<&crate::entity::Velocity>(mob).unwrap().0;
+            assert!(velocity.x >= 0.0, "hostile species must not hunt the protected body to their left: {velocity}");
+        }
+        crate::spawn_protection::disarm(&mut rig.hs.server.players[slot]);
+        rig.hs.server.players[slot].player.pos = at;
+        rig.hs.server.players[slot].player.velocity = Vec3::ZERO;
+        rig.place(shark, Vec3::X);
+        rig.tick(1);
+        assert!(rig.hs.server.players[slot].combat.health < 20.0, "after protection the shark bites");
+        for mob in [hyena, bear] {
+            let velocity = rig.ecs().get::<&crate::entity::Velocity>(mob).unwrap().0;
+            assert!(velocity.x < 0.0, "after protection hostile species hunt the body to their left: {velocity}");
+        }
+    }
+}
+
 /// One logical tick runs each mob phase exactly once on the world, lent or
 /// owned; on a lent world the host client's side runs none of them, so the
 /// server's run is the only one, and a second would be the tripwire's fault.

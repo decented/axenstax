@@ -4861,7 +4861,8 @@ impl super::GameState {
         crate::sim_mobs::MobBodies {
             positions: self.players.iter().map(|s| s.player.pos).collect(),
             yaws: self.players.iter().map(|s| s.camera.yaw).collect(),
-            remote_owners: Vec::new(),
+            local_slots: (0..self.players.len()).collect(),
+            ..Default::default()
         }
     }
 
@@ -4983,6 +4984,27 @@ impl super::GameState {
                     }
                 }
             }
+        }
+    }
+
+    /// Local slots remain trusted: after landing this tick's effects and
+    /// following seats, refresh the authority's shadows before another
+    /// catch-up tick, input or save. No remote damage/death event is queued.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn refresh_lent_local_shadows(players: &[crate::player_slot::PlayerSlot], hs: &mut crate::hosted_server::HostedServer) {
+        if !hs.lends_host_world() { return; }
+        for (local, sp) in players.iter().zip(&mut hs.server.players) {
+            if sp.server_simulated { continue; }
+            sp.player.pos = local.player.pos;
+            sp.player.velocity = local.player.velocity;
+            sp.player.on_ground = local.player.on_ground;
+            sp.player.flying = local.player.flying;
+            sp.player.in_water = local.player.in_water;
+            sp.player.fall_distance = local.player.fall_distance;
+            sp.player.pending_landing = local.player.pending_landing;
+            sp.combat.health = local.combat.health;
+            sp.combat.dead = local.combat.dead;
+            sp.local_seated = local.seated();
         }
     }
 
@@ -5745,6 +5767,9 @@ impl super::GameState {
         // MP-D2c-1 — which of our seats ride, for the joiners' view.
         let seated: Vec<bool> = self.players.iter().map(crate::player_slot::PlayerSlot::seated).collect();
         hs.sync_local_seats(&seated);
+        // A respawn or local rule change may have happened since the last
+        // window; the authority must see the current trusted body now too.
+        Self::refresh_lent_local_shadows(&self.players, hs);
         // D3 — a local-only authority follows this client's live rules.
         if hs.local_only() {
             hs.align_local_rules(self.play_mode, &self.difficulty, self.explosives_enabled, self.fire_spread_enabled);
@@ -5824,7 +5849,8 @@ impl super::GameState {
         // D4 slice 3 — what the server's mob simulation did to this client's
         // players this tick: landed now, before the ride follow below and
         // before any further catch-up tick, input or save.
-        let mob_events = hs.server.sim_events.take();
+        let (contacts, mob_events): (Vec<_>, Vec<_>) = hs.server.sim_events.take().into_iter()
+            .partition(|e| matches!(e, crate::sim_mobs::SimEvent::HostileContacts { .. }));
 
         report.remeshed = self.remesh_lent_cells(
             sim_changes
@@ -5840,6 +5866,12 @@ impl super::GameState {
         // Carts and mounts advanced inside the window: re-pin any rider to
         // the seat (after its steered seat came back, so a dismount stands).
         self.apply_riding_follow();
+        // Hostile melee originally landed after seat follow. Preserve that
+        // order: following a mount clears velocity and would erase the hit.
+        self.apply_sim_events(contacts);
+        if let Some(hs) = self.hosted_server.as_mut() {
+            Self::refresh_lent_local_shadows(&self.players, hs);
+        }
 
         // World handover: a frozen world runs no shared system this tick.
         report.faults = if self.handover_freezes_world() {

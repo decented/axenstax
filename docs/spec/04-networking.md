@@ -1329,8 +1329,12 @@ convergence is separate debt). A **guest** (no verified npub) cannot tame:
 refused with "Sign in to tame animals in someone else's world.", nothing
 taken. Pet follow (`tick_wolf_companions`, `dispatch_companions`,
 `dispatch_nostriches`) resolves an owner key through `tameable::OwnerBodies`:
-a local key by its slot number, a joiner's npub through the lending host's
-npub → server-slot table, to that joiner's server body.
+a local key only through an actual local seat, a joiner's npub through the
+server's npub → slot table, to that joiner's server body. A dedicated server
+has no local seats: a saved `local-player-N` pet never follows or perches on
+joiner N. The same rule holds if a lending host's former local seat number
+is now occupied by a joiner. Wolves, companions and Nostriches share this
+owner lookup; pets whose owner is absent wait for that owner.
 
 **The held item is the client's word** (`// BRIDGE: possession check`, beside
 the block-placement one): the server's copy of a joiner's inventory is only a
@@ -4949,11 +4953,17 @@ steering pass before physics (`GameServer::lent_local_seats`, handed over by the
 this tick's intent). What the mobs did to the host's own players (a species hit, the hostile
 mobs in melee reach of its bodies, a birth, a parrot's alarm, a steered seat) comes back through
 a typed outbox (`GameServer::sim_events`), drained straight after the window and landed by the
-host client's own rules (armour, i-frames, wear, the pets' revenge); a joiner's hits land on its
+host client's own rules (armour, i-frames, wear, the pets' revenge). Local melee contacts use
+the current steered seat position, with no server collision pass on trusted local bodies;
+their hits land after the client's seat follow, so following the mount cannot erase the
+hit's knockback. The local shadows are refreshed after effects and follow. A joiner's hits land on its
 server body at once, and a feeding joiner's credit is its `PlayerEventType::Bred`, as before. The
 generic AI's targets come from the server's player slots, through spawn protection
 (`spawn_protection::targetable_pos`), so on a lending host a protected joiner is no target, and
-no blast lands on it either (`explosion::apply_joiner_blast_damage`). A dedicated server runs the
+no blast lands on it either (`explosion::apply_joiner_blast_damage`). The shark, hyena and bear
+species overrides use protected, slot-indexed target positions too; hostile species hits
+also check protection before landing. Pet follow and Leads retain the real body positions.
+A dedicated server runs the
 same phases (not a village's population), so its joiners' animals breed, follow and obey Leads.
 Why no bump: no packet or save field changed. Spec 01 §4.1.3.
 

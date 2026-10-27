@@ -6,7 +6,8 @@
 //! joiner:
 //!
 //! - takes no hostile melee,
-//! - is no target for hostile mobs: the mob AI and the brigand pre-pass see
+//! - is no target for hostile mobs: the mob AI, brigand pre-pass and hostile
+//!   species overrides (sharks, hyenas and bears) see
 //!   it at the "no body" position ([`targetable_pos`]), so none picks it and a
 //!   chase already on it gives up,
 //! - takes no blast damage (a keg set off near it, by anyone, harms it not:
