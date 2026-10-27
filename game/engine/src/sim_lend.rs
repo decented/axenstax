@@ -30,9 +30,9 @@
 //! implementation a standalone game calls in its own (`sim_mobs`); the host
 //! client hands its seats' input over before the window and drains what the
 //! mobs did to its players from the server's outbox after it
-//! (`GameServer::sim_events`). The client keeps the death sweep (its single
-//! kill-attribution site feeds kill counters, the Vow, raids and
-//! challenges); it moves to the server with D4's next slice.
+//! (`GameServer::sim_events`). Since D4 slice 4, the authority also owns the
+//! early death phase (`server_death`/`sim_death`), before client projectiles;
+//! its local kill and rescue effects drain immediately through that outbox.
 //!
 //! Native only in practice: the web build has no hosted-server tick, so the
 //! lend window is never opened there (the module still compiles, since
@@ -158,8 +158,8 @@ impl SimSystem {
     /// The side that runs this system while the world is lent (module docs).
     pub const fn lent_owner(self) -> SimSide {
         match self {
-            SimSystem::DespawnDead => SimSide::HostClient,
-            SimSystem::MobAi
+            SimSystem::DespawnDead
+            | SimSystem::MobAi
             | SimSystem::EntityPhysics
             | SimSystem::Products
             | SimSystem::Population
@@ -341,6 +341,7 @@ impl Drop for LentSim<'_> {
         server.lent = false;
         // The window ends the logical tick: its phase token never outlives it.
         server.clock_phase_open = false;
+        server.death_phase_open = false;
         // D4 slice 3 — this tick's seats were this tick's only.
         server.lent_local_seats.clear();
         server.lent_day_offer = None;
@@ -437,11 +438,21 @@ impl OwnedSimParts {
         self.clock.tick_counter = back.tick_counter;
         self.clock.weather = back.weather;
         self.clock.reputation_offer = self.reputation_day.advance(self.clock.tick_counter, 1).filter(|pulse| pulse.days > 0).map(|pulse| crate::reputation_day::DayOffer { run_id: hs.server.run_id, pulse });
+        self.death_phase(hs);
         let clock = self.clock;
         LentSim::lend(hs, self.parts(), clock).tick();
         self.events.extend(hs.server.sim_events.take());
         self.clock.reputation_offer = None;
         self.clock.weather = hs.server.weather;
+    }
+
+    /// The real host runs this early boundary before its projectile pass.
+    pub(crate) fn death_phase(&mut self, hs: &mut HostedServer) {
+        let locals: Vec<_> = hs.server.players.iter().map(|sp|
+            (sp.player.pos, sp.server_simulated || !sp.connected || sp.combat.dead)).collect();
+        hs.server.run_host_death_phase(&mut self.world, &mut self.ecs, &locals,
+            (self.clock.tick_counter, self.clock.world_time), true);
+        self.events.extend(hs.server.sim_events.take());
     }
 
     /// The host client's column stream-in / stream-out state, as its
@@ -535,7 +546,7 @@ mod tests {
             (SimSystem::Breeding, Server),
             (SimSystem::Species, Server),
             (SimSystem::Tethers, Server),
-            (SimSystem::DespawnDead, HostClient),
+            (SimSystem::DespawnDead, Server),
             (SimSystem::Fluids, Server),
             (SimSystem::Power, Server),
             (SimSystem::MobSpawning, Server),
@@ -607,12 +618,13 @@ mod tests {
         hs.server
             .run_clock_phase(&seed_of(&host), true, None, &mut host.world.sim_tally)
             .expect("the phase runs");
+        host.death_phase(&mut hs);
         LentSim::lend(&mut hs, host.parts(), clock).tick();
         assert!(!hs.server.lent, "cleared when the window closes");
         let server_only = host.world.sim_tally;
         assert!(
-            SimSystem::ALL.iter().any(|&s| s.every_tick() && server_only.get(s) == before.get(s)),
-            "the server alone leaves the host client's systems to the client"
+            SimSystem::ALL.iter().filter(|s| s.every_tick()).all(|s| server_only.get(*s) == before.get(*s) + 1),
+            "the authority phases and window own every shared system"
         );
         assert_clean("lent host", &before, &client_tick(&hs, server_only));
 

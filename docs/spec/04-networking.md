@@ -1511,17 +1511,32 @@ A raider killed by a departed joiner counts the raid down and credits no
 defender, like any joiner's kill (`Attacker::is_joiner`).
 
 Where the sweep runs:
-- **Lending host:** the death sweep is still the host client's (D1 deviation,
-  until D4). Its `Remote` branch (`server::route_client_kill`) queues the kill
-  on the host's server and credits no host player; a raider a joiner killed
-  counts the raid down but credits no defender. The loot drops as world items,
-  which the joiner's server pickup grants.
-- **Dedicated server / `--no-lend`:** the server's own sweep
-  (`despawn_dead_with_drops`) runs the same rule with no local players: a
-  joiner's kill is queued, and so is a death no player's hit caused, to the
-  nearest living joiner (the server keeps no kill counters).
+- **Lending host:** `GameServer::run_host_death_phase` borrows the actual host
+  World/ECS at the early death boundary, before client projectiles. Shared
+  `sim_death` rescues eligible pets, then drops and attributes real deaths
+  once over slot-indexed trusted locals and generation-stamped joiners. Local
+  notices drain immediately through `SimEvents::Deaths`/`credit_kill`; remote
+  credit uses the existing personal/kill-event path. Colocated tame flags and
+  cargo follow exact entity IDs. A rescue creates neither loot nor kill credit.
+- **Dedicated server / `--no-lend`:** the same shared pass runs at the existing
+  late post-projectile server boundary. Dedicated servers now rescue pets and
+  decrement raid/hideout state too; they award no local defender contribution
+  and add no joiner monetary settlement. `--no-lend` retains its separate client
+  sweep for local credit; its server copy credits only remote players. Both
+  copies forget departures, so slot reuse inherits no attacker or pet grudge.
+- **Bounded death delivery:** 32 candidates per phase; reserve local batch and
+  outbox slot by allocated capacity (16 KiB), plus remote worst-case fan-out
+  (256 pending/16 KiB), before death/rescue/world/credit mutations. Full queues
+  defer inert victims without dropping critical effects. Initial cull/rescue
+  eligibility survives delay. Save/capture refuses unresolved deaths rather
+  than reloading their pets/cargo alive; autosave remains due for retry.
+  Pending-death host preparation refuses guests and signed joiners while it
+  waits, then retries after drain. Its explicit runtime waiting marker is the
+  only retry exception: ordinary preparation/disk errors remain latched.
 - `HostedServer` sends each queued kill as `KillEvent` to the killer alone,
-  after the tick. `KillEvent.reason` (review D2b LOW-6; it was `cause`, always
+  after the tick, validating the queued connection generation again so a
+  reused slot cannot receive its predecessor's effect. `KillEvent.reason`
+  (review D2b LOW-6; it was `cause`, always
   `MELEE`, though a mob keeps no record of its killing blow) says why the kill
   was credited: `kill_reason::LAST_HIT` (0, this player's hit was the last a
   player landed) or `NEAREST` (1, the nearest-player fallback). The joiner's
@@ -4917,8 +4932,9 @@ refuses a damaged `world.dat` itself (leaving the world drops the server). Each 
 runs the block/entity housekeeping (fluids, fire, leaf decay, falling blocks, spawning, power,
 carts, item lifetimes, entity health timers, snowfall, rubber, salt lick, bounties, hideouts,
 the active-tick total `ActiveTicks`, and since C3c-3b laid Blueprints developing, `Develop`;
-since D4 slice 2 the clock and weather, below; since D4 slice 3 the mob simulation, below); the
-host client keeps the death sweep (single kill-attribution site). A per-world tally (`World::sim_tally`) checked after every lent
+since D4 slice 2 the clock and weather, below; since D4 slice 3 the mob simulation, below).
+Since D4 slice 4 the authority also owns the early death phase (`run_host_death_phase`),
+before the client's projectiles; the later window never repeats it. A per-world tally (`World::sim_tally`) checked after every lent
 tick (`SimTally::one_tick_faults`) catches a system that ran twice or not at all, and a
 GPU-free predicate-table test pins one owner per world in every mode (lent host, owning host,
 dedicated, single-player).
@@ -6965,10 +6981,12 @@ quest progress, clock, binding, world scope and local selection and leaves local
 play available. The final failure preserves prior session-save flags and marks
 the save failed, even if the ordinary writer had already reported success.
 Each local host instance records
-one preparation outcome. A refusal appears to the host and rejects new
+one actual preparation outcome. A refusal appears to the host and rejects new
 attachments after their identity/policy checks; existing polling, control
-acknowledgements and shared simulation continue. Restarting hosting begins a
-fresh preparation attempt. Expired legacy decline timers do not block it. An
+acknowledgements and shared simulation continue. The explicit pending-death
+preflight (D4 slice 4) temporarily refuses admission without attempting scope
+preparation, then retries once its backlog drains. Ordinary preparation errors
+remain latched; restarting hosting begins a fresh preparation attempt. Expired legacy decline timers do not block it. An
 already validated Imported holder keeps its exact proof/context while an absent
 independent world scope is saved; failure restores the old scope and holder.
 
@@ -7081,8 +7099,8 @@ kill/decay/quest mutations and canonical saves project all remaining timers,
 restore re-anchors without offline decay, and actual expiry is a discrete revision.
 
 A remote death credit carries its position and optional village resolved from
-that death sweep's actual world. On a lending host the native death sweep runs
-outside the server's borrow window; its resolved village therefore travels with
+that death sweep's actual world. On a lending host the authority's early death
+phase borrows the actual World/ECS outside the full network window; its resolved village travels with
 the credit instead of being looked up in the empty unborrowed server world.
 An explicit absent village stays absent, without fallback. Owning server sweeps
 resolve from their own actual world. The existing attachment-generation gate,

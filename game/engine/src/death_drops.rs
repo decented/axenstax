@@ -1,23 +1,7 @@
-//! Shared mob-death → dropped-item routing (wave-hardening backlog,
-//! 2026-07-11). The ONE place both simulation sides — the client-side
-//! `GameState` death sweep (game_loop.rs) and `GameServer::tick`
-//! (server.rs) — turn `combat::despawn_dead`'s result into dropped-item
-//! entities: the generic per-species loot table (`mob::drops_for`), the
-//! wolf-specific tamed/untamed table (`wolf::drops_for_wolf`), a dead
-//! steed's cargo-pack spill, and the salt-lick drop bonus.
-//!
-//! Extracted from game_loop.rs so the hosted server actually spawns
-//! drops — `GameServer::tick` used to DISCARD the deaths vector, so a mob
-//! killed in the server sim dropped nothing at all. Same shared-free-
-//! function pattern as `spawning::tick_mob_spawning` and
-//! `falling_blocks::tick_falling_blocks` (Tasks 1b/1c).
-//!
-//! On the wire since phase 2 (2026-07-11, v57/v58): the entity diff (`entity_broadcast`)
-//! broadcasts these drops as `EntityKind::Item` spawns, the server runs
-//! lifetimes + pickup for server-simulated players (`InventoryGrant`), and
-//! late joiners get the pre-existing drops backfilled at join-accept
-//! (2026-07-12). Still riding the dual-sim rework: full-fidelity wire
-//! encoding for tool/plan/armour drops (those stay on the server floor).
+//! The loot router used by the shared `sim_death` authority pass: generic
+//! and wolf-specific tables, exact-entity live cargo spill and salt bonus.
+//! World items keep their existing entity-diff and numbered pickup paths;
+//! local death notices never grant a second copy of an item.
 
 use glam::Vec3;
 
@@ -29,51 +13,28 @@ pub struct PreDespawnSnapshots {
     packs: std::collections::HashMap<hecs::Entity, crate::chest::ChestData>,
 }
 
-/// MP-D2b — where every dying mob that is somebody's pet stands (any
-/// ownership shape, `tameable::pet_owner_of`). Call before
-/// `combat::despawn_dead`; a server's sweep marks a joiner's kill of one
-/// `TAMED` in its `KillEvent` (a tamed Nostrich brings no Vow).
-pub fn dying_tamed_positions(ecs: &hecs::World) -> Vec<Vec3> {
-    ecs.query::<(&crate::combat::Health, &crate::entity::Position)>()
-        .iter()
-        .filter(|(e, (h, _))| h.is_dead() && crate::tameable::pet_owner_of(ecs, *e).is_some())
-        .map(|(_, (_, p))| p.0)
-        .collect()
+/// Capture every dying wolf's drop table and pack-carrier's live cargo.
+/// The bounded shared pass uses `snapshot_entities` for its selected batch.
+#[cfg(test)]
+pub fn snapshot_before_despawn(ecs: &hecs::World) -> PreDespawnSnapshots {
+    snapshot_entities(ecs, ecs.query::<&crate::combat::Health>().iter()
+        .filter(|(_, h)| h.is_dead()).map(|(entity, _)| entity))
 }
 
-/// Capture every dying wolf's `WolfData` (tamed-vs-untamed drop table) and
-/// every dying pack-carrier's cargo `ChestData` (spill instead of destroy).
-/// Call immediately before `combat::despawn_dead`.
-pub fn snapshot_before_despawn(ecs: &hecs::World) -> PreDespawnSnapshots {
+pub(crate) fn snapshot_entities(ecs: &hecs::World, entities: impl Iterator<Item = hecs::Entity>) -> PreDespawnSnapshots {
     let mut wolves = std::collections::HashMap::new();
-    for (e, (health, kind, wolf_data)) in ecs
-        .query::<(
-            &crate::combat::Health,
-            &crate::entity::MobKind,
-            &crate::wolf::WolfData,
-        )>()
-        .iter()
-    {
-        if health.is_dead()
-            && kind.0 == crate::mob::MobType::Wolf
-        {
-            wolves.insert(e, wolf_data.clone());
-        }
-    }
     let mut packs = std::collections::HashMap::new();
-    for (e, (health, kind, horse_data)) in ecs
-        .query::<(
-            &crate::combat::Health,
-            &crate::entity::MobKind,
-            &crate::horse_ai::HorseData,
-        )>()
-        .iter()
-    {
-        if health.is_dead()
-            && crate::mob::can_carry_pack(kind.0)
-            && let Some(pack) = &horse_data.pack
-        {
-            packs.insert(e, pack.clone());
+    for entity in entities {
+        if !ecs.get::<&crate::combat::Health>(entity).is_ok_and(|h| h.is_dead()) { continue; }
+        let Ok(kind) = ecs.get::<&crate::entity::MobKind>(entity) else { continue };
+        if kind.0 == crate::mob::MobType::Wolf
+            && let Ok(data) = ecs.get::<&crate::wolf::WolfData>(entity) {
+            wolves.insert(entity, (*data).clone());
+        }
+        if crate::mob::can_carry_pack(kind.0)
+            && let Ok(data) = ecs.get::<&crate::horse_ai::HorseData>(entity)
+            && let Some(pack) = &data.pack {
+            packs.insert(entity, pack.clone());
         }
     }
     PreDespawnSnapshots { wolves, packs }

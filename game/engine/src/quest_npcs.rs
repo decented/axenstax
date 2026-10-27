@@ -216,6 +216,7 @@ pub(crate) fn restore(ecs: &mut hecs::World, saved: &QuestWorldSave) -> Result<(
                     max: npc.health[1],
                     flash_timer: npc.health_ticks[0],
                     invincible_timer: npc.health_ticks[1],
+                    rescue_eligible: None,
                 },
             ),
         )

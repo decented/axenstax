@@ -113,9 +113,10 @@ pub fn tick_tethers(
     player_positions: &[Vec3],
 ) -> Vec<(hecs::Entity, Vec3)> {
     let mut snapped = Vec::new();
-    for (id, (pos, vel, tether)) in ecs
-        .query_mut::<(&Position, &mut Velocity, &Tethered)>()
+    for (id, (pos, vel, tether, health)) in ecs
+        .query_mut::<(&Position, &mut Velocity, &Tethered, Option<&crate::combat::Health>)>()
     {
+        if health.is_some_and(|h| h.is_dead()) { continue; }
         let Some(anchor) = anchor_position(tether.target, player_positions) else {
             // Out-of-range pidx — drop the tether at the mob.
             snapped.push((id, pos.0));

@@ -138,7 +138,7 @@ pub fn tick_salt_lick_regen(
         &mut crate::combat::Health,
     )>();
     for (_id, (pos, kind, health)) in q.iter() {
-        if health.current >= health.max {
+        if health.is_dead() || health.current >= health.max {
             continue;
         }
         if !is_livestock_for_salt_lick(kind.0) {
@@ -276,8 +276,7 @@ mod tests {
             crate::entity::MobKind(MobType::Cow),
             crate::combat::Health {
                 current: 5.0, max: 10.0,
-                flash_timer: 0, invincible_timer: 0,
-            },
+                flash_timer: 0, invincible_timer: 0, rescue_eligible: None },
         ));
 
         // Non-pulse tick — no change.
@@ -308,8 +307,7 @@ mod tests {
             crate::entity::MobKind(MobType::Wolf),
             crate::combat::Health {
                 current: 5.0, max: 10.0,
-                flash_timer: 0, invincible_timer: 0,
-            },
+                flash_timer: 0, invincible_timer: 0, rescue_eligible: None },
         ));
         tick_salt_lick_regen(&mut ecs, &world, SALT_LICK_REGEN_INTERVAL_TICKS);
         let h = ecs.get::<&crate::combat::Health>(wolf_id).unwrap().current;
@@ -326,8 +324,7 @@ mod tests {
             crate::entity::MobKind(MobType::Cow),
             crate::combat::Health {
                 current: 5.0, max: 10.0,
-                flash_timer: 0, invincible_timer: 0,
-            },
+                flash_timer: 0, invincible_timer: 0, rescue_eligible: None },
         ));
         tick_salt_lick_regen(&mut ecs, &world, SALT_LICK_REGEN_INTERVAL_TICKS);
         let h = ecs.get::<&crate::combat::Health>(cow_id).unwrap().current;
@@ -344,8 +341,7 @@ mod tests {
             crate::entity::MobKind(MobType::Cow),
             crate::combat::Health {
                 current: 5.0, max: 10.0,
-                flash_timer: 0, invincible_timer: 0,
-            },
+                flash_timer: 0, invincible_timer: 0, rescue_eligible: None },
         ));
         tick_salt_lick_regen(&mut ecs, &world, SALT_LICK_REGEN_INTERVAL_TICKS);
         let h = ecs.get::<&crate::combat::Health>(cow_id).unwrap().current;
@@ -365,8 +361,7 @@ mod tests {
             crate::entity::MobKind(MobType::Cow),
             crate::combat::Health {
                 current: 5.0, max: 10.0,
-                flash_timer: 0, invincible_timer: 0,
-            },
+                flash_timer: 0, invincible_timer: 0, rescue_eligible: None },
         ));
 
         tick_salt_lick_regen(&mut ecs, &world, SALT_LICK_REGEN_INTERVAL_TICKS);

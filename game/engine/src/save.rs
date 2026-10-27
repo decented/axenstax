@@ -1074,6 +1074,9 @@ pub fn tamed_mobs_to_saved(ecs: &hecs::World) -> Result<Vec<SavedTamedPet>, Stri
 }
 
 fn tamed_mobs_to_saved_impl(ecs: &hecs::World) -> Result<Vec<SavedTamedPet>, String> {
+    if crate::sim_death::has_pending(ecs) {
+        return Err(format!("{} Resume play briefly before saving again.", crate::sim_death::DEATHS_PENDING));
+    }
     use crate::entity::{MobKind, Position};
     let mut out = Vec::new();
     // Tamed wolves.

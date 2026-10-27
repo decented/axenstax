@@ -52,6 +52,7 @@ pub(crate) fn tick_wolf_attack(
     use crate::entity::{Position, Velocity};
 
     let target = hecs::Entity::from_bits(entity_id)
+        .filter(|e| !crate::combat::entity_is_dead(ecs, *e))
         .and_then(|e| ecs.get::<&Position>(e).ok().map(|p| (e, p.0)));
 
     let Some((target_entity, target_pos)) = target else {
@@ -200,7 +201,7 @@ pub(crate) fn tick_wolf_companions(
     for (id, (pos, kind, data)) in
         ecs.query::<(&Position, &MobKind, &WolfData)>().iter()
     {
-        if kind.0 == crate::mob::MobType::Wolf && data.is_tamed() {
+        if !crate::combat::entity_is_dead(ecs, id) && kind.0 == crate::mob::MobType::Wolf && data.is_tamed() {
             wolves.push((id, pos.0, data.clone()));
         }
     }

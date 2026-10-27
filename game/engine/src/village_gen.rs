@@ -766,6 +766,7 @@ pub fn tick_wanderer_migration(
     let mut to_spawn: Vec<Vec3> = Vec::new();
 
     for (id, wpos) in &wanderers {
+        if crate::combat::entity_is_dead(ecs, *id) { continue; }
         let mut best: Option<([i32; 3], f32)> = None;
         for b in &bells {
             let bv = Vec3::new(b[0] as f32 + 0.5, b[1] as f32 + 0.5, b[2] as f32 + 0.5);

@@ -903,10 +903,41 @@ the server holds an empty world and ECS; nothing reads them.
 | Side when lent | Systems |
 |---|---|
 | **Server** (`GameServer::tick`, inside the window; the clock phase just before it) | the day clock + `tick_counter` + night calendar (`SimSystem::Clock`) and the weather window, trial lock and lightning (`SimSystem::Weather`) — D4 slice 2, below; the mob simulation — D4 slice 3, below (`MobAi`, `EntityPhysics`, `Products`, `Population`, `Breeding`, `Species`, `Tethers`); the active-tick total (`tick_world_clock`, `SimSystem::ActiveTicks` — not the day/night clock), mob spawning, falling blocks, fluids (water + lava + fire), leaf decay + saplings, hideout replenisher, snowfall, rubber cooldowns, salt lick, bounty rotation, item lifetimes, power, carts, entity `Health` timers |
-| **Host client** (`GameState::tick`) | the death sweep (`despawn_dead`, the single kill-attribution site: kill counters, the Vow, raids, challenges) |
+| **Server, early host phase** (`GameServer::run_host_death_phase`) | `DespawnDead`: shared rescue/death/drop/attribution and hideout/raid bookkeeping (`sim_death`); local credit arrives through `SimEvents::Deaths` |
 
-A lent server never runs `despawn_dead`; the death sweep moves server-side
-with D4's next slice (behind the same outbox, for attribution).
+**Death boundary (D4 slice 4, 2026-10-27).** Standalone/offline and lending
+hosts sweep before client projectiles, at the established client boundary. A
+lending host borrows its actual World/ECS into an explicit authority method;
+it does not open another network tick. The later lent window never repeats
+the sweep. Dedicated and owning servers retain their late post-projectile
+boundary. Thus a client projectile kill is swept next tick, while an owned
+server projectile kill is swept that tick. `--no-lend` retains its documented
+two worlds and client-local/server-remote credit split.
+
+One shared pass (`sim_death`) rescues eligible pets before removing real deaths,
+then uses entity-keyed cargo/tame snapshots for loot, `combat::attribute_kill`,
+hideout decrements and raid contributions. A rescue produces no loot or kill
+credit. Raid contribution remains nearest living local defender in radius;
+a remote/departed hit decrements the raid without local contribution or new
+joiner monetary settlement. Local effects use the existing `credit_kill`
+consumer (counter, Vow, reputation, challenge and smoke). Remote effects keep
+the existing personal-credit/`KillEvent` path, with the connection generation
+checked when queued and sent; no local kill is replayed through loopback.
+
+Death work is bounded to 32 candidates per phase. Before mutation, reserve a
+fixed-data batch/outbox slot (16 KiB maximum allocated local bytes) and worst-case
+remote fan-out (256 pending events/16 KiB allocated bytes). An undrained local
+phase or unavailable remote capacity leaves deaths pending, with no lost drops
+or credit. Pending corpses are inert; their initial rescue/cull eligibility
+is retained through delivery delay. Pet/cargo snapshot extraction refuses any
+pending death, keeping manual save, autosave, dedicated save and handover from
+restoring it as a fresh living pet. Autosave remains due until the queue drains.
+A hosting instance temporarily refuses admission during this pending-death
+preflight, then retries preparation after drain. Only this explicit transient
+state retries; ordinary preparation/disk refusals remain latched for that host.
+The local death batch drains immediately at the early boundary, before another
+phase, catch-up tick, input or save. These limits apply to death delivery;
+the existing species/seat event allocation is a separate remaining boundary.
 
 **The mob simulation (D4 slice 3, 2026-10-27).** One implementation,
 `sim_mobs` (pure phases over an ECS, a world and the player bodies), in this
@@ -968,7 +999,7 @@ fed a parent, the poof and toast for every birth. Its own hostile-melee pass
 accepted on a lent world: the brigand pre-pass sees post-player-physics
 positions; a Builder NPC's position writes (client) happen before the
 server's physics; a mob killed by its own physics (a fall) is swept by the
-client's death sweep the next tick. In a standalone game a species hit's
+authority's early death sweep the next tick. In a standalone game a species hit's
 parrot dismount now lands after the whole species phase rather than inside
 it.
 
@@ -1176,10 +1207,9 @@ changes: ordinary single-player is still `GameState::tick` alone.
 - *Pause and catch-up.* Pause returns before both halves (as for every
   mode); each caught-up tick is one whole logical tick of both halves.
 
-Remaining before the default flips (owner call after a playtest): D4 moves
-the last client-owned row (the death sweep) into `GameServer::tick` behind the
-`SimEvents` outbox. The clock and weather moved in D4 slice 2, the mob
-simulation in D4 slice 3 (above).
+The default flip still needs the owner's playtest. Clock/weather, mobs and
+death now have shared authority paths (D4 slices 2–4); client-only machines and
+construction remain slice 5. The default stays standalone.
 
 
 ### 4.2 Client Frame Loop

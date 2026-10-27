@@ -139,6 +139,7 @@ pub fn tick_workstation_claims(ecs: &mut hecs::World, world: &World) -> u32 {
     let mut candidates: Vec<(hecs::Entity, glam::Vec3)> = Vec::new();
     let mut already_claimed: ahash::AHashSet<[i32; 3]> = ahash::AHashSet::new();
     for (id, (kind, pos, vc)) in ecs.query::<(&MobKind, &Position, &VillagerComponent)>().iter() {
+        if crate::combat::entity_is_dead(ecs, id) { continue; }
         if !is_villager_kind(kind.0) {
             continue;
         }
@@ -178,6 +179,7 @@ pub fn release_orphan_claims(ecs: &mut hecs::World, world: &World) {
     // Two-pass to avoid borrow conflict on the ecs query while mutating.
     let mut orphans: Vec<hecs::Entity> = Vec::new();
     for (id, (kind, vc)) in ecs.query::<(&MobKind, &VillagerComponent)>().iter() {
+        if crate::combat::entity_is_dead(ecs, id) { continue; }
         if !is_villager_kind(kind.0) {
             continue;
         }
@@ -362,6 +364,7 @@ pub fn tick_gossip_refresh(ecs: &mut hecs::World, current_tick: u64) -> u32 {
     // Two-pass to avoid mutating during the borrow.
     let mut to_refresh: Vec<(hecs::Entity, Profession)> = Vec::new();
     for (id, (kind, vc)) in ecs.query::<(&MobKind, &VillagerComponent)>().iter() {
+        if crate::combat::entity_is_dead(ecs, id) { continue; }
         if !is_villager_kind(kind.0) {
             continue;
         }
@@ -450,6 +453,7 @@ pub fn tick_raid_warning_gossip(ecs: &mut hecs::World, world: &World) -> u32 {
     }
     let mut to_override: Vec<(hecs::Entity, crate::raid::RaidId)> = Vec::new();
     for (id, (kind, _vc, pos)) in ecs.query::<(&MobKind, &VillagerComponent, &Position)>().iter() {
+        if crate::combat::entity_is_dead(ecs, id) { continue; }
         if !is_villager_kind(kind.0) {
             continue;
         }

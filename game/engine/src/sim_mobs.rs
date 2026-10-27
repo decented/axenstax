@@ -108,6 +108,9 @@ pub enum SimEvent {
     CellChanged { x: i32, y: i32, z: i32, block: crate::block::BlockId },
     /// A local seat, steered.
     Seat(LocalSeat),
+    /// Already-applied rescues and locally attributed deaths; reserved before
+    /// the shared death pass, drained at its boundary before projectiles.
+    Deaths(crate::sim_death::DeathBatch),
 }
 
 /// The outbox: [`SimEvent`]s in the order the phases made them.
@@ -117,6 +120,16 @@ pub struct SimEvents(Vec<SimEvent>);
 impl SimEvents {
     pub fn push(&mut self, event: SimEvent) {
         self.0.push(event);
+    }
+
+    /// Reserve a death batch and its outbox slot before any world mutation.
+    /// An undrained phase blocks another batch; no critical notice is dropped.
+    pub fn reserve_deaths(&mut self) -> Option<crate::sim_death::DeathBatch> {
+        if !self.0.is_empty() { return None; }
+        let batch = crate::sim_death::DeathBatch::reserve()?;
+        self.0.try_reserve_exact(1).ok()?;
+        let bytes = self.0.capacity() * std::mem::size_of::<SimEvent>() + batch.owned_bytes();
+        (bytes <= crate::sim_death::MAX_LOCAL_BYTES).then_some(batch)
     }
 
     /// Everything queued, oldest first, leaving the outbox empty.
@@ -133,10 +146,11 @@ impl SimEvents {
 pub fn products(ecs: &mut hecs::World, tick: u64) {
     let mut nostrich_egg_drops: Vec<(Vec3, u32)> = Vec::new();
     let mut nostrich_feather_drops: Vec<(Vec3, u32)> = Vec::new();
-    for (_e, (data, pos)) in ecs
+    for (entity, (data, pos)) in ecs
         .query::<(&mut crate::nostrich::NostrichData, &crate::entity::Position)>()
         .iter()
     {
+        if crate::combat::entity_is_dead(ecs, entity) { continue; }
         // Decrement timers. Lay applies to both wild + tamed;
         // feather shed applies only to tamed.
         if data.lay_ticks_remaining > 0 {
@@ -173,7 +187,7 @@ pub fn products(ecs: &mut hecs::World, tick: u64) {
     // Animals Wave 2 — chicken egg laying: each chicken's
     // AnimalProductState times the lay and drops an Egg at its feet.
     let mut chicken_egg_drops: Vec<(Vec3, u32)> = Vec::new();
-    for (_e, (state, pos, kind)) in ecs
+    for (entity, (state, pos, kind)) in ecs
         .query::<(
             &mut crate::animal_products::AnimalProductState,
             &crate::entity::Position,
@@ -181,6 +195,7 @@ pub fn products(ecs: &mut hecs::World, tick: u64) {
         )>()
         .iter()
     {
+        if crate::combat::entity_is_dead(ecs, entity) { continue; }
         if kind.0 == crate::mob::MobType::Chicken && crate::animal_products::should_lay_egg(*state, tick) {
             let seed = ((pos.0.x as i32 as u32).wrapping_mul(2_246_822_519))
                 .wrapping_add((pos.0.z as i32 as u32).wrapping_mul(668_265_263))

@@ -169,6 +169,7 @@ pub const CAT_WARD_RADIUS: f32 = 12.0;
 pub fn tamed_cat_positions(ecs: &hecs::World) -> Vec<glam::Vec3> {
     ecs.query::<(&Position, &MobKind, &CompanionData)>()
         .iter()
+        .filter(|(id, _)| !crate::combat::entity_is_dead(ecs, *id))
         .filter(|(_, (_, kind, data))| kind.0 == MobType::Cat && data.is_tamed())
         .map(|(_, (pos, _, _))| pos.0)
         .collect()
@@ -231,6 +232,7 @@ pub struct AlarmCooldown {
 fn hostile_positions(ecs: &hecs::World) -> Vec<glam::Vec3> {
     ecs.query::<(&Position, &MobKind)>()
         .iter()
+        .filter(|(id, _)| !crate::combat::entity_is_dead(ecs, *id))
         .filter(|(_, (_, kind))| mob::mob_def(kind.0).category == mob::MobCategory::Hostile)
         .map(|(_, (pos, _))| pos.0)
         .collect()
@@ -247,6 +249,7 @@ pub fn parrot_alarms(ecs: &hecs::World, tick: u64) -> Vec<(hecs::Entity, glam::V
     }
     ecs.query::<(&Position, &MobKind, &CompanionData, Option<&AlarmCooldown>)>()
         .iter()
+        .filter(|(id, _)| !crate::combat::entity_is_dead(ecs, *id))
         .filter(|(_, (_, kind, data, cooldown))| {
             kind.0 == MobType::Parrot
                 && data.is_tamed()

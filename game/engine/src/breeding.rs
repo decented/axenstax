@@ -129,7 +129,7 @@ pub fn tick_breeding(ecs: &mut hecs::World, tick: u64) -> Vec<NewBaby> {
     let grown: Vec<hecs::Entity> = ecs
         .query::<&Baby>()
         .iter()
-        .filter(|(_, b)| tick >= b.adult_at_tick)
+        .filter(|(id, b)| !crate::combat::entity_is_dead(ecs, *id) && tick >= b.adult_at_tick)
         .map(|(id, _)| id)
         .collect();
     for id in grown {
@@ -141,7 +141,7 @@ pub fn tick_breeding(ecs: &mut hecs::World, tick: u64) -> Vec<NewBaby> {
     let fell_out: Vec<hecs::Entity> = ecs
         .query::<&InLove>()
         .iter()
-        .filter(|(_, l)| tick >= l.until_tick)
+        .filter(|(id, l)| !crate::combat::entity_is_dead(ecs, *id) && tick >= l.until_tick)
         .map(|(id, _)| id)
         .collect();
     for id in fell_out {
@@ -150,7 +150,7 @@ pub fn tick_breeding(ecs: &mut hecs::World, tick: u64) -> Vec<NewBaby> {
     let cooled: Vec<hecs::Entity> = ecs
         .query::<&BreedCooldown>()
         .iter()
-        .filter(|(_, c)| tick >= c.until_tick)
+        .filter(|(id, c)| !crate::combat::entity_is_dead(ecs, *id) && tick >= c.until_tick)
         .map(|(id, _)| id)
         .collect();
     for id in cooled {
@@ -165,6 +165,7 @@ pub fn tick_breeding(ecs: &mut hecs::World, tick: u64) -> Vec<NewBaby> {
     let lovers: Vec<Lover> = ecs
         .query::<(&Position, &MobKind, &InLove, Option<&crate::genetics::Genetics>)>()
         .iter()
+        .filter(|(id, _)| !crate::combat::entity_is_dead(ecs, *id))
         .map(|(id, (p, k, love, g))| (id, k.0, p.0, g.copied().unwrap_or_default(), love.fed_by))
         .collect();
 

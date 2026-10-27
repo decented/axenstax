@@ -141,6 +141,7 @@ pub fn dispatch_rabbits(ecs: &mut hecs::World, player_positions: &[Vec3], tick: 
         .query::<(&Position, &MobKind, &RabbitData, &MobAi)>()
         .iter()
     {
+        if crate::combat::entity_is_dead(ecs, id) { continue; }
         if kind.0 == MobType::Rabbit && !generic_owns(&ai.state) {
             rabbits.push((id, pos.0, *data));
         }
@@ -150,6 +151,7 @@ pub fn dispatch_rabbits(ecs: &mut hecs::World, player_positions: &[Vec3], tick: 
     }
     let speed = mob::mob_def(MobType::Rabbit).speed / 20.0;
     for (id, pos, data) in rabbits {
+        if crate::combat::entity_is_dead(ecs, id) { continue; }
         let nearest = nearest_player(pos, player_positions);
         let (next, action) = rabbit_ai::tick_rabbit(&data, (pos.x, pos.y, pos.z), nearest, tick);
         if let Ok(mut d) = ecs.get::<&mut RabbitData>(id) {
@@ -214,6 +216,7 @@ pub fn dispatch_goats(
     }
     let speed = mob::mob_def(MobType::Goat).speed / 20.0;
     for (id, pos, data) in goats {
+        if crate::combat::entity_is_dead(ecs, id) { continue; }
         let target = nearest_player_indexed(pos, player_positions);
         let (next, action) = goat_ai::tick_goat(&data, (pos.x, pos.y, pos.z), target, tick);
         if let Ok(mut d) = ecs.get::<&mut GoatData>(id) {
@@ -276,6 +279,7 @@ pub fn dispatch_bees(
         .query::<(&Position, &MobKind, &BeeData, &MobAi, Option<&LastAttacker>)>()
         .iter()
     {
+        if crate::combat::entity_is_dead(ecs, id) { continue; }
         if kind.0 == MobType::Bee && !generic_owns(&ai.state) {
             bees.push((id, pos.0, data.clone(), attacker.and_then(|a| a.0.slot())));
         }
@@ -286,6 +290,7 @@ pub fn dispatch_bees(
     }
     let speed = mob::mob_def(MobType::Bee).speed / 20.0 * BEE_FLY_SPEED_MULT;
     for (id, pos, data, attacker_pidx) in bees {
+        if crate::combat::entity_is_dead(ecs, id) { continue; }
         // Surface the recent attacker (if any) so the bee can decide to sting.
         let recent_attacker = attacker_pidx
             .and_then(|pidx| player_positions.get(pidx).map(|p| (pidx as u64, p.x, p.y, p.z)));
@@ -345,6 +350,7 @@ pub fn dispatch_horses(ecs: &mut hecs::World, tick: u64) {
         .query::<(&Position, &MobKind, &HorseData, &MobAi, Option<&Ridden>)>()
         .iter()
     {
+        if crate::combat::entity_is_dead(ecs, id) { continue; }
         // The whole horse family (Horse + Donkey + Mule) herd-wanders.
         if crate::mob::is_horse_family(kind.0) && ridden.is_none() && !generic_owns(&ai.state) {
             horses.push((id, pos.0, data.clone(), kind.0));
@@ -354,6 +360,7 @@ pub fn dispatch_horses(ecs: &mut hecs::World, tick: u64) {
         return;
     }
     for (id, pos, data, kind) in horses {
+        if crate::combat::entity_is_dead(ecs, id) { continue; }
         let speed = mob::mob_def(kind).speed / 20.0; // per-species (donkeys/mules amble slower)
         // No species-flee: the generic struck-flee already bolts horses.
         let (next, action) = horse_ai::tick_horse(&data, (pos.x, pos.y, pos.z), None, tick);
@@ -398,6 +405,7 @@ pub fn dispatch_squids(ecs: &mut hecs::World, world: &crate::world::World, tick:
         return;
     }
     for (id, pos, kind, data) in squids {
+        if crate::combat::entity_is_dead(ecs, id) { continue; }
         let speed = mob::mob_def(kind).speed / 20.0;
         let (next, action) = squid_ai::tick_squid(
             &data,
@@ -452,6 +460,7 @@ pub fn dispatch_sharks(
 ) -> Vec<SharkBite> {
     let mut sharks: Vec<(hecs::Entity, Vec3)> = Vec::new();
     for (id, (pos, kind)) in ecs.query::<(&Position, &MobKind)>().iter() {
+        if crate::combat::entity_is_dead(ecs, id) { continue; }
         if kind.0 == MobType::Shark {
             sharks.push((id, pos.0));
         }
@@ -462,6 +471,7 @@ pub fn dispatch_sharks(
     }
     let speed = mob::mob_def(MobType::Shark).speed / 20.0;
     for (id, pos) in sharks {
+        if crate::combat::entity_is_dead(ecs, id) { continue; }
         // Only hunt a player who is themselves in water + within range.
         let target = player_positions
             .iter()
@@ -540,6 +550,7 @@ pub fn dispatch_companions(
         return;
     }
     for (id, pos, kind, owner, state) in pets {
+        if crate::combat::entity_is_dead(ecs, id) { continue; }
         let owner_slot = owners.slot_of(&owner);
         let owner_pos = owners.position_of(&owner);
         match state {
@@ -626,6 +637,7 @@ pub fn dispatch_nostriches(
         birds.push((id, pos.0, data.owner_pubkey().to_string(), generic_owns(&ai.state)));
     }
     for (id, pos, owner, generic_reactive) in birds {
+        if crate::combat::entity_is_dead(ecs, id) { continue; }
         let owner_pos = owners.position_of(&owner);
         let owner_distance = owner_pos.map(|op| (op - pos).length());
 
@@ -694,6 +706,7 @@ pub fn dispatch_hyenas(
 
     let mut hyenas: Vec<(hecs::Entity, Vec3, HyenaData)> = Vec::new();
     for (id, (pos, kind, data)) in ecs.query::<(&Position, &MobKind, &HyenaData)>().iter() {
+        if crate::combat::entity_is_dead(ecs, id) { continue; }
         if kind.0 == MobType::Hyena {
             hyenas.push((id, pos.0, *data));
         }
@@ -703,6 +716,7 @@ pub fn dispatch_hyenas(
     }
     let speed = mob::mob_def(MobType::Hyena).speed / 20.0;
     for (id, pos, mut data) in hyenas {
+        if crate::combat::entity_is_dead(ecs, id) { continue; }
         hyena_ai::tick(&mut data, world_time);
         if let Ok(mut d) = ecs.get::<&mut HyenaData>(id) {
             *d = data;
@@ -770,6 +784,7 @@ pub fn dispatch_bears(
 
     let mut bears: Vec<(hecs::Entity, Vec3)> = Vec::new();
     for (id, (pos, kind, _data)) in ecs.query::<(&Position, &MobKind, &BearData)>().iter() {
+        if crate::combat::entity_is_dead(ecs, id) { continue; }
         if kind.0 == MobType::Bear {
             bears.push((id, pos.0));
         }
@@ -780,6 +795,7 @@ pub fn dispatch_bears(
     }
     let speed = mob::mob_def(MobType::Bear).speed / 20.0;
     for (id, pos) in bears {
+        if crate::combat::entity_is_dead(ecs, id) { continue; }
         let ipos = (pos.x.floor() as i32, pos.y.floor() as i32, pos.z.floor() as i32);
         let effect = {
             let Ok(mut d) = ecs.get::<&mut BearData>(id) else { continue };

@@ -4892,6 +4892,31 @@ impl super::GameState {
             .collect()
     }
 
+    /// Run the shared death pass and consume its local effects immediately,
+    /// before projectiles, pickup, another catch-up tick, input or save.
+    fn tick_deaths(&mut self) {
+        if self.joined() { return; }
+        let lent = self.sim_lent();
+        if !lent { self.sim_runs(SimSystem::DespawnDead); }
+        let locals: Vec<_> = self.players.iter().map(|p| (p.player.pos, p.combat.dead)).collect();
+        let events = if let Some(hs) = self.hosted_server.as_mut() {
+            hs.server.run_host_death_phase(&mut self.world, &mut self.ecs, &locals,
+                (self.tick_counter, self.world_time), lent);
+            hs.server.sim_events.take()
+        } else {
+            crate::sim_death::observe_pending(&self.ecs, self.tick_counter);
+            let mut out = crate::sim_mobs::SimEvents::default();
+            if let Some(mut batch) = out.reserve_deaths() {
+                crate::sim_death::sweep(&mut self.world, &mut self.ecs, crate::sim_death::DeathContext {
+                    tick: self.tick_counter, world_time: self.world_time, locals: &locals, joiners: &[],
+                }, &mut batch);
+                out.push(crate::sim_mobs::SimEvent::Deaths(batch));
+            }
+            out.take()
+        };
+        self.apply_sim_events(events);
+    }
+
     /// D4 slice 3 — land what the mob simulation did to this client's players
     /// and world (`sim_mobs::SimEvent`), through the rules the old inline code
     /// used, once each: a standalone game's right after each phase, a lent
@@ -4961,6 +4986,20 @@ impl super::GameState {
                         Instant::now() + Duration::from_secs(3),
                     ));
                     self.particles.puff(pos, glam::Vec3::Y, 6, self.tick_counter ^ (pet.to_bits().get() << 8));
+                }
+                SimEvent::Deaths(batch) => {
+                    for notice in batch.notices() {
+                        match *notice {
+                            crate::sim_death::DeathNotice::Rescued { kind, .. } => {
+                                self.toast = Some((format!("Your {} was rescued to its bed!", crate::mob::mob_def(kind).name),
+                                    Instant::now() + Duration::from_secs(3)));
+                            }
+                            crate::sim_death::DeathNotice::Killed { death, tamed, credit: crate::combat::KillCredit::Local(slot), .. } => {
+                                self.credit_kill(slot, death.kind, death.pos, tamed);
+                            }
+                            crate::sim_death::DeathNotice::Killed { .. } => {}
+                        }
+                    }
                 }
                 SimEvent::CellChanged { x, y, z, .. } => self.rebuild_chunk_at(x, y, z),
                 SimEvent::Seat(seat) => {
@@ -5742,15 +5781,26 @@ impl super::GameState {
         });
         // The quest preparation only gates admitting joiners (and saves the
         // world to do it): a local-only authority (D3) admits nobody.
+        let deaths_pending = crate::sim_death::has_pending(&self.ecs);
         if self.hosted_server.as_ref().is_some_and(|host| host.lends_host_world() && !host.local_only())
-            && self.hosted_server.as_ref().is_some_and(|host| host.local_gameplay_preparation.is_none())
+            && self.hosted_server.as_ref().is_some_and(|host| host.local_gameplay_preparation.is_none()
+                || (host.local_gameplay_waiting_deaths && !deaths_pending))
         {
-            let prepared = self.prepare_local_gameplay();
+            // Keep admissions refused while waiting, with free control and
+            // simulation running. Retry this transient only after drain.
+            let prepared = if deaths_pending {
+                Err(crate::sim_death::DEATHS_PENDING.to_string())
+            } else {
+                self.prepare_local_gameplay()
+            };
             if let Err(error) = &prepared {
                 log::error!("Hosted gameplay authority could not be prepared: {error}");
                 self.toast = Some((format!("New players cannot join yet: {error}"), web_time::Instant::now() + std::time::Duration::from_secs(10)));
             }
-            if let Some(host) = self.hosted_server.as_mut() { host.local_gameplay_preparation = Some(prepared); }
+            if let Some(host) = self.hosted_server.as_mut() {
+                host.local_gameplay_waiting_deaths = deaths_pending;
+                host.local_gameplay_preparation = Some(prepared);
+            }
         }
         let Some(hs) = self.hosted_server.as_mut() else {
             return report;
@@ -6259,8 +6309,9 @@ impl super::GameState {
         // Never for a joined session: the host owns that world, and a local
         // "remote_game" autosave used to seed the NEXT join with this one's
         // inventory and chunks.
-        self.autosave_counter += 1;
-        if self.autosave_counter >= 6000 && self.persists_locally() {
+        self.autosave_counter = self.autosave_counter.saturating_add(1);
+        if self.autosave_counter >= 6000 && self.persists_locally()
+            && !crate::sim_death::has_pending(&self.ecs) {
             self.autosave_counter = 0;
             #[cfg(not(target_arch = "wasm32"))]
             if let Err(e) = self.preflight_personal_local() { log::error!("Personal autosave failed: {e}"); return; }
@@ -7723,214 +7774,9 @@ impl super::GameState {
                 self.after_mob_attacks(i, attackers);
             }
         }
-        // Spec 28d.nostrich v2 — snapshot tamed-Nostrich ownership
-        // before despawn_dead removes the entity. We'll consult this
-        // snapshot in the vow-trigger path: a Nostrich tamed by the
-        // killing player doesn't trigger the Vow (it's their bird).
-        let mut dying_tamed_nostrich_owners: Vec<glam::Vec3> = Vec::new();
-        for (_e, (kind, health, data, pos)) in self.ecs.query::<(
-            &crate::entity::MobKind,
-            &crate::combat::Health,
-            &crate::nostrich::NostrichData,
-            &crate::entity::Position,
-        )>().iter() {
-            if kind.0 == crate::mob::MobType::Nostrich
-                && health.is_dead()
-                && data.is_tamed()
-            {
-                dying_tamed_nostrich_owners.push(pos.0);
-            }
-        }
-        // Spec 22 Phase 5 — snapshot RaidMember on each dying mob so
-        // we can attribute the kill to the nearest player after
-        // `despawn_dead` removes the entity. Pos is also captured for
-        // the "is this kill inside the defender radius?" check.
-        // MP-D2b — a raider a joiner killed counts down the raid but credits
-        // no defender here (the joiner's own client has no raid to settle).
-        let mut dying_raid_kills: Vec<(crate::raid::RaidId, glam::Vec3, bool)> = Vec::new();
-        for (_e, (health, rm, pos, last)) in self.ecs.query::<(
-            &crate::combat::Health,
-            &crate::raid::RaidMember,
-            &crate::entity::Position,
-            Option<&crate::combat::LastAttacker>,
-        )>().iter() {
-            if health.is_dead() {
-                // A departed joiner's hit is still a joiner's: no defender
-                // here takes the credit for it (Spec 04 §4.2d).
-                let by_joiner = last.is_some_and(|l| l.0.is_joiner());
-                dying_raid_kills.push((rm.raid_id, pos.0, by_joiner));
-            }
-        }
-        // HP-3 — snapshot HomeHideout anchors for any brigand-family mob
-        // about to die, so the kill-attribution path can decrement the
-        // hideout's population after the entity is removed.
-        let mut dying_brigand_homes: Vec<[i32; 3]> = Vec::new();
-        for (_e, (health, kind, home)) in self.ecs.query::<(
-            &crate::combat::Health,
-            &crate::entity::MobKind,
-            &crate::brigand::HomeHideout,
-        )>().iter() {
-            if health.is_dead() && crate::brigand::Tier::from_mob_type(kind.0).is_some() {
-                dying_brigand_homes.push(home.anchor);
-            }
-        }
-        // Spec 28d.wolves R5 + Task 2 (2026-07-07) — snapshot dying wolves'
-        // WolfData (tamed-vs-untamed drop table) and dying steeds' cargo
-        // packs BEFORE despawn. Extracted to `death_drops` (2026-07-11) so
-        // GameServer::tick runs the identical routing. Only mobs still dead
-        // by the time `despawn_dead` runs are matched against the snapshot,
-        // so a Pet Bed rescue (which heals the entity and clears `is_dead()`)
-        // naturally prevents a double-drop.
-        let mut drop_snaps = crate::death_drops::snapshot_before_despawn(&self.ecs);
-        // Pet Bed rescue (2026-07-06 pets wave) — snapshot dying entities
-        // that are somebody's tamed pet (any of the four ownership shapes,
-        // via `tameable::pet_owner_of`) BEFORE `despawn_dead` runs below. If
-        // a PET_BED is in range of the death position, revive + teleport the
-        // pet there instead of letting it die. This has to happen before
-        // `despawn_dead` so the healed entity no longer reads as dead and is
-        // skipped by that pass entirely — no drops, no despawn, no
-        // kill-counter tick, matching the "thin wiring" the feature wants.
-        //
-        // Task 6 (bug-hardening review, 2026-07-07) — `tameable::eligible_for_
-        // pet_bed_rescue` also excludes any pet marked `DeliberateCull` by
-        // the owner's own sneak-kill (the 1C no-friendly-fire bypass) below,
-        // so that deliberate cull sticks instead of being revived at the
-        // nearest bed.
-        let mut dying_pets: Vec<(hecs::Entity, glam::Vec3, crate::mob::MobType)> = Vec::new();
-        for (e, (health, kind, pos)) in self.ecs.query::<(
-            &crate::combat::Health,
-            &crate::entity::MobKind,
-            &crate::entity::Position,
-        )>().iter() {
-            if health.is_dead()
-                && crate::tameable::eligible_for_pet_bed_rescue(&self.ecs, e, self.tick_counter)
-            {
-                dying_pets.push((e, pos.0, kind.0));
-            }
-        }
-        for (e, pos, kind) in dying_pets {
-            let Some(bed) =
-                crate::pet_bed::find_pet_bed_near(&self.world, (pos.x, pos.y, pos.z))
-            else {
-                continue;
-            };
-            if let Ok(mut p) = self.ecs.get::<&mut crate::entity::Position>(e) {
-                p.0 = glam::Vec3::new(bed.0 as f32 + 0.5, bed.1 as f32 + 1.0, bed.2 as f32 + 0.5);
-            }
-            if let Ok(mut h) = self.ecs.get::<&mut crate::combat::Health>(e) {
-                h.current = crate::mob::mob_def(kind).health as f32;
-            }
-            self.toast = Some((
-                format!(
-                    "Your {} was rescued to its bed!",
-                    crate::mob::mob_def(kind).name
-                ),
-                Instant::now() + Duration::from_secs(3),
-            ));
-        }
-
-        // Despawn dead mobs and spawn drops at their last position. Use the
-        // current world tick + each death's position bits as the seed so the
-        // same kill in the same tick is deterministic across replays.
-        // Always this client's, lent world or not (D1, Q1 trap 2): this is the
-        // single kill-attribution site, and a lent server's sweep would drop
-        // the attacker. Tallied for the lent-tick tripwire.
-        let despawn_here = self.sim_runs(SimSystem::DespawnDead);
-        debug_assert!(despawn_here, "the death sweep is always the host client's");
-        let deaths = crate::combat::despawn_dead(&mut self.ecs);
-        // HP-3 — decrement hideout populations for each dying brigand.
-        for home in &dying_brigand_homes {
-            crate::brigand_hideout_gen::on_brigand_killed(&mut self.world, *home);
-        }
-        let locals: Vec<(glam::Vec3, bool)> =
-            self.players.iter().map(|p| (p.player.pos, p.combat.dead)).collect();
-        for death in deaths {
-            let crate::combat::MobDeath { kind, pos, attacker, .. } = death;
-            // Loot table + wolf-specific routing + cargo-pack spill +
-            // salt-lick bonus — shared with GameServer::tick via
-            // `death_drops` (2026-07-11). Deterministic on
-            // (pos.x, pos.z, world_time). A joiner's kill drops its loot
-            // here too, as world items: its server pickup grants them.
-            crate::death_drops::spawn_drops_for_death(
-                &mut self.ecs,
-                &self.world,
-                &mut drop_snaps,
-                death,
-                self.world_time,
-            );
-            // v2 — a tamed Nostrich's death doesn't bring the Vow. If the
-            // dead Nostrich's position matches one of the pre-despawn
-            // "tamed" snapshots, it was somebody's bird.
-            let was_tamed = kind == crate::mob::MobType::Nostrich
-                && dying_tamed_nostrich_owners.iter().any(|p| {
-                    (p.x - pos.x).abs() < 0.5 && (p.z - pos.z).abs() < 0.5 && (p.y - pos.y).abs() < 0.5
-                });
-            // Kill attribution — `combat::attribute_kill`, the one rule
-            // (MP-D2b): the last attacker stamped by `combat::strike` (or a
-            // projectile), else the nearest living local player. A joiner's
-            // kill (a lent world's sweep is this client's until D4) goes to
-            // that joiner as a `KillEvent`, and credits no player here.
-            let location = crate::server::DeathLocation::from_world(&self.world, pos);
-            let server = self.hosted_server.as_mut().map(|hs| &mut hs.server);
-            if let Some(idx) =
-                crate::server::route_client_kill(server, attacker, kind, location, was_tamed, &locals)
-            {
-                self.credit_kill(idx, kind, pos, was_tamed);
-            }
-        }
-
-        // Spec 22 Phase 5 — apply raid-kill attribution. Each dying
-        // raid mob credits the nearest living player who is inside the
-        // village's defender radius. Decrements `mobs_alive`; the last
-        // kill stamps `killing_blow` for the +20 rep bonus on bounty
-        // settlement.
-        for &(raid_id, mob_pos, by_joiner) in &dying_raid_kills {
-            let (raid_id, mob_pos) = (&raid_id, &mob_pos);
-            // Snapshot the village id + anchor for this raid so we can
-            // gate "kill counts only if attacker is inside defender
-            // radius" without re-borrowing world.active_raids.
-            let village_info = self
-                .world
-                .active_raids
-                .iter()
-                .find(|r| r.id == *raid_id)
-                .map(|r| (r.village_id, r.village_anchor));
-            let Some((_vid, anchor)) = village_info else { continue };
-            let anchor_pos = glam::Vec3::new(
-                anchor[0] as f32 + 0.5,
-                anchor[1] as f32 + 0.5,
-                anchor[2] as f32 + 0.5,
-            );
-            // Pick the nearest living player who is within defender
-            // radius of the village anchor.
-            let mut nearest: Option<(usize, f32)> = None;
-            for (i, p) in self.players.iter().enumerate() {
-                if by_joiner || p.combat.dead { continue; }
-                if (p.player.pos - anchor_pos).length() > crate::raid::DEFENDER_RADIUS_BLOCKS {
-                    continue;
-                }
-                let d = (p.player.pos - *mob_pos).length();
-                if nearest.map(|(_, bd)| d < bd).unwrap_or(true) {
-                    nearest = Some((i, d));
-                }
-            }
-            let Some((pidx, _)) = nearest else {
-                // No defender in range — Iron Golem kill or a stray
-                // projectile from outside. The mob still dies and
-                // mobs_alive ticks down, but no contribution credit.
-                if let Some(r) = crate::raid::find_raid_mut(&mut self.world, *raid_id) {
-                    r.mobs_alive = r.mobs_alive.saturating_sub(1);
-                }
-                continue;
-            };
-            if let Some(r) = crate::raid::find_raid_mut(&mut self.world, *raid_id) {
-                crate::raid::record_kill(&mut r.contribution_table, pidx);
-                r.mobs_alive = r.mobs_alive.saturating_sub(1);
-                if r.mobs_alive == 0 {
-                    r.killing_blow = Some(pidx);
-                }
-            }
-        }
+        // Shared death/rescue boundary. Lent authority runs it here too,
+        // retaining the established before-projectile timing.
+        self.tick_deaths();
 
         // Projectile physics (Wave 23). Runs before item-pickup so a
         // killed mob's drops can still be picked up the same tick. C3c-2 — on

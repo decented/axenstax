@@ -151,7 +151,7 @@ pub fn tick_mob_ai(
     // Collect entity updates to avoid borrow conflicts
     let mut updates: Vec<(hecs::Entity, AiState, Vec3)> = Vec::new();
 
-    for (id, (pos, vel, kind, hitbox, _on_ground, ai, ridden)) in ecs
+    for (id, (pos, vel, kind, hitbox, _on_ground, ai, ridden, health)) in ecs
         .query_mut::<(
             &Position,
             &mut Velocity,
@@ -160,8 +160,10 @@ pub fn tick_mob_ai(
             &OnGround,
             &mut MobAi,
             Option<&crate::entity::Ridden>,
+            Option<&crate::combat::Health>,
         )>()
     {
+        if health.is_some_and(|h| h.is_dead()) { continue; }
         // P9 — a ridden mob is steered by its rider, not its wander AI.
         if ridden.is_some() {
             continue;
@@ -584,6 +586,7 @@ pub fn tick_golem_combat(ecs: &mut hecs::World) -> u32 {
     let mut defenders: Vec<(hecs::Entity, Vec3, MobType)> = Vec::new();
     let mut hostiles: Vec<(hecs::Entity, Vec3, f32)> = Vec::new();
     for (id, (pos, kind)) in ecs.query::<(&Position, &MobKind)>().iter() {
+        if crate::combat::entity_is_dead(ecs, id) { continue; }
         if is_village_defender(kind.0) {
             defenders.push((id, pos.0, kind.0));
         } else if mob::mob_def(kind.0).category == MobCategory::Hostile {

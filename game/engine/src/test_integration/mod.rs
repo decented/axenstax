@@ -32,6 +32,7 @@ pub mod electricity;
 pub mod electricity_sources;
 pub mod explosives;
 pub mod death_drops;
+mod sim_death;
 pub mod late_join;
 pub mod entity_mirror; // MP-D2a — joiners see and are hurt by the server's mobs.
 pub mod joiners_act; // MP-D2b — joiners attack, interact with and kill the server's mobs.
