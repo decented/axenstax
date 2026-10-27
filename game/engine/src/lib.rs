@@ -422,7 +422,10 @@ mod data_dir;
 mod transport;
 mod server;
 mod server_stream; // Phase B1 — the dedicated server's column streamer.
-mod block_machines; // T1-3 — GameServer's block-machine pass + the shared MachineCtx.
+mod block_machines;
+mod sim_machines;
+mod server_machines;
+mod machine_client;
 mod block_use; // C3b-2 — composters, drying racks, campfires, item frames and hives: one rule per block.
 mod shot; // C3c-2 — a bow's or slingshot's shot: one rule for every seat, the server's for a joiner.
 mod block_views; // C3b-2 — what joiners are shown of those blocks (`BlockEntityView`).

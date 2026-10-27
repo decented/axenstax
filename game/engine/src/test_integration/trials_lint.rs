@@ -151,7 +151,7 @@ fn check_events_fired_in_gameplay(defs: &[(&str, ScenarioDef)], game_loop_src: &
 
 #[test]
 fn every_objective_event_is_fired_in_gameplay() {
-    let game_loop_src = include_str!("../game_loop.rs");
+    let game_loop_src = concat!(include_str!("../game_loop.rs"), "\n", include_str!("../machine_client.rs"));
     check_events_fired_in_gameplay(&all_bundled_defs(), game_loop_src)
         .unwrap_or_else(|e| panic!("{e}"));
 }

@@ -949,7 +949,14 @@ pub fn power_tick(
 /// them (the blast needs the wider game state: audio, lighting, combat). Pure on
 /// the `World`, so it's unit-testable without a full client. Runs every game-loop
 /// tick, independent of network activity, so a primed fuse always burns down.
+#[cfg(test)]
 pub fn tick_keg_fuses(world: &mut World) -> Vec<Pos> {
+    tick_keg_fuses_bounded(world, usize::MAX)
+}
+
+/// Expiring fuses wait at one when their delivery cannot be reserved. Other
+/// fuses continue burning; no expiry is consumed and then silently dropped.
+pub(crate) fn tick_keg_fuses_bounded(world: &mut World, limit: usize) -> Vec<Pos> {
     let lit: Vec<Pos> = world
         .block_entities
         .iter()
@@ -966,6 +973,7 @@ pub fn tick_keg_fuses(world: &mut World) -> Vec<Pos> {
     for pos in lit {
         if let Some(d) = world.power_device_at_mut(pos)
             && d.kind == PowerDeviceKind::BlastingKeg && d.charge > 0 {
+                if d.charge == 1 && detonations.len() >= limit { continue; }
                 d.charge -= 1;
                 if d.charge == 0 {
                     detonations.push(pos);

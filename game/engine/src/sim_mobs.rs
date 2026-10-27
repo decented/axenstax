@@ -111,6 +111,8 @@ pub enum SimEvent {
     /// Already-applied rescues and locally attributed deaths; reserved before
     /// the shared death pass, drained at its boundary before projectiles.
     Deaths(crate::sim_death::DeathBatch),
+    /// Reserved before machine mutations, drained immediately at that phase.
+    Machines(crate::sim_machines::MachineBatch),
 }
 
 /// The outbox: [`SimEvent`]s in the order the phases made them.
@@ -118,6 +120,13 @@ pub enum SimEvent {
 pub struct SimEvents(Vec<SimEvent>);
 
 impl SimEvents {
+    pub fn reserve_machines(&mut self) -> Option<crate::sim_machines::MachineBatch> {
+        if !self.0.is_empty() { return None; }
+        let batch = crate::sim_machines::MachineBatch::reserve(true)?;
+        self.0.try_reserve_exact(1).ok()?;
+        let bytes = self.0.capacity() * std::mem::size_of::<SimEvent>() + batch.owned_bytes();
+        (bytes <= crate::sim_machines::MAX_MACHINE_BYTES).then_some(batch)
+    }
     pub fn push(&mut self, event: SimEvent) {
         self.0.push(event);
     }
@@ -413,3 +422,16 @@ pub fn summon(world: &World, ecs: &mut hecs::World, anchor: Option<Vec3>) {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod machine_budget_tests {
+    use super::*;
+    #[test]
+    fn d4_machines_outbox_reservation_counts_allocated_capacity() {
+        let cap = crate::sim_machines::MAX_MACHINE_BYTES / std::mem::size_of::<SimEvent>() + 1;
+        let mut out = SimEvents(Vec::with_capacity(cap));
+        assert!(out.reserve_machines().is_none(), "empty length cannot hide retained bytes");
+        out.take();
+        assert!(out.reserve_machines().is_some());
+    }
+}

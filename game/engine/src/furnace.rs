@@ -656,6 +656,7 @@ pub fn cleanup_furnace(world: &mut crate::world::World, x: i32, y: i32, z: i32) 
 }
 
 /// What one [`tick_all`] sweep did, for the caller's side effects.
+#[cfg(test)]
 #[derive(Debug, Default)]
 pub struct FurnaceSweep {
     /// FURNACE ↔ FURNACE_LIT flips, already applied to the world and built with
@@ -675,32 +676,35 @@ pub struct FurnaceSweep {
 /// desired state AND is still a furnace (defence against a `/setblock` that
 /// swapped the block out from under the entity — trust the next tick to
 /// converge).
+#[cfg(test)]
 pub fn tick_all(world: &mut crate::world::World) -> FurnaceSweep {
     let mut sweep = FurnaceSweep::default();
     let positions: Vec<(i32, i32, i32)> = world.iter_furnaces().map(|(p, _)| p).collect();
     for pos in positions {
-        let current_block = world.get_block(pos.0, pos.1, pos.2);
-        let outcome = match world.furnace_at_mut(pos) {
-            Some(data) => tick_one(data),
-            None => continue,
-        };
-        if let Some(lit) = outcome.lit_changed {
-            let want_block = if lit { crate::block::FURNACE_LIT } else { crate::block::FURNACE };
-            if current_block != want_block
-                && (current_block == crate::block::FURNACE
-                    || current_block == crate::block::FURNACE_LIT)
-            {
-                world.set_block(pos.0, pos.1, pos.2, want_block);
-                sweep.changes.push(crate::game_loop::broadcast_change(
-                    world, pos.0, pos.1, pos.2, want_block,
-                ));
-            }
-        }
-        if outcome.recipe_completed.is_some() {
+        if tick_at(world, pos, &mut sweep.changes).is_some_and(|out| out.recipe_completed.is_some()) {
             sweep.completed.push(pos);
         }
     }
     sweep
+}
+
+/// One furnace and its lit flip, so the shared machine phase can reserve a
+/// completion's local policy delivery before advancing fuel or input.
+pub(crate) fn tick_at(
+    world: &mut crate::world::World,
+    pos: (i32, i32, i32),
+    changes: &mut Vec<crate::protocol::BlockChange>,
+) -> Option<FurnaceTickOutcome> {
+    let current = world.get_block(pos.0, pos.1, pos.2);
+    let outcome = tick_one(world.furnace_at_mut(pos)?);
+    if let Some(lit) = outcome.lit_changed {
+        let want = if lit { crate::block::FURNACE_LIT } else { crate::block::FURNACE };
+        if current != want && matches!(current, crate::block::FURNACE | crate::block::FURNACE_LIT) {
+            world.set_block(pos.0, pos.1, pos.2, want);
+            changes.push(crate::game_loop::broadcast_change(world, pos.0, pos.1, pos.2, want));
+        }
+    }
+    Some(outcome)
 }
 
 #[cfg(test)]

@@ -683,36 +683,17 @@ fn a_view_goes_only_to_joiners_holding_its_chunk() {
 
 #[test]
 fn a_joined_client_runs_no_composter_hive_or_rack_sim() {
-    // Source lint, in `block_machines`' tradition (the client tick needs a
-    // GPU; `TestHost` has no client). A joiner's composters, hives and racks
-    // are the server's, shown to it as views: its own sweeps would age,
-    // fill and season its copy between views, and its toasts would announce
-    // logs the server never seasoned. Each stays behind
-    // `remote_client.is_none()`.
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("game_loop.rs");
-    let raw = std::fs::read_to_string(&path).unwrap_or_else(|e| {
-        panic!("joiner-sim lint: cannot read {} ({e}). If the client tick moved, update this lint's path.", path.display())
-    });
-    let lines: Vec<&str> = raw.lines().collect();
-    let sites: [(&str, usize); 3] = [
-        ("crate::composter::tick_all(&mut self.world)", 3),
-        ("crate::bee_hive::accumulate_honey(&mut self.world", 3),
-        ("self.world.drying_racks.keys().copied().collect()", 3),
-    ];
-    for (needle, back) in sites {
-        let hits: Vec<usize> = lines
-            .iter()
-            .enumerate()
-            .filter(|(_, l)| !l.trim_start().starts_with("//") && l.contains(needle))
-            .map(|(i, _)| i)
-            .collect();
-        assert_eq!(hits.len(), 1, "joiner-sim lint: `{needle}` should appear once in game_loop.rs, found {hits:?}");
-        let i = hits[0];
-        assert!(
-            lines[i.saturating_sub(back)..=i].iter().any(|l| l.contains("remote_client.is_none()")),
-            "game_loop.rs:{}: `{needle}` runs on a joined client — gate it behind `self.remote_client.is_none()`",
-            i + 1
-        );
+    // The common entry owns all three sweeps; a joined client must return
+    // before constructing its context or invoking either authority/local path.
+    let client = include_str!("../machine_client.rs");
+    let entry: String = client.split("pub(crate) fn tick_machines(&mut self)").nth(1)
+        .expect("shared machine entry").split_whitespace().collect();
+    let guard = entry.find("ifself.joined(){return;}").expect("joined client refusal");
+    assert!(guard < entry.find("crate::block_machines::MachineCtx").unwrap());
+    let shared = include_str!("../sim_machines.rs");
+    for call in ["crate::composter::tick_all(", "crate::bee_hive::accumulate_honey(", "crate::drying_rack::tick_one("] {
+        assert_eq!(shared.matches(call).count(), 1, "one shared {call} owner");
+        assert!(!include_str!("../game_loop.rs").contains(call), "no private inline {call} copy");
     }
 }
 

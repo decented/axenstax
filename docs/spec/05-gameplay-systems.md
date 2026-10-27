@@ -1960,7 +1960,7 @@ everything else — and every Dropper eject — tosses an item entity (`spawn_th
 0.25 b/t + lift). New dispense behaviours are new arms in `dispenser::eject_decision`.
 On a **dedicated server** (MP-A3, 2026-10-06) the arrow is as real as in single-player:
 `GameServer::tick` runs the same `entity::tick_projectiles` the client runs (only where
-`simulates_block_machines` is set), so it flies, hits the first mob in its path through
+its explicit `SimSystem::Projectiles` owner runs; D4 slice5), so it flies, hits the first mob in its path through
 `combat::Health` (mobs only, on both sides — a projectile never damages a player), and
 reaches joiners as an `EntityKind::Projectile` (Spec 04, "Server projectiles").
 
@@ -4530,3 +4530,32 @@ monetary/treasury effect. The actual source37 controls and final combined gates
 are pending; full transfer acceptance is not claimed here. Reputation's actual
 natural-day runtime contract, raid/treasury6000 schedule, existing proofs and
 selected-primary guards, Mirror default and D4 qualifications are unchanged.
+
+
+### D4 slice 5 — machine gameplay ownership (2026-10-27)
+
+Standalone/web and native authorities call the same `sim_machines::step`
+(architecture Spec01 §4.1.1). Campfire fuel/cooking/smoke, drying racks,
+workstation/gossip maintenance and manual construction/plaque completion now
+also run on dedicated servers. The existing four-logical-tick cadence is
+preserved; no 20 Hz speed-up is introduced. Hoppers retain their separate
+transfer cadence. Joined clients simulate none of these shared machines.
+
+Furnace completions carry already-applied facts to the original local
+Charter/Vow/Proof-of-Play consumer once. Dedicated/joined completion introduces
+no monetary consumer. Piston-use and expired-keg challenge facts retain their
+original frequency and gates. Local blast raw hits and exact chest closures
+are recorded per detonation, then consumed in order through armour/i-frames
+and parrot dismount; joiner damage still lands immediately on the server.
+Critical facts reserve count and actual owned bytes before mutation; full
+queues defer furnace input/fuel and expiring fuses rather than losing effects.
+Cosmetics may coalesce within the documented bounds.
+
+Manual construction pauses before consuming pace/materials if any actual
+rotated target or final plaque is absent, or restored dimensions/coordinates
+are malformed. NPC-commissioned anchors are excluded from the generic sweep;
+`process_builder_commissions` remains their sole every-tick owner. Previously
+the generic sweep could double-advance/remove such an anchor before its
+commission observed completion. Dedicated NPC commissions/village population,
+joined quest interaction and chest auto-collection remain separate limits.
+No save/wire field or default/policy gate changes.

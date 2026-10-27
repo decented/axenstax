@@ -955,18 +955,16 @@ block-only `held_item: u16` field is retained alongside for back-compat.)
 
 ### 4.2b Server projectiles and server-held death (as built, protocol v67, MP-A3)
 
-**Projectiles.** A dedicated server (`GameServer::simulates_block_machines`, set
-when no host client exists) runs `entity::tick_projectiles` every tick — the
-same pure function the client runs, in the same place (after entity physics,
-before item lifetimes). Its dispensers' arrows therefore fly, take gravity,
-stop at the first solid block, and hit the first mob whose hitbox they enter,
-through `combat::Health` and the server's ordinary `despawn_dead` →
-`death_drops` path. Projectiles hit **mobs only**, on both sides; nothing
-fired damages a player. A LAN host's server does NOT run the tick: its
-projectiles live in its host client's sim, and a second tick would be a
-second sim. On a lending host (D1, "Hosted mode — the host lends its world"
-below) that sim's ECS is the one the server diffs, so joiners see the host's
-own arrows in flight through this same `EntityKind::Projectile` channel.
+**Projectiles (D4 slice5, no wire change).** Projectile ownership is explicit
+(`SimSystem::Projectiles`) and independent of the machine flag. Dedicated and
+owning servers run `entity::tick_projectiles` after entity physics and before
+item lifetimes, retaining their late death sweep. On a lending host (LAN,
+online or opt-in `--solo-hosted`), `run_host_projectile_phase` borrows the actual
+world/ECS at the original client post-death boundary; its token refuses a
+second pass and the later full server tick skips it. Those kills retain their
+next-early-boundary death/drop timing. Standalone/web use the same rules at
+their original boundary. Projectiles hit mobs only; no player damage is added.
+The lent ECS remains the one diffed for joiners, so they see the same flight.
 
 The entity diff (`entity_broadcast::EntityBroadcast::diff`, §4.2c) gives each `ProjectileEntity` a `ProtocolId` on first sight
 and broadcasts it as `EntityKind::Projectile = 39`: one `EntitySpawn`
@@ -2593,15 +2591,15 @@ accumulation or drying-rack seasoning (`remote_client.is_none()` gates;
 pinned by `test_integration::block_use::a_joined_client_runs_no_composter_hive_or_rack_sim`);
 the campfire sweep was gated by FU3.
 
-*Known limits (C3b-2).* The dedicated server still ticks no campfires or
-drying racks (tick parity, D4): a dedicated server's fires don't burn down or
-cook and its racks don't season; a lending host's client ticks them on the
-lent world. Its composters age on the block-machine cadence. A `--no-lend`
-host's server copy of these blocks is not mirrored from the host
-(`mirror_host_world_state` copies mirrored families only; the flag is
-slated for deletion). The joiner's held claim is believed within the
-believed bound (C3b-2-fix M2; refused past it, enforced at C3d). Pinned by
-`test_integration::block_use`.
+*Machine ownership (D4 slice5).* Dedicated campfires now cook/burn down and
+place/clear smoke; drying racks season. Lending authorities run the same
+`sim_machines` rules at the established early host boundary, once, and joined
+clients run none. The four-tick machine cadence and server block views are
+retained. Early machine results use `queue_host_broadcast` once, not client
+edits or the power-transition challenge channel. The legacy `--no-lend`
+separate-world/mirror limitations remain. No joined furnace policy/sats
+consumer, dedicated village population or NPC commission lifecycle is enabled.
+See Spec01 §4.1.1 for bounded delivery and remaining machine limits.
 
 **Use requests (C3c-2, protocol v81; log-only for costs, like all
 of C3a–C3c).** The non-edit local uses that still ran only in a joiner's own
@@ -4934,7 +4932,9 @@ carts, item lifetimes, entity health timers, snowfall, rubber, salt lick, bounti
 the active-tick total `ActiveTicks`, and since C3c-3b laid Blueprints developing, `Develop`;
 since D4 slice 2 the clock and weather, below; since D4 slice 3 the mob simulation, below).
 Since D4 slice 4 the authority also owns the early death phase (`run_host_death_phase`),
-before the client's projectiles; the later window never repeats it. A per-world tally (`World::sim_tally`) checked after every lent
+before projectiles; since D4 slice5 the authority also owns the explicit early
+machine, hopper and post-death projectile phases. Their later window never
+repeats them (Spec01 §4.1.1). A per-world tally (`World::sim_tally`) checked after every lent
 tick (`SimTally::one_tick_faults`) catches a system that ran twice or not at all, and a
 GPU-free predicate-table test pins one owner per world in every mode (lent host, owning host,
 dedicated, single-player).

@@ -665,105 +665,85 @@ pub fn server_loop(server: &mut Server) {
 }
 ```
 
-### 4.1.1 As-built: who ticks the block machines (T1-3, 2026-10-05)
+### 4.1.1 As-built: common block machines (D4 slice 5, 2026-10-27)
 
-`GameServer::tick` (`server.rs`) runs world time, weather, mob spawning, falling
-blocks, water / lava / fire, **leaf decay**, player physics, the mob simulation (`sim_mobs`, §4.1.3: AI, breeding, species, Leads), entity
-physics, item pickup, power, carts and combat on every hosted and dedicated
-world. Leaf decay's result is *applied*: each decayed cell is queued as a
-`BlockChange` and its sapling drops spawn (it used to be computed and thrown
-away, so joiners kept floating leaves).
+`sim_machines::step` is the shared renderer-free orchestration for hives,
+crops/saplings, dispensers/droppers, pistons, villager workstation/gossip
+maintenance, campfires, furnaces, composters, keg fuses/detonation, drying
+racks and manual animated construction/plaque completion. It reuses the
+pure rules in each domain module through `block_machines::MachineCtx`.
 
-The **block machines** — hives (honey), crops + saplings, dispensers / droppers,
-pistons, furnaces, composters, Blasting Keg fuses (+ detonation) and hoppers —
-are ticked by exactly ONE side per world, decided by
-`GameServer::simulates_block_machines`:
+| World | Machine owner and boundary |
+|---|---|
+| Standalone native (default) and anonymous offline web | Client calls the shared rules at the established machine boundary. |
+| Lent LAN/online host and opt-in `--solo-hosted` | `GameServer::run_host_machine_phase` borrows the actual client World/ECS/fluid/fire systems at that same early boundary; the later full server tick never repeats it. |
+| Dedicated server | `GameServer::tick_block_machines` calls the same rules at its existing pre-player-physics boundary. No local policy facts are produced. |
+| Legacy `--no-lend` host | Client calls the same rules for its own world; its owning server retains the existing machine-flag/mirror bridge and does not run a second machine phase. |
 
-| World | Who ticks the machines | `simulates_block_machines` |
-|---|---|---|
-| Single-player (client sim) | the client loop (`game_loop.rs`) | n/a (no `GameServer`) |
-| LAN / online **host** (≥ 1 local player) | the host's client loop; results reach joiners via the host's `pending_block_changes`. The host lends the server its one world every tick (§4.1.3), so the machines' block-entities the server reads are the host's own | `false` |
-| **Dedicated server** (`HostedServer::start` with 0 local players — `server_main`, the WebSocket dedicated path) | `GameServer::tick` → `block_machines.rs` | `true` |
+The machine phase runs every fourth logical tick (5 Hz), including campfire
+fuel/cooking and rack seasoning. Older comments describing these sweeps as
+20 Hz were inaccurate; extraction preserves their actual cadence. Honey,
+growth, ejection, pistons, workstation maintenance, campfires, furnaces,
+composters, kegs, racks and manual construction keep their causal order.
+Workstation/gossip scans also retain their forty-tick gate. Hoppers retain
+`HOPPER_INTERVAL_TICKS`, checked at their separate established phase.
 
-Rules:
+`SimSystem::Machines`, `Hoppers` and `Projectiles` give the lending authority
+explicit ownership and tally entries. Early phase tokens reject a second
+execution before `LentSim::drop` closes the logical tick. The machine call
+uses the actual host cadence, including hosting begun part-way through an
+existing world; it never derives that cadence from a newly started server.
 
-- **Never double-tick.** `HostedServer::start_inner` sets the flag iff
-  `num_local_players == 0` (0 local players ⇔ no host client). A host's lent
-  world has its machines ticked by the host client, so the flag is never set on
-  a lending server (server projectiles follow the same flag). `TestHost` leaves
-  the flag off (its `tick_furnaces` / `tick_pistons` stand in for the host
-  client). (A lending host's server reads the host's own block-entities; only
-  a `--no-lend` host still mirrors them into its server's second copy each
-  tick, `mirror_host_world_state` — a BRIDGE that goes with that flag.)
-- **One implementation, two callers.** Each machine's logic is a pure free
-  function both sides call: `bee_hive::accumulate_honey`, `growth::tick_growth`,
-  `dispenser::tick_dispensers` + `dispenser::realise_order` (via
-  `block_machines::MachineCtx`), `piston::tick_pistons`, `furnace::tick_all`,
-  `composter::tick_all`, `power::tick_keg_fuses` + `explosion::detonate_keg_core`,
-  `hopper::tick_hoppers`. The client adds only presentation (remesh, particles,
-  audio) and per-`PlayerSlot` work (player blast damage, the furnace
-  Proof-of-Play trickle). Blast damage on joiners' bodies is the server's on
-  both sides (`explosion::apply_joiner_blast_damage`: after the dedicated
-  server's detonation, and from a host client's on its server's joiners;
-  MP-D2a).
-- **Cadence matches the client.** Everything except hoppers runs inside the
-  4-tick (5 Hz) falling-block block, in the client's order (hives → growth →
-  dispensers → pistons → furnaces → composters → kegs); hoppers gate on
-  `tick_counter % HOPPER_INTERVAL_TICKS` every tick, outside that block.
-- **Broadcast.** Server machine changes go into `GameServer::pending_block_changes`
-  (built with `game_loop::broadcast_change`, so the meta byte rides), which
-  `HostedServer` drains into every `StateUpdatePacket` — the same road falling
-  blocks, fluids and power take.
-- **Leaf-decay feed (T1-3 review B).** A **remote** player's edit that removes
-  a log calls `leaf_decay.on_log_broken` in `hosted_server.rs`'s block-edit
-  apply, on **every** host kind (LAN host and dedicated). It is gated on the
-  editing slot being `server_simulated`, **not** on `simulates_block_machines`.
-  The server decays the canopy, broadcasts each leaf as a `BlockChange` and
-  rolls the saplings once. Joiners see those saplings as ghost items and get
-  them through `InventoryGrant` on pickup. On a lending host (§4.1.3) the
-  decay queue IS the host's: the host client's own breaks feed it through its
-  break arms' `on_log_broken`, joiners' breaks through the server's edit
-  apply, and the server ticks it once on the one world — so a tree the HOST
-  fells now drops its leaves for joiners too, and the saplings land in the
-  host's own ECS, where the host sees and picks them up. (On a `--no-lend`
-  host the pre-D1 split stands: the host client decays its own breaks
-  locally, and server decay reaches it through `apply_remote_block_change`,
-  which feeds no decay and rolls no drops.)
-- **Joiner clients run no growth or leaf decay (T1-3 review A + B).** With
-  `remote_client` set, the client tick skips `growth::tick_growth` and both
-  break arms' `on_log_broken`. The world it joined already grows crops and
-  saplings, and decays leaves, then broadcasts the results. A joiner's own
-  growth pushes were accepted as edits on top of that (`validate_block_edit`
-  only checks reach, plot and owner), so crops near a joiner advanced two stages
-  per cycle. Its own leaf decay rolled a second, independent set of saplings.
-  Gating only the pushes would still grow phantom local trees on the joiner's
-  own sapling rolls, so the whole call is skipped. Source lint:
-  `test_integration/block_machines.rs::a_joiner_client_never_grows_crops_or_decays_leaves_itself`.
-- **Nor power, dispensers, pistons, keg fuses or lightning fire (FU4b,
-  2026-10-07; FU3 verify Q9 row 3).** The same gate (`remote_client.is_none()`)
-  now sits on the client tick's power tick, dispensers, pistons, Blasting Keg
-  fuse sweep and its own weather's lightning fire (the flash and thunder stay).
-  Each pushed its block changes to the server as the joiner's own edits, where
-  they fought the server's machines (`block_machines`, or the lending host's
-  sweep) and, in a burst over 4 a tick (a lamp clock), grew the joiner's edit
-  FIFO. Joiners see the results as block changes. Costs, until D4: a keg a
-  joiner lights by hand lights only its own copy and no longer blows; a joiner
-  sees a server blast's cleared cells with no boom or particles. **The furnace
-  sweep still runs** on a joined client (its own furnace UI cooks until C3 makes
-  furnaces server-run) but its lit flips are no longer queued as edits. Source
-  lint: `block_machines.rs::a_joiner_client_runs_no_machine_sim_that_pushes_edits_to_the_server`;
-  driven: the GPU harness test `game_harness_a_joined_clients_machines_push_no_edits`.
-- **Persistence.** No save-format change: furnaces, composters, hives,
-  dispensers, chests and power devices (keg fuses) are already in `WorldSave`.
-- **Still host-client only:** campfires, drying racks, animated construction
-  anchors, villager workstation claims. Server-side keg blasts damage mobs but
-  not players (the server applies no player damage yet). Server-shot dispenser
-  arrows do nothing: the server runs no projectile sim (`entity::tick_projectiles`)
-  and `diff_entities` doesn't broadcast projectiles, so the arrow is consumed
-  unseen. (The old gap — a LAN host's own leaf decay never reaching joiners —
-  is closed on a lending host, see above; it remains on a `--no-lend` host.)
-  (Joiners still run their other machine sweeps locally. Those pushes converge
-  because they carry absolute state.)
+The local `MachineBatch` reserves before mutation: at most 128 fixed-size
+critical facts and 16 KiB of actual owned allocation, including the enclosing
+outbox capacity. Furnace completions retain the original local
+Charter/Vow/Proof-of-Play consumer once; dedicated and joined completions
+introduce no monetary policy consumer. When delivery is full, a furnace's
+fuel/input/progress waits and an expiring keg stays armed at one. No
+completion or explosion is consumed and then discarded. Critical facts
+drain immediately after the phase, before another tick/input/save.
+Dispenser and sapling cosmetics retain at most 8 each, rack/build toasts
+coalesce, and a copied build name is bounded to 128 UTF-8 bytes. No items,
+private inventory or Plan bodies travel through this outbox.
+
+A keg's core mutates the world once. Remote blast damage lands immediately
+on the existing server-held bodies. Local raw hits/line-of-sight and exact
+opened-chest closure flags are captured after each individual blast and
+applied in order through the existing armour/i-frame/parrot rules. Later
+construction cannot hide a destroyed chest from that record. Fuse-spent
+challenge behaviour and the existing explosives/play-mode gates are retained.
+
+Early authoritative machine block/meta changes use
+`HostedServer::queue_host_broadcast` once and direct local remeshing; they are
+not sent back as client edits or interpreted as power-transition challenges.
+Dedicated changes use `GameServer::pending_block_changes`. Campfire lit
+transitions relight, and smoke placement/removal is broadcast. Existing
+container/block views expose the same current server machine state to joiners;
+a joined client runs none of the common machine phase, hoppers or furnace tick.
+
+Generic construction processes only non-commissioned anchors. Its complete
+actual rotated targets and final plaque must be in present columns before
+pace/material writes; malformed dimensions/coordinates stall safely. This
+closes the old generic-sweep/NPC-lifecycle double advance. Commissioned
+anchors remain with the existing every-tick `process_builder_commissions`
+lifecycle and its local online/refund policy. Campfires and racks pause in
+absent columns; this does not assert a new loaded-column policy for all old
+furnace/dispenser/workstation sweeps.
+
+Projectile ownership is independent of `simulates_block_machines`. Lent
+projectiles run in an explicit authority phase at the original client
+post-death boundary, before local pickups. Dedicated/owned projectiles keep
+their post-physics, pre-item-lifetime boundary and late death sweep. A lent
+projectile kill therefore waits for the next early death boundary; an owned
+server retains its established same-tick death handling. Standalone/web
+call the same projectile rules at their original boundary.
+
+Persistence uses the existing machine/anchor/plaque save fields; no wire or
+save-format change. Remaining limits: dedicated village population,
+player-facing villager quests/NPC commissions and chest auto-collection are
+not enabled by this extraction. `--no-lend` retains its separate-world
+limitations. Standalone default, night-skip/fire policy, monetary scope and
+owner playtest/default gates remain unchanged.
 
 ### 4.1.2 As-built: the dedicated server streams columns (Phase B1, 2026-10-06)
 
@@ -904,6 +884,7 @@ the server holds an empty world and ECS; nothing reads them.
 |---|---|
 | **Server** (`GameServer::tick`, inside the window; the clock phase just before it) | the day clock + `tick_counter` + night calendar (`SimSystem::Clock`) and the weather window, trial lock and lightning (`SimSystem::Weather`) — D4 slice 2, below; the mob simulation — D4 slice 3, below (`MobAi`, `EntityPhysics`, `Products`, `Population`, `Breeding`, `Species`, `Tethers`); the active-tick total (`tick_world_clock`, `SimSystem::ActiveTicks` — not the day/night clock), mob spawning, falling blocks, fluids (water + lava + fire), leaf decay + saplings, hideout replenisher, snowfall, rubber cooldowns, salt lick, bounty rotation, item lifetimes, power, carts, entity `Health` timers |
 | **Server, early host phase** (`GameServer::run_host_death_phase`) | `DespawnDead`: shared rescue/death/drop/attribution and hideout/raid bookkeeping (`sim_death`); local credit arrives through `SimEvents::Deaths` |
+| **Server, early host phases** (`run_host_machine_phase`, `run_host_hopper_phase`, `run_host_projectile_phase`) | `Machines` at the actual four-tick host boundary, `Hoppers` at its separate cadence check, and `Projectiles` after the early death pass; the later window repeats none of them. Machine local facts arrive through `SimEvents::Machines`. |
 
 **Death boundary (D4 slice 4, 2026-10-27).** Standalone/offline and lending
 hosts sweep before client projectiles, at the established client boundary. A
