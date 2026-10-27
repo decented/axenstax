@@ -471,6 +471,9 @@ fn a_reported_heal_counts_as_nothing_and_a_loss_still_lands() {
 fn a_keg_blast_beside_a_joiner_lands_on_its_server_body() {
     let mut rig = Rig::new("keg");
     rig.hs.server.difficulty = crate::survival::Difficulty::Peaceful;
+    // Past its spawn protection, which a blast respects (D4 slice 3).
+    let slot = rig.slot;
+    crate::spawn_protection::disarm(&mut rig.hs.server.players[slot]);
     let keg = (rig.at.x.floor() as i32 + 2, rig.at.y as i32, rig.at.z.floor() as i32);
     rig.hs.server.world.set_block(keg.0, keg.1, keg.2, block::BLASTING_KEG);
     rig.hs.server.world.insert_power_device(

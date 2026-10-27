@@ -136,16 +136,27 @@ fn a_joiner_tames_leads_and_commands_a_pet_on_a_dedicated_server() {
 fn a_chicken_lays_one_egg_per_cadence_on_a_lent_world() {
     let mut rig = Rig::new_lent("egg", 1);
     // Far enough from the joiner that it never picks an egg up.
+    // Only this hen lays: the world's other layers and their eggs go first.
+    let others: Vec<hecs::Entity> = rig
+        .ecs()
+        .query::<(&crate::entity::MobKind,)>()
+        .iter()
+        .filter(|(_, (k,))| matches!(k.0, MobType::Chicken | MobType::Nostrich))
+        .map(|(e, _)| e)
+        .chain(rig.ecs().query::<&crate::entity::ItemEntity>().iter().map(|(e, _)| e))
+        .collect();
+    for e in others {
+        let _ = rig.ecs_mut().despawn(e);
+    }
     let (hen, _) = rig.spawn(MobType::Chicken, Vec3::new(6.0, 0.0, 6.0));
     // A fresh chicken lays at once: the spawn tick's egg.
     assert_eq!(rig.eggs(), 1, "one egg on the first product tick");
     rig.tick(20);
     assert_eq!(rig.eggs(), 1, "nothing more before the cadence");
-    let now = rig.tick_counter();
-    rig.ecs_mut()
-        .get::<&mut crate::animal_products::AnimalProductState>(hen)
-        .unwrap()
-        .last_action_tick = Some(now + 3 - crate::animal_products::EGG_LAY_INTERVAL_TICKS);
+    // The clock jumps to one cadence after that first egg, less a few ticks.
+    let laid = rig.ecs().get::<&crate::animal_products::AnimalProductState>(hen).unwrap().last_action_tick;
+    let laid = laid.expect("the first egg was recorded");
+    rig.hs.server.tick_counter = laid + crate::animal_products::EGG_LAY_INTERVAL_TICKS - 3;
     rig.tick(10);
     assert_eq!(rig.eggs(), 2, "one more egg when the cadence comes round, once");
 }
@@ -160,6 +171,10 @@ fn a_dedicated_restart_keeps_a_tamed_pet_with_its_owner() {
     let (wolf, _) = rig.spawn(MobType::Wolf, Vec3::new(2.0, 0.0, 2.0));
     rig.ecs_mut().get::<&mut crate::wolf::WolfData>(wolf).unwrap().ownership.owner_pubkey = key.clone();
     rig.tick(1);
+    // The test's joiner signed in by hand after joining as a guest: back to a
+    // guest for the save (a guest's progression is never written).
+    let slot = rig.joiners[0].slot;
+    rig.hs.server.players[slot].verified_pubkey = None;
     rig.hs.server.try_save().expect("the dedicated server saves");
     let name = rig.hs.server.world_name.clone();
     drop(rig);
@@ -176,7 +191,13 @@ fn a_dedicated_restart_keeps_a_tamed_pet_with_its_owner() {
         .collect();
     assert_eq!(owned.len(), 1, "the tamed wolf is back, still its owner's");
     let wolf = owned[0];
-    let mut rig = Rig::seat(hs, None, 1);
+    // `Rig::seat` without its mob purge (which would take the pet too).
+    let mut rig = Rig { hs, host: None, joiners: Vec::new(), at: Vec3::ZERO };
+    rig.join("J0");
+    rig.hs.server.column_streamer = None;
+    rig.hs.server.column_refill_per_tick = 0;
+    rig.hs.server.difficulty = crate::survival::Difficulty::Peaceful;
+    assert!(rig.ecs().get::<&crate::wolf::WolfData>(wolf).is_ok(), "the pet is still in the world");
     assert_eq!(rig.sign_in(0), key, "its owner joins again");
     rig.place(wolf, Vec3::new(6.0, 0.0, 6.0));
     let start = (rig.pos(wolf) - rig.at).length();
