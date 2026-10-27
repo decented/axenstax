@@ -1011,12 +1011,44 @@ pub struct GameServer {
     /// D1 — is the host client's world lent in right now (`sim_lend::LentSim`
     /// sets it for the window and clears it on drop)? While set, `world`,
     /// `ecs`, the fluid/fire/leaf systems and `loaded_columns` ARE the host's;
-    /// `tick` runs only the systems `SimSystem::lent_owner` gives the server
-    /// and never advances the host's clock or weather. Never set on a
-    /// dedicated server.
+    /// `tick` runs only the systems `SimSystem::lent_owner` gives the server.
+    /// Its clock and weather are this server's own (the authority, D4 slice
+    /// 2): the host client asks for this tick's clock phase before the window
+    /// opens ([`Self::run_clock_phase`]) and `tick` does not step it again.
+    /// Never set on a dedicated server.
     pub lent: bool,
     pub leaf_decay: LeafDecaySystem,
     pub world_time: u32,
+    /// D4 slice 2 — the day clock's step per tick (`/time speed`): `1` (the
+    /// spec's 20-minute day) unless a lending host's client writes it. A
+    /// dedicated server never changes it.
+    pub world_time_step: u32,
+    /// D4 slice 2 — the scenario `weather_lock` this server pinned last tick
+    /// (`sim_clock::step_weather`): a lending host's trial lock, released
+    /// the tick it goes. Always `None` on a dedicated server (no scenario).
+    pub(crate) weather_lock_applied: Option<String>,
+    /// D4 slice 2 — has this lending server taken its host client's clock
+    /// yet? The first clock phase (or lend) after it was started — or after
+    /// the host changed world (`forget_host_clock`) — adopts the host's
+    /// clock, weather and step; after that the server's own state is the
+    /// world's and nothing copies the client's over it.
+    pub(crate) clock_adopted: bool,
+    /// D4 slice 2 — the phase token: this logical tick's clock phase ran
+    /// ([`Self::run_clock_phase`]) and the lent world phase has not closed it
+    /// yet. A second phase while it is open is refused.
+    pub(crate) clock_phase_open: bool,
+    /// D4 slice 2 — the strike the clock phase rolled this tick, landed by
+    /// the world phase ([`Self::land_strike`]), which needs the world.
+    pub(crate) pending_strike: Option<u64>,
+    /// D4 slice 2 — the strike landed on a lent world this tick, for the host
+    /// client to present ([`Self::take_lent_strike`]).
+    pub(crate) lent_strike: Option<crate::sim_clock::StrikeEvent>,
+    /// D4 slice 2 — does this server's weather throw lightning when it owns
+    /// its world? A server with no host client (dedicated) does; an owning
+    /// (`--no-lend`) host's server does not: its host client rolls the
+    /// strikes and sends the fires as host edits, so a second roll here would
+    /// strike its copy twice. A lent world's strikes are always the server's.
+    pub(crate) rolls_lightning: bool,
     pub(crate) reputation_day: crate::reputation_day::DayClock,
     pub(crate) lent_day_owner: Option<crate::reputation_day::OwnerId>,
     pub(crate) lent_day_offer: Option<crate::reputation_day::DayOffer>,
@@ -1077,8 +1109,8 @@ pub struct GameServer {
     /// after each tick.
     pub pending_kill_events: Vec<(usize, crate::protocol::KillEventPacket)>,
     /// C2a — the count of nights, for a joiner's once-a-night sleep: shown
-    /// the raw clock every tick, after it advances (a lent world's: the
-    /// host's, handed in).
+    /// the raw clock every tick, after it advances (in the clock phase,
+    /// `sim_clock::phase`, on every kind of world).
     pub night_calendar: crate::item_actions::NightCalendar,
     /// Review D2b B2 — babies born to animals a joiner fed, by server player
     /// slot (the offspring's wire species), waiting to go out as
@@ -1179,6 +1211,13 @@ impl GameServer {
             lent: false,
             leaf_decay: LeafDecaySystem::new(),
             world_time: 6000,
+            world_time_step: 1,
+            weather_lock_applied: None,
+            clock_adopted: false,
+            clock_phase_open: false,
+            pending_strike: None,
+            lent_strike: None,
+            rolls_lightning: true,
             reputation_day: crate::reputation_day::DayClock::new(),
             lent_day_owner: None,
             lent_day_offer: None,
@@ -1582,6 +1621,138 @@ impl GameServer {
         run
     }
 
+    /// D4 slice 2 — the clock phase of a world this server owns (dedicated,
+    /// `--no-lend`): run inline at the head of [`Self::tick`]. Returns the
+    /// day-clock step it applied.
+    fn clock_phase_owned(&mut self) -> u32 {
+        use crate::sim_lend::SimSystem;
+        let clock = self.runs(SimSystem::Clock);
+        let weather = self.runs(SimSystem::Weather);
+        debug_assert!(clock && weather, "an owned world's clock and weather are its server's");
+        let has_weather = crate::weather::world_has_weather(self.world.is_workshop);
+        self.clock_phase_core(has_weather, None)
+    }
+
+    /// The one phase, on this server's own clock state (`sim_clock::phase`),
+    /// with the strike queued for the world phase when this server throws
+    /// lightning.
+    fn clock_phase_core(&mut self, has_weather: bool, lock: Option<&str>) -> u32 {
+        let outcome = crate::sim_clock::phase(
+            crate::sim_clock::ClockView {
+                world_time: &mut self.world_time,
+                world_time_step: self.world_time_step,
+                tick_counter: &mut self.tick_counter,
+                weather: &mut self.weather,
+                weather_lock_applied: &mut self.weather_lock_applied,
+                night_calendar: &mut self.night_calendar,
+            },
+            crate::sim_clock::WeatherRules { has_weather, roll: true, lock },
+        );
+        self.pending_strike = outcome.strike.filter(|_| self.rolls_lightning || self.clock_phase_open);
+        outcome.stepped
+    }
+
+    /// D4 slice 2 — take the host client's clock if this lending server has
+    /// not got one yet (its first phase or lend, or the first after the host
+    /// changed world). Never overwrites a clock it already owns.
+    pub(crate) fn adopt_host_clock(&mut self, seed: &crate::sim_clock::ClockSeed) {
+        if self.clock_adopted {
+            return;
+        }
+        self.clock_adopted = true;
+        self.world_time = seed.world_time;
+        self.world_time_step = seed.world_time_step;
+        self.tick_counter = seed.tick_counter;
+        self.weather = seed.weather;
+        self.weather_lock_applied = seed.weather_lock_applied.clone();
+        self.clock_phase_open = false;
+        self.pending_strike = None;
+    }
+
+    /// D4 slice 2 — the host client changed world under this lending server
+    /// (a staged LAN / online server outlives the load's reset): the next
+    /// phase adopts the new world's clock (morning, tick 0, clear sky), not
+    /// the last world's.
+    pub(crate) fn forget_host_clock(&mut self) {
+        self.clock_adopted = false;
+        self.clock_phase_open = false;
+        self.pending_strike = None;
+        self.lent_strike = None;
+    }
+
+    /// D4 slice 2 — a lent world's clock phase, asked for by its host client
+    /// at the point of its fixed tick where it used to step its own counter
+    /// (`GameState::tick`), outside the lend window: the counter, day clock,
+    /// night calendar and weather window advance here, once, and the client
+    /// reads them back ([`ClockReadback`](crate::sim_clock::ClockReadback)).
+    /// `seed`: the client's clock, adopted only if this server has none yet.
+    /// `has_weather` and `lock` are the host world's (the server's own
+    /// between-window world is empty). The run is tallied on the host's
+    /// world (`tally`), which is where the lent tick's tripwire reads it.
+    ///
+    /// Phase-token guarded: a second phase before the lent world phase
+    /// closes the token is refused (`None`), nothing stepped or tallied.
+    pub(crate) fn run_clock_phase(
+        &mut self,
+        seed: &crate::sim_clock::ClockSeed,
+        has_weather: bool,
+        lock: Option<&str>,
+        tally: &mut crate::sim_lend::SimTally,
+    ) -> Option<crate::sim_clock::ClockReadback> {
+        debug_assert!(!self.lent, "the clock phase runs before the lend window opens");
+        if self.clock_phase_open {
+            log::error!("D4: a second clock phase in one logical tick was refused");
+            return None;
+        }
+        self.adopt_host_clock(seed);
+        tally.bump(crate::sim_lend::SimSystem::Clock);
+        tally.bump(crate::sim_lend::SimSystem::Weather);
+        self.clock_phase_open = true;
+        let stepped = self.clock_phase_core(has_weather, lock);
+        Some(crate::sim_clock::ClockReadback {
+            world_time: self.world_time,
+            world_time_step: self.world_time_step,
+            tick_counter: self.tick_counter,
+            weather: self.weather,
+            weather_lock_applied: self.weather_lock_applied.clone(),
+            stepped,
+        })
+    }
+
+    /// D4 slice 2 — land this tick's strike (rolled by the clock phase): its
+    /// ground round the strike anchor (`sim_clock::strike_anchor`: the
+    /// lowest-index body in the world — a hosting server's slot 0 is its
+    /// host; nobody in the world, no bolt), and the fire it starts, relit and
+    /// queued for every joiner. Only in a loaded column (a server must not
+    /// conjure chunks, `World::set_block`). On a lent world the host client
+    /// presents it ([`Self::take_lent_strike`]).
+    fn land_strike(&mut self) {
+        let Some(hash) = self.pending_strike.take() else { return };
+        let Some(anchor) = crate::sim_clock::strike_anchor(
+            self.players.iter().map(|sp| (sp.is_in_world(), sp.player.eye_pos())),
+        ) else {
+            return;
+        };
+        let (cell, ground) = crate::sim_clock::strike_ground(&self.world, anchor, hash);
+        let column = crate::chunk_stream::column_of(glam::Vec3::new(cell.0 as f32, 0.0, cell.2 as f32));
+        let ignited = self.loaded_columns.contains(&column)
+            && crate::sim_clock::ignite_strike(&mut self.world, &mut self.fire, &self.registry, cell, self.tick_counter);
+        if ignited {
+            self.pending_block_changes
+                .push(crate::game_loop::broadcast_change(&self.world, cell.0, cell.1, cell.2, crate::block::FIRE));
+        }
+        if self.lent {
+            self.lent_strike = Some(crate::sim_clock::StrikeEvent { hash, ground, cell, ignited });
+        }
+    }
+
+    /// D4 slice 2 — the strike this lent world's server landed this tick, for
+    /// its host client's flash, bolt and thunder. Taken once.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) fn take_lent_strike(&mut self) -> Option<crate::sim_clock::StrikeEvent> {
+        self.lent_strike.take()
+    }
+
     /// Run one server simulation tick (20 TPS).
     ///
     /// Covers: world time, mob spawn/sun-burn (400-tick cycle), falling
@@ -1637,25 +1808,29 @@ impl GameServer {
                 crate::entity::spawn_item(&mut self.ecs, drop_pos, stack, seed);
             }
         }
-        // Advance world time (24000 ticks per day cycle = 20 min @ 20 TPS).
-        // Matches GameState::world_time_step's default of 1 (post-playtest
-        // rollback from the alpha-fast 4× BRIDGE). A lent world's clock is the
-        // host's: `LentSim` hands it in, already advanced for this tick.
-        let reputation_days = if self.runs(SimSystem::Clock) {
-            self.world_time = (self.world_time + 1) % 24000;
-            // Monotonic counter — used by anything that needs an absolute
-            // age check (Rubber tap cooldown, future replenishers).
-            self.tick_counter = self.tick_counter.wrapping_add(1);
-            self.reputation_day.advance(self.tick_counter, 1).map_or(0, |pulse| pulse.days)
-        } else if let Some(owner) = self.lent_day_owner {
+        // D4 slice 2 — the clock phase: tick counter, day clock (24000 ticks
+        // per day = 20 min @ 20 TPS at the default step of 1), night calendar
+        // and weather window, one shared implementation (`sim_clock`). A
+        // lent world's phase already ran this logical tick, asked for by its
+        // host client at the point of its tick where it used to step its own
+        // clock (`run_clock_phase`); the world phase closes the token and
+        // never steps the clock a second time. An owned world (dedicated,
+        // `--no-lend`) runs its phase here.
+        let stepped = if self.lent {
+            self.clock_phase_open = false;
+            None
+        } else {
+            Some(self.clock_phase_owned())
+        };
+        let reputation_days = if let Some(owner) = self.lent_day_owner {
             self.lent_day_consumer.consume(owner, self.tick_counter, self.run_id, self.lent_day_offer.take())
+        } else if let Some(step) = stepped {
+            self.reputation_day.advance(self.tick_counter, step).map_or(0, |pulse| pulse.days)
         } else { 0 };
         #[cfg(not(target_arch = "wasm32"))]
         { self.advance_personal_timers(); self.decay_personal(reputation_days); }
         #[cfg(target_arch = "wasm32")]
         let _ = reputation_days;
-        // C2a — a dusk starts the next night (once-a-night sleep).
-        self.night_calendar.observe(self.world_time);
 
         // Phase B1 — the dedicated server streams columns around every
         // connected player before anything below reads the world, so a column
@@ -1663,21 +1838,9 @@ impl GameServer {
         // an edit touches it. No-op unless this server streams.
         self.stream_columns();
 
-        // P9 weather sync — advance the SAME formula the client uses
-        // (`weather::advance`), every tick, so a dedicated/hosted server's
-        // weather is the single source of truth every client's rain window
-        // is derived from (see `weather` field doc + `hosted_server.rs`'s
-        // `broadcast_state`, which puts `self.weather.ticks_left(tick)` on
-        // every StateUpdate).
-        // A lent world's window is the host's (its client rolled it this
-        // tick, and a trial may pin it), handed in by `LentSim`.
-        if self.runs(SimSystem::Weather) {
-            self.weather = crate::weather::advance(
-                self.weather,
-                self.tick_counter,
-                crate::weather::world_has_weather(self.world.is_workshop),
-            );
-        }
+        // D4 slice 2 — the strike this tick's phase rolled lands now, on the
+        // world (a lent world's is in the window by now).
+        self.land_strike();
 
         // Mob spawn + sun-burn cycle (every 400 ticks = 20 s). Shared free
         // function — the single-player client path calls the same function on

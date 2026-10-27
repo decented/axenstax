@@ -454,6 +454,47 @@ fn sleeping_at_night_sets_the_spawn_heals_and_a_respawn_lands_at_the_bed() {
     assert_eq!(rig.sp().player.pos, at);
 }
 
+/// D4 slice 2 — on a lent world the clock is the server's: a joiner's sleep
+/// is judged by it, heals and sets the spawn once a night, and never skips
+/// the night — the authority's clock steps exactly once per lend tick
+/// before and after it.
+#[test]
+fn a_joiner_sleeping_on_a_lent_world_never_skips_the_night() {
+    let (mut hs, mut host) = super::lent_world::start_lent("d4s2-sleep");
+    let (client, slot) = super::lent_world::join_guest_lent(&mut hs, &mut host, "Sleepy");
+    let mut world = std::mem::replace(&mut host.world, crate::world::World::new());
+    let at = super::joiners_act::floor_and_stand(&mut world, &mut hs, slot);
+    let bed = [at.x.floor() as i32, at.y as i32, at.z.floor() as i32 + 2];
+    world.set_block(bed[0], bed[1], bed[2], block::BED);
+    host.world = world;
+    hs.server.difficulty = Difficulty::Peaceful;
+    crate::remote_mobs::purge_private_mobs(&mut host.ecs);
+    // Midnight, on the authority's clock (the one write path a host uses).
+    hs.server.world_time = 0;
+    host.lend_tick(&mut hs);
+    let mut inbox = Inbox::default();
+    inbox.drain(&client, slot);
+    hs.server.players[slot].combat.health = 8.0;
+    let sleep = |seq: u32| {
+        let pkt = protocol::ItemActionPacket { seq, action: ItemAction::Sleep { bed }, events_applied: u32::MAX };
+        client.send_to_server(&protocol::serialize_packet(protocol::PacketType::ItemAction, &pkt));
+    };
+    let t0 = hs.server.world_time;
+    sleep(1);
+    host.lend_tick(&mut hs);
+    inbox.drain(&client, slot);
+    assert!(inbox.outcome(1).accepted, "night by the server's clock, a bed in reach");
+    assert_eq!(hs.server.players[slot].spawn_pos, item_actions::bed_spawn(bed));
+    assert_eq!(hs.server.players[slot].combat.health, 20.0, "healed to full");
+    assert_eq!(hs.server.world_time, t0 + 1, "the night is not skipped: one tick, one step");
+    assert_eq!(host.clock.world_time, hs.server.world_time, "the host reads the authority's clock back");
+    sleep(2);
+    host.lend_tick(&mut hs);
+    inbox.drain(&client, slot);
+    assert!(!inbox.outcome(2).accepted, "once a night");
+    assert_eq!(hs.server.world_time, t0 + 2);
+}
+
 /// The far-respawn column wait keeps working with a bed spawn on a server
 /// that owns its world: the bed's column was streamed out while the joiner
 /// was away; the Respawn loads it and lands there.

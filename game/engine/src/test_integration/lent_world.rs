@@ -75,10 +75,11 @@ fn entity_spawns_seen(client: &ChannelClientTransport) -> Vec<protocol::EntitySp
 }
 
 #[test]
-fn a_lent_tick_runs_only_the_servers_systems_and_never_moves_the_hosts_clock() {
+fn a_lent_tick_runs_only_the_servers_systems_and_steps_the_servers_clock_once() {
     let (mut hs, mut host) = start_lent("tally");
     for _ in 0..3 {
         let before = host.world.sim_tally;
+        let (time0, tick0) = (hs.server.world_time, hs.server.tick_counter);
         host.lend_tick(&mut hs);
         let after = host.world.sim_tally;
         for s in SimSystem::ALL {
@@ -89,7 +90,11 @@ fn a_lent_tick_runs_only_the_servers_systems_and_never_moves_the_hosts_clock() {
                 SimSide::Server => assert!(runs <= 1, "{s:?} ran {runs} times"),
             }
         }
-        // The clock the host handed in, never +1: the host owns `/time`.
+        // D4 slice 2 — the server's clock is the world's: its phase stepped
+        // it once (the world phase in the window did not step it again), and
+        // the host's copy is read back from it.
+        assert_eq!(hs.server.tick_counter, tick0 + 1);
+        assert_eq!(hs.server.world_time, (time0 + 1) % 24_000);
         assert_eq!(hs.server.world_time, host.clock.world_time);
         assert_eq!(hs.server.tick_counter, host.clock.tick_counter);
         assert_eq!(hs.server.weather, host.clock.weather);

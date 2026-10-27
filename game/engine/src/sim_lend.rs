@@ -18,8 +18,12 @@
 //!
 //! The table's shape: the server takes the systems whose order against the
 //! client's own passes doesn't matter (fluids, fire, leaf decay, spawning,
-//! power, carts, …). The client keeps the clock and weather (it owns `/time`
-//! and sleeping), the mob locomotion block (brigand pre-pass → `mob_ai` →
+//! power, carts, …), and — D4 slice 2 — the clock and weather: the server's
+//! clock is the world's, stepped once per logical tick by a clock phase the
+//! host client asks for at the point of its tick where it used to step its
+//! own (`GameServer::run_clock_phase`, phase-token guarded; `sim_clock`), and
+//! read back by the client; `/time`, the bed and a trial's weather lock write
+//! the server's. The client keeps the mob locomotion block (brigand pre-pass → `mob_ai` →
 //! entity physics: the client's species AI, wolf follow, tethers and the rest
 //! overwrite `mob_ai`'s velocities BETWEEN those two passes, so splitting them
 //! across the two ticks would erase every override), and the death sweep
@@ -131,12 +135,12 @@ impl SimSystem {
     /// The side that runs this system while the world is lent (module docs).
     pub const fn lent_owner(self) -> SimSide {
         match self {
-            SimSystem::Clock
-            | SimSystem::Weather
-            | SimSystem::MobAi
+            SimSystem::MobAi
             | SimSystem::EntityPhysics
             | SimSystem::DespawnDead => SimSide::HostClient,
             SimSystem::ActiveTicks
+            | SimSystem::Clock
+            | SimSystem::Weather
             | SimSystem::MobSpawning
             | SimSystem::FallingBlocks
             | SimSystem::Fluids
@@ -237,11 +241,12 @@ pub struct SimParts<'a> {
     pub loaded_columns: &'a mut ahash::AHashSet<(i32, i32)>,
 }
 
-/// The host's clock for the window. The host client owns it (`/time`,
-/// sleeping, its weather roll); the server reads it and never advances it
-/// while lent (Q1 trap 2), so every system the server runs this tick — fire
-/// burnout, rubber and hideout cooldowns, the wind sample — reads the same
-/// tick the client's systems did.
+/// What the host client hands its server for the window. D4 slice 2: the
+/// clock and weather here are a SEED only — a server that has not taken its
+/// host's clock yet adopts them (`GameServer::adopt_host_clock`); once it
+/// has, the server's clock is the world's (stepped by the clock phase before
+/// the window opens, read back by the client) and these are never copied
+/// over it. The reputation-day offer is this tick's, as before.
 #[derive(Clone, Copy, Debug)]
 pub struct HostClock {
     pub world_time: u32,
@@ -266,15 +271,19 @@ impl<'a> LentSim<'a> {
         debug_assert!(host.lends_host_world(), "LentSim::lend on a server that owns its world");
         let server = &mut host.server;
         swap_parts(server, &mut parts);
-        server.world_time = clock.world_time;
-        server.tick_counter = clock.tick_counter;
+        server.adopt_host_clock(&crate::sim_clock::ClockSeed {
+            world_time: clock.world_time,
+            world_time_step: server.world_time_step,
+            tick_counter: clock.tick_counter,
+            weather: clock.weather,
+            weather_lock_applied: None,
+        });
         server.lent_day_owner = Some(parts.reputation_owner);
         server.lent_day_offer = clock.reputation_offer.filter(|offer| {
             clock.reputation_owner == parts.reputation_owner
                 && offer.run_id == server.run_id && offer.pulse.owner == parts.reputation_owner
-                && offer.pulse.tick == clock.tick_counter
+                && offer.pulse.tick == server.tick_counter
         });
-        server.weather = clock.weather;
         server.lent = true;
         // Built before `on_lend`, so a panic there still swaps back.
         let lent = Self { host, parts };
@@ -301,6 +310,8 @@ impl Drop for LentSim<'_> {
         let server = &mut self.host.server;
         swap_parts(server, &mut self.parts);
         server.lent = false;
+        // The window ends the logical tick: its phase token never outlives it.
+        server.clock_phase_open = false;
         server.lent_day_offer = None;
         server.lent_day_owner = None;
     }
@@ -383,15 +394,39 @@ impl OwnedSimParts {
         parts
     }
 
-    /// One host tick's lend window: advance the host clock one tick (the
-    /// client's job), lend, tick the server, return.
+    /// One host tick's lend window, as `GameState::tick` +
+    /// `tick_hosted_server` run it: the server's clock phase (D4 slice 2: the
+    /// server's clock is the world's), read back into this stand-in's
+    /// `clock`, then lend and tick the server.
     pub(crate) fn lend_tick(&mut self, hs: &mut HostedServer) {
-        self.clock.world_time = (self.clock.world_time + 1) % 24_000;
-        self.clock.tick_counter = self.clock.tick_counter.wrapping_add(1);
+        // A frozen handover source runs no tick at all, its clock included
+        // (`GameState::tick` returns before the phase while play is held).
+        #[cfg(not(target_arch = "wasm32"))]
+        if hs.handover_frozen() {
+            let clock = self.clock;
+            LentSim::lend(hs, self.parts(), clock).tick();
+            return;
+        }
+        let seed = crate::sim_clock::ClockSeed {
+            world_time: self.clock.world_time,
+            world_time_step: 1,
+            tick_counter: self.clock.tick_counter,
+            weather: self.clock.weather,
+            weather_lock_applied: None,
+        };
+        let has_weather = crate::weather::world_has_weather(self.world.is_workshop);
+        let back = hs
+            .server
+            .run_clock_phase(&seed, has_weather, None, &mut self.world.sim_tally)
+            .expect("one clock phase per lend tick");
+        self.clock.world_time = back.world_time;
+        self.clock.tick_counter = back.tick_counter;
+        self.clock.weather = back.weather;
         self.clock.reputation_offer = self.reputation_day.advance(self.clock.tick_counter, 1).filter(|pulse| pulse.days > 0).map(|pulse| crate::reputation_day::DayOffer { run_id: hs.server.run_id, pulse });
         let clock = self.clock;
         LentSim::lend(hs, self.parts(), clock).tick();
         self.clock.reputation_offer = None;
+        self.clock.weather = hs.server.weather;
     }
 
     /// The host client's column stream-in / stream-out state, as its
@@ -470,11 +505,12 @@ mod tests {
     }
 
     #[test]
-    fn the_ownership_table_keeps_the_clock_ai_and_deaths_on_the_host_client() {
+    fn the_ownership_table_gives_the_clock_to_the_server_and_keeps_ai_and_deaths_on_the_host_client() {
         use SimSide::*;
         for (s, side) in [
-            (SimSystem::Clock, HostClient),
-            (SimSystem::Weather, HostClient),
+            // D4 slice 2 — the server's clock and weather are the world's.
+            (SimSystem::Clock, Server),
+            (SimSystem::Weather, Server),
             (SimSystem::MobAi, HostClient),
             (SimSystem::EntityPhysics, HostClient),
             (SimSystem::DespawnDead, HostClient),
@@ -539,12 +575,16 @@ mod tests {
             );
         };
 
-        // Lent host: the server's tick inside the window, the client's gates.
+        // Lent host: the server's clock phase (before the window, tallied on
+        // the host's world), its tick inside the window, the client's gates.
         let mut hs = lent_server("modes");
         assert!(hs.lends_host_world() && !hs.server.lent);
         let mut host = host_parts();
         let clock = host.clock;
         let before = host.world.sim_tally;
+        hs.server
+            .run_clock_phase(&seed_of(&host), true, None, &mut host.world.sim_tally)
+            .expect("the phase runs");
         LentSim::lend(&mut hs, host.parts(), clock).tick();
         assert!(!hs.server.lent, "cleared when the window closes");
         let server_only = host.world.sim_tally;
@@ -601,6 +641,72 @@ mod tests {
         for (i, s) in SimSystem::ALL.iter().enumerate() {
             assert_eq!(s.index(), i, "{s:?}");
         }
+    }
+
+    fn seed_of(host: &OwnedSimParts) -> crate::sim_clock::ClockSeed {
+        crate::sim_clock::ClockSeed {
+            world_time: host.clock.world_time,
+            world_time_step: 1,
+            tick_counter: host.clock.tick_counter,
+            weather: host.clock.weather,
+            weather_lock_applied: None,
+        }
+    }
+
+    /// D4 slice 2 — the clock phase is token-guarded: one per logical tick
+    /// (phase … window), a second refused with nothing stepped or tallied;
+    /// the window closes the token. A lent world's phase plus its window
+    /// tally Clock and Weather exactly once, and a second phase forced past
+    /// the guard would show in the tally as a double run.
+    #[test]
+    fn a_second_clock_phase_in_one_logical_tick_is_refused() {
+        let mut hs = lent_server("token");
+        let mut host = host_parts();
+        let seed = seed_of(&host);
+        let before = host.world.sim_tally;
+        let back = hs.server.run_clock_phase(&seed, true, None, &mut host.world.sim_tally).expect("first phase");
+        assert_eq!((back.world_time, back.tick_counter), (1001, 5001), "adopted the host's clock, stepped once");
+        assert!(hs.server.run_clock_phase(&seed, true, None, &mut host.world.sim_tally).is_none(), "second refused");
+        assert_eq!(hs.server.tick_counter, 5001, "the refused phase stepped nothing");
+        let clock = host.clock;
+        LentSim::lend(&mut hs, host.parts(), clock).tick();
+        assert_eq!(hs.server.tick_counter, 5001, "the world phase does not step the clock again");
+        let after = host.world.sim_tally;
+        assert_eq!(after.get(SimSystem::Clock) - before.get(SimSystem::Clock), 1);
+        assert_eq!(after.get(SimSystem::Weather) - before.get(SimSystem::Weather), 1);
+        // The window closed the token: the next logical tick's phase runs.
+        assert!(hs.server.run_clock_phase(&seed, true, None, &mut host.world.sim_tally).is_some());
+        assert_eq!(hs.server.tick_counter, 5002);
+        // A double run (a phase past the guard) is what the tripwire flags.
+        let mut doubled = after;
+        doubled.bump(SimSystem::Clock);
+        assert!(doubled.one_tick_faults(&before).contains(&(SimSystem::Clock, 2)));
+    }
+
+    /// D4 slice 2 — the lend no longer copies the host's clock over the
+    /// server's: the server adopts it once, then its own clock is the
+    /// world's; a host world change makes it adopt the new world's.
+    #[test]
+    fn the_server_adopts_the_hosts_clock_once_and_the_lend_never_overwrites_it() {
+        let mut hs = lent_server("adopt");
+        let mut host = host_parts();
+        host.lend_tick(&mut hs);
+        assert_eq!((hs.server.world_time, hs.server.tick_counter), (1001, 5001));
+        // A stale client copy handed to the lend changes nothing.
+        let mut stale = host.clock;
+        stale.world_time = 9;
+        stale.tick_counter = 9;
+        stale.weather = crate::weather::Weather { rain_until: 99_999, storm_until: 99_999 };
+        LentSim::lend(&mut hs, host.parts(), stale).tick();
+        assert_eq!((hs.server.world_time, hs.server.tick_counter), (1001, 5001));
+        assert_eq!(hs.server.weather, crate::weather::Weather::CLEAR);
+        // The host changed world: the next phase takes the new world's clock.
+        hs.server.forget_host_clock();
+        host.clock.world_time = 7500;
+        host.clock.tick_counter = 0;
+        host.lend_tick(&mut hs);
+        assert_eq!((hs.server.world_time, hs.server.tick_counter), (7501, 1));
+        assert_eq!((host.clock.world_time, host.clock.tick_counter), (7501, 1), "read back");
     }
 
     #[test]

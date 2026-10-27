@@ -433,6 +433,7 @@ mod local_routing;
 mod local_seats;
 // FU3 — a client's block edits waiting past the server's per-tick budget.
 mod edit_queue;
+mod sim_clock;
 mod sim_lend;
 // T1-5 — per-client bounded StateUpdate queue (split, budget, coalesce, resync).
 mod state_outbox;

@@ -205,6 +205,10 @@ fn game_harness_solo_hosted_pause_stops_both_halves_and_catch_up_counts_logical_
     game.frames(5);
     assert_eq!(game.state.tick_counter, c0, "paused: no client tick");
     assert_eq!(server_tick(&game), s0, "paused: no server tick");
+    // D4 slice 2 — nor any clock step on either half.
+    let (w0, a0) = (game.state.world_time, authority(&game).tick_counter);
+    game.frames(2);
+    assert_eq!((game.state.world_time, authority(&game).tick_counter), (w0, a0), "paused: the clock holds");
 
     game.state.mode = GameMode::Playing;
     game.state.last_tick = web_time::Instant::now();
@@ -214,6 +218,8 @@ fn game_harness_solo_hosted_pause_stops_both_halves_and_catch_up_counts_logical_
     let server = server_tick(&game) - s0;
     assert!((1..=crate::tick_catchup::MAX_BACKLOG_TICKS as u64 + 1).contains(&client), "caught up {client} ticks");
     assert_eq!(server, client, "each caught-up tick is one whole logical tick");
+    assert_eq!(authority(&game).tick_counter, a0 + client, "the authority's clock stepped once per logical tick");
+    assert_eq!(game.state.world_time, (w0 + client as u32) % 24_000, "and so did the day clock");
 }
 
 #[test]
@@ -240,4 +246,157 @@ fn game_harness_solo_hosted_failed_save_keeps_playing_then_a_retry_leaves() {
     assert!(matches!(game.state.mode, GameMode::Menu(_)));
     assert!(game.state.hosted_server.is_none(), "a landed save drops the authority");
     assert!(game.state.live_world.is_none());
+}
+
+// ─── D4 slice 2: the clock and weather ─────────────────────────────────────
+
+/// The authority's clock in a solo-hosted game.
+fn authority(game: &HeadlessGame) -> &crate::server::GameServer {
+    &game.state.hosted_server.as_ref().expect("a local authority").server
+}
+
+/// One logical tick steps the counter and the day clock exactly once, in
+/// both routings: standalone by the client's own pieces, solo-hosted by the
+/// server's phase (read back), each tallied once on the one world.
+#[test]
+#[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+fn game_harness_one_logical_tick_steps_the_clock_once_in_both_routings() {
+    isolate_saves();
+    let name = unique("clock-standalone");
+    let _ = std::fs::remove_dir_all(crate::save::world_dir(&name));
+    let standalone = HeadlessGame::boot_into_world(&name);
+    let (_name, solo) = solo("clock");
+    for (mode, mut game) in [("standalone", standalone), ("solo-hosted", solo)] {
+        for _ in 0..3 {
+            let (t, w) = (game.state.tick_counter, game.state.world_time);
+            let tally = game.state.world.sim_tally;
+            let reports = game.logical_ticks(1);
+            assert_one_sim(&reports);
+            assert_eq!(game.state.tick_counter, t + 1, "{mode}: one step of the counter");
+            assert_eq!(game.state.world_time, (w + 1) % 24_000, "{mode}: one step of the day clock");
+            let after = game.state.world.sim_tally;
+            for s in [crate::sim_lend::SimSystem::Clock, crate::sim_lend::SimSystem::Weather] {
+                assert_eq!(after.get(s) - tally.get(s), 1, "{mode}: {s:?} ran once");
+            }
+            if game.state.hosted_server.is_some() {
+                let server = authority(&game);
+                assert_eq!((server.tick_counter, server.world_time), (game.state.tick_counter, game.state.world_time), "{mode}: read back");
+            }
+        }
+    }
+}
+
+/// `/time set` and `/time speed` (and the bed) write the clock through one
+/// path (`write_clock`): solo-hosted, the authority's; the next tick steps
+/// from it and the client reads it back.
+#[test]
+#[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+fn game_harness_solo_hosted_time_set_and_speed_write_the_authority() {
+    let (_name, mut game) = solo("time");
+    assert_one_sim(&game.logical_ticks(1));
+    game.state.write_clock(18_000, 8);
+    assert_eq!((authority(&game).world_time, authority(&game).world_time_step), (18_000, 8));
+    assert_one_sim(&game.logical_ticks(1));
+    assert_eq!(game.state.world_time, 18_008, "the next tick steps from the written clock");
+    assert_eq!(authority(&game).world_time, 18_008);
+    assert_one_sim(&game.logical_ticks(1));
+    assert_eq!(game.state.world_time, 18_016, "at the written speed");
+    // A stale client copy is never copied over the authority.
+    game.state.world_time = 3;
+    assert_one_sim(&game.logical_ticks(1));
+    assert_eq!(game.state.world_time, 18_024, "the authority's clock, read back");
+}
+
+/// The local bed on a solo-hosted world: at night it sets the morning (7000)
+/// on the authority, the bed spawn and a full heal, once; by day it refuses.
+#[test]
+#[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+fn game_harness_solo_hosted_bed_sets_morning_spawn_and_heal_once() {
+    let (_name, mut game) = solo("bed");
+    game.state.set_play_mode(crate::play_mode::PlayMode::Survival);
+    let feet = clear_pad(&mut game, None);
+    let bed = [feet[0], feet[1], feet[2] - 2];
+    game.state.world.set_block(bed[0], bed[1], bed[2], crate::block::BED);
+    assert_one_sim(&game.logical_ticks(1));
+    game.state.write_clock(0, 1);
+    assert_one_sim(&game.logical_ticks(1));
+    game.state.players[0].combat.health = 6.0;
+    aim_at(&mut game, glam::Vec3::new(bed[0] as f32 + 0.5, bed[1] as f32 + 0.5, bed[2] as f32 + 0.5));
+    game.state.tick_accumulator = std::time::Duration::ZERO;
+    right_click(&mut game);
+    assert_eq!(authority(&game).world_time, 7000, "morning on the authority");
+    assert_eq!(game.state.world_time, 7000);
+    assert_eq!(game.state.players[0].spawn_pos, crate::item_actions::bed_spawn(bed));
+    assert_eq!(game.state.players[0].combat.health, game.state.players[0].combat.max_health);
+    assert_one_sim(&game.logical_ticks(1));
+    assert_eq!(authority(&game).world_time, 7001, "the morning holds: no second skip");
+    game.state.players[0].combat.health = 6.0;
+    right_click(&mut game);
+    assert_eq!(game.state.players[0].combat.health, 6.0, "by day the bed refuses");
+    assert_eq!(authority(&game).world_time, 7001);
+}
+
+/// A storm's bolt on a solo-hosted world is the authority's: rolled in its
+/// phase, landed in its world, presented by the client (the flash) — and the
+/// client rolls none of its own. Standalone keeps rolling and landing its
+/// own, unchanged.
+#[test]
+#[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+fn game_harness_a_storm_strikes_once_in_both_routings() {
+    let storm_tick = |from: u64, storm: crate::weather::Weather| {
+        (from..from + 100_000).find(|&t| crate::weather::strike_roll(storm, t, true).is_some()).unwrap()
+    };
+    // Solo-hosted: the authority's storm.
+    let (_name, mut game) = solo("storm");
+    assert_one_sim(&game.logical_ticks(1));
+    let base = authority(&game).tick_counter;
+    let storm = crate::weather::Weather { rain_until: base + 100_000, storm_until: base + 100_000 };
+    let t = storm_tick(base + 1, storm);
+    {
+        let server = &mut game.state.hosted_server.as_mut().unwrap().server;
+        server.weather = storm;
+        server.tick_counter = t - 1;
+    }
+    game.state.lightning_flash = 0.0;
+    assert_one_sim(&game.logical_ticks(1));
+    assert_eq!(game.state.tick_counter, t);
+    assert_eq!(game.state.lightning_flash, 1.0, "the client presented the authority's bolt");
+    assert_eq!(game.state.weather_storm_until, storm.storm_until, "and reads the authority's window");
+    // Standalone: its own roll, its own fire.
+    isolate_saves();
+    let name = unique("storm-standalone");
+    let _ = std::fs::remove_dir_all(crate::save::world_dir(&name));
+    let mut game = HeadlessGame::boot_into_world(&name);
+    let base = game.state.tick_counter;
+    let storm = crate::weather::Weather { rain_until: base + 100_000, storm_until: base + 100_000 };
+    let t = storm_tick(base + 1, storm);
+    game.state.weather_rain_until = storm.rain_until;
+    game.state.weather_storm_until = storm.storm_until;
+    game.state.tick_counter = t - 1;
+    game.state.lightning_flash = 0.0;
+    game.ticks(1);
+    assert_eq!(game.state.lightning_flash, 1.0, "standalone rolls and presents its own bolt");
+}
+
+/// The REAL `/time set` and `/time speed` commands (the chat box's command
+/// path, `submit_command_line`) on a solo-hosted world reach the authority
+/// through `write_clock`, and the next tick steps from them.
+#[test]
+#[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+fn game_harness_solo_hosted_real_time_commands_reach_the_authority() {
+    let (_name, mut game) = solo("time-cmd");
+    assert_one_sim(&game.logical_ticks(1));
+    game.state.submit_command_line("/time set 18000".to_string());
+    assert_eq!(authority(&game).world_time, 18_000, "/time set wrote the authority");
+    game.state.submit_command_line("/time speed 8".to_string());
+    assert_eq!(authority(&game).world_time_step, 8, "/time speed wrote the authority");
+    assert_eq!((game.state.world_time, game.state.world_time_step), (18_000, 8), "and this client's copy");
+    assert_one_sim(&game.logical_ticks(1));
+    assert_eq!(authority(&game).world_time, 18_008);
+    assert_eq!(game.state.world_time, 18_008, "the client reads the stepped clock back");
+    game.state.submit_command_line("/time set night".to_string());
+    let night = authority(&game).world_time;
+    assert_ne!(night, 18_008, "a keyword set lands too");
+    assert_one_sim(&game.logical_ticks(1));
+    assert_eq!(authority(&game).world_time, (night + 8) % 24_000);
 }
