@@ -98,3 +98,12 @@ their own `.venv`. `game` and `marketing` keep their test-only dependencies in
 `requirements-dev.txt` (never installed on the deploy box). A missing venv fails
 the gate and prints the install line; a new site with a `test_*.py` must be
 registered in `check.sh`'s `site_tests` list.
+
+## More games downloads
+
+The marketing `/more-games` page refreshes both games from their signed release
+announcements every five minutes. New releases need no website edit or redeploy.
+Verified downloads survive relay outages and restarts in the ignored marketing
+`data/` directory, which deployment already preserves. See
+[the release catalogue contract](../../docs/foundations/2026-10-28-more-games-releases.md)
+for verification rules, persistence and the manual refresh command.

@@ -1,0 +1,38 @@
+{
+  "content": "Menus now follow phone rotation in portrait and landscape, with stacked panels, scrolling lists and fitted keypads. Driving, countdowns and the track designer stay landscape. Cutout padding updates promptly after a turn.",
+  "created_at": 1793199224,
+  "id": "bcebb9361b786f2e2d03700ab011843cdcc356135c2a9e0a267a389ed12d9794",
+  "kind": 30063,
+  "pubkey": "b754ca04fd9c09d17b8e12394ef67544475025bc446ac0e55267588c231288a8",
+  "sig": "2cfcd5785bf6f57855c74ee0ca20b2e81a487583b45b14d1799a2eba73cf900c88e091aef427d56957981b1be7548c9baf9d746956cac90b80f78b17b85d29d6",
+  "tags": [
+    [
+      "d",
+      "stampede-android-apk"
+    ],
+    [
+      "version",
+      "0.4.14"
+    ],
+    [
+      "version_code",
+      "4014"
+    ],
+    [
+      "x",
+      "1dbc3656b7e14b2bab82b131a571949830840f8347e9299ead2960dcef4c972e"
+    ],
+    [
+      "size",
+      "12753770"
+    ],
+    [
+      "cert",
+      "eacd24505a50630e2a115226fe592518bc16cc2421cfc019372b58baeaf08aa9"
+    ],
+    [
+      "url",
+      "https://nostr.download/1dbc3656b7e14b2bab82b131a571949830840f8347e9299ead2960dcef4c972e.apk"
+    ]
+  ]
+}
