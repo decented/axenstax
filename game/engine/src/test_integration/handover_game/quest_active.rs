@@ -8,7 +8,7 @@ fn game_harness_d2c3_retained_source_preserves_active_own_quests_and_current_tim
     let _worlds = crate::save::WorldsRootGuard::new("active-retained-boundary");
     let dir = Tmp::new("active-retained-boundary");
     let mut source = activity::active_source("active-retained-source", [SOURCE_PERSONA; 32]);
-    let mut peer = HeadlessGame::boot_into_world("active-retained-peer");
+    let mut peer = activity::boot_carry_world("active-retained-peer");
     activity::start_lent(&mut source);
     let client = source.state.hosted_server.as_mut().unwrap().attach_test_remote_with_binding(Some(BINDING));
     let (_seat, observation) = activity::attach(
@@ -230,8 +230,11 @@ fn refuse(game: &mut HeadlessGame, folder: &str) {
 fn game_harness_d2c3_active_carry_keeps_private_plan_allocations_through_abort_and_prepared_close() {
     let _worlds = crate::save::WorldsRootGuard::new("active-private-custody");
     let dir = Tmp::new("active-private-custody");
+    for name in ["first-scratch", "retry-scratch"] {
+        activity::prepare_scratch(&dir.0.join(name));
+    }
     let mut source = activity::active_source("active-private-source", [SOURCE_PERSONA; 32]);
-    let mut peer = HeadlessGame::boot_into_world("active-private-peer");
+    let mut peer = activity::boot_carry_world("active-private-peer");
     activity::start_lent(&mut source);
     let client = source.state.hosted_server.as_mut().unwrap().attach_test_remote_with_binding(Some(BINDING));
     let (_, observation) = activity::attach(

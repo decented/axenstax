@@ -6,11 +6,15 @@ use crate::test_integration::handover_carry_fixture as activity;
 #[ignore = "needs two real GameState GPU adapters and signed quest/menu setup"]
 fn game_harness_d2c3_original_chain_preserves_current_active_participant_quests_and_timers() {
     let _worlds = crate::save::WorldsRootGuard::new("active-original-boundary");
+    let scratch_root = crate::data_dir::data_root().join("handover");
+    for name in ["active-original-scratch", "active-chain-1-scratch", "active-chain-2-scratch"] {
+        activity::prepare_scratch(&scratch_root.join(name));
+    }
     let relay = crate::handover::relay_fixture::Relay::start();
     let a = Actor { persona: 0x82, runtime: 0x81 };
     let b = Actor { persona: 0x71, runtime: 0x72 };
     let mut source = activity::active_source("active-original-source", [a.persona; 32]);
-    let mut peer = HeadlessGame::boot_into_world("active-original-peer");
+    let mut peer = activity::boot_carry_world("active-original-peer");
     let hub = FakeRelayHub::new();
     host(&mut source, a, b, vec![relay.url()], &hub);
     let link = source.state.online_host.as_ref().unwrap().invite_link(now()).unwrap();
@@ -105,7 +109,7 @@ fn game_harness_d2c3_original_chain_preserves_current_active_participant_quests_
         // The returning actor is a genuine fresh client process/view. Its own
         // state must come from the transferred canonical member, not old RAM.
         drop(peer);
-        peer = HeadlessGame::boot_into_world(&format!("active-return-client-{epoch}"));
+        peer = activity::boot_carry_world(&format!("active-return-client-{epoch}"));
         let next_source = peer_actor;
         let next_peer = source_actor;
         let hub = FakeRelayHub::new();

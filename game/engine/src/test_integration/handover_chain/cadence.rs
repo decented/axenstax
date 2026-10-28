@@ -8,6 +8,9 @@ fn current_carry(delayed: bool) {
     } else {
         "carry-no-delay"
     });
+    activity::prepare_scratch(
+        &crate::data_dir::data_root().join("handover").join("cadence-scratch"),
+    );
     let relay = crate::handover::relay_fixture::Relay::start();
     let a = Actor {
         persona: 0x82,
@@ -18,7 +21,7 @@ fn current_carry(delayed: bool) {
         runtime: 0x72,
     };
     let mut source = activity::active_source("cadence-source", [a.persona; 32]);
-    let mut peer = HeadlessGame::boot_into_world("cadence-peer");
+    let mut peer = activity::boot_carry_world("cadence-peer");
     let hub = FakeRelayHub::new();
     host(&mut source, a, b, vec![relay.url()], &hub);
     let link = source

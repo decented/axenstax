@@ -37,6 +37,26 @@ pub(super) fn active_source(name: &str, secret: [u8; 32]) -> HeadlessGame {
     native_setup::active_source(name, secret)
 }
 
+/// Prepare a positive fixture's declared staging parent before its baselines.
+pub(super) fn prepare_scratch(path: &Path) {
+    std::fs::create_dir_all(path).expect("prepare the carry fixture's scratch parent");
+    assert!(
+        std::fs::symlink_metadata(path).unwrap().is_dir(),
+        "the carry fixture's scratch parent must be a real directory"
+    );
+}
+
+/// Use the real GPU harness with its minimum view before the first world load.
+pub(super) fn boot_carry_world(name: &str) -> HeadlessGame {
+    let state = pollster::block_on(crate::GameState::new_headless(1280, 720));
+    let mut game = HeadlessGame { state };
+    let distance = crate::graphics_settings::RENDER_DISTANCE_MIN;
+    game.state.graphics.render_distance = distance;
+    game.enter_world(name);
+    assert_eq!(game.state.graphics.render_distance, distance);
+    game
+}
+
 pub(super) fn step(source: &mut HeadlessGame, peer: &mut HeadlessGame) {
     peer.ticks(1);
     peer.state.network_send_input();

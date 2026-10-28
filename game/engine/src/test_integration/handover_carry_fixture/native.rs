@@ -169,7 +169,7 @@ fn actor_giver(host: &mut HostedServer, actor: &mut Actor, distance: f32) -> u32
 /// Enrol and restore through ordinary selected/canonical authority, never an
 /// invented Imported binding or the direct Loading helper used by older tests.
 pub(super) fn active_source(name: &str, secret: [u8; 32]) -> HeadlessGame {
-    let mut game = HeadlessGame::boot_into_world(name);
+    let mut game = super::boot_carry_world(name);
     game.state.handover_fixture = Some(crate::handover_game::Fixture { signed_in: Some(key(secret)), recipient: None });
     game.state.difficulty = "peaceful".into();
     game.state.prepare_local_gameplay().unwrap();
