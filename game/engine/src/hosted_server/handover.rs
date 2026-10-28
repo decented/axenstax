@@ -495,6 +495,13 @@ impl HostedServer {
         self.inbound[slot].front()
     }
 
+    /// The actual sender radius after its ordinary request/input processing.
+    #[cfg(test)]
+    pub fn handover_test_chunk_push_radius(&self, slot: usize) -> Option<i32> {
+        self.chunk_pushes.get(slot)
+            .map(|push| push.radius(self.chunk_push_limit()))
+    }
+
     /// Route a control frame that arrived through ordinary processing.
     /// Frames from any seat but the bound one are dropped.
     pub(super) fn route_handover_frame(&mut self, i: usize, payload: &[u8], capacity: usize) {

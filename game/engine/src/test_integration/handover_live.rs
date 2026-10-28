@@ -694,7 +694,7 @@ mod session {
         plant(&dir.0.join("world"));
         let (mut hs, mut host) = start_prepared_lent(&format!("handover-{tag}"));
         let client = hs.attach_test_remote_with_binding(Some(BINDING));
-        let request = super::super::handover_component::signed_request(&client, [RECIPIENT_PERSONA; 32]);
+        let request = super::super::handover_component::signed_request(&client, [RECIPIENT_PERSONA; 32], Some(BINDING));
         let forged_ready = Arc::new(Mutex::new(None));
         let forged_bearer = Arc::new(Mutex::new(None));
         let forge_ack = Arc::new(std::sync::atomic::AtomicBool::new(false));

@@ -366,9 +366,33 @@ fn joined(tag: &str) -> Joined {
 /// [`joined`], its recipient importing into `imports` (default: the test's
 /// own folder).
 fn joined_into(tag: &str, imports: Option<PathBuf>) -> Joined {
+    joined_into_at_distance(tag, imports, None)
+}
+
+/// A declared initial viewing distance, chosen before any local terrain loads.
+/// Ordinary fixtures retain their existing settings and world-entry path.
+fn joined_into_at_distance(
+    tag: &str,
+    imports: Option<PathBuf>,
+    distance: Option<i32>,
+) -> Joined {
     isolate_saves();
     let dir = Tmp::new(tag);
-    let mut hg = HeadlessGame::boot_into_world(&format!("harness-handover-{tag}"));
+    let name = format!("harness-handover-{tag}");
+    let mut hg = if let Some(distance) = distance {
+        assert!(
+            (crate::graphics_settings::RENDER_DISTANCE_MIN..=crate::graphics_settings::RENDER_DISTANCE_MAX)
+                .contains(&distance)
+        );
+        let state = pollster::block_on(crate::GameState::new_headless(1280, 720));
+        let mut game = HeadlessGame { state };
+        game.state.graphics.render_distance = distance;
+        game.enter_world(&name);
+        assert_eq!(game.state.graphics.render_distance, distance);
+        game
+    } else {
+        HeadlessGame::boot_into_world(&name)
+    };
     let (mut hs, host) = super::lent_world::start_prepared_lent(&format!("handover-game-{tag}"));
     let sent = Arc::new(AtomicUsize::new(0));
     let received = Arc::new(AtomicUsize::new(0));
@@ -377,6 +401,10 @@ fn joined_into(tag: &str, imports: Option<PathBuf>) -> Joined {
     let Some((PacketType::Challenge, bytes)) = protocol::deserialize_header(&pkt) else { panic!("no challenge") };
     let challenge: protocol::ChallengePacket = protocol::safe_deserialize(bytes).unwrap();
     let mut request = crate::remote_client::build_join_request_guest("Recipient", 0);
+    if let Some(distance) = distance {
+        request.render_distance = u8::try_from(distance).unwrap();
+        assert_eq!(i32::from(request.render_distance), distance);
+    }
     request.auth_event = Some(
         pollster::block_on(crate::signet::native_signer::build_join_auth_event(
             &keys(RECIPIENT_PERSONA),
@@ -406,6 +434,13 @@ fn joined_into(tag: &str, imports: Option<PathBuf>) -> Joined {
     assert_ne!(j.slot, usize::MAX, "the game never joined, signed");
     for _ in 0..40 {
         step(&mut j);
+    }
+    if let Some(distance) = distance {
+        assert_eq!(j.hg.state.graphics.render_distance, distance);
+        assert_eq!(
+            j.hs.handover_test_chunk_push_radius(j.slot), Some(distance),
+            "the actual admitted request and ordinary inputs retain the declared radius"
+        );
     }
     j
 }

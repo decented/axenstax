@@ -17,6 +17,7 @@ use std::collections::VecDeque;
 pub(super) fn signed_request(
     client: &dyn ClientTransport,
     secret: [u8; 32],
+    server_binding: Option<[u8; 32]>,
 ) -> protocol::JoinRequestPacket {
     let bytes = client
         .try_recv_from_server()
@@ -30,7 +31,9 @@ pub(super) fn signed_request(
         pollster::block_on(crate::signet::native_signer::build_join_auth_event(
             &nostr::Keys::new(nostr::SecretKey::from_slice(&secret).unwrap()),
             &challenge.nonce_hex,
-            &crate::signet::join_origin(client.channel_binding()),
+            // BoundServerTransport injects this declared fixture binding on
+            // the server only; a channel client has no TLS exporter of its own.
+            &crate::signet::join_origin(server_binding),
         ))
         .unwrap(),
     );
@@ -84,7 +87,11 @@ impl Application {
     ) {
         remote.handover_world_pending(self.intake.has_carried_world_work());
         remote.poll();
-        assert!(remote.is_connected(), "actual signed admission failed");
+        assert!(
+            remote.is_connected(),
+            "actual signed admission failed: {:?}",
+            remote.error()
+        );
         if let Some(joined) = remote.pending_joined_world.take() {
             self.intake.expect_notes(
                 joined.chunk_note_radius,

@@ -1,14 +1,16 @@
 //! Real notes and a real host broadcast force authoritative work across frames.
 use super::*;
 
-fn pending_unloaded(j: &Joined) -> Vec<(i32, i32)> {
+fn pending_unloaded(j: &Joined, centre: (i32, i32), initial_radius: i32) -> Vec<(i32, i32)> {
     let mut columns: Vec<_> = j
         .host
         .loaded_columns
         .iter()
         .copied()
         .filter(|column| {
-            !j.hg.state.loaded_columns.contains(column)
+            let distance = (column.0 - centre.0).abs().max((column.1 - centre.1).abs());
+            distance > initial_radius && distance <= 8
+                && !j.hg.state.loaded_columns.contains(column)
                 && j.hg.state.chunk_intake.has_pending_check(*column)
         })
         .collect();
@@ -40,7 +42,12 @@ fn acknowledge_actual_world(j: &mut Joined) {
 fn game_harness_ordered_park_paused_carried_world_blocks_raw_reads_until_real_application_finishes()
 {
     let _worlds = crate::save::WorldsRootGuard::new("park-carried-world");
-    let mut j = joined("park-carried-world");
+    // Keep the initial actual world/view radius small before its first load.
+    // The later ordinary input genuinely expands the source's radius4 to8,
+    // leaving a fresh note domain instead of reusing already acknowledged land.
+    let initial_radius = crate::graphics_settings::RENDER_DISTANCE_MIN;
+    assert_eq!(initial_radius, 4);
+    let mut j = joined_into_at_distance("park-carried-world", None, Some(initial_radius));
     j.hg.state.mode = crate::GameMode::Paused {
         confirm_quit: false,
         confirm_creative: false,
@@ -75,8 +82,9 @@ fn game_harness_ordered_park_paused_carried_world_blocks_raw_reads_until_real_ap
     for _ in 0..256 {
         acknowledge_actual_world(&mut j);
         j.host.lend_tick(&mut j.hs);
+        assert_eq!(j.hs.handover_test_chunk_push_radius(j.slot), Some(8));
         j.hg.state.handover_test_network_receive();
-        if pending_unloaded(&j).len() >= needed {
+        if pending_unloaded(&j, centre, initial_radius).len() >= needed {
             break;
         }
     }
@@ -85,7 +93,7 @@ fn game_harness_ordered_park_paused_carried_world_blocks_raw_reads_until_real_ap
     j.host.lend_tick(&mut j.hs);
     j.hg.state.handover_test_network_receive();
     assert!(j.hg.state.chunk_intake.column_mismatch().is_none());
-    let columns: Vec<_> = pending_unloaded(&j).into_iter().take(needed).collect();
+    let columns: Vec<_> = pending_unloaded(&j, centre, initial_radius).into_iter().take(needed).collect();
     assert_eq!(
         columns.len(),
         needed,
