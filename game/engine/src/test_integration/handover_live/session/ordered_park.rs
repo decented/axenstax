@@ -168,21 +168,25 @@ fn ordered_park_bad_authority_and_oversized_fence_refuse_with_actual_normal_owne
             !p.rc.is_parked(),
             "invalid fixed control never consumes the actual owner"
         );
-        let mut replay = p.rc.test_handover_replay();
-        let front = replay
-            .next()
-            .expect("the rejected actual raw allocation remains owned");
-        if fault == 4 {
-            assert_eq!(front.len(), 137, "valid short fixed fence bytes");
-            assert!(front.capacity() > crate::handover::live::park::WIRE_CAP,
-                "this case must fail on actual capacity, not encoded length");
-        }
-        assert_eq!(
-            protocol::deserialize_header(front).unwrap().0,
-            PacketType::Handover
-        );
-        assert!(replay.next().is_none());
-        let allocation = front.as_ptr();
+        let allocation = {
+            let mut replay = p.rc.test_handover_replay();
+            let front = replay
+                .next()
+                .expect("the rejected actual raw allocation remains owned");
+            if fault == 4 {
+                assert_eq!(front.len(), 137, "valid short fixed fence bytes");
+                assert!(
+                    front.capacity() > crate::handover::live::park::WIRE_CAP,
+                    "this case must fail on actual capacity, not encoded length"
+                );
+            }
+            assert_eq!(
+                protocol::deserialize_header(front).unwrap().0,
+                PacketType::Handover
+            );
+            assert!(replay.next().is_none());
+            front.as_ptr()
+        };
         p.rc.poll();
         assert_eq!(
             p.rc.test_handover_replay().next().unwrap().as_ptr(),

@@ -84,11 +84,7 @@ impl Application {
     ) {
         remote.handover_world_pending(self.intake.has_carried_world_work());
         remote.poll();
-        assert!(
-            remote.is_connected(),
-            "actual signed admission failed: {:?}",
-            remote.state
-        );
+        assert!(remote.is_connected(), "actual signed admission failed");
         if let Some(joined) = remote.pending_joined_world.take() {
             self.intake.expect_notes(
                 joined.chunk_note_radius,
