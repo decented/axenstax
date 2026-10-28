@@ -132,7 +132,15 @@ pub(super) fn giver(
     source.state.world.village_anchors.insert((2, 3), at.to_array().map(|n| n.floor() as i32));
     let e = crate::entity::spawn_mob(&mut source.state.ecs, crate::mob::MobType::Villager, at);
     source.state.ecs.get::<&mut crate::villager::VillagerComponent>(e).unwrap().profession = profession;
+    // Start this positive quest fixture resting: wandering behind the actor
+    // legitimately closes dialogue. AI and physics still tick this finite
+    // initial timer; no position or timer is reset during settlement or carry.
+    source.state.ecs.get::<&mut crate::mob_ai::MobAi>(e).unwrap().state =
+        crate::mob_ai::AiState::Idle { timer: u32::MAX };
     step(source, peer);
+    assert!(matches!(&source.state.ecs.get::<&crate::mob_ai::MobAi>(e).unwrap().state,
+        crate::mob_ai::AiState::Idle { timer } if *timer < u32::MAX),
+        "the resting giver's real AI must have advanced");
     source.state.ecs.get::<&crate::entity::ProtocolId>(e).unwrap().0
 }
 
