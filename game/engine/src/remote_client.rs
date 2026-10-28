@@ -1048,6 +1048,11 @@ impl RemoteClient {
             if self.handover_drain.is_some() {
                 drain_reads += 1;
                 self.handover_carrier_read();
+                if packet.len() > protocol::MAX_WIRE_PACKET_LEN {
+                    self.refuse_park_drain("The host sent an oversized packet during handover.", packet);
+                    changed = true;
+                    break;
+                }
             }
             if let Some((ptype, payload)) = protocol::deserialize_header(&packet) {
                 match ptype {
@@ -1566,7 +1571,7 @@ impl RemoteClient {
                     }
                     #[cfg(not(target_arch = "wasm32"))]
                     PacketType::Handover => {
-                        match self.receive_park_fence(payload) {
+                        match self.receive_park_fence(payload, packet.capacity()) {
                             Ok(true) => { changed = true; break; }
                             Ok(false) => {}
                             Err(why) => {

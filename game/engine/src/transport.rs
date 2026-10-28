@@ -122,6 +122,30 @@ impl InboundQueue {
         taken
     }
 
+    /// Extract into a pre-reserved, checked owner. Complete the ORIGINAL span:
+    /// unselected ordinary and control packets retain their relative order.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn extract_into(&mut self, out: &mut Vec<Packet>, limit: usize,
+        mut pick: impl FnMut(&Packet) -> bool,
+    ) {
+        if limit == 0 { return; }
+        assert!(out.capacity().saturating_sub(out.len()) >= limit);
+        let span = self.packets.len();
+        let mut removed = 0;
+        for _ in 0..span {
+            let packet = self.packets.pop_front().expect("original FIFO span");
+            if removed < limit && pick(&packet) {
+                self.bytes -= charge(&packet);
+                out.push(packet);
+                removed += 1;
+            } else {
+                // Length never exceeds the original len, so this cannot grow
+                // the existing raw deque or allocate a second kept container.
+                self.packets.push_back(packet);
+            }
+        }
+    }
+
     /// Put a packet taken by [`Self::pop`] back at the front, charged again
     /// (`--keep-world`: a join held for the Keep's gate is read again once the
     /// gate has answered). Not bound-checked: a held client that had nearly

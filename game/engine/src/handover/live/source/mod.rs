@@ -695,11 +695,14 @@ impl SourceSession {
         if let Err(r) = self.check_park_wait(hs, live, now) {
             return Err(self.fail(hs, r));
         }
-        let frames = match hs.handover_take_frames() {
+        let frames = match hs.handover_take_source_frames(self.park_fixed_bytes()) {
             Ok(f) => f,
             Err(why) => return Err(self.fail(hs, Refusal(why))),
         };
         for bytes in frames {
+            if let Err(error) = super::park::check_incoming_control(&bytes, bytes.capacity()) {
+                return Err(self.fail(hs, error));
+            }
             let frame = match Frame::decode(&bytes) {
                 Ok(f) if f.transfer() == self.transfer => f,
                 _ => return Err(self.fail(hs, Refusal("The recipient sent a malformed handover message."))),

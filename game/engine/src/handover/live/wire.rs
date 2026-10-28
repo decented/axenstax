@@ -159,7 +159,7 @@ impl Frame {
         bytes.starts_with(&13u32.to_le_bytes())
     }
 
-    fn is_fixed_park_control(bytes: &[u8]) -> bool {
+    pub(crate) fn is_fixed_park_control(bytes: &[u8]) -> bool {
         Self::is_freeze_fence(bytes) || bytes.starts_with(&14u32.to_le_bytes())
     }
 }

@@ -3476,6 +3476,19 @@ impl super::GameState {
         }
     }
 
+    /// Harness delegates retain the real admission and application owners.
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) fn handover_test_adopt_joined_world(&mut self) {
+        let joined = self.remote_client.as_mut().and_then(|remote| remote.pending_joined_world.take())
+            .expect("the actual still-owned JoinAccept world");
+        self.enter_joined_world(joined);
+    }
+
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) fn handover_test_network_receive(&mut self) {
+        self.network_receive();
+    }
+
     /// Rebuild the world generator + Proof-of-Play secret from a world's
     /// persisted seed. Called on every transition into Playing (new world or
     /// load). Before this existed, `biome_gen` was hardcoded to seed 42 for

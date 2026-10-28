@@ -96,7 +96,11 @@ impl RemoteClient {
         }
     }
 
-    pub(super) fn receive_park_fence(&mut self, payload: &[u8]) -> Result<bool, &'static str> {
+    pub(super) fn receive_park_fence(
+        &mut self,
+        payload: &[u8],
+        capacity: usize,
+    ) -> Result<bool, &'static str> {
         let Some(d) = &mut self.handover_drain else {
             return Ok(false);
         };
@@ -105,6 +109,7 @@ impl RemoteClient {
         if !Frame::is_freeze_fence(payload) {
             return Ok(false);
         }
+        crate::handover::live::park::check_incoming_control(payload, capacity).map_err(|r| r.0)?;
         let Frame::FreezeFence { fence } =
             Frame::decode(payload).map_err(|_| "The host sent an invalid handover fence.")?
         else {

@@ -1,5 +1,6 @@
 //! Real transport/admission component controls; no GameState carry claim.
 use super::*;
+mod bounds;
 
 fn awaiting(p: &mut Pair) {
     consent_only(p);
@@ -149,7 +150,7 @@ fn ordered_park_modified_source_generation_cannot_verify_a_genuine_park_signatur
 
 #[test]
 fn ordered_park_bad_authority_and_oversized_fence_refuse_with_actual_normal_owner_and_raw_fifo() {
-    for fault in [2, 3] {
+    for fault in [2, 3, 4] {
         let mut p = pair(&format!("park-invalid-fence-{fault}"));
         p.park_fence_fault
             .store(fault, std::sync::atomic::Ordering::Relaxed);
@@ -171,6 +172,11 @@ fn ordered_park_bad_authority_and_oversized_fence_refuse_with_actual_normal_owne
         let front = replay
             .next()
             .expect("the rejected actual raw allocation remains owned");
+        if fault == 4 {
+            assert_eq!(front.len(), 137, "valid short fixed fence bytes");
+            assert!(front.capacity() > crate::handover::live::park::WIRE_CAP,
+                "this case must fail on actual capacity, not encoded length");
+        }
         assert_eq!(
             protocol::deserialize_header(front).unwrap().0,
             PacketType::Handover

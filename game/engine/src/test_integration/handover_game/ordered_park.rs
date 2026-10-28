@@ -1,5 +1,6 @@
 //! Actual GameState controls around normal-owned consent and current preparation.
 use super::*;
+mod carried_world;
 
 fn consent_draining(j: &mut Joined) -> SourceSession {
     let src = source(j);

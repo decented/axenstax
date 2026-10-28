@@ -7251,6 +7251,10 @@ selected runtime[32] and the source-issued attach generation u32. Parked contain
 transfer[16], nonce[16], fence digest[32] and signature[[u8;32];2]. Their tagged
 logical sizes are 137 and 133 bytes. The existing bounded codec rejects trailing
 bytes and malformed fields; each new wire's actual capacity must fit 512 bytes.
+Both receivers check the actual incoming Vec allocation before the new phase
+can accept the control; discarding a source packet's tag does not reduce that
+allocation. Every draining carrier also passes the general wire-length bound
+before header or payload decoding, with refusal retaining its actual raw owner.
 
 Consent enters recipient Draining on the same normal owner; new gameplay stops,
 while normal receive/application and generated retirement ACK/GrantUnfit sends
@@ -7298,6 +7302,19 @@ a 16 KiB new-control cap conservatively charges fixed preparation values and the
 actual overlapping capacities and owners of both encoding/tagging Vecs. Existing
 world/cache/transport and crypto runtime storage retain their separate limits;
 this is not a whole-receiver memory bound.
+
+The live SourceSession extracts at most 16 controls per pump, under one combined
+oldest-first limit across its routed inbox and frozen raw FIFO. It reserves and
+checks the actual outer Vec and selected fixed-control capacities before any
+removal, with fixed preparation/owner sizes and two maximum outgoing buffers
+reserved for a possible Accept transition inside that batch. Ordinary and
+unselected control packets keep their original allocation and FIFO order. The
+extractor scans the complete original bounded FIFO span by in-place rotation;
+16 removals is not a 16-entry scan limit. The existing 8 MiB raw FIFO policy is
+separate, and no second taken/kept container is allocated. Any routed or raw
+control left after a park claim prevents fresh current preparation. The generic
+direct HostedServer reader retains its old scope; this bounded reader belongs
+to the live SourceSession and preserves final PreparedAck's close exception.
 
 Before the first possible proof send, all fallible signing/encoding/capacity work
 borrows the genuine returned link. Failure restores that exact transport with

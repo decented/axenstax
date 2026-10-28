@@ -18,6 +18,8 @@
 //! The link holds only a weak lease on its session: a session dropped without
 //! an explicit abort is released (and the recipient told) at the next tick.
 use super::HostedServer;
+#[path = "handover_park.rs"]
+mod park;
 use crate::protocol::{self, PacketType};
 use std::collections::VecDeque;
 
@@ -249,6 +251,9 @@ impl HostedServer {
     pub(crate) fn handover_park_precommit(&mut self) -> Result<(), LinkError> {
         self.handover_check()?;
         let slot = self.handover.as_ref().ok_or("no handover link")?.slot;
+        if self.handover.as_ref().is_some_and(|link| !link.inbox.is_empty()) {
+            return Err("recipient control is still waiting before current preparation");
+        }
         self.inbound[slot].fill_from(&*self.transports[slot])
             .map_err(|_| "the recipient's connection overflowed")?;
         self.handover_fill_guests(slot);
@@ -492,9 +497,13 @@ impl HostedServer {
 
     /// Route a control frame that arrived through ordinary processing.
     /// Frames from any seat but the bound one are dropped.
-    pub(super) fn route_handover_frame(&mut self, i: usize, payload: &[u8]) {
+    pub(super) fn route_handover_frame(&mut self, i: usize, payload: &[u8], capacity: usize) {
         let Some(l) = &mut self.handover else { return };
         if l.slot != i || l.broken.is_some() {
+            return;
+        }
+        if crate::handover::live::park::check_incoming_control(payload, capacity).is_err() {
+            l.broken = Some("the incoming handover control exceeded its limit");
             return;
         }
         if l.inbox.len() >= INBOX_FRAMES || l.inbox_bytes + payload.len() > INBOX_BYTES {

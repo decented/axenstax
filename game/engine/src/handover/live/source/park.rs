@@ -10,6 +10,10 @@ pub(super) struct SourcePark {
 }
 
 impl SourceSession {
+    pub(super) fn park_fixed_bytes(&self) -> usize {
+        size_of::<Option<SourcePark>>()
+    }
+
     #[cfg(test)]
     pub(crate) fn test_current_cut_committed(&self) -> bool {
         self.current_cut.is_some()

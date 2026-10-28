@@ -264,3 +264,35 @@ fn ordered_park_counts_actual_overlapping_allocations_before_both_encodings() {
         .is_err()
     );
 }
+
+#[test]
+fn ordered_park_incoming_census_counts_actual_inner_outer_and_outgoing_overlap() {
+    let (_, _, fence, _) = fixture();
+    let encoded = EncodedControl::new(&Frame::FreezeFence { fence }, 0).unwrap();
+    for count in [16, 32] {
+        let mut batch = Vec::new();
+        batch.try_reserve_exact(count).unwrap();
+        for _ in 0..count {
+            let mut wire = encoded.tagged(0).unwrap();
+            wire.try_reserve_exact(WIRE_CAP - wire.len()).unwrap();
+            assert_eq!(wire.len(), 137);
+            assert_eq!(wire.capacity(), WIRE_CAP);
+            check_incoming_control(&wire[1..], wire.capacity()).unwrap();
+            batch.push(wire);
+        }
+        let actual_inner = batch.iter().map(Vec::capacity).sum();
+        let actual_outer = batch.capacity() * size_of::<Vec<u8>>();
+        assert_eq!(
+            check_incoming_batch(512, actual_inner, actual_outer).is_ok(),
+            count == 16
+        );
+    }
+    let mut short = encoded.tagged(0).unwrap();
+    short.try_reserve_exact(WIRE_CAP + 1 - short.len()).unwrap();
+    assert!(
+        Frame::decode(&short[1..]).is_ok(),
+        "valid short encoding alone is insufficient"
+    );
+    assert!(check_incoming_control(&short[1..], short.capacity()).is_err());
+    assert!(check_incoming_batch(usize::MAX, 0, 0).is_err());
+}

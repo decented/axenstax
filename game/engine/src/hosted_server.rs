@@ -4816,7 +4816,7 @@ impl HostedServer {
                 }
                 match ptype {
                     #[cfg(not(target_arch = "wasm32"))]
-                    protocol::PacketType::Handover => self.route_handover_frame(i, payload),
+                    protocol::PacketType::Handover => self.route_handover_frame(i, payload, packet.capacity()),
                     protocol::PacketType::Action => {
                         if !self.handshake_done[i] || self.disconnected[i] { continue; }
                         self.receive_typed_action(i, payload);

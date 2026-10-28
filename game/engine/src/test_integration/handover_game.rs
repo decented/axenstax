@@ -320,6 +320,7 @@ fn game_harness_handover_frozen_host_refuses_saves_and_leaving_cancels_first() {
 struct Counting {
     inner: ChannelClientTransport,
     sent: Arc<AtomicUsize>,
+    received: Arc<AtomicUsize>,
 }
 impl ClientTransport for Counting {
     fn send_to_server(&self, data: &[u8]) {
@@ -327,7 +328,9 @@ impl ClientTransport for Counting {
         self.inner.send_to_server(data);
     }
     fn try_recv_from_server(&self) -> Option<crate::transport::Packet> {
-        self.inner.try_recv_from_server()
+        let packet = self.inner.try_recv_from_server()?;
+        self.received.fetch_add(1, Ordering::Relaxed);
+        Some(packet)
     }
     fn is_closed(&self) -> bool {
         self.inner.is_closed()
@@ -343,6 +346,7 @@ struct Joined {
     host: OwnedSimParts,
     slot: usize,
     sent: Arc<AtomicUsize>,
+    received: Arc<AtomicUsize>,
     _dir: Tmp,
 }
 
@@ -367,6 +371,7 @@ fn joined_into(tag: &str, imports: Option<PathBuf>) -> Joined {
     let mut hg = HeadlessGame::boot_into_world(&format!("harness-handover-{tag}"));
     let (mut hs, host) = super::lent_world::start_prepared_lent(&format!("handover-game-{tag}"));
     let sent = Arc::new(AtomicUsize::new(0));
+    let received = Arc::new(AtomicUsize::new(0));
     let inner = hs.attach_test_remote_with_binding(Some(BINDING));
     let pkt = inner.try_recv_from_server().expect("challenge issued on attach");
     let Some((PacketType::Challenge, bytes)) = protocol::deserialize_header(&pkt) else { panic!("no challenge") };
@@ -380,13 +385,13 @@ fn joined_into(tag: &str, imports: Option<PathBuf>) -> Joined {
         ))
         .unwrap(),
     );
-    let transport = Counting { inner, sent: sent.clone() };
+    let transport = Counting { inner, sent: sent.clone(), received: received.clone() };
     hg.state.remote_client = Some(RemoteClient::from_transport(Box::new(transport), request, None));
     hg.state.set_joined_host(key(SOURCE_PERSONA), key(SOURCE_RUNTIME));
     let imports = imports.unwrap_or_else(|| dir.0.join("imports"));
     hg.state.handover_fixture =
         Some(Fixture { signed_in: Some(key(RECIPIENT_PERSONA)), recipient: Some(Box::new(move || Ok(recipient_env_at(imports.clone())))) });
-    let mut j = Joined { hg, hs, host, slot: usize::MAX, sent, _dir: dir };
+    let mut j = Joined { hg, hs, host, slot: usize::MAX, sent, received, _dir: dir };
     for _ in 0..400 {
         step(&mut j);
         let slot = j.hs.server.players.len().saturating_sub(1);

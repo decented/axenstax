@@ -307,6 +307,39 @@ fn control_bytes(retained: usize, encoded: usize, tagged: usize) -> usize {
         .saturating_add(tagged)
 }
 
+/// Payload may already have lost its tag; the actual raw allocation did not.
+pub(crate) fn check_incoming_control(payload: &[u8], capacity: usize) -> Result<(), Refusal> {
+    if Frame::is_fixed_park_control(payload)
+        && (payload.len().saturating_add(1) > WIRE_CAP || capacity > WIRE_CAP)
+    {
+        return Err(Refusal("The incoming handover control exceeded its limit."));
+    }
+    Ok(())
+}
+
+pub(crate) fn check_incoming_batch(
+    retained: usize,
+    fixed_capacities: usize,
+    outer_capacity: usize,
+) -> Result<(), Refusal> {
+    // Accept can start the new phase while this exact incoming batch is still
+    // owned. Reserve both maximum outgoing fixed buffers as well as the actual
+    // incoming owners, before extracting any selected control from its FIFO.
+    if control_bytes(
+        retained
+            .saturating_add(2 * WIRE_CAP)
+            .saturating_add(size_of::<Vec<Vec<u8>>>()),
+        fixed_capacities,
+        outer_capacity,
+    ) > CONTROL_CAP
+    {
+        return Err(Refusal(
+            "The incoming handover control batch exceeded its limit.",
+        ));
+    }
+    Ok(())
+}
+
 impl EncodedControl {
     pub(crate) fn new(frame: &Frame, retained: usize) -> Result<Self, Refusal> {
         if !matches!(frame, Frame::FreezeFence { .. } | Frame::Parked { .. }) {

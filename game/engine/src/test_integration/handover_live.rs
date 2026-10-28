@@ -441,6 +441,7 @@ mod session {
         phase::Authority,
     };
     use crate::remote_client::RemoteClient;
+    use crate::protocol::PacketType;
     use nostr::{JsonUtil, Keys, SecretKey, Timestamp, ToBech32};
     use std::sync::{Arc, Mutex};
 
@@ -549,8 +550,17 @@ mod session {
                     1 => *pkt.last_mut().unwrap() ^= 1, // Source-issued generation challenge.
                     2 => pkt[1 + 4 + 16 + 16] ^= 1, // Checked authority digest.
                     3 => pkt.resize(crate::handover::live::park::WIRE_CAP + 1, 0),
+                    4 => {
+                        let needed = (crate::handover::live::park::WIRE_CAP + 1).saturating_sub(pkt.len());
+                        pkt.reserve_exact(needed);
+                    }
                     _ => {}
                 }
+            }
+            if self.park_fence_fault.load(std::sync::atomic::Ordering::Relaxed) == 5
+                && matches!(protocol::deserialize_header(&pkt), Some((PacketType::StateUpdate, _)))
+            {
+                pkt.resize(protocol::MAX_WIRE_PACKET_LEN + 1, 0);
             }
             let forged = *self.forged_bearer.lock().unwrap();
             match (crate::handover::live::recipient::handover_payload(&pkt).and_then(|b| Frame::decode(b).ok()), forged) {
