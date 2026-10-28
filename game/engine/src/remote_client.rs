@@ -2109,6 +2109,12 @@ impl RemoteClient {
 }
 
 impl RemoteClient {
+    /// Test-only: borrow the actual abort-replay FIFO without consuming it.
+    #[cfg(test)]
+    pub(crate) fn test_handover_replay(&self) -> impl ExactSizeIterator<Item = &Vec<u8>> + Clone {
+        self.replay.iter()
+    }
+
     /// Test-only: the `mined` tags still waiting with their edits.
     #[cfg(test)]
     fn carried_tags(&self) -> usize {

@@ -5,7 +5,7 @@ use crate::{
     protocol::{self, PacketType},
     quest_wire::{QuestOperation, QuestView},
     test_game_harness::HeadlessGame,
-    transport::{ChannelClientTransport, ClientTransport},
+    transport::ClientTransport,
 };
 use glam::Vec3;
 use std::{
@@ -27,6 +27,8 @@ mod native_setup;
 #[path = "handover_carry_fixture/observe.rs"]
 mod observe;
 use observe::Observation;
+#[path = "handover_carry_fixture/delay.rs"]
+pub(in crate::test_integration) mod delay;
 #[path = "handover_carry_fixture/continuation.rs"]
 pub(in crate::test_integration) mod continuation;
 #[path = "handover_carry_fixture/custody.rs"]
@@ -69,7 +71,7 @@ pub(super) fn settle(source: &mut HeadlessGame, peer: &mut HeadlessGame) -> Seat
 pub(super) fn attach(
     source: &mut HeadlessGame,
     peer: &mut HeadlessGame,
-    client: ChannelClientTransport,
+    client: impl ClientTransport + 'static,
     secret: [u8; 32],
     source_persona: [u8; 32],
     source_runtime: [u8; 32],

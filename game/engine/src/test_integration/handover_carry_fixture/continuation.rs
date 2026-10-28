@@ -1,5 +1,5 @@
 //! Actual two-controller continuation. No manual Ready, Applied or Imported
-//! authority is used; only the explicit UI consent fixture is armed.
+//! authority is used. Explicit consent and optional transport delay use the real controllers.
 use super::*;
 use crate::{
     handover::{
@@ -63,7 +63,30 @@ pub(in crate::test_integration) fn transfer_with_custody(
     custody: Option<&custody::Custody>,
     close_prepared: bool,
 ) -> Completed {
+    transfer_control(source, peer, seat, custody, close_prepared, None)
+}
+
+/// Exercise the actual prefix and consent in both delayed and ordinary delivery.
+pub(in crate::test_integration) fn transfer_with_delay(
+    source: &mut HeadlessGame,
+    peer: &mut HeadlessGame,
+    seat: Seat,
+    control: &delay::DelayControl,
+    delayed: bool,
+) -> Completed {
+    transfer_control(source, peer, seat, None, false, Some((control, delayed)))
+}
+
+fn transfer_control(
+    source: &mut HeadlessGame,
+    peer: &mut HeadlessGame,
+    seat: Seat,
+    custody: Option<&custody::Custody>,
+    close_prepared: bool,
+    delay: Option<(&delay::DelayControl, bool)>,
+) -> Completed {
     let mut closed_prepared = false;
+    let mut released_delay = false;
     let deadline = Instant::now() + Duration::from_secs(240);
     loop {
         if matches!(&peer.state.handover, Some(Handover::Recipient(s)) if s.stage() == RecipientStage::AwaitingConsent)
@@ -73,6 +96,13 @@ pub(in crate::test_integration) fn transfer_with_custody(
         round(source, peer);
         assert!(Instant::now() < deadline, "real proposal never reached consent: {:?}", source_stage(source));
     }
+    if let Some((control, delayed)) = delay {
+        control.arm(delayed);
+        // These bytes come from the real authority before it knows consent.
+        // The paired baseline performs precisely the same complete round.
+        round(source, peer);
+        control.assert_prefix();
+    }
     let sp = &source.state.hosted_server.as_ref().unwrap().server.players[seat.0];
     assert!(sp.personal_delivery.current(
         sp.personal.as_ref().unwrap(),
@@ -81,8 +111,8 @@ pub(in crate::test_integration) fn transfer_with_custody(
     ));
     assert!(peer.state.remote_client.as_ref().unwrap().handover_authority_settled());
     assert!(peer.state.window_inbox.is_empty());
-    // The completed normal round already drained the peer before consent.
-    // Park that SAME transport without another unpaired source advance.
+    // Ordinary subjects drained their completed normal round. A deliberate
+    // network-delay subject retains its real prefix below this SAME transport.
     peer.state.handover_consent_shown = Some(web_time::Instant::now() - Duration::from_secs(1));
     peer.state.handover_click = Some(UiAction::Accept);
     peer.frames(1);
@@ -125,7 +155,20 @@ pub(in crate::test_integration) fn transfer_with_custody(
                 assert_eq!(native(source), local, "frozen wall time never consumes common timers");
                 assert_eq!(source_stage(source), Some(SourceStage::Frozen));
             }
+            if let Some((control, _)) = delay.filter(|_| !released_delay) {
+                control.release();
+            }
             peer.frames(1);
+            if let Some((control, _)) = delay.filter(|_| !released_delay) {
+                control.assert_released();
+                if peer.state.handover.is_none() {
+                    control.assert_abort_replay(
+                        peer.state.remote_client.as_ref().expect("actual resumed recipient"),
+                        peer.state.toast.as_ref().map(|(text, _)| text.as_str()),
+                    );
+                }
+                released_delay = true;
+            }
             assert!(matches!(peer.state.mode, crate::GameMode::Paused { .. }));
             assert_eq!(
                 peer.state.players[0].personal_binding, actual_binding,

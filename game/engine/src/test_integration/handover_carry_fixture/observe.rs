@@ -6,7 +6,7 @@ use crate::{
     protocol::{self, PacketType},
     quest_wire::{QuestNote, QuestOperation, QuestResult, QuestStatus, QuestView, QuestViewPush},
     test_game_harness::HeadlessGame,
-    transport::{ChannelClientTransport, ClientTransport, Packet},
+    transport::{ClientTransport, Packet},
 };
 use glam::Vec3;
 use sha2::{Digest, Sha256};
@@ -114,10 +114,10 @@ struct State {
 #[derive(Clone)]
 pub(in crate::test_integration) struct Observation(Arc<Mutex<State>>);
 pub(super) struct ObservedTransport {
-    inner: ChannelClientTransport,
+    inner: Box<dyn ClientTransport>,
     trace: Observation,
 }
-pub(super) fn wrap(inner: ChannelClientTransport) -> (ObservedTransport, Observation) {
+pub(super) fn wrap(inner: impl ClientTransport + 'static) -> (ObservedTransport, Observation) {
     let mut events = Vec::new();
     let errors = if events.try_reserve_exact(LIMIT).is_err()
         || events.capacity().checked_mul(std::mem::size_of::<Event>()).is_none_or(|bytes| bytes > BYTE_LIMIT)
@@ -135,7 +135,7 @@ pub(super) fn wrap(inner: ChannelClientTransport) -> (ObservedTransport, Observa
         last_input: None,
         events,
     })));
-    (ObservedTransport { inner, trace: trace.clone() }, trace)
+    (ObservedTransport { inner: Box::new(inner), trace: trace.clone() }, trace)
 }
 impl Observation {
     fn state(&self) -> MutexGuard<'_, State> {
@@ -249,6 +249,16 @@ impl ClientTransport for ObservedTransport {
     }
     fn is_closed(&self) -> bool {
         self.inner.is_closed()
+    }
+    fn close_text(&self) -> Option<String> {
+        self.inner.close_text()
+    }
+    fn host_closed_link(&self) -> bool {
+        self.inner.host_closed_link()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    fn proven_host(&self) -> Option<crate::transport::ProvenHost> {
+        self.inner.proven_host()
     }
 }
 

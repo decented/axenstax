@@ -698,3 +698,4 @@ fn game_harness_handover_original_link_full_transfer_handback_and_later_epoch() 
 
 #[cfg(not(target_arch = "wasm32"))]
 mod quest_active;
+mod cadence;
