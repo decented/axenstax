@@ -455,6 +455,12 @@ impl HostedServer {
         self.inbound[slot].charged_bytes()
     }
 
+    /// Borrow the actual oldest queued packet without advancing it (tests).
+    #[cfg(test)]
+    pub fn handover_test_inbound_front(&self, slot: usize) -> Option<&crate::transport::Packet> {
+        self.inbound[slot].front()
+    }
+
     /// Route a control frame that arrived through ordinary processing.
     /// Frames from any seat but the bound one are dropped.
     pub(super) fn route_handover_frame(&mut self, i: usize, payload: &[u8]) {

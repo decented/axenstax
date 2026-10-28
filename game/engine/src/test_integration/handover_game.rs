@@ -2,7 +2,8 @@
 //! `#[ignore]`d like every harness test; run with `--ignored`). The source
 //! tests host the game's own world on a lent server and drive the far
 //! recipient by hand; the recipient tests join the game to a non-GPU lent
-//! server whose source session is driven by hand. One GPU game per test.
+//! server whose source session is driven by hand. The raw-guest control uses
+//! two GPU clients; the other tests use one GPU game.
 use super::handover_live::{BINDING, signed_join_lent};
 use super::joiner_authority::{accepted, settle_chunk_push};
 use crate::handover::{
@@ -2246,6 +2247,9 @@ fn game_harness_handover_retained_inactive_copy_refuses_native_open_before_origi
 }
 
 mod personal_delay;
+
+#[path = "handover_game/guest_cut.rs"]
+mod guest_cut;
 
 #[cfg(not(target_arch = "wasm32"))]
 mod quest_active;
