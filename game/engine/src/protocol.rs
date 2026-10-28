@@ -2887,7 +2887,7 @@ pub struct ServerAnnouncePacket {
 ///   fingerprint for every generator after v2 (v2's stays in
 ///   `worldgen_version`, the same value as before). A `ColumnLocal` hash
 ///   covers 16 chunks.
-pub const PROTOCOL_VERSION: u32 = 95;
+pub const PROTOCOL_VERSION: u32 = 96;
 
 /// The `protocol_version` of a JoinRequest payload that doesn't decode as this
 /// build's `JoinRequestPacket` (an older or newer client's shape). It is the

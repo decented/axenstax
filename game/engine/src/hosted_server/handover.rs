@@ -233,6 +233,35 @@ impl HostedServer {
         Ok(())
     }
 
+    /// The caller prepares both bounded control allocations before transition.
+    pub(crate) fn handover_send_park(
+        &mut self,
+        wire: &[u8],
+    ) -> Result<(), LinkError> {
+        self.handover_check()?;
+        let slot = self.handover.as_ref().ok_or("no handover link")?.slot;
+        self.send_to_joined_slot(slot, wire);
+        Ok(())
+    }
+
+    /// Re-read real queues before a fresh personal commit. A later control
+    /// extracted from the selected FIFO never makes earlier ordinary work inert.
+    pub(crate) fn handover_park_precommit(&mut self) -> Result<(), LinkError> {
+        self.handover_check()?;
+        let slot = self.handover.as_ref().ok_or("no handover link")?.slot;
+        self.inbound[slot].fill_from(&*self.transports[slot])
+            .map_err(|_| "the recipient's connection overflowed")?;
+        self.handover_fill_guests(slot);
+        if self.handover.as_ref().is_some_and(|link| !link.overflowed.is_empty())
+            || !self.deferred_overflow.is_empty()
+        {
+            return Err("a player's connection is still settling; try again in a moment");
+        }
+        // Already frozen: this repeats the existing real all-seat checks,
+        // neither raises a second fence nor sends another pause notice.
+        self.handover_freeze(None)
+    }
+
     /// Control frames the bound seat sent, oldest first. While frozen they
     /// are read straight out of that seat's queue (no tick runs); before
     /// that, `process_inbound_packets` routes them into the link's inbox.

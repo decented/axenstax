@@ -698,6 +698,10 @@ pub struct Authority {
     expiry: u64,
 }
 impl Authority {
+    pub(crate) fn lineage(&self) -> Id {
+        self.lineage
+    }
+
     /// The authority epoch this source holds (root is 0); its certificate
     /// names epoch + 1.
     pub fn epoch(&self) -> u32 {

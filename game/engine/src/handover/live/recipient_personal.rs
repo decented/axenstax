@@ -1,10 +1,10 @@
 //! Personal-only progress on the one held link; ordinary bytes retain replay ownership.
-use super::{RecipientConsent, RecipientSession, RecipientStage, Refusal};
+use super::{RecipientSession, RecipientStage, Refusal};
 use crate::{
     personal_inbox::AppliedPersonalBatch,
     player_slot::PlayerSlot,
     protocol::{self, PacketType},
-    remote_client::{ParkedPersonalLink, PersonalControlProgress, RemoteClient},
+    remote_client::{PersonalControlProgress, RemoteClient},
     window_events::WindowInbox,
 };
 use std::mem::size_of;
@@ -14,26 +14,6 @@ const CONTROL_FAILED: Refusal =
     Refusal("The joined personal boundary changed, so the handover was cancelled.");
 
 impl RecipientSession {
-    pub(crate) fn consent_personal(
-        &mut self,
-        consent: RecipientConsent,
-        listen: std::net::UdpSocket,
-        link: ParkedPersonalLink,
-        now: u64,
-    ) -> Result<(), Refusal> {
-        if link.binding().transfer() != self.transfer()
-            || link.binding().participant() != Some(self.persona)
-            || link.is_closed()
-        {
-            return Err(Refusal(
-                "This joined personal state does not belong to this handover.",
-            ));
-        }
-        let (transport, binding) = link.into_parts();
-        self.consent(consent, listen, transport, now)?;
-        self.personal_binding = Some(binding);
-        Ok(())
-    }
     pub(super) fn park_gameplay_packet(&mut self, packet: Vec<u8>) {
         if self.parked_overflow {
             return;
@@ -67,6 +47,7 @@ impl RecipientSession {
         matches!(
             self.stage,
             RecipientStage::AwaitingConsent
+                | RecipientStage::Draining
                 | RecipientStage::Prepared
                 | RecipientStage::Activated
                 | RecipientStage::Aborted(_)

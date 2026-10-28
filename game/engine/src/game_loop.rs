@@ -7941,6 +7941,13 @@ impl super::GameState {
         // every mode (never from the game tick): a session outlives the
         // joined world it started in, and the source's freeze stops the tick.
         #[cfg(not(target_arch = "wasm32"))]
+        let received_for_handover = self.handover_prepare_normal_receive();
+        #[cfg(target_arch = "wasm32")]
+        let received_for_handover = false;
+        if received_for_handover {
+            self.network_receive();
+        }
+        #[cfg(not(target_arch = "wasm32"))]
         self.poll_handover();
 
         // Drive animated textures off the game-tick clock (Spec 03 §3.4) so they
@@ -10708,7 +10715,9 @@ impl super::GameState {
         // ── Network: receive state from server ─────────────────────────────
         // Cross-platform now — the browser also pulls server state when it has
         // joined a dedicated server (no-op when not connected).
-        self.network_receive();
+        if !received_for_handover {
+            self.network_receive();
+        }
 
         // Accumulate time and run fixed-rate ticks
         let now = Instant::now();
@@ -21979,6 +21988,10 @@ impl super::GameState {
         // out over SWING_TICKS regardless of render frame rate. Stale ids
         // (players who left) are dropped so the map can't grow unbounded.
         self.update_remote_swing();
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(client) = self.remote_client.as_mut() {
+            client.handover_application_completed(self.chunk_intake.has_carried_world_work());
+        }
     }
 
     /// ARM remote-avatar swing windows on a fresh SWINGING broadcast.

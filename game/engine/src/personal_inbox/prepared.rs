@@ -26,6 +26,26 @@ pub(crate) struct PersonalFenceIdentity {
     ack: PersonalAck,
 }
 impl PersonalFenceIdentity {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn parked_attachment(
+        &self,
+        transfer: crate::handover::Id,
+        player_index: u32,
+    ) -> Result<crate::handover::live::park::Attachment, crate::handover::live::eligibility::Refusal> {
+        use crate::handover::live::{eligibility::Refusal, park::Attachment};
+        let bad = Refusal("The installed personal life changed before handover.");
+        // ACK life and attachment life are distinct fields. Never project an
+        // older installed ACK as proof of a newly observed respawn.
+        if self.ack.session != self.attachment.session
+            || self.ack.life != self.attachment.life
+            || self.attachment.life != self.attachment.observed_life
+        {
+            return Err(bad);
+        }
+        Attachment::checked(transfer, player_index, self.attachment.session,
+            self.attachment.context.ok_or(bad)?, self.attachment.life, self.attachment.observed_life)
+    }
+
     pub(crate) fn event(&self) -> u32 {
         self.ack.window_event
     }
@@ -504,5 +524,34 @@ impl Inbox {
             batch,
             remove,
         })
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod park_life_tests {
+    use super::*;
+
+    #[test]
+    fn ordered_park_checks_installed_ack_attachment_and_observed_life_separately() {
+        let context = GameplayContext::WorldLocal { scope: [3; 16],
+            player: crate::progression::WorldPlayer::Npub([4; 32]) };
+        let mut inbox = Inbox::new([5; 16], 0);
+        let value = PersonalSnapshot { session: [5; 16], life: 0, revision: 1,
+            window_event: 2, context, bytes: GameplayRecord::empty(context).unwrap().encode().unwrap() };
+        inbox.push(value).unwrap();
+        let mut slot = crate::player_slot::PlayerSlot::new(0, glam::Vec3::ZERO, 1.0);
+        assert_eq!(inbox.apply(2, &mut slot).unwrap().len(), 1);
+        let installed = inbox.installed_identity(2).unwrap();
+        assert!(installed.parked_attachment([6; 16], 1).is_ok());
+        inbox.observe_respawn(1).unwrap();
+        let observed = inbox.installed_identity(2).unwrap();
+        assert_eq!(observed.life(), 0, "life() alone is the older actual ACK life");
+        assert!(observed.parked_attachment([6; 16], 1).is_err());
+        // The normal physical-life transition can precede the next Personal
+        // application. The genuine older ACK must still refuse projection.
+        inbox.life = 1;
+        let transitioned = inbox.installed_identity(2).unwrap();
+        assert_eq!(transitioned.life(), 0);
+        assert!(transitioned.parked_attachment([6; 16], 1).is_err());
     }
 }

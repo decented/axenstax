@@ -5611,17 +5611,20 @@ cursor-release predicate (`GameState::cursor_must_be_free`, beside
 answer mid-play; in Playing it is interactable exactly when the cursor is free.
 Its Accept and Decline arm 0.75 s after the window first shows
 (`CONSENT_ARM`, review L7): an earlier click is ignored, so a click already
-under way can't land on Accept. Accept parks the
-`RemoteClient` connection into the session and binds the latched listener on
-a fresh ephemeral UDP socket. The joined session's UPnP lease moves into the
-recipient session at consent (`RecipientSession::hold_lease`, renewed by its
-pump), so leaving the joined world (`stop_online`) can't release a mapping
+under way can't land on Accept. Since protocol96, Accept enters `Draining`:
+the same normal `RemoteClient` retains its connection and UPnP lease while it
+applies the ordered pre-freeze output. A fresh ephemeral UDP socket is reserved
+for the later latched listener. Only the actual checked-fence park moves the
+connection and lease into the recipient session (`RecipientSession::hold_lease`,
+renewed by its pump). Leaving while still draining sends Abort through the
+normal owner before teardown; after actual park, leaving the joined world
+(`stop_online`) can't release a mapping
 the parked link may rely on; it returns to the joined game if the link is
 handed back, and is given back to the router when the session ends without
 it (review L5). The control pump (`poll_handover`) runs every
 frame in every mode next to `poll_online`, never from the game tick. The
-handover session is not cleared by leaving the world: a recipient past
-consent keeps its connection and continues to Ready after its joined world,
+handover session past actual park is not cleared by leaving the world: it
+keeps its connection and continues to Ready after its joined world,
 `RemoteClient` and HUD are gone (an unanswered proposal is declined on
 leave). A source handover is cancelled when the host leaves, before any save
 and while the world and link still exist; the lobby then says so in its
@@ -5630,8 +5633,8 @@ recipient's connection and waiting gameplay go back to the parked
 `RemoteClient` (if it can't be resumed, the player leaves with a notice).
 
 While a handover freezes this machine's world, or the host a client joined
-has paused play (`Notice{paused}`), or a session holds the client's
-connection (`handover_holds_play`): `GameState::tick` returns at once (no
+has paused play (`Notice{paused}`), or its recipient is draining or a session
+holds the client's connection (`handover_holds_play`): `GameState::tick` returns at once (no
 simulation, local edits, grants, decay, raid credit or autosave), the frame
 path produces no gameplay intents, `network_send_input` sends nothing, chat
 commands are refused, `save_live_world` (every pause Save) refuses with "play
@@ -7230,3 +7233,95 @@ close; it is not earned quest activity or transfer of another player's body.
 All checkpoint37 source/runtime controls and the final combined gates remain
 unexecuted at this source checkpoint. Mirror default, parked global Strict
 recovery, D3 opt-in/default decisions and D4 simulation parity are unchanged.
+
+
+### Wire 96 ordered park — implementation awaiting automated acceptance
+
+This implementation corrects an ordering fault: consent previously parked the
+recipient before ordinary output already in flight had applied, causing genuine
+active-carry attempts to refuse before fresh current Personal settlement.
+Source and tests are under review; automated continuation acceptance and owner
+QA remain pending. Application 0.2.27 and save 59 are unchanged. Older protocol
+peers are refused at join. Existing Notice, Personal and Prepared messages keep
+their meanings.
+
+Two append-only fixed Frame variants have discriminants 13 and 14. FreezeFence
+contains transfer[16], nonce[16], authority digest[32], selected persona[32],
+selected runtime[32] and the source-issued attach generation u32. Parked contains
+transfer[16], nonce[16], fence digest[32] and signature[[u8;32];2]. Their tagged
+logical sizes are 137 and 133 bytes. The existing bounded codec rejects trailing
+bytes and malformed fields; each new wire's actual capacity must fit 512 bytes.
+
+Consent enters recipient Draining on the same normal owner; new gameplay stops,
+while normal receive/application and generated retirement ACK/GrantUnfit sends
+remain available. Source verifies consent and the live selected boundary, then
+freezes the actual world, clocks and save fence and enters AwaitingParked. It
+sends a fresh FreezeFence after its last ordinary output on that same ordered
+connection. No current-holder commit or capture has happened at this point.
+
+Each draining poll reads at most one total raw carrier, including replay,
+control and malformed input. Another read needs a completed ordinary application
+pass, and waits while ChunkIntake actually carries authoritative world steps.
+The existing GameState network_receive/application runs once before the pause
+return, including Paused; a frame-local flag skips its later invocation. Normal
+cross-packet window and Personal retirement can progress before the fence. At
+the fully checked fence, raw reading stops persistently across all later polls.
+Subsequent transport bytes stay raw; post-fence replay is refused, never drained
+merely to make the existing replay-empty park gate pass.
+
+At that boundary, actual world application, local edits, WindowInbox, the SAME
+Personal Inbox, action/pack/quest requests and physical life must be settled.
+The normal owner then returns its genuine ParkedPersonalLink. Its installed
+same-origin binding projects transfer, player index, namespace session, signed
+GameplayContext, life and observed/applied life. Require installed ACK life ==
+attachment life == observed/applied life. Guest, LegacyLocal and absent contexts
+cannot prove a selected signed park. Imported contexts retain their existing
+participant, lineage, generation and transfer values. No pointer, Arc address,
+Personal revision or snapshot body becomes new application authority.
+
+Canonical SHA-256 layouts in handover/live/park.rs use distinct versioned domains
+ending in a zero byte, fixed arrays and little-endian integers. Authority binds
+lineage, epoch, committed certificate, runtime, persona and expiry. The freeze
+digest additionally binds protocol, transfer, nonce, selected persona/runtime
+and source-issued generation. The signed park digest binds that reconstructed
+fence, the actual attachment digest and the selected runtime/persona. Existing
+runtime Schnorr APIs sign and verify the reconstructed digest, never a peer's
+chosen digest. Source rechecks its actual live seat/generation, namespace,
+BoundPersonal context, Delivery.current/last and physical life against the proof.
+This ephemeral claim replaces neither fresh Personal ACK nor final PreparedAck.
+
+Both new waits have absolute 60-second local deadlines and monotonic checks,
+within the existing operation cap, checked before accepting a queued proof or
+changing ownership. Recipient sign-in, physical life and connection remain live
+checks while it has no held link. Each side's fixed phase metadata fits 512 bytes;
+a 16 KiB new-control cap conservatively charges fixed preparation values and the
+actual overlapping capacities and owners of both encoding/tagging Vecs. Existing
+world/cache/transport and crypto runtime storage retain their separate limits;
+this is not a whole-receiver memory bound.
+
+Before the first possible proof send, all fallible signing/encoding/capacity work
+borrows the genuine returned link. Failure restores that exact transport with
+honest empty replay, retains its actual lease and sends Abort through the normal
+owner while clearing only this transfer's stop. Success installs the held link,
+binding, socket, session and lease before sending. Afterwards delivery is
+uncertain: existing held abort/replay and actual post-commit semantics apply.
+Leaving during normal Draining cancels before normal ownership is torn down.
+
+Verified park enters Frozen, whose fresh current preparation still requires a
+bounded actual all-seat raw/typed/current precommit recheck. Earlier ordinary
+obligations cause busy abort/resume BEFORE prepare_cut.commit; there is no broad
+frozen gameplay or GrantUnfit processor. A fresh current Personal ACK still
+precedes capture. Post-commit failures retain the actual cut. A closed link
+cannot admit an early Parked proof through the existing final PreparedAck
+closed-last-frame exception. There is no claim of global future transport
+silence, or that still-raw guest input was already an accepted world mutation.
+
+Fixed codec/crypto/life/capacity, normal-owner cancel/leave, deadline/close,
+wrong-context/generation, sticky poll, pre-send restoration, post-fence replay and
+precommit-busy controls accompany the source. Their execution, the original
+three-epoch/retained/private-custody carry tails, focused regressions, WASM gates
+and the final combined check.sh are still required. Source-session component
+fixtures provide narrower evidence than actual GameState/UI/application tests.
+No executed owed-GrantUnfit settlement is claimed; source ordering and generic
+all-ordinary precommit refusal are the selected guarantee until a genuine owed
+case is independently established.

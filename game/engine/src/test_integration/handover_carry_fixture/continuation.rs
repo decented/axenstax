@@ -87,6 +87,7 @@ fn transfer_control(
 ) -> Completed {
     let mut closed_prepared = false;
     let mut released_delay = false;
+    let mut checked_delay = false;
     let deadline = Instant::now() + Duration::from_secs(240);
     loop {
         if matches!(&peer.state.handover, Some(Handover::Recipient(s)) if s.stage() == RecipientStage::AwaitingConsent)
@@ -116,8 +117,8 @@ fn transfer_control(
     peer.state.handover_consent_shown = Some(web_time::Instant::now() - Duration::from_secs(1));
     peer.state.handover_click = Some(UiAction::Accept);
     peer.frames(1);
-    assert!(matches!(&peer.state.handover, Some(Handover::Recipient(s)) if s.stage() == RecipientStage::Accepted));
-    assert!(peer.state.remote_client.as_ref().unwrap().is_parked());
+    assert!(matches!(&peer.state.handover, Some(Handover::Recipient(s)) if s.stage() == RecipientStage::Draining));
+    assert!(!peer.state.remote_client.as_ref().unwrap().is_parked());
     let actual_binding = peer.state.players[0].personal_binding.clone();
     // This is an actual paused joined client. The narrow handover pump must
     // apply the real current snapshot and send its returned Inbox ACK here.
@@ -128,9 +129,20 @@ fn transfer_control(
     let scope = source.state.world.quest_scope.unwrap();
     let mut cut = None;
     let mut observed_working = None;
+    let mut observed_park = false;
     loop {
         source.hosted_ticks(1);
         source.frames(1);
+        // Release the same pre-consent raw prefix at actual host freeze.
+        // Frozen now truthfully means the later verified-park/current stage.
+        if !released_delay && source.state.hosted_server.as_ref().unwrap().handover_frozen()
+            && let Some((control, _)) = delay
+        {
+            assert_eq!(source_stage(source), Some(SourceStage::AwaitingParked));
+            assert!(!peer.state.remote_client.as_ref().unwrap().is_parked());
+            control.release();
+            released_delay = true;
+        }
         if source_stage(source) == Some(SourceStage::Frozen) {
             let hs = source.state.hosted_server.as_ref().unwrap();
             let sp = &hs.server.players[seat.0];
@@ -155,20 +167,7 @@ fn transfer_control(
                 assert_eq!(native(source), local, "frozen wall time never consumes common timers");
                 assert_eq!(source_stage(source), Some(SourceStage::Frozen));
             }
-            if let Some((control, _)) = delay.filter(|_| !released_delay) {
-                control.release();
-            }
             peer.frames(1);
-            if let Some((control, _)) = delay.filter(|_| !released_delay) {
-                control.assert_released();
-                if peer.state.handover.is_none() {
-                    control.assert_abort_replay(
-                        peer.state.remote_client.as_ref().expect("actual resumed recipient"),
-                        peer.state.toast.as_ref().map(|(text, _)| text.as_str()),
-                    );
-                }
-                released_delay = true;
-            }
             assert!(matches!(peer.state.mode, crate::GameMode::Paused { .. }));
             assert_eq!(
                 peer.state.players[0].personal_binding, actual_binding,
@@ -186,6 +185,14 @@ fn transfer_control(
             cut = Some((tick, local, current));
         } else if !closed_prepared {
             peer.frames(1);
+        }
+        if peer.state.remote_client.as_ref().is_some_and(|remote| remote.is_parked()) {
+            assert!(!matches!(&peer.state.handover, Some(Handover::Recipient(s)) if s.stage() == RecipientStage::Draining));
+            if !checked_delay && let Some((control, _)) = delay {
+                control.assert_released();
+                checked_delay = true;
+            }
+            observed_park = true;
         }
         if let Some(Handover::Recipient(s)) = &peer.state.handover {
             if let Some(checkpoint) = s.checkpoint() {
@@ -218,6 +225,9 @@ fn transfer_control(
         assert!(Instant::now() < deadline, "actual active transfer did not retire: {:?}", source_stage(source));
         std::thread::sleep(Duration::from_millis(5));
     }
+    assert!(observed_park, "the same normal recipient actually parked before current capture");
+    assert!(delay.is_none() || released_delay, "the real delayed prefix was released at host freeze");
+    assert!(delay.is_none() || checked_delay, "the same full prefix reached the normal owner before actual park");
     let (cut_tick, source_record, recipient) = cut.expect("the fresh current fence was observed before capture");
     let Some(Handover::Source { session, .. }) = &source.state.handover else {
         panic!("real source session disappeared");
@@ -269,12 +279,17 @@ pub(in crate::test_integration) fn abort_current_with_custody(
     peer.state.handover_consent_shown = Some(web_time::Instant::now() - Duration::from_secs(1));
     peer.state.handover_click = Some(UiAction::Accept);
     peer.frames(1);
-    assert!(peer.state.remote_client.as_ref().unwrap().is_parked());
+    assert!(matches!(&peer.state.handover, Some(Handover::Recipient(s)) if s.stage() == RecipientStage::Draining));
+    assert!(!peer.state.remote_client.as_ref().unwrap().is_parked());
     while source_stage(source) != Some(SourceStage::Frozen) {
         source.hosted_ticks(1);
         source.frames(1);
+        if source_stage(source) != Some(SourceStage::Frozen) {
+            peer.frames(1);
+        }
         assert!(Instant::now() < deadline, "real current cut did not freeze");
     }
+    assert!(peer.state.remote_client.as_ref().unwrap().is_parked());
     let tick = source.state.tick_counter;
     let local = native(source);
     let remote = remote_record(source, seat);

@@ -70,6 +70,10 @@ pub enum Frame {
     /// signs `prepared_ack_content`, binding the transfer, the Prepared
     /// event hash and `prepared_ack_proof` (only a bearer holder computes it).
     PreparedAck { transfer: Id, event: String },
+    /// Source's ordered stop after its last ordinary output. APPEND-ONLY.
+    FreezeFence { fence: super::park::Fence },
+    /// Actual parked recipient's fixed runtime signature; not a Personal ACK.
+    Parked { proof: super::park::Proof },
 }
 
 /// Why a recipient declined a proposal. Every decline is typed: the source
@@ -112,6 +116,8 @@ impl Frame {
             | Frame::Bearer { transfer, .. }
             | Frame::Prepared { transfer, .. }
             | Frame::PreparedAck { transfer, .. } => *transfer,
+            Frame::FreezeFence { fence } => fence.transfer,
+            Frame::Parked { proof } => proof.transfer,
         }
     }
     fn validate(&self) -> Result<()> {
@@ -140,9 +146,21 @@ impl Frame {
         options().serialize(self).map_err(|_| Error::Limit("handover frame"))
     }
     pub fn decode(bytes: &[u8]) -> Result<Self> {
+        if Self::is_fixed_park_control(bytes) && bytes.len() + 1 > super::park::WIRE_CAP {
+            return Err(Error::Limit("handover park control"));
+        }
         let f: Frame = options().deserialize(bytes).map_err(|_| Error::Invalid("handover frame"))?;
         f.validate()?;
         Ok(f)
+    }
+
+    /// The fixed-int bincode discriminant, pinned by the new codec controls.
+    pub(crate) fn is_freeze_fence(bytes: &[u8]) -> bool {
+        bytes.starts_with(&13u32.to_le_bytes())
+    }
+
+    fn is_fixed_park_control(bytes: &[u8]) -> bool {
+        Self::is_freeze_fence(bytes) || bytes.starts_with(&14u32.to_le_bytes())
     }
 }
 

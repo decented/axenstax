@@ -31,6 +31,7 @@ use std::path::PathBuf;
 mod offer;
 mod publish;
 mod retire;
+mod park;
 
 /// The host's explicit choice. Only the host-action caller constructs it.
 pub struct HostAction {
@@ -102,7 +103,11 @@ type PublishResult = (u64, Id, Budget, crate::handover::Result<StoredProof>);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SourceStage {
     Proposed,
-    /// Consent verified and the source frozen: the caller captures now.
+    /// World and save fence are stopped; ordinary recipient intake is still
+    /// settling before its actual transport park. No personal commit yet.
+    AwaitingParked,
+    /// The actual recipient park verified. Settle and ACK the fresh current
+    /// Personal boundary before the caller may capture this frozen world.
     Frozen,
     /// The frozen copy is being packed on a worker thread; the frame, the
     /// control pump and Cancel keep running.
@@ -141,6 +146,7 @@ pub struct Capture<'a> {
 pub struct SourceSession {
     stage: SourceStage,
     current_cut: Option<crate::handover::active_carry::CutTicket>,
+    park: Option<park::SourcePark>,
     action: HostAction,
     cfg: SourceConfig,
     transfer: Id,
@@ -281,6 +287,7 @@ impl SourceSession {
         let mut session = Self {
             stage: SourceStage::Proposed,
             current_cut: None,
+            park: None,
             transfer,
             challenge: random_id(),
             recipient_runtime: None,
@@ -685,6 +692,9 @@ impl SourceSession {
         if matches!(self.stage, SourceStage::Aborted(_)) {
             return Ok(());
         }
+        if let Err(r) = self.check_park_wait(hs, live, now) {
+            return Err(self.fail(hs, r));
+        }
         let frames = match hs.handover_take_frames() {
             Ok(f) => f,
             Err(why) => return Err(self.fail(hs, Refusal(why))),
@@ -714,6 +724,7 @@ impl SourceSession {
         // it); after Retired no deadline fires (CP5 LOW-7).
         let stalled = match self.stage {
             SourceStage::Proposed => quiet > CONSENT_SECS,
+            SourceStage::AwaitingParked => quiet >= super::park::WAIT_SECS,
             SourceStage::Streaming | SourceStage::ReadyVerified | SourceStage::Prepared => quiet > STALL_SECS,
             _ => false,
         };
@@ -727,7 +738,7 @@ impl SourceSession {
         // has heard the end (its own stall clock waits on the source).
         let beats = matches!(
             self.stage,
-            SourceStage::Frozen | SourceStage::Packing | SourceStage::ReadyVerified | SourceStage::Publishing | SourceStage::Prepared | SourceStage::Retired
+            SourceStage::AwaitingParked | SourceStage::Frozen | SourceStage::Packing | SourceStage::ReadyVerified | SourceStage::Publishing | SourceStage::Prepared | SourceStage::Retired
         );
         if beats && now.saturating_sub(self.last_beat) >= HEARTBEAT_SECS {
             self.last_beat = now;
@@ -758,6 +769,7 @@ impl SourceSession {
         let result = (|| {
             if self.current_cut.is_none() {
                 self.check(hs, live)?;
+                hs.handover_park_precommit().map_err(Refusal)?;
                 let identity = crate::handover::active_carry::CutIdentity::checked(self.transfer, hs, live,
                     self.action.seat, tick, scope)?;
                 let (ticket, output) = crate::handover::active_carry::prepare_cut(local, hs, identity, now)?.commit();
@@ -796,21 +808,11 @@ impl SourceSession {
             (_, Frame::Abort { .. }) => Err(Refusal("The other player cancelled the handover.")),
             (SourceStage::Proposed, Frame::Decline { reason, .. }) => Err(Refusal(super::copy::host_declined(reason))),
             (SourceStage::Proposed, Frame::Accept { runtime, attestation, acceptance, challenge, .. }) => {
-                let attestation = self.verify_accept(runtime, &attestation, &acceptance, challenge, now)?;
-                // Re-authenticated: the same identity, seat and records,
-                // still eligible, then freeze.
-                self.check(hs, live)?;
-                hs.handover_freeze(self.cfg.world_dir.as_deref()).map_err(Refusal)?;
-                self.recipient_runtime = Some(runtime);
-                self.recipient_challenge = challenge;
-                self.acceptance = Some(acceptance);
-                self.recipient_attestation = Some(attestation);
-                self.consented_at = Some(now);
-                self.stage = SourceStage::Frozen;
-                Ok(())
+                self.accept_before_park(hs, live, runtime, attestation, acceptance, challenge, now)
             }
+            (SourceStage::AwaitingParked, Frame::Parked { proof }) => self.accept_parked(hs, live, proof, now),
             // M1: the recipient's heartbeat while its import runs on a worker.
-            (SourceStage::Frozen | SourceStage::Streaming, Frame::Notice { .. }) => Ok(()),
+            (SourceStage::AwaitingParked | SourceStage::Frozen | SourceStage::Streaming, Frame::Notice { .. }) => Ok(()),
             (SourceStage::Streaming, Frame::Ack { transfer, through }) => {
                 let sender = self.sender.as_mut().ok_or(Refusal("No transfer is running."))?;
                 if sender

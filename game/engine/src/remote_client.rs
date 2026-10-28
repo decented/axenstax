@@ -19,6 +19,9 @@ mod quest;
 #[path = "remote_client_personal_control.rs"]
 pub(crate) mod personal_control;
 #[cfg(not(target_arch = "wasm32"))]
+#[path = "remote_client_park.rs"]
+mod park_control;
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) use personal_control::{ParkedPersonalLink, PersonalControlProgress};
 pub use actions::flush_strict_window_ops;
 // Read by the copy lint and the stray-op test only.
@@ -647,6 +650,8 @@ pub struct RemoteClient {
     parked: bool,
     #[cfg(not(target_arch = "wasm32"))]
     personal_park: Option<personal_control::PersonalParkBinding>,
+    #[cfg(not(target_arch = "wasm32"))]
+    handover_drain: Option<park_control::Drain>,
     /// Gameplay that arrived while parked, handed back with the connection
     /// on a cancelled handover: read before the transport, in order.
     replay: std::collections::VecDeque<Vec<u8>>,
@@ -927,6 +932,8 @@ impl RemoteClient {
             parked: false,
             #[cfg(not(target_arch = "wasm32"))]
             personal_park: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            handover_drain: None,
             replay: Default::default(),
         }
     }
@@ -1009,6 +1016,8 @@ impl RemoteClient {
             parked: false,
             #[cfg(not(target_arch = "wasm32"))]
             personal_park: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            handover_drain: None,
             replay: Default::default(),
         }
     }
@@ -1029,7 +1038,17 @@ impl RemoteClient {
         // handled first — so its reason wins over the generic one below.
         let transport_closed = self.transport.is_closed();
 
-        while let Some(packet) = self.replay.pop_front().or_else(|| self.transport.try_recv_from_server()) {
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut drain_reads = 0;
+        loop {
+            #[cfg(not(target_arch = "wasm32"))]
+            if !self.park_poll_can_read(drain_reads) { break; }
+            let Some(packet) = self.replay.pop_front().or_else(|| self.transport.try_recv_from_server()) else { break };
+            #[cfg(not(target_arch = "wasm32"))]
+            if self.handover_drain.is_some() {
+                drain_reads += 1;
+                self.handover_carrier_read();
+            }
             if let Some((ptype, payload)) = protocol::deserialize_header(&packet) {
                 match ptype {
                     PacketType::JoinAccept => {
@@ -1547,6 +1566,15 @@ impl RemoteClient {
                     }
                     #[cfg(not(target_arch = "wasm32"))]
                     PacketType::Handover => {
+                        match self.receive_park_fence(payload) {
+                            Ok(true) => { changed = true; break; }
+                            Ok(false) => {}
+                            Err(why) => {
+                                self.refuse_park_drain(why, packet);
+                                changed = true;
+                                break;
+                            }
+                        }
                         if self.handover_inbox.len() < HANDOVER_INBOX_FRAMES
                             && self.handover_inbox_bytes + payload.len() <= HANDOVER_INBOX_BYTES
                         {
@@ -1588,6 +1616,13 @@ impl RemoteClient {
                 }
                 if let Err(reason) = self.check_pack_poll_buffer() {
                     self.pack_carrier_failed(reason);
+                    changed = true;
+                    break;
+                }
+            } else {
+                #[cfg(not(target_arch = "wasm32"))]
+                if self.handover_drain.is_some() {
+                    self.refuse_park_drain("The host sent an invalid packet during handover.", packet);
                     changed = true;
                     break;
                 }

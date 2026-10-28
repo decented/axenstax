@@ -53,6 +53,8 @@ pub mod joiner_authority;
 pub mod lent_world;
 #[cfg(not(target_arch = "wasm32"))]
 mod handover_live;
+#[cfg(not(target_arch = "wasm32"))]
+mod handover_component;
 mod handover_game;
 #[cfg(not(target_arch = "wasm32"))]
 mod handover_chain;

@@ -5,13 +5,13 @@
 //! server whose source session is driven by hand. The raw-guest control uses
 //! two GPU clients; the other tests use one GPU game.
 use super::handover_live::{BINDING, signed_join_lent};
-use super::joiner_authority::{accepted, settle_chunk_push};
+use super::joiner_authority::accepted;
 use crate::handover::{
     context::RootContext,
     live::{
         capture, copy,
         eligibility::Seat,
-        recipient::{JoinedHost, RecipientConsent, RecipientIdentity, RecipientSession, RecipientStage},
+        recipient::{JoinedHost, RecipientIdentity, RecipientSession, RecipientStage},
         source::{Capture, HostAction, Live, SourceConfig, SourceSession, SourceStage},
         wire::{Frame, root_lineage},
     },
@@ -125,6 +125,7 @@ fn lobby_imports() -> PathBuf {
 /// The far end: a joined client's RemoteClient and its session.
 struct Far {
     rc: RemoteClient,
+    application: super::handover_component::Application,
     dst: Option<RecipientSession>,
 }
 
@@ -158,10 +159,13 @@ fn proposed(tag: &str, dir: &Tmp) -> (HeadlessGame, Far, usize) {
     )
     .unwrap();
     hg.state.hosted_server = Some(hs);
-    // The real seat 0 carries its own progress and inventory.
+    // Declared fixture state goes through genuine signed scope/native preparation
+    // BEFORE admission. A consumed admission cannot be retrofitted with an Inbox.
+    hg.state.handover_fixture = Some(Fixture { signed_in: Some(key(SOURCE_PERSONA)), recipient: None });
     let p0 = &mut hg.state.players[0];
     p0.kill_counter.insert(crate::mob::MobType::Pig, 7);
     p0.inventory.set_slot(4, Some(crate::item::ItemStack::new_block(crate::block::GLASS, 9)));
+    hg.state.prepare_local_gameplay().expect("actual signed source authority before join");
     let client = hg.state.hosted_server.as_mut().unwrap().attach_test_remote_with_binding(Some(BINDING));
     let chal = loop {
         let pkt = client.try_recv_from_server().expect("challenge issued on attach");
@@ -171,13 +175,18 @@ fn proposed(tag: &str, dir: &Tmp) -> (HeadlessGame, Far, usize) {
     };
     let origin = crate::signet::join_origin(Some(BINDING));
     let ev = crate::hosted_server::tests::signed_auth_event([RECIPIENT_PERSONA; 32], &chal.nonce_hex, &origin, now() as u32);
-    client.send_to_server(&protocol::serialize_packet(PacketType::JoinRequest, &crate::hosted_server::tests::join_with_auth(ev, None)));
-    hg.hosted_ticks(1);
-    let slot = accepted(&client).expect("signed join accepted").player_index as usize;
-    settle_chunk_push(&mut hg, &client, |hg| {
+    let request = crate::hosted_server::tests::join_with_auth(ev, None);
+    let mut rc = RemoteClient::from_transport(Box::new(client), request, None);
+    let mut application = super::handover_component::Application::new();
+    for _ in 0..64 {
         hg.hosted_ticks(1);
-    });
-    hg.state.handover_fixture = Some(Fixture { signed_in: Some(key(SOURCE_PERSONA)), recipient: None });
+        application.receive(&mut rc, &hg.state.registry);
+        let slot = rc.player_index().unwrap() as usize;
+        let sp = &hg.state.hosted_server.as_ref().unwrap().server.players[slot];
+        if application.ready(&rc) && sp.personal_delivery.initialised && sp.window_events.is_quiescent() { break; }
+    }
+    assert!(application.ready(&rc), "same far component installed actual admission");
+    let slot = rc.player_index().unwrap() as usize;
     let generation = hg.state.hosted_server.as_ref().unwrap().handover_seat(slot).unwrap().0;
     let drawn = (slot, generation, key(RECIPIENT_PERSONA));
     assert_eq!(hg.state.handover_candidates(), vec![drawn], "the present signed joiner");
@@ -198,8 +207,7 @@ fn proposed(tag: &str, dir: &Tmp) -> (HeadlessGame, Far, usize) {
     );
     assert!(hg.state.handover.is_none());
     hg.state.begin_handover_with(drawn, env(), now()).expect("eligible");
-    let rc = RemoteClient::from_transport(Box::new(client), crate::remote_client::build_join_request_guest("far", 0), None);
-    (hg, Far { rc, dst: None }, slot)
+    (hg, Far { rc, application, dst: None }, slot)
 }
 
 /// The far end reads the Propose the ordinary way and consents; the host
@@ -214,7 +222,7 @@ fn frozen_after(tag: &str, dir: &Tmp, prep: impl FnOnce(&mut HeadlessGame)) -> (
     let (mut hg, mut far, _) = proposed(tag, dir);
     prep(&mut hg);
     round(&mut hg);
-    far.rc.poll();
+    far.application.receive(&mut far.rc, &hg.state.registry);
     let propose = far.rc.take_handover_frames().into_iter().find(|b| matches!(Frame::decode(b), Ok(Frame::Propose { .. })));
     let mut dst = RecipientSession::propose(
         &propose.expect("the Propose reached the joined client"),
@@ -224,16 +232,14 @@ fn frozen_after(tag: &str, dir: &Tmp, prep: impl FnOnce(&mut HeadlessGame)) -> (
         now(),
     )
     .unwrap();
-    let p = dst.proposal().clone();
-    let c = RecipientConsent { transfer: p.transfer, world_name: p.world_name, source_npub: p.source_npub };
-    dst.consent(c, std::net::UdpSocket::bind("127.0.0.1:0").unwrap(), far.rc.park_transport(), now()).unwrap();
+    far.application.consent(&mut far.rc, &mut dst, now());
     far.dst = Some(dst);
-    for _ in 0..8 {
+    for _ in 0..2048 {
         round(&mut hg);
-        if hg.state.handover_freezes_world() {
-            break;
-        }
+        if far.rc.is_parked() && !matches!(source_stage(&hg), Some(SourceStage::AwaitingParked | SourceStage::Frozen)) { break; }
+        far.application.progress(&mut far.rc, far.dst.as_mut().unwrap(), &hg.state.registry, now());
     }
+    assert!(far.rc.is_parked(), "the actual normal far component parked");
     assert!(hg.state.handover_freezes_world(), "the host game froze on consent");
     (hg, far)
 }
@@ -379,7 +385,7 @@ fn joined_into(tag: &str, imports: Option<PathBuf>) -> Joined {
     hg.state.set_joined_host(key(SOURCE_PERSONA), key(SOURCE_RUNTIME));
     let imports = imports.unwrap_or_else(|| dir.0.join("imports"));
     hg.state.handover_fixture =
-        Some(Fixture { signed_in: None, recipient: Some(Box::new(move || Ok(recipient_env_at(imports.clone())))) });
+        Some(Fixture { signed_in: Some(key(RECIPIENT_PERSONA)), recipient: Some(Box::new(move || Ok(recipient_env_at(imports.clone())))) });
     let mut j = Joined { hg, hs, host, slot: usize::MAX, sent, _dir: dir };
     for _ in 0..400 {
         step(&mut j);
@@ -465,15 +471,21 @@ fn consented(j: &mut Joined) -> SourceSession {
     j.hg.state.upnp_lease = Some(crate::online_prep::LeaseKeeper::lost_for_test());
     j.hg.state.handover_click = Some(UiAction::Accept);
     j.hg.frames(1);
-    assert!(j.hg.state.remote_client.as_ref().unwrap().is_parked(), "consent took the connection");
-    assert!(j.hg.state.upnp_lease.is_none(), "the lease stayed with the joined session");
-    assert!(matches!(&j.hg.state.handover, Some(Handover::Recipient(s)) if s.holds_lease()), "the session holds the lease");
+    assert_eq!(recipient_stage(&j.hg), Some(RecipientStage::Draining));
+    assert!(!j.hg.state.remote_client.as_ref().unwrap().is_parked(), "normal owner drains after consent");
+    assert!(j.hg.state.upnp_lease.is_some(), "normal owner retains its actual lease while draining");
+    assert!(matches!(&j.hg.state.handover, Some(Handover::Recipient(s)) if !s.holds_lease()));
     assert!(j.hg.state.handover_holds_play());
-    for _ in 0..4 {
+    for _ in 0..400 {
         j.host.lend_tick(&mut j.hs);
         src.pump(&mut j.hs, live(), now()).unwrap();
+        if src.stage() == SourceStage::Frozen { break; }
+        j.hg.frames(1);
     }
     assert_eq!(src.stage(), SourceStage::Frozen);
+    assert!(j.hg.state.remote_client.as_ref().unwrap().is_parked(), "actual fence precedes actual park");
+    assert!(j.hg.state.upnp_lease.is_none(), "the lease moves with the actual park owner");
+    assert!(matches!(&j.hg.state.handover, Some(Handover::Recipient(s)) if s.holds_lease()));
     let mut seat0 = crate::player_slot::PlayerSlot::new(0, glam::Vec3::new(3.0, 70.0, 3.0), 1.0);
     seat0.inventory.set_slot(4, Some(crate::item::ItemStack::new_block(crate::block::GLASS, 9)));
     seat0.kill_counter.insert(crate::mob::MobType::Pig, 7);
@@ -1495,20 +1507,23 @@ fn game_harness_handover_frozen_capture_refuses_torn_or_missing_metadata_without
         let original = std::fs::read(&path).unwrap();
         assert!(crate::handover::checkpoint::source_metadata(&original).is_ok());
         round(&mut hg);
-        far.rc.poll();
+        far.application.receive(&mut far.rc, &hg.state.registry);
         let proposal = far.rc.take_handover_frames().into_iter()
             .find(|bytes| matches!(Frame::decode(bytes), Ok(Frame::Propose { .. }))).unwrap();
         let mut recipient = RecipientSession::propose(&proposal, joined_host(), identity(), dir.0.join("imports"), now()).unwrap();
         if missing { std::fs::remove_file(&path).unwrap(); }
         else { std::fs::write(&path, &original[..original.len()/2]).unwrap(); }
         let before = snapshot(&world);
-        let proposal = recipient.proposal().clone();
-        recipient.consent(RecipientConsent { transfer: proposal.transfer, world_name: proposal.world_name, source_npub: proposal.source_npub },
-            std::net::UdpSocket::bind("127.0.0.1:0").unwrap(), far.rc.park_transport(), now()).unwrap();
+        far.application.consent(&mut far.rc, &mut recipient, now());
         far.dst = Some(recipient);
-        // Accept follows the actual hosted FIFO, then GameState freezes and
-        // invokes its real capture callback in the next frame.
-        round(&mut hg);
+        // The SAME actual far owner drains and parks before the host's real
+        // current-ACK/capture path reaches the deliberately faulted metadata.
+        for _ in 0..2048 {
+            round(&mut hg);
+            if hg.state.handover.is_none() { break; }
+            far.application.progress(&mut far.rc, far.dst.as_mut().unwrap(), &hg.state.registry, now());
+        }
+        assert!(far.rc.is_parked(), "the intended metadata fault was reached AFTER genuine park");
         assert!(hg.state.handover.is_none(), "unreadable metadata entered packing instead of refusing capture");
         assert!(!hg.state.hosted_server.as_ref().unwrap().handover_frozen());
         assert_eq!(snapshot(&world), before, "capture repaired, quarantined or changed source bytes");
@@ -2247,6 +2262,8 @@ fn game_harness_handover_retained_inactive_copy_refuses_native_open_before_origi
 }
 
 mod personal_delay;
+
+mod ordered_park;
 
 #[path = "handover_game/guest_cut.rs"]
 mod guest_cut;

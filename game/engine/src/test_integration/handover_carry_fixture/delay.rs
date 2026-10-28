@@ -255,48 +255,7 @@ impl DelayControl {
         state.armed = false;
     }
 
-    /// Inspect actual restored replay without polling, removing or copying a body.
-    pub(in crate::test_integration) fn assert_abort_replay(
-        &self,
-        remote: &crate::remote_client::RemoteClient,
-        reason: Option<&str>,
-    ) {
-        let state = self.0.lock().expect("delay state poisoned");
-        assert!(!state.armed && state.held.is_empty());
-        let mut replay = remote.test_handover_replay();
-        let front = replay
-            .clone()
-            .next()
-            .map(|packet| Wire::of(packet, Some(packet.capacity())));
-        eprintln!(
-            "actual carry refusal: reason={reason:?} parked={} replay_count={} front={front:?}",
-            remote.is_parked(),
-            replay.len()
-        );
-        assert!(
-            !remote.is_parked(),
-            "an actual refusal must restore the original link"
-        );
-        assert_eq!(
-            reason,
-            Some("Gameplay arrived while the handover was waiting for personal state.")
-        );
-        let expected = state.events.iter().filter(|event| {
-            event.kind == Kind::Held && event.wire.tag != Some(PacketType::Handover)
-        });
-        assert!(
-            replay.len() >= expected.clone().count(),
-            "abort lost a still-raw original prefix"
-        );
-        for event in expected {
-            let actual = replay.next().expect("actual original replay prefix");
-            assert_eq!(
-                Wire::of(actual, Some(actual.capacity())),
-                event.wire,
-                "abort must return the same complete still-raw prefix with its actual allocation in FIFO order"
-            );
-        }
-    }
+
 }
 
 impl<T: ClientTransport> ClientTransport for Delayed<T> {

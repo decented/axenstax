@@ -428,6 +428,12 @@ impl ChunkIntake {
     /// allocation additionally, even when earlier world checks hold it.
     pub fn carried_metadata_bytes(&self) -> usize { self.carried.capacity().saturating_mul(std::mem::size_of::<Delta>()) }
 
+    /// Actual received authoritative steps still awaiting normal application.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn has_carried_world_work(&self) -> bool {
+        !self.carried.is_empty()
+    }
+
     /// Steps held back to a later frame. Test-only.
     #[cfg(test)]
     pub fn carried_len(&self) -> usize {

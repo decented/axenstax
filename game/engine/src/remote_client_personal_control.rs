@@ -129,6 +129,12 @@ mod parked {
         binding: PersonalParkBinding,
     }
     impl ParkedPersonalLink {
+        pub(crate) fn park_attachment(
+            &self,
+        ) -> Result<crate::handover::live::park::Attachment, crate::handover::live::eligibility::Refusal> {
+            self.binding.identity.parked_attachment(self.binding.transfer, self.binding.player_index)
+        }
+
         pub(crate) fn binding(&self) -> &PersonalParkBinding {
             &self.binding
         }
@@ -214,7 +220,7 @@ mod parked {
                 binding,
             })
         }
-        fn personal_control_quiescent(&self) -> bool {
+        pub(in crate::remote_client) fn personal_control_quiescent(&self) -> bool {
             self.handover_authority_settled()
                 && !self.pack_request_pending()
                 && !self.pack_buffers_live()

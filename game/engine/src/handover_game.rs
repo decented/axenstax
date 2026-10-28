@@ -28,6 +28,9 @@ use crate::handover::{
 use std::path::PathBuf;
 use web_time::{Duration, Instant};
 
+#[path = "handover_park.rs"]
+mod park;
+
 /// How long a certificate stays valid, clipped to the invitation's expiry.
 pub(crate) const CERTIFICATE_SECS: u64 = 3600;
 /// L7: the consent buttons arm this long after the window first shows, so a
@@ -194,6 +197,11 @@ pub(crate) fn draw(ctx: &egui::Context, handover: Option<&Handover>, host_paused
                     copy::consent_lines(&p.world_name, &p.source_npub).to_vec(),
                     &[(copy::ACCEPT, UiAction::Accept), (copy::DECLINE, UiAction::Decline)],
                 ),
+                RecipientStage::Draining => (
+                    "World handover",
+                    vec![format!("Waiting for \u{201c}{}\u{201d} to pause before storing the copy.", p.world_name)],
+                    &[(copy::CANCEL, UiAction::Cancel)],
+                ),
                 RecipientStage::Ready => {
                     ("World handover", vec![copy::recipient_stored(&p.world_name)], &[(copy::CANCEL, UiAction::Cancel)])
                 }
@@ -262,6 +270,7 @@ impl crate::GameState {
     pub(crate) fn handover_holds_play(&self) -> bool {
         self.handover_freezes_world()
             || self.host_paused
+            || matches!(&self.handover, Some(Handover::Recipient(s)) if s.stage() == RecipientStage::Draining)
             || self.remote_client.as_ref().is_some_and(|rc| rc.is_parked())
             || self.remote_client.as_ref().is_some_and(|rc| rc.personal_inbox.as_ref().is_some_and(|inbox| !inbox.initialised()))
     }
@@ -481,15 +490,26 @@ impl crate::GameState {
                 }
                 Ok(Frame::Propose { transfer, .. }) => self.on_handover_proposal(&payload, transfer, now),
                 Ok(Frame::Abort { transfer, .. }) => {
-                    if let Some(Handover::Recipient(s)) = &self.handover
+                    if let Some(Handover::Recipient(s)) = &mut self.handover
                         && s.proposal().transfer == transfer
-                        && s.stage() == RecipientStage::AwaitingConsent
                     {
-                        self.handover = None;
-                        self.handover_toast("The host cancelled the handover.");
+                        if s.stage() == RecipientStage::AwaitingConsent {
+                            self.handover = None;
+                            self.handover_toast("The host cancelled the handover.");
+                        } else if s.stage() == RecipientStage::Draining {
+                            s.abort("The host cancelled the handover.");
+                        }
                     }
                 }
-                _ => {}
+                _ => {
+                    // A draining session has only its normal owner. A wrong
+                    // direction or malformed control must end that wait visibly.
+                    if let Some(Handover::Recipient(s)) = &mut self.handover
+                        && s.stage() == RecipientStage::Draining
+                    {
+                        s.abort("The host sent an unexpected handover message.");
+                    }
+                }
             }
         }
     }
@@ -646,6 +666,10 @@ impl crate::GameState {
             _ => (false, msg.to_string()),
         };
         self.handover = None;
+        // Consent can freeze and refuse within a single control pump (for
+        // example, a later fence allocation fails). That pause is invisible
+        // to the frame's entry predicate, so ending the source resets timing.
+        self.reset_tick_timing();
         if rotate {
             if self.online_host.as_ref().is_some_and(|host| host.continuation().is_some()) {
                 line = line.replace(crate::handover::live::copy::INVITE_REISSUED,
@@ -657,6 +681,13 @@ impl crate::GameState {
     }
 
     fn pump_handover_recipient(&mut self, now: u64) {
+        if let Err(Refusal(why)) = self.advance_normal_handover(now) {
+            if let Some(Handover::Recipient(session)) = self.handover.as_mut() {
+                session.abort(why);
+            }
+            self.end_recipient(why);
+            return;
+        }
         let joined = self.joined();
         let carried = self.chunk_intake.carried_metadata_bytes();
         let gates = joined && self.players.len() == 1 && self.pending_block_changes.is_empty()
@@ -724,6 +755,18 @@ impl crate::GameState {
             return;
         }
         let Some(Handover::Recipient(mut s)) = self.handover.take() else { return };
+        // Before actual park, the normal client still owns the link and lease.
+        // Send Abort through that owner and release only this session's stop.
+        if let Some(remote) = self.remote_client.as_mut()
+            && remote.handover_drain_active(s.proposal().transfer)
+        {
+            if let Ok(bytes) = (Frame::Abort { transfer: s.proposal().transfer, aborted: None }).encode() {
+                let mut wire = vec![crate::protocol::PacketType::Handover as u8];
+                wire.extend_from_slice(&bytes);
+                remote.send_raw(&wire);
+            }
+            remote.cancel_handover_drain(s.proposal().transfer);
+        }
         // CP12 (CP10 review LOW-2): past the ack, every end of the session
         // hands its wait for Committed to the resumer first (once: the pump
         // or `abort` may have already).
@@ -774,48 +817,7 @@ impl crate::GameState {
         }
         match (action, self.handover.as_mut()) {
             (UiAction::Accept, Some(Handover::Recipient(s))) if s.stage() == RecipientStage::AwaitingConsent => {
-                let p = s.proposal().clone();
-                if let Some(refusal) = self.players.first().and_then(|slot| crate::handover::live::eligibility::joined_progress(slot, self.tick_counter).err()) {
-                    self.handover = None;
-                    self.decline_over_joined(p.transfer, DeclineReason::NotReady);
-                    self.handover_toast(refusal.0);
-                    return;
-                }
-                if !self.pending_block_changes.is_empty() || !self.window_inbox.is_empty()
-                    || self.players.first().is_some_and(|slot| slot.crafting_ui.ops.first_stamp().is_some())
-                    || self.remote_client.as_ref().is_some_and(|client| !client.handover_authority_settled() || client.pack_buffers_live()) {
-                    self.handover_toast("Your inventory is still settling. Try again in a moment.");
-                    return;
-                }
-                let Some(rc) = self.remote_client.as_mut() else {
-                    self.handover = None;
-                    return;
-                };
-                let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") else {
-                    self.decline_over_joined(p.transfer, DeclineReason::NotReady);
-                    self.handover = None;
-                    self.handover_toast("This machine couldn't open a port for the handover, so it was declined.");
-                    return;
-                };
-                let link = match rc.park_for_personal_control(p.transfer) {
-                    Ok(link) => link,
-                    Err(error) => { self.handover_toast(error); return; }
-                };
-                let consent = RecipientConsent { transfer: p.transfer, world_name: p.world_name, source_npub: p.source_npub };
-                match s.consent_personal(consent, socket, link, now) {
-                    // L5: the router lease goes with the link it serves, so
-                    // leaving the joined world can't give it back early.
-                    Ok(()) => {
-                        if let Some(lease) = self.upnp_lease.take() {
-                            s.hold_lease(Box::new(lease));
-                        }
-                    }
-                    Err(Refusal(why)) => {
-                        // The refused consent took the connection with it.
-                        self.handover = None;
-                        self.leave_world_with_notice(crate::world_exit::SaveChoice::Discard, why.into());
-                    }
-                }
+                self.begin_normal_handover(now);
             }
             (UiAction::Decline, Some(Handover::Recipient(s))) if s.stage() == RecipientStage::AwaitingConsent => {
                 if let Some(pkt) = s.decline()
@@ -878,6 +880,13 @@ impl crate::GameState {
                 let transfer = s.proposal().transfer;
                 self.handover = None;
                 self.decline_over_joined(transfer, DeclineReason::Player);
+            }
+            Some(Handover::Recipient(s)) if s.stage() == RecipientStage::Draining => {
+                // The normal client still owns this transport. Abort while it
+                // exists; teardown cannot move an unparked link into a session.
+                s.abort(copy::LEFT);
+                self.end_recipient_inner(copy::LEFT, true);
+                notice = Some(copy::LEFT.to_owned());
             }
             // CP12 (CP10 review LOW-2): `end_recipient` hands the wait over,
             // gives the lease back and closes the link.

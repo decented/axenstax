@@ -11,6 +11,8 @@
 //! back, so play continues. No gameplay admission or advertisement here.
 #[path = "recipient_personal.rs"]
 mod personal_control;
+#[path = "recipient_park.rs"]
+mod parking;
 use super::bearer::Bearer;
 use super::eligibility::Refusal;
 use super::listener::LatchedListener;
@@ -145,6 +147,8 @@ pub struct RecipientIdentity {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RecipientStage {
     AwaitingConsent,
+    /// Consent sent; the actual normal client receives/applies through the fence.
+    Draining,
     Accepted,
     Receiving,
     /// M1: every byte arrived; the import (extract, sync, verify, rename)
@@ -178,6 +182,7 @@ pub const PARKED_BYTES: usize = 4 * 1024 * 1024;
 pub struct RecipientSession {
     link: Option<Box<dyn ClientTransport>>,
     personal_binding: Option<crate::remote_client::personal_control::PersonalParkBinding>,
+    draining: Option<parking::Wait>,
     parked: VecDeque<Vec<u8>>,
     parked_bytes: usize,
     parked_overflow: bool,
@@ -346,6 +351,7 @@ impl RecipientSession {
         Ok(Self {
             link: None,
             personal_binding: None,
+            draining: None,
             parked: VecDeque::new(),
             parked_bytes: 0,
             parked_overflow: false,
@@ -558,8 +564,9 @@ impl RecipientSession {
         Some((link, std::mem::take(&mut self.parked)))
     }
 
-    /// Explicit consent. `link` is the joined connection, taken out of the
-    /// `RemoteClient` now; `listen` is the socket the latched listener binds.
+    /// Low-level held-session fixture support. The production UI enters normal
+    /// Draining and proves the actual installed attachment before park instead.
+    #[cfg(test)]
     pub fn consent(
         &mut self,
         c: RecipientConsent,
@@ -567,6 +574,16 @@ impl RecipientSession {
         link: Box<dyn ClientTransport>,
         now: u64,
     ) -> Result<(), Refusal> {
+        let accept = self.prepare_acceptance(c, listen, now)?;
+        self.link = Some(link);
+        self.send(&accept);
+        self.stage = RecipientStage::Accepted;
+        Ok(())
+    }
+
+    fn prepare_acceptance(&mut self, c: RecipientConsent,
+        listen: std::net::UdpSocket, now: u64,
+    ) -> Result<Frame, Refusal> {
         let p = &self.proposal;
         if self.stage != RecipientStage::AwaitingConsent
             || c.transfer != p.transfer
@@ -595,10 +612,7 @@ impl RecipientSession {
         self.last_heard = now;
         self.consented_at = now;
         self.socket = Some(listen);
-        self.link = Some(link);
-        self.send(&accept);
-        self.stage = RecipientStage::Accepted;
-        Ok(())
+        Ok(accept)
     }
 
     /// Decline while still joined: the packet the caller sends over its
@@ -614,6 +628,14 @@ impl RecipientSession {
     }
 
     pub fn pump(&mut self, now: u64) -> Result<(), Refusal> {
+        if self.stage == RecipientStage::Draining {
+            // The normal client owns liveness/intake, but this wait's deadline
+            // must still run before this session acquires any held link.
+            if let Err(error) = self.check_normal_wait(now) {
+                return Err(self.fail(error));
+            }
+            return Ok(());
+        }
         if matches!(
             self.stage,
             RecipientStage::Aborted(_) | RecipientStage::Quarantined(_) | RecipientStage::AwaitingConsent | RecipientStage::Activated

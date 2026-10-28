@@ -426,13 +426,14 @@ fn handover_refuses_a_participant_whose_obligations_are_not_proven_zero() {
 
 mod session {
     use super::*;
+    mod ordered_park;
     use crate::handover::{
         context::RootContext,
         durable::{MarkerKind, MarkerStore},
         live::{
             capture,
             eligibility::{Refusal, Seat},
-            recipient::{JoinedHost, RecipientConsent, RecipientIdentity, RecipientSession, RecipientStage},
+            recipient::{JoinedHost, RecipientIdentity, RecipientSession, RecipientStage},
             source::{Capture, HostAction, Live, SourceConfig, SourceSession, SourceStage},
             wire::{Frame, root_lineage},
         },
@@ -471,6 +472,7 @@ mod session {
     /// Ready it sends (a man in the middle, for the source's own check).
     struct Tap {
         inner: Box<dyn ClientTransport>,
+        park_fence_fault: Arc<std::sync::atomic::AtomicU8>,
         forged_ready: Arc<Mutex<Option<Vec<u8>>>>,
         forged_bearer: Arc<Mutex<Option<[u8; 16]>>>,
         /// Re-signs the recipient's PreparedAck with a stranger's key.
@@ -540,7 +542,16 @@ mod session {
             }
         }
         fn try_recv_from_server(&self) -> Option<crate::transport::Packet> {
-            let pkt = self.inner.try_recv_from_server()?;
+            let mut pkt = self.inner.try_recv_from_server()?;
+            if matches!(crate::handover::live::recipient::handover_payload(&pkt)
+                .and_then(|bytes| Frame::decode(bytes).ok()), Some(Frame::FreezeFence { .. })) {
+                match self.park_fence_fault.load(std::sync::atomic::Ordering::Relaxed) {
+                    1 => *pkt.last_mut().unwrap() ^= 1, // Source-issued generation challenge.
+                    2 => pkt[1 + 4 + 16 + 16] ^= 1, // Checked authority digest.
+                    3 => pkt.resize(crate::handover::live::park::WIRE_CAP + 1, 0),
+                    _ => {}
+                }
+            }
             let forged = *self.forged_bearer.lock().unwrap();
             match (crate::handover::live::recipient::handover_payload(&pkt).and_then(|b| Frame::decode(b).ok()), forged) {
                 (Some(Frame::Bearer { transfer, .. }), Some(wrong)) => {
@@ -568,6 +579,8 @@ mod session {
         host: OwnedSimParts,
         src: SourceSession,
         rc: RemoteClient,
+        application: super::super::handover_component::Application,
+        park_fence_fault: Arc<std::sync::atomic::AtomicU8>,
         dst: Option<RecipientSession>,
         seat: Seat,
         live: Live,
@@ -670,21 +683,35 @@ mod session {
         }
         plant(&dir.0.join("world"));
         let (mut hs, mut host) = start_prepared_lent(&format!("handover-{tag}"));
-        let (client, slot, generation, key) = signed_join_lent(&mut hs, &mut host, [RECIPIENT_PERSONA; 32]);
+        let client = hs.attach_test_remote_with_binding(Some(BINDING));
+        let request = super::super::handover_component::signed_request(&client, [RECIPIENT_PERSONA; 32]);
         let forged_ready = Arc::new(Mutex::new(None));
         let forged_bearer = Arc::new(Mutex::new(None));
         let forge_ack = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let ack_forge = Arc::new(Mutex::new(None));
         let drop_ack = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let park_fence_fault = Arc::new(std::sync::atomic::AtomicU8::new(0));
         let tap = Tap {
             inner: Box::new(client),
+            park_fence_fault: park_fence_fault.clone(),
             forged_ready: forged_ready.clone(),
             forged_bearer: forged_bearer.clone(),
             forge_ack: forge_ack.clone(),
             ack_forge: ack_forge.clone(),
             drop_ack: drop_ack.clone(),
         };
-        let rc = RemoteClient::from_transport(Box::new(tap), crate::remote_client::build_join_request_guest("dup", 0), None);
+        let mut rc = RemoteClient::from_transport(Box::new(tap), request, None);
+        let mut application = super::super::handover_component::Application::new();
+        for _ in 0..64 {
+            host.lend_tick(&mut hs);
+            application.receive(&mut rc, &hs.server.registry);
+            let slot = rc.player_index().unwrap() as usize;
+            if application.ready(&rc) && hs.server.players[slot].personal_delivery.initialised
+                && hs.server.players[slot].window_events.is_quiescent() { break; }
+        }
+        assert!(application.ready(&rc), "the SAME component client installed actual admission");
+        let slot = rc.player_index().unwrap() as usize;
+        let (generation, key) = hs.handover_seat(slot).unwrap();
         let relay = crate::handover::relay_fixture::Relay::start();
         let extra: Vec<_> = (1..n).map(|_| crate::handover::relay_fixture::Relay::start()).collect();
         let urls: Vec<String> = std::iter::once(relay.url()).chain(extra.iter().map(|r| r.url())).collect();
@@ -709,14 +736,14 @@ mod session {
         let action = HostAction { seat, source_key, world_name: "Loop".into() };
         let live = Live { signed_in: Some(source_key), local_seats: 1 };
         let src = SourceSession::begin(&mut hs, action, cfg, live, now())?;
-        Ok(Pair { hs, host, src, rc, dst: None, seat, live, root, forged_ready, forged_bearer, forge_ack, ack_forge, drop_ack, relay, extra, dir })
+        Ok(Pair { hs, host, src, rc, application, park_fence_fault, dst: None, seat, live, root, forged_ready, forged_bearer, forge_ack, ack_forge, drop_ack, relay, extra, dir })
     }
 
     /// The joined client reads the proposal through its ordinary poll, the
     /// recipient session checks it against the verified host.
     fn propose(p: &mut Pair) {
         p.host.lend_tick(&mut p.hs);
-        p.rc.poll();
+        p.application.receive(&mut p.rc, &p.hs.server.registry);
         let frames = p.rc.take_handover_frames();
         let propose = frames.iter().find(|b| matches!(Frame::decode(b), Ok(Frame::Propose { .. })));
         let dst = RecipientSession::propose(
@@ -733,19 +760,18 @@ mod session {
         p.dst = Some(dst);
     }
 
-    /// Explicit consent: the session takes the joined connection (parked).
+    /// Signed component consent, actual normal application and returned park owner.
+    /// This is session evidence; the mandatory GPU subjects cover GameState/UI.
     fn consent(p: &mut Pair) {
-        propose(p);
-        let dst = p.dst.as_mut().unwrap();
-        let prop = dst.proposal().clone();
-        let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-        let c = RecipientConsent { transfer: prop.transfer, world_name: prop.world_name, source_npub: prop.source_npub };
-        let link = p.rc.park_transport();
-        dst.consent(c, socket, link, now()).unwrap();
-        assert!(p.rc.is_parked());
-        p.host.lend_tick(&mut p.hs); // ordinary processing routes the Accept
-        p.src.pump(&mut p.hs, p.live, now()).unwrap();
+        consent_only(p);
+        for _ in 0..2048 {
+            p.host.lend_tick(&mut p.hs);
+            p.src.pump(&mut p.hs, p.live, now()).unwrap();
+            if p.src.stage() == SourceStage::Frozen { break; }
+            p.application.progress(&mut p.rc, p.dst.as_mut().unwrap(), &p.hs.server.registry, now());
+        }
         assert_eq!(p.src.stage(), SourceStage::Frozen);
+        assert!(p.rc.is_parked());
         assert!(p.hs.handover_frozen());
     }
 
@@ -1112,13 +1138,10 @@ mod session {
         assert!(!p.hs.handover_frozen(), "a refused Ready releases the source");
     }
 
-    /// Consent over the parked connection, without pumping the source.
+    /// Genuine consent over the normal owner, without source verification yet.
     fn consent_only(p: &mut Pair) {
         propose(p);
-        let dst = p.dst.as_mut().unwrap();
-        let prop = dst.proposal().clone();
-        let c = RecipientConsent { transfer: prop.transfer, world_name: prop.world_name, source_npub: prop.source_npub };
-        dst.consent(c, std::net::UdpSocket::bind("127.0.0.1:0").unwrap(), p.rc.park_transport(), now()).unwrap();
+        p.application.consent(&mut p.rc, p.dst.as_mut().unwrap(), now());
         p.host.lend_tick(&mut p.hs);
     }
 

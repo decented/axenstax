@@ -4,7 +4,7 @@ use crate::{
     handover::{
         context::RootContext,
         live::{
-            recipient::{JoinedHost, RecipientIdentity},
+            recipient::{JoinedHost, RecipientConsent, RecipientIdentity},
             wire::{Frame, root_lineage},
         },
     },
