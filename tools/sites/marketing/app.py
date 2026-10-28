@@ -8,8 +8,10 @@ contribute). Points out at the game, learn, wiki, and docs/project. The in-perso
 merch claim site is deliberately UNLINKED — reachable only by direct code URL.
 """
 
+import asyncio
 import logging
 import os
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -17,6 +19,8 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+
+from releases import MORE_GAMES, ReleaseCatalogue
 
 load_dotenv()
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "WARNING").upper())
@@ -42,7 +46,22 @@ SHOP_URL = os.environ.get("SHOP_URL", "").strip()
 # is a relationship, so this is a contact, not a checkout. Blank = "coming soon".
 PATRON_CONTACT = os.environ.get("PATRON_CONTACT", "").strip()
 
-app = FastAPI(title="Axe'n'Stax — Marketing")
+catalogue = ReleaseCatalogue(MORE_GAMES, BASE_DIR / "data" / "more-games.json")
+
+
+@asynccontextmanager
+async def lifespan(app):
+    catalogue.load()
+    refresh = asyncio.create_task(catalogue.run())
+    try:
+        yield
+    finally:
+        refresh.cancel()
+        with suppress(asyncio.CancelledError):
+            await refresh
+
+
+app = FastAPI(title="Axe'n'Stax — Marketing", lifespan=lifespan)
 
 # Tight baseline CSP. No external script origins; one stylesheet, no fetches.
 _BASELINE_CSP = (
@@ -80,32 +99,6 @@ async def _add_security_headers(request, call_next):
 
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
-
-
-# "More games" page: one place to edit on each release. size_bytes is the APK's
-# exact size; the page shows it rounded to whole MB.
-MORE_GAMES = [
-    {
-        "name": "Stampede",
-        "tagline": "Laser-eyed ostrich racing: an arcade kart racer.",
-        "version": "0.4.12",
-        "package": "org.decented.stampede",
-        "url": "https://nostr.download/b3b38cfb0b35d661de1973becbda8680bd6bfdaaf584f289653d82b3bb4f00a3.apk",
-        "sha256": "b3b38cfb0b35d661de1973becbda8680bd6bfdaaf584f289653d82b3bb4f00a3",
-        "size_bytes": 12573546,
-        "icon": "/static/games/stampede.png",
-    },
-    {
-        "name": "Twang Thang",
-        "tagline": "A neon-space energy-band party game.",
-        "version": "0.8.18",
-        "package": "org.decented.twangthang",
-        "url": "https://nostr.download/cfbe2fabca932f6c0e1d2d13afe126879d0c912faa90fa77ab9f0f026dc22926.apk",
-        "sha256": "cfbe2fabca932f6c0e1d2d13afe126879d0c912faa90fa77ab9f0f026dc22926",
-        "size_bytes": 12045165,
-        "icon": "/static/games/twangthang.png",
-    },
-]
 
 
 def _base_context() -> dict:
@@ -175,9 +168,9 @@ async def experiences(request: Request):
 @app.get("/more-games", response_class=HTMLResponse)
 async def more_games(request: Request):
     """More games — Android APK downloads for Stampede and Twang Thang.
-    Edit MORE_GAMES on each release."""
+    The background catalogue follows the games' signed release announcements."""
     ctx = _base_context()
-    ctx["games"] = [dict(g, size_mb=round(g["size_bytes"] / 1_000_000)) for g in MORE_GAMES]
+    ctx["games"] = [dict(g, size_mb=round(g["size_bytes"] / 1_000_000)) for g in catalogue.view()]
     return templates.TemplateResponse(request=request, name="more_games.html", context=ctx)
 
 
