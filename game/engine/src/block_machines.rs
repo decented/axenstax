@@ -1,39 +1,8 @@
-//! Block machines on the authoritative server (audit T1-3, 2026-10-05).
-//!
-//! The block machines — hives, crops + saplings, dispensers/droppers, pistons,
-//! furnaces, composters, Blasting Keg fuses and hoppers — each have ONE pure
-//! implementation in their home module (`bee_hive::accumulate_honey`,
-//! `growth::tick_growth`, `dispenser::realise_order`, `piston::tick_pistons`,
-//! `furnace::tick_all`, `composter::tick_all`, `power::tick_keg_fuses` +
-//! `explosion::detonate_keg_core`, `hopper::tick_hoppers`). Two callers drive
-//! them, never both on the same world:
-//!
-//! - **The client loop** (`game_loop.rs`) — single-player and the LAN/online
-//!   host. On a host it pushes the results into `pending_block_changes` → the
-//!   server → joiners. A host lends the server its one world every tick (D1,
-//!   `sim_lend`), so the machines' block-entities the server reads ARE the
-//!   host's; an owning `--no-lend` host instead copies them into its server's
-//!   world every tick (`HostedServer::mirror_host_world_state`, a BRIDGE that
-//!   goes with `--no-lend`).
-//! - **`GameServer::tick`** — only when [`GameServer::simulates_block_machines`]
-//!   is set, i.e. when no local host client simulates them: the dedicated server
-//!   (`HostedServer::start` with 0 local players — `server_main` and the
-//!   WebSocket dedicated path).
-//!
-//! The flag is the no-double-tick rule: on a LAN host the server must NOT tick
-//! these, or every piston would fire twice on the one lent world (or, with
-//! `--no-lend`, once in each world, and the server's copy would fight the
-//! mirror — `mirror_host_world_state` debug-asserts the flag is off). Changes
-//! the server makes land in `GameServer::pending_block_changes`, which
-//! `HostedServer` drains into every `StateUpdatePacket` — the same road
-//! leaf decay, falling blocks, fluids and power already take to joiners.
-//!
-//! Not ticked here (still host-client only): campfires, drying racks, animated
-//! construction anchors, villager workstation claims. The furnace Proof-of-Play
-//! trickle stays client-side (it reads `PlayerSlot` Charter / Vow / sats policy
-//! state the server does not hold), and server-side keg blasts damage mobs but
-//! not players (the server applies no player damage today; joiner clients run
-//! their own keg sweep).
+//! Shared machine borrows and the dedicated authority adapter (D4 slice5).
+//! `sim_machines::step` owns the common machine orchestration. Standalone/web
+//! calls it locally; a lending authority borrows the actual world at the early
+//! host boundary; this adapter calls it inside a dedicated server tick. The
+//! legacy no-lend machine flag/mirror bridge remains explicit.
 
 use crate::block::BlockRegistry;
 use crate::fire::FireSystem;
@@ -70,85 +39,31 @@ pub fn cell_changes(world: &World, cells: &[(i32, i32, i32)]) -> Vec<BlockChange
 }
 
 impl GameServer {
-    /// The 4-tick-cadence machine pass, in the client loop's order (hives →
-    /// growth → dispensers → pistons → furnaces → composters → keg fuses).
-    /// Called from `GameServer::tick` inside the falling-block cadence block,
-    /// ONLY when [`GameServer::simulates_block_machines`] is set.
+    /// Dedicated/owned machine phase. A lending authority uses the same rules
+    /// at its host's early phase instead of running this a second time.
     pub(crate) fn tick_block_machines(&mut self) {
-        debug_assert!(
-            self.simulates_block_machines,
-            "tick_block_machines on a server whose host client owns the machines"
-        );
-        let tick = self.tick_counter;
-        let raining = tick < self.weather.rain_until;
-
-        // Hives — a bee working nearby adds honey (block-entity state only).
-        crate::bee_hive::accumulate_honey(&mut self.world, &self.ecs, tick);
-
-        // Crops + saplings.
-        let growth = crate::growth::tick_growth(&mut self.world, tick, raining, self.biome_gen.seed);
-        self.pending_block_changes.extend(growth.crop_changes);
-        let grown = cell_changes(&self.world, &growth.grown_cells);
-        self.pending_block_changes.extend(grown);
-
-        // Dispensers / droppers — rising power edges eject.
-        for order in crate::dispenser::tick_dispensers(&mut self.world) {
-            let mut ctx = MachineCtx {
-                world: &mut self.world,
-                ecs: &mut self.ecs,
-                water: &mut self.water,
-                lava: &mut self.lava,
-                fire: &mut self.fire,
-                registry: &self.registry,
-                tick,
-            };
-            let out = crate::dispenser::realise_order(&mut ctx, order);
-            self.pending_block_changes.extend(out.changes);
-        }
-
-        // Pistons — read the energised map from the previous `power_tick`.
-        let piston_cells = crate::piston::tick_pistons(&mut self.world);
-        let pushed = cell_changes(&self.world, &piston_cells);
-        self.pending_block_changes.extend(pushed);
-
-        // Furnaces (lit/unlit flips broadcast) + composters (state only).
-        let sweep = crate::furnace::tick_all(&mut self.world);
-        self.pending_block_changes.extend(sweep.changes);
-        crate::composter::tick_all(&mut self.world);
-
-        // Blasting Keg fuses — the same gate the client applies.
-        for pos in crate::power::tick_keg_fuses(&mut self.world) {
-            if !crate::explosion::detonation_permitted(
-                self.explosives_enabled,
-                self.play_mode.can_edit_world(),
-            ) {
-                continue;
-            }
-            let blast = crate::explosion::detonate_keg_core(
-                &mut self.world,
-                &mut self.ecs,
-                &mut self.water,
-                &mut self.lava,
-                &self.registry,
-                pos,
-            );
-            self.pending_block_changes.extend(blast.changes);
-            // MP-D2a — and on every joiner in reach: their health is ours.
-            crate::explosion::apply_joiner_blast_damage(
-                &mut self.players,
-                &self.world,
-                &self.registry,
-                pos,
-                self.play_mode,
-            );
-        }
+        debug_assert!(self.simulates_block_machines && !self.lent);
+        let rules = crate::sim_machines::MachineRules {
+            raining: self.tick_counter < self.weather.rain_until,
+            seed: self.biome_gen.seed,
+            can_detonate: crate::explosion::detonation_permitted(self.explosives_enabled, self.play_mode.can_edit_world()),
+            mode: self.play_mode,
+        };
+        let mut batch = crate::sim_machines::MachineBatch::reserve(false).expect("no local delivery allocation");
+        let mut ctx = MachineCtx {
+            world: &mut self.world, ecs: &mut self.ecs, water: &mut self.water,
+            lava: &mut self.lava, fire: &mut self.fire, registry: &self.registry, tick: self.tick_counter,
+        };
+        let players = &mut self.players;
+        let registry = &self.registry;
+        crate::sim_machines::step(&mut ctx, rules, &crate::sim_machines::LocalMachineState::default(),
+            &mut batch, &mut self.pending_block_changes, |world, pos| {
+                crate::explosion::apply_joiner_blast_damage(players, world, registry, pos, rules.mode);
+            });
     }
 
-    /// Hoppers run on their own [`crate::hopper::HOPPER_INTERVAL_TICKS`] cadence
-    /// against the monotonic tick counter (outside the 4-tick block, exactly as
-    /// the client loop does). Contents only — no `BlockChange`.
     pub(crate) fn tick_hoppers(&mut self) {
-        debug_assert!(self.simulates_block_machines);
+        debug_assert!(self.simulates_block_machines && !self.lent);
         crate::hopper::tick_hoppers(&mut self.world, self.tick_counter);
     }
 }

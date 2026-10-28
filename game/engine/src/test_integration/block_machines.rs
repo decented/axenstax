@@ -87,6 +87,136 @@ fn a_host_backed_server_does_not_smelt() {
     assert_eq!(h.get_block(f.0, f.1, f.2), block::FURNACE, "never lit");
 }
 
+// D4 slice 5 — these paths used to exist only in the host client.
+#[test]
+fn dedicated_missing_campfire_ticks_fuel_cooking_and_smoke() {
+    let mut h = host(true);
+    let p = (6, Y, 6);
+    h.set_block(p.0, p.1, p.2, block::CAMPFIRE);
+    h.server.world.insert_campfire(p, crate::campfire::CampfireData {
+        fuel_ticks: 1, smoke_ticks: 1, ..Default::default()
+    });
+    h.server.world.campfire_at_mut(p).unwrap().slots[0] = crate::campfire::CookSlot {
+        item: Some(MaterialId::RawBeef), progress_ticks: crate::campfire::COOK_TICKS_PER_ITEM - 1,
+    };
+    crate::campfire::place_smoke_pillar(&mut h.server.world, p.0, p.1, p.2);
+    h.tick(4);
+    let fire = h.server.world.campfire_at(p).unwrap();
+    assert_eq!(fire.fuel_ticks, 0, "one machine pass burns one fuel tick");
+    assert_eq!(fire.smoke_ticks, 0);
+    assert_eq!(fire.first_cooked_slot(), Some((0, MaterialId::CookedBeef)), "the authority cooks the food");
+    assert_eq!(h.get_block(p.0, p.1 + 1, p.2), block::AIR, "expired smoke clears on the authority");
+    assert!(queued(&h, (p.0, p.1 + 1, p.2), block::AIR), "joiners see smoke clear");
+    h.tick(4);
+    assert_eq!(h.get_block(p.0, p.1, p.2), block::CAMPFIRE_UNLIT);
+    assert!(queued(&h, p, block::CAMPFIRE_UNLIT));
+}
+
+#[test]
+fn dedicated_missing_rack_seasons_once_per_machine_pass_and_respects_roof() {
+    let mut h = host(true);
+    let p = (6, Y, 6);
+    h.set_block(p.0, p.1, p.2, block::DRYING_RACK);
+    let mut rack = crate::drying_rack::DryingRackData::default();
+    assert!(rack.try_place_green(crate::drying_rack::LogSpecies::Oak));
+    h.server.world.drying_racks.insert(p, rack);
+    h.tick(3);
+    assert_eq!(h.server.world.drying_racks[&p].slots[0].seasoning_ticks, 0);
+    h.tick(1);
+    assert_eq!(h.server.world.drying_racks[&p].slots[0].seasoning_ticks, 1);
+    h.set_block(p.0, p.1 + 1, p.2, block::STONE);
+    h.tick(4);
+    assert_eq!(h.server.world.drying_racks[&p].slots[0].seasoning_ticks, 1, "covered rack stalls");
+}
+
+#[test]
+fn dedicated_missing_construction_finishes_with_one_plaque_and_broadcasts() {
+    let mut h = host(true);
+    let anchor = (6, Y, 6);
+    for x in anchor.0..anchor.0 + 3 {
+        for z in anchor.2..anchor.2 + 3 { h.set_block(x, Y, z, block::STONE); }
+    }
+    h.server.world.construction_anchors.insert(anchor, crate::plan::ConstructionAnchorData {
+        plan: crate::plan::PlanData::debug_3x3_stone(), rotations: 0, anchor,
+        placed_index: 0, locked_materials: Vec::new(), is_creative_build: true,
+        pace_divider: 1, pace_counter: 0, builder_credit: None,
+    });
+    h.tick(24);
+    assert!(!h.server.world.construction_anchors.contains_key(&anchor), "the authority completes construction");
+    assert_eq!(h.server.world.architect_plaques.len(), 1);
+    let plaque = (anchor.0 + 1, anchor.1 + 1, anchor.2 + 1);
+    assert_eq!(h.get_block(plaque.0, plaque.1, plaque.2), block::ARCHITECT_PLAQUE);
+    assert!(queued(&h, plaque, block::ARCHITECT_PLAQUE));
+}
+
+#[test]
+fn d4_machines_dedicated_claims_and_releases_workstations_and_refreshes_gossip() {
+    let mut h = host(true);
+    h.set_block(1, Y, 0, block::CRAFTING_TABLE);
+    let villager = h.server.ecs.spawn((crate::entity::MobKind(crate::mob::MobType::Villager),
+        crate::entity::Position(glam::Vec3::new(0.5, Y as f32, 0.5)), crate::villager::VillagerComponent::default()));
+    h.tick(crate::villager::CLAIM_SCAN_INTERVAL);
+    {
+        let data = h.server.ecs.get::<&crate::villager::VillagerComponent>(villager).unwrap();
+        assert_eq!(data.profession, crate::villager::Profession::Carpenter);
+        assert_eq!(data.claimed_workstation, Some([1, Y, 0]));
+        assert!(data.gossip_line.is_some());
+    }
+    h.set_block(1, Y, 0, block::AIR);
+    h.tick(crate::villager::CLAIM_SCAN_INTERVAL);
+    let data = h.server.ecs.get::<&crate::villager::VillagerComponent>(villager).unwrap();
+    assert_eq!(data.profession, crate::villager::Profession::None);
+    assert!(data.claimed_workstation.is_none());
+}
+
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn d4_machines_dedicated_restart_resumes_campfire_rack_and_manual_construction() {
+    let name = format!("d4-machines-restart-{}-{:?}", std::process::id(), std::thread::current().id());
+    let mut h = TestHost::start_with(TestConfig { world_name: name.clone(), num_players: 0, ..Default::default() });
+    h.server.simulates_block_machines = true;
+    let (fire, rack, anchor) = ((0, Y, 0), (2, Y, 0), (4, Y, 0));
+    h.set_block(fire.0, fire.1, fire.2, block::CAMPFIRE);
+    h.server.world.insert_campfire(fire, crate::campfire::CampfireData { fuel_ticks: 10, ..Default::default() });
+    h.set_block(rack.0, rack.1, rack.2, block::DRYING_RACK);
+    let mut rack_data = crate::drying_rack::DryingRackData::default();
+    assert!(rack_data.try_place_green(crate::drying_rack::LogSpecies::Oak));
+    h.server.world.drying_racks.insert(rack, rack_data);
+    h.set_block(anchor.0, anchor.1, anchor.2, block::STONE);
+    h.server.world.construction_anchors.insert(anchor, crate::plan::ConstructionAnchorData {
+        plan: crate::plan::PlanData::debug_3x3_stone(), rotations: 0, anchor, placed_index: 0,
+        locked_materials: vec![ItemStack::new_block(block::STONE, 9)], is_creative_build: false,
+        pace_divider: 2, pace_counter: 1, builder_credit: None,
+    });
+    h.tick(4);
+    assert_eq!(h.server.world.campfire_at(fire).unwrap().fuel_ticks, 9);
+    assert_eq!(h.server.world.drying_racks[&rack].slots[0].seasoning_ticks, 1);
+    assert_eq!(h.server.world.construction_anchors[&anchor].pace_counter, 2);
+    assert_eq!(h.server.world.construction_anchors[&anchor].locked_materials[0].count, 9);
+    h.server.try_save().expect("dedicated machine state saves");
+    drop(h);
+    let mut restored = TestHost::start_with(TestConfig { world_name: name.clone(), num_players: 0,
+        do_initial_load: true, ..Default::default() });
+    restored.server.simulates_block_machines = true;
+    restored.server.ecs.clear();
+    assert_eq!(restored.server.world.campfire_at(fire).unwrap().fuel_ticks, 9);
+    assert_eq!(restored.server.world.drying_racks[&rack].slots[0].seasoning_ticks, 1);
+    assert_eq!(restored.server.world.construction_anchors[&anchor].pace_counter, 2);
+    assert_eq!(restored.server.world.construction_anchors[&anchor].locked_materials[0].count, 9);
+    restored.tick(4);
+    assert_eq!(restored.server.world.campfire_at(fire).unwrap().fuel_ticks, 8);
+    assert_eq!(restored.server.world.drying_racks[&rack].slots[0].seasoning_ticks, 2);
+    assert!(restored.server.world.construction_anchors.get(&anchor).is_none_or(|data| data.placed_index > 0));
+    let building = &restored.server.world.construction_anchors[&anchor];
+    assert_eq!(building.placed_index, crate::plan::BLOCKS_PER_BUILD_TICK);
+    assert_eq!(building.locked_materials[0].count as usize, 9 - building.placed_index, "each placed cell consumes one locked material");
+    restored.tick(40);
+    assert!(!restored.server.world.construction_anchors.contains_key(&anchor));
+    assert_eq!(restored.server.world.architect_plaques.len(), 1);
+    restored.server.try_save().expect("completed plaque saves");
+    let _ = crate::save::delete_world(&name);
+}
+
 // ── Crops ──────────────────────────────────────────────────────────────────
 
 /// A stage-0 wheat on tilled soil in full sky light. Growth is deterministic:
@@ -429,8 +559,8 @@ fn a_joiner_client_never_grows_crops_or_decays_leaves_itself() {
         }
     }
     assert!(
-        sites >= 3,
-        "joiner-sim lint found only {sites} call sites (expected tick_growth + 2 \
+        sites >= 2,
+        "joiner-sim lint found only {sites} call sites (expected 2 \
          on_log_broken) — if they moved, update the lint, don't delete it"
     );
 }
@@ -459,13 +589,13 @@ fn a_joiner_client_runs_no_machine_sim_that_pushes_edits_to_the_server() {
     });
     let lines: Vec<&str> = raw.lines().collect();
     // (needle on the call line, lines of code above it to search for the gate)
-    let sites: [(&str, usize); 6] = [
+    let machine_client = include_str!("../machine_client.rs");
+    let entry: String = machine_client.split("pub(crate) fn tick_machines(&mut self)").nth(1).expect("shared machine entry").split_whitespace().collect();
+    let refusal = entry.find("ifself.joined(){return;}").expect("joined clients run no shared machine phase");
+    assert!(refusal < entry.find("crate::sim_machines::step(").unwrap());
+    let sites: [(&str, usize); 2] = [
         ("crate::power::power_tick(", 14),
-        ("crate::dispenser::tick_dispensers(", 4),
-        ("crate::piston::tick_pistons(", 3),
-        ("crate::power::tick_keg_fuses(", 4),
         ("crate::sim_clock::ignite_strike(&mut self.world", 2),
-        ("crate::furnace::tick_all(&mut self.world)", 3),
     ];
     for (needle, back) in sites {
         let mut found = 0;

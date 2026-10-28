@@ -888,14 +888,18 @@ fn a_broken_container_closes_on_both_sides() {
 /// `game_harness_a_joined_clients_machines_push_no_edits` drives it live).
 #[test]
 fn a_joined_client_runs_no_hopper_furnace_sweep_or_autocollect() {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("game_loop.rs");
-    let raw = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("sims-off lint: cannot read {} ({e})", path.display()));
-    for call in ["crate::hopper::tick_hoppers(", "crate::furnace::tick_all(", "crate::chest::tick_chest_autocollect("] {
-        let at = raw.find(call).unwrap_or_else(|| panic!("{call} is gone from game_loop.rs: update this lint, don't delete it"));
-        assert_eq!(raw.matches(call).count(), 1, "{call}: one call site");
-        let before = &raw[at.saturating_sub(400)..at];
-        assert!(before.contains("self.remote_client.is_none()"), "{call} must be gated on not joined");
+    let client = include_str!("../machine_client.rs");
+    for function in ["pub(crate) fn tick_machines(&mut self)", "pub(crate) fn tick_hopper_phase(&mut self)"] {
+        let entry: String = client.split(function).nth(1).expect("shared phase entry")
+            .split("pub(crate) fn").next().unwrap().split_whitespace().collect();
+        assert!(entry.contains("ifself.joined(){return;}"), "{function}: joined clients run no private phase");
     }
+    assert!(include_str!("../sim_machines.rs").contains("crate::furnace::tick_at("));
+    let raw = include_str!("../game_loop.rs");
+    let call = "crate::chest::tick_chest_autocollect(";
+    let at = raw.find(call).expect("chest autocollect entry");
+    assert_eq!(raw.matches(call).count(), 1);
+    assert!(raw[at.saturating_sub(400)..at].contains("self.remote_client.is_none()"));
 }
 
 // ── v77 (integration) — corrections are relative to the client's claims ──

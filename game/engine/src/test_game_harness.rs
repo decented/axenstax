@@ -174,6 +174,9 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[path = "sim_death.rs"]
     mod sim_death;
+    #[cfg(not(target_arch = "wasm32"))]
+    #[path = "sim_machines.rs"]
+    mod sim_machines;
     use super::*;
 
     /// Point `AXENSTAX_WORLDS_DIR` at one pid-scoped temp dir shared by every

@@ -56,9 +56,8 @@ pub enum SimSide {
 }
 
 /// A world-sim system that both `GameState::tick` and `GameServer::tick`
-/// carry. Systems only one side has (block machines, species AI, breeding,
-/// raids, …; remote-player physics and pickups) are not listed: they cannot
-/// double-tick.
+/// carry, including the explicit early authority phases. Truly local player
+/// work and remote-player physics/pickups retain their separate owners.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SimSystem {
     /// `World::tick_world_clock`: the persisted active-tick total
@@ -122,10 +121,16 @@ pub enum SimSystem {
     Species,
     /// D4 slice 3 — Lead tethers (`sim_mobs::tethers`).
     Tethers,
+    /// Shared four-tick machine phase.
+    Machines,
+    /// Hoppers on their independent transfer cadence.
+    Hoppers,
+    /// Projectile flight/hits at the established post-death host boundary.
+    Projectiles,
 }
 
 impl SimSystem {
-    pub const COUNT: usize = 25;
+    pub const COUNT: usize = 28;
 
     pub const ALL: [SimSystem; Self::COUNT] = [
         SimSystem::ActiveTicks,
@@ -153,6 +158,9 @@ impl SimSystem {
         SimSystem::Breeding,
         SimSystem::Species,
         SimSystem::Tethers,
+        SimSystem::Machines,
+        SimSystem::Hoppers,
+        SimSystem::Projectiles,
     ];
 
     /// The side that runs this system while the world is lent (module docs).
@@ -182,7 +190,10 @@ impl SimSystem {
             | SimSystem::Power
             | SimSystem::Carts
             | SimSystem::EntityHealth
-            | SimSystem::Develop => SimSide::Server,
+            | SimSystem::Develop
+            | SimSystem::Machines
+            | SimSystem::Hoppers
+            | SimSystem::Projectiles => SimSide::Server,
         }
     }
 
@@ -198,6 +209,8 @@ impl SimSystem {
                 | SimSystem::LeafDecay
                 | SimSystem::Hideouts
                 | SimSystem::Population
+                | SimSystem::Machines
+                | SimSystem::Hoppers
         )
     }
 
@@ -342,6 +355,9 @@ impl Drop for LentSim<'_> {
         // The window ends the logical tick: its phase token never outlives it.
         server.clock_phase_open = false;
         server.death_phase_open = false;
+        server.machine_phase_open = false;
+        server.hopper_phase_open = false;
+        server.projectile_phase_open = false;
         // D4 slice 3 — this tick's seats were this tick's only.
         server.lent_local_seats.clear();
         server.lent_day_offer = None;
@@ -438,12 +454,45 @@ impl OwnedSimParts {
         self.clock.tick_counter = back.tick_counter;
         self.clock.weather = back.weather;
         self.clock.reputation_offer = self.reputation_day.advance(self.clock.tick_counter, 1).filter(|pulse| pulse.days > 0).map(|pulse| crate::reputation_day::DayOffer { run_id: hs.server.run_id, pulse });
+        self.machine_phases(hs);
         self.death_phase(hs);
+        self.projectile_phase(hs);
         let clock = self.clock;
         LentSim::lend(hs, self.parts(), clock).tick();
         self.events.extend(hs.server.sim_events.take());
         self.clock.reputation_offer = None;
         self.clock.weather = hs.server.weather;
+    }
+
+    /// The host's early machine/hopper beats, before its death boundary.
+    pub(crate) fn machine_phases(&mut self, hs: &mut HostedServer) {
+        if hs.server.falling_tick_counter.wrapping_add(1).is_multiple_of(4) {
+            let rules = crate::sim_machines::MachineRules {
+                raining: self.clock.tick_counter < self.clock.weather.rain_until,
+                seed: hs.server.biome_gen.seed,
+                can_detonate: crate::explosion::detonation_permitted(hs.server.explosives_enabled, hs.server.play_mode.can_edit_world()),
+                mode: hs.server.play_mode,
+            };
+            let mut locals = crate::sim_machines::LocalMachineState::default();
+            for (i, player) in hs.server.players.iter().take(4).enumerate() {
+                if !player.server_simulated && player.is_present_and_alive() { locals.positions[i] = Some(player.player.pos); }
+            }
+            let registry = crate::block::BlockRegistry::new();
+            let mut ctx = crate::block_machines::MachineCtx {
+                world: &mut self.world, ecs: &mut self.ecs, water: &mut self.water,
+                lava: &mut self.lava, fire: &mut self.fire, registry: &registry, tick: self.clock.tick_counter,
+            };
+            let changes = hs.server.run_host_machine_phase(&mut ctx, rules, &locals, true);
+            hs.queue_host_broadcast(changes);
+            self.events.extend(hs.server.sim_events.take());
+        }
+        hs.server.run_host_hopper_phase(&mut self.world, self.clock.tick_counter);
+    }
+
+    pub(crate) fn projectile_phase(&mut self, hs: &mut HostedServer) {
+        let sneaking = hs.server.players.iter().enumerate().map(|(i, p)| (i, p.last_sneak)).collect();
+        let registry = crate::block::BlockRegistry::new();
+        hs.server.run_host_projectile_phase(&mut self.world, &mut self.ecs, &registry, &sneaking);
     }
 
     /// The real host runs this early boundary before its projectile pass.
@@ -618,7 +667,9 @@ mod tests {
         hs.server
             .run_clock_phase(&seed_of(&host), true, None, &mut host.world.sim_tally)
             .expect("the phase runs");
+        host.machine_phases(&mut hs);
         host.death_phase(&mut hs);
+        host.projectile_phase(&mut hs);
         LentSim::lend(&mut hs, host.parts(), clock).tick();
         assert!(!hs.server.lent, "cleared when the window closes");
         let server_only = host.world.sim_tally;

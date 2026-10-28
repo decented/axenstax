@@ -1003,6 +1003,9 @@ pub struct GameServer {
     /// yet. A second phase while it is open is refused.
     pub(crate) clock_phase_open: bool,
     pub(crate) death_phase_open: bool,
+    pub(crate) machine_phase_open: bool,
+    pub(crate) hopper_phase_open: bool,
+    pub(crate) projectile_phase_open: bool,
     /// D4 slice 2 — the strike the clock phase rolled this tick, landed by
     /// the world phase ([`Self::land_strike`]), which needs the world.
     pub(crate) pending_strike: Option<u64>,
@@ -1194,6 +1197,9 @@ impl GameServer {
             clock_adopted: false,
             clock_phase_open: false,
             death_phase_open: false,
+            machine_phase_open: false,
+            hopper_phase_open: false,
+            projectile_phase_open: false,
             pending_strike: None,
             lent_strike: None,
             rolls_lightning: true,
@@ -1658,6 +1664,9 @@ impl GameServer {
         self.clock_adopted = false;
         self.clock_phase_open = false;
         self.death_phase_open = false;
+        self.machine_phase_open = false;
+        self.hopper_phase_open = false;
+        self.projectile_phase_open = false;
         self.pending_strike = None;
         self.lent_strike = None;
     }
@@ -1747,12 +1756,10 @@ impl GameServer {
     /// the authority's own machine); every joiner is simulated here from its
     /// inputs (Spec 04 §5.3).
     ///
-    /// On a LENT world (D1, [`Self::lent`]) only the systems
-    /// `sim_lend::SimSystem::lent_owner` gives the server run here: the host
-    /// client keeps its clock and weather, the mob locomotion block (brigand
-    /// pre-pass, `mob_ai`, entity physics) and the death sweep, so nothing
-    /// ticks twice on the one world. Single-player runs no server at all; its
-    /// client still simulates everything (CLAUDE.md known debt).
+    /// A lent world's clock, machines, hoppers, death and projectiles have
+    /// explicit early authority phases at the host's established boundaries.
+    /// This later window runs the other shared owners once; it never repeats
+    /// those early phases. Standalone/web call the same rules locally.
     pub fn tick(&mut self) {
         use crate::sim_lend::SimSystem;
         // One column-loading story per mode (`hosted_server::assign_column_loading`):
@@ -1947,15 +1954,15 @@ impl GameServer {
                 );
             }
 
-            // Block machines (T1-3) — only where no host client ticks them.
-            if self.simulates_block_machines {
+            // Dedicated machines; lent authorities already ran their early phase.
+            if !self.lent && self.simulates_block_machines && self.runs(SimSystem::Machines) {
                 self.tick_block_machines();
             }
         }
 
         // Hoppers — own 8-tick cadence on the monotonic counter, outside the
         // 4-tick block, mirroring the client loop. Same flag rule.
-        if self.simulates_block_machines {
+        if !self.lent && self.simulates_block_machines && self.runs(SimSystem::Hoppers) {
             self.tick_hoppers();
         }
 
@@ -2109,20 +2116,10 @@ impl GameServer {
         // Grants are per-tick data, drained by hosted_server.rs into
         // per-connection InventoryGrantPacket sends right after this tick.
         //
-        // Projectiles (MP-A3) — the SAME pure tick the client runs, in the same
-        // place (after entity physics, before item lifetimes), wherever the
-        // server owns its entities' physics: a dedicated server (a
-        // dispenser's arrows, C3c-2 a joiner's shots) and a `--no-lend` host's
-        // owning server (a joiner's shots: its machines and its own seats'
-        // shots live in the host CLIENT's sim). Hits land on mobs through
-        // `combat::Health` and `despawn_dead` below, the server's ordinary
-        // damage path; the entity diff (`entity_broadcast`) broadcasts the
-        // flight. A lent world's projectiles are the host client's to tick
-        // (with its joiners' sneak, `GameState::shooter_sneaking`) — a second
-        // tick here would be a second sim. C3c-2 — the shooter-sneak map is
-        // every present player's sneak by slot, for a joiner's shot's 1C
-        // no-friendly-fire shield.
-        if self.simulates_block_machines || !self.lent {
+        // Explicit projectile ownership (D4 slice5). Owned worlds keep this
+        // post-physics boundary; lent projectiles already ran at the early
+        // post-death host boundary, independently of machine configuration.
+        if !self.lent && self.runs(SimSystem::Projectiles) {
             let sneaking: std::collections::HashMap<usize, bool> =
                 self.players.iter().enumerate().map(|(i, sp)| (i, sp.last_sneak)).collect();
             crate::entity::tick_projectiles(&mut self.ecs, &self.world, &self.registry, &sneaking);
@@ -2697,7 +2694,7 @@ impl GameServer {
                     let meta = self.world.meta_at(x, y, z);
                     self.pending_block_changes.push(crate::protocol::BlockChange::with_meta(x, y, z, block, meta));
                 }
-                other @ (SimEvent::ParrotAlarm { .. } | SimEvent::Seat(_) | SimEvent::HostileContacts { .. } | SimEvent::Deaths(_)) => {
+                other @ (SimEvent::ParrotAlarm { .. } | SimEvent::Seat(_) | SimEvent::HostileContacts { .. } | SimEvent::Deaths(_) | SimEvent::Machines(_)) => {
                     if self.lent {
                         self.sim_events.push(other);
                     }
