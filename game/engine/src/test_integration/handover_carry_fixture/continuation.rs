@@ -85,6 +85,12 @@ fn transfer_control(
     close_prepared: bool,
     delay: Option<(&delay::DelayControl, bool)>,
 ) -> Completed {
+    // Capture native warning diagnostics; another fixture may already have
+    // installed the process logger.
+    let _ = env_logger::Builder::new()
+        .is_test(true)
+        .filter_level(log::LevelFilter::Warn)
+        .try_init();
     let mut closed_prepared = false;
     let mut released_delay = false;
     let mut checked_delay = false;

@@ -54,7 +54,8 @@ impl SourceSession {
             drop(result);
             return Ok(());
         }
-        let product = result.map_err(|_| {
+        let product = result.map_err(|error| {
+            log::warn!("Handover checkpoint pack worker refused: {error}");
             Refusal("The world couldn't be packed for the handover (too large, or something in it can't move yet).")
         })?;
         match product {
@@ -223,7 +224,10 @@ impl SourceSession {
             },
             limits,
         )
-        .map_err(|_| Refusal("The world couldn't be packed for the handover (too large, or something in it can't move yet)."))?;
+        .map_err(|error| {
+            log::warn!("Handover checkpoint snapshot refused: {error}");
+            Refusal("The world couldn't be packed for the handover (too large, or something in it can't move yet).")
+        })?;
         let binding = PackBinding {
             source: self.action.source_key,
             receiver: seat.key,
