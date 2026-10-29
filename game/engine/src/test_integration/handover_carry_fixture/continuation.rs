@@ -381,6 +381,14 @@ pub(in crate::test_integration) fn restored(
     let actual = native(game);
     assert_progress(&actual, expected, game.state.tick_counter);
     assert!(game.state.players[0].gameplay_carry_complete());
+    eprintln!(
+        "D2c3 restored position selection: expected_local={:?}, actual_local={:?}, body={:?}, spawn={:?}, tick={}",
+        expected.local.map(|local| local.pos),
+        actual.local.map(|local| local.pos),
+        game.state.players[0].player.pos,
+        game.state.players[0].spawn_pos,
+        game.state.tick_counter,
+    );
     for accepted in &actual.quests.accepted {
         native_setup::original_dialogue(game, accepted.npc);
     }

@@ -333,6 +333,14 @@ pub(super) fn original_dialogue(game: &mut HeadlessGame, npc: [u8; 16]) {
     assert_eq!(entities.len(), 1);
     let giver = entities[0];
     let at = game.state.ecs.get::<&crate::entity::Position>(giver).unwrap().0;
+    eprintln!(
+        "D2c3 native dialogue geometry: giver={at:?}, body={:?}, eye={:?}, spawn={:?}, distance={}, tick={}",
+        game.state.players[0].player.pos,
+        game.state.players[0].player.eye_pos(),
+        game.state.players[0].spawn_pos,
+        (at - game.state.players[0].player.eye_pos()).length(),
+        game.state.tick_counter,
+    );
     assert!((at - game.state.players[0].player.eye_pos()).length() < crate::villager_ui::INTERACT_RANGE);
     let dir = (at + Vec3::Y * 0.7 - game.state.players[0].player.eye_pos()).normalize();
     game.state.players[0].camera.yaw = (-dir.x).atan2(-dir.z);

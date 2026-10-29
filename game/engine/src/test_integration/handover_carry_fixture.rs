@@ -116,6 +116,15 @@ pub(super) fn attach(
     assert!(matches!(peer.state.mode, crate::GameMode::Playing));
     let seat = settle(source, peer);
     assert!(seat.2 == key(secret), "actual signed participant has the wrong npub");
+    let sp = &source.state.hosted_server.as_ref().unwrap().server.players[seat.0];
+    eprintln!(
+        "D2c3 joined position selection: server_body={:?}, server_spawn={:?}, peer_body={:?}, peer_spawn={:?}, accepted_spawn={:?}",
+        sp.player.pos,
+        sp.spawn_pos,
+        peer.state.players[0].player.pos,
+        peer.state.players[0].spawn_pos,
+        peer.state.remote_client.as_ref().unwrap().spawn_pos,
+    );
     (seat, observation)
 }
 pub(super) fn start_lent(source: &mut HeadlessGame) {
