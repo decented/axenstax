@@ -7342,3 +7342,20 @@ fixtures provide narrower evidence than actual GameState/UI/application tests.
 No executed owed-GrantUnfit settlement is claimed; source ordering and generic
 all-ordinary precommit refusal are the selected guarantee until a genuine owed
 case is independently established.
+
+Default-spawn native own-carrier continuation installs the selected saved spawn
+and restores the selected record's optional `local.pos`, falling back to that
+saved spawn when the local field is absent. Reaching the original quest giver
+is ordinary play after restoration. Native acceptance controls reopen through
+the actual queued menu flow and compare BOTH loaded body and spawn against
+scalar inputs observed from the borrowed selected record at first Playing,
+before any gameplay tick or movement. The observation retains only those
+position fields and is consumed before play.
+
+The same live original giver may then be approached through bounded native
+input and physics before the existing range, actual RMB and dialogue checks.
+Actual logical ticks and wall time bound the approach; genuine timer progress,
+pickups and damage remain part of its outcome. Exact private contents are
+checked before movement and again after the existing interaction assertions.
+These acceptance refinements retain the full continuation tails and remain
+subject to their actual execution and the final combined gate above.
