@@ -6,6 +6,10 @@ use crate::test_integration::handover_carry_fixture as activity;
 #[ignore = "needs two real GameState GPU adapters and signed quest/menu setup"]
 fn game_harness_d2c3_original_chain_preserves_current_active_participant_quests_and_timers() {
     let _worlds = crate::save::WorldsRootGuard::new("active-original-boundary");
+    // The normal recipient environment prepares this parent before consent.
+    let imports = crate::data_dir::data_root().join("handover").join("imports");
+    std::fs::create_dir_all(&imports).expect("prepare the positive carry import parent");
+    assert!(std::fs::symlink_metadata(&imports).unwrap().is_dir());
     let scratch_root = crate::data_dir::data_root().join("handover");
     for name in ["active-original-scratch", "active-chain-1-scratch", "active-chain-2-scratch"] {
         activity::prepare_scratch(&scratch_root.join(name));

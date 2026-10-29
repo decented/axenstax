@@ -8,6 +8,10 @@ fn current_carry(delayed: bool) {
     } else {
         "carry-no-delay"
     });
+    // The normal recipient environment prepares this parent before consent.
+    let imports = crate::data_dir::data_root().join("handover").join("imports");
+    std::fs::create_dir_all(&imports).expect("prepare the positive carry import parent");
+    assert!(std::fs::symlink_metadata(&imports).unwrap().is_dir());
     activity::prepare_scratch(
         &crate::data_dir::data_root().join("handover").join("cadence-scratch"),
     );
