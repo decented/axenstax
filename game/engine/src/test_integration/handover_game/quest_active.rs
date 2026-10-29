@@ -279,12 +279,14 @@ fn game_harness_d2c3_active_carry_keeps_private_plan_allocations_through_abort_a
         activity::continuation::transfer_with_custody(&mut source, &mut peer, seat, now, Some(&custody), true);
     assert!(source.state.leave_world(crate::world_exit::SaveChoice::Discard, crate::world_exit::ExitTo::Lobby));
     activity::continuation::open(&mut source, &completed.retained);
+    custody.assert_source_contents(&source);
     activity::continuation::restored(&mut source, &completed.source, completed.scope, key(SOURCE_PERSONA));
     custody.assert_source_contents(&source);
     let imported = activity::continuation::promoted(&mut peer, completed.transfer);
     // Prepared close has already left the peer in the lobby; promotion/open
     // must reconstruct only its own canonical physical and common state.
     activity::continuation::open(&mut peer, &imported);
+    custody.assert_recipient_contents(&peer);
     activity::continuation::restored(&mut peer, &completed.recipient, completed.scope, key(RECIPIENT_PERSONA));
     custody.assert_recipient_contents(&peer);
 }

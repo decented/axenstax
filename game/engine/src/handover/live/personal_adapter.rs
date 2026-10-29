@@ -10,6 +10,23 @@ use crate::handover::{
 use crate::joiner_save::{BoundPersonal, JoinerSave, PersonalBinding};
 use std::{fs, io::Write, path::Path};
 
+#[cfg(test)]
+#[derive(Clone, Copy)]
+pub(crate) struct TestRestorePosition {
+    pub local: Option<[f32; 3]>,
+    pub spawn: [f32; 3],
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_RESTORE_POSITION: std::cell::Cell<Option<TestRestorePosition>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_test_restore_position() -> Option<TestRestorePosition> {
+    TEST_RESTORE_POSITION.with(|position| position.take())
+}
+
 pub(crate) struct Proof {
     pub core: Core,
     manifest: Manifest,
@@ -504,6 +521,12 @@ pub(crate) fn install(
     slot.combat.health = save.health;
     slot.combat.hunger = save.hunger;
     slot.combat.dead = save.health <= 0.0;
+    // Observe the borrowed position inputs for the native menu-reopen check.
+    #[cfg(test)]
+    TEST_RESTORE_POSITION.with(|position| position.set(Some(TestRestorePosition {
+        local: record.local.map(|local| local.pos),
+        spawn: save.spawn,
+    })));
     slot.spawn_pos = glam::Vec3::from_array(save.spawn);
     slot.player.velocity = glam::Vec3::ZERO;
     slot.player.reset_fall();

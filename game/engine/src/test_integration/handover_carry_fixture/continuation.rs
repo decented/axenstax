@@ -329,6 +329,7 @@ pub(in crate::test_integration) fn abort_current_with_custody(
 }
 pub(in crate::test_integration) fn open(game: &mut HeadlessGame, folder: &str) {
     assert!(matches!(game.state.mode, crate::GameMode::Menu(_)), "true lobby entry, never direct Loading");
+    let _ = crate::handover::live::personal_adapter::take_test_restore_position();
     let meta = crate::save::try_load_world_meta(folder).unwrap();
     game.state.pending_menu_action = Some((
         crate::menu::MenuAction::LoadWorld(folder.into(), crate::spawn_pref::SpawnPref::Default),
@@ -346,6 +347,14 @@ pub(in crate::test_integration) fn open(game: &mut HeadlessGame, folder: &str) {
         assert!(Instant::now() < deadline, "actual queued menu reopen never completed");
     }
     assert_eq!(game.state.world.total_ticks, meta.total_ticks + game.state.tick_counter);
+    let selected = crate::handover::live::personal_adapter::take_test_restore_position()
+        .expect("the actual own-carrier menu reopen installed its selected personal record");
+    assert_eq!(game.state.players[0].spawn_pos.to_array(), selected.spawn, "menu reopen preserves the selected saved spawn");
+    assert_eq!(
+        game.state.players[0].player.pos.to_array(),
+        selected.local.unwrap_or(selected.spawn),
+        "first Playing exposes the selected local position or saved spawn before any movement",
+    );
 }
 pub(in crate::test_integration) fn promoted(peer: &mut HeadlessGame, transfer: [u8; 16]) -> String {
     if !matches!(peer.state.mode, crate::GameMode::Menu(_)) {

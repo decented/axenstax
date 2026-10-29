@@ -321,6 +321,51 @@ fn native_penalty(game: &mut HeadlessGame) {
     assert_eq!(game.state.players[0].reputation.score((2, 3)), -25);
 }
 
+/// Reach the original giver through ordinary native input and physics.
+fn approach_original_giver(game: &mut HeadlessGame, giver: hecs::Entity, npc: [u8; 16]) {
+    struct ReleaseForward<'a>(&'a mut HeadlessGame);
+    impl Drop for ReleaseForward<'_> {
+        fn drop(&mut self) {
+            self.0.state.input.key_released(winit::keyboard::KeyCode::KeyW);
+        }
+    }
+    let release = ReleaseForward(game);
+    let game = &mut *release.0;
+    game.state.input.key_released(winit::keyboard::KeyCode::KeyW);
+    assert!(!game.state.input.left_held && !game.state.input.right_held, "approach has no held action button");
+    let start = game.state.tick_counter;
+    let deadline = Instant::now() + Duration::from_secs(180);
+    let mut steps = 0;
+    loop {
+        let elapsed = game.state.tick_counter.checked_sub(start).expect("native approach clock moved backwards");
+        assert!(elapsed <= 1000 && Instant::now() < deadline, "bounded native approach exhausted its actual time budget");
+        assert!(matches!(game.state.mode, crate::GameMode::Playing)
+            && !game.state.joined() && game.state.hosted_server.is_none()
+            && !game.state.handover_holds_play() && !game.state.players[0].combat.dead,
+            "approach requires actual live standalone play");
+        assert_eq!(game.state.ecs.get::<&crate::quest_npcs::QuestNpcId>(giver).unwrap().0, npc);
+        assert!(game.state.ecs.get::<&crate::combat::Health>(giver).unwrap().current > 0.0);
+        let at = game.state.ecs.get::<&crate::entity::Position>(giver).unwrap().0;
+        let delta = at - game.state.players[0].player.eye_pos();
+        let distance = delta.length();
+        assert!(distance.is_finite() && distance < 128.0, "original giver is beyond the bounded movement fixture");
+        if distance < 3.0 {
+            return;
+        }
+        assert!(steps < 1000 && elapsed < 1000, "actual native movement did not reach the original giver");
+        steps += 1;
+        game.state.input.cursor_captured = true;
+        // When horizontally close, ordinary gravity settles the vertical gap.
+        if delta.x * delta.x + delta.z * delta.z > 0.25 * 0.25 {
+            game.state.players[0].camera.yaw = (-delta.x).atan2(-delta.z);
+            game.state.input.key_pressed(winit::keyboard::KeyCode::KeyW);
+        }
+        game.ticks(1);
+        game.state.input.key_released(winit::keyboard::KeyCode::KeyW);
+        game.frames(1);
+    }
+}
+
 pub(super) fn original_dialogue(game: &mut HeadlessGame, npc: [u8; 16]) {
     let entities: Vec<_> = game
         .state
@@ -341,6 +386,8 @@ pub(super) fn original_dialogue(game: &mut HeadlessGame, npc: [u8; 16]) {
         (at - game.state.players[0].player.eye_pos()).length(),
         game.state.tick_counter,
     );
+    approach_original_giver(game, giver, npc);
+    let at = game.state.ecs.get::<&crate::entity::Position>(giver).unwrap().0;
     assert!((at - game.state.players[0].player.eye_pos()).length() < crate::villager_ui::INTERACT_RANGE);
     let dir = (at + Vec3::Y * 0.7 - game.state.players[0].player.eye_pos()).normalize();
     game.state.players[0].camera.yaw = (-dir.x).atan2(-dir.z);
