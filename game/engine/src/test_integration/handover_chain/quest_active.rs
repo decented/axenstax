@@ -123,13 +123,31 @@ fn game_harness_d2c3_original_chain_preserves_current_active_participant_quests_
             next_peer.pubkey(),
         );
         let offline_bytes = std::fs::read(&canonical).unwrap();
-        let offline =
-            crate::joiner_save::JoinerSave::decode(&offline_bytes).unwrap().personal.unwrap().record().unwrap();
+        // Until its first join bootstraps it, the offline member's window is the
+        // frozen v2 seed and its progression travels in the manifested
+        // `participants/` member (Spec 04: checkpoint sidecars are v2 seeds).
+        assert_eq!(offline_bytes.first(), Some(&2), "an offline member stays its frozen seed before joining");
+        let world = crate::save::world_dir(&source.state.world_name);
+        let proof = crate::handover::live::personal_adapter::proof(&world).unwrap().unwrap();
+        let progress_path =
+            world.join("participants").join(format!("{}.dat", crate::hosted_server::pubkey_to_npub(&next_peer.pubkey())));
+        let progress_bytes = std::fs::read(&progress_path).unwrap();
+        let offline = crate::handover::personal::PersonalRecord::decode(
+            &progress_bytes,
+            &proof.binding(next_peer.pubkey()).context,
+        )
+        .unwrap()
+        .to_gameplay();
         source.hosted_ticks(20);
         assert_eq!(
             std::fs::read(&canonical).unwrap(),
             offline_bytes,
             "offline members do not consume the new host's active ticks"
+        );
+        assert_eq!(
+            std::fs::read(&progress_path).unwrap(),
+            progress_bytes,
+            "offline progression does not consume the new host's active ticks"
         );
         let resolved = resolve(&link);
         assert_eq!(resolved.authority().unwrap().epoch(), epoch);

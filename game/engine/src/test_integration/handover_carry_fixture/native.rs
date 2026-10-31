@@ -387,11 +387,30 @@ pub(super) fn original_dialogue(game: &mut HeadlessGame, npc: [u8; 16]) {
         game.state.tick_counter,
     );
     approach_original_giver(game, giver, npc);
-    let at = game.state.ecs.get::<&crate::entity::Position>(giver).unwrap().0;
-    assert!((at - game.state.players[0].player.eye_pos()).length() < crate::villager_ui::INTERACT_RANGE);
-    let dir = (at + Vec3::Y * 0.7 - game.state.players[0].player.eye_pos()).normalize();
-    game.state.players[0].camera.yaw = (-dir.x).atan2(-dir.z);
-    game.state.players[0].camera.pitch = dir.y.asin();
+    // Other villagers keep wandering after the reopen. Like a player, hold the
+    // aim on the giver until the game's own nearest-in-cone pick is the giver
+    // (read-only), letting real ticks move any villager that stands closer.
+    let start = game.state.tick_counter;
+    loop {
+        let at = game.state.ecs.get::<&crate::entity::Position>(giver).unwrap().0;
+        assert!((at - game.state.players[0].player.eye_pos()).length() < crate::villager_ui::INTERACT_RANGE);
+        let dir = (at + Vec3::Y * 0.7 - game.state.players[0].player.eye_pos()).normalize();
+        game.state.players[0].camera.yaw = (-dir.x).atan2(-dir.z);
+        game.state.players[0].camera.pitch = dir.y.asin();
+        let eye = game.state.players[0].player.eye_pos();
+        let look = game.state.players[0].camera.forward();
+        if game.state.players[0].place_cooldown == 0
+            && crate::combat::find_attack_target(&game.state.ecs, eye, look).map(|(e, _)| e) == Some(giver)
+        {
+            break;
+        }
+        assert!(
+            game.state.tick_counter - start < 400,
+            "another villager stayed nearer the crosshair than the original giver"
+        );
+        game.ticks(1);
+        game.frames(1);
+    }
     while game.state.players[0].place_cooldown > 0 {
         game.ticks(1);
     }
