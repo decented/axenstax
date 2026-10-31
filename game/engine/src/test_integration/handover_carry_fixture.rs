@@ -154,10 +154,14 @@ pub(super) fn giver(
     source: &mut HeadlessGame,
     peer: &mut HeadlessGame,
     profession: crate::villager::Profession,
+    lateral: f32,
 ) -> u32 {
     let seat = observe::positive_giver_seat(source, peer);
     let sp = &source.state.hosted_server.as_ref().unwrap().server.players[seat.0];
-    let at = sp.player.pos + crate::camera::forward_from(sp.yaw, 0.0) * 1.5;
+    // Distinct givers stand apart: two villagers at one point cannot be told
+    // apart by the native nearest-in-cone pick, so a later RMB would be a coin toss.
+    let forward = crate::camera::forward_from(sp.yaw, 0.0);
+    let at = sp.player.pos + forward * 1.5 + forward.cross(Vec3::Y).normalize() * lateral;
     source.state.world.village_anchors.insert((2, 3), at.to_array().map(|n| n.floor() as i32));
     let e = crate::entity::spawn_mob(&mut source.state.ecs, crate::mob::MobType::Villager, at);
     source.state.ecs.get::<&mut crate::villager::VillagerComponent>(e).unwrap().profession = profession;
@@ -365,7 +369,7 @@ fn remote_kill(source: &mut HeadlessGame, peer: &mut HeadlessGame, kind: crate::
     settle(source, peer);
 }
 pub(super) fn active_recipient(source: &mut HeadlessGame, peer: &mut HeadlessGame, observation: &Observation) -> Seat {
-    let target = giver(source, peer, crate::villager::Profession::Carpenter);
+    let target = giver(source, peer, crate::villager::Profession::Carpenter, 0.0);
     let mut offered = quest(source, peer, observation, target, 0, QuestOperation::Talk).unwrap();
     for attempt in 0..12 {
         if matches!(offered.terms.as_ref().unwrap().flavour, crate::quest::QuestFlavour::Kill { .. }) {
@@ -395,7 +399,7 @@ pub(super) fn active_recipient(source: &mut HeadlessGame, peer: &mut HeadlessGam
     assert_eq!(record.kills.iter().find(|(kind, _)| *kind == mob).unwrap().1, 2);
     assert_eq!(crate::quest_play::kill_progress(&record, &accepted).unwrap(), 1);
     quest(source, peer, observation, target, offered.incarnation, QuestOperation::Close);
-    let second = giver(source, peer, crate::villager::Profession::Blacksmith);
+    let second = giver(source, peer, crate::villager::Profession::Blacksmith, 1.5);
     let declined = quest(source, peer, observation, second, 0, QuestOperation::Talk).unwrap();
     assert_ne!(declined.npc, offered.npc);
     quest(

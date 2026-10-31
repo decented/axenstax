@@ -396,6 +396,22 @@ pub(super) fn original_dialogue(game: &mut HeadlessGame, npc: [u8; 16]) {
         game.ticks(1);
     }
     let accepted = native(game).quests.accepted;
+    let eye = game.state.players[0].player.eye_pos();
+    let look = game.state.players[0].camera.forward();
+    eprintln!("D2c3 native dialogue aim: eye={eye:?}, look={look:?}, giver={giver:?}");
+    for (e, (pos, hitbox)) in game.state.ecs.query::<(&crate::entity::Position, &crate::entity::Hitbox)>().iter() {
+        let to = pos.0 + Vec3::Y * (hitbox.height * 0.5) - eye;
+        if to.length() < 8.0 {
+            eprintln!(
+                "D2c3 native dialogue candidate: entity={e:?}, kind={:?}, quest_npc={}, pos={:?}, distance={}, dot={}",
+                game.state.ecs.get::<&crate::entity::MobKind>(e).map(|k| k.0).ok(),
+                game.state.ecs.get::<&crate::quest_npcs::QuestNpcId>(e).is_ok(),
+                pos.0,
+                to.length(),
+                to.normalize_or_zero().dot(look),
+            );
+        }
+    }
     game.state.input.cursor_captured = true;
     game.state.input.right_held = true;
     game.frames(1);

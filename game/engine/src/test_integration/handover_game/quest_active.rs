@@ -236,6 +236,15 @@ fn game_harness_d2c3_active_carry_keeps_private_plan_allocations_through_abort_a
     let mut source = activity::active_source("active-private-source", [SOURCE_PERSONA; 32]);
     let mut peer = activity::boot_carry_world("active-private-peer");
     activity::start_lent(&mut source);
+    // Authored custody needs retained Strict actions. The lending host selects
+    // Strict for this session before admission; the global default stays Mirror.
+    source
+        .state
+        .hosted_server
+        .as_mut()
+        .unwrap()
+        .select_inventory_mode(crate::action_identity::InventoryMode::Strict)
+        .expect("a lending host selects Strict before admission");
     let client = source.state.hosted_server.as_mut().unwrap().attach_test_remote_with_binding(Some(BINDING));
     let (_, observation) = activity::attach(
         &mut source,
@@ -245,7 +254,11 @@ fn game_harness_d2c3_active_carry_keeps_private_plan_allocations_through_abort_a
         key(SOURCE_PERSONA),
         key(SOURCE_RUNTIME),
     );
-    let imports = dir.0.join("imports");
+    // The real lobby promotes Activated imports only from this parent, which the
+    // normal recipient environment prepares before consent.
+    let imports = crate::data_dir::data_root().join("handover").join("imports");
+    std::fs::create_dir_all(&imports).expect("prepare the positive carry import parent");
+    assert!(std::fs::symlink_metadata(&imports).unwrap().is_dir());
     peer.state.handover_fixture = Some(Fixture {
         signed_in: Some(key(RECIPIENT_PERSONA)),
         recipient: Some(Box::new(move || Ok(RecipientEnv { identity: identity(), imports: imports.clone() }))),
