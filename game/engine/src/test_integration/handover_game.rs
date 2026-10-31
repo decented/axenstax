@@ -1169,8 +1169,10 @@ fn game_harness_handover_recipient_opens_and_hosts_the_activated_world_from_the_
     assert!(ms.worlds.iter().any(|e| e.folder_name == folder), "the lobby doesn't list the handed-over world");
     assert_eq!(crate::save::world_open_refusal(&folder), None, "the handed-over world is refused");
     // A signed remote attachment does not silently select the native local
-    // persona after leaving it. The ordinary loader must refuse signed-out
-    // play without changing any imported bytes.
+    // persona after leaving it. Ordered park needs the recipient signed in for
+    // its proof, so the player now signs out in the lobby; the ordinary loader
+    // must refuse signed-out play without changing any imported bytes.
+    j.hg.state.handover_fixture.as_mut().expect("recipient identity fixture disappeared").signed_in = None;
     assert_eq!(j.hg.state.handover_signed_in(), None);
     let before_unsigned = snapshot(&crate::save::world_dir(&folder));
     j.hg.state.pending_menu_action =
