@@ -202,6 +202,7 @@ async def dashboard(request: Request):
             # findable "re-run setup" control (owner/admin only).
             "can_setup": "settings" in caps,
             "setup_complete": wizard.setup_complete(),
+            "awaiting_public_host": wizard.awaiting_public_host(),
             # Use-case guide: the dashboard adapts to what kind of place this is, so
             # the operator can see at a glance who can do what.
             "server_type": wizard.server_type(),
@@ -231,7 +232,10 @@ async def setup_apply(
         raise HTTPException(400, "expected a JSON object")
     # Stamp the operator who owns this world's content (recorded in the manifest).
     payload.setdefault("content_owner_npub", identity.npub_encode(pk))
-    result = wizard.apply(payload)
+    try:
+        result = wizard.apply(payload)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     return JSONResponse(result)
 
 
@@ -253,7 +257,10 @@ async def world_create(
     if not isinstance(payload, dict):
         raise HTTPException(400, "expected a JSON object")
     payload.setdefault("content_owner_npub", identity.npub_encode(pk))
-    result = wizard.apply(payload)
+    try:
+        result = wizard.apply(payload)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     result["worlds"] = worlds.list_worlds()
     return JSONResponse(result)
 
@@ -357,6 +364,22 @@ async def world_publish(
         "archive_sha256": archive_sha,
         "restart": True,
     })
+
+
+@app.post("/api/public-host")
+async def public_host_set(
+    request: Request,
+    public_host: str = Form(...),
+    x_requested_with: str | None = Header(default=None, alias="X-Requested-With"),
+):
+    """The address players use: all the engine still needs when it is waiting for
+    one, without re-running the wizard over the world."""
+    _require_fetch(x_requested_with)
+    _require_cap(request, "settings")
+    try:
+        return JSONResponse(wizard.set_public_host(public_host))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 @app.post("/api/setup/skip")

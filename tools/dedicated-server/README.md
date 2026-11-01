@@ -52,6 +52,10 @@ docker compose up -d              # pulls ghcr.io/decented/axenstax-{server,oper
 ./build.sh                        # cargo + trunk + docker compose -f docker-compose.build.yml build
 docker compose up -d              # finds the locally-built image, runs it (no pull)
 
+# Give it the address players use (it won't start the game server without one):
+#    the setup wizard at https://<this-box-ip>:8443/admin asks, or set
+#    AXENSTAX_PUBLIC_HOST in the compose file. A LAN IP is fine at home.
+
 # Then, from any machine on the same network:
 #    Web    →  open  https://<this-box-ip>:8443   (accept the cert warning once)
 #    Native →  Join  ws://<this-box-ip>:6767
@@ -75,8 +79,8 @@ to the very first world, with no throwaway default to undo.
 1. `docker compose up -d`, then open **`https://<box>:8443/admin`**.
 2. Sign in with your operator npub (signet-login / mySignet — see *Operator Console
    access* below). The owner npub is the one established when the box was provisioned.
-3. The wizard walks you through a few simple questions (kind of place, name, who can
-   join, a couple of toggles) and presses **Create**. The engine then boots into the
+3. The wizard walks you through a few simple questions (kind of place, name, the address
+   players use, who can join, a couple of toggles) and presses **Create**. The engine then boots into the
    world you chose.
 
 The wizard is **re-runnable** any time from the console (Identity panel → *Re-run setup
@@ -85,7 +89,9 @@ one is **archived** (renamed `…​.archived-<timestamp>` on the volume), never
 
 Skipping is possible (a small link) but discouraged — the box then boots on the compose
 defaults and the dashboard keeps a "finish setup" reminder. To bypass the gate entirely
-(headless / CI), set **`AXENSTAX_SKIP_WIZARD=1`**.
+(headless / CI), set **`AXENSTAX_SKIP_WIZARD=1`**. Either way the engine still needs an
+address: with none in compose (`AXENSTAX_PUBLIC_HOST` / `AXENSTAX_DOMAIN`) it waits, the
+log says so, and the dashboard asks for one.
 
 Design: `docs/superpowers/specs/2026-06-21-server-setup-wizard-design.md`.
 
@@ -107,12 +113,14 @@ Design: `docs/superpowers/specs/2026-06-21-server-setup-wizard-design.md`.
   (the native Join dialog accepts `ws://`/`wss://` URLs as well as the legacy
   `ip:port` QUIC form).
 
-### Public address (relay protection)
+### Public address (required)
 
 Since protocol v66 every WebSocket join is signed for the address the player
-dialled (`axenstax-join:ws-host:<host[:port]>`). Tell the server its public
-address(es) and it refuses joins signed for anything else, so another server
-can't pass a player's sign-in on to yours and join as them:
+dialled (`axenstax-join:ws-host:<host[:port]>`). The server refuses joins signed
+for anything but its public address(es), so another server can't pass a player's
+sign-in on to yours and join as them. **It won't boot without one, and there is no
+switch to turn this off:** started directly it exits and says what to set; under
+this image it waits with the console up. A LAN IP or `localhost` is a valid value:
 
 ```yaml
       AXENSTAX_PUBLIC_HOST: "play.example.org"   # or --public-host (repeatable)
@@ -129,9 +137,7 @@ and `:80` also admits `wss://host`. List every address players (and browsers
 opening the `:8443` page) use: a join by any other address is refused with a
 generic "this server expects to be reached at its public address" (the refusal
 never says which addresses the server is configured with; the server's own log
-does). With nothing set the start-up log warns `WebSocket joins are not
-relay-protected: set --public-host …` and any address is accepted, as before v66.
-A malformed entry stops the server at start-up.
+does). A malformed entry stops the server at start-up.
 
 **LAN addresses are not relay-protected.** You can list a LAN IP (`192.168.x.x`,
 `10.x.x.x`, `172.16-31.x.x`), a CGNAT / link-local / loopback / IPv6 ULA address,
@@ -220,7 +226,7 @@ Identity configuration (env in `docker-compose.yml`):
 | `AXENSTAX_REQUIRE_VERIFIED` | `0` | `1` ⇒ refuse to start without a valid, non-expired attestation |
 | `AXENSTAX_IDENTITY_DIR` | `<worlds>/.identity` | where the runtime key + attestation + session live |
 | `AXENSTAX_PAIR_RELAY` | `wss://relay.damus.io` | public relay used for the NIP-46 pairing round-trip (`--pair-relay` on the CLI); also the default `AXENSTAX_ADMIN_RELAY` |
-| `AXENSTAX_PUBLIC_HOST` | _(unset)_ | Public host name(s)/IP(s), comma-separated (`--public-host`, repeatable). The first is advertised in the connect-string as `axenstax://<host>:<ws port>`; all are the addresses WebSocket joins must be signed for (see "Public address") |
+| `AXENSTAX_PUBLIC_HOST` | _(unset; required unless `AXENSTAX_DOMAIN` is set)_ | Public host name(s)/IP(s), comma-separated (`--public-host`, repeatable). The first is advertised in the connect-string as `axenstax://<host>:<ws port>`; all are the addresses WebSocket joins must be signed for (see "Public address") |
 | `AXENSTAX_DELEGATION_DAYS` | `90` | validity window minted at pairing time |
 
 A bare `ws://host:6767` join stays anonymous; a connect-string with `#op=npub…`

@@ -726,8 +726,8 @@ pub struct HostedServer {
     /// `AXENSTAX_PUBLIC_HOST`, `AXENSTAX_DOMAIN`). A WebSocket join whose
     /// declared dialled host isn't one of them is refused, so a relayed
     /// signature (made for the relay's address) can't get in (Spec 08 §9.0.1
-    /// T-JOIN-RELAY). Empty ⇒ any host is accepted (the residual). Set by the
-    /// dedicated server via [`HostedServer::set_ws_public_hosts`].
+    /// T-JOIN-RELAY). Empty ⇒ no WebSocket join is accepted. Set by the dedicated
+    /// server via [`HostedServer::set_ws_public_hosts`]; it won't boot with none.
     #[cfg(not(target_arch = "wasm32"))]
     ws_public_hosts: crate::signet::ws_host::PublicHosts,
 
@@ -1938,8 +1938,7 @@ impl HostedServer {
     }
 
     /// Set the public addresses WebSocket joins must be addressed to (v66).
-    /// Empty leaves WS joins unprotected against relaying; `server_main` logs
-    /// `signet::ws_host::relay_protection_warning` once at boot in that case.
+    /// With none, every WebSocket join is refused.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn set_ws_public_hosts(&mut self, hosts: crate::signet::ws_host::PublicHosts) {
         self.ws_public_hosts = hosts;
@@ -10504,7 +10503,7 @@ pub(crate) mod tests {
     // address refuses a signature made for any other — so a relaying server
     // M can't replay victim V's signature (made for M) to the real server H.
 
-    use crate::signet::ws_host::{relay_protection_warning, ws_host_origin, PublicHosts};
+    use crate::signet::ws_host::{ws_host_origin, PublicHosts};
 
     const WS_NONCE: [u8; 32] = [0x77; 32];
 
@@ -10578,17 +10577,18 @@ pub(crate) mod tests {
         res.expect("an honest WS join to H's own address is accepted");
     }
 
-    /// Without `--public-host` the residual stands (any host is accepted) and
-    /// the boot warning fires.
+    /// A server with no public address admits no WebSocket join at all: there
+    /// is nothing to check a join's address against.
     #[test]
-    fn an_unconfigured_server_still_accepts_a_relayed_ws_signature_and_warns() {
-        let mut h = start_room_test_server("ws-relay-open", 1);
-        assert!(relay_protection_warning(&h.ws_public_hosts).is_some(), "boot warning");
+    fn a_server_with_no_public_address_refuses_a_websocket_join() {
+        let mut h = start_room_test_server("ws-no-address", 1);
         let (_c, res) =
-            ws_join(&mut h, "m.example.net:6767", Some(([0x45; 32], ws_host_origin("m.example.net:6767"))));
-        res.expect("unconfigured: the WS relay residual is accepted");
+            ws_join(&mut h, "h.example.org:6767", Some(([0x45; 32], ws_host_origin("h.example.org:6767"))));
+        assert!(res.unwrap_err().starts_with("auth event origin mismatch"));
         h.set_ws_public_hosts(h_hosts());
-        assert_eq!(relay_protection_warning(&h.ws_public_hosts), None);
+        let (_c, res) =
+            ws_join(&mut h, "h.example.org:6767", Some(([0x45; 32], ws_host_origin("h.example.org:6767"))));
+        res.expect("the same join, once the server knows its address");
     }
 
     /// IP-vs-domain: a player who dialled the server's IP while it answers as

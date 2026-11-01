@@ -50,6 +50,7 @@ services:
       AXENSTAX_GAMEMODE: "survival"        # survival | creative | adventure
       AXENSTAX_MAX_PLAYERS: "8"
       AXENSTAX_SERVER_NAME: "Axe'n'Stax Server"
+      # AXENSTAX_PUBLIC_HOST: "192.168.1.20"  # the address players use; or the wizard asks
     restart: unless-stopped
 
   axenstax-console:                        # the /admin Operator Console (optional)
@@ -70,6 +71,11 @@ Then, in that folder:
 ```bash
 docker compose up -d        # pulls the images from GHCR and starts the server
 ```
+
+The game server needs to know **the address players use to reach it**, and won't
+start until it does (see "Tell the server its public address"). The setup wizard at
+`https://<this-box-ip>:8443/admin` asks for it, or set `AXENSTAX_PUBLIC_HOST` in the
+compose file. On a home network the box's LAN IP is a fine answer.
 
 Then, from any machine on the same network:
 
@@ -104,6 +110,9 @@ cd tools/dedicated-server
 docker compose up -d        # runs the locally-built image (no pull)
 ```
 
+Then give it its address as in path A: the wizard at `/admin`, or
+`AXENSTAX_PUBLIC_HOST` in the compose file.
+
 `build.sh` tags the images with the same GHCR names the pull file expects, so the
 plain `docker compose up -d` finds and runs your local build. Re-run `./build.sh`
 after any engine change.
@@ -131,18 +140,23 @@ On a no-domain box the Caddy front uses a self-signed certificate, so a `wss://`
 join needs that certificate trusted on the player's machine; use a real domain
 (see "Deploying on a VPS") to avoid that.
 
-### Tell the server its public address (recommended)
+### Tell the server its public address (required)
 
 A signed-in player's join is signed for the address they typed (since protocol
-v66): `play.example.org`, `203.0.113.7:6767` and so on. If the server knows its own
-public address, it refuses a join signed for any other one. That stops a hostile
-server from passing a player's sign-in on to yours and joining **as them** (it
-could otherwise forward the join, because `ws://` / `wss://` has no end-to-end
-binding — the TLS ends at Caddy).
+v66): `play.example.org`, `203.0.113.7:6767` and so on. The server refuses a join
+signed for any address but its own. That stops a hostile server from passing a
+player's sign-in on to yours and joining **as them** (it could otherwise forward the
+join, because `ws://` / `wss://` has no end-to-end binding — the TLS ends at Caddy).
+
+**A dedicated server won't boot without an address, and there is no switch to turn
+this off.** Started directly, it exits and says what to set. Under the Docker image
+it waits instead, with the Operator Console up: enter the address in the setup wizard
+or on the dashboard, or set it in compose and recreate the container. A LAN IP or
+`localhost` is a valid value when that is how players reach it.
 
 | Set | Example | Notes |
 |-----|---------|-------|
-| `AXENSTAX_PUBLIC_HOST` (or `--public-host`, repeatable) | `play.example.org` or `203.0.113.7:6767` | Comma-separated public host names or IPs, each optionally `:port`. The first is also the one advertised in the connect-string. Use public addresses (see the LAN caveat below) |
+| `AXENSTAX_PUBLIC_HOST` (or `--public-host`, repeatable) | `play.example.org` or `203.0.113.7:6767` | Comma-separated public host names or IPs, each optionally `:port`. The first is also the one advertised in the connect-string. Use public addresses where you can (see the LAN caveat below). The setup wizard's answer adds to whatever compose sets |
 | `AXENSTAX_DOMAIN` | `play.example.com` | Already set on a VPS with a real domain; it is added to the list automatically |
 
 - **An entry without a port covers only the default ports, your own WebSocket
@@ -179,14 +193,16 @@ binding — the TLS ends at Caddy).
   public-address entries, so prefer a public domain or IP and have players use it;
   the trade-off is that players on the LAN then join through it too.
 - **Check:** the start-up log says `public host: 'play.example.org' …` (and a
-  `not relay-protected: …` warning for any LAN-style entry). With
-  nothing set it warns instead: `WebSocket joins are not relay-protected: set
-  --public-host …` — the server then accepts a join signed for any address, as
-  before.
+  `not relay-protected: …` warning for any LAN-style entry).
 - A malformed entry (a scheme, a path, a bad port) stops the server at start-up
   with the reason.
 - Operator tools still need a direct (QUIC) connection, whatever you set here.
 
+> **Upgrading a server with no address set?** It used to warn and accept a join
+> signed for any address; now it won't boot until you set one. Under Docker it waits,
+> with the console up, and the dashboard asks for the address. Set every address your
+> players use, or they are refused with the generic message above.
+>
 > **Upgrading from an engine before protocol v66?** If you already set
 > `AXENSTAX_PUBLIC_HOST`, `--public-host` or `AXENSTAX_DOMAIN`, the check is now on:
 > players who join by a different address (for example the LAN IP of a box that
@@ -267,7 +283,7 @@ docker compose run --rm axenstax-server axenstax-engine --refresh-delegation
 | `AXENSTAX_REQUIRE_VERIFIED` | `0` | `1` ⇒ refuse to start without a valid, non-expired attestation |
 | `AXENSTAX_IDENTITY_DIR` | `<worlds>/.identity` | where the runtime key + attestation + session live |
 | `AXENSTAX_PAIR_RELAY` | `wss://relay.damus.io` | public relay used for the NIP-46 pairing round-trip (`--pair-relay` on the CLI); also the default `AXENSTAX_ADMIN_RELAY` |
-| `AXENSTAX_PUBLIC_HOST` | _(unset)_ | This server's public host name(s) or IP(s), comma-separated (`--public-host`, repeatable). The first is advertised in the connect-string as `axenstax://<host>:<ws port>`; all of them are the addresses joins must be signed for (see "Tell the server its public address") |
+| `AXENSTAX_PUBLIC_HOST` | _(unset; required unless `AXENSTAX_DOMAIN` is set)_ | This server's public host name(s) or IP(s), comma-separated (`--public-host`, repeatable). The first is advertised in the connect-string as `axenstax://<host>:<ws port>`; all of them are the addresses joins must be signed for (see "Tell the server its public address") |
 | `AXENSTAX_DELEGATION_DAYS` | `90` | validity window minted at pairing time |
 
 A bare `ws://host:6767` join stays anonymous; a connect-string with `#op=npub…`

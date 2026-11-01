@@ -514,6 +514,18 @@ fn apply_admin_command_to_files(
     }
 }
 
+/// Why this server can't start without a public address, if it can't: only a
+/// WebSocket listener has joins that are checked against one.
+fn public_address_refusal(
+    transport: &RemoteTransport,
+    hosts: &crate::signet::ws_host::PublicHosts,
+) -> Option<&'static str> {
+    match transport {
+        RemoteTransport::WebSocket { .. } => crate::signet::ws_host::missing_public_address(hosts),
+        _ => None,
+    }
+}
+
 /// The boot log's account of who may join.
 fn describe_access(policy: &crate::server_policy::AccessPolicy) -> String {
     use crate::access_policy::Allow;
@@ -820,8 +832,9 @@ pub fn run(args: &[String]) {
     let cfg = parse_config(args);
 
     // v66 — the addresses WebSocket joins must be addressed to (relay
-    // protection, Spec 08 §9.0.1 T-JOIN-RELAY). A typo must refuse to boot,
-    // not silently leave the server unprotected.
+    // protection, Spec 08 §9.0.1 T-JOIN-RELAY). A typo or no address at all
+    // refuses to boot: there is no unprotected mode.
+    let transport = RemoteTransport::WebSocket { port: cfg.ws_port };
     let public_hosts = match crate::signet::ws_host::PublicHosts::parse(&public_host_entries_from(args), cfg.ws_port) {
         Ok(h) => h,
         Err(e) => {
@@ -829,6 +842,10 @@ pub fn run(args: &[String]) {
             std::process::exit(1);
         }
     };
+    if let Some(why) = public_address_refusal(&transport, &public_hosts) {
+        eprintln!("refusing to start: {why}");
+        std::process::exit(1);
+    }
 
     // Server identity (Heartwood-backed). Loaded before anything starts so
     // `AXENSTAX_REQUIRE_VERIFIED` can refuse to boot; additive otherwise.
@@ -895,7 +912,7 @@ pub fn run(args: &[String]) {
         cfg.world.clone(),
         seed,
         cfg.max_players,
-        RemoteTransport::WebSocket { port: cfg.ws_port },
+        transport,
     ) {
         Ok(hs) => hs,
         Err(e) => {
@@ -1503,6 +1520,26 @@ mod tests {
             assert_eq!(std::fs::read_to_string(&path).unwrap(), "kept\n", "{cmd:?}");
             let _ = std::fs::remove_dir_all(&dir);
         }
+    }
+
+    #[test]
+    fn a_websocket_server_needs_a_public_address_and_a_quic_one_does_not() {
+        use crate::signet::ws_host::PublicHosts;
+        let ws = RemoteTransport::WebSocket { port: 6767 };
+        let none = PublicHosts::default();
+        assert!(public_address_refusal(&ws, &none).is_some_and(|why| why.contains("--public-host")));
+        let lan = PublicHosts::parse(&["192.168.1.20"], 6767).unwrap();
+        assert_eq!(public_address_refusal(&ws, &lan), None);
+        assert_eq!(public_address_refusal(&RemoteTransport::Quic, &none), None);
+        assert_eq!(public_address_refusal(&RemoteTransport::Fray, &none), None);
+
+        // And a QUIC server really does start with none.
+        let _guard = crate::save::WorldsRootGuard::new("quic-no-address");
+        let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let mut quic = HostedServer::start_online(1, "quic-no-address".into(), 7, 1, socket, crate::hosted_server::HostWorld::Owned)
+            .expect("a QUIC-only server has no address to name");
+        quic.tick();
+        quic.shutdown();
     }
 
     #[test]

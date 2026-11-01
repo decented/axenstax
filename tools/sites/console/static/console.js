@@ -38,6 +38,16 @@
     });
   }
 
+  var addressForm = document.getElementById("public-host-form");
+  if (addressForm) {
+    var addressInput = addressForm.querySelector("input[name=public_host]");
+    addressInput.value = window.location.hostname;
+    addressForm.addEventListener("submit", function (e) {
+      e.preventDefault();
+      doAndReload("api/public-host", form({ public_host: addressInput.value.trim() }), addressForm.querySelector("button"));
+    });
+  }
+
   var allowOff = document.getElementById("allowlist-off");
   if (allowOff) {
     allowOff.addEventListener("click", function () {

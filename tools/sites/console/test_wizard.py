@@ -267,6 +267,155 @@ def test_invalid_terrain_falls_back_to_defaults():
     check(r["water_depth"] == 32, "out-of-range depth clamped to 32")
 
 
+def env_of(identity):
+    parsed = {}
+    for line in (identity.identity_dir() / "server.env").read_text().splitlines():
+        if line and not line.startswith("#"):
+            k, _, v = line.partition("=")
+            parsed[k] = shlex.split(v)[0] if v else ""
+    return parsed
+
+
+def test_public_address_reaches_the_engine():
+    print("test_public_address_reaches_the_engine")
+    fresh_env()
+    wizard = reimport()
+    import identity
+    wizard.apply({"server_type": "survival", "public_host": " play.example.org, 192.168.1.20:6767 "})
+    check(env_of(identity).get("AXENSTAX_PUBLIC_HOST") == "play.example.org,192.168.1.20:6767",
+          "the address lands in server.env")
+    check(wizard.current_state_for_form()["public_host"] == "play.example.org,192.168.1.20:6767",
+          "and the form shows it again")
+    check(not wizard.restart_path().exists(), "a first run needs no restart")
+
+    # "Add a world" and other runs that send no address keep the one it has.
+    r = wizard.apply({"server_type": "survival"})
+    check(env_of(identity).get("AXENSTAX_PUBLIC_HOST") == "play.example.org,192.168.1.20:6767",
+          "a run without an address keeps it")
+    check(r["restart"] is False, "and doesn't restart anything")
+
+    r = wizard.apply({"server_type": "survival", "public_host": "other.example.org"})
+    check(env_of(identity).get("AXENSTAX_PUBLIC_HOST") == "other.example.org", "a new address replaces it")
+    check(r["restart"] is True, "and restarts the engine, which reads it at boot")
+
+
+def test_a_bad_public_address_changes_nothing():
+    print("test_a_bad_public_address_changes_nothing")
+    fresh_env()
+    wizard = reimport()
+    import identity
+    # What the engine would refuse at boot must be refused here instead.
+    for bad in ("https://play.example.org", "play.example.org/ws", "user@host", "host:0",
+                "host:70000", "a b", "[::1", "bad..name", "ex\u00e4mple.org", "host:port", "fe80::1%eth0"):
+        raised = False
+        try:
+            wizard.apply({"server_type": "survival", "public_host": bad})
+        except ValueError:
+            raised = True
+        check(raised, f"{bad!r} is refused")
+    check(not (identity.identity_dir() / "server.env").exists(), "and nothing was written")
+    check(not wizard.engine_booted_once(), "and the engine gate stays shut")
+    for good in ("localhost", "192.168.1.20", "203.0.113.7:6767", "[2001:db8::1]:6767", "::1",
+                 "play.example.org.", "my_box", "a.example,b.example:9000"):
+        check(wizard.clean_public_host(good) == good, f"{good!r} is accepted")
+
+
+def test_set_public_host_touches_only_the_address():
+    print("test_set_public_host_touches_only_the_address")
+    fresh_env()
+    wizard = reimport()
+    import identity
+    wizard.apply({"server_type": "creative", "server_name": "Keep me"})
+    before = env_of(identity)
+    wizard.set_public_host("play.example.org")
+    after = env_of(identity)
+    check(after.pop("AXENSTAX_PUBLIC_HOST") == "play.example.org", "the address is set")
+    check(after == before, "every other setting is as it was")
+    check(wizard.restart_path().exists(), "and the engine is cycled to read it")
+    raised = False
+    try:
+        wizard.set_public_host("")
+    except ValueError:
+        raised = True
+    check(raised, "a blank address is refused")
+
+
+def run_entrypoint(worlds, compose_host=""):
+    """Run the real entrypoint with stand-ins for Caddy and the engine: the engine
+    records the address it was started with, and both just sit there. Exported shell
+    functions, not scripts: a temp dir may well be mounted noexec."""
+    import subprocess
+    started = Path(tempfile.mkdtemp(prefix="wiz-entry-")) / "engine-started"
+    env = {"PATH": os.environ["PATH"], "AXENSTAX_WORLDS_DIR": str(worlds), "AXENSTAX_SKIP_WIZARD": "1",
+           "BASH_FUNC_caddy%%": "() { exec sleep 60; }",
+           "BASH_FUNC_openssl%%": "() { :; }",
+           "BASH_FUNC_axenstax-engine%%":
+               f'() {{ echo "$AXENSTAX_PUBLIC_HOST" > "{started}"; exec sleep 60; }}'}
+    if compose_host:
+        env["AXENSTAX_PUBLIC_HOST"] = compose_host
+    entrypoint = Path(__file__).parents[2] / "dedicated-server" / "entrypoint.sh"
+    proc = subprocess.Popen(["bash", str(entrypoint)], env=env, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
+    return proc, started
+
+
+def stop_entrypoint(proc):
+    proc.terminate()
+    proc.wait(timeout=15)
+
+
+def wait_for(path, seconds=10):
+    import time
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if path.exists():
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def read_when_written(path, seconds=5):
+    """The stand-in creates the file, then writes it."""
+    import time
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline and not path.read_text().strip():
+        time.sleep(0.05)
+    return path.read_text().strip()
+
+
+def test_the_entrypoint_waits_for_an_address_instead_of_looping():
+    print("test_the_entrypoint_waits_for_an_address_instead_of_looping")
+    worlds = fresh_env()
+    wizard = reimport()
+    proc, started = run_entrypoint(worlds)
+    try:
+        marker = wizard.awaiting_public_host_path()
+        check(wait_for(marker), "with no address it waits, and says so to the console")
+        check(wizard.awaiting_public_host(), "the console can tell")
+        check(not started.exists(), "the engine isn't started to refuse and bring the box down")
+        check(proc.poll() is None, "the box stays up so the console can be reached")
+        wizard.set_public_host("play.example.org")
+        check(wait_for(started), "an address from the console releases it, with no restart")
+        check(read_when_written(started) == "play.example.org", "the engine gets that address")
+        check(not marker.exists(), "and the console stops asking")
+    finally:
+        stop_entrypoint(proc)
+
+
+def test_the_entrypoint_keeps_an_address_from_compose():
+    print("test_the_entrypoint_keeps_an_address_from_compose")
+    worlds = fresh_env()
+    wizard = reimport()
+    wizard.set_public_host("from.wizard")
+    proc, started = run_entrypoint(worlds, compose_host="from.compose")
+    try:
+        check(wait_for(started), "an address named in compose needs no waiting")
+        check(read_when_written(started) == "from.compose,from.wizard",
+              "and the wizard's adds to it rather than dropping it")
+    finally:
+        stop_entrypoint(proc)
+
+
 def main():
     # Make local imports resolve when run from anywhere.
     sys.path.insert(0, str(Path(__file__).parent))
@@ -274,7 +423,11 @@ def main():
               test_signin_is_the_default, test_friends, test_rerun_mode_change_resets_world,
               test_rerun_same_mode_no_reset,
               test_apply_terrain_flat, test_rerun_terrain_change_resets_world,
-              test_invalid_terrain_falls_back_to_defaults, test_skip):
+              test_invalid_terrain_falls_back_to_defaults, test_skip,
+              test_public_address_reaches_the_engine, test_a_bad_public_address_changes_nothing,
+              test_set_public_host_touches_only_the_address,
+              test_the_entrypoint_waits_for_an_address_instead_of_looping,
+              test_the_entrypoint_keeps_an_address_from_compose):
         t()
     print()
     if _fails:

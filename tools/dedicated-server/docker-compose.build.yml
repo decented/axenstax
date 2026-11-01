@@ -34,6 +34,8 @@ services:
       AXENSTAX_WS_PORT: "6767"
       AXENSTAX_WORLDS_DIR: "/worlds"
       AXENSTAX_AUTOSAVE_SECS: "60"
+      # The address players use: required, or the setup wizard asks (see docker-compose.yml).
+      # AXENSTAX_PUBLIC_HOST: "play.example.com"
     restart: unless-stopped
 
   axenstax-console:

@@ -5,14 +5,14 @@
 //! WebSocket's TLS ends at the reverse proxy (Caddy), so there is no exporter
 //! to bind to. Instead a WS joiner signs the address it actually dialled:
 //! `axenstax-join:ws-host:<host[:port]>`, normalised by [`normalise_host_port`]
-//! (the one normaliser both ends use). A dedicated server that knows its own
-//! public address(es) ([`PublicHosts`], `--public-host`) refuses a signature
-//! made for any other address, so a relaying server M cannot replay a victim's
-//! signature (made for M's address) to the real server H.
+//! (the one normaliser both ends use). A server refuses a signature made for
+//! any address but its own public address(es) ([`PublicHosts`], `--public-host`),
+//! so a relaying server M cannot replay a victim's signature (made for M's
+//! address) to the real server H.
 //!
-//! **Residual:** a server with no public host configured accepts any `ws-host`
-//! origin (the pre-v66 behaviour); `server_main` logs
-//! [`relay_protection_warning`] once at boot.
+//! A server with a WebSocket listener must know its address: there is no
+//! unprotected mode. [`missing_public_address`] is why the dedicated server
+//! refuses to boot without one, and an empty [`PublicHosts`] admits nothing.
 //!
 //! **Non-unique entries:** an address that other machines can also own (an
 //! RFC 1918 / CGNAT / loopback / link-local IP, a `.local` or `.lan` name, a
@@ -300,8 +300,7 @@ fn is_non_unique_v4(ip: Ipv4Addr) -> bool {
 }
 
 /// The public addresses a dedicated server answers to (`--public-host`,
-/// `AXENSTAX_PUBLIC_HOST`, `AXENSTAX_DOMAIN`). Empty = not configured: any
-/// `ws-host` origin is accepted (the residual).
+/// `AXENSTAX_PUBLIC_HOST`, `AXENSTAX_DOMAIN`). Empty admits no WebSocket join.
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PublicHosts {
@@ -348,11 +347,8 @@ impl PublicHosts {
     }
 
     /// Whether a join that dialled `dialled` (normalised `host[:port]`) is
-    /// addressed to this server. An empty list admits everything.
+    /// addressed to this server. An empty list admits nothing.
     pub fn admits(&self, dialled: &str) -> bool {
-        if self.entries.is_empty() {
-            return true;
-        }
         match split_host_port(dialled, None) {
             Ok((host, port)) => self.entries.iter().any(|p| p.admits(&host, port, self.ws_port)),
             Err(_) => false,
@@ -375,25 +371,25 @@ impl PublicHosts {
     }
 }
 
-/// The one startup warning for a server whose WebSocket joins are not
-/// relay-protected (no public host configured). `None` once configured.
+/// Why a server with a WebSocket listener can't start with these hosts: it has
+/// none. `None` once it has any. There is no override: a LAN IP or `localhost`
+/// is a valid address, so every server has one to name.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn relay_protection_warning(hosts: &PublicHosts) -> Option<&'static str> {
+pub fn missing_public_address(hosts: &PublicHosts) -> Option<&'static str> {
     hosts.is_empty().then_some(
-        "WebSocket joins are not relay-protected: set --public-host (or AXENSTAX_PUBLIC_HOST) \
-         to the address players use to reach this server",
+        "this server has a WebSocket listener and doesn't know the address players use to \
+         reach it, so it would have to refuse every join. Set --public-host <address> (or \
+         AXENSTAX_PUBLIC_HOST, or AXENSTAX_DOMAIN): a domain or public IP, or a LAN IP or \
+         localhost if that is how players reach it",
     )
 }
 
 /// What the dedicated server logs at boot about its public hosts, in order:
-/// the "none configured" warning, or the summary line plus one warning per
-/// entry that is not unique to this server ("not relay-protected: <entry> is
-/// not unique to this server"). `server_main` logs each at its level.
+/// the summary line, then one warning per entry that is not unique to this
+/// server ("not relay-protected: <entry> is not unique to this server").
+/// `server_main` logs each at its level.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn boot_messages(hosts: &PublicHosts) -> Vec<(log::Level, String)> {
-    if let Some(w) = relay_protection_warning(hosts) {
-        return vec![(log::Level::Warn, format!("  public host: none — {w}"))];
-    }
     let mut out = vec![(
         log::Level::Info,
         format!(
@@ -476,6 +472,14 @@ pub fn expected_ws_join_origin(declared: &str, hosts: &PublicHosts) -> Result<St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn an_empty_public_host_list_admits_nothing() {
+        let none = PublicHosts::parse::<&str>(&[], 6767).unwrap();
+        assert!(!none.admits("h.example.org:6767"));
+        assert!(expected_ws_join_origin("h.example.org:6767", &none).is_err());
+    }
 
     /// The normalisation table — the client's view (`ws_url_host`).
     #[test]
@@ -687,8 +691,7 @@ mod tests {
     }
 
     /// The boot log: one warning per non-unique entry, naming it; nothing to
-    /// warn about for unique entries; the unconfigured server keeps its single
-    /// "not relay-protected: set --public-host" warning.
+    /// warn about for unique entries.
     #[test]
     fn boot_warns_for_each_non_unique_entry() {
         let msgs = boot_messages(&parse(&["play.example.org", "192.168.1.20", "nas.local"]));
@@ -710,20 +713,17 @@ mod tests {
         let clean = boot_messages(&parse(&["play.example.org", "203.0.113.7:6767"]));
         assert!(texts(&clean, log::Level::Warn).is_empty(), "{clean:?}");
         assert_eq!(texts(&clean, log::Level::Info).len(), 1);
-
-        let unconfigured = boot_messages(&PublicHosts::default());
-        let warns = texts(&unconfigured, log::Level::Warn);
-        assert_eq!(warns.len(), 1, "{unconfigured:?}");
-        assert!(warns[0].contains("WebSocket joins are not relay-protected: set --public-host"), "{}", warns[0]);
     }
 
     #[test]
-    fn unconfigured_server_admits_any_host_and_warns_once_at_boot() {
-        let none = PublicHosts::default();
-        assert!(none.admits("anything.example:1"));
-        let w = relay_protection_warning(&none).expect("unconfigured → warning");
-        assert!(w.starts_with("WebSocket joins are not relay-protected: set --public-host"), "{w}");
-        assert_eq!(relay_protection_warning(&parse(&["h"])), None);
+    fn no_public_address_names_what_to_set_and_any_address_will_do() {
+        let why = missing_public_address(&PublicHosts::default()).expect("no address, no boot");
+        for needed in ["--public-host", "AXENSTAX_PUBLIC_HOST", "AXENSTAX_DOMAIN", "LAN IP", "localhost"] {
+            assert!(why.contains(needed), "{why}");
+        }
+        assert_eq!(missing_public_address(&parse(&["play.example.org"])), None);
+        assert_eq!(missing_public_address(&parse(&["localhost"])), None, "a LAN address is an address");
+        assert_eq!(missing_public_address(&parse(&["192.168.1.20"])), None);
     }
 
     #[test]
@@ -732,10 +732,6 @@ mod tests {
         assert_eq!(
             expected_ws_join_origin("PLAY.example.org:6767", &hosts).as_deref(),
             Ok("axenstax-join:ws-host:play.example.org:6767")
-        );
-        assert_eq!(
-            expected_ws_join_origin("relay.example.net:6767", &PublicHosts::default()).as_deref(),
-            Ok("axenstax-join:ws-host:relay.example.net:6767")
         );
     }
 

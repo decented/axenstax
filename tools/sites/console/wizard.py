@@ -22,8 +22,10 @@ change, no HTTP between the containers. Reuses identity.py / studio.py for the f
 they already own.
 """
 
+import ipaddress
 import json
 import os
+import re
 import shlex
 import time
 from pathlib import Path
@@ -101,6 +103,16 @@ def reset_world_path() -> Path:
     return _id() / "reset-world"
 
 
+def awaiting_public_host_path() -> Path:
+    return _id() / "awaiting-public-host"
+
+
+def awaiting_public_host() -> bool:
+    """The entrypoint is holding the engine back: nothing has told it the address
+    players use, and a server with a WebSocket listener refuses to boot without one."""
+    return awaiting_public_host_path().exists()
+
+
 # ── state ──────────────────────────────────────────────────────────────────────
 
 
@@ -166,6 +178,7 @@ def current_state_for_form() -> dict:
         "keep_history": bool(prev.get("keep_history",
                                       settings.get("privacy_level") == "sessions")),
         "friends": identity.allowlist(),
+        "public_host": _read_env().get("AXENSTAX_PUBLIC_HOST", ""),
         "world_type": prev.get("world_type") or DEFAULT_WORLD_TYPE,
         "ground": prev.get("ground") or DEFAULT_GROUND,
         "water_depth": prev.get("water_depth") or 3,
@@ -230,7 +243,69 @@ def _clean_friends(v) -> list[str]:
     return out
 
 
+_HOST_NAME = re.compile(r"[A-Za-z0-9_-]{1,63}(\.[A-Za-z0-9_-]{1,63})*\.?")
+
+
+def _valid_public_host_entry(entry: str) -> bool:
+    """One `host[:port]`, by the rules the engine's `PublicHosts::parse` applies at
+    boot: a value it would refuse must be refused here, where the operator can fix
+    it, rather than stop the server. (ASCII only: a name in another script goes in
+    as its punycode.)"""
+    if entry.startswith("["):
+        inner, closed, after = entry[1:].partition("]")
+        port = after[1:] if after.startswith(":") else (None if not after else "bad")
+        host_ok = bool(closed) and _is_ipv6(inner)
+    elif entry.count(":") > 1:
+        return _is_ipv6(entry)
+    else:
+        name, colon, port = entry.partition(":")
+        port = port if colon else None
+        host_ok = len(name) <= 253 and bool(_HOST_NAME.fullmatch(name))
+    if port is not None and not (port.isascii() and port.isdigit() and 0 < int(port) <= 65535):
+        return False
+    return host_ok
+
+
+def _is_ipv6(text: str) -> bool:
+    if "%" in text:  # A zone id only means something on this machine.
+        return False
+    try:
+        ipaddress.IPv6Address(text)
+    except ValueError:
+        return False
+    return True
+
+
+def clean_public_host(v) -> str:
+    """A comma list of the addresses players use, tidied. "" when none was given.
+    Raises `ValueError` on anything malformed."""
+    entries = [e.strip() for e in str(v or "").split(",")]
+    entries = [e for e in entries if e]
+    for entry in entries:
+        if not _valid_public_host_entry(entry):
+            raise ValueError(
+                f"'{entry}' isn't an address: give a host name or IP, optionally with "
+                ":port (no https:// or path), e.g. play.example.org or 192.168.1.20"
+            )
+    return ",".join(entries)
+
+
 # ── env writer (sourced by entrypoint.sh) ──────────────────────────────────────
+
+
+def _read_env() -> dict:
+    """What `_write_env` last wrote."""
+    try:
+        text = server_env_path().read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    out = {}
+    for line in text.splitlines():
+        if line and not line.startswith("#"):
+            key, _, value = line.partition("=")
+            parts = shlex.split(value) if value else []
+            out[key] = parts[0] if parts else ""
+    return out
 
 
 def _write_env(pairs: dict) -> None:
@@ -242,9 +317,18 @@ def _write_env(pairs: dict) -> None:
     ]
     for k, v in pairs.items():
         lines.append(f"{k}={shlex.quote(str(v))}")
-    p = server_env_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    identity._write_atomic(server_env_path(), "\n".join(lines) + "\n")
+
+
+def set_public_host(v) -> dict:
+    """Set the address players use, changing nothing else. The engine reads it at
+    boot, so this cycles it; an engine still waiting for one just starts."""
+    public_host = clean_public_host(v)
+    if not public_host:
+        raise ValueError("give the address players use to reach this server")
+    _write_env({**_read_env(), "AXENSTAX_PUBLIC_HOST": public_host})
+    request_restart()
+    return {"ok": True, "public_host": public_host}
 
 
 # ── apply ──────────────────────────────────────────────────────────────────────
@@ -256,6 +340,12 @@ def apply(choices: dict) -> dict:
     Returns a summary incl. whether the engine will (re)boot and whether the world
     was scheduled for a fresh start, so the UI can tell the operator what happens next.
     """
+    # First, so a bad address leaves everything as it was.
+    public_host = clean_public_host(choices.get("public_host"))
+    prior_public_host = _read_env().get("AXENSTAX_PUBLIC_HOST", "")
+    # A run that names none ("Add a world") keeps the one the server has.
+    public_host = public_host or prior_public_host
+
     stype = _clean_type(choices.get("server_type"))
     spec = SERVER_TYPES[stype]
     game_mode = spec["game_mode"]
@@ -339,6 +429,7 @@ def apply(choices: dict) -> dict:
         "AXENSTAX_WORLD_TYPE": world_type,
         "AXENSTAX_GROUND": ground,
         "AXENSTAX_WATER_DEPTH": str(water_depth),
+        **({"AXENSTAX_PUBLIC_HOST": public_host} if public_host else {}),
     })
 
     # 5. The console's own record.
@@ -387,7 +478,8 @@ def apply(choices: dict) -> dict:
     restart_requested = False
     if needs_fresh:
         reset_world_path().write_text("", encoding="utf-8")
-    if not first_run and (needs_fresh or mode_changed or terrain_changed):
+    address_changed = public_host != prior_public_host
+    if not first_run and (needs_fresh or mode_changed or terrain_changed or address_changed):
         request_restart()
         restart_requested = True
 
@@ -430,7 +522,8 @@ def request_restart() -> None:
 
 def skip() -> dict:
     """Operator chose to skip the wizard (small-text link). The box boots on the
-    compose defaults, but the dashboard keeps nudging until setup is finished."""
+    compose defaults, but the dashboard keeps nudging until setup is finished. With
+    no address in compose the engine waits for one, and the dashboard asks for it."""
     mark_engine_ready()
     prev = read_state() or {}
     state = {

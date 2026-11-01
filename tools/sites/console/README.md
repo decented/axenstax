@@ -18,6 +18,9 @@ Zero engine change. Design: `docs/superpowers/specs/2026-06-18-operator-console-
   the same files below **plus** `server.json` (its own record), `server.env` (boot config
   the dedicated-server entrypoint sources) and the `setup-complete` gate marker. Module:
   `wizard.py`; design `docs/superpowers/specs/2026-06-21-server-setup-wizard-design.md`.
+- **Public address** — the wizard asks for the address players use, written to `server.env`
+  as `AXENSTAX_PUBLIC_HOST`. The engine won't boot without one, so the entrypoint holds it
+  back until there is one, and drops `awaiting-public-host`, which makes the dashboard ask.
 - **Identity** — your operator npub, the runtime key, delegation expiry.
 - **Access** — allowlist + blocklist (npubs), require-sign-in toggle (on by default — the
   engine requires sign-in unless the `require_signin` file says `false` or it was

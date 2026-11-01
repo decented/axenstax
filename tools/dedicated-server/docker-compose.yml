@@ -4,8 +4,10 @@
 # installed is Docker.
 #
 #   1. docker compose up -d
-#   2. Open  https://<this-box-ip>:8443   (accept the cert warning once), or
-#      Native → Join → ws://<this-box-ip>:6767
+#   2. Open  https://<this-box-ip>:8443/admin  (accept the cert warning once) and run
+#      the setup wizard. It asks for the address players use, which the game server
+#      won't start without (or set AXENSTAX_PUBLIC_HOST below).
+#   3. Native → Join → ws://<this-box-ip>:6767
 #
 # Stop + keep the world:  docker compose down
 # Update to the latest:   docker compose pull && docker compose up -d
@@ -45,13 +47,15 @@ services:
       #                                      #   (also a public host for join checks, below)
       # --- Verified operator identity (optional; see README) ---
       # AXENSTAX_REQUIRE_VERIFIED: "0"   # "1" → refuse to boot without a valid attestation
-      # Public address(es) players use — comma list of host or host:port. Joins
-      # signed for any other address are refused (relay protection, protocol v66);
-      # unset → any address is accepted and the log warns. The first entry is the
-      # host advertised in the connect-string. Use a PUBLIC domain or IP here. A
-      # LAN IP or .local/.lan name can be listed too if players join that way, but
-      # it is NOT relay-protected (any machine on that network can hold the same
-      # address; the start-up log warns) — see the README, "Public address".
+      # Public address(es) players use — comma list of host or host:port. REQUIRED
+      # (AXENSTAX_DOMAIN above also counts): the game server won't start without one,
+      # and this box waits, console up, until the setup wizard or this line names it.
+      # Joins signed for any other address are refused (relay protection, protocol
+      # v66). The first entry is the host advertised in the connect-string. Use a
+      # PUBLIC domain or IP where you can. A LAN IP, localhost or .local/.lan name is
+      # valid if players join that way, but it is NOT relay-protected (any machine on
+      # that network can hold the same address; the start-up log warns) — see the
+      # README, "Public address".
       # AXENSTAX_PUBLIC_HOST: "play.example.com"
       # AXENSTAX_PAIR_RELAY: "wss://relay.damus.io"   # any public relay you trust
       # AXENSTAX_DELEGATION_DAYS: "90"

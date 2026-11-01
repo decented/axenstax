@@ -21,6 +21,18 @@
     </div>
   </header>
 
+  {% if can_setup and awaiting_public_host %}
+    <section class="panel">
+      <h2>Your server is waiting for its address</h2>
+      <p>The game server won't start until it knows the address players use to reach it. A
+        domain or public IP is best; a LAN IP or <code>localhost</code> works for playing at home.
+        Several? Separate them with commas.</p>
+      <form class="addrow" id="public-host-form">
+        <input name="public_host" placeholder="play.example.org" autocomplete="off" />
+        <button class="btn">Start the server</button>
+      </form>
+    </section>
+  {% endif %}
   {% if can_setup and not setup_complete %}
   <div class="setup-banner">
     <span class="grow">⚙️ <strong>Server setup isn't finished.</strong> Run the quick setup wizard to choose what kind of place this is.</span>
