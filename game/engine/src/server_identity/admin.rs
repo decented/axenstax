@@ -33,6 +33,8 @@ pub const DEFAULT_ADMIN_SKEW_SECS: u64 = 300;
 pub enum AdminCommand {
     WhitelistAdd([u8; 32]),
     WhitelistRemove([u8; 32]),
+    /// Turn the allowlist off. Emptying it doesn't: an empty allowlist admits nobody.
+    WhitelistOff,
     BlacklistAdd([u8; 32]),
     BlacklistRemove([u8; 32]),
     /// Immediately disconnect a connected player by npub (Spec B §5).
@@ -95,6 +97,7 @@ impl AdminCommand {
                 }
             }
             AdminCommand::WhitelistRemove(pk) => whitelist.retain(|x| x != pk),
+            AdminCommand::WhitelistOff => whitelist.clear(),
             AdminCommand::BlacklistAdd(pk) => {
                 if !blocklist.contains(pk) {
                     blocklist.push(*pk);
@@ -122,6 +125,7 @@ fn parse_cmd(event: &Event) -> Option<AdminCommand> {
         "whitelist-remove" => PublicKey::parse(tag.get(2)?)
             .ok()
             .map(|pk| AdminCommand::WhitelistRemove(pk.to_bytes())),
+        "whitelist-off" => Some(AdminCommand::WhitelistOff),
         "blacklist-add" => PublicKey::parse(tag.get(2)?)
             .ok()
             .map(|pk| AdminCommand::BlacklistAdd(pk.to_bytes())),
@@ -179,7 +183,7 @@ pub async fn sign_admin_command<S: NostrSigner>(
         || (verb == "max-players" && arg.parse::<u16>().is_ok())
         || (matches!(verb, "server-name" | "about" | "region") && !arg.is_empty())
         || (verb == "privacy" && arg.split_once(':').is_some_and(|(_, d)| d.parse::<u32>().is_ok()))
-        || verb == "purge-history";
+        || matches!(verb, "purge-history" | "whitelist-off");
     if !recognised {
         return Err(format!("unrecognised admin command: '{verb} {arg}'"));
     }
@@ -476,6 +480,17 @@ mod tests {
         let mut require = false;
         cmd.apply_to(&mut wl, &mut require, &mut Vec::new());
         assert!(require);
+    }
+
+    #[tokio::test]
+    async fn whitelist_off_is_a_signed_command_with_no_argument() {
+        let op = Keys::generate();
+        let ev = signed_cmd(&op, "whitelist-off", "", 1_000).await;
+        let cmd = verify_admin_command(&ev, &op.public_key(), &srv(), Timestamp::from(1_000), 300).unwrap();
+        assert_eq!(cmd, AdminCommand::WhitelistOff);
+        let signed = sign_admin_command(&op, "whitelist-off", "", &srv()).await.unwrap();
+        let again = verify_admin_command(&signed, &op.public_key(), &srv(), signed.created_at, 300).unwrap();
+        assert_eq!(again, AdminCommand::WhitelistOff);
     }
 
     #[tokio::test]

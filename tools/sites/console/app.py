@@ -184,6 +184,7 @@ async def dashboard(request: Request):
             "you_role": identity.role_of(pk),
             "caps": sorted(caps),
             "allowlist": identity.allowlist(),
+            "allowlist_on": identity.allowlist_enabled(),
             "blocklist": identity.blocklist(),
             "require_signin": identity.require_signin(),
             "settings": identity.settings(),
@@ -421,6 +422,22 @@ async def list_edit(
     except ValueError as e:
         raise HTTPException(400, str(e))
     return JSONResponse({"ok": True, "allowlist": identity.allowlist(), "blocklist": identity.blocklist()})
+
+
+@app.post("/api/allowlist/off")
+async def allowlist_off(
+    request: Request,
+    x_requested_with: str | None = Header(default=None, alias="X-Requested-With"),
+):
+    """Turn the allowlist off (deletes whitelist.txt). Emptying the list does not:
+    an empty allowlist admits nobody."""
+    _require_fetch(x_requested_with)
+    _require_cap(request, "access")
+    try:
+        identity.allowlist_off()
+    except OSError as e:
+        raise HTTPException(400, f"couldn't remove the allowlist: {e}")
+    return JSONResponse({"ok": True, "allowlist_on": identity.allowlist_enabled()})
 
 
 @app.post("/api/require-signin")

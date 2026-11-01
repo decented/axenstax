@@ -261,7 +261,13 @@
       </label>
       {% endif %}
 
-      <h3>Allowlist <span class="muted">(only these npubs may join; blank = open)</span></h3>
+      <h3>Allowlist <span class="muted">(only these npubs may join)</span></h3>
+      {% if allowlist_on %}
+        <p class="muted">On: only the npubs below may join.
+          <button class="btn ghost" id="allowlist-off">Turn allowlist off</button></p>
+      {% else %}
+        <p class="muted">Off: anyone the sign-in rule admits may join. Adding an npub turns it on.</p>
+      {% endif %}
       <form class="addrow" data-add="allow">
         <input name="npub" placeholder="npub1…" autocomplete="off" />
         <button class="btn">Add</button>
@@ -270,7 +276,7 @@
         {% for n in allowlist %}
           <li><span class="mono">{{ n }}</span><button class="x" data-remove="allow" data-npub="{{ n }}">remove</button></li>
         {% else %}
-          <li class="muted">empty — anyone may join</li>
+          <li class="muted">{% if allowlist_on %}empty — nobody can join{% else %}no allowlist{% endif %}</li>
         {% endfor %}
       </ul>
 

@@ -37,6 +37,7 @@ use crate::online_admission::{
 use crate::rendezvous::payload::{
     Answer, Candidate, KIND_JOIN_ANSWER, KIND_JOIN_OFFER, PAYLOAD_VERSION, npub_of, seal_answer,
 };
+use crate::access_policy::Allow;
 use crate::rendezvous::relay_client::RendezvousRelay;
 use crate::rendezvous::verify::{MAX_SEEN, SessionGuard, verify_offer};
 use crate::runtime_identity::RuntimeIdentity;
@@ -56,12 +57,11 @@ pub fn unreachable_warning() -> &'static str {
 /// [`OnlineHost::allowlist`] alone would silently revoke every contact who
 /// hasn't called yet. All three parts go in together, deduplicated, every time.
 ///
-/// **The host's own persona is always first, and that is load-bearing.**
-/// `access_policy::decide_access` reads an EMPTY whitelist as "this server runs
-/// no allowlist", so a first-ever online host — no contacts yet, nobody admitted
-/// yet — would hand `HostedServer` an empty list and admit any signed-in
-/// stranger who found the port. Seeding the list with the one persona that is
-/// always known makes it impossible for the gate to be empty while it is on.
+/// This list is the only gate on the bound QUIC socket: the relay offer gate
+/// doesn't stand in front of it, and anybody who finds the port can dial it
+/// directly. So [`OnlineHost::access_policy`] always hands it over as
+/// [`Allow::Only`], never [`Allow::Open`], however short it is: a first-ever
+/// host with no contacts and nobody admitted admits itself and no stranger.
 ///
 /// Every pubkey in `blocked` (Signet blocks, D8) is left out of both halves —
 /// a block beats a contact row, an invite row and a this-session admission
@@ -489,9 +489,9 @@ impl OnlineHost {
     /// `(whitelist, blocklist)` for `HostedServer::set_access_policy`: the
     /// host, its close contacts and this session's admissions, minus every
     /// block — and the blocks themselves. Every push goes through here.
-    pub fn access_policy(&self) -> (Vec<[u8; 32]>, Vec<[u8; 32]>) {
+    pub fn access_policy(&self) -> (Allow, Vec<[u8; 32]>) {
         (
-            access_allowlist(&self.persona, &self.book, &self.allowlist, &self.blocked),
+            Allow::only(access_allowlist(&self.persona, &self.book, &self.allowlist, &self.blocked)),
             self.blocked.clone(),
         )
     }
@@ -1000,21 +1000,22 @@ mod tests {
     }
 
     /// REGRESSION (whole-branch review, CRITICAL 1). A first-ever online host
-    /// has no contacts and has admitted nobody. If the produced list were
-    /// empty, `decide_access` would read "no allowlist gate" and let any
-    /// signed-in stranger who found the port straight in.
+    /// has no contacts and has admitted nobody, and its QUIC socket can be
+    /// dialled directly, past the relay offer gate. Its policy is an allowlist
+    /// all the same, so a signed-in stranger who finds the port is refused.
     #[test]
     fn a_fresh_online_host_still_refuses_a_signed_in_stranger() {
-        const ME: [u8; 32] = [42; 32];
         const STRANGER: [u8; 32] = [7; 32];
-        let list = access_allowlist(&ME, &[], &[], &[]);
-        assert!(!list.is_empty(), "an empty list is an OPEN server");
+        let hub = FakeRelayHub::new();
+        let (host, _) = a_host(&hub, vec![]);
+        let (allow, _) = host.access_policy();
+        assert!(matches!(allow, Allow::Only(_)), "never an open server: {allow:?}");
         assert_eq!(
-            crate::access_policy::decide_access(Some(STRANGER), &[], &list, true),
+            crate::access_policy::decide_access(Some(STRANGER), &[], &allow, true),
             Err(crate::access_policy::AccessReject::NotAllowlisted),
         );
         // …and the host itself is still allowed onto its own world.
-        assert!(crate::access_policy::decide_access(Some(ME), &[], &list, true).is_ok());
+        assert!(crate::access_policy::decide_access(Some(*host.persona()), &[], &allow, true).is_ok());
     }
 
     #[test]
@@ -1184,10 +1185,10 @@ mod tests {
         );
         let (whitelist, blocklist) = host.access_policy();
         assert!(
-            !whitelist.contains(&[7; 32]) && !whitelist.contains(&[9; 32]),
+            !whitelist.admits(&[7; 32]) && !whitelist.admits(&[9; 32]),
             "{whitelist:?}"
         );
-        assert!(whitelist.contains(&[1; 32]) && whitelist.contains(host.persona()));
+        assert!(whitelist.admits(&[1; 32]) && whitelist.admits(host.persona()));
         assert_eq!(blocklist, vec![[7; 32], [9; 32]]);
 
         // The pure list also drops a block that only arrives as an admission.

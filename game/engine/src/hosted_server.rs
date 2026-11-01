@@ -727,12 +727,11 @@ pub struct HostedServer {
     #[cfg(not(target_arch = "wasm32"))]
     ws_public_hosts: crate::signet::ws_host::PublicHosts,
 
-    /// Track 4 — operator allowlist of verified pubkeys (x-only, 32 bytes). When
-    /// non-empty, only these npubs may join (a whitelist implies sign-in). Empty
-    /// ⇒ no allowlist. Set by the dedicated server from config; runtime-mutable
-    /// by Track 5 admin commands.
+    /// Track 4 — the allowlist of verified pubkeys (x-only, 32 bytes), if this
+    /// server runs one (which implies sign-in). Set by the dedicated server from
+    /// config and by the online host from its contacts.
     #[cfg(not(target_arch = "wasm32"))]
-    whitelist: Vec<[u8; 32]>,
+    allow: crate::access_policy::Allow,
     /// Operator blocklist (`blocklist.txt`); a blocked npub is refused regardless
     /// of the allowlist (block wins, Spec B §5). Runtime-mutable by admin commands.
     #[cfg(not(target_arch = "wasm32"))]
@@ -1243,7 +1242,7 @@ impl HostedServer {
             ws_public_hosts: Default::default(),
             // Set by the dedicated server after `start` via `set_access_policy`.
             #[cfg(not(target_arch = "wasm32"))]
-            whitelist: Vec::new(),
+            allow: crate::access_policy::Allow::Open,
             #[cfg(not(target_arch = "wasm32"))]
             blocklist: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
@@ -1449,10 +1448,11 @@ impl HostedServer {
             None,
             host_world,
         )?;
-        // Sign-in stays required (decision 3) and nobody is allowlisted; the
-        // player's Signet blocks are refused, as the online host refuses them.
-        // Set before the room exists, so no join can be seated without it.
-        server.set_access_policy(true, Vec::new(), blocked);
+        // Sign-in stays required (decision 3) and there is no allowlist (the room
+        // code is what lets people in); the player's Signet blocks are refused,
+        // as the online host refuses them. Set before the room exists, so no join
+        // can be seated without it.
+        server.set_access_policy(true, crate::access_policy::Allow::Open, blocked);
         // Fray counts the host's own seat in the room's size, and refuses a
         // joiner past it, as the QUIC accept thread did.
         // Not the world's folder name: Fray hands the room's name to anyone
@@ -1474,7 +1474,7 @@ impl HostedServer {
     /// Keep passed). Every join goes through the same Signet challenge and
     /// verification as a Fray join, over that binding, and then waits for the
     /// Keep's gate (`ServerTransport::ask_gate`). Sign-in is required, and the
-    /// server's own allowlist and blocklist are empty: the Keep decides who plays.
+    /// server has no allowlist or blocks of its own: the Keep decides who plays.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn start_keep_world(
         world: String,
@@ -1491,7 +1491,7 @@ impl HostedServer {
             None,
             HostWorld::Owned,
         )?;
-        server.set_access_policy(true, Vec::new(), Vec::new());
+        server.set_access_policy(true, crate::access_policy::Allow::Open, Vec::new());
         server.remote_rx = Some(joiners);
         Ok(server)
     }
@@ -1864,18 +1864,18 @@ impl HostedServer {
         self.identity = identity;
     }
 
-    /// Set the access policy (Track 4): whether sign-in is required and the
-    /// operator allowlist of verified pubkeys. A non-empty allowlist forces
-    /// sign-in regardless of `require_signin`. Native-only.
+    /// Set the access policy (Track 4): whether sign-in is required, whether
+    /// this server runs an allowlist of verified pubkeys, and who is blocked.
+    /// An allowlist refuses guests regardless of `require_signin`. Native-only.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn set_access_policy(
         &mut self,
         require_signin: bool,
-        whitelist: Vec<[u8; 32]>,
+        allow: crate::access_policy::Allow,
         blocklist: Vec<[u8; 32]>,
     ) {
         self.require_signin = require_signin;
-        self.whitelist = whitelist;
+        self.allow = allow;
         self.blocklist = blocklist;
     }
 
@@ -2189,7 +2189,7 @@ impl HostedServer {
         let agg = self.session_log.aggregates(now, now - (now % 86_400));
         let policy = (
             self.require_signin,
-            self.whitelist.len() as u32,
+            self.allow.listed() as u32,
             self.blocklist.len() as u32,
         );
         let ident = self.identity.as_ref().map_or_else(
@@ -4933,7 +4933,7 @@ impl HostedServer {
                                     &mut self.challenges,
                                     &expected_origin,
                                     &present_refs,
-                                    &self.whitelist,
+                                    &self.allow,
                                     &self.blocklist,
                                     // T2-8: the host's own contacts book names a known
                                     // joiner. Read per verified join (rare), never
@@ -8021,7 +8021,7 @@ fn resolve_join_identity(
     challenges: &mut signet::ChallengeTable,
     expected_origin: &str,
     present_handles: &[&str],
-    whitelist: &[[u8; 32]],
+    allow: &crate::access_policy::Allow,
     blocklist: &[[u8; 32]],
     load_host_book: impl FnOnce() -> Vec<crate::contacts::Contact>,
 ) -> Result<JoinIdentity, String> {
@@ -8029,7 +8029,7 @@ fn resolve_join_identity(
         let (credential_handle, pubkey) =
             verify_join_signet_auth(slot, req, challenges, expected_origin).map_err(str::to_string)?;
         // Access precedence (Spec B §5): block > allowlist > sign-in.
-        crate::access_policy::decide_access(Some(pubkey), blocklist, whitelist, require_signin)
+        crate::access_policy::decide_access(Some(pubkey), blocklist, allow, require_signin)
             .map_err(crate::access_policy::reject_reason)?;
         // T2-8: name them from the host's contacts book first, then their
         // signed credential, then the typed name, then a short npub. The book is
@@ -8048,8 +8048,8 @@ fn resolve_join_identity(
         Ok(JoinIdentity { display_name, pubkey: Some(pubkey) })
     } else {
         // No auth event: a guest. The same precedence applies (a guest is refused
-        // by `require_signin` or a non-empty allowlist).
-        crate::access_policy::decide_access(None, blocklist, whitelist, require_signin)
+        // by `require_signin` or by any allowlist).
+        crate::access_policy::decide_access(None, blocklist, allow, require_signin)
             .map_err(crate::access_policy::reject_reason)?;
         // Open server: a guest join keeps its asserted name as a display label
         // only — never a trusted identity. Sanitised and ALWAYS marked
@@ -8768,7 +8768,7 @@ pub(crate) mod tests {
         let cred = signed_credential([0x42; 32], "Axolittle", None, now);
         let req = join_with_auth(ev, Some(cred));
 
-        let id = resolve_join_identity(0, &req, true, &mut chals, TEST_ORIGIN, &[], &[], &[], Vec::new)
+        let id = resolve_join_identity(0, &req, true, &mut chals, TEST_ORIGIN, &[], &crate::access_policy::Allow::Open, &[], Vec::new)
             .expect("valid signed join must be accepted");
         // A credential name is self-asserted: always tagged with the npub suffix.
         let pk = id.pubkey.expect("verified join must surface the pubkey");
@@ -8784,7 +8784,7 @@ pub(crate) mod tests {
         let cred = signed_credential([0x42; 32], "Axolittle", None, now);
         let req = join_with_auth(ev, Some(cred));
 
-        let id = resolve_join_identity(0, &req, true, &mut chals, TEST_ORIGIN, &["Axolittle"], &[], &[], Vec::new)
+        let id = resolve_join_identity(0, &req, true, &mut chals, TEST_ORIGIN, &["Axolittle"], &crate::access_policy::Allow::Open, &[], Vec::new)
             .expect("accepted");
         assert!(id.display_name.starts_with("Axolittle-"), "got {}", id.display_name);
     }
@@ -8804,7 +8804,7 @@ pub(crate) mod tests {
             render_distance: 0,
             generator_fingerprints: crate::protocol::GeneratorFingerprint::ours(),
         };
-        let err = resolve_join_identity(0, &req, true, &mut chals, TEST_ORIGIN, &[], &[], &[], Vec::new).unwrap_err();
+        let err = resolve_join_identity(0, &req, true, &mut chals, TEST_ORIGIN, &[], &crate::access_policy::Allow::Open, &[], Vec::new).unwrap_err();
         assert!(err.to_lowercase().contains("sign"), "got {err}");
     }
 
@@ -8823,7 +8823,7 @@ pub(crate) mod tests {
             render_distance: 0,
             generator_fingerprints: crate::protocol::GeneratorFingerprint::ours(),
         };
-        let id = resolve_join_identity(0, &req, false, &mut chals, TEST_ORIGIN, &[], &[], &[], Vec::new)
+        let id = resolve_join_identity(0, &req, false, &mut chals, TEST_ORIGIN, &[], &crate::access_policy::Allow::Open, &[], Vec::new)
             .expect("open server allows guests");
         assert_eq!(id.display_name, "Wanderer (guest)");
         assert!(id.pubkey.is_none(), "guest has no verified pubkey");
@@ -8845,7 +8845,7 @@ pub(crate) mod tests {
         let ev = signed_auth_event([0x42; 32], &nonce_hex, TEST_ORIGIN, now);
         let cred = signed_credential([0x42; 32], "Axolittle", None, now);
         let req = join_with_auth(ev, Some(cred));
-        let allow = vec![xonly_of([0x42; 32])];
+        let allow = crate::access_policy::Allow::only([xonly_of([0x42; 32])]);
         let id = resolve_join_identity(0, &req, true, &mut chals, TEST_ORIGIN, &[], &allow, &[], Vec::new)
             .expect("whitelisted npub must be accepted");
         assert!(id.pubkey.is_some());
@@ -8859,7 +8859,7 @@ pub(crate) mod tests {
         let ev = signed_auth_event([0x42; 32], &nonce_hex, TEST_ORIGIN, now);
         let cred = signed_credential([0x42; 32], "Axolittle", None, now);
         let req = join_with_auth(ev, Some(cred));
-        let allow = vec![xonly_of([0x99; 32])]; // a different operator-approved key
+        let allow = crate::access_policy::Allow::only([xonly_of([0x99; 32])]); // a different operator-approved key
         let err = resolve_join_identity(0, &req, true, &mut chals, TEST_ORIGIN, &[], &allow, &[], Vec::new)
             .unwrap_err();
         assert!(err.to_lowercase().contains("allowlist"), "got {err}");
@@ -8880,8 +8880,8 @@ pub(crate) mod tests {
             render_distance: 0,
             generator_fingerprints: crate::protocol::GeneratorFingerprint::ours(),
         };
-        // require_signin=false, but a non-empty whitelist forces sign-in.
-        let allow = vec![xonly_of([0x42; 32])];
+        // require_signin=false, but an allowlist forces sign-in.
+        let allow = crate::access_policy::Allow::only([xonly_of([0x42; 32])]);
         let err = resolve_join_identity(0, &req, false, &mut chals, TEST_ORIGIN, &[], &allow, &[], Vec::new)
             .unwrap_err();
         assert!(err.to_lowercase().contains("sign"), "got {err}");
@@ -8897,7 +8897,7 @@ pub(crate) mod tests {
         let req = join_with_auth(ev, None);
         // Even on an open server, a PRESENT-but-invalid auth event is rejected —
         // tamper never silently downgrades to a guest join.
-        let err = resolve_join_identity(0, &req, false, &mut chals, TEST_ORIGIN, &[], &[], &[], Vec::new).unwrap_err();
+        let err = resolve_join_identity(0, &req, false, &mut chals, TEST_ORIGIN, &[], &crate::access_policy::Allow::Open, &[], Vec::new).unwrap_err();
         assert!(err.contains("signature invalid"), "got {err}");
     }
 
@@ -9083,7 +9083,7 @@ pub(crate) mod tests {
         let req = join_with_auth(ev, Some(cred));
         let book = vec![book_entry(xonly_of([0x42; 32]), Some("Little Axo"))];
 
-        let id = resolve_join_identity(0, &req, true, &mut chals, TEST_ORIGIN, &[], &[], &[], || book)
+        let id = resolve_join_identity(0, &req, true, &mut chals, TEST_ORIGIN, &[], &crate::access_policy::Allow::Open, &[], || book)
             .expect("accepted");
         assert_eq!(id.display_name, "Little Axo");
         assert!(id.pubkey.is_some());
@@ -9096,7 +9096,7 @@ pub(crate) mod tests {
         let nonce_hex = issue_nonce(&mut chals, 0);
         let ev = signed_auth_event([0x55; 32], &nonce_hex, TEST_ORIGIN, current_unix_ts());
         let req = join_with_auth(ev, None); // typed: "client-asserted-name"
-        let id = resolve_join_identity(0, &req, true, &mut chals, TEST_ORIGIN, &[], &[], &[], Vec::new)
+        let id = resolve_join_identity(0, &req, true, &mut chals, TEST_ORIGIN, &[], &crate::access_policy::Allow::Open, &[], Vec::new)
             .expect("accepted");
         let pk = id.pubkey.expect("verified");
         assert_eq!(id.display_name, format!("client-asserted-name{}", tag(&pk)));
@@ -9107,7 +9107,7 @@ pub(crate) mod tests {
         let ev = signed_auth_event([0x55; 32], &nonce_hex, TEST_ORIGIN, current_unix_ts());
         let mut req = join_with_auth(ev, None);
         req.player_name = "Player".into();
-        let id = resolve_join_identity(0, &req, true, &mut chals, TEST_ORIGIN, &[], &[], &[], Vec::new)
+        let id = resolve_join_identity(0, &req, true, &mut chals, TEST_ORIGIN, &[], &crate::access_policy::Allow::Open, &[], Vec::new)
             .expect("accepted");
         assert!(id.display_name.starts_with("npub1"), "got {}", id.display_name);
         assert!(!looks_like_old_hex_label(&id.display_name));
@@ -9129,7 +9129,7 @@ pub(crate) mod tests {
             render_distance: 0,
             generator_fingerprints: crate::protocol::GeneratorFingerprint::ours(),
         };
-        let id = resolve_join_identity(0, &req, false, &mut chals, TEST_ORIGIN, &[], &[], &[], Vec::new)
+        let id = resolve_join_identity(0, &req, false, &mut chals, TEST_ORIGIN, &[], &crate::access_policy::Allow::Open, &[], Vec::new)
             .expect("open server allows guests");
         assert_eq!(id.display_name, "Player (guest)");
         assert!(!looks_like_old_hex_label(&id.display_name));
@@ -9151,7 +9151,7 @@ pub(crate) mod tests {
         let mut ev = signed_auth_event([0x42; 32], &nonce_hex, TEST_ORIGIN, current_unix_ts());
         ev.sig[0] ^= 0xff;
         let req = join_with_auth(ev, None);
-        resolve_join_identity(0, &req, true, &mut chals, TEST_ORIGIN, &[], &[], &[], loader)
+        resolve_join_identity(0, &req, true, &mut chals, TEST_ORIGIN, &[], &crate::access_policy::Allow::Open, &[], loader)
             .expect_err("tampered");
         assert_eq!(reads.get(), 0, "no disk read for a failed verification");
 
@@ -9169,7 +9169,7 @@ pub(crate) mod tests {
             render_distance: 0,
             generator_fingerprints: crate::protocol::GeneratorFingerprint::ours(),
         };
-        resolve_join_identity(0, &guest, false, &mut chals, TEST_ORIGIN, &[], &[], &[], loader)
+        resolve_join_identity(0, &guest, false, &mut chals, TEST_ORIGIN, &[], &crate::access_policy::Allow::Open, &[], loader)
             .expect("guest");
         assert_eq!(reads.get(), 0, "no disk read for a guest");
 
@@ -9179,7 +9179,7 @@ pub(crate) mod tests {
         let ev = signed_auth_event([0x42; 32], &nonce_hex, TEST_ORIGIN, current_unix_ts());
         let req = join_with_auth(ev, None);
         let blocked = vec![xonly_of([0x42; 32])];
-        resolve_join_identity(0, &req, true, &mut chals, TEST_ORIGIN, &[], &[], &blocked, loader)
+        resolve_join_identity(0, &req, true, &mut chals, TEST_ORIGIN, &[], &crate::access_policy::Allow::Open, &blocked, loader)
             .expect_err("blocked");
         assert_eq!(reads.get(), 0, "no disk read for a refused key");
 
@@ -9188,7 +9188,7 @@ pub(crate) mod tests {
         let nonce_hex = issue_nonce(&mut chals, 0);
         let ev = signed_auth_event([0x42; 32], &nonce_hex, TEST_ORIGIN, current_unix_ts());
         let req = join_with_auth(ev, None);
-        resolve_join_identity(0, &req, true, &mut chals, TEST_ORIGIN, &[], &[], &[], loader)
+        resolve_join_identity(0, &req, true, &mut chals, TEST_ORIGIN, &[], &crate::access_policy::Allow::Open, &[], loader)
             .expect("accepted");
         assert_eq!(reads.get(), 1);
     }

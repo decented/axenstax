@@ -284,7 +284,7 @@ identity above):
 | Var | Default | Meaning |
 |-----|---------|---------|
 | `AXENSTAX_ALLOW_GUESTS` (or `--allow-guests`) | `0` | `1` ⇒ also admit anonymous guests. Unset, **only players with a verified Signet identity may join**. The flag may stand alone (`--allow-guests`) or take a value (`--allow-guests 1`, `--allow-guests=0`; `1`/`true`/`yes`/`on` or `0`/`false`/`no`/`off`) — a falsy value keeps sign-in required, and any other value refuses to start |
-| `AXENSTAX_WHITELIST` | _(unset)_ | Comma-separated npubs allowed to join. A non-empty allowlist **implies** sign-in |
+| `AXENSTAX_WHITELIST` | _(unset)_ | Comma-separated npubs allowed to join. A non-blank value turns the allowlist on, which **implies** sign-in |
 
 **Sign-in is required by default** (since 2026-10-06). The old
 `AXENSTAX_REQUIRE_SIGNIN` / `--require-signin` switch is no longer read — it is
@@ -300,8 +300,10 @@ come in?" step defaulted to *Anyone*, and it saved that choice as a
 `<worlds>/.identity`, i.e. `/worlds/.identity` in the Docker setup, unless
 `AXENSTAX_IDENTITY_DIR` says otherwise). That file beats the new default, so a
 server set up that way **keeps admitting guests** after the engine upgrade until you
-change it. The engine reads only that file: `true` = sign-in required, anything else
-(including an empty file) = guests admitted.
+change it. The file must say exactly `true` or `false` (spaces and case don't matter):
+anything else, an empty file included, is a problem rather than a choice. At
+start-up the server refuses to boot and names the file; while running, it keeps the
+last good value and warns once.
 
 - **Check:** the start-up log line `access :` says `sign-in required` or `guests
   admitted`; the Operator Console shows the same in *Access → Require sign-in*; or
@@ -315,6 +317,25 @@ change it. The engine reads only that file: `true` = sign-in required, anything 
 The allowlist can also live in `<identity-dir>/whitelist.txt` (one npub per line,
 `#` comments allowed) — which is what the **[Operator Console](operator-console.md)**
 edits for you, no shell required. Env and file entries are merged.
+
+**The allowlist is on when `whitelist.txt` exists or `AXENSTAX_WHITELIST` is
+non-blank, however few names it holds.** Only the npubs on it may join, and guests
+are refused.
+
+- **An empty allowlist admits nobody.** Removing the last npub leaves the server
+  closed, and the start-up log says so (`allowlist is on and empty`). Before this
+  change an empty file meant "no allowlist": if you relied on that, delete the
+  file.
+- **To turn it off,** delete `whitelist.txt` (any time, no restart), press *Turn
+  allowlist off* in the Console, or send the `whitelist-off` admin command, and
+  unset `AXENSTAX_WHITELIST` if you set it: while that is non-blank the allowlist
+  stays on.
+- **A line that isn't a valid npub or hex key is skipped with a warning.** It never
+  widens access: a file holding only bad lines is an empty allowlist.
+- **If a policy file can't be read** (`whitelist.txt`, `blocklist.txt` or
+  `require_signin`, for anything other than not existing), the server refuses to
+  boot and names the file. While running it keeps the last good value for that file
+  and warns once per problem.
 
 **Age gates are not yet enforced** — that needs a verifiable Signet *age* credential
 (the engine today only carries the kind-31000 display-name credential).

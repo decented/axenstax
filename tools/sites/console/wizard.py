@@ -307,6 +307,13 @@ def apply(choices: dict) -> dict:
 
     # 2. Access policy (live).
     identity.set_require_signin(require_signin)
+    if access == "friends":
+        # "Just my friends" with nobody named yet admits nobody, not everybody.
+        identity.turn_allowlist_on()
+    elif "access" in choices and prev.get("access") == "friends":
+        # Moving off "friends" turns the allowlist off, or it stays in force. Only
+        # on an explicit choice: "Add a world" sends no `access`.
+        identity.allowlist_off()
     for npub in friends:
         try:
             identity.add_to_list("allow", npub)

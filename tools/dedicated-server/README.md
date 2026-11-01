@@ -262,7 +262,7 @@ identity above):
 | Var | Default | Meaning |
 |-----|---------|---------|
 | `AXENSTAX_ALLOW_GUESTS` (or `--allow-guests`) | `0` | `1` ⇒ also admit anonymous guests. Unset, **only players with a verified Signet identity may join**. The flag may stand alone (`--allow-guests`) or take a value (`--allow-guests 1`, `--allow-guests=0`; `1`/`true`/`yes`/`on` or `0`/`false`/`no`/`off`) — a falsy value keeps sign-in required, and any other value refuses to start |
-| `AXENSTAX_WHITELIST` | _(unset)_ | Comma-separated npubs allowed to join. A non-empty allowlist **implies** sign-in |
+| `AXENSTAX_WHITELIST` | _(unset)_ | Comma-separated npubs allowed to join. A non-blank value turns the allowlist on, which **implies** sign-in |
 
 The sign-in requirement is **on by default**. `AXENSTAX_REQUIRE_SIGNIN` and
 `--require-signin` are no longer read (they are accepted, and logged, so old
@@ -277,8 +277,9 @@ come in?" step defaulted to *Anyone*, and it saved that choice as a
 `<worlds>/.identity`, i.e. `/worlds/.identity` in the Docker setup, unless
 `AXENSTAX_IDENTITY_DIR` says otherwise). That file beats the new default, so a
 server set up that way **keeps admitting guests** after the engine upgrade until you
-change it. The engine reads only that file: `true` = sign-in required, anything else
-(including an empty file) = guests admitted.
+change it. The file must say exactly `true` or `false` (spaces and case don't matter):
+anything else, an empty file included, refuses to boot, and on a running server keeps
+the last good value with one warning.
 
 - **Check:** the start-up log line `access :` says `sign-in required` or `guests
   admitted`; the Operator Console shows the same in *Access → Require sign-in*; or
@@ -290,8 +291,15 @@ change it. The engine reads only that file: `true` = sign-in required, anything 
   within about 5 seconds; no restart.
 
 The allowlist can also live in `<identity-dir>/whitelist.txt` — one npub per line,
-`#` comments allowed — which is easier to edit and is what runtime admin commands
-will append to (later track). Env and file entries are merged.
+`#` comments allowed — which is easier to edit and is what admin commands write.
+Env and file entries are merged.
+
+The allowlist is **on when `whitelist.txt` exists or `AXENSTAX_WHITELIST` is
+non-blank**. An empty allowlist admits nobody, so removing the last npub leaves the
+server closed. To turn it off, delete `whitelist.txt`, use the Console's *Turn
+allowlist off*, or send `whitelist-off`, and unset `AXENSTAX_WHITELIST`. Invalid lines
+are skipped with a warning and never widen access; a policy file that can't be read
+refuses boot, and on a running server keeps the last good value.
 
 ```bash
 # Invite-only server: only these two npubs may join.
@@ -356,7 +364,8 @@ a hand-built command must include it):
 | Command tag | Effect |
 |-------------|--------|
 | `["cmd","whitelist-add","npub1…"]` | add an npub to the allowlist |
-| `["cmd","whitelist-remove","npub1…"]` | remove an npub |
+| `["cmd","whitelist-remove","npub1…"]` | remove an npub (the last one leaves the server closed, not open) |
+| `["cmd","whitelist-off",""]` | turn the allowlist off (deletes `whitelist.txt`) |
 | `["cmd","require-signin","true"\|"false"]` | toggle the sign-in requirement |
 
 Apply a signed command (the server verifies it was signed by *its* operator and is

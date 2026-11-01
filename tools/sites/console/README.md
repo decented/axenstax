@@ -20,10 +20,12 @@ Zero engine change. Design: `docs/superpowers/specs/2026-06-18-operator-console-
   `wizard.py`; design `docs/superpowers/specs/2026-06-21-server-setup-wizard-design.md`.
 - **Identity** — your operator npub, the runtime key, delegation expiry.
 - **Access** — allowlist + blocklist (npubs), require-sign-in toggle (on by default — the
-  engine requires sign-in unless the `require_signin` file says anything but `true` or it was
+  engine requires sign-in unless the `require_signin` file says `false` or it was
   started with `--allow-guests`; a box set up with the old wizard, whose default was
   "Anyone", already has that file saying `false` and stays guest-open until you tick the
-  toggle), kick a player.
+  toggle), kick a player. `whitelist.txt` existing is what turns the allowlist on, even
+  empty (which admits nobody); *Turn allowlist off* deletes it. Policy files are replaced
+  whole, and a file that can't be read is never rewritten.
 - **Server** — name / about / region / max players / announce (publish a Server Card).
 - **Privacy** — tracking level (`none` default / `sessions:<days>`), retention, and the
   erasure controls (forget one player / purge all history). Identity is *verified*;

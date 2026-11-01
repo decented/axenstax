@@ -38,6 +38,13 @@
     });
   }
 
+  var allowOff = document.getElementById("allowlist-off");
+  if (allowOff) {
+    allowOff.addEventListener("click", function () {
+      doAndReload("api/allowlist/off", form({}), allowOff);
+    });
+  }
+
   document.querySelectorAll("form[data-add]").forEach(function (f) {
     f.addEventListener("submit", function (e) {
       e.preventDefault();

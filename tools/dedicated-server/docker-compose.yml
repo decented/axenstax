@@ -60,7 +60,8 @@ services:
       # identity may join. The browser client this box serves on :8443 has no
       # sign-in, so web players (and the showcase kiosk below) need guests:
       # AXENSTAX_ALLOW_GUESTS: "1"       # "1" → also admit anonymous guests
-      # AXENSTAX_WHITELIST: ""           # comma-separated npubs (implies sign-in)
+      # AXENSTAX_WHITELIST: ""           # comma-separated npubs: a non-blank value turns the
+      #                                  #   allowlist on (implies sign-in; see README)
       # --- Creator Gallery / showcase kiosk (optional; Spec 2026-06-19 §8) ---
       # Turn this box into a contained, unattended gallery/booth: a guest opening
       # :8443 is locked to read-only Adventure, can click exhibits to collect them

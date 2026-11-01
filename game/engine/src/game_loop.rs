@@ -793,7 +793,7 @@ impl super::GameState {
         )?;
         server.set_access_policy(
             true,
-            crate::online_host::access_allowlist(&persona, &book, &[], &blocked),
+            crate::access_policy::Allow::only(crate::online_host::access_allowlist(&persona, &book, &[], &blocked)),
             blocked.clone(),
         );
         let host_relays = prep

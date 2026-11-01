@@ -171,6 +171,9 @@ mod admission;
 #[cfg(not(target_arch = "wasm32"))]
 mod online_admission;
 mod access_policy;
+// The dedicated server's access policy on disk. Native only.
+#[cfg(not(target_arch = "wasm32"))]
+mod server_policy;
 mod comms;
 mod charter;
 mod contacts;
