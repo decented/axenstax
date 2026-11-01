@@ -1896,6 +1896,14 @@ impl HostedServer {
         self.enforce_access_policy();
     }
 
+    /// Replace who is blocked, leaving the rest of the policy as it is. For a
+    /// host with no contacts gate ("Host Game"), whose blocks are all that a
+    /// contacts sync can change. Native-only.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn set_blocklist(&mut self, blocklist: Vec<[u8; 32]>) {
+        self.set_access_policy(self.require_signin, self.allow.clone(), blocklist);
+    }
+
     /// Re-run the join decision over every seated joiner and release those it
     /// now refuses, telling them why. Local slots are not subject to it, and a
     /// slot still in its handshake has not been decided yet: its join will be,

@@ -556,28 +556,35 @@ fn try_unequip_pack(ecs: &mut hecs::World, target: hecs::Entity) -> PackUnequip 
 // `online_join` own the protocol, `friends_ui` owns the pixels; what lives here
 // is the wiring between them and `GameState`. Nothing in this block blocks the
 // frame — every slow step is behind `online_prep`'s worker thread.
-/// Push a freshly written contacts book into a world that is being hosted
-/// online right now — with the Signet blocks read alongside it, so a block
-/// leaves the whitelist and lands on the blocklist (D8). `set_access_policy`
-/// removes anyone it now refuses from the world, a blocked player or a contact
-/// no longer in the book alike.
+/// Push a freshly written contacts book, and the Signet blocks read alongside
+/// it, into the world this machine is hosting, however it is hosted. A block
+/// lands on the blocklist (D8), and `set_access_policy` removes anyone it now
+/// refuses from the world.
 ///
-/// `OnlineHost` admits from a **snapshot** taken when hosting started (see its
-/// module docs), and `HostedServer::set_access_policy` *replaces* its whitelist
-/// — so a friend added while a world is up is invisible to both until they are
-/// pushed in here. Every place that writes the mirror calls this; either half
-/// being `None` makes it a no-op, which is the lobby case.
+/// - **Online** (`host` is `Some`): `OnlineHost` admits from a **snapshot** taken
+///   when hosting started (see its module docs), and `set_access_policy`
+///   *replaces* the allowlist, so a friend added or removed while a world is up
+///   only counts once pushed in here.
+/// - **"Host Game"** (`host` is `None`): the room has no allowlist, so only the
+///   blocks apply. They take effect at once and stop the player rejoining.
+///
+/// Every place that writes the mirror calls this; no server makes it a no-op,
+/// which is the lobby case.
 ///
 /// A free function taking the two fields rather than a method, because the
 /// call sites hold a `&mut` borrow of `GameState::mode` (the menu) at the time.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn push_book_to_online_host(
+pub(crate) fn push_book_to_hosted_world(
     host: Option<&mut crate::online_host::OnlineHost>,
     server: Option<&mut crate::hosted_server::HostedServer>,
     book: &[crate::contacts::Contact],
     blocked: &[[u8; 32]],
 ) {
-    let (Some(host), Some(server)) = (host, server) else {
+    let Some(server) = server else {
+        return;
+    };
+    let Some(host) = host else {
+        server.set_blocklist(blocked.to_vec());
         return;
     };
     host.set_book(book.to_vec(), blocked.to_vec());
@@ -931,11 +938,12 @@ impl super::GameState {
 
         // 0 — Signet contacts sync changed the book (a newer snapshot, a
         // revocation, a disconnect): the column re-reads it, and a world being
-        // hosted admits from the fresh book (a Signet block takes effect).
+        // hosted, online or by Host Game, takes the change (a Signet block takes
+        // effect).
         if crate::signet_contacts::take_book_changed() {
             self.contacts_dirty = true;
             let (book, blocked) = crate::contacts::load_local_book_with_blocks();
-            push_book_to_online_host(
+            push_book_to_hosted_world(
                 self.online_host.as_mut(),
                 self.hosted_server.as_mut(),
                 &book,
@@ -1048,7 +1056,7 @@ impl super::GameState {
                     let (book, blocked) = crate::contacts::load_local_book_with_blocks();
                     // Playing at theirs makes them a contact here too, so a
                     // world this machine is hosting must learn it as well.
-                    push_book_to_online_host(
+                    push_book_to_hosted_world(
                         self.online_host.as_mut(),
                         self.hosted_server.as_mut(),
                         &book,
@@ -9776,7 +9784,7 @@ impl super::GameState {
                                 // admits from a snapshot, so the new row has to
                                 // be pushed in there too or it would be a
                                 // stranger at our own door.
-                                push_book_to_online_host(
+                                push_book_to_hosted_world(
                                     self.online_host.as_mut(),
                                     self.hosted_server.as_mut(),
                                     &book,
@@ -9844,7 +9852,7 @@ impl super::GameState {
                             let (book, blocked) = crate::contacts::load_local_book_with_blocks();
                             // A world being hosted admits from a snapshot of the
                             // book, so the new friend goes in there too.
-                            push_book_to_online_host(
+                            push_book_to_hosted_world(
                                 self.online_host.as_mut(),
                                 self.hosted_server.as_mut(),
                                 &book,

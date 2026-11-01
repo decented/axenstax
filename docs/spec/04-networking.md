@@ -405,6 +405,8 @@ so somebody in the same house joins it exactly as before, without an invite.
 That announcement is LAN-local only, self-published, and reaches no directory
 anybody operates, which is what keeps it inside CLAUDE.md red line 1.
 
+**"Host Game" (Fray).** A Fray room has no allowlist (`Allow::Open`, sign-in required), and the contacts sync reaches it with no `OnlineHost` in the way: `game_loop::push_book_to_hosted_world` replaces its blocklist on every book push, so a Signet block takes effect at once and stops the player rejoining.
+
 **The QUIC join is unchanged.** `ChallengePacket` → `JoinRequest` carrying the
 persona-signed kind-21236 `auth_event` → `access_policy`. `PROTOCOL_VERSION` is
 untouched; the `protocol` field in the offer exists only so a mismatch is

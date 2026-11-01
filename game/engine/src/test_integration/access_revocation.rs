@@ -6,7 +6,7 @@
 //! touched. Joins ride the in-process channel transport (`join_guest`), and the
 //! tests give the seat a verified key the way `joiner_authority` does.
 
-use super::joiner_authority::{got_reject, join_guest, start_open_server};
+use super::joiner_authority::{got_reject, join_guest, send_guest_join, start_open_server};
 use super::lent_world::{join_guest_lent, start_lent};
 use crate::access_policy::Allow;
 use crate::hosted_server::{HostedServer, RemoteTransport};
@@ -134,13 +134,43 @@ fn a_contact_removed_from_the_book_is_removed_from_a_home_hosts_world() {
     let mut hs = start_open_server("access-book");
     let (client, slot) = seat(&mut hs, PLAYER);
     let (_friend, friend_slot) = seat(&mut hs, FRIEND);
-    crate::game_loop::push_book_to_online_host(Some(&mut online), Some(&mut hs), &book, &[]);
+    crate::game_loop::push_book_to_hosted_world(Some(&mut online), Some(&mut hs), &book, &[]);
     assert!(!hs.slot_is_free(slot) && !hs.slot_is_free(friend_slot), "both are in the book");
 
     let fresh = vec![a_contact(FRIEND, Tier::Kith)];
-    crate::game_loop::push_book_to_online_host(Some(&mut online), Some(&mut hs), &fresh, &[]);
+    crate::game_loop::push_book_to_hosted_world(Some(&mut online), Some(&mut hs), &fresh, &[]);
 
     assert!(hs.slot_is_free(slot), "a removed contact leaves the world");
     assert!(got_reject(&client).is_some());
     assert!(!hs.slot_is_free(friend_slot), "a remaining contact stays");
+}
+
+/// With no online host, a contacts sync changes the blocks and nothing else.
+#[test]
+fn a_book_push_with_no_online_host_changes_only_the_blocks() {
+    let mut hs = start_dedicated("no-online-host");
+    let (_friend, friend_slot) = seat(&mut hs, FRIEND);
+    hs.set_access_policy(true, Allow::only([FRIEND]), Vec::new());
+
+    crate::game_loop::push_book_to_hosted_world(None, Some(&mut hs), &[], &[PLAYER]);
+
+    assert!(!hs.slot_is_free(friend_slot), "the allowlist still stands, and they are on it");
+    let guest = hs.attach_test_remote();
+    send_guest_join(&guest, "Guest");
+    hs.tick();
+    assert!(got_reject(&guest).is_some(), "and a guest is still refused");
+}
+
+/// The world is lent while "Host Game" runs: the push lands in the next lent tick.
+#[test]
+fn a_book_push_on_a_lending_host_with_no_online_host_removes_the_blocked_player() {
+    let (mut hs, mut host) = start_lent("no-online-host");
+    let (client, slot) = join_guest_lent(&mut hs, &mut host, "Player");
+    hs.server.players[slot].verified_pubkey = Some(PLAYER);
+
+    crate::game_loop::push_book_to_hosted_world(None, Some(&mut hs), &[], &[PLAYER]);
+    host.lend_tick(&mut hs);
+
+    assert!(hs.slot_is_free(slot));
+    assert!(got_reject(&client).is_some_and(|why| why.contains("blocked")));
 }
