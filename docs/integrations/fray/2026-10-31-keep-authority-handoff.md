@@ -214,6 +214,48 @@ Each choice carries AxeNStax's recommendation, for discussion only.
     live run simulates only the columns around anchors. The checkpoint must name the loaded set,
     or restore must re-derive it from player positions, which are not saved today.
 
+### AxeNStax positions, 2026-11-01
+
+AxeNStax has taken the game-side half of each choice so that slices 1 and 2 can go ahead. The
+Fray-side halves are still **proposals for the Fray session**: the contract amendment in 1, the
+`Persist(batch)` command shape in 2, and the ruling on gameplay HMAC keys in 6. Nothing here marks
+the contract itself as changed.
+
+1. **Hybrid checkpoint.** It is the only shape that fits the 1 MiB session-image cap. The
+   checkpoint holds the volatile authority state plus a sorted digest manifest of the stored
+   records. *Fray side:* amend "required content" for tier L to include the game's stored records.
+2. **Keyed records in atomic batches, with no read import in v1.** The authority emits
+   `Persist(batch)`, the runner commits it, and records are read only at restore. *Fray side:* the
+   command's name and shape.
+3. **The authority emits dirty batches at its own cadence (60 s today), and the runner commits
+   each batch atomically or not at all.** A persist that falls on a tick with pending deaths
+   waits for the next tick boundary, which is today's save rule. Crash loss is up to one interval.
+4. **Encoding (the game's own call, contract:106).** Volatile state gets a new versioned,
+   bounded codec in the `quest_npcs::codec` pattern, written to canonical bytes. Chunks keep
+   their 8,704 B form. WorldSave stays the native save. The bincode 1→3 migration is
+   independent.
+5. **Regenerate pristine chunks**, gated by a cross-arch `column_hash` vector set. If the gate
+   cannot be made to pass on ARM or WASM, the fallback is storing them.
+6. **`pop_secret` comes from the host shell as secret config.** It is excluded from the checkpoint
+   and from `state_hash`, and the checkpoint binds only a key id. *Consequence:* if a world is
+   restored on a different Keep without the secret, Satori rolls and use-rolls diverge. That is
+   acceptable for L v1 because of choice 9. *Fray side:* rule that gameplay HMAC keys count as
+   private keys for contract:106.
+7. **Admission moves into the AxeNStax child's own outer shell** (`keep_pipe` plus Signet
+   verification, nonces and the skew clock). The authority core it wraps sees only verified
+   personas. This is internal to the binary: Ingle still does not depend on the AxeNStax crate
+   (K3 decision 1), and the gate is still asked after verification (K3 decision 3). It does not
+   revisit K3.
+8. **Joiner sidecars stay in the world's namespace for v1, as today.** Portability across Keeps
+   is a later product decision. Children's data stays on the operator's Keep either way.
+9. **No live migration for L v1.** If a Keep dies, the world resumes from the last committed
+   batch and loses up to one interval. The peer-hosted path keeps the game-owned handover. No
+   Fray standby is built for L.
+10. **The module migrates its own records at restore**, forward-only, and refuses records from a
+    newer version, as it does today. The bincode 3 migration lands the same way.
+11. **Joiner position, yaw and pitch are added to the saved state** (this also fixes "a restored
+    joiner is back at spawn"). Restore re-derives the simulated set from the anchors.
+
 ## 7. Smallest next adapter slice (AxeNStax-only, no wire or save change)
 
 **Slice 1: twin-run determinism.** This is the smallest slice with regression value, and it is
@@ -242,7 +284,7 @@ useful even without Fray: replays, handover and the D4 shared-sim all gain from 
   Also record the bytes of touched-chunk files and sidecars after a scripted build. This turns
   the tier-L tick row into a measured fact.
 
-**Slice 2 (after choices 1-4 are agreed):** persist the clocks (fixing the auction and bounty
+**Slice 2 (choices 1-4 now have AxeNStax positions, above):** persist the clocks (fixing the auction and bounty
 bug), checkpoint the volatile state per the agreed codec, and a checkpoint→restore→continue test
 at several tick boundaries comparing `sim_digest`.
 **Slice 3:** return output as commands, and the admission split (choice 7).
