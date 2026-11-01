@@ -48,23 +48,28 @@ expect to see slightly worse perf than native at 4 players.
 1. Create a world (or open an existing one) in **Survival** or
    **Creative**.
 2. On the world's card in the lobby, click **Host**. Once the world has
-   loaded, a message tells you the
-   address friends should use (your machine's local IP + port 7700). If
-   hosting can't start — the port is already in use, or there's no network —
-   the message says why, and your world opens for solo play instead.
+   loaded, a message shows your **room code** (a six-letter code like
+   `KMT RWX`). If hosting can't start, the message says why, and your world
+   opens for solo play instead.
 3. While you host, open the **Pause menu**: the **Hosting on your network**
-   panel shows the address again (with a **Copy** button) and how many
+   panel shows the room code again (with a **Copy** button) and how many
    players are in the world. Friends on the same network can pick your
-   world from their Join list, or type the address.
+   world from their Join list. Friends anywhere else type the code.
+
+**Share the code only with people you know.** Anyone who is signed in and has
+the code can join your world, and a player who joins directly can see your IP
+address (and you can see theirs). The code only works from outside your network
+if you have relays set in Settings; with none, only friends on the same network
+can join.
 
 ### Join
 
 1. From the lobby, click **Join Game**.
 2. Pick the host's world from **Games on this network** (it appears when
-   your network supports UDP broadcast on port 7705; a game that is full or
-   on a different version is greyed out and says why), or type the host's
-   `IP:7700`. If the connection fails, you'll see the reason back at the
-   lobby.
+   your network supports local discovery; a game that is full or on a
+   different version is greyed out and says why), or type the host's room
+   code. Typing an address such as `IP:7700` no longer joins anything. If
+   the connection fails, you'll see the reason back at the lobby.
 3. You must be **signed in with Signet** to join — the host requires a
    verified, signed identity and rejects a join attempt that doesn't have
    one. Your player name is just a display fallback; your real identity
@@ -77,10 +82,11 @@ expect to see slightly worse perf than native at 4 players.
 
 ### Network requirements
 
-- **UDP port 7700** open on the host (game traffic).
-- **UDP port 7705** open on the host (LAN-discovery broadcasts —
-  optional; without it you can still type the IP manually).
-- Players + host on the same subnet (192.168.x.x typically).
+- Both players on the same network can find each other without any router
+  setup. Beyond that network, the code goes through your relays and the two
+  computers then connect directly, which depends on your routers; see
+  **[Play with a friend online](play-with-a-friend-online.md)** for what the
+  relays can see.
 
 ### Limits
 

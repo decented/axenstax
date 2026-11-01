@@ -126,8 +126,9 @@ And a lot more since then (August–September 2026):
   control over it yet — see **[Chat & Commands](chat-and-commands.md)**.
 - **Online Play by Contact** — host a world at home and a friend in another house can join
   it by your **npub** or a bearer invite link, no server of ours involved. Public Nostr
-  relays carry only the encrypted setup handshake; the game itself connects the two
-  computers directly. **Brand new** — not yet tried by the team across two real houses.
+  relays carry only the setup handshake, with its contents encrypted (they can still see
+  your IP address and when you check for messages); the game itself connects the two
+  computers directly, so you and your friend can see each other's IP addresses. **Brand new** — not yet tried by the team across two real houses.
   See **[Play with a friend online](play-with-a-friend-online.md)**.
 
 ## Partially shipped — finish-the-loop work pending
