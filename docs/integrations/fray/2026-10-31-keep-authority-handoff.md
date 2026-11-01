@@ -328,7 +328,7 @@ benchmark exists.**
   | 8 | 79 | 687,616 | 2,480 | 21,585,920 | 3,520 |
 
   **A server save writes every non-empty chunk it holds, touched or not** (`try_save`, via
-  `persistable_chunks`), so `chunks/` is 18–31× the touched set here. §2 and §5 say "touched" of
+  `persistable_chunks`), so `chunks/` is 21–31× the touched set here. §2 and §5 say "touched" of
   the 8,704 B form; on disk today that is the whole loaded set.
 
 **Stated limits and decisions**
