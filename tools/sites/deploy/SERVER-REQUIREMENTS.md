@@ -63,13 +63,12 @@ The voice subsystem is **out of the stack** (typed beats voice for kids):
 | Games Master widget | removed (hardcoded `:4100/widget.js` script tag stripped; `VOICE_SERVER_ORIGIN` defaults blank) |
 | `AxeNStax-internal` repo (feedback storage) | only the old voice-feedback wrote there |
 
-**Feedback today:** the in-game **voice recorder + admin board are removed** —
-`feedback.js`, `feedback-admin.js`, `feedback_admin.py`, the two board templates, and
-the `<script src="/static/feedback.js">` in `game/engine/index.html` are all gone, and
-`/api/feedback` returns a graceful "being rebuilt" 503. The replacement is **typed
-feedback published to a dedicated internal Nostr inbox** — config slots reserved in
-`env.game.template` (`FEEDBACK_NPUB` / `FEEDBACK_NSEC` / `FEEDBACK_RELAY`), awaiting the
-owner's keys.
+**Feedback today:** there is **no in-game feedback channel of any kind** (owner
+decision 2026-11-01; the web one went on 2026-10-01). The voice recorder and admin
+board are gone — `feedback.js`, `feedback-admin.js`, `feedback_admin.py`, the two
+board templates, and the `<script src="/static/feedback.js">` in
+`game/engine/index.html`. The reserved `FEEDBACK_*` config slots in
+`env.game.template` were removed with the native feedback channel.
 
 **Residual dead code (safe, flagged for the engine session):** two small bits remain
 because deleting them cleanly needs an engine rebuild + edits to `main.rs`, which the

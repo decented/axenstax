@@ -2,8 +2,9 @@
 """Axe'n'Stax — game site (port 8094).
 
 Serves the PWA runtime: `/` IS the WASM game (login-free local-sandbox tier since
-2026-06-27; the legacy `/game` path 301-redirects to `/`). The browser build has
-no feedback channel (lobby mailbox + /api/test-board removed 2026-10-01).
+2026-06-27; the legacy `/game` path 301-redirects to `/`). The game has no
+feedback channel (web lobby mailbox + /api/test-board removed 2026-10-01; the
+native one followed on 2026-11-01).
 Marketing/landing and the spec website are separate apps under
 tools/sites/marketing/ and tools/sites/docs/.
 

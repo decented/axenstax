@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Forbidden-symbol gate: prove the web bundle carries none of the native-only
 // chat surface, and none of the feedback channel (mailbox / NIP-59 / /bug /
-// /idea) the browser build no longer has (owner decision, 2026-10-01).
+// /idea) the game no longer has (owner decisions: web 2026-10-01, native
+// 2026-11-01).
 //
 // WHY THIS EXISTS
 //
@@ -21,7 +22,7 @@
 //   Node subprocess), guardian copy (NIP-17 over the family's relays), the
 //   guardian policy file, and the custom URL scheme.
 //
-//   It also checks the feedback channel: the browser build has NO /bug, /idea
+//   It also checks the feedback channel: the game has NO /bug, /idea
 //   or mailbox. Markers are specific (never the bare word "mailbox" — wgpu's
 //   `PresentMode::Mailbox` contains it). A second pass looks at the game site's
 //   static JS (what index.html loads at runtime, which is NOT in the trunk dist)
@@ -68,8 +69,7 @@ const FORBIDDEN = [
   ["axenstax://keep", "Keep invite links and My Keeps are native only — the web build is the anonymous local taster"],
   ["signet:contacts:proj:", "Signet contacts sync (signet/contacts_wire) is native only"],
   ["signet-contacts:pairing-code:v1", "Signet contacts pairing is native only"],
-  // The web feedback channel — removed 2026-10-01. Native keeps its mailbox.
-  ["native_mailbox", "the native mailbox module must not be compiled into the web build"],
+  // The feedback channel — removed (web 2026-10-01, native 2026-11-01).
   ["AxeMailbox", "the web lobby mailbox (mailbox.js) was removed — no feedback channel on web"],
   ["AxeNip59", "the web NIP-59 gift-wrap helper (nip59.js) was removed — no feedback channel on web"],
   ["axenstax_mailbox", "the engine<->JS mailbox bridge was removed — no feedback channel on web"],
@@ -109,9 +109,8 @@ const FORBIDDEN_STATIC_PATHS = [
   "vendor/beacon.iife.js",
   "vendor/nostr-tools-nip46.iife.js",
 ];
-// Unloaded legacy file kept only because tools/feedback-tests/gamestr.test.mjs
-// still unit-tests it. index.html does not load it, so it is exempt from the
-// offline markers below. Delete both together, then drop this entry.
+// Unloaded legacy file. index.html does not load it, so it is exempt from the
+// offline markers below. Delete the file, then drop this entry.
 const OFFLINE_EXEMPT_STATIC = new Set(["gamestr.js"]);
 const FORBIDDEN_STATIC_MARKERS = [
   "AxeMailbox",
@@ -287,9 +286,9 @@ if (hits.length > 0) {
     console.error(`    ${h.why}`);
   }
   console.error(
-    "\nThe web build is the anonymous local taster. Chat, the room plug,\n" +
-      "guardian copy and the feedback mailbox (/bug, /idea) are native only, by\n" +
-      "cfg. Something is no longer gated — see docs/foundations/2026-09-05-world-chat.md §6.",
+    "\nThe web build is the anonymous local taster. Chat, the room plug and\n" +
+      "guardian copy are native only, by cfg. The feedback channel is gone\n" +
+      "everywhere. Something is no longer gated — see docs/foundations/2026-09-05-world-chat.md §6.",
   );
   process.exit(1);
 }

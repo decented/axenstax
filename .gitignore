@@ -77,3 +77,9 @@ serviceAccountKey.json
 # the repo root, and a run from the crate directory.
 /profile/
 game/engine/profile/
+
+# Retired in-game feedback tooling (removed 2026-11-01). The owner's local
+# reports live in tools/feedback-reader/feedback-ledger.jsonl (persona npubs and
+# raw tester text) in the main checkout: keep that whole directory ignored so the
+# ledger can never be staged now that the directory's own .gitignore is gone.
+tools/feedback-reader/
