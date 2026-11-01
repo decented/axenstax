@@ -575,14 +575,14 @@ thing chat must not be.
 
 ### 7.7 Guardian copy, concretely
 
-`native_mailbox::wire::wrap_report(device: &Keys, target: &PublicKey, rumor: UnsignedEvent)` is
-already a general "NIP-17 gift-wrap to a pubkey" primitive despite its name — only `build_rumor` is
-mailbox-shaped. Guardian copy builds its own rumor and reuses `wrap_report` + `relay::publish`, and
-reuses the module's worker-thread + owned-tokio-runtime idiom (`native_mailbox/mod.rs:160–213`)
-rather than inventing a second async send path.
+> **2026-11-01:** the feedback mailbox module this section planned to reuse
+> (`wrap_report`, `relay::publish`, the worker-thread idiom) was removed with the
+> in-game feedback channel. Guardian copy now needs its own NIP-17 gift-wrap
+> primitive and send path; `nostr_frames` only holds the plain relay frames.
 
-**One decision to make explicit:** the mailbox device key (`key::load_or_mint`, at
-`<profile>/mailbox_key.json`; REMOVED 2026-10-01 by the feedback status board) is deliberately **not** the player's persona identity — the persona
+Guardian copy builds its own NIP-17 rumor and gift-wraps it to the guardian's pubkey.
+
+**One decision to make explicit:** the device key (a key of the child's own client, minted for this purpose; the old feedback `mailbox_key.json` was removed 2026-10-01) is deliberately **not** the player's persona identity — the persona
 secret never lives on the machine. Guardian copy sends from the **device key**, not the persona,
 and the guardian's reader is told which device key belongs to which child at pairing time. Sending
 "as the persona" would require the persona secret locally, which the whole native-login design
@@ -592,7 +592,7 @@ exists to avoid.
 
 This has bitten the project repeatedly. The rule:
 
-- Gate the **module** (`#[cfg(not(target_arch = "wasm32"))] mod native_mailbox;`, `main.rs:132`) or
+- Gate the **module** (`#[cfg(not(target_arch = "wasm32"))] mod <name>;` in `lib.rs`) or
   gate the **caller**.
 - For a pure, cross-platform helper — the tier rule, `effective_level`, the sanitiser, the contacts
   parser — **never** put a bare `#[cfg(not(target_arch = "wasm32"))]` on the function. That deletes

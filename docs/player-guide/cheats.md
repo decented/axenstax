@@ -18,7 +18,7 @@ gameplay — it's signal, not punishment.
 Commands have a `min_op_level`. The default is **Op** — most commands
 need it. A handful of purely informational commands (`/help`, `/seed`,
 `/biome`, `/biomes`, `/mobs`, `/tools`, `/armour`, `/reach`,
-`/timestep`, `/recipes`, `/complexitytier`, `/tradevalue`, `/mailbox` — the last only when tester feedback is switched on)
+`/timestep`, `/recipes`, `/complexitytier`, `/tradevalue`)
 explicitly opt out to **None**, so anyone can run them. Non-op players
 who try an Op-only command get an "unauthorised" toast.
 
@@ -61,7 +61,6 @@ server, the host is Op by default; other players need an `/op
 | `/recipes [filter]` | List known recipes (substring filter) |
 | `/complexitytier` | Print the complexity tier of the held item |
 | `/tradevalue` | Print the default trade value of the held item |
-| `/mailbox` | Alpha-tester feedback only (off by default: Settings in the lobby or pause menu, tap the version line 7 times). See the status of your `/bug` / `/idea` reports: Sent, Received, Fixed in a version, or Won't fix (native app only). We never message players. |
 
 ## Newer non-cheat commands that still need Op
 

@@ -15,9 +15,9 @@ Rust toolchain (stable) and `cargo` must be installed on the host. Builds run on
 - `../AxeNStax-internal/` (private) — **legacy** feedback data (`feedback/log.jsonl`,
   `items/`, `board.json`, audio). Historically written by the now-removed voice
   server; may carry PII (Whisper transcripts + game context), so the repo is
-  private and never mirrored to the public `AxeNStax` tree. The current feedback
-  path is the serverless lobby mailbox (`/bug`, `/idea`) → `tools/feedback-reader/`,
-  not this repo.
+  private and never mirrored to the public `AxeNStax` tree. The game has no
+  feedback channel (web removed 2026-10-01, native 2026-11-01), so nothing new is
+  written here.
 
 ## Spin Up
 
@@ -44,7 +44,7 @@ grown to **six locally-served sites**, mirroring the production split
 
 | Site | Dir | Port | Production host | Role |
 |------|-----|------|-----------------|------|
-| **Game** | `tools/sites/game/` | `8094` | `play.axenstax.com` | PWA runtime — Signet auth, `/game`, WASM bundle (no feedback channel on web) |
+| **Game** | `tools/sites/game/` | `8094` | `play.axenstax.com` | PWA runtime — Signet auth, `/game`, WASM bundle (no feedback channel) |
 | **Docs** | `tools/sites/docs/` | `8095` | `docs.axenstax.org` | Spec / project-management site — ADRs, roadmap, test sheets, native binary download |
 | **Marketing** | `tools/sites/marketing/` | `8096` | `axenstax.com` | Public landing — CTAs to game and docs |
 | **Wiki** | `tools/sites/wiki/` | `8097` | `wiki.axenstax.com` | Player guide |
@@ -86,15 +86,12 @@ copy one working site venv into the others (e.g.
 > **The voice server / "Games Master" chat widget is REMOVED** (decommissioned
 > 2026-06-23 — implementation `tools/voice-server/` deleted, widget already
 > stripped from the sites). Do **not** spin it up, re-add it, or suggest it.
-> Feedback flows through the serverless lobby mailbox (`/bug`, `/idea` → NIP-17
-> DMs; **native only**, off by default — hidden tester unlock (Settings → tap version ×7), 2026-10-03 — the web build has NO feedback channel, removed 2026-10-01
-> (owner decision; also: our site apps do not log IPs — uvicorn `access_log=False`);
-> native: `game/engine/src/native_mailbox/` per-report burner-key send + in-game
-> `/mailbox` status board (no replies, 2026-10-01, spec
-> docs/foundations/2026-10-01-feedback-status-board.md); reader
-> `tools/feedback-reader/`; spec
-> `docs/foundations/2026-06-07-lobby-mailbox-feedback.md`). (Old web reports may still sit on the relay; the gift-wrap
-> helper the readers share is `tools/feedback-reader/lib/nip59.cjs`.)
+> **The game has NO feedback channel of any kind** (owner decisions: web removed
+> 2026-10-01, native removed 2026-11-01 — no `/bug`, `/idea` or `/mailbox`, no
+> tester unlock, no feedback worker or reader tooling). Do not re-add one. Also:
+> our site apps do not log IPs — uvicorn `access_log=False`. History:
+> `docs/foundations/2026-06-07-lobby-mailbox-feedback.md` and
+> `docs/foundations/2026-10-01-feedback-status-board.md` (both RETIRED).
 
 ### Quick check
 
@@ -172,17 +169,15 @@ turns AxeNStax from a software vendor into the regulated platform.**
 2. **AxeNStax operates no game servers or the relays that carry a group's traffic.**
    Game worlds are self-hosted (direct QUIC/WebSocket); multiplayer does NOT run
    over Nostr. `relay.trotters.cc` is ours and is **no longer an AxeNStax-chosen default
-   in the native app** (2026-10-02; caveats: mySignet itself may name trotters
-   as the contacts grant relay, and the owner-local feedback reader still
-   listens there for pre-v0.2.28 builds): sign-in, contacts pairing, online play, Server Card discovery and
+   in the native app** (2026-10-02; caveat: mySignet itself may name trotters
+   as the contacts grant relay): sign-in, contacts pairing, online play, Server Card discovery and
    the updater use the player's own "Your relays" list (default
-   `server_resolve::PUBLIC_DEFAULT_RELAYS`), and feedback goes to fixed public
-   inbox relays (`native_mailbox::FEEDBACK_INBOX_RELAYS`). Players may add trotters
+   `server_resolve::PUBLIC_DEFAULT_RELAYS`). Players may add trotters
    themselves; it must NEVER carry a group's game traffic, presence, or in-game
    chat. No AxeNStax-hosted game/cloud fleet for others' groups.
 3. **No central collection of kids' data.** Web taster stays anonymous/local (no
    login, cookies, analytics, or age data). Native Stash stays BYO-key /
-   non-custodial / ciphertext-only. Feedback stays burner-key + E2E + owner-local.
+   non-custodial / ciphertext-only. The game has no feedback channel.
    **Never affirmatively collect age** as raw data (age = a boolean from third-party
    Signet, never a DOB to our server). No kid PII to an AxeNStax-operated server.
 4. **Never position/market the product as a "social network / kids' social media /

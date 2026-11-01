@@ -229,7 +229,6 @@ specific one" — see §6 for what that implies for your arena.
 | `CompleteBuildGuide` | A laid build-along guide finishes — every cell of the plan verifies `Correct`. | Unfiltered (no per-plan filter). |
 | `SaveSkin` | A painted avatar skin is pinned in the Workshop: saved to the wardrobe **and** worn. | Unfiltered. |
 | `SpawnRig` | A rig authored in Rig Studio is spawned into the world. | Unfiltered. |
-| `SendFeedback` | A `/bug` or `/idea` report is queued for the makers (native outbox only — the web build has no feedback channel). Local only: nothing about the report reaches the scenario. The only trial using it (`suggestion-box`) is hidden unless tester feedback is switched on (`scenario::FEEDBACK_TRIAL`). | Unfiltered. |
 
 **`SourceTurned` JSON encoding:**
 ```json

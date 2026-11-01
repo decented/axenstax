@@ -422,13 +422,10 @@ threaded in from settings rather than re-read in workers:
 | Signet contacts pairing (v2) | the **first** relay. The pairing URI carries exactly one `relay=`; Signet publishes its ack there. Later fetches use the relay the ack names. |
 | Signed release feed (kind 30063) | the whole list. `tools/release/` publishes to the public defaults (plus trotters as an extra target). A player with no public relay left still gets the HTTPS update check; there is no hidden fallback relay. |
 
-**Feedback is the exception, by design:** it is the project's inbox, not a
-player preference, so a player with custom relays still reaches the project.
-`/bug` and `/idea` publish to, and the status board is read from, the fixed
-`native_mailbox::FEEDBACK_INBOX_RELAYS` (`wss://nos.lol`,
-`wss://relay.primal.net`, `wss://offchain.pub`) — public relays that served kind
-1059 without NIP-42 auth in a read-only probe (2026-10-02); `relay.damus.io`
-answered that probe with `auth-required`, so it is not an inbox relay.
+**There is no feedback relay set.** The game has no feedback channel (removed
+2026-11-01); the fixed inbox relay set that `/bug`,
+`/idea` and the status board used went with it, so every relay the native app
+connects to comes from the player's own list.
 
 The operator's NIP-46 pairing relay (`server_identity::DEFAULT_PAIR_RELAY`, also
 the default admin-command relay) is the first public default, overridable with

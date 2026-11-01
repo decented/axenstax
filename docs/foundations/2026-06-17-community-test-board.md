@@ -1,5 +1,7 @@
 # Community Test Board — lobby playtest tracker
 
+> **2026-11-01:** the verdict transport and the reader tooling this spec relies on (`/bug`·`/idea` rail, mailbox, ledger aggregation) no longer exist: in-game feedback was removed by owner decision. Verdicts go nowhere (`test_board::queue_verdict`). The spec is kept as history.
+
 **Status**: ✅ BUILT 2026-06-17 (worktree `worktree-community-features`). Solo
 vertical slice complete + `check.sh` green; live multi-tester round-trip + visual
 feel = owner/playtest boundary.

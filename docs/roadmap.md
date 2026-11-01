@@ -12,7 +12,7 @@ Axe'n'Stax is an open-source, self-hostable voxel sandbox with its own engine, c
 
 - **Version:** v0.2.27 in source, network protocol v95, save format 59. The published desktop installer is still v0.2.18 until the release below is cut, so what is described here is well ahead of what players can download.
 - **Web (`play.axenstax.com`)** is an anonymous, local-only sandbox: a *taster*. No login, no multiplayer, no cloud save and no feedback channel on web. Worlds live in the browser and can be exported to the desktop app.
-- **Native (Linux AppImage)** is the full game: Signet sign-in, LAN play, online play by contact, the dedicated server, and the feedback mailbox. Windows and macOS are not published as installers yet (build from source).
+- **Native (Linux AppImage)** is the full game: Signet sign-in, LAN play, online play by contact, and the dedicated server. Windows and macOS are not published as installers yet (build from source).
 - **Android** is ported onto main (the APK builds in CI, `android` input off by default, and a tapped `axenstax:` link opens the game), but nothing is published: release signing is owner-side, and updates will come through zap.store, not an in-app updater.
 - **Gamepad support** is built and working, but is parked as a launch priority.
 - **Posture:** self-hosted, sovereign, player-owned. Worlds, saves and identity belong to the player; AxeNStax ships software, not a service. See the red lines at the end.
@@ -82,7 +82,7 @@ Axe'n'Stax is an open-source, self-hostable voxel sandbox with its own engine, c
 
 ### Safety, privacy and compliance hardening
 - Web build has no login, cookies, analytics or feedback channel; the site apps do not log IP addresses.
-- Feedback is native-only: per-report burner key, end-to-end encrypted, no replies, with an in-game status board.
+- The game has no in-game feedback channel (web removed 2026-10-01, native removed 2026-11-01).
 - Crash-safe saves with damage quarantine, a staged data-directory migration, and a hardened updater.
 - Money words are guarded by permanent tests on every text surface; Proof of Play never appears as an earning mechanic.
 - Public repository housekeeping: licence, security policy, contributing guide and a credits file are in place.
@@ -99,7 +99,7 @@ Everything here needs a person, a second machine or a real device, or a decision
 - Death drops, late-joiner chunk push and tool pickup, walked over by a second player, and a joiner hurting and riding the server's mobs.
 - Signet contacts sync on a phone: pairing, Kin/Kith appearing, a block kicking a connected player, disconnect. This now also tests the relay change: pairing runs over the first of "Your relays" (a public relay by default), not the project's own relay.
 - Native QR sign-in on a phone with mySignet. This now also tests the relay change: the QR advertises the first three of "Your relays" (public by default), and editing the list from the sign-in screen rebuilds the QR.
-- A `/bug` report reaching the project's public inbox relays and being read back by the feedback reader, and the release event republished to the public relays so the in-app updater (which now reads the player's relays) finds it.
+- Republishing the release event to the public relays so the in-app updater (which now reads the player's relays) finds it.
 - Playtest of the unverified trials, and the electricity switch test across two machines.
 - First-launch data-directory migration, the updater, and the current framing (v95, Host Game on Fray) on real hardware.
 
@@ -108,8 +108,8 @@ Everything here needs a person, a second machine or a real device, or a decision
 
 **Public launch — done 2026-10-03/04**
 - The repository is public as a fresh single-commit snapshot (old history archived privately), with fork-PR approval, secret scanning and push protection, private vulnerability reporting and a protected `main`.
-- The privacy page is signed off by the owner (2026-10-04): controller published as *decented*, bug reports kept until dealt with and at most 6 months.
-- The project's own relay is no longer a default anywhere in the native app or its tools (pending the phone tests above). Sign-in, contacts pairing, server discovery and the updater use the player's one editable "Your relays" list; feedback goes to a fixed set of public inbox relays.
+- The privacy page is signed off by the owner (2026-10-04): controller published as *decented*.
+- The project's own relay is no longer a default anywhere in the native app or its tools (pending the phone tests above). Sign-in, contacts pairing, server discovery and the updater use the player's one editable "Your relays" list.
 
 **Release**
 - Native v0.2.27 (protocol v95): the owner cuts it with the owner-held signing keys. The release now covers far more than it did when it was planned at protocol v64: the relay and privacy changes, Host Game on Fray, the real-multiplayer work, terrain v3, graphics settings and building variants. Until then `/download` serves v0.2.18. After publishing, republish the kind-30063 release event to the public relays.
@@ -171,7 +171,7 @@ The project does **not** and will **not**:
 
 - Operate a public directory that lists player-run servers, worlds or groups. Discovery is LAN-local, direct-address, or an operator's own opt-in Nostr announce.
 - Operate game servers, or relays that carry a group's game traffic, presence or in-game chat. Worlds are self-hosted; multiplayer runs directly between players.
-- Collect children's data centrally, or collect age as raw data. The web taster stays anonymous and local; feedback is burner-key and end-to-end encrypted.
+- Collect children's data centrally, or collect age as raw data. The web taster stays anonymous and local, and the game has no feedback channel.
 - Position or market itself as a social network, social media or a chat platform. It is a building game; playing with friends means building together.
 - Offer chance-based real-money payouts. Proof of Play is educational proof-of-work. Any real-sats layer is off by default, parent-controlled, set per server, and driven by a deterministic work-meter, never a probabilistic threshold.
 - Build a how-to for turning safety off. Sensitive features sit behind a real capability boundary, not a disclaimer.

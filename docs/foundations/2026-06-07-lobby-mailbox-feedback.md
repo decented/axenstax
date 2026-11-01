@@ -1,3 +1,5 @@
+> **RETIRED 2026-11-01: in-game feedback removed by owner decision.**
+
 # Lobby Mailbox — NIP-17 player↔dev feedback (store-and-forward)
 
 **Status**: DRAFT — pending owner review, then implementation plan.

@@ -10,10 +10,7 @@ This page is the reference for both. Cloud save needs you to be **signed in** (t
 
 When a world is **stashed**, its save is encrypted on your computer and uploaded. Nobody — not us, not the storage server — can read it; only your signed-in identity holds the key. On another computer, sign in as the same player and your stashed worlds appear in the world list, ready to open.
 
-Your Stash also follows you across devices for a couple of other things that ride the same plumbing:
-
-- your **avatar skin** (see [Cosmetics & Skins](cosmetics.md)), and
-- any **feedback** you send the makers, which sends at the same moment you sync.
+Your Stash also follows you across devices for one other thing that rides the same plumbing: your **avatar skin** (see [Cosmetics & Skins](cosmetics.md)).
 
 ### Turning Stash on for a world
 

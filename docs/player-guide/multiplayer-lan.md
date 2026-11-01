@@ -101,12 +101,6 @@ you to be signed in (no verified identity, no chat) and it respects who you've
 recognised as family/friends. See **[Chat & Commands](chat-and-commands.md)**
 for the full rule. There's still **no in-game voice chat**.
 
-## Feedback
-
-Alpha testers can send a bug or an idea with `/bug` or `/idea` in the desktop app —
-it's sent privately to the dev team. It's off by default: open Settings (top of the
-world list, or the pause menu) and tap the version line 7 times to switch it on. (The browser version has no feedback channel.)
-
 ## What's NOT here yet
 
 - **Internet matchmaking / a public server browser.** There's no directory of

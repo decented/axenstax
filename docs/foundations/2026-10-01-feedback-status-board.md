@@ -1,3 +1,5 @@
+> **RETIRED 2026-11-01: in-game feedback removed by owner decision.**
+
 # Feedback status board (native) — replaces mailbox replies
 
 **Status:** READY TO BUILD (2026-10-01). Native only. Supersedes the reply half of

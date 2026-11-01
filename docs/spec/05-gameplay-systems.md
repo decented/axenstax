@@ -2975,19 +2975,13 @@ gated behind the Spec 1 + Spec 2 `hosted_server.rs` queue):
 | `/seed` | — | no | Show world seed |
 | `/clear` | Op | yes | Empty inventory |
 | `/give <item> [count]` | Op | yes | Add item to inventory |
-| `/bug <what went wrong>` | — | no | Native only: queue a bug report to the makers |
-| `/idea <your idea>` | — | no | Native only: queue an idea to the makers |
-
-`/bug` and `/idea` (and `/mailbox`) are **off by default** — an alpha-tester feature behind
-a hidden Settings unlock (tap the version line 7 times); when off they are hidden from
-`/help` and answer as unknown commands (2026-10-03, `native_mailbox::feedback_enabled`).
-They are the feedback commands, **native only**: the report goes to
-the on-disk native outbox (`native_mailbox`) and is flushed as a NIP-17 DM. The
-**browser build has no feedback channel at all** (removed 2026-10-01, owner
-decision): the commands are not compiled on wasm32, so on the web they are
-unknown commands; there is no lobby composer and no `/mailbox`. >2000 chars is
-rejected. Neither is a cheat (`OpLevel::None`, `is_cheat()==false`). Spec:
-`docs/foundations/2026-06-07-lobby-mailbox-feedback.md`.
+**Removed 2026-11-01 (owner decision): the game has no in-game feedback channel.**
+`/bug`, `/idea` and `/mailbox`, the hidden Settings tester unlock (tap the version
+line 7 times), the native outbox/worker/status board, the tester-unlock setting
+and the Suggestion Box trial (`SendFeedback` objective) are all gone; they are
+unknown commands everywhere. The web build lost its channel on 2026-10-01. A
+start-up clean-up deletes the files the feature left in the profile directory.
+History: `docs/foundations/2026-06-07-lobby-mailbox-feedback.md`.
 
 Cheat semantics: the World Integrity Ledger flag `cheats_used` is set when any
 command marked `is_cheat()` succeeds. `/gamemode creative` additionally sets
@@ -3820,7 +3814,7 @@ Sound responsiveness is as important as visual responsiveness. These sounds must
 
 **Platform:** the touch table is used when `touch_input::is_touch_device()` is true (set from `navigator.maxTouchPoints` on the web, unconditionally on Android); keyboard + mouse otherwise. `TOUCH_PLATFORM` is deliberately not used — it is true for every web build, including a desktop with a mouse. **Gamepad is parked: the card makes no gamepad claim.**
 
-**Loading tips** (`assets/loading_tips.json`, shared by the engine and the web loader) no longer contain "New — tell us how it feels" cards or gamepad mentions: the web build has no feedback channel and native `/bug` is off by default behind a hidden tester unlock, so no tip may ask for feedback (a unit test in `loading_screen.rs` enforces it).
+**Loading tips** (`assets/loading_tips.json`, shared by the engine and the web loader) no longer contain "New — tell us how it feels" cards or gamepad mentions: the game has no feedback channel (the native one was removed 2026-11-01), so no tip may ask for feedback (a unit test in `loading_screen.rs` enforces it).
 
 ---
 

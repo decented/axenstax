@@ -4,8 +4,8 @@ This folder holds **foundation-level engine specs** that are ready for a fresh s
 
 When the user asks **"what next"**, list what's here with status `READY TO BUILD`.
 
-For feature *requests / ideas* that aren't yet ready-to-build specs (GitHub feature issues, in-game
-`/idea`, playtest wishes), see the distilled front door: [`../feature-backlog.md`](../feature-backlog.md).
+For feature *requests / ideas* that aren't yet ready-to-build specs (GitHub feature issues,
+playtest wishes), see the distilled front door: [`../feature-backlog.md`](../feature-backlog.md).
 
 > **2026-07-09 — reconciliation pass.** The give-aliases-and-dead-stash spec
 > (below) **✅ SHIPPED same day**, `main@2a39c89a` — both tasks done, `check.sh`
@@ -534,11 +534,11 @@ Flip its status line from `READY TO BUILD` to `DELIVERED` with a commit link, mo
 
 ## Spec 41 — Lobby Mailbox (NIP-17 player↔dev feedback) — added + DELIVERED 2026-06-08
 
-> **2026-10-01:** the reply half is superseded by [Feedback status board](2026-10-01-feedback-status-board.md) — native only, no replies, anonymous per-report burner key, `/mailbox` = "Your reports" status from a public signed board.
+> **RETIRED 2026-11-01: in-game feedback removed by owner decision.** Specs 41 and the [Feedback status board](2026-10-01-feedback-status-board.md) are kept as history only; there is no `/bug`, `/idea` or `/mailbox`, no tester unlock and no feedback tooling.
 
 | # | Spec | Risk | Blocks | Notes |
 |---|------|:----:|--------|-------|
-| 41 | [Lobby Mailbox — NIP-17 player↔dev feedback](2026-06-07-lobby-mailbox-feedback.md) — **WEB BUILD REMOVED 2026-10-01 (owner decision: no feedback channel on web; native keeps its mailbox).** Phases 1–4 BUILT 2026-06-08 (goal `docs/goals/lobby-mailbox-feedback.md`, branch `lobby-mailbox-build`). Serverless store-and-forward feedback: `/bug` & `/idea` (or lobby compose) **queue locally** (`window.AxeMailbox`, IndexedDB) and are **batch-signed as NIP-17 DMs to the AxeNStax npub at stash sync** — one bunker approval covers the world blob + the queued reports, no per-message signing. Replies pulled + threaded into a lobby inbox on the same sync. Dev side = a **local trusted reader** (`tools/feedback-reader/`) decrypting into a gitignored ledger + Claude-assisted triage → `gh` issues (npub never in an issue) + reply pass. New `static/{nip59,mailbox}.js` + vendored `nostr.iife.js`; `relay.iife.js` gained `queryByTag` (inbound `#p` query). Retires the voice-server's feedback intake (Games Master widget still uses the VM). 22 tests green (6 Rust + 16 node), `check.sh` ALL GREEN. | Med | Retires voice-feedback transport (2026-05-28 / 2026-04-20 specs); general `mailbox.js` primitive (player↔player later) | **BOUNDARIES (owner/playtest):** live-bunker round-trip, dev-reader live run with the real AxeNStax secret key, Axolittle end-to-end playtest. Built on an isolated worktree (concurrent-session HEAD tangle); NOT pushed to origin/deployed. |
+| 41 | [Lobby Mailbox — NIP-17 player↔dev feedback](2026-06-07-lobby-mailbox-feedback.md) — **RETIRED 2026-11-01 (owner decision: no in-game feedback channel; web part removed 2026-10-01).** Phases 1–4 BUILT 2026-06-08 (goal `docs/goals/lobby-mailbox-feedback.md`, branch `lobby-mailbox-build`). Serverless store-and-forward feedback: `/bug` & `/idea` (or lobby compose) **queue locally** (`window.AxeMailbox`, IndexedDB) and are **batch-signed as NIP-17 DMs to the AxeNStax npub at stash sync** — one bunker approval covers the world blob + the queued reports, no per-message signing. Replies pulled + threaded into a lobby inbox on the same sync. Dev side = a **local trusted reader** (since removed) decrypting into a gitignored ledger + Claude-assisted triage → `gh` issues (npub never in an issue) + reply pass. New `static/{nip59,mailbox}.js` + vendored `nostr.iife.js`; `relay.iife.js` gained `queryByTag` (inbound `#p` query). Retires the voice-server's feedback intake (Games Master widget still uses the VM). 22 tests green (6 Rust + 16 node), `check.sh` ALL GREEN. | Med | Retires voice-feedback transport (2026-05-28 / 2026-04-20 specs); general `mailbox.js` primitive (player↔player later) | **BOUNDARIES (owner/playtest):** live-bunker round-trip, dev-reader live run with the real AxeNStax secret key, Axolittle end-to-end playtest. Built on an isolated worktree (concurrent-session HEAD tangle); NOT pushed to origin/deployed. |
 
 ## Spec 42 — Gamepad UI Navigation — added + DELIVERED 2026-06-12
 

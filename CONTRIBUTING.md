@@ -38,8 +38,8 @@ crosses any of these four lines:
    in-game chat. No hosted game or cloud fleet for other people's groups.
 3. **No central collection of children's data.** The web build stays anonymous
    and local (no login, cookies, analytics or age data). Cloud storage stays
-   bring-your-own-key and ciphertext-only. Feedback stays burner-key, end-to-end
-   encrypted and owner-local. Never collect age as raw data (at most a yes/no
+   bring-your-own-key and ciphertext-only. The game has no feedback channel.
+   Never collect age as raw data (at most a yes/no
    from a third-party identity provider, never a date of birth), and send no
    child's personal information to any AxeNStax-operated server.
 4. **No positioning as a social network.** Never describe or market the

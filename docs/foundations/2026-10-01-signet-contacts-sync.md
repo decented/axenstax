@@ -58,7 +58,7 @@ Relay I/O sits outside the pure module: an ack waiter implementing WIRE.md §3
 up to 10 candidates newest-first, decrypt+challenge gate, ≤32 attempts, paging
 rule, poll-before-deadline, 600 s default) and a projection fetch (`kinds:[30078]`,
 `authors:[railPubkey]`, `#d:[projectionTag]`). Use the existing `nostr`/`nostr-sdk`
-stack the engine already uses for the mailbox / rendezvous.
+stack the engine already uses for rendezvous.
 
 ## 4. Storage
 
