@@ -37,7 +37,7 @@ __pycache__/
 .superpowers/
 
 # Three-site split — runtime files in each site's data dir.
-# whitelist.txt and feedback-admins.json are intentionally tracked;
+# whitelist.txt is intentionally tracked;
 # *.log, *.key and .venv are caught globally above. This catches the
 # admin-queue request log which doesn't match those patterns.
 tools/sites/*/data/access-requests.jsonl

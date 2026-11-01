@@ -135,10 +135,9 @@ qrcode = { version = "0.14", default-features = false }
 # the tree transitively, so no new resolution). The native sign-in path builds +
 # signs the kind-21236 join auth event with `EventBuilder` / `Keys` / `Tag` and
 # the `NostrSigner` trait. NATIVE-ONLY (never in the wasm32 graph).
-# `nip44` is already pulled in transitively (nip59 = ["nip44"]), but online play
-# by contact uses NIP-44 DIRECTLY to seal the rendezvous offer/answer runtime-key
-# to runtime-key — so declare it rather than inherit it. NATIVE-ONLY.
-nostr = { version = "=0.44.8", features = ["nip59", "nip44"] }
+# Online play by contact uses NIP-44 to seal the rendezvous offer/answer
+# runtime-key to runtime-key. NATIVE-ONLY.
+nostr = { version = "=0.44.8", features = ["nip44"] }
 # NOTE: `rfd` (native file dialogs) is NOT here: Android is also
 # `not(target_arch = "wasm32")` and rfd has no Android backend — see the
 # desktop-only section below.

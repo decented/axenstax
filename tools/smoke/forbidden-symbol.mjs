@@ -109,9 +109,6 @@ const FORBIDDEN_STATIC_PATHS = [
   "vendor/beacon.iife.js",
   "vendor/nostr-tools-nip46.iife.js",
 ];
-// Unloaded legacy file. index.html does not load it, so it is exempt from the
-// offline markers below. Delete the file, then drop this entry.
-const OFFLINE_EXEMPT_STATIC = new Set(["gamestr.js"]);
 const FORBIDDEN_STATIC_MARKERS = [
   "AxeMailbox",
   "AxeNip59",
@@ -236,11 +233,9 @@ for (const name of readdirSync(SITE_STATIC).sort()) {
   }
   if (!name.endsWith(".js")) continue;
   const text = readFileSync(path, "latin1");
-  if (!OFFLINE_EXEMPT_STATIC.has(name)) {
-    for (const [marker, why] of OFFLINE_MARKERS) {
-      if (text.includes(marker)) {
-        hits.push({ name: `sites/game/static/${name}`, marker, why });
-      }
+  for (const [marker, why] of OFFLINE_MARKERS) {
+    if (text.includes(marker)) {
+      hits.push({ name: `sites/game/static/${name}`, marker, why });
     }
   }
   for (const marker of FORBIDDEN_STATIC_MARKERS) {

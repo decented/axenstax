@@ -1109,12 +1109,9 @@ pub(crate) struct GameState {
     /// Loaded column tracking for chunk streaming
     pub(crate) loaded_columns: ahash::AHashSet<(i32, i32)>,
     /// Test Lab: index into the ranked `test_board` registry of the mission
-    /// Satoshi is currently offering. Session-only (not persisted) — a verdict
-    /// is not kept anywhere (`test_board::queue_verdict`), so resuming just
-    /// restarts the list.
+    /// Satoshi is currently offering. Session-only (not persisted), so resuming
+    /// just restarts the list.
     pub(crate) mission_idx: usize,
-    /// Test Lab: the optional free-text note bound to the mission verdict field.
-    pub(crate) mission_note: String,
     /// Test Lab: the ranked mission list, loaded once per world (lazily) from the
     /// embedded `test_board` registry. Empty outside a Test Lab world.
     pub(crate) mission_registry: Vec<crate::test_board::TestItem>,
@@ -2035,7 +2032,6 @@ impl GameState {
             narrator: crate::narration::Narrator::default(),
             loaded_columns: ahash::AHashSet::new(),
             mission_idx: 0,
-            mission_note: String::new(),
             mission_registry: Vec::new(),
             active_trial: None,
             trial_outcome: None,

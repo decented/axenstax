@@ -3263,7 +3263,6 @@ impl super::GameState {
         self.joined_push_only = false;
         self.own_prediction.reset();
         self.mission_idx = 0;
-        self.mission_note.clear();
         self.mission_registry.clear();
         // Trials: cancel any active run on world change (bests persist across worlds).
         self.active_trial = None;
@@ -17900,15 +17899,14 @@ impl super::GameState {
                 } else if self.world.world_type == "testlab" {
                     // Test Lab — Satoshi runs playtest missions instead of the
                     // onboarding gifts. One mission at a time from the ranked
-                    // test_board registry. Verdicts have no transport any more
-                    // (the web mailbox was removed) — see `queue_verdict`.
+                    // test_board registry. The game collects no verdicts.
                     if self.mission_registry.is_empty() {
                         self.mission_registry = crate::test_board::load_registry();
                     }
                     let idx = self.mission_idx;
                     let total = self.mission_registry.len();
-                    // Clone the current mission out so the verdict branch can
-                    // mutate self (toast / idx) without holding a borrow of it.
+                    // Clone the current mission out so drawing it holds no
+                    // borrow of the registry.
                     let item = self.mission_registry.get(idx).cloned();
                     let action = crate::villager_ui::draw_satoshi_mission(
                         &self.renderer.egui.ctx,
@@ -17917,34 +17915,12 @@ impl super::GameState {
                         item.as_ref(),
                         idx,
                         total,
-                        &mut self.mission_note,
                     );
                     match action {
-                        crate::satoshi::MissionAction::Worked
-                        | crate::satoshi::MissionAction::Broken => {
-                            let good = action == crate::satoshi::MissionAction::Worked;
-                            if let Some(it) = &item {
-                                let line = crate::test_board::queue_verdict(
-                                    &it.ref_id,
-                                    good,
-                                    &self.mission_note,
-                                );
-                                if pidx == 0 {
-                                    self.toast = Some((
-                                        line,
-                                        Instant::now() + std::time::Duration::from_secs(3),
-                                    ));
-                                }
-                            }
-                            self.mission_note.clear();
-                            self.mission_idx = idx.saturating_add(1);
-                        }
                         crate::satoshi::MissionAction::Skip => {
-                            self.mission_note.clear();
                             self.mission_idx = idx.saturating_add(1);
                         }
                         crate::satoshi::MissionAction::Close => {
-                            self.mission_note.clear();
                             self.players[pidx].dialogue_satoshi = None;
                             if pidx == 0 {
                                 self.capture_cursor();
