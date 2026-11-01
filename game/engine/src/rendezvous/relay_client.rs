@@ -7,10 +7,9 @@
 //! `kind` + `#p` filter a real relay applies, so a test that passes against it
 //! is testing the filter as well as the flow.
 //!
-//! Frames use the raw REQ/EVENT array shape that `tools/feedback-reader/live.mjs`
-//! and `native_mailbox::relay` already use successfully against
-//! `wss://relay.trotters.cc` — nostr-tools' framing of the same filter is
-//! rejected there, so the field order is load-bearing.
+//! Frames use the raw REQ/EVENT array shape (`nostr_frames`) that has been used
+//! successfully against `wss://relay.trotters.cc` — nostr-tools' framing of the
+//! same filter is rejected there, so the field order is load-bearing.
 //!
 //! A relay only ever sees the sealed setup events (CLAUDE.md red line 2): the
 //! game's own traffic never touches this path.
@@ -41,7 +40,7 @@ use nostr::Event;
 use serde_json::json;
 use tokio_tungstenite::tungstenite::Message;
 
-use crate::native_mailbox::relay::{event_frame, parse_frame, Frame};
+use crate::nostr_frames::{event_frame, parse_frame, Frame};
 
 /// What the rendezvous needs from a relay set. Deliberately tiny: publish one
 /// event, subscribe to one (kind, recipient) filter, drain what arrived.
@@ -292,7 +291,7 @@ impl PendingPublish {
 /// channel, matching events come back on another.
 ///
 /// OWNER BOUNDARY: the socket half is verified against a live relay, not in CI.
-/// The frame shapes it sends are unit-tested above and in `native_mailbox`; the
+/// The frame shapes it sends are unit-tested above and in `nostr_frames`; the
 /// socket behaviour (REQ/EVENT/EOSE/OK, reconnect) is covered by the loopback
 /// relay in this module's tests.
 pub struct MultiRelay {
@@ -647,9 +646,8 @@ mod tests {
 
     #[test]
     fn req_frame_matches_the_known_good_relay_shape() {
-        // Same field order as tools/feedback-reader/live.mjs and
-        // native_mailbox::relay::req_frame — trotters rejects nostr-tools'
-        // framing of the same filter, so the order is load-bearing.
+        // Raw NIP-01 field order — trotters rejects nostr-tools' framing of
+        // the same filter, so the order is load-bearing.
         let f = req_frame("rz", 20900, &"ab".repeat(32), 500);
         let v: serde_json::Value = serde_json::from_str(&f).unwrap();
         assert_eq!(v[0], "REQ");

@@ -2,7 +2,7 @@
 //! `Command` can be registered. Registration order is preserved for /help
 //! listing.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use super::dispatch::{CommandContext, CommandResult};
 
@@ -37,11 +37,6 @@ pub struct CommandRegistry {
     by_name: HashMap<&'static str, Box<dyn Command>>,
     /// Maps alias → primary name. Lookup by alias re-resolves through here.
     alias_to_primary: HashMap<&'static str, &'static str>,
-    /// Primary names switched off at runtime (see [`CommandRegistry::set_hidden`]).
-    /// A hidden command is registered but behaves exactly as if it were not:
-    /// `lookup` misses, `iter` skips it, so dispatch, `/help` and `/help <cmd>`
-    /// all answer as for any unknown command.
-    hidden: HashSet<&'static str>,
 }
 
 impl Default for CommandRegistry {
@@ -56,19 +51,6 @@ impl CommandRegistry {
             order: Vec::new(),
             by_name: HashMap::new(),
             alias_to_primary: HashMap::new(),
-            hidden: HashSet::new(),
-        }
-    }
-
-    /// Hide (or un-hide) a registered command by primary name. Hidden commands
-    /// are invisible to `lookup` and `iter` — indistinguishable from unknown —
-    /// while staying compiled and registered, so un-hiding is instant. Used for
-    /// feature-gated commands (the alpha-tester feedback commands).
-    pub fn set_hidden(&mut self, name: &'static str, hidden: bool) {
-        if hidden {
-            self.hidden.insert(name);
-        } else {
-            self.hidden.remove(name);
         }
     }
 
@@ -92,13 +74,10 @@ impl CommandRegistry {
         // Direct primary-name hit (HashMap key is &'static str; we compare
         // owned strings via the typed key).
         if let Some(boxed) = self.by_name.get(name) {
-            return (!self.hidden.contains(boxed.name())).then(|| boxed.as_ref());
+            return Some(boxed.as_ref());
         }
         // Alias resolution.
         if let Some(primary) = self.alias_to_primary.get(name) {
-            if self.hidden.contains(*primary) {
-                return None;
-            }
             return self.by_name.get(*primary).map(|b| b.as_ref());
         }
         None
@@ -107,7 +86,6 @@ impl CommandRegistry {
     pub fn iter(&self) -> impl Iterator<Item = &dyn Command> {
         self.order
             .iter()
-            .filter(move |n| !self.hidden.contains(**n))
             .filter_map(move |n| self.by_name.get(*n).map(|b| b.as_ref()))
     }
 
@@ -214,24 +192,6 @@ mod tests {
         let len_after_first = r.len();
         r.register(fake("dup", &[]));
         assert_eq!(r.len(), len_after_first); // no duplicate entry in order
-    }
-
-    #[test]
-    fn hidden_commands_are_invisible_to_lookup_aliases_and_iter() {
-        let mut r = CommandRegistry::new();
-        r.register(fake("secret", &["s"]));
-        r.register(fake("open", &[]));
-        r.set_hidden("secret", true);
-        assert!(r.lookup("secret").is_none());
-        assert!(r.lookup("s").is_none(), "an alias must not leak a hidden command");
-        assert!(r.lookup("open").is_some());
-        let names: Vec<_> = r.iter().map(|c| c.name()).collect();
-        assert_eq!(names, vec!["open"]);
-        // Un-hiding restores it without re-registering.
-        r.set_hidden("secret", false);
-        assert!(r.lookup("secret").is_some());
-        assert!(r.lookup("s").is_some());
-        assert_eq!(r.iter().count(), 2);
     }
 
     #[test]

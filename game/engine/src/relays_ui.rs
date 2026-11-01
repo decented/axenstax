@@ -24,8 +24,6 @@ use crate::graphics_settings::{default_online_relays, GraphicsSettings, MAX_RELA
 pub const HEADING: &str = "Your relays";
 pub const LEAD: &str = "The app uses these to sign in, find friends, pair contacts and check for \
                         updates. Your game itself never runs through them.";
-/// Added under [`LEAD`] only while alpha-tester feedback is switched on.
-pub const LEAD_FEEDBACK: &str = " Bug reports go to the project's own inbox relays.";
 /// How long "Check" waits for each relay's websocket to open.
 pub const CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -207,12 +205,7 @@ fn record_all(checks: &Mutex<Checks>, generation: u64, relays: &[String], state:
 pub fn draw(ui: &mut egui::Ui, state: &mut RelaysUiState, gfx: &mut GraphicsSettings) -> bool {
     let mut changed = false;
     ui.label(egui::RichText::new(HEADING).size(15.0).strong());
-    let lead = if crate::native_mailbox::feedback_enabled(gfx) {
-        format!("{LEAD}{LEAD_FEEDBACK}")
-    } else {
-        LEAD.to_string()
-    };
-    ui.label(egui::RichText::new(lead).size(11.0).color(DIM));
+    ui.label(egui::RichText::new(LEAD).size(11.0).color(DIM));
     ui.add_space(4.0);
 
     let removable = can_remove(&gfx.online_relays);

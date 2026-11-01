@@ -10,9 +10,8 @@
 //! not a line number — lines drift). **Do not add a row without a binding**: the
 //! unit tests below press the documented keys on a real [`crate::input::InputState`]
 //! and assert the resulting flag, and a text guard keeps feedback / gamepad
-//! wording out (the web build has no feedback channel, native `/bug` is off by
-//! default behind a hidden tester unlock, and gamepad support is parked — no
-//! parity is claimed).
+//! wording out (the game has no feedback channel, and gamepad support is parked
+//! — no parity is claimed).
 //!
 //! Platform: [`ControlsLayout::current`] picks the touch table on a touch
 //! device (`touch_input::is_touch_device`, set from `navigator.maxTouchPoints`
@@ -304,8 +303,8 @@ mod tests {
 
     #[test]
     fn no_row_promises_feedback_gamepad_or_money() {
-        // Web has no feedback channel; native /bug is off behind a hidden
-        // tester unlock; gamepad is parked; the play surface never says money.
+        // The game has no feedback channel; gamepad is parked; the play
+        // surface never says money.
         let banned = [
             "feedback", "/bug", "/idea", "tell us", "report", "gamepad", "controller",
         ];

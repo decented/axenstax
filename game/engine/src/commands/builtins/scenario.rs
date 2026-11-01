@@ -41,18 +41,12 @@ impl Command for ScenarioCommand {
             // J) is the primary surface now; this stays the chat equivalent.
             None | Some("list") => {
                 ctx.success("Challenges (or press J for the board) — type /scenario <name> to start:".to_string());
-                let feedback_on = ctx.registry.lookup("idea").is_some();
-                for (name, display) in crate::scenario::challenge_listing_visible(feedback_on) {
+                for (name, display) in crate::scenario::challenge_listing() {
                     ctx.success(format!("  /scenario {name}  —  {display}"));
                 }
                 CommandResult::Silent
             }
-            Some(name) => match crate::scenario::named_builtin_def(name)
-                // The feedback trial rides on /idea (alpha-tester gate): while
-                // that command is hidden it is "unknown" here too.
-                .filter(|_| {
-                    name != crate::scenario::FEEDBACK_TRIAL || ctx.registry.lookup("idea").is_some()
-                }) {
+            Some(name) => match crate::scenario::named_builtin_def(name) {
                 Some(def) => {
                     ctx.success(format!("Starting scenario: {}", def.display_name));
                     CommandResult::StartScenario { def }

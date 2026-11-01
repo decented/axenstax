@@ -443,11 +443,6 @@ pub struct MenuState {
     /// draws `draw_settings_panel` over the lobby; while set, `draw_main_menu`
     /// paints only the background so nothing underneath takes clicks. All targets.
     pub show_settings: bool,
-    /// Mirror of `native_mailbox::feedback_enabled(settings)`, refreshed by the
-    /// caller each frame. While false the lobby hides the Suggestion Box trial
-    /// (it needs `/idea`). Native only.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub tester_feedback: bool,
 }
 
 impl MenuState {
@@ -536,8 +531,6 @@ impl MenuState {
             #[cfg(not(target_arch = "wasm32"))]
             show_relays: false,
             show_settings: false,
-            #[cfg(not(target_arch = "wasm32"))]
-            tester_feedback: false,
         };
 
         #[cfg(target_arch = "wasm32")]
@@ -1522,8 +1515,6 @@ fn draw_trials_column(ui: &mut egui::Ui, state: &mut MenuState) -> MenuAction {
     let mut info_request: Option<String> = None;
     // Per-device progress (best times + completed challenges) drives the badges.
     let bests = crate::trials::TrialBests::load();
-    #[cfg(not(target_arch = "wasm32"))]
-    let state_tester_feedback = state.tester_feedback;
     let expanded = state.expanded_trial.clone();
     let done_green = egui::Color32::from_rgb(150, 220, 150);
 
@@ -1588,12 +1579,8 @@ fn draw_trials_column(ui: &mut egui::Ui, state: &mut MenuState) -> MenuAction {
             // interleaved (2026-06-25: no more Races/Challenges split). Each row
             // shows its style icon before the name; the expanded body names the
             // style. Order + icons live in `trials::TRIAL_ORDER`.
-            #[cfg(not(target_arch = "wasm32"))]
-            let feedback_on = state_tester_feedback;
-            #[cfg(target_arch = "wasm32")]
-            let feedback_on = false;
             let ch_display: std::collections::HashMap<&'static str, String> =
-                crate::scenario::challenge_listing_visible(feedback_on).into_iter().collect();
+                crate::scenario::challenge_listing().into_iter().collect();
             for &(ttype, tref) in crate::trials::TRIAL_ORDER {
                 let icon = ttype.icon();
                 let icon_color = {
@@ -4428,7 +4415,7 @@ fn draw_create_dialog(
             }
             // Test Lab — Satoshi hands out playtest missions; normal terrain.
             // Not offered on web: its verdicts had no transport but the browser
-            // lobby mailbox, removed 2026-10-01 (no feedback channel on web).
+            // lobby mailbox, removed 2026-10-01 (the game has no feedback channel).
             #[cfg(not(target_arch = "wasm32"))]
             if ui.add(egui::Button::new(egui::RichText::new("🧪 Test Lab").size(14.0).color(lab_color))
                 .min_size(egui::vec2(170.0, 36.0))
@@ -6053,10 +6040,11 @@ pub struct SettingsPanelState {
     pub governor_note: Option<String>,
     #[cfg(not(target_arch = "wasm32"))]
     pub relays: crate::relays_ui::RelaysUiState,
-    /// Tap counter behind the version line — seven quick taps switch alpha-
-    /// tester feedback on (`tester_gate`). Native only.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub taps: crate::tester_gate::TapCounter,
+}
+
+/// The plain version line shown at the foot of Settings, e.g. `AxeNStax v0.2.28`.
+pub fn version_line() -> String {
+    format!("AxeNStax v{}", env!("CARGO_PKG_VERSION"))
 }
 
 /// What a compact Settings Window spends on everything but its scroll area: its title bar,
@@ -6536,50 +6524,9 @@ pub fn draw_settings_panel(
                 crate::relays_ui::draw(ui, &mut state.relays, gfx);
             }
 
-            // Version line. On the desktop app it is also the hidden unlock for
-            // alpha-tester feedback: seven quick taps turn it on (Android
-            // "developer mode" style), and once on a checkbox lets the player
-            // turn it off again (which hides the checkbox until re-unlocked).
+            // Version line.
             ui.add_space(12.0);
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                let now = ui.input(|i| i.time);
-                if gfx.tester_feedback
-                    && ui
-                        .checkbox(&mut gfx.tester_feedback, crate::tester_gate::CHECKBOX_LABEL)
-                        .changed()
-                {
-                    // Ticked off: the checkbox goes away; 7 taps re-enable.
-                    state.taps.reset();
-                    changed = true;
-                }
-                let version = ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(crate::tester_gate::version_line())
-                            .size(11.0)
-                            .color(DIM_TEXT),
-                    )
-                    .sense(egui::Sense::click()),
-                );
-                if version.clicked()
-                    && !gfx.tester_feedback
-                    && state.taps.tap(now) == crate::tester_gate::TapOutcome::Unlocked
-                {
-                    gfx.tester_feedback = true;
-                    changed = true;
-                }
-                if let Some(msg) = state.taps.message(now) {
-                    ui.label(egui::RichText::new(msg).size(10.0).color(DIM_TEXT));
-                    // Keep repainting so the hint/confirmation fades on time.
-                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
-                }
-            }
-            #[cfg(target_arch = "wasm32")]
-            ui.label(
-                egui::RichText::new(format!("AxeNStax v{}", env!("CARGO_PKG_VERSION")))
-                    .size(11.0)
-                    .color(DIM_TEXT),
-            );
+            ui.label(egui::RichText::new(version_line()).size(11.0).color(DIM_TEXT));
             };
             if compact {
                 // `min_scrolled_height`, as in `draw_dialog_frame`: a Window's UI may only use
@@ -6628,8 +6575,16 @@ pub fn draw_settings_panel(
 #[cfg(test)]
 mod tests {
     use super::{
-        app_feature_copy, plan_lobby_settings, AppFeature, LobbySettingsPlan, SettingsPanelAction,
+        app_feature_copy, plan_lobby_settings, version_line, AppFeature, LobbySettingsPlan,
+        SettingsPanelAction,
     };
+
+    #[test]
+    fn the_version_line_carries_the_crate_version() {
+        let v = version_line();
+        assert!(v.starts_with("AxeNStax v"));
+        assert!(v.ends_with(env!("CARGO_PKG_VERSION")));
+    }
 
     /// CP15 (CP14 review MEDIUM-1): the lobby's Fork on a refused (retired)
     /// world opens no fork dialog and shows the refusal line.

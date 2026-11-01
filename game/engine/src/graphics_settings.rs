@@ -424,8 +424,7 @@ pub struct GraphicsSettings {
     /// sign-in QR (first 3), online-play setup (rendezvous), Server Card
     /// discovery, Signet contacts pairing (first one) and the signed release
     /// feed. **Setup only**: no relay ever carries a byte of game traffic
-    /// (CLAUDE.md red line 2). Feedback is NOT on this list — it goes to the
-    /// project's fixed inbox (`native_mailbox::FEEDBACK_INBOX_RELAYS`).
+    /// (CLAUDE.md red line 2).
     /// Edited through `relays_ui` (reachable before sign-in) so a household
     /// can choose relays it trusts. `serde(default)` so an existing
     /// settings.json still loads.
@@ -437,16 +436,6 @@ pub struct GraphicsSettings {
     /// familiar `protocol::SERVER_PORT`.
     #[serde(default = "default_online_port")]
     pub online_port: u16,
-    /// Alpha-tester feedback (`/bug`, `/idea`, `/mailbox`) — OFF by default.
-    /// Flipped on by the hidden unlock in the Settings panel (tap the version
-    /// line 7 times) and off again by its checkbox. Read ONLY through
-    /// `native_mailbox::feedback_enabled`, never directly, so a future
-    /// age/guardian gate has one place to land. Native only in effect (the web
-    /// build has no feedback channel); the field itself is cross-platform so
-    /// the settings file shape is identical. `serde(default)` = an existing
-    /// settings.json loads with feedback off.
-    #[serde(default)]
-    pub tester_feedback: bool,
     /// Master volume for every sound effect, `MASTER_VOLUME_MIN..=MASTER_VOLUME_MAX`.
     /// Per-device (native `settings.json`, web localStorage) and applied on
     /// BOTH targets via `AudioEngine::set_master`. Personal pref, excluded from
@@ -617,7 +606,6 @@ impl GraphicsSettings {
             has_seen_license_onboarding: false,
             online_relays: default_online_relays(),
             online_port: DEFAULT_ONLINE_PORT,
-            tester_feedback: false,
             master_volume: DEFAULT_MASTER_VOLUME,
             audio_muted: false,
             controls_card_seen: false,
@@ -1018,7 +1006,6 @@ mod tests {
         let mut s = GraphicsSettings::from_preset(GraphicsPreset::High);
         s.online_relays = vec!["wss://relay.example.com".into()];
         s.online_port = 4242;
-        s.tester_feedback = true;
         s.narration_enabled = !s.narration_enabled;
         let narration = s.narration_enabled;
         s.master_volume = 0.3;
@@ -1028,7 +1015,6 @@ mod tests {
         assert_eq!(s.preset(), GraphicsPreset::Potato);
         assert_eq!(s.online_relays, vec!["wss://relay.example.com".to_string()]);
         assert_eq!(s.online_port, 4242);
-        assert!(s.tester_feedback);
         assert_eq!(s.narration_enabled, narration);
         assert_eq!(s.master_volume, 0.3, "a preset click must not touch the volume");
         assert!(s.audio_muted);
@@ -1298,34 +1284,27 @@ mod tests {
     }
 
     #[test]
-    fn tester_feedback_is_off_by_default() {
-        assert!(!GraphicsSettings::default().tester_feedback);
-    }
-
-    #[test]
-    fn an_old_settings_file_without_tester_feedback_loads_with_it_off() {
-        // Built by deleting the key from today's serialised settings, so the
-        // test cannot rot as other fields are added.
-        let mut v: serde_json::Value =
-            serde_json::to_value(GraphicsSettings { tester_feedback: true, ..Default::default() })
-                .unwrap();
-        assert!(v.as_object_mut().unwrap().remove("tester_feedback").is_some());
+    fn an_old_settings_file_naming_the_retired_tester_feedback_key_still_loads() {
+        // The in-game feedback feature (and its `tester_feedback` unlock) was
+        // removed; players' saved settings.json may still carry the key. It must
+        // be ignored without losing any other setting.
+        let mut v = serde_json::to_value(GraphicsSettings {
+            render_distance: 7,
+            online_port: 4242,
+            master_volume: 0.3,
+            ..Default::default()
+        })
+        .unwrap();
+        v.as_object_mut().unwrap().insert("tester_feedback".into(), serde_json::json!(true));
         let s: GraphicsSettings = serde_json::from_value(v).unwrap();
-        assert!(!s.tester_feedback, "an old file must never switch feedback on");
-        // And a file that only holds other keys loads the same way.
-        let s: GraphicsSettings = serde_json::from_str(r#"{ "render_distance": 8 }"#).unwrap();
-        assert!(!s.tester_feedback);
-    }
+        assert_eq!(s.render_distance, 7);
+        assert_eq!(s.online_port, 4242);
+        assert_eq!(s.master_volume, 0.3);
 
-    #[test]
-    fn tester_feedback_round_trips_and_survives_a_preset_click() {
-        let mut s = GraphicsSettings { tester_feedback: true, ..Default::default() };
-        let back: GraphicsSettings =
-            serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
-        assert!(back.tester_feedback);
-        s.apply_preset(GraphicsPreset::Potato);
-        assert!(s.tester_feedback, "choosing a quality preset must not clear the unlock");
-        assert!(s.clone().tester_feedback);
+        let s: GraphicsSettings =
+            serde_json::from_str(r#"{ "render_distance": 9, "tester_feedback": true }"#).unwrap();
+        assert_eq!(s.render_distance, 9);
+        assert_eq!(s.online_port, DEFAULT_ONLINE_PORT, "absent fields take their defaults");
     }
 
     #[test]

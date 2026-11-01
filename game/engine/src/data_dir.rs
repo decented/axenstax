@@ -88,7 +88,7 @@ pub fn data_root() -> PathBuf {
     PathBuf::new()
 }
 
-/// `<data root>/profile` — secrets (runtime key, Signet session, feedback tickets)
+/// `<data root>/profile` — secrets (runtime key, Signet session)
 /// and profile blobs (skins, wardrobe, trials, contacts, replays).
 pub fn profile_dir() -> PathBuf {
     data_root().join("profile")

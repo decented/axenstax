@@ -176,14 +176,6 @@ pub enum CommandResult {
     OnlineStatus,
     /// `/online copy` — the game loop puts the invite link on the clipboard.
     OnlineCopyInvite,
-    /// Wind, Copper & Electricity wave §4 side-effect: a `/bug` or `/idea`
-    /// report was queued for the makers. The report itself is already handled
-    /// (native outbox) — this only tells the game loop to fire
-    /// `ChallengeEvent::SendFeedback` at the running trial, which the commands
-    /// module has no access to. Not a cheat. Native only: the browser build has
-    /// no `/bug` or `/idea`.
-    #[cfg(not(target_arch = "wasm32"))]
-    FeedbackQueued,
 }
 
 /// Bounded view of game state that commands may touch.

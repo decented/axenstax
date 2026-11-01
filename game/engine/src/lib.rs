@@ -236,11 +236,12 @@ mod console_snapshot;
 mod operator_panel;
 #[cfg(not(target_arch = "wasm32"))]
 mod console_auth;
+// Plain NIP-01 relay frames shared by the relay sockets (native only).
 #[cfg(not(target_arch = "wasm32"))]
-mod native_mailbox;
-// Hidden tester-feedback unlock (Settings: tap the version line 7 times).
+mod nostr_frames;
+// One-off native start-up clean-up of retired mailbox files (BRIDGE).
 #[cfg(not(target_arch = "wasm32"))]
-mod tester_gate;
+mod retired_files;
 // Signet contacts sync (native only) — docs/foundations/2026-10-01-signet-contacts-sync.md.
 #[cfg(not(target_arch = "wasm32"))]
 mod signet_contacts;
@@ -1109,7 +1110,8 @@ pub(crate) struct GameState {
     pub(crate) loaded_columns: ahash::AHashSet<(i32, i32)>,
     /// Test Lab: index into the ranked `test_board` registry of the mission
     /// Satoshi is currently offering. Session-only (not persisted) — a verdict
-    /// goes to the mailbox immediately, so resuming just restarts the list.
+    /// is not kept anywhere (`test_board::queue_verdict`), so resuming just
+    /// restarts the list.
     pub(crate) mission_idx: usize,
     /// Test Lab: the optional free-text note bound to the mission verdict field.
     pub(crate) mission_note: String,
@@ -2096,10 +2098,6 @@ impl GameState {
             cmd_registry: {
                 let mut r = commands::CommandRegistry::new();
                 commands::builtins::register_all(&mut r);
-                // Alpha-tester gate: /bug, /idea, /mailbox stay hidden unless
-                // the player unlocked them in Settings (native only).
-                #[cfg(not(target_arch = "wasm32"))]
-                crate::native_mailbox::apply_gate(&mut r, &graphics);
                 r
             },
             autosave_counter: 0,
@@ -3310,13 +3308,10 @@ fn native_boot_services() {
         None => log::info!("Playing as guest — sign-in is optional"),
     }
 
-    // Native mailbox: start the background worker now — it retires the old
-    // device key/inbox files, flushes any queued report, and reads the public
-    // feedback status board off the frame thread. `profile_dir()` is the same
-    // data-dir `profile/` the Signet identity above uses (session_path() in
-    // signet/native_signer.rs) — consistent by design.
+    // Retired in-game feedback: delete the files it left in the profile
+    // directory (the same `profile/` the Signet identity above uses).
     #[cfg(not(target_arch = "wasm32"))]
-    crate::native_mailbox::init(&crate::data_dir::profile_dir());
+    crate::retired_files::remove_retired_mailbox_files(&crate::data_dir::profile_dir());
 
     // Signet contacts sync: boot fetch + the 15-minute loop, on its own
     // worker thread (never the frame thread).

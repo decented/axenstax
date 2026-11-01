@@ -8,9 +8,10 @@
 //! ## Why this exists
 //!
 //! A native build gave the player no way to tell what they were running. On
-//! 2026-07-29 a `/bug` sent "from the native AppImage" never arrived — the
-//! installed build turned out to be from 9 June, a month older than the release
-//! that added the native mailbox, and nothing in the running game said so.
+//! 2026-07-29 a tester's report "from the native AppImage" described behaviour
+//! that had already been fixed — the installed build turned out to be from
+//! 9 June, a month older than the release that fixed it, and nothing in the
+//! running game said so.
 //!
 //! ## Shape
 //!

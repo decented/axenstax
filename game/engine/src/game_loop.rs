@@ -1911,10 +1911,6 @@ impl super::GameState {
         self.governor.rebase(&self.graphics);
         self.sync_graphics_to_engine();
         self.graphics.save();
-        // The tester-feedback unlock lives in these settings: re-gate the
-        // slash commands so it takes effect (or is withdrawn) immediately.
-        #[cfg(not(target_arch = "wasm32"))]
-        crate::native_mailbox::apply_gate(&mut self.cmd_registry, &self.graphics);
     }
 
     /// Exhibits — per-world art lifecycle. On first
@@ -5266,15 +5262,6 @@ impl super::GameState {
                     for id in item_ids {
                         let _ = self.ecs.despawn(id);
                     }
-                }
-                #[cfg(not(target_arch = "wasm32"))]
-                crate::commands::CommandResult::FeedbackQueued => {
-                    // Wind, Copper & Electricity wave §4 — `/bug` or
-                    // `/idea` went to the makers. The report is already
-                    // away (native outbox); this is the local Trial
-                    // counter, fired because the command hands off
-                    // before it returns.
-                    self.fire_challenge(crate::scenario::ChallengeEvent::SendFeedback);
                 }
                 crate::commands::CommandResult::RebuildRegion { min, max, changed } => {
                     // #7 — a /we edit changed blocks in a cuboid; re-mesh
@@ -8974,10 +8961,6 @@ impl super::GameState {
             // the pause-menu settings panel or the Relays window below).
             #[cfg(not(target_arch = "wasm32"))]
             menu_state.relays.clone_from(&self.graphics.online_relays);
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                menu_state.tester_feedback = crate::native_mailbox::feedback_enabled(&self.graphics);
-            }
             // CP20 (CP18 review MEDIUM-1): a handover that finished while
             // the lobby is up lists its world without leaving the lobby.
             #[cfg(not(target_arch = "wasm32"))]
@@ -9085,9 +9068,6 @@ impl super::GameState {
                     // Volume / mute are world-independent: apply them live in
                     // the lobby too (the rest is pushed on world entry).
                     self.audio.set_master(self.graphics.master_volume, self.graphics.audio_muted);
-                    // The tester unlock lives here: re-gate /bug, /idea, /mailbox.
-                    #[cfg(not(target_arch = "wasm32"))]
-                    crate::native_mailbox::apply_gate(&mut self.cmd_registry, &self.graphics);
                 }
                 if plan.apply_display {
                     // A lobby change is the player's own: drop any governor offset.
@@ -21092,11 +21072,7 @@ impl super::GameState {
         // one's progress. Starting routes through the same `start_scenario` the
         // command uses, so the two can't drift.
         if self.challenge_board_open {
-            #[cfg(not(target_arch = "wasm32"))]
-            let feedback_on = crate::native_mailbox::feedback_enabled(&self.graphics);
-            #[cfg(target_arch = "wasm32")]
-            let feedback_on = false;
-            let listing = crate::scenario::challenge_listing_visible(feedback_on);
+            let listing = crate::scenario::challenge_listing();
             let rows: Vec<crate::challenge_board_ui::ChallengeRow> = listing
                 .iter()
                 .map(|(name, display)| crate::challenge_board_ui::ChallengeRow {

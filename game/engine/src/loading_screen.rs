@@ -356,8 +356,7 @@ mod tests {
 
     #[test]
     fn loading_cards_never_ask_for_feedback_or_claim_gamepad() {
-        // The web build has NO feedback channel, and native /bug, /idea and
-        // /mailbox are off by default behind a hidden tester unlock — so a
+        // The game has NO feedback channel — so a
         // loading card must never tell a player to send feedback (the old
         // "New — tell us how it feels" cards did). Gamepad support is parked:
         // no card claims it.

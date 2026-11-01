@@ -44,9 +44,8 @@ pub fn rank_items(items: &mut [TestItem]) {
 }
 
 /// A tester's verdict on a mission. There is NO transport for it: the only one
-/// was the browser build's lobby mailbox, removed 2026-10-01 (the browser build
-/// has no feedback channel at all), and the native mailbox is for `/bug` and
-/// `/idea`, not verdicts. The mission dialogue still lets a tester step through
+/// was the browser build's lobby mailbox, removed 2026-10-01, and the game has
+/// no feedback channel at all (native feedback removed 2026-11-01). The mission dialogue still lets a tester step through
 /// the list; the verdict goes nowhere and this returns the line to show the
 /// player, which says so.
 pub fn queue_verdict(_ref_id: &str, _good: bool, _note: &str) -> String {

@@ -24,8 +24,8 @@ use serde::{Deserialize, Serialize};
 
 /// A relay that must never carry a group's conversation.
 ///
-/// `relay.trotters.cc` is ours. It exists for discovery hints, Signet sign-in
-/// and feedback. A family's chat travelling over it would make AxeNStax the
+/// `relay.trotters.cc` is ours. It exists for discovery hints and Signet
+/// sign-in. A family's chat travelling over it would make AxeNStax the
 /// operator of the channel, which is the second regulatory red line
 /// (`CLAUDE.md`) and the whole reason this lint exists.
 ///
@@ -60,7 +60,7 @@ impl RelayError {
             }
             RelayError::AllForbidden => format!(
                 "Every relay given was {FORBIDDEN_RELAY_HOST}, which is AxeNStax \
-                 infrastructure for discovery hints, sign-in and feedback — it \
+                 infrastructure for discovery hints and sign-in — it \
                  must never carry a group's conversation. Supply your own relays."
             ),
             RelayError::NotARelayUrl(u) => {
