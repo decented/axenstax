@@ -2887,6 +2887,10 @@ pub struct ServerAnnouncePacket {
 ///   fingerprint for every generator after v2 (v2's stays in
 ///   `worldgen_version`, the same value as before). A `ColumnLocal` hash
 ///   covers 16 chunks.
+/// - v96 (D2c-3 ordered park): two append-only fixed handover `Frame`
+///   variants, FreezeFence (13) and Parked (14). Consent drains the
+///   recipient's normal receive and application up to the fence before it
+///   parks and signs the Parked proof (Spec 04 "Wire 96 ordered park").
 pub const PROTOCOL_VERSION: u32 = 96;
 
 /// The `protocol_version` of a JoinRequest payload that doesn't decode as this
@@ -3075,7 +3079,8 @@ mod tests {
         // v92 — D2c-3 quest foundation; v93 — "Host Game" and its joins on Fray;
         // v94 — building variants, block ids 320..=372.
         // v95 — terrain T1: 256-block world, per-world terrain generator.
-        assert_eq!(super::PROTOCOL_VERSION, 95);
+        // v96 — D2c-3 ordered park: FreezeFence (13) and Parked (14) frames.
+        assert_eq!(super::PROTOCOL_VERSION, 96);
     }
 
     #[test]
@@ -3833,7 +3838,8 @@ mod tests {
         // v93 (Fray): "Host Game" and its joins on Fray's transport.
         // v94 (building variants): new block ids 320..=372, no packet change.
         // v95 (terrain T1): 256-block world, JoinAccept.generator, JoinRequest.generator_fingerprints.
-        assert_eq!(PROTOCOL_VERSION, 95);
+        // v96 (D2c-3 ordered park): handover FreezeFence (13) and Parked (14) frames.
+        assert_eq!(PROTOCOL_VERSION, 96);
     }
 
     fn sample_accept() -> JoinAcceptPacket {

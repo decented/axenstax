@@ -988,8 +988,10 @@ mod session {
     fn stream(p: &mut Pair, rounds: usize) {
         let tally = p.host.world.sim_tally;
         // M1: the import runs on a worker; rounds spent waiting for it don't
-        // count, but a wall-clock bound does.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        // count, but a wall-clock bound does. Alone this takes 25-36 s on the
+        // slow ecryptfs test folder; under the full parallel `cargo test --lib`
+        // it overran 60 s once, so the bound allows 180 s.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
         let mut n = 0;
         while n < rounds && std::time::Instant::now() < deadline {
             if p.dst.as_ref().unwrap().stage() == RecipientStage::Importing {

@@ -280,6 +280,11 @@ impl HostedServer {
     /// whose transport alone has closed: a broken link, a disconnect or a
     /// reconnect is refused first, and a closed seat with nothing queued is
     /// refused as before.
+    ///
+    /// Since wire 96 the source reads its control frames through the bounded
+    /// ordered-park pump; this generic reader is kept for the low-level link
+    /// tests.
+    #[cfg_attr(not(test), expect(dead_code, reason = "generic link reader kept for low-level link tests since wire 96"))]
     pub fn handover_take_frames(&mut self) -> Result<Vec<Vec<u8>>, LinkError> {
         let (slot, generation, key, frozen) = match &self.handover {
             Some(l) if l.broken.is_some() => return self.handover_check().map(|()| Vec::new()),
