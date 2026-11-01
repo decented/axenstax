@@ -14,6 +14,11 @@
 //! in which the streamer loads the whole sim distance. Then a scripted build
 //! (blocks placed by every body, items in every joiner's window), a save, and
 //! the bytes on disk of the touched-chunk files and the joiner sidecars.
+//! `GameServer::tick` only: no transport, admission or per-client diff
+//! (`HostedServer::tick`), so this is the simulation's share of a tick. Three
+//! ticks in four skip the fluid and machine pass, so p50 reads that cheap path;
+//! read p99 and the mean for the load. The fire field has burnt out by the end
+//! of the warm-up, so the machines are mostly idle scans here.
 //!
 //! Lives under `#[cfg(test)]`, so its `Instant` is outside the tick lint.
 
@@ -126,13 +131,24 @@ fn tick_bench_joiners_at_sim_distance_8() {
                 let _ = h.server.players[slot].inventory.add_item(stack);
             }
         }
+        // A server save writes every non-empty chunk it holds, touched or not
+        // (`GameServer::try_save`), so `chunks/` is not the touched set: count
+        // that separately, by the flag eviction keeps a column for.
+        let touched = h
+            .server
+            .world
+            .persistable_chunks()
+            .filter(|(_, c)| c.persist() && !c.is_empty())
+            .count();
+        let touched_bytes = touched * crate::chunk::Chunk::new().as_bytes().len();
         h.server.try_save().expect("bench world saves");
         let dir = crate::save::world_dir(&name);
         let (chunk_bytes, chunk_files) = dir_bytes(&dir.join("chunks"));
         let (sidecar_bytes, sidecars) = dir_bytes(&dir.join("joiners"));
         let (all_bytes, all_files) = dir_bytes(&dir);
         eprintln!(
-            "tick_bench joiners={joiners} save: chunks/ {chunk_files} files {chunk_bytes} B; \
+            "tick_bench joiners={joiners} save: touched {touched} chunks {touched_bytes} B; \
+             chunks/ {chunk_files} files {chunk_bytes} B (all non-empty); \
              joiners/ {sidecars} sidecars {sidecar_bytes} B; world dir {all_files} files {all_bytes} B"
         );
     }

@@ -1219,7 +1219,11 @@ phases and the systems they call):
   calls. Its allowlist holds only construction-time identities (the run id,
   the reputation clock's owner), each with its reason.
 - `sim_digest` is a game-owned regression signal, not the Fray contract
-  `state_hash`; floats are compared as bits within one architecture only.
+  `state_hash`; floats are compared as bits within one architecture only. It is
+  the SHA-256 of the sorted `(name, digest)` pairs of `sim_digest_sections`:
+  `block_entities`, `chunks`, `clocks`, `fire_fluid_queues`, `item_drops`,
+  `players`, `projectiles`, `tamed_entities` and `wild_mobs`, so two runs can be
+  compared section by section.
 
 
 ### 4.2 Client Frame Loop

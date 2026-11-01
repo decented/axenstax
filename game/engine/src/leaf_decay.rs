@@ -57,7 +57,17 @@ pub struct LeafDecaySystem {
     pending_sapling_drops: Vec<(i32, i32, i32, crate::item::MaterialId)>,
 }
 
+/// Check queue, decay queue, tick, for `GameServer::sim_digest`.
+pub(crate) type LeafDigestView = (Vec<(i32, i32, i32)>, Vec<(i32, i32, i32, u64)>, u64);
+
 impl LeafDecaySystem {
+    /// Keep slice 1 — the queues in order (which is state) and the tick, for
+    /// `GameServer::sim_digest`.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn digest_view(&self) -> LeafDigestView {
+        (self.check_queue.clone(), self.decay_queue.clone(), self.tick)
+    }
+
     /// Drain the sapling drops rolled since the last call (2026-07-04).
     pub fn take_sapling_drops(&mut self) -> Vec<(i32, i32, i32, crate::item::MaterialId)> {
         std::mem::take(&mut self.pending_sapling_drops)

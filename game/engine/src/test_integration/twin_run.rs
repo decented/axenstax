@@ -230,13 +230,8 @@ pub(crate) fn run_to(h: &mut TestHost, target: u64) {
 
 /// The sections that differ between two twins, by name.
 fn differing(a: &TestHost, b: &TestHost) -> Vec<&'static str> {
-    a.server
-        .sim_digest_sections()
-        .into_iter()
-        .zip(b.server.sim_digest_sections())
-        .filter(|((_, da), (_, db))| da != db)
-        .map(|((name, _), _)| name)
-        .collect()
+    let (sa, sb) = (a.server.sim_digest_sections(), b.server.sim_digest_sections());
+    sa.iter().filter(|(name, d)| sb.get(*name) != Some(*d)).map(|(name, _)| *name).collect()
 }
 
 #[test]
@@ -285,6 +280,54 @@ fn twin_run_different_seed_different_digest() {
     run_to(&mut a, 1);
     run_to(&mut b, 1);
     assert_ne!(a.server.sim_digest(), b.server.sim_digest(), "another seed, another world");
+}
+
+/// Copy a world folder (the twins must not share one).
+fn copy_dir(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::create_dir_all(to).expect("create world copy");
+    for entry in std::fs::read_dir(from).expect("read world") {
+        let entry = entry.expect("dir entry");
+        let target = to.join(entry.file_name());
+        if entry.file_type().expect("file type").is_dir() {
+            copy_dir(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), &target).expect("copy world file");
+        }
+    }
+}
+
+/// A saved world opened twice: `initial_load`'s saved-world path relights,
+/// re-registers and scatters every column, and that scatter allocates entity
+/// ids. The fresh-world path the other tests take walks its region in a fixed
+/// loop; this one used to walk a hash set.
+#[test]
+fn twin_run_saved_world_loads_the_same() {
+    let _root = WorldsRootGuard::new("keep-s1-twin-load");
+    let mut src = twin(4242, "load-src", 0, 2);
+    run_to(&mut src, 40);
+    src.server.try_save().expect("source world saves");
+    for name in ["load-a", "load-b"] {
+        copy_dir(&crate::save::world_dir("load-src"), &crate::save::world_dir(name));
+    }
+    let open = |name: &str| {
+        TestHost::start_seeded(
+            TestConfig {
+                seed: 4242,
+                world_name: name.to_string(),
+                do_initial_load: true,
+                ..TestConfig::default()
+            },
+            LOAD_RADIUS,
+        )
+    };
+    let (mut a, mut b) = (open("load-a"), open("load-b"));
+    assert!(a.server.ecs.len() > 0, "the load scattered wildlife");
+    assert_eq!(differing(&a, &b), Vec::<&str>::new(), "twins differ straight after loading");
+    a.server.simulates_block_machines = true;
+    b.server.simulates_block_machines = true;
+    a.tick(200);
+    b.tick(200);
+    assert_eq!(differing(&a, &b), Vec::<&str>::new(), "twins differ 200 ticks after loading");
 }
 
 /// Diagnostic, not part of the gate: ticks two twins in lock-step and reports

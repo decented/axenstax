@@ -32,6 +32,17 @@ impl WaterSystem {
         }
     }
 
+    /// Keep slice 1 — sources (sorted) and the pending fronts (in queue order,
+    /// which is state), for `GameServer::sim_digest`.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn digest_view(&self) -> crate::fluids::FluidDigestView {
+        (
+            self.sources.sorted(),
+            self.spread_queue.iter().copied().collect(),
+            self.retract_queue.iter().copied().collect(),
+        )
+    }
+
     /// Register a water source (world-gen or player-placed).
     pub fn add_source(&mut self, x: i32, y: i32, z: i32) {
         if self.sources.insert((x, y, z)) {

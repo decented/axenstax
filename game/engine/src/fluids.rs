@@ -72,6 +72,9 @@ pub fn reconcile_frozen_lava_sources(
     }
 }
 
+/// Sources, spread queue, retract queue, for `GameServer::sim_digest`.
+pub(crate) type FluidDigestView = (Vec<(i32, i32, i32)>, Vec<(i32, i32, i32, u8)>, Vec<(i32, i32, i32)>);
+
 /// A fluid system's source cells, indexed by chunk column so a column that
 /// streams out can be forgotten in one step (Phase B1 review). Water registers
 /// every water block of a streamed-in column as a source, so a flat set grew
@@ -115,6 +118,14 @@ impl SourceSet {
     /// them. Returns how many were forgotten.
     pub fn forget_column(&mut self, cx: i32, cz: i32) -> usize {
         self.by_column.remove(&(cx, cz)).map_or(0, |s| s.len())
+    }
+
+    /// Every source, sorted (`GameServer::sim_digest`).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn sorted(&self) -> Vec<(i32, i32, i32)> {
+        let mut all: Vec<_> = self.by_column.values().flatten().copied().collect();
+        all.sort_unstable();
+        all
     }
 
     /// How many sources are held, across every column.

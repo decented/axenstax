@@ -39,6 +39,12 @@ impl DayClock {
     pub(crate) fn with_owner(owner: [u8; 16]) -> Self {
         Self { owner: OwnerId(owner), remainder: 0, last_tick: None }
     }
+    /// Keep slice 1 — the day clock's progress without its per-run owner, for
+    /// `GameServer::sim_digest`.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn digest_view(&self) -> (u32, Option<u64>) {
+        (self.remainder, self.last_tick)
+    }
     pub(crate) fn owner(&self) -> OwnerId {
         self.owner
     }
