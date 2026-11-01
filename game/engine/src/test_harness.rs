@@ -99,6 +99,61 @@ impl TestHost {
         }
     }
 
+    /// Keep slice 1 — a host whose world seed is `config.seed` (honoured here,
+    /// unlike [`Self::start_with`], which pins 42 for the tests written
+    /// against that terrain) and whose every other per-run draw from the OS
+    /// is derived from the seed instead: the Proof-of-Play secret, the run id
+    /// and the reputation clock's owner. Two hosts built from the same config
+    /// therefore start bit-identical, which is what a twin-run determinism
+    /// test needs. Test-only: production worlds still draw a new seed from
+    /// the OS (`save::gen_random_seed`); nothing here touches a save.
+    ///
+    /// `render_distance` (columns, radius) bounds the `initial_load` region
+    /// when `config.do_initial_load` is set. `config.world_name` must differ
+    /// between hosts alive at once (each opens its own world folder).
+    pub fn start_seeded(config: TestConfig, render_distance: i32) -> Self {
+        let seed = config.seed;
+        let derive = |tag: &str| -> [u8; 32] {
+            use sha2::{Digest, Sha256};
+            let mut h = Sha256::new();
+            h.update(b"axenstax-test-seeded:");
+            h.update(tag.as_bytes());
+            h.update(seed.to_le_bytes());
+            h.finalize().into()
+        };
+        let mut server = GameServer::new(config.num_players, config.world_name.clone(), seed);
+        server.render_distance = render_distance;
+        server.biome_gen = crate::biome::BiomeGenerator::new(seed, config.generator);
+        server.world.generator = config.generator;
+        let mut run_id = [0u8; 16];
+        run_id.copy_from_slice(&derive("run-id")[..16]);
+        server.run_id = run_id;
+        let mut owner = [0u8; 16];
+        owner.copy_from_slice(&derive("day-owner")[..16]);
+        server.reputation_day = crate::reputation_day::DayClock::with_owner(owner);
+        if config.do_initial_load {
+            server.initial_load().expect("TestHost seeded initial load");
+            // `initial_load` reads the meta's generator; keep the config's.
+            server.biome_gen = crate::biome::BiomeGenerator::new(seed, config.generator);
+            server.world.generator = config.generator;
+        } else {
+            for cx in -4..4 {
+                for cz in -4..4 {
+                    server.loaded_columns.insert((cx, cz));
+                }
+            }
+        }
+        // After the load: a fresh world's meta carries no secret to read.
+        server.pop_secret = derive("pop-secret");
+        server.set_play_mode(config.play_mode);
+        server.difficulty = crate::survival::Difficulty::from_meta_str(&config.difficulty);
+        Self {
+            server,
+            camera_modes: vec![crate::camera::CameraMode::FirstPerson; config.num_players],
+            collision_frac: vec![1.0; config.num_players],
+        }
+    }
+
     /// Advance the server by `n` ticks.
     pub fn tick(&mut self, n: u32) {
         for _ in 0..n {

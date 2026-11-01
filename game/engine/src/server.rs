@@ -1405,16 +1405,22 @@ impl GameServer {
             crate::steed_save::restore_pets(&mut self.ecs, &save_data.saved_mobs, false)?;
             if let Some(saved) = &save_data.quest_world { crate::quest_npcs::restore(&mut self.ecs, saved)?; }
 
+            // Tick determinism (Spec 01 §4.1.4): the saved columns in
+            // position order, not hash order — light crosses column seams,
+            // and the scatter below allocates entity ids in this order.
+            let mut saved_columns: Vec<(i32, i32)> = self.loaded_columns.iter().copied().collect();
+            saved_columns.sort_unstable();
+
             // Spec 30 — light data isn't persisted; recompute
             // from block state for every loaded column.
-            for &(cx, cz) in &self.loaded_columns.iter().copied().collect::<Vec<_>>() {
+            for &(cx, cz) in &saved_columns {
                 crate::lighting::run_initial_pass_for_column(
                     &mut self.world, cx, cz, &self.registry,
                 );
             }
 
             // Register water + lava sources
-            for &(cx, cz) in &self.loaded_columns.iter().copied().collect::<Vec<_>>() {
+            for &(cx, cz) in &saved_columns {
                 self.water.register_column_sources(cx, cz, &self.world);
                 self.lava.register_column_sources(cx, cz, &self.world);
                 self.fire.register_column_fires(cx, cz, &self.world, self.tick_counter);
@@ -1439,8 +1445,11 @@ impl GameServer {
                 }
             }
 
-            // Scatter mobs
-            for &(cx, cz) in &self.loaded_columns.iter().copied().collect::<Vec<_>>() {
+            // Scatter mobs — every loaded column, now including the ones
+            // generated just above, in position order.
+            let mut scatter_columns: Vec<(i32, i32)> = self.loaded_columns.iter().copied().collect();
+            scatter_columns.sort_unstable();
+            for &(cx, cz) in &scatter_columns {
                 entity::scatter_mobs_in_column(&mut self.ecs, cx, cz, &self.world, &self.biome_gen);
             }
 

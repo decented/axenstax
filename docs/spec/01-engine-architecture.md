@@ -1192,6 +1192,35 @@ The default flip still needs the owner's playtest. Clock/weather, mobs and
 death now have shared authority paths (D4 slices 2–4); client-only machines and
 construction remain slice 5. The default stays standalone.
 
+### 4.1.4 Tick determinism (Keep slice 1, 2026-11-01)
+
+The same world, seed and events at the same ticks must give the same
+simulated state, run after run. Two `TestHost` servers in one process prove it
+(`test_integration/twin_run.rs`: equal `GameServer::sim_digest` at ticks 1,
+200 and 2,000 over fire, furnaces, hoppers, campfires, water, mobs and two
+streaming joiners). Rules for every tick path (`GameServer::tick`, the `sim_*`
+phases and the systems they call):
+
+- **Outcome-affecting iteration over a hash container is sorted** by position
+  or key at the point of use. `ahash` keys are random per map (deliberately:
+  fixed keys would open a hash-collision DoS from joiner-chosen positions), so
+  iteration order differs between two servers. It matters wherever a budget
+  or a `take(n)` picks a subset, two cells share state, or the order allocates
+  hecs entity ids (mob AI rolls hash the id). Sorted today: fire's due budget
+  (`fire.rs`, earliest due then position), the hopper transfer list
+  (`hopper.rs`), furnace and campfire visits (`sim_machines.rs`), the saved
+  columns' light/fluid/scatter pass in `GameServer::initial_load`, and the
+  stream-out column list (`chunk_stream::columns_outside_anchors`). Order-free
+  uses (lookups, sums, independent per-cell updates) need nothing.
+- **No wall clock and no OS randomness in a tick path.** Time is the tick
+  counter; randomness is a hash of tick, position, seed and entity id.
+  `test_integration/tick_determinism_lint.rs` fails on `Instant`, `SystemTime`
+  or `getrandom` in `server.rs`, every `sim_*` module and the systems the tick
+  calls. Its allowlist holds only construction-time identities (the run id,
+  the reputation clock's owner), each with its reason.
+- `sim_digest` is a game-owned regression signal, not the Fray contract
+  `state_hash`; floats are compared as bits within one architecture only.
+
 
 ### 4.2 Client Frame Loop
 

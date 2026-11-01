@@ -173,7 +173,10 @@ pub fn step(
     }
     tick_campfires(ctx, changes);
 
-    let furnaces: Vec<_> = ctx.world.iter_furnaces().map(|(p, _)| p).collect();
+    // Tick determinism (Spec 01 §4.1.4): a full batch defers the furnaces
+    // after it, so they are visited in position order, not hash order.
+    let mut furnaces: Vec<_> = ctx.world.iter_furnaces().map(|(p, _)| p).collect();
+    furnaces.sort_unstable();
     for pos in furnaces {
         // If this furnace could finish, its policy fact must fit before even
         // its fuel/input changes. A full batch defers the remaining furnaces.
@@ -247,7 +250,10 @@ pub fn step(
 }
 
 fn tick_campfires(ctx: &mut MachineCtx<'_>, changes: &mut Vec<BlockChange>) {
-    let positions: Vec<_> = ctx.world.block_entities.keys().copied().collect();
+    // Tick determinism (Spec 01 §4.1.4): a campfire's smoke pillar and lit
+    // flip write cells a neighbour's pass reads, so position order.
+    let mut positions: Vec<_> = ctx.world.block_entities.keys().copied().collect();
+    positions.sort_unstable();
     for pos in positions {
         if !ctx.world.is_column_present_at(pos.0, pos.2) {
             continue;

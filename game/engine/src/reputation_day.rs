@@ -33,6 +33,12 @@ impl DayClock {
             last_tick: None,
         }
     }
+    /// Keep slice 1 — a clock with a caller-chosen owner, so two seeded test
+    /// servers start identical (`TestHost::start_seeded`). Test-only.
+    #[cfg(test)]
+    pub(crate) fn with_owner(owner: [u8; 16]) -> Self {
+        Self { owner: OwnerId(owner), remainder: 0, last_tick: None }
+    }
     pub(crate) fn owner(&self) -> OwnerId {
         self.owner
     }

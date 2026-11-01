@@ -164,6 +164,15 @@ impl FireSystem {
         lit
     }
 
+    /// Keep slice 1 — every burning cell with its timers, sorted by position,
+    /// for `GameServer::sim_digest`.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn digest_view(&self) -> Vec<((i32, i32, i32), u64, u8)> {
+        let mut v: Vec<_> = self.cells.iter().map(|(p, c)| (*p, c.next_event, c.age)).collect();
+        v.sort_unstable_by_key(|(p, _, _)| *p);
+        v
+    }
+
     /// Advance every due fire cell. Returns dirty positions (block changed)
     /// for re-meshing / lighting / broadcast. `raining` is the caller's
     /// weather flag; `spread_enabled` is the world's `fire_spread_enabled`.
@@ -175,13 +184,18 @@ impl FireSystem {
         spread_enabled: bool,
     ) -> Vec<(i32, i32, i32)> {
         let mut dirty: Vec<(i32, i32, i32)> = Vec::new();
-        let due: Vec<(i32, i32, i32)> = self
+        // Tick determinism (Spec 01 §4.1.4): more than `EVENT_BUDGET` cells
+        // can be due at once, and the cells map is a hash map, so the budget's
+        // pick must not follow its iteration order. Earliest due first, then
+        // by position.
+        let mut due: Vec<(u64, (i32, i32, i32))> = self
             .cells
             .iter()
             .filter(|(_, c)| c.next_event <= now)
-            .map(|(p, _)| *p)
-            .take(EVENT_BUDGET)
+            .map(|(p, c)| (c.next_event, *p))
             .collect();
+        due.sort_unstable();
+        let due: Vec<(i32, i32, i32)> = due.into_iter().take(EVENT_BUDGET).map(|(_, p)| p).collect();
 
         for pos in due {
             let (x, y, z) = pos;

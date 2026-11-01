@@ -103,3 +103,6 @@ pub mod building_variants; // Building variants — every wood's and stone's sla
 pub mod machine_index;
 // Terrain T1 — the 256-block world and the per-world terrain generator.
 pub mod tall_world;
+pub mod twin_run; // Keep slice 1 — twin-run determinism (two seeded servers, one digest).
+pub mod tick_determinism_lint; // Keep slice 1 — no wall clock or OS randomness in tick paths.
+pub mod tick_bench; // Keep slice 1 — #[ignore] release bench of GameServer::tick (handoff §8).

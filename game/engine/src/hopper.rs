@@ -112,6 +112,11 @@ pub fn collect_hopper_transfers(world: &World) -> Vec<((i32, i32, i32), (i32, i3
             }
         }
     }
+    // Tick determinism (Spec 01 §4.1.4): `chunks_with_hoppers` walks a hash
+    // map, and two hoppers in different chunks can share a container (one
+    // above a chunk boundary, one below), so the visit order decides how far
+    // an item moves in one pass. Visit in position order.
+    out.sort_unstable();
     out
 }
 

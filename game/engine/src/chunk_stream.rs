@@ -1503,11 +1503,16 @@ pub(crate) fn columns_outside_anchors(
     anchors: &[StreamAnchor],
     slack: i32,
 ) -> Vec<(i32, i32)> {
-    loaded
+    // Tick determinism (Spec 01 §4.1.4): stream-out despawns each column's
+    // wildlife, and despawn order is the hecs free list, which picks the ids
+    // of the next spawns (and mob AI rolls hash ids). Position order.
+    let mut out: Vec<(i32, i32)> = loaded
         .iter()
         .filter(|&&(cx, cz)| anchors.iter().all(|a| a.lets_go(cx, cz, slack)))
         .copied()
-        .collect()
+        .collect();
+    out.sort_unstable();
+    out
 }
 
 /// World side of unloading a column (Spec 02 §7.5): edited / saved columns go
