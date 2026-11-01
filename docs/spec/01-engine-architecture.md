@@ -1212,6 +1212,13 @@ phases and the systems they call):
   columns' light/fluid/scatter pass in `GameServer::initial_load`, and the
   stream-out column list (`chunk_stream::columns_outside_anchors`). Order-free
   uses (lookups, sums, independent per-cell updates) need nothing.
+  *Not yet covered:* the twin fixture does not reach pistons, dispensers,
+  saplings, keg fuses, brigand hideouts or construction, and each still walks a
+  hash container (`piston::collect_piston_positions`,
+  `dispenser::tick_dispensers`, `growth::collect_sapling_positions`,
+  `power::tick_keg_fuses_bounded`, `brigand_hideout_gen`,
+  `sim_machines::tick_construction`). Treat them as open: extend the fixture,
+  see them part, then sort them.
 - **No wall clock and no OS randomness in a tick path.** Time is the tick
   counter; randomness is a hash of tick, position, seed and entity id.
   `test_integration/tick_determinism_lint.rs` fails on `Instant`, `SystemTime`
