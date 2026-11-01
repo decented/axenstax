@@ -558,8 +558,9 @@ fn try_unequip_pack(ecs: &mut hecs::World, target: hecs::Entity) -> PackUnequip 
 // frame — every slow step is behind `online_prep`'s worker thread.
 /// Push a freshly written contacts book into a world that is being hosted
 /// online right now — with the Signet blocks read alongside it, so a block
-/// leaves the whitelist, lands on the blocklist, and drops a blocked player
-/// already in the world (D8).
+/// leaves the whitelist and lands on the blocklist (D8). `set_access_policy`
+/// removes anyone it now refuses from the world, a blocked player or a contact
+/// no longer in the book alike.
 ///
 /// `OnlineHost` admits from a **snapshot** taken when hosting started (see its
 /// module docs), and `HostedServer::set_access_policy` *replaces* its whitelist
@@ -582,7 +583,6 @@ pub(crate) fn push_book_to_online_host(
     host.set_book(book.to_vec(), blocked.to_vec());
     let (list, blocklist) = host.access_policy();
     server.set_access_policy(true, list, blocklist);
-    server.kick_pubkeys(host.blocked());
 }
 
 #[cfg(not(target_arch = "wasm32"))]

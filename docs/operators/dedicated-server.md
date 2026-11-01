@@ -336,6 +336,9 @@ are refused.
   `require_signin`, for anything other than not existing), the server refuses to
   boot and names the file. While running it keeps the last good value for that file
   and warns once per problem.
+- **A change reaches players already in the world.** Within about 5 seconds of a
+  block, a removal from the allowlist, or sign-in turning on, anyone the new policy
+  refuses is removed and told why.
 
 **Age gates are not yet enforced** — that needs a verifiable Signet *age* credential
 (the engine today only carries the kind-31000 display-name credential).

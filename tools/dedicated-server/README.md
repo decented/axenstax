@@ -299,7 +299,8 @@ non-blank**. An empty allowlist admits nobody, so removing the last npub leaves 
 server closed. To turn it off, delete `whitelist.txt`, use the Console's *Turn
 allowlist off*, or send `whitelist-off`, and unset `AXENSTAX_WHITELIST`. Invalid lines
 are skipped with a warning and never widen access; a policy file that can't be read
-refuses boot, and on a running server keeps the last good value.
+refuses boot, and on a running server keeps the last good value. A change reaches
+players already in the world within about 5 seconds: anyone it refuses is removed.
 
 ```bash
 # Invite-only server: only these two npubs may join.

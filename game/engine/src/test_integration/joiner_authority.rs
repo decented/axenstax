@@ -110,7 +110,7 @@ fn accepted_index(client: &ChannelClientTransport) -> Option<usize> {
     accepted(client).map(|a| a.player_index as usize)
 }
 
-fn got_reject(client: &ChannelClientTransport) -> Option<String> {
+pub(super) fn got_reject(client: &ChannelClientTransport) -> Option<String> {
     while let Some(pkt) = client.try_recv_from_server() {
         if let Some((ptype, payload)) = protocol::deserialize_header(&pkt)
             && ptype == protocol::PacketType::JoinReject

@@ -185,6 +185,27 @@ fn handover_frozen_guest_flood_is_bounded_and_kicked_at_release() {
     assert_eq!(hs.handover_test_deferred_overflow(), 0);
 }
 
+/// A world frozen for a handover releases nobody; a policy change made
+/// meanwhile lands on the first tick after the freeze ends.
+#[test]
+fn a_policy_change_during_a_freeze_waits_for_the_release() {
+    let (mut hs, mut host) = start_prepared_lent("handover-policy");
+    let (_client, slot, generation, key) = signed_join_lent(&mut hs, &mut host, [0x56; 32]);
+    let (_guest, guest_slot, _, _) = signed_join_lent(&mut hs, &mut host, [0x57; 32]);
+    let _lease = hs.handover_bind(slot, generation, key, T).unwrap();
+    hs.handover_freeze(None).unwrap();
+    let guest_key = hs.server.players[guest_slot].verified_pubkey.unwrap();
+
+    hs.set_access_policy(true, crate::access_policy::Allow::Open, vec![guest_key]);
+    host.lend_tick(&mut hs);
+    assert!(!hs.slot_is_free(guest_slot), "nobody is released from a frozen world");
+
+    hs.handover_release();
+    host.lend_tick(&mut hs);
+    assert!(hs.slot_is_free(guest_slot), "the block landed after the freeze");
+    assert!(!hs.slot_is_free(slot), "and only on the blocked player");
+}
+
 #[test]
 fn handover_eligibility_refuses_live_seat_state_it_cannot_carry() {
     use crate::handover::live::eligibility::{Refusal, Seat, seats};

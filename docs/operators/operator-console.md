@@ -96,7 +96,8 @@ AXENSTAX_IDENTITY_DIR=/path/to/your/.identity ./start.sh
 2. **Access** — add npubs to the **allowlist** (only listed npubs may join) or
    **blocklist** (refused even if allowlisted — block always wins). Adding the first
    npub turns the allowlist on, and removing the last one leaves it on and **closes
-   the server**: press *Turn allowlist off* to open it again. Toggle
+   the server**: press *Turn allowlist off* to open it again. Anyone a change refuses
+   is removed from the world within about 5 seconds. Toggle
    *require sign-in* — on by default for a new server; turning it off admits anonymous
    guests and stays off across restarts. (A server set up with the old wizard, whose
    default was "Anyone", already has it off — tick it if you want sign-in; see the

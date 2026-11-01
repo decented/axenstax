@@ -457,14 +457,17 @@ impl OnlineHost {
     /// Replace the contacts snapshot this host admits from.
     ///
     /// The book handed to [`OnlineHost::start`] is a snapshot (see the module
-    /// docs). A contact added or re-tiered while a world is hosted only takes
-    /// effect once the owner of the mirror pushes the fresh book in here — the
-    /// game loop does that whenever it writes the mirror. Rows this host added
-    /// itself (an invite admission) are re-applied on top, so pushing a book
-    /// read before the admission cannot un-know somebody — unless Signet now
-    /// blocks them: `blocked` beats every source (D8), so a blocked pubkey
-    /// leaves the book, this session's admissions and (through
-    /// [`OnlineHost::access_policy`]) the server's whitelist.
+    /// docs). A contact added, re-tiered or removed while a world is hosted only
+    /// takes effect once the owner of the mirror pushes the fresh book in here —
+    /// the game loop does that whenever it writes the mirror.
+    ///
+    /// Rows this host added itself (an invite admission) are re-applied on top,
+    /// so pushing a book read before the admission cannot un-know somebody:
+    /// somebody a bearer let in stays admitted until they are blocked. Anyone
+    /// else this session admitted must still be close enough in the new book, or
+    /// they leave the session's admissions too. `blocked` beats every source
+    /// (D8), so a blocked pubkey leaves the book, this session's admissions and
+    /// (through [`OnlineHost::access_policy`]) the server's whitelist.
     pub fn set_book(&mut self, book: Vec<Contact>, blocked: Vec<[u8; 32]>) {
         let mine: Vec<Contact> = self
             .book
@@ -477,16 +480,15 @@ impl OnlineHost {
         for c in mine {
             upsert(&mut self.book, c);
         }
-        self.allowlist.retain(|pk| !blocked.contains(pk));
+        let new_book = &self.book;
+        self.allowlist.retain(|pk| {
+            !blocked.contains(pk)
+                && crate::online_admission::admits_play(crate::contacts::tier_of(new_book, pk))
+        });
         self.blocked = blocked;
     }
 
-    /// The Signet-blocked pubkeys this host refuses.
-    pub fn blocked(&self) -> &[[u8; 32]] {
-        &self.blocked
-    }
-
-    /// `(whitelist, blocklist)` for `HostedServer::set_access_policy`: the
+    /// `(allowlist, blocklist)` for `HostedServer::set_access_policy`: the
     /// host, its close contacts and this session's admissions, minus every
     /// block — and the blocks themselves. Every push goes through here.
     pub fn access_policy(&self) -> (Allow, Vec<[u8; 32]>) {
@@ -831,7 +833,7 @@ impl OnlineHost {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::rendezvous::payload::{Offer, new_session_id, seal_offer};
     use crate::rendezvous::relay_client::{FakeRelayHub, RendezvousRelay};
@@ -884,7 +886,7 @@ mod tests {
     }
 
     /// A host wired to a fake relay, with `book` as its contacts.
-    fn a_host(hub: &FakeRelayHub, book: Vec<Contact>) -> (OnlineHost, Keys) {
+    pub(crate) fn a_host(hub: &FakeRelayHub, book: Vec<Contact>) -> (OnlineHost, Keys) {
         let host_persona = Keys::generate();
         let host_runtime = Keys::generate();
         // `pollster`, not `rt()`: most callers are already inside
@@ -917,7 +919,7 @@ mod tests {
         (host, host_runtime)
     }
 
-    fn a_contact(pk: [u8; 32], tier: crate::comms::Tier) -> Contact {
+    pub(crate) fn a_contact(pk: [u8; 32], tier: crate::comms::Tier) -> Contact {
         Contact {
             pubkey: pk,
             display_name: Some("Friend".to_string()),
@@ -1143,6 +1145,48 @@ mod tests {
                     .contains(&caller.persona.public_key().to_bytes())
             );
         });
+    }
+
+    #[test]
+    fn a_contact_who_is_no_longer_close_leaves_this_sessions_admissions() {
+        use crate::comms::Tier;
+        let hub = FakeRelayHub::new();
+        let book = vec![
+            a_contact([1; 32], Tier::Kith),
+            a_contact([2; 32], Tier::Kith),
+            a_contact([3; 32], Tier::Kith),
+        ];
+        let (mut host, _) = a_host(&hub, book);
+        host.allowlist.extend([[1; 32], [2; 32], [3; 32]]);
+
+        // [1] is gone from the book, [2] is downgraded, [3] is unchanged.
+        host.set_book(vec![a_contact([2; 32], Tier::Ken), a_contact([3; 32], Tier::Kith)], vec![]);
+
+        assert_eq!(host.allowlist(), &[[3; 32]], "only a contact still close enough stays");
+        let (whitelist, _) = host.access_policy();
+        assert!(!whitelist.admits(&[1; 32]) && !whitelist.admits(&[2; 32]), "{whitelist:?}");
+        assert!(whitelist.admits(&[3; 32]));
+    }
+
+    /// Invite rows are out of scope here: somebody a bearer let in stays
+    /// admitted until they are blocked.
+    #[test]
+    fn a_player_admitted_by_invite_stays_until_blocked() {
+        let hub = FakeRelayHub::new();
+        let (mut host, _) = a_host(&hub, vec![]);
+        host.book.push(Contact {
+            added_via: AddedVia::Invite,
+            ..a_contact([7; 32], crate::comms::Tier::Kith)
+        });
+        host.allowlist.push([7; 32]);
+
+        host.set_book(vec![], vec![]);
+        assert_eq!(host.allowlist(), &[[7; 32]], "a book without them does not remove them");
+        assert!(host.access_policy().0.admits(&[7; 32]));
+
+        host.set_book(vec![], vec![[7; 32]]);
+        assert!(host.allowlist().is_empty(), "a block does");
+        assert!(!host.access_policy().0.admits(&[7; 32]));
     }
 
     #[test]

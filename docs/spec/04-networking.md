@@ -148,6 +148,7 @@ The UDP + WebRTC design above is the destination. The **alpha self-hostable dedi
 - **Browser clients** connect over a single HTTPS origin that Caddy fronts, which reverse-proxies `/ws` to the engine: **`wss://host:8443/ws`** on a no-domain/LAN box (self-signed cert), or **`wss://host/ws`** on 443 when a real domain is configured (`AXENSTAX_DOMAIN` → ACME). WebGPU *requires* a secure context off-localhost, so the web path is always TLS.
 - The game socket port is **configurable** via `--port` / `AXENSTAX_WS_PORT`; the default lives in `ws_transport::DEFAULT_WS_PORT`.
 - **An allowlist is a mode, not a list that may be empty** (`access_policy::Allow`, 2026-11-01). `Allow::Open`: any identity the sign-in rule admits. `Allow::Only(set)`: guests refused and identities must be in the set, so an empty set admits nobody. Block always wins. On a dedicated server (`server_policy`) `whitelist.txt` existing or a non-blank `AXENSTAX_WHITELIST` means `Only` (the union of the valid entries; an invalid entry is skipped with a warning and never widens access), and neither means `Open`. Removing the last entry leaves the server closed, and turning the allowlist off means deleting the file (the `whitelist-off` admin command and the Console do that). Every source that can't be read refuses boot, and on the 5-second reload keeps its own last good value with one warning per distinct problem; only a file that doesn't exist counts as absent. Policy writes replace the file whole (`save::write_atomic`) and a read-modify-write stops on a failed read.
+- **A policy change reaches seated players** (2026-11-01). `HostedServer::set_access_policy` is the one way the policy changes. When it changes (and only then, so the 5-second reload is cheap) `enforce_access_policy` re-runs `decide_access` over every joiner past its handshake and releases those it now refuses with the ordinary teardown and the same reason a refused join gets: a block, a removal from the allowlist, `Only` tightening, or sign-in turning on for a seated guest. Local slots are not subject to it. On a lent world outside the lend window, or during a handover freeze, it waits for the next full tick and decides against the policy as it stands then.
 - **Sign-in is required by default** (2026-10-06, owner decision O-7 #3; see Spec 08 §9.0.1). `server_policy`: the `<identity-dir>/require_signin` file wins (exactly `true` or `false` after trimming, any case; anything else refuses boot and, on the 5-second reload, keeps the last good value with one warning); else `require_signin = !allow_guests` (`--allow-guests` bare or `--allow-guests 1`, or `AXENSTAX_ALLOW_GUESTS=1`; `--allow-guests 0` / `=false` keeps sign-in required, and a non-boolean value refuses to boot). A server set up with the old Operator Console wizard (default "Anyone") already has a `require_signin` file reading `false` and so stays guest-open until the operator changes it — see Spec 08 §9.0.1 for how to check and switch. `--require-signin` / `AXENSTAX_REQUIRE_SIGNIN` are accepted, logged and ignored. A signed-in **native** client joins `ws://` / `axenstax://` **authenticated** (`game_loop::connect_websocket_native` → `RemoteClient::connect_websocket_authed`, signed by the restored bunker over the `axenstax-join:ws-host:<dialled host>` origin (v66) — WS has no channel binding, so relay protection depends on the server knowing its public address, §1.8.1); a signed-out one joins as a guest and is refused unless the server admits guests. Browser clients have no signer, so they need a guest-open server.
 
 #### Why port 6767
@@ -279,7 +280,7 @@ Kind-31000 credentials carry an `expires` tag (Signet-app sets a one-year defaul
 
 #### 1.8.3 Ban Enforcement
 
-Bans are keyed on **persona pubkey**, never on handle. A misbehaving player who renames themselves is still banned; a legitimate player who happens to pick a taken handle is not. The `ServerPlayer` record stores `pubkey` as primary key; `handle` is a presentational field derived from the current credential.
+Bans are keyed on **persona pubkey**, never on handle. A misbehaving player who renames themselves is still banned; a legitimate player who happens to pick a taken handle is not. The `ServerPlayer` record stores `pubkey` as primary key; `handle` is a presentational field derived from the current credential. A block or a removal from the allowlist also reaches a player already seated: `HostedServer::set_access_policy` re-runs the decision over every joiner past its handshake when the policy changes.
 
 #### 1.8.4 Current State — BRIDGE (Phase 4 to remove)
 
@@ -370,6 +371,12 @@ bearer, and it always reaches `HostedServer` as `Allow::Only`, never `Allow::Ope
 the QUIC socket can be dialled directly, past the relay offer gate, so this list
 is the only thing that refuses a signed-in stranger who found the port, including
 on a first-ever host with no contacts and nobody admitted yet.
+A contact removed from the book, or downgraded below Kith, leaves
+the allowlist and this session's admissions on the next book push and is removed
+if seated; somebody a bearer let in has an invite row and stays until blocked. A
+Signet block beats every source. A world handed to a new host does not carry the
+old host's blocks: blocks are the persona's Signet state, and the new host starts
+from its own (`start_online_host` reads them before the first offer).
 Pressing **Host online** on a world already hosted
 online does not restart anything: it mints a fresh invite (retiring the previous
 bearer) and copies the new link.

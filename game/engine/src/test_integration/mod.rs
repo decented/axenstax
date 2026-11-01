@@ -49,6 +49,7 @@ pub mod attachments; // C3c-3b — face attachments live in the server's world; 
 pub mod riding; // MP-D2c-1 — riding runs on the server: joiners ride steeds and carts, steered per tick.
 pub mod state_budget; // T1-5 — bounded server→client StateUpdates.
 pub mod joiner_authority;
+mod access_revocation; // A policy change reaches players already in the world.
 // D1 — a host lends its world to its server: one world, one sim.
 pub mod lent_world;
 #[cfg(not(target_arch = "wasm32"))]

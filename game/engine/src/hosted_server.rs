@@ -597,6 +597,10 @@ pub struct HostedServer {
     lent_ids_reset: bool,
     #[cfg(not(target_arch = "wasm32"))]
     deferred_kicks: Vec<[u8; 32]>,
+    /// The access policy changed at a moment no slot could be released (see
+    /// [`Self::enforce_access_policy`]); the next full tick applies it.
+    #[cfg(not(target_arch = "wasm32"))]
+    access_recheck_pending: bool,
     /// Review LOW-2: guests that overflowed during a handover freeze whose
     /// release came outside the lend; kicked inside the next lent tick so
     /// their leave settles on the authoritative world.
@@ -1177,6 +1181,8 @@ impl HostedServer {
             lent_ids_reset: false,
             #[cfg(not(target_arch = "wasm32"))]
             deferred_kicks: Vec::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            access_recheck_pending: false,
             #[cfg(not(target_arch = "wasm32"))]
             deferred_overflow: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
@@ -1866,17 +1872,61 @@ impl HostedServer {
 
     /// Set the access policy (Track 4): whether sign-in is required, whether
     /// this server runs an allowlist of verified pubkeys, and who is blocked.
-    /// An allowlist refuses guests regardless of `require_signin`. Native-only.
+    /// An allowlist refuses guests regardless of `require_signin`.
+    ///
+    /// The ONE way the policy changes, so every change reaches players already
+    /// in the world: whoever it now refuses is removed
+    /// ([`Self::enforce_access_policy`]). The same policy again does nothing,
+    /// which keeps the dedicated server's 5-second reload cheap. Native-only.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn set_access_policy(
         &mut self,
         require_signin: bool,
         allow: crate::access_policy::Allow,
-        blocklist: Vec<[u8; 32]>,
+        mut blocklist: Vec<[u8; 32]>,
     ) {
+        blocklist.sort_unstable();
+        blocklist.dedup();
+        if self.require_signin == require_signin && self.allow == allow && self.blocklist == blocklist {
+            return;
+        }
         self.require_signin = require_signin;
         self.allow = allow;
         self.blocklist = blocklist;
+        self.enforce_access_policy();
+    }
+
+    /// Re-run the join decision over every seated joiner and release those it
+    /// now refuses, telling them why. Local slots are not subject to it, and a
+    /// slot still in its handshake has not been decided yet: its join will be,
+    /// against this same policy.
+    ///
+    /// A slot can't be released outside the lend window (its leave settles on
+    /// the authoritative world) or during a handover freeze, so then this waits
+    /// for the next full tick, which decides against the policy as it stands by
+    /// then.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn enforce_access_policy(&mut self) {
+        if (self.lends_host_world() && !self.server.lent) || self.handover_frozen() {
+            self.access_recheck_pending = true;
+            return;
+        }
+        self.access_recheck_pending = false;
+        for slot in self.num_local_players..self.transports.len() {
+            if self.disconnected[slot] || !self.handshake_done[slot] {
+                continue;
+            }
+            let pubkey = self.server.players[slot].verified_pubkey;
+            let verdict =
+                crate::access_policy::decide_access(pubkey, &self.blocklist, &self.allow, self.require_signin);
+            if let Err(why) = verdict {
+                log::info!("Access policy: removing slot {slot} ({why:?})");
+                let reason = crate::access_policy::reject_reason(why);
+                if let Some(left) = self.release_slot(slot, Some(&reason)) {
+                    self.send_to_joined_except(slot, &left);
+                }
+            }
+        }
     }
 
     /// Set the public addresses WebSocket joins must be addressed to (v66).
@@ -2254,10 +2304,8 @@ impl HostedServer {
     }
 
     /// Disconnect every live remote player whose verified persona is in
-    /// `targets` (the same teardown as an operator kick). Also used when a
-    /// Signet block reaches a hosted world, so a blocked player already in
-    /// the world is removed, not just refused next time (D8). A pubkey with
-    /// no live slot is a no-op. Native-only.
+    /// `targets` (the same teardown as a policy removal). A pubkey with no live
+    /// slot is a no-op. Native-only.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn kick_pubkeys(&mut self, targets: &[[u8; 32]]) {
         if self.lends_host_world() && !self.server.lent {
@@ -4356,6 +4404,10 @@ impl HostedServer {
         );
         #[cfg(not(target_arch = "wasm32"))]
         { let kicks = std::mem::take(&mut self.deferred_kicks); self.kick_pubkeys(&kicks); }
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.access_recheck_pending {
+            self.enforce_access_policy();
+        }
         #[cfg(not(target_arch = "wasm32"))]
         for j in std::mem::take(&mut self.deferred_overflow) {
             self.handover_overflow_kick(j);
