@@ -6,6 +6,16 @@
 <p class="lead">Thanks for supporting the project! Pop your code in, pick a size, and
 tell us where to send it. We print and post it for you — nothing else to pay.</p>
 
+<div class="notice">
+    <h2>How we use your details</h2>
+    <p class="note">Your name, address, email, phone number (if you give one) and the item you choose
+    go to Printful, who make and post your order. Printful may be outside the UK. We use them only to
+    carry out the order you asked for, which is our legal basis. We do not keep them ourselves: we store
+    only your claim code, when it was used, and the order ID. Printful keeps its own order records
+    under its own privacy policy. See also our
+    <a href="https://axenstax.com/privacy">privacy page</a>.</p>
+</div>
+
 {% if errors %}
 <div class="errors">
     <ul>{% for e in errors %}<li>{{ e }}</li>{% endfor %}</ul>
@@ -62,7 +72,6 @@ tell us where to send it. We print and post it for you — nothing else to pay.<
     </label>
 
     <button type="submit">Send my shirt →</button>
-    <p class="fineprint">Your address goes straight to the print &amp; postage service to ship your
-    order. We don't store it. One code, one shirt.</p>
+    <p class="fineprint">One code, one shirt.</p>
 </form>
 {% endblock %}

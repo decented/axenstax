@@ -52,3 +52,6 @@ button:hover { filter: brightness(1.06); }
     background: var(--card); color: var(--ink); border: 1px solid var(--line);
     border-radius: 10px; padding: 0.7rem 1.1rem;
 }
+
+.notice { margin-bottom: 1rem; }
+.notice h2 { margin: 0 0 0.3rem; font-size: 1rem; }
