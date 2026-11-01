@@ -321,7 +321,7 @@ fn twin_run_saved_world_loads_the_same() {
         )
     };
     let (mut a, mut b) = (open("load-a"), open("load-b"));
-    assert!(a.server.ecs.len() > 0, "the load scattered wildlife");
+    assert_ne!(a.server.ecs.len(), 0, "the load scattered wildlife");
     assert_eq!(differing(&a, &b), Vec::<&str>::new(), "twins differ straight after loading");
     a.server.simulates_block_machines = true;
     b.server.simulates_block_machines = true;

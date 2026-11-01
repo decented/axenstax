@@ -307,6 +307,29 @@ benchmark exists.**
   (2026-10-07). This is not total tick time.
 - WASM bundle: 4.72 MiB brotli (27.45 MiB raw) at S4 and S5.
 - Tier S only, not L: K5-0 synthetic component tick p50/p99 of 21–26 / 45–64 µs.
+- Slice 1 bench (`test_integration/tick_bench.rs`), commit `97f9fb29`, release profile, one run,
+  i5-1235U laptop, 2026-11-01. `GameServer::tick` only, so no transport, admission or per-client
+  diff. Sim distance 8, machine fixture, 65–107 entities, synthetic joiners walking on a ring.
+  Three ticks in four skip the fluid and machine pass, so p50 is that cheap path. The fire field
+  has burnt out by the end of the 600-tick warm-up, so machines are mostly idle scans.
+
+  | Joiners | Columns | p50 ms | p99 ms | max ms | mean ms |
+  |---|---|---|---|---|---|
+  | 0 | 289 | 0.05 | 3.59 | 13.56 | 0.95 |
+  | 2 | 443 | 0.07 | 17.77 | 22.58 | 2.36 |
+  | 8 | 530 | 0.12 | 31.10 | 37.68 | 5.25 |
+
+- Same run, bytes after a scripted build and a save. Sidecars are about 440 B each with 20 stacks.
+
+  | Joiners | Touched chunks | Touched bytes | `chunks/` files | `chunks/` bytes | Sidecar bytes |
+  |---|---|---|---|---|---|
+  | 0 | 65 | 565,760 | 1,369 | 11,915,776 | 0 |
+  | 2 | 69 | 600,576 | 2,067 | 17,991,168 | 880 |
+  | 8 | 79 | 687,616 | 2,480 | 21,585,920 | 3,520 |
+
+  **A server save writes every non-empty chunk it holds, touched or not** (`try_save`, via
+  `persistable_chunks`), so `chunks/` is 18–31× the touched set here. §2 and §5 say "touched" of
+  the 8,704 B form; on disk today that is the whole loaded set.
 
 **Stated limits and decisions**
 - 20 TPS (50 ms).
@@ -324,7 +347,7 @@ benchmark exists.**
 - About 40 MB raw blocks resident per anchor at sim distance 8.
 - WASM 1.5–2× native cost (Fray planning figure).
 
-**Not recorded anywhere:** total server tick ms under load, save/autosave duration, chunk-push
-burst size and bytes/s on a real link, and RSS with more than 2 players or after exploration.
-Slice 1's bench covers the first and the last.
+**Not recorded anywhere:** total server tick ms through `HostedServer` under load, save/autosave
+duration, chunk-push burst size and bytes/s on a real link, and RSS with more than 2 players or
+after exploration. Slice 1's bench covers `GameServer::tick` only and does not read RSS.
 
