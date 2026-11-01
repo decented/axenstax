@@ -4,7 +4,9 @@ with a bare `python3` — no venv, no FastAPI — so the gate can never skip."""
 import unittest
 
 from versioning import (
+    DOWNLOAD_NOTICE,
     MANIFEST_KEYS,
+    download_notice,
     filter_newest_per_platform,
     installer_version,
     latest_manifest,
@@ -218,6 +220,43 @@ class LatestManifestAppimageChecksum(unittest.TestCase):
             tuple(doc.keys())[4:],
             ("linux_appimage_sha256", "linux_appimage_url"),
         )
+
+class DownloadNotice(unittest.TestCase):
+    """/download shows a short notice while 0.2.18 is the newest published
+    version, and drops it by itself once anything newer is published."""
+
+    def test_shown_while_the_newest_published_version_is_0_2_18(self):
+        inst = _installers("axenstax-engine_0.2.18_x86_64.AppImage")
+        self.assertEqual(download_notice(inst), DOWNLOAD_NOTICE)
+        self.assertEqual(
+            DOWNLOAD_NOTICE,
+            "This is version 0.2.18. A newer release with access and privacy "
+            "improvements is being prepared.",
+        )
+
+    def test_gone_once_a_newer_version_is_published(self):
+        inst = _installers(
+            "axenstax-engine_0.2.18_x86_64.AppImage",
+            "axenstax-engine_0.2.19_x86_64.AppImage",
+        )
+        self.assertIsNone(download_notice(inst))
+
+    def test_gone_for_a_newer_version_on_any_platform(self):
+        inst = _installers("axenstax-engine_0.2.18_x86_64.AppImage", "axenstax_0.3.0.apk")
+        self.assertIsNone(download_notice(inst))
+
+    def test_version_compare_is_numeric_not_textual(self):
+        # "0.2.100" sorts below "0.2.18" as text; it must still count as newer.
+        inst = _installers("axenstax-engine_0.2.100_x86_64.AppImage", "axenstax-engine_0.2.18_x86_64.AppImage")
+        self.assertIsNone(download_notice(inst))
+
+    def test_not_shown_with_nothing_published_or_unversioned_names(self):
+        self.assertIsNone(download_notice([]))
+        self.assertIsNone(download_notice(_installers("AxeNStax.AppImage")))
+
+    def test_not_shown_for_other_versions(self):
+        self.assertIsNone(download_notice(_installers("axenstax-engine_0.2.17_x86_64.AppImage")))
+
 
 
 if __name__ == "__main__":
