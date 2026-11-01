@@ -77,21 +77,13 @@ AxeNStax project identity npub (kept outside this repo). See
 blast radius (this key only ever signs release announcements + Blossom
 upload auth) and it may live on a different machine than the identity key.
 
-**This ceremony has NOT been run for real yet.** `RELEASE_PUBKEY_HEX` in
-`release-helpers.mjs` is currently `''`. The first time it IS run for real:
-
-1. Run the command above.
-2. Paste the printed `RELEASE_PUBKEY_HEX` value into the constant of the
-   same name in `release-helpers.mjs`.
-3. Commit that change.
-
-Until that pin exists, `publish-release.mjs` and `query-latest.mjs` cannot
-tell a real release from anyone else's kind-30063 event with the same `d`
-tag — they print a loud warning and carry on unverified. This is a
-deliberate bootstrapping gap, not an oversight: there is no way to pin a
-pubkey before one has been generated. **Do not skip step 2** — publishing a
-"real" first release with the pin still empty would announce a channel
-nothing can ever authenticate.
+**The release key is pinned.** `RELEASE_PUBKEY_HEX` in `release-helpers.mjs`
+holds the release pubkey, and the engine carries the same value in
+`game/engine/src/nostr_release.rs`; the two must always match. From the pin,
+`publish-release.mjs` refuses to sign with any other key, and
+`publish-release.mjs` and `query-latest.mjs` only accept kind-30063 events
+signed by it. Rotating the key means changing both constants and telling every
+installed build some other way, so it is a deliberate, disruptive act.
 
 ## Cutting a release
 
@@ -177,11 +169,9 @@ actually being offered, independent of any one web host.
   publishes on whatever mirrors DID verify directly. If none did, the
   whole publish refuses rather than announcing a release nothing can
   actually download.
-- **`RELEASE_PUBKEY_HEX` is still unpinned when someone runs
-  `query-latest.mjs`.** It will always print `none`, even after a real
-  publish, because nothing can be verified as authentic without the pin.
-  This is not a bug in the query — it's the bootstrapping gap described
-  above. Pin the key first.
+- **`query-latest.mjs` prints `none` after a real publish.** Only events signed
+  by the pinned release key count, so check that the key file you published
+  with is the one whose pubkey is pinned in `release-helpers.mjs`.
 - **The artifact's filename doesn't match `axenstax-engine_<version>_x86_64.AppImage`.**
   `parseAppImageVersion` throws and nothing is published. This is
   deliberate — a renamed or hand-copied file is exactly the case where
