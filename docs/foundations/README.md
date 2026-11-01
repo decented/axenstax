@@ -24,10 +24,15 @@ playtest wishes), see the distilled front door: [`../feature-backlog.md`](../fea
 
 - **C3: the server owns a joiner's inventory (real-multiplayer epic)** →
   [`2026-10-07-c3-server-owned-inventory.md`](2026-10-07-c3-server-owned-inventory.md)
-  — DESIGN DECIDED 2026-10-07. The server holds each joiner's inventory window
-  slot for slot and mirrors every click with the client's own rules. Phases:
-  C3a (window mirror), C3b (shared containers), C3c (local uses), death
-  server-side, the per-npub sidecar, C3d (enforcement). Built by the epic's lanes.
+  — ✅ **BUILT, no longer ready to build** (C3a to C3c and the per-npub sidecar are in;
+  the accepted part of C3d, typed actions with receipts and recovery, is in, while its
+  Strict enforcement mode is parked and internally selectable only, so the default Mirror
+  mode still believes some of what a joiner claims). See `docs/roadmap.md`.
+- **Fray (the networking library behind Host Game and Keeps)** →
+  [`../integrations/fray/2026-10-31-keep-authority-handoff.md`](../integrations/fray/2026-10-31-keep-authority-handoff.md)
+  — Host Game and its joins run on Fray today (a room code resolved on the player's own
+  relays; protocol v93 onward). The Keep authority slices and the Fray and Ingle
+  integration are specified there and are not finished.
 
 - **Full-fidelity item wire encoding (death-drops phase 3)** →
   [`2026-07-12-full-fidelity-item-wire.md`](2026-07-12-full-fidelity-item-wire.md)

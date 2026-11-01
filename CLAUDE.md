@@ -110,7 +110,7 @@ copy one working site venv into the others (e.g.
 0b. Published Signet npm consumer checks (`node --test tools/sites/test-signet-login-package.mjs tools/sites/console/test-console-login.mjs`) — verifies exact package selection/integrity boundaries and the console SDK result handling without a live login.
 1. `cargo clippy` on the engine, gated `-D warnings` (Phase 4b, 2026-07-06) — any warning or error fails the run.
 2. `cargo build` on the engine.
-3. `cargo test --lib` — runs every `#[cfg(test)]` module in the engine library (currently about 4,700 tests, counted by `#[test]` attributes, across pure-function units + `TestHost`-driven integration tests under `src/test_integration/`). Never `--bin`: the bin is a thin shim, so it runs zero tests and still passes.
+3. `cargo test --lib` — runs every `#[cfg(test)]` module in the engine library (currently about 7,300 tests, counted by `#[test]` attributes, across pure-function units + `TestHost`-driven integration tests under `src/test_integration/`). Never `--bin`: the bin is a thin shim, so it runs zero tests and still passes.
 4. `trunk build` for the WASM bundle.
 5. Bundle-size gate — brotli-compressed total must stay under 5 MiB (PWA alpha spec).
 6. With `--smoke`: Playwright smoke test against a running website. Confirms `/`, `/game`, WASM asset, JS loader all serve correctly. Saves a screenshot to `tools/smoke/out/play-landing.png`.
