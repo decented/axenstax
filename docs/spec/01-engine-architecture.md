@@ -1262,6 +1262,116 @@ they call):
   section by section. What it leaves out is listed, with reasons, in the
   `sim_digest` module docs.
 
+### 4.1.5 Authority checkpoint (Keep slice 2b, 2026-11-02)
+
+`GameServer::checkpoint()` returns the authority's state as canonical bytes;
+`GameServer::restore_from_checkpoint(config, checkpoint, world_dir)` brings an
+authority back from them and the world's stored records;
+`GameServer::state_hash()` is exactly
+`SHA256(b"fray/authority-state/v1\0" || checkpoint())`. Module:
+`authority_checkpoint/`, native only (the web build has no authority to keep). It
+is an API with tests: `--keep-world` doesn't call it yet, and it changes neither
+the wire nor the save format.
+
+**Shape.** A hybrid (Keep handoff §6, choice 1): volatile state in the bytes, and
+a sorted manifest of `(record key, SHA-256)` for the records a save holds. A world
+doesn't fit the 1 MiB cap as an image, and its digests do. The layout, in order:
+magic, schema `u16` (1), `PROTOCOL_VERSION`, save format, `worldgen_version`, the
+seed widened to `u64`, the config binding (SHA-256 of seed, worldgen version,
+creative and difficulty), the pop key id, the completed tick, the volatile
+sections, the manifest, and a seal (SHA-256 of everything before it; a checksum,
+not a signature). Fixed-width little-endian integers, `u32` length prefixes, every
+set sorted, every queue in queue order (which is state), floats as bits with
+`-0.0` folded onto `0.0`.
+
+**Observational.** `checkpoint` takes `&self`, does no I/O and calls no save path.
+What it needs of the disk (sidecar and meta digests) `GameServer::stored_records`
+learnt when those were read or written. It depends on no hash order, process or
+clock: `run_id` and the reputation clock's owner are left out. `calendar_id` is in,
+as part of the Keep slice 2a clock: random on a real server, but persisted, so two
+authorities opened from one saved world agree. Two separate fresh worlds aren't
+the same world and needn't.
+
+**The secret.** `pop_secret` is never in the bytes: only
+`SHA256(b"axenstax/pop-key-id/v1\0" || pop_secret)[..16]`, and the meta record is
+hashed with the secret removed. A restore is given it by the host shell
+(`AuthorityConfig`).
+
+**Volatile sections** (`volatile.rs`, `players.rs`):
+- the slice 2a clock, plus the day-clock step, the falling cadence, the rolled
+  strike and the world's active ticks and work;
+- the server's modes (machines, lightning, sim distance and so on);
+- the chunk layout: per column, which sections are live, which are evicted, whether
+  it counts as loaded and whether any chunk carries `persist`. A load holds every
+  saved chunk live and marks it `persist`, so this is what puts stream-out state
+  back. A column can hold sections past `0..=MAX_CHUNK_Y`: a light write conjures an
+  empty one just below the floor;
+- fire with its timers; water and lava as queues plus the difference of their
+  sources from a rescan (water registers every water cell of a column, so an
+  ocean's whole set would be past the cap, but flowing cells are not sources until
+  a reload); the leaf-decay queues; the update scheduler; the power flood; rubber-tap
+  cooldowns;
+- each player slot: every field the `players` digest section reads and the persona
+  key. `riding` is left out, since it names a hecs id: a rider restores on its feet.
+
+**Manifest** (`manifest.rs`): every non-empty chunk (its 8,704 B form, from memory),
+every sidecar in `joiners/`, the world meta without its secret, and one record
+over the block entities, drying racks, face attachments and block meta (which sit
+in `world.dat`, which isn't canonical; without this the hash wouldn't move for a
+furnace's contents). It is true of the disk only straight after a save, so a runner
+persists, then checkpoints. Taken any later, it refuses as tampered at restore.
+
+**Refusals.** `checkpoint` returns `DeathsPending` while a mob death waits to be
+swept (retry at the next tick boundary), `TooLarge` past the cap (never a shorter
+checkpoint) and `Lent` on a lending server. `restore_from_checkpoint` verifies the
+magic, the schema, the seal, the binding and the key id, loads the records through
+`initial_load`, checks every manifest digest in both directions against what it
+read, applies the volatile sections, then checks that the body re-encodes to the
+same bytes.
+
+| Failure | Code |
+|---|---|
+| Binding or key id mismatch | `InvalidConfig` |
+| Bad or tampered bytes or manifest, records missing | `InvalidCheckpoint` |
+| Newer schema, protocol or save format | `UnsupportedVersion` |
+| Anything else (the load itself) | `Fault` |
+
+**What a restore keeps** (`test_integration/authority_checkpoint.rs`). At ticks 1,
+200 and 2,000 of the Keep slice 1 fixture, and across a drained water source: persist,
+checkpoint, restore into a new server, feed both the same script for 200 ticks.
+`chunks`, `block_entities`, `clocks`, `players` and `fire_fluid_queues` stay equal.
+
+**What it doesn't yet (`NOT_YET_RESTORED`, the restoration ledger):**
+- `light`: recomputed by the load's column pass, which needn't match a run's
+  increments. Growth reads light, so a sapling or crop could part `chunks` later;
+  the fixture has none.
+- `wild_mobs`, `tamed_entities`, `item_drops`, `projectiles`: hecs ids change on
+  restore and mob AI rolls hash the id. Wild mobs re-scatter, tamed ones and carts
+  come from the save, and what lay on the ground or was in flight is gone.
+- `world_tables`: equal in the fixture, so printed and not promised. `pop_exposure`
+  is in no save or checkpoint (a cell mined after a restore rolls as fully decayed),
+  and the rest reads back from `world.dat`, outside the manifest.
+
+**Limits.**
+- **A world at sim distance 8 doesn't fit yet.** `checkpoint` returns `TooLarge` at all
+  three bench sizes (2.9-5.0 MB, handoff §8). Almost all of it is lava's queue: a column's
+  load wakes every lava cell, about 700 entries a column, and the queue drains at about 53
+  a second. The queue's order is state, so it is carried whole. The cap is reached at about
+  110 such columns, or about 17,000 non-empty chunks once that is dealt with. Open before
+  `--keep-world` is wired.
+- `players` holds in the fixture only because no joiner meets a mob in those 200
+  ticks. A push or a bite moves a body, and a restored world's mobs aren't the
+  original's (`a_mob_on_a_joiner_parts_the_players_section`). From an empty ECS on
+  both sides, every section but `light` stays equal.
+- A restored joiner has a body and no connection state: action, pack and quest
+  lanes, window events and block views are per attach, and it must re-attach before
+  it acts. Its bound personal record reloads from the sidecar. A correction debt in
+  the record isn't live until then, so a save in between marks its obligations
+  incomplete rather than claiming the debt is gone.
+- The meta digest is taken at load. A write to `world_meta.json` after load, other
+  than to the secret, must refresh it (`StoredRecords::note_meta`) or a restore
+  refuses. `--keep-world` needs this when it is wired.
+
 
 ### 4.2 Client Frame Loop
 

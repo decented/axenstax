@@ -83,9 +83,9 @@ What already fits:
 | `on_event(Left)` | pipe `Left` → synthetic `Disconnect`; `release_slot` next tick (`:2317`) | medium | Writes the joiner sidecar inside the event. A server-initiated leave is a transport `Drop`, not a returned `Command`. |
 | `on_event(Control)` | `Hello`/`Shutdown`/`GateAnswer`/`Pass` (`keep_pipe.rs:752-869`) | medium | `GateAnswer` replies to an authority-originated question, which the contract has no primitive for. `Shutdown` saves (I/O). `Pass` (bearer secret) never touches `GameServer`. Good. |
 | `tick(time)` | `HostedServer::tick` (`hosted_server.rs:4341`) driven by a 50 ms `Instant` loop that **skips** missed ticks (`keep_world.rs:288-314`) | medium-high (`GameServer`), low (`HostedServer`) | Takes no time argument. Three counters: `tick_counter` (u64), `world_time` (u32 day clock, starts 6000), `HostedServer.server_tick` (on the wire). Output is pushed through `send_to_client`, not returned as commands. |
-| `checkpoint()` | `GameServer::try_save` (`server.rs:3127-3497`) | low | Writes files, does not return bytes. Refuses while mob deaths are pending (`save.rs:1077`). Non-canonical (§4.3). Omits most live state (§5). `handover/checkpoint` packs saved *files* for transfer and strips `pop_secret` and players. It is not a live-state checkpoint. |
-| `restore(config, ckpt)` | `initial_load` (`server.rs:1325-1450`) | low | Rebuilds from the save rather than restoring. Clocks restart, wildlife re-scatters, entity ids are new, and every saved column is loaded (the live run had streamed some out). |
-| `state_hash()` | none | — | Needs a canonical checkpoint first. The nearest is `chunk_verdict::column_hash` per column. |
+| `checkpoint()` | Slice 2b: `GameServer::checkpoint` (Spec 01 §4.1.5), not wired in. Before it, `GameServer::try_save` (`server.rs:3127-3497`) | medium | The rest of this row is `try_save`, the record path it depends on. Writes files, does not return bytes. Refuses while mob deaths are pending (`save.rs:1077`). Non-canonical (§4.3). Omits most live state (§5). `handover/checkpoint` packs saved *files* for transfer and strips `pop_secret` and players. It is not a live-state checkpoint. |
+| `restore(config, ckpt)` | Slice 2b: `GameServer::restore_from_checkpoint`, not wired in, over `initial_load` (`server.rs:1325-1450`) | medium | The rest of this row is `initial_load` alone; the restoration ledger in §7 says what slice 2b brings back. Rebuilds from the save rather than restoring. Clocks restart, wildlife re-scatters, entity ids are new, and every saved column is loaded (the live run had streamed some out). |
+| `state_hash()` | Slice 2b: `GameServer::state_hash`, `SHA256(b"fray/authority-state/v1\0" \|\| checkpoint())`, not wired in | medium | Covers the world through the manifest, so it needs a persist first. Not comparable across architectures until §4.5 is audited. |
 
 **Time.** 20 TPS, so `Time{tick: n, elapsed_us: n × 50_000}`, with `Time.tick == tick_counter`
 after step n. `server_tick` must become the same restored counter. `world_time` stays derived
@@ -263,7 +263,39 @@ the contract itself as changed.
 10. **The module migrates its own records at restore**, forward-only, and refuses records from a
     newer version, as it does today. The bincode 3 migration lands the same way.
 11. **Joiner position, yaw and pitch are added to the saved state** (this also fixes "a restored
-    joiner is back at spawn"). Restore re-derives the simulated set from the anchors.
+    joiner is back at spawn"). The checkpoint names the loaded and evicted columns, and restore puts
+    them back rather than re-deriving them from the anchors, because a re-derived set would part
+    `chunks` at the next stream-out.
+
+### For the Fray session, from slice 2b
+
+Measured or built on the game side; each needs a Fray answer. The sizes are from
+`checkpoint_size_at_the_bench_world_sizes` (§8).
+
+- **The contract has no "not now" code.** While a mob death waits to be swept, `checkpoint` returns
+  `DeathsPending`, and the runner retries at the next tick boundary (choice 3). Should the contract
+  name this, or should it stay internal to the runner?
+- **The 1 MiB cap and the manifest.** A manifest entry is about 49 B, so the manifest alone reaches
+  the cap near **21,000 non-empty chunks**. With the other volatile sections as measured (about
+  130 KiB, plus 17 B per column), that is about **17,000**. A server save writes every non-empty
+  chunk it holds, so this is the held world and not the edited one. Past it, a checkpoint is an
+  error, not a truncation.
+- **Today the cap is reached sooner, by lava's queue, and a Keep at sim distance 8 can't checkpoint.**
+  See the table in §8: 2.7-4.9 MB at all three bench sizes. Loading a column wakes every lava cell
+  once (`LavaSystem::register_column_sources`), about 700 queue entries and 9.2 KB per column, and the
+  queue drains at about 53 entries a second, so one column loaded takes 13 s and 289 take an hour.
+  The cap is reached at about 110 such columns. The queue's order is state, so slice 2b carries it
+  whole and doesn't cut it. This needs a game-side decision before `--keep-world` is wired (wake only
+  lava that borders air, which changes when lava moves; or a run-length form of the wake entries; or
+  a higher cap), and it is the one number here Fray might want to weigh in on.
+- **What a checkpoint binds.** `state_hash` covers `calendar_id` as part of the slice 2a clock. It is
+  random on a real server but persisted, so two authorities opened from the same saved world agree.
+  Two authorities from two separate fresh worlds aren't the same world and needn't.
+- **Persist, then checkpoint.** The manifest describes the stored records from memory, so it is true
+  of the disk only straight after a commit. A runner that checkpoints later gets a refusal at restore.
+  Does that fit `Persist(batch)` (choice 2)?
+- **The seal is a checksum, not a signature.** Whoever can rewrite a checkpoint can reseal it. Any
+  authentication is the runner's.
 
 ## 7. Smallest next adapter slice (AxeNStax-only, no wire or save change)
 
@@ -294,9 +326,38 @@ D4 shared-sim all gain from it.
   8 synthetic joiners, sim distance 8, and machines and mobs present, plus the bytes of
   touched-chunk files and sidecars after a scripted build (§8).
 
-**Slice 2 (choices 1-4 now have AxeNStax positions, above):** persist the clocks (fixing the auction and bounty
-bug), checkpoint the volatile state per the agreed codec, and a checkpoint→restore→continue test
-at several tick boundaries comparing `sim_digest`.
+**Slice 2: built, native only.** 2a persists the authority clock and a joiner's position (§5). 2b is
+`authority_checkpoint` (Spec 01 §4.1.5): `GameServer::checkpoint`, `restore_from_checkpoint` and
+`state_hash`, canonical, bounded at 1 MiB, with no pipe, Ingle or wire change, no save-format change
+and not called by `--keep-world`. At ticks 1, 200 and 2,000 of the slice 1 fixture, and across a
+drained water source: persist, checkpoint, restore into a new server, feed both the same script for
+200 ticks. `chunks`, `block_entities`, `clocks`, `players` and `fire_fluid_queues` stay equal.
+
+**The restoration ledger (`NOT_YET_RESTORED`).** What a restored world doesn't yet match:
+- `light`: recomputed by the load's column pass, which needn't match a run's increments. Growth reads
+  light, so a sapling or crop could part `chunks` later; the fixture has none.
+- `wild_mobs`, `tamed_entities`, `item_drops`, `projectiles`: **hecs ids change on restore**, and mob
+  AI rolls hash the id. No ids are remapped. Wild mobs re-scatter, tamed ones and carts come from the
+  save, and what lay on the ground or was in flight is gone.
+- `world_tables`: equal in the fixture, so printed and not promised. `pop_exposure` is in no save or
+  checkpoint (a cell mined after a restore rolls as fully decayed), and the rest reads back from
+  `world.dat`, which isn't canonical and isn't in the manifest.
+
+Limits of what does hold:
+- `players` depends on entities after all, which the slice 2b decision had assumed it didn't: a push or
+  a bite moves a body, and a restored world's mobs aren't the original's. It stays equal in the
+  fixture because no joiner meets a mob in those 200 ticks.
+  `a_mob_on_a_joiner_parts_the_players_section` pins this. From an empty ECS on both sides, every
+  section but `light` stays equal. A rider restores on its feet, since `riding` names a hecs id.
+- A restored joiner has a body and no connection state. Its action, pack and quest lanes, window events
+  and block views are per attach, so it must re-attach before it acts (with slice 3). Its bound
+  personal record reloads from the sidecar. A correction debt in the record isn't live until then, so
+  a save in between marks its obligations incomplete rather than claiming the debt is gone.
+- The meta digest is taken at load. `--keep-world` must refresh it after any later meta write
+  (`StoredRecords::note_meta`).
+- Not yet covered as a checkpoint: the §5 rows for `HostedServer` vectors and queues, cooldowns held
+  on connection state and output state.
+
 **Slice 3:** return output as commands, and the admission split (choice 7).
 **Then:** contract acceptance 2 and the WASM build.
 
@@ -343,6 +404,18 @@ benchmark exists.**
 
   **A server save writes every non-empty chunk it holds, touched or not** (`try_save`, via
   `persistable_chunks`), so `chunks/` is 21–31× the touched set here.
+
+- Slice 2b, `checkpoint_size_at_the_bench_world_sizes`, same scripted build, at the bench's three
+  world sizes, 2026-11-02. `checkpoint()` itself returns `TooLarge` at all three, because of lava's
+  queue (§6, "For the Fray session").
+
+  | Joiners | Columns | Non-empty chunks | Manifest B | Lava queue B | Water B | Layout B | Players B | Total B |
+  |---|---|---|---|---|---|---|---|---|
+  | 0 | 289 | 1,377 | 67,514 | 2,661,922 | 117,530 | 6,124 | 353 | ~2,853,700 |
+  | 2 | 409 | 1,918 | 94,231 | 3,763,620 | 117,530 | 8,419 | 1,203 | ~3,985,300 |
+  | 8 | 511 | 2,406 | 118,767 | 4,734,382 | 117,530 | 10,323 | 3,753 | ~4,985,000 |
+
+  The slice 1 twin fixture, at a load radius of 3, fits the cap: its sizes are in the test's output.
 
 **Stated limits and decisions**
 - 20 TPS (50 ms).
