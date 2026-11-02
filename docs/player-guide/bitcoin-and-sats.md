@@ -34,9 +34,9 @@ that's describing the plan, not something switched on today.
 
 Every pickaxe strike runs a real **HMAC-SHA256 hash** — the same kind of
 maths Bitcoin mining uses. Press **F3** to watch it happen. This is there to
-**show you how proof-of-work actually works**, by doing it, and it keeps
-mining honest: rewards are decided on the server, so a modified game can't
-fake them. (Hiding buried ore from x-ray-style cheats is built but not
+**show you how proof-of-work actually works**, by doing it, and on a
+server, what you find is decided by the server using a secret the game never
+sees. (Hiding buried ore from x-ray-style cheats is built but not
 switched on yet.) The hash itself has never paid anything out, on any world,
 ever — it just runs, visibly, for the education and the anti-cheat.
 
