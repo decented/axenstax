@@ -259,9 +259,6 @@ impl OnlineJoin {
         &self.display_name
     }
 
-    /// The host, as a contact to fold into the mirror. `Some` once an accepted
-    /// answer has been verified — the join is mutual, so calling somebody and
-    /// being let in makes them a contact both ways.
     /// The runtime key the host's answer was verified against (the invite's
     /// `k=` or the contact's attested runtime).
     pub fn host_runtime(&self) -> [u8; 32] {
@@ -272,6 +269,9 @@ impl OnlineJoin {
         self.continuation.as_ref()
     }
 
+    /// What an accepted answer verified about the host, for
+    /// `contacts::record_visit`. `Some` once one has been verified. It carries no
+    /// tier, and being let in makes nobody a contact.
     pub fn host_contact(&self) -> Option<Contact> {
         self.host_contact.clone()
     }
@@ -373,16 +373,16 @@ impl OnlineJoin {
         }
 
         self.host_persona = Some(verified.persona);
-        // Being let in makes them a contact: the host wrote us into its book
-        // when it admitted us, and the friendship is not one-directional.
-        // Kith, not Kin — Kin is a deliberate, human act, never automatic.
+        // What this answer verified about the host, for the visit record. Being
+        // let in makes nobody a contact: `contacts::record_visit` writes this only
+        // for a host already in the book, and it carries no tier.
         self.host_contact = Some(Contact {
             pubkey: verified.persona,
             display_name: Some(self.display_name.clone()),
-            tier: crate::comms::Tier::Kith,
+            tier: crate::comms::Tier::Stranger,
             is_child: false,
             runtime_pubkey: Some(verified.runtime),
-            added_via: AddedVia::Invite,
+            added_via: AddedVia::Import,
             added_at: now,
             // The CALLER stamps this once the join actually lands — being
             // answered is not the same as having played there.
@@ -662,9 +662,9 @@ mod tests {
                 joiner.poll(NOW, std::time::Duration::from_secs(1)),
                 JoinStep::Connecting { world_name: "Ivy's Hollow".to_string() }
             );
-            let contact = joiner.host_contact().expect("the host becomes a contact — mutually");
+            let contact = joiner.host_contact().expect("the visit is what the answer verified");
             assert_eq!(contact.pubkey, host.persona.public_key().to_bytes());
-            assert_eq!(contact.tier, crate::comms::Tier::Kith);
+            assert_eq!(contact.tier, crate::comms::Tier::Stranger, "a visit grants no tier");
             assert_eq!(contact.runtime_pubkey, Some(host.runtime.public_key().to_bytes()));
         });
     }

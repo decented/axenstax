@@ -12,7 +12,7 @@
 
 pub const INVITE_VERSION: u32 = 2;
 /// A minted invite is good for 48 hours. Minting a fresh one retires the old
-/// bearer, so this is a floor on nuisance, not a security boundary.
+/// bearer for anyone it has not already admitted.
 pub const DEFAULT_INVITE_TTL_SECS: u64 = 48 * 3600;
 /// More than this many relays in one link is a sign of a mangled paste, not a
 /// well-connected host.
@@ -32,7 +32,11 @@ pub struct Invite {
     pub host_runtime: [u8; 32],
     /// Relays to publish the offer on. Every entry must be `wss://`.
     pub relays: Vec<String>,
-    /// The 16-byte bearer that admits one persona, once.
+    /// The 16-byte bearer. It lets one person into this hosted world: the first
+    /// persona admitted with it owns it and may reconnect with it until
+    /// `expires_at`, and any other persona presenting it gets the same silence
+    /// as someone with no invite. It lasts this hosting session, grants nothing
+    /// in any other, and makes nobody a contact (`online_admission::admit`).
     pub bearer: [u8; BEARER_LEN],
     pub expires_at: u64,
     pub world_name: String,

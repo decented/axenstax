@@ -31,8 +31,8 @@ Long-run shape, built now:
 |---|---|
 | Player address | Signet persona npub. Online play requires a persona on both sides. |
 | Per-session signing | A **runtime key** the persona attests once (bunker tap), reusing the server-identity attestation. Signalling is signed by the runtime key; the QUIC join is signed by the persona (existing kind-21236 auth). |
-| Contacts | Local mirror (`profile/contacts.json`) with Kenspeckle tiers. Fed by **invites** now, by the Signet persona-scoped contacts view when it ships upstream. |
-| Admission | Bearer invite for first contact; thereafter "in my contacts at Kith or closer". Strangers get silence. |
+| Contacts | Local mirror (`profile/contacts.json`) with Kenspeckle tiers. Fed by pastes and the Signet contacts view. An invite adds nobody (amended 2026-11-02). |
+| Admission | "In my contacts at Kith or closer", or one person with a bearer invite, for this hosted world until it expires. Strangers get silence. |
 | Signalling | Ephemeral Nostr events, NIP-44 encrypted runtime-key to runtime-key, over a user-editable list of public relays. |
 | Reachability | Candidates: LAN, IPv6, UPnP/NAT-PMP mapping, STUN reflexive. Try all in parallel, hand the winning UDP socket to quinn. |
 | Fallback | **None in this version.** Plain-words failure message. A forwarder, when it comes, is operator-run software, never ours. |
@@ -71,8 +71,10 @@ nudges anyone to disable a safety gate; Signet is mandatory, not disclaimed.
   is_child, runtime_pubkey: Option<[u8;32]>, added_via: Invite|Import|Paste|Kenspeckle,
   added_at }`. `load_local_book()` becomes the union of the Kenspeckle export and the mirror.
 - **Invite** — a link + QR minted by a host for one world: version, host persona npub, host
-  runtime pubkey, relay list, 16-byte bearer, expiry. Admits once per persona, then that
-  persona is a contact.
+  runtime pubkey, relay list, 16-byte bearer, expiry. The first persona admitted with it
+  owns it and may reconnect with it until expiry; anyone else presenting it gets silence.
+  It lasts this hosted world's session only and makes nobody a contact (amended 2026-11-02;
+  the original "then that persona is a contact" is retired).
 - **Rendezvous** — the offer/answer exchange over relays.
 - **Candidate** — one address the peer may be reachable at, with its type.
 
@@ -122,13 +124,15 @@ Any failure → drop silently (no answer to strangers).
 ```
 admit(offer, contacts, active_bearer, now) =
     if contacts.tier_of(offer.persona) <= Kith          -> Accept(AlreadyContact)
-    else if offer.bearer == active_bearer && !expired    -> Accept(ByInvite)   // then add contact @ Kith, runtime_pubkey recorded
+    else if offer.bearer is claimed by another persona   -> Refuse(BearerInvalid)
+    else if offer.bearer is claimed by this persona
+         or offer.bearer == active_bearer, and !expired  -> Accept(ByInvite)   // claim it; a session allowlist entry, no row
     else                                                -> Refuse(NotAContact | BearerExpired | BearerInvalid)
 ```
 
 Kin/Kith admit; **Ken and Stranger do not** (Ken is hear-only in comms; it is not "play in my
-world"). Joiner side, on an accepted answer whose persona it does not have: add the host as a
-contact at Kith (mutual). A refused answer is shown to the joiner only for `ProtocolMismatch`
+world"). Joiner side: an accepted answer adds nobody; a host already in the book gets its visit
+and runtime key recorded, at no tier (amended 2026-11-02). A refused answer is shown to the joiner only for `ProtocolMismatch`
 and `Full`; `NotAContact` and bearer refusals are **never sent** — the host stays silent.
 
 ### 3.4 The QUIC join is unchanged
@@ -209,7 +213,7 @@ and still host (LAN still works).
 
 1. Lobby → **Friends & servers** column. Friends list = contacts (Kin/Kith/Ken shown; only
    Kin/Kith have **Join**). **Add a friend**: paste an invite link or an npub. Pasting an
-   invite adds a *pending* contact (tier Kith, `added_via: Invite`) and starts a join at once.
+   invite starts a join at once and adds nobody (amended 2026-11-02).
 2. Join: bind socket, gather candidates, publish the offer to the invite's/contact's relays,
    wait for the answer (8 s), punch, parallel connect, then the existing authed
    `RemoteClient::connect_authed` handshake with the bunker sign driver.

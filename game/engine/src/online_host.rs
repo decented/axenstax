@@ -12,27 +12,28 @@
 //! goes to a worker thread.
 //!
 //! The contacts book handed to [`OnlineHost::start`] is a **snapshot**: this
-//! module adds to it (an invite admission) but never re-reads the mirror, so a
-//! contact added or re-tiered elsewhere while a world is hosted is not seen
-//! here. Tasks 17/18, which own the Friends UI and the mirror, must push a
-//! refreshed book in when they change one.
+//! module never writes to it or to the mirror (an invite admission is a session
+//! allowlist entry and no row) and never re-reads the mirror, so a contact added
+//! or re-tiered elsewhere while a world is hosted is not seen here. Tasks 17/18,
+//! which own the Friends UI and the mirror, must push a refreshed book in when
+//! they change one.
 //!
 //! Spec: `docs/superpowers/specs/2026-09-06-online-play-by-contact-design.md` §5.1.
 #![cfg(not(target_arch = "wasm32"))]
 
 use std::collections::{HashSet, VecDeque};
 use std::net::UdpSocket;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use nostr::EventId;
 
-use crate::contacts::{AddedVia, Contact, upsert};
+use crate::contacts::Contact;
 use crate::invite::{DEFAULT_INVITE_TTL_SECS, Invite, mint_bearer};
 use crate::nat::candidates::parse_addrs;
 use crate::online_admission::{
-    ActiveBearer, Admission, AdmitReason, Refusal, admit, is_reply_worthy, refusal_wire,
+    ActiveBearer, Admission, AdmitReason, BearerClaim, Refusal, admit, bearer_eq, is_reply_worthy,
+    refusal_wire,
 };
 use crate::rendezvous::payload::{
     Answer, Candidate, KIND_JOIN_ANSWER, KIND_JOIN_OFFER, PAYLOAD_VERSION, npub_of, seal_answer,
@@ -64,8 +65,7 @@ pub fn unreachable_warning() -> &'static str {
 /// host with no contacts and nobody admitted admits itself and no stranger.
 ///
 /// Every pubkey in `blocked` (Signet blocks, D8) is left out of both halves —
-/// a block beats a contact row, an invite row and a this-session admission
-/// alike. The same list goes to `HostedServer` as its blocklist.
+/// a block beats a contact row and a this-session admission alike. The same list goes to `HostedServer` as its blocklist.
 pub fn access_allowlist(
     host_persona: &[u8; 32],
     book: &[Contact],
@@ -167,8 +167,6 @@ pub enum HostEvent {
     },
     /// Push this into `HostedServer::set_access_policy`.
     AllowlistChanged(Vec<[u8; 32]>),
-    /// A new contact was made; the mirror has already been written.
-    ContactAdded(Box<Contact>),
     /// An offer was discarded. Carries a reason for the log only — nothing was
     /// sent back.
     Dropped(String),
@@ -203,24 +201,6 @@ impl SeenEvents {
     }
 }
 
-/// Where the contacts mirror is written.
-///
-/// Under `cfg(test)` this is a throwaway path in the temp dir: the tests
-/// exercise the real write, but a unit test must never scribble a contacts file
-/// into the working tree.
-fn default_mirror_path() -> PathBuf {
-    #[cfg(not(test))]
-    {
-        crate::contacts::mirror_path()
-    }
-    #[cfg(test)]
-    {
-        std::env::temp_dir()
-            .join(format!("axenstax-online-host-test-{}", std::process::id()))
-            .join("contacts.json")
-    }
-}
-
 pub struct OnlineHost {
     identity: RuntimeIdentity,
     /// The host's own persona, x-only. The invite carries its npub form; this
@@ -234,8 +214,14 @@ pub struct OnlineHost {
     world_name: String,
     relays: Vec<String>,
     book: Vec<Contact>,
-    mirror: PathBuf,
     allowlist: Vec<[u8; 32]>,
+    /// Who holds which bearer. See [`BearerClaim`]: emptied when a bearer may
+    /// have left this machine ([`OnlineHost::rotate_bearer`]).
+    claims: Vec<BearerClaim>,
+    /// Everybody a bearer has let in this session. They stay on the allowlist
+    /// through a book push until blocked, and this is all that holds them there:
+    /// an invite writes no row, so nothing about them outlives this host.
+    guests: Vec<[u8; 32]>,
     /// Signet-blocked pubkeys (D8). Refused before any other check, kept off
     /// the allowlist, and handed to `HostedServer` as its blocklist.
     blocked: Vec<[u8; 32]>,
@@ -298,8 +284,9 @@ impl OnlineHost {
             world_name,
             relays,
             book,
-            mirror: default_mirror_path(),
             allowlist: Vec::new(),
+            claims: Vec::new(),
+            guests: Vec::new(),
             blocked: Vec::new(),
             invite,
             active_bearer: ActiveBearer { bearer, expires_at },
@@ -461,29 +448,22 @@ impl OnlineHost {
     /// takes effect once the owner of the mirror pushes the fresh book in here —
     /// the game loop does that whenever it writes the mirror.
     ///
-    /// Rows this host added itself (an invite admission) are re-applied on top,
-    /// so pushing a book read before the admission cannot un-know somebody:
-    /// somebody a bearer let in stays admitted until they are blocked. Anyone
-    /// else this session admitted must still be close enough in the new book, or
-    /// they leave the session's admissions too. `blocked` beats every source
-    /// (D8), so a blocked pubkey leaves the book, this session's admissions and
-    /// (through [`OnlineHost::access_policy`]) the server's whitelist.
+    /// Somebody a bearer let in stays for this session until they are blocked,
+    /// whatever the book says. Anyone else this session admitted must still be
+    /// close enough in the new book, or they leave the session's admissions too.
+    /// `blocked` beats every source (D8), so a blocked pubkey leaves the book,
+    /// this session's admissions and (through [`OnlineHost::access_policy`]) the
+    /// server's whitelist. A block keeps their claim: it must not free their
+    /// bearer for somebody else.
     pub fn set_book(&mut self, book: Vec<Contact>, blocked: Vec<[u8; 32]>) {
-        let mine: Vec<Contact> = self
-            .book
-            .iter()
-            .filter(|c| c.added_via == AddedVia::Invite && !blocked.contains(&c.pubkey))
-            .cloned()
-            .collect();
         self.book = book;
         self.book.retain(|c| !blocked.contains(&c.pubkey));
-        for c in mine {
-            upsert(&mut self.book, c);
-        }
         let new_book = &self.book;
+        let guests = &self.guests;
         self.allowlist.retain(|pk| {
             !blocked.contains(pk)
-                && crate::online_admission::admits_play(crate::contacts::tier_of(new_book, pk))
+                && (guests.contains(pk)
+                    || crate::online_admission::admits_play(crate::contacts::tier_of(new_book, pk)))
         });
         self.blocked = blocked;
     }
@@ -515,7 +495,11 @@ impl OnlineHost {
     /// A root host replaces its disclosed bearer. A continued authority
     /// preserves the original fields and makes that capability unavailable;
     /// its world-local abort record prevents resurrection on restart.
+    ///
+    /// The bearer may have left this machine, so its owner loses it as well: no
+    /// grace for anybody. A seated guest stays on this session's list.
     pub fn rotate_bearer(&mut self) -> &Invite {
+        self.claims.clear();
         // This authority inherited one immutable original capability. It
         // cannot replace that bearer's value under the original host's key.
         if self.continuation.is_some() {
@@ -545,12 +529,20 @@ impl OnlineHost {
             offered,
             &self.book,
             (!self.continuation_revoked).then_some(&self.active_bearer),
+            &self.claims,
             now,
         )
     }
 
+    /// Whether the current link has already let somebody in, so it would do
+    /// nothing for the next person it is sent to.
+    pub fn link_is_used(&self) -> bool {
+        self.claims.iter().any(|c| bearer_eq(&c.bearer, &self.active_bearer.bearer))
+    }
+
     /// Copy a continued original invitation unchanged, or mint a fresh
-    /// invitation for an ordinary root host.
+    /// invitation for an ordinary root host. The previous bearer lets nobody new
+    /// in; if it has an owner, they keep it until it expires.
     pub fn mint_fresh_invite(&mut self, now: u64) -> Result<&Invite, &'static str> {
         if self.continuation.is_some() {
             if self.live_bearer(now).is_none() {
@@ -619,8 +611,7 @@ impl OnlineHost {
             };
 
             // WHO, first, and in silence. A Signet block beats a contact row
-            // and a live bearer alike (D8) — no answer, no allowlist entry, no
-            // invite row in the mirror.
+            // and a live bearer alike (D8) — no answer, no allowlist entry.
             if self.blocked.contains(&verified.persona) {
                 out.push(HostEvent::Dropped("refused: blocked in Signet".to_string()));
                 continue;
@@ -631,18 +622,31 @@ impl OnlineHost {
                 .as_deref()
                 .and_then(|h| hex::decode(h).ok())
                 .and_then(|b| <[u8; 16]>::try_from(b.as_slice()).ok());
+            // The bearer this persona already owns, if that is what they hold. It
+            // may no longer be the live one, so it is checked against, and
+            // answered in, the context it was claimed in. Nobody else gets past
+            // these checks with a replaced bearer.
+            let own_claim = bearer.and_then(|b| {
+                self.claims
+                    .iter()
+                    .find(|c| c.owner == verified.persona && bearer_eq(&c.bearer, &b))
+                    .copied()
+            });
+            let context = match own_claim {
+                Some(claim) => claim.context,
+                None => self.handover_context(now),
+            };
             // Check continued/retained authority before Kith/contact
             // shortcuts, including a runtime returning at a later epoch.
             if (self.continuation_revoked
                 && (verified.offer.bearer.is_some() || verified.offer.handover.is_some()))
-                || verified
-                    .offer
-                    .handover
-                    .is_some_and(|expected| Some(expected) != self.handover_context(now))
+                || verified.offer.handover.is_some_and(|expected| Some(expected) != context)
                 || ((self.continuation.is_some() || !self.retired_capabilities.is_empty())
                     && verified.offer.bearer.is_some()
                     && verified.offer.handover.is_none())
-                || (verified.offer.handover.is_some() && bearer != Some(self.active_bearer.bearer))
+                || (verified.offer.handover.is_some()
+                    && own_claim.is_none()
+                    && bearer != Some(self.active_bearer.bearer))
                 || verified.offer.handover.is_some_and(|expected| {
                     self.retired_capabilities
                         .iter()
@@ -659,6 +663,7 @@ impl OnlineHost {
                 bearer,
                 &self.book,
                 Some(&self.active_bearer),
+                &self.claims,
                 now,
             ) {
                 Admission::Accept(reason) => reason,
@@ -674,6 +679,7 @@ impl OnlineHost {
                             &verified.offer.session,
                             false,
                             Some(refusal_wire(r)),
+                            context,
                             now,
                         );
                     }
@@ -698,42 +704,30 @@ impl OnlineHost {
                         &verified.offer.session,
                         false,
                         Some(refusal_wire(r)),
+                        context,
                         now,
                     );
                 }
-                // Nothing is written for a refusal, an invitee's included: they
-                // never got in, so they are not yet somebody this player knows,
-                // and the bearer is still live for the retry that follows the
-                // upgrade. Being told "your build is old" is the whole reply.
+                // Nothing is claimed by a refusal, an invitee's included: they
+                // never got in, and the bearer is still free for the retry that
+                // follows the upgrade. Being told "your build is old" is the
+                // whole reply.
                 continue;
             }
 
+            // This hosted world's session only: a claim and an allowlist entry,
+            // no contact row, on disk or in the book.
             if reason == AdmitReason::ByInvite {
-                let row = Contact {
-                    pubkey: verified.persona,
-                    display_name: None,
-                    tier: crate::comms::Tier::Kith,
-                    is_child: false,
-                    runtime_pubkey: Some(verified.runtime),
-                    added_via: AddedVia::Invite,
-                    added_at: now,
-                    // Somebody joining YOUR world is not you visiting
-                    // theirs — `last_joined` is the player's own history.
-                    last_joined: None,
-                };
-                upsert(&mut self.book, row.clone());
-                // Only this row goes to the mirror — `self.book` is the
-                // assembled book (Kenspeckle + Signet rows), which must never
-                // be written back into the player's own file (Signet sync D7).
-                if let Err(e) = crate::contacts::record_in_mirror(&self.mirror, row) {
-                    log::warn!("[online] could not write the contacts mirror: {e}");
+                if own_claim.is_none() {
+                    self.claims.push(BearerClaim {
+                        bearer: self.active_bearer.bearer,
+                        owner: verified.persona,
+                        expires_at: self.active_bearer.expires_at,
+                        context,
+                    });
                 }
-                // Report the row as it now stands, not the one just handed to
-                // `upsert`: a ken contact upgrading to kith by invite keeps the
-                // display name the book already had, and this event is what the
-                // UI renders.
-                if let Some(merged) = crate::contacts::find(&self.book, &verified.persona) {
-                    out.push(HostEvent::ContactAdded(Box::new(merged.clone())));
+                if !self.guests.contains(&verified.persona) {
+                    self.guests.push(verified.persona);
                 }
             }
             if !self.allowlist.contains(&verified.persona) {
@@ -748,7 +742,7 @@ impl OnlineHost {
             // Punch toward the joiner BEFORE answering, so by the time they
             // start dialling, this router already expects them.
             self.punch(&verified.offer.candidates, &verified.offer.session);
-            self.send_answer(&verified.runtime, &verified.offer.session, true, None, now);
+            self.send_answer(&verified.runtime, &verified.offer.session, true, None, context, now);
         }
         out
     }
@@ -784,6 +778,7 @@ impl OnlineHost {
         session: &str,
         accepted: bool,
         reason: Option<&str>,
+        handover: Option<crate::rendezvous::payload::HandoverContext>,
         now: u64,
     ) {
         let Some(attestation) = self.identity.attestation().cloned() else {
@@ -812,7 +807,7 @@ impl OnlineHost {
             },
             world_name: self.world_name.clone(),
             sent_at: now,
-            handover: self.handover_context(now),
+            handover,
         };
         let keys = self.identity.keys().clone();
         // Sealing is pure CPU (a NIP-44 encrypt and a signature) and only
@@ -835,6 +830,7 @@ impl OnlineHost {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::contacts::AddedVia;
     use crate::rendezvous::payload::{Offer, new_session_id, seal_offer};
     use crate::rendezvous::relay_client::{FakeRelayHub, RendezvousRelay};
     use nostr::Keys;
@@ -1021,22 +1017,11 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_refreshed_book_replaces_the_snapshot_without_un_knowing_an_invitee() {
+    fn a_refreshed_book_replaces_the_snapshot() {
         // The book is a start-time snapshot; the game loop pushes a fresh one
-        // whenever it writes the mirror. That must not drop somebody this host
-        // itself admitted by invite a moment earlier.
+        // whenever it writes the mirror.
         let hub = FakeRelayHub::new();
-        let (mut host, _) = a_host(&hub, vec![]);
-        host.book.push(Contact {
-            pubkey: [7; 32],
-            display_name: None,
-            tier: crate::comms::Tier::Kith,
-            is_child: false,
-            runtime_pubkey: Some([8; 32]),
-            added_via: AddedVia::Invite,
-            added_at: 1,
-            last_joined: None,
-        });
+        let (mut host, _) = a_host(&hub, vec![a_contact([7; 32], crate::comms::Tier::Kith)]);
         host.set_book(
             vec![a_contact([1; 32], crate::comms::Tier::Kin)],
             Vec::new(),
@@ -1046,8 +1031,8 @@ pub(crate) mod tests {
             "the fresh book is in"
         );
         assert!(
-            crate::contacts::find(host.book(), &[7; 32]).is_some(),
-            "the invitee this host admitted is still known"
+            crate::contacts::find(host.book(), &[7; 32]).is_none(),
+            "and the old one is gone"
         );
     }
 
@@ -1168,44 +1153,14 @@ pub(crate) mod tests {
         assert!(whitelist.admits(&[3; 32]));
     }
 
-    /// Invite rows are out of scope here: somebody a bearer let in stays
-    /// admitted until they are blocked.
     #[test]
-    fn a_player_admitted_by_invite_stays_until_blocked() {
+    fn a_signet_block_removes_a_guest_and_an_admission_and_is_the_blocklist() {
+        // D8: a block beats every source — including this session's guests and
+        // admissions, which `set_book` and `access_allowlist` otherwise keep on
+        // purpose.
         let hub = FakeRelayHub::new();
         let (mut host, _) = a_host(&hub, vec![]);
-        host.book.push(Contact {
-            added_via: AddedVia::Invite,
-            ..a_contact([7; 32], crate::comms::Tier::Kith)
-        });
-        host.allowlist.push([7; 32]);
-
-        host.set_book(vec![], vec![]);
-        assert_eq!(host.allowlist(), &[[7; 32]], "a book without them does not remove them");
-        assert!(host.access_policy().0.admits(&[7; 32]));
-
-        host.set_book(vec![], vec![[7; 32]]);
-        assert!(host.allowlist().is_empty(), "a block does");
-        assert!(!host.access_policy().0.admits(&[7; 32]));
-    }
-
-    #[test]
-    fn a_signet_block_removes_an_invitee_and_an_admission_and_is_the_blocklist() {
-        // D8: a block beats every source — including the invite row this host
-        // wrote itself and this session's admissions, which `set_book` and
-        // `access_allowlist` otherwise keep on purpose.
-        let hub = FakeRelayHub::new();
-        let (mut host, _) = a_host(&hub, vec![]);
-        host.book.push(Contact {
-            pubkey: [7; 32],
-            display_name: None,
-            tier: crate::comms::Tier::Kith,
-            is_child: false,
-            runtime_pubkey: Some([8; 32]),
-            added_via: AddedVia::Invite,
-            added_at: 1,
-            last_joined: None,
-        });
+        host.guests.push([7; 32]);
         host.allowlist.push([9; 32]);
         host.allowlist.push([7; 32]);
         let fresh = vec![
@@ -1214,10 +1169,6 @@ pub(crate) mod tests {
         ];
         host.set_book(fresh, vec![[7; 32], [9; 32]]);
 
-        assert!(
-            crate::contacts::find(host.book(), &[7; 32]).is_none(),
-            "blocked invitee left the book"
-        );
         assert!(
             crate::contacts::find(host.book(), &[9; 32]).is_none(),
             "blocked contact left the book"
@@ -1264,39 +1215,6 @@ pub(crate) mod tests {
                 "a block beats a live bearer: {events:?}"
             );
             assert!(host.allowlist().is_empty());
-        });
-    }
-
-    #[test]
-    fn a_stranger_with_the_bearer_is_admitted_and_becomes_a_kith_contact() {
-        rt().block_on(async {
-            let hub = FakeRelayHub::new();
-            let caller = Caller::new();
-            let (mut host, host_runtime) = a_host(&hub, vec![]);
-            let bearer = hex::encode(host.invite().bearer);
-            let joiner_relay = hub.client();
-            let offer = caller
-                .offer(Some(bearer), crate::protocol::PROTOCOL_VERSION)
-                .await;
-            let ev = seal_offer(&caller.runtime, &host_runtime.public_key(), &offer)
-                .await
-                .unwrap();
-            joiner_relay.publish(&ev).unwrap();
-
-            let events = host.poll(NOW, 1, 5);
-            let added = events.iter().find_map(|e| match e {
-                HostEvent::ContactAdded(c) => Some(c.clone()),
-                _ => None,
-            });
-            let added = added.expect("an invite admits AND makes a contact");
-            assert_eq!(added.pubkey, caller.persona.public_key().to_bytes());
-            assert_eq!(added.tier, crate::comms::Tier::Kith);
-            assert_eq!(added.added_via, AddedVia::Invite);
-            assert_eq!(
-                added.runtime_pubkey,
-                Some(caller.runtime.public_key().to_bytes()),
-                "the rendezvous is where a runtime key can be learned"
-            );
         });
     }
 
@@ -1428,11 +1346,10 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_refused_invitee_is_not_written_into_the_book() {
+    fn a_refused_invitee_is_explained_and_not_let_in() {
         rt().block_on(async {
-            // The bearer is good but the build is old: explained, and nothing
-            // is written. They are not somebody this player knows until they
-            // actually get in, and the bearer is still live for the retry.
+            // The bearer is good but the build is old: explained, and they are
+            // not on the list. The bearer is still free for the retry.
             let hub = FakeRelayHub::new();
             let caller = Caller::new();
             let (mut host, host_runtime) = a_host(&hub, vec![]);
@@ -1448,61 +1365,13 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
             joiner_relay.publish(&ev).unwrap();
-            let events = host.poll(NOW, 1, 5);
+            host.poll(NOW, 1, 5);
 
             let answer_ev = joiner_relay.try_recv().expect("an invitee IS answered");
             let answer =
                 crate::rendezvous::payload::open_answer(&caller.runtime, &answer_ev).unwrap();
             assert_eq!(answer.reason.as_deref(), Some("protocol-mismatch"));
-            assert!(
-                !events
-                    .iter()
-                    .any(|e| matches!(e, HostEvent::ContactAdded(_))),
-                "a refusal makes no contact: {events:?}"
-            );
             assert!(host.allowlist().is_empty());
-        });
-    }
-
-    #[test]
-    fn an_invite_upgrade_keeps_the_display_name_the_book_already_had() {
-        rt().block_on(async {
-            // Ken does not admit, but a ken contact holding an invite does get
-            // in — and the event the UI renders must be the merged row, not the
-            // bare one handed to `upsert`, or their name disappears.
-            let hub = FakeRelayHub::new();
-            let caller = Caller::new();
-            let (mut host, host_runtime) = a_host(
-                &hub,
-                vec![a_contact(
-                    caller.persona.public_key().to_bytes(),
-                    crate::comms::Tier::Ken,
-                )],
-            );
-            let bearer = hex::encode(host.invite().bearer);
-            let joiner_relay = hub.client();
-            let offer = caller
-                .offer(Some(bearer), crate::protocol::PROTOCOL_VERSION)
-                .await;
-            let ev = seal_offer(&caller.runtime, &host_runtime.public_key(), &offer)
-                .await
-                .unwrap();
-            joiner_relay.publish(&ev).unwrap();
-
-            let events = host.poll(NOW, 1, 5);
-            let added = events
-                .iter()
-                .find_map(|e| match e {
-                    HostEvent::ContactAdded(c) => Some(c.clone()),
-                    _ => None,
-                })
-                .expect("the invite admits and upgrades");
-            assert_eq!(added.tier, crate::comms::Tier::Kith, "ken upgrades to kith");
-            assert_eq!(
-                added.display_name.as_deref(),
-                Some("Friend"),
-                "the merged row keeps the name the book already had"
-            );
         });
     }
 
@@ -1700,6 +1569,312 @@ pub(crate) mod tests {
                 .filter(|e| matches!(e, HostEvent::Admitted { .. }))
                 .count();
             assert_eq!(admits, 1, "the replay guard holds: {events:?}");
+        });
+    }
+
+    // ─── One link, one person, this world only ───
+
+    /// Publish `offer` from `caller` to the host, and read the host's reply on
+    /// a relay subscribed as the caller.
+    async fn call_with(
+        hub: &FakeRelayHub,
+        caller: &Caller,
+        host_runtime: &Keys,
+        offer: &Offer,
+    ) -> Box<dyn RendezvousRelay> {
+        let relay = hub.client();
+        relay
+            .subscribe(KIND_JOIN_ANSWER, &caller.runtime.public_key().to_hex())
+            .unwrap();
+        let ev = seal_offer(&caller.runtime, &host_runtime.public_key(), offer)
+            .await
+            .unwrap();
+        relay.publish(&ev).unwrap();
+        Box::new(relay)
+    }
+
+    /// `caller` presents `bearer` at time `at`: what the host did, and any reply.
+    async fn present(
+        host: &mut OnlineHost,
+        hub: &FakeRelayHub,
+        caller: &Caller,
+        host_runtime: &Keys,
+        bearer: Option<[u8; 16]>,
+        at: u64,
+    ) -> (Vec<HostEvent>, Option<nostr::Event>) {
+        let mut offer = caller
+            .offer(bearer.map(hex::encode), crate::protocol::PROTOCOL_VERSION)
+            .await;
+        offer.sent_at = at;
+        let relay = call_with(hub, caller, host_runtime, &offer).await;
+        let events = host.poll(at, 1, 5);
+        (events, relay.try_recv())
+    }
+
+    fn admitted_by_invite(events: &[HostEvent]) -> bool {
+        events.iter().any(|e| {
+            matches!(e, HostEvent::Admitted { reason: AdmitReason::ByInvite, .. })
+        })
+    }
+
+    #[test]
+    fn a_forwarded_link_gets_a_second_persona_the_silence_of_no_invite() {
+        rt().block_on(async {
+            let hub = FakeRelayHub::new();
+            let (first, second) = (Caller::new(), Caller::new());
+            let (mut host, host_runtime) = a_host(&hub, vec![]);
+            let bearer = host.invite().bearer;
+
+            let (events, answer) =
+                present(&mut host, &hub, &first, &host_runtime, Some(bearer), NOW).await;
+            assert!(admitted_by_invite(&events), "{events:?}");
+            assert!(answer.is_some(), "the first persona is answered");
+
+            let (events, answer) =
+                present(&mut host, &hub, &second, &host_runtime, Some(bearer), NOW).await;
+            assert!(answer.is_none(), "no reply of any kind to a second persona");
+            assert!(
+                events.iter().all(|e| matches!(e, HostEvent::Dropped(_))),
+                "{events:?}"
+            );
+            let second_pk = second.persona.public_key().to_bytes();
+            assert!(!host.allowlist().contains(&second_pk));
+            assert!(!host.access_policy().0.admits(&second_pk));
+        });
+    }
+
+    #[test]
+    fn the_first_persona_can_reconnect_with_its_link_until_it_expires() {
+        rt().block_on(async {
+            let hub = FakeRelayHub::new();
+            let first = Caller::new();
+            let (mut host, host_runtime) = a_host(&hub, vec![]);
+            let (bearer, expires_at) = (host.invite().bearer, host.invite().expires_at);
+            let first_pk = first.persona.public_key().to_bytes();
+
+            let (events, _) =
+                present(&mut host, &hub, &first, &host_runtime, Some(bearer), NOW).await;
+            assert!(admitted_by_invite(&events), "{events:?}");
+
+            // A dropped connection: back with the same link, a new session.
+            let (events, answer) =
+                present(&mut host, &hub, &first, &host_runtime, Some(bearer), NOW + 60).await;
+            assert!(admitted_by_invite(&events), "by the link, as before: {events:?}");
+            assert!(answer.is_some(), "the owner is answered");
+
+            // The last good second, then silence, for the owner too.
+            let (events, _) =
+                present(&mut host, &hub, &first, &host_runtime, Some(bearer), expires_at).await;
+            assert!(admitted_by_invite(&events), "{events:?}");
+            let (events, answer) =
+                present(&mut host, &hub, &first, &host_runtime, Some(bearer), expires_at + 1).await;
+            assert!(!events.iter().any(|e| matches!(e, HostEvent::Admitted { .. })), "{events:?}");
+            assert!(answer.is_none(), "an expired link is silence");
+
+            // The session entry is what still names them on the server.
+            assert!(host.access_policy().0.admits(&first_pk));
+        });
+    }
+
+    #[test]
+    fn a_guest_is_written_nowhere_and_is_not_kith() {
+        rt().block_on(async {
+            use crate::comms::{CommsLevel, Tier, hear_ok, speak_ok};
+            let hub = FakeRelayHub::new();
+            let guest = Caller::new();
+            let (mut host, host_runtime) = a_host(&hub, vec![]);
+            let bearer = host.invite().bearer;
+            let guest_pk = guest.persona.public_key().to_bytes();
+
+            let (events, _) =
+                present(&mut host, &hub, &guest, &host_runtime, Some(bearer), NOW).await;
+            assert!(admitted_by_invite(&events), "{events:?}");
+
+            assert!(crate::contacts::find(host.book(), &guest_pk).is_none(), "no row in the book");
+            assert!(
+                crate::contacts::find(&crate::contacts::load_mirror(&crate::contacts::mirror_path()), &guest_pk).is_none(),
+                "no row in the mirror"
+            );
+            assert!(host.access_policy().0.admits(&guest_pk), "but they are let in");
+
+            // At the safe default a line reaches nobody in either direction.
+            let tier = crate::contacts::tier_of(host.book(), &guest_pk);
+            assert_eq!(tier, Tier::Stranger);
+            assert!(!speak_ok(CommsLevel::Approved, tier));
+            assert!(!hear_ok(CommsLevel::Approved, tier));
+        });
+    }
+
+    #[test]
+    fn being_let_in_grants_nothing_in_another_world_or_session() {
+        rt().block_on(async {
+            let hub = FakeRelayHub::new();
+            let guest = Caller::new();
+            let (mut first_world, first_runtime) = a_host(&hub, vec![]);
+            let bearer = first_world.invite().bearer;
+            let (events, _) =
+                present(&mut first_world, &hub, &guest, &first_runtime, Some(bearer), NOW).await;
+            assert!(admitted_by_invite(&events), "{events:?}");
+
+            // The next world starts from the book this one leaves behind.
+            let (mut next_world, next_runtime) = a_host(&hub, first_world.book().to_vec());
+            let guest_pk = guest.persona.public_key().to_bytes();
+            let (events, answer) =
+                present(&mut next_world, &hub, &guest, &next_runtime, None, NOW).await;
+            assert!(!events.iter().any(|e| matches!(e, HostEvent::Admitted { .. })), "{events:?}");
+            assert!(answer.is_none());
+            let (events, answer) =
+                present(&mut next_world, &hub, &guest, &next_runtime, Some(bearer), NOW).await;
+            assert!(!events.iter().any(|e| matches!(e, HostEvent::Admitted { .. })), "{events:?}");
+            assert!(answer.is_none());
+            assert!(!next_world.access_policy().0.admits(&guest_pk));
+        });
+    }
+
+    #[test]
+    fn a_refreshed_book_keeps_this_session_s_guest_and_a_block_removes_them() {
+        rt().block_on(async {
+            let hub = FakeRelayHub::new();
+            let (guest, other) = (Caller::new(), Caller::new());
+            let (mut host, host_runtime) = a_host(&hub, vec![]);
+            let bearer = host.invite().bearer;
+            let guest_pk = guest.persona.public_key().to_bytes();
+            let (events, _) =
+                present(&mut host, &hub, &guest, &host_runtime, Some(bearer), NOW).await;
+            assert!(admitted_by_invite(&events), "{events:?}");
+
+            host.set_book(vec![], vec![]);
+            assert!(host.allowlist().contains(&guest_pk), "a book without them does not remove them");
+            assert!(host.access_policy().0.admits(&guest_pk));
+            assert!(crate::contacts::find(host.book(), &guest_pk).is_none());
+
+            host.set_book(vec![], vec![guest_pk]);
+            assert!(!host.allowlist().contains(&guest_pk), "a block does");
+            assert!(!host.access_policy().0.admits(&guest_pk));
+
+            // A block does not free the link for somebody else.
+            let (events, answer) =
+                present(&mut host, &hub, &other, &host_runtime, Some(bearer), NOW).await;
+            assert!(!events.iter().any(|e| matches!(e, HostEvent::Admitted { .. })), "{events:?}");
+            assert!(answer.is_none());
+        });
+    }
+
+    #[test]
+    fn a_ken_contact_let_in_by_a_link_stays_ken() {
+        rt().block_on(async {
+            use crate::comms::Tier;
+            let hub = FakeRelayHub::new();
+            let caller = Caller::new();
+            let pk = caller.persona.public_key().to_bytes();
+            let (mut host, host_runtime) = a_host(&hub, vec![a_contact(pk, Tier::Ken)]);
+            let bearer = host.invite().bearer;
+            let (events, _) =
+                present(&mut host, &hub, &caller, &host_runtime, Some(bearer), NOW).await;
+            assert!(admitted_by_invite(&events), "{events:?}");
+            let row = crate::contacts::find(host.book(), &pk).expect("their row is untouched");
+            assert_eq!(row.tier, Tier::Ken);
+            assert_eq!(row.added_via, AddedVia::Kenspeckle);
+            assert_eq!(row.display_name.as_deref(), Some("Friend"));
+        });
+    }
+
+    /// A real link join carries the handover context of the link it came from.
+    /// The guest of an earlier link must get back in after the host made a new
+    /// one for somebody else, and be answered in that link's own context.
+    #[test]
+    fn a_fresh_link_for_somebody_else_does_not_lock_the_first_guest_out() {
+        rt().block_on(async {
+            let hub = FakeRelayHub::new();
+            let (first, next) = (Caller::new(), Caller::new());
+            let (mut host, host_runtime) = a_host(&hub, vec![]);
+            let (old_bearer, old_context) =
+                (host.invite().bearer, host.handover_context(NOW).unwrap());
+            let mut offer = first
+                .offer(Some(hex::encode(old_bearer)), crate::protocol::PROTOCOL_VERSION)
+                .await;
+            offer.handover = Some(old_context);
+            let _relay = call_with(&hub, &first, &host_runtime, &offer).await;
+            assert!(admitted_by_invite(&host.poll(NOW, 1, 5)));
+
+            let new_bearer = host.mint_fresh_invite(NOW + 60).unwrap().bearer;
+
+            // The next friend comes in on the new link.
+            let (events, _) =
+                present(&mut host, &hub, &next, &host_runtime, Some(new_bearer), NOW + 60).await;
+            assert!(admitted_by_invite(&events), "{events:?}");
+
+            // The first guest reconnects on the old one.
+            let mut offer = first
+                .offer(Some(hex::encode(old_bearer)), crate::protocol::PROTOCOL_VERSION)
+                .await;
+            offer.sent_at = NOW + 60;
+            offer.handover = Some(old_context);
+            let relay = call_with(&hub, &first, &host_runtime, &offer).await;
+            let events = host.poll(NOW + 60, 1, 5);
+            assert!(admitted_by_invite(&events), "{events:?}");
+            let answer = relay.try_recv().expect("the owner is answered");
+            let answer =
+                crate::rendezvous::payload::open_answer(&first.runtime, &answer).unwrap();
+            assert!(answer.accepted);
+            assert_eq!(answer.handover, Some(old_context), "in the context of their own link");
+
+            // Nobody else gets the old link, with its context or without.
+            let stranger = Caller::new();
+            let mut offer = stranger
+                .offer(Some(hex::encode(old_bearer)), crate::protocol::PROTOCOL_VERSION)
+                .await;
+            offer.sent_at = NOW + 60;
+            offer.handover = Some(old_context);
+            let relay = call_with(&hub, &stranger, &host_runtime, &offer).await;
+            let events = host.poll(NOW + 60, 1, 5);
+            assert!(!events.iter().any(|e| matches!(e, HostEvent::Admitted { .. })), "{events:?}");
+            assert!(relay.try_recv().is_none());
+        });
+    }
+
+    /// A rotation means the bearer may have left this machine: no grace, for
+    /// its owner either. They stay on this session's list if they are seated.
+    #[test]
+    fn rotating_the_bearer_ends_the_link_for_its_owner_too() {
+        rt().block_on(async {
+            let hub = FakeRelayHub::new();
+            let guest = Caller::new();
+            let (mut host, host_runtime) = a_host(&hub, vec![]);
+            let old = host.invite().bearer;
+            let guest_pk = guest.persona.public_key().to_bytes();
+            let (events, _) = present(&mut host, &hub, &guest, &host_runtime, Some(old), NOW).await;
+            assert!(admitted_by_invite(&events), "{events:?}");
+
+            host.rotate_bearer();
+
+            let (events, answer) =
+                present(&mut host, &hub, &guest, &host_runtime, Some(old), NOW + 1).await;
+            assert!(!events.iter().any(|e| matches!(e, HostEvent::Admitted { .. })), "{events:?}");
+            assert!(answer.is_none());
+            assert!(host.access_policy().0.admits(&guest_pk), "a seated guest isn't thrown out");
+        });
+    }
+
+    #[test]
+    fn a_refused_invitee_does_not_use_the_link_up() {
+        rt().block_on(async {
+            // A full world or an old build is explained, and the link stays
+            // free for the retry: it would be useless to the real invitee if a
+            // refused call had already spent it.
+            let hub = FakeRelayHub::new();
+            let (first, second) = (Caller::new(), Caller::new());
+            let (mut host, host_runtime) = a_host(&hub, vec![]);
+            let bearer = host.invite().bearer;
+            let offer = first
+                .offer(Some(hex::encode(bearer)), crate::protocol::PROTOCOL_VERSION + 1)
+                .await;
+            let _relay = call_with(&hub, &first, &host_runtime, &offer).await;
+            assert!(!admitted_by_invite(&host.poll(NOW, 1, 5)));
+
+            let (events, _) =
+                present(&mut host, &hub, &second, &host_runtime, Some(bearer), NOW).await;
+            assert!(admitted_by_invite(&events), "{events:?}");
         });
     }
 

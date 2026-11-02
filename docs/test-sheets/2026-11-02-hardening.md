@@ -12,6 +12,8 @@ Any PIN on a test device or test identity is `123456`.
 - A contact removed or downgraded in Signet is removed from a hosted world. So are Signet-sourced friends if the contact list goes stale, is disconnected or can't be read.
 - If Signet contacts can't be read, Host Game opens the world solo with a notice and Host online shows a notice in the lobby. Pressing Disconnect clears the damaged file. A player whose Signet file was ever damaged in an older build may see this once after upgrading, until they press Disconnect.
 - The room code message now says anyone signed in who has the code can join.
+- An invite link now lets one person into the world you're hosting, until it expires or you stop hosting. If it's forwarded, nobody else gets in. It no longer adds anybody to a Friends list on either side, and `/online copy` makes a new link once the current one has been used.
+- Rows that older builds added to a Friends list through an invite are gone on upgrade. Signet friends stay at their Signet tier, but **Join** may ask for an invite link once before it works again. Someone you pasted and then played with on an older build may need pasting again.
 - Worlds saved by this build won't open on older builds (save format 60). A handover between this build and an older one is refused at the manifest or import, even though the protocol version is the same.
 - A joiner who leaves a hosted world comes back where they left, not at spawn, if there is room to stand there. A world remembers its clock across a restart: auctions, bounties and cooldowns carry on from where they were instead of starting over, and the sky resumes its time and weather.
 
@@ -60,6 +62,20 @@ Each needs a real install. Say what you saw.
 ## Keep slice 2b: lava in newly loaded land
 
 17. Natural lava rims in newly loaded land now flow within minutes instead of up to an hour later, and can start fires sooner. Walk or fly into new land and find a cave wall or surface pool with lava on an open edge. Does the flow look right, and is the fire it starts reasonable?
+
+## Invites: one person, one world
+
+An invite link now lets one person into the world you are hosting, until it expires or you stop hosting. It makes nobody a friend or contact. Automated checks ran on one machine; nobody has tried this on two machines. You need two or three signed-in players on different machines.
+
+18. Host online and send the link to a friend. Do they get in? Afterwards, is either of you in the other's Friends list? (Expected: no.)
+19. Send the same link to a second person after the first has joined. What do they see? (Expected: the same "didn't answer" message as anyone with no invite.)
+20. The first friend leaves and pastes the same link again. Do they get back in without you doing anything?
+21. Open the Online panel after your friend has joined. Is it clear that link is used and how to get another? Type `/online copy`, send the new link to someone else. Do they get in? Does the first friend still get back in on their old link?
+22. Stop hosting and host again, or host a different world. Does your friend's old link get them in? (Expected: no. They need a new one.)
+23. With a friend in the world by invite, and chat at its default setting, say something each way. Does either of you see it? (Expected: no. A guest isn't a contact.) Does the wording anywhere suggest otherwise?
+24. A friend already in your Signet contacts: after upgrading, is their tier unchanged? Does **Join** work, or does it ask for an invite link first? If it asks, does one invite join fix it for good?
+25. A friend you added by pasting their address and then played with on an older build: are they still in your list? (Expected: may be gone. Paste them again. Say if that feels wrong.)
+26. Read the guide page "Play with a Friend Online" and the Add a friend box. Does anything say an invite makes someone a friend?
 
 ## Known gaps, not bugs in this build
 

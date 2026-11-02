@@ -14,15 +14,16 @@
 
 use crate::comms::Tier;
 
-/// Where a contact came into the book from. Advisory (it drives UI copy and
-/// lets a future "forget everyone I met by invite" do the right thing); it is
-/// never a permission.
+/// Where a contact came into the book from. It drives UI copy and is never a
+/// permission, except that a stored `Invite` row is dropped on load.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AddedVia {
-    /// Admitted by, or admitted with, an invite bearer.
+    /// Read from old mirrors only, so such a row parses and can be dropped rather
+    /// than failing the whole file. An invite makes nobody a contact: nothing
+    /// creates this, [`load_mirror`] drops it and [`upsert`] won't hold it.
     Invite,
-    /// Imported from a Signet persona-scoped contacts view (waits upstream).
+    /// Imported from a Signet persona-scoped contacts view.
     Import,
     /// The player pasted an npub.
     Paste,
@@ -232,8 +233,8 @@ fn config_paths() -> Option<(std::path::PathBuf, std::path::PathBuf)> {
 /// key file, no blob, bad key, bad signature-free decrypt, malformed JSON —
 /// still yields the other sources, which is safe by construction:
 /// `ServerPlayer::tier_of` falls back to `Stranger` for anyone not in it, so a
-/// player simply talks to nobody until a real import or invite exists, never
-/// the other way round.
+/// player simply talks to nobody until a real import exists, never the other
+/// way round.
 ///
 /// There is no QR-scanning UI in this build — a guardian drops
 /// `contacts-key.hex` (64 hex chars, the raw decryption key) and
@@ -359,30 +360,29 @@ pub fn record_in_mirror(path: &std::path::Path, contact: Contact) -> Result<(), 
     save_mirror(path, &mirror)
 }
 
-/// Record a visit to `contact`'s world in the mirror at `path`, folded in as
-/// usual. The only production caller passes the row the join itself built
-/// (`online_join`: `Kith`, `AddedVia::Invite` — being let in earns Kith, the
-/// same rule as before Signet), so what lands in the mirror is what the join
-/// earned, never Signet's own tier (a Signet Kin visited is written as Kith,
-/// a Signet block still beats it through [`assemble_book`]).
+/// Record a visit to a world hosted by somebody already in `book`, the assembled
+/// book, and say whether anything was written. A host not in it gets no row: being
+/// let in by an invite makes nobody a contact, on either side.
 ///
-/// Guard for a caller that does not exist yet: a row tagged `Import` (i.e.
-/// copied out of the Kenspeckle/Signet book) that the mirror does not hold is
-/// written at `Stranger`, so the visit and runtime key are kept without
-/// copying an imported tier into the player's own file.
-pub fn record_visit(path: &std::path::Path, mut contact: Contact) -> Result<(), String> {
-    let mirror = load_mirror(path);
-    if find(&mirror, &contact.pubkey).is_none() && contact.added_via == AddedVia::Import {
-        contact.tier = Tier::Stranger;
-    }
-    record_in_mirror(path, contact)
+/// The visit carries the host's runtime key, which only a verified rendezvous can
+/// supply and which **Join** needs, and `last_joined`. It carries no rights: it goes
+/// in at `Stranger` under the source the book already has, so a contact only in
+/// Signet or Kenspeckle gets a row here that adds no tier of its own, and any block,
+/// re-tier or disconnect still reaches them through [`assemble_book`].
+pub fn record_visit(path: &std::path::Path, book: &[Contact], mut visit: Contact) -> Result<bool, String> {
+    let Some(known) = find(book, &visit.pubkey) else {
+        return Ok(false);
+    };
+    visit.tier = Tier::Stranger;
+    visit.added_via = known.added_via;
+    record_in_mirror(path, visit)?;
+    Ok(true)
 }
 
 // ─── The local mirror (online play by contact, spec §2/§6) ──────────────────
 //
-// `profile/contacts.json` — the player's own address book, fed by invites and
-// pastes today and by the Signet persona-scoped contacts view when that ships
-// upstream. It is a LOCAL FILE and nothing else: no directory, no sync, no
+// `profile/contacts.json` — the player's own address book: pastes, and visits
+// to people already known. It is a LOCAL FILE and nothing else: no directory, no sync, no
 // server copy (CLAUDE.md red lines 1 and 3).
 
 /// On-disk format version. Fields are append-only: an older build reading a
@@ -430,6 +430,10 @@ struct StoredContact {
 /// Read the mirror. Any absence, corruption, or unreadable entry yields an
 /// empty book — safe by construction, because an empty book means `Stranger`
 /// for everyone and therefore admits nobody.
+///
+/// A row whose only source is an invite is dropped, and the next write leaves it
+/// off the disk. Older builds wrote those. A real Signet contact caught by this
+/// comes straight back from its own snapshot row, at Signet's tier.
 pub fn load_mirror(path: &std::path::Path) -> Vec<Contact> {
     let Ok(bytes) = std::fs::read(path) else {
         return Vec::new();
@@ -439,6 +443,7 @@ pub fn load_mirror(path: &std::path::Path) -> Vec<Contact> {
     };
     file.contacts
         .into_iter()
+        .filter(|s| s.added_via != AddedVia::Invite)
         .filter_map(|s| {
             let pubkey = hex::decode(&s.pubkey)
                 .ok()
@@ -502,17 +507,31 @@ fn closeness(t: Tier) -> u8 {
     }
 }
 
+/// How much a source says about a row, low = less. Signet outranks every other,
+/// so a Signet contact stays one whichever order the sources arrive in.
+fn provenance(via: AddedVia) -> u8 {
+    match via {
+        AddedVia::Invite => 0,
+        AddedVia::Kenspeckle => 1,
+        AddedVia::Paste => 2,
+        AddedVia::Import => 3,
+    }
+}
+
 /// Insert `incoming`, or fold it into the existing row for the same pubkey.
 ///
-/// Merge rule, and why: the **closer** tier wins (an invite must never demote
-/// somebody you already call Kin), the **earliest** `added_at` wins (it records
-/// when you met, not when the row was last touched), a newly-learned
-/// `runtime_pubkey` and display name overwrite, `added_via` records the most
-/// recent route in, and `last_joined` keeps the LATER of the two (it is the most
+/// Merge rule, and why: the **closer** tier wins (nothing demotes somebody you
+/// already call Kin), the **earliest** `added_at` wins (it records when you met,
+/// not when the row was last touched), a newly-learned `runtime_pubkey` and
+/// display name overwrite, `added_via` keeps the source that says most
+/// ([`provenance`]), and `last_joined` keeps the LATER of the two (it is the most
 /// recent visit, so an older row must never overwrite a newer one).
+///
+/// An `Invite` row carries no rights: it inserts nothing, raises no tier and
+/// relabels nothing. An invite makes nobody a contact.
 pub fn upsert(book: &mut Vec<Contact>, incoming: Contact) {
     if let Some(existing) = book.iter_mut().find(|c| c.pubkey == incoming.pubkey) {
-        if closeness(incoming.tier) < closeness(existing.tier) {
+        if incoming.added_via != AddedVia::Invite && closeness(incoming.tier) < closeness(existing.tier) {
             existing.tier = incoming.tier;
         }
         if incoming.runtime_pubkey.is_some() {
@@ -523,9 +542,11 @@ pub fn upsert(book: &mut Vec<Contact>, incoming: Contact) {
         }
         existing.is_child |= incoming.is_child;
         existing.added_at = existing.added_at.min(incoming.added_at);
-        existing.added_via = incoming.added_via;
+        if provenance(incoming.added_via) > provenance(existing.added_via) {
+            existing.added_via = incoming.added_via;
+        }
         existing.last_joined = existing.last_joined.max(incoming.last_joined);
-    } else {
+    } else if incoming.added_via != AddedVia::Invite {
         book.push(incoming);
     }
 }
@@ -915,7 +936,7 @@ mod tests {
         let book = vec![
             Contact {
                 runtime_pubkey: Some([0x5a; 32]),
-                ..c(1, Tier::Kith, AddedVia::Invite, 1_700_000_000)
+                ..c(1, Tier::Kith, AddedVia::Import, 1_700_000_000)
             },
             c(2, Tier::Kin, AddedVia::Paste, 1_700_000_001),
         ];
@@ -935,7 +956,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("axe_mirror_mode_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("contacts.json");
-        save_mirror(&path, &[c(1, Tier::Kith, AddedVia::Invite, 1_700_000_000)]).unwrap();
+        save_mirror(&path, &[c(1, Tier::Kith, AddedVia::Paste, 1_700_000_000)]).unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "the contacts mirror must be owner-only");
 
@@ -957,7 +978,7 @@ mod tests {
         let path = dir.join("contacts.json");
         let visited = Contact {
             last_joined: Some(1_700_000_500),
-            ..c(1, Tier::Kith, AddedVia::Invite, 1_700_000_000)
+            ..c(1, Tier::Kith, AddedVia::Paste, 1_700_000_000)
         };
         save_mirror(&path, std::slice::from_ref(&visited)).unwrap();
         let mut book = load_mirror(&path);
@@ -971,7 +992,7 @@ mod tests {
         );
         upsert(
             &mut book,
-            Contact { last_joined: Some(1_700_009_000), ..c(1, Tier::Kith, AddedVia::Invite, 1) },
+            Contact { last_joined: Some(1_700_009_000), ..c(1, Tier::Kith, AddedVia::Paste, 1) },
         );
         assert_eq!(book[0].last_joined, Some(1_700_009_000), "the later visit wins");
         let _ = std::fs::remove_dir_all(&dir);
@@ -1010,7 +1031,7 @@ mod tests {
     #[test]
     fn upsert_inserts_then_updates_without_duplicating() {
         let mut book = vec![c(1, Tier::Ken, AddedVia::Kenspeckle, 100)];
-        upsert(&mut book, c(2, Tier::Kith, AddedVia::Invite, 200));
+        upsert(&mut book, c(2, Tier::Kith, AddedVia::Paste, 200));
         assert_eq!(book.len(), 2);
         // Re-adding #1 at a closer tier upgrades it and records the runtime key,
         // but keeps the ORIGINAL added_at (when you first met them).
@@ -1018,7 +1039,7 @@ mod tests {
             &mut book,
             Contact {
                 runtime_pubkey: Some([9u8; 32]),
-                ..c(1, Tier::Kith, AddedVia::Invite, 300)
+                ..c(1, Tier::Kith, AddedVia::Paste, 300)
             },
         );
         assert_eq!(book.len(), 2, "same pubkey must not duplicate");
@@ -1030,9 +1051,9 @@ mod tests {
 
     #[test]
     fn upsert_never_loosens_a_tier() {
-        // Being handed an invite must not demote somebody you already call Kin.
+        // Nothing another source says demotes somebody you already call Kin.
         let mut book = vec![c(1, Tier::Kin, AddedVia::Kenspeckle, 100)];
-        upsert(&mut book, c(1, Tier::Ken, AddedVia::Invite, 200));
+        upsert(&mut book, c(1, Tier::Ken, AddedVia::Paste, 200));
         assert_eq!(find(&book, &[1u8; 32]).unwrap().tier, Tier::Kin);
     }
 
@@ -1041,7 +1062,7 @@ mod tests {
         let kenspeckle = vec![c(1, Tier::Ken, AddedVia::Kenspeckle, 0)];
         let mirror = vec![Contact {
             runtime_pubkey: Some([3u8; 32]),
-            ..c(1, Tier::Kith, AddedVia::Invite, 500)
+            ..c(1, Tier::Kith, AddedVia::Paste, 500)
         }];
         let merged = merge_books(kenspeckle, mirror);
         assert_eq!(merged.len(), 1);
@@ -1053,7 +1074,7 @@ mod tests {
     fn merge_is_the_union_of_both_books() {
         let merged = merge_books(
             vec![c(1, Tier::Kin, AddedVia::Kenspeckle, 0)],
-            vec![c(2, Tier::Kith, AddedVia::Invite, 1)],
+            vec![c(2, Tier::Kith, AddedVia::Paste, 1)],
         );
         assert_eq!(merged.len(), 2);
         assert!(find(&merged, &[1u8; 32]).is_some());
@@ -1111,14 +1132,164 @@ mod tests {
         // Visiting a Signet-only contact keeps the visit, not Signet's tier.
         let mut visited = row(2, Tier::Kin, AddedVia::Import);
         visited.last_joined = Some(99);
-        record_visit(&path, visited).unwrap();
+        assert_eq!(record_visit(&path, &book, visited), Ok(true));
         let kept = find(&load_mirror(&path), &[2; 32]).cloned().unwrap();
         assert_eq!(kept.tier, Tier::Stranger);
+        assert_eq!(kept.added_via, AddedVia::Import);
         assert_eq!(kept.last_joined, Some(99));
         // A visit to someone already in the mirror is folded in as usual.
         let mut again = row(1, Tier::Kith, AddedVia::Paste);
         again.last_joined = Some(100);
-        record_visit(&path, again).unwrap();
+        record_visit(&path, &book, again).unwrap();
         assert_eq!(find(&load_mirror(&path), &[1; 32]).unwrap().tier, Tier::Kith);
+    }
+
+    /// The visit row an invite or contact join hands the game loop.
+    fn a_visit(n: u8) -> Contact {
+        Contact {
+            display_name: Some("Ivy's Hollow".to_string()),
+            runtime_pubkey: Some([0x5a; 32]),
+            last_joined: Some(99),
+            ..row(n, Tier::Stranger, AddedVia::Import)
+        }
+    }
+
+    #[test]
+    fn a_visit_to_a_host_not_in_the_book_writes_nothing() {
+        let dir = std::env::temp_dir().join(format!("axe_mirror_visit0_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("contacts.json");
+        assert_eq!(record_visit(&path, &[], a_visit(1)), Ok(false));
+        assert!(!path.exists(), "an invite join leaves no file");
+
+        // Nor a row in a mirror that already exists.
+        save_mirror(&path, &[row(2, Tier::Kith, AddedVia::Paste)]).unwrap();
+        assert_eq!(record_visit(&path, &[row(2, Tier::Kith, AddedVia::Paste)], a_visit(1)), Ok(false));
+        assert!(find(&load_mirror(&path), &[1; 32]).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_visit_teaches_a_signet_contact_s_runtime_key_and_changes_nothing_else() {
+        // A Signet row never carries a runtime key, and Join needs one: a visit is
+        // where it comes from. It must not change their tier or source, with
+        // Signet present or gone.
+        let dir = std::env::temp_dir().join(format!("axe_mirror_visit1_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("contacts.json");
+        let signet = || SignetPart { contacts: vec![row(1, Tier::Ken, AddedVia::Import)], blocked: vec![] };
+        let book = assemble_book(vec![], load_mirror(&path), Some(signet()));
+        assert_eq!(record_visit(&path, &book, a_visit(1)), Ok(true));
+
+        let book = assemble_book(vec![], load_mirror(&path), Some(signet()));
+        let them = find(&book, &[1; 32]).unwrap();
+        assert_eq!((them.tier, them.added_via), (Tier::Ken, AddedVia::Import));
+        assert_eq!(them.runtime_pubkey, Some([0x5a; 32]));
+        assert_eq!(them.last_joined, Some(99));
+
+        // Signet goes stale or is disconnected: the visit row grants nothing.
+        let book = assemble_book(vec![], load_mirror(&path), None);
+        assert_eq!(tier_of(&book, &[1; 32]), Tier::Stranger);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_visit_leaves_a_pasted_friend_a_pasted_friend() {
+        let dir = std::env::temp_dir().join(format!("axe_mirror_visit2_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("contacts.json");
+        save_mirror(&path, &[row(1, Tier::Kith, AddedVia::Paste)]).unwrap();
+        let book = load_mirror(&path);
+        assert_eq!(record_visit(&path, &book, a_visit(1)), Ok(true));
+        let kept = find(&load_mirror(&path), &[1; 32]).cloned().unwrap();
+        assert_eq!((kept.tier, kept.added_via), (Tier::Kith, AddedVia::Paste));
+        assert_eq!(kept.last_joined, Some(99), "and survives the next load");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ─── An invite makes no contact ───
+
+    #[test]
+    fn a_legacy_invite_row_is_dropped_on_load() {
+        let dir = std::env::temp_dir().join(format!("axe_mirror_legacy_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("contacts.json");
+        std::fs::create_dir_all(&dir).unwrap();
+        let invite = "01".repeat(32);
+        let paste = "02".repeat(32);
+        let visit = "03".repeat(32);
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{"v":1,"contacts":[
+                {{"pubkey":"{invite}","tier":"kith","added_via":"invite","added_at":7}},
+                {{"pubkey":"{paste}","tier":"kith","added_via":"paste","added_at":8}},
+                {{"pubkey":"{visit}","tier":"stranger","added_via":"import","added_at":9,"last_joined":10}}
+                ]}}"#
+            ),
+        )
+        .unwrap();
+        let book = load_mirror(&path);
+        assert_eq!(book.len(), 2, "only the invite row goes: {book:?}");
+        assert!(find(&book, &[1; 32]).is_none(), "an invite is not a contact");
+        assert_eq!(find(&book, &[2; 32]).unwrap().added_via, AddedVia::Paste);
+        assert_eq!(find(&book, &[3; 32]).unwrap().last_joined, Some(10));
+
+        // The next write leaves it off the disk too.
+        record_in_mirror(&path, row(4, Tier::Kith, AddedVia::Paste)).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains(&invite), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_signet_row_keeps_its_source_and_tier_through_upsert() {
+        let mut book = vec![row(1, Tier::Ken, AddedVia::Import)];
+        upsert(&mut book, row(1, Tier::Kith, AddedVia::Invite));
+        assert_eq!(book[0].added_via, AddedVia::Import);
+        assert_eq!(book[0].tier, Tier::Ken, "an invite row raises nobody");
+
+        // A closer Signet row is not lowered, and keeps its source too.
+        let mut book = vec![row(1, Tier::Kin, AddedVia::Import)];
+        upsert(&mut book, row(1, Tier::Kith, AddedVia::Paste));
+        assert_eq!(book[0].added_via, AddedVia::Import);
+        assert_eq!(book[0].tier, Tier::Kin);
+
+        // Whichever order the sources arrive in, Signet is what it says.
+        let mut book = vec![row(1, Tier::Kith, AddedVia::Paste)];
+        upsert(&mut book, row(1, Tier::Ken, AddedVia::Import));
+        assert_eq!(book[0].added_via, AddedVia::Import);
+    }
+
+    #[test]
+    fn a_signet_contact_keeps_its_source_and_tier_through_load() {
+        // The old build wrote a Kith invite row for a Signet Ken it visited, and
+        // relabelled the Signet Kin it was told about. The mirror's row must not
+        // raise, lower or relabel what Signet says.
+        let dir = std::env::temp_dir().join(format!("axe_mirror_srcs_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("contacts.json");
+        save_mirror(
+            &path,
+            &[row(1, Tier::Kith, AddedVia::Invite), row(2, Tier::Kith, AddedVia::Invite)],
+        )
+        .unwrap();
+        let signet = SignetPart {
+            contacts: vec![row(1, Tier::Ken, AddedVia::Import), row(2, Tier::Kin, AddedVia::Import)],
+            blocked: vec![],
+        };
+        let book = assemble_book(vec![], load_mirror(&path), Some(signet));
+        assert_eq!(book.len(), 2);
+        let (ken, kin) = (find(&book, &[1; 32]).unwrap(), find(&book, &[2; 32]).unwrap());
+        assert_eq!((ken.tier, ken.added_via), (Tier::Ken, AddedVia::Import));
+        assert_eq!((kin.tier, kin.added_via), (Tier::Kin, AddedVia::Import));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_invite_row_never_enters_a_book() {
+        let mut book = vec![];
+        upsert(&mut book, row(1, Tier::Kith, AddedVia::Invite));
+        assert!(book.is_empty(), "{book:?}");
     }
 }

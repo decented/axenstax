@@ -62,7 +62,7 @@ impl Actor {
             tier: crate::comms::Tier::Kith,
             is_child: false,
             runtime_pubkey: Some(self.keys().public_key().to_bytes()),
-            added_via: crate::contacts::AddedVia::Invite,
+            added_via: crate::contacts::AddedVia::Paste,
             added_at: now(),
             last_joined: None,
         }

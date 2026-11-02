@@ -227,7 +227,7 @@ pub enum MenuAction {
         persona_hex: String,
         display_name: String,
     },
-    /// A pasted invite link: adds a pending Kith contact and calls at once.
+    /// A pasted invite link: calls at once and adds nobody.
     #[cfg(not(target_arch = "wasm32"))]
     JoinByInvite(String),
     /// A pasted npub: adds a contact to call later.

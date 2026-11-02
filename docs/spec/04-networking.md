@@ -361,21 +361,34 @@ attestation valid, `role=player`, and naming **the outer signer**; the payload's
 `persona` equal to the attestation's signer; `sent_at` within ±120 s; `session`
 unseen. Any failure is a silent drop.
 
-**Admission.** Contacts at Kin or Kith are admitted; a live 16-byte invite bearer
-admits once and makes the caller a Kith contact. **Ken does not admit** — it is
+**Admission.** Contacts at Kin or Kith are admitted. A 16-byte invite bearer lets
+one person into this hosted world until it expires: the first persona admitted with
+it owns it, may present it again until `expires_at` so a dropped connection doesn't
+lock them out, and any other persona presenting it gets the same silence as someone
+with no invite. A call that is refused or explained (old build, full world) doesn't
+use it up. It makes nobody a contact: no row is written on either side, in the book
+or in the mirror (`profile/contacts.json`), and it grants nothing in any other world
+or hosting session. In chat a guest is `Stranger`, the lowest tier `comms.rs` has, so
+at the safe `Approved` default no line passes between a guest and anyone in either
+direction. The owner's claim lives only in the `OnlineHost` and dies with it, like a
+root host's bearer. A world handed to a new host is the one exception, see "World
+handover": the bearer travels and its owner does not, so on the new host the first
+persona to present it owns it there. **Ken does not admit** — it is
 hear-only in `comms.rs` and is not a key to the house. Only `ProtocolMismatch`
 and `Full` are ever answered; every other refusal is silence. The runtime
 attestation is minted by the act of pressing **Host online** (one bunker tap);
 an unattested-but-signed-in player can still press it, and only a signed-out
 player sees it greyed out. The host's allowlist is **the host's own persona**
 union contacts at Kin/Kith union the personas this session has admitted by
-bearer, and it always reaches `HostedServer` as `Allow::Only`, never `Allow::Open`:
+bearer (a session entry, written nowhere, not pruned at the bearer's `expires_at`:
+expiry ends admission at the offer gate, and the entry ends with the hosting
+session or a block), and it always reaches `HostedServer` as `Allow::Only`, never `Allow::Open`:
 the QUIC socket can be dialled directly, past the relay offer gate, so this list
 is the only thing that refuses a signed-in stranger who found the port, including
 on a first-ever host with no contacts and nobody admitted yet.
 A contact removed from the book, or downgraded below Kith, leaves
 the allowlist and this session's admissions on the next book push and is removed
-if seated; somebody a bearer let in has an invite row and stays until blocked. A
+if seated; somebody a bearer let in stays for this session until blocked. A
 Signet snapshot that has gone stale or been disconnected adds nobody, so a seated
 friend who was only in the book through Signet is removed the same way, with the
 allowlist reason, on the push that follows; they can come back once a sync has them
@@ -389,8 +402,29 @@ once (D12). A world handed to a new host does not carry the
 old host's blocks: blocks are the persona's Signet state, and the new host starts
 from its own (`start_online_host` reads them before the first offer).
 Pressing **Host online** on a world already hosted
-online does not restart anything: it mints a fresh invite (retiring the previous
-bearer) and copies the new link.
+online does not restart anything: it mints a fresh invite and copies the new link.
+So does `/online copy` when the current link has already let somebody in; the Online
+panel says so. A fresh invite retires the previous bearer for everyone it has not
+admitted: its owner keeps it, in that link's own handover context, until it expires.
+There is no way to revoke an issued invite before expiry beyond this, or to remove a
+guest other than a Signet block.
+
+**Old mirror rows.** Builds before 2026-11-02 wrote `added_via: invite` rows at Kith,
+on both sides, and on a visit relabelled a real contact's mirror row as an invite row.
+`load_mirror` drops every such row and the next write leaves it off the disk. A
+Signet contact is restored by its own snapshot row, whose tier and source a mirror
+row can't change (`contacts::upsert`: an invite row raises, relabels and inserts
+nothing, and Signet provenance outranks every other source). What is lost: a stored
+runtime key on those rows, so that contact needs an invite link once more before
+**Join** works, and a contact the player pasted and then visited, which can't be told
+from an invite row and must be pasted again.
+
+**Visits.** A join records `last_joined` and the host's runtime key only for a host
+already in the book (`contacts::record_visit`), at `Stranger` under that row's own
+source, so the visit grants no tier. A runtime key can only come from a verified
+rendezvous and a Signet row never carries one, so a real contact's first invite join
+is still what makes their **Join** button work. A host not in the book gets nothing
+written.
 
 **Reachability.** Candidates in priority order — `lan`, `v6`, `upnp`
 (igd-next, 7200 s lease renewed hourly, released on stop), `stun` (RFC 5389
@@ -5980,12 +6014,20 @@ links stop admitting at once (no grace), and the toast says so. Tested
 in the real game (CP12, the CP9 step 3 game test): Cancel in Publishing
 and in Prepared ends the session, changes `live_bearer()`, the old invite
 is refused and the new one admitted, and the root context is unchanged. Personas
-the old bearer already admitted stay contacts. `mint_fresh_invite` (new
+the old bearer already admitted stay on this session's allowlist, so a seated
+guest stays, but its owner loses it too: rotation drops every claim, because the
+bearer may have left the machine. `mint_fresh_invite` (new
 expiry) stays the UI's "new invite". The handover session's own copies are
 zeroed: the bearer is wiped with `zeroize` on drop, and the buffers this
 code owns that held it (the source's encode buffer, the host's packet
 buffer in `HostedServer::handover_send`, CP8 review MEDIUM-A, and the
 recipient's received packet) are zeroed after use (CP7 review LOW-1).
+What crosses is the bearer and nothing about who used it. No admission, contact row or
+session allowlist entry goes with a world: the new host starts from its own book
+(`start_online_host`) with no guests. The owner of a claimed bearer does not cross
+either, since carrying it needs a new field in `Frame::Bearer` and in the Prepared and
+Activated records, so the first persona to present the bearer on a continued host owns
+it there, and that claim lasts for that host's process.
 Copies that remain in this process and are not wiped: the transport's
 channel copy of each packet (`data.to_vec()`), its send queue and socket
 buffers, the QUIC/TLS stack's plaintext and the serialiser's internal

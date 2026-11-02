@@ -83,7 +83,7 @@ pub fn draw_your_address(ui: &mut egui::Ui, npub: Option<&str>) {
 /// What the player typed into "Add a friend".
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AddFriendInput {
-    /// A full invite link — adds a pending contact and starts a join at once.
+    /// A full invite link: starts a join at once and adds nobody.
     Invite(Box<crate::invite::Invite>),
     /// A bare npub — adds a contact you can call later, once they are hosting.
     Npub(String),
@@ -147,11 +147,11 @@ pub fn friends_lead() -> &'static str {
     "People you know, to build with."
 }
 
-/// What an empty friends list says. It points at the two things that actually
-/// add somebody — a link they sent you, or your address sent to them — because
-/// there is nowhere to go looking.
+/// What an empty friends list says. It points at the one thing that actually
+/// adds somebody, because there is nowhere to go looking. An invite link adds
+/// nobody.
 pub fn friends_empty_line() -> &'static str {
-    "Nobody yet. Paste a friend's invite link below, or send them your address."
+    "Nobody yet. Add a friend's address below, or join their world with an invite link."
 }
 
 /// Whether the world card's "Host online" button can be pressed, and the line
@@ -215,7 +215,7 @@ pub fn reachability_summary(candidates: &[Candidate]) -> String {
 /// The line above the "Add a friend" paste box. Pinned here rather than left
 /// inline in `menu.rs` so the copy sweep below can see it.
 pub fn add_friend_lead() -> &'static str {
-    "Paste their invite link, or their address (npub)."
+    "Paste their address (npub) to add them, or an invite link to join their world."
 }
 
 /// Whether this contact belongs in the Friends column at all.
@@ -283,6 +283,10 @@ pub fn joined_toast(world_name: &str, host_name: &str) -> String {
 /// reaching into `OnlineHost`.
 pub struct OnlinePanelView<'a> {
     pub invite_link: Result<&'a str, &'a str>,
+    /// The link above has already let somebody in. See [`invite_panel_line`].
+    pub link_used: bool,
+    /// This world came from a handover, and keeps its original link.
+    pub link_fixed: bool,
     pub candidates: &'a [Candidate],
     pub relays: (usize, usize),
     /// Setup events the relay layer had to throw away because the game loop
@@ -299,6 +303,16 @@ pub struct OnlinePanelView<'a> {
     pub handover: &'a [(HandoverRow, String)],
 }
 
+/// The line under the invite link: what it does, and how to get another once it
+/// has been used, since it would do nothing for the next person it is sent to.
+pub fn invite_panel_line(link_used: bool, link_fixed: bool) -> &'static str {
+    match (link_used, link_fixed) {
+        (false, _) => "Lets one person into this world until it expires.",
+        (true, false) => "This link has been used. Type /online copy for a new one.",
+        (true, true) => "This link has been used. A world handed to you keeps its one link.",
+    }
+}
+
 /// QR + copy button + reachability + relay count + who is here + any warning.
 /// Returns the seat whose `Hand this world to …` was clicked.
 pub fn draw_online_panel(ui: &mut egui::Ui, view: &OnlinePanelView) -> Option<HandoverRow> {
@@ -312,6 +326,7 @@ pub fn draw_online_panel(ui: &mut egui::Ui, view: &OnlinePanelView) -> Option<Ha
             if ui.button("Copy invite link").clicked() {
                 ui.ctx().copy_text(link.to_string());
             }
+            ui.label(egui::RichText::new(invite_panel_line(view.link_used, view.link_fixed)).size(11.0));
         }
         Err(why) => {
             ui.label(why);
@@ -514,6 +529,20 @@ mod tests {
     use super::*;
 
     const NPUB: &str = "npub1sg6plzptd64u62a878hep2kev88swjh3tw00gjsfl8f237lmu63q0uf63m";
+
+    #[test]
+    fn the_invite_copy_never_says_a_link_makes_a_friend() {
+        for line in [
+            invite_panel_line(false, false),
+            invite_panel_line(true, false),
+            invite_panel_line(true, true),
+        ] {
+            let line = line.to_lowercase();
+            assert!(!line.contains("friend") && !line.contains("contact"), "{line}");
+        }
+        assert!(invite_panel_line(false, false).contains("one person"));
+        assert!(invite_panel_line(true, false).contains("/online copy"));
+    }
 
     #[test]
     fn the_lead_line_is_the_approved_copy() {

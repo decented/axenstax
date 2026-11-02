@@ -23,8 +23,13 @@ join it. Your computer is the server. Nothing runs on ours.
 3. That's it — you're hosting. Type `/online` in the game any time to see the
    link again, or `/online copy` to copy it.
 
-The invite lasts **two days**. Press **Host online** again for a fresh one; the
-old link stops working straight away.
+An invite lets **one person** into this world, for **two days** or until you stop
+hosting. Whoever uses it first owns it: they can come back with it if they drop
+out, and if they forward it, nobody else gets in. It doesn't make them your friend,
+and it doesn't work for your other worlds.
+
+Want to invite someone else? Type `/online copy` for a new link once the first one
+has been used. Nobody new can use the old link, but the person it let in still can.
 
 ### "Friends outside your home probably can't reach you"
 
@@ -34,13 +39,17 @@ router settings and host again. (It's usually under "Advanced", "NAT", or
 
 ## Joining
 
-**The first time**, use the invite link:
+**With an invite link:**
 
 1. Lobby → **Friends & servers** → **Add a friend**.
 2. Paste the link, press **Add**. The game calls them straight away.
 
-**After that** they're in your friends list. Press **Join** next to their name
-whenever they're hosting — no link needed.
+Keep the link: it gets you back into that world if you drop out, until it expires.
+Using one doesn't add anybody to your friends list.
+
+**With a friend in your list:** press **Join** next to their name whenever they're
+hosting. If the game says they haven't played online with you yet, join once with an
+invite link from them. After that, **Join** works with no link.
 
 ## Your address
 
@@ -59,8 +68,8 @@ address; nobody can do anything with it except invite you.
 
 ## Who can join
 
-Only people in your friends list at **Kin** or **Kith**, plus anyone holding a
-live invite link. Everyone else gets nothing at all — the game doesn't even
+Only people in your friends list at **Kin** or **Kith**, plus the one person each
+invite link has let in. Everyone else gets nothing at all — the game doesn't even
 answer them, so a stranger can't tell whether you're there.
 
 ## What the relays see

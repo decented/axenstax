@@ -8,10 +8,12 @@
 //! The rule (spec §3.3):
 //!
 //! ```text
-//! admit(offer, contacts, active_bearer, now) =
-//!     if tier_of(persona) is Kin or Kith        -> Accept(AlreadyContact)
-//!     else if bearer matches and is unexpired   -> Accept(ByInvite)
-//!     else                                      -> Refuse(...)
+//! admit(offer, contacts, active_bearer, claims, now) =
+//!     if tier_of(persona) is Kin or Kith              -> Accept(AlreadyContact)
+//!     else if bearer is claimed by somebody else      -> Refuse(BearerInvalid)
+//!     else if bearer is this persona's, or the live
+//!          unclaimed one, and is unexpired            -> Accept(ByInvite)
+//!     else                                            -> Refuse(...)
 //! ```
 //!
 //! **Ken does not admit.** Ken is one-way recognition — I pinned you, you did
@@ -33,7 +35,9 @@ use crate::invite::BEARER_LEN;
 pub enum AdmitReason {
     /// Already in the host's book at Kin or Kith.
     AlreadyContact,
-    /// Presented the session's live bearer. The caller adds them as a contact.
+    /// Presented the session's live bearer, or one they already own. The caller
+    /// records the claim and a session allowlist entry, and no contact row: an
+    /// invite lets one person into this world, it doesn't make them a friend.
     ByInvite,
 }
 
@@ -69,6 +73,21 @@ pub struct ActiveBearer {
     pub expires_at: u64,
 }
 
+/// A bearer that has let somebody in, and the one persona it now opens for.
+///
+/// In memory only, in the `OnlineHost`: a root host's bearer dies with that
+/// host, so its owner does too. Kept after a fresh invite replaces the live
+/// bearer, so inviting a second friend doesn't lock the first out of reconnecting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BearerClaim {
+    pub bearer: [u8; BEARER_LEN],
+    pub owner: [u8; 32],
+    pub expires_at: u64,
+    /// The handover context of the link this bearer came in, which is what its
+    /// owner offers and must be answered with after the live link has moved on.
+    pub context: Option<crate::rendezvous::payload::HandoverContext>,
+}
+
 /// Whether a tier is close enough to play in someone's world.
 ///
 /// An explicit enumeration rather than `tier <= Kith`: `Tier` is deliberately
@@ -82,7 +101,7 @@ pub fn admits_play(tier: Tier) -> bool {
 /// number of relay round-trips an attacker can drive is not something this
 /// process controls, so the comparison does not short-circuit on the first
 /// differing byte. No new dependency — it is four lines.
-fn bearer_eq(a: &[u8; BEARER_LEN], b: &[u8; BEARER_LEN]) -> bool {
+pub(crate) fn bearer_eq(a: &[u8; BEARER_LEN], b: &[u8; BEARER_LEN]) -> bool {
     let mut diff = 0u8;
     for i in 0..BEARER_LEN {
         diff |= a[i] ^ b[i];
@@ -96,10 +115,23 @@ pub fn admit(
     offered: Option<[u8; BEARER_LEN]>,
     book: &[Contact],
     active: Option<&ActiveBearer>,
+    claims: &[BearerClaim],
     now: u64,
 ) -> Admission {
     if admits_play(tier_of(book, persona)) {
         return Admission::Accept(AdmitReason::AlreadyContact);
+    }
+    // A claimed bearer opens for its owner until it expires and for nobody else.
+    // `BearerInvalid` is never sent, so a second persona hears what somebody
+    // with no invite hears: nothing.
+    if let Some(claim) = offered.and_then(|o| claims.iter().find(|c| bearer_eq(&c.bearer, &o))) {
+        return if now > claim.expires_at {
+            Admission::Refuse(Refusal::BearerExpired)
+        } else if claim.owner == *persona {
+            Admission::Accept(AdmitReason::ByInvite)
+        } else {
+            Admission::Refuse(Refusal::BearerInvalid)
+        };
     }
     match (offered, active) {
         (Some(offered), Some(active)) if bearer_eq(&offered, &active.bearer) => {
@@ -182,7 +214,7 @@ mod tests {
         // Exhaustive over the tier axis, so adding a tier later fails here
         // rather than silently defaulting somebody in.
         for tier in ALL_TIERS {
-            let got = admit(&ALICE, None, &book_at(tier), Some(&active()), 500);
+            let got = admit(&ALICE, None, &book_at(tier), Some(&active()), &[], 500);
             match tier {
                 Tier::Kin | Tier::Kith => {
                     assert_eq!(got, Admission::Accept(AdmitReason::AlreadyContact), "{tier:?}")
@@ -198,7 +230,7 @@ mod tests {
     #[test]
     fn a_stranger_with_the_live_bearer_is_admitted() {
         assert_eq!(
-            admit(&ALICE, Some(BEARER), &[], Some(&active()), 500),
+            admit(&ALICE, Some(BEARER), &[], Some(&active()), &[], 500),
             Admission::Accept(AdmitReason::ByInvite)
         );
     }
@@ -206,11 +238,11 @@ mod tests {
     #[test]
     fn the_bearer_is_valid_up_to_and_including_its_expiry_second() {
         assert_eq!(
-            admit(&ALICE, Some(BEARER), &[], Some(&active()), 1_000),
+            admit(&ALICE, Some(BEARER), &[], Some(&active()), &[], 1_000),
             Admission::Accept(AdmitReason::ByInvite)
         );
         assert_eq!(
-            admit(&ALICE, Some(BEARER), &[], Some(&active()), 1_001),
+            admit(&ALICE, Some(BEARER), &[], Some(&active()), &[], 1_001),
             Admission::Refuse(Refusal::BearerExpired)
         );
     }
@@ -218,7 +250,7 @@ mod tests {
     #[test]
     fn a_wrong_bearer_is_invalid_not_expired() {
         assert_eq!(
-            admit(&ALICE, Some(WRONG), &[], Some(&active()), 500),
+            admit(&ALICE, Some(WRONG), &[], Some(&active()), &[], 500),
             Admission::Refuse(Refusal::BearerInvalid)
         );
     }
@@ -226,7 +258,7 @@ mod tests {
     #[test]
     fn a_bearer_with_no_invite_open_is_invalid() {
         assert_eq!(
-            admit(&ALICE, Some(BEARER), &[], None, 500),
+            admit(&ALICE, Some(BEARER), &[], None, &[], 500),
             Admission::Refuse(Refusal::BearerInvalid)
         );
     }
@@ -234,7 +266,7 @@ mod tests {
     #[test]
     fn a_stranger_with_no_bearer_is_simply_not_a_contact() {
         assert_eq!(
-            admit(&ALICE, None, &[], Some(&active()), 500),
+            admit(&ALICE, None, &[], Some(&active()), &[], 500),
             Admission::Refuse(Refusal::NotAContact)
         );
     }
@@ -243,8 +275,61 @@ mod tests {
     fn being_a_contact_beats_a_wrong_bearer() {
         // A Kith friend who pasted a stale link still gets in.
         assert_eq!(
-            admit(&ALICE, Some(WRONG), &book_at(Tier::Kith), Some(&active()), 500),
+            admit(&ALICE, Some(WRONG), &book_at(Tier::Kith), Some(&active()), &[], 500),
             Admission::Accept(AdmitReason::AlreadyContact)
+        );
+    }
+
+    fn claim(owner: [u8; 32]) -> BearerClaim {
+        BearerClaim { bearer: BEARER, owner, expires_at: 1_000, context: None }
+    }
+
+    #[test]
+    fn a_claimed_bearer_opens_for_its_owner_alone_until_it_expires() {
+        const BOB: [u8; 32] = [2u8; 32];
+        let claims = [claim(ALICE)];
+        assert_eq!(
+            admit(&ALICE, Some(BEARER), &[], Some(&active()), &claims, 1_000),
+            Admission::Accept(AdmitReason::ByInvite)
+        );
+        assert_eq!(
+            admit(&ALICE, Some(BEARER), &[], Some(&active()), &claims, 1_001),
+            Admission::Refuse(Refusal::BearerExpired)
+        );
+        let refused = admit(&BOB, Some(BEARER), &[], Some(&active()), &claims, 500);
+        assert_eq!(refused, Admission::Refuse(Refusal::BearerInvalid));
+        assert!(!is_reply_worthy(Refusal::BearerInvalid), "silence, as with no invite");
+    }
+
+    #[test]
+    fn a_claim_outlives_the_live_bearer_for_its_owner_only() {
+        // A fresh invite has replaced the live bearer. The owner still gets in on
+        // the old one; the old one is no use to anybody else, and the owner's
+        // claim says nothing about the new bearer.
+        const NEW: [u8; 16] = [9u8; 16];
+        const BOB: [u8; 32] = [2u8; 32];
+        let live = ActiveBearer { bearer: NEW, expires_at: 2_000 };
+        let claims = [claim(ALICE)];
+        assert_eq!(
+            admit(&ALICE, Some(BEARER), &[], Some(&live), &claims, 500),
+            Admission::Accept(AdmitReason::ByInvite)
+        );
+        assert_eq!(
+            admit(&BOB, Some(BEARER), &[], Some(&live), &claims, 500),
+            Admission::Refuse(Refusal::BearerInvalid)
+        );
+        assert_eq!(
+            admit(&BOB, Some(NEW), &[], Some(&live), &claims, 500),
+            Admission::Accept(AdmitReason::ByInvite)
+        );
+    }
+
+    #[test]
+    fn a_claim_does_nothing_for_someone_who_presents_no_bearer() {
+        assert_eq!(
+            admit(&ALICE, None, &[], Some(&active()), &[claim(ALICE)], 500),
+            Admission::Refuse(Refusal::NotAContact),
+            "a reconnect needs the link: the claim isn't a standing right"
         );
     }
 

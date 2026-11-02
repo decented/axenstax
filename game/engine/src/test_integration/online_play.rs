@@ -149,7 +149,7 @@ fn dropped(events: &[HostEvent]) -> String {
 }
 
 #[test]
-fn an_invite_admits_a_stranger_and_both_sides_end_up_as_contacts() {
+fn an_invite_admits_a_stranger_and_makes_nobody_a_contact() {
     let hub = FakeRelayHub::new();
     let joiner = Player::new();
     let host_player = Player::new();
@@ -161,10 +161,14 @@ fn an_invite_admits_a_stranger_and_both_sides_end_up_as_contacts() {
     // The host sees the offer, admits it, and answers.
     let events = host.poll(NOW, 1, 5);
     assert!(
-        events.iter().any(|e| matches!(e, HostEvent::ContactAdded(_))),
-        "the host records the caller: {events:?}"
+        events.iter().any(|e| matches!(e, HostEvent::Admitted { .. })),
+        "the host lets the caller in: {events:?}"
     );
     assert!(host.allowlist().contains(&joiner.persona_bytes()));
+    assert!(
+        crate::contacts::find(host.book(), &joiner.persona_bytes()).is_none(),
+        "with no row in the host's book"
+    );
 
     // The joiner sees the answer and moves on to connecting.
     let step = join.poll(NOW, A_FRAME);
@@ -175,12 +179,16 @@ fn an_invite_admits_a_stranger_and_both_sides_end_up_as_contacts() {
         },
         "an accepted answer must name the world"
     );
-    let host_contact = join
-        .host_contact()
-        .expect("the host becomes the joiner's contact too");
-    assert_eq!(host_contact.pubkey, host_player.persona_bytes());
-    assert_eq!(host_contact.tier, Tier::Kith);
-    assert_eq!(host_contact.added_via, AddedVia::Invite);
+    // What the join verified about the host, which the game loop records only for
+    // a host already in the book: an empty book writes nothing, on any path.
+    let visit = join.host_contact().expect("the answer was verified");
+    assert_eq!(visit.pubkey, host_player.persona_bytes());
+    assert_eq!(visit.tier, Tier::Stranger);
+    let dir = std::env::temp_dir().join(format!("axe_online_play_visit_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let path = dir.join("contacts.json");
+    assert_eq!(crate::contacts::record_visit(&path, &[], visit), Ok(false));
+    assert!(!path.exists(), "no row in the joiner's mirror");
 }
 
 #[test]
@@ -193,7 +201,7 @@ fn a_known_contact_joins_with_no_bearer_at_all() {
         tier: Tier::Kith,
         is_child: false,
         runtime_pubkey: Some(joiner.runtime_bytes()),
-        added_via: AddedVia::Invite,
+        added_via: AddedVia::Paste,
         added_at: NOW - 86_400,
         last_joined: None,
     }];

@@ -246,7 +246,8 @@ offer/answer over public Nostr relays (kinds 20900/20901, NIP-44, signed by a
 per-install **runtime key** the persona attested once with `role=player`), punch
 through their routers, and connect **directly**. The QUIC join handshake and
 `PROTOCOL_VERSION` are unchanged. Admission is "in my contacts at Kin or Kith,
-or holding my live invite bearer"; everyone else gets silence. Relays carry
+or the one persona my invite bearer has let in" (this hosted world only, no contact
+row); everyone else gets silence. Relays carry
 setup only and never game traffic. Modules: `invite.rs`, `runtime_identity.rs`,
 `online_admission.rs`, `rendezvous/`, `nat/`, `online_host.rs`,
 `online_join.rs`, `friends_ui.rs`. Spec:

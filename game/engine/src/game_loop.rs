@@ -651,7 +651,7 @@ impl super::GameState {
                     self.online_toast(if continued {
                         "The original invite link is copied."
                     } else {
-                        "A fresh invite link is copied — the previous one no longer works."
+                        "A fresh invite link is copied. The previous one lets nobody new in."
                     }, 8);
                 }
                 Err(why) => self.online_toast(why, 8),
@@ -878,7 +878,7 @@ impl super::GameState {
             if warn {
                 crate::online_host::unreachable_warning().to_string()
             } else {
-                "Invite link copied — send it to your friend.".to_string()
+                "Invite link copied. It lets one person into this world.".to_string()
             },
             8,
         );
@@ -1019,7 +1019,6 @@ impl super::GameState {
 
         // 2 — the host: answer whoever has called, and keep the server's access
         // policy in step with who has been admitted.
-        let mut contacts_changed = false;
         // A world frozen for a handover admits nobody: no offer is answered
         // until the handover ends (offers wait on the relay or time out).
         let frozen = self.handover_freezes_world();
@@ -1031,10 +1030,6 @@ impl super::GameState {
             for event in host.poll(now, players, capacity) {
                 match event {
                     crate::online_host::HostEvent::AllowlistChanged(_) => policy_stale = true,
-                    crate::online_host::HostEvent::ContactAdded(c) => {
-                        log::info!("[online] a new contact was admitted by invite ({:?})", c.tier);
-                        contacts_changed = true;
-                    }
                     crate::online_host::HostEvent::Admitted { .. } => {}
                     crate::online_host::HostEvent::Dropped(why) => {
                         log::debug!("[online] dropped an offer: {why}")
@@ -1048,7 +1043,6 @@ impl super::GameState {
                 server.set_access_policy(true, list, blocklist);
             }
         }
-        self.contacts_dirty |= contacts_changed;
 
         // 3 — the router lease. The tick only decides whether a renewal is due;
         // the SOAP round-trip itself runs on the keeper's worker.
@@ -1079,24 +1073,27 @@ impl super::GameState {
                     // Spec §5.2 step 3 — the visit is recorded on the person,
                     // because a friend's world is reached through them.
                     c.last_joined = Some(now);
-                    // The mirror gets this one row only, never the assembled
-                    // book (Signet rows must stay out of it — signet contacts
-                    // sync D7); the in-memory book is re-read afterwards.
-                    if let Err(e) =
-                        crate::contacts::record_visit(&crate::contacts::mirror_path(), c)
-                    {
-                        log::warn!("[online] could not write the contacts mirror: {e}");
+                    // Only for a host already in the book: an invite makes
+                    // nobody a contact. The mirror gets this one row, never the
+                    // assembled book (Signet rows must stay out of it — signet
+                    // contacts sync D7); the in-memory book is re-read afterwards.
+                    let book = crate::contacts::load_local_book();
+                    match crate::contacts::record_visit(&crate::contacts::mirror_path(), &book, c) {
+                        Ok(false) => {}
+                        Ok(true) => {
+                            let (book, blocked) = crate::contacts::load_local_book_with_blocks();
+                            // The runtime key a visit teaches belongs in the book
+                            // a world this machine is hosting admits from too.
+                            push_book_to_hosted_world(
+                                self.online_host.as_mut(),
+                                self.hosted_server.as_mut(),
+                                &book,
+                                &blocked,
+                            );
+                            self.contacts_dirty = true;
+                        }
+                        Err(e) => log::warn!("[online] could not write the contacts mirror: {e}"),
                     }
-                    let (book, blocked) = crate::contacts::load_local_book_with_blocks();
-                    // Playing at theirs makes them a contact here too, so a
-                    // world this machine is hosting must learn it as well.
-                    push_book_to_hosted_world(
-                        self.online_host.as_mut(),
-                        self.hosted_server.as_mut(),
-                        &book,
-                        &blocked,
-                    );
-                    self.contacts_dirty = true;
                 }
 
                 let Some(transport) = transport else {
@@ -1371,6 +1368,8 @@ impl super::GameState {
             .collect();
         let view = crate::friends_ui::OnlinePanelView {
             invite_link: link.as_deref().map_err(|why| *why),
+            link_used: host.link_is_used(),
+            link_fixed: host.continuation().is_some(),
             candidates: host.candidates(),
             relays,
             dropped,
@@ -5641,12 +5640,20 @@ impl super::GameState {
                 crate::commands::CommandResult::OnlineCopyInvite => {
                     #[cfg(not(target_arch = "wasm32"))]
                     {
-                        match self.online_host.as_ref() {
+                        let handing_over = self.handover.is_some();
+                        match self.online_host.as_mut() {
                             Some(h) => {
+                                // A used link would do nothing for whoever it is
+                                // sent to next. A continued world's original link
+                                // can't be replaced, so it copies unchanged, and a
+                                // handover under way is bound to the current one.
+                                if h.link_is_used() && !handing_over {
+                                    let _ = h.mint_fresh_invite(wardrobe_now());
+                                }
                                 match h.invite_link(wardrobe_now()) {
                                     Ok(link) => {
                                         self.pending_clipboard = Some(link);
-                                        self.chat.push_log(crate::commands::ChatLine::success("Invite link copied.", self.tick_counter));
+                                        self.chat.push_log(crate::commands::ChatLine::success("Invite link copied. It lets one person into this world.", self.tick_counter));
                                     }
                                     Err(why) => self.chat.push_log(crate::commands::ChatLine::system(why, self.tick_counter)),
                                 }
@@ -9865,49 +9872,12 @@ impl super::GameState {
                     let now = wardrobe_now();
                     match crate::invite::Invite::parse(&link, now) {
                         Ok(inv) => {
-                            // Spec §5.2 step 1 — a pasted invite adds a pending
-                            // contact AND calls at once. Written down first, so
-                            // a call that never lands still leaves the player
-                            // with somebody they can try again later.
-                            let mut book = crate::contacts::load_local_book();
+                            // Spec §5.2 step 1 — a pasted invite calls at once.
+                            // It adds nobody, here or at the host.
+                            let book = crate::contacts::load_local_book();
                             let host_persona = nostr::PublicKey::parse(&inv.host_persona)
                                 .ok()
                                 .map(|pk| pk.to_bytes());
-                            if let Some(pubkey) = host_persona {
-                                // One row into the player's own mirror (never
-                                // the assembled book — Signet sync D7), then
-                                // re-read the assembled book.
-                                if let Err(e) = crate::contacts::record_in_mirror(
-                                    &crate::contacts::mirror_path(),
-                                    crate::contacts::Contact {
-                                        pubkey,
-                                        display_name: None,
-                                        tier: crate::comms::Tier::Kith,
-                                        is_child: false,
-                                        runtime_pubkey: Some(inv.host_runtime),
-                                        added_via: crate::contacts::AddedVia::Invite,
-                                        added_at: now,
-                                        last_joined: None,
-                                    },
-                                ) {
-                                    log::warn!("[online] could not write the mirror: {e}");
-                                }
-                                let blocked;
-                                (book, blocked) = crate::contacts::load_local_book_with_blocks();
-                                // Pasting an invite while hosting is ordinary —
-                                // two friends swap links and each joins the
-                                // other. The host this machine is running
-                                // admits from a snapshot, so the new row has to
-                                // be pushed in there too or it would be a
-                                // stranger at our own door.
-                                push_book_to_hosted_world(
-                                    self.online_host.as_mut(),
-                                    self.hosted_server.as_mut(),
-                                    &book,
-                                    &blocked,
-                                );
-                                menu_state.contacts = book.clone();
-                            }
                             // What every message about this call is written
                             // around: what the player already calls them, else
                             // the world's name (the only human word an invite
