@@ -1194,12 +1194,25 @@ construction remain slice 5. The default stays standalone.
 
 ### 4.1.4 Tick determinism (Keep slice 1, 2026-11-01)
 
-The same world, seed and events at the same ticks must give the same
-simulated state, run after run. Two `TestHost` servers in one process prove it
-(`test_integration/twin_run.rs`: equal `GameServer::sim_digest` at ticks 1,
-200 and 2,000 over fire, furnaces, hoppers, campfires, water, mobs and two
-streaming joiners). Rules for every tick path (`GameServer::tick`, the `sim_*`
-phases and the systems they call):
+The same world, seed and events at the same ticks should give the same
+simulated state. Two `TestHost` servers in one process check this
+(`test_integration/twin_run.rs`: equal `GameServer::sim_digest` at ticks 1, 200,
+1,200 and 2,000 over fire, furnaces, hopper chains, campfires, water, mobs and
+two streaming joiners).
+
+This is a check, not a proof, and it has limits:
+- **One process.** The gate compares twins inside one test process. A comparison
+  across two processes is a recorded manual run, not part of the gate.
+- **One fixture.** It has no power devices, carts, crops, bees or salt licks, and
+  the sites under *Not yet covered* below are outside it.
+- **Dedicated-mode `GameServer::tick` only.** `HostedServer::tick`, a lending
+  host, standalone play and a joined client are not twin-tested.
+- **Event paths are not covered.** The script feeds edits, teleports and walking
+  input. Joins, windows and quest engagements are not in it, and a quest
+  engagement draws OS randomness.
+
+Rules for every tick path (`GameServer::tick`, the `sim_*` phases and the systems
+they call):
 
 - **Outcome-affecting iteration over a hash container is sorted** by position
   or key at the point of use. `ahash` keys are random per map (deliberately:
@@ -1208,29 +1221,46 @@ phases and the systems they call):
   or a `take(n)` picks a subset, two cells share state, or the order allocates
   hecs entity ids (mob AI rolls hash the id). Sorted today: fire's due budget
   (`fire.rs`, earliest due then position), the hopper transfer list
-  (`hopper.rs`), furnace and campfire visits (`sim_machines.rs`), the saved
-  columns' light/fluid/scatter pass in `GameServer::initial_load`, and the
-  stream-out column list (`chunk_stream::columns_outside_anchors`). Order-free
-  uses (lookups, sums, independent per-cell updates) need nothing.
+  (`hopper.rs`), furnace visits (`sim_machines.rs`), the saved columns'
+  light/fluid/scatter pass in `GameServer::initial_load`, and the stream-out
+  column list (`chunk_stream::columns_outside_anchors`). Order-free uses
+  (lookups, sums, independent per-cell updates) need nothing.
+  *What fails if a sort goes:* `twin_run_same_seed_same_digest` for fire, hoppers,
+  scatter and stream-out. Furnace order can't show there, because the dedicated
+  path reserves no delivery batch and so never defers a furnace; a
+  `sim_machines` unit test with more finishing furnaces than the batch holds
+  fails instead.
+  *Campfires:* their visits are sorted too, but that pins only the order of the
+  block changes they emit. Reading the code, order doesn't reach simulated state:
+  a smoke pillar stops at the first non-smoke cell, so one fire's flip and clear
+  never touch what another fire reads. A `sim_machines` unit test on stacked
+  campfires pins the emitted order.
   *Not yet covered:* the twin fixture does not reach pistons, dispensers,
-  saplings, keg fuses, brigand hideouts or construction, and each still walks a
-  hash container (`piston::collect_piston_positions`,
-  `dispenser::tick_dispensers`, `growth::collect_sapling_positions`,
-  `power::tick_keg_fuses_bounded`, `brigand_hideout_gen`,
-  `sim_machines::tick_construction`). Treat them as open: extend the fixture,
-  see them part, then sort them.
+  saplings, keg fuses, brigand hideouts, construction, the power network or salt
+  licks, and each still walks a hash container
+  (`piston::collect_piston_positions`, `dispenser::tick_dispensers`,
+  `growth::collect_sapling_positions`, `power::tick_keg_fuses_bounded`,
+  `brigand_hideout_gen`, `sim_machines::tick_construction`, `power.rs:806` where
+  `recompute` schedules gates from `device_cells`, `power.rs:444` where
+  `tick_devices` feeds the pending queue, and `salt_lick.rs:63`, an
+  equal-distance tie). Treat them as open: extend the fixture, see them part,
+  then sort them.
 - **No wall clock and no OS randomness in a tick path.** Time is the tick
   counter; randomness is a hash of tick, position, seed and entity id.
   `test_integration/tick_determinism_lint.rs` fails on `Instant`, `SystemTime`
-  or `getrandom` in `server.rs`, every `sim_*` module and the systems the tick
-  calls. Its allowlist holds only construction-time identities (the run id,
-  the reputation clock's owner), each with its reason.
-- `sim_digest` is a game-owned regression signal, not the Fray contract
-  `state_hash`; floats are compared as bits within one architecture only. It is
-  the SHA-256 of the sorted `(name, digest)` pairs of `sim_digest_sections`:
-  `block_entities`, `chunks`, `clocks`, `fire_fluid_queues`, `item_drops`,
-  `players`, `projectiles`, `tamed_entities` and `wild_mobs`, so two runs can be
-  compared section by section.
+  or `getrandom` in the listed files: its `TICK_PATH_FILES` plus every `sim_*`
+  and `*_ai` module, printed when the test runs. The list is hand-written, not a
+  call graph. Its allowlist holds only construction-time and event-time
+  identities (the run id, the reputation clock's owner, a quest's gameplay id)
+  and a client's loading-screen timers, each with its reason.
+- `sim_digest` is a game-owned regression signal, compiled for tests only, not
+  the Fray contract `state_hash`; floats are compared as bits within one
+  architecture only. It is the SHA-256 of the sorted `(name, digest)` pairs of
+  `sim_digest_sections`: `block_entities`, `chunks`, `clocks`,
+  `fire_fluid_queues`, `item_drops`, `light`, `players`, `projectiles`,
+  `tamed_entities`, `wild_mobs` and `world_tables`, so two runs can be compared
+  section by section. What it leaves out is listed, with reasons, in the
+  `sim_digest` module docs.
 
 
 ### 4.2 Client Frame Loop

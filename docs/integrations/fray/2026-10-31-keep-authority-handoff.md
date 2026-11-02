@@ -1,7 +1,7 @@
 # AxeNStax → Fray/Ingle: authority integration handoff (2026-10-31)
 
 Game-owned. Written for the Fray/Ingle design session. AxeNStax owns every change and build on its
-side; nothing here is implemented yet. Section 6 lists the storage and migration choices that need
+side; only slice 1 (§7) is implemented. Section 6 lists the storage and migration choices that need
 joint design **before** AxeNStax implements anything beyond slice 1. A full WASM port waits for
 that agreement.
 
@@ -69,8 +69,9 @@ What already fits:
 - The pipe's frames already have the contract's shape (`Joined`/`Message`/`Left` in,
   `Send`/`Disconnect` out), and keep-world sets no signing identity. No signing key is in the
   authority (`start_keep_world`, `hosted_server.rs:1479-1496`).
-- Touched chunks already have a canonical byte form: 8,704 B each (4,096 × u16 LE + 64 × u64 LE
-  placed mask, light excluded, `chunk.rs:299-311`).
+- Chunks already have a canonical byte form: 8,704 B each (4,096 × u16 LE + 64 × u64 LE placed
+  mask, light excluded, `chunk.rs:305-317`). A server save writes that form for every non-empty
+  chunk it holds, touched or not (§8).
 
 ## 3. Mapping onto the six operations
 
@@ -109,19 +110,25 @@ and today the game verifies it, not the shell (§6, choice 7).
    ids depend on allocation and free-list order. "Restore the RNG state" therefore means restoring
    the tick counters, exact entity ids and generations, and the allocator free list. None of these
    is serialised.
-3. **Process-random hashing.** `ahash` 0.8 with default features (`runtime-rng`) gives every
-   `AHashMap`/`AHashSet` a per-process random iteration order. That **changes outcomes**: fire
-   `.take(EVENT_BUDGET)` (`fire.rs:178`), furnace batch deferral (`sim_machines.rs:176`), campfire
-   order (`:250`), hopper chain order (`hopper.rs:94`), and mob scatter and despawn order, which
-   feed entity ids. It also makes `world.dat` bytes non-canonical: every `Vec<Saved*>` is built by
-   iterating a hash map, and nothing sorts it.
+3. **Random hash order: the sites named here are fixed in slice 1; others are open (Spec 01
+   §4.1.4).** `ahash` 0.8 with default features (`runtime-rng`) gives every `AHashMap`/`AHashSet` a
+   random iteration order per map, so two servers in one process already disagree. That changed
+   outcomes at fire `.take(EVENT_BUDGET)` (`fire.rs:198`), furnace batch deferral
+   (`sim_machines.rs:179`), hopper chain order (`hopper.rs:119`), and mob scatter and despawn
+   order, which feed entity ids. All of these now sort. Campfire visits (`sim_machines.rs:258`) sort
+   too, but on a closer reading that order changes only the block changes emitted, not simulated
+   state. Pistons, dispensers, saplings, keg fuses, hideouts, construction, the power network and
+   salt licks are still open. **Not fixed:** `world.dat` bytes are still non-canonical, because
+   every `Vec<Saved*>` is built by iterating a hash map and nothing sorts it.
 4. **Secret in state.** `pop_secret` (the Proof-of-Play / Satori HMAC key, in
    `world_meta.json`) keys drops and every server use-roll. A restore without it changes
    outcomes, yet contract:106 forbids serialising private keys (§6, choice 6).
-5. **Floats.** f32 lives in every body, and mob AI has 16 `sin/cos/atan2/powf/exp/ln/mul_add`
+5. **Floats: `-0.0` is fixed in slice 1 for the digest's explicit encoders (Spec 01 §4.1.4); the
+   rest is open.** f32 lives in every body, and mob AI has 16 `sin/cos/atan2/powf/exp/ln/mul_add`
    sites, with glam 0.33 SIMD paths that differ by target. Contract acceptance 5 (x86 vs ARM
-   hash) should be expected to fail until these paths are audited. Bytes are IEEE bits, but
-   nothing normalises `-0.0` or NaN payloads.
+   hash) should be expected to fail until these paths are audited. Bytes are IEEE bits.
+   `sim_digest::f32_bits` folds `-0.0` onto `0.0`; nothing normalises NaN payloads, and floats the
+   digest encodes through `Debug` text are not folded.
 
 ## 5. What complete restoration still needs
 
@@ -130,8 +137,8 @@ restore-after-step-n with the uninterrupted run.
 
 | Area | Today | Changes outcomes? |
 |---|---|---|
-| Chunks, pristine | Regenerated from `seed` + `worldgen_version` | No, *if* generation is bit-exact on every target (unproven cross-arch). |
-| Chunks, touched | Saved, one 8,704 B file each; all loaded at boot | Partly: the **loaded/simulated set** differs after restore. |
+| Chunks, never saved | Regenerated from `seed` + `worldgen_version` | No, *if* generation is bit-exact on every target (unproven cross-arch). |
+| Chunks, held at a save | Saved, one 8,704 B file each, **touched or not** (a server save writes every non-empty chunk it holds, 21–31× the touched set in the §8 bench); all loaded at boot | Partly: the **loaded/simulated set** differs after restore. |
 | Block entities (all 14 kinds) | Saved | Contents yes; order non-canonical. Power is re-derived on load. |
 | RNG | None (§4.2) | **Yes**: AI rolls, spawn rolls, weather/lightning, fire, use-rolls. |
 | Wild mobs, night hostiles, golems, raiders | Lost; re-scattered per column | Yes. |
@@ -258,31 +265,32 @@ the contract itself as changed.
 
 ## 7. Smallest next adapter slice (AxeNStax-only, no wire or save change)
 
-**Slice 1: twin-run determinism.** This is the smallest slice with regression value, and it is
-useful even without Fray: replays, handover and the D4 shared-sim all gain from it.
-- Add a game-owned `sim_digest()` on `GameServer`: SHA-256 over a **sorted**, explicitly encoded
-  view of chunks, block entities, entities (keyed by a stable id, f32 as normalised bits), clocks
-  and per-player server state. It is documented as **not** the contract `state_hash` (no
-  checkpoint exists yet).
-- Add a test-only seeded constructor on `TestHost` (a new world draws its seed from the OS
+**Slice 1: twin-run determinism. Done.** Spec 01 §4.1.4 says what it checks and its limits: one
+process, one fixture, dedicated-mode `GameServer::tick` only, event paths not covered. It was the
+smallest slice with regression value, and it is useful even without Fray: replays, handover and the
+D4 shared-sim all gain from it.
+- A game-owned `sim_digest()` on `GameServer`, compiled for tests only: SHA-256 over a **sorted**,
+  explicitly encoded view of chunks, light, block entities, world tables, entities (keyed by a
+  stable id, f32 as normalised bits), clocks and per-player server state. It is documented as
+  **not** the contract `state_hash` (no checkpoint exists yet), and its module docs list what it
+  leaves out.
+- A test-only seeded constructor on `TestHost` (a new world draws its seed from the OS
   today, `save.rs:3556`). This is test code, not a save change. The twins share the process
   statics in §5 (`CHUNK_SYNC`, `data_dir::ROOT`), which is fine because they don't need to differ.
-- Add a twin-run test in `src/test_integration/`. Two `TestHost` instances get the same seed and
-  the same scripted events at the same logical ticks, in a fixture with fire, furnaces, hoppers,
-  campfires, water and mobs. Assert equal digests at ticks 1, 200 and 2,000, and different
-  digests for a different seed. Expected to **fail first** on the hash-order sites in §4.3: each
-  `RandomState` gets its own keys, so two instances in one process already disagree. Confirm
-  that red before fixing.
-- Fix only the outcome-affecting order sites (sort by position or key at fire, furnace, campfire,
-  hopper, mob scatter and stream-out despawn). Global `ahash` keys stay as they are: fixed keys
-  would open a hash-collision denial-of-service route from joiner-chosen positions, and that is a
-  security decision.
-- Add a lint test that forbids `Instant`, `SystemTime` and `getrandom` in `server.rs` tick paths
-  and `sim_*`, with an explicit allowlist.
-- Add a measurement, in the same slice: an `#[ignore]` release-profile bench of `GameServer::tick`
-  p50/p99 ms with 0, 2 and 8 synthetic joiners, sim distance 8, and machines and mobs present.
-  Also record the bytes of touched-chunk files and sidecars after a scripted build. This turns
-  the tier-L tick row into a measured fact.
+- A twin-run test in `src/test_integration/`. Two `TestHost` instances get the same seed and the
+  same scripted events at the same logical ticks, in a fixture with fire, furnaces, hoppers,
+  campfires, water and mobs. It asserts equal digests at ticks 1, 200, 1,200 and 2,000, and
+  different digests for a different seed. It failed first, as expected, on the hash-order sites in
+  §4.3, before the fixes.
+- Fixes at the outcome-affecting order sites (sorting by position or key at fire, furnace, hopper,
+  mob scatter and stream-out despawn, plus campfire visits for their emitted order). Global `ahash`
+  keys stay as they are: fixed keys would open a hash-collision denial-of-service route from
+  joiner-chosen positions, and that is a security decision.
+- A lint test that forbids `Instant`, `SystemTime` and `getrandom` in a listed set of tick-path
+  files, with an explicit allowlist.
+- A measurement: an `#[ignore]` release-profile bench of `GameServer::tick` p50/p99 ms with 0, 2 and
+  8 synthetic joiners, sim distance 8, and machines and mobs present, plus the bytes of
+  touched-chunk files and sidecars after a scripted build (§8).
 
 **Slice 2 (choices 1-4 now have AxeNStax positions, above):** persist the clocks (fixing the auction and bounty
 bug), checkpoint the volatile state per the agreed codec, and a checkpoint→restore→continue test
@@ -319,6 +327,10 @@ benchmark exists.**
   | 2 | 443 | 0.07 | 17.77 | 22.58 | 2.36 |
   | 8 | 530 | 0.12 | 31.10 | 37.68 | 5.25 |
 
+  **p99 at 2 and 8 joiners (17.77 and 31.10 ms) already exceeds the placeholder budget of about
+  16 ms**, and that is before `HostedServer` adds its share. The twin fixture has changed since this
+  commit (more hopper items, less campfire fuel), and the bench has not been rerun on it.
+
 - Same run, bytes after a scripted build and a save. Sidecars are about 440 B each with 20 stacks.
 
   | Joiners | Touched chunks | Touched bytes | `chunks/` files | `chunks/` bytes | Sidecar bytes |
@@ -328,8 +340,7 @@ benchmark exists.**
   | 8 | 79 | 687,616 | 2,480 | 21,585,920 | 3,520 |
 
   **A server save writes every non-empty chunk it holds, touched or not** (`try_save`, via
-  `persistable_chunks`), so `chunks/` is 21–31× the touched set here. §2 and §5 say "touched" of
-  the 8,704 B form; on disk today that is the whole loaded set.
+  `persistable_chunks`), so `chunks/` is 21–31× the touched set here.
 
 **Stated limits and decisions**
 - 20 TPS (50 ms).
