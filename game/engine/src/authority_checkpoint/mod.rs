@@ -215,6 +215,12 @@ pub(crate) fn section_sizes(server: &GameServer) -> Result<Vec<(&'static str, us
     volatile::section_sizes(server)
 }
 
+/// Where each section of this server's checkpoint starts (the resealed tests).
+#[cfg(test)]
+pub(crate) fn section_offsets(server: &GameServer) -> Result<volatile::SectionOffsets, String> {
+    volatile::section_offsets(server, HEADER_BYTES)
+}
+
 impl GameServer {
     /// The config this authority is running under, as a shell holds it.
     pub(crate) fn authority_config(&self) -> AuthorityConfig {

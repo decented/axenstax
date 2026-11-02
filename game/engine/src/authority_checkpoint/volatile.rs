@@ -24,7 +24,7 @@ use crate::fluids::FluidCheckpoint;
 use crate::server::{GameServer, ServerPlayer};
 use crate::server_stream::ColumnStreamer;
 use crate::sim_clock::SavedClock;
-use crate::world::ChunkColumnLayout;
+use crate::world::{ChunkColumnLayout, LAYOUT_COLUMN_SECTIONS};
 
 type Pos = (i32, i32, i32);
 
@@ -130,6 +130,32 @@ pub(super) fn section_sizes(s: &GameServer) -> Result<Vec<(&'static str, usize)>
         ("  lava sources", 12 * (lava.extra.len() + lava.missing.len())),
         ("players", size(|w| super::players::write_all(w, &s.players))?),
     ])
+}
+
+/// Where each section starts in a checkpoint's bytes, for tests that edit one
+/// and reseal.
+#[cfg(test)]
+pub(crate) struct SectionOffsets {
+    pub modes: usize,
+    pub streamer: usize,
+    pub layout: usize,
+    pub sims: usize,
+    pub players: usize,
+}
+
+#[cfg(test)]
+pub(super) fn section_offsets(s: &GameServer, start: usize) -> Result<SectionOffsets, String> {
+    let mut w = Writer::new();
+    write_clock(&mut w, s);
+    let modes = start + w.len();
+    write_modes(&mut w, s);
+    let streamer = start + w.len();
+    write_streamer(&mut w, s);
+    let layout = start + w.len();
+    write_layout(&mut w, s)?;
+    let sims = start + w.len();
+    write_sims(&mut w, s);
+    Ok(SectionOffsets { modes, streamer, layout, sims, players: start + w.len() })
 }
 
 pub(super) fn read(r: &mut Reader<'_>) -> Result<Volatile, Malformed> {
@@ -288,6 +314,19 @@ const LOADED: u8 = 1;
 const EVICTED: u8 = 2;
 const PERSIST: u8 = 4;
 
+/// The most sections a layout may name. `apply_chunk_layout` builds a chunk (about
+/// 12.8 KB) for each one it finds no record of, so this is what bounds a restore's
+/// allocation: about 840 MB at worst. The 8-joiner bench world is about 9,200.
+const MAX_LAYOUT_SECTIONS: u32 = 1 << 16;
+
+/// The furthest column a run can hold: a body at the playable limit, plus what
+/// streams in round it. Past this a column's first cell nears `i32`'s edge.
+const MAX_COLUMN: i32 = crate::commands::builtins::tp::MAX_COORD as i32 / crate::chunk::CHUNK_SIZE as i32 + 64;
+
+fn column_in_range((cx, cz): (i32, i32)) -> bool {
+    (-MAX_COLUMN..=MAX_COLUMN).contains(&cx) && (-MAX_COLUMN..=MAX_COLUMN).contains(&cz)
+}
+
 /// One entry per column that holds a chunk or counts as loaded, sorted.
 fn write_layout(w: &mut Writer, s: &GameServer) -> Result<(), String> {
     let mut columns: std::collections::BTreeMap<(i32, i32), ChunkColumnLayout> =
@@ -320,19 +359,36 @@ fn read_layout(r: &mut Reader<'_>) -> Result<(AHashSet<(i32, i32)>, Vec<ChunkCol
     let n = r.count(17)?;
     let mut loaded = AHashSet::new();
     let mut layout = Vec::with_capacity(n);
+    let mut sections = 0u32;
     for _ in 0..n {
         let column = (r.i32()?, r.i32()?);
         let flags = r.u8()?;
         if flags > (LOADED | EVICTED | PERSIST) {
             return Err(Malformed("an unknown column flag"));
         }
+        if !column_in_range(column) {
+            return Err(Malformed("a layout column outside the playable range"));
+        }
         if flags & LOADED != 0 {
             loaded.insert(column);
         }
+        let (live_sections, evicted_sections) = (r.u32()?, r.u32()?);
+        if (live_sections | evicted_sections) & !LAYOUT_COLUMN_SECTIONS != 0 {
+            return Err(Malformed("a layout section outside a column"));
+        }
+        // A save keeps one copy of a section (`persistable_chunks`), so no record
+        // could bring the second back.
+        if live_sections & evicted_sections != 0 {
+            return Err(Malformed("a layout section both live and evicted"));
+        }
+        sections = sections.saturating_add(live_sections.count_ones() + evicted_sections.count_ones());
+        if sections > MAX_LAYOUT_SECTIONS {
+            return Err(Malformed("a layout naming more sections than a checkpoint may"));
+        }
         layout.push(ChunkColumnLayout {
             column,
-            live_sections: r.u32()?,
-            evicted_sections: r.u32()?,
+            live_sections,
+            evicted_sections,
             evicted_column: flags & EVICTED != 0,
             persist: flags & PERSIST != 0,
         });

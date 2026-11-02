@@ -110,3 +110,4 @@ pub(crate) mod tick_bench; // Keep slice 1 — #[ignore] release bench of GameSe
 pub mod clock_save; // Keep slice 2a: the authority clock and joiner position across a restart.
 pub(crate) mod authority_checkpoint; // Keep slice 2b: checkpoint and restore of the authority.
 mod authority_checkpoint_refusals; // Keep slice 2b: what they refuse, under which code.
+mod authority_checkpoint_resealed; // Keep slice 2b: bytes someone resealed, refused before they can hurt.

@@ -498,6 +498,15 @@ pub const MAX_ATTACHMENT_CHANGES_LOGGED: usize = 4096;
 #[cfg(not(target_arch = "wasm32"))]
 const LAYOUT_LOWEST_SECTION: i32 = -8;
 
+/// Keep slice 2b — the bits of a layout mask a column can really set:
+/// `0..=MAX_CHUNK_Y` and the section either side of them a light write conjures.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) const LAYOUT_COLUMN_SECTIONS: u32 = {
+    let lowest = (-1 - LAYOUT_LOWEST_SECTION) as u32;
+    let highest = (MAX_CHUNK_Y + 1 - LAYOUT_LOWEST_SECTION) as u32;
+    (u32::MAX >> (u32::BITS - 1 - highest)) & (u32::MAX << lowest)
+};
+
 /// Keep slice 2b — one column of [`World::chunk_layout`]: which of its sections
 /// (see [`LAYOUT_LOWEST_SECTION`]) are live and which are in the evicted store,
 /// whether the column counts as evicted, and whether any of its chunks carries

@@ -8,7 +8,7 @@ use crate::save::WorldsRootGuard;
 use crate::server::GameServer;
 use crate::test_harness::TestHost;
 
-fn saved(tag: &str) -> (WorldsRootGuard, TestHost, Vec<u8>) {
+pub(super) fn saved(tag: &str) -> (WorldsRootGuard, TestHost, Vec<u8>) {
     let root = WorldsRootGuard::new(tag);
     let mut h = fixture(tag, 2);
     run_to(&mut h, 20);
@@ -16,7 +16,7 @@ fn saved(tag: &str) -> (WorldsRootGuard, TestHost, Vec<u8>) {
     (root, h, bytes)
 }
 
-fn assert_invalid_checkpoint(h: &TestHost, bytes: &[u8], what: &str) {
+pub(super) fn assert_invalid_checkpoint(h: &TestHost, bytes: &[u8], what: &str) {
     match restore(h, bytes).err() {
         Some(RestoreError::InvalidCheckpoint(_)) => {}
         other => panic!("{what}: expected InvalidCheckpoint, got {other:?}"),
