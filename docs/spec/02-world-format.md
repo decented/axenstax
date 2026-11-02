@@ -2115,15 +2115,46 @@ format version in a trailing footer — see the bincode note under Migration str
       have made new saves unreadable to shipped builds, and a 4-byte header magic
       collides with a legacy save's leading `seed: u32`; an 8-byte trailing magic
       at the very end of a footer-less save is not a realistic collision.
-    - **`SAVE_FORMAT_VERSION`** = `WORLD_SAVE_FIELD_COUNT` (55 since terrain T1,
-      2026-10-23: `quest_world` was 54, `worldgen_version` 55) +
-      `SAVE_LAYOUT_REVISION` (4 today; see the block-ids bullet below) = 59. Two tripwire tests stop drift: serde's field list
+    - **`SAVE_FORMAT_VERSION`** = `WORLD_SAVE_FIELD_COUNT` (56 since Keep slice 2a,
+      2026-11-02: `quest_world` was 54, `worldgen_version` 55, `authority_clock` 56) +
+      `SAVE_LAYOUT_REVISION` (4 today; see the block-ids bullet below) = 60. Two tripwire tests stop drift: serde's field list
       for `WorldSave` must equal `WORLD_SAVE_FIELD_COUNT` (so appending a field
       without bumping the version fails), and the tolerant reader must consume every
       byte of a current save (so a field listed in its struct literal without a read
       fails). A wire change that is **not** an appended field (a field or enum variant
       inside a nested saved type, a retype) is invisible to both tripwires and must
       bump `SAVE_LAYOUT_REVISION` by hand.
+    - **The authority clock is saved (format 60, Keep slice 2a, 2026-11-02).** Field 56,
+      `WorldSave.authority_clock: Option<sim_clock::SavedClock>`, carries `tick_counter`,
+      `world_time`, the weather window (`rain_until`, `storm_until`), the trial lock it
+      pinned (`weather_lock_applied`), the night calendar (`nights`, `was_night`) and
+      `calendar_id`, and the reputation day's progress (`day_remainder`, `day_last_tick`).
+      **Bug this fixed:** the tick restarted at 0 on every load, so a saved auction's
+      `deadline_tick` stretched by the whole run so far, bounties re-rolled (their day
+      comes from the tick), a saved tick-stamped cooldown meant nothing, use-rolls
+      repeated, and a world always woke at morning under a clear sky. Rules:
+      - Every writer carries it, and the clock is an explicit argument, so a new writer
+        can't forget it: `GameServer::try_save` (dedicated, `--no-lend`) from its own
+        fields, and every client save (`autosave_world`, `save_world_superseding_autosave`,
+        the handover copy through `build_world_save`) from `GameState::clock_to_save`,
+        because single-player runs no server. On a world with a hosting server the
+        calendar is the server's, the one joiners sleep by. A lent world's clock is the
+        server's (`sim_clock`), and its client holds the read-back copy that is saved.
+      - Every load restores it before anything stamps the tick: `GameServer::initial_load`,
+        `begin_load`, and the web's resume. A lending server takes it from its host client
+        at its first phase (`adopt_host_clock`), so it follows the file the host actually
+        opened, autosave included.
+      - A save without the field (footer 59 and older) loads exactly as before: tick 0,
+        morning, clear, night 0, a new calendar id. So does a clock that fails
+        `SavedClock::is_valid` (out of range, a damaged or hostile file). The handover
+        checkpoint refuses such a clock outright.
+      - Rubber taps are stamped at the restored tick, not 0 (`apply_world_save_state`):
+        stamping 0 under a large tick would expire every cooldown at once. Every tap still
+        gets a fresh full cooldown at a load, the anti-save-scum rule.
+      - Not saved: the `/time speed` step, a runtime override that every world entry
+        resets to 1; a pending lightning strike, rolled and landed within one tick so none
+        outlives it; `falling_tick_counter`, a four-tick cadence that restarts at 0.
+      - An older build refuses a format 60 world with its usual "needs a newer version".
     - **Block ids move the version too (2026-10-24).** `SAVE_LAYOUT_REVISION` went 3 → 4
       (`SAVE_FORMAT_VERSION` +1: 57 → 58 before terrain T1 added field 55, 59 combined) when the 53 building-variant ids (320..=372) landed,
       with no `WorldSave` field change. Reason: a build that does not know an id reads it as
@@ -2147,7 +2178,7 @@ format version in a trailing footer — see the bincode note under Migration str
       it. **Rule: the strict check accepts a body of any field count that footer was
       written with, and nothing else.** `save_format::FOOTER_FIELD_COUNTS` maps each
       footer to its allowed positional field counts (53 -> 53, 54 -> 52, 55 -> 53,
-      57 -> 54, 58 -> 54 or 55, 59 -> 55; one footer can come from two field counts
+      57 -> 54, 58 -> 54 or 55, 59 -> 55, 60 -> 56; one footer can come from two field counts
       because it is count + layout revision), each row sourced from the commit that
       wrote it. The tolerant decode reports how many fields it read before a clean end;
       the body is accepted iff the tail is clean, that count is in the footer's row, and

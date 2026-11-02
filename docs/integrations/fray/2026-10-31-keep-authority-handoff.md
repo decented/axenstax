@@ -145,22 +145,23 @@ restore-after-step-n with the uninterrupted run.
 | Tamed pets, carts, quest givers | Saved; attack/target state deliberately dropped; ids change | Mostly kept; `riding: Option<Entity>` dangles. |
 | Projectiles, item drops, bees in flight | Lost | Yes (items on the ground vanish). |
 | Fire, water/lava fronts, leaf decay queues | Lost; fire re-adopted with fresh timers | Yes. |
-| Rubber-tap cooldowns | Rebuilt at `load_tick = 0` | Yes (every cooldown restarts). |
-| Hoppers, growth | Stateless, keyed on tick | Yes (tick counter resets). |
+| Rubber-tap cooldowns | Rebuilt at the restored tick (0 for a save without a clock) | Yes (every cooldown restarts, by design: no save-scumming). |
+| Hoppers, growth | Stateless, keyed on tick | No, now the tick is saved (`4c5a75c6`). A save without a clock still resets it. |
 | Pistons mid-push | No record found | Unknown. |
-| Joiner inventory | Sidecar v4 per npub (≤64 KiB), written on leave and autosave | Kept as of last save. **Position, yaw and pitch not saved**: a restored joiner is back at spawn. |
+| Joiner inventory and position | Sidecar v5 per npub (≤64 KiB), written on leave and autosave | Kept as of last save. **Fixed** (`9872d926`): position, yaw and pitch are saved, and a joiner goes back to its position if a body can stand exactly there, else to its spawn. The client's camera doesn't get the look: `JoinAccept` has no field for it. |
 | Believed-unit buckets, `PossessionTally`, drop bucket | Lost | Yes: bounds refill to full (a cheater gets a fresh allowance). |
 | Action windows/frontier, window events, pending ops | Lost; `action_session` re-drawn | Yes: every connected client's action lane desyncs. |
 | Owed correction debt | Saved (bounded) | Kept. |
 | Quests: per-player session, incarnation, gameplay clock | Not saved, except via the bound personal record | Yes for quests in progress. |
-| Tick counter | **Not saved; restarts at 0** | **Yes, a bug today:** saved auction `deadline_tick` stretches by the run time; bounties re-roll; use-rolls repeat. |
-| Day clock, night calendar, weather, lightning, reputation day | Not saved | Yes. Also: a joiner can sleep twice in one night across a restart (`run_id` gate). |
+| Tick counter | **Fixed** (`4c5a75c6`): saved in `WorldSave.authority_clock`, format 60. A save without the field still restarts at 0 | No. Auction deadlines keep their remaining ticks; bounties don't re-roll; use-rolls carry on. |
+| Day clock, night calendar, weather, reputation day | **Fixed** (`4c5a75c6`, sleep gate `9872d926`): saved with the tick. The gate is now the saved `calendar_id`, not `run_id`, so a second sleep in one night is refused across a restart. Lightning has no state to keep: a strike is rolled and landed in one tick. | No, except that two pieces of the `clocks` digest section are not saved: the `/time speed` step (every world entry resets it to 1) and `falling_tick_counter` (restarts at 0). |
 | Cooldowns, respawn and death timers, spawn protection | Lost | Yes. |
 | Inputs: `last_applied_input`, intent queue, step credit | Lost | Yes: prediction re-snaps, queued input dropped. |
 | Output state: chunk-push sent-sets, entity interest, ProtocolId baseline, outboxes | Lost | Yes for output: every client is fully re-pushed. Contract acceptance 2 (ordered commands agree) cannot pass. |
 | Pending deaths | ECS markers; save refused while pending | A checkpoint at an arbitrary tick boundary may be unavailable. |
 | Economy owners | Saved, but five owner enums still carry `LocalPlayer(slot)` | Meaningless across a restore with reused slots; must converge on npub. |
-| `HostedServer` per-slot vectors, carry-over queues, `server_tick` | Lost | Yes (authority state per §3). |
+| `HostedServer` per-slot vectors, carry-over queues | Lost | Yes (authority state per §3). |
+| `HostedServer.server_tick` | **Fixed** (`4c5a75c6`): carries on from the restored tick at its first tick; audited safe with a large start (Spec 04 §4.2i), no wire change | No. |
 
 **Statics that block two authorities in one process:** `CHUNK_SYNC` (`chunk_push.rs:183`),
 `NO_LEND` (`hosted_server.rs:223`), `data_dir::ROOT` (`data_dir.rs:60`), the `save_fence` and
@@ -189,7 +190,7 @@ Each choice carries AxeNStax's recommendation, for discussion only.
    crash loss up to 60 s, multi-file and fenced. Open: who triggers a persist (authority vs
    runner), what the batch-commit guarantee is, and whether pending deaths may block a
    persist.
-4. **Encoding.** Reuse WorldSave (positional bincode 1, append-only, 55 fields, format 59) with a
+4. **Encoding.** Reuse WorldSave (positional bincode 1, append-only, 56 fields, format 60) with a
    sort pass, or a new canonical checkpoint schema? A bincode 1→3 migration is already planned
    and changes the save and wire encoding.
    *Recommend:* a new versioned, bounded codec for volatile state (the `quest_npcs::codec`
@@ -219,7 +220,8 @@ Each choice carries AxeNStax's recommendation, for discussion only.
     covers how the bincode 3 migration lands on Keep-stored data.
 11. **Simulated set after restore.** Today restore loads and simulates every saved column; the
     live run simulates only the columns around anchors. The checkpoint must name the loaded set,
-    or restore must re-derive it from player positions, which are not saved today.
+    or restore must re-derive it from player positions, which a save holds only as of each
+    joiner's last record (sidecar v5: its leave or an autosave).
 
 ### AxeNStax positions, 2026-11-01
 
