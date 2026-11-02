@@ -379,7 +379,13 @@ if seated; somebody a bearer let in has an invite row and stays until blocked. A
 Signet snapshot that has gone stale or been disconnected adds nobody, so a seated
 friend who was only in the book through Signet is removed the same way, with the
 allowlist reason, on the push that follows; they can come back once a sync has them
-in the book again. A Signet block beats every source. A world handed to a new host does not carry the
+in the book again. A Signet block beats every source. If the Signet files can't be
+read (a read error, or a damaged file set aside: `signet_contacts::SignetRead`), that
+is not the same as having no Signet: a running host keeps the blocks it last applied,
+the book has no Signet rows, and no new world can be hosted until the player reconnects
+Signet (Disconnect clears the files; a new pairing replaces them; a sync replaces a
+damaged snapshot). An explicit Disconnect or a revoked snapshot still lifts blocks at
+once (D12). A world handed to a new host does not carry the
 old host's blocks: blocks are the persona's Signet state, and the new host starts
 from its own (`start_online_host` reads them before the first offer).
 Pressing **Host online** on a world already hosted
@@ -410,7 +416,7 @@ so somebody in the same house joins it exactly as before, without an invite.
 That announcement is LAN-local only, self-published, and reaches no directory
 anybody operates, which is what keeps it inside CLAUDE.md red line 1.
 
-**"Host Game" (Fray).** A Fray room has no allowlist (`Allow::Open`, sign-in required), and the contacts sync reaches it with no `OnlineHost` in the way: `game_loop::push_book_to_hosted_world` replaces its blocklist on every book push, so a Signet block takes effect at once and stops the player rejoining.
+**"Host Game" (Fray).** A Fray room has no allowlist (`Allow::Open`, sign-in required), and the contacts sync reaches it with no `OnlineHost` in the way: `game_loop::push_book_to_hosted_world` replaces its blocklist on every book push, so a Signet block takes effect at once and stops the player rejoining. An unreadable Signet keeps the room's blocks, and a room can't be started while it is unreadable (§1.9).
 
 **The QUIC join is unchanged.** `ChallengePacket` → `JoinRequest` carrying the
 persona-signed kind-21236 `auth_event` → `access_policy`. `PROTOCOL_VERSION` is

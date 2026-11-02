@@ -414,8 +414,6 @@ fn a_blocked_key_is_refused_by_a_fray_room_and_an_unblocked_one_is_seated() {
     signed_join_is_seated(&mut server, transport);
 }
 
-/// S1: starting the room does not wait for it. It is `Pending` or `Ready`
-/// straight after, and `poll_fray_start` settles it on a later frame.
 /// A block made while "Host Game" is running reaches the room through the
 /// contacts-sync push, which has no online host to go through: the player is
 /// removed, told why, and refused when they try to come back.
@@ -435,7 +433,8 @@ fn a_block_during_host_game_removes_the_seated_player_and_stops_the_rejoin() {
     settle(&mut server, &mut client);
     assert!(client.is_connected(), "joined: {}", state_name(&client.state));
 
-    crate::game_loop::push_book_to_hosted_world(None, Some(&mut server), &[], &[pubkey]);
+    let blocks = crate::contacts::SignetBlocks::Known(vec![pubkey]);
+    crate::game_loop::push_book_to_hosted_world(None, Some(&mut server), &[], &blocks);
     server.tick();
 
     assert!(
@@ -457,6 +456,38 @@ fn a_block_during_host_game_removes_the_seated_player_and_stops_the_rejoin() {
     assert!(why.contains("blocked"), "{why}");
 }
 
+/// A Signet that can't be read has not lifted anybody's block: the room keeps
+/// what it has, and the blocked player still can't come back.
+#[test]
+fn an_unreadable_signet_keeps_the_block_during_host_game() {
+    let cfg = test_cfg();
+    let mut server = start_host(|room| host(&cfg, &Identity::ephemeral(), room));
+    let keys = Keys::generate();
+    let pubkey = keys.public_key().to_bytes();
+    let blocks = crate::contacts::SignetBlocks::Known(vec![pubkey]);
+    crate::game_loop::push_book_to_hosted_world(None, Some(&mut server), &[], &blocks);
+    server.tick();
+
+    let unreadable = crate::contacts::SignetBlocks::Unreadable;
+    crate::game_loop::push_book_to_hosted_world(None, Some(&mut server), &[], &unreadable);
+    server.tick();
+
+    let transport = dial_lan(&mut server, &cfg);
+    let mut client = RemoteClient::connect_authed_on_transport(
+        Box::new(transport),
+        "Player",
+        driver(keys, Arc::new(Mutex::new(None)), None),
+        None,
+    );
+    settle(&mut server, &mut client);
+    let ConnectionState::Failed(why) = &client.state else {
+        panic!("a blocked key must stay refused: {}", state_name(&client.state));
+    };
+    assert!(why.contains("blocked"), "{why}");
+}
+
+/// S1: starting the room does not wait for it. It is `Pending` or `Ready`
+/// straight after, and `poll_fray_start` settles it on a later frame.
 #[test]
 fn the_room_start_returns_at_once_and_settles_on_a_later_poll() {
     let cfg = test_cfg();

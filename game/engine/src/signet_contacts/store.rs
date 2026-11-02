@@ -8,8 +8,12 @@
 //!   pubkey was seen (so `added_at` survives a wholesale replacement, D9).
 //!
 //! Both formats are append-only (new fields `#[serde(default)]`). A file that
-//! does not parse is quarantined the way saves are (`save::quarantine_corrupt`)
-//! and treated as absent — never a panic, never silently overwritten.
+//! does not parse is quarantined the way saves are (`save::quarantine_corrupt`) —
+//! never a panic, never silently overwritten. It is not the same as having no
+//! file: the player's blocks were in it. While a quarantined copy sits beside
+//! the path with nothing valid in its place, the file keeps reading as
+//! [`Loaded::Quarantined`], across restarts too, until a valid file replaces it
+//! or the player disconnects ([`delete_all`]).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -145,9 +149,12 @@ impl Snapshot {
 pub enum Loaded<T> {
     Absent,
     Ok(T),
-    /// The file did not parse; it has been moved aside (or could not be, and
-    /// is ignored). Treated as absent by every caller.
+    /// The file did not parse and has been moved aside, now or on an earlier
+    /// read, and nothing valid has replaced it.
     Quarantined,
+    /// It couldn't be looked at, for a reason other than not existing. Says
+    /// which file and why; the wording is stable from one read to the next.
+    Unreadable(String),
 }
 
 impl<T> Loaded<T> {
@@ -162,21 +169,46 @@ impl<T> Loaded<T> {
 fn load_json<T: serde::de::DeserializeOwned>(path: &Path, valid: impl Fn(&T) -> bool) -> Loaded<T> {
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Loaded::Absent,
-        Err(e) => {
-            log::warn!("[signet-contacts] could not read {}: {e}", path.display());
-            return Loaded::Absent;
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return match quarantined_copies(path) {
+                Ok(copies) if copies.is_empty() => Loaded::Absent,
+                Ok(_) => Loaded::Quarantined,
+                Err(e) => Loaded::Unreadable(format!("{}: can't look beside it: {e}", path.display())),
+            };
         }
+        Err(e) => return Loaded::Unreadable(format!("{}: can't be read: {e}", path.display())),
     };
     match serde_json::from_slice::<T>(&bytes) {
         Ok(t) if valid(&t) => Loaded::Ok(t),
-        _ => {
-            if let Err(e) = crate::save::quarantine_corrupt(path) {
-                log::warn!("[signet-contacts] {e}");
+        _ => match crate::save::quarantine_corrupt(path) {
+            Ok(_) => Loaded::Quarantined,
+            Err(e) => {
+                log::debug!("[signet-contacts] {e}");
+                Loaded::Unreadable(format!("{}: damaged, and can't be moved aside", path.display()))
             }
-            Loaded::Quarantined
+        },
+    }
+}
+
+/// The damaged copies `save::quarantine_corrupt` has moved aside from `path`.
+fn quarantined_copies(path: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
+        return Ok(Vec::new());
+    };
+    let prefix = format!("{}.corrupt-", name.to_string_lossy());
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let mut copies = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        if entry.file_name().to_string_lossy().starts_with(&prefix) {
+            copies.push(entry.path());
         }
     }
+    Ok(copies)
 }
 
 pub fn load_grant(path: &Path) -> Loaded<Grant> {
@@ -213,16 +245,28 @@ fn remove(path: &Path) -> Result<(), String> {
     match std::fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        // Something that was never ours at this path must not outlast Disconnect.
+        Err(_) if path.is_dir() => {
+            std::fs::remove_dir_all(path).map_err(|e| format!("remove {}: {e}", path.display()))
+        }
         Err(e) => Err(format!("remove {}: {e}", path.display())),
     }
 }
 
+/// Remove the file at `path` and any damaged copies moved aside from it.
+fn remove_with_copies(path: &Path) -> Result<(), String> {
+    let copies = quarantined_copies(path).map_err(|e| format!("look beside {}: {e}", path.display()))?;
+    remove(path)?;
+    copies.iter().try_for_each(|copy| remove(copy))
+}
+
 /// Remove a snapshot that belongs to an older grant. If it cannot be removed
 /// it is moved aside (`save::quarantine_corrupt`); if even that fails it is
-/// logged loudly and left — `book_part_at` ignores a snapshot whose
-/// `grant_id` is not the current grant's, so a leftover never counts.
+/// logged loudly and left — `read_book_part_at` ignores a snapshot whose
+/// `grant_id` is not the current grant's, so a leftover never counts. Damaged
+/// copies of an older grant's snapshot go too: they say nothing about this one.
 pub fn discard_snapshot(path: &Path) {
-    if let Err(e) = remove(path) {
+    if let Err(e) = remove_with_copies(path) {
         log::warn!("[signet-contacts] could not remove the old snapshot ({e}); moving it aside");
         if let Err(e) = crate::save::quarantine_corrupt(path) {
             log::error!(
@@ -234,10 +278,13 @@ pub fn discard_snapshot(path: &Path) {
 }
 
 /// Disconnect / revoked: drop the snapshot first (so its contacts stop
-/// counting even if the grant removal then fails), then the grant.
+/// counting even if the grant removal then fails), then the grant, each with
+/// any damaged copies of it. This is what a player whose files can't be read
+/// is told to do, so one failure doesn't stop it trying the other.
 pub fn delete_all(paths: &StorePaths) -> Result<(), String> {
-    remove(&paths.snapshot)?;
-    remove(&paths.grant)
+    let snapshot = remove_with_copies(&paths.snapshot);
+    let grant = remove_with_copies(&paths.grant);
+    snapshot.and(grant)
 }
 
 #[cfg(test)]
@@ -326,6 +373,75 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().contains(".corrupt-"))
             .collect();
         assert_eq!(kept.len(), 2);
+    }
+
+    #[test]
+    fn a_quarantined_file_stays_quarantined_on_later_reads() {
+        let dir = tmp("sticky");
+        let paths = StorePaths::in_profile(&dir);
+        std::fs::write(&paths.grant, b"{not json").unwrap();
+        assert_eq!(load_grant(&paths.grant), Loaded::Quarantined);
+        assert_ne!(load_grant(&paths.grant), Loaded::Absent, "moved aside is not the same as never there");
+        assert_eq!(load_grant(&paths.grant), Loaded::Quarantined);
+        // The other file's copies say nothing about this one.
+        assert_eq!(load_snapshot(&paths.snapshot), Loaded::Absent);
+    }
+
+    #[test]
+    fn a_valid_file_beats_a_copy_kept_aside() {
+        let dir = tmp("repaired");
+        let paths = StorePaths::in_profile(&dir);
+        std::fs::write(&paths.grant, b"{not json").unwrap();
+        assert_eq!(load_grant(&paths.grant), Loaded::Quarantined);
+        let g = grant();
+        save_grant(&paths.grant, &g).unwrap();
+        assert_eq!(load_grant(&paths.grant), Loaded::Ok(g), "pairing again repairs it");
+    }
+
+    #[test]
+    fn a_read_failure_is_not_absent() {
+        let dir = tmp("readfail");
+        let paths = StorePaths::in_profile(&dir);
+        // A directory at the path fails the read for any user, root included.
+        std::fs::create_dir_all(&paths.grant).unwrap();
+        assert!(matches!(load_grant(&paths.grant), Loaded::Unreadable(_)), "{:?}", load_grant(&paths.grant));
+    }
+
+    #[test]
+    fn delete_all_clears_an_unreadable_store() {
+        let dir = tmp("forget");
+        let paths = StorePaths::in_profile(&dir);
+        std::fs::write(&paths.grant, b"{not json").unwrap();
+        assert_eq!(load_grant(&paths.grant), Loaded::Quarantined);
+        std::fs::create_dir_all(&paths.snapshot).unwrap();
+        delete_all(&paths).unwrap();
+        assert_eq!(load_grant(&paths.grant), Loaded::Absent, "the copy kept aside went too");
+        assert_eq!(load_snapshot(&paths.snapshot), Loaded::Absent);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delete_all_clears_a_file_with_no_read_permission() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tmp("forget-mode");
+        let paths = StorePaths::in_profile(&dir);
+        save_grant(&paths.grant, &grant()).unwrap();
+        std::fs::set_permissions(&paths.grant, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&paths.grant).is_err() {
+            assert!(matches!(load_grant(&paths.grant), Loaded::Unreadable(_)));
+        } // else root, who can read anything: the removal is still worth checking.
+        delete_all(&paths).unwrap();
+        assert_eq!(load_grant(&paths.grant), Loaded::Absent);
+    }
+
+    #[test]
+    fn a_new_grant_is_not_held_back_by_an_older_grants_damaged_snapshot() {
+        let dir = tmp("discard");
+        let paths = StorePaths::in_profile(&dir);
+        std::fs::write(&paths.snapshot, b"[]").unwrap();
+        assert_eq!(load_snapshot(&paths.snapshot), Loaded::Quarantined);
+        discard_snapshot(&paths.snapshot);
+        assert_eq!(load_snapshot(&paths.snapshot), Loaded::Absent);
     }
 
     #[test]

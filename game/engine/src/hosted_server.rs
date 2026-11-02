@@ -1904,6 +1904,12 @@ impl HostedServer {
         self.set_access_policy(self.require_signin, self.allow.clone(), blocklist);
     }
 
+    /// Who is blocked right now.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn blocklist(&self) -> &[[u8; 32]] {
+        &self.blocklist
+    }
+
     /// Re-run the join decision over every seated joiner and release those it
     /// now refuses, telling them why. Local slots are not subject to it, and a
     /// slot still in its handshake has not been decided yet: its join will be,

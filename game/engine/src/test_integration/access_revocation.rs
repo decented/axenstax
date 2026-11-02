@@ -9,6 +9,7 @@
 use super::joiner_authority::{got_reject, join_guest, send_guest_join, start_open_server};
 use super::lent_world::{join_guest_lent, start_lent};
 use crate::access_policy::Allow;
+use crate::contacts::SignetBlocks;
 use crate::hosted_server::{HostedServer, RemoteTransport};
 use crate::transport::ChannelClientTransport;
 
@@ -134,11 +135,12 @@ fn a_contact_removed_from_the_book_is_removed_from_a_home_hosts_world() {
     let mut hs = start_open_server("access-book");
     let (client, slot) = seat(&mut hs, PLAYER);
     let (_friend, friend_slot) = seat(&mut hs, FRIEND);
-    crate::game_loop::push_book_to_hosted_world(Some(&mut online), Some(&mut hs), &book, &[]);
+    let none = SignetBlocks::Known(Vec::new());
+    crate::game_loop::push_book_to_hosted_world(Some(&mut online), Some(&mut hs), &book, &none);
     assert!(!hs.slot_is_free(slot) && !hs.slot_is_free(friend_slot), "both are in the book");
 
     let fresh = vec![a_contact(FRIEND, Tier::Kith)];
-    crate::game_loop::push_book_to_hosted_world(Some(&mut online), Some(&mut hs), &fresh, &[]);
+    crate::game_loop::push_book_to_hosted_world(Some(&mut online), Some(&mut hs), &fresh, &none);
 
     assert!(hs.slot_is_free(slot), "a removed contact leaves the world");
     assert!(got_reject(&client).is_some());
@@ -146,19 +148,73 @@ fn a_contact_removed_from_the_book_is_removed_from_a_home_hosts_world() {
 }
 
 /// With no online host, a contacts sync changes the blocks and nothing else.
+/// Sign-in is off, so only the allowlist can be what refuses the guest.
 #[test]
 fn a_book_push_with_no_online_host_changes_only_the_blocks() {
     let mut hs = start_dedicated("no-online-host");
-    let (_friend, friend_slot) = seat(&mut hs, FRIEND);
-    hs.set_access_policy(true, Allow::only([FRIEND]), Vec::new());
+    let (client, slot) = seat(&mut hs, PLAYER);
+    let (friend, friend_slot) = seat(&mut hs, FRIEND);
+    hs.set_access_policy(false, Allow::only([PLAYER, FRIEND]), Vec::new());
+    assert!(!hs.slot_is_free(slot), "both are on the allowlist");
 
-    crate::game_loop::push_book_to_hosted_world(None, Some(&mut hs), &[], &[PLAYER]);
+    let blocks = SignetBlocks::Known(vec![PLAYER]);
+    crate::game_loop::push_book_to_hosted_world(None, Some(&mut hs), &[], &blocks);
 
-    assert!(!hs.slot_is_free(friend_slot), "the allowlist still stands, and they are on it");
+    assert!(hs.slot_is_free(slot), "the block landed");
+    assert!(got_reject(&client).is_some_and(|why| why.contains("blocked")), "and they are told why");
+    assert!(!hs.slot_is_free(friend_slot), "the allowlist still stands, and the friend is on it");
+    assert!(got_reject(&friend).is_none());
     let guest = hs.attach_test_remote();
     send_guest_join(&guest, "Guest");
     hs.tick();
-    assert!(got_reject(&guest).is_some(), "and a guest is still refused");
+    assert!(
+        got_reject(&guest).is_some_and(|why| why.contains("sign-in")),
+        "the allowlist still stands: it refuses a guest, by asking them to sign in"
+    );
+}
+
+/// A Signet that can't be read has not lifted a block on an online host, even if
+/// the mirror still has the person. Disconnecting (D12) does lift it.
+#[test]
+fn an_unreadable_signet_keeps_the_blocks_on_an_online_host_and_a_disconnect_lifts_them() {
+    use crate::comms::Tier;
+    use crate::online_host::tests::{a_contact, a_host};
+
+    let hub = crate::rendezvous::relay_client::FakeRelayHub::new();
+    let mirror = vec![a_contact(PLAYER, Tier::Kith), a_contact(FRIEND, Tier::Kith)];
+    let (mut online, _) = a_host(&hub, mirror.clone());
+    let mut hs = start_open_server("access-unreadable");
+    let (_friend, friend_slot) = seat(&mut hs, FRIEND);
+    let (client, slot) = seat(&mut hs, PLAYER);
+    let blocks = SignetBlocks::Known(vec![PLAYER]);
+    crate::game_loop::push_book_to_hosted_world(Some(&mut online), Some(&mut hs), &mirror, &blocks);
+    assert!(hs.slot_is_free(slot));
+    assert!(got_reject(&client).is_some_and(|why| why.contains("blocked")));
+
+    crate::game_loop::push_book_to_hosted_world(Some(&mut online), Some(&mut hs), &mirror, &SignetBlocks::Unreadable);
+
+    assert_eq!(hs.blocklist(), &[PLAYER], "the server keeps the block");
+    assert!(online.book().iter().all(|c| c.pubkey != PLAYER), "and the mirror row stays out of the book");
+    assert_eq!(online.access_policy().1, vec![PLAYER]);
+    assert!(!hs.slot_is_free(friend_slot), "and the book still works for everyone else");
+
+    let disconnected = SignetBlocks::Known(Vec::new());
+    crate::game_loop::push_book_to_hosted_world(Some(&mut online), Some(&mut hs), &mirror, &disconnected);
+    assert!(hs.blocklist().is_empty(), "a disconnect lifts it");
+}
+
+/// The same for "Host Game", and a change arriving before the read fails is kept.
+#[test]
+fn an_unreadable_signet_keeps_the_blocks_with_no_online_host() {
+    let mut hs = start_open_server("access-unreadable-room");
+    let blocks = SignetBlocks::Known(vec![PLAYER]);
+    crate::game_loop::push_book_to_hosted_world(None, Some(&mut hs), &[], &blocks);
+
+    crate::game_loop::push_book_to_hosted_world(None, Some(&mut hs), &[], &SignetBlocks::Unreadable);
+    assert_eq!(hs.blocklist(), &[PLAYER]);
+
+    crate::game_loop::push_book_to_hosted_world(None, Some(&mut hs), &[], &SignetBlocks::Known(Vec::new()));
+    assert!(hs.blocklist().is_empty(), "a disconnect lifts it");
 }
 
 /// The world is lent while "Host Game" runs: the push lands in the next lent tick.
@@ -168,7 +224,8 @@ fn a_book_push_on_a_lending_host_with_no_online_host_removes_the_blocked_player(
     let (client, slot) = join_guest_lent(&mut hs, &mut host, "Player");
     hs.server.players[slot].verified_pubkey = Some(PLAYER);
 
-    crate::game_loop::push_book_to_hosted_world(None, Some(&mut hs), &[], &[PLAYER]);
+    let blocks = SignetBlocks::Known(vec![PLAYER]);
+    crate::game_loop::push_book_to_hosted_world(None, Some(&mut hs), &[], &blocks);
     host.lend_tick(&mut hs);
 
     assert!(hs.slot_is_free(slot));

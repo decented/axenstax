@@ -24,6 +24,11 @@ pub const DISCONNECT_HINT: &str = "Also remove \"Axe'n'Stax\" in Signet.";
 pub const TRUNCATED: &str = "Your Signet list may be incomplete.";
 pub const STALE: &str = "Your Signet list is out of date, so it isn't used until it syncs.";
 pub const REVOKED_NOTICE: &str = "Signet disconnected this game.";
+pub const UNREADABLE: &str =
+    "Your Signet contacts can't be read. Press Disconnect, then connect Signet again.";
+/// Why a world can't be hosted. The row it points at is in the lobby's Friends column.
+pub const HOST_REFUSED: &str =
+    "Your Signet contacts can't be read. Reconnect Signet under Friends in the lobby";
 
 /// "synced 2 min ago" — coarse on purpose.
 pub fn ago(then: u64, now: u64) -> String {
@@ -43,6 +48,12 @@ pub fn connected_line(people: usize, last_synced: Option<u64>, now: u64) -> Stri
         Some(t) => format!("Connected · {who} · synced {}", ago(t, now)),
         None => format!("Connected · {who} · not synced yet"),
     }
+}
+
+/// Whether the row offers Disconnect. A grant that can't be read isn't connected
+/// in any useful sense, but Disconnect is the way out of that.
+pub fn offers_disconnect(connected: bool, unreadable: bool) -> bool {
+    connected || unreadable
 }
 
 fn dim(text: &str) -> egui::RichText {
@@ -104,8 +115,13 @@ pub fn draw(ui: &mut egui::Ui, player_relays: &[String]) {
                 }
             });
         }
-        Phase::Idle if view.connected => {
-            ui.label(dim(&connected_line(view.people, view.last_synced, now)));
+        Phase::Idle if offers_disconnect(view.connected, view.unreadable) => {
+            if view.connected {
+                ui.label(dim(&connected_line(view.people, view.last_synced, now)));
+            }
+            if view.unreadable {
+                ui.label(dim(UNREADABLE));
+            }
             if view.stale {
                 ui.label(dim(STALE));
             }
@@ -113,7 +129,7 @@ pub fn draw(ui: &mut egui::Ui, player_relays: &[String]) {
                 ui.label(dim(TRUNCATED));
             }
             ui.horizontal(|ui| {
-                if ui.small_button(SYNC_NOW).clicked() {
+                if view.connected && ui.small_button(SYNC_NOW).clicked() {
                     super::sync_now();
                 }
                 if ui.small_button(DISCONNECT).clicked() {
@@ -135,10 +151,10 @@ pub fn draw(ui: &mut egui::Ui, player_relays: &[String]) {
 mod tests {
     use super::*;
 
-    const ALL: [&str; 19] = [
+    const ALL: [&str; 21] = [
         HEADING, CONNECT_LEAD, CONNECT_BUTTON, SCAN_LINE, COPY_LINK, WAITING, CODE_LINE, CONTINUE,
         CANCEL, TIMED_OUT, TRY_AGAIN, SYNC_NOW, DISCONNECT, DISCONNECT_HINT, TRUNCATED, STALE,
-        REVOKED_NOTICE, "Connected", "contacts",
+        REVOKED_NOTICE, UNREADABLE, HOST_REFUSED, "Connected", "contacts",
     ];
 
     #[test]

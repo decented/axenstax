@@ -568,6 +568,10 @@ fn try_unequip_pack(ecs: &mut hecs::World, target: hecs::Entity) -> PackUnequip 
 /// - **"Host Game"** (`host` is `None`): the room has no allowlist, so only the
 ///   blocks apply. They take effect at once and stop the player rejoining.
 ///
+/// When Signet couldn't be read the server keeps the blocks it last applied, as
+/// the dedicated server's policy reload keeps a file's last good value. The book
+/// still changes: it has no Signet rows, as when Signet is stale.
+///
 /// Every place that writes the mirror calls this; no server makes it a no-op,
 /// which is the lobby case.
 ///
@@ -578,16 +582,20 @@ pub(crate) fn push_book_to_hosted_world(
     host: Option<&mut crate::online_host::OnlineHost>,
     server: Option<&mut crate::hosted_server::HostedServer>,
     book: &[crate::contacts::Contact],
-    blocked: &[[u8; 32]],
+    blocked: &crate::contacts::SignetBlocks,
 ) {
     let Some(server) = server else {
         return;
     };
+    let blocked = match blocked {
+        crate::contacts::SignetBlocks::Known(blocked) => blocked.clone(),
+        crate::contacts::SignetBlocks::Unreadable => server.blocklist().to_vec(),
+    };
     let Some(host) = host else {
-        server.set_blocklist(blocked.to_vec());
+        server.set_blocklist(blocked);
         return;
     };
-    host.set_book(book.to_vec(), blocked.to_vec());
+    host.set_book(book.to_vec(), blocked);
     let (list, blocklist) = host.access_policy();
     server.set_access_policy(true, list, blocklist);
 }
@@ -730,6 +738,7 @@ impl super::GameState {
         let persona = Self::owner_persona_bytes()
             .ok_or_else(|| crate::online_prep::NOT_SIGNED_IN.to_string())?;
         let (book, blocked) = crate::contacts::load_local_book_with_blocks();
+        let blocked = blocked.for_new_host()?;
         self.start_online_host_with(
             folder,
             prep,
@@ -970,6 +979,10 @@ impl super::GameState {
                     };
                     if let Err(e) = outcome {
                         log::error!("[online] could not start: {e}");
+                        // Toasts draw in a world, and this may be in the lobby.
+                        if let GameMode::Menu(ref mut menu_state) = self.mode {
+                            menu_state.notice = Some(e.clone());
+                        }
                         self.online_toast(e, 8);
                     }
                 }
@@ -9277,17 +9290,21 @@ impl super::GameState {
                     // player's own relays only (red line 2).
                     // The player's Signet blocks are refused here as they are
                     // when hosting online; sign-in stays required. Passed in so
-                    // the policy is on before the room can seat anybody.
+                    // the policy is on before the room can seat anybody. With
+                    // Signet unreadable there's no room: its blocks are unknown.
                     let (_, blocked) = crate::contacts::load_local_book_with_blocks();
-                    match crate::hosted_server::HostedServer::start_fray_host(
-                        1,  // 1 local player
-                        folder_name.clone(),
-                        host_seed,
-                        4,  // max 4 remote players
-                        crate::hosted_server::host_world_mode(),
-                        &self.graphics.online_relays,
-                        blocked,
-                    ) {
+                    let started = blocked.for_new_host().and_then(|blocked| {
+                        crate::hosted_server::HostedServer::start_fray_host(
+                            1,  // 1 local player
+                            folder_name.clone(),
+                            host_seed,
+                            4,  // max 4 remote players
+                            crate::hosted_server::host_world_mode(),
+                            &self.graphics.online_relays,
+                            blocked,
+                        )
+                    });
+                    match started {
                         Ok(server) => {
                             // T2-10: say how friends join — the toast now, the
                             // pause menu (with the code) for as long as we host.
@@ -9703,6 +9720,10 @@ impl super::GameState {
                     // (Spec 02 §8.4); `start_online_host` checks again.
                     if let Some(why) = crate::save::world_open_refusal(&folder_name) {
                         self.online_toast(why, 8);
+                    } else if let Err(why) =
+                        crate::contacts::load_local_book_with_blocks().1.for_new_host()
+                    {
+                        menu_state.notice = Some(why);
                     } else {
                         self.start_online_prep(crate::online_prep::OnlineIntent::Host {
                             folder: folder_name,
