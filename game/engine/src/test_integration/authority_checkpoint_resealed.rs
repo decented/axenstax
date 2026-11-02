@@ -137,3 +137,35 @@ fn a_column_past_the_playable_range_is_refused_before_the_load() {
     put(&mut hostile, at.layout + COUNT, &i32::MIN.to_le_bytes());
     assert_refused_for(&h, hostile, "column x", "column outside");
 }
+
+/// `is_creative` follows the body's play mode, so the body has to agree with the
+/// binding in the header.
+#[test]
+fn an_edited_play_mode_under_a_survival_config_is_refused() {
+    let (_root, h, bytes) = saved("keep-s2b-play-mode");
+    assert!(!h.server.is_creative);
+    let at = section_offsets(&h.server).unwrap().modes + PLAY_MODE + COUNT;
+    assert_eq!(&bytes[at..at + 8], b"survival");
+    let mut edited = bytes.clone();
+    put(&mut edited, at, b"creative");
+    assert_refused_for(&h, edited, "creative body, survival config", "canonical form");
+}
+
+/// A flipped bit is damage whichever field it lands in. A newer build's sealed
+/// bytes are still named as such.
+#[test]
+fn the_seal_is_read_before_the_version_fields() {
+    let (_root, h, bytes) = saved("keep-s2b-versions");
+    let protocol = CHECKPOINT_MAGIC.len() + 2;
+    for field in [protocol, protocol + 4] {
+        let mut newer = bytes.clone();
+        newer[field + 3] ^= 0x40;
+        assert_invalid_checkpoint(&h, &newer, "a flipped bit in a version field");
+        seal(&mut newer);
+        match restore(&h, &newer).err() {
+            Some(RestoreError::UnsupportedVersion(_)) => {}
+            other => panic!("sealed bytes from a newer build: got {other:?}"),
+        }
+    }
+}
+

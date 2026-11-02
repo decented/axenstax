@@ -66,7 +66,9 @@ pub(crate) const MAX_CHECKPOINT_BYTES: usize = 1 << 20;
 const POP_KEY_ID_LABEL: &[u8] = b"axenstax/pop-key-id/v1\0";
 const STATE_HASH_LABEL: &[u8] = b"fray/authority-state/v1\0";
 const SCHEMA_BYTES: usize = 2;
-const HEADER_BYTES: usize = CHECKPOINT_MAGIC.len() + SCHEMA_BYTES + 4 + 4 + 4 + 8 + 32 + 16 + 8;
+/// Past the magic, the schema and the protocol and save-format versions.
+const AFTER_VERSIONS: usize = CHECKPOINT_MAGIC.len() + SCHEMA_BYTES + 4 + 4;
+const HEADER_BYTES: usize = AFTER_VERSIONS + 4 + 8 + 32 + 16 + 8;
 const SEAL_BYTES: usize = 32;
 
 /// Why no checkpoint is available.

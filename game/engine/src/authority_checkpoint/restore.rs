@@ -4,7 +4,7 @@
 //! changes nothing on disk beyond what an ordinary load does.
 
 use super::codec::{Malformed, Reader};
-use super::{volatile, AuthorityConfig, Header, RestoreError, HEADER_BYTES, MAX_CHECKPOINT_BYTES, SEAL_BYTES};
+use super::{volatile, AuthorityConfig, Header, RestoreError, AFTER_VERSIONS, HEADER_BYTES, MAX_CHECKPOINT_BYTES, SEAL_BYTES};
 use crate::server::GameServer;
 
 impl From<Malformed> for RestoreError {
@@ -44,10 +44,11 @@ impl GameServer {
         if checkpoint.len() > MAX_CHECKPOINT_BYTES {
             return Err(RestoreError::InvalidCheckpoint(format!("{} bytes is over the cap", checkpoint.len())));
         }
-        // The schema first: a newer checkpoint's seal and layout are not ours to read.
+        // The schema first: a newer checkpoint's seal and layout are not ours to
+        // read. Then the seal, so that damage to a version field reads as damage.
         let header = Header::read(checkpoint)?;
-        header.check_versions()?;
         super::check_seal(checkpoint)?;
+        header.check_versions()?;
         header.check_config(config)?;
 
         let mut body = Reader::new(&checkpoint[HEADER_BYTES..checkpoint.len() - SEAL_BYTES]);
@@ -90,13 +91,14 @@ impl GameServer {
         restored.apply(&mut server);
         reload_sidecars(&mut server);
 
-        // Every field this module carries is back if the body comes out the
-        // same (the header's version numbers may be an older build's). A
-        // difference means the input wasn't in canonical form: a `-0.0`, say,
-        // which decodes and passes the seal.
+        // Every field this module carries is back, and the server is the one the
+        // header binds, if all of it after the version numbers (which may be an
+        // older build's) comes out the same. A difference means the input wasn't
+        // in canonical form: a `-0.0`, say, which decodes and passes the seal, or
+        // a play mode the binding doesn't name.
         let again = server.checkpoint().map_err(|e| RestoreError::Fault(format!("{e:?}")))?;
-        let body_of = |bytes: &[u8]| bytes[HEADER_BYTES..bytes.len() - SEAL_BYTES].to_vec();
-        if body_of(&again) != body_of(checkpoint) {
+        let bound_part = |bytes: &[u8]| bytes[AFTER_VERSIONS..bytes.len() - SEAL_BYTES].to_vec();
+        if bound_part(&again) != bound_part(checkpoint) {
             return Err(RestoreError::InvalidCheckpoint("the bytes aren't this module's canonical form".into()));
         }
         Ok(server)
