@@ -639,6 +639,20 @@ impl JoinerSave {
         self.pose.filter(JoinerPose::in_range)
     }
 
+    /// Keep slice 2b — what a restored joiner's body doesn't get from the
+    /// checkpoint: its bound personal record and its obligation history, or its
+    /// next save would write them away. Its correction debt isn't live again
+    /// until it re-attaches (the join's window sync carries it), so a record
+    /// that holds some makes the session incomplete: a save before then can't
+    /// claim to be the whole story.
+    pub(crate) fn restore_session(&self, sp: &mut crate::server::ServerPlayer) {
+        sp.personal = self.personal.clone();
+        sp.obligations.merge(self.obligation_history);
+        if !self.owed.is_empty() {
+            sp.obligations.mark(IncompleteCause::Overflow);
+        }
+    }
+
     /// Restore the vitals onto joiner `sp`'s body, and the save's obligation
     /// history onto its session (`ServerPlayer::obligations`: an incomplete
     /// save makes the session incomplete, keeping a cause already there). Its
@@ -671,7 +685,7 @@ impl crate::server::ServerPlayer {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl crate::server::GameServer {
-    fn joiner_path(&self, pk: [u8; 32]) -> std::path::PathBuf {
+    pub(crate) fn joiner_path(&self, pk: [u8; 32]) -> std::path::PathBuf {
         crate::save::world_dir(&self.world_name)
             .join("joiners")
             .join(format!("{}.dat", crate::hosted_server::pubkey_to_npub(&pk)))
@@ -771,8 +785,10 @@ impl crate::server::GameServer {
         // M-1: never written into a retired world (or a refused one).
         crate::save::refuse_write_over_newer_save(&crate::save::world_dir(&self.world_name))?;
         let saved = JoinerSave::capture_projected(sp, self.calendar_id)?;
-        saved.encode()?;
-        crate::handover::live::personal_adapter::write(&crate::save::world_dir(&self.world_name), pk, &saved)
+        let bytes = saved.encode()?;
+        crate::handover::live::personal_adapter::write(&crate::save::world_dir(&self.world_name), pk, &saved)?;
+        self.stored_records.note_joiner(&self.joiner_path(pk), &bytes);
+        Ok(())
     }
     pub(crate) fn save_joiners(&self) -> Result<(), String> {
         let errors: Vec<_> = self

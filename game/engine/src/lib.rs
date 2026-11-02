@@ -447,6 +447,10 @@ mod sim_death;
 // Keep slice 1 — the authority's twin-run state digest (not the Fray `state_hash`). Tests only.
 #[cfg(test)]
 mod sim_digest;
+// Keep slice 2b — the authority's canonical checkpoint and its restore. Native
+// only: the web build is an offline taster with no authority to keep.
+#[cfg(not(target_arch = "wasm32"))]
+mod authority_checkpoint;
 mod server_death;
 // T1-5 — per-client bounded StateUpdate queue (split, budget, coalesce, resync).
 mod state_outbox;

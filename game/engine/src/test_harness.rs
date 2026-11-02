@@ -155,6 +155,16 @@ impl TestHost {
         }
     }
 
+    /// Keep slice 2b — a host around a server built elsewhere (a restored one).
+    pub fn adopt(server: GameServer) -> Self {
+        let slots = server.players.len();
+        Self {
+            server,
+            camera_modes: vec![crate::camera::CameraMode::FirstPerson; slots],
+            collision_frac: vec![1.0; slots],
+        }
+    }
+
     /// Advance the server by `n` ticks.
     pub fn tick(&mut self, n: u32) {
         for _ in 0..n {

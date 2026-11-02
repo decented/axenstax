@@ -73,6 +73,13 @@ const TICK_PATH_FILES: &[&str] = &[
     "nostrich.rs",
     "companion.rs",
     "quest_npcs.rs",
+    // Keep slice 2b — a checkpoint's bytes depend on neither clock nor process.
+    "authority_checkpoint/mod.rs",
+    "authority_checkpoint/codec.rs",
+    "authority_checkpoint/volatile.rs",
+    "authority_checkpoint/players.rs",
+    "authority_checkpoint/manifest.rs",
+    "authority_checkpoint/restore.rs",
 ];
 
 /// `(file, text the line contains)` — the sanctioned uses, none of them on the

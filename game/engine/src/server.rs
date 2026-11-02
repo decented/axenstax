@@ -1159,6 +1159,11 @@ pub struct GameServer {
     /// Non-admitted first-scope retry provenance; never a gameplay record.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) gameplay_preparation: Option<crate::gameplay_preparation::ScopePreparation>,
+    /// Keep slice 2b — what the authority checkpoint names of the world's
+    /// stored records that this server holds no copy of, so a checkpoint reads
+    /// no file (`authority_checkpoint::manifest`).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) stored_records: crate::authority_checkpoint::StoredRecords,
 }
 
 impl GameServer {
@@ -1235,6 +1240,8 @@ impl GameServer {
             selected_local_personal: None,
             #[cfg(not(target_arch = "wasm32"))]
             gameplay_preparation: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            stored_records: Default::default(),
             next_attach_gen: 0,
             released_joiners: Vec::new(),
             released_mounts: Vec::new(),
@@ -1473,6 +1480,8 @@ impl GameServer {
                 // can clear the selected local field ahead of remote admission.
                 self.claim_remote_personal(proof.local_owner(), &proof)?;
             }
+            #[cfg(not(target_arch = "wasm32"))]
+            self.stored_records.scan_joiners(&crate::save::world_dir(&self.world_name));
             return Ok(());
         }
 
@@ -1511,6 +1520,8 @@ impl GameServer {
             p.player.velocity = Vec3::ZERO;
             p.player.reset_fall();
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        self.stored_records.scan_joiners(&crate::save::world_dir(&self.world_name));
         Ok(())
     }
 
@@ -1548,6 +1559,8 @@ impl GameServer {
     /// Falls back to defaults for a brand-new world with no meta yet.
     fn load_meta_rules(&mut self) {
         let meta = crate::save::load_world_meta(&self.world_name);
+        #[cfg(not(target_arch = "wasm32"))]
+        self.stored_records.note_meta(&self.world_name, &meta);
         self.set_play_mode(crate::play_mode::PlayMode::from_meta_str(&meta.game_mode));
         self.difficulty = crate::survival::Difficulty::from_meta_str(&meta.difficulty);
         self.world.apply_meta_rules(&meta);
@@ -1685,7 +1698,7 @@ impl GameServer {
     /// lent world's save is written by its host client
     /// (`GameState::clock_to_save`), whose day clock is the running one.
     #[cfg(not(target_arch = "wasm32"))]
-    fn saved_clock(&self) -> crate::sim_clock::SavedClock {
+    pub(crate) fn saved_clock(&self) -> crate::sim_clock::SavedClock {
         let (nights, was_night) = self.night_calendar.saved();
         let (day_remainder, day_last_tick) = self.reputation_day.saved();
         crate::sim_clock::SavedClock {
@@ -1705,7 +1718,7 @@ impl GameServer {
     /// Keep slice 2a: carry on from a save's clock. `None` (a save from before
     /// the field, or a clock that fails `is_valid`) leaves the new server's
     /// clock exactly as a load always has.
-    fn restore_saved_clock(&mut self, saved: Option<&crate::sim_clock::SavedClock>) {
+    pub(crate) fn restore_saved_clock(&mut self, saved: Option<&crate::sim_clock::SavedClock>) {
         let Some(saved) = saved else { return };
         self.tick_counter = saved.tick_counter;
         self.world_time = saved.world_time;
