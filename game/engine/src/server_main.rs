@@ -1213,9 +1213,13 @@ pub fn run(args: &[String]) {
     let running = Arc::new(AtomicBool::new(true));
     {
         let running = running.clone();
-        if let Err(e) = ctrlc::set_handler(move || {
-            log::info!("Shutdown signal received — finishing tick and saving…");
-            running.store(false, Ordering::Relaxed);
+        // SIGTERM and SIGHUP stop the server with a save, unless SIGHUP was ignored
+        // when it started (`nohup`): that stays ignored.
+        if let Err(e) = keeping_ignored_sighup(|| {
+            ctrlc::set_handler(move || {
+                log::info!("Shutdown signal received — finishing tick and saving…");
+                running.store(false, Ordering::Relaxed);
+            })
         }) {
             log::warn!(
                 "Could not install signal handler: {e} (autosave still protects the world)"
@@ -1273,8 +1277,58 @@ pub fn run(args: &[String]) {
 
     log::info!("Saving '{}' and shutting down…", cfg.world);
     hs.shutdown();
-    hs.server.save();
+    if !report_final_save(&cfg.world, hs.server.try_save()) {
+        std::process::exit(1);
+    }
     log::info!("Saved. Goodbye.");
+}
+
+/// Say plainly how the final save went. `false` means it failed and the server
+/// must exit with a failure status rather than report a clean goodbye.
+fn report_final_save(world: &str, result: Result<(), String>) -> bool {
+    match result {
+        Ok(()) => true,
+        Err(e) => {
+            log::error!(
+                "The final save of '{world}' FAILED: {e}. The world on disk is the last \
+                 successful save; changes since then are lost."
+            );
+            false
+        }
+    }
+}
+
+/// Run `install`, then put SIGHUP back to "ignored" if it was ignored before.
+///
+/// The shutdown handler is installed with ctrlc's `termination` feature, which
+/// takes over SIGHUP as well as SIGTERM and replaces whatever was there. A server
+/// started under `nohup` has SIGHUP ignored on purpose (so it survives its
+/// terminal closing), and must keep it that way.
+#[cfg(unix)]
+fn keeping_ignored_sighup<T>(install: impl FnOnce() -> T) -> T {
+    // SAFETY: sigaction with a null new action only reads the disposition; the
+    // zeroed struct is plain data and is fully written by the call.
+    let was_ignored = unsafe {
+        let mut old: libc::sigaction = std::mem::zeroed();
+        libc::sigaction(libc::SIGHUP, std::ptr::null(), &mut old) == 0
+            && old.sa_sigaction == libc::SIG_IGN
+    };
+    let out = install();
+    if was_ignored {
+        // SAFETY: installs SIG_IGN, which runs no code in this process.
+        unsafe {
+            let mut ign: libc::sigaction = std::mem::zeroed();
+            ign.sa_sigaction = libc::SIG_IGN;
+            libc::sigemptyset(&mut ign.sa_mask);
+            libc::sigaction(libc::SIGHUP, &ign, std::ptr::null_mut());
+        }
+    }
+    out
+}
+
+#[cfg(not(unix))]
+fn keeping_ignored_sighup<T>(install: impl FnOnce() -> T) -> T {
+    install()
 }
 
 #[cfg(test)]
@@ -1289,6 +1343,51 @@ mod tests {
     /// The policy a boot would start on. A policy that refuses boot panics here.
     fn loaded(args: &[String], dir: &std::path::Path) -> crate::server_policy::AccessPolicy {
         load_access_policy(args, dir, &BootEnv::default()).expect("policy loads").policy().clone()
+    }
+
+    #[cfg(unix)]
+    fn sighup_is_ignored() -> bool {
+        unsafe {
+            let mut old: libc::sigaction = std::mem::zeroed();
+            libc::sigaction(libc::SIGHUP, std::ptr::null(), &mut old);
+            old.sa_sigaction == libc::SIG_IGN
+        }
+    }
+
+    #[cfg(unix)]
+    fn set_sighup(handler: libc::sighandler_t) {
+        unsafe {
+            libc::signal(libc::SIGHUP, handler);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_ignored_sighup_stays_ignored_after_the_shutdown_handler_goes_in() {
+        extern "C" fn noop(_: libc::c_int) {}
+        let before = unsafe {
+            let mut old: libc::sigaction = std::mem::zeroed();
+            libc::sigaction(libc::SIGHUP, std::ptr::null(), &mut old);
+            old.sa_sigaction
+        };
+
+        // Ignored before: still ignored, though the installer replaced it.
+        set_sighup(libc::SIG_IGN);
+        keeping_ignored_sighup(|| set_sighup(noop as extern "C" fn(libc::c_int) as libc::sighandler_t));
+        assert!(sighup_is_ignored(), "nohup's SIG_IGN must survive the installer");
+
+        // Not ignored before: the installer's handler is left alone.
+        set_sighup(libc::SIG_DFL);
+        keeping_ignored_sighup(|| set_sighup(noop as extern "C" fn(libc::c_int) as libc::sighandler_t));
+        assert!(!sighup_is_ignored(), "a default SIGHUP gets the shutdown handler");
+
+        set_sighup(before);
+    }
+
+    #[test]
+    fn a_failed_final_save_is_not_a_clean_goodbye() {
+        assert!(report_final_save("w", Ok(())));
+        assert!(!report_final_save("w", Err("disk full".to_string())));
     }
 
     #[test]
