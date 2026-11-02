@@ -1290,8 +1290,8 @@ fn report_final_save(world: &str, result: Result<(), String>) -> bool {
         Ok(()) => true,
         Err(e) => {
             log::error!(
-                "The final save of '{world}' FAILED: {e}. The world on disk is the last \
-                 successful save; changes since then are lost."
+                "The final save of '{world}' FAILED: {e}. Some of this session's changes may \
+                 not be on disk; the lines above name the files that failed."
             );
             false
         }
