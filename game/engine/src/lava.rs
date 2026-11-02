@@ -23,7 +23,7 @@ const RETRACT_BUDGET: usize = 32;
 /// Lava only reaches 3 blocks from a source (overworld parity).
 const MAX_SPREAD_DIST: u8 = 3;
 /// Lava advances every Nth `tick_spread` call — it crawls compared to water.
-const SLOW_FACTOR: u8 = 3;
+pub(crate) const SLOW_FACTOR: u8 = 3;
 
 pub struct LavaSystem {
     sources: crate::fluids::SourceSet,

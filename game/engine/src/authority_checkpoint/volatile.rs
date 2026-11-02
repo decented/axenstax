@@ -489,9 +489,83 @@ fn read_scheduled(r: &mut Reader<'_>) -> Result<(u64, ScheduledUpdate), Malforme
     Ok((tick, ScheduledUpdate { pos, kind }))
 }
 
+/// A cell a tick can add a neighbour's offset to without leaving `i32`.
+fn cell_in_range(&(x, y, z): &Pos) -> bool {
+    const LIMIT: i32 = MAX_COLUMN * crate::chunk::CHUNK_SIZE as i32;
+    [x, y, z].iter().all(|v| (-LIMIT..=LIMIT).contains(v))
+}
+
+fn fluid_in_range(f: &FluidCheckpoint) -> bool {
+    f.extra.iter().chain(&f.missing).chain(&f.retract).all(cell_in_range)
+        && f.spread.iter().all(|&(x, y, z, _)| cell_in_range(&(x, y, z)))
+}
+
+/// Finite, and where the game can put a body: the limit `/tp` clamps to.
+fn body_in_range(sp: &ServerPlayer) -> bool {
+    let limit = crate::commands::builtins::tp::MAX_COORD;
+    let placed = |v: glam::Vec3| v.to_array().iter().all(|c| c.abs() <= limit);
+    let p = &sp.player;
+    placed(p.pos)
+        && placed(sp.spawn_pos)
+        && p.velocity.is_finite()
+        && [p.fall_distance, sp.yaw, sp.pitch, sp.combat.health, sp.combat.max_health].iter().all(|v| v.is_finite())
+}
+
 impl Volatile {
     pub(super) fn tick_counter(&self) -> u64 {
         self.clock.tick_counter
+    }
+
+    /// The seal is a checksum, so a value can be sealed and absurd, and these are
+    /// the ones a first tick would hang or overflow on: a sim distance of
+    /// `i32::MAX` restores cleanly and the next `stream_columns` never ends. The
+    /// bounds are what a real server can hold, not a client's settings: a server's
+    /// render distance is only its load radius, and can be under the menu's floor.
+    /// (The layout and the player count are refused as they are read, since those
+    /// allocate.)
+    pub(super) fn validate(&self) -> Result<(), Malformed> {
+        if let Some(streamer) = &self.streamer {
+            let (sim_distance, budget, settled_for) = streamer.to_parts();
+            if sim_distance != crate::server_stream::clamp_sim_distance(sim_distance) {
+                return Err(Malformed("a sim distance past its limits"));
+            }
+            if budget != crate::server_stream::SERVER_STREAM_BUDGET {
+                return Err(Malformed("a streaming budget no server runs"));
+            }
+            if !settled_for.unwrap_or_default().iter().copied().all(column_in_range) {
+                return Err(Malformed("a settled anchor outside the playable range"));
+            }
+        }
+        if self.modes.column_refill_per_tick as usize > crate::server::HOST_COLUMN_REFILL_PER_TICK {
+            return Err(Malformed("a column refill past its limit"));
+        }
+        if !(0..=crate::graphics_settings::RENDER_DISTANCE_MAX).contains(&self.modes.render_distance) {
+            return Err(Malformed("a render distance past its limits"));
+        }
+        if !column_in_range(self.modes.spawn_column) {
+            return Err(Malformed("a spawn column outside the playable range"));
+        }
+        if !self.players.iter().all(body_in_range) {
+            return Err(Malformed("a body that isn't finite or is out of range"));
+        }
+        let (check, decay, _) = &self.leaf;
+        let cells_in_range = self.fire.iter().all(|c| cell_in_range(&c.0))
+            && fluid_in_range(&self.water)
+            && fluid_in_range(&self.lava)
+            && check.iter().all(cell_in_range)
+            && decay.iter().all(|&(x, y, z, _)| cell_in_range(&(x, y, z)))
+            && self.scheduler_pending.iter().all(cell_in_range)
+            && self.scheduler_due.iter().all(|(_, update)| cell_in_range(&update.pos))
+            && self.energised.iter().all(|c| cell_in_range(&c.0))
+            && self.mains.iter().all(cell_in_range)
+            && self.tapped.iter().all(|c| cell_in_range(&c.0));
+        if !cells_in_range {
+            return Err(Malformed("a queued cell outside the playable range"));
+        }
+        if self.lava_slow >= crate::lava::SLOW_FACTOR {
+            return Err(Malformed("a lava phase past its cycle"));
+        }
+        Ok(())
     }
 
     /// The world's chunks and loaded columns as the checkpoint names them, ready

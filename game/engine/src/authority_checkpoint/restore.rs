@@ -53,6 +53,7 @@ impl GameServer {
 
         let mut body = Reader::new(&checkpoint[HEADER_BYTES..checkpoint.len() - SEAL_BYTES]);
         let mut restored = volatile::read(&mut body)?;
+        restored.validate()?;
         if restored.tick_counter() != header.tick {
             return Err(RestoreError::InvalidCheckpoint("the header and the clock name different ticks".into()));
         }

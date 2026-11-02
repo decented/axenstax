@@ -169,3 +169,104 @@ fn the_seal_is_read_before_the_version_fields() {
     }
 }
 
+#[test]
+fn a_sim_distance_budget_or_refill_past_its_limit_is_refused() {
+    let (_root, h, bytes) = saved("keep-s2b-streamer");
+    let at = section_offsets(&h.server).unwrap();
+    assert!(h.server.column_streamer.is_some());
+    delete_the_world(&h);
+    for value in [i32::MAX, i32::MIN, 1, 17] {
+        let mut hostile = bytes.clone();
+        put(&mut hostile, at.streamer + SIM_DISTANCE, &value.to_le_bytes());
+        assert_refused_for(&h, hostile, &format!("sim distance {value}"), "sim distance");
+    }
+    for value in [0u32, 3, u32::MAX] {
+        let mut hostile = bytes.clone();
+        put(&mut hostile, at.streamer + BUDGET, &value.to_le_bytes());
+        assert_refused_for(&h, hostile, &format!("budget {value}"), "budget");
+    }
+    for value in [3u32, u32::MAX] {
+        let mut hostile = bytes.clone();
+        put(&mut hostile, at.modes + REFILL, &value.to_le_bytes());
+        assert_refused_for(&h, hostile, &format!("refill {value}"), "refill");
+    }
+}
+
+#[test]
+fn a_render_distance_or_spawn_column_past_its_limit_is_refused() {
+    let (_root, h, bytes) = saved("keep-s2b-modes");
+    let at = section_offsets(&h.server).unwrap();
+    delete_the_world(&h);
+    for value in [-1, 17, i32::MAX] {
+        let mut hostile = bytes.clone();
+        put(&mut hostile, at.modes + RENDER_DISTANCE, &value.to_le_bytes());
+        assert_refused_for(&h, hostile, &format!("render distance {value}"), "render distance");
+    }
+    let spawn = at.modes + PLAY_MODE + COUNT + b"survival".len();
+    for (axis, value) in [(0, i32::MAX), (0, i32::MIN), (4, i32::MAX), (4, 1 << 20)] {
+        let mut hostile = bytes.clone();
+        put(&mut hostile, spawn + axis, &value.to_le_bytes());
+        assert_refused_for(&h, hostile, &format!("spawn column axis {axis}: {value}"), "spawn column");
+    }
+}
+
+#[test]
+fn a_body_that_is_not_finite_or_out_of_range_is_refused() {
+    let (_root, h, bytes) = saved("keep-s2b-body");
+    let at = section_offsets(&h.server).unwrap();
+    assert!(h.server.players[0].player.pending_landing.is_none());
+    delete_the_world(&h);
+    let cases = [
+        ("position x", BODY_POS, f32::NAN),
+        ("position y", BODY_POS + 4, f32::INFINITY),
+        ("position z", BODY_POS + 8, 1_000_001.0),
+        ("velocity x", BODY_VELOCITY, f32::NAN),
+        ("spawn x", BODY_SPAWN, f32::NEG_INFINITY),
+        ("spawn z", BODY_SPAWN + 8, -1_000_001.0),
+    ];
+    for (what, field, value) in cases {
+        let mut hostile = bytes.clone();
+        put(&mut hostile, at.players + field, &value.to_le_bytes());
+        assert_refused_for(&h, hostile, what, "a body");
+    }
+}
+
+/// Not reachable by editing a count: the slots have to be there to pass the
+/// reader's own length check. So these are real slots, past what a server holds.
+#[test]
+fn more_players_than_a_server_holds_are_refused() {
+    let _root = WorldsRootGuard::new("keep-s2b-players");
+    let mut h = twin(SEED, "ckpt-players", 0, 2);
+    while h.server.players.len() < 258 {
+        let mut sp = ServerPlayer::new(Vec3::new(0.5, 110.0, 0.5));
+        sp.server_simulated = true;
+        h.server.players.push(sp);
+    }
+    let bytes = h.server.checkpoint().expect("the slots fit the cap");
+    assert_refused_for(&h, bytes, "258 slots", "more players");
+}
+
+/// What a first tick would do arithmetic on: a settled anchor and a queued cell
+/// near the edge of an `i32`, and a lava phase past its cycle.
+#[test]
+fn values_the_first_tick_would_overflow_on_are_refused() {
+    let _root = WorldsRootGuard::new("keep-s2b-overflow");
+    let mut h = twin(SEED, "ckpt-overflow", 0, 2);
+
+    let streamer = h.server.column_streamer.take();
+    h.server.column_streamer = Some(crate::server_stream::ColumnStreamer::from_parts(2, 2, Some(vec![(i32::MAX, 0)])));
+    let bytes = h.server.checkpoint().unwrap();
+    assert_refused_for(&h, bytes, "a settled anchor", "anchor");
+    h.server.column_streamer = streamer;
+
+    h.server.fire.restore_cells(&[((i32::MAX, 110, 0), 1_000_000, 0)]);
+    let bytes = h.server.checkpoint().unwrap();
+    assert_refused_for(&h, bytes, "a burning cell", "cell");
+    h.server.fire.restore_cells(&[]);
+
+    let (view, _) = h.server.lava.checkpoint_view(&h.server.world, &h.server.loaded_columns);
+    h.server.lava.restore_checkpoint(&h.server.world, &h.server.loaded_columns, &view, 255);
+    let bytes = h.server.checkpoint().unwrap();
+    assert_refused_for(&h, bytes, "lava's phase", "lava");
+}
+

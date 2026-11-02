@@ -17,6 +17,9 @@ use crate::combat::PlayerCombat;
 use crate::server::{QueuedInput, ServerPlayer};
 
 const SLOTS: usize = 36;
+/// The widest server there is: the pipe's `Hello` names up to 255 joiners (the
+/// `--max-players` clamp is lower), and a host adds its two local seats.
+const MAX_SLOTS: usize = u8::MAX as usize + 2;
 
 pub(super) fn write_all(w: &mut Writer, players: &[ServerPlayer]) -> Result<(), String> {
     w.count(players.len());
@@ -29,6 +32,9 @@ pub(super) fn write_all(w: &mut Writer, players: &[ServerPlayer]) -> Result<(), 
 pub(super) fn read_all(r: &mut Reader<'_>) -> Result<Vec<ServerPlayer>, Malformed> {
     // A slot takes at least a body's worth of bytes.
     let n = r.count(64)?;
+    if n > MAX_SLOTS {
+        return Err(Malformed("more players than a server holds"));
+    }
     (0..n).map(|_| read_one(r)).collect()
 }
 
