@@ -8,6 +8,7 @@ disk IS the policy: an absent whitelist.txt means no allowlist, an empty one mea
 nobody may join, and a file the console could not read is never rewritten.
 """
 
+import asyncio
 import os
 import stat
 import sys
@@ -142,12 +143,31 @@ def test_the_wizard_moves_the_allowlist_only_when_asked():
     check(not identity.allowlist_enabled(), "moving off 'friends' turns it off")
 
 
+def test_a_failed_allowlist_off_is_a_server_error():
+    print("test_a_failed_allowlist_off_is_a_server_error")
+    fresh()
+    import app
+    from fastapi import HTTPException
+
+    def refuse():
+        raise OSError("read-only file system")
+
+    app.identity.allowlist_off = refuse
+    app._require_cap = lambda request, cap: b"operator"
+    try:
+        asyncio.run(app.allowlist_off(None, x_requested_with="fetch"))
+        check(False, "the failure is reported")
+    except HTTPException as e:
+        check(e.status_code == 500, f"it is a 500, not the caller's fault: {e.status_code}")
+
+
 def main():
     sys.path.insert(0, str(Path(__file__).parent))
     for t in (test_last_removal_keeps_the_allowlist_on,
               test_removal_never_turns_an_absent_allowlist_on,
               test_read_failure_writes_nothing, test_writes_replace_the_file_whole,
               test_allowlist_off_deletes_the_file,
+              test_a_failed_allowlist_off_is_a_server_error,
               test_the_wizard_moves_the_allowlist_only_when_asked,
               test_require_signin_reads_as_the_engine_would_refuse):
         try:

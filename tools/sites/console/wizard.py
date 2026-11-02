@@ -24,6 +24,7 @@ they already own.
 
 import ipaddress
 import json
+import logging
 import os
 import re
 import shlex
@@ -33,6 +34,8 @@ from pathlib import Path
 import identity
 import studio
 import worlds
+
+log = logging.getLogger(__name__)
 
 # ── server "type" → engine settings ─────────────────────────────────────────────
 # The single big wizard choice. Each maps to a game mode (+ for a gallery, the kiosk
@@ -161,6 +164,15 @@ def world_exists() -> bool:
     return (studio._worlds_dir() / studio.world_name()).is_dir()
 
 
+def _access_in_force() -> str:
+    """Who the policy files admit right now, as a wizard answer. The allowlist can be
+    changed on the dashboard after the wizard ran, so this reads the files, not the
+    wizard's own record."""
+    if identity.allowlist_enabled():
+        return "friends"
+    return "signin" if identity.require_signin() else "open"
+
+
 def current_state_for_form() -> dict:
     """Defaults the wizard form renders from — prior choices if any, else sensible
     defaults seeded from the live settings the operator may already have set."""
@@ -172,8 +184,7 @@ def current_state_for_form() -> dict:
         "server_type": prev.get("server_type") or DEFAULT_TYPE,
         "server_name": name,
         "about": prev.get("about") if prev.get("about") is not None else settings.get("about", ""),
-        "access": prev.get("access") or (
-            "signin" if identity.require_signin() else "open"),
+        "access": _access_in_force(),
         "announce": bool(prev.get("announce", settings.get("announce", False))),
         "keep_history": bool(prev.get("keep_history",
                                       settings.get("privacy_level") == "sessions")),
@@ -224,7 +235,12 @@ def _clean_water_depth(v) -> int:
 
 
 def _clean_text(v, limit: int) -> str:
-    return str(v or "").strip()[:limit]
+    """One line of text. Raises `ValueError` on a line break inside it: the form's
+    inputs are single-line, and these values go into the line-based `server.env`."""
+    text = str(v or "").strip()
+    if "\n" in text or "\r" in text:
+        raise ValueError("this must be a single line of text")
+    return text[:limit]
 
 
 def _clean_friends(v) -> list[str]:
@@ -293,18 +309,52 @@ def clean_public_host(v) -> str:
 # ── env writer (sourced by entrypoint.sh) ──────────────────────────────────────
 
 
+_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _parse_env_entry(lines: list[bytes], start: int) -> tuple[str, str, int] | None:
+    """The `KEY=value` at `lines[start]` and the index after it. A quoted value may run
+    over several lines, as the shell would read it. None when it isn't a setting."""
+    key, eq, _ = lines[start].partition(b"=")
+    if not eq or not _ENV_NAME.fullmatch(key.decode("ascii", "replace")):
+        return None
+    for end in range(start + 1, len(lines) + 1):
+        text = b"\n".join(lines[start:end])
+        try:
+            parts = shlex.split(text.decode("utf-8").partition("=")[2])
+        except UnicodeError:
+            return None
+        except ValueError:  # No closing quote yet: it may close on a later line.
+            continue
+        return key.decode("ascii"), parts[0] if parts else "", end
+    return None
+
+
 def _read_env() -> dict:
-    """What `_write_env` last wrote."""
+    """What `_write_env` last wrote. It also has to get the console through a file it
+    didn't write cleanly, because this is how the address gets set: a line that can't
+    be understood is skipped with a warning, not its contents, and the rest is kept.
+    The next `_write_env` leaves that line out, which also lets the entrypoint source
+    the file again."""
     try:
-        text = server_env_path().read_text(encoding="utf-8")
+        raw = server_env_path().read_bytes()
     except OSError:
         return {}
+    lines = raw.split(b"\n")
     out = {}
-    for line in text.splitlines():
-        if line and not line.startswith("#"):
-            key, _, value = line.partition("=")
-            parts = shlex.split(value) if value else []
-            out[key] = parts[0] if parts else ""
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if not line or line.startswith(b"#"):
+            i += 1
+            continue
+        entry = _parse_env_entry(lines, i)
+        if entry is None:
+            log.warning("server.env line %d can't be understood; skipping it", i + 1)
+            i += 1
+            continue
+        key, value, i = entry
+        out[key] = value
     return out
 
 
@@ -342,7 +392,8 @@ def apply(choices: dict) -> dict:
     """
     # First, so a bad address leaves everything as it was.
     public_host = clean_public_host(choices.get("public_host"))
-    prior_public_host = _read_env().get("AXENSTAX_PUBLIC_HOST", "")
+    prior_env = _read_env()
+    prior_public_host = prior_env.get("AXENSTAX_PUBLIC_HOST", "")
     # A run that names none ("Add a world") keeps the one the server has.
     public_host = public_host or prior_public_host
 
@@ -356,10 +407,12 @@ def apply(choices: dict) -> dict:
 
     name = _clean_text(choices.get("server_name"), _NAME_MAX) or "Axe'n'Stax Server"
     about = _clean_text(choices.get("about"), _ABOUT_MAX)
-    access = _clean_access(choices.get("access"))
+    # "Add a world" sends no `access`: it changes who may join in no way.
+    choosing_access = "access" in choices
+    access = _clean_access(choices.get("access")) if choosing_access else _access_in_force()
     announce = bool(choices.get("announce"))
     keep_history = bool(choices.get("keep_history"))
-    friends = _clean_friends(choices.get("friends")) if access == "friends" else []
+    friends = _clean_friends(choices.get("friends")) if choosing_access and access == "friends" else []
     force_fresh = bool(choices.get("start_fresh_world"))
 
     world_type = _clean_world_type(choices.get("world_type"))
@@ -395,15 +448,15 @@ def apply(choices: dict) -> dict:
         "privacy_retention_days": _DEFAULT_RETENTION_DAYS if keep_history else 0,
     })
 
-    # 2. Access policy (live).
-    identity.set_require_signin(require_signin)
-    if access == "friends":
-        # "Just my friends" with nobody named yet admits nobody, not everybody.
-        identity.turn_allowlist_on()
-    elif "access" in choices and prev.get("access") == "friends":
-        # Moving off "friends" turns the allowlist off, or it stays in force. Only
-        # on an explicit choice: "Add a world" sends no `access`.
-        identity.allowlist_off()
+    # 2. Access policy (live), only on an explicit answer.
+    if choosing_access:
+        identity.set_require_signin(require_signin)
+        if access == "friends":
+            # "Just my friends" with nobody named yet admits nobody, not everybody.
+            identity.turn_allowlist_on()
+        else:
+            # Any other answer means it: the form opened on "friends" if a list was on.
+            identity.allowlist_off()
     for npub in friends:
         try:
             identity.add_to_list("allow", npub)
@@ -423,8 +476,9 @@ def apply(choices: dict) -> dict:
         # The engine requires sign-in unless told otherwise; `open` is the only
         # choice that admits guests. (The `require_signin` file written above
         # is what the engine actually reads first; this keeps a fresh boot in
-        # step with it.)
-        "AXENSTAX_ALLOW_GUESTS": "0" if require_signin else "1",
+        # step with it. With no answer, the setting stays as it was.)
+        **({"AXENSTAX_ALLOW_GUESTS": "0" if require_signin else "1"} if choosing_access
+           else {k: v for k, v in prior_env.items() if k == "AXENSTAX_ALLOW_GUESTS"}),
         "AXENSTAX_ANNOUNCE": "1" if announce else "0",
         "AXENSTAX_WORLD_TYPE": world_type,
         "AXENSTAX_GROUND": ground,

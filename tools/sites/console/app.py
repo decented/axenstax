@@ -459,7 +459,7 @@ async def allowlist_off(
     try:
         identity.allowlist_off()
     except OSError as e:
-        raise HTTPException(400, f"couldn't remove the allowlist: {e}")
+        raise HTTPException(500, f"couldn't remove the allowlist: {e}")
     return JSONResponse({"ok": True, "allowlist_on": identity.allowlist_enabled()})
 
 

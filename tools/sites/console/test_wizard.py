@@ -9,6 +9,7 @@ Each test runs against a throwaway identity dir so it never touches a real volum
 import json
 import os
 import shlex
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -140,12 +141,61 @@ def test_signin_is_the_default():
     identity.set_require_signin(False)
     check(identity.require_signin() is False, "an explicit 'false' file admits guests")
     check(wizard.current_state_for_form()["access"] == "open", "form reflects the open toggle")
-    # A wizard run that omits `access` gets the default.
-    wizard.apply({"server_type": "survival", "server_name": "S"})
-    check(identity.require_signin() is True, "omitted access ⇒ sign-in required")
+    # An explicit "signin" answer turns it back on and tells a fresh boot too.
+    wizard.apply({"server_type": "survival", "server_name": "S", "access": "signin"})
+    check(identity.require_signin() is True, "the signin answer requires sign-in")
     env = (identity.identity_dir() / "server.env").read_text()
     check("AXENSTAX_ALLOW_GUESTS='0'" in env or "AXENSTAX_ALLOW_GUESTS=0" in env,
           "sign-in ⇒ server.env does not admit guests")
+
+
+def test_a_run_with_no_access_answer_changes_no_access():
+    print("test_a_run_with_no_access_answer_changes_no_access")
+    fresh_env()
+    wizard = reimport()
+    import identity
+    path = identity.identity_dir() / "require_signin"
+
+    # No answer on a fresh box: no file appears, and nothing says guests are in or out.
+    wizard.apply({"server_type": "survival", "server_name": "S"})
+    check(not path.exists(), "no require_signin file is written")
+    check("AXENSTAX_ALLOW_GUESTS" not in env_of(identity), "and no guest setting either")
+
+    # A server opened to guests stays open, and the records say so.
+    identity.set_require_signin(False)
+    wizard.apply({"server_type": "survival", "server_name": "S"})
+    check(identity.require_signin() is False, "a guest-open server stays open")
+    check(wizard.read_state()["access"] == "open", "the record says what is in force")
+
+    # So does a server with an allowlist.
+    identity.set_require_signin(True)
+    identity.turn_allowlist_on()
+    wizard.apply({"server_type": "survival", "server_name": "S"})
+    check(identity.allowlist_enabled(), "the allowlist stays on")
+    check(wizard.read_state()["access"] == "friends", "and the record says so")
+
+
+def test_the_form_tells_the_truth_about_an_allowlist():
+    print("test_the_form_tells_the_truth_about_an_allowlist")
+    fresh_env()
+    wizard = reimport()
+    import identity
+    good = identity.npub_encode("11" * 32)
+    wizard.apply({"server_type": "survival", "server_name": "S", "access": "signin"})
+
+    # The dashboard adds an allowlist after the wizard recorded "signin".
+    identity.add_to_list("allow", good)
+    form = wizard.current_state_for_form()
+    check(form["access"] == "friends", "the form opens on 'Just my friends'")
+    check(form["friends"] == [good], "with the list that is in force")
+
+    # So an answer of signin or open really is what then applies.
+    for answer, signin in (("signin", True), ("open", False)):
+        identity.add_to_list("allow", good)
+        wizard.apply({"server_type": "survival", "server_name": "S", "access": answer})
+        check(not identity.allowlist_enabled(), f"{answer} turns the allowlist off")
+        check(identity.require_signin() is signin, f"{answer} sets the sign-in rule")
+        check(wizard.current_state_for_form()["access"] == answer, f"the form then shows {answer}")
 
 
 def test_friends():
@@ -340,6 +390,73 @@ def test_set_public_host_touches_only_the_address():
     check(raised, "a blank address is refused")
 
 
+def test_a_line_break_in_a_name_is_refused():
+    print("test_a_line_break_in_a_name_is_refused")
+    fresh_env()
+    wizard = reimport()
+    import identity
+    for field in ("server_name", "about"):
+        for value in ("a\nb", "a\rb"):
+            try:
+                wizard.apply({"server_type": "survival", field: value})
+                check(False, f"{field} {value!r} is refused")
+            except ValueError:
+                check(True, f"{field} {value!r} is refused")
+    check(not (identity.identity_dir() / "server.env").exists(), "and nothing was written")
+    check(not (identity.identity_dir() / "server.json").exists(), "or recorded")
+    # Spaces at the ends are only tidied, as they always were.
+    wizard.apply({"server_type": "survival", "server_name": "  S  "})
+    check(env_of(identity)["AXENSTAX_SERVER_NAME"] == "S", "an ordinary name is fine")
+
+
+def test_a_damaged_env_file_does_not_stop_the_console():
+    print("test_a_damaged_env_file_does_not_stop_the_console")
+    fresh_env()
+    wizard = reimport()
+    import identity
+    path = identity.identity_dir() / "server.env"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    keep = b"AXENSTAX_GAMEMODE=creative\nAXENSTAX_PUBLIC_HOST=play.example.org\n"
+
+    # What an older console could write: a value in quotes across two lines.
+    path.write_bytes(b"AXENSTAX_SERVER_NAME='a\nb'\n" + keep)
+    env = wizard._read_env()
+    check(env.get("AXENSTAX_SERVER_NAME") == "a\nb", "a quoted value across two lines reads whole")
+    check(env.get("AXENSTAX_GAMEMODE") == "creative", "with the lines after it")
+    check("b'" not in env, "and its second line isn't a setting of its own")
+
+    # Lines that can't be understood at all, among good ones.
+    bad = b"\xff\xfe not text\nAXENSTAX_ABOUT='never closed\nnot a setting\nrm -rf x=y\n"
+    path.write_bytes(b"# comment\n" + bad + keep)
+    env = wizard._read_env()
+    check(env == {"AXENSTAX_GAMEMODE": "creative", "AXENSTAX_PUBLIC_HOST": "play.example.org"},
+          f"each bad line is skipped and the rest is kept: {env}")
+    check(wizard.current_state_for_form()["public_host"] == "play.example.org", "the setup page opens")
+
+    # The address route still works and the file it leaves can be sourced.
+    wizard.set_public_host("new.example.org")
+    env = wizard._read_env()
+    check(env.get("AXENSTAX_PUBLIC_HOST") == "new.example.org", "the address can still be set")
+    check(env.get("AXENSTAX_GAMEMODE") == "creative", "without losing the rest of the file")
+    sourced = subprocess.run(["bash", "-c", f'set -e; . "{path}"; printf %s "$AXENSTAX_PUBLIC_HOST"'],
+                             capture_output=True, text=True)
+    check(sourced.returncode == 0 and sourced.stdout == "new.example.org",
+          f"the entrypoint can source the result: {sourced.stderr}")
+    wizard.apply({"server_type": "survival", "server_name": "S"})
+    check(wizard._read_env().get("AXENSTAX_PUBLIC_HOST") == "new.example.org", "and the wizard can run")
+
+    # Other line separators in a value don't split it.
+    wizard.set_public_host("new.example.org")
+    wizard._write_env({"AXENSTAX_SERVER_NAME": "a\u2028b", "AXENSTAX_GAMEMODE": "creative"})
+    env = wizard._read_env()
+    check(env.get("AXENSTAX_SERVER_NAME") == "a\u2028b", "a Unicode line separator stays in its value")
+
+    # A file that isn't a file reads as empty, as a missing one does.
+    path.unlink()
+    path.mkdir()
+    check(wizard._read_env() == {}, "an unreadable file reads as empty")
+
+
 def run_entrypoint(worlds, compose_host=""):
     """Run the real entrypoint with stand-ins for Caddy and the engine: the engine
     records the address it was started with, and both just sit there. Exported shell
@@ -420,12 +537,16 @@ def main():
     # Make local imports resolve when run from anywhere.
     sys.path.insert(0, str(Path(__file__).parent))
     for t in (test_first_run, test_apply_gallery, test_gallery_open_toggle, test_env_quoting,
-              test_signin_is_the_default, test_friends, test_rerun_mode_change_resets_world,
+              test_signin_is_the_default, test_a_run_with_no_access_answer_changes_no_access,
+              test_the_form_tells_the_truth_about_an_allowlist,
+              test_friends, test_rerun_mode_change_resets_world,
               test_rerun_same_mode_no_reset,
               test_apply_terrain_flat, test_rerun_terrain_change_resets_world,
               test_invalid_terrain_falls_back_to_defaults, test_skip,
               test_public_address_reaches_the_engine, test_a_bad_public_address_changes_nothing,
               test_set_public_host_touches_only_the_address,
+              test_a_line_break_in_a_name_is_refused,
+              test_a_damaged_env_file_does_not_stop_the_console,
               test_the_entrypoint_waits_for_an_address_instead_of_looping,
               test_the_entrypoint_keeps_an_address_from_compose):
         t()
