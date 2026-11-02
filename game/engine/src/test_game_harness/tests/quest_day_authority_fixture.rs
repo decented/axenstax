@@ -341,6 +341,8 @@ impl DayRig {
             weather: crate::weather::Weather { rain_until: s.weather_rain_until, storm_until: s.weather_storm_until },
             reputation_owner: s.reputation_day.owner(),
             reputation_offer: offer,
+            night_calendar: s.night_calendar,
+            calendar_id: s.calendar_id,
         }
     }
     /// Isolated negative day-event replay seam: an extra server window without

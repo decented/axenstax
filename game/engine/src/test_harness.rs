@@ -128,6 +128,7 @@ impl TestHost {
         let mut run_id = [0u8; 16];
         run_id.copy_from_slice(&derive("run-id")[..16]);
         server.run_id = run_id;
+        server.calendar_id = run_id;
         let mut owner = [0u8; 16];
         owner.copy_from_slice(&derive("day-owner")[..16]);
         server.reputation_day = crate::reputation_day::DayClock::with_owner(owner);

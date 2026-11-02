@@ -14,8 +14,9 @@
 //! reason: it keys off the runtime flag, not a saved meta field, so existing
 //! Workshop saves are fixed without a migration.
 
-/// The current weather window, in `tick_counter` units. Both fields are
-/// ephemeral — deliberately not saved, so a world always loads clear.
+/// The current weather window, in `tick_counter` units. Saved with the world's
+/// clock (`sim_clock::SavedClock`), so a storm carries on after a restart; a
+/// world without a saved clock loads clear.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Weather {
     /// It is raining while `tick < rain_until`.

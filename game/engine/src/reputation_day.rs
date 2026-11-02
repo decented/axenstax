@@ -1,4 +1,5 @@
-//! Runtime-only reputation days: actual natural clock advance, never phase relocation.
+//! Reputation days: actual natural clock advance, never phase relocation. A save keeps a
+//! day's progress, not its owner: the owner is drawn per run.
 pub(crate) const SOLAR_UNITS_PER_DAY: u32 = 24_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,6 +48,15 @@ impl DayClock {
     }
     pub(crate) fn owner(&self) -> OwnerId {
         self.owner
+    }
+    /// The day's progress as a save carries it (`sim_clock::SavedClock`).
+    pub(crate) fn saved(&self) -> (u32, Option<u64>) {
+        (self.remainder, self.last_tick)
+    }
+    /// Carry on from a save's progress, under this run's owner.
+    pub(crate) fn resume(&mut self, remainder: u32, last_tick: Option<u64>) {
+        self.remainder = remainder;
+        self.last_tick = last_tick;
     }
     /// Only the authoritative natural clock step calls this. Tick rollback needs a new owner.
     pub(crate) fn advance(&mut self, tick: u64, units: u32) -> Option<DayPulse> {

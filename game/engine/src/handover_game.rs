@@ -568,6 +568,7 @@ impl crate::GameState {
             && self.players.first().is_some_and(|slot| slot.personal_binding.is_some());
         let authority_ok = !confirms || self.prepare_local_gameplay().is_ok();
         let live = self.handover_live();
+        let clock = self.clock_to_save();
         let Some(Handover::Source { session, .. }) = self.handover.as_mut() else { return };
         let Some(hs) = self.hosted_server.as_mut() else {
             // The server (and the link with it) went: the session ends the
@@ -614,6 +615,7 @@ impl crate::GameState {
                     players: &self.players,
                     seed: self.biome_gen.seed,
                     tick: self.tick_counter,
+                    clock,
                 },
             );
         }
@@ -958,6 +960,7 @@ struct Frozen<'a> {
     players: &'a [crate::player_slot::PlayerSlot],
     seed: u32,
     tick: u64,
+    clock: crate::sim_clock::SavedClock,
 }
 
 /// The frozen capture: the RAW save from the real lent world, ECS and local
@@ -1003,7 +1006,7 @@ fn capture_and_offer(
             return fail(session, hs, Refusal("This world's quest givers couldn't be saved; the handover was stopped."));
         }
     };
-    let Some(save) = crate::save::build_world_save(f.world, f.players, f.seed, &carts, &kept, quest_world.as_ref()) else {
+    let Some(save) = crate::save::build_world_save(f.world, f.players, f.seed, &carts, &kept, quest_world.as_ref(), Some(&f.clock)) else {
         return fail(session, hs, Refusal("This world has no local player to hand over from."));
     };
     let sidecar = match capture::local0_sidecar(seat0, hs.server.run_id) {

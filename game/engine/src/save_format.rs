@@ -31,7 +31,7 @@ use crate::save::WorldSave;
 /// `world_save_field_count_tripwire` test against serde's own field list, so
 /// appending a `WorldSave` field fails the test until this is bumped — which bumps
 /// [`SAVE_FORMAT_VERSION`] with it.
-pub const WORLD_SAVE_FIELD_COUNT: u32 = 55;
+pub const WORLD_SAVE_FIELD_COUNT: u32 = 56;
 
 /// Bump by hand for a wire change that is NOT an appended `WorldSave` field: a
 /// field or enum variant added inside a nested saved type, a retype. Such a change
@@ -74,7 +74,8 @@ pub const SAVE_FORMAT_VERSION: u32 = WORLD_SAVE_FIELD_COUNT + SAVE_LAYOUT_REVISI
 /// | 57     | 54     | 3        | 84ff0c1a (common progression)                     | `quest_world`     |
 /// | 58     | 55     | 3        | c31080c1 (y 255 + terrain generator record)       | `worldgen_version`|
 /// | 58     | 54     | 4        | fbf2fd87 (building variants, block ids)           | `quest_world`     |
-/// | 59     | 55     | 4        | ed9678f7 (merge of the two; the current build)    | `worldgen_version`|
+/// | 59     | 55     | 4        | ed9678f7 (merge of the two)                       | `worldgen_version`|
+/// | 60     | 56     | 4        | Keep slice 2a (the authority clock; this build)   | `authority_clock` |
 ///
 /// Footers 52 and below are not strictly checked. Sorted by footer, ascending.
 /// The newest entry is written as literals on purpose: bumping
@@ -88,6 +89,7 @@ pub const FOOTER_FIELD_COUNTS: &[(u32, &[u32])] = &[
     (57, &[54]),
     (58, &[54, 55]),
     (59, &[55]),
+    (60, &[56]),
 ];
 
 /// The field counts a footer `version` was written with (empty for a footer the
@@ -358,20 +360,21 @@ mod tests {
     }
 
     /// Building variants (block ids 320..=372) moved the format version one step
-    /// (to 58; terrain's field 55 then made it 59) so builds that don't know the ids refuse the world instead of
+    /// (to 58; terrain's field 55 made it 59, the authority clock's field 56 made
+    /// it 60) so builds that don't know the ids refuse the world instead of
     /// loading them as AIR and saving the holes back.
     #[test]
     fn a_world_written_now_carries_the_building_variants_version() {
-        assert_eq!(SAVE_FORMAT_VERSION, 59, "55 fields + layout revision 4");
+        assert_eq!(SAVE_FORMAT_VERSION, 60, "56 fields + layout revision 4");
         // The world holds no new block, and still carries the new version.
         let bytes = encode_world_save(&minimal_world_save_for_tests(5)).unwrap();
-        assert_eq!(split_save_footer(&bytes).1, Some(59));
+        assert_eq!(split_save_footer(&bytes).1, Some(60));
         assert!(check_version(split_save_footer(&bytes).1).is_ok(), "this build opens its own save");
-        // A build that stopped at 58 refuses this footer (59 > 58) the same
-        // way this build refuses 60: `check_version` is the one rule.
+        // A build that stopped at 59 refuses this footer (60 > 59) the same
+        // way this build refuses 61: `check_version` is the one rule.
         assert_eq!(
-            check_version(Some(59 + 1)),
-            Err(WorldSaveError::NewerVersion { found: 60, supported: 59 }),
+            check_version(Some(60 + 1)),
+            Err(WorldSaveError::NewerVersion { found: 61, supported: 60 }),
             "a footer one version past this build is refused"
         );
         let mut next = bincode::serialize(&minimal_world_save_for_tests(5)).unwrap();

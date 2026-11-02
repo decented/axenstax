@@ -379,6 +379,8 @@ impl super::GameState {
         // running FRESH would clobber the restored position + kit slots.
         let load_ok = load_result.is_some();
         if let Some((save_data, _chunk_count)) = load_result {
+            // Before the load queue stamps anything with the tick (fires).
+            self.restore_saved_clock(save_data.clock());
             // Build per-player restore list: new saves have a `players` Vec;
             // old saves have an empty Vec — fall back to legacy single-player fields.
             let player_saves: Vec<crate::save::PlayerSaveData> = if save_data.players.is_empty() {

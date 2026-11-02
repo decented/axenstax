@@ -748,8 +748,8 @@ mod tests {
             ("load autosave", crate::save::load_autosave("sidecar", &mut crate::world::World::new()).map(|_| ())),
             ("meta", crate::save::save_world_meta("sidecar", &meta)),
             ("world folder", crate::save::write_world_folder("sidecar", &meta, &save, &w)),
-            ("save", crate::save::save_world("sidecar", &w, std::slice::from_ref(&slot), 1, &[], &[], None)),
-            ("autosave", crate::save::autosave_world("sidecar", &w, std::slice::from_ref(&slot), 1, &[], &[], None)),
+            ("save", crate::save::save_world("sidecar", &w, std::slice::from_ref(&slot), 1, &[], &[], None, None)),
+            ("autosave", crate::save::autosave_world("sidecar", &w, std::slice::from_ref(&slot), 1, &[], &[], None, None)),
             ("server save", s.try_save()),
             ("joiner save", s.save_joiner(0)),
         ];
@@ -1545,9 +1545,9 @@ mod quest_codec_tests {
         selected.rig_clips = vec![crate::anim_set::AnimClip::Bounce];
         assert!(selected.quest_world.is_none());
         let mut body = bincode::serialize(&selected).unwrap();
-        // A real footer-55 writer stopped at 53 fields (`local_personal`): neither
-        // `quest_world` nor `worldgen_version`, one `None` byte each, was written.
-        let appended = bincode::serialize(&(&selected.quest_world, &selected.worldgen_version)).unwrap(); assert_eq!(appended, [0, 0]);
+        // A real footer-55 writer stopped at 53 fields (`local_personal`): none of
+        // `quest_world`, `worldgen_version` or `authority_clock`, one `None` byte each, was written.
+        let appended = bincode::serialize(&(&selected.quest_world, &selected.worldgen_version, &selected.authority_clock)).unwrap(); assert_eq!(appended, [0, 0, 0]);
         assert!(body.ends_with(&appended)); body.truncate(body.len() - appended.len());
         body.extend_from_slice(&55u32.to_le_bytes()); body.extend_from_slice(&crate::save_format::SAVE_FOOTER_MAGIC);
         let (old, partial) = crate::save::read_world_save_reporting(&body).unwrap();

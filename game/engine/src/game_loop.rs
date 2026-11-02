@@ -3345,8 +3345,11 @@ impl super::GameState {
         self.reputation_day = crate::reputation_day::DayClock::new();
         self.reputation_day_offer = None;
         self.tick_counter = 0;
-        // Weather is ephemeral and keyed to `tick_counter` ("a world always
-        // loads clear" — `weather.rs`). Zeroing the tick without zeroing the
+        self.night_calendar = Default::default();
+        self.calendar_id = crate::sim_clock::fresh_calendar_id();
+        // Weather is keyed to `tick_counter`, and a world without a saved
+        // clock loads clear (`weather.rs`; a saved one restores all of this in
+        // `restore_saved_clock`, after this reset). Zeroing the tick without zeroing the
         // window left a stale `rain_until` (say 253_000 from an hour in the old
         // world) that `weather::advance` then never re-rolled, so the NEXT world
         // loaded raining — and, if the old window was a storm, being struck by
@@ -3358,7 +3361,7 @@ impl super::GameState {
         self.lightning_flash = 0.0;
         self.falling_tick_counter = 0;
         // D4 slice 2 — a lending server staged for this load outlives the
-        // reset: it takes THIS world's clock (morning, tick 0, clear) at its
+        // reset: it takes THIS world's clock (from its save, or morning, tick 0, clear) at its
         // first phase, never the last world's time and storm.
         if let Some(hs) = self.hosted_server.as_mut() {
             hs.server.forget_host_clock();
@@ -5176,11 +5179,54 @@ impl super::GameState {
                 storm_until: self.weather_storm_until,
             },
             weather_lock_applied: self.weather_lock_applied.clone(),
+            night_calendar: self.night_calendar,
+            calendar_id: self.calendar_id,
         };
         let hs = self.hosted_server.as_mut()?;
         let back = hs.server.run_clock_phase(&seed, has_weather, lock.as_deref(), &mut self.world.sim_tally)?;
         self.mirror_authority_clock(&back);
         Some(back)
+    }
+
+    /// Keep slice 2a — the world's clock as its save carries it. A hosting
+    /// server's calendar is the one joiners sleep by, so it is the one kept
+    /// (once a lending server has taken this client's clock; before that, this
+    /// client's is the newer). The day clock is this client's on every world
+    /// it saves. Every save this client writes goes through here.
+    pub(crate) fn clock_to_save(&self) -> crate::sim_clock::SavedClock {
+        let host = self.hosted_server.as_ref().filter(|hs| !hs.lends_host_world() || hs.server.clock_adopted);
+        let (calendar, calendar_id) =
+            host.map_or((self.night_calendar, self.calendar_id), |hs| (hs.server.night_calendar, hs.server.calendar_id));
+        let (nights, was_night) = calendar.saved();
+        let (day_remainder, day_last_tick) = self.reputation_day.saved();
+        crate::sim_clock::SavedClock {
+            tick_counter: self.tick_counter,
+            world_time: self.world_time,
+            rain_until: self.weather_rain_until,
+            storm_until: self.weather_storm_until,
+            weather_lock_applied: self.weather_lock_applied.clone(),
+            nights,
+            was_night,
+            calendar_id,
+            day_remainder,
+            day_last_tick,
+        }
+    }
+
+    /// Keep slice 2a — carry on from a loaded save's clock, on top of the
+    /// reset every world entry does (`reset_for_world_change`). `None` (a save
+    /// from before the field) leaves that reset's morning, as it always has. A
+    /// lending server staged for this load takes all of it at its first phase.
+    pub(crate) fn restore_saved_clock(&mut self, saved: Option<&crate::sim_clock::SavedClock>) {
+        let Some(saved) = saved else { return };
+        self.tick_counter = saved.tick_counter;
+        self.world_time = saved.world_time;
+        self.weather_rain_until = saved.rain_until;
+        self.weather_storm_until = saved.storm_until;
+        self.weather_lock_applied.clone_from(&saved.weather_lock_applied);
+        self.night_calendar = crate::item_actions::NightCalendar::from_saved(saved.nights, saved.was_night);
+        self.calendar_id = saved.calendar_id;
+        self.reputation_day.resume(saved.day_remainder, saved.day_last_tick);
     }
 
     /// D4 slice 2 — this client's copy of the authority's clock: what its
@@ -5192,6 +5238,7 @@ impl super::GameState {
         self.weather_rain_until = back.weather.rain_until;
         self.weather_storm_until = back.weather.storm_until;
         self.weather_lock_applied.clone_from(&back.weather_lock_applied);
+        self.night_calendar = back.night_calendar;
     }
 
     /// A `/` line from the chat box: dispatched to the local command
@@ -5923,6 +5970,8 @@ impl super::GameState {
                 rain_until: self.weather_rain_until,
                 storm_until: self.weather_storm_until,
             },
+            night_calendar: self.night_calendar,
+            calendar_id: self.calendar_id,
         };
         let parts = crate::sim_lend::SimParts {
             reputation_owner: self.reputation_day.owner(),
@@ -6222,6 +6271,9 @@ impl super::GameState {
             Some(back) => Some(back.stepped),
             None if self.sim_runs(SimSystem::Clock) => {
                 self.world_time = crate::sim_clock::next_world_time(self.world_time, self.world_time_step);
+                // Kept for the world's save: a world played alone and hosted
+                // later keeps counting the same nights.
+                self.night_calendar.observe(self.world_time);
                 Some(self.world_time_step)
             }
             None => None,
@@ -6361,11 +6413,13 @@ impl super::GameState {
                 Ok(saved) => saved,
                 Err(error) => { log::error!("Quest autosave failed: {error}"); return; }
             };
+            let clock = self.clock_to_save();
             if let Err(e) = crate::save::tamed_mobs_to_saved(&self.ecs).and_then(|pets| crate::save::autosave_world(
                 &self.world_name, &self.world, &self.players, self.biome_gen.seed,
                 &crate::save::carts_to_saved(&self.ecs),
                 &pets,
                 quest_world.as_ref(),
+                Some(&clock),
             )) {
                 log::error!("Autosave failed: {e}");
             }
@@ -8824,6 +8878,7 @@ impl super::GameState {
                                     &mut self.world,
                                     &save_data,
                                 );
+                                self.restore_saved_clock(save_data.clock());
                                 let player_saves = if save_data.players.is_empty() {
                                     vec![crate::save::PlayerSaveData {
                                         x: save_data.player_x, y: save_data.player_y, z: save_data.player_z,

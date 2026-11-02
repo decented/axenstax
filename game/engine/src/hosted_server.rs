@@ -4354,6 +4354,20 @@ impl HostedServer {
         }
     }
 
+    /// Keep slice 2a: `server_tick` carries on from a clock this server just
+    /// took (a save's, or its host client's at the first phase). It never runs
+    /// backwards, and a slot attached before the jump keeps its join time. Audit
+    /// of every use (Spec 04 §4.2i): stamps on the wire are `u64`, ages are
+    /// `saturating_sub`, the rest are a modulo and a rate limiter's elapsed.
+    fn continue_wire_tick(&mut self) {
+        let Some(from) = self.server.wire_tick_seed.take() else { return };
+        let jump = from.saturating_sub(self.server_tick);
+        self.server_tick += jump;
+        for attached in &mut self.attached_tick {
+            *attached = attached.saturating_add(jump);
+        }
+    }
+
     /// Test-only: jump the server clock `ticks` forward, so the pre-auth
     /// timeout can be driven without simulating that many ticks.
     #[cfg(test)]
@@ -4410,6 +4424,7 @@ impl HostedServer {
         if self.handover_frozen() {
             return;
         }
+        self.continue_wire_tick();
         debug_assert_eq!(
             self.lends_host_world(),
             self.server.lent,

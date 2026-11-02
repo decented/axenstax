@@ -80,11 +80,14 @@ const TICK_PATH_FILES: &[&str] = &[
 /// an event, compared for equality and never rolled, and the client's own
 /// loading-screen timers.
 const ALLOWED: &[(&str, &str)] = &[
-    // `GameServer::new` — the run id, so a joiner can't sleep twice in one
-    // night across a restart (`run_id` gate) and a lent day offer is matched
-    // to its run. Compared, never rolled. Twin tests derive it from the seed
-    // (`TestHost::start_seeded`).
-    ("server.rs", "run_id: { let mut id = [0; 16]; getrandom::fill"),
+    // `GameServer::new` — the run id, so a lent day offer or a handover carry
+    // is matched to its run, and the first calendar id. Compared, never rolled.
+    // Twin tests derive it from the seed (`TestHost::start_seeded`).
+    ("server.rs", "let run_id = { let mut id = [0; 16]; getrandom::fill"),
+    // `fresh_calendar_id` — a new world's calendar id, drawn at world entry on
+    // a client, and matched against a joiner record's night mark. Compared,
+    // never rolled.
+    ("sim_clock.rs", "getrandom::fill(&mut id)"),
     // `DayClock::new` — the reputation clock's owner id, matched against day
     // pulses (`DayConsumer::consume`). Compared, never rolled.
     ("reputation_day.rs", "getrandom::fill(&mut owner)"),

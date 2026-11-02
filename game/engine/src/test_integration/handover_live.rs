@@ -830,7 +830,7 @@ mod session {
         wolf.ownership.owner_pubkey = "local-player-0".into();
         let pet = crate::save::SavedTamedPet { x: 2.0, y: 70.0, z: 2.0, data: crate::save::SavedTamedPetData::Wolf(wolf) };
         let quest_world = crate::quest_npcs::capture(p.host.world.quest_scope, &p.host.ecs).unwrap();
-        let save = crate::save::build_world_save(&p.host.world, std::slice::from_ref(seat0), 42, &carts, &[pet], quest_world.as_ref()).unwrap();
+        let save = crate::save::build_world_save(&p.host.world, std::slice::from_ref(seat0), 42, &carts, &[pet], quest_world.as_ref(), None).unwrap();
         let cap = Capture {
             meta: &meta,
             save,
@@ -854,7 +854,7 @@ mod session {
         let progress = capture::local0_progress(seat0, context).unwrap();
         let meta = crate::handover::checkpoint::transfer_metadata(&crate::save::WorldMeta::new("Loop")).unwrap();
         let quest_world = crate::quest_npcs::capture(p.host.world.quest_scope, &p.host.ecs).unwrap();
-        let save = crate::save::build_world_save(&p.host.world, std::slice::from_ref(seat0), 42, &[], &[], quest_world.as_ref()).unwrap();
+        let save = crate::save::build_world_save(&p.host.world, std::slice::from_ref(seat0), 42, &[], &[], quest_world.as_ref(), None).unwrap();
         let cap = Capture {
             meta: &meta,
             save,
@@ -1821,7 +1821,7 @@ mod session {
     /// The frame's five-minute autosave of the fixture's world.
     fn autosave(root: &std::path::Path) -> Result<(), String> {
         crate::save::with_worlds_root(root, || {
-            crate::save::autosave_world("world", &crate::world::World::new(), std::slice::from_ref(&seat0()), 77, &[], &[], None)
+            crate::save::autosave_world("world", &crate::world::World::new(), std::slice::from_ref(&seat0()), 77, &[], &[], None, None)
         })
     }
 

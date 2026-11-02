@@ -29,7 +29,7 @@
 //!
 //! **`GameServer`.**
 //! - Secret or per-run identity: `pop_secret` (a secret, never in a digest),
-//!   `run_id`, the reputation clock's owner id.
+//!   `run_id`, `calendar_id`, the reputation clock's owner id.
 //! - Config, set when the server is built or by an admin event, read by the
 //!   tick: `world_name`, `seed` (shows through `chunks`), `registry`,
 //!   `biome_gen`, `fire_spread_enabled`, `explosives_enabled`,
@@ -41,7 +41,7 @@
 //!   `hopper_phase_open`, `projectile_phase_open`, `lent_strike`,
 //!   `lent_day_owner`, `lent_day_offer`, `lent_day_consumer`,
 //!   `lent_local_seats`.
-//! - Output, what is sent and not what is: `pending_block_changes`,
+//! - Output, what is sent and not what is: `wire_tick_seed`, `pending_block_changes`,
 //!   `pending_item_grants`, `pending_kill_events`, `pending_bred_events`,
 //!   `released_joiners`, `released_mounts`, `sim_events`.
 //! - Join and handover event paths: `failed_joiner_reads`, `next_attach_gen`,

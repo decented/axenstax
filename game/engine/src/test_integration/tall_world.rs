@@ -108,7 +108,7 @@ fn a_block_at_y200_survives_save_and_load_with_the_worlds_generator() {
     w.generator = Generator::V3;
     w.place_player_block(3, HIGH, 3, block::STONE);
     let slot = crate::player_slot::PlayerSlot::new(0, glam::Vec3::new(3.5, 201.0, 3.5), 1.0);
-    save::save_world(&name, &w, &[slot], 7, &[], &[], None).expect("save_world");
+    save::save_world(&name, &w, &[slot], 7, &[], &[], None, None).expect("save_world");
 
     let mut loaded = World::new();
     let (saved, _) = save::load_world(&name, &mut loaded).expect("load_world");

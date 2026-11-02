@@ -931,6 +931,14 @@ fn terrain_stand_y(world: &World, x: i32, z: i32) -> f32 {
 /// The authoritative game server.
 pub struct GameServer {
     pub(crate) run_id: [u8; 16],
+    /// Keep slice 2a: which calendar [`Self::night_calendar`] counts in. Unlike
+    /// `run_id` it survives a restart with the clock (a saved clock restores
+    /// it), so a joiner record's night number stays good across one. Starts
+    /// as this run's `run_id`.
+    pub(crate) calendar_id: [u8; 16],
+    /// Keep slice 2a: this server just took a clock (from a save or its host
+    /// client), and `HostedServer.server_tick` has yet to carry on from it.
+    pub(crate) wire_tick_seed: Option<u64>,
     pub(crate) failed_joiner_reads: std::collections::HashSet<[u8; 32]>,
     pub world_name: String,
     /// The world's real generation seed (threaded from `new`). Source of truth
@@ -1042,9 +1050,9 @@ pub struct GameServer {
     /// cooldowns). `world_time` cycles at 24 000 so it can't be used
     /// directly for any subtract-based age check.
     pub tick_counter: u64,
-    /// Server-authoritative weather window (P9 weather sync). Ephemeral —
-    /// always starts `CLEAR` on construction, matching `weather.rs`'s
-    /// "a world always loads clear" invariant; never persisted. Advanced
+    /// Server-authoritative weather window (P9 weather sync). Starts `CLEAR`
+    /// on construction; a load restores it with the rest of the clock
+    /// (`sim_clock::SavedClock`). Advanced
     /// every tick in `tick()` and put on the wire (as ticks-remaining, via
     /// `Weather::ticks_left`) on every `StateUpdatePacket` broadcast, so a
     /// hosted world's rain — and its fire-dousing — agree with what every
@@ -1172,8 +1180,11 @@ impl GameServer {
             players.push(ServerPlayer::new(Vec3::new(0.5 + offset, 80.0, 0.5)));
         }
 
+        let run_id = { let mut id = [0; 16]; getrandom::fill(&mut id).expect("server run randomness unavailable"); id };
         Self {
-            run_id: { let mut id = [0; 16]; getrandom::fill(&mut id).expect("server run randomness unavailable"); id },
+            run_id,
+            calendar_id: run_id,
+            wire_tick_seed: None,
             failed_joiner_reads: Default::default(),
             world_name,
             seed,
@@ -1371,6 +1382,8 @@ impl GameServer {
         if let crate::world_open::OpenedWorld::Loaded { save: save_data, chunks: chunk_count, .. } = opened {
             log::info!("Loaded saved world '{wname}'.");
             self.selected_local_personal = save_data.local_personal.clone();
+            // Before anything below stamps a time on what it loads (fires).
+            self.restore_saved_clock(save_data.clock());
             #[cfg(not(target_arch = "wasm32"))]
             if personal_proof.is_none() && (self.selected_local_personal.as_ref().is_some_and(|snapshot|
                 crate::joiner_save::JoinerSave::decode(&snapshot.0).map_or(true, |saved| saved.personal.as_ref().is_none_or(|bound|
@@ -1661,8 +1674,47 @@ impl GameServer {
         self.tick_counter = seed.tick_counter;
         self.weather = seed.weather;
         self.weather_lock_applied = seed.weather_lock_applied.clone();
+        self.night_calendar = seed.night_calendar;
+        self.calendar_id = seed.calendar_id;
+        self.wire_tick_seed = Some(seed.tick_counter);
         self.clock_phase_open = false;
         self.pending_strike = None;
+    }
+
+    /// Keep slice 2a: this server's clock as its world's save carries it. A
+    /// lent world's save is written by its host client
+    /// (`GameState::clock_to_save`), whose day clock is the running one.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn saved_clock(&self) -> crate::sim_clock::SavedClock {
+        let (nights, was_night) = self.night_calendar.saved();
+        let (day_remainder, day_last_tick) = self.reputation_day.saved();
+        crate::sim_clock::SavedClock {
+            tick_counter: self.tick_counter,
+            world_time: self.world_time,
+            rain_until: self.weather.rain_until,
+            storm_until: self.weather.storm_until,
+            weather_lock_applied: self.weather_lock_applied.clone(),
+            nights,
+            was_night,
+            calendar_id: self.calendar_id,
+            day_remainder,
+            day_last_tick,
+        }
+    }
+
+    /// Keep slice 2a: carry on from a save's clock. `None` (a save from before
+    /// the field, or a clock that fails `is_valid`) leaves the new server's
+    /// clock exactly as a load always has.
+    fn restore_saved_clock(&mut self, saved: Option<&crate::sim_clock::SavedClock>) {
+        let Some(saved) = saved else { return };
+        self.tick_counter = saved.tick_counter;
+        self.world_time = saved.world_time;
+        self.weather = crate::weather::Weather { rain_until: saved.rain_until, storm_until: saved.storm_until };
+        self.weather_lock_applied.clone_from(&saved.weather_lock_applied);
+        self.night_calendar = crate::item_actions::NightCalendar::from_saved(saved.nights, saved.was_night);
+        self.calendar_id = saved.calendar_id;
+        self.reputation_day.resume(saved.day_remainder, saved.day_last_tick);
+        self.wire_tick_seed = Some(saved.tick_counter);
     }
 
     /// D4 slice 2 — the host client changed world under this lending server
@@ -1715,6 +1767,7 @@ impl GameServer {
             tick_counter: self.tick_counter,
             weather: self.weather,
             weather_lock_applied: self.weather_lock_applied.clone(),
+            night_calendar: self.night_calendar,
             stepped,
         })
     }
@@ -3416,6 +3469,7 @@ impl GameServer {
             local_personal: local_personal.cloned(),
             quest_world: crate::quest_npcs::capture(self.world.quest_scope, &self.ecs)?,
             worldgen_version: Some(self.world.generator.version()),
+            authority_clock: Some(self.saved_clock()),
             exhibits: self.world.exhibits.clone(),
             composters: self
                 .world

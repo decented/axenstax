@@ -347,6 +347,25 @@ pub struct WorldSave {
     /// `World::generator`. APPEND LAST.
     #[serde(default)]
     pub worldgen_version: Option<u32>,
+    /// The world's authority clock (Keep slice 2a, Spec 02 §8.4). `None` = a save
+    /// written before the field, or one with no clock to keep (a test's): the
+    /// world starts its clock from nothing, as such a save always has. Read it
+    /// through [`WorldSave::clock`]. APPEND LAST.
+    #[serde(default)]
+    pub authority_clock: Option<crate::sim_clock::SavedClock>,
+}
+
+impl WorldSave {
+    /// The clock to carry on from, if this save has one that could be real.
+    pub fn clock(&self) -> Option<&crate::sim_clock::SavedClock> {
+        let clock = self.authority_clock.as_ref()?;
+        if clock.is_valid() {
+            Some(clock)
+        } else {
+            log::warn!("world.dat: its saved clock is out of range; the world's clock starts afresh");
+            None
+        }
+    }
 }
 
 /// One serialised Dispenser/Dropper. Position + DispenserData (mirrors
@@ -850,6 +869,7 @@ impl LegacyWorldSave {
             local_personal: None,
             quest_world: None,
             worldgen_version: None,
+            authority_clock: None,
             // Legacy saves predate Spec 34 — no tip jars.
             tip_jars: Vec::new(),
             auctions: Vec::new(),
@@ -1955,9 +1975,10 @@ pub fn save_world(
     carts: &[SavedCart],
     saved_mobs: &[SavedTamedPet],
     quest_world: Option<&crate::quest_npcs::QuestWorldSave>,
+    authority_clock: Option<&crate::sim_clock::SavedClock>,
 ) -> Result<(), String> {
     crate::quest_npcs::check_capture(world.quest_scope, quest_world)?;
-    save_world_at(name, world, players, seed, carts, saved_mobs, AtCommit::KeepAutosave, quest_world)
+    save_world_at(name, world, players, seed, carts, saved_mobs, AtCommit::KeepAutosave, quest_world, authority_clock)
 }
 
 /// The positional WorldSave of a live world and its local seats, exactly as
@@ -1971,6 +1992,7 @@ pub fn build_world_save(
     carts: &[SavedCart],
     saved_mobs: &[SavedTamedPet],
     quest_world: Option<&crate::quest_npcs::QuestWorldSave>,
+    authority_clock: Option<&crate::sim_clock::SavedClock>,
 ) -> Option<WorldSave> {
     crate::quest_npcs::check_capture(world.quest_scope, quest_world).ok()?;
     // No seat, no legacy single-player fields to fill: refused, not a panic.
@@ -2105,6 +2127,7 @@ pub fn build_world_save(
         local_personal: crate::joiner_save::capture_local(&players[0]).ok()?,
         quest_world: quest_world.cloned(),
         worldgen_version: Some(world.generator.version()),
+        authority_clock: authority_clock.cloned(),
         exhibits: world.exhibits.clone(),
         composters: world.iter_composters().map(|((x, y, z), data)| SavedComposter { x, y, z, data: data.clone() }).collect(),
         tip_jars,
@@ -2169,6 +2192,7 @@ fn save_world_at(
     saved_mobs: &[SavedTamedPet],
     at_commit: AtCommit,
     quest_world: Option<&crate::quest_npcs::QuestWorldSave>,
+    authority_clock: Option<&crate::sim_clock::SavedClock>,
 ) -> Result<(), String> {
     crate::quest_npcs::check_capture(world.quest_scope, quest_world)?;
     if players.is_empty() {
@@ -2182,7 +2206,7 @@ fn save_world_at(
     finish_staged_first_save(&dir)?;
     let chunks_dir = dir.join("chunks");
 
-    let save = build_world_save(world, players, seed, carts, saved_mobs, quest_world)
+    let save = build_world_save(world, players, seed, carts, saved_mobs, quest_world, authority_clock)
         .ok_or_else(|| "save_world: no players to save".to_string())?;
 
     // Increment version counter + flush proof-of-play stats into meta BEFORE
@@ -2234,6 +2258,7 @@ pub fn save_world(
     carts: &[SavedCart],
     saved_mobs: &[SavedTamedPet],
     quest_world: Option<&crate::quest_npcs::QuestWorldSave>,
+    authority_clock: Option<&crate::sim_clock::SavedClock>,
 ) -> Result<(), String> {
     crate::quest_npcs::check_capture(world.quest_scope, quest_world)?;
     if players.is_empty() {
@@ -2353,6 +2378,7 @@ pub fn save_world(
         local_personal: crate::joiner_save::capture_local(&players[0])?,
         quest_world: quest_world.cloned(),
         worldgen_version: Some(world.generator.version()),
+        authority_clock: authority_clock.cloned(),
         exhibits: world.exhibits.clone(),
         composters: world.iter_composters().map(|((x, y, z), data)| SavedComposter { x, y, z, data: data.clone() }).collect(),
         tip_jars,
@@ -2647,6 +2673,7 @@ fn deserialize_world_save_tolerant_reporting(
         local_personal: tail.field(&mut cur, "local_personal"),
         quest_world: tail.field(&mut cur, "quest_world"),
         worldgen_version: tail.field(&mut cur, "worldgen_version"),
+        authority_clock: tail.field(&mut cur, "authority_clock"),
     };
     Ok((save, tail.failed_at, cur.position(), 7 + tail.read))
 }
@@ -2664,6 +2691,7 @@ fn absent_tail_encoded_len(s: &WorldSave, read: u32) -> Option<usize> {
             53 => size(bincode::serialized_size(&s.local_personal))?,
             54 => size(bincode::serialized_size(&s.quest_world))?,
             55 => size(bincode::serialized_size(&s.worldgen_version))?,
+            56 => size(bincode::serialized_size(&s.authority_clock))?,
             _ => return None,
         };
         Some(total + n)
@@ -3170,13 +3198,12 @@ fn restore_world_save_state(world: &mut World, save: &WorldSave) {
     // until this scan stamps it.
     world.rebuild_salt_lick_index();
     // Rubber feature — rebuild the tapped-rubber-log cooldown index.
-    // Stamps every RUBBER_LOG_TAPPED at load_tick = 0. The runtime
-    // cooldown clock is `tick_counter` (monotonic u64) which is NOT
-    // persisted across save/reload — it also restarts at 0 in the new
-    // session, so this stamping effectively gives every tapped log a
-    // fresh full 24 000-tick cooldown post-load. This is the
-    // anti-exploit property: no save-scumming to skip cooldowns.
-    world.rebuild_tapped_rubber_logs_index(0);
+    // Stamps every RUBBER_LOG_TAPPED at the tick the world's clock carries on
+    // from (0 for a save without a clock), which gives every tapped log a
+    // fresh full 24 000-tick cooldown post-load. This is the anti-exploit
+    // property: no save-scumming to skip cooldowns. The stamp MUST be that
+    // tick: at a restored clock, stamping 0 would expire every cooldown at once.
+    world.rebuild_tapped_rubber_logs_index(save.clock().map_or(0, |clock| clock.tick_counter));
     // Spec 34 Tip Jar — restore block-entity state. Pre-Spec-34
     // saves arrive with an empty Vec via #[serde(default)].
     for sj in &save.tip_jars {
@@ -4385,6 +4412,7 @@ pub fn autosave_world(
     carts: &[SavedCart],
     saved_mobs: &[SavedTamedPet],
     quest_world: Option<&crate::quest_npcs::QuestWorldSave>,
+    authority_clock: Option<&crate::sim_clock::SavedClock>,
 ) -> Result<(), String> {
     crate::quest_npcs::check_capture(world.quest_scope, quest_world)?;
     if players.is_empty() {
@@ -4510,6 +4538,7 @@ pub fn autosave_world(
         local_personal: crate::joiner_save::capture_local(&players[0])?,
         quest_world: quest_world.cloned(),
         worldgen_version: Some(world.generator.version()),
+        authority_clock: authority_clock.cloned(),
         exhibits: world.exhibits.clone(),
         composters: world.iter_composters().map(|((x, y, z), data)| SavedComposter { x, y, z, data: data.clone() }).collect(),
         tip_jars,
@@ -4607,13 +4636,14 @@ pub fn autosave_world(
     carts: &[SavedCart],
     saved_mobs: &[SavedTamedPet],
     quest_world: Option<&crate::quest_npcs::QuestWorldSave>,
+    authority_clock: Option<&crate::sim_clock::SavedClock>,
 ) -> Result<(), String> {
     crate::quest_npcs::check_capture(world.quest_scope, quest_world)?;
     // On WASM, autosave writes to the same IndexedDB store as save_world.
     // NOTE: there is NO cloud upload here yet. The cloud-save bridge tier
     // (tools/sites/game POST /worlds/upload) exists but is not wired into this
     // path — that's Phase 5 of docs/foundations/2026-05-26-cloud-save-blossom.md.
-    save_world(name, world, players, seed, carts, saved_mobs, quest_world)
+    save_world(name, world, players, seed, carts, saved_mobs, quest_world, authority_clock)
 }
 
 /// Save the live session's world ([`save_world`]) and drop the crash-recovery
@@ -4635,15 +4665,16 @@ pub fn save_world_superseding_autosave(
     carts: &[SavedCart],
     saved_mobs: &[SavedTamedPet],
     quest_world: Option<&crate::quest_npcs::QuestWorldSave>,
+    authority_clock: Option<&crate::sim_clock::SavedClock>,
 ) -> Result<(), String> {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        save_world_at(name, world, players, seed, carts, saved_mobs, AtCommit::DropAutosave, quest_world)
+        save_world_at(name, world, players, seed, carts, saved_mobs, AtCommit::DropAutosave, quest_world, authority_clock)
     }
     // The web keeps no separate autosave (it writes the save itself).
     #[cfg(target_arch = "wasm32")]
     {
-        save_world(name, world, players, seed, carts, saved_mobs, quest_world)
+        save_world(name, world, players, seed, carts, saved_mobs, quest_world, authority_clock)
     }
 }
 
@@ -5002,6 +5033,7 @@ pub(crate) fn minimal_world_save_for_tests(seed: u32) -> WorldSave {
         local_personal: None,
         quest_world: None,
         worldgen_version: None,
+        authority_clock: None,
     }
 }
 
@@ -5218,6 +5250,7 @@ mod tests {
             local_personal: None,
             quest_world: None,
             worldgen_version: None,
+            authority_clock: None,
         };
         let bytes = bincode::serialize(&save).unwrap();
         let back: WorldSave = bincode::deserialize(&bytes).unwrap();
@@ -5706,6 +5739,7 @@ mod tests {
             local_personal: None,
             quest_world: None,
             worldgen_version: None,
+            authority_clock: None,
         };
         let mut bytes = bincode::serialize(&save).unwrap();
         bytes.extend_from_slice(&[0xFFu8; 16]); // pretend: a future field's bytes
@@ -5964,11 +5998,14 @@ mod tests {
         // `dispensers` (2026-07-04) and `rig_clips` (#19, 2026-09-06) appended
         // after `satoshi`: two more 8-byte empty-Vec prefixes to drop before the
         // truncation lands mid-workshop.
-        // `local_personal` and `quest_world` (D2c-3) close the tail: both
-        // `None` here, one tag byte each. Computed, like `satoshi`.
+        // `local_personal`, `quest_world`, `worldgen_version` and
+        // `authority_clock` close the tail: all `None` here, one tag byte each.
+        // Computed, like `satoshi`.
         let option_tail_bytes = bincode::serialized_size(&(
             None::<crate::personal_value::LocalPersonalSave>,
             None::<crate::quest_npcs::QuestWorldSave>,
+            None::<u32>,
+            None::<crate::sim_clock::SavedClock>,
         ))
         .unwrap() as usize;
         bytes.truncate(bytes.len() - (8 * 15 + 2 + satoshi_bytes + option_tail_bytes));
@@ -6104,7 +6141,7 @@ mod tests {
         // Indexing player_saves[0] on an empty slice panicked mid-save (engine
         // audit 2026-06-04, A). Guard early with an Err instead.
         let world = World::new();
-        let result = save_world("unused_empty_players", &world, &[], 0, &[], &[], None);
+        let result = save_world("unused_empty_players", &world, &[], 0, &[], &[], None, None);
         assert!(result.is_err(), "empty players must Err, not panic");
     }
 
@@ -6141,13 +6178,13 @@ mod tests {
         world.set_block(2, 70, 2, crate::block::STONE);
         let players = vec![crate::player_slot::PlayerSlot::new(
             0, glam::Vec3::new(0.0, 70.0, 0.0), 1.0)];
-        save_world(name, &world, &players, 0, &[], &[], None).expect("first save");
+        save_world(name, &world, &players, 0, &[], &[], None, None).expect("first save");
         let n_before = std::fs::read_dir(&chunks_dir).unwrap().count();
         assert_eq!(n_before, 1, "exactly the stone chunk's file is written");
 
         // Mine it out → the only loaded chunk is now all-air.
         world.set_block(2, 70, 2, crate::block::AIR);
-        save_world(name, &world, &players, 0, &[], &[], None).expect("second save");
+        save_world(name, &world, &players, 0, &[], &[], None, None).expect("second save");
         let n_after = std::fs::read_dir(&chunks_dir).unwrap().count();
 
         let _ = std::fs::remove_dir_all(&dir); // cleanup before asserting
@@ -6560,6 +6597,7 @@ mod tests {
             local_personal: None,
             quest_world: None,
             worldgen_version: None,
+            authority_clock: None,
         };
         assert_eq!(save.face_overlays.len(), 1, "one wallpaper face");
         assert_eq!(save.face_blueprints.len(), 1, "one blueprint face");
@@ -6664,6 +6702,7 @@ mod tests {
             local_personal: None,
             quest_world: None,
             worldgen_version: None,
+            authority_clock: None,
         };
 
         // Encode, then decode through the REAL production path.
@@ -6843,6 +6882,7 @@ mod tests {
             local_personal: None,
             quest_world: None,
             worldgen_version: None,
+            authority_clock: None,
         };
         let bytes = bincode::serialize(&save).unwrap();
         let back: WorldSave = bincode::deserialize(&bytes).unwrap();
@@ -7480,9 +7520,10 @@ mod tests {
         let dir = world_dir("w");
         fs::create_dir_all(&dir).unwrap();
         save_world_meta("w", &WorldMeta::new("w")).unwrap();
-        // Cut the newest tail field (`rig_clips`) mid-length-prefix.
+        // Cut `rig_clips` mid-length-prefix (the four `Option`s after it are one
+        // byte each, so 5 lands one byte into its prefix).
         let mut bytes = bincode::serialize(&minimal_world_save_for_tests(9)).unwrap();
-        bytes.truncate(bytes.len() - 4);
+        bytes.truncate(bytes.len() - 5);
         fs::write(dir.join("world.dat"), &bytes).unwrap();
 
         let mut world = World::new();
@@ -7600,14 +7641,14 @@ mod tests {
     fn older_version_footer_is_stripped_before_the_tail_decode() {
         // Accepted c280f41f wrote 52 fields, layout revision 0, footer 52.
         // Its last field was rig_clips; the later optional positional fields are
-        // local_personal, quest_world and worldgen_version. No new nested mob carrier enters this fixture.
-        assert_eq!(crate::save_format::WORLD_SAVE_FIELD_COUNT, 55, "re-find the known 52-field fixture if another field appends");
+        // local_personal, quest_world, worldgen_version and authority_clock. No new nested mob carrier enters this fixture.
+        assert_eq!(crate::save_format::WORLD_SAVE_FIELD_COUNT, 56, "re-find the known 52-field fixture if another field appends");
         let mut save = minimal_world_save_for_tests(9);
         save.rig_clips = vec![crate::anim_set::AnimClip::Bounce];
         assert!(save.saved_mobs.is_empty());
         assert!(save.local_personal.is_none());
-        let appended_none = bincode::serialize(&(&save.local_personal, &save.quest_world, &save.worldgen_version)).unwrap();
-        assert_eq!(appended_none, [0, 0, 0], "the three appended optional fields each encode None as one byte");
+        let appended_none = bincode::serialize(&(&save.local_personal, &save.quest_world, &save.worldgen_version, &save.authority_clock)).unwrap();
+        assert_eq!(appended_none, [0, 0, 0, 0], "the four appended optional fields each encode None as one byte");
         let mut bytes = bincode::serialize(&save).unwrap();
         assert!(bytes.ends_with(&appended_none));
         bytes.truncate(bytes.len() - appended_none.len());
@@ -7665,6 +7706,18 @@ mod tests {
         save.local_personal = Some(crate::personal_value::LocalPersonalSave(vec![3, 9, 8, 7]));
         save.quest_world = Some(crate::quest_npcs::QuestWorldSave { scope: [7; 16], npcs: Vec::new() });
         save.worldgen_version = Some(3);
+        save.authority_clock = Some(crate::sim_clock::SavedClock {
+            tick_counter: 5,
+            world_time: 7,
+            rain_until: 0,
+            storm_until: 0,
+            weather_lock_applied: None,
+            nights: 1,
+            was_night: Some(false),
+            calendar_id: [2; 16],
+            day_remainder: 7,
+            day_last_tick: Some(5),
+        });
         save
     }
 
@@ -7675,13 +7728,14 @@ mod tests {
         let save = save_with_populated_tail(seed);
         let mut expected = save_with_populated_tail(seed);
         let mut body = bincode::serialize(&save).unwrap();
-        for index in (n + 1..=55).rev() {
+        for index in (n + 1..=56).rev() {
             let len = match index {
+                56 => { expected.authority_clock = None; bincode::serialize(&save.authority_clock).unwrap().len() }
                 55 => { expected.worldgen_version = None; bincode::serialize(&save.worldgen_version).unwrap().len() }
                 54 => { expected.quest_world = None; bincode::serialize(&save.quest_world).unwrap().len() }
                 53 => { expected.local_personal = None; bincode::serialize(&save.local_personal).unwrap().len() }
                 52 => { expected.rig_clips = Vec::new(); bincode::serialize(&save.rig_clips).unwrap().len() }
-                other => panic!("fixture only knows fields 52..=55, not {other}"),
+                other => panic!("fixture only knows fields 52..=56, not {other}"),
             };
             body.truncate(body.len() - len);
         }
@@ -7765,7 +7819,7 @@ mod tests {
     #[test]
     fn regression_padded_or_unknown_footer_bodies_are_still_refused() {
         let seed = 24;
-        let (_, body) = writer_with_fields(seed, 55);
+        let (_, body) = writer_with_fields(seed, 56);
         // Trailing bytes past the last field (not the footer) are not a clean body.
         let mut padded = body.clone();
         padded.push(0);
@@ -7807,11 +7861,11 @@ mod tests {
             "world folder write"
         );
         assert!(
-            save_world("w", &World::new(), std::slice::from_ref(&slot), 1, &[], &[], None).is_err(),
+            save_world("w", &World::new(), std::slice::from_ref(&slot), 1, &[], &[], None, None).is_err(),
             "save"
         );
         assert!(
-            autosave_world("w", &World::new(), std::slice::from_ref(&slot), 1, &[], &[], None).is_err(),
+            autosave_world("w", &World::new(), std::slice::from_ref(&slot), 1, &[], &[], None, None).is_err(),
             "autosave"
         );
         assert!(
@@ -7871,10 +7925,10 @@ mod tests {
             .unwrap();
         assert_eq!(file_footer_version(&world_dir("a").join("world.dat")), current, "write_world_folder");
 
-        save_world("b", &World::new(), std::slice::from_ref(&slot), 1, &[], &[], None).unwrap();
+        save_world("b", &World::new(), std::slice::from_ref(&slot), 1, &[], &[], None, None).unwrap();
         assert_eq!(file_footer_version(&world_dir("b").join("world.dat")), current, "save_world");
 
-        autosave_world("c", &World::new(), std::slice::from_ref(&slot), 1, &[], &[], None).unwrap();
+        autosave_world("c", &World::new(), std::slice::from_ref(&slot), 1, &[], &[], None, None).unwrap();
         assert_eq!(
             file_footer_version(&world_dir("c").join("autosave").join("world.dat")),
             current,

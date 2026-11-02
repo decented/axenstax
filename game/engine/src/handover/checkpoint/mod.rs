@@ -67,6 +67,9 @@ fn validate_neutral(save: &WorldSave) -> Result<()> {
     if !save.waypoints.is_empty() || save.satoshi != Default::default() {
         return Err(Error::Invalid("source-local player state"));
     }
+    if save.authority_clock.as_ref().is_some_and(|clock| !clock.is_valid()) {
+        return Err(Error::Invalid("world clock out of range"));
+    }
     // Anything still owned or kept by seat number would land on whoever
     // becomes seat 0 on the recipient: the session maps proven seat 0 to
     // its npub first, so a remaining seat owner means it was never mapped.

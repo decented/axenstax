@@ -106,6 +106,8 @@ fn a_weather_lock_pins_and_releases_on_the_authority_and_the_workshop_never_rain
         tick_counter: h.clock.tick_counter,
         weather: h.clock.weather,
         weather_lock_applied: None,
+        night_calendar: h.clock.night_calendar,
+        calendar_id: h.clock.calendar_id,
     };
     let phase = |hs: &mut HostedServer, host: &mut OwnedSimParts, tally: &mut crate::sim_lend::SimTally, has_weather: bool, lock: Option<&'static str>| {
         let back = hs.server.run_clock_phase(&seed(host), has_weather, lock, tally).expect("one phase");

@@ -478,6 +478,7 @@ mod tests {
             local_personal: None,
             quest_world: None,
             worldgen_version: None,
+            authority_clock: None,
         }
     }
 

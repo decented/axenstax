@@ -205,6 +205,7 @@ fn save_load_round_trip_preserves_active_raid_and_treasury() {
         local_personal: None,
         quest_world: None,
         worldgen_version: None,
+        authority_clock: None,
     };
     let bytes = bincode::serialize(&save).expect("serialize");
     let back: crate::save::WorldSave = bincode::deserialize(&bytes).expect("deserialize");
@@ -480,6 +481,7 @@ fn raid_kills_round_trip_through_world_save() {
         local_personal: None,
         quest_world: None,
         worldgen_version: None,
+        authority_clock: None,
     };
     let bytes = bincode::serialize(&save).expect("serialize");
     let back: crate::save::WorldSave = bincode::deserialize(&bytes).expect("deserialize");

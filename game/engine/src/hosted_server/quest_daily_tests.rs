@@ -186,17 +186,18 @@ fn d2c3_offline_reconnect_and_server_restart_preserve_scores_without_day_catch_u
     room.leave(rejoined);
     room.host.server.try_save().unwrap();
     let stored = room.saved(key(secret)).personal.unwrap().record().unwrap();
+    let saved_day = room.host.server.reputation_day.remainder();
     let mut room = room.restart();
     assert_ne!(room.host.server.reputation_day.owner(), owner);
     assert_eq!(
         room.host.server.reputation_day.remainder(),
-        1,
-        "only the actual restart tick accrued"
+        saved_day + 1,
+        "the day carries on from the save (Keep slice 2a): only the actual restart tick accrued"
     );
     let actor = room.connect(Some(secret), [54; 32]);
     assert_eq!(score(&room.record(actor)), score(&stored));
     let context = room.record(actor).context;
-    while room.host.server.tick_counter < 23_999 {
+    while room.host.server.reputation_day.remainder() < 23_999 {
         room.tick();
         assert_eq!(score(&room.record(actor)), score(&stored));
     }

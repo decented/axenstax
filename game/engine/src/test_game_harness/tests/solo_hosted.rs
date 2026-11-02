@@ -101,8 +101,10 @@ fn save_and_reopen(seats: usize) {
     let after: Vec<u32> = game.state.players.iter().map(|p| stone_in(&p.inventory)).collect();
     assert_eq!(after, before);
     assert_eq!(game.state.session_mode(), SessionMode::LocalAuthority);
-    assert_eq!(server_tick(&game), 0, "a reopen gets fresh authority state");
+    assert_eq!(server_tick(&game), 0, "a reopen's authority has not ticked yet");
+    let saved_tick = game.state.tick_counter;
     assert_one_sim(&game.logical_ticks(2));
+    assert!(server_tick(&game) >= saved_tick, "then its wire tick carries on from the saved clock");
     assert_eq!(game.state.hosted_server.as_ref().unwrap().server.players.len(), seats);
 }
 
@@ -561,4 +563,53 @@ fn game_harness_solo_hosted_real_time_commands_reach_the_authority() {
     assert_ne!(night, 18_008, "a keyword set lands too");
     assert_one_sim(&game.logical_ticks(1));
     assert_eq!(authority(&game).world_time, (night + 8) % 24_000);
+}
+
+/// Keep slice 2a — a world's clock across a reopen, through the real load: both
+/// ways a single-player world runs. Standalone has no server, and the bug was
+/// there too; a local authority gets the saved calendar from its host client.
+fn clock_survives_a_reopen(name: &str, mut game: HeadlessGame) {
+    game.logical_ticks(2);
+    let bounty_tick = crate::bounty::BOUNTY_REFRESH_TICKS * 3 + 5;
+    game.state.tick_counter = bounty_tick;
+    game.state.world_time = 15_000;
+    game.state.weather_rain_until = bounty_tick + 1_000;
+    game.state.night_calendar = crate::item_actions::NightCalendar::from_saved(12, Some(true));
+    game.state.reputation_day.resume(15_000, Some(bounty_tick));
+    if let Some(hs) = game.state.hosted_server.as_mut() {
+        hs.server.night_calendar = game.state.night_calendar;
+        hs.server.tick_counter = bounty_tick;
+        hs.server.world_time = 15_000;
+    }
+    assert!(game.state.leave_world(crate::world_exit::SaveChoice::Save, crate::world_exit::ExitTo::Lobby));
+    game.reopen_world(name);
+    assert_eq!(game.state.tick_counter, bounty_tick);
+    assert_eq!(game.state.world_time, 15_000);
+    assert_eq!(game.state.weather_rain_until, bounty_tick + 1_000);
+    assert_eq!(game.state.night_calendar.tonight(), 12);
+    assert_eq!(game.state.reputation_day.saved(), (15_000, Some(bounty_tick)));
+    game.logical_ticks(1);
+    assert_eq!(game.state.tick_counter, bounty_tick + 1, "one step on from the save");
+    if let Some(hs) = game.state.hosted_server.as_ref() {
+        assert_eq!(hs.server.tick_counter, bounty_tick + 1, "the authority took it");
+        assert_eq!(hs.server.night_calendar.tonight(), 12);
+    }
+}
+
+#[test]
+#[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+fn game_harness_standalone_save_carries_the_clock_across_a_reopen() {
+    isolate_saves();
+    let name = unique("clock-standalone");
+    let game = HeadlessGame::boot_into_world(&name);
+    assert!(game.state.hosted_server.is_none());
+    clock_survives_a_reopen(&name, game);
+}
+
+#[test]
+#[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+fn game_harness_solo_hosted_save_carries_the_clock_across_a_reopen() {
+    let (name, game) = solo("clock-solo");
+    assert!(game.state.hosted_server.is_some());
+    clock_survives_a_reopen(&name, game);
 }

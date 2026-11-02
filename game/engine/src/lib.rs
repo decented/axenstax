@@ -1175,8 +1175,14 @@ pub(crate) struct GameState {
     /// World-time advance per tick. 1 = standard 20-min day; 4 = 5-min alpha day.
     /// Configurable at runtime via `/time speed <n>`.
     pub(crate) world_time_step: u32,
-    /// Runtime-only natural reputation day; never a saved player or phase clock.
+    /// The natural reputation day: its progress is saved with the world's
+    /// clock (`sim_clock::SavedClock`), never as a player's or a phase clock.
     pub(crate) reputation_day: crate::reputation_day::DayClock,
+    /// Keep slice 2a — the world's count of nights, kept here so a save has it.
+    /// On a lent world this is the server's, read back with its clock.
+    pub(crate) night_calendar: crate::item_actions::NightCalendar,
+    /// Which calendar `night_calendar` counts in (`GameServer::calendar_id`).
+    pub(crate) calendar_id: [u8; 16],
     pub(crate) reputation_day_offer: Option<crate::reputation_day::DayOffer>,
     /// Monotonic tick counter — never wraps. Used for UI timestamps where
     /// `world_time` (5-min wrap on alpha) would alias.
@@ -1279,7 +1285,7 @@ pub(crate) struct GameState {
     /// PREVIOUS tick, so the loop can tell a lock being held from one being
     /// released. A pinned window is re-stamped a full in-game minute ahead every
     /// tick; without this the residue would sit there for up to 60 s after the
-    /// trial ended (`weather::apply_lock`). Ephemeral, like the window itself.
+    /// trial ended (`weather::apply_lock`). Saved with the window.
     pub(crate) weather_lock_applied: Option<String>,
     /// Wind, Copper & Electricity wave §2.3 — the sea-level wind sample for the
     /// current tick, taken once in the power step and read back by the render
@@ -2071,6 +2077,8 @@ impl GameState {
             // via `/time speed <n>` for testing.
             world_time_step: 1,
             reputation_day: crate::reputation_day::DayClock::new(),
+            night_calendar: Default::default(),
+            calendar_id: crate::sim_clock::fresh_calendar_id(),
             reputation_day_offer: None,
             tick_counter: 0,
             pop_epoch_id: 0,

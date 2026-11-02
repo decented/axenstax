@@ -312,8 +312,9 @@ pub fn bed_spawn(bed: [i32; 3]) -> Vec3 {
 /// raw clock, and the clock passing from day into night starts the next
 /// night. Raw, not time-locked: a night-locked world's beds are always
 /// usable ([`is_night`]), and its raw cycle still counts nights, so a joiner
-/// sleeps there once a cycle. Not saved: a restart starts at night 0, and so
-/// do the players' marks (they are per connection).
+/// sleeps there once a cycle. Saved with the world (`sim_clock::SavedClock`);
+/// a world without a saved clock starts at night 0 under a new calendar id,
+/// which is what makes a joiner's saved night number mean nothing there.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NightCalendar {
     nights: u32,
@@ -333,6 +334,16 @@ impl NightCalendar {
     /// The night it is (or, by day, the last one).
     pub fn tonight(&self) -> u32 {
         self.nights
+    }
+
+    /// As a save carries it.
+    pub fn saved(&self) -> (u32, Option<bool>) {
+        (self.nights, self.was_night)
+    }
+
+    /// Back from a save.
+    pub fn from_saved(nights: u32, was_night: Option<bool>) -> Self {
+        Self { nights, was_night }
     }
 }
 

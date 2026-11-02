@@ -204,7 +204,8 @@ pub fn draw_rain_overlay(
         let x = vp.x + (hsh % w) as f32;
         let speed = 6.0 + ((hsh >> 5) % 40) as f32 * 0.15;
         let seed = ((hsh >> 11) % 1000) as f32;
-        let y = vp.y + ((tick as f32 * speed + seed) % span) - 12.0;
+        // Wrapped first: a saved world's tick grows past what an f32 counts in ones.
+        let y = vp.y + (((tick % (1 << 20)) as f32 * speed + seed) % span) - 12.0;
         painter.line_segment([egui::pos2(x, y), egui::pos2(x - 2.5, y + 13.0)], stroke);
     }
     // Indicator (plain text — the egui font may lack weather glyphs).

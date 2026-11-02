@@ -26,6 +26,13 @@
 //!
 //! Everything here is pure (no `GameState`, no `GameServer`), so one set of
 //! functions serves all three.
+//!
+//! **What a save keeps** ([`SavedClock`], Keep slice 2a, Spec 02 §8.4): all of
+//! the above except a pending lightning strike, which is rolled and landed in
+//! one tick so none outlives it. The `/time speed` step is a runtime override
+//! and goes back to 1 on every world entry, as it always has.
+
+use serde::{Deserialize, Serialize};
 
 use crate::item_actions::NightCalendar;
 use crate::weather::Weather;
@@ -33,6 +40,56 @@ use crate::world::World;
 
 /// Ticks in one day of `world_time`.
 pub const DAY_TICKS: u32 = 24_000;
+
+/// The largest `tick_counter` a save may restore: years past anything a world
+/// reaches at 20 TPS, and far enough from `u64::MAX` that nothing keyed on the
+/// tick can overflow.
+const MAX_SAVED_TICK: u64 = 1 << 56;
+
+/// The longest trial weather lock a save may restore (a scenario's lock name).
+const MAX_SAVED_LOCK_LEN: usize = 64;
+
+/// A world's authority clock as `world.dat` carries it
+/// (`WorldSave.authority_clock`). Positional bincode inside an append-only
+/// field: a change here moves `save_format::SAVE_LAYOUT_REVISION`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedClock {
+    pub tick_counter: u64,
+    pub world_time: u32,
+    pub rain_until: u64,
+    pub storm_until: u64,
+    pub weather_lock_applied: Option<String>,
+    pub nights: u32,
+    pub was_night: Option<bool>,
+    /// Which run of [`NightCalendar`] `nights` counts in. A joiner record's
+    /// night number means something only under the same id
+    /// (`JoinerSave::restore_vitals`): a world whose calendar restarted (an
+    /// old save) has a new one, so old night numbers are ignored.
+    pub calendar_id: [u8; 16],
+    /// The reputation day's progress (`reputation_day::DayClock`); its owner
+    /// is per run and is drawn afresh.
+    pub day_remainder: u32,
+    pub day_last_tick: Option<u64>,
+}
+
+impl SavedClock {
+    /// Could a build have written this? A clock that fails (a damaged or
+    /// hostile file) is not restored: the world loads as an old save does.
+    pub fn is_valid(&self) -> bool {
+        self.tick_counter <= MAX_SAVED_TICK
+            && self.world_time < DAY_TICKS
+            && self.day_remainder < crate::reputation_day::SOLAR_UNITS_PER_DAY
+            && self.day_last_tick.is_none_or(|t| t <= self.tick_counter)
+            && self.weather_lock_applied.as_ref().is_none_or(|l| l.len() <= MAX_SAVED_LOCK_LEN)
+    }
+}
+
+/// A new calendar's identity.
+pub fn fresh_calendar_id() -> [u8; 16] {
+    let mut id = [0; 16];
+    getrandom::fill(&mut id).expect("calendar randomness unavailable");
+    id
+}
 
 /// Radius (blocks, each axis) round the anchor a strike lands in.
 const STRIKE_SPREAD: u64 = 49;
@@ -101,6 +158,8 @@ pub struct ClockSeed {
     pub tick_counter: u64,
     pub weather: Weather,
     pub weather_lock_applied: Option<String>,
+    pub night_calendar: NightCalendar,
+    pub calendar_id: [u8; 16],
 }
 
 /// The authority's clock after a lent world's phase, read back into its host
@@ -112,6 +171,7 @@ pub struct ClockReadback {
     pub tick_counter: u64,
     pub weather: Weather,
     pub weather_lock_applied: Option<String>,
+    pub night_calendar: NightCalendar,
     /// The day-clock step the phase applied.
     pub stepped: u32,
 }

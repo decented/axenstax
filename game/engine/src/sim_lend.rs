@@ -296,6 +296,8 @@ pub struct HostClock {
     pub(crate) reputation_owner: crate::reputation_day::OwnerId,
     pub(crate) reputation_offer: Option<crate::reputation_day::DayOffer>,
     pub weather: crate::weather::Weather,
+    pub night_calendar: crate::item_actions::NightCalendar,
+    pub calendar_id: [u8; 16],
 }
 
 /// RAII lend: swaps the host's [`SimParts`] into the hosted server's
@@ -319,6 +321,8 @@ impl<'a> LentSim<'a> {
             tick_counter: clock.tick_counter,
             weather: clock.weather,
             weather_lock_applied: None,
+            night_calendar: clock.night_calendar,
+            calendar_id: clock.calendar_id,
         });
         server.lent_day_owner = Some(parts.reputation_owner);
         server.lent_day_offer = clock.reputation_offer.filter(|offer| {
@@ -417,6 +421,8 @@ impl OwnedSimParts {
                 reputation_owner: reputation_day.owner(),
                 reputation_offer: None,
                 weather: s.weather,
+                night_calendar: s.night_calendar,
+                calendar_id: s.calendar_id,
             },
             reputation_day,
             events: Vec::new(),
@@ -444,6 +450,8 @@ impl OwnedSimParts {
             tick_counter: self.clock.tick_counter,
             weather: self.clock.weather,
             weather_lock_applied: None,
+            night_calendar: self.clock.night_calendar,
+            calendar_id: self.clock.calendar_id,
         };
         let has_weather = crate::weather::world_has_weather(self.world.is_workshop);
         let back = hs
@@ -574,6 +582,8 @@ mod tests {
                 reputation_owner: reputation_day.owner(),
                 reputation_offer: None,
                 weather: crate::weather::Weather::CLEAR,
+                night_calendar: Default::default(),
+                calendar_id: [1; 16],
             },
             reputation_day,
             events: Vec::new(),
@@ -735,6 +745,8 @@ mod tests {
             tick_counter: host.clock.tick_counter,
             weather: host.clock.weather,
             weather_lock_applied: None,
+            night_calendar: host.clock.night_calendar,
+            calendar_id: host.clock.calendar_id,
         }
     }
 
