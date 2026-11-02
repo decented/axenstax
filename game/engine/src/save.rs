@@ -2491,7 +2491,7 @@ fn decode_bounded<T: serde::de::DeserializeOwned>(
 /// when the cursor is already at a clean end-of-stream — i.e. an OLDER engine stopped
 /// at this exact field boundary, so the field is genuinely absent. If bytes REMAIN,
 /// the field IS present in the stream: decode it and propagate ANY error, including a
-/// mid-field `UnexpectedEof`.
+/// field cut off part-way (which [`decode_bounded`] reports as `SizeLimit`).
 ///
 /// The mid-field-EOF distinction is load-bearing. A genuine legacy stream (or
 /// corruption) whose bytes are a DIFFERENT shape must propagate so `read_world_save`
