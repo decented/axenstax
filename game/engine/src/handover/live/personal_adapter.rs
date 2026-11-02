@@ -194,7 +194,7 @@ pub(crate) fn load_or_bootstrap(
     let bytes = read_regular(&target, crate::joiner_save::MAX_JOINER_SAVE_BYTES)?;
     let mut save = JoinerSave::decode(&bytes)?;
     let binding = proof.binding(key);
-    if matches!(bytes.first(), Some(3 | 4)) {
+    if matches!(bytes.first(), Some(3..=5)) {
         let current = save
             .personal
             .as_ref()
@@ -279,7 +279,7 @@ fn scan_bound_records(world: &Path, imported_only: bool) -> Result<bool, String>
             continue;
         }
         let bytes = read_regular(&entry.path(), crate::joiner_save::MAX_JOINER_SAVE_BYTES)?;
-        if matches!(bytes.first(), Some(3 | 4)) && JoinerSave::decode(&bytes)?.personal.is_some_and(|p| !imported_only || p.binding.imported().is_some()) {
+        if matches!(bytes.first(), Some(3..=5)) && JoinerSave::decode(&bytes)?.personal.is_some_and(|p| !imported_only || p.binding.imported().is_some()) {
             return Ok(true);
         }
     }

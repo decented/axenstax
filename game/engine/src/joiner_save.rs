@@ -5,9 +5,15 @@
 //! window (`window_events::effective_window_and_debt`), and an
 //! [`ObligationHistory`] saying whether that debt is the whole story. A v1
 //! save (which held no debt) still loads, with empty debt and
-//! `Incomplete(LegacyV1)`; the mutable writer always writes v4. The record is read by
+//! `Incomplete(LegacyV1)`; the mutable writer always writes v5. The record is read by
 //! dispatching on its leading version byte, never by trying one layout and
 //! falling back. Spec: `docs/architecture/2026-10-09-sidecar-obligation-carrier.md`.
+//!
+//! v5 (Keep slice 2a, Spec 04 §4.2i) — the joiner's position and look when it
+//! was saved, after everything v4 held. A v4 record reads as having none, and
+//! its joiner goes back to its spawn. The field v4 and before called `run_id`
+//! has always named the clock its night number counts in, which is now
+//! [`crate::server::GameServer::calendar_id`].
 use crate::{
     container_window::{CorrectionDebt, MAX_CARRIED_DEBT},
     item::{Item, ItemStack},
@@ -19,7 +25,8 @@ use crate::personal_value::PersonalContext;
 use crate::personal_value::LocalPersonalSave;
 
 /// The layout the writer writes (OC).
-const VERSION: u8 = 4;
+const VERSION: u8 = 5;
+const VERSION_V4: u8 = 4;
 const VERSION_V3: u8 = 3;
 const VERSION_V2: u8 = 2;
 /// The Sidecar layout (protocol v87), still read ([`JoinerSaveV1`]).
@@ -240,6 +247,36 @@ pub(crate) struct JoinerSaveV2 {
     obligation_history: ObligationHistory,
 }
 
+/// Exact delivered v4 body, read and upgraded ([`JoinerSave::from_v4`]).
+#[derive(Serialize, Deserialize)]
+struct JoinerSaveV4 {
+    version: u8,
+    slots: Vec<Slot>,
+    armour: [Option<crate::save::SavedArmourPiece>; 4],
+    health: f32,
+    hunger: u8,
+    spawn: [f32; 3],
+    run_id: [u8; 16],
+    slept_night: Option<u32>,
+    owed: Vec<OwedEntry>,
+    obligation_history: ObligationHistory,
+    personal: Option<BoundPersonal>,
+}
+
+/// v5 — where a joiner's body was and which way it looked.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct JoinerPose {
+    pub pos: [f32; 3],
+    pub yaw: f32,
+    pub pitch: f32,
+}
+
+impl JoinerPose {
+    fn is_finite(&self) -> bool {
+        self.pos.iter().all(|v| v.is_finite()) && self.yaw.is_finite() && self.pitch.is_finite()
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub(crate) struct JoinerSave {
     version: u8,
@@ -248,7 +285,8 @@ pub(crate) struct JoinerSave {
     pub health: f32,
     pub hunger: u8,
     pub spawn: [f32; 3],
-    run_id: [u8; 16],
+    /// Which calendar `slept_night` counts in (`GameServer::calendar_id`).
+    calendar_id: [u8; 16],
     slept_night: Option<u32>,
     /// v2 — the effective correction debt, in live order, at most
     /// [`MAX_CARRIED_DEBT`] entries.
@@ -257,6 +295,10 @@ pub(crate) struct JoinerSave {
     obligation_history: ObligationHistory,
     /// One atomic record owns the mutable window and personal maps.
     pub(crate) personal: Option<BoundPersonal>,
+    /// v5 — the body when it was saved. `None`: a record from before v5, a seat
+    /// with no server body to keep (a local seat), or a dead body (it respawns
+    /// at its spawn anyway).
+    pose: Option<JoinerPose>,
 }
 
 impl JoinerSave {
@@ -269,7 +311,7 @@ impl JoinerSave {
         health: f32,
         hunger: u8,
         spawn: [f32; 3],
-        run_id: [u8; 16],
+        calendar_id: [u8; 16],
         slept_night: Option<u32>,
     ) -> Self {
         let slots = (0..36)
@@ -290,11 +332,12 @@ impl JoinerSave {
             health,
             hunger,
             spawn,
-            run_id,
+            calendar_id,
             slept_night,
             owed: Vec::new(),
             obligation_history: ObligationHistory::Complete,
             personal: None,
+            pose: None,
         }
     }
 
@@ -306,24 +349,28 @@ impl JoinerSave {
     /// debt passes the bound, `window_events`); the save never fails over it.
     /// The live clock projects all remaining timers at this save boundary.
     /// Failure refuses the canonical write; the current source remains intact.
-    pub(crate) fn capture_projected(sp: &crate::server::ServerPlayer, run_id: [u8; 16]) -> Result<Self, String> {
-        let mut saved = Self::capture(sp, run_id);
+    pub(crate) fn capture_projected(sp: &crate::server::ServerPlayer, calendar_id: [u8; 16]) -> Result<Self, String> {
+        let mut saved = Self::capture(sp, calendar_id);
         if let Some(personal) = &sp.personal {
             let record = sp.gameplay_clock.captured(&personal.record()?);
             saved.personal = Some(BoundPersonal::with_gameplay(personal.binding.clone(), &record)?);
         }
         Ok(saved)
     }
-    pub fn capture(sp: &crate::server::ServerPlayer, run_id: [u8; 16]) -> Self {
+    pub fn capture(sp: &crate::server::ServerPlayer, calendar_id: [u8; 16]) -> Self {
         let fold = crate::window_events::effective_window_and_debt(sp);
         let mut save = Self::from_parts(
             &fold.window,
             sp.combat.health,
             sp.combat.hunger,
             sp.spawn_pos.to_array(),
-            run_id,
+            calendar_id,
             sp.slept_night,
         );
+        // A body that isn't finite is not saved as one (the record would be
+        // refused whole): it goes back to its spawn.
+        save.pose = Some(JoinerPose { pos: sp.player.pos.to_array(), yaw: sp.yaw, pitch: sp.pitch })
+            .filter(|pose| !sp.combat.dead && pose.is_finite());
         let (carried, dropped) = fold.debt.carried();
         let mut history = sp.obligations;
         if dropped > 0 || fold.saturated {
@@ -380,6 +427,10 @@ impl JoinerSave {
             Some(&VERSION) => options()
                 .deserialize::<JoinerSave>(bytes)
                 .map_err(|e| e.to_string())?,
+            Some(&VERSION_V4) => {
+                let old: JoinerSaveV4 = options().deserialize(bytes).map_err(|e| e.to_string())?;
+                Self::from_v4(old)?
+            }
             Some(&VERSION_V3) => {
                 let old: JoinerSaveV3 = options().deserialize(bytes).map_err(|e| e.to_string())?;
                 Self::from_v3(old)?
@@ -404,6 +455,13 @@ impl JoinerSave {
         Ok(saved)
     }
 
+    fn from_v4(old: JoinerSaveV4) -> Result<Self, String> {
+        if old.version != VERSION_V4 { return Err("invalid v4 joiner save".into()); }
+        Ok(Self { version: VERSION, slots: old.slots, armour: old.armour, health: old.health,
+            hunger: old.hunger, spawn: old.spawn, calendar_id: old.run_id, slept_night: old.slept_night,
+            owed: old.owed, obligation_history: old.obligation_history, personal: old.personal, pose: None })
+    }
+
     fn from_v3(old: JoinerSaveV3) -> Result<Self, String> {
         if old.version != VERSION_V3 { return Err("invalid v3 joiner save".into()); }
         let personal = match old.personal {
@@ -415,8 +473,8 @@ impl JoinerSave {
 
         };
         Ok(Self { version: VERSION, slots: old.slots, armour: old.armour, health: old.health,
-            hunger: old.hunger, spawn: old.spawn, run_id: old.run_id, slept_night: old.slept_night,
-            owed: old.owed, obligation_history: old.obligation_history, personal })
+            hunger: old.hunger, spawn: old.spawn, calendar_id: old.run_id, slept_night: old.slept_night,
+            owed: old.owed, obligation_history: old.obligation_history, personal, pose: None })
     }
 
     pub(crate) fn from_v1(v1: JoinerSaveV1) -> Result<Self, String> {
@@ -430,11 +488,12 @@ impl JoinerSave {
             health: v1.health,
             hunger: v1.hunger,
             spawn: v1.spawn,
-            run_id: v1.run_id,
+            calendar_id: v1.run_id,
             slept_night: v1.slept_night,
             owed: Vec::new(),
             obligation_history: ObligationHistory::Incomplete(IncompleteCause::LegacyV1),
             personal: None,
+            pose: None,
         })
     }
 
@@ -446,11 +505,12 @@ impl JoinerSave {
             health: v2.health,
             hunger: v2.hunger,
             spawn: v2.spawn,
-            run_id: v2.run_id,
+            calendar_id: v2.run_id,
             slept_night: v2.slept_night,
             owed: v2.owed,
             obligation_history: v2.obligation_history,
             personal: None,
+            pose: None,
         }
     }
 
@@ -467,7 +527,7 @@ impl JoinerSave {
             health: self.health,
             hunger: self.hunger,
             spawn: self.spawn,
-            run_id: self.run_id,
+            run_id: self.calendar_id,
             slept_night: self.slept_night,
             owed: self.owed.clone(),
             obligation_history: self.obligation_history,
@@ -484,6 +544,7 @@ impl JoinerSave {
             || !(0.0..=20.0).contains(&self.health)
             || self.hunger > 20
             || self.spawn.iter().any(|v| !v.is_finite())
+            || self.pose.is_some_and(|pose| !pose.is_finite())
         {
             return Err("invalid or unsupported joiner save".into());
         }
@@ -537,15 +598,21 @@ impl JoinerSave {
         self.obligation_history == ObligationHistory::Complete && self.owed.is_empty()
     }
 
+    /// v5 — where the body was when this was saved, if the record says.
+    pub(crate) fn pose(&self) -> Option<JoinerPose> {
+        self.pose
+    }
+
     /// Restore the vitals onto joiner `sp`'s body, and the save's obligation
     /// history onto its session (`ServerPlayer::obligations`: an incomplete
-    /// save makes the session incomplete, keeping a cause already there).
-    pub fn restore_vitals(&self, sp: &mut crate::server::ServerPlayer, run_id: [u8; 16]) {
+    /// save makes the session incomplete, keeping a cause already there). Its
+    /// night number stands only under the calendar it was counted in.
+    pub fn restore_vitals(&self, sp: &mut crate::server::ServerPlayer, calendar_id: [u8; 16]) {
         sp.combat.health = self.health;
         sp.combat.hunger = self.hunger;
         sp.combat.dead = self.health <= 0.0;
         sp.death_handled = sp.combat.dead;
-        sp.slept_night = (self.run_id == run_id)
+        sp.slept_night = (self.calendar_id == calendar_id)
             .then_some(self.slept_night)
             .flatten();
         sp.obligations.merge(self.obligation_history);
@@ -613,7 +680,7 @@ impl crate::server::GameServer {
                 .map_err(|e| e.to_string())
                 .and_then(|mut file| {
                     let mut leading = [0];
-                    current_v3 = std::io::Read::read(&mut file, &mut leading).map_err(|e| e.to_string())? == 1 && matches!(leading[0], 3 | 4);
+                    current_v3 = std::io::Read::read(&mut file, &mut leading).map_err(|e| e.to_string())? == 1 && matches!(leading[0], 3..=VERSION);
                     std::io::Seek::rewind(&mut file).map_err(|e| e.to_string())?;
                     crate::save::read_bounded(file, MAX_JOINER_SAVE_BYTES)
                 })
@@ -667,7 +734,7 @@ impl crate::server::GameServer {
         }
         // M-1: never written into a retired world (or a refused one).
         crate::save::refuse_write_over_newer_save(&crate::save::world_dir(&self.world_name))?;
-        let saved = JoinerSave::capture_projected(sp, self.run_id)?;
+        let saved = JoinerSave::capture_projected(sp, self.calendar_id)?;
         saved.encode()?;
         crate::handover::live::personal_adapter::write(&crate::save::world_dir(&self.world_name), pk, &saved)
     }
@@ -995,7 +1062,7 @@ mod oc_tests {
             health: save.health,
             hunger: save.hunger,
             spawn: save.spawn,
-            run_id: save.run_id,
+            run_id: save.calendar_id,
             slept_night: save.slept_night,
         }
     }
@@ -1062,7 +1129,7 @@ mod oc_tests {
         assert!(next.players[0].window_events.debt.is_empty());
         next.save_joiner(0).unwrap();
         let bytes = std::fs::read(&path).unwrap();
-        assert_eq!(bytes[0], 4, "the mutable writer writes v4; legacy readers have separate fixtures");
+        assert_eq!(bytes[0], 5, "the mutable writer writes v5; legacy readers have separate fixtures");
         let resaved = JoinerSave::decode(&bytes).unwrap();
         assert_eq!(resaved.history(), ObligationHistory::Incomplete(IncompleteCause::LegacyV1), "Incomplete is sticky");
         assert!(!next.players[0].obligations_proven_zero());
@@ -1158,7 +1225,7 @@ mod oc_tests {
         let loaded = JoinerSave::decode(&V1_GOLDEN).expect("v87's bytes load");
         assert_eq!(loaded.history(), ObligationHistory::Incomplete(IncompleteCause::LegacyV1));
         assert_eq!((loaded.health, loaded.hunger, loaded.spawn), (17.5, 13, [10.5, 80.0, -20.5]));
-        assert_eq!(loaded.run_id, std::array::from_fn::<u8, 16, _>(|i| 0xa0 + i as u8));
+        assert_eq!(loaded.calendar_id, std::array::from_fn::<u8, 16, _>(|i| 0xa0 + i as u8));
         assert_eq!(loaded.slept_night, None);
         assert!(loaded.debt().unwrap().is_empty());
         assert!(loaded.window().unwrap().inv.slots_iter().all(|s| s.is_none()));
@@ -1442,6 +1509,7 @@ mod oc_tests {
         }
         let debt = CorrectionDebt::from_entries(large_items(256).into_iter().map(|i| (i, u32::MAX)).collect()).unwrap();
         let mut save = JoinerSave::from_parts(&w, 20.0, 20, [f32::MAX; 3], [255; 16], Some(u32::MAX));
+        save.pose = Some(JoinerPose { pos: [f32::MAX; 3], yaw: f32::MAX, pitch: f32::MAX });
         save.owed = debt.entries().iter().map(|(i, n)| OwedEntry::capture(i, *n)).collect();
         save.obligation_history = ObligationHistory::Incomplete(IncompleteCause::Unreadable);
         let bytes = save.encode().unwrap();
@@ -1473,7 +1541,7 @@ pub(crate) fn encode_delivered_v3(save: &JoinerSave) -> Result<Vec<u8>, String> 
         Ok::<_, String>(BoundPersonalV3 { binding, bytes: old.encode_schema1().map_err(|e| e.to_string())? })
     }).transpose()?;
     bincode::serialize(&JoinerSaveV3 { version: 3, slots: save.slots.clone(), armour: save.armour,
-        health: save.health, hunger: save.hunger, spawn: save.spawn, run_id: save.run_id,
+        health: save.health, hunger: save.hunger, spawn: save.spawn, run_id: save.calendar_id,
         slept_night: save.slept_night, owed: save.owed.clone(), obligation_history: save.obligation_history, personal })
         .map_err(|e| e.to_string())
 }
@@ -1500,7 +1568,7 @@ mod quest_codec_tests {
         let bytes = encode_delivered_v3(&original).unwrap();
         assert_eq!(bytes[0], 3);
         let back = JoinerSave::decode(&bytes).unwrap();
-        assert_eq!(back.version, 4);
+        assert_eq!(back.version, 5);
         assert_eq!(bincode::serialize(&back.slots).unwrap(), bincode::serialize(&original.slots).unwrap());
         assert_eq!(bincode::serialize(&back.owed).unwrap(), bincode::serialize(&original.owed).unwrap());
         assert_eq!(back.obligation_history, original.obligation_history);
@@ -1521,7 +1589,7 @@ mod quest_codec_tests {
         assert_eq!(v2.obligation_history, save.obligation_history);
         assert_eq!(bincode::serialize(&v2.owed).unwrap(), bincode::serialize(&save.owed).unwrap());
         let v1 = JoinerSaveV1 { version: 1, slots: save.slots.clone(), armour: save.armour,
-            health: save.health, hunger: save.hunger, spawn: save.spawn, run_id: save.run_id, slept_night: save.slept_night };
+            health: save.health, hunger: save.hunger, spawn: save.spawn, run_id: save.calendar_id, slept_night: save.slept_night };
         let back = JoinerSave::decode(&bincode::serialize(&v1).unwrap()).unwrap();
         assert_eq!(back.obligation_history, ObligationHistory::Incomplete(IncompleteCause::LegacyV1));
         assert!(back.owed.is_empty());

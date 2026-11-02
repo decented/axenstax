@@ -5221,8 +5221,22 @@ impl HostedServer {
                             // ceiling must not move onto the roof for good.
                             let owns = !self.lends_host_world();
                             let saved_spawn = glam::Vec3::from_array(saved.spawn);
-                            let body_at = self.server.safe_spawn_loading(saved_spawn, owns);
+                            // Keep slice 2a: back where it left, if a body can
+                            // stand exactly there; else as a record without a
+                            // position (on a lent world, a column the host has
+                            // not loaded can't be checked, so that too).
+                            let left_at = saved.pose().filter(|pose| {
+                                self.server.stands_clear_loading(glam::Vec3::from_array(pose.pos), owns)
+                            });
+                            let body_at = match left_at {
+                                Some(pose) => glam::Vec3::from_array(pose.pos),
+                                None => self.server.safe_spawn_loading(saved_spawn, owns),
+                            };
                             let sp = &mut self.server.players[i];
+                            if let Some(pose) = left_at {
+                                sp.yaw = pose.yaw;
+                                sp.pitch = pose.pitch;
+                            }
                             sp.spawn_pos = saved_spawn;
                             sp.player.pos = body_at;
                             sp.player.velocity = glam::Vec3::ZERO;
@@ -5333,7 +5347,16 @@ impl HostedServer {
                         if let Some(sp) = self.server.players.get_mut(i) {
                             sp.enter_world();
                         }
-                        if let Some(saved) = &saved_joiner { saved.restore_vitals(&mut self.server.players[i], self.server.run_id); }
+                        if let Some(saved) = &saved_joiner {
+                            let (calendar, tonight) = (self.server.calendar_id, self.server.night_calendar.tonight());
+                            let sp = &mut self.server.players[i];
+                            saved.restore_vitals(sp, calendar);
+                            // A record can be newer than the world it sits by
+                            // (a crash after a leave's save): a night the
+                            // calendar has not reached yet is not one it can
+                            // hold against this body when it gets there.
+                            sp.slept_night = sp.slept_night.filter(|night| *night <= tonight);
+                        }
                         // A restored dead life needs the fresh client's death screen,
                         // but its already-settled grave must not run the death hook again.
                         if self.server.players[i].combat.dead {
@@ -9789,6 +9812,9 @@ pub(crate) mod tests {
         // A spot a body can stand on: the restore keeps it as it is (`spawn_safety`).
         let spawn = hs.server.safe_spawn_loading(glam::Vec3::new(10.5, 80.0, 20.5), true); hs.server.players[i].spawn_pos = spawn;
         let expected = crate::inventory_sync::packet(&crate::window_events::effective_window(&hs.server.players[i]),&Default::default(),1);
+        // Left where no body can stand, so this is the path to the saved spawn.
+        // Where a body goes when it can is `test_integration::clock_save`.
+        hs.server.players[i].player.pos = glam::Vec3::new(10.5, 3.0, 20.5);
         let second = hs.attach_test_remote_with_binding(Some([34;32]));
         send_signed_join(&second, [66;32], Some([34;32])); hs.tick();
         let i = hs.server.players.len()-1;
@@ -9826,6 +9852,9 @@ pub(crate) mod tests {
         let saved = glam::Vec3::new(10.5, 3.0, 20.5);
         assert_ne!(hs.server.safe_spawn_loading(saved, true), saved, "the spot needs a fix-up");
         hs.server.players[i].spawn_pos = saved;
+        // The body too, so the record's position fails its check and this is
+        // the path to the spawn.
+        hs.server.players[i].player.pos = saved;
         let second = hs.attach_test_remote_with_binding(Some([35;32]));
         send_signed_join(&second, [67;32], Some([35;32])); hs.tick();
         let i = hs.server.players.len()-1;

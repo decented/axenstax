@@ -37,7 +37,7 @@ impl<'de> Deserialize<'de> for LocalPersonalSave {
                     }
                     bytes.push(byte);
                 }
-                if !matches!(bytes.first(), Some(3 | 4)) {
+                if !matches!(bytes.first(), Some(3..=5)) {
                     return Err(serde::de::Error::custom(
                         "personal snapshot has an unsupported canonical version",
                     ));
@@ -99,7 +99,7 @@ mod tests {
             bincode::deserialize::<LocalPersonalSave>(&huge).is_err(),
             "oversized sequence reached allocation"
         );
-        for bytes in [vec![], vec![1], vec![2], vec![5]] {
+        for bytes in [vec![], vec![1], vec![2], vec![6]] {
             assert!(
                 bincode::deserialize::<LocalPersonalSave>(&bincode::serialize(&bytes).unwrap())
                     .is_err(),

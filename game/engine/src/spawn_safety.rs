@@ -154,6 +154,17 @@ impl crate::server::GameServer {
         }
         fix_up(&self.world, &self.registry, pos)
     }
+
+    /// Keep slice 2a: can a body go back to exactly `pos`? [`stands_clear`],
+    /// not [`fix_up`] unchanged: `fix_up` leaves a spot in an unloaded column as
+    /// it is, because it has nothing to read.
+    pub(crate) fn stands_clear_loading(&mut self, pos: Vec3, load: bool) -> bool {
+        if !pos.is_finite() {
+            return false;
+        }
+        self.safe_spawn_loading(pos, load);
+        stands_clear(&self.world, &self.registry, pos.x.floor() as i32, pos.y.floor() as i32, pos.z.floor() as i32)
+    }
 }
 
 #[cfg(test)]
