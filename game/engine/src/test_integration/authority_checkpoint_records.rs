@@ -143,3 +143,32 @@ fn a_refusal_after_the_load_leaves_the_world_able_to_restore() {
     assert_eq!(folder_bytes(&dir), before, "the restore changed the folder");
 }
 
+/// A centre column the run let go before its first save isn't on disk. Generating
+/// it for the load could add to a table the manifest binds, so it isn't generated.
+#[test]
+fn a_restore_generates_no_column_the_folder_lacks() {
+    let _root = WorldsRootGuard::new("keep-s2b-centre");
+    let config = TestConfig { seed: SEED, world_name: "ckpt-centre".into(), do_initial_load: true, ..TestConfig::default() };
+    let mut h = TestHost::start_seeded(config, 0);
+    let biome = crate::biome::BiomeGenerator::new(SEED, h.server.world.generator);
+    h.server.world.generate_column(30, 30, &biome);
+    h.server.loaded_columns.insert((30, 30));
+    h.server.world.discard_column(0, 0);
+    h.server.loaded_columns.remove(&(0, 0));
+    h.server.water.forget_column(0, 0);
+    h.server.lava.forget_column(0, 0);
+    h.server.try_save().expect("saves");
+    let chunks = crate::save::world_dir("ckpt-centre").join("chunks");
+    assert!(
+        !std::fs::read_dir(&chunks).unwrap().flatten().any(|f| f.file_name().to_string_lossy().starts_with("0_")),
+        "column (0, 0) isn't on disk"
+    );
+    let bytes = h.server.checkpoint().expect("checkpoints");
+
+    let generated = || crate::world::COLUMNS_GENERATED.with(std::cell::Cell::get);
+    let before = generated();
+    let restored = restore(&h, &bytes).expect("restores");
+    assert_eq!(generated(), before, "the restore's load generated a column");
+    assert!(!restored.loaded_columns.contains(&(0, 0)));
+    assert!(!restored.world.has_chunk(0, 0, 0));
+}

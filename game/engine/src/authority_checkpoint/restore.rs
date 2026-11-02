@@ -70,10 +70,11 @@ impl GameServer {
         refuse_a_pending_role_cut(world_dir)?;
         let seed = u32::try_from(config.seed).map_err(|_| RestoreError::InvalidConfig("a seed past u32".into()))?;
         let mut server = GameServer::new(0, name, seed);
-        // The load generates what is missing round its centre; the layout below
-        // discards it, so it may as well be one column.
+        // The world holds what its records and layout say, so the load generates
+        // nothing: a column generated here could add to a table the manifest binds,
+        // and a good checkpoint would read as tampered.
         server.render_distance = 0;
-        server.initial_load().map_err(RestoreError::Fault)?;
+        server.initial_load_generating(false).map_err(RestoreError::Fault)?;
         if server.world.generator.version() != config.worldgen_version {
             return Err(RestoreError::InvalidConfig(format!(
                 "the world's generator is v{}, the config's v{}",

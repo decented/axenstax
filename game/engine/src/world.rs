@@ -522,6 +522,13 @@ pub(crate) struct ChunkColumnLayout {
     pub persist: bool,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many columns this thread has generated: a load that should generate
+    /// nothing can be seen to, whatever the terrain happens to hold.
+    pub(crate) static COLUMNS_GENERATED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 pub struct World {
     /// Random durable gameplay authority scope, restored from the selected snapshot.
     pub(crate) quest_scope: Option<crate::progression::GameplayId>,
@@ -2803,6 +2810,8 @@ impl World {
     /// into neighbouring chunks) never mark a chunk `persist`; a neighbour's
     /// existing `persist` flag is left as it was.
     pub fn generate_column(&mut self, cx: i32, cz: i32, biome_gen: &BiomeGenerator) {
+        #[cfg(test)]
+        COLUMNS_GENERATED.with(|n| n.set(n.get() + 1));
         self.worldgen_depth += 1;
         let top = std::mem::replace(&mut self.worldgen_top, biome_gen.max_generated_height());
         self.generate_column_inner(cx, cz, biome_gen);

@@ -1348,6 +1348,13 @@ impl GameServer {
     /// why; nothing in the folder was changed. A folder with nothing saved in it
     /// generates a fresh world as before.
     pub fn initial_load(&mut self) -> Result<(), String> {
+        self.initial_load_generating(true)
+    }
+
+    /// [`Self::initial_load`], with `generate_missing` false to leave a saved
+    /// world's missing centre columns ungenerated (a restore: its layout says
+    /// what the world holds, and generating adds to tables it binds).
+    pub(crate) fn initial_load_generating(&mut self, generate_missing: bool) -> Result<(), String> {
         // Dedicated server runs with 0 local players — fall back to the world
         // spawn so initial_load doesn't index an empty player list (gap G4).
         let spawn = self
@@ -1461,7 +1468,7 @@ impl GameServer {
                 for dz in -rd..=rd {
                     let cx = pcx + dx;
                     let cz = pcz + dz;
-                    if !self.loaded_columns.contains(&(cx, cz)) {
+                    if generate_missing && !self.loaded_columns.contains(&(cx, cz)) {
                         self.world.generate_column(cx, cz, &self.biome_gen);
                         crate::lighting::run_initial_pass_for_column(&mut self.world, cx, cz, &self.registry);
                         self.loaded_columns.insert((cx, cz));
