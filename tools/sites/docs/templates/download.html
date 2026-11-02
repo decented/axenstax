@@ -4,6 +4,10 @@
 <div class="doc-container">
     <h1>The native build</h1>
 
+    {% if download_notice %}
+    <p style="background: var(--surface); border: 1px solid var(--copper); border-radius: 8px; padding: 12px 16px; margin: 16px 0; color: var(--stone);">{{ download_notice }}</p>
+    {% endif %}
+
     <div style="background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 16px 20px; margin: 24px 0;">
         <p style="margin: 0 0 0.4rem; color: var(--copper); font-weight: 700;">The browser is the easy path.</p>
         <p style="margin: 0; color: var(--stone);">Per <a href="/docs/tech/architecture/ADR-003-pwa-first-for-alpha.md">ADR-003</a> the browser build is a no-install, anonymous local "taster" — no sign-in, no accounts, just open it and play. <a href="{{ game_url }}">Open the game</a> in <strong>Chrome 121+</strong>, <strong>Edge 121+</strong>, or <strong>Brave</strong> with WebGPU enabled.</p>

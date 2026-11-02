@@ -19,7 +19,7 @@ pub fn dom_overlay_blocks_input() -> bool {
         Some(w) => w,
         None => return false,
     };
-    for flag in ["__axenstax_feedback_overlay_open", "__axenstax_gamestr_overlay_open"] {
+    for flag in ["__axenstax_gamestr_overlay_open"] {
         if let Ok(val) = Reflect::get(&window, &JsValue::from_str(flag)) {
             if val.as_bool().unwrap_or(false) {
                 return true;

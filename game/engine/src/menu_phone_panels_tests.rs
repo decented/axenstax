@@ -115,7 +115,7 @@ fn settings_back_is_on_screen_with_no_scrolling_on_every_phone_size() {
 
 #[test]
 fn the_last_setting_scrolls_into_view_on_every_phone_size() {
-    let last = crate::tester_gate::version_line();
+    let last = crate::menu::version_line();
     for size in PHONES {
         let mut rig = SettingsRig::new(size, Some(true));
         assert!(!rig.on_screen(&last), "the last line is on the {size:?} screen before any scrolling: nothing would scroll");
@@ -154,7 +154,7 @@ fn a_dial_still_changes_in_the_scrolling_panel() {
 fn a_tall_window_keeps_the_settings_panel_unscrolled() {
     // Forced off at a phone size, and a tall desktop window: no scroll area, the version
     // line is drawn at once (the panel is as tall as its content, as before).
-    let last = crate::tester_gate::version_line();
+    let last = crate::menu::version_line();
     let rig = SettingsRig::new(egui::vec2(1280.0, 1400.0), None);
     assert!(rig.on_screen(&last) && rig.on_screen("Back"), "{:?}", texts(&rig.output));
     let content = SettingsRig::new(egui::vec2(1280.0, 1400.0), Some(false)).window();

@@ -1,5 +1,7 @@
 # Feature-coverage challenges — tiered, in-game, scenario-driven
 
+> **2026-11-01:** the `/bug`·`/idea` feedback loop this spec pairs with (the "feedback anchor", item 7) was removed by owner decision; the Suggestion Box trial went with it. Those parts are history.
+
 **Status**: FUNCTIONALLY COMPLETE IN-GAME — Phases 2, 3, 4, 5(logic), **6**, **7**
 DELIVERED to `main`. The onboarding arc + every explorer card progress
 end-to-end (all 9 completion hooks fire); **Phase 7 (feedback anchor) shipped

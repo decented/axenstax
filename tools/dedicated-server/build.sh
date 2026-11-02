@@ -35,6 +35,9 @@ so the pull file finds them locally — start the server with:
 
     cd tools/dedicated-server && docker compose up -d
 
+Run the setup wizard at https://<this-box-ip>:8443/admin: it asks for the address
+players use, which the game server won't start without (or set AXENSTAX_PUBLIC_HOST).
+
 Then share, from any machine on the same network:
 
     Web    →  https://<this-box-ip>:8443   (accept the cert warning once)

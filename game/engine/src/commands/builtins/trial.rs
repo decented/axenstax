@@ -39,10 +39,7 @@ impl Command for TrialCommand {
                     ctx.info(format!("   {} — {}", d.id, d.name));
                 }
                 ctx.info("  CHALLENGES (do the thing):");
-                // The feedback trial rides on /idea: it exists only while that
-                // command is visible (the alpha-tester gate).
-                let feedback_on = ctx.registry.lookup("idea").is_some();
-                for (name, display) in crate::scenario::challenge_listing_visible(feedback_on) {
+                for (name, display) in crate::scenario::challenge_listing() {
                     ctx.info(format!("   {name} — {display}"));
                 }
                 CommandResult::Silent
@@ -52,11 +49,6 @@ impl Command for TrialCommand {
                 if crate::trials::find_def(id).is_some() {
                     // A ⚡ Race (the trials.rs ghost mechanic).
                     CommandResult::StartTrial(id.to_string())
-                } else if id == crate::scenario::FEEDBACK_TRIAL
-                    && ctx.registry.lookup("idea").is_none()
-                {
-                    // Gated off: answer as for any unknown trial.
-                    CommandResult::Error(format!("Unknown trial '{id}'. Try /trial list."))
                 } else if let Some(def) = crate::scenario::named_builtin_def(id) {
                     // An objective challenge — reuse the scenario runner (kit,
                     // event tracking, HUD, completion) so each trial exercises a

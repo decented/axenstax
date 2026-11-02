@@ -15,7 +15,7 @@
 //! anonymous guests; `--allow-guests 0` / `=false` does not. The retired
 //! `--require-signin <v>` / `AXENSTAX_REQUIRE_SIGNIN` are accepted and ignored
 //! (logged once at boot) so existing scripts keep starting. See
-//! [`load_access_policy`].
+//! [`load_access_policy`] and `server_policy`, which owns the policy files.
 
 #![cfg(not(target_arch = "wasm32"))]
 
@@ -204,14 +204,6 @@ fn public_host_entries(cli: &[String], env_hosts: Option<&str>, env_domain: Opti
     out
 }
 
-fn public_host_entries_from(args: &[String]) -> Vec<String> {
-    public_host_entries(
-        &cli_values(args, "--public-host"),
-        std::env::var("AXENSTAX_PUBLIC_HOST").ok().as_deref(),
-        std::env::var("AXENSTAX_DOMAIN").ok().as_deref(),
-    )
-}
-
 /// The ONE advertised public host (connect-string, Server Card endpoint,
 /// pairing): the first `--public-host` / `AXENSTAX_PUBLIC_HOST` entry.
 /// `AXENSTAX_DOMAIN` is not used here (unchanged behaviour).
@@ -279,21 +271,6 @@ fn announce_tls(args: &[String]) -> bool {
         "0" | "false" | "no" | "off" => false,
         _ => !std::env::var("AXENSTAX_DOMAIN").unwrap_or_default().is_empty(),
     }
-}
-
-/// Parse npub (bech32) / hex strings into x-only pubkey bytes, skipping blanks,
-/// `#` comments, and anything unparseable. (Track 4 operator allowlist.)
-fn parse_whitelist_npubs(entries: &[String]) -> Vec<[u8; 32]> {
-    entries
-        .iter()
-        .filter_map(|s| {
-            let s = s.trim();
-            if s.is_empty() || s.starts_with('#') {
-                return None;
-            }
-            nostr::PublicKey::parse(s).ok().map(|pk| pk.to_bytes())
-        })
-        .collect()
 }
 
 /// A boolean word, any case: `1` / `true` / `yes` / `on` → `true`,
@@ -369,40 +346,147 @@ fn retired_signin_switch_present(args: &[String], env: Option<&str>) -> bool {
     args.iter().any(|a| a == "--require-signin") || env.is_some()
 }
 
-/// Resolve the access policy: the sign-in requirement and the operator
-/// allowlist (from `AXENSTAX_WHITELIST` comma-list + a `whitelist.txt` in the
-/// identity dir, one npub per line). A non-empty allowlist forces sign-in.
+/// The access policy on disk (see `server_policy`): the sign-in requirement,
+/// the allowlist (`whitelist.txt` + `AXENSTAX_WHITELIST`) and the blocklist.
 ///
 /// Sign-in precedence: the `<identity-dir>/require_signin` file (written by the
 /// `require-signin` admin command / the Operator Console toggle — survives
 /// restarts, toggles at runtime) wins; otherwise sign-in is required unless
 /// [`allow_guests`]. `--require-signin` / `AXENSTAX_REQUIRE_SIGNIN` are not read.
-fn load_access_policy(args: &[String], dir: &std::path::Path) -> (bool, Vec<[u8; 32]>) {
-    let require_signin = if let Ok(s) = std::fs::read_to_string(dir.join("require_signin")) {
-        s.trim().eq_ignore_ascii_case("true")
-    } else {
-        !allow_guests(args, std::env::var("AXENSTAX_ALLOW_GUESTS").ok().as_deref())
+/// `Err` is a policy that couldn't be read: boot refuses to start on it. The
+/// environment is read only here, so a running server's reload never meets a
+/// value that wasn't good at boot.
+fn load_access_policy(
+    args: &[String],
+    dir: &std::path::Path,
+    env: &BootEnv,
+) -> Result<crate::server_policy::PolicyFiles, String> {
+    let whitelist = match env.whitelist.clone().map(std::ffi::OsString::into_string) {
+        None => None,
+        Some(Ok(value)) => Some(value),
+        Some(Err(_)) => return Err("AXENSTAX_WHITELIST isn't valid text".to_string()),
     };
-    let mut entries: Vec<String> = Vec::new();
-    if let Ok(env) = std::env::var("AXENSTAX_WHITELIST") {
-        entries.extend(env.split(',').map(str::to_string));
-    }
-    if let Ok(contents) = std::fs::read_to_string(dir.join("whitelist.txt")) {
-        entries.extend(contents.lines().map(str::to_string));
-    }
-    (require_signin, parse_whitelist_npubs(&entries))
+    crate::server_policy::PolicyFiles::load(dir, !allow_guests(args, env.allow_guests.as_deref()), whitelist)
 }
 
-/// Load the operator blocklist (`blocklist.txt` in the identity dir, one npub per
-/// line). Blocked npubs are refused regardless of the allowlist — block wins
-/// (Spec B §5 precedence). Same on-disk format as the allowlist.
-fn load_blocklist(dir: &std::path::Path) -> Vec<[u8; 32]> {
-    let entries: Vec<String> = std::fs::read_to_string(dir.join("blocklist.txt"))
-        .unwrap_or_default()
-        .lines()
-        .map(str::to_string)
-        .collect();
-    parse_whitelist_npubs(&entries)
+/// The environment [`boot_preflight`] reads, passed in so a test doesn't have to
+/// change the process's.
+#[derive(Default)]
+struct BootEnv {
+    allow_guests: Option<String>,
+    whitelist: Option<std::ffi::OsString>,
+    public_host: Option<String>,
+    domain: Option<String>,
+}
+
+impl BootEnv {
+    fn from_process() -> Self {
+        Self {
+            allow_guests: std::env::var("AXENSTAX_ALLOW_GUESTS").ok(),
+            whitelist: std::env::var_os("AXENSTAX_WHITELIST"),
+            public_host: std::env::var("AXENSTAX_PUBLIC_HOST").ok(),
+            domain: std::env::var("AXENSTAX_DOMAIN").ok(),
+        }
+    }
+}
+
+/// What a server may start with, once [`boot_preflight`] has passed it.
+struct Preflight {
+    cfg: ServerConfig,
+    policy_files: crate::server_policy::PolicyFiles,
+    transport: RemoteTransport,
+    public_hosts: crate::signet::ws_host::PublicHosts,
+}
+
+/// Everything `run` decides before it creates or opens anything. `Err` is the
+/// message to exit on. `run` starts from what this returns, so it can't start
+/// without it.
+fn boot_preflight(args: &[String], dir: &std::path::Path, env: &BootEnv) -> Result<Preflight, String> {
+    // A malformed `--allow-guests` / `AXENSTAX_ALLOW_GUESTS` value must be loud:
+    // refuse to boot rather than guess whether the operator meant to open the
+    // server (the access policy itself fails closed on it).
+    parse_allow_guests(args, env.allow_guests.as_deref())?;
+    // So must a policy it can't read: nothing is created or opened on a guess.
+    let policy_files =
+        load_access_policy(args, dir, env).map_err(|e| format!("refusing to start: access policy: {e}"))?;
+    let cfg = parse_config(args);
+
+    // v66 — the addresses WebSocket joins must be addressed to (relay
+    // protection, Spec 08 §9.0.1 T-JOIN-RELAY). A typo or no address at all
+    // refuses to boot: there is no unprotected mode.
+    let transport = RemoteTransport::WebSocket { port: cfg.ws_port };
+    let entries = public_host_entries(
+        &cli_values(args, "--public-host"),
+        env.public_host.as_deref(),
+        env.domain.as_deref(),
+    );
+    let public_hosts = crate::signet::ws_host::PublicHosts::parse(&entries, cfg.ws_port)
+        .map_err(|e| format!("{e} (from --public-host / AXENSTAX_PUBLIC_HOST / AXENSTAX_DOMAIN)"))?;
+    if let Some(why) = public_address_refusal(&transport, &public_hosts) {
+        return Err(format!("refusing to start: {why}"));
+    }
+    Ok(Preflight { cfg, policy_files, transport, public_hosts })
+}
+
+/// A policy file about to be rewritten. `None` only when it doesn't exist: any
+/// other read failure is an error, because rewriting from a failed read would
+/// wipe the file.
+fn read_for_update(path: &std::path::Path) -> Result<Option<String>, String> {
+    match std::fs::read_to_string(path) {
+        Ok(contents) => Ok(Some(contents)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("{}: can't be read, nothing was changed: {e}", path.display())),
+    }
+}
+
+/// Replace a policy file whole. The running server reloads these every few
+/// seconds, so it must never see one half written.
+fn write_policy_file(path: &std::path::Path, contents: &str) -> Result<(), String> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    crate::save::write_atomic(path, contents.as_bytes())?;
+    if let Some(dir) = path.parent() {
+        crate::save::sync_dir(dir);
+    }
+    Ok(())
+}
+
+/// Does this line of a policy file name `pk`, in either spelling it may be in?
+fn line_names(line: &str, pk: &[u8; 32]) -> bool {
+    nostr::PublicKey::parse(line.trim()).is_ok_and(|p| p.to_bytes() == *pk)
+}
+
+/// Add `pk` to a policy list, creating the file if it doesn't exist.
+fn policy_list_add(path: &std::path::Path, pk: &[u8; 32]) -> Result<String, String> {
+    let npub = bech32_of(pk).ok_or("invalid pubkey")?;
+    let mut contents = read_for_update(path)?.unwrap_or_default();
+    if !contents.lines().any(|l| line_names(l, pk)) {
+        if !contents.is_empty() && !contents.ends_with('\n') {
+            contents.push('\n');
+        }
+        contents.push_str(&npub);
+        contents.push('\n');
+        write_policy_file(path, &contents)?;
+    }
+    Ok(npub)
+}
+
+/// Remove `pk` from a policy list. A file that doesn't exist stays that way:
+/// creating an empty `whitelist.txt` here would close an open server. Returns
+/// whether the list now names nobody (false when there is no file).
+fn policy_list_remove(path: &std::path::Path, pk: &[u8; 32]) -> Result<(String, bool), String> {
+    let npub = bech32_of(pk).ok_or("invalid pubkey")?;
+    let Some(contents) = read_for_update(path)? else {
+        return Ok((npub, false));
+    };
+    let kept: Vec<&str> = contents.lines().filter(|l| !line_names(l, pk)).collect();
+    if kept.len() != contents.lines().count() {
+        let text: String = kept.iter().map(|l| format!("{l}\n")).collect();
+        write_policy_file(path, &text)?;
+    }
+    let names_nobody = !kept.iter().any(|l| nostr::PublicKey::parse(l.trim()).is_ok());
+    Ok((npub, names_nobody))
 }
 
 /// npub (bech32) for an x-only pubkey, for writing the allowlist file.
@@ -421,71 +505,45 @@ fn apply_admin_command_to_files(
     let wl_path = dir.join("whitelist.txt");
     match cmd {
         AdminCommand::WhitelistAdd(pk) => {
-            let npub = bech32_of(pk).ok_or("invalid pubkey")?;
-            let mut lines: Vec<String> = std::fs::read_to_string(&wl_path)
-                .unwrap_or_default()
-                .lines()
-                .map(str::to_string)
-                .collect();
-            if !lines.iter().any(|l| l.trim() == npub) {
-                lines.push(npub.clone());
-                std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-                std::fs::write(&wl_path, lines.join("\n") + "\n").map_err(|e| e.to_string())?;
-            }
-            Ok(format!("allowlist += {npub}"))
+            Ok(format!("allowlist += {}", policy_list_add(&wl_path, pk)?))
         }
         AdminCommand::WhitelistRemove(pk) => {
-            let npub = bech32_of(pk).ok_or("invalid pubkey")?;
-            let lines: Vec<String> = std::fs::read_to_string(&wl_path)
-                .unwrap_or_default()
-                .lines()
-                .filter(|l| l.trim() != npub)
-                .map(str::to_string)
-                .collect();
-            std::fs::write(&wl_path, lines.join("\n") + "\n").map_err(|e| e.to_string())?;
-            Ok(format!("allowlist -= {npub}"))
+            let (npub, names_nobody) = policy_list_remove(&wl_path, pk)?;
+            Ok(if names_nobody {
+                format!(
+                    "allowlist -= {npub}. It is now empty, so nobody can join until an npub is \
+                     added or the allowlist is turned off (whitelist-off)"
+                )
+            } else {
+                format!("allowlist -= {npub}")
+            })
+        }
+        AdminCommand::WhitelistOff => {
+            match std::fs::remove_file(&wl_path) {
+                Ok(()) => crate::save::sync_dir(dir),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(format!("{}: can't be removed: {e}", wl_path.display())),
+            }
+            Ok("allowlist off (AXENSTAX_WHITELIST, if the server has it set, still applies)".to_string())
         }
         AdminCommand::BlacklistAdd(pk) => {
-            let npub = bech32_of(pk).ok_or("invalid pubkey")?;
-            let bl_path = dir.join("blocklist.txt");
-            let mut lines: Vec<String> = std::fs::read_to_string(&bl_path)
-                .unwrap_or_default()
-                .lines()
-                .map(str::to_string)
-                .collect();
-            if !lines.iter().any(|l| l.trim() == npub) {
-                lines.push(npub.clone());
-                std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-                std::fs::write(&bl_path, lines.join("\n") + "\n").map_err(|e| e.to_string())?;
-            }
-            Ok(format!("blocklist += {npub}"))
+            Ok(format!("blocklist += {}", policy_list_add(&dir.join("blocklist.txt"), pk)?))
         }
         AdminCommand::BlacklistRemove(pk) => {
-            let npub = bech32_of(pk).ok_or("invalid pubkey")?;
-            let bl_path = dir.join("blocklist.txt");
-            let lines: Vec<String> = std::fs::read_to_string(&bl_path)
-                .unwrap_or_default()
-                .lines()
-                .filter(|l| l.trim() != npub)
-                .map(str::to_string)
-                .collect();
-            std::fs::write(&bl_path, lines.join("\n") + "\n").map_err(|e| e.to_string())?;
+            let (npub, _) = policy_list_remove(&dir.join("blocklist.txt"), pk)?;
             Ok(format!("blocklist -= {npub}"))
         }
         AdminCommand::SetRequireSignin(b) => {
-            std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-            std::fs::write(dir.join("require_signin"), if *b { "true" } else { "false" })
-                .map_err(|e| e.to_string())?;
+            write_policy_file(&dir.join("require_signin"), if *b { "true" } else { "false" })?;
             Ok(format!("require-signin = {b}"))
         }
         AdminCommand::KickPlayer(pk) => {
             let npub = bech32_of(pk).ok_or("invalid pubkey")?;
-            std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
             let path = dir.join("kick");
-            let mut q = std::fs::read_to_string(&path).unwrap_or_default();
+            let mut q = read_for_update(&path)?.unwrap_or_default();
             q.push_str(&npub);
             q.push('\n');
-            std::fs::write(&path, q).map_err(|e| e.to_string())?;
+            write_policy_file(&path, &q)?;
             Ok(format!("kick queued: {npub}"))
         }
         // Erasure (Spec C §6) — operator-private session log.
@@ -512,6 +570,31 @@ fn apply_admin_command_to_files(
             s.save(dir)?;
             Ok(format!("settings updated ({cmd:?})"))
         }
+    }
+}
+
+/// Why this server can't start without a public address, if it can't: only a
+/// WebSocket listener has joins that are checked against one.
+fn public_address_refusal(
+    transport: &RemoteTransport,
+    hosts: &crate::signet::ws_host::PublicHosts,
+) -> Option<&'static str> {
+    match transport {
+        RemoteTransport::WebSocket { .. } => crate::signet::ws_host::missing_public_address(hosts),
+        _ => None,
+    }
+}
+
+/// The boot log's account of who may join.
+fn describe_access(policy: &crate::server_policy::AccessPolicy) -> String {
+    use crate::access_policy::Allow;
+    match &policy.allow {
+        Allow::Only(keys) if keys.is_empty() => {
+            format!("NOBODY: {}", crate::server_policy::EMPTY_ALLOWLIST_WARNING)
+        }
+        Allow::Only(keys) => format!("sign-in required + allowlist ({} npub(s))", keys.len()),
+        Allow::Open if policy.require_signin => "sign-in required".to_string(),
+        Allow::Open => "guests admitted (--allow-guests / require_signin file)".to_string(),
     }
 }
 
@@ -634,7 +717,8 @@ pub fn run_admin_publish(args: &[String]) {
 
 /// `--admin-sign "<verb> <arg>"`: sign an admin command with the operator's
 /// Heartwood (restored session) AND publish it to the relay in one step. Verbs:
-/// `whitelist-add <npub>` · `whitelist-remove <npub>` · `require-signin <true|false>`.
+/// `whitelist-add <npub>` · `whitelist-remove <npub>` · `whitelist-off` ·
+/// `require-signin <true|false>`.
 /// With the relay disabled it prints the signed event for manual delivery.
 pub fn run_admin_sign(args: &[String]) {
     use nostr::JsonUtil;
@@ -789,25 +873,14 @@ pub(crate) fn settle_pop_secret(world: &str, server: &mut crate::server::GameSer
 
 /// Entry point dispatched from `main()` when `--server` is present.
 pub fn run(args: &[String]) {
-    // A malformed `--allow-guests` / `AXENSTAX_ALLOW_GUESTS` value must be loud:
-    // refuse to boot rather than guess whether the operator meant to open the
-    // server (the access policy itself fails closed on it).
-    if let Err(e) = parse_allow_guests(args, std::env::var("AXENSTAX_ALLOW_GUESTS").ok().as_deref()) {
-        eprintln!("{e}");
-        std::process::exit(1);
-    }
-    let cfg = parse_config(args);
-
-    // v66 — the addresses WebSocket joins must be addressed to (relay
-    // protection, Spec 08 §9.0.1 T-JOIN-RELAY). A typo must refuse to boot,
-    // not silently leave the server unprotected.
-    let public_hosts = match crate::signet::ws_host::PublicHosts::parse(&public_host_entries_from(args), cfg.ws_port) {
-        Ok(h) => h,
-        Err(e) => {
-            eprintln!("{e} (from --public-host / AXENSTAX_PUBLIC_HOST / AXENSTAX_DOMAIN)");
-            std::process::exit(1);
-        }
-    };
+    let Preflight { cfg, mut policy_files, transport, public_hosts } =
+        match boot_preflight(args, &id_dir(), &BootEnv::from_process()) {
+            Ok(preflight) => preflight,
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        };
 
     // Server identity (Heartwood-backed). Loaded before anything starts so
     // `AXENSTAX_REQUIRE_VERIFIED` can refuse to boot; additive otherwise.
@@ -874,7 +947,7 @@ pub fn run(args: &[String]) {
         cfg.world.clone(),
         seed,
         cfg.max_players,
-        RemoteTransport::WebSocket { port: cfg.ws_port },
+        transport,
     ) {
         Ok(hs) => hs,
         Err(e) => {
@@ -943,20 +1016,9 @@ pub fn run(args: &[String]) {
              required by default. Use --allow-guests (AXENSTAX_ALLOW_GUESTS=1) to admit guests."
         );
     }
-    let (require_signin, whitelist) = load_access_policy(args, &id_dir());
-    if require_signin || !whitelist.is_empty() {
-        log::info!(
-            "  access     : sign-in required{}",
-            if whitelist.is_empty() {
-                String::new()
-            } else {
-                format!(" + allowlist ({} npub(s))", whitelist.len())
-            }
-        );
-    } else {
-        log::info!("  access     : guests admitted (--allow-guests / require_signin file)");
-    }
-    hs.set_access_policy(require_signin, whitelist, load_blocklist(&id_dir()));
+    let policy = policy_files.policy().clone();
+    log::info!("  access     : {}", describe_access(&policy));
+    hs.set_access_policy(policy.require_signin, policy.allow, policy.blocklist);
 
     // World chat (Phase 3) — operator tightening policy (§2.5: Charter sets
     // the ceiling, the operator may only tighten). `CommsLevel::parse` returns
@@ -1151,9 +1213,13 @@ pub fn run(args: &[String]) {
     let running = Arc::new(AtomicBool::new(true));
     {
         let running = running.clone();
-        if let Err(e) = ctrlc::set_handler(move || {
-            log::info!("Shutdown signal received — finishing tick and saving…");
-            running.store(false, Ordering::Relaxed);
+        // SIGTERM and SIGHUP stop the server with a save, unless SIGHUP was ignored
+        // when it started (`nohup`): that stays ignored.
+        if let Err(e) = keeping_ignored_sighup(|| {
+            ctrlc::set_handler(move || {
+                log::info!("Shutdown signal received — finishing tick and saving…");
+                running.store(false, Ordering::Relaxed);
+            })
         }) {
             log::warn!(
                 "Could not install signal handler: {e} (autosave still protects the world)"
@@ -1190,8 +1256,9 @@ pub fn run(args: &[String]) {
         }
 
         if last_policy_reload.elapsed() >= policy_reload_dt {
-            let (require_signin, whitelist) = load_access_policy(args, &id_dir());
-            hs.set_access_policy(require_signin, whitelist, load_blocklist(&id_dir()));
+            policy_files.reload();
+            let policy = policy_files.policy().clone();
+            hs.set_access_policy(policy.require_signin, policy.allow, policy.blocklist);
             hs.process_pending_kicks(&id_dir());
             // Refresh the privacy level (a `privacy` admin command may have changed
             // it) then apply retention + persist the session log (Spec C).
@@ -1210,8 +1277,58 @@ pub fn run(args: &[String]) {
 
     log::info!("Saving '{}' and shutting down…", cfg.world);
     hs.shutdown();
-    hs.server.save();
+    if !report_final_save(&cfg.world, hs.server.try_save()) {
+        std::process::exit(1);
+    }
     log::info!("Saved. Goodbye.");
+}
+
+/// Say plainly how the final save went. `false` means it failed and the server
+/// must exit with a failure status rather than report a clean goodbye.
+fn report_final_save(world: &str, result: Result<(), String>) -> bool {
+    match result {
+        Ok(()) => true,
+        Err(e) => {
+            log::error!(
+                "The final save of '{world}' FAILED: {e}. Some of this session's changes may \
+                 not be on disk; the lines above name the files that failed."
+            );
+            false
+        }
+    }
+}
+
+/// Run `install`, then put SIGHUP back to "ignored" if it was ignored before.
+///
+/// The shutdown handler is installed with ctrlc's `termination` feature, which
+/// takes over SIGHUP as well as SIGTERM and replaces whatever was there. A server
+/// started under `nohup` has SIGHUP ignored on purpose (so it survives its
+/// terminal closing), and must keep it that way.
+#[cfg(unix)]
+fn keeping_ignored_sighup<T>(install: impl FnOnce() -> T) -> T {
+    // SAFETY: sigaction with a null new action only reads the disposition; the
+    // zeroed struct is plain data and is fully written by the call.
+    let was_ignored = unsafe {
+        let mut old: libc::sigaction = std::mem::zeroed();
+        libc::sigaction(libc::SIGHUP, std::ptr::null(), &mut old) == 0
+            && old.sa_sigaction == libc::SIG_IGN
+    };
+    let out = install();
+    if was_ignored {
+        // SAFETY: installs SIG_IGN, which runs no code in this process.
+        unsafe {
+            let mut ign: libc::sigaction = std::mem::zeroed();
+            ign.sa_sigaction = libc::SIG_IGN;
+            libc::sigemptyset(&mut ign.sa_mask);
+            libc::sigaction(libc::SIGHUP, &ign, std::ptr::null_mut());
+        }
+    }
+    out
+}
+
+#[cfg(not(unix))]
+fn keeping_ignored_sighup<T>(install: impl FnOnce() -> T) -> T {
+    install()
 }
 
 #[cfg(test)]
@@ -1221,6 +1338,56 @@ mod tests {
 
     fn tmp(tag: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("axe_srvmain_{}_{}", tag, std::process::id()))
+    }
+
+    /// The policy a boot would start on. A policy that refuses boot panics here.
+    fn loaded(args: &[String], dir: &std::path::Path) -> crate::server_policy::AccessPolicy {
+        load_access_policy(args, dir, &BootEnv::default()).expect("policy loads").policy().clone()
+    }
+
+    #[cfg(unix)]
+    fn sighup_is_ignored() -> bool {
+        unsafe {
+            let mut old: libc::sigaction = std::mem::zeroed();
+            libc::sigaction(libc::SIGHUP, std::ptr::null(), &mut old);
+            old.sa_sigaction == libc::SIG_IGN
+        }
+    }
+
+    #[cfg(unix)]
+    fn set_sighup(handler: libc::sighandler_t) {
+        unsafe {
+            libc::signal(libc::SIGHUP, handler);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_ignored_sighup_stays_ignored_after_the_shutdown_handler_goes_in() {
+        extern "C" fn noop(_: libc::c_int) {}
+        let before = unsafe {
+            let mut old: libc::sigaction = std::mem::zeroed();
+            libc::sigaction(libc::SIGHUP, std::ptr::null(), &mut old);
+            old.sa_sigaction
+        };
+
+        // Ignored before: still ignored, though the installer replaced it.
+        set_sighup(libc::SIG_IGN);
+        keeping_ignored_sighup(|| set_sighup(noop as extern "C" fn(libc::c_int) as libc::sighandler_t));
+        assert!(sighup_is_ignored(), "nohup's SIG_IGN must survive the installer");
+
+        // Not ignored before: the installer's handler is left alone.
+        set_sighup(libc::SIG_DFL);
+        keeping_ignored_sighup(|| set_sighup(noop as extern "C" fn(libc::c_int) as libc::sighandler_t));
+        assert!(!sighup_is_ignored(), "a default SIGHUP gets the shutdown handler");
+
+        set_sighup(before);
+    }
+
+    #[test]
+    fn a_failed_final_save_is_not_a_clean_goodbye() {
+        assert!(report_final_save("w", Ok(())));
+        assert!(!report_final_save("w", Err("disk full".to_string())));
     }
 
     #[test]
@@ -1302,22 +1469,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_whitelist_keeps_valid_drops_junk() {
-        use nostr::ToBech32;
-        let keys = Keys::generate();
-        let npub = keys.public_key().to_bech32().unwrap();
-        let entries = vec![
-            npub,
-            "# a comment".to_string(),
-            "   ".to_string(),
-            "not-a-real-npub".to_string(),
-        ];
-        let parsed = parse_whitelist_npubs(&entries);
-        assert_eq!(parsed.len(), 1, "only the valid npub survives");
-        assert_eq!(parsed[0], keys.public_key().to_bytes());
-    }
-
-    #[test]
     fn admin_whitelist_add_remove_persists_via_files() {
         use crate::server_identity::AdminCommand;
         let dir = tmp("adminfiles");
@@ -1325,12 +1476,289 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let pk = Keys::generate().public_key().to_bytes();
         apply_admin_command_to_files(&AdminCommand::WhitelistAdd(pk), &dir).unwrap();
-        let (_rs, wl) = load_access_policy(&[], &dir);
-        assert!(wl.contains(&pk), "added npub must be in the loaded allowlist");
+        assert!(loaded(&[], &dir).allow.admits(&pk), "added npub must be in the loaded allowlist");
         apply_admin_command_to_files(&AdminCommand::WhitelistRemove(pk), &dir).unwrap();
-        let (_rs2, wl2) = load_access_policy(&[], &dir);
-        assert!(!wl2.contains(&pk), "removed npub must be gone");
+        assert!(!loaded(&[], &dir).allow.admits(&pk), "removed npub must be gone");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A stranger with a verified key: would this policy let them in?
+    fn stranger_admitted(dir: &std::path::Path) -> bool {
+        let policy = loaded(&[], dir);
+        let stranger = Some(Keys::generate().public_key().to_bytes());
+        crate::access_policy::decide_access(stranger, &policy.blocklist, &policy.allow, policy.require_signin).is_ok()
+    }
+
+    #[test]
+    fn removing_the_last_allowlist_entry_keeps_the_server_closed() {
+        use crate::server_identity::AdminCommand;
+        let dir = tmp("wl_last");
+        let _ = std::fs::remove_dir_all(&dir);
+        let pk = Keys::generate().public_key().to_bytes();
+        apply_admin_command_to_files(&AdminCommand::WhitelistAdd(pk), &dir).unwrap();
+        apply_admin_command_to_files(&AdminCommand::WhitelistRemove(pk), &dir).unwrap();
+        assert!(!stranger_admitted(&dir), "an emptied allowlist admits nobody");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Readable by nobody, writable by us. Write-only, not mode 000, so an
+    /// implementation that swallows the read error can still overwrite it.
+    #[cfg(unix)]
+    fn make_unreadable(path: &std::path::Path) -> bool {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o200)).unwrap();
+        // Root reads anything; then this test has nothing to show.
+        std::fs::read(path).is_err()
+    }
+
+    #[cfg(unix)]
+    fn make_readable(path: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_read_failure_on_removal_leaves_the_file_intact() {
+        use crate::server_identity::AdminCommand;
+        let dir = tmp("wl_unreadable");
+        let _ = std::fs::remove_dir_all(&dir);
+        let keep = Keys::generate().public_key().to_bytes();
+        let gone = Keys::generate().public_key().to_bytes();
+        apply_admin_command_to_files(&AdminCommand::WhitelistAdd(keep), &dir).unwrap();
+        apply_admin_command_to_files(&AdminCommand::WhitelistAdd(gone), &dir).unwrap();
+        let path = dir.join("whitelist.txt");
+        let before = std::fs::read(&path).unwrap();
+        if !make_unreadable(&path) {
+            return;
+        }
+        let result = apply_admin_command_to_files(&AdminCommand::WhitelistRemove(gone), &dir);
+        make_readable(&path);
+        assert!(result.is_err(), "the command reports the failure");
+        assert_eq!(std::fs::read(&path).unwrap(), before, "nothing was written");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_line_of_garbage_in_the_allowlist_does_not_widen_access() {
+        let dir = tmp("wl_garbage");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("whitelist.txt"), "this is not a key\n").unwrap();
+        assert!(!stranger_admitted(&dir), "a file that names nobody admits nobody");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `--public-host` arguments as a command line would give them.
+    fn with_address() -> Vec<String> {
+        ["--server", "--public-host", "192.168.1.20"].iter().map(|s| s.to_string()).collect()
+    }
+
+    /// What `run` would exit on, if anything.
+    fn boot_refusal(args: &[String], dir: &std::path::Path, env: &BootEnv) -> Option<String> {
+        boot_preflight(args, dir, env).err()
+    }
+
+    #[test]
+    fn a_server_with_no_public_address_refuses_boot() {
+        let dir = tmp("pf_no_address");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let why = boot_refusal(&[], &dir, &BootEnv::default()).expect("no address, no boot");
+        assert!(why.contains("refusing to start") && why.contains("--public-host"), "{why}");
+        // Any of the three ways of naming one will do, and a typo won't.
+        assert_eq!(boot_refusal(&with_address(), &dir, &BootEnv::default()), None);
+        let env = |public_host: Option<&str>, domain: Option<&str>| BootEnv {
+            public_host: public_host.map(str::to_owned),
+            domain: domain.map(str::to_owned),
+            ..BootEnv::default()
+        };
+        assert_eq!(boot_refusal(&[], &dir, &env(Some("play.example.org"), None)), None);
+        assert_eq!(boot_refusal(&[], &dir, &env(None, Some("play.example.org"))), None);
+        assert!(boot_refusal(&[], &dir, &env(Some("https://play.example.org/"), None)).is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_invalid_require_signin_file_refuses_boot() {
+        let dir = tmp("rs_invalid");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("require_signin"), "").unwrap();
+        let why = boot_refusal(&with_address(), &dir, &BootEnv::default())
+            .expect("an empty file does not admit guests");
+        assert!(why.contains("refusing to start") && why.contains("require_signin"), "{why}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_malformed_guest_setting_refuses_boot() {
+        let dir = tmp("pf_guests");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let env = BootEnv { allow_guests: Some("maybe".to_string()), ..BootEnv::default() };
+        let why = boot_refusal(&with_address(), &dir, &env).expect("a guess never opens a server");
+        assert!(why.contains("AXENSTAX_ALLOW_GUESTS"), "{why}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_allowlist_setting_that_isnt_text_refuses_boot() {
+        use std::os::unix::ffi::OsStringExt as _;
+        let dir = tmp("pf_whitelist");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let env = BootEnv {
+            whitelist: Some(std::ffi::OsString::from_vec(vec![b'n', b'p', 0xff])),
+            ..BootEnv::default()
+        };
+        let why = boot_refusal(&with_address(), &dir, &env).expect("not the same as no allowlist");
+        assert!(why.contains("AXENSTAX_WHITELIST"), "{why}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_good_boot_starts_on_the_policy_it_read() {
+        use crate::access_policy::Allow;
+        let dir = tmp("pf_good");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pk = Keys::generate().public_key().to_bytes();
+        let env = BootEnv { whitelist: Some(hex::encode(pk).into()), ..BootEnv::default() };
+        let Ok(boot) = boot_preflight(&with_address(), &dir, &env) else {
+            panic!("this boot is fine");
+        };
+        assert_eq!(boot.policy_files.policy().allow, Allow::only([pk]));
+        assert!(matches!(boot.transport, RemoteTransport::WebSocket { port } if port == boot.cfg.ws_port));
+        assert!(boot.public_hosts.admits(&format!("192.168.1.20:{}", boot.cfg.ws_port)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn with_no_allowlist_file_a_removal_leaves_the_server_open() {
+        use crate::server_identity::AdminCommand;
+        let dir = tmp("wl_absent");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pk = Keys::generate().public_key().to_bytes();
+        apply_admin_command_to_files(&AdminCommand::WhitelistRemove(pk), &dir).unwrap();
+        assert!(!dir.join("whitelist.txt").exists(), "no allowlist was conjured");
+        assert_eq!(loaded(&[], &dir).allow, crate::access_policy::Allow::Open);
+        assert!(stranger_admitted(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn whitelist_off_deletes_the_file_and_opens_the_server() {
+        use crate::server_identity::AdminCommand;
+        let dir = tmp("wl_off");
+        let _ = std::fs::remove_dir_all(&dir);
+        let pk = Keys::generate().public_key().to_bytes();
+        apply_admin_command_to_files(&AdminCommand::WhitelistAdd(pk), &dir).unwrap();
+        let status = apply_admin_command_to_files(&AdminCommand::WhitelistRemove(pk), &dir).unwrap();
+        assert!(status.contains("nobody can join"), "the operator is told: {status}");
+        assert!(!stranger_admitted(&dir));
+        apply_admin_command_to_files(&AdminCommand::WhitelistOff, &dir).unwrap();
+        assert!(!dir.join("whitelist.txt").exists());
+        assert!(stranger_admitted(&dir));
+        apply_admin_command_to_files(&AdminCommand::WhitelistOff, &dir).expect("already off is fine");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_removal_finds_a_key_in_either_spelling_and_keeps_the_other_lines() {
+        use crate::server_identity::AdminCommand;
+        let dir = tmp("wl_spelling");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pk = Keys::generate().public_key().to_bytes();
+        let other = Keys::generate().public_key().to_bytes();
+        let path = dir.join("whitelist.txt");
+        let other_line = hex::encode(other);
+        std::fs::write(&path, format!("# friends\n{}\n{other_line}\n", hex::encode(pk))).unwrap();
+        let status = apply_admin_command_to_files(&AdminCommand::WhitelistRemove(pk), &dir).unwrap();
+        assert!(!status.contains("nobody"), "{status}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), format!("# friends\n{other_line}\n"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `save::write_atomic` carries the handover's late-save fence. The identity
+    /// directory sits beside the world folders, so a frozen world doesn't stop
+    /// the operator changing who may join. Uses the layout `run` really has.
+    #[test]
+    fn a_frozen_world_does_not_fence_the_policy_files() {
+        use crate::server_identity::AdminCommand;
+        let _guard = crate::save::WorldsRootGuard::new("policy-fence");
+        let world = crate::save::world_dir("frozen-world");
+        let identity = id_dir();
+        std::fs::create_dir_all(&world).unwrap();
+        crate::save_fence::raise(&world);
+        let pk = Keys::generate().public_key().to_bytes();
+        let written = apply_admin_command_to_files(&AdminCommand::BlacklistAdd(pk), &identity);
+        crate::save_fence::lift(&world);
+        written.expect("the policy write is not a save into the world");
+        assert_eq!(loaded(&[], &identity).blocklist, vec![pk]);
+        assert!(!identity.join("blocklist.txt.tmp").exists(), "no temp file left");
+
+        // These writes do go through the atomic path: a fence over the identity
+        // directory itself is honoured, which a plain write would ignore.
+        let other = Keys::generate().public_key().to_bytes();
+        crate::save_fence::raise(&identity);
+        let fenced = apply_admin_command_to_files(&AdminCommand::BlacklistAdd(other), &identity);
+        crate::save_fence::lift(&identity);
+        assert!(fenced.is_err());
+        assert_eq!(loaded(&[], &identity).blocklist, vec![pk], "nothing was written");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn every_read_modify_write_refuses_on_a_read_failure() {
+        use crate::server_identity::AdminCommand;
+        let pk = Keys::generate().public_key().to_bytes();
+        for (name, cmd) in [
+            ("whitelist.txt", AdminCommand::WhitelistAdd(pk)),
+            ("blocklist.txt", AdminCommand::BlacklistAdd(pk)),
+            ("blocklist.txt", AdminCommand::BlacklistRemove(pk)),
+            ("kick", AdminCommand::KickPlayer(pk)),
+        ] {
+            let dir = tmp(&format!("rmw_{name}"));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join(name);
+            std::fs::write(&path, "kept\n").unwrap();
+            if !make_unreadable(&path) {
+                return;
+            }
+            let result = apply_admin_command_to_files(&cmd, &dir);
+            make_readable(&path);
+            assert!(result.is_err(), "{cmd:?}");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "kept\n", "{cmd:?}");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn only_a_websocket_listener_needs_a_public_address() {
+        use crate::signet::ws_host::PublicHosts;
+        let ws = RemoteTransport::WebSocket { port: 6767 };
+        let none = PublicHosts::default();
+        assert!(public_address_refusal(&ws, &none).is_some_and(|why| why.contains("--public-host")));
+        let lan = PublicHosts::parse(&["192.168.1.20"], 6767).unwrap();
+        assert_eq!(public_address_refusal(&ws, &lan), None);
+        assert_eq!(public_address_refusal(&RemoteTransport::Quic, &none), None);
+        assert_eq!(public_address_refusal(&RemoteTransport::Fray, &none), None);
+    }
+
+    #[test]
+    fn the_boot_log_says_when_nobody_can_join() {
+        use crate::access_policy::Allow;
+        use crate::server_policy::AccessPolicy;
+        let with = |allow, require_signin| describe_access(&AccessPolicy { require_signin, allow, blocklist: vec![] });
+        assert!(with(Allow::only([]), true).contains("nobody can join"));
+        assert!(with(Allow::only([[1; 32]]), true).contains("allowlist (1 npub(s))"));
+        assert_eq!(with(Allow::Open, true), "sign-in required");
+        assert!(with(Allow::Open, false).contains("guests admitted"));
     }
 
     #[test]
@@ -1342,12 +1770,12 @@ mod tests {
         let pk = Keys::generate().public_key().to_bytes();
         apply_admin_command_to_files(&AdminCommand::BlacklistAdd(pk), &dir).unwrap();
         assert!(
-            load_blocklist(&dir).contains(&pk),
+            loaded(&[], &dir).blocklist.contains(&pk),
             "added npub must be in the loaded blocklist"
         );
         apply_admin_command_to_files(&AdminCommand::BlacklistRemove(pk), &dir).unwrap();
         assert!(
-            !load_blocklist(&dir).contains(&pk),
+            !loaded(&[], &dir).blocklist.contains(&pk),
             "removed npub must be gone"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -1414,9 +1842,9 @@ mod tests {
     fn sign_in_is_required_by_default() {
         let dir = tmp("signin-default");
         let _ = std::fs::remove_dir_all(&dir);
-        let (rs, wl) = load_access_policy(&[], &dir);
-        assert!(rs, "no flag, no env, no file => sign-in required");
-        assert!(wl.is_empty());
+        let policy = loaded(&[], &dir);
+        assert!(policy.require_signin, "no flag, no env, no file => sign-in required");
+        assert_eq!(policy.allow, crate::access_policy::Allow::Open);
     }
 
     #[test]
@@ -1424,7 +1852,7 @@ mod tests {
         let dir = tmp("signin-allow-guests");
         let _ = std::fs::remove_dir_all(&dir);
         let args = vec!["--allow-guests".to_string()];
-        let (rs, _wl) = load_access_policy(&args, &dir);
+        let rs = loaded(&args, &dir).require_signin;
         assert!(!rs, "--allow-guests admits guests");
         assert!(allow_guests(&[], Some("1")) && allow_guests(&[], Some("TRUE")));
         assert!(!allow_guests(&[], Some("0")) && !allow_guests(&[], None));
@@ -1496,9 +1924,9 @@ mod tests {
         let dir = tmp("signin-allow-guests-zero");
         let _ = std::fs::remove_dir_all(&dir);
         for args in [argv(&["--allow-guests", "0"]), argv(&["--allow-guests=false"])] {
-            assert!(load_access_policy(&args, &dir).0, "{args:?} still requires sign-in");
+            assert!(loaded(&args, &dir).require_signin, "{args:?} still requires sign-in");
         }
-        assert!(!load_access_policy(&argv(&["--allow-guests", "1"]), &dir).0);
+        assert!(!loaded(&argv(&["--allow-guests", "1"]), &dir).require_signin);
     }
 
     #[test]
@@ -1507,7 +1935,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         // The old way to open a server no longer opens it…
         let args = vec!["--require-signin".to_string(), "0".to_string()];
-        let (rs, _wl) = load_access_policy(&args, &dir);
+        let rs = loaded(&args, &dir).require_signin;
         assert!(rs, "--require-signin 0 is ignored: still sign-in required");
         // …but it is still recognised, so boot can point at --allow-guests.
         assert!(retired_signin_switch_present(&args, None));
@@ -1556,8 +1984,8 @@ mod tests {
         )
         .expect("hosted server starts");
 
-        let (rs, wl) = load_access_policy(&[], &dir);
-        hs.set_access_policy(rs, wl, Vec::new());
+        let policy = loaded(&[], &dir);
+        hs.set_access_policy(policy.require_signin, policy.allow, Vec::new());
         assert_eq!(
             guest_join(&mut hs),
             Err(crate::access_policy::reject_reason(
@@ -1566,8 +1994,8 @@ mod tests {
             "default: an unsigned join is refused with the sign-in reason"
         );
 
-        let (rs, wl) = load_access_policy(&["--allow-guests".to_string()], &dir);
-        hs.set_access_policy(rs, wl, Vec::new());
+        let policy = loaded(&["--allow-guests".to_string()], &dir);
+        hs.set_access_policy(policy.require_signin, policy.allow, Vec::new());
         assert_eq!(guest_join(&mut hs), Ok(()), "--allow-guests admits the guest");
     }
 
@@ -1578,9 +2006,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let guests = vec!["--allow-guests".to_string()];
         apply_admin_command_to_files(&AdminCommand::SetRequireSignin(true), &dir).unwrap();
-        assert!(load_access_policy(&guests, &dir).0, "file 'true' beats --allow-guests");
+        assert!(loaded(&guests, &dir).require_signin, "file 'true' beats --allow-guests");
         apply_admin_command_to_files(&AdminCommand::SetRequireSignin(false), &dir).unwrap();
-        assert!(!load_access_policy(&[], &dir).0, "file 'false' (console toggle) admits guests");
+        assert!(!loaded(&[], &dir).require_signin, "file 'false' (console toggle) admits guests");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1590,7 +2018,7 @@ mod tests {
         let dir = tmp("reqsignin");
         let _ = std::fs::remove_dir_all(&dir);
         apply_admin_command_to_files(&AdminCommand::SetRequireSignin(true), &dir).unwrap();
-        let (rs, _wl) = load_access_policy(&[], &dir);
+        let rs = loaded(&[], &dir).require_signin;
         assert!(rs, "require_signin file must force sign-in");
         let _ = std::fs::remove_dir_all(&dir);
     }

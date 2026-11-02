@@ -26,7 +26,7 @@ from fastapi.templating import Jinja2Templates
 from platforms import INSTALLER_META as _INSTALLER_META
 from platforms import OS_LABELS as _OS_LABELS
 from platforms import detect_os as _detect_os
-from versioning import filter_newest_per_platform, latest_manifest
+from versioning import download_notice, filter_newest_per_platform, latest_manifest
 
 load_dotenv()
 log = logging.getLogger(__name__)
@@ -371,6 +371,7 @@ async def download_page(request: Request):
             "binary_size": binary_size,
             "installers": installers,
             "detected_os": detected_os,
+            "download_notice": download_notice(installers),
         },
     )
 

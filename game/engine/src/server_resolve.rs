@@ -21,8 +21,7 @@ use serde::Deserialize;
 /// pairing and the release feed, plus the operator's default pairing relay.
 /// Third-party relays only: AxeNStax operates no relay that is a default
 /// anywhere (CLAUDE.md red line 2). `relay.trotters.cc` is ours; a player may
-/// add it, but it is never shipped as a default. Feedback has its own fixed
-/// inbox set (`native_mailbox::FEEDBACK_INBOX_RELAYS`).
+/// add it, but it is never shipped as a default.
 pub const PUBLIC_DEFAULT_RELAYS: [&str; 3] = [
     "wss://relay.damus.io",
     "wss://nos.lol",

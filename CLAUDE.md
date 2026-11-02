@@ -15,9 +15,9 @@ Rust toolchain (stable) and `cargo` must be installed on the host. Builds run on
 - `../AxeNStax-internal/` (private) — **legacy** feedback data (`feedback/log.jsonl`,
   `items/`, `board.json`, audio). Historically written by the now-removed voice
   server; may carry PII (Whisper transcripts + game context), so the repo is
-  private and never mirrored to the public `AxeNStax` tree. The current feedback
-  path is the serverless lobby mailbox (`/bug`, `/idea`) → `tools/feedback-reader/`,
-  not this repo.
+  private and never mirrored to the public `AxeNStax` tree. The game has no
+  feedback channel (web removed 2026-10-01, native 2026-11-01), so nothing new is
+  written here.
 
 ## Spin Up
 
@@ -44,7 +44,7 @@ grown to **six locally-served sites**, mirroring the production split
 
 | Site | Dir | Port | Production host | Role |
 |------|-----|------|-----------------|------|
-| **Game** | `tools/sites/game/` | `8094` | `play.axenstax.com` | PWA runtime — Signet auth, `/game`, WASM bundle (no feedback channel on web) |
+| **Game** | `tools/sites/game/` | `8094` | `play.axenstax.com` | PWA runtime — Signet auth, `/game`, WASM bundle (no feedback channel) |
 | **Docs** | `tools/sites/docs/` | `8095` | `docs.axenstax.org` | Spec / project-management site — ADRs, roadmap, test sheets, native binary download |
 | **Marketing** | `tools/sites/marketing/` | `8096` | `axenstax.com` | Public landing — CTAs to game and docs |
 | **Wiki** | `tools/sites/wiki/` | `8097` | `wiki.axenstax.com` | Player guide |
@@ -86,15 +86,12 @@ copy one working site venv into the others (e.g.
 > **The voice server / "Games Master" chat widget is REMOVED** (decommissioned
 > 2026-06-23 — implementation `tools/voice-server/` deleted, widget already
 > stripped from the sites). Do **not** spin it up, re-add it, or suggest it.
-> Feedback flows through the serverless lobby mailbox (`/bug`, `/idea` → NIP-17
-> DMs; **native only**, off by default — hidden tester unlock (Settings → tap version ×7), 2026-10-03 — the web build has NO feedback channel, removed 2026-10-01
-> (owner decision; also: our site apps do not log IPs — uvicorn `access_log=False`);
-> native: `game/engine/src/native_mailbox/` per-report burner-key send + in-game
-> `/mailbox` status board (no replies, 2026-10-01, spec
-> docs/foundations/2026-10-01-feedback-status-board.md); reader
-> `tools/feedback-reader/`; spec
-> `docs/foundations/2026-06-07-lobby-mailbox-feedback.md`). (Old web reports may still sit on the relay; the gift-wrap
-> helper the readers share is `tools/feedback-reader/lib/nip59.cjs`.)
+> **The game has NO feedback channel of any kind** (owner decisions: web removed
+> 2026-10-01, native removed 2026-11-01 — no `/bug`, `/idea` or `/mailbox`, no
+> tester unlock, no feedback worker or reader tooling). Do not re-add one. Also:
+> our site apps do not log IPs — uvicorn `access_log=False`. History:
+> `docs/foundations/2026-06-07-lobby-mailbox-feedback.md` and
+> `docs/foundations/2026-10-01-feedback-status-board.md` (both RETIRED).
 
 ### Quick check
 
@@ -113,7 +110,7 @@ copy one working site venv into the others (e.g.
 0b. Published Signet npm consumer checks (`node --test tools/sites/test-signet-login-package.mjs tools/sites/console/test-console-login.mjs`) — verifies exact package selection/integrity boundaries and the console SDK result handling without a live login.
 1. `cargo clippy` on the engine, gated `-D warnings` (Phase 4b, 2026-07-06) — any warning or error fails the run.
 2. `cargo build` on the engine.
-3. `cargo test --lib` — runs every `#[cfg(test)]` module in the engine library (currently about 4,700 tests, counted by `#[test]` attributes, across pure-function units + `TestHost`-driven integration tests under `src/test_integration/`). Never `--bin`: the bin is a thin shim, so it runs zero tests and still passes.
+3. `cargo test --lib` — runs every `#[cfg(test)]` module in the engine library (currently about 7,300 tests, counted by `#[test]` attributes, across pure-function units + `TestHost`-driven integration tests under `src/test_integration/`). Never `--bin`: the bin is a thin shim, so it runs zero tests and still passes.
 4. `trunk build` for the WASM bundle.
 5. Bundle-size gate — brotli-compressed total must stay under 5 MiB (PWA alpha spec).
 6. With `--smoke`: Playwright smoke test against a running website. Confirms `/`, `/game`, WASM asset, JS loader all serve correctly. Saves a screenshot to `tools/smoke/out/play-landing.png`.
@@ -172,17 +169,15 @@ turns AxeNStax from a software vendor into the regulated platform.**
 2. **AxeNStax operates no game servers or the relays that carry a group's traffic.**
    Game worlds are self-hosted (direct QUIC/WebSocket); multiplayer does NOT run
    over Nostr. `relay.trotters.cc` is ours and is **no longer an AxeNStax-chosen default
-   in the native app** (2026-10-02; caveats: mySignet itself may name trotters
-   as the contacts grant relay, and the owner-local feedback reader still
-   listens there for pre-v0.2.28 builds): sign-in, contacts pairing, online play, Server Card discovery and
+   in the native app** (2026-10-02; caveat: mySignet itself may name trotters
+   as the contacts grant relay): sign-in, contacts pairing, online play, Server Card discovery and
    the updater use the player's own "Your relays" list (default
-   `server_resolve::PUBLIC_DEFAULT_RELAYS`), and feedback goes to fixed public
-   inbox relays (`native_mailbox::FEEDBACK_INBOX_RELAYS`). Players may add trotters
+   `server_resolve::PUBLIC_DEFAULT_RELAYS`). Players may add trotters
    themselves; it must NEVER carry a group's game traffic, presence, or in-game
    chat. No AxeNStax-hosted game/cloud fleet for others' groups.
 3. **No central collection of kids' data.** Web taster stays anonymous/local (no
    login, cookies, analytics, or age data). Native Stash stays BYO-key /
-   non-custodial / ciphertext-only. Feedback stays burner-key + E2E + owner-local.
+   non-custodial / ciphertext-only. The game has no feedback channel.
    **Never affirmatively collect age** as raw data (age = a boolean from third-party
    Signet, never a DOB to our server). No kid PII to an AxeNStax-operated server.
 4. **Never position/market the product as a "social network / kids' social media /
@@ -377,7 +372,7 @@ Every piece of code must be either **concrete** (production-grade, spec-aligned,
 - ~~`HostedServer::mirror_host_world_state` is O(block entities) per call~~ (D1, 2026-10-06) — gone from the default path: a host lends its server its one world, so there is no second copy to mirror. It survives only on a `--no-lend` host (BRIDGE, deleted with that flag), where the server keeps its own copy and would otherwise spill stale chest contents.
 - ~~`HostedServer` local-player position-trust path (BRIDGE)~~ — **design, not debt** (MP step 1 + D1, 2026-10-06, Q1 trap 9): a host's local slots stay position/health-trusted because the host is the authority's own machine, and on a lent world the client that moves them also owns the world — simulating its own players' input there buys no authority. `ServerPlayer`/`PlayerSlot` stay dual for local slots; on a lent world a local slot's edits are broadcast without the joiner budget/validation. Every joiner has ONE position, the server-simulated one: the joiner predicts it and reconciles against `last_acked_input` (snap beyond 1 block, camera glide below). See `docs/spec/04-networking.md §5.3.1`.
 - ~~Dispenser arrows on a dedicated server are invisible to joiners~~ (MP-A3, 2026-10-06, protocol v67). `GameServer::tick` now runs the same `entity::tick_projectiles` the client runs wherever `simulates_block_machines` is set, and the entity diff (`entity_broadcast` since D2a) broadcasts projectiles as `EntityKind::Projectile`; joiners render them from `remote_entities::RemoteProjectiles`. Same change: a dead joiner stays dead on the server until it sends `PacketType::Respawn` (the 40-tick server-copy revive BRIDGE and `PlayerCombat.respawn_timer` are gone). Spec 04 §4.2b.
-- ~~`JoinRequestPacket.player_name` is client-asserted~~ (Phase 4 cutover, 2026-06-16, protocol v49). The multiplayer-identity design (`docs/spec/04-networking.md §1.8`) replaces this with `auth_event: SignetAuthEvent` + `handle_credential: Option<SignetCredential>` — handle sourced from the signed kind-31000 `display-name` tag, never from the client string. Batch A bounded + sanitised the field as short-term hardening. **Phase 4 cutover IMPLEMENTED 2026-06-16** (protocol v49): the handshake reorders (authed client waits for `ChallengePacket` → signs `{nonce, origin}` off the main loop → sends `JoinRequest` with the signed `auth_event`); the server verifies any present auth_event (tamper/invalid → reject) and rejects an *absent* one on a sign-in-required host (`HostedServer.require_signin`, `true` for the QUIC LAN host; **the dedicated server requires sign-in by default too since 2026-10-06** (owner decision O-7 #3) — `--allow-guests` / `AXENSTAX_ALLOW_GUESTS=1` opens it to guests, the old `--require-signin` / `AXENSTAX_REQUIRE_SIGNIN` are accepted no-ops, and the `<identity-dir>/require_signin` file (console toggle / admin command) overrides both, `server_main::load_access_policy`). Native `ws://` joins to a dedicated server sign in when a signer is restored (`connect_websocket_authed`); the web build has no sign-in, so web players need a guest-open server. `USE_SIGNET_AUTH` is **retired** — identity is policy-driven (`hosted_server::resolve_join_identity`), not flag-gated. `player_name` is now a **display fallback only**, never trusted; the verified npub is stored on `ServerPlayer.verified_pubkey` for economy-block ownership; collisions get a `-<npub-suffix>` readable label, and a client-side **inspect view** (`hud_ui::draw_player_inspect`, fed by `RemoteClient::roster` + the npub now on the `Joined` event) shows each present player's full, copyable npub. The signing bridge exists on **native only**: `game_loop::native_join_sign_driver` (restored bunker on a worker thread). The web half was never finished — `wasm_auth::js_sign_driver` consumes `window.__axenstax_sign_auth_event`, but nothing defines it (audit 2026-10-04), and the web build is now an anonymous offline taster anyway, so there is no web sign-in path. **Remaining = owner live test only** (2-machine LAN with a real bunker pair, native↔native + native↔dedicated). See `docs/foundations/2026-04-20-engine-signet-auth.md` + `docs/goals/2026-06-16-phase4-signet-multiplayer-auth.md`. **Charter Phase 1 decoupled 2026-05-09** when Charter pivoted to rev. 7 mechanism A (relay-read only, no bunker calls in the hot path) — Spec 10 delivered on main. **The in-engine schedule-Charter gate was STRIPPED 2026-05-26** (the `charter::check` session-start gate, the deny overlay, `charter-*.js`, and the `/auth` Charter store are gone — superseded by the standalone `@forgesworn/charter` SDK shipped upstream 2026-05-25; preserved in git history). Note: the unrelated `charter_allows_sats` Bitcoin parental-gate on `PlayerSlot` is untouched and remains live. The signing-bridge gap still applies to Phase 4 only, plus future Charter mechanism B/C/D specs when they ship. See `docs/spec/08-security-anti-cheat.md §9.0.1` for threat model.
+- ~~`JoinRequestPacket.player_name` is client-asserted~~ (Phase 4 cutover, 2026-06-16, protocol v49). The multiplayer-identity design (`docs/spec/04-networking.md §1.8`) replaces this with `auth_event: SignetAuthEvent` + `handle_credential: Option<SignetCredential>` — handle sourced from the signed kind-31000 `display-name` tag, never from the client string. Batch A bounded + sanitised the field as short-term hardening. **Phase 4 cutover IMPLEMENTED 2026-06-16** (protocol v49): the handshake reorders (authed client waits for `ChallengePacket` → signs `{nonce, origin}` off the main loop → sends `JoinRequest` with the signed `auth_event`); the server verifies any present auth_event (tamper/invalid → reject) and rejects an *absent* one on a sign-in-required host (`HostedServer.require_signin`, `true` for the QUIC LAN host; **the dedicated server requires sign-in by default too since 2026-10-06** (owner decision O-7 #3) — `--allow-guests` / `AXENSTAX_ALLOW_GUESTS=1` opens it to guests, the old `--require-signin` / `AXENSTAX_REQUIRE_SIGNIN` are accepted no-ops, and the `<identity-dir>/require_signin` file (console toggle / admin command, exactly `true` or `false`) overrides both, `server_policy`). Native `ws://` joins to a dedicated server sign in when a signer is restored (`connect_websocket_authed`); the web build has no sign-in, so web players need a guest-open server. `USE_SIGNET_AUTH` is **retired** — identity is policy-driven (`hosted_server::resolve_join_identity`), not flag-gated. `player_name` is now a **display fallback only**, never trusted; the verified npub is stored on `ServerPlayer.verified_pubkey` for economy-block ownership; collisions get a `-<npub-suffix>` readable label, and a client-side **inspect view** (`hud_ui::draw_player_inspect`, fed by `RemoteClient::roster` + the npub now on the `Joined` event) shows each present player's full, copyable npub. The signing bridge exists on **native only**: `game_loop::native_join_sign_driver` (restored bunker on a worker thread). The web half was never finished — `wasm_auth::js_sign_driver` consumes `window.__axenstax_sign_auth_event`, but nothing defines it (audit 2026-10-04), and the web build is now an anonymous offline taster anyway, so there is no web sign-in path. **Remaining = owner live test only** (2-machine LAN with a real bunker pair, native↔native + native↔dedicated). See `docs/foundations/2026-04-20-engine-signet-auth.md` + `docs/goals/2026-06-16-phase4-signet-multiplayer-auth.md`. **Charter Phase 1 decoupled 2026-05-09** when Charter pivoted to rev. 7 mechanism A (relay-read only, no bunker calls in the hot path) — Spec 10 delivered on main. **The in-engine schedule-Charter gate was STRIPPED 2026-05-26** (the `charter::check` session-start gate, the deny overlay, `charter-*.js`, and the `/auth` Charter store are gone — superseded by the standalone `@forgesworn/charter` SDK shipped upstream 2026-05-25; preserved in git history). Note: the unrelated `charter_allows_sats` Bitcoin parental-gate on `PlayerSlot` is untouched and remains live. The signing-bridge gap still applies to Phase 4 only, plus future Charter mechanism B/C/D specs when they ship. See `docs/spec/08-security-anti-cheat.md §9.0.1` for threat model.
 - ~~`main.rs` is too large~~ — decomposed into game_loop.rs, block_interact.rs, chunk_stream.rs, spawning.rs. **Caveat (audit 2026-10-04): the weight just moved — `game_loop.rs` is now about 22,300 lines**, far past the ~500-line guideline; splitting it is open debt
 - ~~`held_tool` is a separate GameState field~~ — now in PlayerSlot.hotbar_slot
 - ~~Tool cycling via T key~~ — replaced by proper inventory/crafting system

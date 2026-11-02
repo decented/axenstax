@@ -142,3 +142,23 @@ def latest_manifest(installers: list[dict], download_url: str, installer_url_bas
         "linux_appimage_sha256": linux_appimage_sha256,
         "linux_appimage_url": linux_appimage_url,
     }
+
+
+# Shown on /download while 0.2.18 is the newest published version. It is driven
+# by the same version `latest_manifest` advertises, so it disappears by itself
+# the moment anything newer is published.
+NOTICE_VERSION = "0.2.18"
+DOWNLOAD_NOTICE = (
+    "This is version 0.2.18. A newer release with access and privacy "
+    "improvements is being prepared."
+)
+
+
+def download_notice(installers: list[dict]) -> str | None:
+    """The /download notice, or None. `installers` is the same list of dicts
+    with a "filename" that `latest_manifest` takes."""
+    versions = [v for i in installers if (v := installer_version(i["filename"]))]
+    if not versions:
+        return None
+    latest = max(versions, key=version_sort_key)
+    return DOWNLOAD_NOTICE if latest == NOTICE_VERSION else None

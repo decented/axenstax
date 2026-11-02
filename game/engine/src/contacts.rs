@@ -254,10 +254,50 @@ pub fn load_local_book() -> Vec<Contact> {
 /// snapshot (two reads could straddle a snapshot replace). A hosted world
 /// needs both: the book to admit from and the blocks to refuse — and to drop
 /// anybody already in (D8: a block beats every source).
-pub fn load_local_book_with_blocks() -> (Vec<Contact>, Vec<[u8; 32]>) {
-    let signet = crate::signet_contacts::book_part_now();
-    let blocked = signet.as_ref().map(|p| p.blocked.clone()).unwrap_or_default();
-    (assemble_book(load_kenspeckle(), load_mirror(&mirror_path()), signet), blocked)
+pub fn load_local_book_with_blocks() -> (Vec<Contact>, SignetBlocks) {
+    book_with_blocks(load_kenspeckle(), load_mirror(&mirror_path()), crate::signet_contacts::read_book_part_now())
+}
+
+/// Who Signet blocks, as far as a read could tell.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SignetBlocks {
+    /// Exactly these. Nobody, if there is no Signet here: disconnecting or a
+    /// revocation lifts every block (D12).
+    Known(Vec<[u8; 32]>),
+    /// Signet is here but couldn't be read, so its blocks exist and aren't
+    /// known. Never the same as nobody: a running host keeps the blocks it has
+    /// (`game_loop::push_book_to_hosted_world`), and a new one can't start.
+    Unreadable,
+}
+
+impl SignetBlocks {
+    /// The blocks a host starting now would run with. There are none in memory
+    /// to fall back on, so on an unreadable Signet the answer is the sentence
+    /// that tells the player why it can't start.
+    pub fn for_new_host(self) -> Result<Vec<[u8; 32]>, String> {
+        match self {
+            SignetBlocks::Known(blocked) => Ok(blocked),
+            SignetBlocks::Unreadable => Err(crate::signet_contacts::ui::HOST_REFUSED.to_string()),
+        }
+    }
+}
+
+/// The book and blocks from one read of Signet (see [`load_local_book_with_blocks`]).
+/// An unreadable Signet supplies no contacts, as a stale one doesn't.
+pub fn book_with_blocks(
+    kenspeckle: Vec<Contact>,
+    mirror: Vec<Contact>,
+    signet: crate::signet_contacts::SignetRead<SignetPart>,
+) -> (Vec<Contact>, SignetBlocks) {
+    use crate::signet_contacts::SignetRead;
+    match signet {
+        SignetRead::Value(part) => {
+            let blocked = part.blocked.clone();
+            (assemble_book(kenspeckle, mirror, Some(part)), SignetBlocks::Known(blocked))
+        }
+        SignetRead::Absent => (assemble_book(kenspeckle, mirror, None), SignetBlocks::Known(Vec::new())),
+        SignetRead::Unreadable(_) => (assemble_book(kenspeckle, mirror, None), SignetBlocks::Unreadable),
+    }
 }
 
 /// The Kenspeckle export from the config dir, or nothing.

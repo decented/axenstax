@@ -52,6 +52,10 @@ docker compose up -d              # pulls ghcr.io/decented/axenstax-{server,oper
 ./build.sh                        # cargo + trunk + docker compose -f docker-compose.build.yml build
 docker compose up -d              # finds the locally-built image, runs it (no pull)
 
+# Give it the address players use (it won't start the game server without one):
+#    the setup wizard at https://<this-box-ip>:8443/admin asks, or set
+#    AXENSTAX_PUBLIC_HOST in the compose file. A LAN IP is fine at home.
+
 # Then, from any machine on the same network:
 #    Web    →  open  https://<this-box-ip>:8443   (accept the cert warning once)
 #    Native →  Join  ws://<this-box-ip>:6767
@@ -75,8 +79,8 @@ to the very first world, with no throwaway default to undo.
 1. `docker compose up -d`, then open **`https://<box>:8443/admin`**.
 2. Sign in with your operator npub (signet-login / mySignet — see *Operator Console
    access* below). The owner npub is the one established when the box was provisioned.
-3. The wizard walks you through a few simple questions (kind of place, name, who can
-   join, a couple of toggles) and presses **Create**. The engine then boots into the
+3. The wizard walks you through a few simple questions (kind of place, name, the address
+   players use, who can join, a couple of toggles) and presses **Create**. The engine then boots into the
    world you chose.
 
 The wizard is **re-runnable** any time from the console (Identity panel → *Re-run setup
@@ -85,7 +89,9 @@ one is **archived** (renamed `…​.archived-<timestamp>` on the volume), never
 
 Skipping is possible (a small link) but discouraged — the box then boots on the compose
 defaults and the dashboard keeps a "finish setup" reminder. To bypass the gate entirely
-(headless / CI), set **`AXENSTAX_SKIP_WIZARD=1`**.
+(headless / CI), set **`AXENSTAX_SKIP_WIZARD=1`**. Either way the engine still needs an
+address: with none in compose (`AXENSTAX_PUBLIC_HOST` / `AXENSTAX_DOMAIN`) it waits, the
+log says so, and the dashboard asks for one.
 
 Design: `docs/superpowers/specs/2026-06-21-server-setup-wizard-design.md`.
 
@@ -107,12 +113,14 @@ Design: `docs/superpowers/specs/2026-06-21-server-setup-wizard-design.md`.
   (the native Join dialog accepts `ws://`/`wss://` URLs as well as the legacy
   `ip:port` QUIC form).
 
-### Public address (relay protection)
+### Public address (required)
 
 Since protocol v66 every WebSocket join is signed for the address the player
-dialled (`axenstax-join:ws-host:<host[:port]>`). Tell the server its public
-address(es) and it refuses joins signed for anything else, so another server
-can't pass a player's sign-in on to yours and join as them:
+dialled (`axenstax-join:ws-host:<host[:port]>`). The server refuses joins signed
+for anything but its public address(es), so another server can't pass a player's
+sign-in on to yours and join as them. **It won't boot without one, and there is no
+switch to turn this off:** started directly it exits and says what to set; under
+this image it waits with the console up. A LAN IP or `localhost` is a valid value:
 
 ```yaml
       AXENSTAX_PUBLIC_HOST: "play.example.org"   # or --public-host (repeatable)
@@ -129,9 +137,7 @@ and `:80` also admits `wss://host`. List every address players (and browsers
 opening the `:8443` page) use: a join by any other address is refused with a
 generic "this server expects to be reached at its public address" (the refusal
 never says which addresses the server is configured with; the server's own log
-does). With nothing set the start-up log warns `WebSocket joins are not
-relay-protected: set --public-host …` and any address is accepted, as before v66.
-A malformed entry stops the server at start-up.
+does). A malformed entry stops the server at start-up.
 
 **LAN addresses are not relay-protected.** You can list a LAN IP (`192.168.x.x`,
 `10.x.x.x`, `172.16-31.x.x`), a CGNAT / link-local / loopback / IPv6 ULA address,
@@ -162,7 +168,7 @@ paths. Operator tools still need a direct QUIC connection. Details:
 | `AXENSTAX_SIM_DISTANCE` (or `--sim-distance`) | `8` | Radius, in 16-block columns, the server keeps loaded and simulated around each connected player and the world spawn (2–16). Higher = more RAM and CPU per player |
 | `AXENSTAX_CHUNK_SYNC` (or `--chunk-sync`) | `touched` | Which chunks the server sends each player, out to the player's render distance (at most the sim distance), so everyone stands on the server's real world. `touched` = only the areas that differ from the world's generated terrain (anything built, dug or changed); the game makes the rest itself from the world's seed, so joining costs a fraction of the bandwidth. A player whose game version generates terrain differently always gets everything, and so, for the rest of their visit, does a player whose game turns out to generate an area differently anyway (the server logs a warning: please report it). `all` = send every chunk to everyone (more bandwidth; for a player whose terrain looks wrong) |
 | `AXENSTAX_SEED` | _(random)_ | Fixed terrain seed for a **new** world |
-| `AXENSTAX_SKIP_WIZARD` | `0` | `1` ⇒ skip the first-run setup gate; boot immediately on these defaults |
+| `AXENSTAX_SKIP_WIZARD` | `0` | `1` ⇒ skip the first-run setup gate and boot on these defaults. It still needs `AXENSTAX_PUBLIC_HOST` or `AXENSTAX_DOMAIN`, or it waits for one |
 
 > Note: with the first-run wizard active (default), the values above are **starting
 > defaults** — the setup wizard (and the console) override most of them
@@ -170,7 +176,9 @@ paths. Operator tools still need a direct QUIC connection. Details:
 > sources at boot.
 
 Worlds persist on the `axenstax-worlds` volume and are saved on autosave + on
-graceful `docker stop`.
+graceful `docker stop`. SIGTERM and SIGHUP stop the server with a save, unless it was
+started under `nohup` (which keeps SIGHUP ignored). The compose files set
+`stop_grace_period: 120s` so the final save of a large world isn't cut short.
 
 ## Verified operator identity (optional)
 
@@ -218,9 +226,8 @@ Identity configuration (env in `docker-compose.yml`):
 | Var | Default | Meaning |
 |-----|---------|---------|
 | `AXENSTAX_REQUIRE_VERIFIED` | `0` | `1` ⇒ refuse to start without a valid, non-expired attestation |
-| `AXENSTAX_IDENTITY_DIR` | `<worlds>/.identity` | where the runtime key + attestation + session live |
 | `AXENSTAX_PAIR_RELAY` | `wss://relay.damus.io` | public relay used for the NIP-46 pairing round-trip (`--pair-relay` on the CLI); also the default `AXENSTAX_ADMIN_RELAY` |
-| `AXENSTAX_PUBLIC_HOST` | _(unset)_ | Public host name(s)/IP(s), comma-separated (`--public-host`, repeatable). The first is advertised in the connect-string as `axenstax://<host>:<ws port>`; all are the addresses WebSocket joins must be signed for (see "Public address") |
+| `AXENSTAX_PUBLIC_HOST` | _(unset; required unless `AXENSTAX_DOMAIN` is set)_ | Public host name(s)/IP(s), comma-separated (`--public-host`, repeatable). The first is advertised in the connect-string as `axenstax://<host>:<ws port>`; all are the addresses WebSocket joins must be signed for (see "Public address") |
 | `AXENSTAX_DELEGATION_DAYS` | `90` | validity window minted at pairing time |
 
 A bare `ws://host:6767` join stays anonymous; a connect-string with `#op=npub…`
@@ -262,7 +269,7 @@ identity above):
 | Var | Default | Meaning |
 |-----|---------|---------|
 | `AXENSTAX_ALLOW_GUESTS` (or `--allow-guests`) | `0` | `1` ⇒ also admit anonymous guests. Unset, **only players with a verified Signet identity may join**. The flag may stand alone (`--allow-guests`) or take a value (`--allow-guests 1`, `--allow-guests=0`; `1`/`true`/`yes`/`on` or `0`/`false`/`no`/`off`) — a falsy value keeps sign-in required, and any other value refuses to start |
-| `AXENSTAX_WHITELIST` | _(unset)_ | Comma-separated npubs allowed to join. A non-empty allowlist **implies** sign-in |
+| `AXENSTAX_WHITELIST` | _(unset)_ | Comma-separated npubs allowed to join. A non-blank value turns the allowlist on, which **implies** sign-in |
 
 The sign-in requirement is **on by default**. `AXENSTAX_REQUIRE_SIGNIN` and
 `--require-signin` are no longer read (they are accepted, and logged, so old
@@ -274,11 +281,11 @@ so a box that was opened to guests from the console stays open after a restart.
 **Upgraded from before 2026-10-06? Check your box.** The old setup wizard's "Who can
 come in?" step defaulted to *Anyone*, and it saved that choice as a
 `<identity-dir>/require_signin` file reading `false` (`<identity-dir>` is
-`<worlds>/.identity`, i.e. `/worlds/.identity` in the Docker setup, unless
-`AXENSTAX_IDENTITY_DIR` says otherwise). That file beats the new default, so a
+`<worlds>/.identity`, i.e. `/worlds/.identity` in the Docker setup). That file beats the new default, so a
 server set up that way **keeps admitting guests** after the engine upgrade until you
-change it. The engine reads only that file: `true` = sign-in required, anything else
-(including an empty file) = guests admitted.
+change it. The file must say exactly `true` or `false` (spaces and case don't matter):
+anything else, an empty file included, refuses to boot, and on a running server keeps
+the last good value with one warning.
 
 - **Check:** the start-up log line `access :` says `sign-in required` or `guests
   admitted`; the Operator Console shows the same in *Access → Require sign-in*; or
@@ -290,8 +297,16 @@ change it. The engine reads only that file: `true` = sign-in required, anything 
   within about 5 seconds; no restart.
 
 The allowlist can also live in `<identity-dir>/whitelist.txt` — one npub per line,
-`#` comments allowed — which is easier to edit and is what runtime admin commands
-will append to (later track). Env and file entries are merged.
+`#` comments allowed — which is easier to edit and is what admin commands write.
+Env and file entries are merged.
+
+The allowlist is **on when `whitelist.txt` exists or `AXENSTAX_WHITELIST` is
+non-blank**. An empty allowlist admits nobody, so removing the last npub leaves the
+server closed. To turn it off, delete `whitelist.txt`, use the Console's *Turn
+allowlist off*, or send `whitelist-off`, and unset `AXENSTAX_WHITELIST`. Invalid lines
+are skipped with a warning and never widen access; a policy file that can't be read
+refuses boot, and on a running server keeps the last good value. A change reaches
+players already in the world within about 5 seconds: anyone it refuses is removed.
 
 ```bash
 # Invite-only server: only these two npubs may join.
@@ -356,7 +371,8 @@ a hand-built command must include it):
 | Command tag | Effect |
 |-------------|--------|
 | `["cmd","whitelist-add","npub1…"]` | add an npub to the allowlist |
-| `["cmd","whitelist-remove","npub1…"]` | remove an npub |
+| `["cmd","whitelist-remove","npub1…"]` | remove an npub (the last one leaves the server closed, not open) |
+| `["cmd","whitelist-off",""]` | turn the allowlist off (deletes `whitelist.txt`) |
 | `["cmd","require-signin","true"\|"false"]` | toggle the sign-in requirement |
 
 Apply a signed command (the server verifies it was signed by *its* operator and is

@@ -66,7 +66,14 @@ answer them, so a stranger can't tell whether you're there.
 ## What the relays see
 
 Setting up a connection uses public Nostr relays for a few messages. They carry
-**only** the setup handshake, and it's encrypted: a relay sees two temporary
-keys and a timestamp, and never sees who you are, what world you're playing, or
-where either of you is. Once you're connected, the game goes **straight** between
-your two computers. You can change which relays are used in Settings → Online.
+**only** the setup handshake. The contents of those messages (the addresses your
+two computers use to reach each other) are encrypted, so a relay can't read
+them. A relay can still see your **IP address**, which keys each message is
+addressed to (an install key your game makes for this, not your Signet public
+key), and **when** you check for messages. It never sees what world you're
+playing.
+
+Once you're connected, the game goes **straight** between your two computers,
+which means **you and your friend can see each other's IP addresses**. Only
+play with people you trust. You can change which relays are used in
+Settings → Online.

@@ -9,7 +9,7 @@ is not evidence that a package has been published.
 |---|---|
 | Operator-console sign-in | Published `signet-login@0.19.1`; copy its shipped `./iife` browser export, without building SDK source. Version and reviewed tarball SHA256 are shared by deployment, refresh and drift checks. |
 | Room wrapper identity utilities | Own lockfile in `tools/room/`; `nostr-tools@2.25.2` and `@noble/hashes@2.0.1` through public exports, replacing imports from a KithMoot checkout's `node_modules`. |
-| Feedback reader and feedback tests | Already consume npm `nostr-tools` with their own manifests and lockfiles. No unrelated version change is needed. |
+| Feedback reader and feedback tests | Removed 2026-11-01 with the in-game feedback channel. |
 | Release tooling | Already consumes npm `nostr-tools` with its own manifest and lockfile. |
 | Beacon offline-catalogue bake | `@forgesworn/beacon` returns 404 from the registry. Keep the explicitly configured built-SDK exception until a compatible release exists; do not add a non-existent npm dependency. |
 | Stash | `@forgesworn/stash` returns 404. The browser taster no longer loads Stash; native storage uses Rust and is outside npm. |

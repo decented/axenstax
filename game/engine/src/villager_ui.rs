@@ -434,7 +434,6 @@ pub fn draw_satoshi_mission(
     item: Option<&crate::test_board::TestItem>,
     idx: usize,
     total: usize,
-    note: &mut String,
 ) -> crate::satoshi::MissionAction {
     use crate::satoshi::{self, MissionAction};
 
@@ -514,25 +513,9 @@ pub fn draw_satoshi_mission(
                                 .wrap(),
                             );
                         }
-                        ui.add_space(12.0);
-                        ui.label(
-                            egui::RichText::new("Anything to add? (optional)")
-                                .size(12.0)
-                                .color(egui::Color32::from_rgb(150, 150, 160)),
-                        );
-                        ui.add_space(4.0);
-                        ui.add_sized([360.0, 26.0], egui::TextEdit::singleline(note));
                         ui.add_space(14.0);
 
-                        if button(ui, "✓  It worked", egui::Color32::from_rgb(45, 130, 65)) {
-                            action = MissionAction::Worked;
-                        }
-                        ui.add_space(8.0);
-                        if button(ui, "✗  It's broken", egui::Color32::from_rgb(150, 55, 45)) {
-                            action = MissionAction::Broken;
-                        }
-                        ui.add_space(8.0);
-                        if button(ui, "Skip this one", egui::Color32::from_rgb(80, 80, 100)) {
+                        if button(ui, "Next one", egui::Color32::from_rgb(80, 80, 100)) {
                             action = MissionAction::Skip;
                         }
                         ui.add_space(8.0);

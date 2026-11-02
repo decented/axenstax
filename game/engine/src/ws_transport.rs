@@ -350,6 +350,7 @@ mod tests {
             RemoteTransport::WebSocket { port },
         )
         .expect("start dedicated WebSocket server");
+        hs.set_ws_public_hosts(crate::signet::ws_host::PublicHosts::parse(&["127.0.0.1"], port).unwrap());
 
         // Let the accept thread bind the listener before connecting.
         std::thread::sleep(Duration::from_millis(400));
@@ -395,6 +396,7 @@ mod tests {
             RemoteTransport::WebSocket { port },
         )
         .expect("start dedicated WebSocket server");
+        hs.set_ws_public_hosts(crate::signet::ws_host::PublicHosts::parse(&["127.0.0.1"], port).unwrap());
         std::thread::sleep(Duration::from_millis(400));
 
         // Connect and say nothing — held open for the whole test.

@@ -74,6 +74,25 @@ app and point it at your box. Both land in the same world.
    with your own identity to manage who can join, the server's name and limits, and
    privacy — no command line.
 
+## Letting people find your server (optional)
+
+A self-hosted server is **unlisted by default**: nobody can look it up, and
+Axe'n'Stax runs no directory of servers. If you want players to be able to
+resolve your server by its operator npub, you can announce it yourself:
+
+- Start the server with `--announce` (or set `AXENSTAX_ANNOUNCE=1`). It needs a
+  public address (`--public-host`, or your domain), and it must be provisioned,
+  because only a provisioned server can sign its card.
+- The server then publishes a signed **Server Card** (name, address and player
+  limit) to Nostr relays when it starts, and again about every five minutes. The
+  relays default to the public discovery relays; set `--card-relays` (or
+  `AXENSTAX_CARD_RELAYS`, a comma-separated list) to choose your own.
+- You can also switch announcing on or off from the Operator Console's Server
+  page. Turning it off withdraws the card.
+
+The card is published by your server, to relays you can see and change. Nothing
+is announced unless you ask for it.
+
 ---
 
 ## Good to know (alpha honesty)

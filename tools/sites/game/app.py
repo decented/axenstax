@@ -2,8 +2,9 @@
 """Axe'n'Stax — game site (port 8094).
 
 Serves the PWA runtime: `/` IS the WASM game (login-free local-sandbox tier since
-2026-06-27; the legacy `/game` path 301-redirects to `/`). The browser build has
-no feedback channel (lobby mailbox + /api/test-board removed 2026-10-01).
+2026-06-27; the legacy `/game` path 301-redirects to `/`). The game has no
+feedback channel (web lobby mailbox + /api/test-board removed 2026-10-01; the
+native one followed on 2026-11-01).
 Marketing/landing and the spec website are separate apps under
 tools/sites/marketing/ and tools/sites/docs/.
 
@@ -19,6 +20,7 @@ import logging
 import os
 import re
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
@@ -105,7 +107,21 @@ MARKETING_URL = os.environ.get("MARKETING_URL", "https://localhost:8096")
 # tests/test_offline_taster.py pin this so it cannot silently regrow.
 
 
-app = FastAPI(title="Axe'n'Stax — Game")
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    """Run the /mc-skin memory sweep on a timer for the life of the app."""
+    task = asyncio.create_task(_mc_sweep_loop())
+    try:
+        yield
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
+app = FastAPI(title="Axe'n'Stax — Game", lifespan=_lifespan)
 
 # --- Security headers ---
 # /play/ overrides this baseline with a stricter CSP that pins inline-script
@@ -202,6 +218,7 @@ _MC_SKIN_CACHE_MAX = 512  # max total entries (name keys + uuid: aliases combine
 _MC_SKIN_RATE: dict[str, tuple[int, float]] = {}  # ip -> (count, window_start)
 _MC_SKIN_RATE_MAX = 10
 _MC_SKIN_RATE_WINDOW = 60.0
+_MC_SWEEP_INTERVAL = 60.0  # background sweep of both stores (seconds)
 _MC_CALL_TIMEOUT = 4.0
 _MC_CHAIN_DEADLINE = 10.0
 _MC_HOST_NAME = "https://api.mojang.com"
@@ -280,6 +297,35 @@ def _mc_cache_evict() -> None:
             uuid_key = "uuid:" + entry["uuid"].lower()
             if _MC_SKIN_CACHE.pop(uuid_key, None) is not None:
                 removed += 1
+
+
+def _mc_sweep_expired(now: float | None = None) -> None:
+    """Remove every expired entry from both in-memory stores.
+
+    Rate entries go once their window has passed; cache entries once their TTL
+    has passed (the name key and its ``uuid:`` alias share one entry, so they
+    expire together). ``now`` is a ``time.monotonic()`` reading. Never logs.
+    """
+    if now is None:
+        now = time.monotonic()
+    for ip, (_count, start) in list(_MC_SKIN_RATE.items()):
+        if now - start >= _MC_SKIN_RATE_WINDOW:
+            _MC_SKIN_RATE.pop(ip, None)
+    for key, entry in list(_MC_SKIN_CACHE.items()):
+        if now - entry["cached_at"] >= _MC_SKIN_CACHE_TTL:
+            _MC_SKIN_CACHE.pop(key, None)
+
+
+async def _mc_sweep_loop() -> None:
+    """Sweep every ``_MC_SWEEP_INTERVAL`` seconds whether or not any request
+    arrives. A failing sweep is logged (no name, uuid or address) and the loop
+    carries on."""
+    while True:
+        await asyncio.sleep(_MC_SWEEP_INTERVAL)
+        try:
+            _mc_sweep_expired()
+        except Exception:  # noqa: BLE001 - the sweeper must never die
+            logging.getLogger("axenstax.mc_skin").error("mc-skin sweep failed")
 
 
 def _mc_decode_textures(profile: dict):

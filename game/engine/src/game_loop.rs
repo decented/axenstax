@@ -556,33 +556,48 @@ fn try_unequip_pack(ecs: &mut hecs::World, target: hecs::Entity) -> PackUnequip 
 // `online_join` own the protocol, `friends_ui` owns the pixels; what lives here
 // is the wiring between them and `GameState`. Nothing in this block blocks the
 // frame — every slow step is behind `online_prep`'s worker thread.
-/// Push a freshly written contacts book into a world that is being hosted
-/// online right now — with the Signet blocks read alongside it, so a block
-/// leaves the whitelist, lands on the blocklist, and drops a blocked player
-/// already in the world (D8).
+/// Push a freshly written contacts book, and the Signet blocks read alongside
+/// it, into the world this machine is hosting, however it is hosted. A block
+/// lands on the blocklist (D8), and `set_access_policy` removes anyone it now
+/// refuses from the world.
 ///
-/// `OnlineHost` admits from a **snapshot** taken when hosting started (see its
-/// module docs), and `HostedServer::set_access_policy` *replaces* its whitelist
-/// — so a friend added while a world is up is invisible to both until they are
-/// pushed in here. Every place that writes the mirror calls this; either half
-/// being `None` makes it a no-op, which is the lobby case.
+/// - **Online** (`host` is `Some`): `OnlineHost` admits from a **snapshot** taken
+///   when hosting started (see its module docs), and `set_access_policy`
+///   *replaces* the allowlist, so a friend added or removed while a world is up
+///   only counts once pushed in here.
+/// - **"Host Game"** (`host` is `None`): the room has no allowlist, so only the
+///   blocks apply. They take effect at once and stop the player rejoining.
+///
+/// When Signet couldn't be read the server keeps the blocks it last applied, as
+/// the dedicated server's policy reload keeps a file's last good value. The book
+/// still changes: it has no Signet rows, as when Signet is stale.
+///
+/// Every place that writes the mirror calls this; no server makes it a no-op,
+/// which is the lobby case.
 ///
 /// A free function taking the two fields rather than a method, because the
 /// call sites hold a `&mut` borrow of `GameState::mode` (the menu) at the time.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn push_book_to_online_host(
+pub(crate) fn push_book_to_hosted_world(
     host: Option<&mut crate::online_host::OnlineHost>,
     server: Option<&mut crate::hosted_server::HostedServer>,
     book: &[crate::contacts::Contact],
-    blocked: &[[u8; 32]],
+    blocked: &crate::contacts::SignetBlocks,
 ) {
-    let (Some(host), Some(server)) = (host, server) else {
+    let Some(server) = server else {
         return;
     };
-    host.set_book(book.to_vec(), blocked.to_vec());
+    let blocked = match blocked {
+        crate::contacts::SignetBlocks::Known(blocked) => blocked.clone(),
+        crate::contacts::SignetBlocks::Unreadable => server.blocklist().to_vec(),
+    };
+    let Some(host) = host else {
+        server.set_blocklist(blocked);
+        return;
+    };
+    host.set_book(book.to_vec(), blocked);
     let (list, blocklist) = host.access_policy();
     server.set_access_policy(true, list, blocklist);
-    server.kick_pubkeys(host.blocked());
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -718,11 +733,11 @@ impl super::GameState {
             return Err(why);
         }
         let settings = crate::graphics_settings::GraphicsSettings::load();
-        let identity = crate::runtime_identity::RuntimeIdentity::load()?
-            .ok_or_else(|| "no runtime identity".to_string())?;
+        let identity = Self::runtime_identity_for_screen()?;
         let persona = Self::owner_persona_bytes()
             .ok_or_else(|| crate::online_prep::NOT_SIGNED_IN.to_string())?;
         let (book, blocked) = crate::contacts::load_local_book_with_blocks();
+        let blocked = blocked.for_new_host()?;
         self.start_online_host_with(
             folder,
             prep,
@@ -735,6 +750,19 @@ impl super::GameState {
             },
             |relays| Box::new(crate::rendezvous::relay_client::MultiRelay::start(relays)),
         )
+    }
+
+    /// The runtime identity, or a sentence safe to put on screen: the real error
+    /// names a file in the player's home directory, and goes to the log only.
+    fn runtime_identity_for_screen() -> Result<crate::runtime_identity::RuntimeIdentity, String> {
+        match crate::runtime_identity::RuntimeIdentity::load() {
+            Ok(Some(identity)) => Ok(identity),
+            Ok(None) => Err("This computer has nowhere to keep its online key.".to_string()),
+            Err(e) => {
+                log::error!("[online] runtime identity: {e}");
+                Err("This computer couldn't prepare its online key.".to_string())
+            }
+        }
     }
 
     /// Common host-start caller: current folder authority is checked before
@@ -793,7 +821,7 @@ impl super::GameState {
         )?;
         server.set_access_policy(
             true,
-            crate::online_host::access_allowlist(&persona, &book, &[], &blocked),
+            crate::access_policy::Allow::only(crate::online_host::access_allowlist(&persona, &book, &[], &blocked)),
             blocked.clone(),
         );
         let host_relays = prep
@@ -870,8 +898,7 @@ impl super::GameState {
     ) -> Result<(), String> {
         let settings = crate::graphics_settings::GraphicsSettings::load();
         let now = self.online_now();
-        let identity = crate::runtime_identity::RuntimeIdentity::load()?
-            .ok_or_else(|| "no runtime identity".to_string())?;
+        let identity = Self::runtime_identity_for_screen()?;
         let persona = Self::owner_persona_bytes()
             .ok_or_else(|| crate::online_prep::NOT_SIGNED_IN.to_string())?;
         // The same check the host does, and for the same reason: an offer
@@ -931,16 +958,23 @@ impl super::GameState {
 
         // 0 — Signet contacts sync changed the book (a newer snapshot, a
         // revocation, a disconnect): the column re-reads it, and a world being
-        // hosted admits from the fresh book (a Signet block takes effect).
+        // hosted, online or by Host Game, takes the change (a Signet block takes
+        // effect).
         if crate::signet_contacts::take_book_changed() {
             self.contacts_dirty = true;
             let (book, blocked) = crate::contacts::load_local_book_with_blocks();
-            push_book_to_online_host(
+            push_book_to_hosted_world(
                 self.online_host.as_mut(),
                 self.hosted_server.as_mut(),
                 &book,
                 &blocked,
             );
+        }
+        // The same read that makes a running online host drop its Signet-only
+        // friends: say so, once per flip. (A Host Game room is open to its friends
+        // and loses nobody.)
+        if crate::signet_contacts::take_went_unreadable() && self.online_host.is_some() {
+            self.online_toast(crate::signet_contacts::ui::HOST_LOST_SIGNET_FRIENDS, 12);
         }
 
         // 1 — the worker, if it has finished.
@@ -962,11 +996,19 @@ impl super::GameState {
                     };
                     if let Err(e) = outcome {
                         log::error!("[online] could not start: {e}");
+                        // Toasts draw in a world, and this may be in the lobby.
+                        if let GameMode::Menu(ref mut menu_state) = self.mode {
+                            menu_state.notice = Some(e.clone());
+                        }
                         self.online_toast(e, 8);
                     }
                 }
                 (_, Err(e)) => {
                     log::warn!("[online] getting ready failed: {e}");
+                    // Toasts draw in a world, and this may be in the lobby.
+                    if let GameMode::Menu(ref mut menu_state) = self.mode {
+                        menu_state.notice = Some(e.clone());
+                    }
                     self.online_toast(e, 8);
                 }
                 (None, Ok(_)) => {}
@@ -1048,7 +1090,7 @@ impl super::GameState {
                     let (book, blocked) = crate::contacts::load_local_book_with_blocks();
                     // Playing at theirs makes them a contact here too, so a
                     // world this machine is hosting must learn it as well.
-                    push_book_to_online_host(
+                    push_book_to_hosted_world(
                         self.online_host.as_mut(),
                         self.hosted_server.as_mut(),
                         &book,
@@ -1911,10 +1953,6 @@ impl super::GameState {
         self.governor.rebase(&self.graphics);
         self.sync_graphics_to_engine();
         self.graphics.save();
-        // The tester-feedback unlock lives in these settings: re-gate the
-        // slash commands so it takes effect (or is withdrawn) immediately.
-        #[cfg(not(target_arch = "wasm32"))]
-        crate::native_mailbox::apply_gate(&mut self.cmd_registry, &self.graphics);
     }
 
     /// Exhibits — per-world art lifecycle. On first
@@ -3267,7 +3305,6 @@ impl super::GameState {
         self.joined_push_only = false;
         self.own_prediction.reset();
         self.mission_idx = 0;
-        self.mission_note.clear();
         self.mission_registry.clear();
         // Trials: cancel any active run on world change (bests persist across worlds).
         self.active_trial = None;
@@ -5266,15 +5303,6 @@ impl super::GameState {
                     for id in item_ids {
                         let _ = self.ecs.despawn(id);
                     }
-                }
-                #[cfg(not(target_arch = "wasm32"))]
-                crate::commands::CommandResult::FeedbackQueued => {
-                    // Wind, Copper & Electricity wave §4 — `/bug` or
-                    // `/idea` went to the makers. The report is already
-                    // away (native outbox); this is the local Trial
-                    // counter, fired because the command hands off
-                    // before it returns.
-                    self.fire_challenge(crate::scenario::ChallengeEvent::SendFeedback);
                 }
                 crate::commands::CommandResult::RebuildRegion { min, max, changed } => {
                     // #7 — a /we edit changed blocks in a cuboid; re-mesh
@@ -8974,10 +9002,6 @@ impl super::GameState {
             // the pause-menu settings panel or the Relays window below).
             #[cfg(not(target_arch = "wasm32"))]
             menu_state.relays.clone_from(&self.graphics.online_relays);
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                menu_state.tester_feedback = crate::native_mailbox::feedback_enabled(&self.graphics);
-            }
             // CP20 (CP18 review MEDIUM-1): a handover that finished while
             // the lobby is up lists its world without leaving the lobby.
             #[cfg(not(target_arch = "wasm32"))]
@@ -9085,9 +9109,6 @@ impl super::GameState {
                     // Volume / mute are world-independent: apply them live in
                     // the lobby too (the rest is pushed on world entry).
                     self.audio.set_master(self.graphics.master_volume, self.graphics.audio_muted);
-                    // The tester unlock lives here: re-gate /bug, /idea, /mailbox.
-                    #[cfg(not(target_arch = "wasm32"))]
-                    crate::native_mailbox::apply_gate(&mut self.cmd_registry, &self.graphics);
                 }
                 if plan.apply_display {
                     // A lobby change is the player's own: drop any governor offset.
@@ -9290,17 +9311,21 @@ impl super::GameState {
                     // player's own relays only (red line 2).
                     // The player's Signet blocks are refused here as they are
                     // when hosting online; sign-in stays required. Passed in so
-                    // the policy is on before the room can seat anybody.
+                    // the policy is on before the room can seat anybody. With
+                    // Signet unreadable there's no room: its blocks are unknown.
                     let (_, blocked) = crate::contacts::load_local_book_with_blocks();
-                    match crate::hosted_server::HostedServer::start_fray_host(
-                        1,  // 1 local player
-                        folder_name.clone(),
-                        host_seed,
-                        4,  // max 4 remote players
-                        crate::hosted_server::host_world_mode(),
-                        &self.graphics.online_relays,
-                        blocked,
-                    ) {
+                    let started = blocked.for_new_host().and_then(|blocked| {
+                        crate::hosted_server::HostedServer::start_fray_host(
+                            1,  // 1 local player
+                            folder_name.clone(),
+                            host_seed,
+                            4,  // max 4 remote players
+                            crate::hosted_server::host_world_mode(),
+                            &self.graphics.online_relays,
+                            blocked,
+                        )
+                    });
+                    match started {
                         Ok(server) => {
                             // T2-10: say how friends join — the toast now, the
                             // pause menu (with the code) for as long as we host.
@@ -9715,8 +9740,21 @@ impl super::GameState {
                     // Refused before any port, router mapping or phone prompt
                     // (Spec 02 §8.4); `start_online_host` checks again.
                     if let Some(why) = crate::save::world_open_refusal(&folder_name) {
+                        menu_state.notice = Some(why.clone());
                         self.online_toast(why, 8);
+                    } else if let Err(why) =
+                        crate::contacts::load_local_book_with_blocks().1.for_new_host()
+                    {
+                        menu_state.notice = Some(why);
                     } else {
+                        // A refusal from an earlier press no longer applies.
+                        if menu_state
+                            .notice
+                            .as_deref()
+                            .is_some_and(crate::signet_contacts::ui::is_host_refusal)
+                        {
+                            menu_state.notice = None;
+                        }
                         self.start_online_prep(crate::online_prep::OnlineIntent::Host {
                             folder: folder_name,
                         });
@@ -9797,7 +9835,7 @@ impl super::GameState {
                                 // admits from a snapshot, so the new row has to
                                 // be pushed in there too or it would be a
                                 // stranger at our own door.
-                                push_book_to_online_host(
+                                push_book_to_hosted_world(
                                     self.online_host.as_mut(),
                                     self.hosted_server.as_mut(),
                                     &book,
@@ -9865,7 +9903,7 @@ impl super::GameState {
                             let (book, blocked) = crate::contacts::load_local_book_with_blocks();
                             // A world being hosted admits from a snapshot of the
                             // book, so the new friend goes in there too.
-                            push_book_to_online_host(
+                            push_book_to_hosted_world(
                                 self.online_host.as_mut(),
                                 self.hosted_server.as_mut(),
                                 &book,
@@ -17920,15 +17958,14 @@ impl super::GameState {
                 } else if self.world.world_type == "testlab" {
                     // Test Lab — Satoshi runs playtest missions instead of the
                     // onboarding gifts. One mission at a time from the ranked
-                    // test_board registry. Verdicts have no transport any more
-                    // (the web mailbox was removed) — see `queue_verdict`.
+                    // test_board registry. The game collects no verdicts.
                     if self.mission_registry.is_empty() {
                         self.mission_registry = crate::test_board::load_registry();
                     }
                     let idx = self.mission_idx;
                     let total = self.mission_registry.len();
-                    // Clone the current mission out so the verdict branch can
-                    // mutate self (toast / idx) without holding a borrow of it.
+                    // Clone the current mission out so drawing it holds no
+                    // borrow of the registry.
                     let item = self.mission_registry.get(idx).cloned();
                     let action = crate::villager_ui::draw_satoshi_mission(
                         &self.renderer.egui.ctx,
@@ -17937,34 +17974,12 @@ impl super::GameState {
                         item.as_ref(),
                         idx,
                         total,
-                        &mut self.mission_note,
                     );
                     match action {
-                        crate::satoshi::MissionAction::Worked
-                        | crate::satoshi::MissionAction::Broken => {
-                            let good = action == crate::satoshi::MissionAction::Worked;
-                            if let Some(it) = &item {
-                                let line = crate::test_board::queue_verdict(
-                                    &it.ref_id,
-                                    good,
-                                    &self.mission_note,
-                                );
-                                if pidx == 0 {
-                                    self.toast = Some((
-                                        line,
-                                        Instant::now() + std::time::Duration::from_secs(3),
-                                    ));
-                                }
-                            }
-                            self.mission_note.clear();
-                            self.mission_idx = idx.saturating_add(1);
-                        }
                         crate::satoshi::MissionAction::Skip => {
-                            self.mission_note.clear();
                             self.mission_idx = idx.saturating_add(1);
                         }
                         crate::satoshi::MissionAction::Close => {
-                            self.mission_note.clear();
                             self.players[pidx].dialogue_satoshi = None;
                             if pidx == 0 {
                                 self.capture_cursor();
@@ -21092,11 +21107,7 @@ impl super::GameState {
         // one's progress. Starting routes through the same `start_scenario` the
         // command uses, so the two can't drift.
         if self.challenge_board_open {
-            #[cfg(not(target_arch = "wasm32"))]
-            let feedback_on = crate::native_mailbox::feedback_enabled(&self.graphics);
-            #[cfg(target_arch = "wasm32")]
-            let feedback_on = false;
-            let listing = crate::scenario::challenge_listing_visible(feedback_on);
+            let listing = crate::scenario::challenge_listing();
             let rows: Vec<crate::challenge_board_ui::ChallengeRow> = listing
                 .iter()
                 .map(|(name, display)| crate::challenge_board_ui::ChallengeRow {

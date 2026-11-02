@@ -98,7 +98,7 @@ pub fn hosting_toast(access: &HostAccess, code: &str, has_relays: bool) -> Strin
     }
     format!(
         "Hosting on your network. Friends on the same Wi-Fi pick this world under Join Game; \
-         the room code is {code} (pause to see it again)."
+         the room code is {code} (pause to see it again). Share it only with people you know."
     )
 }
 

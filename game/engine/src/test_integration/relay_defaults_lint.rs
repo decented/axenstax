@@ -4,8 +4,8 @@
 //!
 //! Walks every default / const relay list the engine connects with on anyone's
 //! behalf — the player's default list and everything derived from it (sign-in
-//! QR, contacts pairing, discovery, release feed), the feedback inbox, and the
-//! operator's pairing relay — and fails on any `trotters` host. Extends the
+//! QR, contacts pairing, discovery, release feed) and the operator's pairing
+//! relay — and fails on any `trotters` host. Extends the
 //! `default_relays_are_public_only` pattern in `graphics_settings`.
 //!
 //! The ONLY sanctioned appearance is [`ALLOWED`]: places where trotters is
@@ -45,7 +45,6 @@ fn no_relay_default_names_our_own_relay() {
         ("graphics_settings::default_online_relays (Your relays)", player_default.clone()),
         ("GraphicsSettings::default().online_relays", crate::graphics_settings::GraphicsSettings::default().online_relays),
         ("server_resolve_native::default_relays (discovery)", crate::server_resolve_native::default_relays()),
-        ("native_mailbox::FEEDBACK_INBOX_RELAYS", owned(&crate::native_mailbox::FEEDBACK_INBOX_RELAYS)),
         ("server_identity::DEFAULT_PAIR_RELAY (operator pairing + admin)", owned(&[crate::server_identity::DEFAULT_PAIR_RELAY])),
         ("native_signin::signin_relays(default) (sign-in QR)", crate::native_signin::signin_relays(&player_default)),
         ("native_signin::signin_relays(empty) (sign-in fallback)", crate::native_signin::signin_relays(&[])),
@@ -67,14 +66,4 @@ fn the_allow_list_only_holds_prohibitions() {
     for (name, value) in ALLOWED {
         assert!(value.contains(OURS), "{name} is allow-listed but no longer names trotters");
     }
-}
-
-#[test]
-fn the_feedback_inbox_is_independent_of_the_player_list() {
-    // D3: a player who customises "Your relays" must still reach the project,
-    // so the inbox is a fixed set — and must not silently equal (and so drift
-    // with) the player defaults.
-    let inbox = owned(&crate::native_mailbox::FEEDBACK_INBOX_RELAYS);
-    assert!((2..=3).contains(&inbox.len()), "2–3 inbox relays");
-    assert_ne!(inbox, crate::graphics_settings::default_online_relays());
 }

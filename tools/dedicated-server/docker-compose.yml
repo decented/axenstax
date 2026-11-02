@@ -4,8 +4,10 @@
 # installed is Docker.
 #
 #   1. docker compose up -d
-#   2. Open  https://<this-box-ip>:8443   (accept the cert warning once), or
-#      Native → Join → ws://<this-box-ip>:6767
+#   2. Open  https://<this-box-ip>:8443/admin  (accept the cert warning once) and run
+#      the setup wizard. It asks for the address players use, which the game server
+#      won't start without (or set AXENSTAX_PUBLIC_HOST below).
+#   3. Native → Join → ws://<this-box-ip>:6767
 #
 # Stop + keep the world:  docker compose down
 # Update to the latest:   docker compose pull && docker compose up -d
@@ -36,8 +38,9 @@ services:
       # First-run setup wizard: on a fresh box the engine WAITS until the operator
       # finishes the setup wizard in the console (/admin) before it creates a world,
       # so the chosen "kind of place" (gallery / creative / survival / adventure)
-      # applies to the first world. Set to "1" to skip the gate and boot immediately
-      # on the defaults above (e.g. headless/CI). See README + the design doc.
+      # applies to the first world. Set to "1" to skip that gate and boot on the
+      # defaults above (e.g. headless/CI). It still needs AXENSTAX_PUBLIC_HOST or
+      # AXENSTAX_DOMAIN, or it waits for one. See README + the design doc.
       # AXENSTAX_SKIP_WIZARD: "0"
       # AXENSTAX_SEED: "12345"           # optional — fixed terrain for a new world
       # --- VPS with a real domain (optional; see README) ---
@@ -45,13 +48,15 @@ services:
       #                                      #   (also a public host for join checks, below)
       # --- Verified operator identity (optional; see README) ---
       # AXENSTAX_REQUIRE_VERIFIED: "0"   # "1" → refuse to boot without a valid attestation
-      # Public address(es) players use — comma list of host or host:port. Joins
-      # signed for any other address are refused (relay protection, protocol v66);
-      # unset → any address is accepted and the log warns. The first entry is the
-      # host advertised in the connect-string. Use a PUBLIC domain or IP here. A
-      # LAN IP or .local/.lan name can be listed too if players join that way, but
-      # it is NOT relay-protected (any machine on that network can hold the same
-      # address; the start-up log warns) — see the README, "Public address".
+      # Public address(es) players use — comma list of host or host:port. REQUIRED
+      # (AXENSTAX_DOMAIN above also counts): the game server won't start without one,
+      # and this box waits, console up, until the setup wizard or this line names it.
+      # Joins signed for any other address are refused (relay protection, protocol
+      # v66). The first entry is the host advertised in the connect-string. Use a
+      # PUBLIC domain or IP where you can. A LAN IP, localhost or .local/.lan name is
+      # valid if players join that way, but it is NOT relay-protected (any machine on
+      # that network can hold the same address; the start-up log warns) — see the
+      # README, "Public address".
       # AXENSTAX_PUBLIC_HOST: "play.example.com"
       # AXENSTAX_PAIR_RELAY: "wss://relay.damus.io"   # any public relay you trust
       # AXENSTAX_DELEGATION_DAYS: "90"
@@ -60,7 +65,8 @@ services:
       # identity may join. The browser client this box serves on :8443 has no
       # sign-in, so web players (and the showcase kiosk below) need guests:
       # AXENSTAX_ALLOW_GUESTS: "1"       # "1" → also admit anonymous guests
-      # AXENSTAX_WHITELIST: ""           # comma-separated npubs (implies sign-in)
+      # AXENSTAX_WHITELIST: ""           # comma-separated npubs: a non-blank value turns the
+      #                                  #   allowlist on (implies sign-in; see README)
       # --- Creator Gallery / showcase kiosk (optional; Spec 2026-06-19 §8) ---
       # Turn this box into a contained, unattended gallery/booth: a guest opening
       # :8443 is locked to read-only Adventure, can click exhibits to collect them
@@ -72,6 +78,9 @@ services:
       # AXENSTAX_EXIT_ACTION: "board"    # the exit screen kind (board/CTA)
       # AXENSTAX_AUTO_LOOP_SECS: "0"     # >0 → reset to a fresh session after N seconds (booth)
     restart: unless-stopped
+    # `docker stop` saves the world before the server exits. Docker's default of
+    # 10 s can cut a large world's save short, so allow it up to two minutes.
+    stop_grace_period: 120s
 
   # Operator Console (web sidecar). Caddy (in the server container) routes
   # /admin → this service. It manages the same identity-dir policy files the

@@ -31,7 +31,9 @@ There are two ways to play:
 - **Web taster** (`play.axenstax.com`) — an anonymous, local, single-player
   sandbox that runs entirely in your browser (WASM + WebGPU, Chromium-based
   browsers for now). No sign-in, no account, no multiplayer, nothing saved
-  or sent anywhere beyond your machine. It's a taste of the game, not the
+  or sent anywhere beyond your machine, with one exception: if you type a
+  Minecraft username to import a skin, that name goes through our game
+  site to Mojang, and is held in memory for a few minutes. It's a taste of the game, not the
   full platform.
 - **Native** — the full desktop build. Sign in with a self-sovereign
   [Signet](https://mysignet.app) identity, run or join a self-hosted

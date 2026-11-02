@@ -35,8 +35,8 @@
                               legacy PNG on 24-25). Regenerate with
                               `node brand/render-rasters.mjs`. res/ is compiled by
                               build-apk.sh (aapt2 compile) — no Gradle needed.
-  INTERNET                  — multiplayer (QUIC/WebSocket), the Nostr relay for
-                              sign-in, and the feedback mailbox. Nothing else is
+  INTERNET                  — multiplayer (QUIC/WebSocket) and the Nostr relays for
+                              sign-in. Nothing else is
                               requested: no storage permission is needed because
                               saves live in internal_data_path(), and no
                               location/camera/contacts are used at all.

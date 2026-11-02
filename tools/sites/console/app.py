@@ -184,6 +184,7 @@ async def dashboard(request: Request):
             "you_role": identity.role_of(pk),
             "caps": sorted(caps),
             "allowlist": identity.allowlist(),
+            "allowlist_on": identity.allowlist_enabled(),
             "blocklist": identity.blocklist(),
             "require_signin": identity.require_signin(),
             "settings": identity.settings(),
@@ -201,6 +202,7 @@ async def dashboard(request: Request):
             # findable "re-run setup" control (owner/admin only).
             "can_setup": "settings" in caps,
             "setup_complete": wizard.setup_complete(),
+            "awaiting_public_host": wizard.awaiting_public_host(),
             # Use-case guide: the dashboard adapts to what kind of place this is, so
             # the operator can see at a glance who can do what.
             "server_type": wizard.server_type(),
@@ -230,7 +232,10 @@ async def setup_apply(
         raise HTTPException(400, "expected a JSON object")
     # Stamp the operator who owns this world's content (recorded in the manifest).
     payload.setdefault("content_owner_npub", identity.npub_encode(pk))
-    result = wizard.apply(payload)
+    try:
+        result = wizard.apply(payload)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     return JSONResponse(result)
 
 
@@ -252,7 +257,10 @@ async def world_create(
     if not isinstance(payload, dict):
         raise HTTPException(400, "expected a JSON object")
     payload.setdefault("content_owner_npub", identity.npub_encode(pk))
-    result = wizard.apply(payload)
+    try:
+        result = wizard.apply(payload)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     result["worlds"] = worlds.list_worlds()
     return JSONResponse(result)
 
@@ -358,6 +366,22 @@ async def world_publish(
     })
 
 
+@app.post("/api/public-host")
+async def public_host_set(
+    request: Request,
+    public_host: str = Form(...),
+    x_requested_with: str | None = Header(default=None, alias="X-Requested-With"),
+):
+    """The address players use: all the engine still needs when it is waiting for
+    one, without re-running the wizard over the world."""
+    _require_fetch(x_requested_with)
+    _require_cap(request, "settings")
+    try:
+        return JSONResponse(wizard.set_public_host(public_host))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
 @app.post("/api/setup/skip")
 async def setup_skip(
     request: Request,
@@ -421,6 +445,22 @@ async def list_edit(
     except ValueError as e:
         raise HTTPException(400, str(e))
     return JSONResponse({"ok": True, "allowlist": identity.allowlist(), "blocklist": identity.blocklist()})
+
+
+@app.post("/api/allowlist/off")
+async def allowlist_off(
+    request: Request,
+    x_requested_with: str | None = Header(default=None, alias="X-Requested-With"),
+):
+    """Turn the allowlist off (deletes whitelist.txt). Emptying the list does not:
+    an empty allowlist admits nobody."""
+    _require_fetch(x_requested_with)
+    _require_cap(request, "access")
+    try:
+        identity.allowlist_off()
+    except OSError as e:
+        raise HTTPException(500, f"couldn't remove the allowlist: {e}")
+    return JSONResponse({"ok": True, "allowlist_on": identity.allowlist_enabled()})
 
 
 @app.post("/api/require-signin")

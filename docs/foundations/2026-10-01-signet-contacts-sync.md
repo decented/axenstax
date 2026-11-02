@@ -58,7 +58,7 @@ Relay I/O sits outside the pure module: an ack waiter implementing WIRE.md §3
 up to 10 candidates newest-first, decrypt+challenge gate, ≤32 attempts, paging
 rule, poll-before-deadline, 600 s default) and a projection fetch (`kinds:[30078]`,
 `authors:[railPubkey]`, `#d:[projectionTag]`). Use the existing `nostr`/`nostr-sdk`
-stack the engine already uses for the mailbox / rendezvous.
+stack the engine already uses for rendezvous.
 
 ## 4. Storage
 
@@ -67,6 +67,10 @@ rail_pubkey, projection_tag, relay, granted_capabilities, max_staleness_seconds,
 paired_at}`. `profile/signet-contacts.json`: the last accepted projection body
 (already parsed/sanitised) + `fetched_at`. Both append-only formats per the
 codebase convention; a corrupt file is quarantined the way saves are, never a panic.
+A quarantined or unreadable file is not the same as no Signet: a running host keeps
+the blocks it last applied, no new world can be hosted until Signet is reconnected
+(Disconnect clears the files, a new pairing replaces them), and the row says so. An
+explicit Disconnect or a revoked snapshot still lifts blocks (D12). Spec 04 §1.9.
 
 ## 5. UI (Friends column)
 

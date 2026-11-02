@@ -34,16 +34,14 @@ export const RELEASE_CHANNEL = 'axenstax-appimage';
 export const BLOSSOM_AUTH_KIND = 24242;
 
 /**
- * The release key ceremony (new-release-key.mjs) has not been run for real
- * yet on any machine that maintains this repo — this session only ran it
- * into a throwaway HOME to prove the mechanics. Pin the printed pubkey here
- * the first time it IS run for real, and commit that change: from that
- * moment on, loadReleaseKey() in publish-release.mjs treats a mismatch as
- * fatal (never sign a release with any key but this one), and query-latest.mjs
- * / publish-release.mjs's own monotonicity check use it to filter which
- * relay events are even candidates. Until it is pinned (empty string),
- * both scripts skip author verification and warn loudly instead — see the
- * README's "Key ceremony" section.
+ * The pinned release pubkey (from new-release-key.mjs). It must equal
+ * `RELEASE_PUBKEY_HEX` in game/engine/src/nostr_release.rs. loadReleaseKey()
+ * in publish-release.mjs treats a mismatch as fatal (never sign a release with
+ * any key but this one), and query-latest.mjs / publish-release.mjs's own
+ * monotonicity check use it to filter which relay events are even candidates.
+ * An empty value would make both scripts skip author verification and warn
+ * loudly instead, which is why it must stay set. See the README's "Key
+ * ceremony" section.
  */
 export const RELEASE_PUBKEY_HEX =
   'ca43e7218d03a50e20b07f54fad58a7cf4ef9ac1a883e3a0104255a46600e502';

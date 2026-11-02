@@ -518,10 +518,6 @@ pub const TRIAL_ORDER: &[(TrialType, TrialRef)] = &[
     (TrialType::Make, TrialRef::Challenge("follow-the-plan")),
     (TrialType::Make, TrialRef::Challenge("fresh-coat")),
     (TrialType::Make, TrialRef::Challenge("bouncer")),
-    // Native only: `SendFeedback` fires from `/bug`·`/idea`, which the browser
-    // build does not have (no feedback channel on web, 2026-10-01).
-    #[cfg(not(target_arch = "wasm32"))]
-    (TrialType::Tech, TrialRef::Challenge("suggestion-box")),
     (TrialType::Make, TrialRef::Challenge("workshop-publish")),
     (TrialType::Brave, TrialRef::Challenge("champion")),
 ];
@@ -738,6 +734,26 @@ mod tests {
         // A pre-rival store (no `rivals` key) still loads — tolerant default.
         let old = r#"{"bests":{},"completed_challenges":[]}"#;
         assert!(TrialBests::from_json(old).rivals.is_empty());
+    }
+
+    #[test]
+    fn a_store_that_completed_the_removed_suggestion_box_trial_still_loads() {
+        // Trial progress is the only per-player store that names trials, and it
+        // keys completed challenges by display name (an open string set), so the
+        // removed Suggestion Box trial leaves a harmless stale entry. Everything
+        // else in the store must survive it (a parse failure would silently
+        // reset the lot: `from_json` falls back to the default).
+        let mut bests = TrialBests::default();
+        let mut ghost = GhostRecording::new();
+        ghost.record(frame(0.0));
+        assert!(bests.submit("sprint", 120, ghost));
+        bests.mark_challenge_done("Suggestion Box \u{2014} tell the makers one idea you would like in the game");
+        bests.mark_challenge_done("Some other challenge");
+        let back = TrialBests::from_json(&bests.to_json());
+        assert_eq!(back.best("sprint").map(|b| b.ticks), Some(120));
+        assert!(back.is_challenge_done("Some other challenge"));
+        // And the trial itself is gone from the lobby list.
+        assert!(!crate::scenario::challenge_listing().iter().any(|(t, _)| *t == "suggestion-box"));
     }
 
     #[test]

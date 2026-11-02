@@ -80,6 +80,8 @@ pub struct View {
     pub people: usize,
     pub truncated: bool,
     pub stale: bool,
+    /// The stored files can't be read; Disconnect is how the player gets out.
+    pub unreadable: bool,
     /// Unix seconds of the last successful check with the relay.
     pub last_synced: Option<u64>,
     /// A one-off line (e.g. "Signet disconnected this game").
@@ -94,6 +96,8 @@ struct Shared {
     last_attempt: Option<u64>,
     notice: Option<&'static str>,
     book_changed: bool,
+    /// Raised once each time the Signet files go from readable to unreadable.
+    went_unreadable: bool,
     column_last_drawn: Option<Instant>,
     /// Bumped by Disconnect. A sync that started under an older generation
     /// has its result discarded.
@@ -103,6 +107,7 @@ struct Shared {
     people: usize,
     truncated: bool,
     stale: bool,
+    unreadable: bool,
 }
 
 enum Cmd {
@@ -118,48 +123,136 @@ struct Service {
 
 static SERVICE: OnceLock<Service> = OnceLock::new();
 
+/// What reading the stored Signet state found. "No Signet here" and "Signet is
+/// here but couldn't be read" are different answers: the first has no blocks,
+/// and the second has blocks nobody can see.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SignetRead<T> {
+    /// Not connected, or disconnected or revoked (D12).
+    Absent,
+    Value(T),
+    /// A file couldn't be read, or was damaged and set aside. Says which.
+    Unreadable(String),
+}
+
+impl<T> SignetRead<T> {
+    pub fn value(self) -> Option<T> {
+        match self {
+            SignetRead::Value(t) => Some(t),
+            _ => None,
+        }
+    }
+}
+
+fn set_aside<T>(path: &std::path::Path) -> SignetRead<T> {
+    SignetRead::Unreadable(format!("{}: damaged, and set aside", path.display()))
+}
+
 /// The stored snapshot, but only when it belongs to the grant stored beside
 /// it. A snapshot with no grant, or one left over from an older grant (a
 /// failed delete, a sync that landed after Disconnect), counts for nothing.
-fn current_snapshot(paths: &StorePaths) -> Option<store::Snapshot> {
-    let grant = store::load_grant(&paths.grant).ok()?;
-    let snap = store::load_snapshot(&paths.snapshot).ok()?;
-    (snap.projection.grant_id == grant.grant_id).then_some(snap)
+fn read_current_snapshot(paths: &StorePaths) -> SignetRead<store::Snapshot> {
+    use store::Loaded;
+    let grant = match store::load_grant(&paths.grant) {
+        Loaded::Ok(grant) => grant,
+        Loaded::Absent => return SignetRead::Absent,
+        Loaded::Quarantined => return set_aside(&paths.grant),
+        Loaded::Unreadable(why) => return SignetRead::Unreadable(why),
+    };
+    let snap = match store::load_snapshot(&paths.snapshot) {
+        Loaded::Ok(snap) => snap,
+        Loaded::Absent => return SignetRead::Absent,
+        Loaded::Quarantined => return set_aside(&paths.snapshot),
+        Loaded::Unreadable(why) => return SignetRead::Unreadable(why),
+    };
+    if snap.projection.grant_id == grant.grant_id {
+        SignetRead::Value(snap)
+    } else {
+        SignetRead::Absent
+    }
 }
 
-/// The snapshot's contribution to the book at `now` (D8–D10).
-pub fn book_part_at(paths: &StorePaths, now: u64) -> Option<crate::contacts::SignetPart> {
-    book::book_part(&current_snapshot(paths)?, now)
+fn current_snapshot(paths: &StorePaths) -> Option<store::Snapshot> {
+    read_current_snapshot(paths).value()
+}
+
+/// The snapshot's contribution to the book at `now` (D8–D10). A revoked snapshot
+/// contributes nothing and lifts its blocks, as Disconnect does (D12).
+pub fn read_book_part_at(paths: &StorePaths, now: u64) -> SignetRead<crate::contacts::SignetPart> {
+    match read_current_snapshot(paths) {
+        SignetRead::Value(s) => match book::book_part(&s, now) {
+            Some(part) => SignetRead::Value(part),
+            None => SignetRead::Absent,
+        },
+        SignetRead::Absent => SignetRead::Absent,
+        SignetRead::Unreadable(why) => SignetRead::Unreadable(why),
+    }
 }
 
 /// The snapshot's contribution to the book right now (read by
 /// `contacts::load_local_book`). Reads the files directly so it works before
 /// (or without) `init`.
-pub fn book_part_now() -> Option<crate::contacts::SignetPart> {
-    book_part_at(&StorePaths::default_paths(), unix_now())
+pub fn read_book_part_now() -> SignetRead<crate::contacts::SignetPart> {
+    let read = read_book_part_at(&StorePaths::default_paths(), unix_now());
+    note_read_problem(&read);
+    read
+}
+
+/// Whether `problem` is news: a different one from the last, which it replaces.
+/// No problem clears the last, so one that comes back is warned about again.
+fn is_new_problem(last: &mut Option<String>, problem: Option<&str>) -> bool {
+    let new = problem.is_some() && last.as_deref() != problem;
+    *last = problem.map(str::to_owned);
+    new
+}
+
+/// Warn once per distinct problem: this file is read every minute, and more.
+fn note_read_problem<T>(read: &SignetRead<T>) {
+    static LAST: Mutex<Option<String>> = Mutex::new(None);
+    let problem = match read {
+        SignetRead::Unreadable(why) => Some(why.as_str()),
+        _ => None,
+    };
+    let Ok(mut last) = LAST.lock() else { return };
+    if is_new_problem(&mut last, problem)
+        && let Some(why) = problem
+    {
+        log::warn!(
+            "[signet-contacts] {why}. A world being hosted keeps the blocks it has, and no new one \
+             can be hosted, until Signet is reconnected."
+        );
+    }
 }
 
 /// Re-read the row facts from disk. A flip in staleness changes the book
 /// (D10: stale adds nobody), so it raises `book_changed` — that is what makes
-/// expired Kin/Kith leave a hosted world's allowlist without a fetch.
+/// expired Kin/Kith leave a hosted world's allowlist without a fetch. Going
+/// unreadable or coming back does too, for the same reason.
 fn refresh_from_disk(sh: &mut Shared, paths: &StorePaths, now: u64) {
     let was_stale = sh.stale;
+    let was_unreadable = sh.unreadable;
     sh.connected = store::load_grant(&paths.grant).ok().is_some();
-    match current_snapshot(paths) {
-        Some(s) => {
+    let read = read_current_snapshot(paths);
+    note_read_problem(&read);
+    sh.unreadable = matches!(read, SignetRead::Unreadable(_));
+    match read {
+        SignetRead::Value(s) => {
             sh.people = book::people_count(&s, now);
             sh.truncated = s.projection.truncated;
             sh.stale = book::is_stale(&s, now);
             sh.last_synced = sh.last_synced.max(Some(s.fetched_at));
         }
-        None => {
+        SignetRead::Absent | SignetRead::Unreadable(_) => {
             sh.people = 0;
             sh.truncated = false;
             sh.stale = false;
         }
     }
-    if sh.stale != was_stale {
+    if sh.stale != was_stale || sh.unreadable != was_unreadable {
         sh.book_changed = true;
+    }
+    if sh.unreadable && !was_unreadable {
+        sh.went_unreadable = true;
     }
 }
 
@@ -298,10 +391,17 @@ pub fn view() -> View {
         people: sh.people,
         truncated: sh.truncated,
         stale: sh.stale,
+        unreadable: sh.unreadable,
         last_synced: sh.last_synced,
         notice: sh.notice,
     })
     .unwrap_or_default()
+}
+
+/// `true` once each time the Signet files become unreadable, so a host can be
+/// told its Signet friends were removed. Not again on the refreshes that follow.
+pub fn take_went_unreadable() -> bool {
+    with_shared(|sh| std::mem::take(&mut sh.went_unreadable)).unwrap_or(false)
 }
 
 /// The frame loop drains this: `true` once after the book's Signet part
@@ -475,6 +575,10 @@ mod tests {
         }
     }
 
+    fn book_part_at(paths: &StorePaths, now: u64) -> Option<crate::contacts::SignetPart> {
+        read_book_part_at(paths, now).value()
+    }
+
     fn snapshot(grant_id: &str, expires_at: u64) -> Snapshot {
         let p = Projection {
             v: 2,
@@ -515,6 +619,118 @@ mod tests {
         sh.book_changed = false;
         refresh_from_disk(&mut sh, &paths, 1002);
         assert!(!sh.book_changed);
+    }
+
+    /// The blocks a host would get from what's on disk, as `contacts` reads them.
+    fn blocks_at(paths: &StorePaths, now: u64) -> crate::contacts::SignetBlocks {
+        crate::contacts::book_with_blocks(Vec::new(), Vec::new(), read_book_part_at(paths, now)).1
+    }
+
+    #[test]
+    fn damaged_or_unreadable_files_read_as_unreadable_every_time() {
+        use crate::contacts::SignetBlocks;
+        let valid_grant = |paths: &StorePaths| store::save_grant(&paths.grant, &grant(&"a".repeat(32))).unwrap();
+
+        // Each way a store can go wrong, with blocks known a moment before.
+        let cases: [(&str, fn(&StorePaths)); 4] = [
+            ("corrupt-grant", |p| std::fs::write(&p.grant, b"{not json").unwrap()),
+            ("corrupt-snapshot", |p| std::fs::write(&p.snapshot, b"[]").unwrap()),
+            ("grant-read-fails", |p| {
+                std::fs::remove_file(&p.grant).unwrap();
+                std::fs::create_dir(&p.grant).unwrap();
+            }),
+            ("snapshot-read-fails", |p| {
+                std::fs::remove_file(&p.snapshot).unwrap();
+                std::fs::create_dir(&p.snapshot).unwrap();
+            }),
+        ];
+        for (name, damage) in cases {
+            let paths = tmp(name);
+            valid_grant(&paths);
+            store::save_snapshot(&paths.snapshot, &snapshot(&"a".repeat(32), 1000)).unwrap();
+            assert_eq!(blocks_at(&paths, 900), SignetBlocks::Known(vec![[2; 32]]), "{name}");
+
+            damage(&paths);
+            // The read after the file was moved aside must say the same as the
+            // read that moved it, and so must one after a restart.
+            for attempt in 0..3 {
+                assert_eq!(blocks_at(&paths, 900), SignetBlocks::Unreadable, "{name}, read {attempt}");
+                assert!(
+                    blocks_at(&paths, 900).for_new_host().is_err_and(|why| why.contains("Signet")),
+                    "{name}: no new host on an empty list"
+                );
+            }
+
+            // And Disconnect gets the player out, whatever went wrong.
+            store::delete_all(&paths).unwrap();
+            assert_eq!(blocks_at(&paths, 900), SignetBlocks::Known(Vec::new()), "{name}: disconnected");
+            let mut sh = Shared::default();
+            refresh_from_disk(&mut sh, &paths, 900);
+            assert!(!sh.unreadable && !sh.connected, "{name}: the row offers Connect again");
+        }
+    }
+
+    /// Decision D12, on purpose: asking Signet to go away takes its blocks with it.
+    #[test]
+    fn disconnect_and_revocation_still_lift_blocks() {
+        use crate::contacts::SignetBlocks;
+        let paths = tmp("d12");
+        store::save_grant(&paths.grant, &grant(&"a".repeat(32))).unwrap();
+        store::save_snapshot(&paths.snapshot, &snapshot(&"a".repeat(32), 1000)).unwrap();
+        assert_eq!(blocks_at(&paths, 900), SignetBlocks::Known(vec![[2; 32]]));
+
+        let mut revoked = snapshot(&"a".repeat(32), 1000);
+        revoked.projection.revoked = true;
+        store::save_snapshot(&paths.snapshot, &revoked).unwrap();
+        assert_eq!(blocks_at(&paths, 900), SignetBlocks::Known(Vec::new()), "a revoked snapshot");
+
+        store::save_snapshot(&paths.snapshot, &snapshot(&"a".repeat(32), 1000)).unwrap();
+        store::delete_all(&paths).unwrap();
+        assert_eq!(blocks_at(&paths, 900), SignetBlocks::Known(Vec::new()), "a disconnect");
+
+        // And nothing connected at all is simply no blocks, not a problem.
+        assert_eq!(read_book_part_at(&tmp("never"), 900), SignetRead::Absent);
+    }
+
+    #[test]
+    fn going_unreadable_changes_the_book_once_and_offers_disconnect() {
+        let paths = tmp("flip");
+        store::save_grant(&paths.grant, &grant(&"a".repeat(32))).unwrap();
+        store::save_snapshot(&paths.snapshot, &snapshot(&"a".repeat(32), 1000)).unwrap();
+        let mut sh = Shared::default();
+        refresh_from_disk(&mut sh, &paths, 900);
+        sh.book_changed = false;
+
+        std::fs::write(&paths.grant, b"{not json").unwrap();
+        refresh_from_disk(&mut sh, &paths, 900);
+        assert!(sh.unreadable && sh.book_changed);
+        assert!(ui::offers_disconnect(sh.connected, sh.unreadable), "even with the grant gone");
+
+        assert!(std::mem::take(&mut sh.went_unreadable), "the host is told, once");
+        sh.book_changed = false;
+        refresh_from_disk(&mut sh, &paths, 900);
+        assert!(sh.unreadable, "still, after the file was moved aside");
+        assert!(!sh.book_changed, "steady state does not re-raise it");
+        assert!(!sh.went_unreadable, "and not again on every refresh");
+        assert!(sh.people == 0 && !sh.stale);
+
+        // Fixed, then broken again: that is a new flip.
+        store::delete_all(&paths).unwrap();
+        refresh_from_disk(&mut sh, &paths, 900);
+        assert!(!sh.unreadable && !sh.went_unreadable);
+        std::fs::write(&paths.grant, b"{not json").unwrap();
+        refresh_from_disk(&mut sh, &paths, 900);
+        assert!(sh.went_unreadable, "a second flip is told again");
+    }
+
+    #[test]
+    fn a_problem_is_warned_about_once_until_it_changes_or_clears() {
+        let mut last = None;
+        assert!(is_new_problem(&mut last, Some("a")));
+        assert!(!is_new_problem(&mut last, Some("a")));
+        assert!(is_new_problem(&mut last, Some("b")));
+        assert!(!is_new_problem(&mut last, None));
+        assert!(is_new_problem(&mut last, Some("b")), "one that comes back is news");
     }
 
     #[test]

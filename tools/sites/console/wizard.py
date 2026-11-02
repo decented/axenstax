@@ -22,8 +22,11 @@ change, no HTTP between the containers. Reuses identity.py / studio.py for the f
 they already own.
 """
 
+import ipaddress
 import json
+import logging
 import os
+import re
 import shlex
 import time
 from pathlib import Path
@@ -31,6 +34,8 @@ from pathlib import Path
 import identity
 import studio
 import worlds
+
+log = logging.getLogger(__name__)
 
 # ── server "type" → engine settings ─────────────────────────────────────────────
 # The single big wizard choice. Each maps to a game mode (+ for a gallery, the kiosk
@@ -101,6 +106,16 @@ def reset_world_path() -> Path:
     return _id() / "reset-world"
 
 
+def awaiting_public_host_path() -> Path:
+    return _id() / "awaiting-public-host"
+
+
+def awaiting_public_host() -> bool:
+    """The entrypoint is holding the engine back: nothing has told it the address
+    players use, and a server with a WebSocket listener refuses to boot without one."""
+    return awaiting_public_host_path().exists()
+
+
 # ── state ──────────────────────────────────────────────────────────────────────
 
 
@@ -149,6 +164,15 @@ def world_exists() -> bool:
     return (studio._worlds_dir() / studio.world_name()).is_dir()
 
 
+def _access_in_force() -> str:
+    """Who the policy files admit right now, as a wizard answer. The allowlist can be
+    changed on the dashboard after the wizard ran, so this reads the files, not the
+    wizard's own record."""
+    if identity.allowlist_enabled():
+        return "friends"
+    return "signin" if identity.require_signin() else "open"
+
+
 def current_state_for_form() -> dict:
     """Defaults the wizard form renders from — prior choices if any, else sensible
     defaults seeded from the live settings the operator may already have set."""
@@ -160,12 +184,12 @@ def current_state_for_form() -> dict:
         "server_type": prev.get("server_type") or DEFAULT_TYPE,
         "server_name": name,
         "about": prev.get("about") if prev.get("about") is not None else settings.get("about", ""),
-        "access": prev.get("access") or (
-            "signin" if identity.require_signin() else "open"),
+        "access": _access_in_force(),
         "announce": bool(prev.get("announce", settings.get("announce", False))),
         "keep_history": bool(prev.get("keep_history",
                                       settings.get("privacy_level") == "sessions")),
         "friends": identity.allowlist(),
+        "public_host": _read_env().get("AXENSTAX_PUBLIC_HOST", ""),
         "world_type": prev.get("world_type") or DEFAULT_WORLD_TYPE,
         "ground": prev.get("ground") or DEFAULT_GROUND,
         "water_depth": prev.get("water_depth") or 3,
@@ -188,8 +212,12 @@ def _clean_type(v) -> str:
 
 
 def _clean_access(v) -> str:
-    v = str(v or "").strip().lower()
-    return v if v in ACCESS_MODES else DEFAULT_ACCESS
+    """A present answer must be one of the three: a typo or an empty value doesn't
+    silently become "signin" and turn an allowlist off."""
+    answer = str(v if v is not None else "").strip().lower()
+    if answer not in ACCESS_MODES:
+        raise ValueError("access must be one of: " + ", ".join(ACCESS_MODES))
+    return answer
 
 
 def _clean_world_type(v) -> str:
@@ -211,7 +239,12 @@ def _clean_water_depth(v) -> int:
 
 
 def _clean_text(v, limit: int) -> str:
-    return str(v or "").strip()[:limit]
+    """One line of text. Raises `ValueError` on a line break inside it: the form's
+    inputs are single-line, and these values go into the line-based `server.env`."""
+    text = str(v or "").strip()
+    if "\n" in text or "\r" in text:
+        raise ValueError("this must be a single line of text")
+    return text[:limit]
 
 
 def _clean_friends(v) -> list[str]:
@@ -230,7 +263,122 @@ def _clean_friends(v) -> list[str]:
     return out
 
 
+_HOST_NAME = re.compile(r"[A-Za-z0-9_-]{1,63}(\.[A-Za-z0-9_-]{1,63})*\.?")
+
+
+def _valid_public_host_entry(entry: str) -> bool:
+    """One `host[:port]`, by the rules the engine's `PublicHosts::parse` applies at
+    boot: a value it would refuse must be refused here, where the operator can fix
+    it, rather than stop the server. (ASCII only: a name in another script goes in
+    as its punycode.)"""
+    if entry.startswith("["):
+        inner, closed, after = entry[1:].partition("]")
+        port = after[1:] if after.startswith(":") else (None if not after else "bad")
+        host_ok = bool(closed) and _is_ipv6(inner)
+    elif entry.count(":") > 1:
+        return _is_ipv6(entry)
+    else:
+        name, colon, port = entry.partition(":")
+        port = port if colon else None
+        host_ok = len(name) <= 253 and bool(_HOST_NAME.fullmatch(name))
+    if port is not None and not (port.isascii() and port.isdigit() and 0 < int(port) <= 65535):
+        return False
+    return host_ok
+
+
+def _is_ipv6(text: str) -> bool:
+    if "%" in text:  # A zone id only means something on this machine.
+        return False
+    try:
+        ipaddress.IPv6Address(text)
+    except ValueError:
+        return False
+    return True
+
+
+def clean_public_host(v) -> str:
+    """A comma list of the addresses players use, tidied. "" when none was given.
+    Raises `ValueError` on anything malformed."""
+    entries = [e.strip() for e in str(v or "").split(",")]
+    entries = [e for e in entries if e]
+    for entry in entries:
+        if not _valid_public_host_entry(entry):
+            raise ValueError(
+                f"'{entry}' isn't an address: give a host name or IP, optionally with "
+                ":port (no https:// or path), e.g. play.example.org or 192.168.1.20"
+            )
+    return ",".join(entries)
+
+
 # ── env writer (sourced by entrypoint.sh) ──────────────────────────────────────
+
+
+_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+_ENV_PREFIX = re.compile(rb"[ \t]*(?:export[ \t]+)?")
+
+
+def _parse_env_entry(lines: list[bytes], start: int) -> tuple[str, str, int] | None:
+    """The `KEY=value` at `lines[start]` and the index after it. A quoted value may run
+    over several lines, as the shell would read it. Indentation and a leading `export`
+    are fine, as they are to the shell that sources the file. None when it isn't a
+    setting."""
+    first = lines[start][_ENV_PREFIX.match(lines[start]).end():]
+    key, eq, _ = first.partition(b"=")
+    if not eq or not _ENV_NAME.fullmatch(key.decode("ascii", "replace")):
+        return None
+    for end in range(start + 1, len(lines) + 1):
+        text = b"\n".join([first] + lines[start + 1:end])
+        try:
+            parts = shlex.split(text.decode("utf-8").partition("=")[2])
+        except UnicodeError:
+            return None
+        except ValueError:  # No closing quote yet: it may close on a later line.
+            continue
+        return key.decode("ascii"), parts[0] if parts else "", end
+    return None
+
+
+def _read_env(*, for_update: bool = False) -> dict:
+    """What `_write_env` last wrote. It also has to get the console through a file it
+    didn't write cleanly, because this is how the address gets set: a line that can't
+    be understood is skipped with a warning naming its setting or line number (never
+    its value), and the rest is kept. The next `_write_env` leaves that line out, which
+    also lets the entrypoint source the file again.
+
+    A file that can't be read at all reads as empty for showing the setup page. With
+    `for_update` it raises `ValueError` (the API's 400) instead, because a write that
+    started from nothing would drop every other setting in the file."""
+    try:
+        raw = server_env_path().read_bytes()
+    except FileNotFoundError:
+        return {}
+    except OSError as e:
+        if for_update:
+            raise ValueError(
+                f"couldn't read server.env, nothing was changed: {e.strerror or type(e).__name__}"
+            ) from e
+        return {}
+    lines = raw.split(b"\n")
+    out = {}
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if not line or line.lstrip().startswith(b"#"):
+            i += 1
+            continue
+        entry = _parse_env_entry(lines, i)
+        if entry is None:
+            named = _ENV_PREFIX.sub(b"", line, count=1).partition(b"=")[0]
+            what = (f"the setting {named.decode('ascii')} on line {i + 1}"
+                    if _ENV_NAME.fullmatch(named.decode("ascii", "replace")) else f"line {i + 1}")
+            log.warning("server.env: can't understand %s; skipping it", what)
+            i += 1
+            continue
+        key, value, i = entry
+        out[key] = value
+    return out
 
 
 def _write_env(pairs: dict) -> None:
@@ -242,9 +390,18 @@ def _write_env(pairs: dict) -> None:
     ]
     for k, v in pairs.items():
         lines.append(f"{k}={shlex.quote(str(v))}")
-    p = server_env_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    identity._write_atomic(server_env_path(), "\n".join(lines) + "\n")
+
+
+def set_public_host(v) -> dict:
+    """Set the address players use, changing nothing else. The engine reads it at
+    boot, so this cycles it; an engine still waiting for one just starts."""
+    public_host = clean_public_host(v)
+    if not public_host:
+        raise ValueError("give the address players use to reach this server")
+    _write_env({**_read_env(for_update=True), "AXENSTAX_PUBLIC_HOST": public_host})
+    request_restart()
+    return {"ok": True, "public_host": public_host}
 
 
 # ── apply ──────────────────────────────────────────────────────────────────────
@@ -256,6 +413,13 @@ def apply(choices: dict) -> dict:
     Returns a summary incl. whether the engine will (re)boot and whether the world
     was scheduled for a fresh start, so the UI can tell the operator what happens next.
     """
+    # First, so a bad address leaves everything as it was.
+    public_host = clean_public_host(choices.get("public_host"))
+    prior_env = _read_env(for_update=True)
+    prior_public_host = prior_env.get("AXENSTAX_PUBLIC_HOST", "")
+    # A run that names none ("Add a world") keeps the one the server has.
+    public_host = public_host or prior_public_host
+
     stype = _clean_type(choices.get("server_type"))
     spec = SERVER_TYPES[stype]
     game_mode = spec["game_mode"]
@@ -266,10 +430,12 @@ def apply(choices: dict) -> dict:
 
     name = _clean_text(choices.get("server_name"), _NAME_MAX) or "Axe'n'Stax Server"
     about = _clean_text(choices.get("about"), _ABOUT_MAX)
-    access = _clean_access(choices.get("access"))
+    # "Add a world" sends no `access`: it changes who may join in no way.
+    choosing_access = "access" in choices
+    access = _clean_access(choices.get("access")) if choosing_access else _access_in_force()
     announce = bool(choices.get("announce"))
     keep_history = bool(choices.get("keep_history"))
-    friends = _clean_friends(choices.get("friends")) if access == "friends" else []
+    friends = _clean_friends(choices.get("friends")) if choosing_access and access == "friends" else []
     force_fresh = bool(choices.get("start_fresh_world"))
 
     world_type = _clean_world_type(choices.get("world_type"))
@@ -305,8 +471,15 @@ def apply(choices: dict) -> dict:
         "privacy_retention_days": _DEFAULT_RETENTION_DAYS if keep_history else 0,
     })
 
-    # 2. Access policy (live).
-    identity.set_require_signin(require_signin)
+    # 2. Access policy (live), only on an explicit answer.
+    if choosing_access:
+        identity.set_require_signin(require_signin)
+        if access == "friends":
+            # "Just my friends" with nobody named yet admits nobody, not everybody.
+            identity.turn_allowlist_on()
+        else:
+            # Any other answer means it: the form opened on "friends" if a list was on.
+            identity.allowlist_off()
     for npub in friends:
         try:
             identity.add_to_list("allow", npub)
@@ -326,12 +499,14 @@ def apply(choices: dict) -> dict:
         # The engine requires sign-in unless told otherwise; `open` is the only
         # choice that admits guests. (The `require_signin` file written above
         # is what the engine actually reads first; this keeps a fresh boot in
-        # step with it.)
-        "AXENSTAX_ALLOW_GUESTS": "0" if require_signin else "1",
+        # step with it. With no answer, the setting stays as it was.)
+        **({"AXENSTAX_ALLOW_GUESTS": "0" if require_signin else "1"} if choosing_access
+           else {k: v for k, v in prior_env.items() if k == "AXENSTAX_ALLOW_GUESTS"}),
         "AXENSTAX_ANNOUNCE": "1" if announce else "0",
         "AXENSTAX_WORLD_TYPE": world_type,
         "AXENSTAX_GROUND": ground,
         "AXENSTAX_WATER_DEPTH": str(water_depth),
+        **({"AXENSTAX_PUBLIC_HOST": public_host} if public_host else {}),
     })
 
     # 5. The console's own record.
@@ -380,7 +555,8 @@ def apply(choices: dict) -> dict:
     restart_requested = False
     if needs_fresh:
         reset_world_path().write_text("", encoding="utf-8")
-    if not first_run and (needs_fresh or mode_changed or terrain_changed):
+    address_changed = public_host != prior_public_host
+    if not first_run and (needs_fresh or mode_changed or terrain_changed or address_changed):
         request_restart()
         restart_requested = True
 
@@ -423,7 +599,8 @@ def request_restart() -> None:
 
 def skip() -> dict:
     """Operator chose to skip the wizard (small-text link). The box boots on the
-    compose defaults, but the dashboard keeps nudging until setup is finished."""
+    compose defaults, but the dashboard keeps nudging until setup is finished. With
+    no address in compose the engine waits for one, and the dashboard asks for it."""
     mark_engine_ready()
     prev = read_state() or {}
     state = {

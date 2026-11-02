@@ -1,6 +1,6 @@
 # Axe'n'Stax Roadmap
 
-*As of 2026-10-26 — source v0.2.27, network protocol v95, save format 59. The repository is public and the sites deploy from `main`.*
+*As of 2026-11-02 — source v0.2.27, network protocol v96, save format 59. The repository is public and the sites deploy from `main`.*
 This file is **the** roadmap: where the project is, what is waiting, and what comes later.
 For "what do we build next", see `docs/foundations/README.md` (the build queue); feature requests and ideas enter through the internal feature backlog.
 
@@ -8,11 +8,11 @@ For "what do we build next", see `docs/foundations/README.md` (the build queue);
 
 ## Where we are
 
-Axe'n'Stax is an open-source, self-hostable voxel sandbox with its own engine, client and server, written in Rust. The build queue is empty: everything that was ready to build has been built. What remains is work only the owner can do (cutting the native release, and live tests with real devices and people), plus a short list of design decisions that block building further on top of the current foundations.
+Axe'n'Stax is an open-source, self-hostable voxel sandbox with its own engine, client and server, written in Rust. The release is the top priority: the access and privacy fixes on `main` reach players only when the desktop release is published. Beyond that, the build queue is not empty. The Keep authority slices (a home Keep's one persistent world, run by the engine) and the integration with Fray and Ingle (the networking library and the Keep program) are still to finish, and there is a keep-or-cut decision on Beacon. The rest is work only the owner can do (cutting the release, and live tests with real devices and people), plus a short list of design decisions that block building further on top of the current foundations.
 
-- **Version:** v0.2.27 in source, network protocol v95, save format 59. The published desktop installer is still v0.2.18 until the release below is cut, so what is described here is well ahead of what players can download.
+- **Version:** v0.2.27 in source, network protocol v96, save format 59. The published desktop installer is still v0.2.18 until the release below is cut, so what is described here is well ahead of what players can download.
 - **Web (`play.axenstax.com`)** is an anonymous, local-only sandbox: a *taster*. No login, no multiplayer, no cloud save and no feedback channel on web. Worlds live in the browser and can be exported to the desktop app.
-- **Native (Linux AppImage)** is the full game: Signet sign-in, LAN play, online play by contact, the dedicated server, and the feedback mailbox. Windows and macOS are not published as installers yet (build from source).
+- **Native (Linux AppImage)** is the full game: Signet sign-in, LAN play, online play by contact, and the dedicated server. Windows and macOS are not published as installers yet (build from source).
 - **Android** is ported onto main (the APK builds in CI, `android` input off by default, and a tapped `axenstax:` link opens the game), but nothing is published: release signing is owner-side, and updates will come through zap.store, not an in-app updater.
 - **Gamepad support** is built and working, but is parked as a launch priority.
 - **Posture:** self-hosted, sovereign, player-owned. Worlds, saves and identity belong to the player; AxeNStax ships software, not a service. See the red lines at the end.
@@ -65,10 +65,10 @@ Axe'n'Stax is an open-source, self-hostable voxel sandbox with its own engine, c
 - Late joiners are sent the world itself: the server pushes the columns players have touched, and a joiner regenerates untouched columns from the seed (B2a, B2b).
 - The server runs every joiner's hunger, eating and sleep (C2a), and keeps its own copy of each joiner's inventory, saved per npub on the operator's machine (C3). The accepted part of C3d (typed actions with receipts and recovery) is in; its Strict enforcement mode is internally selectable only and parked, so the default Mirror mode still believes some of what a joiner claims.
 - World handover: a host who needs to leave can hand the running world to another player in the session ("Hand this world to ..."), and everyone reconnects there; the original host keeps their own copy.
-- Known limits, from `CLAUDE.md`'s known-debt list: a joiner's possession is only partly enforced (a placement check that is log-only, and the held item it claims for attacks, interactions and mined tools is believed, as is some of what it pays with, up to a bound); a dedicated server runs no species AI, breeding or Leads, so it refuses a joiner's feed, tame, Lead and pet command; villager quests for joiners are not finished (the D2c-3 foundation is merged, live delivery is not accepted); a `--no-lend` host (one release only) keeps a second copy of the world.
-- The dedicated server ticks hives, crops, dispensers, pistons, furnaces, composters, kegs and hoppers (`simulates_block_machines`; on a lending host the host's own client ticks them instead), and a tick's changes are split across size-bounded StateUpdates. `CLAUDE.md`'s known-debt entry that says otherwise predates this.
+- Known limits, from `CLAUDE.md`'s known-debt list: a joiner's possession is only partly enforced (a placement check that is log-only, and the held item it claims for attacks, interactions and mined tools is believed, as is some of what it pays with, up to a bound); every server mode now runs species AI, breeding, Leads and animal products (D4 slice 3), so a dedicated server serves a joiner's feed, tame, Lead and pet command, but it spawns no village population; villager quests for joiners are not accepted (the D2c-3 foundation and later checkpoints are in source, while live delivery and verification are pending); a `--no-lend` host (one release only) keeps a second copy of the world.
+- One shared machine phase (`sim_machines`, D4 slice 5) runs hives, growth, dispensers, pistons, furnaces, composters, kegs, drying racks and villager workstation maintenance in every server mode; on a lending host the authority borrows the host's real world for it. Hoppers and projectiles have their own phases, and a tick's changes are split across size-bounded StateUpdates. Chest auto-collection and the NPC Builder commission lifecycle are still client-only. A lent world's clock, weather, mob simulation and death handling are the server's too (D4 slices 2 to 4).
 - Online play by contact (native): join a friend's home-hosted world by their Signet persona npub or a bearer invite. Nostr relays carry connection setup only; the connection is then direct. Strangers get silence. Relays never carry game traffic.
-- Server authority over remote players (movement, reach and block edits are validated; the server keeps its own copy of a joiner's inventory); join handshake with Signet-signed identity and the Fray join binding (v95).
+- Server authority over remote players (movement, reach and block edits are validated; the server keeps its own copy of a joiner's inventory); join handshake with Signet-signed identity and the Fray join binding (v96).
 - World chat (native), tiered by contact relationship, with a ceiling that can only be tightened.
 - Signet sign-in by QR (mySignet pairing) and Signet contacts sync: Kin, Kith and blocks feed the address book, and a block removes a player from a running host.
 - Optional, self-published Nostr announce for an operator's own server. Nothing is ever announced automatically.
@@ -82,7 +82,7 @@ Axe'n'Stax is an open-source, self-hostable voxel sandbox with its own engine, c
 
 ### Safety, privacy and compliance hardening
 - Web build has no login, cookies, analytics or feedback channel; the site apps do not log IP addresses.
-- Feedback is native-only: per-report burner key, end-to-end encrypted, no replies, with an in-game status board.
+- The game has no in-game feedback channel (web removed 2026-10-01, native removed 2026-11-01).
 - Crash-safe saves with damage quarantine, a staged data-directory migration, and a hardened updater.
 - Money words are guarded by permanent tests on every text surface; Proof of Play never appears as an earning mechanic.
 - Public repository housekeeping: licence, security policy, contributing guide and a credits file are in place.
@@ -99,20 +99,20 @@ Everything here needs a person, a second machine or a real device, or a decision
 - Death drops, late-joiner chunk push and tool pickup, walked over by a second player, and a joiner hurting and riding the server's mobs.
 - Signet contacts sync on a phone: pairing, Kin/Kith appearing, a block kicking a connected player, disconnect. This now also tests the relay change: pairing runs over the first of "Your relays" (a public relay by default), not the project's own relay.
 - Native QR sign-in on a phone with mySignet. This now also tests the relay change: the QR advertises the first three of "Your relays" (public by default), and editing the list from the sign-in screen rebuilds the QR.
-- A `/bug` report reaching the project's public inbox relays and being read back by the feedback reader, and the release event republished to the public relays so the in-app updater (which now reads the player's relays) finds it.
+- Republishing the release event to the public relays so the in-app updater (which now reads the player's relays) finds it.
 - Playtest of the unverified trials, and the electricity switch test across two machines.
-- First-launch data-directory migration, the updater, and the current framing (v95, Host Game on Fray) on real hardware.
+- First-launch data-directory migration, the updater, and the current framing (v96, Host Game on Fray) on real hardware.
 
 **Fun test**
 - Play-testing with voluntary children who are not family. Family play has been a bug-hunt, not evidence that the game is fun, so fun is unvalidated.
 
 **Public launch — done 2026-10-03/04**
 - The repository is public as a fresh single-commit snapshot (old history archived privately), with fork-PR approval, secret scanning and push protection, private vulnerability reporting and a protected `main`.
-- The privacy page is signed off by the owner (2026-10-04): controller published as *decented*, bug reports kept until dealt with and at most 6 months.
-- The project's own relay is no longer a default anywhere in the native app or its tools (pending the phone tests above). Sign-in, contacts pairing, server discovery and the updater use the player's one editable "Your relays" list; feedback goes to a fixed set of public inbox relays.
+- The privacy page is signed off by the owner (2026-10-04): controller published as *decented*.
+- The project's own relay is no longer a default anywhere in the native app or its tools (pending the phone tests above). Sign-in, contacts pairing, server discovery and the updater use the player's one editable "Your relays" list.
 
 **Release**
-- Native v0.2.27 (protocol v95): the owner cuts it with the owner-held signing keys. The release now covers far more than it did when it was planned at protocol v64: the relay and privacy changes, Host Game on Fray, the real-multiplayer work, terrain v3, graphics settings and building variants. Until then `/download` serves v0.2.18. After publishing, republish the kind-30063 release event to the public relays.
+- **Top priority: cut the native release.** The fixes reach players only when it is published, and until then `/download` serves v0.2.18 (with a notice that a newer release is being prepared). Native v0.2.27 (protocol v96): the owner cuts it with the owner-held signing keys. The release now covers far more than it did when it was planned at protocol v64: the relay and privacy changes, Host Game on Fray, the real-multiplayer work, terrain v3, graphics settings and building variants. Until then `/download` serves v0.2.18. After publishing, republish the kind-30063 release event to the public relays.
 
 **Decisions and sessions**
 - Flipping new worlds to terrain generator v4 (dry caves) is an owner call; until then new worlds get v3.
@@ -126,14 +126,17 @@ Everything here needs a person, a second machine or a real device, or a decision
 Only items that block building further on top.
 
 - **Planned dependency migrations** (held back from Dependabot on purpose): bincode 1 → 3 (changes the save and wire encoding, so it needs a migration with legacy-save tests) and wgpu/naga 29 → 30 (renderer API change; needs a visual check on real GPUs, native and WebGPU).
-- **Route single-player through the server.** A host already lends its world to its embedded server (D1), so a hosting game no longer runs two simulations. Single-player still runs its own (D3: single-player lends too, with the default flipped after a session with Axolittle), and D4 moves the passes still owned by the client (clock and weather, mob locomotion, the death sweep) into the server tick. Both remain open. The `--no-lend` escape hatch and its second world copy go one release after D1 ships.
+- **Route single-player through the server.** A host already lends its world to its embedded server (D1), so a hosting game no longer runs two simulations. Single-player still runs its own by default: D3 (single-player lends too, behind `--solo-hosted`) is built, and flipping the default waits on a session with Axolittle. D4 slices 2 to 5 (clock and weather, mob simulation, the death sweep, machines) have moved into the server tick; chest auto-collection and the NPC Builder commission lifecycle are what remain client-only. The `--no-lend` escape hatch and its second world copy go one release after D1 ships.
 - **Server-owned joiner inventory, enforcement.** The server keeps a copy of each joiner's inventory, but the default Mirror mode still believes bounded claims. Strict enforcement is partly built and parked: it is selectable only internally and no operator flag is exposed.
 - **`ServerPlayer` / `PlayerSlot` duplication.** The save path uses raw server-player fields while the client uses slots. They will drift; unify when saving becomes server-authoritative.
 - **Comms ceiling raising.** The local policy file can only lower a player's chat ceiling. Raising it waits on a real capability boundary (a Charter comms clause or a Signet guardian attestation).
 - **Anti-X-ray chunk obfuscation.** Built and unit-tested but not applied to the chunk push (`chunk_push::build_chunk_packets`): it only hides anything once the seed stops shipping to joiners, which regenerate natural ore from it. An owner decision. The architectural reward-layer defence is live; this part is not.
 - **Take-your-worlds-to-native conflict policy.** Import currently keeps both when a name clashes; the final merge policy is an owner decision.
 - **Sub-block detail for authored builds** (high-resolution statues and faces): needs a choice between a micro-model reference, sub-voxels or a detail-block palette.
-- **Villager quests for joiners** (D2c-3). The common-progression foundation is merged; live quest delivery for joiners is not accepted yet.
+- **Villager quests for joiners** (D2c-3). The common-progression foundation and later checkpoints are in source; live quest delivery for joiners is not accepted and verification is pending.
+- **Keep authority slices.** How a home Keep's persistent world, run by the engine over stdin and stdout, shares authority with the Keep program is specified in `docs/integrations/fray/2026-10-31-keep-authority-handoff.md`, to be built in slices; it is not finished.
+- **Fray and Ingle integration.** Fray (the networking library behind Host Game) and Ingle (the Keep program that drives the engine) need the authority handoff above agreed on both sides.
+- **Beacon: keep or cut.** The public-distribution path (event kind 30820, `open_stash.rs`) is built, and whether to keep it is an owner decision.
 
 ---
 
@@ -155,7 +158,7 @@ Horizons, each one line. None is scheduled.
 - **Networked spectator tiers** — full, limited and view-only.
 - **Cloud save** — non-custodial, ciphertext-only, native and bring-your-own-key.
 - **Self-hosting tooling** — backups, per-world configuration and a richer operator console, building on the dedicated server and Operator Console that exist today.
-- **Cinematic camera and replay** — camera paths and recorded replays; partly built, not yet verified end to end.
+- **Cinematic camera replay** — the Director camera (F6, six modes, path recording) is built and in the desktop app. In-game playback of recordings has no screen yet, and the whole is not verified end to end.
 - **Windows and macOS installers**, and an Android release.
 - **Console and small-box hardware targets** (Raspberry Pi 5, mini PCs) and a GPU-tier auto-detect.
 - **Texture-pack distribution** and WASM plugins for sandboxed server-side mods.
@@ -171,7 +174,7 @@ The project does **not** and will **not**:
 
 - Operate a public directory that lists player-run servers, worlds or groups. Discovery is LAN-local, direct-address, or an operator's own opt-in Nostr announce.
 - Operate game servers, or relays that carry a group's game traffic, presence or in-game chat. Worlds are self-hosted; multiplayer runs directly between players.
-- Collect children's data centrally, or collect age as raw data. The web taster stays anonymous and local; feedback is burner-key and end-to-end encrypted.
+- Collect children's data centrally, or collect age as raw data. The web taster stays anonymous and local, and the game has no feedback channel.
 - Position or market itself as a social network, social media or a chat platform. It is a building game; playing with friends means building together.
 - Offer chance-based real-money payouts. Proof of Play is educational proof-of-work. Any real-sats layer is off by default, parent-controlled, set per server, and driven by a deterministic work-meter, never a probabilistic threshold.
 - Build a how-to for turning safety off. Sensitive features sit behind a real capability boundary, not a disclaimer.

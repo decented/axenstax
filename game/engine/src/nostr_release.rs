@@ -20,9 +20,8 @@
 //! see that module's doc for why nothing here needs to touch the render
 //! thread. Internally it builds its own current-thread tokio runtime, the
 //! same "spawn a thread, build a runtime, block_on" idiom
-//! `game_loop::native_join_sign_driver` and `native_mailbox`'s worker use —
-//! except there is no nested-runtime hazard here (unlike `native_mailbox::
-//! run_on_worker_thread`'s doc comment), because this function is always
+//! `game_loop::native_join_sign_driver` uses —
+//! there is no nested-runtime hazard here, because this function is always
 //! called from a plain `std::thread::spawn` closure that has never entered a
 //! tokio context, so building and blocking on a runtime directly is safe: no
 //! extra thread hop needed.
@@ -138,10 +137,8 @@ fn parse_release_event(event: &Event, pinned_hex: &str) -> Option<Latest> {
 
 /// OWNER BOUNDARY (live relay). Open a one-shot subscription on `url` for
 /// kind-30063 events from `pinned_hex` with `d = axenstax-appimage`,
-/// collecting events until EOSE or an 8s cap. Mirrors
-/// `native_mailbox::relay::fetch_events`'s shape; not reused directly because
-/// that module's `Frame::Wrap` is gift-wrap-shaped (kind 1059) and naming a
-/// release event a "wrap" would be misleading.
+/// collecting events until EOSE or an 8s cap. `nostr_frames::Frame::Wrap`
+/// is not reused because naming a release event a "wrap" would be misleading.
 async fn fetch_release_events(url: &str, pinned_hex: &str) -> Result<Vec<Event>, String> {
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::Message;

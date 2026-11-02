@@ -7,8 +7,9 @@
 #     immediately, but the engine WAITS until the operator finishes the setup
 #     wizard (the console writes .identity/setup-complete). That way the operator's
 #     chosen game mode + kind-of-place apply to the FIRST world, with no throwaway
-#     default world. Set AXENSTAX_SKIP_WIZARD=1 to boot immediately on the compose
-#     defaults (no gate).
+#     default world. Set AXENSTAX_SKIP_WIZARD=1 to boot on the compose defaults (no
+#     gate). It still needs AXENSTAX_PUBLIC_HOST or AXENSTAX_DOMAIN, or it waits (see
+#     ADDRESS GATE below).
 #   • CONFIG SOURCE — before launching, the engine sources .identity/server.env
 #     (shell-quoted AXENSTAX_* overrides the console wrote); these win over the
 #     compose defaults.
@@ -16,6 +17,10 @@
 #     .identity/reset-world archives the world so it's recreated fresh in a newly
 #     chosen mode. Both are honoured here because the console runs in a SEPARATE
 #     container and can't `docker restart` the engine itself.
+#   • ADDRESS GATE — the engine refuses to boot without the address players use
+#     (AXENSTAX_PUBLIC_HOST / AXENSTAX_DOMAIN), and an engine that exits takes the
+#     container with it. So with no address the box waits here, console up, until
+#     compose or the console (server.env) names one.
 #
 # NB: not `set -e` — the supervise loop handles failures itself.
 set -uo pipefail
@@ -43,6 +48,8 @@ fi
 
 SERVER_PID=""
 CADDY_PID=""
+# An address named in compose stays good alongside whatever the wizard adds.
+COMPOSE_PUBLIC_HOST="${AXENSTAX_PUBLIC_HOST:-}"
 
 shutdown() {
     echo "[entrypoint] shutting down…"
@@ -52,6 +59,25 @@ shutdown() {
     exit 0
 }
 trap shutdown TERM INT
+
+# Stop the game server for a restart: SIGTERM saves the world first, so give it
+# the same time `docker stop` is allowed (stop_grace_period, 120 s), then SIGKILL
+# so a wedged server can't hang the restart with the engine down.
+STOP_SECS="${AXENSTAX_STOP_SECS:-120}"
+stop_engine() {
+    [ -n "$SERVER_PID" ] || return 0
+    kill -TERM "$SERVER_PID" 2>/dev/null || true
+    waited=0
+    while kill -0 "$SERVER_PID" 2>/dev/null && [ "$waited" -lt $((STOP_SECS * 5)) ]; do
+        sleep 0.2
+        waited=$((waited + 1))
+    done
+    if kill -0 "$SERVER_PID" 2>/dev/null; then
+        echo "[entrypoint] game server still running ${STOP_SECS}s after SIGTERM — killing it"
+        kill -KILL "$SERVER_PID" 2>/dev/null || true
+    fi
+    wait "$SERVER_PID" 2>/dev/null || true
+}
 
 # Caddy front (HTTPS + static + /admin console + ws proxy). Started FIRST so the
 # Operator Console is reachable while the engine waits for first-run setup.
@@ -76,8 +102,41 @@ if [ "${AXENSTAX_SKIP_WIZARD:-0}" != "1" ]; then
     done
 fi
 
+# The console writes shell-quoted AXENSTAX_* overrides here; sourced AFTER the
+# base (compose) env is in place, so the wizard's choices win.
+load_engine_env() {
+    unset AXENSTAX_PUBLIC_HOST
+    if [ -f "$IDDIR/server.env" ]; then
+        # shellcheck disable=SC1090
+        set -a; . "$IDDIR/server.env"; set +a
+    fi
+    wizard_host="${AXENSTAX_PUBLIC_HOST:-}"
+    export AXENSTAX_PUBLIC_HOST="${COMPOSE_PUBLIC_HOST}${COMPOSE_PUBLIC_HOST:+${wizard_host:+,}}${wizard_host}"
+}
+
+# ── address gate ────────────────────────────────────────────────────────────────
+wait_for_public_address() {
+    announced=0
+    while :; do
+        load_engine_env
+        [ -n "${AXENSTAX_PUBLIC_HOST}${AXENSTAX_DOMAIN:-}" ] && break
+        if ! kill -0 "$CADDY_PID" 2>/dev/null; then
+            echo "[entrypoint] caddy exited while waiting for an address — aborting"
+            exit 1
+        fi
+        if [ "$announced" = 0 ]; then
+            echo "[entrypoint] waiting for this server's public address: enter it in the console at /admin, or set AXENSTAX_PUBLIC_HOST in compose (a domain or public IP; a LAN IP or localhost is valid too)"
+            : > "$IDDIR/awaiting-public-host"
+            announced=1
+        fi
+        sleep 3
+    done
+    rm -f "$IDDIR/awaiting-public-host"
+}
+
 # ── launch the engine (sourcing the wizard's chosen config) ─────────────────────
 launch_engine() {
+    wait_for_public_address
     # Honour a one-shot fresh-world request: the operator chose a new kind of place
     # that needs a brand-new world (game mode is baked in at world creation). The
     # current world is ARCHIVED (renamed aside), never deleted — recoverable.
@@ -89,12 +148,6 @@ launch_engine() {
             echo "[entrypoint] archiving world → ${wdir}.archived-${ts}"
             mv "$wdir" "${wdir}.archived-${ts}" 2>/dev/null || true
         fi
-    fi
-    # The console writes shell-quoted AXENSTAX_* overrides here; sourced AFTER the
-    # base (compose) env is in place, so the wizard's choices win.
-    if [ -f "$IDDIR/server.env" ]; then
-        # shellcheck disable=SC1090
-        set -a; . "$IDDIR/server.env"; set +a
     fi
     rm -f "$IDDIR/restart"
     echo "[entrypoint] starting game server (gamemode=${AXENSTAX_GAMEMODE:-survival}, showcase=${AXENSTAX_SHOWCASE:-0})"
@@ -109,8 +162,7 @@ while true; do
     # Operator asked for a clean restart (new config / fresh world).
     if [ -f "$IDDIR/restart" ]; then
         echo "[entrypoint] restart requested — cycling the game server"
-        kill -TERM "$SERVER_PID" 2>/dev/null || true
-        wait "$SERVER_PID" 2>/dev/null || true
+        stop_engine
         launch_engine
         continue
     fi

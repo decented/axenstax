@@ -99,7 +99,6 @@ fn event_variant_name(e: &ChallengeEvent) -> &'static str {
         ChallengeEvent::CompleteBuildGuide => "CompleteBuildGuide",
         ChallengeEvent::SaveSkin => "SaveSkin",
         ChallengeEvent::SpawnRig => "SpawnRig",
-        ChallengeEvent::SendFeedback => "SendFeedback",
     }
 }
 

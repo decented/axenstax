@@ -85,17 +85,11 @@ More landed since then:
   playthrough for the first time. The **Windmill** turns in real, weather-driven wind (build it
   high for a reliable breeze). A batch of electricity bugs got fixed along the way: a Battery no
   longer tops itself up off its own wire forever, and a friend's own switches (Lever, Button,
-  Hand Crank, Plunger Detonator, Mirror) now work on your hosted world. Seven new Trials cover
+  Hand Crank, Plunger Detonator, Mirror) now work on your hosted world. Six new Trials cover
   it — see **[Minigames](minigames.md)**. See **[Electricity](electricity.md)**.
 
 And a lot more since then (August–September 2026):
 
-- **Native mailbox** — an alpha-tester feature, off by default (Settings in the lobby or pause menu, then tap the version line 7 times to switch it on). Send `/bug` / `/idea` from the desktop app (each report is sealed
-  with a fresh one-time key, no account or name attached), and see what happened to them
-  with `/mailbox`: Sent, Received, Fixed in vX, or Won't fix. We never message players —
-  the status comes from a public list of scrambled ticket numbers only your own game can
-  recognise. Reports are stamped with the game's build version. (The browser version has no
-  feedback channel — `/bug`, `/idea` and `/mailbox` are desktop-app only.)
 - **Skin painter controls** — **Tab** opens a full paint panel (colour wheel, a `#rrggbb`
   box, all 16 dyes, your last 8 colours), **R** moves your avatar's limbs apart so you can
   reach every face, and there's a Classic/Slim arms toggle. See **[Skins & the Wardrobe](cosmetics.md)**.
@@ -132,8 +126,9 @@ And a lot more since then (August–September 2026):
   control over it yet — see **[Chat & Commands](chat-and-commands.md)**.
 - **Online Play by Contact** — host a world at home and a friend in another house can join
   it by your **npub** or a bearer invite link, no server of ours involved. Public Nostr
-  relays carry only the encrypted setup handshake; the game itself connects the two
-  computers directly. **Brand new** — not yet tried by the team across two real houses.
+  relays carry only the setup handshake, with its contents encrypted (they can still see
+  your IP address and when you check for messages); the game itself connects the two
+  computers directly, so you and your friend can see each other's IP addresses. **Brand new** — not yet tried by the team across two real houses.
   See **[Play with a friend online](play-with-a-friend-online.md)**.
 
 ## Partially shipped — finish-the-loop work pending

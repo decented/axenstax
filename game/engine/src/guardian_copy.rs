@@ -18,12 +18,12 @@
 //!   surveilled; a child who knows is being parented. This is a requirement, not
 //!   a nicety, and it is also what makes the feature defensible.
 //!
-//! The sending half is native-only (it needs the mailbox's NIP-17 primitive and
-//! a tokio runtime). Everything here that shapes a payload is pure and compiled
-//! everywhere, so it is tested on both targets.
+//! The sending half is native-only (it needs a NIP-17 primitive and a tokio
+//! runtime; none is built yet). Everything here that shapes a payload is pure
+//! and compiled everywhere, so it is tested on both targets.
 
 // BRIDGE: the payload shaping and batching are written and tested, but the send
-// path (NIP-17 via native_mailbox::wire::wrap_report) and the HUD indicator are
+// path (a NIP-17 wrap, not yet built) and the HUD indicator are
 // NOT wired up in this build — nothing calls this yet. Each item carries its own
 // `allow(dead_code)`; delete them as Phase 5 wires the item up.
 

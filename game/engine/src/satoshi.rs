@@ -397,11 +397,7 @@ pub enum SatoshiAction {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MissionAction {
     None,
-    /// "It worked" → submit a good verdict for the current mission + advance.
-    Worked,
-    /// "It's broken" → submit a broken verdict (carrying the note) + advance.
-    Broken,
-    /// "Skip this one" → advance to the next mission without a verdict.
+    /// "Next one" → advance to the next mission.
     Skip,
     /// Close the dialogue (come back to Satoshi later).
     Close,

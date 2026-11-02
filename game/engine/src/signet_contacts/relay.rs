@@ -1,5 +1,5 @@
 //! The real relay sockets for Signet contacts sync: raw `REQ`/`EOSE` frames
-//! over `tokio-tungstenite`, the shape `native_mailbox::relay` and
+//! over `tokio-tungstenite`, the shape `nostr_frames` and
 //! `nostr_release` already use against trotters (which rejects nostr-tools'
 //! framing). Every call here runs on a worker thread that owns a
 //! current-thread runtime — never on the frame thread.
@@ -16,7 +16,7 @@ use serde_json::{json, Value};
 use tokio::runtime::Runtime;
 use tokio_tungstenite::tungstenite::Message;
 
-use crate::native_mailbox::relay::{parse_frame, Frame};
+use crate::nostr_frames::{parse_frame, Frame};
 
 use super::ack_wait::AckRelay;
 

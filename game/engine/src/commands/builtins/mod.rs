@@ -33,13 +33,6 @@ pub mod market;
 pub mod scenario;
 // Spec 40 — The Workshop authoring command surface.
 pub mod workshop;
-// Player→maker feedback (`/bug`, `/idea`) and maker replies (`/mailbox`). Native
-// only: the browser build has no feedback channel (removed 2026-10-01), so these
-// are not compiled there and are unknown commands on the web taster.
-#[cfg(not(target_arch = "wasm32"))]
-pub mod feedback;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod mailbox;
 // World chat §4.5 — attach chat to a room. Native only: no room plug and no
 // chat at all on the web taster (spec §0/§6), and this file's own usage text
 // names `/room invite` literally, which the web-bundle forbidden-symbol gate
@@ -106,19 +99,6 @@ pub fn register_all(registry: &mut CommandRegistry) {
     registry.register(Box::new(trial::TrialCommand));
     // Spec 40 — The Workshop authoring command surface.
     registry.register(Box::new(workshop::WorkshopCommand));
-    // Player→maker feedback — native only (see the `mod feedback` cfg above).
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        registry.register(Box::new(feedback::BugCommand));
-        registry.register(Box::new(feedback::IdeaCommand));
-        registry.register(Box::new(mailbox::MailboxCommand));
-        // Alpha-tester gate (2026-10-03): registered but HIDDEN until the
-        // caller applies `native_mailbox::apply_gate` with the player's
-        // settings. Fail-closed — a registry nobody gated shows no feedback.
-        for name in crate::native_mailbox::FEEDBACK_COMMANDS {
-            registry.set_hidden(name, true);
-        }
-    }
     // World chat §4.5 — native only (see the `mod room` cfg above).
     #[cfg(not(target_arch = "wasm32"))]
     registry.register(Box::new(room::RoomCommand));

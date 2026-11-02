@@ -37,6 +37,7 @@ use crate::online_admission::{
 use crate::rendezvous::payload::{
     Answer, Candidate, KIND_JOIN_ANSWER, KIND_JOIN_OFFER, PAYLOAD_VERSION, npub_of, seal_answer,
 };
+use crate::access_policy::Allow;
 use crate::rendezvous::relay_client::RendezvousRelay;
 use crate::rendezvous::verify::{MAX_SEEN, SessionGuard, verify_offer};
 use crate::runtime_identity::RuntimeIdentity;
@@ -56,12 +57,11 @@ pub fn unreachable_warning() -> &'static str {
 /// [`OnlineHost::allowlist`] alone would silently revoke every contact who
 /// hasn't called yet. All three parts go in together, deduplicated, every time.
 ///
-/// **The host's own persona is always first, and that is load-bearing.**
-/// `access_policy::decide_access` reads an EMPTY whitelist as "this server runs
-/// no allowlist", so a first-ever online host — no contacts yet, nobody admitted
-/// yet — would hand `HostedServer` an empty list and admit any signed-in
-/// stranger who found the port. Seeding the list with the one persona that is
-/// always known makes it impossible for the gate to be empty while it is on.
+/// This list is the only gate on the bound QUIC socket: the relay offer gate
+/// doesn't stand in front of it, and anybody who finds the port can dial it
+/// directly. So [`OnlineHost::access_policy`] always hands it over as
+/// [`Allow::Only`], never [`Allow::Open`], however short it is: a first-ever
+/// host with no contacts and nobody admitted admits itself and no stranger.
 ///
 /// Every pubkey in `blocked` (Signet blocks, D8) is left out of both halves —
 /// a block beats a contact row, an invite row and a this-session admission
@@ -457,14 +457,17 @@ impl OnlineHost {
     /// Replace the contacts snapshot this host admits from.
     ///
     /// The book handed to [`OnlineHost::start`] is a snapshot (see the module
-    /// docs). A contact added or re-tiered while a world is hosted only takes
-    /// effect once the owner of the mirror pushes the fresh book in here — the
-    /// game loop does that whenever it writes the mirror. Rows this host added
-    /// itself (an invite admission) are re-applied on top, so pushing a book
-    /// read before the admission cannot un-know somebody — unless Signet now
-    /// blocks them: `blocked` beats every source (D8), so a blocked pubkey
-    /// leaves the book, this session's admissions and (through
-    /// [`OnlineHost::access_policy`]) the server's whitelist.
+    /// docs). A contact added, re-tiered or removed while a world is hosted only
+    /// takes effect once the owner of the mirror pushes the fresh book in here —
+    /// the game loop does that whenever it writes the mirror.
+    ///
+    /// Rows this host added itself (an invite admission) are re-applied on top,
+    /// so pushing a book read before the admission cannot un-know somebody:
+    /// somebody a bearer let in stays admitted until they are blocked. Anyone
+    /// else this session admitted must still be close enough in the new book, or
+    /// they leave the session's admissions too. `blocked` beats every source
+    /// (D8), so a blocked pubkey leaves the book, this session's admissions and
+    /// (through [`OnlineHost::access_policy`]) the server's whitelist.
     pub fn set_book(&mut self, book: Vec<Contact>, blocked: Vec<[u8; 32]>) {
         let mine: Vec<Contact> = self
             .book
@@ -477,21 +480,20 @@ impl OnlineHost {
         for c in mine {
             upsert(&mut self.book, c);
         }
-        self.allowlist.retain(|pk| !blocked.contains(pk));
+        let new_book = &self.book;
+        self.allowlist.retain(|pk| {
+            !blocked.contains(pk)
+                && crate::online_admission::admits_play(crate::contacts::tier_of(new_book, pk))
+        });
         self.blocked = blocked;
     }
 
-    /// The Signet-blocked pubkeys this host refuses.
-    pub fn blocked(&self) -> &[[u8; 32]] {
-        &self.blocked
-    }
-
-    /// `(whitelist, blocklist)` for `HostedServer::set_access_policy`: the
+    /// `(allowlist, blocklist)` for `HostedServer::set_access_policy`: the
     /// host, its close contacts and this session's admissions, minus every
     /// block — and the blocks themselves. Every push goes through here.
-    pub fn access_policy(&self) -> (Vec<[u8; 32]>, Vec<[u8; 32]>) {
+    pub fn access_policy(&self) -> (Allow, Vec<[u8; 32]>) {
         (
-            access_allowlist(&self.persona, &self.book, &self.allowlist, &self.blocked),
+            Allow::only(access_allowlist(&self.persona, &self.book, &self.allowlist, &self.blocked)),
             self.blocked.clone(),
         )
     }
@@ -831,7 +833,7 @@ impl OnlineHost {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::rendezvous::payload::{Offer, new_session_id, seal_offer};
     use crate::rendezvous::relay_client::{FakeRelayHub, RendezvousRelay};
@@ -884,7 +886,7 @@ mod tests {
     }
 
     /// A host wired to a fake relay, with `book` as its contacts.
-    fn a_host(hub: &FakeRelayHub, book: Vec<Contact>) -> (OnlineHost, Keys) {
+    pub(crate) fn a_host(hub: &FakeRelayHub, book: Vec<Contact>) -> (OnlineHost, Keys) {
         let host_persona = Keys::generate();
         let host_runtime = Keys::generate();
         // `pollster`, not `rt()`: most callers are already inside
@@ -917,7 +919,7 @@ mod tests {
         (host, host_runtime)
     }
 
-    fn a_contact(pk: [u8; 32], tier: crate::comms::Tier) -> Contact {
+    pub(crate) fn a_contact(pk: [u8; 32], tier: crate::comms::Tier) -> Contact {
         Contact {
             pubkey: pk,
             display_name: Some("Friend".to_string()),
@@ -1000,21 +1002,22 @@ mod tests {
     }
 
     /// REGRESSION (whole-branch review, CRITICAL 1). A first-ever online host
-    /// has no contacts and has admitted nobody. If the produced list were
-    /// empty, `decide_access` would read "no allowlist gate" and let any
-    /// signed-in stranger who found the port straight in.
+    /// has no contacts and has admitted nobody, and its QUIC socket can be
+    /// dialled directly, past the relay offer gate. Its policy is an allowlist
+    /// all the same, so a signed-in stranger who finds the port is refused.
     #[test]
     fn a_fresh_online_host_still_refuses_a_signed_in_stranger() {
-        const ME: [u8; 32] = [42; 32];
         const STRANGER: [u8; 32] = [7; 32];
-        let list = access_allowlist(&ME, &[], &[], &[]);
-        assert!(!list.is_empty(), "an empty list is an OPEN server");
+        let hub = FakeRelayHub::new();
+        let (host, _) = a_host(&hub, vec![]);
+        let (allow, _) = host.access_policy();
+        assert!(matches!(allow, Allow::Only(_)), "never an open server: {allow:?}");
         assert_eq!(
-            crate::access_policy::decide_access(Some(STRANGER), &[], &list, true),
+            crate::access_policy::decide_access(Some(STRANGER), &[], &allow, true),
             Err(crate::access_policy::AccessReject::NotAllowlisted),
         );
         // …and the host itself is still allowed onto its own world.
-        assert!(crate::access_policy::decide_access(Some(ME), &[], &list, true).is_ok());
+        assert!(crate::access_policy::decide_access(Some(*host.persona()), &[], &allow, true).is_ok());
     }
 
     #[test]
@@ -1145,6 +1148,48 @@ mod tests {
     }
 
     #[test]
+    fn a_contact_who_is_no_longer_close_leaves_this_sessions_admissions() {
+        use crate::comms::Tier;
+        let hub = FakeRelayHub::new();
+        let book = vec![
+            a_contact([1; 32], Tier::Kith),
+            a_contact([2; 32], Tier::Kith),
+            a_contact([3; 32], Tier::Kith),
+        ];
+        let (mut host, _) = a_host(&hub, book);
+        host.allowlist.extend([[1; 32], [2; 32], [3; 32]]);
+
+        // [1] is gone from the book, [2] is downgraded, [3] is unchanged.
+        host.set_book(vec![a_contact([2; 32], Tier::Ken), a_contact([3; 32], Tier::Kith)], vec![]);
+
+        assert_eq!(host.allowlist(), &[[3; 32]], "only a contact still close enough stays");
+        let (whitelist, _) = host.access_policy();
+        assert!(!whitelist.admits(&[1; 32]) && !whitelist.admits(&[2; 32]), "{whitelist:?}");
+        assert!(whitelist.admits(&[3; 32]));
+    }
+
+    /// Invite rows are out of scope here: somebody a bearer let in stays
+    /// admitted until they are blocked.
+    #[test]
+    fn a_player_admitted_by_invite_stays_until_blocked() {
+        let hub = FakeRelayHub::new();
+        let (mut host, _) = a_host(&hub, vec![]);
+        host.book.push(Contact {
+            added_via: AddedVia::Invite,
+            ..a_contact([7; 32], crate::comms::Tier::Kith)
+        });
+        host.allowlist.push([7; 32]);
+
+        host.set_book(vec![], vec![]);
+        assert_eq!(host.allowlist(), &[[7; 32]], "a book without them does not remove them");
+        assert!(host.access_policy().0.admits(&[7; 32]));
+
+        host.set_book(vec![], vec![[7; 32]]);
+        assert!(host.allowlist().is_empty(), "a block does");
+        assert!(!host.access_policy().0.admits(&[7; 32]));
+    }
+
+    #[test]
     fn a_signet_block_removes_an_invitee_and_an_admission_and_is_the_blocklist() {
         // D8: a block beats every source — including the invite row this host
         // wrote itself and this session's admissions, which `set_book` and
@@ -1184,10 +1229,10 @@ mod tests {
         );
         let (whitelist, blocklist) = host.access_policy();
         assert!(
-            !whitelist.contains(&[7; 32]) && !whitelist.contains(&[9; 32]),
+            !whitelist.admits(&[7; 32]) && !whitelist.admits(&[9; 32]),
             "{whitelist:?}"
         );
-        assert!(whitelist.contains(&[1; 32]) && whitelist.contains(host.persona()));
+        assert!(whitelist.admits(&[1; 32]) && whitelist.admits(host.persona()));
         assert_eq!(blocklist, vec![[7; 32], [9; 32]]);
 
         // The pure list also drops a block that only arrives as an admission.

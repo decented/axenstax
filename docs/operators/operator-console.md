@@ -36,10 +36,11 @@ The honest line, which the UI keeps: **identity is _verified_; the privacy postu
 is _declared_.** The open-source default build genuinely honours "no tracking";
 trusting a modified build is a reputation matter.
 
-It also does not set the server's **public address** (the relay protection for
-WebSocket joins, protocol v66) — neither the setup wizard nor the dashboard has
-that field yet. Set `AXENSTAX_PUBLIC_HOST` (and/or `AXENSTAX_DOMAIN`) in
-`docker-compose.yml`; see "Tell the server its public address" in the
+It does set the server's **public address** (the address players use, which a
+dedicated server won't boot without): the setup wizard asks for it, and if the game
+server is waiting for one the dashboard asks too. An address set in
+`docker-compose.yml` (`AXENSTAX_PUBLIC_HOST`, `AXENSTAX_DOMAIN`) stays in force
+alongside it; see "Tell the server its public address" in the
 [dedicated server guide](dedicated-server.md).
 
 ---
@@ -93,8 +94,11 @@ AXENSTAX_IDENTITY_DIR=/path/to/your/.identity ./start.sh
 1. **Sign in.** The login page shows the operator npub this server expects. Click
    *Sign in with Signet*, approve on your signer. Only that npub gets in — any
    other identity is refused.
-2. **Access** — add npubs to the **allowlist** (only listed npubs may join; blank =
-   open) or **blocklist** (refused even if allowlisted — block always wins). Toggle
+2. **Access** — add npubs to the **allowlist** (only listed npubs may join) or
+   **blocklist** (refused even if allowlisted — block always wins). Adding the first
+   npub turns the allowlist on, and removing the last one leaves it on and **closes
+   the server**: press *Turn allowlist off* to open it again. Anyone a change refuses
+   is removed from the world within about 5 seconds. Toggle
    *require sign-in* — on by default for a new server; turning it off admits anonymous
    guests and stays off across restarts. (A server set up with the old wizard, whose
    default was "Anyone", already has it off — tick it if you want sign-in; see the

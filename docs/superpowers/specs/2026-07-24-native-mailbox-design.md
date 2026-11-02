@@ -1,3 +1,5 @@
+> **RETIRED 2026-11-01: in-game feedback removed by owner decision.** This design is kept as history; the code, the reader tooling and the tester unlock are gone.
+
 # Native Mailbox — feedback send + maker replies on the native client
 
 > **SUPERSEDED (reply half) by `docs/foundations/2026-10-01-feedback-status-board.md`.**

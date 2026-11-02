@@ -1,9 +1,8 @@
 //! Community **Test Board** — the lobby column listing features that need
-//! playtesting, each with a traffic-light status driven by tester verdicts.
+//! playtesting, each with a curated traffic-light status.
 //!
 //! Pure core lives here: the importance ordering and the embedded registry.
-//! The verdict transport (the browser lobby mailbox) was removed 2026-10-01 —
-//! see `queue_verdict`. Spec:
+//! The game collects no verdicts (in-game feedback removed 2026-11-01). Spec:
 //! `docs/foundations/2026-06-17-community-test-board.md`.
 //!
 use serde::{Deserialize, Serialize};
@@ -41,16 +40,6 @@ pub fn rank_items(items: &mut [TestItem]) {
             .then(b.priority.cmp(&a.priority)) // then curated priority
             .then(a.ref_id.cmp(&b.ref_id)) // stable tiebreak
     });
-}
-
-/// A tester's verdict on a mission. There is NO transport for it: the only one
-/// was the browser build's lobby mailbox, removed 2026-10-01 (the browser build
-/// has no feedback channel at all), and the native mailbox is for `/bug` and
-/// `/idea`, not verdicts. The mission dialogue still lets a tester step through
-/// the list; the verdict goes nowhere and this returns the line to show the
-/// player, which says so.
-pub fn queue_verdict(_ref_id: &str, _good: bool, _note: &str) -> String {
-    "Test verdicts aren't collected in this build.".to_string()
 }
 
 /// Embedded baseline registry (compile-time) so the column renders offline and
@@ -135,8 +124,5 @@ mod tests {
         for r in ["TB-51-worldgen-floor", "TB-52-satoshi-welcome", "TB-53-build-along"] {
             assert!(items.iter().any(|i| i.ref_id == r), "{r} must be a live mission");
         }
-        // The verdict hook is callable on every target and never panics.
-        assert!(!queue_verdict("TB-51-worldgen-floor", true, "ok").is_empty());
-        assert!(!queue_verdict("TB-53-build-along", false, "layer glow stuck").is_empty());
     }
 }

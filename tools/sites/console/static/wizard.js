@@ -14,7 +14,7 @@
   var ACCESS_LABEL = { open: "Anyone", signin: "Signed-in players", friends: "Just my friends" };
 
   // The steps that show a progress dot (the terminal "done" step doesn't).
-  var STEPS = ["welcome", "type", "name", "access", "finish", "review"];
+  var STEPS = ["welcome", "type", "name", "address", "access", "finish", "review"];
 
   var state = {
     server_type: defaults.server_type || "survival",
@@ -24,6 +24,8 @@
     announce: !!defaults.announce,
     keep_history: !!defaults.keep_history,
     friends: (defaults.friends || []).join("\n"),
+    // What the operator reached this console by is the best first guess.
+    public_host: defaults.public_host || window.location.hostname,
   };
 
   function $(sel, root) { return (root || document).querySelector(sel); }
@@ -51,7 +53,7 @@
   }
 
   // order helpers for Next/Back
-  var FLOW = ["welcome", "type", "name", "access", "finish", "review"];
+  var FLOW = ["welcome", "type", "name", "address", "access", "finish", "review"];
   function go(delta) {
     var i = FLOW.indexOf(currentStep);
     if (i === -1) return;
@@ -65,6 +67,7 @@
   $("#f-announce").checked = state.announce;
   $("#f-history").checked = state.keep_history;
   $("#f-friends").value = state.friends;
+  $("#f-address").value = state.public_host;
   markChoice("#type-choices", state.server_type);
   markChoice("#access-choices", state.access);
   syncFriendsField();
@@ -106,6 +109,7 @@
     state.announce = $("#f-announce").checked;
     state.keep_history = $("#f-history").checked;
     state.friends = $("#f-friends").value;
+    state.public_host = $("#f-address").value.trim();
   }
 
   // ── review ──
@@ -117,6 +121,7 @@
       ["Name", state.server_name],
     ];
     if (state.about) rows.push(["Description", state.about]);
+    rows.push(["Players join at", state.public_host]);
     rows.push(["Who can join", ACCESS_LABEL[state.access] || state.access]);
     rows.push(["In server lists", state.announce ? "Yes" : "No"]);
     rows.push(["Visit history", state.keep_history ? "Kept for a week" : "Not kept"]);
@@ -132,6 +137,14 @@
     var needFresh = !!defaults.engine_booted && !!defaults.world_exists &&
       !!priorMode && priorMode !== newMode;
     $("#fresh-warn").hidden = !needFresh;
+    // An answer other than "friends" turns an existing allowlist off for good.
+    var listed = (defaults.friends || []).length;
+    var warn = $("#allowlist-warn");
+    var turnsOff = defaults.access === "friends" && state.access !== "friends";
+    warn.hidden = !turnsOff;
+    warn.textContent = turnsOff
+      ? "This turns off your allowlist of " + listed + (listed === 1 ? " person." : " people.")
+      : "";
   }
 
   // ── POST helpers ──
@@ -154,6 +167,11 @@
   // ── create ──
   $("#create").addEventListener("click", async function () {
     captureFields();
+    if (!state.public_host) {
+      alert("Your server needs the address players use to reach it.");
+      show("address");
+      return;
+    }
     var btn = this; btn.disabled = true;
     var payload = {
       server_type: state.server_type,
@@ -163,6 +181,7 @@
       announce: state.announce,
       keep_history: state.keep_history,
       friends: state.access === "friends" ? state.friends : "",
+      public_host: state.public_host,
     };
     try {
       var r = await postJSON("api/setup/apply", payload);

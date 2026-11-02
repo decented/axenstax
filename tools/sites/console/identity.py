@@ -171,8 +171,37 @@ def _read_npub_list(path: Path) -> list[str]:
 
 
 def _write_npub_list(path: Path, npubs: list[str]) -> None:
+    _write_atomic(path, "\n".join(npubs) + ("\n" if npubs else ""))
+
+
+def _write_atomic(path: Path, text: str) -> None:
+    """Replace `path` whole. The engine reloads the policy files every few seconds,
+    so it must never see one half written. A plain `open` rather than `mkstemp`:
+    the engine runs in another container and has to be able to read the result."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(npubs) + ("\n" if npubs else ""), encoding="utf-8")
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
+def _read_for_update(path: Path) -> str | None:
+    """A file about to be rewritten: its text, or None if it doesn't exist. Any other
+    read failure raises `ValueError` (the API's 400): rewriting from a read that
+    failed would wipe the file."""
+    try:
+        return path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeError) as e:
+        raise ValueError(f"couldn't read {path.name}, nothing was changed: {e}") from e
+
+
+def _npub_lines(text: str | None) -> list[str]:
+    return [s for s in (line.strip() for line in (text or "").splitlines())
+            if s and not s.startswith("#")]
 
 
 # ── identity / attestation ──
@@ -350,17 +379,30 @@ def blocklist() -> list[str]:
     return _read_npub_list(identity_dir() / "blocklist.txt")
 
 
+def allowlist_enabled() -> bool:
+    """Is the allowlist on? The file's existence is the switch, as in the engine:
+    an empty file means nobody may join, no file means no allowlist. (A server can
+    also be given one by `AXENSTAX_WHITELIST`, which the console can't see.)"""
+    return (identity_dir() / "whitelist.txt").exists()
+
+
+def allowlist_off() -> None:
+    """Turn the allowlist off: anyone the sign-in rule admits may join again."""
+    (identity_dir() / "whitelist.txt").unlink(missing_ok=True)
+
+
 def require_signin() -> bool:
     """The sign-in requirement the engine enforces. Mirrors
-    `server_main::load_access_policy`: the file, when present, decides
-    ("true" = required, anything else = guests admitted); with no file the
-    dedicated server requires sign-in (owner decision 2026-10-06) unless it was
-    started with `--allow-guests` / `AXENSTAX_ALLOW_GUESTS=1`, which the
-    console can't see — so the console reports the default."""
+    `server_policy`: the file, when present, says `true` or `false` (any case);
+    with no file the dedicated server requires sign-in (owner decision 2026-10-06)
+    unless it was started with `--allow-guests` / `AXENSTAX_ALLOW_GUESTS=1`, which
+    the console can't see — so the console reports the default. The engine refuses
+    any other contents, keeping its last good value, so this never reports them
+    as guests being admitted."""
     path = identity_dir() / "require_signin"
     if not path.exists():
         return True
-    return _read_text(path).strip().lower() == "true"
+    return _read_text(path).strip().lower() != "false"
 
 
 def add_to_list(which: str, npub: str) -> None:
@@ -369,22 +411,32 @@ def add_to_list(which: str, npub: str) -> None:
     if not is_valid_npub(npub):
         raise ValueError("not a valid npub")
     path = identity_dir() / ("whitelist.txt" if which == "allow" else "blocklist.txt")
-    items = _read_npub_list(path)
-    if npub not in items:
-        items.append(npub)
-        _write_npub_list(path, items)
+    text = _read_for_update(path)
+    items = _npub_lines(text)
+    if text is None or npub not in items:
+        _write_npub_list(path, items + ([npub] if npub not in items else []))
 
 
 def remove_from_list(which: str, npub: str) -> None:
+    """A last entry leaves an empty file behind, on purpose: the allowlist stays on
+    until `allowlist_off`. With no file there is nothing to do, and creating one
+    would close an open server."""
     path = identity_dir() / ("whitelist.txt" if which == "allow" else "blocklist.txt")
-    items = [n for n in _read_npub_list(path) if n != npub.strip()]
-    _write_npub_list(path, items)
+    text = _read_for_update(path)
+    if text is None:
+        return
+    _write_npub_list(path, [n for n in _npub_lines(text) if n != npub.strip()])
+
+
+def turn_allowlist_on() -> None:
+    """Make the allowlist exist, keeping what is on it. It may be left empty."""
+    path = identity_dir() / "whitelist.txt"
+    if _read_for_update(path) is None:
+        _write_npub_list(path, [])
 
 
 def set_require_signin(on: bool) -> None:
-    d = identity_dir()
-    d.mkdir(parents=True, exist_ok=True)
-    (d / "require_signin").write_text("true" if on else "false", encoding="utf-8")
+    _write_atomic(identity_dir() / "require_signin", "true" if on else "false")
 
 
 def queue_kick(npub: str) -> None:
@@ -392,9 +444,7 @@ def queue_kick(npub: str) -> None:
     if not is_valid_npub(npub):
         raise ValueError("not a valid npub")
     path = identity_dir() / "kick"
-    existing = _read_text(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(existing + npub + "\n", encoding="utf-8")
+    _write_atomic(path, (_read_for_update(path) or "") + npub + "\n")
 
 
 # ── role membership (Team panel) ──

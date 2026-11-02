@@ -205,10 +205,6 @@ pub enum ChallengeEvent {
     SaveSkin,
     /// A rig authored in Rig Studio was spawned into the world.
     SpawnRig,
-    /// A `/bug` or `/idea` report was queued for the makers. Local-only — the
-    /// report itself is unchanged and nothing about it reaches the scenario.
-    /// Native only in practice: the browser build has no `/bug` or `/idea`.
-    SendFeedback,
 }
 
 /// Which self-driving power source turned, for [`ChallengeEvent::SourceTurned`].
@@ -260,8 +256,7 @@ impl ChallengeEvent {
             | (ShearOrMilk, ShearOrMilk)
             | (CompleteBuildGuide, CompleteBuildGuide)
             | (SaveSkin, SaveSkin)
-            | (SpawnRig, SpawnRig)
-            | (SendFeedback, SendFeedback) => true,
+            | (SpawnRig, SpawnRig) => true,
             _ => false,
         }
     }
@@ -988,17 +983,13 @@ pub const EXPLORER_CHALLENGES: &[(&str, &[u8])] = &[
     // Wind, Copper & Electricity wave (2026-09-07) §4 — coverage for the wave's
     // new ground (copper from the rock, the two self-driving power sources) plus
     // the solo-queue features that had no trial at all (build-along, the skin
-    // painter, Rig Studio, the lobby mailbox).
+    // painter, Rig Studio).
     ("copper-rush", include_bytes!("../assets/scenarios/explorer-copper-rush.json")),
     ("mill-race", include_bytes!("../assets/scenarios/explorer-mill-race.json")),
     ("catch-the-wind", include_bytes!("../assets/scenarios/explorer-catch-the-wind.json")),
     ("follow-the-plan", include_bytes!("../assets/scenarios/explorer-follow-the-plan.json")),
     ("fresh-coat", include_bytes!("../assets/scenarios/explorer-fresh-coat.json")),
     ("bouncer", include_bytes!("../assets/scenarios/explorer-bouncer.json")),
-    // Native only: its objective (`SendFeedback`) fires from `/bug`·`/idea`, which
-    // the browser build does not have (no feedback channel on web, 2026-10-01).
-    #[cfg(not(target_arch = "wasm32"))]
-    ("suggestion-box", include_bytes!("../assets/scenarios/explorer-suggestion-box.json")),
 ];
 
 /// `(start-name, display-name)` pairs for the feature-coverage challenges — the
@@ -1016,24 +1007,6 @@ pub fn challenge_listing() -> Vec<(&'static str, String)> {
         if let Ok(def) = load_scenario_def(bytes) {
             out.push((name, def.display_name));
         }
-    }
-    out
-}
-
-/// The one challenge whose objective needs `/idea` (`SendFeedback`). It is part
-/// of the alpha-tester feedback feature, so it is hidden — from the lobby, the
-/// J board, `/trial list` and `/scenario list`, and not startable by name —
-/// whenever `native_mailbox::feedback_enabled` is false. Native only (the web
-/// build does not even bundle it).
-pub const FEEDBACK_TRIAL: &str = "suggestion-box";
-
-/// [`challenge_listing`] minus the feedback trial unless `feedback_on`. Every
-/// player-facing listing goes through this; the unfiltered
-/// [`challenge_listing`] stays for tests that must cover every bundled def.
-pub fn challenge_listing_visible(feedback_on: bool) -> Vec<(&'static str, String)> {
-    let mut out = challenge_listing();
-    if !feedback_on {
-        out.retain(|(name, _)| *name != FEEDBACK_TRIAL);
     }
     out
 }
@@ -1090,7 +1063,6 @@ pub fn event_task_label(event: &ChallengeEvent, count: u32) -> String {
         ChallengeEvent::CompleteBuildGuide => "Finish the build-along guide".to_string(),
         ChallengeEvent::SaveSkin => "Save your painted skin and wear it".to_string(),
         ChallengeEvent::SpawnRig => "Spawn your rig".to_string(),
-        ChallengeEvent::SendFeedback => "Send the makers a note".to_string(),
     }
 }
 
@@ -1197,7 +1169,6 @@ pub fn trial_task_labels(token: &str) -> &'static [&'static str] {
         "follow-the-plan" => &["Follow the ghost guide until the hut is finished"],
         "fresh-coat" => &["Paint the mannequin, then pin it on to wear it"],
         "bouncer" => &["Build a rig, give it the Bounce clip, and spawn it"],
-        "suggestion-box" => &["Send the makers one idea"],
         _ => &[],
     }
 }
@@ -1433,10 +1404,6 @@ pub fn challenge_help(name: &str) -> (&'static str, &'static str) {
             "Invent a little creature in Rig Studio out of blocks, give it the Bounce clip, and spawn it.",
             "Press Y to open RIG STUDIO. Pick a skeleton shape at the top, then hold a block in your hand (press 1–4 for the different kinds) and click a body part in the panel to build that part out of that block — head, body, arms, legs, whatever you fancy. Set the animation to BOUNCE. Then hit SPAWN and your creature appears in front of you, bouncing away. Make it silly. Make it enormous. It's your creature.",
         ),
-        "suggestion-box" => (
-            "Tell the makers one thing you'd love to see in the game — they really do read them.",
-            "There's a straight line from you to the people building this game, and this is it. Press T to open chat, type /idea followed by your idea — for example: /idea please add hot air balloons — and press ENTER. That's it, it's on its way. If you'd rather report something broken, /bug works exactly the same way. Say what you actually think; that's the useful bit.",
-        ),
         _ => ("", ""),
     }
 }
@@ -1657,10 +1624,6 @@ pub fn trial_satoshi(name: &str) -> (&'static str, &'static str) {
         "bouncer" => (
             "Time to make something alive. Rig Studio takes plain blocks and hangs them on a skeleton, and then it MOVES — so pick a shape, hand it some blocks, set it to Bounce, and let it loose. The daftest creature wins.",
             "Y opens Rig Studio. Hold a block, click a body part to build that part from it, set the clip to Bounce, then Spawn.",
-        ),
-        "suggestion-box" => (
-            "This bit matters. The people building this world want to know what you'd add to it — and there's a direct line from your chat box to them. One idea, in your own words. Nothing too big, nothing too silly.",
-            "Press T, type /idea followed by whatever you'd like to see, and press Enter. /bug does the same for something that looks broken.",
         ),
         _ => ("", ""),
     }
@@ -2514,7 +2477,7 @@ mod tests {
         // The four unit-variant events added with the wave. Cheap, but it pins
         // that `matches` didn't collapse any two of them into one arm.
         use ChallengeEvent::*;
-        let unit = [CompleteBuildGuide, SaveSkin, SpawnRig, SendFeedback];
+        let unit = [CompleteBuildGuide, SaveSkin, SpawnRig];
         for want in unit {
             for got in unit {
                 assert_eq!(
