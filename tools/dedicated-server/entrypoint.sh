@@ -7,8 +7,9 @@
 #     immediately, but the engine WAITS until the operator finishes the setup
 #     wizard (the console writes .identity/setup-complete). That way the operator's
 #     chosen game mode + kind-of-place apply to the FIRST world, with no throwaway
-#     default world. Set AXENSTAX_SKIP_WIZARD=1 to boot immediately on the compose
-#     defaults (no gate).
+#     default world. Set AXENSTAX_SKIP_WIZARD=1 to boot on the compose defaults (no
+#     gate). It still needs AXENSTAX_PUBLIC_HOST or AXENSTAX_DOMAIN, or it waits (see
+#     ADDRESS GATE below).
 #   • CONFIG SOURCE — before launching, the engine sources .identity/server.env
 #     (shell-quoted AXENSTAX_* overrides the console wrote); these win over the
 #     compose defaults.

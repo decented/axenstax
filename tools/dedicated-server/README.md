@@ -168,7 +168,7 @@ paths. Operator tools still need a direct QUIC connection. Details:
 | `AXENSTAX_SIM_DISTANCE` (or `--sim-distance`) | `8` | Radius, in 16-block columns, the server keeps loaded and simulated around each connected player and the world spawn (2–16). Higher = more RAM and CPU per player |
 | `AXENSTAX_CHUNK_SYNC` (or `--chunk-sync`) | `touched` | Which chunks the server sends each player, out to the player's render distance (at most the sim distance), so everyone stands on the server's real world. `touched` = only the areas that differ from the world's generated terrain (anything built, dug or changed); the game makes the rest itself from the world's seed, so joining costs a fraction of the bandwidth. A player whose game version generates terrain differently always gets everything, and so, for the rest of their visit, does a player whose game turns out to generate an area differently anyway (the server logs a warning: please report it). `all` = send every chunk to everyone (more bandwidth; for a player whose terrain looks wrong) |
 | `AXENSTAX_SEED` | _(random)_ | Fixed terrain seed for a **new** world |
-| `AXENSTAX_SKIP_WIZARD` | `0` | `1` ⇒ skip the first-run setup gate; boot immediately on these defaults |
+| `AXENSTAX_SKIP_WIZARD` | `0` | `1` ⇒ skip the first-run setup gate and boot on these defaults. It still needs `AXENSTAX_PUBLIC_HOST` or `AXENSTAX_DOMAIN`, or it waits for one |
 
 > Note: with the first-run wizard active (default), the values above are **starting
 > defaults** — the setup wizard (and the console) override most of them
@@ -224,7 +224,6 @@ Identity configuration (env in `docker-compose.yml`):
 | Var | Default | Meaning |
 |-----|---------|---------|
 | `AXENSTAX_REQUIRE_VERIFIED` | `0` | `1` ⇒ refuse to start without a valid, non-expired attestation |
-| `AXENSTAX_IDENTITY_DIR` | `<worlds>/.identity` | where the runtime key + attestation + session live |
 | `AXENSTAX_PAIR_RELAY` | `wss://relay.damus.io` | public relay used for the NIP-46 pairing round-trip (`--pair-relay` on the CLI); also the default `AXENSTAX_ADMIN_RELAY` |
 | `AXENSTAX_PUBLIC_HOST` | _(unset; required unless `AXENSTAX_DOMAIN` is set)_ | Public host name(s)/IP(s), comma-separated (`--public-host`, repeatable). The first is advertised in the connect-string as `axenstax://<host>:<ws port>`; all are the addresses WebSocket joins must be signed for (see "Public address") |
 | `AXENSTAX_DELEGATION_DAYS` | `90` | validity window minted at pairing time |
@@ -280,8 +279,7 @@ so a box that was opened to guests from the console stays open after a restart.
 **Upgraded from before 2026-10-06? Check your box.** The old setup wizard's "Who can
 come in?" step defaulted to *Anyone*, and it saved that choice as a
 `<identity-dir>/require_signin` file reading `false` (`<identity-dir>` is
-`<worlds>/.identity`, i.e. `/worlds/.identity` in the Docker setup, unless
-`AXENSTAX_IDENTITY_DIR` says otherwise). That file beats the new default, so a
+`<worlds>/.identity`, i.e. `/worlds/.identity` in the Docker setup). That file beats the new default, so a
 server set up that way **keeps admitting guests** after the engine upgrade until you
 change it. The file must say exactly `true` or `false` (spaces and case don't matter):
 anything else, an empty file included, refuses to boot, and on a running server keeps

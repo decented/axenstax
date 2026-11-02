@@ -38,8 +38,9 @@ services:
       # First-run setup wizard: on a fresh box the engine WAITS until the operator
       # finishes the setup wizard in the console (/admin) before it creates a world,
       # so the chosen "kind of place" (gallery / creative / survival / adventure)
-      # applies to the first world. Set to "1" to skip the gate and boot immediately
-      # on the defaults above (e.g. headless/CI). See README + the design doc.
+      # applies to the first world. Set to "1" to skip that gate and boot on the
+      # defaults above (e.g. headless/CI). It still needs AXENSTAX_PUBLIC_HOST or
+      # AXENSTAX_DOMAIN, or it waits for one. See README + the design doc.
       # AXENSTAX_SKIP_WIZARD: "0"
       # AXENSTAX_SEED: "12345"           # optional — fixed terrain for a new world
       # --- VPS with a real domain (optional; see README) ---

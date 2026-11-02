@@ -281,7 +281,6 @@ docker compose run --rm axenstax-server axenstax-engine --refresh-delegation
 | Var | Default | Meaning |
 |-----|---------|---------|
 | `AXENSTAX_REQUIRE_VERIFIED` | `0` | `1` ⇒ refuse to start without a valid, non-expired attestation |
-| `AXENSTAX_IDENTITY_DIR` | `<worlds>/.identity` | where the runtime key + attestation + session live |
 | `AXENSTAX_PAIR_RELAY` | `wss://relay.damus.io` | public relay used for the NIP-46 pairing round-trip (`--pair-relay` on the CLI); also the default `AXENSTAX_ADMIN_RELAY` |
 | `AXENSTAX_PUBLIC_HOST` | _(unset; required unless `AXENSTAX_DOMAIN` is set)_ | This server's public host name(s) or IP(s), comma-separated (`--public-host`, repeatable). The first is advertised in the connect-string as `axenstax://<host>:<ws port>`; all of them are the addresses joins must be signed for (see "Tell the server its public address") |
 | `AXENSTAX_DELEGATION_DAYS` | `90` | validity window minted at pairing time |
@@ -313,8 +312,7 @@ restarts.
 **Upgraded from before 2026-10-06? Check your box.** The old setup wizard's "Who can
 come in?" step defaulted to *Anyone*, and it saved that choice as a
 `<identity-dir>/require_signin` file reading `false` (`<identity-dir>` is
-`<worlds>/.identity`, i.e. `/worlds/.identity` in the Docker setup, unless
-`AXENSTAX_IDENTITY_DIR` says otherwise). That file beats the new default, so a
+`<worlds>/.identity`, i.e. `/worlds/.identity` in the Docker setup). That file beats the new default, so a
 server set up that way **keeps admitting guests** after the engine upgrade until you
 change it. The file must say exactly `true` or `false` (spaces and case don't matter):
 anything else, an empty file included, is a problem rather than a choice. At
