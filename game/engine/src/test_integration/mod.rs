@@ -106,5 +106,7 @@ pub mod machine_index;
 pub mod tall_world;
 pub mod twin_run; // Keep slice 1 — twin-run determinism (two seeded servers, one digest).
 pub mod tick_determinism_lint; // Keep slice 1 — no wall clock or OS randomness in tick paths.
-pub mod tick_bench; // Keep slice 1 — #[ignore] release bench of GameServer::tick (handoff §8).
+pub(crate) mod tick_bench; // Keep slice 1 — #[ignore] release bench of GameServer::tick (handoff §8).
 pub mod clock_save; // Keep slice 2a: the authority clock and joiner position across a restart.
+pub(crate) mod authority_checkpoint; // Keep slice 2b: checkpoint and restore of the authority.
+mod authority_checkpoint_refusals; // Keep slice 2b: what they refuse, under which code.

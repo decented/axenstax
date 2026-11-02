@@ -3,9 +3,9 @@
 //! with the same seed, fed the same events at the same ticks, must produce
 //! the same digest (`test_integration/twin_run.rs`).
 //!
-//! **This is NOT the Fray contract `state_hash`.** No canonical checkpoint
-//! exists yet (Keep handoff §3, `checkpoint()` row), and this view leaves out
-//! state a restore would need (the hecs allocator free list, carry-over
+//! **This is NOT the Fray contract `state_hash`**, which is a hash of the
+//! canonical checkpoint (`authority_checkpoint`, Keep slice 2b). This view leaves
+//! out state a restore would need (the hecs allocator free list, carry-over
 //! queues, output state). It is a regression signal, not a cross-architecture
 //! identity. Its byte layout may change freely; nothing persists or sends it,
 //! and it compiles only for tests.
@@ -94,8 +94,9 @@
 //! `VillagerComponent`, and the data of bears, bees, goats, hyenas, rabbits and
 //! squid. A divergence there shows once it moves a body or changes a block; a
 //! difference that never does is not seen. Debug-encoded values carry raw hecs
-//! ids where the type does (a wolf's attack target), which holds within a run
-//! and needs a decision for restore.
+//! ids where the type does (a wolf's attack target), which holds within a run.
+//! A restore doesn't keep hecs ids, so the entity sections are on its ledger
+//! (`test_integration/authority_checkpoint.rs`, `NOT_YET_RESTORED`).
 //!
 //! Entity key: the hecs `Entity::to_bits()` (id + generation), sorted. Entity
 //! ids are outcome state here — mob AI rolls hash them

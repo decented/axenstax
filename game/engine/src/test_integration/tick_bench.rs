@@ -29,7 +29,7 @@ use glam::Vec3;
 use super::twin_run::{add_joiner, drive_joiners, twin_loaded, BASE_Y};
 use crate::save::WorldsRootGuard;
 
-const SIM_DISTANCE: i32 = 8;
+pub(super) const SIM_DISTANCE: i32 = 8;
 const WARMUP: u64 = 600;
 const MEASURED: usize = 600;
 
@@ -56,6 +56,59 @@ fn dir_bytes(dir: &std::path::Path) -> (u64, usize) {
     total
 }
 
+/// The bench's synthetic joiners, walking on a ring by the spawn.
+pub(super) fn add_bench_joiners(h: &mut crate::test_harness::TestHost, joiners: usize) {
+    for j in 0..joiners {
+        let a = j as f32 / joiners as f32 * std::f32::consts::TAU;
+        let pos = Vec3::new(8.5 + 40.0 * a.cos(), (BASE_Y + 1) as f32, 8.5 + 40.0 * a.sin());
+        let slot = add_joiner(h, pos);
+        let mut pk = [0u8; 32];
+        pk[0] = 0x02;
+        pk[31] = slot as u8;
+        h.server.players[slot].verified_pubkey = Some(pk);
+    }
+}
+
+pub(super) fn warm_up(h: &mut crate::test_harness::TestHost) {
+    while h.server.tick_counter < WARMUP {
+        let next = h.server.tick_counter + 1;
+        drive_joiners(h, next);
+        h.server.tick();
+    }
+}
+
+/// A 24×24 four-course wall-and-floor block by the spawn body (2,304 blocks over
+/// four columns), 8×8×2 by each joiner where it stands, and a window of items
+/// for each joiner's sidecar.
+pub(super) fn scripted_build(h: &mut crate::test_harness::TestHost) {
+    for x in 0..24 {
+        for z in 30..54 {
+            for y in 0..4 {
+                let b = if (x + z + y) % 3 == 0 { crate::block::COBBLESTONE } else { crate::block::OAK_PLANKS };
+                h.server.world.place_player_block(x, BASE_Y + 1 + y, z, b);
+            }
+        }
+    }
+    for slot in 0..h.server.players.len() {
+        if !h.server.players[slot].server_simulated {
+            continue;
+        }
+        let at = h.server.players[slot].player.pos;
+        let (bx, by, bz) = (at.x.floor() as i32, at.y.floor() as i32 + 2, at.z.floor() as i32);
+        for dx in 0..8 {
+            for dz in 0..8 {
+                for dy in 0..2 {
+                    h.server.world.place_player_block(bx + dx, by + dy, bz + dz, crate::block::STONE);
+                }
+            }
+        }
+        for i in 0..20u8 {
+            let stack = crate::item::ItemStack::new_block(crate::block::COBBLESTONE, 1 + i);
+            let _ = h.server.players[slot].inventory.add_item(stack);
+        }
+    }
+}
+
 #[test]
 #[ignore]
 fn tick_bench_joiners_at_sim_distance_8() {
@@ -67,20 +120,8 @@ fn tick_bench_joiners_at_sim_distance_8() {
         let name = format!("keep-s1-bench-{joiners}");
         let _root = WorldsRootGuard::new(&name);
         let mut h = twin_loaded(4242, &name, 0, SIM_DISTANCE, SIM_DISTANCE);
-        for j in 0..joiners {
-            let a = j as f32 / joiners as f32 * std::f32::consts::TAU;
-            let pos = Vec3::new(8.5 + 40.0 * a.cos(), (BASE_Y + 1) as f32, 8.5 + 40.0 * a.sin());
-            let slot = add_joiner(&mut h, pos);
-            let mut pk = [0u8; 32];
-            pk[0] = 0x02;
-            pk[31] = slot as u8;
-            h.server.players[slot].verified_pubkey = Some(pk);
-        }
-        while h.server.tick_counter < WARMUP {
-            let next = h.server.tick_counter + 1;
-            drive_joiners(&mut h, next);
-            h.server.tick();
-        }
+        add_bench_joiners(&mut h, joiners);
+        warm_up(&mut h);
         let mut ms = Vec::with_capacity(MEASURED);
         for _ in 0..MEASURED {
             let next = h.server.tick_counter + 1;
@@ -102,35 +143,7 @@ fn tick_bench_joiners_at_sim_distance_8() {
             h.server.ecs.len(),
         );
 
-        // Scripted build: a 24×24 four-course wall-and-floor block by the
-        // spawn body (2,304 blocks over four columns), 8×8×2 by each joiner
-        // where it stands, and a window of items for each joiner's sidecar.
-        for x in 0..24 {
-            for z in 30..54 {
-                for y in 0..4 {
-                    let b = if (x + z + y) % 3 == 0 { crate::block::COBBLESTONE } else { crate::block::OAK_PLANKS };
-                    h.server.world.place_player_block(x, BASE_Y + 1 + y, z, b);
-                }
-            }
-        }
-        for slot in 0..h.server.players.len() {
-            if !h.server.players[slot].server_simulated {
-                continue;
-            }
-            let at = h.server.players[slot].player.pos;
-            let (bx, by, bz) = (at.x.floor() as i32, at.y.floor() as i32 + 2, at.z.floor() as i32);
-            for dx in 0..8 {
-                for dz in 0..8 {
-                    for dy in 0..2 {
-                        h.server.world.place_player_block(bx + dx, by + dy, bz + dz, crate::block::STONE);
-                    }
-                }
-            }
-            for i in 0..20u8 {
-                let stack = crate::item::ItemStack::new_block(crate::block::COBBLESTONE, 1 + i);
-                let _ = h.server.players[slot].inventory.add_item(stack);
-            }
-        }
+        scripted_build(&mut h);
         // A server save writes every non-empty chunk it holds, touched or not
         // (`GameServer::try_save`), so `chunks/` is not the touched set: count
         // that separately, by the flag eviction keeps a column for.
