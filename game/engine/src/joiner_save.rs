@@ -640,17 +640,14 @@ impl JoinerSave {
     }
 
     /// Keep slice 2b — what a restored joiner's body doesn't get from the
-    /// checkpoint: its bound personal record and its obligation history, or its
-    /// next save would write them away. Its correction debt isn't live again
-    /// until it re-attaches (the join's window sync carries it), so a record
-    /// that holds some makes the session incomplete: a save before then can't
-    /// claim to be the whole story.
+    /// checkpoint: its bound personal record and its obligation history. Its
+    /// correction debt stays in this record until it re-attaches (the join's
+    /// window sync carries it), so the slot waits, unsaved
+    /// (`ServerPlayer::awaiting_reattach`).
     pub(crate) fn restore_session(&self, sp: &mut crate::server::ServerPlayer) {
         sp.personal = self.personal.clone();
         sp.obligations.merge(self.obligation_history);
-        if !self.owed.is_empty() {
-            sp.obligations.mark(IncompleteCause::Overflow);
-        }
+        sp.awaiting_reattach = true;
     }
 
     /// Restore the vitals onto joiner `sp`'s body, and the save's obligation
@@ -676,7 +673,8 @@ impl crate::server::ServerPlayer {
     /// C3d's Strict admission and the handover's eligibility.
     #[allow(dead_code)] // consumed by C3d (Strict admission) and the handover (eligibility)
     pub fn obligations_proven_zero(&self) -> bool {
-        self.obligations.get() == ObligationHistory::Complete
+        !self.awaiting_reattach
+            && self.obligations.get() == ObligationHistory::Complete
             && crate::window_events::effective_window_and_debt(self)
                 .debt
                 .is_empty()
@@ -769,7 +767,7 @@ impl crate::server::GameServer {
         let Some(sp) = self
             .players
             .get(i)
-            .filter(|sp| sp.server_simulated && sp.is_in_world())
+            .filter(|sp| sp.server_simulated && sp.is_in_world() && !sp.awaiting_reattach)
         else {
             return Ok(());
         };

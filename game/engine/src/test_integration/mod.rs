@@ -111,3 +111,4 @@ pub mod clock_save; // Keep slice 2a: the authority clock and joiner position ac
 pub(crate) mod authority_checkpoint; // Keep slice 2b: checkpoint and restore of the authority.
 mod authority_checkpoint_refusals; // Keep slice 2b: what they refuse, under which code.
 mod authority_checkpoint_resealed; // Keep slice 2b: bytes someone resealed, refused before they can hurt.
+mod authority_checkpoint_records; // Keep slice 2b: what a restore does with the stored records.

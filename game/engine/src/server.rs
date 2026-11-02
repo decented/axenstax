@@ -191,6 +191,11 @@ pub struct ServerPlayer {
     /// by [`ServerPlayer::enter_world`] when the handshake completes. `false`
     /// for every other player (local ones never handshake).
     pub awaiting_join: bool,
+    /// Keep slice 2b — a joiner a restore brought back. Its sidecar is still the
+    /// truth (its correction debt isn't live again until it re-attaches), so the
+    /// slot isn't saved and doesn't read as owing nothing. Cleared by
+    /// [`ServerPlayer::enter_world`]; a re-attach to a fresh slot starts clear.
+    pub awaiting_reattach: bool,
     /// Spawn protection (`crate::spawn_protection`): server ticks left in
     /// which hostile melee does not hurt this body and (on an owning server)
     /// hostile mobs do not target it; blasts are not shielded, and a lending
@@ -581,6 +586,7 @@ impl ServerPlayer {
             dead_ticks: 0,
             respawns: 0,
             awaiting_join: false,
+            awaiting_reattach: false,
             spawn_protection: 0,
             armour_points: 0,
             armour_wear_hits: 0,
@@ -670,6 +676,7 @@ impl ServerPlayer {
     pub fn enter_world(&mut self) {
         self.death_handled = false;
         self.awaiting_join = false;
+        self.awaiting_reattach = false;
         self.combat.respawn();
         self.combat.just_died = false;
         self.dead_ticks = 0;

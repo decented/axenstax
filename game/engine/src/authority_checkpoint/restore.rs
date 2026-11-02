@@ -107,7 +107,8 @@ impl GameServer {
 }
 
 /// What a joiner's sidecar holds and the checkpoint doesn't: its bound personal
-/// record and its obligation history, or its next save would write them away.
+/// record and its obligation history. A joiner with a sidecar isn't saved again
+/// until it re-attaches, since that file also holds what it owes.
 fn reload_sidecars(server: &mut GameServer) {
     for i in 0..server.players.len() {
         let sp = &server.players[i];

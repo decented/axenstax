@@ -489,8 +489,8 @@ fn evicted_and_dropped_columns_stay_so() {
     }
 }
 
-/// A restored joiner has what its sidecar and the checkpoint carry, and its
-/// next save writes the record it was restored from (nothing lost in between).
+/// A restored joiner has what its sidecar and the checkpoint carry, and a save
+/// before it re-attaches leaves the record it was restored from.
 #[test]
 fn a_restored_joiner_saves_the_record_it_came_from() {
     let _root = WorldsRootGuard::new("keep-s2b-sidecar");
