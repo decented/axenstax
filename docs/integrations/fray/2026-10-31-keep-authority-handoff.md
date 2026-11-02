@@ -415,7 +415,9 @@ benchmark exists.**
   | 2 | 409 | 1,918 | 94,231 | 3,763,620 | 117,530 | 8,419 | 1,203 | ~3,985,300 |
   | 8 | 511 | 2,406 | 118,767 | 4,734,382 | 117,530 | 10,323 | 3,753 | ~4,985,000 |
 
-  The slice 1 twin fixture, at a load radius of 3, fits the cap: its sizes are in the test's output.
+  The slice 1 twin fixture, at a load radius of 3 and a sim distance of 2, fits the cap, but only just:
+  483,936 B at tick 1, 519,854 B at 200, 813,903 B at 800 and 1,015,610 B at 2,000, which is 97% of
+  it. Lava's queue again, growing as the teleports load columns.
 
 **Stated limits and decisions**
 - 20 TPS (50 ms).

@@ -92,8 +92,8 @@ impl GameServer {
 
         // Every field this module carries is back if the body comes out the
         // same (the header's version numbers may be an older build's). A
-        // difference means the input wasn't in canonical form: a non-zero
-        // padding of a float's sign, say, that a seal can't see.
+        // difference means the input wasn't in canonical form: a `-0.0`, say,
+        // which decodes and passes the seal.
         let again = server.checkpoint().map_err(|e| RestoreError::Fault(format!("{e:?}")))?;
         let body_of = |bytes: &[u8]| bytes[HEADER_BYTES..bytes.len() - SEAL_BYTES].to_vec();
         if body_of(&again) != body_of(checkpoint) {
