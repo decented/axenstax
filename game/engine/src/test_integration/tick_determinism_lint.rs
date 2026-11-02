@@ -6,15 +6,19 @@
 //! fixture happened to reach the line).
 //!
 //! Scans the production code (`#[cfg(test)]` items skipped, `//` comments
-//! stripped) of `server.rs`, every `sim_*` module and the modules
-//! `GameServer::tick` calls into, for the words `Instant`, `SystemTime` and
-//! `getrandom` (`web_time::Instant` included). The only sanctioned uses are in
-//! [`ALLOWED`]; each needs a comment saying why it cannot change an outcome.
-//! An allowlist entry that no longer matches exactly one line fails too, so
-//! the list can't go stale.
+//! stripped) of the files in [`covered_files`] for the words `Instant`,
+//! `SystemTime` and `getrandom` (`web_time::Instant` included). That is
+//! [`TICK_PATH_FILES`] plus every `sim_*` and `*_ai` module, and the test prints
+//! the full list. It is a hand-written list, not a call graph: a module that
+//! `GameServer::tick` reaches and that isn't listed is not checked (for one,
+//! `proof_of_play.rs` draws a world's secret from the OS and isn't scanned). The
+//! only sanctioned uses are in [`ALLOWED`]; each needs a comment saying why it
+//! cannot change an outcome. An allowlist entry that no longer matches exactly
+//! one line fails too, so the list can't go stale.
 
-/// The scanned files, relative to `src/`. `sim_*.rs` is added by listing the
-/// directory, so a new sim phase is covered without editing this.
+/// The scanned files, relative to `src/`, beyond the `sim_*.rs` and `*_ai.rs`
+/// that [`covered_files`] finds by listing the directory, so a new sim phase or
+/// species is covered without editing this.
 const TICK_PATH_FILES: &[&str] = &[
     "server.rs",
     "server_stream.rs",
@@ -55,11 +59,26 @@ const TICK_PATH_FILES: &[&str] = &[
     "weather.rs",
     "wind.rs",
     "reputation_day.rs",
+    "villager.rs",
+    "plan.rs",
+    "riding.rs",
+    "window_ops.rs",
+    "window_events.rs",
+    "spawn_protection.rs",
+    "survival.rs",
+    "animal_products.rs",
+    "satoshi.rs",
+    "lighting.rs",
+    "chunk_stream.rs",
+    "nostrich.rs",
+    "companion.rs",
+    "quest_npcs.rs",
 ];
 
-/// `(file, text the line contains)` — the sanctioned uses. Each is drawn once
-/// when a server is built, never inside a tick, and is an identity compared
-/// for equality, never a roll that picks an outcome.
+/// `(file, text the line contains)` — the sanctioned uses, none of them on the
+/// path `GameServer::tick` runs: identities drawn when a server is built or on
+/// an event, compared for equality and never rolled, and the client's own
+/// loading-screen timers.
 const ALLOWED: &[(&str, &str)] = &[
     // `GameServer::new` — the run id, so a joiner can't sleep twice in one
     // night across a restart (`run_id` gate) and a lent day offer is matched
@@ -69,6 +88,18 @@ const ALLOWED: &[(&str, &str)] = &[
     // `DayClock::new` — the reputation clock's owner id, matched against day
     // pulses (`DayConsumer::consume`). Compared, never rolled.
     ("reputation_day.rs", "getrandom::fill(&mut owner)"),
+    // `quest_npcs::random_id` — a gameplay identity, drawn on a quest
+    // engagement or a world attach (`quest_play`, `gameplay_attachment`), never
+    // by a tick. Compared, never rolled. A scripted engagement would part twins
+    // (Spec 01 §4.1.4: event paths aren't covered).
+    ("quest_npcs.rs", "getrandom::fill(&mut value)"),
+    // `GameState::begin_load` — how long a client shows a toast.
+    ("chunk_stream.rs", "web_time::Instant::now() + std::time::Duration::from_secs(10)"),
+    // `GameState` world entry — how long a joiner's loading screen waits for
+    // the pushed spawn ring.
+    ("chunk_stream.rs", "web_time::Instant::now() + JOIN_RING_WAIT_LIMIT"),
+    // `GameState::join_ring_pending` — the end of that same wait.
+    ("chunk_stream.rs", "web_time::Instant::now() >= deadline"),
 ];
 
 const FORBIDDEN: &[&str] = &["Instant", "SystemTime", "getrandom"];
@@ -155,19 +186,28 @@ fn src_dir() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src")
 }
 
-#[test]
-fn no_wall_clock_or_os_randomness_in_tick_paths() {
-    let dir = src_dir();
+/// What the lint covers: [`TICK_PATH_FILES`] plus every `sim_*` and `*_ai`
+/// module in `src/`, sorted.
+fn covered_files() -> Vec<String> {
     let mut files: Vec<String> = TICK_PATH_FILES.iter().map(|s| s.to_string()).collect();
-    for entry in std::fs::read_dir(&dir).expect("read src/") {
+    for entry in std::fs::read_dir(src_dir()).expect("read src/") {
         let name = entry.expect("dir entry").file_name().to_string_lossy().into_owned();
         // `sim_*_tests.rs` are `#[cfg(test)] #[path]` test modules.
-        if name.starts_with("sim_") && name.ends_with(".rs") && !name.ends_with("_tests.rs") {
+        let sim_phase = name.starts_with("sim_") && name.ends_with(".rs") && !name.ends_with("_tests.rs");
+        if sim_phase || name.ends_with("_ai.rs") {
             files.push(name);
         }
     }
     files.sort();
     files.dedup();
+    files
+}
+
+#[test]
+fn no_wall_clock_or_os_randomness_in_tick_paths() {
+    let dir = src_dir();
+    let files = covered_files();
+    eprintln!("tick determinism lint covers {} files: {}", files.len(), files.join(" "));
     let mut allow_hits = vec![0usize; ALLOWED.len()];
     let mut bad = Vec::new();
     for name in &files {
@@ -189,6 +229,16 @@ fn no_wall_clock_or_os_randomness_in_tick_paths() {
             ALLOWED[i]
         );
     }
+}
+
+/// The globs really do find what they are there for.
+#[test]
+fn the_tick_lint_lists_the_species_and_sim_phases() {
+    let files = covered_files();
+    for name in ["bear_ai.rs", "bee_ai.rs", "goat_ai.rs", "horse_ai.rs", "hyena_ai.rs", "mob_ai.rs", "rabbit_ai.rs", "species_ai.rs", "squid_ai.rs", "sim_clock.rs", "sim_machines.rs", "sim_mobs.rs", "sim_death.rs"] {
+        assert!(files.iter().any(|f| f == name), "{name} is not covered: {files:?}");
+    }
+    assert!(!files.iter().any(|f| f.ends_with("_tests.rs")), "{files:?}");
 }
 
 /// The scanner itself: a new use is caught, comments and test items are not.
