@@ -275,6 +275,17 @@ impl LavaSystem {
         false
     }
 
+    /// Would a wake do anything for this cell (`tick_spread`): freeze it, drop it
+    /// or spread it? Air above doesn't count, so neither a pool's middle nor its
+    /// flat top qualifies, and a column that isn't there reads as air, so a seam
+    /// cell does. A wake that can't act only delays the ones that can: a rim at
+    /// the back of a large load used to wait up to an hour behind them.
+    fn can_act_when_woken(world: &World, x: i32, y: i32, z: i32) -> bool {
+        Self::touches_water(world, x, y, z)
+            || world.get_block(x, y - 1, z) == AIR
+            || [(1, 0), (-1, 0), (0, 1), (0, -1)].iter().any(|&(dx, dz)| world.get_block(x + dx, y, z + dz) == AIR)
+    }
+
     /// Register every existing lava block in a column as a source (post
     /// world-gen), so natural pools flow correctly into any air they border.
     pub fn register_column_sources(&mut self, cx: i32, cz: i32, world: &World) {
@@ -288,7 +299,8 @@ impl LavaSystem {
                 let (wx, wz) = (base_x + lx, base_z + lz);
                 for y in 0..max_y {
                     if world.get_block(wx, y, wz) == LAVA
-                        && self.sources.insert((wx, y, wz)) {
+                        && self.sources.insert((wx, y, wz))
+                        && Self::can_act_when_woken(world, wx, y, wz) {
                             // Wake it once so a pool bordering open air flows.
                             self.spread_queue.push_back((wx, y, wz, 0));
                         }
@@ -402,5 +414,132 @@ mod tests {
             lava.tick_retract(&mut world);
         }
         assert_eq!(world.get_block(2, 60, 0), AIR, "orphaned flow drains away");
+    }
+
+    /// Column (0, 0) as solid stone with a 3x3x3 lava pool in its middle, cells
+    /// `(6..=8, 60..=62, 6..=8)`, walled in, with an open shaft above it.
+    fn pool_in_stone() -> (World, Vec<(i32, i32, i32)>) {
+        let mut world = World::new();
+        for x in 0..16 {
+            for z in 0..16 {
+                for y in 50..=70 {
+                    world.set_block(x, y, z, crate::block::STONE);
+                }
+            }
+        }
+        let mut cells = Vec::new();
+        for x in 6..=8 {
+            for z in 6..=8 {
+                for y in 60..=62 {
+                    world.set_block(x, y, z, LAVA);
+                    cells.push((x, y, z));
+                }
+                for y in 63..=70 {
+                    world.set_block(x, y, z, AIR);
+                }
+            }
+        }
+        (world, cells)
+    }
+
+    fn registered(world: &World) -> LavaSystem {
+        let mut lava = LavaSystem::new();
+        lava.register_column_sources(0, 0, world);
+        lava
+    }
+
+    fn queued(lava: &LavaSystem) -> Vec<(i32, i32, i32)> {
+        lava.digest_view().1.iter().map(|&(x, y, z, _)| (x, y, z)).collect()
+    }
+
+    /// A wake only does something next to water, over air or beside air. Air
+    /// above doesn't count, so neither the middle nor the flat top wakes.
+    #[test]
+    fn a_walled_pool_registers_every_source_and_queues_nothing() {
+        let (world, cells) = pool_in_stone();
+        let lava = registered(&world);
+        assert_eq!(queued(&lava), Vec::new(), "nothing in this pool can do anything when woken");
+        for (x, y, z) in cells {
+            assert!(lava.is_source(x, y, z), "({x}, {y}, {z}) is still a source");
+        }
+    }
+
+    #[test]
+    fn a_cell_that_can_act_is_queued() {
+        // A rim: air beside the top course.
+        let (mut world, cells) = pool_in_stone();
+        world.set_block(5, 62, 7, AIR);
+        assert_eq!(queued(&registered(&world)), vec![(6, 62, 7)], "beside air");
+        assert_eq!(registered(&world).digest_view().0.len(), cells.len());
+        // Over air.
+        let (mut world, _) = pool_in_stone();
+        world.set_block(7, 59, 7, AIR);
+        assert_eq!(queued(&registered(&world)), vec![(7, 60, 7)], "over air");
+        // Beside water.
+        let (mut world, _) = pool_in_stone();
+        world.set_block(9, 61, 7, WATER);
+        assert_eq!(queued(&registered(&world)), vec![(8, 61, 7)], "beside water");
+    }
+
+    /// A neighbouring column that isn't there reads as air: a seam cell wakes as
+    /// it always has, and the column's barrier stops it flowing across.
+    #[test]
+    fn a_seam_cell_stays_queued() {
+        let (mut world, _) = pool_in_stone();
+        for x in 6..=8 {
+            for z in 6..=8 {
+                for y in 60..=62 {
+                    world.set_block(x, y, z, crate::block::STONE);
+                }
+            }
+        }
+        world.set_block(15, 60, 7, LAVA);
+        world.set_block(14, 60, 7, LAVA);
+        assert_eq!(queued(&registered(&world)), vec![(15, 60, 7)]);
+    }
+
+    /// The same end shape as waking every cell, as registering used to.
+    #[test]
+    fn a_pool_bordering_air_flows_to_the_same_shape_as_waking_it_all() {
+        let (mut world, cells) = pool_in_stone();
+        // A run to flow along off the top course, a drop under the bottom one,
+        // and water for a third side to freeze against.
+        for x in 1..=5 {
+            world.set_block(x, 62, 7, AIR);
+        }
+        for y in 55..=59 {
+            world.set_block(7, y, 7, AIR);
+        }
+        world.set_block(9, 61, 7, WATER);
+        let run = |mut world: World, mut lava: LavaSystem| {
+            for _ in 0..3_000 {
+                lava.tick_spread(&mut world);
+            }
+            assert_eq!(queued(&lava), Vec::new(), "the queue drained");
+            let mut blocks = Vec::new();
+            for x in 0..16 {
+                for z in 0..16 {
+                    for y in 50..=70 {
+                        blocks.push(world.get_block(x, y, z));
+                    }
+                }
+            }
+            blocks
+        };
+        let mut twin = World::new();
+        for x in 0..16 {
+            for z in 0..16 {
+                for y in 50..=70 {
+                    twin.set_block(x, y, z, world.get_block(x, y, z));
+                }
+            }
+        }
+        let mut wake_all = LavaSystem::new();
+        for (x, y, z) in cells {
+            wake_all.add_source(x, y, z);
+        }
+        let filtered = registered(&world);
+        assert!(queued(&filtered).len() < queued(&wake_all).len(), "the filter left some out");
+        assert!(run(world, filtered) == run(twin, wake_all), "the end shapes differ");
     }
 }

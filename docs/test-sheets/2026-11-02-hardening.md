@@ -57,6 +57,10 @@ Each needs a real install. Say what you saw.
 15. A friend leaves in water, in a block, or in a doorway under a low ceiling, then rejoins. Do they come back at spawn, safe?
 16. Host Game: a friend leaves about 200 blocks from you and rejoins. Expected: spawn (the host can't check ground it hasn't loaded). Say if that feels wrong.
 
+## Keep slice 2b: lava in newly loaded land
+
+17. Natural lava rims in newly loaded land now flow within minutes instead of up to an hour later, and can start fires sooner. Walk or fly into new land and find a cave wall or surface pool with lava on an open edge. Does the flow look right, and is the fire it starts reasonable?
+
 ## Known gaps, not bugs in this build
 
 - The privacy page has no contact route for data requests. Owner to supply one.

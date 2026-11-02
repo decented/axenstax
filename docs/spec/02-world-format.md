@@ -1777,6 +1777,14 @@ so forgetting a column's sources never drains the flow they feed across the
 border. On restore, `register_column_sources` and `register_column_fires`
 re-adopt the column's fluids and fires.
 
+*Which lava wakes (Keep slice 2b, 2026-11-02).* Every lava cell of a column
+registers as a source, but its load queues only the cells a wake can do something
+for: those touching water, over air, or with air on a side. A neighbouring column
+that isn't there reads as air, so seam cells wake as before. Air above doesn't
+count, so neither a pool's middle nor its flat top queues. The end shape doesn't
+change. Natural rims flow, and can light fires, within minutes of the land loading
+instead of waiting behind every useless wake for up to an hour.
+
 **Testing.** The world side of streaming is split into renderer-free helpers in
 `chunk_stream.rs`: `columns_outside_anchors` (via the planner,
 `plan_stream_step_for`), `unload_column_blocks` and `load_column_blocks`. `stream_chunks`, `step_load`, the spawn-pref path and the
