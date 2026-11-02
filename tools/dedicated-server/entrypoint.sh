@@ -60,6 +60,25 @@ shutdown() {
 }
 trap shutdown TERM INT
 
+# Stop the game server for a restart: SIGTERM saves the world first, so give it
+# the same time `docker stop` is allowed (stop_grace_period, 120 s), then SIGKILL
+# so a wedged server can't hang the restart with the engine down.
+STOP_SECS="${AXENSTAX_STOP_SECS:-120}"
+stop_engine() {
+    [ -n "$SERVER_PID" ] || return 0
+    kill -TERM "$SERVER_PID" 2>/dev/null || true
+    waited=0
+    while kill -0 "$SERVER_PID" 2>/dev/null && [ "$waited" -lt $((STOP_SECS * 5)) ]; do
+        sleep 0.2
+        waited=$((waited + 1))
+    done
+    if kill -0 "$SERVER_PID" 2>/dev/null; then
+        echo "[entrypoint] game server still running ${STOP_SECS}s after SIGTERM — killing it"
+        kill -KILL "$SERVER_PID" 2>/dev/null || true
+    fi
+    wait "$SERVER_PID" 2>/dev/null || true
+}
+
 # Caddy front (HTTPS + static + /admin console + ws proxy). Started FIRST so the
 # Operator Console is reachable while the engine waits for first-run setup.
 caddy run --config "$CADDYFILE" --adapter caddyfile &
@@ -143,8 +162,7 @@ while true; do
     # Operator asked for a clean restart (new config / fresh world).
     if [ -f "$IDDIR/restart" ]; then
         echo "[entrypoint] restart requested — cycling the game server"
-        kill -TERM "$SERVER_PID" 2>/dev/null || true
-        wait "$SERVER_PID" 2>/dev/null || true
+        stop_engine
         launch_engine
         continue
     fi

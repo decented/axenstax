@@ -78,6 +78,9 @@ services:
       # AXENSTAX_EXIT_ACTION: "board"    # the exit screen kind (board/CTA)
       # AXENSTAX_AUTO_LOOP_SECS: "0"     # >0 → reset to a fresh session after N seconds (booth)
     restart: unless-stopped
+    # `docker stop` saves the world before the server exits. Docker's default of
+    # 10 s can cut a large world's save short, so allow it up to two minutes.
+    stop_grace_period: 120s
 
   # Operator Console (web sidecar). Caddy (in the server container) routes
   # /admin → this service. It manages the same identity-dir policy files the

@@ -457,7 +457,7 @@ def test_a_damaged_env_file_does_not_stop_the_console():
     check(wizard._read_env() == {}, "an unreadable file reads as empty")
 
 
-def run_entrypoint(worlds, compose_host=""):
+def run_entrypoint(worlds, compose_host="", stubborn_engine=None, stop_secs=None):
     """Run the real entrypoint with stand-ins for Caddy and the engine: the engine
     records the address it was started with, and both just sit there. Exported shell
     functions, not scripts: a temp dir may well be mounted noexec."""
@@ -470,6 +470,13 @@ def run_entrypoint(worlds, compose_host=""):
                f'() {{ echo "$AXENSTAX_PUBLIC_HOST" > "{started}"; exec sleep 60; }}'}
     if compose_host:
         env["AXENSTAX_PUBLIC_HOST"] = compose_host
+    if stop_secs is not None:
+        env["AXENSTAX_STOP_SECS"] = str(stop_secs)
+    if stubborn_engine is not None:
+        # An engine that ignores SIGTERM: one line in the file per start, and its pid.
+        env["BASH_FUNC_axenstax-engine%%"] = (
+            f'() {{ trap "" TERM; echo "$BASHPID" >> "{stubborn_engine}"; '
+            f'while :; do sleep 0.2; done; }}')
     entrypoint = Path(__file__).parents[2] / "dedicated-server" / "entrypoint.sh"
     proc = subprocess.Popen(["bash", str(entrypoint)], env=env, stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL)
@@ -533,6 +540,32 @@ def test_the_entrypoint_keeps_an_address_from_compose():
         stop_entrypoint(proc)
 
 
+def test_a_restart_does_not_wait_forever_for_a_stuck_engine():
+    print("test_a_restart_does_not_wait_forever_for_a_stuck_engine")
+    import signal
+    import time
+    worlds = fresh_env()
+    starts = Path(tempfile.mkdtemp(prefix="wiz-entry-")) / "engine-starts"
+    proc, _ = run_entrypoint(worlds, compose_host="play.example.org", stubborn_engine=starts,
+                             stop_secs=2)
+    try:
+        check(wait_for(starts), "the engine starts")
+        (worlds / ".identity" / "restart").write_text("")
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline and len(starts.read_text().split()) < 2:
+            time.sleep(0.1)
+        pids = starts.read_text().split()
+        check(len(pids) >= 2, "a restart asked of an engine that ignores SIGTERM still starts "
+                              "a new engine, after the stop time")
+    finally:
+        for pid in starts.read_text().split() if starts.exists() else []:
+            try:
+                os.kill(int(pid), signal.SIGKILL)
+            except OSError:
+                pass
+        stop_entrypoint(proc)
+
+
 def main():
     # Make local imports resolve when run from anywhere.
     sys.path.insert(0, str(Path(__file__).parent))
@@ -548,7 +581,8 @@ def main():
               test_a_line_break_in_a_name_is_refused,
               test_a_damaged_env_file_does_not_stop_the_console,
               test_the_entrypoint_waits_for_an_address_instead_of_looping,
-              test_the_entrypoint_keeps_an_address_from_compose):
+              test_the_entrypoint_keeps_an_address_from_compose,
+              test_a_restart_does_not_wait_forever_for_a_stuck_engine):
         t()
     print()
     if _fails:
