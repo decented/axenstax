@@ -137,6 +137,14 @@
     var needFresh = !!defaults.engine_booted && !!defaults.world_exists &&
       !!priorMode && priorMode !== newMode;
     $("#fresh-warn").hidden = !needFresh;
+    // An answer other than "friends" turns an existing allowlist off for good.
+    var listed = (defaults.friends || []).length;
+    var warn = $("#allowlist-warn");
+    var turnsOff = defaults.access === "friends" && state.access !== "friends";
+    warn.hidden = !turnsOff;
+    warn.textContent = turnsOff
+      ? "This turns off your allowlist of " + listed + (listed === 1 ? " person." : " people.")
+      : "";
   }
 
   // ── POST helpers ──

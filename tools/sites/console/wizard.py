@@ -212,8 +212,12 @@ def _clean_type(v) -> str:
 
 
 def _clean_access(v) -> str:
-    v = str(v or "").strip().lower()
-    return v if v in ACCESS_MODES else DEFAULT_ACCESS
+    """A present answer must be one of the three: a typo or an empty value doesn't
+    silently become "signin" and turn an allowlist off."""
+    answer = str(v if v is not None else "").strip().lower()
+    if answer not in ACCESS_MODES:
+        raise ValueError("access must be one of: " + ", ".join(ACCESS_MODES))
+    return answer
 
 
 def _clean_world_type(v) -> str:
@@ -312,14 +316,20 @@ def clean_public_host(v) -> str:
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
+_ENV_PREFIX = re.compile(rb"[ \t]*(?:export[ \t]+)?")
+
+
 def _parse_env_entry(lines: list[bytes], start: int) -> tuple[str, str, int] | None:
     """The `KEY=value` at `lines[start]` and the index after it. A quoted value may run
-    over several lines, as the shell would read it. None when it isn't a setting."""
-    key, eq, _ = lines[start].partition(b"=")
+    over several lines, as the shell would read it. Indentation and a leading `export`
+    are fine, as they are to the shell that sources the file. None when it isn't a
+    setting."""
+    first = lines[start][_ENV_PREFIX.match(lines[start]).end():]
+    key, eq, _ = first.partition(b"=")
     if not eq or not _ENV_NAME.fullmatch(key.decode("ascii", "replace")):
         return None
     for end in range(start + 1, len(lines) + 1):
-        text = b"\n".join(lines[start:end])
+        text = b"\n".join([first] + lines[start + 1:end])
         try:
             parts = shlex.split(text.decode("utf-8").partition("=")[2])
         except UnicodeError:
@@ -330,27 +340,40 @@ def _parse_env_entry(lines: list[bytes], start: int) -> tuple[str, str, int] | N
     return None
 
 
-def _read_env() -> dict:
+def _read_env(*, for_update: bool = False) -> dict:
     """What `_write_env` last wrote. It also has to get the console through a file it
     didn't write cleanly, because this is how the address gets set: a line that can't
-    be understood is skipped with a warning, not its contents, and the rest is kept.
-    The next `_write_env` leaves that line out, which also lets the entrypoint source
-    the file again."""
+    be understood is skipped with a warning naming its setting or line number (never
+    its value), and the rest is kept. The next `_write_env` leaves that line out, which
+    also lets the entrypoint source the file again.
+
+    A file that can't be read at all reads as empty for showing the setup page. With
+    `for_update` it raises `ValueError` (the API's 400) instead, because a write that
+    started from nothing would drop every other setting in the file."""
     try:
         raw = server_env_path().read_bytes()
-    except OSError:
+    except FileNotFoundError:
+        return {}
+    except OSError as e:
+        if for_update:
+            raise ValueError(
+                f"couldn't read server.env, nothing was changed: {e.strerror or type(e).__name__}"
+            ) from e
         return {}
     lines = raw.split(b"\n")
     out = {}
     i = 0
     while i < len(lines):
         line = lines[i]
-        if not line or line.startswith(b"#"):
+        if not line or line.lstrip().startswith(b"#"):
             i += 1
             continue
         entry = _parse_env_entry(lines, i)
         if entry is None:
-            log.warning("server.env line %d can't be understood; skipping it", i + 1)
+            named = _ENV_PREFIX.sub(b"", line, count=1).partition(b"=")[0]
+            what = (f"the setting {named.decode('ascii')} on line {i + 1}"
+                    if _ENV_NAME.fullmatch(named.decode("ascii", "replace")) else f"line {i + 1}")
+            log.warning("server.env: can't understand %s; skipping it", what)
             i += 1
             continue
         key, value, i = entry
@@ -376,7 +399,7 @@ def set_public_host(v) -> dict:
     public_host = clean_public_host(v)
     if not public_host:
         raise ValueError("give the address players use to reach this server")
-    _write_env({**_read_env(), "AXENSTAX_PUBLIC_HOST": public_host})
+    _write_env({**_read_env(for_update=True), "AXENSTAX_PUBLIC_HOST": public_host})
     request_restart()
     return {"ok": True, "public_host": public_host}
 
@@ -392,7 +415,7 @@ def apply(choices: dict) -> dict:
     """
     # First, so a bad address leaves everything as it was.
     public_host = clean_public_host(choices.get("public_host"))
-    prior_env = _read_env()
+    prior_env = _read_env(for_update=True)
     prior_public_host = prior_env.get("AXENSTAX_PUBLIC_HOST", "")
     # A run that names none ("Add a world") keeps the one the server has.
     public_host = public_host or prior_public_host

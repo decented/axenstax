@@ -198,6 +198,39 @@ def test_the_form_tells_the_truth_about_an_allowlist():
         check(wizard.current_state_for_form()["access"] == answer, f"the form then shows {answer}")
 
 
+def test_an_unclear_access_answer_is_refused_not_taken_as_signin():
+    print("test_an_unclear_access_answer_is_refused_not_taken_as_signin")
+    fresh_env()
+    wizard = reimport()
+    import identity
+    good = identity.npub_encode("11" * 32)
+    wizard.apply({"server_type": "survival", "server_name": "S", "access": "friends", "friends": good})
+    for bad in (None, "", "  ", "friend", "everyone", 7):
+        try:
+            wizard.apply({"server_type": "survival", "server_name": "S", "access": bad})
+            refused = False
+        except ValueError:
+            refused = True
+        check(refused, f"access {bad!r} is refused")
+        check(identity.allowlist_enabled() and identity.allowlist() == [good],
+              f"and the allowlist is untouched after {bad!r}")
+    wizard.apply({"server_type": "survival", "server_name": "S", "access": " Open "})
+    check(not identity.allowlist_enabled(), "a real answer, however it is spaced or cased, still works")
+
+
+def test_the_review_says_when_an_answer_turns_an_allowlist_off():
+    print("test_the_review_says_when_an_answer_turns_an_allowlist_off")
+    root = Path(__file__).parent
+    html = (root / "templates" / "setup.html").read_text(encoding="utf-8")
+    js = (root / "static" / "wizard.js").read_text(encoding="utf-8")
+    check("your current list stays; remove people on the dashboard" in html,
+          "the friends box says it adds to the list rather than replacing it")
+    check('id="allowlist-warn"' in html, "the review step has a place for the warning")
+    check("This turns off your allowlist of " in js
+          and 'defaults.access === "friends" && state.access !== "friends"' in js,
+          "and says so when the answer turns the allowlist off")
+
+
 def test_friends():
     print("test_friends")
     fresh_env()
@@ -457,6 +490,69 @@ def test_a_damaged_env_file_does_not_stop_the_console():
     check(wizard._read_env() == {}, "an unreadable file reads as empty")
 
 
+def test_an_unreadable_env_file_is_not_rewritten_from_nothing():
+    print("test_an_unreadable_env_file_is_not_rewritten_from_nothing")
+    fresh_env()
+    wizard = reimport()
+    import identity
+    path = identity.identity_dir() / "server.env"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.mkdir()  # reading it fails with something other than "not found"
+    for label, run in (("setting the address", lambda: wizard.set_public_host("a.example.org")),
+                       ("running the wizard", lambda: wizard.apply(
+                           {"server_type": "survival", "server_name": "S", "public_host": "a.example.org"}))):
+        try:
+            run()
+            refused = False
+        except ValueError:
+            refused = True
+        check(refused, f"{label} is refused when server.env can't be read")
+        check(path.is_dir(), f"and server.env is left as it was after {label}")
+    check(not (identity.identity_dir() / "settings.json").exists()
+          and not wizard.read_state(), "the wizard changed nothing else")
+    path.rmdir()
+    wizard.set_public_host("a.example.org")
+    check(wizard._read_env().get("AXENSTAX_PUBLIC_HOST") == "a.example.org",
+          "with the file simply missing, the write goes ahead")
+
+
+def test_export_and_indented_lines_are_kept_and_skips_are_named():
+    print("test_export_and_indented_lines_are_kept_and_skips_are_named")
+    fresh_env()
+    wizard = reimport()
+    import identity
+    import logging
+    path = identity.identity_dir() / "server.env"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"export AXENSTAX_GAMEMODE=creative\n"
+                     b"   AXENSTAX_MAX_PLAYERS=12\n"
+                     b"\texport  AXENSTAX_SERVER_NAME='A b'\n"
+                     b"  # an indented comment\n"
+                     b"AXENSTAX_ABOUT='secret never closed\n"
+                     b"not a setting secret2\n")
+    records = []
+
+    class Grab(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+    handler = Grab()
+    logging.getLogger().addHandler(handler)
+    try:
+        env = wizard._read_env()
+    finally:
+        logging.getLogger().removeHandler(handler)
+    check(env == {"AXENSTAX_GAMEMODE": "creative", "AXENSTAX_MAX_PLAYERS": "12",
+                  "AXENSTAX_SERVER_NAME": "A b"}, f"export and indented settings are read: {env}")
+    text = "\n".join(records)
+    check("AXENSTAX_ABOUT" in text and "line 5" in text, f"a skipped setting is named: {text}")
+    check("line 6" in text, f"and a skipped line is numbered: {text}")
+    check("secret" not in text, "and no value is logged")
+    wizard.set_public_host("play.example.org")
+    env = wizard._read_env()
+    check(env.get("AXENSTAX_MAX_PLAYERS") == "12" and env.get("AXENSTAX_GAMEMODE") == "creative",
+          "an address write keeps them")
+
+
 def run_entrypoint(worlds, compose_host="", stubborn_engine=None, stop_secs=None):
     """Run the real entrypoint with stand-ins for Caddy and the engine: the engine
     records the address it was started with, and both just sit there. Exported shell
@@ -572,6 +668,8 @@ def main():
     for t in (test_first_run, test_apply_gallery, test_gallery_open_toggle, test_env_quoting,
               test_signin_is_the_default, test_a_run_with_no_access_answer_changes_no_access,
               test_the_form_tells_the_truth_about_an_allowlist,
+              test_an_unclear_access_answer_is_refused_not_taken_as_signin,
+              test_the_review_says_when_an_answer_turns_an_allowlist_off,
               test_friends, test_rerun_mode_change_resets_world,
               test_rerun_same_mode_no_reset,
               test_apply_terrain_flat, test_rerun_terrain_change_resets_world,
@@ -580,6 +678,8 @@ def main():
               test_set_public_host_touches_only_the_address,
               test_a_line_break_in_a_name_is_refused,
               test_a_damaged_env_file_does_not_stop_the_console,
+              test_an_unreadable_env_file_is_not_rewritten_from_nothing,
+              test_export_and_indented_lines_are_kept_and_skips_are_named,
               test_the_entrypoint_waits_for_an_address_instead_of_looping,
               test_the_entrypoint_keeps_an_address_from_compose,
               test_a_restart_does_not_wait_forever_for_a_stuck_engine):

@@ -106,7 +106,7 @@
           <span class="choice-blurb">Only people you add to the list.</span>
         </button>
       </div>
-      <label class="wiz-field" id="friends-field" hidden>Friends' npubs <span class="opt">(one per line — you can add more later)</span>
+      <label class="wiz-field" id="friends-field" hidden>Add friends <span class="opt">(your current list stays; remove people on the dashboard)</span>
         <textarea id="f-friends" rows="3" placeholder="npub1…&#10;npub1…"></textarea>
       </label>
       <div class="wiz-nav">
@@ -146,6 +146,7 @@
         ⚠️ Changing the kind of place starts a <strong>brand-new world</strong>. Your
         current world is saved as a backup (nothing is deleted).
       </p>
+      <p class="warn-box" id="allowlist-warn" hidden></p>
       <div class="wiz-nav">
         <button class="btn ghost" data-back>Back</button>
         <button class="btn big" id="create">Create my server!</button>
