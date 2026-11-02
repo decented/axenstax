@@ -160,7 +160,8 @@ pub fn code_status_line(status: CodeStatus) -> String {
     match status {
         CodeStatus::Published { up, total } => format!(
             "Friends on this network pick this world under Join Game. Friends anywhere else \
-             type the code (it is on {up} of your {total} relays)."
+             type the code (it is on {up} of your {total} relays). Anyone signed in who has the \
+             code can join, so share it only with people you know."
         ),
         CodeStatus::Publishing => "Putting the code on your relays... Friends on this network \
                                    can already pick this world under Join Game."
