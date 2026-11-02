@@ -46,6 +46,11 @@ pub const DAY_TICKS: u32 = 24_000;
 /// tick can overflow.
 const MAX_SAVED_TICK: u64 = 1 << 56;
 
+/// How far past the saved tick a weather window may end: weather rolls windows
+/// of minutes, so a longer one is a damaged file, and one that never ends would
+/// rain for good (the window is only re-rolled once it is over).
+const MAX_SAVED_WEATHER_AHEAD: u64 = 1 << 32;
+
 /// The longest trial weather lock a save may restore (a scenario's lock name).
 const MAX_SAVED_LOCK_LEN: usize = 64;
 
@@ -77,11 +82,82 @@ impl SavedClock {
     /// hostile file) is not restored: the world loads as an old save does.
     pub fn is_valid(&self) -> bool {
         self.tick_counter <= MAX_SAVED_TICK
+            && self.rain_until <= self.tick_counter + MAX_SAVED_WEATHER_AHEAD
+            && self.storm_until <= self.tick_counter + MAX_SAVED_WEATHER_AHEAD
             && self.world_time < DAY_TICKS
             && self.day_remainder < crate::reputation_day::SOLAR_UNITS_PER_DAY
             && self.day_last_tick.is_none_or(|t| t <= self.tick_counter)
             && self.weather_lock_applied.as_ref().is_none_or(|l| l.len() <= MAX_SAVED_LOCK_LEN)
     }
+}
+
+/// The clock fields a client holds that [`SavedClock`] covers (`GameState` has
+/// no server of its own in single-player). The reputation day is kept as its
+/// saved progress: its owner is per run and is drawn afresh.
+#[derive(Clone, Debug)]
+pub struct ClientClock {
+    pub tick_counter: u64,
+    pub world_time: u32,
+    pub rain_until: u64,
+    pub storm_until: u64,
+    pub weather_lock_applied: Option<String>,
+    pub night_calendar: crate::item_actions::NightCalendar,
+    pub calendar_id: [u8; 16],
+    pub day_remainder: u32,
+    pub day_last_tick: Option<u64>,
+}
+
+/// Keep slice 2a — a client's clock as its save carries it. `host_calendar`:
+/// the calendar and id of a hosting server that has taken this client's clock;
+/// joiners sleep by that one, so it is the one kept. Everything else is the
+/// client's.
+pub fn clock_to_save(
+    clock: &ClientClock,
+    host_calendar: Option<(crate::item_actions::NightCalendar, [u8; 16])>,
+) -> SavedClock {
+    let (calendar, calendar_id) = host_calendar.unwrap_or((clock.night_calendar, clock.calendar_id));
+    let (nights, was_night) = calendar.saved();
+    SavedClock {
+        tick_counter: clock.tick_counter,
+        world_time: clock.world_time,
+        rain_until: clock.rain_until,
+        storm_until: clock.storm_until,
+        weather_lock_applied: clock.weather_lock_applied.clone(),
+        nights,
+        was_night,
+        calendar_id,
+        day_remainder: clock.day_remainder,
+        day_last_tick: clock.day_last_tick,
+    }
+}
+
+/// Keep slice 2a — carry on from a loaded save's clock. `None` (a save from
+/// before the field) leaves the clock as it is. Every field of [`SavedClock`]
+/// is named, so a field added to the save fails to compile until it is
+/// restored here.
+pub fn restore_saved_clock(clock: &mut ClientClock, saved: Option<&SavedClock>) {
+    let Some(saved) = saved else { return };
+    let SavedClock {
+        tick_counter,
+        world_time,
+        rain_until,
+        storm_until,
+        weather_lock_applied,
+        nights,
+        was_night,
+        calendar_id,
+        day_remainder,
+        day_last_tick,
+    } = saved;
+    clock.tick_counter = *tick_counter;
+    clock.world_time = *world_time;
+    clock.rain_until = *rain_until;
+    clock.storm_until = *storm_until;
+    clock.weather_lock_applied.clone_from(weather_lock_applied);
+    clock.night_calendar = crate::item_actions::NightCalendar::from_saved(*nights, *was_night);
+    clock.calendar_id = *calendar_id;
+    clock.day_remainder = *day_remainder;
+    clock.day_last_tick = *day_last_tick;
 }
 
 /// A new calendar's identity.
@@ -273,6 +349,73 @@ pub struct StrikeEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn saved_example() -> ClientClock {
+        ClientClock {
+            tick_counter: 90_000,
+            world_time: 15_000,
+            rain_until: 91_000,
+            storm_until: 90_500,
+            weather_lock_applied: Some("storm".into()),
+            night_calendar: crate::item_actions::NightCalendar::from_saved(12, Some(true)),
+            calendar_id: [7; 16],
+            day_remainder: 15_000,
+            day_last_tick: Some(90_000),
+        }
+    }
+
+    fn blank() -> ClientClock {
+        ClientClock {
+            tick_counter: 0,
+            world_time: 6_000,
+            rain_until: 0,
+            storm_until: 0,
+            weather_lock_applied: None,
+            night_calendar: crate::item_actions::NightCalendar::default(),
+            calendar_id: [0; 16],
+            day_remainder: 0,
+            day_last_tick: None,
+        }
+    }
+
+    /// Every field of the single-player clock survives a save and a restore on
+    /// a client that has just reset for the world (`blank`).
+    #[test]
+    fn a_clients_whole_clock_round_trips_through_its_save() {
+        let before = saved_example();
+        let saved = clock_to_save(&before, None);
+        assert!(saved.is_valid());
+        // Through the file's own encoding, not just the struct.
+        let bytes = bincode::serialize(&saved).unwrap();
+        let read: SavedClock = bincode::deserialize(&bytes).unwrap();
+        let mut after = blank();
+        restore_saved_clock(&mut after, Some(&read));
+        assert_eq!(after.tick_counter, before.tick_counter);
+        assert_eq!(after.world_time, before.world_time);
+        assert_eq!(after.rain_until, before.rain_until);
+        assert_eq!(after.storm_until, before.storm_until);
+        assert_eq!(after.weather_lock_applied, before.weather_lock_applied);
+        assert_eq!(after.night_calendar.saved(), before.night_calendar.saved());
+        assert_eq!(after.calendar_id, before.calendar_id);
+        assert_eq!(after.day_remainder, before.day_remainder);
+        assert_eq!(after.day_last_tick, before.day_last_tick);
+    }
+
+    /// A hosting server's calendar is the one kept; nothing else of the
+    /// client's is replaced. A save with no clock leaves the reset alone.
+    #[test]
+    fn the_hosts_calendar_is_saved_and_a_save_without_a_clock_changes_nothing() {
+        let client = saved_example();
+        let host = (crate::item_actions::NightCalendar::from_saved(40, Some(false)), [9; 16]);
+        let saved = clock_to_save(&client, Some(host));
+        assert_eq!((saved.nights, saved.was_night, saved.calendar_id), (40, Some(false), [9; 16]));
+        assert_eq!((saved.tick_counter, saved.world_time, saved.rain_until), (90_000, 15_000, 91_000));
+
+        let mut reset = blank();
+        restore_saved_clock(&mut reset, None);
+        assert_eq!((reset.tick_counter, reset.world_time, reset.calendar_id), (0, 6_000, [0; 16]));
+        assert_eq!(reset.night_calendar.tonight(), 0);
+    }
 
     fn storm(until: u64) -> Weather {
         Weather { rain_until: until, storm_until: until }

@@ -5194,20 +5194,26 @@ impl super::GameState {
     /// client's is the newer). The day clock is this client's on every world
     /// it saves. Every save this client writes goes through here.
     pub(crate) fn clock_to_save(&self) -> crate::sim_clock::SavedClock {
-        let host = self.hosted_server.as_ref().filter(|hs| !hs.lends_host_world() || hs.server.clock_adopted);
-        let (calendar, calendar_id) =
-            host.map_or((self.night_calendar, self.calendar_id), |hs| (hs.server.night_calendar, hs.server.calendar_id));
-        let (nights, was_night) = calendar.saved();
+        let host = self
+            .hosted_server
+            .as_ref()
+            .filter(|hs| !hs.lends_host_world() || hs.server.clock_adopted)
+            .map(|hs| (hs.server.night_calendar, hs.server.calendar_id));
+        crate::sim_clock::clock_to_save(&self.client_clock(), host)
+    }
+
+    /// This client's clock fields, as the free functions in `sim_clock` take
+    /// them (so a plain unit test reaches the save and restore rules).
+    fn client_clock(&self) -> crate::sim_clock::ClientClock {
         let (day_remainder, day_last_tick) = self.reputation_day.saved();
-        crate::sim_clock::SavedClock {
+        crate::sim_clock::ClientClock {
             tick_counter: self.tick_counter,
             world_time: self.world_time,
             rain_until: self.weather_rain_until,
             storm_until: self.weather_storm_until,
             weather_lock_applied: self.weather_lock_applied.clone(),
-            nights,
-            was_night,
-            calendar_id,
+            night_calendar: self.night_calendar,
+            calendar_id: self.calendar_id,
             day_remainder,
             day_last_tick,
         }
@@ -5218,15 +5224,19 @@ impl super::GameState {
     /// from before the field) leaves that reset's morning, as it always has. A
     /// lending server staged for this load takes all of it at its first phase.
     pub(crate) fn restore_saved_clock(&mut self, saved: Option<&crate::sim_clock::SavedClock>) {
-        let Some(saved) = saved else { return };
-        self.tick_counter = saved.tick_counter;
-        self.world_time = saved.world_time;
-        self.weather_rain_until = saved.rain_until;
-        self.weather_storm_until = saved.storm_until;
-        self.weather_lock_applied.clone_from(&saved.weather_lock_applied);
-        self.night_calendar = crate::item_actions::NightCalendar::from_saved(saved.nights, saved.was_night);
-        self.calendar_id = saved.calendar_id;
-        self.reputation_day.resume(saved.day_remainder, saved.day_last_tick);
+        if saved.is_none() {
+            return;
+        }
+        let mut clock = self.client_clock();
+        crate::sim_clock::restore_saved_clock(&mut clock, saved);
+        self.tick_counter = clock.tick_counter;
+        self.world_time = clock.world_time;
+        self.weather_rain_until = clock.rain_until;
+        self.weather_storm_until = clock.storm_until;
+        self.weather_lock_applied = clock.weather_lock_applied;
+        self.night_calendar = clock.night_calendar;
+        self.calendar_id = clock.calendar_id;
+        self.reputation_day.resume(clock.day_remainder, clock.day_last_tick);
     }
 
     /// D4 slice 2 — this client's copy of the authority's clock: what its

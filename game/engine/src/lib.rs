@@ -1278,8 +1278,8 @@ pub(crate) struct GameState {
     /// Ticks since last autosave (autosave every 5 minutes = 6000 ticks at 20 TPS)
     pub(crate) autosave_counter: u32,
     /// P8 — weather. The `tick_counter` value at which the current rain ends;
-    /// it's raining while `tick_counter < weather_rain_until`. Ephemeral (not
-    /// persisted) — a fresh session starts clear.
+    /// it's raining while `tick_counter < weather_rain_until`. Saved with the
+    /// world's clock (`sim_clock::SavedClock`); a save from before that starts clear.
     pub(crate) weather_rain_until: u64,
     /// Wind, Copper & Electricity wave §4 — the `weather_lock` applied on the
     /// PREVIOUS tick, so the loop can tell a lock being held from one being
