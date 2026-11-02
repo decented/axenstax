@@ -85,7 +85,7 @@ What already fits:
 | `tick(time)` | `HostedServer::tick` (`hosted_server.rs:4341`) driven by a 50 ms `Instant` loop that **skips** missed ticks (`keep_world.rs:288-314`) | medium-high (`GameServer`), low (`HostedServer`) | Takes no time argument. Three counters: `tick_counter` (u64), `world_time` (u32 day clock, starts 6000), `HostedServer.server_tick` (on the wire). Output is pushed through `send_to_client`, not returned as commands. |
 | `checkpoint()` | Slice 2b: `GameServer::checkpoint` (Spec 01 §4.1.5), not wired in. Before it, `GameServer::try_save` (`server.rs:3127-3497`) | medium | The rest of this row is `try_save`, the record path it depends on. Writes files, does not return bytes. Refuses while mob deaths are pending (`save.rs:1077`). Non-canonical (§4.3). Omits most live state (§5). `handover/checkpoint` packs saved *files* for transfer and strips `pop_secret` and players. It is not a live-state checkpoint. |
 | `restore(config, ckpt)` | Slice 2b: `GameServer::restore_from_checkpoint`, not wired in, over `initial_load` (`server.rs:1325-1450`) | medium | The rest of this row is `initial_load` alone; the restoration ledger in §7 says what slice 2b brings back. Rebuilds from the save rather than restoring. Clocks restart, wildlife re-scatters, entity ids are new, and every saved column is loaded (the live run had streamed some out). |
-| `state_hash()` | Slice 2b: `GameServer::state_hash`, `SHA256(b"fray/authority-state/v1\0" \|\| checkpoint())`, not wired in | medium | Covers the world through the manifest, so it needs a persist first. Not comparable across architectures until §4.5 is audited. |
+| `state_hash()` | Slice 2b: `GameServer::state_hash`, `SHA256(b"fray/authority-state/v1\0" \|\| checkpoint())`, not wired in | medium | Covers chunks, sidecars, the meta and the block tables through the manifest, not the rest of `world.dat` (§6), and needs a persist first. Not comparable across architectures until §4.5 is audited. |
 
 **Time.** 20 TPS, so `Time{tick: n, elapsed_us: n × 50_000}`, with `Time.tick == tick_counter`
 after step n. `server_tick` must become the same restored counter. `world_time` stays derived
@@ -265,7 +265,8 @@ the contract itself as changed.
 11. **Joiner position, yaw and pitch are added to the saved state** (this also fixes "a restored
     joiner is back at spawn"). The checkpoint names the loaded and evicted columns, and restore puts
     them back rather than re-deriving them from the anchors, because a re-derived set would part
-    `chunks` at the next stream-out.
+    `chunks` at the next stream-out. (Changed by slice 2b: this position said restore re-derives the
+    simulated set from the anchors.)
 
 ### For the Fray session, from slice 2b
 
@@ -280,14 +281,16 @@ Measured or built on the game side; each needs a Fray answer. The sizes are from
   130 KiB, plus 17 B per column), that is about **17,000**. A server save writes every non-empty
   chunk it holds, so this is the held world and not the edited one. Past it, a checkpoint is an
   error, not a truncation.
-- **Today the cap is reached sooner, by lava's queue, and a Keep at sim distance 8 can't checkpoint.**
-  See the table in §8: 2.7-4.9 MB at all three bench sizes. Loading a column wakes every lava cell
-  once (`LavaSystem::register_column_sources`), about 700 queue entries and 9.2 KB per column, and the
-  queue drains at about 53 entries a second, so one column loaded takes 13 s and 289 take an hour.
-  The cap is reached at about 110 such columns. The queue's order is state, so slice 2b carries it
-  whole and doesn't cut it. This needs a game-side decision before `--keep-world` is wired (wake only
-  lava that borders air, which changes when lava moves; or a run-length form of the wake entries; or
-  a higher cap), and it is the one number here Fray might want to weigh in on.
+- **Lava's queue still sets how close a big load comes to the cap.** The bench worlds now fit: 464,194 B
+  at 0 joiners, 724,055 B at 2 and 953,813 B at 8, which is 91% of the cap (§8). Slice 2b measured
+  2.85-4.99 MB before the fix (lava's queue alone was 2.66-4.73 MB): loading a column woke every lava
+  cell, about 708 entries a column. Now it wakes only the cells a wake can act on: touching water, over
+  air, or with air on a side (`LavaSystem::register_column_sources`). That is about 80-110 entries a
+  column, and the queue still drains at about 53 entries a second, so 289 columns take about 7 minutes
+  and not an hour. The queue is transient: while it is draining, joiners moving add to it, and across
+  the bench worlds the total grows about 2.2 KB per column, so **the cap is reached at about 550 columns
+  loaded inside one drain**. Past that a checkpoint is `TooLarge` until the queue falls, and the runner
+  retries. Fray may want to weigh in on that margin.
 - **What a checkpoint binds.** `state_hash` covers `calendar_id` as part of the slice 2a clock. It is
   random on a real server but persisted, so two authorities opened from the same saved world agree.
   Two authorities from two separate fresh worlds aren't the same world and needn't.
@@ -296,6 +299,24 @@ Measured or built on the game side; each needs a Fray answer. The sizes are from
   Does that fit `Persist(batch)` (choice 2)?
 - **The seal is a checksum, not a signature.** Whoever can rewrite a checkpoint can reseal it. Any
   authentication is the runner's.
+- **`state_hash` doesn't cover all of `world.dat`.** The manifest binds chunks, sidecars, the meta and
+  one record over block entities, drying racks, face attachments and block meta. It doesn't bind
+  `world.dat`'s other tables and saved entities: bounties, plots, market hubs, raids, Satoshi, village
+  tables, hideouts, hostile acts, tamed pets, carts and quest NPCs. Two authorities that differ only
+  there report the same hash, and an edit to them restores without complaint. This has to be settled
+  before Keep relies on the hash to compare authorities.
+- **A checkpoint from a previous build is refused until migration lands.** The `m` and `b` digests
+  hash a struct's encoding, so a new `WorldMeta` or block-entity field changes the digest of unchanged
+  records, and a restore reads that as tampering. No cross-version promise exists yet. When choice 10's
+  migration lands, this case should become `UnsupportedVersion`.
+- **A torn meta leaves that run unable to restore.** When `world_meta.json` exists but doesn't parse,
+  the load digests the defaults, then `open_world` repairs the file. The digest is stale for the rest
+  of the run, so its checkpoints are refused at restore.
+- **Two bounds a restore enforces that a run doesn't.** A section both live and evicted is refused,
+  because a save keeps one copy of a section. No server path reaches it today: a block write to an
+  evicted column goes to the store, and a stream-in restores before it generates. A body past
+  ±1,000,000 blocks, the `/tp` limit, is refused too. Walking there takes about 50 hours and nothing
+  stops it. Either way the checkpoint is written and its restore refused.
 
 ## 7. Smallest next adapter slice (AxeNStax-only, no wire or save change)
 
@@ -341,18 +362,24 @@ drained water source: persist, checkpoint, restore into a new server, feed both 
   save, and what lay on the ground or was in flight is gone.
 - `world_tables`: equal in the fixture, so printed and not promised. `pop_exposure` is in no save or
   checkpoint (a cell mined after a restore rolls as fully decayed), and the rest reads back from
-  `world.dat`, which isn't canonical and isn't in the manifest.
+  `world.dat`, which isn't canonical and isn't in the manifest (§6 names what `state_hash` misses).
+- **Pending outputs are dropped:** `pending_item_grants`, `pending_kill_events`, `released_joiners` and
+  `pending_sapling_drops` aren't carried. An item grant is value and not just output, so the slice 3
+  runner checkpoints only after they drain.
 
 Limits of what does hold:
 - `players` depends on entities after all, which the slice 2b decision had assumed it didn't: a push or
-  a bite moves a body, and a restored world's mobs aren't the original's. It stays equal in the
-  fixture because no joiner meets a mob in those 200 ticks.
+  a bite moves a body. **Equality of `players` holds only while no joiner meets a mob during the
+  comparison, because restored mobs aren't the originals.** The fixture's joiners don't in those 200
+  ticks, and that is the fixture's geometry and not a property of restore.
   `a_mob_on_a_joiner_parts_the_players_section` pins this. From an empty ECS on both sides, every
   section but `light` stays equal. A rider restores on its feet, since `riding` names a hecs id.
 - A restored joiner has a body and no connection state. Its action, pack and quest lanes, window events
   and block views are per attach, so it must re-attach before it acts (with slice 3). Its bound
-  personal record reloads from the sidecar. A correction debt in the record isn't live until then, so
-  a save in between marks its obligations incomplete rather than claiming the debt is gone.
+  personal record reloads from the sidecar. Its correction debt stays in the sidecar, which is still
+  the truth: the slot isn't saved until it re-attaches (`ServerPlayer::awaiting_reattach`, which the
+  autosave, a shutdown save and a leave all respect), and nothing reads it as owing nothing until then.
+  Slice 3's re-attach has to load that debt.
 - The meta digest is taken at load. `--keep-world` must refresh it after any later meta write
   (`StoredRecords::note_meta`).
 - Not yet covered as a checkpoint: the §5 rows for `HostedServer` vectors and queues, cooldowns held
@@ -406,18 +433,22 @@ benchmark exists.**
   `persistable_chunks`), so `chunks/` is 21–31× the touched set here.
 
 - Slice 2b, `checkpoint_size_at_the_bench_world_sizes`, same scripted build, at the bench's three
-  world sizes, 2026-11-02. `checkpoint()` itself returns `TooLarge` at all three, because of lava's
-  queue (§6, "For the Fray session").
+  world sizes, with lava waking only the cells that can act, 2026-11-02. `checkpoint()` succeeds at all
+  three.
 
-  | Joiners | Columns | Non-empty chunks | Manifest B | Lava queue B | Water B | Layout B | Players B | Total B |
-  |---|---|---|---|---|---|---|---|---|
-  | 0 | 289 | 1,377 | 67,514 | 2,661,922 | 117,530 | 6,124 | 353 | ~2,853,700 |
-  | 2 | 409 | 1,918 | 94,231 | 3,763,620 | 117,530 | 8,419 | 1,203 | ~3,985,300 |
-  | 8 | 511 | 2,406 | 118,767 | 4,734,382 | 117,530 | 10,323 | 3,753 | ~4,985,000 |
+  | Joiners | Columns | Non-empty chunks | Manifest B | Lava queue B | Water B | Layout B | Players B | Total B | Of the cap |
+  |---|---|---|---|---|---|---|---|---|---|
+  | 0 | 289 | 1,377 | 67,514 | 272,340 | 117,530 | 6,124 | 353 | 464,194 | 44% |
+  | 2 | 409 | 1,918 | 94,231 | 502,323 | 117,530 | 8,419 | 1,203 | 724,055 | 69% |
+  | 8 | 511 | 2,406 | 118,767 | 703,043 | 117,530 | 10,323 | 3,753 | 953,813 | 91% |
 
-  The slice 1 twin fixture, at a load radius of 3 and a sim distance of 2, fits the cap, but only just:
-  483,936 B at tick 1, 519,854 B at 200, 813,903 B at 800 and 1,015,610 B at 2,000, which is 97% of
-  it. Lava's queue again, growing as the teleports load columns.
+  These are taken about 30 s after the columns loaded, so the queue is near its largest. At about 53
+  entries a second it empties in about 7 minutes at 0 joiners and 17 at 8, if nothing else loads. Before
+  the filter the totals were about 2.85, 3.99 and 4.99 MB, all `TooLarge`.
+
+  The slice 1 twin fixture, at a load radius of 3 and a sim distance of 2, was at 1,015,610 B at tick
+  2,000, 97% of the cap. It is now 77,335 B at tick 1, 113,253 B at 200 and 237,079 B at 2,000, which is
+  23%, so it has about 811 KB of margin.
 
 **Stated limits and decisions**
 - 20 TPS (50 ms).

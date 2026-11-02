@@ -1324,17 +1324,29 @@ persists, then checkpoints. Taken any later, it refuses as tampered at restore.
 **Refusals.** `checkpoint` returns `DeathsPending` while a mob death waits to be
 swept (retry at the next tick boundary), `TooLarge` past the cap (never a shorter
 checkpoint) and `Lent` on a lending server. `restore_from_checkpoint` verifies the
-magic, the schema, the seal, the binding and the key id, loads the records through
-`initial_load`, checks every manifest digest in both directions against what it
-read, applies the volatile sections, then checks that the body re-encodes to the
-same bytes.
+magic, the schema, the seal, the versions, the binding and the key id, and decodes and
+range-checks the body. Only then does it touch the world: it refuses a folder that a
+handover's role cut hasn't reached, loads the records through `initial_load` (generating
+nothing), checks every manifest digest in both directions against what it read, applies
+the volatile sections, then checks that everything from the worldgen version to the seal
+re-encodes to the same bytes.
+
+The seal is a checksum, so values that are sealed but absurd are checked as values:
+- the layout: no section outside `-1..=MAX_CHUNK_Y + 1`, at most 65,536 sections in all,
+  no section both live and evicted (a save keeps one copy), no column past the playable
+  range. This is what stands between 1 MiB of bytes and tens of gigabytes of chunks;
+- the streamer's sim distance equal to its clamp and its budget the constant, the refill
+  and render distance within their limits, the spawn column in range;
+- every body finite and within ±1,000,000 blocks (the `/tp` limit), at most 257 slots
+  (255 from the pipe's `Hello`, two local), every queued cell in range and lava's phase
+  within its cycle.
 
 | Failure | Code |
 |---|---|
 | Binding or key id mismatch | `InvalidConfig` |
 | Bad or tampered bytes or manifest, records missing | `InvalidCheckpoint` |
 | Newer schema, protocol or save format | `UnsupportedVersion` |
-| Anything else (the load itself) | `Fault` |
+| A folder a role cut hasn't reached, or anything else (the load itself) | `Fault` |
 
 **What a restore keeps** (`test_integration/authority_checkpoint.rs`). At ticks 1,
 200 and 2,000 of the Keep slice 1 fixture, and across a drained water source: persist,
@@ -1350,24 +1362,35 @@ checkpoint, restore into a new server, feed both the same script for 200 ticks.
   come from the save, and what lay on the ground or was in flight is gone.
 - `world_tables`: equal in the fixture, so printed and not promised. `pop_exposure`
   is in no save or checkpoint (a cell mined after a restore rolls as fully decayed),
-  and the rest reads back from `world.dat`, outside the manifest.
+  and the rest reads back from `world.dat`, outside the manifest. `state_hash` doesn't
+  cover those tables and saved entities: bounties, plots, market hubs, raids, Satoshi,
+  village tables, hideouts, hostile acts, tamed pets, carts and quest NPCs. That has to
+  be settled before Keep relies on the hash to compare authorities (handoff §6).
+- Pending outputs: `pending_item_grants`, `pending_kill_events`, `released_joiners` and
+  `pending_sapling_drops` aren't carried, and the slice 3 runner checkpoints only after
+  they drain.
 
 **Limits.**
-- **A world at sim distance 8 doesn't fit yet.** `checkpoint` returns `TooLarge` at all
-  three bench sizes (2.9-5.0 MB, handoff §8). Almost all of it is lava's queue: a column's
-  load wakes every lava cell, about 700 entries a column, and the queue drains at about 53
-  a second. The queue's order is state, so it is carried whole. The cap is reached at about
-  110 such columns, or about 17,000 non-empty chunks once that is dealt with. Open before
-  `--keep-world` is wired.
-- `players` holds in the fixture only because no joiner meets a mob in those 200
-  ticks. A push or a bite moves a body, and a restored world's mobs aren't the
-  original's (`a_mob_on_a_joiner_parts_the_players_section`). From an empty ECS on
-  both sides, every section but `light` stays equal.
+- **A world at sim distance 8 fits, with the most joiners close to the cap.** The bench sizes are
+  464,194 B, 724,055 B and 953,813 B (91%) at 0, 2 and 8 joiners (handoff §8). Most of it is
+  lava's queue while it drains: a column's load wakes only the lava cells that can act (Spec 02
+  §7.5), about 80-110 entries a column, draining at about 53 a second. The queue's order is state,
+  so it is carried whole. Measured growth is about 2.2 KB a column, so the cap is reached at about
+  550 columns loaded inside one drain, and past that `checkpoint` is `TooLarge` until the queue
+  falls. With the queue drained, the limit is about 17,000 non-empty chunks. The Keep slice 1
+  fixture is at 237,079 B at tick 2,000, which is 23%.
+- Equality of `players` holds only while no joiner meets a mob during the comparison,
+  because a restored world's mobs aren't the original's and a push or a bite moves a
+  body (`a_mob_on_a_joiner_parts_the_players_section`). From an empty ECS on both sides,
+  every section but `light` stays equal.
 - A restored joiner has a body and no connection state: action, pack and quest
   lanes, window events and block views are per attach, and it must re-attach before
-  it acts. Its bound personal record reloads from the sidecar. A correction debt in
-  the record isn't live until then, so a save in between marks its obligations
-  incomplete rather than claiming the debt is gone.
+  it acts. Its bound personal record reloads from the sidecar. Its correction debt
+  stays in the sidecar, which is still the truth: the slot isn't saved until it
+  re-attaches (`ServerPlayer::awaiting_reattach`), and nothing reads it as owing nothing
+  until then. Slice 3's re-attach has to load that debt.
+- A checkpoint from a previous build is refused until migration lands: the `m` and `b`
+  digests hash a struct's encoding, so a new field changes the digest of unchanged records.
 - The meta digest is taken at load. A write to `world_meta.json` after load, other
   than to the secret, must refresh it (`StoredRecords::note_meta`) or a restore
   refuses. `--keep-world` needs this when it is wired.
