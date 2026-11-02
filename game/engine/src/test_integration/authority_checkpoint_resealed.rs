@@ -270,3 +270,33 @@ fn values_the_first_tick_would_overflow_on_are_refused() {
     assert_refused_for(&h, bytes, "lava's phase", "lava");
 }
 
+/// These three were refused already; the first paths past the seal to pin it.
+#[test]
+fn a_resealed_trailing_byte_or_cut_is_invalid() {
+    let (_root, h, bytes) = saved("keep-s2b-resealed-shape");
+    let end = bytes.len() - 32;
+    let mut longer = bytes.clone();
+    longer.insert(end, 0);
+    assert_refused_for(&h, longer, "one byte more", "left over");
+    let mut shorter = bytes.clone();
+    shorter.remove(end - 1);
+    assert_refused_for(&h, shorter, "one byte less", "end early");
+    let mut half = bytes[..bytes.len() / 2].to_vec();
+    half.extend_from_slice(&[0; 32]);
+    seal(&mut half);
+    assert_invalid_checkpoint(&h, &half, "cut in half");
+}
+
+#[test]
+fn a_resealed_minus_zero_is_not_canonical() {
+    let _root = WorldsRootGuard::new("keep-s2b-resealed-zero");
+    let mut h = twin(SEED, "ckpt-zero-reseal", 1, 2);
+    super::authority_checkpoint::sign_in(&mut h);
+    h.server.players[0].player.velocity = Vec3::ZERO;
+    h.server.try_save().unwrap();
+    let mut bytes = h.server.checkpoint().unwrap();
+    let at = section_offsets(&h.server).unwrap().players + BODY_VELOCITY;
+    assert_eq!(bytes[at..at + 4], [0; 4]);
+    put(&mut bytes, at, &(-0.0f32).to_le_bytes());
+    assert_refused_for(&h, bytes, "-0.0", "canonical form");
+}

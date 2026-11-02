@@ -74,3 +74,72 @@ fn a_restored_joiners_debt_stays_in_its_record() {
     b.server.save_joiner(1).unwrap();
     assert_ne!(std::fs::read(&path).unwrap(), record, "back in the world, its saves are its own again");
 }
+
+/// A world with a saved meta, as every real one has.
+fn fixture_with_meta(name: &str) -> TestHost {
+    let mut meta = crate::save::WorldMeta::new(name);
+    meta.seed = SEED;
+    meta.worldgen_version = crate::biome::Generator::V2.version();
+    crate::save::save_world_meta(name, &meta).expect("write meta");
+    fixture(name, 2)
+}
+
+#[test]
+fn a_world_with_a_meta_round_trips_it_and_refuses_a_changed_one() {
+    let _root = WorldsRootGuard::new("keep-s2b-meta-round");
+    let mut h = fixture_with_meta("ckpt-meta-round");
+    run_to(&mut h, 20);
+    let bytes = persist_and_checkpoint(&mut h);
+    assert!(h.server.stored_records.meta_digest().is_some(), "the meta is a record");
+    let restored = TestHost::adopt(restore(&h, &bytes).expect("restores"));
+    assert_eq!(restored.server.checkpoint().expect("checkpoints again"), bytes);
+
+    let file = crate::save::world_dir("ckpt-meta-round").join("world_meta.json");
+    let original = std::fs::read(&file).unwrap();
+    let mut meta = crate::save::load_world_meta("ckpt-meta-round");
+    meta.description = "something else".into();
+    crate::save::save_world_meta("ckpt-meta-round", &meta).expect("write meta");
+    match restore(&h, &bytes).err() {
+        Some(RestoreError::InvalidCheckpoint(why)) => assert!(why.contains("world meta"), "{why}"),
+        other => panic!("a changed meta: got {other:?}"),
+    }
+    std::fs::write(&file, &original).unwrap();
+    restore(&h, &bytes).expect("the meta put back, it restores");
+}
+
+/// Refused after the load, with the world opened and the layout and the volatile
+/// state applied to a server nobody gets: the folder is as it was, and the real
+/// checkpoint still restores.
+#[test]
+fn a_refusal_after_the_load_leaves_the_world_able_to_restore() {
+    let _root = WorldsRootGuard::new("keep-s2b-after-load");
+    let mut h = fixture("ckpt-after-load", 2);
+    h.server.players[0].player.velocity = glam::Vec3::ZERO;
+    run_to(&mut h, 20);
+    h.server.players[0].player.velocity = glam::Vec3::ZERO;
+    let bytes = persist_and_checkpoint(&mut h);
+    let dir = crate::save::world_dir("ckpt-after-load");
+    let before = folder_bytes(&dir);
+
+    // The manifest's last digest: refused where the records are compared.
+    let mut tampered = bytes.clone();
+    let at = tampered.len() - 33;
+    tampered[at] ^= 1;
+    seal(&mut tampered);
+    assert_invalid_checkpoint(&h, &tampered, "a resealed manifest");
+    assert_eq!(folder_bytes(&dir), before, "the refused restore changed the folder");
+
+    // A `-0.0`: refused at the very end, by the re-encode.
+    let velocity = section_offsets(&h.server).unwrap().players + 4 + 12;
+    let mut minus_zero = bytes.clone();
+    assert_eq!(minus_zero[velocity..velocity + 4], [0; 4]);
+    minus_zero[velocity..velocity + 4].copy_from_slice(&(-0.0f32).to_le_bytes());
+    seal(&mut minus_zero);
+    assert_invalid_checkpoint(&h, &minus_zero, "a resealed -0.0");
+    assert_eq!(folder_bytes(&dir), before, "the refused restore changed the folder");
+
+    let restored = TestHost::adopt(restore(&h, &bytes).expect("the real one still restores"));
+    assert_eq!(restored.server.checkpoint().unwrap(), bytes);
+    assert_eq!(folder_bytes(&dir), before, "the restore changed the folder");
+}
+
