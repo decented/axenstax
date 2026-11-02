@@ -38,6 +38,66 @@ pub fn stands_clear(world: &World, registry: &BlockRegistry, x: i32, feet_y: i32
     open(feet_y) && open(feet_y.saturating_add(1)) && below != block::AIR && !block::is_fluid(below)
 }
 
+/// How far (blocks) below `pos.y` the ground's top may be for [`can_stand_exactly`]
+/// to call a body supported: a float's worth, not a fall.
+const GROUND_TOLERANCE: f32 = 0.05;
+
+/// Can a body stand at exactly `pos`, as physics would leave it there? The
+/// body's box (`PLAYER_WIDTH` wide, `PLAYER_HEIGHT` tall, from `pos.y` up) must
+/// touch no collision box (a box whose top is at or below `pos.y` plus the
+/// landing slack is the floor, not an obstruction), sit in no fluid or fire,
+/// and have ground under its footprint: a collision box whose top is within
+/// [`GROUND_TOLERANCE`] below `pos.y`. Collision boxes, not whole cells, so
+/// a slab, a low stair step, a bottom trapdoor or a snow layer is a floor, and
+/// a body within 0.3 of a ledge, its centre over air, still stands. Fails
+/// closed: false for a position that is not finite, a column that is not
+/// loaded (it reads as air, so nothing is ground), a spot inside a block or
+/// over a drop. [`stands_clear`] stays the whole-cell check [`fix_up`] and the
+/// world spawn use.
+pub fn can_stand_exactly(world: &World, registry: &BlockRegistry, pos: Vec3) -> bool {
+    use crate::physics::{FOOT_INSET, LAND_EPS, PLAYER_HEIGHT, PLAYER_WIDTH};
+    if !pos.is_finite() {
+        return false;
+    }
+    let half = PLAYER_WIDTH / 2.0 - FOOT_INSET;
+    let (x0, x1) = ((pos.x - half).floor() as i32, (pos.x + half).floor() as i32);
+    let (z0, z1) = ((pos.z - half).floor() as i32, (pos.z + half).floor() as i32);
+    let top = pos.y + PLAYER_HEIGHT;
+    let feet_cell = pos.y.floor() as i32;
+    let head_cell = (top - LAND_EPS).floor() as i32;
+    let mut supported = false;
+    for x in x0..=x1 {
+        for z in z0..=z1 {
+            // Ground may be in the cell just under the feet when `pos.y` sits on a
+            // cell boundary; the cells the body occupies are `feet_cell..=head_cell`.
+            let lowest = (pos.y - GROUND_TOLERANCE).floor() as i32;
+            for y in lowest.min(feet_cell)..=head_cell {
+                let id = world.get_block(x, y, z);
+                let body_cell = y >= feet_cell;
+                if body_cell && (block::is_fluid(id) || id == block::FIRE) {
+                    return false;
+                }
+                for b in world.collision_boxes_at(x, y, z, registry) {
+                    let overlaps_xz = b.min[0] < pos.x + half
+                        && b.max[0] > pos.x - half
+                        && b.min[2] < pos.z + half
+                        && b.max[2] > pos.z - half;
+                    if !overlaps_xz {
+                        continue;
+                    }
+                    if b.max[1] > pos.y + LAND_EPS && b.min[1] < top - LAND_EPS {
+                        return false;
+                    }
+                    if b.max[1] <= pos.y + LAND_EPS && b.max[1] >= pos.y - GROUND_TOLERANCE {
+                        supported = true;
+                    }
+                }
+            }
+        }
+    }
+    supported
+}
+
 /// The surface of the loaded column `(x, z)`: walk down from its real top
 /// (`World::column_top_y`, not a generator estimate) to the first ground —
 /// past air, and past leaves and logs so a tree's canopy is not the floor —
@@ -155,15 +215,15 @@ impl crate::server::GameServer {
         fix_up(&self.world, &self.registry, pos)
     }
 
-    /// Keep slice 2a: can a body go back to exactly `pos`? [`stands_clear`],
+    /// Keep slice 2a: can a body go back to exactly `pos`? [`can_stand_exactly`],
     /// not [`fix_up`] unchanged: `fix_up` leaves a spot in an unloaded column as
     /// it is, because it has nothing to read.
-    pub(crate) fn stands_clear_loading(&mut self, pos: Vec3, load: bool) -> bool {
+    pub(crate) fn can_stand_exactly_loading(&mut self, pos: Vec3, load: bool) -> bool {
         if !pos.is_finite() {
             return false;
         }
         self.safe_spawn_loading(pos, load);
-        stands_clear(&self.world, &self.registry, pos.x.floor() as i32, pos.y.floor() as i32, pos.z.floor() as i32)
+        can_stand_exactly(&self.world, &self.registry, pos)
     }
 }
 

@@ -63,11 +63,11 @@ const MAX_SUBSTEPS: usize = 64;
 // sub-move; this slack absorbs float error in the "rest exactly on the box top"
 // case, where `prev_foot_y` should equal `b.max[1]` to the bit. Must stay far
 // below any real block face gap (the vault bug it fixes had a 0.74-block gap).
-const LAND_EPS: f32 = 1e-3;
+pub(crate) const LAND_EPS: f32 = 1e-3;
 // Horizontal inset (blocks) applied to the Y pass's footprint, so ground/ceiling
 // contact needs a real millimetre of overlap rather than an exact hit on a block
 // face. Mirrors the 0.01 vertical inset the X/Z passes already use.
-const FOOT_INSET: f32 = 1e-3;
+pub(crate) const FOOT_INSET: f32 = 1e-3;
 
 /// Number of collision sub-steps needed for a per-tick displacement of `speed`
 /// blocks: `ceil(speed / MAX_STEP)`, at least 1. Pure, so the rule is
@@ -103,8 +103,8 @@ pub fn ladder_climb_vy(jump_held: bool, sneak: bool) -> f32 {
 // them — cosmetics are visual-only, so cosmetic geometry can never affect server
 // fairness. Re-tune here ONLY as a deliberate, gameplay-reviewed change.
 // Spec 05 Section 1.4
-const PLAYER_WIDTH: f32 = 0.6;
-const PLAYER_HEIGHT: f32 = 1.8;
+pub(crate) const PLAYER_WIDTH: f32 = 0.6;
+pub(crate) const PLAYER_HEIGHT: f32 = 1.8;
 const PLAYER_EYE_HEIGHT: f32 = 1.62; // Standard Minecraft eye height
 // No consumer references this named constant — auto-step-up onto a half-
 // block obstacle isn't implemented in the collision/movement code below

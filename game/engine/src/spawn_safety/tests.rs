@@ -219,3 +219,115 @@ fn a_saved_spawn_at_the_coordinate_limits_does_not_overflow() {
     let nan = Vec3::new(f32::NAN, 70.0, 0.5);
     assert!(fix_up(&s.world, &s.registry, nan).x.is_nan());
 }
+
+// ---- Keep slice 2a-f: `can_stand_exactly`, the exact-spot check a returning
+// joiner's saved position is judged by. ----
+
+use crate::meta::{Facing, with_aux, with_facing};
+
+/// A stone floor at y = 63 (x, z in -3..=3): its top is y = 64.
+fn flat_floor() -> (World, BlockRegistry) {
+    let mut w = World::new();
+    for x in -3..=3 {
+        for z in -3..=3 {
+            w.set_block(x, 63, z, block::STONE);
+        }
+    }
+    (w, BlockRegistry::new())
+}
+
+fn stands(w: &World, r: &BlockRegistry, x: f32, y: f32, z: f32) -> bool {
+    can_stand_exactly(w, r, Vec3::new(x, y, z))
+}
+
+#[test]
+fn a_body_stands_on_ordinary_ground() {
+    let (w, r) = flat_floor();
+    assert!(stands(&w, &r, 0.5, 64.0, 0.5));
+    assert!(stands(&w, &r, 0.2, 64.0, -0.3), "anywhere over the cell");
+}
+
+/// The cases the whole-cell check turned away: each is a place physics leaves
+/// a body, and `stands_clear` (feet cell non-solid, block below) says no.
+#[test]
+fn a_body_stands_on_a_partial_block_at_its_height() {
+    let (mut w, r) = flat_floor();
+    w.set_block(0, 64, 0, block::STONE_SLAB);
+    w.set_meta((0, 64, 0), with_facing(0, Facing::Down));
+    assert!(stands(&w, &r, 0.5, 64.5, 0.5), "a bottom slab");
+    assert!(!stands_clear(&w, &r, 0, 64, 0), "(the whole-cell check says no)");
+    assert!(!stands(&w, &r, 0.5, 64.0, 0.5), "but not inside it");
+    assert!(!stands(&w, &r, 0.5, 65.0, 0.5), "nor floating a half block above it");
+
+    w.set_block(0, 64, 0, block::SNOW_LAYER);
+    w.set_meta((0, 64, 0), with_aux(0, 0));
+    assert!(stands(&w, &r, 0.5, 64.125, 0.5), "a snow layer");
+    assert!(!stands_clear(&w, &r, 0, 64, 0));
+
+    w.set_block(0, 64, 0, block::OAK_TRAPDOOR);
+    w.set_meta((0, 64, 0), with_facing(0, Facing::North));
+    assert!(stands(&w, &r, 0.5, 64.1875, 0.5), "a bottom trapdoor");
+    assert!(!stands_clear(&w, &r, 0, 64, 0));
+}
+
+#[test]
+fn a_body_stands_on_the_low_step_of_a_stair_but_not_through_the_high_one() {
+    let (mut w, r) = flat_floor();
+    w.set_block(0, 64, 0, block::STONE_STAIRS);
+    w.set_meta((0, 64, 0), with_facing(0, Facing::North)); // the tall half is z in 0..0.5
+    assert!(stands(&w, &r, 0.5, 64.5, 0.8), "on the low half");
+    assert!(!stands_clear(&w, &r, 0, 64, 0));
+    assert!(!stands(&w, &r, 0.5, 64.5, 0.4), "its box overlaps the tall half");
+    assert!(stands(&w, &r, 0.5, 65.0, 0.4), "on top of the tall half");
+}
+
+#[test]
+fn a_body_within_a_ledges_reach_still_stands() {
+    let mut w = World::new();
+    for x in -3..=0 {
+        for z in -3..=3 {
+            w.set_block(x, 63, z, block::STONE);
+        }
+    }
+    let r = BlockRegistry::new();
+    assert!(stands(&w, &r, 1.2, 64.0, 0.5), "centre over air, 0.3 box still over the edge block");
+    assert!(!stands_clear(&w, &r, 1, 64, 0), "(the cell under its centre is air)");
+    assert!(!stands(&w, &r, 1.4, 64.0, 0.5), "past the edge");
+}
+
+#[test]
+fn nowhere_unsafe_is_a_place_to_stand() {
+    let (mut w, r) = flat_floor();
+    assert!(!stands(&w, &r, 0.5, 63.5, 0.5), "inside the floor");
+    assert!(!stands(&w, &r, 0.5, 65.0, 0.5), "a block up: over a drop");
+    assert!(!stands(&w, &r, 0.5, 70.0, 0.5), "high in the air");
+    w.set_block(0, 65, 0, block::STONE);
+    assert!(!stands(&w, &r, 0.5, 64.0, 0.5), "head in a ceiling");
+    w.set_block(0, 65, 0, block::AIR);
+    for hazard in [block::LAVA, block::WATER, block::FIRE] {
+        w.set_block(0, 64, 0, hazard);
+        assert!(!stands(&w, &r, 0.5, 64.0, 0.5), "feet in {hazard}");
+        w.set_block(0, 64, 0, block::AIR);
+        w.set_block(0, 65, 0, hazard);
+        assert!(!stands(&w, &r, 0.5, 64.0, 0.5), "head in {hazard}");
+        w.set_block(0, 65, 0, block::AIR);
+    }
+    assert!(stands(&w, &r, 0.5, 64.0, 0.5), "the same spot, clear again");
+}
+
+#[test]
+fn an_unloaded_column_or_a_position_that_isnt_a_place_fails_closed() {
+    let (w, r) = flat_floor();
+    assert!(!stands(&w, &r, 500.5, 64.0, 500.5), "no column there reads as air, so nothing is ground");
+    assert!(!can_stand_exactly(&World::new(), &r, Vec3::new(0.5, 64.0, 0.5)));
+    for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        assert!(!stands(&w, &r, bad, 64.0, 0.5));
+        assert!(!stands(&w, &r, 0.5, bad, 0.5));
+        assert!(!stands(&w, &r, 0.5, 64.0, bad));
+    }
+    // Finite but past anything a cell index holds: no overflow, no panic.
+    for big in [1e30, -1e30, f32::MAX, f32::MIN] {
+        assert!(!stands(&w, &r, big, big, big));
+        assert!(!stands(&w, &r, 0.5, big, 0.5));
+    }
+}

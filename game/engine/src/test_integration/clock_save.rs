@@ -325,12 +325,20 @@ fn the_client_save_paths_write_the_clock() {
 fn an_out_of_range_saved_clock_is_not_restored() {
     let good = full_clock();
     assert!(good.is_valid());
+    let furthest = good.tick_counter + (1 << 32);
+    assert!(
+        crate::sim_clock::SavedClock { rain_until: furthest, storm_until: furthest, ..good.clone() }.is_valid(),
+        "a window as far ahead as the bound allows is real"
+    );
     for bad in [
         crate::sim_clock::SavedClock { world_time: crate::sim_clock::DAY_TICKS, ..good.clone() },
         crate::sim_clock::SavedClock { tick_counter: u64::MAX, day_last_tick: None, ..good.clone() },
         crate::sim_clock::SavedClock { day_remainder: 24_000, ..good.clone() },
         crate::sim_clock::SavedClock { day_last_tick: Some(good.tick_counter + 1), ..good.clone() },
         crate::sim_clock::SavedClock { weather_lock_applied: Some("x".repeat(65)), ..good.clone() },
+        // A window that never ends: rain with no re-roll, for good.
+        crate::sim_clock::SavedClock { rain_until: u64::MAX, ..good.clone() },
+        crate::sim_clock::SavedClock { storm_until: good.tick_counter + (1 << 32) + 1, ..good.clone() },
     ] {
         let mut save = crate::save::minimal_world_save_for_tests(1);
         save.authority_clock = Some(bad.clone());
@@ -399,4 +407,179 @@ fn a_lending_server_takes_the_calendar_and_wire_tick_from_its_host() {
     assert_eq!(hs.server.night_calendar.tonight(), 12);
     assert_eq!(hs.server.calendar_id, [7; 16]);
     assert_eq!(hs.server_tick_for_test(), 400_001, "the host's tick, then the window's own step");
+}
+
+// ---- Review fixes (2a-f): where a joiner may stand, and the paths the first
+// tests did not reach. ----
+
+/// A flat stone floor of the test's own at y = 119 (x 26..=32, z -16..=-9),
+/// open air over it, high above any terrain; the columns round it are loaded.
+/// Cell (30, 120, -13) is where each case puts its block.
+fn test_floor(hs: &mut HostedServer) {
+    hs.server.safe_spawn_loading(Vec3::new(30.5, 130.0, -12.5), true);
+    let w = &mut hs.server.world;
+    for x in 24..=36 {
+        for z in -18..=-7 {
+            for y in 119..=124 {
+                let id = if y == 119 && (26..=32).contains(&x) && (-16..=-9).contains(&z) {
+                    crate::block::STONE
+                } else {
+                    crate::block::AIR
+                };
+                w.set_block(x, y, z, id);
+            }
+        }
+    }
+}
+
+const CELL: (i32, i32, i32) = (30, 120, -13);
+
+/// The joiner leaves standing at `pos` on the floor `build` makes and joins
+/// again in the same run; returns where its body stands and what its spawn
+/// resolves to.
+fn leave_and_rejoin(name: &str, bindings: (u8, u8), build: &dyn Fn(&mut HostedServer), pos: Vec3) -> (Vec3, Vec3) {
+    let mut hs = start(name);
+    test_floor(&mut hs);
+    build(&mut hs);
+    let (client, i) = join(&mut hs, bindings.0);
+    let spawn = hs.server.players[i].spawn_pos;
+    hs.server.players[i].player.pos = pos;
+    drop(client);
+    hs.tick(); // the leave: its save
+    let (_client, i) = join(&mut hs, bindings.1);
+    let body = hs.server.players[i].player.pos;
+    let at_spawn = hs.server.safe_spawn_loading(spawn, true);
+    (body, at_spawn)
+}
+
+/// Ordinary standing places that are not a whole block: a joiner who left
+/// there goes back there, not to spawn.
+#[test]
+fn a_joiner_who_left_on_a_partial_block_rejoins_there() {
+    let _g = WorldsRootGuard::new("clock-save-partial");
+    use crate::meta::{Facing, with_aux, with_facing};
+    let (x, y, z) = CELL;
+    let put = |id: crate::block::BlockId, meta: u8| {
+        move |hs: &mut HostedServer| {
+            hs.server.world.set_block(x, y, z, id);
+            hs.server.world.set_meta((x, y, z), meta);
+        }
+    };
+    let none = |_: &mut HostedServer| {};
+    let cases: Vec<(&str, Box<dyn Fn(&mut HostedServer)>, Vec3)> = vec![
+        ("the plain floor", Box::new(none), Vec3::new(30.5, 120.0, -12.5)),
+        ("a bottom slab", Box::new(put(crate::block::STONE_SLAB, with_facing(0, Facing::Down))), Vec3::new(30.5, 120.5, -12.5)),
+        ("a snow layer", Box::new(put(crate::block::SNOW_LAYER, with_aux(0, 0))), Vec3::new(30.5, 120.125, -12.5)),
+        // The step's tall half is on the north side; the body is on the low half.
+        ("the low step of a stair", Box::new(put(crate::block::STONE_STAIRS, with_facing(0, Facing::North))), Vec3::new(30.5, 120.5, -12.2)),
+        ("a bottom trapdoor", Box::new(put(crate::block::OAK_TRAPDOOR, with_facing(0, Facing::North))), Vec3::new(30.5, 120.1875, -12.5)),
+        // The floor ends at x = 33: the body's centre is over air.
+        ("a ledge edge", Box::new(none), Vec3::new(33.2, 120.0, -12.5)),
+    ];
+    for (n, (what, build, pos)) in cases.iter().enumerate() {
+        let (body, spawn) = leave_and_rejoin(&format!("partial{n}"), (40 + 2 * n as u8, 41 + 2 * n as u8), build.as_ref(), *pos);
+        assert_ne!(body, spawn, "{what}: not at spawn");
+        assert!(body.distance(*pos) < 0.001, "{what}: back at {pos}, not {body}");
+    }
+}
+
+/// And the places no body can stand still go to spawn.
+#[test]
+fn a_joiner_who_left_where_nothing_can_stand_rejoins_at_its_spawn() {
+    let _g = WorldsRootGuard::new("clock-save-nostand");
+    let (x, y, z) = CELL;
+    let put = |id: crate::block::BlockId, at_y: i32| {
+        move |hs: &mut HostedServer| hs.server.world.set_block(x, at_y, z, id)
+    };
+    let none = |_: &mut HostedServer| {};
+    let cases: Vec<(&str, Box<dyn Fn(&mut HostedServer)>, Vec3)> = vec![
+        ("over a drop", Box::new(none), Vec3::new(30.5, 121.0, -12.5)),
+        ("in lava", Box::new(put(crate::block::LAVA, y)), Vec3::new(30.5, 120.0, -12.5)),
+        ("in fire", Box::new(put(crate::block::FIRE, y)), Vec3::new(30.5, 120.0, -12.5)),
+        ("inside a block", Box::new(put(crate::block::STONE, y)), Vec3::new(30.5, 120.5, -12.5)),
+        ("under a low ceiling", Box::new(put(crate::block::STONE, y + 1)), Vec3::new(30.5, 120.0, -12.5)),
+    ];
+    for (n, (what, build, pos)) in cases.iter().enumerate() {
+        let (body, spawn) = leave_and_rejoin(&format!("nostand{n}"), (60 + 2 * n as u8, 61 + 2 * n as u8), build.as_ref(), *pos);
+        assert_eq!(body, spawn, "{what}: at spawn");
+    }
+}
+
+/// A night mark ahead of a calendar that has not reached it yet is not held
+/// against the body; one it has reached is.
+#[test]
+fn a_sleep_mark_from_a_night_not_yet_reached_is_dropped_on_rejoin() {
+    let _g = WorldsRootGuard::new("clock-save-future-night");
+    let mut hs = start("future-night");
+    hs.server.night_calendar.observe(23_999);
+    hs.server.night_calendar.observe(0);
+    let tonight = hs.server.night_calendar.tonight();
+    // A rejoin can take a lower slot than the last one in the list: find the
+    // body that is in the world.
+    let seat = |hs: &HostedServer| {
+        hs.server.players.iter().position(|p| p.server_simulated && p.is_in_world()).expect("a joiner in the world")
+    };
+    for (n, (mark, kept)) in [(tonight, true), (tonight + 5, false)].into_iter().enumerate() {
+        let (client, _) = join(&mut hs, 80 + 2 * n as u8);
+        let i = seat(&hs);
+        hs.server.players[i].slept_night = Some(mark);
+        hs.server.save_joiner(i).unwrap(); // the record, under this calendar
+        drop(client);
+        hs.tick(); // the leave
+        let (client, _) = join(&mut hs, 81 + 2 * n as u8);
+        let i = seat(&hs);
+        let expected = kept.then_some(mark);
+        assert_eq!(hs.server.players[i].slept_night, expected, "mark {mark} at tonight {tonight}");
+        drop(client);
+        hs.tick(); // settle this leave before the next join
+    }
+}
+
+/// A lending host's world is the host's: a spot in a column it holds is read
+/// and the joiner goes back there; one it does not hold can't be checked, and
+/// the joiner goes to spawn.
+#[test]
+fn a_lent_hosts_rejoin_checks_only_the_columns_it_holds() {
+    use super::handover_live::signed_join_lent;
+    let _g = WorldsRootGuard::new("clock-save-lent-rejoin");
+    let (mut hs, mut host) = super::lent_world::start_prepared_lent("rejoin-spot");
+    let seckey = [0x71; 32];
+    let (client, slot, _, _) = signed_join_lent(&mut hs, &mut host, seckey);
+    let spawn = hs.server.players[slot].spawn_pos;
+    // A loaded column near the spawn with ground to stand on.
+    let held = (-6..=6)
+        .flat_map(|dx| (-6..=6).map(move |dz| (spawn.x.floor() as i32 + dx, spawn.z.floor() as i32 + dz)))
+        .filter(|&(x, z)| (x - spawn.x.floor() as i32).abs() + (z - spawn.z.floor() as i32).abs() > 3)
+        .find_map(|(x, z)| {
+            crate::spawn_safety::surface_feet(&host.world, &hs.server.registry, x, z)
+                .map(|y| Vec3::new(x as f32 + 0.5, y as f32, z as f32 + 0.5))
+        })
+        .expect("a held column with ground near the spawn");
+    // Far outside anything the host loads.
+    let unheld = Vec3::new(held.x + 5_000.0, held.y, held.z + 5_000.0);
+    assert!(
+        crate::spawn_safety::surface_feet(&host.world, &hs.server.registry, unheld.x.floor() as i32, unheld.z.floor() as i32)
+            .is_none(),
+        "the host holds nothing there"
+    );
+
+    let mut client = Some(client);
+    let mut slot = slot;
+    for (what, pos, expect_there) in [("a held column", held, true), ("a column the host does not hold", unheld, false)] {
+        hs.server.players[slot].player.pos = pos;
+        drop(client.take());
+        host.lend_tick(&mut hs);
+        host.lend_tick(&mut hs); // the leave: its save
+        let (c, s, _, _) = signed_join_lent(&mut hs, &mut host, seckey);
+        client = Some(c);
+        slot = s;
+        let body = hs.server.players[slot].player.pos;
+        if expect_there {
+            assert!(body.distance(pos) < 0.001, "{what}: back at {pos}, not {body}");
+        } else {
+            assert!(body.distance(pos) > 1_000.0, "{what}: not at {pos}, but {body}");
+            let expected = crate::spawn_safety::fix_up(&host.world, &hs.server.registry, spawn);
+            assert_eq!(body, expected, "{what}: at the spawn");
+        }
+    }
 }

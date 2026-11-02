@@ -5226,7 +5226,7 @@ impl HostedServer {
                             // position (on a lent world, a column the host has
                             // not loaded can't be checked, so that too).
                             let left_at = saved.pose().filter(|pose| {
-                                self.server.stands_clear_loading(glam::Vec3::from_array(pose.pos), owns)
+                                self.server.can_stand_exactly_loading(glam::Vec3::from_array(pose.pos), owns)
                             });
                             let body_at = match left_at {
                                 Some(pose) => glam::Vec3::from_array(pose.pos),
