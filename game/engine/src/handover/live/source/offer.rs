@@ -164,7 +164,7 @@ impl SourceSession {
         let seat = self.action.seat;
         let mut save = c.save;
         eligibility::neutralise(&mut save, &npub(self.action.source_key))?;
-        let recipient_record = crate::joiner_save::JoinerSave::capture(&hs.server.players[seat.slot], hs.server.run_id);
+        let recipient_record = crate::joiner_save::JoinerSave::capture(&hs.server.players[seat.slot], hs.server.calendar_id);
         eligibility::recipient_record(Some(&recipient_record))?;
         let recipient_sidecar =
             recipient_record.encode_seed().map_err(|_| Refusal("The other player's inventory couldn't be recorded."))?;
