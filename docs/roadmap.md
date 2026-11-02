@@ -1,16 +1,30 @@
 # Axe'n'Stax Roadmap
 
-*As of 2026-11-02 — source v0.2.27, network protocol v96, save format 59. The repository is public and the sites deploy from `main`.*
-This file is **the** roadmap: where the project is, what is waiting, and what comes later.
+*As of 2026-11-02 — source v0.2.27, network protocol v96, save format 60. The repository is public.*
+This file is **the** roadmap: where the project has come from, where it is, and where it is going.
 For "what do we build next", see `docs/foundations/README.md` (the build queue); feature requests and ideas enter through the internal feature backlog.
+
+---
+
+## Where we've come from
+
+- **2026-03-03: full custom engine.** The project chose to own the whole stack rather than inherit another engine's limits (ADR-001).
+- **Spring 2026: from engine to game.** Test harness and Signet sign-in foundations (April), the sites split into independent apps (April 30), then waves of gameplay, creatures, building tools and the Workshop.
+- **June 2026: identity and compliance set the shape.** Signed multiplayer identity at join (2026-06-16, protocol v49). The web build became an anonymous local taster (2026-06-24), and the rule that AxeNStax ships software and never operates the service became the project's red lines.
+- **September 2026: playing with friends.** World chat (2026-09-05), online play by contact and the wind, copper and electricity wave (2026-09-07), then a full code audit (2026-09-27) and a pre-public audit (2026-09-28).
+- **2026-10-01 to 04: public.** Signet contacts sync, the player's own relay list, and the repository going public as a fresh single-commit snapshot with its security settings on. The privacy page was signed off with the controller published as *decented*, and the project's own relay stopped being a default in the native app or its tools (phone tests still pending, below).
+- **2026-10-06 to 31: real multiplayer.** The host lends its one world to its server (D1), joiners stopped running a private mob world (D2), and the server took over joiners' metabolism and inventory records (C2, C3). The clock, weather, mobs, deaths and machines moved into one shared simulation (D4). Single-player lending was built behind an opt-in flag (D3), and world handover landed.
+- **2026-10-22 to 25: Fray, new terrain, Keeps.** Host Game moved to Fray (protocol v92), terrain generator v3 and graphics settings shipped (2026-10-24), and `--keep-world` let a home Keep run one persistent world (2026-10-25).
+- **2026-11-02: hardening and the first Keep slices.** In-game feedback removed, access rules tightened, privacy copy corrected, and Keep authority slices 1, 2a and 2b landed. The full gate passed with 7,203 tests and none failing.
 
 ---
 
 ## Where we are
 
-Axe'n'Stax is an open-source, self-hostable voxel sandbox with its own engine, client and server, written in Rust. The release is the top priority: the access and privacy fixes on `main` reach players only when the desktop release is published. Beyond that, the build queue is not empty. The Keep authority slices (a home Keep's one persistent world, run by the engine) and the integration with Fray and Ingle (the networking library and the Keep program) are still to finish, and there is a keep-or-cut decision on Beacon. The rest is work only the owner can do (cutting the release, and live tests with real devices and people), plus a short list of design decisions that block building further on top of the current foundations.
+Axe'n'Stax is an open-source, self-hostable voxel sandbox with its own engine, client and server, written in Rust. The code is well ahead of what players can get: `main` holds the real-multiplayer work, Host Game on Fray, terrain v3, the access and privacy fixes and the first Keep slices, but the public download is still v0.2.18 and the live sites are the 2026-10-27 build. Closing that gap comes first. Nobody has tried the 2026-11-02 work in person yet.
 
-- **Version:** v0.2.27 in source, network protocol v96, save format 59. The published desktop installer is still v0.2.18 until the release below is cut, so what is described here is well ahead of what players can download.
+- **Version:** v0.2.27 in source, network protocol v96, save format 60. Worlds saved by this build won't open on older builds. The published desktop installer is still v0.2.18 until the release below is cut.
+- **Sites:** every deploy since 2026-10-28 has stopped at the step that syncs the sites to the server, so the live sites, including the web game and the privacy page corrections, are still the 2026-10-27 build. A push to `main` puts them live once that step passes.
 - **Web (`play.axenstax.com`)** is an anonymous, local-only sandbox: a *taster*. No login, no multiplayer, no cloud save and no feedback channel on web. Worlds live in the browser and can be exported to the desktop app.
 - **Native (Linux AppImage)** is the full game: Signet sign-in, LAN play, online play by contact, and the dedicated server. Windows and macOS are not published as installers yet (build from source).
 - **Android** is ported onto main (the APK builds in CI, `android` input off by default, and a tapped `axenstax:` link opens the game), but nothing is published: release signing is owner-side, and updates will come through zap.store, not an in-app updater.
@@ -19,7 +33,9 @@ Axe'n'Stax is an open-source, self-hostable voxel sandbox with its own engine, c
 
 ---
 
-## Shipped
+## What's built
+
+Everything below is on `main`. Much of it hasn't reached players yet (see above).
 
 ### Engine and rendering
 - Custom Rust engine on wgpu: native desktop and WebAssembly/WebGPU (Chromium) from one codebase.
@@ -59,7 +75,7 @@ Axe'n'Stax is an open-source, self-hostable voxel sandbox with its own engine, c
 
 ### Multiplayer and identity
 - Native "Host Game" and its joins run on Fray (a room code resolved on the player's own relays, plus a LAN beacon heard on that network only), with the Signet join challenge unchanged. Split-screen on one machine, and a headless dedicated server (Docker image and an Operator Console with allowlist, blocklist and require-sign-in).
-- A `--keep-world` mode: the engine runs one persistent world for a home Keep (a separate program) over stdin and stdout. Joining a Keep by room code or an `axenstax://keep` link (first-time confirm) saves it to My Keeps, which the Join Game card lists, three newest first with a More Keeps button.
+- A `--keep-world` mode: the engine runs one persistent world for a home Keep (a separate program) over stdin and stdout. Joining a Keep by room code or an `axenstax://keep` link (first-time confirm) saves it to My Keeps, which the Join Game card lists, three newest first with a More Keeps button. Keep authority slices 1, 2a and 2b are in: determinism, a world clock that survives a restart, a joiner's return to where they left, and checkpoint and restore at the API. Restore is not yet wired into `--keep-world`.
 - The host lends its one world and ECS to its embedded server every tick (D1), so there is no second copy of the world; joiners are diffed from the host's real world.
 - Joiners see, hurt and act on the server's mobs (D2a, D2b: attack and kill credit, feed, tame, shear, milk, Leads and pet commands). Riding works through server-accepted mounts (D2c-1), and shared steed packs have an implemented path (D2c-2) that still waits for an owner session.
 - Late joiners are sent the world itself: the server pushes the columns players have touched, and a joiner regenerates untouched columns from the seed (B2a, B2b).
@@ -82,10 +98,26 @@ Axe'n'Stax is an open-source, self-hostable voxel sandbox with its own engine, c
 
 ### Safety, privacy and compliance hardening
 - Web build has no login, cookies, analytics or feedback channel; the site apps do not log IP addresses.
-- The game has no in-game feedback channel (web removed 2026-10-01, native removed 2026-11-01).
+- The game has no in-game feedback channel (web removed 2026-10-01, native removed 2026-11-01): `/bug`, `/idea`, `/mailbox`, the tester unlock and the Suggestion Box trial are gone.
+- Access rules tightened: a Signet block or a removed contact takes a player out of a hosted world, an empty allowlist admits nobody, `require_signin` must be exactly `true` or `false`, and delisting or blocking on a dedicated server removes players within about 5 seconds. A server with a WebSocket listener needs a public address to start, and `docker stop` now reaches the final save.
 - Crash-safe saves with damage quarantine, a staged data-directory migration, and a hardened updater.
 - Money words are guarded by permanent tests on every text surface; Proof of Play never appears as an earning mechanic.
 - Public repository housekeeping: licence, security policy, contributing guide and a credits file are in place.
+
+---
+
+## Where we're going
+
+In order:
+
+1. **Get what's built to players.** The site deploy passing, then the native release.
+2. **Try it with people.** The 2026-11-02 test sheet, then the two-machine and phone tests below.
+3. **Finish the access and safety fixes** from the project's internal review, as the next build after the release.
+4. **Finish Keep authority** with Fray and Ingle: slice 3 wires restore into `--keep-world`. Fray has answered, so it can start when the owner chooses.
+5. **Finish real multiplayer:** the single-player default, removing `--no-lend`, Strict enforcement and villager quests for joiners.
+6. **Then tighten and polish.** Every part of the game reaches a normal player's level first, then come tightening passes and an art-direction pass on blocks, leaves and animal skins, on the owner's go. Fun still needs testing with voluntary children outside the family.
+
+The detail follows: **Now** is waiting on a person, **Next** is design calls and foundations, **Later** is unscheduled.
 
 ---
 
@@ -94,6 +126,7 @@ Axe'n'Stax is an open-source, self-hostable voxel sandbox with its own engine, c
 Everything here needs a person, a second machine or a real device, or a decision that is not the code's to make.
 
 **Live tests (cannot be verified solo)**
+- The 2026-11-02 hardening and Keep sheet (`docs/test-sheets/2026-11-02-hardening.md`): Host Game removals, dedicated-server access rules, `docker stop`, a world's clock and a joiner's return across a restart, and lava in newly loaded land. Nobody has run it yet.
 - Two-machine LAN play with a real remote signer: native to native, and native to dedicated server. (The web build has no sign-in, so there is no browser-plus-phone leg.)
 - Online play by contact across two real houses (UPnP/STUN punch, bearer invite, persona attestation).
 - Death drops, late-joiner chunk push and tool pickup, walked over by a second player, and a joiner hurting and riding the server's mobs.
@@ -106,18 +139,17 @@ Everything here needs a person, a second machine or a real device, or a decision
 **Fun test**
 - Play-testing with voluntary children who are not family. Family play has been a bug-hunt, not evidence that the game is fun, so fun is unvalidated.
 
-**Public launch — done 2026-10-03/04**
-- The repository is public as a fresh single-commit snapshot (old history archived privately), with fork-PR approval, secret scanning and push protection, private vulnerability reporting and a protected `main`.
-- The privacy page is signed off by the owner (2026-10-04): controller published as *decented*.
-- The project's own relay is no longer a default anywhere in the native app or its tools (pending the phone tests above). Sign-in, contacts pairing, server discovery and the updater use the player's one editable "Your relays" list.
-
 **Release**
-- **Top priority: cut the native release.** The fixes reach players only when it is published, and until then `/download` serves v0.2.18 (with a notice that a newer release is being prepared). Native v0.2.27 (protocol v96): the owner cuts it with the owner-held signing keys. The release now covers far more than it did when it was planned at protocol v64: the relay and privacy changes, Host Game on Fray, the real-multiplayer work, terrain v3, graphics settings and building variants. Until then `/download` serves v0.2.18. After publishing, republish the kind-30063 release event to the public relays.
+- **Top priority: cut the native release.** The fixes reach players only when it is published, and until then `/download` serves v0.2.18 (with a notice that a newer release is being prepared). Native v0.2.27 (protocol v96): the owner cuts it with the owner-held signing keys. The release now covers far more than it did when it was planned at protocol v64: the relay and privacy changes, Host Game on Fray, the real-multiplayer work, terrain v3, graphics settings, building variants, the access fixes and save format 60. Its release notes, including what dedicated-server operators must check before upgrading, are in the 2026-11-02 test sheet. After publishing, republish the kind-30063 release event to the public relays.
+
+**Privacy page**
+- The page has no contact route for data requests yet, and it says the relay's log retention is being confirmed. Both wait on the owner and the people who run that infrastructure.
 
 **Decisions and sessions**
 - Flipping new worlds to terrain generator v4 (dry caves) is an owner call; until then new worlds get v3.
 - The default flip for single-player lending its world (D3, below) waits on a session with Axolittle.
 - The owner session for shared steed packs (D2c-2).
+- Three behaviours from the Keep slices need an owner view: a rejoin re-arms the 15-second spawn shield at the exact spot, a joiner more than about 128 blocks from a lending host lands at spawn, and natural lava rims now flow within minutes.
 
 ---
 
@@ -134,8 +166,7 @@ Only items that block building further on top.
 - **Take-your-worlds-to-native conflict policy.** Import currently keeps both when a name clashes; the final merge policy is an owner decision.
 - **Sub-block detail for authored builds** (high-resolution statues and faces): needs a choice between a micro-model reference, sub-voxels or a detail-block palette.
 - **Villager quests for joiners** (D2c-3). The common-progression foundation and later checkpoints are in source; live quest delivery for joiners is not accepted and verification is pending.
-- **Keep authority slices.** How a home Keep's persistent world, run by the engine over stdin and stdout, shares authority with the Keep program is specified in `docs/integrations/fray/2026-10-31-keep-authority-handoff.md`, to be built in slices; it is not finished.
-- **Fray and Ingle integration.** Fray (the networking library behind Host Game) and Ingle (the Keep program that drives the engine) need the authority handoff above agreed on both sides.
+- **Keep authority, slice 3.** Slices 1, 2a and 2b are in, and 2b stops at the API. Slice 3 wires restore into `--keep-world`. Fray (the networking library behind Host Game) answered the storage and migration questions in `docs/integrations/fray/2026-10-31-keep-authority-handoff.md` on 2026-11-02, so slice 3 can start when the owner chooses. Fray's interface lands alongside the game's first use of it. Some rulings change the game's side: how the hidden Proof of Play secret is seeded, how saves are staged across ticks, and no persona identifier in a storage key, with a dependant's save fully erasable before this runs on a Keep with members. Also still to settle on the game's side: `state_hash` doesn't yet cover all of `world.dat`, and regenerating pristine chunks needs the same math on every platform.
 - **Beacon: keep or cut.** The public-distribution path (event kind 30820, `open_stash.rs`) is built, and whether to keep it is an owner decision.
 
 ---
