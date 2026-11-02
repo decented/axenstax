@@ -6,6 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::access_policy::Allow;
 use crate::console_settings::ConsoleSettings;
 use crate::console_telemetry::TelemetryAggregates;
 
@@ -30,6 +31,11 @@ pub struct ConsoleSnapshot {
     pub announce: bool,
     pub privacy_level: String,
     pub require_signin: bool,
+    /// Whether the server runs an allowlist. `false` is an open server;
+    /// `true` with `allowlist_count` 0 is a closed one that admits nobody.
+    /// A snapshot from a build before this field reads as off.
+    #[serde(default)]
+    pub allowlist_on: bool,
     pub allowlist_count: u32,
     pub blocklist_count: u32,
     pub operator_npub: String,
@@ -39,13 +45,13 @@ pub struct ConsoleSnapshot {
 }
 
 /// Assemble a snapshot from the server's live inputs. Pure.
-/// `policy` = `(require_signin, allowlist_count, blocklist_count)`.
+/// `policy` = `(require_signin, allow, blocklist_count)`.
 /// `ident` = `(operator_npub, runtime_npub, delegation_expires_unix)`.
 pub fn build_snapshot(
     settings: &ConsoleSettings,
     roster: &[PlayerRow],
     agg: &TelemetryAggregates,
-    policy: (bool, u32, u32),
+    policy: (bool, &Allow, u32),
     ident: (String, String, u64),
 ) -> ConsoleSnapshot {
     ConsoleSnapshot {
@@ -59,7 +65,8 @@ pub fn build_snapshot(
         announce: settings.announce,
         privacy_level: settings.privacy_level.clone(),
         require_signin: policy.0,
-        allowlist_count: policy.1,
+        allowlist_on: matches!(policy.1, Allow::Only(_)),
+        allowlist_count: policy.1.listed() as u32,
         blocklist_count: policy.2,
         operator_npub: ident.0,
         runtime_npub: ident.1,
@@ -160,7 +167,7 @@ mod tests {
             &settings,
             &roster,
             &agg,
-            (true, 4, 1),
+            (true, &Allow::only([[1u8; 32], [2u8; 32], [3u8; 32], [4u8; 32]]), 1),
             ("npub1op".into(), "npub1rt".into(), 1_900_000_000),
         );
         assert_eq!(snap.server_name, "Cool SMP");
@@ -173,12 +180,42 @@ mod tests {
         assert!(snap.announce);
         assert_eq!(snap.privacy_level, "sessions");
         assert!(snap.require_signin);
+        assert!(snap.allowlist_on);
         assert_eq!(snap.allowlist_count, 4);
         assert_eq!(snap.blocklist_count, 1);
         assert_eq!(snap.operator_npub, "npub1op");
         assert_eq!(snap.runtime_npub, "npub1rt");
         assert_eq!(snap.delegation_expires_unix, 1_900_000_000);
         assert_eq!(snap.protocol, crate::protocol::PROTOCOL_VERSION);
+    }
+
+    /// An open server and a closed one both list nobody: only the mode tells them apart.
+    #[test]
+    fn the_snapshot_says_open_or_only_these() {
+        let build = |allow: &Allow| {
+            build_snapshot(
+                &ConsoleSettings::default(),
+                &[],
+                &TelemetryAggregates::default(),
+                (true, allow, 0),
+                (String::new(), String::new(), 0),
+            )
+        };
+        let open = build(&Allow::Open);
+        assert!(!open.allowlist_on, "no allowlist: open");
+        assert_eq!(open.allowlist_count, 0);
+        let closed = build(&Allow::only([]));
+        assert!(closed.allowlist_on, "an allowlist with nobody on it is still on");
+        assert_eq!(closed.allowlist_count, 0);
+        assert_ne!(open, closed);
+        let some = build(&Allow::only([[7u8; 32]]));
+        assert!(some.allowlist_on);
+        assert_eq!(some.allowlist_count, 1);
+        // A snapshot from a build that predates the field still reads.
+        let mut json: serde_json::Value = serde_json::to_value(&closed).unwrap();
+        json.as_object_mut().unwrap().remove("allowlist_on");
+        let old: ConsoleSnapshot = serde_json::from_value(json).unwrap();
+        assert!(!old.allowlist_on);
     }
 
     #[test]
@@ -198,6 +235,7 @@ mod tests {
             announce: false,
             privacy_level: "none".into(),
             require_signin: false,
+            allowlist_on: false,
             allowlist_count: 0,
             blocklist_count: 0,
             operator_npub: "npub1op".into(),

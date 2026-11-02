@@ -22,7 +22,9 @@ pub fn draw_operator_panel(ui: &mut egui::Ui, snap: &ConsoleSnapshot) {
     ));
     ui.label(format!(
         "Allowlist: {}    Blocklist: {}    Sign-in required: {}",
-        snap.allowlist_count, snap.blocklist_count, snap.require_signin
+        allowlist_text(snap),
+        snap.blocklist_count,
+        snap.require_signin
     ));
     ui.label(format!(
         "Announcing: {}    Privacy: {}",
@@ -45,5 +47,31 @@ pub fn draw_operator_panel(ui: &mut egui::Ui, snap: &ConsoleSnapshot) {
             format!("{} ({})", p.handle, p.npub)
         };
         ui.label(format!("  {who}"));
+    }
+}
+
+/// How the panel words the allowlist: an open server and a closed one both list
+/// nobody, so the count alone can't say which.
+fn allowlist_text(snap: &ConsoleSnapshot) -> String {
+    match (snap.allowlist_on, snap.allowlist_count) {
+        (false, _) => "off (open)".to_string(),
+        (true, 0) => "on, nobody listed (nobody can join)".to_string(),
+        (true, n) => format!("on, {n} listed"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn snap(on: bool, count: u32) -> ConsoleSnapshot {
+        ConsoleSnapshot { allowlist_on: on, allowlist_count: count, ..Default::default() }
+    }
+
+    #[test]
+    fn the_panel_tells_an_open_server_from_a_closed_one() {
+        assert_eq!(allowlist_text(&snap(false, 0)), "off (open)");
+        assert_eq!(allowlist_text(&snap(true, 0)), "on, nobody listed (nobody can join)");
+        assert_eq!(allowlist_text(&snap(true, 3)), "on, 3 listed");
     }
 }

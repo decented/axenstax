@@ -2250,11 +2250,7 @@ impl HostedServer {
 
         let now = current_unix_ts() as u64;
         let agg = self.session_log.aggregates(now, now - (now % 86_400));
-        let policy = (
-            self.require_signin,
-            self.allow.listed() as u32,
-            self.blocklist.len() as u32,
-        );
+        let policy = (self.require_signin, &self.allow, self.blocklist.len() as u32);
         let ident = self.identity.as_ref().map_or_else(
             || (String::new(), String::new(), 0u64),
             |id| {
@@ -8096,13 +8092,43 @@ struct KeepHold {
 /// (the reject reason is sent verbatim to the client).
 /// Read the queued kick npubs from `<dir>/kick` and delete the file. Returns the
 /// x-only pubkey bytes; blank/unparseable lines are skipped.
+///
+/// The file is renamed to `kick.taking` first and read from there, so a kick an
+/// admin command writes while this runs lands in a fresh `kick` and is taken next
+/// time, not deleted unread. A `kick.taking` left by an earlier run that stopped
+/// part-way is read before anything else.
 #[cfg(not(target_arch = "wasm32"))]
 fn take_kick_queue(dir: &std::path::Path) -> Vec<[u8; 32]> {
+    take_kick_queue_with(dir, || {})
+}
+
+/// [`take_kick_queue`], calling `after_move` once the queue has been moved aside
+/// and before it is read: the moment a writer could add a kick.
+#[cfg(not(target_arch = "wasm32"))]
+fn take_kick_queue_with(dir: &std::path::Path, after_move: impl FnOnce()) -> Vec<[u8; 32]> {
     let path = dir.join("kick");
-    let Ok(contents) = std::fs::read_to_string(&path) else {
-        return Vec::new();
+    let taking = dir.join("kick.taking");
+    if !taking.exists() {
+        match std::fs::rename(&path, &taking) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+            Err(e) => {
+                log::warn!("kick: can't take the queue {}: {e}", path.display());
+                return Vec::new();
+            }
+        }
+    }
+    after_move();
+    let contents = match std::fs::read_to_string(&taking) {
+        Ok(contents) => contents,
+        Err(e) => {
+            log::warn!("kick: can't read {}, will try again: {e}", taking.display());
+            return Vec::new();
+        }
     };
-    let _ = std::fs::remove_file(&path);
+    if let Err(e) = std::fs::remove_file(&taking) {
+        log::warn!("kick: can't remove {}: {e}", taking.display());
+    }
     contents
         .lines()
         .filter_map(|l| {
@@ -10788,5 +10814,46 @@ mod block_machine_flag_tests {
         // double every piston push.
         let hs = start("lan-host", 1);
         assert!(!hs.server.simulates_block_machines);
+    }
+
+    // ── the kick queue is taken by renaming it aside ──
+
+    fn kick_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("axe_kick_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn npub_line(pk: &[u8; 32]) -> String {
+        use nostr::ToBech32;
+        format!("{}\n", nostr::PublicKey::from_slice(pk).unwrap().to_bech32().unwrap())
+    }
+
+    #[test]
+    fn a_kick_written_while_the_queue_is_read_is_not_lost() {
+        let dir = kick_dir("race");
+        let (a, b) = ([1u8; 32], [2u8; 32]);
+        std::fs::write(dir.join("kick"), npub_line(&a)).unwrap();
+        // An admin command lands between the queue being taken and it being read.
+        let taken = take_kick_queue_with(&dir, || {
+            std::fs::write(dir.join("kick"), npub_line(&b)).unwrap();
+        });
+        assert_eq!(taken, vec![a], "this look takes only what was queued before it");
+        assert_eq!(take_kick_queue(&dir), vec![b], "the late kick is still there for the next one");
+        assert!(take_kick_queue(&dir).is_empty());
+        assert!(!dir.join("kick").exists() && !dir.join("kick.taking").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_queue_left_half_taken_is_read_before_a_newer_one() {
+        let dir = kick_dir("half");
+        let (a, b) = ([3u8; 32], [4u8; 32]);
+        std::fs::write(dir.join("kick.taking"), npub_line(&a)).unwrap();
+        std::fs::write(dir.join("kick"), npub_line(&b)).unwrap();
+        assert_eq!(take_kick_queue(&dir), vec![a]);
+        assert_eq!(take_kick_queue(&dir), vec![b]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
