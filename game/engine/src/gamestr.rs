@@ -3,12 +3,15 @@
 //!
 //! Design: `docs/superpowers/specs/2026-06-11-gamestr-wasm-scoring-design.md`.
 //!
-//! All wire concerns — the signer, the relay, the minimal kind-0 handle, and the
-//! opt-in (default-OFF) overlay — live in `tools/sites/game/static/gamestr.js`.
-//! This module is only the TRIGGER and the SCOPE GATE: at a scenario's
-//! not-ended → ended edge the game loop calls [`offer_score`], which (on WASM,
-//! for an in-scope scenario with a signer present) hands the score to the JS
-//! overlay. Nothing is signed or published unless the player ticks the box.
+//! **The JS half is gone.** The signer, the relay, the kind-0 handle and the
+//! opt-in overlay lived in `tools/sites/game/static/gamestr.js`, which has been
+//! removed, and nothing in the tree defines
+//! `axenstax_gamestr_offer` now. This module is the TRIGGER and the SCOPE GATE
+//! only: at a scenario's not-ended → ended edge the game loop calls
+//! [`offer_score`], which on WASM, for an in-scope scenario, calls that missing
+//! function; the call fails and a warning is logged. Nothing is signed or
+//! published. Restoring the overlay would need the design below to be revisited
+//! (the web build is an anonymous taster with no signer).
 //!
 //! Score integrity is HONOUR-SYSTEM for v1: a client-signed kind-33334 event is
 //! forgeable. Acceptable for a staffed booth; server-validated proof-of-play is
@@ -42,9 +45,10 @@ pub fn should_offer_on_tick(was_ended: bool, now_ended: bool) -> bool {
     !was_ended && now_ended
 }
 
-// --- WASM bridge to tools/sites/game/static/gamestr.js ----------------------
-// Mirrors the open_stash.rs / beacon.js extern pattern. The engine treats the
-// offer as best-effort and fire-and-forget.
+// --- WASM bridge to a JS overlay that no longer exists -----------------------
+// `gamestr.js` (formerly `tools/sites/game/static/`) is removed, so the extern
+// below resolves to nothing. The engine treats the offer as best-effort and
+// fire-and-forget; the failure is logged and ignored.
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
@@ -53,19 +57,15 @@ use wasm_bindgen::prelude::*;
 #[wasm_bindgen]
 extern "C" {
     /// Show the opt-in leaderboard overlay for `game_id` with `work` points.
-    /// gamestr.js owns the checkbox (default OFF), the handle field, the signer
-    /// acquisition, and the kind-0 + kind-33334 publish; nothing is signed unless
-    /// the player opts in and clicks Post.
+    /// No script defines this any more (see the module note), so the call fails.
     #[wasm_bindgen(js_name = axenstax_gamestr_offer, catch)]
     async fn js_gamestr_offer(game_id: String, work: f64) -> Result<JsValue, JsValue>;
 }
 
 /// Offer to publish a just-ended scenario's score to the leaderboard. No-op
-/// unless the scenario is in scope ([`gamestr_game_id`] is `Some`). On WASM the
-/// overlay ALWAYS appears for an in-scope scenario; it does NOT gate on a live
-/// signer, because a phone bunker may not be connected at the round-end instant
-/// (the background reconnect can take >15s). gamestr.js connects the bunker
-/// lazily when the player clicks Post — the same pattern cloud save uses.
+/// unless the scenario is in scope ([`gamestr_game_id`] is `Some`). On WASM it
+/// then calls the overlay hook, which no script defines now, so nothing appears
+/// and nothing is published.
 ///
 /// The scope gate runs on every target (so it's exercised by the unit tests and
 /// a mis-scoped scenario is caught everywhere); native is a no-op past the gate

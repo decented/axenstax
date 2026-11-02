@@ -266,11 +266,11 @@ docs/
 game/
   engine/          — Custom voxel engine (client + server)
   textures/        — Block textures (16x16 default pack)
-platform/          — RETIRED placeholders (matchmaking/session directory/Agones cross red lines 1+2; see platform/README.md)
 tools/
   research-viewer/ — Local web app for YouTube research (port 8888)
 infra/
   k8s/             — RETIRED (see infra/k8s/README.md)
+  blossom/         — RETIRED (see infra/blossom/README.md)
   docker/          — Dockerfiles for server images
 ```
 
