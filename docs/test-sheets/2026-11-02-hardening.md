@@ -30,6 +30,7 @@ Each needs a real install. Say what you saw, not just pass or fail.
 2. A friend joins by room code. On your phone, block them in Signet. How long until they're removed, and what do they see? Can they rejoin with the code?
 3. Remove a Signet contact while they're in a world you host by contact. Same questions.
 4. Turn your phone off for a long session of hosting by contact. Do friends get removed when the contact list goes stale? Is the wording fair? (Owner call: this fails closed and could surprise a host.)
+4b. With the Signet files damaged, in a window narrower than 1360 logical pixels: is there a Disconnect at the top of the lobby, and does it recover?
 
 ### Dedicated server
 5. Start with no address set: does the message tell you what to set?
