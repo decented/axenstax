@@ -250,9 +250,11 @@ pub fn step(
 }
 
 fn tick_campfires(ctx: &mut MachineCtx<'_>, changes: &mut Vec<BlockChange>) {
-    // Tick determinism (Spec 01 §4.1.4): a campfire's smoke pillar and lit
-    // flip write cells a neighbour's pass reads, so position order.
-    let mut positions: Vec<_> = ctx.world.block_entities.keys().copied().collect();
+    // Tick determinism (Spec 01 §4.1.4): position order pins the order of the
+    // block changes this emits. It doesn't reach simulated state: a pillar
+    // stops at the first non-smoke cell, so one fire's flip and clear never
+    // touch what another fire reads.
+    let mut positions: Vec<_> = ctx.world.iter_campfires().map(|(p, _)| p).collect();
     positions.sort_unstable();
     for pos in positions {
         if !ctx.world.is_column_present_at(pos.0, pos.2) {

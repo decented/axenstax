@@ -2,6 +2,10 @@ use super::*;
 use crate::item::{ItemStack, MaterialId};
 
 fn step_world(world: &mut World, batch: &mut MachineBatch) {
+    step_collecting(world, batch, &mut Vec::new());
+}
+
+fn step_collecting(world: &mut World, batch: &mut MachineBatch, changes: &mut Vec<BlockChange>) {
     let (mut ecs, mut water, mut lava, mut fire) = (
         hecs::World::new(),
         crate::water::WaterSystem::new(),
@@ -28,7 +32,7 @@ fn step_world(world: &mut World, batch: &mut MachineBatch) {
         },
         &LocalMachineState::default(),
         batch,
-        &mut Vec::new(),
+        changes,
         |_, _| {},
     );
 }
@@ -41,6 +45,82 @@ fn ready_furnace() -> crate::furnace::FurnaceData {
         fuel_ticks_remaining: 10,
         ..Default::default()
     }
+}
+
+/// Tick determinism (Spec 01 §4.1.4): more furnaces finish than a batch has
+/// room for, and the ones that get in are the lowest positions, not whichever
+/// the hash map offered first. A deferred furnace is untouched, so its
+/// completion, and everything after it, moves to a later pass.
+#[test]
+fn a_full_batch_takes_the_lowest_furnaces_in_position_order() {
+    let mut world = World::new();
+    let total = MAX_MACHINE_FACTS as i32 + 12;
+    for x in 0..total {
+        world.set_block(x, 64, 0, block::FURNACE);
+        world.insert_furnace((x, 64, 0), ready_furnace());
+    }
+    let mut batch = MachineBatch::reserve(true).unwrap();
+    step_world(&mut world, &mut batch);
+    let finished: Vec<MachineFact> = (0..MAX_MACHINE_FACTS as i32)
+        .map(|x| MachineFact::FurnaceCompleted((x, 64, 0)))
+        .collect();
+    assert_eq!(batch.facts(), &finished[..]);
+    for x in MAX_MACHINE_FACTS as i32..total {
+        let furnace = world.furnace_at((x, 64, 0)).unwrap();
+        assert_eq!(furnace.smelt_progress, 199, "furnace at x {x} was deferred");
+    }
+}
+
+/// Tick determinism (Spec 01 §4.1.4): campfires stacked in one column, each
+/// burning out this pass with smoke above it. The block changes come out in
+/// position order. The block state alone can't tell the order: the lower
+/// fire's clear stops at the upper fire, the upper one's flip touches only its
+/// own cell, so they end the same either way (asserted first, and a mutation
+/// that removes the sort still gets past it).
+#[test]
+fn stacked_campfires_emit_their_changes_in_position_order() {
+    const STACKS: i32 = 8;
+    let (lower, upper) = (64, 67);
+    let mut world = World::new();
+    for x in 0..STACKS {
+        for y in [lower, upper] {
+            world.set_block(x, y, 0, block::CAMPFIRE);
+            world.insert_campfire(
+                (x, y, 0),
+                crate::campfire::CampfireData {
+                    fuel_ticks: 0,
+                    smoke_ticks: 1,
+                    ..Default::default()
+                },
+            );
+        }
+        // One pillar running through the upper fire, as it stands once a fire
+        // is placed in a lower fire's smoke.
+        for y in lower + 1..upper {
+            world.set_block(x, y, 0, block::CAMPFIRE_SMOKE);
+        }
+        for y in upper + 1..=upper + crate::campfire::SMOKE_PILLAR_HEIGHT {
+            world.set_block(x, y, 0, block::CAMPFIRE_SMOKE);
+        }
+    }
+    let mut changes = Vec::new();
+    let mut batch = MachineBatch::reserve(true).unwrap();
+    step_collecting(&mut world, &mut batch, &mut changes);
+
+    let mut expected = Vec::new();
+    for x in 0..STACKS {
+        assert_eq!(world.get_block(x, lower, 0), block::CAMPFIRE_UNLIT);
+        assert_eq!(world.get_block(x, upper, 0), block::CAMPFIRE_UNLIT);
+        for y in (lower + 1..upper).chain(upper + 1..=upper + crate::campfire::SMOKE_PILLAR_HEIGHT) {
+            assert_eq!(world.get_block(x, y, 0), block::AIR, "smoke at ({x}, {y}) cleared");
+        }
+        expected.push((x, lower, block::CAMPFIRE_UNLIT));
+        expected.extend((lower + 1..upper).map(|y| (x, y, block::AIR)));
+        expected.push((x, upper, block::CAMPFIRE_UNLIT));
+        expected.extend((upper + 1..=upper + crate::campfire::SMOKE_PILLAR_HEIGHT).map(|y| (x, y, block::AIR)));
+    }
+    let emitted: Vec<_> = changes.iter().map(|c| (c.x, c.y, c.new_block)).collect();
+    assert_eq!(emitted, expected);
 }
 
 #[test]
