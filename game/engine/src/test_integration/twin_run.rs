@@ -1,17 +1,24 @@
 //! Keep slice 1 — twin-run determinism (Keep handoff §7). Two `TestHost`
 //! servers in one process, built from the same seed
 //! (`TestHost::start_seeded`) and fed the same scripted events at the same
-//! logical ticks, must reach the same `GameServer::sim_digest` at ticks 1, 200
-//! and 2,000; a different seed must give a different digest.
+//! logical ticks, must reach the same `GameServer::sim_digest` at ticks 1, 200,
+//! 1,200 and 2,000; a different seed must give a different digest.
 //!
-//! The fixture runs every system the handoff names as an outcome-affecting
-//! hash-order site: more than `fire::EVENT_BUDGET` fire cells due at once,
-//! loaded furnaces, hopper chains whose hoppers sit in different chunks and
-//! share a chest, lit campfires, flowing water, scattered and placed mobs,
-//! and two server-simulated joiners whose scripted teleports make the
-//! dedicated column streamer scatter new columns in and stream old ones out
-//! (despawning their wildlife). Machines tick inside `GameServer::tick`
+//! What the fixture holds: more than `fire::EVENT_BUDGET` fire cells due at
+//! once, loaded furnaces, hopper chains that cross a chunk boundary in nine
+//! columns, lit campfires, flowing water, scattered and placed mobs, and two
+//! server-simulated joiners whose scripted teleports make the dedicated column
+//! streamer scatter new columns in and stream old ones out (despawning their
+//! wildlife). Machines tick inside `GameServer::tick`
 //! (`simulates_block_machines`, the dedicated server's setting).
+//!
+//! What it can actually catch at a checkpoint: order at the fire budget, the
+//! hopper transfers, the column scatter and the stream-out. Furnaces and
+//! campfires are present but their order can't show here: the dedicated path
+//! reserves no delivery batch, so no furnace is ever deferred, and campfire
+//! order only reaches the emitted block changes, which the digest leaves out.
+//! `sim_machine_tests.rs` covers both. Not in the fixture at all: power devices,
+//! carts, crops, bees, salt licks and the other open sites in Spec 01 §4.1.4.
 //!
 //! Both twins share the process statics (`CHUNK_SYNC`, `data_dir::ROOT`,
 //! one worlds root); each opens its own world folder. The twins share one
@@ -30,6 +37,33 @@ use crate::test_harness::{TestConfig, TestHost};
 pub(crate) const LOAD_RADIUS: i32 = 3;
 /// The machine platform's height: above every v2 column (the old 96 roof).
 pub(crate) const BASE_Y: i32 = 100;
+/// One hopper chain per `(x, z)`, each in its own chunk column. Without the
+/// sort in `hopper::collect_hopper_transfers`, each column is one more chance
+/// for the twins to visit its two hopper chunks in a different order: a chain
+/// misses with odds of one in two, all nine with one in 512.
+const CHAINS: [(i32, i32); 9] = [
+    (-4, -12),
+    (4, -12),
+    (20, -12),
+    (-4, 10),
+    (4, 10),
+    (20, 10),
+    (-4, 20),
+    (4, 20),
+    (20, 20),
+];
+/// A chain's top and bottom chests, and how much the top one starts with: at
+/// one item every 8 ticks, it is still draining at tick 2,000, so a difference
+/// in how far items have travelled is still there at every checkpoint.
+const CHAIN_TOP_Y: i32 = 114;
+const CHAIN_BOTTOM_Y: i32 = 108;
+const CHAIN_STACKS: u8 = 6;
+const CHAIN_STACK_SIZE: u8 = 64;
+/// The campfires' x (at `y = BASE_Y + 1`, `z = 14`).
+const CAMPFIRES_X: [i32; 3] = [-6, -3, 0];
+/// The furnaces' x and z (at `y = BASE_Y + 1`).
+const FURNACES_X: [i32; 3] = [16, 18, 20];
+const FURNACES_Z: [i32; 2] = [0, 2];
 
 /// Hex of a digest, for messages.
 fn hex32(d: &[u8; 32]) -> String {
@@ -98,11 +132,12 @@ pub(crate) fn drive_joiners(h: &mut TestHost, tick: u64) {
 /// - a plank field with 240 fires lit at once (more than `EVENT_BUDGET` = 64
 ///   are due on each 4-tick pass, so the budget's pick is what's tested);
 /// - six loaded furnaces;
-/// - six hopper chains, chest/hopper/chest/hopper/chest/hopper/chest from
-///   y 114 down to 108: the hopper at 113 is in chunk cy 7, those at 111 and
-///   109 in cy 6, and the chest at 112 is shared, so the order the hopper
-///   chunks are visited decides how far an item moves in one pass;
-/// - three lit campfires with smoke, which burn out and smoulder in-run;
+/// - nine hopper chains, one per column of [`CHAINS`],
+///   chest/hopper/chest/hopper/chest/hopper/chest from y 114 down to 108: the
+///   hopper at 113 is in chunk cy 7, those at 111 and 109 in cy 6, and the
+///   chest at 112 is shared, so the order the hopper chunks are visited decides
+///   how far an item moves in one pass;
+/// - three lit campfires with a smoke timer, which burn out and smoulder in-run;
 /// - three water sources, one pouring off the platform's edge;
 /// - a dozen placed animals and brigands next to the joiners.
 pub(crate) fn build_fixture(h: &mut TestHost) {
@@ -126,8 +161,8 @@ pub(crate) fn build_fixture(h: &mut TestHost) {
     }
     assert!(lit > 64 * 2, "fire fixture lit {lit} cells");
     // Furnaces.
-    for (i, x) in [16, 18, 20].into_iter().enumerate() {
-        for z in [0, 2] {
+    for (i, x) in FURNACES_X.into_iter().enumerate() {
+        for z in FURNACES_Z {
             h.load_furnace(
                 x,
                 BASE_Y + 1,
@@ -138,34 +173,35 @@ pub(crate) fn build_fixture(h: &mut TestHost) {
         }
     }
     // Hopper chains.
-    for x in [16, 18, 20] {
-        for z in [8, 10] {
-            for y in [114, 112, 110, 108] {
-                h.set_block(x, y, z, block::CHEST);
-                let stacks: Vec<ItemStack> = if y == 114 {
-                    vec![
-                        ItemStack::new_block(block::COBBLESTONE, 5),
-                        ItemStack::new_material(MaterialId::Coal, 3),
-                        ItemStack::new_material(MaterialId::Copper, 4),
-                    ]
-                } else {
-                    Vec::new()
-                };
-                h.insert_chest_with(x, y, z, &stacks);
-            }
-            for y in [113, 111, 109] {
-                h.set_block(x, y, z, block::HOPPER);
-            }
+    for (x, z) in CHAINS {
+        for y in [CHAIN_TOP_Y, 112, 110, CHAIN_BOTTOM_Y] {
+            h.set_block(x, y, z, block::CHEST);
+            let stacks: Vec<ItemStack> = if y == CHAIN_TOP_Y {
+                (0..CHAIN_STACKS)
+                    .map(|i| match i % 3 {
+                        0 => ItemStack::new_block(block::COBBLESTONE, CHAIN_STACK_SIZE),
+                        1 => ItemStack::new_material(MaterialId::Coal, CHAIN_STACK_SIZE),
+                        _ => ItemStack::new_material(MaterialId::Copper, CHAIN_STACK_SIZE),
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            h.insert_chest_with(x, y, z, &stacks);
+        }
+        for y in [113, 111, 109] {
+            h.set_block(x, y, z, block::HOPPER);
         }
     }
-    // Campfires.
-    for x in [-6, -3, 0] {
+    // Campfires. A fire's timers run down once per 4-tick machine pass, so the
+    // longest of these (400 passes) is out by tick 1,600.
+    for x in CAMPFIRES_X {
         let pos = (x, BASE_Y + 1, 14);
         h.set_block(pos.0, pos.1, pos.2, block::CAMPFIRE);
         h.server.world.insert_campfire(
             pos,
             crate::campfire::CampfireData {
-                fuel_ticks: 300 + 100 * (x.unsigned_abs()),
+                fuel_ticks: 100 + 50 * (x.unsigned_abs()),
                 smoke_ticks: 200,
                 ..Default::default()
             },
@@ -228,6 +264,20 @@ pub(crate) fn run_to(h: &mut TestHost, target: u64) {
     }
 }
 
+/// How many items a chest holds, all stacks together.
+fn chest_items(h: &TestHost, pos: (i32, i32, i32)) -> u32 {
+    let chest = h.server.world.chest_at(pos).expect("a chain chest");
+    chest.slots.iter().flatten().map(|s| u32::from(s.count)).sum()
+}
+
+/// Every chain, as `(items in its top chest, items in its bottom chest)`.
+fn chain_levels(h: &TestHost) -> Vec<(u32, u32)> {
+    CHAINS
+        .iter()
+        .map(|&(x, z)| (chest_items(h, (x, CHAIN_TOP_Y, z)), chest_items(h, (x, CHAIN_BOTTOM_Y, z))))
+        .collect()
+}
+
 /// The sections that differ between two twins, by name.
 fn differing(a: &TestHost, b: &TestHost) -> Vec<&'static str> {
     let (sa, sb) = (a.server.sim_digest_sections(), b.server.sim_digest_sections());
@@ -245,8 +295,15 @@ fn twin_run_same_seed_same_digest() {
         "twins differ before the first tick: {:?}",
         differing(&a, &b)
     );
+    let mut peak_fire_due = 0;
+    let mut levels = chain_levels(&a);
     for at in [1u64, 200, 1200, 2000] {
-        run_to(&mut a, at);
+        while a.server.tick_counter < at {
+            let next = a.server.tick_counter + 1;
+            let due = a.server.fire.digest_view().iter().filter(|(_, event, _)| *event <= next).count();
+            peak_fire_due = peak_fire_due.max(due);
+            run_to(&mut a, next);
+        }
         run_to(&mut b, at);
         if at == 1200 {
             // The streamer really did follow the teleported joiner: the far
@@ -263,13 +320,32 @@ fn twin_run_same_seed_same_digest() {
             "twin digests differ at tick {at}; sections: {:?}",
             differing(&a, &b)
         );
+        // Every chain is still moving at this checkpoint, so a difference in
+        // how far its items have got is there to be seen.
+        if at >= 200 {
+            let now = chain_levels(&a);
+            for (i, (was, is)) in levels.iter().zip(&now).enumerate() {
+                assert!(is.0 > 0 && is.0 < was.0, "chain {i}'s top chest is draining at tick {at}: {was:?} -> {is:?}");
+                assert!(is.1 > was.1, "chain {i}'s bottom chest is filling at tick {at}: {was:?} -> {is:?}");
+            }
+            levels = now;
+        }
     }
     // The fixture really did run the systems it is there for.
     assert!(a.server.ecs.len() > 12, "mobs present: {}", a.server.ecs.len());
     assert!(
-        a.server.world.chest_at((16, 108, 8)).is_some_and(|c| c.slots.iter().any(|s| s.is_some())),
-        "hoppers moved items to the bottom chest"
+        peak_fire_due > crate::fire::EVENT_BUDGET,
+        "{peak_fire_due} fire cells due at once is within the budget, so its pick never mattered"
     );
+    for x in FURNACES_X {
+        for z in FURNACES_Z {
+            let furnace = a.server.world.furnace_at((x, BASE_Y + 1, z)).expect("a fixture furnace");
+            assert!(furnace.output.is_some(), "furnace at ({x}, {z}) smelted something");
+        }
+    }
+    for x in CAMPFIRES_X {
+        assert_eq!(a.get_block(x, BASE_Y + 1, 14), block::CAMPFIRE_UNLIT, "campfire at x {x} burnt out");
+    }
 }
 
 #[test]
