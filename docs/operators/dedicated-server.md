@@ -234,7 +234,11 @@ Set these as environment variables in `docker-compose.yml`:
 | `AXENSTAX_SEED` | _(random)_ | Fixed terrain seed for a **new** world |
 
 Worlds persist on the `axenstax-worlds` volume and are saved on autosave and on a
-graceful `docker stop`.
+graceful `docker stop`. SIGTERM and SIGHUP both stop the server with a final save,
+unless it was started under `nohup`, which keeps SIGHUP ignored. The compose files set
+`stop_grace_period: 120s` so Docker doesn't kill a large world's save part-way; if you
+run your own container, give it as long. If the final save fails the server logs it and
+exits with status 1.
 
 **Simulation distance.** The server loads the world around every connected player
 (and around spawn) as they move, generating new ground or reloading saved ground

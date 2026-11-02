@@ -176,7 +176,9 @@ paths. Operator tools still need a direct QUIC connection. Details:
 > sources at boot.
 
 Worlds persist on the `axenstax-worlds` volume and are saved on autosave + on
-graceful `docker stop`.
+graceful `docker stop`. SIGTERM and SIGHUP stop the server with a save, unless it was
+started under `nohup` (which keeps SIGHUP ignored). The compose files set
+`stop_grace_period: 120s` so the final save of a large world isn't cut short.
 
 ## Verified operator identity (optional)
 
