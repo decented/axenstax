@@ -32,7 +32,7 @@ pub const MAX_ACTIVE_FIRE: usize = 256;
 /// Percent chance per event that rain douses the cell.
 pub const RAIN_DOUSE_PCT: u64 = 40;
 /// Events processed per tick call, so a big blaze can't stall a frame.
-const EVENT_BUDGET: usize = 64;
+pub(crate) const EVENT_BUDGET: usize = 64;
 /// One-in-N chance per settled lava cell per fluid tick to ignite a
 /// neighbouring exposed flammable.
 const LAVA_IGNITE_ONE_IN: u64 = 12;
@@ -166,7 +166,7 @@ impl FireSystem {
 
     /// Keep slice 1 — every burning cell with its timers, sorted by position,
     /// for `GameServer::sim_digest`.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn digest_view(&self) -> Vec<((i32, i32, i32), u64, u8)> {
         let mut v: Vec<_> = self.cells.iter().map(|(p, c)| (*p, c.next_event, c.age)).collect();
         v.sort_unstable_by_key(|(p, _, _)| *p);

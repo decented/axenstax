@@ -34,7 +34,7 @@ impl WaterSystem {
 
     /// Keep slice 1 — sources (sorted) and the pending fronts (in queue order,
     /// which is state), for `GameServer::sim_digest`.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn digest_view(&self) -> crate::fluids::FluidDigestView {
         (
             self.sources.sorted(),

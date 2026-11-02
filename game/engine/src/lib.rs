@@ -440,7 +440,8 @@ mod sim_clock;
 mod sim_lend;
 mod sim_mobs;
 mod sim_death;
-// Keep slice 1 — the authority's twin-run state digest (not the Fray `state_hash`).
+// Keep slice 1 — the authority's twin-run state digest (not the Fray `state_hash`). Tests only.
+#[cfg(test)]
 mod sim_digest;
 mod server_death;
 // T1-5 — per-client bounded StateUpdate queue (split, budget, coalesce, resync).

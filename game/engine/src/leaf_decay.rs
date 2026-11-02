@@ -58,12 +58,13 @@ pub struct LeafDecaySystem {
 }
 
 /// Check queue, decay queue, tick, for `GameServer::sim_digest`.
+#[cfg(test)]
 pub(crate) type LeafDigestView = (Vec<(i32, i32, i32)>, Vec<(i32, i32, i32, u64)>, u64);
 
 impl LeafDecaySystem {
     /// Keep slice 1 — the queues in order (which is state) and the tick, for
     /// `GameServer::sim_digest`.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn digest_view(&self) -> LeafDigestView {
         (self.check_queue.clone(), self.decay_queue.clone(), self.tick)
     }

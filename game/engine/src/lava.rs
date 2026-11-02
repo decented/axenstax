@@ -44,13 +44,21 @@ impl LavaSystem {
 
     /// Keep slice 1 — sources (sorted) and the pending fronts (in queue order,
     /// which is state), for `GameServer::sim_digest`.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn digest_view(&self) -> crate::fluids::FluidDigestView {
         (
             self.sources.sorted(),
             self.spread_queue.iter().copied().collect(),
             self.retract_queue.iter().copied().collect(),
         )
+    }
+
+    /// Keep slice 1 — the phase counter that gates spread, for
+    /// `GameServer::sim_digest` (`FluidDigestView` is shared with water, which
+    /// has no such phase).
+    #[cfg(test)]
+    pub(crate) fn digest_slow(&self) -> u8 {
+        self.slow
     }
 
     pub fn add_source(&mut self, x: i32, y: i32, z: i32) {
