@@ -6,9 +6,9 @@
 //! **This is NOT the Fray contract `state_hash`.** No canonical checkpoint
 //! exists yet (Keep handoff §3, `checkpoint()` row), and this view leaves out
 //! state a restore would need (the hecs allocator free list, carry-over
-//! queues, output state). It is a regression signal for one process, not a
-//! cross-process or cross-architecture identity. Its byte layout may change
-//! freely; nothing persists or sends it.
+//! queues, output state). It is a regression signal, not a cross-architecture
+//! identity. Its byte layout may change freely; nothing persists or sends it,
+//! and it compiles only for tests.
 //!
 //! Encoding: SHA-256 per named section ([`GameServer::sim_digest_sections`])
 //! over an explicitly encoded view, every hash container read in sorted key
@@ -22,14 +22,80 @@
 //! pets, kept steeds, carts, quest givers, author-placed mobs), `wild_mobs`
 //! (every other entity, so nothing falls outside the digest).
 //!
-//! Left out on purpose: `pop_secret` (a secret, never in a digest), `run_id`
-//! and the reputation clock's owner id (per-run identities, not simulated
-//! state), light (derived from blocks), and per-tick output buffers
-//! (`pending_block_changes`, grants: what is sent, not what is). Species
-//! components beyond those [`GameServer::digest_entity`] names (rabbit, bee,
-//! villager data) are not encoded: a divergence there shows once it moves a
-//! body. Debug-encoded values carry raw hecs ids where the type does (a wolf's
-//! attack target), which holds within a run and needs a decision for restore.
+//! ## What is left out, and why
+//!
+//! Walked field by field from the struct definitions; a new field belongs in a
+//! section or in this list.
+//!
+//! **`GameServer`.**
+//! - Secret or per-run identity: `pop_secret` (a secret, never in a digest),
+//!   `run_id`, the reputation clock's owner id.
+//! - Config, set when the server is built or by an admin event, read by the
+//!   tick: `world_name`, `seed` (shows through `chunks`), `registry`,
+//!   `biome_gen`, `fire_spread_enabled`, `explosives_enabled`,
+//!   `simulates_block_machines`, `column_refill_per_tick`, `rolls_lightning`,
+//!   `animal_life_simulated`, `spawn_column`, `play_mode`, `is_creative`,
+//!   `render_distance`, `difficulty`, `lent`.
+//! - Lending mode only (the twins are dedicated): `clock_adopted`,
+//!   `clock_phase_open`, `death_phase_open`, `machine_phase_open`,
+//!   `hopper_phase_open`, `projectile_phase_open`, `lent_strike`,
+//!   `lent_day_owner`, `lent_day_offer`, `lent_day_consumer`,
+//!   `lent_local_seats`.
+//! - Output, what is sent and not what is: `pending_block_changes`,
+//!   `pending_item_grants`, `pending_kill_events`, `pending_bred_events`,
+//!   `released_joiners`, `released_mounts`, `sim_events`.
+//! - Join and handover event paths: `failed_joiner_reads`, `next_attach_gen`,
+//!   `tables_gone` (feeds a joiner's table verdict only),
+//!   `selected_local_personal`, `gameplay_preparation`.
+//!
+//! **`World`.**
+//! - `quest_scope`: a random per-world identity set by an attach event.
+//! - Derived, or runtime flags with no meaning of their own: `evicted_columns`
+//!   (from `evicted`), `salt_licks` and `procgen_plaque_sources` (from blocks),
+//!   `worldgen_depth` and `worldgen_top` (only differ inside `generate_column`).
+//! - Output logs drained every tick and save bookkeeping: `edited_columns`,
+//!   `tables_gone`, `attachment_log`, `disk_chunks`.
+//! - Content and client-side: `plan_registry`, `micro_registry`,
+//!   `override_registry`, `player_wardrobe`, `workshop`, `beacon_publish_pending`,
+//!   `is_workshop`, `beacon_browse_cache`, `render_hidden`.
+//! - Config mirrored from the world's meta at entry: `world_type`, `ground`,
+//!   `water_depth`, `time_lock`, `mobs_enabled`, `keep_inventory`, `generator`.
+//! - `sim_tally`: a diagnostic count.
+//!
+//! **`Chunk`.** `mesh_dirty` and `persist` (runtime flags; `persist` shows
+//! through the evicted store), `non_air`, `pistons`, `hoppers` (counts derived
+//! from `blocks`). An evicted chunk's light: its light reads as 0, writes to it
+//! are dropped, and a restore reruns the column's light pass.
+//!
+//! **Systems.** `LeafDecaySystem`: `check_set` and `decay_set` (from the
+//! queues), `pending_sapling_drops` (output). `UpdateScheduler::in_pending`
+//! (from `pending`).
+//!
+//! **`ServerPlayer`.** The fixture's joiners have no connection, so these
+//! event-fed, per-connection states stay out:
+//! - Action, pack and quest lanes: `inventory_mode`, `action_frontier`,
+//!   `action_queue`, `action_results`, `pack_session`, `pack_flight`,
+//!   `quest_session`, `gameplay_clock`, `personal`, `personal_read_failed`,
+//!   `personal_delivery`.
+//! - Window-mirror models and log-only counters: `window_events`, `obligations`,
+//!   `container_sent`, `block_views`, `refused_uses`, `possession`,
+//!   `strict_refusals`, `strict_corrections`.
+//! - Identity and social settings fixed at join: `skin_key`, `verified_pubkey`,
+//!   `display_name`, `comms`, `contacts` (a `HashMap`, so its `Debug` text is in
+//!   iteration order), `chat_rate`, `worldgen_mismatch`.
+//! - `QueuedInput::intent`: the keys of a queued input (its sequence number,
+//!   look and health delta are encoded). It shows once it moves the body.
+//!
+//! **Entity components** beyond those [`GameServer::digest_entity`] names:
+//! `Hitbox`, `Shooter`, `ProtocolId`, `Mirrored`, `PackRevision`, `Scattered`,
+//! `NightSpawn`, `Authored`, `Summoned`, `Flying`, `Ridden`, `Baby`, `Genetics`,
+//! `InLove`, `BreedCooldown`, `AlarmCooldown`, `AnimalProductState`,
+//! `DeliberateCull`, `HomeHideout`, `LastAttacker`, `SatoshiMarker`, `Tethered`,
+//! `VillagerComponent`, and the data of bears, bees, goats, hyenas, rabbits and
+//! squid. A divergence there shows once it moves a body or changes a block; a
+//! difference that never does is not seen. Debug-encoded values carry raw hecs
+//! ids where the type does (a wolf's attack target), which holds within a run
+//! and needs a decision for restore.
 //!
 //! Entity key: the hecs `Entity::to_bits()` (id + generation), sorted. Entity
 //! ids are outcome state here — mob AI rolls hash them
@@ -138,7 +204,6 @@ impl GameServer {
     /// One SHA-256 over the sorted `(name, digest)` pairs of
     /// [`Self::sim_digest_sections`]. Game-owned; NOT the Fray contract
     /// `state_hash` (see the module docs).
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn sim_digest(&self) -> [u8; 32] {
         let mut top = Sha256::new();
         for (name, digest) in self.sim_digest_sections() {
@@ -150,13 +215,14 @@ impl GameServer {
     }
 
     /// The digest's named sections, each its own SHA-256, for comparing two
-    /// runs section by section: `chunks`, `block_entities`, `tamed_entities`,
-    /// `wild_mobs`, `item_drops`, `projectiles`, `fire_fluid_queues`, `clocks`
-    /// and `players`.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// runs section by section: `chunks`, `light`, `block_entities`,
+    /// `world_tables`, `tamed_entities`, `wild_mobs`, `item_drops`,
+    /// `projectiles`, `fire_fluid_queues`, `clocks` and `players`.
     pub fn sim_digest_sections(&self) -> BTreeMap<&'static str, [u8; 32]> {
         BTreeMap::from([
             ("chunks", self.digest_chunks()),
+            ("light", self.digest_light()),
+            ("world_tables", self.digest_world_tables()),
             ("block_entities", self.digest_block_entities()),
             ("tamed_entities", self.digest_entities("tamed_entities", EntityClass::Tamed)),
             ("wild_mobs", self.digest_entities("wild_mobs", EntityClass::Wild)),
@@ -201,6 +267,73 @@ impl GameServer {
             e.i32(cx);
             e.i32(cz);
         }
+        e.finish()
+    }
+
+    /// The packed light array of every loaded chunk that isn't wholly dark
+    /// (sorted by position). A dark chunk reads like an absent one, so a block
+    /// write that conjures a chunk doesn't read as a light change.
+    fn digest_light(&self) -> [u8; 32] {
+        let mut e = Enc::new("light");
+        for (pos, chunk) in sorted(self.world.iter_chunks()) {
+            let light = chunk.light_bytes();
+            if light.iter().any(|&l| l != 0) {
+                e.pos(pos);
+                e.bytes(light);
+            }
+        }
+        e.finish()
+    }
+
+    /// The world's side tables that a tick, an input or an event writes and a
+    /// later roll or save reads, every hash container in sorted key order.
+    fn digest_world_tables(&self) -> [u8; 32] {
+        let w = &self.world;
+        let mut e = Enc::new("world_tables");
+        e.debug(&w.bounties);
+        e.u32(w.bounty_next_id);
+        e.u64(w.bounty_last_refresh_tick);
+        e.u64(w.brigand_hideouts.len() as u64);
+        for (cell, data) in sorted(w.brigand_hideouts.iter().map(|(c, d)| (*c, d))) {
+            e.i32(cell.0);
+            e.i32(cell.1);
+            e.debug(data);
+        }
+        e.u64(w.construction_anchors.len() as u64);
+        for (pos, data) in sorted(w.construction_anchors.iter().map(|(p, d)| (*p, d))) {
+            e.pos(pos);
+            e.bytes(&bincode::serialize(data).expect("construction anchor encodes"));
+        }
+        e.debug(&w.scheduler.digest_view());
+        let mut mains: Vec<_> = w.power.mains.iter().copied().collect();
+        mains.sort_unstable();
+        e.debug(&mains);
+        e.debug(&w.satoshi);
+        e.debug(&w.active_raids);
+        e.debug(&w.raid_scheduler);
+        e.debug(&sorted(w.raid_kills.iter().map(|(k, n)| (*k, *n))));
+        e.debug(&sorted(w.pop_exposure.iter().map(|(p, t)| (*p, *t))));
+        e.debug(&sorted(w.village_anchors.iter().map(|(c, a)| (*c, *a))));
+        e.debug(&sorted(w.village_treasuries.iter().map(|(c, n)| (*c, *n))));
+        let mut populated: Vec<_> = w.populated_villages.iter().copied().collect();
+        populated.sort_unstable();
+        e.debug(&populated);
+        e.debug(&w.village_bells);
+        e.u64(w.architect_plaques.len() as u64);
+        for (pos, data) in sorted(w.architect_plaques.iter().map(|(p, d)| (*p, d))) {
+            e.pos(pos);
+            e.bytes(&bincode::serialize(data).expect("plaque encodes"));
+        }
+        e.debug(&w.pending_legacy_meat_drops);
+        e.debug(&w.hostile_acts);
+        e.debug(&w.plots);
+        e.debug(&w.market_hubs);
+        e.debug(&w.waypoints);
+        e.debug(&w.exhibits);
+        e.debug(&w.rigs);
+        e.u64(w.total_work);
+        e.u32(self.pop_epoch);
+        e.debug(&self.column_streamer);
         e.finish()
     }
 
@@ -351,6 +484,7 @@ impl GameServer {
         e.debug(&self.night_calendar);
         e.debug(&self.reputation_day.digest_view());
         e.u64(self.world.total_ticks);
+        e.debug(&self.weather_lock_applied);
         e.finish()
     }
 
@@ -360,33 +494,104 @@ impl GameServer {
         let mut e = Enc::new("players");
         e.u64(self.players.len() as u64);
         for sp in &self.players {
-            e.vec3(sp.player.pos);
-            e.vec3(sp.player.velocity);
-            e.bool(sp.player.on_ground);
-            e.bool(sp.player.flying);
-            e.f32(sp.player.fall_distance);
+            let p = &sp.player;
+            e.vec3(p.pos);
+            e.vec3(p.velocity);
+            e.bool(p.on_ground);
+            e.bool(p.flying);
+            e.bool(p.in_water);
+            e.f32(p.sprint_boots_mult);
+            e.f32(p.fall_distance);
+            e.debug(&p.pending_landing);
             e.f32(sp.yaw);
             e.f32(sp.pitch);
-            e.f32(sp.combat.health);
-            e.f32(sp.combat.max_health);
-            e.u8(sp.combat.hunger);
-            e.bool(sp.combat.dead);
-            e.u32(sp.combat.poison_ticks);
+            e.vec3(sp.spawn_pos);
+
+            let c = &sp.combat;
+            e.f32(c.health);
+            e.f32(c.max_health);
+            e.u32(c.attack_cooldown);
+            e.u32(c.flash_timer);
+            e.u32(c.invincible_timer);
+            e.f32(c.last_hit_damage);
+            e.bool(c.dead);
+            e.bool(c.respawn_requested);
+            e.bool(c.just_died);
+            e.u32(c.poison_ticks);
+            e.u8(c.hunger);
+            e.u8(c.max_hunger);
+            e.u32(c.hunger_drain_ticks);
+            e.u32(c.regen_ticks);
+            e.u32(c.starvation_ticks);
+            e.f32(c.starvation_floor);
+            e.debug(&c.last_damage);
+            e.debug(&c.breath);
+
             e.bool(sp.server_simulated);
             e.bool(sp.connected);
+            e.bool(sp.awaiting_join);
+            e.bool(sp.death_handled);
+            e.u32(sp.dead_ticks);
+            e.u32(sp.respawns);
+            e.u32(sp.spawn_protection);
+            e.u8(sp.armour_points);
+            e.u8(sp.armour_wear_hits);
+            e.u32(sp.interact_cooldown);
+            e.u32(sp.eat_cooldown);
+            e.u32(sp.attach_gen);
+            e.u64(sp.next_swing_tick);
+            e.u64(sp.next_shot_tick);
+            e.debug(&sp.fishing);
+            e.debug(&sp.drop_bucket);
+            e.debug(&sp.slept_night);
+
             e.u64(sp.last_applied_input);
+            e.u64(sp.last_input_tick);
             e.u32(sp.step_credit);
+            e.bool(sp.last_sneak);
+            e.bool(sp.last_acting);
+            e.f32(sp.last_move_mag);
+            e.bool(sp.pending_intent.is_some());
             e.u64(sp.intent_queue.len() as u64);
+            for input in sp.pending_intent.iter().chain(sp.intent_queue.iter()) {
+                e.u64(input.seq);
+                e.f32(input.yaw);
+                e.f32(input.pitch);
+                e.f32(input.health_delta);
+            }
+
+            e.u64(sp.hotbar_slot as u64);
+            e.u32(sp.held_item as u32);
+            e.u8(sp.held_kind);
+            e.u32(sp.held_id as u32);
             for slot in sp.inventory.slots_iter() {
                 e.debug(&slot);
             }
+            e.debug(&sp.armour);
+            e.debug(&sp.cursor);
+            e.debug(&sp.craft_grid);
+            e.debug(&sp.station);
+            e.debug(&sp.table_gone_ticks);
+            e.debug(&sp.open_container);
+            e.u32(sp.last_window_op_seq);
+
+            e.debug(&sp.riding.map(|mount| mount.to_bits().get()));
+            e.debug(&sp.ride);
+            e.debug(&sp.seat_input);
+            e.bool(sp.local_seated);
+
+            e.bool(sp.progression_tracked);
+            e.u32(sp.progression_credits);
+            e.u64(sp.quest_next_incarnation);
+            e.u64(sp.pack_next_incarnation);
+            e.debug(&sp.pack_unfit_feedback);
         }
         e.finish()
     }
 
     /// Burning fire cells with their timers, then water's and lava's sources
     /// (sorted) and pending fronts (in queue order, which is itself state),
-    /// then the leaf-decay queues (in queue order).
+    /// and lava's spread phase, then the leaf-decay queues (in queue order).
     fn digest_fire_fluid_queues(&self) -> [u8; 32] {
         let mut e = Enc::new("fire_fluid_queues");
         let fire = self.fire.digest_view();
@@ -411,6 +616,7 @@ impl GameServer {
                 e.pos(pos);
             }
         }
+        e.u8(self.lava.digest_slow());
         let (check, decay, tick) = self.leaf_decay.digest_view();
         e.u64(tick);
         e.u64(check.len() as u64);
@@ -436,16 +642,18 @@ mod tests {
     use crate::test_harness::{TestConfig, TestHost};
 
     /// The section names, in the contract's terms.
-    const NAMES: [&str; 9] = [
+    const NAMES: [&str; 11] = [
         "block_entities",
         "chunks",
         "clocks",
         "fire_fluid_queues",
         "item_drops",
+        "light",
         "players",
         "projectiles",
         "tamed_entities",
         "wild_mobs",
+        "world_tables",
     ];
 
     fn host() -> TestHost {
@@ -509,10 +717,95 @@ mod tests {
         assert_eq!(changed_by(&mut h, |h| h.server.water.add_source(1, 70, 1)), ["fire_fluid_queues"]);
         assert_eq!(changed_by(&mut h, |h| h.server.lava.add_source(2, 70, 1)), ["fire_fluid_queues"]);
         assert_eq!(changed_by(&mut h, |h| h.set_block(9, 70, 9, crate::block::STONE)), ["chunks"]);
+        assert_eq!(changed_by(&mut h, |h| h.server.world.set_block_light_at(9, 71, 9, 5)), ["light"]);
+        assert_eq!(
+            changed_by(&mut h, |h| {
+                let world = &mut h.server.world;
+                let _ = h.server.lava.tick_spread(world);
+            }),
+            ["fire_fluid_queues"],
+            "lava's spread phase"
+        );
         assert_eq!(
             changed_by(&mut h, |h| h.server.world.insert_chest((9, 71, 9), crate::chest::ChestData::new())),
             ["block_entities"]
         );
+    }
+
+    /// A difference in any of these parts the digest in `world_tables`, even if
+    /// it never reaches a block or a body.
+    #[test]
+    fn the_world_tables_section_sees_each_table() {
+        let mut h = host();
+        let hideout = crate::brigand_hideout_gen::HideoutData {
+            anchor_world: [0, 70, 0],
+            gx: 0,
+            gz: 0,
+            population: 4,
+            population_target: 4,
+            has_berserker: false,
+            last_replenish_tick: 0,
+            dormant_since: None,
+            world_seed: 1,
+        };
+        let changes: [(&str, fn(&mut TestHost)); 9] = [
+            ("bounty_next_id", |h| h.server.world.bounty_next_id += 1),
+            ("bounty_last_refresh_tick", |h| h.server.world.bounty_last_refresh_tick += 1),
+            ("scheduler", |h| h.server.world.scheduler.enqueue((1, 70, 1))),
+            ("mains", |h| {
+                h.server.world.power.mains.insert((2, 70, 1));
+            }),
+            ("satoshi", |h| h.server.world.satoshi.has_greeted = true),
+            ("raid_scheduler", |h| h.server.world.raid_scheduler.next_raid_id += 1),
+            ("pop_exposure", |h| {
+                h.server.world.pop_exposure.insert((3, 70, 1), 9);
+            }),
+            ("populated_villages", |h| {
+                h.server.world.populated_villages.insert((1, 1));
+            }),
+            ("total_work", |h| h.server.world.total_work += 1),
+        ];
+        for (name, change) in changes {
+            assert_eq!(changed_by(&mut h, change), ["world_tables"], "{name}");
+        }
+        h.server.world.brigand_hideouts.insert((0, 0), hideout);
+        assert_eq!(
+            changed_by(&mut h, |h| {
+                h.server.world.brigand_hideouts.get_mut(&(0, 0)).unwrap().dormant_since = Some(5);
+            }),
+            ["world_tables"],
+            "a hideout's dormancy"
+        );
+    }
+
+    /// The tick-mutated player fields the first version of the digest missed.
+    #[test]
+    fn the_players_section_sees_timers_and_the_window() {
+        let mut h = host();
+        let changes: [(&str, fn(&mut TestHost)); 10] = [
+            ("hunger_drain_ticks", |h| h.server.players[0].combat.hunger_drain_ticks += 1),
+            ("regen_ticks", |h| h.server.players[0].combat.regen_ticks += 1),
+            ("starvation_ticks", |h| h.server.players[0].combat.starvation_ticks += 1),
+            ("breath", |h| h.server.players[0].combat.breath.air -= 1),
+            ("spawn_protection", |h| h.server.players[0].spawn_protection += 1),
+            ("dead_ticks", |h| h.server.players[0].dead_ticks += 1),
+            ("hotbar_slot", |h| h.server.players[0].hotbar_slot += 1),
+            ("cursor", |h| {
+                h.server.players[0].cursor = Some(ItemStack::new_material(MaterialId::Coal, 1));
+            }),
+            ("craft_grid", |h| {
+                h.server.players[0].craft_grid[0][0] = Some(ItemStack::new_material(MaterialId::Coal, 1));
+            }),
+            ("armour_points", |h| h.server.players[0].armour_points += 1),
+        ];
+        for (name, change) in changes {
+            assert_eq!(changed_by(&mut h, change), ["players"], "{name}");
+        }
+        let horse = crate::entity::spawn_mob(&mut h.server.ecs, MobType::Horse, Vec3::new(1.5, 70.0, 1.5));
+        h.server.players[0].riding = Some(horse);
+        let with_mount = h.server.sim_digest_sections()["players"];
+        h.server.players[0].riding = None;
+        assert_ne!(with_mount, h.server.sim_digest_sections()["players"], "riding");
     }
 
     #[test]

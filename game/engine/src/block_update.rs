@@ -58,6 +58,20 @@ impl UpdateScheduler {
         Self::default()
     }
 
+    /// Keep slice 1 — the pending queue and the scheduled updates in order
+    /// (both are state; `in_pending` is derived from the queue), for
+    /// `GameServer::sim_digest`.
+    #[cfg(test)]
+    pub(crate) fn digest_view(&self) -> (Vec<Pos>, Vec<(u64, ScheduledUpdate)>) {
+        (
+            self.pending.iter().copied().collect(),
+            self.scheduled
+                .iter()
+                .flat_map(|(due, updates)| updates.iter().map(|u| (*due, *u)))
+                .collect(),
+        )
+    }
+
     /// Enqueue a position for re-evaluation this tick. Deduped — a position
     /// already pending is not added twice.
     pub fn enqueue(&mut self, pos: Pos) {

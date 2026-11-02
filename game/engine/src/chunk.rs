@@ -253,6 +253,12 @@ impl Chunk {
         self.light[Self::index(x, y, z)]
     }
 
+    /// Keep slice 1 — the whole packed light array, for `GameServer::sim_digest`.
+    #[cfg(test)]
+    pub(crate) fn light_bytes(&self) -> &[u8] {
+        &self.light
+    }
+
     /// 4-bit block-light value at (x, y, z), 0..=15.
     #[inline]
     pub fn block_light_at(&self, x: usize, y: usize, z: usize) -> u8 {
