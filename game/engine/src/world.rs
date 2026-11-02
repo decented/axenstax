@@ -492,6 +492,27 @@ pub const MAX_TABLES_GONE_LOGGED: usize = 256;
 /// keg blast or a falling column a few dozen); past it the oldest is dropped.
 pub const MAX_ATTACHMENT_CHANGES_LOGGED: usize = 4096;
 
+/// Keep slice 2b — the lowest section [`ChunkColumnLayout`] can name. A column
+/// holds more than `0..=MAX_CHUNK_Y`: a light write conjures an empty section
+/// just past the world's floor or roof. Bit 0 of a mask is this section.
+#[cfg(not(target_arch = "wasm32"))]
+const LAYOUT_LOWEST_SECTION: i32 = -8;
+
+/// Keep slice 2b — one column of [`World::chunk_layout`]: which of its sections
+/// (see [`LAYOUT_LOWEST_SECTION`]) are live and which are in the evicted store,
+/// whether the column counts as evicted, and whether any of its chunks carries
+/// `persist` (the one thing a stream-out reads of the flag, so a column's worth
+/// is enough).
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ChunkColumnLayout {
+    pub column: (i32, i32),
+    pub live_sections: u32,
+    pub evicted_sections: u32,
+    pub evicted_column: bool,
+    pub persist: bool,
+}
+
 pub struct World {
     /// Random durable gameplay authority scope, restored from the selected snapshot.
     pub(crate) quest_scope: Option<crate::progression::GameplayId>,
@@ -1418,6 +1439,105 @@ impl World {
         twin.water_depth = self.water_depth;
         twin.generator = self.generator;
         twin
+    }
+
+    /// Keep slice 2b — call `f` with the world position of every `block` cell
+    /// a rescan of column `(cx, cz)` finds: what `register_column_sources` walks
+    /// with `get_block` (the sections up to the top one holding a block, read
+    /// through to an evicted store), without a hash lookup per cell.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn for_each_cell_of(&self, cx: i32, cz: i32, block: crate::block::BlockId, mut f: impl FnMut((i32, i32, i32))) {
+        let cs = CHUNK_SIZE as i32;
+        let Some(top) = self.top_block_section(cx, cz) else { return };
+        for cy in 0..=top {
+            if let Some(chunk) = self.chunk_for_block_read(cx, cy, cz) {
+                chunk.for_each_cell_of(block, |x, y, z| {
+                    f((cx * cs + x as i32, cy * cs + y as i32, cz * cs + z as i32));
+                });
+            }
+        }
+    }
+
+    /// Keep slice 2b — would [`Self::for_each_cell_of`] on column `(cx, cz)`
+    /// find `cell`?
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn is_cell_of(&self, cx: i32, cz: i32, cell: (i32, i32, i32), block: crate::block::BlockId) -> bool {
+        let cs = CHUNK_SIZE as i32;
+        self.top_block_section(cx, cz).is_some_and(|top| cell.1 >= 0 && cell.1 < (top + 1) * cs)
+            && self.get_block(cell.0, cell.1, cell.2) == block
+    }
+
+    /// Keep slice 2b — which chunks this world holds, and where, by column:
+    /// `(column, live sections, evicted sections, evicted column?, any persist?)`,
+    /// sorted by column. With the columns' blocks (the save) that is what
+    /// [`Self::apply_chunk_layout`] needs to put the world back as it was.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn chunk_layout(&self) -> Result<Vec<ChunkColumnLayout>, String> {
+        let mut by_column = std::collections::BTreeMap::<(i32, i32), ChunkColumnLayout>::new();
+        let mut note = |&(cx, cy, cz): &(i32, i32, i32), chunk: &Chunk, evicted: bool| -> Result<(), String> {
+            let Some(bit) = u32::try_from(cy - LAYOUT_LOWEST_SECTION).ok().filter(|bit| *bit < u32::BITS) else {
+                return Err(format!("chunk section {cy} of column ({cx}, {cz}) is out of range"));
+            };
+            let e = by_column.entry((cx, cz)).or_insert_with(|| ChunkColumnLayout { column: (cx, cz), ..Default::default() });
+            if evicted {
+                e.evicted_sections |= 1 << bit;
+            } else {
+                e.live_sections |= 1 << bit;
+            }
+            e.persist |= chunk.persist();
+            Ok(())
+        };
+        for (pos, chunk) in &self.chunks {
+            note(pos, chunk, false)?;
+        }
+        for (pos, chunk) in &self.evicted {
+            note(pos, chunk, true)?;
+        }
+        for &column in &self.evicted_columns {
+            by_column.entry(column).or_insert_with(|| ChunkColumnLayout { column, ..Default::default() }).evicted_column = true;
+        }
+        Ok(by_column.into_values().collect())
+    }
+
+    /// Keep slice 2b — put this world's chunks where `layout` says they were.
+    /// A load holds every saved chunk live: an evicted column goes back to the
+    /// store, a chunk the run did not hold (a stale file of a column it has
+    /// since dropped) goes, and a section the run held empty (never saved)
+    /// comes back empty. Files and side tables aren't touched.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn apply_chunk_layout(&mut self, layout: &[ChunkColumnLayout]) {
+        let mut held = std::mem::take(&mut self.chunks);
+        // An evicted copy wins over a live one, as in `persistable_chunks`.
+        held.extend(std::mem::take(&mut self.evicted));
+        self.evicted_columns.clear();
+        for c in layout {
+            let (cx, cz) = c.column;
+            // Upward: a section above the column's others comes back open sky.
+            for bit in 0..u32::BITS {
+                let cy = LAYOUT_LOWEST_SECTION + bit as i32;
+                let bit = 1u32 << bit;
+                if c.evicted_sections & bit != 0 {
+                    let chunk = held.remove(&(cx, cy, cz)).unwrap_or_else(Chunk::new);
+                    self.evicted.insert((cx, cy, cz), chunk);
+                }
+                if c.live_sections & bit != 0 {
+                    let chunk = held.remove(&(cx, cy, cz)).unwrap_or_else(|| self.conjured_chunk(cx, cy, cz));
+                    self.chunks.insert((cx, cy, cz), chunk);
+                }
+                for store in [&mut self.chunks, &mut self.evicted] {
+                    if let Some(chunk) = store.get_mut(&(cx, cy, cz)) {
+                        if c.persist {
+                            chunk.mark_persist();
+                        } else {
+                            chunk.clear_persist();
+                        }
+                    }
+                }
+            }
+            if c.evicted_column {
+                self.evicted_columns.insert(c.column);
+            }
+        }
     }
 
     /// Spec 02 §7.5 — every chunk a save must write: the loaded chunks plus the

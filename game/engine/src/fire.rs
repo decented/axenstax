@@ -165,12 +165,19 @@ impl FireSystem {
     }
 
     /// Keep slice 1 — every burning cell with its timers, sorted by position,
-    /// for `GameServer::sim_digest`.
-    #[cfg(test)]
+    /// for `GameServer::sim_digest` and the authority checkpoint.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn digest_view(&self) -> Vec<((i32, i32, i32), u64, u8)> {
         let mut v: Vec<_> = self.cells.iter().map(|(p, c)| (*p, c.next_event, c.age)).collect();
         v.sort_unstable_by_key(|(p, _, _)| *p);
         v
+    }
+
+    /// Keep slice 2b — the burning cells as a checkpoint carries them, in place
+    /// of whatever a load registered with fresh timers.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn restore_cells(&mut self, cells: &[((i32, i32, i32), u64, u8)]) {
+        self.cells = cells.iter().map(|&(pos, next_event, age)| (pos, FireCell { next_event, age })).collect();
     }
 
     /// Advance every due fire cell. Returns dirty positions (block changed)

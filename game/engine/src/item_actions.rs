@@ -466,6 +466,21 @@ pub struct DropBucket {
     last_credited: u64,
 }
 
+/// Keep slice 2b — a bucket's whole state, as an authority checkpoint carries it.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) type DropBucketParts = (u8, u64, u8, Option<u64>, u64, u64);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl DropBucket {
+    pub(crate) fn to_parts(self) -> DropBucketParts {
+        (self.tokens, self.since, self.quarters, self.last_read, self.allowance, self.last_credited)
+    }
+
+    pub(crate) fn from_parts((tokens, since, quarters, last_read, allowance, last_credited): DropBucketParts) -> Self {
+        Self { tokens, since, quarters, last_read, allowance, last_credited }
+    }
+}
+
 impl Default for DropBucket {
     fn default() -> Self {
         DropBucket {

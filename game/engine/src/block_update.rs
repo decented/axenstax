@@ -60,8 +60,8 @@ impl UpdateScheduler {
 
     /// Keep slice 1 — the pending queue and the scheduled updates in order
     /// (both are state; `in_pending` is derived from the queue), for
-    /// `GameServer::sim_digest`.
-    #[cfg(test)]
+    /// `GameServer::sim_digest` and the authority checkpoint.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn digest_view(&self) -> (Vec<Pos>, Vec<(u64, ScheduledUpdate)>) {
         (
             self.pending.iter().copied().collect(),
@@ -70,6 +70,18 @@ impl UpdateScheduler {
                 .flat_map(|(due, updates)| updates.iter().map(|u| (*due, *u)))
                 .collect(),
         )
+    }
+
+    /// Keep slice 2b — put back what [`Self::digest_view`] took, each list in
+    /// its order. A load's re-enqueue of every device is replaced.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn restore_view(&mut self, pending: Vec<Pos>, scheduled: Vec<(u64, ScheduledUpdate)>) {
+        self.in_pending = pending.iter().copied().collect();
+        self.pending = pending.into();
+        self.scheduled.clear();
+        for (due, update) in scheduled {
+            self.scheduled.entry(due).or_default().push(update);
+        }
     }
 
     /// Enqueue a position for re-evaluation this tick. Deduped — a position

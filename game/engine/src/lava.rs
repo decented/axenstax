@@ -61,6 +61,29 @@ impl LavaSystem {
         self.slow
     }
 
+    /// Keep slice 2b — what a checkpoint carries: the sources against a rescan
+    /// of `loaded`, the pending fronts in queue order and the spread phase.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn checkpoint_view(&self, world: &World, loaded: &ahash::AHashSet<(i32, i32)>) -> (crate::fluids::FluidCheckpoint, u8) {
+        let (extra, missing) = self.sources.delta_from_rescan(world, loaded, LAVA);
+        let fronts = crate::fluids::FluidCheckpoint {
+            extra,
+            missing,
+            spread: self.spread_queue.iter().copied().collect(),
+            retract: self.retract_queue.iter().copied().collect(),
+        };
+        (fronts, self.slow)
+    }
+
+    /// Keep slice 2b — put back what [`Self::checkpoint_view`] took.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn restore_checkpoint(&mut self, world: &World, loaded: &ahash::AHashSet<(i32, i32)>, saved: &crate::fluids::FluidCheckpoint, slow: u8) {
+        self.sources.rebuild_from_rescan(world, loaded, LAVA, &saved.extra, &saved.missing);
+        self.spread_queue = saved.spread.iter().copied().collect();
+        self.retract_queue = saved.retract.iter().copied().collect();
+        self.slow = slow;
+    }
+
     pub fn add_source(&mut self, x: i32, y: i32, z: i32) {
         if self.sources.insert((x, y, z)) {
             self.spread_queue.push_back((x, y, z, 0));

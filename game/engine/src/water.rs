@@ -43,6 +43,27 @@ impl WaterSystem {
         )
     }
 
+    /// Keep slice 2b — what a checkpoint carries: the sources against a rescan
+    /// of `loaded`, and the pending fronts in queue order.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn checkpoint_view(&self, world: &World, loaded: &ahash::AHashSet<(i32, i32)>) -> crate::fluids::FluidCheckpoint {
+        let (extra, missing) = self.sources.delta_from_rescan(world, loaded, block::WATER);
+        crate::fluids::FluidCheckpoint {
+            extra,
+            missing,
+            spread: self.spread_queue.iter().copied().collect(),
+            retract: self.retract_queue.iter().copied().collect(),
+        }
+    }
+
+    /// Keep slice 2b — put back what [`Self::checkpoint_view`] took.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn restore_checkpoint(&mut self, world: &World, loaded: &ahash::AHashSet<(i32, i32)>, saved: &crate::fluids::FluidCheckpoint) {
+        self.sources.rebuild_from_rescan(world, loaded, block::WATER, &saved.extra, &saved.missing);
+        self.spread_queue = saved.spread.iter().copied().collect();
+        self.retract_queue = saved.retract.iter().copied().collect();
+    }
+
     /// Register a water source (world-gen or player-placed).
     pub fn add_source(&mut self, x: i32, y: i32, z: i32) {
         if self.sources.insert((x, y, z)) {

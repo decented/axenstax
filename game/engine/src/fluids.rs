@@ -76,6 +76,18 @@ pub fn reconcile_frozen_lava_sources(
 #[cfg(test)]
 pub(crate) type FluidDigestView = (Vec<(i32, i32, i32)>, Vec<(i32, i32, i32, u8)>, Vec<(i32, i32, i32)>);
 
+/// Keep slice 2b — a fluid system as an authority checkpoint carries it: its
+/// sources as the difference from a rescan of the loaded columns
+/// (`SourceSet::delta_from_rescan`), and its pending fronts in queue order.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct FluidCheckpoint {
+    pub extra: Vec<(i32, i32, i32)>,
+    pub missing: Vec<(i32, i32, i32)>,
+    pub spread: Vec<(i32, i32, i32, u8)>,
+    pub retract: Vec<(i32, i32, i32)>,
+}
+
 /// A fluid system's source cells, indexed by chunk column so a column that
 /// streams out can be forgotten in one step (Phase B1 review). Water registers
 /// every water block of a streamed-in column as a source, so a flat set grew
@@ -119,6 +131,66 @@ impl SourceSet {
     /// them. Returns how many were forgotten.
     pub fn forget_column(&mut self, cx: i32, cz: i32) -> usize {
         self.by_column.remove(&(cx, cz)).map_or(0, |s| s.len())
+    }
+
+    /// Keep slice 2b — this set against what a rescan of `loaded` would give
+    /// (`register_column_sources`: every `fluid` cell in those columns), as
+    /// `(sources the rescan would not find, cells it would add)`, each sorted.
+    /// Water registers every water block of a column, so an ocean's set is far
+    /// past a checkpoint's cap, while this difference is only what flowed or
+    /// was placed since those columns loaded.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn delta_from_rescan(
+        &self,
+        world: &World,
+        loaded: &AHashSet<(i32, i32)>,
+        fluid: u16,
+    ) -> (Vec<(i32, i32, i32)>, Vec<(i32, i32, i32)>) {
+        let mut missing = Vec::new();
+        for &(cx, cz) in loaded {
+            world.for_each_cell_of(cx, cz, fluid, |cell| {
+                if !self.contains(cell) {
+                    missing.push(cell);
+                }
+            });
+        }
+        let mut extra = Vec::new();
+        for (col, cells) in &self.by_column {
+            let rescanned = loaded.contains(col);
+            for &cell in cells {
+                if !rescanned || !world.is_cell_of(col.0, col.1, cell, fluid) {
+                    extra.push(cell);
+                }
+            }
+        }
+        extra.sort_unstable();
+        missing.sort_unstable();
+        (extra, missing)
+    }
+
+    /// Keep slice 2b — rebuild from a rescan of `loaded` and the difference
+    /// [`Self::delta_from_rescan`] recorded.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn rebuild_from_rescan(
+        &mut self,
+        world: &World,
+        loaded: &AHashSet<(i32, i32)>,
+        fluid: u16,
+        extra: &[(i32, i32, i32)],
+        missing: &[(i32, i32, i32)],
+    ) {
+        self.by_column.clear();
+        for &(cx, cz) in loaded {
+            world.for_each_cell_of(cx, cz, fluid, |cell| {
+                self.insert(cell);
+            });
+        }
+        for &cell in missing {
+            self.remove(cell);
+        }
+        for &cell in extra {
+            self.insert(cell);
+        }
     }
 
     /// Every source, sorted (`GameServer::sim_digest`).

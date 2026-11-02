@@ -104,6 +104,27 @@ impl Chunk {
         self.persist = true;
     }
 
+    /// Keep slice 2b — clear the flag: a restored column whose run had not
+    /// edited it (a load marks everything it reads).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn clear_persist(&mut self) {
+        self.persist = false;
+    }
+
+    /// Keep slice 2b — call `f` with the local `(x, y, z)` of every cell holding
+    /// `block`. A flat scan of the array, so a whole world costs milliseconds.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn for_each_cell_of(&self, block: BlockId, mut f: impl FnMut(usize, usize, usize)) {
+        if self.is_empty() {
+            return;
+        }
+        for (i, &b) in self.blocks.iter().enumerate() {
+            if b == block {
+                f(i % CHUNK_SIZE, i / (CHUNK_SIZE * CHUNK_SIZE), (i / CHUNK_SIZE) % CHUNK_SIZE);
+            }
+        }
+    }
+
     /// Convert local (x, y, z) to flat array index.
     /// x, y, z must be in 0..16.
     #[inline]

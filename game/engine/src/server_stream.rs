@@ -74,6 +74,17 @@ impl Default for ColumnStreamer {
 }
 
 impl ColumnStreamer {
+    /// Keep slice 2b — the whole state, as an authority checkpoint carries it.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn to_parts(&self) -> (i32, usize, Option<&[(i32, i32)]>) {
+        (self.sim_distance, self.budget, self.settled_for.as_deref())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn from_parts(sim_distance: i32, budget: usize, settled_for: Option<Vec<(i32, i32)>>) -> Self {
+        Self { sim_distance, budget, settled_for }
+    }
+
     /// The radius in force (after clamping). Read by tests today.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn sim_distance(&self) -> i32 {

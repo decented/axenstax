@@ -57,16 +57,28 @@ pub struct LeafDecaySystem {
     pending_sapling_drops: Vec<(i32, i32, i32, crate::item::MaterialId)>,
 }
 
-/// Check queue, decay queue, tick, for `GameServer::sim_digest`.
-#[cfg(test)]
+/// Check queue, decay queue, tick, for `GameServer::sim_digest` and the
+/// authority checkpoint.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) type LeafDigestView = (Vec<(i32, i32, i32)>, Vec<(i32, i32, i32, u64)>, u64);
 
 impl LeafDecaySystem {
     /// Keep slice 1 — the queues in order (which is state) and the tick, for
     /// `GameServer::sim_digest`.
-    #[cfg(test)]
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn digest_view(&self) -> LeafDigestView {
         (self.check_queue.clone(), self.decay_queue.clone(), self.tick)
+    }
+
+    /// Keep slice 2b — put back what [`Self::digest_view`] took; the membership
+    /// sets follow from the queues.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn restore_view(&mut self, (check, decay, tick): LeafDigestView) {
+        self.check_set = check.iter().copied().collect();
+        self.decay_set = decay.iter().map(|&(x, y, z, _)| (x, y, z)).collect();
+        self.check_queue = check;
+        self.decay_queue = decay;
+        self.tick = tick;
     }
 
     /// Drain the sapling drops rolled since the last call (2026-07-04).
