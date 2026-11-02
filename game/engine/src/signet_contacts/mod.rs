@@ -96,6 +96,8 @@ struct Shared {
     last_attempt: Option<u64>,
     notice: Option<&'static str>,
     book_changed: bool,
+    /// Raised once each time the Signet files go from readable to unreadable.
+    went_unreadable: bool,
     column_last_drawn: Option<Instant>,
     /// Bumped by Disconnect. A sync that started under an older generation
     /// has its result discarded.
@@ -249,6 +251,9 @@ fn refresh_from_disk(sh: &mut Shared, paths: &StorePaths, now: u64) {
     if sh.stale != was_stale || sh.unreadable != was_unreadable {
         sh.book_changed = true;
     }
+    if sh.unreadable && !was_unreadable {
+        sh.went_unreadable = true;
+    }
 }
 
 fn generation(shared: &Arc<Mutex<Shared>>) -> Option<u64> {
@@ -391,6 +396,12 @@ pub fn view() -> View {
         notice: sh.notice,
     })
     .unwrap_or_default()
+}
+
+/// `true` once each time the Signet files become unreadable, so a host can be
+/// told its Signet friends were removed. Not again on the refreshes that follow.
+pub fn take_went_unreadable() -> bool {
+    with_shared(|sh| std::mem::take(&mut sh.went_unreadable)).unwrap_or(false)
 }
 
 /// The frame loop drains this: `true` once after the book's Signet part
@@ -695,11 +706,21 @@ mod tests {
         assert!(sh.unreadable && sh.book_changed);
         assert!(ui::offers_disconnect(sh.connected, sh.unreadable), "even with the grant gone");
 
+        assert!(std::mem::take(&mut sh.went_unreadable), "the host is told, once");
         sh.book_changed = false;
         refresh_from_disk(&mut sh, &paths, 900);
         assert!(sh.unreadable, "still, after the file was moved aside");
         assert!(!sh.book_changed, "steady state does not re-raise it");
+        assert!(!sh.went_unreadable, "and not again on every refresh");
         assert!(sh.people == 0 && !sh.stale);
+
+        // Fixed, then broken again: that is a new flip.
+        store::delete_all(&paths).unwrap();
+        refresh_from_disk(&mut sh, &paths, 900);
+        assert!(!sh.unreadable && !sh.went_unreadable);
+        std::fs::write(&paths.grant, b"{not json").unwrap();
+        refresh_from_disk(&mut sh, &paths, 900);
+        assert!(sh.went_unreadable, "a second flip is told again");
     }
 
     #[test]

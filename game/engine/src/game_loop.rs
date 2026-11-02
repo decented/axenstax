@@ -733,8 +733,7 @@ impl super::GameState {
             return Err(why);
         }
         let settings = crate::graphics_settings::GraphicsSettings::load();
-        let identity = crate::runtime_identity::RuntimeIdentity::load()?
-            .ok_or_else(|| "no runtime identity".to_string())?;
+        let identity = Self::runtime_identity_for_screen()?;
         let persona = Self::owner_persona_bytes()
             .ok_or_else(|| crate::online_prep::NOT_SIGNED_IN.to_string())?;
         let (book, blocked) = crate::contacts::load_local_book_with_blocks();
@@ -751,6 +750,19 @@ impl super::GameState {
             },
             |relays| Box::new(crate::rendezvous::relay_client::MultiRelay::start(relays)),
         )
+    }
+
+    /// The runtime identity, or a sentence safe to put on screen: the real error
+    /// names a file in the player's home directory, and goes to the log only.
+    fn runtime_identity_for_screen() -> Result<crate::runtime_identity::RuntimeIdentity, String> {
+        match crate::runtime_identity::RuntimeIdentity::load() {
+            Ok(Some(identity)) => Ok(identity),
+            Ok(None) => Err("This computer has nowhere to keep its online key.".to_string()),
+            Err(e) => {
+                log::error!("[online] runtime identity: {e}");
+                Err("This computer couldn't prepare its online key.".to_string())
+            }
+        }
     }
 
     /// Common host-start caller: current folder authority is checked before
@@ -886,8 +898,7 @@ impl super::GameState {
     ) -> Result<(), String> {
         let settings = crate::graphics_settings::GraphicsSettings::load();
         let now = self.online_now();
-        let identity = crate::runtime_identity::RuntimeIdentity::load()?
-            .ok_or_else(|| "no runtime identity".to_string())?;
+        let identity = Self::runtime_identity_for_screen()?;
         let persona = Self::owner_persona_bytes()
             .ok_or_else(|| crate::online_prep::NOT_SIGNED_IN.to_string())?;
         // The same check the host does, and for the same reason: an offer
@@ -959,6 +970,12 @@ impl super::GameState {
                 &blocked,
             );
         }
+        // The same read that makes a running online host drop its Signet-only
+        // friends: say so, once per flip. (A Host Game room is open to its friends
+        // and loses nobody.)
+        if crate::signet_contacts::take_went_unreadable() && self.online_host.is_some() {
+            self.online_toast(crate::signet_contacts::ui::HOST_LOST_SIGNET_FRIENDS, 12);
+        }
 
         // 1 — the worker, if it has finished.
         let finished = self.online_prep.as_mut().and_then(|p| p.take_ready());
@@ -988,6 +1005,10 @@ impl super::GameState {
                 }
                 (_, Err(e)) => {
                     log::warn!("[online] getting ready failed: {e}");
+                    // Toasts draw in a world, and this may be in the lobby.
+                    if let GameMode::Menu(ref mut menu_state) = self.mode {
+                        menu_state.notice = Some(e.clone());
+                    }
                     self.online_toast(e, 8);
                 }
                 (None, Ok(_)) => {}
@@ -9719,12 +9740,21 @@ impl super::GameState {
                     // Refused before any port, router mapping or phone prompt
                     // (Spec 02 §8.4); `start_online_host` checks again.
                     if let Some(why) = crate::save::world_open_refusal(&folder_name) {
+                        menu_state.notice = Some(why.clone());
                         self.online_toast(why, 8);
                     } else if let Err(why) =
                         crate::contacts::load_local_book_with_blocks().1.for_new_host()
                     {
                         menu_state.notice = Some(why);
                     } else {
+                        // A refusal from an earlier press no longer applies.
+                        if menu_state
+                            .notice
+                            .as_deref()
+                            .is_some_and(crate::signet_contacts::ui::is_host_refusal)
+                        {
+                            menu_state.notice = None;
+                        }
                         self.start_online_prep(crate::online_prep::OnlineIntent::Host {
                             folder: folder_name,
                         });

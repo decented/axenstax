@@ -24,11 +24,48 @@ pub const DISCONNECT_HINT: &str = "Also remove \"Axe'n'Stax\" in Signet.";
 pub const TRUNCATED: &str = "Your Signet list may be incomplete.";
 pub const STALE: &str = "Your Signet list is out of date, so it isn't used until it syncs.";
 pub const REVOKED_NOTICE: &str = "Signet disconnected this game.";
+pub const UNREADABLE_SHORT: &str = "Your Signet contacts can't be read.";
 pub const UNREADABLE: &str =
     "Your Signet contacts can't be read. Press Disconnect, then connect Signet again.";
-/// Why a world can't be hosted. The row it points at is in the lobby's Friends column.
+/// Why a world can't be hosted. Disconnect is in the lobby at any width: in the
+/// Friends column when it is drawn, and in a strip across the top when it isn't.
 pub const HOST_REFUSED: &str =
-    "Your Signet contacts can't be read. Reconnect Signet under Friends in the lobby";
+    "Your Signet contacts can't be read. Press Disconnect in the lobby, then connect Signet again.";
+/// What a host is told when the Signet files become unreadable mid-game.
+pub const HOST_LOST_SIGNET_FRIENDS: &str =
+    "Your Signet contacts can't be read, so friends who were only on your Signet list were removed from this game. Press Disconnect in the lobby, then connect Signet again.";
+/// The button beside the lobby notice that says so.
+pub const DISCONNECT_SIGNET: &str = "Disconnect Signet";
+
+/// The narrowest lobby that has room for the Friends column, and so for the row
+/// that holds Disconnect.
+pub const FRIENDS_COLUMN_MIN_WIDTH: f32 = 1360.0;
+
+/// Whether the lobby has to draw its own way out of an unreadable Signet: the
+/// Friends column holds Disconnect, and below the width that has room for it
+/// nothing else would.
+pub fn needs_strip(lobby_width: f32, unreadable: bool) -> bool {
+    unreadable && lobby_width < FRIENDS_COLUMN_MIN_WIDTH
+}
+
+/// Whether a lobby notice is the refusal that Disconnect answers.
+pub fn is_host_refusal(notice: &str) -> bool {
+    notice == HOST_REFUSED
+}
+
+/// A narrow lobby's way out of an unreadable Signet. Returns true once the player
+/// has pressed Disconnect.
+pub fn draw_unreadable_strip(ui: &mut egui::Ui) -> bool {
+    let mut pressed = false;
+    ui.horizontal_wrapped(|ui| {
+        ui.label(dim(UNREADABLE_SHORT));
+        if ui.small_button(DISCONNECT).clicked() {
+            super::disconnect();
+            pressed = true;
+        }
+    });
+    pressed
+}
 
 /// "synced 2 min ago" — coarse on purpose.
 pub fn ago(then: u64, now: u64) -> String {
@@ -151,10 +188,11 @@ pub fn draw(ui: &mut egui::Ui, player_relays: &[String]) {
 mod tests {
     use super::*;
 
-    const ALL: [&str; 21] = [
+    const ALL: [&str; 24] = [
         HEADING, CONNECT_LEAD, CONNECT_BUTTON, SCAN_LINE, COPY_LINK, WAITING, CODE_LINE, CONTINUE,
         CANCEL, TIMED_OUT, TRY_AGAIN, SYNC_NOW, DISCONNECT, DISCONNECT_HINT, TRUNCATED, STALE,
-        REVOKED_NOTICE, UNREADABLE, HOST_REFUSED, "Connected", "contacts",
+        REVOKED_NOTICE, UNREADABLE, HOST_REFUSED, "Connected", "contacts", UNREADABLE_SHORT,
+        DISCONNECT_SIGNET, HOST_LOST_SIGNET_FRIENDS,
     ];
 
     #[test]
@@ -172,6 +210,29 @@ mod tests {
             let money = crate::copy_lint::banned_in(s, crate::copy_lint::BANNED_MONEY_WORDS);
             assert!(money.is_empty(), "{s:?} contains {money:?}");
         }
+    }
+
+    #[test]
+    fn an_unreadable_signet_always_has_a_way_out_in_the_lobby() {
+        // Below the Friends column's width the strip is drawn; at or above it the
+        // column's own row is. There is no width with neither.
+        for width in [320.0, 800.0, 1280.0, 1359.9, FRIENDS_COLUMN_MIN_WIDTH, 1920.0, 3840.0] {
+            let column = width >= FRIENDS_COLUMN_MIN_WIDTH;
+            assert!(
+                column || needs_strip(width, true),
+                "no Disconnect at {width} wide"
+            );
+            assert!(!(column && needs_strip(width, true)), "two at {width} wide");
+            assert!(!needs_strip(width, false), "a readable Signet needs no strip at {width}");
+        }
+    }
+
+    #[test]
+    fn the_host_refusal_is_the_notice_that_offers_disconnect() {
+        assert!(is_host_refusal(HOST_REFUSED));
+        assert!(!is_host_refusal("The connection was closed."));
+        // It must not point at a column that may not be drawn.
+        assert!(!HOST_REFUSED.contains("Friends"));
     }
 
     #[test]

@@ -2425,7 +2425,17 @@ pub fn draw_main_menu(ctx: &egui::Context, state: &mut MenuState) -> MenuAction 
             .show(ctx, |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(notice).strong());
+                        ui.label(egui::RichText::new(&notice).strong());
+                        // The refusal to host says "press Disconnect": here it is,
+                        // at any window width.
+                        #[cfg(not(target_arch = "wasm32"))]
+                        if crate::signet_contacts::ui::is_host_refusal(&notice)
+                            && crate::signet_contacts::view().unreadable
+                            && ui.button(crate::signet_contacts::ui::DISCONNECT_SIGNET).clicked()
+                        {
+                            crate::signet_contacts::disconnect();
+                            state.notice = None;
+                        }
                         if ui.button("OK").clicked() {
                             state.notice = None;
                         }
@@ -3004,7 +3014,7 @@ pub fn draw_main_menu(ctx: &egui::Context, state: &mut MenuState) -> MenuAction 
     // login-free local sandbox with no multiplayer and no contacts book, so a
     // column you can't act on is just confusing.
     #[cfg(not(target_arch = "wasm32"))]
-    if ctx.content_rect().width() >= 1360.0 {
+    if ctx.content_rect().width() >= crate::signet_contacts::ui::FRIENDS_COLUMN_MIN_WIDTH {
         // Top-level panel — see the `#[allow(deprecated)]` note above.
         #[allow(deprecated)]
         egui::Panel::right("friends_column")
@@ -3021,6 +3031,33 @@ pub fn draw_main_menu(ctx: &egui::Context, state: &mut MenuState) -> MenuAction 
                     action = a;
                 }
             });
+    }
+
+    // Below the Friends column's width there is no Signet row, and with the
+    // Signet files unreadable the player's way out (Disconnect) lives there. A
+    // strip across the top keeps it reachable at any width.
+    #[cfg(not(target_arch = "wasm32"))]
+    if crate::signet_contacts::ui::needs_strip(
+        ctx.content_rect().width(),
+        crate::signet_contacts::view().unreadable,
+    ) {
+        let mut pressed = false;
+        #[allow(deprecated)]
+        egui::Panel::top("signet_unreadable")
+            .resizable(false)
+            .frame(
+                egui::Frame::new()
+                    .fill(brand::DEEP_FRONTIER)
+                    .inner_margin(egui::Margin::same(10)),
+            )
+            .show(ctx, |ui| {
+                pressed = crate::signet_contacts::ui::draw_unreadable_strip(ui);
+            });
+        if pressed
+            && state.notice.as_deref().is_some_and(crate::signet_contacts::ui::is_host_refusal)
+        {
+            state.notice = None;
+        }
     }
 
     // Trials (the Challenge Engine) — left column, replacing the old Test Board.
