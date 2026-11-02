@@ -2092,6 +2092,16 @@ format version in a trailing footer — see the bincode note under Migration str
 - When reading an older version, chunks are lazily upgraded: on load, the old format is
   read; on next save, the chunk is written in the new format.
 
+**Decoding is bounded by the file (2026-11-02).** A world file is untrusted input: an
+imported `.axeworld`, an `.axeprofile`, a dedicated server's boot. bincode's reader path
+allocates a string's claimed length before reading it, so every streamed field of
+`WorldSave` goes through `save::decode_bounded`, which limits the decode to the bytes
+left in the file. A length past the end is `ErrorKind::SizeLimit`, an ordinary decode
+error handled as a torn field. The options (`with_fixint_encoding`,
+`allow_trailing_bytes`) are bincode's defaults, so the encoding is unchanged and this is
+not a format change. The legacy fallback decodes from a slice, which checks a length
+against the slice before allocating.
+
 **Migration strategy**:
 - Minor changes (new fields appended): Same version number.
   - **rkyv (production region format):** rkyv's backward-compatible patterns.

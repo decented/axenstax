@@ -2469,6 +2469,24 @@ pub fn save_world(
 
 /// Load a world from disk. Returns (WorldSave, loaded chunk count).
 /// Handles both the current save format and legacy saves (pre-item-persistence).
+/// Read one streamed `WorldSave` field from `cur`, allowing it no more bytes than
+/// the file has left. A world file is untrusted, and bincode's reader path sizes a
+/// buffer from a string's claimed length before reading it, so an unlimited decode
+/// lets a few bytes demand any allocation, or abort on a length past `isize::MAX`.
+/// Past the limit this is `ErrorKind::SizeLimit`, before anything is allocated.
+/// These options are `deserialize_from`'s own defaults: the encoding doesn't change.
+fn decode_bounded<T: serde::de::DeserializeOwned>(
+    cur: &mut std::io::Cursor<&[u8]>,
+) -> Result<T, bincode::Error> {
+    use bincode::Options;
+    let remaining = (cur.get_ref().len() as u64).saturating_sub(cur.position());
+    bincode::options()
+        .with_fixint_encoding()
+        .allow_trailing_bytes()
+        .with_limit(remaining)
+        .deserialize_from(&mut *cur)
+}
+
 /// Read one appended `WorldSave` tail field from `cur`. Returns `T::default()` ONLY
 /// when the cursor is already at a clean end-of-stream — i.e. an OLDER engine stopped
 /// at this exact field boundary, so the field is genuinely absent. If bytes REMAIN,
@@ -2492,7 +2510,7 @@ fn read_tail<T: serde::de::DeserializeOwned + Default>(
     }
     // Bytes remain → the field is present → decode, propagating any error (including a
     // mid-field EOF, which signals a different/legacy/corrupt shape, not a clean tail).
-    bincode::deserialize_from(&mut *cur)
+    decode_bounded(cur)
 }
 
 /// Decoder state for the swallow-on-error part of the `WorldSave` tail (from
@@ -2590,13 +2608,13 @@ fn deserialize_world_save_tolerant_reporting(
         // Required prefix — fields 1-7. A failure here means the stream is not a
         // modern WorldSave (e.g. a genuine legacy 8-field save); propagate so the
         // caller can try `LegacyWorldSave`.
-        seed: bincode::deserialize_from(&mut cur)?,
-        player_x: bincode::deserialize_from(&mut cur)?,
-        player_y: bincode::deserialize_from(&mut cur)?,
-        player_z: bincode::deserialize_from(&mut cur)?,
-        player_health: bincode::deserialize_from(&mut cur)?,
-        hotbar_slot: bincode::deserialize_from(&mut cur)?,
-        inventory: bincode::deserialize_from(&mut cur)?,
+        seed: decode_bounded(&mut cur)?,
+        player_x: decode_bounded(&mut cur)?,
+        player_y: decode_bounded(&mut cur)?,
+        player_z: decode_bounded(&mut cur)?,
+        player_health: decode_bounded(&mut cur)?,
+        hotbar_slot: decode_bounded(&mut cur)?,
+        inventory: decode_bounded(&mut cur)?,
         // Appended tail — fields 8-35, in declaration order. Each defaults to empty
         // if the older writer's stream ends before it.
         players: tail.strict(&mut cur)?,
@@ -2860,10 +2878,10 @@ pub const MAX_IMPORT_DECOMPRESSED_BYTES: u64 = 512 * 1024 * 1024;
 /// Read at most `max` bytes from `reader` into a fresh Vec, erroring if the
 /// stream would exceed `max`. Used to bound gzip decompression on the
 /// cloud/import path: unbounded `read_to_end` on attacker-supplied gzip is a
-/// decompression-bomb OOM. Once the inflated tar is bounded, every downstream
-/// read (tar entries, the bincode `world.dat` decode) is transitively bounded
-/// too, so a crafted length prefix can only EOF against the bounded slice
-/// rather than over-allocate (engine audit 2026-06-04, A: untrusted decode).
+/// decompression-bomb OOM. This bounds the inflated bytes and nothing inside
+/// them: a crafted length prefix in `world.dat` is bounded separately, by
+/// [`decode_bounded`], because bincode's reader path sizes a buffer from it
+/// before reading (engine audit 2026-06-04, A: untrusted decode).
 ///
 /// Generic over the reader (not tied to `flate2`, which is a wasm-only dep) so
 /// the bound logic is exercised by the native test harness.
@@ -7945,5 +7963,69 @@ mod tests {
         }
         let mut w = World::new();
         load_autosave("c", &mut w).unwrap();
+    }
+
+    // ─── A world file can't make the decoder allocate more than it holds ───
+
+    #[test]
+    fn a_crafted_string_length_in_a_tail_field_is_an_error_not_an_allocation() {
+        // Each length is refused before anything is sized from it: 1 TiB returning
+        // at all, at once, is the proof no buffer of that size was made.
+        for len in [1u64 << 40, 1u64 << 63, u64::MAX] {
+            let mut bytes = len.to_le_bytes().to_vec();
+            bytes.extend_from_slice(b"short");
+            let mut cur = std::io::Cursor::new(&bytes[..]);
+            let start = std::time::Instant::now();
+            let err = read_tail::<String>(&mut cur).unwrap_err();
+            assert!(matches!(*err, bincode::ErrorKind::SizeLimit), "{len}: {err:?}");
+            assert!(start.elapsed() < std::time::Duration::from_secs(1), "{len}");
+        }
+    }
+
+    /// A real save whose sign text claims `len` bytes.
+    fn save_with_crafted_sign(len: u64) -> Vec<u8> {
+        const MARK: &[u8] = b"CRAFTED-SIGN-TEXT";
+        let mut save = minimal_world_save_for_tests(7);
+        save.signs.push(SavedSign {
+            x: 0,
+            y: 0,
+            z: 0,
+            data: crate::sign::SignData { text: String::from_utf8(MARK.to_vec()).unwrap() },
+        });
+        let mut bytes = bincode::serialize(&save).unwrap();
+        let at = bytes.windows(MARK.len()).position(|w| w == MARK).unwrap();
+        bytes[at - 8..at].copy_from_slice(&len.to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn a_crafted_world_file_with_a_huge_length_loads_or_refuses_without_panicking() {
+        for len in [1u64 << 40, 1u64 << 63, u64::MAX] {
+            // No footer: the tolerant tail keeps what came before the bad field.
+            let (save, damaged) = read_world_save_reporting(&save_with_crafted_sign(len)).unwrap();
+            assert!(damaged, "the damaged field is reported");
+            assert!(save.signs.is_empty());
+            assert_eq!(save.seed, 7);
+
+            // A current footer: refused whole.
+            let mut footed = save_with_crafted_sign(len);
+            footed.extend_from_slice(&crate::save_format::footer_bytes(crate::save_format::SAVE_FORMAT_VERSION));
+            assert!(read_world_save(&footed).is_err());
+        }
+    }
+
+    #[test]
+    fn the_bounded_decode_reads_exactly_what_the_writer_wrote() {
+        // Byte for byte the encoding `bincode::serialize` writes: fixed-width
+        // integers, a u64 length, and the field stops where it stops, however much
+        // file follows, right up to a field that ends on the file's last byte.
+        let mut bytes = bincode::serialize(&(7u32, String::from("hi"))).unwrap();
+        assert_eq!(bytes.len(), 4 + 8 + 2, "fixint, not varint");
+        bytes.extend_from_slice(&[0xAB; 5]);
+        let mut cur = std::io::Cursor::new(&bytes[..]);
+        assert_eq!(decode_bounded::<u32>(&mut cur).unwrap(), 7);
+        assert_eq!(decode_bounded::<String>(&mut cur).unwrap(), "hi");
+        assert_eq!(cur.position(), 14, "nothing after the field is read");
+        assert_eq!(decode_bounded::<[u8; 5]>(&mut cur).unwrap(), [0xAB; 5]);
     }
 }
