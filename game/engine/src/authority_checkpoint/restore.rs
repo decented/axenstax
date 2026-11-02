@@ -1,7 +1,8 @@
 //! `GameServer::restore_from_checkpoint`: verify, load the records through the
 //! existing load path, verify them against the manifest, apply the volatile
 //! sections. Nothing reaches the caller unless all of it holds, and a refusal
-//! changes nothing on disk beyond what an ordinary load does.
+//! changes nothing on disk: a folder whose load would make a handover's role cut
+//! is refused before the load.
 
 use super::codec::{Malformed, Reader};
 use super::{volatile, AuthorityConfig, Header, RestoreError, AFTER_VERSIONS, HEADER_BYTES, MAX_CHECKPOINT_BYTES, SEAL_BYTES};
@@ -66,6 +67,7 @@ impl GameServer {
         if crate::world_open::is_new_world(&name).map_err(RestoreError::Fault)? {
             return Err(RestoreError::InvalidCheckpoint(format!("world '{name}' holds no saved records")));
         }
+        refuse_a_pending_role_cut(world_dir)?;
         let seed = u32::try_from(config.seed).map_err(|_| RestoreError::InvalidConfig("a seed past u32".into()))?;
         let mut server = GameServer::new(0, name, seed);
         // The load generates what is missing round its centre; the layout below
@@ -104,6 +106,18 @@ impl GameServer {
         }
         Ok(server)
     }
+}
+
+/// A server with no local players makes a handover's role cut at its first load,
+/// so a checkpoint's folder has already made it. One that hasn't (the wrong folder,
+/// a copy from before the cut) would make it inside `initial_load`, an irreversible
+/// change of authority, before the manifest is read.
+fn refuse_a_pending_role_cut(world_dir: &std::path::Path) -> Result<(), RestoreError> {
+    use crate::handover::live::personal_adapter::{proof, role_cut_pending};
+    if proof(world_dir).map_err(RestoreError::Fault)?.is_some() && role_cut_pending(world_dir).map_err(RestoreError::Fault)? {
+        return Err(RestoreError::Fault(format!("{} hasn't made its role cut", world_dir.display())));
+    }
+    Ok(())
 }
 
 /// What a joiner's sidecar holds and the checkpoint doesn't: its bound personal

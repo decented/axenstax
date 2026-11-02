@@ -61,6 +61,23 @@ pub(crate) fn read_regular(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
     crate::save::read_bounded(file, limit)
 }
 
+/// Keep slice 2b — does this folder still show what a role cut clears: a local
+/// recovery snapshot, or a selected local record in `world.dat`? The same test
+/// `claim_selected_personal` makes, read from the disk, so that a restore can
+/// refuse before its load would make the cut. Writes nothing.
+pub(crate) fn role_cut_pending(world: &Path) -> Result<bool, String> {
+    if !matches!(fs::symlink_metadata(world.join("autosave")), Err(e) if e.kind() == std::io::ErrorKind::NotFound) {
+        return Ok(true);
+    }
+    let file = match fs::File::open(world.join("world.dat")) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e.to_string()),
+    };
+    let bytes = crate::save::read_bounded(file, crate::handover::checkpoint::WORLD_DATA_BYTES as u64)?;
+    Ok(crate::save::read_world_save(&bytes).map_err(|e| e.to_string())?.local_personal.is_some())
+}
+
 pub(crate) fn proof(world: &Path) -> Result<Option<Proof>, String> {
     super::authority::open_guard(world).map_err(|r| r.0.to_string())?;
     if let Some(info) = super::retained::read(world).map_err(|e| e.to_string())? {

@@ -414,3 +414,68 @@ fn handover_personal_current_world_snapshot_corruption_never_defaults_to_a_seed(
         "current corrupt prefix took the ancient legacy reset path"
     );
 }
+
+/// A checkpoint from another world, which the bytes' own checks all accept, so a
+/// refusal has to come from what is done with the folder.
+fn restore_on_the_fixture(f: &Fixture) -> Result<crate::server::GameServer, crate::authority_checkpoint::RestoreError> {
+    let mut donor = crate::server::GameServer::new(0, "donor".into(), 42);
+    donor.world.generator = crate::biome::Generator::for_new_world();
+    let bytes = donor.checkpoint().unwrap();
+    crate::server::GameServer::restore_from_checkpoint(&donor.authority_config(), &bytes, &f.world)
+}
+
+fn folder_bytes(dir: &std::path::Path) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+    let mut out = std::collections::BTreeMap::new();
+    for entry in fs::read_dir(dir).unwrap().flatten() {
+        if entry.metadata().unwrap().is_dir() {
+            out.extend(folder_bytes(&entry.path()));
+        } else {
+            out.insert(entry.path(), fs::read(entry.path()).unwrap());
+        }
+    }
+    out
+}
+
+/// A role cut left to `initial_load` would write the owner's sidecar, save the
+/// world and park the autosave before the manifest is read.
+#[test]
+fn a_restore_refuses_a_folder_the_role_cut_has_not_reached() {
+    use crate::authority_checkpoint::RestoreError;
+    let f = fixture("personal-restore-uncut");
+    // A local recovery snapshot, which a cut parks.
+    fs::create_dir(f.world.join("autosave")).unwrap();
+    fs::copy(f.world.join("world.dat"), f.world.join("autosave/world.dat")).unwrap();
+    let before = folder_bytes(&f.world);
+    match restore_on_the_fixture(&f).err() {
+        Some(RestoreError::Fault(why)) => assert!(why.contains("role cut"), "{why}"),
+        other => panic!("an autosave: expected Fault, got {other:?}"),
+    }
+    assert_eq!(folder_bytes(&f.world), before, "the refused restore changed the folder");
+
+    // A selected local record in the primary, which a cut clears.
+    fs::remove_dir_all(f.world.join("autosave")).unwrap();
+    let mut save = crate::save::read_world_save(&fs::read(f.world.join("world.dat")).unwrap()).unwrap();
+    let record = load_or_bootstrap(&f.world, f.key, &f.proof).unwrap().unwrap().encode().unwrap();
+    save.local_personal = Some(crate::personal_value::LocalPersonalSave(record));
+    fs::write(f.world.join("world.dat"), crate::save_format::encode_world_save(&save).unwrap()).unwrap();
+    let before = folder_bytes(&f.world);
+    match restore_on_the_fixture(&f).err() {
+        Some(RestoreError::Fault(why)) => assert!(why.contains("role cut"), "{why}"),
+        other => panic!("a selected record: expected Fault, got {other:?}"),
+    }
+    assert_eq!(folder_bytes(&f.world), before, "the refused restore changed the folder");
+}
+
+/// A folder the cut has reached goes on to the manifest, and the load's call into
+/// the cut only confirms what is there.
+#[test]
+fn a_restore_of_a_cut_folder_writes_nothing_and_reaches_the_manifest() {
+    use crate::authority_checkpoint::RestoreError;
+    let f = fixture("personal-restore-cut");
+    let before = folder_bytes(&f.world);
+    match restore_on_the_fixture(&f).err() {
+        Some(RestoreError::InvalidCheckpoint(why)) => assert!(why.contains("manifest"), "{why}"),
+        other => panic!("expected the manifest to refuse it, got {other:?}"),
+    }
+    assert_eq!(folder_bytes(&f.world), before, "the refused restore changed the folder");
+}
