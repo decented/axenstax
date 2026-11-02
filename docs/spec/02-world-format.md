@@ -2134,7 +2134,7 @@ format version in a trailing footer — see the bincode note under Migration str
       comes from the tick), a saved tick-stamped cooldown meant nothing, use-rolls
       repeated, and a world always woke at morning under a clear sky. Rules:
       - Every writer carries it, and the clock is an explicit argument, so a new writer
-        can't forget it: `GameServer::try_save` (dedicated, `--no-lend`) from its own
+        can't forget it: `GameServer::try_save` (dedicated, Keep) from its own
         fields, and every client save (`autosave_world`, `save_world_superseding_autosave`,
         the handover copy through `build_world_save`) from `GameState::clock_to_save`,
         because single-player runs no server. On a world with a hosting server the

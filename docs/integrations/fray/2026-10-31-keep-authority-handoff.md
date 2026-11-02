@@ -148,7 +148,7 @@ restore-after-step-n with the uninterrupted run.
 | Rubber-tap cooldowns | Rebuilt at the restored tick (0 for a save without a clock) | Yes (every cooldown restarts, by design: no save-scumming). |
 | Hoppers, growth | Stateless, keyed on tick | No, now the tick is saved (`4c5a75c6`). A save without a clock still resets it. |
 | Pistons mid-push | No record found | Unknown. |
-| Joiner inventory and position | Sidecar v5 per npub (≤64 KiB), written on leave and autosave | Kept as of last save. **Fixed** (`9872d926`): position, yaw and pitch are saved, and a joiner goes back to its position if a body can stand exactly there, else to its spawn. The client's camera doesn't get the look: `JoinAccept` has no field for it. |
+| Joiner inventory and position | Sidecar v5 per npub (≤64 KiB), written on leave and autosave | Kept as of last save. **Fixed** (`9872d926`): position, yaw and pitch are saved, and a joiner goes back to its position if a body can stand exactly there, else to its spawn. The client's camera doesn't get the look: `JoinAccept` has no field for it. A joiner who left beyond a lending host's load radius (about 128 blocks at the default render distance) lands at spawn, because the host can't check a column it hasn't loaded and keeps no anchor for a rejoin. |
 | Believed-unit buckets, `PossessionTally`, drop bucket | Lost | Yes: bounds refill to full (a cheater gets a fresh allowance). |
 | Action windows/frontier, window events, pending ops | Lost; `action_session` re-drawn | Yes: every connected client's action lane desyncs. |
 | Owed correction debt | Saved (bounded) | Kept. |

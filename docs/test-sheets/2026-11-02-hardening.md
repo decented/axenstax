@@ -12,6 +12,8 @@ Any PIN on a test device or test identity is `123456`.
 - A contact removed or downgraded in Signet is removed from a hosted world. So are Signet-sourced friends if the contact list goes stale, is disconnected or can't be read.
 - If Signet contacts can't be read, Host Game opens the world solo with a notice and Host online shows a notice in the lobby. Pressing Disconnect clears the damaged file. A player whose Signet file was ever damaged in an older build may see this once after upgrading, until they press Disconnect.
 - The room code message now says anyone signed in who has the code can join.
+- Worlds saved by this build won't open on older builds (save format 60). A handover between this build and an older one is refused at the manifest or import, even though the protocol version is the same.
+- A joiner who leaves a hosted world comes back where they left, not at spawn, if there is room to stand there. A world remembers its clock across a restart: auctions, bounties and cooldowns carry on from where they were instead of starting over, and the sky resumes its time and weather.
 
 **People running a dedicated server: check these before upgrading**
 - **Your server needs an address.** A server with a WebSocket listener won't start without `--public-host`, `AXENSTAX_PUBLIC_HOST` or `AXENSTAX_DOMAIN`. A LAN IP or `localhost` is fine. In Docker, the setup wizard or dashboard asks for it. `AXENSTAX_SKIP_WIZARD=1` with no address waits rather than starting.
@@ -41,6 +43,19 @@ Each needs a real install. Say what you saw, not just pass or fail.
 ### Browser and sites
 9. `/mc-skin` on the web: does a lookup still work? (Mojang's name service was unreliable on 2026-11-01.)
 10. Read `/privacy`, `/safety` and `/download` as a parent would. Does anything read wrong?
+
+## Keep slice 2a: the world's clock and where a joiner stands
+
+**Worlds saved by this build won't open on older builds** (save format 60). Keep a copy of a world's folder first if you may go back.
+
+Each needs a real install. Say what you saw.
+
+11. Single-player: play to dusk in rain, save and quit, reopen. Is it the same time of day and the same weather, not morning with a clear sky?
+12. Single-player: leave a world, come back a day later. Does a crop, furnace or auction that was part-way carry on from where it was?
+13. Host a world, have a friend join, sleep through to a new night and leave. Restart the host and rejoin: are they refused a second sleep the same night?
+14. A friend leaves standing on a slab, a low stair step, a snow layer or at a ledge edge. On rejoin, are they back on that spot and not at spawn?
+15. A friend leaves in water, in a block, or in a doorway under a low ceiling, then rejoins. Do they come back at spawn, safe?
+16. Host Game: a friend leaves about 200 blocks from you and rejoins. Expected: spawn (the host can't check ground it hasn't loaded). Say if that feels wrong.
 
 ## Known gaps, not bugs in this build
 
