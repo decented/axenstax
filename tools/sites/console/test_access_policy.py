@@ -9,10 +9,13 @@ nobody may join, and a file the console could not read is never rewritten.
 """
 
 import asyncio
+import fcntl
 import os
 import stat
 import sys
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 _fails = 0
@@ -161,6 +164,87 @@ def test_a_failed_allowlist_off_is_a_server_error():
         check(e.status_code == 500, f"it is a 500, not the caller's fault: {e.status_code}")
 
 
+def test_the_dashboard_tells_an_open_server_from_a_closed_one():
+    print("test_the_dashboard_tells_an_open_server_from_a_closed_one")
+    from jinja2 import Template
+    identity = fresh()
+    a, _ = valid_npubs(identity)
+    html = (Path(__file__).parent / "templates" / "dashboard.html").read_text(encoding="utf-8")
+    start = html.index("<h3>Allowlist")
+    section = Template(html[start:html.index("<h3>Blocklist", start)])
+
+    def shown():
+        return section.render(allowlist=identity.allowlist(), allowlist_on=identity.allowlist_enabled())
+
+    open_page = shown()
+    check("Off: anyone the sign-in rule admits may join" in open_page, "no whitelist.txt reads as Off, open")
+    check("nobody can join" not in open_page, "and does not say nobody can join")
+    identity.turn_allowlist_on()
+    closed_page = shown()
+    check("On: only the npubs below may join" in closed_page, "an empty whitelist.txt reads as On")
+    check("empty \u2014 nobody can join" in closed_page, "and says that nobody can join")
+    identity.add_to_list("allow", a)
+    check(a in shown(), "a listed npub is shown")
+
+
+def test_a_write_keeps_the_mode_of_the_file_it_replaces():
+    print("test_a_write_keeps_the_mode_of_the_file_it_replaces")
+    identity = fresh()
+    a, b = valid_npubs(identity)
+    path = identity.identity_dir() / "whitelist.txt"
+    identity.add_to_list("allow", a)
+    path.chmod(0o600)
+    identity.add_to_list("allow", b)
+    check(stat.S_IMODE(path.stat().st_mode) == 0o600, "a hand-tightened 0600 allowlist stays 0600")
+    identity.remove_from_list("allow", a)
+    check(stat.S_IMODE(path.stat().st_mode) == 0o600, "through a removal too")
+    check(identity.allowlist() == [b], "and the content is right")
+
+
+def test_writers_do_not_share_a_dot_tmp_name():
+    print("test_writers_do_not_share_a_dot_tmp_name")
+    identity = fresh()
+    a, _ = valid_npubs(identity)
+    theirs = identity.identity_dir() / "whitelist.txt.tmp"
+    theirs.write_text("the engine's half-written list", encoding="utf-8")
+    identity.add_to_list("allow", a)
+    check(theirs.read_text(encoding="utf-8") == "the engine's half-written list",
+          "another writer's <file>.tmp is left alone")
+    check(identity.allowlist() == [a], "and the list is written")
+    leftovers = [p.name for p in identity.identity_dir().iterdir()
+                 if p.name.endswith(".tmp") and p != theirs]
+    check(not leftovers, f"our own temp file is renamed away: {leftovers}")
+
+
+def test_a_change_waits_for_the_policy_lock():
+    print("test_a_change_waits_for_the_policy_lock")
+    identity = fresh()
+    a, b = valid_npubs(identity)
+    lock_path = identity.identity_dir() / ".policy.lock"
+    # What the engine does around its own read-modify-write: flock this file.
+    held = open(lock_path, "a")
+    fcntl.flock(held, fcntl.LOCK_EX)
+    worker = threading.Thread(target=lambda: identity.add_to_list("allow", a))
+    worker.start()
+    time.sleep(0.3)
+    check(not (identity.identity_dir() / "whitelist.txt").exists(),
+          "nothing is written while the engine holds the lock")
+    fcntl.flock(held, fcntl.LOCK_UN)
+    held.close()
+    worker.join(5)
+    check(not worker.is_alive() and identity.allowlist() == [a], "it goes ahead once the lock is free")
+
+    # And two console writers in a row lose nothing.
+    threads = [threading.Thread(target=identity.queue_kick, args=(n,))
+               for n in (a, b, a, b, a, b)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(5)
+    queued = (identity.identity_dir() / "kick").read_text(encoding="utf-8").split()
+    check(len(queued) == 6, f"six kicks queued at once are all there: {len(queued)}")
+
+
 def main():
     sys.path.insert(0, str(Path(__file__).parent))
     for t in (test_last_removal_keeps_the_allowlist_on,
@@ -169,7 +253,11 @@ def main():
               test_allowlist_off_deletes_the_file,
               test_a_failed_allowlist_off_is_a_server_error,
               test_the_wizard_moves_the_allowlist_only_when_asked,
-              test_require_signin_reads_as_the_engine_would_refuse):
+              test_require_signin_reads_as_the_engine_would_refuse,
+              test_the_dashboard_tells_an_open_server_from_a_closed_one,
+              test_a_write_keeps_the_mode_of_the_file_it_replaces,
+              test_writers_do_not_share_a_dot_tmp_name,
+              test_a_change_waits_for_the_policy_lock):
         try:
             t()
         except Exception as e:  # a missing function is a failure, not a crash of the run

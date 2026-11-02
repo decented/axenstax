@@ -28,7 +28,11 @@ Zero engine change. Design: `docs/superpowers/specs/2026-06-18-operator-console-
   "Anyone", already has that file saying `false` and stays guest-open until you tick the
   toggle), kick a player. `whitelist.txt` existing is what turns the allowlist on, even
   empty (which admits nobody); *Turn allowlist off* deletes it. Policy files are replaced
-  whole, and a file that can't be read is never rewritten.
+  whole through a temp file of the writer's own, keep the mode of the file they replace,
+  are changed under an advisory lock (`.policy.lock`, shared with the engine's admin
+  commands), and a file that can't be read is never rewritten. The Console can't see
+  `AXENSTAX_WHITELIST`: if the server has it set, the allowlist stays on whatever the
+  Console shows.
 - **Server** — name / about / region / max players / announce (publish a Server Card).
 - **Privacy** — tracking level (`none` default / `sessions:<days>`), retention, and the
   erasure controls (forget one player / purge all history). Identity is *verified*;

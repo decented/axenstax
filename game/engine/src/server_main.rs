@@ -445,11 +445,17 @@ fn write_policy_file(path: &std::path::Path, contents: &str) -> Result<(), Strin
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    crate::save::write_atomic(path, contents.as_bytes())?;
+    crate::save::write_atomic_unique_tmp(path, contents.as_bytes())?;
     if let Some(dir) = path.parent() {
         crate::save::sync_dir(dir);
     }
     Ok(())
+}
+
+/// The policy lock of the directory `path` sits in, held across a read-modify-write.
+fn lock_beside(path: &std::path::Path) -> Result<crate::server_policy::PolicyLock, String> {
+    let dir = path.parent().ok_or_else(|| format!("{}: has no directory", path.display()))?;
+    crate::server_policy::lock(dir)
 }
 
 /// Does this line of a policy file name `pk`, in either spelling it may be in?
@@ -460,6 +466,7 @@ fn line_names(line: &str, pk: &[u8; 32]) -> bool {
 /// Add `pk` to a policy list, creating the file if it doesn't exist.
 fn policy_list_add(path: &std::path::Path, pk: &[u8; 32]) -> Result<String, String> {
     let npub = bech32_of(pk).ok_or("invalid pubkey")?;
+    let _lock = lock_beside(path)?;
     let mut contents = read_for_update(path)?.unwrap_or_default();
     if !contents.lines().any(|l| line_names(l, pk)) {
         if !contents.is_empty() && !contents.ends_with('\n') {
@@ -477,6 +484,7 @@ fn policy_list_add(path: &std::path::Path, pk: &[u8; 32]) -> Result<String, Stri
 /// whether the list now names nobody (false when there is no file).
 fn policy_list_remove(path: &std::path::Path, pk: &[u8; 32]) -> Result<(String, bool), String> {
     let npub = bech32_of(pk).ok_or("invalid pubkey")?;
+    let _lock = lock_beside(path)?;
     let Some(contents) = read_for_update(path)? else {
         return Ok((npub, false));
     };
@@ -501,6 +509,17 @@ fn apply_admin_command_to_files(
     cmd: &crate::server_identity::AdminCommand,
     dir: &std::path::Path,
 ) -> Result<String, String> {
+    let env_allow = std::env::var("AXENSTAX_WHITELIST").is_ok_and(|v| !v.trim().is_empty());
+    apply_admin_command_with_env(cmd, dir, env_allow)
+}
+
+/// [`apply_admin_command_to_files`] with `AXENSTAX_WHITELIST` passed in: whether
+/// it is set to something. A test doesn't have to change the process's own.
+fn apply_admin_command_with_env(
+    cmd: &crate::server_identity::AdminCommand,
+    dir: &std::path::Path,
+    env_allow: bool,
+) -> Result<String, String> {
     use crate::server_identity::AdminCommand;
     let wl_path = dir.join("whitelist.txt");
     match cmd {
@@ -519,12 +538,21 @@ fn apply_admin_command_to_files(
             })
         }
         AdminCommand::WhitelistOff => {
+            // The variable is read at boot and counts as an allowlist for the whole
+            // run, so removing the file would say "off" and leave the server closed.
+            if env_allow {
+                return Err("the allowlist stays on: AXENSTAX_WHITELIST is set, and the server \
+                     keeps what it names whatever whitelist.txt says. Unset it and restart the \
+                     server to turn the allowlist off"
+                    .to_string());
+            }
+            let _lock = crate::server_policy::lock(dir)?;
             match std::fs::remove_file(&wl_path) {
                 Ok(()) => crate::save::sync_dir(dir),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => return Err(format!("{}: can't be removed: {e}", wl_path.display())),
             }
-            Ok("allowlist off (AXENSTAX_WHITELIST, if the server has it set, still applies)".to_string())
+            Ok("allowlist off".to_string())
         }
         AdminCommand::BlacklistAdd(pk) => {
             Ok(format!("blocklist += {}", policy_list_add(&dir.join("blocklist.txt"), pk)?))
@@ -540,6 +568,7 @@ fn apply_admin_command_to_files(
         AdminCommand::KickPlayer(pk) => {
             let npub = bech32_of(pk).ok_or("invalid pubkey")?;
             let path = dir.join("kick");
+            let _lock = crate::server_policy::lock(dir)?;
             let mut q = read_for_update(&path)?.unwrap_or_default();
             q.push_str(&npub);
             q.push('\n');
@@ -1663,6 +1692,67 @@ mod tests {
         assert!(!dir.join("whitelist.txt").exists());
         assert!(stranger_admitted(&dir));
         apply_admin_command_to_files(&AdminCommand::WhitelistOff, &dir).expect("already off is fine");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn whitelist_off_is_refused_while_the_environment_variable_keeps_the_allowlist_on() {
+        use crate::server_identity::AdminCommand;
+        let dir = tmp("wl_off_env");
+        let _ = std::fs::remove_dir_all(&dir);
+        let pk = Keys::generate().public_key().to_bytes();
+        apply_admin_command_with_env(&AdminCommand::WhitelistAdd(pk), &dir, true).unwrap();
+        let refused = apply_admin_command_with_env(&AdminCommand::WhitelistOff, &dir, true)
+            .expect_err("the variable keeps the allowlist on");
+        assert!(refused.contains("AXENSTAX_WHITELIST") && refused.contains("stays on"), "{refused}");
+        assert!(dir.join("whitelist.txt").exists(), "a refusal changes nothing");
+        // Without the variable the same command still opens the server.
+        apply_admin_command_with_env(&AdminCommand::WhitelistOff, &dir, false).unwrap();
+        assert!(!dir.join("whitelist.txt").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A temp file another writer is part-way through is not ours to overwrite.
+    #[test]
+    fn a_policy_write_leaves_the_shared_dot_tmp_name_alone() {
+        use crate::server_identity::AdminCommand;
+        let dir = tmp("wl_tmp_name");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let theirs = dir.join("whitelist.txt.tmp");
+        std::fs::write(&theirs, "the console's half-written list").unwrap();
+        let pk = Keys::generate().public_key().to_bytes();
+        apply_admin_command_with_env(&AdminCommand::WhitelistAdd(pk), &dir, false).unwrap();
+        assert_eq!(std::fs::read_to_string(&theirs).unwrap(), "the console's half-written list");
+        assert!(std::fs::read_to_string(dir.join("whitelist.txt")).unwrap().starts_with("npub1"));
+        let leftovers = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp") && e.path() != theirs)
+            .count();
+        assert_eq!(leftovers, 0, "our own temp file is renamed away");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The console holds the same lock around its own read-modify-write, so an
+    /// admin command waits for it rather than rewriting a list it has already read.
+    #[test]
+    fn a_policy_change_waits_for_the_lock_the_console_holds() {
+        use crate::server_identity::AdminCommand;
+        let dir = tmp("wl_lock");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let held = crate::server_policy::lock(&dir).unwrap();
+        let pk = Keys::generate().public_key().to_bytes();
+        let worker_dir = dir.clone();
+        let worker = std::thread::spawn(move || {
+            apply_admin_command_with_env(&AdminCommand::WhitelistAdd(pk), &worker_dir, false).unwrap();
+        });
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(!dir.join("whitelist.txt").exists(), "nothing is written while the lock is held");
+        drop(held);
+        worker.join().unwrap();
+        assert!(dir.join("whitelist.txt").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

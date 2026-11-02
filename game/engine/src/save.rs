@@ -1322,22 +1322,53 @@ pub(crate) fn with_worlds_root<T>(root: &std::path::Path, f: impl FnOnce() -> T)
 /// silently substituting default meta (seed 42, survival) — audit 2026-09-27.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
-    use std::io::Write as _;
-    // Handover late-save fence: nothing is written into a frozen world.
-    crate::save_fence::check(path)?;
     // Append ".tmp" to the full path (robust for any filename, unlike with_extension).
     let tmp: PathBuf = {
         let mut t = path.as_os_str().to_owned();
         t.push(".tmp");
         PathBuf::from(t)
     };
+    write_atomic_via(path, bytes, &tmp)
+}
+
+/// [`write_atomic`] through a temp name no other writer uses: `<path>.<pid>.<n>.tmp`.
+/// For a file that another process also replaces (the policy files in the identity
+/// directory, which the console writes too): with the shared `<path>.tmp` one
+/// writer's half-written temp could be renamed into place by the other.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn write_atomic_unique_tmp(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let tmp: PathBuf = {
+        let mut t = path.as_os_str().to_owned();
+        t.push(format!(".{}.{}.tmp", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+        PathBuf::from(t)
+    };
+    let written = write_atomic_via(path, bytes, &tmp);
+    if written.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    written
+}
+
+/// Write `bytes` to `tmp`, fsync, give it the mode of the file it is about to
+/// replace (a hand-tightened `0600` stays `0600`), and rename it over `path`.
+#[cfg(not(target_arch = "wasm32"))]
+fn write_atomic_via(path: &std::path::Path, bytes: &[u8], tmp: &std::path::Path) -> Result<(), String> {
+    use std::io::Write as _;
+    // Handover late-save fence: nothing is written into a frozen world.
+    crate::save_fence::check(path)?;
     {
-        let mut f = crate::fsync::open_written(fs::OpenOptions::new().create(true).truncate(true), &tmp)
+        let mut f = crate::fsync::open_written(fs::OpenOptions::new().create(true).truncate(true), tmp)
             .map_err(|e| format!("create {}: {e}", tmp.display()))?;
         f.write_all(bytes).map_err(|e| format!("write {}: {e}", tmp.display()))?;
         crate::fsync::sync_written(&f).map_err(|e| format!("fsync {}: {e}", tmp.display()))?;
     }
-    commit_rename(&tmp, path)
+    if let Ok(replaced) = fs::metadata(path) {
+        fs::set_permissions(tmp, replaced.permissions())
+            .map_err(|e| format!("set the mode of {}: {e}", tmp.display()))?;
+    }
+    commit_rename(tmp, path)
 }
 
 /// The rename that commits an atomic write, behind the late-save fence's
@@ -6047,6 +6078,26 @@ mod tests {
             .expect("a corrupt/old-shape carts tail must not fail the whole load");
         assert_eq!(save.chests.len(), 1, "fields before carts survive");
         assert!(save.carts.is_empty(), "the unreadable carts tail defaults to empty");
+    }
+
+    /// A hand-tightened mode survives the replace; a new file gets the default.
+    #[cfg(unix)]
+    #[test]
+    fn write_atomic_keeps_the_mode_of_the_file_it_replaces() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = world_dir("__test_write_atomic_mode__");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("whitelist.txt");
+        std::fs::write(&path, "old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        write_atomic(&path, b"new").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        write_atomic_unique_tmp(&path, b"newer").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"newer");
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

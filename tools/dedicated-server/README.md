@@ -372,7 +372,7 @@ a hand-built command must include it):
 |-------------|--------|
 | `["cmd","whitelist-add","npub1…"]` | add an npub to the allowlist |
 | `["cmd","whitelist-remove","npub1…"]` | remove an npub (the last one leaves the server closed, not open) |
-| `["cmd","whitelist-off",""]` | turn the allowlist off (deletes `whitelist.txt`) |
+| `["cmd","whitelist-off",""]` | turn the allowlist off (deletes `whitelist.txt`). Refused while `AXENSTAX_WHITELIST` is set: the variable keeps the allowlist on, so unset it and restart first |
 | `["cmd","require-signin","true"\|"false"]` | toggle the sign-in requirement |
 
 Apply a signed command (the server verifies it was signed by *its* operator and is

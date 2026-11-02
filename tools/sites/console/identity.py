@@ -12,6 +12,8 @@ single source of truth for those files:
       console.json       ConsoleSettings (name/about/region/cap/announce/privacy)
       sessions.jsonl     operator-private session log (npub + timestamps, no IP/geo)
       kick               queued npubs to disconnect (consumed by the engine)
+      .policy.lock       advisory flock: held around every read-modify-write of the
+                         files above, by this module and by the engine's admin commands
 
 The identity dir defaults to `$AXENSTAX_IDENTITY_DIR`, else `$AXENSTAX_WORLDS_DIR/.identity`,
 else `/worlds/.identity` (the Docker volume).
@@ -20,9 +22,13 @@ Includes a self-contained bech32 (BIP-173) so the console needs no crypto dep fo
 npub display/validation — `auth.py` owns the secp256k1 signature verification.
 """
 
+import contextlib
+import fcntl
 import json
 import os
+import stat
 import time
+import uuid
 from pathlib import Path
 
 # ─────────────────────────────── bech32 (BIP-173) ───────────────────────────────
@@ -174,17 +180,50 @@ def _write_npub_list(path: Path, npubs: list[str]) -> None:
     _write_atomic(path, "\n".join(npubs) + ("\n" if npubs else ""))
 
 
+@contextlib.contextmanager
+def policy_lock():
+    """Hold the identity directory's advisory lock (`flock` on `.policy.lock`) for a
+    read-modify-write of a policy file. The engine's admin commands take the same lock
+    around theirs, so neither process rewrites a list from a read the other has since
+    made stale. Blocks until the lock is free; the lock goes when the block ends."""
+    directory = identity_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / ".policy.lock"
+    try:
+        handle = open(path, "a")
+    except PermissionError:
+        # Created by the engine's user under a mode we can't write: a read-only
+        # handle takes the lock just as well.
+        handle = open(path, "rb")
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        yield
+    finally:
+        handle.close()
+
+
 def _write_atomic(path: Path, text: str) -> None:
     """Replace `path` whole. The engine reloads the policy files every few seconds,
     so it must never see one half written. A plain `open` rather than `mkstemp`:
-    the engine runs in another container and has to be able to read the result."""
+    the engine runs in another container and has to be able to read the result.
+    The temp name is this writer's own (the engine writes `<file>.tmp` and others
+    may be writing at once), and the new file takes the mode of the one it replaces,
+    so a hand-tightened `0600` allowlist stays `0600`."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(text)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            try:
+                os.chmod(tmp, stat.S_IMODE(path.stat().st_mode))
+            except FileNotFoundError:
+                pass
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def _read_for_update(path: Path) -> str | None:
@@ -388,7 +427,8 @@ def allowlist_enabled() -> bool:
 
 def allowlist_off() -> None:
     """Turn the allowlist off: anyone the sign-in rule admits may join again."""
-    (identity_dir() / "whitelist.txt").unlink(missing_ok=True)
+    with policy_lock():
+        (identity_dir() / "whitelist.txt").unlink(missing_ok=True)
 
 
 def require_signin() -> bool:
@@ -411,10 +451,11 @@ def add_to_list(which: str, npub: str) -> None:
     if not is_valid_npub(npub):
         raise ValueError("not a valid npub")
     path = identity_dir() / ("whitelist.txt" if which == "allow" else "blocklist.txt")
-    text = _read_for_update(path)
-    items = _npub_lines(text)
-    if text is None or npub not in items:
-        _write_npub_list(path, items + ([npub] if npub not in items else []))
+    with policy_lock():
+        text = _read_for_update(path)
+        items = _npub_lines(text)
+        if text is None or npub not in items:
+            _write_npub_list(path, items + ([npub] if npub not in items else []))
 
 
 def remove_from_list(which: str, npub: str) -> None:
@@ -422,17 +463,19 @@ def remove_from_list(which: str, npub: str) -> None:
     until `allowlist_off`. With no file there is nothing to do, and creating one
     would close an open server."""
     path = identity_dir() / ("whitelist.txt" if which == "allow" else "blocklist.txt")
-    text = _read_for_update(path)
-    if text is None:
-        return
-    _write_npub_list(path, [n for n in _npub_lines(text) if n != npub.strip()])
+    with policy_lock():
+        text = _read_for_update(path)
+        if text is None:
+            return
+        _write_npub_list(path, [n for n in _npub_lines(text) if n != npub.strip()])
 
 
 def turn_allowlist_on() -> None:
     """Make the allowlist exist, keeping what is on it. It may be left empty."""
     path = identity_dir() / "whitelist.txt"
-    if _read_for_update(path) is None:
-        _write_npub_list(path, [])
+    with policy_lock():
+        if _read_for_update(path) is None:
+            _write_npub_list(path, [])
 
 
 def set_require_signin(on: bool) -> None:
@@ -444,7 +487,8 @@ def queue_kick(npub: str) -> None:
     if not is_valid_npub(npub):
         raise ValueError("not a valid npub")
     path = identity_dir() / "kick"
-    _write_atomic(path, (_read_for_update(path) or "") + npub + "\n")
+    with policy_lock():
+        _write_atomic(path, (_read_for_update(path) or "") + npub + "\n")
 
 
 # ── role membership (Team panel) ──

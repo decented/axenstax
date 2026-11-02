@@ -30,6 +30,42 @@ const REQUIRE_SIGNIN_FILE: &str = "require_signin";
 pub const EMPTY_ALLOWLIST_WARNING: &str = "the allowlist is on and empty, so nobody can join: \
      add an npub, or turn it off by deleting whitelist.txt (and unsetting AXENSTAX_WHITELIST)";
 
+/// The advisory lock file in the identity directory. The engine's admin commands
+/// and the console both read, change and rewrite these files; each holds an
+/// exclusive `flock` on this file for the whole of that, so neither loses the
+/// other's change. (`tools/sites/console/identity.py` takes the same lock.)
+pub const LOCK_FILE: &str = ".policy.lock";
+
+/// An exclusive hold on the identity directory's policy files, released on drop.
+#[derive(Debug)]
+pub struct PolicyLock(#[allow(dead_code)] std::fs::File);
+
+/// Wait for, and take, the policy lock in `dir` (created if need be). An error is
+/// a refusal to change the policy: nothing is written without the lock.
+pub fn lock(dir: &Path) -> Result<PolicyLock, String> {
+    let path = dir.join(LOCK_FILE);
+    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        // Whoever creates it, the other process (another user, in another
+        // container) must be able to open it.
+        options.mode(0o666);
+    }
+    let file = match options.open(&path) {
+        Ok(file) => file,
+        // Made by the other side under a mode we can't write: a read-only handle
+        // locks just as well.
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => std::fs::File::open(&path)
+            .map_err(|e| format!("{}: can't be opened for locking: {e}", path.display()))?,
+        Err(e) => return Err(format!("{}: can't be opened for locking: {e}", path.display())),
+    };
+    file.lock().map_err(|e| format!("{}: can't be locked: {e}", path.display()))?;
+    Ok(PolicyLock(file))
+}
+
 /// The policy to hand `HostedServer::set_access_policy`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AccessPolicy {

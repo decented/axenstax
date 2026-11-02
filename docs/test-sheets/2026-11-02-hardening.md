@@ -77,6 +77,15 @@ An invite link now lets one person into the world you are hosting, until it expi
 25. A friend you added by pasting their address and then played with on an older build: are they still in your list? (Expected: may be gone. Paste them again. Say if that feels wrong.)
 26. Read the guide page "Play with a Friend Online" and the Add a friend box. Does anything say an invite makes someone a friend?
 
+## Operator access: small fixes
+
+For anyone running a dedicated server. The Console and the server's admin commands share one identity folder.
+
+27. Operator panel in the game (or the Console's Access box): on a server with no allowlist it should say the allowlist is off and the server is open. Add then remove the only name on the allowlist: it should now say the allowlist is on with nobody listed and that nobody can join. Are the two easy to tell apart?
+28. Start a server with `AXENSTAX_WHITELIST` set, then send `whitelist-off`. Expected: it is refused, with a message that the variable keeps the allowlist on, and `whitelist.txt` is untouched. Unset the variable, restart, and `whitelist-off` works. (The Console's *Turn allowlist off* button can't see the variable: it still deletes `whitelist.txt`, and the server stays closed until the variable is unset.)
+29. Make `whitelist.txt` mode `0600`, then add and remove a name from the Console and by admin command. Does it stay `0600`?
+30. Queue a kick from the Console while the server is running and check the player is removed. Do two kicks queued close together both take effect?
+
 ## Known gaps, not bugs in this build
 
 - The privacy page has no contact route for data requests. Owner to supply one.
