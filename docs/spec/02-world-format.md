@@ -2135,7 +2135,7 @@ against the slice before allocating.
       at the very end of a footer-less save is not a realistic collision.
     - **`SAVE_FORMAT_VERSION`** = `WORLD_SAVE_FIELD_COUNT` (56 since Keep slice 2a,
       2026-11-02: `quest_world` was 54, `worldgen_version` 55, `authority_clock` 56) +
-      `SAVE_LAYOUT_REVISION` (4 today; see the block-ids bullet below) = 60. Two tripwire tests stop drift: serde's field list
+      `SAVE_LAYOUT_REVISION` (4 today; see the block-ids bullet below) = 60. The current `SAVE_FORMAT_VERSION` is `60` (a test, `save_format::tests::spec_02_states_the_current_save_format_version`, fails if this sentence and the constant disagree, so a bump must edit this line). Two tripwire tests stop drift: serde's field list
       for `WorldSave` must equal `WORLD_SAVE_FIELD_COUNT` (so appending a field
       without bumping the version fails), and the tolerant reader must consume every
       byte of a current save (so a field listed in its struct literal without a read

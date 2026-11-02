@@ -10,7 +10,7 @@
 //! only: at a scenario's not-ended → ended edge the game loop calls
 //! [`offer_score`], which on WASM, for an in-scope scenario, calls that missing
 //! function; the call fails and a warning is logged. Nothing is signed or
-//! published. Restoring the overlay would need the design below to be revisited
+//! published. Restoring the overlay would need the linked design to be revisited
 //! (the web build is an anonymous taster with no signer).
 //!
 //! Score integrity is HONOUR-SYSTEM for v1: a client-signed kind-33334 event is

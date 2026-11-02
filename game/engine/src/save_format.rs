@@ -265,6 +265,19 @@ mod tests {
     use super::*;
     use crate::save::minimal_world_save_for_tests;
 
+    /// A save bump must touch the spec: Spec 02 states the format in force, and
+    /// this fails the moment the constant and that sentence disagree.
+    #[test]
+    fn spec_02_states_the_current_save_format_version() {
+        let spec = include_str!("../../../docs/spec/02-world-format.md");
+        let sentence = format!("The current `SAVE_FORMAT_VERSION` is `{SAVE_FORMAT_VERSION}`");
+        assert!(
+            spec.contains(&sentence),
+            "SAVE_FORMAT_VERSION is {SAVE_FORMAT_VERSION}: update the format-versioning \
+             bullet in docs/spec/02-world-format.md to say \"{sentence}\" (and log the bump)"
+        );
+    }
+
     #[test]
     fn footer_round_trips() {
         let save = minimal_world_save_for_tests(7);

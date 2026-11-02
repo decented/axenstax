@@ -3038,6 +3038,19 @@ pub fn decompress_chunk(compressed: &[u8]) -> Result<Vec<u8>, String> {
 mod tests {
     use super::*;
 
+    /// A wire bump must touch the spec: Spec 04 states the version in force, and
+    /// this fails the moment the constant and that sentence disagree.
+    #[test]
+    fn spec_04_states_the_current_protocol_version() {
+        let spec = include_str!("../../../docs/spec/04-networking.md");
+        let sentence = format!("The current wire version is `{PROTOCOL_VERSION}`");
+        assert!(
+            spec.contains(&sentence),
+            "PROTOCOL_VERSION is {PROTOCOL_VERSION}: update the addendum at the top of \
+             docs/spec/04-networking.md to say \"{sentence}\" (and log the bump)"
+        );
+    }
+
     #[test]
     fn item_ref_roundtrip() {
         use super::{ItemRef, item_kind};
