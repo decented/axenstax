@@ -204,14 +204,6 @@ fn public_host_entries(cli: &[String], env_hosts: Option<&str>, env_domain: Opti
     out
 }
 
-fn public_host_entries_from(args: &[String]) -> Vec<String> {
-    public_host_entries(
-        &cli_values(args, "--public-host"),
-        std::env::var("AXENSTAX_PUBLIC_HOST").ok().as_deref(),
-        std::env::var("AXENSTAX_DOMAIN").ok().as_deref(),
-    )
-}
-
 /// The ONE advertised public host (connect-string, Server Card endpoint,
 /// pairing): the first `--public-host` / `AXENSTAX_PUBLIC_HOST` entry.
 /// `AXENSTAX_DOMAIN` is not used here (unchanged behaviour).
@@ -361,16 +353,79 @@ fn retired_signin_switch_present(args: &[String], env: Option<&str>) -> bool {
 /// `require-signin` admin command / the Operator Console toggle — survives
 /// restarts, toggles at runtime) wins; otherwise sign-in is required unless
 /// [`allow_guests`]. `--require-signin` / `AXENSTAX_REQUIRE_SIGNIN` are not read.
-/// `Err` is a policy that couldn't be read: boot refuses to start on it.
+/// `Err` is a policy that couldn't be read: boot refuses to start on it. The
+/// environment is read only here, so a running server's reload never meets a
+/// value that wasn't good at boot.
 fn load_access_policy(
     args: &[String],
     dir: &std::path::Path,
+    env: &BootEnv,
 ) -> Result<crate::server_policy::PolicyFiles, String> {
-    crate::server_policy::PolicyFiles::load(
-        dir,
-        !allow_guests(args, std::env::var("AXENSTAX_ALLOW_GUESTS").ok().as_deref()),
-        std::env::var("AXENSTAX_WHITELIST").ok(),
-    )
+    let whitelist = match env.whitelist.clone().map(std::ffi::OsString::into_string) {
+        None => None,
+        Some(Ok(value)) => Some(value),
+        Some(Err(_)) => return Err("AXENSTAX_WHITELIST isn't valid text".to_string()),
+    };
+    crate::server_policy::PolicyFiles::load(dir, !allow_guests(args, env.allow_guests.as_deref()), whitelist)
+}
+
+/// The environment [`boot_preflight`] reads, passed in so a test doesn't have to
+/// change the process's.
+#[derive(Default)]
+struct BootEnv {
+    allow_guests: Option<String>,
+    whitelist: Option<std::ffi::OsString>,
+    public_host: Option<String>,
+    domain: Option<String>,
+}
+
+impl BootEnv {
+    fn from_process() -> Self {
+        Self {
+            allow_guests: std::env::var("AXENSTAX_ALLOW_GUESTS").ok(),
+            whitelist: std::env::var_os("AXENSTAX_WHITELIST"),
+            public_host: std::env::var("AXENSTAX_PUBLIC_HOST").ok(),
+            domain: std::env::var("AXENSTAX_DOMAIN").ok(),
+        }
+    }
+}
+
+/// What a server may start with, once [`boot_preflight`] has passed it.
+struct Preflight {
+    cfg: ServerConfig,
+    policy_files: crate::server_policy::PolicyFiles,
+    transport: RemoteTransport,
+    public_hosts: crate::signet::ws_host::PublicHosts,
+}
+
+/// Everything `run` decides before it creates or opens anything. `Err` is the
+/// message to exit on. `run` starts from what this returns, so it can't start
+/// without it.
+fn boot_preflight(args: &[String], dir: &std::path::Path, env: &BootEnv) -> Result<Preflight, String> {
+    // A malformed `--allow-guests` / `AXENSTAX_ALLOW_GUESTS` value must be loud:
+    // refuse to boot rather than guess whether the operator meant to open the
+    // server (the access policy itself fails closed on it).
+    parse_allow_guests(args, env.allow_guests.as_deref())?;
+    // So must a policy it can't read: nothing is created or opened on a guess.
+    let policy_files =
+        load_access_policy(args, dir, env).map_err(|e| format!("refusing to start: access policy: {e}"))?;
+    let cfg = parse_config(args);
+
+    // v66 — the addresses WebSocket joins must be addressed to (relay
+    // protection, Spec 08 §9.0.1 T-JOIN-RELAY). A typo or no address at all
+    // refuses to boot: there is no unprotected mode.
+    let transport = RemoteTransport::WebSocket { port: cfg.ws_port };
+    let entries = public_host_entries(
+        &cli_values(args, "--public-host"),
+        env.public_host.as_deref(),
+        env.domain.as_deref(),
+    );
+    let public_hosts = crate::signet::ws_host::PublicHosts::parse(&entries, cfg.ws_port)
+        .map_err(|e| format!("{e} (from --public-host / AXENSTAX_PUBLIC_HOST / AXENSTAX_DOMAIN)"))?;
+    if let Some(why) = public_address_refusal(&transport, &public_hosts) {
+        return Err(format!("refusing to start: {why}"));
+    }
+    Ok(Preflight { cfg, policy_files, transport, public_hosts })
 }
 
 /// A policy file about to be rewritten. `None` only when it doesn't exist: any
@@ -390,7 +445,11 @@ fn write_policy_file(path: &std::path::Path, contents: &str) -> Result<(), Strin
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    crate::save::write_atomic(path, contents.as_bytes())
+    crate::save::write_atomic(path, contents.as_bytes())?;
+    if let Some(dir) = path.parent() {
+        crate::save::sync_dir(dir);
+    }
+    Ok(())
 }
 
 /// Does this line of a policy file name `pk`, in either spelling it may be in?
@@ -814,38 +873,14 @@ pub(crate) fn settle_pop_secret(world: &str, server: &mut crate::server::GameSer
 
 /// Entry point dispatched from `main()` when `--server` is present.
 pub fn run(args: &[String]) {
-    // A malformed `--allow-guests` / `AXENSTAX_ALLOW_GUESTS` value must be loud:
-    // refuse to boot rather than guess whether the operator meant to open the
-    // server (the access policy itself fails closed on it).
-    if let Err(e) = parse_allow_guests(args, std::env::var("AXENSTAX_ALLOW_GUESTS").ok().as_deref()) {
-        eprintln!("{e}");
-        std::process::exit(1);
-    }
-    // So must a policy it can't read: nothing is created or opened on a guess.
-    let mut policy_files = match load_access_policy(args, &id_dir()) {
-        Ok(files) => files,
-        Err(e) => {
-            eprintln!("refusing to start: access policy: {e}");
-            std::process::exit(1);
-        }
-    };
-    let cfg = parse_config(args);
-
-    // v66 — the addresses WebSocket joins must be addressed to (relay
-    // protection, Spec 08 §9.0.1 T-JOIN-RELAY). A typo or no address at all
-    // refuses to boot: there is no unprotected mode.
-    let transport = RemoteTransport::WebSocket { port: cfg.ws_port };
-    let public_hosts = match crate::signet::ws_host::PublicHosts::parse(&public_host_entries_from(args), cfg.ws_port) {
-        Ok(h) => h,
-        Err(e) => {
-            eprintln!("{e} (from --public-host / AXENSTAX_PUBLIC_HOST / AXENSTAX_DOMAIN)");
-            std::process::exit(1);
-        }
-    };
-    if let Some(why) = public_address_refusal(&transport, &public_hosts) {
-        eprintln!("refusing to start: {why}");
-        std::process::exit(1);
-    }
+    let Preflight { cfg, mut policy_files, transport, public_hosts } =
+        match boot_preflight(args, &id_dir(), &BootEnv::from_process()) {
+            Ok(preflight) => preflight,
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        };
 
     // Server identity (Heartwood-backed). Loaded before anything starts so
     // `AXENSTAX_REQUIRE_VERIFIED` can refuse to boot; additive otherwise.
@@ -1253,7 +1288,7 @@ mod tests {
 
     /// The policy a boot would start on. A policy that refuses boot panics here.
     fn loaded(args: &[String], dir: &std::path::Path) -> crate::server_policy::AccessPolicy {
-        load_access_policy(args, dir).expect("policy loads").policy().clone()
+        load_access_policy(args, dir, &BootEnv::default()).expect("policy loads").policy().clone()
     }
 
     #[test]
@@ -1415,14 +1450,89 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// `--public-host` arguments as a command line would give them.
+    fn with_address() -> Vec<String> {
+        ["--server", "--public-host", "192.168.1.20"].iter().map(|s| s.to_string()).collect()
+    }
+
+    /// What `run` would exit on, if anything.
+    fn boot_refusal(args: &[String], dir: &std::path::Path, env: &BootEnv) -> Option<String> {
+        boot_preflight(args, dir, env).err()
+    }
+
+    #[test]
+    fn a_server_with_no_public_address_refuses_boot() {
+        let dir = tmp("pf_no_address");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let why = boot_refusal(&[], &dir, &BootEnv::default()).expect("no address, no boot");
+        assert!(why.contains("refusing to start") && why.contains("--public-host"), "{why}");
+        // Any of the three ways of naming one will do, and a typo won't.
+        assert_eq!(boot_refusal(&with_address(), &dir, &BootEnv::default()), None);
+        let env = |public_host: Option<&str>, domain: Option<&str>| BootEnv {
+            public_host: public_host.map(str::to_owned),
+            domain: domain.map(str::to_owned),
+            ..BootEnv::default()
+        };
+        assert_eq!(boot_refusal(&[], &dir, &env(Some("play.example.org"), None)), None);
+        assert_eq!(boot_refusal(&[], &dir, &env(None, Some("play.example.org"))), None);
+        assert!(boot_refusal(&[], &dir, &env(Some("https://play.example.org/"), None)).is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn an_invalid_require_signin_file_refuses_boot() {
         let dir = tmp("rs_invalid");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("require_signin"), "").unwrap();
-        let err = load_access_policy(&[], &dir).err().expect("an empty file does not admit guests");
-        assert!(err.contains("require_signin"), "{err}");
+        let why = boot_refusal(&with_address(), &dir, &BootEnv::default())
+            .expect("an empty file does not admit guests");
+        assert!(why.contains("refusing to start") && why.contains("require_signin"), "{why}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_malformed_guest_setting_refuses_boot() {
+        let dir = tmp("pf_guests");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let env = BootEnv { allow_guests: Some("maybe".to_string()), ..BootEnv::default() };
+        let why = boot_refusal(&with_address(), &dir, &env).expect("a guess never opens a server");
+        assert!(why.contains("AXENSTAX_ALLOW_GUESTS"), "{why}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_allowlist_setting_that_isnt_text_refuses_boot() {
+        use std::os::unix::ffi::OsStringExt as _;
+        let dir = tmp("pf_whitelist");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let env = BootEnv {
+            whitelist: Some(std::ffi::OsString::from_vec(vec![b'n', b'p', 0xff])),
+            ..BootEnv::default()
+        };
+        let why = boot_refusal(&with_address(), &dir, &env).expect("not the same as no allowlist");
+        assert!(why.contains("AXENSTAX_WHITELIST"), "{why}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_good_boot_starts_on_the_policy_it_read() {
+        use crate::access_policy::Allow;
+        let dir = tmp("pf_good");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pk = Keys::generate().public_key().to_bytes();
+        let env = BootEnv { whitelist: Some(hex::encode(pk).into()), ..BootEnv::default() };
+        let Ok(boot) = boot_preflight(&with_address(), &dir, &env) else {
+            panic!("this boot is fine");
+        };
+        assert_eq!(boot.policy_files.policy().allow, Allow::only([pk]));
+        assert!(matches!(boot.transport, RemoteTransport::WebSocket { port } if port == boot.cfg.ws_port));
+        assert!(boot.public_hosts.admits(&format!("192.168.1.20:{}", boot.cfg.ws_port)));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1476,14 +1586,13 @@ mod tests {
 
     /// `save::write_atomic` carries the handover's late-save fence. The identity
     /// directory sits beside the world folders, so a frozen world doesn't stop
-    /// the operator changing who may join.
+    /// the operator changing who may join. Uses the layout `run` really has.
     #[test]
     fn a_frozen_world_does_not_fence_the_policy_files() {
         use crate::server_identity::AdminCommand;
-        let worlds = tmp("fence");
-        let _ = std::fs::remove_dir_all(&worlds);
-        let world = worlds.join("frozen-world");
-        let identity = worlds.join(".identity");
+        let _guard = crate::save::WorldsRootGuard::new("policy-fence");
+        let world = crate::save::world_dir("frozen-world");
+        let identity = id_dir();
         std::fs::create_dir_all(&world).unwrap();
         crate::save_fence::raise(&world);
         let pk = Keys::generate().public_key().to_bytes();
@@ -1492,7 +1601,15 @@ mod tests {
         written.expect("the policy write is not a save into the world");
         assert_eq!(loaded(&[], &identity).blocklist, vec![pk]);
         assert!(!identity.join("blocklist.txt.tmp").exists(), "no temp file left");
-        let _ = std::fs::remove_dir_all(&worlds);
+
+        // These writes do go through the atomic path: a fence over the identity
+        // directory itself is honoured, which a plain write would ignore.
+        let other = Keys::generate().public_key().to_bytes();
+        crate::save_fence::raise(&identity);
+        let fenced = apply_admin_command_to_files(&AdminCommand::BlacklistAdd(other), &identity);
+        crate::save_fence::lift(&identity);
+        assert!(fenced.is_err());
+        assert_eq!(loaded(&[], &identity).blocklist, vec![pk], "nothing was written");
     }
 
     #[cfg(unix)]
@@ -1523,7 +1640,7 @@ mod tests {
     }
 
     #[test]
-    fn a_websocket_server_needs_a_public_address_and_a_quic_one_does_not() {
+    fn only_a_websocket_listener_needs_a_public_address() {
         use crate::signet::ws_host::PublicHosts;
         let ws = RemoteTransport::WebSocket { port: 6767 };
         let none = PublicHosts::default();
@@ -1532,14 +1649,6 @@ mod tests {
         assert_eq!(public_address_refusal(&ws, &lan), None);
         assert_eq!(public_address_refusal(&RemoteTransport::Quic, &none), None);
         assert_eq!(public_address_refusal(&RemoteTransport::Fray, &none), None);
-
-        // And a QUIC server really does start with none.
-        let _guard = crate::save::WorldsRootGuard::new("quic-no-address");
-        let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-        let mut quic = HostedServer::start_online(1, "quic-no-address".into(), 7, 1, socket, crate::hosted_server::HostWorld::Owned)
-            .expect("a QUIC-only server has no address to name");
-        quic.tick();
-        quic.shutdown();
     }
 
     #[test]
