@@ -112,8 +112,10 @@ futures-util = { version = "0.3", default-features = false, features = ["sink", 
 # crate is built. Native-only: the browser punycodes `WebSocket.url` itself.
 idna = "1"
 # SIGINT/SIGTERM handler so the dedicated server saves the world on graceful
-# shutdown (`docker stop` sends SIGTERM). Native-only, dependency-light.
-ctrlc = "3"
+# shutdown (`docker stop` sends SIGTERM). Native-only, dependency-light. Without
+# `termination` it handles SIGINT alone, and SIGTERM skips the final save
+# (`tools/dedicated-server/test-sigterm-save.sh` checks this).
+ctrlc = { version = "3", features = ["termination"] }
 rcgen = "0.13"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 # BIP-340 Schnorr (server-side only — the engine WASM client doesn't verify;
