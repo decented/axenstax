@@ -220,7 +220,7 @@ pub(crate) fn returned_world_local(
         }
         return Ok(None);
     };
-    if bytes.first() != Some(&4)
+    if !crate::joiner_save::JoinerSave::is_current_bound_version(&bytes)
         || !matches!(personal.binding, GameplayBinding::WorldLocal { scope: expected, player: WorldPlayer::Npub(owner) } if Some(expected) == scope && owner == key)
     {
         return Err(

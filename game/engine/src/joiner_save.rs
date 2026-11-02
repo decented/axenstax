@@ -275,6 +275,13 @@ impl JoinerPose {
     fn is_finite(&self) -> bool {
         self.pos.iter().all(|v| v.is_finite()) && self.yaw.is_finite() && self.pitch.is_finite()
     }
+
+    /// Within the playable range: the same limit `/tp` clamps to. A position
+    /// past it (a hand-edited file) is no saved position.
+    fn in_range(&self) -> bool {
+        let limit = crate::commands::builtins::tp::MAX_COORD;
+        self.pos.iter().all(|v| v.abs() <= limit)
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -598,9 +605,38 @@ impl JoinerSave {
         self.obligation_history == ObligationHistory::Complete && self.owed.is_empty()
     }
 
-    /// v5 — where the body was when this was saved, if the record says.
+    /// Does a record file lead with a version that can carry bound personal
+    /// progress and that this build still accepts in place: the current one
+    /// (v5) or v4, which differs only by lacking a position. v2 (the immutable
+    /// checkpoint seed) and v3 are not.
+    pub(crate) fn is_current_bound_version(bytes: &[u8]) -> bool {
+        matches!(bytes.first(), Some(&VERSION) | Some(&VERSION_V4))
+    }
+
+    /// A genuine v4 body of this record (the layout the last build wrote), for
+    /// tests of what must still be read in place.
+    #[cfg(test)]
+    pub(crate) fn encode_v4_for_tests(&self) -> Vec<u8> {
+        let v4 = JoinerSaveV4 {
+            version: VERSION_V4,
+            slots: self.slots.clone(),
+            armour: self.armour,
+            health: self.health,
+            hunger: self.hunger,
+            spawn: self.spawn,
+            run_id: self.calendar_id,
+            slept_night: self.slept_night,
+            owed: self.owed.clone(),
+            obligation_history: self.obligation_history,
+            personal: self.personal.clone(),
+        };
+        bincode::serialize(&v4).unwrap()
+    }
+
+    /// v5 — where the body was when this was saved, if the record says and
+    /// the spot is within the playable range.
     pub(crate) fn pose(&self) -> Option<JoinerPose> {
-        self.pose
+        self.pose.filter(JoinerPose::in_range)
     }
 
     /// Restore the vitals onto joiner `sp`'s body, and the save's obligation
@@ -826,6 +862,69 @@ mod tests {
         }
         assert_eq!(snapshot(&dir), before, "a refused path wrote into the retired world");
     }
+    /// Which leading bytes a local seat may take a bound record under: v5 and
+    /// v4. The v2 checkpoint seed and v3 stay refused.
+    #[test]
+    fn only_v4_and_v5_records_are_current_bound_versions() {
+        let s = server();
+        let v5 = JoinerSave::capture(&s.players[0], [1; 16]).encode().unwrap();
+        assert!(JoinerSave::is_current_bound_version(&v5));
+        assert!(JoinerSave::is_current_bound_version(&JoinerSave::capture(&s.players[0], [1; 16]).encode_v4_for_tests()));
+        for other in [0u8, 1, 2, 3, 6] {
+            assert!(!JoinerSave::is_current_bound_version(&[other]), "v{other}");
+        }
+        assert!(!JoinerSave::is_current_bound_version(&[]));
+        JoinerSave::decode(&JoinerSave::capture(&s.players[0], [1; 16]).encode_v4_for_tests()).expect("the v4 body reads");
+    }
+
+    /// A record keeps a body's position only while that body is alive and the
+    /// position is a real one: a dead body respawns at its spawn, and a
+    /// non-finite one would have the record refused whole.
+    #[test]
+    fn capture_keeps_the_pose_of_a_living_finite_body_only() {
+        let mut s = server();
+        s.players[0].player.pos = glam::Vec3::new(10.5, 70.0, -3.5);
+        s.players[0].yaw = 0.5;
+        let pose = JoinerSave::capture(&s.players[0], [1; 16]).pose().expect("a living body keeps its pose");
+        assert_eq!((pose.pos, pose.yaw), ([10.5, 70.0, -3.5], 0.5));
+
+        s.players[0].combat.dead = true;
+        assert_eq!(JoinerSave::capture(&s.players[0], [1; 16]).pose(), None, "a dead body respawns at its spawn");
+        s.players[0].combat.dead = false;
+
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let mut moved = s.players[0].player.pos;
+            moved.y = bad;
+            s.players[0].player.pos = moved;
+            let record = JoinerSave::capture(&s.players[0], [1; 16]);
+            assert_eq!(record.pose(), None, "{bad}");
+            JoinerSave::decode(&record.encode().expect("the record itself is still written")).expect("and read");
+        }
+        s.players[0].player.pos = glam::Vec3::new(1.0, 70.0, 1.0);
+        s.players[0].yaw = f32::NAN;
+        assert_eq!(JoinerSave::capture(&s.players[0], [1; 16]).pose(), None, "a look that isn't finite");
+    }
+
+    /// A position nowhere near the playable range (a hand-edited file) counts
+    /// as no saved position, and the record still loads.
+    #[test]
+    fn a_pose_beyond_the_playable_range_is_no_saved_position() {
+        let s = server();
+        let mut save = JoinerSave::capture(&s.players[0], [1; 16]);
+        let limit = crate::commands::builtins::tp::MAX_COORD;
+        for (pos, kept) in [
+            ([limit, 70.0, -limit], true),
+            ([limit + 1.0, 70.0, 0.0], false),
+            ([0.0, 70.0, -limit - 1.0], false),
+            ([0.0, f32::MAX, 0.0], false),
+            ([1e9, 70.0, 0.0], false),
+        ] {
+            save.pose = Some(JoinerPose { pos, yaw: 0.0, pitch: 0.0 });
+            let back = JoinerSave::decode(&save.encode().unwrap()).expect("the record loads either way");
+            assert_eq!(back.pose().is_some(), kept, "{pos:?}");
+        }
+    }
+
     #[test]
     fn sidecar_round_trips_whole_effective_window_and_run_scoped_night() {
         let _g = crate::save::WorldsRootGuard::new("sidecar-full");

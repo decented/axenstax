@@ -87,3 +87,39 @@ fn d2c3_world_local_native_return_refuses_corrupt_foreign_owed_and_incomplete_wi
         );
     }
 }
+
+/// The record before the position field (v4) is still the same player's
+/// authority: it is accepted in place, as the current one is. A v2 seed or a v3
+/// record is not.
+#[test]
+fn d2c3_world_local_native_return_accepts_a_genuine_v4_record_and_refuses_older_ones() {
+    use crate::joiner_save::{BoundPersonal, JoinerSave};
+    let _root = crate::save::WorldsRootGuard::new("d2c3-native-return-v4");
+    let name = "d2c3-native-return-v4";
+    let mut server = crate::server::GameServer::new(1, name.into(), 42);
+    let key = [17; 32];
+    let scope = [19; 16];
+    let directory = crate::save::world_dir(name);
+    std::fs::create_dir_all(directory.join("joiners")).unwrap();
+    let target = crate::handover::live::personal_adapter::path(&directory, key);
+    server.players[0].personal = Some(
+        BoundPersonal::fresh(GameplayBinding::WorldLocal { scope, player: WorldPlayer::Npub(key) }).unwrap(),
+    );
+    let record = JoinerSave::capture(&server.players[0], [3; 16]);
+    let v4 = record.encode_v4_for_tests();
+    assert_eq!(v4[0], 4);
+    std::fs::write(&target, &v4).unwrap();
+    let selected = returned_world_local(&directory, Some(scope), Some(key))
+        .expect("a v4 record is read")
+        .expect("and it is the player's authority");
+    assert!(selected.pose().is_none(), "v4 has no position");
+    assert_eq!(std::fs::read(&target).unwrap(), v4, "read in place, not rewritten");
+
+    for old in [2u8, 3u8] {
+        let mut bytes = v4.clone();
+        bytes[0] = old;
+        std::fs::write(&target, &bytes).unwrap();
+        assert!(returned_world_local(&directory, Some(scope), Some(key)).is_err(), "v{old} installed a local seat");
+        assert_eq!(std::fs::read(&target).unwrap(), bytes, "v{old} was rewritten");
+    }
+}

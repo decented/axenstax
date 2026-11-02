@@ -5,7 +5,7 @@ use crate::commands::registry::Command;
 
 pub struct TpCommand;
 
-const MAX_COORD: f32 = 1_000_000.0;
+pub(crate) const MAX_COORD: f32 = 1_000_000.0;
 
 impl Command for TpCommand {
     fn name(&self) -> &'static str {
