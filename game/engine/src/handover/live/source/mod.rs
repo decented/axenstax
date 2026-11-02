@@ -274,7 +274,7 @@ impl SourceSession {
             }
         }
         let context = crate::handover::personal::RecordContext { participant: action.seat.key, lineage: cfg.lineage, generation: cfg.generation, transfer: [1; 16] };
-        let save = crate::joiner_save::JoinerSave::capture(&hs.server.players[action.seat.slot], hs.server.calendar_id);
+        let save = super::capture::seat_record(&hs.server, action.seat.slot);
         let seed = save.encode_seed().map_err(|_| Refusal("The other player's inventory couldn't be recorded."))?;
         let progress = if let Some(personal) = &save.personal {
             let record = personal.record().map_err(|_| Refusal("The other player's progress couldn't be recorded."))?;

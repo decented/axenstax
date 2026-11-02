@@ -1009,7 +1009,7 @@ fn capture_and_offer(
     let Some(save) = crate::save::build_world_save(f.world, f.players, f.seed, &carts, &kept, quest_world.as_ref(), Some(&f.clock)) else {
         return fail(session, hs, Refusal("This world has no local player to hand over from."));
     };
-    let sidecar = match capture::local0_sidecar(seat0, hs.server.run_id) {
+    let sidecar = match capture::local0_sidecar(seat0, hs.server.calendar_id) {
         Ok(b) => b,
         Err(r) => return fail(session, hs, r),
     };

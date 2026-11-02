@@ -274,14 +274,14 @@ fn game_harness_handover_frozen_host_runs_no_tick_captures_the_real_seat_and_can
     );
     assert!(!crate::save::has_autosave(&hg.state.world_name), "a frozen host autosaved");
     // The copy carries the REAL seat 0: its own record and its sidecar.
-    let run_id = hg.state.hosted_server.as_ref().unwrap().server.run_id;
+    let calendar_id = hg.state.hosted_server.as_ref().unwrap().server.calendar_id;
     let Some(Handover::Source { session, .. }) = &hg.state.handover else { panic!("no source session") };
     let context = session.record_context(key(SOURCE_PERSONA));
     let cp = far.dst.as_ref().unwrap().checkpoint().unwrap().received_world().to_path_buf();
     let rec = std::fs::read(cp.join(format!("participants/{}.dat", npub(SOURCE_PERSONA)))).unwrap();
     assert_eq!(PersonalRecord::decode(&rec, &context).unwrap().kills, vec![(crate::mob::MobType::Pig, 7)]);
     let sidecar = std::fs::read(cp.join(format!("joiners/{}.dat", npub(SOURCE_PERSONA)))).unwrap();
-    assert_eq!(sidecar, capture::local0_sidecar(&hg.state.players[0], run_id).unwrap(), "not the real seat 0");
+    assert_eq!(sidecar, capture::local0_sidecar(&hg.state.players[0], calendar_id).unwrap(), "not the real seat 0");
     // Cancel: the host game plays again (and the far end is told).
     hg.state.handover_click = Some(UiAction::Cancel);
     hg.frames(1);

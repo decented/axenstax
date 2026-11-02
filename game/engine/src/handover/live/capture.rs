@@ -7,16 +7,24 @@ use super::eligibility::Refusal;
 use crate::handover::personal::{PersonalRecord, RecordContext};
 use crate::player_slot::PlayerSlot;
 
+/// A joiner seat's record for a handover, as the source captures it: its night
+/// mark counted in the server's calendar, which travels with the world (the
+/// recipient restores the same id). One function for both capture sites, so the
+/// id can't drift between them.
+pub(crate) fn seat_record(server: &crate::server::GameServer, slot: usize) -> crate::joiner_save::JoinerSave {
+    crate::joiner_save::JoinerSave::capture(&server.players[slot], server.calendar_id)
+}
+
 /// The seat's window + vitals in exactly the sidecar encoding a joiner's
 /// record uses. Pure: nothing on this machine changes at capture.
-pub fn local0_sidecar(slot: &PlayerSlot, run_id: [u8; 16]) -> Result<Vec<u8>, Refusal> {
+pub fn local0_sidecar(slot: &PlayerSlot, calendar_id: [u8; 16]) -> Result<Vec<u8>, Refusal> {
     let window = local0_window(slot);
     let save = crate::joiner_save::JoinerSave::from_parts(
         &window,
         slot.combat.health,
         slot.combat.hunger,
         slot.spawn_pos.to_array(),
-        run_id,
+        calendar_id,
         None,
     );
     save.encode_seed().map_err(|_| Refusal("Your inventory couldn't be recorded for the handover."))

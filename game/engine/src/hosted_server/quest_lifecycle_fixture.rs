@@ -260,7 +260,7 @@ impl Room {
         let i = self.actors[who].i();
         let expected = crate::joiner_save::JoinerSave::capture_projected(
             &self.host.server.players[i],
-            self.host.server.run_id,
+            self.host.server.calendar_id,
         )
         .unwrap();
         self.actors[who]

@@ -1398,3 +1398,107 @@ fn handover_checkpoint_native_metadata_accepts_pretty_history_and_refuses_recove
     assert!(source_metadata(&[]).is_err());
     assert!(source_metadata(&vec![b' '; 2 * 1024 * 1024 + 1]).is_err());
 }
+
+/// Keep slice 2a: the world's clock crosses a handover inside `world.dat`, and a
+/// handed-over joiner's night mark stands under the calendar the recipient
+/// restores from it. The source here has restarted (its run id is not its
+/// calendar's), which is the case the mark was once captured wrongly for.
+#[test]
+fn handover_checkpoint_carries_the_authority_clock_and_a_sleep_mark_under_its_calendar() {
+    let t = Temp::new();
+    let f = Fixture::new();
+    let mut server = crate::server::GameServer::new(1, "clock-handover".into(), 42);
+    {
+        let sp = &mut server.players[0];
+        sp.server_simulated = true;
+        sp.verified_pubkey = Some([1; 32]);
+        sp.enter_world();
+        sp.slept_night = Some(3);
+    }
+    server.run_id = [3; 16];
+    server.calendar_id = [8; 16];
+    let clock = crate::sim_clock::SavedClock {
+        tick_counter: 90_000,
+        world_time: 15_000,
+        rain_until: 91_000,
+        storm_until: 90_500,
+        weather_lock_applied: Some("storm".into()),
+        nights: 12,
+        was_night: Some(true),
+        calendar_id: server.calendar_id,
+        day_remainder: 15_000,
+        day_last_tick: Some(90_000),
+    };
+    let row = super::super::live::capture::seat_record(&server, 0).encode_seed().unwrap();
+    let mut save = neutral_save(42);
+    save.authority_clock = Some(clock.clone());
+    let meta = transfer_metadata(&WorldMeta::new("source")).unwrap();
+    let npub_a = f.source.public_key().to_bech32().unwrap();
+    let npub_b = f.recipient.public_key().to_bech32().unwrap();
+    let participants = [
+        ParticipantMember { npub: &npub_a, kind: MemberKind::Sidecar, schema: 1, bytes: &row },
+        ParticipantMember { npub: &npub_b, kind: MemberKind::Sidecar, schema: 1, bytes: &row },
+    ];
+    let agreements = vec![
+        Agreement { participant: f.core.source_persona, proof: [1; 32] },
+        Agreement { participant: f.core.successor_persona, proof: [2; 32] },
+    ];
+    let packed = pack(
+        CheckpointSource {
+            meta: &meta,
+            save: &save,
+            world: &World::new(),
+            disk_chunks: None,
+            exhibit_dir: None,
+            participants: &participants,
+        },
+        f.binding(agreements),
+        &t.0,
+    )
+    .unwrap();
+    let mut import = Import::new(f.admitted(packed.manifest()), &t.0, 0).unwrap();
+    feed(&mut import, packed.archive());
+    let receipt = import.complete(0, &mut import::NoFault).unwrap();
+    let raw = receipt.received_world();
+
+    let back = bounded_decode::world(&fs::read(raw.join("world.dat")).unwrap()).unwrap();
+    assert_eq!(back.authority_clock, Some(clock.clone()), "the clock arrives whole");
+    assert_eq!(back.clock(), Some(&clock));
+
+    let seed = fs::read(raw.join(format!("joiners/{npub_b}.dat"))).unwrap();
+    let record = crate::joiner_save::JoinerSave::decode(&seed).unwrap();
+    let mut recipient = crate::server::ServerPlayer::new(glam::Vec3::ZERO);
+    record.restore_vitals(&mut recipient, back.clock().unwrap().calendar_id);
+    assert_eq!(recipient.slept_night, Some(3), "the mark stands under the calendar the recipient restores");
+    record.restore_vitals(&mut recipient, server.run_id);
+    assert_eq!(recipient.slept_night, None, "and means nothing under the source's run id");
+}
+
+#[test]
+fn handover_checkpoint_refuses_a_clock_no_build_could_have_written() {
+    let t = Temp::new();
+    let f = Fixture::new();
+    let meta = transfer_metadata(&WorldMeta::new("source")).unwrap();
+    let mut save = neutral_save(42);
+    save.authority_clock = Some(crate::sim_clock::SavedClock {
+        tick_counter: 1,
+        world_time: 0,
+        rain_until: u64::MAX,
+        storm_until: 0,
+        weather_lock_applied: None,
+        nights: 0,
+        was_night: None,
+        calendar_id: [1; 16],
+        day_remainder: 0,
+        day_last_tick: None,
+    });
+    assert!(validate_neutral(&save).is_err(), "a window that never ends is refused");
+    assert!(
+        pack(
+            CheckpointSource { meta: &meta, save: &save, world: &World::new(), disk_chunks: None, exhibit_dir: None, participants: &[] },
+            f.binding(vec![]),
+            &t.0
+        )
+        .is_err()
+    );
+}
