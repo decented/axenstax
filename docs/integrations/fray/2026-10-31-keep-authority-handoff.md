@@ -280,7 +280,7 @@ Fray-side halves were **proposals** when this was written: the contract amendmen
 Measured or built on the game side. The sizes are from `checkpoint_size_at_the_bench_world_sizes`
 (§8). Slice 3 has settled the ones below against the Tier-L rulings.
 
-**Settled in the game, 2026-11-03 (checkpoint schema 5; no save-format or protocol change):**
+**Settled in the game, 2026-11-03 (checkpoint schema 6; no save-format or protocol change):**
 
 - **"Not now": there is no such code.** `checkpoint` no longer refuses a pending death: each corpse
   is in the bytes (`authority_checkpoint/deaths.rs`) and comes back as a corpse, and the restored
@@ -317,14 +317,14 @@ Measured or built on the game side. The sizes are from `checkpoint_size_at_the_b
   root of a manifest tree (`authority_checkpoint/records.rs`, key `t` + prefix), where a key starting `t`
   binds a further manifest record the same way. At most 64 entries is a record; more are shared out by the
   byte after their common prefix. So it is a function of the entries, walking it gives the one sorted list,
-  one changed entry rewrites one path, and no manifest record passes 64 KiB. The layout (`l`), the lava
-  queue with its source differences (`q`), each cell's exposure clock (`p`), water likewise (`f`), the cell
+  one changed entry rewrites one path, and no manifest record passes 64 KiB. The layout (`l`), each cell's
+  exposure clock (`p`), water with its source differences (`f`), the cell
   sims (`s`: fire, leaf decay, scheduler, power, rubber taps), the player slots (`u`) and the corpses (`k`) are
   stored records cut at 64 KiB, read by the same readers as before. Inline stays for fixtures only
-  (`checkpoint_inline`, `#[cfg(test)]`). Numbers are in §8.
+  (`checkpoint_inline`, `#[cfg(test)]`). Lava has its own forms, `q`, `r` and `x` (Spec 01 §4.1.5). Numbers are in §8.
 - **The image is bounded whatever the world holds.** What is left: the header, the clock, the modes, the
-  streamer's settled anchors (one a player), lava's phase, leaf decay's clock, the manifest's root and the
-  seal. So about 2.4 KB at the widest server. Two things moved that look bounded and aren't. A player slot: a
+  streamer's settled anchors (one a player), lava's phase and queue cursors, leaf decay's clock, the manifest's
+  root and the seal. So about 2.4 KB at the widest server. Two things moved that look bounded and aren't. A player slot: a
   plan in an inventory holds a captured building's cells, up to 32,768 of them, and a joiner's pack feedback
   can hold 1,024 rows. Fire: `MAX_ACTIVE_FIRE` (256) holds a run's ignitions, but a fire block in a column that
   goes out of memory stays and `register_column_fires` re-adopts it uncapped when the column returns, so a world
@@ -407,7 +407,8 @@ Measured or built on the game side. The sizes are from `checkpoint_size_at_the_b
 - *Keys and personas:* a keyed digest of a persona still counts as an identifier. Use the game's own counter,
   never reused, plus a directory record bound by the tree, with the entry removed on erasure.
 - *Native path:* `--keep-world` stays unchanged through slice 3; no native L runner before the WASM build.
-- *Lava queue:* making its pieces not shift, so it fits a `last` batch, is the game's to fix.
+- *Lava queue:* making its pieces not shift, so it fits a `last` batch, was the game's to fix. Built, schema 6
+  (Spec 01 §4.1.5, what has been measured in §8). Water still has the old form (§8).
 - *A state file in fixed pieces* (ruling 2's addendum): yes, under the file's own keys, with no contract change;
   met below.
 
@@ -416,13 +417,11 @@ Measured or built on the game side. The sizes are from `checkpoint_size_at_the_b
 - **A corpse's living copy is matched, not identified.** A pet's row in `world.dat` was taken when it
   lived, and pets have no stable id, so a restore removes the nearest living mob of the corpse's kind and
   owner. With two alike, it may be the other one. A quest NPC's row isn't matched at all.
-- **A piece is by position.** A queue's order is its state, so a state record is cut by offset: an entry added
-  near the start of the sorted layout or the clocks rewrites the pieces after it, up to the whole record in a
-  batch. For lava it is always the whole record while the queue drains, as taking the front shifts every byte
-  after it: 703,043 B a persist at the 8-joiner bench. At the largest measured, all of `authority/` is 962,259 B (§8)
-  against the 1 MiB batch, which staged batches can spread. Fine at a 60 s cadence; a much shorter one makes it
-  the dirty-rate limit ruling 1 says to measure. Water and the player slots add to that: slots change at every
-  persist with anyone moving, about 440 B a slot, and water only as it flows.
+- **A piece is by position, except lava's.** A queue's order is its state, so a state record is cut by offset: an
+  entry added near the start of the sorted layout or the clocks rewrites the pieces after it, up to the whole record
+  in a batch. Water's queue is still that form, so taking its front rewrites its whole record. Lava was the same, 703,043 B a
+  persist at the 8-joiner bench; it now writes immutable pieces and moves a cursor in the image (Spec 01 §4.1.5). What
+  a tick and a commit interval really dirty, family by family, is in §8.
 - **A corpse lies in a record, and a save still waits for the sweep.** So a real `last` batch holds an empty
   corpses record, and only a fixture writes a full one (`write_bound_records` without the save). If the runner
   ever persists with deaths pending, the save's wait has to go first.
@@ -532,6 +531,18 @@ Limits of what does hold:
 
 **Slice 3:** return output as commands, and the admission split (choice 7).
 **Then:** contract acceptance 2 and the WASM build.
+
+**For the adapter's batcher, from lava's pieces (schema 6):**
+- `build_record_set`'s `previous` must be what the store will hold at the commit, staged keys included, not only the
+  last root's keys. A piece staged and then drained before the `last` is otherwise never removed.
+- A queue piece is final once it is full and the cursor hasn't passed it, so a batcher may stage any but the last
+  ahead of the `last` step, however long the queue. `the_first_commit_of_a_huge_queue_spreads_over_staged_batches_and_binds_at_the_last`
+  does that with a plain function. A staged value can still go stale: when a queue empties, its numbering restarts
+  from 0, and the digest compare at the `last` step writes the key again. Latest write wins, as the contract says.
+- Water's queue is still cut by position, so its whole record belongs in any `last` while it drains (§8). It needs
+  the same treatment, or a withheld `last`, before a large flood can commit.
+- Building a set is still O(the queue): it encodes every piece, then the dirty map hashes them. It's bounded by what
+  the batch writes only once the adapter remembers a full piece's digest.
 
 **For the next slices (from the independent review of slice 3a; no code in this branch):**
 - Slice 5: the test runner asserts the restore at each commit, as the root is only restorable straight
@@ -662,6 +673,28 @@ benchmark exists.**
   of it rewritten at every persist while the queue drains. Staged batches can spread it, as the ruling allows; the
   bytes are the same state the image held before, so this is where the dirty-rate limit will show first. `world.dat`'s
   pieces add a file's worth at most to a batch that wants them, and aren't in that figure.
+
+- **What a tick dirties, after lava's pieces (schema 6), 2026-11-03.** Debug build, one run, and only part of it: the
+  disk floor stopped the lane before the 8-joiner bench ran (`what_a_tick_dirties_at_the_eight_joiner_bench`, `#[ignore]`,
+  run by name with `--nocapture`), so **this has no bench numbers yet**, and `LAVA_SHARE_OF_A_TICK` (32 KiB) in that test is
+  a target nothing has measured.
+
+  Measured on the small fixture. Before, with 100,000 queued cells: 1,299,600 B of lava dirty in a draining tick, and a
+  batch fault with 540,000. After: at most one piece, 13,312 B, in each of 24 ticks with 100,000 queued, and every tick's whole
+  dirty set a legal batch with 540,000 and eight joiners, which then stays under the cap and restores. A first commit of
+  540,000 goes over staged batches and restores from them.
+
+  The other families, from the §8 sizes above and arithmetic, **not measured tick by tick**:
+
+  | Family | Size | A typical tick | Does it threaten a batch? |
+  |---|---|---|---|
+  | `f` water | 117,530 B at the bench; 25 B a flowing cell (source and front) | Whole record while its queue drains, the form lava had; otherwise untouched | **Yes, the same way as lava.** Arithmetic: past about 42,000 flowing cells it alone passes 1 MiB, and a `last` can't be sent while it drains. A 400,000-source fixture is 10 MB. The same form would fit |
+  | `p` exposure | 20 B a cell, 60 to 80 B a block mined in deepslate | Untouched unless mining; a sorted insert rewrites every later piece | **Later, in a long-lived world.** Arithmetic: 1 MiB at about 52,000 cells, or 13,000 to 17,000 blocks, and nothing prunes it. A mined block near the start then rewrites all of it |
+  | `w` | 114,445 B, 2 pieces | The clock moves, so at least the piece holding it. How many pieces a tick touches is unmeasured | Only when the file is large and a row's length changes: every later piece. About 4,000 full chests is 1 MiB (§8) |
+  | `u` slots | 3,753 B at 8 joiners; about 440 B a slot | Each moving slot, so all of it with everyone moving | No at bench sizes; arithmetic 113 KB at 257 slots. A slot holding full plans is far larger, and a move near it rewrites its piece |
+  | `s` cell sims | 32 B idle; fire 21 B a cell, 256 in a run | Only while something burns or decays | No in a run; a load re-adopts fire uncapped |
+  | `l` layout | 10,323 B | Only as columns stream; a sorted insert rewrites later pieces | No at bench sizes |
+  | `k` corpses | 4 B | Empty at a real `last` | No |
 
 - **`world.dat` against the record-value limit, which nobody had measured.** At the bench sizes it is 112,555,
   113,339 and 114,445 B, about **11% of 1 MiB**. It barely moves between them, so it follows what the fixture
