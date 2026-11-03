@@ -260,11 +260,19 @@ fn every_record_refuses_every_mutation() {
     meta.description = "later".into();
     crate::save::save_world_meta("ckpt-records", &meta).expect("write meta");
     run_to(&mut h, 30);
-    // And the state in records: a new column, a woken lava cell, a clock.
+    // And the state in records: a new column, a woken lava cell, a clock, a water source
+    // and a powered cell. The slots have moved already.
     h.set_block(200, 100, 200, crate::block::COBBLESTONE);
     h.server.lava.add_source(3, 120, 3);
     h.server.world.pop_exposure.insert((3, 20, 3), 9);
-    let bytes = persist_and_checkpoint(&mut h);
+    h.server.water.add_source(4, 120, 4);
+    h.server.world.power.energised.insert((5, 120, 5), 3);
+    h.server.persist_authority().expect("the second persist");
+    // A save waits for the sweep, so a corpse comes after it, in its own record.
+    let cow = spawn_mob(&mut h.server.ecs, crate::mob::MobType::Cow, glam::Vec3::new(6.5, 120.0, 6.5));
+    h.server.ecs.get::<&mut crate::combat::Health>(cow).unwrap().current = 0.0;
+    h.server.write_bound_records().expect("the records write");
+    let bytes = h.server.checkpoint().expect("checkpoints");
     restore(&h, &bytes).unwrap_or_else(|e| panic!("untouched, it restores: {e:?}"));
 
     let records = [
@@ -290,10 +298,15 @@ fn every_record_refuses_every_mutation() {
         key
     };
     let (layout, lava, exposure) = (piece(b'l'), piece(b'q'), piece(b'p'));
+    let (water, cells, players, corpses) = (piece(b'f'), piece(b's'), piece(b'u'), piece(b'k'));
     let authority_records = [
         Record { name: "layout piece", path: authority(&layout), swapped: older(&authority(&lava)), older: older_of(&layout) },
         Record { name: "lava piece", path: authority(&lava), swapped: older(&authority(&exposure)), older: older_of(&lava) },
         Record { name: "exposure piece", path: authority(&exposure), swapped: older(&authority(&layout)), older: older_of(&exposure) },
+        Record { name: "water piece", path: authority(&water), swapped: older(&authority(&lava)), older: older_of(&water) },
+        Record { name: "cell sims piece", path: authority(&cells), swapped: older(&authority(&water)), older: older_of(&cells) },
+        Record { name: "players piece", path: authority(&players), swapped: older(&authority(&cells)), older: older_of(&players) },
+        Record { name: "corpses piece", path: authority(&corpses), swapped: older(&authority(&players)), older: older_of(&corpses) },
         Record { name: "manifest root", path: authority(b"t"), swapped: older(&authority(node)), older: older_of(b"t") },
         Record { name: "manifest record", path: authority(node), swapped: older(&authority(b"t")), older: older_of(node) },
     ];

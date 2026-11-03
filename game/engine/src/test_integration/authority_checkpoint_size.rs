@@ -1,6 +1,7 @@
 //! Keep slice 3: the checkpoint's size doesn't follow the world's. The manifest, the
-//! layout, the lava queue and each cell's exposure clock are bound stored records, so
-//! each of them can grow past what the 1 MiB image could hold (Spec 01 §4.1.5).
+//! layout, lava, water, each cell's exposure clock, the cell sims, the player slots and
+//! the corpses are bound stored records, so each of them can grow past what the 1 MiB
+//! image could hold (Spec 01 §4.1.5).
 
 use super::authority_checkpoint::{fixture, persist_and_checkpoint, restore, SEED};
 use super::twin_run::{run_to, twin};
@@ -42,6 +43,73 @@ fn a_worst_case_lava_load_with_eight_joiners_stays_under_the_cap() {
     assert!(bytes.len() < MAX_CHECKPOINT_BYTES / 4, "{} B", bytes.len());
     let back = restore(&h, &bytes).unwrap_or_else(|e| panic!("restores: {e:?}"));
     assert_eq!(back.checkpoint().expect("again"), bytes);
+}
+
+/// A very large water load: about 87,000 flowing cells' sources used to reach the cap.
+/// Each here is a source (12 B) and a queued front (13 B), at a small cost on disk.
+#[test]
+fn a_very_large_water_load_stays_under_the_cap_and_restores() {
+    let _root = WorldsRootGuard::new("keep-s3d-water");
+    let mut h = fixture("ckpt-water", 8);
+    run_to(&mut h, 5);
+    for i in 0..400_000 {
+        h.server.water.add_source(i, 300, i % 7);
+    }
+    let bytes = persist_and_checkpoint(&mut h);
+    assert!(bytes.len() < MAX_CHECKPOINT_BYTES / 4, "{} B", bytes.len());
+    let back = restore(&h, &bytes).unwrap_or_else(|e| panic!("restores: {e:?}"));
+    assert_eq!(back.checkpoint().expect("again"), bytes);
+    let files = crate::authority_checkpoint::bound_record_files(&h.server).unwrap();
+    assert!(files.iter().all(|(_, record)| record.len() <= MAX_RECORD_BYTES));
+    assert!(files.iter().filter(|(key, _)| key[0] == b'f').count() > 100, "the load is in its record");
+}
+
+fn zeros<T: serde::de::DeserializeOwned>() -> T {
+    bincode::deserialize(&[0u8; 1 << 12]).expect("zeros decode as this")
+}
+
+/// Every list that can grow with what the world holds, past what the image could carry,
+/// and the image is the size it was: only fire and the settled anchors have a length in
+/// it, and both are bounded (a constant, and the player count).
+#[test]
+fn the_image_is_one_size_whatever_the_world_holds() {
+    let _root = WorldsRootGuard::new("keep-s3d-flood");
+    let mut h = fixture("ckpt-flood", 2);
+    run_to(&mut h, 5);
+    let small = h.server.checkpoint().expect("checkpoints").len();
+    const N: i32 = 120_000;
+    for i in 0..N {
+        h.server.water.add_source(i, 300, 0);
+        h.server.world.power.energised.insert((i, 301, 0), 3);
+        h.server.world.power.mains.insert((i, 302, 0));
+        h.server.world.tapped_rubber_logs.insert((i, 303, 0), 7);
+    }
+    let cell = |y: i32| (0..N).map(move |i| (i, y, 0));
+    let tick = h.server.leaf_decay.digest_view().2;
+    h.server.leaf_decay.restore_view((cell(304).collect(), cell(305).map(|(x, y, z)| (x, y, z, tick + 400)).collect(), tick));
+    let due = cell(306).map(|pos| (1_000_000, crate::block_update::ScheduledUpdate { pos, kind: crate::block_update::ScheduleKind::GateSettle })).collect();
+    h.server.world.scheduler.restore_view(cell(307).collect(), due);
+    // Plans in a slot's inventory: a plan holds a whole captured building's cells.
+    let mut plan: crate::plan::PlanData = zeros();
+    plan.cells = vec![zeros(); 32_768];
+    let mut carrier = crate::server::ServerPlayer::new(glam::Vec3::new(0.5, 110.0, 0.5));
+    carrier.server_simulated = true;
+    for slot in 0..36 {
+        carrier.inventory.set_slot(slot, Some(crate::item::ItemStack { item: crate::item::Item::Plan(plan.clone()), count: 1 }));
+    }
+    h.server.players.push(carrier);
+    h.server.persist_authority().expect("persists");
+    // A save waits for the sweep, so these come after it, with the record that holds them.
+    for i in 0..3_000 {
+        let cow = crate::entity::spawn_mob(&mut h.server.ecs, crate::mob::MobType::Cow, glam::Vec3::new(i as f32, 300.0, 0.5));
+        h.server.ecs.get::<&mut crate::combat::Health>(cow).unwrap().current = 0.0;
+    }
+    h.server.write_bound_records().expect("the records write");
+    let bytes = h.server.checkpoint().expect("checkpoints");
+    assert_eq!(bytes.len(), small, "the image grew");
+    let back = restore(&h, &bytes).unwrap_or_else(|e| panic!("restores: {e:?}"));
+    assert_eq!(back.checkpoint().expect("again"), bytes);
+    assert!(crate::authority_checkpoint::bound_record_files(&h.server).unwrap().iter().all(|(_, record)| record.len() <= MAX_RECORD_BYTES));
 }
 
 /// Past the 50,000-odd cells the image had room for, its values untouched.

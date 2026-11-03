@@ -1276,7 +1276,7 @@ the wire nor the save format.
 **Shape.** A hybrid (Keep handoff §6, choice 1): volatile state in the bytes, and
 the digest of a tree of stored records naming every record the checkpoint binds. A
 world doesn't fit the 1 MiB cap as an image, and one digest does, at any size. The
-layout, in order: magic, schema `u16` (4), `PROTOCOL_VERSION`, save format, `worldgen_version`, the
+layout, in order: magic, schema `u16` (5), `PROTOCOL_VERSION`, save format, `worldgen_version`, the
 seed widened to `u64`, the config binding (SHA-256 of seed, worldgen version,
 creative and difficulty), the pop key id, the completed tick, the volatile
 sections, the manifest's root, and a seal (SHA-256 of everything before it; a checksum,
@@ -1300,40 +1300,54 @@ the same world and needn't.
 hashed with the value of the secret cut from its stored bytes. A restore is given it by the host shell
 (`AuthorityConfig`).
 
-**Volatile sections** (`volatile.rs`, `players.rs`):
+**Volatile sections** (`volatile.rs`). Bounded by constants and the player count, whatever the
+world holds, about 8 KB at the widest server:
 - the slice 2a clock, plus the day-clock step, the falling cadence, the rolled
   strike and the world's active ticks and work;
-- the server's modes (machines, lightning, sim distance and so on);
-- fire with its timers; water as queues plus the difference of its sources from a
-  rescan (water registers every water cell of a column, so an ocean's whole set would
-  be past the cap, but flowing cells are not sources until a reload) and lava's spread
-  phase; the leaf-decay queues; the update scheduler; the power flood; rubber-tap
-  cooldowns;
-- each player slot: every field the `players` digest section reads and the persona
-  key. `riding` is left out, since it names a hecs id: a rider restores on its feet;
-- each corpse waiting for the death pass (`deaths.rs`), sorted by its bytes: its kind and
+- the server's modes (machines, lightning, sim distance and so on), and the streamer's
+  settled anchors, one a player;
+- fire with its timers, at most `fire::MAX_ACTIVE_FIRE` cells; lava's spread phase; leaf
+  decay's clock.
+
+**State in records** (`records.rs`, keys `l`, `q`, `p`, `f`, `s`, `u`, `k` + a `u32` piece number).
+The same kind of state, read and range-checked by the same readers (`Volatile::take_state`), but it
+grows with the world, so it lies in stored records rather than the image. Each is cut at 64 KiB:
+- the chunk layout (`l`): per column, which sections are live, which are evicted, whether
+  it counts as loaded and whether any chunk carries `persist`. A load holds every
+  saved chunk live and marks it `persist`, so this is what puts stream-out state
+  back. A column can hold sections past `0..=MAX_CHUNK_Y`: a light write conjures an
+  empty one just below the floor;
+- lava (`q`) and water (`f`): their queues in order, plus the difference of their sources from a
+  rescan (water registers every water cell of a column, so an ocean's whole set would be past the
+  cap, but flowing cells are not sources until a reload);
+- each cell's Proof-of-Play exposure clock (`p`, `World::pop_exposure`, in no save, 20 B a
+  cell and never pruned);
+- the cell sims (`s`): the leaf-decay queues, the update scheduler, the power flood and the
+  rubber-tap cooldowns;
+- each player slot (`u`, `players.rs`): every field the `players` digest section reads and the
+  persona key. `riding` is left out, since it names a hecs id: a rider restores on its feet. A slot's
+  size follows what it carries: a plan in an inventory holds a captured building's cells;
+- each corpse waiting for the death pass (`k`, `deaths.rs`), sorted by its bytes: its kind and
   place, last attacker, rescue decision, cull mark, hideout and raid, and for a tamed or
   authored mob its saved row (owner and cargo). The pass runs 32 a tick, and not at all
   while the kill credit has nowhere to go, so a corpse can outlive a tick. It comes back
   as a corpse, and the restored world's next pass does what the uninterrupted one's does.
   The pet's row in `world.dat` was taken while it lived, so the nearest living mob of its
   kind and owner goes (pets have no stable id). A save still waits for the pass: it would
-  otherwise lose a dead pet's row and cargo. Over-cap is the only limit on the count.
+  otherwise lose a dead pet's row and cargo.
 
-**State in records** (`records.rs`, keys `l`, `q`, `p` + a `u32` piece number). The same kind
-of state, read and range-checked by the same readers (`Volatile::take_state`), but it grows with
-the world, so it lies in stored records rather than the image. Each is cut at 64 KiB:
-- the chunk layout (`l`): per column, which sections are live, which are evicted, whether
-  it counts as loaded and whether any chunk carries `persist`. A load holds every
-  saved chunk live and marks it `persist`, so this is what puts stream-out state
-  back. A column can hold sections past `0..=MAX_CHUNK_Y`: a light write conjures an
-  empty one just below the floor;
-- lava (`q`): its queues in order, plus the difference of its sources from a rescan;
-- each cell's Proof-of-Play exposure clock (`p`, `World::pop_exposure`, in no save, 20 B a
-  cell and never pruned).
+**`world.dat` in pieces** (`records.rs`, key `w` + a `u32` piece number). The file stays whole where a
+save writes it, with no second copy, and is bound one digest per `FILE_PIECE_BYTES` (64 KiB, part of the
+schema, not derived from the batch limit) of its stored bytes, so it can pass the runner's record-value
+limit. An empty file is one empty piece; a file of a whole number of pieces has no empty one after them.
+A restore cuts what is on disk and compares every piece before anything reads the file, so a flipped,
+missing, swapped, stale or surplus piece is `invalid-checkpoint`, naming the piece. One changed row rewrites
+its piece, and every later piece if it changes the row's length. `records::file_piece_batch` gives a future
+`PersistBatch` the piece writes and the keys to remove when the file shrinks, so the store equals the bound
+set. No key of this family carries a persona identifier.
 
 **Who writes them.** `GameServer::persist_authority`, which is `try_save` and then the records:
-the state above and the manifest's tree, in `authority/` in the world's folder, one file per key
+the state records above and the manifest's tree, in `authority/` in the world's folder, one file per key
 named by the key in hex, standing in for a runner's store. Nothing else calls it (a runner's
 `last` step will, and `--keep-world` doesn't yet), so a normal server's save writes exactly what it
 did and a world never run as an authority has no such folder. A piece or tree record that is
@@ -1354,7 +1368,7 @@ are entries, and the persist writes the tree a checkpoint of that same state com
 `handover/` and `participants/` (key `h`, as stored; all but a lock or a temporary file, as
 `open_guard` and `proof` scan them and `load_or_bootstrap` reads them), every non-empty chunk (the 8,704 B a save writes, taken from
 memory so that a checkpoint moves with an unsaved block), every sidecar in `joiners/`, the
-world meta's stored bytes with the secret's value cut, and `world.dat`'s stored bytes, which
+world meta's stored bytes with the secret's value cut, and `world.dat`'s stored bytes in fixed pieces, which
 hold every table of `WorldSave` (block entities, plots, market hubs, raids, Satoshi, village
 tables, hideouts, hostile acts, tamed pets, carts, quest NPCs and the rest) under one digest at
 any world size. A server's save sorts the rows it takes from hash maps and entity queries
@@ -1403,7 +1417,7 @@ everything from the worldgen version to the seal re-encodes to the same bytes.
 **Damaged records.** From a good root a record arrives byte-exact or not at all, so a torn
 meta is `InvalidCheckpoint`: refused before the load, and neither repaired nor kept aside.
 A chunk file the manifest doesn't name is a column the run dropped, which the layout keeps
-out; a sidecar, a meta, a handover record or a `world.dat` it doesn't name is refused, and so is a lost meta with a
+out; a sidecar, a meta, a handover record or a piece of `world.dat` it doesn't name is refused, and so is a lost meta with a
 damaged copy kept aside. A normal open keeps its recovery (Spec 02 §8.4), because without it every
 later save would be refused: a server opened over a torn meta rebuilds it, and its digest
 is taken after that, so the run's checkpoints bind the file that is there.

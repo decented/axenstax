@@ -5,7 +5,8 @@
 //! a Pet Bed rescue, a pack's cargo), so each corpse is written with what the pass
 //! reads off it, and comes back as a corpse for the restored world's next pass.
 //!
-//! The count has no limit of its own: the checkpoint's cap bounds it.
+//! The count has no limit of its own, and a row can hold a pack's cargo, so they are a
+//! stored record (`records.rs`) and don't count against the checkpoint's cap.
 //!
 //! A pet's row in `world.dat` was taken when it last lived. It would come back
 //! alive beside its own corpse, so the nearest living mob of its kind and owner
@@ -69,7 +70,7 @@ fn encode(s: &GameServer, entity: hecs::Entity, health: &Health) -> Result<Optio
     let (Ok(kind), Ok(pos)) = (ecs.get::<&MobKind>(entity), ecs.get::<&Position>(entity)) else {
         return Ok(None);
     };
-    let mut w = Writer::new();
+    let mut w = Writer::uncapped();
     // `MobType` holds no float and no container: a fixed encoding.
     w.blob(&bincode::serialize(&kind.0).map_err(|e| e.to_string())?);
     w.vec3(pos.0);
@@ -81,7 +82,7 @@ fn encode(s: &GameServer, entity: hecs::Entity, health: &Health) -> Result<Optio
     let row = crate::save::pet_rows(ecs, Some(entity))?.into_iter().next();
     let row = row.map(|row| bincode::serialize(&row).map_err(|e| e.to_string())).transpose()?;
     w.opt(row.as_deref(), |w, row| w.blob(row));
-    w.finish().map(Some).map_err(|bytes| format!("a corpse of {bytes} bytes"))
+    Ok(Some(w.into_bytes()))
 }
 
 fn decode(r: &mut Reader<'_>) -> Result<Corpse, Malformed> {

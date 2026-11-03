@@ -6,20 +6,25 @@
 //!   cadence, the rolled strike and the world's active ticks and work.
 //! - **Modes:** what a dedicated server sets when it is built, so a restored one
 //!   runs the same passes.
-//! - **Deaths:** corpses waiting to be swept (`deaths.rs`).
-//! - **Sims:** fire with its timers, water (sources as the difference from a rescan:
-//!   an ocean's whole set is far past the cap, queues in order) and lava's phase, the
-//!   leaf-decay queues, the update scheduler, the power flood and the rubber-tap
-//!   cooldowns (a load rebuilds those at its own tick).
+//! - **Streamer:** its settled anchors, one a player.
+//! - **Sims:** fire with its timers, at most `fire::MAX_ACTIVE_FIRE` cells, and the phase
+//!   of lava and the clock of leaf decay.
 //!
-//! Three more are the same kind of state, and grow with the world, so they are stored
-//! records bound through the manifest (`records.rs`), read by these same readers:
+//! So the image is bounded by constants and the player count, whatever the world holds.
+//! The rest is the same kind of state and grows with the world, so it is stored records
+//! bound through the manifest (`records.rs`), read by these same readers:
 //!
 //! - **Layout:** which chunks are live, which are evicted and which columns count
 //!   as loaded. A load holds every saved chunk live, so this is what puts the
 //!   stream-out state back (handoff §6, choice 11). Bytes stay in the records.
-//! - **Lava:** sources as the difference from a rescan, and its queues in order.
+//! - **Lava and water:** sources as the difference from a rescan (an ocean's whole set
+//!   is far past the cap), and their queues in order.
 //! - **Exposure clocks:** each cell's (in no save; 20 B a cell, and nothing prunes it).
+//! - **Cell sims:** the leaf-decay queues, the update scheduler, the power flood and the
+//!   rubber-tap cooldowns (a load rebuilds those at its own tick).
+//! - **Player slots** (`players.rs`): a slot's size follows what it carries, and a plan in
+//!   an inventory holds a captured building's cells.
+//! - **Corpses** waiting to be swept (`deaths.rs`).
 //!
 //! Everything else in handoff §5 is the restoration ledger (Spec 01 §4.1.5).
 
@@ -113,8 +118,7 @@ pub(super) fn write(w: &mut Writer, s: &GameServer) -> Result<(), String> {
     write_modes(w, s);
     write_streamer(w, s);
     write_sims(w, s);
-    super::players::write_all(w, &s.players)?;
-    super::deaths::write(w, s)
+    Ok(())
 }
 
 /// The state that is a stored record: what `persist_authority` writes, and what a
@@ -124,6 +128,14 @@ pub(super) fn state_records(s: &GameServer) -> Result<StateRecords, String> {
     write_layout(&mut layout, s)?;
     let mut lava = Writer::uncapped();
     write_fluid(&mut lava, &s.lava.checkpoint_view(&s.world, &s.loaded_columns).0);
+    let mut water = Writer::uncapped();
+    write_fluid(&mut water, &s.water.checkpoint_view(&s.world, &s.loaded_columns));
+    let mut cells = Writer::uncapped();
+    write_cells(&mut cells, s);
+    let mut players = Writer::uncapped();
+    super::players::write_all(&mut players, &s.players)?;
+    let mut corpses = Writer::uncapped();
+    super::deaths::write(&mut corpses, s)?;
     let mut exposure = Writer::uncapped();
     let exposed = sorted(s.world.pop_exposure.iter().map(|(p, t)| (*p, *t)).collect());
     exposure.count(exposed.len());
@@ -131,7 +143,15 @@ pub(super) fn state_records(s: &GameServer) -> Result<StateRecords, String> {
         exposure.pos(pos);
         exposure.u64(tick);
     }
-    Ok(StateRecords { layout: layout.into_bytes(), lava: lava.into_bytes(), exposure: exposure.into_bytes() })
+    Ok(StateRecords {
+        layout: layout.into_bytes(),
+        lava: lava.into_bytes(),
+        exposure: exposure.into_bytes(),
+        water: water.into_bytes(),
+        cells: cells.into_bytes(),
+        players: players.into_bytes(),
+        corpses: corpses.into_bytes(),
+    })
 }
 
 /// Each volatile section's encoded size, for the size bench. The writer counts
@@ -143,7 +163,6 @@ pub(super) fn section_sizes(s: &GameServer) -> Result<Vec<(&'static str, usize)>
         write(&mut w)?;
         Ok(w.len())
     }
-    let f = |fluid: &FluidCheckpoint| size(|w| { write_fluid(w, fluid); Ok(()) });
     let water = s.water.checkpoint_view(&s.world, &s.loaded_columns);
     let (lava, _) = s.lava.checkpoint_view(&s.world, &s.loaded_columns);
     let state = state_records(s)?;
@@ -151,10 +170,12 @@ pub(super) fn section_sizes(s: &GameServer) -> Result<Vec<(&'static str, usize)>
         ("clock", size(|w| { write_clock(w, s); Ok(()) })?),
         ("modes", size(|w| { write_modes(w, s); Ok(()) })?),
         ("sims", size(|w| { write_sims(w, s); Ok(()) })?),
-        ("  water", f(&water)?),
-        ("  water sources", 12 * (water.extra.len() + water.missing.len())),
-        ("players", size(|w| super::players::write_all(w, &s.players))?),
         ("record: layout", state.layout.len()),
+        ("record: water", state.water.len()),
+        ("record:   water sources", 12 * (water.extra.len() + water.missing.len())),
+        ("record: cell sims", state.cells.len()),
+        ("record: players", state.players.len()),
+        ("record: corpses", state.corpses.len()),
         ("record: lava", state.lava.len()),
         ("record:   lava sources", 12 * (lava.extra.len() + lava.missing.len())),
         ("record: exposure", state.exposure.len()),
@@ -169,7 +190,6 @@ pub(crate) struct SectionOffsets {
     pub modes: usize,
     pub streamer: usize,
     pub sims: usize,
-    pub players: usize,
 }
 
 #[cfg(test)]
@@ -180,9 +200,7 @@ pub(super) fn section_offsets(s: &GameServer, start: usize) -> Result<SectionOff
     write_modes(&mut w, s);
     let streamer = start + w.len();
     write_streamer(&mut w, s);
-    let sims = start + w.len();
-    write_sims(&mut w, s);
-    Ok(SectionOffsets { modes, streamer, sims, players: start + w.len() })
+    Ok(SectionOffsets { modes, streamer, sims: start + w.len() })
 }
 
 pub(super) fn read(r: &mut Reader<'_>) -> Result<Volatile, Malformed> {
@@ -197,24 +215,9 @@ pub(super) fn read(r: &mut Reader<'_>) -> Result<Volatile, Malformed> {
     let n = r.count(21)?;
     let fire: Vec<_> = (0..n).map(|_| Ok((r.pos()?, r.u64()?, r.u8()?))).collect::<Result<_, _>>()?;
     strictly_increasing(&fire, |c| c.0)?;
-    let water = read_fluid(r)?;
     let lava_slow = r.u8()?;
-    let check = read_list(r)?;
-    let n = r.count(20)?;
-    let decay = (0..n).map(|_| { let (x, y, z) = r.pos()?; Ok((x, y, z, r.u64()?)) }).collect::<Result<_, _>>()?;
-    let leaf = (check, decay, r.u64()?);
-    let scheduler_pending = read_list(r)?;
-    let n = r.count(21)?;
-    let scheduler_due = (0..n).map(|_| read_scheduled(r)).collect::<Result<_, _>>()?;
-    let n = r.count(13)?;
-    let energised: Vec<_> = (0..n).map(|_| Ok((r.pos()?, r.u8()?))).collect::<Result<_, _>>()?;
-    strictly_increasing(&energised, |c| c.0)?;
-    let mains = read_sorted_list(r)?;
-    let n = r.count(20)?;
-    let tapped: Vec<_> = (0..n).map(|_| Ok((r.pos()?, r.u64()?))).collect::<Result<_, _>>()?;
-    strictly_increasing(&tapped, |c| c.0)?;
-    let players = super::players::read_all(r)?;
-    let deaths = super::deaths::read(r)?;
+    let leaf_tick = r.u64()?;
+    let no_fluid = || FluidCheckpoint { extra: Vec::new(), missing: Vec::new(), spread: Vec::new(), retract: Vec::new() };
     Ok(Volatile {
         clock,
         world_time_step,
@@ -227,18 +230,18 @@ pub(super) fn read(r: &mut Reader<'_>) -> Result<Volatile, Malformed> {
         loaded: AHashSet::new(),
         layout: Vec::new(),
         fire,
-        water,
-        lava: FluidCheckpoint { extra: Vec::new(), missing: Vec::new(), spread: Vec::new(), retract: Vec::new() },
+        water: no_fluid(),
+        lava: no_fluid(),
         lava_slow,
-        leaf,
-        scheduler_pending,
-        scheduler_due,
-        energised,
-        mains,
-        tapped,
+        leaf: (Vec::new(), Vec::new(), leaf_tick),
+        scheduler_pending: Vec::new(),
+        scheduler_due: Vec::new(),
+        energised: Vec::new(),
+        mains: Vec::new(),
+        tapped: Vec::new(),
         pop_exposure: Vec::new(),
-        players,
-        deaths,
+        players: Vec::new(),
+        deaths: Vec::new(),
     })
 }
 
@@ -473,17 +476,19 @@ fn write_sims(w: &mut Writer, s: &GameServer) {
         w.u64(next_event);
         w.u8(age);
     }
-    write_fluid(w, &s.water.checkpoint_view(&s.world, &s.loaded_columns));
     w.u8(s.lava.slow_phase());
+    w.u64(s.leaf_decay.digest_view().2);
+}
 
-    let (check, decay, leaf_tick) = s.leaf_decay.digest_view();
+/// The record of the sims that follow what the world holds.
+fn write_cells(w: &mut Writer, s: &GameServer) {
+    let (check, decay, _) = s.leaf_decay.digest_view();
     write_list(w, &check);
     w.count(decay.len());
     for (x, y, z, at) in decay {
         w.pos((x, y, z));
         w.u64(at);
     }
-    w.u64(leaf_tick);
 
     let (pending, due) = s.world.scheduler.digest_view();
     write_list(w, &pending);
@@ -507,6 +512,23 @@ fn write_sims(w: &mut Writer, s: &GameServer) {
         w.pos(pos);
         w.u64(tick);
     }
+}
+
+fn read_cells(r: &mut Reader<'_>, v: &mut Volatile) -> Result<(), Malformed> {
+    v.leaf.0 = read_list(r)?;
+    let n = r.count(20)?;
+    v.leaf.1 = (0..n).map(|_| { let (x, y, z) = r.pos()?; Ok((x, y, z, r.u64()?)) }).collect::<Result<_, _>>()?;
+    v.scheduler_pending = read_list(r)?;
+    let n = r.count(21)?;
+    v.scheduler_due = (0..n).map(|_| read_scheduled(r)).collect::<Result<_, _>>()?;
+    let n = r.count(13)?;
+    v.energised = (0..n).map(|_| Ok((r.pos()?, r.u8()?))).collect::<Result<_, _>>()?;
+    strictly_increasing(&v.energised, |c| c.0)?;
+    v.mains = read_sorted_list(r)?;
+    let n = r.count(20)?;
+    v.tapped = (0..n).map(|_| Ok((r.pos()?, r.u64()?))).collect::<Result<_, _>>()?;
+    strictly_increasing(&v.tapped, |c| c.0)?;
+    Ok(())
 }
 
 fn schedule_kind(kind: ScheduleKind) -> u8 {
@@ -572,6 +594,10 @@ impl Volatile {
         }
         (self.loaded, self.layout) = whole(&state.layout, read_layout)?;
         self.lava = whole(&state.lava, read_fluid)?;
+        self.water = whole(&state.water, read_fluid)?;
+        whole(&state.cells, |r| read_cells(r, self))?;
+        self.players = whole(&state.players, super::players::read_all)?;
+        self.deaths = whole(&state.corpses, super::deaths::read)?;
         self.pop_exposure = whole(&state.exposure, |r| {
             let n = r.count(20)?;
             let cells: Vec<_> = (0..n).map(|_| Ok((r.pos()?, r.u64()?))).collect::<Result<_, _>>()?;
@@ -587,7 +613,8 @@ impl Volatile {
     /// bounds are what a real server can hold, not a client's settings: a server's
     /// render distance is only its load radius, and can be under the menu's floor.
     /// (The layout and the player count are refused as they are read, since those
-    /// allocate.)
+    /// allocate.) What lies in records is empty here until [`Self::take_state`] has run,
+    /// which validates again.
     pub(super) fn validate(&self) -> Result<(), Malformed> {
         if let Some(streamer) = &self.streamer {
             let (sim_distance, budget, settled_for) = streamer.to_parts();

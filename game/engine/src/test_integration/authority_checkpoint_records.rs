@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use super::authority_checkpoint::{fixture, persist_and_checkpoint, restore, SEED};
 use super::authority_checkpoint_refusals::assert_invalid_checkpoint;
 use super::twin_run::run_to;
-use crate::authority_checkpoint::{seal, section_offsets, RestoreError};
+use crate::authority_checkpoint::{rebind_state, seal, state_record, RestoreError};
 use crate::container_window::ItemDelta;
 use crate::item::ItemStack;
 use crate::joiner_save::{BoundPersonal, JoinerSave};
@@ -130,13 +130,16 @@ fn a_refusal_after_the_load_leaves_the_world_able_to_restore() {
     assert_eq!(folder_bytes(&dir), before, "the refused restore changed the folder");
 
     // A `-0.0`: refused at the very end, by the re-encode.
-    let velocity = section_offsets(&h.server).unwrap().players + 4 + 12;
-    let mut minus_zero = bytes.clone();
-    assert_eq!(minus_zero[velocity..velocity + 4], [0; 4]);
-    minus_zero[velocity..velocity + 4].copy_from_slice(&(-0.0f32).to_le_bytes());
-    seal(&mut minus_zero);
+    let velocity = 4 + 12;
+    let mut players = state_record(&h.server, b'u');
+    assert_eq!(players[velocity..velocity + 4], [0; 4]);
+    players[velocity..velocity + 4].copy_from_slice(&(-0.0f32).to_le_bytes());
+    let minus_zero = rebind_state(&h.server, &bytes, b'u', players);
+    let rebound = folder_bytes(&dir);
     assert_invalid_checkpoint(&h, &minus_zero, "a resealed -0.0");
-    assert_eq!(folder_bytes(&dir), before, "the refused restore changed the folder");
+    assert_eq!(folder_bytes(&dir), rebound, "the refused restore changed the folder");
+    h.server.write_bound_records().expect("the records go back");
+    assert_eq!(folder_bytes(&dir), before, "put back");
 
     let restored = TestHost::adopt(restore(&h, &bytes).expect("the real one still restores"));
     assert_eq!(restored.server.checkpoint().unwrap(), bytes);

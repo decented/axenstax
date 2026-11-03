@@ -9,6 +9,10 @@
 //! | `l` + `u32` BE | a piece of the layout |
 //! | `q` + `u32` BE | a piece of the lava queue |
 //! | `p` + `u32` BE | a piece of the exposure clocks |
+//! | `f` + `u32` BE | a piece of water: sources as the difference from a rescan, its queues |
+//! | `s` + `u32` BE | a piece of the cell sims: leaf decay, the scheduler, power, rubber taps |
+//! | `u` + `u32` BE | a piece of the player slots |
+//! | `k` + `u32` BE | a piece of the corpses waiting for a death pass |
 //!
 //! One more family is bound the same way and has no file here, as the file it is pieces
 //! of stays whole where a save writes it: `w` + `u32` BE, a piece of `world.dat`.
@@ -32,7 +36,6 @@
 //! piece if it changes the row's length. Per-table keys can replace that if a measured
 //! commit shows it matters.
 
-use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -68,8 +71,20 @@ pub(super) const MANIFEST: u8 = b't';
 pub(super) const LAYOUT: u8 = b'l';
 pub(super) const LAVA: u8 = b'q';
 pub(super) const EXPOSURE: u8 = b'p';
+pub(super) const WATER: u8 = b'f';
+pub(super) const CELLS: u8 = b's';
+pub(super) const PLAYERS: u8 = b'u';
+pub(super) const CORPSES: u8 = b'k';
 pub(super) const WORLD_DAT: u8 = b'w';
-const FAMILIES: [(u8, &str); 3] = [(LAYOUT, "layout"), (LAVA, "lava queue"), (EXPOSURE, "exposure clocks")];
+const FAMILIES: [(u8, &str); 7] = [
+    (LAYOUT, "layout"),
+    (LAVA, "lava queue"),
+    (EXPOSURE, "exposure clocks"),
+    (WATER, "water"),
+    (CELLS, "cell sims"),
+    (PLAYERS, "player slots"),
+    (CORPSES, "corpses"),
+];
 
 pub(crate) type Stored = (Vec<u8>, Vec<u8>);
 
@@ -105,19 +120,46 @@ fn piece_key(family: u8, i: u32) -> Vec<u8> {
     key
 }
 
-/// The bytes of the three state records, whole.
+/// The bytes of the state records, whole.
 #[derive(Default)]
 pub(super) struct StateRecords {
     pub layout: Vec<u8>,
     pub lava: Vec<u8>,
     pub exposure: Vec<u8>,
+    pub water: Vec<u8>,
+    pub cells: Vec<u8>,
+    pub players: Vec<u8>,
+    pub corpses: Vec<u8>,
 }
 
 impl StateRecords {
+    /// The record of a family in [`FAMILIES`].
+    pub(super) fn family(&mut self, family: u8) -> &mut Vec<u8> {
+        match family {
+            LAYOUT => &mut self.layout,
+            LAVA => &mut self.lava,
+            EXPOSURE => &mut self.exposure,
+            WATER => &mut self.water,
+            CELLS => &mut self.cells,
+            PLAYERS => &mut self.players,
+            CORPSES => &mut self.corpses,
+            other => unreachable!("no state record is family {other}"),
+        }
+    }
+
     /// As they are stored: at least one piece each, in key order.
     pub(super) fn pieces(&self) -> Vec<Stored> {
         let mut out = Vec::new();
-        for (family, bytes) in [(LAYOUT, &self.layout), (LAVA, &self.lava), (EXPOSURE, &self.exposure)] {
+        let parts = [
+            (LAYOUT, &self.layout),
+            (LAVA, &self.lava),
+            (EXPOSURE, &self.exposure),
+            (WATER, &self.water),
+            (CELLS, &self.cells),
+            (PLAYERS, &self.players),
+            (CORPSES, &self.corpses),
+        ];
+        for (family, bytes) in parts {
             for (i, piece) in bytes.chunks(MAX_RECORD_BYTES).enumerate() {
                 let mut key = vec![family];
                 key.extend_from_slice(&(i as u32).to_be_bytes());
@@ -284,7 +326,7 @@ fn walk_list(list: &[Entry], within: Option<&[u8]>, world_dir: &Path, flat: &mut
 /// comparison to name.
 pub(super) fn read_state(wanted: &[Entry], world_dir: &Path) -> Result<(StateRecords, Vec<Entry>), RestoreError> {
     let mut found = Vec::new();
-    let mut whole: BTreeMap<u8, Vec<u8>> = BTreeMap::new();
+    let mut state = StateRecords::default();
     for (family, name) in FAMILIES {
         let mut bytes = Vec::new();
         let mut next = 0u32;
@@ -301,10 +343,9 @@ pub(super) fn read_state(wanted: &[Entry], world_dir: &Path) -> Result<(StateRec
         if next == 0 {
             return Err(RestoreError::InvalidCheckpoint(format!("no {name} is bound")));
         }
-        whole.insert(family, bytes);
+        *state.family(family) = bytes;
     }
-    let mut take = |family| whole.remove(&family).unwrap_or_default();
-    Ok((StateRecords { layout: take(LAYOUT), lava: take(LAVA), exposure: take(EXPOSURE) }, found))
+    Ok((state, found))
 }
 
 /// Write `records` and the manifest `nodes` that bind them: anything that changed, the
@@ -483,7 +524,7 @@ mod tests {
 
     #[test]
     fn every_piece_is_within_the_limit_and_they_join_back() {
-        let state = StateRecords { layout: vec![1; 3], lava: vec![2; MAX_RECORD_BYTES * 2 + 1], exposure: vec![3; MAX_RECORD_BYTES] };
+        let state = StateRecords { layout: vec![1; 3], lava: vec![2; MAX_RECORD_BYTES * 2 + 1], exposure: vec![3; MAX_RECORD_BYTES], ..StateRecords::default() };
         let pieces = state.pieces();
         assert_eq!(pieces.len(), 1 + 3 + 1);
         assert!(pieces.iter().all(|(key, bytes)| is_state_key(key) && bytes.len() <= MAX_RECORD_BYTES));

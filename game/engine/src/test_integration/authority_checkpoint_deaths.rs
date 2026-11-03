@@ -1,7 +1,7 @@
 //! Keep slice 3: a death waiting to be swept is state, so it is in the checkpoint
 //! and the restored world's next sweep does what the uninterrupted one's does
-//! (Spec 01 §4.1.5). A save still waits for the sweep, so these persist first,
-//! then the mob dies.
+//! (Spec 01 §4.1.5). A save still waits for the sweep, so these persist first, then
+//! the mob dies, and the corpses' record is written with what binds it.
 
 use glam::Vec3;
 
@@ -40,6 +40,7 @@ fn a_pending_death_is_in_the_bytes_and_comes_back() {
     let clean = persist_and_checkpoint(&mut h);
     let cow = spawn_mob(&mut h.server.ecs, MobType::Cow, AT);
     kill(&mut h, cow);
+    h.server.write_bound_records().expect("the records write");
     let bytes = h.server.checkpoint().expect("a pending death isn't a refusal");
     assert_ne!(bytes, clean, "the death is in the bytes");
     h.server.state_hash().expect("nor is its hash");
@@ -63,6 +64,7 @@ fn the_next_sweep_in_a_restored_world_does_the_same() {
     let cow = spawn_mob(&mut h.server.ecs, MobType::Cow, AT);
     let _ = h.server.ecs.insert_one(cow, LastAttacker(Attacker::Remote { slot, generation }));
     kill(&mut h, cow);
+    h.server.write_bound_records().expect("the records write");
     let bytes = h.server.checkpoint().unwrap();
     let mut back = restore(&h, &bytes).expect("restores");
 
@@ -120,6 +122,7 @@ fn a_dead_pet_does_not_come_back_alive_beside_its_corpse() {
     *h.server.ecs.get::<&mut crate::wolf::WolfData>(friend).unwrap() = other_wolf_data.unwrap();
     persist_and_checkpoint(&mut h);
     kill(&mut h, wolf);
+    h.server.write_bound_records().expect("the records write");
     let bytes = h.server.checkpoint().unwrap();
 
     let mut back = restore(&h, &bytes).expect("restores");
@@ -151,6 +154,7 @@ fn a_dead_pack_animals_cargo_spills_in_the_restored_world() {
         data.pack = Some(pack);
     }
     kill(&mut h, donkey);
+    h.server.write_bound_records().expect("the records write");
     let bytes = h.server.checkpoint().unwrap();
     let mut back = restore(&h, &bytes).expect("restores");
     assert_eq!(back.checkpoint().expect("again"), bytes);
@@ -175,6 +179,7 @@ fn a_corpses_hideout_raid_and_rescue_marks_come_back() {
     ));
     h.server.ecs.get::<&mut Health>(raider).unwrap().rescue_eligible = Some(false);
     kill(&mut h, raider);
+    h.server.write_bound_records().expect("the records write");
     let bytes = h.server.checkpoint().unwrap();
     let back = restore(&h, &bytes).expect("restores");
     let mut query = back.ecs.query::<&Health>();

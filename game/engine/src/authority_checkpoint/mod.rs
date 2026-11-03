@@ -16,7 +16,7 @@
 //! binding       [32]  SHA-256 of seed, worldgen, creative and difficulty
 //! pop key id    [16]  SHA256(b"axenstax/pop-key-id/v1\0" || pop_secret)[..16]
 //! tick          u64   the completed tick
-//! volatile            `volatile.rs`, then `players.rs`, then `deaths.rs`
+//! volatile            `volatile.rs`: the clock, the modes, the streamer, fire and phases
 //! manifest            `records.rs`: the root of the tree, (key, SHA-256)
 //! seal          [32]  SHA-256 of everything before it
 //! ```
@@ -25,8 +25,9 @@
 //! order, every queue in its queue order (which is state), floats as bits with
 //! `-0.0` folded onto `0.0` (`codec.rs`). The hard cap is 1 MiB: past it a
 //! checkpoint is an error, never a shorter checkpoint. What grows with the world is
-//! not in these bytes: the manifest, the layout, the lava queue and the exposure clocks
-//! are stored records, each bound by its digest (`records.rs`).
+//! not in these bytes: the manifest, the layout, lava, water, the exposure clocks, the cell
+//! sims, the player slots and the corpses are stored records, and `world.dat` is bound in
+//! fixed pieces, each by its digest (`records.rs`).
 //!
 //! The seal isn't in the slice 2 spec's list. It lets a restore see damage to the
 //! volatile sections, which nothing else on disk can check. It is a checksum, not
@@ -298,13 +299,23 @@ pub(crate) fn commit_and_read_bound(
     layout: Vec<u8>,
     chunks: Vec<(Vec<u8>, [u8; 32])>,
 ) -> Result<(u32, Vec<(Vec<u8>, [u8; 32])>, records::Tree), RestoreError> {
-    let mut exposure = codec::Writer::uncapped();
-    exposure.count(0);
-    let mut lava = codec::Writer::uncapped();
-    for _ in 0..4 {
-        lava.count(0);
-    }
-    let state = records::StateRecords { layout, lava: lava.into_bytes(), exposure: exposure.into_bytes() };
+    let counts = |n: usize| {
+        let mut w = codec::Writer::uncapped();
+        for _ in 0..n {
+            w.count(0);
+        }
+        w.into_bytes()
+    };
+    // What each record's reader takes for nothing there.
+    let state = records::StateRecords {
+        layout,
+        lava: counts(4),
+        exposure: counts(1),
+        water: counts(4),
+        cells: counts(7),
+        players: counts(1),
+        corpses: counts(1),
+    };
     let pieces = state.pieces();
     let mut flat = chunks;
     flat.extend(pieces.iter().map(|(key, bytes)| (key.clone(), records::sha256(bytes))));
@@ -329,27 +340,55 @@ pub(crate) fn layout_record(server: &GameServer) -> Vec<u8> {
     server.bound_records().expect("the state encodes").state.layout
 }
 
+/// This server's record of a state family, whole.
+#[cfg(test)]
+pub(crate) fn state_record(server: &GameServer, family: u8) -> Vec<u8> {
+    server.bound_records().expect("the state encodes").state.family(family).clone()
+}
+
+/// `pieces` and a tree of `flat` written, and the checkpoint's digest of the tree replaced
+/// and resealed.
+#[cfg(test)]
+fn rebound(server: &GameServer, bytes: &[u8], old_top: [u8; 32], pieces: &[records::Stored], flat: &[manifest::Entry]) -> Vec<u8> {
+    let tree = records::build_tree(flat).expect("a tree");
+    let dir = crate::save::world_dir(&server.world_name);
+    records::commit(&dir, pieces, &tree.nodes).expect("the records write");
+    // The manifest section is the last thing before the seal, and its root is `t`.
+    let mut out = bytes.to_vec();
+    let digest_at = out.len() - SEAL_BYTES - 32;
+    assert_eq!(old_top, out[digest_at..digest_at + 32], "the section is where it was");
+    out[digest_at..digest_at + 32].copy_from_slice(&tree.top.1);
+    seal(&mut out);
+    out
+}
+
 /// A checkpoint with one state record's bytes replaced, its pieces and tree written and
 /// the digest in the image resealed: for the tests of what a restore does with bytes
 /// the digests vouch for.
 #[cfg(test)]
-pub(crate) fn rebind_layout(server: &GameServer, bytes: &[u8], layout: Vec<u8>) -> Vec<u8> {
-    let bound = server.bound_records().expect("the state encodes");
-    let state = records::StateRecords { layout, lava: bound.state.lava, exposure: bound.state.exposure };
-    let pieces = state.pieces();
+pub(crate) fn rebind_state(server: &GameServer, bytes: &[u8], family: u8, record: Vec<u8>) -> Vec<u8> {
+    let mut bound = server.bound_records().expect("the state encodes");
+    *bound.state.family(family) = record;
+    let pieces = bound.state.pieces();
     let mut flat: Vec<_> = bound.flat.into_iter().filter(|(key, _)| !records::is_state_key(key)).collect();
     flat.extend(pieces.iter().map(|(key, piece)| (key.clone(), records::sha256(piece))));
     flat.sort_unstable();
-    let tree = records::build_tree(&flat).expect("a tree");
-    let dir = crate::save::world_dir(&server.world_name);
-    records::commit(&dir, &pieces, &tree.nodes).expect("the records write");
-    // The manifest section is the last thing before the seal, and its root is `t`.
-    let mut out = bytes.to_vec();
-    let digest_at = out.len() - SEAL_BYTES - 32;
-    assert_eq!(bound.tree.top.1, out[digest_at..digest_at + 32], "the section is where it was");
-    out[digest_at..digest_at + 32].copy_from_slice(&tree.top.1);
-    seal(&mut out);
-    out
+    rebound(server, bytes, bound.tree.top.1, &pieces, &flat)
+}
+
+/// The same for the layout.
+#[cfg(test)]
+pub(crate) fn rebind_layout(server: &GameServer, bytes: &[u8], layout: Vec<u8>) -> Vec<u8> {
+    rebind_state(server, bytes, records::LAYOUT, layout)
+}
+
+/// A checkpoint whose tree binds `edit`'s list instead, every piece left in the store:
+/// for what a restore does with a list that isn't one a persist would write.
+#[cfg(test)]
+pub(crate) fn rebind_entries(server: &GameServer, bytes: &[u8], edit: impl FnOnce(&mut Vec<manifest::Entry>)) -> Vec<u8> {
+    let mut bound = server.bound_records().expect("the state encodes");
+    edit(&mut bound.flat);
+    rebound(server, bytes, bound.tree.top.1, &bound.pieces, &bound.flat)
 }
 
 /// Every part's encoded size, past the cap too (the size bench).

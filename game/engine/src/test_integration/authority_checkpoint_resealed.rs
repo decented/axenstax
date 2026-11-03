@@ -9,7 +9,7 @@ use glam::Vec3;
 use super::authority_checkpoint::{restore, SEED};
 use super::authority_checkpoint_refusals::{assert_invalid_checkpoint, saved};
 use super::twin_run::twin;
-use crate::authority_checkpoint::{layout_record, rebind_layout, seal, section_offsets, RestoreError, CHECKPOINT_MAGIC, MAX_CHECKPOINT_BYTES};
+use crate::authority_checkpoint::{layout_record, rebind_layout, rebind_state, seal, section_offsets, state_record, RestoreError, CHECKPOINT_MAGIC};
 use crate::save::WorldsRootGuard;
 use crate::server::ServerPlayer;
 use crate::test_harness::TestHost;
@@ -29,7 +29,7 @@ const PLAY_MODE: usize = 13;
 /// Within the streamer section, past its option tag (`volatile::write_streamer`).
 const SIM_DISTANCE: usize = 1;
 const BUDGET: usize = 5;
-/// Within the players section, in the first body (`players::write_body`), which
+/// Within the players record, in the first body (`players::write_body`), which
 /// has no landing pending.
 const BODY_POS: usize = COUNT;
 const BODY_VELOCITY: usize = COUNT + 12;
@@ -204,9 +204,7 @@ fn a_render_distance_or_spawn_column_past_its_limit_is_refused() {
 #[test]
 fn a_body_that_is_not_finite_or_out_of_range_is_refused() {
     let (_root, h, bytes) = saved("keep-s2b-body");
-    let at = section_offsets(&h.server).unwrap();
     assert!(h.server.players[0].player.pending_landing.is_none());
-    delete_the_world(&h);
     let cases = [
         ("position x", BODY_POS, f32::NAN),
         ("position y", BODY_POS + 4, f32::INFINITY),
@@ -216,9 +214,9 @@ fn a_body_that_is_not_finite_or_out_of_range_is_refused() {
         ("spawn z", BODY_SPAWN + 8, -1_000_001.0),
     ];
     for (what, field, value) in cases {
-        let mut hostile = bytes.clone();
-        put(&mut hostile, at.players + field, &value.to_le_bytes());
-        assert_refused_for(&h, hostile, what, "a body");
+        let mut players = state_record(&h.server, b'u');
+        put(&mut players, field, &value.to_le_bytes());
+        assert_refused_for(&h, rebind_state(&h.server, &bytes, b'u', players), what, "a body");
     }
 }
 
@@ -233,7 +231,8 @@ fn more_players_than_a_server_holds_are_refused() {
         sp.server_simulated = true;
         h.server.players.push(sp);
     }
-    let bytes = h.server.checkpoint_ungated().expect("the slots fit the cap");
+    h.server.persist_authority().expect("the slots are stored");
+    let bytes = h.server.checkpoint_ungated().expect("the image holds no slot");
     assert_refused_for(&h, bytes, "258 slots", "more players");
 }
 
@@ -285,9 +284,9 @@ fn a_resealed_minus_zero_is_not_canonical() {
     super::authority_checkpoint::sign_in(&mut h);
     h.server.players[0].player.velocity = Vec3::ZERO;
     h.server.persist_authority().unwrap();
-    let mut bytes = h.server.checkpoint().unwrap();
-    let at = section_offsets(&h.server).unwrap().players + BODY_VELOCITY;
-    assert_eq!(bytes[at..at + 4], [0; 4]);
-    put(&mut bytes, at, &(-0.0f32).to_le_bytes());
-    assert_refused_for(&h, bytes, "-0.0", "canonical form");
+    let bytes = h.server.checkpoint().unwrap();
+    let mut players = state_record(&h.server, b'u');
+    assert_eq!(players[BODY_VELOCITY..BODY_VELOCITY + 4], [0; 4]);
+    put(&mut players, BODY_VELOCITY, &(-0.0f32).to_le_bytes());
+    assert_refused_for(&h, rebind_state(&h.server, &bytes, b'u', players), "-0.0", "canonical form");
 }
