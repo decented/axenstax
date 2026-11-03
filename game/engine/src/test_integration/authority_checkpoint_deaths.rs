@@ -88,8 +88,17 @@ fn the_next_sweep_in_a_restored_world_does_the_same() {
     assert_eq!(back.pending_kill_events.len(), 1, "the restored one too");
     assert_eq!(back.pending_kill_events[0].0, slot);
     assert_eq!(back.players[slot].progression_credits, h.server.players[slot].progression_credits);
-    assert!(items(&back) > 0, "loot");
-    assert_eq!(items(&back), items(&h.server), "the same loot");
+    let loot = |s: &GameServer| {
+        let mut query = s.ecs.query::<(&crate::entity::ItemEntity, &Position)>();
+        let near = query.iter().filter(|(_, (_, p))| (p.0.x - AT.x).abs() < 4.0 && (p.0.z - AT.z).abs() < 4.0);
+        let mut totals = std::collections::BTreeMap::new();
+        for (_, (item, _)) in near {
+            *totals.entry(format!("{:?}", item.stack.item)).or_insert(0u32) += u32::from(item.stack.count);
+        }
+        totals
+    };
+    assert!(!loot(&back).is_empty(), "loot, of {} on the ground", items(&back));
+    assert_eq!(loot(&back), loot(&h.server), "the same loot");
 }
 
 /// A tamed mob's saved row, taken alive at the last persist, doesn't come back

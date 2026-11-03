@@ -271,7 +271,7 @@ the contract itself as changed.
 ### For the Fray session, from slice 2b
 
 Measured or built on the game side. The sizes are from `checkpoint_size_at_the_bench_world_sizes`
-(§8). Slice 3 (branch `keep-s3a`) has settled the ones marked below against the Tier-L rulings.
+(§8). Slice 3 has settled the ones below against the Tier-L rulings.
 
 **Settled in the game, 2026-11-03 (checkpoint schema 2; no save-format or protocol change):**
 
