@@ -78,8 +78,9 @@ use sha2::{Digest, Sha256};
 use crate::server::GameServer;
 
 pub(crate) use manifest::StoredRecords;
+pub(crate) use records::RECORDS_DIR;
 #[cfg(test)]
-pub(crate) use records::{FILE_PIECE_BYTES, MAX_RECORD_BYTES, RECORDS_DIR, Tree};
+pub(crate) use records::{FILE_PIECE_BYTES, MAX_RECORD_BYTES, Tree};
 
 pub(crate) const CHECKPOINT_MAGIC: &[u8] = b"axenstax/authority-checkpoint\0";
 /// 5: `world.dat` bound in fixed pieces, and all that grows with the world in stored
