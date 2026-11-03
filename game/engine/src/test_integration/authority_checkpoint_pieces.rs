@@ -295,6 +295,8 @@ fn world_of_long_records(name: &str) -> (TestHost, Vec<u8>) {
         h.server.world.pop_exposure.insert((i, 302, 0), 9);
         h.server.world.power.energised.insert((i, 303, 0), 3);
     }
+    let burning: Vec<_> = (0..N).map(|i| ((i, 305, 0), 1_000_000u64, 0u8)).collect();
+    h.server.fire.restore_cells(&burning);
     let mut plan: crate::plan::PlanData = bincode::deserialize(&[0u8; 1 << 12]).expect("zeros decode as a plan");
     plan.cells = vec![bincode::deserialize(&[0u8; 1 << 12]).expect("zeros decode as a cell"); 32_768];
     let mut carrier = crate::server::ServerPlayer::new(glam::Vec3::new(0.5, 110.0, 0.5));

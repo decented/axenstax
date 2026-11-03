@@ -69,8 +69,8 @@ fn zeros<T: serde::de::DeserializeOwned>() -> T {
 }
 
 /// Every list that can grow with what the world holds, past what the image could carry,
-/// and the image is the size it was: only fire and the settled anchors have a length in
-/// it, and both are bounded (a constant, and the player count).
+/// and the image is the size it was: only the settled anchors have a length in it, and
+/// they are one a player.
 #[test]
 fn the_image_is_one_size_whatever_the_world_holds() {
     let _root = WorldsRootGuard::new("keep-s3d-flood");
@@ -85,6 +85,9 @@ fn the_image_is_one_size_whatever_the_world_holds() {
         h.server.world.tapped_rubber_logs.insert((i, 303, 0), 7);
     }
     let cell = |y: i32| (0..N).map(move |i| (i, y, 0));
+    // A load re-adopts every fire block a column kept, past what a run's ignitions reach.
+    let burning: Vec<_> = cell(308).map(|pos| (pos, 1_000_000u64, 0u8)).collect();
+    h.server.fire.restore_cells(&burning);
     let tick = h.server.leaf_decay.digest_view().2;
     h.server.leaf_decay.restore_view((cell(304).collect(), cell(305).map(|(x, y, z)| (x, y, z, tick + 400)).collect(), tick));
     let due = cell(306).map(|pos| (1_000_000, crate::block_update::ScheduledUpdate { pos, kind: crate::block_update::ScheduleKind::GateSettle })).collect();

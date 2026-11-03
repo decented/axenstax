@@ -16,7 +16,7 @@
 //! binding       [32]  SHA-256 of seed, worldgen, creative and difficulty
 //! pop key id    [16]  SHA256(b"axenstax/pop-key-id/v1\0" || pop_secret)[..16]
 //! tick          u64   the completed tick
-//! volatile            `volatile.rs`: the clock, the modes, the streamer, fire and phases
+//! volatile            `volatile.rs`: the clock, the modes, the streamer and two phases
 //! manifest            `records.rs`: the root of the tree, (key, SHA-256)
 //! seal          [32]  SHA-256 of everything before it
 //! ```
@@ -312,7 +312,7 @@ pub(crate) fn commit_and_read_bound(
         lava: counts(4),
         exposure: counts(1),
         water: counts(4),
-        cells: counts(7),
+        cells: counts(8),
         players: counts(1),
         corpses: counts(1),
     };

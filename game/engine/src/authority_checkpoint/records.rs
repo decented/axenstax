@@ -10,7 +10,7 @@
 //! | `q` + `u32` BE | a piece of the lava queue |
 //! | `p` + `u32` BE | a piece of the exposure clocks |
 //! | `f` + `u32` BE | a piece of water: sources as the difference from a rescan, its queues |
-//! | `s` + `u32` BE | a piece of the cell sims: leaf decay, the scheduler, power, rubber taps |
+//! | `s` + `u32` BE | a piece of the cell sims: fire, leaf decay, the scheduler, power, rubber taps |
 //! | `u` + `u32` BE | a piece of the player slots |
 //! | `k` + `u32` BE | a piece of the corpses waiting for a death pass |
 //!

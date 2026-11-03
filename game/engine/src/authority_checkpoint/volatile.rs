@@ -7,8 +7,7 @@
 //! - **Modes:** what a dedicated server sets when it is built, so a restored one
 //!   runs the same passes.
 //! - **Streamer:** its settled anchors, one a player.
-//! - **Sims:** fire with its timers, at most `fire::MAX_ACTIVE_FIRE` cells, and the phase
-//!   of lava and the clock of leaf decay.
+//! - **Sims:** the phase of lava and the clock of leaf decay.
 //!
 //! So the image is bounded by constants and the player count, whatever the world holds.
 //! The rest is the same kind of state and grows with the world, so it is stored records
@@ -20,8 +19,10 @@
 //! - **Lava and water:** sources as the difference from a rescan (an ocean's whole set
 //!   is far past the cap), and their queues in order.
 //! - **Exposure clocks:** each cell's (in no save; 20 B a cell, and nothing prunes it).
-//! - **Cell sims:** the leaf-decay queues, the update scheduler, the power flood and the
-//!   rubber-tap cooldowns (a load rebuilds those at its own tick).
+//! - **Cell sims:** fire with its timers (`MAX_ACTIVE_FIRE` holds a run's ignitions, but a
+//!   load re-adopts every fire block a column kept when it went out of memory), the
+//!   leaf-decay queues, the update scheduler, the power flood and the rubber-tap cooldowns
+//!   (a load rebuilds those at its own tick).
 //! - **Player slots** (`players.rs`): a slot's size follows what it carries, and a plan in
 //!   an inventory holds a captured building's cells.
 //! - **Corpses** waiting to be swept (`deaths.rs`).
@@ -212,9 +213,6 @@ pub(super) fn read(r: &mut Reader<'_>) -> Result<Volatile, Malformed> {
     let total_work = r.u64()?;
     let modes = read_modes(r)?;
     let streamer = read_streamer(r)?;
-    let n = r.count(21)?;
-    let fire: Vec<_> = (0..n).map(|_| Ok((r.pos()?, r.u64()?, r.u8()?))).collect::<Result<_, _>>()?;
-    strictly_increasing(&fire, |c| c.0)?;
     let lava_slow = r.u8()?;
     let leaf_tick = r.u64()?;
     let no_fluid = || FluidCheckpoint { extra: Vec::new(), missing: Vec::new(), spread: Vec::new(), retract: Vec::new() };
@@ -229,7 +227,7 @@ pub(super) fn read(r: &mut Reader<'_>) -> Result<Volatile, Malformed> {
         streamer,
         loaded: AHashSet::new(),
         layout: Vec::new(),
-        fire,
+        fire: Vec::new(),
         water: no_fluid(),
         lava: no_fluid(),
         lava_slow,
@@ -469,6 +467,12 @@ fn read_fluid(r: &mut Reader<'_>) -> Result<FluidCheckpoint, Malformed> {
 }
 
 fn write_sims(w: &mut Writer, s: &GameServer) {
+    w.u8(s.lava.slow_phase());
+    w.u64(s.leaf_decay.digest_view().2);
+}
+
+/// The record of the sims that follow what the world holds.
+fn write_cells(w: &mut Writer, s: &GameServer) {
     let fire = s.fire.digest_view();
     w.count(fire.len());
     for (pos, next_event, age) in fire {
@@ -476,12 +480,7 @@ fn write_sims(w: &mut Writer, s: &GameServer) {
         w.u64(next_event);
         w.u8(age);
     }
-    w.u8(s.lava.slow_phase());
-    w.u64(s.leaf_decay.digest_view().2);
-}
 
-/// The record of the sims that follow what the world holds.
-fn write_cells(w: &mut Writer, s: &GameServer) {
     let (check, decay, _) = s.leaf_decay.digest_view();
     write_list(w, &check);
     w.count(decay.len());
@@ -515,6 +514,9 @@ fn write_cells(w: &mut Writer, s: &GameServer) {
 }
 
 fn read_cells(r: &mut Reader<'_>, v: &mut Volatile) -> Result<(), Malformed> {
+    let n = r.count(21)?;
+    v.fire = (0..n).map(|_| Ok((r.pos()?, r.u64()?, r.u8()?))).collect::<Result<_, _>>()?;
+    strictly_increasing(&v.fire, |c| c.0)?;
     v.leaf.0 = read_list(r)?;
     let n = r.count(20)?;
     v.leaf.1 = (0..n).map(|_| { let (x, y, z) = r.pos()?; Ok((x, y, z, r.u64()?)) }).collect::<Result<_, _>>()?;

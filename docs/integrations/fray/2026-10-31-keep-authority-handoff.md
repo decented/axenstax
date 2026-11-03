@@ -307,16 +307,17 @@ Measured or built on the game side. The sizes are from `checkpoint_size_at_the_b
   byte after their common prefix. So it is a function of the entries, walking it gives the one sorted list,
   one changed entry rewrites one path, and no manifest record passes 64 KiB. The layout (`l`), the lava
   queue with its source differences (`q`), each cell's exposure clock (`p`), water likewise (`f`), the cell
-  sims (`s`: leaf decay, scheduler, power, rubber taps), the player slots (`u`) and the corpses (`k`) are
+  sims (`s`: fire, leaf decay, scheduler, power, rubber taps), the player slots (`u`) and the corpses (`k`) are
   stored records cut at 64 KiB, read by the same readers as before. Inline stays for fixtures only
   (`checkpoint_inline`, `#[cfg(test)]`). Numbers are in §8.
 - **The image is bounded whatever the world holds.** What is left: the header, the clock, the modes, the
-  streamer's settled anchors (one a player), fire (at most `fire::MAX_ACTIVE_FIRE`, 256 cells at 21 B, a
-  limit `ignite` and the spread both hold), lava's phase, leaf decay's clock, the manifest's root and the
-  seal. So about 8 KB at the widest server. A player slot had to move although the count is bounded: a plan
-  in an inventory holds a captured building's cells, up to 32,768 of them, and a joiner's pack feedback can
-  hold 1,024 rows. `TooLarge` can still be produced by state built directly (a test does, with fire past its
-  limit), but not by anything a world can hold. `the_image_is_one_size_whatever_the_world_holds` puts 120,000
+  streamer's settled anchors (one a player), lava's phase, leaf decay's clock, the manifest's root and the
+  seal. So about 2.4 KB at the widest server. Two things moved that look bounded and aren't. A player slot: a
+  plan in an inventory holds a captured building's cells, up to 32,768 of them, and a joiner's pack feedback
+  can hold 1,024 rows. Fire: `MAX_ACTIVE_FIRE` (256) holds a run's ignitions, but a fire block in a column that
+  goes out of memory stays and `register_column_fires` re-adopts it uncapped when the column returns, so a world
+  can hold more. `TooLarge` can still be produced by state built directly (a test does, with anchors past any
+  player count), but not by anything a world can hold. `the_image_is_one_size_whatever_the_world_holds` puts 120,000
   entries in each list, 36 full plans in a slot and 3,000 corpses, and the image is the size it was.
 - **A record that can't be read is an error at `checkpoint`.** `note_meta`, `note_world_dat` and
   `note_handover` used to log a failed read or scan and bind nothing, so `checkpoint` could succeed with an
@@ -572,17 +573,17 @@ benchmark exists.**
 
   | Joiners | Columns | Checkpoint B | Of the cap | Manifest records | Manifest B | Longest B | `authority/` records | `authority/` B | Water B | Cell sims B | Players B | Corpses B | Lava B | Layout B | `world.dat` B (pieces) | Restore ms |
   |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-  | 0 | 289 | 346 | 0.03% | 124 | 74,098 | 837 | 136 | 470,481 | 117,530 | 28 | 353 | 4 | 272,340 | 6,124 | 112,555 (2) | 2,072 |
-  | 2 | 409 | 362 | 0.03% | 163 | 102,915 | 970 | 178 | 732,426 | 117,530 | 28 | 1,203 | 4 | 502,323 | 8,419 | 113,339 (2) | 2,804 |
-  | 8 | 511 | 410 | 0.04% | 163 | 127,570 | 1,131 | 181 | 962,255 | 117,530 | 28 | 3,753 | 4 | 703,043 | 10,323 | 114,445 (2) | 3,490 |
+  | 0 | 289 | 342 | 0.03% | 124 | 74,098 | 837 | 136 | 470,485 | 117,530 | 32 | 353 | 4 | 272,340 | 6,124 | 112,555 (2) | 2,862 |
+  | 2 | 409 | 358 | 0.03% | 163 | 102,915 | 970 | 178 | 732,430 | 117,530 | 32 | 1,203 | 4 | 502,323 | 8,419 | 113,339 (2) | 3,370 |
+  | 8 | 511 | 406 | 0.04% | 163 | 127,570 | 1,131 | 181 | 962,259 | 117,530 | 32 | 3,753 | 4 | 703,043 | 10,323 | 114,445 (2) | 4,642 |
 
   The image's 16 B between 0 and 2 joiners, and 48 B more at 8, is the settled anchors. **Its worst, by arithmetic:**
-  about 8 KB, at 257 slots' anchors and 256 fire cells. **Worst lava on the 8-joiner world,** 540,000 queued cells:
-  410 B, and it restores. **Worst water, on a fixture with eight joiners,** 400,000 sources and as many queued
+  about 2.4 KB, at 257 slots' anchors. **Worst lava on the 8-joiner world,** 540,000 queued cells:
+  406 B, and it restores. **Worst water, on a fixture with eight joiners,** 400,000 sources and as many queued
   fronts, 10 MB in its record: it restores, and was `TooLarge { bytes: 10010418 }` before the move. **Everything
   at once,** 120,000 entries in each list, 36 slots of full plans and 3,000 corpses: the image is the size it was.
 
-  **All of `authority/` at the 8-joiner bench is now 962,255 B, close to the 1 MiB batch,** with lava's 703,043 B
+  **All of `authority/` at the 8-joiner bench is now 962,259 B, close to the 1 MiB batch,** with lava's 703,043 B
   of it rewritten at every persist while the queue drains. Staged batches can spread it, as the ruling allows; the
   bytes are the same state the image held before, so this is where the dirty-rate limit will show first. `world.dat`'s
   pieces add a file's worth at most to a batch that wants them, and aren't in that figure.

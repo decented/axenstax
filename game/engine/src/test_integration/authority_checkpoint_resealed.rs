@@ -250,6 +250,7 @@ fn values_the_first_tick_would_overflow_on_are_refused() {
     h.server.column_streamer = streamer;
 
     h.server.fire.restore_cells(&[((i32::MAX, 110, 0), 1_000_000, 0)]);
+    h.server.persist_authority().expect("the cell is stored");
     let bytes = h.server.checkpoint_ungated().unwrap();
     assert_refused_for(&h, bytes, "a burning cell", "cell");
     h.server.fire.restore_cells(&[]);

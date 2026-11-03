@@ -1301,13 +1301,12 @@ hashed with the value of the secret cut from its stored bytes. A restore is give
 (`AuthorityConfig`).
 
 **Volatile sections** (`volatile.rs`). Bounded by constants and the player count, whatever the
-world holds, about 8 KB at the widest server:
+world holds, about 2.4 KB at the widest server:
 - the slice 2a clock, plus the day-clock step, the falling cadence, the rolled
   strike and the world's active ticks and work;
 - the server's modes (machines, lightning, sim distance and so on), and the streamer's
   settled anchors, one a player;
-- fire with its timers, at most `fire::MAX_ACTIVE_FIRE` cells; lava's spread phase; leaf
-  decay's clock.
+- lava's spread phase; leaf decay's clock.
 
 **State in records** (`records.rs`, keys `l`, `q`, `p`, `f`, `s`, `u`, `k` + a `u32` piece number).
 The same kind of state, read and range-checked by the same readers (`Volatile::take_state`), but it
@@ -1322,7 +1321,8 @@ grows with the world, so it lies in stored records rather than the image. Each i
   cap, but flowing cells are not sources until a reload);
 - each cell's Proof-of-Play exposure clock (`p`, `World::pop_exposure`, in no save, 20 B a
   cell and never pruned);
-- the cell sims (`s`): the leaf-decay queues, the update scheduler, the power flood and the
+- the cell sims (`s`): fire with its timers (`MAX_ACTIVE_FIRE` holds a run's ignitions, but a
+  load re-adopts every fire block a column kept, uncapped), the leaf-decay queues, the update scheduler, the power flood and the
   rubber-tap cooldowns;
 - each player slot (`u`, `players.rs`): every field the `players` digest section reads and the
   persona key. `riding` is left out, since it names a hecs id: a rider restores on its feet. A slot's

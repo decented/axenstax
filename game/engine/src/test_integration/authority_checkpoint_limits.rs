@@ -189,31 +189,24 @@ fn the_restores_other_limits_are_errors_at_checkpoint() {
 
 // ---- The size cap, to the byte ----
 
-/// Filled to exactly the cap a checkpoint is written and restored; a byte past
-/// it is an error. Fire cells for the bulk and settled anchors to come out exact: past
-/// what a run could hold, as nothing a world holds can reach the cap now.
+/// Filled to exactly the cap a checkpoint is written and restored; a byte past it is an
+/// error. Settled anchors for the bulk and a weather lock to come out exact: past what a
+/// run could hold, as nothing a world holds can reach the cap now.
 #[test]
 fn a_checkpoint_of_exactly_the_cap_restores_and_one_byte_more_is_too_large() {
     let _root = WorldsRootGuard::new("keep-s3-exact-cap");
     let mut h = twin(SEED, "ckpt-exact-cap", 1, 2);
     run_to(&mut h, 2);
-    h.server.fire.restore_cells(&[]);
-    let anchors_of = |h: &mut TestHost, anchors: Vec<(i32, i32)>| {
-        let streamer = h.server.column_streamer.as_ref().expect("a streamer");
-        let (distance, budget, _) = streamer.to_parts();
-        h.server.column_streamer = Some(crate::server_stream::ColumnStreamer::from_parts(distance, budget, Some(anchors)));
-    };
-    anchors_of(&mut h, Vec::new());
-    h.server.persist_authority().expect("persists");
-    let room = MAX_CHECKPOINT_BYTES - h.server.checkpoint().unwrap().len();
-    const FIRE_CELL: usize = 12 + 8 + 1;
     const ANCHOR: usize = 8;
     let fill = |h: &mut TestHost, room: usize| {
-        let anchors = (0..FIRE_CELL).find(|a| (room - a * ANCHOR).is_multiple_of(FIRE_CELL)).expect("8 and 21 share no factor");
-        let cells: Vec<_> = (0..((room - anchors * ANCHOR) / FIRE_CELL) as i32).map(|i| ((i, 100, 0), 1_000_000u64, 0u8)).collect();
-        h.server.fire.restore_cells(&cells);
-        anchors_of(h, (0..anchors as i32).map(|a| (a, 0)).collect());
+        let (distance, budget, _) = h.server.column_streamer.as_ref().expect("a streamer").to_parts();
+        let anchors = (0..(room / ANCHOR) as i32).map(|a| (a % 1000, a / 1000)).collect();
+        h.server.column_streamer = Some(crate::server_stream::ColumnStreamer::from_parts(distance, budget, Some(anchors)));
+        h.server.weather_lock_applied = Some("x".repeat(room % ANCHOR));
     };
+    fill(&mut h, 0);
+    h.server.persist_authority().expect("persists");
+    let room = MAX_CHECKPOINT_BYTES - h.server.checkpoint().unwrap().len();
     fill(&mut h, room);
     let bytes = h.server.checkpoint().expect("exactly the cap");
     assert_eq!(bytes.len(), MAX_CHECKPOINT_BYTES);

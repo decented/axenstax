@@ -187,8 +187,10 @@ fn oversize_bytes_are_invalid_on_restore() {
 fn oversize_state_is_an_error_not_a_truncation() {
     let _root = WorldsRootGuard::new("keep-s2b-oversize");
     let mut h = twin(SEED, "ckpt-oversize", 0, 2);
-    let cells: Vec<_> = (0..60_000).map(|i| ((i, 200, 0), 1_000_000u64, 0u8)).collect();
-    h.server.fire.restore_cells(&cells);
+    // What a run can't hold, as nothing a world holds is left to reach the cap.
+    let (distance, budget, _) = h.server.column_streamer.as_ref().expect("a streamer").to_parts();
+    let anchors = (0..140_000).map(|i| (i % 1000, i / 1000)).collect();
+    h.server.column_streamer = Some(crate::server_stream::ColumnStreamer::from_parts(distance, budget, Some(anchors)));
     match h.server.checkpoint() {
         Err(CheckpointError::TooLarge { bytes }) => assert!(bytes > MAX_CHECKPOINT_BYTES, "{bytes}"),
         other => panic!("expected TooLarge, got {:?}", other.map(|b| b.len())),
