@@ -12,8 +12,9 @@
 //! - **Deaths:** corpses waiting to be swept (`deaths.rs`).
 //! - **Sims:** fire with its timers, water and lava (sources as the difference
 //!   from a rescan: an ocean's whole set is far past the cap, queues in order),
-//!   the leaf-decay queues, the update scheduler, the power flood and the
-//!   rubber-tap cooldowns (a load rebuilds those at its own tick).
+//!   the leaf-decay queues, the update scheduler, the power flood, the
+//!   rubber-tap cooldowns (a load rebuilds those at its own tick) and each cell's
+//!   exposure clock (in no save; 20 B a cell, and nothing prunes it).
 //!
 //! Everything else in handoff §5 is the restoration ledger (Spec 01 §4.1.5).
 
@@ -50,6 +51,7 @@ pub(super) struct Volatile {
     energised: Vec<(Pos, u8)>,
     mains: Vec<Pos>,
     tapped: Vec<(Pos, u64)>,
+    pop_exposure: Vec<(Pos, u64)>,
     pub(super) players: Vec<ServerPlayer>,
     deaths: Vec<super::deaths::Corpse>,
 }
@@ -131,6 +133,7 @@ pub(super) fn section_sizes(s: &GameServer) -> Result<Vec<(&'static str, usize)>
         ("  water sources", 12 * (water.extra.len() + water.missing.len())),
         ("  lava", f(&lava)?),
         ("  lava sources", 12 * (lava.extra.len() + lava.missing.len())),
+        ("  pop exposure", 20 * s.world.pop_exposure.len()),
         ("players", size(|w| super::players::write_all(w, &s.players))?),
     ])
 }
@@ -191,6 +194,9 @@ pub(super) fn read(r: &mut Reader<'_>) -> Result<Volatile, Malformed> {
     let n = r.count(20)?;
     let tapped: Vec<_> = (0..n).map(|_| Ok((r.pos()?, r.u64()?))).collect::<Result<_, _>>()?;
     strictly_increasing(&tapped, |c| c.0)?;
+    let n = r.count(20)?;
+    let pop_exposure: Vec<_> = (0..n).map(|_| Ok((r.pos()?, r.u64()?))).collect::<Result<_, _>>()?;
+    strictly_increasing(&pop_exposure, |c| c.0)?;
     let players = super::players::read_all(r)?;
     let deaths = super::deaths::read(r)?;
     Ok(Volatile {
@@ -214,6 +220,7 @@ pub(super) fn read(r: &mut Reader<'_>) -> Result<Volatile, Malformed> {
         energised,
         mains,
         tapped,
+        pop_exposure,
         players,
         deaths,
     })
@@ -386,6 +393,11 @@ fn read_layout(r: &mut Reader<'_>) -> Result<(AHashSet<(i32, i32)>, Vec<ChunkCol
         if live_sections & evicted_sections != 0 {
             return Err(Malformed("a layout section both live and evicted"));
         }
+        // No run stores a section for a column it holds live, and a block write
+        // there would make a second copy.
+        if evicted_sections != 0 && flags & EVICTED == 0 {
+            return Err(Malformed("evicted sections in a column not flagged evicted"));
+        }
         sections = sections.saturating_add(live_sections.count_ones() + evicted_sections.count_ones());
         if sections > MAX_LAYOUT_SECTIONS {
             return Err(Malformed("a layout naming more sections than a checkpoint may"));
@@ -470,6 +482,12 @@ fn write_sims(w: &mut Writer, s: &GameServer) {
         w.pos(pos);
         w.u64(tick);
     }
+    let exposed = sorted(s.world.pop_exposure.iter().map(|(p, t)| (*p, *t)).collect());
+    w.count(exposed.len());
+    for (pos, tick) in exposed {
+        w.pos(pos);
+        w.u64(tick);
+    }
 }
 
 fn schedule_kind(kind: ScheduleKind) -> u8 {
@@ -495,7 +513,7 @@ fn read_scheduled(r: &mut Reader<'_>) -> Result<(u64, ScheduledUpdate), Malforme
 }
 
 /// A cell a tick can add a neighbour's offset to without leaving `i32`.
-fn cell_in_range(&(x, y, z): &Pos) -> bool {
+pub(super) fn cell_in_range(&(x, y, z): &Pos) -> bool {
     const LIMIT: i32 = MAX_COLUMN * crate::chunk::CHUNK_SIZE as i32;
     [x, y, z].iter().all(|v| (-LIMIT..=LIMIT).contains(v))
 }
@@ -563,7 +581,8 @@ impl Volatile {
             && self.scheduler_due.iter().all(|(_, update)| cell_in_range(&update.pos))
             && self.energised.iter().all(|c| cell_in_range(&c.0))
             && self.mains.iter().all(cell_in_range)
-            && self.tapped.iter().all(|c| cell_in_range(&c.0));
+            && self.tapped.iter().all(|c| cell_in_range(&c.0))
+            && self.pop_exposure.iter().all(|c| cell_in_range(&c.0));
         if !cells_in_range {
             return Err(Malformed("a queued cell outside the playable range"));
         }
@@ -625,6 +644,7 @@ impl Volatile {
         s.world.power.energised = self.energised.into_iter().collect();
         s.world.power.mains = self.mains.into_iter().collect();
         s.world.tapped_rubber_logs = self.tapped.into_iter().collect();
+        s.world.pop_exposure = self.pop_exposure.into_iter().collect();
         s.players = self.players;
     }
 }

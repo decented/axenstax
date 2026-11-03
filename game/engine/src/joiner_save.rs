@@ -690,7 +690,6 @@ impl crate::server::GameServer {
     }
     pub(crate) fn load_joiner(&mut self, i: usize) -> Option<JoinerSave> {
         let pk = self.players.get(i)?.verified_pubkey?;
-        let path = self.joiner_path(pk);
         // The load settled any stage; this is for one a failed publish left since.
         if let Err(error) = self.settle_joiner_stage() {
             log::warn!("Joiner records staged for a save can't be settled: {error}");
@@ -699,6 +698,14 @@ impl crate::server::GameServer {
             self.players[i].obligations.mark(IncompleteCause::Unreadable);
             return None;
         }
+        self.load_joiner_unsettled(i)
+    }
+
+    /// [`Self::load_joiner`], reading the record as it lies and settling no stage: a
+    /// Keep restore's read, which writes nothing.
+    pub(crate) fn load_joiner_unsettled(&mut self, i: usize) -> Option<JoinerSave> {
+        let pk = self.players.get(i)?.verified_pubkey?;
+        let path = self.joiner_path(pk);
         match crate::handover::live::personal_adapter::proof(&crate::save::world_dir(&self.world_name)) {
             Ok(Some(proof)) if proof.has_participant(pk) => {
                 if let Err(error) = proof.confirm_authority_durable(&crate::save::world_dir(&self.world_name)) {

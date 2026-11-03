@@ -115,3 +115,4 @@ mod authority_checkpoint_records; // Keep slice 2b: what a restore does with the
 mod authority_checkpoint_order; // Keep slice 3: restore order, digests over stored bytes, torn meta.
 mod authority_checkpoint_limits; // Keep slice 3: every restore limit enforced at checkpoint.
 mod authority_checkpoint_deaths; // Keep slice 3: a pending death is in the checkpoint.
+mod authority_checkpoint_mutation; // Keep slice 3: every field of the save is bound, driven from the type.

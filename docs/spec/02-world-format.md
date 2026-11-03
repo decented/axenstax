@@ -2097,7 +2097,12 @@ and then checkpoints only after `Ok`, so step 3 is behind every checkpoint. Afte
 the load settles first and `scan_joiners` reads the result. A checkpoint older than that commit
 is refused as it is for any later save. A persist also re-reads `world_meta.json` for its digest
 (`StoredRecords::note_meta`, its stored bytes with the PoP secret's value cut), as does the end of
-a load, after the torn-meta rebuild (Spec 01 §4.1.5).
+a load, after the torn-meta rebuild, and likewise `world.dat` (`StoredRecords::note_world_dat`,
+its stored bytes whole), which binds every table of the save. A server's `try_save` sorts the rows
+it takes from hash maps and entity queries (`WorldSave::sort_unordered_rows`), which changes no
+format and no reader, so that the same tables are the same bytes. A Keep restore runs none of this
+section's or §8.4's recoveries: it reads what the checkpoint binds and writes nothing, and its
+persist settles anything left over (Spec 01 §4.1.5).
 
 **Known windows, still open:**
 

@@ -1276,7 +1276,7 @@ the wire nor the save format.
 **Shape.** A hybrid (Keep handoff §6, choice 1): volatile state in the bytes, and
 a sorted manifest of `(record key, SHA-256)` for the records a save holds. A world
 doesn't fit the 1 MiB cap as an image, and its digests do. The layout, in order:
-magic, schema `u16` (2), `PROTOCOL_VERSION`, save format, `worldgen_version`, the
+magic, schema `u16` (3), `PROTOCOL_VERSION`, save format, `worldgen_version`, the
 seed widened to `u64`, the config binding (SHA-256 of seed, worldgen version,
 creative and difficulty), the pop key id, the completed tick, the volatile
 sections, the manifest, and a seal (SHA-256 of everything before it; a checksum,
@@ -1285,9 +1285,9 @@ set sorted, every queue in queue order (which is state), floats as bits with
 `-0.0` folded onto `0.0`.
 
 **Observational.** `checkpoint` takes `&self`, does no I/O and calls no save path.
-What it needs of the disk (sidecar and meta digests) `GameServer::stored_records`
-learnt when those were read or written: sidecars as each lands, the meta at the end of
-a load, whenever a server writes it back and at each persist. It depends on no hash order, process or
+What it needs of the disk (sidecar, meta and `world.dat` digests) `GameServer::stored_records`
+learnt when those were read or written: sidecars as each lands, the meta and `world.dat` at
+the end of a load and at each persist, and the meta whenever a server writes it back. It depends on no hash order, process or
 clock: `run_id` and the reputation clock's owner are left out. `calendar_id` is in,
 as part of the Keep slice 2a clock: random on a real server, but persisted, so two
 authorities opened from one saved world agree. Two separate fresh worlds aren't
@@ -1311,7 +1311,8 @@ hashed with the value of the secret cut from its stored bytes. A restore is give
   sources from a rescan (water registers every water cell of a column, so an
   ocean's whole set would be past the cap, but flowing cells are not sources until
   a reload); the leaf-decay queues; the update scheduler; the power flood; rubber-tap
-  cooldowns;
+  cooldowns; each cell's Proof-of-Play exposure clock (`World::pop_exposure`, in no save,
+  20 B a cell and never pruned, so it counts against the cap as a world is mined);
 - each player slot: every field the `players` digest section reads and the persona
   key. `riding` is left out, since it names a hecs id: a rider restores on its feet;
 - each corpse waiting for the death pass (`deaths.rs`), sorted by its bytes: its kind and
@@ -1325,17 +1326,32 @@ hashed with the value of the secret cut from its stored bytes. A restore is give
 
 **Manifest** (`manifest.rs`): every non-empty chunk (the 8,704 B a save writes, taken from
 memory so that a checkpoint moves with an unsaved block), every sidecar in `joiners/`, the
-world meta's stored bytes with the secret's value cut, and one record over the block
-entities, drying racks, face attachments and block meta. It is true of the disk only
-straight after a save, so a runner persists, then checkpoints. Taken any later, a restore
-finds a record that doesn't match and refuses.
+world meta's stored bytes with the secret's value cut, and `world.dat`'s stored bytes, which
+hold every table of `WorldSave` (block entities, plots, market hubs, raids, Satoshi, village
+tables, hideouts, hostile acts, tamed pets, carts, quest NPCs and the rest) under one digest at
+any world size. A server's save sorts the rows it takes from hash maps and entity queries
+(`WorldSave::sort_unordered_rows`), so the same tables are the same bytes. The manifest is true
+of the disk only straight after a save, so a runner persists, then checkpoints. Taken any
+later, a restore refuses: a record that has changed doesn't match, and `world.dat`'s clock
+names another tick even where every digest does. A table's change moves the checkpoint at the
+persist that stores it, not before.
 
 **Digests are over stored bytes.** `restore_from_checkpoint` reads each bound file and
-hashes it as it lies, and a meta is never parsed and encoded again to hash, so a build
-with another `WorldMeta` field doesn't see an unchanged record as changed. The exception
-is the block-table record, which has no stored bytes while those tables sit in
-`world.dat`: it is compared after the load, and a new block-entity field still moves it
-until those tables become records of their own.
+hashes it as it lies, and nothing is parsed and encoded again to hash, so a build with
+another field in `WorldMeta` or `WorldSave` doesn't see an unchanged record as changed.
+
+**Every field is bound, and a test says so from the type.**
+`authority_checkpoint_mutation.rs` destructures `WorldSave` with no `..`, so a new field
+doesn't compile until it has a row, and every row runs a real restore: another valid value, a
+flipped byte of its own and, for a table, its rows gone, each `InvalidCheckpoint`. Each kind
+of record also takes a flipped byte, absence, another key's valid bytes and an older value of
+its own. What still isn't in a checkpoint or a record is in the restoration ledger below.
+
+**A restore writes nothing.** Record bytes change only through a persist, so it opens through
+`world_open::open_bound_world`: `world.dat` and `chunks/` only. A joiner stage or a staged first
+save stays where it is, for the restored world's next persist to settle; a torn chunk file no
+record binds is skipped where it lies; a bound `world.dat` this build only part-decodes is
+`InvalidCheckpoint`. A normal open keeps all of those recoveries (Spec 02 §8.4).
 
 **Refusals.** `checkpoint` returns `TooLarge` past the cap (never a shorter checkpoint),
 `Lent` on a lending server and `Unrestorable` for a state a restore would refuse: it puts
@@ -1356,14 +1372,11 @@ everything from the worldgen version to the seal re-encodes to the same bytes.
 **Damaged records.** From a good root a record arrives byte-exact or not at all, so a torn
 meta is `InvalidCheckpoint`: refused before the load, and neither repaired nor kept aside.
 A chunk file the manifest doesn't name is a column the run dropped, which the layout keeps
-out; a sidecar or a meta it doesn't name is refused, and so is a lost meta with a damaged
-copy kept aside. A normal open keeps its recovery (Spec 02 §8.4), because without it every
+out; a sidecar, a meta or a `world.dat` it doesn't name is refused, and so is a lost meta with a
+damaged copy kept aside. A normal open keeps its recovery (Spec 02 §8.4), because without it every
 later save would be refused: a server opened over a torn meta rebuilds it, and its digest
 is taken after that, so the run's checkpoints bind the file that is there.
-`server_main::settle_pop_secret` likewise re-reads what it writes. The load's other
-recoveries (publishing joiners' records staged before a crash, keeping aside a torn chunk
-file no record binds, a partly decoded `world.dat`) can still write during a restore that
-gets past the digests; they go with `world.dat`'s binding.
+`server_main::settle_pop_secret` likewise re-reads what it writes.
 
 The seal is a checksum, and nothing tells corruption from anything else: both are
 `InvalidCheckpoint`. So values that are sealed but absurd are checked as values:
@@ -1402,12 +1415,9 @@ checkpoint, restore into a new server, feed both the same script for 200 ticks.
 - `wild_mobs`, `tamed_entities`, `item_drops`, `projectiles`: hecs ids change on
   restore and mob AI rolls hash the id. Wild mobs re-scatter, tamed ones and carts
   come from the save, and what lay on the ground or was in flight is gone.
-- `world_tables`: equal in the fixture, so printed and not promised. `pop_exposure`
-  is in no save or checkpoint (a cell mined after a restore rolls as fully decayed),
-  and the rest reads back from `world.dat`, outside the manifest. `state_hash` doesn't
-  cover those tables and saved entities: bounties, plots, market hubs, raids, Satoshi,
-  village tables, hideouts, hostile acts, tamed pets, carts and quest NPCs. That has to
-  be settled before Keep relies on the hash to compare authorities (handoff §6).
+- `world_tables`: equal in the fixture, so printed and not promised, as hideout and
+  raid counts follow the mobs. The tables read back from `world.dat`, which the manifest
+  binds, and `pop_exposure` is in the volatile sections.
 - Pending outputs: `pending_item_grants`, `pending_kill_events`, `released_joiners` and
   `pending_sapling_drops` aren't carried, and the slice 3 runner checkpoints only after
   they drain.

@@ -290,6 +290,20 @@ pub(crate) fn open_world(
     Ok(OpenedWorld::New)
 }
 
+/// A Keep restore's open: `world.dat` and `chunks/`, whose digests it has just checked,
+/// and nothing else. No autosave is read, since no checkpoint binds one, and nothing is
+/// written, as a record's bytes change only through a persist: no joiner stage settles,
+/// no first save publishes, nothing is kept aside and no meta is repaired. A persist of
+/// the restored world settles what is left over, as any persist does.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn open_bound_world(name: &str, world: &mut World) -> Result<OpenedWorld, String> {
+    if let Some(why) = crate::save::world_open_refusal(name) {
+        return Err(why);
+    }
+    let (save, chunks) = crate::save::load_world_writing_nothing(name, world)?;
+    Ok(OpenedWorld::Loaded { save: Box::new(save), chunks, from: OpenedFrom::LastSave })
+}
+
 /// The operator-facing refusal for a server log: the world, its folder, why, and
 /// that nothing was changed.
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]

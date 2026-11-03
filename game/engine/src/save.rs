@@ -356,6 +356,55 @@ pub struct WorldSave {
 }
 
 impl WorldSave {
+    /// A server's save, its rows in one order: the ones it takes from a hash map by
+    /// their key, the ones from an entity query by their bytes. The same tables are
+    /// then the same bytes, which the Keep checkpoint binds (Spec 01 §4.1.5). The
+    /// format and every reader are unchanged, and nothing reads a meaning into these
+    /// orders. No `..`, so a new field has to say which it is.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) fn sort_unordered_rows(&mut self) {
+        let Self {
+            campfires, furnaces, vendors, drying_racks, hives, chests, tip_jars, auctions, latent_prints,
+            construction_anchors, architect_plaques, graves, power_devices, signs, item_frames, composters,
+            dispensers, face_overlays, face_blueprints, face_blueprint_blanks, village_anchors,
+            populated_villages, village_treasuries, raid_kills, brigand_hideouts, block_meta, carts, saved_mobs,
+            // Each kept in the order the world holds it, which is its state.
+            seed: _, player_x: _, player_y: _, player_z: _, player_health: _, hotbar_slot: _, inventory: _,
+            players: _, plots: _, market_hubs: _, village_bells: _, active_raids: _, raid_scheduler: _,
+            bounties: _, bounty_next_id: _, bounty_last_refresh_tick: _, workshop: _, waypoints: _,
+            locked_slots: _, hostile_acts: _, rigs: _, exhibits: _, satoshi: _, rig_clips: _, local_personal: _,
+            quest_world: _, worldgen_version: _, authority_clock: _,
+        } = self;
+        campfires.sort_unstable_by_key(|r| (r.x, r.y, r.z));
+        furnaces.sort_unstable_by_key(|r| (r.x, r.y, r.z));
+        vendors.sort_unstable_by_key(|r| (r.x, r.y, r.z));
+        drying_racks.sort_unstable_by_key(|r| (r.x, r.y, r.z));
+        hives.sort_unstable_by_key(|r| (r.x, r.y, r.z));
+        chests.sort_unstable_by_key(|r| (r.x, r.y, r.z));
+        tip_jars.sort_unstable_by_key(|r| (r.x, r.y, r.z));
+        auctions.sort_unstable_by_key(|r| (r.x, r.y, r.z));
+        latent_prints.sort_unstable_by_key(|r| (r.x, r.y, r.z));
+        construction_anchors.sort_unstable_by_key(|r| (r.x, r.y, r.z));
+        architect_plaques.sort_unstable_by_key(|r| (r.x, r.y, r.z));
+        graves.sort_unstable_by_key(|r| (r.x, r.y, r.z));
+        power_devices.sort_unstable_by_key(|r| (r.x, r.y, r.z));
+        signs.sort_unstable_by_key(|r| (r.x, r.y, r.z));
+        item_frames.sort_unstable_by_key(|r| (r.x, r.y, r.z));
+        composters.sort_unstable_by_key(|r| (r.x, r.y, r.z));
+        dispensers.sort_unstable_by_key(|r| (r.x, r.y, r.z));
+        face_overlays.sort_unstable_by_key(|r| (r.x, r.y, r.z, r.face));
+        face_blueprints.sort_unstable_by_key(|r| (r.x, r.y, r.z, r.face));
+        face_blueprint_blanks.sort_unstable_by_key(|r| (r.x, r.y, r.z, r.face));
+        village_anchors.sort_unstable_by_key(|r| (r.grid_x, r.grid_z));
+        populated_villages.sort_unstable();
+        village_treasuries.sort_unstable_by_key(|r| r.0);
+        raid_kills.sort_unstable_by_key(|r| (r.0, r.1));
+        brigand_hideouts.sort_unstable_by_key(|r| (r.grid_x, r.grid_z));
+        block_meta.sort_unstable_by_key(|r| (r.0, r.1, r.2));
+        carts.sort_by_cached_key(|r| bincode::serialize(r).unwrap_or_default());
+        saved_mobs.sort_by_cached_key(|r| bincode::serialize(r).unwrap_or_default());
+    }
+
     /// The clock to carry on from, if this save has one that could be real.
     pub fn clock(&self) -> Option<&crate::sim_clock::SavedClock> {
         let clock = self.authority_clock.as_ref()?;
@@ -3018,6 +3067,28 @@ pub fn load_world(
     name: &str,
     world: &mut World,
 ) -> Result<(WorldSave, u32), String> {
+    load_world_with(name, world, AtLoad::Recover)
+}
+
+/// [`load_world`] for a Keep restore, which writes nothing: a staged first save is
+/// left where it is, a torn chunk file is skipped where it lies (the digests have
+/// already vouched for every chunk the checkpoint binds), and a `world.dat` this build
+/// only part-decodes is refused.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn load_world_writing_nothing(name: &str, world: &mut World) -> Result<(WorldSave, u32), String> {
+    load_world_with(name, world, AtLoad::WriteNothing)
+}
+
+/// Whether a load may run the recoveries that write.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AtLoad {
+    Recover,
+    WriteNothing,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn load_world_with(name: &str, world: &mut World, at_load: AtLoad) -> Result<(WorldSave, u32), String> {
     let dir = world_dir(name);
     // M-1: a retired world (or an unreadable handover record) is never loaded.
     #[cfg(not(target_arch = "wasm32"))]
@@ -3039,8 +3110,12 @@ pub fn load_world(
     // A first save that committed this world.dat but was cut short before its
     // chunks were published: publish them now, or the world would load empty
     // under world.dat's block entities (Spec 02 §8.4).
-    finish_staged_first_save(&dir)?;
-    let loaded = load_chunk_dir(&dir.join("chunks"), world)?;
+    if at_load == AtLoad::Recover {
+        finish_staged_first_save(&dir)?;
+    } else if partial {
+        return Err("world.dat only partly decodes".to_string());
+    }
+    let loaded = load_chunk_dir(&dir.join("chunks"), world, at_load)?;
     if partial {
         keep_damaged_copy_once(&dat_path);
     }
@@ -3076,9 +3151,10 @@ pub fn load_world(
 /// coordinates recorded as known on disk (`World::note_disk_chunk`, which is what
 /// lets a later save delete a mined-out chunk's file). A damaged chunk is not
 /// inserted: the streamer regenerates it, with the original kept aside.
-/// Files whose name isn't `<a>_<b>_<c>.chunk` are left alone.
+/// Files whose name isn't `<a>_<b>_<c>.chunk` are left alone. With
+/// [`AtLoad::WriteNothing`], so is a damaged one.
 #[cfg(not(target_arch = "wasm32"))]
-fn load_chunk_dir(chunks_dir: &std::path::Path, world: &mut World) -> Result<u32, String> {
+fn load_chunk_dir(chunks_dir: &std::path::Path, world: &mut World, at_load: AtLoad) -> Result<u32, String> {
     // Name the folder relative to the world folder in errors ("autosave/chunks").
     let rel = match chunks_dir.parent().and_then(|p| p.file_name()) {
         Some(parent) if parent == "autosave" => "autosave/chunks",
@@ -3120,6 +3196,10 @@ fn load_chunk_dir(chunks_dir: &std::path::Path, world: &mut World) -> Result<u32
             Some(chunk) => good.push((key, chunk)),
             None => damaged.push((entry.path(), format!("{rel}/{name_str}"), data.len())),
         }
+    }
+
+    if at_load == AtLoad::WriteNothing {
+        damaged.clear();
     }
 
     // Pass 2 — keep every damaged file aside, or none of them.
@@ -4873,7 +4953,7 @@ pub fn load_autosave(
     // load_world (Spec 02 §8.4).
     let (save, partial) = decode_world_dat(&data, "autosave/world.dat")?;
 
-    let loaded = load_chunk_dir(&dir.join("chunks"), world)?;
+    let loaded = load_chunk_dir(&dir.join("chunks"), world, AtLoad::Recover)?;
     if partial {
         keep_damaged_copy_once(&dat_path);
     }
@@ -7684,7 +7764,7 @@ mod tests {
         fs::write(chunks.join("3_1_-2.chunk"), &torn).unwrap();
 
         let mut world = World::new();
-        let loaded = load_chunk_dir(&chunks, &mut world).expect("load continues");
+        let loaded = load_chunk_dir(&chunks, &mut world, AtLoad::Recover).expect("load continues");
         assert_eq!(loaded, 0);
         assert!(!chunks.join("3_1_-2.chunk").exists(), "moved aside so a save can't overwrite it");
         let aside: Vec<_> = fs::read_dir(&chunks)

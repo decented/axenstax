@@ -32,8 +32,9 @@ pub(super) struct Corpse {
 }
 
 impl Corpse {
+    /// Finite, and at a cell a tick can reach.
     pub(super) fn is_placed(&self) -> bool {
-        self.pos.is_finite()
+        self.pos.is_finite() && super::volatile::cell_in_range(&(self.pos.x as i32, self.pos.y as i32, self.pos.z as i32))
     }
 }
 

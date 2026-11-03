@@ -1,9 +1,10 @@
 //! `GameServer::restore_from_checkpoint`, in the contract's order: the schema
 //! field, the seal, the remaining versions, the config binding, then the digest of
 //! every bound record as it lies on disk. Only then does the load run, so a record
-//! that doesn't match is refused before anything has parsed it, and before the
-//! load's keep-a-damaged-copy-aside recoveries could write. Then the layout, the
-//! volatile sections and a last check that it all encodes back to the same bytes.
+//! that doesn't match is refused before anything has parsed it. The load writes
+//! nothing: the recoveries of a normal open don't run (`world_open::open_bound_world`).
+//! Then the layout, the volatile sections and a last check that it all encodes back
+//! to the same bytes.
 
 use super::codec::{Malformed, Reader};
 use super::manifest::Entry;
@@ -81,6 +82,7 @@ impl GameServer {
         if let Some(why) = super::manifest::stored_mismatch(&manifest, world_dir).map_err(RestoreError::Fault)? {
             return Err(RestoreError::InvalidCheckpoint(format!("the stored records and the manifest disagree: {why}")));
         }
+        refuse_a_bound_world_dat_that_isnt_the_state(world_dir, header.tick)?;
         refuse_a_pending_role_cut(world_dir)?;
         let seed = u32::try_from(config.seed).map_err(|_| RestoreError::InvalidConfig("a seed past u32".into()))?;
         let mut server = GameServer::new(0, name, seed);
@@ -88,7 +90,7 @@ impl GameServer {
         // nothing: a column generated here could add to a table the manifest binds,
         // and a good checkpoint would read as a mismatch.
         server.render_distance = 0;
-        server.initial_load_generating(false).map_err(RestoreError::Fault)?;
+        server.initial_load_restoring().map_err(RestoreError::Fault)?;
         if server.world.generator.version() != config.worldgen_version {
             return Err(RestoreError::InvalidConfig(format!(
                 "the world's generator is v{}, the config's v{}",
@@ -125,6 +127,28 @@ impl GameServer {
     }
 }
 
+/// The bound `world.dat` matches its digest. It still isn't this checkpoint's state if
+/// this build only part-decodes it (the rest would be defaults), or if it holds another
+/// tick's clock: a checkpoint taken after its persist has digests that can all match
+/// while the tables are stale. A save with no clock is older than the field, and says
+/// nothing either way.
+fn refuse_a_bound_world_dat_that_isnt_the_state(world_dir: &std::path::Path, tick: u64) -> Result<(), RestoreError> {
+    let stored = std::fs::read(world_dir.join("world.dat"))
+        .map_err(|e| RestoreError::Fault(format!("world.dat can't be read ({e})")))?;
+    let (save, partial) = crate::save::read_world_save_reporting(&stored)
+        .map_err(|e| RestoreError::InvalidCheckpoint(format!("the bound world.dat doesn't read: {e}")))?;
+    if partial {
+        return Err(RestoreError::InvalidCheckpoint("the bound world.dat only partly decodes".into()));
+    }
+    match save.clock() {
+        Some(clock) if clock.tick_counter != tick => Err(RestoreError::InvalidCheckpoint(format!(
+            "the stored records are of tick {}, and the checkpoint of tick {tick}",
+            clock.tick_counter
+        ))),
+        _ => Ok(()),
+    }
+}
+
 /// A server with no local players makes a handover's role cut at its first load,
 /// so a checkpoint's folder has already made it. One that hasn't (the wrong folder,
 /// a copy from before the cut) would make it inside `initial_load`, an irreversible
@@ -146,7 +170,7 @@ fn reload_sidecars(server: &mut GameServer) {
         if !sp.server_simulated || !sp.is_in_world() || sp.verified_pubkey.is_none() {
             continue;
         }
-        if let Some(saved) = server.load_joiner(i) {
+        if let Some(saved) = server.load_joiner_unsettled(i) {
             saved.restore_session(&mut server.players[i]);
         }
         let now = server.tick_counter;

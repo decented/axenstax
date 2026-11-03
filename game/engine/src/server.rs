@@ -1351,10 +1351,21 @@ impl GameServer {
         self.initial_load_generating(true)
     }
 
+    /// The load of a Keep restore: its bound records and nothing else, generating
+    /// nothing and writing nothing (`world_open::open_bound_world`).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn initial_load_restoring(&mut self) -> Result<(), String> {
+        self.initial_load_opening(false, true)
+    }
+
     /// [`Self::initial_load`], with `generate_missing` false to leave a saved
     /// world's missing centre columns ungenerated (a restore: its layout says
     /// what the world holds, and generating adds to tables it binds).
     pub(crate) fn initial_load_generating(&mut self, generate_missing: bool) -> Result<(), String> {
+        self.initial_load_opening(generate_missing, false)
+    }
+
+    fn initial_load_opening(&mut self, generate_missing: bool, restoring: bool) -> Result<(), String> {
         // Dedicated server runs with 0 local players — fall back to the world
         // spawn so initial_load doesn't index an empty player list (gap G4).
         let spawn = self
@@ -1391,15 +1402,18 @@ impl GameServer {
                 crate::world_open::server_refusal_message(&wname, &why)
             });
         #[cfg(not(target_arch = "wasm32"))]
-        let autosave_policy = if personal_proof.is_some() || local_present()? {
+        let autosave_policy = if !restoring && (personal_proof.is_some() || local_present()?) {
             crate::world_open::AutosavePolicy::Prefer
         } else { autosave_policy };
-        let opened = crate::world_open::open_world(
-            &wname,
-            &mut self.world,
-            autosave_policy,
-        )
-        .map_err(|why| crate::world_open::server_refusal_message(&wname, &why))?;
+        #[cfg(not(target_arch = "wasm32"))]
+        let opening = if restoring {
+            crate::world_open::open_bound_world(&wname, &mut self.world)
+        } else {
+            crate::world_open::open_world(&wname, &mut self.world, autosave_policy)
+        };
+        #[cfg(target_arch = "wasm32")]
+        let opening = { let _ = restoring; crate::world_open::open_world(&wname, &mut self.world, autosave_policy) };
+        let opened = opening.map_err(|why| crate::world_open::server_refusal_message(&wname, &why))?;
         if let crate::world_open::OpenedWorld::Loaded { save: save_data, chunks: chunk_count, .. } = opened {
             log::info!("Loaded saved world '{wname}'.");
             self.selected_local_personal = save_data.local_personal.clone();
@@ -1499,6 +1513,7 @@ impl GameServer {
                 self.stored_records.scan_joiners(&crate::save::world_dir(&self.world_name));
                 // After `open_world`, whose recovery may have rewritten it.
                 self.stored_records.note_meta(&self.world_name);
+                self.stored_records.note_world_dat(&self.world_name);
             }
             return Ok(());
         }
@@ -1542,6 +1557,7 @@ impl GameServer {
         {
             self.stored_records.scan_joiners(&crate::save::world_dir(&self.world_name));
             self.stored_records.note_meta(&self.world_name);
+            self.stored_records.note_world_dat(&self.world_name);
         }
         Ok(())
     }
@@ -3409,7 +3425,7 @@ impl GameServer {
                 x, y, z, chain: chain.clone(),
             })
             .collect();
-        let save = crate::save::WorldSave {
+        let mut save = crate::save::WorldSave {
             seed: self.seed,
             player_x: p0.x,
             player_y: p0.y,
@@ -3539,6 +3555,7 @@ impl GameServer {
                 .collect(),
         };
 
+        save.sort_unordered_rows();
         let encoded = crate::save_format::encode_world_save(&save)?;
         if !joiner_rows.is_empty() {
             crate::joiner_stage::stage(&dir, &joiner_rows, &encoded)?;
@@ -3549,6 +3566,7 @@ impl GameServer {
         let published = self.settle_joiner_stage();
         // A persist binds what the disk then holds, however the meta came to change.
         self.stored_records.note_meta(&wname);
+        self.stored_records.note_world_dat(&wname);
         committed.and(published)
     }
 

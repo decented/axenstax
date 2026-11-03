@@ -38,10 +38,9 @@ const NOT_YET_RESTORED: [&str; 6] = [
     "item_drops",
     // In flight when the checkpoint was taken: gone. Hecs ids change on restore.
     "projectiles",
-    // Equal in this fixture, so printed and not promised: `pop_exposure` is in no
-    // save and no checkpoint (a cell mined after a restore rolls as fully
-    // decayed), the rest reads back from `world.dat`, which isn't canonical and
-    // isn't in the manifest, and hideout and raid counts follow the mobs.
+    // Equal in this fixture, so printed and not promised: hideout and raid counts
+    // follow the mobs. The tables themselves read back from `world.dat`, which the
+    // manifest binds, and `pop_exposure` is in the volatile sections.
     "world_tables",
 ];
 
@@ -188,7 +187,7 @@ fn the_header_and_the_hash_are_as_specified() {
     };
     assert_eq!(CHECKPOINT_MAGIC, b"axenstax/authority-checkpoint\0");
     assert_eq!(take(CHECKPOINT_MAGIC.len()), CHECKPOINT_MAGIC);
-    assert_eq!(take(2), 2u16.to_le_bytes(), "schema");
+    assert_eq!(take(2), 3u16.to_le_bytes(), "schema");
     assert_eq!(take(4), crate::protocol::PROTOCOL_VERSION.to_le_bytes());
     assert_eq!(take(4), crate::save_format::SAVE_FORMAT_VERSION.to_le_bytes());
     assert_eq!(take(4), h.server.world.generator.version().to_le_bytes());

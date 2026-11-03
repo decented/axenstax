@@ -7,28 +7,26 @@
 //! | `b"c"` + `(cx, cy, cz)` | a non-empty chunk, the 8,704 B a save writes | memory |
 //! | `b"j"` + file name | a joiner's sidecar, as stored | [`StoredRecords`] |
 //! | `b"m"` | the world's meta as stored, the value of `pop_secret` cut | [`StoredRecords`] |
-//! | `b"b"` | block entities, drying racks, face attachments and block meta | memory |
+//! | `b"w"` | `world.dat` as stored: every table of `WorldSave` | [`StoredRecords`] |
 //!
 //! A server save writes every non-empty chunk it holds, so that is what is
 //! listed, and the list is what meets the 1 MiB cap first.
 //!
-//! The `b"b"` record is not named in the slice 2 spec's list. Without it a
-//! checkpoint's hash would not move for a furnace's contents, because a block
-//! entity sits in `world.dat`, which isn't canonical. It is the same canonical
-//! view the `block_entities` digest section takes, and costs one entry.
+//! `world.dat` is one record, so all 56 fields of the save are bound by one entry
+//! whatever size the world's tables reach, and a field added to the save is bound by
+//! being in the file. A server writes its rows in one order
+//! (`WorldSave::sort_unordered_rows`), so the same tables are the same bytes.
 //!
-//! The manifest is only true of the disk straight after a save: a restore from a
-//! checkpoint taken any later finds a record that doesn't match and refuses. The
-//! runner persists, then checkpoints.
+//! The manifest is only true of the disk straight after a save. A record that has
+//! since changed doesn't match, and a checkpoint of a later tick than the save is
+//! refused by the clock `world.dat` holds, as an unsaved change to a table doesn't
+//! move the digest until the save stores it. The runner persists, then checkpoints.
 //!
 //! A digest is over a record's stored bytes ([`stored_mismatch`] reads them), never
-//! a parsed struct encoded again, so a build with another `WorldMeta` field doesn't
-//! see an unchanged record as changed. A chunk's digest is taken from memory, so
-//! that a checkpoint moves with an unsaved block; its `as_bytes` is exactly what a
-//! save writes, not an encoding of parsed fields. The one exception is `b"b"`, which
-//! has no stored bytes of its own while those tables sit in `world.dat`: it is
-//! compared after the load, and a new block-entity field still moves it, until those
-//! tables become records of their own (handoff §6, slice 3).
+//! a parsed struct encoded again, so a build with another field doesn't see an
+//! unchanged record as changed. A chunk's digest is taken from memory, so that a
+//! checkpoint moves with an unsaved block; its `as_bytes` is exactly what a save
+//! writes, not an encoding of parsed fields.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -40,6 +38,8 @@ use super::codec::{Malformed, Reader, Writer};
 use crate::server::GameServer;
 
 pub(super) type Entry = (Vec<u8>, [u8; 32]);
+
+const WORLD_DAT_KEY: &[u8] = b"w";
 
 fn sha256(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
@@ -53,6 +53,8 @@ pub(crate) struct StoredRecords {
     /// The digest of the world's stored meta, without its secret. `None`: no meta
     /// file. A `Mutex`, as a save takes `&self`.
     meta: Mutex<Option<[u8; 32]>>,
+    /// The digest of the world's stored `world.dat`. `None`: no such file yet.
+    world_dat: Mutex<Option<[u8; 32]>>,
     /// Every sidecar in the world's `joiners/`, by file name. A `Mutex`, as a
     /// save takes `&self` (as `World::disk_chunks` does).
     joiners: Mutex<BTreeMap<String, [u8; 32]>>,
@@ -77,6 +79,19 @@ impl StoredRecords {
             }
         };
         *self.meta.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = digest;
+    }
+
+    /// Learn `world.dat` from the disk: at the load and at each persist, whichever
+    /// way its commit went, so the digest is of the bytes that are there.
+    pub(crate) fn note_world_dat(&self, world: &str) {
+        let digest = match stored_world_dat_digest(&crate::save::world_dir(world)) {
+            Ok(digest) => digest,
+            Err(e) => {
+                log::error!("world '{world}': the checkpoint can't bind world.dat: {e}");
+                None
+            }
+        };
+        *self.world_dat.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = digest;
     }
 
     /// Whatever sidecars the world folder holds: at load, including the records
@@ -129,6 +144,14 @@ fn stored_sidecars(world_dir: &Path) -> BTreeMap<String, [u8; 32]> {
     joiners
 }
 
+fn stored_world_dat_digest(world_dir: &Path) -> Result<Option<[u8; 32]>, String> {
+    match std::fs::read(world_dir.join("world.dat")) {
+        Ok(stored) => Ok(Some(sha256(&stored))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("world.dat can't be read ({e})")),
+    }
+}
+
 fn stored_meta_digest(world_dir: &Path) -> Result<Option<[u8; 32]>, String> {
     match std::fs::read(world_dir.join("world_meta.json")) {
         Ok(stored) => Ok(Some(meta_record_digest(&stored))),
@@ -141,30 +164,30 @@ fn stored_meta_digest(world_dir: &Path) -> Result<Option<[u8; 32]>, String> {
 /// disk, read before any load has parsed them. `Err` is a disk that can't be read.
 ///
 /// A chunk file the manifest doesn't name is no mismatch: it is a column the run
-/// dropped, and the layout keeps it out of the restored world. A sidecar or meta
-/// it doesn't name is one, as each of those is read whole into the world.
+/// dropped, and the layout keeps it out of the restored world. A sidecar, meta or
+/// `world.dat` it doesn't name is one, as each of those is read whole into the world.
+/// A manifest with no `world.dat` is a checkpoint from before any persist.
 pub(super) fn stored_mismatch(wanted: &[Entry], world_dir: &Path) -> Result<Option<String>, String> {
+    if !wanted.iter().any(|(key, _)| key == WORLD_DAT_KEY) {
+        return Ok(Some("no world.dat is bound".to_string()));
+    }
     let mut found: Vec<Entry> = Vec::new();
-    for (key, digest) in wanted {
-        match key.first() {
-            Some(b'c') if key.len() == 13 => {
-                let at = |i: usize| i32::from_le_bytes([key[i], key[i + 1], key[i + 2], key[i + 3]]);
-                let file = world_dir.join("chunks").join(format!("{}_{}_{}.chunk", at(1), at(5), at(9)));
-                match std::fs::read(&file) {
-                    Ok(stored) => found.push((key.clone(), sha256(&stored))),
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(e) => return Err(format!("{} can't be read ({e})", file.display())),
-                }
-            }
-            // Has no stored bytes of its own yet: compared after the load.
-            Some(b'b') => found.push((key.clone(), *digest)),
-            _ => {}
+    for (key, _) in wanted.iter().filter(|(key, _)| key.first() == Some(&b'c') && key.len() == 13) {
+        let at = |i: usize| i32::from_le_bytes([key[i], key[i + 1], key[i + 2], key[i + 3]]);
+        let file = world_dir.join("chunks").join(format!("{}_{}_{}.chunk", at(1), at(5), at(9)));
+        match std::fs::read(&file) {
+            Ok(stored) => found.push((key.clone(), sha256(&stored))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("{} can't be read ({e})", file.display())),
         }
     }
     for (name, digest) in stored_sidecars(world_dir) {
         let mut key = vec![b'j'];
         key.extend_from_slice(name.as_bytes());
         found.push((key, digest));
+    }
+    if let Some(digest) = stored_world_dat_digest(world_dir)? {
+        found.push((WORLD_DAT_KEY.to_vec(), digest));
     }
     match stored_meta_digest(world_dir)? {
         Some(digest) => found.push((b"m".to_vec(), digest)),
@@ -253,38 +276,6 @@ fn secret_value_span(json: &[u8]) -> Option<std::ops::Range<usize>> {
     None
 }
 
-/// The block side tables a save keeps in `world.dat`, in one canonical view.
-fn block_tables_digest(s: &GameServer) -> Result<[u8; 32], String> {
-    fn enc(value: &impl serde::Serialize) -> Result<Vec<u8>, String> {
-        bincode::serialize(value).map_err(|e| e.to_string())
-    }
-    fn table<V: serde::Serialize>(
-        h: &mut Sha256,
-        map: &ahash::AHashMap<(i32, i32, i32), V>,
-    ) -> Result<(), String> {
-        let mut rows: Vec<_> = map.iter().collect();
-        rows.sort_unstable_by_key(|(pos, _)| **pos);
-        h.update((rows.len() as u32).to_le_bytes());
-        for (pos, value) in rows {
-            h.update(pos.0.to_le_bytes());
-            h.update(pos.1.to_le_bytes());
-            h.update(pos.2.to_le_bytes());
-            let bytes = enc(value)?;
-            h.update((bytes.len() as u32).to_le_bytes());
-            h.update(&bytes);
-        }
-        Ok(())
-    }
-    let w = &s.world;
-    let mut h = Sha256::new();
-    h.update(b"block-tables\0");
-    table(&mut h, &w.block_entities)?;
-    table(&mut h, &w.drying_racks)?;
-    table(&mut h, &w.face_attachments)?;
-    table(&mut h, &w.block_meta)?;
-    Ok(h.finalize().into())
-}
-
 /// Every record, sorted by key.
 pub(super) fn entries(s: &GameServer) -> Result<Vec<Entry>, String> {
     let mut list: Vec<Entry> = Vec::new();
@@ -310,7 +301,9 @@ pub(super) fn entries(s: &GameServer) -> Result<Vec<Entry>, String> {
     if let Some(digest) = *s.stored_records.meta.lock().unwrap_or_else(std::sync::PoisonError::into_inner) {
         list.push((b"m".to_vec(), digest));
     }
-    list.push((b"b".to_vec(), block_tables_digest(s)?));
+    if let Some(digest) = *s.stored_records.world_dat.lock().unwrap_or_else(std::sync::PoisonError::into_inner) {
+        list.push((WORLD_DAT_KEY.to_vec(), digest));
+    }
     list.sort_unstable_by(|a, b| a.0.cmp(&b.0));
     Ok(list)
 }
@@ -346,7 +339,7 @@ pub(super) fn first_mismatch(wanted: &[Entry], found: &[Entry]) -> Option<String
         }
         Some(b'j') => format!("sidecar {}", String::from_utf8_lossy(&key[1..])),
         Some(b'm') => "the world meta".to_string(),
-        Some(b'b') => "the block tables".to_string(),
+        Some(b'w') => "world.dat".to_string(),
         _ => "an unknown record".to_string(),
     };
     let (mut a, mut b) = (wanted.iter().peekable(), found.iter().peekable());

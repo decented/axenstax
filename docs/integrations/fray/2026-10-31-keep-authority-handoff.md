@@ -85,7 +85,7 @@ What already fits:
 | `tick(time)` | `HostedServer::tick` (`hosted_server.rs:4341`) driven by a 50 ms `Instant` loop that **skips** missed ticks (`keep_world.rs:288-314`) | medium-high (`GameServer`), low (`HostedServer`) | Takes no time argument. Three counters: `tick_counter` (u64), `world_time` (u32 day clock, starts 6000), `HostedServer.server_tick` (on the wire). Output is pushed through `send_to_client`, not returned as commands. |
 | `checkpoint()` | Slice 2b: `GameServer::checkpoint` (Spec 01 §4.1.5), not wired in. Before it, `GameServer::try_save` (`server.rs:3127-3497`) | medium | The rest of this row is `try_save`, the record path it depends on. Writes files, does not return bytes. Refuses while mob deaths are pending (`save.rs:1077`). Non-canonical (§4.3). Omits most live state (§5). `handover/checkpoint` packs saved *files* for transfer and strips `pop_secret` and players. It is not a live-state checkpoint. |
 | `restore(config, ckpt)` | Slice 2b: `GameServer::restore_from_checkpoint`, not wired in, over `initial_load` (`server.rs:1325-1450`) | medium | The rest of this row is `initial_load` alone; the restoration ledger in §7 says what slice 2b brings back. Rebuilds from the save rather than restoring. Clocks restart, wildlife re-scatters, entity ids are new, and every saved column is loaded (the live run had streamed some out). |
-| `state_hash()` | Slice 2b: `GameServer::state_hash`, `SHA256(b"fray/authority-state/v1\0" \|\| checkpoint())`, not wired in | medium | Covers chunks, sidecars, the meta and the block tables through the manifest, not the rest of `world.dat` (§6), and needs a persist first. Not comparable across architectures until §4.5 is audited. |
+| `state_hash()` | Slice 2b: `GameServer::state_hash`, `SHA256(b"fray/authority-state/v1\0" \|\| checkpoint())`, not wired in | medium | Covers chunks, sidecars, the meta and all of `world.dat` through the manifest, and needs a persist first. Not comparable across architectures until §4.5 is audited. |
 
 **Time.** 20 TPS, so `Time{tick: n, elapsed_us: n × 50_000}`, with `Time.tick == tick_counter`
 after step n. `server_tick` must become the same restored counter. `world_time` stays derived
@@ -118,8 +118,8 @@ and today the game verifies it, not the shell (§6, choice 7).
    order, which feed entity ids. All of these now sort. Campfire visits (`sim_machines.rs:258`) sort
    too, but on a closer reading that order changes only the block changes emitted, not simulated
    state. Pistons, dispensers, saplings, keg fuses, hideouts, construction, the power network and
-   salt licks are still open. **Not fixed:** `world.dat` bytes are still non-canonical, because
-   every `Vec<Saved*>` is built by iterating a hash map and nothing sorts it.
+   salt licks are still open. A server's `world.dat` is canonical since slice 3
+   (`WorldSave::sort_unordered_rows`); a client's save isn't, and no checkpoint reads one.
 4. **Secret in state.** `pop_secret` (the Proof-of-Play / Satori HMAC key, in
    `world_meta.json`) keys drops and every server use-roll. A restore without it changes
    outcomes, yet contract:106 forbids serialising private keys (§6, choice 6).
@@ -273,7 +273,7 @@ the contract itself as changed.
 Measured or built on the game side. The sizes are from `checkpoint_size_at_the_bench_world_sizes`
 (§8). Slice 3 has settled the ones below against the Tier-L rulings.
 
-**Settled in the game, 2026-11-03 (checkpoint schema 2; no save-format or protocol change):**
+**Settled in the game, 2026-11-03 (checkpoint schema 3; no save-format or protocol change):**
 
 - **"Not now": there is no such code.** `checkpoint` no longer refuses a pending death: each corpse
   is in the bytes (`authority_checkpoint/deaths.rs`) and comes back as a corpse, and the restored
@@ -288,7 +288,7 @@ Measured or built on the game side. The sizes are from `checkpoint_size_at_the_b
 - **Digests over stored bytes.** `m` is its stored bytes with the secret's value cut, never a parsed
   struct encoded again, so a new `WorldMeta` field doesn't move it, and a space no parser would notice
   does. `c` is taken from memory so a checkpoint moves with an unsaved block, but `as_bytes` is exactly
-  what a save writes, and the restore hashes the files. `j` already was. **`b` is not settled:** see
+  what a save writes, and the restore hashes the files. `j` already was. `b` is gone: see `world.dat`
   below.
 - **Torn meta.** A restore refuses one as `invalid-checkpoint` before the load, and leaves the folder
   byte-identical. So does a lost meta with a damaged copy kept aside. A normal open keeps its recovery,
@@ -303,31 +303,62 @@ Measured or built on the game side. The sizes are from `checkpoint_size_at_the_b
   fixture goes through the same gate on bytes: a world at it holds 840 MB of chunks.
 - **The seal is a checksum, not a signature.** Ruled so: any authentication is the runner's, and nothing
   tells corruption from anything else.
+- **The `world.dat` gap is closed.** The manifest binds `world.dat` as one record, key `w`, over its stored
+  bytes, so all 56 fields of `WorldSave` are bound by one entry at any world size, and a field added to the
+  save is bound by being in the file. The `b` record, its digest of memory and its post-load special
+  standing are gone. A mutation test enumerates the fields from the type (a new field doesn't compile
+  until it has a row) and runs each through a real restore: another valid value, a flipped byte of its own,
+  its rows gone. `c`, `j`, `m` and `w` each also take a flipped byte, absence, another key's valid bytes and
+  an older value of their own. All `invalid-checkpoint`.
+- **Canonical bytes.** A server's save now writes the rows it takes from hash maps sorted by key, and the
+  ones from entity queries sorted by their bytes (`WorldSave::sort_unordered_rows`, the sort pass of §6
+  choice 4). That is the one change to what a normal save writes: the order of rows on a dedicated server's
+  or role cut's save. The format and every reader are the same, and a client's save is untouched.
+- **What moves the hash.** A table's digest is the persist's, so an unsaved table change doesn't move
+  `state_hash` until the persist that stores it, where `b` used to. A checkpoint of a later tick than its
+  persist is refused by the clock `world.dat` holds, since its digests can all match while its tables are stale.
+- **`pop_exposure` is in the volatile sections,** at 20 B a cell. It is in no save, so a bound record for it
+  would be a new thing a normal save writes.
+- **A restore writes nothing.** It opens through `world_open::open_bound_world`: `world.dat` only (never the
+  autosave), no joiner stage settled, no staged first save published, a torn chunk file no record binds
+  skipped where it lies. A bound `world.dat` this build only part-decodes is `invalid-checkpoint`, as is
+  one that doesn't read. What is left in the folder is settled by the restored world's next persist. A normal
+  open keeps every recovery it had. Still done on a restore that gets past the digests: the fsyncs of
+  `confirm_authority_durable` on a handed-over world, which change no bytes.
+- **Two value checks.** `read_layout` refuses evicted sections in a column not flagged evicted, and a corpse
+  must be at a cell in range. One check each in the shared reader, so `checkpoint` has them too.
 
 **Still open on the game side, not needing a Fray answer:**
 
-- **The `b` record has no stored bytes.** Its tables sit in `world.dat`, so its digest is still over a
-  canonical view of memory, compared after the load, and a new block-entity field still reads as a
-  mismatch. Ruling 2's stored-byte rule needs those tables to become bound records of their own. That is
-  the same work as the `world.dat` gap, so it goes with it rather than being done twice.
-- **`state_hash` doesn't cover all of `world.dat`.** The manifest doesn't bind its other tables and saved
-  entities: bounties, plots, market hubs, raids, Satoshi, village tables, hideouts, hostile acts, tamed
-  pets, carts and quest NPCs. Ruled: must close before acceptance 2.
+- **A handed-over world's `handover/` records aren't bound.** A restore of a world with a personal proof
+  reads `handover/` (the proof, and each participant's personal record through `load_or_bootstrap`), and the
+  manifest names none of them. Only a world that was handed over has them. No restore path uses one yet;
+  they go in the manifest, or such a world is refused, before `--keep-world` restores one.
 - **A corpse's living copy is matched, not identified.** A pet's row in `world.dat` was taken when it
   lived, and pets have no stable id, so a restore removes the nearest living mob of the corpse's kind and
   owner. With two alike, it may be the other one. A quest NPC's row isn't matched at all.
-- **The load's other recoveries can still write during a restore that gets past the digests:** publishing
-  joiners' records staged before a crash, keeping aside a torn chunk file no record binds, a partly
-  decoded `world.dat`. Each goes when `world.dat` is bound.
-- **Two value checks to tighten.** `read_layout` accepts evicted sections in a column not flagged evicted,
-  which no run writes, and such a world could later make a second copy of a section. A corpse's position
-  is checked as finite, not against the playable range. Each is one check in the shared reader, so
-  `checkpoint` gets it too.
 - **The cap and the world size.** A manifest entry is about 49 B, so the manifest alone reaches the cap
   near **21,000 non-empty chunks**; with the other volatile sections (about 130 KiB, plus 17 B per column)
   about **17,000**. Lava's queue sets how close a big load comes: 464,194 B at 0 joiners, 724,055 B at 2
   and 953,813 B at 8, which is 91% of the cap (§8), reached at about 550 columns loaded inside one drain.
   Ruled: the cap stays, and the layout, manifest and queue move into bound records.
+
+**For the Fray session, from closing the `world.dat` gap:**
+
+- **`world.dat` as one record against the record-value limit.** Ruling 2 limits a record to one batch (1 MiB
+  less headers). The file is 34,846 B in the two-joiner fixture, and it grows with block entities, plots and
+  plans, so a world with enough chests or blueprints passes the limit, and that is a module fault at the
+  batch, not a game refusal. Binding the tables under keys of their own would change what a normal save
+  writes (a file per table, or a split `world.dat`), which is outside this work, so it stopped there. The
+  game's proposal, when `--keep-world` is wired to a runner's store: split the file into fixed pieces under
+  `w`-prefixed keys bound by the record tree, so the stored bytes are unchanged and no piece passes the limit.
+  Unlike per-table keys, one changed row can then rewrite every later piece, so a `last` batch
+  still carries about the whole file: please say whether that is acceptable.
+- **`pop_exposure` is unbounded in the volatile image.** Nothing prunes it, and an entry past its decay still
+  holds its clock (a re-exposed cell must not start again). At 20 B it fills the 1 MiB cap at about 50,000
+  cells, roughly 15,000 to 25,000 deepslate blocks mined (estimate), and C3's moves don't reach it. It belongs in a
+  bound record once the runner's store exists, as that writes nothing new to a normal save. Until then it is
+  a cap the world can hit: `TooLarge`.
 
 **Answered without game code:** what a checkpoint binds (`calendar_id` is in, and two fresh worlds needn't
 agree); persist then checkpoint (one root per `last`).
@@ -374,9 +405,9 @@ drained water source: persist, checkpoint, restore into a new server, feed both 
 - `wild_mobs`, `tamed_entities`, `item_drops`, `projectiles`: **hecs ids change on restore**, and mob
   AI rolls hash the id. No ids are remapped. Wild mobs re-scatter, tamed ones and carts come from the
   save, and what lay on the ground or was in flight is gone.
-- `world_tables`: equal in the fixture, so printed and not promised. `pop_exposure` is in no save or
-  checkpoint (a cell mined after a restore rolls as fully decayed), and the rest reads back from
-  `world.dat`, which isn't canonical and isn't in the manifest (§6 names what `state_hash` misses).
+- `world_tables`: equal in the fixture, so printed and not promised, as hideout and raid counts follow the
+  mobs. The tables read back from `world.dat`, which the manifest binds, and `pop_exposure` is in the
+  volatile sections.
 - **Pending outputs are dropped:** `pending_item_grants`, `pending_kill_events`, `released_joiners` and
   `pending_sapling_drops` aren't carried. An item grant is value and not just output, so the slice 3
   runner checkpoints only after they drain.

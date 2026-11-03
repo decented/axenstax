@@ -7,7 +7,7 @@
 //!
 //! ```text
 //! magic         b"axenstax/authority-checkpoint\0"
-//! schema        u16 (2)
+//! schema        u16 (3)
 //! protocol      u32   PROTOCOL_VERSION
 //! save format   u32   SAVE_FORMAT_VERSION
 //! worldgen      u32   the world's generator version
@@ -67,8 +67,9 @@ use crate::server::GameServer;
 pub(crate) use manifest::StoredRecords;
 
 pub(crate) const CHECKPOINT_MAGIC: &[u8] = b"axenstax/authority-checkpoint\0";
-/// 2: pending deaths, and the meta digested as stored. Nothing relies on 1.
-pub(crate) const SCHEMA: u16 = 2;
+/// 3: `world.dat` bound as stored, and each cell's exposure clock. Nothing relies on
+/// an earlier one.
+pub(crate) const SCHEMA: u16 = 3;
 /// The session-image cap of migration v0.1 (handoff §6, choice 1).
 pub(crate) const MAX_CHECKPOINT_BYTES: usize = 1 << 20;
 
