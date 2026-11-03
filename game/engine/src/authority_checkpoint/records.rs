@@ -470,6 +470,16 @@ mod tests {
 
     use super::piece_key as key;
 
+    /// The runner's ceilings are reachable from the game, and what the game cuts to fits
+    /// under them: a record's key and a file's piece, with room for a batch of several.
+    #[test]
+    fn the_runners_batch_limits_are_reachable_and_the_records_fit_under_them() {
+        use fray_session::authority::{MAX_PERSIST_BATCH_BYTES, MAX_PERSIST_BATCH_ENTRIES, MAX_STORED_KEY_BYTES};
+        assert!(MAX_RECORD_KEY <= MAX_STORED_KEY_BYTES);
+        assert!(MAX_RECORD_BYTES < MAX_PERSIST_BATCH_BYTES);
+        assert!(MAX_PERSIST_BATCH_ENTRIES > 0);
+    }
+
     /// The schema's number: a change is a new schema, not a tuning. Under the runner's
     /// record-value limit of 1 MiB less headers.
     #[test]
