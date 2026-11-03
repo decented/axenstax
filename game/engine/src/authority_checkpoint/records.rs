@@ -255,10 +255,10 @@ pub(super) fn commit(world_dir: &Path, records: &[Stored], nodes: &[Stored]) -> 
     let bound: std::collections::BTreeSet<String> = records.iter().chain(nodes).map(|(key, _)| hex::encode(key)).collect();
     let entries = std::fs::read_dir(&dir).map_err(|e| format!("{} can't be listed ({e})", dir.display()))?;
     for entry in entries.flatten() {
-        if entry.file_name().to_str().is_none_or(|name| !bound.contains(name)) {
-            if let Err(e) = std::fs::remove_file(entry.path()) {
-                log::warn!("{}: a record nothing binds now wasn't removed: {e}", entry.path().display());
-            }
+        if entry.file_name().to_str().is_none_or(|name| !bound.contains(name))
+            && let Err(e) = std::fs::remove_file(entry.path())
+        {
+            log::warn!("{}: a record nothing binds now wasn't removed: {e}", entry.path().display());
         }
     }
     Ok(())
