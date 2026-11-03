@@ -1112,7 +1112,19 @@ impl World {
         self.chunks.get_mut(&(cx, cy, cz))
     }
 
+    /// A live copy of a section the evicted store also holds, which no game path
+    /// makes: for the test that a checkpoint refuses one.
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) fn force_live_chunk(&mut self, cx: i32, cy: i32, cz: i32, chunk: Chunk) {
+        self.chunks.insert((cx, cy, cz), chunk);
+    }
+
     pub fn insert_chunk(&mut self, cx: i32, cy: i32, cz: i32, chunk: Chunk) {
+        // A section has one home, and the evicted copy is the one a save keeps
+        // and a stream-in brings back (`persistable_chunks`, `restore_column`).
+        if self.evicted.contains_key(&(cx, cy, cz)) {
+            return;
+        }
         self.chunks.insert((cx, cy, cz), chunk);
     }
 

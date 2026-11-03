@@ -898,6 +898,8 @@ pub(crate) fn settle_pop_secret(world: &str, server: &mut crate::server::GameSer
             }
         }
     }
+    // Either arm may have changed the file (the load above repairs a torn one).
+    server.stored_records.note_meta(world);
 }
 
 /// Entry point dispatched from `main()` when `--server` is present.

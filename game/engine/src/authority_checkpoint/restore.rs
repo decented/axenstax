@@ -1,10 +1,13 @@
-//! `GameServer::restore_from_checkpoint`: verify, load the records through the
-//! existing load path, verify them against the manifest, apply the volatile
-//! sections. Nothing reaches the caller unless all of it holds, and a refusal
-//! changes nothing on disk: a folder whose load would make a handover's role cut
-//! is refused before the load.
+//! `GameServer::restore_from_checkpoint`, in the contract's order: the schema
+//! field, the seal, the remaining versions, the config binding, then the digest of
+//! every bound record as it lies on disk. Only then does the load run, so a record
+//! that doesn't match is refused before anything has parsed it, and before the
+//! load's keep-a-damaged-copy-aside recoveries could write. Then the layout, the
+//! volatile sections and a last check that it all encodes back to the same bytes.
 
 use super::codec::{Malformed, Reader};
+use super::manifest::Entry;
+use super::volatile::Volatile;
 use super::{volatile, AuthorityConfig, Header, RestoreError, AFTER_VERSIONS, HEADER_BYTES, MAX_CHECKPOINT_BYTES, SEAL_BYTES};
 use crate::server::GameServer;
 
@@ -28,6 +31,22 @@ fn world_name(world_dir: &std::path::Path) -> Result<String, RestoreError> {
     Ok(name.to_string())
 }
 
+/// Everything between the header and the seal, read and range-checked. The one
+/// reader of these bytes, used by `restore` and by `checkpoint` on its own output.
+pub(super) fn decode_body(body: &[u8], tick: u64) -> Result<(Volatile, Vec<Entry>), Malformed> {
+    let mut body = Reader::new(body);
+    let restored = volatile::read(&mut body)?;
+    restored.validate()?;
+    if restored.tick_counter() != tick {
+        return Err(Malformed("the header and the clock name different ticks"));
+    }
+    let manifest = super::manifest::read(&mut body)?;
+    if !body.is_empty() {
+        return Err(Malformed("bytes left over after the manifest"));
+    }
+    Ok((restored, manifest))
+}
+
 impl GameServer {
     /// Restore an authority from `checkpoint` and the records in `world_dir`,
     /// which must be the ones written by the save just before it. The errors
@@ -42,37 +61,32 @@ impl GameServer {
         checkpoint: &[u8],
         world_dir: &std::path::Path,
     ) -> Result<Self, RestoreError> {
+        super::check_schema(checkpoint)?;
         if checkpoint.len() > MAX_CHECKPOINT_BYTES {
             return Err(RestoreError::InvalidCheckpoint(format!("{} bytes is over the cap", checkpoint.len())));
         }
-        // The schema first: a newer checkpoint's seal and layout are not ours to
-        // read. Then the seal, so that damage to a version field reads as damage.
         let header = Header::read(checkpoint)?;
+        // The seal before the versions, so that damage to a version field reads
+        // as damage.
         super::check_seal(checkpoint)?;
         header.check_versions()?;
         header.check_config(config)?;
 
-        let mut body = Reader::new(&checkpoint[HEADER_BYTES..checkpoint.len() - SEAL_BYTES]);
-        let mut restored = volatile::read(&mut body)?;
-        restored.validate()?;
-        if restored.tick_counter() != header.tick {
-            return Err(RestoreError::InvalidCheckpoint("the header and the clock name different ticks".into()));
-        }
-        let manifest = super::manifest::read(&mut body)?;
-        if !body.is_empty() {
-            return Err(RestoreError::InvalidCheckpoint("bytes left over after the manifest".into()));
-        }
+        let (mut restored, manifest) = decode_body(&checkpoint[HEADER_BYTES..checkpoint.len() - SEAL_BYTES], header.tick)?;
 
         let name = world_name(world_dir)?;
         if crate::world_open::is_new_world(&name).map_err(RestoreError::Fault)? {
             return Err(RestoreError::InvalidCheckpoint(format!("world '{name}' holds no saved records")));
+        }
+        if let Some(why) = super::manifest::stored_mismatch(&manifest, world_dir).map_err(RestoreError::Fault)? {
+            return Err(RestoreError::InvalidCheckpoint(format!("the stored records and the manifest disagree: {why}")));
         }
         refuse_a_pending_role_cut(world_dir)?;
         let seed = u32::try_from(config.seed).map_err(|_| RestoreError::InvalidConfig("a seed past u32".into()))?;
         let mut server = GameServer::new(0, name, seed);
         // The world holds what its records and layout say, so the load generates
         // nothing: a column generated here could add to a table the manifest binds,
-        // and a good checkpoint would read as tampered.
+        // and a good checkpoint would read as a mismatch.
         server.render_distance = 0;
         server.initial_load_generating(false).map_err(RestoreError::Fault)?;
         if server.world.generator.version() != config.worldgen_version {
@@ -92,7 +106,9 @@ impl GameServer {
         if let Some(why) = super::manifest::first_mismatch(&manifest, &found) {
             return Err(RestoreError::InvalidCheckpoint(format!("the stored records and the manifest disagree: {why}")));
         }
+        let deaths = restored.take_deaths();
         restored.apply(&mut server);
+        super::deaths::apply(&deaths, &mut server).map_err(RestoreError::InvalidCheckpoint)?;
         reload_sidecars(&mut server);
 
         // Every field this module carries is back, and the server is the one the

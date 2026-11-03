@@ -270,53 +270,63 @@ the contract itself as changed.
 
 ### For the Fray session, from slice 2b
 
-Measured or built on the game side; each needs a Fray answer. The sizes are from
-`checkpoint_size_at_the_bench_world_sizes` (§8).
+Measured or built on the game side. The sizes are from `checkpoint_size_at_the_bench_world_sizes`
+(§8). Slice 3 (branch `keep-s3a`) has settled the ones marked below against the Tier-L rulings.
 
-- **The contract has no "not now" code.** While a mob death waits to be swept, `checkpoint` returns
-  `DeathsPending`, and the runner retries at the next tick boundary (choice 3). Should the contract
-  name this, or should it stay internal to the runner?
-- **The 1 MiB cap and the manifest.** A manifest entry is about 49 B, so the manifest alone reaches
-  the cap near **21,000 non-empty chunks**. With the other volatile sections as measured (about
-  130 KiB, plus 17 B per column), that is about **17,000**. A server save writes every non-empty
-  chunk it holds, so this is the held world and not the edited one. Past it, a checkpoint is an
-  error, not a truncation.
-- **Lava's queue still sets how close a big load comes to the cap.** The bench worlds now fit: 464,194 B
-  at 0 joiners, 724,055 B at 2 and 953,813 B at 8, which is 91% of the cap (§8). Slice 2b measured
-  2.85-4.99 MB before the fix (lava's queue alone was 2.66-4.73 MB): loading a column woke every lava
-  cell, about 708 entries a column. Now it wakes only the cells a wake can act on: touching water, over
-  air, or with air on a side (`LavaSystem::register_column_sources`). That is about 80-110 entries a
-  column, and the queue still drains at about 53 entries a second, so 289 columns take about 7 minutes
-  and not an hour. The queue is transient: while it is draining, joiners moving add to it, and across
-  the bench worlds the total grows about 2.2 KB per column, so **the cap is reached at about 550 columns
-  loaded inside one drain**. Past that a checkpoint is `TooLarge` until the queue falls, and the runner
-  retries. Fray may want to weigh in on that margin.
-- **What a checkpoint binds.** `state_hash` covers `calendar_id` as part of the slice 2a clock. It is
-  random on a real server but persisted, so two authorities opened from the same saved world agree.
-  Two authorities from two separate fresh worlds aren't the same world and needn't.
-- **Persist, then checkpoint.** The manifest describes the stored records from memory, so it is true
-  of the disk only straight after a commit. A runner that checkpoints later gets a refusal at restore.
-  Does that fit `Persist(batch)` (choice 2)?
-- **The seal is a checksum, not a signature.** Whoever can rewrite a checkpoint can reseal it. Any
-  authentication is the runner's.
-- **`state_hash` doesn't cover all of `world.dat`.** The manifest binds chunks, sidecars, the meta and
-  one record over block entities, drying racks, face attachments and block meta. It doesn't bind
-  `world.dat`'s other tables and saved entities: bounties, plots, market hubs, raids, Satoshi, village
-  tables, hideouts, hostile acts, tamed pets, carts and quest NPCs. Two authorities that differ only
-  there report the same hash, and an edit to them restores without complaint. This has to be settled
-  before Keep relies on the hash to compare authorities.
-- **A checkpoint from a previous build is refused until migration lands.** The `m` and `b` digests
-  hash a struct's encoding, so a new `WorldMeta` or block-entity field changes the digest of unchanged
-  records, and a restore reads that as tampering. No cross-version promise exists yet. When choice 10's
-  migration lands, this case should become `UnsupportedVersion`.
-- **A torn meta leaves that run unable to restore.** When `world_meta.json` exists but doesn't parse,
-  the load digests the defaults, then `open_world` repairs the file. The digest is stale for the rest
-  of the run, so its checkpoints are refused at restore.
-- **Two bounds a restore enforces that a run doesn't.** A section both live and evicted is refused,
-  because a save keeps one copy of a section. No server path reaches it today: a block write to an
-  evicted column goes to the store, and a stream-in restores before it generates. A body past
-  ±1,000,000 blocks, the `/tp` limit, is refused too. Walking there takes about 50 hours and nothing
-  stops it. Either way the checkpoint is written and its restore refused.
+**Settled in the game, 2026-11-03 (checkpoint schema 2; no save-format or protocol change):**
+
+- **"Not now": there is no such code.** `checkpoint` no longer refuses a pending death: each corpse
+  is in the bytes (`authority_checkpoint/deaths.rs`) and comes back as a corpse, and the restored
+  world's next death pass does what the uninterrupted one's does (credit, loot, cargo, hideout and
+  raid counts). Sweeping inside the tick wouldn't do: the pass is bounded at 32 a tick and stops while
+  the kill credit has nowhere to go. A save still waits for the pass, so the runner's `last` waits too.
+  The only refusals left for a server that owns its world are `TooLarge` and `Unrestorable` (below).
+- **Restore order.** Schema field, seal, remaining versions, config binding, record digests, and only
+  then the load. Any schema but this build's, older or newer, is `unsupported-version` whatever
+  follows it, the cap included. The old check for schema 0 as a bad checkpoint is gone. Bad magic stays
+  `invalid-checkpoint`: without it there is no schema field to read.
+- **Digests over stored bytes.** `m` is its stored bytes with the secret's value cut, never a parsed
+  struct encoded again, so a new `WorldMeta` field doesn't move it, and a space no parser would notice
+  does. `c` is taken from memory so a checkpoint moves with an unsaved block, but `as_bytes` is exactly
+  what a save writes, and the restore hashes the files. `j` already was. **`b` is not settled:** see
+  below.
+- **Torn meta.** A restore refuses one as `invalid-checkpoint` before the load, and leaves the folder
+  byte-identical. So does a lost meta with a damaged copy kept aside. A normal open keeps its recovery,
+  because without it every later save is refused; the digest is taken after it, again whenever the
+  server writes the file back and at each persist, so a run's digest can't go stale.
+- **Restore-only bounds.** `checkpoint` puts its own bytes through the decoder and range checks a
+  restore runs, so every limit is enforced at both ends by one piece of code: `Unrestorable`, no image.
+  That covers `MAX_LAYOUT_SECTIONS`, the live-and-evicted section, the body bound and every other value
+  check in `read_layout`, `Volatile::validate` and `players::read_all`. A tick holds bodies and spawns at
+  ±1,000,000 as at a wall, and `World::insert_chunk` won't make a second copy of an evicted section.
+  Tests: at-limit fixtures to the byte, and a seeded walk over the fixture's actions. The section cap's
+  fixture goes through the same gate on bytes: a world at it holds 840 MB of chunks.
+- **The seal is a checksum, not a signature.** Ruled so: any authentication is the runner's, and nothing
+  tells corruption from anything else.
+
+**Still open on the game side, not needing a Fray answer:**
+
+- **The `b` record has no stored bytes.** Its tables sit in `world.dat`, so its digest is still over a
+  canonical view of memory, compared after the load, and a new block-entity field still reads as a
+  mismatch. Ruling 2's stored-byte rule needs those tables to become bound records of their own. That is
+  the same work as the `world.dat` gap, so it goes with it rather than being done twice.
+- **`state_hash` doesn't cover all of `world.dat`.** The manifest doesn't bind its other tables and saved
+  entities: bounties, plots, market hubs, raids, Satoshi, village tables, hideouts, hostile acts, tamed
+  pets, carts and quest NPCs. Ruled: must close before acceptance 2.
+- **A corpse's living copy is matched, not identified.** A pet's row in `world.dat` was taken when it
+  lived, and pets have no stable id, so a restore removes the nearest living mob of the corpse's kind and
+  owner. With two alike, it may be the other one. A quest NPC's row isn't matched at all.
+- **The load's other recoveries can still write during a restore that gets past the digests:** publishing
+  joiners' records staged before a crash, keeping aside a torn chunk file no record binds, a partly
+  decoded `world.dat`. Each goes when `world.dat` is bound.
+- **The cap and the world size.** A manifest entry is about 49 B, so the manifest alone reaches the cap
+  near **21,000 non-empty chunks**; with the other volatile sections (about 130 KiB, plus 17 B per column)
+  about **17,000**. Lava's queue sets how close a big load comes: 464,194 B at 0 joiners, 724,055 B at 2
+  and 953,813 B at 8, which is 91% of the cap (§8), reached at about 550 columns loaded inside one drain.
+  Ruled: the cap stays, and the layout, manifest and queue move into bound records.
+
+**Answered without game code:** what a checkpoint binds (`calendar_id` is in, and two fresh worlds needn't
+agree); persist then checkpoint (one root per `last`).
 
 ## 7. Smallest next adapter slice (AxeNStax-only, no wire or save change)
 

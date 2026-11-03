@@ -112,3 +112,6 @@ pub(crate) mod authority_checkpoint; // Keep slice 2b: checkpoint and restore of
 mod authority_checkpoint_refusals; // Keep slice 2b: what they refuse, under which code.
 mod authority_checkpoint_resealed; // Keep slice 2b: bytes someone resealed, refused before they can hurt.
 mod authority_checkpoint_records; // Keep slice 2b: what a restore does with the stored records.
+mod authority_checkpoint_order; // Keep slice 3: restore order, digests over stored bytes, torn meta.
+mod authority_checkpoint_limits; // Keep slice 3: every restore limit enforced at checkpoint.
+mod authority_checkpoint_deaths; // Keep slice 3: a pending death is in the checkpoint.

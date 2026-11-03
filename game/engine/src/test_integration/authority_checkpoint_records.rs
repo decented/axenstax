@@ -18,7 +18,7 @@ use crate::save::WorldsRootGuard;
 use crate::test_harness::{TestConfig, TestHost};
 
 /// Every file under `dir`, with its bytes.
-fn folder_bytes(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+pub(super) fn folder_bytes(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     let mut out = BTreeMap::new();
     for entry in std::fs::read_dir(dir).expect("a folder").flatten() {
         if entry.metadata().expect("metadata").is_dir() {
@@ -76,7 +76,7 @@ fn a_restored_joiners_debt_stays_in_its_record() {
 }
 
 /// A world with a saved meta, as every real one has.
-fn fixture_with_meta(name: &str) -> TestHost {
+pub(super) fn fixture_with_meta(name: &str) -> TestHost {
     let mut meta = crate::save::WorldMeta::new(name);
     meta.seed = SEED;
     meta.worldgen_version = crate::biome::Generator::V2.version();

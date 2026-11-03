@@ -54,34 +54,40 @@ pub(crate) fn restore_pets(ecs: &mut hecs::World, pets: &[SavedTamedPet], local_
         }
     }
     for pet in pets {
-        let id = crate::entity::spawn_mob(ecs, pet.data.mob_type(), glam::Vec3::new(pet.x, pet.y, pet.z));
-        match &pet.data {
-            SavedTamedPetData::Wolf(data) => {
-                let mut data = data.clone();
-                data.sanitize_attack_state_for_persistence();
-                let _ = ecs.insert_one(id, data);
-            },
-            SavedTamedPetData::Nostrich(data) => { let _ = ecs.insert_one(id, data.clone()); },
-            SavedTamedPetData::Companion { data, .. } => { let _ = ecs.insert_one(id, data.clone()); },
-            SavedTamedPetData::Companion2 { data, state, .. } => {
-                let mut data = data.clone();
-                data.state = *state;
-                let _ = ecs.insert_one(id, data);
-            },
-            SavedTamedPetData::Steed { data, .. } => { let _ = ecs.insert_one(id, data.clone()); },
-            SavedTamedPetData::Steed2 { data, pack, .. } => {
-                let mut data = data.clone();
-                data.pack = pack.clone();
-                let _ = ecs.insert_one(id, data);
-            },
-            SavedTamedPetData::Steed3 { data, keeper, pack, .. } => {
-                let data = restored_steed(data, keeper, pack, local_bodies)?;
-                let _ = ecs.insert_one(id, data);
-            },
-            SavedTamedPetData::Authored { .. } => { let _ = ecs.insert_one(id, crate::entity::Authored); },
-        }
+        spawn_pet(ecs, pet, local_bodies)?;
     }
     Ok(())
+}
+
+/// One saved pet in the ECS, its cargo already validated or to be refused here.
+pub(crate) fn spawn_pet(ecs: &mut hecs::World, pet: &SavedTamedPet, local_bodies: bool) -> Result<hecs::Entity, String> {
+    let id = crate::entity::spawn_mob(ecs, pet.data.mob_type(), glam::Vec3::new(pet.x, pet.y, pet.z));
+    match &pet.data {
+        SavedTamedPetData::Wolf(data) => {
+            let mut data = data.clone();
+            data.sanitize_attack_state_for_persistence();
+            let _ = ecs.insert_one(id, data);
+        },
+        SavedTamedPetData::Nostrich(data) => { let _ = ecs.insert_one(id, data.clone()); },
+        SavedTamedPetData::Companion { data, .. } => { let _ = ecs.insert_one(id, data.clone()); },
+        SavedTamedPetData::Companion2 { data, state, .. } => {
+            let mut data = data.clone();
+            data.state = *state;
+            let _ = ecs.insert_one(id, data);
+        },
+        SavedTamedPetData::Steed { data, .. } => { let _ = ecs.insert_one(id, data.clone()); },
+        SavedTamedPetData::Steed2 { data, pack, .. } => {
+            let mut data = data.clone();
+            data.pack = pack.clone();
+            let _ = ecs.insert_one(id, data);
+        },
+        SavedTamedPetData::Steed3 { data, keeper, pack, .. } => {
+            let data = restored_steed(data, keeper, pack, local_bodies)?;
+            let _ = ecs.insert_one(id, data);
+        },
+        SavedTamedPetData::Authored { .. } => { let _ = ecs.insert_one(id, crate::entity::Authored); },
+    }
+    Ok(id)
 }
 
 #[cfg(test)]

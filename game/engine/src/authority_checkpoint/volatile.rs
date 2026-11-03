@@ -9,6 +9,7 @@
 //! - **Layout:** which chunks are live, which are evicted and which columns count
 //!   as loaded. A load holds every saved chunk live, so this is what puts the
 //!   stream-out state back (handoff §6, choice 11). Bytes stay in the records.
+//! - **Deaths:** corpses waiting to be swept (`deaths.rs`).
 //! - **Sims:** fire with its timers, water and lava (sources as the difference
 //!   from a rescan: an ocean's whole set is far past the cap, queues in order),
 //!   the leaf-decay queues, the update scheduler, the power flood and the
@@ -50,6 +51,7 @@ pub(super) struct Volatile {
     mains: Vec<Pos>,
     tapped: Vec<(Pos, u64)>,
     pub(super) players: Vec<ServerPlayer>,
+    deaths: Vec<super::deaths::Corpse>,
 }
 
 struct Modes {
@@ -104,7 +106,8 @@ pub(super) fn write(w: &mut Writer, s: &GameServer) -> Result<(), String> {
     write_streamer(w, s);
     write_layout(w, s)?;
     write_sims(w, s);
-    super::players::write_all(w, &s.players)
+    super::players::write_all(w, &s.players)?;
+    super::deaths::write(w, s)
 }
 
 /// Each volatile section's encoded size, for the size bench. The writer counts
@@ -189,6 +192,7 @@ pub(super) fn read(r: &mut Reader<'_>) -> Result<Volatile, Malformed> {
     let tapped: Vec<_> = (0..n).map(|_| Ok((r.pos()?, r.u64()?))).collect::<Result<_, _>>()?;
     strictly_increasing(&tapped, |c| c.0)?;
     let players = super::players::read_all(r)?;
+    let deaths = super::deaths::read(r)?;
     Ok(Volatile {
         clock,
         world_time_step,
@@ -211,6 +215,7 @@ pub(super) fn read(r: &mut Reader<'_>) -> Result<Volatile, Malformed> {
         mains,
         tapped,
         players,
+        deaths,
     })
 }
 
@@ -565,7 +570,15 @@ impl Volatile {
         if self.lava_slow >= crate::lava::SLOW_FACTOR {
             return Err(Malformed("a lava phase past its cycle"));
         }
+        if !self.deaths.iter().all(super::deaths::Corpse::is_placed) {
+            return Err(Malformed("a corpse that isn't anywhere"));
+        }
         Ok(())
+    }
+
+    /// The pending deaths, which `deaths::apply` puts back once the rest is in.
+    pub(super) fn take_deaths(&mut self) -> Vec<super::deaths::Corpse> {
+        std::mem::take(&mut self.deaths)
     }
 
     /// The world's chunks and loaded columns as the checkpoint names them, ready

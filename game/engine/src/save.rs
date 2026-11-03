@@ -1097,12 +1097,19 @@ fn tamed_mobs_to_saved_impl(ecs: &hecs::World) -> Result<Vec<SavedTamedPet>, Str
     if crate::sim_death::has_pending(ecs) {
         return Err(format!("{} Resume play briefly before saving again.", crate::sim_death::DEATHS_PENDING));
     }
+    pet_rows(ecs, None)
+}
+
+/// The saved rows of the mobs a save keeps, or of just `only` if it is one of them
+/// (a checkpoint's corpse). Dead or alive: the save's preflight above is what waits.
+pub(crate) fn pet_rows(ecs: &hecs::World, only: Option<hecs::Entity>) -> Result<Vec<SavedTamedPet>, String> {
     use crate::entity::{MobKind, Position};
     let mut out = Vec::new();
     // Tamed wolves.
-    for (_id, (pos, kind, data)) in
+    for (id, (pos, kind, data)) in
         ecs.query::<(&Position, &MobKind, &crate::wolf::WolfData)>().iter()
     {
+        if only.is_some_and(|only| only != id) { continue; }
         if kind.0 == crate::mob::MobType::Wolf && data.is_tamed() {
             // Attack states carry a raw hecs entity id + a session-local
             // tick deadline — neither survives a reload (see the doc
@@ -1119,9 +1126,10 @@ fn tamed_mobs_to_saved_impl(ecs: &hecs::World) -> Result<Vec<SavedTamedPet>, Str
         }
     }
     // Tamed nostriches.
-    for (_id, (pos, kind, data)) in
+    for (id, (pos, kind, data)) in
         ecs.query::<(&Position, &MobKind, &crate::nostrich::NostrichData)>().iter()
     {
+        if only.is_some_and(|only| only != id) { continue; }
         if kind.0 == crate::mob::MobType::Nostrich && data.is_tamed() {
             out.push(SavedTamedPet {
                 x: pos.0.x,
@@ -1135,9 +1143,10 @@ fn tamed_mobs_to_saved_impl(ecs: &hecs::World) -> Result<Vec<SavedTamedPet>, Str
     // The cargo pack (Task 11, 2026-07-06) is `serde(skip)` on `HorseData`
     // (wire-V1 frozen), so it's carried explicitly in the appended
     // `Steed3` variant carries the runtime keeper and marker-safe cargo.
-    for (_id, (pos, kind, data)) in
+    for (id, (pos, kind, data)) in
         ecs.query::<(&Position, &MobKind, &crate::horse_ai::HorseData)>().iter()
     {
+        if only.is_some_and(|only| only != id) { continue; }
         if data.is_kept()
             && matches!(
                 kind.0,
@@ -1161,9 +1170,10 @@ fn tamed_mobs_to_saved_impl(ecs: &hecs::World) -> Result<Vec<SavedTamedPet>, Str
     // so the live MobKind supplies the species to re-spawn as. The command
     // `state` is `serde(skip)` on CompanionData (wire-V1 frozen), so it is
     // carried explicitly in the appended `Companion2` variant.
-    for (_id, (pos, kind, data)) in
+    for (id, (pos, kind, data)) in
         ecs.query::<(&Position, &MobKind, &crate::companion::CompanionData)>().iter()
     {
+        if only.is_some_and(|only| only != id) { continue; }
         if data.is_tamed() {
             out.push(SavedTamedPet {
                 x: pos.0.x,
@@ -1183,6 +1193,7 @@ fn tamed_mobs_to_saved_impl(ecs: &hecs::World) -> Result<Vec<SavedTamedPet>, Str
     for (id, (pos, kind, _)) in
         ecs.query::<(&Position, &MobKind, &crate::entity::Authored)>().iter()
     {
+        if only.is_some_and(|only| only != id) { continue; }
         // A statue-authored steed which was later kept already has its
         // Steed3 record; a second Authored row would duplicate it on load.
         if ecs.get::<&crate::quest_npcs::QuestNpcId>(id).is_ok() { continue; }
@@ -1636,7 +1647,7 @@ pub(crate) fn check_blob_writable(path: &std::path::Path) -> Result<(), String> 
 
 /// True when `dir` holds a quarantined `<file>.corrupt-*` sibling of `file`.
 #[cfg(not(target_arch = "wasm32"))]
-fn has_quarantined_sibling(dir: &std::path::Path, file: &str) -> bool {
+pub(crate) fn has_quarantined_sibling(dir: &std::path::Path, file: &str) -> bool {
     let prefix = format!("{file}.corrupt-");
     fs::read_dir(dir)
         .map(|rd| {

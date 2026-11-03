@@ -63,8 +63,8 @@ pub(super) fn sign_in(h: &mut TestHost) {
     }
 }
 
-/// Run on until no mob death is waiting: a save and a checkpoint both refuse
-/// one (the runner's "next tick boundary", choice 3).
+/// Run on until no mob death is waiting: a save refuses one (the runner withholds
+/// its `last` while one is pending).
 fn settle(h: &mut TestHost) {
     while crate::sim_death::has_pending(&h.server.ecs) {
         let next = h.server.tick_counter + 1;
@@ -188,7 +188,7 @@ fn the_header_and_the_hash_are_as_specified() {
     };
     assert_eq!(CHECKPOINT_MAGIC, b"axenstax/authority-checkpoint\0");
     assert_eq!(take(CHECKPOINT_MAGIC.len()), CHECKPOINT_MAGIC);
-    assert_eq!(take(2), 1u16.to_le_bytes(), "schema");
+    assert_eq!(take(2), 2u16.to_le_bytes(), "schema");
     assert_eq!(take(4), crate::protocol::PROTOCOL_VERSION.to_le_bytes());
     assert_eq!(take(4), crate::save_format::SAVE_FORMAT_VERSION.to_le_bytes());
     assert_eq!(take(4), h.server.world.generator.version().to_le_bytes());

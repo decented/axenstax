@@ -242,7 +242,7 @@ fn more_players_than_a_server_holds_are_refused() {
         sp.server_simulated = true;
         h.server.players.push(sp);
     }
-    let bytes = h.server.checkpoint().expect("the slots fit the cap");
+    let bytes = h.server.checkpoint_ungated().expect("the slots fit the cap");
     assert_refused_for(&h, bytes, "258 slots", "more players");
 }
 
@@ -255,18 +255,18 @@ fn values_the_first_tick_would_overflow_on_are_refused() {
 
     let streamer = h.server.column_streamer.take();
     h.server.column_streamer = Some(crate::server_stream::ColumnStreamer::from_parts(2, 2, Some(vec![(i32::MAX, 0)])));
-    let bytes = h.server.checkpoint().unwrap();
+    let bytes = h.server.checkpoint_ungated().unwrap();
     assert_refused_for(&h, bytes, "a settled anchor", "anchor");
     h.server.column_streamer = streamer;
 
     h.server.fire.restore_cells(&[((i32::MAX, 110, 0), 1_000_000, 0)]);
-    let bytes = h.server.checkpoint().unwrap();
+    let bytes = h.server.checkpoint_ungated().unwrap();
     assert_refused_for(&h, bytes, "a burning cell", "cell");
     h.server.fire.restore_cells(&[]);
 
     let (view, _) = h.server.lava.checkpoint_view(&h.server.world, &h.server.loaded_columns);
     h.server.lava.restore_checkpoint(&h.server.world, &h.server.loaded_columns, &view, 255);
-    let bytes = h.server.checkpoint().unwrap();
+    let bytes = h.server.checkpoint_ungated().unwrap();
     assert_refused_for(&h, bytes, "lava's phase", "lava");
 }
 

@@ -2095,7 +2095,9 @@ and stays so: `StoredRecords::note_joiner` runs as each record lands in `joiners
 staging. `try_save` returns `Ok` only once the publish has finished, and a runner persists
 and then checkpoints only after `Ok`, so step 3 is behind every checkpoint. After a crash in steps 2-3,
 the load settles first and `scan_joiners` reads the result. A checkpoint older than that commit
-is refused as it is for any later save.
+is refused as it is for any later save. A persist also re-reads `world_meta.json` for its digest
+(`StoredRecords::note_meta`, its stored bytes with the PoP secret's value cut), as does the end of
+a load, after the torn-meta rebuild (Spec 01 §4.1.5).
 
 **Known windows, still open:**
 

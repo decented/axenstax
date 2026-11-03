@@ -3,7 +3,7 @@
 
 use super::authority_checkpoint::{fixture, persist_and_checkpoint, restore, SEED};
 use super::twin_run::{run_to, twin};
-use crate::authority_checkpoint::{seal, CheckpointError, RestoreError, CHECKPOINT_MAGIC, MAX_CHECKPOINT_BYTES};
+use crate::authority_checkpoint::{seal, CheckpointError, RestoreError, CHECKPOINT_MAGIC, MAX_CHECKPOINT_BYTES, SCHEMA};
 use crate::save::WorldsRootGuard;
 use crate::server::GameServer;
 use crate::test_harness::TestHost;
@@ -23,7 +23,7 @@ pub(super) fn assert_invalid_checkpoint(h: &TestHost, bytes: &[u8], what: &str) 
     }
 }
 
-fn assert_invalid_config(h: &TestHost, config: &crate::authority_checkpoint::AuthorityConfig, bytes: &[u8], what: &str) {
+pub(super) fn assert_invalid_config(h: &TestHost, config: &crate::authority_checkpoint::AuthorityConfig, bytes: &[u8], what: &str) {
     let dir = crate::save::world_dir(&h.server.world_name);
     match GameServer::restore_from_checkpoint(config, bytes, &dir).err() {
         Some(RestoreError::InvalidConfig(_)) => {}
@@ -35,20 +35,11 @@ fn assert_invalid_config(h: &TestHost, config: &crate::authority_checkpoint::Aut
 fn a_newer_schema_is_unsupported() {
     let (_root, h, mut bytes) = saved("keep-s2b-newer");
     let at = CHECKPOINT_MAGIC.len();
-    bytes[at..at + 2].copy_from_slice(&2u16.to_le_bytes());
+    bytes[at..at + 2].copy_from_slice(&(SCHEMA + 1).to_le_bytes());
     match restore(&h, &bytes).err() {
         Some(RestoreError::UnsupportedVersion(_)) => {}
         other => panic!("expected UnsupportedVersion, got {other:?}"),
     }
-}
-
-/// Schema 0 never existed: a bad checkpoint, not a future one.
-#[test]
-fn a_schema_that_never_was_is_invalid() {
-    let (_root, h, mut bytes) = saved("keep-s2b-schema-0");
-    let at = CHECKPOINT_MAGIC.len();
-    bytes[at..at + 2].copy_from_slice(&0u16.to_le_bytes());
-    assert_invalid_checkpoint(&h, &bytes, "schema 0");
 }
 
 #[test]
@@ -203,20 +194,6 @@ fn oversize_state_is_an_error_not_a_truncation() {
         other => panic!("expected TooLarge, got {:?}", other.map(|b| b.len())),
     }
     assert!(matches!(h.server.state_hash(), Err(CheckpointError::TooLarge { .. })));
-}
-
-#[test]
-fn pending_deaths_are_refused_until_the_next_tick() {
-    let _root = WorldsRootGuard::new("keep-s2b-deaths");
-    let mut h = twin(SEED, "ckpt-deaths", 0, 2);
-    let at = glam::Vec3::new(4.5, 101.0, 20.5);
-    let cow = crate::entity::spawn_mob(&mut h.server.ecs, crate::mob::MobType::Cow, at);
-    h.server.ecs.get::<&mut crate::combat::Health>(cow).unwrap().current = 0.0;
-    assert_eq!(h.server.checkpoint(), Err(CheckpointError::DeathsPending));
-    assert_eq!(h.server.state_hash(), Err(CheckpointError::DeathsPending));
-    let next = h.server.tick_counter + 1;
-    run_to(&mut h, next);
-    h.server.checkpoint().expect("the death was swept at the tick boundary");
 }
 
 #[test]

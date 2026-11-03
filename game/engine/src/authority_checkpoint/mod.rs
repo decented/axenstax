@@ -1,13 +1,13 @@
-//! Keep slice 2b — the authority's canonical checkpoint and its restore (Spec 01
-//! §4.1.5). A pure, bounded byte form of what a save doesn't hold, plus a digest
-//! manifest of what it does (handoff §6, choice 1). An API with tests: nothing in
-//! `--keep-world` calls it yet, and nothing here touches the pipe or the wire.
+//! Keep slices 2b and 3 — the authority's canonical checkpoint and its restore
+//! (Spec 01 §4.1.5). A pure, bounded byte form of what a save doesn't hold, plus a
+//! digest manifest of what it does (handoff §6, choice 1). An API with tests: nothing
+//! in `--keep-world` calls it yet, and nothing here touches the pipe or the wire.
 //!
 //! ## Layout, in order
 //!
 //! ```text
 //! magic         b"axenstax/authority-checkpoint\0"
-//! schema        u16 (1)
+//! schema        u16 (2)
 //! protocol      u32   PROTOCOL_VERSION
 //! save format   u32   SAVE_FORMAT_VERSION
 //! worldgen      u32   the world's generator version
@@ -15,7 +15,7 @@
 //! binding       [32]  SHA-256 of seed, worldgen, creative and difficulty
 //! pop key id    [16]  SHA256(b"axenstax/pop-key-id/v1\0" || pop_secret)[..16]
 //! tick          u64   the completed tick
-//! volatile            `volatile.rs`, then `players.rs`
+//! volatile            `volatile.rs`, then `players.rs`, then `deaths.rs`
 //! manifest            `manifest.rs`: sorted (record key, SHA-256)
 //! seal          [32]  SHA-256 of everything before it
 //! ```
@@ -25,12 +25,19 @@
 //! `-0.0` folded onto `0.0` (`codec.rs`). The hard cap is 1 MiB: past it a
 //! checkpoint is an error, never a shorter checkpoint.
 //!
-//! The seal isn't in the slice 2 spec's list. It makes "bad or tampered bytes"
-//! true of the volatile sections, which nothing else on disk can check. It is a
-//! checksum, not a signature: whoever can rewrite a checkpoint can reseal it.
+//! The seal isn't in the slice 2 spec's list. It lets a restore see damage to the
+//! volatile sections, which nothing else on disk can check. It is a checksum, not
+//! a signature, and nothing here tells one kind of damage from another: whatever
+//! doesn't match is `InvalidCheckpoint`.
 //!
 //! The secret itself is never in the bytes: only the key id, and the meta record
-//! is hashed with `pop_secret` removed.
+//! is hashed with the value of `pop_secret` cut from it.
+//!
+//! ## A checkpoint that can't be restored is never written
+//!
+//! `checkpoint` puts its own bytes through the decoder and range checks `restore`
+//! uses (`decode_body`), so each limit is enforced at both ends by one piece of
+//! code, and a limit added later is enforced at both by being added once.
 //!
 //! ## Observational
 //!
@@ -47,6 +54,7 @@
 #![cfg_attr(not(test), allow(dead_code))] // The API, not wired into `--keep-world` yet.
 
 mod codec;
+mod deaths;
 mod manifest;
 mod players;
 mod restore;
@@ -59,7 +67,8 @@ use crate::server::GameServer;
 pub(crate) use manifest::StoredRecords;
 
 pub(crate) const CHECKPOINT_MAGIC: &[u8] = b"axenstax/authority-checkpoint\0";
-pub(crate) const SCHEMA: u16 = 1;
+/// 2: pending deaths, and the meta digested as stored. Nothing relies on 1.
+pub(crate) const SCHEMA: u16 = 2;
 /// The session-image cap of migration v0.1 (handoff §6, choice 1).
 pub(crate) const MAX_CHECKPOINT_BYTES: usize = 1 << 20;
 
@@ -74,13 +83,13 @@ const SEAL_BYTES: usize = 32;
 /// Why no checkpoint is available.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum CheckpointError {
-    /// A mob's death is waiting to be swept. Retry at the next tick boundary
-    /// (choice 3). The contract has no "not now" code yet: handoff §6.
-    DeathsPending,
     /// The state doesn't fit the cap: nothing is cut to make it.
     TooLarge { bytes: usize },
     /// A lent server's world is its host client's, not its own.
     Lent,
+    /// The state breaks a limit `restore` enforces, so its restore would refuse:
+    /// no image is written (Spec 01 §4.1.5).
+    Unrestorable(String),
     Encode(String),
 }
 
@@ -100,16 +109,16 @@ pub(crate) struct AuthorityConfig {
 pub(crate) enum RestoreError {
     /// The binding or the key id doesn't match the config.
     InvalidConfig(String),
-    /// Bad or tampered bytes, or records that don't match the manifest.
+    /// Damaged bytes, or records that don't match the manifest.
     InvalidCheckpoint(String),
-    /// A newer schema or build than this one.
+    /// A schema this build can't read, or a newer build's versions.
     UnsupportedVersion(String),
     /// Anything else: the load itself failed.
     Fault(String),
 }
 
 /// SHA-256 over the canonical bytes of what a restore must agree on.
-fn config_binding(seed: u64, worldgen_version: u32, creative: bool, difficulty: crate::survival::Difficulty) -> [u8; 32] {
+pub(crate) fn config_binding(seed: u64, worldgen_version: u32, creative: bool, difficulty: crate::survival::Difficulty) -> [u8; 32] {
     let mut h = Sha256::new();
     h.update(seed.to_le_bytes());
     h.update(worldgen_version.to_le_bytes());
@@ -146,6 +155,15 @@ fn check_seal(bytes: &[u8]) -> Result<(), RestoreError> {
     Ok(())
 }
 
+/// The gate `checkpoint` puts its own bytes through: the decoder and the range
+/// checks a restore runs on them, so nothing they would refuse is written.
+pub(crate) fn refuse_unrestorable(bytes: &[u8]) -> Result<(), CheckpointError> {
+    let refused = |why: String| CheckpointError::Unrestorable(why);
+    let tick = Header::read(bytes).map_err(|e| refused(format!("{e:?}")))?.tick;
+    restore::decode_body(&bytes[HEADER_BYTES..bytes.len() - SEAL_BYTES], tick).map_err(|e| refused(e.0.to_string()))?;
+    Ok(())
+}
+
 /// The fields a checkpoint opens with.
 struct Header {
     protocol: u32,
@@ -157,19 +175,24 @@ struct Header {
     tick: u64,
 }
 
+/// The first thing a restore reads, whatever follows it: any schema but this
+/// build's, older or newer, is one whose layout, seal and cap aren't ours to judge.
+fn check_schema(bytes: &[u8]) -> Result<(), RestoreError> {
+    let mut r = codec::Reader::new(bytes);
+    if r.take(CHECKPOINT_MAGIC.len())? != CHECKPOINT_MAGIC {
+        return Err(RestoreError::InvalidCheckpoint("the magic is wrong".into()));
+    }
+    match r.u16()? {
+        SCHEMA => Ok(()),
+        other => Err(RestoreError::UnsupportedVersion(format!("schema {other}, and this build reads {SCHEMA}"))),
+    }
+}
+
 impl Header {
-    /// The magic, then the schema, then the rest: a newer schema is named as
-    /// such whatever follows it.
+    /// The fields after the schema, which [`check_schema`] has read.
     fn read(bytes: &[u8]) -> Result<Self, RestoreError> {
         let mut r = codec::Reader::new(bytes);
-        if r.take(CHECKPOINT_MAGIC.len())? != CHECKPOINT_MAGIC {
-            return Err(RestoreError::InvalidCheckpoint("the magic is wrong".into()));
-        }
-        match r.u16()? {
-            SCHEMA => {}
-            0 => return Err(RestoreError::InvalidCheckpoint("schema 0 never existed".into())),
-            newer => return Err(RestoreError::UnsupportedVersion(format!("schema {newer}, and this build reads {SCHEMA}"))),
-        }
+        r.take(CHECKPOINT_MAGIC.len() + SCHEMA_BYTES)?;
         Ok(Self {
             protocol: r.u32()?,
             save_format: r.u32()?,
@@ -199,6 +222,9 @@ impl Header {
         if pop_key_id(&config.pop_secret) != self.key_id {
             return Err(RestoreError::InvalidConfig("this config holds another Proof-of-Play key".into()));
         }
+        if u32::try_from(config.seed).is_err() {
+            return Err(RestoreError::InvalidConfig("a seed past u32".into()));
+        }
         Ok(())
     }
 }
@@ -209,6 +235,12 @@ pub(crate) fn manifest_len(server: &GameServer) -> Result<usize, String> {
     let mut w = codec::Writer::new();
     manifest::write(&mut w, &manifest::entries(server)?);
     Ok(w.len())
+}
+
+/// The manifest as `checkpoint` would write it (the stored-bytes tests).
+#[cfg(test)]
+pub(crate) fn manifest_entries(server: &GameServer) -> Result<Vec<(Vec<u8>, [u8; 32])>, String> {
+    manifest::entries(server)
 }
 
 /// Every part's encoded size, past the cap too (the size bench).
@@ -238,12 +270,19 @@ impl GameServer {
     /// This authority's state, in canonical bytes (see the module docs for the
     /// layout). Observational: no I/O, no mutation. Its manifest is true of the
     /// disk only straight after a save, so a runner persists, then checkpoints.
+    /// `TooLarge` is the state not fitting here and now; `Unrestorable` is a state
+    /// no restore would take. Neither ever leaves an image behind.
     pub(crate) fn checkpoint(&self) -> Result<Vec<u8>, CheckpointError> {
+        let mut bytes = self.image()?;
+        refuse_unrestorable(&bytes)?;
+        seal(&mut bytes);
+        Ok(bytes)
+    }
+
+    /// The bytes, its seal still to set. Past the gate only in `checkpoint`.
+    fn image(&self) -> Result<Vec<u8>, CheckpointError> {
         if self.lent {
             return Err(CheckpointError::Lent);
-        }
-        if crate::sim_death::has_pending(&self.ecs) {
-            return Err(CheckpointError::DeathsPending);
         }
         let config = self.authority_config();
         let mut w = codec::Writer::new();
@@ -263,7 +302,14 @@ impl GameServer {
         }
         manifest::write(&mut w, &manifest::entries(self).map_err(CheckpointError::Encode)?);
         w.raw(&[0; SEAL_BYTES]);
-        let mut bytes = w.finish().map_err(|bytes| CheckpointError::TooLarge { bytes })?;
+        w.finish().map_err(|bytes| CheckpointError::TooLarge { bytes })
+    }
+
+    /// What `checkpoint` won't hand over, for the tests that a restore also refuses
+    /// it whoever wrote it.
+    #[cfg(test)]
+    pub(crate) fn checkpoint_ungated(&self) -> Result<Vec<u8>, CheckpointError> {
+        let mut bytes = self.image()?;
         seal(&mut bytes);
         Ok(bytes)
     }

@@ -1495,7 +1495,11 @@ impl GameServer {
                 self.claim_remote_personal(proof.local_owner(), &proof)?;
             }
             #[cfg(not(target_arch = "wasm32"))]
-            self.stored_records.scan_joiners(&crate::save::world_dir(&self.world_name));
+            {
+                self.stored_records.scan_joiners(&crate::save::world_dir(&self.world_name));
+                // After `open_world`, whose recovery may have rewritten it.
+                self.stored_records.note_meta(&self.world_name);
+            }
             return Ok(());
         }
 
@@ -1535,7 +1539,10 @@ impl GameServer {
             p.player.reset_fall();
         }
         #[cfg(not(target_arch = "wasm32"))]
-        self.stored_records.scan_joiners(&crate::save::world_dir(&self.world_name));
+        {
+            self.stored_records.scan_joiners(&crate::save::world_dir(&self.world_name));
+            self.stored_records.note_meta(&self.world_name);
+        }
         Ok(())
     }
 
@@ -1574,7 +1581,7 @@ impl GameServer {
     fn load_meta_rules(&mut self) {
         let meta = crate::save::load_world_meta(&self.world_name);
         #[cfg(not(target_arch = "wasm32"))]
-        self.stored_records.note_meta(&self.world_name, &meta);
+        self.stored_records.note_meta(&self.world_name);
         self.set_play_mode(crate::play_mode::PlayMode::from_meta_str(&meta.game_mode));
         self.difficulty = crate::survival::Difficulty::from_meta_str(&meta.difficulty);
         self.world.apply_meta_rules(&meta);
@@ -1857,6 +1864,8 @@ impl GameServer {
             !self.lent || (self.column_refill_per_tick == 0 && self.column_streamer.is_none()),
             "a lent world must not be streamed or refilled by its server"
         );
+        // First, so nothing below streams round a body past the limit.
+        self.hold_bodies_in_range();
         // Review D2b MEDIUM-1 — before anything else this tick: a joiner who
         // left leaves no slot-keyed credit or grudge for its slot's next
         // occupant (on a lending host this is the host's real ECS).
@@ -2395,6 +2404,25 @@ impl GameServer {
         // landed above, its metabolism, a fall or its own report), is off
         // its mount before this tick's broadcast says where it is.
         self.end_dead_riders();
+        // And last, for whatever moved a body in between: a step, a shove, a seat.
+        self.hold_bodies_in_range();
+    }
+
+    /// Nothing holds a body past the playable limit (the one `/tp` clamps to): it
+    /// stops there as at a wall. Beyond it floats stop resolving blocks, its column
+    /// nears `i32`'s edge and a checkpoint can't name it (Spec 01 §4.1.5).
+    fn hold_bodies_in_range(&mut self) {
+        let limit = crate::commands::builtins::tp::MAX_COORD;
+        for sp in &mut self.players {
+            let (pos, velocity) = (&mut sp.player.pos, &mut sp.player.velocity);
+            for (at, speed) in [(&mut pos.x, &mut velocity.x), (&mut pos.y, &mut velocity.y), (&mut pos.z, &mut velocity.z)] {
+                if at.abs() > limit {
+                    *at = at.clamp(-limit, limit);
+                    *speed = 0.0;
+                }
+            }
+            sp.spawn_pos = sp.spawn_pos.clamp(glam::Vec3::splat(-limit), glam::Vec3::splat(limit));
+        }
     }
 
     /// MP-D2c-1 — a rider's death ends its ride, whatever killed it: the
@@ -3519,6 +3547,8 @@ impl GameServer {
         // Whichever way that went, the disk says whether this save's world.dat
         // committed, and so whether its sidecars publish or drop.
         let published = self.settle_joiner_stage();
+        // A persist binds what the disk then holds, however the meta came to change.
+        self.stored_records.note_meta(&wname);
         committed.and(published)
     }
 
