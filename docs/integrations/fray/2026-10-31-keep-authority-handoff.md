@@ -547,7 +547,11 @@ Limits of what does hold:
 - The production refusal of an inline manifest (`restore.rs`, under `#[cfg(test)]`) has no test of its own.
 - A pending death at every persist step means no commit until the interval escalation, because the death
   pass defers while a delivery queue is full (`sim_death.rs`). For the adapter's wiring.
-- Section cap: see the note on the 65,536-section restore below.
+- Section cap: a real restore past 65,536 sections has passed once, by `a_real_restore_past_65536_empty_sections`
+  (`#[ignore]`, run by name with `-- --ignored`): a fixture's own layout with 65,537 more empty live sections,
+  bound by the real tree, then a real restore and a re-encode to the same bytes. It took 5 s and a peak of about
+  1.6 GB resident on the shared machine, with nothing written to disk beyond the fixture; a real world of that
+  many non-empty sections holds about 840 MB of chunks, and has not been restored.
 
 ## 8. Tier-L measurements: measured facts vs estimates
 
