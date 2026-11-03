@@ -119,3 +119,4 @@ mod authority_checkpoint_mutation; // Keep slice 3: every field of the save is b
 mod authority_checkpoint_size; // Keep slice 3: the checkpoint's size doesn't follow the world's.
 mod authority_checkpoint_pieces; // Keep slice 3: world.dat in fixed pieces, and reads that fail.
 mod authority_checkpoint_builder; // Keep slice 3, ruling 1: the record set built from memory, equal to the disk.
+mod authority_checkpoint_lava; // Keep slice 3, ruling 1: lava records that don't shift as the queue drains.
