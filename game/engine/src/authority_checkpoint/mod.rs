@@ -89,7 +89,8 @@ pub(crate) use records::{FILE_PIECE_BYTES, MAX_RECORD_BYTES, Tree};
 
 pub(crate) const CHECKPOINT_MAGIC: &[u8] = b"axenstax/authority-checkpoint\0";
 /// 5: `world.dat` bound in fixed pieces, and all that grows with the world in stored
-/// records. Nothing relies on an earlier one.
+/// records. 6: lava's stable queue pieces, monotonic cursors and source sections.
+/// Nothing relies on an earlier one.
 pub(crate) const SCHEMA: u16 = 6;
 /// The session-image cap of migration v0.1 (handoff §6, choice 1).
 pub(crate) const MAX_CHECKPOINT_BYTES: usize = 1 << 20;
