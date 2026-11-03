@@ -278,7 +278,7 @@
         <p class="muted">On: only the npubs below may join.
           <button class="btn ghost" id="allowlist-off">Turn allowlist off</button></p>
       {% else %}
-        <p class="muted">Off: anyone the sign-in rule admits may join. Adding an npub turns it on.</p>
+        <p class="muted">Off: anyone the sign-in rule admits may join, unless the server has <code>AXENSTAX_WHITELIST</code> set, which keeps the allowlist on. Adding an npub turns it on.</p>
       {% endif %}
       <form class="addrow" data-add="allow">
         <input name="npub" placeholder="npub1…" autocomplete="off" />

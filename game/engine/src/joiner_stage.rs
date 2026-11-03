@@ -124,8 +124,13 @@ pub(crate) fn settle(world: &Path, commit: Commit, note: &mut dyn FnMut(&Path, &
     }
     // M-1: never written into a retired world.
     crate::handover::live::authority::open_guard(world).map_err(|r| r.0.to_string())?;
-    if is_committed(world, &staging, commit)? {
+    if let Some(matched) = committed_file(world, &staging, commit)? {
         log::warn!("{}: publishing joiners' records saved with this world.dat", world.display());
+        // The match proves the rename is visible, not that it is durable. Flush
+        // the directory holding that file before the first record is renamed in,
+        // so a published record can never outlast the commit it depends on.
+        let holder = Path::new(matched).parent().filter(|p| !p.as_os_str().is_empty());
+        sync_dir(&holder.map_or_else(|| world.to_path_buf(), |p| world.join(p)))?;
         publish(world, &staging, note)
     } else {
         log::warn!("{}: dropping joiners' records staged for a save that never committed", world.display());
@@ -133,22 +138,23 @@ pub(crate) fn settle(world: &Path, commit: Commit, note: &mut dyn FnMut(&Path, &
     }
 }
 
-fn is_committed(world: &Path, staging: &Path, commit: Commit) -> Result<bool, String> {
-    let Some(marker) = read_marker(staging)? else { return Ok(false) };
+/// The `world.dat` (relative to the world) whose digest the marker names, if any.
+fn committed_file(world: &Path, staging: &Path, commit: Commit) -> Result<Option<&'static str>, String> {
+    let Some(marker) = read_marker(staging)? else { return Ok(None) };
     let files: &[&str] = match commit {
         Commit::WorldDat => &["world.dat"],
         Commit::Autosave => &["autosave/world.dat"],
         Commit::Either => &["world.dat", "autosave/world.dat"],
     };
-    for file in files {
+    for &file in files {
         match fs::read(world.join(file)) {
-            Ok(bytes) if sha256(&bytes) == marker => return Ok(true),
+            Ok(bytes) if sha256(&bytes) == marker => return Ok(Some(file)),
             Ok(_) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(format!("{file} can't be read to settle {STAGED_JOINERS}/ ({e})")),
         }
     }
-    Ok(false)
+    Ok(None)
 }
 
 /// The digest the marker names. `None`: no marker, or not one, so a stage cut

@@ -92,7 +92,10 @@ pub fn host_declined(reason: super::wire::DeclineReason) -> &'static str {
              receive this world. Play has resumed."
         }
         R::NotReady => "The other player isn't signed in for online play, so they can't receive this world.",
-        R::Invalid => "The other player couldn't verify this offer against the host they joined, so they declined it.",
+        R::Invalid => {
+            "The other player couldn't verify this offer against the host they joined, so they declined it. If they joined \
+             on an earlier invite link, that is probably why."
+        }
     }
 }
 pub const RESUME_FAILED: &str = "The handover was cancelled, but the connection couldn't carry on. Join the world again.";

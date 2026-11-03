@@ -409,6 +409,14 @@ admitted: its owner keeps it, in that link's own handover context, until it expi
 There is no way to revoke an issued invite before expiry beyond this, or to remove a
 guest other than a Signet block.
 
+**A new link and handover.** A guest who joined by a link can receive or follow a handover only
+while that link's invitation is the host's current one: a handover is checked against the
+invitation the guest joined on, and a new link changes it (a new invitation is a new lineage,
+below). So after the host mints a new link for a second friend, the first friend's client declines
+a handover proposal, and the host is told the other player may have joined on an earlier link.
+Handing to the newest link's guest works. Whether a new link should change the invitation is an
+open owner decision.
+
 **Old mirror rows.** Builds before 2026-11-02 wrote `added_via: invite` rows at Kith,
 on both sides, and on a visit relabelled a real contact's mirror row as an invite row.
 `load_mirror` drops every such row and the next write leaves it off the disk. A

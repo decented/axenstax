@@ -1328,7 +1328,7 @@ pub(crate) fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> Result<(), S
         t.push(".tmp");
         PathBuf::from(t)
     };
-    write_atomic_via(path, bytes, &tmp)
+    write_atomic_via(path, bytes, &tmp, false)
 }
 
 /// [`write_atomic`] through a temp name no other writer uses: `<path>.<pid>.<n>.tmp`.
@@ -1344,7 +1344,7 @@ pub(crate) fn write_atomic_unique_tmp(path: &std::path::Path, bytes: &[u8]) -> R
         t.push(format!(".{}.{}.tmp", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
         PathBuf::from(t)
     };
-    let written = write_atomic_via(path, bytes, &tmp);
+    let written = write_atomic_via(path, bytes, &tmp, true);
     if written.is_err() {
         let _ = fs::remove_file(&tmp);
     }
@@ -1352,9 +1352,15 @@ pub(crate) fn write_atomic_unique_tmp(path: &std::path::Path, bytes: &[u8]) -> R
 }
 
 /// Write `bytes` to `tmp`, fsync, give it the mode of the file it is about to
-/// replace (a hand-tightened `0600` stays `0600`), and rename it over `path`.
+/// replace (a hand-tightened `0600` stays `0600`; see [`keep_mode`] for what a
+/// refused change does), and rename it over `path`.
 #[cfg(not(target_arch = "wasm32"))]
-fn write_atomic_via(path: &std::path::Path, bytes: &[u8], tmp: &std::path::Path) -> Result<(), String> {
+fn write_atomic_via(
+    path: &std::path::Path,
+    bytes: &[u8],
+    tmp: &std::path::Path,
+    strict_mode: bool,
+) -> Result<(), String> {
     use std::io::Write as _;
     // Handover late-save fence: nothing is written into a frozen world.
     crate::save_fence::check(path)?;
@@ -1365,10 +1371,43 @@ fn write_atomic_via(path: &std::path::Path, bytes: &[u8], tmp: &std::path::Path)
         crate::fsync::sync_written(&f).map_err(|e| format!("fsync {}: {e}", tmp.display()))?;
     }
     if let Ok(replaced) = fs::metadata(path) {
-        fs::set_permissions(tmp, replaced.permissions())
-            .map_err(|e| format!("set the mode of {}: {e}", tmp.display()))?;
+        keep_mode(tmp, &replaced.permissions(), strict_mode)?;
     }
     commit_rename(tmp, path)
+}
+
+#[cfg(all(not(target_arch = "wasm32"), test))]
+thread_local! {
+    /// Test seam: make every mode change on this thread fail, as a mount that refuses chmod does.
+    static REFUSE_CHMOD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Give `tmp` the mode of the file it replaces, only when the two differ. A mount
+/// that refuses the change must not stop a save, so it is a warning, unless
+/// `strict` (a policy file, whose hand-tightened mode is a promise): then it is
+/// an error and the file stays as it was.
+#[cfg(not(target_arch = "wasm32"))]
+fn keep_mode(tmp: &std::path::Path, want: &fs::Permissions, strict: bool) -> Result<(), String> {
+    if fs::metadata(tmp).is_ok_and(|have| have.permissions() == *want) {
+        return Ok(());
+    }
+    match set_mode(tmp, want.clone()) {
+        Ok(()) => Ok(()),
+        Err(e) if strict => Err(format!("set the mode of {}: {e}", tmp.display())),
+        Err(e) => {
+            log::warn!("could not keep the mode of the file replaced by {}: {e}", tmp.display());
+            Ok(())
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn set_mode(tmp: &std::path::Path, mode: fs::Permissions) -> std::io::Result<()> {
+    #[cfg(test)]
+    if REFUSE_CHMOD.with(|r| r.get()) {
+        return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "chmod refused (test)"));
+    }
+    fs::set_permissions(tmp, mode)
 }
 
 /// The rename that commits an atomic write, behind the late-save fence's
@@ -6148,6 +6187,66 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"newer");
         assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Stops every mode change on this thread for as long as it lives.
+    #[cfg(unix)]
+    struct ChmodRefused;
+    #[cfg(unix)]
+    impl ChmodRefused {
+        fn new() -> Self {
+            REFUSE_CHMOD.with(|r| r.set(true));
+            ChmodRefused
+        }
+    }
+    #[cfg(unix)]
+    impl Drop for ChmodRefused {
+        fn drop(&mut self) {
+            REFUSE_CHMOD.with(|r| r.set(false));
+        }
+    }
+
+    /// A mount that refuses chmod must not stop a world saving: the data is
+    /// what matters, and the mode is kept only where it can be.
+    #[cfg(unix)]
+    #[test]
+    fn a_world_save_succeeds_when_the_mode_cannot_be_kept() {
+        // 0o700 can never be the mode a new temp file gets, whatever the umask.
+        use std::os::unix::fs::PermissionsExt;
+        let _g = WorldsRootGuard::new("chmod_refused_world");
+        let dir = world_dir("w");
+        fs::create_dir_all(&dir).unwrap();
+        let world_dat = dir.join("world.dat");
+        fs::write(&world_dat, b"first").unwrap();
+        fs::set_permissions(&world_dat, fs::Permissions::from_mode(0o700)).unwrap();
+        let meta = dir.join("world_meta.json");
+        save_world_meta("w", &WorldMeta::new("w")).unwrap();
+        fs::set_permissions(&meta, fs::Permissions::from_mode(0o700)).unwrap();
+        let _refused = ChmodRefused::new();
+        write_atomic(&world_dat, b"second").expect("world.dat still saves");
+        assert_eq!(fs::read(&world_dat).unwrap(), b"second");
+        save_world_meta("w", &WorldMeta::new("w")).expect("the world's meta still saves");
+        assert!(fs::read_to_string(&meta).unwrap().contains("display_name"));
+        assert_eq!(fs::read_dir(&dir).unwrap().filter(|e| e.as_ref().unwrap().path().extension().is_some_and(|x| x == "tmp")).count(), 0);
+    }
+
+    /// A policy file's mode is a promise (a hand-tightened `0600`), so a write
+    /// that cannot keep it fails and leaves the file as it was.
+    #[cfg(unix)]
+    #[test]
+    fn a_policy_file_write_fails_rather_than_loosen_its_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let _g = WorldsRootGuard::new("chmod_refused_policy");
+        let dir = world_dir("__test_policy_mode_refused__");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("whitelist.txt");
+        fs::write(&path, "old").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        let _refused = ChmodRefused::new();
+        assert!(write_atomic_unique_tmp(&path, b"new").is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"old");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

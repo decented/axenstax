@@ -258,9 +258,9 @@ fn save_mark(path: &std::path::Path, mark: &ReleaseMark) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
     let tmp = path.with_extension("json.tmp");
     let body = serde_json::to_vec(mark).map_err(|e| format!("encode mark: {e}"))?;
-    let written = std::fs::File::create(&tmp).and_then(|mut f| {
+    let written = crate::fsync::open_written(std::fs::OpenOptions::new().create(true).truncate(true), &tmp).and_then(|mut f| {
         f.write_all(&body)?;
-        f.sync_all()
+        crate::fsync::sync_written(&f)
     });
     if let Err(e) = written.and_then(|()| std::fs::rename(&tmp, path)) {
         let _ = std::fs::remove_file(&tmp);

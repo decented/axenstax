@@ -509,3 +509,30 @@ fn a_fence_between_the_commit_and_the_publish_holds_the_stage_and_refuses_a_hand
     assert_eq!(saved_stone(KEYS[0]), 20);
     assert_eq!(saved_record_keys(&dir).map(|keys| keys.len()).map_err(|r| r.0), Ok(2));
 }
+
+/// The commit's directory is made durable before any record is renamed into
+/// place: a publish that became durable ahead of the `world.dat` it depends on
+/// would leave records ahead of the world after a power cut.
+#[test]
+fn a_publish_makes_the_commits_directory_durable_before_the_first_rename() {
+    for route in [Route::HostAutosave, Route::HostSave] {
+        let _root = WorldsRootGuard::new(&format!("stage-dirsync-{route:?}"));
+        let mut s = rig();
+        hold(&mut s, 3);
+        save_by(Route::HostSave, &s).unwrap();
+        hold(&mut s, 20);
+        cut_short(Cut::AfterCommit, || save_by(route, &s));
+        let dir = if route == Route::HostAutosave { world_dir(NAME).join("autosave") } else { world_dir(NAME) };
+        {
+            let fault = crate::fsync::tests::fail_directory_on_match(&dir, 1);
+            let settled = s.settle_joiner_stage();
+            assert!(settled.is_err(), "{route:?}: the commit's directory was flushed first, and that failed");
+            assert_eq!(fault.failures(), 1, "{route:?}: {} was flushed", dir.display());
+            assert_eq!(saved_stone(KEYS[0]), 3, "{route:?}: nothing was renamed in yet");
+            assert!(staging().exists(), "{route:?}: the stage waits for the next settle");
+        }
+        s.settle_joiner_stage().unwrap();
+        drop(s);
+        assert_pair(load(AutosavePolicy::Prefer), 20, &format!("{route:?}: the next settle publishes"));
+    }
+}

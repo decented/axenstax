@@ -1993,7 +1993,10 @@ Mitigation:
   `world.dat`, `world_meta.json` and the blobs are fsynced per file (`save::write_atomic`);
   chunk files are NOT (thousands per save made autosave a multi-second stall) — they use
   `write_atomic_nosync` plus ONE fsync of the `chunks/` directory, and are written BEFORE
-  `world.dat`, which is the save's commit point. A file that fails to decode is renamed to
+  `world.dat`, which is the save's commit point. A write that replaces a file gives the temp
+  file the replaced file's mode, and only when the two differ. If the mount refuses that
+  change, a world save still goes ahead with a warning; a policy file's write
+  (`write_atomic_unique_tmp`) fails instead, so a hand-tightened mode is never loosened. A file that fails to decode is renamed to
   `<file>.corrupt-<unix secs>` (`save::quarantine_corrupt`; never overwritten, a `-<n>`
   suffix on collision) and logged:
   - **`world_meta.json`**: a parse failure is NOT replaced with defaults (that used to
@@ -2057,7 +2060,9 @@ A save with no joiner record to save creates no `joiners.new/` and behaves as it
 
 **Recovery rule** (`joiner_stage::settle`), run before any sidecar is read: read the marker and
 compare it with the digest of the commit file. A match means the commit happened, so the
-publish is finished. Anything else (no marker, not a digest, another digest) means it didn't,
+publish is finished, after the folder holding the matched file (the world folder, or
+`autosave/`) is fsynced: a match proves the rename is visible, not that it is durable, and no
+record may be renamed in ahead of the commit it depends on. Anything else (no marker, not a digest, another digest) means it didn't,
 so `joiners.new/` is dropped. Both can be cut short and run again. A commit file that can't be
 read (other than missing) is an error and the stage is left alone: a failed read isn't a
 commit that never happened. It runs:
@@ -2099,10 +2104,8 @@ is refused as it is for any later save.
   ahead of `world.dat` and the sidecars, which do still match each other. The first save is
   whole (`chunks.new/`, §8.4). Not changed by this section.
 - **A joiner leaving.** `release_slot` writes that joiner's record at once, outside any save,
-  because the slot's state goes with it. Until the next commit (60 s by default on a dedicated
-  server or `--keep-world`, 5 minutes on a host) that record is ahead of `world.dat`, and a hard
-  crash in that time can reopen the world with an item in both places or in neither. A clean
-  stop saves, so it doesn't reach this.
+  because the slot's state goes with it. A record written outside a save can be ahead of
+  `world.dat` until the next commit. A clean stop saves, so it doesn't reach this.
 - **A host's rollback.** A host's autosave publishes into the one `joiners/` once it has
   committed. A host that then drops that autosave and reopens the last save, or a later open
   that ignores or fails to read it, gets `world.dat` older than the records published since.

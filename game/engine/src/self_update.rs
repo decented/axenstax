@@ -290,7 +290,7 @@ pub fn previous_path(target: &Path) -> PathBuf {
 /// its directory has been flushed). Failure is logged, not fatal: by the time
 /// this runs the new file is already in place.
 pub(crate) fn sync_dir(dir: &Path) {
-    match std::fs::File::open(dir).and_then(|d| d.sync_all()) {
+    match crate::fsync::sync_dir(dir) {
         Ok(()) => {}
         Err(e) => log::warn!("self-update: could not flush {}: {e}", dir.display()),
     }
@@ -330,8 +330,7 @@ pub fn install_over_with(
         perms.set_mode(0o755);
         std::fs::set_permissions(part, perms).map_err(|e| format!("make downloaded file executable: {e}"))?;
     }
-    std::fs::File::open(part)
-        .and_then(|f| f.sync_all())
+    crate::fsync::sync_file(part)
         .map_err(|e| format!("flush downloaded file to disk: {e}"))?;
 
     let previous = previous_path(target);

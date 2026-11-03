@@ -23,10 +23,15 @@ join it. Your computer is the server. Nothing runs on ours.
 3. That's it — you're hosting. Type `/online` in the game any time to see the
    link again, or `/online copy` to copy it.
 
-An invite lets **one person** into this world, for **two days** or until you stop
-hosting. Whoever uses it first owns it: they can come back with it if they drop
-out, and if they forward it, nobody else gets in. It doesn't make them your friend,
-and it doesn't work for your other worlds.
+An invite lets in **the first person who uses it**, into this world only. Send it
+to the person you mean, and only them: whoever uses it first owns it. They can come
+back with it if they drop out, and once they have used it, nobody else can get in with
+it. The link works for two days. Someone it has let in can stay until you stop hosting
+or block them. It doesn't make them your friend, and it doesn't work for your other
+worlds.
+
+If you hand the world to someone else to host, that host starts with no record of who
+used a link, so on their machine the first person to use it is the one it lets in.
 
 Want to invite someone else? Type `/online copy` for a new link once the first one
 has been used. Nobody new can use the old link, but the person it let in still can.
