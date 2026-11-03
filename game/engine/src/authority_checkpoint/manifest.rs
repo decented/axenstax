@@ -8,7 +8,8 @@
 //! | `b"c"` + `(cx, cy, cz)` | a non-empty chunk, the 8,704 B a save writes | memory |
 //! | `b"h"` + path | a handed-over world's `handover/` or `participants/` file, as stored | [`StoredRecords`] |
 //! | `b"j"` + file name | a joiner's sidecar, as stored | [`StoredRecords`] |
-//! | `b"l"`, `b"q"`, `b"p"` + piece | the layout, lava queue and exposure clocks | memory |
+//! | `b"l"`, `b"q"`, `b"p"`, `b"f"`, `b"s"`, `b"u"`, `b"k"` + piece | the layout, lava queue, exposure clocks, water, cell sims, player slots and corpses | memory |
+//! | `b"t"` + prefix | a record of the manifest tree itself, which names others the same way | memory |
 //! | `b"m"` | the world's meta as stored, the value of `pop_secret` cut | [`StoredRecords`] |
 //! | `b"w"` + piece | `world.dat` as stored, in fixed pieces: every table of `WorldSave` | [`StoredRecords`] |
 //!
@@ -91,7 +92,9 @@ impl StoredRecords {
                 value
             }
             Err(e) => {
-                log::error!("world '{world}': the checkpoint can't bind {what}: {e}");
+                // A normal save goes on regardless; only a checkpoint or an authority's
+                // persist stops, and it says why (`why_unbindable`).
+                log::warn!("world '{world}': the checkpoint can't bind {what}: {e}");
                 unreadable.insert(what, e);
                 T::default()
             }
@@ -130,7 +133,8 @@ impl StoredRecords {
     /// Whatever sidecars the world folder holds: at load, including the records
     /// of joiners not connected now.
     pub(crate) fn scan_joiners(&mut self, world_dir: &std::path::Path) {
-        let joiners = stored_sidecars(world_dir);
+        let world = world_dir.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+        let joiners = self.noted(world, "its sidecars", stored_sidecars(world_dir));
         *self.joiners.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner) = joiners;
     }
 
@@ -155,26 +159,27 @@ impl StoredRecords {
 }
 
 /// Every sidecar in a world's `joiners/`, as its file holds it, by file name.
-fn stored_sidecars(world_dir: &Path) -> BTreeMap<String, [u8; 32]> {
+/// `Err`: one that can't be read, which a restore would then report as not in the
+/// manifest though nothing is wrong with it.
+fn stored_sidecars(world_dir: &Path) -> Result<BTreeMap<String, [u8; 32]>, String> {
     let mut joiners = BTreeMap::new();
-    if let Ok(entries) = std::fs::read_dir(world_dir.join("joiners")) {
-        for entry in entries.flatten() {
-            let Ok(name) = entry.file_name().into_string() else { continue };
-            if !is_sidecar_name(&name) {
-                continue;
-            }
-            let read = std::fs::File::open(entry.path())
-                .map_err(|e| e.to_string())
-                .and_then(|file| crate::save::read_bounded(file, crate::joiner_save::MAX_JOINER_SAVE_BYTES));
-            match read {
-                Ok(bytes) => {
-                    joiners.insert(name, sha256(&bytes));
-                }
-                Err(e) => log::warn!("Sidecar {name} left out of the checkpoint's records: {e}"),
-            }
+    let entries = match std::fs::read_dir(world_dir.join("joiners")) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(joiners),
+        Err(e) => return Err(format!("joiners/ can't be listed ({e})")),
+    };
+    for entry in entries.flatten() {
+        let Ok(name) = entry.file_name().into_string() else { continue };
+        if !is_sidecar_name(&name) {
+            continue;
         }
+        let bytes = std::fs::File::open(entry.path())
+            .map_err(|e| e.to_string())
+            .and_then(|file| crate::save::read_bounded(file, crate::joiner_save::MAX_JOINER_SAVE_BYTES))
+            .map_err(|e| format!("sidecar {name}: {e}"))?;
+        joiners.insert(name, sha256(&bytes));
     }
-    joiners
+    Ok(joiners)
 }
 
 /// Every record a restore of a handed-over world reads: all `open_guard` and `proof`
@@ -253,7 +258,7 @@ pub(super) fn verify_stored(wanted: &[Entry], world_dir: &Path) -> Result<StateR
             Err(e) => return Err(RestoreError::Fault(format!("{} can't be read ({e})", file.display()))),
         }
     }
-    for (name, digest) in stored_sidecars(world_dir) {
+    for (name, digest) in stored_sidecars(world_dir).map_err(RestoreError::Fault)? {
         let mut key = vec![b'j'];
         key.extend_from_slice(name.as_bytes());
         found.push((key, digest));

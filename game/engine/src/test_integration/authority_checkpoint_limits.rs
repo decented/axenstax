@@ -87,6 +87,26 @@ fn a_tick_holds_a_body_at_the_limit() {
     h.server.checkpoint().expect("a held body checkpoints");
 }
 
+/// A coordinate that isn't a number goes back to the spawn, so a body never stays where no
+/// checkpoint can name it.
+#[test]
+fn a_tick_returns_a_body_that_is_not_a_number_to_its_spawn() {
+    let (_root, mut h) = host("keep-s3-body-nan");
+    {
+        let sp = &mut h.server.players[0];
+        sp.spawn_pos = Vec3::new(12.5, 100.0, -7.5);
+        sp.player.pos = Vec3::new(f32::NAN, 100.0, f32::INFINITY);
+        sp.player.velocity = Vec3::new(f32::NAN, 0.0, 3.0);
+    }
+    h.server.hold_bodies_in_range();
+    let sp = &h.server.players[0];
+    assert_eq!((sp.player.pos.x, sp.player.pos.z), (12.5, -7.5), "{:?}", sp.player.pos);
+    assert_eq!(sp.player.pos.y, 100.0);
+    assert_eq!((sp.player.velocity.x, sp.player.velocity.z), (0.0, 0.0), "{:?}", sp.player.velocity);
+    h.server.tick();
+    h.server.checkpoint().expect("a body that was not a number checkpoints once held");
+}
+
 // ---- Bounds on a section ----
 
 fn evicted_column(h: &mut TestHost) -> (i32, i32, i32) {

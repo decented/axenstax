@@ -2596,7 +2596,7 @@ mod tests {
         // CP20 (step 3, DECIDED): we can't prove it is a leftover rather
         // than the player's copy, so it is never deleted either, and the
         // lobby shows no line for it; the log says so once (a minute).
-        crate::save::copy_dir_recursive(&root.join("harbour_town"), &working, None).unwrap();
+        crate::save::copy_dir_recursive(&root.join("harbour_town"), &working, &[]).unwrap();
         for _ in 0..2 {
             assert_eq!(promote_activated_imports(&imports, &root), Default::default(), "a world was moved in twice");
             assert!(working.join("handover").exists(), "the hand-made twin was deleted");
@@ -2632,7 +2632,7 @@ mod tests {
         activate_import(&imports, &working, t);
         assert_eq!(promote_until_moved(&imports).moved, vec!["still_pond".to_owned()]);
         let root = crate::save::worlds_root();
-        crate::save::copy_dir_recursive(&root.join("still_pond"), &working, None).unwrap();
+        crate::save::copy_dir_recursive(&root.join("still_pond"), &working, &[]).unwrap();
         let ledger = crate::handover::ledger::Ledger::install();
         // Lobby entry: the count first, then the entry pass and the lines.
         let now = std::time::Instant::now();

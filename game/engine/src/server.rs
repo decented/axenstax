@@ -1559,7 +1559,7 @@ impl GameServer {
             self.stored_records.scan_joiners(&crate::save::world_dir(&self.world_name));
             self.stored_records.note_meta(&self.world_name);
             self.stored_records.note_world_dat(&self.world_name);
-                self.stored_records.note_handover(&self.world_name);
+            self.stored_records.note_handover(&self.world_name);
         }
         Ok(())
     }
@@ -2428,18 +2428,37 @@ impl GameServer {
 
     /// Nothing holds a body past the playable limit (the one `/tp` clamps to): it
     /// stops there as at a wall. Beyond it floats stop resolving blocks, its column
-    /// nears `i32`'s edge and a checkpoint can't name it (Spec 01 §4.1.5).
-    fn hold_bodies_in_range(&mut self) {
+    /// nears `i32`'s edge and a checkpoint can't name it (Spec 01 §4.1.5). A
+    /// coordinate that isn't a number (a comparison with the limit says nothing of it)
+    /// goes back to the body's spawn, with that axis at rest.
+    pub(crate) fn hold_bodies_in_range(&mut self) {
         let limit = crate::commands::builtins::tp::MAX_COORD;
         for sp in &mut self.players {
+            let mut spawn = sp.spawn_pos.to_array();
+            for c in &mut spawn {
+                if !c.is_finite() {
+                    *c = 0.0;
+                }
+            }
+            sp.spawn_pos = glam::Vec3::from_array(spawn).clamp(glam::Vec3::splat(-limit), glam::Vec3::splat(limit));
+            let spawn = sp.spawn_pos;
             let (pos, velocity) = (&mut sp.player.pos, &mut sp.player.velocity);
-            for (at, speed) in [(&mut pos.x, &mut velocity.x), (&mut pos.y, &mut velocity.y), (&mut pos.z, &mut velocity.z)] {
-                if at.abs() > limit {
+            for (at, speed, home) in [
+                (&mut pos.x, &mut velocity.x, spawn.x),
+                (&mut pos.y, &mut velocity.y, spawn.y),
+                (&mut pos.z, &mut velocity.z, spawn.z),
+            ] {
+                if !at.is_finite() {
+                    *at = home;
+                    *speed = 0.0;
+                } else if at.abs() > limit {
                     *at = at.clamp(-limit, limit);
                     *speed = 0.0;
                 }
+                if !speed.is_finite() {
+                    *speed = 0.0;
+                }
             }
-            sp.spawn_pos = sp.spawn_pos.clamp(glam::Vec3::splat(-limit), glam::Vec3::splat(limit));
         }
     }
 

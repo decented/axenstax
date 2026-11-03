@@ -5,7 +5,9 @@
 
 use super::authority_checkpoint::{fixture, persist_and_checkpoint, restore, SEED};
 use super::twin_run::{run_to, twin};
-use crate::authority_checkpoint::{commit_and_read_bound, layout_sections_read, section_sizes, tree_shape, MAX_CHECKPOINT_BYTES, MAX_RECORD_BYTES};
+use crate::authority_checkpoint::{
+    commit_and_read_bound, layout_record, layout_sections_read, rebind_layout, section_sizes, tree_shape, MAX_CHECKPOINT_BYTES, MAX_RECORD_BYTES,
+};
 use crate::fluids::FluidCheckpoint;
 use crate::save::{world_dir, WorldsRootGuard};
 use crate::world::LAYOUT_COLUMN_SECTIONS;
@@ -178,6 +180,43 @@ fn a_world_past_65536_sections_commits_and_restores_its_layout_and_manifest() {
     assert_eq!(hex::encode(&tree.top.0), "74", "the checkpoint names one digest whatever the size");
 }
 
+/// A real restore of a world whose layout names 65,537 sections that hold nothing, past
+/// the old limit of 65,536: a small fixture's own layout with 3,641 columns of empty
+/// live sections added, bound by the real tree, then restored for real. Each empty
+/// section is conjured on restore (about 12.8 KB), so this holds about 840 MB; it is
+/// ignored so a gate on a shared machine doesn't build it, and run by name with
+/// `--ignored` where there are 16 GB of disk and 5 GB of memory to spare.
+#[test]
+#[ignore]
+fn a_real_restore_past_65536_empty_sections() {
+    let _root = WorldsRootGuard::new("keep-s3a-65537");
+    let mut h = fixture("ckpt-65537", 0);
+    run_to(&mut h, 5);
+    let bytes = persist_and_checkpoint(&mut h);
+    let mut layout = layout_record(&h.server);
+    let base = u32::from_le_bytes(layout[..4].try_into().unwrap());
+    let (columns, first) = (3_641u32, 10_000i32);
+    layout[..4].copy_from_slice(&(base + columns).to_le_bytes());
+    let mut named = 0u32;
+    for i in 0..columns {
+        // The last column holds one section fewer: 3,640 of 18 and one of 17 is 65,537.
+        let live = if i + 1 == columns { LAYOUT_COLUMN_SECTIONS & (LAYOUT_COLUMN_SECTIONS - 1) } else { LAYOUT_COLUMN_SECTIONS };
+        named += live.count_ones();
+        layout.extend_from_slice(&(first + i as i32).to_le_bytes());
+        layout.extend_from_slice(&0i32.to_le_bytes());
+        layout.push(0);
+        layout.extend_from_slice(&live.to_le_bytes());
+        layout.extend_from_slice(&0u32.to_le_bytes());
+    }
+    assert_eq!(named, 65_537);
+    assert!(layout_sections_read(&layout).unwrap() >= 65_537, "the layout reads past the old limit");
+    let crafted = rebind_layout(&h.server, &bytes, layout);
+    let back = restore(&h, &crafted).unwrap_or_else(|e| panic!("restores past 65,536 sections: {e:?}"));
+    let held: u32 = back.world.chunk_layout().unwrap().iter().map(|c| c.live_sections.count_ones() + c.evicted_sections.count_ones()).sum();
+    assert!(held >= 65_537, "{held} sections");
+    assert_eq!(back.checkpoint().expect("again"), crafted);
+}
+
 /// The form a fixture may use, which the module never writes.
 #[test]
 fn an_inline_manifest_restores_in_a_fixture() {
@@ -221,6 +260,22 @@ fn a_world_never_run_as_an_authority_gains_no_new_file() {
     run_to(&mut h, 5);
     h.server.try_save().expect("saves");
     assert!(!world_dir("ckpt-no-file").join("authority").exists());
+}
+
+/// A fork is a new world: it takes the source's chunks and tables and none of the
+/// records that bind them, which name the source's players.
+#[test]
+fn a_fork_does_not_carry_the_authoritys_records() {
+    let _root = WorldsRootGuard::new("keep-s3a-fork");
+    let mut h = fixture("ckpt-fork", 1);
+    run_to(&mut h, 5);
+    persist_and_checkpoint(&mut h);
+    assert!(world_dir("ckpt-fork").join("authority").is_dir(), "the source has its records");
+    let forked = crate::save::fork_world("ckpt-fork", "ckpt-fork").expect("forks");
+    let copy = world_dir(&forked);
+    assert!(copy.join("world.dat").is_file(), "the fork has the tables");
+    assert!(!copy.join("authority").exists(), "the fork copied the authority's records");
+    assert!(world_dir("ckpt-fork").join("authority").is_dir(), "the source keeps them");
 }
 
 /// The authority's persist writes the records it binds.
