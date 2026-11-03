@@ -30,6 +30,12 @@ fn chunk_key(cx: i32, cy: i32, cz: i32) -> Vec<u8> {
     key
 }
 
+fn seed_lava_records(h: &mut TestHost) {
+    // A source differing from a rescan and a pending retraction exercise both families.
+    h.server.lava.add_source(1, 300, 1);
+    h.server.lava.queue_for_test(&[(1, 300, 1, 0)], &[(2, 300, 2)]);
+}
+
 /// A save writes `world.dat` and every chunk file as the plain encoder gives them, the
 /// first time and after.
 #[test]
@@ -63,6 +69,7 @@ fn the_builders_set_is_what_a_persist_writes() {
     let mut h = fixture("ckpt-equal", 2);
     for tick in [5, 12] {
         run_to(&mut h, tick);
+        seed_lava_records(&mut h);
         persist_and_checkpoint(&mut h);
         let dir = world_dir("ckpt-equal");
         let set = h.server.build_record_set(None, &h.server.stored_records.bound_keys()).expect("builds");
@@ -86,7 +93,10 @@ fn the_builders_set_is_what_a_persist_writes() {
         }
         // authority/: exactly the state pieces and the tree
         let held: BTreeSet<_> = std::fs::read_dir(dir.join("authority")).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
-        let stored: Vec<_> = set.records.iter().filter(|r| matches!(r.key[0], b'l' | b'q' | b'p' | b'f' | b's' | b'u' | b'k' | b't')).collect();
+        let stored: Vec<_> = set.records.iter().filter(|r| matches!(r.key[0], b'l' | b'q' | b'r' | b'x' | b'p' | b'f' | b's' | b'u' | b'k' | b't')).collect();
+        for family in [b'r', b'x'] {
+            assert!(stored.iter().any(|r| r.key[0] == family && !r.value.is_empty()), "the fixture exercises {}", family as char);
+        }
         assert_eq!(held, stored.iter().map(|r| hex::encode(&r.key)).collect::<BTreeSet<_>>(), "the files are the set");
         for r in stored {
             assert_eq!(std::fs::read(record_file(&dir, &r.key)).unwrap(), r.value);
@@ -147,12 +157,13 @@ fn the_keys_are_of_known_families_and_only_two_carry_a_persona() {
     let _root = WorldsRootGuard::new("keep-s3d-keys");
     let mut h = fixture("ckpt-keys", 2);
     run_to(&mut h, 5);
+    seed_lava_records(&mut h);
     persist_and_checkpoint(&mut h);
     let set = h.server.build_record_set(None, &BTreeSet::new()).expect("builds");
     let personas: Vec<[u8; 32]> = h.server.players.iter().filter_map(|sp| sp.verified_pubkey).collect();
     assert!(!personas.is_empty());
     for key in set.keys() {
-        assert!(b"cdhjlmqpfstuwk".contains(&key[0]) || key[0] == b'k', "{key:?}");
+        assert!(b"cdhjlmqrxpfstuwk".contains(&key[0]), "{key:?}");
         if matches!(key[0], b'j' | b't') {
             continue;
         }

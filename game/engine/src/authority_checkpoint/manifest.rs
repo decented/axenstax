@@ -8,7 +8,9 @@
 //! | `b"c"` + `(cx, cy, cz)` | a non-empty chunk, the 8,704 B a save writes | memory |
 //! | `b"h"` + path | a handed-over world's `handover/` or `participants/` file, as stored | [`StoredRecords`] |
 //! | `b"j"` + file name | a joiner's sidecar, as stored | [`StoredRecords`] |
-//! | `b"l"`, `b"q"`, `b"r"`, `b"p"`, `b"f"`, `b"s"`, `b"u"`, `b"k"` + piece | the layout, lava queue, exposure clocks, water, cell sims, player slots and corpses | memory |
+//! | `b"l"`, `b"p"`, `b"f"`, `b"s"`, `b"u"`, `b"k"` + piece | the layout, exposure clocks, water, cell sims, player slots and corpses | memory |
+//! | `b"q"`, `b"r"` + piece | lava's spread and retract queues, at stable positions | memory |
+//! | `b"x"` + section | lava's source differences, by 16-cube section | memory |
 //! | `b"t"` + prefix | a record of the manifest tree itself, which names others the same way | memory |
 //! | `b"m"` | the world's meta as stored, the value of `pop_secret` cut | [`StoredRecords`] |
 //! | `b"w"` + piece | `world.dat` as stored, in fixed pieces: every table of `WorldSave` | [`StoredRecords`] |

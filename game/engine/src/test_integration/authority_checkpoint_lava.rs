@@ -1,6 +1,6 @@
 //! Keep slice 3, ruling 1: the lava queue's records don't shift as it drains, so what a
-//! tick changes of them is small and a `last` batch fits at any queue length (Tier-L
-//! rulings, section 4 item 3).
+//! tick changes of them stays small in the queue-drain fixtures (Tier-L rulings,
+//! section 4 item 3). The adapter must still withhold `last` if the full dirty set is too big.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -65,7 +65,7 @@ fn step(h: &mut TestHost) {
     run_to(h, next);
 }
 
-/// How many entries the spread and the retract queue have held since they last stood empty.
+/// How many entries the spread and the retract queue have held since they were created.
 fn pushed(h: &TestHost) -> (u64, u64) {
     let (spread, retract) = (h.server.lava.spread_queue(), h.server.lava.retract_queue());
     (spread.head() + spread.iter().len() as u64, retract.head() + retract.iter().len() as u64)
@@ -114,8 +114,9 @@ fn a_tick_dirties_one_piece_of_a_long_queue() {
     assert!(h.server.lava.digest_view().1.len() < 100_000, "the queue drained, so the comparison wasn't idle");
 }
 
-/// After the first commit of a worst-case load, each tick's dirty set is a legal batch, so
-/// lava never has `last` withheld, and the load still stays under the cap and restores.
+/// After the first commit of the 540,000-wake fixture, each tick's dirty set is a legal
+/// batch, and the checkpoint stays under the cap and restores. This doesn't bound a tick
+/// changing many dense source sections.
 #[test]
 fn a_worst_case_queue_leaves_a_tick_a_legal_batch() {
     let _root = WorldsRootGuard::new("keep-s3e-worst");
@@ -233,6 +234,42 @@ fn a_piece_the_cursor_has_passed_is_removed_and_the_rest_stay_as_they_were() {
     let bytes = h.server.checkpoint().expect("checkpoints");
     let back = restore(&h, &bytes).unwrap_or_else(|e| panic!("restores: {e:?}"));
     assert_eq!(back.checkpoint().expect("again"), bytes);
+}
+
+/// Both forms of an empty queue restore: a partial piece kept for future appends, and
+/// no piece on a boundary. Later appends retain their positions in both runs.
+#[test]
+fn an_empty_queue_restores_and_appends_without_reusing_positions() {
+    let _root = WorldsRootGuard::new("keep-s3e-empty");
+    for head in [N + 3, N * 2] {
+        let mut a = fixture(&format!("ckpt-lava-empty-{head}"), 1);
+        run_to(&mut a, 5);
+        a.server.lava.queue_at_head_for_test(head, (0, 300, 0, 1), &[]);
+        let bytes = persist_and_checkpoint(&mut a);
+        let mut b = TestHost::adopt(restore(&a, &bytes).expect("an empty queue restores"));
+        assert_eq!(a.server.lava.spread_queue(), b.server.lava.spread_queue());
+        assert_eq!(b.server.lava.spread_queue().head(), head);
+        assert_eq!(b.server.checkpoint().expect("again"), bytes);
+        let records = lava_records(&a);
+        let spread: Vec<_> = records.iter().filter(|(key, _)| key[0] == b'q').collect();
+        if head.is_multiple_of(N) {
+            assert!(spread.is_empty(), "a full piece behind the cursor is removed");
+        } else {
+            assert_eq!(spread.len(), 1);
+            assert_eq!(spread[0].0, &piece_key(b'q', (head / N) as u32));
+            assert_eq!(spread[0].1.len(), head as usize % PIECE_ENTRIES * SPREAD_ENTRY_BYTES);
+        }
+        for host in [&mut a, &mut b] {
+            host.server.lava.add_source(1, 300, 1);
+            assert_eq!(host.server.lava.spread_queue().head(), head);
+            let to = host.server.tick_counter + 24;
+            run_to(host, to);
+            settle(host);
+        }
+        assert_eq!(a.server.lava.spread_queue().head(), head + 1);
+        assert_eq!(a.server.lava.spread_queue(), b.server.lava.spread_queue());
+        assert_eq!(lava_records(&a), lava_records(&b));
+    }
 }
 
 /// Everything of lava a record set holds, by key.
@@ -380,14 +417,15 @@ fn a_cursor_past_the_end_or_in_a_removed_piece_is_refused() {
     let end = N + 5 + live as u64;
     assert_eq!(bytes[spread_at..spread_at + 8], (N + 5).to_le_bytes(), "the cursor is where this test thinks it is");
     assert_eq!(bytes[retract_at..retract_at + 8], 0u64.to_le_bytes());
-    let cases: [(&str, usize, u64, &str); 7] = [
+    let cases: [(&str, usize, u64, &str); 8] = [
         ("past the end", spread_at, end + 1, "past the end"),
-        ("on the end", spread_at, end, "past the end"),
+        ("on the end with whole pieces still bound", spread_at, end, "wholly behind"),
         ("far past the end", spread_at, u64::MAX, "past the end"),
         ("in a removed piece", spread_at, 5, "isn't bound"),
         ("at the start of a removed piece", spread_at, 0, "isn't bound"),
         ("leaving a piece behind it", spread_at, N * 2 + 1, "wholly behind"),
-        ("past the retract queue's end", retract_at, 2000, "past the end"),
+        ("past the retract queue's end", retract_at, 2001, "past the end"),
+        ("on the retract queue's end with its whole first piece still bound", retract_at, 2000, "wholly behind"),
     ];
     for (what, at, cursor, words) in cases {
         let mut crafted = bytes.clone();
@@ -404,7 +442,6 @@ fn a_cursor_past_the_end_or_in_a_removed_piece_is_refused() {
     for (what, key, words) in [
         ("a gap", piece_key(b'q', 2), "piece by piece"),
         ("no first piece", piece_key(b'q', 1), "isn't bound"),
-        ("no last piece", piece_key(b'q', 3), ""),
         ("no retract piece", piece_key(b'r', 0), ""),
     ] {
         let crafted = rebind_entries(&h.server, &bytes, |flat| flat.retain(|(k, _)| *k != key));
@@ -414,6 +451,11 @@ fn a_cursor_past_the_end_or_in_a_removed_piece_is_refused() {
         }
         h.server.write_bound_records().expect("the tree goes back");
     }
+    // Rebinding and resealing a shorter, still-contiguous queue describes another valid
+    // state. A missing final piece under the original binding is refused by the mutation test.
+    let shorter = rebind_entries(&h.server, &bytes, |flat| flat.retain(|(key, _)| *key != piece_key(b'q', 3)));
+    restore(&h, &shorter).expect("a shorter rebound queue is structurally valid");
+    h.server.write_bound_records().expect("the tree goes back");
     restore(&h, &bytes).unwrap_or_else(|e| panic!("all put back, it restores: {e:?}"));
 }
 
@@ -490,7 +532,7 @@ fn the_first_commit_of_a_huge_queue_spreads_over_staged_batches_and_binds_at_the
     assert_eq!(back.checkpoint().expect("again"), bytes);
 }
 
-/// The most of lava a tick may dirty at the 8-joiner bench, in a batch of 1 MiB: a piece of
+/// The fixture's bound on what lava dirties at the 8-joiner bench, in a batch of 1 MiB: a piece of
 /// each queue, and a little for what a drain appends and the sources that moved.
 const LAVA_SHARE_OF_A_TICK: usize = 32 * 1024;
 

@@ -108,12 +108,12 @@ pub(crate) const QUEUE_PIECE_ENTRIES: u64 = 1024;
 /// A first-in, first-out queue that knows where each entry lies in the pieces a stored
 /// authority holds it in, so that taking the front moves no other entry.
 ///
-/// `head` counts the entries taken since the queue last stood empty, so an entry's place
+/// `head` counts all entries taken since the queue was created, so an entry's place
 /// in that run gives its piece and its place in it, and neither ever changes. To write a
 /// part-used piece back as it was, the queue keeps the entries of it already taken:
 /// `drained`, at most `QUEUE_PIECE_ENTRIES - 1`. They are forgotten when the cursor reaches
-/// the next piece, and with `head`, when the queue empties: then there is nothing for a
-/// piece to keep in place, and two runs that have drained the same queue hold the same.
+/// the next piece. Emptying the queue preserves its cursor and any partial piece, so a
+/// later push never reuses an earlier entry's place.
 /// Pushing and popping give exactly what a `VecDeque` gives.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PositionedQueue<T> {
@@ -137,10 +137,7 @@ impl<T: Copy> PositionedQueue<T> {
     pub(crate) fn pop_front(&mut self) -> Option<T> {
         let entry = self.live.pop_front()?;
         self.head += 1;
-        if self.live.is_empty() {
-            self.head = 0;
-            self.drained.clear();
-        } else if self.head.is_multiple_of(QUEUE_PIECE_ENTRIES) {
+        if self.head.is_multiple_of(QUEUE_PIECE_ENTRIES) {
             self.drained.clear();
         } else {
             self.drained.push(entry);
@@ -160,7 +157,7 @@ impl<T: Copy> PositionedQueue<T> {
         Self { head, drained, live: live.into() }
     }
 
-    /// How many entries have been taken since the queue last stood empty.
+    /// How many entries have been taken since the queue was created.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn head(&self) -> u64 {
         self.head
@@ -298,6 +295,30 @@ mod tests {
     use super::*;
     use crate::block::STONE;
 
+    #[test]
+    fn an_empty_positioned_queue_keeps_its_cursor_and_partial_piece() {
+        let mut q = PositionedQueue::default();
+        q.push_back(10u32);
+        q.push_back(11);
+        assert_eq!(q.pop_front(), Some(10));
+        assert_eq!(q.pop_front(), Some(11));
+        assert_eq!(q.head(), 2, "emptying the queue never reuses an entry's place");
+        assert_eq!(q.drained(), &[10, 11]);
+        assert_eq!(q.pop_front(), None);
+        q.push_back(12);
+        assert_eq!(q.head(), 2);
+        assert_eq!(q.pop_front(), Some(12));
+        assert_eq!(q.head(), 3);
+        assert_eq!(q.drained(), &[10, 11, 12]);
+        for i in 3..QUEUE_PIECE_ENTRIES {
+            q.push_back(i as u32);
+            assert_eq!(q.pop_front(), Some(i as u32));
+        }
+        assert_eq!(q.head(), QUEUE_PIECE_ENTRIES);
+        assert!(q.drained().is_empty(), "only a completed piece's prefix is forgotten");
+        assert!(q.iter().next().is_none());
+    }
+
     /// The queue gives what a `VecDeque` gives, for a run of pushes and pops that crosses
     /// piece edges and empties, and `drained` is what its first piece holds behind the head.
     #[test]
@@ -322,7 +343,8 @@ mod tests {
             assert!(q.drained().iter().rev().copied().eq((front - q.drained().len() as u32..front).rev()), "the entries just taken");
         }
         assert_eq!(q.pop_front(), None);
-        assert_eq!((q.head(), q.drained().len()), (0, 0), "an empty queue has no history");
+        assert_eq!(q.head(), u64::from(next), "emptying the queue keeps every entry's place");
+        assert_eq!(q.drained().len() as u64, q.head() % QUEUE_PIECE_ENTRIES);
     }
 
     fn solid_floor(world: &mut World, y: i32, r: i32) {

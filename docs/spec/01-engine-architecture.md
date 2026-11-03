@@ -1343,20 +1343,23 @@ queue can hold hours of work. So:
 - the spread queue (`q`) and the retract queue (`r`), key + a `u32` piece number, are in immutable pieces of
   `QUEUE_PIECE_ENTRIES` (1,024) entries, 13,312 B and 12,288 B at most, part of the schema. An entry's place in
   the queue gives its piece and its place in it. Only an append touches a piece, and only the last. The cursor, how
-  many entries have been taken since the queue last stood empty, is in the image. So a drain changes the image alone,
-  and a piece wholly behind the cursor stops being bound: the record set's `removed` holds it. When the queue
-  empties, the cursor goes back to 0 and it has no piece. In memory (`fluids::PositionedQueue`) a queue also keeps the
+  many entries have been taken since the queue was created, is in the image. So a drain changes the image alone,
+  and a full piece wholly behind the cursor stops being bound: the record set's `removed` holds it. When the queue
+  empties, the cursor stays monotonic and any partial piece stays for later appends; an empty queue on a piece
+  boundary has no piece. In memory (`fluids::PositionedQueue`) a queue also keeps the
   taken entries of its first piece, up to 1,023 (about 16 KB for spread and 12 KB for retract), so that piece can be written
   back as it was. It gives exactly what a `VecDeque` gives, in the same order, on client and server;
 - the difference of lava's sources from a rescan (`x` + the section's three big-endian `i32`s) is one record for each
   16-cube section holding any, at most 49,160 B, and a function of the set alone. One flowing cell rewrites one section.
+  Multiple dense sections can still exceed a batch in one tick; the adapter must withhold `last` in that case.
 
 A restore reads `q`, `r` and `x` only after every one has matched its digest, then refuses a cursor past the end, one
 in a piece no longer bound, or one that leaves a whole piece behind it, a piece that isn't full and isn't the last, or a
-gap in the numbers. Two runs write the same pieces if they have made the same pushes and pops since the queue last
-stood empty (or a load made it). Two runs of one saved world fed the same do that, and a restored run carries the cursor and the
+gap in the numbers. A cursor at a partial piece's end is a valid empty queue, and a cursor on a piece boundary needs
+no record if the queue is empty. Two runs write the same pieces if they have made the same pushes and pops since the queue
+was created (or a load made it). Two runs of one saved world fed the same do that, and a restored run carries the cursor and the
 entries behind it, so it goes on writing the uninterrupted run's bytes. Two runs that reach the same queue by different
-histories can differ, in the cursor and those entries, until it next stands empty: they play alike and their
+histories can differ, in the cursor and those entries, even when empty: they play alike and their
 checkpoints and state hashes differ. No lava queue is in `world.dat`, so a plain load starts it from what the load wakes.
 
 **`world.dat` in pieces** (`records.rs`, key `w` + a `u32` piece number). The file stays whole where a

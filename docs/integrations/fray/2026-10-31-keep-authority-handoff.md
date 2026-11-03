@@ -537,8 +537,12 @@ Limits of what does hold:
   last root's keys. A piece staged and then drained before the `last` is otherwise never removed.
 - A queue piece is final once it is full and the cursor hasn't passed it, so a batcher may stage any but the last
   ahead of the `last` step, however long the queue. `the_first_commit_of_a_huge_queue_spreads_over_staged_batches_and_binds_at_the_last`
-  does that with a plain function. A staged value can still go stale: when a queue empties, its numbering restarts
-  from 0, and the digest compare at the `last` step writes the key again. Latest write wins, as the contract says.
+  does that with a plain function. Emptying a queue keeps its monotonic cursor and any partial piece for later
+  appends; full pieces behind the cursor leave through `removed`. A partial piece can still change on append,
+  and the digest compare at the `last` step writes it again. Latest write wins, as the contract says.
+- Queue-drain fixtures prove that their 540,000 queued wakes fit after spreading; they don't bound all source
+  changes. Several dense `x` sections can change in one tick and exceed a batch. The adapter must withhold `last`
+  on the full dirty set, even with these stable queue pieces.
 - Water's queue is still cut by position, so its whole record belongs in any `last` while it drains (§8). It needs
   the same treatment, or a withheld `last`, before a large flood can commit.
 - Building a set is still O(the queue): it encodes every piece, then the dirty map hashes them. It's bounded by what
@@ -683,6 +687,14 @@ benchmark exists.**
   batch fault with 540,000. After: at most one piece, 13,312 B, in each of 24 ticks with 100,000 queued, and every tick's whole
   dirty set a legal batch with 540,000 and eight joiners, which then stays under the cap and restores. A first commit of
   540,000 goes over staged batches and restores from them.
+
+  The monotonic-cursor form was then checked on those fixtures and a real-flow fixture, including empty partial and
+  boundary queues restored before appending. Over the 1,200-tick small-fixture interval, 7,171 entries appended and
+  97,799 B of `q` changed (`r` and `x` unchanged). Over 240 ticks of the flow/retraction fixture, 540 entries appended,
+  one piece was removed, at most 784 B of `x` changed in a tick, and 1,200 B of `r` was written in total. These are
+  fixture measurements, not bounds on all reachable source changes. The combined regression run passed 560 tests
+  and failed only a header assertion still expecting schema 5; that assertion is now corrected to 6 but not rerun.
+  Disk again fell below the 12 GiB floor before the bench, binding-sensitivity run or clippy could start.
 
   The other families, from the §8 sizes above and arithmetic, **not measured tick by tick**:
 

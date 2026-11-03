@@ -9,7 +9,9 @@
 //! | `w` + piece | a piece of `world.dat` | [`GameServer::encode_world_dat`], cut by `records::file_piece_batch` |
 //! | `c` + `(cx, cy, cz)` | a non-empty chunk | `Chunk::as_bytes`, what a save writes |
 //! | `j` + file name | a present joiner's sidecar | its capture, encoded (`joiner_rows_in_memory`) |
-//! | `l q p f s u k` + piece | the state records | `volatile::state_records` |
+//! | `l p f s u k` + piece | the state records | `volatile::state_records` |
+//! | `q r` + piece | lava's spread and retract queues, at stable positions | `lava_records` |
+//! | `x` + section | lava's source differences, by 16-cube section | `lava_records` |
 //! | `t` + prefix | a manifest record | the tree over every entry below |
 //!
 //! `held` lists the entries this server has only a digest of: the sidecars of joiners not

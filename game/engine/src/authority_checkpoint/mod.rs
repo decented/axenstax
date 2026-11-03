@@ -8,7 +8,7 @@
 //!
 //! ```text
 //! magic         b"axenstax/authority-checkpoint\0"
-//! schema        u16 (5)
+//! schema        u16 (6)
 //! protocol      u32   PROTOCOL_VERSION
 //! save format   u32   SAVE_FORMAT_VERSION
 //! worldgen      u32   the world's generator version
@@ -16,7 +16,7 @@
 //! binding       [32]  SHA-256 of seed, worldgen, creative and difficulty
 //! pop key id    [16]  SHA256(b"axenstax/pop-key-id/v1\0" || pop_secret)[..16]
 //! tick          u64   the completed tick
-//! volatile            `volatile.rs`: the clock, the modes, the streamer and two phases
+//! volatile            `volatile.rs`: the clock, the modes, the streamer, phases and lava cursors
 //! manifest            `records.rs`: the root of the tree, (key, SHA-256)
 //! seal          [32]  SHA-256 of everything before it
 //! ```

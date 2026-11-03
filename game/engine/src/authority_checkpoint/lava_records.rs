@@ -6,8 +6,9 @@
 //! place in it, so a piece is never rewritten once full, and an append only touches the
 //! last. The image holds each queue's cursor, the count of entries taken from the front.
 //! Taking an entry moves only that: the piece keeps what lies behind the cursor, and a
-//! piece wholly behind it is no longer bound. When a queue empties, its cursor goes back to
-//! 0 and it has no piece, so numbering starts again from 0 at the next push.
+//! full piece wholly behind it is no longer bound. When a queue empties, its cursor and
+//! any partial piece stay, so later entries never reuse earlier positions. An empty queue
+//! on a piece boundary has no piece.
 //!
 //! So a tick rewrites at most the last piece and adds what it appended; the rest of a long
 //! queue's bytes stay as they were, which also lets a first commit of one spread over staged
@@ -20,11 +21,11 @@
 //! most 4,096 cells, so a change costs at most 49,160 B a section.
 //!
 //! **What "same history" means.** The cursor counts the entries taken since the queue last
-//! stood empty (or a load made it). Two runs write the same pieces when they have made the
+//! was created (or a load made it). Two runs write the same pieces when they have made the
 //! same pushes and pops since then. Two runs of one saved world, fed the same, do so. A restore
 //! carries the cursor and the entries behind it, so a restored run goes on writing the bytes
 //! the uninterrupted run writes. Two runs that reach the same queue by other histories can
-//! differ, in the cursor and the bytes behind it, until it next stands empty: they play alike,
+//! differ, in the cursor and the bytes behind it, even when empty: they play alike,
 //! and their checkpoints and state hashes differ. The rulings ask that two authorities of one
 //! saved world agree, and no lava queue is in `world.dat`, so each load starts from what it wakes.
 
@@ -104,7 +105,7 @@ fn read_queue<T>(
 ) -> Result<(Vec<T>, Vec<T>), Malformed> {
     let n = QUEUE_PIECE_ENTRIES;
     let Some((first, _)) = pieces.first() else {
-        return if head == 0 { Ok((Vec::new(), Vec::new())) } else { Err(Malformed("a lava cursor in a piece that isn't bound")) };
+        return if head.is_multiple_of(n) { Ok((Vec::new(), Vec::new())) } else { Err(Malformed("a lava cursor in a piece that isn't bound")) };
     };
     let start = u64::from(*first) * n;
     let mut entries = Vec::new();
@@ -119,7 +120,7 @@ fn read_queue<T>(
             entries.push(read(&mut r)?);
         }
     }
-    if head >= start + entries.len() as u64 {
+    if head > start + entries.len() as u64 {
         return Err(Malformed("a lava cursor past the end of its queue"));
     }
     if head < start {
@@ -256,7 +257,11 @@ mod tests {
     fn a_piece_wholly_behind_the_cursor_is_gone() {
         let q = queue(N * 2 + 3, N);
         assert_eq!(retract_pieces(&q).unwrap().iter().map(|p| p.0).collect::<Vec<_>>(), vec![1, 2]);
-        assert!(retract_pieces(&queue(N * 2 + 3, N * 2 + 3)).unwrap().is_empty(), "an empty queue has no piece, wherever it stopped");
+        let partial = queue(N * 2 + 3, N * 2 + 3);
+        let pieces = retract_pieces(&partial).unwrap();
+        assert_eq!(partial.head(), N * 2 + 3);
+        assert_eq!(pieces.iter().map(|p| p.0).collect::<Vec<_>>(), vec![2], "an empty partial piece stays for later appends");
+        assert_eq!(pieces[0].1.len(), 3 * RETRACT_ENTRY_BYTES);
         assert!(retract_pieces(&queue(N * 2, N * 2)).unwrap().is_empty());
         assert!(retract_pieces(&queue(0, 0)).unwrap().is_empty());
     }
@@ -285,10 +290,9 @@ mod tests {
         }
     }
 
-    /// Same queue, other histories: this is the whole of what a different history changes,
-    /// and it lasts until the queue next stands empty.
+    /// Same queue, other histories: cursors retain that history even while empty.
     #[test]
-    fn two_histories_of_one_queue_can_differ_until_it_empties() {
+    fn two_histories_of_one_queue_still_differ_when_empty() {
         let mut a = PositionedQueue::default();
         a.push_back((1, 1, 2));
         let mut b = queue(2, 1);
@@ -297,8 +301,8 @@ mod tests {
         assert_ne!(retract_pieces(&a).unwrap(), retract_pieces(&b).unwrap());
         a.pop_front();
         b.pop_front();
-        assert_eq!((a.head(), b.head()), (0, 0));
-        assert_eq!(retract_pieces(&a).unwrap(), retract_pieces(&b).unwrap(), "both empty, both alike");
+        assert_eq!((a.head(), b.head()), (1, 2));
+        assert_ne!(retract_pieces(&a).unwrap(), retract_pieces(&b).unwrap(), "empty queues keep their distinct positions");
     }
 
     #[test]
@@ -307,7 +311,10 @@ mod tests {
         let pieces = retract_pieces(&q).unwrap();
         let head = q.head();
         assert_eq!(why(read_back(N * 2 + 4, &pieces)), "a lava cursor past the end of its queue");
-        assert_eq!(why(read_back(N * 2 + 3, &pieces)), "a lava cursor past the end of its queue");
+        assert_eq!(why(read_back(N * 2 + 3, &pieces)), "a lava piece wholly behind its cursor");
+        let (drained, live) = read_back(N * 2 + 3, &pieces[1..]).expect("only the empty queue's partial piece stays bound");
+        assert_eq!(drained.len(), 3);
+        assert!(live.is_empty());
         assert_eq!(why(read_back(N - 1, &pieces)), "a lava cursor in a piece that isn't bound");
         assert_eq!(why(read_back(N * 2, &pieces)), "a lava piece wholly behind its cursor");
         assert_eq!(why(read_back(N + 7, &[])), "a lava cursor in a piece that isn't bound");
