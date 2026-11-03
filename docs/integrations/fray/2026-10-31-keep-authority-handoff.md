@@ -678,35 +678,76 @@ benchmark exists.**
   bytes are the same state the image held before, so this is where the dirty-rate limit will show first. `world.dat`'s
   pieces add a file's worth at most to a batch that wants them, and aren't in that figure.
 
-- **What a tick dirties, after lava's pieces (schema 6), 2026-11-03.** Debug build, one run, and only part of it: the
-  disk floor stopped the lane before the 8-joiner bench ran (`what_a_tick_dirties_at_the_eight_joiner_bench`, `#[ignore]`,
-  run by name with `--nocapture`), so **this has no bench numbers yet**, and `LAVA_SHARE_OF_A_TICK` (32 KiB) in that test is
-  a target nothing has measured.
+- **What a tick dirties, after lava's pieces (schema 6), 2026-11-03.** Debug build, one run of
+  `what_a_tick_dirties_at_the_eight_joiner_bench` (`--ignored --nocapture`), on the same 511-column,
+  eight-joiner fixture. **Passed.** The initial lava spread cursor is 1,600 with 54,079 live entries;
+  its retained partial prefix explains the difference between its stored bytes and the live queue alone.
 
-  Measured on the small fixture. Before, with 100,000 queued cells: 1,299,600 B of lava dirty in a draining tick, and a
-  batch fault with 540,000. After: at most one piece, 13,312 B, in each of 24 ticks with 100,000 queued, and every tick's whole
-  dirty set a legal batch with 540,000 and eight joiners, which then stays under the cap and restores. A first commit of
-  540,000 goes over staged batches and restores from them.
+  Each row's initial bytes and dirty bytes count record values only. A dirty record is written whole;
+  the 48-tick total sums those writes, including repeated writes of the same record. A zero means the
+  fixture did not change that family, not that the family cannot change in a different world.
 
-  The monotonic-cursor form was then checked on those fixtures and a real-flow fixture, including empty partial and
-  boundary queues restored before appending. Over the 1,200-tick small-fixture interval, 7,171 entries appended and
-  97,799 B of `q` changed (`r` and `x` unchanged). Over 240 ticks of the flow/retraction fixture, 540 entries appended,
-  one piece was removed, at most 784 B of `x` changed in a tick, and 1,200 B of `r` was written in total. These are
-  fixture measurements, not bounds on all reachable source changes. The combined regression run passed 560 tests
-  and failed only a header assertion still expecting schema 5; that assertion is now corrected to 6 but not rerun.
-  Disk again fell below the 12 GiB floor before the bench, binding-sensitivity run or clippy could start.
+  | Family | Initial records | Initial value B | Ticks dirty, of 48 | Most dirty value B in a tick | Dirty value B over 48 ticks |
+  |---|---|---|---|---|---|
+  | `c` chunks | 2,406 | 20,941,824 | 12 | 113,152 | 1,035,776 |
+  | `f` water | 2 | 117,530 | 12 | 126,621 | 1,470,564 |
+  | `j` sidecars | 8 | 3,628 | 48 | 2,305 | 110,640 |
+  | `k` corpses | 1 | 4 | 0 | 0 | 0 |
+  | `l` layout | 1 | 10,323 | 2 | 10,323 | 20,646 |
+  | `p` exposure | 1 | 4 | 0 | 0 | 0 |
+  | `q` lava spread | 54 | 710,515 | 0 | 0 | 0 |
+  | `r` lava retract | 1 | 11,580 | 4 | 12,048 | 24,552 |
+  | `s` cell sims | 1 | 32 | 0 | 0 | 0 |
+  | `t` manifest | 164 | 129,420 | 48 | 13,920 | 186,154 |
+  | `u` player slots | 1 | 3,753 | 48 | 3,753 | 180,144 |
+  | `w` world.dat | 2 | 114,445 | 48 | 123,363 | 3,320,770 |
+  | `x` lava source differences | 0 | 0 | 0 | 0 | 0 |
 
-  The other families, from the §8 sizes above and arithmetic, **not measured tick by tick**:
+  Lava dirtied at most **12,048 B in a tick**, below this fixture's 32 KiB target. Each of the 48 full
+  batches, including its removals, passed `validate_persist_batch`. The largest changed-record key/value
+  sum was **386,858 B** against the 1,048,576-B cap; that printed sum excludes removal keys. The per-family
+  maxima need not fall on the same tick, so adding their columns is not the largest batch.
 
-  | Family | Size | A typical tick | Does it threaten a batch? |
-  |---|---|---|---|
-  | `f` water | 117,530 B at the bench; 25 B a flowing cell (source and front) | Whole record while its queue drains, the form lava had; otherwise untouched | **Yes, the same way as lava.** Arithmetic: past about 42,000 flowing cells it alone passes 1 MiB, and a `last` can't be sent while it drains. A 400,000-source fixture is 10 MB. The same form would fit |
-  | `p` exposure | 20 B a cell, 60 to 80 B a block mined in deepslate | Untouched unless mining; a sorted insert rewrites every later piece | **Later, in a long-lived world.** Arithmetic: 1 MiB at about 52,000 cells, or 13,000 to 17,000 blocks, and nothing prunes it. A mined block near the start then rewrites all of it |
-  | `w` | 114,445 B, 2 pieces | The clock moves, so at least the piece holding it. How many pieces a tick touches is unmeasured | Only when the file is large and a row's length changes: every later piece. About 4,000 full chests is 1 MiB (§8) |
-  | `u` slots | 3,753 B at 8 joiners; about 440 B a slot | Each moving slot, so all of it with everyone moving | No at bench sizes; arithmetic 113 KB at 257 slots. A slot holding full plans is far larger, and a move near it rewrites its piece |
-  | `s` cell sims | 32 B idle; fire 21 B a cell, 256 in a run | Only while something burns or decays | No in a run; a load re-adopts fire uncapped |
-  | `l` layout | 10,323 B | Only as columns stream; a sorted insert rewrites later pieces | No at bench sizes |
-  | `k` corpses | 4 B | Empty at a real `last` | No |
+  At 1,248 ticks, the final set differs from the initial set as follows. This is one initial-to-final
+  delta, **not** cumulative writes over the interval; the families absent here are unchanged.
+
+  | Family | Changed records | Changed value B |
+  |---|---|---|
+  | `c` | 247 | 2,149,888 |
+  | `f` | 2 | 125,464 |
+  | `j` | 5 | 2,265 |
+  | `l` | 1 | 12,924 |
+  | `q` | 21 | 271,102 |
+  | `r` | 1 | 12,012 |
+  | `t` | 171 | 86,801 |
+  | `u` | 1 | 3,761 |
+  | `w` | 2 | 125,113 |
+
+  Changed keys and values total **2,794,374 B**, so the interval requires staged batches. The set removes
+  three `q` keys, one `r` key and one `t` key. The final spread cursor is 4,928 with 71,222 live entries.
+  This is native fixture sizing, not a WASM tick/commit timing measurement or a bound on all dense source changes.
+
+  Earlier small-fixture checks: before the stable form, 100,000 queued cells dirtied 1,299,600 B in a draining
+  tick, and 540,000 caused a batch fault. After it, each step of the 24-tick fixture changed at most one
+  13,312-B piece; the 540,000-wake, eight-joiner fixture's full dirty sets fit, checkpoint and restore. Its initial
+  commit spreads over staged batches. With monotonic cursors, the 1,200-tick small-fixture delta appended
+  7,171 entries and changed 97,799 B of `q` (`r` and `x` unchanged). Over 240 real-flow/retraction ticks,
+  540 entries appended, one piece was removed, at most 784 B of `x` changed in a tick, and 1,200 B of `r`
+  was written in total. Empty partial and boundary queues restore before later appends. The combined
+  save/restore and fluid regression filter passed **561 tests, none failed, 24 ignored**.
+
+  Remaining sizing risks, beyond these measurements:
+
+  | Family | What the fixture establishes | What remains |
+  |---|---|---|
+  | `f` water | Whole positional records change during flow; at most 126,621 value B in a tick here | Stable pieces before the adapter. Arithmetic: 42,000 cells exceed 1 MiB only if each contributes both a 12-B source delta and a 13-B front; fronts alone reach it near 80,000. The 400,000-source fixture is about 10 MB |
+  | `p` exposure | No mining, so no dirty exposure record | Arithmetic: 1 MiB at about 52,000 cells (13,000 to 17,000 blocks mined); a sorted insert rewrites later pieces, and nothing prunes it |
+  | `w` | Dirty every tick, up to both pieces here (123,363 value B) | A row-length change in a large file can rewrite every later piece; about 4,000 full chests reach 1 MiB |
+  | `u` | Dirty every tick, 3,753 value B here | Full plans can be much larger, and a move near one rewrites its piece |
+  | `s` | Idle (32 B), no changes | Fire/adoption bursts and other active cell systems need their own load checks |
+  | `l` | Changed twice in 48 ticks, 10,323 value B each time | A sorted insert can rewrite later pieces in a larger layout |
+  | `k` | Empty fixture record (4 B), no changes | Does not measure a pending-death workload |
+  | `x` | No source difference at this bench; the sparse-flow fixture changes up to 784 B a tick | Simultaneous dense-section changes need the adapter's separate withholding/resumption check |
 
 - **`world.dat` against the record-value limit, which nobody had measured.** At the bench sizes it is 112,555,
   113,339 and 114,445 B, about **11% of 1 MiB**. It barely moves between them, so it follows what the fixture
