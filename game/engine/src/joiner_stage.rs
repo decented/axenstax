@@ -29,10 +29,10 @@ const MARKER: &str = "world-dat.sha256";
 /// Which commit a stage may belong to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Commit {
-    /// The load of `world.dat`: a stage for the autosave is for a commit this
-    /// load is not reading.
+    /// `world_open::open_world` opened `world.dat`: a stage for the autosave is
+    /// for a commit that isn't the world now open.
     WorldDat,
-    /// The load of `autosave/world.dat`.
+    /// `open_world` opened `autosave/world.dat`.
     Autosave,
     /// A running session, whose last publish failed: whichever it committed.
     Either,

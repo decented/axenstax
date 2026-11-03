@@ -2958,8 +2958,7 @@ fn decode_world_dat(data: &[u8], rel: &str) -> Result<(WorldSave, bool), String>
 /// Load the world saved in `worlds/<name>/` into `world`.
 ///
 /// All or nothing (Spec 02 §8.4, load-failure rule): on `Err`, `world` is
-/// untouched and nothing on disk was renamed, copied or written, except a save
-/// this build had already committed being finished — so the caller
+/// untouched and nothing on disk was renamed, copied or written — so the caller
 /// can refuse the world (or fall back to another copy) knowing it is exactly as
 /// it was. The `Err` text is a short, file-naming reason for the lobby notice.
 /// The recovery flows that keep a damaged original aside (a torn chunk, a
@@ -2991,9 +2990,6 @@ pub fn load_world(
     // chunks were published: publish them now, or the world would load empty
     // under world.dat's block entities (Spec 02 §8.4).
     finish_staged_first_save(&dir)?;
-    // Likewise sidecars staged for this world.dat, before any sidecar is read.
-    // Ones staged for a commit that never happened are dropped.
-    crate::joiner_stage::settle(&dir, crate::joiner_stage::Commit::WorldDat, &mut |_, _| {})?;
     let loaded = load_chunk_dir(&dir.join("chunks"), world)?;
     if partial {
         keep_damaged_copy_once(&dat_path);
@@ -4827,7 +4823,6 @@ pub fn load_autosave(
     // load_world (Spec 02 §8.4).
     let (save, partial) = decode_world_dat(&data, "autosave/world.dat")?;
 
-    crate::joiner_stage::settle(&world_dir(name), crate::joiner_stage::Commit::Autosave, &mut |_, _| {})?;
     let loaded = load_chunk_dir(&dir.join("chunks"), world)?;
     if partial {
         keep_damaged_copy_once(&dat_path);

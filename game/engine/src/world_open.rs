@@ -143,6 +143,17 @@ pub(crate) fn open_world(
     // damaged file aside, write the rebuilt meta) runs last, like the other
     // keep-a-copy-aside recoveries.
     let repaired = |opened: OpenedWorld| -> Result<OpenedWorld, String> {
+        // Joiners' records staged for a save (Spec 02 §8.2.1), judged against the
+        // copy that actually opened, and before any record is read. Only now: an
+        // autosave that failed part-way must not publish records for a save the
+        // world then falls back from.
+        if let OpenedWorld::Loaded { from, .. } = &opened {
+            let commit = match from {
+                OpenedFrom::Autosave | OpenedFrom::AutosaveAfterLastSaveFailed { .. } => crate::joiner_stage::Commit::Autosave,
+                OpenedFrom::LastSave | OpenedFrom::LastSaveAfterAutosaveFailed { .. } => crate::joiner_stage::Commit::WorldDat,
+            };
+            crate::joiner_stage::settle(&dir, commit, &mut |_, _| {})?;
+        }
         crate::save::try_load_world_meta(name)?;
         Ok(opened)
     };

@@ -90,7 +90,7 @@ For anyone running a dedicated server. The Console and the server's admin comman
 
 Only a hard stop shows this. Automated checks cut a save short at each step. Nobody has pulled the plug on a real machine. Back the world up first.
 
-31. Host a world with a signed-in friend. The friend takes a stack from a chest. Wait for the autosave (5 minutes on a host, 60 seconds on a dedicated server), then kill the host (`kill -9`, or pull the plug) straight after one. Reopen the world. Is the stack in one place only: the chest or the friend's bag, never both or neither?
+31. Host a world with a signed-in friend. The friend takes a stack from a chest and stays in the world. Kill the host (`kill -9`, or pull the plug) at any moment, during an autosave if you can catch one (5 minutes on a host, 60 seconds on a dedicated server). Reopen the world. Is the stack in one place only: the chest or the friend's bag, never both or neither?
 32. After any hard stop and reopen, look in the world's folder. A `joiners.new` folder should be gone. Is it?
 33. Known gap, not a bug: if the friend takes the stack and **leaves**, then the host dies within that same autosave wait, the stack can come back in both places. A clean quit doesn't do this.
 

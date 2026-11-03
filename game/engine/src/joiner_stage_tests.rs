@@ -167,6 +167,26 @@ fn a_stage_for_the_autosave_is_dropped_by_a_load_of_world_dat() {
     assert!(!staging().exists());
 }
 
+/// An autosave that fails to load falls back to the older save, so its stage
+/// must not have published on the way past.
+#[test]
+fn a_stage_for_an_autosave_that_fails_to_load_is_dropped_with_it() {
+    let _root = WorldsRootGuard::new("stage-autosave-torn");
+    let dir = world_dir(NAME);
+    let mut s = rig();
+    s.world.set_block(1, 70, 1, crate::block::STONE);
+    hold(&mut s, 3);
+    save_by(Route::HostSave, &s).unwrap();
+    hold(&mut s, 20);
+    cut_short(Cut::AfterCommit, || save_by(Route::HostAutosave, &s));
+    drop(s);
+    // Its chunks can't be read, so the load fails after its world.dat decodes.
+    let chunks = dir.join("autosave/chunks");
+    fs::create_dir_all(chunks.join("9_9_9.chunk")).unwrap();
+    assert_pair(load(AutosavePolicy::Prefer), 3, "the older save, whole");
+    assert!(!staging().exists());
+}
+
 #[test]
 fn a_first_save_cut_short_anywhere_loads_as_a_matching_pair() {
     for at in CUTS {

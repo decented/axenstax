@@ -2062,10 +2062,10 @@ so `joiners.new/` is dropped. Both can be cut short and run again. A commit file
 read (other than missing) is an error and the stage is left alone: a failed read isn't a
 commit that never happened. It runs:
 
-- in `load_world`, against `world.dat`, and `load_autosave`, against `autosave/world.dat`. A
-  stage for the autosave is dropped by a load that reads `world.dat` instead, which is then
-  the older save with its older records. A world still new has no load and no sidecars to
-  read: its next save drops the stage;
+- in `world_open::open_world`, once a copy has opened, against that copy: `world.dat` or
+  `autosave/world.dat`. A stage for the autosave is dropped when `world.dat` opens instead (the
+  autosave was ignored or failed to load), which is then the older save with its older records.
+  A world still new has no load and no sidecars to read: its next save drops the stage;
 - at the start of every save, and again straight after a commit (either file counts);
 - before a joiner's own leave write and before `load_joiner`, so a publish that failed with
   the session still running can't land an older record on a newer one.
@@ -2103,9 +2103,9 @@ is refused as it is for any later save.
   server or `--keep-world`, 5 minutes on a host) that record is ahead of `world.dat`, and a hard
   crash in that time can reopen the world with an item in both places or in neither. A clean
   stop saves, so it doesn't reach this.
-- **A host's rollback.** A host's autosave publishes into the one `joiners/`. A host that then
-  drops the autosave and reopens the last save, or a loader that ignores or fails to read the
-  autosave, gets `world.dat` older than the records published since.
+- **A host's rollback.** A host's autosave publishes into the one `joiners/` once it has
+  committed. A host that then drops that autosave and reopens the last save, or a later open
+  that ignores or fails to read it, gets `world.dat` older than the records published since.
 
 ### 8.3 Atomic Snapshots
 
