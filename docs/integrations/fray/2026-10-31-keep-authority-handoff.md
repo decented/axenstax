@@ -273,7 +273,7 @@ the contract itself as changed.
 Measured or built on the game side. The sizes are from `checkpoint_size_at_the_bench_world_sizes`
 (§8). Slice 3 has settled the ones below against the Tier-L rulings.
 
-**Settled in the game, 2026-11-03 (checkpoint schema 3; no save-format or protocol change):**
+**Settled in the game, 2026-11-03 (checkpoint schema 4; no save-format or protocol change):**
 
 - **"Not now": there is no such code.** `checkpoint` no longer refuses a pending death: each corpse
   is in the bytes (`authority_checkpoint/deaths.rs`) and comes back as a corpse, and the restored
@@ -300,7 +300,34 @@ Measured or built on the game side. The sizes are from `checkpoint_size_at_the_b
   check in `read_layout`, `Volatile::validate` and `players::read_all`. A tick holds bodies and spawns at
   ±1,000,000 as at a wall, and `World::insert_chunk` won't make a second copy of an evicted section.
   Tests: at-limit fixtures to the byte, and a seeded walk over the fixture's actions. The section cap's
-  fixture goes through the same gate on bytes: a world at it holds 840 MB of chunks.
+  fixture goes through the same reader on bytes: a world at it holds 3.4 GiB of chunks.
+- **The checkpoint is independent of the world's size for what grew with it.** The checkpoint names the
+  root of a manifest tree (`authority_checkpoint/records.rs`, key `t` + prefix), where a key starting `t`
+  binds a further manifest record the same way. At most 64 entries is a record; more are shared out by the
+  byte after their common prefix. So it is a function of the entries, walking it gives the one sorted list,
+  one changed entry rewrites one path, and no manifest record passes 64 KiB. The layout (`l`), the lava
+  queue with its source differences (`q`) and each cell's exposure clock (`p`) are stored records cut at
+  64 KiB, read by the same readers as before. Inline stays for fixtures only (`checkpoint_inline`,
+  `#[cfg(test)]`). Numbers are in §8.
+- **`MAX_LAYOUT_SECTIONS` is 262,144.** The ruling lifts 65,536 once the layout is a record, and something
+  must still bound what `apply_chunk_layout` builds for a section with no record (12.8 KB each). 262,144 is
+  the runner's key ceiling, and about 3.4 GiB at worst, inside the placeholder 4 GiB. Same constant at both
+  ends, through the one reader.
+- **What writes the records: `GameServer::persist_authority`.** It is `try_save` and then the records, in
+  `authority/` in the world's folder, one file per key. Nothing but the tests calls it yet: `--keep-world`
+  still calls `try_save`, and wiring it is the step that makes a runner's `last` batch carry them. A normal
+  server's save is untouched, and a world never run as an authority has no such folder.
+- **`checkpoint` still does no I/O, and still moves with an unsaved block.** The tree and the state records
+  are functions of what the server holds, so it computes them from memory; what a persist wrote is the same
+  bytes if nothing has changed. If something has, its digests aren't the store's, and a restore refuses.
+- **A handed-over world's records are bound.** Every file in `handover/` and `participants/` but a lock or a
+  temporary file is an `h` key, over its stored bytes; one not named is a mismatch, as `open_guard` scans the
+  folder. Mutation cases from a real restore: `a_handed_over_worlds_records_are_bound`.
+- **The write on that path is gone.** `load_or_bootstrap` turned a participant's frozen seed sidecar into its
+  current record and wrote it, during a restore, through `reload_sidecars`. A restore now makes it in memory
+  (`load_or_bootstrap_unwritten`), and the first ordinary read after the seat comes back writes it. A normal
+  open is unchanged. The fsyncs of `confirm_authority_durable` and `confirm_durable` stay: they change no
+  bytes.
 - **The seal is a checksum, not a signature.** Ruled so: any authentication is the runner's, and nothing
   tells corruption from anything else.
 - **The `world.dat` gap is closed.** The manifest binds `world.dat` as one record, key `w`, over its stored
@@ -317,8 +344,8 @@ Measured or built on the game side. The sizes are from `checkpoint_size_at_the_b
 - **What moves the hash.** A table's digest is the persist's, so an unsaved table change doesn't move
   `state_hash` until the persist that stores it, where `b` used to. A checkpoint of a later tick than its
   persist is refused by the clock `world.dat` holds, since its digests can all match while its tables are stale.
-- **`pop_exposure` is in the volatile sections,** at 20 B a cell. It is in no save, so a bound record for it
-  would be a new thing a normal save writes.
+- **`pop_exposure` is a bound record,** at 20 B a cell, its values unchanged. It is in no save, and only the
+  authority's persist writes it, so a normal save is unchanged.
 - **A restore writes nothing.** It opens through `world_open::open_bound_world`: `world.dat` only (never the
   autosave), no joiner stage settled, no staged first save published, a torn chunk file no record binds
   skipped where it lies. A bound `world.dat` this build only part-decodes is `invalid-checkpoint`, as is
@@ -330,35 +357,39 @@ Measured or built on the game side. The sizes are from `checkpoint_size_at_the_b
 
 **Still open on the game side, not needing a Fray answer:**
 
-- **A handed-over world's `handover/` records aren't bound.** A restore of a world with a personal proof
-  reads `handover/` (the proof, and each participant's personal record through `load_or_bootstrap`), and the
-  manifest names none of them. Only a world that was handed over has them. No restore path uses one yet;
-  they go in the manifest, or such a world is refused, before `--keep-world` restores one.
 - **A corpse's living copy is matched, not identified.** A pet's row in `world.dat` was taken when it
   lived, and pets have no stable id, so a restore removes the nearest living mob of the corpse's kind and
   owner. With two alike, it may be the other one. A quest NPC's row isn't matched at all.
-- **The cap and the world size.** A manifest entry is about 49 B, so the manifest alone reaches the cap
-  near **21,000 non-empty chunks**; with the other volatile sections (about 130 KiB, plus 17 B per column)
-  about **17,000**. Lava's queue sets how close a big load comes: 464,194 B at 0 joiners, 724,055 B at 2
-  and 953,813 B at 8, which is 91% of the cap (§8), reached at about 550 columns loaded inside one drain.
-  Ruled: the cap stays, and the layout, manifest and queue move into bound records.
+- **What is left in the image can still reach the cap.** Water is the largest: 117,530 B of about 120,000 at
+  every bench size, nearly all of it (116,292 B) source differences at 12 B a cell. Those are water cells a
+  rescan would call sources and the run doesn't, which is flowing water, so it follows how much water has run
+  rather than how many columns are loaded: about 87,000 such cells is the cap. Fire, the leaf queues, the
+  scheduler, the power flood, the tap cooldowns and corpses are in the image too, and small in everything
+  measured. Moving water is one more family in `records.rs`. It wasn't in the ruling's list, so it is here.
+- **A piece is by position.** A queue's order is its state, so a state record is cut by offset: an entry added
+  near the start of the sorted layout or the clocks rewrites the pieces after it, up to the whole record in a
+  batch. At the largest measured, that is 840,504 B of `authority/` records against the 1 MiB batch, which
+  staged batches can spread.
 
 **For the Fray session, from closing the `world.dat` gap:**
 
 - **`world.dat` as one record against the record-value limit.** Ruling 2 limits a record to one batch (1 MiB
-  less headers). The file is 34,846 B in the two-joiner fixture, and it grows with block entities, plots and
-  plans, so a world with enough chests or blueprints passes the limit, and that is a module fault at the
-  batch, not a game refusal. Binding the tables under keys of their own would change what a normal save
-  writes (a file per table, or a split `world.dat`), which is outside this work, so it stopped there. The
-  game's proposal, when `--keep-world` is wired to a runner's store: split the file into fixed pieces under
-  `w`-prefixed keys bound by the record tree, so the stored bytes are unchanged and no piece passes the limit.
-  Unlike per-table keys, one changed row can then rewrite every later piece, so a `last` batch
-  still carries about the whole file: please say whether that is acceptable.
-- **`pop_exposure` is unbounded in the volatile image.** Nothing prunes it, and an entry past its decay still
-  holds its clock (a re-exposed cell must not start again). At 20 B it fills the 1 MiB cap at about 50,000
-  cells, roughly 15,000 to 25,000 deepslate blocks mined (estimate), and C3's moves don't reach it. It belongs in a
-  bound record once the runner's store exists, as that writes nothing new to a normal save. Until then it is
-  a cap the world can hit: `TooLarge`.
+  less headers). The file is about 114 KB in the bench worlds (§8 has the numbers and how many rows reach the
+  limit), and it grows with block entities, plots and plans, so a world with enough chests or blueprints
+  passes the limit, and that is a module fault at the batch, not a game refusal. Binding the tables under keys
+  of their own would change what a normal save writes (a file per table, or a split `world.dat`), which is
+  outside this work, so it stopped there. The game's proposal, when `--keep-world` is wired to a runner's
+  store: split the file into fixed pieces under `w`-prefixed keys bound by the record tree, so the stored
+  bytes are unchanged and no piece passes the limit. Unlike per-table keys, one changed row can then rewrite
+  every later piece, so a `last` batch still carries about the whole file: please say whether that is
+  acceptable.
+- **`personal-manifest.dat` has the same limit problem, for a handed-over world.** Its own limit is 2 MiB
+  (`handover::manifest::MANIFEST_LIMIT`), twice the record-value limit, and it lists a member per file of the
+  world handed over. Bound as one record, it is a module fault past 1 MiB. Not measured, and only a world that
+  was handed over has one. The same fixed pieces would do.
+- **`pop_exposure` isn't bounded, only out of the image.** Nothing prunes it, and an entry past its decay still
+  holds its clock (a re-exposed cell must not start again). It grows at about 60 to 80 B a block mined in pure
+  deepslate (§8), as stored bytes against the world's quota rather than against the cap.
 
 **Answered without game code:** what a checkpoint binds (`calendar_id` is in, and two fresh worlds needn't
 agree); persist then checkpoint (one root per `last`).
@@ -406,8 +437,8 @@ drained water source: persist, checkpoint, restore into a new server, feed both 
   AI rolls hash the id. No ids are remapped. Wild mobs re-scatter, tamed ones and carts come from the
   save, and what lay on the ground or was in flight is gone.
 - `world_tables`: equal in the fixture, so printed and not promised, as hideout and raid counts follow the
-  mobs. The tables read back from `world.dat`, which the manifest binds, and `pop_exposure` is in the
-  volatile sections.
+  mobs. The tables read back from `world.dat`, which the manifest binds, and `pop_exposure` is a bound
+  record.
 - **Pending outputs are dropped:** `pending_item_grants`, `pending_kill_events`, `released_joiners` and
   `pending_sapling_drops` aren't carried. An item grant is value and not just output, so the slice 3
   runner checkpoints only after they drain.
@@ -493,7 +524,65 @@ benchmark exists.**
 
   The slice 1 twin fixture, at a load radius of 3 and a sim distance of 2, was at 1,015,610 B at tick
   2,000, 97% of the cap. It is now 77,335 B at tick 1, 113,253 B at 200 and 237,079 B at 2,000, which is
-  23%, so it has about 811 KB of margin.
+  23%, so it has about 811 KB of margin. (All of the above is before the move below.)
+
+- Slice 3, the same test at the same sizes, debug build, one run, 2026-11-03, with the manifest as a record
+  tree and the layout, lava queue and exposure clocks in bound records. Each restores, and encodes back to
+  the same bytes.
+
+  | Joiners | Columns | Non-empty chunks | Checkpoint B | Of the cap | Manifest records | Manifest B | Longest B | `authority/` records | `authority/` B | Layout B | Lava B | Water in the image B | Players B | `world.dat` B | Restore ms |
+  |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+  | 0 | 289 | 1,377 | 118,261 | 11% | 120 | 73,662 | 837 | 127 | 352,130 | 6,124 | 272,340 | 117,530 | 353 | 112,555 | 1,460 |
+  | 2 | 409 | 1,918 | 119,127 | 11% | 159 | 102,479 | 970 | 169 | 613,225 | 8,419 | 502,323 | 117,530 | 1,203 | 113,339 | 2,142 |
+  | 8 | 511 | 2,406 | 121,725 | 11% | 159 | 127,134 | 1,131 | 172 | 840,504 | 10,323 | 703,043 | 117,530 | 3,753 | 114,445 | 3,062 |
+
+  The tree costs about 7% more bytes than the same list inline (127,134 B against 119,300 B), and the image
+  holds 41 B of it. **Worst lava inside one drain,** on the 8-joiner world with 540,000 cells queued (ten times
+  the real load): 121,725 B, the same as with the real queue, and it restores. The lava record is then about
+  7 MB in pieces of 64 KiB.
+
+- **`world.dat` against the record-value limit, which nobody had measured.** At the bench sizes it is 112,555,
+  113,339 and 114,445 B, about **11% of 1 MiB**. It barely moves between them, so it follows what the fixture
+  built rather than how many columns are loaded. To see how far off the limit is, each table was given 1,000 rows on a
+  smaller fixture's save (base 6,651 B), encoded through the real `encode_world_save`, and the bytes per row
+  divided into 1 MiB. The row limit is taken as 1 MiB exactly, so these are slightly generous. Nothing was
+  written to disk beyond that fixture's save.
+
+  Real rows, as a played world holds them:
+
+  | Table | Row | Bytes a row | Rows to the limit |
+  |---|---|---|---|
+  | chests | a full wooden chest, 27 stacks of one block | 240 | 4,341 |
+  | signs | 120 characters of ASCII | 140 | 7,442 |
+
+  The rest are each table's **smallest** possible row (what zeros decode to, so no contents, no text, no
+  lists), which makes these ceilings, not estimates: a real row is larger and a real count lower.
+
+  | Bytes a row | Rows to the limit | Tables |
+  |---|---|---|
+  | 109 | 9,558 | construction_anchors |
+  | 78 | 13,358 | players |
+  | 66 to 70 | 14,884 to 15,786 | face_blueprints, latent_prints, auctions, active_raids |
+  | 44 to 52 | 20,037 to 23,680 | drying_racks, brigand_hideouts, exhibits, campfires, vendors, saved_mobs |
+  | 36 to 41 | 25,412 to 28,942 | carts, plots, tip_jars, rigs |
+  | 28 to 31 | 33,610 to 37,211 | waypoints, power_devices, architect_plaques, furnaces, market_hubs |
+  | 20 to 25 | 41,677 to 52,096 | dispensers, chests (empty), graves, hostile_acts, composters, village_anchors, raid_kills, bounties, signs (empty) |
+  | 12 to 16 | 65,120 to 86,827 | village_treasuries, face_overlays, hives, item_frames, block_meta, face_blueprint_blanks, village_bells |
+  | 8 | 130,240 | populated_villages |
+  | 4 | 260,481 | inventory, locked_slots, rig_clips |
+
+  `workshop` holds plans and isn't a list of rows in the save, so it isn't here and wasn't measured; a plan's
+  size follows what it records, and it may well be the first to reach the limit. `face_overlays` and
+  `block_meta` count one row per painted face or per block with meta, so a builder reaches those by the
+  thousand. So on chests alone: about 4,000 full chests in one world, fewer with the other tables' rows beside
+  them. The bench worlds are nowhere near that; a long-lived shared world could plausibly get there. Past it the
+  record is a module fault at the batch; the proposal for the Fray session is in §6.
+
+- **`pop_exposure`'s growth.** The bench's scripted build mines no pure deepslate: 0 cells at all three sizes.
+  With the real `mark_exposed_neighbours` in a block of pure deepslate, a two-high tunnel gave 4.00 new cells a
+  block (360 blocks, 1,441 cells) and a one-layer floor 3.02 (22,500 blocks, 67,858 cells), so 60 to 80 B a
+  block mined. The old image had room for about 52,000 cells, or 13,000 to 17,000 blocks. It has no such
+  ceiling now, and nothing prunes it.
 
 **Stated limits and decisions**
 - 20 TPS (50 ms).
