@@ -1342,9 +1342,16 @@ schema, not derived from the batch limit) of its stored bytes, so it can pass th
 limit. An empty file is one empty piece; a file of a whole number of pieces has no empty one after them.
 A restore cuts what is on disk and compares every piece before anything reads the file, so a flipped,
 missing, swapped, stale or surplus piece is `invalid-checkpoint`, naming the piece. One changed row rewrites
-its piece, and every later piece if it changes the row's length. `records::file_piece_batch` gives a future
-`PersistBatch` the piece writes and the keys to remove when the file shrinks, so the store equals the bound
-set. No key of this family carries a persona identifier.
+its piece, and every later piece if it changes the row's length. `records::file_piece_batch` gives the piece
+writes and the keys to remove when the file shrinks, so the store equals the bound set; the record set
+builder calls it. No key of this family carries a persona identifier.
+
+**The record set** (`record_set.rs`) is built from memory by one pure function,
+`GameServer::build_record_set`: the `w` pieces of the `world.dat` a save would write, each non-empty
+chunk, each present joiner's sidecar, the state pieces and the tree as records with their bytes
+(Fray `StoredRecord`s); the entries held by digest only (the sidecars of absent joiners, `m`, `h`); and
+`removed`, the keys the previous bound set had and this one hasn't. A save and the set share the encoders
+(`encode_world_dat`, `joiner_rows_in_memory`), so a save writes what it always did.
 
 **Who writes them.** `GameServer::persist_authority`, which is `try_save` and then the records:
 the state records above and the manifest's tree, in `authority/` in the world's folder, one file per key

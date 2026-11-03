@@ -359,6 +359,12 @@ pub(crate) fn checked_record(world: &Path, key: [u8; 32], save: &JoinerSave) -> 
         }
         Err(e) => return Err(e.to_string()),
     }
+    encode_record(key, save)
+}
+
+/// A record's bytes, once its identity is checked against `key`. Pure: the checks of the
+/// disk are [`checked_record`]'s.
+pub(crate) fn encode_record(key: [u8; 32], save: &JoinerSave) -> Result<Vec<u8>, String> {
     let bytes = save.encode()?;
     if save
         .personal

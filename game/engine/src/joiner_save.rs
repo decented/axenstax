@@ -792,6 +792,17 @@ impl crate::server::GameServer {
     /// What a save of slot `i` would write now. `None`: nothing, for a guest, a
     /// local slot or a joiner not back in the world. `Err`: it must not be saved.
     fn joiner_record(&self, i: usize) -> Result<Option<([u8; 32], JoinerSave)>, String> {
+        let Some(pk) = self.joiner_slot(i)? else {
+            return Ok(None);
+        };
+        // M-1: never written into a retired world (or a refused one).
+        crate::save::refuse_write_over_newer_save(&crate::save::world_dir(&self.world_name))?;
+        Ok(Some((pk, self.joiner_capture(i)?)))
+    }
+
+    /// The persona of slot `i` if a save of it is due: `None` for a guest, a local slot or
+    /// a joiner not back in the world, `Err` if it must not be saved. Reads no file.
+    fn joiner_slot(&self, i: usize) -> Result<Option<[u8; 32]>, String> {
         let Some(sp) = self
             .players
             .get(i)
@@ -808,9 +819,31 @@ impl crate::server::GameServer {
                 self.joiner_path(pk).display()
             ));
         }
-        // M-1: never written into a retired world (or a refused one).
-        crate::save::refuse_write_over_newer_save(&crate::save::world_dir(&self.world_name))?;
-        Ok(Some((pk, JoinerSave::capture_projected(sp, self.calendar_id)?)))
+        Ok(Some(pk))
+    }
+
+    /// What slot `i` (which [`Self::joiner_slot`] named) would write: its capture. Reads no file.
+    fn joiner_capture(&self, i: usize) -> Result<JoinerSave, String> {
+        JoinerSave::capture_projected(&self.players[i], self.calendar_id)
+    }
+
+    /// Every connected joiner's record as a save would stage it, from memory: the same
+    /// bytes as [`Self::joiner_rows`], without the checks of the disk it makes first (a
+    /// retired world, the `handover/` guard, the record's directory). The authority's
+    /// record set uses it.
+    pub(crate) fn joiner_rows_in_memory(&self) -> Result<Vec<crate::joiner_stage::Row>, String> {
+        let mut rows = Vec::new();
+        for (i, _) in self.players.iter().enumerate().filter(|(_, sp)| sp.connected) {
+            if let Some(pk) = self.joiner_slot(i)? {
+                let bytes = crate::handover::live::personal_adapter::encode_record(pk, &self.joiner_capture(i)?)?;
+                rows.push(crate::joiner_stage::Row { name: Self::joiner_file_name(&pk), bytes });
+            }
+        }
+        Ok(rows)
+    }
+
+    fn joiner_file_name(pk: &[u8; 32]) -> String {
+        format!("{}.dat", crate::hosted_server::pubkey_to_npub(pk))
     }
     /// Write slot `i`'s record now, outside any world save (a joiner leaving; see
     /// Spec 02 §8.2.1 for what that leaves open). A stage a failed publish left
@@ -836,8 +869,7 @@ impl crate::server::GameServer {
                 record
                     .map(|(pk, saved)| {
                         let bytes = crate::handover::live::personal_adapter::checked_record(&world, pk, &saved)?;
-                        let name = format!("{}.dat", crate::hosted_server::pubkey_to_npub(&pk));
-                        Ok(crate::joiner_stage::Row { name, bytes })
+                        Ok(crate::joiner_stage::Row { name: Self::joiner_file_name(&pk), bytes })
                     })
                     .transpose()
             });

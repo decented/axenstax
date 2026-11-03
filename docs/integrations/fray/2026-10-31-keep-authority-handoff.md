@@ -342,8 +342,21 @@ Measured or built on the game side. The sizes are from `checkpoint_size_at_the_b
   must still bound what `apply_chunk_layout` builds for a section with no record (12.8 KB each). 262,144 is
   the runner's key ceiling, and about 3.4 GiB at worst, inside the placeholder 4 GiB. Same constant at both
   ends, through the one reader.
+- **The record set is built from memory by one pure function, `GameServer::build_record_set`** (ruling 1,
+  slice 3, `authority_checkpoint/record_set.rs`). It returns the records this server holds the bytes of (`w`
+  pieces through `file_piece_batch`, `c` from `Chunk::as_bytes`, a present joiner's `j` from its capture, the
+  state records, the `t` tree) as Fray's `StoredRecord`s, the entries it has only a digest of (`held`: the
+  sidecars of joiners not present, `m`, `h`, whose bytes are the meta writer's and the joiners' own saves',
+  not this save's), the tree, and `removed`: the keys the previous bound set had and this one hasn't (a
+  shrunk `w`, a dropped chunk, a sidecar no longer bound). The type is its own `RecordSet`, not `PersistBatch`:
+  a set has digest-only entries and a tree root, and no `last` or size split, which are the batcher's.
+  `StoredRecords` keeps the previous set's keys (and nothing else of it) for `removed`; the dirty map of
+  digests that supersedes that is slice 5's. A save and the set share the encoders: `encode_world_dat` (the
+  `WorldSave` build, which touches no file) and `joiner_rows_in_memory`; `try_save_selected` calls the first at
+  the point it built the same bytes before, so a save writes what it always did.
 - **What writes the records: `GameServer::persist_authority`.** It is `try_save` and then the records, in
-  `authority/` in the world's folder, one file per key. Nothing but the tests calls it yet: `--keep-world`
+  `authority/` in the world's folder, one file per key, written from the builder's set (`persist_authority_set`
+  returns it) rather than from a second pass over the notes. Nothing but the tests calls it yet: `--keep-world`
   still calls `try_save`. Fray's answer is that `--keep-world` stays unchanged through slice 3 and no native L
   runner comes before the WASM build: only a test runner calls the new paths. A normal
   server's save is untouched, and a world never run as an authority has no such folder.
@@ -426,9 +439,9 @@ Measured or built on the game side. The sizes are from `checkpoint_size_at_the_b
     after them.
   - *A shrink removes the pieces past the new end, so the store equals the bound set.* Nothing writes pieces yet:
     the file stays whole on disk, with no second copy, exactly as a save writes it. `records::file_piece_batch`
-    is the pure function `PersistBatch` (ruling 1) will call, giving the piece keys and slices for the new bytes
-    and the keys to remove given the old count. Unit-tested for growth, no change, a shrink by exactly one piece,
-    by more, to empty, and a file that has gone. Until ruling 1 calls it, no shrink of a store happens at all.
+    is the pure function that gives the piece keys and slices for the new bytes and the keys to remove given the
+    old count. Unit-tested for growth, no change, a shrink by exactly one piece, by more, to empty, and a file
+    that has gone. The record set builder (below) calls it for `w`; nothing yet writes a `w` piece as a record.
   - *Restore verifies every piece before assembling.* `manifest::verify_stored` cuts what is on disk and compares
     each piece, before `refuse_a_bound_world_dat_that_isnt_the_state` or the load read the file. Each of these is
     `invalid-checkpoint` from a real restore, naming the piece, in `every_way_world_dat_can_differ_from_its_pieces_is_refused`:

@@ -3284,6 +3284,14 @@ impl GameServer {
     /// the unclaimed selected local record instead of saving a player shadow.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn try_save_selected(&self, local_personal: Option<&crate::personal_value::LocalPersonalSave>) -> Result<(), String> {
+        self.try_save_returning(local_personal).map(|_| ())
+    }
+
+    /// [`Self::try_save_selected`], handing back the bytes of the `world.dat` it committed
+    /// and the joiners' records it published, which the authority's persist builds its
+    /// record set from instead of encoding them again.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn try_save_returning(&self, local_personal: Option<&crate::personal_value::LocalPersonalSave>) -> Result<(Vec<u8>, Vec<crate::joiner_stage::Row>), String> {
         self.guard_gameplay_preparation_write(local_personal)?;
         let wname = self.world_name.clone();
         let dir = crate::save::world_dir(&wname);
@@ -3302,6 +3310,33 @@ impl GameServer {
         if !refused.is_empty() {
             return Err(refused.join("; "));
         }
+        let encoded = self.encode_world_dat(local_personal, saved_mobs)?;
+        if !joiner_rows.is_empty() {
+            crate::joiner_stage::stage(&dir, &joiner_rows, &encoded)?;
+        }
+        let committed = self.commit_world_files(&dir, &encoded, first_save);
+        // Whichever way that went, the disk says whether this save's world.dat
+        // committed, and so whether its sidecars publish or drop.
+        let published = self.settle_joiner_stage();
+        // A persist binds what the disk then holds, however the meta came to change.
+        self.stored_records.note_meta(&wname);
+        self.stored_records.note_world_dat(&wname);
+        self.stored_records.note_handover(&wname);
+        committed.and(published)?;
+        Ok((encoded, joiner_rows))
+    }
+
+    /// `world.dat`'s bytes: the whole `WorldSave` this server would write, encoded. Pure: it
+    /// reads this server and touches no file, so a save and the authority's record set
+    /// (`authority_checkpoint::record_set`) make their bytes by this one function.
+    /// `saved_mobs` is `save::tamed_mobs_to_saved`, which a save takes first for its
+    /// refusal while a death is pending.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn encode_world_dat(
+        &self,
+        local_personal: Option<&crate::personal_value::LocalPersonalSave>,
+        saved_mobs: Vec<crate::save::SavedTamedPet>,
+    ) -> Result<Vec<u8>, String> {
         let player_saves: Vec<crate::save::PlayerSaveData> = self.players.iter().filter(|sp| !sp.server_simulated).map(|sp| {
             crate::save::PlayerSaveData {
                 x: sp.player.pos.x,
@@ -3577,19 +3612,7 @@ impl GameServer {
         };
 
         save.sort_unordered_rows();
-        let encoded = crate::save_format::encode_world_save(&save)?;
-        if !joiner_rows.is_empty() {
-            crate::joiner_stage::stage(&dir, &joiner_rows, &encoded)?;
-        }
-        let committed = self.commit_world_files(&dir, &encoded, first_save);
-        // Whichever way that went, the disk says whether this save's world.dat
-        // committed, and so whether its sidecars publish or drop.
-        let published = self.settle_joiner_stage();
-        // A persist binds what the disk then holds, however the meta came to change.
-        self.stored_records.note_meta(&wname);
-        self.stored_records.note_world_dat(&wname);
-        self.stored_records.note_handover(&wname);
-        committed.and(published)
+        crate::save_format::encode_world_save(&save)
     }
 
     /// The chunks, then `world.dat`, then the exhibits file; see [`Self::try_save`].

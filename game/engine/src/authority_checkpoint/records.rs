@@ -248,8 +248,8 @@ pub(crate) struct PieceWrites<'a> {
 
 /// The pieces of `world.dat`'s new bytes (`None`: the file has gone), and the keys to
 /// remove given how many pieces the store held, so a file that shrank leaves none past its
-/// new end. Pure, and not called yet: the file stays whole on disk here, and `PersistBatch`
-/// (ruling 1) will call this to make its batch of a persist.
+/// new end. Pure: the file stays whole on disk here, and the record set builder
+/// (`record_set.rs`) calls this to cut `world.dat` into the `w` records of a persist.
 pub(crate) fn file_piece_batch(new_bytes: Option<&[u8]>, old_count: u32) -> PieceWrites<'_> {
     let pieces = new_bytes.map(file_pieces).unwrap_or_default();
     let new_count = pieces.len() as u32;

@@ -118,3 +118,4 @@ mod authority_checkpoint_deaths; // Keep slice 3: a pending death is in the chec
 mod authority_checkpoint_mutation; // Keep slice 3: every field of the save is bound, driven from the type.
 mod authority_checkpoint_size; // Keep slice 3: the checkpoint's size doesn't follow the world's.
 mod authority_checkpoint_pieces; // Keep slice 3: world.dat in fixed pieces, and reads that fail.
+mod authority_checkpoint_builder; // Keep slice 3, ruling 1: the record set built from memory, equal to the disk.
