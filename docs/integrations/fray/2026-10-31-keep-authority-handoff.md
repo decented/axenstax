@@ -368,8 +368,10 @@ Measured or built on the game side. The sizes are from `checkpoint_size_at_the_b
   measured. Moving water is one more family in `records.rs`. It wasn't in the ruling's list, so it is here.
 - **A piece is by position.** A queue's order is its state, so a state record is cut by offset: an entry added
   near the start of the sorted layout or the clocks rewrites the pieces after it, up to the whole record in a
-  batch. At the largest measured, that is 840,504 B of `authority/` records against the 1 MiB batch, which
-  staged batches can spread.
+  batch. For lava it is always the whole record while the queue drains, as taking the front shifts every byte
+  after it: 703,043 B a persist at the 8-joiner bench. At the largest measured, all of `authority/` is 840,504 B
+  against the 1 MiB batch, which staged batches can spread. Fine at a 60 s cadence; a much shorter one makes it
+  the dirty-rate limit ruling 1 says to measure.
 
 **For the Fray session, from closing the `world.dat` gap:**
 
