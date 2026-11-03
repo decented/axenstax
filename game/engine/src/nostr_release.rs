@@ -38,6 +38,18 @@
 //! an install — the unsigned HTTP manifest can only add a mirror URL held to
 //! this signed hash (audit 2026-09-27).
 //!
+//! ## Freshness: the high-water mark
+//!
+//! A relay is not trusted to be current. One that holds back the newest release,
+//! or replays an old signed one, could keep a player on a build with a known
+//! flaw. So the highest verified release ever seen (version and event
+//! `created_at`) is kept in the app's data directory ([`mark_path`]), and a
+//! release below it is never offered, from any relay or from the site check
+//! (`update_check::start_once`). Only a SIGNED event raises the mark, never the
+//! unsigned manifest. A missing, unreadable or damaged mark file means no mark:
+//! updates carry on as before. It is written atomically (temp file, fsync,
+//! rename, fsync of the directory).
+//!
 //! The pinned key here MUST equal `RELEASE_PUBKEY_HEX` in
 //! `tools/release/release-helpers.mjs` (the publish side) — see that
 //! constant's doc comment for the ceremony that minted it and the
@@ -179,32 +191,143 @@ async fn fetch_release_events(url: &str, pinned_hex: &str) -> Result<Vec<Event>,
     Ok(out)
 }
 
-/// Query every relay in `relays` for the pinned author's release event, verify every
-/// candidate, and keep the one with the latest `created_at` (the addressable-
-/// event replacement rule — a relay serving a stale copy loses to a fresher
-/// one from another relay). `None` when the source is disabled
-/// ([`RELEASE_PUBKEY_HEX`] is `None`), every relay is unreachable, or nothing
-/// verifiable came back — same "absent, not current" contract as
-/// `update_check::fetch_latest_version`.
-async fn fetch_latest_async(pinned_hex: &str, relays: &[String]) -> Option<Latest> {
-    let mut best: Option<Event> = None;
+/// Query every relay in `relays` for the pinned author's release event and
+/// return every event that verifies and is from the pinned author. A relay
+/// serving a stale copy is dealt with by [`choose_release`]. Empty when every
+/// relay is unreachable or nothing verifiable came back.
+async fn collect_release_events(pinned_hex: &str, relays: &[String]) -> Vec<Event> {
+    let mut out = Vec::new();
     for url in relays {
         let url = url.as_str();
         match fetch_release_events(url, pinned_hex).await {
             Ok(events) => {
-                for ev in events {
-                    if ev.verify().is_err() || ev.pubkey.to_hex() != pinned_hex {
-                        continue;
-                    }
-                    if best.as_ref().is_none_or(|b| ev.created_at > b.created_at) {
-                        best = Some(ev);
-                    }
-                }
+                out.extend(events.into_iter().filter(|ev| ev.verify().is_ok() && ev.pubkey.to_hex() == pinned_hex));
             }
             Err(e) => log::debug!("[update] relay {url} unreachable for release event: {e}"),
         }
     }
-    best.and_then(|ev| parse_release_event(&ev, pinned_hex))
+    out
+}
+
+/// The highest verified release seen so far: its version and the event's
+/// `created_at`. Persisted by [`save_mark`]; see the module doc.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct ReleaseMark {
+    pub(crate) version: String,
+    pub(crate) created_at: u64,
+}
+
+impl ReleaseMark {
+    /// Ordering key: version first, then publish time. `None` for a version
+    /// that does not parse (such a mark is never stored or honoured).
+    fn key(&self) -> Option<([u32; 4], u64)> {
+        Some((update_check::parse_version(&self.version)?, self.created_at))
+    }
+
+    /// True when a release with this `version` / `created_at` is OLDER than the
+    /// mark: a lower version, or the same version published earlier. A higher
+    /// version is never older, whatever its timestamp. An unparseable
+    /// candidate is not judged here (the version comparison drops it later).
+    fn is_older_than(&self, version: &str, created_at: u64) -> bool {
+        let (Some((mark_v, mark_t)), Some(cand_v)) = (self.key(), update_check::parse_version(version)) else {
+            return false;
+        };
+        cand_v < mark_v || (cand_v == mark_v && created_at < mark_t)
+    }
+}
+
+/// Where the high-water mark lives: the app's own data directory.
+fn mark_path() -> std::path::PathBuf {
+    crate::data_dir::data_root().join("release_mark.json")
+}
+
+/// Read the mark. A missing, unreadable or damaged file is `None`: no mark,
+/// never a refusal to update.
+fn load_mark(path: &std::path::Path) -> Option<ReleaseMark> {
+    let bytes = std::fs::read(path).ok()?;
+    let mark: ReleaseMark = serde_json::from_slice(&bytes).ok()?;
+    mark.key()?;
+    Some(mark)
+}
+
+/// Write the mark atomically: temp file in the same directory, fsync, rename
+/// over, fsync of the directory.
+fn save_mark(path: &std::path::Path, mark: &ReleaseMark) -> Result<(), String> {
+    use std::io::Write;
+    let dir = path.parent().ok_or_else(|| "mark path has no parent directory".to_string())?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    let tmp = path.with_extension("json.tmp");
+    let body = serde_json::to_vec(mark).map_err(|e| format!("encode mark: {e}"))?;
+    let written = std::fs::File::create(&tmp).and_then(|mut f| {
+        f.write_all(&body)?;
+        f.sync_all()
+    });
+    if let Err(e) = written.and_then(|()| std::fs::rename(&tmp, path)) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("write release mark: {e}"));
+    }
+    crate::self_update::sync_dir(dir);
+    Ok(())
+}
+
+/// Pick the release to offer from `events`: verified, from the pinned author,
+/// parseable, and not older than `mark`; of those, the latest `created_at` (the
+/// addressable-event replacement rule). Returns it with the mark it implies.
+fn choose_release(events: Vec<Event>, pinned_hex: &str, mark: Option<&ReleaseMark>) -> Option<(Latest, ReleaseMark)> {
+    let mut best: Option<(Latest, ReleaseMark)> = None;
+    for ev in events {
+        if ev.verify().is_err() || ev.pubkey.to_hex() != pinned_hex {
+            continue;
+        }
+        let Some(latest) = parse_release_event(&ev, pinned_hex) else { continue };
+        let created_at = ev.created_at.as_secs();
+        if mark.is_some_and(|m| m.is_older_than(&latest.version, created_at)) {
+            log::warn!("[update] ignored a release older than one already seen ({})", latest.version);
+            continue;
+        }
+        if best.as_ref().is_none_or(|(_, b)| created_at > b.created_at) {
+            let new_mark = ReleaseMark { version: latest.version.clone(), created_at };
+            best = Some((latest, new_mark));
+        }
+    }
+    best
+}
+
+/// Load the mark from `path`, choose a release, and raise the stored mark if
+/// this one is higher. A failed write is logged and the offer stands.
+fn offer_release(events: Vec<Event>, pinned_hex: &str, path: &std::path::Path) -> Option<Latest> {
+    let mark = load_mark(path);
+    let (latest, new_mark) = choose_release(events, pinned_hex, mark.as_ref())?;
+    if mark.as_ref().is_none_or(|m| new_mark.key() > m.key())
+        && let Err(e) = save_mark(path, &new_mark)
+    {
+        log::warn!("[update] {e}");
+    }
+    Some(latest)
+}
+
+/// Drop `latest` (from the unsigned site manifest) when its version is below
+/// `mark`. The site carries no `created_at`, so only the version is compared,
+/// and it never raises the mark.
+fn without_older_than_mark(latest: Option<Latest>, mark: Option<&ReleaseMark>) -> Option<Latest> {
+    let latest = latest?;
+    match mark {
+        Some(m) if m.is_older_than(&latest.version, u64::MAX) => {
+            log::warn!("[update] ignored a site manifest older than a release already seen ({})", latest.version);
+            None
+        }
+        _ => Some(latest),
+    }
+}
+
+/// The site check's answer, with anything below the stored mark dropped.
+pub(crate) fn drop_below_stored_mark(latest: Option<Latest>) -> Option<Latest> {
+    without_older_than_mark(latest, load_mark(&mark_path()).as_ref())
+}
+
+/// True when `version` is below the stored mark: the installer's last check.
+pub(crate) fn version_is_below_stored_mark(version: &str) -> bool {
+    load_mark(&mark_path()).is_some_and(|m| m.is_older_than(version, u64::MAX))
 }
 
 /// Synchronous entry point — see the module doc for why building a runtime
@@ -219,7 +342,8 @@ pub fn fetch_latest(relays: &[String]) -> Option<Latest> {
         return None;
     }
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().ok()?;
-    rt.block_on(fetch_latest_async(pinned_hex, relays))
+    let events = rt.block_on(collect_release_events(pinned_hex, relays));
+    offer_release(events, pinned_hex, &mark_path())
 }
 
 #[cfg(test)]
@@ -347,5 +471,135 @@ mod tests {
             let ev = release_event(&keys, "0.3.0", REAL_SHA, url);
             assert_eq!(parse_release_event(&ev, &pinned), None, "{url}");
         }
+    }
+
+    // ---- high-water mark ----
+
+    fn scratch_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("axe_nostr_release_test_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        dir
+    }
+
+    /// A signed release event for `version` published at `created_at`.
+    fn release_at(keys: &Keys, version: &str, created_at: u64) -> Event {
+        let url = format!("https://mirror.example/axenstax-engine_{version}_x86_64.AppImage");
+        EventBuilder::new(Kind::Custom(RELEASE_KIND), "release notes")
+            .tags([
+                Tag::parse(["d", RELEASE_D_TAG]).unwrap(),
+                Tag::parse(["version", version]).unwrap(),
+                Tag::parse(["x", REAL_SHA]).unwrap(),
+                Tag::parse(["url", url.as_str()]).unwrap(),
+            ])
+            .custom_created_at(Timestamp::from_secs(created_at))
+            .sign_with_keys(keys)
+            .unwrap()
+    }
+
+    #[test]
+    fn a_replayed_older_event_is_not_offered() {
+        let dir = scratch_dir("replay");
+        let path = dir.join("release_mark.json");
+        let keys = Keys::generate();
+        let pinned = keys.public_key().to_hex();
+
+        let current = offer_release(vec![release_at(&keys, "0.3.0", 2000)], &pinned, &path);
+        assert_eq!(current.expect("the current release is offered").version, "0.3.0");
+
+        // A relay replays an older, still validly signed release.
+        assert_eq!(offer_release(vec![release_at(&keys, "0.2.0", 1000)], &pinned, &path), None);
+        // The same version, earlier publish: also a replay.
+        assert_eq!(offer_release(vec![release_at(&keys, "0.3.0", 1500)], &pinned, &path), None);
+        // With the newer one present too, the newer one wins, whatever the order.
+        let both = vec![release_at(&keys, "0.2.0", 1000), release_at(&keys, "0.3.0", 2000)];
+        assert_eq!(offer_release(both, &pinned, &path).expect("offered").version, "0.3.0");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_newer_release_is_still_offered_and_raises_the_mark() {
+        let dir = scratch_dir("raise");
+        let path = dir.join("release_mark.json");
+        let keys = Keys::generate();
+        let pinned = keys.public_key().to_hex();
+
+        assert!(offer_release(vec![release_at(&keys, "0.3.0", 2000)], &pinned, &path).is_some());
+        assert!(offer_release(vec![release_at(&keys, "0.3.1", 3000)], &pinned, &path).is_some());
+        assert_eq!(load_mark(&path), Some(ReleaseMark { version: "0.3.1".into(), created_at: 3000 }));
+        // A replay does not lower it.
+        assert_eq!(offer_release(vec![release_at(&keys, "0.3.0", 2000)], &pinned, &path), None);
+        assert_eq!(load_mark(&path), Some(ReleaseMark { version: "0.3.1".into(), created_at: 3000 }));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_mark_survives_a_restart() {
+        let dir = scratch_dir("restart");
+        let path = dir.join("nested").join("release_mark.json");
+        let keys = Keys::generate();
+        let pinned = keys.public_key().to_hex();
+
+        assert!(offer_release(vec![release_at(&keys, "0.3.0", 2000)], &pinned, &path).is_some());
+
+        // "Restart": nothing in memory, only the file. It is whole JSON, and
+        // no temporary is left beside it.
+        assert_eq!(load_mark(&path), Some(ReleaseMark { version: "0.3.0".into(), created_at: 2000 }));
+        let names: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["release_mark.json"]);
+        assert_eq!(offer_release(vec![release_at(&keys, "0.2.9", 1900)], &pinned, &path), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_unreadable_mark_does_not_stop_updates() {
+        let keys = Keys::generate();
+        let pinned = keys.public_key().to_hex();
+        let ev = || vec![release_at(&keys, "0.3.0", 2000)];
+
+        // Damaged contents.
+        let dir = scratch_dir("damaged");
+        let path = dir.join("release_mark.json");
+        std::fs::write(&path, b"\x00not json at all").unwrap();
+        assert_eq!(load_mark(&path), None);
+        assert_eq!(offer_release(ev(), &pinned, &path).expect("offered").version, "0.3.0");
+        assert_eq!(load_mark(&path), Some(ReleaseMark { version: "0.3.0".into(), created_at: 2000 }), "healed");
+
+        // Valid JSON, nonsense version.
+        std::fs::write(&path, br#"{"version":"banana","created_at":1}"#).unwrap();
+        assert_eq!(load_mark(&path), None);
+        assert!(offer_release(ev(), &pinned, &path).is_some());
+
+        // The path is a directory: unreadable, and unwritable. Still offered.
+        let as_dir = dir.join("dir_mark");
+        std::fs::create_dir_all(&as_dir).unwrap();
+        assert_eq!(load_mark(&as_dir), None);
+        assert!(offer_release(ev(), &pinned, &as_dir).is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_site_check_cannot_offer_a_version_below_the_mark() {
+        let mark = ReleaseMark { version: "0.3.0".into(), created_at: 2000 };
+        let site = |v: &str| Some(Latest { version: v.to_string(), appimage: None });
+        assert_eq!(without_older_than_mark(site("0.2.9"), Some(&mark)), None);
+        assert!(without_older_than_mark(site("0.3.0"), Some(&mark)).is_some());
+        assert!(without_older_than_mark(site("0.3.1"), Some(&mark)).is_some());
+        assert!(without_older_than_mark(site("0.2.9"), None).is_some(), "no mark, no refusal");
+        assert_eq!(without_older_than_mark(None, Some(&mark)), None);
+    }
+
+    #[test]
+    fn an_event_signed_by_another_key_never_counts_toward_the_mark() {
+        let dir = scratch_dir("stranger");
+        let path = dir.join("release_mark.json");
+        let pinned = Keys::generate().public_key().to_hex();
+        let stranger = Keys::generate();
+        assert_eq!(offer_release(vec![release_at(&stranger, "99.0.0", 9999)], &pinned, &path), None);
+        assert_eq!(load_mark(&path), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

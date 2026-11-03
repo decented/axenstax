@@ -51,6 +51,30 @@ can therefore no longer choose the installed bytes; the remaining trust root is
 the release-signing key. See `docs/superpowers/specs/2026-07-29-native-version-update-indicator-design.md`
 § "In-place update" for the full flow.
 
+*Freshness and durability (2026-11-03).* The updater never goes backwards, and
+replacing the AppImage survives a power cut:
+
+- **High-water mark.** The highest SIGNED release seen (version and the event's
+  `created_at`) is kept in `<data root>/release_mark.json`, written atomically
+  (temp file, `fsync`, rename, `fsync` of the directory). A release is older than
+  the mark if its version is lower, or the version is equal and it was published
+  earlier; an older one is never offered from any relay, and the site manifest is
+  dropped when its version is below the mark (`nostr_release::drop_below_stored_mark`,
+  called from `update_check::start_once`). `self_update::start` re-checks the
+  version as a last line. Only a verified, pinned-author event raises the mark,
+  never the unsigned manifest. A missing, unreadable or damaged mark file means
+  no mark: updates carry on, and the next signed release rewrites it.
+- **Durable replacement** (`self_update::install_over_with`). The download is a
+  sibling `.part` file, verified against the signed sha256; then it is `fsync`ed,
+  the build being replaced is hard-linked (copied where links are refused) and
+  kept as `<name>.AppImage.previous` (one copy only), the `.part` is renamed over
+  the target, and the directory is `fsync`ed. Any failure before the rename
+  leaves the target and any earlier `.previous` as they were. Cost: one extra
+  AppImage of disk. The previous copy is for recovery by hand; there is no
+  rollback UI.
+- **Not done.** Release-event expiry and signing-key rotation are open owner
+  questions; the published event format is unchanged.
+
 ### 1.2 Attack Targets
 
 | Target | Impact if Compromised |

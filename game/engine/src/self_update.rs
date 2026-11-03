@@ -27,6 +27,16 @@
 //! hash mismatch — removes the `.part` and leaves the running binary exactly
 //! as it was; the player falls back to the manual download link.
 //!
+//! ## Surviving power loss, and the previous copy
+//!
+//! [`install_over_with`] flushes the verified file to disk before any name
+//! points at it, keeps the build being replaced as `<name>.AppImage.previous`
+//! beside it (one copy only, so an update costs one extra AppImage of disk),
+//! renames the new file into place and then flushes the directory. A failed
+//! rename leaves the running AppImage and any earlier `.previous` as they were.
+//! The previous copy is for recovery by hand (rename it back); nothing in the
+//! game offers a rollback.
+//!
 //! ## Privacy
 //!
 //! The download is a plain GET of the exact URL named in `latest.json` — same
@@ -91,6 +101,12 @@ pub fn running_appimage() -> Option<PathBuf> {
 ///
 /// Returns immediately; the work runs on a worker thread.
 pub fn start(target: PathBuf, reference: AppImageRef, version: String) {
+    // Last line of defence behind the offer filter: never install a release
+    // below the highest one already seen (see `nostr_release`).
+    if crate::nostr_release::version_is_below_stored_mark(&version) {
+        set_progress(Progress::Failed("that release is older than one already seen".to_string()));
+        return;
+    }
     {
         let mut guard = match PROGRESS.lock() {
             Ok(g) => g,
@@ -262,11 +278,51 @@ pub fn verify_sha256(path: &Path, expected_hex: &str) -> Result<(), String> {
     }
 }
 
-/// Make `part` executable and atomically move it over `target` (same
-/// directory ⇒ `rename` is atomic on Linux — no window where `target` is a
-/// truncated or partial file). On rename failure `target` is left untouched;
-/// the caller (`finish_install`) is responsible for removing `part`.
+/// Where the copy being replaced is kept: `<target>.previous`, beside it.
+/// Recovery by hand only (rename it back); there is deliberately no rollback UI.
+pub fn previous_path(target: &Path) -> PathBuf {
+    let mut name = target.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+    name.push(".previous");
+    target.with_file_name(name)
+}
+
+/// Make the directory entry itself durable (a rename is only crash-safe once
+/// its directory has been flushed). Failure is logged, not fatal: by the time
+/// this runs the new file is already in place.
+pub(crate) fn sync_dir(dir: &Path) {
+    match std::fs::File::open(dir).and_then(|d| d.sync_all()) {
+        Ok(()) => {}
+        Err(e) => log::warn!("self-update: could not flush {}: {e}", dir.display()),
+    }
+}
+
+/// Make `part` executable, flush it to disk, keep the copy being replaced as
+/// `<target>.previous`, then move `part` over `target` and flush the directory.
+/// See [`install_over_with`] for the order and its failure behaviour.
 pub fn install_over(part: &Path, target: &Path) -> Result<(), String> {
+    install_over_with(part, target, |from, to| std::fs::rename(from, to))
+}
+
+/// [`install_over`] with the final rename injectable, so a test can fail it.
+///
+/// Order, each step before the next so a power cut leaves either the old or the
+/// new AppImage whole, never a truncated one:
+/// 1. `chmod 755` and `fsync` the verified `part`, so its bytes are on disk
+///    before any name points at them;
+/// 2. hard-link (or, where links are refused, copy) the current `target` to a
+///    temporary name, so the old build cannot vanish when `target` is replaced;
+/// 3. rename `part` over `target` (atomic within one directory);
+/// 4. only now rename the temporary to `<target>.previous`, replacing the one
+///    older copy, and `fsync` the directory. If step 3 failed, the temporary is
+///    removed and the earlier `.previous` and `target` are exactly as they were.
+///
+/// Costs one extra AppImage of disk: the previous build stays on disk beside
+/// the new one.
+pub fn install_over_with(
+    part: &Path,
+    target: &Path,
+    rename: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -274,7 +330,45 @@ pub fn install_over(part: &Path, target: &Path) -> Result<(), String> {
         perms.set_mode(0o755);
         std::fs::set_permissions(part, perms).map_err(|e| format!("make downloaded file executable: {e}"))?;
     }
-    std::fs::rename(part, target).map_err(|e| format!("install: {e}"))
+    std::fs::File::open(part)
+        .and_then(|f| f.sync_all())
+        .map_err(|e| format!("flush downloaded file to disk: {e}"))?;
+
+    let previous = previous_path(target);
+    let keep = previous.with_file_name({
+        let mut n = previous.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+        n.push(".tmp");
+        n
+    });
+    let _ = std::fs::remove_file(&keep);
+    let kept = if target.exists() {
+        match std::fs::hard_link(target, &keep).or_else(|_| std::fs::copy(target, &keep).map(|_| ())) {
+            Ok(()) => true,
+            Err(e) => {
+                // The update matters more than the safety copy: say so and go on.
+                log::warn!("self-update: could not keep the previous copy: {e}");
+                let _ = std::fs::remove_file(&keep);
+                false
+            }
+        }
+    } else {
+        false
+    };
+
+    if let Err(e) = rename(part, target) {
+        if kept {
+            let _ = std::fs::remove_file(&keep);
+        }
+        return Err(format!("install: {e}"));
+    }
+    if kept && let Err(e) = std::fs::rename(&keep, &previous) {
+        log::warn!("self-update: could not store the previous copy: {e}");
+        let _ = std::fs::remove_file(&keep);
+    }
+    if let Some(dir) = target.parent() {
+        sync_dir(dir);
+    }
+    Ok(())
 }
 
 /// Launch `appimage` as a new process and return immediately. The caller is
@@ -399,6 +493,105 @@ mod tests {
             "target must be untouched on a verify failure"
         );
         assert!(!part.exists(), "part must be removed after a failed verify");
+    }
+
+    #[cfg(unix)]
+    fn mode_of(p: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        fs::metadata(p).unwrap().permissions().mode() & 0o777
+    }
+
+    fn dir_names(dir: &Path) -> Vec<String> {
+        let mut v: Vec<String> =
+            fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn install_keeps_the_replaced_copy_beside_the_target_as_previous() {
+        let dir = scratch_dir("keep_previous");
+        let part = dir.join(".new.AppImage.part");
+        let target = dir.join("axenstax-engine.AppImage");
+        fs::write(&part, b"new build").unwrap();
+        fs::write(&target, b"old build").unwrap();
+
+        assert_eq!(install_over(&part, &target), Ok(()));
+
+        assert_eq!(fs::read(&target).unwrap(), b"new build");
+        assert_eq!(fs::read(dir.join("axenstax-engine.AppImage.previous")).unwrap(), b"old build");
+        assert_eq!(dir_names(&dir), ["axenstax-engine.AppImage", "axenstax-engine.AppImage.previous"]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_one_previous_copy_is_kept() {
+        let dir = scratch_dir("one_previous");
+        let target = dir.join("axenstax-engine.AppImage");
+        fs::write(&target, b"build 1").unwrap();
+        for next in [&b"build 2"[..], b"build 3"] {
+            let part = dir.join(".new.AppImage.part");
+            fs::write(&part, next).unwrap();
+            assert_eq!(install_over(&part, &target), Ok(()));
+        }
+        assert_eq!(fs::read(&target).unwrap(), b"build 3");
+        assert_eq!(fs::read(previous_path(&target)).unwrap(), b"build 2", "previous is the one just replaced");
+        assert_eq!(dir_names(&dir), ["axenstax-engine.AppImage", "axenstax-engine.AppImage.previous"]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_first_install_with_no_target_makes_no_previous() {
+        let dir = scratch_dir("no_previous");
+        let part = dir.join(".new.AppImage.part");
+        let target = dir.join("axenstax-engine.AppImage");
+        fs::write(&part, b"first build").unwrap();
+        assert_eq!(install_over(&part, &target), Ok(()));
+        assert_eq!(dir_names(&dir), ["axenstax-engine.AppImage"]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_verify_leaves_the_target_and_the_previous_copy_untouched() {
+        let dir = scratch_dir("verify_keeps_previous");
+        let part = dir.join(".new.AppImage.part");
+        let target = dir.join("axenstax-engine.AppImage");
+        fs::write(&part, b"tampered bytes").unwrap();
+        fs::write(&target, b"current build").unwrap();
+        fs::write(previous_path(&target), b"older build").unwrap();
+
+        let res = finish_install(&part, &target, &sha256_hex(b"the signed bytes"));
+
+        assert!(res.is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"current build");
+        assert_eq!(fs::read(previous_path(&target)).unwrap(), b"older build");
+        assert_eq!(dir_names(&dir), ["axenstax-engine.AppImage", "axenstax-engine.AppImage.previous"]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_rename_leaves_the_current_appimage_runnable_and_the_older_previous_in_place() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch_dir("rename_fails");
+        let part = dir.join(".new.AppImage.part");
+        let target = dir.join("axenstax-engine.AppImage");
+        fs::write(&part, b"new build").unwrap();
+        fs::write(&target, b"current build").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(previous_path(&target), b"older build").unwrap();
+
+        let res = install_over_with(&part, &target, |_, _| {
+            Err(std::io::Error::other("injected rename failure"))
+        });
+
+        assert!(res.unwrap_err().contains("injected rename failure"));
+        assert_eq!(fs::read(&target).unwrap(), b"current build");
+        assert_eq!(mode_of(&target), 0o755, "the current AppImage must stay executable");
+        assert_eq!(fs::read(previous_path(&target)).unwrap(), b"older build");
+        let names = dir_names(&dir);
+        assert!(!names.iter().any(|n| n.ends_with(".tmp")), "no temporary left behind: {names:?}");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -14,6 +14,7 @@ Any PIN on a test device or test identity is `123456`.
 - The room code message now says anyone signed in who has the code can join.
 - An invite link now lets one person into the world you're hosting, until it expires or you stop hosting. If it's forwarded, nobody else gets in. It no longer adds anybody to a Friends list on either side, and `/online copy` makes a new link once the current one has been used.
 - Rows that older builds added to a Friends list through an invite are gone on upgrade. Signet friends stay at their Signet tier, but **Join** may ask for an invite link once before it works again. Someone you pasted and then played with on an older build may need pasting again.
+- The desktop app's updater never offers a release older than one it has already seen, and it keeps the build it replaces next to the new one as `<name>.AppImage.previous` (about one extra AppImage of disk). That copy is for recovery by hand only: if an update misbehaves, quit the game and rename it back over the AppImage. There is no rollback button.
 - Worlds saved by this build won't open on older builds (save format 60). A handover between this build and an older one is refused at the manifest or import, even though the protocol version is the same.
 - A joiner who leaves a hosted world comes back where they left, not at spawn, if there is room to stand there. A world remembers its clock across a restart: auctions, bounties and cooldowns carry on from where they were instead of starting over, and the sky resumes its time and weather.
 
@@ -93,6 +94,14 @@ Only a hard stop shows this. Automated checks cut a save short at each step. Nob
 31. Host a world with a signed-in friend. The friend takes a stack from a chest and stays in the world. Kill the host (`kill -9`, or pull the plug) at any moment, during an autosave if you can catch one (5 minutes on a host, 60 seconds on a dedicated server). Reopen the world. Is the stack in one place only: the chest or the friend's bag, never both or neither?
 32. After any hard stop and reopen, look in the world's folder. A `joiners.new` folder should be gone. Is it?
 33. Known gap, not a bug: if the friend takes the stack and **leaves**, then the host dies within that same autosave wait, the stack can come back in both places. A clean quit doesn't do this.
+
+## Updater: previous copy and no going back
+
+Needs a real AppImage install and a newer published release.
+
+34. Update in place from the lobby. Is there now a `<name>.AppImage.previous` beside the AppImage, and does the new one start? Update again later: is there still only one `.previous`?
+35. Pull the plug (or `kill -9`) during the install if you can catch it. After a restart does the AppImage still start, old or new, never a half file?
+36. Known limit: the updater does not go backwards, so a release older than one this install has already seen is never offered. To test it you need to delete `release_mark.json` from the data folder, which resets that memory.
 
 ## Known gaps, not bugs in this build
 

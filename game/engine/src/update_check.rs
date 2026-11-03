@@ -168,8 +168,12 @@ pub fn start_once(relays: Vec<String>) {
         // gets installed, and the HTTP manifest is a mirror / notify-only
         // hint — see `decide`. A source that failed is `None`, i.e. absent,
         // never "this one says you're current".
-        let http = fetch_latest_version();
+        // Signed feed first, so a newer release raises the stored mark before
+        // the site's answer is judged against it. The site's answer is dropped
+        // when it is below the highest signed release ever seen: a stale or
+        // replayed manifest never goes backwards.
         let nostr = crate::nostr_release::fetch_latest(&relays);
+        let http = crate::nostr_release::drop_below_stored_mark(fetch_latest_version());
         let state = decide(current_version(), http, nostr);
         log::debug!("update check: {state:?}");
         if let Ok(mut slot) = RESULT.lock() {
@@ -301,7 +305,7 @@ fn compare_versions(current: &str, latest: Latest) -> UpdateState {
 /// Padded to a fixed width so `"0.2"` and `"0.2.0"` compare equal, and so a
 /// plain `Vec` ordering is a correct version ordering. Rejects empty strings,
 /// non-numeric segments, and anything longer than four segments.
-fn parse_version(v: &str) -> Option<[u32; 4]> {
+pub(crate) fn parse_version(v: &str) -> Option<[u32; 4]> {
     let v = v.trim().trim_start_matches('v');
     if v.is_empty() {
         return None;
