@@ -597,3 +597,23 @@ fn a_handed_over_worlds_records_are_bound() {
     assert!(wrong.is_empty(), "handover records' mutations not refused: {wrong:#?}");
     restore_of(&h, &bytes, &f).unwrap_or_else(|e| panic!("all put back, it restores: {e:?}"));
 }
+
+/// A checkpoint can't bind what it can't read, and a restore would refuse what it left out.
+#[test]
+fn a_handover_record_that_cant_be_read_is_an_error_at_checkpoint() {
+    use crate::authority_checkpoint::CheckpointError;
+    let f = fixture("personal-unreadable");
+    let (h, _, _) = authority_of_the_fixture(&f);
+    let link = f.world.join("handover/ready-link.dat");
+    std::os::unix::fs::symlink(f.world.join("world.dat"), &link).unwrap();
+    h.server.stored_records.note_handover("personal");
+    assert!(matches!(h.server.checkpoint(), Err(CheckpointError::Unrestorable(_))), "a symlink");
+    assert!(h.server.write_bound_records().is_err(), "and no persist can bind it");
+    fs::remove_file(&link).unwrap();
+    fs::create_dir(&link).unwrap();
+    h.server.stored_records.note_handover("personal");
+    assert!(matches!(h.server.checkpoint(), Err(CheckpointError::Unrestorable(_))), "a folder");
+    fs::remove_dir(&link).unwrap();
+    h.server.stored_records.note_handover("personal");
+    h.server.checkpoint().expect("put right, it checkpoints");
+}

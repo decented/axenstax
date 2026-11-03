@@ -10,6 +10,10 @@
 //! | `q` + `u32` BE | a piece of the lava queue |
 //! | `p` + `u32` BE | a piece of the exposure clocks |
 //!
+//! One more family is bound the same way and has no file here, as the file it is pieces
+//! of stays whole where a save writes it: `w` + `u32` BE, a piece of `world.dat`.
+//! `manifest.rs` reads it.
+//!
 //! **The tree.** A checkpoint's manifest section lists `(key, digest)`, and a key
 //! starting `t` binds a further manifest record the same way (ruling 2). The tree is a
 //! function of the entries alone: at most [`LEAF_ENTRIES`] entries is one record; more
@@ -20,6 +24,13 @@
 //! **Pieces.** A state record is cut at [`MAX_RECORD_BYTES`], so that no value passes
 //! the runner's record limit whatever the world holds. A queue's order is its state, so
 //! a piece is by position: an entry added near the start rewrites the pieces after it.
+//!
+//! **`world.dat`'s pieces.** One key and digest for each [`FILE_PIECE_BYTES`] of the stored
+//! bytes, so the file can pass the runner's record-value limit (the Tier-L rulings' addendum
+//! to section 2). Nothing is parsed to make them, so a build with another field doesn't
+//! see an unchanged file as changed. One changed row rewrites its piece, and every later
+//! piece if it changes the row's length. Per-table keys can replace that if a measured
+//! commit shows it matters.
 
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -35,15 +46,29 @@ use super::RestoreError;
 pub(crate) const RECORDS_DIR: &str = "authority";
 /// The runner's key limit (Tier-L rulings, the limits table).
 pub(super) const MAX_RECORD_KEY: usize = 128;
-/// No record here is longer, well inside the runner's limit of one batch. A manifest
-/// record can't reach it: 257 entries of at most `4 + 128 + 32` bytes.
+/// No record here is longer: the game's number, a sixteenth of the runner's record-value
+/// limit (1 MiB less headers). It isn't derived from that limit or the batch limit behind
+/// it, which is an unmeasured placeholder. A manifest record can't reach it: 257 entries
+/// of at most `4 + 128 + 32` bytes.
 pub(crate) const MAX_RECORD_BYTES: usize = 64 * 1024;
 const LEAF_ENTRIES: usize = 64;
+
+/// The size of a piece of `world.dat`, part of this schema: changing it is a new schema.
+/// Not derived from the batch limit, an unmeasured placeholder. Well under the runner's
+/// record-value limit, so that limit can come down without a change here. Why this number:
+/// a piece costs the file one manifest entry of 41 B, so even a 1 GiB file (the runner's
+/// total) is 16,384 keys of its 262,144; and it is what one changed row of a fixed length
+/// rewrites, where a piece at the limit would make that 1 MiB. A smaller one saves nothing
+/// once a row's length changes, as every later piece is then rewritten whatever their
+/// size. It is also the one limit a read of any record in this schema already has.
+pub(crate) const FILE_PIECE_BYTES: usize = 64 * 1024;
+const _: () = assert!(FILE_PIECE_BYTES <= MAX_RECORD_BYTES);
 
 pub(super) const MANIFEST: u8 = b't';
 pub(super) const LAYOUT: u8 = b'l';
 pub(super) const LAVA: u8 = b'q';
 pub(super) const EXPOSURE: u8 = b'p';
+pub(super) const WORLD_DAT: u8 = b'w';
 const FAMILIES: [(u8, &str); 3] = [(LAYOUT, "layout"), (LAVA, "lava queue"), (EXPOSURE, "exposure clocks")];
 
 pub(crate) type Stored = (Vec<u8>, Vec<u8>);
@@ -62,11 +87,22 @@ pub(super) fn is_state_key(key: &[u8]) -> bool {
     key.len() == 5 && FAMILIES.iter().any(|(family, _)| *family == key[0])
 }
 
+/// Is this key a piece of `world.dat`?
+pub(super) fn is_world_dat_piece(key: &[u8]) -> bool {
+    key.len() == 5 && key[0] == WORLD_DAT
+}
+
 /// What a family's key says, for a refusal.
 pub(super) fn describe(key: &[u8]) -> Option<String> {
-    FAMILIES.iter().find(|(family, _)| key.len() == 5 && *family == key[0]).map(|(_, name)| {
+    FAMILIES.iter().chain(&[(WORLD_DAT, "world.dat")]).find(|(family, _)| key.len() == 5 && *family == key[0]).map(|(_, name)| {
         format!("{name} piece {}", u32::from_be_bytes([key[1], key[2], key[3], key[4]]))
     })
+}
+
+fn piece_key(family: u8, i: u32) -> Vec<u8> {
+    let mut key = vec![family];
+    key.extend_from_slice(&i.to_be_bytes());
+    key
 }
 
 /// The bytes of the three state records, whole.
@@ -144,6 +180,41 @@ fn build_node(entries: &[Entry], nodes: &mut Vec<Stored>) -> Entry {
     let digest = sha256(&bytes);
     nodes.push((key.clone(), bytes));
     (key, digest)
+}
+
+/// `world.dat`'s stored bytes cut into its pieces. An empty file is one empty piece, so that
+/// it is bound and isn't the same as no file; a file of a whole number of pieces has no
+/// empty one after them.
+pub(crate) fn file_pieces(bytes: &[u8]) -> Vec<&[u8]> {
+    if bytes.is_empty() {
+        return vec![bytes];
+    }
+    bytes.chunks(FILE_PIECE_BYTES).collect()
+}
+
+/// The key and digest of each piece of `world.dat`.
+pub(super) fn file_entries(bytes: &[u8]) -> Vec<Entry> {
+    file_pieces(bytes).into_iter().enumerate().map(|(i, piece)| (piece_key(WORLD_DAT, i as u32), sha256(piece))).collect()
+}
+
+/// What a batch must do to leave the store equal to the record set a checkpoint binds.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct PieceWrites<'a> {
+    pub writes: Vec<(Vec<u8>, &'a [u8])>,
+    pub removes: Vec<Vec<u8>>,
+}
+
+/// The pieces of `world.dat`'s new bytes (`None`: the file has gone), and the keys to
+/// remove given how many pieces the store held, so a file that shrank leaves none past its
+/// new end. Pure, and not called yet: the file stays whole on disk here, and `PersistBatch`
+/// (ruling 1) will call this to make its batch of a persist.
+pub(crate) fn file_piece_batch(new_bytes: Option<&[u8]>, old_count: u32) -> PieceWrites<'_> {
+    let pieces = new_bytes.map(file_pieces).unwrap_or_default();
+    let new_count = pieces.len() as u32;
+    PieceWrites {
+        writes: pieces.into_iter().enumerate().map(|(i, piece)| (piece_key(WORLD_DAT, i as u32), piece)).collect(),
+        removes: (new_count..old_count.max(new_count)).map(|i| piece_key(WORLD_DAT, i)).collect(),
+    }
 }
 
 /// What the store holds under `key`. `None`: nothing. A record past the limit comes back
@@ -354,6 +425,60 @@ mod tests {
         assert!(build_tree(&list).is_err());
         let list = entries(&[vec![b'j'; MAX_RECORD_KEY - 1]]);
         assert!(build_tree(&list).is_ok());
+    }
+
+    use super::piece_key as key;
+
+    /// The schema's number: a change is a new schema, not a tuning. Under the runner's
+    /// record-value limit of 1 MiB less headers.
+    #[test]
+    fn a_files_piece_size_is_the_schemas_number() {
+        assert_eq!(FILE_PIECE_BYTES, 65_536);
+        assert!(FILE_PIECE_BYTES < (1 << 20) - 4096);
+    }
+
+    #[test]
+    fn an_empty_file_is_one_empty_piece_and_a_whole_one_has_no_empty_tail() {
+        assert_eq!(file_pieces(&[]), vec![&[] as &[u8]]);
+        let exact = vec![1u8; FILE_PIECE_BYTES * 2];
+        assert_eq!(file_pieces(&exact).len(), 2);
+        let over = vec![1u8; FILE_PIECE_BYTES * 2 + 1];
+        let pieces = file_pieces(&over);
+        assert_eq!(pieces.len(), 3);
+        assert_eq!(pieces[2].len(), 1);
+        assert_eq!(pieces.concat(), over);
+    }
+
+    /// After the batch, the store is the bound set: every piece of the new bytes, and
+    /// nothing past them, whatever the old count.
+    #[test]
+    fn a_batch_of_a_files_pieces_leaves_the_store_equal_to_the_bound_set() {
+        let piece = FILE_PIECE_BYTES;
+        for (new_len, pieces) in [(piece * 3, 3u32), (piece * 3 + 1, 4), (piece, 1), (1, 1), (0, 1)] {
+            let bytes: Vec<u8> = (0..new_len).map(|i| (i % 251) as u8).collect();
+            for old in [0u32, 1, 2, 3, 4, 5, 40] {
+                let batch = file_piece_batch(Some(&bytes), old);
+                let keys: Vec<_> = batch.writes.iter().map(|(k, _)| k.clone()).collect();
+                assert_eq!(keys, (0..pieces).map(|i| key(b'w', i)).collect::<Vec<_>>(), "{new_len} B, {old} before");
+                assert_eq!(batch.writes.iter().map(|(_, b)| b.to_vec()).collect::<Vec<_>>().concat(), bytes);
+                let gone: Vec<_> = (pieces..old.max(pieces)).map(|i| key(b'w', i)).collect();
+                assert_eq!(batch.removes, gone, "{new_len} B, {old} before");
+            }
+        }
+    }
+
+    #[test]
+    fn a_shrink_by_exactly_one_piece_removes_exactly_the_last_key() {
+        let bytes = vec![0u8; FILE_PIECE_BYTES * 2];
+        assert_eq!(file_piece_batch(Some(&bytes), 3).removes, vec![key(b'w', 2)]);
+    }
+
+    /// A file that has gone leaves no piece behind.
+    #[test]
+    fn a_batch_of_a_file_that_has_gone_removes_every_piece() {
+        let batch = file_piece_batch(None, 2);
+        assert!(batch.writes.is_empty());
+        assert_eq!(batch.removes, vec![key(b'w', 0), key(b'w', 1)]);
     }
 
     #[test]

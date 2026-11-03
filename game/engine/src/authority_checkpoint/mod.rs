@@ -8,7 +8,7 @@
 //!
 //! ```text
 //! magic         b"axenstax/authority-checkpoint\0"
-//! schema        u16 (4)
+//! schema        u16 (5)
 //! protocol      u32   PROTOCOL_VERSION
 //! save format   u32   SAVE_FORMAT_VERSION
 //! worldgen      u32   the world's generator version
@@ -74,12 +74,12 @@ use crate::server::GameServer;
 
 pub(crate) use manifest::StoredRecords;
 #[cfg(test)]
-pub(crate) use records::{MAX_RECORD_BYTES, Tree};
+pub(crate) use records::{FILE_PIECE_BYTES, MAX_RECORD_BYTES, Tree};
 
 pub(crate) const CHECKPOINT_MAGIC: &[u8] = b"axenstax/authority-checkpoint\0";
-/// 4: the manifest, the layout, the lava queue and the exposure clocks in stored
+/// 5: `world.dat` bound in fixed pieces, and all that grows with the world in stored
 /// records. Nothing relies on an earlier one.
-pub(crate) const SCHEMA: u16 = 4;
+pub(crate) const SCHEMA: u16 = 5;
 /// The session-image cap of migration v0.1 (handoff §6, choice 1).
 pub(crate) const MAX_CHECKPOINT_BYTES: usize = 1 << 20;
 
@@ -418,6 +418,9 @@ impl GameServer {
     fn bound_records_for_checkpoint(&self) -> Result<Bound, CheckpointError> {
         if self.lent {
             return Err(CheckpointError::Lent);
+        }
+        if let Some(why) = self.stored_records.why_unbindable() {
+            return Err(CheckpointError::Unrestorable(why));
         }
         self.bound_records().map_err(CheckpointError::Encode)
     }

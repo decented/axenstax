@@ -187,7 +187,7 @@ fn the_header_and_the_hash_are_as_specified() {
     };
     assert_eq!(CHECKPOINT_MAGIC, b"axenstax/authority-checkpoint\0");
     assert_eq!(take(CHECKPOINT_MAGIC.len()), CHECKPOINT_MAGIC);
-    assert_eq!(take(2), 4u16.to_le_bytes(), "schema");
+    assert_eq!(take(2), 5u16.to_le_bytes(), "schema");
     assert_eq!(take(4), crate::protocol::PROTOCOL_VERSION.to_le_bytes());
     assert_eq!(take(4), crate::save_format::SAVE_FORMAT_VERSION.to_le_bytes());
     assert_eq!(take(4), h.server.world.generator.version().to_le_bytes());

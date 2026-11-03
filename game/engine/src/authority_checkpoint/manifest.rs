@@ -10,13 +10,15 @@
 //! | `b"j"` + file name | a joiner's sidecar, as stored | [`StoredRecords`] |
 //! | `b"l"`, `b"q"`, `b"p"` + piece | the layout, lava queue and exposure clocks | memory |
 //! | `b"m"` | the world's meta as stored, the value of `pop_secret` cut | [`StoredRecords`] |
-//! | `b"w"` | `world.dat` as stored: every table of `WorldSave` | [`StoredRecords`] |
+//! | `b"w"` + piece | `world.dat` as stored, in fixed pieces: every table of `WorldSave` | [`StoredRecords`] |
 //!
 //! A server save writes every non-empty chunk it holds, so that is what is listed.
 //!
-//! `world.dat` is one record, so all 56 fields of the save are bound by one entry
-//! whatever size the world's tables reach, and a field added to the save is bound by
-//! being in the file. A server writes its rows in one order
+//! `world.dat` is bound in fixed pieces (`records.rs`), so it can pass the runner's
+//! record-value limit whatever the world's tables reach, and a field added to the save is
+//! bound by being in the file. The file stays whole where a save writes it: a restore
+//! cuts what is on disk, so a file longer than the bound set has a piece the manifest
+//! doesn't name, and one shorter lacks one it does. A server writes its rows in one order
 //! (`WorldSave::sort_unordered_rows`), so the same tables are the same bytes.
 //!
 //! The manifest is only true of the disk straight after a save. A record that has
@@ -31,19 +33,19 @@
 //! writes, not an encoding of parsed fields.
 
 use std::collections::BTreeMap;
+use std::io::Read;
 use std::path::Path;
 use std::sync::Mutex;
 
 use sha2::{Digest, Sha256};
 
 use super::codec::{Malformed, Reader, Writer};
-use super::records::{self, sha256, StateRecords, MANIFEST, MAX_RECORD_KEY};
+use super::records::{self, sha256, StateRecords, FILE_PIECE_BYTES, MANIFEST, MAX_RECORD_KEY};
 use super::RestoreError;
 use crate::server::GameServer;
 
 pub(super) type Entry = (Vec<u8>, [u8; 32]);
 
-const WORLD_DAT_KEY: &[u8] = b"w";
 const HANDOVER: u8 = b'h';
 /// Where a handed-over world keeps what a restore reads of its authority: every file
 /// but a lock or a temporary one, which nothing reads as a record.
@@ -59,13 +61,17 @@ pub(crate) struct StoredRecords {
     /// The digest of the world's stored meta, without its secret. `None`: no meta
     /// file. A `Mutex`, as a save takes `&self`.
     meta: Mutex<Option<[u8; 32]>>,
-    /// The digest of the world's stored `world.dat`. `None`: no such file yet.
-    world_dat: Mutex<Option<[u8; 32]>>,
+    /// The key and digest of each piece of the stored `world.dat`. Empty: no such file yet.
+    world_dat: Mutex<Vec<Entry>>,
     /// Every sidecar in the world's `joiners/`, by file name. A `Mutex`, as a
     /// save takes `&self` (as `World::disk_chunks` does).
     joiners: Mutex<BTreeMap<String, [u8; 32]>>,
     /// Every record of a handed-over world's authority, by path in its folder.
     handover: Mutex<BTreeMap<String, [u8; 32]>>,
+    /// What couldn't be read when it was last noted. A record left out can't be bound,
+    /// and a restore would refuse the checkpoint that left it out, so none is written
+    /// while this holds anything. Which of them: the `note_*` that failed.
+    unreadable: Mutex<BTreeMap<&'static str, String>>,
 }
 
 /// The sidecars are one file per persona ever seen. A name too long for a record key
@@ -75,41 +81,49 @@ fn is_sidecar_name(name: &str) -> bool {
 }
 
 impl StoredRecords {
+    /// What a read came to. A normal save goes on as it did, with the error logged; it
+    /// is only a checkpoint or an authority's persist that can't go on without it.
+    fn noted<T: Default>(&self, world: &str, what: &'static str, read: Result<T, String>) -> T {
+        let mut unreadable = self.unreadable.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        match read {
+            Ok(value) => {
+                unreadable.remove(what);
+                value
+            }
+            Err(e) => {
+                log::error!("world '{world}': the checkpoint can't bind {what}: {e}");
+                unreadable.insert(what, e);
+                T::default()
+            }
+        }
+    }
+
+    /// Why no checkpoint can bind the records as they were last noted, if so.
+    pub(super) fn why_unbindable(&self) -> Option<String> {
+        let unreadable = self.unreadable.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        unreadable.iter().next().map(|(what, why)| format!("{what} can't be read, so it can't be bound: {why}"))
+    }
+
     /// Learn the world's meta from the disk: at the load, after anything that can
     /// rewrite it, and at each persist, so the digest is of the bytes that are there.
     /// A world with no file has no record: the defaults `load_world_meta` falls back
     /// to hold a random seed and today's date, which are nothing to bind to.
     pub(crate) fn note_meta(&self, world: &str) {
-        let digest = match stored_meta_digest(&crate::save::world_dir(world)) {
-            Ok(digest) => digest,
-            Err(e) => {
-                log::error!("world '{world}': the checkpoint can't bind the meta: {e}");
-                None
-            }
-        };
+        let digest = self.noted(world, "the meta", stored_meta_digest(&crate::save::world_dir(world)));
         *self.meta.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = digest;
     }
 
     /// Learn `world.dat` from the disk: at the load and at each persist, whichever
-    /// way its commit went, so the digest is of the bytes that are there.
+    /// way its commit went, so the digests are of the bytes that are there.
     pub(crate) fn note_world_dat(&self, world: &str) {
-        let digest = match stored_world_dat_digest(&crate::save::world_dir(world)) {
-            Ok(digest) => digest,
-            Err(e) => {
-                log::error!("world '{world}': the checkpoint can't bind world.dat: {e}");
-                None
-            }
-        };
-        *self.world_dat.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = digest;
+        let pieces = self.noted(world, "world.dat", stored_world_dat_pieces(&crate::save::world_dir(world), u64::MAX));
+        *self.world_dat.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = pieces;
     }
 
     /// Learn a handed-over world's authority records from the disk: at the load and at
     /// each persist. A world with no `handover/` has none.
     pub(crate) fn note_handover(&self, world: &str) {
-        let records = stored_handover(&crate::save::world_dir(world)).unwrap_or_else(|e| {
-            log::error!("world '{world}': the checkpoint can't bind its handover records: {e}");
-            BTreeMap::new()
-        });
+        let records = self.noted(world, "its handover records", stored_handover(&crate::save::world_dir(world)));
         *self.handover.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = records;
     }
 
@@ -192,12 +206,18 @@ fn stored_handover(world_dir: &Path) -> Result<BTreeMap<String, [u8; 32]>, Strin
     Ok(records)
 }
 
-fn stored_world_dat_digest(world_dir: &Path) -> Result<Option<[u8; 32]>, String> {
-    match std::fs::read(world_dir.join("world.dat")) {
-        Ok(stored) => Ok(Some(sha256(&stored))),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(format!("world.dat can't be read ({e})")),
-    }
+/// The key and digest of each piece of the stored `world.dat`, of at most its first `most`
+/// bytes, as a restore has no use for more than one piece past what it binds. Empty: no
+/// such file.
+fn stored_world_dat_pieces(world_dir: &Path, most: u64) -> Result<Vec<Entry>, String> {
+    let file = match std::fs::File::open(world_dir.join("world.dat")) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("world.dat can't be read ({e})")),
+    };
+    let mut stored = Vec::new();
+    file.take(most).read_to_end(&mut stored).map_err(|e| format!("world.dat can't be read ({e})"))?;
+    Ok(records::file_entries(&stored))
 }
 
 fn stored_meta_digest(world_dir: &Path) -> Result<Option<[u8; 32]>, String> {
@@ -214,11 +234,13 @@ fn stored_meta_digest(world_dir: &Path) -> Result<Option<[u8; 32]>, String> {
 ///
 /// A chunk file the manifest doesn't name is no mismatch: it is a column the run
 /// dropped, and the layout keeps it out of the restored world. A sidecar, meta, handover
-/// record or `world.dat` it doesn't name is one, as each of those is read whole into the
-/// world. A manifest with no `world.dat` is a checkpoint from before any persist.
+/// record or piece of `world.dat` it doesn't name is one, as each of those is read whole
+/// into the world. A manifest with no `world.dat` is a checkpoint from before any persist.
+/// `world.dat` is only digested here, piece by piece: its readers come after.
 pub(super) fn verify_stored(wanted: &[Entry], world_dir: &Path) -> Result<StateRecords, RestoreError> {
     let disagree = |why: String| RestoreError::InvalidCheckpoint(format!("the stored records and the manifest disagree: {why}"));
-    if !wanted.iter().any(|(key, _)| key == WORLD_DAT_KEY) {
+    let world_dat_pieces = wanted.iter().filter(|(key, _)| records::is_world_dat_piece(key)).count() as u64;
+    if world_dat_pieces == 0 {
         return Err(disagree("no world.dat is bound".to_string()));
     }
     let (state, mut found) = records::read_state(wanted, world_dir)?;
@@ -239,9 +261,9 @@ pub(super) fn verify_stored(wanted: &[Entry], world_dir: &Path) -> Result<StateR
     for (path, digest) in stored_handover(world_dir).map_err(&disagree)? {
         found.push((handover_key(&path), digest));
     }
-    if let Some(digest) = stored_world_dat_digest(world_dir).map_err(RestoreError::Fault)? {
-        found.push((WORLD_DAT_KEY.to_vec(), digest));
-    }
+    // Enough to show a piece past the bound set, if there is one.
+    let most = (world_dat_pieces + 1).saturating_mul(FILE_PIECE_BYTES as u64);
+    found.extend(stored_world_dat_pieces(world_dir, most).map_err(RestoreError::Fault)?);
     match stored_meta_digest(world_dir).map_err(RestoreError::Fault)? {
         Some(digest) => found.push((b"m".to_vec(), digest)),
         // The load would rebuild a meta from this: a write, of a record nobody bound.
@@ -341,6 +363,9 @@ fn secret_value_span(json: &[u8]) -> Option<std::ops::Range<usize>> {
 /// Every record but the state that lies in records, which is added once it is encoded
 /// (`GameServer::bound_records`). Sorted by key.
 pub(super) fn entries(s: &GameServer) -> Result<Vec<Entry>, String> {
+    if let Some(why) = s.stored_records.why_unbindable() {
+        return Err(why);
+    }
     let mut list: Vec<Entry> = Vec::new();
     for ((cx, cy, cz), chunk) in s.world.persistable_chunks() {
         if chunk.is_empty() {
@@ -369,9 +394,7 @@ pub(super) fn entries(s: &GameServer) -> Result<Vec<Entry>, String> {
     if let Some(digest) = *s.stored_records.meta.lock().unwrap_or_else(std::sync::PoisonError::into_inner) {
         list.push((b"m".to_vec(), digest));
     }
-    if let Some(digest) = *s.stored_records.world_dat.lock().unwrap_or_else(std::sync::PoisonError::into_inner) {
-        list.push((WORLD_DAT_KEY.to_vec(), digest));
-    }
+    list.extend_from_slice(&s.stored_records.world_dat.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
     list.sort_unstable_by(|a, b| a.0.cmp(&b.0));
     Ok(list)
 }
@@ -414,7 +437,6 @@ pub(super) fn first_mismatch(wanted: &[Entry], found: &[Entry]) -> Option<String
         Some(b'j') => format!("sidecar {}", String::from_utf8_lossy(&key[1..])),
         Some(&HANDOVER) => format!("handover record {}", String::from_utf8_lossy(&key[1..])),
         Some(b'm') => "the world meta".to_string(),
-        Some(b'w') => "world.dat".to_string(),
         _ => records::describe(key).unwrap_or_else(|| "an unknown record".to_string()),
     };
     let (mut a, mut b) = (wanted.iter().peekable(), found.iter().peekable());

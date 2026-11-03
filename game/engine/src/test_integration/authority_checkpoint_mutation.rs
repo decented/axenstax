@@ -3,9 +3,11 @@
 //! row here, and a row is a real restore that must come back `InvalidCheckpoint`.
 //! "Makes the hash differ" is not what these check (Spec 01 §4.1.5).
 //!
-//! One stored record, `world.dat`, holds them all, so each field's row asks the
-//! record's question of that field's own bytes; the record-wide cases (absent, swapped
-//! from another key, an older value) are in `every_record_refuses_every_mutation`.
+//! One stored file, `world.dat`, holds them all, bound in fixed pieces, so each field's
+//! row asks the question of that field's own bytes, and is refused by the piece they lie
+//! in. Piece-level cases (missing, swapped, stale, longer) are in
+//! `authority_checkpoint_pieces.rs`; the file-wide ones (absent, swapped from another
+//! world, an older value) are in `every_record_refuses_every_mutation`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -367,8 +369,9 @@ fn a_persist_moves_the_checkpoint_with_the_tables() {
     let file = std::fs::read(world_dir("ckpt-persist-moves").join("world.dat")).unwrap();
     let digest: [u8; 32] = Sha256::digest(&file).into();
     let entries = crate::authority_checkpoint::manifest_entries(&h.server).unwrap();
-    assert_eq!(entries.iter().find(|(key, _)| key == b"w").map(|(_, d)| *d), Some(digest));
-    assert!(!entries.iter().any(|(key, _)| key == b"b"), "the tables have stored bytes now");
+    let pieces: Vec<_> = entries.iter().filter(|(key, _)| key[0] == b'w').collect();
+    assert_eq!((pieces.len(), pieces[0].0.as_slice(), pieces[0].1), (1, &b"w\0\0\0\0"[..], digest));
+    assert!(!entries.iter().any(|(key, _)| key == b"b" || key == b"w"), "the tables have stored bytes, in pieces");
 }
 
 /// A record written before this build's last field is unchanged, and doesn't read as
