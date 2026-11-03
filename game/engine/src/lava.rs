@@ -14,6 +14,7 @@ use std::collections::VecDeque;
 use ahash::AHashSet;
 
 use crate::block::{AIR, LAVA, OBSIDIAN, WATER};
+use crate::fluids::PositionedQueue;
 use crate::world::World;
 
 /// Max cells solidified/spread per active tick — lava is rarer than water so a
@@ -27,8 +28,8 @@ pub(crate) const SLOW_FACTOR: u8 = 3;
 
 pub struct LavaSystem {
     sources: crate::fluids::SourceSet,
-    spread_queue: VecDeque<(i32, i32, i32, u8)>,
-    retract_queue: VecDeque<(i32, i32, i32)>,
+    spread_queue: PositionedQueue<(i32, i32, i32, u8)>,
+    retract_queue: PositionedQueue<(i32, i32, i32)>,
     slow: u8,
 }
 
@@ -36,8 +37,8 @@ impl LavaSystem {
     pub fn new() -> Self {
         Self {
             sources: crate::fluids::SourceSet::default(),
-            spread_queue: VecDeque::new(),
-            retract_queue: VecDeque::new(),
+            spread_queue: PositionedQueue::default(),
+            retract_queue: PositionedQueue::default(),
             slow: 0,
         }
     }
@@ -61,18 +62,22 @@ impl LavaSystem {
         self.slow
     }
 
-    /// Keep slice 2b — what a checkpoint carries: the sources against a rescan
-    /// of `loaded`, the pending fronts in queue order and the spread phase.
+    /// The sources against a rescan of `loaded`, as a checkpoint carries them.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn checkpoint_view(&self, world: &World, loaded: &ahash::AHashSet<(i32, i32)>) -> (crate::fluids::FluidCheckpoint, u8) {
-        let (extra, missing) = self.sources.delta_from_rescan(world, loaded, LAVA);
-        let fronts = crate::fluids::FluidCheckpoint {
-            extra,
-            missing,
-            spread: self.spread_queue.iter().copied().collect(),
-            retract: self.retract_queue.iter().copied().collect(),
-        };
-        (fronts, self.slow)
+    pub(crate) fn sources_from_rescan(&self, world: &World, loaded: &ahash::AHashSet<(i32, i32)>) -> (Vec<(i32, i32, i32)>, Vec<(i32, i32, i32)>) {
+        self.sources.delta_from_rescan(world, loaded, LAVA)
+    }
+
+    /// The pending spread fronts, in queue order.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn spread_queue(&self) -> &PositionedQueue<(i32, i32, i32, u8)> {
+        &self.spread_queue
+    }
+
+    /// The pending retractions, in queue order.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn retract_queue(&self) -> &PositionedQueue<(i32, i32, i32)> {
+        &self.retract_queue
     }
 
     /// Keep slice 3 — the spread phase, which the checkpoint holds apart from the
@@ -82,13 +87,34 @@ impl LavaSystem {
         self.slow
     }
 
-    /// Keep slice 2b — put back what [`Self::checkpoint_view`] took.
+    /// Keep slice 3 — put back what the methods above took.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn restore_checkpoint(&mut self, world: &World, loaded: &ahash::AHashSet<(i32, i32)>, saved: &crate::fluids::FluidCheckpoint, slow: u8) {
+    pub(crate) fn restore_checkpoint(&mut self, world: &World, loaded: &ahash::AHashSet<(i32, i32)>, saved: &crate::fluids::LavaCheckpoint, slow: u8) {
         self.sources.rebuild_from_rescan(world, loaded, LAVA, &saved.extra, &saved.missing);
-        self.spread_queue = saved.spread.iter().copied().collect();
-        self.retract_queue = saved.retract.iter().copied().collect();
+        self.spread_queue = saved.spread.clone();
+        self.retract_queue = saved.retract.clone();
         self.slow = slow;
+    }
+
+    /// For tests: `spread` and `retract` as a queue that has given up nothing yet.
+    #[cfg(test)]
+    pub(crate) fn queue_for_test(&mut self, spread: &[(i32, i32, i32, u8)], retract: &[(i32, i32, i32)]) {
+        self.spread_queue = PositionedQueue::restored(0, Vec::new(), spread.to_vec());
+        self.retract_queue = PositionedQueue::restored(0, Vec::new(), retract.to_vec());
+    }
+
+    /// For tests: the spread phase alone, a value no run reaches included.
+    #[cfg(test)]
+    pub(crate) fn set_slow_for_test(&mut self, slow: u8) {
+        self.slow = slow;
+    }
+
+    /// For tests: the spread queue placed at `head`, as if it had already drained that
+    /// many, the cells behind the head being `behind`.
+    #[cfg(test)]
+    pub(crate) fn queue_at_head_for_test(&mut self, head: u64, behind: (i32, i32, i32, u8), spread: &[(i32, i32, i32, u8)]) {
+        let drained = vec![behind; (head % crate::fluids::QUEUE_PIECE_ENTRIES) as usize];
+        self.spread_queue = PositionedQueue::restored(head, drained, spread.to_vec());
     }
 
     pub fn add_source(&mut self, x: i32, y: i32, z: i32) {
@@ -214,11 +240,10 @@ impl LavaSystem {
         let mut dirty: Vec<(i32, i32, i32)> = Vec::new();
 
         let mut to_check: Vec<(i32, i32, i32)> = Vec::new();
-        while let Some(pos) = self.retract_queue.pop_front() {
-            if to_check.len() >= RETRACT_BUDGET {
-                self.retract_queue.push_front(pos);
+        while to_check.len() < RETRACT_BUDGET {
+            let Some(pos) = self.retract_queue.pop_front() else {
                 break;
-            }
+            };
             to_check.push(pos);
         }
 

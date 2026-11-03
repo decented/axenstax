@@ -64,7 +64,7 @@ pub(super) fn sign_in(h: &mut TestHost) {
 
 /// Run on until no mob death is waiting: a save refuses one (the runner withholds
 /// its `last` while one is pending).
-fn settle(h: &mut TestHost) {
+pub(super) fn settle(h: &mut TestHost) {
     while crate::sim_death::has_pending(&h.server.ecs) {
         let next = h.server.tick_counter + 1;
         run_to(h, next);
@@ -584,9 +584,7 @@ fn checkpoint_size_at_the_bench_world_sizes() {
             // Worst lava inside one drain, on the real 511-column world: every entry a
             // tenfold load could hold, past anything the bench's real load queued.
             let spread: Vec<_> = (0..540_000).map(|i| (i, 300, i % 7, 1u8)).collect();
-            let queued = crate::fluids::FluidCheckpoint { extra: Vec::new(), missing: Vec::new(), spread, retract: Vec::new() };
-            let (world, loaded) = (&h.server.world, &h.server.loaded_columns);
-            h.server.lava.restore_checkpoint(world, loaded, &queued, 0);
+            h.server.lava.queue_for_test(&spread, &[]);
             h.server.persist_authority().expect("persists");
             let worst = h.server.checkpoint().expect("checkpoints");
             assert!(worst.len() < MAX_CHECKPOINT_BYTES, "{} B", worst.len());

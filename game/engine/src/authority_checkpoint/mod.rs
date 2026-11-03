@@ -70,6 +70,7 @@ mod deaths;
 mod manifest;
 mod players;
 mod record_set;
+mod lava_records;
 mod records;
 mod restore;
 mod volatile;
@@ -89,7 +90,7 @@ pub(crate) use records::{FILE_PIECE_BYTES, MAX_RECORD_BYTES, Tree};
 pub(crate) const CHECKPOINT_MAGIC: &[u8] = b"axenstax/authority-checkpoint\0";
 /// 5: `world.dat` bound in fixed pieces, and all that grows with the world in stored
 /// records. Nothing relies on an earlier one.
-pub(crate) const SCHEMA: u16 = 5;
+pub(crate) const SCHEMA: u16 = 6;
 /// The session-image cap of migration v0.1 (handoff §6, choice 1).
 pub(crate) const MAX_CHECKPOINT_BYTES: usize = 1 << 20;
 
@@ -292,6 +293,12 @@ pub(crate) fn state_families() -> Vec<(u8, &'static str)> {
     records::FAMILIES.to_vec()
 }
 
+/// A record's digest as a manifest binds it.
+#[cfg(test)]
+pub(crate) fn record_digest(bytes: &[u8]) -> [u8; 32] {
+    records::sha256(bytes)
+}
+
 /// The key of every manifest record and state piece it binds, and each one's bytes.
 #[cfg(test)]
 pub(crate) fn bound_record_files(server: &GameServer) -> Result<Vec<(Vec<u8>, Vec<u8>)>, String> {
@@ -325,7 +332,9 @@ pub(crate) fn commit_and_read_bound(
     // What each record's reader takes for nothing there.
     let state = records::StateRecords {
         layout,
-        lava: counts(4),
+        lava_spread: Vec::new(),
+        lava_retract: Vec::new(),
+        lava_sources: Vec::new(),
         exposure: counts(1),
         water: counts(4),
         cells: counts(8),
