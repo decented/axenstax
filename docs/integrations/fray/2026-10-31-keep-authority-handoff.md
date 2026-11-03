@@ -319,6 +319,10 @@ Measured or built on the game side. The sizes are from `checkpoint_size_at_the_b
 - **The load's other recoveries can still write during a restore that gets past the digests:** publishing
   joiners' records staged before a crash, keeping aside a torn chunk file no record binds, a partly
   decoded `world.dat`. Each goes when `world.dat` is bound.
+- **Two value checks to tighten.** `read_layout` accepts evicted sections in a column not flagged evicted,
+  which no run writes, and such a world could later make a second copy of a section. A corpse's position
+  is checked as finite, not against the playable range. Each is one check in the shared reader, so
+  `checkpoint` gets it too.
 - **The cap and the world size.** A manifest entry is about 49 B, so the manifest alone reaches the cap
   near **21,000 non-empty chunks**; with the other volatile sections (about 130 KiB, plus 17 B per column)
   about **17,000**. Lava's queue sets how close a big load comes: 464,194 B at 0 joiners, 724,055 B at 2
