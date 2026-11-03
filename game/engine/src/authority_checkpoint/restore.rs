@@ -32,6 +32,15 @@ fn world_name(world_dir: &std::path::Path) -> Result<String, RestoreError> {
     Ok(name.to_string())
 }
 
+/// The section a chunk record's key names: `c` and three little-endian `i32`s.
+fn chunk_key(key: &[u8]) -> Option<(i32, i32, i32)> {
+    if key.len() != 13 || key[0] != b'c' {
+        return None;
+    }
+    let at = |i: usize| i32::from_le_bytes([key[i], key[i + 1], key[i + 2], key[i + 3]]);
+    Some((at(1), at(5), at(9)))
+}
+
 /// Everything between the header and the seal, read and range-checked. The one
 /// reader of these bytes, used by `restore` and by `checkpoint` on its own output.
 /// The manifest is what the section lists, its tree not yet walked, and the state that
@@ -105,6 +114,12 @@ impl GameServer {
         server.pop_secret = config.pop_secret;
         server.difficulty = config.difficulty;
 
+        // The load holds every chunk file in the folder, bound or not. A file the manifest
+        // doesn't name is stale: the run saved no chunk for that section because it was
+        // empty, or never held it, and left an older file in the folder. Keeping it would
+        // put its blocks into a section the run held empty and refuse a good root.
+        let bound: ahash::AHashSet<(i32, i32, i32)> = manifest.iter().filter_map(|(key, _)| chunk_key(key)).collect();
+        server.world.retain_sections(|key| bound.contains(key));
         restored.apply_layout(&mut server);
         let found = super::manifest::entries(&server).map_err(RestoreError::Fault)?;
         // The state records have been checked as they lie, and what they restore is

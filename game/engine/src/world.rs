@@ -1140,6 +1140,16 @@ impl World {
         self.chunks.remove(&(cx, cy, cz));
     }
 
+    /// Keep slice 3 — drop every held section `named` doesn't say yes to, live or
+    /// evicted. A restore keeps the sections its manifest binds: a file the manifest
+    /// doesn't name is a stale one (the section was empty when the run saved), and the
+    /// layout puts back an empty section where the run held one.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn retain_sections(&mut self, named: impl Fn(&(i32, i32, i32)) -> bool) {
+        self.chunks.retain(|key, _| named(key));
+        self.evicted.retain(|key, _| named(key));
+    }
+
     /// The highest section of column `(cx, cz)` holding a real block (live or
     /// evicted), if any. Above it every cell is air.
     pub fn top_block_section(&self, cx: i32, cz: i32) -> Option<i32> {

@@ -40,7 +40,7 @@ const NOT_YET_RESTORED: [&str; 6] = [
     "projectiles",
     // Equal in this fixture, so printed and not promised: hideout and raid counts
     // follow the mobs. The tables themselves read back from `world.dat`, which the
-    // manifest binds, and `pop_exposure` is in the volatile sections.
+    // manifest binds, and `pop_exposure` is a bound record.
     "world_tables",
 ];
 
@@ -218,6 +218,16 @@ fn the_pop_secret_is_never_in_the_bytes() {
     let contains = |needle: &[u8]| bytes.windows(needle.len()).any(|w| w == needle);
     assert!(!contains(&h.server.pop_secret), "the secret is in the checkpoint");
     assert!(!contains(&crate::server::use_seed_key(&h.server.pop_secret)), "the use-roll key is in the checkpoint");
+    // The state that grew out of the image lies in records, which are where a secret
+    // would now have to be written.
+    let use_key = crate::server::use_seed_key(&h.server.pop_secret);
+    let records = crate::authority_checkpoint::bound_record_files(&h.server).expect("the records encode");
+    assert!(!records.is_empty(), "no records to scan");
+    for (key, record) in &records {
+        let has = |needle: &[u8]| record.windows(needle.len()).any(|w| w == needle);
+        assert!(!has(&h.server.pop_secret), "the secret is in record {}", hex::encode(key));
+        assert!(!has(&use_key), "the use-roll key is in record {}", hex::encode(key));
+    }
 }
 
 /// A meta carrying the secret doesn't put it in the bytes, and the digest of
@@ -486,6 +496,31 @@ fn evicted_and_dropped_columns_stay_so() {
         step(&mut b, ticks);
         assert_restored("columns, walked", &a.server, &b.server, &promised());
     }
+}
+
+/// A section the run holds live and empty, while a non-empty file of the same
+/// position lies in the folder (the file of an earlier life of that column, never
+/// deleted): the restore leaves it empty, and the root is good.
+#[test]
+fn a_stale_chunk_file_under_a_live_empty_section_restores_empty() {
+    let _root = WorldsRootGuard::new("keep-s3a-stale-section");
+    let mut a = fixture("ckpt-stale-section", 1);
+    run_to(&mut a, 20);
+    let (cx, cz) = *a.server.loaded_columns.iter().min().expect("a column is held");
+    let cy = (-1..=crate::world::MAX_CHUNK_Y + 1)
+        .rev()
+        .find(|cy| !a.server.world.has_chunk(cx, *cy, cz))
+        .expect("a free section");
+    a.server.world.insert_chunk(cx, cy, cz, crate::chunk::Chunk::new());
+    settle(&mut a);
+    a.server.persist_authority().expect("persists");
+    let mut stale = crate::chunk::Chunk::new();
+    stale.set(1, 1, 1, crate::block::STONE);
+    let file = crate::save::world_dir("ckpt-stale-section").join("chunks").join(format!("{cx}_{cy}_{cz}.chunk"));
+    std::fs::write(&file, stale.as_bytes()).expect("writes the stale file");
+    let bytes = a.server.checkpoint().expect("checkpoints");
+    let b = restore(&a, &bytes).expect("a good root restores with a stale file under a live empty section");
+    assert!(b.world.get_chunk(cx, cy, cz).is_some_and(|c| c.is_empty()), "the section comes back empty");
 }
 
 /// A restored joiner has what its sidecar and the checkpoint carry, and a save
