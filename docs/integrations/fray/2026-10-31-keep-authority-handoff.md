@@ -158,7 +158,7 @@ restore-after-step-n with the uninterrupted run.
 | Cooldowns, respawn and death timers, spawn protection | Lost | Yes. |
 | Inputs: `last_applied_input`, intent queue, step credit | Lost | Yes: prediction re-snaps, queued input dropped. |
 | Output state: chunk-push sent-sets, entity interest, ProtocolId baseline, outboxes | Lost | Yes for output: every client is fully re-pushed. Contract acceptance 2 (ordered commands agree) cannot pass. |
-| Pending deaths | ECS markers; save refused while pending | A checkpoint at an arbitrary tick boundary may be unavailable. |
+| Pending deaths | ECS markers; save refused while pending | No longer: each corpse is in the checkpoint (slice 3), and a save still waits for the death pass, so the runner's `last` waits too. |
 | Economy owners | Saved, but five owner enums still carry `LocalPlayer(slot)` | Meaningless across a restore with reused slots; must converge on npub. |
 | `HostedServer` per-slot vectors, carry-over queues | Lost | Yes (authority state per §3). |
 | `HostedServer.server_tick` | **Fixed** (`4c5a75c6`): carries on from the restored tick at its first tick; audited safe with a large start (Spec 04 §4.2i), no wire change | No. |
@@ -225,15 +225,20 @@ Each choice carries AxeNStax's recommendation, for discussion only.
 
 ### AxeNStax positions, 2026-11-01
 
+> **Superseded where the rulings differ.** The Fray session's rulings of 2 November 2026 (and their
+> addenda of 3 November) have landed in the contract: `forgesworn/fray-internal/plans/2026-11-02-tier-l-contract-rulings.md`.
+> Where a position below disagrees, the ruling stands: choice 2 gains a bounded `get` import for restore, and
+> choice 6 is rejected (`pop_secret` derives from the 32-byte `init` seed, never from the host shell). The
+> positions are kept as they were written.
+
 AxeNStax has taken the game-side half of each choice so that slices 1 and 2 can go ahead. The
-Fray-side halves are still **proposals for the Fray session**: the contract amendment in 1, the
-`Persist(batch)` command shape in 2, and the ruling on gameplay HMAC keys in 6. Nothing here marks
-the contract itself as changed.
+Fray-side halves were **proposals** when this was written: the contract amendment in 1, the
+`Persist(batch)` command shape in 2, and the ruling on gameplay HMAC keys in 6. They have since been ruled on.
 
 1. **Hybrid checkpoint.** It is the only shape that fits the 1 MiB session-image cap. The
    checkpoint holds the volatile authority state plus a sorted digest manifest of the stored
    records. *Fray side:* amend "required content" for tier L to include the game's stored records.
-2. **Keyed records in atomic batches, with no read import in v1.** The authority emits
+2. **Keyed records in atomic batches** (ruled: with a bounded `get` import, valid only during `restore`, not "no read import"). The authority emits
    `Persist(batch)`, the runner commits it, and records are read only at restore. *Fray side:* the
    command's name and shape.
 3. **The authority emits dirty batches at its own cadence (60 s today), and the runner commits
@@ -245,7 +250,9 @@ the contract itself as changed.
    independent.
 5. **Regenerate pristine chunks**, gated by a cross-arch `column_hash` vector set. If the gate
    cannot be made to pass on ARM or WASM, the fallback is storing them.
-6. **`pop_secret` comes from the host shell as secret config.** It is excluded from the checkpoint
+6. **`pop_secret` comes from the host shell as secret config.** (Rejected by ruling 3: it is hidden game state in
+   the volatile checkpoint, derived from the 32-byte `init` seed under its own domain label; the host shell passes
+   no secret.) As proposed, it was excluded from the checkpoint
    and from `state_hash`, and the checkpoint binds only a key id. *Consequence:* if a world is
    restored on a different Keep without the secret, Satori rolls and use-rolls diverge. That is
    acceptable for L v1 because of choice 9. *Fray side:* rule that gameplay HMAC keys count as
@@ -280,7 +287,8 @@ Measured or built on the game side. The sizes are from `checkpoint_size_at_the_b
   world's next death pass does what the uninterrupted one's does (credit, loot, cargo, hideout and
   raid counts). Sweeping inside the tick wouldn't do: the pass is bounded at 32 a tick and stops while
   the kill credit has nowhere to go. A save still waits for the pass, so the runner's `last` waits too.
-  The only refusals left for a server that owns its world are `TooLarge` and `Unrestorable` (below).
+  The refusals left for a server that owns its world are `TooLarge`, `Unrestorable` (below) and `Encode`, which is a
+  capture that failed (a pack animal's plan body, or a layout section out of range) and not an over-cap image.
 - **Restore order.** Schema field, seal, remaining versions, config binding, record digests, and only
   then the load. Any schema but this build's, older or newer, is `unsupported-version` whatever
   follows it, the cap included. The old check for schema 0 as a bad checkpoint is gone. Bad magic stays
@@ -297,7 +305,11 @@ Measured or built on the game side. The sizes are from `checkpoint_size_at_the_b
 - **Restore-only bounds.** `checkpoint` puts its own bytes through the decoder and range checks a
   restore runs, so every limit is enforced at both ends by one piece of code: `Unrestorable`, no image.
   That covers `MAX_LAYOUT_SECTIONS`, the live-and-evicted section, the body bound and every other value
-  check in `read_layout`, `Volatile::validate` and `players::read_all`. A tick holds bodies and spawns at
+  check in `read_layout`, `Volatile::validate` and `players::read_all`. This is about the image's own bytes
+  and the state records, not a promise about the root: an image is written, and refused at restore, when there
+  is no persist yet, when it is of a later tick than the persist, when `world.dat` only part-decodes, or when the
+  state changed since the persist (tests pin each). It is true of a root straight after a persist, which is
+  where a runner's `last` step takes it; the slice 5 test runner must assert the restore at each commit. A tick holds bodies and spawns at
   ±1,000,000 as at a wall, and `World::insert_chunk` won't make a second copy of an evicted section.
   Tests: at-limit fixtures to the byte, and a seeded walk over the fixture's actions. The section cap's
   fixture goes through the same reader on bytes: a world at it holds 3.4 GiB of chunks.
@@ -323,15 +335,17 @@ Measured or built on the game side. The sizes are from `checkpoint_size_at_the_b
   `note_handover` used to log a failed read or scan and bind nothing, so `checkpoint` could succeed with an
   image the restore refuses. The failure is now kept: `checkpoint` is `Unrestorable` and the authority's
   persist is `Err` until a later note reads the file. A normal save still only logs it, and a file that is
-  legally absent isn't a failure. A sidecar `scan_joiners` can't read is still left out with a warning: that
-  checkpoint does restore, without the sidecar, and a restore does the same.
+  legally absent isn't a failure. A sidecar `scan_joiners` can't read is kept the same way, as it would
+  otherwise be left out of an image whose restore, reading the file after it became readable, reports it as
+  not in the manifest.
 - **`MAX_LAYOUT_SECTIONS` is 262,144.** The ruling lifts 65,536 once the layout is a record, and something
   must still bound what `apply_chunk_layout` builds for a section with no record (12.8 KB each). 262,144 is
   the runner's key ceiling, and about 3.4 GiB at worst, inside the placeholder 4 GiB. Same constant at both
   ends, through the one reader.
 - **What writes the records: `GameServer::persist_authority`.** It is `try_save` and then the records, in
   `authority/` in the world's folder, one file per key. Nothing but the tests calls it yet: `--keep-world`
-  still calls `try_save`, and wiring it is the step that makes a runner's `last` batch carry them. A normal
+  still calls `try_save`. Fray's answer is that `--keep-world` stays unchanged through slice 3 and no native L
+  runner comes before the WASM build: only a test runner calls the new paths. A normal
   server's save is untouched, and a world never run as an authority has no such folder.
 - **`checkpoint` still does no I/O, and still moves with an unsaved block.** The tree and the state records
   are functions of what the server holds, so it computes them from memory; what a persist wrote is the same
@@ -371,6 +385,19 @@ Measured or built on the game side. The sizes are from `checkpoint_size_at_the_b
 - **Two value checks.** `read_layout` refuses evicted sections in a column not flagged evicted, and a corpse
   must be at a cell in range. One check each in the shared reader, so `checkpoint` has them too.
 
+**Fray's answers, 3 November 2026** (addenda to rulings 2 and 3, from the game's fit check):
+
+- *First commit:* a world's first commit lands when its initial spread ends; `init` cannot persist. The test
+  runner keeps the same batch limit, so the check exercises real batching.
+- *Handed-over worlds:* cannot be an L world in v1. The `h` family, `open_guard` and `proof` in restore, and
+  `participants/<npub>` keys drop out for Keep.
+- *Keys and personas:* a keyed digest of a persona still counts as an identifier. Use the game's own counter,
+  never reused, plus a directory record bound by the tree, with the entry removed on erasure.
+- *Native path:* `--keep-world` stays unchanged through slice 3; no native L runner before the WASM build.
+- *Lava queue:* making its pieces not shift, so it fits a `last` batch, is the game's to fix.
+- *A state file in fixed pieces* (ruling 2's addendum): yes, under the file's own keys, with no contract change;
+  met below.
+
 **Still open on the game side, not needing a Fray answer:**
 
 - **A corpse's living copy is matched, not identified.** A pet's row in `world.dat` was taken when it
@@ -379,7 +406,7 @@ Measured or built on the game side. The sizes are from `checkpoint_size_at_the_b
 - **A piece is by position.** A queue's order is its state, so a state record is cut by offset: an entry added
   near the start of the sorted layout or the clocks rewrites the pieces after it, up to the whole record in a
   batch. For lava it is always the whole record while the queue drains, as taking the front shifts every byte
-  after it: 703,043 B a persist at the 8-joiner bench. At the largest measured, all of `authority/` is 840,504 B
+  after it: 703,043 B a persist at the 8-joiner bench. At the largest measured, all of `authority/` is 962,259 B (§8)
   against the 1 MiB batch, which staged batches can spread. Fine at a 60 s cadence; a much shorter one makes it
   the dirty-rate limit ruling 1 says to measure. Water and the player slots add to that: slots change at every
   persist with anyone moving, about 440 B a slot, and water only as it flows.
@@ -408,8 +435,10 @@ Measured or built on the game side. The sizes are from `checkpoint_size_at_the_b
     a flipped piece (first, middle, last), a missing one (short by exactly one piece, by two, by a byte, cut inside
     a piece, emptied, absent), two swapped, a stale piece, and longer than the bound set (by a byte, by a piece).
   - *Keys stay free of persona identifiers.* `w` + `u32`. The contents are unaffected. **Keys that carry one today,
-    for ruling 1's review and not touched here:** `j` + a sidecar's name (`npub1….dat`) and `h` +
-    `participants/<npub>.dat`.
+    not touched here (the persona-free keys slice):** `j` + a sidecar's name (`npub1….dat`), `h` + `participants/<npub>.dat`,
+    and a `t` key: a manifest-tree record is named `t` + the common prefix of its entries (`records.rs`
+    `build_node`), so a world with one joiner and over 64 entries holds `t` + `jnpub1….dat`, and `authority/`
+    holds a file named by that prefix in hex. The counter keys fix it with the others.
 - **`personal-manifest.dat`: no L world from a handover in v1, addendum at the end of ruling 3.** So it isn't cut
   into pieces, and its `h` binding, like the rest of `handover/` and `participants/`, stays as it was until a
   restore moves off the folder. The extra mutation cases for `prepared-`, `retired-`, `ready-` and `retained-*`
@@ -483,13 +512,42 @@ Limits of what does hold:
   the truth: the slot isn't saved until it re-attaches (`ServerPlayer::awaiting_reattach`, which the
   autosave, a shutdown save and a leave all respect), and nothing reads it as owing nothing until then.
   Slice 3's re-attach has to load that debt.
-- The meta digest is taken at load. `--keep-world` must refresh it after any later meta write
-  (`StoredRecords::note_meta`).
+- The meta digest is re-noted at each persist and whenever the server writes the file back. `--keep-world`
+  must refresh it after any later meta write outside those paths (`StoredRecords::note_meta`).
 - Not yet covered as a checkpoint: the §5 rows for `HostedServer` vectors and queues, cooldowns held
   on connection state and output state.
 
 **Slice 3:** return output as commands, and the admission split (choice 7).
 **Then:** contract acceptance 2 and the WASM build.
+
+**For the next slices (from the independent review of slice 3a; no code in this branch):**
+- Slice 5: the test runner asserts the restore at each commit, as the root is only restorable straight
+  after a persist.
+- Build the batch as the last act of `tick`, and test a `world.dat`-only table change (a chest, a bell) just
+  before it: it moves neither the clock nor `w`, so a checkpoint after the persist at the same tick restores the
+  persist's table under the same hash. Past about 1 MiB, the dirty pieces of a `last` step may not fit one batch,
+  so `last` must then be withheld, since a row-length change near the start rewrites every later piece.
+- Slice 6: read each record once. Today `w` is read 3 to 4 times and `c` twice, against `get`'s 4 GiB budget a
+  restore.
+- Only `w` has a shrink batch; the state families, `c`, `j` and `t` rely on `commit`'s folder sweep
+  (`records.rs`), which a `PersistBatch` won't have.
+- `checkpoint` is not quite observational: `deaths::encode` reaches `plan_store::remember_checked`, which writes a
+  Plan body for a dead pack animal carrying a full body. On a server these are markers and return early, so no
+  real path was found, but the code can't rule it out. A failed capture surfaces as `Encode`.
+- `has_bound_records` reads the unbound stage and can refuse a good root over a stale imported stage; it applies
+  to handed-over and imported worlds, which Fray rules out of Keep.
+- A flip inside the secret's value that breaks the JSON passes the digest and comes back as `Fault`, not
+  `InvalidCheckpoint`; ruling 3's plain `m` closes it.
+- `write_bound_records` has no gate, so a persist of a state `checkpoint` refuses overwrites the previous
+  records, and `persist_authority` isn't atomic. The stand-in store only; the real root is Ingle's.
+- `pending_item_grants` and the rest stay on the ledger, and nothing withholds `last` while they are non-empty.
+  An item grant is value, so the adapter must enforce it.
+- `save_joiner` on a leave changes a bound record outside a persist; `note_joiner` keeps the digest true, but the
+  adapter must carry it in a batch.
+- The production refusal of an inline manifest (`restore.rs`, under `#[cfg(test)]`) has no test of its own.
+- A pending death at every persist step means no commit until the interval escalation, because the death
+  pass defers while a delivery queue is full (`sim_death.rs`). For the adapter's wiring.
+- Section cap: see the note on the 65,536-section restore below.
 
 ## 8. Tier-L measurements: measured facts vs estimates
 

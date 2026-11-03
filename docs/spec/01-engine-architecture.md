@@ -1350,7 +1350,7 @@ set. No key of this family carries a persona identifier.
 the state records above and the manifest's tree, in `authority/` in the world's folder, one file per key
 named by the key in hex, standing in for a runner's store. Nothing else calls it (a runner's
 `last` step will, and `--keep-world` doesn't yet), so a normal server's save writes exactly what it
-did and a world never run as an authority has no such folder. A piece or tree record that is
+did and a world never run as an authority has no such folder. A fork doesn't copy it. A piece or tree record that is
 unchanged isn't rewritten, and one nothing binds any more is removed.
 
 **Manifest tree** (`records.rs`, key `t` + a prefix). A checkpoint's manifest section lists
@@ -1400,8 +1400,11 @@ returns writes the file. A normal open keeps all of those recoveries (Spec 02 §
 **Refusals.** `checkpoint` returns `TooLarge` past the cap (never a shorter checkpoint),
 `Lent` on a lending server and `Unrestorable` for a state a restore would refuse: it puts
 its own bytes and the state records through the decoders and range checks a restore runs
-(`decode_body`, `take_state`), so each limit below is enforced at both ends by one piece of code, and no image that can't be
-restored is written. A pending death isn't a refusal.
+(`decode_body`, `take_state`), so each limit below is enforced at both ends by one piece of code, and no image
+whose own bytes or state records a restore would refuse is written. That is true of a root only straight after a
+persist: an image taken with no persist yet, at a later tick than the persist, over a `world.dat` this build only
+part-decodes, or after the state changed since it, is written and refused at restore. A runner checks the restore
+at each commit. A pending death isn't a refusal.
 
 `restore_from_checkpoint` reads, in this order: the magic and schema field (any schema but
 this build's, older or newer, is `UnsupportedVersion`, whatever follows it, the cap
@@ -1416,8 +1419,8 @@ everything from the worldgen version to the seal re-encodes to the same bytes.
 
 **Damaged records.** From a good root a record arrives byte-exact or not at all, so a torn
 meta is `InvalidCheckpoint`: refused before the load, and neither repaired nor kept aside.
-A chunk file the manifest doesn't name is a column the run dropped, which the layout keeps
-out; a sidecar, a meta, a handover record or a piece of `world.dat` it doesn't name is refused, and so is a lost meta with a
+A chunk file the manifest doesn't name is stale (a column the run dropped, or a section it held
+empty and saved no chunk for): the restore drops it before the layout is applied; a sidecar, a meta, a handover record or a piece of `world.dat` it doesn't name is refused, and so is a lost meta with a
 damaged copy kept aside. A normal open keeps its recovery (Spec 02 §8.4), because without it every
 later save would be refused: a server opened over a torn meta rebuilds it, and its digest
 is taken after that, so the run's checkpoints bind the file that is there.
@@ -1437,7 +1440,7 @@ The seal is a checksum, and nothing tells corruption from anything else: both ar
 
 Two of these a run holds as it goes, not only at the checkpoint. A tick holds every body
 and spawn at ±1,000,000 blocks as at a wall (`GameServer::hold_bodies_in_range`, at the
-start and end of the tick). A section has one home: `World::insert_chunk` leaves a section
+start and end of the tick); a coordinate that isn't a number goes back to the body's spawn. A section has one home: `World::insert_chunk` leaves a section
 the evicted store holds where it is, because that copy is the one a save keeps. The
 section cap isn't held live: past it `checkpoint` is `Unrestorable`.
 
@@ -1462,20 +1465,16 @@ checkpoint, restore into a new server, feed both the same script for 200 ticks.
   come from the save, and what lay on the ground or was in flight is gone.
 - `world_tables`: equal in the fixture, so printed and not promised, as hideout and
   raid counts follow the mobs. The tables read back from `world.dat`, which the manifest
-  binds, and `pop_exposure` is in the volatile sections.
+  binds, and `pop_exposure` is a bound record (`p`).
 - Pending outputs: `pending_item_grants`, `pending_kill_events`, `released_joiners` and
   `pending_sapling_drops` aren't carried, and the slice 3 runner checkpoints only after
   they drain.
 
 **Limits.**
-- **A world at sim distance 8 fits, with the most joiners close to the cap.** The bench sizes are
-  464,194 B, 724,055 B and 953,813 B (91%) at 0, 2 and 8 joiners (handoff §8). Most of it is
-  lava's queue while it drains: a column's load wakes only the lava cells that can act (Spec 02
-  §7.5), about 80-110 entries a column, draining at about 53 a second. The queue's order is state,
-  so it is carried whole. Measured growth is about 2.2 KB a column, so the cap is reached at about
-  550 columns loaded inside one drain, and past that `checkpoint` is `TooLarge` until the queue
-  falls. With the queue drained, the limit is about 17,000 non-empty chunks. The Keep slice 1
-  fixture is at 237,079 B at tick 2,000, which is 23%.
+- **The image is bounded whatever the world holds.** About 2.4 KB at the widest server (handoff §8);
+  what grows with the world (the layout, lava, water, the cell sims, the player slots, the corpses) lies in
+  bound records cut at 64 KiB, so a world is limited by its stored bytes and the runner's quota, not by the
+  image's cap. `TooLarge` can only be produced by state built directly.
 - Equality of `players` holds only while no joiner meets a mob during the comparison,
   because a restored world's mobs aren't the original's and a push or a bite moves a
   body (`a_mob_on_a_joiner_parts_the_players_section`). From an empty ECS on both sides,
@@ -1486,12 +1485,12 @@ checkpoint, restore into a new server, feed both the same script for 200 ticks.
   stays in the sidecar, which is still the truth: the slot isn't saved until it
   re-attaches (`ServerPlayer::awaiting_reattach`), and nothing reads it as owing nothing
   until then. Slice 3's re-attach has to load that debt.
-- A checkpoint from a previous build is refused until migration lands: the `m` and `b`
-  digests hash a struct's encoding, so a new field changes the digest of unchanged records.
-- The meta digest is taken at load. A write to `world_meta.json` after load, other
-  than to the secret, must refresh it (`StoredRecords::note_meta`) or a restore
-  refuses. `--keep-world` needs this when it is wired.
-
+- A checkpoint from a previous build is refused until migration lands: any schema but this build's
+  is `UnsupportedVersion`.
+- The meta digest is over the file's stored bytes with the secret's value cut, and is re-noted at
+  each persist and whenever the server writes the file back (`StoredRecords::note_meta`). A write to
+  `world_meta.json` outside those paths must refresh it or a restore refuses. `--keep-world` needs
+  this when it is wired.
 
 ### 4.2 Client Frame Loop
 
