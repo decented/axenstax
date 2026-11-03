@@ -698,12 +698,17 @@ impl crate::server::GameServer {
             self.players[i].obligations.mark(IncompleteCause::Unreadable);
             return None;
         }
-        self.load_joiner_unsettled(i)
+        self.read_joiner(i, true)
     }
 
-    /// [`Self::load_joiner`], reading the record as it lies and settling no stage: a
-    /// Keep restore's read, which writes nothing.
+    /// [`Self::load_joiner`], reading the record as it lies, settling no stage and
+    /// making a frozen seed's record in memory only: a Keep restore's read, which
+    /// writes nothing.
     pub(crate) fn load_joiner_unsettled(&mut self, i: usize) -> Option<JoinerSave> {
+        self.read_joiner(i, false)
+    }
+
+    fn read_joiner(&mut self, i: usize, may_write: bool) -> Option<JoinerSave> {
         let pk = self.players.get(i)?.verified_pubkey?;
         let path = self.joiner_path(pk);
         match crate::handover::live::personal_adapter::proof(&crate::save::world_dir(&self.world_name)) {
@@ -715,7 +720,13 @@ impl crate::server::GameServer {
                     self.players[i].obligations.mark(IncompleteCause::Unreadable);
                     return None;
                 }
-                match crate::handover::live::personal_adapter::load_or_bootstrap(&crate::save::world_dir(&self.world_name), pk, &proof) {
+                let world = crate::save::world_dir(&self.world_name);
+                let read = if may_write {
+                    crate::handover::live::personal_adapter::load_or_bootstrap(&world, pk, &proof)
+                } else {
+                    crate::handover::live::personal_adapter::load_or_bootstrap_unwritten(&world, pk, &proof)
+                };
+                match read {
                     Ok(saved) => return saved,
                     Err(error) => {
                         log::warn!("Personal restore for {} refused: {error}", crate::hosted_server::pubkey_to_npub(&pk));

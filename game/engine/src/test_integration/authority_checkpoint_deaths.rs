@@ -165,7 +165,7 @@ fn a_corpses_hideout_raid_and_rescue_marks_come_back() {
     let _root = WorldsRootGuard::new("keep-s3-death-marks");
     let mut h = twin(SEED, "keep-s3-death-marks", 0, 2);
     run_to(&mut h, 2);
-    h.server.try_save().unwrap();
+    h.server.persist_authority().unwrap();
     let raider = spawn_mob(&mut h.server.ecs, MobType::Cow, AT);
     let _ = h.server.ecs.insert(raider, (
         crate::brigand::HomeHideout { anchor: [1, 2, 3] },

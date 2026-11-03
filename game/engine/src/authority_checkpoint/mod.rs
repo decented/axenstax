@@ -1,13 +1,14 @@
 //! Keep slices 2b and 3 — the authority's canonical checkpoint and its restore
-//! (Spec 01 §4.1.5). A pure, bounded byte form of what a save doesn't hold, plus a
-//! digest manifest of what it does (handoff §6, choice 1). An API with tests: nothing
-//! in `--keep-world` calls it yet, and nothing here touches the pipe or the wire.
+//! (Spec 01 §4.1.5). A pure, bounded byte form of what a save doesn't hold, plus the
+//! digest of a tree of stored records naming what it does (handoff §6, choice 1). An
+//! API with tests: nothing in `--keep-world` calls it yet, and nothing here touches the
+//! pipe or the wire.
 //!
 //! ## Layout, in order
 //!
 //! ```text
 //! magic         b"axenstax/authority-checkpoint\0"
-//! schema        u16 (3)
+//! schema        u16 (4)
 //! protocol      u32   PROTOCOL_VERSION
 //! save format   u32   SAVE_FORMAT_VERSION
 //! worldgen      u32   the world's generator version
@@ -16,14 +17,16 @@
 //! pop key id    [16]  SHA256(b"axenstax/pop-key-id/v1\0" || pop_secret)[..16]
 //! tick          u64   the completed tick
 //! volatile            `volatile.rs`, then `players.rs`, then `deaths.rs`
-//! manifest            `manifest.rs`: sorted (record key, SHA-256)
+//! manifest            `records.rs`: the root of the tree, (key, SHA-256)
 //! seal          [32]  SHA-256 of everything before it
 //! ```
 //!
 //! Fixed-width little-endian integers, `u32` length prefixes, every set in sorted
 //! order, every queue in its queue order (which is state), floats as bits with
 //! `-0.0` folded onto `0.0` (`codec.rs`). The hard cap is 1 MiB: past it a
-//! checkpoint is an error, never a shorter checkpoint.
+//! checkpoint is an error, never a shorter checkpoint. What grows with the world is
+//! not in these bytes: the manifest, the layout, the lava queue and the exposure clocks
+//! are stored records, each bound by its digest (`records.rs`).
 //!
 //! The seal isn't in the slice 2 spec's list. It lets a restore see damage to the
 //! volatile sections, which nothing else on disk can check. It is a checksum, not
@@ -35,15 +38,19 @@
 //!
 //! ## A checkpoint that can't be restored is never written
 //!
-//! `checkpoint` puts its own bytes through the decoder and range checks `restore`
-//! uses (`decode_body`), so each limit is enforced at both ends by one piece of
-//! code, and a limit added later is enforced at both by being added once.
+//! `checkpoint` puts its own bytes and the state records it binds through the decoder
+//! and range checks `restore` uses (`decode_body`, `take_state`), so each limit is
+//! enforced at both ends by one piece of code, and a limit added later is enforced at
+//! both by being added once.
 //!
 //! ## Observational
 //!
 //! `checkpoint` takes `&self`, does no I/O and calls no save path (nothing touches
 //! `World::disk_chunks`). What it needs of the disk, `StoredRecords` learnt when
-//! the records were read or written. It reads no clock and no per-run value:
+//! the records were read or written. The tree and the state records are functions of
+//! what it holds, so it computes them from memory, as `persist_authority` wrote them
+//! if nothing has changed since; if something has, the digests it names aren't the
+//! store's, and a restore refuses. It reads no clock and no per-run value:
 //! `run_id` and the reputation clock's owner are left out. `calendar_id` is in, as
 //! part of the 2a clock: it is random on a real server but persisted since 2a, so
 //! two authorities opened from one saved world agree (two separate fresh worlds
@@ -57,6 +64,7 @@ mod codec;
 mod deaths;
 mod manifest;
 mod players;
+mod records;
 mod restore;
 mod volatile;
 
@@ -65,11 +73,13 @@ use sha2::{Digest, Sha256};
 use crate::server::GameServer;
 
 pub(crate) use manifest::StoredRecords;
+#[cfg(test)]
+pub(crate) use records::{MAX_RECORD_BYTES, Tree};
 
 pub(crate) const CHECKPOINT_MAGIC: &[u8] = b"axenstax/authority-checkpoint\0";
-/// 3: `world.dat` bound as stored, and each cell's exposure clock. Nothing relies on
-/// an earlier one.
-pub(crate) const SCHEMA: u16 = 3;
+/// 4: the manifest, the layout, the lava queue and the exposure clocks in stored
+/// records. Nothing relies on an earlier one.
+pub(crate) const SCHEMA: u16 = 4;
 /// The session-image cap of migration v0.1 (handoff §6, choice 1).
 pub(crate) const MAX_CHECKPOINT_BYTES: usize = 1 << 20;
 
@@ -156,13 +166,24 @@ fn check_seal(bytes: &[u8]) -> Result<(), RestoreError> {
     Ok(())
 }
 
-/// The gate `checkpoint` puts its own bytes through: the decoder and the range
-/// checks a restore runs on them, so nothing they would refuse is written.
-pub(crate) fn refuse_unrestorable(bytes: &[u8]) -> Result<(), CheckpointError> {
+/// The gate `checkpoint` puts its own bytes and state records through: the decoders
+/// and the range checks a restore runs on them, so nothing they would refuse is written.
+fn refuse_unrestorable(bytes: &[u8], state: &records::StateRecords) -> Result<(), CheckpointError> {
     let refused = |why: String| CheckpointError::Unrestorable(why);
     let tick = Header::read(bytes).map_err(|e| refused(format!("{e:?}")))?.tick;
-    restore::decode_body(&bytes[HEADER_BYTES..bytes.len() - SEAL_BYTES], tick).map_err(|e| refused(e.0.to_string()))?;
+    let (mut volatile, _) = restore::decode_body(&bytes[HEADER_BYTES..bytes.len() - SEAL_BYTES], tick).map_err(|e| refused(e.0.to_string()))?;
+    volatile.take_state(state).map_err(|e| refused(e.0.to_string()))?;
     Ok(())
+}
+
+/// What a checkpoint binds, all from memory: each is exactly what a persist writes.
+struct Bound {
+    state: records::StateRecords,
+    /// The state records as stored.
+    pieces: Vec<records::Stored>,
+    /// Every record, the one sorted list.
+    flat: Vec<manifest::Entry>,
+    tree: records::Tree,
 }
 
 /// The fields a checkpoint opens with.
@@ -230,18 +251,105 @@ impl Header {
     }
 }
 
-/// The manifest's encoded size (the size bench).
+/// How many sections a layout's bytes name, through the reader `checkpoint` and
+/// `restore` share.
 #[cfg(test)]
-pub(crate) fn manifest_len(server: &GameServer) -> Result<usize, String> {
-    let mut w = codec::Writer::new();
-    manifest::write(&mut w, &manifest::entries(server)?);
-    Ok(w.len())
+pub(crate) fn layout_sections_read(bytes: &[u8]) -> Result<u32, String> {
+    volatile::layout_sections_read(bytes)
 }
 
-/// The manifest as `checkpoint` would write it (the stored-bytes tests).
+/// What the manifest's tree comes to (the size bench): its records, their bytes, the
+/// largest, and what the same list would be inline.
+#[cfg(test)]
+pub(crate) fn manifest_sizes(server: &GameServer) -> Result<(usize, usize, usize, usize), String> {
+    let bound = server.bound_records()?;
+    let mut inline = codec::Writer::new();
+    manifest::write(&mut inline, &bound.flat);
+    let sizes = bound.tree.nodes.iter().map(|(_, bytes)| bytes.len());
+    Ok((bound.tree.nodes.len(), sizes.clone().sum(), sizes.max().unwrap_or(0), inline.len()))
+}
+
+/// Every record this server's checkpoint binds, the tree walked (the stored-bytes tests).
 #[cfg(test)]
 pub(crate) fn manifest_entries(server: &GameServer) -> Result<Vec<(Vec<u8>, [u8; 32])>, String> {
-    manifest::entries(server)
+    Ok(server.bound_records()?.flat)
+}
+
+/// The key of every manifest record and state piece it binds, and each one's bytes.
+#[cfg(test)]
+pub(crate) fn bound_record_files(server: &GameServer) -> Result<Vec<(Vec<u8>, Vec<u8>)>, String> {
+    let bound = server.bound_records()?;
+    Ok(bound.pieces.into_iter().chain(bound.tree.nodes).collect())
+}
+
+/// The file a record lies in.
+#[cfg(test)]
+pub(crate) fn record_file(world_dir: &std::path::Path, key: &[u8]) -> std::path::PathBuf {
+    records::record_path(world_dir, key)
+}
+
+/// The world past what a test can build: real sorted chunk keys and a real layout's
+/// bytes through the real pieces, tree, commit and walk, the store a folder holding
+/// nothing else, and the same read and range check a restore does. Returns the sections
+/// the layout names, and what the tree gave back.
+#[cfg(test)]
+pub(crate) fn commit_and_read_bound(
+    world_dir: &std::path::Path,
+    layout: Vec<u8>,
+    chunks: Vec<(Vec<u8>, [u8; 32])>,
+) -> Result<(u32, Vec<(Vec<u8>, [u8; 32])>, records::Tree), RestoreError> {
+    let mut exposure = codec::Writer::uncapped();
+    exposure.count(0);
+    let mut lava = codec::Writer::uncapped();
+    for _ in 0..4 {
+        lava.count(0);
+    }
+    let state = records::StateRecords { layout, lava: lava.into_bytes(), exposure: exposure.into_bytes() };
+    let pieces = state.pieces();
+    let mut flat = chunks;
+    flat.extend(pieces.iter().map(|(key, bytes)| (key.clone(), records::sha256(bytes))));
+    flat.sort_unstable();
+    let tree = records::build_tree(&flat).map_err(RestoreError::Fault)?;
+    records::commit(world_dir, &pieces, &tree.nodes).map_err(RestoreError::Fault)?;
+    let walked = records::walk(std::slice::from_ref(&tree.top), world_dir)?;
+    let (read, _) = records::read_state(&walked, world_dir)?;
+    let sections = volatile::layout_sections_read(&read.layout).map_err(RestoreError::InvalidCheckpoint)?;
+    Ok((sections, walked, tree))
+}
+
+/// `tree`'s size in the terms of the size tests: how many records and the longest.
+#[cfg(test)]
+pub(crate) fn tree_shape(tree: &records::Tree) -> (usize, usize) {
+    (tree.nodes.len(), tree.nodes.iter().map(|(_, bytes)| bytes.len()).max().unwrap_or(0))
+}
+
+/// This server's layout record, whole.
+#[cfg(test)]
+pub(crate) fn layout_record(server: &GameServer) -> Vec<u8> {
+    server.bound_records().expect("the state encodes").state.layout
+}
+
+/// A checkpoint with one state record's bytes replaced, its pieces and tree written and
+/// the digest in the image resealed: for the tests of what a restore does with bytes
+/// the digests vouch for.
+#[cfg(test)]
+pub(crate) fn rebind_layout(server: &GameServer, bytes: &[u8], layout: Vec<u8>) -> Vec<u8> {
+    let bound = server.bound_records().expect("the state encodes");
+    let state = records::StateRecords { layout, lava: bound.state.lava, exposure: bound.state.exposure };
+    let pieces = state.pieces();
+    let mut flat: Vec<_> = bound.flat.into_iter().filter(|(key, _)| !records::is_state_key(key)).collect();
+    flat.extend(pieces.iter().map(|(key, piece)| (key.clone(), records::sha256(piece))));
+    flat.sort_unstable();
+    let tree = records::build_tree(&flat).expect("a tree");
+    let dir = crate::save::world_dir(&server.world_name);
+    records::commit(&dir, &pieces, &tree.nodes).expect("the records write");
+    // The manifest section is the last thing before the seal, and its root is `t`.
+    let mut out = bytes.to_vec();
+    let digest_at = out.len() - SEAL_BYTES - 32;
+    assert_eq!(bound.tree.top.1, out[digest_at..digest_at + 32], "the section is where it was");
+    out[digest_at..digest_at + 32].copy_from_slice(&tree.top.1);
+    seal(&mut out);
+    out
 }
 
 /// Every part's encoded size, past the cap too (the size bench).
@@ -268,23 +376,65 @@ impl GameServer {
         }
     }
 
+    /// The authority's persist: a save, then the records only an authority has, which
+    /// bind it. A world that is never run as one gets no new file, as nothing else calls
+    /// this: `try_save` is a normal server's save, and writes what it always did. Not
+    /// called by `--keep-world` yet; a runner's `last` step will. `Err`: this persist's
+    /// records aren't all there, so no checkpoint can be restored from it.
+    pub(crate) fn persist_authority(&self) -> Result<(), String> {
+        self.try_save()?;
+        self.write_bound_records()
+    }
+
+    /// The second half of [`Self::persist_authority`]: what a checkpoint now binds.
+    pub(crate) fn write_bound_records(&self) -> Result<(), String> {
+        let bound = self.bound_records()?;
+        records::commit(&crate::save::world_dir(&self.world_name), &bound.pieces, &bound.tree.nodes)
+    }
+
+    fn bound_records(&self) -> Result<Bound, String> {
+        let state = volatile::state_records(self)?;
+        let pieces = state.pieces();
+        let mut flat = manifest::entries(self)?;
+        flat.extend(pieces.iter().map(|(key, bytes)| (key.clone(), records::sha256(bytes))));
+        flat.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        let tree = records::build_tree(&flat)?;
+        Ok(Bound { state, pieces, flat, tree })
+    }
+
     /// This authority's state, in canonical bytes (see the module docs for the
     /// layout). Observational: no I/O, no mutation. Its manifest is true of the
     /// disk only straight after a save, so a runner persists, then checkpoints.
     /// `TooLarge` is the state not fitting here and now; `Unrestorable` is a state
     /// no restore would take. Neither ever leaves an image behind.
     pub(crate) fn checkpoint(&self) -> Result<Vec<u8>, CheckpointError> {
-        let mut bytes = self.image()?;
-        refuse_unrestorable(&bytes)?;
+        let bound = self.bound_records_for_checkpoint()?;
+        let mut bytes = self.image(std::slice::from_ref(&bound.tree.top))?;
+        refuse_unrestorable(&bytes, &bound.state)?;
+        seal(&mut bytes);
+        Ok(bytes)
+    }
+
+    fn bound_records_for_checkpoint(&self) -> Result<Bound, CheckpointError> {
+        if self.lent {
+            return Err(CheckpointError::Lent);
+        }
+        self.bound_records().map_err(CheckpointError::Encode)
+    }
+
+    /// A manifest listed in the image: for a fixture. The shipped module only ever
+    /// writes the tree, and a restore outside the tests refuses this as not canonical.
+    #[cfg(test)]
+    pub(crate) fn checkpoint_inline(&self) -> Result<Vec<u8>, CheckpointError> {
+        let bound = self.bound_records_for_checkpoint()?;
+        let mut bytes = self.image(&bound.flat)?;
+        refuse_unrestorable(&bytes, &bound.state)?;
         seal(&mut bytes);
         Ok(bytes)
     }
 
     /// The bytes, its seal still to set. Past the gate only in `checkpoint`.
-    fn image(&self) -> Result<Vec<u8>, CheckpointError> {
-        if self.lent {
-            return Err(CheckpointError::Lent);
-        }
+    fn image(&self, manifest_section: &[manifest::Entry]) -> Result<Vec<u8>, CheckpointError> {
         let config = self.authority_config();
         let mut w = codec::Writer::new();
         w.raw(CHECKPOINT_MAGIC);
@@ -301,7 +451,7 @@ impl GameServer {
         if w.over_cap() {
             return Err(CheckpointError::TooLarge { bytes: w.len() });
         }
-        manifest::write(&mut w, &manifest::entries(self).map_err(CheckpointError::Encode)?);
+        manifest::write(&mut w, manifest_section);
         w.raw(&[0; SEAL_BYTES]);
         w.finish().map_err(|bytes| CheckpointError::TooLarge { bytes })
     }
@@ -310,7 +460,8 @@ impl GameServer {
     /// it whoever wrote it.
     #[cfg(test)]
     pub(crate) fn checkpoint_ungated(&self) -> Result<Vec<u8>, CheckpointError> {
-        let mut bytes = self.image()?;
+        let bound = self.bound_records_for_checkpoint()?;
+        let mut bytes = self.image(std::slice::from_ref(&bound.tree.top))?;
         seal(&mut bytes);
         Ok(bytes)
     }

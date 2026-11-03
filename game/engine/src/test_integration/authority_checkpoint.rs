@@ -74,7 +74,7 @@ fn settle(h: &mut TestHost) {
 /// Persist with the existing save, then checkpoint.
 pub(super) fn persist_and_checkpoint(h: &mut TestHost) -> Vec<u8> {
     settle(h);
-    h.server.try_save().expect("the fixture saves");
+    h.server.persist_authority().expect("the fixture persists");
     h.server.checkpoint().expect("the fixture checkpoints")
 }
 
@@ -187,7 +187,7 @@ fn the_header_and_the_hash_are_as_specified() {
     };
     assert_eq!(CHECKPOINT_MAGIC, b"axenstax/authority-checkpoint\0");
     assert_eq!(take(CHECKPOINT_MAGIC.len()), CHECKPOINT_MAGIC);
-    assert_eq!(take(2), 3u16.to_le_bytes(), "schema");
+    assert_eq!(take(2), 4u16.to_le_bytes(), "schema");
     assert_eq!(take(4), crate::protocol::PROTOCOL_VERSION.to_le_bytes());
     assert_eq!(take(4), crate::save_format::SAVE_FORMAT_VERSION.to_le_bytes());
     assert_eq!(take(4), h.server.world.generator.version().to_le_bytes());
@@ -457,7 +457,7 @@ fn evicted_and_dropped_columns_stay_so() {
     a.teleport_player(1, home);
     step(&mut a, 60);
     settle(&mut a);
-    a.server.try_save().expect("saves");
+    a.server.persist_authority().expect("persists");
     let (cx, cz) = (200i32.div_euclid(16), 40i32.div_euclid(16));
     let (fx, fz) = ((-151i32).div_euclid(16), (-61i32).div_euclid(16));
     assert!(a.server.world.is_column_evicted(cx, cz), "the edited column was evicted");
@@ -519,22 +519,78 @@ fn checkpoint_size_at_the_bench_world_sizes() {
         super::tick_bench::warm_up(&mut h);
         super::tick_bench::scripted_build(&mut h);
         settle(&mut h);
-        h.server.try_save().expect("the bench world saves");
-        let manifest = crate::authority_checkpoint::manifest_len(&h.server).expect("a manifest");
+        h.server.persist_authority().expect("the bench world persists");
+        let (tree_records, tree_bytes, longest, inline) = crate::authority_checkpoint::manifest_sizes(&h.server).expect("a manifest");
         let chunks = h.server.world.persistable_chunks().filter(|(_, c)| !c.is_empty()).count();
-        let per_chunk = manifest as f64 / chunks.max(1) as f64;
         let sections = crate::authority_checkpoint::section_sizes(&h.server).expect("the sections");
-        let volatile: usize = sections.iter().filter(|(n, _)| !n.starts_with(' ')).map(|(_, b)| b).sum();
-        let result = h.server.checkpoint().map(|b| b.len());
+        let bytes = h.server.checkpoint().expect("the bench world checkpoints");
+        let dir = crate::save::world_dir(&name);
+        let world_dat = std::fs::metadata(dir.join("world.dat")).expect("a world.dat").len();
+        let files = crate::authority_checkpoint::bound_record_files(&h.server).expect("the records");
+        assert!(files.iter().all(|(_, b)| b.len() <= crate::authority_checkpoint::MAX_RECORD_BYTES), "a record past the limit");
+        let on_disk: u64 = files.iter().map(|(k, _)| std::fs::metadata(crate::authority_checkpoint::record_file(&dir, k)).expect("written").len()).sum();
+        assert!(bytes.len() < MAX_CHECKPOINT_BYTES, "{} B", bytes.len());
+        let total_ms = std::time::Instant::now();
+        let back = restore(&h, &bytes).unwrap_or_else(|e| panic!("restores: {e:?}"));
+        assert_eq!(back.checkpoint().expect("again"), bytes);
         eprintln!(
-            "checkpoint_size joiners={joiners}: checkpoint() {result:?}; manifest {manifest} B for {chunks} non-empty \
-             chunks ({per_chunk:.1} B each); volatile {volatile} B {sections:?}; columns {}, entities {}; \
-             with no volatile the cap is near {:.0} chunks",
+            "checkpoint_size joiners={joiners}: checkpoint {} B ({}% of the cap); columns {}, non-empty chunks {chunks}, entities {}; \
+             manifest {tree_records} records {tree_bytes} B, longest {longest} B, inline it would be {inline} B; \
+             {} records {on_disk} B in authority/; world.dat {world_dat} B; sections {sections:?}; restore {} ms",
+            bytes.len(),
+            bytes.len() * 100 / MAX_CHECKPOINT_BYTES,
             h.server.loaded_columns.len(),
             h.server.ecs.len(),
-            MAX_CHECKPOINT_BYTES as f64 / per_chunk,
+            files.len(),
+            total_ms.elapsed().as_millis(),
         );
+        drop(back);
+        if joiners == 8 {
+            // Worst lava inside one drain, on the real 511-column world: every entry a
+            // tenfold load could hold, past anything the bench's real load queued.
+            let spread: Vec<_> = (0..540_000).map(|i| (i, 300, i % 7, 1u8)).collect();
+            let queued = crate::fluids::FluidCheckpoint { extra: Vec::new(), missing: Vec::new(), spread, retract: Vec::new() };
+            let (world, loaded) = (&h.server.world, &h.server.loaded_columns);
+            h.server.lava.restore_checkpoint(world, loaded, &queued, 0);
+            h.server.persist_authority().expect("persists");
+            let worst = h.server.checkpoint().expect("checkpoints");
+            assert!(worst.len() < MAX_CHECKPOINT_BYTES, "{} B", worst.len());
+            let back = restore(&h, &worst).unwrap_or_else(|e| panic!("restores: {e:?}"));
+            assert_eq!(back.checkpoint().expect("again"), worst);
+            eprintln!("checkpoint_size worst lava: checkpoint {} B with 540,000 queued cells", worst.len());
+        }
     }
+}
+
+/// How `pop_exposure` grows: the bench's scripted build mines no pure deepslate, so this
+/// mines some with the real function, as the two ways a player digs. Run by name.
+#[test]
+#[ignore]
+fn exposure_growth_per_block_mined() {
+    let _root = WorldsRootGuard::new("keep-s3c-exposure-growth");
+    let mut h = twin(SEED, "ckpt-exposure-growth", 0, 2);
+    let world = &mut h.server.world;
+    for x in 0..200 {
+        for y in 10..30 {
+            for z in 0..200 {
+                world.set_block(x, y, z, crate::block::PURE_DEEPSLATE);
+            }
+        }
+    }
+    let mine = |world: &mut crate::world::World, cells: &mut dyn Iterator<Item = (i32, i32, i32)>| {
+        world.pop_exposure.clear();
+        let mut blocks = 0u32;
+        for (x, y, z) in cells {
+            world.set_block(x, y, z, crate::block::AIR);
+            crate::break_drops::mark_exposed_neighbours(world, x, y, z, 7);
+            blocks += 1;
+        }
+        (blocks, world.pop_exposure.len())
+    };
+    let (blocks, cells) = mine(world, &mut (0..180).flat_map(|x| [(x, 20, 100), (x, 21, 100)]));
+    eprintln!("exposure growth, a two-high tunnel: {blocks} blocks, {cells} cells, {:.2} a block", cells as f64 / f64::from(blocks));
+    let (blocks, cells) = mine(world, &mut (0..150).flat_map(|x| (0..150).map(move |z| (x, 15, z))));
+    eprintln!("exposure growth, a one-layer floor: {blocks} blocks, {cells} cells, {:.2} a block", cells as f64 / f64::from(blocks));
 }
 
 /// A joiner stands at a spot the restore then loads a body for.

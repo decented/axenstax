@@ -157,7 +157,7 @@ fn a_restore_generates_no_column_the_folder_lacks() {
     h.server.loaded_columns.remove(&(0, 0));
     h.server.water.forget_column(0, 0);
     h.server.lava.forget_column(0, 0);
-    h.server.try_save().expect("saves");
+    h.server.persist_authority().expect("persists");
     let chunks = crate::save::world_dir("ckpt-centre").join("chunks");
     assert!(
         !std::fs::read_dir(&chunks).unwrap().flatten().any(|f| f.file_name().to_string_lossy().starts_with("0_")),

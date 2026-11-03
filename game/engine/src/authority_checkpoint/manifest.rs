@@ -1,16 +1,18 @@
 //! The manifest: a sorted list of `(record key, SHA-256 of the record's bytes)`
 //! naming what the world's stored records hold. `state_hash` covers the world
-//! through it (handoff §6, choice 1).
+//! through it (handoff §6, choice 1). The checkpoint names its root record and the
+//! list lies in a tree of stored records (`records.rs`), so its size isn't the image's.
 //!
 //! | Key | Record | Read from |
 //! |---|---|---|
 //! | `b"c"` + `(cx, cy, cz)` | a non-empty chunk, the 8,704 B a save writes | memory |
+//! | `b"h"` + path | a handed-over world's `handover/` or `participants/` file, as stored | [`StoredRecords`] |
 //! | `b"j"` + file name | a joiner's sidecar, as stored | [`StoredRecords`] |
+//! | `b"l"`, `b"q"`, `b"p"` + piece | the layout, lava queue and exposure clocks | memory |
 //! | `b"m"` | the world's meta as stored, the value of `pop_secret` cut | [`StoredRecords`] |
 //! | `b"w"` | `world.dat` as stored: every table of `WorldSave` | [`StoredRecords`] |
 //!
-//! A server save writes every non-empty chunk it holds, so that is what is
-//! listed, and the list is what meets the 1 MiB cap first.
+//! A server save writes every non-empty chunk it holds, so that is what is listed.
 //!
 //! `world.dat` is one record, so all 56 fields of the save are bound by one entry
 //! whatever size the world's tables reach, and a field added to the save is bound by
@@ -35,15 +37,19 @@ use std::sync::Mutex;
 use sha2::{Digest, Sha256};
 
 use super::codec::{Malformed, Reader, Writer};
+use super::records::{self, sha256, StateRecords, MANIFEST, MAX_RECORD_KEY};
+use super::RestoreError;
 use crate::server::GameServer;
 
 pub(super) type Entry = (Vec<u8>, [u8; 32]);
 
 const WORLD_DAT_KEY: &[u8] = b"w";
-
-fn sha256(bytes: &[u8]) -> [u8; 32] {
-    Sha256::digest(bytes).into()
-}
+const HANDOVER: u8 = b'h';
+/// Where a handed-over world keeps what a restore reads of its authority: every file
+/// but a lock or a temporary one, which nothing reads as a record.
+const HANDOVER_FOLDERS: [&str; 2] = ["handover", "participants"];
+/// More than the `handover/` scan's own limit of 256, and than a manifest's agreements.
+const MAX_HANDOVER_RECORDS: usize = 4096;
 
 /// What this server knows of the records it holds no copy of, so that a
 /// checkpoint reads no file: written where those records are read or written,
@@ -58,11 +64,14 @@ pub(crate) struct StoredRecords {
     /// Every sidecar in the world's `joiners/`, by file name. A `Mutex`, as a
     /// save takes `&self` (as `World::disk_chunks` does).
     joiners: Mutex<BTreeMap<String, [u8; 32]>>,
+    /// Every record of a handed-over world's authority, by path in its folder.
+    handover: Mutex<BTreeMap<String, [u8; 32]>>,
 }
 
-/// The sidecars are one file per persona ever seen.
+/// The sidecars are one file per persona ever seen. A name too long for a record key
+/// (and the manifest record over it) is no persona's, and nothing reads it.
 fn is_sidecar_name(name: &str) -> bool {
-    name.starts_with("npub") && name.ends_with(".dat")
+    name.starts_with("npub") && name.ends_with(".dat") && name.len() + 2 < MAX_RECORD_KEY
 }
 
 impl StoredRecords {
@@ -92,6 +101,16 @@ impl StoredRecords {
             }
         };
         *self.world_dat.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = digest;
+    }
+
+    /// Learn a handed-over world's authority records from the disk: at the load and at
+    /// each persist. A world with no `handover/` has none.
+    pub(crate) fn note_handover(&self, world: &str) {
+        let records = stored_handover(&crate::save::world_dir(world)).unwrap_or_else(|e| {
+            log::error!("world '{world}': the checkpoint can't bind its handover records: {e}");
+            BTreeMap::new()
+        });
+        *self.handover.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = records;
     }
 
     /// Whatever sidecars the world folder holds: at load, including the records
@@ -144,6 +163,35 @@ fn stored_sidecars(world_dir: &Path) -> BTreeMap<String, [u8; 32]> {
     joiners
 }
 
+/// Every record a restore of a handed-over world reads: all `open_guard` and `proof`
+/// scan in `handover/`, and the progress `load_or_bootstrap` reads in `participants/`.
+/// `Err`: one that isn't a readable regular file, which isn't what any persist bound.
+fn stored_handover(world_dir: &Path) -> Result<BTreeMap<String, [u8; 32]>, String> {
+    let mut records = BTreeMap::new();
+    for folder in HANDOVER_FOLDERS {
+        let entries = match std::fs::read_dir(world_dir.join(folder)) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(format!("{folder}/ can't be listed ({e})")),
+        };
+        for entry in entries {
+            let entry = entry.map_err(|e| format!("{folder}/ can't be listed ({e})"))?;
+            let name = entry.file_name();
+            let name = name.to_str().ok_or_else(|| format!("a name in {folder}/ that isn't text"))?;
+            if name.starts_with('.') || name.contains(".tmp-") {
+                continue;
+            }
+            if records.len() >= MAX_HANDOVER_RECORDS {
+                return Err(format!("more than {MAX_HANDOVER_RECORDS} handover records"));
+            }
+            let bytes = crate::handover::live::personal_adapter::read_regular(&entry.path(), crate::handover::manifest::MANIFEST_LIMIT as u64)
+                .map_err(|e| format!("{folder}/{name}: {e}"))?;
+            records.insert(format!("{folder}/{name}"), sha256(&bytes));
+        }
+    }
+    Ok(records)
+}
+
 fn stored_world_dat_digest(world_dir: &Path) -> Result<Option<[u8; 32]>, String> {
     match std::fs::read(world_dir.join("world.dat")) {
         Ok(stored) => Ok(Some(sha256(&stored))),
@@ -160,25 +208,27 @@ fn stored_meta_digest(world_dir: &Path) -> Result<Option<[u8; 32]>, String> {
     }
 }
 
-/// What, if anything, differs between the manifest and the records as they lie on
-/// disk, read before any load has parsed them. `Err` is a disk that can't be read.
+/// Every record the sorted `wanted` binds, read as it lies on disk before any load has
+/// parsed it and checked against its digest. What comes back is the state that lies in
+/// records, whole. A disk that can't be read is a `Fault`.
 ///
 /// A chunk file the manifest doesn't name is no mismatch: it is a column the run
-/// dropped, and the layout keeps it out of the restored world. A sidecar, meta or
-/// `world.dat` it doesn't name is one, as each of those is read whole into the world.
-/// A manifest with no `world.dat` is a checkpoint from before any persist.
-pub(super) fn stored_mismatch(wanted: &[Entry], world_dir: &Path) -> Result<Option<String>, String> {
+/// dropped, and the layout keeps it out of the restored world. A sidecar, meta, handover
+/// record or `world.dat` it doesn't name is one, as each of those is read whole into the
+/// world. A manifest with no `world.dat` is a checkpoint from before any persist.
+pub(super) fn verify_stored(wanted: &[Entry], world_dir: &Path) -> Result<StateRecords, RestoreError> {
+    let disagree = |why: String| RestoreError::InvalidCheckpoint(format!("the stored records and the manifest disagree: {why}"));
     if !wanted.iter().any(|(key, _)| key == WORLD_DAT_KEY) {
-        return Ok(Some("no world.dat is bound".to_string()));
+        return Err(disagree("no world.dat is bound".to_string()));
     }
-    let mut found: Vec<Entry> = Vec::new();
+    let (state, mut found) = records::read_state(wanted, world_dir)?;
     for (key, _) in wanted.iter().filter(|(key, _)| key.first() == Some(&b'c') && key.len() == 13) {
         let at = |i: usize| i32::from_le_bytes([key[i], key[i + 1], key[i + 2], key[i + 3]]);
         let file = world_dir.join("chunks").join(format!("{}_{}_{}.chunk", at(1), at(5), at(9)));
         match std::fs::read(&file) {
             Ok(stored) => found.push((key.clone(), sha256(&stored))),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(format!("{} can't be read ({e})", file.display())),
+            Err(e) => return Err(RestoreError::Fault(format!("{} can't be read ({e})", file.display()))),
         }
     }
     for (name, digest) in stored_sidecars(world_dir) {
@@ -186,19 +236,31 @@ pub(super) fn stored_mismatch(wanted: &[Entry], world_dir: &Path) -> Result<Opti
         key.extend_from_slice(name.as_bytes());
         found.push((key, digest));
     }
-    if let Some(digest) = stored_world_dat_digest(world_dir)? {
+    for (path, digest) in stored_handover(world_dir).map_err(&disagree)? {
+        found.push((handover_key(&path), digest));
+    }
+    if let Some(digest) = stored_world_dat_digest(world_dir).map_err(RestoreError::Fault)? {
         found.push((WORLD_DAT_KEY.to_vec(), digest));
     }
-    match stored_meta_digest(world_dir)? {
+    match stored_meta_digest(world_dir).map_err(RestoreError::Fault)? {
         Some(digest) => found.push((b"m".to_vec(), digest)),
         // The load would rebuild a meta from this: a write, of a record nobody bound.
         None if crate::save::has_quarantined_sibling(world_dir, "world_meta.json") => {
-            return Ok(Some("the world meta was kept aside as damaged".to_string()));
+            return Err(disagree("the world meta was kept aside as damaged".to_string()));
         }
         None => {}
     }
     found.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-    Ok(first_mismatch(wanted, &found))
+    match first_mismatch(wanted, &found) {
+        Some(why) => Err(disagree(why)),
+        None => Ok(state),
+    }
+}
+
+fn handover_key(path: &str) -> Vec<u8> {
+    let mut key = vec![HANDOVER];
+    key.extend_from_slice(path.as_bytes());
+    key
 }
 
 /// The digest of a stored meta: all of its bytes but the value of `pop_secret`,
@@ -276,7 +338,8 @@ fn secret_value_span(json: &[u8]) -> Option<std::ops::Range<usize>> {
     None
 }
 
-/// Every record, sorted by key.
+/// Every record but the state that lies in records, which is added once it is encoded
+/// (`GameServer::bound_records`). Sorted by key.
 pub(super) fn entries(s: &GameServer) -> Result<Vec<Entry>, String> {
     let mut list: Vec<Entry> = Vec::new();
     for ((cx, cy, cz), chunk) in s.world.persistable_chunks() {
@@ -298,6 +361,11 @@ pub(super) fn entries(s: &GameServer) -> Result<Vec<Entry>, String> {
         list.push((key, *digest));
     }
     drop(joiners);
+    let handover = s.stored_records.handover.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    for (path, digest) in handover.iter() {
+        list.push((handover_key(path), *digest));
+    }
+    drop(handover);
     if let Some(digest) = *s.stored_records.meta.lock().unwrap_or_else(std::sync::PoisonError::into_inner) {
         list.push((b"m".to_vec(), digest));
     }
@@ -322,12 +390,18 @@ pub(super) fn read(r: &mut Reader<'_>) -> Result<Vec<Entry>, Malformed> {
     for _ in 0..n {
         let key = r.blob()?.to_vec();
         let digest = r.bytes32()?;
-        if list.last().is_some_and(|(last, _)| *last >= key) {
+        if list.last().is_some_and(|(last, _): &Entry| sort_name(last) >= sort_name(&key)) {
             return Err(Malformed("a manifest that isn't in its one sorted order"));
         }
         list.push((key, digest));
     }
     Ok(list)
+}
+
+/// Where a key sorts: a manifest record by the prefix it holds, so that a list reads in
+/// the order of what it binds, at every level.
+fn sort_name(key: &[u8]) -> &[u8] {
+    if key.first() == Some(&MANIFEST) { &key[1..] } else { key }
 }
 
 /// What differs between the checkpoint's manifest and what the load read, named.
@@ -338,9 +412,10 @@ pub(super) fn first_mismatch(wanted: &[Entry], found: &[Entry]) -> Option<String
             format!("chunk ({}, {}, {})", at(1), at(5), at(9))
         }
         Some(b'j') => format!("sidecar {}", String::from_utf8_lossy(&key[1..])),
+        Some(&HANDOVER) => format!("handover record {}", String::from_utf8_lossy(&key[1..])),
         Some(b'm') => "the world meta".to_string(),
         Some(b'w') => "world.dat".to_string(),
-        _ => "an unknown record".to_string(),
+        _ => records::describe(key).unwrap_or_else(|| "an unknown record".to_string()),
     };
     let (mut a, mut b) = (wanted.iter().peekable(), found.iter().peekable());
     loop {

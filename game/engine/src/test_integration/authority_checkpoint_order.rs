@@ -149,7 +149,7 @@ fn the_manifest_binds_each_record_by_its_stored_bytes() {
     let _root = WorldsRootGuard::new("keep-s3-stored");
     let mut h = fixture_with_meta("ckpt-stored");
     run_to(&mut h, 20);
-    h.server.try_save().expect("saves");
+    h.server.persist_authority().expect("persists");
     let dir = world_dir("ckpt-stored");
     let (mut chunks, mut sidecars, mut metas) = (0, 0, 0);
     for (key, digest) in manifest_entries(&h.server).expect("entries") {
@@ -267,7 +267,7 @@ fn a_run_opened_over_a_torn_meta_binds_the_repaired_file() {
     let repaired = std::fs::read(dir.join("world_meta.json")).unwrap();
     assert_ne!(repaired, b"{ torn");
     assert_eq!(server.stored_records.meta_digest(), Some(sha256(&stored_without_secret(&repaired))));
-    server.try_save().expect("saves");
+    server.persist_authority().expect("persists");
     let bytes = server.checkpoint().expect("checkpoints");
     let back = GameServer::restore_from_checkpoint(&server.authority_config(), &bytes, &dir).expect("restores");
     assert_eq!(back.checkpoint().expect("again"), bytes);

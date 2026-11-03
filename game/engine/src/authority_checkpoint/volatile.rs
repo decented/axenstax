@@ -6,21 +6,27 @@
 //!   cadence, the rolled strike and the world's active ticks and work.
 //! - **Modes:** what a dedicated server sets when it is built, so a restored one
 //!   runs the same passes.
+//! - **Deaths:** corpses waiting to be swept (`deaths.rs`).
+//! - **Sims:** fire with its timers, water (sources as the difference from a rescan:
+//!   an ocean's whole set is far past the cap, queues in order) and lava's phase, the
+//!   leaf-decay queues, the update scheduler, the power flood and the rubber-tap
+//!   cooldowns (a load rebuilds those at its own tick).
+//!
+//! Three more are the same kind of state, and grow with the world, so they are stored
+//! records bound through the manifest (`records.rs`), read by these same readers:
+//!
 //! - **Layout:** which chunks are live, which are evicted and which columns count
 //!   as loaded. A load holds every saved chunk live, so this is what puts the
 //!   stream-out state back (handoff §6, choice 11). Bytes stay in the records.
-//! - **Deaths:** corpses waiting to be swept (`deaths.rs`).
-//! - **Sims:** fire with its timers, water and lava (sources as the difference
-//!   from a rescan: an ocean's whole set is far past the cap, queues in order),
-//!   the leaf-decay queues, the update scheduler, the power flood, the
-//!   rubber-tap cooldowns (a load rebuilds those at its own tick) and each cell's
-//!   exposure clock (in no save; 20 B a cell, and nothing prunes it).
+//! - **Lava:** sources as the difference from a rescan, and its queues in order.
+//! - **Exposure clocks:** each cell's (in no save; 20 B a cell, and nothing prunes it).
 //!
 //! Everything else in handoff §5 is the restoration ledger (Spec 01 §4.1.5).
 
 use ahash::AHashSet;
 
 use super::codec::{Malformed, Reader, Writer};
+use super::records::StateRecords;
 use crate::block_update::{ScheduleKind, ScheduledUpdate};
 use crate::fluids::FluidCheckpoint;
 use crate::server::{GameServer, ServerPlayer};
@@ -106,10 +112,26 @@ pub(super) fn write(w: &mut Writer, s: &GameServer) -> Result<(), String> {
     write_clock(w, s);
     write_modes(w, s);
     write_streamer(w, s);
-    write_layout(w, s)?;
     write_sims(w, s);
     super::players::write_all(w, &s.players)?;
     super::deaths::write(w, s)
+}
+
+/// The state that is a stored record: what `persist_authority` writes, and what a
+/// checkpoint binds the digests of.
+pub(super) fn state_records(s: &GameServer) -> Result<StateRecords, String> {
+    let mut layout = Writer::uncapped();
+    write_layout(&mut layout, s)?;
+    let mut lava = Writer::uncapped();
+    write_fluid(&mut lava, &s.lava.checkpoint_view(&s.world, &s.loaded_columns).0);
+    let mut exposure = Writer::uncapped();
+    let exposed = sorted(s.world.pop_exposure.iter().map(|(p, t)| (*p, *t)).collect());
+    exposure.count(exposed.len());
+    for (pos, tick) in exposed {
+        exposure.pos(pos);
+        exposure.u64(tick);
+    }
+    Ok(StateRecords { layout: layout.into_bytes(), lava: lava.into_bytes(), exposure: exposure.into_bytes() })
 }
 
 /// Each volatile section's encoded size, for the size bench. The writer counts
@@ -124,17 +146,19 @@ pub(super) fn section_sizes(s: &GameServer) -> Result<Vec<(&'static str, usize)>
     let f = |fluid: &FluidCheckpoint| size(|w| { write_fluid(w, fluid); Ok(()) });
     let water = s.water.checkpoint_view(&s.world, &s.loaded_columns);
     let (lava, _) = s.lava.checkpoint_view(&s.world, &s.loaded_columns);
+    let state = state_records(s)?;
     Ok(vec![
         ("clock", size(|w| { write_clock(w, s); Ok(()) })?),
         ("modes", size(|w| { write_modes(w, s); Ok(()) })?),
-        ("layout", size(|w| write_layout(w, s))?),
         ("sims", size(|w| { write_sims(w, s); Ok(()) })?),
         ("  water", f(&water)?),
         ("  water sources", 12 * (water.extra.len() + water.missing.len())),
-        ("  lava", f(&lava)?),
-        ("  lava sources", 12 * (lava.extra.len() + lava.missing.len())),
-        ("  pop exposure", 20 * s.world.pop_exposure.len()),
         ("players", size(|w| super::players::write_all(w, &s.players))?),
+        ("record: layout", state.layout.len()),
+        ("record: lava", state.lava.len()),
+        ("record:   lava sources", 12 * (lava.extra.len() + lava.missing.len())),
+        ("record: exposure", state.exposure.len()),
+        ("record:   exposed cells", s.world.pop_exposure.len()),
     ])
 }
 
@@ -144,7 +168,6 @@ pub(super) fn section_sizes(s: &GameServer) -> Result<Vec<(&'static str, usize)>
 pub(crate) struct SectionOffsets {
     pub modes: usize,
     pub streamer: usize,
-    pub layout: usize,
     pub sims: usize,
     pub players: usize,
 }
@@ -157,11 +180,9 @@ pub(super) fn section_offsets(s: &GameServer, start: usize) -> Result<SectionOff
     write_modes(&mut w, s);
     let streamer = start + w.len();
     write_streamer(&mut w, s);
-    let layout = start + w.len();
-    write_layout(&mut w, s)?;
     let sims = start + w.len();
     write_sims(&mut w, s);
-    Ok(SectionOffsets { modes, streamer, layout, sims, players: start + w.len() })
+    Ok(SectionOffsets { modes, streamer, sims, players: start + w.len() })
 }
 
 pub(super) fn read(r: &mut Reader<'_>) -> Result<Volatile, Malformed> {
@@ -173,12 +194,10 @@ pub(super) fn read(r: &mut Reader<'_>) -> Result<Volatile, Malformed> {
     let total_work = r.u64()?;
     let modes = read_modes(r)?;
     let streamer = read_streamer(r)?;
-    let (loaded, layout) = read_layout(r)?;
     let n = r.count(21)?;
     let fire: Vec<_> = (0..n).map(|_| Ok((r.pos()?, r.u64()?, r.u8()?))).collect::<Result<_, _>>()?;
     strictly_increasing(&fire, |c| c.0)?;
     let water = read_fluid(r)?;
-    let lava = read_fluid(r)?;
     let lava_slow = r.u8()?;
     let check = read_list(r)?;
     let n = r.count(20)?;
@@ -194,9 +213,6 @@ pub(super) fn read(r: &mut Reader<'_>) -> Result<Volatile, Malformed> {
     let n = r.count(20)?;
     let tapped: Vec<_> = (0..n).map(|_| Ok((r.pos()?, r.u64()?))).collect::<Result<_, _>>()?;
     strictly_increasing(&tapped, |c| c.0)?;
-    let n = r.count(20)?;
-    let pop_exposure: Vec<_> = (0..n).map(|_| Ok((r.pos()?, r.u64()?))).collect::<Result<_, _>>()?;
-    strictly_increasing(&pop_exposure, |c| c.0)?;
     let players = super::players::read_all(r)?;
     let deaths = super::deaths::read(r)?;
     Ok(Volatile {
@@ -208,11 +224,11 @@ pub(super) fn read(r: &mut Reader<'_>) -> Result<Volatile, Malformed> {
         total_work,
         modes,
         streamer,
-        loaded,
-        layout,
+        loaded: AHashSet::new(),
+        layout: Vec::new(),
         fire,
         water,
-        lava,
+        lava: FluidCheckpoint { extra: Vec::new(), missing: Vec::new(), spread: Vec::new(), retract: Vec::new() },
         lava_slow,
         leaf,
         scheduler_pending,
@@ -220,7 +236,7 @@ pub(super) fn read(r: &mut Reader<'_>) -> Result<Volatile, Malformed> {
         energised,
         mains,
         tapped,
-        pop_exposure,
+        pop_exposure: Vec::new(),
         players,
         deaths,
     })
@@ -328,8 +344,11 @@ const PERSIST: u8 = 4;
 
 /// The most sections a layout may name. `apply_chunk_layout` builds a chunk (about
 /// 12.8 KB) for each one it finds no record of, so this is what bounds a restore's
-/// allocation: about 840 MB at worst. The 8-joiner bench world is about 9,200.
-const MAX_LAYOUT_SECTIONS: u32 = 1 << 16;
+/// allocation: about 3.4 GiB at worst, inside tier L's 4 GiB. It is also the runner's
+/// ceiling of 262,144 keys, and a section that holds anything is a key, so no world a
+/// runner can store passes it by more than its empty sections. The 8-joiner bench
+/// world is about 9,200.
+const MAX_LAYOUT_SECTIONS: u32 = 1 << 18;
 
 /// The furthest column a run can hold: a body at the playable limit, plus what
 /// streams in round it. Past this a column's first cell nears `i32`'s edge.
@@ -414,6 +433,14 @@ fn read_layout(r: &mut Reader<'_>) -> Result<(AHashSet<(i32, i32)>, Vec<ChunkCol
     Ok((loaded, layout))
 }
 
+/// How many sections a layout's bytes name, through the shared reader.
+#[cfg(test)]
+pub(super) fn layout_sections_read(bytes: &[u8]) -> Result<u32, String> {
+    let mut r = Reader::new(bytes);
+    let (_, layout) = read_layout(&mut r).map_err(|e| e.0.to_string())?;
+    Ok(layout.iter().map(|c| c.live_sections.count_ones() + c.evicted_sections.count_ones()).sum())
+}
+
 fn write_fluid(w: &mut Writer, f: &FluidCheckpoint) {
     write_list(w, &f.extra);
     write_list(w, &f.missing);
@@ -447,9 +474,7 @@ fn write_sims(w: &mut Writer, s: &GameServer) {
         w.u8(age);
     }
     write_fluid(w, &s.water.checkpoint_view(&s.world, &s.loaded_columns));
-    let (lava, slow) = s.lava.checkpoint_view(&s.world, &s.loaded_columns);
-    write_fluid(w, &lava);
-    w.u8(slow);
+    w.u8(s.lava.slow_phase());
 
     let (check, decay, leaf_tick) = s.leaf_decay.digest_view();
     write_list(w, &check);
@@ -479,12 +504,6 @@ fn write_sims(w: &mut Writer, s: &GameServer) {
     let tapped = sorted(s.world.tapped_rubber_logs.iter().map(|(p, t)| (*p, *t)).collect());
     w.count(tapped.len());
     for (pos, tick) in tapped {
-        w.pos(pos);
-        w.u64(tick);
-    }
-    let exposed = sorted(s.world.pop_exposure.iter().map(|(p, t)| (*p, *t)).collect());
-    w.count(exposed.len());
-    for (pos, tick) in exposed {
         w.pos(pos);
         w.u64(tick);
     }
@@ -537,6 +556,29 @@ fn body_in_range(sp: &ServerPlayer) -> bool {
 impl Volatile {
     pub(super) fn tick_counter(&self) -> u64 {
         self.clock.tick_counter
+    }
+
+    /// The state that lies in stored records, read and range-checked by the same
+    /// readers whichever end it is: the bytes a checkpoint is about to bind, or the
+    /// ones a restore has just checked against their digests.
+    pub(super) fn take_state(&mut self, state: &StateRecords) -> Result<(), Malformed> {
+        fn whole<T>(bytes: &[u8], read: impl FnOnce(&mut Reader<'_>) -> Result<T, Malformed>) -> Result<T, Malformed> {
+            let mut r = Reader::new(bytes);
+            let value = read(&mut r)?;
+            if !r.is_empty() {
+                return Err(Malformed("bytes left over in a stored state record"));
+            }
+            Ok(value)
+        }
+        (self.loaded, self.layout) = whole(&state.layout, read_layout)?;
+        self.lava = whole(&state.lava, read_fluid)?;
+        self.pop_exposure = whole(&state.exposure, |r| {
+            let n = r.count(20)?;
+            let cells: Vec<_> = (0..n).map(|_| Ok((r.pos()?, r.u64()?))).collect::<Result<_, _>>()?;
+            strictly_increasing(&cells, |c| c.0)?;
+            Ok(cells)
+        })?;
+        self.validate()
     }
 
     /// The seal is a checksum, so a value can be sealed and absurd, and these are

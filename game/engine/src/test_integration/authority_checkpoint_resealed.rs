@@ -9,7 +9,7 @@ use glam::Vec3;
 use super::authority_checkpoint::{restore, SEED};
 use super::authority_checkpoint_refusals::{assert_invalid_checkpoint, saved};
 use super::twin_run::twin;
-use crate::authority_checkpoint::{seal, section_offsets, RestoreError, CHECKPOINT_MAGIC, MAX_CHECKPOINT_BYTES};
+use crate::authority_checkpoint::{layout_record, rebind_layout, seal, section_offsets, RestoreError, CHECKPOINT_MAGIC, MAX_CHECKPOINT_BYTES};
 use crate::save::WorldsRootGuard;
 use crate::server::ServerPlayer;
 use crate::test_harness::TestHost;
@@ -58,10 +58,9 @@ fn assert_refused_for(h: &TestHost, mut bytes: Vec<u8>, what: &str, needle: &str
     }
 }
 
-/// The checkpoint with its layout replaced by `columns` entries, all live in
-/// `live`.
+/// The checkpoint with its layout record replaced by `columns` entries, all live in
+/// `live`, and bound: the digests all vouch for it, so what refuses it is its reader.
 fn with_layout(h: &TestHost, bytes: &[u8], columns: i32, live: u32) -> Vec<u8> {
-    let at = section_offsets(&h.server).unwrap();
     let mut layout = Vec::with_capacity(COUNT + columns as usize * COLUMN_ENTRY);
     layout.extend_from_slice(&(columns as u32).to_le_bytes());
     for x in 0..columns {
@@ -71,59 +70,54 @@ fn with_layout(h: &TestHost, bytes: &[u8], columns: i32, live: u32) -> Vec<u8> {
         layout.extend_from_slice(&live.to_le_bytes());
         layout.extend_from_slice(&0u32.to_le_bytes());
     }
-    let mut out = bytes[..at.layout].to_vec();
-    out.extend_from_slice(&layout);
-    out.extend_from_slice(&bytes[at.sims..]);
-    out
+    rebind_layout(&h.server, bytes, layout)
+}
+
+/// This server's layout record with `edit` made to it, and bound.
+fn with_edited_layout(h: &TestHost, bytes: &[u8], edit: impl FnOnce(&mut Vec<u8>)) -> Vec<u8> {
+    let mut layout = layout_record(&h.server);
+    edit(&mut layout);
+    rebind_layout(&h.server, bytes, layout)
 }
 
 #[test]
 fn a_section_no_column_holds_is_refused_before_the_load() {
     let (_root, h, bytes) = saved("keep-s2b-layout-bits");
-    let at = section_offsets(&h.server).unwrap();
-    delete_the_world(&h);
-    let first = at.layout + COUNT;
+    let first = COUNT;
     for bit in [0u32, 6, 25, 31] {
         for mask in [LIVE_MASK, EVICTED_MASK] {
-            let mut hostile = bytes.clone();
-            let was = read_u32(&hostile, first + mask);
-            put(&mut hostile, first + mask, &(was | 1 << bit).to_le_bytes());
+            let hostile = with_edited_layout(&h, &bytes, |layout| {
+                let was = read_u32(layout, first + mask);
+                put(layout, first + mask, &(was | 1 << bit).to_le_bytes());
+            });
             assert_refused_for(&h, hostile, &format!("bit {bit} of mask {mask}"), "outside a column");
         }
     }
 }
 
-/// The review's scenario, at the scale a 1 MiB checkpoint can ask for: every
-/// bit legal, and tens of gigabytes of chunks if they were built.
+/// The review's scenario: every bit legal, and tens of gigabytes of chunks if they were
+/// built. Refused by the reader, before the load allocates any.
 #[test]
 fn a_layout_past_the_section_cap_is_refused_before_the_load() {
     let (_root, h, bytes) = saved("keep-s2b-layout-cap");
-    delete_the_world(&h);
     assert_eq!(COLUMN_SECTIONS.count_ones(), 18);
-    // As many columns as the cap has room for, and just past the section cap.
-    let at = section_offsets(&h.server).unwrap();
-    let room = (MAX_CHECKPOINT_BYTES - (bytes.len() - (at.sims - at.layout)) - COUNT) / COLUMN_ENTRY;
-    assert!(room > 10_000, "only room for {room}");
-    for columns in [3_641, room as i32] {
+    // Just past the section cap, and far past it.
+    for columns in [14_565, 100_000] {
         let hostile = with_layout(&h, &bytes, columns, COLUMN_SECTIONS);
         assert_refused_for(&h, hostile, &format!("{columns} full columns"), "more sections");
     }
-    // Just under the cap gets as far as the load, which finds no folder.
-    let under = with_layout(&h, &bytes, 3_640, COLUMN_SECTIONS);
-    assert_refused_for(&h, under, "under the cap", "holds no saved records");
 }
 
 /// The save keeps one copy of a section, so a checkpoint can't name two.
 #[test]
 fn a_section_both_live_and_evicted_is_refused_before_the_load() {
     let (_root, h, bytes) = saved("keep-s2b-layout-both");
-    let at = section_offsets(&h.server).unwrap();
-    delete_the_world(&h);
-    let first = at.layout + COUNT;
-    let live = read_u32(&bytes, first + LIVE_MASK);
-    assert_ne!(live, 0, "the fixture's first column holds a section");
-    let mut hostile = bytes.clone();
-    put(&mut hostile, first + EVICTED_MASK, &live.to_le_bytes());
+    let first = COUNT;
+    let hostile = with_edited_layout(&h, &bytes, |layout| {
+        let live = read_u32(layout, first + LIVE_MASK);
+        assert_ne!(live, 0, "the fixture's first column holds a section");
+        put(layout, first + EVICTED_MASK, &live.to_le_bytes());
+    });
     assert_refused_for(&h, hostile, "both masks", "both live and evicted");
 }
 
@@ -131,10 +125,7 @@ fn a_section_both_live_and_evicted_is_refused_before_the_load() {
 #[test]
 fn a_column_past_the_playable_range_is_refused_before_the_load() {
     let (_root, h, bytes) = saved("keep-s2b-layout-far");
-    let at = section_offsets(&h.server).unwrap();
-    delete_the_world(&h);
-    let mut hostile = bytes.clone();
-    put(&mut hostile, at.layout + COUNT, &i32::MIN.to_le_bytes());
+    let hostile = with_edited_layout(&h, &bytes, |layout| put(layout, COUNT, &i32::MIN.to_le_bytes()));
     assert_refused_for(&h, hostile, "column x", "column outside");
 }
 
@@ -293,7 +284,7 @@ fn a_resealed_minus_zero_is_not_canonical() {
     let mut h = twin(SEED, "ckpt-zero-reseal", 1, 2);
     super::authority_checkpoint::sign_in(&mut h);
     h.server.players[0].player.velocity = Vec3::ZERO;
-    h.server.try_save().unwrap();
+    h.server.persist_authority().unwrap();
     let mut bytes = h.server.checkpoint().unwrap();
     let at = section_offsets(&h.server).unwrap().players + BODY_VELOCITY;
     assert_eq!(bytes[at..at + 4], [0; 4]);

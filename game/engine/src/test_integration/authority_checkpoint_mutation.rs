@@ -16,7 +16,7 @@ use super::authority_checkpoint::{fixture, persist_and_checkpoint, restore};
 use super::authority_checkpoint_records::{fixture_with_meta, folder_bytes};
 use super::authority_checkpoint_refusals::assert_invalid_checkpoint;
 use super::twin_run::run_to;
-use crate::authority_checkpoint::{seal, section_offsets, CheckpointError, RestoreError};
+use crate::authority_checkpoint::{layout_record, rebind_layout, record_file, CheckpointError, RestoreError};
 use crate::entity::spawn_mob;
 use crate::save::{read_world_save, read_world_save_reporting, world_dir, WorldSave, WorldsRootGuard};
 use crate::save_format::{encode_world_save, footer_bytes};
@@ -102,6 +102,49 @@ fn encoded(save: &WorldSave) -> Vec<u8> {
     encode_world_save(save).expect("encodes")
 }
 
+/// How many of a row reach the record limit, from what `add` adds to the save.
+fn rows_to_the_limit(base: &WorldSave, add: impl Fn(&mut WorldSave)) -> (usize, usize) {
+    const ROWS: usize = 1_000;
+    let empty = encoded(base).len();
+    let mut filled = read_world_save(&encoded(base)).expect("reads");
+    for _ in 0..ROWS {
+        add(&mut filled);
+    }
+    let per_row = (encoded(&filled).len() - empty) / ROWS;
+    (per_row, ((1usize << 20).saturating_sub(empty)) / per_row.max(1))
+}
+
+/// `world.dat` against the runner's record limit (1 MiB less headers; 1 MiB is used here,
+/// so these are slightly generous): the handoff's table. Zero rows are each table's
+/// smallest row, what zeros decode to; the "real" rows are a played world's. Run by name.
+#[test]
+#[ignore]
+fn world_dat_rows_to_the_record_limit() {
+    let _root = WorldsRootGuard::new("keep-s3c-world-dat");
+    let mut h = fixture("ckpt-world-dat", 2);
+    run_to(&mut h, 20);
+    persist_and_checkpoint(&mut h);
+    let base = read_world_save(&std::fs::read(world_dir("ckpt-world-dat").join("world.dat")).unwrap()).expect("a save");
+    eprintln!("world_dat base: {} B", encoded(&base).len());
+    for field in save_fields() {
+        if let Some(populate) = field.populate {
+            let (per_row, rows) = rows_to_the_limit(&base, populate);
+            eprintln!("world_dat zero row, {}: {per_row} B, {rows} rows", field.name);
+        }
+    }
+    let stack = crate::item::ItemStack::new_block(crate::block::COBBLESTONE, 64);
+    let chest = crate::chest::ChestData { slots: vec![Some(stack); 27], tier: Default::default() };
+    let (per_row, rows) = rows_to_the_limit(&base, |s| {
+        s.chests.push(crate::save::SavedChest { x: 1, y: 2, z: 3, data: chest.clone() });
+    });
+    eprintln!("world_dat real row, a full wooden chest: {per_row} B, {rows} rows");
+    let text = "x".repeat(crate::sign::SIGN_MAX_CHARS);
+    let (per_row, rows) = rows_to_the_limit(&base, |s| {
+        s.signs.push(crate::save::SavedSign { x: 1, y: 2, z: 3, data: crate::sign::SignData { text: text.clone() } });
+    });
+    eprintln!("world_dat real row, a full sign: {per_row} B, {rows} rows");
+}
+
 /// `None` if the restore refused `record` as it should, else what happened.
 fn wrong_outcome(h: &TestHost, bytes: &[u8], file: &Path, record: &[u8], names: &str) -> Option<String> {
     std::fs::write(file, record).expect("write the record");
@@ -134,6 +177,7 @@ fn every_field_of_the_save_is_bound() {
     let baseline = encoded(&rich);
     std::fs::write(&file, &baseline).unwrap();
     h.server.stored_records.note_world_dat(&name);
+    h.server.write_bound_records().expect("the records write");
     let bytes = h.server.checkpoint().expect("checkpoints");
     let back = restore(&h, &bytes).unwrap_or_else(|e| panic!("every table holding a row restores: {e:?}"));
     assert_eq!(back.checkpoint().expect("again"), bytes);
@@ -197,8 +241,9 @@ fn every_record_refuses_every_mutation() {
 
     let mut h = fixture_with_meta("ckpt-records");
     run_to(&mut h, 20);
-    h.server.try_save().expect("the first persist");
+    h.server.persist_authority().expect("the first persist");
     let dir = world_dir("ckpt-records");
+    let older_authority = folder_bytes(&dir.join("authority"));
     let chunk = dir.join("chunks/0_6_0.chunk");
     let sidecar = h.server.joiner_path(h.server.players[1].verified_pubkey.unwrap());
     let sidecar_b = h.server.joiner_path(h.server.players[2].verified_pubkey.unwrap());
@@ -213,6 +258,10 @@ fn every_record_refuses_every_mutation() {
     meta.description = "later".into();
     crate::save::save_world_meta("ckpt-records", &meta).expect("write meta");
     run_to(&mut h, 30);
+    // And the state in records: a new column, a woken lava cell, a clock.
+    h.set_block(200, 100, 200, crate::block::COBBLESTONE);
+    h.server.lava.add_source(3, 120, 3);
+    h.server.world.pop_exposure.insert((3, 20, 3), 9);
     let bytes = persist_and_checkpoint(&mut h);
     restore(&h, &bytes).unwrap_or_else(|e| panic!("untouched, it restores: {e:?}"));
 
@@ -222,8 +271,32 @@ fn every_record_refuses_every_mutation() {
         Record { name: "sidecar", path: sidecar.clone(), swapped: older(&sidecar_b), older: older_sidecar },
         Record { name: "world meta", path: dir.join("world_meta.json"), swapped: older(&other_dir.join("world_meta.json")), older: older_meta },
     ];
+    // The records only an authority has: each state record, the manifest's root, and
+    // one of the tree's other records. Each has an older value of its own key, and any
+    // of them is another's valid bytes.
+    let authority = |key: &[u8]| record_file(&dir, key);
+    let older_of = |key: &[u8]| older_authority.get(&authority(key)).unwrap_or_else(|| panic!("no older {}", hex::encode(key))).clone();
+    let files = crate::authority_checkpoint::bound_record_files(&h.server).unwrap();
+    let node = files
+        .iter()
+        .map(|(key, _)| key)
+        .find(|key| key.len() > 1 && key[0] == b't' && older_authority.get(&authority(key)).is_some_and(|was| *was != older(&authority(key))))
+        .expect("a persist rewrites a record below the root");
+    let piece = |family: u8| {
+        let mut key = vec![family];
+        key.extend_from_slice(&0u32.to_be_bytes());
+        key
+    };
+    let (layout, lava, exposure) = (piece(b'l'), piece(b'q'), piece(b'p'));
+    let authority_records = [
+        Record { name: "layout piece", path: authority(&layout), swapped: older(&authority(&lava)), older: older_of(&layout) },
+        Record { name: "lava piece", path: authority(&lava), swapped: older(&authority(&exposure)), older: older_of(&lava) },
+        Record { name: "exposure piece", path: authority(&exposure), swapped: older(&authority(&layout)), older: older_of(&exposure) },
+        Record { name: "manifest root", path: authority(b"t"), swapped: older(&authority(node)), older: older_of(b"t") },
+        Record { name: "manifest record", path: authority(node), swapped: older(&authority(b"t")), older: older_of(node) },
+    ];
     let mut wrong = BTreeMap::new();
-    for record in &records {
+    for record in records.iter().chain(&authority_records) {
         let good = older(&record.path);
         assert_ne!(record.older, good, "{}: the persists left it as it was", record.name);
         assert_ne!(record.swapped, good, "{}: another key held these bytes", record.name);
@@ -315,6 +388,7 @@ fn a_record_from_an_older_build_is_no_mismatch() {
     body.extend_from_slice(&footer_bytes(59));
     std::fs::write(&file, &body).unwrap();
     h.server.stored_records.note_world_dat(&name);
+    h.server.write_bound_records().expect("the records write");
     let bytes = h.server.checkpoint().expect("checkpoints");
     let back = restore(&h, &bytes).unwrap_or_else(|e| panic!("an older record restores: {e:?}"));
     assert_eq!(back.checkpoint().expect("again"), bytes);
@@ -337,7 +411,7 @@ fn a_checkpoint_later_than_its_persist_is_refused() {
     restore(&h, &good).unwrap_or_else(|e| panic!("the good one restores: {e:?}"));
 }
 
-/// `pop_exposure` is in no save: the checkpoint carries it.
+/// `pop_exposure` is in no save: the checkpoint binds it, in a record of its own.
 #[test]
 fn a_cells_exposure_clock_comes_back() {
     let _root = WorldsRootGuard::new("keep-s3-exposure");
@@ -347,7 +421,9 @@ fn a_cells_exposure_clock_comes_back() {
     h.server.world.pop_exposure.insert((3, 70, 1), 9);
     h.server.world.pop_exposure.insert((-3, 70, 1), 12);
     let with = h.server.checkpoint().expect("checkpoints");
-    assert_ne!(without, with, "the clock is in the bytes");
+    assert_ne!(without, with, "the clock is bound");
+    assert_invalid_checkpoint(&h, &with, "a clock no persist has stored");
+    h.server.persist_authority().expect("persists");
     let back = restore(&h, &with).unwrap_or_else(|e| panic!("restores: {e:?}"));
     assert_eq!(back.world.pop_exposure, h.server.world.pop_exposure);
     assert_eq!(back.checkpoint().expect("again"), with);
@@ -404,6 +480,7 @@ fn a_partly_decoded_world_dat_is_refused_and_nothing_is_written() {
     assert!(read_world_save_reporting(&body).expect("reads").1, "the fixture is a partly decoded record");
     std::fs::write(&file, &body).unwrap();
     h.server.stored_records.note_world_dat(&name);
+    h.server.write_bound_records().expect("the records write");
     let bytes = h.server.checkpoint().expect("checkpoints");
     let before = folder_bytes(&dir);
     assert_invalid_checkpoint(&h, &bytes, "a partly decoded world.dat");
@@ -418,14 +495,17 @@ fn evicted_sections_in_a_column_not_flagged_evicted_are_refused() {
     run_to(&mut h, 5);
     let bytes = persist_and_checkpoint(&mut h);
     // The first column: x, z, flags, live, evicted.
-    let entry = section_offsets(&h.server).unwrap().layout + 4;
-    assert_eq!(bytes[entry + 8] & 2, 0, "the fixture's first column isn't evicted");
-    let live = u32::from_le_bytes(bytes[entry + 9..entry + 13].try_into().unwrap());
+    let entry = 4;
+    let mut layout = layout_record(&h.server);
+    assert_eq!(layout[entry + 8] & 2, 0, "the fixture's first column isn't evicted");
+    let live = u32::from_le_bytes(layout[entry + 9..entry + 13].try_into().unwrap());
     let free = !live & crate::world::LAYOUT_COLUMN_SECTIONS;
-    let mut crafted = bytes.clone();
-    crafted[entry + 13..entry + 17].copy_from_slice(&(1u32 << free.trailing_zeros()).to_le_bytes());
-    seal(&mut crafted);
-    assert_invalid_checkpoint(&h, &crafted, "evicted sections, no flag");
+    layout[entry + 13..entry + 17].copy_from_slice(&(1u32 << free.trailing_zeros()).to_le_bytes());
+    let crafted = rebind_layout(&h.server, &bytes, layout);
+    match restore(&h, &crafted).err() {
+        Some(RestoreError::InvalidCheckpoint(why)) => assert!(why.contains("not flagged evicted"), "{why}"),
+        other => panic!("evicted sections, no flag: {other:?}"),
+    }
 }
 
 /// The shared reader: a corpse past the playable range isn't anywhere a tick can

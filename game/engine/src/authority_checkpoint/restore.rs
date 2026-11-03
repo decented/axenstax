@@ -1,10 +1,10 @@
 //! `GameServer::restore_from_checkpoint`, in the contract's order: the schema
 //! field, the seal, the remaining versions, the config binding, then the digest of
-//! every bound record as it lies on disk. Only then does the load run, so a record
-//! that doesn't match is refused before anything has parsed it. The load writes
-//! nothing: the recoveries of a normal open don't run (`world_open::open_bound_world`).
-//! Then the layout, the volatile sections and a last check that it all encodes back
-//! to the same bytes.
+//! every bound record as it lies on disk, walking the manifest's tree of records. Only
+//! then does the load run, so a record that doesn't match is refused before anything
+//! has parsed it. The load writes nothing: the recoveries of a normal open don't run
+//! (`world_open::open_bound_world`). Then the layout, the volatile sections and a last
+//! check that it all encodes back to the same bytes.
 
 use super::codec::{Malformed, Reader};
 use super::manifest::Entry;
@@ -34,6 +34,8 @@ fn world_name(world_dir: &std::path::Path) -> Result<String, RestoreError> {
 
 /// Everything between the header and the seal, read and range-checked. The one
 /// reader of these bytes, used by `restore` and by `checkpoint` on its own output.
+/// The manifest is what the section lists, its tree not yet walked, and the state that
+/// lies in records isn't in yet (`Volatile::take_state`).
 pub(super) fn decode_body(body: &[u8], tick: u64) -> Result<(Volatile, Vec<Entry>), Malformed> {
     let mut body = Reader::new(body);
     let restored = volatile::read(&mut body)?;
@@ -73,15 +75,15 @@ impl GameServer {
         header.check_versions()?;
         header.check_config(config)?;
 
-        let (mut restored, manifest) = decode_body(&checkpoint[HEADER_BYTES..checkpoint.len() - SEAL_BYTES], header.tick)?;
+        let (mut restored, top) = decode_body(&checkpoint[HEADER_BYTES..checkpoint.len() - SEAL_BYTES], header.tick)?;
 
         let name = world_name(world_dir)?;
         if crate::world_open::is_new_world(&name).map_err(RestoreError::Fault)? {
             return Err(RestoreError::InvalidCheckpoint(format!("world '{name}' holds no saved records")));
         }
-        if let Some(why) = super::manifest::stored_mismatch(&manifest, world_dir).map_err(RestoreError::Fault)? {
-            return Err(RestoreError::InvalidCheckpoint(format!("the stored records and the manifest disagree: {why}")));
-        }
+        let manifest = super::records::walk(&top, world_dir)?;
+        let state = super::manifest::verify_stored(&manifest, world_dir)?;
+        restored.take_state(&state)?;
         refuse_a_bound_world_dat_that_isnt_the_state(world_dir, header.tick)?;
         refuse_a_pending_role_cut(world_dir)?;
         let seed = u32::try_from(config.seed).map_err(|_| RestoreError::InvalidConfig("a seed past u32".into()))?;
@@ -105,7 +107,10 @@ impl GameServer {
 
         restored.apply_layout(&mut server);
         let found = super::manifest::entries(&server).map_err(RestoreError::Fault)?;
-        if let Some(why) = super::manifest::first_mismatch(&manifest, &found) {
+        // The state records have been checked as they lie, and what they restore is
+        // checked by the last comparison below.
+        let loaded: Vec<_> = manifest.into_iter().filter(|(key, _)| !super::records::is_state_key(key)).collect();
+        if let Some(why) = super::manifest::first_mismatch(&loaded, &found) {
             return Err(RestoreError::InvalidCheckpoint(format!("the stored records and the manifest disagree: {why}")));
         }
         let deaths = restored.take_deaths();
@@ -118,7 +123,16 @@ impl GameServer {
         // older build's) comes out the same. A difference means the input wasn't
         // in canonical form: a `-0.0`, say, which decodes and passes the seal, or
         // a play mode the binding doesn't name.
-        let again = server.checkpoint().map_err(|e| RestoreError::Fault(format!("{e:?}")))?;
+        // That includes the manifest's form: the only one a module writes is the tree.
+        #[cfg(test)]
+        let again = if top.iter().any(|(key, _)| key.first() != Some(&super::records::MANIFEST)) {
+            server.checkpoint_inline()
+        } else {
+            server.checkpoint()
+        };
+        #[cfg(not(test))]
+        let again = server.checkpoint();
+        let again = again.map_err(|e| RestoreError::Fault(format!("{e:?}")))?;
         let bound_part = |bytes: &[u8]| bytes[AFTER_VERSIONS..bytes.len() - SEAL_BYTES].to_vec();
         if bound_part(&again) != bound_part(checkpoint) {
             return Err(RestoreError::InvalidCheckpoint("the bytes aren't this module's canonical form".into()));

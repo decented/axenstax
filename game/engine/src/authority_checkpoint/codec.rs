@@ -20,11 +20,22 @@ fn f64_bits(v: f64) -> u64 {
 pub(super) struct Writer {
     buf: Vec<u8>,
     len: usize,
+    cap: usize,
 }
 
 impl Writer {
     pub(super) fn new() -> Self {
-        Self { buf: Vec::new(), len: 0 }
+        Self { buf: Vec::new(), len: 0, cap: MAX_CHECKPOINT_BYTES }
+    }
+
+    /// For a stored record, which the cap doesn't bound: it is cut into pieces.
+    pub(super) fn uncapped() -> Self {
+        Self { buf: Vec::new(), len: 0, cap: usize::MAX }
+    }
+
+    /// What an uncapped writer holds.
+    pub(super) fn into_bytes(self) -> Vec<u8> {
+        self.buf
     }
 
     /// Bytes written so far, including any past the cap.
@@ -33,12 +44,12 @@ impl Writer {
     }
 
     pub(super) fn over_cap(&self) -> bool {
-        self.len > MAX_CHECKPOINT_BYTES
+        self.len > self.cap
     }
 
     pub(super) fn raw(&mut self, bytes: &[u8]) {
         self.len += bytes.len();
-        if self.len <= MAX_CHECKPOINT_BYTES {
+        if self.len <= self.cap {
             self.buf.extend_from_slice(bytes);
         }
     }

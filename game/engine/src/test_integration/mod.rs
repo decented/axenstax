@@ -116,3 +116,4 @@ mod authority_checkpoint_order; // Keep slice 3: restore order, digests over sto
 mod authority_checkpoint_limits; // Keep slice 3: every restore limit enforced at checkpoint.
 mod authority_checkpoint_deaths; // Keep slice 3: a pending death is in the checkpoint.
 mod authority_checkpoint_mutation; // Keep slice 3: every field of the save is bound, driven from the type.
+mod authority_checkpoint_size; // Keep slice 3: the checkpoint's size doesn't follow the world's.

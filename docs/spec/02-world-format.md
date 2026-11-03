@@ -2102,7 +2102,9 @@ its stored bytes whole), which binds every table of the save. A server's `try_sa
 it takes from hash maps and entity queries (`WorldSave::sort_unordered_rows`), which changes no
 format and no reader, so that the same tables are the same bytes. A Keep restore runs none of this
 section's or §8.4's recoveries: it reads what the checkpoint binds and writes nothing, and its
-persist settles anything left over (Spec 01 §4.1.5).
+persist settles anything left over (Spec 01 §4.1.5). A world run as an authority also holds an
+`authority/` folder of records only `GameServer::persist_authority` writes. It is no part of the save
+format: no reader of a save opens it, and a world never run as an authority doesn't have one.
 
 **Known windows, still open:**
 

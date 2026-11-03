@@ -436,17 +436,19 @@ fn folder_bytes(dir: &std::path::Path) -> std::collections::BTreeMap<std::path::
     out
 }
 
-/// A role cut left to `initial_load` would write the owner's sidecar, save the
-/// world and park the autosave before the manifest is read.
+/// A role cut left to `initial_load` would write the owner's sidecar, save the world
+/// and park the autosave. A folder that shows one pending, with every digest matching,
+/// is refused before the load.
 #[test]
 fn a_restore_refuses_a_folder_the_role_cut_has_not_reached() {
     use crate::authority_checkpoint::RestoreError;
     let f = fixture("personal-restore-uncut");
-    // A local recovery snapshot, which a cut parks.
+    let (h, _, bytes) = authority_of_the_fixture(&f);
+    // A local recovery snapshot, which a cut parks. No record the checkpoint binds.
     fs::create_dir(f.world.join("autosave")).unwrap();
     fs::copy(f.world.join("world.dat"), f.world.join("autosave/world.dat")).unwrap();
     let before = folder_bytes(&f.world);
-    match restore_on_the_fixture(&f).err() {
+    match restore_of(&h, &bytes, &f).err() {
         Some(RestoreError::Fault(why)) => assert!(why.contains("role cut"), "{why}"),
         other => panic!("an autosave: expected Fault, got {other:?}"),
     }
@@ -455,11 +457,14 @@ fn a_restore_refuses_a_folder_the_role_cut_has_not_reached() {
     // A selected local record in the primary, which a cut clears.
     fs::remove_dir_all(f.world.join("autosave")).unwrap();
     let mut save = crate::save::read_world_save(&fs::read(f.world.join("world.dat")).unwrap()).unwrap();
-    let record = load_or_bootstrap(&f.world, f.key, &f.proof).unwrap().unwrap().encode().unwrap();
+    let record = load_or_bootstrap_unwritten(&f.world, f.key, &f.proof).unwrap().unwrap().encode().unwrap();
     save.local_personal = Some(crate::personal_value::LocalPersonalSave(record));
     fs::write(f.world.join("world.dat"), crate::save_format::encode_world_save(&save).unwrap()).unwrap();
+    h.server.stored_records.note_world_dat("personal");
+    h.server.write_bound_records().expect("the records write");
+    let bytes = h.server.checkpoint().expect("the authority checkpoints");
     let before = folder_bytes(&f.world);
-    match restore_on_the_fixture(&f).err() {
+    match restore_of(&h, &bytes, &f).err() {
         Some(RestoreError::Fault(why)) => assert!(why.contains("role cut"), "{why}"),
         other => panic!("a selected record: expected Fault, got {other:?}"),
     }
@@ -478,4 +483,117 @@ fn a_restore_of_a_cut_folder_writes_nothing_and_reaches_the_manifest() {
         other => panic!("expected the manifest to refuse it, got {other:?}"),
     }
     assert_eq!(folder_bytes(&f.world), before, "the refused restore changed the folder");
+}
+
+/// A server that has run the fixture's handed-over world as its authority: the
+/// participant holds a body, its sidecar still the frozen seed, as a seat that hasn't
+/// come back since the import leaves it.
+fn authority_of_the_fixture(f: &Fixture) -> (crate::test_harness::TestHost, usize, Vec<u8>) {
+    let mut server = crate::server::GameServer::new(0, "personal".into(), 42);
+    server.render_distance = 0;
+    server.initial_load().unwrap();
+    let mut h = crate::test_harness::TestHost::adopt(server);
+    let slot = crate::test_integration::twin_run::add_joiner(&mut h, glam::Vec3::new(0.5, 90.0, 0.5));
+    h.server.players[slot].verified_pubkey = Some(f.key);
+    h.server.players[slot].awaiting_reattach = true;
+    h.server.persist_authority().expect("the authority persists");
+    let bytes = h.server.checkpoint().expect("the authority checkpoints");
+    (h, slot, bytes)
+}
+
+fn restore_of(h: &crate::test_harness::TestHost, bytes: &[u8], f: &Fixture) -> Result<crate::server::GameServer, crate::authority_checkpoint::RestoreError> {
+    crate::server::GameServer::restore_from_checkpoint(&h.server.authority_config(), bytes, &f.world)
+}
+
+/// `load_or_bootstrap` turns a frozen seed into the current record and writes it back.
+/// A restore takes the same record and leaves the file: the join after it writes it.
+#[test]
+fn a_restore_bootstraps_a_seed_sidecar_without_writing_it() {
+    let f = fixture("personal-restore-seed");
+    let (h, slot, bytes) = authority_of_the_fixture(&f);
+    let sidecar = path(&f.world, f.key);
+    assert_eq!(fs::read(&sidecar).unwrap(), f.seed, "the fixture's sidecar is the frozen seed");
+    let before = folder_bytes(&f.world);
+    let mut back = restore_of(&h, &bytes, &f).unwrap_or_else(|e| panic!("restores: {e:?}"));
+    assert_eq!(folder_bytes(&f.world), before, "a restore wrote");
+    assert!(back.players[slot].personal.is_some(), "the seat has its bound record, in memory");
+    // A normal open keeps what it needs: the next ordinary read writes the record.
+    back.load_joiner(slot).expect("the joiner reads");
+    assert_ne!(fs::read(&sidecar).unwrap(), f.seed, "the join after it bootstraps the file");
+}
+
+/// Every `handover/` record and `participants/` file a restore reads is bound: a flipped
+/// byte, absent, another key's valid bytes and an older value of its own key are each
+/// `invalid-checkpoint` from a real restore, and an added record too.
+#[test]
+fn a_handed_over_worlds_records_are_bound() {
+    use crate::authority_checkpoint::RestoreError;
+    let f = fixture("personal-restore-bound");
+    let npub = crate::hosted_server::pubkey_to_npub(&f.key);
+    let activated = f.world.join(format!("handover/activated-{}.dat", hex::encode(f.proof.core.transfer)));
+    let manifest = f.world.join("handover/personal-manifest.dat");
+    let progress = f.world.join(format!("participants/{npub}.dat"));
+
+    // Older values, from the same encoders with what an earlier state held.
+    let older_marker = {
+        let aside = f.world.join("older-marker");
+        let store = MarkerStore::new(aside.clone()).unwrap();
+        let mut payload = Vec::new();
+        frame(&mut payload, b"AxeNStax/handover/activated/v2");
+        frame(&mut payload, &f.proof.core.encode());
+        payload.extend_from_slice(&[9; 80]);
+        store.persist(MarkerKind::Activated, f.proof.core.transfer, &payload).unwrap();
+        let bytes = fs::read(aside.join(format!("activated-{}.dat", hex::encode(f.proof.core.transfer)))).unwrap();
+        fs::remove_dir_all(aside).unwrap();
+        bytes
+    };
+    let older_manifest = {
+        let mut earlier = f.proof.manifest.clone();
+        earlier.stream_length -= 1;
+        earlier.encode().unwrap()
+    };
+    let older_progress = {
+        let mut slot = crate::player_slot::PlayerSlot::new(0, glam::Vec3::new(4.5, 70.0, 9.5), 1.0);
+        slot.kill_counter.insert(crate::mob::MobType::Pig, 3);
+        let context = RecordContext { participant: f.key, lineage: [1; 16], generation: 9, transfer: [4; 16] };
+        super::super::capture::local0_progress(&slot, context).unwrap()
+    };
+
+    let (h, _, bytes) = authority_of_the_fixture(&f);
+    restore_of(&h, &bytes, &f).unwrap_or_else(|e| panic!("untouched, it restores: {e:?}"));
+    let good = |file: &std::path::Path| fs::read(file).unwrap();
+    let records = [
+        ("activated", activated.clone(), good(&manifest), older_marker),
+        ("manifest", manifest.clone(), good(&progress), older_manifest),
+        ("participant", progress.clone(), good(&activated), older_progress),
+    ];
+    let mut wrong = Vec::new();
+    for (name, file, swapped, older) in &records {
+        let was = good(file);
+        assert_ne!(&was, older, "{name}: the older value is the current one");
+        let mut flipped = was.clone();
+        flipped[2] ^= 1;
+        for (case, there) in [("flipped", Some(&flipped)), ("absent", None), ("swapped", Some(swapped)), ("older", Some(older))] {
+            match there {
+                Some(b) => fs::write(file, b).unwrap(),
+                None => fs::remove_file(file).unwrap(),
+            }
+            match restore_of(&h, &bytes, &f).err() {
+                Some(RestoreError::InvalidCheckpoint(_)) => {}
+                other => wrong.push(format!("{name}, {case}: {other:?}")),
+            }
+        }
+        fs::write(file, &was).unwrap();
+    }
+    // A record no persist bound: `open_guard` scans the folder, so it changes what a
+    // restore does, and it isn't a stale leftover it could ignore.
+    let added = f.world.join(format!("handover/quarantined-{}.dat", hex::encode([6u8; 16])));
+    fs::write(&added, b"added").unwrap();
+    match restore_of(&h, &bytes, &f).err() {
+        Some(RestoreError::InvalidCheckpoint(_)) => {}
+        other => wrong.push(format!("added record: {other:?}")),
+    }
+    fs::remove_file(&added).unwrap();
+    assert!(wrong.is_empty(), "handover records' mutations not refused: {wrong:#?}");
+    restore_of(&h, &bytes, &f).unwrap_or_else(|e| panic!("all put back, it restores: {e:?}"));
 }

@@ -8,7 +8,7 @@ use glam::Vec3;
 use super::authority_checkpoint::{fixture, persist_and_checkpoint, restore, SEED};
 use super::authority_checkpoint_refusals::saved;
 use super::twin_run::{add_joiner, run_to, twin, BASE_Y};
-use crate::authority_checkpoint::{refuse_unrestorable, seal, section_offsets, CheckpointError, MAX_CHECKPOINT_BYTES};
+use crate::authority_checkpoint::{layout_sections_read, CheckpointError, MAX_CHECKPOINT_BYTES};
 use crate::commands::builtins::tp::MAX_COORD;
 use crate::save::WorldsRootGuard;
 use crate::server::{GameServer, ServerPlayer};
@@ -124,13 +124,11 @@ fn a_column_past_the_range_is_an_error_at_checkpoint() {
     assert_unrestorable(&h.server, "a chunk past the playable range");
 }
 
-/// The section cap, on bytes: a world at it holds 840 MB of chunks, too much to
-/// build in a test on a shared machine, so this puts the entries through the same
-/// gate `checkpoint` puts its own bytes through.
+/// The section cap, on bytes: a world at it holds 3.4 GiB of chunks, too much to
+/// build in a test on a shared machine, so this puts a layout through the one reader
+/// `checkpoint` puts its records through and `restore` puts the store's.
 #[test]
 fn the_section_cap_is_the_gates_at_exactly_the_restores_number() {
-    let (_root, h, bytes) = saved("keep-s3-section-cap");
-    let at = section_offsets(&h.server).unwrap();
     let with_sections = |full_columns: i32, last: u32| {
         let mut layout = Vec::new();
         layout.extend_from_slice(&((full_columns + 1) as u32).to_le_bytes());
@@ -141,20 +139,16 @@ fn the_section_cap_is_the_gates_at_exactly_the_restores_number() {
             layout.extend_from_slice(&(if x == full_columns { last } else { FULL_COLUMN }).to_le_bytes());
             layout.extend_from_slice(&0u32.to_le_bytes());
         }
-        let mut out = bytes[..at.layout].to_vec();
-        out.extend_from_slice(&layout);
-        out.extend_from_slice(&bytes[at.sims..]);
-        seal(&mut out);
-        out
+        layout
     };
-    // 3,640 full columns are 65,520 sections: 16 more is the cap, 17 past it.
-    let sixteen = FULL_COLUMN & (FULL_COLUMN >> 2);
-    assert_eq!(sixteen.count_ones(), 16);
-    let seventeen = FULL_COLUMN & (FULL_COLUMN >> 1);
-    assert_eq!(seventeen.count_ones(), 17);
-    refuse_unrestorable(&with_sections(3_640, sixteen)).expect("at the cap");
-    match refuse_unrestorable(&with_sections(3_640, seventeen)) {
-        Err(CheckpointError::Unrestorable(why)) => assert!(why.contains("more sections"), "{why}"),
+    // 14,563 full columns are 262,134 sections: 10 more is the cap, 11 past it.
+    let ten = FULL_COLUMN & (FULL_COLUMN >> 8);
+    assert_eq!(ten.count_ones(), 10);
+    let eleven = FULL_COLUMN & (FULL_COLUMN >> 7);
+    assert_eq!(eleven.count_ones(), 11);
+    assert_eq!(layout_sections_read(&with_sections(14_563, ten)), Ok(262_144), "at the cap");
+    match layout_sections_read(&with_sections(14_563, eleven)) {
+        Err(why) => assert!(why.contains("more sections"), "{why}"),
         other => panic!("past the cap: {other:?}"),
     }
 }
@@ -203,7 +197,7 @@ fn a_checkpoint_of_exactly_the_cap_restores_and_one_byte_more_is_too_large() {
     let mut h = twin(SEED, "ckpt-exact-cap", 1, 2);
     run_to(&mut h, 2);
     h.server.fire.restore_cells(&[]);
-    h.server.try_save().expect("saves");
+    h.server.persist_authority().expect("persists");
     let room = MAX_CHECKPOINT_BYTES - h.server.checkpoint().unwrap().len();
     const FIRE_CELL: usize = 12 + 8 + 1;
     let cells: Vec<_> = (0..(room / FIRE_CELL) as i32).map(|i| ((i, 100, 0), 1_000_000u64, 0u8)).collect();
@@ -218,18 +212,6 @@ fn a_checkpoint_of_exactly_the_cap_restores_and_one_byte_more_is_too_large() {
         Err(CheckpointError::TooLarge { bytes }) => assert_eq!(bytes, MAX_CHECKPOINT_BYTES + 1),
         other => panic!("one byte past the cap: {:?}", other.map(|b| b.len())),
     }
-}
-
-/// The manifest reaches the cap the same way: an error, not a shorter list.
-#[test]
-fn a_manifest_past_the_cap_is_too_large() {
-    let _root = WorldsRootGuard::new("keep-s3-manifest-cap");
-    let h = twin(SEED, "ckpt-manifest-cap", 0, 2);
-    let name = |i: usize| std::path::PathBuf::from(format!("npub{i:0>60}.dat"));
-    for i in 0..(MAX_CHECKPOINT_BYTES / (COUNT + 1 + 68 + 32) + 1) {
-        h.server.stored_records.note_joiner(&name(i), b"a record");
-    }
-    assert!(matches!(h.server.checkpoint(), Err(CheckpointError::TooLarge { .. })));
 }
 
 // ---- Anything the fixture can reach ----

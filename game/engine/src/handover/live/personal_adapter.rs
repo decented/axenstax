@@ -204,6 +204,32 @@ pub(crate) fn load_or_bootstrap(
     key: [u8; 32],
     proof: &Proof,
 ) -> Result<Option<JoinerSave>, String> {
+    let Some((save, bootstrapped)) = read_personal(world, key, proof)? else {
+        return Ok(None);
+    };
+    if bootstrapped {
+        write(world, key, &save)?;
+    }
+    Ok(Some(save))
+}
+
+/// [`load_or_bootstrap`] and no write: the current record of a seat a frozen seed still
+/// stands for is in memory only, and the next ordinary read writes it. For a Keep
+/// restore, whose bound sidecar is the seed.
+pub(crate) fn load_or_bootstrap_unwritten(
+    world: &Path,
+    key: [u8; 32],
+    proof: &Proof,
+) -> Result<Option<JoinerSave>, String> {
+    Ok(read_personal(world, key, proof)?.map(|(save, _)| save))
+}
+
+/// The participant's record, and whether it was made from the frozen seed just now.
+fn read_personal(
+    world: &Path,
+    key: [u8; 32],
+    proof: &Proof,
+) -> Result<Option<(JoinerSave, bool)>, String> {
     if !proof.has_participant(key) {
         return Ok(None);
     }
@@ -223,7 +249,7 @@ pub(crate) fn load_or_bootstrap(
         // A previous rename can have landed before directory fsync failed.
         // Presence alone never admits gameplay; retry full durability here.
         confirm_durable(&target)?;
-        return Ok(Some(save));
+        return Ok(Some((save, false)));
     }
     if bytes.first() != Some(&2) {
         return Err("unsupported personal checkpoint seed".into());
@@ -260,8 +286,7 @@ pub(crate) fn load_or_bootstrap(
     let record = crate::handover::personal::PersonalRecord::decode(&progress, &binding.context)
         .map_err(|e| e.to_string())?;
     save.personal = Some(BoundPersonal::new(binding, &record)?);
-    write(world, key, &save)?;
-    Ok(Some(save))
+    Ok(Some((save, true)))
 }
 
 pub(crate) fn confirm_durable(target: &Path) -> Result<(), String> {

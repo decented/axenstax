@@ -1514,6 +1514,7 @@ impl GameServer {
                 // After `open_world`, whose recovery may have rewritten it.
                 self.stored_records.note_meta(&self.world_name);
                 self.stored_records.note_world_dat(&self.world_name);
+                self.stored_records.note_handover(&self.world_name);
             }
             return Ok(());
         }
@@ -1558,6 +1559,7 @@ impl GameServer {
             self.stored_records.scan_joiners(&crate::save::world_dir(&self.world_name));
             self.stored_records.note_meta(&self.world_name);
             self.stored_records.note_world_dat(&self.world_name);
+                self.stored_records.note_handover(&self.world_name);
         }
         Ok(())
     }
@@ -3567,6 +3569,7 @@ impl GameServer {
         // A persist binds what the disk then holds, however the meta came to change.
         self.stored_records.note_meta(&wname);
         self.stored_records.note_world_dat(&wname);
+        self.stored_records.note_handover(&wname);
         committed.and(published)
     }
 

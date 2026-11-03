@@ -1274,20 +1274,22 @@ is an API with tests: `--keep-world` doesn't call it yet, and it changes neither
 the wire nor the save format.
 
 **Shape.** A hybrid (Keep handoff §6, choice 1): volatile state in the bytes, and
-a sorted manifest of `(record key, SHA-256)` for the records a save holds. A world
-doesn't fit the 1 MiB cap as an image, and its digests do. The layout, in order:
-magic, schema `u16` (3), `PROTOCOL_VERSION`, save format, `worldgen_version`, the
+the digest of a tree of stored records naming every record the checkpoint binds. A
+world doesn't fit the 1 MiB cap as an image, and one digest does, at any size. The
+layout, in order: magic, schema `u16` (4), `PROTOCOL_VERSION`, save format, `worldgen_version`, the
 seed widened to `u64`, the config binding (SHA-256 of seed, worldgen version,
 creative and difficulty), the pop key id, the completed tick, the volatile
-sections, the manifest, and a seal (SHA-256 of everything before it; a checksum,
+sections, the manifest's root, and a seal (SHA-256 of everything before it; a checksum,
 not a signature). Fixed-width little-endian integers, `u32` length prefixes, every
 set sorted, every queue in queue order (which is state), floats as bits with
 `-0.0` folded onto `0.0`.
 
 **Observational.** `checkpoint` takes `&self`, does no I/O and calls no save path.
-What it needs of the disk (sidecar, meta and `world.dat` digests) `GameServer::stored_records`
-learnt when those were read or written: sidecars as each lands, the meta and `world.dat` at
-the end of a load and at each persist, and the meta whenever a server writes it back. It depends on no hash order, process or
+What it needs of the disk (sidecar, meta, `world.dat` and handover digests) `GameServer::stored_records`
+learnt when those were read or written: sidecars as each lands, the rest at
+the end of a load and at each persist, and the meta whenever a server writes it back. The tree
+and the state records are functions of what the server holds, so it computes them from memory.
+It depends on no hash order, process or
 clock: `run_id` and the reputation clock's owner are left out. `calendar_id` is in,
 as part of the Keep slice 2a clock: random on a real server, but persisted, so two
 authorities opened from one saved world agree. Two separate fresh worlds aren't
@@ -1302,17 +1304,11 @@ hashed with the value of the secret cut from its stored bytes. A restore is give
 - the slice 2a clock, plus the day-clock step, the falling cadence, the rolled
   strike and the world's active ticks and work;
 - the server's modes (machines, lightning, sim distance and so on);
-- the chunk layout: per column, which sections are live, which are evicted, whether
-  it counts as loaded and whether any chunk carries `persist`. A load holds every
-  saved chunk live and marks it `persist`, so this is what puts stream-out state
-  back. A column can hold sections past `0..=MAX_CHUNK_Y`: a light write conjures an
-  empty one just below the floor;
-- fire with its timers; water and lava as queues plus the difference of their
-  sources from a rescan (water registers every water cell of a column, so an
-  ocean's whole set would be past the cap, but flowing cells are not sources until
-  a reload); the leaf-decay queues; the update scheduler; the power flood; rubber-tap
-  cooldowns; each cell's Proof-of-Play exposure clock (`World::pop_exposure`, in no save,
-  20 B a cell and never pruned, so it counts against the cap as a world is mined);
+- fire with its timers; water as queues plus the difference of its sources from a
+  rescan (water registers every water cell of a column, so an ocean's whole set would
+  be past the cap, but flowing cells are not sources until a reload) and lava's spread
+  phase; the leaf-decay queues; the update scheduler; the power flood; rubber-tap
+  cooldowns;
 - each player slot: every field the `players` digest section reads and the persona
   key. `riding` is left out, since it names a hecs id: a rider restores on its feet;
 - each corpse waiting for the death pass (`deaths.rs`), sorted by its bytes: its kind and
@@ -1324,7 +1320,39 @@ hashed with the value of the secret cut from its stored bytes. A restore is give
   kind and owner goes (pets have no stable id). A save still waits for the pass: it would
   otherwise lose a dead pet's row and cargo. Over-cap is the only limit on the count.
 
-**Manifest** (`manifest.rs`): every non-empty chunk (the 8,704 B a save writes, taken from
+**State in records** (`records.rs`, keys `l`, `q`, `p` + a `u32` piece number). The same kind
+of state, read and range-checked by the same readers (`Volatile::take_state`), but it grows with
+the world, so it lies in stored records rather than the image. Each is cut at 64 KiB:
+- the chunk layout (`l`): per column, which sections are live, which are evicted, whether
+  it counts as loaded and whether any chunk carries `persist`. A load holds every
+  saved chunk live and marks it `persist`, so this is what puts stream-out state
+  back. A column can hold sections past `0..=MAX_CHUNK_Y`: a light write conjures an
+  empty one just below the floor;
+- lava (`q`): its queues in order, plus the difference of its sources from a rescan;
+- each cell's Proof-of-Play exposure clock (`p`, `World::pop_exposure`, in no save, 20 B a
+  cell and never pruned).
+
+**Who writes them.** `GameServer::persist_authority`, which is `try_save` and then the records:
+the state above and the manifest's tree, in `authority/` in the world's folder, one file per key
+named by the key in hex, standing in for a runner's store. Nothing else calls it (a runner's
+`last` step will, and `--keep-world` doesn't yet), so a normal server's save writes exactly what it
+did and a world never run as an authority has no such folder. A piece or tree record that is
+unchanged isn't rewritten, and one nothing binds any more is removed.
+
+**Manifest tree** (`records.rs`, key `t` + a prefix). A checkpoint's manifest section lists
+`(key, digest)`, and a key starting `t` binds a further manifest record the same way. The
+checkpoint names only the root. The tree is a function of the sorted entries: at most 64 is one
+record, and more are shared out by the byte after their common prefix, each share a record of its
+own, recursively. So walking it gives the one sorted list, one changed entry rewrites one path, and
+no manifest record passes 64 KiB. An inline list is for test fixtures only
+(`checkpoint_inline`, `#[cfg(test)]`): outside the tests the last comparison of a restore refuses
+one as not canonical, because the only form the module writes is the tree. A chunk's digest comes
+from memory at the checkpoint and `world.dat`'s from the persist, and the tree doesn't mind: both
+are entries, and the persist writes the tree a checkpoint of that same state computes.
+
+**Manifest entries** (`manifest.rs`): the state pieces above, every file of a handed-over world's
+`handover/` and `participants/` (key `h`, as stored; all but a lock or a temporary file, as
+`open_guard` and `proof` scan them and `load_or_bootstrap` reads them), every non-empty chunk (the 8,704 B a save writes, taken from
 memory so that a checkpoint moves with an unsaved block), every sidecar in `joiners/`, the
 world meta's stored bytes with the secret's value cut, and `world.dat`'s stored bytes, which
 hold every table of `WorldSave` (block entities, plots, market hubs, raids, Satoshi, village
@@ -1351,28 +1379,31 @@ its own. What still isn't in a checkpoint or a record is in the restoration ledg
 `world_open::open_bound_world`: `world.dat` and `chunks/` only. A joiner stage or a staged first
 save stays where it is, for the restored world's next persist to settle; a torn chunk file no
 record binds is skipped where it lies; a bound `world.dat` this build only part-decodes is
-`InvalidCheckpoint`. A normal open keeps all of those recoveries (Spec 02 §8.4).
+`InvalidCheckpoint`; a participant's frozen seed sidecar on a handed-over world becomes its current
+record in memory only (`load_or_bootstrap_unwritten`), and the first ordinary read after the seat
+returns writes the file. A normal open keeps all of those recoveries (Spec 02 §8.4).
 
 **Refusals.** `checkpoint` returns `TooLarge` past the cap (never a shorter checkpoint),
 `Lent` on a lending server and `Unrestorable` for a state a restore would refuse: it puts
-its own bytes through the decoder and range checks a restore runs (`decode_body`), so each
-limit below is enforced at both ends by one piece of code, and no image that can't be
+its own bytes and the state records through the decoders and range checks a restore runs
+(`decode_body`, `take_state`), so each limit below is enforced at both ends by one piece of code, and no image that can't be
 restored is written. A pending death isn't a refusal.
 
 `restore_from_checkpoint` reads, in this order: the magic and schema field (any schema but
 this build's, older or newer, is `UnsupportedVersion`, whatever follows it, the cap
 included), the seal, the remaining versions (a newer protocol or save format), the config
 binding, the key id and that the seed fits a server, the body's decoding and range checks,
-and then every bound record's digest as it lies on disk. Only then does it touch the world:
+then the manifest's tree, each of its records checked against its digest before it is parsed,
+then every bound record's digest as it lies on disk, then the state records' decoding and range
+checks. Only then does it touch the world:
 it refuses a folder that a handover's role cut hasn't reached, loads the records through
-`initial_load` (generating nothing), compares what it loaded to the manifest again (this is
-where the block-table record is checked), applies the volatile sections, then checks that
+`initial_load` (generating nothing), compares what it loaded to the manifest again, applies the volatile sections, then checks that
 everything from the worldgen version to the seal re-encodes to the same bytes.
 
 **Damaged records.** From a good root a record arrives byte-exact or not at all, so a torn
 meta is `InvalidCheckpoint`: refused before the load, and neither repaired nor kept aside.
 A chunk file the manifest doesn't name is a column the run dropped, which the layout keeps
-out; a sidecar, a meta or a `world.dat` it doesn't name is refused, and so is a lost meta with a
+out; a sidecar, a meta, a handover record or a `world.dat` it doesn't name is refused, and so is a lost meta with a
 damaged copy kept aside. A normal open keeps its recovery (Spec 02 §8.4), because without it every
 later save would be refused: a server opened over a torn meta rebuilds it, and its digest
 is taken after that, so the run's checkpoints bind the file that is there.
@@ -1380,9 +1411,10 @@ is taken after that, so the run's checkpoints bind the file that is there.
 
 The seal is a checksum, and nothing tells corruption from anything else: both are
 `InvalidCheckpoint`. So values that are sealed but absurd are checked as values:
-- the layout: no section outside `-1..=MAX_CHUNK_Y + 1`, at most 65,536 sections in all,
-  no section both live and evicted (a save keeps one copy), no column past the playable
-  range. This is what stands between 1 MiB of bytes and tens of gigabytes of chunks;
+- the layout: no section outside `-1..=MAX_CHUNK_Y + 1`, at most 262,144 sections in all (the
+  runner's key ceiling, and about 3.4 GiB of chunks for a restore to build at worst, inside tier
+  L's placeholder 4 GiB), no section both live and evicted (a save keeps one copy), no column past
+  the playable range. This is what stands between a bound record and tens of gigabytes of chunks;
 - the streamer's sim distance equal to its clamp and its budget the constant, the refill
   and render distance within their limits, the spawn column in range;
 - every body finite and within ±1,000,000 blocks (the `/tp` limit), at most 257 slots
@@ -1393,8 +1425,7 @@ Two of these a run holds as it goes, not only at the checkpoint. A tick holds ev
 and spawn at ±1,000,000 blocks as at a wall (`GameServer::hold_bodies_in_range`, at the
 start and end of the tick). A section has one home: `World::insert_chunk` leaves a section
 the evicted store holds where it is, because that copy is the one a save keeps. The
-section cap isn't held live: past it `checkpoint` is `Unrestorable` until a later slice
-moves the layout out of the image.
+section cap isn't held live: past it `checkpoint` is `Unrestorable`.
 
 | Failure | Code |
 |---|---|

@@ -75,6 +75,13 @@ impl LavaSystem {
         (fronts, self.slow)
     }
 
+    /// Keep slice 3 — the spread phase, which the checkpoint holds apart from the
+    /// fronts (those can be large, and are a stored record).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn slow_phase(&self) -> u8 {
+        self.slow
+    }
+
     /// Keep slice 2b — put back what [`Self::checkpoint_view`] took.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn restore_checkpoint(&mut self, world: &World, loaded: &ahash::AHashSet<(i32, i32)>, saved: &crate::fluids::FluidCheckpoint, slow: u8) {
