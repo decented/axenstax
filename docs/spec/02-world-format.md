@@ -2035,6 +2035,78 @@ Mitigation:
   `AXENSTAX_DATA_DIR` is used in place and never migrated into: the dedicated-server
   image sets it to its `/worlds` volume (`tools/dedicated-server/Dockerfile`).
 
+#### 8.2.1 Joiner sidecars commit with `world.dat`
+
+A joiner's sidecar (`joiners/<npub>.dat`) holds what that joiner carries; `world.dat` holds
+the chests. The two have to describe the same save, or a world can reopen with an item in
+both places or in neither. Neither file's format carries a generation, so the order does the
+work (`joiner_stage.rs`). No format changed.
+
+**Commit order** of every world save that holds a joiner's record:
+
+1. Stage: each record into `joiners.new/` (mode `0700`, files `0600`, each fsynced), then the
+   marker `joiners.new/world-dat.sha256` (the SHA-256, in hex, of the exact `world.dat` bytes
+   about to commit), written last, then the directory and the world folder fsynced. A stage
+   with a marker is whole.
+2. Commit: chunk files, then `world.dat`, as in §8.4 and the bullets above. Its rename is the
+   commit point.
+3. Publish: rename each staged record into `joiners/` (behind the late-save fence), fsync
+   `joiners/` and the world folder, then remove `joiners.new/`.
+
+A save with no joiner record to save creates no `joiners.new/` and behaves as it did before.
+
+**Recovery rule** (`joiner_stage::settle`), run before any sidecar is read: read the marker and
+compare it with the digest of the commit file. A match means the commit happened, so the
+publish is finished. Anything else (no marker, not a digest, another digest) means it didn't,
+so `joiners.new/` is dropped. Both can be cut short and run again. A commit file that can't be
+read (other than missing) is an error and the stage is left alone: a failed read isn't a
+commit that never happened. It runs:
+
+- in `load_world`, against `world.dat`, and `load_autosave`, against `autosave/world.dat`. A
+  stage for the autosave is dropped by a load that reads `world.dat` instead, which is then
+  the older save with its older records. A world still new has no load and no sidecars to
+  read: its next save drops the stage;
+- at the start of every save, and again straight after a commit (either file counts);
+- before a joiner's own leave write and before `load_joiner`, so a publish that failed with
+  the session still running can't land an older record on a newer one.
+
+Only regular files named `npub1*.dat` of at most the sidecar size bound are published.
+`personal_adapter::generic_copy_guard` also reads the stage, so a bound record there still
+stops a generic copy of a world not opened since the crash. `eligibility::saved_record_keys`
+refuses a handover while a stage is there. A retired world is never settled (`open_guard`).
+
+**Each save path:**
+
+| Path | Commit file | Refused record |
+|---|---|---|
+| `GameServer::try_save` (dedicated server, `--keep-world`, role cut) | `world.dat`, first save included | Refuses the save before anything is touched; nothing is published |
+| `save_live_world` (a host's save, through `GameServer::save_with_joiners`) | `world.dat`, first save included | The world still saves; that joiner's record stands as it is on disk; the save reports `Err` |
+| A host's autosave (`save_with_joiners`) | `autosave/world.dat` | As above, logged |
+
+Failing to write the stage itself stops the save before its commit on every path.
+
+**The Keep checkpoint's manifest** (Keep slice 2b) is true of the disk straight after a commit,
+and stays so: `StoredRecords::note_joiner` runs as each record lands in `joiners/`, never at
+staging. `try_save` returns `Ok` only once the publish has finished, and a runner persists
+and then checkpoints only after `Ok`, so step 3 is behind every checkpoint. After a crash in steps 2-3,
+the load settles first and `scan_joiners` reads the result. A checkpoint older than that commit
+is refused as it is for any later save.
+
+**Known windows, still open:**
+
+- **Chunk files.** A later save (not a world's first) deletes mined-out chunk files and writes
+  chunks before `world.dat`, and a chunk file names no generation. A crash there leaves chunks
+  ahead of `world.dat` and the sidecars, which do still match each other. The first save is
+  whole (`chunks.new/`, §8.4). Not changed by this section.
+- **A joiner leaving.** `release_slot` writes that joiner's record at once, outside any save,
+  because the slot's state goes with it. Until the next commit (60 s by default on a dedicated
+  server or `--keep-world`, 5 minutes on a host) that record is ahead of `world.dat`, and a hard
+  crash in that time can reopen the world with an item in both places or in neither. A clean
+  stop saves, so it doesn't reach this.
+- **A host's rollback.** A host's autosave publishes into the one `joiners/`. A host that then
+  drops the autosave and reopens the last save, or a loader that ignores or fails to read the
+  autosave, gets `world.dat` older than the records published since.
+
 ### 8.3 Atomic Snapshots
 
 For the production tier, the platform supports **atomic world snapshots** for backup and

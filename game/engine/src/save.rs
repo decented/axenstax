@@ -1936,8 +1936,14 @@ pub fn write_world_folder(
     save: &WorldSave,
     world: &World,
 ) -> Result<(), String> {
-    write_world_folder_at(name, meta, save, world, AtCommit::KeepAutosave)
+    write_world_folder_at(name, meta, save, world, AtCommit::KeepAutosave, &mut |_| Ok(()))
 }
+
+/// What a save runs with the exact `world.dat` bytes it is about to commit,
+/// before it touches a chunk: the joiner sidecars staged for that commit
+/// (`joiner_stage::stage`, Spec 02 §8.2.1). An `Err` stops the save there.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) type BeforeCommit<'a> = dyn FnMut(&[u8]) -> Result<(), String> + 'a;
 
 /// [`write_world_folder`], doing `at_commit` to the autosave the moment
 /// `world.dat` commits ([`world_dat_committed`]).
@@ -1948,10 +1954,12 @@ fn write_world_folder_at(
     save: &WorldSave,
     world: &World,
     at_commit: AtCommit,
+    before_commit: &mut BeforeCommit<'_>,
 ) -> Result<(), String> {
     let dir = world_dir(name);
     refuse_world_write(&dir)?;
     finish_staged_first_save(&dir)?;
+    crate::joiner_stage::settle(&dir, crate::joiner_stage::Commit::Either, &mut |_, _| {})?;
 
     // Seam A (offline-first login contract) — encryption-at-rest is NOT finalised
     // here; it is pinned by the owner's web-Stash blob format. This is the clean
@@ -1962,6 +1970,7 @@ fn write_world_folder_at(
     // caller. Implement no AEAD now (the recommended end-state per the contract);
     // until then `world.dat` stays plaintext bincode (+ the format-version footer).
     let encoded = crate::save_format::encode_world_save(save)?;
+    before_commit(&encoded)?;
 
     if is_first_save(&dir) {
         write_first_save(&dir, world, &encoded, at_commit)?;
@@ -2009,7 +2018,7 @@ pub fn save_world(
     authority_clock: Option<&crate::sim_clock::SavedClock>,
 ) -> Result<(), String> {
     crate::quest_npcs::check_capture(world.quest_scope, quest_world)?;
-    save_world_at(name, world, players, seed, carts, saved_mobs, AtCommit::KeepAutosave, quest_world, authority_clock)
+    save_world_at(name, world, players, seed, carts, saved_mobs, AtCommit::KeepAutosave, quest_world, authority_clock, &mut |_| Ok(()))
 }
 
 /// The positional WorldSave of a live world and its local seats, exactly as
@@ -2224,6 +2233,7 @@ fn save_world_at(
     at_commit: AtCommit,
     quest_world: Option<&crate::quest_npcs::QuestWorldSave>,
     authority_clock: Option<&crate::sim_clock::SavedClock>,
+    before_commit: &mut BeforeCommit<'_>,
 ) -> Result<(), String> {
     crate::quest_npcs::check_capture(world.quest_scope, quest_world)?;
     if players.is_empty() {
@@ -2266,7 +2276,7 @@ fn save_world_at(
 
     // Delegate the actual file writes (world.dat, world_meta.json, chunks/)
     // to the shared helper so import uses the same code path.
-    write_world_folder_at(name, &meta, &save, world, at_commit)?;
+    write_world_folder_at(name, &meta, &save, world, at_commit, before_commit)?;
 
     // Log after the write so we can report the final version and chunk count.
     let saved = world.persistable_chunks()
@@ -2948,7 +2958,8 @@ fn decode_world_dat(data: &[u8], rel: &str) -> Result<(WorldSave, bool), String>
 /// Load the world saved in `worlds/<name>/` into `world`.
 ///
 /// All or nothing (Spec 02 §8.4, load-failure rule): on `Err`, `world` is
-/// untouched and nothing on disk was renamed, copied or written — so the caller
+/// untouched and nothing on disk was renamed, copied or written, except a save
+/// this build had already committed being finished — so the caller
 /// can refuse the world (or fall back to another copy) knowing it is exactly as
 /// it was. The `Err` text is a short, file-naming reason for the lobby notice.
 /// The recovery flows that keep a damaged original aside (a torn chunk, a
@@ -2980,6 +2991,9 @@ pub fn load_world(
     // chunks were published: publish them now, or the world would load empty
     // under world.dat's block entities (Spec 02 §8.4).
     finish_staged_first_save(&dir)?;
+    // Likewise sidecars staged for this world.dat, before any sidecar is read.
+    // Ones staged for a commit that never happened are dropped.
+    crate::joiner_stage::settle(&dir, crate::joiner_stage::Commit::WorldDat, &mut |_, _| {})?;
     let loaded = load_chunk_dir(&dir.join("chunks"), world)?;
     if partial {
         keep_damaged_copy_once(&dat_path);
@@ -4453,6 +4467,7 @@ pub fn fork_world(_source_folder: &str, _source_display_name: &str) -> Result<St
 /// Autosave the world to a separate subdirectory within the world folder.
 /// This protects against crashes without overwriting the manual save.
 #[cfg(not(target_arch = "wasm32"))]
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn autosave_world(
     name: &str,
     world: &World,
@@ -4463,11 +4478,29 @@ pub fn autosave_world(
     quest_world: Option<&crate::quest_npcs::QuestWorldSave>,
     authority_clock: Option<&crate::sim_clock::SavedClock>,
 ) -> Result<(), String> {
+    autosave_world_with(name, world, players, seed, carts, saved_mobs, quest_world, authority_clock, &mut |_| Ok(()))
+}
+
+/// [`autosave_world`], running `before_commit` with the `autosave/world.dat`
+/// about to commit.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn autosave_world_with(
+    name: &str,
+    world: &World,
+    players: &[crate::player_slot::PlayerSlot],
+    seed: u32,
+    carts: &[SavedCart],
+    saved_mobs: &[SavedTamedPet],
+    quest_world: Option<&crate::quest_npcs::QuestWorldSave>,
+    authority_clock: Option<&crate::sim_clock::SavedClock>,
+    before_commit: &mut BeforeCommit<'_>,
+) -> Result<(), String> {
     crate::quest_npcs::check_capture(world.quest_scope, quest_world)?;
     if players.is_empty() {
         return Err("autosave_world: no players to save".to_string());
     }
     refuse_write_over_newer_save(&world_dir(name))?;
+    crate::joiner_stage::settle(&world_dir(name), crate::joiner_stage::Commit::Either, &mut |_, _| {})?;
     let dir = world_dir(name).join("autosave");
     let chunks_dir = dir.join("chunks");
     fs::create_dir_all(&chunks_dir).map_err(|e| format!("mkdir autosave: {e}"))?;
@@ -4640,6 +4673,7 @@ pub fn autosave_world(
     };
 
     let encoded = crate::save_format::encode_world_save(&save)?;
+    before_commit(&encoded)?;
 
     let mut saved = 0u32;
     let (to_write, to_delete) = partition_chunks_for_save(world);
@@ -4705,7 +4739,10 @@ pub fn autosave_world(
 /// BEFORE its commit keeps it. Every save of the live session goes through here
 /// (`GameState::save_live_world`): Save, Save & Quit and every other exit that
 /// saves, a resumable scenario's start and the replay snapshot — the last two
-/// used to leave it behind (review 2026-10-06).
+/// used to leave it behind (review 2026-10-06). A host's save goes through
+/// [`save_world_superseding_autosave_with`], so its joiners' sidecars commit
+/// with it.
+#[cfg_attr(all(not(test), not(target_arch = "wasm32")), allow(dead_code))]
 pub fn save_world_superseding_autosave(
     name: &str,
     world: &World,
@@ -4718,13 +4755,30 @@ pub fn save_world_superseding_autosave(
 ) -> Result<(), String> {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        save_world_at(name, world, players, seed, carts, saved_mobs, AtCommit::DropAutosave, quest_world, authority_clock)
+        save_world_at(name, world, players, seed, carts, saved_mobs, AtCommit::DropAutosave, quest_world, authority_clock, &mut |_| Ok(()))
     }
     // The web keeps no separate autosave (it writes the save itself).
     #[cfg(target_arch = "wasm32")]
     {
         save_world(name, world, players, seed, carts, saved_mobs, quest_world, authority_clock)
     }
+}
+
+/// [`save_world_superseding_autosave`], running `before_commit` with the
+/// `world.dat` about to commit.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn save_world_superseding_autosave_with(
+    name: &str,
+    world: &World,
+    players: &[crate::player_slot::PlayerSlot],
+    seed: u32,
+    carts: &[SavedCart],
+    saved_mobs: &[SavedTamedPet],
+    quest_world: Option<&crate::quest_npcs::QuestWorldSave>,
+    authority_clock: Option<&crate::sim_clock::SavedClock>,
+    before_commit: &mut BeforeCommit<'_>,
+) -> Result<(), String> {
+    save_world_at(name, world, players, seed, carts, saved_mobs, AtCommit::DropAutosave, quest_world, authority_clock, before_commit)
 }
 
 /// How long ago this world's crash-recovery autosave was written ("2 minutes
@@ -4773,6 +4827,7 @@ pub fn load_autosave(
     // load_world (Spec 02 §8.4).
     let (save, partial) = decode_world_dat(&data, "autosave/world.dat")?;
 
+    crate::joiner_stage::settle(&world_dir(name), crate::joiner_stage::Commit::Autosave, &mut |_, _| {})?;
     let loaded = load_chunk_dir(&dir.join("chunks"), world)?;
     if partial {
         keep_damaged_copy_once(&dat_path);

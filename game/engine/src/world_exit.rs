@@ -459,18 +459,42 @@ impl crate::GameState {
         self.preflight_personal_local()?;
         let quest_world = crate::quest_npcs::capture(self.world.quest_scope, &self.ecs)?;
         let clock = self.clock_to_save();
-        let result = crate::save::tamed_mobs_to_saved(&self.ecs).and_then(|pets| crate::save::save_world_superseding_autosave(
-            &self.world_name,
-            &self.world,
-            &self.players,
-            self.biome_gen.seed,
-            &crate::save::carts_to_saved(&self.ecs),
-            &pets,
-            quest_world.as_ref(),
-            Some(&clock),
-        ))
+        let result = crate::save::tamed_mobs_to_saved(&self.ecs).and_then(|pets| {
+            let carts = crate::save::carts_to_saved(&self.ecs);
+            // Joiners' records commit with this world.dat (Spec 02 §8.2.1).
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let save = |before_commit: &mut crate::save::BeforeCommit<'_>| crate::save::save_world_superseding_autosave_with(
+                    &self.world_name,
+                    &self.world,
+                    &self.players,
+                    self.biome_gen.seed,
+                    &carts,
+                    &pets,
+                    quest_world.as_ref(),
+                    Some(&clock),
+                    before_commit,
+                );
+                match &self.hosted_server {
+                    Some(h) => h.server.save_with_joiners(save),
+                    None => save(&mut |_| Ok(())),
+                }
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                crate::save::save_world_superseding_autosave(
+                    &self.world_name,
+                    &self.world,
+                    &self.players,
+                    self.biome_gen.seed,
+                    &carts,
+                    &pets,
+                    quest_world.as_ref(),
+                    Some(&clock),
+                )
+            }
+        })
         .inspect_err(|e| log::error!("Save failed: {e}"));
-        let result = result.and_then(|()| self.hosted_server.as_ref().map_or(Ok(()), |h| h.server.save_joiners()));
         self.session_saves.note_save(result.is_ok());
         result
     }

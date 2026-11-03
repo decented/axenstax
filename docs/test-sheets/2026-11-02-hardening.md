@@ -86,6 +86,14 @@ For anyone running a dedicated server. The Console and the server's admin comman
 29. Make `whitelist.txt` mode `0600`, then add and remove a name from the Console and by admin command. Does it stay `0600`?
 30. Queue a kick from the Console while the server is running and check the player is removed. Do two kicks queued close together both take effect?
 
+## Saved players and the world save together
+
+Only a hard stop shows this. Automated checks cut a save short at each step. Nobody has pulled the plug on a real machine. Back the world up first.
+
+31. Host a world with a signed-in friend. The friend takes a stack from a chest. Wait for the autosave (5 minutes on a host, 60 seconds on a dedicated server), then kill the host (`kill -9`, or pull the plug) straight after one. Reopen the world. Is the stack in one place only: the chest or the friend's bag, never both or neither?
+32. After any hard stop and reopen, look in the world's folder. A `joiners.new` folder should be gone. Is it?
+33. Known gap, not a bug: if the friend takes the stack and **leaves**, then the host dies within that same autosave wait, the stack can come back in both places. A clean quit doesn't do this.
+
 ## Known gaps, not bugs in this build
 
 - The privacy page has no contact route for data requests. Owner to supply one.

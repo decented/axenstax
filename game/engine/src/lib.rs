@@ -292,6 +292,8 @@ mod death;
 mod starter_kit;
 mod inventory_sync;
 mod joiner_save;
+#[cfg(not(target_arch = "wasm32"))]
+mod joiner_stage;
 mod saved_item_slot;
 mod personal_value;
 pub(crate) mod progression;

@@ -3208,7 +3208,8 @@ impl GameServer {
     /// failed (likely a dead disk) is `world.dat` skipped, leaving the last
     /// consistent pair untouched. `exhibits.json` is a sidecar for the
     /// Operator Console, written after `world.dat`; its failure is logged but
-    /// doesn't fail the save.
+    /// doesn't fail the save. The joiners' sidecars are staged before all of it
+    /// and published once `world.dat` has committed (`joiner_stage`).
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn try_save(&self) -> Result<(), String> {
         self.try_save_selected(self.selected_local_personal.as_ref())
@@ -3227,10 +3228,15 @@ impl GameServer {
         let saved_mobs = crate::save::tamed_mobs_to_saved(&self.ecs)?;
         // A committed first save cut short is published after death preflight.
         crate::save::finish_staged_first_save(&dir)?;
+        self.settle_joiner_stage()?;
         let first_save = crate::save::is_first_save(&dir);
-        let chunks_dir = dir.join("chunks");
 
-        self.save_joiners()?;
+        // A joiner whose record can't be saved refuses the world save, before
+        // anything is touched. The others stage below (Spec 02 §8.2.1).
+        let (joiner_rows, refused) = self.joiner_rows();
+        if !refused.is_empty() {
+            return Err(refused.join("; "));
+        }
         let player_saves: Vec<crate::save::PlayerSaveData> = self.players.iter().filter(|sp| !sp.server_simulated).map(|sp| {
             crate::save::PlayerSaveData {
                 x: sp.player.pos.x,
@@ -3506,6 +3512,20 @@ impl GameServer {
         };
 
         let encoded = crate::save_format::encode_world_save(&save)?;
+        if !joiner_rows.is_empty() {
+            crate::joiner_stage::stage(&dir, &joiner_rows, &encoded)?;
+        }
+        let committed = self.commit_world_files(&dir, &encoded, first_save);
+        // Whichever way that went, the disk says whether this save's world.dat
+        // committed, and so whether its sidecars publish or drop.
+        let published = self.settle_joiner_stage();
+        committed.and(published)
+    }
+
+    /// The chunks, then `world.dat`, then the exhibits file; see [`Self::try_save`].
+    #[cfg(not(target_arch = "wasm32"))]
+    fn commit_world_files(&self, dir: &std::path::Path, encoded: &[u8], first_save: bool) -> Result<(), String> {
+        let chunks_dir = dir.join("chunks");
         let world_dat = dir.join("world.dat");
 
         // Spec 02 §7.5 — loaded + evicted chunks, written before the commit point.
@@ -3520,9 +3540,9 @@ impl GameServer {
             // of a column's chunks (holes no load ever fills). Any chunk that
             // can't be written fails it before world.dat.
             crate::save::write_first_save(
-                &dir,
+                dir,
                 &self.world,
-                &encoded,
+                encoded,
                 // The server never reads or clears the client's autosave.
                 crate::save::AtCommit::KeepAutosave,
             )?;
@@ -3564,7 +3584,7 @@ impl GameServer {
                     first_failure.unwrap_or_default()
                 ));
             }
-            crate::save::write_atomic(&world_dat, &encoded)?;
+            crate::save::write_atomic(&world_dat, encoded)?;
         }
 
         // Creator-gallery (Spec 2026-06-19 §9) — write an `exhibits.json` sidecar

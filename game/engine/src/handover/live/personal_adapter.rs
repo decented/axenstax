@@ -278,7 +278,13 @@ pub(crate) fn confirm_durable(target: &Path) -> Result<(), String> {
 pub(crate) fn has_bound_records(world: &Path) -> Result<bool, String> { scan_bound_records(world, true) }
 pub(crate) fn has_any_bound_records(world: &Path) -> Result<bool, String> { scan_bound_records(world, false) }
 fn scan_bound_records(world: &Path, imported_only: bool) -> Result<bool, String> {
-    let entries = match fs::read_dir(world.join("joiners")) {
+    // A world not opened since a save was cut short can hold its only bound
+    // record in the stage (Spec 02 §8.2.1). Reading it here is on the safe side.
+    Ok(scan_bound_in(&world.join("joiners"), imported_only)?
+        || scan_bound_in(&world.join(crate::joiner_stage::STAGED_JOINERS), imported_only)?)
+}
+fn scan_bound_in(directory: &Path, imported_only: bool) -> Result<bool, String> {
+    let entries = match fs::read_dir(directory) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(error.to_string()),
@@ -312,20 +318,11 @@ pub(crate) fn generic_copy_guard(world: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub(crate) fn write(world: &Path, key: [u8; 32], save: &JoinerSave) -> Result<(), String> {
-    write_observed(world, key, save, &mut crate::handover::durable::NoFault)
-}
-
-pub(crate) fn write_observed(
-    world: &Path,
-    key: [u8; 32],
-    save: &JoinerSave,
-    observer: &mut impl crate::handover::durable::BoundaryObserver,
-) -> Result<(), String> {
-    use crate::handover::durable::WriteBoundary;
+/// The bytes of `save`, once every check a personal write makes has passed: an
+/// open world, no fence, a world directory that's a real one, the right persona.
+pub(crate) fn checked_record(world: &Path, key: [u8; 32], save: &JoinerSave) -> Result<Vec<u8>, String> {
     super::authority::open_guard(world).map_err(|r| r.0.to_string())?;
-    let target = path(world, key);
-    crate::save_fence::check(&target)?;
+    crate::save_fence::check(&path(world, key))?;
     match fs::symlink_metadata(world) {
         Ok(m) if m.is_dir() && !m.file_type().is_symlink() => (),
         Ok(_) => return Err("unsafe world directory for personal save".into()),
@@ -345,10 +342,14 @@ pub(crate) fn write_observed(
     {
         return Err("personal save identity mismatch".into());
     }
-    let directory = target.parent().ok_or("missing personal directory")?;
+    Ok(bytes)
+}
+
+/// `joiners/`, private, and refused if it's anything but a real directory.
+pub(crate) fn ensure_directory(directory: &Path) -> Result<(), String> {
     match fs::symlink_metadata(directory) {
-        Ok(m) if m.is_dir() && !m.file_type().is_symlink() => (),
-        Ok(_) => return Err("unsafe personal directory".into()),
+        Ok(m) if m.is_dir() && !m.file_type().is_symlink() => Ok(()),
+        Ok(_) => Err("unsafe personal directory".into()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             fs::create_dir(directory).map_err(|e| e.to_string())?;
             #[cfg(unix)]
@@ -357,9 +358,27 @@ pub(crate) fn write_observed(
                 fs::set_permissions(directory, fs::Permissions::from_mode(0o700))
                     .map_err(|e| e.to_string())?;
             }
+            Ok(())
         }
-        Err(e) => return Err(e.to_string()),
+        Err(e) => Err(e.to_string()),
     }
+}
+
+pub(crate) fn write(world: &Path, key: [u8; 32], save: &JoinerSave) -> Result<(), String> {
+    write_observed(world, key, save, &mut crate::handover::durable::NoFault)
+}
+
+pub(crate) fn write_observed(
+    world: &Path,
+    key: [u8; 32],
+    save: &JoinerSave,
+    observer: &mut impl crate::handover::durable::BoundaryObserver,
+) -> Result<(), String> {
+    use crate::handover::durable::WriteBoundary;
+    let bytes = checked_record(world, key, save)?;
+    let target = path(world, key);
+    let directory = target.parent().ok_or("missing personal directory")?;
+    ensure_directory(directory)?;
     let mut random = [0u8; 16];
     getrandom::fill(&mut random).map_err(|e| e.to_string())?;
     let temp = directory.join(format!(".personal-{}.tmp", hex::encode(random)));

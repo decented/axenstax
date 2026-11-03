@@ -95,6 +95,11 @@ impl StoredRecords {
     }
 
     #[cfg(test)]
+    pub(crate) fn joiner_digest(&self, name: &str) -> Option<[u8; 32]> {
+        self.joiners.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(name).copied()
+    }
+
+    #[cfg(test)]
     pub(crate) fn meta_digest(&self) -> Option<[u8; 32]> {
         self.meta
     }

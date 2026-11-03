@@ -691,6 +691,14 @@ impl crate::server::GameServer {
     pub(crate) fn load_joiner(&mut self, i: usize) -> Option<JoinerSave> {
         let pk = self.players.get(i)?.verified_pubkey?;
         let path = self.joiner_path(pk);
+        // The load settled any stage; this is for one a failed publish left since.
+        if let Err(error) = self.settle_joiner_stage() {
+            log::warn!("Joiner records staged for a save can't be settled: {error}");
+            self.failed_joiner_reads.insert(pk);
+            self.players[i].personal_read_failed = true;
+            self.players[i].obligations.mark(IncompleteCause::Unreadable);
+            return None;
+        }
         match crate::handover::live::personal_adapter::proof(&crate::save::world_dir(&self.world_name)) {
             Ok(Some(proof)) if proof.has_participant(pk) => {
                 if let Err(error) = proof.confirm_authority_durable(&crate::save::world_dir(&self.world_name)) {
@@ -763,16 +771,18 @@ impl crate::server::GameServer {
         }
         saved
     }
-    pub(crate) fn save_joiner(&self, i: usize) -> Result<(), String> {
+    /// What a save of slot `i` would write now. `None`: nothing, for a guest, a
+    /// local slot or a joiner not back in the world. `Err`: it must not be saved.
+    fn joiner_record(&self, i: usize) -> Result<Option<([u8; 32], JoinerSave)>, String> {
         let Some(sp) = self
             .players
             .get(i)
             .filter(|sp| sp.server_simulated && sp.is_in_world() && !sp.awaiting_reattach)
         else {
-            return Ok(());
+            return Ok(None);
         };
         let Some(pk) = sp.verified_pubkey else {
-            return Ok(());
+            return Ok(None);
         };
         if sp.personal_read_failed || self.failed_joiner_reads.contains(&pk) {
             return Err(format!(
@@ -782,12 +792,76 @@ impl crate::server::GameServer {
         }
         // M-1: never written into a retired world (or a refused one).
         crate::save::refuse_write_over_newer_save(&crate::save::world_dir(&self.world_name))?;
-        let saved = JoinerSave::capture_projected(sp, self.calendar_id)?;
+        Ok(Some((pk, JoinerSave::capture_projected(sp, self.calendar_id)?)))
+    }
+    /// Write slot `i`'s record now, outside any world save (a joiner leaving; see
+    /// Spec 02 §8.2.1 for what that leaves open). A stage a failed publish left
+    /// goes first, so its older record can't land on this one later.
+    pub(crate) fn save_joiner(&self, i: usize) -> Result<(), String> {
+        let Some((pk, saved)) = self.joiner_record(i)? else {
+            return Ok(());
+        };
+        self.settle_joiner_stage()?;
         let bytes = saved.encode()?;
         crate::handover::live::personal_adapter::write(&crate::save::world_dir(&self.world_name), pk, &saved)?;
         self.stored_records.note_joiner(&self.joiner_path(pk), &bytes);
         Ok(())
     }
+    /// Every connected joiner's record for a world save to stage, and why any
+    /// can't be saved.
+    pub(crate) fn joiner_rows(&self) -> (Vec<crate::joiner_stage::Row>, Vec<String>) {
+        let world = crate::save::world_dir(&self.world_name);
+        let mut rows = Vec::new();
+        let mut refused = Vec::new();
+        for (i, _) in self.players.iter().enumerate().filter(|(_, sp)| sp.connected) {
+            let row = self.joiner_record(i).and_then(|record| {
+                record
+                    .map(|(pk, saved)| {
+                        let bytes = crate::handover::live::personal_adapter::checked_record(&world, pk, &saved)?;
+                        let name = format!("{}.dat", crate::hosted_server::pubkey_to_npub(&pk));
+                        Ok(crate::joiner_stage::Row { name, bytes })
+                    })
+                    .transpose()
+            });
+            match row {
+                Ok(Some(row)) => rows.push(row),
+                Ok(None) => {}
+                Err(why) => refused.push(why),
+            }
+        }
+        (rows, refused)
+    }
+    /// Finish or drop any stage beside this world's sidecars, telling the
+    /// checkpoint's records what lands.
+    pub(crate) fn settle_joiner_stage(&self) -> Result<(), String> {
+        crate::joiner_stage::settle(
+            &crate::save::world_dir(&self.world_name),
+            crate::joiner_stage::Commit::Either,
+            &mut |path, bytes| self.stored_records.note_joiner(path, bytes),
+        )
+    }
+    /// A host's save, whose commit is inside `save`: stage the joiners' records
+    /// for it, then publish them. A host's world saves past one joiner's refused
+    /// record, which stands as it is on disk and is reported in the `Err`; a
+    /// stage that can't be written stops the save before its commit.
+    pub(crate) fn save_with_joiners(
+        &self,
+        save: impl FnOnce(&mut crate::save::BeforeCommit<'_>) -> Result<(), String>,
+    ) -> Result<(), String> {
+        self.settle_joiner_stage()?;
+        let world = crate::save::world_dir(&self.world_name);
+        let (rows, refused) = self.joiner_rows();
+        let committed = save(&mut |encoded| {
+            if rows.is_empty() { Ok(()) } else { crate::joiner_stage::stage(&world, &rows, encoded) }
+        });
+        let published = self.settle_joiner_stage();
+        committed.and(published)?;
+        if refused.is_empty() { Ok(()) } else { Err(refused.join("; ")) }
+    }
+    /// Write every connected joiner's record now, outside any commit. The game
+    /// saves through [`Self::try_save`] and [`Self::save_with_joiners`]; a test
+    /// that only wants the records on disk comes here.
+    #[cfg(test)]
     pub(crate) fn save_joiners(&self) -> Result<(), String> {
         let errors: Vec<_> = self
             .players
@@ -809,9 +883,6 @@ impl crate::server::GameServer {
         None
     }
     pub(crate) fn save_joiner(&self, _: usize) -> Result<(), String> {
-        Ok(())
-    }
-    pub(crate) fn save_joiners(&self) -> Result<(), String> {
         Ok(())
     }
 }

@@ -6431,16 +6431,37 @@ impl super::GameState {
                 Err(error) => { log::error!("Quest autosave failed: {error}"); return; }
             };
             let clock = self.clock_to_save();
-            if let Err(e) = crate::save::tamed_mobs_to_saved(&self.ecs).and_then(|pets| crate::save::autosave_world(
-                &self.world_name, &self.world, &self.players, self.biome_gen.seed,
-                &crate::save::carts_to_saved(&self.ecs),
-                &pets,
-                quest_world.as_ref(),
-                Some(&clock),
-            )) {
+            if let Err(e) = crate::save::tamed_mobs_to_saved(&self.ecs).and_then(|pets| {
+                let carts = crate::save::carts_to_saved(&self.ecs);
+                // Joiners' records commit with this autosave (Spec 02 §8.2.1).
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let save = |before_commit: &mut crate::save::BeforeCommit<'_>| crate::save::autosave_world_with(
+                        &self.world_name, &self.world, &self.players, self.biome_gen.seed,
+                        &carts,
+                        &pets,
+                        quest_world.as_ref(),
+                        Some(&clock),
+                        before_commit,
+                    );
+                    match &self.hosted_server {
+                        Some(h) => h.server.save_with_joiners(save),
+                        None => save(&mut |_| Ok(())),
+                    }
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    crate::save::autosave_world(
+                        &self.world_name, &self.world, &self.players, self.biome_gen.seed,
+                        &carts,
+                        &pets,
+                        quest_world.as_ref(),
+                        Some(&clock),
+                    )
+                }
+            }) {
                 log::error!("Autosave failed: {e}");
             }
-            if let Some(h) = &self.hosted_server && let Err(e) = h.server.save_joiners() { log::error!("Joiner autosave failed: {e}"); }
         }
 
         // Spec 40 persistence — debounced wardrobe flush. Authoring sets

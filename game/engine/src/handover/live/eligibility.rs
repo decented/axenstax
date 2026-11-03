@@ -186,10 +186,17 @@ pub const SAVED_RECORDS_LIMIT: usize = 4096;
 /// (`joiners/<npub>.dat`). Read by the session itself at every boundary, so
 /// a record written after the host action (a player who joined and left
 /// during the consent window) refuses instead of being silently left out.
-/// A half-written or unrecognised file refuses too: it is never guessed at.
+/// A half-written or unrecognised file refuses too: it is never guessed at, and
+/// so do records still staged for a save (`joiner_stage`), which `joiners/` is
+/// not yet true of.
 pub fn saved_record_keys(world_dir: &std::path::Path) -> Result<Vec<[u8; 32]>, Refusal> {
     use nostr::FromBech32;
     let unreadable = Refusal("This world's saved player records couldn't be read. Nothing was changed.");
+    match std::fs::symlink_metadata(world_dir.join(crate::joiner_stage::STAGED_JOINERS)) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(unreadable),
+        Ok(_) => return Err(Refusal("A saved player record here is unfinished or unrecognised. Nothing was changed.")),
+    }
     let entries = match std::fs::read_dir(world_dir.join("joiners")) {
         Ok(e) => e,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
