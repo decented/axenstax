@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use super::authority_checkpoint::{fixture, persist_and_checkpoint, restore};
 use super::authority_checkpoint_records::fixture_with_meta;
 use super::twin_run::run_to;
-use crate::authority_checkpoint::{manifest_entries, CheckpointError, RestoreError, FILE_PIECE_BYTES};
+use crate::authority_checkpoint::{manifest_entries, rebind_entries, record_file, CheckpointError, RestoreError, FILE_PIECE_BYTES};
 use crate::save::{read_world_save, world_dir, SavedSign, WorldSave, WorldsRootGuard};
 use crate::save_format::encode_world_save;
 use crate::server::GameServer;
@@ -270,4 +270,113 @@ fn a_file_that_is_legally_absent_is_no_failure() {
     h.server.stored_records.note_world_dat("ckpt-note-absent");
     h.server.stored_records.note_handover("ckpt-note-absent");
     h.server.checkpoint().expect("nothing failed");
+}
+
+// ---- Pieces of the state records ----
+
+/// A key of a state family.
+fn state_key(family: u8, i: u32) -> Vec<u8> {
+    let mut key = vec![family];
+    key.extend_from_slice(&i.to_be_bytes());
+    key
+}
+
+/// Every state family at three pieces or more: the reader's bytes are real, from real
+/// state, at a small cost on disk.
+fn world_of_long_records(name: &str) -> (TestHost, Vec<u8>) {
+    let mut h = fixture(name, 1);
+    run_to(&mut h, 5);
+    const N: i32 = 15_000;
+    for i in 0..N {
+        // 17 B a column, 25 B a water source and its front, 20 B a clock, 13 B a powered cell.
+        h.server.loaded_columns.insert((i + 1000, 0));
+        h.server.water.add_source(i, 300, 0);
+        h.server.lava.add_source(i, 301, 0);
+        h.server.world.pop_exposure.insert((i, 302, 0), 9);
+        h.server.world.power.energised.insert((i, 303, 0), 3);
+    }
+    let mut plan: crate::plan::PlanData = bincode::deserialize(&[0u8; 1 << 12]).expect("zeros decode as a plan");
+    plan.cells = vec![bincode::deserialize(&[0u8; 1 << 12]).expect("zeros decode as a cell"); 32_768];
+    let mut carrier = crate::server::ServerPlayer::new(glam::Vec3::new(0.5, 110.0, 0.5));
+    carrier.server_simulated = true;
+    carrier.inventory.set_slot(35, Some(crate::item::ItemStack { item: crate::item::Item::Plan(plan), count: 1 }));
+    h.server.players.push(carrier);
+    h.server.persist_authority().expect("persists");
+    for i in 0..6_000 {
+        let cow = crate::entity::spawn_mob(&mut h.server.ecs, crate::mob::MobType::Cow, glam::Vec3::new(i as f32, 304.0, 0.5));
+        h.server.ecs.get::<&mut crate::combat::Health>(cow).unwrap().current = 0.0;
+    }
+    h.server.write_bound_records().expect("the records write");
+    let bytes = h.server.checkpoint().expect("checkpoints");
+    let back = restore(&h, &bytes).unwrap_or_else(|e| panic!("untouched, it restores: {e:?}"));
+    assert_eq!(back.checkpoint().expect("again"), bytes);
+    (h, bytes)
+}
+
+/// Each family, an absent middle piece and pieces the tree binds with a gap: the digests
+/// can't speak for these, as a gap's list is one a persist never writes. All refused.
+#[test]
+fn every_state_family_refuses_an_absent_middle_piece_and_non_contiguous_pieces() {
+    let _root = WorldsRootGuard::new("keep-s3d-families");
+    let (h, bytes) = world_of_long_records("ckpt-families");
+    let dir = world_dir("ckpt-families");
+    let entries = manifest_entries(&h.server).unwrap();
+    let expect = |crafted: &[u8], case: String, words: &str, wrong: &mut BTreeMap<String, String>| match restore(&h, crafted).err() {
+        Some(RestoreError::InvalidCheckpoint(why)) if why.contains(words) => {}
+        other => {
+            wrong.insert(case, format!("wanted \"{words}\", got {other:?}"));
+        }
+    };
+    let mut wrong = BTreeMap::new();
+    for (family, name) in [(b'l', "layout"), (b'q', "lava"), (b'p', "exposure"), (b'f', "water"), (b's', "cell sims"), (b'u', "players"), (b'k', "corpses")] {
+        let pieces = entries.iter().filter(|(key, _)| key.len() == 5 && key[0] == family).count() as u32;
+        assert!(pieces >= 3, "{name}: {pieces} pieces");
+
+        let middle = record_file(&dir, &state_key(family, 1));
+        let good = std::fs::read(&middle).unwrap();
+        std::fs::remove_file(&middle).unwrap();
+        expect(&bytes, format!("{name}: an absent middle piece"), "piece 1 is missing", &mut wrong);
+        std::fs::write(&middle, &good).unwrap();
+
+        let first = record_file(&dir, &state_key(family, 0));
+        let held = std::fs::read(&first).unwrap();
+        std::fs::write(&first, &good).unwrap();
+        std::fs::write(&middle, &held).unwrap();
+        expect(&bytes, format!("{name}: two pieces swapped"), "piece 0 doesn't match", &mut wrong);
+        std::fs::write(&first, &held).unwrap();
+        std::fs::write(&middle, &good).unwrap();
+
+        let without = |gone: u32| rebind_entries(&h.server, &bytes, |flat| flat.retain(|(key, _)| *key != state_key(family, gone)));
+        expect(&without(1), format!("{name}: a gap in the middle"), "piece by piece", &mut wrong);
+        expect(&without(0), format!("{name}: no first piece"), "piece by piece", &mut wrong);
+        expect(&without(pieces - 1), format!("{name}: no last piece"), "", &mut wrong);
+        let renumbered = rebind_entries(&h.server, &bytes, |flat| {
+            flat.retain(|(key, _)| *key != state_key(family, 1));
+            let digest = flat.iter().find(|(key, _)| *key == state_key(family, 2)).expect("a third piece").1;
+            flat.push((state_key(family, pieces + 5), digest));
+            flat.sort_unstable();
+        });
+        expect(&renumbered, format!("{name}: a piece past the end"), "piece by piece", &mut wrong);
+        h.server.write_bound_records().expect("the tree goes back");
+    }
+    assert!(wrong.is_empty(), "{} cases wrong: {wrong:#?}", wrong.len());
+    restore(&h, &bytes).unwrap_or_else(|e| panic!("all put back, it restores: {e:?}"));
+}
+
+/// A gap in the pieces bound of `world.dat` isn't a tree a persist writes either: the file
+/// has a piece the manifest doesn't name.
+#[test]
+fn a_gap_in_world_dats_bound_pieces_is_refused() {
+    let _root = WorldsRootGuard::new("keep-s3d-w-gap");
+    let (h, bytes, _) = world_of_pieces("ckpt-w-gap", 3);
+    let crafted = rebind_entries(&h.server, &bytes, |flat| flat.retain(|(key, _)| *key != state_key(b'w', 1)));
+    match restore(&h, &crafted).err() {
+        Some(RestoreError::InvalidCheckpoint(why)) => assert!(why.contains("world.dat piece 1 is not in the manifest"), "{why}"),
+        other => panic!("a gap: {other:?}"),
+    }
+    let crafted = rebind_entries(&h.server, &bytes, |flat| flat.retain(|(key, _)| key[0] != b'w'));
+    match restore(&h, &crafted).err() {
+        Some(RestoreError::InvalidCheckpoint(why)) => assert!(why.contains("no world.dat is bound"), "{why}"),
+        other => panic!("no pieces: {other:?}"),
+    }
 }
