@@ -193,7 +193,7 @@ fn every_field_of_the_save_is_bound() {
         assert_ne!(changed, baseline, "{}: its change changed nothing", field.name);
         let (_, damaged) = read_world_save_reporting(&changed).unwrap_or_else(|e| panic!("{}: not a valid record: {e:?}", field.name));
         assert!(!damaged, "{}: not a whole record", field.name);
-        if let Some(why) = wrong_outcome(&h, &bytes, &file, &changed, "world.dat") {
+        if let Some(why) = wrong_outcome(&h, &bytes, &file, &changed, "world.dat piece") {
             wrong.insert(format!("{}, another valid value", field.name), why);
         }
 
@@ -201,7 +201,7 @@ fn every_field_of_the_save_is_bound() {
         let at = baseline.iter().zip(&changed).position(|(a, b)| a != b).unwrap_or(baseline.len() - 1);
         let mut flipped = baseline.clone();
         flipped[at] ^= 1;
-        if let Some(why) = wrong_outcome(&h, &bytes, &file, &flipped, "world.dat") {
+        if let Some(why) = wrong_outcome(&h, &bytes, &file, &flipped, "world.dat piece") {
             wrong.insert(format!("{}, a flipped byte", field.name), why);
         }
 
@@ -210,7 +210,7 @@ fn every_field_of_the_save_is_bound() {
             absent(&mut save);
             let emptied = encoded(&save);
             assert_ne!(emptied, baseline, "{}: it held no row", field.name);
-            if let Some(why) = wrong_outcome(&h, &bytes, &file, &emptied, "world.dat") {
+            if let Some(why) = wrong_outcome(&h, &bytes, &file, &emptied, "world.dat piece") {
                 wrong.insert(format!("{}, its rows gone", field.name), why);
             }
         }
@@ -223,7 +223,7 @@ fn every_field_of_the_save_is_bound() {
 }
 
 struct Record {
-    name: &'static str,
+    name: String,
     path: PathBuf,
     /// Another key's valid bytes.
     swapped: Vec<u8>,
@@ -276,10 +276,10 @@ fn every_record_refuses_every_mutation() {
     restore(&h, &bytes).unwrap_or_else(|e| panic!("untouched, it restores: {e:?}"));
 
     let records = [
-        Record { name: "world.dat", path: dir.join("world.dat"), swapped: older(&other_dir.join("world.dat")), older: older_dat },
-        Record { name: "chunk", path: chunk.clone(), swapped: older(&dir.join("chunks/1_6_1.chunk")), older: older_chunk },
-        Record { name: "sidecar", path: sidecar.clone(), swapped: older(&sidecar_b), older: older_sidecar },
-        Record { name: "world meta", path: dir.join("world_meta.json"), swapped: older(&other_dir.join("world_meta.json")), older: older_meta },
+        Record { name: "world.dat".into(), path: dir.join("world.dat"), swapped: older(&other_dir.join("world.dat")), older: older_dat },
+        Record { name: "chunk".into(), path: chunk.clone(), swapped: older(&dir.join("chunks/1_6_1.chunk")), older: older_chunk },
+        Record { name: "sidecar".into(), path: sidecar.clone(), swapped: older(&sidecar_b), older: older_sidecar },
+        Record { name: "world meta".into(), path: dir.join("world_meta.json"), swapped: older(&other_dir.join("world_meta.json")), older: older_meta },
     ];
     // The records only an authority has: each state record, the manifest's root, and
     // one of the tree's other records. Each has an older value of its own key, and any
@@ -297,19 +297,20 @@ fn every_record_refuses_every_mutation() {
         key.extend_from_slice(&0u32.to_be_bytes());
         key
     };
-    let (layout, lava, exposure) = (piece(b'l'), piece(b'q'), piece(b'p'));
-    let (water, cells, players, corpses) = (piece(b'f'), piece(b's'), piece(b'u'), piece(b'k'));
-    let authority_records = [
-        Record { name: "layout piece", path: authority(&layout), swapped: older(&authority(&lava)), older: older_of(&layout) },
-        Record { name: "lava piece", path: authority(&lava), swapped: older(&authority(&exposure)), older: older_of(&lava) },
-        Record { name: "exposure piece", path: authority(&exposure), swapped: older(&authority(&layout)), older: older_of(&exposure) },
-        Record { name: "water piece", path: authority(&water), swapped: older(&authority(&lava)), older: older_of(&water) },
-        Record { name: "cell sims piece", path: authority(&cells), swapped: older(&authority(&water)), older: older_of(&cells) },
-        Record { name: "players piece", path: authority(&players), swapped: older(&authority(&cells)), older: older_of(&players) },
-        Record { name: "corpses piece", path: authority(&corpses), swapped: older(&authority(&players)), older: older_of(&corpses) },
-        Record { name: "manifest root", path: authority(b"t"), swapped: older(&authority(node)), older: older_of(b"t") },
-        Record { name: "manifest record", path: authority(node), swapped: older(&authority(b"t")), older: older_of(node) },
-    ];
+    // One row for each state family, from the list the records module keeps, so a family
+    // added there is mutated here. Each takes the next family's piece as another key's
+    // valid bytes.
+    let families = crate::authority_checkpoint::state_families();
+    let mut authority_records: Vec<Record> = families
+        .iter()
+        .enumerate()
+        .map(|(i, (family, name))| {
+            let (key, next) = (piece(*family), piece(families[(i + 1) % families.len()].0));
+            Record { name: format!("{name} piece"), path: authority(&key), swapped: older(&authority(&next)), older: older_of(&key) }
+        })
+        .collect();
+    authority_records.push(Record { name: "manifest root".into(), path: authority(b"t"), swapped: older(&authority(node)), older: older_of(b"t") });
+    authority_records.push(Record { name: "manifest record".into(), path: authority(node), swapped: older(&authority(b"t")), older: older_of(node) });
     let mut wrong = BTreeMap::new();
     for record in records.iter().chain(&authority_records) {
         let good = older(&record.path);

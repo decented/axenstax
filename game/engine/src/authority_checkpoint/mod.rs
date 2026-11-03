@@ -37,12 +37,16 @@
 //! The secret itself is never in the bytes: only the key id, and the meta record
 //! is hashed with the value of `pop_secret` cut from it.
 //!
-//! ## A checkpoint that can't be restored is never written
+//! ## An image its own bytes or state records would be refused for is never written
 //!
 //! `checkpoint` puts its own bytes and the state records it binds through the decoder
 //! and range checks `restore` uses (`decode_body`, `take_state`), so each limit is
 //! enforced at both ends by one piece of code, and a limit added later is enforced at
-//! both by being added once.
+//! both by being added once. That is all it checks: a root is restorable only straight
+//! after a persist. With no persist yet, at a later tick than the persist, over a
+//! `world.dat` this build only part-decodes, or after the state changed since the
+//! persist, `checkpoint` still returns an image and the restore refuses it. A runner
+//! checks the restore at each commit.
 //!
 //! ## Observational
 //!
@@ -75,7 +79,7 @@ use crate::server::GameServer;
 
 pub(crate) use manifest::StoredRecords;
 #[cfg(test)]
-pub(crate) use records::{FILE_PIECE_BYTES, MAX_RECORD_BYTES, Tree};
+pub(crate) use records::{FILE_PIECE_BYTES, MAX_RECORD_BYTES, RECORDS_DIR, Tree};
 
 pub(crate) const CHECKPOINT_MAGIC: &[u8] = b"axenstax/authority-checkpoint\0";
 /// 5: `world.dat` bound in fixed pieces, and all that grows with the world in stored
@@ -274,6 +278,13 @@ pub(crate) fn manifest_sizes(server: &GameServer) -> Result<(usize, usize, usize
 #[cfg(test)]
 pub(crate) fn manifest_entries(server: &GameServer) -> Result<Vec<(Vec<u8>, [u8; 32])>, String> {
     Ok(server.bound_records()?.flat)
+}
+
+/// Every family of state record, by its key letter and name: what the tests that go
+/// through each family are driven from.
+#[cfg(test)]
+pub(crate) fn state_families() -> Vec<(u8, &'static str)> {
+    records::FAMILIES.to_vec()
 }
 
 /// The key of every manifest record and state piece it binds, and each one's bytes.

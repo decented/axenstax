@@ -21,6 +21,173 @@ const SLOTS: usize = 36;
 /// `--max-players` clamp is lower), and a host adds its two local seats.
 const MAX_SLOTS: usize = u8::MAX as usize + 2;
 
+/// Every field of `ServerPlayer`, named once and marked: encoded by this module, or left
+/// out with its reason. There is no `..`, so a field added to the struct doesn't compile
+/// until someone has said which it is. A field this module doesn't encode comes back as
+/// `ServerPlayer::new` made it, or as the sidecar reload sets it.
+#[allow(dead_code)]
+fn every_field_is_accounted_for(sp: &ServerPlayer) {
+    let ServerPlayer {
+        // left out: set again from the host's mode when the joiner re-attaches (`hosted_server.rs` at admission)
+        inventory_mode: _,
+        // left out: an action lane, drawn again per attach
+        action_frontier: _,
+        // left out: an action lane, drawn again per attach
+        action_queue: _,
+        // left out: an action lane, drawn again per attach
+        action_results: _,
+        // left out: a pack lane, drawn again per attach
+        pack_session: _,
+        // left out: a quest lane, drawn again per attach
+        quest_session: _,
+        // encoded
+        quest_next_incarnation: _,
+        // left out: set to the restored tick by `restore::reload_sidecars`
+        gameplay_clock: _,
+        // left out: a pack lane in flight, dropped with the connection
+        pack_flight: _,
+        // encoded
+        pack_next_incarnation: _,
+        // encoded
+        pack_unfit_feedback: _,
+        // encoded
+        death_handled: _,
+        // encoded (position, velocity, ground and water flags, fall state)
+        player: _,
+        // encoded (through the window section)
+        inventory: _,
+        // encoded
+        combat: _,
+        // encoded (through the window section)
+        hotbar_slot: _,
+        // encoded
+        yaw: _,
+        // encoded
+        pitch: _,
+        // encoded (through the window section)
+        held_item: _,
+        // encoded (through the window section)
+        held_kind: _,
+        // encoded (through the window section)
+        held_id: _,
+        // encoded
+        pending_intent: _,
+        // encoded
+        intent_queue: _,
+        // encoded
+        step_credit: _,
+        // encoded
+        last_applied_input: _,
+        // encoded
+        server_simulated: _,
+        // encoded
+        connected: _,
+        // encoded
+        last_input_tick: _,
+        // encoded
+        last_sneak: _,
+        // encoded
+        last_acting: _,
+        // encoded
+        last_move_mag: _,
+        // encoded
+        skin_key: _,
+        // encoded
+        verified_pubkey: _,
+        // encoded
+        display_name: _,
+        // left out: the chat policy, fresh per attach
+        comms: _,
+        // left out: the chat policy, fresh per attach
+        contacts: _,
+        // left out: a rate limiter, fresh per attach
+        chat_rate: _,
+        // encoded
+        worldgen_mismatch: _,
+        // encoded
+        spawn_pos: _,
+        // encoded
+        dead_ticks: _,
+        // encoded
+        respawns: _,
+        // encoded
+        awaiting_join: _,
+        // left out: set by the sidecar reload, which is what says the slot isn't saved yet
+        awaiting_reattach: _,
+        // encoded
+        spawn_protection: _,
+        // encoded
+        armour_points: _,
+        // encoded
+        armour_wear_hits: _,
+        // encoded
+        interact_cooldown: _,
+        // encoded
+        attach_gen: _,
+        // encoded
+        next_swing_tick: _,
+        // encoded
+        next_shot_tick: _,
+        // encoded
+        fishing: _,
+        // encoded
+        drop_bucket: _,
+        // left out: a log-only tally that refills on a restart (handoff section 5)
+        possession: _,
+        // left out: a tally that refills on a restart (handoff section 5)
+        strict_refusals: _,
+        // left out: a rate that refills on a restart (handoff section 5)
+        strict_corrections: _,
+        // encoded
+        eat_cooldown: _,
+        // encoded
+        slept_night: _,
+        // encoded
+        progression_tracked: _,
+        // left out: the bound personal record, which comes back from the sidecar
+        personal: _,
+        // left out: set by a read of the personal record at attach
+        personal_read_failed: _,
+        // left out: delivery state of the personal record, per attach
+        #[cfg(not(target_arch = "wasm32"))]
+        personal_delivery: _,
+        // encoded
+        progression_credits: _,
+        // encoded (through the window section)
+        armour: _,
+        // encoded (through the window section)
+        cursor: _,
+        // encoded (through the window section)
+        craft_grid: _,
+        // encoded (through the window section)
+        station: _,
+        // encoded (through the window section)
+        table_gone_ticks: _,
+        // left out: window events, per attach
+        window_events: _,
+        // left out: the correction debt stays in the sidecar, which merges it back
+        obligations: _,
+        // encoded (through the window section)
+        open_container: _,
+        // left out: what the client was sent, per attach
+        container_sent: _,
+        // encoded (through the window section)
+        last_window_op_seq: _,
+        // left out: what the client was sent, per attach
+        block_views: _,
+        // left out: refusals waiting to be sent, dropped with the connection
+        refused_uses: _,
+        // left out: names a hecs entity, and hecs ids change on restore; the rider is put on its feet
+        riding: _,
+        // encoded (through the seat section)
+        ride: _,
+        // encoded (through the seat section)
+        seat_input: _,
+        // encoded (through the seat section)
+        local_seated: _,
+    } = sp;
+}
+
 pub(super) fn write_all(w: &mut Writer, players: &[ServerPlayer]) -> Result<(), String> {
     w.count(players.len());
     for sp in players {

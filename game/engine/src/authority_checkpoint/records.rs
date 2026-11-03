@@ -76,7 +76,7 @@ pub(super) const CELLS: u8 = b's';
 pub(super) const PLAYERS: u8 = b'u';
 pub(super) const CORPSES: u8 = b'k';
 pub(super) const WORLD_DAT: u8 = b'w';
-const FAMILIES: [(u8, &str); 7] = [
+pub(super) const FAMILIES: [(u8, &str); 7] = [
     (LAYOUT, "layout"),
     (LAVA, "lava queue"),
     (EXPOSURE, "exposure clocks"),

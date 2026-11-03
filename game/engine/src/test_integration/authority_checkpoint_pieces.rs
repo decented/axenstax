@@ -330,7 +330,7 @@ fn every_state_family_refuses_an_absent_middle_piece_and_non_contiguous_pieces()
         }
     };
     let mut wrong = BTreeMap::new();
-    for (family, name) in [(b'l', "layout"), (b'q', "lava"), (b'p', "exposure"), (b'f', "water"), (b's', "cell sims"), (b'u', "players"), (b'k', "corpses")] {
+    for (family, name) in crate::authority_checkpoint::state_families() {
         let pieces = entries.iter().filter(|(key, _)| key.len() == 5 && key[0] == family).count() as u32;
         assert!(pieces >= 3, "{name}: {pieces} pieces");
 
