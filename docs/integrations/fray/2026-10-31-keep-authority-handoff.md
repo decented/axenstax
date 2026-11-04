@@ -158,7 +158,7 @@ restore-after-step-n with the uninterrupted run.
 | Cooldowns, respawn and death timers, spawn protection | Lost | Yes. |
 | Inputs: `last_applied_input`, intent queue, step credit | Lost | Yes: prediction re-snaps, queued input dropped. |
 | Output state: chunk-push sent-sets, entity interest, ProtocolId baseline, outboxes | Lost | Yes for output: every client is fully re-pushed. Contract acceptance 2 (ordered commands agree) cannot pass. |
-| Pending deaths | ECS markers; save refused while pending | No longer: each corpse is in the checkpoint (slice 3), and a save still waits for the death pass, so the runner's `last` waits too. |
+| Pending deaths | ECS markers; save refused while pending | Corpse state is encoded, but the native save and its record-set builder still refuse pending deaths. The Keep path must handle them coherently before a real `last`; that path is not implemented yet. |
 | Economy owners | Saved, but five owner enums still carry `LocalPlayer(slot)` | Meaningless across a restore with reused slots; must converge on npub. |
 | `HostedServer` per-slot vectors, carry-over queues | Lost | Yes (authority state per §3). |
 | `HostedServer.server_tick` | **Fixed** (`4c5a75c6`): carries on from the restored tick at its first tick; audited safe with a large start (Spec 04 §4.2i), no wire change | No. |
@@ -422,9 +422,10 @@ Measured or built on the game side. The sizes are from `checkpoint_size_at_the_b
   in a batch. Water's queue is still that form, so taking its front rewrites its whole record. Lava was the same, 703,043 B a
   persist at the 8-joiner bench; it now writes immutable pieces and moves a cursor in the image (Spec 01 §4.1.5). What
   a tick and a commit interval really dirty, family by family, is in §8.
-- **A corpse lies in a record, and a save still waits for the sweep.** So a real `last` batch holds an empty
-  corpses record, and only a fixture writes a full one (`write_bound_records` without the save). If the runner
-  ever persists with deaths pending, the save's wait has to go first.
+- **A corpse lies in a record, and the native save still waits for the sweep.** The folder-based persist
+  helper therefore writes an empty corpses record; only a fixture writes a full one
+  (`write_bound_records` without the save). A real Keep builder must handle pending deaths coherently
+  rather than inherit that refusal as an indefinite reason to withhold `last`.
 
 **For the Fray session, from closing the `world.dat` gap:**
 
@@ -509,7 +510,7 @@ drained water source: persist, checkpoint, restore into a new server, feed both 
   record.
 - **Pending outputs are dropped:** `pending_item_grants`, `pending_kill_events`, `released_joiners` and
   `pending_sapling_drops` aren't carried. An item grant is value and not just output, so the slice 3
-  runner checkpoints only after they drain.
+  runner must drain or carry pending value before a `last`; that boundary is not implemented yet.
 
 Limits of what does hold:
 - `players` depends on entities after all, which the slice 2b decision had assumed it didn't: a push or
@@ -529,7 +530,14 @@ Limits of what does hold:
 - Not yet covered as a checkpoint: the §5 rows for `HostedServer` vectors and queues, cooldowns held
   on connection state and output state.
 
-**Slice 3:** return output as commands, and the admission split (choice 7).
+**Before wiring slice 3's stored adapter:** build the persona-free counter keys and bound directory,
+then the seed-derived checkpoint state and secret-free config required by the rulings. The new path
+must not temporarily initialise through the native folder API's secret-bearing config. That native
+API and `--keep-world` retain their current behaviour through this slice.
+
+**Slice 3:** return output as commands, staged persistence, reader restore and restart membership;
+use the native test runner before a Keep uses those paths. The host-verified persona encoding in
+metadata (choice 7) is still a prerequisite for the later WASM build.
 **Then:** contract acceptance 2 and the WASM build.
 
 **For the adapter's batcher, from lava's pieces (schema 6):**
@@ -557,8 +565,9 @@ Limits of what does hold:
   so `last` must then be withheld, since a row-length change near the start rewrites every later piece.
 - Slice 6: read each record once. Today `w` is read 3 to 4 times and `c` twice, against `get`'s 4 GiB budget a
   restore.
-- Only `w` has a shrink batch; the state families, `c`, `j` and `t` rely on `commit`'s folder sweep
-  (`records.rs`), which a `PersistBatch` won't have.
+- The record-set builder now computes removals for every family from the previous and current key sets.
+  The stored batcher must use the effective previous set, staged keys included, and return those removals;
+  it cannot rely on the native folder persist's sweep (`records.rs`).
 - `checkpoint` is not quite observational: `deaths::encode` reaches `plan_store::remember_checked`, which writes a
   Plan body for a dead pack animal carrying a full body. On a server these are markers and return early, so no
   real path was found, but the code can't rule it out. A failed capture surfaces as `Encode`.
