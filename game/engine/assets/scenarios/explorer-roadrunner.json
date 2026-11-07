@@ -1,6 +1,7 @@
 {
   "kind": "Challenge",
   "display_name": "Roadrunner \u2014 saddle up a Nostrich and take her for a ride",
+  "card_art": "sand",
   "objective": {
     "Action": {
       "event": "RideEntity",

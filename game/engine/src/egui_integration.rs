@@ -127,6 +127,20 @@ impl EguiIntegration {
             );
             self.block_texture_ids.push(texture_id);
         }
+        // Publish the ids on the context so menu screens drawn from `&Context`
+        // alone (the lobby's Trials gallery) can draw the game's own block icons.
+        self.ctx.data_mut(|d| {
+            d.insert_temp(
+                egui::Id::new(BLOCK_TEXTURES_KEY),
+                std::sync::Arc::new(self.block_texture_ids.clone()),
+            )
+        });
+    }
+
+    /// The uploaded block-icon ids, indexed by texture layer.
+    #[allow(dead_code)]
+    pub fn block_texture_ids(&self) -> &[egui::TextureId] {
+        &self.block_texture_ids
     }
 
     /// Get the egui TextureId for a given block texture layer.
@@ -495,4 +509,14 @@ mod tests {
         // boundary rather than asserting a fallback that never fires here.
         assert_eq!(icon_upload_side(4 * 4 * 4 + 7, 16), 4);
     }
+}
+
+const BLOCK_TEXTURES_KEY: &str = "axenstax_block_texture_ids";
+
+/// The block-icon texture ids published by [`EguiIntegration::upload_block_textures`],
+/// indexed by texture layer. Empty before the first upload (so callers draw a
+/// fallback, never panic).
+pub fn block_texture_handles(ctx: &egui::Context) -> std::sync::Arc<Vec<egui::TextureId>> {
+    ctx.data(|d| d.get_temp::<std::sync::Arc<Vec<egui::TextureId>>>(egui::Id::new(BLOCK_TEXTURES_KEY)))
+        .unwrap_or_default()
 }

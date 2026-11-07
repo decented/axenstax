@@ -1,6 +1,7 @@
 {
   "kind": "Challenge",
   "display_name": "Booby Trap \u2014 rig a pressure plate to a blasting keg so a trespasser sets off the boom",
+  "card_art": "pressure_plate",
   "kit": [
     {
       "name": "blasting_keg",

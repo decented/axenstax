@@ -1,6 +1,7 @@
 {
   "kind": "Challenge",
   "display_name": "Bouncer — build a creature in Rig Studio and set it bouncing",
+  "card_art": "rubber_log",
   "kit": [
     {
       "name": "oak_planks",

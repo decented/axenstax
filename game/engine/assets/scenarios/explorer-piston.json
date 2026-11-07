@@ -1,6 +1,7 @@
 {
   "kind": "Challenge",
   "display_name": "Hidden Door \u2014 build a secret piston door that slides open at the flip of a lever",
+  "card_art": "piston",
   "kit": [
     {
       "name": "sticky_piston",

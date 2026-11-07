@@ -1,6 +1,7 @@
 {
   "kind": "Challenge",
   "display_name": "Follow the Plan — raise a little hut block by block, following the ghost guide",
+  "card_art": "blueprint_paper",
   "kit": [
     {
       "name": "hut_plan",

@@ -1,6 +1,7 @@
 {
   "kind": "Challenge",
   "display_name": "Quarry Run \u2014 break twenty blocks and feel a mine take shape",
+  "card_art": "coal_ore",
   "kit": [
     {
       "name": "stone_pickaxe",

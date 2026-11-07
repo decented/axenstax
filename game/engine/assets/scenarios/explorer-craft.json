@@ -1,6 +1,7 @@
 {
   "kind": "Challenge",
   "display_name": "First Workbench \u2014 fell a tree, build a bench, and make your first tools",
+  "card_art": "crafting_table",
   "kit": [],
   "objective": {
     "Sequence": {

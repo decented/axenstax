@@ -1,6 +1,7 @@
 {
   "kind": "Challenge",
   "display_name": "Catch & Cook \u2014 Reel a fish from the pond, sizzle it on the campfire, and eat a meal you made from scratch.",
+  "card_art": "oak_planks",
   "kit": [
     {
       "name": "fishing_rod",

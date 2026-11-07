@@ -1,6 +1,7 @@
 {
   "kind": "Challenge",
   "display_name": "Two of Every Kind \u2014 Feed the cows their favourite wheat until love blooms and a calf appears.",
+  "card_art": "hay_bale",
   "kit": [
     {
       "name": "wheat",

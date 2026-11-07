@@ -1,6 +1,7 @@
 {
   "kind": "Challenge",
   "display_name": "Forged in Fire \u2014 pour lava beside water and make obsidian",
+  "card_art": "bedrock",
   "kit": [
     {
       "name": "lava_bucket",

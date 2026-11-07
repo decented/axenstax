@@ -1,6 +1,7 @@
 {
   "kind": "Challenge",
   "display_name": "First Light \u2014 wake up, dig in, and make your very first camp",
+  "card_art": "torch",
   "kit": [
     {
       "name": "oak_planks",

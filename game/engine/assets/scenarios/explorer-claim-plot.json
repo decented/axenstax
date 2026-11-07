@@ -1,6 +1,7 @@
 {
   "kind": "Challenge",
   "display_name": "Stake Your Claim \u2014 plant a marker and make a patch of the world yours",
+  "card_art": "plot_marker",
   "kit": [
     {
       "name": "plot_marker",

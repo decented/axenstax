@@ -1,6 +1,7 @@
 {
   "kind": "Challenge",
   "display_name": "Skybox Studio \u2014 raise a little house with walls, a door, and a window",
+  "card_art": "oak_door",
   "kit": [
     {
       "name": "oak_planks",

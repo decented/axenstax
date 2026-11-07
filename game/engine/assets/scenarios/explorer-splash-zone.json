@@ -1,6 +1,7 @@
 {
   "kind": "Challenge",
   "display_name": "Splash Zone \u2014 build the world's silliest water park",
+  "card_art": "glass",
   "kit": [
     {
       "name": "water_bucket",

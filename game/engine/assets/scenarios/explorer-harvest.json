@@ -1,6 +1,7 @@
 {
   "kind": "Challenge",
   "display_name": "Green Thumb \u2014 Wake a bare patch of soil into a row of golden wheat.",
+  "card_art": "wheat_mature",
   "kit": [
     {
       "name": "wooden_hoe",

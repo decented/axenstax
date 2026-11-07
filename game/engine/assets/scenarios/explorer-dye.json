@@ -1,6 +1,7 @@
 {
   "kind": "Challenge",
   "display_name": "Colour Lab \u2014 mix dyes and paint the world bright",
+  "card_art": "amethyst_block",
   "kit": [
     {
       "name": "red_dye",

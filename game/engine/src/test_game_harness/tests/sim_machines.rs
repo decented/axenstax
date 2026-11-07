@@ -237,6 +237,7 @@ fn game_harness_d4_machines_construction_does_not_fake_a_power_transition() {
         mobs_enabled: None,
         trial_race: None,
         arena: None,
+        card_art: None,
     };
     game.state.scenario = Some(crate::scenario::ScenarioState::new(def));
     game.state.falling_tick_counter = 3;

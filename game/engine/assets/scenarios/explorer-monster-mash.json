@@ -1,6 +1,7 @@
 {
   "kind": "Challenge",
   "display_name": "Monster Mash \u2014 bonk the whole monster mosh pit",
+  "card_art": "coal_block",
   "kit": [
     {
       "name": "iron_sword",

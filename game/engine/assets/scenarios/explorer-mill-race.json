@@ -1,6 +1,7 @@
 {
   "kind": "Challenge",
   "display_name": "Mill Race — set a water wheel turning in the falls and light a lamp with it",
+  "card_art": "water_wheel",
   "kit": [
     {
       "name": "water_wheel",

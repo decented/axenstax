@@ -1,6 +1,7 @@
 {
   "kind": "Challenge",
   "display_name": "The Forge \u2014 light a furnace and smelt raw iron into a shining ingot",
+  "card_art": "furnace",
   "kit": [
     {
       "name": "furnace",

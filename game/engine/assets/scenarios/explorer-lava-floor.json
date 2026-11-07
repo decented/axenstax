@@ -1,6 +1,7 @@
 {
   "kind": "Challenge",
   "display_name": "The Floor Is Lava! \u2014 build islands across a bubbling lava sea",
+  "card_art": "lava",
   "kit": [
     {
       "name": "oak_planks",

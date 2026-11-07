@@ -1,6 +1,7 @@
 {
   "kind": "Challenge",
   "display_name": "Barn Chores \u2014 Run the morning chores: shear the wool and milk the cow of the homestead.",
+  "card_art": "fence_post",
   "kit": [
     {
       "name": "shears",

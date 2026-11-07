@@ -36,6 +36,14 @@ returns a parse error. Fields with a default are optional.
   // "Quarry Run — break twenty blocks and feel a mine take shape".
   "display_name": "Title — one-line premise",
 
+  // REQUIRED BY LINT for every bundled trial (default: null). The key picture
+  // on the trial's card in the lobby's Trials gallery: a `/give`-style item or
+  // block name, e.g. "furnace" or "bone". Blocks draw with their own texture;
+  // other items draw as a colour swatch. Pick the obvious key item or creature
+  // item. Presentation only — it changes nothing about play. `trials_lint`
+  // fails if it does not resolve to a real item (see §4 for valid names).
+  "card_art": "furnace",
+
   // GOTCHA: this exact string is ALSO the reverse-lookup key. The running
   // scenario only carries its display_name at runtime (not your JSON's
   // filename or token) — so `challenge_help_for_display`, `trial_satoshi_for_display`,
@@ -327,7 +335,8 @@ touches these files. Do them in this order.
 
 ### (1) The JSON file — REQUIRED
 **File:** `game/engine/assets/scenarios/explorer-<token>.json`
-Author the full `ScenarioDef` per §1. **Failure mode if skipped/wrong:** the
+Author the full `ScenarioDef` per §1. Set `card_art` (the gallery card's key
+item or block). **Failure mode if skipped/wrong:** the
 file doesn't exist → step (2)'s `include_bytes!` is a **compile error**
 (missing file). If the JSON is malformed or missing a required field, every
 test that parses bundled defs panics with a clear serde error naming the file.

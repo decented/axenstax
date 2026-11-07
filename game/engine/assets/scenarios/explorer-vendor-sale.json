@@ -1,6 +1,7 @@
 {
   "kind": "Challenge",
   "display_name": "Market Day \u2014 swap your spare stone for a fresh-baked loaf",
+  "card_art": "vendor_block",
   "kit": [
     {
       "name": "stone",

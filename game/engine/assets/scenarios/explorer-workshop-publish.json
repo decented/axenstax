@@ -1,6 +1,7 @@
 {
   "kind": "Challenge",
   "display_name": "Open Your Workshop \u2014 design a reskin and publish it for the whole world to use",
+  "card_art": "item_frame",
   "kit": [
     {
       "name": "blueprint_paper",

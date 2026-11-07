@@ -1,6 +1,7 @@
 {
   "kind": "Challenge",
   "display_name": "Skeleton Trial — replace this whole string with your trial's one-line premise",
+  "card_art": "stone",
   "kit": [
     {
       "name": "stone",

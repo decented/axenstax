@@ -1,6 +1,7 @@
 {
   "kind": "Challenge",
   "display_name": "Saddle Up \u2014 Climb aboard a horse and feel the world move under you.",
+  "card_art": "oak_fence_gate",
   "objective": {
     "Action": {
       "event": "RideEntity",

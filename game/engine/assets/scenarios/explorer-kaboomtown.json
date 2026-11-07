@@ -1,6 +1,7 @@
 {
   "kind": "Challenge",
   "display_name": "Kaboomtown \u2014 blow the whole tower sky-high",
+  "card_art": "plunger_detonator",
   "kit": [
     {
       "name": "blasting_keg",

@@ -1,6 +1,7 @@
 {
   "kind": "Challenge",
   "display_name": "Rail Rider \u2014 lay a track, drop a cart on it, and ride your own railway",
+  "card_art": "track",
   "kit": [
     {
       "name": "rail",

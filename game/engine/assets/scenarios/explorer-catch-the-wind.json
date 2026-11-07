@@ -1,6 +1,7 @@
 {
   "kind": "Challenge",
   "display_name": "Catch the Wind — raise a windmill above the storm-blown hilltop and light a lamp with it",
+  "card_art": "windmill",
   "kit": [
     {
       "name": "windmill",

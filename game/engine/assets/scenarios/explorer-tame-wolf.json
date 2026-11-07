@@ -1,6 +1,7 @@
 {
   "kind": "Challenge",
   "display_name": "Best Friend \u2014 Win over a wild wolf with bones until it sits at your side, loyal for life.",
+  "card_art": "bone_block",
   "kit": [
     {
       "name": "bone",

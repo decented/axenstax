@@ -1,6 +1,7 @@
 {
   "kind": "Challenge",
   "display_name": "Suit Up \u2014 forge four pieces of iron gear, then test them on the raiders",
+  "card_art": "iron_block",
   "kit": [
     {
       "name": "furnace",

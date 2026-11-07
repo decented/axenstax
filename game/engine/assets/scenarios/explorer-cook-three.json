@@ -1,6 +1,7 @@
 {
   "kind": "Challenge",
   "display_name": "Camp Cook \u2014 roast three meals over a crackling campfire",
+  "card_art": "campfire_lit",
   "kit": [
     {
       "name": "campfire",

@@ -545,6 +545,7 @@ pub fn race_scenario_def(def: &TrialDef) -> crate::scenario::ScenarioDef {
         weather_lock: None,
         mobs_enabled: Some(false),
         trial_race: Some(def.id.to_string()),
+        card_art: None,
         arena: None,
     }
 }

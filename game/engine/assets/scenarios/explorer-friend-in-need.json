@@ -1,6 +1,7 @@
 {
   "kind": "Challenge",
   "display_name": "A Friend in Need — Win over a cat, parrot or fox with its favourite food until it becomes your companion.",
+  "card_art": "salt_lick",
   "kit": [
     {
       "name": "raw_fish",

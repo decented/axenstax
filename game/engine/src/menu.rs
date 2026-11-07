@@ -17,9 +17,6 @@ const TITLE_COLOR: egui::Color32 = brand::COPPER;
 const SUBTITLE_COLOR: egui::Color32 = brand::MUTED_TEXT;
 const TEXT_COLOR: egui::Color32 = brand::STONE;
 const DIM_TEXT: egui::Color32 = brand::MUTED_TEXT;
-/// Campaign G — the rival ghost's signature colour (matches its in-world
-/// orange wireframe so "orange = the friend" reads everywhere).
-const RIVAL_ORANGE: egui::Color32 = egui::Color32::from_rgb(255, 165, 60);
 const BG_DARK: egui::Color32 = brand::DEEP_FRONTIER;
 const CARD_BG: egui::Color32 = brand::SURFACE;
 const CARD_SELECTED_BORDER: egui::Color32 = brand::COPPER;
@@ -417,12 +414,11 @@ pub struct MenuState {
     /// Shown as a banner until dismissed.
     pub notice: Option<String>,
 
-    /// Trials column — which trial row is expanded (its unique key, e.g.
-    /// `"race:sprint"` / `"ch:kill"`), or `None` when the list is collapsed.
-    /// Clicking a row toggles it; only one is open at a time.
-    pub expanded_trial: Option<String>,
-    /// Trials column — which trial's info (ⓘ) pop-up is open (same key form as
-    /// `expanded_trial`), or `None`. A centred modal with the detailed how-to +
+    /// The Trials gallery (full-screen shelves + hero view); closed by default.
+    /// Opened by the "Trials" tile in the world list. See `trials_gallery_ui`.
+    pub trials_gallery: crate::trials_gallery_ui::GalleryState,
+    /// Trials gallery — which trial's "How it works" pop-up is open (`"race:<id>"`
+    /// / `"ch:<token>"`), or `None`. A centred modal with the detailed how-to +
     /// Cancel / Play.
     pub trial_info: Option<String>,
     /// Online play by contact — the local address book, loaded once for the
@@ -522,7 +518,7 @@ impl MenuState {
             #[cfg(not(target_arch = "wasm32"))]
             keep_confirm_shown: None,
             notice: None,
-            expanded_trial: None,
+            trials_gallery: Default::default(),
             trial_info: None,
             #[cfg(not(target_arch = "wasm32"))]
             contacts: crate::contacts::load_local_book(),
@@ -1504,225 +1500,6 @@ fn draw_my_keeps(
     {
         crate::keeps::forget(file, &host_key);
         *keeps = crate::keeps::load_list(file);
-    }
-    action
-}
-
-fn draw_trials_column(ui: &mut egui::Ui, state: &mut MenuState) -> MenuAction {
-    let mut action = MenuAction::None;
-    // A "What to do?" (ⓘ) click sets this to the trial's key; applied to
-    // `state.trial_info` AFTER the scroll closure (so `state` isn't borrowed in it).
-    let mut info_request: Option<String> = None;
-    // Per-device progress (best times + completed challenges) drives the badges.
-    let bests = crate::trials::TrialBests::load();
-    let expanded = state.expanded_trial.clone();
-    let done_green = egui::Color32::from_rgb(150, 220, 150);
-
-    // Accumulate an expand-toggle to apply AFTER the scroll closure (so `state`
-    // isn't borrowed inside it). `Some(x)` = set expanded_trial to `x`.
-    let new_expanded: Option<Option<String>> = egui::ScrollArea::vertical()
-        .id_salt("trials_column")
-        .show(ui, |ui| {
-            let mut ne: Option<Option<String>> = None;
-            ui.add_space(8.0);
-            ui.label(egui::RichText::new("Trials").size(18.0).color(TITLE_COLOR).strong());
-            ui.add_space(2.0);
-            ui.label(
-                egui::RichText::new("Tap one to see what it is, then Play.")
-                    .size(12.0)
-                    .color(SUBTITLE_COLOR),
-            );
-            ui.add_space(8.0);
-
-            // A single expandable row. `badge` is the trailing status widget;
-            // `body` fills the expanded panel (premise + status + Play).
-            let mut row = |ui: &mut egui::Ui,
-                           key: String,
-                           icon: &str,
-                           icon_color: egui::Color32,
-                           title: &str,
-                           done: bool,
-                           badge: &str,
-                           badge_done: bool| {
-                let is_open = expanded.as_deref() == Some(key.as_str());
-                let mut clicked = false;
-                ui.horizontal(|ui| {
-                    let arrow = if is_open { "v" } else { ">" };
-                    // Inline coloured icon: dim arrow + type-coloured icon + title.
-                    let mut job = egui::text::LayoutJob::default();
-                    let fmt = |color: egui::Color32| egui::TextFormat {
-                        font_id: egui::FontId::proportional(13.0),
-                        color,
-                        ..Default::default()
-                    };
-                    job.append(&format!("{arrow} "), 0.0, fmt(TEXT_COLOR));
-                    job.append(icon, 0.0, fmt(icon_color));
-                    job.append(&format!(" {title}"), 0.0, fmt(TEXT_COLOR));
-                    if ui.add(egui::Button::new(job).frame(false)).clicked() {
-                        clicked = true;
-                    }
-                    let _ = done;
-                    ui.label(
-                        egui::RichText::new(badge)
-                            .size(if badge_done { 13.0 } else { 12.0 })
-                            .strong()
-                            .color(if badge_done { done_green } else { DIM_TEXT }),
-                    );
-                });
-                if clicked {
-                    ne = Some(if is_open { None } else { Some(key) });
-                }
-                is_open
-            };
-
-            // One unified, difficulty-ordered list — Races and Challenges
-            // interleaved (2026-06-25: no more Races/Challenges split). Each row
-            // shows its style icon before the name; the expanded body names the
-            // style. Order + icons live in `trials::TRIAL_ORDER`.
-            let ch_display: std::collections::HashMap<&'static str, String> =
-                crate::scenario::challenge_listing().into_iter().collect();
-            for &(ttype, tref) in crate::trials::TRIAL_ORDER {
-                let icon = ttype.icon();
-                let icon_color = {
-                    let [r, g, b] = ttype.color_rgb();
-                    egui::Color32::from_rgb(r, g, b)
-                };
-                match tref {
-                    crate::trials::TrialRef::Race(id) => {
-                        let Some(d) = crate::trials::find_def(id) else { continue };
-                        let best = bests.best(d.id);
-                        let (badge, bdone) = match best {
-                            Some(b) => (crate::trials::format_time(b.ticks), true),
-                            None => ("[  ]".to_string(), false),
-                        };
-                        let open = row(ui, format!("race:{}", d.id), icon, icon_color, d.name, best.is_some(), &badge, bdone);
-                        if open {
-                            ui.indent(format!("race-body:{}", d.id), |ui| {
-                                ui.label(
-                                    egui::RichText::new(format!("{icon} {} trial", ttype.label()))
-                                        .size(10.0)
-                                        .color(DIM_TEXT),
-                                );
-                                ui.label(egui::RichText::new(d.blurb).size(11.0).color(SUBTITLE_COLOR));
-                                ui.label(
-                                    egui::RichText::new(match best {
-                                        Some(b) => format!("Your best: {}", crate::trials::format_time(b.ticks)),
-                                        None => "Not yet run.".to_string(),
-                                    })
-                                    .size(11.0)
-                                    .color(if best.is_some() { done_green } else { DIM_TEXT }),
-                                );
-                                // Campaign G — the imported rival, if one is stored.
-                                if let Some(r) = bests.rivals.get(d.id) {
-                                    ui.label(
-                                        egui::RichText::new(format!(
-                                            "Rival: {} — {}",
-                                            r.label,
-                                            crate::trials::format_time(r.ticks)
-                                        ))
-                                        .size(11.0)
-                                        .color(RIVAL_ORANGE),
-                                    );
-                                }
-                                ui.add_space(2.0);
-                                ui.horizontal(|ui| {
-                                    if ui.button(egui::RichText::new("Play").size(13.0)).clicked() {
-                                        action = MenuAction::PlayScenario {
-                                            def: Box::new(crate::trials::race_scenario_def(d)),
-                                        };
-                                    }
-                                    if ui
-                                        .button(egui::RichText::new("What to do?").size(13.0))
-                                        .clicked()
-                                    {
-                                        info_request = Some(format!("race:{}", d.id));
-                                    }
-                                });
-                                // Campaign G — hand your best run to a friend /
-                                // bring theirs in. Own row: four buttons overflow
-                                // the narrow lobby column. Export needs a best.
-                                ui.horizontal(|ui| {
-                                    if best.is_some()
-                                        && ui
-                                            .button(egui::RichText::new("Export ghost").size(13.0))
-                                            .on_hover_text(
-                                                "Save your best run as a file a friend can race against.",
-                                            )
-                                            .clicked()
-                                    {
-                                        action = MenuAction::ExportGhost { trial_id: d.id.to_string() };
-                                    }
-                                    if ui
-                                        .button(egui::RichText::new("Import ghost").size(13.0))
-                                        .on_hover_text(
-                                            "Open a friend's ghost file — it becomes the rival you race here.",
-                                        )
-                                        .clicked()
-                                    {
-                                        action = MenuAction::ImportGhost;
-                                    }
-                                });
-                                ui.add_space(4.0);
-                            });
-                        }
-                    }
-                    crate::trials::TrialRef::Challenge(token) => {
-                        let Some(display) = ch_display.get(token) else { continue };
-                        let (head, premise) =
-                            display.split_once(" — ").unwrap_or((display.as_str(), ""));
-                        let done = bests.is_challenge_done(display);
-                        let badge = if done { "[x]".to_string() } else { "[  ]".to_string() };
-                        let open = row(ui, format!("ch:{token}"), icon, icon_color, head, done, &badge, done);
-                        if open {
-                            ui.indent(format!("ch-body:{token}"), |ui| {
-                                ui.label(
-                                    egui::RichText::new(format!("{icon} {} trial", ttype.label()))
-                                        .size(10.0)
-                                        .color(DIM_TEXT),
-                                );
-                                // One-line "what is it": authored tagline, falling back to
-                                // the display-name premise (so onboarding — which has no
-                                // "Title — premise" split — still shows a line).
-                                let (tagline, _) = crate::scenario::challenge_help(token);
-                                let one_line = if tagline.is_empty() { premise } else { tagline };
-                                if !one_line.is_empty() {
-                                    ui.label(
-                                        egui::RichText::new(one_line).size(11.0).color(SUBTITLE_COLOR),
-                                    );
-                                }
-                                ui.label(
-                                    egui::RichText::new(if done { "Completed" } else { "Not yet done." })
-                                        .size(11.0)
-                                        .color(if done { done_green } else { DIM_TEXT }),
-                                );
-                                ui.add_space(2.0);
-                                ui.horizontal(|ui| {
-                                    if ui.button(egui::RichText::new("Play").size(13.0)).clicked()
-                                        && let Some(def) = crate::scenario::named_builtin_def(token) {
-                                            action = MenuAction::PlayScenario { def: Box::new(def) };
-                                        }
-                                    if ui
-                                        .button(egui::RichText::new("What to do?").size(13.0))
-                                        .clicked()
-                                    {
-                                        info_request = Some(format!("ch:{token}"));
-                                    }
-                                });
-                                ui.add_space(4.0);
-                            });
-                        }
-                    }
-                }
-            }
-            ne
-        })
-        .inner;
-
-    if let Some(x) = new_expanded {
-        state.expanded_trial = x;
-    }
-    if let Some(key) = info_request {
-        state.trial_info = Some(key);
     }
     action
 }
@@ -2975,6 +2752,30 @@ pub fn draw_main_menu(ctx: &egui::Context, state: &mut MenuState) -> MenuAction 
         MenuDialog::None => {}
     }
 
+    // The Trials gallery takes the whole screen while it is open: no world list,
+    // no side columns. Back / Escape closes it (inside `draw`). The "How it works"
+    // modal is drawn last, over it, as it is over the lobby.
+    if state.trials_gallery.is_open() {
+        let icons = crate::egui_integration::block_texture_handles(ctx);
+        let g = crate::trials_gallery_ui::draw(
+            ctx,
+            &mut state.trials_gallery,
+            &icons,
+            state.trial_info.is_some(),
+        );
+        if !matches!(g.action, MenuAction::None) {
+            action = g.action;
+        }
+        if let Some(key) = g.how_it_works {
+            state.trial_info = Some(key);
+        }
+        let info_action = draw_trial_info_modal(ctx, state);
+        if !matches!(info_action, MenuAction::None) {
+            action = info_action;
+        }
+        return action;
+    }
+
     // Main menu content — responsive lobby (world list). "Wide" gets the side
     // columns; narrow stacks to a single scrolling column.
     let wide = ctx.content_rect().width() >= 900.0;
@@ -3057,57 +2858,6 @@ pub fn draw_main_menu(ctx: &egui::Context, state: &mut MenuState) -> MenuAction 
             && state.notice.as_deref().is_some_and(crate::signet_contacts::ui::is_host_refusal)
         {
             state.notice = None;
-        }
-    }
-
-    // Trials (the Challenge Engine) — left column, replacing the old Test Board.
-    // Declared before the CentralPanel so egui places it to the world list's LEFT
-    // (→ trials | worlds | stash) on WIDE screens. On narrow/mobile a
-    // 272px column would crowd the world list, so Trials moves to a collapsible
-    // strip across the TOP instead — still reachable on touch/tablet (the
-    // secondary platform) without needing the in-game `/trial` command.
-    if wide {
-        // Top-level panel — see the `#[allow(deprecated)]` note above.
-        #[allow(deprecated)]
-        let trials_action = egui::Panel::left("trials")
-            .resizable(false)
-            .exact_size(272.0)
-            .frame(
-                egui::Frame::new()
-                    .fill(brand::DEEP_FRONTIER)
-                    .inner_margin(egui::Margin::same(14)),
-            )
-            .show(ctx, |ui| draw_trials_column(ui, state))
-            .inner;
-        if !matches!(trials_action, MenuAction::None) {
-            action = trials_action;
-        }
-    } else {
-        let mut trials_action = MenuAction::None;
-        // Top-level panel — see the `#[allow(deprecated)]` note above.
-        #[allow(deprecated)]
-        egui::Panel::top("trials_top")
-            .resizable(false)
-            .frame(
-                egui::Frame::new()
-                    .fill(brand::DEEP_FRONTIER)
-                    .inner_margin(egui::Margin::same(10)),
-            )
-            .show(ctx, |ui| {
-                egui::CollapsingHeader::new(
-                    egui::RichText::new("🎯  Trials").size(16.0).strong(),
-                )
-                .id_salt("trials_narrow")
-                .default_open(false)
-                .show(ui, |ui| {
-                    let a = draw_trials_column(ui, state);
-                    if !matches!(a, MenuAction::None) {
-                        trials_action = a;
-                    }
-                });
-            });
-        if !matches!(trials_action, MenuAction::None) {
-            action = trials_action;
         }
     }
 
@@ -3265,6 +3015,13 @@ pub fn draw_main_menu(ctx: &egui::Context, state: &mut MenuState) -> MenuAction 
                 );
                 ui.add_space(6.0);
             }
+
+            // The Trials tile (a full-width button on narrow screens) opens the
+            // full-screen gallery.
+            if crate::trials_gallery_ui::draw_trials_tile(ui, !wide) {
+                state.trials_gallery.open();
+            }
+            ui.add_space(10.0);
 
             // --- Primary actions: Create / Join / Restore / Spawn ---
             ui.horizontal_wrapped(|ui| {

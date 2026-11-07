@@ -428,6 +428,13 @@ pub struct ScenarioDef {
     /// Races / Experiences and any challenge that needs no scaffolding.
     #[serde(default)]
     pub arena: Option<ArenaSetup>,
+    /// Trials gallery — the card's key picture: a `/give`-style item or block
+    /// name (`"furnace"`, `"bone"`), drawn large on the trial's card and hero
+    /// view from the game's own item icons. `None` falls back to the shelf's
+    /// icon. Presentation only: it changes nothing about how the trial plays.
+    /// `trials_lint` checks that a bundled value resolves to a real item.
+    #[serde(default)]
+    pub card_art: Option<String>,
 }
 
 /// Scaffolding for a Challenge's fresh arena — see [`ScenarioDef::arena`].
@@ -893,6 +900,7 @@ pub fn builtin_test_def() -> ScenarioDef {
         weather_lock: None,
         mobs_enabled: None,
         trial_race: None,
+        card_art: None,
         arena: None,
     }
 }
@@ -1785,6 +1793,7 @@ mod tests {
             weather_lock: None,
             mobs_enabled: None,
             trial_race: None,
+            card_art: None,
             arena: None,
         }
     }
@@ -1862,6 +1871,7 @@ mod tests {
             weather_lock: None,
             mobs_enabled: None,
             trial_race: None,
+            card_art: None,
             arena: None,
         }
     }
@@ -2347,6 +2357,7 @@ mod tests {
             weather_lock: None,
             mobs_enabled: None,
             trial_race: None,
+            card_art: None,
             arena: None,
         }
     }

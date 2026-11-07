@@ -1,6 +1,7 @@
 {
   "kind": "Challenge",
   "display_name": "Scavenger — three minutes to grab as many DIFFERENT things as you can",
+  "card_art": "chest",
   "objective": {
     "Timed": {
       "ticks": 3600

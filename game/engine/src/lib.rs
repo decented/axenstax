@@ -367,6 +367,8 @@ mod village_gen;
 mod satoshi;
 mod profile_bundle;
 mod trials;
+mod trials_gallery;
+mod trials_gallery_ui;
 mod ravine_gen;
 mod mineshaft_gen;
 mod villager_ui;
@@ -2817,7 +2819,13 @@ impl ApplicationHandler for App {
                                 // #7 — Loading is a single transient frame; ESC does nothing.
                                 GameMode::Loading(_) => EscAction::Ignore,
                                 GameMode::Menu(menu_state) => {
-                                    if matches!(menu_state.dialog, crate::menu::MenuDialog::None) {
+                                    if menu_state.trials_gallery.is_open() {
+                                        // The Trials gallery owns Escape / Back: its own
+                                        // draw (which got this same key event through egui)
+                                        // closes the hero view, then the gallery. Escape
+                                        // must never quit the app from here.
+                                        EscAction::Ignore
+                                    } else if matches!(menu_state.dialog, crate::menu::MenuDialog::None) {
                                         EscAction::Quit
                                     } else {
                                         menu_state.dialog = crate::menu::MenuDialog::None;
@@ -3468,13 +3476,24 @@ fn run_shot_lobby(args: &[String]) {
             menu.worlds.clear();
             menu.selected = None;
         }
-        // Campaign G — pre-expand the first race so the shots exercise the
-        // expanded body (best/rival lines + Play / Export ghost / Import ghost).
-        menu.expanded_trial = Some("race:sprint".to_string());
+        // Block icons on the gallery cards need the atlas uploaded (the headless
+        // renderer skips it).
+        renderer.egui.upload_block_textures(&renderer.device, &renderer.queue, &textures, 16);
+        // `--hero <key>` opens that trial's hero view (e.g. `ch:smelt`,
+        // `race:sprint`); `--gallery` opens the shelves; neither shows the lobby.
+        if let Some(key) = args.iter().position(|a| a == "--hero").and_then(|i| args.get(i + 1)) {
+            menu.trials_gallery.open_hero(key);
+        } else if args.iter().any(|a| a == "--gallery") {
+            menu.trials_gallery.open();
+        }
         let path = format!("{out_dir}/lobby-{name}.png");
-        renderer.render_menu_to_png(&path, |ctx| {
-            let _ = crate::menu::draw_main_menu(ctx, &mut menu);
-        });
+        // Two passes: egui measures on the first, and the gallery's card
+        // lift animation settles.
+        for _ in 0..2 {
+            renderer.render_menu_to_png(&path, |ctx| {
+                let _ = crate::menu::draw_main_menu(ctx, &mut menu);
+            });
+        }
     }
     log::info!("Lobby shots written to {out_dir}");
 }

@@ -65,6 +65,7 @@ fn fixture_def(objective: Objective) -> ScenarioDef {
         weather_lock: None,
         mobs_enabled: None,
         trial_race: None,
+        card_art: None,
         arena: None,
     }
 }
@@ -991,4 +992,49 @@ fn check_weather_lock_values_accepts_every_advertised_lock() {
         check_weather_lock_values(&[("ok-trial", def)])
             .unwrap_or_else(|e| panic!("{name} is advertised as valid but the lint rejects it: {e}"));
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Check 8 — a trial's gallery `card_art` must name a real item
+// ─────────────────────────────────────────────────────────────────────────
+
+/// `ScenarioDef.card_art` is the key picture on a trial's card in the lobby's
+/// Trials gallery: a `/give`-style item or block name. At runtime an unresolved
+/// name quietly falls back to the shelf icon, so a typo would ship as a bland
+/// card with nothing to say why. Every bundled value must resolve through the
+/// same resolver `/give` and kits use; and, because the gallery is the front
+/// door, every bundled trial must name one.
+fn check_card_art(defs: &[(&str, ScenarioDef)]) -> Result<(), String> {
+    for (token, def) in defs {
+        let Some(name) = def.card_art.as_deref() else {
+            return Err(format!(
+                "{token}: no `card_art` — set it to the trial's key item or block (a /give-style \
+                 name such as \"furnace\" or \"bone\") so its gallery card has a picture"
+            ));
+        };
+        if crate::commands::builtins::give::resolve_item(name, 1).is_err() {
+            return Err(format!(
+                "{token}: card_art {name:?} does not resolve to an item — use a name /give accepts \
+                 (see docs/authoring/trials.md §4)"
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn every_bundled_trial_has_card_art_that_resolves() {
+    check_card_art(&all_bundled_defs()).unwrap_or_else(|e| panic!("{e}"));
+}
+
+#[test]
+fn check_card_art_bites_on_a_typo_and_on_a_missing_value() {
+    let mut def = fixture_def(Objective::Action { event: ChallengeEvent::CraftItem, count: 1 });
+    def.card_art = Some("furnaec".to_string());
+    let err = check_card_art(&[("bad-trial", def.clone())])
+        .expect_err("an unresolvable card_art must be rejected");
+    assert!(err.contains("bad-trial") && err.contains("furnaec"), "{err}");
+    def.card_art = None;
+    let err = check_card_art(&[("bare-trial", def)]).expect_err("a missing card_art must be rejected");
+    assert!(err.contains("bare-trial"), "{err}");
 }

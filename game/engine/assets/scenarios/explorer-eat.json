@@ -1,6 +1,7 @@
 {
   "kind": "Challenge",
   "display_name": "Campfire Cook \u2014 roast a meal and eat your fill",
+  "card_art": "carrot_stage_3",
   "kit": [
     {
       "name": "campfire",

@@ -1,6 +1,7 @@
 {
   "kind": "Challenge",
   "display_name": "Raiders at the Gate \u2014 brigands are storming the wall \u2014 hold the line",
+  "card_art": "cobblestone_wall",
   "kit": [
     {
       "name": "stone_sword",

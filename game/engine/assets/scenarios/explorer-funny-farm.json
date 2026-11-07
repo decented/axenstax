@@ -1,6 +1,7 @@
 {
   "kind": "Challenge",
   "display_name": "Funny Farm \u2014 round up the silliest little zoo",
+  "card_art": "composter",
   "kit": [
     {
       "name": "bone",

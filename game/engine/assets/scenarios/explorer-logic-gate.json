@@ -1,6 +1,7 @@
 {
   "kind": "Challenge",
   "display_name": "Sensor Vault \u2014 use a motion sensor and a logic gate to trip a lamp automatically",
+  "card_art": "logic_gate",
   "kit": [
     {
       "name": "motion_sensor",

@@ -1,6 +1,7 @@
 {
   "kind": "Challenge",
   "display_name": "Copper Rush — dig copper out of the rock, smelt it, and draw your first cable",
+  "card_art": "copper_ore",
   "kit": [
     {
       "name": "stone_pickaxe",

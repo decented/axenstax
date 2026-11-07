@@ -1,6 +1,7 @@
 {
   "kind": "Challenge",
   "display_name": "Light the Lab \u2014 wire a lever through cable to switch on a dark room's lamp",
+  "card_art": "lever",
   "kit": [
     {
       "name": "cable",

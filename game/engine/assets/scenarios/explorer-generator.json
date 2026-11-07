@@ -1,6 +1,7 @@
 {
   "kind": "Challenge",
   "display_name": "Power Plant \u2014 make your own electricity, no switch required",
+  "card_art": "steam_generator",
   "kit": [
     {
       "name": "hand_crank",

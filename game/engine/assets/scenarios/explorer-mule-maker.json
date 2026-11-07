@@ -1,6 +1,7 @@
 {
   "kind": "Challenge",
   "display_name": "Mule Maker — Pair a horse with a donkey and feed them wheat until a sturdy mule foal is born.",
+  "card_art": "potato_stage_3",
   "kit": [
     {
       "name": "wheat",

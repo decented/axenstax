@@ -1,6 +1,7 @@
 {
   "kind": "Challenge",
   "display_name": "Fresh Coat — paint your own skin in the Workshop and wear it out",
+  "card_art": "mirror",
   "kit": [
     {
       "name": "bellows",

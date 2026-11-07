@@ -1,6 +1,7 @@
 {
   "kind": "Challenge",
   "display_name": "Bring the Wall Down \u2014 a raider hides behind a stone wall \u2014 blow it open and finish the job",
+  "card_art": "blasting_keg",
   "kit": [
     {
       "name": "blasting_keg",
