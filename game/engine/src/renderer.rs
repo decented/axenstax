@@ -10,6 +10,9 @@ use crate::mesh::{ChunkMesh, Vertex};
 use crate::texture_gen;
 use crate::egui_integration::EguiIntegration;
 
+mod postcard_capture;
+pub use postcard_capture::PostcardPoll;
+
 /// Per-chunk GPU buffers.
 pub struct GpuChunkMesh {
     pub vertex_buffer: wgpu::Buffer,
@@ -724,6 +727,8 @@ pub struct Renderer {
     pub egui: EguiIntegration,
     // Headless rendering target
     color_target: Option<wgpu::Texture>,
+    /// A trial postcard being read back (`renderer/postcard_capture.rs`).
+    postcard_capture: Option<postcard_capture::PostcardCapture>,
     /// Linear sky horizon RGB, updated each frame for day/night and weather.
     /// `update_camera` shares it with the sky gradient and land fog.
     pub sky_color: [f32; 3],
@@ -1642,6 +1647,7 @@ impl Renderer {
             blit_bind_group_layout,
             egui,
             color_target: None,
+            postcard_capture: None,
             sky_color: [0.53, 0.72, 0.90], // Default: noon sky
         }
     }
@@ -4003,6 +4009,7 @@ impl Renderer {
             egui,
             sky_color: [0.53, 0.72, 0.90],
             color_target: Some(color_texture),
+            postcard_capture: None,
         }
     }
 

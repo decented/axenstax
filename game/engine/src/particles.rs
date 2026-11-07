@@ -227,6 +227,35 @@ impl ParticleSystem {
         }
     }
 
+    /// Trial finished — bright, many-coloured sparks thrown up round the player
+    /// that drift slowly down (the moment before a postcard is taken).
+    pub fn burst_confetti(&mut self, pos: Vec3, n: usize, seed: u64) {
+        const COLOURS: [[f32; 3]; 6] = [
+            [1.0, 0.82, 0.30],
+            [0.45, 0.85, 1.0],
+            [1.0, 0.45, 0.55],
+            [0.55, 1.0, 0.55],
+            [0.85, 0.6, 1.0],
+            [1.0, 0.65, 0.25],
+        ];
+        for i in 0..n as u64 {
+            let c = COLOURS[(i as usize) % COLOURS.len()];
+            self.spawn(Particle {
+                pos: pos + Vec3::new(jitter(seed, i * 3) * 1.2, unit(seed, i * 3 + 1) * 0.6, jitter(seed, i * 3 + 2) * 1.2),
+                vel: Vec3::new(jitter(seed, i * 5) * 2.4, 3.0 + unit(seed, i * 5 + 1) * 3.0, jitter(seed, i * 5 + 2) * 2.4),
+                life: 1.4 + unit(seed, i * 7) * 1.0,
+                max_life: 2.4,
+                size: 0.08 + unit(seed, i * 11) * 0.06,
+                color: [c[0], c[1], c[2], 1.0],
+                tex_layer: block::TEX_PARTICLE_SPARK,
+                gravity: 0.35,
+                drag: 0.9,
+                kill_y: f32::MIN,
+                grow: 0.0,
+            });
+        }
+    }
+
     /// Water splash — white-blue droplets out and up.
     pub fn burst_splash(&mut self, pos: Vec3, n: usize, seed: u64) {
         for i in 0..n as u64 {

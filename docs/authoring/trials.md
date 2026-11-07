@@ -66,7 +66,8 @@ returns a parse error. Fields with a default are optional.
   // filename or token) — so `challenge_help_for_display`, `trial_satoshi_for_display`,
   // and `trial_recipe_hints_for_display` all match the LIVE display_name
   // against `challenge_listing()`'s (token, display_name) pairs to find your
-  // authored help/voice/hints. If display_name here doesn't byte-for-byte
+  // authored help/voice/hints. The finish postcard does the same
+  // (`postcard::token_for_challenge`): it is kept under the token found here. If display_name here doesn't byte-for-byte
   // match what challenge_listing() reports (i.e. what's actually in this same
   // JSON file), those reverse-lookups silently return ("", "") / &[] and the
   // in-game help panel goes blank. In practice: just don't hand-edit

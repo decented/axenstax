@@ -110,6 +110,8 @@ mod weather;
 mod wind;
 mod dispenser;
 mod particles;
+mod postcard;
+mod postcard_flow;
 mod fluids;
 mod entity;
 mod mob;
@@ -367,6 +369,7 @@ mod village_gen;
 mod satoshi;
 mod profile_bundle;
 mod trials;
+mod trials_album_ui;
 mod trials_diorama;
 mod trials_diorama_ui;
 mod trials_gallery;
@@ -1139,6 +1142,9 @@ pub(crate) struct GameState {
     /// Trials: personal bests per trial id (+ the ghost of each best run).
     /// Cross-world within a session; persisted to the local trials store.
     pub(crate) trial_bests: crate::trials::TrialBests,
+    /// Trials: this run's postcard (the moment, the capture, the picture shown
+    /// on the completion card). Reset by a new run, a retry or a new world.
+    pub(crate) postcard: crate::postcard_flow::PostcardFlow,
     /// Columns still to generate+mesh during a `GameMode::Loading` world entry.
     /// Built by `chunk_stream::begin_load`, drained by `step_load` over frames
     /// so the load screen animates instead of freezing. Empty outside loading.
@@ -2058,6 +2064,7 @@ impl GameState {
             active_trial: None,
             trial_outcome: None,
             trial_bests: crate::trials::TrialBests::load(),
+            postcard: crate::postcard_flow::PostcardFlow::Idle,
             load_queue: std::collections::VecDeque::new(),
             dirty_mesh_chunks: ahash::AHashSet::new(),
             falling_tick_counter: 0,
@@ -3482,11 +3489,25 @@ fn run_shot_lobby(args: &[String]) {
         // renderer skips it).
         renderer.egui.upload_block_textures(&renderer.device, &renderer.queue, &textures, 16);
         // `--hero <key>` opens that trial's hero view (e.g. `ch:smelt`,
-        // `race:sprint`); `--gallery` opens the shelves; neither shows the lobby.
+        // `race:sprint`); `--gallery` opens the shelves; `--album` the postcard
+        // album; none of them shows the lobby. `--fixture-postcards` swaps the
+        // profile's bests and postcards for made-up ones (nothing is written).
+        let fixtures = args.iter().any(|a| a == "--fixture-postcards");
+        let open_gallery = |g: &mut crate::trials_gallery_ui::GalleryState| {
+            if fixtures {
+                g.open_with(crate::trials::TrialBests::default(), crate::postcard::fixtures());
+            } else {
+                g.open();
+            }
+        };
         if let Some(key) = args.iter().position(|a| a == "--hero").and_then(|i| args.get(i + 1)) {
-            menu.trials_gallery.open_hero(key);
+            open_gallery(&mut menu.trials_gallery);
+            menu.trials_gallery.focus_hero(key);
+        } else if args.iter().any(|a| a == "--album") {
+            open_gallery(&mut menu.trials_gallery);
+            menu.trials_gallery.open_album();
         } else if args.iter().any(|a| a == "--gallery") {
-            menu.trials_gallery.open();
+            open_gallery(&mut menu.trials_gallery);
         }
         let path = format!("{out_dir}/lobby-{name}.png");
         // Two passes: egui measures on the first, and the gallery's card

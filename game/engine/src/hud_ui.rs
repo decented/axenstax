@@ -475,6 +475,35 @@ pub fn draw_trial_clock(
         });
 }
 
+/// A finished trial's postcard on its completion card: the picture in a white
+/// border, or a held slot while it is being taken.
+fn draw_postcard_slot(ui: &mut egui::Ui, slot: crate::postcard_flow::PostcardSlot, size: egui::Vec2) {
+    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    let painter = ui.painter();
+    let border = egui::CornerRadius::same(6);
+    painter.rect_filled(rect.translate(egui::vec2(0.0, 3.0)), border, egui::Color32::from_black_alpha(90));
+    painter.rect_filled(rect, border, egui::Color32::from_rgb(245, 240, 228));
+    let inner = rect.shrink(5.0);
+    match slot {
+        crate::postcard_flow::PostcardSlot::Ready(tex) => {
+            painter.add(egui::Shape::Rect(
+                egui::epaint::RectShape::filled(inner, egui::CornerRadius::same(3), egui::Color32::WHITE)
+                    .with_texture(tex, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0))),
+            ));
+        }
+        _ => {
+            painter.rect_filled(inner, egui::CornerRadius::same(3), egui::Color32::from_rgb(58, 66, 74));
+            painter.text(
+                inner.center(),
+                egui::Align2::CENTER_CENTER,
+                "Developing\u{2026}",
+                egui::FontId::proportional(14.0),
+                egui::Color32::from_rgb(190, 196, 200),
+            );
+        }
+    }
+}
+
 /// Trials — the "Well done!" completion panel for a finished Race. Celebrate the
 /// result, then head back to the Trials lobby (the trial's done) or re-run it.
 /// No "live here" option — a trial arena is throwaway, not one of your worlds.
@@ -484,8 +513,11 @@ pub fn draw_trial_complete(
     name: &str,
     headline: &str,
     is_best: bool,
+    postcard: crate::postcard_flow::PostcardSlot,
 ) -> crate::trials::TrialDoneAction {
     use crate::trials::TrialDoneAction;
+    let card_size = egui::vec2(288.0, 162.0);
+    let has_card = postcard != crate::postcard_flow::PostcardSlot::None;
     let overlay = egui::Rect::from_min_size(
         egui::pos2(viewport.x as f32, viewport.y as f32),
         egui::vec2(viewport.width as f32, viewport.height as f32),
@@ -499,7 +531,9 @@ pub fn draw_trial_complete(
     let panel_w = 380.0;
     let origin = egui::pos2(
         viewport.x as f32 + viewport.width as f32 / 2.0 - panel_w / 2.0,
-        viewport.y as f32 + viewport.height as f32 / 2.0 - 120.0,
+        viewport.y as f32 + viewport.height as f32 / 2.0
+            - 120.0
+            - if has_card { (card_size.y + 12.0) / 2.0 } else { 0.0 },
     );
     let mut action = TrialDoneAction::None;
     egui::Area::new(egui::Id::new("trial_done"))
@@ -511,6 +545,10 @@ pub fn draw_trial_complete(
             ui.set_max_width(panel_w);
             ui.vertical_centered(|ui| {
                 ui.add_space(14.0);
+                if has_card {
+                    draw_postcard_slot(ui, postcard, card_size);
+                    ui.add_space(12.0);
+                }
                 ui.label(
                     egui::RichText::new("Well done!")
                         .size(26.0)
@@ -2402,15 +2440,18 @@ pub fn draw_scenario_end_screen(
     viewport: &ViewportRect,
     player_index: usize,
     scenario: &crate::scenario::ScenarioState,
+    postcard: crate::postcard_flow::PostcardSlot,
 ) -> ScenarioEndAction {
     let mut action = ScenarioEndAction::None;
     let (headline, detail) = scenario_result_text(scenario);
+    let card_size = egui::vec2(300.0, 169.0);
+    let has_card = postcard != crate::postcard_flow::PostcardSlot::None;
     // Coverage challenges are Trials (return to the Trials column + can retry);
     // the official games/experiences keep the plain "Back to Menu".
     let is_trial = scenario.def().kind == crate::scenario::ScenarioKind::Challenge;
 
     let panel_w = 360.0_f32;
-    let panel_h = 200.0_f32;
+    let panel_h = 200.0_f32 + if has_card { card_size.y + 14.0 } else { 0.0 };
     let x = viewport.x as f32 + viewport.width as f32 / 2.0 - panel_w / 2.0;
     let y = viewport.y as f32 + viewport.height as f32 / 2.0 - panel_h / 2.0;
 
@@ -2425,6 +2466,10 @@ pub fn draw_scenario_end_screen(
                 .corner_radius(egui::CornerRadius::same(8))
                 .show(ui, |ui| {
                     ui.vertical_centered(|ui| {
+                        if has_card {
+                            draw_postcard_slot(ui, postcard, card_size);
+                            ui.add_space(14.0);
+                        }
                         ui.label(
                             egui::RichText::new(scenario.display_name())
                                 .size(20.0)

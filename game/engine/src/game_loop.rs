@@ -3198,6 +3198,7 @@ impl super::GameState {
         let Some(def) = crate::trials::find_def(id) else {
             return;
         };
+        self.reset_postcard();
         let (sx, sz) = (def.start_xz[0], def.start_xz[1]);
         let (fx, fz) = (def.finish_xz[0], def.finish_xz[1]);
         let s_surf = self.surface_y(sx, sz);
@@ -3308,6 +3309,7 @@ impl super::GameState {
         // Trials: cancel any active run on world change (bests persist across worlds).
         self.active_trial = None;
         self.trial_outcome = None;
+        self.reset_postcard();
         // Drop queued rebuilds from the previous world (Spec 39 A4).
         self.dirty_mesh_chunks.clear();
         // Every per-section mesh map (opaque, water, transparent, plants,
@@ -3619,6 +3621,7 @@ impl super::GameState {
     /// arena launch (the first-play-tick consume of `pending_scenario_launch`),
     /// so the two paths can't drift. Read-only on `def` — it's a template.
     pub(crate) fn start_scenario(&mut self, def: crate::scenario::ScenarioDef) {
+        self.reset_postcard();
         let name = def.display_name.clone();
         crate::scenario::provision_all_players(&mut self.players, &def);
         self.scenario = Some(crate::scenario::ScenarioState::new(def));
@@ -6228,6 +6231,10 @@ impl super::GameState {
                         is_best: improved,
                     });
                     self.release_cursor();
+                    // The postcard moment (a burst, then the picture).
+                    if let Some(token) = crate::postcard::token_for_race(&at.id) {
+                        self.begin_postcard(token);
+                    }
                 }
             }
         }
@@ -17775,6 +17782,13 @@ impl super::GameState {
         // borrow conflicts with the commit/re-mesh path.
         let mut painter_result = crate::workshop_painter::PainterResult::None;
 
+        // Trials: the postcard moment, its capture and read-back (never blocks).
+        let p0_aspect = screens
+            .iter()
+            .find(|s| matches!(s.content, crate::screen::ScreenContent::LocalPlayer(0)))
+            .map_or(16.0 / 9.0, |s| s.viewport.aspect());
+        self.step_postcard(p0_aspect);
+
         for screen in &screens {
             let pidx = match &screen.content {
                 crate::screen::ScreenContent::LocalPlayer(idx) => *idx,
@@ -17825,6 +17839,7 @@ impl super::GameState {
                     &outcome.name,
                     &outcome.headline,
                     outcome.is_best,
+                    self.postcard.slot(),
                 );
                 match act {
                     crate::trials::TrialDoneAction::BackToTrials => {
@@ -17858,11 +17873,20 @@ impl super::GameState {
                     && self.trial_bests.mark_challenge_done(name) {
                         self.trial_bests.save();
                     }
+                // The postcard moment (once per run: later frames are no-ops).
+                if pidx == 0
+                    && matches!(self.postcard, crate::postcard_flow::PostcardFlow::Idle)
+                    && let Some(token) = challenge_name.as_deref().and_then(crate::postcard::token_for_challenge)
+                {
+                    self.begin_postcard(token);
+                }
+                let slot = if pidx == 0 { self.postcard.slot() } else { crate::postcard_flow::PostcardSlot::None };
                 let act = crate::hud_ui::draw_scenario_end_screen(
                     &self.renderer.egui.ctx,
                     &screen.viewport,
                     pidx,
                     self.scenario.as_ref().unwrap(),
+                    slot,
                 );
                 match act {
                     crate::hud_ui::ScenarioEndAction::BackToMenu

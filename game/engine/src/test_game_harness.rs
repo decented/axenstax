@@ -228,6 +228,61 @@ mod tests {
         hg.frames(30);
     }
 
+    /// Trials postcards, end to end on the GPU: a real race finish through the
+    /// tick, the moment, the off-screen world capture, the non-blocking
+    /// read-back, the reduction to 320×180, the PNG in the profile folder and
+    /// the texture on the completion card. `POSTCARD_E2E_OUT=<path>` also
+    /// writes the kept PNG there to look at.
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_finishing_a_race_keeps_a_postcard() {
+        isolate_saves();
+        let dir = crate::data_dir::profile_dir().join("postcards").join("sprint");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let mut hg = HeadlessGame::boot_into_world("harness-postcard");
+        hg.frames(5);
+        hg.state.start_trial("sprint");
+        let finish = hg.state.active_trial.as_ref().expect("the race started").finish;
+        hg.state.players[0].player.pos = glam::Vec3::from(finish);
+        hg.ticks(2);
+        assert!(hg.state.trial_outcome.is_some(), "standing on the finish ends the race");
+        assert!(
+            matches!(hg.state.postcard, crate::postcard_flow::PostcardFlow::Moment { token: "sprint", .. }),
+            "the finish starts the postcard moment"
+        );
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !matches!(hg.state.postcard, crate::postcard_flow::PostcardFlow::Shown { .. }) {
+            hg.frames(1);
+            assert!(std::time::Instant::now() < deadline, "the postcard never developed");
+        }
+        assert!(
+            matches!(hg.state.postcard.slot(), crate::postcard_flow::PostcardSlot::Ready(_)),
+            "the completion card shows the postcard"
+        );
+
+        let png = crate::postcard::load_all()
+            .into_iter()
+            .find(|p| p.token == "sprint")
+            .expect("a postcard file under profile/postcards/sprint")
+            .png;
+        let (w, h, rgba) = crate::postcard::decode_png(&png).expect("it decodes");
+        assert_eq!((w, h), (crate::postcard::POSTCARD_W, crate::postcard::POSTCARD_H));
+        // A real view, not a blank frame: the pixels vary.
+        let lum: Vec<u32> = rgba.chunks_exact(4).map(|p| p[0] as u32 + p[1] as u32 + p[2] as u32).collect();
+        let (lo, hi) = (lum.iter().min().unwrap(), lum.iter().max().unwrap());
+        assert!(hi - lo > 60, "the postcard is flat ({lo}..{hi})");
+        if let Ok(out) = std::env::var("POSTCARD_E2E_OUT") {
+            std::fs::write(out, &png).unwrap();
+        }
+
+        // A retry resets the flow; leaving the world drops it.
+        hg.state.trial_try_again("sprint");
+        assert!(matches!(hg.state.postcard, crate::postcard_flow::PostcardFlow::Idle));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Spec 39 A6 — the mipmaps dial rebuilds the block atlas + sampler live.
     /// This is the only place the *GPU* side of A6 can be exercised without a
     /// display: a bad mip level count, an out-of-range `write_texture` level, or

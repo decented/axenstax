@@ -8,8 +8,11 @@
 //! built cards) is `trials_gallery`; Play returns the same `MenuAction` the old
 //! column did.
 
+use std::collections::HashMap;
+
 use crate::brand;
 use crate::menu::MenuAction;
+use crate::postcard::Postcard;
 use crate::trials::{TrialBests, TrialType};
 use crate::trials_diorama_ui::{paint_backdrop, paint_diorama};
 use crate::trials_gallery::{build_rows, BuiltRow, Card, CardArt};
@@ -30,6 +33,13 @@ pub struct GalleryState {
     scroll_to_focus: bool,
     /// Set when the hero just opened: give the Play button keyboard focus.
     hero_fresh: bool,
+    /// Every kept postcard, newest first (read when the gallery opens).
+    pub(crate) postcards: Vec<Postcard>,
+    /// Textures made from `postcards` (by index) the first time each is drawn;
+    /// `None` when one would not decode.
+    textures: HashMap<usize, Option<egui::TextureHandle>>,
+    /// The album, when it is open over the shelves.
+    pub(crate) album: Option<crate::trials_album_ui::AlbumView>,
 }
 
 impl GalleryState {
@@ -37,9 +47,20 @@ impl GalleryState {
         self.built.is_some()
     }
 
-    /// Open the gallery on its first card. Reads the player's bests afresh.
+    /// Open the gallery on its first card. Reads the player's bests and
+    /// postcards afresh.
     pub fn open(&mut self) {
-        self.built = Some(build_rows(&TrialBests::load()));
+        self.open_with(TrialBests::load(), crate::postcard::load_all());
+    }
+
+    /// Open the gallery over these bests and postcards (the screenshot path
+    /// passes fixtures, so nothing is read from or written to the profile).
+    pub fn open_with(&mut self, bests: TrialBests, mut postcards: Vec<Postcard>) {
+        crate::postcard::sort_newest_first(&mut postcards);
+        self.built = Some(build_rows(&bests));
+        self.postcards = postcards;
+        self.textures.clear();
+        self.album = None;
         self.hero = None;
         self.focus = (0, 0);
         self.scroll_to_focus = false;
@@ -49,13 +70,20 @@ impl GalleryState {
     pub fn close(&mut self) {
         self.built = None;
         self.hero = None;
+        self.album = None;
+        self.postcards.clear();
+        self.textures.clear();
     }
 
-    /// Open the gallery straight onto one trial's hero view (the screenshot
-    /// path). `key` is `"race:<id>"` or `"ch:<token>"` (a bare token means the
-    /// challenge). Unknown keys leave the gallery open on its shelves.
-    pub fn open_hero(&mut self, key: &str) {
-        self.open();
+    /// Open the album over the gallery.
+    pub fn open_album(&mut self) {
+        self.album = Some(crate::trials_album_ui::AlbumView::default());
+    }
+
+    /// Show one trial's hero view in an open gallery (the screenshot path).
+    /// `key` is `"race:<id>"` or `"ch:<token>"` (a bare token means the
+    /// challenge). Unknown keys leave the gallery on its shelves.
+    pub fn focus_hero(&mut self, key: &str) {
         let key = &if key.contains(':') { key.to_string() } else { format!("ch:{key}") };
         let found = self.built.as_ref().and_then(|rows| {
             rows.iter().enumerate().find_map(|(r, row)| {
@@ -67,6 +95,37 @@ impl GalleryState {
             self.hero = Some(pos);
             self.hero_fresh = true;
         }
+    }
+
+    /// The texture for postcard `i`, made on first use.
+    pub(crate) fn postcard_texture(&mut self, ctx: &egui::Context, i: usize) -> Option<egui::TextureId> {
+        if !self.textures.contains_key(&i) {
+            let tex = self
+                .postcards
+                .get(i)
+                .and_then(|p| crate::postcard_flow::texture_from_png(ctx, &format!("postcard_{i}"), &p.png));
+            self.textures.insert(i, tex);
+        }
+        self.textures.get(&i).and_then(|t| t.as_ref().map(|t| t.id()))
+    }
+
+    /// Each trial's newest postcard, as a texture, keyed by token.
+    fn newest_textures(&mut self, ctx: &egui::Context) -> HashMap<String, egui::TextureId> {
+        let mut firsts: Vec<(String, usize)> = Vec::new();
+        for (i, p) in self.postcards.iter().enumerate() {
+            if !firsts.iter().any(|(t, _)| *t == p.token) {
+                firsts.push((p.token.clone(), i));
+            }
+        }
+        firsts
+            .into_iter()
+            .filter_map(|(token, i)| self.postcard_texture(ctx, i).map(|t| (token, t)))
+            .collect()
+    }
+
+    /// A trial's title by token, for the album's captions.
+    pub(crate) fn title_of(&self, token: &str) -> Option<String> {
+        self.built.as_ref()?.iter().flat_map(|r| &r.cards).find(|c| c.token == token).map(|c| c.title.clone())
     }
 }
 
@@ -129,7 +188,12 @@ fn paint_art(
     shelf: egui::Color32,
     glyph: &str,
     icons: &[egui::TextureId],
+    postcard: Option<egui::TextureId>,
 ) {
+    if let Some(tex) = postcard {
+        paint_picture(painter, rect, radii, tex);
+        return;
+    }
     let (top, bottom) = backdrop_colours(shelf);
     paint_backdrop(painter, rect, radii, top, bottom);
     let centre = rect.center();
@@ -172,10 +236,36 @@ fn paint_art(
     }
 }
 
+/// The part of a 16:9 postcard that covers a rect of another aspect (centred).
+pub(crate) fn cover_uv(rect: egui::Rect) -> egui::Rect {
+    let img = crate::postcard::POSTCARD_W as f32 / crate::postcard::POSTCARD_H as f32;
+    let want = rect.width() / rect.height().max(1.0);
+    if want > img {
+        let h = img / want;
+        egui::Rect::from_min_max(egui::pos2(0.0, 0.5 - h / 2.0), egui::pos2(1.0, 0.5 + h / 2.0))
+    } else {
+        let w = want / img;
+        egui::Rect::from_min_max(egui::pos2(0.5 - w / 2.0, 0.0), egui::pos2(0.5 + w / 2.0, 1.0))
+    }
+}
+
+/// Paint a postcard filling `rect` (cropped to cover it), rounded by `radii`.
+pub(crate) fn paint_picture(painter: &egui::Painter, rect: egui::Rect, radii: [f32; 4], tex: egui::TextureId) {
+    let cr = egui::CornerRadius {
+        nw: radii[0] as u8,
+        ne: radii[1] as u8,
+        se: radii[2] as u8,
+        sw: radii[3] as u8,
+    };
+    painter.add(egui::Shape::Rect(
+        egui::epaint::RectShape::filled(rect, cr, egui::Color32::WHITE).with_texture(tex, cover_uv(rect)),
+    ));
+}
+
 /// A lone block is drawn no taller than this fraction of the art's height.
 const DIORAMA_MAX_SCALE: f32 = 0.36;
 
-/// A small "done" mark in a card's corner (postcards come later).
+/// A small "done" mark in a card's corner.
 fn paint_done_mark(painter: &egui::Painter, centre: egui::Pos2) {
     painter.circle_filled(centre, 11.0, DONE_GREEN);
     painter.circle_stroke(centre, 11.0, egui::Stroke::new(1.5_f32, egui::Color32::from_black_alpha(90)));
@@ -196,6 +286,7 @@ fn paint_card(
     card: &Card,
     lift: f32,
     icons: &[egui::TextureId],
+    postcard: Option<egui::TextureId>,
 ) {
     let shelf = rgb(card.row.color_rgb());
     let r = egui::Rect::from_center_size(rect.center(), rect.size() * (1.0 + LIFT_SCALE * lift));
@@ -211,7 +302,7 @@ fn paint_card(
     );
     painter.rect_filled(r, cr, brand::SURFACE);
     let art_rect = egui::Rect::from_min_size(r.min, egui::vec2(r.width(), r.height() * ART_H / CARD_H));
-    paint_art(painter, art_rect, [12.0, 12.0, 0.0, 0.0], &card.art, shelf, card.row.glyph(), icons);
+    paint_art(painter, art_rect, [12.0, 12.0, 0.0, 0.0], &card.art, shelf, card.row.glyph(), icons, postcard);
     // The shelf-colour band between picture and title.
     painter.rect_filled(
         egui::Rect::from_min_size(egui::pos2(r.min.x, art_rect.max.y), egui::vec2(r.width(), 3.0)),
@@ -235,7 +326,7 @@ fn paint_card(
         egui::Stroke::new(2.0_f32, mix(mix(brand::BORDER, shelf, 0.55), shelf, lift)),
         egui::StrokeKind::Inside,
     );
-    if card.done {
+    if card.done || postcard.is_some() {
         paint_done_mark(painter, egui::pos2(r.max.x - 18.0, r.min.y + 18.0));
     }
 }
@@ -253,6 +344,7 @@ fn draw_shelves(
     focus: (usize, usize),
     scroll_to_focus: bool,
     icons: &[egui::TextureId],
+    art: &HashMap<String, egui::TextureId>,
 ) -> ShelfResult {
     let mut out = ShelfResult::default();
     let pointer_moved = ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO);
@@ -294,7 +386,7 @@ fn draw_shelves(
                             if is_focus && scroll_to_focus {
                                 ui.scroll_to_rect(rect.expand(28.0), None);
                             }
-                            paint_card(ui.painter(), rect, card, lift, icons);
+                            paint_card(ui.painter(), rect, card, lift, icons, art.get(card.token).copied());
                             resp.on_hover_cursor(egui::CursorIcon::PointingHand);
                         }
                         ui.add_space(6.0);
@@ -314,7 +406,13 @@ struct HeroResult {
     how_it_works: bool,
 }
 
-fn draw_hero(ui: &mut egui::Ui, card: &Card, icons: &[egui::TextureId], fresh: bool) -> HeroResult {
+fn draw_hero(
+    ui: &mut egui::Ui,
+    card: &Card,
+    icons: &[egui::TextureId],
+    fresh: bool,
+    postcard: Option<egui::TextureId>,
+) -> HeroResult {
     let mut out = HeroResult::default();
     let shelf = rgb(card.row.color_rgb());
     egui::ScrollArea::vertical().id_salt("trials_gallery_hero").auto_shrink([false, false]).show(ui, |ui| {
@@ -324,14 +422,14 @@ fn draw_hero(ui: &mut egui::Ui, card: &Card, icons: &[egui::TextureId], fresh: b
             ui.add_space(pad);
             ui.vertical(|ui| {
                 ui.set_width(w);
-                // The art at full width.
-                let h = (w * 0.5).clamp(160.0, 320.0);
+                // The art at full width (a postcard at its own 16:9).
+                let h = if postcard.is_some() { w * 9.0 / 16.0 } else { (w * 0.5).clamp(160.0, 320.0) };
                 let (art_rect, _) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::hover());
                 let p = ui.painter();
                 let cr = egui::CornerRadius::same(16);
-                paint_art(p, art_rect, [16.0; 4], &card.art, shelf, card.row.glyph(), icons);
+                paint_art(p, art_rect, [16.0; 4], &card.art, shelf, card.row.glyph(), icons, postcard);
                 p.rect_stroke(art_rect, cr, egui::Stroke::new(3.0_f32, shelf), egui::StrokeKind::Inside);
-                if card.done {
+                if card.done || postcard.is_some() {
                     paint_done_mark(p, egui::pos2(art_rect.max.x - 24.0, art_rect.min.y + 24.0));
                 }
 
@@ -503,6 +601,10 @@ pub fn draw(
     modal_open: bool,
 ) -> GalleryOutput {
     let mut out = GalleryOutput { action: MenuAction::None, how_it_works: None };
+    if st.is_open() && st.album.is_some() {
+        crate::trials_album_ui::draw(ctx, st, modal_open);
+        return out;
+    }
     let Some(row_lens) = st.built.as_ref().map(|rows| rows.iter().map(|r| r.cards.len()).collect::<Vec<_>>()) else {
         return out;
     };
@@ -555,7 +657,9 @@ pub fn draw(
         }
     }
 
+    let art = st.newest_textures(ctx);
     let mut back = false;
+    let mut album = false;
     let mut shelf_result = ShelfResult::default();
     let mut hero_result = HeroResult::default();
     let hero_pos = st.hero;
@@ -580,17 +684,36 @@ pub fn draw(
                 }
                 ui.add_space(8.0);
                 ui.label(egui::RichText::new("Trials").size(26.0).strong().color(brand::COPPER));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add(
+                            egui::Button::new(egui::RichText::new("Album").size(15.0).color(TEXT))
+                                .min_size(egui::vec2(0.0, 34.0))
+                                .corner_radius(egui::CornerRadius::same(6)),
+                        )
+                        .on_hover_text("Every postcard from the trials you have finished.")
+                        .clicked()
+                    {
+                        album = true;
+                    }
+                });
             });
             let Some(rows) = st.built.as_ref() else { return };
             match hero_pos.and_then(|(r, c)| rows.get(r).and_then(|row| row.cards.get(c))) {
-                Some(card) => hero_result = draw_hero(ui, card, icons, fresh),
+                Some(card) => {
+                    hero_result = draw_hero(ui, card, icons, fresh, art.get(card.token).copied())
+                }
                 None => {
                     ui.label(egui::RichText::new("Pick one to look into it, then play.").size(13.0).color(MUTED));
-                    shelf_result = draw_shelves(ui, rows, focus, scroll_to_focus, icons);
+                    shelf_result = draw_shelves(ui, rows, focus, scroll_to_focus, icons, &art);
                 }
             }
         });
 
+    if album {
+        st.open_album();
+        return out;
+    }
     if back {
         if st.hero.is_some() {
             st.hero = None;
@@ -682,7 +805,13 @@ mod tests {
     #[test]
     fn no_counts_or_money_words_in_the_gallery_copy() {
         // The gallery never shows how many there are, nor frames play as money.
-        for src in [include_str!("trials_gallery_ui.rs"), include_str!("trials_gallery.rs")] {
+        for src in [
+            include_str!("trials_gallery_ui.rs"),
+            include_str!("trials_gallery.rs"),
+            include_str!("trials_album_ui.rs"),
+            include_str!("postcard.rs"),
+            include_str!("postcard_flow.rs"),
+        ] {
             let body = src.split("#[cfg(test)]").next().unwrap();
             let hits = crate::copy_lint::banned_in(body, crate::copy_lint::BANNED_MONEY_WORDS);
             assert!(hits.is_empty(), "money words in gallery copy: {hits:?}");

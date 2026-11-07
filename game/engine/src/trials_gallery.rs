@@ -267,6 +267,8 @@ pub fn race_art(race_id: &str) -> CardArt {
 /// One trial, ready to draw.
 pub(crate) struct Card {
     pub(crate) key: String,
+    /// The trial's token (challenge token or race id): its postcards' key.
+    pub(crate) token: &'static str,
     pub(crate) row: RowKind,
     pub(crate) title: String,
     pub(crate) premise: String,
@@ -307,6 +309,7 @@ fn build_card(
             let best = bests.best(d.id);
             Some(Card {
                 key: trial_key(tref),
+                token: d.id,
                 row,
                 title: d.name.to_string(),
                 premise: d.blurb.to_string(),
@@ -335,6 +338,7 @@ fn build_card(
                 crate::scenario::objective_tasks(&def, crate::scenario::trial_task_labels(token));
             Some(Card {
                 key: trial_key(tref),
+                token,
                 row,
                 title: head.to_string(),
                 premise: premise.to_string(),
