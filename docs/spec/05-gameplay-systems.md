@@ -2607,6 +2607,143 @@ These compose **with** a `PlayMode` rather than being modes themselves. Keeping 
 
 ---
 
+## 8b. Trials — act one (Trials in Two Acts, Part A; built 2026-11-07)
+
+Trials are bundled `ScenarioDef` challenges run on the Scenario overlay (§8.6).
+Design: `docs/vision/trials-two-acts.md` Part A (internal repo). Authoring
+recipe and lint: `docs/authoring/trials.md`. Code: `scenario.rs` (defs, events,
+tables), `objective_progress.rs` (pure progress rules), `item_kind.rs` (the
+craft filter), `trials_unlock.rs` (unlock by doing), `trials.rs` (`TRIAL_ORDER`,
+`TrialBests`).
+
+### 8b.1 The list
+
+34 challenges (onboarding + 33 `explorer-*.json`), plus the three ghost Races.
+`TRIAL_ORDER` is the single order:
+
+1. **Front shelf** — the first `FRONT_SHELF_LEN` (10) entries, visible from the
+   start, one per core verb: onboarding (First Light), mine, craft, build,
+   smelt, harvest, cook-three, tame-wolf, ride, kill.
+2. **Unlocked by doing** (23), grouped Make → Tend → Tech → Brave; within a
+   shelf a trial comes after the ones that unlock it. Each has an `unlock`:
+
+   | Token | Appears when |
+   |---|---|
+   | dye | after craft |
+   | bucket | on `UseBucket` |
+   | obsidian | after bucket |
+   | follow-the-plan, bouncer, lava-floor, claim-plot | after build |
+   | fresh-coat | after onboarding |
+   | workshop-publish | after follow-the-plan |
+   | fish | on `CatchFish` |
+   | farmhand | on `ShearOrMilk` |
+   | rancher | on `BreedAnimals { offspring: None }` (any breeding), or after tame-wolf |
+   | funny-farm | after rancher |
+   | vendor-sale | after claim-plot |
+   | power | after smelt |
+   | logic-gate, piston, generator | after power |
+   | copper-rush | on `BreakBlock` of copper ore |
+   | rail-rider | after ride |
+   | breach-and-clear | after kill |
+   | armour-up | after smelt AND kill |
+   | champion | after armour-up |
+3. **Clock corner** — Scavenger (typed Make; the gallery files it with the
+   races), sprint, cross-country, marathon. Always visible, never unlocked.
+
+**No total is ever shown** (no "12 of 34", no percentage).
+
+**Merged away (2026-11-07)** — removed from JSON, `EXPLORER_CHALLENGES`,
+`TRIAL_ORDER` and every table: eat, fish-feast → Camp Cook; friend-in-need →
+Best Friend; roadrunner → Saddle Up; monster-mash → Raiders at the Gate;
+splash-zone → The Plumber; mule-maker → Two of Every Kind; mill-race,
+catch-the-wind → Power Plant; kaboomtown, booby-trap → Bring the Wall Down.
+Completion is stored by display name, so a merged-away trial's tick, and the
+tick of a survivor whose premise text changed, is lost by decision (no alias
+table).
+
+### 8b.2 Objectives
+
+`Action { event, count }`, `Sequence { steps }` (ordered), `Checklist { items }`
+(unordered; an event fills the FIRST unfinished matching item, so list filtered
+items before an unfiltered one, as Skybox Studio does: door, window, then 30
+blocks), and **`AnyOf { routes: [{ name, objective }] }`**:
+
+- Every route keeps its own progress (counters are flat, one per leaf, routes
+  laid end to end) and sees every event; the first route to finish completes
+  the trial.
+- Top level only. A route is an `Action`, or a `Sequence`/`Checklist` of
+  `Action`s (`trials_lint` rejects anything else, including a nested `AnyOf`).
+- When one event finishes several routes, all are "done" for the ways memory
+  and the first listed is named on the end card — so routes are listed
+  most-specific first (Camp Cook: catch-cook-eat, cook-and-eat, roast three;
+  Two of Every Kind: mule, any pair; The Plumber: water park, carry the pond).
+- Task list: "Pick a way:" then each route by name with its own steps; the HUD
+  progress and the current-step arrow follow the leading route (most finished
+  leaves, then most counted events, then listed order).
+- End card: "You did it by: <route>".
+
+Survivors with routes: Camp Cook, The Plumber, Two of Every Kind, Power Plant,
+Bring the Wall Down. Best Friend (wolf/cat/parrot/fox) and Saddle Up
+(horse/Nostrich) need no routes: one unfiltered event, and the arena offers
+every animal.
+
+**`CraftItem { item: Option<ItemKind> }`** — `None` = any craft. The filter is
+authored as a `/give` name (`"iron_pickaxe"`, `"orange_dye"`,
+`"crafting_table"`) or an armour name (`"iron_helmet"`); it serialises as the
+typed `ItemKind`, and a bare `"CraftItem"` (every older def) still parses as
+`CraftItem { item: None }`. An unknown name is a parse error, never a silent
+"any". The craft fire site passes the crafted item's kind.
+
+### 8b.3 Unlock by doing
+
+- `ScenarioDef.unlock: Option<TrialUnlock { on, after, hint }>`; `None` =
+  always visible. A trial appears when ANY `on` event has happened anywhere
+  (own world or any arena, a trial running or not) OR ALL `after` tokens are
+  completed. A completed trial is always visible.
+- `GameState::fire_challenge` is the one seam every gameplay event goes
+  through (the craft, place, break, harvest, cook, claim, trade, publish and
+  material sites call it; none calls `ScenarioState::on_event` directly). It
+  records the event first: a scan of the few `on` patterns (no allocation when
+  nothing listens), an insert into `TrialBests.events_seen`, and a save only
+  when the store changed.
+- `TrialBests` gained four append-only, `#[serde(default)]` fields, all sets
+  that only grow: `unlocked` (tokens), `events_seen` (event JSON keys),
+  `ways_done` (display name → route names) and `cards_opened` (tokens whose
+  card was opened, which clears the "new" mark). An older `trials.json` /
+  localStorage store loads unchanged. `merge` unions them. `load` seeds
+  `unlocked` from existing completions, so nobody loses a visible trial.
+- **Persistence rule:** `TrialBests::save` merges with the copy on disk before
+  writing (sets union, a race keeps the faster best, rival ghosts stay as in
+  memory). The game holds a copy loaded at start-up while the lobby gallery and
+  a profile import load and save their own; a plain overwrite would drop what
+  they wrote.
+- Quiet: an unlock shows only as a "new" mark (`trials_unlock::is_new`) until
+  the card is opened or the trial done. `next_hints` lists hidden trials worth a
+  nudge: one with at least one `after` prerequisite done, or an `on`-only trial
+  whose shelf already has a completion.
+- `trials_lint`: every `after` token exists, every unlock has a clause and a
+  hint, every `on` event is fired in gameplay, and a fixpoint from the front
+  shelf reaches every trial (no cycles, no orphans).
+
+### 8b.4 Arena and label rules learned in the reshape
+
+- A label must describe what the objective checks. Filtered `PlaceBlock`
+  steps name the block (furnace, cable, lever, motion sensor, sticky piston,
+  rail, door, glass, pressure plate, water wheel, windmill, hand crank).
+- First Workbench is a Checklist, not a Sequence: an ordered "pickaxe then
+  sword" would strand a player who made the sword first (the three arena logs
+  give just enough planks for one of each).
+- Green Thumb's arena holds no ready wheat: the crops are grown from the kit's
+  seeds.
+- Power Plant pins `weather_lock: "storm"` and holds all three set-ups (the
+  spring pillar, the hilltop platform, the lamp wall). Its third route is the
+  hand crank alone: the steam generator needs fuel and is not part of it.
+- The Plumber's water park route is "8 glass, then 2 bucket uses"; the kit
+  holds only an empty bucket, so it finishes together with (and is named over)
+  the carry route when the pool is built first.
+
+---
+
 ## 9. Mob System
 
 #### Entity System (Step 7 — Foundation)
@@ -3467,7 +3604,8 @@ same `ChallengeEvent::TameMob` the wolf-tame path already fired, so it counts
 toward Trials (hardened 2026-07-07 — previously only wolf tames were visible
 to the challenge system). The Tend track gained two trials this wave: **Mule
 Maker** (breed a Mule) and **A Friend in Need** (tame any one of Cat, Parrot,
-or Fox).
+or Fox). (2026-11-07: both merged into Two of Every Kind and Best Friend as
+ways to do them — §8b.)
 
 **Known, not a bug: placeholder meshes.** Cat, Parrot, and Crab all render with
 a placeholder mesh (the established cat-uses-wolf-mesh pattern) — dedicated

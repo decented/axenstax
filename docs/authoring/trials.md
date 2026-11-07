@@ -61,6 +61,23 @@ returns a parse error. Fields with a default are optional.
     { "block": "iron_block", "at": [1, 0, 0] }
   ],
 
+  // OPTIONAL (default: null = visible from the start). UNLOCK BY DOING: when
+  // the trial appears in the gallery. Only the ten front-shelf trials and
+  // Scavenger leave it out; EVERY new trial sets it (a test fails otherwise).
+  //   "on":    ChallengeEvents — ANY of them happening once, anywhere (the
+  //            player's own world or any arena), unlocks the trial.
+  //   "after": trial tokens — ALL of them completed unlocks it.
+  //   Either clause unlocks. Give at least one. Same event JSON as objectives.
+  //   "hint":  REQUIRED one-line nudge shown while it is hidden, in the shape
+  //            "Something about horses…" (UK English, no money words).
+  // `trials_lint` checks every `after` token exists, the hint is set, every
+  // `on` event is really fired in gameplay, and the trial is reachable from the
+  // front shelf (no unlock cycles, no orphans).
+  "unlock": {
+    "after": ["smelt"],
+    "hint": "Something about a dark room and a switch\u2026"
+  },
+
   // GOTCHA: this exact string is ALSO the reverse-lookup key. The running
   // scenario only carries its display_name at runtime (not your JSON's
   // filename or token) — so `challenge_help_for_display`, `trial_satoshi_for_display`,
@@ -134,7 +151,8 @@ returns a parse error. Fields with a default are optional.
   // above (world-shape values baked into the fresh arena's WorldMeta), this is
   // re-applied every tick from the RUNNING scenario, so `/scenario <token>` in
   // your own world pins the weather too — and it lands before the tick samples
-  // the wind, which is what lets "catch-the-wind" guarantee a turning windmill.
+  // the wind, which is what lets Power Plant ("generator") guarantee a turning
+  // windmill.
   // An unrecognised value is IGNORED at runtime (forward-compatible defs) and
   // fails `trials_lint`'s `every_bundled_weather_lock_is_a_value_the_engine_honours`
   // at test time. A Workshop world still never has weather, lock or no lock.
@@ -196,18 +214,47 @@ typo in a trial you're authoring.
 Objective::Action { event: ChallengeEvent, count: u32 }       // "do X, N times"
 Objective::Sequence { steps: Vec<Objective> }                  // ORDERED: step 0 must finish before step 1 counts
 Objective::Checklist { items: Vec<Objective> }                 // UNORDERED: any order, all must finish
+Objective::AnyOf { routes: Vec<Route> }                        // SEVERAL WAYS: the first route to finish wins
 Objective::Timed { ticks: u32 }                                // built-in games only — not for Explorer Challenges
 Objective::FirstSatori | Objective::FreeRoam                   // built-in games only — not for Explorer Challenges
 ```
 
-**THE RULE: every leaf inside a `Sequence` or `Checklist` must be a plain
-`Action`.** Nesting a `Sequence` inside a `Sequence`, or a `Timed` inside a
+**THE RULE: every leaf inside a `Sequence`, a `Checklist` or an `AnyOf` route
+must be a plain `Action`, and `AnyOf` is top level only.** Nesting a `Sequence` inside a `Sequence`, or a `Timed` inside a
 `Checklist`, *parses fine* — but `ScenarioState::objective_is_complete` only
 recognises `Action` leaves, so a non-`Action` leaf can **never complete** and
 the trial silently stalls forever for every player who reaches it. This is
 exactly what `trials_lint`'s `sequence_and_checklist_leaves_are_actions` check
 catches — if you break this rule, that test fails and names the exact step
-index.
+index (and, inside an `AnyOf`, the route).
+
+**`AnyOf` — one trial, several ways.** Each route is `{ "name", "objective" }`,
+where the objective is an `Action`, or a `Sequence`/`Checklist` of `Action`s
+(never another `AnyOf`):
+
+```json
+"objective": { "AnyOf": { "routes": [
+  { "name": "Cook and eat", "objective": { "Sequence": { "steps": [
+      { "Action": { "event": "CookAtCampfire", "count": 1 } },
+      { "Action": { "event": "EatFood", "count": 1 } } ] } } },
+  { "name": "Roast three", "objective": { "Action": { "event": "CookAtCampfire", "count": 3 } } }
+] } }
+```
+
+Every route sees every event and keeps its own progress; the first route to
+finish completes the trial. The task list reads "Pick a way:" then each route
+by name with its steps, the end card says "You did it by: <route name>", and the
+player's `TrialBests::ways_done` remembers each way done. **List routes
+most-specific first:** when one event finishes several routes at once (a mule
+birth is also "any breeding"), all count as done but the FIRST listed is the
+one named. And check no route is a strict subset of an earlier-finishing one,
+or the later route can never be the one that wins. `trial_task_labels` gets
+one label per leaf, all routes end to end in order.
+
+**`Checklist` fills the FIRST unfinished item that matches**, so put filtered
+items before an unfiltered one (Skybox Studio lists the door and the window
+before "place 30 blocks"; the other way round, the door would vanish into the
+30).
 
 JSON shape reminders (confirmed against the bundled JSON):
 - A unit-variant event (no fields) serialises as a bare string: `"event": "TameMob"`.
@@ -232,7 +279,7 @@ specific one" — see §6 for what that implies for your arena.
 |---|---|---|
 | `BreakBlock { block }` | A block-break completes (survival AND creative/instant breaks — the latter fire with 0 work). | `Some(id)` = that block only; `None` = any block. |
 | `PlaceBlock { block }` | A block-place commits. | `Some(id)` = that block only; `None` = any block. |
-| `CraftItem` | A craft completes at the `ResultSlot` click (any recipe) — fires the same for BOTH the 2×2 personal-inventory grid and the 3×3 crafting-table grid, so a `CraftItem` objective is satisfiable without a table. | Unfiltered (v1 has no per-recipe filter). |
+| `CraftItem { item }` | A craft completes at the `ResultSlot` click — fires the same for BOTH the 2×2 personal-inventory grid and the 3×3 crafting-table grid, so a `CraftItem` objective is satisfiable without a table. The event carries what was crafted. | `item: null` (or the bare string `"CraftItem"`, still accepted) = any craft; `"item": "<name>"` = only that output. The name is a `/give` name (`"iron_pickaxe"`, `"orange_dye"`, `"oak_planks"`, `"drafting_stamp"`) or an armour name `<material>_<slot>` (`"iron_helmet"`, `"leather_boots"`). An unknown name fails to parse (loudly in the lint), never a silent "any". |
 | `CookAtCampfire` | A cooked item is taken OFF a campfire. | Unfiltered. |
 | `TameMob` | A companion tame (cat/parrot/fox, `companion::tame_food`) OR a wolf bone-tame succeeds — two separate fire sites, same event. | Unfiltered — no species filter (see below). |
 | `VendorSale` | A Vendor trade/barter settles (either the plan-buy path or the direct swap path). | Unfiltered. |
@@ -261,12 +308,10 @@ specific one" — see §6 for what that implies for your arena.
 "event": { "SourceTurned": { "kind": "Windmill" } }
 ```
 
-**Arena-shaped gotcha for the two turning sources:** the reachability check (§6)
-counts `arena.blocks` only, so a `PlaceBlock { block: Some(<wheel|mill>) }` step
-whose block comes from the **kit** needs a `REACHABILITY_MANUALLY_VERIFIED`
-entry — see `mill-race` / `catch-the-wind` for the pattern. And a windmill needs
+**Arena-shaped gotcha for the two turning sources:** a windmill needs
 `weather_lock: "storm"` (or real altitude) if the trial is to be reliably
-completable: a clear day at sea level is intermittent by design.
+completable: a clear day at sea level is intermittent by design (see Power
+Plant, `explorer-generator.json`).
 
 **`GainMaterial` JSON encoding (untested by any bundled trial — verified against
 the enum, not copied from a real JSON):** `MaterialId` (`src/item.rs`) is a
@@ -361,7 +406,7 @@ test that parses bundled defs panics with a clear serde error naming the file.
 
 ### (2) `EXPLORER_CHALLENGES` — REQUIRED
 **File:** `game/engine/src/scenario.rs`, the `EXPLORER_CHALLENGES` const
-(currently 45 entries, alphabetically-unordered — just append a line).
+(currently 33 entries, unordered — just append a line).
 **Add:** `("<token>", include_bytes!("../assets/scenarios/explorer-<token>.json")),`
 **Failure mode if skipped:** the trial is **completely inert** — it doesn't
 show up in `challenge_listing()`, `/scenario <token>` doesn't resolve it,
@@ -373,9 +418,11 @@ leave in the repo unregistered — it's inert until you add this line.)
 ### (3) `TRIAL_ORDER` — REQUIRED
 **File:** `game/engine/src/trials.rs`, the `TRIAL_ORDER` const.
 **Add:** `(TrialType::<Make|Tend|Brave|Tech|Race>, TrialRef::Challenge("<token>")),`
-at a reasonable position (roughly: easier/foundational trials first, deeper
-systems later — look at neighbouring entries for a similar trial and slot
-near it). Pick the `TrialType` that best matches the trial's flavour (see the
+AFTER the front shelf (the first `FRONT_SHELF_LEN` = 10 entries are the
+day-one shelf and stay exactly as they are), in its shelf's group (Make, Tend,
+Tech, Brave), after the trials its `unlock` names. A new trial is never on the
+front shelf: give it an `unlock` (§1) or
+`the_front_shelf_is_the_first_ten_and_the_rest_unlock` fails. Pick the `TrialType` that best matches the trial's flavour (see the
 existing entries for examples: `Make` = building/crafting/production, `Tend`
 = animals/farming/trade, `Brave` = combat/danger, `Tech` = electricity/
 logic/mechanisms, `Race` = movement).
@@ -412,6 +459,13 @@ how-to are non-empty for every entry in `challenge_listing()`.
 **COMPLIANCE (checked by this same surface, and by `trials_lint`):** never
 use money/earning words in this text (or anywhere else authored) — see §7.
 
+### (7) `unlock` — REQUIRED for every new trial
+In the JSON (§1): `on` events and/or `after` tokens plus a `hint`. Pick what
+the trial builds on: the trial that teaches its skill (`after`), or the first
+time the player does the thing in their own world (`on`). **Failure modes:**
+no `unlock` fails the front-shelf test above; an unknown token, an empty hint
+or an unreachable chain fails `every_unlock_is_reachable_from_the_front_shelf`.
+
 ### Conditional extras (only when they genuinely apply)
 - **(6b) `trial_recipe_hints`** (`scenario.rs`) — only if your objective
   involves crafting something specific and you want its recipe auto-pinned in
@@ -442,15 +496,12 @@ verifies your `arena` actually supplies enough of it — see §3's species-gatin
 note. If it doesn't, you get a clear failure naming the trial, the event, and
 the shortfall.
 
-**Known limitation:** for a filtered `BreakBlock { block: Some(id) }` or
-`PlaceBlock { block: Some(id) }` objective, the check counts ONLY
-`arena.blocks` entries — it never looks at `kit`. A trial that hands the
-target block to the player via `kit` (rather than placing it in the world via
-`arena.blocks`) will fail this check even though a player could genuinely
-complete it. Either add a matching `arena.blocks` entry for the filtered
-block, or (if the block is only ever obtained some other way, e.g. crafted or
-kit-provided) add the trial to `REACHABILITY_MANUALLY_VERIFIED` as described
-below.
+**Block filters:** for `PlaceBlock { block: Some(id) }` the check counts the
+matching `arena.blocks` entries AND the kit's stacks of that block (a block to
+place comes from the player's hands). For `BreakBlock { block: Some(id) }` it
+counts `arena.blocks` only (a block to break must be standing there). A block
+obtained some other way (crafted, like First Workbench's crafting table) needs
+a `REACHABILITY_MANUALLY_VERIFIED` entry as described below.
 
 **If a trial's completion genuinely can't come from a statically-countable
 arena resource** — e.g. a block that's *formed* by a world reaction (lava +
@@ -463,7 +514,7 @@ entry to `const REACHABILITY_MANUALLY_VERIFIED` in
 an entry for a trial that would actually pass the static check anyway (i.e.
 you don't need the bypass). Only reach for this when the static rule
 genuinely can't express your trial's reachability — most trials never need it
-(only 4 of the 45 current ones do).
+(only 4 of the 34 current ones do: obsidian, rail-rider, craft, harvest).
 
 ---
 
@@ -518,6 +569,15 @@ reachability allowlist, no unfiltered-mob allowlist).
 {
   "kind": "Challenge",
   "display_name": "Sandcastle — pile up ten blocks of sand into your own castle on the beach",
+  "card_art": [
+    { "block": "sand", "at": [0, 0, 0] },
+    { "block": "sand", "at": [1, 0, 0] },
+    { "block": "sand", "at": [0, 1, 0] }
+  ],
+  "unlock": {
+    "after": ["build"],
+    "hint": "Something about a day at the beach\u2026"
+  },
   "kit": [
     { "name": "sand", "count": 10 }
   ],
@@ -538,8 +598,8 @@ reachability allowlist, no unfiltered-mob allowlist).
 ("sandcastle", include_bytes!("../assets/scenarios/explorer-sandcastle.json")),
 ```
 
-**(3) `trials.rs`, `TRIAL_ORDER`** — add near other `Make`-flavoured building
-trials (e.g. next to `"build"` or `"splash-zone"`):
+**(3) `trials.rs`, `TRIAL_ORDER`** — add in the Make group after the front
+shelf (e.g. next to `"bouncer"`, another trial that appears after `"build"`):
 ```rust
 (TrialType::Make, TrialRef::Challenge("sandcastle")),
 ```
