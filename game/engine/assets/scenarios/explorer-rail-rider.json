@@ -1,7 +1,16 @@
 {
   "kind": "Challenge",
   "display_name": "Rail Rider \u2014 lay a track, drop a cart on it, and ride your own railway",
-  "card_art": "track",
+  "card_art": [
+    { "block": "cobblestone", "at": [0, 0, 0] },
+    { "block": "cobblestone", "at": [1, 0, 0] },
+    { "block": "cobblestone", "at": [2, 0, 0] },
+    { "block": "cobblestone", "at": [3, 0, 0] },
+    { "block": "track", "at": [0, 1, 0] },
+    { "block": "track", "at": [1, 1, 0] },
+    { "block": "track", "at": [3, 1, 0] },
+    { "block": "track", "at": [2, 1, 0] }
+  ],
   "kit": [
     {
       "name": "rail",

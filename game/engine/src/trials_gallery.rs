@@ -8,6 +8,7 @@
 //! untouched.
 
 use crate::trials::{TrialBests, TrialRef, TrialType, TRIAL_ORDER};
+use crate::trials_diorama::{sort_back_to_front, CardArtDef, Cube, DioramaBlock, Shape};
 
 // ---------------------------------------------------------------------------
 // Pure: rows
@@ -107,10 +108,11 @@ pub fn trial_key(tref: TrialRef) -> String {
 // ---------------------------------------------------------------------------
 
 /// What a card's picture is made of.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum CardArt {
-    /// A block: drawn with its own texture layer from the game's atlas.
-    Block { layer: u32 },
+    /// One or more blocks drawn as an isometric diorama from the game's atlas
+    /// (a lone block is a one-cube diorama).
+    Diorama(Vec<Cube>),
     /// Any other item: a flat colour swatch (how the game's own slots draw
     /// tools and materials).
     Swatch { rgb: [u8; 3] },
@@ -124,22 +126,138 @@ fn registry() -> &'static crate::block::BlockRegistry {
     &REG
 }
 
-/// Resolve a `card_art` name (`/give` vocabulary) to a picture. `None` or a
-/// name the game does not know falls back to the shelf glyph, so a card is
-/// never blank (`trials_lint` makes a bad bundled name a test failure).
-pub fn resolve_card_art(name: Option<&str>) -> CardArt {
-    let Some(name) = name else { return CardArt::Shelf };
-    let Ok(stack) = crate::commands::builtins::give::resolve_item(name, 1) else {
-        return CardArt::Shelf;
-    };
-    match &stack.item {
-        crate::item::Item::Block(id) => CardArt::Block { layer: registry().tex_top(*id) },
-        other => {
-            let c = other.color(registry());
+/// Block names whose picture is a flat tile lying on the floor, not a cube.
+const FLAT_BLOCKS: [&str; 3] = ["track", "pressure_plate", "cable"];
+
+/// How a block is drawn: liquids bright, the flat tiles flat, anything
+/// non-solid (crops, torches, doors) as an upright sprite, the rest as cubes.
+fn shape_of(id: crate::block::BlockId) -> Shape {
+    use crate::block;
+    let reg = registry();
+    if id == block::WATER || id == block::LAVA {
+        Shape::Fluid
+    } else if FLAT_BLOCKS.iter().any(|n| block_name_matches(id, n)) {
+        Shape::Flat
+    } else if !reg.is_solid(id) {
+        Shape::Sprite
+    } else {
+        Shape::Cube
+    }
+}
+
+fn block_name_matches(id: crate::block::BlockId, name: &str) -> bool {
+    crate::commands::builtins::give::resolve_item(name, 1)
+        .ok()
+        .is_some_and(|s| matches!(s.item, crate::item::Item::Block(b) if b == id))
+}
+
+/// A block name (`/give` vocabulary) at a grid cell, resolved to the faces to
+/// draw. `None` when the name is not a block.
+pub fn resolve_cube(name: &str, pos: [i32; 3]) -> Option<Cube> {
+    let stack = crate::commands::builtins::give::resolve_item(name, 1).ok()?;
+    match stack.item {
+        crate::item::Item::Block(id) => {
+            let reg = registry();
+            Some(Cube { pos, top: reg.tex_top(id), side: reg.tex_side(id), shape: shape_of(id) })
+        }
+        _ => None,
+    }
+}
+
+/// Resolve a diorama's blocks, sorted back to front. Blocks that do not
+/// resolve, or sit off the grid, are skipped (`trials_lint` makes one in a bundled trial a failure).
+pub fn resolve_diorama(blocks: &[DioramaBlock]) -> Vec<Cube> {
+    let mut cubes: Vec<Cube> = blocks
+        .iter()
+        .take(crate::trials_diorama::MAX_DIORAMA_BLOCKS)
+        .filter(|b| b.at.iter().all(|c| c.abs() <= crate::trials_diorama::MAX_COORD))
+        .filter_map(|b| resolve_cube(&b.block, b.at))
+        .collect();
+    sort_back_to_front(&mut cubes);
+    cubes
+}
+
+/// Resolve a `card_art` to a picture. `None` or a name the game does not know
+/// falls back to the shelf glyph, so a card is never blank (`trials_lint`
+/// makes a bad bundled value a test failure).
+pub fn resolve_card_art(art: Option<&CardArtDef>) -> CardArt {
+    let Some(art) = art else { return CardArt::Shelf };
+    match art {
+        CardArtDef::Diorama(blocks) => {
+            let cubes = resolve_diorama(blocks);
+            if cubes.is_empty() {
+                CardArt::Shelf
+            } else {
+                CardArt::Diorama(cubes)
+            }
+        }
+        CardArtDef::Name(name) => {
+            if let Some(cube) = resolve_cube(name, [0, 0, 0]) {
+                return CardArt::Diorama(vec![cube]);
+            }
+            let Ok(stack) = crate::commands::builtins::give::resolve_item(name, 1) else {
+                return CardArt::Shelf;
+            };
+            let c = stack.item.color(registry());
             let to_u8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
             CardArt::Swatch { rgb: [to_u8(c[0]), to_u8(c[1]), to_u8(c[2])] }
         }
     }
+}
+
+/// The fixed diorama for each bundled race (races carry no `card_art` data):
+/// a short course with its finish marker.
+const RACE_ART: [(&str, &[(&str, [i32; 3])]); 3] = [
+    (
+        "sprint",
+        &[
+            ("sand", [0, 0, 0]),
+            ("sand", [1, 0, 0]),
+            ("sand", [2, 0, 0]),
+            ("sand", [3, 0, 0]),
+            ("lamp", [3, 1, 0]),
+            ("pressure_plate", [0, 1, 0]),
+        ],
+    ),
+    (
+        "cross-country",
+        &[
+            ("grass", [0, 0, 0]),
+            ("grass", [1, 0, 0]),
+            ("dirt", [2, 0, 0]),
+            ("stone", [2, 1, 0]),
+            ("grass", [3, 0, 0]),
+            ("oak_leaves", [1, 1, 1]),
+            ("oak_log", [1, 0, 1]),
+            ("lamp", [3, 1, 0]),
+        ],
+    ),
+    (
+        "marathon",
+        &[
+            ("cobblestone", [0, 0, 0]),
+            ("cobblestone", [1, 0, 0]),
+            ("cobblestone", [2, 0, 0]),
+            ("cobblestone", [3, 0, 0]),
+            ("cobblestone", [4, 0, 0]),
+            ("fence_post", [2, 1, 1]),
+            ("fence_post", [4, 1, 1]),
+            ("lamp", [4, 1, 0]),
+        ],
+    ),
+];
+
+/// The picture for a bundled race.
+pub fn race_art(race_id: &str) -> CardArt {
+    let Some((_, cells)) = RACE_ART.iter().find(|(id, _)| *id == race_id) else {
+        return CardArt::Shelf;
+    };
+    let blocks: Vec<DioramaBlock> = cells
+        .iter()
+        .map(|(b, at)| DioramaBlock { block: (*b).to_string(), at: *at })
+        .collect();
+    let cubes = resolve_diorama(&blocks);
+    if cubes.is_empty() { CardArt::Shelf } else { CardArt::Diorama(cubes) }
 }
 
 // ---------------------------------------------------------------------------
@@ -198,7 +316,7 @@ fn build_card(
                 ],
                 ordered: false,
                 satoshi: crate::scenario::trial_satoshi(d.id).0.to_string(),
-                art: CardArt::Shelf,
+                art: race_art(d.id),
                 done: best.is_some(),
                 best_ticks: best.map(|b| b.ticks),
                 rival: bests.rivals.get(d.id).map(|r| (r.label.clone(), r.ticks)),
@@ -223,7 +341,7 @@ fn build_card(
                 steps: tasks.lines,
                 ordered: tasks.ordered,
                 satoshi: crate::scenario::trial_satoshi(token).0.to_string(),
-                art: resolve_card_art(def.card_art.as_deref()),
+                art: resolve_card_art(def.card_art.as_ref()),
                 done: bests.is_challenge_done(display),
                 best_ticks: None,
                 rival: None,
@@ -323,21 +441,79 @@ mod tests {
         }
     }
 
+    fn name(n: &str) -> CardArtDef {
+        CardArtDef::Name(n.to_string())
+    }
+
     #[test]
-    fn card_art_resolves_blocks_to_a_texture_and_other_items_to_a_swatch() {
-        assert!(matches!(resolve_card_art(Some("furnace")), CardArt::Block { .. }));
-        assert!(matches!(resolve_card_art(Some("bone")), CardArt::Swatch { .. }));
-        assert!(matches!(resolve_card_art(Some("stone_pickaxe")), CardArt::Swatch { .. }));
+    fn a_single_block_name_is_a_one_cube_diorama_and_other_items_a_swatch() {
+        let CardArt::Diorama(cubes) = resolve_card_art(Some(&name("furnace"))) else {
+            panic!("a block name should resolve to a diorama");
+        };
+        assert_eq!(cubes.len(), 1);
+        assert_eq!(cubes[0].shape, Shape::Cube);
+        assert!(matches!(resolve_card_art(Some(&name("bone"))), CardArt::Swatch { .. }));
+        assert!(matches!(resolve_card_art(Some(&name("stone_pickaxe"))), CardArt::Swatch { .. }));
     }
 
     #[test]
     fn card_art_falls_back_to_the_shelf_glyph() {
         assert_eq!(resolve_card_art(None), CardArt::Shelf);
-        assert_eq!(resolve_card_art(Some("not_a_thing")), CardArt::Shelf);
+        assert_eq!(resolve_card_art(Some(&name("not_a_thing"))), CardArt::Shelf);
+        assert_eq!(resolve_card_art(Some(&CardArtDef::Diorama(vec![]))), CardArt::Shelf);
     }
 
     #[test]
-    fn every_challenge_card_gets_real_art_and_every_race_the_fallback() {
+    fn a_diorama_resolves_per_face_textures_in_painter_order() {
+        let blocks = vec![
+            DioramaBlock { block: "grass".into(), at: [1, 0, 1] },
+            DioramaBlock { block: "furnace".into(), at: [0, 0, 0] },
+            DioramaBlock { block: "not_a_block".into(), at: [5, 0, 0] },
+            DioramaBlock { block: "bone".into(), at: [2, 0, 0] },
+        ];
+        let CardArt::Diorama(cubes) = resolve_card_art(Some(&CardArtDef::Diorama(blocks))) else {
+            panic!("expected a diorama");
+        };
+        // The unknown name and the non-block item are skipped; the rest is sorted.
+        assert_eq!(cubes.len(), 2);
+        assert_eq!(cubes[0].pos, [0, 0, 0]);
+        assert_eq!(cubes[1].pos, [1, 0, 1]);
+        let reg = registry();
+        assert_eq!(cubes[1].top, reg.tex_top(crate::block::GRASS));
+        assert_eq!(cubes[1].side, reg.tex_side(crate::block::GRASS));
+        assert_ne!(cubes[1].top, cubes[1].side, "grass has a different top and side");
+    }
+
+    #[test]
+    fn a_diorama_is_capped_at_its_block_limit() {
+        let blocks: Vec<DioramaBlock> = (0..20)
+            .map(|i| DioramaBlock { block: "stone".into(), at: [i % 5, 0, i / 5] })
+            .collect();
+        let CardArt::Diorama(cubes) = resolve_card_art(Some(&CardArtDef::Diorama(blocks))) else {
+            panic!("expected a diorama");
+        };
+        assert_eq!(cubes.len(), crate::trials_diorama::MAX_DIORAMA_BLOCKS);
+    }
+
+    #[test]
+    fn blocks_pick_their_drawing_shape() {
+        let shape = |n: &str| resolve_cube(n, [0, 0, 0]).unwrap().shape;
+        assert_eq!(shape("stone"), Shape::Cube);
+        assert_eq!(shape("water"), Shape::Fluid);
+        assert_eq!(shape("lava"), Shape::Fluid);
+        assert_eq!(shape("track"), Shape::Flat);
+        assert_eq!(shape("wheat_mature"), Shape::Sprite);
+    }
+
+    #[test]
+    fn every_race_has_a_diorama() {
+        for d in crate::trials::CATALOG {
+            assert!(matches!(race_art(d.id), CardArt::Diorama(_)), "{}", d.id);
+        }
+    }
+
+    #[test]
+    fn every_card_gets_real_art() {
         let rows = build_rows(&TrialBests::default());
         let mut keys = std::collections::HashSet::new();
         let mut total = 0;
@@ -345,11 +521,7 @@ mod tests {
             for card in &row.cards {
                 total += 1;
                 assert!(keys.insert(card.key.clone()), "{} appears twice", card.key);
-                if card.race_id.is_some() {
-                    assert_eq!(card.art, CardArt::Shelf, "{}", card.key);
-                } else {
-                    assert_ne!(card.art, CardArt::Shelf, "{} has no usable card_art", card.key);
-                }
+                assert_ne!(card.art, CardArt::Shelf, "{} has no usable card_art", card.key);
                 assert!(!card.done, "a fresh profile has nothing done");
             }
         }

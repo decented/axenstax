@@ -1,7 +1,16 @@
 {
   "kind": "Challenge",
   "display_name": "Follow the Plan — raise a little hut block by block, following the ghost guide",
-  "card_art": "blueprint_paper",
+  "card_art": [
+    { "block": "grass", "at": [0, 0, 0] },
+    { "block": "grass", "at": [1, 0, 0] },
+    { "block": "grass", "at": [0, 0, 1] },
+    { "block": "grass", "at": [1, 0, 1] },
+    { "block": "drafting_table", "at": [0, 1, 1] },
+    { "block": "oak_planks", "at": [1, 1, 0] },
+    { "block": "glass", "at": [1, 2, 0] },
+    { "block": "glass", "at": [1, 1, 1] }
+  ],
   "kit": [
     {
       "name": "hut_plan",

@@ -1,7 +1,16 @@
 {
   "kind": "Challenge",
   "display_name": "Copper Rush — dig copper out of the rock, smelt it, and draw your first cable",
-  "card_art": "copper_ore",
+  "card_art": [
+    { "block": "stone", "at": [0, 0, 0] },
+    { "block": "stone", "at": [1, 0, 0] },
+    { "block": "stone", "at": [2, 0, 0] },
+    { "block": "copper_ore", "at": [0, 1, 0] },
+    { "block": "copper_ore", "at": [1, 1, 0] },
+    { "block": "furnace", "at": [2, 1, 0] },
+    { "block": "copper_ore", "at": [0, 0, 1] },
+    { "block": "cable", "at": [1, 0, 1] }
+  ],
   "kit": [
     {
       "name": "stone_pickaxe",

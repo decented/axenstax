@@ -367,6 +367,8 @@ mod village_gen;
 mod satoshi;
 mod profile_bundle;
 mod trials;
+mod trials_diorama;
+mod trials_diorama_ui;
 mod trials_gallery;
 mod trials_gallery_ui;
 mod ravine_gen;

@@ -428,13 +428,15 @@ pub struct ScenarioDef {
     /// Races / Experiences and any challenge that needs no scaffolding.
     #[serde(default)]
     pub arena: Option<ArenaSetup>,
-    /// Trials gallery — the card's key picture: a `/give`-style item or block
-    /// name (`"furnace"`, `"bone"`), drawn large on the trial's card and hero
-    /// view from the game's own item icons. `None` falls back to the shelf's
-    /// icon. Presentation only: it changes nothing about how the trial plays.
-    /// `trials_lint` checks that a bundled value resolves to a real item.
+    /// Trials gallery — the card's picture. Either one `/give`-style item or
+    /// block name (`"furnace"`: a lone block is drawn as an isometric cube,
+    /// another item as a colour swatch) or a small diorama: up to 8
+    /// `{ "block": "<name>", "at": [x, y, z] }` blocks on an integer grid,
+    /// drawn as isometric cubes (see `trials_diorama`). `None` falls back to
+    /// the shelf's icon. Presentation only: it changes nothing about how the
+    /// trial plays. `trials_lint` checks that a bundled value resolves.
     #[serde(default)]
-    pub card_art: Option<String>,
+    pub card_art: Option<crate::trials_diorama::CardArtDef>,
 }
 
 /// Scaffolding for a Challenge's fresh arena — see [`ScenarioDef::arena`].

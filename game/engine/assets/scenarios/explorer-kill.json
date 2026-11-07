@@ -1,7 +1,14 @@
 {
   "kind": "Challenge",
   "display_name": "Raiders at the Gate \u2014 brigands are storming the wall \u2014 hold the line",
-  "card_art": "cobblestone_wall",
+  "card_art": [
+    { "block": "cobblestone", "at": [0, 0, 0] },
+    { "block": "cobblestone", "at": [1, 0, 0] },
+    { "block": "cobblestone", "at": [2, 0, 0] },
+    { "block": "cobblestone_wall", "at": [0, 1, 0] },
+    { "block": "cobblestone_wall", "at": [2, 1, 0] },
+    { "block": "oak_fence_gate", "at": [1, 1, 0] }
+  ],
   "kit": [
     {
       "name": "stone_sword",

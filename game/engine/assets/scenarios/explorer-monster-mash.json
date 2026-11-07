@@ -1,7 +1,15 @@
 {
   "kind": "Challenge",
   "display_name": "Monster Mash \u2014 bonk the whole monster mosh pit",
-  "card_art": "coal_block",
+  "card_art": [
+    { "block": "stone", "at": [0, 0, 0] },
+    { "block": "stone", "at": [1, 0, 0] },
+    { "block": "stone", "at": [0, 0, 1] },
+    { "block": "stone", "at": [1, 0, 1] },
+    { "block": "bone_block", "at": [0, 1, 0] },
+    { "block": "coal_block", "at": [1, 1, 0] },
+    { "block": "bone_block", "at": [1, 1, 1] }
+  ],
   "kit": [
     {
       "name": "iron_sword",

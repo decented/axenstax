@@ -1,7 +1,14 @@
 {
   "kind": "Challenge",
   "display_name": "Open Your Workshop \u2014 design a reskin and publish it for the whole world to use",
-  "card_art": "item_frame",
+  "card_art": [
+    { "block": "oak_planks", "at": [0, 0, 0] },
+    { "block": "oak_planks", "at": [1, 0, 0] },
+    { "block": "oak_planks", "at": [2, 0, 0] },
+    { "block": "drafting_table", "at": [0, 1, 0] },
+    { "block": "item_frame", "at": [1, 1, 0] },
+    { "block": "mirror", "at": [2, 1, 0] }
+  ],
   "kit": [
     {
       "name": "blueprint_paper",

@@ -1,7 +1,14 @@
 {
   "kind": "Challenge",
   "display_name": "Sensor Vault \u2014 use a motion sensor and a logic gate to trip a lamp automatically",
-  "card_art": "logic_gate",
+  "card_art": [
+    { "block": "iron_block", "at": [0, 0, 0] },
+    { "block": "iron_block", "at": [1, 0, 0] },
+    { "block": "iron_block", "at": [2, 0, 0] },
+    { "block": "motion_sensor", "at": [0, 1, 0] },
+    { "block": "logic_gate", "at": [1, 1, 0] },
+    { "block": "lamp", "at": [2, 1, 0] }
+  ],
   "kit": [
     {
       "name": "motion_sensor",

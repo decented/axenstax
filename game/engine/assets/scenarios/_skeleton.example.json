@@ -1,7 +1,11 @@
 {
   "kind": "Challenge",
   "display_name": "Skeleton Trial — replace this whole string with your trial's one-line premise",
-  "card_art": "stone",
+  "card_art": [
+    { "block": "stone", "at": [0, 0, 0] },
+    { "block": "stone", "at": [1, 0, 0] },
+    { "block": "lamp", "at": [0, 1, 0] }
+  ],
   "kit": [
     {
       "name": "stone",

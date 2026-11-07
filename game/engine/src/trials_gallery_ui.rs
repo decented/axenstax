@@ -11,6 +11,7 @@
 use crate::brand;
 use crate::menu::MenuAction;
 use crate::trials::{TrialBests, TrialType};
+use crate::trials_diorama_ui::{paint_backdrop, paint_diorama};
 use crate::trials_gallery::{build_rows, BuiltRow, Card, CardArt};
 
 // ---------------------------------------------------------------------------
@@ -51,13 +52,14 @@ impl GalleryState {
     }
 
     /// Open the gallery straight onto one trial's hero view (the screenshot
-    /// path). `key` is `"race:<id>"` or `"ch:<token>"`. Unknown keys leave the
-    /// gallery open on its shelves.
+    /// path). `key` is `"race:<id>"` or `"ch:<token>"` (a bare token means the
+    /// challenge). Unknown keys leave the gallery open on its shelves.
     pub fn open_hero(&mut self, key: &str) {
         self.open();
+        let key = &if key.contains(':') { key.to_string() } else { format!("ch:{key}") };
         let found = self.built.as_ref().and_then(|rows| {
             rows.iter().enumerate().find_map(|(r, row)| {
-                row.cards.iter().position(|c| c.key == key).map(|c| (r, c))
+                row.cards.iter().position(|c| c.key == *key).map(|c| (r, c))
             })
         });
         if let Some(pos) = found {
@@ -106,41 +108,40 @@ fn with_alpha(c: egui::Color32, a: u8) -> egui::Color32 {
     egui::Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), a)
 }
 
-/// Paint a card's picture into `rect`: a shelf-tinted glow, then the item large.
-/// This is the one place the picture is made, so real arena art can replace it
-/// here later without touching the layout.
+/// The art backdrop's two colours: light at the top, deeper at the bottom, both
+/// the shelf's colour over the surface.
+fn backdrop_colours(shelf: egui::Color32) -> (egui::Color32, egui::Color32) {
+    (
+        mix(mix(brand::SURFACE, shelf, 0.48), egui::Color32::WHITE, 0.07),
+        mix(brand::SURFACE, shelf, 0.17),
+    )
+}
+
+/// Paint a card's picture into `rect`: a shelf-coloured gradient (rounded by
+/// `radii`, nw/ne/se/sw), then the picture: an isometric block diorama, a flat
+/// swatch, or the shelf glyph. This is the one place the picture is made, so
+/// real arena art can replace it here later without touching the layout.
 fn paint_art(
     painter: &egui::Painter,
     rect: egui::Rect,
+    radii: [f32; 4],
     art: &CardArt,
     shelf: egui::Color32,
     glyph: &str,
     icons: &[egui::TextureId],
-    icon_px: f32,
 ) {
+    let (top, bottom) = backdrop_colours(shelf);
+    paint_backdrop(painter, rect, radii, top, bottom);
     let centre = rect.center();
-    painter.circle_filled(centre, rect.height() * 0.46, with_alpha(shelf, 30));
-    painter.circle_filled(centre, rect.height() * 0.32, with_alpha(shelf, 36));
-    let texture = match art {
-        CardArt::Block { layer } => icons.get(*layer as usize).copied(),
-        _ => None,
-    };
-    match (art, texture) {
-        (CardArt::Block { .. }, Some(tex)) => {
-            let r = egui::Rect::from_center_size(centre, egui::Vec2::splat(icon_px));
-            painter.rect_filled(
-                r.translate(egui::vec2(0.0, 4.0)).expand(1.0),
-                egui::CornerRadius::same(6),
-                egui::Color32::from_black_alpha(70),
-            );
-            painter.image(
-                tex,
-                r,
-                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                egui::Color32::WHITE,
-            );
+    let icon_px = rect.height() * 0.62;
+    // A soft glow behind the picture lifts dark textures off the backdrop.
+    painter.circle_filled(centre, rect.height() * 0.46, with_alpha(egui::Color32::WHITE, 9));
+    painter.circle_filled(centre, rect.height() * 0.32, with_alpha(egui::Color32::WHITE, 10));
+    match art {
+        CardArt::Diorama(cubes) => {
+            paint_diorama(painter, rect, cubes, icons, DIORAMA_MAX_SCALE);
         }
-        (CardArt::Swatch { rgb: c }, _) => {
+        CardArt::Swatch { rgb: c } => {
             let base = rgb(*c);
             let r = egui::Rect::from_center_size(centre, egui::Vec2::splat(icon_px * 0.82));
             let cr = egui::CornerRadius::same(10);
@@ -159,7 +160,7 @@ fn paint_art(
                 egui::StrokeKind::Inside,
             );
         }
-        _ => {
+        CardArt::Shelf => {
             painter.text(
                 centre,
                 egui::Align2::CENTER_CENTER,
@@ -170,6 +171,9 @@ fn paint_art(
         }
     }
 }
+
+/// A lone block is drawn no taller than this fraction of the art's height.
+const DIORAMA_MAX_SCALE: f32 = 0.36;
 
 /// A small "done" mark in a card's corner (postcards come later).
 fn paint_done_mark(painter: &egui::Painter, centre: egui::Pos2) {
@@ -207,12 +211,7 @@ fn paint_card(
     );
     painter.rect_filled(r, cr, brand::SURFACE);
     let art_rect = egui::Rect::from_min_size(r.min, egui::vec2(r.width(), r.height() * ART_H / CARD_H));
-    painter.rect_filled(
-        art_rect,
-        egui::CornerRadius { nw: 12, ne: 12, sw: 0, se: 0 },
-        mix(brand::SURFACE, shelf, 0.20),
-    );
-    paint_art(painter, art_rect, &card.art, shelf, card.row.glyph(), icons, art_rect.height() * 0.62);
+    paint_art(painter, art_rect, [12.0, 12.0, 0.0, 0.0], &card.art, shelf, card.row.glyph(), icons);
     // The shelf-colour band between picture and title.
     painter.rect_filled(
         egui::Rect::from_min_size(egui::pos2(r.min.x, art_rect.max.y), egui::vec2(r.width(), 3.0)),
@@ -326,12 +325,11 @@ fn draw_hero(ui: &mut egui::Ui, card: &Card, icons: &[egui::TextureId], fresh: b
             ui.vertical(|ui| {
                 ui.set_width(w);
                 // The art at full width.
-                let h = (w * 0.42).clamp(150.0, 260.0);
+                let h = (w * 0.5).clamp(160.0, 320.0);
                 let (art_rect, _) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::hover());
                 let p = ui.painter();
                 let cr = egui::CornerRadius::same(16);
-                p.rect_filled(art_rect, cr, mix(brand::SURFACE, shelf, 0.22));
-                paint_art(p, art_rect, &card.art, shelf, card.row.glyph(), icons, h * 0.62);
+                paint_art(p, art_rect, [16.0; 4], &card.art, shelf, card.row.glyph(), icons);
                 p.rect_stroke(art_rect, cr, egui::Stroke::new(3.0_f32, shelf), egui::StrokeKind::Inside);
                 if card.done {
                     paint_done_mark(p, egui::pos2(art_rect.max.x - 24.0, art_rect.min.y + 24.0));

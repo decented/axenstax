@@ -1,7 +1,16 @@
 {
   "kind": "Challenge",
   "display_name": "A Friend in Need — Win over a cat, parrot or fox with its favourite food until it becomes your companion.",
-  "card_art": "salt_lick",
+  "card_art": [
+    { "block": "grass", "at": [0, 0, 0] },
+    { "block": "grass", "at": [1, 0, 0] },
+    { "block": "grass", "at": [0, 0, 1] },
+    { "block": "grass", "at": [1, 0, 1] },
+    { "block": "tall_grass", "at": [0, 1, 0] },
+    { "block": "salt_lick", "at": [1, 1, 1] },
+    { "block": "fence_post", "at": [1, 1, 0] },
+    { "block": "fence_post", "at": [0, 1, 1] }
+  ],
   "kit": [
     {
       "name": "raw_fish",

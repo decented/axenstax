@@ -1,7 +1,16 @@
 {
   "kind": "Challenge",
   "display_name": "Catch the Wind — raise a windmill above the storm-blown hilltop and light a lamp with it",
-  "card_art": "windmill",
+  "card_art": [
+    { "block": "dirt", "at": [0, 0, 0] },
+    { "block": "dirt", "at": [1, 0, 0] },
+    { "block": "dirt", "at": [0, 0, 1] },
+    { "block": "dirt", "at": [1, 0, 1] },
+    { "block": "grass", "at": [0, 1, 0] },
+    { "block": "grass", "at": [1, 1, 0] },
+    { "block": "windmill", "at": [0, 2, 0] },
+    { "block": "lamp", "at": [1, 2, 0] }
+  ],
   "kit": [
     {
       "name": "windmill",

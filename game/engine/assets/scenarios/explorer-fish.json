@@ -1,7 +1,15 @@
 {
   "kind": "Challenge",
   "display_name": "Master Angler \u2014 Cast off a little stone dock and reel in a catch from the pond.",
-  "card_art": "sandstone",
+  "card_art": [
+    { "block": "water", "at": [1, 0, 0] },
+    { "block": "water", "at": [2, 0, 0] },
+    { "block": "water", "at": [2, 0, 1] },
+    { "block": "sandstone", "at": [0, 0, 0] },
+    { "block": "sandstone", "at": [0, 0, 1] },
+    { "block": "sandstone", "at": [1, 0, 1] },
+    { "block": "fence_post", "at": [1, 1, 1] }
+  ],
   "kit": [
     {
       "name": "fishing_rod",

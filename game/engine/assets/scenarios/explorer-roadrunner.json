@@ -1,7 +1,15 @@
 {
   "kind": "Challenge",
   "display_name": "Roadrunner \u2014 saddle up a Nostrich and take her for a ride",
-  "card_art": "sand",
+  "card_art": [
+    { "block": "sand", "at": [0, 0, 0] },
+    { "block": "sand", "at": [1, 0, 0] },
+    { "block": "sand", "at": [2, 0, 0] },
+    { "block": "sand", "at": [3, 0, 0] },
+    { "block": "hay_bale", "at": [1, 1, 0] },
+    { "block": "tall_grass", "at": [2, 1, 0] },
+    { "block": "fence_post", "at": [3, 1, 0] }
+  ],
   "objective": {
     "Action": {
       "event": "RideEntity",

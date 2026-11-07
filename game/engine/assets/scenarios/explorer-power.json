@@ -1,7 +1,16 @@
 {
   "kind": "Challenge",
   "display_name": "Light the Lab \u2014 wire a lever through cable to switch on a dark room's lamp",
-  "card_art": "lever",
+  "card_art": [
+    { "block": "stone", "at": [0, 0, 0] },
+    { "block": "stone", "at": [1, 0, 0] },
+    { "block": "stone", "at": [2, 0, 0] },
+    { "block": "cobblestone", "at": [1, 0, 1] },
+    { "block": "cobblestone", "at": [2, 0, 1] },
+    { "block": "lever", "at": [0, 1, 0] },
+    { "block": "cable", "at": [1, 1, 0] },
+    { "block": "lamp", "at": [2, 1, 0] }
+  ],
   "kit": [
     {
       "name": "cable",

@@ -1,7 +1,14 @@
 {
   "kind": "Challenge",
   "display_name": "Power Plant \u2014 make your own electricity, no switch required",
-  "card_art": "steam_generator",
+  "card_art": [
+    { "block": "stone", "at": [0, 0, 0] },
+    { "block": "stone", "at": [1, 0, 0] },
+    { "block": "stone", "at": [2, 0, 0] },
+    { "block": "steam_generator", "at": [0, 1, 0] },
+    { "block": "furnace", "at": [1, 1, 0] },
+    { "block": "lamp", "at": [2, 1, 0] }
+  ],
   "kit": [
     {
       "name": "hand_crank",

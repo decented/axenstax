@@ -1,7 +1,16 @@
 {
   "kind": "Challenge",
   "display_name": "Bring the Wall Down \u2014 a raider hides behind a stone wall \u2014 blow it open and finish the job",
-  "card_art": "blasting_keg",
+  "card_art": [
+    { "block": "stone", "at": [0, 0, 0] },
+    { "block": "stone", "at": [1, 0, 0] },
+    { "block": "stone", "at": [2, 0, 0] },
+    { "block": "stone", "at": [0, 1, 0] },
+    { "block": "stone", "at": [1, 1, 0] },
+    { "block": "stone", "at": [2, 1, 0] },
+    { "block": "blasting_keg", "at": [1, 0, 1] },
+    { "block": "blasting_keg", "at": [2, 0, 1] }
+  ],
   "kit": [
     {
       "name": "blasting_keg",

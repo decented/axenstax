@@ -1,7 +1,16 @@
 {
   "kind": "Challenge",
   "display_name": "Saddle Up \u2014 Climb aboard a horse and feel the world move under you.",
-  "card_art": "oak_fence_gate",
+  "card_art": [
+    { "block": "grass", "at": [0, 0, 0] },
+    { "block": "grass", "at": [1, 0, 0] },
+    { "block": "grass", "at": [2, 0, 0] },
+    { "block": "grass", "at": [0, 0, 1] },
+    { "block": "fence_post", "at": [1, 1, 0] },
+    { "block": "fence_post", "at": [2, 1, 0] },
+    { "block": "hay_bale", "at": [0, 1, 0] },
+    { "block": "oak_fence_gate", "at": [0, 1, 1] }
+  ],
   "objective": {
     "Action": {
       "event": "RideEntity",

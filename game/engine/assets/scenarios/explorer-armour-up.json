@@ -1,7 +1,14 @@
 {
   "kind": "Challenge",
   "display_name": "Suit Up \u2014 forge four pieces of iron gear, then test them on the raiders",
-  "card_art": "iron_block",
+  "card_art": [
+    { "block": "stone", "at": [0, 0, 0] },
+    { "block": "stone", "at": [1, 0, 0] },
+    { "block": "stone", "at": [0, 0, 1] },
+    { "block": "iron_block", "at": [0, 1, 0] },
+    { "block": "iron_block", "at": [0, 2, 0] },
+    { "block": "furnace", "at": [1, 1, 0] }
+  ],
   "kit": [
     {
       "name": "furnace",

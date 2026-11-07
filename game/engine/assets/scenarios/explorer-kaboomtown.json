@@ -1,7 +1,15 @@
 {
   "kind": "Challenge",
   "display_name": "Kaboomtown \u2014 blow the whole tower sky-high",
-  "card_art": "plunger_detonator",
+  "card_art": [
+    { "block": "cobblestone", "at": [0, 0, 0] },
+    { "block": "cobblestone", "at": [0, 1, 0] },
+    { "block": "cobblestone", "at": [0, 2, 0] },
+    { "block": "cobblestone", "at": [0, 3, 0] },
+    { "block": "blasting_keg", "at": [1, 0, 0] },
+    { "block": "blasting_keg", "at": [0, 0, 1] },
+    { "block": "plunger_detonator", "at": [1, 0, 1] }
+  ],
   "kit": [
     {
       "name": "blasting_keg",

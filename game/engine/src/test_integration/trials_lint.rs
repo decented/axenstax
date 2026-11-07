@@ -17,6 +17,7 @@ use crate::block::{self, BlockId};
 use crate::breeding::{offspring_kind, pair_allowed};
 use crate::commands::builtins::give::resolve_item;
 use crate::mob::MobType;
+use crate::trials_diorama::{CardArtDef, DioramaBlock};
 use crate::scenario::{
     ArenaSetup, ChallengeEvent, Objective, ScenarioDef, ScenarioKind, ScenarioTuning, Scoring,
     trial_task_labels,
@@ -998,25 +999,65 @@ fn check_weather_lock_values_accepts_every_advertised_lock() {
 // Check 8 — a trial's gallery `card_art` must name a real item
 // ─────────────────────────────────────────────────────────────────────────
 
-/// `ScenarioDef.card_art` is the key picture on a trial's card in the lobby's
-/// Trials gallery: a `/give`-style item or block name. At runtime an unresolved
-/// name quietly falls back to the shelf icon, so a typo would ship as a bland
-/// card with nothing to say why. Every bundled value must resolve through the
-/// same resolver `/give` and kits use; and, because the gallery is the front
+/// `ScenarioDef.card_art` is the picture on a trial's card in the lobby's
+/// Trials gallery: one `/give`-style item or block name, or a diorama of up to
+/// 8 blocks. At runtime an unresolved name quietly falls back to the shelf icon
+/// (and an unknown block is skipped), so a typo would ship as a bland card with
+/// nothing to say why. Every bundled value must resolve through the same
+/// resolver `/give` and kits use, every diorama block must be a real BLOCK on a
+/// small grid with no two in one cell, and, because the gallery is the front
 /// door, every bundled trial must name one.
 fn check_card_art(defs: &[(&str, ScenarioDef)]) -> Result<(), String> {
+    use crate::trials_diorama::{MAX_COORD, MAX_DIORAMA_BLOCKS};
     for (token, def) in defs {
-        let Some(name) = def.card_art.as_deref() else {
+        let Some(art) = def.card_art.as_ref() else {
             return Err(format!(
                 "{token}: no `card_art` — set it to the trial's key item or block (a /give-style \
-                 name such as \"furnace\" or \"bone\") so its gallery card has a picture"
+                 name such as \"furnace\" or \"bone\") or to a diorama list so its gallery card \
+                 has a picture"
             ));
         };
-        if crate::commands::builtins::give::resolve_item(name, 1).is_err() {
-            return Err(format!(
-                "{token}: card_art {name:?} does not resolve to an item — use a name /give accepts \
-                 (see docs/authoring/trials.md §4)"
-            ));
+        match art {
+            CardArtDef::Name(name) => {
+                if crate::commands::builtins::give::resolve_item(name, 1).is_err() {
+                    return Err(format!(
+                        "{token}: card_art {name:?} does not resolve to an item — use a name /give \
+                         accepts (see docs/authoring/trials.md §4)"
+                    ));
+                }
+            }
+            CardArtDef::Diorama(blocks) => {
+                if blocks.is_empty() || blocks.len() > MAX_DIORAMA_BLOCKS {
+                    return Err(format!(
+                        "{token}: a card_art diorama needs 1 to {MAX_DIORAMA_BLOCKS} blocks, has {}",
+                        blocks.len()
+                    ));
+                }
+                let mut seen = std::collections::HashSet::new();
+                for b in blocks {
+                    let is_block = crate::commands::builtins::give::resolve_item(&b.block, 1)
+                        .is_ok_and(|s| matches!(s.item, crate::item::Item::Block(_)));
+                    if !is_block {
+                        return Err(format!(
+                            "{token}: diorama block {:?} is not a block name /give accepts (items \
+                             such as bone cannot be drawn; use a block, see docs/authoring/trials.md §4)",
+                            b.block
+                        ));
+                    }
+                    if b.at.iter().any(|c| c.abs() > MAX_COORD) {
+                        return Err(format!(
+                            "{token}: diorama block {:?} at {:?} is outside -{MAX_COORD}..={MAX_COORD}",
+                            b.block, b.at
+                        ));
+                    }
+                    if !seen.insert(b.at) {
+                        return Err(format!(
+                            "{token}: two diorama blocks share the cell {:?}",
+                            b.at
+                        ));
+                    }
+                }
+            }
         }
     }
     Ok(())
@@ -1030,11 +1071,41 @@ fn every_bundled_trial_has_card_art_that_resolves() {
 #[test]
 fn check_card_art_bites_on_a_typo_and_on_a_missing_value() {
     let mut def = fixture_def(Objective::Action { event: ChallengeEvent::CraftItem, count: 1 });
-    def.card_art = Some("furnaec".to_string());
+    def.card_art = Some(CardArtDef::Name("furnaec".to_string()));
     let err = check_card_art(&[("bad-trial", def.clone())])
         .expect_err("an unresolvable card_art must be rejected");
     assert!(err.contains("bad-trial") && err.contains("furnaec"), "{err}");
     def.card_art = None;
     let err = check_card_art(&[("bare-trial", def)]).expect_err("a missing card_art must be rejected");
     assert!(err.contains("bare-trial"), "{err}");
+}
+
+#[test]
+fn check_card_art_bites_on_a_bad_diorama() {
+    let diorama = |blocks: Vec<(&str, [i32; 3])>| {
+        let mut def = fixture_def(Objective::Action { event: ChallengeEvent::CraftItem, count: 1 });
+        def.card_art = Some(CardArtDef::Diorama(
+            blocks
+                .into_iter()
+                .map(|(b, at)| DioramaBlock { block: b.to_string(), at })
+                .collect(),
+        ));
+        def
+    };
+    check_card_art(&[("ok", diorama(vec![("furnace", [0, 1, 0]), ("stone", [0, 0, 0])]))])
+        .expect("a good diorama passes");
+    let err = check_card_art(&[("t1", diorama(vec![("furnaec", [0, 0, 0])]))]).expect_err("typo");
+    assert!(err.contains("t1") && err.contains("furnaec"), "{err}");
+    let err = check_card_art(&[("t2", diorama(vec![("bone", [0, 0, 0])]))]).expect_err("an item, not a block");
+    assert!(err.contains("t2") && err.contains("bone"), "{err}");
+    let err = check_card_art(&[("t3", diorama(vec![]))]).expect_err("empty");
+    assert!(err.contains("t3"), "{err}");
+    let nine: Vec<(&str, [i32; 3])> = (0..9).map(|i| ("stone", [i, 0, 0])).collect();
+    let err = check_card_art(&[("t4", diorama(nine))]).expect_err("too many");
+    assert!(err.contains("t4"), "{err}");
+    let err = check_card_art(&[("t5", diorama(vec![("stone", [0, 0, 0]), ("dirt", [0, 0, 0])]))])
+        .expect_err("same cell");
+    assert!(err.contains("t5"), "{err}");
+    let err = check_card_art(&[("t6", diorama(vec![("stone", [99, 0, 0])]))]).expect_err("far away");
+    assert!(err.contains("t6"), "{err}");
 }

@@ -1,7 +1,15 @@
 {
   "kind": "Challenge",
   "display_name": "First Workbench \u2014 fell a tree, build a bench, and make your first tools",
-  "card_art": "crafting_table",
+  "card_art": [
+    { "block": "grass", "at": [0, 0, 0] },
+    { "block": "grass", "at": [1, 0, 0] },
+    { "block": "grass", "at": [0, 0, 1] },
+    { "block": "grass", "at": [1, 0, 1] },
+    { "block": "oak_log", "at": [0, 1, 0] },
+    { "block": "oak_planks", "at": [1, 1, 0] },
+    { "block": "crafting_table", "at": [1, 1, 1] }
+  ],
   "kit": [],
   "objective": {
     "Sequence": {

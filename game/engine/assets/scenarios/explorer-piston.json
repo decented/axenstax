@@ -1,7 +1,16 @@
 {
   "kind": "Challenge",
   "display_name": "Hidden Door \u2014 build a secret piston door that slides open at the flip of a lever",
-  "card_art": "piston",
+  "card_art": [
+    { "block": "stone", "at": [0, 0, 0] },
+    { "block": "stone", "at": [0, 1, 0] },
+    { "block": "stone", "at": [2, 0, 0] },
+    { "block": "stone", "at": [2, 1, 0] },
+    { "block": "stone", "at": [1, 2, 0] },
+    { "block": "piston", "at": [1, 0, 0] },
+    { "block": "piston", "at": [1, 1, 0] },
+    { "block": "lever", "at": [2, 0, 1] }
+  ],
   "kit": [
     {
       "name": "sticky_piston",

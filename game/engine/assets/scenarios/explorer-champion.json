@@ -1,7 +1,15 @@
 {
   "kind": "Challenge",
   "display_name": "The Champion \u2014 stand alone against the valley's fiercest raider",
-  "card_art": "diamond_block",
+  "card_art": [
+    { "block": "stone", "at": [0, 0, 0] },
+    { "block": "stone", "at": [1, 0, 0] },
+    { "block": "stone", "at": [0, 0, 1] },
+    { "block": "stone", "at": [1, 0, 1] },
+    { "block": "diamond_block", "at": [1, 1, 1] },
+    { "block": "lamp", "at": [1, 1, 0] },
+    { "block": "lamp", "at": [0, 1, 1] }
+  ],
   "kit": [
     {
       "name": "iron_sword",

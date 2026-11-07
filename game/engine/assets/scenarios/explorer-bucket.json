@@ -1,7 +1,15 @@
 {
   "kind": "Challenge",
   "display_name": "The Plumber \u2014 carry a pond across the room and fill a dry trough",
-  "card_art": "water",
+  "card_art": [
+    { "block": "stone", "at": [0, 0, 0] },
+    { "block": "stone", "at": [1, 0, 0] },
+    { "block": "stone", "at": [2, 0, 0] },
+    { "block": "stone", "at": [2, 0, 1] },
+    { "block": "water", "at": [0, 1, 0] },
+    { "block": "oak_planks", "at": [2, 1, 0] },
+    { "block": "oak_planks", "at": [2, 1, 1] }
+  ],
   "kit": [
     {
       "name": "bucket",

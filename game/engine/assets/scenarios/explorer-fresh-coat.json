@@ -1,7 +1,15 @@
 {
   "kind": "Challenge",
   "display_name": "Fresh Coat — paint your own skin in the Workshop and wear it out",
-  "card_art": "mirror",
+  "card_art": [
+    { "block": "oak_planks", "at": [0, 0, 0] },
+    { "block": "oak_planks", "at": [1, 0, 0] },
+    { "block": "oak_planks", "at": [0, 0, 1] },
+    { "block": "oak_planks", "at": [1, 0, 1] },
+    { "block": "mirror", "at": [0, 1, 0] },
+    { "block": "mirror", "at": [1, 1, 0] },
+    { "block": "item_frame", "at": [1, 1, 1] }
+  ],
   "kit": [
     {
       "name": "bellows",

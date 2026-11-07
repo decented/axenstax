@@ -1,7 +1,16 @@
 {
   "kind": "Challenge",
   "display_name": "The Forge \u2014 light a furnace and smelt raw iron into a shining ingot",
-  "card_art": "furnace",
+  "card_art": [
+    { "block": "stone", "at": [0, 0, 0] },
+    { "block": "stone", "at": [1, 0, 0] },
+    { "block": "stone", "at": [0, 0, 1] },
+    { "block": "stone", "at": [1, 0, 1] },
+    { "block": "coal_ore", "at": [0, 1, 0] },
+    { "block": "iron_block", "at": [1, 1, 0] },
+    { "block": "furnace", "at": [0, 1, 1] },
+    { "block": "iron_block", "at": [1, 2, 0] }
+  ],
   "kit": [
     {
       "name": "furnace",

@@ -1,7 +1,16 @@
 {
   "kind": "Challenge",
   "display_name": "Funny Farm \u2014 round up the silliest little zoo",
-  "card_art": "composter",
+  "card_art": [
+    { "block": "grass", "at": [0, 0, 0] },
+    { "block": "grass", "at": [1, 0, 0] },
+    { "block": "grass", "at": [0, 0, 1] },
+    { "block": "grass", "at": [1, 0, 1] },
+    { "block": "composter", "at": [0, 1, 0] },
+    { "block": "hay_bale", "at": [1, 1, 0] },
+    { "block": "hay_bale", "at": [1, 2, 0] },
+    { "block": "fence_post", "at": [1, 1, 1] }
+  ],
   "kit": [
     {
       "name": "bone",

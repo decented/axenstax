@@ -1,7 +1,16 @@
 {
   "kind": "Challenge",
   "display_name": "Market Day \u2014 swap your spare stone for a fresh-baked loaf",
-  "card_art": "vendor_block",
+  "card_art": [
+    { "block": "oak_planks", "at": [0, 0, 0] },
+    { "block": "oak_planks", "at": [1, 0, 0] },
+    { "block": "oak_planks", "at": [2, 0, 0] },
+    { "block": "vendor_block", "at": [1, 1, 0] },
+    { "block": "hay_bale", "at": [0, 1, 0] },
+    { "block": "chest", "at": [2, 1, 0] },
+    { "block": "fence_post", "at": [0, 0, 1] },
+    { "block": "fence_post", "at": [2, 0, 1] }
+  ],
   "kit": [
     {
       "name": "stone",

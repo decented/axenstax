@@ -1,7 +1,16 @@
 {
   "kind": "Challenge",
   "display_name": "Skybox Studio \u2014 raise a little house with walls, a door, and a window",
-  "card_art": "oak_door",
+  "card_art": [
+    { "block": "grass", "at": [0, 0, 0] },
+    { "block": "grass", "at": [1, 0, 0] },
+    { "block": "grass", "at": [0, 0, 1] },
+    { "block": "grass", "at": [1, 0, 1] },
+    { "block": "oak_planks", "at": [0, 1, 0] },
+    { "block": "oak_planks", "at": [1, 1, 0] },
+    { "block": "glass", "at": [0, 1, 1] },
+    { "block": "oak_door", "at": [1, 1, 1] }
+  ],
   "kit": [
     {
       "name": "oak_planks",

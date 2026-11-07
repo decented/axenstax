@@ -1,7 +1,14 @@
 {
   "kind": "Challenge",
   "display_name": "Mill Race — set a water wheel turning in the falls and light a lamp with it",
-  "card_art": "water_wheel",
+  "card_art": [
+    { "block": "stone", "at": [0, 0, 0] },
+    { "block": "stone", "at": [0, 0, 1] },
+    { "block": "water", "at": [1, 0, 0] },
+    { "block": "water", "at": [1, 0, 1] },
+    { "block": "water_wheel", "at": [1, 1, 0] },
+    { "block": "lamp", "at": [0, 1, 0] }
+  ],
   "kit": [
     {
       "name": "water_wheel",

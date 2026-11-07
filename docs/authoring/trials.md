@@ -36,13 +36,30 @@ returns a parse error. Fields with a default are optional.
   // "Quarry Run — break twenty blocks and feel a mine take shape".
   "display_name": "Title — one-line premise",
 
-  // REQUIRED BY LINT for every bundled trial (default: null). The key picture
-  // on the trial's card in the lobby's Trials gallery: a `/give`-style item or
-  // block name, e.g. "furnace" or "bone". Blocks draw with their own texture;
-  // other items draw as a colour swatch. Pick the obvious key item or creature
-  // item. Presentation only — it changes nothing about play. `trials_lint`
-  // fails if it does not resolve to a real item (see §4 for valid names).
-  "card_art": "furnace",
+  // REQUIRED BY LINT for every bundled trial (default: null). The picture on
+  // the trial's card in the lobby's Trials gallery. Two forms:
+  //   (a) one `/give`-style name, e.g. "furnace": a block is drawn as a lone
+  //       isometric cube, any other item (e.g. "bone") as a colour swatch;
+  //   (b) a DIORAMA: a list of up to 8 blocks on a small integer grid, drawn as
+  //       a little isometric scene (the form every bundled trial uses):
+  //         [ { "block": "stone",   "at": [0, 0, 0] },
+  //           { "block": "furnace", "at": [0, 1, 0] } ]
+  //       `at` is [x, y, z]: x runs to the lower right, z to the lower left,
+  //       y is up (y 0 is the floor). Keep each coordinate in -6..=6, one block
+  //       per cell, and stack on something (nothing is drawn for gravity).
+  //       Every `block` must be a real BLOCK name (see §4), not an item. Mobs
+  //       cannot be drawn: suggest them with their blocks (hay, bones, fence).
+  //       Non-solid blocks (crops, torches, doors) draw as upright sprites,
+  //       rails/plates/cable as flat tiles, water/lava as bright liquid cubes.
+  //       Aim for 3-8 blocks that tell the trial at a glance.
+  // Presentation only — it changes nothing about play. `trials_lint` fails if
+  // a name does not resolve, a diorama block is not a block, there are more
+  // than 8, two share a cell, or one is off the grid.
+  "card_art": [
+    { "block": "stone", "at": [0, 0, 0] },
+    { "block": "furnace", "at": [0, 1, 0] },
+    { "block": "iron_block", "at": [1, 0, 0] }
+  ],
 
   // GOTCHA: this exact string is ALSO the reverse-lookup key. The running
   // scenario only carries its display_name at runtime (not your JSON's
@@ -335,8 +352,8 @@ touches these files. Do them in this order.
 
 ### (1) The JSON file — REQUIRED
 **File:** `game/engine/assets/scenarios/explorer-<token>.json`
-Author the full `ScenarioDef` per §1. Set `card_art` (the gallery card's key
-item or block). **Failure mode if skipped/wrong:** the
+Author the full `ScenarioDef` per §1. Set `card_art` (the gallery card's diorama:
+3-8 blocks that tell the trial at a glance). **Failure mode if skipped/wrong:** the
 file doesn't exist → step (2)'s `include_bytes!` is a **compile error**
 (missing file). If the JSON is malformed or missing a required field, every
 test that parses bundled defs panics with a clear serde error naming the file.

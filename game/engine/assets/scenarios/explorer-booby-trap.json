@@ -1,7 +1,15 @@
 {
   "kind": "Challenge",
   "display_name": "Booby Trap \u2014 rig a pressure plate to a blasting keg so a trespasser sets off the boom",
-  "card_art": "pressure_plate",
+  "card_art": [
+    { "block": "stone", "at": [0, 0, 0] },
+    { "block": "stone", "at": [1, 0, 0] },
+    { "block": "stone", "at": [2, 0, 0] },
+    { "block": "stone", "at": [2, 0, 1] },
+    { "block": "pressure_plate", "at": [1, 1, 0] },
+    { "block": "blasting_keg", "at": [2, 1, 0] },
+    { "block": "blasting_keg", "at": [2, 1, 1] }
+  ],
   "kit": [
     {
       "name": "blasting_keg",

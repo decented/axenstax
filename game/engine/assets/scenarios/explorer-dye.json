@@ -1,7 +1,16 @@
 {
   "kind": "Challenge",
   "display_name": "Colour Lab \u2014 mix dyes and paint the world bright",
-  "card_art": "amethyst_block",
+  "card_art": [
+    { "block": "stone", "at": [0, 0, 0] },
+    { "block": "stone", "at": [1, 0, 0] },
+    { "block": "stone", "at": [0, 0, 1] },
+    { "block": "stone", "at": [1, 0, 1] },
+    { "block": "lamp", "at": [0, 1, 0] },
+    { "block": "amethyst_block", "at": [0, 1, 1] },
+    { "block": "amethyst_block", "at": [1, 1, 1] },
+    { "block": "glass", "at": [1, 1, 0] }
+  ],
   "kit": [
     {
       "name": "red_dye",

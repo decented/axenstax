@@ -1,7 +1,16 @@
 {
   "kind": "Challenge",
   "display_name": "Camp Cook \u2014 roast three meals over a crackling campfire",
-  "card_art": "campfire_lit",
+  "card_art": [
+    { "block": "stone", "at": [0, 0, 0] },
+    { "block": "stone", "at": [1, 0, 0] },
+    { "block": "stone", "at": [0, 0, 1] },
+    { "block": "stone", "at": [1, 0, 1] },
+    { "block": "drying_rack", "at": [0, 1, 0] },
+    { "block": "oak_log", "at": [1, 1, 0] },
+    { "block": "oak_log", "at": [0, 1, 1] },
+    { "block": "campfire_lit", "at": [1, 1, 1] }
+  ],
   "kit": [
     {
       "name": "campfire",

@@ -1,7 +1,15 @@
 {
   "kind": "Challenge",
   "display_name": "Scavenger — three minutes to grab as many DIFFERENT things as you can",
-  "card_art": "chest",
+  "card_art": [
+    { "block": "stone", "at": [0, 0, 0] },
+    { "block": "stone", "at": [1, 0, 0] },
+    { "block": "stone", "at": [2, 0, 0] },
+    { "block": "chest", "at": [0, 1, 0] },
+    { "block": "furnace", "at": [1, 1, 0] },
+    { "block": "hay_bale", "at": [2, 1, 0] },
+    { "block": "diamond_ore", "at": [1, 0, 1] }
+  ],
   "objective": {
     "Timed": {
       "ticks": 3600
