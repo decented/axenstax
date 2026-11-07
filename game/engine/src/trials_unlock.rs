@@ -16,6 +16,11 @@
 //! Pure: the public functions read the bundled catalogue (built once); the
 //! `*_in` forms take any catalogue so tests can use fixtures.
 
+// The read side of this API (`is_unlocked`, `next_hints`, `is_new`,
+// `newly_unlocked`, `route_names`) is for the gallery UI, wired in the next
+// slice; until then only the tests call it.
+#![cfg_attr(not(test), allow(dead_code))]
+
 use std::sync::LazyLock;
 
 use serde::{Deserialize, Serialize};
@@ -61,7 +66,7 @@ static CATALOGUE: LazyLock<Vec<TrialEntry>> = LazyLock::new(|| {
                 crate::scenario::Objective::AnyOf { routes } => routes.iter().map(|r| r.name.clone()).collect(),
                 _ => Vec::new(),
             };
-            Some(TrialEntry { token, display_name: def.display_name, shelf: *shelf, unlock: def.unlock, routes })
+            Some(TrialEntry { token, display_name: def.display_name, shelf: *shelf, unlock: def.unlock.map(|u| *u), routes })
         })
         .collect()
 });

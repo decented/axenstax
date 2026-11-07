@@ -478,9 +478,10 @@ pub struct ScenarioDef {
     /// Trials in Two Acts §A.5 — unlock by doing: when this trial appears in
     /// the gallery (`on` any of these events, or `after` all of these trials),
     /// with a one-line hint while it is hidden. `None` = always visible (the
-    /// front shelf). See `trials_unlock`.
+    /// front shelf). See `trials_unlock`. Boxed: it is rare and keeps
+    /// `ScenarioDef` (carried by value in `CommandResult`) small.
     #[serde(default)]
-    pub unlock: Option<crate::trials_unlock::TrialUnlock>,
+    pub unlock: Option<Box<crate::trials_unlock::TrialUnlock>>,
 }
 
 /// Scaffolding for a Challenge's fresh arena — see [`ScenarioDef::arena`].

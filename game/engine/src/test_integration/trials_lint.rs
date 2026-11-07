@@ -362,11 +362,11 @@ fn check_banlist_bites_on_a_banned_word_in_display_name() {
 #[test]
 fn check_banlist_bites_on_a_banned_word_in_an_unlock_hint_or_route_name() {
     let mut def = fixture_def(Objective::Action { event: ChallengeEvent::CraftItem { item: None }, count: 1 });
-    def.unlock = Some(crate::trials_unlock::TrialUnlock {
+    def.unlock = Some(Box::new(crate::trials_unlock::TrialUnlock {
         on: vec![],
         after: vec!["mine".into()],
         hint: "Something about earning\u{2026}".into(),
-    });
+    }));
     let err = check_banlist_covers_all_text_surfaces(&[("bad-hint", def)]).expect_err("a money word in a hint");
     assert!(err.contains("\"earning\""), "{err}");
     let def = fixture_def(Objective::AnyOf {
@@ -1290,11 +1290,11 @@ fn every_unlock_is_reachable_from_the_front_shelf() {
 
 fn unlocked_after(after: &[&str]) -> ScenarioDef {
     let mut def = fixture_def(Objective::Action { event: ChallengeEvent::KillMob, count: 1 });
-    def.unlock = Some(crate::trials_unlock::TrialUnlock {
+    def.unlock = Some(Box::new(crate::trials_unlock::TrialUnlock {
         on: vec![],
         after: after.iter().map(|s| s.to_string()).collect(),
         hint: "Something about raiders\u{2026}".into(),
-    });
+    }));
     def
 }
 
