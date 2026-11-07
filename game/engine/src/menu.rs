@@ -1543,6 +1543,7 @@ fn draw_trial_info_modal(ctx: &egui::Context, state: &mut MenuState) -> MenuActi
                         format!("Run ~{dist} blocks to the bright finish beacon."),
                         "Beat your best time — you race the ghost of your last run.".to_string(),
                     ],
+                    routes: Vec::new(),
                 };
                 (d.name.to_string(), tasks, Vec::new(), crate::trials::race_scenario_def(d))
             })

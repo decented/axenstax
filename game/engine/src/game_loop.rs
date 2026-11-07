@@ -3026,6 +3026,7 @@ impl super::GameState {
                 scenario.def().objective,
                 crate::scenario::Objective::Sequence { .. }
                     | crate::scenario::Objective::Checklist { .. }
+                    | crate::scenario::Objective::AnyOf { .. }
             );
             let before = scenario.objective_progress().map(|(d, _)| d).unwrap_or(0);
             scenario.on_event(ev);
@@ -20840,37 +20841,9 @@ impl super::GameState {
                         }
                     };
                     // Render a TaskList as a "✓ done / ➜ now / • next" checklist
-                    // (numbered when the steps are ordered), with a per-step count
-                    // on multi-count steps — so "what do I do, where am I, what's
-                    // next" is answered at a glance.
-                    let task_block = |tasks: &crate::scenario::TaskList,
-                                      status: &[(u32, u32)],
-                                      current: Option<usize>|
-                     -> String {
-                        let mut out = String::new();
-                        for (i, line) in tasks.lines.iter().enumerate() {
-                            let (done, total) = status.get(i).copied().unwrap_or((0, 0));
-                            let complete = total > 0 && done >= total;
-                            let marker = if complete {
-                                "\u{2713}" // ✓
-                            } else if Some(i) == current {
-                                "\u{279C}" // ➜
-                            } else {
-                                "\u{2022}" // •
-                            };
-                            let count = if total > 1 && !complete {
-                                format!("  ({done}/{total})")
-                            } else {
-                                String::new()
-                            };
-                            if tasks.ordered {
-                                out.push_str(&format!("{marker} {}. {line}{count}\n", i + 1));
-                            } else {
-                                out.push_str(&format!("{marker} {line}{count}\n"));
-                            }
-                        }
-                        out.trim_end().to_string()
-                    };
+                    // (pure, `objective_progress::task_text`; an AnyOf trial reads
+                    // "Pick a way:" then each route).
+                    let task_block = crate::objective_progress::task_text;
                     let (title, how_to, progress) = if let Some(at) = self.active_trial.as_ref() {
                         let (_i, hint) = crate::scenario::trial_satoshi(at.id.as_str());
                         let (done, total) = self.race_distance();
@@ -21367,11 +21340,13 @@ impl super::GameState {
                         _ => None,
                     };
                     let crafted = craft_item.is_some();
-                    // Phase 3 — coverage-challenge CraftItem event (only on a real craft).
-                    if crafted
-                        && let Some(scenario) = &mut self.scenario {
-                            scenario.on_event(crate::scenario::ChallengeEvent::CraftItem);
-                        }
+                    // Phase 3 — coverage-challenge CraftItem event (only on a real
+                    // craft), naming what was made so a trial can ask for one item.
+                    if let Some(item) = &craft_item {
+                        self.fire_challenge(crate::scenario::ChallengeEvent::CraftItem {
+                            item: Some(crate::item_kind::ItemKind::of(item)),
+                        });
+                    }
                     if crafted {
                         // First-craft trigger for the three non-obvious pet-kit
                         // items — cheapest clean single site (a craft always

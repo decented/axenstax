@@ -78,7 +78,7 @@ fn event_variant_name(e: &ChallengeEvent) -> &'static str {
     match e {
         ChallengeEvent::BreakBlock { .. } => "BreakBlock",
         ChallengeEvent::PlaceBlock { .. } => "PlaceBlock",
-        ChallengeEvent::CraftItem => "CraftItem",
+        ChallengeEvent::CraftItem { .. } => "CraftItem",
         ChallengeEvent::CookAtCampfire => "CookAtCampfire",
         ChallengeEvent::TameMob => "TameMob",
         ChallengeEvent::VendorSale => "VendorSale",
@@ -119,6 +119,9 @@ fn collect_leaf_events(obj: &Objective) -> Vec<(&ChallengeEvent, u32)> {
                 _ => None,
             })
             .collect(),
+        // Every route's leaves: each route must be completable on its own, so
+        // the reachability and fired-event checks see all of them.
+        Objective::AnyOf { routes } => routes.iter().flat_map(|r| collect_leaf_events(&r.objective)).collect(),
         Objective::Timed { .. } | Objective::FirstSatori | Objective::FreeRoam => vec![],
     }
 }
@@ -207,7 +210,7 @@ fn check_leaves_are_actions_bites_on_a_nested_sequence() {
         "bad-trial",
         fixture_def(Objective::Sequence {
             steps: vec![Objective::Sequence {
-                steps: vec![Objective::Action { event: ChallengeEvent::CraftItem, count: 1 }],
+                steps: vec![Objective::Action { event: ChallengeEvent::CraftItem { item: None }, count: 1 }],
             }],
         }),
     )];
@@ -223,7 +226,7 @@ fn check_leaves_are_actions_bites_on_a_timed_checklist_item() {
         "bad-trial-2",
         fixture_def(Objective::Checklist {
             items: vec![
-                Objective::Action { event: ChallengeEvent::CraftItem, count: 1 },
+                Objective::Action { event: ChallengeEvent::CraftItem { item: None }, count: 1 },
                 Objective::Timed { ticks: 100 },
             ],
         }),
@@ -276,7 +279,7 @@ fn compliance_banlist_covers_all_text_surfaces() {
 
 #[test]
 fn check_banlist_bites_on_a_banned_word_in_display_name() {
-    let mut def = fixture_def(Objective::Action { event: ChallengeEvent::CraftItem, count: 1 });
+    let mut def = fixture_def(Objective::Action { event: ChallengeEvent::CraftItem { item: None }, count: 1 });
     def.display_name = "Buy Your First Sword".to_string();
     let err = check_banlist_covers_all_text_surfaces(&[("bad-trial", def)])
         .expect_err("a money word in display_name must be rejected");
@@ -286,7 +289,7 @@ fn check_banlist_bites_on_a_banned_word_in_display_name() {
 
 #[test]
 fn check_banlist_bites_on_a_banned_word_in_kit_name() {
-    let mut def = fixture_def(Objective::Action { event: ChallengeEvent::CraftItem, count: 1 });
+    let mut def = fixture_def(Objective::Action { event: ChallengeEvent::CraftItem { item: None }, count: 1 });
     def.kit = vec![crate::scenario::KitItem { name: "cash_stack".to_string(), count: 1 }];
     let err = check_banlist_covers_all_text_surfaces(&[("bad-trial", def)])
         .expect_err("a money word in a kit item name must be rejected");
@@ -977,7 +980,7 @@ fn every_bundled_weather_lock_is_a_value_the_engine_honours() {
 
 #[test]
 fn check_weather_lock_values_bites_on_a_typo() {
-    let mut def = fixture_def(Objective::Action { event: ChallengeEvent::CraftItem, count: 1 });
+    let mut def = fixture_def(Objective::Action { event: ChallengeEvent::CraftItem { item: None }, count: 1 });
     def.weather_lock = Some("stormy".to_string());
     let err = check_weather_lock_values(&[("bad-trial", def)])
         .expect_err("an unrecognised weather_lock must be rejected");
@@ -988,7 +991,7 @@ fn check_weather_lock_values_bites_on_a_typo() {
 #[test]
 fn check_weather_lock_values_accepts_every_advertised_lock() {
     for name in crate::weather::WEATHER_LOCKS {
-        let mut def = fixture_def(Objective::Action { event: ChallengeEvent::CraftItem, count: 1 });
+        let mut def = fixture_def(Objective::Action { event: ChallengeEvent::CraftItem { item: None }, count: 1 });
         def.weather_lock = Some((*name).to_string());
         check_weather_lock_values(&[("ok-trial", def)])
             .unwrap_or_else(|e| panic!("{name} is advertised as valid but the lint rejects it: {e}"));
@@ -1070,7 +1073,7 @@ fn every_bundled_trial_has_card_art_that_resolves() {
 
 #[test]
 fn check_card_art_bites_on_a_typo_and_on_a_missing_value() {
-    let mut def = fixture_def(Objective::Action { event: ChallengeEvent::CraftItem, count: 1 });
+    let mut def = fixture_def(Objective::Action { event: ChallengeEvent::CraftItem { item: None }, count: 1 });
     def.card_art = Some(CardArtDef::Name("furnaec".to_string()));
     let err = check_card_art(&[("bad-trial", def.clone())])
         .expect_err("an unresolvable card_art must be rejected");
@@ -1083,7 +1086,7 @@ fn check_card_art_bites_on_a_typo_and_on_a_missing_value() {
 #[test]
 fn check_card_art_bites_on_a_bad_diorama() {
     let diorama = |blocks: Vec<(&str, [i32; 3])>| {
-        let mut def = fixture_def(Objective::Action { event: ChallengeEvent::CraftItem, count: 1 });
+        let mut def = fixture_def(Objective::Action { event: ChallengeEvent::CraftItem { item: None }, count: 1 });
         def.card_art = Some(CardArtDef::Diorama(
             blocks
                 .into_iter()

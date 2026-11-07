@@ -137,22 +137,30 @@ pub enum Scoring {
 /// variant maps to a real subsystem call site (wired in Phase 3). Incoming
 /// events always carry a concrete value (e.g. `BreakBlock { block: Some(id) }`);
 /// an objective's *pattern* may leave the filter `None` to match any. Kept
-/// minimal for v1 (no general Item/Mob taxonomy yet — `TameMob`/`CraftItem`
-/// stay unfiltered; a companion tame and a wolf tame both just fire
+/// minimal for v1 (no general Mob taxonomy yet — `TameMob` stays
+/// unfiltered; a companion tame and a wolf tame both just fire
 /// `TameMob`, so a bundled challenge can only tell them apart by which mobs
 /// its own arena spawns). `BreedAnimals` DOES carry an optional offspring
 /// `MobType` filter (Task 19) — added so a "breed a Mule" trial can't be
 /// satisfied by breeding two cows. Cross-game-generic — no AxeNStax
 /// coupling beyond the block/material/mob id types it references.
+/// `CraftItem` carries an optional [`crate::item_kind::ItemKind`] filter
+/// (Trials in Two Acts §A.5) so "craft an iron pickaxe" can't be met by
+/// crafting planks.
 /// Foundation: `docs/foundations/2026-06-06-feature-coverage-challenges.md`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Serde: hand-wired (see the impls below) only so the pre-filter bare string
+/// `"CraftItem"` still parses as `CraftItem { item: None }` — every older
+/// bundled def, saved world and published mod stays readable unchanged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChallengeEvent {
     /// A block-break completed. `None` = any block; `Some(id)` = that block.
     BreakBlock { block: Option<crate::block::BlockId> },
     /// A block-place committed. `None` = any block; `Some(id)` = that block.
     PlaceBlock { block: Option<crate::block::BlockId> },
-    /// A craft committed (any recipe — v1 has no per-item filter).
-    CraftItem,
+    /// A craft committed. `None` = any recipe; `Some(kind)` = only when the
+    /// crafted output is that item (authored as a `/give`-style name).
+    CraftItem { item: Option<crate::item_kind::ItemKind> },
     /// A cooked output was taken from a campfire.
     CookAtCampfire,
     /// A mob was tamed (wolf for alpha).
@@ -219,6 +227,57 @@ pub enum TurningSource {
     Windmill,
 }
 
+/// The serialised shape of [`ChallengeEvent`] — serde's remote mirror, so a
+/// variant added to the real enum without being added here is a compile error.
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "ChallengeEvent")]
+enum ChallengeEventWire {
+    BreakBlock { block: Option<crate::block::BlockId> },
+    PlaceBlock { block: Option<crate::block::BlockId> },
+    CraftItem {
+        #[serde(default)]
+        item: Option<crate::item_kind::ItemKind>,
+    },
+    CookAtCampfire,
+    TameMob,
+    VendorSale,
+    WorkshopPublish,
+    ClaimPlot,
+    GainMaterial { material: MaterialId },
+    KillMob,
+    EatFood,
+    HarvestCrop,
+    SmeltItem,
+    CatchFish,
+    RideEntity,
+    PowerDevice,
+    UsePiston,
+    Detonate,
+    UseBucket,
+    ShearOrMilk,
+    BreedAnimals { offspring: Option<crate::mob::MobType> },
+    SourceTurned { kind: TurningSource },
+    CompleteBuildGuide,
+    SaveSkin,
+    SpawnRig,
+}
+
+impl Serialize for ChallengeEvent {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        ChallengeEventWire::serialize(self, s)
+    }
+}
+
+impl<'de> Deserialize<'de> for ChallengeEvent {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let v = serde_json::Value::deserialize(d)?;
+        if v.as_str() == Some("CraftItem") {
+            return Ok(ChallengeEvent::CraftItem { item: None });
+        }
+        ChallengeEventWire::deserialize(v).map_err(serde::de::Error::custom)
+    }
+}
+
 impl ChallengeEvent {
     /// Does `self` (an objective's pattern) match `incoming` (a fired event)?
     /// Same variant required; a `None` block filter matches any block, a
@@ -237,8 +296,8 @@ impl ChallengeEvent {
                 pat.is_none() || pat == got
             }
             (SourceTurned { kind: a }, SourceTurned { kind: b }) => a == b,
-            (CraftItem, CraftItem)
-            | (CookAtCampfire, CookAtCampfire)
+            (CraftItem { item: pat }, CraftItem { item: got }) => pat.is_none() || pat == got,
+            (CookAtCampfire, CookAtCampfire)
             | (TameMob, TameMob)
             | (VendorSale, VendorSale)
             | (WorkshopPublish, WorkshopPublish)
@@ -288,43 +347,22 @@ pub enum Objective {
     /// An UNORDERED checklist (explorer "do A and B"): all items complete, any
     /// order; ends when all are done. v1: each item is an `Action`.
     Checklist { items: Vec<Objective> },
+    /// One trial, several ways (Trials in Two Acts §A.5): each route keeps its
+    /// own progress and the first route to finish completes the trial. Top
+    /// level only — a route's objective is an `Action`, or a `Sequence` /
+    /// `Checklist` of `Action`s, never another `AnyOf` (`trials_lint` checks).
+    /// List routes most-specific first: when one event finishes several, the
+    /// first listed is the one the end card names.
+    AnyOf { routes: Vec<Route> },
 }
 
-impl Objective {
-    /// If this is an `Action`, its `(pattern event, target count)`. Used by the
-    /// Sequence/Checklist progress logic (v1 leaves are Actions).
-    fn as_action(&self) -> Option<(&ChallengeEvent, u32)> {
-        if let Objective::Action { event, count } = self {
-            Some((event, *count))
-        } else {
-            None
-        }
-    }
-
-    /// Number of event-progress slots this objective needs (1 per Action leaf;
-    /// 0 for passive Timed/FirstSatori/FreeRoam).
-    fn leaf_count(&self) -> usize {
-        match self {
-            Objective::Action { .. } => 1,
-            Objective::Sequence { steps } => steps.len(),
-            Objective::Checklist { items } => items.len(),
-            _ => 0,
-        }
-    }
-}
-
-/// Index of the first incomplete step in an ordered `Sequence`, given the
-/// per-step progress counts. A non-Action leaf can't complete via events, so it
-/// blocks the sequence there (returns its index). `None` ⇒ all steps complete.
-fn first_incomplete_step(steps: &[Objective], progress: &[u32]) -> Option<usize> {
-    steps
-        .iter()
-        .enumerate()
-        .find(|(i, o)| match o.as_action() {
-            Some((_, count)) => progress.get(*i).copied().unwrap_or(0) < count,
-            None => true,
-        })
-        .map(|(i, _)| i)
+/// One way through an [`Objective::AnyOf`] trial.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Route {
+    /// Shown in the task list ("Pick a way:") and on the end card ("You did it
+    /// by: <name>"), and remembered in `TrialBests::ways_done`.
+    pub name: String,
+    pub objective: Objective,
 }
 
 fn default_work_exponent() -> f32 {
@@ -516,7 +554,7 @@ pub struct ScenarioState {
 impl ScenarioState {
     /// Start a fresh run of `def`.
     pub fn new(def: ScenarioDef) -> Self {
-        let progress = vec![0; def.objective.leaf_count()];
+        let progress = vec![0; crate::objective_progress::leaf_count(&def.objective)];
         Self {
             def,
             elapsed_ticks: 0,
@@ -538,7 +576,7 @@ impl ScenarioState {
         ended: bool,
         result_tick: Option<u32>,
     ) -> Self {
-        let progress = vec![0; def.objective.leaf_count()];
+        let progress = vec![0; crate::objective_progress::leaf_count(&def.objective)];
         Self {
             def,
             elapsed_ticks,
@@ -612,85 +650,47 @@ impl ScenarioState {
         if self.ended {
             return;
         }
-        // Mutate progress in a scope that borrows `def` (shared) + `progress`
-        // (mutable) as DISJOINT fields, so the borrow ends before the
-        // completion check re-borrows `self`.
-        {
-            let obj = &self.def.objective;
-            let progress = &mut self.progress;
-            match obj {
-                Objective::Action { event, count } => {
-                    if event.matches(&ev) && progress[0] < *count {
-                        progress[0] += 1;
-                    }
-                }
-                Objective::Sequence { steps } => {
-                    // Ordered: only the current (first incomplete) step counts.
-                    if let Some(i) = first_incomplete_step(steps, progress)
-                        && let Some((event, count)) = steps[i].as_action()
-                            && event.matches(&ev) && progress[i] < count {
-                                progress[i] += 1;
-                            }
-                }
-                Objective::Checklist { items } => {
-                    // Unordered: fill the first incomplete item that matches.
-                    for (i, item) in items.iter().enumerate() {
-                        if let Some((event, count)) = item.as_action()
-                            && progress[i] < count && event.matches(&ev) {
-                                progress[i] += 1;
-                                break;
-                            }
-                    }
-                }
-                _ => return,
-            }
-        }
-        if self.objective_is_complete() {
+        crate::objective_progress::advance(&self.def.objective, &mut self.progress, &ev);
+        if crate::objective_progress::is_complete(&self.def.objective, &self.progress) {
             self.ended = true;
             self.result_tick = Some(self.elapsed_ticks);
         }
     }
 
-    /// Whether the event-driven objective has reached completion. `false` for
-    /// passive objectives (they end via `tick`/`on_material_gained`, not here).
-    fn objective_is_complete(&self) -> bool {
-        let all_leaves_done = |subs: &[Objective]| -> bool {
-            subs.iter().enumerate().all(|(i, o)| match o.as_action() {
-                Some((_, count)) => self.progress.get(i).copied().unwrap_or(0) >= count,
-                None => false, // a non-Action leaf can't complete via events (v1)
-            })
-        };
-        match &self.def.objective {
-            Objective::Action { count, .. } => {
-                self.progress.first().copied().unwrap_or(0) >= *count
-            }
-            Objective::Sequence { steps } => all_leaves_done(steps),
-            Objective::Checklist { items } => all_leaves_done(items),
-            _ => false,
-        }
-    }
-
     /// Progress of an event-driven objective as `(done, total)` for the HUD:
     /// `Action` → `(events so far, count)`; `Sequence`/`Checklist` → `(completed
-    /// leaves, total leaves)`. `None` for passive objectives (no progress HUD).
+    /// leaves, total leaves)`; `AnyOf` → the leading route's leaves. `None` for
+    /// passive objectives (no progress HUD).
     pub fn objective_progress(&self) -> Option<(u32, u32)> {
-        let leaves_done = |subs: &[Objective]| -> u32 {
-            subs.iter()
-                .enumerate()
-                .filter(|(i, o)| match o.as_action() {
-                    Some((_, count)) => self.progress.get(*i).copied().unwrap_or(0) >= count,
-                    None => false,
-                })
-                .count() as u32
-        };
         match &self.def.objective {
             Objective::Action { count, .. } => {
                 Some((self.progress.first().copied().unwrap_or(0).min(*count), *count))
             }
-            Objective::Sequence { steps } => Some((leaves_done(steps), steps.len() as u32)),
-            Objective::Checklist { items } => Some((leaves_done(items), items.len() as u32)),
-            _ => None,
+            Objective::Sequence { .. } | Objective::Checklist { .. } | Objective::AnyOf { .. } => {
+                Some(crate::objective_progress::leaves_done(&self.def.objective, &self.progress))
+            }
+            Objective::Timed { .. } | Objective::FirstSatori | Objective::FreeRoam => None,
         }
+    }
+
+    /// For a finished `AnyOf` trial, the route the end card names ("You did it
+    /// by: …"): the first, in authored order, of the routes that are complete.
+    /// `None` for any other objective or before the run ends.
+    pub fn completed_route(&self) -> Option<&str> {
+        self.completed_routes().into_iter().next()
+    }
+
+    /// Every `AnyOf` route that is complete (several can finish on one event),
+    /// in authored order — what `TrialBests::ways_done` remembers.
+    pub fn completed_routes(&self) -> Vec<&str> {
+        let Objective::AnyOf { routes } = &self.def.objective else { return Vec::new() };
+        if !self.ended {
+            return Vec::new();
+        }
+        crate::objective_progress::complete_routes(&self.def.objective, &self.progress)
+            .into_iter()
+            .map(|i| routes[i].name.as_str())
+            .collect()
     }
 
     /// Weighted per-block work under the def's tuning. Linear (identity) by
@@ -766,55 +766,23 @@ impl ScenarioState {
     /// progress reaches the leaf's target count. Passive objectives
     /// (Timed / FirstSatori / FreeRoam) have no leaves and return `(0, 0)`.
     pub fn progress_summary(&self) -> (u32, u32) {
-        let required: Vec<u32> = match &self.def.objective {
-            Objective::Action { count, .. } => vec![*count],
-            Objective::Sequence { steps } => steps
-                .iter()
-                .map(|s| s.as_action().map(|(_, c)| c).unwrap_or(1))
-                .collect(),
-            Objective::Checklist { items } => items
-                .iter()
-                .map(|s| s.as_action().map(|(_, c)| c).unwrap_or(1))
-                .collect(),
-            _ => Vec::new(),
-        };
-        let total = required.len() as u32;
-        let done = required
-            .iter()
-            .enumerate()
-            .filter(|(i, req)| self.progress.get(*i).copied().unwrap_or(0) >= **req)
-            .count() as u32;
-        (done, total)
+        crate::objective_progress::leaves_done(&self.def.objective, &self.progress)
     }
 
     /// Per-step `(done, required)` for the objective's leaves — one entry per
-    /// task line (Action → one). Drives the in-game checklist + the badge's
-    /// current-step counter. Empty for timed / free-roam / Satori objectives.
+    /// task line (Action → one; an `AnyOf` lists every route's leaves end to
+    /// end). Drives the in-game checklist + the badge's current-step counter.
+    /// Empty for timed / free-roam / Satori objectives.
     pub fn step_status(&self) -> Vec<(u32, u32)> {
-        let required: Vec<u32> = match &self.def.objective {
-            Objective::Action { count, .. } => vec![*count],
-            Objective::Sequence { steps } => steps
-                .iter()
-                .map(|s| s.as_action().map(|(_, c)| c).unwrap_or(1))
-                .collect(),
-            Objective::Checklist { items } => items
-                .iter()
-                .map(|s| s.as_action().map(|(_, c)| c).unwrap_or(1))
-                .collect(),
-            _ => Vec::new(),
-        };
-        required
-            .iter()
-            .enumerate()
-            .map(|(i, req)| (self.progress.get(i).copied().unwrap_or(0).min(*req), *req))
-            .collect()
+        crate::objective_progress::step_status(&self.def.objective, &self.progress)
     }
 
     /// Index of the current (first incomplete) step, or `None` when every step
     /// is done / the objective has no steps. For an ordered Sequence this is the
-    /// step you're working on; for a Checklist it's just the first unfinished one.
+    /// step you're working on; for a Checklist it's just the first unfinished
+    /// one; for an `AnyOf`, the first unfinished step of the leading route.
     pub fn current_step(&self) -> Option<usize> {
-        self.step_status().iter().position(|(done, req)| done < req)
+        crate::objective_progress::current_step(&self.def.objective, &self.progress)
     }
 
     /// Remaining ticks for a timed objective (`0` for untimed or ended).
@@ -826,7 +794,8 @@ impl ScenarioState {
             | Objective::FreeRoam
             | Objective::Action { .. }
             | Objective::Sequence { .. }
-            | Objective::Checklist { .. } => 0,
+            | Objective::Checklist { .. }
+            | Objective::AnyOf { .. } => 0,
         }
     }
 }
@@ -1033,8 +1002,11 @@ pub fn event_task_label(event: &ChallengeEvent, count: u32) -> String {
     match event {
         ChallengeEvent::BreakBlock { .. } => format!("Break {n} block{}", plural_s(n)),
         ChallengeEvent::PlaceBlock { .. } => format!("Place {n} block{}", plural_s(n)),
-        ChallengeEvent::CraftItem => {
+        ChallengeEvent::CraftItem { item: None } => {
             if n == 1 { "Craft an item".to_string() } else { format!("Craft {n} items") }
+        }
+        ChallengeEvent::CraftItem { item: Some(kind) } => {
+            if n == 1 { format!("Craft a {}", kind.label()) } else { format!("Craft {n} x {}", kind.label()) }
         }
         ChallengeEvent::CookAtCampfire => {
             if n == 1 { "Cook food at a campfire".to_string() } else { format!("Cook {n} foods at a campfire") }
@@ -1080,38 +1052,67 @@ pub fn event_task_label(event: &ChallengeEvent, count: u32) -> String {
 /// so it always matches what actually completes the trial, and is control-free.
 /// `ordered` → render as a numbered list (the steps must be done in order);
 /// otherwise bullets (any order).
+///
+/// `lines` is always one line per objective leaf (so `ScenarioState::step_status`
+/// and the authored labels index it 1:1). For an `AnyOf` trial `routes` groups
+/// those lines: each route takes the next `len` lines, in order, and the task
+/// list reads "Pick a way:" then each route by name with its own steps. Empty
+/// `routes` = a plain list.
 pub struct TaskList {
     pub ordered: bool,
     pub lines: Vec<String>,
+    pub routes: Vec<RouteTasks>,
+}
+
+/// One `AnyOf` route's slice of a [`TaskList`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RouteTasks {
+    pub name: String,
+    /// The route's steps must be done in order (a `Sequence`).
+    pub ordered: bool,
+    /// How many of `TaskList::lines` (following the previous route's) it owns.
+    pub len: usize,
 }
 
 /// Auto-derived [`TaskList`] from a scenario's objective events (the generic
 /// fallback: "Break 3 blocks", "Craft an item").
 fn objective_tasks_auto(def: &ScenarioDef) -> TaskList {
+    objective_tasks_for(&def.objective)
+}
+
+fn objective_tasks_for(objective: &Objective) -> TaskList {
+    let plain = |ordered: bool, lines: Vec<String>| TaskList { ordered, lines, routes: Vec::new() };
     let leaves = |subs: &[Objective]| -> Vec<String> {
         subs.iter()
-            .filter_map(|o| o.as_action().map(|(e, c)| event_task_label(e, c)))
+            .filter_map(|o| match o {
+                Objective::Action { event, count } => Some(event_task_label(event, *count)),
+                _ => None,
+            })
             .collect()
     };
-    match &def.objective {
-        Objective::Action { event, count } => TaskList {
-            ordered: false,
-            lines: vec![event_task_label(event, *count)],
-        },
-        Objective::Sequence { steps } => TaskList { ordered: true, lines: leaves(steps) },
-        Objective::Checklist { items } => TaskList { ordered: false, lines: leaves(items) },
-        Objective::Timed { .. } => TaskList {
-            ordered: false,
-            lines: vec!["Score as many points as you can before the timer runs out.".to_string()],
-        },
-        Objective::FirstSatori => TaskList {
-            ordered: false,
-            lines: vec!["Mine the Genesis Block as fast as you can.".to_string()],
-        },
-        Objective::FreeRoam => TaskList {
-            ordered: false,
-            lines: vec!["Explore freely — there's no set goal.".to_string()],
-        },
+    match objective {
+        Objective::Action { event, count } => plain(false, vec![event_task_label(event, *count)]),
+        Objective::Sequence { steps } => plain(true, leaves(steps)),
+        Objective::Checklist { items } => plain(false, leaves(items)),
+        Objective::AnyOf { routes } => {
+            let mut out = plain(false, Vec::new());
+            for route in routes {
+                let sub = objective_tasks_for(&route.objective);
+                out.routes.push(RouteTasks {
+                    name: route.name.clone(),
+                    ordered: sub.ordered,
+                    len: sub.lines.len(),
+                });
+                out.lines.extend(sub.lines);
+            }
+            out
+        }
+        Objective::Timed { .. } => plain(
+            false,
+            vec!["Score as many points as you can before the timer runs out.".to_string()],
+        ),
+        Objective::FirstSatori => plain(false, vec!["Mine the Genesis Block as fast as you can.".to_string()]),
+        Objective::FreeRoam => plain(false, vec!["Explore freely — there's no set goal.".to_string()]),
     }
 }
 
@@ -2508,7 +2509,7 @@ mod tests {
         let mut s = ScenarioState::new(challenge_def(Objective::Sequence {
             steps: vec![
                 Objective::Action { event: ChallengeEvent::BreakBlock { block: None }, count: 1 },
-                Objective::Action { event: ChallengeEvent::CraftItem, count: 1 },
+                Objective::Action { event: ChallengeEvent::CraftItem { item: None }, count: 1 },
                 Objective::Action { event: ChallengeEvent::CookAtCampfire, count: 1 },
             ],
         }));
@@ -2516,7 +2517,7 @@ mod tests {
         assert_eq!(s.objective_progress(), Some((0, 3)));
         s.on_event(ChallengeEvent::BreakBlock { block: Some(crate::block::STONE) });
         assert_eq!(s.objective_progress(), Some((1, 3)), "step 1 done");
-        s.on_event(ChallengeEvent::CraftItem);
+        s.on_event(ChallengeEvent::CraftItem { item: None });
         assert_eq!(s.objective_progress(), Some((2, 3)), "step 2 done");
         assert!(!s.is_ended());
         s.on_event(ChallengeEvent::CookAtCampfire);
@@ -2646,7 +2647,7 @@ mod tests {
             },
             Objective::Sequence {
                 steps: vec![
-                    Objective::Action { event: ChallengeEvent::CraftItem, count: 1 },
+                    Objective::Action { event: ChallengeEvent::CraftItem { item: None }, count: 1 },
                     Objective::Action { event: ChallengeEvent::CookAtCampfire, count: 1 },
                 ],
             },
@@ -2866,7 +2867,7 @@ mod tests {
         // Mirrors the authored sequence break×4 → craft → place×6 → cook.
         let mut s = ScenarioState::new(load_scenario_def(ONBOARDING_JSON).unwrap());
         for _ in 0..4 { s.on_event(ChallengeEvent::BreakBlock { block: Some(crate::block::STONE) }); }
-        s.on_event(ChallengeEvent::CraftItem);
+        s.on_event(ChallengeEvent::CraftItem { item: None });
         for _ in 0..6 { s.on_event(ChallengeEvent::PlaceBlock { block: Some(crate::block::DIRT) }); }
         assert!(!s.is_ended(), "not done until the campfire-cook capstone");
         s.on_event(ChallengeEvent::CookAtCampfire);

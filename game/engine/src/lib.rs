@@ -66,6 +66,8 @@ mod quality_governor;
 mod draw_order;
 mod input;
 mod item;
+mod item_kind;
+mod objective_progress;
 mod inventory;
 mod mesh;
 mod micro_model;

@@ -2332,7 +2332,8 @@ pub fn draw_scenario_hud(
         // "complete!" celebration on the finishing frame.
         crate::scenario::Objective::Action { .. }
         | crate::scenario::Objective::Sequence { .. }
-        | crate::scenario::Objective::Checklist { .. } => {
+        | crate::scenario::Objective::Checklist { .. }
+        | crate::scenario::Objective::AnyOf { .. } => {
             if scenario.is_ended() {
                 if scenario.shows_blocking_end_card() {
                     return; // the blocking completion card (drawn elsewhere) shows the result
@@ -2345,6 +2346,7 @@ pub fn draw_scenario_hud(
                     scenario.def().objective,
                     crate::scenario::Objective::Sequence { .. }
                         | crate::scenario::Objective::Checklist { .. }
+                        | crate::scenario::Objective::AnyOf { .. }
                 );
                 let step_label = if stepped {
                     scenario.current_step().and_then(|i| {
@@ -2424,7 +2426,8 @@ fn scenario_result_text(scenario: &crate::scenario::ScenarioState) -> (String, S
         // normally rendered for them; provide a sensible generic result anyway.
         crate::scenario::Objective::Action { .. }
         | crate::scenario::Objective::Sequence { .. }
-        | crate::scenario::Objective::Checklist { .. } => (
+        | crate::scenario::Objective::Checklist { .. }
+        | crate::scenario::Objective::AnyOf { .. } => (
             "Challenge complete!".to_string(),
             scenario.display_name().to_string(),
         ),
@@ -2488,6 +2491,15 @@ pub fn draw_scenario_end_screen(
                                 .size(18.0)
                                 .color(egui::Color32::WHITE),
                         );
+                        // An AnyOf trial names the way it was done.
+                        if let Some(route) = scenario.completed_route() {
+                            ui.add_space(6.0);
+                            ui.label(
+                                egui::RichText::new(format!("You did it by: {route}"))
+                                    .size(18.0)
+                                    .color(egui::Color32::from_rgb(170, 230, 170)),
+                            );
+                        }
                         ui.add_space(18.0);
                         if is_trial {
                             if ui
