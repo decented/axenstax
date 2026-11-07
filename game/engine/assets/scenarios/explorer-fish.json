@@ -10,6 +10,12 @@
     { "block": "sandstone", "at": [1, 0, 1] },
     { "block": "fence_post", "at": [1, 1, 1] }
   ],
+  "unlock": {
+    "on": [
+      "CatchFish"
+    ],
+    "hint": "Something about a quiet pond\u2026"
+  },
   "kit": [
     {
       "name": "fishing_rod",

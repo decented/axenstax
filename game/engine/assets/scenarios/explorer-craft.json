@@ -12,8 +12,8 @@
   ],
   "kit": [],
   "objective": {
-    "Sequence": {
-      "steps": [
+    "Checklist": {
+      "items": [
         {
           "Action": {
             "event": {
@@ -26,15 +26,9 @@
         },
         {
           "Action": {
-            "event": "CraftItem",
-            "count": 1
-          }
-        },
-        {
-          "Action": {
             "event": {
-              "PlaceBlock": {
-                "block": null
+              "CraftItem": {
+                "item": "oak_planks"
               }
             },
             "count": 1
@@ -42,8 +36,32 @@
         },
         {
           "Action": {
-            "event": "CraftItem",
-            "count": 2
+            "event": {
+              "PlaceBlock": {
+                "block": 14
+              }
+            },
+            "count": 1
+          }
+        },
+        {
+          "Action": {
+            "event": {
+              "CraftItem": {
+                "item": "wooden_pickaxe"
+              }
+            },
+            "count": 1
+          }
+        },
+        {
+          "Action": {
+            "event": {
+              "CraftItem": {
+                "item": "wooden_sword"
+              }
+            },
+            "count": 1
           }
         }
       ]

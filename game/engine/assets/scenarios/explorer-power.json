@@ -11,6 +11,12 @@
     { "block": "cable", "at": [1, 1, 0] },
     { "block": "lamp", "at": [2, 1, 0] }
   ],
+  "unlock": {
+    "after": [
+      "smelt"
+    ],
+    "hint": "Something about a dark room and a switch\u2026"
+  },
   "kit": [
     {
       "name": "cable",
@@ -32,7 +38,7 @@
           "Action": {
             "event": {
               "PlaceBlock": {
-                "block": null
+                "block": 268
               }
             },
             "count": 4
@@ -42,7 +48,7 @@
           "Action": {
             "event": {
               "PlaceBlock": {
-                "block": null
+                "block": 272
               }
             },
             "count": 1
@@ -58,7 +64,6 @@
     }
   },
   "game_mode": "creative",
-  "world_type": "flat",
   "time_lock": "night",
   "mobs_enabled": false,
   "arena": {
@@ -136,5 +141,6 @@
         "block": "stone"
       }
     ]
-  }
+  },
+  "world_type": "flat"
 }

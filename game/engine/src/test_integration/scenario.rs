@@ -126,6 +126,7 @@ fn timed_work_def(ticks: u32) -> ScenarioDef {
         mobs_enabled: None,
         trial_race: None,
         card_art: None,
+        unlock: None,
         arena: None,
     }
 }
@@ -175,6 +176,7 @@ fn satori_rush_scenario_ends_on_first_satori_with_world_clock_result() {
         mobs_enabled: None,
         trial_race: None,
         card_art: None,
+        unlock: None,
         arena: None,
     };
     let mut s = ScenarioState::new(def);

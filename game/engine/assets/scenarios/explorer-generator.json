@@ -1,25 +1,33 @@
 {
   "kind": "Challenge",
-  "display_name": "Power Plant \u2014 make your own electricity, no switch required",
+  "display_name": "Power Plant \u2014 make your own electricity with a water wheel, a windmill in the storm, or a hand crank",
   "card_art": [
     { "block": "stone", "at": [0, 0, 0] },
     { "block": "stone", "at": [1, 0, 0] },
     { "block": "stone", "at": [2, 0, 0] },
-    { "block": "steam_generator", "at": [0, 1, 0] },
-    { "block": "furnace", "at": [1, 1, 0] },
-    { "block": "lamp", "at": [2, 1, 0] }
+    { "block": "stone", "at": [0, 0, 1] },
+    { "block": "water_wheel", "at": [0, 1, 0] },
+    { "block": "windmill", "at": [1, 1, 0] },
+    { "block": "hand_crank", "at": [2, 1, 0] },
+    { "block": "lamp", "at": [0, 1, 1] }
   ],
+  "unlock": {
+    "after": [
+      "power"
+    ],
+    "hint": "Something about making your own power\u2026"
+  },
   "kit": [
     {
+      "name": "water_wheel",
+      "count": 1
+    },
+    {
+      "name": "windmill",
+      "count": 1
+    },
+    {
       "name": "hand_crank",
-      "count": 1
-    },
-    {
-      "name": "steam_generator",
-      "count": 1
-    },
-    {
-      "name": "battery",
       "count": 1
     },
     {
@@ -28,38 +36,121 @@
     },
     {
       "name": "electric_lamp",
-      "count": 2
+      "count": 3
     },
     {
-      "name": "lever",
+      "name": "bucket",
       "count": 1
+    },
+    {
+      "name": "stone",
+      "count": 16
     }
   ],
   "objective": {
-    "Sequence": {
-      "steps": [
+    "AnyOf": {
+      "routes": [
         {
-          "Action": {
-            "event": {
-              "PlaceBlock": {
-                "block": null
-              }
-            },
-            "count": 3
+          "name": "Water wheel",
+          "objective": {
+            "Sequence": {
+              "steps": [
+                {
+                  "Action": {
+                    "event": {
+                      "PlaceBlock": {
+                        "block": 316
+                      }
+                    },
+                    "count": 1
+                  }
+                },
+                {
+                  "Action": {
+                    "event": {
+                      "SourceTurned": {
+                        "kind": "WaterWheel"
+                      }
+                    },
+                    "count": 1
+                  }
+                },
+                {
+                  "Action": {
+                    "event": "PowerDevice",
+                    "count": 1
+                  }
+                }
+              ]
+            }
           }
         },
         {
-          "Action": {
-            "event": "PowerDevice",
-            "count": 1
+          "name": "Windmill",
+          "objective": {
+            "Sequence": {
+              "steps": [
+                {
+                  "Action": {
+                    "event": {
+                      "PlaceBlock": {
+                        "block": 318
+                      }
+                    },
+                    "count": 1
+                  }
+                },
+                {
+                  "Action": {
+                    "event": {
+                      "SourceTurned": {
+                        "kind": "Windmill"
+                      }
+                    },
+                    "count": 1
+                  }
+                },
+                {
+                  "Action": {
+                    "event": "PowerDevice",
+                    "count": 1
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Hand crank",
+          "objective": {
+            "Sequence": {
+              "steps": [
+                {
+                  "Action": {
+                    "event": {
+                      "PlaceBlock": {
+                        "block": 276
+                      }
+                    },
+                    "count": 1
+                  }
+                },
+                {
+                  "Action": {
+                    "event": "PowerDevice",
+                    "count": 1
+                  }
+                }
+              ]
+            }
           }
         }
       ]
     }
   },
   "game_mode": "creative",
-  "world_type": "flat",
   "time_lock": "night",
+  "weather_lock": "storm",
   "mobs_enabled": false,
   "arena": {
     "blocks": [
@@ -134,7 +225,152 @@
           0
         ],
         "block": "stone"
+      },
+      {
+        "at": [
+          4,
+          0,
+          -5
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          4,
+          1,
+          -5
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          4,
+          2,
+          -5
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          4,
+          3,
+          -5
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          4,
+          4,
+          -5
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          5,
+          0,
+          5
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          5,
+          1,
+          5
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          5,
+          2,
+          5
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          5,
+          3,
+          5
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          4,
+          4,
+          4
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          4,
+          4,
+          5
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          4,
+          4,
+          6
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          5,
+          4,
+          4
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          5,
+          4,
+          5
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          5,
+          4,
+          6
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          6,
+          4,
+          4
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          6,
+          4,
+          5
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          6,
+          4,
+          6
+        ],
+        "block": "stone"
       }
     ]
-  }
+  },
+  "world_type": "flat"
 }

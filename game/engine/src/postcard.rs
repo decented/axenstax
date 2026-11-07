@@ -686,7 +686,7 @@ mod tests {
         let longest_key = TRIAL_ORDER.iter().map(|(_, r)| token_of(*r).len()).max().unwrap()
             + WEB_KEY_PREFIX.len();
         let worst = trials * (WEB_MAX_VALUE_CHARS + longest_key) * WEB_BYTES_PER_CHAR;
-        assert!(trials >= 45, "the budget is planned for at least 45 trials");
+        assert!(trials <= 45, "the budget is planned for up to 45 trials ({trials} now): re-plan it past that");
         let at_45 = 45 * (WEB_MAX_VALUE_CHARS + longest_key) * WEB_BYTES_PER_CHAR;
         assert!(at_45 * 2 <= WEB_QUOTA_BYTES, "45 postcards take {at_45} bytes: over half the quota");
         assert!(worst * 2 <= WEB_QUOTA_BYTES + WEB_QUOTA_BYTES / 10, "{trials} postcards take {worst} bytes");

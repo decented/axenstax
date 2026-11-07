@@ -11,6 +11,12 @@
     { "block": "track", "at": [3, 1, 0] },
     { "block": "track", "at": [2, 1, 0] }
   ],
+  "unlock": {
+    "after": [
+      "ride"
+    ],
+    "hint": "Something about a track and a cart\u2026"
+  },
   "kit": [
     {
       "name": "rail",
@@ -28,7 +34,7 @@
           "Action": {
             "event": {
               "PlaceBlock": {
-                "block": null
+                "block": 260
               }
             },
             "count": 3
@@ -44,7 +50,6 @@
     }
   },
   "game_mode": "creative",
-  "world_type": "flat",
   "time_lock": "day",
   "mobs_enabled": false,
   "arena": {
@@ -98,5 +103,6 @@
         "block": "cobblestone"
       }
     ]
-  }
+  },
+  "world_type": "flat"
 }

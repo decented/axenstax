@@ -67,6 +67,7 @@ fn fixture_def(objective: Objective) -> ScenarioDef {
         mobs_enabled: None,
         trial_race: None,
         card_art: None,
+        unlock: None,
         arena: None,
     }
 }
@@ -134,7 +135,11 @@ fn collect_leaf_events(obj: &Objective) -> Vec<(&ChallengeEvent, u32)> {
 /// scanned here too — add another `include_str!` + `haystack.contains` pass.
 fn check_events_fired_in_gameplay(defs: &[(&str, ScenarioDef)], game_loop_src: &str) -> Result<(), String> {
     for (token, def) in defs {
-        for (event, _count) in collect_leaf_events(&def.objective) {
+        // An unlock listening for an event gameplay never fires would leave
+        // its trial hidden forever, so `unlock.on` is scanned too.
+        let unlock_events = def.unlock.iter().flat_map(|u| u.on.iter());
+        let leaf_events = collect_leaf_events(&def.objective).into_iter().map(|(e, _)| e);
+        for event in leaf_events.chain(unlock_events) {
             let variant = event_variant_name(event);
             let needle = format!("ChallengeEvent::{variant}");
             if !game_loop_src.contains(&needle) {
@@ -176,24 +181,55 @@ fn check_events_fired_in_gameplay_bites_on_a_never_fired_event() {
 // Check 2 — Sequence/Checklist leaves must be Action (never complete otherwise)
 // ─────────────────────────────────────────────────────────────────────────
 
+/// The leaf rule for one (sub-)objective: every step of a `Sequence` or
+/// `Checklist` is an `Action`. `where_` names the route for the message.
+fn check_leaves_of(token: &str, where_: &str, obj: &Objective) -> Result<(), String> {
+    let (kind, steps) = match obj {
+        Objective::Sequence { steps } => ("Sequence", steps),
+        Objective::Checklist { items } => ("Checklist", items),
+        _ => return Ok(()),
+    };
+    for (i, step) in steps.iter().enumerate() {
+        if !matches!(step, Objective::Action { .. }) {
+            return Err(format!(
+                "{token}: {where_}{kind} step {i} is a nested {step:?}, not an `Action` leaf. \
+                 `ScenarioState::on_event` only recognises Action leaves inside a \
+                 {kind} — a nested Sequence/Checklist/Timed/AnyOf parses fine but can NEVER \
+                 complete, silently stalling the trial forever. Flatten step {i} to a plain \
+                 `Action {{ event: .., count: .. }}`."
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Every leaf inside a `Sequence`, a `Checklist` or an `AnyOf` route must be an
+/// `Action`; an `AnyOf` is top level only (never nested in a route), and a
+/// route is an `Action`, `Sequence` or `Checklist`.
 fn check_sequence_and_checklist_leaves_are_actions(defs: &[(&str, ScenarioDef)]) -> Result<(), String> {
     for (token, def) in defs {
-        let (kind, steps) = match &def.objective {
-            Objective::Sequence { steps } => ("Sequence", steps),
-            Objective::Checklist { items } => ("Checklist", items),
-            _ => continue,
-        };
-        for (i, step) in steps.iter().enumerate() {
-            if !matches!(step, Objective::Action { .. }) {
-                return Err(format!(
-                    "{token}: {kind} step {i} is a nested {step:?}, not an `Action` leaf. \
-                     `ScenarioState::objective_is_complete` only recognises Action leaves inside a \
-                     {kind} — a nested Sequence/Checklist/Timed parses fine but can NEVER complete, \
-                     silently stalling the trial forever. Flatten step {i} to a plain \
-                     `Action {{ event: .., count: .. }}`."
-                ));
+        if let Objective::AnyOf { routes } = &def.objective {
+            if routes.is_empty() {
+                return Err(format!("{token}: an AnyOf with no routes can never complete."));
             }
+            for (r, route) in routes.iter().enumerate() {
+                let where_ = format!("AnyOf route {r} (\"{}\") ", route.name);
+                if !matches!(
+                    route.objective,
+                    Objective::Action { .. } | Objective::Sequence { .. } | Objective::Checklist { .. }
+                ) {
+                    return Err(format!(
+                        "{token}: {where_}is a {:?}. A route must be an `Action`, or a `Sequence` / \
+                         `Checklist` of Actions — an AnyOf is top level only (never nested), and \
+                         Timed/FirstSatori/FreeRoam never complete through events.",
+                        route.objective
+                    ));
+                }
+                check_leaves_of(token, &where_, &route.objective)?;
+            }
+            continue;
         }
+        check_leaves_of(token, "", &def.objective)?;
     }
     Ok(())
 }
@@ -218,6 +254,32 @@ fn check_leaves_are_actions_bites_on_a_nested_sequence() {
         .expect_err("a Sequence-of-Sequence must be rejected");
     assert!(err.contains("bad-trial"));
     assert!(err.contains("step 0"));
+}
+
+fn route(name: &str, objective: Objective) -> crate::scenario::Route {
+    crate::scenario::Route { name: name.to_string(), objective }
+}
+
+#[test]
+fn check_leaves_are_actions_bites_on_a_nested_any_of() {
+    let craft = || Objective::Action { event: ChallengeEvent::CraftItem { item: None }, count: 1 };
+    let nested = Objective::AnyOf { routes: vec![route("inner", craft())] };
+    let bad = vec![("bad-anyof", fixture_def(Objective::AnyOf { routes: vec![route("outer", nested)] }))];
+    let err = check_sequence_and_checklist_leaves_are_actions(&bad).expect_err("a nested AnyOf must be rejected");
+    assert!(err.contains("bad-anyof") && err.contains("outer"), "{err}");
+    // …and inside a Sequence too.
+    let in_seq = Objective::Sequence { steps: vec![Objective::AnyOf { routes: vec![route("r", craft())] }] };
+    assert!(check_sequence_and_checklist_leaves_are_actions(&[("bad-seq", fixture_def(in_seq))]).is_err());
+}
+
+#[test]
+fn check_leaves_are_actions_bites_on_a_bad_leaf_inside_a_route() {
+    let route_obj = Objective::Checklist {
+        items: vec![Objective::Timed { ticks: 10 }],
+    };
+    let bad = vec![("bad-route", fixture_def(Objective::AnyOf { routes: vec![route("Slow way", route_obj)] }))];
+    let err = check_sequence_and_checklist_leaves_are_actions(&bad).expect_err("a Timed leaf in a route must be rejected");
+    assert!(err.contains("Slow way") && err.contains("step 0"), "{err}");
 }
 
 #[test]
@@ -257,11 +319,21 @@ fn check_banlist_covers_all_text_surfaces(defs: &[(&str, ScenarioDef)]) -> Resul
             corpus.push_str(&kit.name);
             corpus.push(' ');
         }
+        if let Some(unlock) = &def.unlock {
+            corpus.push_str(&unlock.hint);
+            corpus.push(' ');
+        }
+        if let Objective::AnyOf { routes } = &def.objective {
+            for r in routes {
+                corpus.push_str(&r.name);
+                corpus.push(' ');
+            }
+        }
         if let Some(banned) =
             crate::copy_lint::banned_in(&corpus, crate::copy_lint::BANNED_MONEY_WORDS).first()
         {
             return Err(format!(
-                "{token} (\"{}\"): display_name/task-label/kit-name text contains banned \
+                "{token} (\"{}\"): display_name/task-label/kit-name/unlock-hint/route-name text contains banned \
                  money/earning word {banned:?}. Trials must never frame play as money/earning \
                  (compliance red line — see CLAUDE.md \"Regulatory Red Lines\"). Reword the \
                  offending text; \"trade/barter/swap\" is fine, \"buy/sell/earn/sats\" is not.",
@@ -285,6 +357,23 @@ fn check_banlist_bites_on_a_banned_word_in_display_name() {
         .expect_err("a money word in display_name must be rejected");
     assert!(err.contains("bad-trial"));
     assert!(err.contains("\"buy\""));
+}
+
+#[test]
+fn check_banlist_bites_on_a_banned_word_in_an_unlock_hint_or_route_name() {
+    let mut def = fixture_def(Objective::Action { event: ChallengeEvent::CraftItem { item: None }, count: 1 });
+    def.unlock = Some(crate::trials_unlock::TrialUnlock {
+        on: vec![],
+        after: vec!["mine".into()],
+        hint: "Something about earning\u{2026}".into(),
+    });
+    let err = check_banlist_covers_all_text_surfaces(&[("bad-hint", def)]).expect_err("a money word in a hint");
+    assert!(err.contains("\"earning\""), "{err}");
+    let def = fixture_def(Objective::AnyOf {
+        routes: vec![route("Sell it", Objective::Action { event: ChallengeEvent::VendorSale, count: 1 })],
+    });
+    let err = check_banlist_covers_all_text_surfaces(&[("bad-route", def)]).expect_err("a money word in a route");
+    assert!(err.contains("\"sell\""), "{err}");
 }
 
 #[test]
@@ -315,20 +404,18 @@ const REACHABILITY_MANUALLY_VERIFIED: &[(&str, &str)] = &[
     ),
     (
         "rail-rider",
-        "RideEntity is satisfied by riding the CART the kit provides (after laying the arena's \
-         rail blocks), not an arena-authored mob — the arena has no `mobs` list at all.",
+        "RideEntity is satisfied by riding the CART the kit provides (after laying the kit's \
+         rails), not an arena-authored mob — the arena has no `mobs` list at all.",
     ),
     (
-        "mill-race",
-        "the Water Wheel to place comes from the KIT, never from arena.blocks (the arena \
-         authors the spring and the pillar it falls off) — and the static block count \
-         deliberately ignores kits.",
+        "craft",
+        "the crafting table to place is CRAFTED from the planks of the arena's oak logs; it is \
+         in neither the arena nor the kit.",
     ),
     (
-        "catch-the-wind",
-        "the Windmill to place comes from the KIT, never from arena.blocks (the arena authors \
-         the hilltop platform it stands on) — and the static block count deliberately ignores \
-         kits.",
+        "harvest",
+        "the wheat is GROWN from the kit's seeds (hoe + bone meal) — the arena deliberately \
+         holds no ready crops (Trials in Two Acts §A.6), so no static count can see it.",
     ),
 ];
 
@@ -395,6 +482,17 @@ fn arena_block_count(arena: Option<&ArenaSetup>, id: BlockId) -> u32 {
 }
 
 /// The mature (harvestable) stage of every crop family — see `crop_growth.rs`.
+/// How many of block `id` the kit hands the player (a `PlaceBlock` target can
+/// come from the kit; see `leaf_reachability`).
+fn kit_block_count(def: &ScenarioDef, id: BlockId) -> u32 {
+    def.kit
+        .iter()
+        .filter_map(|k| resolve_item(&k.name, k.count).ok())
+        .filter(|stack| stack.item == crate::item::Item::Block(id))
+        .map(|stack| stack.count as u32)
+        .sum()
+}
+
 const MATURE_CROP_BLOCK_IDS: &[BlockId] = &[
     block::WHEAT_STAGE_3,
     block::CARROT_STAGE_3,
@@ -501,7 +599,10 @@ fn leaf_reachability(token: &str, def: &ScenarioDef, event: &ChallengeEvent, cou
             }
         }
         ChallengeEvent::BreakBlock { block: Some(id) } | ChallengeEvent::PlaceBlock { block: Some(id) } => {
-            let have = arena_block_count(def.arena.as_ref(), *id);
+            // A block to PLACE comes from the player's hands, so the kit
+            // counts too; a block to BREAK must be standing in the arena.
+            let from_kit = if matches!(event, ChallengeEvent::PlaceBlock { .. }) { kit_block_count(def, *id) } else { 0 };
+            let have = arena_block_count(def.arena.as_ref(), *id) + from_kit;
             if have < count {
                 return Err(format!(
                     "{token}: objective needs {count} x block id {id}, but arena.blocks only \
@@ -669,6 +770,17 @@ fn check_arena_provides_bites_on_a_block_target_the_arena_never_authors() {
     assert!(err.contains("bad-trial"));
 }
 
+#[test]
+fn a_place_target_handed_over_in_the_kit_is_reachable() {
+    let mut def = fixture_def(Objective::Action {
+        event: ChallengeEvent::PlaceBlock { block: Some(block::FURNACE) },
+        count: 1,
+    });
+    assert!(check_arena_provides_objective_targets(&[("no-furnace", def.clone())]).is_err());
+    def.kit = vec![crate::scenario::KitItem { name: "furnace".to_string(), count: 1 }];
+    check_arena_provides_objective_targets(&[("kit-furnace", def)]).expect("a kit furnace can be placed");
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // Check 5 — an unfiltered mob event over a multi-species arena is a
 // conscious choice, not an authoring accident
@@ -683,8 +795,13 @@ fn check_arena_provides_bites_on_a_block_target_the_arena_never_authors() {
 /// verified structurally by check 4 instead, so it's excluded here.
 const UNFILTERED_EVENT_INTENTIONAL: &[(&str, &str)] = &[
     (
-        "friend-in-need",
-        "any of cat/parrot/fox is fine — Satoshi explicitly says \"your pick\" (arena stocks all 3).",
+        "tame-wolf",
+        "any of wolf/cat/parrot/fox is fine — Best Friend is one trial with four ways in \
+         (Trials in Two Acts §A.4); the arena stocks all four and their foods.",
+    ),
+    (
+        "ride",
+        "horse or Nostrich, either is fine — Saddle Up offers both mounts (§A.4).",
     ),
     (
         "farmhand",
@@ -1111,4 +1228,92 @@ fn check_card_art_bites_on_a_bad_diorama() {
     assert!(err.contains("t5"), "{err}");
     let err = check_card_art(&[("t6", diorama(vec![("stone", [99, 0, 0])]))]).expect_err("far away");
     assert!(err.contains("t6"), "{err}");
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Check 8 — unlock by doing (Trials in Two Acts §A.5): every hidden trial can
+// actually appear
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Every `unlock` names something real and every trial is reachable from the
+/// front shelf: `after` tokens exist, each unlock has a clause and a hint, and
+/// iterating "visible from the start, or `on` an event (which can happen in the
+/// player's own world), or every `after` reachable" reaches every trial — so
+/// there is no unlock cycle and no orphan.
+fn check_unlocks(defs: &[(&str, ScenarioDef)]) -> Result<(), String> {
+    let tokens: HashSet<&str> = defs.iter().map(|(t, _)| *t).collect();
+    for (token, def) in defs {
+        let Some(u) = &def.unlock else { continue };
+        if u.on.is_empty() && u.after.is_empty() {
+            return Err(format!("{token}: `unlock` has neither `on` nor `after`, so it never appears."));
+        }
+        if u.hint.trim().is_empty() {
+            return Err(format!("{token}: `unlock.hint` is empty — every hidden trial needs a one-line nudge."));
+        }
+        for a in &u.after {
+            if !tokens.contains(a.as_str()) {
+                return Err(format!("{token}: `unlock.after` names \"{a}\", which is not a bundled trial token."));
+            }
+        }
+    }
+    let mut reachable: HashSet<&str> = HashSet::new();
+    loop {
+        let before = reachable.len();
+        for (token, def) in defs {
+            let ok = match &def.unlock {
+                None => true,
+                Some(u) => !u.on.is_empty() || u.after.iter().all(|a| reachable.contains(a.as_str())),
+            };
+            if ok {
+                reachable.insert(token);
+            }
+        }
+        if reachable.len() == before {
+            break;
+        }
+    }
+    let mut stuck: Vec<&str> = defs.iter().map(|(t, _)| *t).filter(|t| !reachable.contains(t)).collect();
+    stuck.sort();
+    if !stuck.is_empty() {
+        return Err(format!(
+            "these trials can never appear (an unlock cycle, or `after` a trial that itself never \
+             appears): {stuck:?}. Every trial must be reachable from the front shelf."
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn every_unlock_is_reachable_from_the_front_shelf() {
+    check_unlocks(&all_bundled_defs()).unwrap_or_else(|e| panic!("{e}"));
+}
+
+fn unlocked_after(after: &[&str]) -> ScenarioDef {
+    let mut def = fixture_def(Objective::Action { event: ChallengeEvent::KillMob, count: 1 });
+    def.unlock = Some(crate::trials_unlock::TrialUnlock {
+        on: vec![],
+        after: after.iter().map(|s| s.to_string()).collect(),
+        hint: "Something about raiders\u{2026}".into(),
+    });
+    def
+}
+
+#[test]
+fn check_unlocks_bites_on_an_unknown_token_a_cycle_and_a_missing_hint() {
+    let front = fixture_def(Objective::Action { event: ChallengeEvent::KillMob, count: 1 });
+    let err = check_unlocks(&[("front", front.clone()), ("a", unlocked_after(&["nope"]))]).unwrap_err();
+    assert!(err.contains("nope"), "{err}");
+    let err = check_unlocks(&[
+        ("front", front.clone()),
+        ("a", unlocked_after(&["b"])),
+        ("b", unlocked_after(&["a"])),
+    ])
+    .unwrap_err();
+    assert!(err.contains("[\"a\", \"b\"]"), "{err}");
+    let mut no_hint = unlocked_after(&["front"]);
+    no_hint.unlock.as_mut().unwrap().hint.clear();
+    assert!(check_unlocks(&[("front", front.clone()), ("c", no_hint)]).unwrap_err().contains("hint"));
+    // A chain from the front shelf is fine.
+    check_unlocks(&[("front", front), ("a", unlocked_after(&["front"])), ("b", unlocked_after(&["a"]))])
+        .expect("a chain from the front shelf is reachable");
 }

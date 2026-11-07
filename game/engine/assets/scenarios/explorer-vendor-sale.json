@@ -11,6 +11,12 @@
     { "block": "fence_post", "at": [0, 0, 1] },
     { "block": "fence_post", "at": [2, 0, 1] }
   ],
+  "unlock": {
+    "after": [
+      "claim-plot"
+    ],
+    "hint": "Something about a swap at a market stall\u2026"
+  },
   "kit": [
     {
       "name": "stone",

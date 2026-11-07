@@ -10,6 +10,12 @@
     { "block": "lamp", "at": [1, 1, 0] },
     { "block": "lamp", "at": [0, 1, 1] }
   ],
+  "unlock": {
+    "after": [
+      "armour-up"
+    ],
+    "hint": "Something about the valley's fiercest raider\u2026"
+  },
   "kit": [
     {
       "name": "iron_sword",

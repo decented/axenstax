@@ -11,6 +11,12 @@
     { "block": "fence_post", "at": [0, 1, 1] },
     { "block": "fence_post", "at": [1, 1, 1] }
   ],
+  "unlock": {
+    "on": [
+      "ShearOrMilk"
+    ],
+    "hint": "Something about morning chores on the farm\u2026"
+  },
   "kit": [
     {
       "name": "shears",

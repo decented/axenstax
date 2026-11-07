@@ -11,6 +11,12 @@
     { "block": "amethyst_block", "at": [1, 1, 1] },
     { "block": "glass", "at": [1, 1, 0] }
   ],
+  "unlock": {
+    "after": [
+      "craft"
+    ],
+    "hint": "Something about mixing colours\u2026"
+  },
   "kit": [
     {
       "name": "red_dye",
@@ -38,13 +44,42 @@
     }
   ],
   "objective": {
-    "Action": {
-      "event": "CraftItem",
-      "count": 3
+    "Checklist": {
+      "items": [
+        {
+          "Action": {
+            "event": {
+              "CraftItem": {
+                "item": "orange_dye"
+              }
+            },
+            "count": 1
+          }
+        },
+        {
+          "Action": {
+            "event": {
+              "CraftItem": {
+                "item": "green_dye"
+              }
+            },
+            "count": 1
+          }
+        },
+        {
+          "Action": {
+            "event": {
+              "CraftItem": {
+                "item": "purple_dye"
+              }
+            },
+            "count": 1
+          }
+        }
+      ]
     }
   },
   "game_mode": "creative",
-  "world_type": "flat",
   "time_lock": "day",
   "mobs_enabled": false,
   "arena": {
@@ -66,5 +101,6 @@
         "block": "stone"
       }
     ]
-  }
+  },
+  "world_type": "flat"
 }

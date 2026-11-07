@@ -11,6 +11,12 @@
     { "block": "hay_bale", "at": [1, 2, 0] },
     { "block": "fence_post", "at": [1, 1, 1] }
   ],
+  "unlock": {
+    "after": [
+      "rancher"
+    ],
+    "hint": "Something about a very silly zoo\u2026"
+  },
   "kit": [
     {
       "name": "bone",

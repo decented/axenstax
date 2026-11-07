@@ -1,6 +1,6 @@
 {
   "kind": "Challenge",
-  "display_name": "Follow the Plan — raise a little hut block by block, following the ghost guide",
+  "display_name": "Follow the Plan \u2014 raise a little hut block by block, following the ghost guide",
   "card_art": [
     { "block": "grass", "at": [0, 0, 0] },
     { "block": "grass", "at": [1, 0, 0] },
@@ -11,6 +11,12 @@
     { "block": "glass", "at": [1, 2, 0] },
     { "block": "glass", "at": [1, 1, 1] }
   ],
+  "unlock": {
+    "after": [
+      "build"
+    ],
+    "hint": "Something about building from a plan\u2026"
+  },
   "kit": [
     {
       "name": "hut_plan",
@@ -32,7 +38,7 @@
     }
   },
   "game_mode": "creative",
-  "world_type": "flat",
   "time_lock": "day",
-  "mobs_enabled": false
+  "mobs_enabled": false,
+  "world_type": "flat"
 }

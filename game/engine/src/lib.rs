@@ -376,6 +376,7 @@ mod trials_diorama;
 mod trials_diorama_ui;
 mod trials_gallery;
 mod trials_gallery_ui;
+mod trials_unlock;
 mod ravine_gen;
 mod mineshaft_gen;
 mod villager_ui;

@@ -1,6 +1,6 @@
 {
   "kind": "Challenge",
-  "display_name": "Saddle Up \u2014 Climb aboard a horse and feel the world move under you.",
+  "display_name": "Saddle Up \u2014 climb aboard a horse or a Nostrich and feel the world move under you",
   "card_art": [
     { "block": "grass", "at": [0, 0, 0] },
     { "block": "grass", "at": [1, 0, 0] },
@@ -72,6 +72,14 @@
         ],
         "mob": "horse",
         "count": 1
+      },
+      {
+        "at": [
+          5,
+          0,
+          1
+        ],
+        "mob": "nostrich"
       }
     ]
   }

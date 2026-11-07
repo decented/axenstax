@@ -58,9 +58,8 @@ impl RowKind {
     }
 }
 
-/// Which row a trial belongs in: anything typed `Race` (both the ghost races
-/// and the Roadrunner challenge) plus Scavenger go against the clock; the rest
-/// sit on their own shelf.
+/// Which row a trial belongs in: anything typed `Race` (the ghost races) plus
+/// Scavenger go against the clock; the rest sit on their own shelf.
 pub fn row_kind_of(ttype: TrialType, tref: TrialRef) -> RowKind {
     let scavenge = matches!(tref, TrialRef::Challenge(t) if t == CLOCK_CHALLENGE);
     if ttype == TrialType::Race || scavenge {
@@ -417,18 +416,18 @@ mod tests {
     }
 
     #[test]
-    fn the_clock_row_holds_the_races_roadrunner_and_scavenger() {
+    fn the_clock_row_holds_the_races_and_scavenger() {
         let rows = row_specs();
         let clock = rows.iter().find(|r| r.kind == RowKind::Clock).expect("a clock row");
         let t = tokens(clock);
-        for want in ["sprint", "cross-country", "marathon", "roadrunner", "scavenger"] {
+        for want in ["sprint", "cross-country", "marathon", "scavenger"] {
             assert!(t.contains(&want), "{want} should be against the clock: {t:?}");
         }
         // Scavenger is typed Make in TRIAL_ORDER but must not stay on that shelf.
         let make = rows.iter().find(|r| r.kind == RowKind::Shelf(TrialType::Make)).unwrap();
         assert!(!tokens(make).contains(&"scavenger"));
         // Nothing else leaks into the clock row.
-        assert_eq!(t.len(), 5, "{t:?}");
+        assert_eq!(t.len(), 4, "{t:?}");
     }
 
     #[test]

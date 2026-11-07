@@ -475,6 +475,12 @@ pub struct ScenarioDef {
     /// trial plays. `trials_lint` checks that a bundled value resolves.
     #[serde(default)]
     pub card_art: Option<crate::trials_diorama::CardArtDef>,
+    /// Trials in Two Acts §A.5 — unlock by doing: when this trial appears in
+    /// the gallery (`on` any of these events, or `after` all of these trials),
+    /// with a one-line hint while it is hidden. `None` = always visible (the
+    /// front shelf). See `trials_unlock`.
+    #[serde(default)]
+    pub unlock: Option<crate::trials_unlock::TrialUnlock>,
 }
 
 /// Scaffolding for a Challenge's fresh arena — see [`ScenarioDef::arena`].
@@ -872,6 +878,7 @@ pub fn builtin_test_def() -> ScenarioDef {
         mobs_enabled: None,
         trial_race: None,
         card_art: None,
+        unlock: None,
         arena: None,
     }
 }
@@ -930,31 +937,22 @@ pub const EXPLORER_CHALLENGES: &[(&str, &[u8])] = &[
     ("logic-gate", include_bytes!("../assets/scenarios/explorer-logic-gate.json")),
     ("piston", include_bytes!("../assets/scenarios/explorer-piston.json")),
     ("rail-rider", include_bytes!("../assets/scenarios/explorer-rail-rider.json")),
-    ("booby-trap", include_bytes!("../assets/scenarios/explorer-booby-trap.json")),
     ("bucket", include_bytes!("../assets/scenarios/explorer-bucket.json")),
     ("workshop-publish", include_bytes!("../assets/scenarios/explorer-workshop-publish.json")),
     ("kill", include_bytes!("../assets/scenarios/explorer-kill.json")),
     ("armour-up", include_bytes!("../assets/scenarios/explorer-armour-up.json")),
     ("breach-and-clear", include_bytes!("../assets/scenarios/explorer-breach-and-clear.json")),
-    ("eat", include_bytes!("../assets/scenarios/explorer-eat.json")),
     ("harvest", include_bytes!("../assets/scenarios/explorer-harvest.json")),
     ("farmhand", include_bytes!("../assets/scenarios/explorer-farmhand.json")),
     ("rancher", include_bytes!("../assets/scenarios/explorer-rancher.json")),
-    ("mule-maker", include_bytes!("../assets/scenarios/explorer-mule-maker.json")),
     ("tame-wolf", include_bytes!("../assets/scenarios/explorer-tame-wolf.json")),
-    ("friend-in-need", include_bytes!("../assets/scenarios/explorer-friend-in-need.json")),
     ("fish", include_bytes!("../assets/scenarios/explorer-fish.json")),
     ("ride", include_bytes!("../assets/scenarios/explorer-ride.json")),
-    ("fish-feast", include_bytes!("../assets/scenarios/explorer-fish-feast.json")),
     ("vendor-sale", include_bytes!("../assets/scenarios/explorer-vendor-sale.json")),
     ("claim-plot", include_bytes!("../assets/scenarios/explorer-claim-plot.json")),
     ("scavenger", include_bytes!("../assets/scenarios/explorer-scavenger.json")),
-    ("roadrunner", include_bytes!("../assets/scenarios/explorer-roadrunner.json")),
     ("lava-floor", include_bytes!("../assets/scenarios/explorer-lava-floor.json")),
-    ("kaboomtown", include_bytes!("../assets/scenarios/explorer-kaboomtown.json")),
-    ("monster-mash", include_bytes!("../assets/scenarios/explorer-monster-mash.json")),
     ("funny-farm", include_bytes!("../assets/scenarios/explorer-funny-farm.json")),
-    ("splash-zone", include_bytes!("../assets/scenarios/explorer-splash-zone.json")),
     ("champion", include_bytes!("../assets/scenarios/explorer-champion.json")),
     ("generator", include_bytes!("../assets/scenarios/explorer-generator.json")),
     ("obsidian", include_bytes!("../assets/scenarios/explorer-obsidian.json")),
@@ -964,8 +962,6 @@ pub const EXPLORER_CHALLENGES: &[(&str, &[u8])] = &[
     // the solo-queue features that had no trial at all (build-along, the skin
     // painter, Rig Studio).
     ("copper-rush", include_bytes!("../assets/scenarios/explorer-copper-rush.json")),
-    ("mill-race", include_bytes!("../assets/scenarios/explorer-mill-race.json")),
-    ("catch-the-wind", include_bytes!("../assets/scenarios/explorer-catch-the-wind.json")),
     ("follow-the-plan", include_bytes!("../assets/scenarios/explorer-follow-the-plan.json")),
     ("fresh-coat", include_bytes!("../assets/scenarios/explorer-fresh-coat.json")),
     ("bouncer", include_bytes!("../assets/scenarios/explorer-bouncer.json")),
@@ -1064,6 +1060,47 @@ pub struct TaskList {
     pub routes: Vec<RouteTasks>,
 }
 
+impl TaskList {
+    /// The lines as display groups: one unnamed group for a plain list, or
+    /// one group per `AnyOf` route (`name` = the route's name; show "Pick a
+    /// way:" above them). Each line comes with its flat index, which is what
+    /// `ScenarioState::step_status` / `current_step` speak.
+    pub fn groups(&self) -> Vec<TaskGroup<'_>> {
+        if self.routes.is_empty() {
+            return vec![TaskGroup {
+                name: None,
+                ordered: self.ordered,
+                lines: self.lines.iter().map(String::as_str).enumerate().collect(),
+            }];
+        }
+        let mut start = 0;
+        self.routes
+            .iter()
+            .map(|r| {
+                let end = (start + r.len).min(self.lines.len());
+                let g = TaskGroup {
+                    name: Some(r.name.as_str()),
+                    ordered: r.ordered,
+                    lines: (start..end).map(|i| (i, self.lines[i].as_str())).collect(),
+                };
+                start = end;
+                g
+            })
+            .collect()
+    }
+}
+
+/// One display group of a [`TaskList`] — see [`TaskList::groups`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TaskGroup<'a> {
+    /// The `AnyOf` route's name; `None` for a plain list.
+    pub name: Option<&'a str>,
+    /// Number the lines (the steps are ordered).
+    pub ordered: bool,
+    /// `(flat index, line)`.
+    pub lines: Vec<(usize, &'a str)>,
+}
+
 /// One `AnyOf` route's slice of a [`TaskList`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RouteTasks {
@@ -1137,46 +1174,35 @@ pub fn trial_task_labels(token: &str) -> &'static [&'static str] {
     match token {
         "onboarding" => &["Dig up 4 blocks", "Craft your first item", "Place 6 blocks to build a shelter", "Cook a meal on the campfire"],
         "mine" => &["Mine 20 blocks to open up your quarry"],
-        "craft" => &["Chop down the oak tree (3 logs)", "Craft wooden planks", "Build a workbench and place it down", "Make a wooden pickaxe and a sword"],
+        "craft" => &["Chop down the oak tree (3 logs)", "Craft wooden planks", "Build a workbench and place it down", "Make a wooden pickaxe", "Make a wooden sword"],
         "smelt" => &["Place the furnace", "Smelt raw iron into a shining ingot", "Forge an iron pickaxe"],
-        "cook-three" => &["Cook 3 meals over the campfire"],
-        "build" => &["Place 30 blocks — raise a house with walls, a door and a window"],
+        "cook-three" => &["Catch a fish from the pond", "Cook it on the campfire", "Eat your fresh meal", "Cook a meal on the campfire", "Eat your fill", "Cook 3 meals over the campfire"],
+        "build" => &["Hang the door", "Set a glass window", "Place 30 more blocks to raise the walls and roof"],
         "power" => &["Lay 4 cables from the lever toward the lamp", "Place the lever", "Flip the lever to light the lamp"],
         "logic-gate" => &["Place the motion sensor", "Wire 3 cables through the logic gate", "Make it trip the lamp automatically"],
         "piston" => &["Place the sticky piston against the wall", "Run 2 cables from the lever", "Flip the lever to slide the door open"],
         "rail-rider" => &["Lay 3 rail tracks in a line", "Drop a cart on and ride it"],
-        "booby-trap" => &["Place the blasting keg behind the wall", "Wire the pressure plate to it (2 cables)", "Step on the plate — boom!"],
-        "bucket" => &["Scoop water from the pond with your bucket", "Pour it into the dry trough"],
-        "workshop-publish" => &["Design a reskin in the Workshop", "Publish it for the whole world"],
+        "bucket" => &["Build a pool wall from 8 glass blocks", "Fill your bucket at the pond and pour it into your pool (twice)", "Scoop water from the pond with your bucket", "Pour it into the dry trough"],
+        "workshop-publish" => &["Craft a drafting stamp (iron ingot + blueprint paper)", "Publish your reskin for the whole world"],
         "kill" => &["Defeat 3 raiders at the gate"],
-        "armour-up" => &["Smelt iron in the furnace", "Forge 4 pieces of iron armour", "Defeat 2 raiders"],
-        "breach-and-clear" => &["Blow open the stone wall", "Defeat the raider hiding behind it"],
-        "eat" => &["Cook a meal on the campfire", "Eat your fill"],
-        "harvest" => &["Harvest 4 grown wheat"],
+        "armour-up" => &["Smelt iron in the furnace", "Forge an iron helmet", "Forge an iron chestplate", "Forge iron leggings", "Forge iron boots", "Defeat 2 raiders"],
+        "breach-and-clear" => &["Place a pressure plate", "Wire a blasting keg to it and set it off", "Blow open the stone wall", "Defeat the raider hiding behind it", "Set off 3 blasts to bring the tower down"],
+        "harvest" => &["Grow and harvest 4 wheat"],
         "farmhand" => &["Shear a sheep or milk a cow — 2 chores in all"],
-        "rancher" => &["Feed two cows wheat until a calf is born"],
-        "mule-maker" => &["Feed a horse and a donkey wheat until a mule foal is born"],
-        "tame-wolf" => &["Tame a wild wolf with bones"],
-        "friend-in-need" => &["Tame a cat, parrot or fox — your pick"],
+        "rancher" => &["Feed the horse and the donkey until a mule foal is born", "Feed a pair of the same animal until a baby appears"],
+        "tame-wolf" => &["Tame an animal — a wolf, cat, parrot or fox"],
         "fish" => &["Catch 2 fish from the pond"],
-        "ride" => &["Climb aboard a horse and ride"],
-        "fish-feast" => &["Catch a fish from the pond", "Cook it on the campfire", "Eat your fresh meal"],
+        "ride" => &["Climb aboard a horse or a Nostrich and ride"],
         "vendor-sale" => &["Trade your spare stone with the vendor"],
         "claim-plot" => &["Plant a claim marker", "Place a block on your new land"],
         "scavenger" => &["Grab as many DIFFERENT things as you can before time runs out"],
-        "roadrunner" => &["Saddle up a Nostrich and take her for a ride"],
         "lava-floor" => &["Place 20 blocks to bridge across the lava sea"],
-        "kaboomtown" => &["Blow the whole tower sky-high"],
-        "monster-mash" => &["Defeat all 6 monsters in the pit"],
         "funny-farm" => &["Tame an animal", "Breed a pair of animals", "Ride an animal", "Shear a sheep or milk a cow"],
-        "splash-zone" => &["Use your bucket 5 times to build a water park"],
         "champion" => &["Defeat the valley's fiercest raider"],
-        "generator" => &["Place 3 generator blocks", "Switch on your home-made power"],
+        "generator" => &["Place the water wheel in the falling water", "Get the wheel turning in the current", "Wire it up and light a lamp", "Place the windmill on the hilltop platform", "Let the storm get the sails turning", "Wire it up and light a lamp", "Place the hand crank", "Wire it to a lamp and crank it until the lamp lights"],
         "obsidian" => &["Pour lava beside water, then mine the obsidian you made"],
-        "dye" => &["Mix and craft 3 dyes"],
+        "dye" => &["Mix red and yellow into orange dye", "Mix yellow and blue into green dye", "Mix blue and red into purple dye"],
         "copper-rush" => &["Mine 3 copper ore out of the rock face", "Smelt copper ore into a copper ingot", "Craft your first length of cable"],
-        "mill-race" => &["Place the water wheel in the falling water", "Get the wheel turning in the current", "Wire it up and light the lamp"],
-        "catch-the-wind" => &["Place the windmill on the hilltop platform", "Let the gale get the sails turning", "Wire it up and light the lamp"],
         "follow-the-plan" => &["Follow the ghost guide until the hut is finished"],
         "fresh-coat" => &["Paint the mannequin, then pin it on to wear it"],
         "bouncer" => &["Build a rig, give it the Bounce clip, and spawn it"],
@@ -1248,12 +1274,12 @@ pub fn challenge_help(name: &str) -> (&'static str, &'static str) {
             "Place the furnace with RIGHT-CLICK, then RIGHT-CLICK it to open it. Drop coal in the bottom fuel slot and raw iron in the top. Watch the flames — when a shiny iron ingot pops out, pull it into your inventory. Then take that ingot to the crafting table and forge an iron pickaxe. Real metalwork!",
         ),
         "cook-three" => (
-            "Light a campfire and cook three pieces of food till they're golden.",
-            "Place your campfire (right-click), drop in the sticks as fuel and light it with the flint & steel (right-click the fire). Now put raw meat on it and wait for it to brown — take 3 cooked pieces off to finish. Smells good already!",
+            "Light a campfire and cook — three meals, one you eat, or a fish you caught yourself.",
+            "Place your campfire (right-click), drop in the sticks as fuel and light it with the flint & steel (right-click the fire). Put raw food on it and wait for it to brown, then take it off. Pick a way: cook three pieces; or cook one and eat it (hold it and right-click); or cast your fishing rod into the pond, reel in a fish, cook it and eat that. Any one of them finishes the trial. Smells good already!",
         ),
         "build" => (
-            "Free-build a tiny house: four walls, a glass window, a door, and a sign out front.",
-            "You've got a stack of blocks, glass, a door, and a sign. Fly around with creative mode and RIGHT-CLICK to place blocks. Build four walls about three high on the marked-out floor, leave a gap for the door and pop it in, frame a glass window, and hang a sign by the entrance. Make it yours — there's no single right shape!",
+            "Free-build a tiny house: walls, a glass window and a door.",
+            "You've got a stack of blocks, glass, a door, and a sign. Fly around with creative mode and RIGHT-CLICK to place blocks. Pop the door in, frame a glass window, and build walls about three high on the marked-out floor — 30 more blocks in all. Hang the sign by the entrance if you like. Make it yours — there's no single right shape!",
         ),
         "power" => (
             "Run cable from a lever to an electric lamp and flip the switch — let there be light!",
@@ -1271,69 +1297,49 @@ pub fn challenge_help(name: &str) -> (&'static str, &'static str) {
             "Lay down rail, set a minecart on the line, hop in, and ride the railway you just built.",
             "Build a railway! RIGHT-CLICK to lay rail blocks in a line along the ground — make it as long as you like. Then place a cart on the track and RIGHT-CLICK it to climb aboard. Give yourself a push and roll down the line you laid. You're the engineer AND the driver.",
         ),
-        "booby-trap" => (
-            "Wire a pressure plate to a blasting keg, then step on the plate and trigger your own KABOOM.",
-            "Time to build a trap. Place the blasting keg behind the wall, set a pressure plate on the floor in front, and run cable between them so the plate is wired to the keg. Then walk onto the plate yourself — CLICK — the keg goes off in a satisfying explosion. You've built a real booby trap. Stand clear!",
-        ),
         "bucket" => (
-            "Scoop water, walk it over, and fill the dry trough.",
-            "Hold the empty bucket and right-click on the blue water source to scoop it up — your bucket fills. Walk to the empty stone trough on the right and right-click into it to pour the water back out. Refill once more and pour it into the second slot. Watch the trough fill up where it was dry before!",
+            "Carry water in a bucket — into the dry trough, or into a glass pool you build yourself.",
+            "Hold the empty bucket and right-click on the blue water to scoop it up — your bucket fills. Then pick a way: walk to the empty stone trough and right-click into it to pour the water out, then do it once more; or first build a pool wall from 8 blocks of glass on the cobblestone pad, then fill your bucket at the pond and pour it in, twice. Watch the water land where it was dry before!",
         ),
         "workshop-publish" => (
             "Make a drafting stamp, then publish your reskin to share.",
-            "This is a maker's trial! At the crafting table, craft a drafting stamp from your blueprint paper and plan — that's your design tool. Then open chat with T and use the workshop publish command (type /help if you forget it) to publish your reskin so other players can use your creation. You're a published creator now!",
+            "This is a maker's trial! At the crafting table, craft a drafting stamp from an iron ingot and a sheet of blueprint paper — that's your design tool. Then open chat with T and use the workshop publish command (type /help if you forget it) to publish your reskin so other players can use your creation. You're a published creator now!",
         ),
         "kill" => (
             "Grab the sword, hold the gate, and drive off three raiders.",
             "You spawn behind a little stone wall with a gate. A stone_sword is in your hotbar — press 1 to hold it. Three brigands rush in from the front. Face them and LEFT-CLICK to swing. Keep hitting each one until it falls, then turn to the next. Back up against the wall if they crowd you.",
         ),
         "armour-up" => (
-            "Smelt iron, forge four pieces of gear at the bench, then fight the raiders in style.",
-            "First make metal: put raw iron and coal in the furnace and take the iron INGOTS out (that's a smelt). At the crafting table, forge FOUR pieces of iron gear — armour if you like, or iron tools — one craft at a time. Then hold your iron sword (press 1) and LEFT-CLICK the two raiders until they fall. Do it in any order you like.",
+            "Smelt iron, forge a full suit of iron armour at the bench, then fight the raiders in style.",
+            "First make metal: put raw iron and coal in the furnace and take the iron INGOTS out (that's a smelt). At the crafting table, forge the four pieces of iron armour — a helmet, a chestplate, leggings and boots — one craft at a time. Then hold your iron sword (press 1) and LEFT-CLICK the two raiders until they fall. Do it in any order you like.",
         ),
         "breach-and-clear" => (
-            "Plant a blasting keg by the wall, spark it, then storm through the rubble.",
-            "A thick stone wall blocks your path with a raider waiting behind it. Right-click to PLACE the blasting_keg right against the wall, then hold your flint_and_steel (press 2) and right-click the keg to light it — stand back, BOOM! Walk through the hole and LEFT-CLICK the raider with your sword.",
-        ),
-        "eat" => (
-            "Cook raw meat on the campfire, then eat it to fill your hunger back up.",
-            "Light the campfire with the flint & steel (it burns the sticks for fuel), lay raw beef on it and wait, then take the cooked food OFF. Now hold the cooked meat (press 1) and HOLD right-click to eat it. If nothing happens you're already full — sprint and jump around for a moment to work up an appetite, then eat. A good meal, made by you.",
+            "Blow it up your way: breach the raider's wall, rig a pressure-plate trap, or bring a tower down.",
+            "Right-click to PLACE a blasting keg, then hold your flint and steel and right-click the keg to light it — stand back, BOOM! Pick a way. Breach: put a keg against the stone wall, blow it open, walk through the hole and LEFT-CLICK the raider with your sword. Trap: put a pressure plate down, run cable from it to a keg, and set the keg off. Tower: set off three blasts at the old stone tower until it comes down.",
         ),
         "harvest" => (
             "Till the soil, plant seeds, sprinkle bone meal, reap the gold.",
-            "Hold the hoe and right-click the brown dirt in front of you to till it into soil. Then hold wheat seeds and right-click the tilled soil to plant them. Sprinkle bone meal (right-click the little sprouts) to make them shoot up fast, and when the wheat turns tall and golden, left-click to harvest it. Bring in 4 mature crops to finish.",
+            "Hold the hoe and right-click the brown dirt in front of you to till it into soil. Then hold wheat seeds and right-click the tilled soil to plant them. Sprinkle bone meal (right-click the little sprouts) to make them shoot up fast, and when the wheat turns tall and golden, left-click to harvest it. Grow and bring in 4 crops to finish.",
         ),
         "farmhand" => (
             "Shear a sheep AND milk a cow — two chores, any order.",
             "Walk up to the fuzzy sheep, hold the shears and right-click it — its wool pops right off. Then walk to the cow, hold the empty bucket and right-click it to fill the bucket with milk. Do both, in any order you like, and the chores are done.",
         ),
         "rancher" => (
-            "Feed two cows wheat so they breed a wobbly little calf.",
-            "Hold the wheat and right-click ONE cow to feed it — little hearts will float above its head. Then right-click the OTHER cow to feed it too. When both are in 'love mode' they'll pair up and a tiny calf will pop out between them. Feed both cows to make it happen!",
-        ),
-        "mule-maker" => (
-            "Feed a horse and a donkey wheat until they breed a sturdy mule foal.",
-            "A mule only comes from ONE pairing in the whole animal kingdom here: a horse AND a donkey. Hold the wheat, CROUCH, and right-click the horse to feed it — hearts will float above its head. CROUCH and right-click the donkey with wheat too. When both are in 'love mode' they'll pair up and a mule foal appears between them. Any other pairing just makes more of the same animal — it takes the cross to get a mule.",
+            "Feed a pair of animals wheat until a baby appears — or a horse and a donkey for a mule.",
+            "Hold the wheat and right-click ONE cow to feed it — little hearts float above its head. Then feed the OTHER cow too. When both are in 'love mode' they pair up and a tiny calf appears. For a mule instead, feed the horse and the donkey in the next pen the same way: a sturdy mule foal is the only baby those two can have.",
         ),
         "tame-wolf" => (
-            "Feed a wild wolf bones until it becomes your loyal pet.",
-            "Walk up to the wolf, hold a bone, and right-click it to give the bone. Keep right-clicking with bones — it may take a few — and watch for the moment hearts burst out and a collar appears. That's your new best friend, tamed and yours.",
-        ),
-        "friend-in-need" => (
-            "Win over a cat, parrot or fox with its favourite food — any one of them counts.",
-            "Three shy companions are waiting nearby: a cat, a parrot and a fox. Cats love raw fish, parrots love wheat seeds, and foxes love berries — hold the right food and right-click the animal you fancy. It may take a couple of tries, so keep offering. The moment hearts burst out, that animal is yours for good — you only need ONE new friend to finish.",
+            "Win over a wolf, cat, parrot or fox with the food it loves until it is yours for life.",
+            "A wolf loves bones, a cat loves raw fish, a parrot loves seeds and a fox loves berries. Hold the right food, walk up to the animal and right-click to offer it. Keep offering — it may take a few — and watch for the moment hearts burst out. That's your new best friend, tamed and yours.",
         ),
         "fish" => (
             "Cast your rod into the pond and reel in a fish.",
             "Stand on the stone dock facing the water, hold the fishing rod and right-click to cast your line out onto the pond. Now wait — when the bobber dips and you see splashes, right-click again FAST to yank the fish in. Land 2 fish to finish.",
         ),
         "ride" => (
-            "Hop on the horse and take your first ride.",
-            "Walk right up to the horse and right-click it to climb on. Once you're in the saddle, use your normal walk keys to trot it forward — give it a little ride around the paddock. Mounting up is all it takes to finish.",
-        ),
-        "fish-feast" => (
-            "Catch a fish, cook it on the fire, then eat your own catch.",
-            "First, hold the rod and cast onto the pond with right-click, then snap it back when the bobber dips to land a fish. Carry your catch to the campfire and right-click the fire to set it cooking — wait for it to brown, then right-click again to take the cooked fish off. Finally, hold the cooked fish and hold right-click to eat it. Catch, cook, eat — a full meal, start to finish! If nothing happens when you eat, you're already full — sprint and jump around for a moment to work up an appetite, then tuck in.",
+            "Hop on the horse or the Nostrich and take your first ride.",
+            "Walk right up to the horse or the Nostrich and right-click it to climb on. Once you're in the saddle, use your normal walk keys to move — give it a little ride around. Mounting up is all it takes to finish.",
         ),
         "vendor-sale" => (
             "Trade your stone for warm bread at the village stall — a fair barter.",
@@ -1352,16 +1358,16 @@ pub fn challenge_help(name: &str) -> (&'static str, &'static str) {
             "This is a real boss fight. You've got an iron sword, a bow with arrows, and bread to heal. Soften the berserker from range first — hold the bow (press 2) and right-click to fire arrows. When it closes in, switch to your sword (press 1) and LEFT-CLICK, backing away between swings. Eat bread (hold right-click) whenever your health drops. Stand your ground until the giant falls!",
         ),
         "generator" => (
-            "Light a lamp from a generator you build — a hand crank or steam engine, no lever needed.",
-            "No lever this time — you're making the power yourself. Place a hand crank (or the steam generator) and run copper cable from it to the electric lamp on the far wall. Set the generator running and the lamp glows — electricity you made from nothing but elbow grease. Real power engineering! (In a normal world the copper for all of this comes out of the ground — Copper Rush is the trial that teaches the dig.)",
+            "Make your own electricity three ways — a water wheel, a windmill in the storm, or a hand crank.",
+            "No lever this time — you're making the power yourself. Pick a way. Water wheel: place it where the spring tumbles off the stone pillar so the falling water turns it. Windmill: place it up on the hilltop platform and let the storm wind spin the sails. Hand crank: place it and turn it yourself. Then run copper cable from your power source to an electric lamp and watch it glow. (In a normal world the copper for all of this comes out of the ground — Copper Rush is the trial that teaches the dig.)",
         ),
         "obsidian" => (
             "Handle a bucket of lava, meet it with water, and forge the toughest stone there is.",
             "Lava plus water makes obsidian — the hardest stone in the world. Hold the lava bucket and right-click to pour it onto the stone pad. Now hold the water bucket and pour it right next to the lava. Where they touch, the lava hardens into shiny black obsidian — give it a moment to freeze solid, then LEFT-CLICK to mine the block out and finish the trial. Careful — lava burns, so pour from the edge!",
         ),
         "dye" => (
-            "Mix dyes into new shades and paint papyrus into bright wallpaper — your own colour lab.",
-            "Time to play with colour! At the crafting table, combine two dyes to make a new shade — red and yellow make orange, blue and white make light blue. Then dye a sheet of papyrus with any colour to make bright wallpaper. Make three colourful things and your colour lab is open for business!",
+            "Mix new shades from your dyes — orange, green and purple.",
+            "Time to play with colour! At the crafting table, put two dyes side by side to mix a new shade: red and yellow make orange, yellow and blue make green, and blue and red make purple. Make all three and your colour lab is open. (Then try white with any colour for a lighter shade, or dye a sheet of papyrus into bright wallpaper.)",
         ),
         "scavenger" => (
             "Three minutes, survival, empty pockets — grab and craft as many DIFFERENT things as you can.",
@@ -1371,37 +1377,13 @@ pub fn challenge_help(name: &str) -> (&'static str, &'static str) {
             "The playground classic, for REAL — the whole floor is lava! Build blocks to make your own way across.",
             "Look down — that whole glowing orange floor is LAVA, and you do NOT want to touch it! Lucky you've got a giant stack of blocks. Right-click to place a block, hop onto it, and place the next — build your own islands and bridges all the way across the lava sea. Lay down 20 blocks to claim your path. You're flying in creative so it's totally safe... but pretend it isn't!",
         ),
-        "kaboomtown" => (
-            "Demolition time! Stack blasting kegs and set off the biggest, silliest chain of BOOMs you can.",
-            "See that tower? It's BEGGING to be demolished. You've got a pile of blasting kegs and a flint & steel. Right-click to place kegs against the tower (the more the merrier!), then light one with the flint & steel and RUN. Set off at least three big booms to bring it down. Stand WELL back — this is going to be loud!",
-        ),
-        "monster-mash" => (
-            "It's a monster mosh pit and you're the bouncer — gear up and bonk a whole rowdy crowd of raiders!",
-            "A crowd of brigands has crashed the party and you're on bouncer duty! You've got an iron sword, a bow with arrows, and a pile of bread to keep your health up. Keep your back to the wall, LEFT-CLICK to bonk them one at a time, and fire arrows (hold the bow, key 2) at the ones still coming. Bonk SIX of them to clear the pit. Munch bread whenever you're hurt. Mosh on!",
-        ),
         "funny-farm" => (
             "Assemble a wonderfully wacky menagerie: tame a wolf, breed the cows, ride a horse, and shear a sheep.",
             "Welcome to your very own funny farm! There's a whole crew of critters here, and four jobs to do — in ANY order: tame the wolf with a bone, feed BOTH cows wheat so they make a calf, hop on the horse for a ride, and give the sheep a haircut with the shears. Pull out the right item for each and right-click the animal. Round 'em all up!",
         ),
-        "splash-zone" => (
-            "Grab your buckets and flood the place — build a wild and wet water park, one splash at a time!",
-            "Time to make a splash! You've got a stack of buckets full of water and a big walled pool. Right-click to pour water out wherever you like — fill the pool, send waterfalls over the edge, splash it everywhere! Pour water out FIVE times to get your park flowing. Run dry? Right-click the water you just poured to refill an empty bucket. The wetter and wackier, the better!",
-        ),
-        "roadrunner" => (
-            "Saddle up a Nostrich and take her for a ride — climbing aboard is all it takes to finish.",
-            "Right-click the Nostrich to hop on — that's the trial done! Stick around for the fun bit, though: HOLD FORWARD and she builds from a trot into a blazing sprint (watch the speed bar fill at the top). The faster you go, the more you DRIFT on turns — and you can HOLD CROUCH to drift even at lower speeds, Mario-Kart style! Wind all the way up and aim at the lake: get fast enough (watch for the '💧 SKIM!' flash) and you'll run right across the top of the water! Slow down over the lake and... SPLASH — you sink and fall off. Sneak to hop off.",
-        ),
         "copper-rush" => (
             "Dig copper straight out of the rock, smelt it to an ingot, and draw your first cable.",
             "Copper starts life as ORE in the stone. Hold the stone pickaxe (press 1) and LEFT-CLICK-and-hold the orange-flecked blocks in the rock face — three of them. (A wooden pickaxe is too soft: copper needs stone or better, or the ore just crumbles to nothing.) Now place the furnace with RIGHT-CLICK and RIGHT-CLICK it to open it: coal in the bottom slot, copper ore in the top, and pull the shiny COPPER INGOT out when it pops. Last step: put the crafting table down, RIGHT-CLICK it, and lay Rubber / Copper Ingot / Rubber in a row across the middle — that's a length of cable, the wire every machine in the game runs on.",
-        ),
-        "mill-race" => (
-            "Drop a water wheel into the falls, let the current spin it, and let it light your lamp.",
-            "See the spring on top of the stone pillar? Water spills off it and falls all the way down — that falling water is a CURRENT, and a current is what turns a wheel. RIGHT-CLICK to place the water wheel right in the falling water (or in the pool at the bottom, touching the flow). Watch it: the moment it catches the current the sails start to spin. Now run cable from the wheel — RIGHT-CLICK, block by block — over to the electric lamp, place the lamp at the end, and it lights itself. No lever, no switch: the stream is doing the work. A still pond won't do it — it has to be moving water.",
-        ),
-        "catch-the-wind" => (
-            "Put a windmill up on the hilltop platform in a thunderstorm and let the gale drive your lamp.",
-            "It's blowing a gale up here — perfect mill weather. Fly up (double-tap SPACE, then SPACE to rise) to the stone platform and RIGHT-CLICK to place the windmill on it. A mill needs OPEN SKY above it, so don't build a roof over it. Give it a moment and the sails start to turn on their own. Then run cable down from the mill — RIGHT-CLICK, block by block — and put the electric lamp at the far end. The higher a mill stands the more wind it catches, which is why it's worth the climb.",
         ),
         "follow-the-plan" => (
             "Lay a plan down as a ghost guide and build the little hut it shows you, block by block.",
@@ -1457,12 +1439,12 @@ pub fn trial_satoshi(name: &str) -> (&'static str, &'static str) {
             "No flames? The furnace needs coal in the lower slot AND raw iron in the upper slot before it'll start smelting.",
         ),
         "cook-three" => (
-            "A warm fire and a hot meal — that's the heart of any camp. Get yours crackling, lay on the meat, and cook three good pieces. Nothing tastes better than food you cooked yourself.",
-            "Light the campfire with the flint & steel first (it needs the sticks as fuel), then add raw food and wait for it to cook.",
+            "A warm fire and a hot meal — that's the heart of any camp. Roast a few good pieces, cook one and tuck in, or catch your own fish from the pond and cook that. Every way ends with a full belly.",
+            "Light the campfire with the flint & steel first (it needs the sticks as fuel). You can only eat when you're a little hungry.",
         ),
         "build" => (
-            "A blank floor is the best kind of invitation. Stack some walls, cut a window so the light comes in, hang a door and a sign — this is YOUR place. Build it however you dream it.",
-            "Keep placing blocks to raise the walls — a window is just a hole filled with glass, and the door snaps into a one-block gap.",
+            "A blank floor is the best kind of invitation. Hang a door, cut a window so the light comes in, stack up the walls — this is YOUR place. Build it however you dream it.",
+            "A window is just a gap filled with glass, and the door snaps into a one-block gap. Then keep placing blocks to raise the walls.",
         ),
         "power" => (
             "Electricity is just a path you build for power to travel. Drop a line of cable from this lever all the way to that lamp, flip the switch, and watch the whole lab light up. You're the engineer now.",
@@ -1480,13 +1462,9 @@ pub fn trial_satoshi(name: &str) -> (&'static str, &'static str) {
             "There's a special joy in laying your own track and then riding it. Run a line of rail across the ground, set a cart on top, and hop in — the railway is all yours. Let's get rolling.",
             "Lay several rail blocks in a connected line first, then place the cart ON the rail and right-click it to ride.",
         ),
-        "booby-trap" => (
-            "Every fortress needs a nasty surprise for uninvited guests. Hook a blasting keg up to a hidden pressure plate, then test it yourself — step on, and BOOM. Engineering can be loud and fun. Mind your eyebrows.",
-            "Wire the pressure plate to the blasting keg with cable, back up to a safe distance, then step onto the plate to set it off.",
-        ),
         "bucket" => (
-            "A bucket is the simplest little wonder there is — it lets you pick up a whole pond and carry it somewhere new. Scoop from the spring, carry it across, and pour it into the dry trough. The room changes shape in your hands.",
-            "Right-click the water with the bucket to fill it, then right-click the empty trough hole to pour it back out.",
+            "A bucket is the simplest little wonder there is — it lets you pick up a whole pond and carry it somewhere new. Fill the dry trough, or build a glass pool of your own and make a splash.",
+            "Right-click the water with the bucket to fill it, then right-click where you want it to pour it back out.",
         ),
         "workshop-publish" => (
             "The deepest joy here is making something other people get to use. Craft your drafting stamp, design your reskin, and publish it. Somewhere out there, a player you'll never meet will build with the thing you made today. That's the whole dream.",
@@ -1497,16 +1475,12 @@ pub fn trial_satoshi(name: &str) -> (&'static str, &'static str) {
             "Hold your sword with key 1 and left-click again and again on ONE raider until it drops, then turn to the next.",
         ),
         "armour-up" => (
-            "A real warrior makes their own gear before the fight. Smelt the iron, hammer out four good pieces at the bench, then show those two raiders what fresh iron can do.",
-            "Take the iron ingots OUT of the furnace, craft four iron pieces at the table, and swing your sword at the raiders — the order's up to you.",
+            "A real warrior makes their own gear before the fight. Smelt the iron, hammer out a helmet, a chestplate, leggings and boots at the bench, then show those two raiders what fresh iron can do.",
+            "Take the iron ingots OUT of the furnace, craft the four iron armour pieces at the table, and swing your sword at the raiders — the order's up to you.",
         ),
         "breach-and-clear" => (
-            "Some walls won't open with a key, friend — they open with a bang. Set that keg against the stone, spark it, and clear the way. Mind your eyebrows!",
-            "Place the blasting_keg touching the wall, then light it with flint_and_steel (key 2) and step back before it blows.",
-        ),
-        "eat" => (
-            "You can't adventure on an empty stomach, friend. Get that campfire going, roast some beef, and eat well. A fed explorer is a happy one.",
-            "Light the fire with the flint & steel, take the cooked meat OFF when it's done, then hold right-click to eat — if it won't eat, you're full, so dash about a moment first.",
+            "Some walls won't open with a key, friend — they open with a bang. Breach the raider's wall, rig a sneaky trap, or flatten the old tower. Mind your eyebrows!",
+            "Place the blasting keg first, then light it with the flint and steel and step well back before it blows.",
         ),
         "harvest" => (
             "Every great farm starts with one patch of dirt and a little patience. Here is your hoe and a pocket of seeds — let's coax some breakfast out of the ground together.",
@@ -1517,32 +1491,20 @@ pub fn trial_satoshi(name: &str) -> (&'static str, &'static str) {
             "Shears on the sheep, empty bucket on the cow — right-click each animal up close.",
         ),
         "rancher" => (
-            "Animals grow a herd when they're well fed and happy. Hold this wheat and offer some to each cow — watch for the little hearts, and a brand-new calf will soon join the pair.",
-            "Right-click EACH cow with wheat — both need hearts before a calf can appear.",
-        ),
-        "mule-maker" => (
-            "A mule isn't born from just any two animals, friend — it takes a horse AND a donkey, the one cross going in this whole valley. Feed them both some wheat and see what turns up between them.",
-            "Remember to CROUCH while you feed — a plain right-click just climbs into the saddle instead of offering the wheat.",
+            "Animals grow a herd when they're well fed and happy. Offer wheat to the cows for a calf — or try the horse and the donkey together and see what kind of foal turns up.",
+            "Feed BOTH animals of a pair — each needs hearts before a baby can appear.",
         ),
         "tame-wolf" => (
-            "That wolf is wild and wary, but a kind hand and a few bones can change everything. Hold a bone, step close, and right-click — keep offering until it trusts you.",
-            "Keep feeding bones — one isn't always enough. The burst of hearts means it's yours.",
-        ),
-        "friend-in-need" => (
-            "Every good companion starts out as a stranger. There's a cat, a parrot and a fox nearby, each with a favourite treat — work out which likes what, offer it, and be patient. One loyal friend is all you need.",
-            "Cat likes raw fish, parrot likes wheat seeds, fox likes berries. If it doesn't take the first time, just keep offering.",
+            "Every animal here is wild and wary, but kindness and the right snack change everything. A bone for the wolf, fish for the cat, seeds for the parrot, berries for the fox — pick your friend and keep offering until it trusts you.",
+            "Each animal wants its own food. Keep offering — the burst of hearts means it's yours.",
         ),
         "fish" => (
             "There's a quiet patience to fishing that I've always loved. Cast your line onto the pond, watch the bobber, and the moment it dips — snap it back and reel in your catch.",
             "Cast with right-click, then right-click again the instant the bobber dips and splashes.",
         ),
         "ride" => (
-            "Nothing covers ground quite like a good horse. Step up beside it and right-click to swing into the saddle — then the reins are yours. Off you go!",
-            "Get right next to the horse and right-click it to mount up.",
-        ),
-        "fish-feast" => (
-            "Here's the whole circle of a simple meal: catch it, cook it, eat it. Cast your rod onto the pond first, then bring your fish to the fire. There's real pride in eating something you made from nothing.",
-            "Order matters: catch the fish first, THEN cook it on the campfire, THEN eat it.",
+            "Nothing covers ground quite like a good mount. The horse is steady, the Nostrich is quick — step up beside either one and right-click to swing aboard. Off you go!",
+            "Get right next to the horse or the Nostrich and right-click it to mount up.",
         ),
         "vendor-sale" => (
             "Market day! A trade is just two people each handing over something the other wants more. You've got strong stone; the stall has warm bread. Swap it across — everyone walks away happier.",
@@ -1573,16 +1535,16 @@ pub fn trial_satoshi(name: &str) -> (&'static str, &'static str) {
             "Fire arrows with the bow (key 2) while he's far off, swap to the sword up close, and eat bread the moment your health dips.",
         ),
         "generator" => (
-            "A switch just borrows power that's already there. A generator MAKES it. Set down a hand crank or a steam engine, wire it to the lamp, and bring your own light into the world. You're the power station now.",
-            "Run cable from your generator (hand crank or steam generator) all the way to the lamp, then set it running — the lamp lights when power reaches it.",
+            "A switch just borrows power that's already there. A generator MAKES it. Catch the falling water with a wheel, catch the storm with a windmill, or crank one by hand — then wire it to a lamp and bring your own light into the world.",
+            "Run cable from your power source all the way to a lamp — it lights when power reaches it. The storm keeps the windmill turning.",
         ),
         "obsidian" => (
             "Here's a bit of earth-craft, friend: fire and water don't cancel out — together they make something new. Pour your lava onto the pad, splash water against it, and watch obsidian form, tough enough to outlast everything. Give it a moment to freeze solid, then dig it up to finish. Mind your toes around the lava.",
             "Pour the lava bucket first, then pour the water bucket right beside it — wait for the black obsidian to form, then mine it out.",
         ),
         "dye" => (
-            "Every world needs colour, and colour is something you MIX. Put two dyes together for a brand-new shade, then brush it onto papyrus for bright wallpaper. There's no wrong combination — make something that makes you smile.",
-            "On the crafting table: two dyes together make a new colour, and a dye plus a papyrus sheet makes coloured wallpaper. Craft three things to finish.",
+            "Every world needs colour, and colour is something you MIX. Orange, green and purple are all hiding in your red, yellow and blue — put two dyes together and find them.",
+            "On the crafting table, two dyes side by side make a new colour. Mix orange, green and purple to finish.",
         ),
         "scavenger" => (
             "Empty pockets, three minutes on the clock, and a whole world to rummage through! It's not how MUCH you grab — it's how many DIFFERENT things. Punch some wood, dig the ground, pick a flower, then craft something brand-new from what you found. Ready? Go, go, go!",
@@ -1592,37 +1554,13 @@ pub fn trial_satoshi(name: &str) -> (&'static str, &'static str) {
             "Everybody knows the rules: the floor is LAVA! I've turned this whole room into a bubbling orange sea, and the only way across is the path YOU build. Drop blocks, hop along them, make your islands. Don't touch the floor... or do, you're in creative — but where's the fun in that?",
             "Right-click to lay a block at your feet, step onto it, and keep going — a chain of islands all the way across the lava.",
         ),
-        "kaboomtown" => (
-            "Some days you build things up. Today? We knock 'em DOWN. Here's a heap of blasting kegs — stack 'em against that tower, light the fuse, and leg it. The bigger the boom, the better. Mind your eyebrows!",
-            "Place kegs right next to each other so one sets off the next, then light just ONE with the flint & steel and back away — boom, boom, BOOM!",
-        ),
-        "monster-mash" => (
-            "Hope you brought your dancing shoes, because this monster mosh pit is HOPPING — six rowdy raiders and you're the only bouncer. Grab that sword, keep the bread handy, and bonk 'em out one by one. It's loud, it's chaos, and it's a riot. GO!",
-            "Back into the wall so they can't surround you, bonk ONE at a time, and eat bread the second your health dips.",
-        ),
         "funny-farm" => (
             "Every great adventurer needs a sidekick or twelve! I've gathered a wonderfully silly bunch of critters for you — a wolf, some cows, a horse, a fluffy sheep. Tame, breed, ride and shear your way to the wackiest little zoo in the world. Off you go, farmer!",
             "One job per critter: a bone for the wolf, wheat for BOTH cows, an empty hand on the horse, shears on the sheep — any order you like.",
         ),
-        "splash-zone" => (
-            "Who says you can't bring the beach indoors? Here are your buckets — go wild! Pour water into the pool, send it cascading down the sides, splash it everywhere. Build the silliest, soggiest water park you can dream up. Make a splash!",
-            "Hold a water bucket and right-click the ground or the pool to pour it out — five splashes fills your park. Refill from any water you've poured.",
-        ),
-        "roadrunner" => (
-            "Meet your new favourite ride — the mighty Nostrich! Climb aboard and she's yours to gallop — that's the whole trial, done the moment you're in the saddle. Stick around, though: wind her up and at full tilt she runs CLEAN ACROSS WATER. Hold on tight, lean into the drifts, and whatever you do — don't slow down over the lake!",
-            "Right-click the Nostrich to mount up — that finishes the trial. Fancy the extra challenge? Wind up to full speed on dry land FIRST (watch for '💧 SKIM!'), THEN hit the water — and keep it pinned, because slowing down over water means a splash.",
-        ),
         "copper-rush" => (
             "Everything electric in this world starts as a dull orange streak in the rock. Chip three lumps of copper ore out of that face, cook them in the furnace until they run bright, and roll the metal out into cable. Do that once and you can wire up anything you can imagine.",
             "Stone pickaxe or better for copper — wood just crumbles it. Coal in the bottom furnace slot, ore in the top. Then Rubber / Copper Ingot / Rubber in a row on the crafting table.",
-        ),
-        "mill-race" => (
-            "The oldest machine there is: put a wheel where the water falls and let the river do your work for you. No switch to flip, no fuel to feed — drop it in the current and it just goes. Get it turning, then run a cable across and let the stream light your lamp.",
-            "It has to be MOVING water — falling or flowing, never a still pond. Place the wheel right in the falls, then cable from the wheel to the lamp.",
-        ),
-        "catch-the-wind" => (
-            "Hear that? That's a thunderstorm rolling through, and a mill has never had a better day. Get up on that platform, plant your windmill where nothing shades it from the sky, and let the gale turn the sails. Then wire it up — free power, straight out of the weather.",
-            "A mill needs open sky above it, so don't roof it in. Once the sails are spinning, run cable from the mill to the lamp.",
         ),
         "follow-the-plan" => (
             "A plan is a builder's memory: lay it down and it shows you, ghost block by ghost block, exactly what to put where. Set this one down, pick BUILD ALONG, and put every block in yourself. There's a real satisfaction in the last ghost going solid.",
@@ -1797,6 +1735,7 @@ mod tests {
             mobs_enabled: None,
             trial_race: None,
             card_art: None,
+            unlock: None,
             arena: None,
         }
     }
@@ -1875,6 +1814,7 @@ mod tests {
             mobs_enabled: None,
             trial_race: None,
             card_art: None,
+            unlock: None,
             arena: None,
         }
     }
@@ -2361,6 +2301,7 @@ mod tests {
             mobs_enabled: None,
             trial_race: None,
             card_art: None,
+            unlock: None,
             arena: None,
         }
     }
@@ -2726,6 +2667,7 @@ mod tests {
                     Objective::Action { .. }
                         | Objective::Sequence { .. }
                         | Objective::Checklist { .. }
+                        | Objective::AnyOf { .. } // one trial, several ways (§A.4)
                         | Objective::Timed { .. } // the Scavenger — a timed variety score-attack
                 ),
                 "explorer {name} must be an Action/Sequence/Checklist or a Timed score-attack"

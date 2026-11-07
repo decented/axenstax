@@ -279,6 +279,14 @@ mod tests {
         assert!(text.contains("   \u{279C} 2. "), "the leading route's next step is marked: {text}");
         assert!(text.contains("Roast three:\n   \u{2022} "), "{text}");
         assert!(text.contains("(1/3)"), "{text}");
+        let groups = tasks.groups();
+        assert_eq!(groups.iter().map(|g| g.name).collect::<Vec<_>>(), vec![
+            Some("Catch, cook and eat"),
+            Some("Cook and eat"),
+            Some("Roast three"),
+        ]);
+        assert_eq!(groups[2].lines, vec![(5, tasks.lines[5].as_str())]);
+        assert!(groups[0].ordered && !groups[2].ordered);
     }
 
     fn act(event: ChallengeEvent, count: u32) -> Objective {

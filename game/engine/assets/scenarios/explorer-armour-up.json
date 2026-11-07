@@ -1,6 +1,6 @@
 {
   "kind": "Challenge",
-  "display_name": "Suit Up \u2014 forge four pieces of iron gear, then test them on the raiders",
+  "display_name": "Suit Up \u2014 forge a full suit of iron armour, then test it on the raiders",
   "card_art": [
     { "block": "stone", "at": [0, 0, 0] },
     { "block": "stone", "at": [1, 0, 0] },
@@ -9,6 +9,13 @@
     { "block": "iron_block", "at": [0, 2, 0] },
     { "block": "furnace", "at": [1, 1, 0] }
   ],
+  "unlock": {
+    "after": [
+      "smelt",
+      "kill"
+    ],
+    "hint": "Something about a suit of iron\u2026"
+  },
   "kit": [
     {
       "name": "furnace",
@@ -58,8 +65,42 @@
         },
         {
           "Action": {
-            "event": "CraftItem",
-            "count": 4
+            "event": {
+              "CraftItem": {
+                "item": "iron_helmet"
+              }
+            },
+            "count": 1
+          }
+        },
+        {
+          "Action": {
+            "event": {
+              "CraftItem": {
+                "item": "iron_chestplate"
+              }
+            },
+            "count": 1
+          }
+        },
+        {
+          "Action": {
+            "event": {
+              "CraftItem": {
+                "item": "iron_leggings"
+              }
+            },
+            "count": 1
+          }
+        },
+        {
+          "Action": {
+            "event": {
+              "CraftItem": {
+                "item": "iron_boots"
+              }
+            },
+            "count": 1
           }
         },
         {

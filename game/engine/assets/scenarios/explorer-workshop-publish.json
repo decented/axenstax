@@ -9,6 +9,12 @@
     { "block": "item_frame", "at": [1, 1, 0] },
     { "block": "mirror", "at": [2, 1, 0] }
   ],
+  "unlock": {
+    "after": [
+      "follow-the-plan"
+    ],
+    "hint": "Something about sharing what you make\u2026"
+  },
   "kit": [
     {
       "name": "blueprint_paper",
@@ -21,6 +27,10 @@
     {
       "name": "drafting_stamp",
       "count": 1
+    },
+    {
+      "name": "iron_ingot",
+      "count": 1
     }
   ],
   "objective": {
@@ -28,7 +38,11 @@
       "steps": [
         {
           "Action": {
-            "event": "CraftItem",
+            "event": {
+              "CraftItem": {
+                "item": "drafting_stamp"
+              }
+            },
             "count": 1
           }
         },
@@ -42,7 +56,6 @@
     }
   },
   "game_mode": "creative",
-  "world_type": "flat",
   "time_lock": "day",
   "mobs_enabled": false,
   "arena": {
@@ -96,5 +109,6 @@
         "block": "item_frame"
       }
     ]
-  }
+  },
+  "world_type": "flat"
 }

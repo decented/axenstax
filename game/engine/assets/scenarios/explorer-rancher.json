@@ -1,6 +1,6 @@
 {
   "kind": "Challenge",
-  "display_name": "Two of Every Kind \u2014 Feed the cows their favourite wheat until love blooms and a calf appears.",
+  "display_name": "Two of Every Kind \u2014 feed a pair wheat until a baby appears, or pair a horse with a donkey for a mule",
   "card_art": [
     { "block": "grass", "at": [0, 0, 0] },
     { "block": "grass", "at": [1, 0, 0] },
@@ -11,20 +11,55 @@
     { "block": "wheat_mature", "at": [1, 1, 0] },
     { "block": "wheat_mature", "at": [1, 1, 1] }
   ],
-  "kit": [
-    {
-      "name": "wheat",
-      "count": 8
-    }
-  ],
-  "objective": {
-    "Action": {
-      "event": {
+  "unlock": {
+    "on": [
+      {
         "BreedAnimals": {
           "offspring": null
         }
-      },
-      "count": 1
+      }
+    ],
+    "after": [
+      "tame-wolf"
+    ],
+    "hint": "Something about baby animals\u2026"
+  },
+  "kit": [
+    {
+      "name": "wheat",
+      "count": 16
+    }
+  ],
+  "objective": {
+    "AnyOf": {
+      "routes": [
+        {
+          "name": "Breed a mule",
+          "objective": {
+            "Action": {
+              "event": {
+                "BreedAnimals": {
+                  "offspring": "Mule"
+                }
+              },
+              "count": 1
+            }
+          }
+        },
+        {
+          "name": "Breed any pair",
+          "objective": {
+            "Action": {
+              "event": {
+                "BreedAnimals": {
+                  "offspring": null
+                }
+              },
+              "count": 1
+            }
+          }
+        }
+      ]
     }
   },
   "game_mode": "survival",
@@ -79,6 +114,38 @@
           2
         ],
         "block": "hay_bale"
+      },
+      {
+        "at": [
+          2,
+          -1,
+          3
+        ],
+        "block": "fence_post"
+      },
+      {
+        "at": [
+          6,
+          -1,
+          3
+        ],
+        "block": "fence_post"
+      },
+      {
+        "at": [
+          2,
+          -1,
+          6
+        ],
+        "block": "fence_post"
+      },
+      {
+        "at": [
+          6,
+          -1,
+          6
+        ],
+        "block": "fence_post"
       }
     ],
     "mobs": [
@@ -99,6 +166,22 @@
         ],
         "mob": "cow",
         "count": 1
+      },
+      {
+        "at": [
+          3,
+          0,
+          4
+        ],
+        "mob": "horse"
+      },
+      {
+        "at": [
+          5,
+          0,
+          5
+        ],
+        "mob": "donkey"
       }
     ]
   }

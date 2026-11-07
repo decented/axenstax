@@ -38,17 +38,42 @@
     }
   ],
   "objective": {
-    "Action": {
-      "event": {
-        "PlaceBlock": {
-          "block": null
+    "Checklist": {
+      "items": [
+        {
+          "Action": {
+            "event": {
+              "PlaceBlock": {
+                "block": 289
+              }
+            },
+            "count": 1
+          }
+        },
+        {
+          "Action": {
+            "event": {
+              "PlaceBlock": {
+                "block": 19
+              }
+            },
+            "count": 1
+          }
+        },
+        {
+          "Action": {
+            "event": {
+              "PlaceBlock": {
+                "block": null
+              }
+            },
+            "count": 30
+          }
         }
-      },
-      "count": 30
+      ]
     }
   },
   "game_mode": "creative",
-  "world_type": "flat",
   "time_lock": "day",
   "mobs_enabled": false,
   "arena": {
@@ -150,5 +175,6 @@
         "block": "sandstone"
       }
     ]
-  }
+  },
+  "world_type": "flat"
 }

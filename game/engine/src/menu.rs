@@ -1586,21 +1586,34 @@ fn draw_trial_info_modal(ctx: &egui::Context, state: &mut MenuState) -> MenuActi
             }
         });
         ui.add_space(12.0);
-        // Task list: numbered when the steps are ordered, bullets otherwise.
-        for (i, line) in tasks.lines.iter().enumerate() {
-            let prefix = if tasks.ordered { format!("{}.", i + 1) } else { "•".to_string() };
-            ui.horizontal(|ui| {
-                ui.add_space(8.0);
-                ui.label(
-                    egui::RichText::new(prefix)
-                        .size(15.0)
-                        .strong()
-                        .color(icon_color.unwrap_or(TEXT_COLOR)),
-                );
-                ui.add_space(6.0);
-                ui.label(egui::RichText::new(line).size(15.0).color(TEXT_COLOR));
-            });
+        // Task list: numbered when the steps are ordered, bullets otherwise;
+        // a trial with several ways reads "Pick a way:" then each route.
+        let groups = tasks.groups();
+        if groups.iter().any(|g| g.name.is_some()) {
+            ui.label(egui::RichText::new("Pick a way:").size(15.0).strong().color(TEXT_COLOR));
             ui.add_space(3.0);
+        }
+        for group in &groups {
+            if let Some(name) = group.name {
+                ui.label(
+                    egui::RichText::new(name).size(15.0).strong().color(icon_color.unwrap_or(TEXT_COLOR)),
+                );
+            }
+            for (k, (_, line)) in group.lines.iter().enumerate() {
+                let prefix = if group.ordered { format!("{}.", k + 1) } else { "•".to_string() };
+                ui.horizontal(|ui| {
+                    ui.add_space(8.0);
+                    ui.label(
+                        egui::RichText::new(prefix)
+                            .size(15.0)
+                            .strong()
+                            .color(icon_color.unwrap_or(TEXT_COLOR)),
+                    );
+                    ui.add_space(6.0);
+                    ui.label(egui::RichText::new(*line).size(15.0).color(TEXT_COLOR));
+                });
+                ui.add_space(3.0);
+            }
         }
         if !recipes.is_empty() {
             ui.add_space(8.0);

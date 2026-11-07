@@ -9,6 +9,12 @@
     { "block": "bedrock", "at": [1, 0, 1] },
     { "block": "bedrock", "at": [2, 0, 1] }
   ],
+  "unlock": {
+    "after": [
+      "bucket"
+    ],
+    "hint": "Something about lava meeting water\u2026"
+  },
   "kit": [
     {
       "name": "lava_bucket",
@@ -34,7 +40,6 @@
     }
   },
   "game_mode": "creative",
-  "world_type": "flat",
   "time_lock": "day",
   "mobs_enabled": false,
   "arena": {
@@ -112,5 +117,6 @@
         "block": "cobblestone"
       }
     ]
-  }
+  },
+  "world_type": "flat"
 }

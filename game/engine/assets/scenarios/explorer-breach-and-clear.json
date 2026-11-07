@@ -1,6 +1,6 @@
 {
   "kind": "Challenge",
-  "display_name": "Bring the Wall Down \u2014 a raider hides behind a stone wall \u2014 blow it open and finish the job",
+  "display_name": "Bring the Wall Down \u2014 blast open the raider's wall, rig a pressure-plate trap, or blow a tower sky-high",
   "card_art": [
     { "block": "stone", "at": [0, 0, 0] },
     { "block": "stone", "at": [1, 0, 0] },
@@ -11,10 +11,16 @@
     { "block": "blasting_keg", "at": [1, 0, 1] },
     { "block": "blasting_keg", "at": [2, 0, 1] }
   ],
+  "unlock": {
+    "after": [
+      "kill"
+    ],
+    "hint": "Something about a wall that has to come down\u2026"
+  },
   "kit": [
     {
       "name": "blasting_keg",
-      "count": 2
+      "count": 8
     },
     {
       "name": "flint_and_steel",
@@ -27,21 +33,72 @@
     {
       "name": "bread",
       "count": 3
+    },
+    {
+      "name": "pressure_plate",
+      "count": 2
+    },
+    {
+      "name": "cable",
+      "count": 16
     }
   ],
   "objective": {
-    "Checklist": {
-      "items": [
+    "AnyOf": {
+      "routes": [
         {
-          "Action": {
-            "event": "Detonate",
-            "count": 1
+          "name": "Rig a trap",
+          "objective": {
+            "Sequence": {
+              "steps": [
+                {
+                  "Action": {
+                    "event": {
+                      "PlaceBlock": {
+                        "block": 274
+                      }
+                    },
+                    "count": 1
+                  }
+                },
+                {
+                  "Action": {
+                    "event": "Detonate",
+                    "count": 1
+                  }
+                }
+              ]
+            }
           }
         },
         {
-          "Action": {
-            "event": "KillMob",
-            "count": 1
+          "name": "Breach the wall",
+          "objective": {
+            "Checklist": {
+              "items": [
+                {
+                  "Action": {
+                    "event": "Detonate",
+                    "count": 1
+                  }
+                },
+                {
+                  "Action": {
+                    "event": "KillMob",
+                    "count": 1
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Blast the tower",
+          "objective": {
+            "Action": {
+              "event": "Detonate",
+              "count": 3
+            }
           }
         }
       ]
@@ -121,6 +178,270 @@
           4,
           1,
           1
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          3,
+          -1,
+          -7
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          3,
+          -1,
+          -6
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          3,
+          -1,
+          -5
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          -7
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          -6
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          -5
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          5,
+          -1,
+          -7
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          5,
+          -1,
+          -6
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          5,
+          -1,
+          -5
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          6,
+          -1,
+          -7
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          6,
+          -1,
+          -6
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          6,
+          -1,
+          -5
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          7,
+          -1,
+          -7
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          7,
+          -1,
+          -6
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          7,
+          -1,
+          -5
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          5,
+          0,
+          -6
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          5,
+          1,
+          -6
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          5,
+          2,
+          -6
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          5,
+          3,
+          -6
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          5,
+          4,
+          -6
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          4,
+          0,
+          -6
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          6,
+          0,
+          -6
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          5,
+          0,
+          -5
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          5,
+          0,
+          -7
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          5,
+          1,
+          -5
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          5,
+          1,
+          -7
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          6
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          5,
+          -1,
+          6
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          6,
+          -1,
+          6
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          5,
+          0,
+          5
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          5,
+          1,
+          5
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          6,
+          0,
+          5
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          6,
+          1,
+          5
         ],
         "block": "stone"
       }

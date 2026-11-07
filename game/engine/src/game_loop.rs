@@ -3014,10 +3014,16 @@ impl super::GameState {
         }
     }
 
-    /// Fire a challenge/coverage event at the active scenario (no-op when no
-    /// trial/scenario is running). Lets feature sites report "the player did X"
-    /// in one line, so Trials can verify that system. See `scenario::ChallengeEvent`.
+    /// Fire a challenge/coverage event: the ONE seam every gameplay fire site
+    /// reports "the player did X" through. Records it for unlock by doing
+    /// (Trials in Two Acts §A.5) whether or not a trial is running — a cheap
+    /// scan unless some trial's `unlock.on` listens for it, and a save only
+    /// when the store changed — then forwards it to the active scenario (a
+    /// no-op when none runs). See `scenario::ChallengeEvent`.
     pub(crate) fn fire_challenge(&mut self, ev: crate::scenario::ChallengeEvent) {
+        if self.trial_bests.record_event(&ev) {
+            self.trial_bests.save();
+        }
         // Watch for a step finishing so we can nudge the player to the next one
         // ("✓ done! next: …") — momentum + a clear "what now". Only for stepped
         // trials (Sequence/Checklist); single-action trials would spam per event.
@@ -5672,9 +5678,7 @@ impl super::GameState {
                 crate::commands::CommandResult::PublishOverrideSet { name, bytes } => {
                     // Phase 3 — coverage-challenge WorkshopPublish event (the player
                     // confirmed a share; fires on both targets regardless of Beacon outcome).
-                    if let Some(scenario) = &mut self.scenario {
-                        scenario.on_event(crate::scenario::ChallengeEvent::WorkshopPublish);
-                    }
+                    self.fire_challenge(crate::scenario::ChallengeEvent::WorkshopPublish);
                     // Spec 40 Phase D2 — the player confirmed a PUBLIC share. Live Beacon is
                     // PWA-only (CONSUMING.md §5), like cloud save: fire the signed publish from
                     // the browser; the native build only ships the baked official catalogue.
@@ -12312,11 +12316,11 @@ impl super::GameState {
                                 // that count blocks. Fire the hook with 0 work.
                                 if let Some(scenario) = &mut self.scenario {
                                     scenario.on_block_broken(0);
-                                    // Phase 3 — coverage-challenge BreakBlock event.
-                                    scenario.on_event(crate::scenario::ChallengeEvent::BreakBlock {
-                                        block: Some(_prev),
-                                    });
                                 }
+                                // Phase 3 — coverage-challenge BreakBlock event.
+                                self.fire_challenge(crate::scenario::ChallengeEvent::BreakBlock {
+                                    block: Some(_prev),
+                                });
                                 // Spec 30 — re-light around the break.
                                 crate::lighting::update_for_block_change(
                                     &mut self.world,
@@ -12651,16 +12655,14 @@ impl super::GameState {
                                     self.world.add_work(pop_work);
                                     if let Some(scenario) = &mut self.scenario {
                                         scenario.on_block_broken(pop_work);
-                                        // Phase 3 — coverage-challenge BreakBlock event.
-                                        scenario.on_event(crate::scenario::ChallengeEvent::BreakBlock {
-                                            block: Some(blk),
-                                        });
-                                        // Trials coverage — breaking a crop is a harvest.
-                                        if crate::growth::is_crop(blk) {
-                                            scenario.on_event(
-                                                crate::scenario::ChallengeEvent::HarvestCrop,
-                                            );
-                                        }
+                                    }
+                                    // Phase 3 — coverage-challenge BreakBlock event.
+                                    self.fire_challenge(crate::scenario::ChallengeEvent::BreakBlock {
+                                        block: Some(blk),
+                                    });
+                                    // Trials coverage — breaking a crop is a harvest.
+                                    if crate::growth::is_crop(blk) {
+                                        self.fire_challenge(crate::scenario::ChallengeEvent::HarvestCrop);
                                     }
                                     // Crops (Spec 16 Phase 7): a mature crop
                                     // resets to TILLED_SOIL so the player can
@@ -12984,13 +12986,11 @@ impl super::GameState {
                                         // first Satori).
                                         if let Some(scenario) = &mut self.scenario {
                                             scenario.on_material_gained(gem_material);
-                                            // Phase 3 — coverage-challenge GainMaterial event.
-                                            scenario.on_event(
-                                                crate::scenario::ChallengeEvent::GainMaterial {
-                                                    material: gem_material,
-                                                },
-                                            );
                                         }
+                                        // Phase 3 — coverage-challenge GainMaterial event.
+                                        self.fire_challenge(crate::scenario::ChallengeEvent::GainMaterial {
+                                            material: gem_material,
+                                        });
                                         if self.maybe_claim_genesis_block() {
                                             self.audio.play_genesis_block();
                                             // Moonshot Phase A — the Genesis Block is the
@@ -15577,8 +15577,8 @@ impl super::GameState {
                                         }
                                         // Phase 3 — coverage-challenge CookAtCampfire event
                                         // (a cooked item was taken off the fire).
-                                        if took_cooked && let Some(scenario) = &mut self.scenario {
-                                            scenario.on_event(crate::scenario::ChallengeEvent::CookAtCampfire);
+                                        if took_cooked {
+                                            self.fire_challenge(crate::scenario::ChallengeEvent::CookAtCampfire);
                                         }
                                     }
                                     Err(crate::item_actions::ItemNote::InventoryFull) => {
@@ -16582,11 +16582,9 @@ impl super::GameState {
                                     // Phase 3 — coverage-challenge PlaceBlock event. (A Plot
                                     // Marker whose claim would conflict never gets here:
                                     // C3c-1 checks it before the take.)
-                                    if let Some(scenario) = &mut self.scenario {
-                                        scenario.on_event(crate::scenario::ChallengeEvent::PlaceBlock {
-                                            block: Some(block_to_place),
-                                        });
-                                    }
+                                    self.fire_challenge(crate::scenario::ChallengeEvent::PlaceBlock {
+                                        block: Some(block_to_place),
+                                    });
                                     // Spec 30 — re-light around the placement.
                                     // Updates block-light if the new block emits
                                     // (torch / campfire / furnace_lit) and
@@ -16765,9 +16763,7 @@ impl super::GameState {
                                             Instant::now() + Duration::from_secs(3),
                                         ));
                                         // Phase 3 — coverage-challenge ClaimPlot event.
-                                        if let Some(scenario) = &mut self.scenario {
-                                            scenario.on_event(crate::scenario::ChallengeEvent::ClaimPlot);
-                                        }
+                                        self.fire_challenge(crate::scenario::ChallengeEvent::ClaimPlot);
                                     }
                                     // Spec 37 — Market Bell place handler.
                                     // Designates a discovery zone owned by the
@@ -17870,10 +17866,23 @@ impl super::GameState {
                     .as_ref()
                     .filter(|s| s.def().kind == crate::scenario::ScenarioKind::Challenge)
                     .map(|s| s.display_name().to_string());
-                if let Some(name) = &challenge_name
-                    && self.trial_bests.mark_challenge_done(name) {
+                // An AnyOf trial also remembers the way(s) it was done; a first
+                // completion may make the next trials appear (unlock by doing).
+                if let Some(name) = &challenge_name {
+                    let newly_done = self.trial_bests.mark_challenge_done(name);
+                    let mut changed = newly_done;
+                    if let Some(s) = self.scenario.as_ref() {
+                        for route in s.completed_routes() {
+                            changed |= self.trial_bests.mark_way_done(name, route);
+                        }
+                    }
+                    if newly_done {
+                        changed |= self.trial_bests.refresh_unlocks();
+                    }
+                    if changed {
                         self.trial_bests.save();
                     }
+                }
                 // The postcard moment (once per run: later frames are no-ops).
                 if pidx == 0
                     && matches!(self.postcard, crate::postcard_flow::PostcardFlow::Idle)
@@ -19125,9 +19134,7 @@ impl super::GameState {
                                         }
                                         self.audio.play_place();
                                         // Phase 3 — coverage-challenge VendorSale event (plan buy settled).
-                                        if let Some(scenario) = &mut self.scenario {
-                                            scenario.on_event(crate::scenario::ChallengeEvent::VendorSale);
-                                        }
+                                        self.fire_challenge(crate::scenario::ChallengeEvent::VendorSale);
                                         continue;
                                     }
                                 }
@@ -19234,9 +19241,7 @@ impl super::GameState {
                                 }
                             self.audio.play_place();
                             // Phase 3 — coverage-challenge VendorSale event (buy settled).
-                            if let Some(scenario) = &mut self.scenario {
-                                scenario.on_event(crate::scenario::ChallengeEvent::VendorSale);
-                            }
+                            self.fire_challenge(crate::scenario::ChallengeEvent::VendorSale);
                         }
                     }
                 } else {

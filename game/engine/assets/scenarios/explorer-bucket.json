@@ -1,6 +1,6 @@
 {
   "kind": "Challenge",
-  "display_name": "The Plumber \u2014 carry a pond across the room and fill a dry trough",
+  "display_name": "The Plumber \u2014 carry a pond across to a dry trough, or build your own water park",
   "card_art": [
     { "block": "stone", "at": [0, 0, 0] },
     { "block": "stone", "at": [1, 0, 0] },
@@ -10,25 +10,69 @@
     { "block": "oak_planks", "at": [2, 1, 0] },
     { "block": "oak_planks", "at": [2, 1, 1] }
   ],
+  "unlock": {
+    "on": [
+      "UseBucket"
+    ],
+    "hint": "Something about carrying water\u2026"
+  },
   "kit": [
     {
       "name": "bucket",
       "count": 1
+    },
+    {
+      "name": "glass",
+      "count": 32
     }
   ],
   "objective": {
-    "Sequence": {
-      "steps": [
+    "AnyOf": {
+      "routes": [
         {
-          "Action": {
-            "event": "UseBucket",
-            "count": 1
+          "name": "Water park",
+          "objective": {
+            "Sequence": {
+              "steps": [
+                {
+                  "Action": {
+                    "event": {
+                      "PlaceBlock": {
+                        "block": 19
+                      }
+                    },
+                    "count": 8
+                  }
+                },
+                {
+                  "Action": {
+                    "event": "UseBucket",
+                    "count": 2
+                  }
+                }
+              ]
+            }
           }
         },
         {
-          "Action": {
-            "event": "UseBucket",
-            "count": 1
+          "name": "Carry the pond",
+          "objective": {
+            "Sequence": {
+              "steps": [
+                {
+                  "Action": {
+                    "event": "UseBucket",
+                    "count": 1
+                  }
+                },
+                {
+                  "Action": {
+                    "event": "UseBucket",
+                    "count": 1
+                  }
+                }
+              ]
+            }
           }
         }
       ]
@@ -134,6 +178,166 @@
           1
         ],
         "block": "stone"
+      },
+      {
+        "at": [
+          2,
+          -1,
+          4
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          2,
+          -1,
+          5
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          2,
+          -1,
+          6
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          2,
+          -1,
+          7
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          3,
+          -1,
+          4
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          3,
+          -1,
+          5
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          3,
+          -1,
+          6
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          3,
+          -1,
+          7
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          4
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          5
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          6
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          7
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          5,
+          -1,
+          4
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          5,
+          -1,
+          5
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          5,
+          -1,
+          6
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          5,
+          -1,
+          7
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          6,
+          -1,
+          4
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          6,
+          -1,
+          5
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          6,
+          -1,
+          6
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          6,
+          -1,
+          7
+        ],
+        "block": "cobblestone"
       }
     ]
   }

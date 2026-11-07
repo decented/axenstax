@@ -40,7 +40,7 @@
           "Action": {
             "event": {
               "PlaceBlock": {
-                "block": null
+                "block": 59
               }
             },
             "count": 1
@@ -54,7 +54,11 @@
         },
         {
           "Action": {
-            "event": "CraftItem",
+            "event": {
+              "CraftItem": {
+                "item": "iron_pickaxe"
+              }
+            },
             "count": 1
           }
         }

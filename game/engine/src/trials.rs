@@ -95,6 +95,25 @@ pub struct TrialBests {
     /// import replaces). `#[serde(default)]` so pre-rival stores load clean.
     #[serde(default)]
     pub rivals: std::collections::BTreeMap<String, RivalGhost>,
+    // Trials in Two Acts §A.5 — append-only, each `#[serde(default)]` so an
+    // older store loads unchanged, and each a set that only grows, so two
+    // stores always merge as a union (see `merge` / `save`).
+    /// Unlock by doing: tokens of the trials that have appeared (seeded from
+    /// completions on load). See `trials_unlock`.
+    #[serde(default)]
+    pub unlocked: std::collections::BTreeSet<String>,
+    /// Unlock by doing: the events (as `trials_unlock::event_key`) some
+    /// trial's `unlock.on` listens for that have happened, anywhere.
+    #[serde(default)]
+    pub events_seen: std::collections::BTreeSet<String>,
+    /// Ways remembered: display name → the `AnyOf` route names done. A local
+    /// memory, never a total and never sent anywhere.
+    #[serde(default)]
+    pub ways_done: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+    /// Tokens whose gallery card has been opened since appearing — what
+    /// clears the quiet "new" mark (`trials_unlock::is_new`).
+    #[serde(default)]
+    pub cards_opened: std::collections::BTreeSet<String>,
 }
 
 impl TrialBests {
@@ -126,6 +145,60 @@ impl TrialBests {
         self.completed_challenges.contains(display_name)
     }
 
+    /// Remember that an `AnyOf` trial (by display name) was done by `route`.
+    /// Returns `true` if newly remembered (so the caller can save once).
+    pub fn mark_way_done(&mut self, display_name: &str, route: &str) -> bool {
+        self.ways_done.entry(display_name.to_string()).or_default().insert(route.to_string())
+    }
+
+    /// The route names this trial (by display name) has been done by, in name
+    /// order. Pair with `trials_unlock::route_names` for one mark per way.
+    pub fn ways_done(&self, display_name: &str) -> Vec<&str> {
+        self.ways_done
+            .get(display_name)
+            .map(|set| set.iter().map(String::as_str).collect())
+            .unwrap_or_default()
+    }
+
+    /// The gallery opened this trial's card: its "new" mark goes. Returns
+    /// `true` if that changed anything (so the caller can save once).
+    pub fn mark_card_opened(&mut self, token: &str) -> bool {
+        self.cards_opened.insert(token.to_string())
+    }
+
+    /// Record a fired gameplay event for unlocking (any world, any arena, a
+    /// trial running or not). Cheap for events no trial listens for. Returns
+    /// `true` if the store changed, so the caller saves once.
+    pub fn record_event(&mut self, ev: &crate::scenario::ChallengeEvent) -> bool {
+        crate::trials_unlock::record_event_in(crate::trials_unlock::catalogue(), self, ev)
+    }
+
+    /// Store every trial whose unlock now holds — call after a completion, and
+    /// on load (where it seeds the set from existing completions). Returns
+    /// `true` if any trial newly appeared.
+    pub fn refresh_unlocks(&mut self) -> bool {
+        crate::trials_unlock::refresh_in(crate::trials_unlock::catalogue(), self)
+    }
+
+    /// Fold in another store's progress — everything except the rival ghosts,
+    /// which an import deliberately replaces. Sets union; a race keeps the
+    /// faster best. Used by `save` so a copy loaded earlier (the game's own)
+    /// never drops what another (the gallery, a profile import) wrote since.
+    pub fn absorb_progress(&mut self, other: &TrialBests) {
+        for (id, incoming) in &other.bests {
+            if self.bests.get(id).is_none_or(|mine| incoming.ticks < mine.ticks) {
+                self.bests.insert(id.clone(), incoming.clone());
+            }
+        }
+        self.completed_challenges.extend(other.completed_challenges.iter().cloned());
+        self.unlocked.extend(other.unlocked.iter().cloned());
+        self.events_seen.extend(other.events_seen.iter().cloned());
+        self.cards_opened.extend(other.cards_opened.iter().cloned());
+        for (name, ways) in &other.ways_done {
+            self.ways_done.entry(name.clone()).or_default().extend(ways.iter().cloned());
+        }
+    }
+
     /// Serialise the store (pure; the platform load/save wraps this).
     pub fn to_json(&self) -> String {
         serde_json::to_string(self).unwrap_or_else(|_| "{}".to_string())
@@ -149,20 +222,11 @@ impl TrialBests {
     /// - **rivals** — the faster rival ghost wins (it's the one worth chasing);
     ///   a race with no local rival takes the incoming one.
     ///
+    /// - **unlocked / events_seen / ways_done / cards_opened** — unions.
+    ///
     /// Pure: no I/O, so the caller decides when to `save()`.
     pub fn merge(&mut self, other: &TrialBests) {
-        for (id, incoming) in &other.bests {
-            let take = match self.bests.get(id) {
-                Some(mine) => incoming.ticks < mine.ticks,
-                None => true,
-            };
-            if take {
-                self.bests.insert(id.clone(), incoming.clone());
-            }
-        }
-        for name in &other.completed_challenges {
-            self.completed_challenges.insert(name.clone());
-        }
+        self.absorb_progress(other);
         for (id, incoming) in &other.rivals {
             let take = match self.rivals.get(id) {
                 Some(mine) => incoming.ticks < mine.ticks,
@@ -460,66 +524,66 @@ pub enum TrialRef {
     Challenge(&'static str),
 }
 
-/// The lobby Trials list as ONE progression — easiest / first-session trials at
-/// the top, deepest systems at the bottom — with Races and Challenges
-/// interleaved (no Race-vs-Challenge split). Each entry carries its [`TrialType`]
-/// so the row shows the style icon before the name and names the style in the
-/// description. Ordering is "reasonable, not perfect": where a trial leans on a
-/// skill, an easier trial that teaches it comes first (mine → craft → smelt →
-/// armour-up; power → logic-gate → generator). `trial_order_covers_every_trial`
-/// guards that this stays in sync with `CATALOG` + the challenge set.
+/// How many leading [`TRIAL_ORDER`] entries form the front shelf (Trials in Two
+/// Acts §A.2): visible from the start, one trial per core verb.
+pub const FRONT_SHELF_LEN: usize = 10;
+
+/// The front shelf: the first [`FRONT_SHELF_LEN`] entries of [`TRIAL_ORDER`].
+pub fn front_shelf() -> &'static [(TrialType, TrialRef)] {
+    &TRIAL_ORDER[..FRONT_SHELF_LEN]
+}
+
+/// Every Trial in one order (Trials in Two Acts §A.2–A.3): the front shelf
+/// first, then the trials that appear by doing, grouped by shelf (Make, Tend,
+/// Tech, Brave; within a shelf, a trial comes after the ones that unlock it),
+/// then the clock corner. Each entry carries its [`TrialType`] so the gallery
+/// puts it on its shelf with the style icon. `trial_order_covers_every_trial`
+/// guards that this stays in sync with `CATALOG` + the challenge set, and
+/// `the_front_shelf_is_the_first_ten_and_the_rest_unlock` the shelf split.
 pub const TRIAL_ORDER: &[(TrialType, TrialRef)] = &[
+    // The front shelf (§A.2), visible from the start: one trial per core
+    // verb. Exactly the first `FRONT_SHELF_LEN` entries.
     (TrialType::Make, TrialRef::Challenge("onboarding")),
     (TrialType::Make, TrialRef::Challenge("mine")),
     (TrialType::Make, TrialRef::Challenge("craft")),
-    (TrialType::Race, TrialRef::Race("sprint")),
     (TrialType::Make, TrialRef::Challenge("build")),
     (TrialType::Make, TrialRef::Challenge("smelt")),
-    (TrialType::Make, TrialRef::Challenge("cook-three")),
-    (TrialType::Tend, TrialRef::Challenge("eat")),
     (TrialType::Tend, TrialRef::Challenge("harvest")),
-    (TrialType::Make, TrialRef::Challenge("bucket")),
-    (TrialType::Tend, TrialRef::Challenge("fish")),
+    (TrialType::Make, TrialRef::Challenge("cook-three")),
     (TrialType::Tend, TrialRef::Challenge("tame-wolf")),
-    (TrialType::Tend, TrialRef::Challenge("friend-in-need")),
     (TrialType::Tend, TrialRef::Challenge("ride")),
-    (TrialType::Race, TrialRef::Challenge("roadrunner")),
-    (TrialType::Tend, TrialRef::Challenge("farmhand")),
-    (TrialType::Tend, TrialRef::Challenge("rancher")),
-    (TrialType::Tend, TrialRef::Challenge("mule-maker")),
-    (TrialType::Race, TrialRef::Race("cross-country")),
-    (TrialType::Tend, TrialRef::Challenge("vendor-sale")),
-    (TrialType::Tend, TrialRef::Challenge("claim-plot")),
-    (TrialType::Make, TrialRef::Challenge("scavenger")),
-    (TrialType::Make, TrialRef::Challenge("dye")),
-    (TrialType::Tend, TrialRef::Challenge("fish-feast")),
-    (TrialType::Tend, TrialRef::Challenge("funny-farm")),
     (TrialType::Brave, TrialRef::Challenge("kill")),
-    (TrialType::Brave, TrialRef::Challenge("armour-up")),
-    (TrialType::Tech, TrialRef::Challenge("rail-rider")),
-    (TrialType::Tech, TrialRef::Challenge("power")),
-    (TrialType::Tech, TrialRef::Challenge("piston")),
-    (TrialType::Tech, TrialRef::Challenge("logic-gate")),
-    (TrialType::Tech, TrialRef::Challenge("generator")),
-    // Wind, Copper & Electricity wave §4 — the copper dig comes FIRST (it is
-    // where every cable in the three trials above actually comes from), then
-    // the two self-driving sources that need no switch at all.
-    (TrialType::Tech, TrialRef::Challenge("copper-rush")),
-    (TrialType::Tech, TrialRef::Challenge("mill-race")),
-    (TrialType::Tech, TrialRef::Challenge("catch-the-wind")),
-    (TrialType::Make, TrialRef::Challenge("splash-zone")),
-    (TrialType::Brave, TrialRef::Challenge("lava-floor")),
+    // Unlocked by doing (§A.3), by shelf: each appears when its `unlock`
+    // fires (see `trials_unlock`).
+    (TrialType::Make, TrialRef::Challenge("dye")),
+    (TrialType::Make, TrialRef::Challenge("bucket")),
     (TrialType::Make, TrialRef::Challenge("obsidian")),
-    (TrialType::Brave, TrialRef::Challenge("booby-trap")),
-    (TrialType::Brave, TrialRef::Challenge("breach-and-clear")),
-    (TrialType::Brave, TrialRef::Challenge("kaboomtown")),
-    (TrialType::Brave, TrialRef::Challenge("monster-mash")),
-    (TrialType::Race, TrialRef::Race("marathon")),
     (TrialType::Make, TrialRef::Challenge("follow-the-plan")),
     (TrialType::Make, TrialRef::Challenge("fresh-coat")),
     (TrialType::Make, TrialRef::Challenge("bouncer")),
     (TrialType::Make, TrialRef::Challenge("workshop-publish")),
+    (TrialType::Tend, TrialRef::Challenge("fish")),
+    (TrialType::Tend, TrialRef::Challenge("farmhand")),
+    (TrialType::Tend, TrialRef::Challenge("rancher")),
+    (TrialType::Tend, TrialRef::Challenge("funny-farm")),
+    (TrialType::Tend, TrialRef::Challenge("claim-plot")),
+    (TrialType::Tend, TrialRef::Challenge("vendor-sale")),
+    (TrialType::Tech, TrialRef::Challenge("power")),
+    (TrialType::Tech, TrialRef::Challenge("logic-gate")),
+    (TrialType::Tech, TrialRef::Challenge("piston")),
+    (TrialType::Tech, TrialRef::Challenge("generator")),
+    (TrialType::Tech, TrialRef::Challenge("copper-rush")),
+    (TrialType::Tech, TrialRef::Challenge("rail-rider")),
+    (TrialType::Brave, TrialRef::Challenge("lava-floor")),
+    (TrialType::Brave, TrialRef::Challenge("breach-and-clear")),
+    (TrialType::Brave, TrialRef::Challenge("armour-up")),
     (TrialType::Brave, TrialRef::Challenge("champion")),
+    // The clock corner (§A.7): always visible, never unlocked. Scavenger is
+    // typed Make but the gallery puts it in the clock row.
+    (TrialType::Make, TrialRef::Challenge("scavenger")),
+    (TrialType::Race, TrialRef::Race("sprint")),
+    (TrialType::Race, TrialRef::Race("cross-country")),
+    (TrialType::Race, TrialRef::Race("marathon")),
 ];
 
 /// Wrap a Race trial as a launchable `ScenarioDef` for the lobby Trials column.
@@ -546,6 +610,7 @@ pub fn race_scenario_def(def: &TrialDef) -> crate::scenario::ScenarioDef {
         mobs_enabled: Some(false),
         trial_race: Some(def.id.to_string()),
         card_art: None,
+        unlock: None,
         arena: None,
     }
 }
@@ -607,15 +672,26 @@ pub fn format_time(ticks: u32) -> String {
 const TRIALS_STORAGE_KEY: &str = "axenstax_trials";
 
 impl TrialBests {
-    /// Load persisted bests (absent/corrupt → empty; never panics).
+    /// Load persisted bests (absent/corrupt → empty; never panics). Seeds the
+    /// unlocked set from existing completions (§A.5: nobody loses a visible
+    /// trial), in memory; it is written with the next save.
     pub fn load() -> Self {
-        load_raw().map(|j| Self::from_json(&j)).unwrap_or_default()
+        let mut bests = load_raw().map(|j| Self::from_json(&j)).unwrap_or_default();
+        bests.refresh_unlocks();
+        bests
     }
 
     /// Persist these bests (best-effort — a write failure just means they don't
-    /// survive the session, never a crash).
+    /// survive the session, never a crash). Merges with what is on disk first
+    /// (`absorb_progress`): the game holds a copy loaded at start-up while the
+    /// lobby gallery and a profile import load and save their own, and a plain
+    /// overwrite from the older copy would drop what they wrote.
     pub fn save(&self) {
-        save_raw(&self.to_json());
+        let mut out = self.clone();
+        if let Some(disk) = load_raw() {
+            out.absorb_progress(&Self::from_json(&disk));
+        }
+        save_raw(&out.to_json());
     }
 }
 
@@ -803,6 +879,35 @@ mod tests {
             challenges.len(),
             "every Challenge must appear in TRIAL_ORDER"
         );
+    }
+
+    #[test]
+    fn the_front_shelf_is_the_first_ten_and_the_rest_unlock() {
+        let tokens: Vec<&str> = front_shelf()
+            .iter()
+            .map(|(_, r)| match r {
+                TrialRef::Challenge(t) => *t,
+                TrialRef::Race(id) => panic!("race {id} on the front shelf"),
+            })
+            .collect();
+        assert_eq!(
+            tokens,
+            ["onboarding", "mine", "craft", "build", "smelt", "harvest", "cook-three", "tame-wolf", "ride", "kill"]
+        );
+        for (_, tref) in TRIAL_ORDER {
+            let TrialRef::Challenge(token) = tref else { continue };
+            let def = crate::scenario::named_builtin_def(token).unwrap();
+            let front = tokens.contains(token);
+            if front || *token == "scavenger" {
+                assert!(def.unlock.is_none(), "{token} must be visible from the start");
+            } else {
+                assert!(def.unlock.is_some(), "{token} must appear by doing (give it an unlock)");
+            }
+        }
+        // 34 trials in the list: the front shelf, the 23 that appear by doing,
+        // and Scavenger.
+        let challenges = TRIAL_ORDER.iter().filter(|(_, r)| matches!(r, TrialRef::Challenge(_))).count();
+        assert_eq!(challenges, 34);
     }
 
     #[test]
@@ -1007,5 +1112,63 @@ mod tests {
         let before = mine.clone();
         mine.merge(&TrialBests::default());
         assert_eq!(mine, before);
+    }
+
+    #[test]
+    fn a_store_from_before_unlocks_loads_unchanged() {
+        // Exactly what an older build wrote: no unlocked / events_seen /
+        // ways_done / cards_opened keys at all.
+        let old = r#"{"bests":{},"completed_challenges":["Chop a tree"],"rivals":{}}"#;
+        let b = TrialBests::from_json(old);
+        assert!(b.is_challenge_done("Chop a tree"));
+        assert!(b.unlocked.is_empty() && b.events_seen.is_empty());
+        assert!(b.ways_done.is_empty() && b.cards_opened.is_empty());
+        // And the new fields round-trip.
+        let mut b = b;
+        b.unlocked.insert("fish".into());
+        b.events_seen.insert("\"CatchFish\"".into());
+        assert!(b.mark_way_done("Camp Cook", "Roast three"));
+        assert!(!b.mark_way_done("Camp Cook", "Roast three"));
+        assert!(b.mark_card_opened("fish"));
+        assert_eq!(TrialBests::from_json(&b.to_json()), b);
+        assert_eq!(b.ways_done("Camp Cook"), vec!["Roast three"]);
+        assert!(b.ways_done("Nothing").is_empty());
+    }
+
+    #[test]
+    fn merge_unions_unlocks_events_ways_and_opened_cards() {
+        let mut mine = TrialBests::default();
+        mine.unlocked.insert("fish".into());
+        mine.mark_way_done("Camp Cook", "Roast three");
+        let mut web = TrialBests::default();
+        web.unlocked.insert("bucket".into());
+        web.events_seen.insert("\"UseBucket\"".into());
+        web.mark_way_done("Camp Cook", "Cook and eat");
+        web.mark_card_opened("bucket");
+        mine.merge(&web);
+        assert_eq!(mine.unlocked.len(), 2);
+        assert!(mine.events_seen.contains("\"UseBucket\""));
+        assert_eq!(mine.ways_done("Camp Cook"), vec!["Cook and eat", "Roast three"]);
+        assert!(mine.cards_opened.contains("bucket"));
+    }
+
+    #[test]
+    fn absorbing_another_copy_keeps_my_rival_but_takes_its_progress() {
+        let rival = |label: &str, ticks: u32| RivalGhost { label: label.to_string(), ticks, ghost: GhostRecording::new() };
+        // The game's copy just imported a slower rival on purpose…
+        let mut game = TrialBests::default();
+        game.rivals.insert("sprint".into(), rival("Axo", 500));
+        game.mark_challenge_done("Chop a tree");
+        // …while the copy on disk (the gallery's) opened a card and holds an
+        // older, faster rival and a best the game's copy never saw.
+        let mut disk = TrialBests::default();
+        disk.rivals.insert("sprint".into(), rival("Stax", 300));
+        disk.mark_card_opened("fish");
+        disk.bests.insert("sprint".into(), best(250, 1.0));
+        game.absorb_progress(&disk);
+        assert_eq!(game.rivals["sprint"].label, "Axo", "an import replaces; a save must not undo it");
+        assert!(game.cards_opened.contains("fish"), "the gallery's mark survives the game's save");
+        assert_eq!(game.best("sprint").map(|b| b.ticks), Some(250));
+        assert!(game.is_challenge_done("Chop a tree"));
     }
 }

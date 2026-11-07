@@ -9,6 +9,12 @@
     { "block": "logic_gate", "at": [1, 1, 0] },
     { "block": "lamp", "at": [2, 1, 0] }
   ],
+  "unlock": {
+    "after": [
+      "power"
+    ],
+    "hint": "Something about a lamp that turns itself on\u2026"
+  },
   "kit": [
     {
       "name": "motion_sensor",
@@ -38,7 +44,7 @@
           "Action": {
             "event": {
               "PlaceBlock": {
-                "block": null
+                "block": 282
               }
             },
             "count": 1
@@ -48,7 +54,7 @@
           "Action": {
             "event": {
               "PlaceBlock": {
-                "block": null
+                "block": 268
               }
             },
             "count": 3
@@ -64,7 +70,6 @@
     }
   },
   "game_mode": "creative",
-  "world_type": "flat",
   "time_lock": "night",
   "mobs_enabled": false,
   "arena": {
@@ -142,5 +147,6 @@
         "block": "electric_lamp"
       }
     ]
-  }
+  },
+  "world_type": "flat"
 }

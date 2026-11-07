@@ -11,6 +11,12 @@
     { "block": "piston", "at": [1, 1, 0] },
     { "block": "lever", "at": [2, 0, 1] }
   ],
+  "unlock": {
+    "after": [
+      "power"
+    ],
+    "hint": "Something about a secret door\u2026"
+  },
   "kit": [
     {
       "name": "sticky_piston",
@@ -40,7 +46,7 @@
           "Action": {
             "event": {
               "PlaceBlock": {
-                "block": null
+                "block": 303
               }
             },
             "count": 1
@@ -50,7 +56,7 @@
           "Action": {
             "event": {
               "PlaceBlock": {
-                "block": null
+                "block": 268
               }
             },
             "count": 2
@@ -66,7 +72,6 @@
     }
   },
   "game_mode": "creative",
-  "world_type": "flat",
   "time_lock": "day",
   "mobs_enabled": false,
   "arena": {
@@ -144,5 +149,6 @@
         "block": "stone"
       }
     ]
-  }
+  },
+  "world_type": "flat"
 }

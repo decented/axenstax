@@ -1,6 +1,6 @@
 {
   "kind": "Challenge",
-  "display_name": "Bouncer — build a creature in Rig Studio and set it bouncing",
+  "display_name": "Bouncer \u2014 build a creature in Rig Studio and set it bouncing",
   "card_art": [
     { "block": "grass", "at": [0, 0, 0] },
     { "block": "grass", "at": [1, 0, 0] },
@@ -10,6 +10,12 @@
     { "block": "rubber_leaves", "at": [0, 3, 0] },
     { "block": "rubber_leaves", "at": [1, 1, 0] }
   ],
+  "unlock": {
+    "after": [
+      "build"
+    ],
+    "hint": "Something about a creature that bounces\u2026"
+  },
   "kit": [
     {
       "name": "oak_planks",
@@ -35,7 +41,7 @@
     }
   },
   "game_mode": "creative",
-  "world_type": "flat",
   "time_lock": "day",
-  "mobs_enabled": false
+  "mobs_enabled": false,
+  "world_type": "flat"
 }

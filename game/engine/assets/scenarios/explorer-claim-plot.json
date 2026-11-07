@@ -11,6 +11,12 @@
     { "block": "fence_post", "at": [0, 1, 1] },
     { "block": "lamp", "at": [1, 1, 1] }
   ],
+  "unlock": {
+    "after": [
+      "build"
+    ],
+    "hint": "Something about a patch of land to call your own\u2026"
+  },
   "kit": [
     {
       "name": "plot_marker",
