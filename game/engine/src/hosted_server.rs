@@ -2264,7 +2264,14 @@ impl HostedServer {
             },
         );
         let snap =
-            crate::console_snapshot::build_snapshot(&self.console_settings, &roster, &agg, policy, ident);
+            crate::console_snapshot::build_snapshot(&self.console_settings, &roster, &agg, policy, ident, {
+                // Living world S5 — a dedicated server reports its bloom and Tally.
+                let dedicated = self.server.measures_bloom();
+                (
+                    dedicated.then(|| crate::console_snapshot::BloomFigures::from_summary(&self.server.bloom.world_summary())),
+                    dedicated.then(|| crate::console_snapshot::TallyFigures::from(&self.server.tally)),
+                )
+            });
         let json = serde_json::to_string(&snap).unwrap_or_default();
         let pkt = protocol::serialize_packet(
             protocol::PacketType::OperatorSnapshot,
@@ -5918,6 +5925,10 @@ impl HostedServer {
         }
         let old_block =
             self.server.world.get_block(bc.x, bc.y, bc.z);
+        // Living world S5 — a dedicated server's Tally: an edit it accepted.
+        if remote && self.server.measures_bloom() {
+            self.server.tally.note_edit(old_block, bc.new_block);
+        }
         // C3c-2-fix (F-L1) — which half a door's broken cell was, read before
         // the edit's meta lands.
         let old_meta = self.server.world.meta_at(bc.x, bc.y, bc.z);

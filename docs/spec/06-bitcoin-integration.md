@@ -101,6 +101,8 @@ flowchart TB
 
 **Defaults as built (2026-09-27 audit fix).** Sats are off unless someone opts in. `ServerSatsPolicy::default()` has `bitcoin_enabled = false` (an operator turns it on explicitly via `ServerSatsPolicy::bitcoin_enabled_policy()`; nothing loads it from config yet), and every `PlayerSlot` — new player, guest, split-screen, web — starts with `charter_allows_sats = false`: a missing guardian record is not consent (§10.3). The tip jar never shows a fabricated balance: with no real wallet the balance is unknown and the line is hidden. The web taster (wasm32) renders nothing sats-related at all (`economy::SATS_UI_AVAILABLE = false` there): the tip-jar, auction, bounty-board, market-hub, bazaar and commission dialogs never open, vendors show Barter only, and the Reserve gauge's "sats / 1000 digs" line is shown only on a Bitcoin-enabled native server.
 
+**Tally and world bloom panel (living world S5, 2026-11-08).** The F3 overlay's top-right slot, where the Reserve gauge draws, can also show a grown-up panel: the session Tally (blocks mined and placed, items crafted and smelted, vendor trades, container stock) and world bloom (the mean level, life, people together; ideas and time "not measured yet"). It has its own Settings switch, "Grown-up panel (F3)", off by default, and no money words. The gauge's sats rows keep their own gate (`sats_ui_visible`) and the two are independent of each other. The figures are about the world, never a person. A dedicated server reports the same bloom figures and its accepted block-edit counts in `ConsoleSnapshot`. See `docs/superpowers/specs/2026-11-08-living-world-tier1.md` section 5.1.
+
 ```rust
 // Cargo.toml
 [features]

@@ -997,6 +997,15 @@ pub struct GameServer {
     /// opens ([`Self::run_clock_phase`]) and `tick` does not step it again.
     /// Never set on a dedicated server.
     pub lent: bool,
+    /// Living world S5 (spec section 1.8, 5) — a dedicated server's own bloom
+    /// field, ticked round its present players for the `ConsoleSnapshot`
+    /// figures only. Never ticked on a lent or hosted-owning server: a host
+    /// client has its own (`GameState::bloom`). Presentation and reporting:
+    /// it writes nothing to the world.
+    pub bloom: crate::bloom::BloomField,
+    /// Living world S5 — the Tally as a dedicated server can count it: the
+    /// block edits it accepted from joiners (`Tally::note_edit`).
+    pub tally: crate::tally::Tally,
     pub leaf_decay: LeafDecaySystem,
     pub world_time: u32,
     /// D4 slice 2 — the day clock's step per tick (`/time speed`): `1` (the
@@ -1213,6 +1222,8 @@ impl GameServer {
             simulates_block_machines: false,
             column_refill_per_tick: 0,
             lent: false,
+            bloom: crate::bloom::BloomField::new(),
+            tally: crate::tally::Tally::default(),
             leaf_decay: LeafDecaySystem::new(),
             world_time: 6000,
             world_time_step: 1,
@@ -1888,6 +1899,8 @@ impl GameServer {
         // left leaves no slot-keyed credit or grudge for its slot's next
         // occupant (on a lending host this is the host's real ECS).
         self.forget_released_joiners();
+        // Living world S5 — a dedicated server measures bloom for its console.
+        self.tick_bloom();
         // MP-D2c-1 — and a departed rider's mount is free again.
         for mount in std::mem::take(&mut self.released_mounts) {
             let _ = self.ecs.remove_one::<crate::entity::Ridden>(mount);

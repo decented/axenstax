@@ -448,6 +448,11 @@ pub struct GraphicsSettings {
     /// survives a web reload. The pause menu's "Controls" button reopens the
     /// card any time regardless. Off by default.
     pub controls_card_seen: bool,
+    /// Living world S5 (decision D16) — show the grown-up panel (the Tally and
+    /// world bloom) in the F3 overlay's top-right slot. Off by default; a
+    /// personal pref like `show_debug_hud`, excluded from preset detection.
+    /// Old settings files load it as off.
+    pub grownup_panel: bool,
 }
 
 /// The shipped relay set for the rendezvous handshake: public third-party
@@ -609,6 +614,7 @@ impl GraphicsSettings {
             master_volume: DEFAULT_MASTER_VOLUME,
             audio_muted: false,
             controls_card_seen: false,
+            grownup_panel: false,
         }
     }
 
@@ -1038,6 +1044,23 @@ mod tests {
         assert_eq!(back.master_volume, 0.4);
         assert!(back.audio_muted);
         assert!(back.controls_card_seen);
+    }
+
+    /// Living world S5 (D16) — the grown-up panel switch is off by default, an
+    /// old settings file loads it off, it survives a save round-trip, and a
+    /// quality preset never touches it.
+    #[test]
+    fn the_grownup_panel_switch_is_off_by_default_and_round_trips() {
+        assert!(!GraphicsSettings::default().grownup_panel);
+        let old: GraphicsSettings = serde_json::from_str(r#"{ "render_distance": 8 }"#).unwrap();
+        assert!(!old.grownup_panel, "an old settings.json loads it off");
+        let on = GraphicsSettings { grownup_panel: true, ..Default::default() };
+        let back: GraphicsSettings = serde_json::from_str(&serde_json::to_string(&on).unwrap()).unwrap();
+        assert!(back.grownup_panel);
+        let mut s = on;
+        s.apply_preset(GraphicsPreset::Potato);
+        assert!(s.grownup_panel, "a preset click must not touch it");
+        assert_eq!(s.preset(), GraphicsPreset::Potato);
     }
 
     #[test]

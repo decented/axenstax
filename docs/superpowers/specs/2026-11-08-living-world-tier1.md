@@ -358,6 +358,36 @@ every tenth tick from those counters. Placing the stone fires `ClaimCommons` on 
   - `ConsoleSnapshot` on dedicated servers gains the same figures.
 - **Copy:** passes `copy_lint`. No money words. The panel says what each figure counts in plain words.
 
+### 5.1 As built (slice S5, 2026-11-08)
+
+Modules: `tally.rs` (the counters and the container stock), `tally_ui.rs` (the panel; its strings are under the `*_ui.rs` copy
+lint), the server half in `bloom/glue.rs`, the snapshot fields in `console_snapshot.rs`.
+
+- **Counting.** One line, `self.tally.note_event(&ev)`, at the top of `GameState::fire_challenge`. Every mined block
+  (`BreakBlock`), placed block (`PlaceBlock`), finished craft (`CraftItem`), furnace smelt taken (`SmeltItem`) and settled vendor
+  trade (`VendorSale`) already passes there, so the Tally has no seam of its own to drift. The counters are `u64`, saturating,
+  runtime only (no save, no wire) and reset in `reset_for_world_change` with the bloom field.
+- **Whose actions.** The seams are the local ones, so single-player and a host count their own seats' actions, and a joiner
+  counts its own client-side actions. A joiner's actions on a host are not counted by that host's panel (they never reach its
+  `fire_challenge`). Auction settlement fires no event (`tick_auctions` returns a count that includes unsold lots), so the panel's
+  "Vendor trades" are vendor trades only; counting settled auctions waits for a sale-only seam.
+- **Stock.** `tally::stock_in`: the item count in every chest and dispenser/dropper block entity whose chunk is loaded.
+  `StockMeter` caches it for one second and is read only while the panel draws, so a closed panel costs nothing.
+- **Switch.** `GraphicsSettings.grownup_panel` (Settings -> "Grown-up panel (F3)"), default off, persisted with the other
+  settings in `settings.json` (native) / localStorage (web), `serde(default)` so old files load it off. A personal pref: a quality
+  preset never touches it.
+- **Panel.** Drawn in the Reserve gauge's top-right slot when `show_debug` (F3) and the switch are both on: The Tally rows,
+  then World bloom (mean level, Life, People together, "Ideas" and "Time" as "not measured yet", places measured), then the
+  sentence "The Tally counts what was taken and made. Bloom is how alive the places are." The sats gauge keeps its own
+  `show_debug` + `sats_ui_visible` gate unchanged; the two are independent, and when both show the panel sits below the gauge.
+- **Dedicated server.** `GameServer` owns a `BloomField` and a `Tally`. `GameServer::tick_bloom` runs only when
+  `measures_bloom()` (not lent and `column_streamer` set, which only the dedicated server has), round its present and alive
+  bodies, feeding Feast Markers, Commons and feast surges as the client does. Its Tally counts the block edits it accepts from
+  joiners (mined when a cell becomes air, placed otherwise); crafts, smelts and trades are window operations it does not count,
+  so they read 0. `ConsoleSnapshot` gains `world_bloom` (`regions`, `level_permille`, `life_permille`, `people_permille`) and
+  `tally`, both `Option` with `serde(default)` (a lending host or an older server sends none, an older snapshot reads without
+  them). The console site is unchanged and does not read them.
+
 ## 6. The Grey Quarry (act-two place trial)
 
 ### 6.1 Engine additions

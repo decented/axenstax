@@ -18,6 +18,50 @@ pub struct PlayerRow {
     pub connected_secs: u64,
 }
 
+/// Living world S5 (spec section 5) — world bloom as a dedicated server sees it,
+/// as whole thousandths (so the snapshot stays `Eq`): the mean level and its
+/// two measured terms over the regions round its present players.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BloomFigures {
+    /// Regions the means are over; 0 means none has been measured yet.
+    pub regions: u32,
+    pub level_permille: u16,
+    /// Life: the mean eco term.
+    pub life_permille: u16,
+    /// People together: the mean people term.
+    pub people_permille: u16,
+}
+
+impl BloomFigures {
+    pub fn from_summary(s: &crate::bloom::WorldSummary) -> Self {
+        let permille = |x: f32| (x.clamp(0.0, 1.0) * 1000.0).round() as u16;
+        Self {
+            regions: s.regions as u32,
+            level_permille: permille(s.mean_level),
+            life_permille: permille(s.mean_eco),
+            people_permille: permille(s.mean_people),
+        }
+    }
+}
+
+/// Living world S5 — the Tally as a dedicated server counts it: the block
+/// edits it accepted from joiners. Crafts, smelts and trades happen in window
+/// operations the server does not count, so they read 0 here.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TallyFigures {
+    pub mined: u64,
+    pub placed: u64,
+    pub crafted: u64,
+    pub smelted: u64,
+    pub trades: u64,
+}
+
+impl From<&crate::tally::Tally> for TallyFigures {
+    fn from(t: &crate::tally::Tally) -> Self {
+        Self { mined: t.mined, placed: t.placed, crafted: t.crafted, smelted: t.smelted, trades: t.trades }
+    }
+}
+
 /// Everything the Operator panel renders, in one serialisable read-model.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConsoleSnapshot {
@@ -42,17 +86,27 @@ pub struct ConsoleSnapshot {
     pub runtime_npub: String,
     pub delegation_expires_unix: u64,
     pub protocol: u32,
+    /// World bloom on a dedicated server (S5). `None` from a build before the
+    /// field, or a server that does not measure it; the console site does not
+    /// read it.
+    #[serde(default)]
+    pub world_bloom: Option<BloomFigures>,
+    /// The Tally on a dedicated server (S5); `None` as for `world_bloom`.
+    #[serde(default)]
+    pub tally: Option<TallyFigures>,
 }
 
 /// Assemble a snapshot from the server's live inputs. Pure.
 /// `policy` = `(require_signin, allow, blocklist_count)`.
 /// `ident` = `(operator_npub, runtime_npub, delegation_expires_unix)`.
+/// `world` = `(world bloom, the Tally)`, each `None` where the server keeps none.
 pub fn build_snapshot(
     settings: &ConsoleSettings,
     roster: &[PlayerRow],
     agg: &TelemetryAggregates,
     policy: (bool, &Allow, u32),
     ident: (String, String, u64),
+    world: (Option<BloomFigures>, Option<TallyFigures>),
 ) -> ConsoleSnapshot {
     ConsoleSnapshot {
         server_name: settings.server_name.clone().unwrap_or_default(),
@@ -72,6 +126,8 @@ pub fn build_snapshot(
         runtime_npub: ident.1,
         delegation_expires_unix: ident.2,
         protocol: crate::protocol::PROTOCOL_VERSION,
+        world_bloom: world.0,
+        tally: world.1,
     }
 }
 
@@ -169,6 +225,7 @@ mod tests {
             &agg,
             (true, &Allow::only([[1u8; 32], [2u8; 32], [3u8; 32], [4u8; 32]]), 1),
             ("npub1op".into(), "npub1rt".into(), 1_900_000_000),
+            (None, None),
         );
         assert_eq!(snap.server_name, "Cool SMP");
         assert_eq!(snap.players_cur, 2);
@@ -199,6 +256,7 @@ mod tests {
                 &TelemetryAggregates::default(),
                 (true, allow, 0),
                 (String::new(), String::new(), 0),
+                (None, None),
             )
         };
         let open = build(&Allow::Open);
@@ -242,10 +300,51 @@ mod tests {
             runtime_npub: "npub1rt".into(),
             delegation_expires_unix: 0,
             protocol: crate::protocol::PROTOCOL_VERSION,
+            world_bloom: Some(BloomFigures { regions: 9, level_permille: 620, life_permille: 700, people_permille: 200 }),
+            tally: Some(TallyFigures { mined: 5, placed: 4, crafted: 0, smelted: 0, trades: 0 }),
         };
         let json = serde_json::to_string(&snap).unwrap();
         let back: ConsoleSnapshot = serde_json::from_str(&json).unwrap();
         assert_eq!(snap, back);
+    }
+
+    /// Living world S5 — the world-bloom and Tally figures reach the snapshot, and
+    /// a snapshot from a build before them still reads (the console site's
+    /// readers, and an older server, see them absent).
+    #[test]
+    fn the_snapshot_carries_world_bloom_and_the_tally_and_reads_without_them() {
+        let summary = crate::bloom::WorldSummary { mean_level: 0.6234, mean_eco: 0.7, mean_people: 1.4, regions: 9 };
+        let bloom = BloomFigures::from_summary(&summary);
+        assert_eq!(bloom, BloomFigures { regions: 9, level_permille: 623, life_permille: 700, people_permille: 1000 });
+        let tally = crate::tally::Tally { mined: 11, placed: 7, crafted: 3, smelted: 2, trades: 1 };
+        let snap = build_snapshot(
+            &ConsoleSettings::default(),
+            &[],
+            &TelemetryAggregates::default(),
+            (true, &Allow::Open, 0),
+            (String::new(), String::new(), 0),
+            (Some(bloom), Some(TallyFigures::from(&tally))),
+        );
+        assert_eq!(snap.world_bloom, Some(bloom));
+        assert_eq!(snap.tally.map(|t| (t.mined, t.placed, t.crafted, t.smelted, t.trades)), Some((11, 7, 3, 2, 1)));
+        let back: ConsoleSnapshot = serde_json::from_str(&serde_json::to_string(&snap).unwrap()).unwrap();
+        assert_eq!(back, snap);
+        // An older snapshot has neither key.
+        let mut json = serde_json::to_value(&snap).unwrap();
+        json.as_object_mut().unwrap().remove("world_bloom");
+        json.as_object_mut().unwrap().remove("tally");
+        let old: ConsoleSnapshot = serde_json::from_value(json).unwrap();
+        assert_eq!((old.world_bloom, old.tally), (None, None));
+        // A server that keeps none sends none.
+        let none = build_snapshot(
+            &ConsoleSettings::default(),
+            &[],
+            &TelemetryAggregates::default(),
+            (false, &Allow::Open, 0),
+            (String::new(), String::new(), 0),
+            (None, None),
+        );
+        assert!(none.world_bloom.is_none() && none.tally.is_none());
     }
 
     #[test]

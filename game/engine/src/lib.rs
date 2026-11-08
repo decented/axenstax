@@ -274,6 +274,8 @@ mod block_interact;
 mod falling_blocks;
 mod feast_client; // Living world S3 — the client half: local arms, confetti, bloom feed.
 mod feast; // Living world S3 — the Feast rule (spec §3).
+mod tally; // Living world S5 — the Tally: session counters and the container stock (spec §5).
+mod tally_ui; // Living world S5 — the grown-up panel (F3): the Tally and world bloom.
 mod commons; // Living world S3 — Commons footprints and the Plot/Commons overlap rule (spec §4).
 mod growth;
 mod campfire;
@@ -1659,6 +1661,10 @@ pub(crate) struct GameState {
     /// local players is. Presentation only; ticked once per logical tick in
     /// every client mode and reset when a world is entered.
     pub(crate) bloom: crate::bloom::BloomField,
+    /// Living world S5 (spec §5): this session's counters and the container
+    /// stock, for the grown-up panel. Runtime only; reset with the world.
+    pub(crate) tally: crate::tally::Tally,
+    pub(crate) tally_stock: crate::tally::StockMeter,
     /// Living world S3 — a joiner has asked the authority to hold the feast at
     /// this cell: toast "The Feast of X, N guests." when the table is seen to
     /// become a marker, until the instant (`feast_client`).
@@ -2296,6 +2302,8 @@ impl GameState {
             pending_mc_import: None,
             remote_players: Vec::new(),
             bloom: crate::bloom::BloomField::new(),
+            tally: crate::tally::Tally::default(),
+            tally_stock: crate::tally::StockMeter::default(),
             feast_toast: None,
             bloom_present: crate::bloom::present::BloomPresent::default(),
             remote_swing: std::collections::HashMap::new(),

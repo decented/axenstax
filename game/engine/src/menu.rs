@@ -5083,6 +5083,14 @@ pub fn draw_settings_panel(
             {
                 changed = true;
             }
+            // Living world S5 (D16) — the Tally and world bloom, for grown-ups,
+            // drawn with the F3 overlay. Off unless someone turns it on.
+            if ui
+                .checkbox(&mut gfx.grownup_panel, "Grown-up panel (F3)")
+                .changed()
+            {
+                changed = true;
+            }
             // #45 — auto-refill an emptied hotbar block from the bag.
             if ui
                 .checkbox(&mut gfx.auto_refill, "Auto-refill hotbar from inventory")

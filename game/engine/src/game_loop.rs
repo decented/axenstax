@@ -3021,6 +3021,7 @@ impl super::GameState {
     /// when the store changed — then forwards it to the active scenario (a
     /// no-op when none runs). See `scenario::ChallengeEvent`.
     pub(crate) fn fire_challenge(&mut self, ev: crate::scenario::ChallengeEvent) {
+        self.tally.note_event(&ev); // Living world S5: the grown-up panel's counters.
         if self.trial_bests.record_event(&ev) {
             self.trial_bests.save();
         }
@@ -3221,6 +3222,8 @@ impl super::GameState {
         // Bloom state belongs to the world being left.
         self.bloom.reset();
         self.bloom_present.reset();
+        self.tally.reset();
+        self.tally_stock.reset();
         // Nothing about the last world's saves carries over (`begin_load`
         // records whether this one opened from its autosave).
         self.session_saves = crate::world_exit::SessionSaves::default();
@@ -21012,9 +21015,9 @@ impl super::GameState {
                 // change beyond moving the call site.
                 // Audit 2026-09-27 — the gauge prints a "sats / 1000 digs"
                 // rate: only on a Bitcoin-enabled server, never on web.
-                if self.show_debug
-                    && crate::economy::sats_ui_visible(self.sats_policy.bitcoin_enabled, self.players[pidx].charter_allows_sats)
-                {
+                let sats_gauge = self.show_debug
+                    && crate::economy::sats_ui_visible(self.sats_policy.bitcoin_enabled, self.players[pidx].charter_allows_sats);
+                if sats_gauge {
                     let want_fund = crate::hud_ui::draw_reserve_gauge(
                         &self.renderer.egui.ctx,
                         &screen.viewport,
@@ -21028,6 +21031,21 @@ impl super::GameState {
                     if want_fund && pidx == 0 && self.fund_dialog.is_none() {
                         self.fund_dialog = Some(crate::hud_ui::FundDialogState::default());
                     }
+                }
+                // Living world S5 (D16) — the grown-up panel, in the same F3 slot,
+                // behind its own Settings switch. Independent of the sats gate: it
+                // takes the slot alone, or sits below the gauge when both show.
+                if self.show_debug && self.graphics.grownup_panel {
+                    let stock = self.tally_stock.read(&self.world, Instant::now());
+                    crate::tally_ui::draw_grownup_panel(
+                        &self.renderer.egui.ctx,
+                        &screen.viewport,
+                        pidx,
+                        &self.tally,
+                        stock,
+                        &self.bloom.world_summary(),
+                        if sats_gauge { crate::tally_ui::BELOW_RESERVE_GAUGE } else { 0.0 },
+                    );
                 }
             }
 
