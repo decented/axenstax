@@ -2742,6 +2742,78 @@ typed `ItemKind`, and a bare `"CraftItem"` (every older def) still parses as
   holds only an empty bucket, so it finishes together with (and is named over)
   the carry route when the pool is built first.
 
+### 8b.5 The Trials island (Part C §C.3; built 2026-11-08)
+
+A walkable hub where each unlocked trial is a doorway. Code:
+`trials_island_layout.rs` (pure layout, unit-tested), `trials_island_build.rs`
+(what the layout is fed, the column write), `trials_island_flow.rs` (visit,
+doorways, launch and return), `trials_island_ui.rs` (the card).
+
+- **The world.** `assets/scenarios/trials-island.json`: `FreeRoam`,
+  `ArenaMode::Resume` (one persistent world, folder `exp-trials-island`),
+  `world_type: "flat"` with `ground: "water"` (a new optional `ScenarioDef`
+  field copied to `WorldMeta.ground` on a fresh arena), day-locked, no mobs.
+  It is in neither `EXPLORER_CHALLENGES` nor `TRIAL_ORDER`. Entered from the
+  gallery header's "Walk the island" (a plain `PlayScenario`). The visit
+  starts on the first play tick in a world whose folder is the island's; no
+  scenario runs there (the def is only the world's shape).
+- **Layout** (square distance `max(|x|, |z|)` from spawn at the origin, floor
+  y 79): plaza 0..=4 (marble, a signpost per district and one for the track,
+  lanterns), inner lawn 5..=8, running track 9..=11, four district wedges
+  (Make north, Tend east, Tech south, Brave west) with plot rows at 15, 23
+  and 31 (room for 3, 4 and 6 plots; Make's 13 fill it), land to 40, sand to
+  42, water to 46, open sea beyond. The land is two blocks of earth over the
+  sea floor. A district plot is 8 by 6: a flush coloured plinth (the engine
+  has no step-up, so a raised one would need a jump), a 5-wide, 6-tall marble
+  arch with a 3-wide, 4-tall opening and a shelf-coloured top with a lantern,
+  the card diorama (`card_art` data, or `RACE_ART` for races) built beside it
+  at full scale with its bottom layer set into the floor, and an oak sign
+  with the gallery title. The four clock-corner doorways straddle the track,
+  one per side, their dioramas on the inner lawn.
+- **Fixed plots.** Every trial has a fixed plot (its index within its
+  district in `TRIAL_ORDER`), whatever is unlocked, so a doorway never moves.
+  Open trials (the gallery's cards) get a doorway; `next_hints` trials get a
+  roped-off plot (fence posts) with the hint on a sign; the rest stay grass,
+  so nothing tells how many there are. Signs carry names and hints only.
+- **Writing it.** The layout covers the whole built area, air included, and
+  is written column by column as each column's floor chunk exists (a write
+  into an ungenerated column would conjure an empty chunk the flat generator
+  then skips: a hole with no floor). Only differing cells are written, so the
+  write is idempotent; it runs on every visit, so new unlocks appear and a
+  hint plot becomes a doorway (its sign removed). Changed columns get a fresh
+  light pass and a remesh.
+- **Liquids in dioramas** are cased in glass wherever they would touch air,
+  and lava is lidded, so nothing flows or sets fire to the island.
+- **Protection.** A block aimed at within distance 47 (the built area and the
+  ring round it) cannot be broken or built on, in any game mode (the break
+  and place intents are dropped). Beyond it the player may build.
+- **Doorways.** A card opens when the feet step into an arch's opening from
+  outside it (arriving in one, or standing on after closing, opens nothing)
+  and closes when the feet leave its plinth. The card is the gallery's hero
+  view (`trials_gallery_ui::draw_hero`, Play not focused, so the movement
+  keys still move) in a panel on the right; the cursor is freed for Play
+  (`cursor_must_be_free`); Enter also plays. Opening a card clears its New
+  mark.
+- **Launch and return.** Play stands the player on the doorway's return spot
+  (just in front of the arch, facing it), leaves the island with a save, and
+  queues the trial's `PlayScenario` (not `launch_scenario_from_world`, which
+  would overlay a kit-less trial in the island itself), then sets
+  `GameState.island_return` (the token and the trial's folder). A trial's end
+  card "Back to Trials" (race panel or challenge card) reads it before
+  leaving and, from that trial's world, queues the island again with
+  `island_arrival` set to the doorway, where the visit puts the player.
+  `leave_world` clears `island_return`, so the pause menu's Save & Quit
+  ("Back to menu") still goes to the lobby.
+- **Postcards.** Each open doorway whose trial has a postcard
+  (`postcard::newest_png`) hangs it as a wall exhibit on the arch's top, the
+  image written as `island-postcard-<token>.png` in the island world's
+  `exhibits/` folder (on the web, handed to the exhibit loader in memory). The
+  island's own exhibits are replaced on each visit; others are kept.
+- **Known limits:** doors, chests and machines in dioramas are inert only
+  because right-click is dropped in the built area; the weather is not locked
+  (no scenario runs on the island); on the web the cursor stays free after a
+  card closes until the player clicks back into the game.
+
 ---
 
 ## 9. Mob System

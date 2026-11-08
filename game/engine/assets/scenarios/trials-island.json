@@ -8,5 +8,7 @@
   "arena_mode": "Resume",
   "world_type": "flat",
   "time_lock": "day",
-  "mobs_enabled": false
+  "mobs_enabled": false,
+  "ground": "water",
+  "water_depth": 8
 }

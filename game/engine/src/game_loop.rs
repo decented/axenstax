@@ -9726,6 +9726,12 @@ impl super::GameState {
                         if let Some(me) = launch.def.mobs_enabled {
                             meta.mobs_enabled = me;
                         }
+                        if let Some(g) = &launch.def.ground {
+                            meta.ground = g.clone();
+                        }
+                        if let Some(d) = launch.def.water_depth {
+                            meta.water_depth = d;
+                        }
                         if let Err(e) = crate::save::save_world_meta(&folder, &meta) {
                             log::error!("experience world meta save failed: {e}");
                         }

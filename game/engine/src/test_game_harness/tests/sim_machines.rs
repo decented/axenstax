@@ -234,6 +234,8 @@ fn game_harness_d4_machines_construction_does_not_fake_a_power_transition() {
         game_mode: None,
         time_lock: None,
         weather_lock: None,
+        ground: None,
+        water_depth: None,
         mobs_enabled: None,
         trial_race: None,
         arena: None,

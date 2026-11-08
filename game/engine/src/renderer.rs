@@ -11,6 +11,8 @@ use crate::texture_gen;
 use crate::egui_integration::EguiIntegration;
 
 mod postcard_capture;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod view_shot;
 pub use postcard_capture::PostcardPoll;
 
 /// Per-chunk GPU buffers.

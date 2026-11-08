@@ -64,6 +64,8 @@ fn fixture_def(objective: Objective) -> ScenarioDef {
         game_mode: None,
         time_lock: None,
         weather_lock: None,
+        ground: None,
+        water_depth: None,
         mobs_enabled: None,
         trial_race: None,
         card_art: None,

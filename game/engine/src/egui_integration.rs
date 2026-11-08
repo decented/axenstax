@@ -11,6 +11,11 @@ pub struct EguiIntegration {
     /// Harness observation of the real completed headless paint pass.
     #[cfg(test)]
     pub(crate) last_shapes: Vec<egui::epaint::ClippedShape>,
+    /// Harness: texture changes from discarded headless frames (no surface
+    /// to paint), applied by the next headless paint so a screenshot taken
+    /// mid-session finds the fonts and images those frames made.
+    #[cfg(test)]
+    held_textures: egui::TexturesDelta,
     /// Real headless input events, consumed by the ordinary frame entry.
     #[cfg(test)]
     pub(crate) headless_events: Vec<egui::Event>,
@@ -57,6 +62,8 @@ impl EguiIntegration {
             #[cfg(test)]
             last_shapes: Vec::new(),
             #[cfg(test)]
+            held_textures: Default::default(),
+            #[cfg(test)]
             headless_events: Vec::new(),
             state: Some(state),
             renderer,
@@ -89,6 +96,8 @@ impl EguiIntegration {
             ctx,
             #[cfg(test)]
             last_shapes: Vec::new(),
+            #[cfg(test)]
+            held_textures: Default::default(),
             state: None,
             #[cfg(test)]
             headless_events: Vec::new(),
@@ -205,7 +214,10 @@ impl EguiIntegration {
     pub fn end_frame_discard(&mut self) {
         let output = self.ctx.end_pass();
         #[cfg(test)]
-        { self.last_shapes = output.shapes; }
+        {
+            self.last_shapes = output.shapes;
+            self.held_textures.append(output.textures_delta);
+        }
         #[cfg(not(test))]
         let _ = output;
     }
@@ -294,6 +306,16 @@ impl EguiIntegration {
         run_ui(&self.ctx, self);
         let full_output = self.ctx.end_pass();
         let paint_jobs = self.ctx.tessellate(full_output.shapes, full_output.pixels_per_point);
+        #[cfg(test)]
+        {
+            let held = std::mem::take(&mut self.held_textures);
+            for (id, delta) in &held.set {
+                self.renderer.update_texture(device, queue, *id, delta);
+            }
+            for id in &held.free {
+                self.renderer.free_texture(id);
+            }
+        }
         for (id, delta) in &full_output.textures_delta.set {
             self.renderer.update_texture(device, queue, *id, delta);
         }

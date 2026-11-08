@@ -14,7 +14,9 @@
 //! - **Four districts**, one per shelf, each a wedge on the compass (Make
 //!   north, Tend east, Tech south, Brave west), with three rows of plots
 //!   facing the plaza (rows at 15, 23 and 31, room for 3, 4 and 6 plots).
-//! - **Shore**: sand (41..=42) then water (43..=46).
+//! - **Shore**: sand (41..=42) then water (43..=46). The island world's
+//!   flat floor is water (`"ground": "water"`), so beyond it is open sea;
+//!   the land is laid as two blocks of earth over the sea floor.
 //!
 //! Every trial has a FIXED plot, whatever is unlocked, so a doorway never
 //! moves; a plot is a doorway (open), a roped-off plot with a hint sign (one of
@@ -32,8 +34,9 @@ pub const LAND_R: i32 = 40;
 const SAND_R: i32 = 42;
 /// The outer edge of the water: the island's whole built (and protected) area.
 pub const ISLAND_R: i32 = 46;
-/// Lowest and highest rows the layout writes.
-pub const MIN_Y: i32 = GROUND_Y - 1;
+/// Lowest and highest rows the layout writes (the land is two blocks of
+/// earth over the island world's sea floor).
+pub const MIN_Y: i32 = GROUND_Y - 2;
 pub const MAX_Y: i32 = GROUND_Y + 8;
 /// A cell the layout leaves as it is (below the floor, away from the water).
 pub const KEEP: BlockId = BlockId::MAX;
@@ -242,166 +245,6 @@ impl IslandLayout {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Building the grid
-// ---------------------------------------------------------------------------
-
-/// Rotate a north-frame cell (or direction) by quarter turns, clockwise seen
-/// from above (north -> east -> south -> west).
-fn rot(turns: u8, x: i32, z: i32) -> (i32, i32) {
-    match turns % 4 {
-        0 => (x, z),
-        1 => (-z, x),
-        2 => (-x, -z),
-        _ => (z, -x),
-    }
-}
-
-fn facing_of(dx: i32, dz: i32) -> Facing {
-    match (dx.signum(), dz.signum()) {
-        (0, 1) => Facing::South,
-        (0, -1) => Facing::North,
-        (1, 0) => Facing::East,
-        _ => Facing::West,
-    }
-}
-
-/// Exhibit yaw for an outward wall normal (`exhibit::yaw_to_normal`'s inverse).
-fn normal_yaw(nx: i32, nz: i32) -> f32 {
-    (nx as f32).atan2(nz as f32)
-}
-
-/// Camera yaw looking along `(fx, fz)` (`camera::forward_from`'s inverse).
-fn look_yaw(fx: i32, fz: i32) -> f32 {
-    (-fx as f32).atan2(-fz as f32)
-}
-
-struct Grid {
-    cells: Vec<BlockId>,
-    signs: Vec<SignSpot>,
-    doorways: Vec<Doorway>,
-    footprints: Vec<(&'static str, Vec<[i32; 3]>)>,
-}
-
-/// A north-frame painter for one district (or one clock doorway).
-struct Frame<'g> {
-    g: &'g mut Grid,
-    turns: u8,
-    /// Cells written through [`Frame::own`], for the footprint.
-    owned: Vec<[i32; 3]>,
-}
-
-impl Grid {
-    fn set(&mut self, x: i32, y: i32, z: i32, b: BlockId) {
-        if let Some(i) = index(x, y, z) {
-            self.cells[i] = b;
-        }
-    }
-
-    fn get(&self, x: i32, y: i32, z: i32) -> BlockId {
-        index(x, y, z).map_or(KEEP, |i| self.cells[i])
-    }
-
-    fn frame(&mut self, turns: u8) -> Frame<'_> {
-        Frame { g: self, turns, owned: Vec::new() }
-    }
-}
-
-impl Frame<'_> {
-    fn world(&self, x: i32, z: i32) -> (i32, i32) {
-        rot(self.turns, x, z)
-    }
-
-    fn set(&mut self, x: i32, y: i32, z: i32, b: BlockId) {
-        let (wx, wz) = self.world(x, z);
-        self.g.set(wx, y, wz, b);
-    }
-
-    /// Write a cell that belongs to this plot's own structure.
-    fn own(&mut self, x: i32, y: i32, z: i32, b: BlockId) {
-        let (wx, wz) = self.world(x, z);
-        self.g.set(wx, y, wz, b);
-        self.owned.push([wx, y, wz]);
-    }
-
-    fn get(&self, x: i32, y: i32, z: i32) -> BlockId {
-        let (wx, wz) = self.world(x, z);
-        self.g.get(wx, y, wz)
-    }
-
-    fn sign(&mut self, x: i32, z: i32, text: String, toward: (i32, i32)) {
-        let (wx, wz) = self.world(x, z);
-        let (fx, fz) = rot(self.turns, toward.0, toward.1);
-        self.g.set(wx, GROUND_Y + 1, wz, block::OAK_SIGN);
-        self.owned.push([wx, GROUND_Y + 1, wz]);
-        self.g.signs.push(SignSpot { pos: [wx, GROUND_Y + 1, wz], text, facing: facing_of(fx, fz) });
-    }
-
-    /// The (min, max) world cells of a north-frame rectangle.
-    fn rect(&self, a: (i32, i32), b: (i32, i32)) -> ([i32; 2], [i32; 2]) {
-        let (ax, az) = self.world(a.0, a.1);
-        let (bx, bz) = self.world(b.0, b.1);
-        ([ax.min(bx), az.min(bz)], [ax.max(bx), az.max(bz)])
-    }
-
-    /// The centre of a north-frame cell, in the world.
-    fn centre(&self, x: i32, z: i32) -> [f32; 3] {
-        let (wx, wz) = self.world(x, z);
-        [wx as f32 + 0.5, (GROUND_Y + 1) as f32, wz as f32 + 0.5]
-    }
-
-    /// Place a diorama so its cell `(0, 0, 0)` lands at north-frame `at`, its
-    /// long axis along `long` and short axis along `short` (unit vectors), its
-    /// bottom layer set into the floor. Liquids are cased in glass where they
-    /// would touch air (and lava is lidded), so nothing flows or burns.
-    fn diorama(&mut self, cells: &[([i32; 3], BlockId)], at: (i32, i32), long: (i32, i32), short: (i32, i32)) {
-        let Some(norm) = normalise(cells) else { return };
-        let mut placed = Vec::new();
-        for ([dx, dy, dz], b) in norm {
-            let x = at.0 + long.0 * dx + short.0 * dz;
-            let z = at.1 + long.1 * dx + short.1 * dz;
-            self.own(x, GROUND_Y + dy, z, b);
-            placed.push((x, GROUND_Y + dy, z, b));
-        }
-        for (x, y, z, b) in placed {
-            if b != block::WATER && b != block::LAVA {
-                continue;
-            }
-            let mut around = vec![(x + 1, y, z), (x - 1, y, z), (x, y, z + 1), (x, y, z - 1), (x, y - 1, z)];
-            if b == block::LAVA {
-                around.push((x, y + 1, z));
-            }
-            for (nx, ny, nz) in around {
-                let open = self.get(nx, ny, nz);
-                if ny > GROUND_Y && (open == block::AIR || open == KEEP) {
-                    self.own(nx, ny, nz, block::GLASS);
-                } else if ny <= GROUND_Y && open == KEEP {
-                    self.own(nx, ny, nz, block::DIRT);
-                }
-            }
-        }
-    }
-
-    fn finish(self, token: &'static str) {
-        let owned = self.owned;
-        self.g.footprints.push((token, owned));
-    }
-}
-
-/// Shift a diorama to start at the origin and drop what falls off a plot
-/// (`DIO_LONG` by `DIO_SHORT`, at most 4 high).
-fn normalise(cells: &[([i32; 3], BlockId)]) -> Option<Vec<([i32; 3], BlockId)>> {
-    let min = |i: usize| cells.iter().map(|(p, _)| p[i]).min();
-    let (mx, my, mz) = (min(0)?, min(1)?, min(2)?);
-    Some(
-        cells
-            .iter()
-            .map(|(p, b)| ([p[0] - mx, p[1] - my, p[2] - mz], *b))
-            .filter(|(p, b)| p[0] < DIO_LONG && p[2] < DIO_SHORT && p[1] < 5 && *b != block::AIR)
-            .collect(),
-    )
-}
-
 /// The plots in one district, front row first, the middle of each row first:
 /// `(row distance, left edge x)` in the north frame.
 pub(crate) fn slot_positions() -> Vec<(i32, i32)> {
@@ -434,7 +277,12 @@ fn base(g: &mut Grid) {
             if r > SAND_R {
                 g.set(x, GROUND_Y, z, block::WATER);
                 g.set(x, GROUND_Y - 1, z, block::WATER);
-            } else if r > LAND_R {
+                continue;
+            }
+            for y in MIN_Y..GROUND_Y {
+                g.set(x, y, z, if r > LAND_R { block::SAND } else { block::DIRT });
+            }
+            if r > LAND_R {
                 g.set(x, GROUND_Y, z, block::SAND);
             } else if r <= PLAZA_R {
                 g.set(x, GROUND_Y, z, if r == PLAZA_R { block::SANDSTONE } else { block::MARBLE });
@@ -578,6 +426,31 @@ fn clock_slot(f: &mut Frame<'_>, slot: &SlotInput) {
     });
 }
 
+/// A sprinkle of wild flowers on the open lawn (never on a path, a plinth,
+/// or where a doorway puts a player back).
+fn flowers(g: &mut Grid) {
+    const KINDS: [BlockId; 3] = [block::CORNFLOWER, block::FIELD_POPPY, block::BUTTERCUP];
+    for z in -LAND_R..=LAND_R {
+        for x in -LAND_R..=LAND_R {
+            let r = ring(x, z);
+            if r <= TRACK.1 + 1 || g.get(x, GROUND_Y, z) != block::GRASS || g.get(x, GROUND_Y + 1, z) != block::AIR {
+                continue;
+            }
+            let h = (x.wrapping_mul(73_856_093) ^ z.wrapping_mul(19_349_663)) as u32;
+            if h % 23 != 0 {
+                continue;
+            }
+            let keep_clear = g.doorways.iter().any(|d| {
+                let (rx, rz) = (d.return_pos[0].floor() as i32, d.return_pos[2].floor() as i32);
+                (x - rx).abs() <= 1 && (z - rz).abs() <= 1
+            });
+            if !keep_clear {
+                g.set(x, GROUND_Y + 1, z, KINDS[(h / 23 % 3) as usize]);
+            }
+        }
+    }
+}
+
 /// Lay out the island for these trials (in `TRIAL_ORDER` order: each
 /// district's plots are taken in that order, so a trial's plot never moves).
 pub fn layout(slots: &[SlotInput]) -> IslandLayout {
@@ -612,6 +485,7 @@ pub fn layout(slots: &[SlotInput]) -> IslandLayout {
     let mut f = g.frame(0);
     f.sign(-(PLAZA_R - 1), -(PLAZA_R - 1), District::Clock.signpost().to_string(), (0, 1));
     f.finish("plaza");
+    flowers(&mut g);
     IslandLayout { cells: g.cells, doorways: g.doorways, signs: g.signs, footprints: g.footprints }
 }
 
@@ -620,6 +494,10 @@ pub fn layout(slots: &[SlotInput]) -> IslandLayout {
 pub fn district_capacity() -> usize {
     slot_positions().len()
 }
+
+#[path = "trials_island_frame.rs"]
+mod frame;
+use frame::{look_yaw, normal_yaw, rot, Frame, Grid};
 
 #[cfg(test)]
 #[path = "trials_island_layout_tests.rs"]

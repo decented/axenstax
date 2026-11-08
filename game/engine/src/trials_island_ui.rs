@@ -39,7 +39,7 @@ pub(crate) fn draw_card(ctx: &egui::Context, card: &Card, postcard: Option<egui:
                             .color(brand::MUTED_TEXT),
                     );
                     ui.add_space(6.0);
-                    let hero = crate::trials_gallery_ui::draw_hero(ui, card, &icons, false, postcard);
+                    let hero = crate::trials_gallery_ui::draw_hero(ui, card, &icons, false, postcard, false);
                     if matches!(hero.action, Some(MenuAction::PlayScenario { .. })) {
                         play = true;
                     }

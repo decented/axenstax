@@ -541,12 +541,14 @@ pub(crate) struct HeroResult {
 
 /// The hero view for one card: the gallery's, and the Trials island's
 /// doorway card (`trials_island_ui`). `fresh` gives Play keyboard focus.
+/// `lobby` adds the lobby-only links ("How it works", the ghost files).
 pub(crate) fn draw_hero(
     ui: &mut egui::Ui,
     card: &Card,
     icons: &[egui::TextureId],
     fresh: bool,
     postcard: Option<egui::TextureId>,
+    lobby: bool,
 ) -> HeroResult {
     let mut out = HeroResult::default();
     let shelf = rgb(card.row.color_rgb());
@@ -724,7 +726,7 @@ pub(crate) fn draw_hero(
                 }
 
                 ui.add_space(8.0);
-                ui.horizontal(|ui| {
+                ui.add_visible_ui(lobby, |ui| ui.horizontal(|ui| {
                     if ui
                         .add(egui::Button::new(egui::RichText::new("How it works").size(13.0).underline().color(MUTED)).frame(false))
                         .clicked()
@@ -750,7 +752,7 @@ pub(crate) fn draw_hero(
                             out.action = Some(MenuAction::ImportGhost);
                         }
                     }
-                });
+                }));
                 ui.add_space(20.0);
             });
         });
@@ -882,7 +884,7 @@ pub fn draw(
             let Some(rows) = st.built.as_ref() else { return };
             match hero_pos.and_then(|(r, c)| rows.get(r).and_then(|row| row.cards.get(c))) {
                 Some(card) => {
-                    hero_result = draw_hero(ui, card, icons, fresh, art.get(card.token).copied())
+                    hero_result = draw_hero(ui, card, icons, fresh, art.get(card.token).copied(), true)
                 }
                 None => {
                     ui.label(egui::RichText::new("Pick one to look into it, then play.").size(13.0).color(MUTED));

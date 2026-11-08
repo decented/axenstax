@@ -607,6 +607,8 @@ pub fn race_scenario_def(def: &TrialDef) -> crate::scenario::ScenarioDef {
         game_mode: Some("survival".to_string()),
         time_lock: Some("day".to_string()),
         weather_lock: None,
+        ground: None,
+        water_depth: None,
         mobs_enabled: Some(false),
         trial_race: Some(def.id.to_string()),
         card_art: None,

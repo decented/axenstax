@@ -452,6 +452,15 @@ pub struct ScenarioDef {
     pub weather_lock: Option<String>,
     #[serde(default)]
     pub mobs_enabled: Option<bool>,
+    /// The flat floor's top layer for a `"flat"` arena (`WorldMeta.ground`:
+    /// `"grass"`, `"sand"`, `"water"`, ...). `None` keeps the default (grass).
+    /// The Trials island sets `"water"`, so it stands in an open sea.
+    #[serde(default)]
+    pub ground: Option<String>,
+    /// With `ground: "water"`, how deep the sea is (`WorldMeta.water_depth`,
+    /// 1..=8). `None` keeps the default.
+    #[serde(default)]
+    pub water_depth: Option<u8>,
     /// Trials (⚡ Race): when set, this scenario is a Race-trial wrapper — the
     /// engine arms the named `trials::CATALOG` race on entry (teleport to start,
     /// plant the finish beacon, start the clock + ghost). The scenario itself is
@@ -876,6 +885,8 @@ pub fn builtin_test_def() -> ScenarioDef {
         game_mode: None,
         time_lock: None,
         weather_lock: None,
+        ground: None,
+        water_depth: None,
         mobs_enabled: None,
         trial_race: None,
         card_art: None,
@@ -1746,6 +1757,8 @@ mod tests {
             game_mode: None,
             time_lock: None,
             weather_lock: None,
+            ground: None,
+            water_depth: None,
             mobs_enabled: None,
             trial_race: None,
             card_art: None,
@@ -1825,6 +1838,8 @@ mod tests {
             game_mode: None,
             time_lock: None,
             weather_lock: None,
+            ground: None,
+            water_depth: None,
             mobs_enabled: None,
             trial_race: None,
             card_art: None,
@@ -2312,6 +2327,8 @@ mod tests {
             game_mode: None,
             time_lock: None,
             weather_lock: None,
+            ground: None,
+            water_depth: None,
             mobs_enabled: None,
             trial_race: None,
             card_art: None,
