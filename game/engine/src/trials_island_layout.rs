@@ -437,7 +437,7 @@ fn flowers(g: &mut Grid) {
                 continue;
             }
             let h = (x.wrapping_mul(73_856_093) ^ z.wrapping_mul(19_349_663)) as u32;
-            if h % 23 != 0 {
+            if !h.is_multiple_of(23) {
                 continue;
             }
             let keep_clear = g.doorways.iter().any(|d| {

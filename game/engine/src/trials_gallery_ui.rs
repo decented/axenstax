@@ -726,7 +726,7 @@ pub(crate) fn draw_hero(
                 }
 
                 ui.add_space(8.0);
-                ui.add_visible_ui(lobby, |ui| ui.horizontal(|ui| {
+                if lobby { ui.horizontal(|ui| {
                     if ui
                         .add(egui::Button::new(egui::RichText::new("How it works").size(13.0).underline().color(MUTED)).frame(false))
                         .clicked()
@@ -752,7 +752,7 @@ pub(crate) fn draw_hero(
                             out.action = Some(MenuAction::ImportGhost);
                         }
                     }
-                }));
+                }); }
                 ui.add_space(20.0);
             });
         });
