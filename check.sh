@@ -52,17 +52,21 @@ fail()    { printf "\033[1;31mFAIL\033[0m %s\n" "$*" >&2; }
 clean_test_litter() {
     local dir="${TMPDIR:-/tmp}" before after d pid
     [ -d "$dir" ] || return 0
-    before="$(du -sk "$dir" 2>/dev/null | awk '{print $1}')"
+    before="$( { du -sk "$dir" 2>/dev/null || true; } | awk '{print $1+0}')"
     for d in "$dir"/axenstax-test-data-* "$dir"/axe_mirror_signet_* "$dir"/axenstax-signet-* "$dir"/axenstax-harness-*; do
         [ -d "$d" ] || continue
         pid="${d##*-}"
         case "$d" in */axe_mirror_signet_*) pid="${d##*_}" ;; esac
         case "$pid" in ''|*[!0-9]*) continue ;; esac
+        # /proc/<pid> exists for any user's live process (kill -0 fails on
+        # another user's). A run in another pid namespace (a sandbox) can still
+        # look dead: run check.sh with its own TMPDIR in that case.
+        [ -d "/proc/$pid" ] && continue
         kill -0 "$pid" 2>/dev/null && continue
-        rm -rf -- "$d"
+        rm -rf -- "$d" 2>/dev/null || true
     done
-    after="$(du -sk "$dir" 2>/dev/null | awk '{print $1}')"
-    echo "test litter in $dir: freed $(( (before - after) / 1024 )) MiB"
+    after="$( { du -sk "$dir" 2>/dev/null || true; } | awk '{print $1+0}')"
+    echo "test litter in $dir: freed $(( (${before:-0} - ${after:-0}) / 1024 )) MiB"
 }
 clean_test_litter
 

@@ -5925,10 +5925,6 @@ impl HostedServer {
         }
         let old_block =
             self.server.world.get_block(bc.x, bc.y, bc.z);
-        // Living world S5 — a dedicated server's Tally: an edit it accepted.
-        if remote && self.server.measures_bloom() {
-            self.server.tally.note_edit(old_block, bc.new_block);
-        }
         // C3c-2-fix (F-L1) — which half a door's broken cell was, read before
         // the edit's meta lands.
         let old_meta = self.server.world.meta_at(bc.x, bc.y, bc.z);
@@ -6059,6 +6055,11 @@ impl HostedServer {
     /// broadcast, a door's pair, a campfire, a used block's spill and
     /// attachments. Shared by Mirror and Strict.
     pub(super) fn finish_edit_world(&mut self, bc: &protocol::BlockChange, old_block: crate::block::BlockId, old_meta: u8, remote: bool, as_use: bool) {
+        // Living world S5 — a dedicated server's Tally: an edit that landed
+        // (counted here, after every refusal, so a refused one never counts).
+        if remote && self.server.measures_bloom() {
+            self.server.tally.note_edit(old_block, bc.new_block);
+        }
         // T1-3 — a log broken by a REMOTE player queues its
         // leaves for the server's leaf-decay pass (the
         // client break arms' `on_log_broken`, server side),
