@@ -17,6 +17,7 @@ pub mod rubber;
 pub mod bounty;
 pub mod repair;
 pub mod plot;
+mod authorship; // Living world Tier 2 S2 — who built a block: save, Commons protection, Plan starters.
 pub mod market_hub;
 pub mod auction;
 pub mod bazaar;

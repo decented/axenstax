@@ -479,6 +479,7 @@ mod tests {
             quest_world: None,
             worldgen_version: None,
             authority_clock: None,
+            block_authors: None,
         }
     }
 

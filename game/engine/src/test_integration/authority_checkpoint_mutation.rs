@@ -97,6 +97,11 @@ save_fields! {
         quest_world: |s| s.quest_world = Some(crate::quest_npcs::QuestWorldSave { scope: [7; 16], npcs: Vec::new() }),
         worldgen_version: |s| s.worldgen_version = s.worldgen_version.map(|v| v + 1),
         authority_clock: |s| s.authority_clock.as_mut().expect("a server's save has a clock").tick_counter += 1,
+        block_authors: |s| s.block_authors = Some(crate::authorship::SavedAuthorship {
+            keys: vec![crate::authorship::AuthorKey::Npub("npub1mutation".into())],
+            chunks: vec![(0, 4, 0, vec![(7, 0)])],
+            starters: Vec::new(),
+        }),
     ],
 }
 
@@ -400,8 +405,10 @@ fn a_record_from_an_older_build_is_no_mismatch() {
     let file = world_dir(&name).join("world.dat");
     let mut save = read_world_save(&std::fs::read(&file).unwrap()).unwrap();
     save.authority_clock = None;
+    save.block_authors = None;
     let mut body = bincode::serialize(&save).unwrap();
-    body.pop(); // The clock's `None`: a format 59 writer had no such field.
+    body.pop(); // The authorship's `None`: a format 59 writer had no such field,
+    body.pop(); // nor the clock's.
     body.extend_from_slice(&footer_bytes(59));
     std::fs::write(&file, &body).unwrap();
     h.server.stored_records.note_world_dat(&name);

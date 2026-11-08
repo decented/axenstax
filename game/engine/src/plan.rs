@@ -1469,6 +1469,10 @@ pub fn tick_build(
         return Vec::new();
     }
     let ordered = order_cells_for_build(&rotate_cells(&data.plan.cells, data.rotations, data.plan.width, data.plan.depth));
+    // Living world S2 — who started this build (kept beside the anchor and saved
+    // with the world's authorship), so its blocks are theirs and a Commons can
+    // tell when it would stamp over someone else's.
+    let starter = world.authors.starter(anchor_pos).cloned();
     let mut placed = Vec::new();
     let mut next_index = data.placed_index;
     let mut new_locked = data.locked_materials.clone();
@@ -1489,9 +1493,16 @@ pub fn tick_build(
             next_index += 1;
             continue;
         }
+        // Living world S2 (Tier 2 §2.1) — nor may it stamp over a block someone
+        // else built inside a Commons: skipped the same way, at no material cost
+        // (the items come back with the other leftovers).
+        if world.commons_protects(wx, wy, wz, starter.as_ref()) {
+            next_index += 1;
+            continue;
+        }
         // Spec 06 §2.2 — builder-stamped blocks are player-placed, so mining
         // the finished structure earns no proof-of-play work.
-        world.place_player_block(wx, wy, wz, cell.block_id);
+        world.place_player_block_as(wx, wy, wz, cell.block_id, starter.as_ref());
         // Owner-inbox #1/2/3 — a build stamping over a painted block clears its
         // wallpaper overlays so none orphan beneath the newly-placed block.
         world.remove_face_attachments_at((wx, wy, wz));
@@ -1533,6 +1544,7 @@ pub fn cancel_build(
     anchor_pos: (i32, i32, i32),
     inventory: &mut crate::inventory::Inventory,
 ) {
+    world.authors.clear_starter(anchor_pos);
     if let Some(data) = world.construction_anchors.remove(&anchor_pos) {
         for stack in data.locked_materials {
             if stack.count > 0 {
@@ -1594,6 +1606,8 @@ pub fn complete_build(
     anchor_pos: (i32, i32, i32),
 ) -> Option<CompletedBuild> {
     let data = world.construction_anchors.remove(&anchor_pos)?;
+    let starter = world.authors.starter(anchor_pos).cloned();
+    world.authors.clear_starter(anchor_pos);
     let (ax, ay, az) = data.anchor;
     // Most-central XZ cell on the floor — pick the cell at (rx, 0, rz)
     // with rx = width/2, rz = depth/2 (rotation-aware).
@@ -1602,13 +1616,21 @@ pub fn complete_build(
         _ => (data.plan.width, data.plan.depth),
     };
     let plaque_x = ax + (rotated_w / 2) as i32;
-    let plaque_y = ay + 1;
+    let mut plaque_y = ay + 1;
     let plaque_z = az + (rotated_d / 2) as i32;
+    // Living world S2 — the plaque overrides its cell, so in a Commons it goes
+    // above a block someone else built (the first free cell up, within a few).
+    for dy in 0..8 {
+        if !world.commons_protects(plaque_x, ay + 1 + dy, plaque_z, starter.as_ref()) {
+            plaque_y = ay + 1 + dy;
+            break;
+        }
+    }
     // Place plaque block. Note that this OVERRIDES whatever cell from
     // the plan sits at the central position. v1 accepts this; v2 could
     // pick a non-overlapping cell or set the plaque next to the build.
     // Spec 06 §2.2 — the plaque is player-placed (part of the built structure).
-    world.place_player_block(plaque_x, plaque_y, plaque_z, block::ARCHITECT_PLAQUE);
+    world.place_player_block_as(plaque_x, plaque_y, plaque_z, block::ARCHITECT_PLAQUE, starter.as_ref());
     // Owner-inbox #1/2/3 — the plaque overrides whatever cell sat here; clear any
     // wallpaper overlays so none orphan beneath it.
     world.remove_face_attachments_at((plaque_x, plaque_y, plaque_z));

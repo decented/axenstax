@@ -206,6 +206,7 @@ fn neutral_save(seed: u32) -> WorldSave {
         quest_world: None,
         worldgen_version: None,
         authority_clock: None,
+        block_authors: None,
     }
 }
 
@@ -432,7 +433,13 @@ fn handover_checkpoint_personal_rows_and_operator_metadata_refused() {
     save.inventory.clear();
     assert!(validate_neutral(&save).is_ok());
     // Seat-numbered ownership the session never mapped refuses at the packer.
-    let seat_owned: [fn(&mut WorldSave); 4] = [
+    let seat_owned: [fn(&mut WorldSave); 5] = [
+        // Living world Tier 2 S2: a block's author named by seat number.
+        |s| s.block_authors = Some(crate::authorship::SavedAuthorship {
+            keys: vec![crate::authorship::AuthorKey::Local(0)],
+            chunks: vec![(0, 4, 0, vec![(1, 0)])],
+            starters: Vec::new(),
+        }),
         |s| s.plots.push(crate::plot::PlotData::from_marker(crate::plot::PlotOwner::LocalPlayer(0), 0, 64, 0)),
         |s| s.raid_kills.push(((0, 0), 0, 1)),
         |s| {

@@ -3616,6 +3616,7 @@ impl GameServer {
             quest_world: crate::quest_npcs::capture(self.world.quest_scope, &self.ecs)?,
             worldgen_version: Some(self.world.generator.version()),
             authority_clock: Some(self.saved_clock()),
+            block_authors: self.world.authors.to_saved(),
             exhibits: self.world.exhibits.clone(),
             composters: self
                 .world

@@ -178,6 +178,9 @@ mod tests {
     #[path = "feast.rs"]
     mod feast;
     #[cfg(not(target_arch = "wasm32"))]
+    #[path = "authorship.rs"]
+    mod authorship;
+    #[cfg(not(target_arch = "wasm32"))]
     #[path = "sim_machines.rs"]
     mod sim_machines;
     #[cfg(not(target_arch = "wasm32"))]

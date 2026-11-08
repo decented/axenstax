@@ -150,7 +150,7 @@ impl HostedServer {
         // Mirror still believes the claim (Spec 05).
         let applied = if yielded && change.new_block != crate::block::AIR { protocol::BlockChange { meta: old_meta, ..change.clone() } } else { change.clone() };
         let change = &applied;
-        self.apply_edit_world(change, old, true, yielded);
+        self.apply_edit_world(i, change, old, true, yielded);
         if yielded { crate::break_drops::mark_exposed_neighbours(&mut self.server.world, change.x, change.y, change.z, now); }
         let (inv, armour, cursor, grid) = after.into_parts();
         let sp = &mut self.server.players[i];

@@ -241,6 +241,77 @@ fn a_feast_and_a_commons_lift_a_grey_place_to_at_most_seven_tenths() {
     assert!(h.field.region_terms(FOREST).unwrap().1 < p);
 }
 
+// ── Built together (Tier 2 S2, `b`) ─────────────────────────────────────
+
+fn build_as(h: &mut Harness, who: &[&str]) {
+    for (i, name) in who.iter().enumerate() {
+        let key = crate::authorship::AuthorKey::Npub((*name).to_string());
+        h.world.place_player_block_as(FOREST.0 * 16 + i as i32, QUARRY_Y + 1, 3, block::COBBLESTONE, Some(&key));
+    }
+}
+
+#[test]
+fn built_together_lifts_p_by_the_number_of_distinct_authors_and_one_author_does_not() {
+    let p_of = |who: &[&str]| {
+        let mut h = quarry();
+        build_as(&mut h, who);
+        h.rescan(FOREST);
+        h.run(2);
+        h.field.region_terms(FOREST).unwrap().1
+    };
+    // A solo player, no Feast, no Commons: P is exactly b.
+    assert_eq!(p_of(&[]), 0.0, "no authors recorded");
+    assert_eq!(p_of(&["a", "a", "a"]), 0.0, "one builder, however many blocks");
+    for (who, n) in [(&["a", "b"][..], 2), (&["a", "b", "c"], 3), (&["a", "b", "c", "d", "e"], 5)] {
+        let want = crate::authorship::built_together(n);
+        let got = p_of(who);
+        assert!((got - want).abs() < 1e-5, "{n} authors: {got} vs {want}");
+    }
+    let many: Vec<String> = (0..12).map(|i| format!("k{i}")).collect();
+    let many: Vec<&str> = many.iter().map(String::as_str).collect();
+    assert!((p_of(&many) - crate::authorship::built_together(8)).abs() < 1e-5, "capped at eight");
+}
+
+#[test]
+fn built_together_raises_the_target_of_a_grey_place_and_only_a_scan_moves_it() {
+    let mut h = quarry();
+    // Twenty-four neighbours are loaded too, so a sweep of the regions takes the
+    // field's real cadence (four scans a tick, oldest first) rather than a tick.
+    for rz in -2..=2 {
+        for rx in -2..=2 {
+            if (rx, rz) != FOREST {
+                h.generate((rx, rz));
+            }
+        }
+    }
+    build_as(&mut h, &["a"]);
+    h.rescan(FOREST);
+    h.run(2);
+    let (_, p0, _, target0) = h.field.region_terms(FOREST).unwrap();
+    assert_eq!(p0, 0.0);
+    // A second builder arrives. Bloom reads the table when it scans the region,
+    // so a tick later the region has not been looked at again...
+    build_as(&mut h, &["a", "b"]);
+    h.run(1);
+    assert_eq!(h.field.region_terms(FOREST).unwrap().1, 0.0, "not recomputed every tick");
+    // ...and a full sweep of the tracked regions later it has.
+    h.run(400);
+    let (_, p1, _, target1) = h.field.region_terms(FOREST).unwrap();
+    assert!(p1 > 0.39 && p1 < 0.40, "{p1}");
+    assert!(target1 > target0, "{target1} vs {target0}");
+}
+
+#[test]
+fn a_client_with_no_authorship_table_has_b_zero() {
+    // A joined client's world copy has an empty table (the authority keeps it).
+    let mut h = quarry();
+    h.world.place_player_block(FOREST.0 * 16, QUARRY_Y + 1, 3, block::COBBLESTONE);
+    h.world.place_player_block(FOREST.0 * 16 + 1, QUARRY_Y + 1, 3, block::COBBLESTONE);
+    h.rescan(FOREST);
+    h.run(2);
+    assert_eq!(h.field.region_terms(FOREST).unwrap().1, 0.0);
+}
+
 #[test]
 fn feast_markers_leave_a_lasting_floor() {
     let mut h = quarry();

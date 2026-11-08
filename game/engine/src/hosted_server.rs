@@ -5987,7 +5987,7 @@ impl HostedServer {
             }
             _ => None,
         };
-        self.apply_edit_world(bc, old_block, remote, break_yield.is_some());
+        self.apply_edit_world(i, bc, old_block, remote, break_yield.is_some());
         if let Some(edit) = joiner_edit {
             self.settle_joiner_edit(i, bc, slot, edit, break_yield);
         }
@@ -6003,7 +6003,7 @@ impl HostedServer {
     /// placed flag is set — every fill player-placed, a yielded break natural
     /// again. Shared by the Mirror path (`process_one_edit`) and Strict
     /// (`strict_edit`), never a second copy.
-    pub(super) fn apply_edit_world(&mut self, bc: &protocol::BlockChange, old_block: crate::block::BlockId, remote: bool, yielded: bool) {
+    pub(super) fn apply_edit_world(&mut self, i: usize, bc: &protocol::BlockChange, old_block: crate::block::BlockId, remote: bool, yielded: bool) {
         self.spill_container_on_change(
             (bc.x, bc.y, bc.z),
             old_block,
@@ -6047,6 +6047,12 @@ impl HostedServer {
             // soil), as single-player's break arm does.
             let placed = bc.new_block != crate::block::AIR && !yielded;
             self.server.world.set_placed(bc.x, bc.y, bc.z, placed);
+            // Living world S2 — and who placed it: the joiner's verified npub (a
+            // guest is anonymous). A clear above already dropped the author.
+            if placed {
+                let author = self.joiner_author_key(i);
+                self.server.world.record_author(bc.x, bc.y, bc.z, author.as_ref());
+            }
         }
     }
 
@@ -6695,11 +6701,40 @@ impl HostedServer {
         }
         if sp.server_simulated {
             self.remote_may_touch(sp, bc.x, bc.z)?;
+            if current != bc.new_block {
+                self.remote_authored_allows(i, bc.x, bc.y, bc.z)?;
+            }
             let npub = verified_npub(sp.verified_pubkey);
             let cell = (bc.x, bc.y, bc.z);
             if !economy_owner_allows(&self.server.world, cell, current, npub.as_deref()) {
                 return Err(EditRefusal::EconomyOwner);
             }
+        }
+        Ok(())
+    }
+
+    /// Living world S2 — the author key of server player `i`: its verified npub,
+    /// or `None` for a guest (and on web, which has no remote joiners).
+    pub(super) fn joiner_author_key(&self, i: usize) -> Option<crate::authorship::AuthorKey> {
+        let pk = self.server.players.get(i)?.verified_pubkey;
+        verified_npub(pk).map(crate::authorship::AuthorKey::Npub)
+    }
+
+    /// Living world S2 (Tier 2 §2.1) — Commons protection on a REMOTE player's
+    /// edit: in a Commons footprint a block someone else built is not the
+    /// joiner's to break or build over. Creative bypasses, as for plots. A block
+    /// with no recorded author (natural, older than the record, a guest's) is
+    /// free. Called with the cell a change would alter; the caller has already
+    /// seen that the edit changes the block (a same-block meta toggle breaks
+    /// nothing).
+    fn remote_authored_allows(&self, i: usize, x: i32, y: i32, z: i32) -> Result<(), EditRefusal> {
+        if self.server.world.authors.is_empty() {
+            return Ok(());
+        }
+        if !self.server.play_mode.is_creative()
+            && self.server.world.commons_protects(x, y, z, self.joiner_author_key(i).as_ref())
+        {
+            return Err(EditRefusal::SomeoneElsesBuild);
         }
         Ok(())
     }
@@ -7644,6 +7679,10 @@ pub(crate) enum EditRefusal {
     /// Living world S3 — a Commons Stone over a Plot, or a Plot Marker over a
     /// Commons (`commons`): the land is claimed.
     Claimed,
+    /// Living world S2 — inside a Commons, a block someone else built
+    /// (`authorship`, Tier 2 §2.1). Host-internal like the rest: the joiner
+    /// only sees the authoritative block come back.
+    SomeoneElsesBuild,
 }
 
 impl EditRefusal {
@@ -7661,7 +7700,8 @@ impl EditRefusal {
             | EditRefusal::ForeignPlot
             | EditRefusal::EconomyOwner
             | EditRefusal::Protected
-            | EditRefusal::Claimed => {
+            | EditRefusal::Claimed
+            | EditRefusal::SomeoneElsesBuild => {
                 ItemNote::NotHere
             }
             EditRefusal::Malformed | EditRefusal::OutOfWorld | EditRefusal::Unloaded => ItemNote::None,

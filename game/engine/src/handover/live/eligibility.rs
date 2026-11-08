@@ -276,6 +276,11 @@ pub fn neutralise(save: &mut WorldSave, source_npub: &str) -> Result<(), Refusal
     for h in &mut save.market_hubs {
         owner!(&mut h.owner, crate::market_hub::HubOwner);
     }
+    // Living world Tier 2 S2: the source's seat 0 authored blocks are its
+    // npub's now; a split-screen seat's become anonymous (no proven identity).
+    if let Some(authors) = &mut save.block_authors {
+        authors.neutralise(source_npub);
+    }
     if !save.raid_kills.is_empty()
         || save.active_raids.iter().any(|r| !r.contribution_table.is_empty() || r.killing_blow.is_some())
     {
@@ -368,6 +373,24 @@ mod tests {
         assert!(s.players.is_empty() && s.inventory.is_empty() && s.locked_slots.is_empty());
         assert!(s.waypoints.is_empty() && s.satoshi == Default::default(), "the host's pins and guide stay home");
         assert_eq!((s.player_x, s.player_health, s.hotbar_slot), (0.0, 20.0, 0));
+    }
+
+    #[test]
+    fn handover_neutralise_maps_block_authors_seat0_to_the_source_and_anonymises_other_seats() {
+        use crate::authorship::{AuthorKey, Authorship};
+        let mut s = live_copy();
+        let mut a = Authorship::new();
+        a.set((0, 4, 0), 1, Some(&AuthorKey::Local(0)));
+        a.set((0, 4, 0), 2, Some(&AuthorKey::Local(1)));
+        a.set((0, 4, 0), 3, Some(&AuthorKey::Npub("npub1friend".into())));
+        s.block_authors = a.to_saved();
+        neutralise(&mut s, SOURCE).unwrap();
+        let saved = s.block_authors.as_ref().expect("still recorded");
+        assert!(!saved.has_seat_keys(), "no seat number is left to land on the recipient's seat 0");
+        let back = Authorship::from_saved(saved);
+        assert_eq!(back.get((0, 4, 0), 1), Some(&AuthorKey::Npub(SOURCE.into())));
+        assert_eq!(back.get((0, 4, 0), 2), None, "a split-screen seat's block is anonymous");
+        assert_eq!(back.get((0, 4, 0), 3), Some(&AuthorKey::Npub("npub1friend".into())));
     }
 
     #[test]

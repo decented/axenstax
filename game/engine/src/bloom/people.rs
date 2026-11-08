@@ -4,6 +4,11 @@
 //! co-presence `c`, the Feast `f` and Commons `k`. A solo player with no Feast
 //! and no Commons has `P = 0`: absent, never a penalty.
 //!
+//! Tier 2 S2 adds a fourth, `b`, built together (`P = 1 - (1-c)(1-f)(1-k)(1-b)`):
+//! the number of distinct recorded authors of the placed blocks in a region
+//! (`authorship::built_together`). It is read from the world's authorship table
+//! on the region scan cadence, so only a machine that owns the world sees it.
+//!
 //! The Feast and Commons blocks come with slice S3. The field takes them as
 //! plain inputs ([`FeastMarker`], [`CommonsArea`]) so S3 only has to feed it.
 
@@ -105,11 +110,17 @@ impl PeopleState {
         self.surge = self.surge.max(feast_strength(guests));
     }
 
-    /// `P`, given the Markers' lasting `floor` and whether a Commons overlaps.
+    /// `P`, given the Markers' lasting `floor` and whether a Commons overlaps
+    /// (no built-together term: probes, which have no authorship to read).
     pub fn value(&self, floor: f32, in_commons: bool) -> f32 {
+        self.value_with(floor, in_commons, 0.0)
+    }
+
+    /// `P` with the built-together term `b` (0..=1) as well.
+    pub fn value_with(&self, floor: f32, in_commons: bool, b: f32) -> f32 {
         let f = self.surge.max(floor.min(MARKER_FLOOR_CAP));
         let k = if in_commons { COMMONS_K } else { 0.0 };
-        1.0 - (1.0 - self.c) * (1.0 - f) * (1.0 - k)
+        1.0 - (1.0 - self.c) * (1.0 - f) * (1.0 - k) * (1.0 - b.clamp(0.0, 1.0))
     }
 }
 
@@ -141,6 +152,23 @@ mod tests {
             p.step(2, false, 0.05);
         }
         assert!(p.c > 0.55 && p.c < 0.75, "{}", p.c);
+    }
+
+    #[test]
+    fn built_together_is_a_fourth_independent_factor_of_p() {
+        let p = PeopleState { c: 0.5, surge: 0.0 };
+        let (floor, b) = (0.0, 0.3935);
+        let base = p.value_with(floor, true, 0.0);
+        assert_eq!(base, p.value(floor, true), "b = 0 is the Tier 1 value");
+        let with_b = p.value_with(floor, true, b);
+        // 1 - (1-c)(1-k)(1-b)
+        let want = 1.0 - (1.0 - 0.5) * (1.0 - COMMONS_K) * (1.0 - b);
+        assert!((with_b - want).abs() < 1e-6, "{with_b} vs {want}");
+        assert!(with_b > base);
+        // Alone, it lifts a place nobody is in: the people built it together.
+        let alone = PeopleState::default().value_with(0.0, false, b);
+        assert!((alone - b).abs() < 1e-6);
+        assert_eq!(PeopleState::default().value_with(0.0, false, 2.0), 1.0, "clamped");
     }
 
     #[test]

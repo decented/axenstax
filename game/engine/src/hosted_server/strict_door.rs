@@ -173,8 +173,8 @@ impl HostedServer {
         };
         // Effects: both cells, raw R (one door), the row; then the shared
         // world finish for each half.
-        self.apply_edit_world(&lower, old, true, false);
-        self.apply_edit_world(&upper, AIR, true, false);
+        self.apply_edit_world(i, &lower, old, true, false);
+        self.apply_edit_world(i, &upper, AIR, true, false);
         let (inv, armour, cursor, grid) = after.into_parts();
         let sp = &mut self.server.players[i];
         sp.inventory = inv; sp.armour = armour; sp.cursor = cursor; sp.craft_grid = grid;

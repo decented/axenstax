@@ -2,10 +2,10 @@
 //!
 //! A [`block::COMMONS_STONE`] declares a Commons: the same 33 x 33 footprint as
 //! a Plot (marker +-`plot::PLOT_HALF_EXTENT`), open to everyone to build in.
-//! At Tier 1 that is all it is: a declaration and a bloom lift (the `k` term
-//! and the doubled co-presence rate). **Nothing protects what is built there**
-//! (decision D10: breaking protection waits for block authorship, Tier 2), and
-//! the stone itself can be broken by anyone.
+//! At Tier 1 that was all it was: a declaration and a bloom lift (the `k` term
+//! and the doubled co-presence rate). Since Tier 2 S2 a block built there can be
+//! broken only by its author (`authorship`, `World::commons_protects`); the
+//! stone itself, and any block with no recorded author, can be broken by anyone.
 //!
 //! The one rule is that a Commons and a Plot may not overlap, either way round:
 //! a Commons Stone whose footprint touches any Plot is refused, and so is a Plot

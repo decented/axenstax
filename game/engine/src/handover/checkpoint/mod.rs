@@ -82,6 +82,9 @@ fn validate_neutral(save: &WorldSave) -> Result<()> {
         })
         || save.plots.iter().any(|p| matches!(p.owner, crate::plot::PlotOwner::LocalPlayer(_)))
         || save.market_hubs.iter().any(|h| matches!(h.owner, crate::market_hub::HubOwner::LocalPlayer(_)))
+        // Living world Tier 2 S2: a block's author named by seat number would
+        // land on whoever becomes seat 0 on the recipient.
+        || save.block_authors.as_ref().is_some_and(|a| a.has_seat_keys())
         || !save.raid_kills.is_empty()
         || save.active_raids.iter().any(|r| !r.contribution_table.is_empty() || r.killing_blow.is_some())
         || save.saved_mobs.iter().any(|m| match &m.data {

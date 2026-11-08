@@ -628,6 +628,12 @@ pub fn process_builder_commissions(
                         builder_credit: Some(credit),
                     };
                     world.construction_anchors.insert(anchor_key, anchor_data);
+                    // Living world S2 — the commissioner is the build's author
+                    // (`local-player-N` is a local seat; anything else an npub).
+                    world.authors.set_starter(
+                        anchor_key,
+                        crate::authorship::AuthorKey::from_commissioner(&commission.commissioner_npub).as_ref(),
+                    );
                 }
                 if let Ok(mut vc) = ecs.get::<&mut crate::villager::VillagerComponent>(id)
                     && let Some(c) = vc.commission.as_mut() {

@@ -332,6 +332,9 @@ impl GameServer {
         e.debug(&w.waypoints);
         e.debug(&w.exhibits);
         e.debug(&w.rigs);
+        // Living world S2 — authorship, in the canonical (sorted) saved form, so
+        // a lent host and its twin agree whatever order their hash maps hold.
+        e.bytes(&bincode::serialize(&w.authors.to_saved()).expect("authorship encodes"));
         e.u64(w.total_work);
         e.u32(self.pop_epoch);
         e.debug(&self.column_streamer);

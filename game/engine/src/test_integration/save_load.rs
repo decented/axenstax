@@ -216,6 +216,7 @@ fn legacy_single_player_save_synthesises_one_player_entry() {
         quest_world: None,
         worldgen_version: None,
         authority_clock: None,
+        block_authors: None,
     };
 
     // Round-trip via bincode to mimic the on-disk path. Defensive: a
@@ -807,13 +808,13 @@ fn flower_micro_model_survives_save_load() {
 /// before all three face tables. Encode the actual appended fields rather
 /// than guessing their size; nested fixed tuples add no bincode length prefix.
 fn pre_overlay_world_save_bytes(full: &WorldSave) -> Vec<u8> {
-    assert_eq!(crate::save_format::WORLD_SAVE_FIELD_COUNT, 56, "re-find the appended suffix if another world field is added");
+    assert_eq!(crate::save_format::WORLD_SAVE_FIELD_COUNT, 57, "re-find the appended suffix if another world field is added");
     assert!(full.face_overlays.is_empty() && full.face_blueprints.is_empty() && full.face_blueprint_blanks.is_empty());
-    assert!(full.local_personal.is_none() && full.quest_world.is_none() && full.authority_clock.is_none());
+    assert!(full.local_personal.is_none() && full.quest_world.is_none() && full.authority_clock.is_none() && full.block_authors.is_none());
     let suffix = bincode::serialize(&(
         (&full.face_overlays, &full.face_blueprints, &full.face_blueprint_blanks, &full.workshop, &full.carts, &full.graves, &full.waypoints, &full.block_meta),
         (&full.power_devices, &full.signs, &full.item_frames, &full.locked_slots, &full.hostile_acts, &full.rigs, &full.exhibits, &full.composters),
-        (&full.saved_mobs, &full.satoshi, &full.dispensers, &full.rig_clips, &full.local_personal, &full.quest_world, &full.worldgen_version, &full.authority_clock),
+        (&full.saved_mobs, &full.satoshi, &full.dispensers, &full.rig_clips, &full.local_personal, &full.quest_world, &full.worldgen_version, &full.authority_clock, &full.block_authors),
     )).expect("encode the actual appended suffix");
     let mut bytes = bincode::serialize(full).expect("serialize WorldSave");
     assert!(bytes.ends_with(&suffix), "the retained old fields must precede the exact appended suffix");

@@ -4552,6 +4552,12 @@ impl super::GameState {
             inv,
             &player_positions,
         );
+        // Living world S2 — whoever starts a build is its author: the key is kept
+        // beside the anchor, so a reload mid-build still credits them.
+        if res.is_ok() {
+            let starter = self.author_for_seat(pidx);
+            self.world.authors.set_starter((anchor[0], anchor[1], anchor[2]), starter.as_ref());
+        }
         if pidx == 0 {
             self.toast = Some((
                 match res {
@@ -12115,6 +12121,21 @@ impl super::GameState {
                             self.players[pidx].breaking_pos = None;
                             self.players[pidx].break_progress = 0;
                         }
+                        // Living world S2 (Tier 2 §2.1) — Commons protection: in a
+                        // Commons a block can be broken only by its author. A block
+                        // with no recorded author is free; creative bypasses.
+                        let commons_break_blocked = !self.is_creative && {
+                            let who = self.author_for_seat(pidx);
+                            self.world.commons_protects(pos[0], pos[1], pos[2], who.as_ref())
+                        };
+                        if commons_break_blocked {
+                            self.toast = Some((
+                                crate::authorship::SOMEONE_ELSE_BUILT_TOAST.to_string(),
+                                Instant::now() + Duration::from_secs(2),
+                            ));
+                            self.players[pidx].breaking_pos = None;
+                            self.players[pidx].break_progress = 0;
+                        }
                         // Spec 36 — releasing a plot: if the broken block is
                         // a PLOT_MARKER the player owns (or creative), drop
                         // its PlotData. Non-owner breaking a foreign marker
@@ -12143,6 +12164,7 @@ impl super::GameState {
                             && !market_bell_anti_grief_blocked
                             && !auction_anti_grief_blocked
                             && !plot_break_blocked
+                            && !commons_break_blocked
                             && !plot_marker_break_blocked
                             && blk != block::BEDROCK
                             && self.play_mode.can_edit_world()
@@ -14332,9 +14354,11 @@ impl super::GameState {
                                             let tag = self.use_tag(pidx, crate::use_edits::UseKind::HangPrint, cell);
                                             // Spec 06 §2.2 — a mounted print is
                                             // player-placed: no work when re-mined.
-                                            self.world.place_player_block(
+                                            let author = self.author_for_seat(pidx);
+                                            self.world.place_player_block_as(
                                                 place.0, place.1, place.2,
                                                 crate::block::CYANOTYPE_PRINT,
+                                                author.as_ref(),
                                             );
                                             let _ = self.players[pidx]
                                                 .inventory
@@ -15865,7 +15889,8 @@ impl super::GameState {
                                 // the flag rides through growth (set_block stage
                                 // changes don't touch it) so harvesting it earns
                                 // the produce but no proof-of-play work.
-                                self.world.place_player_block(above[0], above[1], above[2], stage_0);
+                                let author = self.author_for_seat(pidx);
+                                self.world.place_player_block_as(above[0], above[1], above[2], stage_0, author.as_ref());
                                 self.push_use_edit(above, stage_0, tag, None, 0);
                                 self.rebuild_chunk_at(above[0], above[1], above[2]);
                                 self.audio.play_place();
@@ -15969,7 +15994,8 @@ impl super::GameState {
                                 .consume_one_material(hotbar, crate::item::MaterialId::PapyrusReed)
                         {
                             // Spec 06 §2.2 — planted papyrus is player-placed.
-                            self.world.place_player_block(pos[0], pos[1] + 1, pos[2], block::PAPYRUS_STAGE_0);
+                            let author = self.author_for_seat(pidx);
+                            self.world.place_player_block_as(pos[0], pos[1] + 1, pos[2], block::PAPYRUS_STAGE_0, author.as_ref());
                             self.push_use_edit(reed_cell, block::PAPYRUS_STAGE_0, tag, None, 0);
                             self.rebuild_chunk_at(pos[0], pos[1] + 1, pos[2]);
                             self.audio.play_place();
@@ -16559,8 +16585,11 @@ impl super::GameState {
                                     }
                                     // Spec 06 §2.2 — flag the voxel player-placed
                                     // so re-mining it earns no proof-of-play work.
+                                    // Living world S2 — and who placed it (a seat's key;
+                                    // nothing on a joined client, whose server records it).
+                                    let author = self.author_for_seat(pidx);
                                     self.world
-                                        .place_player_block(place_x, place_y, place_z, block_to_place);
+                                        .place_player_block_as(place_x, place_y, place_z, block_to_place, author.as_ref());
                                     // C3d run 9 — the placement's meta (a shaped block's orientation,
                                     // a piston's, dispenser's or dropper's look facing, a directional
                                     // power device's axis facing) is ONE pure rule, hoisted so a Strict
@@ -16588,7 +16617,7 @@ impl super::GameState {
                                         .then_some([place_x, place_y + 1, place_z]);
                                     if let Some([ax, ay, az]) = door_top {
                                         let bottom_m = self.world.meta_at(place_x, place_y, place_z);
-                                        self.world.place_player_block(ax, ay, az, block_to_place);
+                                        self.world.place_player_block_as(ax, ay, az, block_to_place, author.as_ref());
                                         self.world.set_meta((ax, ay, az), crate::use_edits::door_top_meta(bottom_m));
                                         crate::lighting::update_for_block_change(
                                             &mut self.world,

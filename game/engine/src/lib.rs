@@ -276,6 +276,7 @@ mod feast_client; // Living world S3 — the client half: local arms, confetti, 
 mod feast; // Living world S3 — the Feast rule (spec §3).
 mod tally; // Living world S5 — the Tally: session counters and the container stock (spec §5).
 mod tally_ui; // Living world S5 — the grown-up panel (F3): the Tally and world bloom.
+mod authorship; // Living world S2 — who built a block (spec Tier 2 §2).
 mod commons; // Living world S3 — Commons footprints and the Plot/Commons overlap rule (spec §4).
 mod growth;
 mod campfire;

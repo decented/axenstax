@@ -348,7 +348,7 @@ fn a_world_with_a_marker_and_a_commons_save_loads_with_its_meta() {
 #[test]
 fn the_save_and_the_wire_moved_with_the_new_block_ids() {
     assert_eq!(crate::save_format::SAVE_LAYOUT_REVISION, 5);
-    assert_eq!(crate::save_format::SAVE_FORMAT_VERSION, 61);
+    assert_eq!(crate::save_format::SAVE_FORMAT_VERSION, 62, "61 at the block ids, 62 with the authorship field");
     assert_eq!(crate::protocol::PROTOCOL_VERSION, 97);
     let reg = block::BlockRegistry::new();
     for b in [block::FEAST_TABLE, block::FEAST_MARKER, block::COMMONS_STONE] {

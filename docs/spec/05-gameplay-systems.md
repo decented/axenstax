@@ -4880,5 +4880,18 @@ column, two short word lists). Local holders fire `ChallengeEvent::HoldFeast`.
 **Commons.** The footprint is a Plot's (marker +-16). Placing a Commons Stone over any Plot, or a Plot Marker over a Commons, is
 refused ("This land is claimed.") on the local path and in `validate_block_edit` for a joiner. Commons areas are found by scanning
 loaded chunks whose maintained `has_commons` counter is set; nothing stores them. Anyone may build in a Commons and anyone may
-break the stone (decision D10: no break protection before block authorship). `ChallengeEvent::ClaimCommons` fires locally on
-placement. The bloom `k` term and the doubled co-presence rate read the same areas.
+break the stone. `ChallengeEvent::ClaimCommons` fires locally on placement. The bloom `k` term and the doubled co-presence rate
+read the same areas.
+
+**Commons protection (Tier 2 S2, 2026-11-09; supersedes decision D10's "no protection").** The world now records who placed a
+block (`authorship`, Spec 02 "Who placed a block is saved"). Inside a Commons footprint a block can be broken (or built over) only by
+its author: the local break arm, beside the Plot check, refuses with the toast "Someone else built this." and the authority's
+`validate_block_edit` refuses a joiner's edit (`EditRefusal::SomeoneElsesBuild`, host-internal, not on the wire) and sends the
+authoritative block back as for `ForeignPlot`. A block with no recorded author (natural, placed before this build, a guest's) is free,
+creative bypasses, and the message never says who. Blasts, pistons, fire and falling blocks are not stopped. A Plan or a Builder
+commission stamping over another author's block in a Commons skips that cell, as it skips a claim (the item goes to the leftovers
+spill), and its plaque goes on the first free cell above. Whoever starts a Plan build is its author (a seat's key; a commission's
+commissioner): the key is kept beside the anchor and saved with the world's authorship. The bloom `b` term (below) reads the same
+table: `n` = distinct recorded authors of placed blocks in a region (capped at 8), `b = 0` for n < 2, else `1 - exp(-(n-1)/2)`, and
+`P = 1 - (1-c)(1-f)(1-k)(1-b)`. It is read when the region is scanned, and only a machine that owns the world has the table, so
+a joined client's `b` is 0 until S10.

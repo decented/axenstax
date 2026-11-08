@@ -79,6 +79,9 @@ struct Region {
     people: PeopleState,
     floor: f32,
     commons: bool,
+    /// Built together (Tier 2 S2): from the region's distinct recorded authors,
+    /// refreshed with each region scan, not every tick.
+    built: f32,
     level: f32,
     target: f32,
     last_scan: Option<u64>,
@@ -94,6 +97,7 @@ impl Region {
             people: PeopleState::default(),
             floor: 0.0,
             commons: false,
+            built: 0.0,
             level: UNKNOWN_LEVEL,
             target: UNKNOWN_LEVEL,
             last_scan: None,
@@ -102,7 +106,7 @@ impl Region {
     }
 
     fn p(&self) -> f32 {
-        self.people.value(self.floor, self.commons)
+        self.people.value_with(self.floor, self.commons, self.built)
     }
 }
 
@@ -429,6 +433,9 @@ impl BloomField {
             r.last_scan = Some(self.tick_no);
             r.tally = tally;
             r.eco = r.tally.eco(r.wildlife);
+            // Tier 2 S2 — b, on the scan's own cadence. A joined client's table
+            // is empty (the authority keeps it), so there it is 0.
+            r.built = crate::authorship::built_together(input.world.authors_in_region(key.0, key.1));
             if !r.known {
                 r.known = true;
                 r.target = level::target(r.eco, r.p(), input.creative);

@@ -2219,9 +2219,10 @@ against the slice before allocating.
       have made new saves unreadable to shipped builds, and a 4-byte header magic
       collides with a legacy save's leading `seed: u32`; an 8-byte trailing magic
       at the very end of a footer-less save is not a realistic collision.
-    - **`SAVE_FORMAT_VERSION`** = `WORLD_SAVE_FIELD_COUNT` (56 since Keep slice 2a,
-      2026-11-02: `quest_world` was 54, `worldgen_version` 55, `authority_clock` 56) +
-      `SAVE_LAYOUT_REVISION` (5 today; see the block-ids bullets below) = 61. The current `SAVE_FORMAT_VERSION` is `61` (a test, `save_format::tests::spec_02_states_the_current_save_format_version`, fails if this sentence and the constant disagree, so a bump must edit this line). Two tripwire tests stop drift: serde's field list
+    - **`SAVE_FORMAT_VERSION`** = `WORLD_SAVE_FIELD_COUNT` (57 since living world Tier 2 S2,
+      2026-11-09: `quest_world` was 54, `worldgen_version` 55, `authority_clock` 56,
+      `block_authors` 57) +
+      `SAVE_LAYOUT_REVISION` (5 today; see the block-ids bullets below) = 62. The current `SAVE_FORMAT_VERSION` is `62` (a test, `save_format::tests::spec_02_states_the_current_save_format_version`, fails if this sentence and the constant disagree, so a bump must edit this line). Two tripwire tests stop drift: serde's field list
       for `WorldSave` must equal `WORLD_SAVE_FIELD_COUNT` (so appending a field
       without bumping the version fails), and the tolerant reader must consume every
       byte of a current save (so a field listed in its struct literal without a read
@@ -2239,6 +2240,28 @@ against the slice before allocating.
       no generic code reads that byte for this block. Commons areas are stored nowhere:
       they are found by scanning loaded chunks for the stone. See
       `docs/superpowers/specs/2026-11-08-living-world-tier1.md` §3, §4.
+    - **Who placed a block is saved (format 62, living world Tier 2 S2, 2026-11-09).** Field 57,
+      `WorldSave.block_authors: Option<authorship::SavedAuthorship>`, is
+      `{ keys: Vec<AuthorKey>, chunks: Vec<(cx, cy, cz, Vec<(cell: u16, author: u16)>)>, starters: Vec<(x, y, z, author: u16)> }`.
+      `AuthorKey` is `Local(u8 seat)` or `Npub(String)`; `cell` is the chunk's flat index
+      (`x + 16 z + 256 y`); `author` indexes `keys`; `starters` names who started each Plan build in
+      progress, by anchor. Rules: (1) *absent means anonymous*: a save without the field, a world with
+      nothing recorded (written as `None`, so such a world's bytes are as before plus one tag byte), a
+      guest's block and every block placed before the field have no author; (2) *canonical*: the keys are
+      sorted and only the used ones are kept, chunks and cells are sorted, so the same world is the same
+      bytes (the Keep checkpoint binds `world.dat`, `sim_digest` digests the same form); (3) *the placed bit
+      owns it*: an entry exists only for a cell whose placed bit is set. `World::set_placed(.., false)` is
+      the one clear funnel (breaks, pistons and falling blocks all go through it), and a restore drops any
+      entry whose bit is clear or whose chunk is gone (the chunk files and `world.dat` are written
+      separately, so a crash can leave the record newer than a chunk); (4) *never a refusal*: a present
+      but invalid record (an unknown key index, a cell past 4095, a repeated cell, a repeated key) is
+      dropped with a `log::warn!`; (5) *bounds*: at most 4096 entries a chunk and 65,535 keys; past them a
+      new placement is anonymous. Never on the wire (no packet carries an author, no protocol change).
+      Written from `World.authors` by every writer (a world is always passed), so it needs no extra
+      argument the way the clock does. A handover's transfer copy maps the source's seat 0 to its npub and
+      makes any other seat's blocks anonymous (`SavedAuthorship::neutralise`), and the checkpoint refuses
+      a copy that still names a seat. `FOOTER_FIELD_COUNTS` gains `(62, [57])`. See
+      `docs/superpowers/specs/2026-11-09-living-world-tier2.md` §2.
     - **The authority clock is saved (format 60, Keep slice 2a, 2026-11-02).** Field 56,
       `WorldSave.authority_clock: Option<sim_clock::SavedClock>`, carries `tick_counter`,
       `world_time`, the weather window (`rain_until`, `storm_until`), the trial lock it

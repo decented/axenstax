@@ -818,6 +818,10 @@ pub struct World {
     /// place/break (alpha-scale; mirrors the salt_licks posture).
     /// Persisted via WorldSave.plots.
     pub plots: Vec<crate::plot::PlotData>,
+    /// Living world S2 — who placed which block (`authorship`). Authority-side:
+    /// saved as `WorldSave.block_authors`, never sent on the wire, never shown
+    /// per person. Its entries go with the placed bit (`set_placed(.., false)`).
+    pub(crate) authors: crate::authorship::Authorship,
     /// Spec 37 Market Hubs — vendor-discovery zones. Linear scan
     /// (alpha-scale). Persisted via WorldSave.market_hubs.
     pub market_hubs: Vec<crate::market_hub::MarketHubData>,
@@ -980,6 +984,7 @@ impl World {
             bounty_last_refresh_tick: 0,
             satoshi: crate::satoshi::SatoshiState::default(),
             plots: Vec::new(),
+            authors: crate::authorship::Authorship::new(),
             market_hubs: Vec::new(),
             face_attachments: AHashMap::new(),
             total_work: 0,
@@ -1441,7 +1446,7 @@ impl World {
     /// Read-side twin of `chunk_for_block_write`: `chunks`, then (on a miss)
     /// the evicted store.
     #[inline]
-    fn chunk_for_block_read(&self, cx: i32, cy: i32, cz: i32) -> Option<&Chunk> {
+    pub(crate) fn chunk_for_block_read(&self, cx: i32, cy: i32, cz: i32) -> Option<&Chunk> {
         match self.chunks.get(&(cx, cy, cz)) {
             Some(c) => Some(c),
             None if !self.evicted.is_empty() => self.evicted.get(&(cx, cy, cz)),
@@ -2058,6 +2063,7 @@ impl World {
         self.bounty_last_refresh_tick = 0;
         self.satoshi = crate::satoshi::SatoshiState::default();
         self.plots.clear();
+        self.authors.clear();
         self.market_hubs.clear();
         self.pop_exposure.clear();
         self.feast_events.clear();
@@ -2534,6 +2540,12 @@ impl World {
         let ly = y.rem_euclid(CHUNK_SIZE as i32) as usize;
         let lz = z.rem_euclid(CHUNK_SIZE as i32) as usize;
         let in_worldgen = self.worldgen_depth > 0;
+        // Living world S2 — the one clear funnel: whatever clears the placed bit
+        // (a break, a piston move, a falling block) drops the cell's author, bit
+        // already clear or not.
+        if !placed && !self.authors.is_empty() {
+            self.authors.clear_cell((cx, cy, cz), crate::authorship::cell_of(x, y, z));
+        }
         let chunk = if placed {
             Some(self.chunk_for_block_write(cx, cy, cz))
         } else if self.evicted_columns.contains(&(cx, cz)) {
