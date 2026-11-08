@@ -147,7 +147,8 @@ fn villagers_are_the_guests_of_a_lone_joiner() {
 
 /// A modified client claims bread it doesn't hold: the server's copy of its
 /// window holds none, so ONE is believed (within the believed-pay bound), never
-/// the 64 it claims.
+/// the 64 it claims. One loaf is under the four a feast needs, so it is refused
+/// and nothing is dropped or taken.
 #[test]
 fn a_modified_client_cannot_feast_a_stack_it_does_not_hold() {
     let mut rig = Rig::dedicated("feast-liar", 2);
@@ -156,8 +157,64 @@ fn a_modified_client_cannot_feast_a_stack_it_does_not_hold() {
     rig.cs[0].use_raw(77, table, 0, &bread());
     rig.ticks(3);
     assert_eq!(rig.cs[0].outcomes.len(), before + 1, "answered");
-    assert_eq!(rig.ground(&bread()), 1, "one believed loaf, not a stack of 64");
-    assert_eq!(rig.world().meta_at(table[0], table[1], table[2]), 1);
+    refused(&rig.cs[0].outcomes.last().unwrap().clone(), ItemNote::NeedsFood);
+    assert_eq!(rig.ground(&bread()), 0, "no stack of 64, and the one believed loaf is too few");
+    assert_eq!(rig.world().get_block(table[0], table[1], table[2]), block::FEAST_TABLE);
+}
+
+/// Tier 1 review L4, closed (S1): a feast needs at least four edible items in
+/// the stack the joiner holds. Dirt, wheat and three loaves are refused with
+/// the reason, nothing is taken, the table stays a table; four loaves feast.
+#[test]
+fn a_feast_needs_four_things_to_eat() {
+    let mut rig = Rig::dedicated("feast-food", 2);
+    let table = rig.place(2, block::FEAST_TABLE);
+    rig.give(0, 0, Item::Block(block::DIRT), 32);
+    refused(&rig.use_block(0, table, UseKind::Feast, 0).clone(), ItemNote::NeedsFood);
+    assert_eq!(ItemNote::NeedsFood.toast(), Some("A feast needs at least four things to eat."));
+    assert_eq!(rig.world().get_block(table[0], table[1], table[2]), block::FEAST_TABLE);
+    assert_eq!(rig.cs[0].count(&Item::Block(block::DIRT)), 32, "nothing was taken");
+    rig.assert_lockstep(0, "after the dirt refusal");
+
+    rig.give(0, 1, bread(), 3);
+    refused(&rig.use_block(0, table, UseKind::Feast, 1).clone(), ItemNote::NeedsFood);
+    assert_eq!(rig.cs[0].count(&bread()), 3);
+
+    rig.give(0, 3, bread(), 4);
+    accepted(&rig.use_block(0, table, UseKind::Feast, 3).clone(), 4);
+    assert_eq!(rig.world().get_block(table[0], table[1], table[2]), block::FEAST_MARKER);
+}
+
+/// Tier 1 review L4, closed (S1): a column's Feast surge cannot be renewed
+/// within one world day, on the authority's own clock. A second table in the
+/// same 16 x 16 column is refused with the reason, a table in the next column
+/// over is not, and the next night's number lets the first column feast again.
+#[test]
+fn a_column_cannot_feast_twice_in_one_world_day() {
+    let mut rig = Rig::dedicated("feast-day", 2);
+    let first = rig.place(1, block::FEAST_TABLE);
+    rig.give(0, 0, bread(), 8);
+    accepted(&rig.use_block(0, first, UseKind::Feast, 0).clone(), 8);
+    assert!(crate::feast::feasted_today(rig.world(), (first[0], first[1], first[2]), 0));
+
+    // Another table in the same column, the same day.
+    let second = rig.place(2, block::FEAST_TABLE);
+    assert_eq!(
+        crate::feast::surge_column(first[0], first[2]),
+        crate::feast::surge_column(second[0], second[2]),
+        "same column"
+    );
+    rig.give(0, 1, bread(), 8);
+    refused(&rig.use_block(0, second, UseKind::Feast, 1).clone(), ItemNote::FeastedToday);
+    assert_eq!(ItemNote::FeastedToday.toast(), Some("This place has feasted today."));
+    assert_eq!(rig.world().get_block(second[0], second[1], second[2]), block::FEAST_TABLE);
+    assert_eq!(rig.cs[0].count(&bread()), 8, "nothing was taken");
+    rig.assert_lockstep(0, "after the day refusal");
+
+    // The next world day (the authority's night count moves on): allowed again.
+    rig.hs.server.night_calendar = crate::item_actions::NightCalendar::from_saved(1, Some(false));
+    accepted(&rig.use_block(0, second, UseKind::Feast, 1).clone(), 8);
+    assert_eq!(rig.world().get_block(second[0], second[1], second[2]), block::FEAST_MARKER);
 }
 
 /// Using a Feast Marker is a client-local read: its guest count is the meta the

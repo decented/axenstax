@@ -1103,8 +1103,12 @@ impl GameState {
         // A retry stays in the same world: a trial that was running in its fresh
         // arena still sets the bloom tempo (`start_scenario` clears the flag).
         let fresh_arena = self.scenario_fresh_arena;
+        let arena_spawn = self.arena_spawn;
         self.start_scenario(def);
         self.scenario_fresh_arena = fresh_arena;
+        self.arena_spawn = arena_spawn;
+        // A Place trial starts over as it first did: terrain re-laid, grey again.
+        self.rewind_place_arena();
         self.capture_cursor();
     }
 }
@@ -1731,6 +1735,10 @@ pub(crate) struct GameState {
     /// tempo (`ScenarioTuning::bloom_time_scale`); the player's own world never
     /// has its tempo changed by a trial. Cleared on any world change.
     pub(crate) scenario_fresh_arena: bool,
+    /// Where the player stood when the fresh trial arena was laid: the origin
+    /// its offsets (fills, Place areas) are relative to, kept so a retry lays
+    /// them in the same place. `None` outside a fresh arena.
+    pub(crate) arena_spawn: Option<glam::Vec3>,
     /// Trials island (§C.3): the visit in progress while the island world is
     /// up (`trials_island_flow`); `None` anywhere else. Cleared by `leave_world`.
     pub(crate) island: Option<crate::trials_island_flow::IslandVisit>,
@@ -2336,6 +2344,7 @@ impl GameState {
             pending_workshop_reset: false,
             pending_scenario_launch: None,
             scenario_fresh_arena: false,
+            arena_spawn: None,
             island: None,
             island_return: None,
             island_arrival: None,

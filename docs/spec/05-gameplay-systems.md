@@ -4866,6 +4866,14 @@ column, two short word lists). Local holders fire `ChallengeEvent::HoldFeast`.
   and alive players except the holder (a lent host's own seats included) and its ECS, spawns every player guest's drops, converts the
   table and broadcasts the change. The pay is the whole stack the server's copy of the joiner's window holds in that slot, believed
   within the existing believed-pay bound when it holds less.
+- **Not cheap to repeat (Tier 2 S1, closing review L4).** The stack must be food (`Item::food_value`, the rule eating uses) and
+  hold at least four ("A feast needs at least four things to eat."), and a 16 x 16 column that has feasted on the current
+  night-calendar number cannot feast again until the next one ("This place has feasted today."). The day record is
+  `World::feast_days`, authority-side and unsaved. One function (`feast::hold`) gives both refusals on every path; joiners get them
+  as `ItemNote::NeedsFood` (31) and `ItemNote::FeastedToday` (32).
+- A Plan (animated build) that skips a Commons Stone or Plot Marker cell because the placement rule refuses it no longer eats the
+  item: when the build completes (`plan::complete_build`) the skipped items spill as ground items one block outside the build's
+  lowest-XZ corner (`plan::spill_leftovers`), on every path.
 - Every client that sees the table become a marker (its own act, the authority's on a lent world, or a received block change) plays
   confetti and calls `BloomField::note_feast`; markers also feed the lasting floor each second.
 

@@ -45,6 +45,12 @@ pub const MAX_VILLAGERS: usize = 12;
 pub const NEEDS_GUESTS_TOAST: &str = "A feast needs guests. Bring friends, or find a village.";
 /// The toast when the hand is empty.
 pub const NOTHING_TO_SHARE_TOAST: &str = "Hold something to share at the feast.";
+/// The toast when the held stack is not food, or is too small.
+pub const NEEDS_FOOD_TOAST: &str = "A feast needs at least four things to eat.";
+/// The toast when this place has already feasted today.
+pub const FEASTED_TODAY_TOAST: &str = "This place has feasted today.";
+/// A feast needs at least this many edible items in the held stack (review L4).
+pub const MIN_FOOD: u8 = 4;
 
 /// Who a guest is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,6 +76,11 @@ pub enum Refusal {
     NeedsGuests,
     /// Nothing in hand to share.
     NothingToShare,
+    /// The held stack is not food, or holds fewer than [`MIN_FOOD`] items.
+    NeedsFood,
+    /// This column has already held a feast in the current world day
+    /// ([`feasted_today`]).
+    FeastedToday,
 }
 
 impl Refusal {
@@ -78,6 +89,8 @@ impl Refusal {
         match self {
             Refusal::NeedsGuests => NEEDS_GUESTS_TOAST,
             Refusal::NothingToShare => NOTHING_TO_SHARE_TOAST,
+            Refusal::NeedsFood => NEEDS_FOOD_TOAST,
+            Refusal::FeastedToday => FEASTED_TODAY_TOAST,
         }
     }
 }
@@ -161,15 +174,45 @@ pub fn cell_centre(cell: (i32, i32, i32)) -> Vec3 {
     Vec3::new(cell.0 as f32 + 0.5, cell.1 as f32 + 0.5, cell.2 as f32 + 0.5)
 }
 
+/// The bloom region (a chunk column's 16 x 16 blocks) whose Feast surge a feast
+/// at `(x, z)` lifts, and so the unit the once-a-day rule counts.
+pub fn surge_column(x: i32, z: i32) -> (i32, i32) {
+    let size = crate::chunk::CHUNK_SIZE as i32;
+    (x.div_euclid(size), z.div_euclid(size))
+}
+
+/// Has the column of `cell` held a feast in the current world day? `tonight` is
+/// the night calendar's number (`NightCalendar::tonight`), the one day count the
+/// local path (`GameState`) and the authority (`GameServer`) both keep.
+pub fn feasted_today(world: &World, cell: (i32, i32, i32), tonight: u32) -> bool {
+    world.feast_days.get(&surge_column(cell.0, cell.2)) == Some(&tonight)
+}
+
 /// Hold a feast at `cell` with `held`, among `guests`. Splits the whole stack
 /// evenly; the remainder goes one apiece to the nearest guests. Villagers'
 /// shares are used up, players' are dropped at their feet by the caller
 /// ([`spawn_drops`]). `guests` need not be sorted.
-pub fn hold(cell: (i32, i32, i32), held: Option<&ItemStack>, guests: &[Guest]) -> Result<Feast, Refusal> {
+///
+/// The goods must be food (`Item::food_value`, the rule eating uses) and at
+/// least [`MIN_FOOD`] of them, and `feasted_today` (the caller's
+/// [`feasted_today`]) must be false: a feast is not cheap to repeat (Tier 1
+/// review L4, closed in Tier 2 slice S1). Every path calls this one function.
+pub fn hold(
+    cell: (i32, i32, i32),
+    held: Option<&ItemStack>,
+    guests: &[Guest],
+    feasted_today: bool,
+) -> Result<Feast, Refusal> {
     if guests.is_empty() {
         return Err(Refusal::NeedsGuests);
     }
     let stack = held.filter(|s| s.count > 0).ok_or(Refusal::NothingToShare)?;
+    if feasted_today {
+        return Err(Refusal::FeastedToday);
+    }
+    if stack.count < MIN_FOOD || stack.item.food_value().is_none() {
+        return Err(Refusal::NeedsFood);
+    }
     let mut sorted = guests.to_vec();
     sort_nearest(cell_centre(cell), &mut sorted);
     let n = usize::from(stack.count);
@@ -242,8 +285,12 @@ pub fn villagers_in(ecs: &hecs::World) -> Vec<(hecs::Entity, Vec3)> {
 /// becomes a Feast Marker carrying the guest count as its meta byte, and the
 /// feast is noted for the clients' confetti and bloom
 /// (`World::feast_events`, drained by `GameState`). Returns the block change
-/// to broadcast. The placed-by-a-player bit is left as the table had it.
-pub fn convert(world: &mut World, cell: (i32, i32, i32), guests: u8) -> crate::protocol::BlockChange {
+/// to broadcast. The placed-by-a-player bit is left as the table had it. The
+/// column is noted as having feasted on `tonight` ([`feasted_today`]).
+pub fn convert(world: &mut World, cell: (i32, i32, i32), guests: u8, tonight: u32) -> crate::protocol::BlockChange {
+    // Only today's entries matter; older ones are dropped so the table stays small.
+    world.feast_days.retain(|_, n| *n == tonight);
+    world.feast_days.insert(surge_column(cell.0, cell.2), tonight);
     world.set_block(cell.0, cell.1, cell.2, block::FEAST_MARKER);
     world.set_meta(cell, guests);
     world.note_feast(cell, guests);
@@ -329,11 +376,48 @@ mod tests {
 
     #[test]
     fn no_guests_refuses_and_an_empty_hand_refuses() {
-        assert_eq!(hold(CELL, Some(&bread(8)), &[]), Err(Refusal::NeedsGuests));
+        assert_eq!(hold(CELL, Some(&bread(8)), &[], false), Err(Refusal::NeedsGuests));
         let g = [Guest { kind: GuestKind::Player(1), pos: Vec3::new(3.0, 64.0, 0.0) }];
-        assert_eq!(hold(CELL, None, &g), Err(Refusal::NothingToShare));
-        assert_eq!(hold(CELL, Some(&bread(0)), &g), Err(Refusal::NothingToShare));
+        assert_eq!(hold(CELL, None, &g, false), Err(Refusal::NothingToShare));
+        assert_eq!(hold(CELL, Some(&bread(0)), &g, false), Err(Refusal::NothingToShare));
         assert_eq!(Refusal::NeedsGuests.toast(), "A feast needs guests. Bring friends, or find a village.");
+    }
+
+    #[test]
+    fn a_feast_needs_at_least_four_edible_items() {
+        let g = [Guest { kind: GuestKind::Player(1), pos: Vec3::new(3.0, 64.0, 0.0) }];
+        assert_eq!(hold(CELL, Some(&bread(3)), &g, false), Err(Refusal::NeedsFood), "three is too few");
+        assert!(hold(CELL, Some(&bread(4)), &g, false).is_ok(), "four is enough");
+        let dirt = ItemStack::new_block(block::DIRT, 32);
+        assert_eq!(hold(CELL, Some(&dirt), &g, false), Err(Refusal::NeedsFood), "a stack of dirt is not food");
+        // The same predicate eating uses: a Raw Beef counts, wheat does not.
+        let beef = ItemStack::new_material(MaterialId::RawBeef, 4);
+        assert!(hold(CELL, Some(&beef), &g, false).is_ok());
+        let wheat = ItemStack::new_material(MaterialId::Wheat, 16);
+        assert_eq!(wheat.item.food_value(), None);
+        assert_eq!(hold(CELL, Some(&wheat), &g, false), Err(Refusal::NeedsFood));
+        assert_eq!(Refusal::NeedsFood.toast(), "A feast needs at least four things to eat.");
+    }
+
+    #[test]
+    fn a_column_cannot_feast_twice_in_one_world_day() {
+        let mut w = World::new();
+        let table = (5, 64, 5);
+        w.set_block(5, 64, 5, block::FEAST_TABLE);
+        assert!(!feasted_today(&w, table, 3));
+        convert(&mut w, table, 2, 3);
+        assert!(feasted_today(&w, table, 3), "the same night number: refused");
+        // Another table in the same 16 x 16 column is the same surge.
+        assert!(feasted_today(&w, (12, 64, 14), 3));
+        assert!(!feasted_today(&w, (16, 64, 5), 3), "the next column over is a different surge");
+        assert!(!feasted_today(&w, table, 4), "the next day it can be held again");
+        let g = [Guest { kind: GuestKind::Player(1), pos: Vec3::new(3.0, 64.0, 0.0) }];
+        assert_eq!(hold(CELL, Some(&bread(8)), &g, true), Err(Refusal::FeastedToday));
+        assert_eq!(Refusal::FeastedToday.toast(), "This place has feasted today.");
+        // A new day clears the old entries.
+        w.set_block(40, 64, 40, block::FEAST_TABLE);
+        convert(&mut w, (40, 64, 40), 2, 4);
+        assert_eq!(w.feast_days.len(), 1);
     }
 
     #[test]
@@ -344,7 +428,7 @@ mod tests {
             Guest { kind: GuestKind::Player(5), pos: Vec3::new(9.0, 64.0, 0.0) },
         ];
         // 10 over 3: 3 each, the one left over to the nearest (player 3).
-        let f = hold(CELL, Some(&bread(10)), &guests).unwrap();
+        let f = hold(CELL, Some(&bread(10)), &guests, false).unwrap();
         assert_eq!(f.pay, 10);
         assert_eq!(f.guests, 3);
         let got: Vec<(usize, u8)> = f.shares.iter().map(|s| (s.player, s.count)).collect();
@@ -352,7 +436,7 @@ mod tests {
         assert_eq!(f.villager_units, 0);
         assert_eq!(f.shares.iter().map(|s| u32::from(s.count)).sum::<u32>(), 10);
         // 11 over 3: the two left over go to the two nearest.
-        let f = hold(CELL, Some(&bread(11)), &guests).unwrap();
+        let f = hold(CELL, Some(&bread(11)), &guests, false).unwrap();
         let got: Vec<(usize, u8)> = f.shares.iter().map(|s| (s.player, s.count)).collect();
         assert_eq!(got, vec![(3, 4), (5, 4), (7, 3)]);
     }
@@ -361,15 +445,17 @@ mod tests {
     fn villager_shares_are_used_up_and_a_small_stack_feeds_the_nearest_only() {
         let (_ecs, villagers) = ecs_with_villagers(&[2.0, 3.0]);
         let guests = gather(cell_centre(CELL), [player(1, 10.0)], villagers);
-        let f = hold(CELL, Some(&bread(9)), &guests).unwrap();
+        let f = hold(CELL, Some(&bread(9)), &guests, false).unwrap();
         assert_eq!(f.guests, 3);
         assert_eq!(f.shares.len(), 1);
         assert_eq!(f.shares[0].count, 3, "a third for the player");
         assert_eq!(f.villager_units, 6, "two thirds used up by the villagers");
-        // One loaf, three guests: only the nearest is served, but all three count.
-        let f = hold(CELL, Some(&bread(1)), &guests).unwrap();
-        assert_eq!(f.guests, 3);
-        assert_eq!(f.shares.iter().map(|s| u32::from(s.count)).sum::<u32>() + f.villager_units, 1);
+        // Four loaves, five guests: only the nearest four are served, but all five count.
+        let (_ecs, villagers) = ecs_with_villagers(&[2.0, 3.0, 4.0, 5.0]);
+        let guests = gather(cell_centre(CELL), [player(1, 10.0)], villagers);
+        let f = hold(CELL, Some(&bread(4)), &guests, false).unwrap();
+        assert_eq!(f.guests, 5);
+        assert_eq!(f.shares.iter().map(|s| u32::from(s.count)).sum::<u32>() + f.villager_units, 4);
     }
 
     #[test]
@@ -380,7 +466,7 @@ mod tests {
         let many: Vec<Guest> = (0..300)
             .map(|i| Guest { kind: GuestKind::Player(i), pos: Vec3::new(1.0 + i as f32 * 0.1, 64.0, 0.0) })
             .collect();
-        assert_eq!(hold(CELL, Some(&bread(64)), &many).unwrap().guests, 255);
+        assert_eq!(hold(CELL, Some(&bread(64)), &many, false).unwrap().guests, 255);
     }
 
     #[test]
@@ -396,7 +482,7 @@ mod tests {
     fn no_name_or_toast_carries_a_money_word() {
         let banned: std::collections::HashSet<&str> = crate::copy_lint::BANNED_MONEY_WORDS.iter().copied().collect();
         let mut words: Vec<String> = FIRST.iter().chain(SECOND.iter()).map(|w| w.to_lowercase()).collect();
-        for t in [NEEDS_GUESTS_TOAST, NOTHING_TO_SHARE_TOAST, &toast("The Feast of Long Hollow", 5)] {
+        for t in [NEEDS_GUESTS_TOAST, NOTHING_TO_SHARE_TOAST, NEEDS_FOOD_TOAST, FEASTED_TODAY_TOAST, &toast("The Feast of Long Hollow", 5)] {
             words.extend(t.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(str::to_lowercase));
         }
         for w in words {
@@ -414,7 +500,7 @@ mod tests {
     fn convert_turns_the_table_into_a_marker_with_its_meta_and_notes_the_feast() {
         let mut w = World::new();
         w.set_block(5, 64, 5, block::FEAST_TABLE);
-        let bc = convert(&mut w, (5, 64, 5), 7);
+        let bc = convert(&mut w, (5, 64, 5), 7, 3);
         assert_eq!(w.get_block(5, 64, 5), block::FEAST_MARKER);
         assert_eq!(w.meta_at(5, 64, 5), 7);
         assert_eq!((bc.new_block, bc.meta), (block::FEAST_MARKER, 7));
@@ -429,7 +515,7 @@ mod tests {
             Guest { kind: GuestKind::Player(2), pos: Vec3::new(9.0, 64.0, 0.0) },
         ];
         let held = bread(5);
-        let f = hold(CELL, Some(&held), &guests).unwrap();
+        let f = hold(CELL, Some(&held), &guests, false).unwrap();
         let mut ecs = hecs::World::new();
         spawn_drops(&mut ecs, &held, &f);
         let mut found: Vec<(i32, u8)> = ecs

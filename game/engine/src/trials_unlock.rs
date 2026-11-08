@@ -146,19 +146,24 @@ pub fn refresh_in(cat: &[TrialEntry], bests: &mut TrialBests) -> bool {
 
 /// Hidden trials worth a nudge, `(token, hint)`, in `TRIAL_ORDER` order: a
 /// locked trial with at least one `after` prerequisite completed, or an
-/// `on`-only trial whose shelf already has a completed trial.
+/// `on`-only trial whose shelf already has a completed trial. A locked trial
+/// with an `on` alternative that is the only trial on its shelf (the Grey
+/// Quarry) is nudged from the start: nothing else on its shelf could ever be
+/// done to start it, and a single `after` is either not done or unlocks it,
+/// so neither rule above could ever show its hint.
 pub fn next_hints_in(cat: &[TrialEntry], bests: &TrialBests) -> Vec<(&'static str, String)> {
     let shelf_started = |shelf: TrialType| {
         cat.iter().any(|e| e.shelf == shelf && bests.is_challenge_done(&e.display_name))
     };
+    let sole_on_shelf = |e: &TrialEntry| cat.iter().filter(|o| o.shelf == e.shelf).count() == 1;
     cat.iter()
         .filter(|e| !is_unlocked_in(cat, e.token, bests))
         .filter_map(|e| {
             let u = e.unlock.as_ref()?;
             let near = if u.after.is_empty() {
-                !u.on.is_empty() && shelf_started(e.shelf)
+                !u.on.is_empty() && (shelf_started(e.shelf) || sole_on_shelf(e))
             } else {
-                u.after.iter().any(|t| done(cat, t, bests))
+                u.after.iter().any(|t| done(cat, t, bests)) || (!u.on.is_empty() && sole_on_shelf(e))
             };
             near.then(|| (e.token, u.hint.clone()))
         })
@@ -308,6 +313,48 @@ mod tests {
         // breeder has its `after` prerequisite met, so it is already visible.
         assert_eq!(tokens, vec!["suit", "angler"]);
         assert!(is_unlocked_in(&cat, "breed", &bests));
+    }
+
+    #[test]
+    fn a_locked_on_trial_alone_on_its_shelf_is_hinted_from_the_start() {
+        let quarry = trial(
+            "quarry",
+            TrialType::Bloom,
+            Some(TrialUnlock {
+                on: vec![ChallengeEvent::PlaceWentGrey],
+                after: vec!["raiders".into()],
+                hint: "Somewhere grey is waiting.".into(),
+            }),
+        );
+        let mut cat = fixture();
+        cat.push(quarry);
+        let mut bests = TrialBests::default();
+        let tokens = |b: &TrialBests| next_hints_in(&cat, b).into_iter().map(|(t, _)| t).collect::<Vec<_>>();
+        assert_eq!(tokens(&bests), vec!["quarry"], "shown while locked, nothing started");
+        // Other trials keep their rules: the breeder (on + after, shared shelf) stays quiet.
+        complete(&cat, &mut bests, "forge");
+        assert!(!tokens(&bests).contains(&"breed"));
+        assert!(tokens(&bests).contains(&"quarry"), "still locked, still hinted");
+        // Once the place goes grey the trial is unlocked and the nudge goes.
+        record_event_in(&cat, &mut bests, &ChallengeEvent::PlaceWentGrey);
+        assert!(!tokens(&bests).contains(&"quarry"));
+    }
+
+    #[test]
+    fn the_bundled_grey_quarry_is_hinted_while_locked_and_other_hints_are_unchanged() {
+        let none = TrialBests::default();
+        let hints = next_hints(&none);
+        assert!(
+            hints.iter().any(|(t, h)| *t == "grey-quarry" && h == "Somewhere grey is waiting."),
+            "the frosted hint shows for the locked Grey Quarry: {hints:?}"
+        );
+        // A fresh store hints only the Grey Quarry: no other trial's hint moved.
+        assert_eq!(hints.len(), 1, "{hints:?}");
+        // The mixed Rancher (on + after) keeps its old rule: quiet until it unlocks.
+        assert!(!hints.iter().any(|(t, _)| *t == "rancher"));
+        let mut grey = TrialBests::default();
+        record_event_in(catalogue(), &mut grey, &ChallengeEvent::PlaceWentGrey);
+        assert!(!next_hints(&grey).iter().any(|(t, _)| *t == "grey-quarry"), "unlocked: no longer a hint");
     }
 
     #[test]

@@ -703,8 +703,16 @@ mod tests {
                 "{t} is locked on a fresh profile"
             );
         }
-        // Nothing started, nothing nudged.
-        assert!(rows.iter().all(|r| r.hints.is_empty()));
+        // Nothing started, nothing nudged: the one exception is the Grey Quarry,
+        // alone on its shelf, whose frosted hint shows from the start.
+        for r in &rows {
+            if r.kind == RowKind::Shelf(TrialType::Bloom) {
+                let hints: Vec<_> = r.hints.iter().map(|h| (h.token, h.hint.as_str())).collect();
+                assert_eq!(hints, vec![("grey-quarry", "Somewhere grey is waiting.")]);
+            } else {
+                assert!(r.hints.is_empty(), "{:?} nudges on a fresh profile", r.kind);
+            }
+        }
         assert!(rows.iter().flat_map(|r| &r.cards).all(|c| !c.is_new));
     }
 

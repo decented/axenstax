@@ -384,3 +384,64 @@ fn the_arena_builds_the_terraces_fence_chest_and_meadow_the_trial_describes() {
     assert_eq!(census.get("Rabbit"), Some(&2));
     assert_eq!(census.len(), 3);
 }
+
+/// Living world S1 — "Try again" on the Grey Quarry in its fresh arena. The
+/// first run is restored fully (the probe and the regions under the quarry
+/// are high, the player has dug a terrace out); the retry the game performs
+/// (`GameState::scenario_try_again`: fresh scenario state, a new probe, then
+/// `place_trial::rewind_arena`) puts the terraces back and starts it grey again.
+#[test]
+fn try_again_relays_the_terraces_and_starts_the_quarry_grey_again() {
+    let mut r = Rig::new();
+    restore_fully(&mut r);
+    assert!(r.scn.is_ended());
+    let def = scenario::named_builtin_def("grey-quarry").unwrap();
+    let arena = def.arena.clone().unwrap();
+    let probe_cell = (ORIGIN.0 + 10, ORIGIN.2 - 3);
+    assert!(r.bloom.level_at(probe_cell.0 as f32, probe_cell.1 as f32) > 0.5, "the region under the quarry came back to life");
+    // The player dug a terrace cell out and flooded another with the spring.
+    let dug = r.at(16, 79, -3);
+    assert_eq!(r.world.get_block(dug.0, dug.1, dug.2), block::STONE);
+    r.world.set_block(dug.0, dug.1, dug.2, block::AIR);
+
+    let animals_before = r.ecs.query::<&crate::entity::MobKind>().iter().count();
+    // What the game does on retry, step for step.
+    let retry = |r: &mut Rig, rewind: bool| {
+        place_trial::remove_probes(&mut r.scn, &mut r.bloom);
+        r.scn = ScenarioState::new(def.clone());
+        place_trial::register_probes(&mut r.scn, &mut r.bloom, ORIGIN);
+        if rewind {
+            let mut lava = crate::lava::LavaSystem::new();
+            let touched = place_trial::rewind_arena(&mut r.world, &mut r.water, &mut lava, &mut r.bloom, &arena, ORIGIN);
+            assert!(!touched.is_empty(), "the chunks to re-mesh are reported");
+        }
+        r.settle();
+    };
+
+    // Without the rewind (what a retry did before): the dug cell stays dug and
+    // the world's bloom under the quarry stays high.
+    let mut before = Rig::new();
+    restore_fully(&mut before);
+    let cell = before.at(16, 79, -3);
+    before.world.set_block(cell.0, cell.1, cell.2, block::AIR);
+    retry(&mut before, false);
+    assert_eq!(before.world.get_block(cell.0, cell.1, cell.2), block::AIR, "not re-laid");
+    assert!(before.bloom.level_at(probe_cell.0 as f32, probe_cell.1 as f32) > 0.5, "the region stays high");
+
+    // With it: terraces back, grey again, a fresh run that is not already over.
+    retry(&mut r, true);
+    assert_eq!(r.world.get_block(dug.0, dug.1, dug.2), block::STONE, "the terrace is re-laid");
+    let p = r.probe();
+    assert!((p.level - 0.05).abs() < 0.011, "the grey start again: {}", p.level);
+    assert_eq!(p.stage, Stage::GreyAndStill);
+    assert!(
+        r.bloom.level_at(probe_cell.0 as f32, probe_cell.1 as f32) < 0.1,
+        "the regions under it are drained too: {}",
+        r.bloom.level_at(probe_cell.0 as f32, probe_cell.1 as f32)
+    );
+    assert!(!r.scn.is_ended());
+    assert_eq!(r.scn.place_stage_phrase(), Some("Grey and still"));
+    // The arena's single blocks and mobs were not re-run: no duplicated animals.
+    let animals = r.ecs.query::<&crate::entity::MobKind>().iter().count();
+    assert_eq!(animals, animals_before, "no duplicated animals");
+}

@@ -1542,14 +1542,57 @@ pub fn cancel_build(
     }
 }
 
+/// What [`complete_build`] settled: where the plaque went, and the materials
+/// the build locked but never used (living world S1).
+#[derive(Clone, Debug, PartialEq)]
+pub struct CompletedBuild {
+    /// The Architect's Plaque cell, for the caller to broadcast + rebuild.
+    pub plaque: (i32, i32, i32),
+    /// Locked materials left when the last cell was done: the items for the
+    /// cells `tick_build` skipped because `commons::placement_refused` refused
+    /// them (a Commons Stone over a Plot, a Plot Marker over a Commons). The
+    /// caller hands them back with [`spill_leftovers`]. Empty in creative.
+    pub leftovers: Vec<crate::item::ItemStack>,
+}
+
+/// Put a finished build's `leftovers` on the ground, just outside the build's
+/// lowest-XZ corner (one block out, on the build's floor level), where the
+/// player who started it can pick them up. Stacks are split to their stack
+/// limit. Pure about the world: it only spawns item entities in `ecs`, so
+/// every path (standalone, lending host, dedicated) shares it.
+pub fn spill_leftovers(
+    ecs: &mut hecs::World,
+    anchor: (i32, i32, i32),
+    leftovers: Vec<crate::item::ItemStack>,
+) {
+    let at = glam::Vec3::new(anchor.0 as f32 - 0.5, anchor.1 as f32 + 1.0, anchor.2 as f32 - 0.5);
+    let mut k = 0u32;
+    for stack in leftovers {
+        let limit = stack.item.max_stack().max(1);
+        let mut left = stack.count;
+        while left > 0 {
+            let n = left.min(limit);
+            left -= n;
+            crate::entity::spawn_item(
+                ecs,
+                at,
+                crate::item::ItemStack { item: stack.item.clone(), count: n },
+                0x5B1D_0000u32.wrapping_add(k.wrapping_mul(7919)),
+            );
+            k += 1;
+        }
+    }
+}
+
 /// Spec 24 Phase 12 — finalise a completed build. Removes the anchor,
 /// places the Architect's Plaque at the most-central XZ tile cell on
 /// the build's floor (y = anchor.y + 1). Returns the plaque position
-/// so the caller can broadcast + rebuild.
+/// so the caller can broadcast + rebuild, and the locked materials the
+/// build never used (see [`CompletedBuild`]).
 pub fn complete_build(
     world: &mut World,
     anchor_pos: (i32, i32, i32),
-) -> Option<(i32, i32, i32)> {
+) -> Option<CompletedBuild> {
     let data = world.construction_anchors.remove(&anchor_pos)?;
     let (ax, ay, az) = data.anchor;
     // Most-central XZ cell on the floor — pick the cell at (rx, 0, rz)
@@ -1573,7 +1616,10 @@ pub fn complete_build(
         (plaque_x, plaque_y, plaque_z),
         ArchitectPlaqueData::from_plan_with_credit(&data.plan, data.builder_credit.clone()),
     );
-    Some((plaque_x, plaque_y, plaque_z))
+    Some(CompletedBuild {
+        plaque: (plaque_x, plaque_y, plaque_z),
+        leftovers: data.locked_materials.into_iter().filter(|s| s.count > 0).collect(),
+    })
 }
 
 // ─── Placement validation (Phase 9) ───────────────────────────────────
@@ -2796,6 +2842,85 @@ mod tests {
         assert_eq!(left, 0, "all 300 consumed from the inventory");
     }
 
+    /// Living world S1 — a Plan that skips a Commons Stone cell (a Plot stands
+    /// there) must not eat the stone: the locked item comes back with the
+    /// build's leftovers and lands on the ground at the anchor.
+    #[test]
+    fn a_skipped_commons_stone_is_returned_with_the_leftovers() {
+        let reg = crate::block::BlockRegistry::new();
+        let mut world = world_with_3x3_solid_at((0, 60, 0), (2, 60, 2));
+        let mut plan = PlanData::debug_3x3_stone();
+        plan.cells[0].block_id = block::COMMONS_STONE;
+        plan.cells[8].block_id = block::COMMONS_STONE;
+        // Someone's Plot covers the whole build site.
+        world.plots.push(crate::plot::PlotData::from_marker(
+            crate::plot::PlotOwner::Npub("npub1someoneelse".into()),
+            1,
+            60,
+            1,
+        ));
+        let mut inv = inv_with_blocks(&[(block::STONE, 7), (block::COMMONS_STONE, 2)]);
+        start_build(&mut world, &reg, "survival", plan, 0, (0, 60, 0), &mut inv, &[(100, 100, 100)]).unwrap();
+        assert_eq!(world.construction_anchors[&(0, 60, 0)].locked_materials.len(), 2);
+        for _ in 0..10 {
+            tick_build(&mut world, (0, 60, 0));
+        }
+        assert!(build_is_complete(&world, (0, 60, 0)));
+        // The two claim cells were skipped: still air, their items still locked.
+        let anchor = &world.construction_anchors[&(0, 60, 0)];
+        let locked_stone: u8 = anchor
+            .locked_materials
+            .iter()
+            .filter(|s| matches!(s.item, crate::item::Item::Block(b) if b == block::COMMONS_STONE))
+            .map(|s| s.count)
+            .sum();
+        assert_eq!(locked_stone, 2);
+        let done = complete_build(&mut world, (0, 60, 0)).expect("the plaque is placed");
+        assert_eq!(
+            done.leftovers,
+            vec![crate::item::ItemStack::new_block(block::COMMONS_STONE, 2)],
+            "the two skipped stones are handed back, nothing else"
+        );
+        // And they land on the ground just outside the corner, as real items.
+        let mut ecs = hecs::World::new();
+        spill_leftovers(&mut ecs, (0, 60, 0), done.leftovers);
+        let items: Vec<_> = ecs
+            .query::<(&crate::entity::Position, &crate::entity::ItemEntity)>()
+            .iter()
+            .map(|(_, (pos, it))| (pos.0, it.stack.clone()))
+            .collect();
+        assert_eq!(items.len(), 1);
+        assert!(matches!(items[0].1.item, crate::item::Item::Block(b) if b == block::COMMONS_STONE));
+        assert_eq!(items[0].1.count, 2);
+        assert!(items[0].0.x < 0.0 && items[0].0.z < 0.0, "one block outside the build's corner: {:?}", items[0].0);
+    }
+
+    #[test]
+    fn a_clean_survival_build_leaves_nothing_and_spills_nothing() {
+        let reg = crate::block::BlockRegistry::new();
+        let mut world = world_with_3x3_solid_at((0, 60, 0), (2, 60, 2));
+        let mut inv = inv_with_blocks(&[(block::STONE, 9)]);
+        start_build(&mut world, &reg, "survival", PlanData::debug_3x3_stone(), 0, (0, 60, 0), &mut inv, &[(100, 100, 100)]).unwrap();
+        for _ in 0..10 {
+            tick_build(&mut world, (0, 60, 0));
+        }
+        let done = complete_build(&mut world, (0, 60, 0)).unwrap();
+        assert!(done.leftovers.is_empty());
+        let mut ecs = hecs::World::new();
+        spill_leftovers(&mut ecs, (0, 60, 0), done.leftovers);
+        assert_eq!(ecs.len(), 0);
+    }
+
+    #[test]
+    fn leftovers_over_a_stack_limit_spill_as_several_stacks() {
+        let mut ecs = hecs::World::new();
+        let big = crate::item::ItemStack { item: crate::item::Item::Block(block::STONE), count: 150 };
+        spill_leftovers(&mut ecs, (0, 60, 0), vec![big]);
+        let mut counts: Vec<u8> = ecs.query::<&crate::entity::ItemEntity>().iter().map(|(_, i)| i.stack.count).collect();
+        counts.sort();
+        assert_eq!(counts, vec![22, 64, 64]);
+    }
+
     #[test]
     fn complete_build_places_plaque_at_centre_with_authored_in() {
         let reg = crate::block::BlockRegistry::new();
@@ -2810,7 +2935,9 @@ mod tests {
         for _ in 0..5 {
             tick_build(&mut world, (0, 60, 0));
         }
-        let plaque_pos = complete_build(&mut world, (0, 60, 0)).expect("plaque placed");
+        let done = complete_build(&mut world, (0, 60, 0)).expect("plaque placed");
+        assert!(done.leftovers.is_empty(), "nothing was skipped, nothing is left");
+        let plaque_pos = done.plaque;
         // 3×3 footprint → centre = (anchor.x + 1, anchor.y + 1, anchor.z + 1) = (1, 61, 1).
         assert_eq!(plaque_pos, (1, 61, 1));
         assert_eq!(world.get_block(1, 61, 1), block::ARCHITECT_PLAQUE);

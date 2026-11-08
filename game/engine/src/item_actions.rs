@@ -171,6 +171,13 @@ pub enum ItemNote {
     NeedsGuests = 29,
     /// Living world S3 — a Feast Table used with an empty hand. Nothing happens.
     NothingToShare = 30,
+    /// Living world S1 — a Feast Table used with a stack that is not food or
+    /// holds fewer than four. Nothing happens. An unknown code reads as
+    /// nothing to an older client (no protocol bump).
+    NeedsFood = 31,
+    /// Living world S1 — a Feast Table used in a column that has already
+    /// feasted today. Nothing happens.
+    FeastedToday = 32,
 }
 
 impl ItemNote {
@@ -212,6 +219,8 @@ impl ItemNote {
             28 => NotAFloor,
             29 => NeedsGuests,
             30 => NothingToShare,
+            31 => NeedsFood,
+            32 => FeastedToday,
             _ => None,
         }
     }
@@ -246,6 +255,8 @@ impl ItemNote {
             NotAFloor => Some("Blank paper only lies flat on a floor."),
             NeedsGuests => Some(crate::feast::NEEDS_GUESTS_TOAST),
             NothingToShare => Some(crate::feast::NOTHING_TO_SHARE_TOAST),
+            NeedsFood => Some(crate::feast::NEEDS_FOOD_TOAST),
+            FeastedToday => Some(crate::feast::FEASTED_TODAY_TOAST),
         }
     }
 }
@@ -788,9 +799,17 @@ mod tests {
             ItemNote::NotDryEnough,
             ItemNote::FaceCovered,
             ItemNote::NotAFloor,
+            ItemNote::NeedsGuests,
+            ItemNote::NothingToShare,
+            ItemNote::NeedsFood,
+            ItemNote::FeastedToday,
         ] {
             assert_eq!(ItemNote::from_wire(n.to_wire()), n);
         }
+        // Living world S1 — the Feast's two new refusals follow NothingToShare (30).
+        // An older client reads them as nothing (a silent refusal), so no bump.
+        assert_eq!((ItemNote::NeedsFood.to_wire(), ItemNote::FeastedToday.to_wire()), (31, 32));
+        assert_eq!(ItemNote::from_wire(33), ItemNote::None);
         // C3c-2 (v81) — the use-request codes follow InventoryFull, in order.
         assert_eq!(ItemNote::NoAmmo.to_wire(), 19);
         assert_eq!(ItemNote::NotDryEnough.to_wire(), 26);

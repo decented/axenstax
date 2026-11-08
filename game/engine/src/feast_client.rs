@@ -68,7 +68,8 @@ impl GameState {
             .filter(|(_, p)| p.health > 0.0)
             .map(|(k, p)| (base + k, Vec3::new(p.x, p.y, p.z)));
         let guests = feast::gather(feast::cell_centre(cell), seats.chain(joiners), feast::villagers_in(&self.ecs));
-        let held_feast = match feast::hold(cell, held.as_ref(), &guests) {
+        let tonight = self.night_calendar.tonight();
+        let held_feast = match feast::hold(cell, held.as_ref(), &guests, feast::feasted_today(&self.world, cell, tonight)) {
             Ok(f) => f,
             Err(why) => {
                 self.say(why.toast(), 3);
@@ -81,7 +82,7 @@ impl GameState {
         if let Some(stack) = &held {
             feast::spawn_drops(&mut self.ecs, stack, &held_feast);
         }
-        let change = feast::convert(&mut self.world, cell, held_feast.guests);
+        let change = feast::convert(&mut self.world, cell, held_feast.guests, tonight);
         self.pending_block_changes.push(change);
         self.rebuild_chunk_at(pos[0], pos[1], pos[2]);
         self.audio.play_gem_pickup();

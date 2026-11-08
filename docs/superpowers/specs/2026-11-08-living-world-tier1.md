@@ -528,14 +528,14 @@ whole path, from arena to end card, is driven without a window by
 - Feast and co-presence surges fade on reload; the Feast Marker's lasting lift stays.
 - Commons do not yet stop anyone breaking things.
 - The Grey Quarry's people route is a rules test, not a solo play: a Feast with no guests is refused, the arena has no villagers, and an inventory-touching trial is refused while networked. A group at a Feast of five or more is what carries it (`grey_quarry.rs` drives `note_feast` directly).
-- "Try again" on a Place trial re-runs it in the same arena world, whatever shape the place is in; the grey start (`drained`) is not re-applied.
-- Feasts are cheap to repeat (review L4): a broken Feast Marker gives its table back, and a feast can be held with one dirt block and one guest, so a repeated feast can keep lifting bloom and finishing `HoldFeast`. Left as it is at Tier 1; if it matters, set a minimum goods count, require edible goods, or give each column's feast surge a cooldown.
+- ~~"Try again" on a Place trial re-runs it in the same arena world, whatever shape the place is in; the grey start (`drained`) is not re-applied.~~ Closed in Tier 2 S1: a retry re-lays the arena's fills and re-applies `drained` (the planted-above-the-fills limit is in the Tier 2 spec §13).
+- ~~Feasts are cheap to repeat (review L4)~~ **Closed in Tier 2 S1.** A feast now needs at least four edible items in the held stack, and a column's feast surge cannot be renewed within one world day (the night-calendar number; unsaved, so a reload forgets it). See the Tier 2 spec §9 "As built (S1)".
 - A joiner's stack size is read from the server's copy of its hand slot, not from its claim (review L6). Item requests are stamped with `request_input_seq()`, which should make the copy current, but that ordering was not proved; if it is ever wrong the extra units are bounded by the believed-pay bound. Left as it is.
 - A joiner's Commons Stone or Plot Marker refused as `Claimed` takes the optimistic cost with it (review L5, confirmed by reading): a plain placement carries no use tag, so nothing undoes the client's take, exactly as for a refused foreign-plot placement today. Refunding on the refusal would let a modified client that never took the item duplicate it, so it waits for inventory authority (C3d), not a one-line fix.
-- A Plan that skips a Commons Stone or Plot Marker cell (the placement rule refuses it) keeps that item in its locked materials, and `complete_build` discards it, so the item is lost (independent review, NOTE). Return skipped claim items with the build's leftovers when Plans are next touched.
+- ~~A Plan that skips a Commons Stone or Plot Marker cell loses that item.~~ Closed in Tier 2 S1: the skipped items spill on the ground at the build site when it completes.
 - A dedicated server's Tally counts accepted joiner block edits only, at `finish_edit_world` (after every refusal); crafts, smelts and trades read 0 there.
 - `check.sh`'s test-litter sweep treats a pid that has no `/proc` entry as dead, so a test run in another pid namespace (a sandbox) sharing the same `TMPDIR` could lose its scratch dir. Give such runs their own `TMPDIR`.
-- The frosted hint "Somewhere grey is waiting." is not shown by the gallery or the island: `next_hints` only nudges an `after` trial while some, but not all, of its `after` trials are done, and the Grey Quarry has one.
+- ~~The frosted hint "Somewhere grey is waiting." is not shown by the gallery or the island.~~ Closed in Tier 2 S1 (`next_hints` nudges a locked `on` trial that is alone on its shelf).
 
 ## 7. Build slices (one at a time, in worktree `../AxeNStax-living-world`, branch `living-world`)
 

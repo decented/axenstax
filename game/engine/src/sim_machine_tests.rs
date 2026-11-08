@@ -273,3 +273,66 @@ fn d4_machines_cosmetic_build_name_and_owned_allocations_are_bounded() {
         "capacity is charged even with length zero"
     );
 }
+
+/// Living world S1 — through the shared machines phase (the one every path
+/// runs): a survival Plan that skipped a Commons Stone over a Plot hands the
+/// stone back as a ground item when the build completes.
+#[test]
+fn s1_a_plan_that_skips_a_claim_cell_spills_its_item_when_it_completes() {
+    let mut world = World::new();
+    let pos = (0, 64, 0);
+    for x in 0..3 {
+        for z in 0..3 {
+            world.set_block(x, 63, z, block::STONE);
+        }
+    }
+    world.plots.push(crate::plot::PlotData::from_marker(
+        crate::plot::PlotOwner::Npub("npub1someoneelse".into()),
+        1,
+        64,
+        1,
+    ));
+    let mut data = anchor(pos);
+    data.plan.cells[4].block_id = block::COMMONS_STONE;
+    data.is_creative_build = false;
+    data.locked_materials = vec![
+        ItemStack::new_block(block::STONE, 8),
+        ItemStack::new_block(block::COMMONS_STONE, 1),
+    ];
+    world.construction_anchors.insert(pos, data);
+    let (mut ecs, mut water, mut lava, mut fire) = (
+        hecs::World::new(),
+        crate::water::WaterSystem::new(),
+        crate::lava::LavaSystem::new(),
+        crate::fire::FireSystem::new(),
+    );
+    let registry = crate::block::BlockRegistry::new();
+    let mut batch = MachineBatch::reserve(true).unwrap();
+    for tick in 0..12u64 {
+        let mut ctx = MachineCtx {
+            world: &mut world,
+            ecs: &mut ecs,
+            water: &mut water,
+            lava: &mut lava,
+            fire: &mut fire,
+            registry: &registry,
+            tick,
+        };
+        step(
+            &mut ctx,
+            MachineRules { raining: false, seed: 42, can_detonate: false, mode: crate::play_mode::PlayMode::Survival },
+            &LocalMachineState::default(),
+            &mut batch,
+            &mut Vec::new(),
+            |_, _| {},
+        );
+    }
+    assert!(!world.construction_anchors.contains_key(&pos), "the build completed");
+    assert!(batch.building_completed);
+    let items: Vec<_> = ecs
+        .query::<&crate::entity::ItemEntity>()
+        .iter()
+        .map(|(_, it)| it.stack.clone())
+        .collect();
+    assert_eq!(items, vec![ItemStack::new_block(block::COMMONS_STONE, 1)], "the skipped stone is on the ground");
+}

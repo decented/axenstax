@@ -246,7 +246,7 @@ pub fn step(
             batch.rack_ready |= batch.deliver_local && !out.newly_mature_slots.is_empty();
         }
     }
-    tick_construction(ctx.world, batch, changes);
+    tick_construction(ctx.world, ctx.ecs, batch, changes);
 }
 
 fn tick_campfires(ctx: &mut MachineCtx<'_>, changes: &mut Vec<BlockChange>) {
@@ -285,7 +285,12 @@ fn tick_campfires(ctx: &mut MachineCtx<'_>, changes: &mut Vec<BlockChange>) {
     }
 }
 
-fn tick_construction(world: &mut World, batch: &mut MachineBatch, changes: &mut Vec<BlockChange>) {
+fn tick_construction(
+    world: &mut World,
+    ecs: &mut hecs::World,
+    batch: &mut MachineBatch,
+    changes: &mut Vec<BlockChange>,
+) {
     let anchors: Vec<_> = world
         .construction_anchors
         .iter()
@@ -302,7 +307,11 @@ fn tick_construction(world: &mut World, batch: &mut MachineBatch, changes: &mut 
             if let Some(data) = world.construction_anchors.get(&anchor) {
                 batch.build_finished(&data.plan.name);
             }
-            if let Some(pos) = crate::plan::complete_build(world, anchor) {
+            if let Some(done) = crate::plan::complete_build(world, anchor) {
+                // A Plan that skipped a claim cell hands its item back as a
+                // ground stack, on every path (the same world the build ran in).
+                crate::plan::spill_leftovers(ecs, anchor, done.leftovers);
+                let pos = done.plaque;
                 changes.push(crate::game_loop::broadcast_change(
                     world,
                     pos.0,

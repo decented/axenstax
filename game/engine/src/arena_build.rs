@@ -66,18 +66,32 @@ fn put_cell(
     }
 }
 
-/// Build `arena` round `origin`. Returns one cell per chunk the blocks
-/// touched, for the caller to re-mesh.
-pub(crate) fn build_arena(
+/// Lay only `arena`'s box fills round `origin` (the terrain: terraces, soil
+/// rows), not its single blocks or mobs. Returns one cell per chunk touched.
+/// This is what a Place trial's "Try again" re-lays (`place_trial::rewind_arena`):
+/// the blocks hold chests and a spring, the mobs would duplicate the animals.
+pub(crate) fn build_fills(
     world: &mut World,
     water: &mut WaterSystem,
     lava: &mut crate::lava::LavaSystem,
-    ecs: &mut hecs::World,
     origin: (i32, i32, i32),
     arena: &ArenaSetup,
 ) -> Vec<(i32, i32, i32)> {
-    let (ox, oy, oz) = origin;
-    let mut touched: std::collections::HashMap<(i32, i32, i32), (i32, i32, i32)> = std::collections::HashMap::new();
+    let mut touched = std::collections::HashMap::new();
+    lay_fills(world, water, lava, origin, arena, &mut touched);
+    touched.into_values().collect()
+}
+
+type Touched = std::collections::HashMap<(i32, i32, i32), (i32, i32, i32)>;
+
+fn lay_fills(
+    world: &mut World,
+    water: &mut WaterSystem,
+    lava: &mut crate::lava::LavaSystem,
+    (ox, oy, oz): (i32, i32, i32),
+    arena: &ArenaSetup,
+    touched: &mut Touched,
+) {
     let mut note = |cell: (i32, i32, i32)| {
         touched.entry(World::block_to_chunk(cell.0, cell.1, cell.2)).or_insert(cell);
     };
@@ -100,6 +114,24 @@ pub(crate) fn build_arena(
             }
         }
     }
+}
+
+/// Build `arena` round `origin`. Returns one cell per chunk the blocks
+/// touched, for the caller to re-mesh.
+pub(crate) fn build_arena(
+    world: &mut World,
+    water: &mut WaterSystem,
+    lava: &mut crate::lava::LavaSystem,
+    ecs: &mut hecs::World,
+    origin: (i32, i32, i32),
+    arena: &ArenaSetup,
+) -> Vec<(i32, i32, i32)> {
+    let (ox, oy, oz) = origin;
+    let mut touched = Touched::new();
+    lay_fills(world, water, lava, origin, arena, &mut touched);
+    let mut note = |cell: (i32, i32, i32)| {
+        touched.entry(World::block_to_chunk(cell.0, cell.1, cell.2)).or_insert(cell);
+    };
     for b in &arena.blocks {
         let Some(block_id) = arena_block(&b.block) else { continue };
         let cell = (ox + b.at[0], oy + b.at[1], oz + b.at[2]);

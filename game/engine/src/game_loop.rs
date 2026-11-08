@@ -3126,8 +3126,10 @@ impl super::GameState {
     /// same `/give` + `/spawn` registries the kit uses. Called ONLY on the
     /// fresh-world lobby launch (never the in-world overlay). Cross-platform.
     pub(crate) fn apply_arena_setup(&mut self, arena: &crate::scenario::ArenaSetup) {
-        let origin = self.players[0].player.pos;
-        let origin = (origin.x.floor() as i32, origin.y.floor() as i32, origin.z.floor() as i32);
+        let spawn = self.players[0].player.pos;
+        // Remembered so a Place trial's "Try again" lays everything in the same place.
+        self.arena_spawn = Some(spawn);
+        let origin = (spawn.x.floor() as i32, spawn.y.floor() as i32, spawn.z.floor() as i32);
         let touched = crate::arena_build::build_arena(
             &mut self.world,
             &mut self.water,

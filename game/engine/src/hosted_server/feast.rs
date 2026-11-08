@@ -70,13 +70,21 @@ impl HostedServer {
             .filter(|(j, sp)| *j != i && sp.is_present_and_alive())
             .map(|(j, sp)| (j, sp.player.pos));
         let guests = crate::feast::gather(table, players, crate::feast::villagers_in(&self.server.ecs));
-        let feast = match crate::feast::hold(pos, Some(&stack), &guests) {
+        let tonight = self.server.night_calendar.tonight();
+        let feasted = crate::feast::feasted_today(&self.server.world, pos, tonight);
+        let feast = match crate::feast::hold(pos, Some(&stack), &guests, feasted) {
             Ok(f) => f,
             Err(crate::feast::Refusal::NeedsGuests) => {
                 return self.feast_outcome(i, seq, false, 0, ItemNote::NeedsGuests, 0);
             }
             Err(crate::feast::Refusal::NothingToShare) => {
                 return self.feast_outcome(i, seq, false, 0, ItemNote::NothingToShare, 0);
+            }
+            Err(crate::feast::Refusal::NeedsFood) => {
+                return self.feast_outcome(i, seq, false, 0, ItemNote::NeedsFood, 0);
+            }
+            Err(crate::feast::Refusal::FeastedToday) => {
+                return self.feast_outcome(i, seq, false, 0, ItemNote::FeastedToday, 0);
             }
         };
         // Pay: believed within the joiner's bound, refused past it. A creative
@@ -96,7 +104,7 @@ impl HostedServer {
             self.note_believed_use(i, believed, 0, now);
         }
         crate::feast::spawn_drops(&mut self.server.ecs, &stack, &feast);
-        let change = crate::feast::convert(&mut self.server.world, pos, feast.guests);
+        let change = crate::feast::convert(&mut self.server.world, pos, feast.guests, tonight);
         self.pending_block_changes.push(change);
         if self.lends_host_world() {
             self.lent_edit_cells.push(pos);

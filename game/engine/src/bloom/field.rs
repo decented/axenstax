@@ -240,7 +240,11 @@ impl BloomField {
     pub fn set_initial_level(&mut self, min: IVec3, max: IVec3, level: f32) {
         let (lo, hi) = (min.min(max), min.max(max));
         let level = level.clamp(0.0, 1.0);
-        self.initial.push((lo, hi, level));
+        // The same box again (a Place trial's retry) replaces its level.
+        match self.initial.iter_mut().find(|(l, h, _)| *l == lo && *h == hi) {
+            Some(entry) => entry.2 = level,
+            None => self.initial.push((lo, hi, level)),
+        }
         for (&key, r) in &mut self.regions {
             let (x0, x1, z0, z1) = block_rect(key);
             if r.known && lo.x <= x1 && hi.x >= x0 && lo.z <= z1 && hi.z >= z0 {

@@ -879,6 +879,12 @@ pub struct World {
     /// and `BloomField::note_feast`. Transient; never persisted or sent. Capped
     /// ([`FEAST_EVENTS_CAP`]) so a server nobody drains cannot grow it.
     pub feast_events: Vec<(i32, i32, i32, u8)>,
+    /// Living world S1 (review L4) — the night-calendar number on which each
+    /// column (`feast::surge_column`) last held a feast, so a column's Feast
+    /// surge is not renewed within one world day. Authority-side and
+    /// transient: never persisted or sent, so a reload forgets it (and the
+    /// feast on a reloaded world can be held again that day). Sorted map.
+    pub feast_days: std::collections::BTreeMap<(i32, i32), u32>,
 }
 
 /// The most feasts [`World::feast_events`] holds undrained.
@@ -986,6 +992,7 @@ impl World {
             sim_tally: crate::sim_lend::SimTally::default(),
             pop_exposure: AHashMap::new(),
             feast_events: Vec::new(),
+            feast_days: std::collections::BTreeMap::new(),
         }
     }
 
@@ -2054,6 +2061,7 @@ impl World {
         self.market_hubs.clear();
         self.pop_exposure.clear();
         self.feast_events.clear();
+        self.feast_days.clear();
         // Plan registry deliberately preserved — engine-bundled
         // content is constant across world resets.
     }

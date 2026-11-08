@@ -233,6 +233,26 @@ pub fn apply_drained(bloom: &mut BloomField, arena: &ArenaSetup, origin: (i32, i
     }
 }
 
+/// "Try again" on a Place trial in its fresh arena: re-lay the arena's box
+/// fills round `origin` (the terrain the player has dug, flooded or built
+/// over) and re-apply its grey start, so the second run begins as the first
+/// did. The arena's single blocks and mobs are NOT re-run (the chest, the
+/// spring and the five animals are already there). Returns one cell per chunk
+/// touched, for the caller to re-mesh. What the player planted above the fills
+/// stays (a known limit).
+pub fn rewind_arena(
+    world: &mut crate::world::World,
+    water: &mut crate::water::WaterSystem,
+    lava: &mut crate::lava::LavaSystem,
+    bloom: &mut BloomField,
+    arena: &ArenaSetup,
+    origin: (i32, i32, i32),
+) -> Vec<(i32, i32, i32)> {
+    let touched = crate::arena_build::build_fills(world, water, lava, origin, arena);
+    apply_drained(bloom, arena, origin);
+    touched
+}
+
 /// One tick of a running scenario's `Place` leaves: read each open leaf's
 /// probe, remember its stage and terms, and finish the leaf when the probe
 /// reads "Alive". Returns `true` once, when Satoshi's halfway line is due.
@@ -259,6 +279,13 @@ impl crate::GameState {
     /// The block the area offsets are relative to: the first seat's feet cell
     /// (the same origin `apply_arena_setup` uses).
     fn place_origin(&self) -> (i32, i32, i32) {
+        // In a fresh arena the origin is where the arena was laid, wherever
+        // the player has walked since.
+        if self.scenario_fresh_arena
+            && let Some(spawn) = self.arena_spawn
+        {
+            return (spawn.x.floor() as i32, spawn.y.floor() as i32, spawn.z.floor() as i32);
+        }
         let p = self.players[0].player.pos;
         (p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32)
     }
@@ -284,6 +311,32 @@ impl crate::GameState {
     pub(crate) fn apply_arena_drained(&mut self, arena: &ArenaSetup) {
         let origin = self.place_origin();
         apply_drained(&mut self.bloom, arena, origin);
+    }
+
+    /// "Try again" on a Place trial in its fresh arena: back to the start,
+    /// terrain re-laid and grey again (see [`rewind_arena`]). Run after
+    /// `start_scenario` has made the fresh scenario state, with the fresh-arena
+    /// flag and `arena_spawn` restored. No-op outside a fresh arena or for a
+    /// scenario with no `Place` leaf.
+    pub(crate) fn rewind_place_arena(&mut self) {
+        let Some(spawn) = self.arena_spawn.filter(|_| self.scenario_fresh_arena) else { return };
+        let Some(def) = self.scenario.as_ref().map(|s| s.def().clone()) else { return };
+        let Some(arena) = def.arena.as_ref() else { return };
+        if crate::objective_progress::place_leaves(&def.objective).is_empty() {
+            return;
+        }
+        // The probes were laid at wherever the player stood: lay them at the arena.
+        self.remove_place_probes();
+        self.register_place_probes();
+        let origin = self.place_origin();
+        let touched = rewind_arena(&mut self.world, &mut self.water, &mut self.lava, &mut self.bloom, arena, origin);
+        for (x, y, z) in touched {
+            self.rebuild_chunk_at(x, y, z);
+        }
+        // Stand at the start again, not inside the re-laid stone.
+        self.players[0].player.pos = spawn;
+        self.players[0].player.velocity = glam::Vec3::ZERO;
+        self.players[0].player.reset_fall();
     }
 
     /// Per tick, while a scenario with `Place` leaves runs (see [`step`]).

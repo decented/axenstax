@@ -637,7 +637,9 @@ pub fn process_builder_commissions(
             }
             CommissionTickAction::BuildComplete => {
                 let anchor_key = (commission.anchor[0], commission.anchor[1], commission.anchor[2]);
-                plaque_out = crate::plan::complete_build(world, anchor_key);
+                // A commission locks no materials (the commission holds them), so
+                // there are no leftovers to hand back here.
+                plaque_out = crate::plan::complete_build(world, anchor_key).map(|done| done.plaque);
                 if let Ok(mut vc) = ecs.get::<&mut crate::villager::VillagerComponent>(id)
                     && let Some(c) = vc.commission.as_mut() {
                         c.status = CommissionStatus::Returning;
