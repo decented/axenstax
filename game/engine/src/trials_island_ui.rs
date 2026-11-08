@@ -10,9 +10,11 @@ use crate::trials_gallery::Card;
 
 /// Draw the card for one frame. Returns true when Play (or Enter) was pressed.
 pub(crate) fn draw_card(ctx: &egui::Context, card: &Card, postcard: Option<egui::TextureId>) -> bool {
-    let screen = ctx.content_rect();
-    let w = (screen.width() * 0.42).clamp(300.0, 520.0);
-    let h = (screen.height() - 48.0).clamp(240.0, 720.0);
+    // Inside the TV-safe area (home page overhaul spec §2), never larger than it.
+    let safe = crate::ui_safe_area::rect(ctx);
+    const MARGIN: f32 = 16.0;
+    let w = (safe.width() * 0.45).clamp(300.0, 520.0).min(safe.width() - 2.0 * MARGIN).max(0.0);
+    let h = (safe.height() - 2.0 * MARGIN).clamp(0.0, 720.0);
     let icons = crate::egui_integration::block_texture_handles(ctx);
     let mut play = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
     let fill = egui::Color32::from_rgba_unmultiplied(
@@ -22,14 +24,16 @@ pub(crate) fn draw_card(ctx: &egui::Context, card: &Card, postcard: Option<egui:
         238,
     );
     egui::Area::new(egui::Id::new("trials_island_card"))
-        .anchor(egui::Align2::RIGHT_CENTER, [-20.0, 0.0])
+        .pivot(egui::Align2::RIGHT_CENTER)
+        .fixed_pos(egui::pos2(safe.max.x, safe.center().y))
+        .constrain_to(safe)
         .order(egui::Order::Foreground)
         .show(ctx, |ui| {
             egui::Frame::new()
                 .fill(fill)
                 .stroke(egui::Stroke::new(1.0_f32, brand::BORDER))
                 .corner_radius(egui::CornerRadius::same(16))
-                .inner_margin(egui::Margin::same(16))
+                .inner_margin(egui::Margin::same(MARGIN as i8))
                 .show(ui, |ui| {
                     ui.set_width(w);
                     ui.set_height(h);

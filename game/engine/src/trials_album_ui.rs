@@ -80,13 +80,13 @@ pub fn draw(ctx: &egui::Context, st: &mut GalleryState, modal_open: bool) {
     let mut opened: Option<usize> = None;
     #[allow(deprecated)]
     egui::CentralPanel::default()
-        .frame(egui::Frame::new().fill(brand::DEEP_FRONTIER).inner_margin(egui::Margin::symmetric(20, 14)))
-        .show(ctx, |ui| {
+        .frame(egui::Frame::new().fill(brand::DEEP_FRONTIER))
+        .show(ctx, |ui| crate::ui_safe_area::inside(ui, |ui| {
             ui.horizontal(|ui| {
                 if ui
                     .add(
                         egui::Button::new(egui::RichText::new("\u{2039}  Back").size(15.0).color(brand::STONE))
-                            .min_size(egui::vec2(0.0, 34.0))
+                            .min_size(egui::vec2(0.0, crate::ui_safe_area::HIT))
                             .corner_radius(egui::CornerRadius::same(6)),
                     )
                     .clicked()
@@ -160,7 +160,7 @@ pub fn draw(ctx: &egui::Context, st: &mut GalleryState, modal_open: bool) {
                 }
                 ui.add_space(20.0);
             });
-        });
+        }));
 
     if back {
         step_back(st, enlarged.is_some());

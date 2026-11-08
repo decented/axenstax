@@ -840,13 +840,13 @@ pub fn draw(
 
     #[allow(deprecated)]
     egui::CentralPanel::default()
-        .frame(egui::Frame::new().fill(brand::DEEP_FRONTIER).inner_margin(egui::Margin::symmetric(20, 14)))
-        .show(ctx, |ui| {
+        .frame(egui::Frame::new().fill(brand::DEEP_FRONTIER))
+        .show(ctx, |ui| crate::ui_safe_area::inside(ui, |ui| {
             ui.horizontal(|ui| {
                 if ui
                     .add(
                         egui::Button::new(egui::RichText::new("\u{2039}  Back").size(15.0).color(TEXT))
-                            .min_size(egui::vec2(0.0, 34.0))
+                            .min_size(egui::vec2(0.0, crate::ui_safe_area::HIT))
                             .corner_radius(egui::CornerRadius::same(6)),
                     )
                     .clicked()
@@ -859,7 +859,7 @@ pub fn draw(
                     if ui
                         .add(
                             egui::Button::new(egui::RichText::new("Album").size(15.0).color(TEXT))
-                                .min_size(egui::vec2(0.0, 34.0))
+                                .min_size(egui::vec2(0.0, crate::ui_safe_area::HIT))
                                 .corner_radius(egui::CornerRadius::same(6)),
                         )
                         .on_hover_text("Every postcard from the trials you have finished.")
@@ -871,7 +871,7 @@ pub fn draw(
                     if ui
                         .add(
                             egui::Button::new(egui::RichText::new("Walk the island").size(15.0).color(TEXT))
-                                .min_size(egui::vec2(0.0, 34.0))
+                                .min_size(egui::vec2(0.0, crate::ui_safe_area::HIT))
                                 .corner_radius(egui::CornerRadius::same(6)),
                         )
                         .on_hover_text("A little island with a doorway for each trial you can play.")
@@ -891,7 +891,7 @@ pub fn draw(
                     shelf_result = draw_shelves(ui, rows, focus, scroll_to_focus, icons, &art);
                 }
             }
-        });
+        }));
 
     if album {
         st.open_album();
@@ -933,56 +933,67 @@ pub fn draw(
 // The lobby tile that opens the gallery
 // ---------------------------------------------------------------------------
 
-/// The big "Trials" tile in the world-list area (a full-width button on narrow
-/// screens). Returns true when pressed.
-pub fn draw_trials_tile(ui: &mut egui::Ui, narrow: bool) -> bool {
-    let width = if narrow { ui.available_width() } else { ui.available_width().min(420.0) };
-    let height = if narrow { 64.0 } else { 78.0 };
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
+/// The big "Trials" tile on the home page, beside Continue (home page
+/// overhaul spec §3): the four shelf colours as band art across the top, then
+/// the title and its line. `scale` is the lobby's large-screen scale. Returns
+/// true when pressed.
+pub fn draw_trials_tile(ui: &mut egui::Ui, size: egui::Vec2, scale: f32) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
     let painter = ui.painter();
-    let cr = egui::CornerRadius::same(12);
+    let cr = egui::CornerRadius::same(16);
     let hot = resp.hovered() || resp.has_focus();
     painter.rect_filled(rect, cr, if hot { brand::SURFACE_HOVER } else { brand::SURFACE });
-    // The four shelf colours as a band down the left edge.
+    // The four shelves as tall coloured bands, each with its glyph.
+    let text_h = 96.0 * scale;
+    let art = egui::Rect::from_min_max(rect.min, egui::pos2(rect.max.x, (rect.max.y - text_h).max(rect.min.y + 24.0)));
     let shelves = [TrialType::Make, TrialType::Tend, TrialType::Tech, TrialType::Brave];
-    let seg = (height - 20.0) / shelves.len() as f32;
+    let gap = 6.0 * scale;
+    let inner = art.shrink(12.0 * scale);
+    let seg = (inner.width() - gap * 3.0) / shelves.len() as f32;
     for (i, t) in shelves.iter().enumerate() {
+        let r = egui::Rect::from_min_size(
+            egui::pos2(inner.min.x + (seg + gap) * i as f32, inner.min.y),
+            egui::vec2(seg, inner.height()),
+        );
+        let c = rgb(t.color_rgb());
+        let (top, bottom) = backdrop_colours(c);
+        paint_backdrop(painter, r, [10.0; 4], top, bottom);
         painter.rect_filled(
-            egui::Rect::from_min_size(
-                egui::pos2(rect.min.x + 12.0, rect.min.y + 10.0 + seg * i as f32),
-                egui::vec2(6.0, seg - 2.0),
-            ),
-            egui::CornerRadius::same(3),
-            rgb(t.color_rgb()),
+            egui::Rect::from_min_max(egui::pos2(r.min.x, r.max.y - 6.0), r.max),
+            egui::CornerRadius { nw: 0, ne: 0, se: 10, sw: 10 },
+            c,
+        );
+        painter.text(
+            r.center(),
+            egui::Align2::CENTER_CENTER,
+            t.icon(),
+            egui::FontId::proportional((r.height() * 0.4).min(r.width() * 0.6).max(10.0)),
+            mix(c, egui::Color32::WHITE, 0.3),
         );
     }
+    let tx = rect.min.x + 18.0 * scale;
     painter.text(
-        egui::pos2(rect.min.x + 32.0, rect.min.y + height * 0.34),
+        egui::pos2(tx, rect.max.y - text_h + 34.0 * scale),
         egui::Align2::LEFT_CENTER,
         "Trials",
-        egui::FontId::proportional(if narrow { 22.0 } else { 26.0 }),
+        egui::FontId::proportional(26.0 * scale),
         brand::COPPER,
     );
     painter.text(
-        egui::pos2(rect.min.x + 32.0, rect.min.y + height * 0.72),
+        egui::pos2(tx, rect.max.y - text_h + 68.0 * scale),
         egui::Align2::LEFT_CENTER,
         "Little challenges. Pick one and play.",
-        egui::FontId::proportional(12.5),
+        egui::FontId::proportional(15.0 * scale),
         MUTED,
     );
     painter.text(
-        egui::pos2(rect.max.x - 18.0, rect.center().y),
+        egui::pos2(rect.max.x - 18.0 * scale, rect.max.y - text_h / 2.0),
         egui::Align2::RIGHT_CENTER,
         "\u{203A}",
-        egui::FontId::proportional(30.0),
+        egui::FontId::proportional(34.0 * scale),
         brand::COPPER,
     );
-    painter.rect_stroke(
-        rect,
-        cr,
-        egui::Stroke::new(if resp.has_focus() { 2.0_f32 } else { 1.0_f32 }, if resp.has_focus() { brand::LANTERN } else { brand::BORDER }),
-        egui::StrokeKind::Inside,
-    );
+    painter.rect_stroke(rect, cr, egui::Stroke::new(1.0_f32, brand::BORDER), egui::StrokeKind::Inside);
     resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
 }
 
