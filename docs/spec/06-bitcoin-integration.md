@@ -1,4 +1,6 @@
-# 06 -- Bitcoin Integration
+# 06 -- Economy
+
+> *Re-titled 2026-11-08 (owner) from "Bitcoin Integration". The filename is kept so links do not break. The title says what the spec now covers: the whole economy, with Bitcoin as one optional operator layer inside it.*
 
 > **This is a design spec, not a description of live behaviour.** Nothing in
 > this document is switched on in any shipped build today — no real sats
@@ -7,9 +9,34 @@
 > default; see `docs/learn-journey/the-hash-and-your-first-sats.md` and the
 > CLAUDE.md "Reward Mechanic" section for what's actually built vs. planned.
 
-**Status**: Draft (custody/settlement model decided 2026-06-10 — see §1.5 + ADR-004)
+> **The work-meter is retired.** RETIRED 2026-11-08 (owner): the work-meter is not built and will not be; proof-of-play effort is not turned into sats. Every mention of the work-meter, work credits, payout thresholds or an effort-based sats rate in this file (§1.1, §1.4, §2.1, §2.3 to §2.5, §3, §7, §10, Appendices B and C) is kept as history only. Nothing in the game is convertible into sats.
+
+**Status**: Draft (custody/settlement model decided 2026-06-10 — see §1.5 + ADR-004; work-meter retired 2026-11-08)
 **Date**: 2026-03-03
 **Depends on**: ADR-001 (Full Custom Engine), ADR-002 (Tech Stack), ADR-004 (Lightning Settlement Backend)
+
+---
+
+## Atoms and bits
+
+*Added 2026-11-08 (owner decision). Design basis: `docs/vision/living-world-long-run.md` §3.3 in the internal repo.*
+
+The economy has two kinds of thing, and they follow different rules.
+
+- **Atoms.** Blocks placed in the world are atoms. There is one per cell. They are rival: if you hold one, I do not.
+- **Bits.** Plans, recipes, skins, Workshop assets, maps and music are bits. A copy costs nothing and the original is untouched.
+
+**The bit economy is free and open by default.** Checked against the code on 2026-11-08:
+
+- **CC-BY-SA is the licence default for a Plan.** `PlanLicense` derives its default as `Ccbysa` (`game/engine/src/plan.rs`, the `#[default]` variant), and the capture dialog labels it "CC-BY-SA (Default)" (`plan_ui.rs`).
+- **A Licence listing can be unlimited.** `vendor::UNLIMITED_STOCK` (`vendor.rs`) marks a Plan Licence listing that never runs out. A buyer gets a non-master copy and the owner keeps the original (`try_buy_plan`).
+- **A vendor can charge nothing.** The owner's price control clamps at 0 (`vendor_ui.rs`) and `try_buy_plan` has no price floor. A caveat: the Plan sale path is one of the vendor's sats modes, so it is only reachable where sats are switched on for the server and the player (`economy::sats_ui_visible`). On a server with sats off there is no vendor route that hands out a Plan, even for free. That is a gap to close, not a rule.
+
+**Status in the bit economy is attribution, not exclusion.** Credit by lineage (the Plan's family tree, shown on its plaque, back to the first author) is **designed for a later tier and NOT built.** Today a Plan carries its author and licence and nothing more.
+
+**Bitcoin is an optional operator layer.** It exists only on Bitcoin-enabled servers, off by default. Nothing in the game is convertible into sats, and playing does not turn into sats (see the retired work-meter, §2.4).
+
+**Vendors, auctions and the bazaar are act-one tools.** Players trade atoms, and bits where a seller chooses to sell them. They are not the whole economy and they are not a ledger of how well someone plays.
 
 ---
 
@@ -23,7 +50,7 @@ The Bitcoin subsystem comprises five components, each a distinct Rust module wit
 
 | Component | Responsibility |
 |---|---|
-| **Reward Engine** | Proof-of-Play hash calculation (§2), work-meter accumulation, Bitcoin-layer threshold checks, epoch management |
+| **Reward Engine** | Proof-of-Play hash calculation (§2), work-meter accumulation, Bitcoin-layer threshold checks, epoch management. (Work-meter accumulation was part of this row: RETIRED 2026-11-08 (owner): the work-meter is not built and will not be; proof-of-play effort is not turned into sats.) |
 | **Payment Gateway** | LNbits HTTP client, invoice creation, payment verification, webhook receiver |
 | **Wallet Manager** | Per-player in-world **score** tracking (not custody); entry-payment intake + exit-payout orchestration (§1.5) |
 | **Treasury** | Reward pool accounting, split enforcement, pool sustainability logic |
@@ -114,14 +141,14 @@ This is the structural backbone of three guarantees:
 
 1. **The platform is not a money transmitter.** Funds are always either (a) in the player's noncustodial external wallet, (b) in the server-operator's LNbits pool (which the platform never touches), or (c) in flight via Lightning HTLCs. The platform provides game logic and infrastructure; it never holds or moves player funds. Server operators run their own LNbits in their own jurisdiction with their own compliance posture — the platform's posture is non-handling.
 2. **No pay-to-win.** External sats cannot bypass the pool gate. A player with £1,000 in their external wallet cannot dump it into the in-world economy without first contributing to the shared pool — at which point everyone benefits, not just them. Wealth in AxeNStax is always the product of time × work, never of capital injection. This is what §10.5 #7 ("paying more entry fees does not give mining advantages") means *operationally*.
-3. **Auditable inflow.** Every sat that enters player wallets came from mining (§2) or from another player's wallet (which itself traces back to mining). The provenance chain is unbroken. Every sat in the in-world economy has been earned through Proof-of-Play work somewhere upstream.
+3. **Auditable inflow.** Every sat that enters player wallets came from mining (§2) or from another player's wallet (which itself traces back to mining). The provenance chain is unbroken. Every sat in the in-world economy has been earned through Proof-of-Play work somewhere upstream. *(RETIRED 2026-11-08 (owner): the work-meter is not built and will not be; proof-of-play effort is not turned into sats. The "earned through work" provenance rule has no input today; sats enter a world only through entry fees and Fund the Reserve, §5 and §6.2.)*
 
 **The four canonical sat flows in a world:**
 
 | Flow | Direction | Mechanism | Custody |
 |------|-----------|-----------|---------|
 | **Entry / Fund the Reserve** | External wallet → server pool (via split, §5) | BOLT11 invoice paid from player wallet | Server-operator LNbits holds the pool |
-| **Mining payout** | Server pool → player's in-world balance | Work-meter accumulation (§2.4) | Server-operator LNbits (per-player ledger entry) |
+| **Mining payout** | Server pool → player's in-world balance | Work-meter accumulation (§2.4) — RETIRED 2026-11-08 (owner): the work-meter is not built and will not be; proof-of-play effort is not turned into sats. | Server-operator LNbits (per-player ledger entry) |
 | **In-world trade** | Player A's in-world balance → Player B's in-world balance | Internal LNbits transfer | Server-operator LNbits (re-attributes ledger entry) |
 | **Withdrawal at exit** | Player's in-world balance → external wallet | LNURL-withdraw or BOLT11 payout (§6.3) | Sats leave the server pool to the player's wallet |
 
@@ -137,7 +164,7 @@ The principle was implicit in the original March 2025 brainstorm ("payments batc
 
 **Non-custody is a hard requirement.** Neither the platform nor the server-operator may hold funds that legally belong to a player pending transmission to anyone else. The constraint is honoured by *being non-custodial*, not by a clever pooling topology.
 
-**Players hold their own external wallets.** There are no app-controlled, per-player custodial sub-wallets. The engine tracks an in-world **score** (sats earned through Proof-of-Play, §2) — a claim, not a stored balance of the player's money. Between worlds, a player's sats live only in their own wallet; the platform persists nothing withdrawable.
+**Players hold their own external wallets.** There are no app-controlled, per-player custodial sub-wallets. The engine tracks an in-world **score** (a sats score; the Proof-of-Play work-meter that fed it is retired, see §2.4) — a claim, not a stored balance of the player's money. Between worlds, a player's sats live only in their own wallet; the platform persists nothing withdrawable.
 
 **Two independent one-way payments — never a held balance:**
 
@@ -165,11 +192,13 @@ The principle was implicit in the original March 2025 brainstorm ("payments batc
 
 ### 2.1 Core Principle
 
+> **AS BUILT (verified 2026-11-08).** Only the gem-vein path hashes. A strike hashes only when `break_drops::satori_drop` runs on a pure-deepslate block, below the depth gate, with a Diamond or better pickaxe, on a block no player placed (`break_drops.rs:100-103`, called from `break_yield` at `break_drops.rs:182`). Then `block_is_vein_member` and `proof_hash` (`proof_of_play.rs:91`, the HMAC-SHA-256) decide the Satori. Strikes on grass, dirt and plain stone run no hash, and plain-stone rare drops are seeded by tick and cell (`break_drops::drop_seed`), not by this hash. There is no per-strike hash in the HUD (no HUD or UI code reads a proof hash). The only player-facing trace is the Genesis Block sound on a world's first Satori (`game_loop.rs:13012-13013`). Layers 1 and 3 below are design, not build. The text that follows is the design as first written.
+
 Every pickaxe strike — on any block, including grass and dirt — runs an HMAC-SHA-256 over the block coordinates and server-held secrets. **One hash, three layers stacked on it:**
 
 1. **Proof of Play (always-on, educational).** The hash is surfaced to the player (truncated in the HUD, counted per session, used to trigger a "Genesis Block" celebration when it falls below a difficulty target). The player *sees* proof-of-work as a concept while playing. This layer runs whether Bitcoin is enabled or not.
 2. **Material-drop layer (deterministic, hash-reusing).** The same hash bytes drive probabilistic rare drops on plain stone (e.g., a "lucky strike" yields a diamond fragment). Visible ore blocks (coal, iron, diamond) are **guaranteed drops with the correct tool — Minecraft-style** and bypass the hash check; the visible block *is* the contract.
-3. **Bitcoin layer (optional, server-operator concern).** A Bitcoin-enabled server may translate proof-of-play effort into sats payouts via the **deterministic work-meter** (§3.1). *(The per-strike "probabilistic" payout model is **retired for real sats** — see §2.3.)* **The player is not a Bitcoin miner.** They're playing on a server whose operator has chosen to pool effort and pay sats. Default posture: Bitcoin layer off.
+3. **Bitcoin layer (optional, server-operator concern).** A Bitcoin-enabled server may translate proof-of-play effort into sats payouts via the **deterministic work-meter** (§3.1). *(RETIRED 2026-11-08 (owner): the work-meter is not built and will not be; proof-of-play effort is not turned into sats.)* *(The per-strike "probabilistic" payout model is **retired for real sats** — see §2.3.)* **The player is not a Bitcoin miner.** They're playing on a server whose operator has chosen to pool effort and pay sats. Default posture: Bitcoin layer off.
 
 **Anti-X-ray** is achieved in two complementary ways, expanded in Spec 8 §5:
 
@@ -210,7 +239,7 @@ hash = HMAC-SHA256(
 
 **Where `server_secret` comes from (as built, 2026-09-27).** 32 random bytes from the OS RNG (`proof_of_play::gen_world_secret`), generated once per world when the world is created and stored in the host's `WorldMeta.pop_secret` (`world_meta.json`). It is **never derived from the world seed** and **never serialised to a client**: the seed is public (every joiner receives it in `JoinAccept`), so the earlier alpha stub — `HMAC(fixed public key, seed)` — let any joiner or save-holder rebuild the secret offline and map every Satori vein (a complete x-ray for the top-tier gem; audit 2026-09-27). A world saved before `pop_secret` existed gets a fresh random secret on its first load, saved back at once (`proof_of_play::ensure_world_secret`). That moves the old world's *future* rare-drop and vein placement — accepted: blocks already mined are unaffected, and nothing pays sats. A fork starts without a secret and gets its own. The tip-jar and bounty audit hashes use the same per-world secret. The production `env:GENESIS_SERVER_SECRET` below remains the operator override for dedicated servers (not yet wired: a dedicated server reads the world's own `pop_secret` from its meta, see the next paragraph). **Exports never carry it; imports never keep it (2026-09-28).** Every share path strips `pop_secret`: the native `.axeworld` export (Save-As dialog + world-transfer folder, `world_archive::pack_world_for_export`), `.axereplay` initial snapshots, the web Backup download and web `.axeprofile` export (`strip_secret_from_archive` re-packs the IndexedDB blob), and the operator console's `/api/world/<id>/export`. Only owner persistence keeps it: the native `world_meta.json`, the web IndexedDB blob and the NIP-44-encrypted Stash blob. Every import (native `.axeworld`, `.axeprofile` world, web file import, console publish/install) discards any incoming secret and generates a fresh one (`world_archive::unpack_world_for_import`; console `worlds._meta_with_fresh_secret`), so a world file never hands its host's secret to its recipients.
 
-**Who rolls a strike (as built, C1 2026-10-07).** Whoever holds the world: the single-player client, and a host for its own players, roll in the client's break arm; **a joiner's break is rolled by the server** (`break_drops::break_yield`, run when it accepts the joiner's break — Spec 04 §4.2e) with the world's secret (`GameServer::pop_secret`) and the world's exposure map (`World::pop_exposure`, which travels with a host's lend, so a host's mining and its joiners' share one exposure clock). A dedicated server reads the secret from the world meta and, once the world has opened and before its first tick, settles it against the disk (`server_main::settle_pop_secret`): it adopts the meta's — including one the open's torn-meta repair had to generate, which the earlier read-only peek could not see (C1 review LOW-2) — or, for a world saved without one, writes back the one it generated; a host's server is handed its host client's every tick (`GameState::tick_hosted_server`). As in single-player, the roll needs a natural cell: every block a joiner puts into a cell is flagged player-placed, whatever the edit (Spec 04 §4.2e). A native joiner never rolls: it holds no secret of the world it joined, takes nothing from its own break, and gets a Satori only as the server's `InventoryGrant` (with the routine "+1 Satori" celebration; the Genesis Block is not claimed for a joiner's find yet). A web joiner's edits never reach the server (`break_drops::edits_reach_server`, since e9a49e9c), so it rolls into its own copy of the world, on its own client's random secret (`GameState::pop_server_secret`), and keeps its own drops. Nothing it finds reaches the server's world. The joiner's client keeps no strike-hash readout (none exists in the client). Unchanged by C1: the work-meter. `crafting::break_work` / `World::add_work` still accrue only in the breaker's own client, so a joiner's breaks tally into its local copy of the world, not the host's — open question for when a joiner's work matters (Bitcoin-enabled servers).
+**Who rolls a strike (as built, C1 2026-10-07).** Whoever holds the world: the single-player client, and a host for its own players, roll in the client's break arm; **a joiner's break is rolled by the server** (`break_drops::break_yield`, run when it accepts the joiner's break — Spec 04 §4.2e) with the world's secret (`GameServer::pop_secret`) and the world's exposure map (`World::pop_exposure`, which travels with a host's lend, so a host's mining and its joiners' share one exposure clock). A dedicated server reads the secret from the world meta and, once the world has opened and before its first tick, settles it against the disk (`server_main::settle_pop_secret`): it adopts the meta's — including one the open's torn-meta repair had to generate, which the earlier read-only peek could not see (C1 review LOW-2) — or, for a world saved without one, writes back the one it generated; a host's server is handed its host client's every tick (`GameState::tick_hosted_server`). As in single-player, the roll needs a natural cell: every block a joiner puts into a cell is flagged player-placed, whatever the edit (Spec 04 §4.2e). A native joiner never rolls: it holds no secret of the world it joined, takes nothing from its own break, and gets a Satori only as the server's `InventoryGrant` (with the routine "+1 Satori" celebration; the Genesis Block is not claimed for a joiner's find yet). A web joiner's edits never reach the server (`break_drops::edits_reach_server`, since e9a49e9c), so it rolls into its own copy of the world, on its own client's random secret (`GameState::pop_server_secret`), and keeps its own drops. Nothing it finds reaches the server's world. The joiner's client keeps no strike-hash readout (none exists in the client). Unchanged by C1: the work-meter *(RETIRED 2026-11-08 (owner): the work-meter is not built and will not be.)* (the work tally that remains, `crafting::break_work` / `World::add_work`, feeds the scenario score only and is not a sats meter). `crafting::break_work` / `World::add_work` still accrue only in the breaker's own client, so a joiner's breaks tally into its local copy of the world, not the host's — open question for when a joiner's work matters (Bitcoin-enabled servers).
 
 ### 2.2a Hash byte budget (per-layer usage)
 
@@ -264,7 +293,7 @@ A pickaxe strike on block `(x, y, z)` is a candidate gem drop iff **all** of:
 4. **Vein membership.** The dual-hash algorithm in §2.2c.2 below returns "this block is part of a vein."
 5. **Exposure-decay check passes.** Per §2.2c.3.
 
-If all five pass, one Satori is added to the player's inventory. **Satori carries no sats value** (changed 2026-09-27; the earlier "1 Satori ≡ 1 sat at drop time" equivalence is retired). The exposure check is a per-strike hash lottery, so a Satori is a *chance drop*, and a chance-based real-sats payout sits inside the UK Gambling Act s.6 perimeter (§2.3). Sats flow only through the deterministic work-meter. The code enforces this at every sats path via `economy::is_chance_drop`, which covers Satori **and every item derived from it**: `economy::CHANCE_DERIVED_KEYS` is a fixpoint over the real recipe registry (`crafting_catalogue::all_cards`, pinned to `match_recipe`) — any recipe that consumes Satori or a Satori-derived item makes its output Satori-derived (the Satori block, Satori tools and armour, the Satori Chest, and any future recipe). The Bazaar never quotes one, an operator price table can't price one, a vendor refuses to list or sell one in any sats mode (Barter still works), and an auction refuses sats bids on one. The lint `economy::no_satori_derived_item_ever_feeds_a_sats_payout` walks the recipe graph independently (feeding each card's grid to `match_recipe`) and asserts every sats entry point refuses every item it finds (2026-09-28).
+If all five pass, one Satori is added to the player's inventory. **Satori carries no sats value** (changed 2026-09-27; the earlier "1 Satori ≡ 1 sat at drop time" equivalence is retired). The exposure check is a per-strike hash lottery, so a Satori is a *chance drop*, and a chance-based real-sats payout sits inside the UK Gambling Act s.6 perimeter (§2.3). *(Sats were to flow only through the deterministic work-meter. RETIRED 2026-11-08 (owner): the work-meter is not built and will not be; proof-of-play effort is not turned into sats.)* The code enforces this at every sats path via `economy::is_chance_drop`, which covers Satori **and every item derived from it**: `economy::CHANCE_DERIVED_KEYS` is a fixpoint over the real recipe registry (`crafting_catalogue::all_cards`, pinned to `match_recipe`) — any recipe that consumes Satori or a Satori-derived item makes its output Satori-derived (the Satori block, Satori tools and armour, the Satori Chest, and any future recipe). The Bazaar never quotes one, an operator price table can't price one, a vendor refuses to list or sell one in any sats mode (Barter still works), and an auction refuses sats bids on one. The lint `economy::no_satori_derived_item_ever_feeds_a_sats_payout` walks the recipe graph independently (feeding each card's grid to `match_recipe`) and asserts every sats entry point refuses every item it finds (2026-09-28).
 
 #### 2.2c.2 The vein algorithm — dual-hash origin + propagation
 
@@ -466,7 +495,7 @@ The gem-vein mechanic *feels* probabilistic to the player (they can't predict wh
 - **Pay-to-play servers** running gem-vein drops do not, on this framing, satisfy the "chance" element of the UK Gambling Act 2005 three-element test (or its equivalents in EU, US-state, and AU/NZ gambling laws). The mechanism is proof-of-work-shaped.
 - **Adult-only restrictions still recommended where local case law is ambiguous** (notably Belgium / Netherlands, which apply broader "tradeable in-game value" tests that may catch the gem-as-Bitcoin equivalence regardless of the proof-of-work mechanic).
 - **For minors, the gate remains parent-controlled** per §10.3 / §11.4 — not because the mechanic is gambling but because parents reasonably want to decide whether their child earns real money for game effort.
-- **The work-meter model (§2.4 / §3.1)** is the cleanest case (zero per-strike unpredictability from the player's POV) but is *not categorically different* from the gem-vein mechanic at the legal level — both share the determinism + verifiability + work-required properties. Defence-in-depth argument: even if a court rejects the proof-of-work framing for gem-veins, the work-meter remains a defensible fallback shape.
+- **The work-meter model (§2.4 / §3.1)** *(RETIRED 2026-11-08 (owner): the work-meter is not built and will not be; proof-of-play effort is not turned into sats.)* is the cleanest case (zero per-strike unpredictability from the player's POV) but is *not categorically different* from the gem-vein mechanic at the legal level — both share the determinism + verifiability + work-required properties. Defence-in-depth argument: even if a court rejects the proof-of-work framing for gem-veins, the work-meter remains a defensible fallback shape.
 
 This subsection's framing **strengthens the regulatory posture across every jurisdiction** by establishing that the mechanic is structurally proof-of-work, not gambling. The mitigations in §10 (parent-controlled, server-policy gates, jurisdiction overrides) remain in place as belt-and-braces, but the starting position changes from "this is probabilistic-payout gambling-adjacent" to "this is deterministic proof-of-work."
 
@@ -474,7 +503,7 @@ This subsection's framing **strengthens the regulatory posture across every juri
 
 ### 2.3 Threshold Check (Probabilistic Model) — ⚠️ RETIRED FOR REAL-SATS PAYOUTS (2026-06-22)
 
-> **SUPERSEDED for real-Bitcoin payouts.** Per the 2026-06-21 compliance research (`docs/research/2026-06-21-uk-online-safety-gambling-crypto-landscape.md` §4 + the US/EU companion), a **probabilistic real-money reward is inside the UK Gambling Act "gaming" perimeter** — s.6 catches a game of chance *or one presented as chance* for a money's-worth prize, and **s.6(4) needs no stake, so "free-to-play" is NOT a defence** — and it is **likely an offence with under-18 users**. The hash being deterministic-under-the-hood does **not** cure this: a per-strike "did I win sats?" threshold is *presented as chance* (s.6(2)(c)). **The only sanctioned real-sats payout is the deterministic work-meter (§3.1)** — zero per-strike unpredictability. The threshold/celebration computation below may still drive the **educational, no-sats** Genesis-Block moment and **in-game (non-cashable) item** loot; it must **not** gate a real-Bitcoin payout for under-18 / UK / US / EU users. Retained below for the historical design + the determinism/verifiability argument (which still governs the work-meter and the spatially-deterministic gem-vein, §2.2c.6).
+> **SUPERSEDED for real-Bitcoin payouts.** Per the 2026-06-21 compliance research (`docs/research/2026-06-21-uk-online-safety-gambling-crypto-landscape.md` §4 + the US/EU companion), a **probabilistic real-money reward is inside the UK Gambling Act "gaming" perimeter** — s.6 catches a game of chance *or one presented as chance* for a money's-worth prize, and **s.6(4) needs no stake, so "free-to-play" is NOT a defence** — and it is **likely an offence with under-18 users**. The hash being deterministic-under-the-hood does **not** cure this: a per-strike "did I win sats?" threshold is *presented as chance* (s.6(2)(c)). **The only sanctioned real-sats payout was the deterministic work-meter (§3.1)** *(RETIRED 2026-11-08 (owner): the work-meter is not built and will not be.)* — zero per-strike unpredictability. The threshold/celebration computation below may still drive the **educational, no-sats** Genesis-Block moment and **in-game (non-cashable) item** loot; it must **not** gate a real-Bitcoin payout for under-18 / UK / US / EU users. Retained below for the historical design + the determinism/verifiability argument (which still governs the work-meter and the spatially-deterministic gem-vein, §2.2c.6).
 
 > **Bitcoin layer only.** This section describes the optional Bitcoin reward layer. Servers running pure Proof of Play (Bitcoin disabled) compute the same hash and trigger the same celebration animation when `reward_value < threshold`, but no sats are involved.
 
@@ -510,7 +539,9 @@ Exact sats within tier:
   sats = tier_min + (hash[9] as u64 * (tier_max - tier_min)) / 255
 ```
 
-### 2.4 Threshold Check (Work-Meter Model)
+### 2.4 Threshold Check (Work-Meter Model) — RETIRED 2026-11-08
+
+> **RETIRED 2026-11-08 (owner): the work-meter is not built and will not be; proof-of-play effort is not turned into sats.** This section is kept as history. The Genesis Block celebration it mentions is separate and is built (it plays on a world's first Satori).
 
 > **Bitcoin layer only.** This section, like §2.3, describes the optional Bitcoin reward layer. The Proof-of-Play celebration animation runs on the same hash threshold regardless of whether the Bitcoin layer is enabled.
 
@@ -529,7 +560,9 @@ if player.work_credits >= payout_threshold {
 
 The hash still determines the "Genesis Block" visual celebration (threshold check as above), but the actual payout is decoupled from the hash -- it is purely a function of cumulative work.
 
-### 2.5 Expected Rewards Per Hour
+### 2.5 Expected Rewards Per Hour — RETIRED 2026-11-08
+
+> **RETIRED 2026-11-08 (owner): the work-meter is not built and will not be; proof-of-play effort is not turned into sats.** The rates below belonged to the work-meter and the retired probabilistic payout. History only.
 
 Assumptions for calculation:
 
@@ -554,7 +587,7 @@ These rates are configurable per server. The platform provides recommended range
 
 ```toml
 [bitcoin.rewards]
-# Work-meter model
+# Work-meter model (RETIRED 2026-11-08)
 work_credits_per_dig = 1
 payout_threshold = 100
 payout_amount_sats = 10
@@ -620,9 +653,11 @@ fn verify_reward(season_secret: &[u8], world_seed: u64, epoch_id: u32,
 
 > **Frame.** Reward economics in this section describe how a **Bitcoin-enabled server** (operator opt-in) translates Proof-of-Play effort into sats payouts. The player is not a commercial miner — the server operator is the agent making the "pay sats for proof-of-play effort" decision and bearing the pool-sustainability obligations described below. Servers running pure Proof of Play (Bitcoin disabled, default) skip this section entirely; effort still produces the visible hash + celebration, no sats involved.
 
-### 3.1 Work-Meter Model (Primary)
+### 3.1 Work-Meter Model (Primary) — RETIRED 2026-11-08
 
-The work-meter is the recommended and default payout model. It is deterministic and does not depend on luck.
+> **RETIRED 2026-11-08 (owner): the work-meter is not built and will not be; proof-of-play effort is not turned into sats.** History only. "Primary" and "default" below describe the old design, not the game.
+
+The work-meter was the recommended and default payout model (retired 2026-11-08). It is deterministic and does not depend on luck.
 
 **Flow:**
 
@@ -644,7 +679,7 @@ Player digs block
 
 ### 3.2 Probabilistic Model (Secondary, Optional) — ⚠️ RETIRED FOR REAL-SATS (2026-06-22)
 
-> **Do not use for real-Bitcoin payouts.** A per-dig independent chance of winning sats is a chance-based real-money reward → inside the UK Gambling Act gaming perimeter (s.6; free-to-play is not a defence), and likely an offence with under-18 users. Use the deterministic **work-meter (§3.1)** only. See §2.3 and the 2026-06-21 compliance research. Retained below for historical context.
+> **Do not use for real-Bitcoin payouts.** A per-dig independent chance of winning sats is a chance-based real-money reward → inside the UK Gambling Act gaming perimeter (s.6; free-to-play is not a defence), and likely an offence with under-18 users. Use the deterministic **work-meter (§3.1)** only. *(RETIRED 2026-11-08 (owner): the work-meter is not built and will not be.)* See §2.3 and the 2026-06-21 compliance research. Retained below for historical context.
 
 Server operators can opt into the probabilistic model where each dig has an independent chance of yielding a reward. This is pool-backed: payouts come from the reward pool, not created from nothing.
 
@@ -655,6 +690,8 @@ Server operators can opt into the probabilistic model where each dig has an inde
 - Must display probability and expected value prominently in the Treasury Transparency Panel
 
 ### 3.3 Pool Sustainability Math
+
+> **RETIRED 2026-11-08 (owner): the work-meter is not built and will not be; proof-of-play effort is not turned into sats.** This section sized a payout pool that the work-meter would have drawn on. History only.
 
 The reward pool must never go into debt. The system enforces:
 
@@ -1250,7 +1287,7 @@ The player's HUD shows a Bitcoin balance element:
 ```
 
 - **Balance**: current internal balance in sats
-- **Work meter**: progress toward next payout (work-meter model only)
+- **Work meter**: progress toward next payout (work-meter model only; RETIRED 2026-11-08 (owner): the work-meter is not built and will not be; proof-of-play effort is not turned into sats.)
 - The element is positioned in the top-right corner by default, repositionable in settings
 - Clicking/tapping the element opens the Bitcoin menu
 - The element is only visible on Bitcoin-enabled servers
@@ -1316,7 +1353,7 @@ When the pool is empty or critically low:
 
 1. **Rewards pause** -- mining continues as gameplay but no sats are earned
 2. Players are notified: "Mining rewards are currently paused while the reward pool replenishes."
-3. The work meter freezes (work-meter model) or the probability drops to zero (probabilistic model)
+3. The work meter freezes (work-meter model; retired 2026-11-08) or the probability drops to zero (probabilistic model)
 4. New player entry fees still flow in, gradually replenishing the pool
 5. When the pool rises above the low-water mark, rewards automatically resume
 6. **No debt is ever created** -- the system never promises sats it cannot pay
@@ -1353,7 +1390,7 @@ An in-game UI panel accessible from the Bitcoin menu:
 |                                            |
 |  --- Fairness ---                          |
 |  Season Commitment:    a3f8c2...e91b       |
-|  Reward Model:         Work Meter          |
+|  Reward Model:         Work Meter (retired)|
 |  Payout Rate:          10 sats / 100 digs  |
 |  Split:  Pool 50% | Creator 30%           |
 |          Platform 15% | Reserve 5%         |
@@ -1858,13 +1895,15 @@ A standalone verification tool (CLI binary) allows anyone to:
 
 ### 10.1 Why Proof-of-Play Mechanics Reduce Gambling Risk
 
+> **RETIRED 2026-11-08 (owner): the work-meter is not built and will not be; proof-of-play effort is not turned into sats.** The work-meter arguments in this section are kept as history. The gem-vein argument stands, and Satori carries no sats value in any case (§2.2c.1).
+
 > **Reframe (2026-05-13).** Earlier draft framed this as "Why the Work-Meter Model Reduces Gambling Risk," implying only the work-meter cleared the gambling test and other Proof-of-Play mechanics (gem-vein drops, probabilistic threshold) were gambling-adjacent. That framing was too narrow. **All Proof-of-Play mechanics share the same underlying not-gambling structure** because they all rely on the *deterministic hash function over public + secret inputs*, not on a random number generated at the moment of play. See Spec 6 §2.2c.6 for the full proof-of-work argument as it applies to gem-vein drops; the same logic applies to the work-meter and the spatially-deterministic gem-vein.
 >
 > **Correction (2026-06-22) — the probabilistic-threshold model is NOT cleared for real sats.** The 2026-06-21 UK gambling deep-research pass (`docs/research/2026-06-21-uk-online-safety-gambling-crypto-landscape.md` §4) refuted extending this argument to a **per-strike probabilistic real-sats payout**: Gambling Act **s.6(2)(c)** catches a game *presented as* involving chance, so a per-strike "did I win sats?" threshold is inside the gaming perimeter **even though the hash is deterministic**, and **s.6(4) means free-to-play is not a defence**. The determinism/verifiability argument below holds for the **work-meter** (no per-strike unpredictability) and the **gem-vein** (spatially predetermined — the work is *finding* it), but **not** for the probabilistic-threshold real-sats model, which is **retired** (§2.3, §3.2). Read the table below as applying to the work-meter + gem-vein only.
 
 **The gambling test against the Proof-of-Play family:**
 
-| Gambling element | Proof-of-Play mechanics (work-meter, probabilistic threshold, gem-vein) | Assessment |
+| Gambling element | Proof-of-Play mechanics (work-meter [retired 2026-11-08], probabilistic threshold, gem-vein) | Assessment |
 |---|---|---|
 | **Consideration** (paying to play) | Yes on pay-to-play servers (entry fee); No on free-faucet servers | Conditional |
 | **Chance** (outcome determined randomly at the moment of the play) | **No** — outcomes are *predetermined* by `HMAC(server_secret, world_seed ‖ epoch_id ‖ position)` at world-gen / season start, *not generated at the moment of play*. The player discovers the predetermined outcome through effort. Publicly verifiable post-season via the commitment-reveal scheme (§2.7). | **Not present** |
@@ -1874,16 +1913,17 @@ Most gambling definitions require all three elements to be present. The "chance"
 
 The work-meter is the *cleanest* case (zero per-strike unpredictability from the player's POV — they know exactly how many digs yield a payout) and the gem-vein shares the underlying determinism + verifiability properties that defeat the "chance" element (the work is *finding* a spatially-predetermined vein, like mining ore). **The probabilistic-threshold *real-sats* payout does NOT share this clearance** — see the 2026-06-22 correction above (s.6(2)(c) "presented as chance"); it is **retired for real sats**. [LEGAL REVIEW]
 
-**Defence-in-depth:** even if a specific jurisdiction's court rejects the proof-of-work framing for hash-driven mechanisms with player-perceived randomness, the work-meter remains a defensible fallback shape with no per-strike unpredictability at all. Servers in those jurisdictions can operate the work-meter exclusively while keeping gem-vein drops as game-only (no sat tie) cosmetic loot. [LEGAL REVIEW]
+**Defence-in-depth:** even if a specific jurisdiction's court rejects the proof-of-work framing for hash-driven mechanisms with player-perceived randomness, the work-meter (retired 2026-11-08) remains a defensible fallback shape with no per-strike unpredictability at all. Servers in those jurisdictions can operate the work-meter exclusively while keeping gem-vein drops as game-only (no sat tie) cosmetic loot. [LEGAL REVIEW]
 
 ### 10.2 Specific Mitigations
 
-- **No "jackpot" framing**: Rewards are framed as "earnings" and "work rewards," not "winnings" or "prizes"
-- **Transparent rates**: Expected earnings per hour are displayed before the player pays
-- **No variable stakes**: The entry fee is fixed; players cannot "bet more" for "higher odds"
-- **Work-proportional**: Payouts scale linearly with blocks mined, not with luck
-- **Published economics**: All rates, splits, and pool balances are visible in-game
-- **No secondary market**: The platform does not operate an exchange or marketplace for in-game items
+*Rewritten 2026-11-08 (owner decision). The earlier list framed rates, work and payouts for the retired work-meter.*
+
+- **No "jackpot" framing**: nothing in the game is presented as winnings, a prize or a bet.
+- **Fixed stakes**: where a server charges an entry fee, it is fixed. Players cannot bet more for better odds.
+- **Nothing is convertible**: no in-game item, including Satori, has a sats value, and playing does not turn into sats (§2.4).
+- **Published terms**: where a server operator uses the Bitcoin layer, its entry fee, splits and pool balances are visible in-game.
+- **Player trade is between players**: vendors, the auction house and the bazaar let players trade items with each other. AxeNStax does not run an exchange, set prices or take a cut. Satori and anything made from it can be traded by Barter only, never for sats.
 
 ### 10.3 Bitcoin is Parent-Controlled, Not Age-Gated [LEGAL REVIEW]
 
@@ -1902,7 +1942,7 @@ The work-meter is the *cleanest* case (zero per-strike unpredictability from the
 | Concern | Where it lives | Notes |
 |---|---|---|
 | **Per-server age requirements** (operator's call) | Server operator config, using the Signet age ladder | A creator can run a kid-only server (`accept_age_max=12`) or an adults-only tournament (`accept_age=18`). This is operator policy on top of the platform's parent-controls; orthogonal to whether Bitcoin is enabled. |
-| **Gambling-classification jurisdictions** | Per-region overrides | The Proof-of-Play family of mechanics (work-meter, probabilistic threshold, gem-vein) are structurally **proof-of-work, not gambling** — see §2.2c.6 and §10.1 for the determinism + verifiability argument. Some jurisdictions may nonetheless apply broader local tests (e.g., Belgium / Netherlands "tradeable in-game value" rules) that catch the gem-as-Bitcoin equivalence regardless of the underlying mechanism. Where that happens, the platform respects the local rule; it's an external constraint, not internal policy. [LEGAL REVIEW] |
+| **Gambling-classification jurisdictions** | Per-region overrides | The Proof-of-Play family of mechanics (work-meter *(RETIRED 2026-11-08 (owner): the work-meter is not built and will not be.), probabilistic threshold, gem-vein) are structurally **proof-of-work, not gambling** — see §2.2c.6 and §10.1 for the determinism + verifiability argument. Some jurisdictions may nonetheless apply broader local tests (e.g., Belgium / Netherlands "tradeable in-game value" rules) that catch the gem-as-Bitcoin equivalence regardless of the underlying mechanism. Where that happens, the platform respects the local rule; it's an external constraint, not internal policy. [LEGAL REVIEW] |
 | **Competition / esports prize-pool rules** | Per-region overrides | Some jurisdictions have specific rules on competitions with monetary prizes (esports leagues etc.). Tournament servers comply with the jurisdiction. [LEGAL REVIEW] |
 | **Lightning withdrawal for dependants** | Guardian-approval flow | The off-ramp from in-game gems to the open Lightning network. Guardian sets an auto-approval limit (default 0 = approve each); see §11.5. This is a *guardian-control mechanism*, not an age mechanism. |
 
@@ -1937,8 +1977,8 @@ Players must accept terms of service before accessing Bitcoin features. The ToS 
 The platform's position rests on these structural choices:
 
 1. **All hash-driven mechanics are proof-of-work, not chance.** Outcomes are predetermined by `HMAC(server_secret, world_seed ‖ epoch ‖ position)` at world-gen / season start and publicly verifiable post-season-reveal (§2.7). No fresh random number is generated at the moment of play. See §2.2c.6 for the full proof-of-work argument and §10.1 for the gambling-element test against the Proof-of-Play family.
-2. **Work-meter is the cleanest case.** Zero per-strike unpredictability from the player's POV — they know exactly how many digs yield a payout. Defensible fallback shape in jurisdictions where local case law might reject the broader proof-of-work framing for hash-driven mechanisms with player-perceived randomness.
-3. **No house edge on the work-meter model**: 100% of the reward pool is distributed to players (less transaction costs).
+2. **Work-meter is the cleanest case.** *(RETIRED 2026-11-08 (owner): the work-meter is not built and will not be.)* Zero per-strike unpredictability from the player's POV — they know exactly how many digs yield a payout. Defensible fallback shape in jurisdictions where local case law might reject the broader proof-of-work framing for hash-driven mechanisms with player-perceived randomness.
+3. **No house edge on the work-meter model** *(RETIRED 2026-11-08 (owner): the work-meter is not built and will not be.)*: 100% of the reward pool is distributed to players (less transaction costs).
 4. **Transparent pool**: Players can see exactly how much is available and how much they have earned.
 5. **Effort-based framing**: "Proof of Play" — the player observes proof-of-work as a game concept; on Bitcoin-enabled servers, the operator (not the player) translates that observable effort into sats payouts. The player is not described or marketed as a Bitcoin miner. The mechanism is structurally identical to other legal proof-of-work activities (Bitcoin mining, treasure hunting, voxel-game ore prospecting, geocaching) — see §2.2c.6 for the parallel-cases analysis.
 6. **Optional Bitcoin**: The game stands alone without Bitcoin; it is an enhancement, not the core product.
@@ -2065,7 +2105,7 @@ The `bitcoin_enabled` field is the **primary parental-control surface** from §1
 
 - Pay-to-join invoices are not generated for this dependant (servers that require an entry fee will offer the sandbox-tier join path if their policy allows it; otherwise the join fails politely).
 - The Bitcoin HUD element is hidden.
-- The work meter is hidden.
+- The work meter is hidden. *(Retired 2026-11-08: there is no work meter.)*
 - Bitcoin payouts are not calculated (the Bitcoin layer of §2 is bypassed). **The Proof-of-Play hash itself still runs** — the educational + visual + Genesis-Block-celebration layer is unaffected.
 - No internal balance is created for this dependant.
 - The Bitcoin menu keybind is unbound.
@@ -2130,7 +2170,7 @@ When Bitcoin is disabled, the following UI elements are not rendered:
 | Element | Bitcoin Mode | Non-Bitcoin Mode |
 |---|---|---|
 | Balance display (HUD) | Visible | Hidden |
-| Work meter (HUD) | Visible | Hidden |
+| Work meter (HUD) — retired 2026-11-08 | Visible | Hidden |
 | Bitcoin menu (keybind `B`) | Active | Unbound |
 | Pay-to-join screen | Shown on connect | Skipped |
 | "Genesis Block found" animation | Plays on reward | Never triggers |
@@ -2341,7 +2381,7 @@ platform = 15
 reserve = 5
 
 [bitcoin.rewards]
-# Work-meter model settings
+# Work-meter model settings — RETIRED 2026-11-08 (owner): not built, will not be
 work_credits_per_dig = 1
 payout_threshold = 100
 payout_amount_sats = 10
@@ -2384,7 +2424,7 @@ panel_auth_token = "env:ADMIN_PANEL_TOKEN"
 
 ## Appendix C: Economic Modelling Worked Example
 
-**Scenario**: A creator runs a server with 30 average concurrent players, entry fee of 1000 sats, standard splits, work-meter model with default settings.
+**Scenario**: A creator runs a server with 30 average concurrent players, entry fee of 1000 sats, standard splits, work-meter model with default settings. *(RETIRED 2026-11-08 (owner): the work-meter is not built and will not be, so the payout figures below are history only.)*
 
 **Assumptions:**
 - Average session length: 2 hours

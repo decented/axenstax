@@ -298,7 +298,7 @@ base_break_time = block_hardness / tool_speed_multiplier
 
 If the tool is the wrong type for the block (e.g., pickaxe vs dirt), `tool_speed_multiplier` = 1.0 (hand speed). If the correct tool is used, the multiplier depends on tool tier.
 
-> **Proof-of-play credit (Spec 6 §2.2).** Breaking a block tallies `block_work` into the world's `total_work` / scenario score on a successful harvest — **except** for blocks a *player* placed, which earn **no** work or hash-driven drop when re-mined (you still recover the item). This closes the chop-restand-rebreak / place→break farming loop. The origin is tracked by a per-voxel "placed" bit (Spec 2 §4.3). BUILT 2026-06-08.
+> **Proof-of-play credit (Spec 6 §2.2).** Breaking a block tallies `block_work` into the world's `total_work` / scenario score on a successful harvest — **except** for blocks a *player* placed, which yield **no** work or hash-driven drop when re-mined (you still recover the item). This closes the chop-restand-rebreak / place→break farming loop. The origin is tracked by a per-voxel "placed" bit (Spec 2 §4.3). BUILT 2026-06-08.
 
 | Tool Tier | Speed Multiplier | Example |
 |---|---:|---|
@@ -790,18 +790,20 @@ Container types and sizes:
 
 ### 3.8 Special Materials — Satori
 
-**Satori** is the in-world physical manifestation of Bitcoin in AxeNStax — a luminous orange gem that drops from pure deepslate at depth. It is a regular `Item` from the inventory system's perspective (stacks to 64; tradeable in-game) but has unique drop rules + economic significance distinguishing it from every other material.
+**Satori** is the game's Bitcoin-themed gem (the code calls it the orange Bitcoin gem): a luminous orange gem that drops from pure deepslate at depth. It is a regular `Item` from the inventory system's perspective (stacks to 64; tradeable in-game) but has unique drop rules distinguishing it from every other material.
 
-**Etymology.** *Satori* (悟り) is the Japanese Zen term for sudden awakening — the moment understanding crystallises. It fits the gameplay beat where a player strikes deep deepslate and the first orange flash appears. The name is also a phonetic nod to Satoshi Nakamoto without being a literal naming-after — the gem is Bitcoin's in-world face, not a worship object. Pronunciation: *sah-toh-ree*. Singular and plural are both "Satori" (mass noun); use "Satori gem(s)" only when grammar forces a count.
+> **Satori is a gem, not a sat (2026-11-08).** It carries **no sats value anywhere**. It is a chance drop (the exposure roll), and the code refuses it, and everything crafted from it, at every sats entry point (`economy::is_chance_drop`; the vendor says "Satori and Satori-made items can't be sold for sats. Try Barter."). It trades in the game by Barter only. The older text below that matched one gem to one sat is retired.
+
+**Etymology.** *Satori* (悟り) is the Japanese Zen term for sudden awakening — the moment understanding crystallises. It fits the gameplay beat where a player strikes deep deepslate and the first orange flash appears. The name is also a phonetic nod to Satoshi Nakamoto without being a literal naming-after — the gem is Bitcoin-themed, not a worship object. Pronunciation: *sah-toh-ree*. Singular and plural are both "Satori" (mass noun); use "Satori gem(s)" only when grammar forces a count.
 
 **Status across server modes:**
 
 | Server mode | Gem behaviour |
 |---|---|
-| **Sandbox / non-Bitcoin** | Gems drop as collectible items only. No real-money tie. Usable for crafting (tools / armour) and in-game trading. |
-| **Bitcoin-enabled (faucet, pay-to-play, tournament)** | Each gem drop is matched 1:1 with a sat in the player's internal balance. Player may craft, trade, or *withdraw to Lightning* (subject to the parental flag + server policy in `docs/spec/06-bitcoin-integration.md §10.3 / §11`). |
+| **Sandbox / non-Bitcoin** | Gems drop as collectible items only. No real-money tie. Usable for crafting (tools / armour) and in-game trading (Barter). |
+| **Bitcoin-enabled (operator layer)** | The same. The gem has no sats value on any server: it is not matched to a sat, not priced in sats, and not withdrawable. (RETIRED 2026-11-08 (owner): the earlier \"each drop is matched 1:1 with a sat\" and \"withdraw to Lightning\" rows. They were never built.) |
 
-The gem itself is **universal** — possession, in-game trading, and crafting are unrestricted. Only **Lightning withdrawal** is subject to the parental flag / age / jurisdiction controls; see Spec 6.
+The gem is **universal** — possession, in-game trading (Barter) and crafting are the same on every server. See Spec 6 §2.2c.1 for why it never carries a sats value.
 
 **Drop trigger — high-level (full algorithm in Spec 6 §2.2c):**
 
@@ -847,7 +849,7 @@ The gem can be combined into tools and armour at the top tier (above diamond —
 
 The full armour set provides **20 total armour points** with **12 toughness** — same armour points as diamond, more toughness (greater protection against heavy hits per Spec 6 §6 damage formula). Notably: in a future meteor-survival mechanic (Axolittle's must-have from `docs/research/2026-03-06-blocks-qa-round2-gameplay.md`), the gem-tier armour set would be the survival threshold.
 
-**On-chain note:** the gem ≡ sats equivalence in Bitcoin-enabled servers is a 1:1 mapping at *drop time*. The internal balance is server-tracked; the in-inventory gem is the visible artefact. Players can craft with their gems (consumes the inventory gem AND deducts the corresponding sats from the internal balance), trade in-game (transfers both), or withdraw the sat-equivalent of their inventory gems to Lightning (consumes inventory gems, debits internal balance, queues Lightning payout). The unified-token framing is documented in Spec 6 §6 (server economy modes, TBD).
+**On-chain note (RETIRED 2026-11-08, owner):** an earlier draft made the gem equal to one sat at drop time, with an internal balance that moved with it and a Lightning withdrawal. That was retired on 2026-09-27 (Satori carries no sats value) and the withdrawal path was never built. Crafting consumes the gem and nothing else; trading it moves the gem and nothing else.
 
 **X-ray defence:** vein-membership bitmasks are computed server-side at chunk-load time from `server_secret`; never sent to clients. Plus the chunk-stream obfuscation per `docs/spec/08-security-anti-cheat.md §5.2.2` hides buried deepslate just like every other buried block. The gem mechanic preserves the architectural anti-X-ray property by construction.
 
@@ -1306,7 +1308,7 @@ The furnace is a block entity with three slots: input, fuel, and output. **Spec 
 
 **Mining level** determines which blocks can be harvested (drop items). A block with mining level 2 (e.g., diamond ore) requires at least an iron pickaxe. Lower-tier tools still break the block (at hand speed) but drop nothing.
 
-Satori is the **top tier** — it sits above diamond in both gameplay progression (tool durability + mining speed + level) and economic significance (the in-world manifestation of Bitcoin sats — see §3.8 and `docs/spec/06-bitcoin-integration.md §2.2c` for vein generation). Acquiring Satori-tier gear is a real commitment: Satori only drops from pure-deepslate at depth, in deterministic veins, with exposure decay on exterior surfaces.
+Satori is the **top tier** — it sits above diamond in both gameplay progression (tool durability + mining speed + level) and rarity (the game's Bitcoin-themed gem, with no sats value — see §3.8 and `docs/spec/06-bitcoin-integration.md §2.2c` for vein generation). Acquiring Satori-tier gear is a real commitment: Satori only drops from pure-deepslate at depth, in deterministic veins, with exposure decay on exterior surfaces.
 
 ### 5.2 Tool Types and Effectiveness
 
@@ -2469,7 +2471,7 @@ multiplayer-identity work (Spec 1 Phase 4); the ledger is the audit substrate th
 its wholesale stock from an adjacent **freight depot chest** (the cart's unload destination): on
 open, `vendor::restock_bulk_from_depot` moves matching freight into the vendor's `stock`, then lots
 sell through the existing `try_buy` → `escrow_sats` path — completing load→haul→unload→**pay**.
-Single-item `Sell` vendors stay pocket-fed. Earnings are the in-world escrow score; real
+Single-item `Sell` vendors stay pocket-fed. Takings accrue to the vendor's in-world escrow score; real
 cross-boundary Lightning settlement stays owner economics (untouched). **Still gated:** Phase 4
 Aether security (info/flagging only) — gated on the Aether tier.
 
@@ -2594,7 +2596,7 @@ Every world carries an append-only integrity record in `world_meta.json`. These 
 
 Applied to hostile melee (`combat::tick_mob_attacks`) and the neutral bee sting / goat charge / shark bite. Not applied to fall damage, drowning, lava, fire or explosions. A joined client adopts the host's difficulty from `JoinAccept.difficulty` (the field was always on the wire — no protocol change). Server-side, `GameServer.difficulty` (from `WorldMeta` on `initial_load`) scales the hostile melee it lands on joiners (§6.4.1) and turns it off on Peaceful. It runs no hunger or starvation for any player's copy since MP-D2a — a joiner's metabolism is its client's, applying the floor from the joined world's difficulty, and arrives as `InputPacket.health_delta`; a host's local slot is health-trusted (its client writes the health) — which retired the old non-lethal starvation-floor BRIDGE.
 
-**Bitcoin integration** (Phase 5): The integrity ledger provides the data layer for reward eligibility decisions. Server operators will configure policies (e.g., "creative worlds earn zero Bitcoin", "hard mode gets 2x multiplier"). The engine records facts; the server applies rules; the protocol delivers rewards.
+**Bitcoin integration** (Phase 5, design only): The integrity ledger provides the data layer for any operator policy that depends on how a world was played (for example, a creative world switching the Bitcoin layer off). The engine records facts; the server applies rules. (RETIRED 2026-11-08 (owner): the work-meter is not built and will not be; proof-of-play effort is not turned into sats, so there is no effort-based multiplier to configure.)
 
 ### 8.6 Modifiers (orthogonal to mode)
 
