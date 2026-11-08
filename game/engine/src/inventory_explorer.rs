@@ -377,7 +377,9 @@ pub fn enumerate_all_items(registry: &BlockRegistry) -> Vec<ExplorerEntry> {
     // list: a builder looking at "Stone Slab" sees the other slabs beside it.
     let variants = variant_groups(registry.len() as BlockId);
     for id in 0u16..registry.len() as u16 {
-        if id == AIR || variants.is_new(id) {
+        // Living world S3 (review L7) — a Feast Marker is a record of a feast
+        // held, never an item: breaking one gives back a table.
+        if id == AIR || id == crate::block::FEAST_MARKER || variants.is_new(id) {
             continue;
         }
         for id in std::iter::once(id).chain(variants.after(id)) {
@@ -731,7 +733,9 @@ mod tests {
             .iter()
             .filter(|e| e.category == ExplorerCategory::Blocks)
             .count();
-        assert_eq!(block_count, registry.len() - 1);
+        // Every block but air, and but the Feast Marker (a record, never an item).
+        assert_eq!(block_count, registry.len() - 2);
+        assert!(entries.iter().all(|e| !matches!(&e.item, Item::Block(b) if *b == crate::block::FEAST_MARKER)));
     }
 
     #[test]

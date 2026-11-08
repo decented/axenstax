@@ -283,6 +283,11 @@ impl Rig {
 
     /// Joiner `n`'s input carrying the edit `b` at `pos` (a break with AIR).
     pub(super) fn edit(&mut self, n: usize, pos: (i32, i32, i32), b: block::BlockId) {
+        self.edit_with_meta(n, pos, b, 0);
+    }
+
+    /// [`Self::edit`] carrying the meta byte `meta` (a modified client's).
+    pub(super) fn edit_with_meta(&mut self, n: usize, pos: (i32, i32, i32), b: block::BlockId, meta: u8) {
         let c = &mut self.cs[n];
         c.input_seq += 1;
         let sp = &self.hs.server.players[c.slot];
@@ -294,7 +299,7 @@ impl Rig {
             yaw: sp.yaw,
             pitch: sp.pitch,
             health: 20.0,
-            block_changes: vec![protocol::BlockChange { x: pos.0, y: pos.1, z: pos.2, new_block: b, meta: 0 }],
+            block_changes: vec![protocol::BlockChange { x: pos.0, y: pos.1, z: pos.2, new_block: b, meta }],
             events_applied: c.events,
             ..Default::default()
         };

@@ -289,6 +289,9 @@ pub fn resolve_blast(
         let (stacks, side_cleared) = spill_block_contents(world, p);
         spilled.extend(stacks.into_iter().map(|s| (p, s)));
         world.set_block(p.0, p.1, p.2, block::AIR);
+        // Living world S3 (review L2) — a blasted cell keeps no meta byte (a
+        // Feast Marker's guest count would otherwise outlive it on AIR).
+        world.set_meta(p, 0);
         destroyed.push((p, id));
         for c in side_cleared {
             destroyed.push((c, block::CAMPFIRE_SMOKE));
@@ -477,6 +480,24 @@ mod tests {
         assert!(players[0].combat.health < players[0].combat.max_health, "the armour soaked some, not all");
         assert_eq!(players[0].armour_wear_hits, 1, "the soaking armour wears once");
         assert_eq!(players[1].armour_wear_hits, 0, "out of range: nothing lands, nothing wears");
+    }
+
+    /// Review L2 — a blasted Feast Marker leaves no guest count on the AIR.
+    #[test]
+    fn a_blasted_cell_keeps_no_meta_byte() {
+        let mut w = World::new();
+        for x in 0..6 {
+            for y in 0..6 {
+                for z in 0..6 {
+                    w.set_block(x, y, z, block::STONE);
+                }
+            }
+        }
+        w.set_block(3, 3, 3, block::FEAST_MARKER);
+        w.set_meta((3, 3, 3), 37);
+        resolve_blast(&mut w, (3, 3, 4), BLAST_RADIUS, KEG_BLAST_POWER);
+        assert_eq!(w.get_block(3, 3, 3), block::AIR, "the marker is demolished");
+        assert_eq!(w.meta_at(3, 3, 3), 0, "and its guest count goes with it");
     }
 
     #[test]

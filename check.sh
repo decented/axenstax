@@ -45,6 +45,27 @@ section() { printf "\n\033[1;36m== %s ==\033[0m\n" "$*"; }
 ok()      { printf "\033[1;32mOK\033[0m %s\n" "$*"; }
 fail()    { printf "\033[1;31mFAIL\033[0m %s\n" "$*" >&2; }
 
+# Test runs leave multi-GB scratch dirs in $TMPDIR that nothing else removes
+# (`axenstax-test-data-<pid>` is ~5 GB per run). Remove only those name
+# patterns, and only when the trailing pid is no longer a live process, so a
+# test run in flight elsewhere is never touched. Prints how much it freed.
+clean_test_litter() {
+    local dir="${TMPDIR:-/tmp}" before after d pid
+    [ -d "$dir" ] || return 0
+    before="$(du -sk "$dir" 2>/dev/null | awk '{print $1}')"
+    for d in "$dir"/axenstax-test-data-* "$dir"/axe_mirror_signet_* "$dir"/axenstax-signet-* "$dir"/axenstax-harness-*; do
+        [ -d "$d" ] || continue
+        pid="${d##*-}"
+        case "$d" in */axe_mirror_signet_*) pid="${d##*_}" ;; esac
+        case "$pid" in ''|*[!0-9]*) continue ;; esac
+        kill -0 "$pid" 2>/dev/null && continue
+        rm -rf -- "$d"
+    done
+    after="$(du -sk "$dir" 2>/dev/null | awk '{print $1}')"
+    echo "test litter in $dir: freed $(( (before - after) / 1024 )) MiB"
+}
+clean_test_litter
+
 failures=0
 verified=()   # gates that actually ran and passed
 notrun=()     # gates deliberately not run this invocation (opt-in only)
@@ -269,6 +290,7 @@ else
     failures=$((failures + 1))
 fi
 rm -f "$test_log"
+clean_test_litter
 
 section "trunk build (wasm)"
 if (cd game/engine && trunk build); then

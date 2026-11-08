@@ -38,6 +38,12 @@ impl GameState {
     /// authority (`send_block_use`).
     pub(crate) fn use_feast_table(&mut self, pidx: usize, pos: [i32; 3]) -> bool {
         let cell = (pos[0], pos[1], pos[2]);
+        // The authority's gate (`remote_may_touch`): a world edit needs a play
+        // mode that allows one (review L3).
+        if !self.play_mode.can_edit_world() {
+            self.say("You can't use that here.", 2);
+            return false;
+        }
         if !self.is_creative && crate::plot::is_in_foreign_plot(&self.world.plots, pos[0], pos[2], pidx) {
             self.say("This land belongs to another player.", 2);
             return false;

@@ -229,6 +229,39 @@ fn a_joiners_commons_over_a_plot_is_refused_and_a_clear_one_stands() {
     assert_eq!(rig.world().get_block(marker.0, marker.1, marker.2), block::AIR, "a plot over a Commons is refused");
 }
 
+/// Review M2 — a modified joiner cannot make a Feast Marker, or rewrite a
+/// marker's guest count, with a plain block edit; only the feast rule makes one.
+/// Breaking a marker is still an ordinary edit.
+#[test]
+fn a_joiner_cannot_forge_a_marker_or_its_guest_count() {
+    let mut rig = Rig::dedicated("feast-forge", 1);
+    let (cx, cy, cz) = (rig.at.x.floor() as i32, rig.at.y as i32, rig.at.z.floor() as i32);
+    // A forged marker over empty ground, and over a table.
+    let empty = (cx, cy, cz + 2);
+    rig.edit_with_meta(0, empty, block::FEAST_MARKER, 255);
+    rig.ticks(3);
+    assert_eq!(rig.world().get_block(empty.0, empty.1, empty.2), block::AIR, "no forged marker over air");
+    assert_eq!(rig.world().meta_at(empty.0, empty.1, empty.2), 0);
+    let table = rig.place(3, block::FEAST_TABLE);
+    rig.edit_with_meta(0, (table[0], table[1], table[2]), block::FEAST_MARKER, 255);
+    rig.ticks(3);
+    assert_eq!(rig.world().get_block(table[0], table[1], table[2]), block::FEAST_TABLE, "a table is not converted by a plain edit");
+    assert!(rig.world().feast_events.is_empty(), "and no feast is noted");
+
+    // A real marker (the feast rule's) keeps its count against a meta-only edit.
+    let marker = rig.place(4, block::FEAST_MARKER);
+    rig.world().set_meta((marker[0], marker[1], marker[2]), 3);
+    rig.edit_with_meta(0, (marker[0], marker[1], marker[2]), block::FEAST_MARKER, 255);
+    rig.ticks(3);
+    assert_eq!(rig.world().meta_at(marker[0], marker[1], marker[2]), 3, "the guest count is the feast's");
+
+    // Breaking it is allowed, and leaves no count behind.
+    rig.edit(0, (marker[0], marker[1], marker[2]), block::AIR);
+    rig.ticks(3);
+    assert_eq!(rig.world().get_block(marker[0], marker[1], marker[2]), block::AIR);
+    assert_eq!(rig.world().meta_at(marker[0], marker[1], marker[2]), 0);
+}
+
 /// A world with a Feast Marker and a Commons Stone saves and loads with the
 /// marker's guest count intact (it is `block_meta`), and the Commons is found
 /// again from the loaded chunks.

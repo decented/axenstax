@@ -40,6 +40,19 @@ pub fn plot_overlaps_a_commons(areas: &[CommonsArea], x: i32, z: i32) -> bool {
     areas.iter().any(|c| c.overlaps(x - PLOT_HALF_EXTENT, x + PLOT_HALF_EXTENT, z - PLOT_HALF_EXTENT, z + PLOT_HALF_EXTENT))
 }
 
+/// Would placing `block` at column `(x, z)` break a claim rule? The Commons
+/// Stone over a Plot, the Plot Marker over a Commons, and a Feast Marker (a
+/// record only a held feast makes) are refused. The one predicate for a Plan's
+/// builder, which has no player to ask (`plan::tick_build`, review L1).
+pub fn placement_refused(world: &crate::world::World, block: crate::block::BlockId, x: i32, z: i32) -> bool {
+    match block {
+        crate::block::COMMONS_STONE => stone_overlaps_a_plot(&world.plots, x, z),
+        crate::block::PLOT_MARKER => plot_overlaps_a_commons(&world.commons_areas(), x, z),
+        crate::block::FEAST_MARKER => true,
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -103,6 +116,20 @@ mod tests {
         // Breaking a stone takes its area with it.
         w.set_block(40, 70, -20, crate::block::AIR);
         assert_eq!(w.commons_areas(), vec![footprint(-100, 7)]);
+    }
+
+    #[test]
+    fn a_plan_may_not_stamp_a_claim_the_placement_arm_would_refuse() {
+        use crate::block::{COMMONS_STONE, FEAST_MARKER, PLOT_MARKER, STONE};
+        let mut w = World::new();
+        w.plots.push(plot_at(0, 0));
+        w.set_block(200, 64, 200, COMMONS_STONE);
+        assert!(placement_refused(&w, COMMONS_STONE, 5, 5), "a stone over a plot");
+        assert!(!placement_refused(&w, COMMONS_STONE, 100, 100), "a stone on clear ground");
+        assert!(placement_refused(&w, PLOT_MARKER, 210, 210), "a plot over a commons");
+        assert!(!placement_refused(&w, PLOT_MARKER, 100, 100));
+        assert!(placement_refused(&w, FEAST_MARKER, 100, 100), "a marker is a record, never stamped");
+        assert!(!placement_refused(&w, STONE, 5, 5));
     }
 
     #[test]

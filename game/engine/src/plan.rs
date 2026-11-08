@@ -1481,6 +1481,14 @@ pub fn tick_build(
         let wx = ax + cell.rx as i32;
         let wy = ay + 1 + cell.ry as i32;
         let wz = az + cell.rz as i32;
+        // Living world S3 (review L1) — a Plan may not stamp a claim that the
+        // placement arm would refuse (a Commons Stone over a Plot, a Plot
+        // Marker over a Commons, a Feast Marker): the cell is left as it is
+        // and costs no material.
+        if crate::commons::placement_refused(world, cell.block_id, wx, wz) {
+            next_index += 1;
+            continue;
+        }
         // Spec 06 §2.2 — builder-stamped blocks are player-placed, so mining
         // the finished structure earns no proof-of-play work.
         world.place_player_block(wx, wy, wz, cell.block_id);

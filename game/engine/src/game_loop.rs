@@ -14159,11 +14159,18 @@ impl super::GameState {
                 && self.players[pidx].place_cooldown == 0
             {
                 let hotbar = self.players[pidx].hotbar_slot;
-                let is_food = self.players[pidx]
-                    .inventory
-                    .hotbar_slot(hotbar)
-                    .map(|s| s.item.is_food())
-                    .unwrap_or(false);
+                // Living world S3 (review M1) — food held at a Feast Table or
+                // a Feast Marker is for the feast (or for reading the marker),
+                // never eaten: the click falls through to the use chain below.
+                let at_feast = self.players[pidx].target_block.is_some_and(|b| {
+                    crate::feast::is_feast_block(self.world.get_block(b[0], b[1], b[2]))
+                });
+                let is_food = !at_feast
+                    && self.players[pidx]
+                        .inventory
+                        .hotbar_slot(hotbar)
+                        .map(|s| s.item.is_food())
+                        .unwrap_or(false);
                 // A joiner reads these from the server's copy: its hunger
                 // (`own_hunger`) and its health (`health_sync`).
                 // Eating is paced in fixed ticks on every path (C2a verify
@@ -22711,16 +22718,17 @@ impl super::GameState {
         // the request claims while it is in flight.
         let hot = self.players[pidx].hotbar_slot;
         let stack_count = self.players[pidx].inventory.hotbar_slot(hot).map_or(0, |s| s.count);
-        if kind == crate::block_use::UseKind::Feast && stack_count > 0 {
-            self.expect_feast_toast(cell);
-        }
-        self.send_block_request(pidx, cell, |held| {
+        let sent = self.send_block_request(pidx, cell, |held| {
             let mut claim = crate::block_use::claim(kind, held);
             if kind == crate::block_use::UseKind::Feast && claim > 0 {
                 claim = stack_count;
             }
             crate::joiner_actions::Asked::UseBlock { cell, kind, claim }
         });
+        // Review L7 — only a request that really went out expects the toast.
+        if sent && kind == crate::block_use::UseKind::Feast && stack_count > 0 {
+            self.expect_feast_toast(cell);
+        }
     }
 
     /// C3c-2 — player `pidx` (a joiner) strikes the unlit campfire at `cell`
@@ -22736,23 +22744,24 @@ impl super::GameState {
     }
 
     /// One `ItemAction::UseBlock` at `cell` with what is in hand, claimed as
-    /// `asked` says ([`Self::send_block_use`], [`Self::send_light`]).
+    /// `asked` says ([`Self::send_block_use`], [`Self::send_light`]). Returns
+    /// whether the request went out.
     fn send_block_request(
         &mut self,
         pidx: usize,
         cell: [i32; 3],
         asked: impl FnOnce(Option<&crate::item::Item>) -> crate::joiner_actions::Asked,
-    ) {
-        if self.pack_window_frozen(pidx) { return; }
+    ) -> bool {
+        if self.pack_window_frozen(pidx) { return false; }
         self.players[pidx].place_cooldown = 8;
         let (hot, held, held_kind, held_id, held_full) = self.held_for_request(pidx);
         if matches!(held, Some(crate::item::Item::Plan(_))) {
             self.toast = Some(("Put the Plan away first.".to_string(), Instant::now() + Duration::from_secs(2)));
-            return;
+            return false;
         }
         let asked = asked(held.as_ref());
         let action = crate::protocol::ItemAction::UseBlock { cell, hotbar_slot: hot as u8, held_kind, held_id, held_full };
-        self.send_use_request(pidx, asked, held, hot, action);
+        self.send_use_request(pidx, asked, held, hot, action)
     }
 
     /// Ask the authority to add an Explorer item to this window.

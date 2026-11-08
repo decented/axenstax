@@ -6660,6 +6660,14 @@ impl HostedServer {
         if !block_change_within_reach(dx * dx + dy * dy + dz * dz, reach_kind, reach_id, false) {
             return Err(EditRefusal::Reach);
         }
+        // Living world S3 (review M2) — a Feast Marker is a record of a feast
+        // that was held: only `feast::convert` (the authority's own rule)
+        // creates one, and its meta byte is the guest count. A joiner's plain
+        // edit may neither place one nor rewrite an existing one's meta (the
+        // same block, a different count), in any play mode.
+        if sp.server_simulated && bc.new_block == crate::block::FEAST_MARKER {
+            return Err(EditRefusal::Protected);
+        }
         // Living world S3 — a Plot and a Commons may not overlap, either way
         // round (`commons`): judged for every seat and play mode, as the local
         // placement arm does (creative bypasses build protection, not a claim).

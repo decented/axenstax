@@ -223,6 +223,12 @@ pub fn toast(name: &str, guests: u8) -> String {
     format!("{name}, {guests} {}.", if guests == 1 { "guest" } else { "guests" })
 }
 
+/// A Feast Table or a Feast Marker: the two blocks a right-click is for the
+/// feast (hold it, or read the marker) and never for eating held food.
+pub fn is_feast_block(b: block::BlockId) -> bool {
+    b == block::FEAST_TABLE || b == block::FEAST_MARKER
+}
+
 /// The villagers and peddlers in `ecs` with their positions, for [`gather`].
 pub fn villagers_in(ecs: &hecs::World) -> Vec<(hecs::Entity, Vec3)> {
     ecs.query::<(&crate::entity::Position, &crate::entity::MobKind)>()

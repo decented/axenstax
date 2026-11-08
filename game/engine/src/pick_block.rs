@@ -98,6 +98,8 @@ pub fn canonical_block(b: BlockId) -> BlockId {
         block::PURE_DEEPSLATE_THIN | block::PURE_DEEPSLATE_HEALTHY | block::PURE_DEEPSLATE_FAT => block::PURE_DEEPSLATE,
         block::RUBBER_LOG_TAPPED => block::RUBBER_LOG,
         block::CABLE_LIT => block::CABLE,
+        // A held feast's marker picks the table it came from (never a marker).
+        block::FEAST_MARKER => block::FEAST_TABLE,
         block::ELECTRIC_LAMP_LIT => block::ELECTRIC_LAMP,
         block::STEAM_GENERATOR_LIT => block::STEAM_GENERATOR,
         other => other,
