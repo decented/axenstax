@@ -908,6 +908,18 @@ pub fn satori_rush_def() -> ScenarioDef {
     load_scenario_def(SATORI_RUSH_JSON).expect("bundled satori-rush.json must parse")
 }
 
+/// The Trials island (Trials in Two Acts §C.3): a walkable hub where every
+/// unlocked trial has a doorway. The def is only the world's shape (flat,
+/// day-locked, no mobs; `Resume`, so one persistent world); the island itself
+/// is built by `trials_island_build` on every visit, and no scenario runs
+/// there. Not a trial: it is in neither `EXPLORER_CHALLENGES` nor `TRIAL_ORDER`.
+pub const TRIALS_ISLAND_JSON: &[u8] = include_bytes!("../assets/scenarios/trials-island.json");
+
+/// Parse the embedded Trials island def (build-time invariant; covered by a test).
+pub fn trials_island_def() -> ScenarioDef {
+    load_scenario_def(TRIALS_ISLAND_JSON).expect("bundled trials-island.json must parse")
+}
+
 // ─── Feature-coverage challenge pack (Phase 4) ───────────────────────────────
 // Authored as DATA (JSON ScenarioDefs), embedded like the games above so they
 // work offline and can also ride the open-stash as community packs later. Each
@@ -1634,6 +1646,7 @@ pub fn named_builtin_def(name: &str) -> Option<ScenarioDef> {
         "test" => Some(builtin_test_def()),
         "hash-dash" | "hashdash" => load_scenario_def(HASH_DASH_JSON).ok(),
         "satori-rush" | "satorirush" => load_scenario_def(SATORI_RUSH_JSON).ok(),
+        "trials-island" => load_scenario_def(TRIALS_ISLAND_JSON).ok(),
         "onboarding" | "getting-started" => load_scenario_def(ONBOARDING_JSON).ok(),
         // Explorer challenges by their short name (e.g. `/scenario tame-wolf`).
         other => EXPLORER_CHALLENGES

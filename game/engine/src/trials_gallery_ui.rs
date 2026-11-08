@@ -534,12 +534,14 @@ fn draw_shelves(
 
 /// What the hero view found this frame.
 #[derive(Default)]
-struct HeroResult {
-    action: Option<MenuAction>,
-    how_it_works: bool,
+pub(crate) struct HeroResult {
+    pub(crate) action: Option<MenuAction>,
+    pub(crate) how_it_works: bool,
 }
 
-fn draw_hero(
+/// The hero view for one card: the gallery's, and the Trials island's
+/// doorway card (`trials_island_ui`). `fresh` gives Play keyboard focus.
+pub(crate) fn draw_hero(
     ui: &mut egui::Ui,
     card: &Card,
     icons: &[egui::TextureId],
@@ -826,6 +828,7 @@ pub fn draw(
     let art = st.newest_textures(ctx);
     let mut back = false;
     let mut album = false;
+    let mut island = false;
     let mut shelf_result = ShelfResult::default();
     let mut hero_result = HeroResult::default();
     let hero_pos = st.hero;
@@ -862,6 +865,18 @@ pub fn draw(
                     {
                         album = true;
                     }
+                    ui.add_space(6.0);
+                    if ui
+                        .add(
+                            egui::Button::new(egui::RichText::new("Walk the island").size(15.0).color(TEXT))
+                                .min_size(egui::vec2(0.0, 34.0))
+                                .corner_radius(egui::CornerRadius::same(6)),
+                        )
+                        .on_hover_text("A little island with a doorway for each trial you can play.")
+                        .clicked()
+                    {
+                        island = true;
+                    }
                 });
             });
             let Some(rows) = st.built.as_ref() else { return };
@@ -878,6 +893,10 @@ pub fn draw(
 
     if album {
         st.open_album();
+        return out;
+    }
+    if island {
+        out.action = MenuAction::PlayScenario { def: Box::new(crate::scenario::trials_island_def()) };
         return out;
     }
     if back {
@@ -978,6 +997,10 @@ mod tests {
             include_str!("trials_album_ui.rs"),
             include_str!("postcard.rs"),
             include_str!("postcard_flow.rs"),
+            include_str!("trials_island_ui.rs"),
+            include_str!("trials_island_flow.rs"),
+            include_str!("trials_island_build.rs"),
+            include_str!("trials_island_layout.rs"),
         ] {
             let body = src.split("#[cfg(test)]").next().unwrap();
             let hits = crate::copy_lint::banned_in(body, crate::copy_lint::BANNED_MONEY_WORDS);

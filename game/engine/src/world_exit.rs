@@ -604,6 +604,11 @@ impl crate::GameState {
         // unrelated lobby visit (callers that hop re-queue AFTER this).
         self.pending_menu_action = None;
         self.pending_scenario_launch = None;
+        // The island visit ends with its world; a trial's way back to the
+        // island ends with any leave but the island's own hop (which sets it
+        // again after this) and "Back to Trials" (which reads it before).
+        self.island = None;
+        self.island_return = None;
         self.pending_workshop_for_skin = false;
         self.region_broadcast_queue.clear();
         // Spec 40 — the wardrobe is a GLOBAL asset, flushed whatever happened

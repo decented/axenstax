@@ -355,9 +355,8 @@ pub fn save(token: &str, rgba: &[u8], ms: u64) -> Option<Vec<u8>> {
     save_impl(token, rgba, ms)
 }
 
-/// The newest postcard's PNG for a trial token: what the Trials island reads.
-/// Read next by the Trials island (§C.3); nothing in the game calls it yet.
-#[allow(dead_code)]
+/// The newest postcard's PNG for a trial token: what the Trials island hangs
+/// on a doorway and shows on its card (§C.3).
 pub fn newest_png(token: &str) -> Option<Vec<u8>> {
     if !is_safe_token(token) {
         return None;
@@ -412,7 +411,6 @@ fn save_impl(token: &str, rgba: &[u8], ms: u64) -> Option<Vec<u8>> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-#[allow(dead_code)]
 fn newest_impl(token: &str) -> Option<Vec<u8>> {
     let dir = token_dir(token);
     let newest = times_in(&dir).into_iter().max()?;

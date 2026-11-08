@@ -376,6 +376,10 @@ mod trials_diorama;
 mod trials_diorama_ui;
 mod trials_gallery;
 mod trials_gallery_ui;
+mod trials_island_build;
+mod trials_island_flow;
+mod trials_island_ui;
+mod trials_island_layout;
 mod trials_unlock;
 mod ravine_gen;
 mod mineshaft_gen;
@@ -1684,6 +1688,15 @@ pub(crate) struct GameState {
     /// on the FIRST play tick, once the arena world is fully loaded + players
     /// spawned (same hook as `pending_workshop_reset`). `take()`-consumed once.
     pub(crate) pending_scenario_launch: Option<crate::scenario::PendingScenarioLaunch>,
+    /// Trials island (§C.3): the visit in progress while the island world is
+    /// up (`trials_island_flow`); `None` anywhere else. Cleared by `leave_world`.
+    pub(crate) island: Option<crate::trials_island_flow::IslandVisit>,
+    /// A trial launched from an island doorway: its end card's "Back to
+    /// Trials" returns there. Set after the hop's `leave_world`; any other
+    /// leave clears it, so "Back to menu" still goes to the lobby.
+    pub(crate) island_return: Option<crate::trials_island_flow::IslandReturn>,
+    /// The doorway the next island visit puts the player at (back from its trial).
+    pub(crate) island_arrival: Option<String>,
     /// Stash Column (Prague) — one-shot: the bytes of a skin override-set adopted
     /// from the lobby (the override registry lives on a World, so it can't apply
     /// in the menu). Applied to the next world the player enters on the first play
@@ -2274,6 +2287,9 @@ impl GameState {
             world_preloaded: false,
             pending_workshop_reset: false,
             pending_scenario_launch: None,
+            island: None,
+            island_return: None,
+            island_arrival: None,
             live_world: None,
             session_saves: crate::world_exit::SessionSaves::default(),
             pending_menu_action: None,

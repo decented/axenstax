@@ -6143,6 +6143,9 @@ impl super::GameState {
                 self.start_trial(&id);
             }
         }
+        // Trials island (§C.3) — build it as its columns load, place the
+        // player, watch the doorways. No-op in any other world.
+        self.tick_trials_island();
         // Stash Column (Prague) — adopt a lobby-adopted skin into THIS player's
         // wardrobe (it lives on a World, not the menu), then re-resolve the render
         // view. One-shot, beneath the device texture-layer cap.
@@ -8020,6 +8023,8 @@ impl super::GameState {
                 .as_ref()
                 .is_some_and(|s| s.shows_blocking_end_card())
             || self.handover_wants_pointer()
+            // Trials island — a doorway's card has a Play button to press.
+            || self.island_card_open()
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -11363,6 +11368,13 @@ impl super::GameState {
             if let Some(hit) = cast_ray(eye, dir, self.effective_reach(pidx), &self.world, &self.registry) {
                 self.players[pidx].target_block = Some(hit.block_pos);
                 self.players[pidx].target_face = hit.face_normal;
+            }
+
+            // Trials island (§C.3) — the built area cannot be broken or built
+            // on (in any mode); beyond the water it can.
+            if self.island_protects(self.players[pidx].target_block) {
+                intent.break_block = false;
+                intent.place_block = false;
             }
 
             // Kiosk click-to-collect (Spec 2026-06-19 §10): a requested left-click
@@ -17824,6 +17836,10 @@ impl super::GameState {
                     &self.registry, &self.renderer.egui);
             }
 
+            // Trials island — the doorway card, beside the doorway.
+            if pidx == 0 && !critical && self.island_card_open() {
+                self.draw_island_card();
+            }
             if pidx == 0 && self.trial_outcome.is_some() {
                 // Trials (⚡ Race) — the "Well done!" completion panel. Celebrate,
                 // then back to the lobby (trial done) or re-run it. Priority over
@@ -17839,9 +17855,8 @@ impl super::GameState {
                     self.postcard.slot(),
                 );
                 match act {
-                    crate::trials::TrialDoneAction::BackToTrials => {
-                        self.leave_world(crate::world_exit::SaveChoice::Save, crate::world_exit::ExitTo::Lobby);
-                    }
+                    // Back to the island's doorway when launched from there.
+                    crate::trials::TrialDoneAction::BackToTrials => self.back_to_trials(),
                     crate::trials::TrialDoneAction::TryAgain => self.trial_try_again(&outcome.trial_id),
                     crate::trials::TrialDoneAction::None => {}
                 }
@@ -17899,10 +17914,11 @@ impl super::GameState {
                     slot,
                 );
                 match act {
-                    crate::hud_ui::ScenarioEndAction::BackToMenu
-                    | crate::hud_ui::ScenarioEndAction::BackToTrials => {
+                    crate::hud_ui::ScenarioEndAction::BackToMenu => {
                         self.leave_world(crate::world_exit::SaveChoice::Save, crate::world_exit::ExitTo::Lobby);
                     }
+                    // Back to the island's doorway when launched from there.
+                    crate::hud_ui::ScenarioEndAction::BackToTrials => self.back_to_trials(),
                     crate::hud_ui::ScenarioEndAction::TryAgain => self.scenario_try_again(),
                     crate::hud_ui::ScenarioEndAction::None => {}
                 }

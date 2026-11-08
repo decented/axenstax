@@ -247,6 +247,12 @@ const RACE_ART: [(&str, &[(&str, [i32; 3])]); 3] = [
     ),
 ];
 
+/// A bundled race's diorama cells, `(block name, [x, y, z])` (empty for an
+/// unknown race). The Trials island builds them in real blocks.
+pub fn race_art_cells(race_id: &str) -> &'static [(&'static str, [i32; 3])] {
+    RACE_ART.iter().find(|(id, _)| *id == race_id).map_or(&[], |(_, cells)| cells)
+}
+
 /// The picture for a bundled race.
 pub fn race_art(race_id: &str) -> CardArt {
     let Some((_, cells)) = RACE_ART.iter().find(|(id, _)| *id == race_id) else {
@@ -458,6 +464,12 @@ pub(crate) fn build_rows(bests: &TrialBests) -> Vec<BuiltRow> {
         })
         .filter(|row| !row.cards.is_empty() || !row.hints.is_empty())
         .collect()
+}
+
+/// The gallery's card for one unlocked trial (`token` is a challenge token or
+/// a race id), as its hero view shows it. `None` when it is not unlocked.
+pub(crate) fn card_for(token: &str, bests: &TrialBests) -> Option<Card> {
+    build_rows(bests).into_iter().flat_map(|r| r.cards).find(|c| c.token == token)
 }
 
 /// Keep only the fixture postcards that fit `bests`: a postcard stays when its

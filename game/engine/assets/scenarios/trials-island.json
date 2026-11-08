@@ -1,0 +1,12 @@
+{
+  "kind": "Test",
+  "display_name": "Trials Island",
+  "kit": [],
+  "objective": "FreeRoam",
+  "scoring": "None",
+  "lock_creative": true,
+  "arena_mode": "Resume",
+  "world_type": "flat",
+  "time_lock": "day",
+  "mobs_enabled": false
+}
