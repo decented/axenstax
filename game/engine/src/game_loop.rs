@@ -3274,6 +3274,8 @@ impl super::GameState {
         // Nothing is live until this load finishes (a close mid-load must not
         // save the half-built world over the real one).
         self.live_world = None;
+        // Bloom state belongs to the world being left.
+        self.bloom.reset();
         // Nothing about the last world's saves carries over (`begin_load`
         // records whether this one opened from its autosave).
         self.session_saves = crate::world_exit::SessionSaves::default();
@@ -7193,6 +7195,11 @@ impl super::GameState {
                 let meshes = build_chunk_meshes(cx, cy, cz, &self.world, &self.registry);
                 self.renderer.upload_chunk((cx, cy, cz), &meshes);
             }
+        }
+
+        // Living-world bloom (presentation only; reads the world, never writes).
+        if self.tick_bloom() {
+            self.fire_challenge(crate::scenario::ChallengeEvent::PlaceWentGrey);
         }
 
         // Mob AI — targets nearest player. Re-snapshotted after this tick's

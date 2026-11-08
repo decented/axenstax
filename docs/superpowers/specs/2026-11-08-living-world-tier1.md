@@ -52,11 +52,20 @@ For each of the region's 256 columns, take the highest non-air block (`World::hi
 | BARE | 0.0 | everything else: stone, cobble, gravel, deepslate and so on outside a biome where they are natural |
 
 **Natural terrain is never BARE.** A natural ravine, cave mouth, cliff or rocky bank in an untouched world must not read grey.
-Preferred rule: if worldgen can give the **natural top block of a column** cheaply (worldgen_v3 `surface::Column` /
-`Terrain`; cached once per region per session, budget about 2 ms per region), then any non-placed top block that **matches
-the natural top** is NATURAL (0.8) or LIVING, and BARE means "not living, not placed, and differs from the natural top".
-For generators where that is not available or too costly, fall back to the biome table above. Either way, the calibration
-test "an untouched region with a natural ravine or cave mouth stays at or above 0.45" gates S1.
+As built (S1): the natural top of a column is found by **regenerating the region's chunk column into a throwaway twin of the
+world** (`World::generation_twin` + `generate_column`, the `chunk_verdict` trick) and keeping each column's top height and
+block (`bloom/natural.rs`, 256 entries per region, cached for the session). That is exact for every generator (v2, v3, v4,
+flat) and includes trees, villages and ravines. Classification of a non-living, non-placed top block:
+- it **matches the natural top** (same block at the same height), or is snow cover: NATURAL (0.8);
+- otherwise dirt or tilled soil: SOIL (0.4);
+- otherwise BARE (0).
+
+The twin is needed only for a **touched** region, one with any section edited this session or loaded from a save
+(`Chunk::persist`). A region fresh from worldgen is its own natural top, so every non-placed block there is NATURAL and no
+twin is built. At most one regeneration per tick. Measured about 1 to 2 ms per column in a debug-profile test build for v3
+(estimate well under 1 ms in release); a fully touched 289-region field fills in over about 15 s. The biome table is not
+used. The calibration tests below gate S1: a touched natural-stone, desert, forest and mountain region reads the same as
+untouched (within 0.02).
 
 - `living_frac` = mean value over non-BUILT columns (if every column is BUILT, use 0.5).
 - `cover = 1 − exp(−3 · living_frac) / normalised so that living_frac = 1 → 1.0` (i.e. `cover = (1 − e^{−3f}) / (1 − e^{−3})`). It rises fast: a place does not need every column planted.
@@ -69,16 +78,19 @@ test "an untouched region with a natural ravine or cave mouth stays at or above 
 - `div = 1 − exp(−kinds / 4)`.
 - **Monoculture:** if the region has ≥ 24 crop cells and one family is ≥ 85 % of them, `mono = 0.6`; otherwise `mono = 1`.
 - **Walls everywhere:** `built_frac` = BUILT columns / 256. `wall = 1 − 1.5 · max(0, built_frac − 0.6)`.
-- `eco = cover^0.7 · (0.45 + 0.55 · div) · wall · mono`, clamped to 0..1.
+- `eco = cover^0.7 · (0.5 + 0.5 · div) · wall · mono`, clamped to 0..1. (S1 moved the base from 0.45/0.55 to 0.5/0.5 so that
+  a purely natural place with no green, such as bare desert or mountain rock, stays at or above 0.45 instead of 0.44.)
 
 Intended feel. These bands are targets; S1's calibration tests pin them, and the formula's constants move to meet the tests,
 not the other way round:
-- Untouched plains or forest: about 0.8.
-- Untouched desert or ocean: about 0.5 (normal colour, see §2).
+- Untouched plains or forest: about 0.8 (a forest measures 0.94 to 0.98; grass-only plains with no trees or animals 0.57;
+  with a few animals about 0.75).
+- Untouched desert, beach, mountain or ocean: about 0.5 (0.49 to 0.57; normal colour, see §2).
 - A first mine, one chopped tree or a house: the region stays in the normal band.
 - A stripped quarry floor: about 0.
-- One sapling kind planted 40 times in a quarry: below 0.35.
-- A quarry with three tree kinds, three crops, water and two animal kinds: 0.6 or more.
+- One sapling kind planted 40 times in a quarry: below 0.35 (measures 0.32).
+- A quarry with three tree kinds, three crops, water and two animal kinds, on 64 of the 256 columns: 0.6 or more (measures 0.63).
+- A monoculture (one crop family on 64 columns) falls to under 0.8 of the same ground with two families.
 
 ### 1.3 The people-together term, runtime only
 
@@ -97,6 +109,11 @@ Per region, three parts, each 0..1:
 
 Combined: `P = 1 − (1 − c)(1 − f)(1 − k)`. A solo player with no Feast and no Commons has `P = 0`. That is absent, never a penalty.
 
+S1 inputs for slice S3: the field is fed `set_feast_markers(&[(x, z, guests)])` (the lasting floors, whole list replaced),
+`set_commons(&[CommonsArea])` (whole list replaced; `CommonsArea::from_marker(x, z)` is the 33 x 33 footprint) and
+`note_feast(x, z, guests)` (the surge, region and probes). "Present" players are the local seats plus `remote_players`;
+every player counts in the four regions within 8 blocks of them. Co-presence is real time, never scaled.
+
 ### 1.4 Target, level and tempo
 
 - `target = 1 − (1 − eco) · (1 − 0.7 · P)`. People can lift even a grey place, to at most 0.7.
@@ -107,11 +124,19 @@ Combined: `P = 1 − (1 − c)(1 − f)(1 − k)`. A solo player with no Feast a
   - "Slow drift, fast recovery." Newly tracked regions start at `level = target`.
 - **Scan budget.** Four regions are re-scanned per tick, oldest first. A full sweep takes about 4 s at 20 TPS. The passive-mob census is one ECS pass every 20 ticks, bucketed by region.
 
+S1 constants as built (`bloom/level.rs`): `TAU_DOWN` 2400 s, `TAU_UP` 360 s, people lift 0.7, creative floor 0.6, unknown
+places read 0.6. Regions tracked: 289 round every local seat (remote players do not extend tracking). A region that is not
+loaded costs no scan.
+
 ### 1.5 Probes (for trials)
 
 `BloomField` also holds named **probes**: an axis-aligned box in world coordinates with its own target, level and terms,
 computed over exactly the box's columns rather than region-aligned. The people-together part of a probe uses the same three
 parts restricted to the box. Probes re-scan once per second. The trial `Place` objective reads a probe.
+As built: `add_probe(id, min, max)`, `set_probe_goal(id, at_least, hold_secs)` (default 0.55 and 20 s),
+`remove_probe`, `probe(id) -> Option<ProbeState { level, target, eco, people, stage, held_secs, scanned }>` (`scanned` is
+false until the first scan). `set_initial_level(min, max, level)` applies to regions and probes overlapping the box, now or
+when first scanned.
 
 ### 1.6 Stages (words, never numbers)
 
@@ -127,6 +152,8 @@ parts restricted to the box. Probes re-scan once per second. The trial `Place` o
 In a non-trial world, the first time any tracked region's **level** falls below 0.25 while its `eco` is below 0.25, fire
 `ChallengeEvent::PlaceWentGrey` once (through `fire_challenge`, so it records in `TrialBests.events_seen`). A world whose
 regions start grey on load fires it too, after a 60-second grace period so that loading never counts as an event.
+As built: reported by `BloomField::tick` and fired from `game_loop.rs`; never on a joined client, in a flat or Workshop world, or
+while a scenario is running or about to launch (trial arenas). It is one-shot per session and, if suppressed, not used up.
 
 ### 1.8 Where it runs
 

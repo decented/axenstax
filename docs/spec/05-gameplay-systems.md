@@ -4765,3 +4765,35 @@ the generic sweep could double-advance/remove such an anchor before its
 commission observed completion. Dedicated NPC commissions/village population,
 joined quest interaction and chest auto-collection remain separate limits.
 No save/wire field or default/policy gate changes.
+
+
+## 14. Bloom (living world), as built (S1, 2026-11-08)
+
+Source of truth for intent: `docs/superpowers/specs/2026-11-08-living-world-tier1.md` §1. This is what slice S1 built.
+
+`game/engine/src/bloom/` works out, on each client, how alive each region (one chunk column) near the local players is.
+It is presentation only: it reads the world, the ECS and player positions, and writes nothing. No wire packet, no save
+field, no sim-lend `SimSystem`. `GameState.bloom: BloomField` is ticked once per logical tick from `GameState::tick` in
+single-player, on a host and on a joined client (call site in `game_loop.rs`, body in `bloom/glue.rs`), and reset in
+`reset_for_world_change`. The dedicated server's own field is not part of S1.
+
+Modules: `kinds` (which blocks are alive, kind bits), `eco` (the life term from a tally of columns), `scan` (reads a region's
+chunk sections directly), `natural` (the natural top of a touched region by regeneration into a world twin), `people`
+(co-presence, Feast, Commons), `level` (target, easing, stage words), `probe`, `field` (`BloomField`).
+
+- Life term: each column's top block is LIVING (1), NATURAL (0.8), SOIL (0.4), BARE (0) or BUILT (placed, left out). Natural
+  means it matches what worldgen left (same block, same height) or is snow cover. Kinds are collected by walking each column
+  down through living and non-solid cells. `eco = cover^0.7 (0.5 + 0.5 div) wall mono`.
+- People term: `P = 1 - (1-c)(1-f)(1-k)`; a lone player adds nothing.
+- `target = 1 - (1-eco)(1-0.7 P)`, floored at 0.6 in creative. The level eases (fall 2400 s, rise 360 s, times the world's
+  time scale). A newly scanned region starts at its target (or an authored initial level).
+- Budget: 4 regions scanned per tick (oldest first, nearest first when never scanned), one natural-top regeneration per
+  tick, a passive-wildlife census every 20 ticks. People (villagers, peddlers, knights) and hostiles are not wildlife.
+- Read API: `level_at(x, z)`, `grid_around(cx, cz) -> (16x16 levels, origin_x, origin_z)` (unknown 0.6), `add_probe`,
+  `remove_probe`, `probe`, `set_probe_goal`, `set_time_scale`, `set_initial_level`, `note_feast`, `set_feast_markers`,
+  `set_commons`, `world_summary`.
+- `ChallengeEvent::PlaceWentGrey` (unit variant, wire mirror, `matches`, task label, lint name) fires once when a known region
+  has level and eco under 0.25, after a 60 s grace, and never in a trial arena or on a joined client.
+- Known limits: a joiner reads sections as the chunk push delivers them, so a half-pushed region can read low for a moment
+  (the slow fall hides it); grass-only plains with no trees or animals read 0.57; the Feast and Commons inputs are empty until S3.
+

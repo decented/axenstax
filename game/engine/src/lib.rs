@@ -52,6 +52,7 @@ mod strict_admission;
 mod audio;
 mod controls;
 mod biome;
+mod bloom;
 mod block;
 mod camera;
 mod chunk;
@@ -1644,6 +1645,10 @@ pub(crate) struct GameState {
     /// frames so the client always has a current value for HUD + future
     /// chunk-gen variant selection. Set on every network state-update tick.
     pub(crate) reserve: crate::reserve::ReserveState,
+    /// Living-world bloom (spec 2026-11-08 §1): how alive each region near the
+    /// local players is. Presentation only; ticked once per logical tick in
+    /// every client mode and reset when a world is entered.
+    pub(crate) bloom: crate::bloom::BloomField,
     /// Fund-the-Reserve dialog state (Spec 16 Phase 5). `Some` while the
     /// dialog is open; `None` when closed. Opened by clicking the
     /// "Fund the Reserve" button in the F3 gauge.
@@ -2268,6 +2273,7 @@ impl GameState {
             #[cfg(not(target_arch = "wasm32"))]
             pending_mc_import: None,
             remote_players: Vec::new(),
+            bloom: crate::bloom::BloomField::new(),
             remote_swing: std::collections::HashMap::new(),
             remote_items: crate::remote_entities::RemoteItems::default(),
             remote_projectiles: crate::remote_entities::RemoteProjectiles::default(),

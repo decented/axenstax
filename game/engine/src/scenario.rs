@@ -213,6 +213,11 @@ pub enum ChallengeEvent {
     SaveSkin,
     /// A rig authored in Rig Studio was spawned into the world.
     SpawnRig,
+    /// A place in the player's own world went grey: a bloom region's level
+    /// fell below 0.25 while its life term was below 0.25 (living-world spec
+    /// §1.7). Fired once per session by `bloom::BloomField`; never in a trial
+    /// arena world. Unlocks the act-two shelf.
+    PlaceWentGrey,
 }
 
 /// Which self-driving power source turned, for [`ChallengeEvent::SourceTurned`].
@@ -260,6 +265,7 @@ enum ChallengeEventWire {
     CompleteBuildGuide,
     SaveSkin,
     SpawnRig,
+    PlaceWentGrey,
 }
 
 impl Serialize for ChallengeEvent {
@@ -315,7 +321,8 @@ impl ChallengeEvent {
             | (ShearOrMilk, ShearOrMilk)
             | (CompleteBuildGuide, CompleteBuildGuide)
             | (SaveSkin, SaveSkin)
-            | (SpawnRig, SpawnRig) => true,
+            | (SpawnRig, SpawnRig)
+            | (PlaceWentGrey, PlaceWentGrey) => true,
             _ => false,
         }
     }
@@ -1065,6 +1072,7 @@ pub fn event_task_label(event: &ChallengeEvent, count: u32) -> String {
         ChallengeEvent::CompleteBuildGuide => "Finish the build-along guide".to_string(),
         ChallengeEvent::SaveSkin => "Save your painted skin and wear it".to_string(),
         ChallengeEvent::SpawnRig => "Spawn your rig".to_string(),
+        ChallengeEvent::PlaceWentGrey => "Let a place go grey".to_string(),
     }
 }
 
@@ -2463,7 +2471,7 @@ mod tests {
         // The four unit-variant events added with the wave. Cheap, but it pins
         // that `matches` didn't collapse any two of them into one arm.
         use ChallengeEvent::*;
-        let unit = [CompleteBuildGuide, SaveSkin, SpawnRig];
+        let unit = [CompleteBuildGuide, SaveSkin, SpawnRig, PlaceWentGrey];
         for want in unit {
             for got in unit {
                 assert_eq!(
