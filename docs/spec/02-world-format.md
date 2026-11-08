@@ -2221,13 +2221,24 @@ against the slice before allocating.
       at the very end of a footer-less save is not a realistic collision.
     - **`SAVE_FORMAT_VERSION`** = `WORLD_SAVE_FIELD_COUNT` (56 since Keep slice 2a,
       2026-11-02: `quest_world` was 54, `worldgen_version` 55, `authority_clock` 56) +
-      `SAVE_LAYOUT_REVISION` (4 today; see the block-ids bullet below) = 60. The current `SAVE_FORMAT_VERSION` is `60` (a test, `save_format::tests::spec_02_states_the_current_save_format_version`, fails if this sentence and the constant disagree, so a bump must edit this line). Two tripwire tests stop drift: serde's field list
+      `SAVE_LAYOUT_REVISION` (5 today; see the block-ids bullets below) = 61. The current `SAVE_FORMAT_VERSION` is `61` (a test, `save_format::tests::spec_02_states_the_current_save_format_version`, fails if this sentence and the constant disagree, so a bump must edit this line). Two tripwire tests stop drift: serde's field list
       for `WorldSave` must equal `WORLD_SAVE_FIELD_COUNT` (so appending a field
       without bumping the version fails), and the tolerant reader must consume every
       byte of a current save (so a field listed in its struct literal without a read
       fails). A wire change that is **not** an appended field (a field or enum variant
       inside a nested saved type, a retype) is invisible to both tripwires and must
       bump `SAVE_LAYOUT_REVISION` by hand.
+    - **Layout revision 5 (format 61, living world S3, 2026-11-08): block ids 373..=375.**
+      `FEAST_TABLE` (373), `FEAST_MARKER` (374) and `COMMONS_STONE` (375) follow the
+      building variants (320..=372). Like revision 4, a build that does not know a block id
+      reads it back as AIR (`BlockRegistry::get`), so the version moves for every world
+      this build writes and older builds take their "needs a newer version" refusal. No
+      `WorldSave` field was added (the field count stays 56; `FOOTER_FIELD_COUNTS` gains
+      `(61, [56])`). A Feast Marker's guest count (0-255) is its `block_meta` byte, which
+      is already saved and already carried by chunk files' side data and the chunk push;
+      no generic code reads that byte for this block. Commons areas are stored nowhere:
+      they are found by scanning loaded chunks for the stone. See
+      `docs/superpowers/specs/2026-11-08-living-world-tier1.md` §3, §4.
     - **The authority clock is saved (format 60, Keep slice 2a, 2026-11-02).** Field 56,
       `WorldSave.authority_clock: Option<sim_clock::SavedClock>`, carries `tick_counter`,
       `world_time`, the weather window (`rain_until`, `storm_until`), the trial lock it

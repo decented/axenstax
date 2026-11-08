@@ -175,6 +175,9 @@ mod tests {
     #[path = "sim_death.rs"]
     mod sim_death;
     #[cfg(not(target_arch = "wasm32"))]
+    #[path = "feast.rs"]
+    mod feast;
+    #[cfg(not(target_arch = "wasm32"))]
     #[path = "sim_machines.rs"]
     mod sim_machines;
     #[cfg(not(target_arch = "wasm32"))]

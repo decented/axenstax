@@ -2891,7 +2891,13 @@ pub struct ServerAnnouncePacket {
 ///   variants, FreezeFence (13) and Parked (14). Consent drains the
 ///   recipient's normal receive and application up to the fence before it
 ///   parks and signs the Parked proof (Spec 04 "Wire 96 ordered park").
-pub const PROTOCOL_VERSION: u32 = 96;
+/// - v97 (2026-11-08, living world S3): **New block ids 373..=375** (Feast
+///   Table, Feast Marker, Commons Stone) and two `ItemNote` codes
+///   (`NeedsGuests` = 29, `NothingToShare` = 30). No packet shape changed. A
+///   client without them resolves the ids to `AIR` (the registry fallback),
+///   drawing voids where a table or marker stands, so the bump refuses it at
+///   join. A Feast Marker's guest count rides `BlockChange.meta`.
+pub const PROTOCOL_VERSION: u32 = 97;
 
 /// The `protocol_version` of a JoinRequest payload that doesn't decode as this
 /// build's `JoinRequestPacket` (an older or newer client's shape). It is the
@@ -3093,7 +3099,8 @@ mod tests {
         // v94 — building variants, block ids 320..=372.
         // v95 — terrain T1: 256-block world, per-world terrain generator.
         // v96 — D2c-3 ordered park: FreezeFence (13) and Parked (14) frames.
-        assert_eq!(super::PROTOCOL_VERSION, 96);
+        // v97 — living world S3: block ids 373..=375, two ItemNote codes.
+        assert_eq!(super::PROTOCOL_VERSION, 97);
     }
 
     #[test]
@@ -3852,7 +3859,8 @@ mod tests {
         // v94 (building variants): new block ids 320..=372, no packet change.
         // v95 (terrain T1): 256-block world, JoinAccept.generator, JoinRequest.generator_fingerprints.
         // v96 (D2c-3 ordered park): handover FreezeFence (13) and Parked (14) frames.
-        assert_eq!(PROTOCOL_VERSION, 96);
+        // v97 (living world S3): block ids 373..=375 and two ItemNote codes, no packet change.
+        assert_eq!(PROTOCOL_VERSION, 97);
     }
 
     fn sample_accept() -> JoinAcceptPacket {

@@ -19,6 +19,9 @@ impl GameState {
     /// arena (a scenario running, one about to launch, a flat or Workshop world)
     /// and never on a joined client, which has no world of its own to unlock by.
     pub(crate) fn tick_bloom(&mut self) -> bool {
+        // Living world S3 — feasts held, Feast Markers and Commons areas, in
+        // every client mode (all read this client's own world copy).
+        self.tick_gatherings();
         let local: Vec<Vec3> = self.players.iter().map(|p| p.player.pos).collect();
         let remote: Vec<Vec3> = self
             .remote_players

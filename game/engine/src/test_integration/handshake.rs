@@ -263,7 +263,8 @@ fn protocol_version_is_the_pinned_value() {
     // v95 (terrain T1): 256-block world, JoinAccept.generator,
     //   JoinRequest.generator_fingerprints.
     // v96 (D2c-3 ordered park): handover FreezeFence (13) and Parked (14) frames.
-    assert_eq!(protocol::PROTOCOL_VERSION, 96);
+    // v97 (living world S3): block ids 373..=375 and two ItemNote codes, no packet change.
+    assert_eq!(protocol::PROTOCOL_VERSION, 97);
 }
 
 #[test]

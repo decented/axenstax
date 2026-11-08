@@ -299,6 +299,8 @@ pub fn block_hardness(block_id: BlockId) -> f32 {
         block::COBBLESTONE => 2.0,
         block::OAK_LOG => 4.5,              // Axolittle: 4.5s
         block::OAK_PLANKS | block::CRAFTING_TABLE => 2.0,
+        // Living world S3 — a table is boards; the Commons Stone is cobblestone.
+        block::FEAST_TABLE | block::FEAST_MARKER | block::COMMONS_STONE => 2.0,
         // Spec 48 Phase 4 — the Water Wheel is a plank build; mine it like planks.
         block::WATER_WHEEL | block::WATER_WHEEL_TURNING => 2.0,
         // Wind wave §2.2 — the Windmill is canvas on planks; same rung.
@@ -362,7 +364,7 @@ pub fn break_work(block_id: BlockId, harvestable: bool, was_player_placed: bool)
 /// Best tool type for a block.
 pub fn best_tool_for(block_id: BlockId) -> Option<ToolType> {
     match block_id {
-        block::STONE | block::COBBLESTONE | block::SANDSTONE
+        block::STONE | block::COBBLESTONE | block::SANDSTONE | block::COMMONS_STONE
         | block::COAL_ORE | block::IRON_ORE | block::DIAMOND_ORE
         | block::COAL_BLOCK | block::IRON_BLOCK | block::DIAMOND_BLOCK
         | block::DEEPSLATE_COAL_ORE
@@ -375,7 +377,8 @@ pub fn best_tool_for(block_id: BlockId) -> Option<ToolType> {
         // so Phase 3b's variant rollout is automatic.
         id if block::is_pure_deepslate_family(id) => Some(ToolType::Pickaxe),
         block::DIRT | block::GRASS | block::SAND | block::GRAVEL | block::SNOW => Some(ToolType::Shovel),
-        block::OAK_LOG | block::OAK_PLANKS | block::CRAFTING_TABLE => Some(ToolType::Axe),
+        block::OAK_LOG | block::OAK_PLANKS | block::CRAFTING_TABLE
+        | block::FEAST_TABLE | block::FEAST_MARKER => Some(ToolType::Axe),
         // Building variants: woods want an axe, stones a pickaxe.
         id => crate::building_variants::best_tool(id),
     }
@@ -970,6 +973,15 @@ pub fn match_recipe(grid: &[[CraftSlot; 3]; 3]) -> Option<ItemStack> {
         let planks = CraftSlot::Block(block::OAK_PLANKS);
         if r0 == [wool, wool, wool] && r1 == [planks, planks, planks] {
             return Some(ItemStack::new_block(block::BED, 1));
+        }
+        // Living world S3 — Feast Table: three planks over two sticks with a
+        // loaf between them (PPP / SBS) → 1 table. Any plank species.
+        let loaf = CraftSlot::Material(MaterialId::Bread);
+        let stick_leg = CraftSlot::Material(MaterialId::Stick);
+        if r0.iter().all(|s| matches!(s, CraftSlot::Block(b) if block::is_any_planks(*b)))
+            && r1 == [stick_leg, loaf, stick_leg]
+        {
+            return Some(ItemStack::new_block(block::FEAST_TABLE, 1));
         }
         // Pet Bed (2026-07-06 pets wave): W.W / PPP — wool tufts at the top
         // corners over a solid plank base (a basket, not a mattress). Kept
@@ -1948,6 +1960,18 @@ pub fn match_recipe(grid: &[[CraftSlot; 3]; 3]) -> Option<ItemStack> {
             && grid[min_r + 2][min_c + 2] == stick;
         if ring_sticks && grid[min_r + 1][min_c + 1] == leather {
             return Some(ItemStack::new_block(block::ITEM_FRAME, 1));
+        }
+
+        // Living world S3 — Commons Stone: 8 cobblestone round 1 sapling (any
+        // species) → 1 stone.
+        let cobble_slot = CraftSlot::Block(block::COBBLESTONE);
+        let ring_cobble = [(0, 0), (0, 1), (0, 2), (1, 0), (1, 2), (2, 0), (2, 1), (2, 2)]
+            .iter()
+            .all(|&(r, c)| grid[min_r + r][min_c + c] == cobble_slot);
+        if ring_cobble
+            && matches!(grid[min_r + 1][min_c + 1], CraftSlot::Block(b) if block::is_sapling_block(b))
+        {
+            return Some(ItemStack::new_block(block::COMMONS_STONE, 1));
         }
     }
 
@@ -3849,6 +3873,55 @@ mod tests {
             _ => panic!("expected item frame block"),
         }
         assert_eq!(out.count, 1);
+    }
+
+    #[test]
+    fn three_planks_over_two_sticks_and_a_loaf_make_a_feast_table() {
+        // Living world S3 — PPP / SBS, any plank species, anywhere on the grid.
+        for (row, col) in [(0, 0), (1, 0), (1, 0)] {
+            let mut g = empty_grid();
+            for c in 0..3 {
+                g[row][col + c] = CraftSlot::Block(block::BIRCH_PLANKS);
+            }
+            g[row + 1][col] = CraftSlot::Material(MaterialId::Stick);
+            g[row + 1][col + 1] = CraftSlot::Material(MaterialId::Bread);
+            g[row + 1][col + 2] = CraftSlot::Material(MaterialId::Stick);
+            let out = match_recipe(&g).expect("planks + sticks + bread -> table");
+            assert_eq!((out.item, out.count), (Item::Block(block::FEAST_TABLE), 1));
+        }
+        // No bread, no table; and the Bed's wool row is not planks.
+        let mut g = empty_grid();
+        for c in 0..3 {
+            g[0][c] = CraftSlot::Block(block::OAK_PLANKS);
+        }
+        g[1][0] = CraftSlot::Material(MaterialId::Stick);
+        g[1][2] = CraftSlot::Material(MaterialId::Stick);
+        assert!(match_recipe(&g).is_none(), "a table needs its loaf");
+    }
+
+    #[test]
+    fn eight_cobblestone_round_any_sapling_make_a_commons_stone() {
+        // Living world S3 — a ring of cobblestone round one sapling, any species.
+        for sapling in [block::SAPLING_OAK, block::SAPLING_BIRCH, block::SAPLING_SPRUCE, block::SAPLING_ACACIA] {
+            let mut g = empty_grid();
+            for r in 0..3 {
+                for c in 0..3 {
+                    g[r][c] = CraftSlot::Block(block::COBBLESTONE);
+                }
+            }
+            g[1][1] = CraftSlot::Block(sapling);
+            let out = match_recipe(&g).expect("cobble ring + sapling -> commons stone");
+            assert_eq!((out.item, out.count), (Item::Block(block::COMMONS_STONE), 1));
+        }
+        // An empty centre is the furnace, not the stone; a log is no sapling.
+        let mut g = empty_grid();
+        for r in 0..3 {
+            for c in 0..3 {
+                g[r][c] = CraftSlot::Block(block::COBBLESTONE);
+            }
+        }
+        g[1][1] = CraftSlot::Block(block::OAK_LOG);
+        assert_ne!(match_recipe(&g).map(|s| s.item), Some(Item::Block(block::COMMONS_STONE)));
     }
 
     #[test]

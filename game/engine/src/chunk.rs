@@ -47,6 +47,12 @@ pub struct Chunk {
     /// `machine_counts_*` tests pin both against a full recount.
     pistons: u16,
     hoppers: u16,
+    /// Living world S3 — how many cells hold a Commons Stone, and how many a
+    /// Feast Marker. Maintained exactly like the machine counters, so the
+    /// bloom feed and the Plot/Commons overlap checks skip every chunk that
+    /// has none (`World::commons_areas` / `feast_markers`).
+    commons: u16,
+    feast_markers: u16,
     /// Spec 30 — packed per-voxel light: `(sky_light << 4) | block_light`.
     /// Each nibble is 0..15. Initialised to 0 (dark); world-gen + place
     /// hooks fill in via the `lighting` BFS module. Not persisted on
@@ -76,6 +82,8 @@ impl Chunk {
             non_air: 0,
             pistons: 0,
             hoppers: 0,
+            commons: 0,
+            feast_markers: 0,
             light: [0; CHUNK_VOLUME],
             placed: [0; PLACED_WORDS],
             mesh_dirty: true,
@@ -113,7 +121,6 @@ impl Chunk {
 
     /// Keep slice 2b — call `f` with the local `(x, y, z)` of every cell holding
     /// `block`. A flat scan of the array, so a whole world costs milliseconds.
-    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn for_each_cell_of(&self, block: BlockId, mut f: impl FnMut(usize, usize, usize)) {
         if self.is_empty() {
             return;
@@ -163,6 +170,8 @@ impl Chunk {
         let counter = match block {
             crate::block::PISTON | crate::block::STICKY_PISTON => &mut self.pistons,
             crate::block::HOPPER => &mut self.hoppers,
+            crate::block::COMMONS_STONE => &mut self.commons,
+            crate::block::FEAST_MARKER => &mut self.feast_markers,
             _ => return,
         };
         if add {
@@ -182,6 +191,26 @@ impl Chunk {
     #[inline]
     pub(crate) fn has_hoppers(&self) -> bool {
         self.hoppers != 0
+    }
+
+    /// Does this chunk hold at least one Commons Stone? O(1).
+    #[inline]
+    pub(crate) fn has_commons(&self) -> bool {
+        self.commons != 0
+    }
+
+    /// Does this chunk hold at least one Feast Marker? O(1).
+    #[inline]
+    pub(crate) fn has_feast_markers(&self) -> bool {
+        self.feast_markers != 0
+    }
+
+    /// Full recount of (commons stones, feast markers) — the oracle the
+    /// maintained counters are tested against. Test-only.
+    #[cfg(test)]
+    pub(crate) fn recount_gatherings(&self) -> (usize, usize) {
+        let count = |id: BlockId| self.blocks.iter().filter(|&&b| b == id).count();
+        (count(crate::block::COMMONS_STONE), count(crate::block::FEAST_MARKER))
     }
 
     /// Full recount of (pistons, hoppers) — the oracle the maintained
@@ -373,12 +402,15 @@ impl Chunk {
         let mut blocks = [AIR; CHUNK_VOLUME];
         let mut non_air = 0u16;
         let (mut pistons, mut hoppers) = (0u16, 0u16);
+        let (mut commons, mut feast_markers) = (0u16, 0u16);
         for (i, chunk) in data[..block_bytes].as_chunks::<2>().0.iter().enumerate() {
             blocks[i] = u16::from_le_bytes(*chunk);
             non_air += u16::from(blocks[i] != AIR);
             match blocks[i] {
                 crate::block::PISTON | crate::block::STICKY_PISTON => pistons += 1,
                 crate::block::HOPPER => hoppers += 1,
+                crate::block::COMMONS_STONE => commons += 1,
+                crate::block::FEAST_MARKER => feast_markers += 1,
                 _ => {}
             }
         }
@@ -393,6 +425,8 @@ impl Chunk {
             non_air,
             pistons,
             hoppers,
+            commons,
+            feast_markers,
             light: [0; CHUNK_VOLUME],
             placed,
             mesh_dirty: true,
@@ -665,6 +699,45 @@ mod tests {
         empty.set(0, 0, 0, STONE);
         assert_count_exact(&empty, "edit after load");
         assert_eq!(empty.non_air_count(), 1);
+    }
+
+    // ── maintained Commons / Feast Marker counters (living world S3) ─
+
+    #[test]
+    fn gathering_counts_match_a_full_recount_after_random_edits() {
+        use crate::block::{COMMONS_STONE, FEAST_MARKER, FEAST_TABLE};
+        let palette = [AIR, STONE, COMMONS_STONE, FEAST_MARKER, FEAST_TABLE, DIRT];
+        let exact = |c: &Chunk, what: &str| {
+            let (commons, markers) = c.recount_gatherings();
+            assert_eq!(c.has_commons(), commons > 0, "{what}: has_commons");
+            assert_eq!(c.has_feast_markers(), markers > 0, "{what}: has_feast_markers");
+            assert_eq!(usize::from(c.commons), commons, "{what}: commons counter");
+            assert_eq!(usize::from(c.feast_markers), markers, "{what}: marker counter");
+        };
+        let mut c = Chunk::new();
+        exact(&c, "new");
+        let mut rng = 0x9E37_79B9_7F4A_7C15u64;
+        for step in 0..20_000 {
+            let r = next(&mut rng);
+            let (x, y, z) = ((r & 15) as usize, ((r >> 4) & 15) as usize, ((r >> 8) & 15) as usize);
+            c.set(x, y, z, palette[((r >> 16) % palette.len() as u64) as usize]);
+            if step % 97 == 0 {
+                exact(&c, &format!("step {step}"));
+            }
+        }
+        exact(&c, "after 20,000 random edits");
+        let back = Chunk::from_bytes(&c.as_bytes()).expect("round trip");
+        exact(&back, "from_bytes");
+        assert_eq!(back.recount_gatherings(), c.recount_gatherings());
+        let mut d = Chunk::new();
+        d.set(1, 1, 1, COMMONS_STONE);
+        d.set(1, 1, 1, COMMONS_STONE);
+        d.set(2, 1, 1, FEAST_MARKER);
+        exact(&d, "same block again");
+        d.set(1, 1, 1, FEAST_MARKER);
+        d.set(2, 1, 1, AIR);
+        exact(&d, "swapped");
+        assert!(!d.has_commons() && d.has_feast_markers());
     }
 
     // ── maintained piston / hopper counters ──────────────────────────

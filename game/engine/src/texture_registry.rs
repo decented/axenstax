@@ -347,6 +347,9 @@ static TEXTURE_KEYS: &[&str] = &[
     // Windmill idle/turning (509..=510, Wind, Copper & Electricity wave §2.2,
     // 2026-09-07), lock-step with generate_textures / `block::TEX_WINDMILL*`.
     "blocks/windmill", "blocks/windmill_turning",
+    // Feast Table top (511, living world S3, 2026-11-08), lock-step with
+    // generate_textures / `block::TEX_FEAST_TABLE`.
+    "blocks/feast_table",
 ];
 
 /// Override base layers in place from a disk pack: for each layer whose key has

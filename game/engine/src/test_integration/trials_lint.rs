@@ -105,6 +105,8 @@ fn event_variant_name(e: &ChallengeEvent) -> &'static str {
         ChallengeEvent::SaveSkin => "SaveSkin",
         ChallengeEvent::SpawnRig => "SpawnRig",
         ChallengeEvent::PlaceWentGrey => "PlaceWentGrey",
+        ChallengeEvent::HoldFeast => "HoldFeast",
+        ChallengeEvent::ClaimCommons => "ClaimCommons",
     }
 }
 

@@ -218,6 +218,13 @@ pub enum ChallengeEvent {
     /// §1.7). Fired once per session by `bloom::BloomField`; never in a trial
     /// arena world. Unlocks the act-two shelf.
     PlaceWentGrey,
+    /// The player held a Feast: a Feast Table was used with guests near and
+    /// became a Feast Marker (living-world spec §3). Fired for the local
+    /// holder only, from `game_loop.rs`; a joiner fires no trial events.
+    HoldFeast,
+    /// The player placed a Commons Stone (living-world spec §4). Fired locally
+    /// on placement from `game_loop.rs`.
+    ClaimCommons,
 }
 
 /// Which self-driving power source turned, for [`ChallengeEvent::SourceTurned`].
@@ -266,6 +273,8 @@ enum ChallengeEventWire {
     SaveSkin,
     SpawnRig,
     PlaceWentGrey,
+    HoldFeast,
+    ClaimCommons,
 }
 
 impl Serialize for ChallengeEvent {
@@ -322,7 +331,9 @@ impl ChallengeEvent {
             | (CompleteBuildGuide, CompleteBuildGuide)
             | (SaveSkin, SaveSkin)
             | (SpawnRig, SpawnRig)
-            | (PlaceWentGrey, PlaceWentGrey) => true,
+            | (PlaceWentGrey, PlaceWentGrey)
+            | (HoldFeast, HoldFeast)
+            | (ClaimCommons, ClaimCommons) => true,
             _ => false,
         }
     }
@@ -1073,6 +1084,8 @@ pub fn event_task_label(event: &ChallengeEvent, count: u32) -> String {
         ChallengeEvent::SaveSkin => "Save your painted skin and wear it".to_string(),
         ChallengeEvent::SpawnRig => "Spawn your rig".to_string(),
         ChallengeEvent::PlaceWentGrey => "Let a place go grey".to_string(),
+        ChallengeEvent::HoldFeast => "Hold a feast".to_string(),
+        ChallengeEvent::ClaimCommons => "Declare a Commons".to_string(),
     }
 }
 
@@ -2471,7 +2484,7 @@ mod tests {
         // The four unit-variant events added with the wave. Cheap, but it pins
         // that `matches` didn't collapse any two of them into one arm.
         use ChallengeEvent::*;
-        let unit = [CompleteBuildGuide, SaveSkin, SpawnRig, PlaceWentGrey];
+        let unit = [CompleteBuildGuide, SaveSkin, SpawnRig, PlaceWentGrey, HoldFeast, ClaimCommons];
         for want in unit {
             for got in unit {
                 assert_eq!(

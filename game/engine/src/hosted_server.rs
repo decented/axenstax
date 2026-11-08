@@ -70,6 +70,7 @@ mod strict_edit;
 mod strict_attack;
 mod strict_interact;
 mod strict_door;
+mod feast; // Living world S3 — the authority's half of the Feast.
 mod strict_item;
 mod strict_drop;
 #[cfg(test)]
@@ -3428,6 +3429,11 @@ impl HostedServer {
             self.send_to_joined_slot(i, &pkt);
             return;
         }
+        // Living world S3 — a Feast Table pays the whole stack and needs its
+        // guests: its own rule (`feast`), judged the same way as any block use.
+        if self.judge_block_use(i, cell) == Ok(crate::block_use::UseKind::Feast) {
+            return self.serve_feast(i, seq, cell, hotbar_slot, held);
+        }
         let pos = (cell[0], cell[1], cell[2]);
         let stack = held.clone().map(|item| crate::item::ItemStack { item, count: 1 });
         let creative = self.server.play_mode.is_creative();
@@ -6654,6 +6660,19 @@ impl HostedServer {
         if !block_change_within_reach(dx * dx + dy * dy + dz * dz, reach_kind, reach_id, false) {
             return Err(EditRefusal::Reach);
         }
+        // Living world S3 — a Plot and a Commons may not overlap, either way
+        // round (`commons`): judged for every seat and play mode, as the local
+        // placement arm does (creative bypasses build protection, not a claim).
+        if current != bc.new_block {
+            let world = &self.server.world;
+            if (bc.new_block == crate::block::COMMONS_STONE
+                && crate::commons::stone_overlaps_a_plot(&world.plots, bc.x, bc.z))
+                || (bc.new_block == crate::block::PLOT_MARKER
+                    && crate::commons::plot_overlaps_a_commons(&world.commons_areas(), bc.x, bc.z))
+            {
+                return Err(EditRefusal::Claimed);
+            }
+        }
         if sp.server_simulated {
             self.remote_may_touch(sp, bc.x, bc.z)?;
             let npub = verified_npub(sp.verified_pubkey);
@@ -7602,6 +7621,9 @@ pub(crate) enum EditRefusal {
     EconomyOwner,
     /// Inside a plot the joiner doesn't own.
     ForeignPlot,
+    /// Living world S3 — a Commons Stone over a Plot, or a Plot Marker over a
+    /// Commons (`commons`): the land is claimed.
+    Claimed,
 }
 
 impl EditRefusal {
@@ -7615,7 +7637,11 @@ impl EditRefusal {
         use crate::item_actions::ItemNote;
         match self {
             EditRefusal::Reach => ItemNote::OutOfReach,
-            EditRefusal::PlayMode | EditRefusal::ForeignPlot | EditRefusal::EconomyOwner | EditRefusal::Protected => {
+            EditRefusal::PlayMode
+            | EditRefusal::ForeignPlot
+            | EditRefusal::EconomyOwner
+            | EditRefusal::Protected
+            | EditRefusal::Claimed => {
                 ItemNote::NotHere
             }
             EditRefusal::Malformed | EditRefusal::OutOfWorld | EditRefusal::Unloaded => ItemNote::None,

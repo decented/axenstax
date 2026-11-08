@@ -166,6 +166,11 @@ pub enum ItemNote {
     /// C3c-3b — an `Attach` of blank Blueprint Paper on a face that isn't a
     /// floor's Top: blank paper only lies flat.
     NotAFloor = 28,
+    /// Living world S3 (v97) — a Feast Table used with no guest within reach.
+    /// Nothing is taken. The toast is `feast::NEEDS_GUESTS_TOAST`.
+    NeedsGuests = 29,
+    /// Living world S3 — a Feast Table used with an empty hand. Nothing happens.
+    NothingToShare = 30,
 }
 
 impl ItemNote {
@@ -205,6 +210,8 @@ impl ItemNote {
             26 => NotDryEnough,
             27 => FaceCovered,
             28 => NotAFloor,
+            29 => NeedsGuests,
+            30 => NothingToShare,
             _ => None,
         }
     }
@@ -237,6 +244,8 @@ impl ItemNote {
             NotDryEnough => Some("The stick wasn't dry enough."),
             FaceCovered => Some("That face is already covered."),
             NotAFloor => Some("Blank paper only lies flat on a floor."),
+            NeedsGuests => Some(crate::feast::NEEDS_GUESTS_TOAST),
+            NothingToShare => Some(crate::feast::NOTHING_TO_SHARE_TOAST),
         }
     }
 }

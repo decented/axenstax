@@ -302,6 +302,9 @@ specific one" — see §6 for what that implies for your arena.
 | `CompleteBuildGuide` | A laid build-along guide finishes — every cell of the plan verifies `Correct`. | Unfiltered (no per-plan filter). |
 | `SaveSkin` | A painted avatar skin is pinned in the Workshop: saved to the wardrobe **and** worn. | Unfiltered. |
 | `SpawnRig` | A rig authored in Rig Studio is spawned into the world. | Unfiltered. |
+| `PlaceWentGrey` | A place in the player's own world went grey (living-world bloom, spec §1.7). Once per session; never inside a trial arena. | Unfiltered. |
+| `HoldFeast` | A Feast Table was used with guests near and became a Feast Marker (living-world spec §3). The local holder only; a joiner fires no trial events. Needs a second player or a village near the table. | Unfiltered. |
+| `ClaimCommons` | A Commons Stone was placed (living-world spec §4). The local player only. | Unfiltered. |
 
 **`SourceTurned` JSON encoding:**
 ```json

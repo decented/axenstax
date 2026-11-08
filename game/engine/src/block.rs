@@ -644,6 +644,21 @@ pub const WATER_WHEEL_TURNING: BlockId = 317;
 pub const WINDMILL: BlockId = 318;
 pub const WINDMILL_TURNING: BlockId = 319;
 
+// Living world, Tier 1 (S3, 2026-11-08). The Feast and Commons blocks, minted
+// after the building variants (320..=372; `building_variants::END_NEW_ID`).
+// Spec: docs/superpowers/specs/2026-11-08-living-world-tier1.md §3, §4.
+/// A table laid for a feast: use it while holding a stack with guests near,
+/// and the stack is shared out and the table becomes a [`FEAST_MARKER`].
+pub const FEAST_TABLE: BlockId = 373;
+/// What a Feast Table becomes once the feast is held. Its `block_meta` byte is
+/// the number of guests fed (0-255, `feast::guest_meta`). Nothing else reads
+/// that byte for this block (every meta consumer is keyed on its own block id),
+/// so it needs no bit layout. Breaks into a Feast Table.
+pub const FEAST_MARKER: BlockId = 374;
+/// Declares a Commons: the same 33 x 33 footprint as a Plot (`plot::PLOT_HALF_EXTENT`),
+/// open to everyone to build in. May not overlap any Plot.
+pub const COMMONS_STONE: BlockId = 375;
+
 /// The planted-sapling block for a species. Symmetric counterpart to
 /// `species_for_sapling` (which IS live, via `is_sapling_block`); this forward
 /// direction has no caller yet.
@@ -1460,6 +1475,11 @@ pub const TEX_COPPER_ORE: u32 = 508;
 /// with `generate_textures`.
 pub const TEX_WINDMILL: u32 = 509;
 pub const TEX_WINDMILL_TURNING: u32 = 510;
+/// Feast Table top (S3, living world Tier 1): a cloth laid over the boards.
+/// The last free layer under the 512 device floor (`texture_count()` 512).
+/// Appended after the Windmill layers for the same post-tint reason. The sides
+/// reuse `TEX_OAK_PLANKS`; the Feast Marker reuses all of these.
+pub const TEX_FEAST_TABLE: u32 = 511;
 // #30 building-detail blocks (2026-06-16). Ladder = oak rails + rungs with
 // transparent gaps; Carpet = near-white tintable wool weave.
 pub const TEX_LADDER: u32 = 374;
@@ -3331,6 +3351,30 @@ impl BlockRegistry {
             });
         }
 
+        // Living world, Tier 1 (S3) — the Feast and Commons blocks (373..=375),
+        // pushed after the building variants. The table's cloth top is the one
+        // new layer; the marker reuses it; the Commons Stone is cobblestone
+        // with a grassy top (no new layer: the atlas is at its 512 floor).
+        debug_assert_eq!(blocks.len(), FEAST_TABLE as usize, "the Feast blocks follow the building variants");
+        blocks.push(BlockDef { // 373 FEAST_TABLE
+            name: "genesis:feast_table",
+            solid: true, transparent: false, gravity: false,
+            color: [0.82, 0.66, 0.42],
+            tex_top: TEX_FEAST_TABLE, tex_bottom: TEX_OAK_PLANKS, tex_side: TEX_OAK_PLANKS,
+        });
+        blocks.push(BlockDef { // 374 FEAST_MARKER
+            name: "genesis:feast_marker",
+            solid: true, transparent: false, gravity: false,
+            color: [0.82, 0.66, 0.42],
+            tex_top: TEX_FEAST_TABLE, tex_bottom: TEX_OAK_PLANKS, tex_side: TEX_OAK_PLANKS,
+        });
+        blocks.push(BlockDef { // 375 COMMONS_STONE
+            name: "genesis:commons_stone",
+            solid: true, transparent: false, gravity: false,
+            color: [0.46, 0.56, 0.40],
+            tex_top: TEX_GRASS_TOP, tex_bottom: TEX_COBBLESTONE, tex_side: TEX_COBBLESTONE,
+        });
+
         Self { blocks, leaves_fast: false }
     }
 
@@ -3364,6 +3408,9 @@ impl BlockRegistry {
             // when the player fells the tree. The live RUBBER_LOG itself
             // mines to GreenLog via the multi-species log arm above.
             RUBBER_LOG_TAPPED => ItemStack::new_material(MaterialId::GreenLog, 1),
+            // Living world S3 — a held feast leaves a marker; breaking it gives
+            // back a table to lay the next one (the marker is never an item).
+            FEAST_MARKER => ItemStack::new_block(FEAST_TABLE, 1),
             // Mob Bounty Board — drops itself as a placeable material.
             BOUNTY_BOARD => ItemStack::new_material(MaterialId::BountyBoardItem, 1),
             // Tip Jar — drops itself. Anti-grief on non-owner break is
@@ -3909,7 +3956,12 @@ mod tests {
         // The building variants (320..=372) follow the Windmill; the first id past them is unknown.
         assert!(reg.is_known(WINDMILL_TURNING + 1));
         assert!(reg.is_known(crate::building_variants::END_NEW_ID - 1));
-        assert!(!reg.is_known(crate::building_variants::END_NEW_ID));
+        // The Feast and Commons blocks (373..=375) follow the variants.
+        assert_eq!(crate::building_variants::END_NEW_ID, FEAST_TABLE);
+        assert!(reg.is_known(FEAST_TABLE));
+        assert!(reg.is_known(FEAST_MARKER));
+        assert!(reg.is_known(COMMONS_STONE));
+        assert!(!reg.is_known(COMMONS_STONE + 1));
         assert!(!reg.is_known(u16::MAX));
     }
 

@@ -44,7 +44,12 @@ pub const WORLD_SAVE_FIELD_COUNT: u32 = 56;
 /// The version moves with the first new block id, for EVERY world this build
 /// writes (whether or not it holds a new block), so old builds take their
 /// existing "needs a newer version" refusal instead.
-pub const SAVE_LAYOUT_REVISION: u32 = 4;
+///
+/// 5 (living world S3, block ids 373..=375: Feast Table, Feast Marker, Commons
+/// Stone): the same reason as 4. Moves the version for every world this build
+/// writes, so builds before it refuse a world instead of reading a table or a
+/// Commons Stone as AIR and saving the hole back. No `WorldSave` field was added.
+pub const SAVE_LAYOUT_REVISION: u32 = 5;
 
 /// The `world.dat` format version this build writes, and the newest it opens.
 /// Monotonic: both terms only ever increase.
@@ -75,7 +80,8 @@ pub const SAVE_FORMAT_VERSION: u32 = WORLD_SAVE_FIELD_COUNT + SAVE_LAYOUT_REVISI
 /// | 58     | 55     | 3        | c31080c1 (y 255 + terrain generator record)       | `worldgen_version`|
 /// | 58     | 54     | 4        | fbf2fd87 (building variants, block ids)           | `quest_world`     |
 /// | 59     | 55     | 4        | ed9678f7 (merge of the two)                       | `worldgen_version`|
-/// | 60     | 56     | 4        | Keep slice 2a (the authority clock; this build)   | `authority_clock` |
+/// | 60     | 56     | 4        | Keep slice 2a (the authority clock)               | `authority_clock` |
+/// | 61     | 56     | 5        | living world S3 (block ids 373..=375; this build) | `authority_clock` |
 ///
 /// Footers 52 and below are not strictly checked. Sorted by footer, ascending.
 /// The newest entry is written as literals on purpose: bumping
@@ -90,6 +96,7 @@ pub const FOOTER_FIELD_COUNTS: &[(u32, &[u32])] = &[
     (58, &[54, 55]),
     (59, &[55]),
     (60, &[56]),
+    (61, &[56]),
 ];
 
 /// The field counts a footer `version` was written with (empty for a footer the
@@ -378,16 +385,17 @@ mod tests {
     /// loading them as AIR and saving the holes back.
     #[test]
     fn a_world_written_now_carries_the_building_variants_version() {
-        assert_eq!(SAVE_FORMAT_VERSION, 60, "56 fields + layout revision 4");
+        // 61 as of living world S3 (block ids 373..=375): layout revision 5.
+        assert_eq!(SAVE_FORMAT_VERSION, 61, "56 fields + layout revision 5");
         // The world holds no new block, and still carries the new version.
         let bytes = encode_world_save(&minimal_world_save_for_tests(5)).unwrap();
-        assert_eq!(split_save_footer(&bytes).1, Some(60));
+        assert_eq!(split_save_footer(&bytes).1, Some(61));
         assert!(check_version(split_save_footer(&bytes).1).is_ok(), "this build opens its own save");
-        // A build that stopped at 59 refuses this footer (60 > 59) the same
-        // way this build refuses 61: `check_version` is the one rule.
+        // A build that stopped at 60 refuses this footer (61 > 60) the same
+        // way this build refuses 62: `check_version` is the one rule.
         assert_eq!(
-            check_version(Some(60 + 1)),
-            Err(WorldSaveError::NewerVersion { found: 61, supported: 60 }),
+            check_version(Some(61 + 1)),
+            Err(WorldSaveError::NewerVersion { found: 62, supported: 61 }),
             "a footer one version past this build is refused"
         );
         let mut next = bincode::serialize(&minimal_world_save_for_tests(5)).unwrap();

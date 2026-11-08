@@ -3384,6 +3384,8 @@ impl super::GameState {
         self.world.total_work = 0;
         self.world.total_ticks = 0;
         self.world.pop_exposure.clear();
+        self.world.feast_events.clear();
+        self.feast_toast = None;
         #[cfg(not(target_arch = "wasm32"))]
         {
             self.pending_block_changes.clear();
@@ -12292,6 +12294,11 @@ impl super::GameState {
                                 self.players[pidx].arm_break_cooldown();
                                 let _prev = self.world.get_block(pos[0], pos[1], pos[2]);
                                 self.world.set_block(pos[0], pos[1], pos[2], block::AIR);
+                                // Living world S3 — a broken Feast Marker takes its
+                                // guest count (the meta byte) with it.
+                                if _prev == block::FEAST_MARKER {
+                                    self.world.set_meta((pos[0], pos[1], pos[2]), 0);
+                                }
                                 // F1 Wave 2 — breaking one door half removes the
                                 // other (no dupe / no orphan).
                                 if crate::block_shape::is_door(_prev) {
@@ -12731,6 +12738,11 @@ impl super::GameState {
                                     // clear the placed flag so a future natural
                                     // block here isn't wrongly excluded from work.
                                     self.world.set_placed(pos[0], pos[1], pos[2], false);
+                                    // Living world S3 — a broken Feast Marker takes its
+                                    // guest count (the meta byte) with it.
+                                    if blk == block::FEAST_MARKER {
+                                        self.world.set_meta((pos[0], pos[1], pos[2]), 0);
+                                    }
                                     // Spec 48 §2.3 — a manual break must
                                     // re-evaluate power. Drop the PowerDevice
                                     // entity (else a broken lever/lamp/generator
@@ -14952,6 +14964,26 @@ impl super::GameState {
                         self.players[pidx].open_chest = Some(pos_key);
                         if pidx == 0 { self.release_cursor(); }
                         continue;
+                    } else if target_blk == block::FEAST_TABLE {
+                        // Living world S3 — a Feast Table: share the held stack
+                        // out among the guests near (`feast::hold`, one rule for
+                        // every path). A joiner asks the authority, which gathers
+                        // its own guests and spawns the drops (`serve_feast`).
+                        if self.joined() {
+                            self.send_block_use(pidx, pos, crate::block_use::UseKind::Feast);
+                            continue;
+                        }
+                        if self.use_feast_table(pidx, pos) {
+                            self.fire_challenge(crate::scenario::ChallengeEvent::HoldFeast);
+                        }
+                        self.players[pidx].place_cooldown = 8;
+                        continue;
+                    } else if target_blk == block::FEAST_MARKER {
+                        // Living world S3 — a held feast's marker: its name and
+                        // how many it fed (this client's own copy of the meta).
+                        self.use_feast_marker(pos);
+                        self.players[pidx].place_cooldown = 8;
+                        continue;
                     } else if target_blk == block::COMPOSTER {
                         // Spec 49 (Explosives) — Composter: right-click with a
                         // compostable item (seeds / crops / saplings, or Compost
@@ -16502,6 +16534,20 @@ impl super::GameState {
                                     {
                                         Some(("Too close to another player's plot.", 3))
                                     }
+                                    // Living world S3 — a Plot and a Commons may not
+                                    // overlap, either way round (spec §4). A joiner's
+                                    // world holds no plots, so there the authority
+                                    // judges the Stone (`validate_block_edit`).
+                                    Some(block::COMMONS_STONE)
+                                        if crate::commons::stone_overlaps_a_plot(&self.world.plots, place_x, place_z) =>
+                                    {
+                                        Some((crate::commons::CLAIMED_TOAST, 3))
+                                    }
+                                    Some(block::PLOT_MARKER)
+                                        if crate::commons::plot_overlaps_a_commons(&self.world.commons_areas(), place_x, place_z) =>
+                                    {
+                                        Some((crate::commons::CLAIMED_TOAST, 3))
+                                    }
                                     _ => None,
                                 };
                                 if let Some((why, secs)) = refusal {
@@ -16790,6 +16836,18 @@ impl super::GameState {
                                         ));
                                         // Phase 3 — coverage-challenge ClaimPlot event.
                                         self.fire_challenge(crate::scenario::ChallengeEvent::ClaimPlot);
+                                    }
+                                    // Living world S3 — a Commons Stone declares a
+                                    // Commons (33 x 33, open to everyone). Single-player
+                                    // and a host's seats; a joiner's stone stands or goes
+                                    // on the authority's word (an overlap with a plot is
+                                    // refused there) and fires no trial event.
+                                    if block_to_place == block::COMMONS_STONE && !self.joined() {
+                                        self.toast = Some((
+                                            "Commons declared. Anyone may build here.".to_string(),
+                                            Instant::now() + Duration::from_secs(3),
+                                        ));
+                                        self.fire_challenge(crate::scenario::ChallengeEvent::ClaimCommons);
                                     }
                                     // Spec 37 — Market Bell place handler.
                                     // Designates a discovery zone owned by the
@@ -22671,10 +22729,19 @@ impl super::GameState {
     /// hand nothing is sent.
     pub(crate) fn send_block_use(&mut self, pidx: usize, cell: [i32; 3], kind: crate::block_use::UseKind) {
         if self.pack_window_frozen(pidx) { return; }
-        self.send_block_request(pidx, cell, |held| crate::joiner_actions::Asked::UseBlock {
-            cell,
-            kind,
-            claim: crate::block_use::claim(kind, held),
+        // Living world S3 — a feast pays the WHOLE stack in hand, so that is what
+        // the request claims while it is in flight.
+        let hot = self.players[pidx].hotbar_slot;
+        let stack_count = self.players[pidx].inventory.hotbar_slot(hot).map_or(0, |s| s.count);
+        if kind == crate::block_use::UseKind::Feast && stack_count > 0 {
+            self.expect_feast_toast(cell);
+        }
+        self.send_block_request(pidx, cell, |held| {
+            let mut claim = crate::block_use::claim(kind, held);
+            if kind == crate::block_use::UseKind::Feast && claim > 0 {
+                claim = stack_count;
+            }
+            crate::joiner_actions::Asked::UseBlock { cell, kind, claim }
         });
     }
 
@@ -22900,8 +22967,15 @@ impl super::GameState {
     fn block_use_feedback(&mut self, request: &crate::joiner_actions::Pending, out: &crate::protocol::ItemActionOutcomePacket) {
         use crate::block_use::{Effect, UseKind};
         let crate::joiner_actions::Asked::UseBlock { cell, kind, .. } = request.kind else { return };
+        // Living world S3 — a held feast: the marker, the confetti and the
+        // holder's toast arrive with the block change (`feast_client`).
+        if kind == UseKind::Feast {
+            self.audio.play_gem_pickup();
+            return;
+        }
         let paid = out.consume_held > 0;
         let effect = match kind {
+            UseKind::Feast => Effect::None,
             UseKind::Composter if paid => Effect::Loaded,
             UseKind::Composter => Effect::Collected,
             UseKind::DryingRack if paid => Effect::Hung,
@@ -23027,6 +23101,10 @@ impl super::GameState {
         // C3c-2 — a refused cast puts no line out.
         if request.kind == crate::joiner_actions::Asked::Cast {
             self.players[0].fishing = None;
+        }
+        // Living world S3 — a refused feast has no marker coming.
+        if matches!(request.kind, crate::joiner_actions::Asked::UseBlock { kind: crate::block_use::UseKind::Feast, .. }) {
+            self.feast_toast = None;
         }
         // C3b-2 — a rack's "not ready yet" says how far it is, from our view
         // of the server's rack.

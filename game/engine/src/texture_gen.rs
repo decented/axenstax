@@ -682,7 +682,47 @@ pub fn generate_textures() -> Vec<Vec<u8>> {
     textures.push(gen_windmill());         // 509: TEX_WINDMILL
     textures.push(gen_windmill_turning()); // 510: TEX_WINDMILL_TURNING
 
+    // Feast Table top (2026-11-08, living-world Tier 1 S3) — the last free
+    // layer under the 512 floor. The Feast Marker and the sides reuse layers.
+    textures.push(gen_feast_table()); // 511: TEX_FEAST_TABLE
+
     textures
+}
+
+/// Feast Table top (511) — a cream cloth with a woven check and a red-and-gold
+/// border, laid over the boards: the one block that reads "a meal is meant to
+/// happen here" from across a field.
+fn gen_feast_table() -> Vec<u8> {
+    let mut px = vec![0u8; PIXELS];
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let n = (px_hash(x, y, 7310) % 7) as i32 - 3;
+            let edge = x.min(y).min(SIZE - 1 - x).min(SIZE - 1 - y);
+            let (r, g, b) = if edge == 0 {
+                // The bare boards showing at the very rim.
+                (150, 112, 70)
+            } else if edge == 1 || edge == 2 {
+                // Red-and-gold border: gold line, then red band.
+                if edge == 1 { (214, 170, 66) } else { (176, 52, 48) }
+            } else if (x / 2 + y / 2) % 2 == 0 {
+                // Cream check, light square.
+                (240, 228, 200)
+            } else {
+                // Cream check, shaded square.
+                (226, 212, 180)
+            };
+            set_pixel(&mut px, x, y, clamp_u8(r + n), clamp_u8(g + n), clamp_u8(b + n));
+        }
+    }
+    // A loaf and a jug at the centre, so the cloth is not mistaken for a rug.
+    for (x, y, c) in [
+        (6, 6, (196, 140, 70)), (7, 6, (206, 152, 80)), (8, 6, (196, 140, 70)),
+        (6, 7, (176, 118, 56)), (7, 7, (190, 132, 64)), (8, 7, (176, 118, 56)),
+        (10, 8, (110, 150, 190)), (10, 9, (96, 134, 176)),
+    ] {
+        set_pixel(&mut px, x, y, c.0, c.1, c.2);
+    }
+    px
 }
 
 /// Water Wheel (506) — a paddle wheel seen side-on: eight wooden paddles on an
@@ -2146,6 +2186,8 @@ pub fn texture_count() -> u32 {
     //   Spec 02 §1) — same post-tint reasoning as the Water Wheel.
     // + 2 Windmill layers (509..=510, Wind, Copper & Electricity wave §2.2,
     //   2026-09-07) — 511 total, one layer under the 512 floor.
+    // + 1 Feast Table top (511, living world S3, 2026-11-08) — 512 total, AT
+    //   the 512 floor.
     POST_TINT_LAYER_START + POST_TINT_LAYER_COUNT
 }
 
@@ -2158,9 +2200,11 @@ pub const POST_TINT_LAYER_START: u32 = PRE_TINT_LAYER_COUNT + tint_run_len();
 /// How many layers live at/after [`POST_TINT_LAYER_START`]: the Water Wheel
 /// idle + turning faces (Spec 48 Phase 4), the Copper Ore layer, and the
 /// Windmill idle + turning faces (both Wind, Copper & Electricity wave,
-/// 2026-09-07). Five layers → `texture_count()` = 511, ONE under the 512
-/// device floor — the next block layer has to buy its room somewhere.
-pub const POST_TINT_LAYER_COUNT: u32 = 5;
+/// 2026-09-07), and the Feast Table top (living world S3, 2026-11-08). Six
+/// layers → `texture_count()` = 512, EXACTLY the 512 device floor — the next
+/// block layer has to buy its room somewhere (or the floor has to rise in all
+/// four website sites).
+pub const POST_TINT_LAYER_COUNT: u32 = 6;
 
 /// Total layers the species-tint bake produces (47 today). `const fn` so
 /// [`POST_TINT_LAYER_START`] is a compile-time constant — iterators aren't
@@ -6327,6 +6371,24 @@ mod tests {
         assert_eq!(
             crate::texture_registry::texture_index("blocks/windmill_turning"),
             Some(crate::block::TEX_WINDMILL_TURNING)
+        );
+    }
+
+    /// Living world S3 — the Feast Table top sits at `TEX_FEAST_TABLE`, is a
+    /// real opaque layer, and takes the atlas to exactly the 512 floor.
+    #[test]
+    fn feast_table_layer_sits_at_its_constant_and_fills_the_atlas() {
+        assert_eq!(crate::block::TEX_FEAST_TABLE, POST_TINT_LAYER_START + 5);
+        assert_eq!(texture_count(), 512, "the Feast Table top is the last free layer");
+        let layers = generate_textures();
+        assert_eq!(layers.len() as u32, texture_count());
+        let top = &layers[crate::block::TEX_FEAST_TABLE as usize];
+        assert_eq!(top.len(), PIXELS);
+        assert!(top.chunks(4).all(|p| p[3] == 255), "an opaque block face must be fully opaque");
+        assert_ne!(top, &layers[crate::block::TEX_OAK_PLANKS as usize], "the cloth is not the planks");
+        assert_eq!(
+            crate::texture_registry::texture_index("blocks/feast_table"),
+            Some(crate::block::TEX_FEAST_TABLE)
         );
     }
 

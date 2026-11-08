@@ -82,6 +82,8 @@ pub enum FuzzyKind {
     #[allow(dead_code)]
     Plank,
     Paper,
+    /// Any sapling species (the Commons Stone's centre).
+    Sapling,
 }
 
 /// One line of a recipe's shapeless bill of materials (display + search +
@@ -1296,6 +1298,39 @@ fn push_gap_close_cards(out: &mut Vec<RecipeCard>) {
         RecipeCategory::Decoration,
     ));
 
+    // Living world S3 — Feast Table: three planks over two sticks with a
+    // loaf between them → 1 table. Any plank species.
+    out.push(card(
+        "Feast Table",
+        ItemStack::new_block(block::FEAST_TABLE, 1),
+        vec![
+            RecipeIngredient { item: Item::Block(block::OAK_PLANKS), count: 3, fuzzy: Some(FuzzyKind::Plank) },
+            mat(M::Stick, 2),
+            mat(M::Bread, 1),
+        ],
+        grid(&[
+            (0, 0, p), (0, 1, p), (0, 2, p),
+            (1, 0, STICK), (1, 1, CraftSlot::Material(M::Bread)), (1, 2, STICK),
+        ]),
+        RecipeCategory::Decoration,
+    ));
+
+    // Living world S3 — Commons Stone: 8 cobblestone round any sapling → 1.
+    out.push(card(
+        "Commons Stone",
+        ItemStack::new_block(block::COMMONS_STONE, 1),
+        vec![
+            blk(block::COBBLESTONE, 8),
+            RecipeIngredient { item: Item::Block(block::SAPLING_OAK), count: 1, fuzzy: Some(FuzzyKind::Sapling) },
+        ],
+        grid(&[
+            (0, 0, cobble), (0, 1, cobble), (0, 2, cobble),
+            (1, 0, cobble), (1, 1, CraftSlot::Block(block::SAPLING_OAK)), (1, 2, cobble),
+            (2, 0, cobble), (2, 1, cobble), (2, 2, cobble),
+        ]),
+        RecipeCategory::Decoration,
+    ));
+
     // crafting.rs:1897-1903 — Cobblestone Wall: a 3×2 block of cobblestone
     // → 6 walls.
     out.push(card(
@@ -1450,6 +1485,9 @@ fn item_satisfies(inv_item: &Item, ing: &RecipeIngredient) -> bool {
         }
         Some(FuzzyKind::Paper) => {
             crate::crafting::is_paperish_slot(CraftSlot::from_item(inv_item))
+        }
+        Some(FuzzyKind::Sapling) => {
+            matches!(inv_item, Item::Block(b) if block::is_sapling_block(*b))
         }
         None => match (inv_item, &ing.item) {
             (Item::Block(a), Item::Block(b)) => a == b,
@@ -1616,7 +1654,8 @@ mod tests {
         // 348 as of 2026-10-24: 295 + 53, one generated card per building-variant
         // id (every wood's slab/stairs/door/trapdoor/gate, every stone's
         // slab/stairs/wall) that had no authored card.
-        assert_eq!(all_cards().len(), 348, "catalogue size changed to {}", all_cards().len());
+        // 350 as of 2026-11-08 (living world S3): + the Feast Table and the Commons Stone.
+        assert_eq!(all_cards().len(), 350, "catalogue size changed to {}", all_cards().len());
     }
 
     /// UX polish sweep Task 3 — the non-obvious craftables (a kid can't

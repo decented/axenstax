@@ -259,6 +259,10 @@ pub fn block_has_remote_apply_effects(b: BlockId) -> bool {
     crate::power::device_kind_for_block(b).is_some()
         || mirrored_family(b).is_some()
         || b == block::PLOT_MARKER
+        // Living world S3 — a table -> marker change raises the confetti and
+        // the bloom surge when it is SEEN, so a backlog must not fold it away.
+        || b == block::FEAST_TABLE
+        || b == block::FEAST_MARKER
 }
 
 impl BlockEntityData {
@@ -868,7 +872,17 @@ pub struct World {
     /// with a host's lend and a host's breaks and its joiners' (which the
     /// server rolls, C1) share one clock. Transient; never persisted.
     pub pop_exposure: AHashMap<(i32, i32, i32), u64>,
+    /// Living world S3 — feasts held in this world since `GameState` last
+    /// looked, as `(x, y, z, guests)`: pushed where a Feast Table becomes a
+    /// Feast Marker (`feast::convert`, the authority's, or a received block
+    /// change, `apply_remote_block_change`), drained each tick for the confetti
+    /// and `BloomField::note_feast`. Transient; never persisted or sent. Capped
+    /// ([`FEAST_EVENTS_CAP`]) so a server nobody drains cannot grow it.
+    pub feast_events: Vec<(i32, i32, i32, u8)>,
 }
+
+/// The most feasts [`World::feast_events`] holds undrained.
+pub const FEAST_EVENTS_CAP: usize = 32;
 
 /// #19 Rig Studio — one placed authored rig: where it stands, which way it
 /// faces, and the `RiggedModel` (skeleton + per-part block assignments).
@@ -971,6 +985,7 @@ impl World {
             rigs: Vec::new(),
             sim_tally: crate::sim_lend::SimTally::default(),
             pop_exposure: AHashMap::new(),
+            feast_events: Vec::new(),
         }
     }
 
@@ -2038,6 +2053,7 @@ impl World {
         self.plots.clear();
         self.market_hubs.clear();
         self.pop_exposure.clear();
+        self.feast_events.clear();
         // Plan registry deliberately preserved — engine-bundled
         // content is constant across world resets.
     }
@@ -2085,6 +2101,52 @@ impl World {
     /// [`Self::chunks_with_pistons`]).
     pub(crate) fn chunks_with_hoppers(&self) -> impl Iterator<Item = ((i32, i32, i32), &Chunk)> {
         self.chunks.iter().filter(|(_, c)| c.has_hoppers()).map(|(&k, c)| (k, c))
+    }
+
+    /// Note that a feast was held at `cell` for `guests` guests (see
+    /// [`Self::feast_events`]).
+    pub fn note_feast(&mut self, cell: (i32, i32, i32), guests: u8) {
+        if self.feast_events.len() < FEAST_EVENTS_CAP {
+            self.feast_events.push((cell.0, cell.1, cell.2, guests));
+        }
+    }
+
+    /// Every Commons footprint in the loaded world (living world S3): one per
+    /// Commons Stone, found by walking only the chunks whose maintained
+    /// counter says they hold one. Evicted columns are not seen. Sorted, so
+    /// the list is deterministic.
+    pub fn commons_areas(&self) -> Vec<crate::bloom::CommonsArea> {
+        let mut out: Vec<(i32, i32)> = Vec::new();
+        for (&(cx, cy, cz), chunk) in self.chunks.iter().filter(|(_, c)| c.has_commons()) {
+            let (ox, oz) = (cx * CHUNK_SIZE as i32, cz * CHUNK_SIZE as i32);
+            let _ = cy;
+            chunk.for_each_cell_of(block::COMMONS_STONE, |x, _y, z| out.push((ox + x as i32, oz + z as i32)));
+        }
+        out.sort_unstable();
+        out.dedup();
+        out.into_iter().map(|(x, z)| crate::bloom::CommonsArea::from_marker(x, z)).collect()
+    }
+
+    /// Does a Commons footprint in the loaded world overlap the block
+    /// rectangle `min..=max` (inclusive, x and z)?
+    pub fn commons_overlaps(&self, min_x: i32, max_x: i32, min_z: i32, max_z: i32) -> bool {
+        self.commons_areas().iter().any(|c| c.overlaps(min_x, max_x, min_z, max_z))
+    }
+
+    /// Every Feast Marker in the loaded world as `(x, z, guests)`, the guest
+    /// count being the cell's meta byte. Only chunks with a marker are walked.
+    /// Sorted.
+    pub fn feast_markers(&self) -> Vec<(i32, i32, u8)> {
+        let mut out: Vec<(i32, i32, i32, u8)> = Vec::new();
+        for (&(cx, cy, cz), chunk) in self.chunks.iter().filter(|(_, c)| c.has_feast_markers()) {
+            let (ox, oy, oz) = (cx * CHUNK_SIZE as i32, cy * CHUNK_SIZE as i32, cz * CHUNK_SIZE as i32);
+            chunk.for_each_cell_of(block::FEAST_MARKER, |x, y, z| {
+                let (wx, wy, wz) = (ox + x as i32, oy + y as i32, oz + z as i32);
+                out.push((wx, wy, wz, self.meta_at(wx, wy, wz)));
+            });
+        }
+        out.sort_unstable();
+        out.into_iter().map(|(x, _y, z, g)| (x, z, g)).collect()
     }
 
     /// Get block at world-space position.
@@ -2262,6 +2324,11 @@ impl World {
             crate::block_use::drop_left_state(self, pos, old_block, bc.new_block);
             if old_block == block::PLOT_MARKER && bc.new_block != block::PLOT_MARKER {
                 self.release_plot(pos);
+            }
+            // Living world S3 — a table that became a marker is a feast held.
+            // (Its guest count rides `bc.meta`, set just below.)
+            if old_block == block::FEAST_TABLE && bc.new_block == block::FEAST_MARKER {
+                self.note_feast(pos, bc.meta);
             }
         }
         if meta_changed {
@@ -3421,7 +3488,7 @@ mod tests {
         for b in [
             CHEST, COPPER_CHEST, FURNACE, FURNACE_LIT, DISPENSER, GRAVE, VENDOR_BLOCK, TIP_JAR,
             AUCTION_BLOCK, LEVER, BATTERY, ELECTRIC_LAMP, ELECTRIC_LAMP_LIT, WINDMILL,
-            PLOT_MARKER,
+            PLOT_MARKER, FEAST_TABLE, FEAST_MARKER,
         ] {
             assert!(block_has_remote_apply_effects(b), "block {b} carries apply side effects");
         }

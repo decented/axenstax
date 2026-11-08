@@ -312,6 +312,7 @@ fn ingredient_hint(card: &crafting_catalogue::RecipeCard, registry: &BlockRegist
                 Some(crafting_catalogue::FuzzyKind::Log) => "Any Log".to_string(),
                 Some(crafting_catalogue::FuzzyKind::Plank) => "Any Plank".to_string(),
                 Some(crafting_catalogue::FuzzyKind::Paper) => "Any Paper".to_string(),
+                Some(crafting_catalogue::FuzzyKind::Sapling) => "Any Sapling".to_string(),
                 None => ing.item.name(registry),
             };
             format!("{}× {}", ing.count, label)

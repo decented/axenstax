@@ -39,6 +39,12 @@ pub enum UseKind {
     Campfire,
     ItemFrame,
     Hive,
+    /// Living world S3 — a Feast Table. Its rule is [`crate::feast`]'s, which
+    /// needs the table's guests and so can't run in [`use_block_admitted`]:
+    /// the local arm and `HostedServer::serve_feast` each gather them. It is a
+    /// kind here so a joiner's request, its claim and its refusal travel the
+    /// ordinary `UseBlock` path; it holds no block-entity state.
+    Feast,
 }
 
 impl UseKind {
@@ -50,6 +56,7 @@ impl UseKind {
             block::CAMPFIRE | block::CAMPFIRE_UNLIT => Some(UseKind::Campfire),
             block::ITEM_FRAME => Some(UseKind::ItemFrame),
             block::BEE_HIVE => Some(UseKind::Hive),
+            block::FEAST_TABLE => Some(UseKind::Feast),
             _ => None,
         }
     }
@@ -453,6 +460,8 @@ pub fn use_block_admitted(
             world.insert_hive(cell, hive);
             Ok(used)
         }
+        // The Feast needs its guests: `feast::hold`, run by the caller.
+        UseKind::Feast => Err(ItemNote::NotThatBlock),
     }
 }
 
@@ -523,6 +532,9 @@ pub fn claim(kind: UseKind, held: Option<&Item>) -> u8 {
             matches!(item, Item::Material(MaterialId::Bucket))
                 || matches!(item, Item::Tool(t) if t.tool_type == crate::crafting::ToolType::Shears)
         }
+        // The whole stack goes (`send_block_use` claims its real count): a
+        // Plan never leaves its holder.
+        UseKind::Feast => !matches!(item, Item::Plan(_)),
     };
     u8::from(takes)
 }
@@ -564,7 +576,7 @@ pub fn take_on_break(world: &mut World, cell: (i32, i32, i32), old: BlockId, cre
             world.remove_block_entity(cell);
         }
         Some(UseKind::Hive) => world.remove_block_entity(cell),
-        Some(UseKind::Campfire) | None => {}
+        Some(UseKind::Campfire) | Some(UseKind::Feast) | None => {}
     }
     spill.retain(|s| s.count > 0);
     spill

@@ -4795,5 +4795,37 @@ chunk sections directly), `natural` (the natural top of a touched region by rege
 - `ChallengeEvent::PlaceWentGrey` (unit variant, wire mirror, `matches`, task label, lint name) fires once when a known region
   has level and eco under 0.25, after a 60 s grace, and never in a trial arena or on a joined client.
 - Known limits: a joiner reads sections as the chunk push delivers them, so a half-pushed region can read low for a moment
-  (the slow fall hides it); grass-only plains with no trees or animals read 0.57; the Feast and Commons inputs are empty until S3.
+  (the slow fall hides it); grass-only plains with no trees or animals read 0.57. The Feast and Commons inputs are fed since S3 (§15).
 
+## 15. The Feast and Commons (living world), as built (S3, 2026-11-08)
+
+Source of intent: `docs/superpowers/specs/2026-11-08-living-world-tier1.md` §3 and §4, which carry the full as-built notes. In short:
+
+**Blocks.** `FEAST_TABLE` (373), `FEAST_MARKER` (374), `COMMONS_STONE` (375). All solid, in the creative inventory, `/give feast_table`
+and `/give commons_stone`. The table's cloth top is texture layer 511 (the last free layer: the atlas is now exactly the 512
+device floor); the sides reuse the plank layer; the marker reuses the table's layers; the Commons Stone is cobblestone with a grassy
+top. Recipes: Feast Table = three planks (any species) over a stick, a loaf and a stick (`PPP / SBS`); Commons Stone = eight
+cobblestone round one sapling of any species. A Feast Marker breaks into a Feast Table. Save layout revision 5 (format 61) and
+protocol 97 (Spec 02, Spec 04).
+
+**The Feast.** Using a Feast Table while holding a stack shares the WHOLE stack among its guests (`feast.rs`, one rule for every
+path): other players within 48 blocks and villagers or peddlers within 32 (the nearest 12), the holder never a guest. The share
+splits evenly, the remainder going one apiece to the nearest guests. A player guest's share is dropped as a real item at their
+feet; a villager's is used up. With no guest nothing happens and nothing is taken ("A feast needs guests. Bring friends, or find a
+village."). The table becomes a Feast Marker whose `block_meta` byte is the guest count (0-255; every `block_meta` consumer is keyed
+on its own block id, so none reads it for this block). Using a marker toasts "The Feast of <Name>, N guests." (name from the
+column, two short word lists). Local holders fire `ChallengeEvent::HoldFeast`.
+- Single-player and a host's own seats gather guests from the other local seats, the joiners the host draws and the ECS villagers
+  (`feast_client.rs`).
+- A joiner sends the ordinary `UseBlock`; the authority (`hosted_server/feast.rs`, `serve_feast`) gathers guests from its present
+  and alive players except the holder (a lent host's own seats included) and its ECS, spawns every player guest's drops, converts the
+  table and broadcasts the change. The pay is the whole stack the server's copy of the joiner's window holds in that slot, believed
+  within the existing believed-pay bound when it holds less.
+- Every client that sees the table become a marker (its own act, the authority's on a lent world, or a received block change) plays
+  confetti and calls `BloomField::note_feast`; markers also feed the lasting floor each second.
+
+**Commons.** The footprint is a Plot's (marker +-16). Placing a Commons Stone over any Plot, or a Plot Marker over a Commons, is
+refused ("This land is claimed.") on the local path and in `validate_block_edit` for a joiner. Commons areas are found by scanning
+loaded chunks whose maintained `has_commons` counter is set; nothing stores them. Anyone may build in a Commons and anyone may
+break the stone (decision D10: no break protection before block authorship). `ChallengeEvent::ClaimCommons` fires locally on
+placement. The bloom `k` term and the doubled co-presence rate read the same areas.

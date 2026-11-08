@@ -13,9 +13,10 @@ use crate::meta::{self, Facing};
 use crate::strict_doors::{toggle_metas, OpenRule};
 use crate::test_harness::{TestConfig, TestHost};
 
-/// The texture-layer count before this change. Variants copy their base
-/// block's layers, so it must not move.
-const TEXTURE_COUNT: u32 = 511;
+/// The texture-layer count: the variants copy their base block's layers, so
+/// they add none. (511 before the Feast Table top, the last free layer, was
+/// minted in living-world S3; 512 is the device floor.)
+const TEXTURE_COUNT: u32 = 512;
 
 fn expected_shape(s: VShape) -> BlockShape {
     match s {
@@ -76,7 +77,8 @@ fn every_variant_is_registered_with_its_shape_and_its_materials_textures() {
         assert_eq!(def.name, format!("genesis:{}_{}", m.key, shape.suffix()));
     }
     // Appended after the old last id: nothing renumbered.
-    assert_eq!(reg.len(), bv::END_NEW_ID as usize);
+    // (The three living-world S3 blocks, 373..=375, follow the variants.)
+    assert_eq!(reg.len(), bv::END_NEW_ID as usize + 3);
     assert_eq!(reg.get(block::WINDMILL_TURNING).name, "electricity:windmill_turning");
     assert_eq!(reg.get(block::STONE_SLAB).name, "genesis:stone_slab");
     assert_eq!(reg.get(block::OAK_DOOR).name, "genesis:oak_door");

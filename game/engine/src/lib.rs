@@ -269,6 +269,9 @@ mod tick_catchup;
 mod prediction; // Spec 04 §5.3 — a joiner's prediction + reconciliation of its own body.
 mod block_interact;
 mod falling_blocks;
+mod feast_client; // Living world S3 — the client half: local arms, confetti, bloom feed.
+mod feast; // Living world S3 — the Feast rule (spec §3).
+mod commons; // Living world S3 — Commons footprints and the Plot/Commons overlap rule (spec §4).
 mod growth;
 mod campfire;
 mod composter; // Spec 49 (Explosives) — the farming nitre-bed (Compost → Saltpetre).
@@ -1649,6 +1652,10 @@ pub(crate) struct GameState {
     /// local players is. Presentation only; ticked once per logical tick in
     /// every client mode and reset when a world is entered.
     pub(crate) bloom: crate::bloom::BloomField,
+    /// Living world S3 — a joiner has asked the authority to hold the feast at
+    /// this cell: toast "The Feast of X, N guests." when the table is seen to
+    /// become a marker, until the instant (`feast_client`).
+    pub(crate) feast_toast: Option<((i32, i32, i32), Instant)>,
     /// Living-world presentation: the shader clock and the ambient sound timers
     /// (`bloom::present`).
     pub(crate) bloom_present: crate::bloom::present::BloomPresent,
@@ -2277,6 +2284,7 @@ impl GameState {
             pending_mc_import: None,
             remote_players: Vec::new(),
             bloom: crate::bloom::BloomField::new(),
+            feast_toast: None,
             bloom_present: crate::bloom::present::BloomPresent::default(),
             remote_swing: std::collections::HashMap::new(),
             remote_items: crate::remote_entities::RemoteItems::default(),

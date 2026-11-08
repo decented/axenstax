@@ -52,7 +52,8 @@ pub struct CommonsArea {
 impl CommonsArea {
     /// A Commons Stone's footprint: the same 33 x 33 as a Plot, marker +-16.
     pub fn from_marker(x: i32, z: i32) -> Self {
-        Self { min_x: x - 16, max_x: x + 16, min_z: z - 16, max_z: z + 16 }
+        let h = crate::plot::PLOT_HALF_EXTENT;
+        Self { min_x: x - h, max_x: x + h, min_z: z - h, max_z: z + h }
     }
 
     /// Does this footprint overlap the block rectangle (inclusive)?

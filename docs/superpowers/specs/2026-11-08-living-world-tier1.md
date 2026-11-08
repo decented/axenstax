@@ -109,7 +109,7 @@ Per region, three parts, each 0..1:
 
 Combined: `P = 1 − (1 − c)(1 − f)(1 − k)`. A solo player with no Feast and no Commons has `P = 0`. That is absent, never a penalty.
 
-S1 inputs for slice S3: the field is fed `set_feast_markers(&[(x, z, guests)])` (the lasting floors, whole list replaced),
+S1 inputs for slice S3 (fed since S3, §3.3 and §4.1): the field is fed `set_feast_markers(&[(x, z, guests)])` (the lasting floors, whole list replaced),
 `set_commons(&[CommonsArea])` (whole list replaced; `CommonsArea::from_marker(x, z)` is the 33 x 33 footprint) and
 `note_feast(x, z, guests)` (the surge, region and probes). "Present" players are the local seats plus `remote_players`;
 every player counts in the four regions within 8 blocks of them. Co-presence is real time, never scaled.
@@ -271,6 +271,47 @@ Use a Feast Marker: a toast with its name and guest count.
 
 A joiner's held stack is believed within the existing believed-deposit bound (`window_ops::believe_pay`), like other UseBlock payments. That is an accepted Tier 1 limit.
 
+### 3.3 As built (slice S3, 2026-11-08)
+
+Modules: `feast.rs` (the pure rule: `gather`, `hold`, `name_at`, `convert`, `spawn_drops`), `feast_client.rs` (the local arm,
+the client's reaction, the bloom feed), `hosted_server/feast.rs` (`serve_feast`, the authority). Everything in §3.1 and §3.2 is
+built as written; the details and the deviations:
+
+- **Blocks.** Ids 373-375 after the building variants. `texture_count()` was 511 as expected, so the table took layer 511 (a cream
+  check cloth with a red-and-gold border, a loaf and a jug) and the atlas is now exactly 512, the floor. `FEAST_MARKER` reuses the
+  table's top and the plank sides, so a marker looks like the table it was. `COMMONS_STONE` reuses no mossy layer (there is none):
+  it is cobblestone with a grass top and cobblestone sides. The 512 floor was not touched (no website edit).
+- **Recipes.** Feast Table = `PPP / SBS` (any three planks over a stick, a loaf and a stick; a 2x3 anywhere on the grid).
+  Commons Stone = the 3x3 cobblestone ring round any sapling (`block::is_sapling_block`). The recipe book gets a new fuzzy kind
+  "Any Sapling". `/give feast_table` (also `feast`) and `/give commons_stone` (also `commons`).
+- **Meta byte.** Every `block_meta` reader is keyed on its own block id (water level, door half, device facing, rail power, snow
+  depth, the mesher's shaped blocks), so the marker's guest count needs no bit layout and is stored raw (capped at 255). It rides
+  `BlockChange.meta` (the authority sends `convert`'s change) and the chunk push's `block_meta` rows (a test pins both). A broken
+  marker clears its meta on the local break arms and the authority's edit apply already writes the edit's meta (0 for air).
+- **Guests.** `feast::gather` takes the table's centre, the candidate players and the candidate villagers, filters by 3-D distance
+  (48 and 32), keeps the nearest 12 villagers, and returns everyone nearest first with a deterministic tie-break. The local path
+  passes the other `GameState.players` seats (alive) and `remote_players` (health above zero); the authority passes
+  `GameServer.players` that are present and alive except the holder. Villagers come from `feast::villagers_in` on either ECS.
+- **Authority.** A Feast Table is `UseKind::Feast`, so a joiner's request, its claim (the whole stack count, not 1) and its
+  refusal travel the ordinary `UseBlock` path; `serve_block_use` hands it to `serve_feast` after the usual judging (alive, reach,
+  play mode, plots). The stack is the server's copy of the named hand slot (as it will be once its waiting events land), else one
+  believed; the pay goes through `window_ops::believe_pay`, so a modified client cannot feast a stack it does not hold past the
+  bound. The authority spawns all player-guest drops (a lent host and a dedicated server behave alike), converts the table in the
+  world it serves and queues the block change (`lent_edit_cells` for a lent host's remesh). Two new `ItemNote` codes carry the
+  refusals (`NeedsGuests` 29, `NothingToShare` 30; wire 97).
+- **Seeing a feast.** `World::feast_events` is a capped outbox written by `feast::convert` and by `apply_remote_block_change`
+  (table to marker); `GameState` drains it each tick for the confetti, `BloomField::note_feast` and the holder's joiner toast
+  (a joiner's pending request, `feast_toast`). `block_has_remote_apply_effects` names both blocks so a backed-up outbox cannot fold
+  the change away. A late joiner's marker arrives in its chunk and is no new feast (it still feeds the lasting floor).
+- **Using a marker** is a client-local read of the meta this client already holds; the name is a pure function of the column.
+- **Events.** `HoldFeast` and `ClaimCommons` are on the full checklist (enum, wire mirror, `matches`, task label, lint name,
+  fire sites in `game_loop.rs`). Both fire for the local player only: a joined client fires neither.
+- **Deviations / limits.** A host started with `--no-lend` (the one-release BRIDGE) spawns its own feast's drops in its client
+  world, not its owning server's copy, so joiners do not see them; the lending host and the dedicated server are right. A joiner
+  has no toast when the authority refuses a Commons or Plot placement (no refusal message exists for a plain edit; the block just
+  does not stand), as for a foreign plot today. The creative player's stack is not used up (nothing is, in creative). Commons are
+  found from loaded chunks only, so an evicted column's stone is not seen until it loads.
+
 ## 4. Commons
 
 - `COMMONS_STONE` (375): solid, stone-like, reusing an existing texture (D9).
@@ -285,6 +326,19 @@ A joiner's held stack is believed within the existing believed-deposit bound (`w
   - Building inside a Commons area is open to everyone, as on unclaimed land. Breaking protection waits for Tier 2 (D10).
 - **Bloom:** the `k` term and the doubled co-presence rate (§1.3).
 - **Event:** `ChallengeEvent::ClaimCommons`, fired locally when a Commons Stone is placed.
+
+### 4.1 As built (slice S3, 2026-11-08)
+
+`commons.rs` holds the footprint and the two overlap predicates (`stone_overlaps_a_plot`, `plot_overlaps_a_commons`);
+`CommonsArea::from_marker` now uses `plot::PLOT_HALF_EXTENT`. `Chunk` keeps `commons` and `feast_markers` counters beside
+`pistons` and `hoppers` (maintained in `set` and `from_bytes`, pinned against a recount), and `World::commons_areas` /
+`World::feast_markers` walk only chunks with a non-zero counter. The local placement arm refuses with "This land is claimed."
+before the item is taken; `validate_block_edit` refuses the same two cases for any seat and play mode (`EditRefusal::Claimed`,
+note `NotHere`), against the authority's plots (a joiner's world holds none) and the loaded Commons. A Plot Marker a joiner
+places creates no `PlotData` today (the economy-owner convergence is open debt), so for a joiner the Plot half only keeps the
+marker block out of a Commons. `GameState::tick_gatherings` (called from `tick_bloom`, every client mode) feeds `BloomField`
+every tenth tick from those counters. Placing the stone fires `ClaimCommons` on a non-joined client and toasts
+"Commons declared. Anyone may build here."
 
 ## 5. The adult layer: the Tally and world bloom
 

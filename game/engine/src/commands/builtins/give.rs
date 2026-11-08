@@ -210,6 +210,9 @@ fn block_by_name(key: &str) -> Option<BlockId> {
         "cobblestone_wall" | "cobble_wall" | "wall" => Some(block::COBBLESTONE_WALL),
         "oak_sign" | "sign" => Some(block::OAK_SIGN),
         "item_frame" | "frame" => Some(block::ITEM_FRAME),
+        // Living world S3 — the Feast and Commons blocks.
+        "feast_table" | "feasttable" | "feast" => Some(block::FEAST_TABLE),
+        "commons_stone" | "commonsstone" | "commons" => Some(block::COMMONS_STONE),
         // Smelting + redstone-equivalent blocks — added so Trials challenge kits
         // (Smith / Engineer) can hand them out. The engine-managed PISTON_HEAD is
         // deliberately NOT giveable.
