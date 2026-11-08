@@ -269,6 +269,18 @@ pub fn parse_web_value(value: &str) -> Option<(u64, Vec<u8>)> {
     Some((ms.parse().ok()?, base64_decode(b64)?))
 }
 
+/// The postcard keys to delete, in order, when the web quota is full and the
+/// trials store needs room: oldest postcard first (a value with no readable
+/// time counts as oldest of all, ties by key). `entries` is `(key, ms)`; only
+/// keys under [`WEB_KEY_PREFIX`] are ever returned, so nothing else in the
+/// origin's storage can be chosen.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub fn eviction_order(entries: &[(String, u64)]) -> Vec<String> {
+    let mut mine: Vec<&(String, u64)> = entries.iter().filter(|(k, _)| k.starts_with(WEB_KEY_PREFIX)).collect();
+    mine.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+    mine.into_iter().map(|(k, _)| k.clone()).collect()
+}
+
 /// Encode a native-size postcard (RGBA, `POSTCARD_W`×`POSTCARD_H`) for the web:
 /// down the ladder until the stored value fits. `None` when none fits.
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
@@ -737,6 +749,32 @@ mod tests {
         assert!(save("not-a-trial", &rgba, 1).is_none());
         assert!(newest_png("../evil").is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_full_web_quota_evicts_the_oldest_postcards_first_and_nothing_else() {
+        let e = |k: &str, ms: u64| (k.to_string(), ms);
+        let entries = vec![
+            e("axenstax_postcard_smelt", 300),
+            e("axenstax_trials", 1),
+            e("axenstax_postcard_sprint", 100),
+            e("axenstax_wardrobe", 2),
+            e("axenstax_postcard_kill", 0),
+            e("axenstax_postcard_build", 200),
+        ];
+        assert_eq!(
+            eviction_order(&entries),
+            vec![
+                "axenstax_postcard_kill",
+                "axenstax_postcard_sprint",
+                "axenstax_postcard_build",
+                "axenstax_postcard_smelt",
+            ]
+        );
+        assert!(eviction_order(&[e("axenstax_trials", 5)]).is_empty());
+        // Equal times fall back to key order, so the result is stable.
+        let tie = vec![e("axenstax_postcard_b", 7), e("axenstax_postcard_a", 7)];
+        assert_eq!(eviction_order(&tie), vec!["axenstax_postcard_a", "axenstax_postcard_b"]);
     }
 
     #[test]

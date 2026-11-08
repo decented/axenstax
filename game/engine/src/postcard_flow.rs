@@ -10,6 +10,12 @@ use web_time::{Duration, Instant};
 /// How long the burst plays before the picture is taken.
 const MOMENT: Duration = Duration::from_millis(650);
 
+/// How many frames the GPU read-back may take before the picture is given up
+/// on (about three seconds at 60 frames a second). A read-back that never
+/// completes (a lost device, a throttled tab) must not hold the card's
+/// "developing" slot for the rest of the run.
+const READBACK_FRAME_LIMIT: u32 = 180;
+
 /// Where the postcard flow is for the current run.
 #[derive(Default)]
 pub(crate) enum PostcardFlow {
@@ -18,8 +24,9 @@ pub(crate) enum PostcardFlow {
     Idle,
     /// The burst is playing; the picture is taken at `at`.
     Moment { token: &'static str, at: Instant },
-    /// The picture is being read back from the GPU.
-    Capturing { token: &'static str },
+    /// The picture is being read back from the GPU; `frames` counts the
+    /// frames spent waiting (see [`READBACK_FRAME_LIMIT`]).
+    Capturing { token: &'static str, frames: u32 },
     /// Done for this run: the picture, if one was kept.
     Shown { tex: Option<egui::TextureHandle> },
 }
@@ -43,6 +50,11 @@ impl PostcardFlow {
             PostcardFlow::Shown { tex } => tex.as_ref().map_or(PostcardSlot::None, |t| PostcardSlot::Ready(t.id())),
         }
     }
+}
+
+/// Has the read-back waited long enough (this many frames) to be dropped?
+fn readback_expired(frames_waited: u32) -> bool {
+    frames_waited >= READBACK_FRAME_LIMIT
 }
 
 /// Turn a kept postcard into an egui texture.
@@ -76,15 +88,23 @@ impl crate::GameState {
             PostcardFlow::Moment { token, at } if Instant::now() >= *at => {
                 let token = *token;
                 self.postcard = if self.renderer.start_postcard_capture(0, aspect) {
-                    PostcardFlow::Capturing { token }
+                    PostcardFlow::Capturing { token, frames: 0 }
                 } else {
                     PostcardFlow::Shown { tex: None }
                 };
             }
-            PostcardFlow::Capturing { token } => {
-                let token = *token;
+            PostcardFlow::Capturing { token, frames } => {
+                let (token, frames) = (*token, *frames);
                 match self.renderer.poll_postcard_capture() {
-                    crate::renderer::PostcardPoll::Pending => {}
+                    crate::renderer::PostcardPoll::Pending => {
+                        if readback_expired(frames + 1) {
+                            // Give up quietly: the card keeps the art and no postcard.
+                            self.renderer.cancel_postcard_capture();
+                            self.postcard = PostcardFlow::Shown { tex: None };
+                        } else {
+                            self.postcard = PostcardFlow::Capturing { token, frames: frames + 1 };
+                        }
+                    }
                     crate::renderer::PostcardPoll::Ready { rgba, width, height } => {
                         let tex = crate::postcard::crop_and_reduce(
                             &rgba,
@@ -122,7 +142,16 @@ mod tests {
         assert_eq!(PostcardFlow::Idle.slot(), PostcardSlot::None);
         let moment = PostcardFlow::Moment { token: "sprint", at: Instant::now() };
         assert_eq!(moment.slot(), PostcardSlot::Developing);
-        assert_eq!(PostcardFlow::Capturing { token: "sprint" }.slot(), PostcardSlot::Developing);
+        assert_eq!(PostcardFlow::Capturing { token: "sprint", frames: 0 }.slot(), PostcardSlot::Developing);
         assert_eq!(PostcardFlow::Shown { tex: None }.slot(), PostcardSlot::None);
+    }
+
+    #[test]
+    fn a_read_back_that_never_completes_is_dropped_after_a_few_seconds() {
+        assert!(!readback_expired(0));
+        assert!(!readback_expired(READBACK_FRAME_LIMIT - 1));
+        assert!(readback_expired(READBACK_FRAME_LIMIT));
+        // Three seconds at 60 frames a second, give or take.
+        assert!((150..=240).contains(&READBACK_FRAME_LIMIT));
     }
 }
