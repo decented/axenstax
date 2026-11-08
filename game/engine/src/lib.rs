@@ -1649,6 +1649,9 @@ pub(crate) struct GameState {
     /// local players is. Presentation only; ticked once per logical tick in
     /// every client mode and reset when a world is entered.
     pub(crate) bloom: crate::bloom::BloomField,
+    /// Living-world presentation: the shader clock and the ambient sound timers
+    /// (`bloom::present`).
+    pub(crate) bloom_present: crate::bloom::present::BloomPresent,
     /// Fund-the-Reserve dialog state (Spec 16 Phase 5). `Some` while the
     /// dialog is open; `None` when closed. Opened by clicking the
     /// "Fund the Reserve" button in the F3 gauge.
@@ -2274,6 +2277,7 @@ impl GameState {
             pending_mc_import: None,
             remote_players: Vec::new(),
             bloom: crate::bloom::BloomField::new(),
+            bloom_present: crate::bloom::present::BloomPresent::default(),
             remote_swing: std::collections::HashMap::new(),
             remote_items: crate::remote_entities::RemoteItems::default(),
             remote_projectiles: crate::remote_entities::RemoteProjectiles::default(),
@@ -3845,6 +3849,8 @@ fn run_shot_workshop(args: &[String]) {
         params: [1.0, 0.0, 0.0, 0.0],
         cam_right: [1.0, 0.0, 0.0, 0.0],
         cam_up: [0.0, 1.0, 0.0, 0.0],
+        bloom_origin: crate::camera::BLOOM_ORIGIN_OFF,
+        bloom_grid: crate::camera::BLOOM_GRID_NEUTRAL,
     };
     renderer.update_camera(0, &camera_uniform);
     renderer.render_to_png(&out_path);
@@ -3968,7 +3974,7 @@ fn run_screenshot(args: &[String]) {
     } else {
         [0.3, 1.0, 0.5, 1.0]
     };
-    let camera_uniform = CameraUniform {
+    let mut camera_uniform = CameraUniform {
         view_proj: view_proj.to_cols_array_2d(),
         camera_pos: [eye.x, eye.y, eye.z, 0.0],
         sun_dir: sun,
@@ -3976,7 +3982,19 @@ fn run_screenshot(args: &[String]) {
         params: [1.0, 0.0, 0.0, 0.0],
         cam_right: [1.0, 0.0, 0.0, 0.0],
         cam_up: [0.0, 1.0, 0.0, 0.0],
+        bloom_origin: crate::camera::BLOOM_ORIGIN_OFF,
+        bloom_grid: crate::camera::BLOOM_GRID_NEUTRAL,
     };
+    // Test hook: `--bloom <level>` forces every bloom cell to that level
+    // (0 = grey, 1 = vivid) so the colour grade can be looked at.
+    if let Some(level) = args
+        .iter()
+        .position(|a| a == "--bloom")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|v| v.parse::<f32>().ok())
+    {
+        crate::bloom::present::force_flat(&mut camera_uniform, level, 0.0);
+    }
     renderer.update_camera(0, &camera_uniform);
 
     // Owner-inbox #18 — upload the per-type baked micro-model shells so the

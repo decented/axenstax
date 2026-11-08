@@ -1141,6 +1141,8 @@ impl Renderer {
             params: [1.0, 0.0, 0.0, 0.0],
         cam_right: [1.0, 0.0, 0.0, 0.0],
         cam_up: [0.0, 1.0, 0.0, 0.0],
+        bloom_origin: crate::camera::BLOOM_ORIGIN_OFF,
+        bloom_grid: crate::camera::BLOOM_GRID_NEUTRAL,
         };
         let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("camera_uniform"),
@@ -1891,6 +1893,8 @@ impl Renderer {
             params: [1.0, 0.0, 0.0, 0.0],
         cam_right: [1.0, 0.0, 0.0, 0.0],
         cam_up: [0.0, 1.0, 0.0, 0.0],
+        bloom_origin: crate::camera::BLOOM_ORIGIN_OFF,
+        bloom_grid: crate::camera::BLOOM_GRID_NEUTRAL,
         };
         let camera_buffer = self.device.create_buffer_init(
             &wgpu::util::BufferInitDescriptor {
@@ -2896,6 +2900,8 @@ impl Renderer {
             params: [1.0, 0.0, 0.0, 0.0],
         cam_right: [1.0, 0.0, 0.0, 0.0],
         cam_up: [0.0, 1.0, 0.0, 0.0],
+        bloom_origin: crate::camera::BLOOM_ORIGIN_OFF,
+        bloom_grid: crate::camera::BLOOM_GRID_NEUTRAL,
         };
 
         let device = &self.device;
@@ -3018,6 +3024,8 @@ impl Renderer {
                 params: [1.0, 0.0, 0.0, 0.0],
         cam_right: [1.0, 0.0, 0.0, 0.0],
         cam_up: [0.0, 1.0, 0.0, 0.0],
+        bloom_origin: crate::camera::BLOOM_ORIGIN_OFF,
+        bloom_grid: crate::camera::BLOOM_GRID_NEUTRAL,
             };
             self.queue.write_buffer(
                 &gpu.viewmodel_camera_buffer,
@@ -3508,6 +3516,8 @@ impl Renderer {
             params: [1.0, 0.0, 0.0, 0.0],
         cam_right: [1.0, 0.0, 0.0, 0.0],
         cam_up: [0.0, 1.0, 0.0, 0.0],
+        bloom_origin: crate::camera::BLOOM_ORIGIN_OFF,
+        bloom_grid: crate::camera::BLOOM_GRID_NEUTRAL,
         };
         let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("camera_uniform"),
@@ -5457,6 +5467,8 @@ fn make_viewmodel_camera(
         params: [1.0, 0.0, 0.0, 0.0],
         cam_right: [1.0, 0.0, 0.0, 0.0],
         cam_up: [0.0, 1.0, 0.0, 0.0],
+        bloom_origin: crate::camera::BLOOM_ORIGIN_OFF,
+        bloom_grid: crate::camera::BLOOM_GRID_NEUTRAL,
     };
     let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("viewmodel_camera_uniform"),

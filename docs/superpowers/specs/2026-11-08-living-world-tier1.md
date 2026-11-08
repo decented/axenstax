@@ -199,6 +199,41 @@ New particle emitters in `particles.rs`, both using `TEX_PARTICLE_SOFT`:
 
 They are spawned from the existing ambient loop round each local player. The rate is scaled by the local level and is zero below 0.45.
 
+### 2.4 As built (slice S2, 2026-11-08)
+
+Module `bloom/present.rs` (pure curves, the uniform fill, the sound scheduler, the mote spawner; the `game_loop.rs` additions are
+four call sites: the uniform fill beside `update_camera`, `bloom_ambient_sound` and `bloom_ambient_life` in the particle frame
+block, and the reset on a world change). Unit tests pin grid packing, the grade curve, the bilinear sampler, sway amplitude,
+sound intervals and mote rates. Colour was checked by eye with the headless screenshot hook: `axenstax-engine --screenshot
+out.png --bloom <level> --time 12000` forces every cell to a level (level 0 reads clearly grey with a cool cast, sky included;
+level 1 reads a saturated, warm green).
+
+- **Colour.** As specced, with these details. `bloom_origin` = (min-corner x, min-corner z, cell size, shader clock in
+  seconds); a cell size of 0 means the grid is off (every non-game path: headless, avatar preview, viewmodel), which grades and
+  sways nothing. The grid is centred on each viewport's own camera (`camera_pos`, so the third-person and Director cameras
+  work). The grade runs on the lit colour *before* the fog mix, at terrain (`fs_main`, which entities and micro-models also use),
+  plants, water and transparent solids; avatars and paintings are not graded. Sky and fog share one horizon colour
+  (`sky_horizon()`), graded once by the camera's own cell, so land fading into fog still meets the sky. The curve is
+  continuous at 0.45 and 0.75; the cool cast is x(0.95, 0.98, 1.04) at level 0 and the warm lift x(1.04, 1.015, 0.95) at level 1.
+  Bilinear sampling uses cell centres as the sample points and clamps at the edges. Particles are not graded.
+- **Grass sway.** Built. The plant pipeline has its own vertex shader (`vs_plant`), so solid blocks never move. The tip leans
+  (root fixed, quadratic in height) by 0 at or below level 0.3, 0.035 blocks at 0.6, 0.06 at 1.0, phased by the plant's
+  position so a meadow ripples. It applies to every instanced plant (grass, flowers and crops alike). The level is read at the
+  plant, per vertex.
+- **Sound.** `Sound::Birdsong`, `BirdsongTrill` and `BirdsongWhistle` (the "variants", chosen by a seed) and `Sound::Insects`,
+  all synthesised from tone layers, peaks under 0.15. `play_birdsong(seed)` and `play_insects()` exist on the native and web
+  engines. Each local player has a timer: birdsong by day (sky brightness 0.5 and over), insects by night (0.2 and under), nothing
+  at twilight or in rain, nothing below level 0.3. The interval is 20 s at 0.3, 12 s at 0.45 and 3 s at 1.0, jittered by 30%
+  either way; the first sound comes 3 to 9 s after arriving. Several local players each have their own timer and share one
+  audio engine. Master volume and mute are the audio engine's own.
+- **Life.** `ParticleSystem::pollen_mote` (day) and `firefly` (night), both on `TEX_PARTICLE_SOFT`. `Particle` gained `blink`
+  (pulses per second; 0 = steady): a blinking mote pulses its alpha on its own phase (taken from its unique `max_life`) and is not
+  dimmed by the dark around it. Rates per second near a player: none below 0.45; pollen rises to 0.6 at 0.75 and 2.5 at 1.0;
+  fireflies to 0.4 and 1.6. Spawned in the 0.15 s ambient pulse within 14 blocks, a little above the ground found by
+  `surface_kill_y`; halved on Reduced, absent on Off (the pool cap), and none at twilight or in rain.
+- **Skipped.** Nothing in §2 is skipped. Not done: positional audio (the engine has none), and sounds for remote players
+  (the loop only knows local seats).
+
 ## 3. The Feast
 
 ### 3.1 Blocks

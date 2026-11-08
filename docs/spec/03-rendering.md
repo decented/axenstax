@@ -2757,3 +2757,21 @@ pillar stays its own block system), **local-light tinting** (instances dim by
 embers are exempt as visual light sources), and **wall collision** (particles
 die entering solid cells — chips stop at walls, smoke dies at ceilings; the
 `kill_y` floor plane remains for weather). The particle backlog is CLEAR.
+
+## Living-world bloom: colour grade and grass sway — AS BUILT 2026-11-08 (slice S2)
+
+`CameraUniform` (Rust `camera.rs`, WGSL `shader.wgsl`) gained two fields at the end:
+`bloom_origin: vec4` (xy = world x/z of the grid's min corner, z = cell size 16, w = shader clock in seconds) and
+`bloom_grid: array<vec4, 64>` (16 x 16 region levels, row-major in z then x, four per vec4; the 16-byte array stride is the
+uniform-space layout, so no padding). The struct is now 1,264 bytes. `bloom_origin.z == 0` switches the whole feature off and
+every non-game path (headless, skin preview, viewmodel) fills the neutral constants `BLOOM_ORIGIN_OFF` / `BLOOM_GRID_NEUTRAL`.
+`overlay.wgsl` declares only the first two fields of the same buffer and is unaffected.
+Filled per player viewport each frame by `bloom::present::fill_uniform` from `BloomField::grid_around(camera x, z)`.
+
+`bloom_grade(colour, world_xz)` samples the grid bilinearly (cell centres, clamped edges; outside the grid it uses the camera
+cell) and applies: level 0.45 to 0.75 unchanged; below 0.45 desaturate toward luminance (15% saturation at 0) with a cool cast;
+above 0.75 up to +15% saturation with a warm lift. It runs on the lit colour before the fog mix in `fs_main`, `fs_plant`,
+`fs_water` and `fs_transparent`; `sky_horizon()` (shared by sky and fog) is graded once by the camera's own cell. Avatars,
+paintings and particles are not graded. `vs_plant` leans each plant's tip by `bloom_sway_amplitude(level)` (0 at 0.3 and below,
+0.035 blocks at 0.6, 0.06 at 1.0) using the clock; solid terrain uses `vs_main` and never moves. CPU twins of `grade`,
+`sample_level` and `sway_amplitude` live in `bloom/present.rs` with tests. Visual check: `--screenshot out.png --bloom <level>`.

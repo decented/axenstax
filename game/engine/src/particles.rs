@@ -49,6 +49,14 @@ fn unit(seed: u64, lane: u64) -> f32 {
     (jitter(seed, lane) + 1.0) * 0.5
 }
 
+/// Firefly blink: 0 (dark) to 1 (lit) over a mote's life. A rounded pulse, off
+/// for about a third of each cycle. The phase is taken from `max_life`.
+fn blink_factor(rate: f32, max_life: f32, life: f32) -> f32 {
+    let phase = (max_life * 7.31).fract() * std::f32::consts::TAU;
+    let wave = 0.5 + 0.5 * ((max_life - life) * rate * std::f32::consts::TAU + phase).sin();
+    ((wave - 0.35) / 0.65).clamp(0.0, 1.0)
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Particle {
     pub pos: Vec3,
@@ -69,6 +77,10 @@ pub struct Particle {
     pub kill_y: f32,
     /// Smoke-style growth: size multiplier per second (0 = constant size).
     pub grow: f32,
+    /// Firefly blink: pulses per second (0 = steady). Modulates alpha, and a
+    /// blinking mote is a light of its own, so it is never dimmed by the dark
+    /// around it. The phase comes from `max_life`, which is unique per mote.
+    pub blink: f32,
 }
 
 pub struct ParticleSystem {
@@ -142,6 +154,7 @@ impl ParticleSystem {
                 drag: 0.4,
                 kill_y: f32::MIN,
                 grow: 0.0,
+                blink: 0.0,
             });
         }
     }
@@ -163,6 +176,7 @@ impl ParticleSystem {
                 drag: 0.4,
                 kill_y: f32::MIN,
                 grow: 0.0,
+                blink: 0.0,
             });
         }
     }
@@ -185,6 +199,7 @@ impl ParticleSystem {
                 drag: 0.0,
                 kill_y: f32::MIN,
                 grow: 0.0,
+                blink: 0.0,
             });
         }
     }
@@ -204,6 +219,7 @@ impl ParticleSystem {
                 drag: 0.15,
                 kill_y: f32::MIN,
                 grow: 0.35,
+                blink: 0.0,
             });
         }
     }
@@ -223,6 +239,7 @@ impl ParticleSystem {
                 drag: 0.2,
                 kill_y: f32::MIN,
                 grow: 0.0,
+                blink: 0.0,
             });
         }
     }
@@ -252,6 +269,7 @@ impl ParticleSystem {
                 drag: 0.9,
                 kill_y: f32::MIN,
                 grow: 0.0,
+                blink: 0.0,
             });
         }
     }
@@ -271,6 +289,7 @@ impl ParticleSystem {
                 drag: 0.25,
                 kill_y: pos.y - 0.3,
                 grow: 0.0,
+                blink: 0.0,
             });
         }
     }
@@ -291,6 +310,7 @@ impl ParticleSystem {
                 drag: 0.6,
                 kill_y: f32::MIN,
                 grow: 0.4,
+                blink: 0.0,
             });
         }
     }
@@ -310,6 +330,7 @@ impl ParticleSystem {
                 drag: 0.3,
                 kill_y: f32::MIN,
                 grow: 0.1,
+                blink: 0.0,
             });
         }
     }
@@ -329,6 +350,52 @@ impl ParticleSystem {
             drag: 0.0,
             kill_y: f32::MIN,
             grow: 0.0,
+            blink: 0.0,
+        });
+    }
+
+    /// Pollen mote (living world, daytime): a pale speck that drifts slowly
+    /// on the air and fades out. Gentle and sparse; it says "this place is
+    /// alive" and nothing more.
+    pub fn pollen_mote(&mut self, pos: Vec3, seed: u64) {
+        self.spawn(Particle {
+            pos,
+            vel: Vec3::new(
+                0.10 + jitter(seed, 1) * 0.10,
+                0.02 + unit(seed, 2) * 0.06,
+                jitter(seed, 3) * 0.12,
+            ),
+            life: 6.0 + unit(seed, 4) * 4.0,
+            max_life: 10.0,
+            size: 0.022 + unit(seed, 5) * 0.012,
+            color: [1.0, 0.96, 0.7, 0.6],
+            tex_layer: block::TEX_PARTICLE_SOFT,
+            gravity: 0.0,
+            drag: 0.0,
+            kill_y: f32::MIN,
+            grow: 0.0,
+            blink: 0.0,
+        });
+    }
+
+    /// Firefly (living world, night): a yellow-green glow that wanders and
+    /// blinks (alpha pulses about 0.7 times a second, each mote on its own
+    /// phase).
+    pub fn firefly(&mut self, pos: Vec3, seed: u64) {
+        let life = 7.0 + unit(seed, 4) * 5.0;
+        self.spawn(Particle {
+            pos,
+            vel: Vec3::new(jitter(seed, 1) * 0.25, jitter(seed, 2) * 0.10, jitter(seed, 3) * 0.25),
+            life,
+            max_life: life,
+            size: 0.04,
+            color: [0.78, 1.0, 0.3, 0.95],
+            tex_layer: block::TEX_PARTICLE_SOFT,
+            gravity: 0.0,
+            drag: 0.0,
+            kill_y: f32::MIN,
+            grow: 0.0,
+            blink: 0.55 + unit(seed, 6) * 0.3,
         });
     }
 
@@ -347,6 +414,7 @@ impl ParticleSystem {
             drag: 0.0,
             kill_y,
             grow: 0.0,
+            blink: 0.0,
         });
     }
 
@@ -364,6 +432,7 @@ impl ParticleSystem {
             drag: 0.0,
             kill_y,
             grow: 0.0,
+            blink: 0.0,
         });
     }
 
@@ -413,8 +482,11 @@ impl ParticleSystem {
         out.clear();
         for p in &self.pool {
             let frac = (p.life / p.max_life).clamp(0.0, 1.0);
-            let alpha = p.color[3] * (frac / 0.4).min(1.0);
-            let lit = if p.tex_layer == block::TEX_PARTICLE_SPARK {
+            let mut alpha = p.color[3] * (frac / 0.4).min(1.0);
+            if p.blink > 0.0 {
+                alpha *= blink_factor(p.blink, p.max_life, p.life);
+            }
+            let lit = if p.tex_layer == block::TEX_PARTICLE_SPARK || p.blink > 0.0 {
                 1.0
             } else {
                 let l = light_at(
@@ -608,6 +680,41 @@ mod tests {
         assert_eq!(after.len(), ps.live());
         assert!(after[0].size > before[0].size, "smoke grows");
     }
+
+    #[test]
+    fn pollen_and_fireflies_spawn_and_respect_the_caps() {
+        let mut ps = ParticleSystem::new();
+        ps.pollen_mote(Vec3::ZERO, 1);
+        ps.firefly(Vec3::ZERO, 2);
+        assert_eq!(ps.live(), 2);
+        let mut ic = Vec::new();
+        ps.instances(|_, _, _| 0, &mut ic);
+        // In the dark, pollen dims to the floor; a firefly is its own light.
+        assert!(ic[0].color[1] < 0.3, "pollen dims: {}", ic[0].color[1]);
+        assert!(ic[1].color[1] > 0.9, "firefly glows: {}", ic[1].color[1]);
+        ps.set_cap(ParticleLevel::Off);
+        ps.pollen_mote(Vec3::ZERO, 3);
+        ps.firefly(Vec3::ZERO, 4);
+        assert_eq!(ps.live(), 0, "off spawns neither");
+        ps.set_cap(ParticleLevel::Reduced);
+        for k in 0..CAP_REDUCED + 50 {
+            ps.firefly(Vec3::ZERO, k as u64);
+        }
+        assert_eq!(ps.live(), CAP_REDUCED);
+    }
+
+    #[test]
+    fn a_firefly_blinks_between_dark_and_lit() {
+        let (mut lo, mut hi) = (1.0_f32, 0.0_f32);
+        for step in 0..400 {
+            let life = 9.0 - step as f32 * 0.02;
+            let f = blink_factor(0.7, 9.0, life);
+            lo = lo.min(f);
+            hi = hi.max(f);
+        }
+        assert!(lo < 0.05, "goes dark: {lo}");
+        assert!(hi > 0.95, "comes fully lit: {hi}");
+    }
 }
 
 
@@ -627,4 +734,5 @@ mod shader_guard {
         let src = include_str!("overlay.wgsl");
         wgpu::naga::front::wgsl::parse_str(src).expect("overlay.wgsl must parse");
     }
+
 }

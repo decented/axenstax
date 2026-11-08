@@ -1,8 +1,9 @@
 //! Audio engine — procedural sound effects for block interaction and movement.
 //!
-//! Seven synthesised sounds (no audio files exist, anywhere): block break,
+//! Eleven synthesised sounds (no audio files exist, anywhere): block break,
 //! block place, footstep, explosion, thunder, gem pickup, Genesis Block
-//! fanfare. Each is a short recipe of tone / noise layers ([`layers`]) rendered
+//! fanfare, and the living world's ambience (three birdsong chirps, a cricket
+//! trill). Each is a short recipe of tone / noise layers ([`layers`]) rendered
 //! to mono PCM by the pure [`render_mix`] — the SAME samples on every target.
 //!
 //! - **Native** (incl. Android): rodio `play_raw` of the rendered buffer.
@@ -24,7 +25,7 @@
 /// Sample rate every sound is rendered at (mono).
 pub(crate) const SAMPLE_RATE: u32 = 44_100;
 
-/// The seven sounds the game can request.
+/// The sounds the game can request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Sound {
     Break,
@@ -34,12 +35,18 @@ pub(crate) enum Sound {
     Thunder,
     GemPickup,
     GenesisBlock,
+    /// Living-world ambience (spec 2026-11-08 §2.2): three short chirps...
+    Birdsong,
+    BirdsongTrill,
+    BirdsongWhistle,
+    /// ...and a soft cricket trill. Quiet by design.
+    Insects,
 }
 
 impl Sound {
     /// Every sound, in discriminant order.
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) const ALL: [Sound; 7] = [
+    pub(crate) const ALL: [Sound; 11] = [
         Sound::Break,
         Sound::Place,
         Sound::Footstep,
@@ -47,7 +54,22 @@ impl Sound {
         Sound::Thunder,
         Sound::GemPickup,
         Sound::GenesisBlock,
+        Sound::Birdsong,
+        Sound::BirdsongTrill,
+        Sound::BirdsongWhistle,
+        Sound::Insects,
     ];
+
+    /// One of the three chirps, chosen by `seed` (so two birds sound different).
+    pub(crate) fn birdsong_variant(seed: u64) -> Sound {
+        // Mix the bits first: callers pass counters and positions.
+        let h = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 33;
+        match h % 3 {
+            0 => Sound::Birdsong,
+            1 => Sound::BirdsongTrill,
+            _ => Sound::BirdsongWhistle,
+        }
+    }
 
     /// Dense index (cache slot on the web backend).
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
@@ -91,6 +113,41 @@ pub(crate) fn layers(sound: Sound) -> &'static [Layer] {
             Layer::Tone { secs: 0.20, freq: 659.25, volume: 0.32, delay: 0.10 },
             Layer::Tone { secs: 0.20, freq: 783.99, volume: 0.32, delay: 0.20 },
             Layer::Tone { secs: 0.20, freq: 1046.50, volume: 0.32, delay: 0.30 },
+        ],
+        // Living-world ambience. Tiny, high, quiet: a bird is a few short
+        // notes, a cricket is a run of ticks. Linear decay envelopes make each
+        // note a soft chirp rather than a beep.
+        Sound::Birdsong => &[
+            Layer::Tone { secs: 0.06, freq: 3400.0, volume: 0.07, delay: 0.0 },
+            Layer::Tone { secs: 0.07, freq: 4200.0, volume: 0.07, delay: 0.08 },
+            Layer::Tone { secs: 0.09, freq: 3800.0, volume: 0.06, delay: 0.17 },
+        ],
+        Sound::BirdsongTrill => &[
+            Layer::Tone { secs: 0.035, freq: 4600.0, volume: 0.06, delay: 0.00 },
+            Layer::Tone { secs: 0.035, freq: 3900.0, volume: 0.06, delay: 0.05 },
+            Layer::Tone { secs: 0.035, freq: 4600.0, volume: 0.06, delay: 0.10 },
+            Layer::Tone { secs: 0.035, freq: 3900.0, volume: 0.06, delay: 0.15 },
+            Layer::Tone { secs: 0.035, freq: 4600.0, volume: 0.06, delay: 0.20 },
+        ],
+        Sound::BirdsongWhistle => &[
+            Layer::Tone { secs: 0.10, freq: 2900.0, volume: 0.06, delay: 0.00 },
+            Layer::Tone { secs: 0.10, freq: 2500.0, volume: 0.06, delay: 0.09 },
+            Layer::Tone { secs: 0.14, freq: 2100.0, volume: 0.05, delay: 0.18 },
+        ],
+        // Cricket trill: three short runs of four ticks.
+        Sound::Insects => &[
+            Layer::Tone { secs: 0.025, freq: 4300.0, volume: 0.04, delay: 0.000 },
+            Layer::Tone { secs: 0.025, freq: 4300.0, volume: 0.04, delay: 0.035 },
+            Layer::Tone { secs: 0.025, freq: 4300.0, volume: 0.04, delay: 0.070 },
+            Layer::Tone { secs: 0.025, freq: 4300.0, volume: 0.04, delay: 0.105 },
+            Layer::Tone { secs: 0.025, freq: 4300.0, volume: 0.04, delay: 0.200 },
+            Layer::Tone { secs: 0.025, freq: 4300.0, volume: 0.04, delay: 0.235 },
+            Layer::Tone { secs: 0.025, freq: 4300.0, volume: 0.04, delay: 0.270 },
+            Layer::Tone { secs: 0.025, freq: 4300.0, volume: 0.04, delay: 0.305 },
+            Layer::Tone { secs: 0.025, freq: 4300.0, volume: 0.04, delay: 0.400 },
+            Layer::Tone { secs: 0.025, freq: 4300.0, volume: 0.04, delay: 0.435 },
+            Layer::Tone { secs: 0.025, freq: 4300.0, volume: 0.04, delay: 0.470 },
+            Layer::Tone { secs: 0.025, freq: 4300.0, volume: 0.04, delay: 0.505 },
         ],
     }
 }
@@ -205,6 +262,10 @@ mod native {
         pub fn play_gem_pickup(&self) { self.play(Sound::GemPickup); }
         /// Genesis Block fanfare — the *first* Satori found in this world.
         pub fn play_genesis_block(&self) { self.play(Sound::GenesisBlock); }
+        /// Living-world ambience: a bird (one of three chirps, by `seed`).
+        pub fn play_birdsong(&self, seed: u64) { self.play(Sound::birdsong_variant(seed)); }
+        /// Living-world ambience: a soft cricket trill.
+        pub fn play_insects(&self) { self.play(Sound::Insects); }
 
         pub fn play_footstep(&mut self, sprinting: bool) {
             let interval = if sprinting { Duration::from_millis(350) } else { Duration::from_millis(450) };
@@ -317,6 +378,10 @@ mod wasm {
         pub fn play_thunder(&self) { self.play(Sound::Thunder); }
         pub fn play_gem_pickup(&self) { self.play(Sound::GemPickup); }
         pub fn play_genesis_block(&self) { self.play(Sound::GenesisBlock); }
+        /// Living-world ambience: a bird (one of three chirps, by `seed`).
+        pub fn play_birdsong(&self, seed: u64) { self.play(Sound::birdsong_variant(seed)); }
+        /// Living-world ambience: a soft cricket trill.
+        pub fn play_insects(&self) { self.play(Sound::Insects); }
 
         pub fn play_footstep(&mut self, sprinting: bool) {
             let interval = if sprinting { Duration::from_millis(350) } else { Duration::from_millis(450) };
@@ -426,5 +491,17 @@ mod tests {
         assert_eq!(effective_gain(7.0, false), 1.0);
         assert_eq!(effective_gain(-3.0, false), 0.0);
         assert_eq!(effective_gain(f32::NAN, false), 0.0);
+    }
+
+    #[test]
+    fn ambience_is_quiet_and_birdsong_has_three_distinct_variants() {
+        for s in [Sound::Birdsong, Sound::BirdsongTrill, Sound::BirdsongWhistle, Sound::Insects] {
+            let peak = render_mix(s, 1.0).iter().fold(0.0_f32, |m, v| m.max(v.abs()));
+            assert!(peak > 0.02 && peak <= 0.15, "{s:?} peak {peak}: ambience stays soft");
+        }
+        let seen: std::collections::BTreeSet<usize> =
+            (0..64u64).map(|seed| Sound::birdsong_variant(seed).index()).collect();
+        assert_eq!(seen.len(), 3, "all three chirps get chosen");
+        assert_eq!(Sound::birdsong_variant(9), Sound::birdsong_variant(9), "by seed");
     }
 }

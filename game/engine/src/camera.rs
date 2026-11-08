@@ -595,7 +595,21 @@ pub struct CameraUniform {
     pub cam_right: [f32; 4],
     /// Camera world-space UP vector (xyz; w unused).
     pub cam_up: [f32; 4],
+    /// Living-world bloom (spec 2026-11-08 §2): the grid's min corner x and z,
+    /// the cell size (16; `0` means the grid is off, so nothing is graded and
+    /// nothing sways), and the shader clock in seconds (grass sway).
+    pub bloom_origin: [f32; 4],
+    /// Living-world bloom: a 16 x 16 grid of region levels, row-major in z then
+    /// x, packed four to a vec4 (`bloom::present::pack_grid`).
+    pub bloom_grid: [[f32; 4]; 64],
 }
+
+/// `bloom_origin` for every path with no bloom: cell size 0 = grid off.
+pub const BLOOM_ORIGIN_OFF: [f32; 4] = [0.0; 4];
+
+/// `bloom_grid` for every path with no bloom: all 0.6 (the unknown level,
+/// which grades nothing).
+pub const BLOOM_GRID_NEUTRAL: [[f32; 4]; 64] = [[0.6; 4]; 64];
 
 impl CameraUniform {
     pub fn from_camera(camera: &Camera) -> Self {
@@ -625,6 +639,8 @@ impl CameraUniform {
             params: [1.0, 0.0, 0.0, 0.0],
             cam_right: [right.x, right.y, right.z, 0.0],
             cam_up: [up.x, up.y, up.z, 0.0],
+            bloom_origin: BLOOM_ORIGIN_OFF,
+            bloom_grid: BLOOM_GRID_NEUTRAL,
         }
     }
 }

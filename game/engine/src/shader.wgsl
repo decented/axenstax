@@ -17,6 +17,12 @@ struct CameraUniform {
     // (xyz; w unused). Per-player, so split-screen billboards face each eye.
     cam_right: vec4<f32>,
     cam_up: vec4<f32>,
+    // Living-world bloom (spec 2026-11-08 §2). bloom_origin: xy = world x/z of
+    // the grid's min corner, z = cell size (0 = grid off, so nothing is graded
+    // and nothing sways), w = shader clock in seconds. bloom_grid: 16 x 16
+    // region levels, row-major in z then x, four to a vec4.
+    bloom_origin: vec4<f32>,
+    bloom_grid: array<vec4<f32>, 64>,
 };
 
 @group(0) @binding(0)
@@ -39,12 +45,86 @@ fn apply_user_brightness(c: vec3<f32>) -> vec3<f32> {
     return pow(lit, vec3<f32>(1.0 / x));
 }
 
+// ── Living-world bloom: colour grade and grass sway (spec §2) ────────────────
+// CPU mirror + tests: `bloom/present.rs` (`grade`, `sample_level`, `sway_amplitude`).
+fn bloom_cell(i: i32, j: i32) -> f32 {
+    let k = u32(clamp(j, 0, 15) * 16 + clamp(i, 0, 15));
+    return camera.bloom_grid[k >> 2u][k & 3u];
+}
+
+// The level in the camera's own cell.
+fn bloom_camera_level() -> f32 {
+    let g = floor((camera.camera_pos.xz - camera.bloom_origin.xy) / max(camera.bloom_origin.z, 0.0001));
+    return bloom_cell(i32(g.x), i32(g.y));
+}
+
+// Bilinear level at a world x/z (cell centres are the sample points). Outside
+// the grid, or with the grid off, the camera-cell level (0.6 when off).
+fn bloom_level_at(xz: vec2<f32>) -> f32 {
+    let cell = camera.bloom_origin.z;
+    if (cell <= 0.0) {
+        return 0.6;
+    }
+    let g = (xz - camera.bloom_origin.xy) / cell;
+    if (g.x < 0.0 || g.y < 0.0 || g.x >= 16.0 || g.y >= 16.0) {
+        return bloom_camera_level();
+    }
+    let u = g - vec2<f32>(0.5);
+    let f = floor(u);
+    let t = u - f;
+    let i = i32(f.x);
+    let j = i32(f.y);
+    let a = mix(bloom_cell(i, j), bloom_cell(i + 1, j), t.x);
+    let b = mix(bloom_cell(i, j + 1), bloom_cell(i + 1, j + 1), t.x);
+    return mix(a, b, t.y);
+}
+
+// >= 0.45 and <= 0.75: unchanged. Below 0.45: desaturate toward luminance (15%
+// saturation left at level 0) with a slight cool cast. Above 0.75: up to +15%
+// saturation with a slight warm lift.
+fn bloom_grade_level(c: vec3<f32>, level: f32) -> vec3<f32> {
+    let lum = dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
+    if (level < 0.45) {
+        let t = clamp(1.0 - level / 0.45, 0.0, 1.0);
+        let g = mix(vec3<f32>(lum), c, 1.0 - 0.85 * t);
+        return max(g * mix(vec3<f32>(1.0), vec3<f32>(0.95, 0.98, 1.04), t), vec3<f32>(0.0));
+    }
+    if (level > 0.75) {
+        let t = clamp((level - 0.75) / 0.25, 0.0, 1.0);
+        let g = mix(vec3<f32>(lum), c, 1.0 + 0.15 * t);
+        return max(g * mix(vec3<f32>(1.0), vec3<f32>(1.04, 1.015, 0.95), t), vec3<f32>(0.0));
+    }
+    return c;
+}
+
+fn bloom_grade(c: vec3<f32>, world_xz: vec2<f32>) -> vec3<f32> {
+    if (camera.bloom_origin.z <= 0.0) {
+        return c;
+    }
+    return bloom_grade_level(c, bloom_level_at(world_xz));
+}
+
+// Sky and fog horizon: graded by the level in the camera's own cell.
+fn bloom_grade_camera(c: vec3<f32>) -> vec3<f32> {
+    if (camera.bloom_origin.z <= 0.0) {
+        return c;
+    }
+    return bloom_grade_level(c, bloom_camera_level());
+}
+
+// Grass sway amplitude (blocks at the plant's tip) by local level: none at or
+// below 0.3, gentle (0.035) at 0.6, a bit more (0.06) at 1.0.
+fn bloom_sway_amplitude(level: f32) -> f32 {
+    return 0.035 * smoothstep(0.3, 0.6, level) + 0.025 * smoothstep(0.6, 1.0, level);
+}
+
 // The renderer supplies the live horizon colour, including weather/lightning.
 // Standalone uniforms with no supplied colour retain the day/night fallback.
 fn sky_horizon() -> vec3<f32> {
     let b = camera.sun_dir.w;
     let fallback = vec3<f32>(0.01 + 0.52 * b, 0.01 + 0.71 * b, 0.05 + 0.85 * b);
-    return select(fallback, camera.params.yzw, any(camera.params.yzw != vec3<f32>(0.0)));
+    let base = select(fallback, camera.params.yzw, any(camera.params.yzw != vec3<f32>(0.0)));
+    return bloom_grade_camera(base);
 }
 
 struct SkyOutput {
@@ -160,7 +240,18 @@ struct PlantVertexInput {
 @vertex
 fn vs_plant(in: PlantVertexInput) -> VertexOutput {
     var out: VertexOutput;
-    let world = in.inst_pos + in.local * in.inst_size;
+    var world = in.inst_pos + in.local * in.inst_size;
+    // Living-world grass sway: the tip (local.y = 1) leans, the root stays put.
+    // Off with the grid off (headless / menu paths). Phase from the plant's
+    // own position so a meadow ripples rather than nodding in step.
+    if (camera.bloom_origin.z > 0.0) {
+        let amp = bloom_sway_amplitude(bloom_level_at(in.inst_pos.xz));
+        let t = camera.bloom_origin.w;
+        let ph = in.inst_pos.x * 0.7 + in.inst_pos.z * 0.45;
+        let lean = in.local.y * in.local.y * amp * in.inst_size.y;
+        world.x += lean * sin(t * 1.7 + ph);
+        world.z += lean * sin(t * 1.3 + ph * 1.3 + 1.7);
+    }
     out.clip_position = camera.view_proj * vec4<f32>(world, 1.0);
     out.normal = vec3<f32>(0.0, 1.0, 0.0); // up-facing → even, never self-shadowed
     out.world_pos = world;
@@ -227,7 +318,7 @@ fn fs_plant(in: VertexOutput) -> @location(0) vec4<f32> {
     // channel), so combine with sky * sun.w exactly like fs_main; without this
     // every sky-lit plant rendered at the 0.08 floor in broad daylight.
     let block_light = min(max(max(in.light, in.sky_light * camera.sun_dir.w), 0.08), 1.0);
-    let lit = tex_color.rgb * (ambient + sun_color * ndotl * 0.6) * block_light;
+    let lit = bloom_grade(tex_color.rgb * (ambient + sun_color * ndotl * 0.6) * block_light, in.world_pos.xz);
 
     let underwater = camera.camera_pos.w > 0.5;
     let dist = distance(in.world_pos, camera.camera_pos.xyz);
@@ -299,7 +390,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Satoshi's amulet, stamped with entity_model::SATOSHI_GLOW_LIGHT). Render it
     // mostly unlit so it glows even in a dim hut. All other geometry uses
     // light <= 1.0, so this branch is inert for everything else.
-    let lit = mix(lit_normal, tex_color.rgb, step(1.5, in.light) * 0.85);
+    let lit = bloom_grade(mix(lit_normal, tex_color.rgb, step(1.5, in.light) * 0.85), in.world_pos.xz);
 
     // Underwater detection (packed in camera_pos.w)
     let underwater = camera.camera_pos.w > 0.5;
@@ -499,13 +590,13 @@ fn fs_water(in: VertexOutput) -> @location(0) vec4<f32> {
     let water_tint = vec3<f32>(0.3, 0.5, 0.9) * (0.3 + 0.7 * brightness);
     // Spec 30 — water also darkens in caves; reuse the same block-light.
     let block_light = max(in.light, 0.08);
-    let lit = tex_color.rgb * water_tint * block_light;
+    let lit = bloom_grade(tex_color.rgb * water_tint * block_light, in.world_pos.xz);
 
     // Fog
     let dist = distance(in.world_pos, camera.camera_pos.xyz);
     let fog_start = camera.fog.z;
     let fog_end = camera.fog.w;
-    let fog_color = vec3<f32>(0.3, 0.5, 0.7) * brightness;
+    let fog_color = bloom_grade_camera(vec3<f32>(0.3, 0.5, 0.7) * brightness);
     let fog_factor = clamp((dist - fog_start) / (fog_end - fog_start), 0.0, 1.0);
 
     let final_color = mix(lit, fog_color, fog_factor);
@@ -541,7 +632,7 @@ fn fs_transparent(in: VertexOutput) -> @location(0) vec4<f32> {
     // Scale sky by daylight while keeping torch/block light independent.
     let combined = max(in.light, in.sky_light * brightness);
     let block_light = min(max(combined, 0.08), 1.0);
-    let lit = tex_color.rgb * (ambient + sun_color * ndotl * 0.6) * block_light;
+    let lit = bloom_grade(tex_color.rgb * (ambient + sun_color * ndotl * 0.6) * block_light, in.world_pos.xz);
 
     let dist = distance(in.world_pos, camera.camera_pos.xyz);
     let fog_start = camera.fog.x;

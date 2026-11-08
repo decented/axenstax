@@ -3276,6 +3276,7 @@ impl super::GameState {
         self.live_world = None;
         // Bloom state belongs to the world being left.
         self.bloom.reset();
+        self.bloom_present.reset();
         // Nothing about the last world's saves carries over (`begin_load`
         // records whether this one opened from its autosave).
         self.session_saves = crate::world_exit::SessionSaves::default();
@@ -16957,6 +16958,8 @@ impl super::GameState {
             self.last_particle_frame = now;
             // Lightning flash decays fast (~0.3 s to dark).
             self.lightning_flash = (self.lightning_flash - dt * 3.5).max(0.0);
+            // Living world: the shader clock and birdsong / insects by local level.
+            self.bloom_ambient_sound(dt);
             if self.particles.is_enabled() {
                 // Splash: a player crossing INTO water this frame (edge
                 // detect on the physics flag) kicks up droplets at the feet.
@@ -17056,6 +17059,9 @@ impl super::GameState {
                             }
                         }
                     }
+
+                    // Living world: pollen by day, fireflies by night, by local level.
+                    self.bloom_ambient_life(seed_base, 0.15, reduced);
 
                     // Footstep dust (2026-07-05): a walking player kicks a
                     // small puff of the block underfoot's colour each pulse.
@@ -17210,6 +17216,8 @@ impl super::GameState {
             // Brightness slider (graphics menu) → shader `pow(colour, 1/x)`. Read
             // live each frame, so moving the slider updates instantly.
             camera_uniform.params[0] = self.graphics.brightness;
+            // Living world: this viewport's bloom grid, centred on its camera.
+            crate::bloom::present::fill_uniform(&mut camera_uniform, &self.bloom, self.bloom_present.clock());
             self.renderer.update_camera(pidx, &camera_uniform);
 
             // Block highlight (already set in per-player frame loop above)
