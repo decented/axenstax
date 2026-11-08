@@ -69,6 +69,9 @@ mod input;
 mod item;
 mod item_kind;
 mod objective_progress;
+mod arena_build; // Living world S4 — building a trial arena into a world, renderer-free.
+mod place_trial_ui; // Living world S4 — the end card's four-petal flower.
+mod place_trial; // Living world S4 — `Objective::Place`: bloom probes, the recovery flower.
 mod inventory;
 mod mesh;
 mod micro_model;
@@ -1095,7 +1098,11 @@ impl GameState {
             return;
         }
         let Some(def) = self.scenario.as_ref().map(|s| s.def().clone()) else { return };
+        // A retry stays in the same world: a trial that was running in its fresh
+        // arena still sets the bloom tempo (`start_scenario` clears the flag).
+        let fresh_arena = self.scenario_fresh_arena;
         self.start_scenario(def);
+        self.scenario_fresh_arena = fresh_arena;
         self.capture_cursor();
     }
 }
@@ -1713,6 +1720,11 @@ pub(crate) struct GameState {
     /// on the FIRST play tick, once the arena world is fully loaded + players
     /// spawned (same hook as `pending_workshop_reset`). `take()`-consumed once.
     pub(crate) pending_scenario_launch: Option<crate::scenario::PendingScenarioLaunch>,
+    /// The running scenario was installed by the fresh-world arena launch (not
+    /// by the in-world `/scenario` overlay). Only then may it set the bloom
+    /// tempo (`ScenarioTuning::bloom_time_scale`); the player's own world never
+    /// has its tempo changed by a trial. Cleared on any world change.
+    pub(crate) scenario_fresh_arena: bool,
     /// Trials island (§C.3): the visit in progress while the island world is
     /// up (`trials_island_flow`); `None` anywhere else. Cleared by `leave_world`.
     pub(crate) island: Option<crate::trials_island_flow::IslandVisit>,
@@ -2315,6 +2327,7 @@ impl GameState {
             world_preloaded: false,
             pending_workshop_reset: false,
             pending_scenario_launch: None,
+            scenario_fresh_arena: false,
             island: None,
             island_return: None,
             island_arrival: None,

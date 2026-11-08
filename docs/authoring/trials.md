@@ -67,7 +67,9 @@ returns a parse error. Fields with a default are optional.
   //   "on":    ChallengeEvents — ANY of them happening once, anywhere (the
   //            player's own world or any arena), unlocks the trial.
   //   "after": trial tokens — ALL of them completed unlocks it.
-  //   Either clause unlocks. Give at least one. Same event JSON as objectives.
+  //   Either clause unlocks (`on` OR `after`, never both required: the Grey
+  //   Quarry has `on: [PlaceWentGrey]` and `after: ["generator"]`, and either
+  //   one makes it appear). Give at least one. Same event JSON as objectives.
   //   "hint":  REQUIRED one-line nudge shown while it is hidden, in the shape
   //            "Something about horses…" (UK English, no money words).
   // `trials_lint` checks every `after` token exists, the hint is set, every
@@ -169,16 +171,45 @@ returns a parse error. Fields with a default are optional.
   // (sprint/cross-country/marathon) — never on an Explorer Challenge. Leave
   // it out.
 
+  // OPTIONAL (default: {}). Balance knobs. Both fields are optional.
+  //   "work_exponent":    scoring exponent for work-scored games; leave it out.
+  //   "bloom_time_scale": the living world's tempo while THIS trial runs in
+  //                       its fresh arena (default 1.0). The Grey Quarry sets
+  //                       12.0 so a recovery takes minutes, not an hour. It
+  //                       counts ONLY in a fresh trial-arena world: the
+  //                       in-world `/scenario` overlay never changes the
+  //                       tempo of the player's own world
+  //                       (`place_trial::effective_bloom_time_scale`).
+  "tuning": { "bloom_time_scale": 12.0 },
+
   // OPTIONAL (default: null). Blocks + mobs planted next to the player's
   // spawn so the challenge is completable SOLO. `at` is a `[dx, dy, dz]`
   // offset from the player's spawn position (NOT world coordinates) —
-  // applied by `GameState::apply_arena_setup` in game_loop.rs.
+  // built by `arena_build::build_arena`, called from
+  // `GameState::apply_arena_setup` in game_loop.rs. Order: `fills`, then
+  // `blocks` (so a single block can sit on a fill), then `mobs`.
   "arena": {
     "blocks": [
       { "at": [3, 0, 0], "block": "stone" }
     ],
     "mobs": [
       { "at": [3, 0, 0], "mob": "wolf", "count": 1 }  // "count" optional, default 1
+    ],
+
+    // OPTIONAL (default: []). Box fills, inclusive corners, offsets from
+    // spawn: a terraced 24x24 quarry is a dozen of these, not thousands of
+    // `blocks` rows. Same block names as `blocks`. One fill is capped at
+    // 100,000 cells (`arena_build::MAX_FILL_CELLS`; the lint checks it).
+    "fills": [
+      { "from": [6, -1, -12], "to": [13, -1, 11], "block": "stone" }
+    ],
+
+    // OPTIONAL (default: []). Grey starts: the bloom level (0..1) the area
+    // begins at, so a `Place` trial starts grey whatever the ground says.
+    // Applied on the FRESH-WORLD launch only (never by `/scenario`). Give the
+    // `Place` area and a level below its `at_least` (0.05 for a stripped place).
+    "drained": [
+      { "area": { "from": [6, -1, -12], "to": [29, 6, 11] }, "level": 0.05 }
     ]
   }
 }
@@ -215,12 +246,13 @@ Objective::Action { event: ChallengeEvent, count: u32 }       // "do X, N times"
 Objective::Sequence { steps: Vec<Objective> }                  // ORDERED: step 0 must finish before step 1 counts
 Objective::Checklist { items: Vec<Objective> }                 // UNORDERED: any order, all must finish
 Objective::AnyOf { routes: Vec<Route> }                        // SEVERAL WAYS: the first route to finish wins
+Objective::Place { area, measure, at_least, hold_seconds }     // BRING A PLACE BACK TO LIFE (living world) — see below
 Objective::Timed { ticks: u32 }                                // built-in games only — not for Explorer Challenges
 Objective::FirstSatori | Objective::FreeRoam                   // built-in games only — not for Explorer Challenges
 ```
 
 **THE RULE: every leaf inside a `Sequence`, a `Checklist` or an `AnyOf` route
-must be a plain `Action`, and `AnyOf` is top level only.** Nesting a `Sequence` inside a `Sequence`, or a `Timed` inside a
+must be a plain `Action` (or a `Place`, below), and `AnyOf` is top level only.** Nesting a `Sequence` inside a `Sequence`, or a `Timed` inside a
 `Checklist`, *parses fine* — but `ScenarioState::objective_is_complete` only
 recognises `Action` leaves, so a non-`Action` leaf can **never complete** and
 the trial silently stalls forever for every player who reaches it. This is
@@ -250,6 +282,50 @@ birth is also "any breeding"), all count as done but the FIRST listed is the
 one named. And check no route is a strict subset of an earlier-finishing one,
 or the later route can never be the one that wins. `trial_task_labels` gets
 one label per leaf, all routes end to end in order.
+
+**`Place` — bring a place back to life (act two).** The objective is a
+stretch of ground, not an event:
+
+```json
+"objective": { "Place": {
+  "area": { "from": [6, -1, -12], "to": [29, 6, 11] },
+  "measure": "Bloom",
+  "at_least": 0.55,
+  "hold_seconds": 20 } }
+```
+
+- `area` is two corners as `[dx, dy, dz]` offsets from the player's spawn (like
+  `arena`); only x and z matter. Keep it under 64 columns a side.
+- When the scenario starts, a bloom probe (`bloom::BloomField::add_probe`) is
+  put over the area; it is taken off when the scenario ends. The leaf completes
+  when the probe's level has stayed at or above `at_least` for `hold_seconds`
+  of real time. `measure` is `"Bloom"` (the only one).
+- A `Place` may stand alone, or be a leaf of a `Sequence`, a `Checklist` or an
+  `AnyOf` route (in a `Sequence` it counts only when it is the current step).
+- The task list shows the **stage words** after the line, never a number:
+  "Grey and still" (level under 0.25), "Something's stirring" (under 0.45),
+  "Waking up" (under `at_least`), "Alive" (at or above it, held). The HUD badge
+  and the H panel show the same words. One task label per `Place` leaf.
+- A bundled `Place` trial must bring an `arena` and start the area grey with
+  `arena.drained` (lint `bundled_place_trials_start_their_area_grey`), or the
+  probe would read whatever terrain it landed on and the trial could pass at
+  once.
+- Pace: the level eases toward its target with a 360 s time constant when
+  rising (2400 s falling). Set `tuning.bloom_time_scale` (the Grey Quarry uses
+  12) so a full recovery takes about 8 to 15 minutes of play. Then tune
+  `at_least` against a scripted restoration (see
+  `src/test_integration/grey_quarry.rs`): it must be reachable by real work
+  (several tree kinds, crops, water, animals) and not by one shortcut.
+- The end card draws a four-petal flower (life, ideas, people, time) from the
+  probe's start and end terms, one sentence ("You brought it back mostly
+  through life." / "...through people together." / "...through life and
+  people together."), and Satoshi's end line (`trial_satoshi_end`, §5 (6)).
+  `TrialBests::ways_done` records `"life"` and/or `"people"` for the trial,
+  and the card lists the ways done once there is one.
+- Terms: life is what grows (living blocks on top, kinds, crops, animals);
+  people-together is players near each other, a Feast, a Commons. A solo player
+  can reach `at_least` through life; the people route needs a crowd (about five
+  guests at a Feast).
 
 **`Checklist` fills the FIRST unfinished item that matches**, so put filtered
 items before an unfiltered one (Skybox Studio lists the door and the window
@@ -365,7 +441,7 @@ itself in every path — it's `trials_lint`'s
 `every_challenge_kit_and_arena_name_resolves`-style test (in `scenario.rs`)
 that catches it, so **only use names from these sources**:
 
-- **`kit[].name` and `arena.blocks[].block`** — resolved via
+- **`kit[].name`, `arena.blocks[].block` and `arena.fills[].block`** — resolved via
   `commands::builtins::give::resolve_item` in
   `src/commands/builtins/give.rs`. This is the exact `/give <name>` vocabulary
   (hyphens accepted, normalised to underscore). It covers placeable blocks,
@@ -375,6 +451,9 @@ that catches it, so **only use names from these sources**:
   want doesn't exist yet, add an alias to `block_by_name` / `tool_by_name` /
   `material_by_name` in that file — this is the "conditional /give alias"
   step, only needed for a genuinely new item, never for an existing one.
+  Saplings (`oak_sapling`, `birch_sapling`, `spruce_sapling`, and the other
+  species) and `lead` resolve since the Grey Quarry (a fence is `oak_fence_post`,
+  a gate `oak_fence_gate`).
 - **`arena.mobs[].mob`** — resolved via `mob::MobType::from_name` in
   `src/mob.rs`. Valid snake_case ids (verified, ~30 total): `cow`, `chicken`,
   `pig`, `sheep`, `villager`, `peddler`, `wolf`, `horse`, `rabbit`, `goat`,
@@ -420,15 +499,17 @@ leave in the repo unregistered — it's inert until you add this line.)
 
 ### (3) `TRIAL_ORDER` — REQUIRED
 **File:** `game/engine/src/trials.rs`, the `TRIAL_ORDER` const.
-**Add:** `(TrialType::<Make|Tend|Brave|Tech|Race>, TrialRef::Challenge("<token>")),`
+**Add:** `(TrialType::<Make|Tend|Brave|Tech|Bloom|Race>, TrialRef::Challenge("<token>")),`
 AFTER the front shelf (the first `FRONT_SHELF_LEN` = 10 entries are the
 day-one shelf and stay exactly as they are), in its shelf's group (Make, Tend,
-Tech, Brave), after the trials its `unlock` names. A new trial is never on the
+Tech, Brave, Bloom), after the trials its `unlock` names. A new trial is never on the
 front shelf: give it an `unlock` (§1) or
 `the_front_shelf_is_the_first_ten_and_the_rest_unlock` fails. Pick the `TrialType` that best matches the trial's flavour (see the
 existing entries for examples: `Make` = building/crafting/production, `Tend`
 = animals/farming/trade, `Brave` = combat/danger, `Tech` = electricity/
-logic/mechanisms, `Race` = movement).
+logic/mechanisms, `Bloom` = act two: bring a place back to life (the Bloom
+shelf, 🌸 soft pink, after Brave in the gallery; on the Trials island its
+trials stand in the Tend wedge), `Race` = movement).
 **Failure mode if skipped:** the test `trial_order_covers_every_trial_once`
 (in `trials.rs`) **fails** with `"every Challenge must appear in TRIAL_ORDER"`
 — your trial exists (from step 2) but never appears in the in-game Trials
@@ -459,6 +540,8 @@ how-to are non-empty for every entry in `challenge_listing()`.
 **Add:** `"<token>" => ("<Satoshi's intro line>", "<Satoshi's hint line>"),`
 **Failure mode if omitted:** `every_trial_has_satoshi_voice` (test) **fails**
 — every bundled challenge token needs a non-empty intro + hint.
+A `Place` trial also gets an end line under its flower: add the token to
+`trial_satoshi_end` (same file). It is optional for other trials.
 **COMPLIANCE (checked by this same surface, and by `trials_lint`):** never
 use money/earning words in this text (or anywhere else authored) — see §7.
 

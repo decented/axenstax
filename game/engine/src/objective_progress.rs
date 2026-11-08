@@ -19,7 +19,7 @@ use crate::scenario::{ChallengeEvent, Objective};
 /// routes); 0 for the passive objectives (Timed / FirstSatori / FreeRoam).
 pub fn leaf_count(obj: &Objective) -> usize {
     match obj {
-        Objective::Action { .. } => 1,
+        Objective::Action { .. } | Objective::Place { .. } => 1,
         Objective::Sequence { steps } => steps.len(),
         Objective::Checklist { items } => items.len(),
         Objective::AnyOf { routes } => routes.iter().map(|r| leaf_count(&r.objective)).sum(),
@@ -51,6 +51,8 @@ pub fn required(obj: &Objective) -> Vec<u32> {
     };
     match obj {
         Objective::Action { count, .. } => vec![*count],
+        // A Place leaf is done or not: one unit, set by the bloom probe.
+        Objective::Place { .. } => vec![1],
         Objective::Sequence { steps } => of_leaves(steps),
         Objective::Checklist { items } => of_leaves(items),
         Objective::AnyOf { routes } => routes.iter().flat_map(|r| required(&r.objective)).collect(),
@@ -58,9 +60,12 @@ pub fn required(obj: &Objective) -> Vec<u32> {
     }
 }
 
+/// The target count of a LEAF (`Action`, or a `Place`, which counts as one),
+/// `None` for anything that can never complete as a leaf.
 fn action_count(obj: &Objective) -> Option<u32> {
     match obj {
         Objective::Action { count, .. } => Some(*count),
+        Objective::Place { .. } => Some(1),
         _ => None,
     }
 }
@@ -118,7 +123,8 @@ pub fn advance(obj: &Objective, progress: &mut [u32], ev: &ChallengeEvent) {
                 }
             }
         }
-        Objective::Timed { .. } | Objective::FirstSatori | Objective::FreeRoam => {}
+        // A Place leaf is advanced by the bloom probe (`place_trial`), never by events.
+        Objective::Place { .. } | Objective::Timed { .. } | Objective::FirstSatori | Objective::FreeRoam => {}
     }
 }
 
@@ -133,6 +139,7 @@ pub fn is_complete(obj: &Objective, progress: &[u32]) -> bool {
     };
     match obj {
         Objective::Action { count, .. } => get(progress, 0) >= *count,
+        Objective::Place { .. } => get(progress, 0) >= 1,
         Objective::Sequence { steps } => all_done(steps),
         Objective::Checklist { items } => all_done(items),
         Objective::AnyOf { .. } => !complete_routes(obj, progress).is_empty(),
@@ -216,13 +223,105 @@ pub fn current_step(obj: &Objective, progress: &[u32]) -> Option<usize> {
     }
 }
 
+/// One open `Place` leaf of an objective: where its counter lives and what it
+/// asks for.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PlaceLeaf<'a> {
+    /// Flat leaf index (the counter slot, and the task line).
+    pub index: usize,
+    pub area: &'a crate::scenario::PlaceArea,
+    pub at_least: f32,
+    pub hold_seconds: u32,
+}
+
+/// Every `Place` leaf of `obj`, in flat order, finished or not. Used to register
+/// the probes when a scenario starts.
+pub fn place_leaves(obj: &Objective) -> Vec<PlaceLeaf<'_>> {
+    let mut out = Vec::new();
+    walk_places(obj, 0, &[], false, &mut out);
+    out
+}
+
+/// The `Place` leaves still open that may count NOW: unfinished, and, inside an
+/// ordered `Sequence`, only the current step.
+pub fn open_place_leaves<'a>(obj: &'a Objective, progress: &[u32]) -> Vec<PlaceLeaf<'a>> {
+    let mut out = Vec::new();
+    walk_places(obj, 0, progress, true, &mut out);
+    out
+}
+
+fn walk_places<'a>(
+    obj: &'a Objective,
+    base: usize,
+    progress: &[u32],
+    only_open: bool,
+    out: &mut Vec<PlaceLeaf<'a>>,
+) -> usize {
+    let leaf = |index: usize, o: &'a Objective| -> Option<PlaceLeaf<'a>> {
+        let Objective::Place { area, at_least, hold_seconds, .. } = o else { return None };
+        (!only_open || get(progress, index) < 1).then_some(PlaceLeaf {
+            index,
+            area,
+            at_least: *at_least,
+            hold_seconds: *hold_seconds,
+        })
+    };
+    match obj {
+        Objective::Place { .. } => {
+            out.extend(leaf(base, obj));
+            1
+        }
+        Objective::Sequence { steps } => {
+            if only_open {
+                let tail = progress.get(base..).unwrap_or(&[]);
+                if let Some(i) = first_incomplete_step(steps, tail) {
+                    out.extend(leaf(base + i, &steps[i]));
+                }
+            } else {
+                out.extend(steps.iter().enumerate().filter_map(|(i, s)| leaf(base + i, s)));
+            }
+            steps.len()
+        }
+        Objective::Checklist { items } => {
+            out.extend(items.iter().enumerate().filter_map(|(i, s)| leaf(base + i, s)));
+            items.len()
+        }
+        Objective::AnyOf { routes } => {
+            let mut at = base;
+            for r in routes {
+                at += walk_places(&r.objective, at, progress, only_open, out);
+            }
+            at - base
+        }
+        Objective::Action { .. } | Objective::Timed { .. } | Objective::FirstSatori | Objective::FreeRoam => {
+            leaf_count(obj)
+        }
+    }
+}
+
 /// The in-game "What to do" text for a task list: "✓ done / ➜ now / • next",
 /// numbered when the steps are ordered, with a `(done/total)` count on an
 /// unfinished multi-count step. An `AnyOf` list reads "Pick a way:" then each
 /// route by name with its own steps, numbered within the route.
+#[cfg(test)]
 pub fn task_text(tasks: &crate::scenario::TaskList, status: &[(u32, u32)], current: Option<usize>) -> String {
+    task_text_with_notes(tasks, status, current, &[])
+}
+
+/// [`task_text`] with a short state note after a line: `notes[i]` is appended
+/// to line `i` as " — <note>" (a `Place` leaf's stage phrase). Missing or
+/// `None` entries add nothing.
+pub fn task_text_with_notes(
+    tasks: &crate::scenario::TaskList,
+    status: &[(u32, u32)],
+    current: Option<usize>,
+    notes: &[Option<String>],
+) -> String {
     let line = |i: usize, number: Option<usize>, indent: &str| -> String {
-        let text = &tasks.lines[i];
+        let text = &match notes.get(i).and_then(|n| n.as_deref()) {
+            Some(n) => format!("{} \u{2014} {n}", tasks.lines[i]),
+            None => tasks.lines[i].clone(),
+        };
         let (done, total) = status.get(i).copied().unwrap_or((0, 0));
         let complete = total > 0 && done >= total;
         let marker = if complete {
@@ -380,5 +479,79 @@ mod tests {
         assert!(is_complete(&seq, &p));
         assert!(complete_routes(&seq, &p).is_empty());
         assert_eq!(current_step(&seq, &p), None);
+    }
+
+    // ── Place leaves (living world S4) ───────────────────────────────
+
+    fn place(at_least: f32) -> Objective {
+        Objective::Place {
+            area: crate::scenario::PlaceArea { from: [0, 0, 0], to: [7, 4, 7] },
+            measure: crate::scenario::PlaceMeasure::Bloom,
+            at_least,
+            hold_seconds: 10,
+        }
+    }
+
+    #[test]
+    fn a_place_is_one_leaf_with_one_slot_done_only_when_marked() {
+        let obj = place(0.5);
+        assert_eq!(leaf_count(&obj), 1);
+        assert_eq!(required(&obj), vec![1]);
+        let mut p = vec![0];
+        advance(&obj, &mut p, &ChallengeEvent::KillMob);
+        assert!(!is_complete(&obj, &p), "events never advance a Place");
+        assert_eq!(place_leaves(&obj).len(), 1);
+        assert_eq!(open_place_leaves(&obj, &p).len(), 1);
+        p[0] = 1;
+        assert!(is_complete(&obj, &p));
+        assert!(open_place_leaves(&obj, &p).is_empty());
+    }
+
+    #[test]
+    fn places_inside_a_sequence_and_a_route_have_the_right_slots_and_order() {
+        // Route "grow": act, then a place. Route "wait": a place alone.
+        let obj = Objective::AnyOf {
+            routes: vec![
+                Route {
+                    name: "grow".into(),
+                    objective: Objective::Sequence {
+                        steps: vec![act(ChallengeEvent::PlaceBlock { block: None }, 2), place(0.5)],
+                    },
+                },
+                Route { name: "wait".into(), objective: place(0.6) },
+            ],
+        };
+        assert_eq!(leaf_count(&obj), 3);
+        assert_eq!(place_leaves(&obj).iter().map(|l| l.index).collect::<Vec<_>>(), vec![1, 2]);
+        let mut p = vec![0; 3];
+        // The sequence's place waits for its act; the lone route's place is open.
+        assert_eq!(open_place_leaves(&obj, &p).iter().map(|l| l.index).collect::<Vec<_>>(), vec![2]);
+        advance(&obj, &mut p, &ChallengeEvent::PlaceBlock { block: None });
+        advance(&obj, &mut p, &ChallengeEvent::PlaceBlock { block: None });
+        assert_eq!(open_place_leaves(&obj, &p).iter().map(|l| l.index).collect::<Vec<_>>(), vec![1, 2]);
+        assert!(!is_complete(&obj, &p));
+        p[1] = 1;
+        assert_eq!(complete_routes(&obj, &p), vec![0], "the Sequence route finished");
+        assert!(is_complete(&obj, &p));
+        // A Checklist counts a place alongside an action, in any order.
+        let list = Objective::Checklist { items: vec![place(0.5), act(ChallengeEvent::KillMob, 1)] };
+        let mut q = vec![0; 2];
+        q[0] = 1;
+        assert!(!is_complete(&list, &q));
+        advance(&list, &mut q, &ChallengeEvent::KillMob);
+        assert!(is_complete(&list, &q));
+    }
+
+    #[test]
+    fn a_note_follows_its_line_and_the_others_are_left_alone() {
+        let def = crate::scenario::ScenarioDef {
+            objective: Objective::Checklist { items: vec![place(0.5), act(ChallengeEvent::KillMob, 1)] },
+            ..crate::scenario::builtin_test_def()
+        };
+        let tasks = crate::scenario::objective_tasks(&def, &["Bring it back", "Defeat one"]);
+        let st = step_status(&def.objective, &[0, 0]);
+        let text = task_text_with_notes(&tasks, &st, Some(0), &[Some("Waking up".to_string()), None]);
+        assert_eq!(text, "\u{279C} Bring it back \u{2014} Waking up\n\u{2022} Defeat one");
+        assert_eq!(task_text_with_notes(&tasks, &st, Some(0), &[]), task_text(&tasks, &st, Some(0)));
     }
 }

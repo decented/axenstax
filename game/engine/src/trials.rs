@@ -446,7 +446,7 @@ pub fn find_def(id: &str) -> Option<&'static TrialDef> {
     CATALOG.iter().find(|d| d.id == id)
 }
 
-/// The five styles of Trial. Each has an icon shown immediately before the
+/// The six styles of Trial. Each has an icon shown immediately before the
 /// trial's name in the lobby (and named in its description) so a player can tell
 /// at a glance what KIND of thing a trial is — without the list being split into
 /// separate sections.
@@ -462,6 +462,9 @@ pub enum TrialType {
     Brave,
     /// 🌱 Farming, animals, fishing, riding, trade — tend the living world.
     Tend,
+    /// 🌸 Act two: bring a stripped place back to life (living world, the Grey
+    /// Quarry). The label is a placeholder until the vision names the shelf.
+    Bloom,
 }
 
 impl TrialType {
@@ -473,6 +476,7 @@ impl TrialType {
             TrialType::Tech => "\u{26A1}",   // ⚡ high voltage
             TrialType::Brave => "\u{2694}",  // ⚔ crossed swords
             TrialType::Tend => "\u{1F331}",  // 🌱 seedling
+            TrialType::Bloom => "\u{1F338}", // 🌸 cherry blossom
         }
     }
 
@@ -484,6 +488,7 @@ impl TrialType {
             TrialType::Tech => "Tech",
             TrialType::Brave => "Brave",
             TrialType::Tend => "Tend",
+            TrialType::Bloom => "Bloom",
         }
     }
 
@@ -498,6 +503,7 @@ impl TrialType {
             TrialType::Tech => [240, 205, 70],  // gold
             TrialType::Brave => [186, 130, 224], // violet
             TrialType::Tend => [120, 200, 110], // green
+            TrialType::Bloom => [240, 160, 196], // soft pink
         }
     }
 }
@@ -577,6 +583,9 @@ pub const TRIAL_ORDER: &[(TrialType, TrialRef)] = &[
     (TrialType::Brave, TrialRef::Challenge("breach-and-clear")),
     (TrialType::Brave, TrialRef::Challenge("armour-up")),
     (TrialType::Brave, TrialRef::Challenge("champion")),
+    // Act two (living world): a place trial, unlocked when somewhere in the
+    // player's own world goes grey, or after Power Plant.
+    (TrialType::Bloom, TrialRef::Challenge("grey-quarry")),
     // The clock corner (§A.7): always visible, never unlocked. Scavenger is
     // typed Make but the gallery puts it in the clock row.
     (TrialType::Make, TrialRef::Challenge("scavenger")),
@@ -1077,10 +1086,19 @@ mod tests {
                 assert!(def.unlock.is_some(), "{token} must appear by doing (give it an unlock)");
             }
         }
-        // 34 trials in the list: the front shelf, the 23 that appear by doing,
+        // 35 trials in the list: the front shelf, the 24 that appear by doing,
         // and Scavenger.
         let challenges = TRIAL_ORDER.iter().filter(|(_, r)| matches!(r, TrialRef::Challenge(_))).count();
-        assert_eq!(challenges, 34);
+        assert_eq!(challenges, 35);
+    }
+
+    #[test]
+    fn the_bloom_shelf_has_its_own_icon_label_and_colour() {
+        assert_eq!(TrialType::Bloom.icon(), "\u{1F338}");
+        assert_eq!(TrialType::Bloom.label(), "Bloom");
+        let all = [TrialType::Race, TrialType::Make, TrialType::Tech, TrialType::Brave, TrialType::Tend];
+        assert!(all.iter().all(|t| t.color_rgb() != TrialType::Bloom.color_rgb()), "a colour of its own");
+        assert!(all.iter().all(|t| t.icon() != TrialType::Bloom.icon()));
     }
 
     #[test]
@@ -1091,6 +1109,7 @@ mod tests {
             TrialType::Tech,
             TrialType::Brave,
             TrialType::Tend,
+            TrialType::Bloom,
         ] {
             assert!(!t.icon().is_empty());
             assert!(!t.label().is_empty());

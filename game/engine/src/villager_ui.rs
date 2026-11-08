@@ -312,6 +312,7 @@ pub fn draw_satoshi_dialogue(
     player_index: usize,
     view: crate::satoshi::SatoshiView,
     is_creative: bool,
+    ambient: Option<&str>,
 ) -> crate::satoshi::SatoshiAction {
     use crate::satoshi::{self, SatoshiAction, SatoshiView};
 
@@ -381,6 +382,20 @@ pub fn draw_satoshi_dialogue(
                                 .size(14.0)
                                 .italics()
                                 .color(egui::Color32::from_rgb(180, 200, 170)),
+                        )
+                        .wrap(),
+                    );
+                }
+                // The gardener's ambient line, when he stands in a grey or a
+                // blooming place (living world D17).
+                if let Some(line) = ambient {
+                    ui.add_space(8.0);
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(line)
+                                .size(14.0)
+                                .italics()
+                                .color(egui::Color32::from_rgb(190, 215, 175)),
                         )
                         .wrap(),
                     );

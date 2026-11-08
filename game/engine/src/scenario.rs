@@ -344,7 +344,9 @@ impl ChallengeEvent {
 /// NOTE: this enum is intentionally NOT `Copy` — the `Sequence`/`Checklist`
 /// variants own a `Vec<Objective>`. Match on `&self.def.objective` (a borrow),
 /// never by value.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Not `Eq`: [`Objective::Place`] carries an `f32` goal.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Objective {
     /// Timed score-attack: ends after `ticks` active ticks (Hash Dash).
     Timed { ticks: u32 },
@@ -365,6 +367,19 @@ pub enum Objective {
     /// An UNORDERED checklist (explorer "do A and B"): all items complete, any
     /// order; ends when all are done. v1: each item is an `Action`.
     Checklist { items: Vec<Objective> },
+    /// A place comes back to life (living world spec §6.1): a bloom probe is
+    /// registered on `area` (offsets from the player's spawn, like
+    /// `ArenaSetup`) when the scenario starts and removed when it ends. The
+    /// leaf completes when the probe's level has stayed at or above `at_least`
+    /// for `hold_seconds` of real time. Its task line shows the stage phrase
+    /// ("Grey and still" … "Alive"), never a number. Allowed alone, or as a
+    /// leaf of a `Sequence`, a `Checklist` or an `AnyOf` route.
+    Place {
+        area: PlaceArea,
+        measure: PlaceMeasure,
+        at_least: f32,
+        hold_seconds: u32,
+    },
     /// One trial, several ways (Trials in Two Acts §A.5): each route keeps its
     /// own progress and the first route to finish completes the trial. Top
     /// level only — a route's objective is an `Action`, or a `Sequence` /
@@ -374,8 +389,32 @@ pub enum Objective {
     AnyOf { routes: Vec<Route> },
 }
 
+/// A box of ground as offsets from the player's spawn, both corners inclusive
+/// (only x and z matter to the bloom probe; y is kept for authoring symmetry
+/// with `ArenaSetup`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlaceArea {
+    pub from: [i32; 3],
+    pub to: [i32; 3],
+}
+
+impl PlaceArea {
+    /// The world box `(min, max)` for a spawn at block `origin`.
+    pub fn world_box(&self, origin: (i32, i32, i32)) -> (glam::IVec3, glam::IVec3) {
+        let a = glam::IVec3::new(origin.0 + self.from[0], origin.1 + self.from[1], origin.2 + self.from[2]);
+        let b = glam::IVec3::new(origin.0 + self.to[0], origin.1 + self.to[1], origin.2 + self.to[2]);
+        (a.min(b), a.max(b))
+    }
+}
+
+/// What a [`Objective::Place`] measures. One today.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PlaceMeasure {
+    Bloom,
+}
+
 /// One way through an [`Objective::AnyOf`] trial.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Route {
     /// Shown in the task list ("Pick a way:") and on the end card ("You did it
     /// by: <name>"), and remembered in `TrialBests::ways_done`.
@@ -397,11 +436,21 @@ pub struct ScenarioTuning {
     /// the Hash-Dash leaves-vs-tools lever from the hashing foundations doc.
     #[serde(default = "default_work_exponent")]
     pub work_exponent: f32,
+    /// The living world's bloom tempo while this scenario runs in a FRESH trial
+    /// arena (`1.0` = the world's own pace). It is never applied by the
+    /// in-world `/scenario` overlay, so a trial can never change the tempo of
+    /// the player's own world (`place_trial::effective_bloom_time_scale`).
+    #[serde(default = "default_bloom_time_scale")]
+    pub bloom_time_scale: f32,
+}
+
+fn default_bloom_time_scale() -> f32 {
+    1.0
 }
 
 impl Default for ScenarioTuning {
     fn default() -> Self {
-        Self { work_exponent: default_work_exponent() }
+        Self { work_exponent: default_work_exponent(), bloom_time_scale: default_bloom_time_scale() }
     }
 }
 
@@ -523,6 +572,31 @@ pub struct ArenaSetup {
     /// Mobs to spawn: `at` offset from spawn, `mob` a `/spawn`-style name.
     #[serde(default)]
     pub mobs: Vec<ArenaMob>,
+    /// Box fills, applied with `blocks` (in the order: fills first, then the
+    /// single `blocks` rows on top of them), so a 24x24 terraced quarry does
+    /// not need thousands of rows. Corners are offsets from spawn, inclusive.
+    #[serde(default)]
+    pub fills: Vec<ArenaFill>,
+    /// Grey starts: the bloom level of the given areas on the FRESH-world
+    /// launch (living world spec §6.1). Never applied by the `/scenario`
+    /// overlay (which builds no arena at all).
+    #[serde(default)]
+    pub drained: Vec<ArenaDrained>,
+}
+
+/// A box fill of one block: `from`/`to` are offsets from spawn, inclusive.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArenaFill {
+    pub from: [i32; 3],
+    pub to: [i32; 3],
+    pub block: String,
+}
+
+/// An area that starts the trial grey: its bloom `level` (0..=1) at launch.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ArenaDrained {
+    pub area: PlaceArea,
+    pub level: f32,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -583,6 +657,9 @@ pub struct ScenarioState {
     /// `InventoryVariety` score is this set's size, so it only ever grows. Empty
     /// for every other scenario.
     variety_seen: std::collections::HashSet<u64>,
+    /// What the run remembers about its `Place` leaves (bloom probes, stages,
+    /// start and end terms for the end card). Empty for every other objective.
+    place: crate::place_trial::PlaceTrack,
 }
 
 impl ScenarioState {
@@ -597,6 +674,7 @@ impl ScenarioState {
             result_tick: None,
             progress,
             variety_seen: std::collections::HashSet::new(),
+            place: crate::place_trial::PlaceTrack::default(),
         }
     }
 
@@ -619,6 +697,7 @@ impl ScenarioState {
             result_tick,
             progress,
             variety_seen: std::collections::HashSet::new(),
+            place: crate::place_trial::PlaceTrack::default(),
         }
     }
 
@@ -700,7 +779,10 @@ impl ScenarioState {
             Objective::Action { count, .. } => {
                 Some((self.progress.first().copied().unwrap_or(0).min(*count), *count))
             }
-            Objective::Sequence { .. } | Objective::Checklist { .. } | Objective::AnyOf { .. } => {
+            Objective::Place { .. }
+            | Objective::Sequence { .. }
+            | Objective::Checklist { .. }
+            | Objective::AnyOf { .. } => {
                 Some(crate::objective_progress::leaves_done(&self.def.objective, &self.progress))
             }
             Objective::Timed { .. } | Objective::FirstSatori | Objective::FreeRoam => None,
@@ -827,10 +909,66 @@ impl ScenarioState {
             Objective::FirstSatori
             | Objective::FreeRoam
             | Objective::Action { .. }
+            | Objective::Place { .. }
             | Objective::Sequence { .. }
             | Objective::Checklist { .. }
             | Objective::AnyOf { .. } => 0,
         }
+    }
+
+    // ── Place objectives (living world §6.1) ─────────────────────────
+
+    pub(crate) fn place_track_mut(&mut self) -> &mut crate::place_trial::PlaceTrack {
+        &mut self.place
+    }
+
+    /// Flat indices of the `Place` leaves that may count right now.
+    pub(crate) fn open_place_indices(&self) -> Vec<usize> {
+        crate::objective_progress::open_place_leaves(&self.def.objective, &self.progress)
+            .into_iter()
+            .map(|l| l.index)
+            .collect()
+    }
+
+    /// A `Place` leaf finished: its probe read "Alive". Ends the run when that
+    /// was the last thing the objective needed.
+    pub(crate) fn complete_place(&mut self, leaf: usize, state: &crate::bloom::ProbeState) {
+        if self.ended {
+            return;
+        }
+        if let Some(p) = self.progress.get_mut(leaf) {
+            *p = 1;
+        }
+        self.place.finish(leaf, state);
+        if crate::objective_progress::is_complete(&self.def.objective, &self.progress) {
+            self.ended = true;
+            self.result_tick = Some(self.elapsed_ticks);
+        }
+    }
+
+    /// The stage words of the first `Place` leaf ("Grey and still" … "Alive"),
+    /// once its probe has been read. A finished run reads "Alive".
+    pub fn place_stage_phrase(&self) -> Option<&'static str> {
+        self.place.first_stage().map(|s| s.phrase())
+    }
+
+    /// Per task line (flat leaf order), the stage phrase of a `Place` leaf, so
+    /// the task list can show it after the line. `None` for every other line.
+    pub fn place_notes(&self) -> Vec<Option<String>> {
+        let n = crate::objective_progress::leaf_count(&self.def.objective);
+        let mut notes = vec![None; n];
+        for l in crate::objective_progress::place_leaves(&self.def.objective) {
+            if let (Some(slot), Some(stage)) = (notes.get_mut(l.index), self.place.stage_of(l.index)) {
+                *slot = Some(stage.phrase().to_string());
+            }
+        }
+        notes
+    }
+
+    /// For a finished `Place` trial, how the place came back (the end card's
+    /// flower and sentence). `None` before the run ends or for any other trial.
+    pub fn place_recovery(&self) -> Option<crate::place_trial::Recovery> {
+        if self.ended { self.place.recovery() } else { None }
     }
 }
 
@@ -1007,6 +1145,9 @@ pub const EXPLORER_CHALLENGES: &[(&str, &[u8])] = &[
     ("follow-the-plan", include_bytes!("../assets/scenarios/explorer-follow-the-plan.json")),
     ("fresh-coat", include_bytes!("../assets/scenarios/explorer-fresh-coat.json")),
     ("bouncer", include_bytes!("../assets/scenarios/explorer-bouncer.json")),
+    // Living world S4 (2026-11-08) — act two: the first place trial. A stripped
+    // quarry, a bloom probe over it, and the player's own way of bringing it back.
+    ("grey-quarry", include_bytes!("../assets/scenarios/explorer-grey-quarry.json")),
 ];
 
 /// `(start-name, display-name)` pairs for the feature-coverage challenges — the
@@ -1158,6 +1299,9 @@ pub struct RouteTasks {
 
 /// Auto-derived [`TaskList`] from a scenario's objective events (the generic
 /// fallback: "Break 3 blocks", "Craft an item").
+/// The generic task line of a `Place` leaf (trials author their own).
+const PLACE_TASK_LABEL: &str = "Bring this place back to life";
+
 fn objective_tasks_auto(def: &ScenarioDef) -> TaskList {
     objective_tasks_for(&def.objective)
 }
@@ -1168,12 +1312,14 @@ fn objective_tasks_for(objective: &Objective) -> TaskList {
         subs.iter()
             .filter_map(|o| match o {
                 Objective::Action { event, count } => Some(event_task_label(event, *count)),
+                Objective::Place { .. } => Some(PLACE_TASK_LABEL.to_string()),
                 _ => None,
             })
             .collect()
     };
     match objective {
         Objective::Action { event, count } => plain(false, vec![event_task_label(event, *count)]),
+        Objective::Place { .. } => plain(false, vec![PLACE_TASK_LABEL.to_string()]),
         Objective::Sequence { steps } => plain(true, leaves(steps)),
         Objective::Checklist { items } => plain(false, leaves(items)),
         Objective::AnyOf { routes } => {
@@ -1251,6 +1397,7 @@ pub fn trial_task_labels(token: &str) -> &'static [&'static str] {
         "follow-the-plan" => &["Follow the ghost guide until the hut is finished"],
         "fresh-coat" => &["Paint the mannequin, then pin it on to wear it"],
         "bouncer" => &["Build a rig, give it the Bounce clip, and spawn it"],
+        "grey-quarry" => &["Bring the quarry back to life"],
         _ => &[],
     }
 }
@@ -1442,6 +1589,10 @@ pub fn challenge_help(name: &str) -> (&'static str, &'static str) {
             "Invent a little creature in Rig Studio out of blocks, give it the Bounce clip, and spawn it.",
             "Press Y to open RIG STUDIO. Pick a skeleton shape at the top, then hold a block in your hand (press 1–4 for the different kinds) and click a body part in the panel to build that part out of that block — head, body, arms, legs, whatever you fancy. Set the animation to BOUNCE. Then hit SPAWN and your creature appears in front of you, bouncing away. Make it silly. Make it enormous. It's your creature.",
         ),
+        "grey-quarry" => (
+            "It was alive once. What lives in places like this?",
+            "Somebody took everything this place had. Look around: there is stone, a little soil, a spring behind a wall, and a meadow with animals just outside. The words in the corner tell you how the place is doing, and they change as it does. Take your time. Some things grow slowly, and some places wake faster than you would think.",
+        ),
         _ => ("", ""),
     }
 }
@@ -1619,7 +1770,20 @@ pub fn trial_satoshi(name: &str) -> (&'static str, &'static str) {
             "Time to make something alive. Rig Studio takes plain blocks and hangs them on a skeleton, and then it MOVES — so pick a shape, hand it some blocks, set it to Bounce, and let it loose. The daftest creature wins.",
             "Y opens Rig Studio. Hold a block, click a body part to build that part from it, set the clip to Bounce, then Spawn.",
         ),
+        "grey-quarry" => (
+            "Somebody took everything this place had and walked away. It's still here, though. Let's see if it remembers how to be alive.",
+            "Hear that? Something moved in.",
+        ),
         _ => ("", ""),
+    }
+}
+
+/// Satoshi's last word on a trial, said under the end card (only the Place
+/// trials have one so far): a quiet line, never a moral. Keyed by the trial token.
+pub fn trial_satoshi_end(name: &str) -> &'static str {
+    match name {
+        "grey-quarry" => "Look at it. Nobody owns that colour. It's just there now, for whoever comes next.",
+        _ => "",
     }
 }
 
@@ -1636,6 +1800,22 @@ pub fn trial_satoshi_for_display(display: &str) -> (&'static str, &'static str) 
         }
     }
     ("", "")
+}
+
+/// Satoshi's `(intro, hint, end line)` for a running scenario carrying only its
+/// `display_name`; all empty for a non-bundled scenario.
+pub fn trial_satoshi_lines_for_display(display: &str) -> (&'static str, &'static str, &'static str) {
+    if load_scenario_def(ONBOARDING_JSON).map(|d| d.display_name == display).unwrap_or(false) {
+        let (i, h) = trial_satoshi("onboarding");
+        return (i, h, trial_satoshi_end("onboarding"));
+    }
+    for (name, bytes) in EXPLORER_CHALLENGES {
+        if load_scenario_def(bytes).map(|d| d.display_name == display).unwrap_or(false) {
+            let (i, h) = trial_satoshi(name);
+            return (i, h, trial_satoshi_end(name));
+        }
+    }
+    ("", "", "")
 }
 
 /// Whether to OFFER the onboarding arc to a player arriving at the lobby.
@@ -2720,6 +2900,7 @@ mod tests {
                         | Objective::Sequence { .. }
                         | Objective::Checklist { .. }
                         | Objective::AnyOf { .. } // one trial, several ways (§A.4)
+                        | Objective::Place { .. } // act two: bring a place back to life (living world §6)
                         | Objective::Timed { .. } // the Scavenger — a timed variety score-attack
                 ),
                 "explorer {name} must be an Action/Sequence/Checklist or a Timed score-attack"
@@ -2850,6 +3031,16 @@ mod tests {
                         m.mob,
                     );
                 }
+                for f in &arena.fills {
+                    let stack = crate::commands::builtins::give::resolve_item(&f.block, 1)
+                        .unwrap_or_else(|e| panic!("{}: arena fill '{}': {e}", def.display_name, f.block));
+                    assert!(
+                        stack.item.as_block().is_some(),
+                        "{}: arena fill '{}' must be a placeable block",
+                        def.display_name,
+                        f.block,
+                    );
+                }
             }
         }
     }
@@ -2978,7 +3169,7 @@ mod tests {
         for (name, _d) in challenge_listing() {
             let (t, h) = challenge_help(name);
             let (i, hi) = trial_satoshi(name);
-            corpus.push_str(&format!(" {t} {h} {i} {hi} "));
+            corpus.push_str(&format!(" {t} {h} {i} {hi} {} ", trial_satoshi_end(name)));
         }
         for race in crate::trials::CATALOG {
             corpus.push_str(&format!(" {} {} ", race.blurb, race.how_to));
@@ -2987,5 +3178,122 @@ mod tests {
         }
         let hits = crate::copy_lint::banned_in(&corpus, crate::copy_lint::BANNED_MONEY_WORDS);
         assert!(hits.is_empty(), "trial text contains banned money/earning word(s): {hits:?}");
+    }
+
+    // ── Place objectives and act-two arena fields (living world S4) ──────
+
+    fn quarry() -> ScenarioDef {
+        named_builtin_def("grey-quarry").expect("the Grey Quarry is bundled")
+    }
+
+    fn probe_state(eco: f32, people: f32) -> crate::bloom::ProbeState {
+        crate::bloom::ProbeState {
+            level: 0.6,
+            target: 0.6,
+            eco,
+            people,
+            stage: crate::bloom::Stage::Alive,
+            held_secs: 20.0,
+            scanned: true,
+        }
+    }
+
+    #[test]
+    fn the_grey_quarry_is_a_place_trial_on_the_bloom_shelf() {
+        let d = quarry();
+        assert_eq!(d.kind, ScenarioKind::Challenge);
+        assert!(matches!(
+            d.objective,
+            Objective::Place { measure: PlaceMeasure::Bloom, hold_seconds: 20, .. }
+        ));
+        assert_eq!(d.tuning.bloom_time_scale, 12.0);
+        assert_eq!(d.world_type.as_deref(), Some("flat"));
+        let arena = d.arena.as_ref().unwrap();
+        assert!(!arena.fills.is_empty() && arena.drained.len() == 1);
+        assert_eq!(arena.drained[0].level, 0.05);
+        let u = d.unlock.as_ref().expect("it appears by doing");
+        assert_eq!(u.on, vec![ChallengeEvent::PlaceWentGrey]);
+        assert_eq!(u.after, vec!["generator".to_string()]);
+        assert_eq!(u.hint, "Somewhere grey is waiting.");
+        // The kit: three tree kinds, three crops, the tools, food and Leads,
+        // and one Feast Table (the people route).
+        let names: Vec<&str> = d.kit.iter().map(|k| k.name.as_str()).collect();
+        for want in [
+            "oak_sapling", "birch_sapling", "spruce_sapling", "wheat_seeds", "carrot", "potato", "bucket",
+            "stone_shovel", "wooden_hoe", "bone_meal", "bread", "wheat", "lead", "feast_table",
+        ] {
+            assert!(names.contains(&want), "the kit holds {want}");
+        }
+        assert_eq!(
+            trial_tasks_for_token("grey-quarry").unwrap().lines,
+            vec!["Bring the quarry back to life".to_string()]
+        );
+        let (intro, hint) = trial_satoshi("grey-quarry");
+        assert!(intro.starts_with("Somebody took everything this place had"));
+        assert_eq!(hint, "Hear that? Something moved in.");
+        assert!(trial_satoshi_end("grey-quarry").starts_with("Look at it. Nobody owns that colour."));
+        let (i2, h2, e2) = trial_satoshi_lines_for_display(&d.display_name);
+        assert_eq!((i2, h2, e2), (intro, hint, trial_satoshi_end("grey-quarry")));
+    }
+
+    #[test]
+    fn a_place_leaf_completes_through_its_probe_never_through_events() {
+        let mut s = ScenarioState::new(quarry());
+        assert_eq!(s.step_status(), vec![(0, 1)]);
+        assert_eq!(s.objective_progress(), Some((0, 1)));
+        for ev in [ChallengeEvent::KillMob, ChallengeEvent::PlaceWentGrey, ChallengeEvent::HoldFeast] {
+            s.on_event(ev);
+        }
+        assert!(!s.is_ended(), "no event can finish a Place");
+        assert_eq!(s.open_place_indices(), vec![0]);
+        assert!(s.place_recovery().is_none());
+        s.complete_place(0, &probe_state(0.7, 0.0));
+        assert!(s.is_ended());
+        assert_eq!(s.objective_progress(), Some((1, 1)));
+        assert!(s.open_place_indices().is_empty());
+        assert!(s.shows_blocking_end_card(), "a Challenge ends on the modal card");
+    }
+
+    #[test]
+    fn the_bloom_time_scale_defaults_to_one_and_survives_a_round_trip() {
+        assert_eq!(ScenarioTuning::default().bloom_time_scale, 1.0);
+        let plain = load_scenario_def(br#"{"kind":"Challenge","display_name":"X","objective":"FreeRoam"}"#).unwrap();
+        assert_eq!(plain.tuning.bloom_time_scale, 1.0, "an older def has the world's own pace");
+        let back = load_scenario_def(quarry().to_json().unwrap().as_bytes()).unwrap();
+        assert_eq!(back, quarry());
+        assert_eq!(back.tuning.bloom_time_scale, 12.0);
+    }
+
+    #[test]
+    fn a_place_task_line_without_an_authored_label_reads_generically() {
+        let mut d = quarry();
+        d.display_name = "Not bundled".into();
+        let t = objective_tasks(&d, &[]);
+        assert_eq!(t.lines, vec!["Bring this place back to life".to_string()]);
+    }
+
+    #[test]
+    fn the_stage_words_follow_the_probe_and_go_into_the_task_list() {
+        let mut s = ScenarioState::new(quarry());
+        assert_eq!(s.place_stage_phrase(), None, "before the probe has been read");
+        assert_eq!(s.place_notes(), vec![None]);
+        let mut st = probe_state(0.1, 0.0);
+        st.stage = crate::bloom::Stage::Stirring;
+        s.place_track_mut().note(0, &st);
+        assert_eq!(s.place_stage_phrase(), Some("Something's stirring"));
+        assert_eq!(s.place_notes(), vec![Some("Something's stirring".to_string())]);
+        let tasks = trial_tasks_for_token("grey-quarry").unwrap();
+        let text = crate::objective_progress::task_text_with_notes(&tasks, &s.step_status(), s.current_step(), &s.place_notes());
+        assert_eq!(text, "\u{279C} Bring the quarry back to life \u{2014} Something's stirring");
+        assert!(!text.chars().any(|c| c.is_ascii_digit()), "words, never a number: {text}");
+    }
+
+    #[test]
+    fn the_overlay_never_sets_the_tempo_of_the_players_own_world() {
+        // `/scenario grey-quarry` in a player's own world is not a fresh arena.
+        let d = quarry();
+        let scale = d.tuning.bloom_time_scale;
+        assert_eq!(crate::place_trial::effective_bloom_time_scale(Some(scale), false), 1.0);
+        assert_eq!(crate::place_trial::effective_bloom_time_scale(Some(scale), true), 12.0);
     }
 }

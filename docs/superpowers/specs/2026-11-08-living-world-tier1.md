@@ -411,12 +411,95 @@ every tenth tick from those counters. Placing the stone fires `ClaimCommons` on 
   - hint (halfway): "Hear that? Something moved in."
   - end line (end card): "Look at it. Nobody owns that colour. It's just there now, for whoever comes next."
 
+### 6.2a As built (slice S4, 2026-11-08)
+
+Code: `place_trial.rs` (tempo rule, recovery shares and sentence, the per-run
+record, the scenario/field glue), `place_trial_ui.rs` (the flower),
+`arena_build.rs` (the arena written into a world with no renderer),
+`objective_progress.rs` (`Place` as a leaf), `scenario.rs`, `trials.rs`,
+`satoshi.rs`; the trial is `assets/scenarios/explorer-grey-quarry.json`. The
+whole path, from arena to end card, is driven without a window by
+`test_integration/grey_quarry.rs`.
+
+- **`Objective::Place`** may be the whole objective or a leaf of `Sequence`,
+  `Checklist` or an `AnyOf` route (in a `Sequence` it counts only as the current
+  step). `Objective`/`Route` lost `Eq` (an `f32` goal). The probe is registered
+  by `start_scenario` (so the `/scenario` overlay gets one too, over the area
+  taken from the player's feet) and removed when the run ends; probe id is
+  `0x5000_0000 + flat leaf index`; the goal is set with `set_probe_goal`.
+  Completion is the probe reading "Alive" (level at or above `at_least`, held
+  `hold_seconds` of real time). The task line shows the stage words after the
+  label (H panel, HUD badge); no number anywhere.
+- **Tempo.** `GameState::scenario_fresh_arena` is set only by the fresh-world
+  launch, cleared by `start_scenario` and any world change.
+  `place_trial::effective_bloom_time_scale` returns the scenario's
+  `bloom_time_scale` only when that flag is set (and the number is finite and
+  positive), else 1.0; `tick_bloom` applies it every tick, so the overlay and a
+  player's own world never change tempo. `BloomField::reset` also drops the
+  scale on a world change.
+- **`ArenaSetup.fills`** are written first (a box, inclusive, capped at 100,000
+  cells), then `blocks`, then `mobs`; one re-mesh per touched chunk.
+  **`ArenaSetup.drained`** sets the initial level of the probe and of the regions
+  under the area (`set_initial_level`); only the fresh-world path builds an arena.
+- **Unlock.** `trials_unlock::rule_met` is `after || on`: the clauses were
+  already either-or, so no any-of form was added. `next_hints` shows a hint for
+  an `after`-and-`on` trial only while some but not all `after` trials are done,
+  so the Grey Quarry (one `after` token) never shows a frosted hint card: it is
+  simply absent until a place goes grey or Power Plant is done.
+- **Shelf.** `TrialType::Bloom`, 🌸 U+1F338, "Bloom", RGB (240, 160, 196),
+  after Brave in `SHELF_ORDER`. On the Trials island the one Bloom trial stands in
+  the Tend wedge (`trials_island_build::district_of`); a fifth wedge is not built.
+- **End card.** `Recovery` splits the rise in target between life and people by
+  a Shapley split (each term's effect averaged over both orders), so the shares
+  sum to one. Both within 25 points: "through life and people together"; else
+  the larger term: "mostly through life" / "mostly through people together".
+  `ways()` is the same decision: `["life"]`, `["people"]` or both, recorded in
+  `TrialBests::ways_done` under the trial's display name, and listed on the
+  gallery card's premise afterwards. The flower has four petals in the order
+  life, ideas, people, time; life and people are open and sized by share
+  (16 to 62 px long), ideas and time are always buds (14 px, muted). Satoshi's end
+  line is `trial_satoshi_end`. **Before/after pictures: not built (D15).**
+  `world_picture.rs` draws a placeholder diorama from the world's type; it
+  cannot render the world from a camera, and the postcard flow needs a window
+  and a GPU.
+- **Satoshi's gardener lines** (D17), `satoshi.rs`: level under 0.25, one of
+  "This place could do with some company." / "Nothing growing here, and yet it
+  feels as if it's listening."; level over 0.8, "Listen to that. Somebody's been
+  looking after it." Shown as an italic line under his greeting.
+- **Kit.** B.5's list, plus a hoe (D18) and one Feast Table (the people route).
+  `give.rs` gained `oak_sapling`, `birch_sapling`, `spruce_sapling` (and the other
+  species) and `lead`.
+- **The arena** (flat world, offsets from the feet): the quarry is x 6 to 29,
+  z -12 to 11 (24 x 24) in four stone terraces 8, 6, 6 and 4 wide with tops at
+  y -1, 0, 1 and 2, split round a one-wide stream bed along z = 0 whose floor
+  steps down with them; the spring is a water source at (28, 2, 0) behind two
+  cobblestone blocks at (27, 2, 0) and (26, 2, 0); six one-wide rows of dirt (28
+  columns) and three oak stumps. The meadow (x -22 to -8, z -6 to 6) is fenced with
+  oak fence posts and a gate, with 2 sheep, 1 cow and 2 rabbits, and a chest sits
+  at (1, 0, 1). Nothing but the stumps, soil and spring is alive inside the area.
+- **Calibration** (`grey_quarry.rs`, a flat world, 20 TPS, scale 12). Start: level
+  0.05, target 0.119 (life 0.119, people 0). Left alone it settles at 0.119.
+  Opening the spring alone settles at 0.199; with the five animals led in at 0.245.
+  Adding twelve crops (three kinds) reaches 0.433 and stops there. Six saplings
+  (two each of oak, birch and spruce) lift the target to 0.60 to 0.73 as they grow,
+  and the trial ends. So **`at_least` stays 0.55**: water, animals and crops
+  cannot reach it without trees, and nothing finishes in the first minute.
+  Growth is a one-in-thirty roll every 200 ticks per sapling, so the time is the
+  trees': the committed scripted run finished 2,650 ticks (2.2 minutes) after the
+  work was done; the same work started three minutes later took 14,400 ticks (12
+  minutes). The people route: a Feast for five guests finishes it in under ten
+  minutes of game time (target 0.62 at once); three guests do not (target 0.51).
+  At the world's own pace the same Feast has barely started after four minutes.
+
 ## 6.3 Known limits at Tier 1 (for the things-to-try note)
 
 - Worlds saved by this build do not open in 0.2.29 (layout revision 5).
 - Bloom is computed per client: two players may see slightly different shades at the edges of what they have loaded.
 - Feast and co-presence surges fade on reload; the Feast Marker's lasting lift stays.
 - Commons do not yet stop anyone breaking things.
+- The Grey Quarry's people route is a rules test, not a solo play: a Feast with no guests is refused, the arena has no villagers, and an inventory-touching trial is refused while networked. A group at a Feast of five or more is what carries it (`grey_quarry.rs` drives `note_feast` directly).
+- "Try again" on a Place trial re-runs it in the same arena world, whatever shape the place is in; the grey start (`drained`) is not re-applied.
+- The frosted hint "Somewhere grey is waiting." is not shown by the gallery or the island: `next_hints` only nudges an `after` trial while some, but not all, of its `after` trials are done, and the Grey Quarry has one.
 
 ## 7. Build slices (one at a time, in worktree `../AxeNStax-living-world`, branch `living-world`)
 

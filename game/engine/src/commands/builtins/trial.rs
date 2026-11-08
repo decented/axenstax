@@ -53,7 +53,7 @@ impl Command for TrialCommand {
                     // An objective challenge — reuse the scenario runner (kit,
                     // event tracking, HUD, completion) so each trial exercises a
                     // genuinely different system.
-                    CommandResult::StartScenario { def }
+                    CommandResult::StartScenario { def: Box::new(def) }
                 } else {
                     CommandResult::Error(format!("Unknown trial '{id}'. Try /trial list."))
                 }

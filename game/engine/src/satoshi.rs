@@ -325,6 +325,33 @@ pub const SATOSHI_SCHEMATIC_LINE: &str =
 pub const SATOSHI_RETURN_LINE: &str =
     "Back again? Good. My door is always open to those who seek it.";
 
+/// The gardener's ambient lines (living world D17): what his greeting may say
+/// when the player stands in a grey place or a blooming one. He never explains
+/// and never lectures; he notices, the way a gardener does.
+pub const SATOSHI_GARDENER_GREY: [&str; 2] = [
+    "This place could do with some company.",
+    "Nothing growing here, and yet it feels as if it's listening.",
+];
+pub const SATOSHI_GARDENER_BLOOMING: &str = "Listen to that. Somebody's been looking after it.";
+
+/// Below this bloom level a place counts as grey for his ambient line.
+pub const GARDENER_GREY_BELOW: f32 = 0.25;
+/// Above this one it counts as blooming.
+pub const GARDENER_BLOOMING_ABOVE: f32 = 0.8;
+
+/// The ambient gardener line for a player standing where the bloom level is
+/// `level`, or `None` in between. `pick` varies the grey line (any number; a
+/// slowly changing one keeps a line steady while a dialogue is open).
+pub fn gardener_line(level: f32, pick: u64) -> Option<&'static str> {
+    if level < GARDENER_GREY_BELOW {
+        Some(SATOSHI_GARDENER_GREY[(pick % SATOSHI_GARDENER_GREY.len() as u64) as usize])
+    } else if level > GARDENER_BLOOMING_ABOVE {
+        Some(SATOSHI_GARDENER_BLOOMING)
+    } else {
+        None
+    }
+}
+
 /// Label on the food-accept action.
 pub const SATOSHI_GIFT_LABEL: &str = "Thank you!";
 /// Label on the schematic-accept action.
@@ -466,7 +493,20 @@ mod tests {
             SATOSHI_SCHEMATIC_LABEL,
             SATOSHI_DISMISS_LABEL,
             SATOSHI_MISSIONS_DONE,
+            SATOSHI_GARDENER_GREY[0],
+            SATOSHI_GARDENER_GREY[1],
+            SATOSHI_GARDENER_BLOOMING,
         ]
+    }
+
+    #[test]
+    fn the_gardener_speaks_only_in_a_grey_or_a_blooming_place() {
+        assert!(gardener_line(0.1, 0).is_some());
+        assert_ne!(gardener_line(0.1, 0), gardener_line(0.1, 1), "two grey lines to vary");
+        assert_eq!(gardener_line(0.9, 3), Some(SATOSHI_GARDENER_BLOOMING));
+        for mid in [0.25, 0.5, 0.8] {
+            assert_eq!(gardener_line(mid, 0), None, "{mid}: in between he says nothing extra");
+        }
     }
 
     #[test]

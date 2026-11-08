@@ -2331,6 +2331,7 @@ pub fn draw_scenario_hud(
         // (Action count, or completed steps/items), and a non-blocking
         // "complete!" celebration on the finishing frame.
         crate::scenario::Objective::Action { .. }
+        | crate::scenario::Objective::Place { .. }
         | crate::scenario::Objective::Sequence { .. }
         | crate::scenario::Objective::Checklist { .. }
         | crate::scenario::Objective::AnyOf { .. } => {
@@ -2339,6 +2340,13 @@ pub fn draw_scenario_hud(
                     return; // the blocking completion card (drawn elsewhere) shows the result
                 }
                 format!("✅  {}  —  complete!", scenario.display_name())
+            } else if let crate::scenario::Objective::Place { .. } = &scenario.def().objective {
+                // A place coming back to life reads in words, never a number
+                // (just the name until its probe has been read, about a second).
+                match scenario.place_stage_phrase() {
+                    Some(phrase) => format!("\u{1F338}  {}  \u{2014}  {phrase}", scenario.display_name()),
+                    None => format!("\u{1F338}  {}", scenario.display_name()),
+                }
             } else if let Some((done, total)) = scenario.objective_progress() {
                 // For a stepped trial, name the step you're on so the badge says
                 // WHAT to do now, not just "1 / 4".
@@ -2425,6 +2433,7 @@ fn scenario_result_text(scenario: &crate::scenario::ScenarioState) -> (String, S
         // Coverage challenges end NON-blocking (no modal), so this text is not
         // normally rendered for them; provide a sensible generic result anyway.
         crate::scenario::Objective::Action { .. }
+        | crate::scenario::Objective::Place { .. }
         | crate::scenario::Objective::Sequence { .. }
         | crate::scenario::Objective::Checklist { .. }
         | crate::scenario::Objective::AnyOf { .. } => (
@@ -2454,7 +2463,9 @@ pub fn draw_scenario_end_screen(
     let is_trial = scenario.def().kind == crate::scenario::ScenarioKind::Challenge;
 
     let panel_w = 360.0_f32;
-    let panel_h = 200.0_f32 + if has_card { card_size.y + 14.0 } else { 0.0 };
+    let panel_h = 200.0_f32
+        + if has_card { card_size.y + 14.0 } else { 0.0 }
+        + if scenario.place_recovery().is_some() { 230.0 } else { 0.0 };
     let x = viewport.x as f32 + viewport.width as f32 / 2.0 - panel_w / 2.0;
     let y = viewport.y as f32 + viewport.height as f32 / 2.0 - panel_h / 2.0;
 
@@ -2491,6 +2502,13 @@ pub fn draw_scenario_end_screen(
                                 .size(18.0)
                                 .color(egui::Color32::WHITE),
                         );
+                        // A Place trial shows how the place came back: the flower, one
+                        // sentence, and Satoshi's end line.
+                        if let Some(rec) = scenario.place_recovery() {
+                            ui.add_space(10.0);
+                            let (_, _, end_line) = crate::scenario::trial_satoshi_lines_for_display(scenario.display_name());
+                            crate::place_trial_ui::draw_recovery(ui, &rec, end_line);
+                        }
                         // An AnyOf trial names the way it was done.
                         if let Some(route) = scenario.completed_route() {
                             ui.add_space(6.0);

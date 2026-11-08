@@ -4972,4 +4972,56 @@ mod tests {
         }
     }
 
+    /// Living world S4 — the real launch path for a Place trial: `start_scenario`
+    /// puts a bloom probe over the area (the `/scenario` overlay gets one too),
+    /// only the fresh-arena launch lets the trial set the bloom tempo, the arena
+    /// builder writes the quarry and starts it grey, and a world change takes the
+    /// tempo and the probe away again.
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_a_place_trial_sets_the_tempo_only_in_its_fresh_arena() {
+        isolate_saves();
+        let mut hg = HeadlessGame::boot_into_world("harness-grey-quarry");
+        hg.state.set_play_mode(crate::play_mode::PlayMode::Survival);
+        hg.frames(5);
+        let def = crate::scenario::named_builtin_def("grey-quarry").expect("the Grey Quarry is bundled");
+        let arena = def.arena.clone().expect("it has an arena");
+        let probe = crate::place_trial::probe_id(0);
+
+        // The in-world overlay: a probe, but the world's own tempo.
+        hg.state.start_scenario(def.clone());
+        assert!(!hg.state.scenario_fresh_arena);
+        assert!(hg.state.bloom.probe(probe).is_some(), "start_scenario registers the probe");
+        hg.ticks(3);
+        assert_eq!(hg.state.bloom_time_scale_now(), 1.0, "the overlay never changes the player's own world's tempo");
+
+        // The fresh-arena launch (what the first play tick does).
+        hg.state.start_scenario(def.clone());
+        hg.state.scenario_fresh_arena = true;
+        hg.state.apply_arena_setup(&arena);
+        assert_eq!(hg.state.bloom_time_scale_now(), 12.0);
+        for _ in 0..200 {
+            hg.ticks(1);
+            if hg.state.bloom.probe(probe).is_some_and(|p| p.scanned) {
+                break;
+            }
+        }
+        let p = hg.state.bloom.probe(probe).expect("the probe is on the field");
+        assert!(p.scanned, "the probe was read");
+        assert!(p.level < 0.1, "the arena starts the quarry grey: {}", p.level);
+        assert_eq!(hg.state.scenario.as_ref().unwrap().place_stage_phrase(), Some("Grey and still"));
+
+        // "Try again" re-runs it in the same arena world: still the trial's tempo.
+        hg.state.scenario_try_again();
+        assert!(hg.state.scenario_fresh_arena, "a retry keeps the fresh-arena tempo");
+        assert_eq!(hg.state.bloom_time_scale_now(), 12.0);
+        assert!(hg.state.bloom.probe(probe).is_some(), "and a fresh probe");
+
+        // A world change takes the tempo, the flag and the probe away.
+        hg.state.reset_for_world_change();
+        assert!(!hg.state.scenario_fresh_arena);
+        assert_eq!(hg.state.bloom_time_scale_now(), 1.0);
+        assert!(hg.state.bloom.probe(probe).is_none());
+    }
+
 }

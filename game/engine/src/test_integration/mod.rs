@@ -23,6 +23,7 @@ pub mod bazaar;
 pub mod avatars;
 pub mod skins;
 pub mod scenario;
+mod grey_quarry; // Living world S4: the Grey Quarry, from arena to end card, without a window.
 pub mod play_mode;
 pub mod third_person;
 pub mod rail_freight;

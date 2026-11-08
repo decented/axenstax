@@ -33,6 +33,9 @@ impl GameState {
             && self.pending_scenario_launch.is_none()
             && !self.world.has_flat_floor()
             && !self.world.is_workshop;
+        // A trial may set the tempo, but only in its own fresh arena world.
+        let scale = self.bloom_time_scale_now();
+        self.bloom.set_time_scale(scale);
         let out = self.bloom.tick(&TickInput {
             world: &self.world,
             ecs: &self.ecs,

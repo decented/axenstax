@@ -49,7 +49,7 @@ impl Command for ScenarioCommand {
             Some(name) => match crate::scenario::named_builtin_def(name) {
                 Some(def) => {
                     ctx.success(format!("Starting scenario: {}", def.display_name));
-                    CommandResult::StartScenario { def }
+                    CommandResult::StartScenario { def: Box::new(def) }
                 }
                 None => {
                     let msg = format!("unknown scenario: {name} (try: /scenario list)");

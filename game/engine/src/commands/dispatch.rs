@@ -103,8 +103,10 @@ pub enum CommandResult {
     SetBuildGuideMode(crate::build_steps::StepMode),
     /// Side-effect: start the given scenario (Goal 1 runner). The game loop
     /// clears the player's inventory, provisions the def's kit, sets
-    /// `self.scenario`, and resets tick timing. Unboxed per the Goal 1 spec.
-    StartScenario { def: crate::scenario::ScenarioDef },
+    /// `self.scenario`, and resets tick timing. Boxed since the arena grew
+    /// `fills` and `drained` (living world S4): the def is far larger than any
+    /// other variant.
+    StartScenario { def: Box<crate::scenario::ScenarioDef> },
     /// Spec 40 (The Workshop) side-effect: the override registry on the World was
     /// mutated (a reskin was pinned, or overrides were reset). The game loop must
     /// rebuild the block texture array from `world.override_registry.appended_layers()`

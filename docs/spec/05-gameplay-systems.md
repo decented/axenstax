@@ -2620,13 +2620,13 @@ craft filter), `trials_unlock.rs` (unlock by doing), `trials.rs` (`TRIAL_ORDER`,
 
 ### 8b.1 The list
 
-34 challenges (onboarding + 33 `explorer-*.json`), plus the three ghost Races.
+35 challenges (onboarding + 34 `explorer-*.json`), plus the three ghost Races.
 `TRIAL_ORDER` is the single order:
 
 1. **Front shelf** — the first `FRONT_SHELF_LEN` (10) entries, visible from the
    start, one per core verb: onboarding (First Light), mine, craft, build,
    smelt, harvest, cook-three, tame-wolf, ride, kill.
-2. **Unlocked by doing** (23), grouped Make → Tend → Tech → Brave; within a
+2. **Unlocked by doing** (24), grouped Make → Tend → Tech → Brave → Bloom; within a
    shelf a trial comes after the ones that unlock it. Each has an `unlock`:
 
    | Token | Appears when |
@@ -2649,10 +2649,11 @@ craft filter), `trials_unlock.rs` (unlock by doing), `trials.rs` (`TRIAL_ORDER`,
    | breach-and-clear | after kill |
    | armour-up | after smelt AND kill |
    | champion | after armour-up |
+   | grey-quarry (Bloom shelf) | on `PlaceWentGrey`, or after generator |
 3. **Clock corner** — Scavenger (typed Make; the gallery files it with the
    races), sprint, cross-country, marathon. Always visible, never unlocked.
 
-**No total is ever shown** (no "12 of 34", no percentage).
+**No total is ever shown** (no "12 of 35", no percentage).
 
 **Merged away (2026-11-07)** — removed from JSON, `EXPLORER_CHALLENGES`,
 `TRIAL_ORDER` and every table: eat, fish-feast → Camp Cook; friend-in-need →
@@ -2726,6 +2727,50 @@ typed `ItemKind`, and a bare `"CraftItem"` (every older def) still parses as
 - `trials_lint`: every `after` token exists, every unlock has a clause and a
   hint, every `on` event is fired in gameplay, and a fixpoint from the front
   shelf reaches every trial (no cycles, no orphans).
+
+### 8b.3a Act two: place trials (living world S4, 2026-11-08)
+
+The first act-two trial is **The Grey Quarry** (`explorer-grey-quarry.json`,
+token `grey-quarry`), on a sixth shelf, `TrialType::Bloom` (🌸 U+1F338,
+"Bloom", soft pink, last in the gallery's shelf order). Design:
+`docs/superpowers/specs/2026-11-08-living-world-tier1.md` §6. Code:
+`place_trial.rs` (rules and glue), `place_trial_ui.rs` (the end card's flower),
+`arena_build.rs` (the renderer-free arena builder), `objective_progress.rs`
+(`Place` as a leaf), `test_integration/grey_quarry.rs` (the scripted
+restoration).
+
+- **`Objective::Place { area, measure: "Bloom", at_least, hold_seconds }`**
+  (`Objective` is no longer `Eq`: it carries an `f32`). A leaf of `Sequence`,
+  `Checklist` or an `AnyOf` route, or the whole objective. The running scenario
+  puts a bloom probe over the area at `start_scenario` and removes it when the
+  run ends; the leaf completes when the probe reads "Alive". Task lines carry
+  the stage words, never a number.
+- **`ScenarioTuning.bloom_time_scale`** (default 1.0) reaches the bloom field
+  only while the scenario runs in a fresh arena world (`GameState::
+  scenario_fresh_arena`, set by the launch, cleared by `start_scenario` and by
+  any world change). The `/scenario` overlay never changes the tempo of a
+  player's own world.
+- **`ArenaSetup.fills`** (box fills) and **`ArenaSetup.drained`** (grey starts,
+  fresh-world launch only). One re-mesh per touched chunk, not per cell.
+- **Unlock** `{ on: [PlaceWentGrey], after: ["generator"] }`: `on` and `after`
+  were already either-or (`trials_unlock::rule_met` is `after || on`), so no
+  any-of form was needed. A pin test records it.
+- **End card**: a four-petal flower (life, ideas, people, time) sized by each
+  term's share of the recovery (a Shapley split of the rise in target, so the
+  shares add to one), ideas and time drawn closed, one sentence ("mostly
+  through life" / "mostly through people together" / "through life and people
+  together" when the two shares are within 25 points), and Satoshi's end line.
+  `TrialBests::ways_done` records "life" and/or "people". The gallery card
+  lists the ways done after one completion.
+- **Satoshi, the gardener** (D17): `satoshi::gardener_line` gives his dialogue
+  one ambient line when the player stands in a grey (level under 0.25) or a
+  blooming (over 0.8) place.
+- Lint: `Place` is an allowed leaf; a bundled `Place` trial needs an arena whose
+  `drained` row covers its area below `at_least`; fills and drained rows are
+  checked for names, size and range (each with a "bites" test).
+- Not built: before/after pictures on the end card (D15: `world_picture.rs`
+  cannot render from a fixed camera without a window and a GPU), and a fifth
+  Trials-island wedge (a Bloom trial stands in the Tend wedge).
 
 ### 8b.4 Arena and label rules learned in the reshape
 

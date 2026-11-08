@@ -657,6 +657,7 @@ impl crate::GameState {
 
         // Session overlays that belong to the world being left.
         self.scenario = None;
+        self.scenario_fresh_arena = false;
         self.active_trial = None;
         self.trial_outcome = None;
         self.challenge_board_open = false;

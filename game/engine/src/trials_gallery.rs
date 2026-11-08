@@ -15,9 +15,9 @@ use crate::trials_diorama::{sort_back_to_front, CardArtDef, Cube, DioramaBlock, 
 // Pure: rows
 // ---------------------------------------------------------------------------
 
-/// The four shelves, in the order they are shown.
-pub const SHELF_ORDER: [TrialType; 4] =
-    [TrialType::Make, TrialType::Tend, TrialType::Tech, TrialType::Brave];
+/// The five shelves, in the order they are shown (Bloom, act two, last).
+pub const SHELF_ORDER: [TrialType; 5] =
+    [TrialType::Make, TrialType::Tend, TrialType::Tech, TrialType::Brave, TrialType::Bloom];
 
 /// Title of the row that holds the races and the timed scavenge.
 pub const CLOCK_TITLE: &str = "Against the clock";
@@ -395,7 +395,13 @@ fn build_card(
                 token,
                 row,
                 title: head.to_string(),
-                premise: premise.to_string(),
+                // A trial with ways (a Place trial's "life" / "people") lists
+                // the ones the player has done, once there is one.
+                premise: if routes.is_empty() && !ways_done.is_empty() {
+                    format!("{premise} Ways you have done it: {}.", ways_done.join(", "))
+                } else {
+                    premise.to_string()
+                },
                 steps: tasks.lines,
                 ordered: tasks.ordered,
                 satoshi: crate::scenario::trial_satoshi(token).0.to_string(),
@@ -540,7 +546,7 @@ mod tests {
     }
 
     #[test]
-    fn rows_run_make_tend_tech_brave_then_the_clock() {
+    fn rows_run_make_tend_tech_brave_bloom_then_the_clock() {
         let kinds: Vec<RowKind> = row_specs().iter().map(|r| r.kind).collect();
         assert_eq!(
             kinds,
@@ -549,6 +555,7 @@ mod tests {
                 RowKind::Shelf(TrialType::Tend),
                 RowKind::Shelf(TrialType::Tech),
                 RowKind::Shelf(TrialType::Brave),
+                RowKind::Shelf(TrialType::Bloom),
                 RowKind::Clock,
             ]
         );

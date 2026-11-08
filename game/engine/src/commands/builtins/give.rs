@@ -334,6 +334,15 @@ fn material_by_name(key: &str) -> Option<crate::item::MaterialId> {
         // Rubber feature materials.
         "rubber" | "latex" => Some(M::Rubber),
         "rubber_sapling" | "rubbersapling" => Some(M::RubberSapling),
+        // Living world S4 — the Grey Quarry's kit hands out saplings of three
+        // trees and Leads (animals are led into the quarry on one).
+        "oak_sapling" | "oaksapling" => Some(M::OakSapling),
+        "birch_sapling" | "birchsapling" => Some(M::BirchSapling),
+        "spruce_sapling" | "sprucesapling" => Some(M::SpruceSapling),
+        "jungle_sapling" | "junglesapling" => Some(M::JungleSapling),
+        "acacia_sapling" | "acaciasapling" => Some(M::AcaciaSapling),
+        "dark_oak_sapling" | "darkoaksapling" => Some(M::DarkOakSapling),
+        "lead" | "leash" => Some(M::Lead),
         "rubber_ball" | "rubberball" | "ball" => Some(M::RubberBall),
         "copper_cable" | "coppercable" | "cable" => Some(M::CopperCable),
         "bounty_board" | "bountyboard" | "board" => Some(M::BountyBoardItem),

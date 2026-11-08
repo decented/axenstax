@@ -19,8 +19,8 @@ use crate::commands::builtins::give::resolve_item;
 use crate::mob::MobType;
 use crate::trials_diorama::{CardArtDef, DioramaBlock};
 use crate::scenario::{
-    ArenaSetup, ChallengeEvent, Objective, ScenarioDef, ScenarioKind, ScenarioTuning, Scoring,
-    trial_task_labels,
+    ArenaSetup, ChallengeEvent, Objective, PlaceArea, PlaceMeasure, ScenarioDef, ScenarioKind, ScenarioTuning,
+    Scoring, trial_task_labels,
 };
 use std::collections::HashSet;
 
@@ -128,7 +128,7 @@ fn collect_leaf_events(obj: &Objective) -> Vec<(&ChallengeEvent, u32)> {
         // Every route's leaves: each route must be completable on its own, so
         // the reachability and fired-event checks see all of them.
         Objective::AnyOf { routes } => routes.iter().flat_map(|r| collect_leaf_events(&r.objective)).collect(),
-        Objective::Timed { .. } | Objective::FirstSatori | Objective::FreeRoam => vec![],
+        Objective::Place { .. } | Objective::Timed { .. } | Objective::FirstSatori | Objective::FreeRoam => vec![],
     }
 }
 
@@ -195,13 +195,13 @@ fn check_leaves_of(token: &str, where_: &str, obj: &Objective) -> Result<(), Str
         _ => return Ok(()),
     };
     for (i, step) in steps.iter().enumerate() {
-        if !matches!(step, Objective::Action { .. }) {
+        if !matches!(step, Objective::Action { .. } | Objective::Place { .. }) {
             return Err(format!(
-                "{token}: {where_}{kind} step {i} is a nested {step:?}, not an `Action` leaf. \
-                 `ScenarioState::on_event` only recognises Action leaves inside a \
-                 {kind} — a nested Sequence/Checklist/Timed/AnyOf parses fine but can NEVER \
-                 complete, silently stalling the trial forever. Flatten step {i} to a plain \
-                 `Action {{ event: .., count: .. }}`."
+                "{token}: {where_}{kind} step {i} is a nested {step:?}, not an `Action` or `Place` leaf. \
+                 `ScenarioState::on_event` only recognises Action leaves (and the bloom probe \
+                 only Place leaves) inside a {kind} — a nested Sequence/Checklist/Timed/AnyOf \
+                 parses fine but can NEVER complete, silently stalling the trial forever. \
+                 Flatten step {i} to a plain `Action {{ event: .., count: .. }}` or a `Place`."
             ));
         }
     }
@@ -221,12 +221,15 @@ fn check_sequence_and_checklist_leaves_are_actions(defs: &[(&str, ScenarioDef)])
                 let where_ = format!("AnyOf route {r} (\"{}\") ", route.name);
                 if !matches!(
                     route.objective,
-                    Objective::Action { .. } | Objective::Sequence { .. } | Objective::Checklist { .. }
+                    Objective::Action { .. }
+                        | Objective::Place { .. }
+                        | Objective::Sequence { .. }
+                        | Objective::Checklist { .. }
                 ) {
                     return Err(format!(
-                        "{token}: {where_}is a {:?}. A route must be an `Action`, or a `Sequence` / \
-                         `Checklist` of Actions — an AnyOf is top level only (never nested), and \
-                         Timed/FirstSatori/FreeRoam never complete through events.",
+                        "{token}: {where_}is a {:?}. A route must be an `Action` or a `Place`, or a \
+                         `Sequence` / `Checklist` of them — an AnyOf is top level only (never nested), \
+                         and Timed/FirstSatori/FreeRoam never complete through events.",
                         route.objective
                     ));
                 }
@@ -689,6 +692,7 @@ fn check_arena_provides_bites_on_an_undersupplied_mob_count() {
     def.arena = Some(ArenaSetup {
         blocks: vec![],
         mobs: vec![crate::scenario::ArenaMob { at: [1, 0, 0], mob: "brigand".to_string(), count: 1 }],
+        ..Default::default()
     });
     let err = check_arena_provides_objective_targets(&[("bad-trial", def)])
         .expect_err("an arena with fewer mobs than the objective count must be rejected");
@@ -711,6 +715,7 @@ fn check_arena_provides_bites_on_an_unbreedable_pair() {
             crate::scenario::ArenaMob { at: [1, 0, 0], mob: "cow".to_string(), count: 1 },
             crate::scenario::ArenaMob { at: [2, 0, 0], mob: "pig".to_string(), count: 1 },
         ],
+        ..Default::default()
     });
     let err = check_arena_provides_objective_targets(&[("bad-trial", def)])
         .expect_err("Cow+Pig can never breed a Mule");
@@ -725,6 +730,7 @@ fn check_arena_provides_bites_on_a_tame_trial_with_an_untameable_arena() {
     def.arena = Some(ArenaSetup {
         blocks: vec![],
         mobs: vec![crate::scenario::ArenaMob { at: [1, 0, 0], mob: "cow".to_string(), count: 1 }],
+        ..Default::default()
     });
     let err = check_arena_provides_objective_targets(&[("bad-trial", def)])
         .expect_err("a TameMob objective over a cow-only arena can never complete");
@@ -739,6 +745,7 @@ fn check_arena_provides_bites_on_a_ride_trial_with_a_non_rideable_arena() {
     def.arena = Some(ArenaSetup {
         blocks: vec![],
         mobs: vec![crate::scenario::ArenaMob { at: [1, 0, 0], mob: "pig".to_string(), count: 1 }],
+        ..Default::default()
     });
     let err = check_arena_provides_objective_targets(&[("bad-trial", def)])
         .expect_err("a RideEntity objective over a non-rideable arena can never complete");
@@ -752,6 +759,7 @@ fn check_arena_provides_bites_on_a_shear_trial_with_the_wrong_species() {
     def.arena = Some(ArenaSetup {
         blocks: vec![],
         mobs: vec![crate::scenario::ArenaMob { at: [1, 0, 0], mob: "horse".to_string(), count: 1 }],
+        ..Default::default()
     });
     let err = check_arena_provides_objective_targets(&[("bad-trial", def)])
         .expect_err("a ShearOrMilk objective over a horse-only arena can never complete");
@@ -769,6 +777,7 @@ fn check_arena_provides_bites_on_a_block_target_the_arena_never_authors() {
     def.arena = Some(ArenaSetup {
         blocks: vec![crate::scenario::ArenaBlock { at: [1, 0, 0], block: "cobblestone".to_string() }],
         mobs: vec![],
+        ..Default::default()
     });
     let err = check_arena_provides_objective_targets(&[("bad-trial", def)])
         .expect_err("an arena with no matching block must be rejected");
@@ -888,6 +897,7 @@ fn check_unfiltered_bites_on_an_unacknowledged_multi_species_arena() {
             crate::scenario::ArenaMob { at: [1, 0, 0], mob: "cow".to_string(), count: 1 },
             crate::scenario::ArenaMob { at: [2, 0, 0], mob: "pig".to_string(), count: 1 },
         ],
+        ..Default::default()
     });
     let err = check_unfiltered_event_trials_are_intentional(&[("bad-trial", def)])
         .expect_err("an unacknowledged multi-species arena over TameMob must be rejected");
@@ -902,6 +912,7 @@ fn check_unfiltered_does_not_flag_a_single_species_arena() {
     def.arena = Some(ArenaSetup {
         blocks: vec![],
         mobs: vec![crate::scenario::ArenaMob { at: [1, 0, 0], mob: "wolf".to_string(), count: 1 }],
+        ..Default::default()
     });
     check_unfiltered_event_trials_are_intentional(&[("fine-trial", def)])
         .expect("a single-species arena is never ambiguous");
@@ -1233,6 +1244,219 @@ fn check_card_art_bites_on_a_bad_diorama() {
     assert!(err.contains("t5"), "{err}");
     let err = check_card_art(&[("t6", diorama(vec![("stone", [99, 0, 0])]))]).expect_err("far away");
     assert!(err.contains("t6"), "{err}");
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Check 9 — Place objectives and arena grey starts (living world §6)
+// ─────────────────────────────────────────────────────────────────────────
+
+/// The biggest area a Place probe may cover, in columns per side. A probe
+/// scans its whole box once a second.
+const MAX_PLACE_SIDE: u32 = 64;
+
+/// Every `Place` leaf of an objective (any depth the engine looks: the top
+/// level, `Sequence`/`Checklist` leaves and `AnyOf` routes).
+fn place_leaves(obj: &Objective) -> Vec<(&PlaceArea, f32, u32)> {
+    fn visit<'a>(o: &'a Objective, out: &mut Vec<(&'a PlaceArea, f32, u32)>) {
+        if let Objective::Place { area, at_least, hold_seconds, .. } = o {
+            out.push((area, *at_least, *hold_seconds));
+        }
+    }
+    let mut out = Vec::new();
+    match obj {
+        Objective::Place { .. } => visit(obj, &mut out),
+        Objective::Sequence { steps } | Objective::Checklist { items: steps } => {
+            steps.iter().for_each(|s| visit(s, &mut out))
+        }
+        Objective::AnyOf { routes } => {
+            for r in routes {
+                match &r.objective {
+                    Objective::Sequence { steps } | Objective::Checklist { items: steps } => {
+                        steps.iter().for_each(|s| visit(s, &mut out))
+                    }
+                    other => visit(other, &mut out),
+                }
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+fn inside(outer: &PlaceArea, inner: &PlaceArea) -> bool {
+    let (o_lo, o_hi) = ([outer.from[0].min(outer.to[0]), outer.from[2].min(outer.to[2])], [outer.from[0].max(outer.to[0]), outer.from[2].max(outer.to[2])]);
+    let (i_lo, i_hi) = ([inner.from[0].min(inner.to[0]), inner.from[2].min(inner.to[2])], [inner.from[0].max(inner.to[0]), inner.from[2].max(inner.to[2])]);
+    o_lo[0] <= i_lo[0] && o_lo[1] <= i_lo[1] && o_hi[0] >= i_hi[0] && o_hi[1] >= i_hi[1]
+}
+
+/// A bundled `Place` trial must (1) ask for a sane goal and a probe of a sane
+/// size, (2) bring its own fresh arena, and (3) start the area grey: a
+/// `drained` row that covers it, at a level below the goal. Without (3) the
+/// probe would read the terrain the player happens to spawn on and the trial
+/// could pass at once, or never.
+fn check_place_objectives(defs: &[(&str, ScenarioDef)]) -> Result<(), String> {
+    for (token, def) in defs {
+        for (area, at_least, hold) in place_leaves(&def.objective) {
+            if !(at_least > 0.0 && at_least <= 1.0) {
+                return Err(format!("{token}: Place `at_least` {at_least} is not in (0, 1]."));
+            }
+            if !(1..=600).contains(&hold) {
+                return Err(format!("{token}: Place `hold_seconds` {hold} is not between 1 and 600."));
+            }
+            let side = |a: i32, b: i32| (a - b).unsigned_abs() + 1;
+            if side(area.from[0], area.to[0]) > MAX_PLACE_SIDE || side(area.from[2], area.to[2]) > MAX_PLACE_SIDE {
+                return Err(format!(
+                    "{token}: the Place area is wider than {MAX_PLACE_SIDE} columns a side; a probe scans \
+                     the whole box once a second."
+                ));
+            }
+            let Some(arena) = def.arena.as_ref() else {
+                return Err(format!(
+                    "{token}: a bundled Place trial needs an `arena` that starts the area grey (add \
+                     `arena.drained` over the Place area), or the probe reads whatever terrain it lands on."
+                ));
+            };
+            let grey_start = arena.drained.iter().any(|d| inside(&d.area, area) && d.level < at_least);
+            if !grey_start {
+                return Err(format!(
+                    "{token}: no `arena.drained` row covers the Place area at a level below its \
+                     `at_least` ({at_least}), so the place does not start grey and the trial can \
+                     pass at once. Add `{{ \"area\": <the Place area>, \"level\": 0.05 }}`."
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn bundled_place_trials_start_their_area_grey() {
+    check_place_objectives(&all_bundled_defs()).unwrap_or_else(|e| panic!("{e}"));
+    // And the Grey Quarry really is one, so the rule is not vacuous.
+    let defs = all_bundled_defs();
+    let (_, quarry) = defs.iter().find(|(t, _)| *t == "grey-quarry").expect("the Grey Quarry is bundled");
+    assert_eq!(place_leaves(&quarry.objective).len(), 1);
+}
+
+/// Every arena fill and drained row is sane: its block resolves to a placeable
+/// block, a fill is under the engine's cap, and a drained level is a level.
+fn check_arena_fills_and_drained(defs: &[(&str, ScenarioDef)]) -> Result<(), String> {
+    for (token, def) in defs {
+        let Some(arena) = def.arena.as_ref() else { continue };
+        for f in &arena.fills {
+            let placeable = resolve_item(&f.block, 1).ok().and_then(|s| s.item.as_block()).is_some();
+            if !placeable {
+                return Err(format!("{token}: arena fill block {:?} is not a placeable block name.", f.block));
+            }
+            let cells: u64 =
+                (0..3).map(|i| (f.to[i] - f.from[i]).unsigned_abs() as u64 + 1).product();
+            if cells > crate::arena_build::MAX_FILL_CELLS {
+                return Err(format!(
+                    "{token}: arena fill {:?} covers {cells} cells, over the {} cap; split it.",
+                    f.block,
+                    crate::arena_build::MAX_FILL_CELLS
+                ));
+            }
+        }
+        for d in &arena.drained {
+            if !(0.0..=1.0).contains(&d.level) {
+                return Err(format!("{token}: arena.drained level {} is not between 0 and 1.", d.level));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn arena_fills_and_drained_rows_are_sane() {
+    check_arena_fills_and_drained(&all_bundled_defs()).unwrap_or_else(|e| panic!("{e}"));
+}
+
+fn place_def(at_least: f32, hold: u32, area: PlaceArea) -> ScenarioDef {
+    fixture_def(Objective::Place { area, measure: PlaceMeasure::Bloom, at_least, hold_seconds: hold })
+}
+
+fn area(from: [i32; 3], to: [i32; 3]) -> PlaceArea {
+    PlaceArea { from, to }
+}
+
+fn grey_arena(over: PlaceArea, level: f32) -> ArenaSetup {
+    ArenaSetup {
+        drained: vec![crate::scenario::ArenaDrained { area: over, level }],
+        ..Default::default()
+    }
+}
+
+#[test]
+fn check_place_objectives_bites_on_a_bad_goal_a_huge_area_and_a_place_that_starts_alive() {
+    let a = area([6, 0, 6], [20, 4, 20]);
+    let mut ok = place_def(0.55, 20, a);
+    ok.arena = Some(grey_arena(a, 0.05));
+    check_place_objectives(&[("ok", ok.clone())]).expect("a grey-started place passes");
+
+    let mut bad_goal = ok.clone();
+    bad_goal.objective = Objective::Place { area: a, measure: PlaceMeasure::Bloom, at_least: 1.5, hold_seconds: 20 };
+    assert!(check_place_objectives(&[("bad-goal", bad_goal)]).unwrap_err().contains("at_least"));
+
+    let mut no_hold = ok.clone();
+    no_hold.objective = Objective::Place { area: a, measure: PlaceMeasure::Bloom, at_least: 0.5, hold_seconds: 0 };
+    assert!(check_place_objectives(&[("no-hold", no_hold)]).unwrap_err().contains("hold_seconds"));
+
+    let big = area([0, 0, 0], [200, 4, 10]);
+    let mut huge = place_def(0.55, 20, big);
+    huge.arena = Some(grey_arena(big, 0.05));
+    assert!(check_place_objectives(&[("huge", huge)]).unwrap_err().contains("wider"));
+
+    // No arena at all.
+    let err = check_place_objectives(&[("no-arena", place_def(0.55, 20, a))]).unwrap_err();
+    assert!(err.contains("no-arena") && err.contains("arena"), "{err}");
+
+    // The drained row does not cover the area.
+    let mut elsewhere = place_def(0.55, 20, a);
+    elsewhere.arena = Some(grey_arena(area([100, 0, 100], [110, 4, 110]), 0.05));
+    assert!(check_place_objectives(&[("elsewhere", elsewhere)]).unwrap_err().contains("grey"));
+
+    // It covers the area, but not below the goal: it would start alive.
+    let mut alive = place_def(0.55, 20, a);
+    alive.arena = Some(grey_arena(a, 0.9));
+    assert!(check_place_objectives(&[("alive", alive)]).unwrap_err().contains("start grey"));
+}
+
+#[test]
+fn a_place_is_an_allowed_leaf_and_a_nested_objective_still_is_not() {
+    let a = area([0, 0, 0], [8, 4, 8]);
+    let place = || Objective::Place { area: a, measure: PlaceMeasure::Bloom, at_least: 0.5, hold_seconds: 5 };
+    let act = || Objective::Action { event: ChallengeEvent::CraftItem { item: None }, count: 1 };
+    for obj in [
+        place(),
+        Objective::Sequence { steps: vec![act(), place()] },
+        Objective::Checklist { items: vec![place(), act()] },
+        Objective::AnyOf { routes: vec![route("grow", place()), route("craft", act())] },
+    ] {
+        check_sequence_and_checklist_leaves_are_actions(&[("ok", fixture_def(obj))])
+            .unwrap_or_else(|e| panic!("a Place leaf must be allowed: {e}"));
+    }
+    // A Timed leaf next to a Place is still caught.
+    let bad = Objective::Checklist { items: vec![place(), Objective::Timed { ticks: 10 }] };
+    let err = check_sequence_and_checklist_leaves_are_actions(&[("bad", fixture_def(bad))]).unwrap_err();
+    assert!(err.contains("step 1"), "{err}");
+}
+
+#[test]
+fn check_arena_fills_bites_on_a_typo_a_huge_fill_and_a_bad_level() {
+    let mut def = fixture_def(Objective::FreeRoam);
+    def.arena = Some(ArenaSetup {
+        fills: vec![crate::scenario::ArenaFill { from: [0, 0, 0], to: [3, 0, 3], block: "stoen".into() }],
+        ..Default::default()
+    });
+    assert!(check_arena_fills_and_drained(&[("typo", def.clone())]).unwrap_err().contains("stoen"));
+    def.arena = Some(ArenaSetup {
+        fills: vec![crate::scenario::ArenaFill { from: [0, 0, 0], to: [200, 20, 200], block: "stone".into() }],
+        ..Default::default()
+    });
+    assert!(check_arena_fills_and_drained(&[("huge", def.clone())]).unwrap_err().contains("cap"));
+    def.arena = Some(grey_arena(area([0, 0, 0], [3, 0, 3]), 1.5));
+    assert!(check_arena_fills_and_drained(&[("level", def)]).unwrap_err().contains("level"));
 }
 
 // ─────────────────────────────────────────────────────────────────────────

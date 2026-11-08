@@ -3126,79 +3126,23 @@ impl super::GameState {
     /// fresh-world lobby launch (never the in-world overlay). Cross-platform.
     pub(crate) fn apply_arena_setup(&mut self, arena: &crate::scenario::ArenaSetup) {
         let origin = self.players[0].player.pos;
-        let (ox, oy, oz) = (
-            origin.x.floor() as i32,
-            origin.y.floor() as i32,
-            origin.z.floor() as i32,
+        let origin = (origin.x.floor() as i32, origin.y.floor() as i32, origin.z.floor() as i32);
+        let touched = crate::arena_build::build_arena(
+            &mut self.world,
+            &mut self.water,
+            &mut self.lava,
+            &mut self.ecs,
+            origin,
+            arena,
         );
-        for b in &arena.blocks {
-            // Reuse the kit/`/give` block registry so arena block names match.
-            let Ok(stack) = crate::commands::builtins::give::resolve_item(&b.block, 1) else {
-                log::warn!("arena: unknown block '{}'", b.block);
-                continue;
-            };
-            let Some(block_id) = stack.item.as_block() else {
-                log::warn!("arena: '{}' is not a placeable block", b.block);
-                continue;
-            };
-            let (x, y, z) = (ox + b.at[0], oy + b.at[1], oz + b.at[2]);
-            self.world.set_block(x, y, z, block_id);
-            // A placed liquid must be a SOURCE so it can fill a bucket / host a
-            // fishing spot — mirror the bucket-empty path's source registration.
-            if block_id == crate::block::WATER {
-                self.water.add_source(x, y, z);
-            } else if block_id == crate::block::LAVA {
-                self.lava.add_source(x, y, z);
-            } else if block_id == crate::block::VENDOR_BLOCK {
-                // An arena vendor belongs to a friendly NPC trader (a FOREIGN
-                // owner), so the solo player is a BUYER — the owner view has no
-                // buy button, so a player-owned vendor could never fire the sale.
-                // Pre-stock a simple BARTER (bring 1 stone → get 1 bread); barter
-                // sidesteps the sats/Charter gate, so the "Sell at a Vendor"
-                // Trial completes solo when the player trades.
-                self.world.insert_vendor(
-                    (x, y, z),
-                    crate::vendor::VendorData {
-                        owner: Some(crate::vendor::VendorOwner::Npub(
-                            "arena-trader".to_string(),
-                        )),
-                        mode: Some(crate::vendor::VendorMode::Barter),
-                        slot: Some(crate::item::ItemStack::new_material(
-                            crate::item::MaterialId::Bread,
-                            1,
-                        )),
-                        barter_request: Some(crate::item::ItemStack::new_block(
-                            crate::block::STONE,
-                            1,
-                        )),
-                        price_sats: 0,
-                        stock: 9,
-                        escrow_sats: 0,
-                        last_txn_tick: 0,
-                        lot_size: 1,
-                    },
-                );
-            }
+        // One re-mesh per chunk the arena touched (a terraced quarry is
+        // thousands of cells in a handful of chunks).
+        for (x, y, z) in touched {
             self.rebuild_chunk_at(x, y, z);
         }
-        for m in &arena.mobs {
-            let Some(kind) = crate::mob::MobType::from_name(&m.mob) else {
-                log::warn!("arena: unknown mob '{}'", m.mob);
-                continue;
-            };
-            for i in 0..m.count.max(1) {
-                // Fan copies out along +X so they don't stack in one cell.
-                let pos = glam::Vec3::new(
-                    (ox + m.at[0]) as f32 + 0.5 + i as f32 * 0.8,
-                    (oy + m.at[1]) as f32 + 0.5,
-                    (oz + m.at[2]) as f32 + 0.5,
-                );
-                let e = crate::entity::spawn_mob(&mut self.ecs, kind, pos);
-                // Authored = a deliberately-placed wild mob; it persists across
-                // chunk unload (unlike scattered wildlife) so the arena survives.
-                let _ = self.ecs.insert_one(e, crate::entity::Authored);
-            }
-        }
+        // Grey starts (living world §6.1): fresh-world launch only, which is
+        // the only caller of this function.
+        self.apply_arena_drained(arena);
     }
 
     pub(crate) fn start_trial(&mut self, id: &str) {
@@ -3381,6 +3325,7 @@ impl super::GameState {
         // accumulators on world change. The loaded world re-seeds them from its
         // WorldMeta in the load path below; a NEW world correctly starts at zero.
         self.scenario = None;
+        self.scenario_fresh_arena = false;
         self.world.total_work = 0;
         self.world.total_ticks = 0;
         self.world.pop_exposure.clear();
@@ -3636,7 +3581,13 @@ impl super::GameState {
         self.reset_postcard();
         let name = def.display_name.clone();
         crate::scenario::provision_all_players(&mut self.players, &def);
+        // A replaced scenario's probes leave the field with it. Whoever starts a
+        // scenario in a fresh arena says so after this returns.
+        self.remove_place_probes();
+        self.scenario_fresh_arena = false;
         self.scenario = Some(crate::scenario::ScenarioState::new(def));
+        // Place objectives: a bloom probe over each area.
+        self.register_place_probes();
         self.reset_tick_timing();
         // Auto-show the in-game objective panel (the detailed, control-specific
         // "how") the moment a trial starts; H still toggles it.
@@ -5430,7 +5381,7 @@ impl super::GameState {
                     // path (kit-all-players, resumable-persist, toast).
                     // Same routing as the J board: inventory-touching
                     // scenarios launch into their arena, never in place.
-                    self.launch_scenario_from_world(def);
+                    self.launch_scenario_from_world(*def);
                 }
                 crate::commands::CommandResult::ApplyWorkshopOverrides => {
                     // Spec 40 — a reskin was pinned via `/ws pin` (power-user path),
@@ -6132,6 +6083,9 @@ impl super::GameState {
                     launch.has_fixed_arena()
                 );
                 self.start_scenario(launch.def);
+                // The scenario now runs in a fresh trial arena: it may set the
+                // bloom tempo (`place_trial::effective_bloom_time_scale`).
+                self.scenario_fresh_arena = true;
                 if let Some(a) = &arena {
                     self.apply_arena_setup(a);
                 }
@@ -7204,6 +7158,8 @@ impl super::GameState {
         if self.tick_bloom() {
             self.fire_challenge(crate::scenario::ChallengeEvent::PlaceWentGrey);
         }
+        // Place trials: read the probes and finish a Place leaf that reads Alive.
+        self.tick_place_trial();
 
         // Mob AI — targets nearest player. Re-snapshotted after this tick's
         // player physics. (A lent world's runs in its server, with the
@@ -17969,6 +17925,12 @@ impl super::GameState {
                         for route in s.completed_routes() {
                             changed |= self.trial_bests.mark_way_done(name, route);
                         }
+                        // A Place trial remembers how the place came back.
+                        if let Some(rec) = s.place_recovery() {
+                            for way in rec.ways() {
+                                changed |= self.trial_bests.mark_way_done(name, way);
+                            }
+                        }
                     }
                     if newly_done {
                         changed |= self.trial_bests.refresh_unlocks();
@@ -18175,12 +18137,19 @@ impl super::GameState {
                 } else {
                     let is_creative = self.is_creative;
                     let view = crate::satoshi::view_for(&self.world.satoshi, is_creative);
+                    // The gardener notices where the player stands (D17).
+                    let feet = self.players[pidx].player.pos;
+                    let ambient = crate::satoshi::gardener_line(
+                        self.bloom.level_at(feet.x, feet.z),
+                        self.world.total_ticks / 1200,
+                    );
                     let action = crate::villager_ui::draw_satoshi_dialogue(
                         &self.renderer.egui.ctx,
                         &screen.viewport,
                         pidx,
                         view,
                         is_creative,
+                        ambient,
                     );
                     match action {
                         crate::satoshi::SatoshiAction::TakeGift => {
@@ -20943,7 +20912,6 @@ impl super::GameState {
                     // Render a TaskList as a "✓ done / ➜ now / • next" checklist
                     // (pure, `objective_progress::task_text`; an AnyOf trial reads
                     // "Pick a way:" then each route).
-                    let task_block = crate::objective_progress::task_text;
                     let (title, how_to, progress) = if let Some(at) = self.active_trial.as_ref() {
                         let (_i, hint) = crate::scenario::trial_satoshi(at.id.as_str());
                         let (done, total) = self.race_distance();
@@ -20959,12 +20927,22 @@ impl super::GameState {
                             .unwrap_or_else(|| crate::scenario::objective_tasks(s.def(), &[]));
                         let status = s.step_status();
                         let current = s.current_step();
-                        let block = task_block(&tasks, &status, current);
+                        // A Place leaf shows its stage words after the line.
+                        let block = crate::objective_progress::task_text_with_notes(
+                            &tasks,
+                            &status,
+                            current,
+                            &s.place_notes(),
+                        );
                         let (_i, hint) = crate::scenario::trial_satoshi_for_display(&display);
                         let how_to = with_tip(block, hint);
-                        let progress = match s.objective_progress() {
-                            Some((d, t)) => format!("Steps done:  {d} / {t}"),
-                            None => String::new(),
+                        let progress = match (&s.def().objective, s.place_stage_phrase(), s.objective_progress()) {
+                            // A place coming back to life reads in words, not numbers.
+                            (crate::scenario::Objective::Place { .. }, phrase, _) => {
+                                phrase.unwrap_or_default().to_string()
+                            }
+                            (_, _, Some((d, t))) => format!("Steps done:  {d} / {t}"),
+                            _ => String::new(),
                         };
                         (display, how_to, progress)
                     } else {

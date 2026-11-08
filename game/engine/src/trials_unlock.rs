@@ -330,4 +330,33 @@ mod tests {
         assert!(cat.iter().any(|e| e.token == "onboarding" && e.unlock.is_none()));
         assert_eq!(route_names("nope"), &[] as &[String]);
     }
+
+    #[test]
+    fn on_and_after_are_either_or_never_both_required() {
+        // The Grey Quarry names `on: [PlaceWentGrey]` AND `after: [generator]`.
+        // Either one alone must show it (living world D13).
+        let cat = catalogue();
+        let quarry = entry(cat, "grey-quarry").expect("the Grey Quarry is in the catalogue");
+        let u = quarry.unlock.as_ref().expect("it appears by doing");
+        assert!(!u.on.is_empty() && !u.after.is_empty(), "both clauses are authored");
+        assert_eq!(quarry.shelf, TrialType::Bloom);
+
+        let none = TrialBests::default();
+        assert!(!is_unlocked("grey-quarry", &none), "hidden until one clause holds");
+
+        // Only the event: a place went grey, Power Plant never done.
+        let mut grey = TrialBests::default();
+        assert!(record_event_in(cat, &mut grey, &ChallengeEvent::PlaceWentGrey));
+        assert!(is_unlocked("grey-quarry", &grey));
+        assert!(!done(cat, "generator", &grey));
+
+        // Only the trial: Power Plant done, no place ever went grey.
+        let mut plant = TrialBests::default();
+        let display = entry(cat, "generator").unwrap().display_name.clone();
+        plant.mark_challenge_done(&display);
+        assert!(plant.events_seen.is_empty());
+        assert!(is_unlocked("grey-quarry", &plant));
+        assert!(refresh_in(cat, &mut plant));
+        assert!(plant.unlocked.contains("grey-quarry"));
+    }
 }

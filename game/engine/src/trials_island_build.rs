@@ -29,6 +29,9 @@ pub fn district_of(ttype: TrialType, tref: TrialRef) -> District {
         RowKind::Shelf(TrialType::Tend) => District::Tend,
         RowKind::Shelf(TrialType::Tech) => District::Tech,
         RowKind::Shelf(TrialType::Brave) => District::Brave,
+        // The island has four wedges; the Bloom shelf's one trial stands in the
+        // Tend wedge (a fifth district is not built).
+        RowKind::Shelf(TrialType::Bloom) => District::Tend,
         RowKind::Shelf(TrialType::Race) => District::Clock,
     }
 }

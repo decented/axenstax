@@ -1,0 +1,108 @@
+{
+  "kind": "Challenge",
+  "display_name": "The Grey Quarry \u2014 bring a stripped quarry back to life",
+  "card_art": [
+    { "block": "stone", "at": [0, 0, 0] },
+    { "block": "stone", "at": [1, 0, 0] },
+    { "block": "stone", "at": [2, 0, 0] },
+    { "block": "stone", "at": [1, 1, 0] },
+    { "block": "stone", "at": [2, 1, 0] },
+    { "block": "stone", "at": [2, 2, 0] },
+    { "block": "oak_leaves", "at": [0, 1, 0] },
+    { "block": "dirt", "at": [1, 2, 0] }
+  ],
+  "unlock": {
+    "on": [
+      "PlaceWentGrey"
+    ],
+    "after": [
+      "generator"
+    ],
+    "hint": "Somewhere grey is waiting."
+  },
+  "kit": [
+    { "name": "oak_sapling", "count": 4 },
+    { "name": "birch_sapling", "count": 4 },
+    { "name": "spruce_sapling", "count": 4 },
+    { "name": "wheat_seeds", "count": 8 },
+    { "name": "carrot", "count": 8 },
+    { "name": "potato", "count": 8 },
+    { "name": "bucket", "count": 1 },
+    { "name": "stone_shovel", "count": 1 },
+    { "name": "wooden_hoe", "count": 1 },
+    { "name": "bone_meal", "count": 8 },
+    { "name": "bread", "count": 16 },
+    { "name": "wheat", "count": 8 },
+    { "name": "lead", "count": 3 },
+    { "name": "feast_table", "count": 1 }
+  ],
+  "objective": {
+    "Place": {
+      "area": {
+        "from": [6, -1, -12],
+        "to": [29, 6, 11]
+      },
+      "measure": "Bloom",
+      "at_least": 0.55,
+      "hold_seconds": 20
+    }
+  },
+  "tuning": {
+    "bloom_time_scale": 12.0
+  },
+  "game_mode": "survival",
+  "time_lock": "day",
+  "mobs_enabled": false,
+  "world_type": "flat",
+  "arena": {
+    "fills": [
+      { "from": [6, -1, -12], "to": [13, -1, -1], "block": "stone" },
+      { "from": [6, -1, 1], "to": [13, -1, 11], "block": "stone" },
+      { "from": [6, -1, 0], "to": [13, -1, 0], "block": "stone" },
+      { "from": [14, -1, -12], "to": [19, 0, -1], "block": "stone" },
+      { "from": [14, -1, 1], "to": [19, 0, 11], "block": "stone" },
+      { "from": [14, -1, 0], "to": [19, -1, 0], "block": "stone" },
+      { "from": [20, -1, -12], "to": [25, 1, -1], "block": "stone" },
+      { "from": [20, -1, 1], "to": [25, 1, 11], "block": "stone" },
+      { "from": [20, -1, 0], "to": [25, 0, 0], "block": "stone" },
+      { "from": [26, -1, -12], "to": [29, 2, -1], "block": "stone" },
+      { "from": [26, -1, 1], "to": [29, 2, 11], "block": "stone" },
+      { "from": [26, -1, 0], "to": [29, 1, 0], "block": "stone" },
+      { "from": [29, -1, 0], "to": [29, 2, 0], "block": "stone" },
+      { "from": [8, -1, -8], "to": [13, -1, -8], "block": "dirt" },
+      { "from": [8, -1, 6], "to": [13, -1, 6], "block": "dirt" },
+      { "from": [15, 0, -5], "to": [18, 0, -5], "block": "dirt" },
+      { "from": [15, 0, 5], "to": [18, 0, 5], "block": "dirt" },
+      { "from": [21, 1, -4], "to": [24, 1, -4], "block": "dirt" },
+      { "from": [21, 1, 4], "to": [24, 1, 4], "block": "dirt" },
+      { "from": [-22, 0, -6], "to": [-8, 0, -6], "block": "oak_fence_post" },
+      { "from": [-22, 0, 6], "to": [-8, 0, 6], "block": "oak_fence_post" },
+      { "from": [-22, 0, -5], "to": [-22, 0, 5], "block": "oak_fence_post" },
+      { "from": [-8, 0, -5], "to": [-8, 0, 5], "block": "oak_fence_post" }
+    ],
+    "blocks": [
+      { "at": [7, 0, -11], "block": "oak_log" },
+      { "at": [12, 0, 10], "block": "oak_log" },
+      { "at": [18, 1, -10], "block": "oak_log" },
+      { "at": [28, 2, 0], "block": "water" },
+      { "at": [27, 2, 0], "block": "cobblestone" },
+      { "at": [26, 2, 0], "block": "cobblestone" },
+      { "at": [-8, 0, 0], "block": "oak_fence_gate" },
+      { "at": [1, 0, 1], "block": "chest" }
+    ],
+    "mobs": [
+      { "at": [-15, 0, -2], "mob": "sheep", "count": 2 },
+      { "at": [-13, 0, 2], "mob": "cow", "count": 1 },
+      { "at": [-18, 0, 3], "mob": "rabbit", "count": 2 }
+    ],
+    "drained": [
+      {
+        "area": {
+          "from": [6, -1, -12],
+          "to": [29, 6, 11]
+        },
+        "level": 0.05
+      }
+    ]
+  }
+}
