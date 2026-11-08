@@ -4330,6 +4330,11 @@ pub fn list_world_entries() -> Vec<WorldEntry> {
             if folder_name == crate::workshop::WORKSHOP_FOLDER {
                 continue;
             }
+            // Trial arenas (`exp-*`) are reached from Trials, never listed as
+            // worlds (home page overhaul spec §4.1).
+            if is_arena_folder(&folder_name) {
+                continue;
+            }
             // A world saved by a newer build, or whose world.dat can't be read
             // (Spec 02 §8.4), keeps its card, labelled with why; opening it is
             // refused with the same message.
@@ -5313,6 +5318,20 @@ mod tests {
             vec!["iso_test_world".to_string()],
             "isolated root must list exactly the world written into it"
         );
+    }
+
+    /// Home page overhaul §4.1: a Trial arena (`exp-*`) and the Workshop are
+    /// never world cards; an ordinary world beside them still is.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_world_list_leaves_out_trial_arenas_and_the_workshop() {
+        let _guard = WorldsRootGuard::new("list-skips-arenas");
+        let save = minimal_world_save_for_tests(7);
+        for folder in ["my_castle", "exp-hash-dash", "Exp-Sprint-42", crate::workshop::WORKSHOP_FOLDER] {
+            write_world_folder(folder, &WorldMeta::new(folder), &save, &crate::world::World::new()).unwrap();
+        }
+        let names: Vec<String> = list_world_entries().into_iter().map(|e| e.folder_name).collect();
+        assert_eq!(names, vec!["my_castle".to_string()]);
     }
 
     fn inventory_with_mix() -> Inventory {

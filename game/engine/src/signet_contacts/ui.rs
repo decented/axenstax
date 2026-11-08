@@ -37,17 +37,6 @@ pub const HOST_LOST_SIGNET_FRIENDS: &str =
 /// The button beside the lobby notice that says so.
 pub const DISCONNECT_SIGNET: &str = "Disconnect Signet";
 
-/// The narrowest lobby that has room for the Friends column, and so for the row
-/// that holds Disconnect.
-pub const FRIENDS_COLUMN_MIN_WIDTH: f32 = 1360.0;
-
-/// Whether the lobby has to draw its own way out of an unreadable Signet: the
-/// Friends column holds Disconnect, and below the width that has room for it
-/// nothing else would.
-pub fn needs_strip(lobby_width: f32, unreadable: bool) -> bool {
-    unreadable && lobby_width < FRIENDS_COLUMN_MIN_WIDTH
-}
-
 /// Whether a lobby notice is the refusal that Disconnect answers.
 pub fn is_host_refusal(notice: &str) -> bool {
     notice == HOST_REFUSED
@@ -214,17 +203,16 @@ mod tests {
 
     #[test]
     fn an_unreadable_signet_always_has_a_way_out_in_the_lobby() {
-        // Below the Friends column's width the strip is drawn; at or above it the
-        // column's own row is. There is no width with neither.
-        for width in [320.0, 800.0, 1280.0, 1359.9, FRIENDS_COLUMN_MIN_WIDTH, 1920.0, 3840.0] {
-            let column = width >= FRIENDS_COLUMN_MIN_WIDTH;
-            assert!(
-                column || needs_strip(width, true),
-                "no Disconnect at {width} wide"
-            );
-            assert!(!(column && needs_strip(width, true)), "two at {width} wide");
-            assert!(!needs_strip(width, false), "a readable Signet needs no strip at {width}");
-        }
+        // Home page overhaul §5: the strip with Disconnect sits at the top of
+        // Play together at every screen width (no width test gates it), and
+        // the host refusal's notice carries its own Disconnect button.
+        let page = include_str!("../lobby_pages_ui.rs");
+        let body = page.split("#[cfg(test)]").next().unwrap();
+        let at = body.find("draw_unreadable_strip").expect("Play together draws the strip");
+        let gate = body[..at].rfind("view().unreadable").expect("the strip is gated on an unreadable Signet");
+        assert!(!body[gate..at].contains("width"), "the strip is gated on width: {}", &body[gate..at]);
+        let menu = include_str!("../menu.rs");
+        assert!(menu.contains("is_host_refusal(&notice)") && menu.contains("DISCONNECT_SIGNET"));
     }
 
     #[test]

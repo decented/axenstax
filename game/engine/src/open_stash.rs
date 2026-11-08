@@ -33,6 +33,7 @@ pub const OPEN_STASH_MANIFEST_KIND: u32 = 30820;
 /// The matching secret lives outside the repo (`~/.config/axenstax/`, mode
 /// 600) and is read only by the offline publish tool. Rotate to a secure key
 /// store before non-demo use (see the Stash Column goal, Phase 5).
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub const OFFICIAL_AXENSTAX_PUBKEY: &str =
     "0bb8a9199a3e3c240a378cf1b5a977945decf05fc7d3021f66faa6b049cb55fd";
 
@@ -89,6 +90,7 @@ pub fn normalize_pubkey(pubkey: &str) -> Option<String> {
 /// Config seam for the official AxeNStax pubkey. Returns the real semi-burner
 /// AxeNStax identity (Prague delivery). The seam stays so a config/env override
 /// can later swap in a rotated production key without touching call sites.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub fn official_axenstax_pubkey() -> String {
     OFFICIAL_AXENSTAX_PUBKEY.to_string()
 }

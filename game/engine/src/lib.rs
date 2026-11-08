@@ -379,6 +379,12 @@ mod trials_gallery_ui;
 mod trials_island_build;
 mod trials_island_flow;
 mod trials_island_ui;
+mod ui_safe_area;
+mod home_ui;
+mod worlds_ui;
+mod world_detail_ui;
+mod world_picture;
+mod lobby_pages_ui;
 mod trials_island_layout;
 mod trials_unlock;
 mod ravine_gen;
@@ -682,6 +688,8 @@ pub(crate) fn escape_closes_settings(mode: &mut GameMode, panel: &mut crate::men
     match mode {
         GameMode::Menu(menu) if menu.show_settings => {
             menu.show_settings = false;
+            // The page under Settings must not also step back on this press.
+            menu.escape_spent = true;
             panel.open = false;
             true
         }
@@ -2847,17 +2855,16 @@ impl ApplicationHandler for App {
                                 // #7 — Loading is a single transient frame; ESC does nothing.
                                 GameMode::Loading(_) => EscAction::Ignore,
                                 GameMode::Menu(menu_state) => {
-                                    if menu_state.trials_gallery.is_open() {
-                                        // The Trials gallery owns Escape / Back: its own
-                                        // draw (which got this same key event through egui)
-                                        // closes the hero view, then the gallery. Escape
-                                        // must never quit the app from here.
-                                        EscAction::Ignore
-                                    } else if matches!(menu_state.dialog, crate::menu::MenuDialog::None) {
-                                        EscAction::Quit
-                                    } else {
-                                        menu_state.dialog = crate::menu::MenuDialog::None;
-                                        EscAction::CloseDialog
+                                    // A dialog closes first. The Trials gallery, an
+                                    // inner lobby page (world detail, Your worlds, Play
+                                    // together, More to play) and an open menu take
+                                    // Escape in their own draw (which got this same key
+                                    // through egui): back one page, never quit. Only a
+                                    // bare Home page quits (`menu::lobby_escape`).
+                                    match crate::menu::lobby_escape(menu_state) {
+                                        crate::menu::LobbyEscape::ClosedDialog => EscAction::CloseDialog,
+                                        crate::menu::LobbyEscape::LeaveToPage => EscAction::Ignore,
+                                        crate::menu::LobbyEscape::Quit => EscAction::Quit,
                                     }
                                 }
                                 GameMode::Paused { .. } => EscAction::Resume,
@@ -3476,14 +3483,16 @@ fn sample_menu_state() -> crate::menu::MenuState {
         mk("Redstone Lab", "", "creative", 8, false, 3_600, 2_200_000),
         mk("Jungle Hideout", "New world", "survival", 1, true, 120, 540_000),
     ];
-    state.selected = Some(0);
+    state.selected = None;
     state.world_page = 0;
     state
 }
 
 /// Headless lobby screenshot mode: render the world list at several screen sizes
 /// to PNGs, for visual iteration without opening a window.
-/// `--shot-lobby [out_dir] [--empty]` also covers the empty world list.
+/// `--shot-lobby [out_dir] [--empty]` also covers the empty world list;
+/// `--page home|worlds|together|stash` and `--select <n>` pick the page and
+/// open a world's page. Sizes: tv 1920x1080, desktop, tablet and phone.
 /// `--gallery`, `--hero <key>`, `--album`, `--fixture-postcards` and
 /// `--fixture-unlocks <name>` capture the Trials gallery (see below).
 #[cfg(not(target_arch = "wasm32"))]
@@ -3498,10 +3507,25 @@ fn run_shot_lobby(args: &[String]) {
     std::fs::create_dir_all(&out_dir).ok();
 
     let textures = crate::texture_gen::generate_textures();
-    let sizes = [("desktop", 1280u32, 800u32), ("tablet", 834, 1112), ("phone", 390, 844)];
+    let sizes = [("tv", 1920u32, 1080u32), ("desktop", 1280, 800), ("tablet", 834, 1112), ("phone", 390, 844)];
+    // `--page home|worlds|together|stash` picks the lobby page; `--select <n>`
+    // opens world n's page (on Your worlds).
+    let arg_after = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned();
+    let page = match arg_after("--page").as_deref() {
+        Some("worlds") => crate::menu::LobbyPage::Worlds,
+        Some("together") => crate::menu::LobbyPage::PlayTogether,
+        Some("stash") => crate::menu::LobbyPage::Stash,
+        _ => crate::menu::LobbyPage::Home,
+    };
+    let select = arg_after("--select").and_then(|n| n.parse::<usize>().ok());
     for (name, w, h) in sizes {
         let mut renderer = pollster::block_on(Renderer::new_headless(w, h, &textures));
         let mut menu = sample_menu_state();
+        menu.page = page;
+        if let Some(n) = select {
+            menu.page = crate::menu::LobbyPage::Worlds;
+            menu.selected = Some(n);
+        }
         if args.iter().any(|arg| arg == "--empty") {
             menu.worlds.clear();
             menu.selected = None;

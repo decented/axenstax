@@ -18,12 +18,9 @@ const SUBTITLE_COLOR: egui::Color32 = brand::MUTED_TEXT;
 const TEXT_COLOR: egui::Color32 = brand::STONE;
 const DIM_TEXT: egui::Color32 = brand::MUTED_TEXT;
 const BG_DARK: egui::Color32 = brand::DEEP_FRONTIER;
-const CARD_BG: egui::Color32 = brand::SURFACE;
 const CARD_SELECTED_BORDER: egui::Color32 = brand::COPPER;
 const CARD_BORDER: egui::Color32 = brand::BORDER;
 const PANEL_BG: egui::Color32 = egui::Color32::from_rgba_premultiplied(18, 32, 36, 245);
-const BADGE_SURVIVAL_BG: egui::Color32 = egui::Color32::from_rgb(45, 90, 30);
-const BADGE_SURVIVAL_TEXT: egui::Color32 = egui::Color32::from_rgb(166, 214, 128);
 const BADGE_CREATIVE_BG: egui::Color32 = egui::Color32::from_rgb(30, 58, 90);
 const BADGE_CREATIVE_TEXT: egui::Color32 = egui::Color32::from_rgb(106, 176, 199);
 const DELETE_RED: egui::Color32 = egui::Color32::from_rgb(236, 104, 104);
@@ -146,22 +143,6 @@ fn app_feature_copy(feature: AppFeature) -> AppFeatureCopy {
     }
 }
 
-/// Styled lobby button for a desktop-only capability explainer (web). A muted
-/// green "app accent" so it reads as "available in the app", not a core action.
-#[cfg(target_arch = "wasm32")]
-fn desktop_feature_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
-    let btn = egui::Button::new(
-        egui::RichText::new(label)
-            .size(14.0)
-            .color(egui::Color32::from_rgb(150, 200, 150)),
-    )
-    .min_size(egui::vec2(0.0, 40.0))
-    .fill(egui::Color32::from_rgba_premultiplied(18, 30, 22, 240))
-    .corner_radius(egui::CornerRadius::same(6))
-    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(44, 90, 56)));
-    ui.add(btn)
-}
-
 /// Action returned from the menu each frame.
 pub enum MenuAction {
     None,
@@ -274,6 +255,64 @@ pub fn official_stash_items() -> Vec<StashItem> {
         .collect()
 }
 
+/// Which lobby page shows (home page overhaul spec §10). The Trials gallery
+/// keeps its own open flag and draws over any page.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LobbyPage {
+    #[default]
+    Home,
+    Worlds,
+    PlayTogether,
+    /// "More to play": the official games (and, on the web, a creator look-up).
+    Stash,
+}
+
+/// What Escape (the Android Back key) does in the lobby, decided by [`lobby_escape`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LobbyEscape {
+    /// A bare Home page: quit, as the lobby always has.
+    Quit,
+    /// A dialog was open and is now closed.
+    ClosedDialog,
+    /// The page (or the gallery, or an open menu) handles it in its own draw:
+    /// back one page, never quit.
+    LeaveToPage,
+}
+
+/// Escape in the lobby. A dialog closes first; the Trials gallery, an inner
+/// page or an open ⋯ / ▾ menu then take it in their own draw (which got the
+/// same key through egui), so it steps back and never quits; only a bare Home
+/// page quits. A closed dialog marks the key spent, so the page under it does
+/// not also step back on the same press.
+pub fn lobby_escape(menu: &mut MenuState) -> LobbyEscape {
+    if !matches!(menu.dialog, MenuDialog::None) {
+        menu.dialog = MenuDialog::None;
+        menu.escape_spent = true;
+        return LobbyEscape::ClosedDialog;
+    }
+    if menu.trials_gallery.is_open() || menu.page != LobbyPage::Home || menu.popup_open {
+        return LobbyEscape::LeaveToPage;
+    }
+    LobbyEscape::Quit
+}
+
+/// The Create dialog with its defaults: survival, commands on, Stash off,
+/// normal terrain on grass, the day cycle and mobs on.
+pub(crate) fn new_create_dialog() -> MenuDialog {
+    MenuDialog::Create {
+        name: String::new(),
+        seed: String::new(),
+        creative: false,
+        commands_enabled: true,
+        cloud_save: false,
+        world_type: "normal".to_string(),
+        ground: "grass".to_string(),
+        water_depth: 3,
+        time_lock: "cycle".to_string(),
+        mobs_enabled: true,
+    }
+}
+
 /// Persistent menu state held in GameMode::Menu.
 pub struct MenuState {
     pub worlds: Vec<WorldEntry>,
@@ -366,6 +405,7 @@ pub struct MenuState {
     /// The npub (or 64-hex) the player typed to browse a stash. Cross-platform
     /// so the column renders on native (`--shot-lobby`); the live browse itself
     /// is a PWA path.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     pub stash_input: String,
     /// Typed items returned by the last browse. The pinned "AxeNStax Official"
     /// section is separate + always present (see `official_stash_items`).
@@ -386,7 +426,9 @@ pub struct MenuState {
     /// see docs/superpowers/specs/2026-07-09-give-aliases-and-dead-web-stash-code.md).
     #[allow(dead_code)]
     pub stash_syncing: bool,
-    /// The latest "Sync Stash" status/result line, shown under the lobby header.
+    /// The latest "Sync Stash" status/result line. No longer shown (the home
+    /// page overhaul removed the dead line); still written by the web poll.
+    #[allow(dead_code)]
     pub stash_sync_msg: Option<String>,
     /// My Servers (Spec A) — the player's saved server list, loaded once.
     /// Native only: its column moved under `friends_ui::draw_friends_column`,
@@ -439,9 +481,72 @@ pub struct MenuState {
     /// draws `draw_settings_panel` over the lobby; while set, `draw_main_menu`
     /// paints only the background so nothing underneath takes clicks. All targets.
     pub show_settings: bool,
+    /// Which lobby page shows. Home when the lobby is built.
+    pub page: LobbyPage,
+    /// Set when `lib.rs` spent an Escape closing a dialog or Settings, so the
+    /// page drawn on the next frame does not also step back on that press.
+    pub escape_spent: bool,
+    /// A ⋯ / ▾ menu (or the Start at list) was open at the end of the last
+    /// frame: Escape closes it rather than leaving the page or quitting.
+    pub popup_open: bool,
 }
 
 impl MenuState {
+    /// Show `page` (its world detail, if any, stays as it was).
+    pub fn go(&mut self, page: LobbyPage) {
+        self.page = page;
+    }
+
+    /// Back one step: world detail to Your worlds, any inner page to Home.
+    pub fn step_back(&mut self) {
+        if self.page == LobbyPage::Worlds && self.selected.is_some() {
+            self.selected = None;
+        } else {
+            self.page = LobbyPage::Home;
+        }
+    }
+
+    /// Native: an OS file dialog is in flight (the import / export entries grey out).
+    pub(crate) fn dialog_pending(&self) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        return self.pending_dialog.is_some();
+        #[cfg(target_arch = "wasm32")]
+        false
+    }
+
+    /// Native: open an OS file picker (one at a time), saying so on the status line.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn open_file_dialog(&mut self, req: crate::native_file_dialog::FileDialogRequest) {
+        if self.pending_dialog.is_some() {
+            return;
+        }
+        self.transfer_status = Some("Opening the file picker…".to_string());
+        self.pending_dialog = Some(crate::native_file_dialog::spawn_dialog(req));
+    }
+
+    /// Native: bring in every `.axeworld` in the transfer folder, then re-list.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn import_transfer_folder(&mut self) {
+        let msg = native_import_worlds();
+        self.worlds = save::list_world_entries();
+        self.selected = None;
+        self.transfer_status = Some(msg);
+    }
+
+    /// Web: "Restore from a file" (one `.axeworld` into this browser).
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn start_web_import(&mut self) {
+        self.import_status = None;
+        self.import_result = Some(kick_off_import());
+    }
+
+    /// Web: "Save everything to a file" (every world plus the Trials records).
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn start_web_profile_export(&mut self) {
+        self.import_status = Some("Packing your profile…".to_string());
+        self.profile_export = Some(kick_off_profile_export());
+    }
+
     pub fn new() -> Self {
         // CP18: a handed-over world that has finished arriving moves into
         // the worlds folder first, so it lists below. CP20: the activation
@@ -527,6 +632,9 @@ impl MenuState {
             #[cfg(not(target_arch = "wasm32"))]
             show_relays: false,
             show_settings: false,
+            page: LobbyPage::Home,
+            escape_spent: false,
+            popup_open: false,
         };
 
         #[cfg(target_arch = "wasm32")]
@@ -759,6 +867,8 @@ impl MenuState {
                         // The Workshop is a singleton authoring space reached ONLY
                         // via the "The Workshop" button — never a lobby world card.
                         .filter(|e| e.name != crate::workshop::WORKSHOP_FOLDER)
+                        // Trial arenas are reached from Trials, never listed as worlds.
+                        .filter(|e| !save::is_arena_folder(&e.name))
                         .map(|e| WorldEntry {
                         folder_name: e.name.clone(),
                         meta: save::WorldMeta {
@@ -1117,7 +1227,7 @@ fn kick_off_profile_export() -> std::rc::Rc<std::cell::RefCell<Option<Result<Str
 /// Apply a world-card action: mutate menu state (open dialogs, persist the Stash
 /// toggle, kick a backup) and return any resulting `MenuAction` (Play/Host/Load),
 /// or `MenuAction::None`. Centralised so the responsive grid stays readable.
-fn handle_card_action(state: &mut MenuState, idx: usize, card_action: CardAction) -> MenuAction {
+pub(crate) fn handle_card_action(state: &mut MenuState, idx: usize, card_action: CardAction) -> MenuAction {
     // A world saved by a newer version is never opened or hosted (Spec 02 §8.4):
     // stay in the lobby and say why, before anything reads or writes it.
     // CP15 (CP14 review MEDIUM-1): nor forked (a refused world is never
@@ -1727,7 +1837,7 @@ fn draw_stash_item_card(ui: &mut egui::Ui, item: &StashItem) -> StashCardClick {
         .fill(egui::Color32::from_rgb(28, 31, 42))
         .stroke(egui::Stroke::new(1.0_f32, CARD_BORDER))
         .corner_radius(egui::CornerRadius::same(6))
-        .inner_margin(egui::Margin::same(8));
+        .inner_margin(egui::Margin::same(12));
     // Per-kind tag: a published Experience shows its specific flavour ("Race",
     // "Speedrun") when the def is in hand (the embedded official ones); a browsed
     // scenario whose def isn't downloaded yet shows the broad "Experience". Skins
@@ -1742,25 +1852,25 @@ fn draw_stash_item_card(ui: &mut egui::Ui, item: &StashItem) -> StashCardClick {
     frame.show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new(&item.name).size(13.5).color(TEXT_COLOR).strong());
+            ui.label(egui::RichText::new(&item.name).size(18.0).color(TEXT_COLOR).strong());
             if let Some((t, col)) = tag {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(egui::RichText::new(t).size(10.0).color(col).strong());
+                    ui.label(egui::RichText::new(t).size(13.0).color(col).strong());
                 });
             }
         });
         ui.label(
             egui::RichText::new(crate::plan::short_npub(&item.author_npub, 22))
-                .size(11.0)
+                .size(15.0)
                 .color(DIM_TEXT),
         );
         ui.add_space(4.0);
         match item.kind {
             crate::open_stash::StashItemKind::Scenario => {
                 let btn = egui::Button::new(
-                    egui::RichText::new("Play").size(12.5).color(egui::Color32::from_rgb(184, 232, 184)).strong(),
+                    egui::RichText::new("Play").size(15.0).color(egui::Color32::from_rgb(184, 232, 184)).strong(),
                 )
-                .min_size(egui::vec2(ui.available_width(), 30.0))
+                .min_size(egui::vec2(ui.available_width(), 44.0))
                 .fill(egui::Color32::from_rgb(45, 107, 45))
                 .corner_radius(egui::CornerRadius::same(5));
                 if ui.add(btn).clicked() {
@@ -1769,9 +1879,9 @@ fn draw_stash_item_card(ui: &mut egui::Ui, item: &StashItem) -> StashCardClick {
             }
             crate::open_stash::StashItemKind::Skin => {
                 let btn = egui::Button::new(
-                    egui::RichText::new("✦ Adopt skin").size(12.5).color(egui::Color32::from_rgb(255, 224, 178)).strong(),
+                    egui::RichText::new("✦ Adopt skin").size(15.0).color(egui::Color32::from_rgb(255, 224, 178)).strong(),
                 )
-                .min_size(egui::vec2(ui.available_width(), 30.0))
+                .min_size(egui::vec2(ui.available_width(), 44.0))
                 .fill(egui::Color32::from_rgb(150, 92, 22))
                 .corner_radius(egui::CornerRadius::same(5));
                 if ui.add(btn).clicked() {
@@ -1788,7 +1898,7 @@ fn draw_stash_item_card(ui: &mut egui::Ui, item: &StashItem) -> StashCardClick {
 /// The pinned "AxeNStax Official" section (embedded, zero-network) is always
 /// present; a live browse appends the typed items found for the entered npub.
 /// Returns a `MenuAction` (PlayScenario / AdoptSkin) when the player acts.
-fn draw_stash_column(ui: &mut egui::Ui, state: &mut MenuState) -> MenuAction {
+pub(crate) fn draw_stash_column(ui: &mut egui::Ui, state: &mut MenuState) -> MenuAction {
     let mut action = MenuAction::None;
 
     // Drain async results (PWA). A resolved download becomes the action.
@@ -1800,13 +1910,13 @@ fn draw_stash_column(ui: &mut egui::Ui, state: &mut MenuState) -> MenuAction {
                 match result {
                     Ok(items) => {
                         state.stash_status = Some(if items.is_empty() {
-                            "No experiences or skins in that stash.".to_string()
+                            "They haven't shared any experiences or skins yet.".to_string()
                         } else {
                             format!("{} item(s) found.", items.len())
                         });
                         state.stash_items = items;
                     }
-                    Err(e) => state.stash_status = Some(format!("Browse failed: {e}")),
+                    Err(e) => state.stash_status = Some(format!("Couldn't look them up: {e}")),
                 }
             }
         }
@@ -1829,46 +1939,56 @@ fn draw_stash_column(ui: &mut egui::Ui, state: &mut MenuState) -> MenuAction {
         }
     }
 
-    ui.label(egui::RichText::new("The Stash").size(18.0).color(TITLE_COLOR).strong());
-    ui.label(
-        egui::RichText::new("Browse an npub's open stash — play their experiences, adopt their skins.")
-            .size(11.5)
-            .color(SUBTITLE_COLOR),
-    );
-    ui.add_space(8.0);
-
-    // npub input + Browse.
-    let mut do_browse = false;
-    ui.horizontal(|ui| {
-        let field_w = ui.available_width() - 64.0;
-        let resp = menu_text_field(
-            ui,
-            &mut state.stash_input,
-            "Nostr address (npub)",
-            "npub1…",
-            field_w,
-            12.5,
+    // Look up a creator (web only: on native the live look-up never ran, it
+    // only said so). The page header above carries the page's name.
+    #[cfg(target_arch = "wasm32")]
+    {
+        ui.label(
+            egui::RichText::new(crate::worlds_ui::words::LOOK_UP_CREATOR).size(20.0).color(TITLE_COLOR).strong(),
         );
-        if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-            do_browse = true;
+        ui.label(
+            egui::RichText::new("Play the experiences they share and try on their skins.")
+                .size(15.0)
+                .color(SUBTITLE_COLOR),
+        );
+        ui.add_space(8.0);
+        let mut do_browse = false;
+        ui.horizontal(|ui| {
+            let field_w = ui.available_width() - 96.0;
+            let resp = menu_text_field(
+                ui,
+                &mut state.stash_input,
+                crate::worlds_ui::words::LOOK_UP_HINT,
+                "npub1…",
+                field_w,
+                15.0,
+            );
+            if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                do_browse = true;
+            }
+            if ui.add(egui::Button::new(egui::RichText::new("Look up").size(15.0)).min_size(egui::vec2(88.0, 44.0))).clicked() {
+                do_browse = true;
+            }
+        });
+        if do_browse {
+            trigger_stash_browse(state);
         }
-        if ui.add(egui::Button::new("Browse").min_size(egui::vec2(56.0, 26.0))).clicked() {
-            do_browse = true;
+        if let Some(status) = state.stash_status.clone() {
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new(status).size(15.0).color(egui::Color32::from_rgb(170, 180, 150)));
         }
-    });
-    if do_browse {
-        trigger_stash_browse(state);
+        ui.add_space(14.0);
     }
+    #[cfg(not(target_arch = "wasm32"))]
     if let Some(status) = state.stash_status.clone() {
-        ui.add_space(4.0);
-        ui.label(egui::RichText::new(status).size(11.0).color(egui::Color32::from_rgb(170, 180, 150)));
+        ui.label(egui::RichText::new(status).size(15.0).color(egui::Color32::from_rgb(170, 180, 150)));
     }
 
     ui.add_space(8.0);
-    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-        // Pinned offline floor — always present.
-        ui.label(egui::RichText::new("AxeNStax Official").size(13.0).color(egui::Color32::from_rgb(255, 200, 140)).strong());
-        ui.label(egui::RichText::new("Always here, even offline.").size(10.5).color(DIM_TEXT));
+    {
+        // Pinned offline floor — always present. (The page scrolls as one.)
+        ui.label(egui::RichText::new("AxeNStax Official").size(20.0).color(egui::Color32::from_rgb(255, 200, 140)).strong());
+        ui.label(egui::RichText::new("Always here, even offline.").size(15.0).color(DIM_TEXT));
         ui.add_space(6.0);
         // Built once — reused for both the card loop and the merge-over dedup set.
         let official = official_stash_items();
@@ -1902,7 +2022,7 @@ fn draw_stash_column(ui: &mut egui::Ui, state: &mut MenuState) -> MenuAction {
             ui.add_space(6.0);
             ui.separator();
             ui.add_space(6.0);
-            ui.label(egui::RichText::new("From this stash").size(13.0).color(ACTION_BLUE).strong());
+            ui.label(egui::RichText::new("From this creator").size(20.0).color(ACTION_BLUE).strong());
             ui.add_space(6.0);
             // Snapshot so the per-card action can mutate `state` (kick a download).
             let items: Vec<StashItem> = browsed.into_iter().cloned().collect();
@@ -1928,7 +2048,7 @@ fn draw_stash_column(ui: &mut egui::Ui, state: &mut MenuState) -> MenuAction {
                 }
             }
         }
-    });
+    }
 
     action
 }
@@ -1936,6 +2056,7 @@ fn draw_stash_column(ui: &mut egui::Ui, state: &mut MenuState) -> MenuAction {
 /// Normalise the typed npub/hex and kick a browse (PWA). On native it just
 /// explains the live browse is a PWA path — the embedded official games below
 /// still work. Centralised so the input handler stays readable.
+#[cfg(target_arch = "wasm32")]
 fn trigger_stash_browse(state: &mut MenuState) {
     let trimmed = state.stash_input.trim().to_string();
     // Empty Browse → show the official AxeNStax stash LIVE (the online
@@ -1946,24 +2067,15 @@ fn trigger_stash_browse(state: &mut MenuState) {
     } else {
         crate::open_stash::normalize_pubkey(&trimmed).or_else(|| crate::npub::npub_to_hex(&trimmed))
     };
-    #[cfg(target_arch = "wasm32")]
-    {
-        match hex {
-            Some(h) => {
-                state.stash_status = Some("Browsing…".to_string());
-                state.stash_items.clear();
-                state.stash_browse = Some(kick_off_stash_browse(h));
-            }
-            None => {
-                state.stash_status = Some("That's not a valid npub or hex pubkey.".to_string());
-            }
+    match hex {
+        Some(h) => {
+            state.stash_status = Some("Looking…".to_string());
+            state.stash_items.clear();
+            state.stash_browse = Some(kick_off_stash_browse(h));
         }
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let _ = hex;
-        state.stash_status =
-            Some("Live browse is a PWA feature — the AxeNStax Official games below work offline.".to_string());
+        None => {
+            state.stash_status = Some("That isn't an npub1… address.".to_string());
+        }
     }
 }
 
@@ -2013,7 +2125,7 @@ fn trigger_stash_download(
 /// the CREATIVE badge's blue: informational, deliberately not a warning
 /// colour.
 #[cfg(not(target_arch = "wasm32"))]
-fn draw_version_line(ui: &mut egui::Ui, restart: &mut bool) {
+pub(crate) fn draw_version_line(ui: &mut egui::Ui, restart: &mut bool) {
     use crate::update_check::{self, UpdateState};
 
     const VERSION_SIZE: f32 = 15.0;
@@ -2210,12 +2322,17 @@ pub fn draw_main_menu(ctx: &egui::Context, state: &mut MenuState) -> MenuAction 
     // Why the player is back here, when it wasn't their choice (a dropped or
     // closed connection, a kick). Stays until dismissed.
     if let Some(notice) = state.notice.clone() {
+        // Top-centre, inside the TV-safe area.
+        let safe = crate::ui_safe_area::rect(ctx);
         egui::Area::new(egui::Id::new("menu_notice"))
-            .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 12.0))
+            .pivot(egui::Align2::CENTER_TOP)
+            .fixed_pos(egui::pos2(safe.center().x, safe.min.y))
+            .constrain_to(safe)
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    ui.horizontal(|ui| {
+                    ui.set_max_width(safe.width() - 24.0);
+                    ui.horizontal_wrapped(|ui| {
                         ui.label(egui::RichText::new(&notice).strong());
                         // The refusal to host says "press Disconnect": here it is,
                         // at any window width.
@@ -2518,6 +2635,7 @@ pub fn draw_main_menu(ctx: &egui::Context, state: &mut MenuState) -> MenuAction 
             let shown = *state.keep_confirm_shown.get_or_insert_with(web_time::Instant::now);
             let armed = crate::keeps::confirm_armed(shown.elapsed());
             egui::Window::new(crate::keeps::CONFIRM_TITLE)
+                .max_width(crate::ui_safe_area::rect(ctx).width() - 24.0)
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
@@ -2541,6 +2659,7 @@ pub fn draw_main_menu(ctx: &egui::Context, state: &mut MenuState) -> MenuAction 
         }
         MenuDialog::ResetWorkshop => {
             egui::Window::new("Reset The Workshop?")
+                .max_width(crate::ui_safe_area::rect(ctx).width() - 24.0)
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
@@ -2718,12 +2837,15 @@ pub fn draw_main_menu(ctx: &egui::Context, state: &mut MenuState) -> MenuAction 
             let mut close = false;
             let mut submit: Option<String> = None;
             egui::Window::new("Add a friend")
+                .max_width(crate::ui_safe_area::rect(ctx).width() - 24.0)
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
                 .show(ctx, |ui| {
+                    let w = (crate::ui_safe_area::rect(ctx).width() - 40.0).min(420.0);
+                    ui.set_max_width(w);
                     ui.label(crate::friends_ui::add_friend_lead());
-                    ui.add(egui::TextEdit::singleline(&mut input).desired_width(420.0));
+                    ui.add(egui::TextEdit::singleline(&mut input).desired_width(w));
                     if let Some(e) = error.as_ref() {
                         ui.colored_label(egui::Color32::from_rgb(230, 150, 150), e);
                     }
@@ -2790,558 +2912,16 @@ pub fn draw_main_menu(ctx: &egui::Context, state: &mut MenuState) -> MenuAction 
         return action;
     }
 
-    // Main menu content — responsive lobby (world list). "Wide" gets the side
-    // columns; narrow stacks to a single scrolling column.
-    let wide = ctx.content_rect().width() >= 900.0;
-
-    // Stash Column (Prague) — slim right-hand column next to the world list
-    // (→ worlds | stash). Shown only when there's room for
-    // the worlds to stay dominant; below that the embedded official games stay
-    // reachable in-world via `/scenario`.
-    let show_stash = ctx.content_rect().width() >= 1080.0;
-    if show_stash {
-        // `.show(ctx, ..)` is deprecated in favour of `.show_inside(ui, ..)`, but
-        // this is a genuine top-level panel (no enclosing Ui to nest inside) —
-        // egui 0.34 has no non-deprecated top-level entry point for Panel, so
-        // the deprecated call is the only option here.
-        #[allow(deprecated)]
-        egui::Panel::right("stash_column")
-            .resizable(false)
-            .exact_size(264.0)
-            .frame(
-                egui::Frame::new()
-                    .fill(brand::DEEP_FRONTIER)
-                    .inner_margin(egui::Margin::same(14)),
-            )
-            .show(ctx, |ui| {
-                let a = draw_stash_column(ui, state);
-                if !matches!(a, MenuAction::None) {
-                    action = a;
-                }
-            });
+    // The lobby's pages (home page overhaul spec): Home, Your worlds, Play
+    // together, More to play, each inside the TV-safe area.
+    let page_action = crate::lobby_pages_ui::draw(
+        ctx,
+        state,
+        crate::lobby_pages_ui::HostOnline { enabled: host_online_enabled, note: host_online_note },
+    );
+    if !matches!(page_action, MenuAction::None) {
+        action = page_action;
     }
-
-    // Friends & servers — your address, the people you know, then the saved
-    // servers (online play by contact §5.2/§5.3, absorbing the Spec A My
-    // Servers column). Gated on a wider breakpoint than stash so it doesn't
-    // disturb the existing layout; exact placement / width / breakpoint are
-    // playtest-tunable (visual boundary). NOT on web: the web build is a
-    // login-free local sandbox with no multiplayer and no contacts book, so a
-    // column you can't act on is just confusing.
-    #[cfg(not(target_arch = "wasm32"))]
-    if ctx.content_rect().width() >= crate::signet_contacts::ui::FRIENDS_COLUMN_MIN_WIDTH {
-        // Top-level panel — see the `#[allow(deprecated)]` note above.
-        #[allow(deprecated)]
-        egui::Panel::right("friends_column")
-            .resizable(false)
-            .exact_size(248.0)
-            .frame(
-                egui::Frame::new()
-                    .fill(brand::DEEP_FRONTIER)
-                    .inner_margin(egui::Margin::same(14)),
-            )
-            .show(ctx, |ui| {
-                let a = crate::friends_ui::draw_friends_column(ui, state);
-                if !matches!(a, MenuAction::None) {
-                    action = a;
-                }
-            });
-    }
-
-    // Below the Friends column's width there is no Signet row, and with the
-    // Signet files unreadable the player's way out (Disconnect) lives there. A
-    // strip across the top keeps it reachable at any width.
-    #[cfg(not(target_arch = "wasm32"))]
-    if crate::signet_contacts::ui::needs_strip(
-        ctx.content_rect().width(),
-        crate::signet_contacts::view().unreadable,
-    ) {
-        let mut pressed = false;
-        #[allow(deprecated)]
-        egui::Panel::top("signet_unreadable")
-            .resizable(false)
-            .frame(
-                egui::Frame::new()
-                    .fill(brand::DEEP_FRONTIER)
-                    .inner_margin(egui::Margin::same(10)),
-            )
-            .show(ctx, |ui| {
-                pressed = crate::signet_contacts::ui::draw_unreadable_strip(ui);
-            });
-        if pressed
-            && state.notice.as_deref().is_some_and(crate::signet_contacts::ui::is_host_refusal)
-        {
-            state.notice = None;
-        }
-    }
-
-    // Top-level panel — see the `#[allow(deprecated)]` note above (no
-    // non-deprecated top-level entry point for CentralPanel in egui 0.34).
-    #[allow(deprecated)]
-    egui::CentralPanel::default()
-        .frame(
-            egui::Frame::new()
-                .fill(egui::Color32::TRANSPARENT)
-                .inner_margin(egui::Margin::symmetric(20, 16)),
-        )
-        .show(ctx, |ui| {
-            // --- Header: title (left) + Leave/Quit (right) ---
-            ui.horizontal(|ui| {
-                ui.vertical(|ui| {
-                    let wordmark_width = if ctx.content_rect().width() < 600.0 { 180.0 } else { 220.0 };
-                    brand::show_wordmark(ui, wordmark_width);
-                    #[cfg(not(target_arch = "wasm32"))]
-                    {
-                        let mut restart = false;
-                        draw_version_line(ui, &mut restart);
-                        if restart {
-                            action = MenuAction::RestartForUpdate;
-                        }
-                    }
-                    ui.add_space(6.0);
-                    ui.label(egui::RichText::new("Your Worlds").size(14.0).color(SUBTITLE_COLOR));
-                });
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center).with_main_wrap(true), |ui| {
-                    // #5 — WASM gets two buttons. "Log out" drops the Signet
-                    // session (forces a QR re-login next time — a faff). "Exit"
-                    // just leaves the game back to the entrance while keeping the
-                    // session, so coming back is instant. Native keeps "Quit".
-                    // (right_to_left layout: first added = rightmost.)
-                    #[cfg(target_arch = "wasm32")]
-                    {
-                        // Web is a purely local sandbox — no login and no Stash, so
-                        // there's nothing to "Log out" of and nothing to "Sync". The
-                        // features the web build deliberately omits (cloud saves,
-                        // multiplayer) are surfaced as a nudge to the desktop app,
-                        // under the header. "Exit" just returns to the home page.
-                        if lobby_header_button(ui, "Exit")
-                            .on_hover_text("Leave the game, back to the home page")
-                            .clicked()
-                        {
-                            crate::wasm_auth::exit_to_lobby();
-                        }
-                    }
-                    #[cfg(not(target_arch = "wasm32"))]
-                    {
-                        // CP12 (CP10 review MEDIUM-1): through the one exit function.
-                        if lobby_header_button(ui, "Quit").clicked() {
-                            action = MenuAction::Quit;
-                        }
-                        // Native Signet identity (right-to-left: added after Quit, so
-                        // it sits to Quit's left). Guest by default; sign-in is opt-in.
-                        match crate::signet::native_signer::current_owner_pubkey() {
-                            Some(_) => {
-                                if lobby_header_button(ui, "Sign out")
-                                    .on_hover_text("Forget this device's Signet sign-in")
-                                    .clicked()
-                                {
-                                    crate::native_signin::sign_out();
-                                }
-                            }
-                            None => {
-                                if lobby_header_button(ui, "Sign in")
-                                    .on_hover_text("Sign in with Signet — scan a QR with your phone")
-                                    .clicked()
-                                {
-                                    crate::native_signin::reset();
-                                    state.dialog = MenuDialog::SignIn {
-                                        paste_uri: String::new(),
-                                        show_paste: false,
-                                    };
-                                }
-                            }
-                        }
-                    }
-                    // Settings — the SAME panel the pause menu opens (graphics,
-                    // "Your relays", the tester unlock), reachable before entering
-                    // a world or signing in. The caller draws it
-                    // (`MenuState::show_settings`). All targets; on web the panel
-                    // is graphics-only.
-                    if lobby_header_button(ui, "Settings")
-                        .on_hover_text("Graphics, your relays and more")
-                        .clicked()
-                    {
-                        state.show_settings = true;
-                    }
-                });
-            });
-
-            // Native identity line, just under the header.
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                ui.add_space(2.0);
-                match crate::signet::native_signer::current_owner_pubkey() {
-                    Some(hex) => {
-                        let npub = crate::signet::native_signer::NativeIdentity::SignedIn {
-                            pubkey_hex: hex,
-                        }
-                        .npub()
-                        .unwrap_or_default();
-                        ui.label(
-                            egui::RichText::new(format!("👤 {}", crate::plan::short_npub(&npub, 24)))
-                                .size(12.0)
-                                .color(egui::Color32::from_rgb(150, 200, 150)),
-                        )
-                        .on_hover_text("Signed in with Signet — cloud save & multiplayer unlocked");
-                    }
-                    None => {
-                        ui.label(
-                            egui::RichText::new("👤 Playing as guest — Sign in to save to the cloud & join servers")
-                                .size(12.0)
-                                .color(SUBTITLE_COLOR),
-                        );
-                    }
-                }
-            }
-
-            // Web (local-sandbox taster): the desktop-app capabilities (Stash, Join,
-            // Host) are surfaced as clickable explainer buttons in the actions row
-            // below — each opens a popup that points players at the free app.
-            // "Show them what they're missing."
-
-            // "Sync Stash" status line. On web this never fires: with every Stash
-            // toggle gated out (local sandbox), no world has cloud_save=true, so
-            // cloud.js never starts a sync and stash_sync_msg stays None — it can't
-            // contradict the desktop-app nudge above. Kept ungated (the field is
-            // read here on both targets).
-            if let Some(msg) = state.stash_sync_msg.clone() {
-                ui.add_space(4.0);
-                ui.label(
-                    egui::RichText::new(msg)
-                        .size(11.5)
-                        .color(egui::Color32::from_rgb(150, 190, 150)),
-                );
-            }
-
-            ui.add_space(10.0);
-
-            // "Take your worlds to native" — first-run nudge. Only while there
-            // are no worlds here yet: a player who arrived from the browser has
-            // an empty lobby and no reason to guess that their browser worlds
-            // can come across. It's a hint, never an auto-opened dialog; the
-            // "Import a web profile…" button below stays available always.
-            #[cfg(not(target_arch = "wasm32"))]
-            if state.worlds.is_empty() {
-                ui.label(
-                    egui::RichText::new("Played in the browser? Import your web worlds here.")
-                        .size(12.5)
-                        .color(egui::Color32::from_rgb(170, 190, 150)),
-                );
-                ui.add_space(6.0);
-            }
-
-            // The Trials tile (a full-width button on narrow screens) opens the
-            // full-screen gallery.
-            if crate::trials_gallery_ui::draw_trials_tile(ui, !wide) {
-                state.trials_gallery.open();
-            }
-            ui.add_space(10.0);
-
-            // --- Primary actions: Create / Join / Restore / Spawn ---
-            ui.horizontal_wrapped(|ui| {
-                let create = egui::Button::new(
-                    egui::RichText::new("+ Create New World").size(15.0)
-                        .color(egui::Color32::from_rgb(184, 232, 184)).strong(),
-                )
-                .min_size(egui::vec2(200.0, 40.0))
-                .fill(egui::Color32::from_rgb(45, 107, 45))
-                .corner_radius(egui::CornerRadius::same(6));
-                let create_resp = ui.add(create);
-                focus_ring(ui, &create_resp);
-                if create_resp.clicked() {
-                    state.dialog = MenuDialog::Create {
-                        name: String::new(), seed: String::new(),
-                        creative: false, commands_enabled: true, cloud_save: false,
-                        world_type: "normal".to_string(),
-                        ground: "grass".to_string(),
-                        water_depth: 3,
-                        time_lock: "cycle".to_string(),
-                        mobs_enabled: true,
-                    };
-                }
-                // Spec 40 (The Workshop) — the Lobby entry into the redesign space.
-                // Opens the player's (single) Workshop world, created on first use.
-                let workshop = egui::Button::new(
-                    egui::RichText::new("🔧 The Workshop").size(15.0)
-                        .color(egui::Color32::from_rgb(255, 224, 178)).strong(),
-                )
-                .min_size(egui::vec2(180.0, 40.0))
-                .fill(egui::Color32::from_rgb(150, 92, 22))
-                .corner_radius(egui::CornerRadius::same(6));
-                let workshop_resp = ui.add(workshop);
-                focus_ring(ui, &workshop_resp);
-                if workshop_resp.clicked() {
-                    action = MenuAction::EnterWorkshop;
-                }
-                // Spec 40 — the Workshop's reset affordance. It's not a lobby world
-                // card (singleton, button-only), so the normal delete-world path
-                // can't reach it; this wipes the room while keeping saved reskins.
-                let reset_ws = egui::Button::new(
-                    egui::RichText::new("♻ Reset").size(13.0)
-                        .color(egui::Color32::from_rgb(255, 200, 160)),
-                )
-                .min_size(egui::vec2(0.0, 40.0))
-                .fill(egui::Color32::from_rgba_premultiplied(60, 34, 12, 240))
-                .corner_radius(egui::CornerRadius::same(6))
-                .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(120, 74, 30)));
-                if ui.add(reset_ws).on_hover_text(
-                    "Clear everything built in The Workshop, back to an empty floor. Keeps your saved skins.",
-                ).clicked() {
-                    state.dialog = MenuDialog::ResetWorkshop;
-                }
-                // Multiplayer is native-only (web is a local sandbox — see the
-                // desktop-app nudge under the header). Hidden on WASM.
-                #[cfg(not(target_arch = "wasm32"))]
-                {
-                    let join = egui::Button::new(
-                        egui::RichText::new("Join Game").size(14.0).color(ACTION_BLUE),
-                    )
-                    .min_size(egui::vec2(0.0, 40.0))
-                    .fill(egui::Color32::from_rgba_premultiplied(20, 23, 31, 240))
-                    .corner_radius(egui::CornerRadius::same(6))
-                    .stroke(egui::Stroke::new(1.0_f32, brand::BORDER));
-                    let join_resp = ui.add(join);
-                    focus_ring(ui, &join_resp);
-                    if join_resp.clicked() {
-                        state.dialog = MenuDialog::JoinDirect { address: String::new() };
-                    }
-                }
-                #[cfg(target_arch = "wasm32")]
-                {
-                    let restore = egui::Button::new(
-                        egui::RichText::new("Restore from file").size(14.0).color(ACTION_BLUE),
-                    )
-                    .min_size(egui::vec2(0.0, 40.0))
-                    .fill(egui::Color32::from_rgba_premultiplied(20, 23, 31, 240))
-                    .corner_radius(egui::CornerRadius::same(6))
-                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(42, 48, 72)));
-                    if ui.add(restore).clicked() {
-                        state.import_status = None;
-                        state.import_result = Some(kick_off_import());
-                    }
-
-                    // "Take your worlds to native" — the whole-profile bundle.
-                    // Browser saves are local to this browser; this is how a
-                    // player carries the lot to the desktop app in one file.
-                    let export_all = egui::Button::new(
-                        egui::RichText::new("Export everything").size(14.0).color(ACTION_BLUE),
-                    )
-                    .min_size(egui::vec2(0.0, 40.0))
-                    .fill(egui::Color32::from_rgba_premultiplied(20, 23, 31, 240))
-                    .corner_radius(egui::CornerRadius::same(6))
-                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(42, 48, 72)));
-                    let export_busy = state.profile_export.is_some();
-                    if ui
-                        .add_enabled(!export_busy, export_all)
-                        .on_hover_text(
-                            "Export everything (take your worlds to the desktop app) — saves one .axeprofile file with every world in this browser plus your Trials records.",
-                        )
-                        .clicked()
-                    {
-                        state.import_status = Some("Packing your profile…".to_string());
-                        state.profile_export = Some(kick_off_profile_export());
-                    }
-
-                    // Desktop-app capabilities, surfaced as explainer buttons (the
-                    // web build is a local sandbox). Each opens a popup that points
-                    // players at the free app — capability framing, never "bypass".
-                    if desktop_feature_button(ui, "☁ Stash")
-                        .on_hover_text("Cloud backup & sharing — in the free desktop app")
-                        .clicked()
-                    {
-                        state.dialog = MenuDialog::DesktopOnly(AppFeature::Stash);
-                    }
-                    if desktop_feature_button(ui, "🎮 Join")
-                        .on_hover_text("Multiplayer — in the free desktop app")
-                        .clicked()
-                    {
-                        state.dialog = MenuDialog::DesktopOnly(AppFeature::Join);
-                    }
-                    if desktop_feature_button(ui, "🖧 Host")
-                        .on_hover_text("Host multiplayer — in the free desktop app")
-                        .clicked()
-                    {
-                        state.dialog = MenuDialog::DesktopOnly(AppFeature::Host);
-                    }
-                }
-                #[cfg(not(target_arch = "wasm32"))]
-                {
-                    // Both import buttons grey out while an OS dialog is in
-                    // flight, so a second click can't open a second picker.
-                    let dialog_pending = state.pending_dialog.is_some();
-
-                    // Primary: single-file OS picker — "Import world…"
-                    let import_file_btn = egui::Button::new(
-                        egui::RichText::new("Import world…").size(14.0).color(ACTION_BLUE),
-                    )
-                    .min_size(egui::vec2(0.0, 40.0))
-                    .fill(egui::Color32::from_rgba_premultiplied(20, 23, 31, 240))
-                    .corner_radius(egui::CornerRadius::same(6))
-                    .stroke(egui::Stroke::new(1.0_f32, brand::BORDER));
-                    if ui.add_enabled(!dialog_pending, import_file_btn)
-                        .on_hover_text("Open a single .axeworld file from anywhere on your computer")
-                        .clicked()
-                    {
-                        // Immediate feedback before the OS dialog appears.
-                        state.transfer_status = Some("Opening the file picker…".to_string());
-                        state.pending_dialog = Some(crate::native_file_dialog::spawn_dialog(
-                            crate::native_file_dialog::FileDialogRequest::OpenWorld,
-                        ));
-                    }
-                    // Fallback: bulk scan of world-transfer/ folder
-                    let import_btn = egui::Button::new(
-                        egui::RichText::new("Import from folder").size(13.0).color(ACTION_BLUE),
-                    )
-                    .min_size(egui::vec2(0.0, 36.0))
-                    .fill(egui::Color32::from_rgba_premultiplied(20, 23, 31, 220))
-                    .corner_radius(egui::CornerRadius::same(6))
-                    .stroke(egui::Stroke::new(1.0_f32, brand::BORDER));
-                    if ui.add_enabled(!dialog_pending, import_btn)
-                        .on_hover_text("Reads every *.axeworld file in the world-transfer/ folder and imports each one")
-                        .clicked()
-                    {
-                        let msg = native_import_worlds();
-                        // Refresh the world list so new worlds appear immediately.
-                        state.worlds = save::list_world_entries();
-                        state.transfer_status = Some(msg);
-                    }
-
-                    // "Take your worlds to native" — the whole-profile bundle
-                    // the web lobby's "Export everything" writes. Always
-                    // available, not just on first run.
-                    let profile_btn = egui::Button::new(
-                        egui::RichText::new("Import a web profile…").size(13.0).color(ACTION_BLUE),
-                    )
-                    .min_size(egui::vec2(0.0, 36.0))
-                    .fill(egui::Color32::from_rgba_premultiplied(20, 23, 31, 220))
-                    .corner_radius(egui::CornerRadius::same(6))
-                    .stroke(egui::Stroke::new(1.0_f32, brand::BORDER));
-                    if ui.add_enabled(!dialog_pending, profile_btn)
-                        .on_hover_text(
-                            "Open an .axeprofile file — every world you saved in the browser, plus your Trials records. Worlds already here are kept: a copy arrives as \"(web)\".",
-                        )
-                        .clicked()
-                    {
-                        state.transfer_status = Some("Opening the file picker…".to_string());
-                        state.pending_dialog = Some(crate::native_file_dialog::spawn_dialog(
-                            crate::native_file_dialog::FileDialogRequest::OpenProfile,
-                        ));
-                    }
-                }
-            });
-
-            // Keep this preference out of the wrapping action row: ComboBox
-            // treats its width as a minimum and can otherwise enlarge the panel.
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("Spawn:").size(13.0).color(DIM_TEXT));
-                let spawn_width = ui.available_width().clamp(80.0, 180.0);
-                egui::ComboBox::from_id_salt("spawn_pref_combo")
-                    .width(spawn_width)
-                    .wrap_mode(egui::TextWrapMode::Truncate)
-                    .selected_text(state.spawn_pref.label())
-                    .show_ui(ui, |ui| {
-                        for opt in crate::spawn_pref::SpawnPref::all() {
-                            ui.selectable_value(&mut state.spawn_pref, *opt, opt.label());
-                        }
-                    });
-            });
-
-            #[cfg(target_arch = "wasm32")]
-            if let Some(ref status) = state.import_status {
-                ui.add_space(6.0);
-                ui.label(egui::RichText::new(status).size(13.0).color(egui::Color32::from_rgb(170, 190, 150)));
-            }
-            #[cfg(not(target_arch = "wasm32"))]
-            if let Some(ref status) = state.transfer_status {
-                ui.add_space(6.0);
-                ui.label(egui::RichText::new(status).size(13.0).color(egui::Color32::from_rgb(170, 190, 150)));
-            }
-            // CP11: a handover import still awaiting its Committed.
-            #[cfg(not(target_arch = "wasm32"))]
-            for line in &state.awaiting_imports {
-                ui.add_space(6.0);
-                ui.label(egui::RichText::new(line).size(13.0).color(egui::Color32::from_rgb(170, 190, 150)));
-            }
-            #[cfg(not(target_arch = "wasm32"))]
-            let nothing_awaiting = state.awaiting_imports.is_empty();
-            #[cfg(target_arch = "wasm32")]
-            let nothing_awaiting = true;
-
-            ui.add_space(10.0);
-            ui.separator();
-            ui.add_space(8.0);
-
-            // --- Worlds: responsive multi-column grid in a scroll area ---
-            if state.worlds.is_empty() && nothing_awaiting {
-                ui.add_space(40.0);
-                ui.vertical_centered(|ui| {
-                    brand::show_mark(ui, 96.0, 255, 0.0);
-                    ui.add_space(16.0);
-                    ui.label(egui::RichText::new("No worlds yet").size(18.0).color(TEXT_COLOR).strong());
-                    ui.add_space(6.0);
-                    ui.label(egui::RichText::new("Tap \"+ Create New World\" to begin.").size(13.0).color(DIM_TEXT));
-                });
-            } else {
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                    // Responsive column count from the available width. `ui.columns`
-                    // gives each card a properly-bounded width so card content
-                    // (incl. the wrapping action row) lays out correctly.
-                    let area_w = ui.available_width();
-                    let min_card = 320.0;
-                    let cols = (((area_w + 10.0) / (min_card + 10.0)).floor() as usize).clamp(1, 3);
-                    let n = state.worlds.len();
-                    let mut base = 0;
-                    while base < n {
-                        ui.columns(cols, |cols_ui| {
-                            for (c, cui) in cols_ui.iter_mut().enumerate() {
-                                let idx = base + c;
-                                if idx >= n { break; }
-                                let is_selected = state.selected == Some(idx);
-                                let stash_in_cloud = {
-                                    #[cfg(target_arch = "wasm32")]
-                                    // Cloud manifest is keyed by display name (see
-                                    // poll_cloud_worlds), so match on that — else green
-                                    // never resolves for a genuinely-stashed world.
-                                    { state.cloud_world_names.contains(&state.worlds[idx].meta.display_name) }
-                                    #[cfg(not(target_arch = "wasm32"))]
-                                    { false }
-                                };
-                                let w = cui.available_width();
-                                // #4 — namespace each card's inner widget Ids by
-                                // folder name. Without a unique Id salt, the auto-
-                                // generated button Ids could collide between cards
-                                // laid out in the same columns row, so a click on
-                                // one card's button was attributed to another's.
-                                // Native-only: greys out the card's Export
-                                // buttons while an OS dialog is mid-flight.
-                                // Always `false` on WASM (no native dialogs).
-                                #[cfg(not(target_arch = "wasm32"))]
-                                let dialog_pending = state.pending_dialog.is_some();
-                                #[cfg(target_arch = "wasm32")]
-                                let dialog_pending = false;
-                                let ca = cui
-                                    .push_id(("world_card", &state.worlds[idx].folder_name), |cui| {
-                                        draw_world_card(
-                                            cui,
-                                            &state.worlds[idx],
-                                            is_selected,
-                                            w,
-                                            stash_in_cloud,
-                                            dialog_pending,
-                                            host_online_enabled,
-                                            host_online_note,
-                                        )
-                                    })
-                                    .inner;
-                                let act = handle_card_action(state, idx, ca);
-                                if !matches!(act, MenuAction::None) { action = act; }
-                            }
-                        });
-                        base += cols;
-                    }
-                });
-            }
-        });
 
     // Trials "What to do?" pop-up — a centred modal over the whole lobby. Drawn
     // last so it sits on top; its Play takes precedence over the lobby behind it.
@@ -3357,7 +2937,7 @@ pub fn draw_main_menu(ctx: &egui::Context, state: &mut MenuState) -> MenuAction 
 // World Card
 // ---------------------------------------------------------------------------
 
-enum CardAction {
+pub(crate) enum CardAction {
     None,
     Select,
     DoubleClick,
@@ -3380,386 +2960,6 @@ enum CardAction {
     /// Native only — host this world for friends outside the house.
     #[cfg(not(target_arch = "wasm32"))]
     HostOnline,
-}
-
-fn draw_world_card(
-    ui: &mut egui::Ui,
-    entry: &WorldEntry,
-    is_selected: bool,
-    width: f32,
-    stash_in_cloud: bool,
-    // Native only — true while an OS file dialog (export/import) is in flight,
-    // so the per-card Export buttons can grey out instead of silently no-op'ing
-    // on a second click. Always `false` on WASM (no native dialogs there); the
-    // WASM card has no Export buttons, so the value is simply ignored there.
-    #[cfg_attr(target_arch = "wasm32", allow(unused_variables))] dialog_pending: bool,
-    // Online play by contact §5.1 — whether "Host online" is pressable, and the
-    // line to show beside it. Computed once per frame by the caller (it reads
-    // the profile directory), passed as plain values because
-    // `friends_ui::HostOnlineState` is a native-only type and this signature
-    // has to compile for WASM too. Ignored on WASM: no online host there.
-    #[cfg_attr(target_arch = "wasm32", allow(unused_variables))] host_online_enabled: bool,
-    #[cfg_attr(target_arch = "wasm32", allow(unused_variables))] host_online_note: Option<
-        &'static str,
-    >,
-) -> CardAction {
-    let mut card_action = CardAction::None;
-
-    ui.push_id(egui::Id::new("world_card").with(&entry.folder_name), |ui| {
-        let border_color = if is_selected { CARD_SELECTED_BORDER } else { CARD_BORDER };
-        let border_width = if is_selected { 2.0_f32 } else { 1.0_f32 };
-
-        let frame = egui::Frame::new()
-            .fill(if is_selected { brand::SURFACE_SELECTED } else { CARD_BG })
-            .corner_radius(egui::CornerRadius::same(8))
-            .stroke(egui::Stroke::new(border_width, border_color))
-            .inner_margin(egui::Margin::same(14));
-
-        let inner_width = (width - frame.total_margin().sum().x).max(0.0);
-        let frame_resp = frame.show(ui, |ui| {
-        // Include the stroke as well as padding: selected cards have a thicker
-        // outline, but must occupy the same column width as the other cards.
-        ui.set_width(inner_width);
-
-        // Row 1: name + mode badge + version + (collapsed) Stash dot.
-        ui.horizontal_wrapped(|ui| {
-            ui.label(
-                egui::RichText::new(&entry.meta.display_name)
-                    .size(17.0)
-                    .color(TEXT_COLOR)
-                    .strong(),
-            );
-            draw_game_mode_badge(ui, &entry.meta.game_mode);
-            if entry.meta.version > 0 {
-                ui.label(
-                    egui::RichText::new(format!("v{}", entry.meta.version))
-                        .size(11.0)
-                        .color(DIM_TEXT),
-                );
-            }
-            // Publish flow: show a badge when this world is published to a server.
-            draw_publish_badge(ui, entry.meta.publish_badge());
-            if !entry.cloud_only {
-                let (dot, col) = stash_light(entry.meta.cloud_save, stash_in_cloud);
-                ui.label(egui::RichText::new(dot).size(12.0).color(col));
-            }
-        });
-
-        // Row 2: description.
-        ui.add_space(2.0);
-        if entry.meta.description.is_empty() {
-            ui.label(
-                egui::RichText::new("No description")
-                    .size(12.0)
-                    .color(DIM_TEXT)
-                    .italics(),
-            );
-        } else {
-            ui.label(
-                egui::RichText::new(&entry.meta.description)
-                    .size(12.0)
-                    .color(DIM_TEXT),
-            );
-        }
-
-        // Row 3: meta (last played · size).
-        ui.add_space(4.0);
-        ui.horizontal_wrapped(|ui| {
-            #[cfg(not(target_arch = "wasm32"))]
-            ui.label(
-                egui::RichText::new(format!("Last played: {}", save::format_relative_time(entry.last_played)))
-                    .size(11.0)
-                    .color(DIM_TEXT),
-            );
-            ui.label(
-                egui::RichText::new(save::format_size(entry.size_bytes))
-                    .size(11.0)
-                    .color(DIM_TEXT),
-            );
-        });
-
-        // Expanded action row (selected card only). Wraps on narrow widths.
-        if is_selected {
-            ui.add_space(10.0);
-            ui.separator();
-            ui.add_space(6.0);
-            ui.horizontal_wrapped(|ui| {
-                // #6 — a cloud-only card has no local copy; pressing Play
-                // downloads + decrypts the blob from the Stash and then plays.
-                // Make that explicit so it doesn't look identical to a local
-                // Play (the pull path already works end-to-end; this is the
-                // discoverability fix).
-                let play_label = if entry.cloud_only {
-                    "▶ Play (from Stash)"
-                } else {
-                    "▶ Play"
-                };
-                let play = egui::Button::new(
-                    egui::RichText::new(play_label).size(14.0)
-                        .color(egui::Color32::from_rgb(184, 232, 184)).strong(),
-                )
-                .min_size(egui::vec2(84.0, 34.0))
-                .fill(egui::Color32::from_rgb(45, 107, 45))
-                .corner_radius(egui::CornerRadius::same(6));
-                let play_resp = ui.add(play);
-                focus_ring(ui, &play_resp);
-                let play_resp = if entry.cloud_only {
-                    play_resp.on_hover_text("Download this world from your Stash and play it")
-                } else {
-                    play_resp
-                };
-                if play_resp.clicked() { card_action = CardAction::Play; }
-
-                if action_button(ui, "Host").clicked() { card_action = CardAction::Host; }
-
-                // Online play by contact — hosting for friends in other houses.
-                // Greyed (with the reason) until there is a persona to host as;
-                // the first-time phone tap is a heads-up, not a block, because
-                // pressing this is what mints it.
-                #[cfg(not(target_arch = "wasm32"))]
-                {
-                    let resp = ui
-                        .add_enabled(host_online_enabled, action_button_widget("Host online"));
-                    let resp = match host_online_note {
-                        Some(note) => resp.on_hover_text(note).on_disabled_hover_text(note),
-                        None => resp,
-                    };
-                    if resp.clicked() {
-                        card_action = CardAction::HostOnline;
-                    }
-                }
-                if action_button(ui, "Edit").clicked() { card_action = CardAction::Edit; }
-                if action_button(ui, "Fork").clicked() { card_action = CardAction::Fork; }
-
-                #[cfg(target_arch = "wasm32")]
-                if action_button(ui, "Back up").clicked() { card_action = CardAction::Backup; }
-
-                // Native export buttons grey out while an OS file dialog is in
-                // flight — a second click can't fire a second picker (it would
-                // silently no-op against `pending_dialog.is_some()` anyway, so
-                // the disabled state just makes the busy-ness visible).
-                #[cfg(not(target_arch = "wasm32"))]
-                if ui
-                    .add_enabled(!dialog_pending, action_button_widget("Export…"))
-                    .clicked()
-                {
-                    card_action = CardAction::Export;
-                }
-                #[cfg(not(target_arch = "wasm32"))]
-                if ui
-                    .add_enabled(!dialog_pending, action_button_widget("Export to folder"))
-                    .clicked()
-                {
-                    card_action = CardAction::ExportToFolder;
-                }
-
-                // Stash traffic-light toggle (full label). Hidden for cloud-only
-                // entries (already stashed). Native-only: web is a local sandbox
-                // with no Stash — the lobby nudges to the desktop app instead.
-                #[cfg(not(target_arch = "wasm32"))]
-                if !entry.cloud_only {
-                    let (dot, label, text_col, fill, stroke) =
-                        stash_button_style(entry.meta.cloud_save, stash_in_cloud);
-                    let btn = egui::Button::new(
-                        egui::RichText::new(format!("{dot} {label}")).size(12.0).color(text_col),
-                    )
-                    .min_size(egui::vec2(0.0, 34.0))
-                    .fill(fill)
-                    .stroke(egui::Stroke::new(1.0_f32, stroke))
-                    .corner_radius(egui::CornerRadius::same(6));
-                    let resp = ui.add(btn)
-                        .on_hover_text(stash_hint(entry.meta.cloud_save, stash_in_cloud));
-                    if resp.clicked() { card_action = CardAction::ToggleStash; }
-                }
-
-                let del = egui::Button::new(
-                    egui::RichText::new("Delete").size(12.0).color(DELETE_RED),
-                )
-                .min_size(egui::vec2(0.0, 34.0))
-                .fill(egui::Color32::from_rgb(46, 31, 31))
-                .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(74, 40, 40)))
-                .corner_radius(egui::CornerRadius::same(6));
-                if ui.add(del).clicked() { card_action = CardAction::Delete; }
-            });
-        }
-    });
-
-    // Whole-card click → select (double-click → play). #4 — ONLY the
-    // collapsed (unselected) card senses whole-card clicks. An expanded card's
-    // clicks belong to its action buttons; egui routes a click to the topmost
-    // (last-added) widget under the pointer, and this full-card click-sense is
-    // added AFTER the buttons, so it sat on top and ate every button press —
-    // which is why the expanded Play/Host/Edit/… buttons went dead. A
-    // collapsed card has no inner buttons, so sensing it is unambiguous:
-    // single click selects (expands), double click plays. `.interact()` adds
-    // sensing to the frame's existing rect WITHOUT consuming layout space
-    // (unlike allocate_rect, which would advance the cursor a second time).
-    if !is_selected {
-        let card_resp = frame_resp.response.interact(egui::Sense::click());
-        if card_resp.hovered() {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-        }
-        // Controller/keyboard: the collapsed card is focusable (Sense::click);
-        // egui's Enter/Space fake-click lands in clicked() below, so A on a
-        // focused card selects (expands) it — then the action buttons take
-        // d-pad focus. Ring makes the cursor position visible.
-        focus_ring(ui, &card_resp);
-        if card_resp.double_clicked() {
-            card_action = CardAction::DoubleClick;
-        } else if card_resp.clicked() {
-            card_action = CardAction::Select;
-        }
-    }
-    });
-
-    card_action
-}
-
-/// Stash traffic-light dot + colour for the collapsed card header.
-fn stash_light(cloud_save: bool, in_cloud: bool) -> (&'static str, egui::Color32) {
-    if !cloud_save {
-        ("🔴", egui::Color32::from_rgb(200, 110, 110))
-    } else if in_cloud {
-        ("🟢", egui::Color32::from_rgb(120, 210, 130))
-    } else {
-        ("🟠", egui::Color32::from_rgb(225, 175, 90))
-    }
-}
-
-/// Stash traffic-light button styling: (dot, label, text, fill, stroke).
-/// Native-only: the world-card Stash toggle is hidden on web (local sandbox).
-#[cfg(not(target_arch = "wasm32"))]
-fn stash_button_style(
-    cloud_save: bool,
-    in_cloud: bool,
-) -> (&'static str, &'static str, egui::Color32, egui::Color32, egui::Color32) {
-    if !cloud_save {
-        ("🔴", "Stash: Off",
-         egui::Color32::from_rgb(210, 150, 150),
-         egui::Color32::from_rgb(48, 28, 28),
-         egui::Color32::from_rgb(120, 60, 60))
-    } else if in_cloud {
-        ("🟢", "Stash: On",
-         egui::Color32::from_rgb(160, 220, 160),
-         egui::Color32::from_rgb(26, 50, 30),
-         egui::Color32::from_rgb(70, 130, 80))
-    } else {
-        ("🟠", "Stash: On…",
-         egui::Color32::from_rgb(230, 190, 120),
-         egui::Color32::from_rgb(52, 42, 22),
-         egui::Color32::from_rgb(150, 115, 50))
-    }
-}
-
-/// Hover explanation for the Stash traffic-light state.
-/// Native-only: the world-card Stash toggle is hidden on web (local sandbox).
-#[cfg(not(target_arch = "wasm32"))]
-fn stash_hint(cloud_save: bool, in_cloud: bool) -> &'static str {
-    if !cloud_save {
-        "Off — this world stays on this computer. Click to start stashing it."
-    } else if in_cloud {
-        "On — this world is in your Stash; open it on any computer."
-    } else {
-        "On — not in your Stash yet. Save the world (with a Stash sign-in) to upload it."
-    }
-}
-
-/// Lobby badge for a world's publish state (Publish flow). A normal local
-/// world (`NotPublished`) shows nothing; published worlds show whether the
-/// server copy is current or has pending local edits.
-fn draw_publish_badge(ui: &mut egui::Ui, badge: crate::save::PublishBadge) {
-    use crate::save::PublishBadge;
-    let (bg, text_color, label) = match badge {
-        PublishBadge::NotPublished => return,
-        PublishBadge::UpToDate => (
-            egui::Color32::from_rgb(28, 64, 38),
-            egui::Color32::from_rgb(150, 224, 160),
-            "PUBLISHED",
-        ),
-        PublishBadge::UnpublishedChanges => (
-            egui::Color32::from_rgb(74, 60, 24),
-            egui::Color32::from_rgb(232, 206, 130),
-            "EDITS PENDING",
-        ),
-    };
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(96.0, 18.0), egui::Sense::hover());
-    ui.painter().rect_filled(rect, 10.0, bg);
-    ui.painter().text(
-        rect.center(),
-        egui::Align2::CENTER_CENTER,
-        label,
-        egui::FontId::proportional(9.5),
-        text_color,
-    );
-}
-
-fn draw_game_mode_badge(ui: &mut egui::Ui, mode: &str) {
-    let (bg, text_color, label) = if mode == "creative" {
-        (BADGE_CREATIVE_BG, BADGE_CREATIVE_TEXT, "CREATIVE")
-    } else {
-        (BADGE_SURVIVAL_BG, BADGE_SURVIVAL_TEXT, "SURVIVAL")
-    };
-
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(68.0, 18.0), egui::Sense::hover());
-    ui.painter().rect_filled(rect, 10.0, bg);
-    ui.painter().text(
-        rect.center(),
-        egui::Align2::CENTER_CENTER,
-        label,
-        egui::FontId::proportional(10.0),
-        text_color,
-    );
-}
-
-/// Shared styling for a secondary lobby-card action button. Returns the
-/// configured [`egui::Button`] widget so callers can either `ui.add(...)` it
-/// directly (via [`action_button`]) or `ui.add_enabled(cond, ...)` it to grey
-/// it out — the native Export buttons use the latter while a file dialog is in
-/// flight, so a second click can't open a second picker.
-/// Gold ring around the controller/keyboard-focused widget. The lobby's
-/// custom-styled buttons override the stroke egui's "active" visuals would
-/// use to show focus, so the menu paints its own ring (same gold as the
-/// crafting UI's PAD_FOCUS_BORDER — one focus colour everywhere).
-fn focus_ring(ui: &egui::Ui, resp: &egui::Response) {
-    if resp.has_focus() {
-        ui.painter().rect_stroke(
-            resp.rect.expand(2.0),
-            6.0,
-            egui::Stroke::new(2.0_f32, brand::LANTERN),
-            egui::StrokeKind::Outside,
-        );
-    }
-}
-
-fn action_button_widget(label: &str) -> egui::Button<'static> {
-    egui::Button::new(
-        egui::RichText::new(label.to_owned())
-            .size(12.0)
-            .color(TEXT_COLOR),
-    )
-    .min_size(egui::vec2(0.0, 34.0))
-    .fill(brand::SURFACE)
-    .stroke(egui::Stroke::new(1.0_f32, brand::BORDER))
-    .corner_radius(egui::CornerRadius::same(6))
-}
-
-fn action_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
-    let resp = ui.add(action_button_widget(label));
-    focus_ring(ui, &resp);
-    resp
-}
-
-/// Lobby header button (Exit / Log out / Quit). Shared styling so the #5
-/// two-button split stays visually consistent.
-fn lobby_header_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
-    let btn = egui::Button::new(egui::RichText::new(label).size(13.0).color(DIM_TEXT))
-        .min_size(egui::vec2(0.0, 32.0))
-        .fill(brand::with_alpha(brand::SURFACE, 230))
-        .corner_radius(egui::CornerRadius::same(6))
-        .stroke(egui::Stroke::new(1.0_f32, brand::BORDER));
-    let resp = ui.add(btn);
-    focus_ring(ui, &resp);
-    resp
 }
 
 // ---------------------------------------------------------------------------
@@ -4043,16 +3243,20 @@ fn draw_dialog_frame(ctx: &egui::Context, title: &str, title_color: egui::Color3
     // content_rect(), not the deprecated screen_rect(): egui 0.34 split the
     // two, and on a phone the CONTENT area excludes the notch / nav-bar insets.
     let screen = ctx.content_rect();
+    // Home page overhaul §2: centred in the TV-safe area, never larger than it.
+    let safe = crate::ui_safe_area::rect(ctx);
     let compact = dialog_is_compact(ctx);
     let short_screen = screen.height() < 620.0;
-    let max_dialog_h = (screen.height() - 48.0).max(200.0);
+    let margin = if short_screen { 16 } else { 28 };
+    // The scrolling body's cap: the safe height less the pinned title and the card's own margins.
+    let max_dialog_h = (safe.height() - 2.0 * margin as f32 - 40.0).max(160.0);
     // The -40 nudge is a desktop nicety (optical centring above the midline);
     // on a short screen it just pushes the card's bottom off the display.
     let y_offset = if short_screen { 0.0 } else { -40.0 };
-    let margin = if short_screen { 16 } else { 28 };
 
     egui::Area::new(egui::Id::new("dialog_content"))
-        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, y_offset))
+        .pivot(egui::Align2::CENTER_CENTER)
+        .fixed_pos(safe.center() + egui::vec2(0.0, y_offset))
         .interactable(true)
         .order(egui::Order::Foreground)
         .show(ctx, |ui| {
@@ -4062,11 +3266,14 @@ fn draw_dialog_frame(ctx: &egui::Context, title: &str, title_color: egui::Color3
                 .corner_radius(egui::CornerRadius::same(10))
                 .inner_margin(egui::Margin::same(margin))
                 .show(ui, |ui| {
-                    ui.set_min_width(360.0);
+                    let inner_w = safe.width() - 2.0 * margin as f32 - 2.0;
+                    ui.set_min_width(360.0_f32.min(inner_w));
                     if compact {
                         // Cap the width too: on a 914-point-wide landscape
                         // phone an unconstrained card sprawls edge to edge.
-                        ui.set_max_width((screen.width() - 64.0).clamp(360.0, 620.0));
+                        ui.set_max_width((screen.width() - 64.0).clamp(360.0, 620.0).min(inner_w));
+                    } else {
+                        ui.set_max_width(inner_w);
                     }
 
                     // Title stays PINNED outside the scroll area — a scrolled-
@@ -5886,9 +5093,11 @@ pub fn draw_settings_panel(
     // its title and the pinned Back button fits the screen; Back stays outside the scroll
     // area, so it is always reachable. A tall window keeps the panel as it was.
     let compact = dialog_is_compact(ctx);
-    let settings_scroll_h = (ctx.content_rect().height() - SETTINGS_COMPACT_CHROME).max(120.0);
+    // Inside the TV-safe area (home page overhaul §2), so the pinned Back is on screen.
+    let settings_scroll_h = (crate::ui_safe_area::rect(ctx).height() - SETTINGS_COMPACT_CHROME).max(120.0);
 
     egui::Window::new("Graphics")
+        .max_width(crate::ui_safe_area::rect(ctx).width() - 24.0)
         .collapsible(false)
         .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -7034,6 +6243,7 @@ fn draw_signin_dialog(
 
     let mut result = SignInDialogResult::Stay;
     egui::Window::new("Sign in with Signet")
+        .max_width(crate::ui_safe_area::rect(ctx).width() - 24.0)
         .collapsible(false)
         .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))

@@ -636,9 +636,9 @@ pub async fn export_profile_wasm(pubkey: String) -> Result<String, String> {
         .map_err(jsval_err)?;
 
     let mut msg = match worlds {
-        0 => "No worlds saved here yet — exported your Trials records only. Open it in the desktop app with \"Import a web profile…\".".to_string(),
-        1 => "Exported 1 world + your Trials records. Open it in the desktop app with \"Import a web profile…\".".to_string(),
-        n => format!("Exported {n} worlds + your Trials records. Open it in the desktop app with \"Import a web profile…\"."),
+        0 => "No worlds saved here yet — exported your Trials records only. In the desktop app, open Your worlds → Import ▾ → \"Bring in your worlds from the web game…\".".to_string(),
+        1 => "Exported 1 world + your Trials records. In the desktop app, open Your worlds → Import ▾ → \"Bring in your worlds from the web game…\".".to_string(),
+        n => format!("Exported {n} worlds + your Trials records. In the desktop app, open Your worlds → Import ▾ → \"Bring in your worlds from the web game…\"."),
     };
     if skipped > 0 {
         msg.push_str(&format!(" ({skipped} world(s) couldn't be read.)"));

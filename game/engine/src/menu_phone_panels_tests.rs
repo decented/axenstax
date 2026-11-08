@@ -413,3 +413,64 @@ fn escape_while_playing_or_paused_without_settings_is_left_to_the_usual_chain() 
         assert!(!escape_closes_settings(&mut mode, &mut panel));
     }
 }
+
+// ---- Escape (Android Back) on the lobby's pages (home page overhaul §2) ---------------------
+
+use crate::menu::{lobby_escape, LobbyEscape, LobbyPage};
+
+#[test]
+fn escape_on_a_bare_home_page_quits_as_before() {
+    let mut menu = MenuState::new();
+    assert_eq!(lobby_escape(&mut menu), LobbyEscape::Quit);
+}
+
+#[test]
+fn escape_on_any_inner_page_is_left_to_the_page_and_never_quits() {
+    for page in [LobbyPage::Worlds, LobbyPage::PlayTogether, LobbyPage::Stash] {
+        let mut menu = MenuState::new();
+        menu.go(page);
+        assert_eq!(lobby_escape(&mut menu), LobbyEscape::LeaveToPage, "{page:?}");
+    }
+    let mut menu = MenuState::new();
+    menu.popup_open = true;
+    assert_eq!(lobby_escape(&mut menu), LobbyEscape::LeaveToPage, "an open menu on Home quit the app");
+}
+
+#[test]
+fn escape_closes_a_dialog_first_and_the_page_under_it_does_not_also_step_back() {
+    let mut menu = MenuState::new();
+    menu.go(LobbyPage::Worlds);
+    menu.dialog = MenuDialog::ResetWorkshop;
+    assert_eq!(lobby_escape(&mut menu), LobbyEscape::ClosedDialog);
+    assert!(matches!(menu.dialog, MenuDialog::None));
+    assert!(menu.escape_spent, "the same press would also step the page back");
+    assert_eq!(menu.page, LobbyPage::Worlds);
+}
+
+#[test]
+fn back_steps_from_a_worlds_page_to_the_grid_then_home() {
+    let mut menu = MenuState::new();
+    menu.go(LobbyPage::Worlds);
+    menu.selected = Some(0);
+    menu.step_back();
+    assert_eq!((menu.page, menu.selected), (LobbyPage::Worlds, None));
+    menu.step_back();
+    assert_eq!(menu.page, LobbyPage::Home);
+    menu.go(LobbyPage::Stash);
+    menu.step_back();
+    assert_eq!(menu.page, LobbyPage::Home);
+}
+
+#[test]
+fn escape_out_of_the_lobbys_settings_is_spent_for_the_page_under_it() {
+    let mut menu = MenuState::new();
+    menu.show_settings = true;
+    menu.go(LobbyPage::Worlds);
+    let mut mode = GameMode::Menu(Box::new(menu));
+    let mut panel = SettingsPanelState { open: true, ..Default::default() };
+    assert!(escape_closes_settings(&mut mode, &mut panel));
+    match &mode {
+        GameMode::Menu(menu) => assert!(menu.escape_spent && menu.page == LobbyPage::Worlds),
+        _ => panic!("Escape left the lobby menu"),
+    }
+}
