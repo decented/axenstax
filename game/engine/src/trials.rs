@@ -153,7 +153,6 @@ impl TrialBests {
 
     /// The route names this trial (by display name) has been done by, in name
     /// order. Pair with `trials_unlock::route_names` for one mark per way.
-    #[cfg_attr(not(test), allow(dead_code))] // for the gallery UI (next slice)
     pub fn ways_done(&self, display_name: &str) -> Vec<&str> {
         self.ways_done
             .get(display_name)
@@ -163,7 +162,6 @@ impl TrialBests {
 
     /// The gallery opened this trial's card: its "new" mark goes. Returns
     /// `true` if that changed anything (so the caller can save once).
-    #[cfg_attr(not(test), allow(dead_code))] // for the gallery UI (next slice)
     pub fn mark_card_opened(&mut self, token: &str) -> bool {
         self.cards_opened.insert(token.to_string())
     }
@@ -528,11 +526,9 @@ pub enum TrialRef {
 
 /// How many leading [`TRIAL_ORDER`] entries form the front shelf (Trials in Two
 /// Acts §A.2): visible from the start, one trial per core verb.
-#[cfg_attr(not(test), allow(dead_code))] // for the gallery UI (next slice)
 pub const FRONT_SHELF_LEN: usize = 10;
 
 /// The front shelf: the first [`FRONT_SHELF_LEN`] entries of [`TRIAL_ORDER`].
-#[cfg_attr(not(test), allow(dead_code))] // for the gallery UI (next slice)
 pub fn front_shelf() -> &'static [(TrialType, TrialRef)] {
     &TRIAL_ORDER[..FRONT_SHELF_LEN]
 }

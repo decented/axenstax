@@ -7,7 +7,8 @@
 //! Trials column launched, and trial order, objectives and persistence are
 //! untouched.
 
-use crate::trials::{TrialBests, TrialRef, TrialType, TRIAL_ORDER};
+use crate::trials::{front_shelf, TrialBests, TrialRef, TrialType, TRIAL_ORDER};
+use crate::trials_unlock::{is_new, is_unlocked, next_hints, route_names};
 use crate::trials_diorama::{sort_back_to_front, CardArtDef, Cube, DioramaBlock, Shape};
 
 // ---------------------------------------------------------------------------
@@ -263,6 +264,29 @@ pub fn race_art(race_id: &str) -> CardArt {
 // Built cards (everything a frame needs, resolved once when the gallery opens)
 // ---------------------------------------------------------------------------
 
+/// How many frosted hint cards one row shows after its unlocked cards: the
+/// player sees the edge of the map, never its size.
+pub(crate) const HINTS_PER_ROW: usize = 2;
+
+/// One way (`AnyOf` route) of a trial, for the hero view's "Pick a way:" list.
+pub(crate) struct RouteView {
+    pub(crate) name: String,
+    /// Whether this trial has been done by this way (a remembered mark, never a total).
+    pub(crate) done: bool,
+    /// The way's own steps (task labels), numbered when `ordered`.
+    pub(crate) ordered: bool,
+    pub(crate) steps: Vec<String>,
+}
+
+/// A trial the player has not unlocked yet, shown as a frosted card: the
+/// picture dimmed, no title, and one line of nudge. Not playable.
+#[derive(Clone)]
+pub(crate) struct HintCard {
+    pub(crate) token: &'static str,
+    pub(crate) art: CardArt,
+    pub(crate) hint: String,
+}
+
 /// One trial, ready to draw.
 pub(crate) struct Card {
     pub(crate) key: String,
@@ -276,6 +300,10 @@ pub(crate) struct Card {
     pub(crate) satoshi: String,
     pub(crate) art: CardArt,
     pub(crate) done: bool,
+    /// Appeared by doing and its card has not been opened yet: wears the quiet "New" mark.
+    pub(crate) is_new: bool,
+    /// An `AnyOf` trial's ways, in authored order (empty for a one-way trial).
+    pub(crate) routes: Vec<RouteView>,
     /// A race's personal best, in ticks.
     pub(crate) best_ticks: Option<u32>,
     /// A race's imported rival: (label, ticks).
@@ -288,7 +316,10 @@ pub(crate) struct Card {
 
 pub(crate) struct BuiltRow {
     pub(crate) kind: RowKind,
+    /// The unlocked trials, in `TRIAL_ORDER` order.
     pub(crate) cards: Vec<Card>,
+    /// Up to [`HINTS_PER_ROW`] frosted nudges toward trials still hidden.
+    pub(crate) hints: Vec<HintCard>,
 }
 
 fn build_card(
@@ -320,6 +351,8 @@ fn build_card(
                 satoshi: crate::scenario::trial_satoshi(d.id).0.to_string(),
                 art: race_art(d.id),
                 done: best.is_some(),
+                is_new: false,
+                routes: Vec::new(),
                 best_ticks: best.map(|b| b.ticks),
                 rival: bests.rivals.get(d.id).map(|r| (r.label.clone(), r.ticks)),
                 race_id: Some(d.id),
@@ -335,6 +368,22 @@ fn build_card(
             let premise = if tagline.is_empty() { display_premise } else { tagline };
             let tasks =
                 crate::scenario::objective_tasks(&def, crate::scenario::trial_task_labels(token));
+            let ways_done = bests.ways_done(display);
+            let groups = tasks.groups();
+            let routes: Vec<RouteView> = route_names(token)
+                .iter()
+                .map(|name| {
+                    let group = groups.iter().find(|g| g.name == Some(name.as_str()));
+                    RouteView {
+                        name: name.clone(),
+                        done: ways_done.contains(&name.as_str()),
+                        ordered: group.is_some_and(|g| g.ordered),
+                        steps: group
+                            .map(|g| g.lines.iter().map(|(_, l)| (*l).to_string()).collect())
+                            .unwrap_or_default(),
+                    }
+                })
+                .collect();
             Some(Card {
                 key: trial_key(tref),
                 token,
@@ -346,6 +395,8 @@ fn build_card(
                 satoshi: crate::scenario::trial_satoshi(token).0.to_string(),
                 art: resolve_card_art(def.card_art.as_ref()),
                 done: bests.is_challenge_done(display),
+                is_new: is_new(token, bests),
+                routes,
                 best_ticks: None,
                 rival: None,
                 race_id: None,
@@ -355,9 +406,29 @@ fn build_card(
     }
 }
 
+/// A frosted hint card for the hidden trial `token`, with its row.
+fn build_hint(token: &'static str, hint: String) -> Option<(RowKind, HintCard)> {
+    let (ttype, tref) = TRIAL_ORDER
+        .iter()
+        .find(|(_, r)| matches!(r, TrialRef::Challenge(t) if *t == token))?;
+    let def = crate::scenario::named_builtin_def(token)?;
+    Some((
+        row_kind_of(*ttype, *tref),
+        HintCard { token, art: resolve_card_art(def.card_art.as_ref()), hint },
+    ))
+}
+
+/// The gallery's rows for these bests: each shelf shows only the trials that
+/// are unlocked (the front ten always are), in `TRIAL_ORDER`, then up to two
+/// frosted hint cards for what comes next. A row with neither is left out.
 pub(crate) fn build_rows(bests: &TrialBests) -> Vec<BuiltRow> {
     let listing: std::collections::HashMap<&'static str, String> =
         crate::scenario::challenge_listing().into_iter().collect();
+    let hints: Vec<(RowKind, HintCard)> = next_hints(bests)
+        .into_iter()
+        .filter(|(_, text)| !text.trim().is_empty())
+        .filter_map(|(token, text)| build_hint(token, text))
+        .collect();
     row_specs()
         .into_iter()
         .map(|spec| BuiltRow {
@@ -365,11 +436,82 @@ pub(crate) fn build_rows(bests: &TrialBests) -> Vec<BuiltRow> {
             cards: spec
                 .entries
                 .iter()
+                .filter(|(ttype, tref)| {
+                    // The front ten are always there; the rest appear when unlocked.
+                    let token = match tref {
+                        TrialRef::Race(id) | TrialRef::Challenge(id) => *id,
+                    };
+                    front_shelf().contains(&(*ttype, *tref)) || is_unlocked(token, bests)
+                })
                 .filter_map(|(_, tref)| build_card(spec.kind, *tref, bests, &listing))
                 .collect(),
+            hints: Vec::new(),
         })
-        .filter(|row| !row.cards.is_empty())
+        .map(|mut row| {
+            row.hints = hints
+                .iter()
+                .filter(|(kind, _)| *kind == row.kind)
+                .take(HINTS_PER_ROW)
+                .map(|(_, h)| h.clone())
+                .collect();
+            row
+        })
+        .filter(|row| !row.cards.is_empty() || !row.hints.is_empty())
         .collect()
+}
+
+/// Keep only the fixture postcards that fit `bests`: a postcard stays when its
+/// trial is done there (or when no unlock fixture is in play, `bests` empty of
+/// completions, so a postcards-only shot keeps them all).
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+pub fn postcards_matching(bests: &TrialBests, cards: Vec<crate::postcard::Postcard>) -> Vec<crate::postcard::Postcard> {
+    if bests.completed_challenges.is_empty() {
+        return cards;
+    }
+    let listing: std::collections::HashMap<&'static str, String> =
+        crate::scenario::challenge_listing().into_iter().collect();
+    cards
+        .into_iter()
+        .filter(|c| listing.get(c.token.as_str()).is_some_and(|d| bests.is_challenge_done(d)))
+        .collect()
+}
+
+/// Made-up unlock states for the `--shot-lobby --fixture-unlocks <name>`
+/// screenshots and tests (never written to any store): `fresh` (nothing done),
+/// `started` (a few front-shelf trials done) and `several` (most of the front
+/// shelf done, two ways of Camp Cook, and a catch and a bucket seen so those
+/// trials appeared).
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+pub fn fixture_bests(name: &str) -> TrialBests {
+    use crate::scenario::ChallengeEvent;
+    let listing: std::collections::HashMap<&'static str, String> =
+        crate::scenario::challenge_listing().into_iter().collect();
+    let mut bests = TrialBests::default();
+    let done = |bests: &mut TrialBests, token: &str| {
+        if let Some(display) = listing.get(token) {
+            bests.mark_challenge_done(display);
+        }
+    };
+    match name {
+        "started" => {
+            for t in ["onboarding", "craft", "smelt"] {
+                done(&mut bests, t);
+            }
+        }
+        "several" => {
+            for t in ["onboarding", "mine", "craft", "build", "smelt", "harvest", "kill", "cook-three"] {
+                done(&mut bests, t);
+            }
+            if let Some(display) = listing.get("cook-three") {
+                bests.mark_way_done(display, "Roast three");
+            }
+            bests.record_event(&ChallengeEvent::CatchFish);
+            bests.record_event(&ChallengeEvent::UseBucket);
+        }
+        _ => {}
+    }
+    bests.refresh_unlocks();
+    bests
 }
 
 #[cfg(test)]
@@ -515,9 +657,128 @@ mod tests {
         }
     }
 
+    fn tokens_in(rows: &[BuiltRow]) -> Vec<&'static str> {
+        rows.iter().flat_map(|r| r.cards.iter().map(|c| c.token)).collect()
+    }
+
+    fn front_tokens() -> Vec<&'static str> {
+        front_shelf()
+            .iter()
+            .map(|(_, r)| match r {
+                TrialRef::Race(id) | TrialRef::Challenge(id) => *id,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_fresh_profile_shows_the_front_ten_and_no_locked_trial() {
+        let rows = build_rows(&fixture_bests("fresh"));
+        let shown = tokens_in(&rows);
+        for t in front_tokens() {
+            assert!(shown.contains(&t), "the front shelf always shows {t}");
+        }
+        // Nothing hidden by an unlock rule leaks in; races and Scavenger have none.
+        for t in &shown {
+            assert!(
+                front_tokens().contains(t) || !crate::trials_unlock::catalogue().iter().any(|e| e.token == *t && e.unlock.is_some()),
+                "{t} is locked on a fresh profile"
+            );
+        }
+        // Nothing started, nothing nudged.
+        assert!(rows.iter().all(|r| r.hints.is_empty()));
+        assert!(rows.iter().flat_map(|r| &r.cards).all(|c| !c.is_new));
+    }
+
+    #[test]
+    fn shelves_keep_trial_order_and_hide_what_is_locked() {
+        let rows = build_rows(&fixture_bests("several"));
+        let pos = |tok: &str| {
+            TRIAL_ORDER
+                .iter()
+                .position(|(_, r)| matches!(r, TrialRef::Race(i) | TrialRef::Challenge(i) if *i == tok))
+                .unwrap()
+        };
+        for row in &rows {
+            let idx: Vec<usize> = row.cards.iter().map(|c| pos(c.token)).collect();
+            assert!(idx.windows(2).all(|w| w[0] < w[1]), "{:?} is out of TRIAL_ORDER order", row.kind);
+            for c in &row.cards {
+                assert!(is_unlocked(c.token, &fixture_bests("several")), "{} shown while locked", c.token);
+            }
+        }
+    }
+
+    #[test]
+    fn hints_come_after_the_cards_at_most_two_a_row_and_never_for_a_shown_trial() {
+        for name in ["started", "several"] {
+            let bests = fixture_bests(name);
+            let rows = build_rows(&bests);
+            let shown = tokens_in(&rows);
+            let mut any = false;
+            for row in &rows {
+                assert!(row.hints.len() <= HINTS_PER_ROW, "{name}: {:?} has too many hints", row.kind);
+                assert!(!row.cards.is_empty() || !row.hints.is_empty());
+                for h in &row.hints {
+                    any = true;
+                    assert!(!h.hint.trim().is_empty());
+                    assert!(!shown.contains(&h.token), "{name}: {} is both shown and hinted", h.token);
+                    assert!(!is_unlocked(h.token, &bests));
+                }
+            }
+            assert!(any, "{name}: a started profile gets at least one hint");
+        }
+    }
+
+    #[test]
+    fn a_started_profile_unlocks_what_it_did_and_hints_at_what_is_one_step_off() {
+        let rows = build_rows(&fixture_bests("started"));
+        let shown = tokens_in(&rows);
+        let hinted: Vec<&str> = rows.iter().flat_map(|r| r.hints.iter().map(|h| h.token)).collect();
+        // Smelt done, so The Light Lab (after: smelt) has appeared; craft done, so Colour Lab.
+        assert!(shown.contains(&"power") && shown.contains(&"dye"), "{shown:?}");
+        // Suit Up wants smelt AND kill: one is done, so it is nudged, not shown.
+        assert!(hinted.contains(&"armour-up") && !shown.contains(&"armour-up"), "{hinted:?}");
+    }
+
+    #[test]
+    fn unlocked_extras_wear_new_until_opened() {
+        let mut bests = fixture_bests("several");
+        let rows = build_rows(&bests);
+        let card = |rows: &[BuiltRow], t: &str| {
+            rows.iter().flat_map(|r| &r.cards).find(|c| c.token == t).map(|c| c.is_new)
+        };
+        assert_eq!(card(&rows, "fish"), Some(true), "a catch seen unlocks the angler, new");
+        assert_eq!(card(&rows, "bucket"), Some(true));
+        assert_eq!(card(&rows, "smelt"), Some(false), "a front-shelf trial is never new");
+        assert!(bests.mark_card_opened("fish"));
+        let rows = build_rows(&bests);
+        assert_eq!(card(&rows, "fish"), Some(false), "opening the card clears the mark");
+        assert_eq!(card(&rows, "bucket"), Some(true));
+    }
+
+    #[test]
+    fn a_multi_route_card_marks_only_the_ways_done() {
+        let rows = build_rows(&fixture_bests("several"));
+        let cook = rows.iter().flat_map(|r| &r.cards).find(|c| c.token == "cook-three").unwrap();
+        let names: Vec<&str> = cook.routes.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, vec!["Catch, cook and eat", "Cook and eat", "Roast three"]);
+        let done: Vec<bool> = cook.routes.iter().map(|r| r.done).collect();
+        assert_eq!(done, vec![false, false, true]);
+        assert!(cook.routes.iter().all(|r| !r.steps.is_empty()), "every way lists its own steps");
+        // A one-way trial has no routes.
+        let smelt = rows.iter().flat_map(|r| &r.cards).find(|c| c.token == "smelt").unwrap();
+        assert!(smelt.routes.is_empty());
+    }
+
     #[test]
     fn every_card_gets_real_art() {
-        let rows = build_rows(&TrialBests::default());
+        // Unlock everything so every bundled trial is built.
+        let mut bests = TrialBests::default();
+        for (_, r) in TRIAL_ORDER {
+            if let TrialRef::Challenge(t) = r {
+                bests.unlocked.insert((*t).to_string());
+            }
+        }
+        let rows = build_rows(&bests);
         let mut keys = std::collections::HashSet::new();
         let mut total = 0;
         for row in &rows {
@@ -529,5 +790,23 @@ mod tests {
             }
         }
         assert_eq!(total, TRIAL_ORDER.len());
+    }
+
+    #[test]
+    fn fixture_postcards_follow_what_is_done() {
+        let cards = crate::postcard::fixtures();
+        let kept = postcards_matching(&fixture_bests("several"), cards.clone());
+        assert!(kept.iter().any(|c| c.token == "craft"));
+        assert!(kept.iter().all(|c| c.token != "fish" && c.token != "power"), "undone trials keep no postcard");
+        assert_eq!(postcards_matching(&fixture_bests("fresh"), cards.clone()).len(), cards.len());
+    }
+
+    #[test]
+    fn every_hidden_trial_has_real_art_for_its_hint_card() {
+        for (_, r) in TRIAL_ORDER {
+            let TrialRef::Challenge(t) = r else { continue };
+            let (_, hint) = build_hint(t, "Something\u{2026}".into()).expect("a hint card builds");
+            assert_ne!(hint.art, CardArt::Shelf, "{t} has no usable card_art");
+        }
     }
 }

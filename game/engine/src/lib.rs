@@ -3468,6 +3468,8 @@ fn sample_menu_state() -> crate::menu::MenuState {
 /// Headless lobby screenshot mode: render the world list at several screen sizes
 /// to PNGs, for visual iteration without opening a window.
 /// `--shot-lobby [out_dir] [--empty]` also covers the empty world list.
+/// `--gallery`, `--hero <key>`, `--album`, `--fixture-postcards` and
+/// `--fixture-unlocks <name>` capture the Trials gallery (see below).
 #[cfg(not(target_arch = "wasm32"))]
 fn run_shot_lobby(args: &[String]) {
     let out_dir = args
@@ -3495,10 +3497,24 @@ fn run_shot_lobby(args: &[String]) {
         // `race:sprint`); `--gallery` opens the shelves; `--album` the postcard
         // album; none of them shows the lobby. `--fixture-postcards` swaps the
         // profile's bests and postcards for made-up ones (nothing is written).
+        // `--fixture-unlocks <fresh|started|several>` swaps in a made-up unlock
+        // state (see `trials_gallery::fixture_bests`); combine it with
+        // `--fixture-postcards` for postcards too.
         let fixtures = args.iter().any(|a| a == "--fixture-postcards");
+        let unlock_fixture = args
+            .iter()
+            .position(|a| a == "--fixture-unlocks")
+            .and_then(|i| args.get(i + 1))
+            .cloned();
         let open_gallery = |g: &mut crate::trials_gallery_ui::GalleryState| {
-            if fixtures {
-                g.open_with(crate::trials::TrialBests::default(), crate::postcard::fixtures());
+            if fixtures || unlock_fixture.is_some() {
+                let bests = crate::trials_gallery::fixture_bests(unlock_fixture.as_deref().unwrap_or("fresh"));
+                let postcards = if fixtures {
+                    crate::trials_gallery::postcards_matching(&bests, crate::postcard::fixtures())
+                } else {
+                    Vec::new()
+                };
+                g.open_with(bests, postcards);
             } else {
                 g.open();
             }

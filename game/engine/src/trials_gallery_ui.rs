@@ -15,7 +15,7 @@ use crate::menu::MenuAction;
 use crate::postcard::Postcard;
 use crate::trials::{TrialBests, TrialType};
 use crate::trials_diorama_ui::{paint_backdrop, paint_diorama};
-use crate::trials_gallery::{build_rows, BuiltRow, Card, CardArt};
+use crate::trials_gallery::{build_rows, BuiltRow, Card, CardArt, HintCard, RowKind};
 
 // ---------------------------------------------------------------------------
 // State
@@ -40,6 +40,12 @@ pub struct GalleryState {
     textures: HashMap<usize, Option<egui::TextureHandle>>,
     /// The album, when it is open over the shelves.
     pub(crate) album: Option<crate::trials_album_ui::AlbumView>,
+    /// The bests the shelves were built from; opening a "New" card is
+    /// remembered here (and saved, when `persist`).
+    bests: TrialBests,
+    /// Write `bests` back to the profile when a card is first opened (false
+    /// for the screenshot fixtures, which must not touch the profile).
+    persist: bool,
 }
 
 impl GalleryState {
@@ -51,19 +57,39 @@ impl GalleryState {
     /// postcards afresh.
     pub fn open(&mut self) {
         self.open_with(TrialBests::load(), crate::postcard::load_all());
+        self.persist = true;
     }
 
     /// Open the gallery over these bests and postcards (the screenshot path
     /// passes fixtures, so nothing is read from or written to the profile).
     pub fn open_with(&mut self, bests: TrialBests, mut postcards: Vec<Postcard>) {
         crate::postcard::sort_newest_first(&mut postcards);
-        self.built = Some(build_rows(&bests));
+        let rows = build_rows(&bests);
+        self.focus = (rows.iter().position(|r| !r.cards.is_empty()).unwrap_or(0), 0);
+        self.built = Some(rows);
+        self.bests = bests;
+        self.persist = false;
         self.postcards = postcards;
         self.textures.clear();
         self.album = None;
         self.hero = None;
-        self.focus = (0, 0);
         self.scroll_to_focus = false;
+    }
+
+    /// An opened hero view clears its card's "New" mark, remembered (and
+    /// saved once) so it stays gone.
+    fn note_hero_opened(&mut self) {
+        let Some((r, c)) = self.hero else { return };
+        let Some(card) = self.built.as_mut().and_then(|rows| rows.get_mut(r)?.cards.get_mut(c)) else {
+            return;
+        };
+        if !card.is_new {
+            return;
+        }
+        card.is_new = false;
+        if self.bests.mark_card_opened(card.token) && self.persist {
+            self.bests.save();
+        }
     }
 
     /// Back to the world list.
@@ -329,6 +355,106 @@ fn paint_card(
     if card.done || postcard.is_some() {
         paint_done_mark(painter, egui::pos2(r.max.x - 18.0, r.min.y + 18.0));
     }
+    if card.is_new {
+        paint_new_badge(painter, egui::pos2(r.min.x + 9.0, r.min.y + 9.0));
+    }
+}
+
+/// The quiet "New" mark: a small warm pill in a card's top-left corner.
+fn paint_new_badge(painter: &egui::Painter, top_left: egui::Pos2) {
+    let galley = painter.layout_no_wrap(
+        "New".to_string(),
+        egui::FontId::proportional(12.0),
+        brand::DEEP_FRONTIER,
+    );
+    let pill = egui::Rect::from_min_size(top_left, galley.size() + egui::vec2(16.0, 6.0));
+    painter.rect_filled(pill.translate(egui::vec2(0.0, 1.5)), egui::CornerRadius::same(9), egui::Color32::from_black_alpha(80));
+    painter.rect_filled(pill, egui::CornerRadius::same(9), brand::LANTERN);
+    painter.galley(pill.min + egui::vec2(8.0, 3.0), galley, brand::DEEP_FRONTIER);
+}
+
+/// A tick in a small circle: filled green when `done`, a hollow ring when not.
+/// One per way (`AnyOf` route) in the hero view; never added up.
+fn paint_pip(painter: &egui::Painter, centre: egui::Pos2, done: bool) {
+    let r = 8.0;
+    if done {
+        painter.circle_filled(centre, r, DONE_GREEN);
+        painter.add(egui::Shape::line(
+            vec![
+                centre + egui::vec2(-3.6, 0.2),
+                centre + egui::vec2(-1.0, 3.0),
+                centre + egui::vec2(3.8, -2.8),
+            ],
+            egui::Stroke::new(2.0_f32, egui::Color32::WHITE),
+        ));
+    } else {
+        painter.circle_stroke(centre, r, egui::Stroke::new(1.5_f32, brand::BORDER));
+    }
+}
+
+/// Paint a frosted hint card: the hidden trial's picture under a milky veil,
+/// no title, one italic line of nudge. It is a hint, not a button: hovering
+/// only warms its frame a little.
+fn paint_hint_card(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    hint: &HintCard,
+    kind: RowKind,
+    hovered: bool,
+    icons: &[egui::TextureId],
+) {
+    let shelf = rgb(kind.color_rgb());
+    let cr = egui::CornerRadius::same(12);
+    painter.add(
+        egui::Shadow { offset: [0, 3], blur: 6, spread: 0, color: egui::Color32::from_black_alpha(60) }
+            .as_shape(rect, cr),
+    );
+    painter.rect_filled(rect, cr, brand::SURFACE);
+    let art_rect = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), rect.height() * ART_H / CARD_H));
+    paint_art(painter, art_rect, [12.0, 12.0, 0.0, 0.0], &hint.art, shelf, kind.glyph(), icons, None);
+    // The frost: a milky veil, with a few soft pale pools in it.
+    let veil_cr = egui::CornerRadius { nw: 12, ne: 12, se: 0, sw: 0 };
+    let veil = mix(mix(brand::SURFACE, shelf, 0.25), egui::Color32::WHITE, 0.5);
+    painter.rect_filled(art_rect, veil_cr, with_alpha(veil, if hovered { 190 } else { 205 }));
+    let frost = painter.with_clip_rect(art_rect);
+    let c = art_rect.center();
+    for (dx, dy, rad, a) in [(-0.26, -0.12, 0.34, 26u8), (0.22, 0.1, 0.4, 22), (0.02, -0.34, 0.24, 20)] {
+        frost.circle_filled(
+            c + egui::vec2(art_rect.width() * dx, art_rect.height() * dy),
+            art_rect.height() * rad,
+            with_alpha(egui::Color32::WHITE, a),
+        );
+    }
+    painter.rect_filled(
+        egui::Rect::from_min_size(egui::pos2(rect.min.x, art_rect.max.y), egui::vec2(rect.width(), 3.0)),
+        0.0,
+        with_alpha(shelf, 90),
+    );
+    // The hint, in italics.
+    let mut job = egui::text::LayoutJob::default();
+    job.wrap.max_width = rect.width() - 20.0;
+    job.wrap.max_rows = 2;
+    job.append(
+        &hint.hint,
+        0.0,
+        egui::TextFormat {
+            font_id: egui::FontId::proportional(12.5),
+            color: if hovered { TEXT } else { MUTED },
+            italics: true,
+            ..Default::default()
+        },
+    );
+    let galley = painter.layout_job(job);
+    painter.galley(egui::pos2(rect.min.x + 10.0, art_rect.max.y + 8.0), galley, MUTED);
+    painter.rect_stroke(
+        rect,
+        cr,
+        egui::Stroke::new(
+            1.5_f32,
+            with_alpha(mix(brand::BORDER, shelf, if hovered { 0.7 } else { 0.25 }), if hovered { 230 } else { 150 }),
+        ),
+        egui::StrokeKind::Inside,
+    );
 }
 
 /// What the shelves view found this frame.
@@ -388,6 +514,13 @@ fn draw_shelves(
                             }
                             paint_card(ui.painter(), rect, card, lift, icons, art.get(card.token).copied());
                             resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+                        }
+                        // Frosted nudges toward what is still hidden: look, don't click.
+                        for hint in &row.hints {
+                            let (rect, _) =
+                                ui.allocate_exact_size(egui::vec2(CARD_W, CARD_H), egui::Sense::hover());
+                            let resp = ui.interact(rect, egui::Id::new(("trial_hint", hint.token)), egui::Sense::hover());
+                            paint_hint_card(ui.painter(), rect, hint, row.kind, resp.hovered(), icons);
                         }
                         ui.add_space(6.0);
                     });
@@ -487,8 +620,40 @@ fn draw_hero(
                     });
                 }
 
-                // The steps.
-                if !card.steps.is_empty() {
+                // The ways (an `AnyOf` trial), each with its own steps; a way
+                // already done wears a tick. Never a count.
+                if !card.routes.is_empty() {
+                    ui.add_space(14.0);
+                    ui.label(egui::RichText::new("Pick a way:").size(16.0).strong().color(TEXT));
+                    for route in &card.routes {
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            let (pip, resp) = ui.allocate_exact_size(egui::vec2(24.0, 20.0), egui::Sense::hover());
+                            paint_pip(ui.painter(), pip.center(), route.done);
+                            if route.done {
+                                resp.on_hover_text("You have done it this way.");
+                            }
+                            ui.label(
+                                egui::RichText::new(&route.name)
+                                    .size(16.0)
+                                    .strong()
+                                    .color(if route.done { DONE_GREEN } else { shelf }),
+                            );
+                        });
+                        for (i, line) in route.steps.iter().take(8).enumerate() {
+                            ui.horizontal_top(|ui| {
+                                ui.add_space(24.0);
+                                let mark = if route.ordered { format!("{}", i + 1) } else { "\u{2022}".to_string() };
+                                ui.add_sized(
+                                    [20.0, 18.0],
+                                    egui::Label::new(egui::RichText::new(mark).size(13.5).color(MUTED)),
+                                );
+                                ui.add(egui::Label::new(egui::RichText::new(line).size(14.0).color(TEXT)).wrap());
+                            });
+                        }
+                    }
+                } else if !card.steps.is_empty() {
+                    // The steps.
                     ui.add_space(14.0);
                     for (i, line) in card.steps.iter().take(8).enumerate() {
                         ui.horizontal_top(|ui| {
@@ -639,11 +804,12 @@ pub fn draw(
             if right {
                 c = (c + 1).min(row_lens[r].saturating_sub(1));
             }
-            if up {
-                r = r.saturating_sub(1);
+            // A row can hold only frosted hints (no card to focus): skip it.
+            if up && let Some(n) = (0..r).rev().find(|&n| row_lens[n] > 0) {
+                r = n;
             }
-            if down {
-                r = (r + 1).min(last_row);
+            if down && let Some(n) = (r + 1..=last_row).find(|&n| row_lens[n] > 0) {
+                r = n;
             }
             c = c.min(row_lens[r].saturating_sub(1));
             if (r, c) != st.focus {
@@ -730,6 +896,7 @@ pub fn draw(
         st.hero = Some(pos);
         st.hero_fresh = true;
     }
+    st.note_hero_opened();
     if let Some(a) = hero_result.action {
         out.action = a;
     }

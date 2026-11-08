@@ -16,11 +16,6 @@
 //! Pure: the public functions read the bundled catalogue (built once); the
 //! `*_in` forms take any catalogue so tests can use fixtures.
 
-// The read side of this API (`is_unlocked`, `next_hints`, `is_new`,
-// `newly_unlocked`, `route_names`) is for the gallery UI, wired in the next
-// slice; until then only the tests call it.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::sync::LazyLock;
 
 use serde::{Deserialize, Serialize};
@@ -193,6 +188,8 @@ pub fn is_new(token: &str, bests: &TrialBests) -> bool {
 }
 
 /// Every trial currently wearing the "new" mark, in `TRIAL_ORDER` order.
+/// (The gallery reads `is_new` per card; this is the whole list, for tests and tools.)
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn newly_unlocked(bests: &TrialBests) -> Vec<&'static str> {
     catalogue().iter().filter(|e| is_new(e.token, bests)).map(|e| e.token).collect()
 }
