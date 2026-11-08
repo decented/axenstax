@@ -151,7 +151,7 @@ pub fn draw(ctx: &egui::Context, st: &mut GalleryState, modal_open: bool) {
                                     }
                                     resp.on_hover_cursor(egui::CursorIcon::PointingHand);
                                     ui.add_space(4.0);
-                                    ui.label(egui::RichText::new(caption(st, i)).size(13.0).color(brand::STONE));
+                                    ui.label(egui::RichText::new(caption(st, i)).size(15.0).color(brand::STONE));
                                 });
                             }
                         });

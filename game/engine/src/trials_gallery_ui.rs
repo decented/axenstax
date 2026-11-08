@@ -338,7 +338,7 @@ fn paint_card(
     // Title under the art: up to two lines.
     let mut job = egui::text::LayoutJob::simple(
         card.title.clone(),
-        egui::FontId::proportional(13.5),
+        egui::FontId::proportional(15.0),
         TEXT,
         r.width() - 20.0,
     );
@@ -438,7 +438,7 @@ fn paint_hint_card(
         &hint.hint,
         0.0,
         egui::TextFormat {
-            font_id: egui::FontId::proportional(12.5),
+            font_id: egui::FontId::proportional(15.0),
             color: if hovered { TEXT } else { MUTED },
             italics: true,
             ..Default::default()
@@ -574,7 +574,7 @@ pub(crate) fn draw_hero(
                 ui.label(egui::RichText::new(&card.title).size(28.0).strong().color(brand::COPPER));
                 ui.label(
                     egui::RichText::new(format!("{} {}", card.row.glyph(), card.row.title()))
-                        .size(13.0)
+                        .size(15.0)
                         .color(shelf),
                 );
                 if !card.premise.is_empty() {
@@ -605,7 +605,7 @@ pub(crate) fn draw_hero(
                             .show(ui, |ui| {
                                 ui.set_width((w - 38.0 - 10.0 - 30.0).max(120.0));
                                 ui.vertical(|ui| {
-                                    ui.label(egui::RichText::new("Satoshi").size(12.0).strong().color(brand::LANTERN));
+                                    ui.label(egui::RichText::new("Satoshi").size(15.0).strong().color(brand::LANTERN));
                                     ui.add(egui::Label::new(egui::RichText::new(&card.satoshi).size(15.0).color(TEXT)).wrap());
                                 });
                             });
@@ -650,9 +650,9 @@ pub(crate) fn draw_hero(
                                 let mark = if route.ordered { format!("{}", i + 1) } else { "\u{2022}".to_string() };
                                 ui.add_sized(
                                     [20.0, 18.0],
-                                    egui::Label::new(egui::RichText::new(mark).size(13.5).color(MUTED)),
+                                    egui::Label::new(egui::RichText::new(mark).size(15.0).color(MUTED)),
                                 );
-                                ui.add(egui::Label::new(egui::RichText::new(line).size(14.0).color(TEXT)).wrap());
+                                ui.add(egui::Label::new(egui::RichText::new(line).size(15.0).color(TEXT)).wrap());
                             });
                         }
                     }
@@ -685,7 +685,7 @@ pub(crate) fn draw_hero(
                     if let Some((label, t)) = &card.rival {
                         ui.label(
                             egui::RichText::new(format!("Rival: {label} \u{2014} {}", crate::trials::format_time(*t)))
-                                .size(14.0)
+                                .size(15.0)
                                 .color(RIVAL_ORANGE),
                         );
                     }
@@ -728,7 +728,7 @@ pub(crate) fn draw_hero(
                 ui.add_space(8.0);
                 if lobby { ui.horizontal(|ui| {
                     if ui
-                        .add(egui::Button::new(egui::RichText::new("How it works").size(13.0).underline().color(MUTED)).frame(false))
+                        .add(egui::Button::new(egui::RichText::new("How it works").size(15.0).underline().color(MUTED)).frame(false))
                         .clicked()
                     {
                         out.how_it_works = true;
@@ -737,7 +737,7 @@ pub(crate) fn draw_hero(
                         ui.add_space(12.0);
                         if card.best_ticks.is_some()
                             && ui
-                                .add(egui::Button::new(egui::RichText::new("Export ghost").size(13.0).color(MUTED)).frame(false))
+                                .add(egui::Button::new(egui::RichText::new("Export ghost").size(15.0).color(MUTED)).frame(false))
                                 .on_hover_text("Save your best run as a file a friend can race against.")
                                 .clicked()
                         {
@@ -745,7 +745,7 @@ pub(crate) fn draw_hero(
                         }
                         ui.add_space(8.0);
                         if ui
-                            .add(egui::Button::new(egui::RichText::new("Import ghost").size(13.0).color(MUTED)).frame(false))
+                            .add(egui::Button::new(egui::RichText::new("Import ghost").size(15.0).color(MUTED)).frame(false))
                             .on_hover_text("Open a friend's ghost file: it becomes the rival you race here.")
                             .clicked()
                         {
@@ -887,7 +887,7 @@ pub fn draw(
                     hero_result = draw_hero(ui, card, icons, fresh, art.get(card.token).copied(), true)
                 }
                 None => {
-                    ui.label(egui::RichText::new("Pick one to look into it, then play.").size(13.0).color(MUTED));
+                    ui.label(egui::RichText::new("Pick one to look into it, then play.").size(15.0).color(MUTED));
                     shelf_result = draw_shelves(ui, rows, focus, scroll_to_focus, icons, &art);
                 }
             }

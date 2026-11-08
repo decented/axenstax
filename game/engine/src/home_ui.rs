@@ -206,7 +206,7 @@ fn hero(
     let pad = m.px(14.0);
     let cr = egui::CornerRadius::same(16);
     let p = ui.painter().clone();
-    let hot = state.worlds.first().is_some() && (card.hovered() || card.has_focus());
+    let hot = !state.worlds.is_empty() && (card.hovered() || card.has_focus());
     p.rect_filled(rect, cr, if hot { brand::SURFACE_HOVER } else { brand::SURFACE });
     p.rect_stroke(rect, cr, egui::Stroke::new(1.0_f32, brand::BORDER), egui::StrokeKind::Inside);
     let pic = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), pic_h));

@@ -509,9 +509,13 @@ impl MenuState {
     /// Native: an OS file dialog is in flight (the import / export entries grey out).
     pub(crate) fn dialog_pending(&self) -> bool {
         #[cfg(not(target_arch = "wasm32"))]
-        return self.pending_dialog.is_some();
+        {
+            self.pending_dialog.is_some()
+        }
         #[cfg(target_arch = "wasm32")]
-        false
+        {
+            false
+        }
     }
 
     /// Native: open an OS file picker (one at a time), saying so on the status line.
