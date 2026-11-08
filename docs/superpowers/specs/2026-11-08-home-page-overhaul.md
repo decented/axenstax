@@ -33,7 +33,7 @@ Inventory of every control before the change (labels, actions, platforms, file:l
 │ │  Played 2 hours ago      [ ▶ Play ] │ │ Little challenges…    › │ │
 │ └─────────────────────────────────────┘ └─────────────────────────┘ │
 │                                                                     │
-│ [ Your worlds ] [ The Workshop ] [ Play together ] [ The Stash ]    │
+│ [ Your worlds ] [ The Workshop ] [ Play together ] [ More to play ] │
 │                                                                     │
 │ v0.2.28 ★ Latest                                    (status line)   │
 └─────────────────────────────────────────────────────────────────────┘
@@ -54,7 +54,7 @@ Inventory of every control before the change (labels, actions, platforms, file:l
   - **Your worlds:** "Every world you've made." Subtitle shows how many worlds there are.
   - **The Workshop:** "Redesign blocks, mobs and your skin."
   - **Play together:** "Friends, invites and games nearby." On web this tile opens the existing desktop-app explainer (Join/Host) instead.
-  - **The Stash:** "Official games and shared things."
+  - **More to play:** "Official games and things people share" (was "The Stash"; see §11).
 - **Footer:**
   - The version and update state move here, bottom-left, unchanged in behaviour: badge, update link, Update now, progress, Restart.
   - The last import or export message sits on the right.
@@ -116,11 +116,11 @@ Hosting stays on a world's page (§4.2), because you host a particular world. Th
 - **For now, every world card and the Continue hero show a placeholder.** It is a small isometric diorama drawn with the Trials diorama code, chosen by mode and world type (grass and oak for survival, quartz and glass for creative, sand for a desert seed), on that mode's colour band. It is never an empty grey box.
 - **Follow-up (not in this build):** capture the world view on save-and-quit (the postcard capture path, 320×180) to `<world>/picture.png` and show it instead. The capture must never block or fail a save.
 
-## 7. The Stash (page)
+## 7. More to play (page; was "The Stash")
 
-- Header: `‹ Back`, "The Stash".
+- Header: `‹ Back`, "More to play".
 - **AxeNStax Official:** Hash Dash and Satori Rush, as large cards in the gallery style, each with Play. They still work offline.
-- **Look in someone's stash** (web only): the npub field and the results, with Play and Adopt skin. It is hidden on native, where Browse only printed "Live browse is a PWA feature".
+- **Look up a creator** (web only): the address field (hint "Their address (npub1…)") and the results, with Play and Adopt skin. It is hidden on native, where Browse only printed "Live browse is a PWA feature".
 - The side column leaves the home page.
 
 ## 8. The Workshop
@@ -144,13 +144,13 @@ Hosting stays on a world's page (§4.2), because you host a particular world. Th
 | Join Game | Play together → Join a game |
 | Import world… / Import from folder / Import a web profile… | Your worlds → Import ▾ (renamed, §4) |
 | Restore from file / Export everything (web) | Your worlds header (renamed, §4) |
-| ☁ Stash / 🎮 Join / 🖧 Host explainers (web) | Play together tile opens the Join/Host explainer; the Stash explainer is no longer needed (The Stash page works on web) |
+| ☁ Stash / 🎮 Join / 🖧 Host explainers (web) | Play together tile opens the Join/Host explainer; the Stash explainer is no longer needed (the More to play page works on web) |
 | Spawn dropdown | World detail → "Start at" |
 | Status line, handover lines | Footer (status); Your worlds header (handover lines) |
 | World card: Play, Host, Host online | World detail: Play; Host on this network; Host for friends online |
 | World card: Edit, Fork, Export…, Export to folder, Back up, Delete | World detail → More ⋯ (renamed, §4.2) |
 | World card: Stash toggle and dot | World detail → More ⋯ "Keep in your Stash" |
-| Stash column (Browse, Official) | The Stash page |
+| Stash column (Browse, Official) | The More to play page (Browse becomes "Look up a creator", web only) |
 | Friends column, Signet strip, Add a friend, My Servers, My Keeps | Play together page |
 | Empty state ("No worlds yet") | Hero "Start your first world"; Your worlds shows the same message with "+ New world" |
 
@@ -161,7 +161,7 @@ Hosting stays on a world's page (§4.2), because you host a particular world. Th
   - `home_ui.rs`: home.
   - `worlds_ui.rs`: the world grid and world detail.
   - `play_together_ui.rs`: hosts the existing `friends_ui` / `lan_ui` / `signet_contacts::ui` / keeps pieces.
-  - `stash_page_ui.rs`.
+  - `stash_page_ui.rs` (the More to play page).
   - `world_picture.rs`: placeholder choice (capture comes later).
 - `menu.rs` keeps `MenuAction`, `MenuState` and the dialogs; its old lobby body is deleted, not left beside the new one.
 - Escape on any inner page (and in the gallery) goes back one page and never quits. The `lib.rs` lobby-Escape guard covers every `LobbyPage`.
@@ -171,3 +171,9 @@ Hosting stays on a world's page (§4.2), because you host a particular world. Th
   - `--page home|worlds|together|stash`
   - `--select <n>`, so world detail can be shown
   - a TV size of 1920×1080, alongside desktop, tablet and phone
+
+## 11. Coming from the Keep work (not built here)
+
+The owner expects "Stash" to give way to **your Keep** (Fray design, `keep-and-ingle.md`: "your Keep is where your stuff lives"; in a game "Host on my Keep", for backup "Back up to my Keep"). When that lands: the per-world "Keep in your Stash" entry in More ⋯ becomes the Keep backup or "promote to my Keep" action; "Host for friends online" may become "Host on my Keep"; My Keeps stays on Play together. Those labels live in one place (`lobby_words`) so the rename is one edit. To avoid a clash, the old "The Stash" side panel (official games and browsing a creator's open stash) is renamed **More to play** now. Component names (Fray, Ingle, Bothy, WildBloom Node) never appear in player UI.
+
+As built (slice A): `lobby_words` is the `words` module at the top of `game/engine/src/worlds_ui.rs`.
