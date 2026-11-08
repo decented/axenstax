@@ -795,10 +795,10 @@ impl TrialBests {
     /// not parse is copied aside (`trials.json.bad-<ms>`, native) before it is
     /// replaced.
     pub fn save(&mut self) {
-        if let Some(raw) = load_raw() {
-            if !self.fold_in_stored(&raw) {
-                keep_unreadable(&raw);
-            }
+        if let Some(raw) = load_raw()
+            && !self.fold_in_stored(&raw)
+        {
+            keep_unreadable(&raw);
         }
         save_raw(&self.to_json());
     }
@@ -816,16 +816,14 @@ fn load_raw() -> Option<String> {
 /// to a temp file in the same directory, flushed, then renamed into place.
 #[cfg(not(target_arch = "wasm32"))]
 fn write_atomic(path: &std::path::Path, contents: &str) -> std::io::Result<()> {
-    use std::io::Write;
     let tmp = {
         let mut name = path.file_name().unwrap_or_default().to_os_string();
         name.push(".tmp");
         path.with_file_name(name)
     };
     let result = (|| {
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(contents.as_bytes())?;
-        f.sync_all()?;
+        std::fs::write(&tmp, contents)?;
+        crate::fsync::sync_file(&tmp)?;
         std::fs::rename(&tmp, path)
     })();
     if result.is_err() {
