@@ -8,7 +8,9 @@
 //! | `b"c"` + `(cx, cy, cz)` | a non-empty chunk, the 8,704 B a save writes | memory |
 //! | `b"h"` + path | a handed-over world's `handover/` or `participants/` file, as stored | [`StoredRecords`] |
 //! | `b"j"` + file name | a joiner's sidecar, as stored | [`StoredRecords`] |
-//! | `b"l"`, `b"q"`, `b"p"`, `b"f"`, `b"s"`, `b"u"`, `b"k"` + piece | the layout, lava queue, exposure clocks, water, cell sims, player slots and corpses | memory |
+//! | `b"l"`, `b"p"`, `b"f"`, `b"s"`, `b"u"`, `b"k"` + piece | the layout, exposure clocks, water, cell sims, player slots and corpses | memory |
+//! | `b"q"`, `b"r"` + piece | lava's spread and retract queues, at stable positions | memory |
+//! | `b"x"` + section | lava's source differences, by 16-cube section | memory |
 //! | `b"t"` + prefix | a record of the manifest tree itself, which names others the same way | memory |
 //! | `b"m"` | the world's meta as stored, the value of `pop_secret` cut | [`StoredRecords`] |
 //! | `b"w"` + piece | `world.dat` as stored, in fixed pieces: every table of `WorldSave` | [`StoredRecords`] |
@@ -73,6 +75,9 @@ pub(crate) struct StoredRecords {
     /// and a restore would refuse the checkpoint that left it out, so none is written
     /// while this holds anything. Which of them: the `note_*` that failed.
     unreadable: Mutex<BTreeMap<&'static str, String>>,
+    /// The keys the last record set bound, so that the next knows which to remove
+    /// (`record_set`). Keys only; empty until a persist.
+    bound: Mutex<std::collections::BTreeSet<Vec<u8>>>,
 }
 
 /// The sidecars are one file per persona ever seen. A name too long for a record key
@@ -145,6 +150,15 @@ impl StoredRecords {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(name.to_string(), sha256(bytes));
+    }
+
+    /// The keys the last persist bound.
+    pub(crate) fn bound_keys(&self) -> std::collections::BTreeSet<Vec<u8>> {
+        self.bound.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+    }
+
+    pub(super) fn set_bound_keys(&self, keys: std::collections::BTreeSet<Vec<u8>>) {
+        *self.bound.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = keys;
     }
 
     #[cfg(test)]
@@ -365,24 +379,24 @@ fn secret_value_span(json: &[u8]) -> Option<std::ops::Range<usize>> {
     None
 }
 
-/// Every record but the state that lies in records, which is added once it is encoded
-/// (`GameServer::bound_records`). Sorted by key.
-pub(super) fn entries(s: &GameServer) -> Result<Vec<Entry>, String> {
+/// The key of a chunk's record.
+pub(super) fn chunk_key(cx: i32, cy: i32, cz: i32) -> Vec<u8> {
+    let mut key = Vec::with_capacity(13);
+    key.push(b'c');
+    key.extend_from_slice(&cx.to_le_bytes());
+    key.extend_from_slice(&cy.to_le_bytes());
+    key.extend_from_slice(&cz.to_le_bytes());
+    key
+}
+
+/// The records this server holds a digest of and no bytes: the sidecars of every joiner
+/// the world has seen, a handed-over world's records, the meta and `world.dat`'s pieces, as
+/// last noted from the disk. Unsorted.
+pub(super) fn held_entries(s: &GameServer) -> Result<Vec<Entry>, String> {
     if let Some(why) = s.stored_records.why_unbindable() {
         return Err(why);
     }
     let mut list: Vec<Entry> = Vec::new();
-    for ((cx, cy, cz), chunk) in s.world.persistable_chunks() {
-        if chunk.is_empty() {
-            continue;
-        }
-        let mut key = Vec::with_capacity(13);
-        key.push(b'c');
-        key.extend_from_slice(&cx.to_le_bytes());
-        key.extend_from_slice(&cy.to_le_bytes());
-        key.extend_from_slice(&cz.to_le_bytes());
-        list.push((key, sha256(&chunk.as_bytes())));
-    }
     let joiners = s.stored_records.joiners.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     for (name, digest) in joiners.iter() {
         let mut key = Vec::with_capacity(1 + name.len());
@@ -400,6 +414,18 @@ pub(super) fn entries(s: &GameServer) -> Result<Vec<Entry>, String> {
         list.push((b"m".to_vec(), digest));
     }
     list.extend_from_slice(&s.stored_records.world_dat.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+    Ok(list)
+}
+
+/// Every record but the state that lies in records, which is added once it is encoded
+/// (`GameServer::bound_records`). Sorted by key.
+pub(super) fn entries(s: &GameServer) -> Result<Vec<Entry>, String> {
+    let mut list = held_entries(s)?;
+    for ((cx, cy, cz), chunk) in s.world.persistable_chunks() {
+        if !chunk.is_empty() {
+            list.push((chunk_key(cx, cy, cz), sha256(&chunk.as_bytes())));
+        }
+    }
     list.sort_unstable_by(|a, b| a.0.cmp(&b.0));
     Ok(list)
 }

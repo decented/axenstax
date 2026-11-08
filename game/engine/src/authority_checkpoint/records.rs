@@ -7,7 +7,9 @@
 //! |---|---|
 //! | `t` + prefix | a manifest record: `(key, digest)` in sorted order, of records with that prefix |
 //! | `l` + `u32` BE | a piece of the layout |
-//! | `q` + `u32` BE | a piece of the lava queue |
+//! | `q` + `u32` BE | a piece of lava's spread queue, by its number (`lava_records.rs`) |
+//! | `r` + `u32` BE | a piece of lava's retract queue, likewise |
+//! | `x` + 3 × `i32` BE | lava's source difference in one section of the world |
 //! | `p` + `u32` BE | a piece of the exposure clocks |
 //! | `f` + `u32` BE | a piece of water: sources as the difference from a rescan, its queues |
 //! | `s` + `u32` BE | a piece of the cell sims: fire, leaf decay, the scheduler, power, rubber taps |
@@ -27,7 +29,9 @@
 //!
 //! **Pieces.** A state record is cut at [`MAX_RECORD_BYTES`], so that no value passes
 //! the runner's record limit whatever the world holds. A queue's order is its state, so
-//! a piece is by position: an entry added near the start rewrites the pieces after it.
+//! a piece is by position: an entry added near the start rewrites the pieces after it, and
+//! taking water's front rewrites them all. Lava's queues and sources are in the forms
+//! `lava_records.rs` describes instead, so that a drain rewrites none of them.
 //!
 //! **`world.dat`'s pieces.** One key and digest for each [`FILE_PIECE_BYTES`] of the stored
 //! bytes, so the file can pass the runner's record-value limit (the Tier-L rulings' addendum
@@ -42,6 +46,7 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 use super::codec::{Malformed, Reader, Writer};
+use super::lava_records::{self, NumberedPieces};
 use super::manifest::{self, Entry};
 use super::RestoreError;
 
@@ -69,16 +74,18 @@ const _: () = assert!(FILE_PIECE_BYTES <= MAX_RECORD_BYTES);
 
 pub(super) const MANIFEST: u8 = b't';
 pub(super) const LAYOUT: u8 = b'l';
-pub(super) const LAVA: u8 = b'q';
+pub(super) const LAVA_SPREAD: u8 = b'q';
+pub(super) const LAVA_RETRACT: u8 = b'r';
+pub(super) const LAVA_SOURCES: u8 = b'x';
 pub(super) const EXPOSURE: u8 = b'p';
 pub(super) const WATER: u8 = b'f';
 pub(super) const CELLS: u8 = b's';
 pub(super) const PLAYERS: u8 = b'u';
 pub(super) const CORPSES: u8 = b'k';
 pub(super) const WORLD_DAT: u8 = b'w';
-pub(super) const FAMILIES: [(u8, &str); 7] = [
+/// The families whose pieces are numbered from 0 and hold one whole record between them.
+pub(super) const FAMILIES: [(u8, &str); 6] = [
     (LAYOUT, "layout"),
-    (LAVA, "lava queue"),
     (EXPOSURE, "exposure clocks"),
     (WATER, "water"),
     (CELLS, "cell sims"),
@@ -99,7 +106,8 @@ pub(crate) fn record_path(world_dir: &Path, key: &[u8]) -> PathBuf {
 
 /// A record cut to fit: is this key one of those a state's pieces use?
 pub(super) fn is_state_key(key: &[u8]) -> bool {
-    key.len() == 5 && FAMILIES.iter().any(|(family, _)| *family == key[0])
+    (key.len() == 5 && (FAMILIES.iter().any(|(family, _)| *family == key[0]) || key[0] == LAVA_SPREAD || key[0] == LAVA_RETRACT))
+        || lava_records::is_source_key(key)
 }
 
 /// Is this key a piece of `world.dat`?
@@ -109,7 +117,11 @@ pub(super) fn is_world_dat_piece(key: &[u8]) -> bool {
 
 /// What a family's key says, for a refusal.
 pub(super) fn describe(key: &[u8]) -> Option<String> {
-    FAMILIES.iter().chain(&[(WORLD_DAT, "world.dat")]).find(|(family, _)| key.len() == 5 && *family == key[0]).map(|(_, name)| {
+    if lava_records::is_source_key(key) {
+        return Some(format!("lava's sources at section {:?}", lava_records::source_section(key)));
+    }
+    const OTHERS: [(u8, &str); 3] = [(LAVA_SPREAD, "lava spread queue"), (LAVA_RETRACT, "lava retract queue"), (WORLD_DAT, "world.dat")];
+    FAMILIES.iter().chain(&OTHERS).find(|(family, _)| key.len() == 5 && *family == key[0]).map(|(_, name)| {
         format!("{name} piece {}", u32::from_be_bytes([key[1], key[2], key[3], key[4]]))
     })
 }
@@ -124,7 +136,9 @@ fn piece_key(family: u8, i: u32) -> Vec<u8> {
 #[derive(Default)]
 pub(super) struct StateRecords {
     pub layout: Vec<u8>,
-    pub lava: Vec<u8>,
+    pub lava_spread: NumberedPieces,
+    pub lava_retract: NumberedPieces,
+    pub lava_sources: Vec<Stored>,
     pub exposure: Vec<u8>,
     pub water: Vec<u8>,
     pub cells: Vec<u8>,
@@ -137,7 +151,6 @@ impl StateRecords {
     pub(super) fn family(&mut self, family: u8) -> &mut Vec<u8> {
         match family {
             LAYOUT => &mut self.layout,
-            LAVA => &mut self.lava,
             EXPOSURE => &mut self.exposure,
             WATER => &mut self.water,
             CELLS => &mut self.cells,
@@ -147,12 +160,11 @@ impl StateRecords {
         }
     }
 
-    /// As they are stored: at least one piece each, in key order.
+    /// As they are stored: at least one piece each of [`FAMILIES`], and what lava has.
     pub(super) fn pieces(&self) -> Vec<Stored> {
         let mut out = Vec::new();
         let parts = [
             (LAYOUT, &self.layout),
-            (LAVA, &self.lava),
             (EXPOSURE, &self.exposure),
             (WATER, &self.water),
             (CELLS, &self.cells),
@@ -166,6 +178,10 @@ impl StateRecords {
                 out.push((key, piece.to_vec()));
             }
         }
+        for (family, pieces) in [(LAVA_SPREAD, &self.lava_spread), (LAVA_RETRACT, &self.lava_retract)] {
+            out.extend(pieces.iter().map(|(number, piece)| (piece_key(family, *number), piece.clone())));
+        }
+        out.extend_from_slice(&self.lava_sources);
         out
     }
 }
@@ -248,8 +264,8 @@ pub(crate) struct PieceWrites<'a> {
 
 /// The pieces of `world.dat`'s new bytes (`None`: the file has gone), and the keys to
 /// remove given how many pieces the store held, so a file that shrank leaves none past its
-/// new end. Pure, and not called yet: the file stays whole on disk here, and `PersistBatch`
-/// (ruling 1) will call this to make its batch of a persist.
+/// new end. Pure: the file stays whole on disk here, and the record set builder
+/// (`record_set.rs`) calls this to cut `world.dat` into the `w` records of a persist.
 pub(crate) fn file_piece_batch(new_bytes: Option<&[u8]>, old_count: u32) -> PieceWrites<'_> {
     let pieces = new_bytes.map(file_pieces).unwrap_or_default();
     let new_count = pieces.len() as u32;
@@ -344,6 +360,33 @@ pub(super) fn read_state(wanted: &[Entry], world_dir: &Path) -> Result<(StateRec
             return Err(RestoreError::InvalidCheckpoint(format!("no {name} is bound")));
         }
         *state.family(family) = bytes;
+    }
+    // Lava's: from whatever number the cursor has reached, and none at all for an empty
+    // queue. The cursor in the image says what the first must be, as they are read.
+    for (family, name) in [(LAVA_SPREAD, "lava spread queue"), (LAVA_RETRACT, "lava retract queue")] {
+        let mut pieces = Vec::new();
+        let mut next = None;
+        for (key, _) in wanted.iter().filter(|(key, _)| key.len() == 5 && key[0] == family) {
+            let number = u32::from_be_bytes([key[1], key[2], key[3], key[4]]);
+            if next.is_some_and(|expected| expected != Some(number)) {
+                return Err(RestoreError::InvalidCheckpoint(format!("the {name} isn't bound piece by piece")));
+            }
+            next = Some(number.checked_add(1));
+            if let Some(piece) = read_record(world_dir, key)? {
+                found.push((key.clone(), sha256(&piece)));
+                pieces.push((number, piece));
+            }
+        }
+        match family {
+            LAVA_SPREAD => state.lava_spread = pieces,
+            _ => state.lava_retract = pieces,
+        }
+    }
+    for (key, _) in wanted.iter().filter(|(key, _)| lava_records::is_source_key(key)) {
+        if let Some(section) = read_record(world_dir, key)? {
+            found.push((key.clone(), sha256(&section)));
+            state.lava_sources.push((key.clone(), section));
+        }
     }
     Ok((state, found))
 }
@@ -470,6 +513,16 @@ mod tests {
 
     use super::piece_key as key;
 
+    /// The runner's ceilings are reachable from the game, and what the game cuts to fits
+    /// under them: a record's key and a file's piece, with room for a batch of several.
+    #[test]
+    fn the_runners_batch_limits_are_reachable_and_the_records_fit_under_them() {
+        use fray_session::authority::{MAX_PERSIST_BATCH_BYTES, MAX_PERSIST_BATCH_ENTRIES, MAX_STORED_KEY_BYTES};
+        assert!(MAX_RECORD_KEY <= MAX_STORED_KEY_BYTES);
+        assert!(MAX_RECORD_BYTES < MAX_PERSIST_BATCH_BYTES);
+        assert!(MAX_PERSIST_BATCH_ENTRIES > 0);
+    }
+
     /// The schema's number: a change is a new schema, not a tuning. Under the runner's
     /// record-value limit of 1 MiB less headers.
     #[test]
@@ -524,7 +577,7 @@ mod tests {
 
     #[test]
     fn every_piece_is_within_the_limit_and_they_join_back() {
-        let state = StateRecords { layout: vec![1; 3], lava: vec![2; MAX_RECORD_BYTES * 2 + 1], exposure: vec![3; MAX_RECORD_BYTES], ..StateRecords::default() };
+        let state = StateRecords { layout: vec![1; 3], water: vec![2; MAX_RECORD_BYTES * 2 + 1], exposure: vec![3; MAX_RECORD_BYTES], ..StateRecords::default() };
         let pieces = state.pieces();
         assert_eq!(pieces.len(), 1 + 3 + 1);
         assert!(pieces.iter().all(|(key, bytes)| is_state_key(key) && bytes.len() <= MAX_RECORD_BYTES));

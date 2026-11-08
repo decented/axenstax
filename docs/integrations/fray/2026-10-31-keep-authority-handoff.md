@@ -158,7 +158,7 @@ restore-after-step-n with the uninterrupted run.
 | Cooldowns, respawn and death timers, spawn protection | Lost | Yes. |
 | Inputs: `last_applied_input`, intent queue, step credit | Lost | Yes: prediction re-snaps, queued input dropped. |
 | Output state: chunk-push sent-sets, entity interest, ProtocolId baseline, outboxes | Lost | Yes for output: every client is fully re-pushed. Contract acceptance 2 (ordered commands agree) cannot pass. |
-| Pending deaths | ECS markers; save refused while pending | No longer: each corpse is in the checkpoint (slice 3), and a save still waits for the death pass, so the runner's `last` waits too. |
+| Pending deaths | ECS markers; save refused while pending | Corpse state is encoded, but the native save and its record-set builder still refuse pending deaths. The Keep path must handle them coherently before a real `last`; that path is not implemented yet. |
 | Economy owners | Saved, but five owner enums still carry `LocalPlayer(slot)` | Meaningless across a restore with reused slots; must converge on npub. |
 | `HostedServer` per-slot vectors, carry-over queues | Lost | Yes (authority state per §3). |
 | `HostedServer.server_tick` | **Fixed** (`4c5a75c6`): carries on from the restored tick at its first tick; audited safe with a large start (Spec 04 §4.2i), no wire change | No. |
@@ -280,7 +280,7 @@ Fray-side halves were **proposals** when this was written: the contract amendmen
 Measured or built on the game side. The sizes are from `checkpoint_size_at_the_bench_world_sizes`
 (§8). Slice 3 has settled the ones below against the Tier-L rulings.
 
-**Settled in the game, 2026-11-03 (checkpoint schema 5; no save-format or protocol change):**
+**Settled in the game, 2026-11-03 (checkpoint schema 6; no save-format or protocol change):**
 
 - **"Not now": there is no such code.** `checkpoint` no longer refuses a pending death: each corpse
   is in the bytes (`authority_checkpoint/deaths.rs`) and comes back as a corpse, and the restored
@@ -317,14 +317,14 @@ Measured or built on the game side. The sizes are from `checkpoint_size_at_the_b
   root of a manifest tree (`authority_checkpoint/records.rs`, key `t` + prefix), where a key starting `t`
   binds a further manifest record the same way. At most 64 entries is a record; more are shared out by the
   byte after their common prefix. So it is a function of the entries, walking it gives the one sorted list,
-  one changed entry rewrites one path, and no manifest record passes 64 KiB. The layout (`l`), the lava
-  queue with its source differences (`q`), each cell's exposure clock (`p`), water likewise (`f`), the cell
+  one changed entry rewrites one path, and no manifest record passes 64 KiB. The layout (`l`), each cell's
+  exposure clock (`p`), water with its source differences (`f`), the cell
   sims (`s`: fire, leaf decay, scheduler, power, rubber taps), the player slots (`u`) and the corpses (`k`) are
   stored records cut at 64 KiB, read by the same readers as before. Inline stays for fixtures only
-  (`checkpoint_inline`, `#[cfg(test)]`). Numbers are in §8.
+  (`checkpoint_inline`, `#[cfg(test)]`). Lava has its own forms, `q`, `r` and `x` (Spec 01 §4.1.5). Numbers are in §8.
 - **The image is bounded whatever the world holds.** What is left: the header, the clock, the modes, the
-  streamer's settled anchors (one a player), lava's phase, leaf decay's clock, the manifest's root and the
-  seal. So about 2.4 KB at the widest server. Two things moved that look bounded and aren't. A player slot: a
+  streamer's settled anchors (one a player), lava's phase and queue cursors, leaf decay's clock, the manifest's
+  root and the seal. So about 2.4 KB at the widest server. Two things moved that look bounded and aren't. A player slot: a
   plan in an inventory holds a captured building's cells, up to 32,768 of them, and a joiner's pack feedback
   can hold 1,024 rows. Fire: `MAX_ACTIVE_FIRE` (256) holds a run's ignitions, but a fire block in a column that
   goes out of memory stays and `register_column_fires` re-adopts it uncapped when the column returns, so a world
@@ -342,8 +342,21 @@ Measured or built on the game side. The sizes are from `checkpoint_size_at_the_b
   must still bound what `apply_chunk_layout` builds for a section with no record (12.8 KB each). 262,144 is
   the runner's key ceiling, and about 3.4 GiB at worst, inside the placeholder 4 GiB. Same constant at both
   ends, through the one reader.
+- **The record set is built from memory by one pure function, `GameServer::build_record_set`** (ruling 1,
+  slice 3, `authority_checkpoint/record_set.rs`). It returns the records this server holds the bytes of (`w`
+  pieces through `file_piece_batch`, `c` from `Chunk::as_bytes`, a present joiner's `j` from its capture, the
+  state records, the `t` tree) as Fray's `StoredRecord`s, the entries it has only a digest of (`held`: the
+  sidecars of joiners not present, `m`, `h`, whose bytes are the meta writer's and the joiners' own saves',
+  not this save's), the tree, and `removed`: the keys the previous bound set had and this one hasn't (a
+  shrunk `w`, a dropped chunk, a sidecar no longer bound). The type is its own `RecordSet`, not `PersistBatch`:
+  a set has digest-only entries and a tree root, and no `last` or size split, which are the batcher's.
+  `StoredRecords` keeps the previous set's keys (and nothing else of it) for `removed`; the dirty map of
+  digests that supersedes that is slice 5's. A save and the set share the encoders: `encode_world_dat` (the
+  `WorldSave` build, which touches no file) and `joiner_rows_in_memory`; `try_save_selected` calls the first at
+  the point it built the same bytes before, so a save writes what it always did.
 - **What writes the records: `GameServer::persist_authority`.** It is `try_save` and then the records, in
-  `authority/` in the world's folder, one file per key. Nothing but the tests calls it yet: `--keep-world`
+  `authority/` in the world's folder, one file per key, written from the builder's set (`persist_authority_set`
+  returns it) rather than from a second pass over the notes. Nothing but the tests calls it yet: `--keep-world`
   still calls `try_save`. Fray's answer is that `--keep-world` stays unchanged through slice 3 and no native L
   runner comes before the WASM build: only a test runner calls the new paths. A normal
   server's save is untouched, and a world never run as an authority has no such folder.
@@ -394,7 +407,8 @@ Measured or built on the game side. The sizes are from `checkpoint_size_at_the_b
 - *Keys and personas:* a keyed digest of a persona still counts as an identifier. Use the game's own counter,
   never reused, plus a directory record bound by the tree, with the entry removed on erasure.
 - *Native path:* `--keep-world` stays unchanged through slice 3; no native L runner before the WASM build.
-- *Lava queue:* making its pieces not shift, so it fits a `last` batch, is the game's to fix.
+- *Lava queue:* making its pieces not shift, so it fits a `last` batch, was the game's to fix. Built, schema 6
+  (Spec 01 §4.1.5, what has been measured in §8). Water still has the old form (§8).
 - *A state file in fixed pieces* (ruling 2's addendum): yes, under the file's own keys, with no contract change;
   met below.
 
@@ -403,16 +417,15 @@ Measured or built on the game side. The sizes are from `checkpoint_size_at_the_b
 - **A corpse's living copy is matched, not identified.** A pet's row in `world.dat` was taken when it
   lived, and pets have no stable id, so a restore removes the nearest living mob of the corpse's kind and
   owner. With two alike, it may be the other one. A quest NPC's row isn't matched at all.
-- **A piece is by position.** A queue's order is its state, so a state record is cut by offset: an entry added
-  near the start of the sorted layout or the clocks rewrites the pieces after it, up to the whole record in a
-  batch. For lava it is always the whole record while the queue drains, as taking the front shifts every byte
-  after it: 703,043 B a persist at the 8-joiner bench. At the largest measured, all of `authority/` is 962,259 B (§8)
-  against the 1 MiB batch, which staged batches can spread. Fine at a 60 s cadence; a much shorter one makes it
-  the dirty-rate limit ruling 1 says to measure. Water and the player slots add to that: slots change at every
-  persist with anyone moving, about 440 B a slot, and water only as it flows.
-- **A corpse lies in a record, and a save still waits for the sweep.** So a real `last` batch holds an empty
-  corpses record, and only a fixture writes a full one (`write_bound_records` without the save). If the runner
-  ever persists with deaths pending, the save's wait has to go first.
+- **A piece is by position, except lava's.** A queue's order is its state, so a state record is cut by offset: an
+  entry added near the start of the sorted layout or the clocks rewrites the pieces after it, up to the whole record
+  in a batch. Water's queue is still that form, so taking its front rewrites its whole record. Lava was the same, 703,043 B a
+  persist at the 8-joiner bench; it now writes immutable pieces and moves a cursor in the image (Spec 01 §4.1.5). What
+  a tick and a commit interval really dirty, family by family, is in §8.
+- **A corpse lies in a record, and the native save still waits for the sweep.** The folder-based persist
+  helper therefore writes an empty corpses record; only a fixture writes a full one
+  (`write_bound_records` without the save). A real Keep builder must handle pending deaths coherently
+  rather than inherit that refusal as an indefinite reason to withhold `last`.
 
 **For the Fray session, from closing the `world.dat` gap:**
 
@@ -426,9 +439,9 @@ Measured or built on the game side. The sizes are from `checkpoint_size_at_the_b
     after them.
   - *A shrink removes the pieces past the new end, so the store equals the bound set.* Nothing writes pieces yet:
     the file stays whole on disk, with no second copy, exactly as a save writes it. `records::file_piece_batch`
-    is the pure function `PersistBatch` (ruling 1) will call, giving the piece keys and slices for the new bytes
-    and the keys to remove given the old count. Unit-tested for growth, no change, a shrink by exactly one piece,
-    by more, to empty, and a file that has gone. Until ruling 1 calls it, no shrink of a store happens at all.
+    is the pure function that gives the piece keys and slices for the new bytes and the keys to remove given the
+    old count. Unit-tested for growth, no change, a shrink by exactly one piece, by more, to empty, and a file
+    that has gone. The record set builder (below) calls it for `w`; nothing yet writes a `w` piece as a record.
   - *Restore verifies every piece before assembling.* `manifest::verify_stored` cuts what is on disk and compares
     each piece, before `refuse_a_bound_world_dat_that_isnt_the_state` or the load read the file. Each of these is
     `invalid-checkpoint` from a real restore, naming the piece, in `every_way_world_dat_can_differ_from_its_pieces_is_refused`:
@@ -497,7 +510,7 @@ drained water source: persist, checkpoint, restore into a new server, feed both 
   record.
 - **Pending outputs are dropped:** `pending_item_grants`, `pending_kill_events`, `released_joiners` and
   `pending_sapling_drops` aren't carried. An item grant is value and not just output, so the slice 3
-  runner checkpoints only after they drain.
+  runner must drain or carry pending value before a `last`; that boundary is not implemented yet.
 
 Limits of what does hold:
 - `players` depends on entities after all, which the slice 2b decision had assumed it didn't: a push or
@@ -517,8 +530,31 @@ Limits of what does hold:
 - Not yet covered as a checkpoint: the §5 rows for `HostedServer` vectors and queues, cooldowns held
   on connection state and output state.
 
-**Slice 3:** return output as commands, and the admission split (choice 7).
+**Before wiring slice 3's stored adapter:** build the persona-free counter keys and bound directory,
+then the seed-derived checkpoint state and secret-free config required by the rulings. The new path
+must not temporarily initialise through the native folder API's secret-bearing config. That native
+API and `--keep-world` retain their current behaviour through this slice.
+
+**Slice 3:** return output as commands, staged persistence, reader restore and restart membership;
+use the native test runner before a Keep uses those paths. The host-verified persona encoding in
+metadata (choice 7) is still a prerequisite for the later WASM build.
 **Then:** contract acceptance 2 and the WASM build.
+
+**For the adapter's batcher, from lava's pieces (schema 6):**
+- `build_record_set`'s `previous` must be what the store will hold at the commit, staged keys included, not only the
+  last root's keys. A piece staged and then drained before the `last` is otherwise never removed.
+- A queue piece is final once it is full and the cursor hasn't passed it, so a batcher may stage any but the last
+  ahead of the `last` step, however long the queue. `the_first_commit_of_a_huge_queue_spreads_over_staged_batches_and_binds_at_the_last`
+  does that with a plain function. Emptying a queue keeps its monotonic cursor and any partial piece for later
+  appends; full pieces behind the cursor leave through `removed`. A partial piece can still change on append,
+  and the digest compare at the `last` step writes it again. Latest write wins, as the contract says.
+- Queue-drain fixtures prove that their 540,000 queued wakes fit after spreading; they don't bound all source
+  changes. Several dense `x` sections can change in one tick and exceed a batch. The adapter must withhold `last`
+  on the full dirty set, even with these stable queue pieces.
+- Water's queue is still cut by position, so its whole record belongs in any `last` while it drains (§8). It needs
+  the same treatment, or a withheld `last`, before a large flood can commit.
+- Building a set is still O(the queue): it encodes every piece, then the dirty map hashes them. It's bounded by what
+  the batch writes only once the adapter remembers a full piece's digest.
 
 **For the next slices (from the independent review of slice 3a; no code in this branch):**
 - Slice 5: the test runner asserts the restore at each commit, as the root is only restorable straight
@@ -529,8 +565,9 @@ Limits of what does hold:
   so `last` must then be withheld, since a row-length change near the start rewrites every later piece.
 - Slice 6: read each record once. Today `w` is read 3 to 4 times and `c` twice, against `get`'s 4 GiB budget a
   restore.
-- Only `w` has a shrink batch; the state families, `c`, `j` and `t` rely on `commit`'s folder sweep
-  (`records.rs`), which a `PersistBatch` won't have.
+- The record-set builder now computes removals for every family from the previous and current key sets.
+  The stored batcher must use the effective previous set, staged keys included, and return those removals;
+  it cannot rely on the native folder persist's sweep (`records.rs`).
 - `checkpoint` is not quite observational: `deaths::encode` reaches `plan_store::remember_checked`, which writes a
   Plan body for a dead pack animal carrying a full body. On a server these are markers and return early, so no
   real path was found, but the code can't rule it out. A failed capture surfaces as `Encode`.
@@ -649,6 +686,77 @@ benchmark exists.**
   of it rewritten at every persist while the queue drains. Staged batches can spread it, as the ruling allows; the
   bytes are the same state the image held before, so this is where the dirty-rate limit will show first. `world.dat`'s
   pieces add a file's worth at most to a batch that wants them, and aren't in that figure.
+
+- **What a tick dirties, after lava's pieces (schema 6), 2026-11-03.** Debug build, one run of
+  `what_a_tick_dirties_at_the_eight_joiner_bench` (`--ignored --nocapture`), on the same 511-column,
+  eight-joiner fixture. **Passed.** The initial lava spread cursor is 1,600 with 54,079 live entries;
+  its retained partial prefix explains the difference between its stored bytes and the live queue alone.
+
+  Each row's initial bytes and dirty bytes count record values only. A dirty record is written whole;
+  the 48-tick total sums those writes, including repeated writes of the same record. A zero means the
+  fixture did not change that family, not that the family cannot change in a different world.
+
+  | Family | Initial records | Initial value B | Ticks dirty, of 48 | Most dirty value B in a tick | Dirty value B over 48 ticks |
+  |---|---|---|---|---|---|
+  | `c` chunks | 2,406 | 20,941,824 | 12 | 113,152 | 1,035,776 |
+  | `f` water | 2 | 117,530 | 12 | 126,621 | 1,470,564 |
+  | `j` sidecars | 8 | 3,628 | 48 | 2,305 | 110,640 |
+  | `k` corpses | 1 | 4 | 0 | 0 | 0 |
+  | `l` layout | 1 | 10,323 | 2 | 10,323 | 20,646 |
+  | `p` exposure | 1 | 4 | 0 | 0 | 0 |
+  | `q` lava spread | 54 | 710,515 | 0 | 0 | 0 |
+  | `r` lava retract | 1 | 11,580 | 4 | 12,048 | 24,552 |
+  | `s` cell sims | 1 | 32 | 0 | 0 | 0 |
+  | `t` manifest | 164 | 129,420 | 48 | 13,920 | 186,154 |
+  | `u` player slots | 1 | 3,753 | 48 | 3,753 | 180,144 |
+  | `w` world.dat | 2 | 114,445 | 48 | 123,363 | 3,320,770 |
+  | `x` lava source differences | 0 | 0 | 0 | 0 | 0 |
+
+  Lava dirtied at most **12,048 B in a tick**, below this fixture's 32 KiB target. Each of the 48 full
+  batches, including its removals, passed `validate_persist_batch`. The largest changed-record key/value
+  sum was **386,858 B** against the 1,048,576-B cap; that printed sum excludes removal keys. The per-family
+  maxima need not fall on the same tick, so adding their columns is not the largest batch.
+
+  At 1,248 ticks, the final set differs from the initial set as follows. This is one initial-to-final
+  delta, **not** cumulative writes over the interval; the families absent here are unchanged.
+
+  | Family | Changed records | Changed value B |
+  |---|---|---|
+  | `c` | 247 | 2,149,888 |
+  | `f` | 2 | 125,464 |
+  | `j` | 5 | 2,265 |
+  | `l` | 1 | 12,924 |
+  | `q` | 21 | 271,102 |
+  | `r` | 1 | 12,012 |
+  | `t` | 171 | 86,801 |
+  | `u` | 1 | 3,761 |
+  | `w` | 2 | 125,113 |
+
+  Changed keys and values total **2,794,374 B**, so the interval requires staged batches. The set removes
+  three `q` keys, one `r` key and one `t` key. The final spread cursor is 4,928 with 71,222 live entries.
+  This is native fixture sizing, not a WASM tick/commit timing measurement or a bound on all dense source changes.
+
+  Earlier small-fixture checks: before the stable form, 100,000 queued cells dirtied 1,299,600 B in a draining
+  tick, and 540,000 caused a batch fault. After it, each step of the 24-tick fixture changed at most one
+  13,312-B piece; the 540,000-wake, eight-joiner fixture's full dirty sets fit, checkpoint and restore. Its initial
+  commit spreads over staged batches. With monotonic cursors, the 1,200-tick small-fixture delta appended
+  7,171 entries and changed 97,799 B of `q` (`r` and `x` unchanged). Over 240 real-flow/retraction ticks,
+  540 entries appended, one piece was removed, at most 784 B of `x` changed in a tick, and 1,200 B of `r`
+  was written in total. Empty partial and boundary queues restore before later appends. The combined
+  save/restore and fluid regression filter passed **561 tests, none failed, 24 ignored**.
+
+  Remaining sizing risks, beyond these measurements:
+
+  | Family | What the fixture establishes | What remains |
+  |---|---|---|
+  | `f` water | Whole positional records change during flow; at most 126,621 value B in a tick here | Stable pieces before the adapter. Arithmetic: 42,000 cells exceed 1 MiB only if each contributes both a 12-B source delta and a 13-B front; fronts alone reach it near 80,000. The 400,000-source fixture is about 10 MB |
+  | `p` exposure | No mining, so no dirty exposure record | Arithmetic: 1 MiB at about 52,000 cells (13,000 to 17,000 blocks mined); a sorted insert rewrites later pieces, and nothing prunes it |
+  | `w` | Dirty every tick, up to both pieces here (123,363 value B) | A row-length change in a large file can rewrite every later piece; about 4,000 full chests reach 1 MiB |
+  | `u` | Dirty every tick, 3,753 value B here | Full plans can be much larger, and a move near one rewrites its piece |
+  | `s` | Idle (32 B), no changes | Fire/adoption bursts and other active cell systems need their own load checks |
+  | `l` | Changed twice in 48 ticks, 10,323 value B each time | A sorted insert can rewrite later pieces in a larger layout |
+  | `k` | Empty fixture record (4 B), no changes | Does not measure a pending-death workload |
+  | `x` | No source difference at this bench; the sparse-flow fixture changes up to 784 B a tick | Simultaneous dense-section changes need the adapter's separate withholding/resumption check |
 
 - **`world.dat` against the record-value limit, which nobody had measured.** At the bench sizes it is 112,555,
   113,339 and 114,445 B, about **11% of 1 MiB**. It barely moves between them, so it follows what the fixture

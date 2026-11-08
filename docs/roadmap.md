@@ -1,6 +1,6 @@
 # Axe'n'Stax Roadmap
 
-*As of 2026-11-02 — source v0.2.27, network protocol v96, save format 60. The repository is public.*
+*As of 2026-11-03 — source v0.2.27, network protocol v96, save format 60. The repository is public.*
 This file is **the** roadmap: where the project has come from, where it is, and where it is going.
 For "what do we build next", see `docs/foundations/README.md` (the build queue); feature requests and ideas enter through the internal feature backlog.
 
@@ -15,7 +15,7 @@ For "what do we build next", see `docs/foundations/README.md` (the build queue);
 - **2026-10-01 to 04: public.** Signet contacts sync, the player's own relay list, and the repository going public as a fresh single-commit snapshot with its security settings on. The privacy page was signed off with the controller published as *decented*, and the project's own relay stopped being a default in the native app or its tools (phone tests still pending, below).
 - **2026-10-06 to 31: real multiplayer.** The host lends its one world to its server (D1), joiners stopped running a private mob world (D2), and the server took over joiners' metabolism and inventory records (C2, C3). The clock, weather, mobs, deaths and machines moved into one shared simulation (D4). Single-player lending was built behind an opt-in flag (D3), and world handover landed.
 - **2026-10-22 to 25: Fray, new terrain, Keeps.** Host Game moved to Fray (protocol v92), terrain generator v3 and graphics settings shipped (2026-10-24), and `--keep-world` let a home Keep run one persistent world (2026-10-25).
-- **2026-11-02: hardening and the first Keep slices.** In-game feedback removed, access rules tightened, privacy copy corrected, and Keep authority slices 1, 2a and 2b landed. The full gate passed with 7,203 tests and none failing.
+- **2026-11-02 to 03: hardening and Keep authority.** In-game feedback removed, access rules tightened, privacy copy corrected, and Keep authority slices 1, 2a and 2b landed. The checkpoint now binds every `world.dat` field and uses a tree of stored records, keeping its image under the cap as the world grows. The latest landed full gate passed with 7,347 tests and none failing.
 
 ---
 
@@ -113,7 +113,7 @@ In order:
 1. **Get what's built to players.** The site deploy passing, then the native release.
 2. **Try it with people.** The 2026-11-02 test sheet, then the two-machine and phone tests below.
 3. **Finish the access and safety fixes** from the project's internal review, as the next build after the release.
-4. **Finish Keep authority** with Fray and Ingle: slice 3 wires restore into `--keep-world`. Fray has answered, so it can start when the owner chooses.
+4. **Finish Keep authority** with Fray and Ingle: build persona-free records, seed-derived checkpoint state and secret-free config before wiring staged persistence, reader restore and restart membership. Exercise those paths in the native test runner, then build the WASM component. Native `--keep-world` stays unchanged through slice 3; connecting the new authority to a Keep comes later.
 5. **Finish real multiplayer:** the single-player default, removing `--no-lend`, Strict enforcement and villager quests for joiners.
 6. **Then tighten and polish.** Every part of the game reaches a normal player's level first, then come tightening passes and an art-direction pass on blocks, leaves and animal skins, on the owner's go. Fun still needs testing with voluntary children outside the family.
 
@@ -166,7 +166,7 @@ Only items that block building further on top.
 - **Take-your-worlds-to-native conflict policy.** Import currently keeps both when a name clashes; the final merge policy is an owner decision.
 - **Sub-block detail for authored builds** (high-resolution statues and faces): needs a choice between a micro-model reference, sub-voxels or a detail-block palette.
 - **Villager quests for joiners** (D2c-3). The common-progression foundation and later checkpoints are in source; live quest delivery for joiners is not accepted and verification is pending.
-- **Keep authority, slice 3.** Slices 1, 2a and 2b are in, and 2b stops at the API. Slice 3 wires restore into `--keep-world`. Fray (the networking library behind Host Game) answered the storage and migration questions in `docs/integrations/fray/2026-10-31-keep-authority-handoff.md` on 2026-11-02, so slice 3 can start when the owner chooses. Fray's interface lands alongside the game's first use of it. Some rulings change the game's side: how the hidden Proof of Play secret is seeded, how saves are staged across ticks, and no persona identifier in a storage key, with a dependant's save fully erasable before this runs on a Keep with members. Also still to settle on the game's side: `state_hash` doesn't yet cover all of `world.dat`, and regenerating pristine chunks needs the same math on every platform.
+- **Keep authority, slice 3.** The checkpoint now binds all of `world.dat` and the world's growing state through stored records. Persona-free record keys, seed-derived checkpoint state and secret-free config come before wiring staged batches, reader restore and restart membership; a native test runner exercises them before any Keep uses them. Fray's storage and migration rulings are recorded in `docs/integrations/fray/2026-10-31-keep-authority-handoff.md`. They require seed-derived hidden gameplay state, persona-free storage keys and full erasure before a Keep hosts members. Erasure's effect on owned things still needs an owner decision. Native `--keep-world` stays unchanged through this slice. The WASM component, cross-platform world-generation checks, memory and storage limits, and the real durable commit remain later hosting gates.
 - **Beacon: keep or cut.** The public-distribution path (event kind 30820, `open_stash.rs`) is built, and whether to keep it is an owner decision.
 
 ---

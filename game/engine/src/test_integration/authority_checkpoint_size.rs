@@ -8,7 +8,6 @@ use super::twin_run::{run_to, twin};
 use crate::authority_checkpoint::{
     commit_and_read_bound, layout_record, layout_sections_read, rebind_layout, section_sizes, tree_shape, MAX_CHECKPOINT_BYTES, MAX_RECORD_BYTES,
 };
-use crate::fluids::FluidCheckpoint;
 use crate::save::{world_dir, WorldsRootGuard};
 use crate::world::LAYOUT_COLUMN_SECTIONS;
 
@@ -37,10 +36,8 @@ fn a_worst_case_lava_load_with_eight_joiners_stays_under_the_cap() {
     let _root = WorldsRootGuard::new("keep-s3c-lava");
     let mut h = fixture("ckpt-lava", 8);
     run_to(&mut h, 5);
-    let spread = (0..500_000).map(|i| (i, 300, i % 7, 1u8)).collect();
-    let queued = FluidCheckpoint { extra: Vec::new(), missing: Vec::new(), spread, retract: Vec::new() };
-    let (world, loaded) = (&h.server.world, &h.server.loaded_columns);
-    h.server.lava.restore_checkpoint(world, loaded, &queued, 0);
+    let spread: Vec<_> = (0..500_000).map(|i| (i, 300, i % 7, 1u8)).collect();
+    h.server.lava.queue_for_test(&spread, &[]);
     let bytes = persist_and_checkpoint(&mut h);
     assert!(bytes.len() < MAX_CHECKPOINT_BYTES / 4, "{} B", bytes.len());
     let back = restore(&h, &bytes).unwrap_or_else(|e| panic!("restores: {e:?}"));

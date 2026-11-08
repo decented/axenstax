@@ -255,8 +255,7 @@ fn values_the_first_tick_would_overflow_on_are_refused() {
     assert_refused_for(&h, bytes, "a burning cell", "cell");
     h.server.fire.restore_cells(&[]);
 
-    let (view, _) = h.server.lava.checkpoint_view(&h.server.world, &h.server.loaded_columns);
-    h.server.lava.restore_checkpoint(&h.server.world, &h.server.loaded_columns, &view, 255);
+    h.server.lava.set_slow_for_test(255);
     let bytes = h.server.checkpoint_ungated().unwrap();
     assert_refused_for(&h, bytes, "lava's phase", "lava");
 }

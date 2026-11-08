@@ -95,11 +95,16 @@ quinn = "0.11"
 # pinned to a commit on its public repo. NATIVE-ONLY: it must never enter the wasm32 graph (the
 # browser has no QUIC and no sockets). The one `fray-relays` copy in the graph is
 # the one fray-net itself depends on; do not add a second.
-decented-net = { package = "fray-net", git = "https://github.com/forgesworn/fray", rev = "1018cb6e792037f75cab96079030f2d936a12ce5" }
+decented-net = { package = "fray-net", git = "https://github.com/forgesworn/fray", rev = "c1623463f7bb94c419fd17ecf473f77cf2d63287" }
 # The Keep invite link, finding it in pasted text, the saved-Keeps file (keeps.json) and the rule for
 # believing a return pass: one crate shared with the other games, from the same Fray revision as
 # `decented-net`. NATIVE-ONLY like `decented-net` (the web build has no Keeps); keep both on one rev.
-fray-keep = { git = "https://github.com/forgesworn/fray", rev = "1018cb6e792037f75cab96079030f2d936a12ce5" }
+fray-keep = { git = "https://github.com/forgesworn/fray", rev = "c1623463f7bb94c419fd17ecf473f77cf2d63287" }
+# The stored-authority types (`PersistBatch`, `StoredRecord`, the batch limits) the Keep record set is
+# built against. NATIVE-ONLY like the two above, same revision; keep all three on one rev. `authority`
+# alone: the session runner stays off, and on native the default features are on anyway through
+# `decented-net`.
+fray-session = { git = "https://github.com/forgesworn/fray", rev = "c1623463f7bb94c419fd17ecf473f77cf2d63287", default-features = false, features = ["authority"] }
 # WebSocket transport for the dedicated server (and a native client that joins
 # it). Plain `ws` only — TLS for the browser is terminated by the Caddy front in
 # the Docker image, so the engine never needs a TLS stack here. `futures-util`

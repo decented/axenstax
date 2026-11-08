@@ -8,7 +8,7 @@
 //!
 //! ```text
 //! magic         b"axenstax/authority-checkpoint\0"
-//! schema        u16 (5)
+//! schema        u16 (6)
 //! protocol      u32   PROTOCOL_VERSION
 //! save format   u32   SAVE_FORMAT_VERSION
 //! worldgen      u32   the world's generator version
@@ -16,7 +16,7 @@
 //! binding       [32]  SHA-256 of seed, worldgen, creative and difficulty
 //! pop key id    [16]  SHA256(b"axenstax/pop-key-id/v1\0" || pop_secret)[..16]
 //! tick          u64   the completed tick
-//! volatile            `volatile.rs`: the clock, the modes, the streamer and two phases
+//! volatile            `volatile.rs`: the clock, the modes, the streamer, phases and lava cursors
 //! manifest            `records.rs`: the root of the tree, (key, SHA-256)
 //! seal          [32]  SHA-256 of everything before it
 //! ```
@@ -69,6 +69,8 @@ mod codec;
 mod deaths;
 mod manifest;
 mod players;
+mod record_set;
+mod lava_records;
 mod records;
 mod restore;
 mod volatile;
@@ -78,14 +80,18 @@ use sha2::{Digest, Sha256};
 use crate::server::GameServer;
 
 pub(crate) use manifest::StoredRecords;
+pub(crate) use record_set::RecordSet;
+#[cfg(test)]
+pub(crate) use records::file_piece_batch;
 pub(crate) use records::RECORDS_DIR;
 #[cfg(test)]
 pub(crate) use records::{FILE_PIECE_BYTES, MAX_RECORD_BYTES, Tree};
 
 pub(crate) const CHECKPOINT_MAGIC: &[u8] = b"axenstax/authority-checkpoint\0";
 /// 5: `world.dat` bound in fixed pieces, and all that grows with the world in stored
-/// records. Nothing relies on an earlier one.
-pub(crate) const SCHEMA: u16 = 5;
+/// records. 6: lava's stable queue pieces, monotonic cursors and source sections.
+/// Nothing relies on an earlier one.
+pub(crate) const SCHEMA: u16 = 6;
 /// The session-image cap of migration v0.1 (handoff §6, choice 1).
 pub(crate) const MAX_CHECKPOINT_BYTES: usize = 1 << 20;
 
@@ -288,6 +294,12 @@ pub(crate) fn state_families() -> Vec<(u8, &'static str)> {
     records::FAMILIES.to_vec()
 }
 
+/// A record's digest as a manifest binds it.
+#[cfg(test)]
+pub(crate) fn record_digest(bytes: &[u8]) -> [u8; 32] {
+    records::sha256(bytes)
+}
+
 /// The key of every manifest record and state piece it binds, and each one's bytes.
 #[cfg(test)]
 pub(crate) fn bound_record_files(server: &GameServer) -> Result<Vec<(Vec<u8>, Vec<u8>)>, String> {
@@ -321,7 +333,9 @@ pub(crate) fn commit_and_read_bound(
     // What each record's reader takes for nothing there.
     let state = records::StateRecords {
         layout,
-        lava: counts(4),
+        lava_spread: Vec::new(),
+        lava_retract: Vec::new(),
+        lava_sources: Vec::new(),
         exposure: counts(1),
         water: counts(4),
         cells: counts(8),
@@ -433,14 +447,28 @@ impl GameServer {
     /// called by `--keep-world` yet; a runner's `last` step will. `Err`: this persist's
     /// records aren't all there, so no checkpoint can be restored from it.
     pub(crate) fn persist_authority(&self) -> Result<(), String> {
-        self.try_save()?;
-        self.write_bound_records()
+        self.persist_authority_set().map(|_| ())
     }
 
-    /// The second half of [`Self::persist_authority`]: what a checkpoint now binds.
+    /// [`Self::persist_authority`], returning the record set it bound: the save's own
+    /// `world.dat` and sidecars cut into records by [`Self::build_record_set`]'s code, the
+    /// state records and the tree written to `authority/`, and the bound keys kept for the
+    /// next set's `removed`.
+    pub(crate) fn persist_authority_set(&self) -> Result<RecordSet, String> {
+        let (world_dat, rows) = self.try_save_returning(self.selected_local_personal.as_ref())?;
+        let set = self.record_set_of(&world_dat, rows, &self.stored_records.bound_keys())?;
+        records::commit(&crate::save::world_dir(&self.world_name), set.state_pieces(), &set.tree.nodes)?;
+        self.stored_records.set_bound_keys(set.keys());
+        Ok(set)
+    }
+
+    /// What a checkpoint now binds, written: for the tests that change a record after a persist.
     pub(crate) fn write_bound_records(&self) -> Result<(), String> {
         let bound = self.bound_records()?;
-        records::commit(&crate::save::world_dir(&self.world_name), &bound.pieces, &bound.tree.nodes)
+        records::commit(&crate::save::world_dir(&self.world_name), &bound.pieces, &bound.tree.nodes)?;
+        let keys = bound.flat.iter().map(|(key, _)| key.clone()).chain(bound.tree.nodes.iter().map(|(key, _)| key.clone())).collect();
+        self.stored_records.set_bound_keys(keys);
+        Ok(())
     }
 
     fn bound_records(&self) -> Result<Bound, String> {

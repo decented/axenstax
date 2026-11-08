@@ -7,7 +7,7 @@
 //! - **Modes:** what a dedicated server sets when it is built, so a restored one
 //!   runs the same passes.
 //! - **Streamer:** its settled anchors, one a player.
-//! - **Sims:** the phase of lava and the clock of leaf decay.
+//! - **Sims:** the phase of lava, the clock of leaf decay, and each lava queue's cursor.
 //!
 //! So the image is bounded by constants and the player count, whatever the world holds.
 //! The rest is the same kind of state and grows with the world, so it is stored records
@@ -16,8 +16,9 @@
 //! - **Layout:** which chunks are live, which are evicted and which columns count
 //!   as loaded. A load holds every saved chunk live, so this is what puts the
 //!   stream-out state back (handoff §6, choice 11). Bytes stay in the records.
-//! - **Lava and water:** sources as the difference from a rescan (an ocean's whole set
-//!   is far past the cap), and their queues in order.
+//! - **Water:** sources as the difference from a rescan (an ocean's whole set is far past
+//!   the cap), and its queues in order.
+//! - **Lava** (`lava_records.rs`): the same, in forms a drain doesn't rewrite.
 //! - **Exposure clocks:** each cell's (in no save; 20 B a cell, and nothing prunes it).
 //! - **Cell sims:** fire with its timers (`MAX_ACTIVE_FIRE` holds a run's ignitions, but a
 //!   load re-adopts every fire block a column kept when it went out of memory), the
@@ -34,7 +35,8 @@ use ahash::AHashSet;
 use super::codec::{Malformed, Reader, Writer};
 use super::records::StateRecords;
 use crate::block_update::{ScheduleKind, ScheduledUpdate};
-use crate::fluids::FluidCheckpoint;
+use crate::fluids::{FluidCheckpoint, LavaCheckpoint, PositionedQueue};
+use super::lava_records;
 use crate::server::{GameServer, ServerPlayer};
 use crate::server_stream::ColumnStreamer;
 use crate::sim_clock::SavedClock;
@@ -55,8 +57,10 @@ pub(super) struct Volatile {
     layout: Vec<ChunkColumnLayout>,
     fire: Vec<(Pos, u64, u8)>,
     water: FluidCheckpoint,
-    lava: FluidCheckpoint,
+    lava: LavaCheckpoint,
     lava_slow: u8,
+    lava_spread_head: u64,
+    lava_retract_head: u64,
     leaf: crate::leaf_decay::LeafDigestView,
     scheduler_pending: Vec<Pos>,
     scheduler_due: Vec<(u64, ScheduledUpdate)>,
@@ -87,7 +91,7 @@ fn sorted<T: Ord>(mut v: Vec<T>) -> Vec<T> {
     v
 }
 
-fn write_list(w: &mut Writer, cells: &[Pos]) {
+pub(super) fn write_list(w: &mut Writer, cells: &[Pos]) {
     w.count(cells.len());
     for &p in cells {
         w.pos(p);
@@ -100,7 +104,7 @@ fn read_list(r: &mut Reader<'_>) -> Result<Vec<Pos>, Malformed> {
 }
 
 /// A list that is written sorted, refused otherwise: each set has one form.
-fn read_sorted_list(r: &mut Reader<'_>) -> Result<Vec<Pos>, Malformed> {
+pub(super) fn read_sorted_list(r: &mut Reader<'_>) -> Result<Vec<Pos>, Malformed> {
     let cells = read_list(r)?;
     strictly_increasing(&cells, |c| *c)?;
     Ok(cells)
@@ -127,8 +131,7 @@ pub(super) fn write(w: &mut Writer, s: &GameServer) -> Result<(), String> {
 pub(super) fn state_records(s: &GameServer) -> Result<StateRecords, String> {
     let mut layout = Writer::uncapped();
     write_layout(&mut layout, s)?;
-    let mut lava = Writer::uncapped();
-    write_fluid(&mut lava, &s.lava.checkpoint_view(&s.world, &s.loaded_columns).0);
+    let (lava_extra, lava_missing) = s.lava.sources_from_rescan(&s.world, &s.loaded_columns);
     let mut water = Writer::uncapped();
     write_fluid(&mut water, &s.water.checkpoint_view(&s.world, &s.loaded_columns));
     let mut cells = Writer::uncapped();
@@ -146,7 +149,9 @@ pub(super) fn state_records(s: &GameServer) -> Result<StateRecords, String> {
     }
     Ok(StateRecords {
         layout: layout.into_bytes(),
-        lava: lava.into_bytes(),
+        lava_spread: lava_records::spread_pieces(s.lava.spread_queue())?,
+        lava_retract: lava_records::retract_pieces(s.lava.retract_queue())?,
+        lava_sources: lava_records::source_sections(&lava_extra, &lava_missing),
         exposure: exposure.into_bytes(),
         water: water.into_bytes(),
         cells: cells.into_bytes(),
@@ -165,8 +170,9 @@ pub(super) fn section_sizes(s: &GameServer) -> Result<Vec<(&'static str, usize)>
         Ok(w.len())
     }
     let water = s.water.checkpoint_view(&s.world, &s.loaded_columns);
-    let (lava, _) = s.lava.checkpoint_view(&s.world, &s.loaded_columns);
+    let (lava_extra, lava_missing) = s.lava.sources_from_rescan(&s.world, &s.loaded_columns);
     let state = state_records(s)?;
+    let bytes_of = |pieces: &[(u32, Vec<u8>)]| pieces.iter().map(|(_, piece)| piece.len()).sum::<usize>();
     Ok(vec![
         ("clock", size(|w| { write_clock(w, s); Ok(()) })?),
         ("modes", size(|w| { write_modes(w, s); Ok(()) })?),
@@ -177,8 +183,12 @@ pub(super) fn section_sizes(s: &GameServer) -> Result<Vec<(&'static str, usize)>
         ("record: cell sims", state.cells.len()),
         ("record: players", state.players.len()),
         ("record: corpses", state.corpses.len()),
-        ("record: lava", state.lava.len()),
-        ("record:   lava sources", 12 * (lava.extra.len() + lava.missing.len())),
+        ("record: lava spread pieces", bytes_of(&state.lava_spread)),
+        ("record: lava spread pieces, how many", state.lava_spread.len()),
+        ("record: lava retract pieces", bytes_of(&state.lava_retract)),
+        ("record: lava source sections", state.lava_sources.iter().map(|(_, section)| section.len()).sum()),
+        ("record: lava source sections, how many", state.lava_sources.len()),
+        ("record:   lava sources", 12 * (lava_extra.len() + lava_missing.len())),
         ("record: exposure", state.exposure.len()),
         ("record:   exposed cells", s.world.pop_exposure.len()),
     ])
@@ -215,6 +225,8 @@ pub(super) fn read(r: &mut Reader<'_>) -> Result<Volatile, Malformed> {
     let streamer = read_streamer(r)?;
     let lava_slow = r.u8()?;
     let leaf_tick = r.u64()?;
+    let lava_spread_head = r.u64()?;
+    let lava_retract_head = r.u64()?;
     let no_fluid = || FluidCheckpoint { extra: Vec::new(), missing: Vec::new(), spread: Vec::new(), retract: Vec::new() };
     Ok(Volatile {
         clock,
@@ -229,8 +241,10 @@ pub(super) fn read(r: &mut Reader<'_>) -> Result<Volatile, Malformed> {
         layout: Vec::new(),
         fire: Vec::new(),
         water: no_fluid(),
-        lava: no_fluid(),
+        lava: LavaCheckpoint::default(),
         lava_slow,
+        lava_spread_head,
+        lava_retract_head,
         leaf: (Vec::new(), Vec::new(), leaf_tick),
         scheduler_pending: Vec::new(),
         scheduler_due: Vec::new(),
@@ -469,6 +483,8 @@ fn read_fluid(r: &mut Reader<'_>) -> Result<FluidCheckpoint, Malformed> {
 fn write_sims(w: &mut Writer, s: &GameServer) {
     w.u8(s.lava.slow_phase());
     w.u64(s.leaf_decay.digest_view().2);
+    w.u64(s.lava.spread_queue().head());
+    w.u64(s.lava.retract_queue().head());
 }
 
 /// The record of the sims that follow what the world holds.
@@ -561,6 +577,13 @@ pub(super) fn cell_in_range(&(x, y, z): &Pos) -> bool {
     [x, y, z].iter().all(|v| (-LIMIT..=LIMIT).contains(v))
 }
 
+/// The entries behind the cursor too: a restore writes them back, so they are state.
+fn lava_in_range(l: &LavaCheckpoint) -> bool {
+    l.extra.iter().chain(&l.missing).all(cell_in_range)
+        && l.retract.drained().iter().chain(l.retract.iter()).all(cell_in_range)
+        && l.spread.drained().iter().chain(l.spread.iter()).all(|&(x, y, z, _)| cell_in_range(&(x, y, z)))
+}
+
 fn fluid_in_range(f: &FluidCheckpoint) -> bool {
     f.extra.iter().chain(&f.missing).chain(&f.retract).all(cell_in_range)
         && f.spread.iter().all(|&(x, y, z, _)| cell_in_range(&(x, y, z)))
@@ -595,7 +618,11 @@ impl Volatile {
             Ok(value)
         }
         (self.loaded, self.layout) = whole(&state.layout, read_layout)?;
-        self.lava = whole(&state.lava, read_fluid)?;
+        let (drained, live) = lava_records::read_spread(self.lava_spread_head, &state.lava_spread)?;
+        self.lava.spread = PositionedQueue::restored(self.lava_spread_head, drained, live);
+        let (drained, live) = lava_records::read_retract(self.lava_retract_head, &state.lava_retract)?;
+        self.lava.retract = PositionedQueue::restored(self.lava_retract_head, drained, live);
+        (self.lava.extra, self.lava.missing) = lava_records::read_source_sections(&state.lava_sources)?;
         self.water = whole(&state.water, read_fluid)?;
         whole(&state.cells, |r| read_cells(r, self))?;
         self.players = whole(&state.players, super::players::read_all)?;
@@ -645,7 +672,7 @@ impl Volatile {
         let (check, decay, _) = &self.leaf;
         let cells_in_range = self.fire.iter().all(|c| cell_in_range(&c.0))
             && fluid_in_range(&self.water)
-            && fluid_in_range(&self.lava)
+            && lava_in_range(&self.lava)
             && check.iter().all(cell_in_range)
             && decay.iter().all(|&(x, y, z, _)| cell_in_range(&(x, y, z)))
             && self.scheduler_pending.iter().all(cell_in_range)

@@ -1276,7 +1276,7 @@ the wire nor the save format.
 **Shape.** A hybrid (Keep handoff §6, choice 1): volatile state in the bytes, and
 the digest of a tree of stored records naming every record the checkpoint binds. A
 world doesn't fit the 1 MiB cap as an image, and one digest does, at any size. The
-layout, in order: magic, schema `u16` (5), `PROTOCOL_VERSION`, save format, `worldgen_version`, the
+layout, in order: magic, schema `u16` (6), `PROTOCOL_VERSION`, save format, `worldgen_version`, the
 seed widened to `u64`, the config binding (SHA-256 of seed, worldgen version,
 creative and difficulty), the pop key id, the completed tick, the volatile
 sections, the manifest's root, and a seal (SHA-256 of everything before it; a checksum,
@@ -1306,9 +1306,9 @@ world holds, about 2.4 KB at the widest server:
   strike and the world's active ticks and work;
 - the server's modes (machines, lightning, sim distance and so on), and the streamer's
   settled anchors, one a player;
-- lava's spread phase; leaf decay's clock.
+- lava's spread phase and each lava queue's cursor; leaf decay's clock.
 
-**State in records** (`records.rs`, keys `l`, `q`, `p`, `f`, `s`, `u`, `k` + a `u32` piece number).
+**State in records** (`records.rs`, keys `l`, `p`, `f`, `s`, `u`, `k` + a `u32` piece number; lava's own forms are `q`, `r` and `x`, below).
 The same kind of state, read and range-checked by the same readers (`Volatile::take_state`), but it
 grows with the world, so it lies in stored records rather than the image. Each is cut at 64 KiB:
 - the chunk layout (`l`): per column, which sections are live, which are evicted, whether
@@ -1316,9 +1316,9 @@ grows with the world, so it lies in stored records rather than the image. Each i
   saved chunk live and marks it `persist`, so this is what puts stream-out state
   back. A column can hold sections past `0..=MAX_CHUNK_Y`: a light write conjures an
   empty one just below the floor;
-- lava (`q`) and water (`f`): their queues in order, plus the difference of their sources from a
-  rescan (water registers every water cell of a column, so an ocean's whole set would be past the
-  cap, but flowing cells are not sources until a reload);
+- water (`f`): its queues in order, plus the difference of its sources from a rescan (water
+  registers every water cell of a column, so an ocean's whole set would be past the cap, but
+  flowing cells are not sources until a reload);
 - each cell's Proof-of-Play exposure clock (`p`, `World::pop_exposure`, in no save, 20 B a
   cell and never pruned);
 - the cell sims (`s`): fire with its timers (`MAX_ACTIVE_FIRE` holds a run's ignitions, but a
@@ -1336,15 +1336,48 @@ grows with the world, so it lies in stored records rather than the image. Each i
   kind and owner goes (pets have no stable id). A save still waits for the pass: it would
   otherwise lose a dead pet's row and cargo.
 
+**Lava in forms a drain doesn't rewrite** (`lava_records.rs`). A `last` batch must hold every record as
+it stands at that step, so a record that changes wholesale every tick can't be staged early and can outgrow the
+batch. Lava's queue was that record: taking the front of a queue cut by offset shifts every byte after it, while a
+queue can hold hours of work. So:
+- the spread queue (`q`) and the retract queue (`r`), key + a `u32` piece number, are in immutable pieces of
+  `QUEUE_PIECE_ENTRIES` (1,024) entries, 13,312 B and 12,288 B at most, part of the schema. An entry's place in
+  the queue gives its piece and its place in it. Only an append touches a piece, and only the last. The cursor, how
+  many entries have been taken since the queue was created, is in the image. So a drain changes the image alone,
+  and a full piece wholly behind the cursor stops being bound: the record set's `removed` holds it. When the queue
+  empties, the cursor stays monotonic and any partial piece stays for later appends; an empty queue on a piece
+  boundary has no piece. In memory (`fluids::PositionedQueue`) a queue also keeps the
+  taken entries of its first piece, up to 1,023 (about 16 KB for spread and 12 KB for retract), so that piece can be written
+  back as it was. It gives exactly what a `VecDeque` gives, in the same order, on client and server;
+- the difference of lava's sources from a rescan (`x` + the section's three big-endian `i32`s) is one record for each
+  16-cube section holding any, at most 49,160 B, and a function of the set alone. One flowing cell rewrites one section.
+  Multiple dense sections can still exceed a batch in one tick; the adapter must withhold `last` in that case.
+
+A restore reads `q`, `r` and `x` only after every one has matched its digest, then refuses a cursor past the end, one
+in a piece no longer bound, or one that leaves a whole piece behind it, a piece that isn't full and isn't the last, or a
+gap in the numbers. A cursor at a partial piece's end is a valid empty queue, and a cursor on a piece boundary needs
+no record if the queue is empty. Two runs write the same pieces if they have made the same pushes and pops since the queue
+was created (or a load made it). Two runs of one saved world fed the same do that, and a restored run carries the cursor and the
+entries behind it, so it goes on writing the uninterrupted run's bytes. Two runs that reach the same queue by different
+histories can differ, in the cursor and those entries, even when empty: they play alike and their
+checkpoints and state hashes differ. No lava queue is in `world.dat`, so a plain load starts it from what the load wakes.
+
 **`world.dat` in pieces** (`records.rs`, key `w` + a `u32` piece number). The file stays whole where a
 save writes it, with no second copy, and is bound one digest per `FILE_PIECE_BYTES` (64 KiB, part of the
 schema, not derived from the batch limit) of its stored bytes, so it can pass the runner's record-value
 limit. An empty file is one empty piece; a file of a whole number of pieces has no empty one after them.
 A restore cuts what is on disk and compares every piece before anything reads the file, so a flipped,
 missing, swapped, stale or surplus piece is `invalid-checkpoint`, naming the piece. One changed row rewrites
-its piece, and every later piece if it changes the row's length. `records::file_piece_batch` gives a future
-`PersistBatch` the piece writes and the keys to remove when the file shrinks, so the store equals the bound
-set. No key of this family carries a persona identifier.
+its piece, and every later piece if it changes the row's length. `records::file_piece_batch` gives the piece
+writes and the keys to remove when the file shrinks, so the store equals the bound set; the record set
+builder calls it. No key of this family carries a persona identifier.
+
+**The record set** (`record_set.rs`) is built from memory by one pure function,
+`GameServer::build_record_set`: the `w` pieces of the `world.dat` a save would write, each non-empty
+chunk, each present joiner's sidecar, the state pieces and the tree as records with their bytes
+(Fray `StoredRecord`s); the entries held by digest only (the sidecars of absent joiners, `m`, `h`); and
+`removed`, the keys the previous bound set had and this one hasn't. A save and the set share the encoders
+(`encode_world_dat`, `joiner_rows_in_memory`), so a save writes what it always did.
 
 **Who writes them.** `GameServer::persist_authority`, which is `try_save` and then the records:
 the state records above and the manifest's tree, in `authority/` in the world's folder, one file per key
