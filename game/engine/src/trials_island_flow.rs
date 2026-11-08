@@ -119,6 +119,9 @@ impl crate::GameState {
             // The island is a place, not a run: no scenario, no race.
             self.scenario = None;
             self.active_trial = None;
+            // Build from what is stored now: the gallery or a profile import
+            // may have saved since the game's copy was loaded.
+            self.trial_bests.refresh_from_disk();
             let layout = build::layout_for(&self.trial_bests);
             let pending = IslandLayout::columns(crate::chunk::CHUNK_SIZE as i32);
             let arrival = match self.island_arrival.take() {

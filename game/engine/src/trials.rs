@@ -86,6 +86,7 @@ pub struct TrialBest {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct TrialBests {
     /// Timed (Race) trials → best time + ghost, keyed by trial id.
+    #[serde(default)]
     pub bests: std::collections::BTreeMap<String, TrialBest>,
     /// Binary (Challenge) trials you've completed, keyed by display name (what
     /// the lobby list shows). `#[serde(default)]` so older stores load clean.
@@ -180,10 +181,8 @@ impl TrialBests {
         crate::trials_unlock::refresh_in(crate::trials_unlock::catalogue(), self)
     }
 
-    /// Fold in another store's progress — everything except the rival ghosts,
-    /// which an import deliberately replaces. Sets union; a race keeps the
-    /// faster best. Used by `save` so a copy loaded earlier (the game's own)
-    /// never drops what another (the gallery, a profile import) wrote since.
+    /// Fold in another store's progress — everything except the rival ghosts
+    /// (`merge` adds those). Sets union; a race keeps the faster best.
     pub fn absorb_progress(&mut self, other: &TrialBests) {
         for (id, incoming) in &other.bests {
             if self.bests.get(id).is_none_or(|mine| incoming.ticks < mine.ticks) {
@@ -673,27 +672,135 @@ pub fn format_time(ticks: u32) -> String {
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 const TRIALS_STORAGE_KEY: &str = "axenstax_trials";
 
+/// Display names that changed since the last release, `(old, new)`. Completions
+/// (and remembered ways) are keyed by display name, so a store written under
+/// an old name is rewritten to the new one on load and on every save: the
+/// trial stays ticked, what hangs off it stays unlocked and it does not come
+/// back wearing the "new" mark. Only trials that survived are listed; the
+/// ones merged away in the Two Acts rework keep no tick (spec §8b). Race
+/// bests are keyed by race id, which did not change.
+const OLD_TRIAL_NAMES: &[(&str, &str)] = &[
+    (
+        "Suit Up — forge four pieces of iron gear, then test them on the raiders",
+        "Suit Up — forge a full suit of iron armour, then test it on the raiders",
+    ),
+    (
+        "Bring the Wall Down — a raider hides behind a stone wall — blow it open and finish the job",
+        "Bring the Wall Down — blast open the raider's wall, rig a pressure-plate trap, or blow a tower sky-high",
+    ),
+    (
+        "The Plumber — carry a pond across the room and fill a dry trough",
+        "The Plumber — carry a pond across to a dry trough, or build your own water park",
+    ),
+    (
+        "Camp Cook — roast three meals over a crackling campfire",
+        "Camp Cook — roast three meals, cook one and eat it, or catch a fish and cook that",
+    ),
+    (
+        "Power Plant — make your own electricity, no switch required",
+        "Power Plant — make your own electricity with a water wheel, a windmill in the storm, or a hand crank",
+    ),
+    (
+        "Two of Every Kind — Feed the cows their favourite wheat until love blooms and a calf appears.",
+        "Two of Every Kind — feed a pair wheat until a baby appears, or pair a horse with a donkey for a mule",
+    ),
+    (
+        "Saddle Up — Climb aboard a horse and feel the world move under you.",
+        "Saddle Up — climb aboard a horse or a Nostrich and feel the world move under you",
+    ),
+    (
+        "Best Friend — Win over a wild wolf with bones until it sits at your side, loyal for life.",
+        "Best Friend — win over a wolf with bones, or a cat, parrot or fox with its favourite food",
+    ),
+];
+
 impl TrialBests {
-    /// Load persisted bests (absent/corrupt → empty; never panics). Seeds the
-    /// unlocked set from existing completions (§A.5: nobody loses a visible
-    /// trial), in memory; it is written with the next save.
+    /// Rewrite old display names to their new ones (completions and ways),
+    /// and mark a renamed, finished trial's card as opened so it never wears
+    /// the "new" mark. Returns `true` if anything changed. Run before the
+    /// unlock back-fill, so the prerequisites hold under the new names.
+    pub fn upgrade_old_names(&mut self) -> bool {
+        self.upgrade_names_with(OLD_TRIAL_NAMES)
+    }
+
+    fn upgrade_names_with(&mut self, table: &[(&str, &str)]) -> bool {
+        let mut changed = false;
+        for (old, new) in table {
+            if self.completed_challenges.remove(*old) {
+                self.completed_challenges.insert((*new).to_string());
+                changed = true;
+                let token = crate::trials_unlock::catalogue()
+                    .iter()
+                    .find(|e| e.display_name == *new)
+                    .map(|e| e.token);
+                if let Some(token) = token {
+                    self.cards_opened.insert(token.to_string());
+                }
+            }
+            if let Some(ways) = self.ways_done.remove(*old) {
+                self.ways_done.entry((*new).to_string()).or_default().extend(ways);
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// Load persisted bests (absent/corrupt → empty; never panics). Old
+    /// display names are rewritten first, then the unlocked set is seeded
+    /// from existing completions (§A.5: nobody loses a visible trial), in
+    /// memory; it is written with the next save.
     pub fn load() -> Self {
-        let mut bests = load_raw().map(|j| Self::from_json(&j)).unwrap_or_default();
+        load_raw().map(|j| Self::from_stored(&j)).unwrap_or_default()
+    }
+
+    /// A stored copy's text brought up to date: parsed, old names rewritten,
+    /// then the unlocked set seeded.
+    fn from_stored(json: &str) -> Self {
+        let mut bests = Self::from_json(json);
+        bests.upgrade_old_names();
         bests.refresh_unlocks();
         bests
     }
 
-    /// Persist these bests (best-effort — a write failure just means they don't
-    /// survive the session, never a crash). Merges with what is on disk first
-    /// (`absorb_progress`): the game holds a copy loaded at start-up while the
-    /// lobby gallery and a profile import load and save their own, and a plain
-    /// overwrite from the older copy would drop what they wrote.
-    pub fn save(&self) {
-        let mut out = self.clone();
-        if let Some(disk) = load_raw() {
-            out.absorb_progress(&Self::from_json(&disk));
+    /// Fold a stored copy (the raw file or localStorage text) into this one:
+    /// `merge` (sets union, the faster best and the faster rival win), after
+    /// bringing the stored copy's old names up to date. `false` when the text
+    /// does not parse as a store, in which case nothing is folded in.
+    fn fold_in_stored(&mut self, raw: &str) -> bool {
+        match serde_json::from_str::<TrialBests>(raw) {
+            Ok(mut stored) => {
+                stored.upgrade_old_names();
+                self.merge(&stored);
+                true
+            }
+            Err(_) => false,
         }
-        save_raw(&out.to_json());
+    }
+
+    /// Fold in whatever is stored right now without writing anything: what
+    /// the gallery or a profile import saved since this copy was loaded.
+    /// Call before building something from this copy (the island).
+    pub fn refresh_from_disk(&mut self) {
+        if let Some(raw) = load_raw() {
+            self.fold_in_stored(&raw);
+        }
+    }
+
+    /// Persist these bests (best-effort — a write failure just means they don't
+    /// survive the session, never a crash). First folds what is stored into
+    /// `self`, rivals included: the game holds a copy loaded at start-up while
+    /// the lobby gallery and a profile import load and save their own, and
+    /// each save must neither drop what another wrote nor leave this copy
+    /// stale (the island builds from the game's copy). A stored file that does
+    /// not parse is copied aside (`trials.json.bad-<ms>`, native) before it is
+    /// replaced.
+    pub fn save(&mut self) {
+        if let Some(raw) = load_raw() {
+            if !self.fold_in_stored(&raw) {
+                keep_unreadable(&raw);
+            }
+        }
+        save_raw(&self.to_json());
     }
 }
 
@@ -705,13 +812,51 @@ fn trials_path() -> std::path::PathBuf {
 fn load_raw() -> Option<String> {
     std::fs::read_to_string(trials_path()).ok()
 }
+/// Write `contents` to `path` without ever leaving a half-written file there:
+/// to a temp file in the same directory, flushed, then renamed into place.
+#[cfg(not(target_arch = "wasm32"))]
+fn write_atomic(path: &std::path::Path, contents: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let tmp = {
+        let mut name = path.file_name().unwrap_or_default().to_os_string();
+        name.push(".tmp");
+        path.with_file_name(name)
+    };
+    let result = (|| {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(contents.as_bytes())?;
+        f.sync_all()?;
+        std::fs::rename(&tmp, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+/// Copy an unreadable store next to the real one as `<name>.bad-<ms>`.
+#[cfg(not(target_arch = "wasm32"))]
+fn backup_unreadable_at(path: &std::path::Path, raw: &str, ms: u64) -> Option<std::path::PathBuf> {
+    let mut name = path.file_name()?.to_os_string();
+    name.push(format!(".bad-{ms}"));
+    let dest = path.with_file_name(name);
+    std::fs::write(&dest, raw).ok()?;
+    Some(dest)
+}
+#[cfg(not(target_arch = "wasm32"))]
+fn keep_unreadable(raw: &str) {
+    if let Some(dest) = backup_unreadable_at(&trials_path(), raw, crate::postcard::now_ms()) {
+        log::warn!("Trials store did not parse; kept a copy at {}", dest.display());
+    }
+}
 #[cfg(not(target_arch = "wasm32"))]
 fn save_raw(json: &str) {
     let p = trials_path();
     if let Some(parent) = p.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let _ = std::fs::write(p, json);
+    if let Err(e) = write_atomic(&p, json) {
+        log::warn!("Trials store not saved: {e}");
+    }
 }
 #[cfg(target_arch = "wasm32")]
 fn local_storage() -> Option<web_sys::Storage> {
@@ -721,10 +866,38 @@ fn local_storage() -> Option<web_sys::Storage> {
 fn load_raw() -> Option<String> {
     local_storage()?.get_item(TRIALS_STORAGE_KEY).ok()?
 }
+/// No second copy on the web: a backup would only spend quota that trial
+/// progress needs.
+#[cfg(target_arch = "wasm32")]
+fn keep_unreadable(_raw: &str) {}
+/// Trial progress always wins the origin's localStorage quota: when the write
+/// fails, postcards (the optional thing) are deleted oldest first, retrying
+/// after each, until it succeeds or none are left.
 #[cfg(target_arch = "wasm32")]
 fn save_raw(json: &str) {
-    if let Some(store) = local_storage() {
-        let _ = store.set_item(TRIALS_STORAGE_KEY, json);
+    let Some(store) = local_storage() else { return };
+    if store.set_item(TRIALS_STORAGE_KEY, json).is_ok() {
+        return;
+    }
+    let mut entries = Vec::new();
+    for i in 0..store.length().unwrap_or(0) {
+        let Some(key) = store.key(i).ok().flatten() else { continue };
+        if !key.starts_with(crate::postcard::WEB_KEY_PREFIX) {
+            continue;
+        }
+        let ms = store
+            .get_item(&key)
+            .ok()
+            .flatten()
+            .and_then(|v| v.split_once(':').and_then(|(ms, _)| ms.parse().ok()))
+            .unwrap_or(0);
+        entries.push((key, ms));
+    }
+    for key in crate::postcard::eviction_order(&entries) {
+        let _ = store.remove_item(&key);
+        if store.set_item(TRIALS_STORAGE_KEY, json).is_ok() {
+            return;
+        }
     }
 }
 
@@ -1172,5 +1345,138 @@ mod tests {
         assert!(game.cards_opened.contains("fish"), "the gallery's mark survives the game's save");
         assert_eq!(game.best("sprint").map(|b| b.ticks), Some(250));
         assert!(game.is_challenge_done("Chop a tree"));
+    }
+
+    #[test]
+    fn a_store_written_under_the_old_names_keeps_its_ticks_unlocks_and_no_new_mark() {
+        use crate::trials_unlock::{is_new, is_unlocked};
+        let old = serde_json::json!({
+            "bests": {},
+            "completed_challenges": [
+                "Saddle Up — Climb aboard a horse and feel the world move under you.",
+                "Best Friend — Win over a wild wolf with bones until it sits at your side, loyal for life.",
+                "Suit Up — forge four pieces of iron gear, then test them on the raiders",
+                "The Plumber — carry a pond across the room and fill a dry trough",
+                "Chop a tree"
+            ],
+            "rivals": {}
+        })
+        .to_string();
+        let b = TrialBests::from_stored(&old);
+        for (token, new_name) in [
+            ("ride", "Saddle Up — climb aboard a horse or a Nostrich and feel the world move under you"),
+            ("armour-up", "Suit Up — forge a full suit of iron armour, then test it on the raiders"),
+        ] {
+            assert!(b.is_challenge_done(new_name), "{token} keeps its tick under the new name");
+            assert!(!is_new(token, &b), "{token} was already done: no new mark");
+        }
+        assert!(b.is_challenge_done("Chop a tree"), "names that did not change are untouched");
+        assert!(b.completed_challenges.iter().all(|n| !OLD_TRIAL_NAMES.iter().any(|(o, _)| o == n)));
+        // What hangs off the renamed trials is unlocked from the first load.
+        for token in ["rail-rider", "rancher", "champion", "obsidian"] {
+            assert!(is_unlocked(token, &b), "{token} stays reachable");
+            assert!(b.unlocked.contains(token), "{token} is seeded into the unlocked set");
+        }
+        assert!(!is_new("bucket", &b), "a finished, renamed trial is not new");
+        assert!(is_new("rancher", &b), "a trial that genuinely appeared is still new");
+        // Loading again changes nothing.
+        let again = TrialBests::from_stored(&b.to_json());
+        assert_eq!(again, b);
+    }
+
+    #[test]
+    fn the_alias_table_maps_old_display_names_onto_live_trials() {
+        let cat = crate::trials_unlock::catalogue();
+        for (old, new) in OLD_TRIAL_NAMES {
+            assert!(cat.iter().any(|e| e.display_name == *new), "{new:?} is not a live trial name");
+            assert!(!cat.iter().any(|e| e.display_name == *old), "{old:?} is still a live name");
+        }
+        let olds: std::collections::BTreeSet<_> = OLD_TRIAL_NAMES.iter().map(|(o, _)| o).collect();
+        assert_eq!(olds.len(), OLD_TRIAL_NAMES.len());
+    }
+
+    #[test]
+    fn remembered_ways_follow_a_renamed_trial() {
+        let (old, new) = OLD_TRIAL_NAMES[3];
+        let mut b = TrialBests::default();
+        b.mark_way_done(old, "Roast three");
+        b.mark_way_done(new, "Cook and eat");
+        assert!(b.upgrade_old_names());
+        assert_eq!(b.ways_done(new), vec!["Cook and eat", "Roast three"]);
+        assert!(b.ways_done(old).is_empty());
+        assert!(!b.upgrade_old_names(), "nothing left to rewrite");
+    }
+
+    #[test]
+    fn two_copies_each_saving_a_different_rival_lose_neither() {
+        let rival = |label: &str, ticks: u32| RivalGhost { label: label.to_string(), ticks, ghost: GhostRecording::new() };
+        // `stored` stands in for the file; a save folds it in, then writes.
+        let mut stored = String::new();
+        let save = |me: &mut TrialBests, stored: &mut String| {
+            if !stored.is_empty() {
+                assert!(me.fold_in_stored(stored));
+            }
+            *stored = me.to_json();
+        };
+        let mut game = TrialBests::default();
+        let mut gallery = TrialBests::default();
+        game.rivals.insert("sprint".into(), rival("Axo", 500));
+        save(&mut game, &mut stored);
+        gallery.rivals.insert("marathon".into(), rival("Stax", 900));
+        gallery.mark_card_opened("fish");
+        save(&mut gallery, &mut stored);
+        // The gallery's save also taught the game's stale copy nothing yet…
+        assert!(!game.rivals.contains_key("marathon"));
+        // …until the game saves again: nothing is lost, and its own copy is now fresh.
+        save(&mut game, &mut stored);
+        let on_disk = TrialBests::from_json(&stored);
+        assert!(on_disk.rivals.contains_key("sprint") && on_disk.rivals.contains_key("marathon"));
+        assert!(game.rivals.contains_key("marathon"), "the saving copy learns what was on disk");
+        assert!(game.cards_opened.contains("fish"));
+        // The faster rival of the same race wins.
+        let mut slow = TrialBests::default();
+        slow.rivals.insert("sprint".into(), rival("Slow", 800));
+        save(&mut slow, &mut stored);
+        assert_eq!(TrialBests::from_json(&stored).rivals["sprint"].label, "Axo");
+    }
+
+    #[test]
+    fn a_store_that_does_not_parse_is_refused_and_can_be_copied_aside() {
+        let mut b = TrialBests::default();
+        b.mark_challenge_done("Chop a tree");
+        for junk in ["", "{", "not json", r#"{"completed_challenges": 5}"#] {
+            assert!(!b.fold_in_stored(junk), "{junk:?}");
+        }
+        assert!(b.is_challenge_done("Chop a tree"));
+        // A store with every key missing is still a readable store.
+        assert!(b.fold_in_stored("{}"));
+
+        let dir = std::env::temp_dir().join(format!("axenstax_trials_bad_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("trials.json");
+        std::fs::write(&path, "{ half a file").unwrap();
+        let kept = backup_unreadable_at(&path, "{ half a file", 1234).expect("backup written");
+        assert_eq!(kept.file_name().unwrap(), "trials.json.bad-1234");
+        assert_eq!(std::fs::read_to_string(&kept).unwrap(), "{ half a file");
+        // The write that follows replaces the original and leaves the copy.
+        write_atomic(&path, &b.to_json()).unwrap();
+        assert_eq!(TrialBests::from_json(&std::fs::read_to_string(&path).unwrap()), b);
+        assert_eq!(std::fs::read_to_string(&kept).unwrap(), "{ half a file");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_atomic_write_replaces_the_file_and_leaves_no_temp_file() {
+        let dir = std::env::temp_dir().join(format!("axenstax_trials_atomic_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("trials.json");
+        write_atomic(&path, "one").unwrap();
+        write_atomic(&path, "two").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "two");
+        let names: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("trials.json")]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
