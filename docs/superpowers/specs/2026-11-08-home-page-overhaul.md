@@ -111,6 +111,8 @@ One page for everything about other people. It used to appear only on screens 13
 
 Hosting stays on a world's page (§4.2), because you host a particular world. The Friends column and the Signet-unreadable strip leave the home page. The strip's warning and Disconnect move to the top of this page, and to the notice banner when a host is refused, as now. Red lines are unchanged: people you already know, no directory, no social framing.
 
+As built (slice B): the page is `play_together_ui`; each section is a card. Wide screens (safe width of 980 pt or more before scaling) put Join a game and Friends in the left column and Your address, My Servers and My Keeps in the right; narrower screens stack them in that order. "Join a game" polls the same LAN browser as the dialog (it lives while the page is up and is dropped when the player leaves it) and keeps its room-code text in `MenuState.join_code`; Connect or Enter in the field emits `JoinGame`, a heard room emits `JoinLanRoom`, exactly as the dialog did. The Join Game dialog itself stays, untouched, because `axenstax://` launch links open it. Body text on the page is at least 15 pt (the hosted Friends column was 11 pt) and every button is at least 44 pt tall, scaled by the same `Metrics` as Home. My Keeps still appears only when the player has a saved Keep. The Signet-unreadable strip is above the cards at every width.
+
 ## 6. World pictures
 
 - **For now, every world card and the Continue hero show a placeholder.** It is a small isometric diorama drawn with the Trials diorama code, chosen by mode and world type (grass and oak for survival, quartz and glass for creative, sand for a desert seed), on that mode's colour band. It is never an empty grey box.
@@ -122,6 +124,8 @@ Hosting stays on a world's page (§4.2), because you host a particular world. Th
 - **AxeNStax Official:** Hash Dash and Satori Rush, as large cards in the gallery style, each with Play. They still work offline.
 - **Look up a creator** (web only): the address field (hint "Their address (npub1…)") and the results, with Play and Adopt skin. It is hidden on native, where Browse only printed "Live browse is a PWA feature".
 - The side column leaves the home page.
+
+As built (slice B): `stash_page_ui`. Each official game is one card (a small block picture on the game's colour, its name, "Race" or "Speedrun", one plain line, and a Play bar); the whole card is one keyboard target, so the gold ring goes round it and Enter plays. Two across from a safe width of 760 pt, one column below. The lines are in `worlds_ui::words` ("Mine as much as you can in three minutes." and "Race to mine your first Satori. Leave any time and carry on later."): no scores, counts or money words, pinned by a test. On the web, "Look up a creator" follows the cards and its results are cards with Play or Adopt skin.
 
 ## 8. The Workshop
 
@@ -141,7 +145,7 @@ Hosting stays on a world's page (§4.2), because you host a particular world. Th
 | Trials tile | Home, beside Continue |
 | + Create New World | "+ New world" on Your worlds; "Create a world" in the empty hero |
 | The Workshop / Reset | Workshop tile / its ⋯ "Clear the Workshop floor…" |
-| Join Game | Play together → Join a game |
+| Join Game | Play together → Join a game (the dialog is kept, unchanged, for launch links: `axenstax://` opens it over any page) |
 | Import world… / Import from folder / Import a web profile… | Your worlds → Import ▾ (renamed, §4) |
 | Restore from file / Export everything (web) | Your worlds header (renamed, §4) |
 | ☁ Stash / 🎮 Join / 🖧 Host explainers (web) | Play together tile opens the Join/Host explainer; the Stash explainer is no longer needed (the More to play page works on web) |
@@ -160,8 +164,8 @@ Hosting stays on a world's page (§4.2), because you host a particular world. Th
   - `ui_safe_area.rs`: the helper, scale and tests.
   - `home_ui.rs`: home.
   - `worlds_ui.rs`: the world grid and world detail.
-  - `play_together_ui.rs`: hosts the existing `friends_ui` / `lan_ui` / `signet_contacts::ui` / keeps pieces.
-  - `stash_page_ui.rs` (the More to play page).
+  - `play_together_ui.rs`: hosts the existing `friends_ui` / `lan_ui` / `signet_contacts::ui` / keeps pieces (native only).
+  - `stash_page_ui.rs` (the More to play page; the web's creator look-up and its async plumbing moved here from `menu.rs`).
   - `world_picture.rs`: placeholder choice (capture comes later).
 - `menu.rs` keeps `MenuAction`, `MenuState` and the dialogs; its old lobby body is deleted, not left beside the new one.
 - Escape on any inner page (and in the gallery) goes back one page and never quits. The `lib.rs` lobby-Escape guard covers every `LobbyPage`.
@@ -177,3 +181,13 @@ Hosting stays on a world's page (§4.2), because you host a particular world. Th
 The owner expects "Stash" to give way to **your Keep** (Fray design, `keep-and-ingle.md`: "your Keep is where your stuff lives"; in a game "Host on my Keep", for backup "Back up to my Keep"). When that lands: the per-world "Keep in your Stash" entry in More ⋯ becomes the Keep backup or "promote to my Keep" action; "Host for friends online" may become "Host on my Keep"; My Keeps stays on Play together. Those labels live in one place (`lobby_words`) so the rename is one edit. To avoid a clash, the old "The Stash" side panel (official games and browsing a creator's open stash) is renamed **More to play** now. Component names (Fray, Ingle, Bothy, WildBloom Node) never appear in player UI.
 
 As built (slice A): `lobby_words` is the `words` module at the top of `game/engine/src/worlds_ui.rs`.
+
+## 12. Coming from the mySignet contacts work (not built here)
+
+Upstream, mySignet added an optional **contact card** (a name and a photo pointer) on invite request and accept, and a **blur** flag. The Signet roadmap adds a **combined sign-in and online-play approval**. None of it is built in this overhaul. When that work lands, the Friends section on Play together:
+
+- shows the contact's name and photo on their row, in place of the short npub that stands in for a contact with no name today;
+- honours the blur flag, so a blurred photo stays blurred until the player chooses otherwise;
+- follows the combined approval, so signing in and agreeing to play online is one step in Signet rather than two.
+
+The npub is still the identity: a card is a label on it, never a replacement (and never hex). The Friends row keeps its Join button and the admission rule (Kin or Kith) unchanged. Photos are a pointer the player's own device fetches; the game never uploads or stores a picture on an AxeNStax-operated server (red line 3).

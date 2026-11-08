@@ -4,9 +4,8 @@
 //!
 //! `menu::draw_main_menu` draws the notice, the dialogs and the Trials gallery
 //! first; when none of them owns the screen it calls [`draw`]. Home is
-//! `home_ui`, Your worlds is `worlds_ui` (+ `world_detail_ui`). Play together
-//! and More to play host the existing Friends column and official-games
-//! column under a `‹ Back` header for now.
+//! `home_ui`, Your worlds is `worlds_ui` (+ `world_detail_ui`), Play together
+//! is `play_together_ui` (native) and More to play is `stash_page_ui`.
 
 use crate::brand;
 use crate::menu::{LobbyPage, MenuAction, MenuState};
@@ -69,8 +68,16 @@ pub(crate) fn draw(ctx: &egui::Context, state: &mut MenuState, host: HostOnline)
                 action = match state.page {
                     LobbyPage::Home => crate::home_ui::draw(ui, state, &m, keys),
                     LobbyPage::Worlds => crate::worlds_ui::draw(ui, state, &m, host, keys),
-                    LobbyPage::PlayTogether => draw_play_together(ui, state, &m),
-                    LobbyPage::Stash => draw_more_to_play(ui, state, &m),
+                    #[cfg(not(target_arch = "wasm32"))]
+                    LobbyPage::PlayTogether => crate::play_together_ui::draw(ui, state, &m, keys),
+                    // The web build has no multiplayer: its Play together tile
+                    // explains the desktop app, so this page is never reached.
+                    #[cfg(target_arch = "wasm32")]
+                    LobbyPage::PlayTogether => {
+                        state.go(LobbyPage::Home);
+                        MenuAction::None
+                    }
+                    LobbyPage::Stash => crate::stash_page_ui::draw(ui, state, &m, keys),
                 };
             });
         });
@@ -169,65 +176,111 @@ pub(crate) fn status_line(ui: &mut egui::Ui, m: &Metrics, text: &str) {
     ui.label(egui::RichText::new(text).size(m.body()).color(egui::Color32::from_rgb(170, 190, 150)));
 }
 
-// ---------------------------------------------------------------------------
-// Play together and More to play (hosting the existing columns for now)
-// ---------------------------------------------------------------------------
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
 
-fn draw_play_together(ui: &mut egui::Ui, state: &mut MenuState, m: &Metrics) -> MenuAction {
-    #[allow(unused_mut)]
-    let mut action = MenuAction::None;
-    if page_header(ui, m, "Play together", |_| {}) {
-        state.go(LobbyPage::Home);
-    }
-    ui.add_space(m.px(12.0));
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        // The Signet files can't be read: the way out (Disconnect) is here.
-        if crate::signet_contacts::view().unreadable {
-            egui::Frame::new()
-                .fill(brand::SURFACE)
-                .corner_radius(egui::CornerRadius::same(8))
-                .inner_margin(egui::Margin::same(10))
-                .show(ui, |ui| {
-                    if crate::signet_contacts::ui::draw_unreadable_strip(ui)
-                        && state.notice.as_deref().is_some_and(crate::signet_contacts::ui::is_host_refusal)
-                    {
-                        state.notice = None;
-                    }
-                });
-            ui.add_space(m.px(10.0));
-        }
-        if ui.add(button(m, "Join a game…", Kind::Primary)).clicked() {
-            state.dialog = crate::menu::MenuDialog::JoinDirect { address: String::new() };
-        }
-        ui.add_space(m.px(12.0));
-        let w = ui.available_width().min(m.px(560.0));
-        ui.allocate_ui(egui::vec2(w, ui.available_height()), |ui| {
-            ui.set_width(w);
-            let a = crate::friends_ui::draw_friends_column(ui, state);
-            if !matches!(a, MenuAction::None) {
-                action = a;
-            }
-        });
-    }
-    action
-}
+    const SIZES: [(&str, f32, f32); 4] =
+        [("tv", 1920.0, 1080.0), ("desktop", 1280.0, 800.0), ("tablet", 834.0, 1112.0), ("phone", 390.0, 844.0)];
 
-fn draw_more_to_play(ui: &mut egui::Ui, state: &mut MenuState, m: &Metrics) -> MenuAction {
-    let mut action = MenuAction::None;
-    if page_header(ui, m, crate::worlds_ui::words::MORE_TO_PLAY, |_| {}) {
-        state.go(LobbyPage::Home);
-    }
-    ui.add_space(m.px(12.0));
-    let w = ui.available_width().min(m.px(560.0));
-    ui.allocate_ui(egui::vec2(w, ui.available_height()), |ui| {
-        ui.set_width(w);
-        egui::ScrollArea::vertical().id_salt("more_to_play").auto_shrink([false, false]).show(ui, |ui| {
-            let a = crate::menu::draw_stash_column(ui, state);
-            if !matches!(a, MenuAction::None) {
-                action = a;
+    /// Every text the frame drew: its rect and the smallest font size in it.
+    fn texts_with_size(output: &egui::FullOutput) -> Vec<(String, egui::Rect, f32)> {
+        fn walk(shape: &egui::epaint::Shape, out: &mut Vec<(String, egui::Rect, f32)>) {
+            match shape {
+                egui::epaint::Shape::Text(t) => {
+                    let size = t.galley.job.sections.iter().map(|s| s.format.font_id.size).fold(f32::MAX, f32::min);
+                    out.push((t.galley.text().to_string(), t.galley.rect.translate(t.pos.to_vec2()), size));
+                }
+                egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+                _ => {}
             }
-        });
-    });
-    action
+        }
+        let mut out = Vec::new();
+        output.shapes.iter().for_each(|c| walk(&c.shape, &mut out));
+        out
+    }
+
+    /// The page on a screen of this size, a few frames in (egui measures first).
+    fn draw_page(page: LobbyPage, w: f32, h: f32, with_fixture: bool) -> (egui::FullOutput, egui::Rect) {
+        let ctx = egui::Context::default();
+        let mut state = MenuState::new();
+        if with_fixture {
+            crate::fixture_together(&mut state);
+        }
+        state.go(page);
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w, h));
+        let mut out = Default::default();
+        for _ in 0..4 {
+            let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
+            out = ctx.run(input, |ctx| {
+                let _ = crate::menu::draw_main_menu(ctx, &mut state);
+            });
+        }
+        (out, crate::ui_safe_area::safe_rect(screen))
+    }
+
+    #[test]
+    fn play_together_and_more_to_play_use_body_text_of_15_or_more_and_stay_in_the_safe_width() {
+        for page in [LobbyPage::PlayTogether, LobbyPage::Stash] {
+            for (name, w, h) in SIZES {
+                let (out, safe) = draw_page(page, w, h, true);
+                let seen = texts_with_size(&out);
+                assert!(seen.len() > 5, "{page:?} on {name} drew almost nothing: {seen:?}");
+                for (text, rect, size) in &seen {
+                    assert!(*size >= 15.0, "{page:?} on {name}: {text:?} is {size} pt");
+                    assert!(
+                        rect.min.x >= safe.min.x - 1.0 && rect.max.x <= safe.max.x + 1.0,
+                        "{page:?} on {name}: {text:?} at {rect:?} crosses the safe width {safe:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn play_together_has_its_sections_and_more_to_play_its_two_games() {
+        let names = |page: LobbyPage| {
+            let (out, _) = draw_page(page, 1920.0, 1080.0, true);
+            texts_with_size(&out).into_iter().map(|(t, _, _)| t).collect::<Vec<_>>()
+        };
+        let together = names(LobbyPage::PlayTogether);
+        for want in ["Play together", "Join a game", "Games on this network", "Room code", "Connect", "Friends", "Your address", "My Servers"] {
+            assert!(together.iter().any(|t| t == want), "no {want:?} on Play together: {together:?}");
+        }
+        let more = names(LobbyPage::Stash);
+        for want in ["More to play", "AxeNStax Official", "Hash Dash", "Satori Rush"] {
+            assert!(more.iter().any(|t| t == want), "no {want:?} on More to play: {more:?}");
+        }
+        // Look up a creator is web only.
+        assert!(!more.iter().any(|t| t.contains("Look up")), "{more:?}");
+    }
+
+    #[test]
+    fn the_two_pages_step_back_to_home() {
+        for page in [LobbyPage::PlayTogether, LobbyPage::Stash] {
+            let mut menu = MenuState::new();
+            menu.go(page);
+            menu.step_back();
+            assert_eq!(menu.page, LobbyPage::Home);
+        }
+    }
+
+    #[test]
+    fn the_lan_browser_lives_only_while_something_that_lists_games_is_up() {
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 800.0));
+        let mut state = MenuState::new();
+        let mut frame = |state: &mut MenuState| {
+            let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
+            let _ = ctx.run(input, |ctx| {
+                let _ = crate::menu::draw_main_menu(ctx, state);
+            });
+        };
+        state.go(LobbyPage::PlayTogether);
+        frame(&mut state);
+        assert!(state.lan.is_some(), "Play together lists the games on this network");
+        state.go(LobbyPage::Home);
+        frame(&mut state);
+        assert!(state.lan.is_none(), "leaving the page frees the beacon port");
+    }
 }

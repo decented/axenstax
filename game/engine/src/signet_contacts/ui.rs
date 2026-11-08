@@ -4,6 +4,8 @@
 
 use super::pairing_flow::Phase;
 use super::View;
+use crate::lobby_pages_ui::{button, Kind};
+use crate::ui_safe_area::Metrics;
 
 pub const HEADING: &str = "Signet contacts";
 pub const CONNECT_LEAD: &str = "Use the people you already know in Signet here. Signet stays in charge of the list.";
@@ -44,11 +46,11 @@ pub fn is_host_refusal(notice: &str) -> bool {
 
 /// A narrow lobby's way out of an unreadable Signet. Returns true once the player
 /// has pressed Disconnect.
-pub fn draw_unreadable_strip(ui: &mut egui::Ui) -> bool {
+pub fn draw_unreadable_strip(ui: &mut egui::Ui, m: &Metrics) -> bool {
     let mut pressed = false;
     ui.horizontal_wrapped(|ui| {
-        ui.label(dim(UNREADABLE_SHORT));
-        if ui.small_button(DISCONNECT).clicked() {
+        ui.label(dim(UNREADABLE_SHORT, m));
+        if ui.add(button(m, DISCONNECT, Kind::Secondary)).clicked() {
             super::disconnect();
             pressed = true;
         }
@@ -82,23 +84,23 @@ pub fn offers_disconnect(connected: bool, unreadable: bool) -> bool {
     connected || unreadable
 }
 
-fn dim(text: &str) -> egui::RichText {
-    egui::RichText::new(text).size(11.0).color(egui::Color32::from_rgb(150, 150, 160))
+fn dim(text: &str, m: &Metrics) -> egui::RichText {
+    egui::RichText::new(text).size(m.body()).color(egui::Color32::from_rgb(150, 150, 160))
 }
 
 /// Draw the row. Calls straight into the service; never blocks.
 /// `player_relays` is the player's "Your relays" list — a new pairing asks
 /// Signet to answer on its first relay (D4).
-pub fn draw(ui: &mut egui::Ui, player_relays: &[String]) {
+pub fn draw(ui: &mut egui::Ui, player_relays: &[String], m: &Metrics) {
     super::note_column_drawn();
     let view: View = super::view();
     let now = super::unix_now();
 
-    ui.label(egui::RichText::new(HEADING).size(14.0).strong());
+    ui.label(egui::RichText::new(HEADING).size(m.px(17.0)).strong());
     if let Some(n) = view.notice {
         ui.horizontal(|ui| {
-            ui.label(dim(n));
-            if ui.small_button("OK").clicked() {
+            ui.label(dim(n, m));
+            if ui.add(button(m, "OK", Kind::Secondary)).clicked() {
                 super::dismiss_notice();
             }
         });
@@ -106,67 +108,67 @@ pub fn draw(ui: &mut egui::Ui, player_relays: &[String]) {
 
     match view.phase.unwrap_or(Phase::Idle) {
         Phase::Waiting { carrier } => {
-            ui.label(dim(SCAN_LINE));
-            crate::menu::draw_qr(ui, &carrier, 200.0);
+            ui.label(dim(SCAN_LINE, m));
+            crate::menu::draw_qr(ui, &carrier, m.px(200.0));
             ui.horizontal(|ui| {
-                if ui.small_button(COPY_LINK).clicked() {
+                if ui.add(button(m, COPY_LINK, Kind::Secondary)).clicked() {
                     ui.ctx().copy_text(carrier.clone());
                 }
-                if ui.small_button(CANCEL).clicked() {
+                if ui.add(button(m, CANCEL, Kind::Secondary)).clicked() {
                     super::cancel_pairing();
                 }
             });
-            ui.label(dim(WAITING));
+            ui.label(dim(WAITING, m));
         }
         Phase::Code { code } => {
-            ui.label(egui::RichText::new(code).size(30.0).strong().monospace());
-            ui.label(dim(CODE_LINE));
+            ui.label(egui::RichText::new(code).size(m.px(30.0)).strong().monospace());
+            ui.label(dim(CODE_LINE, m));
             ui.horizontal(|ui| {
-                if ui.button(CONTINUE).clicked() {
+                if ui.add(button(m, CONTINUE, Kind::Primary)).clicked() {
                     super::continue_pairing();
                 }
-                if ui.small_button(CANCEL).clicked() {
+                if ui.add(button(m, CANCEL, Kind::Secondary)).clicked() {
                     super::cancel_pairing();
                 }
             });
         }
         Phase::TimedOut => {
-            ui.label(dim(TIMED_OUT));
+            ui.label(dim(TIMED_OUT, m));
             ui.horizontal(|ui| {
-                if ui.small_button(TRY_AGAIN).clicked() {
+                if ui.add(button(m, TRY_AGAIN, Kind::Secondary)).clicked() {
                     super::start_pairing(player_relays);
                 }
-                if ui.small_button(CANCEL).clicked() {
+                if ui.add(button(m, CANCEL, Kind::Secondary)).clicked() {
                     super::cancel_pairing();
                 }
             });
         }
         Phase::Idle if offers_disconnect(view.connected, view.unreadable) => {
             if view.connected {
-                ui.label(dim(&connected_line(view.people, view.last_synced, now)));
+                ui.label(dim(&connected_line(view.people, view.last_synced, now), m));
             }
             if view.unreadable {
-                ui.label(dim(UNREADABLE));
+                ui.label(dim(UNREADABLE, m));
             }
             if view.stale {
-                ui.label(dim(STALE));
+                ui.label(dim(STALE, m));
             }
             if view.truncated {
-                ui.label(dim(TRUNCATED));
+                ui.label(dim(TRUNCATED, m));
             }
             ui.horizontal(|ui| {
-                if view.connected && ui.small_button(SYNC_NOW).clicked() {
+                if view.connected && ui.add(button(m, SYNC_NOW, Kind::Secondary)).clicked() {
                     super::sync_now();
                 }
-                if ui.small_button(DISCONNECT).clicked() {
+                if ui.add(button(m, DISCONNECT, Kind::Secondary)).clicked() {
                     super::disconnect();
                 }
             });
-            ui.label(dim(DISCONNECT_HINT));
+            ui.label(dim(DISCONNECT_HINT, m));
         }
         Phase::Idle => {
-            ui.label(dim(CONNECT_LEAD));
-            if ui.button(CONNECT_BUTTON).clicked() {
+            ui.label(dim(CONNECT_LEAD, m));
+            if ui.add(button(m, CONNECT_BUTTON, Kind::Secondary)).clicked() {
                 super::start_pairing(player_relays);
             }
         }
@@ -206,7 +208,7 @@ mod tests {
         // Home page overhaul §5: the strip with Disconnect sits at the top of
         // Play together at every screen width (no width test gates it), and
         // the host refusal's notice carries its own Disconnect button.
-        let page = include_str!("../lobby_pages_ui.rs");
+        let page = include_str!("../play_together_ui.rs");
         let body = page.split("#[cfg(test)]").next().unwrap();
         let at = body.find("draw_unreadable_strip").expect("Play together draws the strip");
         let gate = body[..at].rfind("view().unreadable").expect("the strip is gated on an unreadable Signet");

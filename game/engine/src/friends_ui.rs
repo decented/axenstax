@@ -11,7 +11,9 @@
 #![cfg(not(target_arch = "wasm32"))]
 
 use crate::contacts::Contact;
+use crate::lobby_pages_ui::{button, Kind};
 use crate::menu::MenuAction;
+use crate::ui_safe_area::Metrics;
 use crate::rendezvous::payload::Candidate;
 
 /// The one-line explanation under "Your address". Pinned by a unit test so the
@@ -34,44 +36,55 @@ pub fn short_npub(npub: &str) -> String {
 /// Draw the "Your address" block: heading, QR, the abbreviated npub, a Copy
 /// button, and the lead line. `npub` is `None` for a guest, in which case the
 /// block explains what signing in unlocks rather than showing nothing.
-pub fn draw_your_address(ui: &mut egui::Ui, npub: Option<&str>) {
-    ui.add_space(8.0);
-    ui.label(
-        egui::RichText::new("Your address")
-            .size(16.0)
-            .color(egui::Color32::from_rgb(226, 214, 178))
-            .strong(),
-    );
-    ui.add_space(4.0);
+///
+/// `m` is `None` in the profile chip's menu (its own heading and small sizes)
+/// and the lobby's metrics on the Play together page, where the section card
+/// draws the heading and everything is body-sized with a hit-sized Copy.
+pub fn draw_your_address(ui: &mut egui::Ui, npub: Option<&str>, m: Option<&Metrics>) {
+    let text = |chip: f32| m.map_or(chip, |m| m.body());
+    if m.is_none() {
+        ui.add_space(8.0);
+        ui.label(
+            egui::RichText::new(crate::worlds_ui::words::YOUR_ADDRESS)
+                .size(16.0)
+                .color(egui::Color32::from_rgb(226, 214, 178))
+                .strong(),
+        );
+        ui.add_space(4.0);
+    }
 
     let Some(npub) = npub else {
         ui.label(
             egui::RichText::new(
                 "Sign in with your Signet persona to get an address friends can invite.",
             )
-            .size(11.0)
+            .size(text(11.0))
             .color(egui::Color32::from_rgb(150, 150, 160)),
         );
         return;
     };
 
-    crate::menu::draw_qr(ui, npub, 132.0);
+    crate::menu::draw_qr(ui, npub, m.map_or(132.0, |m| m.px(160.0)));
     ui.add_space(4.0);
     ui.horizontal(|ui| {
         ui.label(
             egui::RichText::new(short_npub(npub))
-                .size(11.0)
+                .size(text(11.0))
                 .monospace()
                 .color(egui::Color32::from_rgb(200, 200, 210)),
         );
-        if ui.small_button("Copy").clicked() {
+        let copied = match m {
+            Some(m) => ui.add(button(m, "Copy", Kind::Secondary)).clicked(),
+            None => ui.small_button("Copy").clicked(),
+        };
+        if copied {
             ui.ctx().copy_text(npub.to_string());
         }
     });
     ui.add_space(2.0);
     ui.label(
         egui::RichText::new(your_address_lead())
-            .size(11.0)
+            .size(text(11.0))
             .color(egui::Color32::from_rgb(150, 150, 160)),
     );
 }
@@ -387,84 +400,59 @@ pub fn draw_online_panel(ui: &mut egui::Ui, view: &OnlinePanelView) -> Option<Ha
     hand_to
 }
 
-/// The "Friends & servers" column: your address, the people you know, the paste
-/// box, then the saved-servers list.
+/// The Friends section of Play together: the contact list with Join, Add a
+/// friend, and the Signet contacts row. The section card draws the heading and
+/// [`friends_lead`].
 ///
 /// This lists **people you already know**. There is nothing to browse and
 /// nobody new to find here — that is the point (CLAUDE.md red lines 1 and 4).
-pub fn draw_friends_column(ui: &mut egui::Ui, state: &mut crate::menu::MenuState) -> MenuAction {
+pub fn draw_friends_section(ui: &mut egui::Ui, state: &mut crate::menu::MenuState, m: &Metrics) -> MenuAction {
     let mut action = MenuAction::None;
+    let dim = egui::Color32::from_rgb(150, 150, 160);
 
-    egui::ScrollArea::vertical()
-        .id_salt("friends_column")
-        .show(ui, |ui| {
-            let identity = crate::signet::native_signer::load_identity();
-            draw_your_address(ui, identity.npub().as_deref());
-            ui.add_space(10.0);
-            ui.separator();
-            ui.add_space(6.0);
+    if !state.contacts.iter().any(shows_in_friends) {
+        ui.label(egui::RichText::new(friends_empty_line()).size(m.body()).color(dim));
+    }
 
-            ui.label(egui::RichText::new("Friends").size(16.0).strong());
-            ui.label(
-                egui::RichText::new(friends_lead())
-                    .size(11.0)
-                    .color(egui::Color32::from_rgb(150, 150, 160)),
-            );
-            ui.add_space(4.0);
-
-            if !state.contacts.iter().any(shows_in_friends) {
-                ui.label(
-                    egui::RichText::new(friends_empty_line())
-                        .size(11.0)
-                        .color(egui::Color32::from_rgb(150, 150, 160)),
-                );
-            }
-
-            // Snapshot so the row loop can stage an action without holding a
-            // borrow of `state`.
-            let rows: Vec<(String, String, bool)> = state
-                .contacts
-                .iter()
-                .filter(|c| shows_in_friends(c))
-                .map(|c| (hex::encode(c.pubkey), contact_row_label(c), can_join(c)))
-                .collect();
-            for (persona_hex, label, joinable) in rows {
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(&label).size(13.0));
-                    if joinable && ui.small_button("Join").clicked() {
-                        action = MenuAction::JoinContact {
-                            persona_hex: persona_hex.clone(),
-                            display_name: label.clone(),
-                        };
-                    }
+    // Snapshot so the row loop can stage an action without holding a
+    // borrow of `state`.
+    let rows: Vec<(String, String, bool)> = state
+        .contacts
+        .iter()
+        .filter(|c| shows_in_friends(c))
+        .map(|c| (hex::encode(c.pubkey), contact_row_label(c), can_join(c)))
+        .collect();
+    for (persona_hex, label, joinable) in rows {
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), m.hit()),
+            egui::Layout::right_to_left(egui::Align::Center),
+            |ui| {
+                if joinable && ui.add(button(m, "Join", Kind::Primary).min_size(egui::vec2(m.px(72.0), m.hit()))).clicked() {
+                    action = MenuAction::JoinContact {
+                        persona_hex: persona_hex.clone(),
+                        display_name: label.clone(),
+                    };
+                }
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    ui.add(egui::Label::new(egui::RichText::new(&label).size(m.body())).truncate());
                 });
-            }
+            },
+        );
+        ui.add_space(m.px(6.0));
+    }
 
-            ui.add_space(8.0);
-            if ui.button("Add a friend").clicked() {
-                state.dialog = crate::menu::MenuDialog::AddFriend {
-                    input: String::new(),
-                    error: None,
-                };
-            }
+    ui.add_space(m.px(8.0));
+    if ui.add(button(m, crate::worlds_ui::words::ADD_A_FRIEND, Kind::Secondary)).clicked() {
+        state.dialog = crate::menu::MenuDialog::AddFriend {
+            input: String::new(),
+            error: None,
+        };
+    }
 
-            ui.add_space(10.0);
-            ui.separator();
-            ui.add_space(6.0);
-            crate::signet_contacts::ui::draw(ui, &state.relays);
-
-            ui.add_space(10.0);
-            ui.separator();
-            let servers_action = crate::menu::draw_my_servers_column_inner(ui, state);
-            if !matches!(servers_action, MenuAction::None) {
-                action = servers_action;
-            }
-            let keeps_action = crate::menu::draw_my_keeps_column_inner(ui, state);
-            if !matches!(keeps_action, MenuAction::None) {
-                action = keeps_action;
-            }
-        });
-
+    ui.add_space(m.px(10.0));
+    ui.separator();
+    ui.add_space(m.px(6.0));
+    crate::signet_contacts::ui::draw(ui, &state.relays, m);
     action
 }
 

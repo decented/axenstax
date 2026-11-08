@@ -222,6 +222,8 @@ pub enum MenuAction {
 /// is **Adopted**. Embedded official scenarios carry their `def` in hand so they
 /// launch with the network off; browsed items download their blob on action.
 #[derive(Clone, Debug)]
+// On native only the two embedded official games exist; the fields are read by the web look-up.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub struct StashItem {
     /// Display label (the Beacon item name / def display-name).
     pub name: String,
@@ -376,6 +378,10 @@ pub struct MenuState {
     /// for the whole session.
     #[cfg(not(target_arch = "wasm32"))]
     pub lan: Option<decented_net::LanBrowser>,
+    /// What the player has typed in Play together's room-code field (a room
+    /// code, a Keep link or a server address). Native only.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub join_code: String,
     /// Native: status line shown after the Export/Import buttons (last
     /// operation result — success or error). Cleared on the next export/import.
     #[cfg(not(target_arch = "wasm32"))]
@@ -409,9 +415,11 @@ pub struct MenuState {
     pub stash_input: String,
     /// Typed items returned by the last browse. The pinned "AxeNStax Official"
     /// section is separate + always present (see `official_stash_items`).
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     pub stash_items: Vec<StashItem>,
     /// Status / error line under the input ("Browsing…", "No items", an error,
     /// or the native "live browse is a PWA feature" note).
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     pub stash_status: Option<String>,
     /// WASM: async Beacon browse result for the column (typed items).
     #[cfg(target_arch = "wasm32")]
@@ -431,7 +439,7 @@ pub struct MenuState {
     #[allow(dead_code)]
     pub stash_sync_msg: Option<String>,
     /// My Servers (Spec A) — the player's saved server list, loaded once.
-    /// Native only: its column moved under `friends_ui::draw_friends_column`,
+    /// Native only: its card sits on the Play together page,
     /// which the web taster never mounts (no multiplayer there).
     #[cfg(not(target_arch = "wasm32"))]
     pub my_servers: crate::my_servers::MyServers,
@@ -598,6 +606,8 @@ impl MenuState {
             profile_export: None,
             #[cfg(not(target_arch = "wasm32"))]
             lan: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            join_code: String::new(),
             #[cfg(not(target_arch = "wasm32"))]
             transfer_status: None,
             #[cfg(not(target_arch = "wasm32"))]
@@ -1381,14 +1391,14 @@ pub(crate) fn draw_loading_overlay(ctx: &egui::Context, world_name: &str) {
 /// "Join" re-resolves the operator npub fresh (native; the web resolve path is
 /// an A-8 follow-up). Visual placement/feel = playtest boundary.
 ///
-/// Drawn as the lower half of `friends_ui::draw_friends_column`, which owns the
-/// scroll area and the "Your address" block above it — hence `_inner`, and
-/// hence no `ScrollArea` of its own (nesting two would give it its own
-/// scrollbar inside the column's).
+/// Drawn as a card on the Play together page (`play_together_ui`), which owns
+/// the scroll area — hence `_inner`, and hence no `ScrollArea` of its own
+/// (nesting two would give it its own scrollbar inside the page's).
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn draw_my_servers_column_inner(
     ui: &mut egui::Ui,
     state: &mut MenuState,
+    m: &crate::ui_safe_area::Metrics,
 ) -> MenuAction {
     fn short_npub(s: &str) -> String {
         if s.len() > 18 {
@@ -1401,17 +1411,16 @@ pub(crate) fn draw_my_servers_column_inner(
     let mut action = MenuAction::None;
     let mut remove_npub: Option<String> = None;
 
-    ui.add_space(8.0);
     ui.label(
         egui::RichText::new("My Servers")
-            .size(18.0)
+            .size(m.px(20.0))
             .color(TITLE_COLOR)
             .strong(),
     );
     ui.add_space(2.0);
     ui.label(
         egui::RichText::new("Servers you've joined. Join by name — the address is looked up fresh.")
-            .size(12.0)
+            .size(m.body())
             .color(SUBTITLE_COLOR),
     );
     ui.add_space(6.0);
@@ -1438,7 +1447,7 @@ pub(crate) fn draw_my_servers_column_inner(
             egui::RichText::new(
                 "No saved servers yet. Join one with an axenstax://npub… link and it'll appear here.",
             )
-            .size(11.0)
+            .size(m.body())
             .color(DIM_TEXT),
         );
     }
@@ -1447,7 +1456,7 @@ pub(crate) fn draw_my_servers_column_inner(
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             if *favourite {
-                ui.label(egui::RichText::new("★").size(13.0).color(TITLE_COLOR));
+                ui.label(egui::RichText::new("★").size(m.body()).color(TITLE_COLOR));
             }
             let title = if name.is_empty() {
                 short_npub(npub)
@@ -1456,28 +1465,28 @@ pub(crate) fn draw_my_servers_column_inner(
             };
             ui.label(
                 egui::RichText::new(title)
-                    .size(14.0)
+                    .size(m.body())
                     .color(TEXT_COLOR)
                     .strong(),
             );
         });
         ui.label(
             egui::RichText::new(short_npub(npub))
-                .size(10.0)
+                .size(m.body())
                 .color(DIM_TEXT),
         );
         if !endpoint.is_empty() {
             ui.label(
                 egui::RichText::new(endpoint.as_str())
-                    .size(10.0)
+                    .size(m.body())
                     .color(DIM_TEXT),
             );
         }
         ui.horizontal(|ui| {
-            if ui.button(egui::RichText::new("Join").size(12.0)).clicked() {
+            if ui.add(crate::lobby_pages_ui::button(m, "Join", crate::lobby_pages_ui::Kind::Primary).min_size(egui::vec2(m.px(72.0), m.hit()))).clicked() {
                 action = MenuAction::JoinGame(format!("axenstax://{npub}"));
             }
-            if ui.button(egui::RichText::new("Remove").size(12.0)).clicked() {
+            if ui.add(crate::lobby_pages_ui::button(m, "Remove", crate::lobby_pages_ui::Kind::Secondary)).clicked() {
                 remove_npub = Some(npub.clone());
             }
         });
@@ -1497,9 +1506,12 @@ pub(crate) fn draw_my_servers_column_inner(
 /// The same block sits under the text box of the Join Game dialog (`draw_my_keeps`), which is
 /// the only place a phone shows it. Visual placement/feel = playtest boundary.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn draw_my_keeps_column_inner(ui: &mut egui::Ui, state: &mut MenuState) -> MenuAction {
-    ui.add_space(8.0);
-    draw_my_keeps(ui, &mut state.keeps, &mut state.keep_forget_armed, &crate::keeps::path(), KeepsLayout::Whole)
+pub(crate) fn draw_my_keeps_column_inner(
+    ui: &mut egui::Ui,
+    state: &mut MenuState,
+    m: &crate::ui_safe_area::Metrics,
+) -> MenuAction {
+    draw_my_keeps(ui, &mut state.keeps, &mut state.keep_forget_armed, &crate::keeps::path(), KeepsLayout::Whole, Some(m))
 }
 
 /// How the My Keeps rows are laid out.
@@ -1516,6 +1528,20 @@ enum KeepsLayout<'a> {
     Folded(&'a mut bool),
 }
 
+/// A My Keeps button: the dialog's small button, or the lobby page's hit-sized one.
+#[cfg(not(target_arch = "wasm32"))]
+fn keeps_button(
+    ui: &mut egui::Ui,
+    m: Option<&crate::ui_safe_area::Metrics>,
+    label: &str,
+    kind: crate::lobby_pages_ui::Kind,
+) -> egui::Response {
+    match m {
+        Some(m) => ui.add(crate::lobby_pages_ui::button(m, label, kind).min_size(egui::vec2(m.px(72.0), m.hit()))),
+        None => ui.button(egui::RichText::new(label).size(12.0)),
+    }
+}
+
 /// The My Keeps block: a heading, then a row per Keep (name, age, Join, Forget). Shared by the
 /// friends column and the Join Game dialog; `layout` says how the rows sit (see `KeepsLayout`).
 /// Returns `JoinKeep` when a Join was tapped, else `None`. A Forget that completes removes the
@@ -1527,7 +1553,11 @@ fn draw_my_keeps(
     forget_armed: &mut Option<String>,
     file: &std::path::Path,
     layout: KeepsLayout<'_>,
+    m: Option<&crate::ui_safe_area::Metrics>,
 ) -> MenuAction {
+    // `m` is `None` in the Join Game dialog (its own sizes) and the lobby's
+    // metrics on the Play together page (body text, hit-sized buttons).
+    let text = |dialog: f32| m.map_or(dialog, |m| m.body());
     let mut action = MenuAction::None;
     if keeps.is_empty() {
         return action;
@@ -1535,7 +1565,7 @@ fn draw_my_keeps(
     let now = crate::keeps::unix_now();
     let rows = crate::keeps::rows(keeps, now);
 
-    ui.label(egui::RichText::new(crate::keeps::MY_KEEPS).size(18.0).color(TITLE_COLOR).strong());
+    ui.label(egui::RichText::new(crate::keeps::MY_KEEPS).size(m.map_or(18.0, |m| m.px(20.0))).color(TITLE_COLOR).strong());
     ui.add_space(6.0);
     ui.separator();
 
@@ -1547,11 +1577,11 @@ fn draw_my_keeps(
     let mut draw_rows = |ui: &mut egui::Ui| {
         for row in rows.iter().take(shown) {
             ui.add_space(6.0);
-            ui.label(egui::RichText::new(row.name.as_str()).size(14.0).color(TEXT_COLOR).strong());
-            ui.label(egui::RichText::new(row.when.as_str()).size(10.0).color(DIM_TEXT));
+            ui.label(egui::RichText::new(row.name.as_str()).size(text(14.0)).color(TEXT_COLOR).strong());
+            ui.label(egui::RichText::new(row.when.as_str()).size(text(10.0)).color(DIM_TEXT));
             let armed = forget_armed.as_deref() == Some(row.host_key.as_str());
             ui.horizontal(|ui| {
-                if ui.button(egui::RichText::new("Join").size(12.0)).clicked() {
+                if keeps_button(ui, m, "Join", crate::lobby_pages_ui::Kind::Primary).clicked() {
                     let invite = keeps
                         .iter()
                         .find(|k| k.host_key == row.host_key)
@@ -1563,7 +1593,7 @@ fn draw_my_keeps(
                     }
                 }
                 let forget_label = if armed { "Forget for sure" } else { "Forget" };
-                if ui.button(egui::RichText::new(forget_label).size(12.0)).clicked()
+                if keeps_button(ui, m, forget_label, crate::lobby_pages_ui::Kind::Secondary).clicked()
                     && crate::keeps::tap_forget(forget_armed, &row.host_key)
                 {
                     forget = Some(row.host_key.clone());
@@ -1573,7 +1603,7 @@ fn draw_my_keeps(
             // the bottom edge of a scrolled area: scroll it into view once, when it appears.
             let seen = egui::Id::new(("keep-forget-seen", row.host_key.as_str()));
             if armed {
-                let said = ui.label(egui::RichText::new(crate::keeps::FORGET_CONFIRM).size(11.0).color(DIM_TEXT));
+                let said = ui.label(egui::RichText::new(crate::keeps::FORGET_CONFIRM).size(text(11.0)).color(DIM_TEXT));
                 if !ui.data(|d| d.get_temp::<bool>(seen).unwrap_or(false)) {
                     ui.data_mut(|d| d.insert_temp(seen, true));
                     said.scroll_to_me(None);
@@ -1602,7 +1632,7 @@ fn draw_my_keeps(
                 } else {
                     format!("More Keeps ({})", rows.len() - JOIN_KEEPS_COMPACT_SHOWN)
                 };
-                if ui.button(egui::RichText::new(label).size(12.0)).clicked() {
+                if keeps_button(ui, m, &label, crate::lobby_pages_ui::Kind::Secondary).clicked() {
                     *expanded = !*expanded;
                 }
             }
@@ -1763,343 +1793,6 @@ fn draw_trial_info_modal(ctx: &egui::Context, state: &mut MenuState) -> MenuActi
         state.trial_info = None;
     }
     action
-}
-
-// ---------------------------------------------------------------------------
-// Stash Column (Prague delivery) — browse an npub's open stash, play / adopt.
-// ---------------------------------------------------------------------------
-
-/// WASM: kick off a Beacon browse of `pubkey_hex` for the Stash Column. Lists
-/// the npub's published items, keeps only the types this build can render
-/// (skin / scenario), and maps them to typed [`StashItem`]s. Result lands in
-/// the returned slot, drained by `poll_stash` each frame. Mirrors
-/// `kick_off_local_fetch` / `game_loop`'s `beacon_browse_slot` pattern.
-#[cfg(target_arch = "wasm32")]
-fn kick_off_stash_browse(
-    pubkey_hex: String,
-) -> std::rc::Rc<std::cell::RefCell<Option<Result<Vec<StashItem>, String>>>> {
-    let slot = std::rc::Rc::new(std::cell::RefCell::new(None));
-    let slot_clone = slot.clone();
-    wasm_bindgen_futures::spawn_local(async move {
-        let result = match crate::open_stash::beacon_list(&pubkey_hex).await {
-            Ok(items) => {
-                let npub = crate::npub::hex_to_npub(&pubkey_hex);
-                let mapped = items
-                    .into_iter()
-                    .filter_map(|it| {
-                        crate::open_stash::classify_content_type(&it.content_type).map(|kind| {
-                            StashItem {
-                                name: it.name,
-                                author_npub: npub.clone(),
-                                kind,
-                                blob_hash: it.blob_hash,
-                                embedded_def: None,
-                            }
-                        })
-                    })
-                    .collect();
-                Ok(mapped)
-            }
-            Err(e) => Err(e),
-        };
-        *slot_clone.borrow_mut() = Some(result);
-    });
-    slot
-}
-
-/// WASM: kick off a Beacon blob download for a Play/Adopt action, tagged with
-/// the item kind so the resolved bytes route to the right `MenuAction`.
-#[cfg(target_arch = "wasm32")]
-fn kick_off_stash_download(
-    blob_hash: String,
-    kind: crate::open_stash::StashItemKind,
-) -> std::rc::Rc<std::cell::RefCell<Option<Result<(crate::open_stash::StashItemKind, Vec<u8>), String>>>> {
-    let slot = std::rc::Rc::new(std::cell::RefCell::new(None));
-    let slot_clone = slot.clone();
-    wasm_bindgen_futures::spawn_local(async move {
-        let result = crate::open_stash::beacon_download(&blob_hash)
-            .await
-            .map(|bytes| (kind, bytes));
-        *slot_clone.borrow_mut() = Some(result);
-    });
-    slot
-}
-
-/// What a Stash item card emitted this frame.
-enum StashCardClick {
-    None,
-    /// Play this scenario — embedded def in hand (offline) or download by hash.
-    Play,
-    /// Adopt this skin — download by hash, apply on next world entry.
-    Adopt,
-}
-
-/// Draw one typed Stash item card (name + author + a single per-kind action).
-fn draw_stash_item_card(ui: &mut egui::Ui, item: &StashItem) -> StashCardClick {
-    let mut click = StashCardClick::None;
-    let frame = egui::Frame::new()
-        .fill(egui::Color32::from_rgb(28, 31, 42))
-        .stroke(egui::Stroke::new(1.0_f32, CARD_BORDER))
-        .corner_radius(egui::CornerRadius::same(6))
-        .inner_margin(egui::Margin::same(12));
-    // Per-kind tag: a published Experience shows its specific flavour ("Race",
-    // "Speedrun") when the def is in hand (the embedded official ones); a browsed
-    // scenario whose def isn't downloaded yet shows the broad "Experience". Skins
-    // need no tag — the Adopt button says it.
-    let tag: Option<(&str, egui::Color32)> = match item.kind {
-        crate::open_stash::StashItemKind::Scenario => Some(match &item.embedded_def {
-            Some(def) => (def.kind.label(), egui::Color32::from_rgb(120, 200, 160)),
-            None => ("Experience", egui::Color32::from_rgb(120, 160, 210)),
-        }),
-        crate::open_stash::StashItemKind::Skin => None,
-    };
-    frame.show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new(&item.name).size(18.0).color(TEXT_COLOR).strong());
-            if let Some((t, col)) = tag {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(egui::RichText::new(t).size(13.0).color(col).strong());
-                });
-            }
-        });
-        ui.label(
-            egui::RichText::new(crate::plan::short_npub(&item.author_npub, 22))
-                .size(15.0)
-                .color(DIM_TEXT),
-        );
-        ui.add_space(4.0);
-        match item.kind {
-            crate::open_stash::StashItemKind::Scenario => {
-                let btn = egui::Button::new(
-                    egui::RichText::new("Play").size(15.0).color(egui::Color32::from_rgb(184, 232, 184)).strong(),
-                )
-                .min_size(egui::vec2(ui.available_width(), 44.0))
-                .fill(egui::Color32::from_rgb(45, 107, 45))
-                .corner_radius(egui::CornerRadius::same(5));
-                if ui.add(btn).clicked() {
-                    click = StashCardClick::Play;
-                }
-            }
-            crate::open_stash::StashItemKind::Skin => {
-                let btn = egui::Button::new(
-                    egui::RichText::new("✦ Adopt skin").size(15.0).color(egui::Color32::from_rgb(255, 224, 178)).strong(),
-                )
-                .min_size(egui::vec2(ui.available_width(), 44.0))
-                .fill(egui::Color32::from_rgb(150, 92, 22))
-                .corner_radius(egui::CornerRadius::same(5));
-                if ui.add(btn).clicked() {
-                    click = StashCardClick::Adopt;
-                }
-            }
-        }
-    });
-    ui.add_space(6.0);
-    click
-}
-
-/// The slim middle lobby column: browse an npub's open stash → Play / Adopt.
-/// The pinned "AxeNStax Official" section (embedded, zero-network) is always
-/// present; a live browse appends the typed items found for the entered npub.
-/// Returns a `MenuAction` (PlayScenario / AdoptSkin) when the player acts.
-pub(crate) fn draw_stash_column(ui: &mut egui::Ui, state: &mut MenuState) -> MenuAction {
-    let mut action = MenuAction::None;
-
-    // Drain async results (PWA). A resolved download becomes the action.
-    #[cfg(target_arch = "wasm32")]
-    {
-        if let Some(slot) = state.stash_browse.clone() {
-            if let Some(result) = slot.borrow_mut().take() {
-                state.stash_browse = None;
-                match result {
-                    Ok(items) => {
-                        state.stash_status = Some(if items.is_empty() {
-                            "They haven't shared any experiences or skins yet.".to_string()
-                        } else {
-                            format!("{} item(s) found.", items.len())
-                        });
-                        state.stash_items = items;
-                    }
-                    Err(e) => state.stash_status = Some(format!("Couldn't look them up: {e}")),
-                }
-            }
-        }
-        if let Some(slot) = state.stash_action_dl.clone() {
-            if let Some(result) = slot.borrow_mut().take() {
-                state.stash_action_dl = None;
-                match result {
-                    Ok((crate::open_stash::StashItemKind::Scenario, bytes)) => {
-                        match crate::scenario::scenario_from_blob_bytes(&bytes) {
-                            Ok(def) => action = MenuAction::PlayScenario { def: Box::new(def) },
-                            Err(e) => state.stash_status = Some(format!("Bad experience: {e}")),
-                        }
-                    }
-                    Ok((crate::open_stash::StashItemKind::Skin, bytes)) => {
-                        action = MenuAction::AdoptSkin { bytes };
-                    }
-                    Err(e) => state.stash_status = Some(format!("Download failed: {e}")),
-                }
-            }
-        }
-    }
-
-    // Look up a creator (web only: on native the live look-up never ran, it
-    // only said so). The page header above carries the page's name.
-    #[cfg(target_arch = "wasm32")]
-    {
-        ui.label(
-            egui::RichText::new(crate::worlds_ui::words::LOOK_UP_CREATOR).size(20.0).color(TITLE_COLOR).strong(),
-        );
-        ui.label(
-            egui::RichText::new("Play the experiences they share and try on their skins.")
-                .size(15.0)
-                .color(SUBTITLE_COLOR),
-        );
-        ui.add_space(8.0);
-        let mut do_browse = false;
-        ui.horizontal(|ui| {
-            let field_w = ui.available_width() - 96.0;
-            let resp = menu_text_field(
-                ui,
-                &mut state.stash_input,
-                crate::worlds_ui::words::LOOK_UP_HINT,
-                "npub1…",
-                field_w,
-                15.0,
-            );
-            if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                do_browse = true;
-            }
-            if ui.add(egui::Button::new(egui::RichText::new("Look up").size(15.0)).min_size(egui::vec2(88.0, 44.0))).clicked() {
-                do_browse = true;
-            }
-        });
-        if do_browse {
-            trigger_stash_browse(state);
-        }
-        if let Some(status) = state.stash_status.clone() {
-            ui.add_space(4.0);
-            ui.label(egui::RichText::new(status).size(15.0).color(egui::Color32::from_rgb(170, 180, 150)));
-        }
-        ui.add_space(14.0);
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    if let Some(status) = state.stash_status.clone() {
-        ui.label(egui::RichText::new(status).size(15.0).color(egui::Color32::from_rgb(170, 180, 150)));
-    }
-
-    ui.add_space(8.0);
-    {
-        // Pinned offline floor — always present. (The page scrolls as one.)
-        ui.label(egui::RichText::new("AxeNStax Official").size(20.0).color(egui::Color32::from_rgb(255, 200, 140)).strong());
-        ui.label(egui::RichText::new("Always here, even offline.").size(15.0).color(DIM_TEXT));
-        ui.add_space(6.0);
-        // Built once — reused for both the card loop and the merge-over dedup set.
-        let official = official_stash_items();
-        for item in &official {
-            match draw_stash_item_card(ui, item) {
-                StashCardClick::Play => {
-                    if let Some(def) = item.embedded_def.clone() {
-                        action = MenuAction::PlayScenario { def: Box::new(def) };
-                    }
-                }
-                StashCardClick::Adopt | StashCardClick::None => {}
-            }
-        }
-
-        // Browsed items (typed), if any. A live item that duplicates an embedded
-        // official scenario (by name) is the SAME content as the pinned floor
-        // above, so it's skipped here — the cache+live "merge over" model: the
-        // offline seed represents it once; only NEW items (community, or future
-        // official content) list below.
-        let embedded_names: std::collections::HashSet<&str> =
-            official.iter().map(|i| i.name.as_str()).collect();
-        let browsed: Vec<&StashItem> = state
-            .stash_items
-            .iter()
-            .filter(|it| {
-                !(it.kind == crate::open_stash::StashItemKind::Scenario
-                    && embedded_names.contains(it.name.as_str()))
-            })
-            .collect();
-        if !browsed.is_empty() {
-            ui.add_space(6.0);
-            ui.separator();
-            ui.add_space(6.0);
-            ui.label(egui::RichText::new("From this creator").size(20.0).color(ACTION_BLUE).strong());
-            ui.add_space(6.0);
-            // Snapshot so the per-card action can mutate `state` (kick a download).
-            let items: Vec<StashItem> = browsed.into_iter().cloned().collect();
-            for item in &items {
-                match draw_stash_item_card(ui, item) {
-                    StashCardClick::Play => {
-                        if let Some(def) = item.embedded_def.clone() {
-                            action = MenuAction::PlayScenario { def: Box::new(def) };
-                        } else if item.blob_hash.is_empty() {
-                            state.stash_status = Some("That item has no download — skip.".to_string());
-                        } else {
-                            trigger_stash_download(state, item.blob_hash.clone(), item.kind);
-                        }
-                    }
-                    StashCardClick::Adopt => {
-                        if item.blob_hash.is_empty() {
-                            state.stash_status = Some("That item has no download — skip.".to_string());
-                        } else {
-                            trigger_stash_download(state, item.blob_hash.clone(), item.kind);
-                        }
-                    }
-                    StashCardClick::None => {}
-                }
-            }
-        }
-    }
-
-    action
-}
-
-/// Normalise the typed npub/hex and kick a browse (PWA). On native it just
-/// explains the live browse is a PWA path — the embedded official games below
-/// still work. Centralised so the input handler stays readable.
-#[cfg(target_arch = "wasm32")]
-fn trigger_stash_browse(state: &mut MenuState) {
-    let trimmed = state.stash_input.trim().to_string();
-    // Empty Browse → show the official AxeNStax stash LIVE (the online
-    // counterpart of the embedded floor). Otherwise normalise the typed value:
-    // hex passes straight through; an npub bech32-decodes at the boundary (PWA).
-    let hex = if trimmed.is_empty() {
-        Some(crate::open_stash::official_axenstax_pubkey())
-    } else {
-        crate::open_stash::normalize_pubkey(&trimmed).or_else(|| crate::npub::npub_to_hex(&trimmed))
-    };
-    match hex {
-        Some(h) => {
-            state.stash_status = Some("Looking…".to_string());
-            state.stash_items.clear();
-            state.stash_browse = Some(kick_off_stash_browse(h));
-        }
-        None => {
-            state.stash_status = Some("That isn't an npub1… address.".to_string());
-        }
-    }
-}
-
-/// Kick a download for a Play/Adopt action on a browsed item (PWA). Native is a
-/// no-op with a friendly note (browsed items need the Beacon transport).
-fn trigger_stash_download(
-    state: &mut MenuState,
-    blob_hash: String,
-    kind: crate::open_stash::StashItemKind,
-) {
-    #[cfg(target_arch = "wasm32")]
-    {
-        state.stash_status = Some("Fetching…".to_string());
-        state.stash_action_dl = Some(kick_off_stash_download(blob_hash, kind));
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let _ = (blob_hash, kind);
-        state.stash_status = Some("Downloading a browsed item is a PWA feature.".to_string());
-    }
 }
 
 /// Draw the main menu. Returns a MenuAction if the user did something.
@@ -2363,8 +2056,12 @@ pub fn draw_main_menu(ctx: &egui::Context, state: &mut MenuState) -> MenuAction 
     }
 
     // The LAN browser only lives while the Join dialog is up (frees the beacon port).
+    // (The Play together page lists the same games inline, so it keeps the
+    // browser too while nothing is on top of it.)
     #[cfg(not(target_arch = "wasm32"))]
-    if !matches!(state.dialog, MenuDialog::JoinDirect { .. }) {
+    if !matches!(state.dialog, MenuDialog::JoinDirect { .. })
+        && !(state.page == LobbyPage::PlayTogether && matches!(state.dialog, MenuDialog::None))
+    {
         state.lan = None;
         state.keeps_expanded = false;
     }
@@ -3185,6 +2882,20 @@ fn menu_text_field(
     width: f32,
     font_size: f32,
 ) -> egui::Response {
+    menu_text_field_tall(ui, buf, prompt_label, placeholder, width, font_size, 0.0)
+}
+
+/// [`menu_text_field`] at least `min_height` tall (a lobby page's 44 pt hit target).
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+pub(crate) fn menu_text_field_tall(
+    ui: &mut egui::Ui,
+    buf: &mut String,
+    prompt_label: &str,
+    placeholder: &str,
+    width: f32,
+    font_size: f32,
+    min_height: f32,
+) -> egui::Response {
     if crate::touch_input::is_touch_device() && crate::touch_input::OS_KEYBOARD_PROMPT {
         let (text, color) = if buf.is_empty() {
             (placeholder.to_string(), egui::Color32::from_rgb(120, 120, 136))
@@ -3192,7 +2903,7 @@ fn menu_text_field(
             (buf.clone(), egui::Color32::from_rgb(224, 224, 232))
         };
         let resp = ui.add_sized(
-            egui::vec2(width, font_size + 16.0),
+            egui::vec2(width, (font_size + 16.0).max(min_height)),
             egui::Button::new(egui::RichText::new(text).size(font_size).color(color))
                 .fill(egui::Color32::from_rgb(28, 30, 40)),
         );
@@ -3205,8 +2916,14 @@ fn menu_text_field(
         ui.add(
             egui::TextEdit::singleline(buf)
                 .desired_width(width)
-                .hint_text(placeholder)
-                .font(egui::FontId::proportional(font_size)),
+                .hint_text(if min_height > 0.0 {
+                    // A lobby page's field: its hint is body size too, not egui's small default.
+                    egui::RichText::new(placeholder).size(font_size)
+                } else {
+                    egui::RichText::new(placeholder)
+                })
+                .font(egui::FontId::proportional(font_size))
+                .margin(egui::Margin::symmetric(8, (((min_height - font_size * 1.3) / 2.0).max(4.0)) as i8)),
         )
     }
 }
@@ -3851,6 +3568,7 @@ fn draw_join_dialog(
                 keeps_pane.forget_armed,
                 keeps_pane.file,
                 KeepsLayout::Folded(&mut *keeps_pane.expanded),
+                None,
             );
             if matches!(action, MenuAction::JoinKeep(_)) {
                 *keeps_pane.join = action;
@@ -3890,6 +3608,7 @@ fn draw_join_dialog(
                     keeps_pane.forget_armed,
                     keeps_pane.file,
                     KeepsLayout::Scroll(JOIN_KEEPS_MAX_HEIGHT),
+                    None,
                 );
                 if matches!(action, MenuAction::JoinKeep(_)) {
                     *keeps_pane.join = action;

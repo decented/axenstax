@@ -385,6 +385,8 @@ mod worlds_ui;
 mod world_detail_ui;
 mod world_picture;
 mod lobby_pages_ui;
+mod play_together_ui;
+mod stash_page_ui;
 mod trials_island_layout;
 mod trials_unlock;
 mod ravine_gen;
@@ -3507,10 +3509,16 @@ fn run_shot_lobby(args: &[String]) {
     std::fs::create_dir_all(&out_dir).ok();
 
     let textures = crate::texture_gen::generate_textures();
-    let sizes = [("tv", 1920u32, 1080u32), ("desktop", 1280, 800), ("tablet", 834, 1112), ("phone", 390, 844)];
+    let mut sizes = vec![("tv", 1920u32, 1080u32), ("desktop", 1280, 800), ("tablet", 834, 1112), ("phone", 390, 844)];
     // `--page home|worlds|together|stash` picks the lobby page; `--select <n>`
-    // opens world n's page (on Your worlds).
+    // opens world n's page (on Your worlds); `--size WxH` takes one custom
+    // size (a tall one shows the bottom of a scrolling page).
     let arg_after = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned();
+    if let Some((w, h)) = arg_after("--size").as_deref().and_then(|v| v.split_once('x'))
+        && let (Ok(w), Ok(h)) = (w.parse(), h.parse())
+    {
+        sizes = vec![("custom", w, h)];
+    }
     let page = match arg_after("--page").as_deref() {
         Some("worlds") => crate::menu::LobbyPage::Worlds,
         Some("together") => crate::menu::LobbyPage::PlayTogether,
@@ -3529,6 +3537,13 @@ fn run_shot_lobby(args: &[String]) {
         if args.iter().any(|arg| arg == "--empty") {
             menu.worlds.clear();
             menu.selected = None;
+        }
+        // `--fixture-together` fills Play together with made-up friends,
+        // servers and Keeps (in memory only; nothing is written). Signed in is
+        // a cached identity in the data dir: point `AXENSTAX_DATA_DIR` at a
+        // scratch dir holding `profile/signet_identity.json`.
+        if args.iter().any(|arg| arg == "--fixture-together") {
+            fixture_together(&mut menu);
         }
         // Block icons on the gallery cards need the atlas uploaded (the headless
         // renderer skips it).
@@ -3578,6 +3593,42 @@ fn run_shot_lobby(args: &[String]) {
         }
     }
     log::info!("Lobby shots written to {out_dir}");
+}
+
+/// Made-up friends, servers and Keeps for the `--shot-lobby --fixture-together`
+/// screenshots (in memory only).
+#[cfg(not(target_arch = "wasm32"))]
+fn fixture_together(menu: &mut crate::menu::MenuState) {
+    use crate::contacts::{AddedVia, Contact};
+    let friend = |name: Option<&str>, tier: crate::comms::Tier| Contact {
+        pubkey: nostr::Keys::generate().public_key().to_bytes(),
+        display_name: name.map(str::to_string),
+        tier,
+        is_child: false,
+        runtime_pubkey: None,
+        added_via: AddedVia::Paste,
+        added_at: 1_700_000_000,
+        last_joined: None,
+    };
+    menu.contacts = vec![
+        friend(Some("Rowan"), crate::comms::Tier::Kith),
+        friend(Some("Ada the Builder with a very long name indeed"), crate::comms::Tier::Kin),
+        friend(None, crate::comms::Tier::Ken),
+    ];
+    menu.my_servers.entries = vec![crate::my_servers::MyServerEntry {
+        operator_npub: nostr::ToBech32::to_bech32(&nostr::Keys::generate().public_key()).unwrap_or_default(),
+        name: "Maple Hall".to_string(),
+        last_endpoint: "203.0.113.7:7700".to_string(),
+        last_joined_unix: 1_700_000_000,
+        favourite: true,
+        privacy_ack: None,
+    }];
+    let hex = |b: u8| format!("{b:02x}").repeat(32);
+    let now = crate::keeps::unix_now();
+    menu.keeps = vec![
+        crate::keeps::Keep { host_key: hex(0xab), secret: hex(0x01), name: "Dragon's Keep".to_string(), last_joined: now - 7_200 },
+        crate::keeps::Keep { host_key: hex(0xcd), secret: hex(0x02), name: "Keep cd cd cd".to_string(), last_joined: now - 3 * 86_400 },
+    ];
 }
 
 /// Dump the procedural default pack to editable PNGs, one per texture key.

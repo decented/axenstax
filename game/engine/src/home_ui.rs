@@ -171,7 +171,7 @@ fn profile_chip(ui: &mut egui::Ui, state: &mut MenuState, m: &Metrics) {
             let label = format!("{} \u{23F7}", crate::plan::short_npub(&npub, 16));
             menu_button(ui, m, &label, |ui| {
                 ui.set_max_width(m.px(300.0));
-                crate::friends_ui::draw_your_address(ui, Some(&npub));
+                crate::friends_ui::draw_your_address(ui, Some(&npub), None);
                 ui.separator();
                 if ui
                     .add(menu_entry(m, "Sign out", brand::STONE))

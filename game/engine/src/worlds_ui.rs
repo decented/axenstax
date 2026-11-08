@@ -28,6 +28,27 @@ pub(crate) mod words {
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     pub const LOOK_UP_HINT: &str = "Their address (npub1…)";
 
+    /// The official games on that page.
+    pub const OFFICIAL: &str = "AxeNStax Official";
+    pub const OFFICIAL_LEAD: &str = "Always here, even offline.";
+    pub const PLAY: &str = "Play";
+    /// One plain line per official game (no scores, no counts).
+    pub const HASH_DASH_LINE: &str = "Mine as much as you can in three minutes.";
+    pub const SATORI_RUSH_LINE: &str = "Race to mine your first Satori. Leave any time and carry on later.";
+    /// What the web page says under the look-up field before anything is found.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    pub const LOOK_UP_LEAD: &str = "Play the experiences they share and try on their skins.";
+
+    /// Play together (native only).
+    pub const PLAY_TOGETHER: &str = "Play together";
+    pub const JOIN_A_GAME: &str = "Join a game";
+    pub const GAMES_ON_THIS_NETWORK: &str = "Games on this network";
+    pub const ROOM_CODE: &str = "Room code";
+    pub const CONNECT: &str = "Connect";
+    pub const FRIENDS: &str = "Friends";
+    pub const ADD_A_FRIEND: &str = "Add a friend";
+    pub const YOUR_ADDRESS: &str = "Your address";
+
     /// Hosting from a world's page.
     pub const HOST_LAN: &str = "Host on this network";
     pub const HOST_ONLINE: &str = "Host for friends online";
@@ -347,6 +368,20 @@ mod tests {
         for w in [
             MORE_TO_PLAY,
             MORE_TO_PLAY_LEAD,
+            OFFICIAL,
+            OFFICIAL_LEAD,
+            PLAY,
+            HASH_DASH_LINE,
+            SATORI_RUSH_LINE,
+            LOOK_UP_LEAD,
+            PLAY_TOGETHER,
+            JOIN_A_GAME,
+            GAMES_ON_THIS_NETWORK,
+            ROOM_CODE,
+            CONNECT,
+            FRIENDS,
+            ADD_A_FRIEND,
+            YOUR_ADDRESS,
             LOOK_UP_CREATOR,
             LOOK_UP_HINT,
             HOST_LAN,
@@ -372,6 +407,8 @@ mod tests {
             include_str!("worlds_ui.rs"),
             include_str!("world_detail_ui.rs"),
             include_str!("lobby_pages_ui.rs"),
+            include_str!("play_together_ui.rs"),
+            include_str!("stash_page_ui.rs"),
         ] {
             let body = src.split("#[cfg(test)]").next().unwrap();
             for lit in body.split('"').skip(1).step_by(2) {

@@ -120,10 +120,9 @@ pub fn poll_games(browser: &mut Option<LanBrowser>) -> LanGames {
     LanGames { rooms: ordered(&rooms), listening: b.is_listening() }
 }
 
-/// The "Games on this network" section. Returns the room the player clicked,
-/// if any.
+/// The "Games on this network" section of the Join Game dialog. Returns the
+/// room the player clicked, if any.
 pub fn draw_lan_games(ui: &mut egui::Ui, games: &LanGames) -> Option<LanRoom> {
-    let mut picked = None;
     ui.label(
         egui::RichText::new(GAMES_HEADING)
             .size(11.0)
@@ -131,27 +130,56 @@ pub fn draw_lan_games(ui: &mut egui::Ui, games: &LanGames) -> Option<LanRoom> {
             .strong(),
     );
     ui.add_space(4.0);
-    if !games.listening {
-        ui.label(egui::RichText::new(GAMES_NOT_LISTENING).size(12.0).color(egui::Color32::from_rgb(220, 170, 120)));
-    } else if games.rooms.is_empty() {
-        ui.label(egui::RichText::new(GAMES_SEARCHING).size(12.0).color(egui::Color32::from_rgb(150, 150, 160)));
-    } else {
-        egui::ScrollArea::vertical().max_height(150.0).auto_shrink([true, true]).show(ui, |ui| {
-            let names = row_names(&games.rooms);
-            for (r, name) in games.rooms.iter().zip(&names) {
-                let joinable = unavailable_reason(r).is_none();
-                let btn = egui::Button::new(egui::RichText::new(entry_label(name, r)).size(13.0))
-                    .min_size(egui::vec2(360.0, 28.0))
-                    .corner_radius(egui::CornerRadius::same(6));
-                let resp = ui.add_enabled(joinable, btn);
-                if resp.clicked() {
-                    picked = Some(r.clone());
-                }
-                ui.add_space(3.0);
-            }
-        });
-    }
+    let picked = draw_lan_rows(ui, games, None);
     ui.add_space(12.0);
+    picked
+}
+
+/// What the "Games on this network" list says or offers: the line while
+/// nothing is heard, or a row per heard room. `m` is `None` in the Join Game
+/// dialog (its own small sizes and inner scroll) and the lobby's metrics on the
+/// Play together page (body text, full-width rows at least a hit target tall,
+/// scrolling with the page). Returns the room the player clicked, if any.
+pub fn draw_lan_rows(
+    ui: &mut egui::Ui,
+    games: &LanGames,
+    m: Option<&crate::ui_safe_area::Metrics>,
+) -> Option<LanRoom> {
+    let mut picked = None;
+    let text = |dialog: f32| m.map_or(dialog, |m| m.body());
+    if !games.listening {
+        ui.label(egui::RichText::new(GAMES_NOT_LISTENING).size(text(12.0)).color(egui::Color32::from_rgb(220, 170, 120)));
+        return picked;
+    }
+    if games.rooms.is_empty() {
+        ui.label(egui::RichText::new(GAMES_SEARCHING).size(text(12.0)).color(egui::Color32::from_rgb(150, 150, 160)));
+        return picked;
+    }
+    let mut rows = |ui: &mut egui::Ui| {
+        let names = row_names(&games.rooms);
+        for (r, name) in games.rooms.iter().zip(&names) {
+            let joinable = unavailable_reason(r).is_none();
+            let label = egui::RichText::new(entry_label(name, r)).size(text(13.0));
+            let btn = match m {
+                Some(m) => egui::Button::new(label)
+                    .min_size(egui::vec2(ui.available_width(), m.hit()))
+                    .corner_radius(egui::CornerRadius::same(8)),
+                None => egui::Button::new(label)
+                    .min_size(egui::vec2(360.0, 28.0))
+                    .corner_radius(egui::CornerRadius::same(6)),
+            };
+            let resp = ui.add_enabled(joinable, btn);
+            if resp.clicked() {
+                picked = Some(r.clone());
+            }
+            ui.add_space(3.0);
+        }
+    };
+    if m.is_some() {
+        rows(ui);
+    } else {
+        egui::ScrollArea::vertical().max_height(150.0).auto_shrink([true, true]).show(ui, rows);
+    }
     picked
 }
 
