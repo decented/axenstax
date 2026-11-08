@@ -112,7 +112,7 @@ copy one working site venv into the others (e.g.
 2. `cargo build` on the engine.
 3. `cargo test --lib` — runs every `#[cfg(test)]` module in the engine library (currently about 7,400 tests, counted by `#[test]` attributes, across pure-function units + `TestHost`-driven integration tests under `src/test_integration/`). Never `--bin`: the bin is a thin shim, so it runs zero tests and still passes.
 4. `trunk build` for the WASM bundle.
-5. Bundle-size gate — brotli-compressed total must stay under 5 MiB (PWA alpha spec).
+5. Bundle size — brotli-compressed total measured against a 5 MiB **target** (owner, 2026-11-08: keep the web build as light as possible; over the target warns, never fails). Origin: the PWA alpha spec’s first-load and Chromebook parse-time goal.
 6. With `--smoke`: Playwright smoke test against a running website. Confirms `/`, `/game`, WASM asset, JS loader all serve correctly. Saves a screenshot to `tools/smoke/out/play-landing.png`.
 
 Flags: `--release` uses the release profile (slower, matches CI). `--smoke` requires the website running on `:8094`.

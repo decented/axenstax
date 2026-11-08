@@ -1,13 +1,16 @@
 #!/usr/bin/env node
 // Measure the WASM+JS bundle size in the trunk dist dir.
-// Reports raw, gzip, brotli. Exit 1 if brotli > 5 MB (spec gate).
+// Reports raw, gzip, brotli against a 5 MiB brotli TARGET (owner, 2026-11-08):
+// a target to stay near, not a hard limit. Keep the web build as light as it
+// can be. Exit 2 when over the target (check.sh warns, does not fail); exit 1
+// only on a real error (e.g. no dist dir).
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { gzipSync, brotliCompressSync, constants as zlibConstants } from "node:zlib";
 import { resolve } from "node:path";
 
 const DIST = resolve(new URL(".", import.meta.url).pathname, "..", "..", "game", "engine", "dist");
-const BROTLI_GATE_BYTES = 5 * 1024 * 1024;
+const BROTLI_TARGET_BYTES = 5 * 1024 * 1024;
 
 function human(bytes) {
   if (bytes < 1024) return `${bytes} B`;
@@ -50,10 +53,10 @@ console.log(
   `${"TOTAL".padEnd(44)}${human(totalRaw).padStart(10)} ${human(totalGzip).padStart(10)} ${human(totalBrotli).padStart(10)}`,
 );
 
-if (totalBrotli > BROTLI_GATE_BYTES) {
+if (totalBrotli > BROTLI_TARGET_BYTES) {
   console.error(
-    `\nFAIL: brotli total ${human(totalBrotli)} exceeds gate of ${human(BROTLI_GATE_BYTES)}`,
+    `\nOVER TARGET: brotli total ${human(totalBrotli)} is ${human(totalBrotli - BROTLI_TARGET_BYTES)} over the ${human(BROTLI_TARGET_BYTES)} target`,
   );
-  process.exit(1);
+  process.exit(2);
 }
-console.log(`\nOK: brotli total under ${human(BROTLI_GATE_BYTES)} gate`);
+console.log(`\nOK: brotli total ${human(totalBrotli)}, ${human(BROTLI_TARGET_BYTES - totalBrotli)} under the ${human(BROTLI_TARGET_BYTES)} target`);

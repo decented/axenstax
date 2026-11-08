@@ -2,7 +2,7 @@
 # Axe'n'Stax verification harness. One command, green or red.
 #
 # Default: version parity, site Python tests, clippy + build + licence audit + test +
-# trunk build + forbidden-symbol + bundle-size gates.
+# trunk build + forbidden-symbol gate + bundle-size measure (5 MiB target, warns).
 # With --smoke: also runs Playwright smoke against a running site.
 # With --release: uses --release profile for cargo (slower, matches CI).
 #
@@ -324,22 +324,28 @@ else
     failures=$((failures + 1))
 fi
 
-section "bundle size gate (< 5 MB brotli)"
-# bundle-size.mjs uses only Node built-ins (node:fs, node:zlib, node:path), so it
-# needs NO npm install — it was previously gated behind tools/smoke/node_modules
-# and silently skipped in a fresh worktree while the run still printed ALL GREEN.
-# Only a missing `node` is a real reason it can't run, and that counts as a
-# FAILURE rather than a shrug.
+section "bundle size (target 5 MiB brotli)"
+# A TARGET, not a hard limit (owner, 2026-11-08): keep the web build as light as
+# it can be and aim for 5 MiB brotli; going over warns but does not fail the run.
+# bundle-size.mjs exits 2 when over the target and 1 only on a real error (no
+# dist). It uses only Node built-ins, so it needs NO npm install — it was once
+# gated behind tools/smoke/node_modules and silently skipped in a fresh worktree
+# while the run still printed ALL GREEN. A missing `node` is still a FAILURE.
 if command -v node >/dev/null 2>&1; then
-    if (cd tools/smoke && node bundle-size.mjs); then
-        ok "bundle size under gate"
-        verified+=("bundle size < 5 MiB brotli")
+    bundle_rc=0
+    (cd tools/smoke && node bundle-size.mjs) || bundle_rc=$?
+    if [ "$bundle_rc" -eq 0 ]; then
+        ok "bundle size under the 5 MiB target"
+        verified+=("bundle size measured (under 5 MiB target)")
+    elif [ "$bundle_rc" -eq 2 ]; then
+        printf "\033[1;33mWARN\033[0m bundle size over the 5 MiB target (not a failure; keep it as light as possible)\n"
+        verified+=("bundle size measured (OVER the 5 MiB target, warning only)")
     else
-        fail "bundle size over gate"
+        fail "bundle size could not be measured"
         failures=$((failures + 1))
     fi
 else
-    fail "node not found — bundle size gate could NOT run (install Node to gate the bundle)"
+    fail "node not found — bundle size could NOT be measured (install Node)"
     failures=$((failures + 1))
 fi
 
