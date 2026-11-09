@@ -1686,16 +1686,64 @@ scatter, then mesh. `generate_column` must never run on a restored column,
 because it refills chunks that were dug down to all air. An evicted chunk
 overwrites any world-gen spill a neighbour left at its position.
 
-**Saves.** Every chunk writer iterates `World::persistable_chunks()`, which yields
-the loaded chunks plus the evicted ones, with the evicted copy winning on a
-duplicate position. The writers are `partition_chunks_for_save` (so the native
-save and the autosave), `write_world_folder`, `world_archive::pack_world` (WASM
-IndexedDB and `.axeworld` export) and `GameServer`'s save. The all-air
-delete rule (§8.4: read or written this session, and `persist`) applies to
-evicted chunks too, on `GameServer::try_save` as well since its review
-follow-up: an evicted, edited column is written, never deleted, and a pristine
-column dropped on stream-out is in neither set, so its file stays. `World::clear` empties the store, so
-nothing leaks between worlds.
+**Saves.** `World::persistable_chunks()` yields the loaded chunks plus the
+evicted ones, with the evicted copy winning on a duplicate position. The
+client's writers take the part of it a save keeps, `World::saved_chunks()`:
+every chunk of a column that differs from generation, meaning a column holding
+at least one `persist` section (an empty, mined-out one counts) or sitting in
+the evicted store. A column with no `persist` section is pristine world-gen and
+is **not written**: explored but untouched land is regenerated from the world's
+frozen generator (`WorldMeta.worldgen_version`, §5.2) at the next load, not
+stored. Those writers are `partition_chunks_for_save` (so the native save and
+the autosave), `write_world_folder` (its first save too, `write_first_save`) and
+`world_archive::pack_world` (the WASM IndexedDB save, which packs the live
+world). A world read from a folder or an archive is all `persist`, so an
+`.axeworld` export, a publish or an import still carries every saved chunk.
+
+*Column granularity, never per section.* Every loader leaves a column with any
+saved section ungenerated (`step_load` passes `regen_present = false`), so a
+column written in part would load with holes, the bug §8.4's staged first save
+fixed. A column with one edited section is written whole: all its non-empty
+sections. Example: a section mined out to air plus its pristine siblings is
+written as the siblings, the empty section has no file, and on reload the
+column is not generated, so the section stays air.
+
+*Why it can be skipped.* The same rule `evict_column` already relies on in a
+session: a pristine column regenerates block for block. Generation is a pure
+function of the column, the seed and the generator, writes only inside its own
+column, and runs in any order to the same blocks and side tables
+(`worldgen_golden::assert_order_independent`, the v2/v3/v4 golden tests). The
+side tables it writes into are restored from `world.dat` before any column is
+generated (`load_world`: chunks, then `apply_world_save_state`; `step_load`
+later), and generation does not overwrite their state: a mineshaft or hideout
+chest, a wild hive and a hideout record are only inserted when absent; village
+anchors and Architect Plaques are put back with the same seed-derived value.
+
+*Before (bug fixed 2026-11-09).* Every writer took every non-empty chunk, so the
+first autosave wrote every pristine section in render distance, those files
+loaded back as `persist`, every saved column was loaded, lit and meshed at each
+world open and then held in the evicted store all session, and every autosave
+(6,000 ticks, on the main thread) re-encoded and rewrote all of it. The save,
+the load and the session's memory grew with every column the player had walked
+past. Old worlds keep the pristine files they already have (they load as
+`persist`); only land explored from now on stops being added. Tests:
+`test_integration::save_pristine_columns`.
+
+*The dedicated server writes every held chunk.* `GameServer::try_save` (and its
+first save) still iterates `persistable_chunks()`, pristine columns included:
+the Keep authority checkpoint binds each held non-empty section to its file
+(`authority_checkpoint::manifest::entries`), records every loaded column in its
+layout, and its restore generates nothing, so a pristine column left unwritten
+would come back loaded with no terrain. Moving the server to the same rule
+needs a restore that regenerates the layout's pristine columns first. A server
+opening a folder a client saved generates the absent columns like any other
+missing column.
+
+The all-air delete rule (§8.4: read or written this session, and `persist`)
+applies to evicted chunks too, on `GameServer::try_save` as well since its
+review follow-up: an evicted, edited column is written, never deleted, and a
+pristine column dropped on stream-out is in neither set, so its file stays.
+`World::clear` empties the store, so nothing leaks between worlds.
 
 **The dedicated server uses the same store (Phase B1, 2026-10-06).**
 `GameServer::stream_columns` (Spec 01 §4.1.2) streams columns in and out around
@@ -1723,7 +1771,10 @@ sims already did. Restore runs the column's own light pass. Regression test:
 
 **Memory bound.** Only edited or saved columns are kept: the columns a player
 changed, plus every column loaded from the save. Pristine columns are still
-dropped. The store is in memory and not paged to disk, so native and WASM behave
+dropped, and since 2026-11-09 a client save no longer writes them, so the saved
+set is the changed set and does not grow with exploration alone. It still grows
+with natural writes: snowfall, lava rims, fire and farm growth set `persist` on
+the columns they touch. The store is in memory and not paged to disk, so native and WASM behave
 the same (WASM has no per-chunk file reads). A future option is to page evicted
 columns to disk on native and to IndexedDB on WASM, restoring them from there
 through the same `restore_column` hook.
@@ -1977,6 +2028,16 @@ the stale file and resurrects (engine audit 2026-06-04, A#4). `save_world` /
 `autosave_world` partition the loaded chunks (`partition_chunks_for_save`) into
 write-set + delete-set and `fs::remove_file` the delete-set first. Regression:
 `save::save_world_deletes_stale_file_for_emptied_chunk`.
+
+**Only changed columns are written (2026-11-09).** The write-set is the non-empty
+chunks of the columns that differ from generation (`World::saved_chunks`,
+§7.5.1), whole; a pristine column has no file and regenerates on load. A world
+nobody has changed saves a `world.dat` and no chunk file, and is a saved world
+all the same (`world_open::is_new_world` reads `world.dat`). The native save,
+the autosave and the WASM save still rewrite every changed column each time, in
+full: the autosave folder is a complete copy (`load_autosave` reads it alone)
+that each committed save deletes, so skipping unchanged files needs per-folder
+written-state, not one dirty bit (not built).
 
 **Save robustness invariants** (engine audit 2026-06-04, A):
 - `save_world` / `autosave_world` reject an **empty `players` slice** with an

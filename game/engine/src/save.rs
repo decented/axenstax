@@ -1855,21 +1855,52 @@ fn serialize_inventory(inventory: &Inventory) -> Vec<SavedSlot> {
 /// conjures an EMPTY chunk (`World::set_block` creates one, and air over air
 /// changes nothing, so it is never `persist`), which used to delete the real
 /// file under it — a hole after the restart (review 2026-10-06).
+///
+/// The write list is [`World::saved_chunks`] (Spec 02 §7.5.1): the non-empty
+/// chunks of the columns that differ from generation, whole. A pristine column
+/// is not written; the next load generates it (review 2026-11-09: writing every
+/// loaded chunk made each save, each world open and the session's memory grow
+/// with every column the player had walked past).
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn partition_chunks_for_save(
     world: &World,
 ) -> (Vec<(i32, i32, i32)>, Vec<(i32, i32, i32)>) {
-    let mut write = Vec::new();
-    let mut delete = Vec::new();
     // Spec 02 §7.5 — loaded + evicted chunks (an unloaded edit must still save).
-    for (key, chunk) in world.persistable_chunks() {
-        if !chunk.is_empty() {
-            write.push(key);
-        } else if chunk.persist() && world.knows_disk_chunk(key) {
-            delete.push(key);
-        }
-    }
+    let write = world
+        .saved_chunks()
+        .filter(|(_, chunk)| !chunk.is_empty())
+        .map(|(key, _)| key)
+        .collect();
+    // A `persist` chunk is always in a column `saved_chunks` keeps, so this is
+    // the same set it would name.
+    let delete = world
+        .persistable_chunks()
+        .filter(|(key, chunk)| chunk.is_empty() && chunk.persist() && world.knows_disk_chunk(*key))
+        .map(|(key, _)| key)
+        .collect();
     (write, delete)
+}
+
+/// Which chunks a world-folder save writes (Spec 02 §7.5.1).
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ChunksToWrite {
+    /// The client's saves: [`World::saved_chunks`], the columns that differ
+    /// from generation, whole. Pristine columns regenerate at the next load.
+    ChangedColumns,
+    /// The dedicated server's save: every held non-empty chunk
+    /// ([`World::persistable_chunks`]). Its Keep checkpoint binds each held
+    /// section to its file (`authority_checkpoint::manifest::entries`) and a
+    /// restore generates nothing, so this save must not leave one out.
+    EveryHeldChunk,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn chunks_to_write(world: &World, which: ChunksToWrite) -> Box<dyn Iterator<Item = ((i32, i32, i32), &Chunk)> + '_> {
+    match which {
+        ChunksToWrite::ChangedColumns => Box::new(world.saved_chunks()),
+        ChunksToWrite::EveryHeldChunk => Box::new(world.persistable_chunks()),
+    }
 }
 
 /// True when `dir` holds nothing of a saved world yet — no `world.dat` and no
@@ -1894,7 +1925,7 @@ pub(crate) const STAGED_CHUNKS: &str = "chunks.new";
 /// chunks one by one (in hash-map order) into `chunks/` left permanent holes
 /// when cut short (review 2026-10-06).
 ///
-/// 1. Every non-empty chunk into `chunks.new/` (one left by an earlier first save
+/// 1. Every non-empty chunk `which` names into `chunks.new/` (one left by an earlier first save
 ///    cut short — never committed, as there is no `world.dat` — is cleared
 ///    first), then one directory fsync.
 /// 2. `world.dat` — the commit point — then [`world_dat_committed`]: a directory
@@ -1909,13 +1940,16 @@ pub(crate) const STAGED_CHUNKS: &str = "chunks.new";
 /// again. Cut short after 2, the next load or save finishes step 3
 /// ([`finish_staged_first_save`]). A chunk that can't be written fails the save
 /// before `world.dat`. `encoded` is the world's `world.dat`; the caller writes
-/// anything else (the meta) afterwards.
+/// anything else (the meta) afterwards. `which` says which chunks the save
+/// writes ([`ChunksToWrite`]); a first save of a world nobody has changed yet
+/// stages none, and its `world.dat` alone makes it a saved world.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn write_first_save(
     dir: &std::path::Path,
     world: &World,
     encoded: &[u8],
     at_commit: AtCommit,
+    which: ChunksToWrite,
 ) -> Result<(), String> {
     let staging = dir.join(STAGED_CHUNKS);
     match fs::remove_dir_all(&staging) {
@@ -1925,7 +1959,7 @@ pub(crate) fn write_first_save(
     }
     fs::create_dir_all(&staging).map_err(|e| format!("mkdir {}: {e}", staging.display()))?;
     let mut staged = Vec::new();
-    for (key, chunk) in world.persistable_chunks() {
+    for (key, chunk) in chunks_to_write(world, which) {
         if chunk.is_empty() {
             continue;
         }
@@ -2079,7 +2113,9 @@ fn refuse_world_write(dir: &std::path::Path) -> Result<(), String> {
 ///
 /// Specifically this function:
 ///   - Creates `worlds/<name>/chunks/` (mkdir -p).
-///   - Writes every non-empty chunk as `chunks/<cx>_<cy>_<cz>.chunk`.
+///   - Writes the non-empty chunks of every column that differs from
+///     generation (`World::saved_chunks`, Spec 02 §7.5.1) as
+///     `chunks/<cx>_<cy>_<cz>.chunk`; a pristine column regenerates on load.
 ///   - Atomically writes `worlds/<name>/world.dat` (bincode of `save`).
 ///   - Writes `worlds/<name>/world_meta.json` (via `save_world_meta`).
 ///
@@ -2136,17 +2172,19 @@ fn write_world_folder_at(
     before_commit(&encoded)?;
 
     if is_first_save(&dir) {
-        write_first_save(&dir, world, &encoded, at_commit)?;
+        write_first_save(&dir, world, &encoded, at_commit, ChunksToWrite::ChangedColumns)?;
         return save_world_meta(name, meta);
     }
 
-    // Spec 02 §7.5 — loaded + evicted chunks. Written FIRST (tmp + rename, one
+    // Spec 02 §7.5 — loaded + evicted chunks of the columns that differ from
+    // generation (§7.5.1: a pristine column is not written; the next load
+    // generates it). Written FIRST (tmp + rename, one
     // directory fsync at the end — review S2), so `world.dat` below is the commit
     // point: a crash before it leaves the old world.dat with new-or-old chunks,
     // never new block-entity state over old block data.
     let chunks_dir = dir.join("chunks");
     fs::create_dir_all(&chunks_dir).map_err(|e| format!("mkdir: {e}"))?;
-    for ((cx, cy, cz), chunk) in world.persistable_chunks() {
+    for ((cx, cy, cz), chunk) in world.saved_chunks() {
         if chunk.is_empty() {
             continue;
         }
@@ -2447,7 +2485,7 @@ fn save_world_at(
     write_world_folder_at(name, &meta, &save, world, at_commit, before_commit)?;
 
     // Log after the write so we can report the final version and chunk count.
-    let saved = world.persistable_chunks()
+    let saved = world.saved_chunks()
         .filter(|(_, c)| !c.is_empty())
         .count() as u32;
     let p0_x = save.player_x;

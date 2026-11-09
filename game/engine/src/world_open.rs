@@ -1049,13 +1049,18 @@ mod tests {
     #[test]
     fn save_never_deletes_a_chunk_file_under_a_conjured_empty_chunk() {
         let _g = WorldsRootGuard::new("save_conjured_empty");
-        // A world-gen (never edited) chunk at 0_4_0, written by a save.
+        // A world-gen (never edited) chunk at 0_4_0, written by a save. Only the
+        // dedicated server's save still writes a pristine column (a client's
+        // writes changed columns only, Spec 02 §7.5.1), so the server writes it.
         let mut w = World::new();
         let mut generated = crate::chunk::Chunk::new();
         generated.set(3, 0, 5, crate::block::STONE);
         assert!(!generated.persist());
         w.insert_chunk(0, 4, 0, generated);
-        crate::save::save_world("w", &w, std::slice::from_ref(&slot()), 1, &[], &[], None, None).unwrap();
+        let mut first = crate::server::GameServer::new(0, "w".into(), 1);
+        first.world = w;
+        first.try_save().unwrap();
+        let mut w = std::mem::replace(&mut first.world, World::new());
         let dir = world_dir("w");
         let before = fs::read(dir.join("chunks/0_4_0.chunk")).unwrap();
         assert!(w.knows_disk_chunk((0, 4, 0)));

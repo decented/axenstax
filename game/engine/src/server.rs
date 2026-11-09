@@ -3727,6 +3727,10 @@ impl GameServer {
                 encoded,
                 // The server never reads or clears the client's autosave.
                 crate::save::AtCommit::KeepAutosave,
+                // Every held chunk, pristine columns included, like the later
+                // saves below: a Keep checkpoint binds each held section to its
+                // file (Spec 02 §7.5.1).
+                crate::save::ChunksToWrite::EveryHeldChunk,
             )?;
         } else {
             // A mined-out chunk's file is deleted, by the client's rule
@@ -3745,6 +3749,10 @@ impl GameServer {
             }
             std::fs::create_dir_all(&chunks_dir)
                 .map_err(|e| format!("mkdir {}: {e}", chunks_dir.display()))?;
+            // Every held chunk, pristine columns included, unlike the client's
+            // save (`World::saved_chunks`): the Keep checkpoint binds each held
+            // section to its file and its restore generates nothing (Spec 02
+            // §7.5.1).
             for ((cx, cy, cz), chunk) in self.world.persistable_chunks() {
                 if chunk.is_empty() { continue; }
                 chunk_attempts += 1;

@@ -1674,6 +1674,23 @@ impl World {
         )
     }
 
+    /// Spec 02 §7.5.1 — the chunks a client save writes to a world folder (and
+    /// packs into an archive): [`Self::persistable_chunks`] in every column that
+    /// differs from generation, i.e. that holds at least one `persist` section
+    /// (an empty, mined-out one counts) or sits in the evicted store. A column
+    /// with no `persist` section is pristine world-gen: it is not written, and
+    /// the next load generates it again, exactly as a stream-in does after
+    /// `evict_column` dropped it. Column granularity, never per section: every
+    /// loader leaves a column with any saved section ungenerated, so a column
+    /// written in part would load with holes. The dedicated server's save and
+    /// the Keep still write every held chunk (`persistable_chunks`): a Keep
+    /// checkpoint binds each held section to its file.
+    pub fn saved_chunks(&self) -> impl Iterator<Item = ((i32, i32, i32), &Chunk)> {
+        let mut changed: ahash::AHashSet<(i32, i32)> = self.evicted.keys().map(|&(cx, _, cz)| (cx, cz)).collect();
+        changed.extend(self.chunks.iter().filter(|(_, c)| c.persist()).map(|(&(cx, _, cz), _)| (cx, cz)));
+        self.persistable_chunks().filter(move |((cx, _, cz), _)| changed.contains(&(*cx, *cz)))
+    }
+
     /// Look up one chunk the way `persistable_chunks` sees it (evicted first).
     pub fn persistable_chunk(&self, cx: i32, cy: i32, cz: i32) -> Option<&Chunk> {
         self.evicted.get(&(cx, cy, cz)).or_else(|| self.chunks.get(&(cx, cy, cz)))

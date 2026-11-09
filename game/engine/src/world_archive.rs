@@ -175,8 +175,12 @@ pub fn pack_world(
         ar.append_data(&mut header, "world.dat", &world_dat[..])
             .map_err(|e| format!("tar world.dat: {e}"))?;
 
-        // Spec 02 §7.5 — loaded + evicted chunks.
-        for ((cx, cy, cz), chunk) in world.persistable_chunks() {
+        // Spec 02 §7.5 — loaded + evicted chunks of the columns that differ
+        // from generation (§7.5.1, `World::saved_chunks`): the web build's save
+        // packs its live world here, so a pristine column is left out and
+        // regenerates on load. A world read from a folder or an archive is all
+        // `persist`, so an export or a publish carries every saved chunk.
+        for ((cx, cy, cz), chunk) in world.saved_chunks() {
             if chunk.is_empty() {
                 continue;
             }

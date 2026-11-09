@@ -8,6 +8,7 @@ pub mod spawn_protection;
 pub mod blocks;
 pub mod physics;
 pub mod save_load;
+mod save_pristine_columns; // Spec 02 §7.5.1 — a save writes the edited columns only; untouched land regenerates.
 pub mod villages;
 pub mod audits;
 pub mod raids;

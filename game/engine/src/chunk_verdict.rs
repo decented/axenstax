@@ -438,6 +438,10 @@ mod tests {
         loaded.track_edited_columns();
         crate::save::load_world(&name, &mut loaded).expect("loaded");
         assert!(loaded.chest_at(cell).is_some(), "the chest came back");
+        // An unedited column has no chunk file (Spec 02 §7.5.1): the load
+        // generates it, as `step_load` does, over the restored chest.
+        assert!((0..=crate::world::MAX_CHUNK_Y).all(|cy| !loaded.has_chunk(col.0, cy, col.1)), "not saved");
+        crate::chunk_stream::load_column_blocks(&mut loaded, col.0, col.1, &biome, false);
         assert!(loaded.take_edited_columns().is_empty(), "a restore is no edit");
         assert_eq!(column_verdict(&loaded, &biome, col), Verdict::Untouched);
         let _ = crate::save::delete_world(&name);
