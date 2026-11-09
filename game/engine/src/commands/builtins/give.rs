@@ -215,6 +215,7 @@ fn block_by_name(key: &str) -> Option<BlockId> {
         "commons_stone" | "commonsstone" | "commons" => Some(block::COMMONS_STONE),
         // Living world Tier 2 S6 — the Commons Shelf.
         "commons_shelf" | "commonsshelf" | "shelf" => Some(block::COMMONS_SHELF),
+        "site_board" | "siteboard" => Some(block::SITE_BOARD),
         // Smelting + redstone-equivalent blocks — added so Trials challenge kits
         // (Smith / Engineer) can hand them out. The engine-managed PISTON_HEAD is
         // deliberately NOT giveable.

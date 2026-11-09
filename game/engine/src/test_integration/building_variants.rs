@@ -78,8 +78,8 @@ fn every_variant_is_registered_with_its_shape_and_its_materials_textures() {
     }
     // Appended after the old last id: nothing renumbered.
     // (The living-world blocks follow the variants: 373..=375 in Tier 1, the Worn Path 376 in Tier 2 S3,
-    // the Blighted Crop 377 in Tier 2 S8, the Commons Shelf 378 in Tier 2 S6.)
-    assert_eq!(reg.len(), bv::END_NEW_ID as usize + 6);
+    // the Blighted Crop 377 in Tier 2 S8, the Commons Shelf 378 in Tier 2 S6, the Site Board 379 in Tier 2 S7.)
+    assert_eq!(reg.len(), bv::END_NEW_ID as usize + 7);
     assert_eq!(reg.get(block::WINDMILL_TURNING).name, "electricity:windmill_turning");
     assert_eq!(reg.get(block::STONE_SLAB).name, "genesis:stone_slab");
     assert_eq!(reg.get(block::OAK_DOOR).name, "genesis:oak_door");

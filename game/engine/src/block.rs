@@ -676,6 +676,11 @@ pub const BLIGHTED_CROP: BlockId = 377;
 /// (and whether it has been cleaned out) in its `block_meta` byte, which bloom
 /// reads on every client.
 pub const COMMONS_SHELF: BlockId = 378;
+// Living world, Tier 2 (S7, 2026-11-09). Spec: docs/superpowers/specs/2026-11-09-living-world-tier2.md §7.
+/// A crew's job list: right-click opens it, up to 8 picked jobs with a done
+/// tick (`site_board.rs`). Drops itself; its list is a world table keyed by its
+/// cell (`World::site_boards`) and goes with the block.
+pub const SITE_BOARD: BlockId = 379;
 
 /// The planted-sapling block for a species. Symmetric counterpart to
 /// `species_for_sapling` (which IS live, via `is_sapling_block`); this forward
@@ -3415,7 +3420,6 @@ impl BlockRegistry {
             color: [0.55, 0.50, 0.25],
             tex_top: TEX_WHEAT_STAGE_2, tex_bottom: TEX_WHEAT_STAGE_2, tex_side: TEX_WHEAT_STAGE_2,
         });
-
         // Living world, Tier 2 (S6) — the Commons Shelf. A chest's top over crafting-table
         // boards: only existing layers (the atlas is full).
         debug_assert_eq!(blocks.len(), COMMONS_SHELF as usize, "the Commons Shelf follows the Blighted Crop");
@@ -3424,6 +3428,14 @@ impl BlockRegistry {
             solid: true, transparent: false, gravity: false,
             color: [0.70, 0.52, 0.30],
             tex_top: TEX_CHEST_TOP, tex_bottom: TEX_OAK_PLANKS, tex_side: TEX_CRAFTING_TABLE_TOP,
+        });
+        // The Site Board reuses the Bounty Board's texture layer (the atlas is full).
+        debug_assert_eq!(blocks.len(), SITE_BOARD as usize, "the Site Board follows the Commons Shelf");
+        blocks.push(BlockDef { // 379 SITE_BOARD
+            name: "genesis:site_board",
+            solid: true, transparent: false, gravity: false,
+            color: [0.55, 0.36, 0.20],
+            tex_top: TEX_BOUNTY_BOARD, tex_bottom: TEX_BOUNTY_BOARD, tex_side: TEX_BOUNTY_BOARD,
         });
 
         Self { blocks, leaves_fast: false }
@@ -4025,7 +4037,12 @@ mod tests {
         // Living world Tier 2 S6: the Commons Shelf (378) follows the Blighted Crop.
         assert_eq!(BLIGHTED_CROP + 1, COMMONS_SHELF);
         assert!(reg.is_known(COMMONS_SHELF));
-        assert!(!reg.is_known(COMMONS_SHELF + 1));
+        // Living world Tier 2 S7: the Site Board (379) follows the Shelf and is the last registered id.
+        assert_eq!(COMMONS_SHELF + 1, SITE_BOARD);
+        assert!(reg.is_known(SITE_BOARD));
+        assert!(reg.is_solid(SITE_BOARD));
+        assert_eq!(reg.mine_drop(SITE_BOARD), crate::item::ItemStack::new_block(SITE_BOARD, 1), "a board drops itself");
+        assert!(!reg.is_known(SITE_BOARD + 1));
         assert!(!reg.is_known(u16::MAX));
     }
 

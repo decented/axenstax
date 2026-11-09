@@ -25,6 +25,7 @@ mod growth_after_reload; // Living world Tier 2 S4/S8 review: crops grow after a
 mod use_record; // Living world Tier 2 S3 — the use record, nights slept and Worn Paths: save, joiner, lending host.
 mod plan_builds; // Living world Tier 2 S4 — Plan build counts: completion on every path, save, digest.
 mod plot_succession; // Living world Tier 2 S5 — joiners' Plots, last seen and succession: claims, protection, pass-on, save.
+mod site_board; // Living world Tier 2 S7 — Site Boards: joiner ops, shown lists, reach, surge, break, save.
 pub mod market_hub;
 pub mod auction;
 pub mod bazaar;

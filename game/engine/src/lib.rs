@@ -284,6 +284,10 @@ mod region_people; // Living world Tier 2 S10 — joiners are told b and u per r
 mod use_record; // Living world Tier 2 S3 — lived days and nights slept per region (spec §3).
 mod gardener_lines; // Living world Tier 2 S9 — Satoshi's lines for a Worn Path and a Blighted Crop (spec §11).
 mod succession; // Living world Tier 2 S5 — last seen and Plots passing on (spec §5).
+mod site_board; // Living world Tier 2 S7 — Site Boards: a crew's job list (spec §7).
+mod site_board_ui; // Living world Tier 2 S7 — the Site Board window.
+mod site_board_client; // Living world Tier 2 S7 — the client half: where a window's op goes.
+mod crew_mood; // Living world Tier 2 S7 — villagers' moods from a place's bloom (spec §7).
 mod plan_builds; // Living world Tier 2 S4 — how often each Plan has been built here (spec §4).
 mod commons; // Living world S3 — Commons footprints and the Plot/Commons overlap rule (spec §4).
 mod growth;

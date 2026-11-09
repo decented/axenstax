@@ -71,6 +71,7 @@ mod strict_attack;
 mod strict_interact;
 mod strict_door;
 mod feast; // Living world S3 — the authority's half of the Feast.
+mod site_board; // Living world Tier 2 S7 — the authority's half of the Site Board.
 mod strict_item;
 mod strict_drop;
 #[cfg(test)]
@@ -2876,6 +2877,10 @@ impl HostedServer {
             }
             protocol::ItemAction::Detach { x, y, z, face } => {
                 return self.serve_detach(i, req.seq, [*x, *y, *z], *face);
+            }
+            // Living world Tier 2 S7 (v100) — an op on a Site Board's list.
+            protocol::ItemAction::SiteBoard { pos, op } => {
+                return self.serve_site_board(i, req.seq, *pos, *op);
             }
         };
         let (accepted, consume_held, note) = match served {

@@ -268,6 +268,7 @@ fn protocol_version_is_the_pinned_value() {
     // v99 (living world Tier 2 S8): block id 377 (Blighted Crop), no packet change.
     // v100 (living world Tier 2 S10): RegionPeople (79), a new packet.
     // v100 (living world Tier 2 S6): block id 378 (Commons Shelf), no packet change.
+    // v100 (living world Tier 2 S7): block id 379; ItemAction::SiteBoard; BlockView::SiteBoard.
     assert_eq!(protocol::PROTOCOL_VERSION, 100);
 }
 

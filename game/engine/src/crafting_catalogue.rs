@@ -1348,6 +1348,23 @@ fn push_gap_close_cards(out: &mut Vec<RecipeCard>) {
         RecipeCategory::Decoration,
     ));
 
+    // Living world Tier 2 S7 — Site Board: a column of three planks between
+    // two posts of sticks → 1.
+    out.push(card(
+        "Site Board",
+        ItemStack::new_block(block::SITE_BOARD, 1),
+        vec![
+            RecipeIngredient { item: Item::Block(block::OAK_PLANKS), count: 3, fuzzy: Some(FuzzyKind::Plank) },
+            mat(M::Stick, 6),
+        ],
+        grid(&[
+            (0, 0, STICK), (0, 1, p), (0, 2, STICK),
+            (1, 0, STICK), (1, 1, p), (1, 2, STICK),
+            (2, 0, STICK), (2, 1, p), (2, 2, STICK),
+        ]),
+        RecipeCategory::Decoration,
+    ));
+
     // crafting.rs:1897-1903 — Cobblestone Wall: a 3×2 block of cobblestone
     // → 6 walls.
     out.push(card(
@@ -1673,7 +1690,9 @@ mod tests {
         // slab/stairs/wall) that had no authored card.
         // 350 as of 2026-11-08 (living world S3): + the Feast Table and the Commons Stone.
         // 351 as of 2026-11-09 (living world Tier 2 S6): + the Commons Shelf.
-        assert_eq!(all_cards().len(), 351, "catalogue size changed to {}", all_cards().len());
+        // 351 as of 2026-11-09 (living world Tier 2 S7): + the Site Board.
+        // 352 as of the Tier 2 integration: the Commons Shelf and the Site Board together.
+        assert_eq!(all_cards().len(), 352, "catalogue size changed to {}", all_cards().len());
     }
 
     /// UX polish sweep Task 3 — the non-obvious craftables (a kid can't

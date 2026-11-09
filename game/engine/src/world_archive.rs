@@ -495,6 +495,7 @@ mod tests {
             region_use: None,
             plan_builds: None,
             plot_succession: None,
+            site_boards: None,
         }
     }
 
@@ -594,6 +595,27 @@ mod tests {
         let blob = pack_world(&meta, &handed, &world, &[]).expect("pack");
         let (_, imported, _) = unpack_world_for_import(&blob, &mut World::new()).expect("import");
         assert!(imported.plot_succession.is_none(), "an import never adopts a file's table");
+    }
+
+    /// Living world Tier 2 S7 — a Site Board's list holds no identities (a job is
+    /// a number, a tick a bool), so a shared world file carries it and an import
+    /// adopts it, with the boards' blocks.
+    #[test]
+    fn export_and_import_keep_the_site_boards() {
+        let world = World::new();
+        let meta = WorldMeta::new("boards-x");
+        let mut boards = std::collections::BTreeMap::new();
+        let mut b = crate::site_board::SiteBoard::default();
+        crate::site_board::apply(&mut b, crate::site_board::Op::add(crate::site_board::Job::BuildRoof)).unwrap();
+        boards.insert((2, 64, 2), b);
+        let table = crate::site_board::to_saved(&boards);
+        let mut save = minimal_world_save(1);
+        save.site_boards = table.clone();
+        let exported = pack_world_for_export(&meta, save, &world, &[]).expect("pack");
+        let (_, shared, _) = unpack_world(&exported, &mut World::new()).expect("unpack");
+        assert_eq!(shared.site_boards, table, "an export keeps the job lists");
+        let (_, imported, _) = unpack_world_for_import(&exported, &mut World::new()).expect("import");
+        assert_eq!(imported.site_boards, table, "and so does an import");
     }
 
     #[test]

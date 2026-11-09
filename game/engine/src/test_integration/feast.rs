@@ -348,9 +348,9 @@ fn a_world_with_a_marker_and_a_commons_save_loads_with_its_meta() {
 #[test]
 fn the_save_and_the_wire_moved_with_the_new_block_ids() {
     // Tier 1 took the layout to 5 (these ids); Tier 2 S3's Worn Path (376) took it to 6.
-    // S8's Blighted Crop (377) took it to 7.
+    // S8's Blighted Crop (377) took it to 7; S6's Commons Shelf (378) took it to 8, and S7's Site Board (379) joined it.
     assert_eq!(crate::save_format::SAVE_LAYOUT_REVISION, 8);
-    assert_eq!(crate::save_format::SAVE_FORMAT_VERSION, 68, "60 fields + layout revision 8");
+    assert_eq!(crate::save_format::SAVE_FORMAT_VERSION, 69, "61 fields + layout revision 8");
     assert_eq!(crate::protocol::PROTOCOL_VERSION, 100);
     let reg = block::BlockRegistry::new();
     for b in [block::FEAST_TABLE, block::FEAST_MARKER, block::COMMONS_STONE] {

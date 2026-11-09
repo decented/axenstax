@@ -280,6 +280,10 @@ pub struct PlayerSlot {
     /// no sign editor showing. Set on right-click / on placement; cleared on
     /// Close / Esc / break. Mirrors `open_chest`.
     pub open_sign: Option<(i32, i32, i32)>,
+    /// Living world Tier 2 S7 — world-space position of a Site Board the
+    /// player has open. None = no board window showing. Set on right-click;
+    /// cleared on Done / Esc / the block going.
+    pub open_site_board: Option<(i32, i32, i32)>,
     /// Spec 33 Mob Bounty Board — world-space position of a
     /// BOUNTY_BOARD the player has open. None = no bounty UI is
     /// showing. Set on right-click; cleared on Close / Esc / break.
@@ -382,6 +386,7 @@ impl PlayerSlot {
             || self.open_pack.is_some()
             || self.open_chest.is_some()
             || self.open_sign.is_some()
+            || self.open_site_board.is_some()
             || self.open_bounty_board.is_some()
             || self.open_tip_jar.is_some()
             || self.open_repair_bench.is_some()
@@ -410,6 +415,7 @@ impl PlayerSlot {
         self.open_pack = None;
         self.open_chest = None;
         self.open_sign = None;
+        self.open_site_board = None;
         self.open_bounty_board = None;
         self.open_tip_jar = None;
         self.open_repair_bench = None;
@@ -489,6 +495,7 @@ impl PlayerSlot {
             open_pack: None,
             was_in_water: false,
             open_sign: None,
+            open_site_board: None,
             open_bounty_board: None,
             open_tip_jar: None,
             open_repair_bench: None,

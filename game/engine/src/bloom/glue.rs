@@ -23,6 +23,9 @@ impl GameState {
         // Living world S3 — feasts held, Feast Markers and Commons areas, in
         // every client mode (all read this client's own world copy).
         self.tick_gatherings();
+        // Living world Tier 2 S7 — crew moods: presentation only, off this client's
+        // bloom field and villagers (a joiner's are the mirrored ones).
+        self.tick_crew_moods();
         let local: Vec<Vec3> = self.players.iter().map(|p| p.player.pos).collect();
         let remote: Vec<Vec3> = self
             .remote_players

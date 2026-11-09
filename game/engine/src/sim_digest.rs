@@ -347,6 +347,8 @@ impl GameServer {
             s
         });
         e.bytes(&bincode::serialize(&succession).expect("plot succession encodes"));
+        // Living world Tier 2 S7 — each Site Board's list (a sorted map, canonical).
+        e.bytes(&bincode::serialize(&crate::site_board::to_saved(&w.site_boards)).expect("site boards encode"));
         e.u64(w.total_work);
         e.u32(self.pop_epoch);
         e.debug(&self.column_streamer);

@@ -7018,6 +7018,7 @@ impl super::GameState {
                 || self.players[i].open_vendor.is_some()
                 || self.players[i].open_chest.is_some()
                 || self.players[i].open_sign.is_some()
+                || self.players[i].open_site_board.is_some()
                 || self.players[i].explorer_state.is_some()
                 // Spec 40 — the Workshop painter (player 0) is a modal editor.
                 || (i == 0 && self.workshop_painter.open)
@@ -7937,6 +7938,7 @@ impl super::GameState {
                 || p.open_pack.is_some()
                 || p.shared_container.as_ref().is_some_and(crate::container_window::SharedContainer::visible)
                 || p.open_sign.is_some()
+                || p.open_site_board.is_some()
                 || p.explorer_state.is_some()
         })
     }
@@ -8061,6 +8063,10 @@ impl super::GameState {
         }
         if p.open_sign.is_some() {
             p.open_sign = None;
+            return true;
+        }
+        if p.open_site_board.is_some() {
+            p.open_site_board = None;
             return true;
         }
         if p.explorer_state.is_some() {
@@ -11367,6 +11373,7 @@ impl super::GameState {
                     || self.players[pidx].open_vendor.is_some()
                     || self.players[pidx].open_chest.is_some()
                     || self.players[pidx].open_sign.is_some()
+                    || self.players[pidx].open_site_board.is_some()
                 {
                     // No-op; the workstation UI's own 'E' handler
                     // already closed it this frame.
@@ -15103,6 +15110,13 @@ impl super::GameState {
                             }
                         }
                         self.players[pidx].place_cooldown = 8;
+                        continue;
+                    } else if target_blk == block::SITE_BOARD {
+                        // Living world Tier 2 S7 — a Site Board: open its job list.
+                        // Anyone may use it, joined or not (`apply_site_board_op`).
+                        self.players[pidx].open_site_board = Some((pos[0], pos[1], pos[2]));
+                        self.players[pidx].place_cooldown = 8;
+                        if pidx == 0 { self.release_cursor(); }
                         continue;
                     } else if target_blk == block::OAK_SIGN {
                         // Wave 2c — right-click a placed Sign to re-edit its text.
@@ -19695,6 +19709,33 @@ impl super::GameState {
                     self.players[pidx].open_sign = None;
                     if pidx == 0 { self.capture_cursor(); }
                 }
+            } else if let Some(board_pos) = self.players[pidx].open_site_board {
+                // Living world Tier 2 S7 — the Site Board window. It draws this
+                // client's copy of the list (a joiner's is the authority's, shown
+                // by a block view); an op goes through `apply_site_board_op`.
+                let still_present =
+                    self.world.get_block(board_pos.0, board_pos.1, board_pos.2) == block::SITE_BOARD;
+                // The window closes when its user walks off, as a container's does.
+                let in_reach = crate::container_window::container_in_reach(
+                    self.players[pidx].player.eye_pos(),
+                    [board_pos.0, board_pos.1, board_pos.2],
+                );
+                if !still_present || !in_reach {
+                    self.players[pidx].open_site_board = None;
+                    if pidx == 0 { self.capture_cursor(); }
+                } else {
+                    let board = self.world.site_boards.get(&board_pos).cloned().unwrap_or_default();
+                    match crate::site_board_ui::draw_site_board_ui(&self.renderer.egui.ctx, pidx, &board) {
+                        crate::site_board_ui::SiteBoardUiOutcome::InProgress => {}
+                        crate::site_board_ui::SiteBoardUiOutcome::Closed => {
+                            self.players[pidx].open_site_board = None;
+                            if pidx == 0 { self.capture_cursor(); }
+                        }
+                        crate::site_board_ui::SiteBoardUiOutcome::Op(op) => {
+                            self.apply_site_board_op(pidx, board_pos, op);
+                        }
+                    }
+                }
             } else if let Some(board_pos) = self.players[pidx].open_bounty_board {
                 // Spec 33 Phase 8 — Mob Bounty Board dialog. Server-
                 // issued; one row per active bounty + Claim button.
@@ -23076,6 +23117,15 @@ impl super::GameState {
             held_full,
         };
         self.send_use_request(pidx, asked, held, hot, action);
+    }
+
+    /// Living world Tier 2 S7 — player `pidx` (a joiner) asks the authority for
+    /// `op` on the Site Board at `cell` (`ItemAction::SiteBoard`). Claims nothing.
+    /// The board's new list comes back as a block view, so nothing changes here.
+    pub(crate) fn send_site_board_op(&mut self, pidx: usize, cell: [i32; 3], op: crate::site_board::Op) {
+        let asked = crate::joiner_actions::Asked::SiteBoard { cell };
+        let hot = self.players[pidx].hotbar_slot;
+        self.send_use_request(pidx, asked, None, hot, crate::protocol::ItemAction::SiteBoard { pos: cell, op });
     }
 
     /// Ask the server to grant what fits from this shared grave. One request

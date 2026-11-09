@@ -31,7 +31,7 @@ use crate::save::WorldSave;
 /// `world_save_field_count_tripwire` test against serde's own field list, so
 /// appending a `WorldSave` field fails the test until this is bumped — which bumps
 /// [`SAVE_FORMAT_VERSION`] with it.
-pub const WORLD_SAVE_FIELD_COUNT: u32 = 60;
+pub const WORLD_SAVE_FIELD_COUNT: u32 = 61;
 
 /// Bump by hand for a wire change that is NOT an appended `WorldSave` field: a
 /// field or enum variant added inside a nested saved type, a retype. Such a change
@@ -62,6 +62,10 @@ pub const WORLD_SAVE_FIELD_COUNT: u32 = 60;
 /// again. No `WorldSave` field was added (a shelf's contents ride the existing
 /// block entities and its fill the existing `block_meta`), so the footer is
 /// 68 = 60 fields + revision 8.
+///
+/// Revision 8 also covers living world Tier 2 S7 (block id 379: the Site Board). With its
+/// appended `site_boards` field (61) the footer is 69 = 61 fields + revision 8; S6 and S7
+/// were integrated into the one revision 8 (the Commons Shelf at 378, the Site Board at 379).
 pub const SAVE_LAYOUT_REVISION: u32 = 8;
 
 /// The `world.dat` format version this build writes, and the newest it opens.
@@ -100,7 +104,8 @@ pub const SAVE_FORMAT_VERSION: u32 = WORLD_SAVE_FIELD_COUNT + SAVE_LAYOUT_REVISI
 /// | 65     | 59     | 6        | living world Tier 2 S4 (Plan build counts)        | `plan_builds`     |
 /// | 66     | 59     | 7        | living world Tier 2 S8 (block 377)                | `plan_builds`     |
 /// | 67     | 60     | 7        | living world Tier 2 S5 (last seen and succession) | `plot_succession` |
-/// | 68     | 60     | 8        | living world Tier 2 S6 (block 378; this build)    | `plot_succession` |
+/// | 68     | 60     | 8        | living world Tier 2 S6 (block 378)               | `plot_succession` |
+/// | 69     | 61     | 8        | living world Tier 2 S7 (Site Boards, block 379; this build) | `site_boards` |
 ///
 /// (No commit wrote footer 63: S3 moved the field count and the layout revision together.)
 ///
@@ -124,6 +129,7 @@ pub const FOOTER_FIELD_COUNTS: &[(u32, &[u32])] = &[
     (66, &[59]),
     (67, &[60]),
     (68, &[60]),
+    (69, &[61]),
 ];
 
 /// The field counts a footer `version` was written with (empty for a footer the
@@ -412,17 +418,17 @@ mod tests {
     /// loading them as AIR and saving the holes back.
     #[test]
     fn a_world_written_now_carries_the_building_variants_version() {
-        // 68 as of living world Tier 2 S6 (block id 378): 60 fields + layout revision 8.
-        assert_eq!(SAVE_FORMAT_VERSION, 68, "60 fields + layout revision 8");
+        // 69 as of living world Tier 2 S7 (the `site_boards` field and blocks 378, 379): 61 fields + layout revision 8.
+        assert_eq!(SAVE_FORMAT_VERSION, 69, "61 fields + layout revision 8");
         // The world holds no new block, and still carries the new version.
         let bytes = encode_world_save(&minimal_world_save_for_tests(5)).unwrap();
-        assert_eq!(split_save_footer(&bytes).1, Some(68));
+        assert_eq!(split_save_footer(&bytes).1, Some(69));
         assert!(check_version(split_save_footer(&bytes).1).is_ok(), "this build opens its own save");
-        // A build that stopped at 67 refuses this footer (68 > 67) the same
-        // way this build refuses 68: `check_version` is the one rule.
+        // A build that stopped at 67 refuses this footer (69 > 67) the same
+        // way this build refuses 70: `check_version` is the one rule.
         assert_eq!(
-            check_version(Some(68 + 1)),
-            Err(WorldSaveError::NewerVersion { found: 69, supported: 68 }),
+            check_version(Some(69 + 1)),
+            Err(WorldSaveError::NewerVersion { found: 70, supported: 69 }),
             "a footer one version past this build is refused"
         );
         let mut next = bincode::serialize(&minimal_world_save_for_tests(5)).unwrap();

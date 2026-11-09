@@ -129,6 +129,10 @@ pub enum Asked {
     /// (`ItemAction::Detach`): claims nothing; the item comes as a grant.
     Detach { cell: [i32; 3], face: u8 },
     OpenGrave { cell: [i32; 3] },
+    /// Living world Tier 2 S7 — an op on the Site Board at `cell`
+    /// (`ItemAction::SiteBoard`): claims nothing. Several may be in flight; the
+    /// board's new list arrives as a block view, not in the outcome.
+    SiteBoard { cell: [i32; 3] },
 }
 
 impl Asked {
@@ -493,6 +497,7 @@ pub fn uses(kind: Asked) -> u8 {
         | Asked::Reel
         | Asked::CreativeGive
         | Asked::OpenGrave { .. }
+        | Asked::SiteBoard { .. }
         | Asked::Detach { .. } => 0,
         Asked::UseBlock { claim, .. } => claim,
         Asked::Light { lighter, .. } => u8::from(lighter != crate::block_use::Lighter::Firestarter),
@@ -822,6 +827,7 @@ pub fn apply_outcome(
         | Asked::Attach { .. }
         | Asked::CreativeGive
         | Asked::OpenGrave { .. }
+        | Asked::SiteBoard { .. }
         | Asked::Detach { .. } => {}
     }
     applied
