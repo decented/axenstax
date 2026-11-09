@@ -345,15 +345,15 @@ fn game_harness_solo_hosted_bed_sets_morning_spawn_and_heal_once() {
 #[test]
 #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
 fn game_harness_a_storm_strikes_once_in_both_routings() {
-    let storm_tick = |from: u64, storm: crate::weather::Weather| {
-        (from..from + 100_000).find(|&t| crate::weather::strike_roll(storm, t, true).is_some()).unwrap()
+    let storm_tick = |from: u64, storm: crate::weather::Weather, seed: u32| {
+        (from..from + 100_000).find(|&t| crate::weather::strike_roll(storm, t, true, seed).is_some()).unwrap()
     };
     // Solo-hosted: the authority's storm.
     let (_name, mut game) = solo("storm");
     assert_one_sim(&game.logical_ticks(1));
     let base = authority(&game).tick_counter;
     let storm = crate::weather::Weather { rain_until: base + 100_000, storm_until: base + 100_000 };
-    let t = storm_tick(base + 1, storm);
+    let t = storm_tick(base + 1, storm, authority(&game).biome_gen.seed);
     {
         let server = &mut game.state.hosted_server.as_mut().unwrap().server;
         server.weather = storm;
@@ -371,7 +371,7 @@ fn game_harness_a_storm_strikes_once_in_both_routings() {
     let mut game = HeadlessGame::boot_into_world(&name);
     let base = game.state.tick_counter;
     let storm = crate::weather::Weather { rain_until: base + 100_000, storm_until: base + 100_000 };
-    let t = storm_tick(base + 1, storm);
+    let t = storm_tick(base + 1, storm, game.state.biome_gen.seed);
     game.state.weather_rain_until = storm.rain_until;
     game.state.weather_storm_until = storm.storm_until;
     game.state.tick_counter = t - 1;

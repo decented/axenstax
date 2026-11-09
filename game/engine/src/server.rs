@@ -1729,7 +1729,7 @@ impl GameServer {
                 weather_lock_applied: &mut self.weather_lock_applied,
                 night_calendar: &mut self.night_calendar,
             },
-            crate::sim_clock::WeatherRules { has_weather, roll: true, lock },
+            crate::sim_clock::WeatherRules { has_weather, roll: true, lock, seed: self.biome_gen.seed },
         );
         self.pending_strike = outcome.strike.filter(|_| self.rolls_lightning || self.clock_phase_open);
         outcome.stepped

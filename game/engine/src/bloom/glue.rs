@@ -9,6 +9,12 @@ use crate::GameState;
 /// Seconds one logical tick stands for (20 TPS).
 const TICK_SECS: f32 = 1.0 / 20.0;
 
+/// The ECS the bloom census reads: this client's own, or on a joined client the
+/// mirror of the server's mobs (the same choice crew moods make).
+fn census_ecs<'a>(joined: bool, own: &'a hecs::World, mirror: &'a hecs::World) -> &'a hecs::World {
+    if joined { mirror } else { own }
+}
+
 impl GameState {
     /// Tick the bloom field once. Runs in every client mode (single-player, a
     /// host, a joined client), from this client's own world copy, ECS mobs and
@@ -43,9 +49,16 @@ impl GameState {
         // Tier 2 S10 — a joined client has no authorship or use tables; it reads
         // the b and u its server told it.
         let told = self.remote_client.as_ref().map(|rc| rc.region_people());
+        // A joiner's mobs live only in the render-only mirror (`remote_mobs`); its own
+        // ECS holds none, so the census would count no wildlife there.
+        let joined = self.joined();
+        let ecs = census_ecs(joined, &self.ecs, self.remote_mobs.ecs());
+        // A push-only joiner's own worldgen differs from its host's, so it cannot
+        // regenerate the natural terrain it was sent (`NaturalCache`).
+        let natural_known = !self.joined_push_only;
         let out = self.bloom.tick(&TickInput {
             world: &self.world,
-            ecs: &self.ecs,
+            ecs,
             biome_gen: &self.biome_gen,
             registry: &self.registry,
             local_players: &local,
@@ -54,6 +67,7 @@ impl GameState {
             dt: TICK_SECS,
             allow_grey_event,
             told_people: told,
+            natural_known,
         });
         out.place_went_grey
     }
@@ -102,7 +116,24 @@ impl GameServer {
             dt: TICK_SECS,
             allow_grey_event: false,
             told_people: None,
+            natural_known: true,
         });
+    }
+}
+
+#[cfg(test)]
+mod census_tests {
+    use super::census_ecs;
+
+    /// A joined client's mobs live only in the mirror, so that is what the
+    /// census must read there; everywhere else its own ECS.
+    #[test]
+    fn a_joined_clients_census_reads_the_mirror() {
+        let own = hecs::World::new();
+        let mut mirror = hecs::World::new();
+        mirror.spawn((1u8,));
+        assert_eq!(census_ecs(true, &own, &mirror).len(), 1);
+        assert_eq!(census_ecs(false, &own, &mirror).len(), 0);
     }
 }
 

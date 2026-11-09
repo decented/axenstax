@@ -7,7 +7,7 @@
 > move, no wallet exists yet, and no guardian withdrawal flow exists.
 > Bitcoin-enabled servers are a future, opt-in capability layer, off by
 > default; see `docs/learn-journey/the-hash-and-your-first-sats.md` and the
-> CLAUDE.md "Reward Mechanic" section for what's actually built vs. planned.
+> CLAUDE.md "Proof of Play (as built)" bullet for what's actually built vs. planned.
 
 > **The work-meter is retired.** RETIRED 2026-11-08 (owner): the work-meter is not built and will not be; proof-of-play effort is not turned into sats. Every mention of the work-meter, work credits, payout thresholds or an effort-based sats rate in this file (§1.1, §1.4, §2.1, §2.3 to §2.5, §3, §7, §10, Appendices B and C) is kept as history only. Nothing in the game is convertible into sats.
 
@@ -32,7 +32,7 @@ The economy has two kinds of thing, and they follow different rules.
 - **A Licence listing can be unlimited.** `vendor::UNLIMITED_STOCK` (`vendor.rs`) marks a Plan Licence listing that never runs out. A buyer gets a non-master copy and the owner keeps the original (`try_buy_plan`).
 - **A vendor can charge nothing.** The owner's price control clamps at 0 (`vendor_ui.rs`) and `try_buy_plan` has no price floor. A caveat: the Plan sale path is one of the vendor's sats modes, so it is only reachable where sats are switched on for the server and the player (`economy::sats_ui_visible`). On a server with sats off there is no vendor route that hands out a Plan, even for free. That is a gap to close, not a rule.
 
-**Status in the bit economy is attribution, not exclusion.** Credit by lineage (the Plan's family tree, shown on its plaque, back to the first author) is **designed for a later tier and NOT built.** Today a Plan carries its author and licence and nothing more.
+**Status in the bit economy is attribution, not exclusion.** Credit by lineage is **built (Tier 2 S4, `plan_builds.rs`, `plan_ui::plaque_lines`).** A Plan's plaque shows its own author and the Plans it came after ("From a Plan by npub1..., after Hut, Cabin", or "A local Plan"), and on the machine that owns the world how many times the design was built and how many more were built from it. A licence copy counts as a build of its design. The counts hold no identities, never name who built, and are not sent to joiners (a joiner sees the lineage only). **Not built:** lineage across worlds (federation), and any change to Master/Licence scarcity (an owner call, Living World Tier 2 spec T12).
 
 **Bitcoin is an optional operator layer.** It exists only on Bitcoin-enabled servers, off by default. Nothing in the game is convertible into sats, and playing does not turn into sats (see the retired work-meter, §2.4).
 
@@ -194,7 +194,7 @@ The principle was implicit in the original March 2025 brainstorm ("payments batc
 
 ### 2.1 Core Principle
 
-> **AS BUILT (verified 2026-11-08).** Only the gem-vein path hashes. A strike hashes only when `break_drops::satori_drop` runs on a pure-deepslate block, below the depth gate, with a Diamond or better pickaxe, on a block no player placed (`break_drops.rs:100-103`, called from `break_yield` at `break_drops.rs:182`). Then `block_is_vein_member` and `proof_hash` (`proof_of_play.rs:91`, the HMAC-SHA-256) decide the Satori. Strikes on grass, dirt and plain stone run no hash, and plain-stone rare drops are seeded by tick and cell (`break_drops::drop_seed`), not by this hash. There is no per-strike hash in the HUD (no HUD or UI code reads a proof hash). The only player-facing trace is the Genesis Block sound on a world's first Satori (`game_loop.rs:13012-13013`). Layers 1 and 3 below are design, not build. The text that follows is the design as first written.
+> **AS BUILT (verified 2026-11-08).** Only the gem-vein path hashes. A strike hashes only when `break_drops::satori_drop` runs on a pure-deepslate block, below the depth gate, with a Diamond or better pickaxe, on a block no player placed (`break_drops::satori_drop`, called from `break_drops::break_yield`). Then `proof_of_play::block_is_vein_member` and `proof_of_play::proof_hash` (the HMAC-SHA-256) decide the Satori. Strikes on grass, dirt and plain stone run no hash, and plain-stone rare drops are seeded by tick and cell (`break_drops::drop_seed`), not by this hash. There is no per-strike hash in the HUD (no HUD or UI code reads a proof hash). The only player-facing trace is the Genesis Block sound on a world's first Satori (`maybe_claim_genesis_block` and `audio.play_genesis_block` in `game_loop.rs`). Layers 1 and 3 below are design, not build. The text that follows is the design as first written.
 
 Every pickaxe strike — on any block, including grass and dirt — runs an HMAC-SHA-256 over the block coordinates and server-held secrets. **One hash, three layers stacked on it:**
 
@@ -1158,6 +1158,8 @@ The Treasury Transparency Panel (section 7) displays cumulative split totals, al
 
 ## 6. Player Payment Flows
 
+> **RETIRED 2026-11-08 — history only** for every balance, work credit, withdrawal of mined sats and HUD work meter below. None of it is built and none will be. What remains is an unbuilt, off-by-default operator-layer design on the operator's own server; nothing in the game converts to sats.
+
 ### 6.1 Pay-to-Join
 
 ```mermaid
@@ -1297,6 +1299,8 @@ The player's HUD shows a Bitcoin balance element:
 ---
 
 ## 7. Treasury and Pool Management
+
+> **RETIRED 2026-11-08 — history only.** A reward pool that pays players for proof-of-play effort is not built and will not be. Read this section as an unbuilt, off-by-default operator-layer design on the operator's own server.
 
 ### 7.1 Reward Pool Wallet
 

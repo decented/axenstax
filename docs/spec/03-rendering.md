@@ -4,7 +4,7 @@
 **Date**: 2026-03-03
 **Depends on**: ADR-002 (Tech Stack), Platform Overview (Visual Strategy)
 
-> **AS-BUILT (audit 2026-10-04).** The following sections are **design targets, not shipped**: §4.3 smooth lighting, §4.4 ambient occlusion, §6 the full procedural sky (as built, a camera-bound triangle grades the live horizon colour into a deeper overhead blue; no sun/moon discs, stars or clouds), and §9 post-processing and bloom (no HDR `Rgba16Float` target). The `smooth_lighting` graphics setting was **removed** (Perf B1, 2026-10-24): nothing ever read it, and the mesher has no smooth-light or AO path to switch (light is per quad). An old settings file that still carries the key loads fine (unknown keys are ignored). Light is per-face block/sky light (`shader.wgsl`).
+> **AS-BUILT (audit 2026-10-04).** The following sections are **design targets, not shipped**: §4.3 smooth lighting, §4.4 ambient occlusion, §6 the full procedural sky (as built, a camera-bound triangle grades the live horizon colour into a deeper overhead blue; no sun/moon discs, stars or clouds), and §9 post-processing and the HDR glow ("bloom" in the older text; no HDR `Rgba16Float` target). The `smooth_lighting` graphics setting was **removed** (Perf B1, 2026-10-24): nothing ever read it, and the mesher has no smooth-light or AO path to switch (light is per quad). An old settings file that still carries the key loads fine (unknown keys are ignored). Light is per-face block/sky light (`shader.wgsl`).
 
 ---
 
@@ -44,7 +44,7 @@ Feature detection drives capability tiers:
 |------|-------------------|--------|
 | Base | (none beyond core) | No post-processing, no shadow maps, 2D texture atlas |
 | Mid | `TEXTURE_BINDING_ARRAY` | Texture arrays for atlas, smooth AO |
-| High | `TEXTURE_BINDING_ARRAY`, `MULTI_DRAW_INDIRECT` | Indirect draws, bloom, shadows |
+| High | `TEXTURE_BINDING_ARRAY`, `MULTI_DRAW_INDIRECT` | Indirect draws, HDR glow, shadows |
 
 The renderer queries features at startup and selects the highest available tier. All tiers share the same shader entry points; tier-dependent code paths are controlled via pipeline constants (WGSL `override` declarations) and bind group layouts.
 
@@ -1027,7 +1027,7 @@ SUNSET_COLOUR= (1.00, 0.45, 0.15)   Orange
 
 The sun and moon are rendered as bright discs in the sky pass:
 
-- **Sun**: a circular gradient with a bright white core fading to yellow. Angular radius: 2 degrees. Intensity is clamped to avoid oversaturation (or drives bloom on Tier Mid+).
+- **Sun**: a circular gradient with a bright white core fading to yellow. Angular radius: 2 degrees. Intensity is clamped to avoid oversaturation (or drives the HDR glow on Tier Mid+).
 - **Moon**: a circular disc with a subtle texture (a 64x64 texture loaded from the resource pack). Rendered only at night.
 
 Sun position is derived from in-game time: `sun_elevation = sin(time_of_day * 2 * PI)`, `sun_azimuth = cos(time_of_day * 2 * PI)`. The moon is opposite the sun.
@@ -1530,7 +1530,7 @@ Post-processing is performed on Tier Mid and above. The world and entity passes 
 
 ```mermaid
 flowchart LR
-    A["HDR Colour Buffer"] --> B["Bloom (optional)"]
+    A["HDR Colour Buffer"] --> B["Glow (optional)"]
     B --> C["Tone Mapping"]
     C --> D["Colour Grading / LUT (future)"]
     D --> E["Underwater Tint (conditional)"]
@@ -1540,17 +1540,19 @@ flowchart LR
 
 The entire post-processing pipeline is a single full-screen triangle draw call with a fragment shader that reads the HDR buffer and applies effects sequentially.
 
-### 9.2 Bloom
+### 9.2 Glow (HDR bloom)
 
-Bloom is a multi-pass effect:
+> **Naming.** This section is the HDR glow post effect (a design target, not built; see the AS-BUILT note at the top). "Bloom" everywhere else in the specs (Spec 05 §14 and §16, and "Living-world bloom" below) means the Living World's place-bloom: how alive a region is. It is a different thing and shares nothing with this effect.
+
+The glow is a multi-pass effect:
 
 1. **Threshold pass**: extract bright regions (luminance > 1.0) from the HDR buffer into a half-resolution texture.
 2. **Blur pass**: apply a two-pass Gaussian blur (horizontal then vertical) at half resolution. Repeat at quarter and eighth resolution for a wide glow (3 blur levels total).
 3. **Composite**: additively blend the blurred bright regions back onto the HDR buffer during tone mapping.
 
-Bloom is controlled by a user setting (Off / Low / High). The bloom intensity multiplier is 0.0 (off), 0.15 (low), or 0.3 (high).
+The glow is controlled by a user setting (Off / Low / High). The glow intensity multiplier is 0.0 (off), 0.15 (low), or 0.3 (high).
 
-On WASM/Base tier, bloom is disabled (no HDR buffer, no compute passes for blur).
+On WASM/Base tier, the glow is disabled (no HDR buffer, no compute passes for blur).
 
 ### 9.3 Tone Mapping
 
@@ -1587,7 +1589,7 @@ Post-processing effects are individually toggleable in the settings menu:
 ```text
 [Graphics Settings]
   Post-Processing:    On / Off          (Off disables HDR buffer entirely)
-  Bloom:              Off / Low / High
+  Glow (HDR bloom):   Off / Low / High
   Tone Mapping:       ACES / Reinhard / None
   Underwater Effects: On / Off
   Damage Flash:       On / Off

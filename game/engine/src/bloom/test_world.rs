@@ -21,6 +21,8 @@ pub struct Harness {
     pub allow_grey: bool,
     /// Tier 2 S10 — `Some` makes this a joined client's field.
     pub told: Option<crate::region_people::RemotePeople>,
+    /// False makes this a push-only joiner's field (no natural-terrain regeneration).
+    pub natural_known: bool,
 }
 
 impl Harness {
@@ -43,6 +45,7 @@ impl Harness {
             creative: false,
             allow_grey: true,
             told: None,
+            natural_known: true,
         }
     }
 
@@ -63,6 +66,7 @@ impl Harness {
             dt: 0.05,
             allow_grey_event: self.allow_grey,
             told_people: self.told.as_ref(),
+            natural_known: self.natural_known,
         })
     }
 

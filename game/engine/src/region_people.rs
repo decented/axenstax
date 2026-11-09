@@ -118,10 +118,10 @@ impl PeopleSent {
         world: &World,
         held: impl IntoIterator<Item = (i32, i32, u32)>,
     ) -> Option<RegionPeoplePacket> {
-        // Ascending region order, so a list over the packet cap continues on the
-        // next beat in a fixed order.
-        let held: BTreeMap<(i32, i32), u32> = held.into_iter().map(|(cx, cz, n)| ((cx, cz), n)).collect();
-        if held.is_empty() {
+        // Peek, don't collect: the due check comes before the walk, so the other
+        // 199 ticks in 200 cost one step of the iterator, not a map of every column.
+        let mut held = held.into_iter().peekable();
+        if held.peek().is_none() {
             // Nothing pushed yet: wait without spending the beat.
             self.told.clear();
             return None;
@@ -130,6 +130,9 @@ impl PeopleSent {
             return None;
         }
         self.next_due = tick + PEOPLE_EVERY_TICKS;
+        // Ascending region order, so a list over the packet cap continues on the
+        // next beat in a fixed order.
+        let held: BTreeMap<(i32, i32), u32> = held.map(|(cx, cz, n)| ((cx, cz), n)).collect();
         self.told.retain(|k, _| held.contains_key(k));
 
         let mut regions = Vec::new();
@@ -317,5 +320,34 @@ mod tests {
         let mut gone = PeopleSent::default();
         gone.plan(0, &world, [(0, 0, 1)]);
         assert!(gone.plan(PEOPLE_EVERY_TICKS, &world, std::iter::empty()).is_none());
+    }
+
+    #[test]
+    fn a_tick_that_is_not_due_does_not_walk_the_joiners_columns() {
+        let world = World::new();
+        let mut sent = PeopleSent::default();
+        let walked = std::cell::Cell::new(0usize);
+        let columns = || {
+            (0..5000).map(|i| {
+                walked.set(walked.get() + 1);
+                (i, 0, 1u32)
+            })
+        };
+        sent.plan(0, &world, columns());
+        let first = walked.replace(0);
+        assert!(first >= 5000, "the due tick reads every column ({first})");
+        for tick in 1..PEOPLE_EVERY_TICKS {
+            assert!(sent.plan(tick, &world, columns()).is_none());
+        }
+        assert!(walked.get() <= PEOPLE_EVERY_TICKS as usize, "199 idle ticks peeked one column each: {}", walked.get());
+        // Nothing pushed yet still waits without spending the beat: the first
+        // push is told at once, however soon after.
+        let mut busy = World::new();
+        for (i, who) in ["alice", "bob"].iter().enumerate() {
+            busy.place_player_block_as(2 + i as i32, 100, 2, crate::block::STONE, Some(&crate::authorship::AuthorKey::Npub((*who).to_string())));
+        }
+        let mut fresh = PeopleSent::default();
+        assert!(fresh.plan(0, &busy, std::iter::empty()).is_none());
+        assert!(fresh.plan(1, &busy, [(0, 0, 1)]).is_some(), "the beat was not spent");
     }
 }

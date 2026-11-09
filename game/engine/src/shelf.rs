@@ -366,6 +366,20 @@ mod tests {
     }
 
     #[test]
+    fn a_world_change_forgets_every_shelfs_day() {
+        let mut w = World::new();
+        let pos = (1, 20, 1);
+        w.set_block(pos.0, pos.1, pos.2, block::COMMONS_SHELF);
+        w.insert_chest(pos, ChestData::for_tier(ChestTier::Shelf));
+        w.chest_at_mut(pos).unwrap().slots[0] = Some(ItemStack::new_material(MaterialId::Stick, 1));
+        let mut changes = Vec::new();
+        tick(&mut w, 0, &mut changes);
+        assert!(w.shelf_days.contains_key(&pos));
+        w.clear();
+        assert!(w.shelf_days.is_empty(), "a new world's shelf must not start from the old world's day mark");
+    }
+
+    #[test]
     fn region_terms_read_blocks_and_meta_alone() {
         let mut w = World::new();
         // Two shelves in region (0, 0), one in region (1, 0), different heights.

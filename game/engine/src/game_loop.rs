@@ -6366,7 +6366,7 @@ impl super::GameState {
                     storm_until: self.weather_storm_until,
                 },
                 self.tick_counter,
-                crate::sim_clock::WeatherRules { has_weather, roll, lock: active_lock.as_deref() },
+                crate::sim_clock::WeatherRules { has_weather, roll, lock: active_lock.as_deref(), seed: self.biome_gen.seed },
                 &mut self.weather_lock_applied,
             );
             self.weather_rain_until = after_lock.rain_until;
@@ -6379,7 +6379,7 @@ impl super::GameState {
             // row 3: its fire would be pushed to the server as an edit, where
             // it fights the server's own fire sim); its own bolts are not the
             // server's (no strike is on the wire; CLAUDE.md debt).
-            crate::sim_clock::strike_roll(after_lock, self.tick_counter, has_weather)
+            crate::sim_clock::strike_roll(after_lock, self.tick_counter, has_weather, self.biome_gen.seed)
         } else {
             None
         };

@@ -256,7 +256,12 @@ pub fn rewind_arena(
 /// One tick of a running scenario's `Place` leaves: read each open leaf's
 /// probe, remember its stage and terms, and finish the leaf when the probe
 /// reads "Alive". Returns `true` once, when Satoshi's halfway line is due.
-pub fn step(scn: &mut ScenarioState, bloom: &BloomField) -> bool {
+///
+/// `may_complete` is true only in a fresh trial arena. In the player's own
+/// world (the `/scenario` overlay) nothing starts grey, so living ground already
+/// reads "Alive" and the trial would finish by itself and be recorded as done:
+/// there the stage words still show but the leaf never completes.
+pub fn step(scn: &mut ScenarioState, bloom: &BloomField, may_complete: bool) -> bool {
     if !scn.place_track_mut().probes_live || scn.is_ended() {
         return false;
     }
@@ -266,7 +271,7 @@ pub fn step(scn: &mut ScenarioState, bloom: &BloomField) -> bool {
             continue;
         }
         scn.place_track_mut().note(index, &state);
-        if state.stage == Stage::Alive {
+        if may_complete && state.stage == Stage::Alive {
             scn.complete_place(index, &state);
         }
     }
@@ -347,7 +352,7 @@ impl crate::GameState {
             self.remove_place_probes();
             return;
         }
-        if !step(scn, &self.bloom) {
+        if !step(scn, &self.bloom, self.scenario_fresh_arena) {
             return;
         }
         let display = scn.display_name().to_string();

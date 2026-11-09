@@ -15,6 +15,7 @@ use glam::Vec3;
 
 use super::field::{BloomField, GRID_SIDE};
 use crate::camera::CameraUniform;
+use crate::world::World;
 use crate::GameState;
 
 /// Cells in the grid.
@@ -280,6 +281,20 @@ pub fn spawn_count(expected: f32, roll: f32) -> u32 {
 /// Horizontal reach of the ambient motes round a player, in blocks.
 const LIFE_RADIUS: f32 = 14.0;
 
+/// The sky light at a player's eye from which birdsong and pollen belong:
+/// open sky, a forest canopy (leaves let light through) or a porch's edge.
+/// Sky light is 15 under open sky and drops one a block sideways into cover,
+/// so 12 reaches about three blocks under a roof; a mine, a cave or a closed
+/// house reads 0.
+const OPEN_SKY_LIGHT: u8 = 12;
+
+/// Can the player whose eye is at `eye` see (or nearly see) the sky? The one
+/// question birdsong and pollen ask, so a player mining under a forest does
+/// not hear the birds above. (Unloaded chunks read as open sky.)
+pub fn under_open_sky(world: &World, eye: Vec3) -> bool {
+    world.sky_light_at(eye.x.floor() as i32, eye.y.floor() as i32, eye.z.floor() as i32) >= OPEN_SKY_LIGHT
+}
+
 // ── The one place this meets `GameState` ─────────────────────────────
 
 impl GameState {
@@ -296,10 +311,18 @@ impl GameState {
     pub(crate) fn bloom_ambient_sound(&mut self, dt: f32) {
         self.bloom_present.advance_clock(dt);
         let (phase, calm) = self.bloom_sky();
+        // A player under cover (a mine, a cave, a closed room) hears nothing: level 0
+        // is below `SOUND_MIN_LEVEL`, so that seat's timer just looks again each second.
         let levels: Vec<f32> = self
             .players
             .iter()
-            .map(|p| self.bloom.level_at(p.player.pos.x, p.player.pos.z))
+            .map(|p| {
+                if under_open_sky(&self.world, p.player.eye_pos()) {
+                    self.bloom.level_at(p.player.pos.x, p.player.pos.z)
+                } else {
+                    0.0
+                }
+            })
             .collect();
         for s in self.bloom_present.due_sounds(dt, &levels, phase, calm) {
             match s {
@@ -320,6 +343,9 @@ impl GameState {
         let tier = if reduced { 0.5 } else { 1.0 };
         for pidx in 0..self.players.len() {
             let eye = self.players[pidx].player.eye_pos();
+            if !under_open_sky(&self.world, eye) {
+                continue; // no pollen or fireflies drifting in a tunnel
+            }
             let level = self.bloom.level_at(eye.x, eye.z);
             let per_sec = if phase == DayPhase::Day { pollen_per_sec(level) } else { firefly_per_sec(level) };
             let sd0 = seed_base.wrapping_mul(0x9E37_79B9).wrapping_add((pidx as u64) << 44);
@@ -348,6 +374,25 @@ impl GameState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn birdsong_and_pollen_need_open_sky_at_the_eye() {
+        let mut w = World::new();
+        // A column of stone with a lit surface cell above it and a dark tunnel in it.
+        for y in 0..=60 {
+            w.set_block(5, y, 5, crate::block::STONE);
+        }
+        w.set_sky_light_at(5, 61, 5, 15);
+        w.set_sky_light_at(5, 30, 5, 0);
+        assert!(under_open_sky(&w, Vec3::new(5.5, 61.6, 5.5)), "on the surface");
+        assert!(!under_open_sky(&w, Vec3::new(5.5, 30.6, 5.5)), "40 blocks down a mine");
+        w.set_sky_light_at(5, 61, 5, 12);
+        assert!(under_open_sky(&w, Vec3::new(5.5, 61.6, 5.5)), "a few blocks under a porch or canopy still hears");
+        w.set_sky_light_at(5, 61, 5, 8);
+        assert!(!under_open_sky(&w, Vec3::new(5.5, 61.6, 5.5)), "deep in a closed room does not");
+        // Not yet loaded reads as open sky.
+        assert!(under_open_sky(&w, Vec3::new(500.5, 70.6, 500.5)));
+    }
 
     fn close(a: f32, b: f32) -> bool {
         (a - b).abs() < 1e-4

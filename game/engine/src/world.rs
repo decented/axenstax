@@ -732,6 +732,12 @@ pub struct World {
     /// reload a day begins at whatever the shelf holds. Cleaned when the shelf
     /// leaves its cell.
     pub(crate) shelf_days: std::collections::HashMap<(i32, i32, i32), crate::shelf::DayMark>,
+    /// Living world Tier 2 — per build anchor, how many of its cells `plan::tick_build`
+    /// skipped (a claim, a Commons block or a foreign Plot) since this world was
+    /// opened. A build that skipped every cell placed nothing and counts for
+    /// nothing (`plan::complete_build`). Runtime only, never serialised: after a
+    /// reload a build resumed part-way counts as before.
+    pub(crate) build_skips: std::collections::HashMap<(i32, i32, i32), usize>,
 
     // ─── Blank-canvas world config (Task B1) — runtime mirrors of WorldMeta ──
     // Set from meta at every load/entry seam so world-gen + gameplay systems can
@@ -1007,6 +1013,7 @@ impl World {
             is_workshop: false,
             trial_running: false,
             shelf_days: std::collections::HashMap::new(),
+            build_skips: std::collections::HashMap::new(),
             world_type: "normal".to_string(),
             ground: "grass".to_string(),
             water_depth: 3,
@@ -2123,6 +2130,9 @@ impl World {
         self.pop_exposure.clear();
         self.feast_events.clear();
         self.feast_days.clear();
+        // Runtime-only per-world marks (a new world starts every shelf's day afresh).
+        self.shelf_days.clear();
+        self.build_skips.clear();
         // Plan registry deliberately preserved — engine-bundled
         // content is constant across world resets.
     }

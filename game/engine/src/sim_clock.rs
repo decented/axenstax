@@ -209,6 +209,9 @@ pub struct WeatherRules<'a> {
     /// The scenario's `weather_lock` in force this tick, already dropped by
     /// the caller where the world has no weather.
     pub lock: Option<&'a str>,
+    /// The world's seed, which the weather and strike rolls mix in so every
+    /// world has its own timeline. Every side that rolls passes the same one.
+    pub seed: u32,
 }
 
 /// Advance the weather window one tick: the roll (if this side rolls), then
@@ -222,7 +225,7 @@ pub fn step_weather(
     lock_applied: &mut Option<String>,
 ) -> Weather {
     let rolled = if rules.roll {
-        crate::weather::advance(current, tick, rules.has_weather)
+        crate::weather::advance(current, tick, rules.has_weather, rules.seed)
     } else {
         current
     };
@@ -236,8 +239,8 @@ pub fn step_weather(
 
 /// The roll for a lightning strike this tick, from the post-lock window
 /// (`weather::strike_roll`): the strike hash, or `None`.
-pub fn strike_roll(weather: Weather, tick: u64, has_weather: bool) -> Option<u64> {
-    crate::weather::strike_roll(weather, tick, has_weather)
+pub fn strike_roll(weather: Weather, tick: u64, has_weather: bool, seed: u32) -> Option<u64> {
+    crate::weather::strike_roll(weather, tick, has_weather, seed)
 }
 
 /// A host client's clock, handed to its lending server so the server can
@@ -299,7 +302,7 @@ pub fn phase(view: ClockView<'_>, rules: WeatherRules<'_>) -> PhaseOutcome {
     *view.weather = step_weather(*view.weather, *view.tick_counter, rules, view.weather_lock_applied);
     PhaseOutcome {
         stepped: view.world_time_step,
-        strike: strike_roll(*view.weather, *view.tick_counter, rules.has_weather),
+        strike: strike_roll(*view.weather, *view.tick_counter, rules.has_weather, rules.seed),
     }
 }
 
@@ -458,7 +461,7 @@ mod tests {
                 weather_lock_applied: &mut applied,
                 night_calendar: &mut night,
             },
-            WeatherRules { has_weather: true, roll: true, lock: None },
+            WeatherRules { has_weather: true, roll: true, lock: None, seed: 42 },
         );
         assert_eq!((wt, tick), (7503, 42));
         assert_eq!(out.stepped, 3);
@@ -475,7 +478,7 @@ mod tests {
         let mut strikes = 0;
         for i in 0..200_000u64 {
             let lock = (50_000..60_000).contains(&i).then_some("storm");
-            let rules = WeatherRules { has_weather: true, roll: true, lock };
+            let rules = WeatherRules { has_weather: true, roll: true, lock, seed: 42 };
             let out = phase(
                 ClockView {
                     world_time: &mut wt,
@@ -490,7 +493,7 @@ mod tests {
             c_tick = next_tick(c_tick);
             c_wt = next_world_time(c_wt, 1);
             c_weather = step_weather(c_weather, c_tick, rules, &mut c_applied);
-            let c_strike = strike_roll(c_weather, c_tick, true);
+            let c_strike = strike_roll(c_weather, c_tick, true, 42);
             assert_eq!((wt, tick, weather, out.strike), (c_wt, c_tick, c_weather, c_strike), "tick {i}");
             strikes += usize::from(out.strike.is_some());
         }
@@ -502,16 +505,16 @@ mod tests {
         let mut applied = None;
         let mut w = storm(5_000);
         for t in 1..=4_000 {
-            w = step_weather(w, t, WeatherRules { has_weather: false, roll: true, lock: None }, &mut applied);
+            w = step_weather(w, t, WeatherRules { has_weather: false, roll: true, lock: None, seed: 42 }, &mut applied);
             assert_eq!(w, Weather::CLEAR);
-            assert_eq!(strike_roll(w, t, false), None);
+            assert_eq!(strike_roll(w, t, false, 42), None);
         }
     }
 
     #[test]
     fn a_lock_pins_the_window_and_its_release_clears_it_at_once() {
         let mut applied = None;
-        let rules = |lock| WeatherRules { has_weather: true, roll: true, lock };
+        let rules = |lock| WeatherRules { has_weather: true, roll: true, lock, seed: 42 };
         let pinned = step_weather(Weather::CLEAR, 10, rules(Some("storm")), &mut applied);
         assert!(pinned.storm_until > 10 && applied.as_deref() == Some("storm"));
         let released = step_weather(pinned, 11, rules(None), &mut applied);

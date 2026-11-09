@@ -4,7 +4,7 @@
 //! Presentation only. It reads the world, the ECS and player positions; it
 //! writes nothing to any of them, sends nothing and saves nothing.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use glam::{IVec3, Vec3};
 
@@ -60,6 +60,12 @@ pub struct TickInput<'a> {
     /// its server told it, region by region, instead of the authorship and use
     /// tables it does not keep. `None` everywhere else, which reads its own.
     pub told_people: Option<&'a crate::region_people::RemotePeople>,
+    /// Can this client regenerate the world's natural terrain with its own
+    /// worldgen? False on a push-only joiner (its generator differs from the
+    /// host's): regeneration would not match what it was sent, so a touched
+    /// region reads every non-placed block as natural, like an untouched one,
+    /// and no natural top is ever generated.
+    pub natural_known: bool,
 }
 
 /// What a tick reports.
@@ -149,6 +155,10 @@ pub struct BloomField {
     feasts: Vec<FeastMarker>,
     commons: Vec<CommonsArea>,
     initial: Vec<(IVec3, IVec3, f32)>,
+    /// Regions whose `initial` level has been applied: a drained start is
+    /// used once, so a region dropped by `track` and tracked again later
+    /// starts at its target, not grey again.
+    seeded: HashSet<RegionKey>,
     time_scale: f32,
     tick_no: u64,
     age_secs: f32,
@@ -172,6 +182,7 @@ impl BloomField {
             feasts: Vec::new(),
             commons: Vec::new(),
             initial: Vec::new(),
+            seeded: HashSet::new(),
             time_scale: 1.0,
             tick_no: 0,
             age_secs: 0.0,
@@ -295,6 +306,11 @@ impl BloomField {
             Some(entry) => entry.2 = level,
             None => self.initial.push((lo, hi, level)),
         }
+        // A new or replaced start is a fresh one: regions under it may use it again.
+        self.seeded.retain(|&key| {
+            let (x0, x1, z0, z1) = block_rect(key);
+            !(lo.x <= x1 && hi.x >= x0 && lo.z <= z1 && hi.z >= z0)
+        });
         for (&key, r) in &mut self.regions {
             let (x0, x1, z0, z1) = block_rect(key);
             if r.known && lo.x <= x1 && hi.x >= x0 && lo.z <= z1 && hi.z >= z0 {
@@ -398,7 +414,7 @@ impl BloomField {
         let before = self.regions.len();
         self.regions.retain(|k, _| near(k));
         if self.regions.len() != before {
-            self.natural.trim(super::natural::NATURAL_CACHE_MAX);
+            self.natural.trim(super::natural::cache_cap(self.regions.len()));
         }
         for c in centres {
             for dz in -TRACK_RADIUS..=TRACK_RADIUS {
@@ -452,7 +468,7 @@ impl BloomField {
             }
             let chunks = RegionChunks::of(input.world, key);
             let (x0, x1, z0, z1) = block_rect(key);
-            let init = self.initial_for(x0, x1, z0, z1);
+            let init = self.initial_for(x0, x1, z0, z1).filter(|_| !self.seeded.contains(&key));
             let Some(r) = self.regions.get_mut(&key) else { continue };
             if !chunks.is_loaded() {
                 // Nothing here yet. Rotate it to the back; it costs no scan.
@@ -461,7 +477,7 @@ impl BloomField {
                 r.tally = EcoTally::default();
                 continue;
             }
-            let natural = if chunks.is_touched() {
+            let natural = if input.natural_known && chunks.is_touched() {
                 if !self.natural.contains(key) {
                     if *gens == 0 {
                         continue;
@@ -503,6 +519,9 @@ impl BloomField {
                 r.known = true;
                 r.target = r.target_now(input.creative);
                 r.level = init.unwrap_or(r.target);
+                if init.is_some() {
+                    self.seeded.insert(key);
+                }
             }
         }
     }
@@ -548,7 +567,7 @@ impl BloomField {
                 if !chunks.is_loaded() {
                     continue;
                 }
-                let natural = if chunks.is_touched() {
+                let natural = if input.natural_known && chunks.is_touched() {
                     if !self.natural.contains(key) {
                         if *gens == 0 {
                             return None;
@@ -606,6 +625,12 @@ impl BloomField {
     /// The terms of a scanned region: `(eco, people, level, target)`.
     pub fn region_terms(&self, key: RegionKey) -> Option<(f32, f32, f32, f32)> {
         self.regions.get(&key).filter(|r| r.known).map(|r| (r.eco, r.p(), r.level, r.target))
+    }
+
+    /// Natural tops kept in the cache (tests).
+    #[cfg(test)]
+    pub fn natural_cached(&self) -> usize {
+        self.natural.len()
     }
 
     /// Regions currently tracked (tests and the Tally).

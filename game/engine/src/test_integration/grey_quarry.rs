@@ -43,6 +43,8 @@ struct Rig {
     ticks: u64,
     /// How many times Satoshi's halfway line came due.
     halfway_lines: u32,
+    /// True in a fresh arena, where a leaf may complete (`place_trial::step`).
+    fresh_arena: bool,
 }
 
 impl Rig {
@@ -53,6 +55,17 @@ impl Rig {
     /// The trial as launched; `scale` overrides its bloom time scale (to show
     /// what the tempo is worth).
     fn with_scale(scale: Option<f32>) -> Self {
+        Self::build(scale, true)
+    }
+
+    /// The `/scenario grey-quarry` overlay in a player's own, living world: the
+    /// same arena terrain, but no grey start, the world's own tempo, and no
+    /// completing.
+    fn overlay() -> Self {
+        Self::build(Some(1.0), false)
+    }
+
+    fn build(scale: Option<f32>, fresh_arena: bool) -> Self {
         let def = scenario::named_builtin_def("grey-quarry").expect("the Grey Quarry is bundled");
         assert_eq!(def.world_type.as_deref(), Some("flat"));
         let arena = def.arena.clone().expect("it has an arena");
@@ -67,16 +80,20 @@ impl Rig {
         let mut ecs = hecs::World::new();
         let mut water = WaterSystem::new();
         let mut lava = crate::lava::LavaSystem::new();
-        crate::arena_build::build_arena(&mut world, &mut water, &mut lava, &mut ecs, ORIGIN, &arena);
+        if fresh_arena {
+            crate::arena_build::build_arena(&mut world, &mut water, &mut lava, &mut ecs, ORIGIN, &arena);
+        }
         let mut bloom = BloomField::new();
         let mut scn = ScenarioState::new(def.clone());
         bloom.set_time_scale(place_trial::effective_bloom_time_scale(
             Some(scale.unwrap_or(def.tuning.bloom_time_scale)),
-            true,
+            fresh_arena,
         ));
         place_trial::register_probes(&mut scn, &mut bloom, ORIGIN);
-        place_trial::apply_drained(&mut bloom, &arena, ORIGIN);
-        Self { world, bg, ecs, registry: BlockRegistry::new(), water, bloom, scn, ticks: 0, halfway_lines: 0 }
+        if fresh_arena {
+            place_trial::apply_drained(&mut bloom, &arena, ORIGIN);
+        }
+        Self { world, bg, ecs, registry: BlockRegistry::new(), water, bloom, scn, ticks: 0, halfway_lines: 0, fresh_arena }
     }
 
     fn tick(&mut self) {
@@ -95,8 +112,9 @@ impl Rig {
             dt: 0.05,
             allow_grey_event: false,
             told_people: None,
+            natural_known: true,
         });
-        if place_trial::step(&mut self.scn, &self.bloom) {
+        if place_trial::step(&mut self.scn, &self.bloom, self.fresh_arena) {
             self.halfway_lines += 1;
         }
     }
@@ -226,6 +244,24 @@ fn the_quarry_starts_grey_and_stays_grey_on_its_own() {
     assert_eq!(p.stage, Stage::GreyAndStill);
     assert!(!r.scn.is_ended());
     assert_eq!(r.scn.place_stage_phrase(), Some("Grey and still"));
+}
+
+#[test]
+fn the_overlay_in_a_living_world_never_finishes_the_trial_by_itself() {
+    // `/scenario grey-quarry` in the player's own world: no arena is built and
+    // nothing is drained, so the probe starts at its target, and ordinary
+    // living ground (a flat grass world here) already reads "Alive".
+    let mut allowed = Rig::overlay();
+    allowed.fresh_arena = true; // what the old code did: complete anywhere
+    allowed.run(40 * MINUTE);
+    assert!(allowed.scn.is_ended(), "living ground reads Alive on its own (level {})", allowed.probe().level);
+
+    // As the overlay it still shows the stage words but never completes.
+    let mut r = Rig::overlay();
+    r.run(40 * MINUTE);
+    assert!(!r.scn.is_ended(), "an overlay run never ends by itself");
+    assert!(r.scn.place_recovery().is_none(), "and records no recovery");
+    assert_eq!(r.scn.place_stage_phrase(), Some("Alive"), "the stage words still show");
 }
 
 /// Plant, sow and stock the quarry, open the spring, and tick until it ends.

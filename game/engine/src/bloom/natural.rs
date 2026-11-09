@@ -10,8 +10,11 @@
 //! That is exact for every generator (trees, villages, ravines, flat floors
 //! included). It is needed only for a *touched* region, one with a section
 //! edited or loaded from a save; a region fresh from worldgen is its own natural
-//! top. It is cached per region for the session and generated at most once per
-//! tick (see `field.rs`).
+//! top. It is cached per region for the session and generated at most once
+//! every 4 ticks (see `field.rs`; a fully touched field fills in about a
+//! minute). A client that cannot regenerate the terrain its host sent (a
+//! push-only joiner, whose worldgen differs) never builds one and reads every
+//! non-placed block as natural.
 
 use std::collections::HashMap;
 
@@ -71,6 +74,15 @@ pub struct NaturalCache {
 
 /// Regions kept in a [`NaturalCache`] (about 1.3 KB each).
 pub const NATURAL_CACHE_MAX: usize = 2048;
+
+/// The cap for a field tracking `tracked` regions: never below
+/// [`NATURAL_CACHE_MAX`], and always with room for every tracked region and a
+/// quarter more. A dedicated server with many players far apart tracks more
+/// than 2,048 regions at once; trimming under that would drop regions still in
+/// use and regenerate them (a worldgen column each) for ever.
+pub fn cache_cap(tracked: usize) -> usize {
+    NATURAL_CACHE_MAX.max(tracked * 5 / 4)
+}
 
 impl NaturalCache {
     pub fn get(&self, key: RegionKey) -> Option<&NaturalRegion> {
@@ -148,5 +160,13 @@ mod tests {
         // Under the cap nothing moves.
         c.trim(16);
         assert_eq!(c.len(), 14);
+    }
+
+    #[test]
+    fn the_cap_always_has_room_for_every_tracked_region() {
+        assert_eq!(cache_cap(289), NATURAL_CACHE_MAX, "one player: the usual cap");
+        assert_eq!(cache_cap(2048), 2560);
+        // Eight players far apart track 2,312 regions: more than the old cap.
+        assert!(cache_cap(8 * 289) >= 8 * 289 * 5 / 4);
     }
 }

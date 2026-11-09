@@ -1560,6 +1560,9 @@ pub fn tick_build_reporting(
         d.locked_materials = new_locked;
         d.pace_counter = next_counter;
     }
+    if !skipped.is_empty() {
+        *world.build_skips.entry(anchor_pos).or_default() += skipped.len();
+    }
     BuildStep { placed, skipped }
 }
 
@@ -1578,6 +1581,7 @@ pub fn cancel_build(
     inventory: &mut crate::inventory::Inventory,
 ) {
     world.authors.clear_starter(anchor_pos);
+    world.build_skips.remove(&anchor_pos);
     if let Some(data) = world.construction_anchors.remove(&anchor_pos) {
         for stack in data.locked_materials {
             if stack.count > 0 {
@@ -1645,10 +1649,15 @@ pub fn complete_build(
     // Living world Tier 2 S4 — a finished build counts for its design and, once
     // each, for the designs it descends from. Every completion (a player's build,
     // a creative one, an NPC commission) passes here; a cancelled or refunded
-    // build never does, so it counts nothing.
-    world
-        .plan_builds
-        .note_completed(crate::plan_builds::build_key(&data.plan), &crate::plan_builds::ancestors_of(&data.plan));
+    // build never does, so it counts nothing. Nor does one that skipped every
+    // cell (all in a Commons block, a foreign Plot or a refused claim): it built
+    // nothing.
+    let skipped = world.build_skips.remove(&anchor_pos).unwrap_or(0);
+    if skipped < data.plan.cells.len() || data.plan.cells.is_empty() {
+        world
+            .plan_builds
+            .note_completed(crate::plan_builds::build_key(&data.plan), &crate::plan_builds::ancestors_of(&data.plan));
+    }
     let starter = world.authors.starter(anchor_pos).cloned();
     world.authors.clear_starter(anchor_pos);
     let (ax, ay, az) = data.anchor;
@@ -1665,6 +1674,14 @@ pub fn complete_build(
     // above a block someone else built (the first free cell up, within a few).
     // If all of them are someone else's, there is no plaque: it never replaces
     // another builder's work.
+    // Nor does it go into a Plot that is not the starter's own (the build skipped
+    // every cell there too; a plaque would overwrite whatever the Plot's owner
+    // built on that cell). A build whose starter is unknown keeps the old behaviour.
+    if let Some(key) = starter.as_ref()
+        && crate::plot::is_in_plot_foreign_to_author(&world.plots, plaque_x, plaque_z, key)
+    {
+        return Some(CompletedBuild { plaque: None, leftovers });
+    }
     let Some(plaque_y) = (0..8)
         .map(|dy| ay + 1 + dy)
         .find(|&y| !world.commons_protects(plaque_x, y, plaque_z, starter.as_ref()))
@@ -2962,6 +2979,11 @@ mod tests {
         assert!(items[0].0.x < 0.0 && items[0].0.z < 0.0, "one block outside the build's corner: {:?}", items[0].0);
     }
 
+    /// Times the 3 x 3 stone design was built in `world`.
+    fn built_count(world: &World) -> u32 {
+        world.plan_builds.counts(&crate::plan_builds::build_key(&PlanData::debug_3x3_stone())).built
+    }
+
     /// Run a 3 x 3 stone survival build at the origin for `starter` with `plot`
     /// standing over the site; returns the finished world and what came back.
     fn build_under_a_plot(starter: Option<crate::authorship::AuthorKey>, plot: Option<crate::plot::PlotOwner>) -> (World, CompletedBuild) {
@@ -2985,11 +3007,16 @@ mod tests {
         use crate::authorship::AuthorKey;
         let (world, done) = build_under_a_plot(Some(AuthorKey::Local(1)), Some(crate::plot::PlotOwner::LocalPlayer(0)));
         assert_eq!(world.get_block(0, 61, 0), block::AIR, "nothing stamped in seat 0's Plot");
+        assert_eq!(done.plaque, None, "and no plaque over the Plot's owner's cell");
+        assert_eq!(world.get_block(1, 61, 1), block::AIR);
+        assert_eq!(built_count(&world), 0, "a build that placed nothing counts for nothing");
         assert_eq!(done.leftovers, vec![crate::item::ItemStack::new_block(block::STONE, 9)], "all nine come back");
         // The Plot's own seat builds there as it always did.
         let (world, done) = build_under_a_plot(Some(AuthorKey::Local(0)), Some(crate::plot::PlotOwner::LocalPlayer(0)));
         assert_eq!(world.get_block(0, 61, 0), block::STONE);
         assert!(done.leftovers.is_empty());
+        assert_eq!(done.plaque, Some((1, 61, 1)), "the Plot's own seat gets its plaque");
+        assert_eq!(built_count(&world), 1);
     }
 
     #[test]
@@ -3000,6 +3027,8 @@ mod tests {
         assert_eq!(world.get_block(0, 61, 0), block::AIR);
         assert_eq!(done.leftovers.len(), 1);
         assert_eq!(done.leftovers[0].count, 9);
+        assert_eq!(done.plaque, None, "no plaque over the joiner's Plot");
+        assert_eq!(world.get_block(1, 61, 1), block::AIR, "the joiner's cell is not overwritten");
         // Another joiner is as foreign as a seat.
         let (world, _) = build_under_a_plot(Some(AuthorKey::Npub("npub1other".into())), Some(joiner()));
         assert_eq!(world.get_block(0, 61, 0), block::AIR);

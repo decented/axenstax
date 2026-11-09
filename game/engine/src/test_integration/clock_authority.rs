@@ -27,10 +27,10 @@ fn dedicated(tag: &str) -> HostedServer {
 
 /// A storm over every tick of the test, and the first tick at or after
 /// `from` on which it throws a bolt.
-fn storm_and_strike_tick(from: u64) -> (Weather, u64) {
+fn storm_and_strike_tick(from: u64, seed: u32) -> (Weather, u64) {
     let storm = Weather { rain_until: from + 100_000, storm_until: from + 100_000 };
     let t = (from..from + 100_000)
-        .find(|&t| crate::weather::strike_roll(storm, t, true).is_some())
+        .find(|&t| crate::weather::strike_roll(storm, t, true, seed).is_some())
         .expect("a storm throws a bolt within minutes");
     (storm, t)
 }
@@ -139,7 +139,7 @@ fn a_weather_lock_pins_and_releases_on_the_authority_and_the_workshop_never_rain
 fn a_lent_worlds_strike_is_the_servers_landed_round_the_host() {
     let (mut hs, mut host) = start_lent("strike");
     host.lend_tick(&mut hs);
-    let (storm, t) = storm_and_strike_tick(hs.server.tick_counter + 1);
+    let (storm, t) = storm_and_strike_tick(hs.server.tick_counter + 1, hs.server.biome_gen.seed);
     hs.server.weather = storm;
     hs.server.tick_counter = t - 1;
     let before = host.world.sim_tally;
@@ -149,7 +149,7 @@ fn a_lent_worlds_strike_is_the_servers_landed_round_the_host() {
     let strike = hs.server.take_lent_strike().expect("the server landed this tick's bolt");
     assert!(hs.server.take_lent_strike().is_none(), "taken once");
     let anchor = hs.server.players[0].player.eye_pos();
-    let h = crate::weather::strike_roll(storm, t, true).unwrap();
+    let h = crate::weather::strike_roll(storm, t, true, hs.server.biome_gen.seed).unwrap();
     assert_eq!(strike.hash, h);
     // The column the hash picks round the host's own body (read after the
     // strike, so a fire that took now tops it).
@@ -172,12 +172,12 @@ fn a_dedicated_servers_strike_lands_round_its_lowest_body_deterministically() {
     let strike_cell = |tag: &str| {
         let mut hs = dedicated(tag);
         let (_client, slot) = join_guest(&mut hs, "Anchor");
-        let (storm, t) = storm_and_strike_tick(hs.server.tick_counter + 1);
+        let (storm, t) = storm_and_strike_tick(hs.server.tick_counter + 1, hs.server.biome_gen.seed);
         hs.server.weather = storm;
         hs.server.tick_counter = t - 1;
         let fire_before = hs.server.fire.active();
         hs.tick();
-        let h = crate::weather::strike_roll(storm, t, true).unwrap();
+        let h = crate::weather::strike_roll(storm, t, true, hs.server.biome_gen.seed).unwrap();
         let anchor = hs.server.players[slot].player.eye_pos();
         // Read after the strike: a fire that took now tops the column, one
         // below the cell `strike_ground` names.
@@ -199,13 +199,13 @@ fn a_dedicated_servers_strike_lands_round_its_lowest_body_deterministically() {
 fn an_empty_dedicated_server_throws_no_bolt() {
     let mut hs = dedicated("empty-storm");
     assert!(hs.server.players.iter().all(|sp| !sp.is_in_world()), "nobody is in the world");
-    let (storm, t) = storm_and_strike_tick(hs.server.tick_counter + 1);
+    let (storm, t) = storm_and_strike_tick(hs.server.tick_counter + 1, hs.server.biome_gen.seed);
     hs.server.weather = storm;
     hs.server.tick_counter = t - 1;
     for _ in 0..1_000 {
         hs.tick();
         assert_eq!(hs.server.fire.active(), 0, "no fire on an empty server (tick {})", hs.server.tick_counter);
     }
-    let strike_ticks = (t..t + 1_000).filter(|&k| crate::weather::strike_roll(storm, k, true).is_some()).count();
+    let strike_ticks = (t..t + 1_000).filter(|&k| crate::weather::strike_roll(storm, k, true, hs.server.biome_gen.seed).is_some()).count();
     assert!(strike_ticks >= 2, "the storm rolled bolts on {strike_ticks} ticks");
 }

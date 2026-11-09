@@ -620,3 +620,46 @@ fn a_joined_clients_built_together_and_lived_in_terms_equal_the_hosts_within_qua
     let u_host = host.world.lived_in_term(FOREST.0, FOREST.1);
     assert!((crate::region_people::lived_term(use_u) - u_host).abs() <= 0.5 / 255.0 + 1e-6);
 }
+
+// ── Review fixes (2026-11-09) ───────────────────────────────────────────
+
+#[test]
+fn a_push_only_joiner_never_regenerates_natural_terrain_and_reads_rock_as_natural() {
+    // Its own worldgen differs from the host's (another seed stands in for
+    // another generator version): regenerating would not match what it was
+    // sent, so natural stone would read as bare ground.
+    let mut h = Harness::with_generator(MOUNTAINS_SEED, Generator::V3);
+    h.at(MOUNTAINS);
+    h.generate(MOUNTAINS);
+    let fresh = h.eco(MOUNTAINS);
+    h.world.place_player_block(MOUNTAINS.0 * 16 + 1, 2, MOUNTAINS.1 * 16 + 1, block::STONE);
+    // The joiner's generator is not the host's.
+    h.bg = crate::biome::BiomeGenerator::new(MOUNTAINS_SEED + 1, Generator::V3);
+    h.natural_known = true;
+    let mismatched = h.eco(MOUNTAINS);
+    h.natural_known = false;
+    let joiner = h.eco(MOUNTAINS);
+    assert!(mismatched < fresh - 0.05, "the mismatch reads as wounds: fresh {fresh} mismatched {mismatched}");
+    assert!((fresh - joiner).abs() < 0.02, "fresh {fresh} vs push-only joiner {joiner}");
+    assert_eq!(h.field.natural_cached(), 0, "and it spends no worldgen column on it");
+}
+
+#[test]
+fn a_drained_start_is_used_once_not_each_time_the_region_is_tracked_again() {
+    let mut h = forest();
+    let (lo, hi) = (IVec3::new(0, 0, 0), IVec3::new(15, 100, 15));
+    h.field.set_initial_level(lo, hi, 0.05);
+    h.settle(FOREST);
+    assert!(h.field.level_at(8.0, 8.0) < 0.15, "starts grey");
+    // Walk well out of range (the region is dropped) and come back.
+    h.at((30, 30));
+    h.run(2);
+    h.at(FOREST);
+    h.settle(FOREST);
+    let target = h.field.region_terms(FOREST).unwrap().3;
+    assert!(target >= 0.5);
+    assert!(h.field.level_at(8.0, 8.0) >= target - 0.01, "back at its target, not grey again: {}", h.field.level_at(8.0, 8.0));
+    // A retry's fresh start does apply again.
+    h.field.set_initial_level(lo, hi, 0.05);
+    assert!(h.field.level_at(8.0, 8.0) < 0.15);
+}

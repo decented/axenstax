@@ -1439,6 +1439,8 @@ live in **§6.2.1 Food Values and Cooking Risk** below.
 > down from T1.5 (data-only); the runtime that consumes them ships
 > alongside the status-effect runtime at T7.
 
+> **Act-one trade tool.** Trade values are notional and not convertible (Spec 06, "Atoms and bits").
+
 ### 6.2.1 Food Values and Cooking Risk
 
 > **Status (2026-05-18).** This subsection supersedes the small "example
@@ -1571,7 +1573,7 @@ The 5–6× cooking premium is the commerce engine. A typical loop:
 - **Cook** buys cheap raw + fuels the furnace + sells cooked beef at 30 sats.
 - **Market-stall vendor** rents space; takes a 2–5% slice on commerce.
 
-Three actors making a living from the same source meat, none of them
+Three actors trading from the same source meat, none of them
 dominating. Add fence-protected chicken farms + brewery beer +
 restaurant menus and you have a real medieval-village economic
 ecosystem on top of the same Tier 1.5 workstation framework.
@@ -2116,8 +2118,13 @@ strip), fire spreading diagonally/upward MC-style.
 ~1 rain in 7 upgrades to a thunderstorm for the same window (`h % 10 == 0`
 among the rain rolls; it was 1 in 3 until v0.2.32, and the deterministic
 timeline then made a new world's first three rains, at 2, 5 and 8 minutes,
-all storms: the playtest's "lightning happens too often"; the first storm is
-now at about 13 minutes, then roughly every 40). (`weather_storm_until`,
+all storms: the playtest's "lightning happens too often"). The roll hashed the
+tick alone, so every world had the same timeline and the storms came bunched
+(three in the first 32 minutes of every new world). Since the v0.2.32 review it
+is a splitmix64 finaliser of the tick and the world seed (`weather::roll_hash`),
+so each world has its own weather at the same rates, and the server, a lending
+host, a standalone client and a joiner's presentation-only bolts (it has the
+seed from `JoinAccept`) all roll the same. (`weather_storm_until`,
 transient like the rain timer — nothing saved). While storming, a strike rolls
 every 8 s (55%, deterministic tick hash, `weather::STRIKE_EVERY_TICKS`), so a
 storm's bolts come bunched and then the sky clears, within ±24 blocks of player
@@ -2737,6 +2744,8 @@ typed `ItemKind`, and a bare `"CraftItem"` (every older def) still parses as
   shelf reaches every trial (no cycles, no orphans).
 
 ### 8b.3a Act two: place trials (living world S4, 2026-11-08)
+
+The act-two rules this trial reads (bloom, the Feast, Commons) are collected in §16.
 
 The first act-two trial is **The Grey Quarry** (`explorer-grey-quarry.json`,
 token `grey-quarry`), on a sixth shelf, `TrialType::Bloom` (🌸 U+1F338,
@@ -4941,3 +4950,106 @@ built anything. A joined client's plaque shows the lineage only, because the tab
 totals (designs built, builds) for the S9 panel's "ideas" line.
 
 **The grown-up panel's four terms and Satoshi's gardener lines (Tier 2 S9, 2026-11-09).** No save, block or protocol change. *Terms:* `bloom::world_terms(field, plan_builds)` (module `bloom/terms.rs`) is the one pure function behind both the F3 panel and the dedicated server's `ConsoleSnapshot.world_bloom`: **life** is the mean eco over the measured regions, **ideas** is `PlanBuilds::ideas_total` (designs built at least once, total builds), **people together** is the mean `P` read through the field's own `P` (so every term of `P`, including later ones, flows in) and **time** is the mean `u` over the measured regions that have a use record (`BloomField::mean_lived`; a region with a record but too few placed blocks counts as 0). World totals only; nothing per person. *Panel* (`tally_ui::bloom_rows`): the rows run Bloom (mean level), Life, Ideas ("4 designs, 11 builds"), People together, Time, Places measured; Time shows an em dash when no place has a record. A joined client holds no Plan-build table and no use record (the host does), so it shows the em dash for Ideas and Time and what its own world copy gives for Life and People (its `b` and `u` are 0 until S10). *Snapshot:* `BloomFigures` gains `ideas_designs`, `ideas_builds` and `time_permille` (all `serde(default)`, so an older snapshot still parses and an older reader ignores them); `life_permille` and `people_permille` now come from the same function. The console site does not read `world_bloom` and was not touched. *Gardener lines* (`gardener_lines.rs`, shown as a "Satoshi:" toast): standing on a Worn Path ("A path! Feet wore that in. Places people use get paths.") and a Blighted Crop within 4 blocks and 2 up or down ("That crop's gone grey. A field of just one plant gets sick easily. Try mixing in other plants."), each once per local seat per world session (the record is cleared with the bloom field when a world is left). Checked about once a second from the client's own world copy, so a joiner hears them too; skipped while another toast is showing (the sight is tried again a second later, never lost), when the seat is dead and inside a trial. The passed-on Plot line is S5's.
+
+
+## 16. Living World (act two)
+
+The game is a two-act world. Act one is survival (§1 to §13). Act two is making places come alive: planting, building together, feasting, sharing and tending. This section is the rules-at-a-glance for act two. Each subsection names its module and the tier-spec section that carries the design and the full as-built notes. Tier 1 shipped as v0.2.30 and Tier 2 as v0.2.31 (current state: protocol 100, save format 69 with 61 `WorldSave` fields and layout revision 8, last block id 379). The Tier specs are `docs/superpowers/specs/2026-11-08-living-world-tier1.md` (T1) and `docs/superpowers/specs/2026-11-09-living-world-tier2.md` (T2). The longer as-built prose is §14 (bloom) and §15 (everything else). The Grey Quarry, the one act-two trial, is §8b.3a.
+
+**Hard lines (they bind every item below).**
+- Bloom belongs to a place, never to a person. No bloom figure, author, use record or last-seen time is ever shown per person or sent as a name.
+- There is no per-child score. The child's dashboard is the world itself: colour, birdsong, pollen, fireflies, villagers' moods.
+- Adult figures are the Tally and the world-bloom terms, behind Settings, "Grown-up panel (F3)", off by default.
+- Nothing in act two is convertible into money, and no act-two surface frames play as pay.
+- Bloom output is presentation only. It changes colour, sound and particles. Consequences (crop or mob health, villager behaviour) are Tier 3 and are not built.
+
+### 16.1 Bloom: terms and stages
+
+Module `bloom/` (`field`, `eco`, `people`, `level`, `natural`, `scan`, `present`, `probe`, `terms`, `kinds`, `glue`). T1 §1 and §2; T2 §1. Detail: §14.
+- A **region** is one chunk column (16 x 16 blocks, all heights). A client tracks the regions within 8 chunks of its local seats (about 289), re-scanning 4 a tick (`SCANS_PER_TICK`).
+- Life term `eco = cover^0.7 x (0.5 + 0.5 x div) x wall x mono`. A column's top block is living (1.0), natural (0.8, it matches what worldgen left), soil (0.4), bare (0) or built (a placed non-living block, left out). A Worn Path is left out like built ground; a Blighted Crop is bare. A natural cliff, desert or rock never reads grey: the natural top comes from regenerating the column into a throwaway twin world (`bloom/natural.rs`), at most one regeneration every 4 ticks, with a 2,048-region cache (v0.2.32).
+- Monoculture: 24 or more crop cells with one family at 85% or more multiplies `eco` by 0.6.
+- People term `P = 1 - (1-c)(1-f)(1-k)(1-b)(1-u)(1-s)`: co-presence `c`, Feast `f`, Commons `k`, built-together `b`, lived-in `u`, tended shelf `s`. A lone player adds nothing (absent, never a penalty).
+- `target = 1 - (1-eco)(1-0.7P)`, so people can lift even a grey place, to at most 0.7. Creative floors the target at 0.6. A looted shelf in the region multiplies the target by 0.8 first (§16.8).
+- The level eases to the target: falling with time constant 2400 s, rising with 360 s ("slow drift, fast recovery"), scaled by the world's `time_scale`.
+- Stages are words, never numbers: under 0.25 "Grey and still", under 0.45 "Something's stirring", then "Waking up", and "Alive" once a trial's `at_least` has been held long enough. `ChallengeEvent::PlaceWentGrey` fires once when a region's level and `eco` are both under 0.25, after a 60 s grace, never in a trial arena or on a joined client.
+- Presentation (`bloom/present.rs`): colour grade below 0.45 (desaturates, cool cast) and above 0.75 (warmer, a little richer), grass sway (none at 0.3 or below), birdsong and insects (nothing below 0.3; the interval is 60 s at 0.3, 35 s at 0.45 and 20 s at 1.0), pollen by day and fireflies by night (none below 0.45).
+
+### 16.2 The Feast
+
+Modules `feast.rs`, `feast_client.rs`, `hosted_server/feast.rs`. Blocks `FEAST_TABLE` 373 and `FEAST_MARKER` 374. T1 §3; T2 §9 (S1). Detail: §15.
+- Recipe: three planks (any wood) over a stick, a loaf and a stick (`PPP / SBS`).
+- Use a table while holding a stack: the whole stack is shared out among the guests, and the table becomes a Feast Marker whose `block_meta` byte is the guest count. A marker breaks into a table.
+- Guests: other players within 48 blocks (`PLAYER_RADIUS`) and villagers or peddlers within 32 (`VILLAGER_RADIUS`, the nearest `MAX_VILLAGERS` = 12). The holder is never a guest. With none, nothing happens and nothing is used up.
+- The stack must be food (`Item::food_value`) and hold at least `MIN_FOOD` = 4. A 16 x 16 column that has feasted on the current night-calendar number cannot feast again until the next one (`World::feast_days`, unsaved).
+- A player guest's share drops at their feet; a villager's is used up. The marker's name is "The Feast of <two words>", drawn from the column.
+- Bloom: a surge `1 - exp(-g/3)` that fades over 1200 s, and a lasting floor of `0.15 x (1 - exp(-g/3))` per marker, capped at 0.3 for a region.
+
+### 16.3 Commons Stone and the Survival-only break rule
+
+Modules `commons.rs`, `authorship.rs`. Block `COMMONS_STONE` 375. T1 §4; T2 §0 (T5), §2.1. Detail: §15.
+- Recipe: eight cobblestone round one sapling of any species.
+- Footprint: the same 33 x 33 as a Plot (marker +-16, `plot::PLOT_HALF_EXTENT`). A Commons and a Plot may not overlap, either way round ("This land is claimed."). Commons areas are found by scanning chunks whose maintained counter says they hold a stone; nothing else stores them.
+- Anyone may build in a Commons. A block built there can be broken (or built over, or have a tool or bucket used on it) only by its author. The refusal is "Someone else built this." and never names the author.
+- **Survival only.** Creative bypasses the rule, on the local path and on the authority (`remote_authored_allows` checks `play_mode.is_creative()`).
+- A block with no recorded author (natural, placed before Tier 2, a guest's) is free. The Commons Stone itself is anyone's to take down. Blasts, pistons, fire and falling blocks are not stopped, and a block that moves lands with no author.
+- Bloom: `k` = 0.1 where any Commons overlaps the region, and the co-presence rate doubles.
+
+### 16.4 Block authorship
+
+Module `authorship.rs` (`AuthorKey { Local(seat), Npub(String) }`, `Authorship`, `SavedAuthorship`). T2 §2; Spec 02 "Who placed a block is saved".
+- The world records who placed a placed block: a per-chunk sparse map from cell to a key in a world table (`WorldSave.block_authors`, field 57). A guest (no verified key) is anonymous. At most 4096 entries a chunk and 65,535 keys.
+- It lives on the machine that owns the world. It is never sent on the wire and never shown per person. Exports and imports drop it; only a handover copy carries it, with seats neutralised.
+- Every placed-bit clear clears the author, and a block that becomes air loses its entry. Readers: Commons protection, bloom's `b`, succession.
+- `b`: `n` = distinct recorded authors of placed blocks in the region, capped at 8 (`MAX_COUNTED_AUTHORS`). `b = 0` for fewer than two, else `1 - exp(-(n-1)/2)`.
+
+### 16.5 The use record and Worn Paths
+
+Modules `use_record.rs`, `path_wear.rs`. Block `WORN_PATH` 376. T2 §3; Spec 02 "Layout revision 6 and the use record".
+- Per region the world keeps `RegionUse { days, last_day, nights }` (`WorldSave.region_use`, field 58). A **lived day** is a world day (the night calendar's number) on which a player was present, so an idle server, `/time` or a bed cannot age a place. Presence is noted once a second (`PRESENCE_PERIOD` = 20 ticks). A sleeper in a bed counts a night for the bed's region, once per night.
+- `u = 0.6 x (1 - exp(-(days + 2 x nights)/10))`, only where the region holds at least 16 placed blocks (`MIN_PLACED`), faded linearly to 0 between 14 and 28 lived days since the region was last used.
+- A **footfall** is a body on the ground, on a Grass block, entering a cell it was not in at its last grounded sample (standing or hopping on the spot makes none). Sampled every tick. At `FOOTFALLS` = 24 the cell becomes a Worn Path. Partial counts are runtime only, bounded at 16,384 cells. Off in creative.
+- A Worn Path is not "placed" (no author), breaks like dirt and drops dirt, never turns back to grass, and is kept out of the creative inventory. Bloom treats a road as honour, not damage.
+
+### 16.6 Blight
+
+Module `blight.rs`. Block `BLIGHTED_CROP` 377. T2 §8.
+- In the farming pass, a region (chunk column) with at least `MONO_MIN_CROPS` = 64 farmed crops, 90% or more of one kind (`MONO_SHARE_PCT`), is a monoculture. Each crop of that kind that would grow rolls a position-and-tick hash and 1 time in 40 (`BLIGHT_ONE_IN`) becomes a Blighted Crop. A child's first patch or a mixed field never blights.
+- A Blighted Crop remembers its kind in `block_meta` and spreads to a same-kind horizontal neighbour 1 time in 8 (`SPREAD_ONE_IN`) per pass, whatever the region's mix. At most 512 blighted crops spread per pass.
+- It never grows, breaks to nothing, takes no bone meal and is not an item. Bloom reads its column as bare. Off in creative and while a trial runs.
+
+### 16.7 Plan lineage and counts, succession
+
+Modules `plan_builds.rs`, `plan_ui.rs`, `succession.rs`. T2 §4 and §5; Spec 02 "Plan build counts" and "Last seen and passed-on Plots".
+- Per Plan design the world counts builds and builds descended from it (`WorldSave.plan_builds`, field 59), on the owning machine, with no identities. The Plan's plaque shows its lineage ("From a Plan by npub1..., after ...") and, on the owning machine, "Built 3 times in this world." It never names who built. The counts feed the "ideas" figure.
+- A verified joiner's Plot passes on to the village after `GONE_SECS` = 60 real days (wall clock) without the owner: the marker becomes a Commons Stone, the Plot is released and the owner's authorship inside it is cleared. A seat's Plot never passes on. Last-seen times are never shown or sent.
+
+### 16.8 The Commons Shelf
+
+Module `shelf.rs`. Block `COMMONS_SHELF` 378 (`ChestTier::Shelf`). T2 §6. Detail: §15.
+- Recipe: three planks over a chest between two sticks (`PPP / SCS`). A 27-slot container with no owner and no lock.
+- The authority keeps one `block_meta` byte: the low 7 bits are the fill (share of slots holding anything, 0..=127, `FILL_MAX`) and the top bit (`LOOTED_BIT`) says it has been looted. The shared machine phase `shelf::tick` keeps it true.
+- Looted: the world day began at least a quarter full (`LOOTED_FROM` = 32) and the fill is now half of that or less. It stays looted until the fill is 64 or more (`RESTOCKED_AT`).
+- Bloom: `s = 0.5 x` the fullest shelf's fill share in the region (`SHELF_WEIGHT`). A looted shelf multiplies the region's target by 0.8 (`LOOTED_TARGET_SCALE`) until restocked.
+
+### 16.9 The Site Board and crew moods
+
+Modules `site_board.rs`, `site_board_client.rs`, `site_board_ui.rs`, `crew_mood.rs`. Block `SITE_BOARD` 379. T2 §7. Detail: §15.
+- Recipe: a column of three planks between two columns of sticks. Up to `MAX_TASKS` = 8 tasks, each one of twelve picked jobs. There is no free text anywhere (T9): a board would otherwise be a chat surface.
+- Anyone may add, tick or remove a task. Ticking a task done adds a short people surge to the board's region (two guests, `SURGE_GUESTS`) at most once per board per world day.
+- Crew moods are presentation only: villagers near a camera show confetti where a Feast surge runs, a green poof where the place is Alive (0.7 or more) and a grey puff where it is Grey and still.
+
+### 16.10 Joiners' people terms
+
+Module `region_people.rs`. `RegionPeople` packet, protocol 100. T2 §10. A joined client has no authorship or use record, so the authority tells it per region the builder count (`b`) and a byte for `u`. Counts only, no identities, at most every 10 s per joiner.
+
+### 16.11 The Tally and the grown-up panel
+
+Modules `tally.rs`, `tally_ui.rs`, `bloom/terms.rs`, `console_snapshot.rs`. T1 §5; T2 §11.
+- The **Tally** counts, for this session and this world, blocks mined, blocks placed, items crafted, smelts taken and vendor trades settled, plus the item stock in containers of loaded chunks. Runtime only: not saved, not sent, not per person.
+- **World bloom** shows four named world terms: life (mean `eco`), ideas (designs built and builds), people together (mean `P`) and time (mean `u`).
+- Both appear only in the F3 overlay when Settings, "Grown-up panel (F3)" is on (`GraphicsSettings.grownup_panel`, default off), and in `ConsoleSnapshot` on a dedicated server. Satoshi's gardener lines (`gardener_lines.rs`) speak for a Worn Path, a Blighted Crop and a passed-on Plot, once per seat per session, never about a person.
+
+### 16.12 Not built
+
+Consequences of bloom (crops, mobs, villager behaviour), seasons, patina, ruins, Plans moving between worlds and further act-two trials are Tier 3 and later. They are not in the code.

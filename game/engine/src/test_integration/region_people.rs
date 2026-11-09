@@ -63,6 +63,7 @@ fn joiner_p(j: &Joiner, col: (i32, i32), use_told: bool) -> f32 {
             dt: 0.05,
             allow_grey_event: false,
             told_people: use_told.then(|| j.rc.region_people()),
+            natural_known: true,
         });
         if let Some((_, p, _, _)) = field.region_terms(col) {
             return p;

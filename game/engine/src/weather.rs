@@ -3,7 +3,9 @@
 //! Extracted from `game_loop` so the "which worlds get weather" decision is
 //! stated once, in one testable place, instead of living inside a 20-line block
 //! in the middle of the client tick. Both rolls are derived deterministically
-//! from the tick counter (no RNG dependency), exactly as before.
+//! from the tick counter and the world's seed (no RNG dependency), so every
+//! world has its own weather timeline and every side that rolls (the server, a
+//! lending host, a standalone client, a joiner's presentation-only bolts) agrees.
 //!
 //! **The Workshop never has weather.** It's an indoor authoring space on a void
 //! platform: rain over it is nonsense, and a lightning strike is actively
@@ -115,7 +117,18 @@ pub fn apply_lock(current: Weather, lock: Option<&str>, lock_changed: bool, tick
     current
 }
 
-/// Advance the weather window for `tick`.
+/// The roll's hash: splitmix64's finaliser over the tick and the world seed.
+/// `salt` keeps the rain roll and the strike roll independent of each other.
+/// (Until the v0.2.32 review the roll hashed the tick alone, so every world had
+/// the same timeline, and a Weyl-style multiply clustered the storms.)
+fn roll_hash(tick: u64, seed: u32, salt: u64) -> u64 {
+    let mut z = (tick ^ (u64::from(seed) << 32) ^ salt).wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// Advance the weather window for `tick`, in the world with `seed`.
 ///
 /// While the sky is clear, once an in-game minute (1200 ticks) there is a ~22%
 /// chance of rain lasting 1–2.5 minutes, and ~1 rain in 7 upgrades to a
@@ -125,13 +138,13 @@ pub fn apply_lock(current: Weather, lock: Option<&str>, lock_changed: bool, tick
 /// When `has_weather` is false the result is [`Weather::CLEAR`] — which also
 /// cancels a window carried in from the world you just left, so walking from a
 /// downpour into the Workshop stops the rain at the door.
-pub fn advance(current: Weather, tick: u64, has_weather: bool) -> Weather {
+pub fn advance(current: Weather, tick: u64, has_weather: bool, seed: u32) -> Weather {
     if !has_weather {
         return Weather::CLEAR;
     }
     let mut out = current;
     if tick >= current.rain_until && tick > 0 && tick.is_multiple_of(1200) {
-        let h = tick.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 33;
+        let h = roll_hash(tick, seed, 0x5241_494E) >> 33;
         if h % 100 < 22 {
             let dur = 1200 + (h % 4) * 600;
             out.rain_until = tick + dur;
@@ -154,14 +167,14 @@ pub fn advance(current: Weather, tick: u64, has_weather: bool) -> Weather {
 /// Ticks between strike rolls while storming (8 s at 20 TPS).
 pub const STRIKE_EVERY_TICKS: u64 = 160;
 
-pub fn strike_roll(current: Weather, tick: u64, has_weather: bool) -> Option<u64> {
+pub fn strike_roll(current: Weather, tick: u64, has_weather: bool, seed: u32) -> Option<u64> {
     if !has_weather {
         return None;
     }
     if tick == 0 || tick >= current.storm_until || !tick.is_multiple_of(STRIKE_EVERY_TICKS) {
         return None;
     }
-    let h = tick.wrapping_mul(0xC4CE_B9FE_1A85_EC53) >> 31;
+    let h = roll_hash(tick, seed, 0x424F_4C54) >> 31;
     (h % 100 < 55).then_some(h)
 }
 
@@ -169,11 +182,14 @@ pub fn strike_roll(current: Weather, tick: u64, has_weather: bool) -> Option<u64
 mod tests {
     use super::*;
 
+    /// A world seed for the tests that do not care which.
+    const SEED: u32 = 42;
+
     /// Run the window forward over `ticks` and report whether it ever rained.
     fn ever_rains(has_weather: bool, ticks: u64) -> bool {
         let mut w = Weather::CLEAR;
         for t in 1..=ticks {
-            w = advance(w, t, has_weather);
+            w = advance(w, t, has_weather, SEED);
             if t < w.rain_until {
                 return true;
             }
@@ -185,8 +201,8 @@ mod tests {
     fn ever_strikes(has_weather: bool, ticks: u64) -> bool {
         let mut w = Weather::CLEAR;
         for t in 1..=ticks {
-            w = advance(w, t, has_weather);
-            if strike_roll(w, t, has_weather).is_some() {
+            w = advance(w, t, has_weather, SEED);
+            if strike_roll(w, t, has_weather, SEED).is_some() {
                 return true;
             }
         }
@@ -225,7 +241,7 @@ mod tests {
     fn entering_the_workshop_cancels_weather_carried_in() {
         let storming = Weather { rain_until: 9_000, storm_until: 9_000 };
         assert_eq!(
-            advance(storming, 1_000, false),
+            advance(storming, 1_000, false, SEED),
             Weather::CLEAR,
             "a rain window from the world you just left must not follow you in"
         );
@@ -237,7 +253,7 @@ mod tests {
         let storming = Weather { rain_until: 9_000, storm_until: 9_000 };
         for t in (160..9_000).step_by(160) {
             assert!(
-                strike_roll(storming, t, false).is_none(),
+                strike_roll(storming, t, false, SEED).is_none(),
                 "tick {t} rolled a bolt over the Workshop"
             );
         }
@@ -249,7 +265,7 @@ mod tests {
     fn plain_rain_produces_no_lightning() {
         let raining = Weather { rain_until: 9_000, storm_until: 0 };
         for t in (160..9_000).step_by(160) {
-            assert!(strike_roll(raining, t, true).is_none(), "plain rain must not strike");
+            assert!(strike_roll(raining, t, true, SEED).is_none(), "plain rain must not strike");
         }
     }
 
@@ -259,7 +275,7 @@ mod tests {
     fn a_storm_never_outlasts_its_rain() {
         let mut w = Weather::CLEAR;
         for t in 1..200_000 {
-            w = advance(w, t, true);
+            w = advance(w, t, true, SEED);
             assert!(w.storm_until <= w.rain_until, "storm outran its rain at tick {t}");
         }
     }
@@ -410,5 +426,70 @@ mod tests {
         let storm = apply_lock(Weather::CLEAR, Some("storm"), true, tick);
         assert!(tick < storm.rain_until);
         assert_eq!(apply_lock(storm, Some("blizzard"), true, tick + 1), Weather::CLEAR);
+    }
+
+    // ── The world seed (v0.2.32 review) ──────────────────────────────────
+
+    /// Ticks at which a rain / a storm opens, in `ticks`, in the world with `seed`.
+    fn openings(seed: u32, ticks: u64) -> (Vec<u64>, Vec<u64>) {
+        let (mut rains, mut storms) = (Vec::new(), Vec::new());
+        let mut w = Weather::CLEAR;
+        for t in (1200..=ticks).step_by(1200) {
+            let before = w;
+            w = advance(w, t, true, seed);
+            if w.rain_until != before.rain_until {
+                rains.push(t);
+                if w.storm_until == w.rain_until {
+                    storms.push(t);
+                }
+            }
+        }
+        (rains, storms)
+    }
+
+    #[test]
+    fn two_worlds_have_different_weather_and_different_bolts() {
+        let (r1, s1) = openings(1, 2_000_000);
+        let (r2, s2) = openings(2, 2_000_000);
+        assert_ne!(r1, r2, "two seeds, one rain timeline");
+        assert_ne!(s1, s2, "two seeds, one storm timeline");
+        // Every one of 16 seeds has its own timeline.
+        let mut all: Vec<Vec<u64>> = (0..16).map(|s| openings(s, 600_000).1).collect();
+        all.sort();
+        all.dedup();
+        assert_eq!(all.len(), 16, "no two of 16 worlds share a storm timeline");
+
+        // And the bolts of a storm differ by world too.
+        let storm = Weather { rain_until: u64::MAX, storm_until: u64::MAX };
+        let bolts = |seed| -> Vec<Option<u64>> { (1..400).map(|k| strike_roll(storm, k * STRIKE_EVERY_TICKS, true, seed)).collect() };
+        assert_ne!(bolts(1), bolts(2));
+        assert_eq!(bolts(7), bolts(7), "but one world always rolls the same");
+    }
+
+    #[test]
+    fn storms_stay_about_one_rain_in_seven_over_a_long_run() {
+        let (mut rains, mut storms) = (0usize, 0usize);
+        for seed in 0..8 {
+            let (r, s) = openings(seed, 10_000_000);
+            rains += r.len();
+            storms += s.len();
+        }
+        assert!(rains > 1000, "{rains} rains is too few to judge");
+        let share = storms as f64 / rains as f64;
+        assert!((0.11..0.17).contains(&share), "{storms} storms in {rains} rains = {share:.3}, want about 1/7");
+    }
+
+    #[test]
+    fn a_new_worlds_first_forty_minutes_do_not_always_hold_three_storms() {
+        const FORTY_MINUTES: u64 = 40 * 1200;
+        let counts: Vec<usize> = (0..200).map(|seed| openings(seed, FORTY_MINUTES).1.len()).collect();
+        let three = counts.iter().filter(|&&n| n == 3).count();
+        assert!(three < counts.len() / 4, "{three} of {} new worlds open with exactly three storms", counts.len());
+        let mut kinds = counts.clone();
+        kinds.sort_unstable();
+        kinds.dedup();
+        assert!(kinds.len() >= 3, "storm counts in 40 minutes should vary by world: {kinds:?}");
+        let mean = counts.iter().sum::<usize>() as f64 / counts.len() as f64;
+        assert!(mean < 2.0, "a storm every 20 minutes on average is too many: {mean}");
     }
 }

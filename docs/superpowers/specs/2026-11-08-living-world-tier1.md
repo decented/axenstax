@@ -60,7 +60,9 @@ the main thread, needed for every *touched* region (any edit outside worldgen, g
 chunk loaded from a save), so the touched area grows with play. Until v0.2.32 it ran up to once a tick and the cache was
 trimmed to the tracked regions, so a player flying back and forth regenerated the same regions on every pass (the playtest's
 "laggier the longer I play"). Now at most one regeneration every 4 ticks (`NATURAL_GEN_EVERY_TICKS`; a changed region shows
-its colour a moment later), and the cache keeps up to 2,048 regions (about 2.7 MB), dropping the least recently used.
+its colour a moment later), and the cache keeps up to 2,048 regions (about 2.7 MB), or a quarter more than the regions currently tracked when that is
+larger (a dedicated server with many players far apart tracks more than 2,048 and would otherwise regenerate regions it is
+still using for ever), dropping the least recently used.
 Classification of a non-living, non-placed top block:
 - it **matches the natural top** (same block at the same height), or is snow cover: NATURAL (0.8);
 - otherwise dirt or tilled soil: SOIL (0.4);
@@ -68,8 +70,9 @@ Classification of a non-living, non-placed top block:
 
 The twin is needed only for a **touched** region, one with any section edited this session or loaded from a save
 (`Chunk::persist`). A region fresh from worldgen is its own natural top, so every non-placed block there is NATURAL and no
-twin is built. At most one regeneration per tick. Measured about 1 to 2 ms per column in a debug-profile test build for v3
-(estimate well under 1 ms in release); a fully touched 289-region field fills in over about 15 s. The biome table is not
+twin is built. At most one regeneration every 4 ticks (regions and trial probes share the budget). Measured about 1 to 2 ms per
+column in a debug-profile test build for v3 (estimate well under 1 ms in release); a fully touched 289-region field fills in
+over about a minute (until a region is regenerated it reads the neutral 0.6, then snaps to its level). The biome table is not
 used. The calibration tests below gate S1: a touched natural-stone, desert, forest and mountain region reads the same as
 untouched (within 0.02).
 
@@ -142,7 +145,8 @@ parts restricted to the box. Probes re-scan once per second. The trial `Place` o
 As built: `add_probe(id, min, max)`, `set_probe_goal(id, at_least, hold_secs)` (default 0.55 and 20 s),
 `remove_probe`, `probe(id) -> Option<ProbeState { level, target, eco, people, stage, held_secs, scanned }>` (`scanned` is
 false until the first scan). `set_initial_level(min, max, level)` applies to regions and probes overlapping the box, now or
-when first scanned.
+when first scanned. A region uses a start level once: it is remembered as seeded, so a region the field dropped (more than 8 chunks
+away) and tracks again starts at its target, not grey again (a retry's new `set_initial_level` re-arms the regions under it).
 
 ### 1.6 Stages (words, never numbers)
 
@@ -164,7 +168,9 @@ while a scenario is running or about to launch (trial arenas). It is one-shot pe
 ### 1.8 Where it runs
 
 - **Single-player, host and joiner clients:** `GameState` owns a `BloomField`, ticked from `GameState::tick`.
-  - It is ticked on joiners too. It reads the client's own world copy and mob mirror.
+  - It is ticked on joiners too. It reads the client's own world copy and, for the wildlife census, the mob mirror (a joiner's own
+    ECS holds no mobs). A push-only joiner (its worldgen differs from the host's) cannot regenerate natural terrain, so its field
+    never builds a natural top and reads every non-placed block as natural (`TickInput::natural_known`).
   - It is not part of the sim-lend machinery: it is presentation and writes nothing to the world.
 - **Dedicated server:** `GameServer` owns a `BloomField` round its present players, used only for the `ConsoleSnapshot` figures (§5).
 - **Web build:** the same as single-player. No native-only code.
@@ -233,13 +239,14 @@ level 1 reads a saturated, warm green).
   either way; the first sound comes 3 to 9 s after arriving. (v0.2.32, from the playtest's "a high-pitched twinkly sound every
   few seconds": it was 20, 12 and 3 s, and in Creative, whose floor keeps places vivid, that was a chirp every 2 to 4 s. The
   birdsong tones also dropped from 3 to 4.6 kHz to 1.7 to 2.8 kHz at about half the volume, the crickets from 4.3 to 3.6 kHz,
-  and ambience now peaks under 0.06.) Several local players each have their own timer and share one
+  and ambience now peaks under 0.06.) A player under cover hears nothing: the ear and the motes need sky light 12 or more at the
+  eye (`present::under_open_sky`: open sky, a forest canopy, a porch's edge), so a mine under a forest is silent. Several local players each have their own timer and share one
   audio engine. Master volume and mute are the audio engine's own.
 - **Life.** `ParticleSystem::pollen_mote` (day) and `firefly` (night), both on `TEX_PARTICLE_SOFT`. `Particle` gained `blink`
   (pulses per second; 0 = steady): a blinking mote pulses its alpha on its own phase (taken from its unique `max_life`) and is not
   dimmed by the dark around it. Rates per second near a player: none below 0.45; pollen rises to 0.6 at 0.75 and 2.5 at 1.0;
   fireflies to 0.4 and 1.6. Spawned in the 0.15 s ambient pulse within 14 blocks, a little above the ground found by
-  `surface_kill_y`; halved on Reduced, absent on Off (the pool cap), and none at twilight or in rain.
+  `surface_kill_y`; halved on Reduced, absent on Off (the pool cap), and none at twilight, in rain or under cover (sky light under 12 at the eye).
 - **Skipped.** Nothing in §2 is skipped. Not done: positional audio (the engine has none), and sounds for remote players
   (the loop only knows local seats).
 
@@ -467,7 +474,10 @@ whole path, from arena to end card, is driven without a window by
   taken from the player's feet) and removed when the run ends; probe id is
   `0x5000_0000 + flat leaf index`; the goal is set with `set_probe_goal`.
   Completion is the probe reading "Alive" (level at or above `at_least`, held
-  `hold_seconds` of real time). The task line shows the stage words after the
+  `hold_seconds` of real time), **in a fresh trial arena only** (`place_trial::step`'s
+  `may_complete`): in the player's own world nothing starts grey, so living ground
+  would read "Alive" on its own and finish and record the trial with no action. The
+  overlay still shows the stage words; it never completes. The task line shows the stage words after the
   label (H panel, HUD badge); no number anywhere.
 - **Tempo.** `GameState::scenario_fresh_arena` is set only by the fresh-world
   launch, cleared by `start_scenario` and any world change.

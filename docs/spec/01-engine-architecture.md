@@ -131,6 +131,18 @@ The prototype is a single crate (`axenstax-engine`) with these modules. Since
 | `font.rs` | 5×7 bitmap font, text-to-quad rendering |
 | `chat_ui.rs` | In-game chat overlay (egui) — output log + input field, focus + history |
 | `commands/` | Slash-command system (parser, registry, dispatcher, built-ins). Plugin-shaped — registry/parser/UI are game-agnostic. Spec: `docs/foundations/2026-05-07-engine-commands.md` |
+| `bloom/` | Living World (Tier 1): per-region (chunk column) bloom field: life, people and time terms, level easing, stages, probes for Place trials, and the colour/sound/particle presentation. Presentation only; writes nothing to the world. Spec 05 §14, §16.1 |
+| `feast.rs`, `feast_client.rs`, `hosted_server/feast.rs` | Living World: the Feast rule (guests, split, once a day per column), its local path and the authority's path for a joiner. Spec 05 §16.2 |
+| `commons.rs` | Living World: the Commons Stone footprint and the Plot/Commons overlap rules. Spec 05 §16.3 |
+| `authorship.rs` | Living World (Tier 2): who placed a placed block (`AuthorKey`), saved per chunk, owner's machine only; Commons break protection and bloom's built-together term. Spec 05 §16.3, §16.4 |
+| `use_record.rs`, `path_wear.rs` | Living World (Tier 2): per-region lived days and nights slept; footfalls that wear grass into a Worn Path. Spec 05 §16.5 |
+| `blight.rs` | Living World (Tier 2): monoculture blight and its spread, run from the shared farming pass. Spec 05 §16.6 |
+| `plan_builds.rs`, `plan_ui.rs` | Living World (Tier 2): per-design build counts and the Plan plaque's lineage text. Spec 05 §16.7 |
+| `succession.rs` | Living World (Tier 2): a joiner's Plot passes to the village after 60 real days away. Spec 05 §16.7 |
+| `shelf.rs` | Living World (Tier 2): the Commons Shelf's fill and looted byte, kept by a shared machine sweep. Spec 05 §16.8 |
+| `site_board.rs`, `site_board_client.rs`, `site_board_ui.rs`, `crew_mood.rs` | Living World (Tier 2): the Site Board's picked-job list (no free text) with its window and wire path, and villagers' presentation-only moods. Spec 05 §16.9 |
+| `region_people.rs` | Living World (Tier 2): the per-region builder and lived-in counts the authority tells a joiner (`RegionPeople`, protocol 100). Spec 05 §16.10 |
+| `tally.rs`, `tally_ui.rs`, `gardener_lines.rs`, `place_trial.rs` | Living World: the grown-up Tally and world-bloom panel (F3, off by default), Satoshi's gardener lines, and the Place trial rules (Grey Quarry). Spec 05 §16.11, §8b.3a |
 
 Dependencies (as of 2026-10-04, `game/engine/Cargo.toml`): wgpu 29, winit 0.30, glam 0.33, hecs 0.10, serde 1, bincode 1, ahash 0.8, noise 0.9, rodio 0.20, image 0.25, bytemuck 1, quinn 0.11, egui 0.34.
 
