@@ -1968,3 +1968,58 @@ fn a_joiner_breaking_a_stocked_shelf_spills_its_contents_once_and_takes_its_byte
     }
     assert_eq!(rig.world_ref().meta_at(pos.0, pos.1, pos.2), 0, "the sweep does not bring it back");
 }
+
+/// Review SF2 — the shelf's byte is the authority's: a joiner's edit that
+/// carries another byte (shelf over shelf, or a fresh shelf) is refused and the
+/// ghost put back, whether it forges the looted bit or a full fill. Only the
+/// sweep writes the byte.
+#[test]
+fn a_joiner_cannot_forge_a_shelfs_byte() {
+    use crate::shelf::{FILL_MAX, LOOTED_BIT};
+    let mut rig = Rig::dedicated("shelf-forge", 1);
+    let cell = rig.place(0, 2, block::COMMONS_SHELF);
+    let pos = (cell[0], cell[1], cell[2]);
+    let mut shelf = ChestData::for_tier(ChestTier::Shelf);
+    for slot in shelf.slots.iter_mut().take(10) {
+        *slot = Some(stone(1));
+    }
+    rig.world().insert_chest(pos, shelf);
+    for _ in 0..12 {
+        rig.tick();
+    }
+    let real = rig.world_ref().meta_at(pos.0, pos.1, pos.2);
+    assert_eq!(real, crate::shelf::fill_of(&rig.world_ref().chest_at(pos).unwrap().slots));
+    assert_ne!(real, 0);
+
+    let send = |rig: &mut Rig, at: (i32, i32, i32), meta: u8| {
+        let c = &mut rig.cs[0];
+        let sp = &rig.hs.server.players[c.slot];
+        c.inputs += 1;
+        let input = protocol::InputPacket {
+            tick: c.inputs,
+            x: sp.player.pos.x,
+            y: sp.player.pos.y,
+            z: sp.player.pos.z,
+            health: 20.0,
+            block_changes: vec![protocol::BlockChange { x: at.0, y: at.1, z: at.2, new_block: block::COMMONS_SHELF, meta }],
+            events_applied: c.events,
+            ..Default::default()
+        };
+        c.transport.send_to_server(&protocol::serialize_packet(protocol::PacketType::ClientInput, &input));
+        rig.tick();
+    };
+    // Shelf over shelf with the looted bit, and with a full fill.
+    send(&mut rig, pos, real | LOOTED_BIT);
+    assert_eq!(rig.world_ref().meta_at(pos.0, pos.1, pos.2), real, "the looted bit was not taken");
+    send(&mut rig, pos, FILL_MAX);
+    assert_eq!(rig.world_ref().meta_at(pos.0, pos.1, pos.2), real, "a forged fill was not taken");
+    // A fresh shelf with a chosen byte is refused outright.
+    let fresh = (pos.0, pos.1, pos.2 + 1);
+    send(&mut rig, fresh, LOOTED_BIT | FILL_MAX);
+    assert_eq!(rig.world_ref().get_block(fresh.0, fresh.1, fresh.2), block::AIR, "no forged shelf");
+    assert_eq!(rig.world_ref().meta_at(fresh.0, fresh.1, fresh.2), 0);
+    // A fresh shelf with the honest byte (0) is an ordinary placement.
+    send(&mut rig, fresh, 0);
+    assert_eq!(rig.world_ref().get_block(fresh.0, fresh.1, fresh.2), block::COMMONS_SHELF);
+    assert_eq!(rig.world_ref().meta_at(fresh.0, fresh.1, fresh.2), 0);
+}

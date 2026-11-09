@@ -255,3 +255,30 @@ fn the_chunk_counter_finds_shelves_however_they_were_set() {
     assert_eq!(w.shelf_cells(), vec![(40, 70, -3)]);
     assert!(FILL_MAX == 127);
 }
+
+/// Review SF1 — `World::set_block` leaves the sparse meta of a cell, so a shelf
+/// arriving where flowing water (aux in the low bits and bit 7 for a long way
+/// out), a stair or a trapdoor stood would inherit a fill and a looted mark it
+/// never earned. The sweep writes such a byte away; bloom never reads it.
+#[test]
+fn a_shelf_placed_over_a_leftover_byte_starts_clean() {
+    let mut w = World::new();
+    // Flowing water five cells out: aux 5 sets bit 7, the looted bit.
+    w.set_meta(POS, crate::meta::with_aux(0, 5));
+    assert_ne!(meta(&w), 0, "the cell holds a leftover byte");
+    w.set_block(POS.0, POS.1, POS.2, block::COMMONS_SHELF);
+    assert_ne!(meta(&w), 0, "set_block alone leaves it (the reason for the sweep)");
+    let key = (POS.0.div_euclid(16), POS.2.div_euclid(16));
+    let before = crate::shelf::region_terms(&w, key);
+    assert!(before.looted || before.fullest > 0.0, "unrepaired, bloom would read it");
+
+    let mut changes = Vec::new();
+    beat(&mut w, 4, &mut changes);
+    assert_eq!(meta(&w), 0, "no contents yet, so the byte is 0, not looted");
+    assert_eq!(changes.len(), 1, "and the repair is broadcast");
+    assert_eq!((changes[0].new_block, changes[0].meta), (block::COMMONS_SHELF, 0));
+    let after = crate::shelf::region_terms(&w, key);
+    assert!(!after.looted && after.fullest == 0.0 && after.s() == 0.0 && after.target_scale() == 1.0);
+    beat(&mut w, 8, &mut changes);
+    assert_eq!(changes.len(), 1, "a clean byte is not written again");
+}

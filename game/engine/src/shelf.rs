@@ -20,7 +20,7 @@
 //! true. It runs from the shared machine phase (`sim_machines::step`), so the
 //! dedicated server, a lending host and single-player share it, and it sees every
 //! way a shelf's contents change (the container window, a joiner's window ops, a
-//! hopper, a bear, a blast) with nothing to forget. The byte follows the contents
+//! hopper, a blast) with nothing to forget. The byte follows the contents
 //! by at most one machine beat.
 
 use crate::block;
@@ -110,16 +110,25 @@ pub fn observe(mark: &mut Option<DayMark>, day: u32, prev_meta: u8, fill: u8) ->
     next
 }
 
-/// The sweep: for every shelf in the loaded world with contents, bring its meta
-/// byte in line with them, and push a broadcastable change for each byte that
+/// The sweep: for every shelf in the loaded world, bring its meta
+/// byte in line with its contents (0 when it has none yet), and push a broadcastable change for each byte that
 /// moved. A byte that is already right is not written (no change, no write).
 /// `day` is the world day (the day a tick falls in); order is by position, so the
 /// changes are deterministic.
 pub fn tick(world: &mut World, day: u32, changes: &mut Vec<BlockChange>) {
     for pos in world.shelf_cells() {
-        // A shelf nobody has opened has no contents yet: nothing to say.
-        let Some(fill) = world.chest_at(pos).map(|c| fill_of(&c.slots)) else { continue };
         let prev = world.meta_at(pos.0, pos.1, pos.2);
+        // A shelf nobody has opened has no contents yet, so its byte is 0. Any
+        // other byte is a stale one the cell held before the shelf arrived (or a
+        // forged one): write it away (review SF1).
+        let Some(fill) = world.chest_at(pos).map(|c| fill_of(&c.slots)) else {
+            if prev != 0 {
+                world.shelf_days.remove(&pos);
+                world.set_meta(pos, 0);
+                changes.push(crate::game_loop::broadcast_change(world, pos.0, pos.1, pos.2, block::COMMONS_SHELF));
+            }
+            continue;
+        };
         let mut mark = world.shelf_days.get(&pos).copied();
         let next = observe(&mut mark, day, prev, fill);
         if let Some(m) = mark {
