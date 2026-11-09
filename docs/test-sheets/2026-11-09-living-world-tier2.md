@@ -8,7 +8,7 @@ Things to try: the living world, part 2 (v0.2.31)
 Same idea as last time: places come alive or go grey depending on how you treat them. This build is about people: building together, using a place, sharing, and leaving things for others.
 
 1. A Commons now protects what people build
-   Put down a Commons Stone (eight cobblestone round a sapling) and build inside it. Then get a friend to try breaking your blocks. They should be told "Someone else built this." Anyone can still break the Commons Stone itself.
+   In Survival, put down a Commons Stone (eight cobblestone round a sapling) and build inside it. Then get a friend to try breaking your blocks. In split-screen they're told "Someone else built this." On a LAN game the block just pops back. Anyone can still break the Commons Stone itself.
 
 2. Wear a path
    In Survival, walk the same bit of grass back and forth lots of times. It turns into a worn dirt path. Paths only come from feet, so the places you really use get them. Satoshi says something the first time you stand on one.
@@ -23,7 +23,7 @@ Same idea as last time: places come alive or go grey depending on how you treat 
    Build something from a Plan, then build it again. The plaque now says how many times it has been built in this world, and how many more were built from it.
 
 6. Blight
-   Plant a big field of just one crop: 64 or more, with almost nothing else mixed in. After a while some of it goes grey and the grey spreads. Pull the grey ones up and mix other plants in. Satoshi has a line about it.
+   In Survival, plant a big field of just one crop: 64 or more, with almost nothing else mixed in. After a while some of it goes grey and the grey spreads. Pull the grey ones up and mix other plants in. Satoshi has a line about it.
 
 7. Plots for friends who join
    If you join someone else's game, you can now put down your own Plot Marker and own that Plot. If the owner doesn't come back for 60 real days of the world being hosted, the Plot passes to the village and turns into a Commons.
@@ -47,6 +47,8 @@ Fixed: crops and saplings sometimes stopped growing after you saved and reloaded
 
 Known rough bits (tell us, but don't worry about them):
 - Worlds saved in this build won't open in 0.2.30.
+- On a LAN game, a friend who tries to break your block in a Commons gets no message. The block just pops back.
+- In Creative, a Commons doesn't stop anyone, and crops never go grey.
 - A block pushed by a piston, or one that falls, can be broken by anyone.
 - If a crop inside a Commons goes grey, anyone can pull it up.
 - Nothing cures a grey crop. Pull it up.
