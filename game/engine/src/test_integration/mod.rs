@@ -18,6 +18,7 @@ pub mod bounty;
 pub mod repair;
 pub mod plot;
 mod authorship; // Living world Tier 2 S2 — who built a block: save, Commons protection, Plan starters.
+mod commons_shelf; // Living world Tier 2 S6 — the Commons Shelf: local, hopper, save, recipe and item-list halves.
 mod blight; // Living world Tier 2 S8 — blight: joiner, creative and trial gates, save round trip, break.
 mod growth_after_reload; // Living world Tier 2 S4/S8 review: crops grow after a reload at any tick phase.
 mod use_record; // Living world Tier 2 S3 — the use record, nights slept and Worn Paths: save, joiner, lending host.

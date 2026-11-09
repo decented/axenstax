@@ -85,6 +85,11 @@ struct Region {
     /// Lived in (Tier 2 S3): from the region's use record, refreshed with each
     /// region scan like `built`.
     lived: f32,
+    /// A tended shelf (Tier 2 S6): from the Commons Shelves in the region's
+    /// blocks and meta, refreshed with each region scan. Unlike `built` and
+    /// `lived` it needs nothing the authority alone keeps, so a joined client
+    /// sees it too.
+    shelf: crate::shelf::ShelfTerms,
     level: f32,
     target: f32,
     last_scan: Option<u64>,
@@ -102,6 +107,7 @@ impl Region {
             commons: false,
             built: 0.0,
             lived: 0.0,
+            shelf: crate::shelf::ShelfTerms::default(),
             level: UNKNOWN_LEVEL,
             target: UNKNOWN_LEVEL,
             last_scan: None,
@@ -110,7 +116,13 @@ impl Region {
     }
 
     fn p(&self) -> f32 {
-        self.people.value_full(self.floor, self.commons, self.built, self.lived)
+        self.people.value_all(self.floor, self.commons, self.built, self.lived, self.shelf.s())
+    }
+
+    /// Where this region's level is heading: the people term lifts it, and a
+    /// looted shelf dims it.
+    fn target_now(&self, creative: bool) -> f32 {
+        level::target_scaled(self.eco, self.p(), creative, self.shelf.target_scale())
     }
 }
 
@@ -443,9 +455,11 @@ impl BloomField {
             // Tier 2 S3 — u, on the same cadence. A joined client's table is
             // empty (the authority keeps it), so there it is 0.
             r.lived = input.world.lived_in_term(key.0, key.1);
+            // Tier 2 S6 — the shelves, from blocks and meta every client has.
+            r.shelf = crate::shelf::region_terms(input.world, key);
             if !r.known {
                 r.known = true;
-                r.target = level::target(r.eco, r.p(), input.creative);
+                r.target = r.target_now(input.creative);
                 r.level = init.unwrap_or(r.target);
             }
         }
@@ -526,7 +540,7 @@ impl BloomField {
         for (key, r) in &mut self.regions {
             r.people.step(present.get(key).copied().unwrap_or(0), r.commons, dt);
             if r.known {
-                r.target = level::target(r.eco, r.p(), creative);
+                r.target = r.target_now(creative);
                 r.level = level::ease(r.level, r.target, dt, scale);
             }
         }

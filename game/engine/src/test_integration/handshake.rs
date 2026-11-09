@@ -266,7 +266,8 @@ fn protocol_version_is_the_pinned_value() {
     // v97 (living world S3): block ids 373..=375 and two ItemNote codes, no packet change.
     // v98 (living world Tier 2 S3): block id 376 (Worn Path), no packet change.
     // v99 (living world Tier 2 S8): block id 377 (Blighted Crop), no packet change.
-    assert_eq!(protocol::PROTOCOL_VERSION, 99);
+    // v100 (living world Tier 2 S6): block id 378 (Commons Shelf), no packet change.
+    assert_eq!(protocol::PROTOCOL_VERSION, 100);
 }
 
 #[test]

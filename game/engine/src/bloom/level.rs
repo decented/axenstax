@@ -19,7 +19,14 @@ const WAKING_FROM: f32 = 0.45;
 /// Where the level is heading: `1 - (1 - eco)(1 - 0.7 P)`, floored at 0.6 in
 /// creative mode.
 pub fn target(eco: f32, people: f32, creative: bool) -> f32 {
-    let t = 1.0 - (1.0 - eco) * (1.0 - PEOPLE_LIFT * people);
+    target_scaled(eco, people, creative, 1.0)
+}
+
+/// [`target`] with the region's target multiplied by `scale` (a looted Commons
+/// Shelf dims it to 0.8, Tier 2 S6) before the creative floor, so creative
+/// stays vivid and neutral.
+pub fn target_scaled(eco: f32, people: f32, creative: bool, scale: f32) -> f32 {
+    let t = (1.0 - (1.0 - eco) * (1.0 - PEOPLE_LIFT * people)) * scale;
     let t = if creative { t.max(CREATIVE_FLOOR) } else { t };
     t.clamp(0.0, 1.0)
 }

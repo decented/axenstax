@@ -2908,7 +2908,14 @@ pub struct ServerAnnouncePacket {
 ///   `BlockChange` whose `meta` is the index of the crop kind it came from). No
 ///   packet shape changed. A client without it resolves the id to `AIR` and
 ///   would show a hole in the field, so the bump refuses it at join.
-pub const PROTOCOL_VERSION: u32 = 99;
+/// - v100 (2026-11-09, living world Tier 2 S6): **New block id 378** (Commons
+///   Shelf: a chest-sized shared container). No packet shape changed: it opens,
+///   updates and closes through the chest container packets
+///   (`ContainerKind::Chest { tier: ChestTier::Shelf }`, the tier APPENDED after
+///   Satori), and the authority's fill and looted byte rides `BlockChange.meta`
+///   and the chunk push like any block's. A client without it resolves the id to
+///   `AIR` and cannot read a `Shelf` tier, so the bump refuses it at join.
+pub const PROTOCOL_VERSION: u32 = 100;
 
 /// The `protocol_version` of a JoinRequest payload that doesn't decode as this
 /// build's `JoinRequestPacket` (an older or newer client's shape). It is the
@@ -3113,7 +3120,8 @@ mod tests {
         // v97 — living world S3: block ids 373..=375, two ItemNote codes.
         // v98 — living world Tier 2 S3: block id 376 (Worn Path), no packet change.
         // v99 — living world Tier 2 S8: block id 377 (Blighted Crop), no packet change.
-        assert_eq!(super::PROTOCOL_VERSION, 99);
+        // v100 — living world Tier 2 S6: block id 378 (Commons Shelf), `ChestTier::Shelf`, no packet change.
+        assert_eq!(super::PROTOCOL_VERSION, 100);
     }
 
     #[test]
@@ -3875,7 +3883,8 @@ mod tests {
         // v97 (living world S3): block ids 373..=375 and two ItemNote codes, no packet change.
         // v98 (living world Tier 2 S3): block id 376 (Worn Path), no packet change.
         // v99 (living world Tier 2 S8): block id 377 (Blighted Crop), no packet change.
-        assert_eq!(PROTOCOL_VERSION, 99);
+        // v100 (living world Tier 2 S6): block id 378 (Commons Shelf), `ChestTier::Shelf`, no packet change.
+        assert_eq!(PROTOCOL_VERSION, 100);
     }
 
     fn sample_accept() -> JoinAcceptPacket {

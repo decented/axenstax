@@ -231,7 +231,7 @@ impl MirroredFamily {
 pub fn mirrored_family(b: BlockId) -> Option<MirroredFamily> {
     use block::*;
     match b {
-        CHEST | COPPER_CHEST | IRON_CHEST | DIAMOND_CHEST | SATORI_CHEST => {
+        CHEST | COPPER_CHEST | IRON_CHEST | DIAMOND_CHEST | SATORI_CHEST | COMMONS_SHELF => {
             Some(MirroredFamily::Chest)
         }
         FURNACE | FURNACE_LIT => Some(MirroredFamily::Furnace),
@@ -725,6 +725,11 @@ pub struct World {
     /// it borrows this world (`blight::allowed`: a farming trial must not turn
     /// flaky). Not serialised; never set on a dedicated server.
     pub trial_running: bool,
+    /// Living world Tier 2 S6 — how full each Commons Shelf was when its world
+    /// day began (`shelf::DayMark`). Runtime only, never serialised: after a
+    /// reload a day begins at whatever the shelf holds. Cleaned when the shelf
+    /// leaves its cell.
+    pub(crate) shelf_days: std::collections::HashMap<(i32, i32, i32), crate::shelf::DayMark>,
 
     // ─── Blank-canvas world config (Task B1) — runtime mirrors of WorldMeta ──
     // Set from meta at every load/entry seam so world-gen + gameplay systems can
@@ -988,6 +993,7 @@ impl World {
             beacon_publish_pending: None,
             is_workshop: false,
             trial_running: false,
+            shelf_days: std::collections::HashMap::new(),
             world_type: "normal".to_string(),
             ground: "grass".to_string(),
             water_depth: 3,
@@ -2157,6 +2163,19 @@ impl World {
         }
     }
 
+    /// Every Commons Shelf in the loaded world (living world Tier 2 S6), found
+    /// by walking only the chunks whose maintained counter says they hold one.
+    /// Evicted columns are not seen. Sorted, so the sweep is deterministic.
+    pub fn shelf_cells(&self) -> Vec<(i32, i32, i32)> {
+        let mut out = Vec::new();
+        for (&(cx, cy, cz), chunk) in self.chunks.iter().filter(|(_, c)| c.has_shelves()) {
+            let (ox, oy, oz) = (cx * CHUNK_SIZE as i32, cy * CHUNK_SIZE as i32, cz * CHUNK_SIZE as i32);
+            chunk.for_each_cell_of(block::COMMONS_SHELF, |x, y, z| out.push((ox + x as i32, oy + y as i32, oz + z as i32)));
+        }
+        out.sort_unstable();
+        out
+    }
+
     /// Every Commons footprint in the loaded world (living world S3): one per
     /// Commons Stone, found by walking only the chunks whose maintained
     /// counter says they hold one. Evicted columns are not seen. Sorted, so
@@ -2328,7 +2347,7 @@ impl World {
         // `set_block` clears a Blighted Crop's kind byte as it leaves, so the
         // broadcast's meta is always applied after one.
         let meta_changed = self.meta_at(bc.x, bc.y, bc.z) != bc.meta
-            || (block_changed && old_block == block::BLIGHTED_CROP);
+            || (block_changed && (old_block == block::BLIGHTED_CROP || old_block == block::COMMONS_SHELF));
         if block_changed {
             self.set_block(bc.x, bc.y, bc.z, bc.new_block);
             // Spec 48 (Electricity) — the block-entity behind a power block has
@@ -2536,6 +2555,12 @@ impl World {
             // it, so the next block put here does not start with a stale kind.
             if was == block::BLIGHTED_CROP && block != block::BLIGHTED_CROP {
                 self.set_meta((x, y, z), 0);
+            }
+            // Living world Tier 2 S6 — the same for a Commons Shelf: its byte is
+            // its fill and looted bit, and its day mark is its own.
+            if was == block::COMMONS_SHELF && block != block::COMMONS_SHELF {
+                self.set_meta((x, y, z), 0);
+                self.shelf_days.remove(&(x, y, z));
             }
             // C3b-fix-d (A-L5) — a table gone, for a server's table grace.
             if was == block::CRAFTING_TABLE
@@ -3556,7 +3581,7 @@ mod tests {
     fn block_has_remote_apply_effects_names_every_block_the_apply_keeps_an_entity_for() {
         use crate::block::*;
         for b in [
-            CHEST, COPPER_CHEST, FURNACE, FURNACE_LIT, DISPENSER, GRAVE, VENDOR_BLOCK, TIP_JAR,
+            CHEST, COPPER_CHEST, COMMONS_SHELF, FURNACE, FURNACE_LIT, DISPENSER, GRAVE, VENDOR_BLOCK, TIP_JAR,
             AUCTION_BLOCK, LEVER, BATTERY, ELECTRIC_LAMP, ELECTRIC_LAMP_LIT, WINDMILL,
             PLOT_MARKER, FEAST_TABLE, FEAST_MARKER,
         ] {

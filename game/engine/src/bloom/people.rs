@@ -8,6 +8,10 @@
 //! player was present and the nights slept, in a place with at least 16 placed
 //! blocks, fading over 14 to 28 lived days of disuse. It is read like `b`.
 //!
+//! Tier 2 S6 adds a sixth, `s`, a tended shelf: half the fill of the fullest
+//! Commons Shelf in the region (`shelf::ShelfTerms`), read from block meta so every
+//! client sees it.
+//!
 //! Tier 2 S2 adds a fourth, `b`, built together (`P = 1 - (1-c)(1-f)(1-k)(1-b)`):
 //! the number of distinct recorded authors of the placed blocks in a region
 //! (`authorship::built_together`). It is read from the world's authorship table
@@ -128,6 +132,12 @@ impl PeopleState {
     /// `P` with the built-together term `b` and the lived-in term `u` (both
     /// 0..=1): `1 - (1-c)(1-f)(1-k)(1-b)(1-u)` (Tier 2 S3 adds `u`).
     pub fn value_full(&self, floor: f32, in_commons: bool, b: f32, u: f32) -> f32 {
+        self.value_all(floor, in_commons, b, u, 0.0)
+    }
+
+    /// `P` with every term: `1 - (1-c)(1-f)(1-k)(1-b)(1-u)(1-s)`, `s` being the
+    /// tended-shelf factor (Tier 2 S6, `shelf::ShelfTerms::s`).
+    pub fn value_all(&self, floor: f32, in_commons: bool, b: f32, u: f32, s: f32) -> f32 {
         let f = self.surge.max(floor.min(MARKER_FLOOR_CAP));
         let k = if in_commons { COMMONS_K } else { 0.0 };
         1.0 - (1.0 - self.c)
@@ -135,6 +145,7 @@ impl PeopleState {
             * (1.0 - k)
             * (1.0 - b.clamp(0.0, 1.0))
             * (1.0 - u.clamp(0.0, 1.0))
+            * (1.0 - s.clamp(0.0, 1.0))
     }
 }
 
