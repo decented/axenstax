@@ -713,6 +713,51 @@ pub enum PlaqueDialogOutcome {
     TipLink(usize),
 }
 
+/// The plaque's text, as lines, for [`show_plaque_dialog`]. Pure so the
+/// wording is tested without a screen. Never names who built anything.
+///
+/// * The lineage line: "From a Plan by npub1…" (the Plan's own author, short
+///   form) or "A local Plan" when that author is empty, then ", after A, B"
+///   for the earlier Plans in its chain.
+/// * The counts line, only when `counts` is `Some` (the machine that owns the
+///   world; a joined client has no table): "Built 3 times in this world." and,
+///   when others descend from it, "2 more were built from it."
+pub fn plaque_lines(chain: &[crate::plan::DerivationLink], counts: Option<crate::plan_builds::PlanCounts>) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some((own, earlier)) = chain.split_last() {
+        let head = if own.author_npub.is_empty() {
+            "A local Plan".to_string()
+        } else {
+            format!("From a Plan by {}\u{2026}", crate::plan::short_npub(&own.author_npub, 12))
+        };
+        let after = if earlier.is_empty() {
+            String::new()
+        } else {
+            let names: Vec<&str> = earlier.iter().map(|l| l.plan_name.as_str()).collect();
+            format!(", after {}", names.join(", "))
+        };
+        lines.push(format!("{head}{after}"));
+    }
+    if let Some(c) = counts {
+        if c.built > 0 {
+            lines.push(if c.built == 1 {
+                "Built 1 time in this world.".to_string()
+            } else {
+                format!("Built {} times in this world.", c.built)
+            });
+        }
+        if c.built_from > 0 {
+            let more = if c.built > 0 { " more" } else { "" };
+            lines.push(if c.built_from == 1 {
+                format!("1{more} was built from it.")
+            } else {
+                format!("{}{more} were built from it.", c.built_from)
+            });
+        }
+    }
+    lines
+}
+
 /// Render the Architect's Plaque attribution dialog. Shows the
 /// derivation chain + the root plan's authored-in badge. Spec 25
 /// Phase 7 adds the per-architect tip button.
@@ -729,6 +774,7 @@ pub fn show_plaque_dialog(
     tip_eligible: bool,
     tips_visible: bool,
     procgen_source: bool,
+    counts: Option<crate::plan_builds::PlanCounts>,
 ) -> PlaqueDialogOutcome {
     let overlay_rect = egui::Rect::from_min_size(
         egui::pos2(viewport.x as f32, viewport.y as f32),
@@ -745,7 +791,8 @@ pub fn show_plaque_dialog(
     );
 
     let panel_w = 520.0;
-    let panel_h = (160.0 + (plaque.chain.len() as f32 * 44.0)).min(560.0);
+    let lines = plaque_lines(&plaque.chain, counts);
+    let panel_h = (160.0 + (lines.len() as f32 * 20.0) + (plaque.chain.len() as f32 * 44.0)).min(560.0);
     let origin = egui::pos2(
         viewport.x as f32 + viewport.width as f32 / 2.0 - panel_w / 2.0,
         viewport.y as f32 + viewport.height as f32 / 2.0 - panel_h / 2.0,
@@ -827,6 +874,15 @@ pub fn show_plaque_dialog(
                         .size(12.0)
                         .italics()
                         .color(egui::Color32::from_rgb(170, 200, 170)),
+                    );
+                }
+                // Living world Tier 2 S4 — the lineage and, on the machine that
+                // owns the world, how often it has been built. Never who built.
+                for line in &lines {
+                    ui.label(
+                        egui::RichText::new(line.as_str())
+                            .size(12.0)
+                            .color(egui::Color32::from_rgb(200, 200, 220)),
                     );
                 }
                 ui.add_space(12.0);
@@ -928,6 +984,49 @@ mod tests {
         let s = material_summary(&plan);
         assert_eq!(s.len(), 1);
         assert_eq!(s[0], (block::STONE, 9));
+    }
+
+    fn plaque_link(name: &str, author: &str) -> crate::plan::DerivationLink {
+        crate::plan::DerivationLink {
+            author_npub: author.to_string(),
+            plan_name: name.to_string(),
+            license: PlanLicense::default(),
+            captured_at: 0,
+            plan_hash: [0; 32],
+        }
+    }
+
+    #[test]
+    fn plaque_lines_name_the_lineage_and_never_a_builder() {
+        let own = plaque_link("Tower", "");
+        // An empty author reads as a local Plan.
+        assert_eq!(plaque_lines(std::slice::from_ref(&own), None), vec!["A local Plan"]);
+        // A named author is shown short, with the earlier Plans after it.
+        let npub = "npub1abcdefghijklmnopqrstuvwxyz";
+        let chain = [plaque_link("Hut", npub), plaque_link("Cabin", ""), plaque_link("Tower", npub)];
+        assert_eq!(
+            plaque_lines(&chain, None),
+            vec!["From a Plan by npub1abcdefg\u{2026}, after Hut, Cabin"]
+        );
+        assert!(plaque_lines(&[], None).is_empty());
+    }
+
+    #[test]
+    fn plaque_counts_use_singular_and_plural_forms_and_are_absent_for_a_joiner() {
+        use crate::plan_builds::PlanCounts;
+        let chain = [plaque_link("Tower", "")];
+        // No table (a joined client): the lineage only.
+        assert_eq!(plaque_lines(&chain, None).len(), 1);
+        let one = plaque_lines(&chain, Some(PlanCounts { built: 1, built_from: 1 }));
+        assert_eq!(one[1], "Built 1 time in this world.");
+        assert_eq!(one[2], "1 more was built from it.");
+        let many = plaque_lines(&chain, Some(PlanCounts { built: 3, built_from: 2 }));
+        assert_eq!(many[1], "Built 3 times in this world.");
+        assert_eq!(many[2], "2 more were built from it.");
+        // A plaque from before the counts: no "Built 0 times".
+        assert_eq!(plaque_lines(&chain, Some(PlanCounts::default())).len(), 1);
+        let only_from = plaque_lines(&chain, Some(PlanCounts { built: 0, built_from: 2 }));
+        assert_eq!(only_from[1], "2 were built from it.");
     }
 
     #[test]

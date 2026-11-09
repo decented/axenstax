@@ -107,6 +107,7 @@ save_fields! {
             last_world_day: Some(9),
             regions: vec![((0, 0), crate::use_record::RegionUse { days: 2, last_day: 3, nights: 1, last_night: Some(8) })],
         }),
+        plan_builds: |s| s.plan_builds = Some(crate::plan_builds::SavedPlanBuilds { rows: vec![([4; 32], 2, 1)] }),
     ],
 }
 
@@ -412,8 +413,10 @@ fn a_record_from_an_older_build_is_no_mismatch() {
     save.authority_clock = None;
     save.block_authors = None;
     save.region_use = None;
+    save.plan_builds = None;
     let mut body = bincode::serialize(&save).unwrap();
-    body.pop(); // The use record's `None`: a format 59 writer had no such field,
+    body.pop(); // The Plan build counts' `None`: a format 59 writer had no such field,
+    body.pop(); // nor the use record's,
     body.pop(); // nor the authorship's,
     body.pop(); // nor the clock's.
     body.extend_from_slice(&footer_bytes(59));
@@ -505,9 +508,11 @@ fn a_partly_decoded_world_dat_is_refused_and_nothing_is_written() {
     let dir = world_dir(&name);
     let file = dir.join("world.dat");
     let save = read_world_save(&std::fs::read(&file).unwrap()).unwrap();
-    // No footer, as the oldest saves, and cut inside the last field.
+    // No footer, as the oldest saves, and cut inside a field: the three newest
+    // (authorship, use record, Plan build counts) are one `None` byte each, so
+    // four bytes reaches into the clock before them.
     let mut body = bincode::serialize(&save).unwrap();
-    body.truncate(body.len() - 3);
+    body.truncate(body.len() - 4);
     assert!(read_world_save_reporting(&body).expect("reads").1, "the fixture is a partly decoded record");
     std::fs::write(&file, &body).unwrap();
     h.server.stored_records.note_world_dat(&name);

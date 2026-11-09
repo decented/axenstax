@@ -830,6 +830,10 @@ pub struct World {
     /// (`path_wear`). Runtime only: never saved, never sent; the Worn Path
     /// block it produces is what persists.
     pub(crate) path_wear: crate::path_wear::PathWear,
+    /// Living world Tier 2 S4 — how often each Plan has been built here
+    /// (`plan_builds`). Authority-side: saved as `WorldSave.plan_builds`, never
+    /// sent on the wire, holds no identities.
+    pub(crate) plan_builds: crate::plan_builds::PlanBuilds,
     /// Spec 37 Market Hubs — vendor-discovery zones. Linear scan
     /// (alpha-scale). Persisted via WorldSave.market_hubs.
     pub market_hubs: Vec<crate::market_hub::MarketHubData>,
@@ -995,6 +999,7 @@ impl World {
             authors: crate::authorship::Authorship::new(),
             use_record: crate::use_record::UseRecord::default(),
             path_wear: crate::path_wear::PathWear::default(),
+            plan_builds: crate::plan_builds::PlanBuilds::default(),
             market_hubs: Vec::new(),
             face_attachments: AHashMap::new(),
             total_work: 0,
@@ -2076,6 +2081,7 @@ impl World {
         self.authors.clear();
         self.use_record.clear();
         self.path_wear.clear();
+        self.plan_builds.clear();
         self.market_hubs.clear();
         self.pop_exposure.clear();
         self.feast_events.clear();

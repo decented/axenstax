@@ -100,6 +100,15 @@ In a Commons footprint (marker ±16, the Tier 1 rule), a break of a block whose 
 - **The plaque** shows the lineage it already carries in plain words ("From a Plan by …, after …", authors as npub per the npub-only display rule, "a local Plan" when empty) and the counts: "Built 3 times in this world. 2 more were built from it." No names of who built.
 - World bloom's **ideas** term reads this table.
 
+**As built (S4).** Decisions taken building it:
+- *Format arithmetic.* Field 59 with layout revision 6 (no new block) makes the footer **65**; `FOOTER_FIELD_COUNTS` gains `(65, [59])`. No protocol bump (no wire change, no block).
+- *One seam, not two.* Both completions (the generic `tick_construction` sweep and the commission's `BuildComplete`) end in `plan::complete_build`, so the count is taken there, before the plaque is placed: a build whose plaque is left out (every candidate cell is someone else's block in a Commons) still counts. A cancelled, refunded or still-running build never reaches it. A creative build counts.
+- *Module.* `plan_builds.rs` owns `PlanBuilds` (a `BTreeMap`, so saving and digesting are canonical), `note_completed`, `ancestors_of`, `ideas_total` and the saved form `SavedPlanBuilds`. `World.plan_builds` holds it; it is cleared with the world and restored at load.
+- *Hash used.* `plan::content_hash(&anchor.plan)`, the function the derivation chain's links already use. Ancestors are the chain's `plan_hash` values less the Plan's own, each once, at most 64 per completion.
+- *Bounds.* 8,192 designs; past it a new design evicts the least-counted row (the lowest hash on a tie), so throwaway Plans cannot grow the table without limit. Counts saturate.
+- *The plaque.* `plan_ui::plaque_lines` is the pure text builder (in `plan_ui.rs` so the money-word lint scans its strings). The counts line is looked up by the plaque chain's last link's `plan_hash` (the Plan's own hash at capture). A design with no count shows no counts line, never "Built 0 times", so a plaque made before the counts reads honestly. A joined client passes no counts.
+- *Exports.* Unlike authorship, `plan_builds` is kept in exports, imports and a handover's transfer copy (no identities).
+
 ## 5. Joiners' Plots, last-seen and succession (slice S5)
 
 - **Joiner Plots.** A joiner placing a Plot Marker on the authority creates `PlotData { owner: PlotOwner::Npub(npub), .. }` under the same claim rules (no overlap with Plots or Commons); breaking it releases the claim (already wired). A guest's marker claims nothing (it stays a plain block, as today). Protection for an `Npub` owner already works through `is_in_foreign_plot_for_npub` / `economy_owner_allows`; the local break arm must treat an `Npub` Plot as foreign to every local seat.
@@ -193,4 +202,7 @@ After the last slice: version bump to 0.2.31, `.deb` and release APK to the Desk
 - S3: the footfall rule counts a body entering a grass cell, so a long straight run counts once per cell per pass and a hop between two cells counts each time: a determined player can wear a lane quickly; this is the intended honour of a road, not a limit to close.
 - S3: a Worn Path is not turned back by anything, including snowfall and tilling; breaking it gives dirt (the player can till or re-grass that).
 - S3: the footer is 64; a build before S2 refuses a world written now (it names a newer version).
+- S4: a joined client's plaque shows the lineage but no counts line (the table is authority-only; S10 may send per-region summaries but not this table). Counts begin at format 65: plaques made before it show no counts line until the design is built again.
+- S4: a design is identified by its content hash, which ignores authorship, mode and kind, so two Plans with the same cells share one row (the same design); a Plan whose chain was not built by `commit_capture` (a hand-made file) may carry a last link whose hash is not its own content hash, and its plaque then finds no row.
+- S4: the table evicts its least-counted design at 8,192 rows, so a world with more designs than that forgets the rarest.
 (More are added as slices land.)

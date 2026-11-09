@@ -1630,6 +1630,13 @@ pub fn complete_build(
     anchor_pos: (i32, i32, i32),
 ) -> Option<CompletedBuild> {
     let data = world.construction_anchors.remove(&anchor_pos)?;
+    // Living world Tier 2 S4 — a finished build counts for its design and, once
+    // each, for the designs it descends from. Every completion (a player's build,
+    // a creative one, an NPC commission) passes here; a cancelled or refunded
+    // build never does, so it counts nothing.
+    world
+        .plan_builds
+        .note_completed(content_hash(&data.plan), &crate::plan_builds::ancestors_of(&data.plan));
     let starter = world.authors.starter(anchor_pos).cloned();
     world.authors.clear_starter(anchor_pos);
     let (ax, ay, az) = data.anchor;

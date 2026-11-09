@@ -349,7 +349,7 @@ fn a_world_with_a_marker_and_a_commons_save_loads_with_its_meta() {
 fn the_save_and_the_wire_moved_with_the_new_block_ids() {
     // Tier 1 took the layout to 5 (these ids); Tier 2 S3's Worn Path (376) took it to 6.
     assert_eq!(crate::save_format::SAVE_LAYOUT_REVISION, 6);
-    assert_eq!(crate::save_format::SAVE_FORMAT_VERSION, 64, "58 fields + layout revision 6");
+    assert_eq!(crate::save_format::SAVE_FORMAT_VERSION, 65, "59 fields + layout revision 6");
     assert_eq!(crate::protocol::PROTOCOL_VERSION, 98);
     let reg = block::BlockRegistry::new();
     for b in [block::FEAST_TABLE, block::FEAST_MARKER, block::COMMONS_STONE] {

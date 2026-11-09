@@ -489,6 +489,7 @@ mod tests {
             authority_clock: None,
             block_authors: None,
             region_use: None,
+            plan_builds: None,
         }
     }
 
@@ -546,6 +547,22 @@ mod tests {
         // An incoming file that still carries it is dropped on import.
         let (_, imported, _) = unpack_world_for_import(&owner, &mut World::new()).expect("import");
         assert!(imported.block_authors.is_none(), "an import never adopts a file's author table");
+    }
+
+    /// Living world Tier 2 S4 — the Plan build counts hold no identities, so
+    /// an export and an import keep them (unlike the author table).
+    #[test]
+    fn export_and_import_keep_the_plan_build_counts() {
+        let world = World::new();
+        let meta = WorldMeta::new("plan-builds-x");
+        let rows = Some(crate::plan_builds::SavedPlanBuilds { rows: vec![([3; 32], 2, 1)] });
+        let mut save = minimal_world_save(1);
+        save.plan_builds = rows.clone();
+        let exported = pack_world_for_export(&meta, save, &world, &[]).expect("pack");
+        let (_, shared, _) = unpack_world(&exported, &mut World::new()).expect("unpack");
+        assert_eq!(shared.plan_builds, rows, "an export keeps the counts");
+        let (_, imported, _) = unpack_world_for_import(&exported, &mut World::new()).expect("import");
+        assert_eq!(imported.plan_builds, rows, "and so does an import");
     }
 
     #[test]

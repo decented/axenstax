@@ -2219,10 +2219,10 @@ against the slice before allocating.
       have made new saves unreadable to shipped builds, and a 4-byte header magic
       collides with a legacy save's leading `seed: u32`; an 8-byte trailing magic
       at the very end of a footer-less save is not a realistic collision.
-    - **`SAVE_FORMAT_VERSION`** = `WORLD_SAVE_FIELD_COUNT` (58 since living world Tier 2 S3,
+    - **`SAVE_FORMAT_VERSION`** = `WORLD_SAVE_FIELD_COUNT` (59 since living world Tier 2 S4,
       2026-11-09: `quest_world` was 54, `worldgen_version` 55, `authority_clock` 56,
-      `block_authors` 57, `region_use` 58) +
-      `SAVE_LAYOUT_REVISION` (6 today; see the block-ids bullets below) = 64. The current `SAVE_FORMAT_VERSION` is `64` (a test, `save_format::tests::spec_02_states_the_current_save_format_version`, fails if this sentence and the constant disagree, so a bump must edit this line). Two tripwire tests stop drift: serde's field list
+      `block_authors` 57, `region_use` 58, `plan_builds` 59) +
+      `SAVE_LAYOUT_REVISION` (6 today; see the block-ids bullets below) = 65. The current `SAVE_FORMAT_VERSION` is `65` (a test, `save_format::tests::spec_02_states_the_current_save_format_version`, fails if this sentence and the constant disagree, so a bump must edit this line). Two tripwire tests stop drift: serde's field list
       for `WorldSave` must equal `WORLD_SAVE_FIELD_COUNT` (so appending a field
       without bumping the version fails), and the tolerant reader must consume every
       byte of a current save (so a field listed in its struct literal without a read
@@ -2285,6 +2285,18 @@ against the slice before allocating.
       arithmetic: field count 58 + revision 6 = 64; **there is no footer 63** (S3 moved both terms at
       once), and `FOOTER_FIELD_COUNTS` gains `(64, [58])`. See
       `docs/superpowers/specs/2026-11-09-living-world-tier2.md` §3.
+    - **Plan build counts (format 65, living world Tier 2 S4, 2026-11-09).** Field 59,
+      `WorldSave.plan_builds: Option<plan_builds::SavedPlanBuilds>`, is
+      `{ rows: Vec<(content_hash: [u8; 32], built: u32, built_from: u32)> }`: per Plan design (the
+      `plan::content_hash` its derivation chain already carries) the times it was built in this world and the
+      builds of designs derived from it. No block was added, so the layout revision stays 6; footer arithmetic
+      is field count 59 + revision 6 = 65, and `FOOTER_FIELD_COUNTS` gains `(65, [59])`. Rules: (1) *absent
+      means nothing built* (an older save; an empty table is written as `None`); (2) *canonical*: rows sorted
+      by hash, so the same world is the same bytes (`sim_digest` digests the same form); (3) *never a
+      refusal*: an all-zero row, a repeated hash or a row past the 8,192-row bound is dropped with a
+      `log::warn!`; the live table evicts its least-counted row when a new design arrives at the bound;
+      (4) *no identities*: a handover's transfer copy and an export both keep it as it is; (5) never on the
+      wire. See `docs/superpowers/specs/2026-11-09-living-world-tier2.md` §4.
     - **The authority clock is saved (format 60, Keep slice 2a, 2026-11-02).** Field 56,
       `WorldSave.authority_clock: Option<sim_clock::SavedClock>`, carries `tick_counter`,
       `world_time`, the weather window (`rain_until`, `storm_until`), the trial lock it
@@ -2339,7 +2351,7 @@ against the slice before allocating.
       it. **Rule: the strict check accepts a body of any field count that footer was
       written with, and nothing else.** `save_format::FOOTER_FIELD_COUNTS` maps each
       footer to its allowed positional field counts (53 -> 53, 54 -> 52, 55 -> 53,
-      57 -> 54, 58 -> 54 or 55, 59 -> 55, 60 -> 56, 61 -> 56, 62 -> 57, 64 -> 58; one footer can come from two field counts
+      57 -> 54, 58 -> 54 or 55, 59 -> 55, 60 -> 56, 61 -> 56, 62 -> 57, 64 -> 58, 65 -> 59; one footer can come from two field counts
       because it is count + layout revision), each row sourced from the commit that
       wrote it. The tolerant decode reports how many fields it read before a clean end;
       the body is accepted iff the tail is clean, that count is in the footer's row, and

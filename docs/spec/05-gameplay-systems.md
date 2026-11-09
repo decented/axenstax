@@ -4912,3 +4912,15 @@ and drops dirt, not placed, never reverts to grass, kept out of the creative inv
 (`TopClass::Path`): left out of the cover average like built ground and, unlike built ground, out of the wall term too, so a road is neither bare nor
 life and a village of roads is not "walls".
 
+**Plan build counts and the plaque (Tier 2 S4, 2026-11-09).** The world counts, per Plan design (its content hash), how many times it has been built
+and how many builds descended from it (Spec 02 "Plan build counts"), on the machine that owns the world, never on the wire and holding no
+identities. Every completed build counts: `plan::complete_build` adds one to `built` for the Plan's hash and one to `built_from` for each *distinct*
+earlier hash in its derivation chain (its own hash excluded, a repeat counted once). Both completion seams reach it, so a player's build (survival or
+creative, `sim_machines::tick_construction`) and an NPC commission (`builder.rs`) count alike on every path; a cancelled, refunded or still-running
+build never reaches it and counts nothing. *The plaque* (`plan_ui::show_plaque_dialog`) gains a lineage line from what it already carries ("From a
+Plan by npub1abc…, after Hut, Cabin", or "A local Plan" when the Plan's own author is empty, ", after" listing the earlier Plans) and, on the
+machine that owns the world, a counts line ("Built 3 times in this world." and, when others descend from it, "2 more were built from it."; singular
+"Built 1 time" and "1 more was built from it"; no line for a design with no count, such as a plaque from before the counts). It never names who
+built anything. A joined client's plaque shows the lineage only, because the table is not on the wire. `PlanBuilds::ideas_total` gives the world
+totals (designs built, builds) for the S9 panel's "ideas" line.
+

@@ -67,10 +67,12 @@ fn a_world_nobody_has_used_saves_the_field_absent() {
 
 #[test]
 fn a_footer_62_save_loads_with_an_empty_table() {
-    // A footer-62 writer (Tier 2 S2) had 57 fields: the same bytes without the new last one.
+    // A footer-62 writer (Tier 2 S2) had 57 fields: the same bytes without the two newest.
     let mut save = crate::save::minimal_world_save_for_tests(7);
     save.region_use = None;
+    save.plan_builds = None;
     let mut body = bincode::serialize(&save).unwrap();
+    assert_eq!(body.pop(), Some(0), "the absent Plan build counts are one None byte");
     assert_eq!(body.pop(), Some(0), "the absent field is one None byte");
     body.extend_from_slice(&crate::save_format::footer_bytes(62));
     let (old, damaged) = crate::save::read_world_save_reporting(&body).expect("an older save loads");

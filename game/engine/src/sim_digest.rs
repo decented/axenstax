@@ -338,6 +338,8 @@ impl GameServer {
         // Living world Tier 2 S3 — the use record (a sorted map, canonical). The
         // runtime wear counts are not digested: they are not world state.
         e.bytes(&bincode::serialize(&w.use_record.to_saved()).expect("use record encodes"));
+        // Living world Tier 2 S4 — Plan build counts (a sorted map, canonical).
+        e.bytes(&bincode::serialize(&w.plan_builds.to_saved()).expect("plan builds encode"));
         e.u64(w.total_work);
         e.u32(self.pop_epoch);
         e.debug(&self.column_streamer);

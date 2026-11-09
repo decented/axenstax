@@ -19,6 +19,7 @@ pub mod repair;
 pub mod plot;
 mod authorship; // Living world Tier 2 S2 — who built a block: save, Commons protection, Plan starters.
 mod use_record; // Living world Tier 2 S3 — the use record, nights slept and Worn Paths: save, joiner, lending host.
+mod plan_builds; // Living world Tier 2 S4 — Plan build counts: completion on every path, save, digest.
 pub mod market_hub;
 pub mod auction;
 pub mod bazaar;

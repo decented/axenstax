@@ -3646,6 +3646,7 @@ impl GameServer {
             authority_clock: Some(self.saved_clock()),
             block_authors: self.world.authors.to_saved(),
             region_use: self.world.use_record.to_saved(),
+            plan_builds: self.world.plan_builds.to_saved(),
             exhibits: self.world.exhibits.clone(),
             composters: self
                 .world

@@ -425,6 +425,18 @@ mod tests {
     }
 
     #[test]
+    fn handover_neutralise_keeps_the_plan_build_counts_they_hold_no_identity() {
+        let mut t = crate::plan_builds::PlanBuilds::default();
+        t.note_completed([5; 32], &[[1; 32]]);
+        let mut s = live_copy();
+        s.plan_builds = t.to_saved();
+        let before = s.plan_builds.clone();
+        assert!(before.is_some());
+        neutralise(&mut s, SOURCE).unwrap();
+        assert_eq!(s.plan_builds, before, "builds per design carry over untouched");
+    }
+
+    #[test]
     fn handover_neutralise_refuses_unattributable_slot_state() {
         let cases: [fn(&mut WorldSave); 4] = [
             |s| s.vendors.push(vendor(VendorOwner::LocalPlayer(1))),

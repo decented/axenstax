@@ -20314,6 +20314,13 @@ impl super::GameState {
                             self.players[pidx].nostrich_vow.as_ref(),
                         );
                     let procgen_source = self.world.procgen_plaque_sources.contains(&plaque_pos);
+                    // Living world Tier 2 S4 — the build counts live on the machine
+                    // that owns the world; a joined client has no table, so no line.
+                    let plan_counts = if self.joined() {
+                        None
+                    } else {
+                        plaque.chain.last().map(|own| self.world.plan_builds.counts(&own.plan_hash))
+                    };
                     let outcome = crate::plan_ui::show_plaque_dialog(
                         &self.renderer.egui.ctx,
                         &screen.viewport,
@@ -20322,6 +20329,7 @@ impl super::GameState {
                         tip_eligible,
                         crate::economy::sats_ui_visible(self.sats_policy.bitcoin_enabled, self.players[pidx].charter_allows_sats),
                         procgen_source,
+                        plan_counts,
                     );
                     match outcome {
                         crate::plan_ui::PlaqueDialogOutcome::InProgress => {}

@@ -201,8 +201,8 @@ fn an_old_format_save_fixture_loads_with_todays_defaults() {
     let _g = WorldsRootGuard::new("clock-save-footer59");
     let bytes = WORLD_FOOTER_59;
     assert_eq!(crate::save_format::split_save_footer(bytes).1, Some(59));
-    // 64 since living world Tier 2 S3 (the `region_use` field and block 376): 59 is an older format still.
-    assert_eq!(crate::save_format::SAVE_FORMAT_VERSION, 64, "59 is an older format than this one");
+    // 65 since living world Tier 2 S4 (the `plan_builds` field): 59 is an older format still.
+    assert_eq!(crate::save_format::SAVE_FORMAT_VERSION, 65, "59 is an older format than this one");
     let (save, damaged) = crate::save::read_world_save_reporting(bytes).expect("the old save is read");
     assert!(!damaged);
     assert_eq!(save.seed, 42);
