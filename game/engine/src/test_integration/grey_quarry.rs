@@ -94,6 +94,7 @@ impl Rig {
             creative: false,
             dt: 0.05,
             allow_grey_event: false,
+            told_people: None,
         });
         if place_trial::step(&mut self.scn, &self.bloom) {
             self.halfway_lines += 1;

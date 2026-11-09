@@ -18,7 +18,7 @@ Tier 2 buys the **people-together** and **time** terms of bloom: the world learn
 - **T10. Crew moods are presentation.** Villagers show a mood from their place's bloom and recent Feasts (a small particle cue). Moods change nothing in the simulation; consequences are Tier 3.
 - **T11. Blight comes from monoculture only, and only big ones.** A large single-crop field (at least 64 crops in a region, 90% one kind) can blight; a child's first wheat patch or a mixed field never starts one. Blight spreads only to the same crop. Off in creative and inside trial arenas (a farming trial must not turn flaky).
 - **T12. Plan licences stay.** Retiring Master/Licence scarcity on Plans is an economy change (vision §14 "owner calls") and is not made here.
-- **T13. Joiners' bloom.** The co-building and lived-in terms need authority data. A late slice (S10) sends joiners per-region summaries (counts, no identities). Until it lands, a joiner sees less of those two terms than the host does; this is a known limit.
+- **T13. Joiners' bloom.** The co-building and lived-in terms need authority data. A late slice (S10) sends joiners per-region summaries (counts, no identities). S10 has landed (§10): a joiner reads both terms from what its server tells it, to within a byte of `u` and to the same figure for `b`; the known limits are in §13.
 - **T14. Bundle size is a target.** 5 MiB brotli is a target, not a gate (owner, 2026-11-08). Keep the web build lean: no new dependencies, native-only code `cfg`'d out of WASM.
 
 ## 1. Bloom: the new people and time terms
@@ -186,6 +186,14 @@ In a Commons footprint (marker ±16, the Tier 1 rule), a break of a block whose 
 
 The authority sends each joiner, for regions in its chunk interest, `(cx, cz, builders: u8, use_u: u8)` when they change (changed-only, at most every 10 s). The joiner's bloom uses them for `b` and `u`. Counts only, no identities. Protocol bump.
 
+**As built (S10).** A new server-to-client packet, `PacketType::RegionPeople` (tag 79, protocol 100): `RegionPeoplePacket { regions: Vec<RegionPeople { cx: i32, cz: i32, builders: u8, use_u: u8 }> }`, at most 512 regions a packet. The maths and the wire live in `region_people.rs`.
+- *Same maths.* `people_of` is `World::authors_in_region` (capped at 8) and `quantise_u(World::lived_in_term)`, the two functions the host's bloom reads; `use_u` is the final `u` (16-placed-blocks gate and fade applied on the authority) times 255, rounded. The joiner turns it back with `built_term` (`authorship::built_together`) and `use_u / 255`; the bloom test pins the joiner's `P` and target against the host's for the same region (`b` exact, `u` within half a byte).
+- *Who and when.* `HostedServer::tick` calls `PeopleSent::plan` once per remote slot after that slot's outbox drains, so it runs once per tick on a dedicated server, a lending host and an owning host alike (a host's own seat gets none: it reads its own tables). Per joiner, at most once every 200 ticks (10 s), counted from the first beat after anything was pushed to it (nothing is sent, and the beat is not spent, until the first chunk is queued).
+- *Which regions.* Only regions the joiner has been pushed (`ClientChunkPush::has_sent_column`, the whole-column sent-set; a column noted local is in it too), and only those that could be non-zero: columns holding an author entry or a use record, plus those already told (so a fall to zero is told, once). A region that leaves the sent-set is forgotten, so it is told again if pushed again; the joiner forgets a column's numbers when it lets the column go (`GameState::drop_column_meshes`, the one place every unload, mismatch and given-up path passes). Changed-only: a region whose pair equals what that joiner was last told is not resent. A longer list than 512 changed regions continues on the next beat (ascending region order).
+- *Joiner.* `RemotePeople`, a bounded runtime map (16,384 regions; a packet over 512 regions is ignored whole; `builders` is capped at 8 on arrival), owned by `RemoteClient`, never saved. `TickInput.told_people` is `Some` only on a joined client; `scan_regions` then takes `r.built`/`r.lived` from it (0 for a region it was not told) instead of the tables, still only on the region's scan cadence.
+- *T3.* The packet has no field a name, key or author could ride in; a test pins the entry at 10 bytes and checks the bytes of a packet built from two named builders for their names.
+- *Per-joiner state.* The "last told" map sits in `HostedServer::people_sent`, parallel to `chunk_pushes`, and is reset in the same four places (slot attach, release, reuse, new local slot). Not saved, not digested.
+
 ## 11. Grown-up panel (slice S9)
 
 The F3 grown-up panel and `ConsoleSnapshot.world_bloom` show the four world bloom terms (§1). Satoshi lines for Worn Paths, blight and a passed-on Plot (gardener voice, no money words, no morality: a grey place is a puzzle).
@@ -205,15 +213,15 @@ One at a time in worktree `../AxeNStax-living-world`, branch `living-world-t2`. 
 | S7 | §7 Site Board, crew moods | field `site_boards`, block 379, wire | **review** |
 | S8 | §8 blight | block 377, layout + protocol bump | **review** (with S4) |
 | S9 | §11 panel terms and Satoshi lines | none | no |
-| S10 | §10 joiners' people terms (stretch) | wire | **review** |
+| S10 | §10 joiners' people terms | wire (protocol 100) | **review** |
 
 After the last slice: version bump to 0.2.31, `.deb` and release APK to the Desktop beside 0.2.30, and a "things to try" addendum for Axe.
 
 ## 13. Known limits at Tier 2
 
 - `--no-lend` hosts: authorship and the use record live in each copy separately.
+- S10: a joiner sees `b` and `u` for a region up to 10 s after the authority's table changes (plus the bloom's own scan cadence), and for a region pushed late, up to 10 s after the push. The packet is not ordered against the client applying the chunk push (a number can arrive before its chunks are applied; it is kept and read when they are). A narrow race remains: if the server's beat tells a column's numbers after the client let it go but before the server took the drop, then the value falls to zero before the column is pushed again, the joiner keeps the stale number until the next change. A web joiner on a guest-open server receives the packet too (it is not native-only). A host's own seat on a `--no-lend` host reads the host client's copy of the tables, as before.
 - A block moved by a piston or a fall lands anonymous (nobody's, so anyone may break it). Undermining a support, or removing the natural block under an authored crop, reed or torch, is not checked; whether those pop through neighbour updates is unverified.
-- Until S10, joiners' bloom lacks the `b` and `u` terms.
 - A local seat's Plot never passes on; a guest's Plot Marker claims nothing.
 - S5: succession uses the wall clock, so time a server spends switched off counts toward the 60 days: an owner who has not joined since a server came back after two months is passed over at the first check (an owner who is in the world at that check is not). No grace is given for downtime.
 - S5: a Plot whose marker chunk is not loaded waits for a later check (writing the stone would conjure an empty chunk), so on a world where nobody goes near a Plot it stays closed until someone does.
@@ -234,7 +242,7 @@ After the last slice: version bump to 0.2.31, `.deb` and release APK to the Desk
 - S2: a joined client records nothing (its table is empty), so its own bloom has `b = 0`, and the local break arm cannot pre-check protection there; the server refuses and undoes the ghost.
 - S2: protection is judged at the cell: a block's second half (a door's top) is separate, and a door's two halves are recorded to the same author at placement and cleared together on a break.
 - S2: the Keep checkpoint's restore of a world with authorship was exercised by the mutation table (a changed `block_authors` is refused) but not by a live handover between two machines.
-- S3: a joined client records nothing, so its `u` is 0 (S10 sends joiners the per-region figure); nothing about the use record is shown per person or sent on the wire except the Worn Path block itself.
+- S3: a joined client records nothing and reads the `u` the authority sends it (S10); nothing about the use record is shown per person or sent on the wire except the Worn Path block itself.
 - S3: `--no-lend` hosts wear paths and count days in each world copy separately (the owning server's copy and the host client's); the flag is a one-release bridge.
 - S3: the placed-block count behind `u` counts placed bits on non-air cells; a placed bit left on a cell burnt or blasted to air (the known S2 gap) is not counted, but a placed bit kept by a block that was swapped for another still is.
 - S3: path wear is not stopped by trials, Plots or Commons (a road across someone's Plot wears like any other grass); a seated rider or a swimmer over grass is judged by position and the body's own `on_ground` like anyone (not specially handled or tested).
@@ -246,7 +254,7 @@ After the last slice: version bump to 0.2.31, `.deb` and release APK to the Desk
 - S3 review: a plant (flower, tall grass, sapling) on a worn grass cell stays standing, so saplings and papyrus cannot then be planted on that path.
 - S3 review: path wear overwrites another player's authored grass in a Commons (24 footfalls by a non-author), clearing its author, as the Commons does not protect against wear.
 - S3 review: no test drives a real `GameState` lending tick through both halves of the phase (the client's seat loop is skipped while lent; the gate's `one_tick_faults` tripwire covers it at runtime). A seat removal shifts the standalone `PathWear.last` keys and a first sample after a teleport counts one footfall: at most one footfall each.
-- S4: a joined client's plaque shows the lineage but no counts line (the table is authority-only; S10 may send per-region summaries but not this table). Counts begin at format 65: plaques made before it show no counts line until the design is built again.
+- S4: a joined client's plaque shows the lineage but no counts line (the table is authority-only; S10 sends per-region bloom summaries, not this table). Counts begin at format 65: plaques made before it show no counts line until the design is built again.
 - S4: a design is identified by the last link of its derivation chain (its hash at capture), so a licence copy counts with its master. A Plan with no chain is counted under its recomputed hash, but its plaque has no last link and so shows no counts line.
 - S4: the table evicts its least-counted design at 8,192 rows, so a world with more designs than that forgets the rarest.
 - S8: blight is judged in the host client's world and the authority's, so a `--no-lend` host's owning server (a second world copy that never learns of a trial) can blight during a trial; trials are solo arenas, so this is unlikely. A survival world opened to LAN whose host types `/gamemode creative` is still survival to the server (the S3 review limit), so blight keeps running there.

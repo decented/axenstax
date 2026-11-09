@@ -4895,8 +4895,8 @@ commission stamping over another author's block in a Commons skips that cell, as
 spill), and its plaque goes on the first free cell above. Whoever starts a Plan build is its author (a seat's key; a commission's
 commissioner): the key is kept beside the anchor and saved with the world's authorship. The bloom `b` term (below) reads the same
 table: `n` = distinct recorded authors of placed blocks in a region (capped at 8), `b = 0` for n < 2, else `1 - exp(-(n-1)/2)`, and
-`P = 1 - (1-c)(1-f)(1-k)(1-b)`. It is read when the region is scanned, and only a machine that owns the world has the table, so
-a joined client's `b` is 0 until S10.
+`P = 1 - (1-c)(1-f)(1-k)(1-b)`. It is read when the region is scanned. Only a machine that owns the world has the table; a joined client
+is told the count per region it holds (`RegionPeople`, protocol v100, counts only) and reads `b` from that with the same formula.
 
 **Lived days, nights slept and Worn Paths (Tier 2 S3, 2026-11-09).** The world keeps, per bloom region, how it has been used (Spec 02 "Layout
 revision 6 and the use record"), on the machine that owns the world and never on the wire or on screen per person. *Lived days:* a world-level
@@ -4906,7 +4906,7 @@ the bed's region. *Nights:* both sleep paths (the authority's `serve_sleep`, aft
 morning) add one night to the bed's region, once per night per region (`last_night`). *Presence* is noted about once a second from every present,
 living body (a dead joiner is not present). *The bloom `u` term:* `u = 0.6 (1 - e^(-(days + 2 nights)/10))`, only where the region holds at least 16
 placed blocks (counted on the scan cadence, `Chunk::placed_count`), faded linearly to 0 between 14 and 28 lived days since the region was last used;
-`P = 1 - (1-c)(1-f)(1-k)(1-b)(1-u)`. A joined client has an empty table, so its `u` is 0 until S10.
+`P = 1 - (1-c)(1-f)(1-k)(1-b)(1-u)`. A joined client has no use record; it is told `u` (times 255) per region it holds and reads that (`RegionPeople`, protocol v100).
 *Worn Paths:* a footfall is a body on the ground, standing on a Grass block, entering a cell it was not in at its last grounded sample (standing
 still, or jumping on the spot, makes none: the body's real `on_ground` and a solid block under its feet are both needed); sampled every tick. At 24 footfalls the cell becomes a Worn Path (block 376, dirt textures, breaks like dirt
 and drops dirt, not placed, never reverts to grass, kept out of the creative inventory; a pick-block gives dirt). The partial counts are a runtime map

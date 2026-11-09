@@ -473,6 +473,9 @@ pub struct RemoteClient {
     /// Return passes a Keep sent this connection, until the game saves them in My Keeps.
     #[cfg(not(target_arch = "wasm32"))]
     keep_passes: crate::keeps::PassInbox,
+    /// Living world Tier 2 S10 — what the server has told this client of how many
+    /// built where and how lived-in each region is (counts only). Bloom reads it.
+    region_people: crate::region_people::RemotePeople,
     pub state: ConnectionState,
     /// The sequence number (`InputPacket.tick`) the NEXT input goes out with:
     /// 1, 2, 3… per connection. The ONE input counter of a joined session —
@@ -897,6 +900,7 @@ impl RemoteClient {
             pending_exhibits: None,
             #[cfg(not(target_arch = "wasm32"))]
             keep_passes: Default::default(),
+            region_people: Default::default(),
             pending_joined_world: None,
             join: JoinFlow::Sent,
             roster: HashMap::new(),
@@ -981,6 +985,7 @@ impl RemoteClient {
             pending_exhibits: None,
             #[cfg(not(target_arch = "wasm32"))]
             keep_passes: Default::default(),
+            region_people: Default::default(),
             pending_joined_world: None,
             join: JoinFlow::AwaitingChallenge { base, driver: Some(driver) },
             roster: HashMap::new(),
@@ -1615,6 +1620,15 @@ impl RemoteClient {
                         let proven = self.transport.proven_host().map(|host| host.key);
                         self.keep_passes.offer(proven, payload);
                     }
+                    // Living world Tier 2 S10: the people terms of the regions pushed
+                    // to this client. A packet that does not decode, or is longer
+                    // than an honest server sends, is dropped; bloom reads 0 for
+                    // what it was not told, as before.
+                    PacketType::RegionPeople => {
+                        if let Ok(packet) = protocol::safe_deserialize::<crate::region_people::RegionPeoplePacket>(payload) {
+                            self.region_people.apply(&packet);
+                        }
+                    }
                     _ => {
                         // Unknown or unexpected packet type
                     }
@@ -2089,6 +2103,16 @@ impl RemoteClient {
         self.respawn_resend_from = None;
         self.state = ConnectionState::Disconnected;
         log::info!("Disconnected from server");
+    }
+
+    /// The people terms this server has told this client (living world Tier 2 S10).
+    pub fn region_people(&self) -> &crate::region_people::RemotePeople {
+        &self.region_people
+    }
+
+    /// The same, to sweep regions the client no longer holds.
+    pub fn region_people_mut(&mut self) -> &mut crate::region_people::RemotePeople {
+        &mut self.region_people
     }
 
     /// The Keep's return passes received since the last call, for the game to save in

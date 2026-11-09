@@ -351,7 +351,7 @@ fn the_save_and_the_wire_moved_with_the_new_block_ids() {
     // S8's Blighted Crop (377) took it to 7.
     assert_eq!(crate::save_format::SAVE_LAYOUT_REVISION, 7);
     assert_eq!(crate::save_format::SAVE_FORMAT_VERSION, 67, "60 fields + layout revision 7");
-    assert_eq!(crate::protocol::PROTOCOL_VERSION, 99);
+    assert_eq!(crate::protocol::PROTOCOL_VERSION, 100);
     let reg = block::BlockRegistry::new();
     for b in [block::FEAST_TABLE, block::FEAST_MARKER, block::COMMONS_STONE] {
         assert!(reg.is_known(b));

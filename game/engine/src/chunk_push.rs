@@ -282,6 +282,18 @@ impl ClientChunkPush {
         self.sent.contains_key(&c)
     }
 
+    /// Has this client been pushed (or told local) column `(cx, cz)`? Columns go
+    /// whole (never half), so the bottom chunk stands for it. Living world S10
+    /// asks it before telling a joiner a region's people terms.
+    pub fn has_sent_column(&self, cx: i32, cz: i32) -> bool {
+        self.sent.contains_key(&(cx, 0, cz))
+    }
+
+    /// Has anything been sent to this client yet?
+    pub fn holds_any(&self) -> bool {
+        !self.sent.is_empty()
+    }
+
     /// C3b-2 — the number of the first packet of chunk `c`'s latest push (or
     /// of its column's "local" note), if this client holds it: a block view
     /// is shown again after each new push of its chunk

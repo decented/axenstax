@@ -54,6 +54,10 @@ pub struct TickInput<'a> {
     pub dt: f32,
     /// May `PlaceWentGrey` be reported? False in a trial arena world.
     pub allow_grey_event: bool,
+    /// Tier 2 S10 — `Some` on a joined client: the people terms (`b` and `u`)
+    /// its server told it, region by region, instead of the authorship and use
+    /// tables it does not keep. `None` everywhere else, which reads its own.
+    pub told_people: Option<&'a crate::region_people::RemotePeople>,
 }
 
 /// What a tick reports.
@@ -437,12 +441,17 @@ impl BloomField {
             r.last_scan = Some(self.tick_no);
             r.tally = tally;
             r.eco = r.tally.eco(r.wildlife);
-            // Tier 2 S2 — b, on the scan's own cadence. A joined client's table
-            // is empty (the authority keeps it), so there it is 0.
-            r.built = crate::authorship::built_together(input.world.authors_in_region(key.0, key.1));
-            // Tier 2 S3 — u, on the same cadence. A joined client's table is
-            // empty (the authority keeps it), so there it is 0.
-            r.lived = input.world.lived_in_term(key.0, key.1);
+            // Tier 2 S2 — b, on the scan's own cadence.
+            // Tier 2 S10 — a joined client reads what its server told it.
+            if let Some(told) = input.told_people {
+                let (builders, use_u) = told.get(key.0, key.1);
+                r.built = crate::region_people::built_term(builders);
+                r.lived = crate::region_people::lived_term(use_u);
+            } else {
+                r.built = crate::authorship::built_together(input.world.authors_in_region(key.0, key.1));
+                // Tier 2 S3 — u, on the same cadence.
+                r.lived = input.world.lived_in_term(key.0, key.1);
+            }
             if !r.known {
                 r.known = true;
                 r.target = level::target(r.eco, r.p(), input.creative);

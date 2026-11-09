@@ -628,6 +628,10 @@ pub struct HostedServer {
     /// sent, its credit window and its pending resyncs. Local slots carry an
     /// idle one (they share the host's world; nothing is pushed or filtered).
     chunk_pushes: Vec<crate::chunk_push::ClientChunkPush>,
+    /// Per-slot people terms (living world Tier 2 S10, `region_people`), indexed
+    /// like `chunk_pushes` and reset with them: what each joiner was last told
+    /// of builders and use per region, and when it may be told again.
+    people_sent: Vec<crate::region_people::PeopleSent>,
     /// `--chunk-sync`: which chunks a joiner is pushed (`touched` by default,
     /// Phase B2b; `all` pushes everything, B2a).
     chunk_sync: crate::chunk_push::ChunkSync,
@@ -1196,6 +1200,7 @@ impl HostedServer {
             chunk_pushes: (0..num_local_players)
                 .map(|_| crate::chunk_push::ClientChunkPush::default())
                 .collect(),
+            people_sent: (0..num_local_players).map(|_| Default::default()).collect(),
             chunk_sync: crate::chunk_push::chunk_sync(),
             verdicts: crate::chunk_verdict::Verdicts::default(),
             // Tests count verdicts, never time them: the time cap would make
@@ -1754,6 +1759,7 @@ impl HostedServer {
         self.outboxes.push(crate::state_outbox::ClientOutbox::new(false));
         self.entity_interest.push(Default::default());
         self.chunk_pushes.push(crate::chunk_push::ClientChunkPush::default());
+        self.people_sent.push(Default::default());
         self.num_local_players += 1;
     }
 
@@ -2449,6 +2455,7 @@ impl HostedServer {
             self.outboxes[i] = crate::state_outbox::ClientOutbox::new(true);
             self.entity_interest[i] = Default::default();
             self.chunk_pushes[i] = crate::chunk_push::ClientChunkPush::default();
+            self.people_sent[i] = Default::default();
         }
         log::info!("Slot {i} released");
         was_joined.then(|| {
@@ -4591,6 +4598,7 @@ impl HostedServer {
                 self.outboxes[j] = crate::state_outbox::ClientOutbox::new(true);
                 self.entity_interest[j] = Default::default();
                 self.chunk_pushes[j] = crate::chunk_push::ClientChunkPush::default();
+                self.people_sent[j] = Default::default();
                 j
             }
             None => {
@@ -4604,6 +4612,7 @@ impl HostedServer {
                 self.outboxes.push(crate::state_outbox::ClientOutbox::new(true));
                 self.entity_interest.push(Default::default());
                 self.chunk_pushes.push(crate::chunk_push::ClientChunkPush::default());
+                self.people_sent.push(Default::default());
                 self.transports.len() - 1
             }
         };
@@ -7224,6 +7233,22 @@ impl HostedServer {
             for pkt in outbox.drain_packets(&template) {
                 self.transports[i].send_to_client(&pkt);
             }
+            // Living world Tier 2 S10 — then this joiner's people terms (how
+            // many built where, how lived-in), counts only, every 10 s at most
+            // and only for the regions it has been pushed. A host's own seat
+            // reads the world's tables itself and is sent none.
+            if filters {
+                let push = &self.chunk_pushes[i];
+                if let Some(packet) = self.people_sent[i].plan(
+                    self.server_tick,
+                    &self.server.world,
+                    push.holds_any(),
+                    |cx, cz| push.has_sent_column(cx, cz),
+                ) {
+                    let pkt = protocol::serialize_packet(protocol::PacketType::RegionPeople, &packet);
+                    self.transports[i].send_to_client(&pkt);
+                }
+            }
         }
     }
 
@@ -7449,6 +7474,12 @@ impl HostedServer {
         for cy in 0..=crate::world::MAX_CHUNK_Y {
             self.chunk_pushes[slot].hold_for_test((col.0, cy, col.1));
         }
+    }
+
+    /// Test-only: what slot `slot` has been told of people terms (S10).
+    #[cfg(test)]
+    pub(crate) fn people_sent_for_test(&self, slot: usize) -> &crate::region_people::PeopleSent {
+        &self.people_sent[slot]
     }
 
     /// Test-only: slot `slot`'s chunk-push state.

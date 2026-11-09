@@ -37,6 +37,9 @@ impl GameState {
         // A trial may set the tempo, but only in its own fresh arena world.
         let scale = self.bloom_time_scale_now();
         self.bloom.set_time_scale(scale);
+        // Tier 2 S10 — a joined client has no authorship or use tables; it reads
+        // the b and u its server told it.
+        let told = self.remote_client.as_ref().map(|rc| rc.region_people());
         let out = self.bloom.tick(&TickInput {
             world: &self.world,
             ecs: &self.ecs,
@@ -47,6 +50,7 @@ impl GameState {
             creative: self.is_creative,
             dt: TICK_SECS,
             allow_grey_event,
+            told_people: told,
         });
         out.place_went_grey
     }
@@ -94,6 +98,7 @@ impl GameServer {
             creative: self.is_creative,
             dt: TICK_SECS,
             allow_grey_event: false,
+            told_people: None,
         });
     }
 }
