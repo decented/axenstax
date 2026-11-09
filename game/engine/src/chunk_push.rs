@@ -283,15 +283,19 @@ impl ClientChunkPush {
     }
 
     /// Has this client been pushed (or told local) column `(cx, cz)`? Columns go
-    /// whole (never half), so the bottom chunk stands for it. Living world S10
-    /// asks it before telling a joiner a region's people terms.
+    /// whole (never half), so the bottom chunk stands for it. Test-only: S10 walks
+    /// `sent_columns` instead.
+    #[cfg(test)]
     pub fn has_sent_column(&self, cx: i32, cz: i32) -> bool {
         self.sent.contains_key(&(cx, 0, cz))
     }
 
-    /// Has anything been sent to this client yet?
-    pub fn holds_any(&self) -> bool {
-        !self.sent.is_empty()
+    /// Every column this client holds as pushed (or noted local), with the push
+    /// number of its bottom chunk, as `push_number` gives it. Living world S10
+    /// walks it to tell a joiner its regions' people terms: the work is bounded
+    /// by the client's render distance, not by the world.
+    pub fn sent_columns(&self) -> impl Iterator<Item = (i32, i32, u32)> + '_ {
+        self.sent.iter().filter(|(c, _)| c.1 == 0).map(|(c, &n)| (c.0, c.2, n))
     }
 
     /// C3b-2 — the number of the first packet of chunk `c`'s latest push (or

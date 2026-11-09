@@ -221,11 +221,54 @@ fn nothing_that_names_anyone_is_in_the_packet_a_joiner_receives() {
     let col = host_column(&hs);
     build(&mut hs.server.world, col, 0, &["npub1alicealicealice", "npub1bobbobbobbob"]);
     let mut sent = crate::region_people::PeopleSent::default();
-    let packet = sent.plan(0, &hs.server.world, true, |_, _| true).expect("something to say");
+    let packet = sent.plan(0, &hs.server.world, [(col.0, col.1, 1)]).expect("something to say");
     let bytes = crate::protocol::serialize_packet(crate::protocol::PacketType::RegionPeople, &packet);
     for needle in [&b"alice"[..], b"bob", b"npub"] {
         assert!(!bytes.windows(needle.len()).any(|w| w == needle));
     }
     assert!(packet.regions.iter().all(|r| r.builders <= 8));
     assert_eq!(bytes.len(), 1 + 8 + 10 * packet.regions.len());
+}
+
+#[test]
+fn a_column_dropped_and_pushed_again_within_one_beat_is_told_its_numbers_again() {
+    // The ride case: the client unloads a column round the server's body and,
+    // before the next ten-second beat, the server pushes it again. The joiner
+    // forgot the column's numbers with it; the authority must not take them to
+    // still stand just because the pair is unchanged.
+    use super::push_joiner::move_body;
+    let mut hs = start_host("people-repush");
+    let mut j = Joiner::join(&mut hs, 2, false);
+    j.settle(&mut hs);
+    let me = j.column(&hs);
+    let col = (me.0 + 1, me.1);
+    build(&mut hs.server.world, col, 0, &["alice", "bob"]);
+    // Play to the beat that tells it (the server's beat counter is its own).
+    for _ in 0..(PEOPLE_EVERY_TICKS as usize + 40) {
+        play(&mut j, &mut hs, 1);
+        if told(&j, col).0 == 2 {
+            break;
+        }
+    }
+    assert_eq!(told(&j, col).0, 2);
+    let packets = j.rc.region_people().packets_taken();
+
+    // Let the column go (as `drop_column_meshes` does: the world and the numbers),
+    // then walk the body off and back so the server pushes it again, all inside
+    // one beat.
+    j.let_go(col);
+    j.rc.region_people_mut().forget(col.0, col.1);
+    assert_eq!(told(&j, col), (0, 0));
+    let mut gap = 0;
+    move_body(&mut hs, j.slot, -5);
+    gap += j.settle(&mut hs);
+    move_body(&mut hs, j.slot, 5);
+    gap += j.settle(&mut hs);
+    assert!(j.intake.column_complete(col), "pushed again");
+    assert!(gap < PEOPLE_EVERY_TICKS as usize - 20, "the gap {gap} fits inside one beat, which is the case under test");
+
+    // The values are unchanged, yet the joiner is told them again.
+    play(&mut j, &mut hs, PEOPLE_EVERY_TICKS as usize + 20);
+    assert_eq!(told(&j, col).0, 2, "told again after the re-push");
+    assert!(j.rc.region_people().packets_taken() > packets);
 }

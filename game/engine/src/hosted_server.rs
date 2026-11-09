@@ -5165,6 +5165,7 @@ impl HostedServer {
                         // out to the render distance it announced.
                         self.chunk_pushes[i] =
                             crate::chunk_push::ClientChunkPush::new(req.render_distance);
+                        self.people_sent[i] = Default::default();
 
                         // Record the joining client's announced skin reference
                         // on its (already-created, at transport-accept time)
@@ -7239,12 +7240,7 @@ impl HostedServer {
             // reads the world's tables itself and is sent none.
             if filters {
                 let push = &self.chunk_pushes[i];
-                if let Some(packet) = self.people_sent[i].plan(
-                    self.server_tick,
-                    &self.server.world,
-                    push.holds_any(),
-                    |cx, cz| push.has_sent_column(cx, cz),
-                ) {
+                if let Some(packet) = self.people_sent[i].plan(self.server_tick, &self.server.world, push.sent_columns()) {
                     let pkt = protocol::serialize_packet(protocol::PacketType::RegionPeople, &packet);
                     self.transports[i].send_to_client(&pkt);
                 }

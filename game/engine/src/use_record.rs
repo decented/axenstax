@@ -155,11 +155,6 @@ impl UseRecord {
         self.lived_day
     }
 
-    /// Every region with a record, in order.
-    pub fn regions(&self) -> impl Iterator<Item = RegionKey> + '_ {
-        self.regions.keys().copied()
-    }
-
     /// One region's record.
     pub fn get(&self, region: RegionKey) -> Option<&RegionUse> {
         self.regions.get(&region)

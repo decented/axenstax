@@ -23,7 +23,7 @@
 //!   region, read by its bloom in place of the tables it does not have.
 //!   Not saved. A column the client lets go of is forgotten from it.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
 
@@ -83,10 +83,15 @@ pub fn lived_term(use_u: u8) -> f32 {
 // ── The authority's side ─────────────────────────────────────────────
 
 /// What the authority last told one joiner, and when it may tell it again.
+///
+/// Each told entry carries the push number of its column (as block views do,
+/// `block_views::ViewsSent`): a column dropped and pushed again has a new
+/// number, so what the joiner was told before it let the column go is not taken
+/// to still stand, however short the gap between the drop and the push.
 #[derive(Debug, Default)]
 pub struct PeopleSent {
     next_due: u64,
-    told: HashMap<(i32, i32), (u8, u8)>,
+    told: HashMap<(i32, i32), ((u8, u8), u32)>,
 }
 
 impl PeopleSent {
@@ -99,19 +104,24 @@ impl PeopleSent {
     /// This beat's packet for the joiner, or `None` (not yet due, nothing
     /// pushed to it, or nothing changed).
     ///
-    /// `held(cx, cz)` says whether the joiner has been pushed that region; a
-    /// region it has not is never mentioned, and one it let go of is forgotten
-    /// (so it is told again if pushed again). Only regions that could be
-    /// non-zero are looked at: those with a builder on record or a use record,
-    /// and those already told (so a fall back to zero is told too).
+    /// `held` is every column the joiner has been pushed with the number of its
+    /// latest push (`ClientChunkPush::sent_columns`); a region it has not been
+    /// pushed is never mentioned, and one it let go of is forgotten. Only the
+    /// joiner's own columns are looked at (bounded by its render distance, not
+    /// by the world). A column whose push number differs from the one its entry
+    /// was told under has been pushed again since, so the joiner may have let
+    /// it go and lost the numbers: it is told again, even a zero over a
+    /// non-zero entry.
     pub fn plan(
         &mut self,
         tick: u64,
         world: &World,
-        holds_any: bool,
-        held: impl Fn(i32, i32) -> bool,
+        held: impl IntoIterator<Item = (i32, i32, u32)>,
     ) -> Option<RegionPeoplePacket> {
-        if !holds_any {
+        // Ascending region order, so a list over the packet cap continues on the
+        // next beat in a fixed order.
+        let held: BTreeMap<(i32, i32), u32> = held.into_iter().map(|(cx, cz, n)| ((cx, cz), n)).collect();
+        if held.is_empty() {
             // Nothing pushed yet: wait without spending the beat.
             self.told.clear();
             return None;
@@ -120,31 +130,28 @@ impl PeopleSent {
             return None;
         }
         self.next_due = tick + PEOPLE_EVERY_TICKS;
-        self.told.retain(|&(cx, cz), _| held(cx, cz));
-
-        let mut candidates: BTreeSet<(i32, i32)> = self.told.keys().copied().collect();
-        for (cx, _, cz) in world.authors.chunk_positions() {
-            candidates.insert((cx, cz));
-        }
-        candidates.extend(world.use_record.regions());
+        self.told.retain(|k, _| held.contains_key(k));
 
         let mut regions = Vec::new();
-        for (cx, cz) in candidates {
+        for (&(cx, cz), &number) in &held {
             if regions.len() >= MAX_REGIONS_PER_PACKET {
                 break;
             }
-            if !held(cx, cz) {
-                continue;
-            }
             let now = people_of(world, cx, cz);
-            if self.told.get(&(cx, cz)).copied().unwrap_or((0, 0)) == now {
+            let must_tell = match self.told.get(&(cx, cz)) {
+                Some(&(value, n)) if n == number => value != now,
+                // Pushed again since it was told: it may have been let go.
+                Some(_) => true,
+                None => now != (0, 0),
+            };
+            if !must_tell {
                 continue;
             }
-            self.told.insert((cx, cz), now);
+            self.told.insert((cx, cz), (now, number));
             regions.push(RegionPeople { cx, cz, builders: now.0, use_u: now.1 });
         }
         // A region back at zero is told once and then forgotten.
-        self.told.retain(|_, v| *v != (0, 0));
+        self.told.retain(|_, (v, _)| *v != (0, 0));
         (!regions.is_empty()).then_some(RegionPeoplePacket { regions })
     }
 }
@@ -168,7 +175,9 @@ impl RemotePeople {
         }
         self.packets += 1;
         for r in &packet.regions {
-            let value = (r.builders.min(MAX_COUNTED_AUTHORS as u8), r.use_u);
+            // Neither number exceeds what an honest authority sends: `u` tops out
+            // at `U_CAP`, builders at the cap.
+            let value = (r.builders.min(MAX_COUNTED_AUTHORS as u8), r.use_u.min(quantise_u(crate::use_record::U_CAP)));
             if value == (0, 0) {
                 self.map.remove(&(r.cx, r.cz));
             } else if self.map.len() < MAX_REMEMBERED || self.map.contains_key(&(r.cx, r.cz)) {
@@ -267,6 +276,9 @@ mod tests {
         assert!(p.is_empty(), "zero is the default");
         assert!(p.apply(&one(2, 200, 5)));
         assert_eq!(p.get(2, 0), (8, 5), "builders are capped on arrival");
+        assert!(p.apply(&one(3, 2, 255)));
+        assert_eq!(p.get(3, 0), (2, 153), "u is capped at the authority's own cap");
+        p.forget(3, 0);
         let long = RegionPeoplePacket {
             regions: (0..=MAX_REGIONS_PER_PACKET as i32)
                 .map(|cx| RegionPeople { cx, cz: 1, builders: 2, use_u: 1 })
@@ -276,5 +288,34 @@ mod tests {
         assert_eq!(p.len(), 1);
         p.forget(2, 0);
         assert!(p.is_empty(), "a column let go is forgotten");
+    }
+
+    #[test]
+    fn a_new_push_number_tells_the_column_again_even_when_the_pair_is_unchanged() {
+        let mut world = World::new();
+        for (i, who) in ["alice", "bob"].iter().enumerate() {
+            world.place_player_block_as(2 + i as i32, 100, 2, crate::block::STONE, Some(&crate::authorship::AuthorKey::Npub((*who).to_string())));
+        }
+        let mut sent = PeopleSent::default();
+        let first = sent.plan(0, &world, [(0, 0, 5)]).expect("told");
+        assert_eq!(first.regions, vec![RegionPeople { cx: 0, cz: 0, builders: 2, use_u: 0 }]);
+        assert!(sent.plan(PEOPLE_EVERY_TICKS, &world, [(0, 0, 5)]).is_none(), "same push, same pair: nothing");
+        let again = sent.plan(2 * PEOPLE_EVERY_TICKS, &world, [(0, 0, 9)]).expect("pushed again: told again");
+        assert_eq!(again.regions.len(), 1);
+        assert!(sent.plan(3 * PEOPLE_EVERY_TICKS, &world, [(0, 0, 9)]).is_none());
+        // Pushed again after the numbers fell to zero: the zero is told too, once,
+        // since the joiner may still hold the old pair.
+        for i in 0..2 {
+            world.set_block(2 + i, 100, 2, crate::block::AIR);
+            world.set_placed(2 + i, 100, 2, false);
+        }
+        let zero = sent.plan(4 * PEOPLE_EVERY_TICKS, &world, [(0, 0, 11)]).expect("a zero over a non-zero entry");
+        assert_eq!((zero.regions[0].builders, zero.regions[0].use_u), (0, 0));
+        assert_eq!(sent.told_len(), 0);
+        assert!(sent.plan(5 * PEOPLE_EVERY_TICKS, &world, [(0, 0, 12)]).is_none(), "a zero over nothing is not news");
+        // A column the joiner no longer holds is forgotten.
+        let mut gone = PeopleSent::default();
+        gone.plan(0, &world, [(0, 0, 1)]);
+        assert!(gone.plan(PEOPLE_EVERY_TICKS, &world, std::iter::empty()).is_none());
     }
 }
