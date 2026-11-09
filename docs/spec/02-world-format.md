@@ -2222,7 +2222,7 @@ against the slice before allocating.
     - **`SAVE_FORMAT_VERSION`** = `WORLD_SAVE_FIELD_COUNT` (59 since living world Tier 2 S4,
       2026-11-09: `quest_world` was 54, `worldgen_version` 55, `authority_clock` 56,
       `block_authors` 57, `region_use` 58, `plan_builds` 59) +
-      `SAVE_LAYOUT_REVISION` (6 today; see the block-ids bullets below) = 65. The current `SAVE_FORMAT_VERSION` is `65` (a test, `save_format::tests::spec_02_states_the_current_save_format_version`, fails if this sentence and the constant disagree, so a bump must edit this line). Two tripwire tests stop drift: serde's field list
+      `SAVE_LAYOUT_REVISION` (7 today; see the block-ids bullets below) = 66. The current `SAVE_FORMAT_VERSION` is `66` (a test, `save_format::tests::spec_02_states_the_current_save_format_version`, fails if this sentence and the constant disagree, so a bump must edit this line). Two tripwire tests stop drift: serde's field list
       for `WorldSave` must equal `WORLD_SAVE_FIELD_COUNT` (so appending a field
       without bumping the version fails), and the tolerant reader must consume every
       byte of a current save (so a field listed in its struct literal without a read
@@ -2297,6 +2297,18 @@ against the slice before allocating.
       `log::warn!`; the live table evicts its least-counted row when a new design arrives at the bound;
       (4) *no identities*: a handover's transfer copy and an export both keep it as it is; (5) never on the
       wire. See `docs/superpowers/specs/2026-11-09-living-world-tier2.md` §4.
+    - **Layout revision 7 and the Blighted Crop (format 66, living world Tier 2 S8, 2026-11-09).** Block id
+      377, `BLIGHTED_CROP` (a crop taken by blight: a plant, non-solid and transparent, on the straw-yellow
+      wheat stage-2 texture layer; breaks to nothing; never "placed", so it carries no author), follows the
+      Worn Path, so the revision moves 6 to 7 for the reason revisions 4, 5 and 6 did (an older build reads
+      the id as AIR and saves a hole in the field). No `WorldSave` field was added: the crop kind it came
+      from rides the existing sparse `block_meta` byte at its cell (`blight::CropKind` index 0..=9: wheat,
+      carrot, potato, corn, papyrus, cotton, hemp, cornflower, field poppy, buttercup), so it saves and
+      reloads with the world and reaches joiners in `BlockChange.meta` and the chunk push. A meta byte
+      naming no kind is read as a blight that spreads to nothing. Footer arithmetic: field count 59 +
+      revision 7 = 66; `FOOTER_FIELD_COUNTS` gains `(66, [59])`; a world written at footer 65 still opens.
+      The block is kept out of the creative inventory and picks nothing (`pick_block::PICKS_NOTHING`). See
+      `docs/superpowers/specs/2026-11-09-living-world-tier2.md` §8.
     - **The authority clock is saved (format 60, Keep slice 2a, 2026-11-02).** Field 56,
       `WorldSave.authority_clock: Option<sim_clock::SavedClock>`, carries `tick_counter`,
       `world_time`, the weather window (`rain_until`, `storm_until`), the trial lock it

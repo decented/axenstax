@@ -664,6 +664,12 @@ pub const COMMONS_STONE: BlockId = 375;
 /// dirt, and never turns back to grass. Bloom leaves it out of the cover
 /// average exactly like built ground. Kept out of the creative inventory.
 pub const WORN_PATH: BlockId = 376;
+// Living world, Tier 2 (S8, 2026-11-09). Spec: docs/superpowers/specs/2026-11-09-living-world-tier2.md §8.
+/// A crop that blight has taken (`blight.rs`): a stunted, straw-coloured plant
+/// that never grows, breaks to nothing and drops nothing. Its `block_meta` byte
+/// is the index of the crop kind it came from (`blight::CropKind`), which the
+/// spread needs. Never "placed", never an item.
+pub const BLIGHTED_CROP: BlockId = 377;
 
 /// The planted-sapling block for a species. Symmetric counterpart to
 /// `species_for_sapling` (which IS live, via `is_sapling_block`); this forward
@@ -3391,6 +3397,18 @@ impl BlockRegistry {
             color: [0.52, 0.38, 0.26],
             tex_top: TEX_DIRT, tex_bottom: TEX_DIRT, tex_side: TEX_DIRT,
         });
+        // Living world, Tier 2 (S8) — the Blighted Crop. A plant (non-solid,
+        // transparent, like every crop and flower, so it draws as a cross
+        // billboard). The atlas has no free layer: the straw-yellow wheat stage-2
+        // strands are the least healthy-looking existing plant texture, and the
+        // mesh gives it a stunted half-height shape no real crop has.
+        debug_assert_eq!(blocks.len(), BLIGHTED_CROP as usize, "the Blighted Crop follows the Worn Path");
+        blocks.push(BlockDef { // 377 BLIGHTED_CROP
+            name: "genesis:blighted_crop",
+            solid: false, transparent: true, gravity: false,
+            color: [0.55, 0.50, 0.25],
+            tex_top: TEX_WHEAT_STAGE_2, tex_bottom: TEX_WHEAT_STAGE_2, tex_side: TEX_WHEAT_STAGE_2,
+        });
 
         Self { blocks, leaves_fast: false }
     }
@@ -3430,6 +3448,8 @@ impl BlockRegistry {
             FEAST_MARKER => ItemStack::new_block(FEAST_TABLE, 1),
             // Living world Tier 2 S3 — a trodden path breaks like the dirt it was.
             WORN_PATH => ItemStack::new_block(DIRT, 1),
+            // Living world Tier 2 S8 — a blighted crop breaks to nothing.
+            BLIGHTED_CROP => ItemStack::empty(),
             // Mob Bounty Board — drops itself as a placeable material.
             BOUNTY_BOARD => ItemStack::new_material(MaterialId::BountyBoardItem, 1),
             // Tip Jar — drops itself. Anti-grief on non-owner break is
@@ -3983,7 +4003,10 @@ mod tests {
         // Living world Tier 2 S3: the Worn Path (376) follows the Commons Stone.
         assert_eq!(COMMONS_STONE + 1, WORN_PATH);
         assert!(reg.is_known(WORN_PATH));
-        assert!(!reg.is_known(WORN_PATH + 1));
+        // Living world Tier 2 S8: the Blighted Crop (377) follows the Worn Path.
+        assert_eq!(WORN_PATH + 1, BLIGHTED_CROP);
+        assert!(reg.is_known(BLIGHTED_CROP));
+        assert!(!reg.is_known(BLIGHTED_CROP + 1));
         assert!(!reg.is_known(u16::MAX));
     }
 

@@ -326,6 +326,8 @@ pub fn block_hardness(block_id: BlockId) -> f32 {
         block::BED => 0.2,
         block::GLASS => 0.3,
         block::TORCH => 0.0,
+        // Living world Tier 2 S8 — a blighted plant is pulled up at once (no work credit).
+        block::BLIGHTED_CROP => 0.0,
         // Building variants (slabs, stairs, doors, …): the table's per-material number.
         id => crate::building_variants::hardness(id).unwrap_or(1.0),
     }

@@ -153,7 +153,7 @@ pub struct BreakYield {
 pub fn yields_drops(blk: BlockId) -> bool {
     blk != crate::block::AIR
         && !crate::block::is_fluid(blk)
-        && !matches!(blk, crate::block::FIRE | crate::block::CAMPFIRE_SMOKE)
+        && !matches!(blk, crate::block::FIRE | crate::block::CAMPFIRE_SMOKE | crate::block::BLIGHTED_CROP)
 }
 
 /// The yield of breaking `blk` at `cell` with `tool` on tick `tick`, read from

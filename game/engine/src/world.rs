@@ -719,6 +719,12 @@ pub struct World {
     /// world-gen preset (a blank platform, no terrain) in `generate_column`. Not
     /// serialised — a runtime mirror of the meta flag, default `false`.
     pub is_workshop: bool,
+    /// Living world Tier 2 S8 — runtime flag: a Trial (a scenario, a pending
+    /// launch, a race) is running in the host's client. Written each tick by the
+    /// host client (`GameState::tick_machines`) and read by the authority wherever
+    /// it borrows this world (`blight::allowed`: a farming trial must not turn
+    /// flaky). Not serialised; never set on a dedicated server.
+    pub trial_running: bool,
 
     // ─── Blank-canvas world config (Task B1) — runtime mirrors of WorldMeta ──
     // Set from meta at every load/entry seam so world-gen + gameplay systems can
@@ -976,6 +982,7 @@ impl World {
             workshop: crate::workshop::WorkshopProjects::new(),
             beacon_publish_pending: None,
             is_workshop: false,
+            trial_running: false,
             world_type: "normal".to_string(),
             ground: "grass".to_string(),
             water_depth: 3,

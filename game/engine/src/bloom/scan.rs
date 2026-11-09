@@ -102,6 +102,11 @@ pub fn scan_columns(
                 tally.add_column(TopClass::Path);
                 continue;
             }
+            // Tier 2 S8 — a Blighted Crop is a wound: bare ground (0), neither life nor built.
+            if top == block::BLIGHTED_CROP {
+                tally.add_column(TopClass::Bare);
+                continue;
+            }
             let living = living_kind(top).is_some();
             let placed = chunks.placed(lx, top_y, lz);
             let is_natural = is_weather_cover(top)
@@ -204,6 +209,42 @@ mod tests {
         scan_columns(&rc, None, &reg(), 0..=7, 2..=2, &mut all_paths);
         assert_eq!(all_paths.paths, 8);
         assert!(all_paths.eco(0) > 0.3, "{}", all_paths.eco(0));
+    }
+
+    #[test]
+    fn a_blighted_crop_reads_as_bare_ground_a_planted_one_as_life() {
+        // Tier 2 S8: a blighted field is bare (0), not life and not built, even
+        // where the crop that sickened had been planted by a player.
+        let mut w = World::new();
+        w.place_player_block(2, 20, 2, block::WHEAT_STAGE_0);
+        w.place_player_block(3, 20, 2, block::WHEAT_STAGE_0);
+        crate::blight::blight_cell(&mut w, 3, 20, 2, crate::blight::CropKind::Wheat);
+        let rc = RegionChunks::of(&w, (0, 0));
+        let mut t = EcoTally::default();
+        scan_columns(&rc, None, &reg(), 3..=3, 2..=2, &mut t);
+        assert_eq!((t.columns, t.built, t.value_sum, t.crop_cells[0]), (1, 0, 0.0, 0), "bare: nothing living, nothing built");
+        let mut both = EcoTally::default();
+        scan_columns(&rc, None, &reg(), 2..=3, 2..=2, &mut both);
+        assert_eq!(both.living_frac(), 0.5, "the healthy crop is life, the blighted one a wound");
+        // A blighted field is worth less than the same field healthy.
+        let mut field = World::new();
+        for x in 0..8 {
+            field.set_block(x, 19, 2, block::TILLED_SOIL);
+            field.set_block(x, 20, 2, block::WHEAT_STAGE_0);
+        }
+        let healthy = {
+            let rc = RegionChunks::of(&field, (0, 0));
+            let mut t = EcoTally::default();
+            scan_columns(&rc, None, &reg(), 0..=7, 2..=2, &mut t);
+            t.value_sum
+        };
+        for x in 0..4 {
+            crate::blight::blight_cell(&mut field, x, 20, 2, crate::blight::CropKind::Wheat);
+        }
+        let rc = RegionChunks::of(&field, (0, 0));
+        let mut sick = EcoTally::default();
+        scan_columns(&rc, None, &reg(), 0..=7, 2..=2, &mut sick);
+        assert_eq!((healthy, sick.value_sum), (8.0, 4.0));
     }
 
     #[test]

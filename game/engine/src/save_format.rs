@@ -53,7 +53,11 @@ pub const WORLD_SAVE_FIELD_COUNT: u32 = 59;
 /// 6 (living world Tier 2 S3, block id 376: the Worn Path): the same reason
 /// again. Together with the appended `region_use` field (58) this makes the
 /// footer 64, not 63: field and revision both moved.
-pub const SAVE_LAYOUT_REVISION: u32 = 6;
+///
+/// 7 (living world Tier 2 S8, block id 377: the Blighted Crop): the same reason
+/// as 4, 5 and 6. No `WorldSave` field was added (the crop kind rides the existing
+/// `block_meta`), so the footer is 66 = 59 fields + revision 7.
+pub const SAVE_LAYOUT_REVISION: u32 = 7;
 
 /// The `world.dat` format version this build writes, and the newest it opens.
 /// Monotonic: both terms only ever increase.
@@ -88,7 +92,8 @@ pub const SAVE_FORMAT_VERSION: u32 = WORLD_SAVE_FIELD_COUNT + SAVE_LAYOUT_REVISI
 /// | 61     | 56     | 5        | living world S3 (block ids 373..=375)             | `authority_clock` |
 /// | 62     | 57     | 5        | living world Tier 2 S2 (block authorship)         | `block_authors`   |
 /// | 64     | 58     | 6        | living world Tier 2 S3 (use record, block 376)    | `region_use`      |
-/// | 65     | 59     | 6        | living world Tier 2 S4 (Plan build counts; this build) | `plan_builds` |
+/// | 65     | 59     | 6        | living world Tier 2 S4 (Plan build counts)        | `plan_builds`     |
+/// | 66     | 59     | 7        | living world Tier 2 S8 (block 377; this build)    | `plan_builds`     |
 ///
 /// (No commit wrote footer 63: S3 moved the field count and the layout revision together.)
 ///
@@ -109,6 +114,7 @@ pub const FOOTER_FIELD_COUNTS: &[(u32, &[u32])] = &[
     (62, &[57]),
     (64, &[58]),
     (65, &[59]),
+    (66, &[59]),
 ];
 
 /// The field counts a footer `version` was written with (empty for a footer the
@@ -397,17 +403,17 @@ mod tests {
     /// loading them as AIR and saving the holes back.
     #[test]
     fn a_world_written_now_carries_the_building_variants_version() {
-        // 65 as of living world Tier 2 S4 (the `plan_builds` field): 59 fields + layout revision 6.
-        assert_eq!(SAVE_FORMAT_VERSION, 65, "59 fields + layout revision 6");
+        // 66 as of living world Tier 2 S8 (block id 377): 59 fields + layout revision 7.
+        assert_eq!(SAVE_FORMAT_VERSION, 66, "59 fields + layout revision 7");
         // The world holds no new block, and still carries the new version.
         let bytes = encode_world_save(&minimal_world_save_for_tests(5)).unwrap();
-        assert_eq!(split_save_footer(&bytes).1, Some(65));
+        assert_eq!(split_save_footer(&bytes).1, Some(66));
         assert!(check_version(split_save_footer(&bytes).1).is_ok(), "this build opens its own save");
-        // A build that stopped at 64 refuses this footer (65 > 64) the same
-        // way this build refuses 66: `check_version` is the one rule.
+        // A build that stopped at 65 refuses this footer (66 > 65) the same
+        // way this build refuses 67: `check_version` is the one rule.
         assert_eq!(
-            check_version(Some(65 + 1)),
-            Err(WorldSaveError::NewerVersion { found: 66, supported: 65 }),
+            check_version(Some(66 + 1)),
+            Err(WorldSaveError::NewerVersion { found: 67, supported: 66 }),
             "a footer one version past this build is refused"
         );
         let mut next = bincode::serialize(&minimal_world_save_for_tests(5)).unwrap();

@@ -51,6 +51,7 @@ pub const PICKS_NOTHING: &[(BlockId, &str)] = &[
     (block::BRIGAND_HIDEOUT_BANNER, "a hideout marker whose identity lives in a world side-table; a carried copy would be a forgery"),
     (block::PISTON_HEAD, "the extended arm is transient and does not say plain or sticky: aim at the piston body"),
     (block::LATENT_PRINT, "a developing print placed from a Plan, which carries per-instance data a bare item cannot"),
+    (block::BLIGHTED_CROP, "a sickness in a crop, not a thing anyone holds: it breaks to nothing"),
     (block::CYANOTYPE_PRINT, "a print hung from a Plan, which carries per-instance data a bare item cannot"),
 ];
 

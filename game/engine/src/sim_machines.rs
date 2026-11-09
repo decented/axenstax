@@ -126,7 +126,8 @@ pub fn step(
     mut on_blast: impl FnMut(&World, Cell),
 ) {
     crate::bee_hive::accumulate_honey(ctx.world, ctx.ecs, ctx.tick);
-    let growth = crate::growth::tick_growth(ctx.world, ctx.tick, rules.raining, rules.seed);
+    let blight = crate::blight::allowed(rules.mode, ctx.world);
+    let growth = crate::growth::tick_growth(ctx.world, ctx.tick, rules.raining, rules.seed, blight);
     changes.extend(growth.crop_changes);
     for &cell in &growth.grown_cells {
         if batch.deliver_local

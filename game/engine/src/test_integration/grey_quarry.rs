@@ -81,7 +81,7 @@ impl Rig {
 
     fn tick(&mut self) {
         self.ticks += 1;
-        crate::growth::tick_growth(&mut self.world, self.ticks, false, 7);
+        crate::growth::tick_growth(&mut self.world, self.ticks, false, 7, false);
         self.water.tick_spread(&mut self.world);
         let me = [Vec3::new(0.5, 80.0, 0.5)];
         self.bloom.tick(&TickInput {

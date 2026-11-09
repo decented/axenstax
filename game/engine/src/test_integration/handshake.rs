@@ -265,7 +265,8 @@ fn protocol_version_is_the_pinned_value() {
     // v96 (D2c-3 ordered park): handover FreezeFence (13) and Parked (14) frames.
     // v97 (living world S3): block ids 373..=375 and two ItemNote codes, no packet change.
     // v98 (living world Tier 2 S3): block id 376 (Worn Path), no packet change.
-    assert_eq!(protocol::PROTOCOL_VERSION, 98);
+    // v99 (living world Tier 2 S8): block id 377 (Blighted Crop), no packet change.
+    assert_eq!(protocol::PROTOCOL_VERSION, 99);
 }
 
 #[test]

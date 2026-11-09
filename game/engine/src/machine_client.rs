@@ -11,6 +11,11 @@ impl GameState {
         if self.joined() {
             return;
         }
+        // Tier 2 S8: tell the authority (which borrows this world when it lends
+        // it) whether a Trial is running, so blight stays out of it.
+        self.world.trial_running = self.scenario.is_some()
+            || self.pending_scenario_launch.is_some()
+            || self.active_trial.is_some();
         let lent = self.sim_lent();
         if !lent {
             self.sim_runs(SimSystem::Machines);

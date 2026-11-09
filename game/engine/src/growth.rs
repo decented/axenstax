@@ -181,11 +181,32 @@ pub fn crops_should_advance(tick: u64) -> bool {
         || tick.is_multiple_of(CROP_GROWTH_TICKS_PER_STAGE / WATER_GROWTH_DIVISOR)
 }
 
+/// Plain growth, no blight: the tests' entry point (the pass itself runs
+/// [`advance_crops_blight`]).
+#[cfg(test)]
 pub fn advance_crops<I>(
     world: &mut World,
     tick: u64,
     raining: bool,
     crops: I,
+) -> Vec<BlockChange>
+where
+    I: IntoIterator<Item = (i32, i32, i32)>,
+{
+    advance_crops_blight(world, tick, raining, crops, None)
+}
+
+/// [`advance_crops`] with blight (living world Tier 2 S8): a crop that would
+/// advance and stands in a monoculture of its own kind (`blight`, from
+/// [`crate::blight::find_monocultures`]) rolls [`crate::blight::blight_roll`] and,
+/// on a hit, becomes a Blighted Crop of its kind instead of advancing. `None`
+/// (creative, a trial, a caller that does not want it) is plain growth.
+pub fn advance_crops_blight<I>(
+    world: &mut World,
+    tick: u64,
+    raining: bool,
+    crops: I,
+    blight: Option<&crate::blight::Monocultures>,
 ) -> Vec<BlockChange>
 where
     I: IntoIterator<Item = (i32, i32, i32)>,
@@ -217,6 +238,14 @@ where
         let has_water = raining || water_within_radius(world, x, y, z);
         let advance = if has_water { fast_fire } else { base_fire };
         if advance {
+            if let Some(m) = blight
+                && let Some(kind) = crate::blight::kind_of_block(blk)
+                && m.dominant_at(x, z) == Some(kind)
+                && crate::blight::blight_roll(x, y, z, tick)
+            {
+                changes.push(crate::blight::blight_cell(world, x, y, z, kind));
+                continue;
+            }
             world.set_block(x, y, z, next);
             changes.push(BlockChange { x, y, z, new_block: next, meta: 0 });
         }
@@ -366,24 +395,38 @@ pub fn crop_break(blk: BlockId, rng_seed: u64, on_tilled: bool) -> Option<CropBr
 
 /// Collect every crop position in the currently-loaded chunks. Helper for
 /// the engine's per-tick growth pass.
+#[cfg(test)]
 pub fn collect_crop_positions(world: &World) -> Vec<(i32, i32, i32)> {
-    let mut out = Vec::new();
+    scan_crops(world).0
+}
+
+/// One scan of the loaded chunks for the farming pass: every crop position, and
+/// every Blighted Crop (Tier 2 S8). One walk, not two: the scan is O(loaded
+/// volume).
+fn scan_crops(world: &World) -> (Vec<(i32, i32, i32)>, Vec<(i32, i32, i32)>) {
+    let mut crops = Vec::new();
+    let mut blighted = Vec::new();
     for ((cx, cy, cz), chunk) in world.iter_chunks() {
         for ly in 0..crate::chunk::CHUNK_SIZE {
             for lz in 0..crate::chunk::CHUNK_SIZE {
                 for lx in 0..crate::chunk::CHUNK_SIZE {
                     let blk = chunk.get(lx, ly, lz);
-                    if is_crop(blk) {
+                    let is_blight = blk == block::BLIGHTED_CROP;
+                    if is_blight || is_crop(blk) {
                         let wx = cx * crate::chunk::CHUNK_SIZE as i32 + lx as i32;
                         let wy = cy * crate::chunk::CHUNK_SIZE as i32 + ly as i32;
                         let wz = cz * crate::chunk::CHUNK_SIZE as i32 + lz as i32;
-                        out.push((wx, wy, wz));
+                        if is_blight {
+                            blighted.push((wx, wy, wz));
+                        } else {
+                            crops.push((wx, wy, wz));
+                        }
                     }
                 }
             }
         }
     }
-    out
+    (crops, blighted)
 }
 
 /// One-in-N chance per growth scan for a planted sapling to become a tree
@@ -482,12 +525,20 @@ pub struct GrowthTick {
 /// are O(loaded chunks), but growth only fires on ~1 tick in 40 (engine audit
 /// 2026-06-04, B). Deterministic: crops advance on the tick cadence + light gate,
 /// saplings on a position+tick hash — no RNG state to share.
-pub fn tick_growth(world: &mut World, tick: u64, raining: bool, seed: u32) -> GrowthTick {
+///
+/// `blight` (living world Tier 2 S8, `blight::allowed`: not creative, not in a
+/// trial) turns on the monoculture roll and the spread. Blight is judged on the
+/// pass's own scan, so a crop blighted this pass spreads from the next one.
+pub fn tick_growth(world: &mut World, tick: u64, raining: bool, seed: u32, blight: bool) -> GrowthTick {
     if !crops_should_advance(tick) {
         return GrowthTick::default();
     }
-    let crop_positions = collect_crop_positions(world);
-    let crop_changes = advance_crops(world, tick, raining, crop_positions);
+    let (crop_positions, blighted) = scan_crops(world);
+    let monocultures = blight.then(|| crate::blight::find_monocultures(world, &crop_positions));
+    let mut crop_changes = advance_crops_blight(world, tick, raining, crop_positions, monocultures.as_ref());
+    if blight {
+        crop_changes.extend(crate::blight::spread(world, tick, blighted));
+    }
     let saplings = collect_sapling_positions(world);
     let grown_cells = advance_saplings(world, tick, seed, saplings);
     GrowthTick { crop_changes, grown_cells }
@@ -502,10 +553,10 @@ mod tests {
         let mut world = World::new();
         world.set_block(0, 70, 0, WHEAT_STAGE_0);
         world.set_sky_light_at(0, 70, 0, 15);
-        let off = tick_growth(&mut world, CROP_GROWTH_TICKS_PER_STAGE - 1, false, 7);
+        let off = tick_growth(&mut world, CROP_GROWTH_TICKS_PER_STAGE - 1, false, 7, false);
         assert!(off.crop_changes.is_empty() && off.grown_cells.is_empty());
         assert_eq!(world.get_block(0, 70, 0), WHEAT_STAGE_0);
-        let on = tick_growth(&mut world, CROP_GROWTH_TICKS_PER_STAGE, false, 7);
+        let on = tick_growth(&mut world, CROP_GROWTH_TICKS_PER_STAGE, false, 7, false);
         assert_eq!(on.crop_changes.len(), 1, "the lit wheat advances on the base cadence");
         assert_eq!(world.get_block(0, 70, 0), WHEAT_STAGE_1);
     }

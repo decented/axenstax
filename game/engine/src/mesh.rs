@@ -455,6 +455,9 @@ fn non_solid_shape_for(block_id: BlockId) -> Option<([f32; 3], [f32; 3])> {
         block::TORCH => Some(([0.4, 0.0, 0.4], [0.6, 0.6, 0.6])),
         // Wider but shorter — fills most of the X-Z footprint.
         block::TALL_GRASS => Some(([0.15, 0.0, 0.15], [0.85, 0.85, 0.85])),
+        // Living world Tier 2 S8 — a blighted crop: stunted, half a block high
+        // and narrow, so it never reads as a healthy plant of any stage.
+        block::BLIGHTED_CROP => Some(([0.25, 0.0, 0.25], [0.75, 0.45, 0.75])),
         // Wild dye flowers (Spec 35). Bespoke shape so they don't fall
         // through to the catch-all default, which made them read as
         // chunky full-height cubes (playtest 2026-05-28: "the flowers
@@ -2748,6 +2751,7 @@ mod tests {
             block::COTTON_PLANT,
             block::COTTON_STAGE_2,
             block::HEMP_STAGE_3,
+            block::BLIGHTED_CROP,
         ] {
             let (mut world, registry) = empty_world_with_chunk();
             world.set_block(5, 5, 5, b);

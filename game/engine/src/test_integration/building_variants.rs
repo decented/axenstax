@@ -77,8 +77,9 @@ fn every_variant_is_registered_with_its_shape_and_its_materials_textures() {
         assert_eq!(def.name, format!("genesis:{}_{}", m.key, shape.suffix()));
     }
     // Appended after the old last id: nothing renumbered.
-    // (The living-world blocks follow the variants: 373..=375 in Tier 1, the Worn Path 376 in Tier 2 S3.)
-    assert_eq!(reg.len(), bv::END_NEW_ID as usize + 4);
+    // (The living-world blocks follow the variants: 373..=375 in Tier 1, the Worn Path 376 in Tier 2 S3,
+    // the Blighted Crop 377 in Tier 2 S8.)
+    assert_eq!(reg.len(), bv::END_NEW_ID as usize + 5);
     assert_eq!(reg.get(block::WINDMILL_TURNING).name, "electricity:windmill_turning");
     assert_eq!(reg.get(block::STONE_SLAB).name, "genesis:stone_slab");
     assert_eq!(reg.get(block::OAK_DOOR).name, "genesis:oak_door");

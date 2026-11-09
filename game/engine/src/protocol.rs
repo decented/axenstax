@@ -2903,7 +2903,12 @@ pub struct ServerAnnouncePacket {
 ///   id to `AIR` and would draw a hole in the grass, so the bump refuses it at
 ///   join. The use record itself (days, nights) is authority-side and never
 ///   on the wire.
-pub const PROTOCOL_VERSION: u32 = 98;
+/// - v99 (2026-11-09, living world Tier 2 S8): **New block id 377** (Blighted
+///   Crop: a crop taken by blight, written by the authority as an ordinary
+///   `BlockChange` whose `meta` is the index of the crop kind it came from). No
+///   packet shape changed. A client without it resolves the id to `AIR` and
+///   would show a hole in the field, so the bump refuses it at join.
+pub const PROTOCOL_VERSION: u32 = 99;
 
 /// The `protocol_version` of a JoinRequest payload that doesn't decode as this
 /// build's `JoinRequestPacket` (an older or newer client's shape). It is the
@@ -3107,7 +3112,8 @@ mod tests {
         // v96 — D2c-3 ordered park: FreezeFence (13) and Parked (14) frames.
         // v97 — living world S3: block ids 373..=375, two ItemNote codes.
         // v98 — living world Tier 2 S3: block id 376 (Worn Path), no packet change.
-        assert_eq!(super::PROTOCOL_VERSION, 98);
+        // v99 — living world Tier 2 S8: block id 377 (Blighted Crop), no packet change.
+        assert_eq!(super::PROTOCOL_VERSION, 99);
     }
 
     #[test]
@@ -3868,7 +3874,8 @@ mod tests {
         // v96 (D2c-3 ordered park): handover FreezeFence (13) and Parked (14) frames.
         // v97 (living world S3): block ids 373..=375 and two ItemNote codes, no packet change.
         // v98 (living world Tier 2 S3): block id 376 (Worn Path), no packet change.
-        assert_eq!(PROTOCOL_VERSION, 98);
+        // v99 (living world Tier 2 S8): block id 377 (Blighted Crop), no packet change.
+        assert_eq!(PROTOCOL_VERSION, 99);
     }
 
     fn sample_accept() -> JoinAcceptPacket {

@@ -124,14 +124,14 @@ In a Commons footprint (marker ±16, the Tier 1 rule), a break of a block whose 
 
 ## 6. The Commons Shelf (slice S6)
 
-- **Block.** Commons Shelf (id 377): a container shared like a chest (reuse the chest container and its joiner window path; a new chest tier or a sibling block entity, whichever the chest code takes most cleanly). Textures: existing chest or crafting-table layers. Recipe: a chest in a ring of planks is taken; the agent picks a free shape and records it.
+- **Block.** Commons Shelf (id 378): a container shared like a chest (reuse the chest container and its joiner window path; a new chest tier or a sibling block entity, whichever the chest code takes most cleanly). Textures: existing chest or crafting-table layers. Recipe: a chest in a ring of planks is taken; the agent picks a free shape and records it.
 - **Fill in meta.** The authority keeps the shelf's `block_meta` byte as its state: low 7 bits = fill (0..127 = share of slots holding anything), top bit = looted. Meta is already synced by `BlockChange` and the chunk push, so every client's bloom reads it. First confirm the chest family does not already use its meta byte (facing); if it does, make the shelf a sibling block entity whose meta is free.
 - **Looted.** If the fill falls by at least half within one world day while it was at least a quarter full, the looted bit is set (the day's starting fill is runtime-only; after a reload the day starts from the current fill). Restocking to half full or more clears it.
 - A Commons Shelf may be placed anywhere; it counts towards bloom anywhere.
 
 ## 7. Site boards and crew moods (slice S7)
 
-- **Site Board** (id 378, existing board textures, e.g. the bounty board layer). Holds up to 8 tasks, each a job picked from a fixed list (plant trees, build walls, build a roof, dig a well, light the way, make a garden, bring food, gather wood, clear the ground, build a bridge, fence the animals, decorate) with a done tick. Anyone may add, tick or remove a task. Saved as an appended `WorldSave` field `site_boards`.
+- **Site Board** (id 379, existing board textures, e.g. the bounty board layer). Holds up to 8 tasks, each a job picked from a fixed list (plant trees, build walls, build a roof, dig a well, light the way, make a garden, bring food, gather wood, clear the ground, build a bridge, fence the animals, decorate) with a done tick. Anyone may add, tick or remove a task. Saved as an appended `WorldSave` field `site_boards`.
 - **Wire.** Joiners send `ItemAction::SiteBoard { pos, op: Add(job) | Toggle(i) | Remove(i) }` (append-only enum growth, protocol bump); the authority applies it and pushes the board's state to clients that hold the chunk (a new small packet or a `BlockView`, whichever the code takes most cleanly), and the chunk push carries it for late joiners.
 - **Bloom.** Ticking a task done adds a short people surge to the board's region (the Feast surge path with two guests), at most once per board per world day, so ticking and unticking cannot pump it (the Tier 1 L4 lesson).
 - **UI.** Right-click opens a small egui window: the list, a picker for a new job, a tick per task. Copy-linted (`*_ui.rs`).
@@ -140,9 +140,20 @@ In a Commons footprint (marker ±16, the Tier 1 rule), a break of a block whose 
 ## 8. Blight (slice S8)
 
 - In `growth::advance_crops`, once per growth pass, count crops by kind per region from the positions already collected. A region with at least 64 crops whose most common kind is 90% or more of them is a monoculture.
-- Each crop of the dominant kind in a monoculture that would advance rolls a position+tick hash (the sapling pattern, no RNG state) and blights 1 time in 40: it becomes a **Blighted Crop** (id 379; a plant shape on an existing withered-looking layer such as tall grass or a stage-0 crop, tinted if the tint path allows it without a new layer).
+- Each crop of the dominant kind in a monoculture that would advance rolls a position+tick hash (the sapling pattern, no RNG state) and blights 1 time in 40: it becomes a **Blighted Crop** (id 377, built before the Shelf and the Board, which take 378 and 379; a plant shape on an existing withered-looking layer such as tall grass or a stage-0 crop, tinted if the tint path allows it without a new layer).
 - A Blighted Crop next to a crop of the same kind spreads to it 1 time in 8 per growth pass, wherever it is: once present, blight moves through a field whatever the region's mix. It breaks to nothing and drops nothing; bonemeal does nothing to it. A Blighted Crop has to remember its kind for spreading: keep the kind in its `block_meta`.
 - Off in creative and in trial arenas. Runs wherever growth runs (authority on all paths).
+
+**As built (S8).** Decisions taken building it:
+- *Module.* `blight.rs` owns the pure rules: `CropKind` (ten kinds, the meta index), `find_monocultures`, the two dice (`blight_roll`, `spread_roll`), `blight_cell`, `spread`. `growth::tick_growth` takes a `blight: bool` (from `blight::allowed`) and does one scan for crops and Blighted Crops; `advance_crops_blight` is `advance_crops` with the monoculture roll, and `advance_crops` is the same with none. It runs from `sim_machines::step`, the one place the dedicated server, a lending host and the standalone path share.
+- *Block 377, protocol 99, layout 7, format 66.* No `WorldSave` field: the kind is the cell's `block_meta` byte. The Shelf and Board take 378 and 379. Look: the straw-yellow wheat stage-2 layer (the least healthy existing plant texture; plants take no tint, so none was tried), drawn half height and narrow so no real crop looks like it.
+- *Which crops count.* Live crops only (a Blighted Crop is not in the count), farmed ones only: a mature cornflower, poppy or buttercup is the wild-meadow block, so it counts and blights only on tilled soil (the rule `crop_break` uses). Mature crops count towards the 64 and the 90% but only a crop that would grow rolls.
+- *A field at the edge.* Because a blighted crop leaves the count, a field of exactly 64 can fall under the floor after its first blight and start no more; spread goes on regardless of the mix (the spec's intent). Larger fields keep rolling.
+- *Dice.* Position, tick and a per-purpose salt, murmur-mixed (the sapling hash). Spread is rolled per source cell and direction, so a cell beside two blights is reached on either's roll.
+- *Cap.* 512 Blighted Crops a pass; the sorted list is taken as a window that moves 512 on each 100-tick pass, so a bigger field is covered over a few passes.
+- *Off in creative and trials.* Creative is `PlayMode::Creative` in the machine rules. The trial gate is a runtime `World::trial_running`, written each tick by the host client (`GameState::tick_machines`) from `scenario`, `pending_scenario_launch` or `active_trial`; because a lending authority borrows that same world, it sees it on every lent path. A blight already standing in a world is not removed when blight turns off.
+- *Placed.* Blighting clears the planted crop's placed bit (and so its author), or bloom would class the column as built, not bare. Bloom counts the column as `TopClass::Bare` explicitly.
+- *Not an item.* Excluded from the creative inventory, `PICKS_NOTHING`, mine drop empty, `yields_drops` false (so single-player, a host's seat and a joiner all get nothing), hardness 0. Bone meal and fertiliser are gated on `growth::is_crop`/`next_stage`, which a Blighted Crop is not in, so nothing is used up.
 
 ## 9. Tier 1 leftovers (slice S1)
 
@@ -176,9 +187,9 @@ One at a time in worktree `../AxeNStax-living-world`, branch `living-world-t2`. 
 | S3 | §3 use record, nights, Worn Path, §1 `u` | field `region_use`, block 376, layout + protocol bump | **review** |
 | S4 | §4 Plan build counts and plaque | field `plan_builds` | **review** (with S8) |
 | S5 | §5 joiner Plots, last seen, succession | field `owner_last_seen` | **review** |
-| S6 | §6 Commons Shelf, §1 `s` and looted | block 377, layout + protocol bump | **review** |
-| S7 | §7 Site Board, crew moods | field `site_boards`, block 378, wire | **review** |
-| S8 | §8 blight | block 379, layout + protocol bump | **review** (with S4) |
+| S6 | §6 Commons Shelf, §1 `s` and looted | block 378, layout + protocol bump | **review** |
+| S7 | §7 Site Board, crew moods | field `site_boards`, block 379, wire | **review** |
+| S8 | §8 blight | block 377, layout + protocol bump | **review** (with S4) |
 | S9 | §11 panel terms and Satoshi lines | none | no |
 | S10 | §10 joiners' people terms (stretch) | wire | **review** |
 
@@ -217,4 +228,9 @@ After the last slice: version bump to 0.2.31, `.deb` and release APK to the Desk
 - S4: a joined client's plaque shows the lineage but no counts line (the table is authority-only; S10 may send per-region summaries but not this table). Counts begin at format 65: plaques made before it show no counts line until the design is built again.
 - S4: a design is identified by its content hash, which ignores authorship, mode and kind, so two Plans with the same cells share one row (the same design); a Plan whose chain was not built by `commit_capture` (a hand-made file) may carry a last link whose hash is not its own content hash, and its plaque then finds no row.
 - S4: the table evicts its least-counted design at 8,192 rows, so a world with more designs than that forgets the rarest.
+- S8: blight is judged in the host client's world and the authority's, so a `--no-lend` host's owning server (a second world copy that never learns of a trial) can blight during a trial; trials are solo arenas, so this is unlikely. A survival world opened to LAN whose host types `/gamemode creative` is still survival to the server (the S3 review limit), so blight keeps running there.
+- S8: the monoculture is judged per chunk column (16 x 16 cells), so a field cut by a column edge is counted in two halves, and a very long thin field may never reach 64 in one column.
+- S8: blight rolls and spread run on the growth cadence only in loaded chunks, and the 512-per-pass cap spreads a very big blight over several passes. A Blighted Crop is not cured by anything (the player pulls it up); a pulled blight leaves bare soil.
+- S8: a plant above a field-edge cell, or an unsupported Blighted Crop (the soil under it broken), is not checked specially; it pops or stands as crops do.
+- S8: a joined client's block change for a blight reaches its own mesh as any change does, but its local placed mask for the cell is stale until a chunk re-push (as for every change; bloom on a joiner reads the cell by id and so still sees bare ground).
 (More are added as slices land.)

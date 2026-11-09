@@ -1007,6 +1007,23 @@ mod tests {
         assert!(!judge_to(&fert, block::WHEAT_STAGE_2));
     }
 
+    /// Living world Tier 2 S8: a Blighted Crop is not a growing crop, so neither
+    /// bone meal nor fertiliser has any outcome on it (no use is accepted, so
+    /// nothing is taken from the hand), and the pure advance rules give none.
+    #[test]
+    fn bone_meal_and_fertiliser_do_nothing_to_a_blighted_crop() {
+        let w = World::new();
+        for used in [mat(MaterialId::Bonemeal), mat(MaterialId::Fertiliser)] {
+            for new in [block::WHEAT_STAGE_1, block::WHEAT_STAGE_2, block::WHEAT_STAGE_3, block::BLIGHTED_CROP, block::AIR] {
+                let v = judge(UseKind::GrowCrop, Some(&used), &bc(0, 70, 0, new), before(block::BLIGHTED_CROP), &w);
+                assert!(!v.legal(), "{used:?} -> {new}");
+            }
+        }
+        assert_eq!(crate::growth::next_stage(block::BLIGHTED_CROP), None);
+        assert_eq!(crate::growth::bonemeal_advance(block::BLIGHTED_CROP, 7), None);
+        assert!(!crate::growth::is_crop(block::BLIGHTED_CROP));
+    }
+
     /// A bucket fill is legal on a source only, with an empty bucket, and
     /// makes the bucket of the fluid the server's cell held.
     #[test]
