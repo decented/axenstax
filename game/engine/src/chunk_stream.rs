@@ -2267,6 +2267,193 @@ mod tests {
         );
     }
 
+    /// Column (0, 0) streamed in, with a player-placed stone floor at y = 89
+    /// over all of it and air above, so a fluid poured on it stays inside the
+    /// column and the column is kept (edited) when it streams out.
+    fn fluid_floor() -> SimsFixture {
+        let mut fx = SimsFixture::new();
+        fx.sims().stream_in(0, 0);
+        for x in 0..16 {
+            for z in 0..16 {
+                fx.world.place_player_block(x, 89, z, block::STONE);
+                for y in 90..=96 {
+                    if fx.world.get_block(x, y, z) != block::AIR {
+                        fx.world.set_block(x, y, z, block::AIR);
+                    }
+                }
+            }
+        }
+        fx
+    }
+
+    /// Every `fluid` cell of column (0, 0) between y = 80 and 100, sorted.
+    fn fluid_cells(world: &crate::world::World, fluid: block::BlockId) -> Vec<(i32, i32, i32)> {
+        let mut cells = Vec::new();
+        for x in 0..16 {
+            for z in 0..16 {
+                for y in 80..=100 {
+                    if world.get_block(x, y, z) == fluid {
+                        cells.push((x, y, z));
+                    }
+                }
+            }
+        }
+        cells
+    }
+
+    /// Both fluid sims, as the client and server tick them.
+    fn run_fluids(fx: &mut SimsFixture, ticks: usize) {
+        for _ in 0..ticks {
+            let water_dirty = fx.water.tick_spread(&mut fx.world);
+            crate::fluids::reconcile_frozen_lava_sources(&mut fx.lava, &fx.world, &water_dirty);
+            fx.water.tick_retract(&mut fx.world);
+            fx.lava.tick_spread(&mut fx.world);
+            fx.lava.tick_retract(&mut fx.world);
+        }
+    }
+
+    /// Walk away and back: column (0, 0) streams out (evicted: it was edited)
+    /// and in again, re-registering its fluids as a world open does.
+    fn reload(fx: &mut SimsFixture) {
+        fx.sims().stream_out(0, 0);
+        fx.sims().stream_in(0, 0);
+    }
+
+    /// Dig the block at `p` as a player does: AIR, and both fluid sims told.
+    fn dig(fx: &mut SimsFixture, p: (i32, i32, i32)) {
+        let old = fx.world.get_block(p.0, p.1, p.2);
+        fx.world.set_block(p.0, p.1, p.2, block::AIR);
+        crate::fluids::notify_block_edit(&mut fx.water, &mut fx.lava, &fx.world, p.0, p.1, p.2, old, block::AIR);
+    }
+
+    /// Review 2026-11-09 — a poured water sheet is flow, not sources, after its
+    /// column streams out and in: an edge cell beside a dug block reaches one
+    /// cell further at most (as it does before the reload), and taking the
+    /// source drains the whole sheet. Registration used to make every water
+    /// cell a source, so the sheet never drained and every edge re-spread 7.
+    #[test]
+    fn a_poured_water_sheet_stays_flow_across_a_reload_and_drains() {
+        let mut fx = fluid_floor();
+        // A wall beside where the +x rim will stop, to dig after the reload.
+        fx.world.place_player_block(15, 90, 7, block::STONE);
+        let src = (7, 90, 7);
+        fx.world.place_player_block(src.0, src.1, src.2, block::WATER);
+        fx.water.add_source(src.0, src.1, src.2);
+        run_fluids(&mut fx, 64);
+        assert_eq!(fx.world.get_block(14, 90, 7), block::WATER, "fixture: the sheet reached its rim");
+        assert_eq!(fluid_cells(&fx.world, block::WATER).len(), 113, "fixture: a 7-block diamond");
+
+        reload(&mut fx);
+        assert!(fx.water.is_source(src.0, src.1, src.2), "the poured source is still a source");
+        assert!(!fx.water.is_source(14, 90, 7), "the rim is flow");
+        assert!(!fx.water.is_source(8, 90, 7), "the cell beside the source is flow");
+
+        dig(&mut fx, (15, 90, 7));
+        run_fluids(&mut fx, 64);
+        assert_eq!(fx.world.get_block(15, 90, 7), block::WATER, "the rim flows into the dug cell");
+        assert_eq!(fx.world.get_block(15, 90, 6), block::AIR, "and no further: it is not a source");
+
+        dig(&mut fx, src);
+        run_fluids(&mut fx, 64);
+        assert_eq!(fluid_cells(&fx.world, block::WATER), Vec::new(), "the whole sheet drained");
+    }
+
+    /// A poured waterfall (a source on a ledge, falling three blocks and
+    /// spreading below): after a reload the falling cells are flow too, so
+    /// taking the source leaves exactly what it leaves without the reload.
+    #[test]
+    fn a_poured_waterfall_drains_the_same_after_a_reload() {
+        let run = |with_reload: bool| {
+            let mut fx = fluid_floor();
+            fx.world.place_player_block(7, 92, 7, block::STONE); // the ledge
+            let src = (7, 93, 7);
+            fx.world.place_player_block(src.0, src.1, src.2, block::WATER);
+            fx.water.add_source(src.0, src.1, src.2);
+            run_fluids(&mut fx, 96);
+            assert_eq!(fx.world.get_block(8, 91, 7), block::WATER, "fixture: the water fell past the ledge");
+            if with_reload {
+                reload(&mut fx);
+                assert!(!fx.water.is_source(8, 91, 7), "a falling cell is flow");
+                assert!(!fx.water.is_source(8, 90, 7), "so is the cell it landed in");
+            }
+            dig(&mut fx, src);
+            run_fluids(&mut fx, 96);
+            fluid_cells(&fx.world, block::WATER)
+        };
+        let kept = run(false);
+        assert_eq!(run(true), kept, "a reload changed what the waterfall leaves");
+    }
+
+    /// Review 2026-11-09 — poured lava keeps its extent however often its
+    /// column streams out and in. Registration used to make every lava cell a
+    /// source and wake the ones beside air, so the rim crept 3 blocks a time.
+    #[test]
+    fn poured_lava_keeps_its_extent_across_reloads() {
+        let mut fx = fluid_floor();
+        let src = (7, 90, 7);
+        fx.world.place_player_block(src.0, src.1, src.2, block::LAVA);
+        fx.lava.add_source(src.0, src.1, src.2);
+        run_fluids(&mut fx, 300);
+        let extent = fluid_cells(&fx.world, block::LAVA);
+        assert_eq!(extent.len(), 25, "fixture: a 3-block diamond");
+        for n in 0..3 {
+            reload(&mut fx);
+            run_fluids(&mut fx, 300);
+            assert_eq!(fluid_cells(&fx.world, block::LAVA), extent, "reload {n} moved the lava");
+        }
+        dig(&mut fx, src);
+        run_fluids(&mut fx, 300);
+        assert_eq!(fluid_cells(&fx.world, block::LAVA), Vec::new(), "taking the source drains it all");
+    }
+
+    /// A natural (meta-free, never registered) pool flows from its rim on
+    /// the first load that registers it, exactly once: later loads leave it.
+    #[test]
+    fn a_natural_lava_pool_flows_once_and_then_keeps_its_extent() {
+        let mut fx = fluid_floor();
+        let pool = [(7, 90, 7), (8, 90, 7), (7, 90, 8), (8, 90, 8)];
+        for p in pool {
+            fx.world.set_block(p.0, p.1, p.2, block::LAVA);
+        }
+        reload(&mut fx);
+        run_fluids(&mut fx, 300);
+        let extent = fluid_cells(&fx.world, block::LAVA);
+        assert!(extent.len() > pool.len(), "the rim flowed on its first load");
+        assert_eq!(fx.world.get_block(11, 90, 7), block::LAVA, "3 blocks out from the rim");
+        assert_eq!(fx.world.get_block(12, 90, 7), block::AIR, "and no further");
+        for n in 0..3 {
+            reload(&mut fx);
+            run_fluids(&mut fx, 300);
+            assert_eq!(fluid_cells(&fx.world, block::LAVA), extent, "reload {n} moved the lava");
+        }
+    }
+
+    /// A lava source over a one-wide shaft only falls (the sim flows down
+    /// first and spreads sideways only when it cannot): a reload must not wake
+    /// it to spread over the open floor beside it either.
+    #[test]
+    fn lava_over_a_shaft_does_not_spread_sideways_after_a_reload() {
+        let mut fx = fluid_floor();
+        fx.world.place_player_block(7, 84, 7, block::STONE);
+        for y in 85..=89 {
+            for (x, z) in [(6, 7), (8, 7), (7, 6), (7, 8)] {
+                fx.world.place_player_block(x, y, z, block::STONE);
+            }
+            fx.world.set_block(7, y, 7, block::AIR);
+        }
+        let src = (7, 90, 7);
+        fx.world.place_player_block(src.0, src.1, src.2, block::LAVA);
+        fx.lava.add_source(src.0, src.1, src.2);
+        run_fluids(&mut fx, 300);
+        let extent = fluid_cells(&fx.world, block::LAVA);
+        assert_eq!(extent.len(), 6, "fixture: the source and its five-block fall");
+        for n in 0..3 {
+            reload(&mut fx);
+            run_fluids(&mut fx, 300);
+            assert_eq!(fluid_cells(&fx.world, block::LAVA), extent, "reload {n} moved the lava");
+        }
+    }
+
     /// Phase B1 review (LOW) — a night-spawned hostile in a column that
     /// streams out is despawned (it is never saved, and frozen there it held a
     /// slot of the hostile cap forever); a hideout's brigand (its hideout

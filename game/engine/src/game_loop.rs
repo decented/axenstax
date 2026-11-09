@@ -16201,6 +16201,10 @@ impl super::GameState {
                                 .consume_one_material(hotbar, filled)
                             {
                                 self.world.set_block(dx, dy, dz, liquid);
+                                // A source's meta byte is 0 (`fluids::is_source_meta`),
+                                // whatever an earlier block left in the cell; the
+                                // edit below carries it.
+                                self.world.set_meta((dx, dy, dz), 0);
                                 if liquid == block::WATER {
                                     self.water.add_source(dx, dy, dz);
                                 } else {
@@ -16718,6 +16722,11 @@ impl super::GameState {
                                     let author = self.author_for_seat(pidx);
                                     self.world
                                         .place_player_block_as(place_x, place_y, place_z, block_to_place, author.as_ref());
+                                    // A placed fluid is a source: its meta byte is 0
+                                    // (`fluids::is_source_meta`), whatever was left there.
+                                    if block::is_fluid(block_to_place) {
+                                        self.world.set_meta((place_x, place_y, place_z), 0);
+                                    }
                                     // C3d run 9 — the placement's meta (a shaped block's orientation,
                                     // a piston's, dispenser's or dropper's look facing, a directional
                                     // power device's axis facing) is ONE pure rule, hoisted so a Strict

@@ -106,6 +106,7 @@ impl WaterSystem {
             let (nx, ny, nz) = (x + dx, y + dy, z + dz);
             if world.get_block(nx, ny, nz) == block::LAVA && world.is_column_present_at(nx, nz) {
                 world.set_block(nx, ny, nz, block::OBSIDIAN);
+                world.set_meta((nx, ny, nz), 0); // the lava's flow level goes with it
                 dirty.push((nx, ny, nz));
             }
         }
@@ -133,9 +134,11 @@ impl WaterSystem {
             let below = world.get_block(x, y - 1, z);
             if below == block::AIR {
                 world.set_block(x, y - 1, z, block::WATER);
-                // Falling water is full-depth (level 0) — clear any stale meta
-                // (set_block never touches the sparse meta map).
-                world.set_meta((x, y - 1, z), 0);
+                // Falling water is full-depth (level 0), marked falling so a
+                // load never reads it as a source (`fluids::is_source_meta`).
+                // This also overwrites any stale meta (set_block never touches
+                // the sparse meta map).
+                world.set_meta((x, y - 1, z), crate::fluids::falling_meta());
                 dirty.push((x, y - 1, z));
                 Self::freeze_adjacent_lava(world, x, y - 1, z, &mut dirty);
                 self.spread_queue.push_back((x, y - 1, z, 0));
@@ -160,10 +163,7 @@ impl WaterSystem {
                             world.set_meta((nx, y, nz), 0);
                             self.add_source(nx, y, nz);
                         } else {
-                            world.set_meta(
-                                (nx, y, nz),
-                                crate::meta::with_aux(0, (dist + 1).min(MAX_SPREAD_DIST)),
-                            );
+                            world.set_meta((nx, y, nz), crate::fluids::flow_meta((dist + 1).min(MAX_SPREAD_DIST)));
                             self.spread_queue.push_back((nx, y, nz, dist + 1));
                         }
                     }
@@ -278,8 +278,14 @@ impl WaterSystem {
         false
     }
 
-    /// Bulk-register all existing water blocks in a column as sources.
-    /// Called after world generation for each column.
+    /// Register a column's water sources as it loads (world open, stream-in,
+    /// a pushed or repaired column): every WATER cell whose meta reads as a
+    /// source (`fluids::is_source_meta`). Worldgen water carries no meta, so
+    /// every ocean, lake and river cell registers, as it always has. A flow
+    /// cell (level 1..=7) or falling cell (marked) does not: it stays flow,
+    /// so it drains when its source goes, as it would without the load
+    /// (review 2026-11-09: every water cell used to register, so a poured
+    /// sheet never drained after a reload and its edges re-spread 7).
     pub fn register_column_sources(&mut self, cx: i32, cz: i32, world: &World) {
         let cs = crate::chunk::CHUNK_SIZE as i32;
         let base_x = cx * cs;
@@ -293,7 +299,9 @@ impl WaterSystem {
                 let wx = base_x + lx;
                 let wz = base_z + lz;
                 for y in 0..max_y {
-                    if world.get_block(wx, y, wz) == block::WATER {
+                    if world.get_block(wx, y, wz) == block::WATER
+                        && crate::fluids::is_source_meta(world.meta_at(wx, y, wz))
+                    {
                         self.sources.insert((wx, y, wz));
                     }
                 }
@@ -419,6 +427,30 @@ mod tests {
         settle(&mut ws, &mut w);
         assert_eq!(w.get_block(2, 9, 0), block::WATER, "water fell into the shaft");
         assert_eq!(level_at(&w, 2, 9, 0), 0, "falling water lands full-depth");
+        assert!(crate::fluids::is_falling_at(&w, 2, 9, 0), "and is marked falling");
+        assert!(!crate::fluids::is_source_meta(w.meta_at(2, 9, 0)), "so it never reads as a source");
+    }
+
+    /// Review 2026-11-09 — only sources register: meta-free water (an ocean,
+    /// a lake, a placed source) every cell of it, however deep; a flow level
+    /// or the falling mark never.
+    #[test]
+    fn registration_takes_sources_and_skips_flow() {
+        let mut w = World::new();
+        for y in 20..=22 {
+            w.set_block(4, y, 4, block::WATER); // a meta-free column, 3 deep
+        }
+        w.set_block(6, 20, 4, block::WATER);
+        w.set_meta((6, 20, 4), crate::fluids::flow_meta(3));
+        w.set_block(8, 20, 4, block::WATER);
+        w.set_meta((8, 20, 4), crate::fluids::falling_meta());
+        let mut ws = WaterSystem::new();
+        ws.register_column_sources(0, 0, &w);
+        for y in 20..=22 {
+            assert!(ws.is_source(4, y, 4), "meta-free water at y {y} is a source");
+        }
+        assert!(!ws.is_source(6, 20, 4), "a level-3 flow is not");
+        assert!(!ws.is_source(8, 20, 4), "falling water is not");
     }
 
     #[test]

@@ -2049,7 +2049,9 @@ flow down first.
 - Spread rate: 5 Hz (every 4 game ticks)
 - Budget: 64 blocks per tick to prevent frame spikes
 - Removing a source block retracts dependent water via BFS (and clears depth meta)
-- World-gen water (oceans, caves) registered as sources on chunk load
+- World-gen water (oceans, caves) registered as sources on chunk load; a load
+  registers only cells whose meta reads as a source, never a flow (below, and
+  Spec 02 §7.5 "What is a source", 2026-11-09)
 - Sand/gravel falling into water displaces it
 
 **Depth levels (2026-07-04).** Every flow cell carries a depth level 0–7 in the
@@ -2061,6 +2063,15 @@ greedy_water_face`). Renders at `water_surface_height(level) = (8−level)/9` (s
 Levels persist via `WorldSave.block_meta` and reach remote clients in
 `BlockChange.meta` (the client apply path now applies meta —
 `World::apply_remote_block_change`). **No protocol bump, no chunk-format change.**
+
+**Source or flow, across a load (2026-11-09).** Falling water is level 0 too, so
+it carries a mark in the meta STATE field (1, `fluids::falling_meta`); lava flows
+carry a level the same way (AUX 1–3 sideways, the falling mark down,
+`lava::place_flow`). A WATER or LAVA cell is a source when its byte has neither
+(`fluids::is_source_meta`): a placed source's byte is 0, worldgen fluid has none.
+`register_column_sources` registers (and, for lava, wakes) only sources, so after
+a reload or walk-away a poured sheet still drains when its source goes and a lava
+rim does not creep. Before, every fluid cell came back from a load as a source.
 
 **Infinite pool (MC parity, 2026-07-04).** A flow cell with ≥ 2 horizontal source
 neighbours is promoted to a source (the classic 2×2 infinite pool),

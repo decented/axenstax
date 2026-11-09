@@ -250,7 +250,8 @@ block array. This keeps the hot path (block lookups) fast and cache-friendly.
 > (1) A **sparse per-block meta byte** — `World.block_meta: AHashMap<(i32,i32,i32), u8>`,
 > packed facing (low 3 bits) / state (2 bits) / aux (3 bits) via `meta.rs`; persisted as
 > — **AUX carries the WATER depth level 0–7 since 2026-07-04** (0 = source/full; worldgen
-> water stays meta-free ⇒ level 0; see Spec 05 §7.2) — and otherwise
+> water stays meta-free ⇒ level 0; see Spec 05 §7.2), **and the LAVA flow level 1–3 since
+> 2026-11-09; STATE 1 marks falling water or lava** (level 0 but flow, not a source) — and otherwise
 > `WorldSave.block_meta: Vec<(i32,i32,i32,u8)>`. Not derivable from the block id (lever
 > latch, gate op, powered-rail bit), so it must be saved. (2) A new block-entity variant
 > **`BlockEntityData::PowerDevice`** (`PowerDeviceData`: kind, facing, on-latch, charge,
@@ -1769,21 +1770,47 @@ kept it. A sapling growing at the edge did the same at canopy height. Tests:
 
 *Sources follow the column.* `ColumnSims::stream_out` forgets the column's
 water and lava sources (`WaterSystem` / `LavaSystem::forget_column`; sources
-are indexed by column in `fluids::SourceSet`). Water registers every water block
-of a streamed-in column as a source, so the sets used to grow with every column
-ever loaded. `stream_in`'s `register_column_sources` re-adds them. Retraction's
+are indexed by column in `fluids::SourceSet`), so the sets no longer grow with
+every column ever loaded. `stream_in`'s `register_column_sources` re-adds them. Retraction's
 `can_reach_source` treats a fluid cell in a column that is not present as fed,
 so forgetting a column's sources never drains the flow they feed across the
 border. On restore, `register_column_sources` and `register_column_fires`
 re-adopt the column's fluids and fires.
 
-*Which lava wakes (Keep slice 2b, 2026-11-02).* Every lava cell of a column
-registers as a source, but its load queues only the cells a wake can do something
-for: those touching water, over air, or with air on a side. A neighbouring column
+*What is a source (review fix 2026-11-09).* Registration (world open, stream-in,
+a pushed or repaired column; the same function on a dedicated server, a lending
+host and a joined client) takes a WATER or LAVA cell as a source only when its
+meta byte reads as one (`fluids::is_source_meta`): no AUX flow level and no
+falling mark (STATE 1). What is saved is the block and that byte
+(`WorldSave.block_meta`, already persisted; no format change): a source's byte is
+0 (a placed bucket or block clears whatever the cell held), worldgen fluid has
+none, a sideways flow carries its level (water 1–7, lava 1–3, written by
+`tick_spread` / `lava::place_flow`), a falling cell the mark. Before, every water
+and lava cell registered, so after any reload or walk-away a poured water sheet
+never drained and its edges re-spread 7, and a lava rim crept 3 blocks further
+every load. Old worlds: water flows saved with a level are flow again (fed ones
+stay; an orphaned sheet stays until a retraction reaches it; a load drains
+nothing); water that fell, and every lava cell, saved before the fix read as
+sources, so an old lava rim beside air flows up to 3 blocks once more on the
+first load after the fix, writing levels, and then keeps its extent. The
+authority checkpoint's source rescan (`SourceSet::delta_from_rescan`) stays every
+fluid cell: it is a stored encoding, not the registration rule. Tests:
+`chunk_stream::tests::a_poured_water_sheet_stays_flow_across_a_reload_and_drains`,
+`a_poured_waterfall_drains_the_same_after_a_reload`,
+`poured_lava_keeps_its_extent_across_reloads`,
+`a_natural_lava_pool_flows_once_and_then_keeps_its_extent`,
+`lava_over_a_shaft_does_not_spread_sideways_after_a_reload`.
+
+*Which lava wakes (Keep slice 2b, 2026-11-02).* Every lava source of a column
+registers, but its load queues only the sources a wake can do something
+for: those touching water, over air, or with air on a side (not a source over
+its own falling lava: it already fell, and the sim spreads sideways only where it
+can't fall, 2026-11-09). A neighbouring column
 that isn't there reads as air, so seam cells wake as before. Air above doesn't
 count, so neither a pool's middle nor its flat top queues. The end shape doesn't
-change. Natural rims flow, and can light fires, within minutes of the land loading
-instead of waiting behind every useless wake for up to an hour.
+change. Natural rims flow, and can light fires, within minutes of the land first
+loading instead of waiting behind every useless wake for up to an hour, and only
+then: their flows carry a level, so later loads leave them.
 
 **Testing.** The world side of streaming is split into renderer-free helpers in
 `chunk_stream.rs`: `columns_outside_anchors` (via the planner,

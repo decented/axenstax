@@ -16,6 +16,37 @@ use crate::lava::LavaSystem;
 use crate::water::WaterSystem;
 use crate::world::World;
 
+/// The meta STATE value (bits 3–4) a falling WATER or LAVA cell carries. Falling
+/// fluid is full depth (AUX level 0, which the mesher and `water::flow_vector`
+/// read), so the level alone can't tell it from a source: this mark does.
+const FALLING_STATE: u8 = 1;
+
+/// The meta byte of a falling fluid cell: level 0, marked falling.
+pub(crate) fn falling_meta() -> u8 {
+    crate::meta::with_state(0, FALLING_STATE)
+}
+
+/// The meta byte of a horizontal flow cell `level` (1..=7 water, 1..=3 lava)
+/// steps from its source.
+pub(crate) fn flow_meta(level: u8) -> u8 {
+    crate::meta::with_aux(0, level)
+}
+
+/// Is a WATER or LAVA cell with meta byte `m` a source? Yes unless it carries a
+/// flow level (AUX 1..=7) or the falling mark. A source's byte is 0, and
+/// worldgen fluid carries none, so oceans, lakes and natural lava pools read
+/// as sources. Lava written before 2026-11-09 carries no level, so its old
+/// flows read as sources too (the safe reading). `register_column_sources`
+/// registers only these, so a flow never comes back from a load as a source.
+pub(crate) fn is_source_meta(m: u8) -> bool {
+    crate::meta::aux(m) == 0 && crate::meta::state(m) != FALLING_STATE
+}
+
+/// Is the cell at `(x, y, z)` marked falling (see [`falling_meta`])?
+pub(crate) fn is_falling_at(world: &World, x: i32, y: i32, z: i32) -> bool {
+    crate::meta::state(world.meta_at(x, y, z)) == FALLING_STATE
+}
+
 /// Mirror a block edit into both fluid systems' source bookkeeping, matching the
 /// client's inline place/break handling (see `game_loop.rs`). Covers three cases:
 /// placing a fluid registers a source; digging a fluid drops its source; opening
@@ -216,11 +247,14 @@ impl SourceSet {
     }
 
     /// Keep slice 2b — this set against what a rescan of `loaded` would give
-    /// (`register_column_sources`: every `fluid` cell in those columns), as
+    /// (every `fluid` cell in those columns), as
     /// `(sources the rescan would not find, cells it would add)`, each sorted.
-    /// Water registers every water block of a column, so an ocean's set is far
-    /// past a checkpoint's cap, while this difference is only what flowed or
-    /// was placed since those columns loaded.
+    /// An ocean's set is far past a checkpoint's cap, while this difference is
+    /// only the flow cells and what was placed since those columns loaded.
+    /// The rescan is deliberately every fluid cell, not the narrower rule
+    /// `register_column_sources` applies (`is_source_meta`): a stored
+    /// checkpoint is decoded against this rescan, so changing it would change
+    /// what an existing checkpoint means (a new checkpoint schema).
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn delta_from_rescan(
         &self,

@@ -158,14 +158,19 @@ impl LavaSystem {
 
     /// Place lava at a flow target — but if the target would sit next to water,
     /// freeze it to obsidian and report it as terminal (no further flow).
-    /// Returns `true` if lava was placed (caller should enqueue it).
-    fn place_flow(world: &mut World, x: i32, y: i32, z: i32, dirty: &mut Vec<(i32, i32, i32)>) -> bool {
+    /// Returns `true` if lava was placed (caller should enqueue it). `meta` is
+    /// the flow's byte (`fluids::flow_meta` sideways, `fluids::falling_meta`
+    /// down): it is saved with the world, so a load knows the cell is flow and
+    /// never registers or wakes it as a source (review 2026-11-09).
+    fn place_flow(world: &mut World, x: i32, y: i32, z: i32, meta: u8, dirty: &mut Vec<(i32, i32, i32)>) -> bool {
         if Self::touches_water(world, x, y, z) {
             world.set_block(x, y, z, OBSIDIAN);
+            world.set_meta((x, y, z), 0);
             dirty.push((x, y, z));
             false
         } else {
             world.set_block(x, y, z, LAVA);
+            world.set_meta((x, y, z), meta);
             dirty.push((x, y, z));
             true
         }
@@ -202,6 +207,7 @@ impl LavaSystem {
             // enqueues the now-orphaned flow for retraction.
             if Self::touches_water(world, x, y, z) {
                 world.set_block(x, y, z, OBSIDIAN);
+                world.set_meta((x, y, z), 0); // its flow level goes with it
                 self.remove_source(x, y, z);
                 dirty.push((x, y, z));
                 continue;
@@ -209,7 +215,7 @@ impl LavaSystem {
 
             // Flow down first.
             if world.get_block(x, y - 1, z) == AIR {
-                if Self::place_flow(world, x, y - 1, z, &mut dirty) {
+                if Self::place_flow(world, x, y - 1, z, crate::fluids::falling_meta(), &mut dirty) {
                     self.spread_queue.push_back((x, y - 1, z, 0));
                 }
                 continue;
@@ -225,7 +231,7 @@ impl LavaSystem {
                     // column without bedrock).
                     if world.is_column_present_at(nx, nz)
                         && world.get_block(nx, y, nz) == AIR
-                        && Self::place_flow(world, nx, y, nz, &mut dirty) {
+                        && Self::place_flow(world, nx, y, nz, crate::fluids::flow_meta(dist + 1), &mut dirty) {
                             self.spread_queue.push_back((nx, y, nz, dist + 1));
                         }
                 }
@@ -276,6 +282,7 @@ impl LavaSystem {
 
             for (ox, oy, oz) in orphans {
                 world.set_block(ox, oy, oz, AIR);
+                world.set_meta((ox, oy, oz), 0); // clear the flow level
                 dirty.push((ox, oy, oz));
             }
         }
@@ -312,14 +319,26 @@ impl LavaSystem {
     /// flat top qualifies, and a column that isn't there reads as air, so a seam
     /// cell does. A wake that can't act only delays the ones that can: a rim at
     /// the back of a large load used to wait up to an hour behind them.
+    ///
+    /// A source over falling lava has already run: it fell (the sim flows down
+    /// first and spreads sideways only when it can't), so air beside it does
+    /// not count either. Else every load would spread it sideways once more.
     fn can_act_when_woken(world: &World, x: i32, y: i32, z: i32) -> bool {
+        let below = world.get_block(x, y - 1, z);
+        let fell = below == LAVA && crate::fluids::is_falling_at(world, x, y - 1, z);
         Self::touches_water(world, x, y, z)
-            || world.get_block(x, y - 1, z) == AIR
-            || [(1, 0), (-1, 0), (0, 1), (0, -1)].iter().any(|&(dx, dz)| world.get_block(x + dx, y, z + dz) == AIR)
+            || below == AIR
+            || (!fell && [(1, 0), (-1, 0), (0, 1), (0, -1)].iter().any(|&(dx, dz)| world.get_block(x + dx, y, z + dz) == AIR))
     }
 
-    /// Register every existing lava block in a column as a source (post
-    /// world-gen), so natural pools flow correctly into any air they border.
+    /// Register a column's lava sources as it loads (world open, stream-in, a
+    /// pushed or repaired column): every LAVA cell whose meta reads as a source
+    /// (`fluids::is_source_meta`), waking those a wake can act for, so natural
+    /// pools flow into any air they border. Worldgen lava carries no meta, so a
+    /// natural pool's rim flows on the first load; its flow cells carry a level
+    /// (or the falling mark), so later loads neither register nor wake them and
+    /// the rim keeps its extent (review 2026-11-09: every lava cell used to
+    /// register and wake, so a rim crept 3 blocks further every load).
     pub fn register_column_sources(&mut self, cx: i32, cz: i32, world: &World) {
         let cs = crate::chunk::CHUNK_SIZE as i32;
         let base_x = cx * cs;
@@ -331,6 +350,7 @@ impl LavaSystem {
                 let (wx, wz) = (base_x + lx, base_z + lz);
                 for y in 0..max_y {
                     if world.get_block(wx, y, wz) == LAVA
+                        && crate::fluids::is_source_meta(world.meta_at(wx, y, wz))
                         && self.sources.insert((wx, y, wz))
                         && Self::can_act_when_woken(world, wx, y, wz) {
                             // Wake it once so a pool bordering open air flows.
