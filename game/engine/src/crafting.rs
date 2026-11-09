@@ -301,6 +301,8 @@ pub fn block_hardness(block_id: BlockId) -> f32 {
         block::OAK_PLANKS | block::CRAFTING_TABLE => 2.0,
         // Living world S3 — a table is boards; the Commons Stone is cobblestone.
         block::FEAST_TABLE | block::FEAST_MARKER | block::COMMONS_STONE => 2.0,
+        // Living world Tier 2 S6 — a shelf is boards and a chest.
+        block::COMMONS_SHELF => 2.0,
         // Spec 48 Phase 4 — the Water Wheel is a plank build; mine it like planks.
         block::WATER_WHEEL | block::WATER_WHEEL_TURNING => 2.0,
         // Wind wave §2.2 — the Windmill is canvas on planks; same rung.
@@ -380,7 +382,7 @@ pub fn best_tool_for(block_id: BlockId) -> Option<ToolType> {
         id if block::is_pure_deepslate_family(id) => Some(ToolType::Pickaxe),
         block::DIRT | block::GRASS | block::WORN_PATH | block::SAND | block::GRAVEL | block::SNOW => Some(ToolType::Shovel),
         block::OAK_LOG | block::OAK_PLANKS | block::CRAFTING_TABLE
-        | block::FEAST_TABLE | block::FEAST_MARKER => Some(ToolType::Axe),
+        | block::FEAST_TABLE | block::FEAST_MARKER | block::COMMONS_SHELF => Some(ToolType::Axe),
         // Building variants: woods want an axe, stones a pickaxe.
         id => crate::building_variants::best_tool(id),
     }
@@ -984,6 +986,16 @@ pub fn match_recipe(grid: &[[CraftSlot; 3]; 3]) -> Option<ItemStack> {
             && r1 == [stick_leg, loaf, stick_leg]
         {
             return Some(ItemStack::new_block(block::FEAST_TABLE, 1));
+        }
+        // Living world Tier 2 S6 — Commons Shelf: three planks over a chest
+        // flanked by two sticks (PPP / SCS) -> 1 shelf. Any plank species. The
+        // chest at the centre of a 2 x 3 shape collides with no other recipe
+        // (the Feast Table has a loaf there, the Fence Gate a plank, the Tent
+        // nothing); the 3 x 3 chest recipes are a different shape.
+        if r0.iter().all(|s| matches!(s, CraftSlot::Block(b) if block::is_any_planks(*b)))
+            && r1 == [stick_leg, CraftSlot::Block(block::CHEST), stick_leg]
+        {
+            return Some(ItemStack::new_block(block::COMMONS_SHELF, 1));
         }
         // Pet Bed (2026-07-06 pets wave): W.W / PPP — wool tufts at the top
         // corners over a solid plank base (a basket, not a mattress). Kept
@@ -3875,6 +3887,50 @@ mod tests {
             _ => panic!("expected item frame block"),
         }
         assert_eq!(out.count, 1);
+    }
+
+    #[test]
+    fn three_planks_over_a_chest_between_two_sticks_make_a_commons_shelf() {
+        // Living world Tier 2 S6 — PPP / SCS, any plank species, anywhere on the grid.
+        for (row, col) in [(0, 0), (1, 0)] {
+            let mut g = empty_grid();
+            for (c, plank) in [block::OAK_PLANKS, block::BIRCH_PLANKS, block::SPRUCE_PLANKS].into_iter().enumerate() {
+                g[row][col + c] = CraftSlot::Block(plank);
+            }
+            g[row + 1][col] = CraftSlot::Material(MaterialId::Stick);
+            g[row + 1][col + 1] = CraftSlot::Block(block::CHEST);
+            g[row + 1][col + 2] = CraftSlot::Material(MaterialId::Stick);
+            let out = match_recipe(&g).expect("planks + chest + sticks -> shelf");
+            assert_eq!((out.item, out.count), (Item::Block(block::COMMONS_SHELF), 1));
+        }
+        // The shape, not the parts: a tier chest, a loaf or nothing at the centre,
+        // a missing stick, or planks under the chest make something else or nothing.
+        let shelf_grid = |centre: CraftSlot, left: CraftSlot| {
+            let mut g = empty_grid();
+            for c in 0..3 {
+                g[0][c] = CraftSlot::Block(block::OAK_PLANKS);
+            }
+            g[1][0] = left;
+            g[1][1] = centre;
+            g[1][2] = CraftSlot::Material(MaterialId::Stick);
+            g
+        };
+        let stick = CraftSlot::Material(MaterialId::Stick);
+        let wood_chest = CraftSlot::Block(block::CHEST);
+        assert_eq!(match_recipe(&shelf_grid(wood_chest, stick)).map(|s| s.item), Some(Item::Block(block::COMMONS_SHELF)));
+        assert_ne!(match_recipe(&shelf_grid(CraftSlot::Block(block::COPPER_CHEST), stick)).map(|s| s.item), Some(Item::Block(block::COMMONS_SHELF)));
+        assert_eq!(match_recipe(&shelf_grid(CraftSlot::Material(MaterialId::Bread), stick)).map(|s| s.item), Some(Item::Block(block::FEAST_TABLE)));
+        assert_eq!(match_recipe(&shelf_grid(wood_chest, CraftSlot::Empty)), None, "a stick is missing");
+        // A chest is not made from the shelf's own ingredients: the wood chest's plank ring is a different shape.
+        let mut ring = empty_grid();
+        for r in 0..3 {
+            for c in 0..3 {
+                if !(r == 1 && c == 1) {
+                    ring[r][c] = CraftSlot::Block(block::OAK_PLANKS);
+                }
+            }
+        }
+        assert_eq!(match_recipe(&ring).map(|s| s.item), Some(Item::Block(block::CHEST)));
     }
 
     #[test]

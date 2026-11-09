@@ -26,6 +26,8 @@ mod glue;
 mod test_world;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod shelf_tests;
 
 pub use eco::EcoTally;
 pub use field::{BloomField, TickInput, TickOutput, WorldSummary};

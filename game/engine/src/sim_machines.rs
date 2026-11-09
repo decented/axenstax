@@ -173,6 +173,9 @@ pub fn step(
         crate::villager::tick_raid_warning_gossip(ctx.ecs, ctx.world);
     }
     tick_campfires(ctx, changes);
+    // Living world Tier 2 S6 — a Commons Shelf's fill and looted byte follow its
+    // contents, whoever (a seat, a joiner's window, a hopper) changed them.
+    crate::shelf::tick(ctx.world, crate::shelf::day_of_tick(ctx.tick), changes);
 
     // Tick determinism (Spec 01 §4.1.4): a full batch defers the furnaces
     // after it, so they are visited in position order, not hash order.

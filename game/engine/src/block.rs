@@ -670,6 +670,12 @@ pub const WORN_PATH: BlockId = 376;
 /// is the index of the crop kind it came from (`blight::CropKind`), which the
 /// spread needs. Never "placed", never an item.
 pub const BLIGHTED_CROP: BlockId = 377;
+// Living world, Tier 2 (S6, 2026-11-09). Spec: docs/superpowers/specs/2026-11-09-living-world-tier2.md §6.
+/// The Commons Shelf (`shelf.rs`): a chest-sized container anyone may put into
+/// or take from, with no owner and no lock. The authority keeps how full it is
+/// (and whether it has been cleaned out) in its `block_meta` byte, which bloom
+/// reads on every client.
+pub const COMMONS_SHELF: BlockId = 378;
 
 /// The planted-sapling block for a species. Symmetric counterpart to
 /// `species_for_sapling` (which IS live, via `is_sapling_block`); this forward
@@ -3410,6 +3416,16 @@ impl BlockRegistry {
             tex_top: TEX_WHEAT_STAGE_2, tex_bottom: TEX_WHEAT_STAGE_2, tex_side: TEX_WHEAT_STAGE_2,
         });
 
+        // Living world, Tier 2 (S6) — the Commons Shelf. A chest's top over crafting-table
+        // boards: only existing layers (the atlas is full).
+        debug_assert_eq!(blocks.len(), COMMONS_SHELF as usize, "the Commons Shelf follows the Blighted Crop");
+        blocks.push(BlockDef { // 378 COMMONS_SHELF
+            name: "genesis:commons_shelf",
+            solid: true, transparent: false, gravity: false,
+            color: [0.70, 0.52, 0.30],
+            tex_top: TEX_CHEST_TOP, tex_bottom: TEX_OAK_PLANKS, tex_side: TEX_CRAFTING_TABLE_TOP,
+        });
+
         Self { blocks, leaves_fast: false }
     }
 
@@ -3496,7 +3512,7 @@ impl BlockRegistry {
             // for the block-id drop; the contents-spill happens upstream
             // in `block_interact`-side break handling via `chest::cleanup_chest`.
             MILL | OVEN | AGING_RACK | BEE_HIVE | CHEST | COPPER_CHEST | IRON_CHEST
-            | DIAMOND_CHEST | SATORI_CHEST => ItemStack::new_block(id, 1),
+            | DIAMOND_CHEST | SATORI_CHEST | COMMONS_SHELF => ItemStack::new_block(id, 1),
             // Both campfire variants drop the unlit form. The lit/unlit
             // distinction is block-state only — a "lit campfire item" in
             // the inventory would re-place as visually lit until the next
@@ -4006,7 +4022,10 @@ mod tests {
         // Living world Tier 2 S8: the Blighted Crop (377) follows the Worn Path.
         assert_eq!(WORN_PATH + 1, BLIGHTED_CROP);
         assert!(reg.is_known(BLIGHTED_CROP));
-        assert!(!reg.is_known(BLIGHTED_CROP + 1));
+        // Living world Tier 2 S6: the Commons Shelf (378) follows the Blighted Crop.
+        assert_eq!(BLIGHTED_CROP + 1, COMMONS_SHELF);
+        assert!(reg.is_known(COMMONS_SHELF));
+        assert!(!reg.is_known(COMMONS_SHELF + 1));
         assert!(!reg.is_known(u16::MAX));
     }
 

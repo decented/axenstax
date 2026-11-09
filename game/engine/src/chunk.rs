@@ -53,6 +53,10 @@ pub struct Chunk {
     /// has none (`World::commons_areas` / `feast_markers`).
     commons: u16,
     feast_markers: u16,
+    /// Living world Tier 2 S6 — how many cells hold a Commons Shelf. Kept like
+    /// the counters above, so the shelf sweep and the bloom scan skip every
+    /// chunk that has none (`World::shelf_cells_in_column`, `World::shelves`).
+    shelves: u16,
     /// Spec 30 — packed per-voxel light: `(sky_light << 4) | block_light`.
     /// Each nibble is 0..15. Initialised to 0 (dark); world-gen + place
     /// hooks fill in via the `lighting` BFS module. Not persisted on
@@ -84,6 +88,7 @@ impl Chunk {
             hoppers: 0,
             commons: 0,
             feast_markers: 0,
+            shelves: 0,
             light: [0; CHUNK_VOLUME],
             placed: [0; PLACED_WORDS],
             mesh_dirty: true,
@@ -172,6 +177,7 @@ impl Chunk {
             crate::block::HOPPER => &mut self.hoppers,
             crate::block::COMMONS_STONE => &mut self.commons,
             crate::block::FEAST_MARKER => &mut self.feast_markers,
+            crate::block::COMMONS_SHELF => &mut self.shelves,
             _ => return,
         };
         if add {
@@ -203,6 +209,12 @@ impl Chunk {
     #[inline]
     pub(crate) fn has_feast_markers(&self) -> bool {
         self.feast_markers != 0
+    }
+
+    /// Does this chunk hold at least one Commons Shelf? O(1).
+    #[inline]
+    pub(crate) fn has_shelves(&self) -> bool {
+        self.shelves != 0
     }
 
     /// Full recount of (commons stones, feast markers) — the oracle the
@@ -422,6 +434,7 @@ impl Chunk {
         let mut non_air = 0u16;
         let (mut pistons, mut hoppers) = (0u16, 0u16);
         let (mut commons, mut feast_markers) = (0u16, 0u16);
+        let mut shelves = 0u16;
         for (i, chunk) in data[..block_bytes].as_chunks::<2>().0.iter().enumerate() {
             blocks[i] = u16::from_le_bytes(*chunk);
             non_air += u16::from(blocks[i] != AIR);
@@ -430,6 +443,7 @@ impl Chunk {
                 crate::block::HOPPER => hoppers += 1,
                 crate::block::COMMONS_STONE => commons += 1,
                 crate::block::FEAST_MARKER => feast_markers += 1,
+                crate::block::COMMONS_SHELF => shelves += 1,
                 _ => {}
             }
         }
@@ -446,6 +460,7 @@ impl Chunk {
             hoppers,
             commons,
             feast_markers,
+            shelves,
             light: [0; CHUNK_VOLUME],
             placed,
             mesh_dirty: true,
@@ -724,14 +739,18 @@ mod tests {
 
     #[test]
     fn gathering_counts_match_a_full_recount_after_random_edits() {
-        use crate::block::{COMMONS_STONE, FEAST_MARKER, FEAST_TABLE};
-        let palette = [AIR, STONE, COMMONS_STONE, FEAST_MARKER, FEAST_TABLE, DIRT];
+        use crate::block::{COMMONS_SHELF, COMMONS_STONE, FEAST_MARKER, FEAST_TABLE};
+        let palette = [AIR, STONE, COMMONS_STONE, FEAST_MARKER, FEAST_TABLE, DIRT, COMMONS_SHELF];
         let exact = |c: &Chunk, what: &str| {
             let (commons, markers) = c.recount_gatherings();
             assert_eq!(c.has_commons(), commons > 0, "{what}: has_commons");
             assert_eq!(c.has_feast_markers(), markers > 0, "{what}: has_feast_markers");
             assert_eq!(usize::from(c.commons), commons, "{what}: commons counter");
             assert_eq!(usize::from(c.feast_markers), markers, "{what}: marker counter");
+            // Tier 2 S6 — the Commons Shelf counter.
+            let shelves = c.blocks.iter().filter(|&&b| b == COMMONS_SHELF).count();
+            assert_eq!(usize::from(c.shelves), shelves, "{what}: shelf counter");
+            assert_eq!(c.has_shelves(), shelves > 0, "{what}: has_shelves");
         };
         let mut c = Chunk::new();
         exact(&c, "new");

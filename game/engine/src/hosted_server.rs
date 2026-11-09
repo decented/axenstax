@@ -6730,6 +6730,17 @@ impl HostedServer {
         if sp.server_simulated && bc.new_block == crate::block::FEAST_MARKER {
             return Err(EditRefusal::Protected);
         }
+        // Living world S6 (review SF2) — a Commons Shelf's meta byte (fill and
+        // looted) is the authority's: `shelf::tick` is its only writer. A joiner's
+        // edit that carries any other byte than the server's own for that cell
+        // (0 for a fresh shelf, the cell's byte for a shelf over a shelf) is
+        // refused and the ghost put back, in any play mode.
+        if sp.server_simulated && bc.new_block == crate::block::COMMONS_SHELF {
+            let own = if current == crate::block::COMMONS_SHELF { self.server.world.meta_at(bc.x, bc.y, bc.z) } else { 0 };
+            if bc.meta != own {
+                return Err(EditRefusal::Protected);
+            }
+        }
         // Living world S3 — a Plot and a Commons may not overlap, either way
         // round (`commons`): judged for every seat and play mode, as the local
         // placement arm does (creative bypasses build protection, not a claim).

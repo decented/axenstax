@@ -72,9 +72,9 @@ fn signed_claim(
 fn ordered_park_canonical_domains_match_independent_fixed_layout_goldens() {
     let (_, authority, fence, attachment) = fixture();
     // Independently calculated from the documented byte layouts, protocol96,
-    // and the secp256k1 generator's public x coordinate (secret scalar1). Protocol99
-    // (living world Tier 2 S8): the fence and message domains hash the protocol
-    // version, so those goldens were recomputed with 99 (the same independent
+    // and the secp256k1 generator's public x coordinate (secret scalar1). Protocol100
+    // (living world Tier 2 S6): the fence and message domains hash the protocol
+    // version, so those goldens were recomputed with 100 (the same independent
     // computation, a short script over the layouts in `park.rs`, reproduced the
     // protocol-98 values before the bump). Protocol100 (Tier 2 S10): recomputed
     // again with 100, the same script having reproduced the protocol-99 values

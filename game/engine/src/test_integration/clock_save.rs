@@ -202,7 +202,7 @@ fn an_old_format_save_fixture_loads_with_todays_defaults() {
     let bytes = WORLD_FOOTER_59;
     assert_eq!(crate::save_format::split_save_footer(bytes).1, Some(59));
     // 67 since living world Tier 2 S5 (the `plot_succession` field): 59 is an older format still.
-    assert_eq!(crate::save_format::SAVE_FORMAT_VERSION, 67, "59 is an older format than this one");
+    assert_eq!(crate::save_format::SAVE_FORMAT_VERSION, 68, "59 is an older format than this one");
     let (save, damaged) = crate::save::read_world_save_reporting(bytes).expect("the old save is read");
     assert!(!damaged);
     assert_eq!(save.seed, 42);

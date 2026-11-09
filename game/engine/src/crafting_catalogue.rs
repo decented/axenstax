@@ -1315,6 +1315,23 @@ fn push_gap_close_cards(out: &mut Vec<RecipeCard>) {
         RecipeCategory::Decoration,
     ));
 
+    // Living world Tier 2 S6 — Commons Shelf: three planks over a chest between
+    // two sticks → 1 shelf. Any plank species.
+    out.push(card(
+        "Commons Shelf",
+        ItemStack::new_block(block::COMMONS_SHELF, 1),
+        vec![
+            RecipeIngredient { item: Item::Block(block::OAK_PLANKS), count: 3, fuzzy: Some(FuzzyKind::Plank) },
+            mat(M::Stick, 2),
+            blk(block::CHEST, 1),
+        ],
+        grid(&[
+            (0, 0, p), (0, 1, p), (0, 2, p),
+            (1, 0, STICK), (1, 1, CraftSlot::Block(block::CHEST)), (1, 2, STICK),
+        ]),
+        RecipeCategory::Decoration,
+    ));
+
     // Living world S3 — Commons Stone: 8 cobblestone round any sapling → 1.
     out.push(card(
         "Commons Stone",
@@ -1655,7 +1672,8 @@ mod tests {
         // id (every wood's slab/stairs/door/trapdoor/gate, every stone's
         // slab/stairs/wall) that had no authored card.
         // 350 as of 2026-11-08 (living world S3): + the Feast Table and the Commons Stone.
-        assert_eq!(all_cards().len(), 350, "catalogue size changed to {}", all_cards().len());
+        // 351 as of 2026-11-09 (living world Tier 2 S6): + the Commons Shelf.
+        assert_eq!(all_cards().len(), 351, "catalogue size changed to {}", all_cards().len());
     }
 
     /// UX polish sweep Task 3 — the non-obvious craftables (a kid can't

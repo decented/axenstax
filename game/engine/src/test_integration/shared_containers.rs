@@ -62,6 +62,9 @@ struct Client {
     actions: u32,
     /// Its last input's sequence number ([`Rig::report`]).
     inputs: u64,
+    /// Every block change the server sent it, in order (Tier 2 S6: a Commons
+    /// Shelf's fill and looted byte rides them).
+    block_changes: Vec<protocol::BlockChange>,
 }
 
 impl Client {
@@ -81,6 +84,7 @@ impl Client {
             unfit: 0,
             actions: 0,
             inputs: 0,
+            block_changes: Vec::new(),
         }
     }
 
@@ -125,6 +129,11 @@ impl Client {
                         self.transport.send_to_server(&protocol::serialize_packet(protocol::PacketType::ItemAction, &pkt));
                     }
                     self.slot_sets.push(set);
+                }
+                Some((protocol::PacketType::StateUpdate, payload)) => {
+                    if let Ok(update) = protocol::safe_deserialize::<protocol::StateUpdatePacket>(payload) {
+                        self.block_changes.extend(update.block_changes);
+                    }
                 }
                 _ => {}
             }
@@ -1844,4 +1853,173 @@ fn a_phantom_chestplate_equipped_inside_the_round_trip_is_taken_by_its_correctio
     assert_eq!((rig.cs[loser].armour[1], rig.sp(loser).armour[1]), (None, None), "taken off on both sides");
     assert_eq!(rig.world_total(&Item::Armour(plate), chest), (1, 1), "the winner's, alone");
     assert_eq!(rig.tally(loser).correction_short, 0);
+}
+
+// ── Living world Tier 2 S6 — the Commons Shelf ──────────────────────────────
+
+/// A Commons Shelf is a chest under another block id: a joiner opens it, takes
+/// from it and puts into it through the same window ops, and the server's fill
+/// and looted byte for it reaches the joiner by an ordinary block change. The
+/// byte follows within one machine beat (a dedicated server's is four ticks).
+#[test]
+fn a_joiner_cleaning_out_a_shelf_marks_it_looted_and_restocking_clears_it() {
+    use crate::shelf::{fill_of_meta, is_looted, FILL_MAX};
+    let mut rig = Rig::dedicated("shelf", 1);
+    let cell = rig.place(0, 2, block::COMMONS_SHELF);
+    let pos = (cell[0], cell[1], cell[2]);
+    let mut shelf = ChestData::for_tier(ChestTier::Shelf);
+    for slot in shelf.slots.iter_mut() {
+        *slot = Some(stone(3));
+    }
+    rig.world().insert_chest(pos, shelf);
+    let beats = |rig: &mut Rig, n: usize| (0..n).for_each(|_| rig.tick());
+    beats(&mut rig, 12);
+    assert_eq!(rig.world_ref().meta_at(pos.0, pos.1, pos.2), FILL_MAX, "a full shelf, not looted");
+    let seen = |rig: &Rig| rig.cs[0].block_changes.iter().rev().find(|c| (c.x, c.y, c.z) == pos).map(|c| c.meta);
+    assert_eq!(seen(&rig), Some(FILL_MAX), "the joiner was told how full it is");
+
+    // The joiner opens it as the chest it is, and takes everything.
+    rig.open(0, cell);
+    assert_eq!(rig.cs[0].mirror.as_ref().map(|m| m.kind), Some(ContainerKind::Chest { tier: ChestTier::Shelf }));
+    rig.step(0, "take all", ContainerClick::TakeAll);
+    beats(&mut rig, 12);
+    let meta = rig.world_ref().meta_at(pos.0, pos.1, pos.2);
+    assert!(is_looted(meta) && fill_of_meta(meta) == 0, "cleaned out in one day: looted, empty ({meta:#x})");
+    assert_eq!(seen(&rig), Some(meta), "the joiner sees the looted byte");
+
+    // Putting a few items back changes the fill but the shelf stays looted.
+    for (i, id) in (1..=4u16).enumerate() {
+        rig.give(0, 10 + i, Item::Block(id), 1);
+        rig.step(0, "deposit", ContainerClick::Deposit { slot: 10 + i, all: true });
+    }
+    beats(&mut rig, 12);
+    let meta = rig.world_ref().meta_at(pos.0, pos.1, pos.2);
+    assert!(is_looted(meta), "four slots of 27 is not half full");
+    assert_eq!(fill_of_meta(meta), crate::shelf::fill_of(&rig.world_ref().chest_at(pos).unwrap().slots));
+    assert_eq!(seen(&rig), Some(meta));
+
+    // Stocked to half full or more, the mark clears.
+    for (i, id) in (5..=15u16).enumerate() {
+        rig.give(0, 14 + i, Item::Block(id), 1);
+        rig.step(0, "restock", ContainerClick::Deposit { slot: 14 + i, all: true });
+    }
+    beats(&mut rig, 12);
+    let meta = rig.world_ref().meta_at(pos.0, pos.1, pos.2);
+    assert!(!is_looted(meta), "fifteen slots of 27 is over half: {meta:#x}");
+    assert_eq!(seen(&rig), Some(meta), "the joiner sees it cleared");
+    assert!(fill_of_meta(meta) >= crate::shelf::RESTOCKED_AT);
+    let t = rig.tally(0);
+    assert_eq!((t.window_mismatch, t.container_corrected, t.container_refused), (0, 0, 0));
+}
+
+/// The same shelf on a lending host: the host's world is the authority's, so the
+/// joiner is told the byte there too.
+#[test]
+fn a_lending_hosts_shelf_reaches_its_joiner_with_the_fill_byte() {
+    let mut rig = Rig::lent("shelf-lent");
+    let cell = rig.place(0, 2, block::COMMONS_SHELF);
+    let pos = (cell[0], cell[1], cell[2]);
+    let mut shelf = ChestData::for_tier(ChestTier::Shelf);
+    for slot in shelf.slots.iter_mut().take(10) {
+        *slot = Some(stone(1));
+    }
+    rig.world().insert_chest(pos, shelf);
+    for _ in 0..12 {
+        rig.tick();
+    }
+    let want = crate::shelf::fill_of(&rig.world_ref().chest_at(pos).unwrap().slots);
+    assert_eq!(rig.world_ref().meta_at(pos.0, pos.1, pos.2), want);
+    let seen = rig.cs[0].block_changes.iter().rev().find(|c| (c.x, c.y, c.z) == pos).map(|c| c.meta);
+    assert_eq!(seen, Some(want), "the joiner of a lending host sees the byte");
+}
+
+/// A joiner breaking a stocked shelf: the server spills the real contents once
+/// (a shelf breaks like a chest) and the byte leaves the cell with the block.
+#[test]
+fn a_joiner_breaking_a_stocked_shelf_spills_its_contents_once_and_takes_its_byte() {
+    let mut rig = Rig::dedicated("shelf-break", 1);
+    let cell = rig.place(0, 2, block::COMMONS_SHELF);
+    let pos = (cell[0], cell[1], cell[2]);
+    let mut shelf = ChestData::for_tier(ChestTier::Shelf);
+    for slot in shelf.slots.iter_mut().take(5) {
+        *slot = Some(stone(3));
+    }
+    rig.world().insert_chest(pos, shelf);
+    for _ in 0..12 {
+        rig.tick();
+    }
+    assert_ne!(rig.world_ref().meta_at(pos.0, pos.1, pos.2), 0, "the byte follows the contents");
+    super::joiner_authority::send_edits(&rig.hs, &rig.cs[0].transport, rig.cs[0].slot, 1, &[(pos, block::AIR)]);
+    rig.tick();
+    let spilled: u32 = rig
+        .hs
+        .server
+        .ecs
+        .query::<&crate::entity::ItemEntity>()
+        .iter()
+        .map(|(_, it)| u32::from(it.stack.count))
+        .sum();
+    assert_eq!(spilled, 15, "five stacks of three, once");
+    assert_eq!(rig.world_ref().get_block(pos.0, pos.1, pos.2), block::AIR);
+    assert_eq!(rig.world_ref().meta_at(pos.0, pos.1, pos.2), 0, "the byte is gone with the block");
+    assert!(rig.world_ref().chest_at(pos).is_none());
+    for _ in 0..8 {
+        rig.tick();
+    }
+    assert_eq!(rig.world_ref().meta_at(pos.0, pos.1, pos.2), 0, "the sweep does not bring it back");
+}
+
+/// Review SF2 — the shelf's byte is the authority's: a joiner's edit that
+/// carries another byte (shelf over shelf, or a fresh shelf) is refused and the
+/// ghost put back, whether it forges the looted bit or a full fill. Only the
+/// sweep writes the byte.
+#[test]
+fn a_joiner_cannot_forge_a_shelfs_byte() {
+    use crate::shelf::{FILL_MAX, LOOTED_BIT};
+    let mut rig = Rig::dedicated("shelf-forge", 1);
+    let cell = rig.place(0, 2, block::COMMONS_SHELF);
+    let pos = (cell[0], cell[1], cell[2]);
+    let mut shelf = ChestData::for_tier(ChestTier::Shelf);
+    for slot in shelf.slots.iter_mut().take(10) {
+        *slot = Some(stone(1));
+    }
+    rig.world().insert_chest(pos, shelf);
+    for _ in 0..12 {
+        rig.tick();
+    }
+    let real = rig.world_ref().meta_at(pos.0, pos.1, pos.2);
+    assert_eq!(real, crate::shelf::fill_of(&rig.world_ref().chest_at(pos).unwrap().slots));
+    assert_ne!(real, 0);
+
+    let send = |rig: &mut Rig, at: (i32, i32, i32), meta: u8| {
+        let c = &mut rig.cs[0];
+        let sp = &rig.hs.server.players[c.slot];
+        c.inputs += 1;
+        let input = protocol::InputPacket {
+            tick: c.inputs,
+            x: sp.player.pos.x,
+            y: sp.player.pos.y,
+            z: sp.player.pos.z,
+            health: 20.0,
+            block_changes: vec![protocol::BlockChange { x: at.0, y: at.1, z: at.2, new_block: block::COMMONS_SHELF, meta }],
+            events_applied: c.events,
+            ..Default::default()
+        };
+        c.transport.send_to_server(&protocol::serialize_packet(protocol::PacketType::ClientInput, &input));
+        rig.tick();
+    };
+    // Shelf over shelf with the looted bit, and with a full fill.
+    send(&mut rig, pos, real | LOOTED_BIT);
+    assert_eq!(rig.world_ref().meta_at(pos.0, pos.1, pos.2), real, "the looted bit was not taken");
+    send(&mut rig, pos, FILL_MAX);
+    assert_eq!(rig.world_ref().meta_at(pos.0, pos.1, pos.2), real, "a forged fill was not taken");
+    // A fresh shelf with a chosen byte is refused outright.
+    let fresh = (pos.0, pos.1, pos.2 + 1);
+    send(&mut rig, fresh, LOOTED_BIT | FILL_MAX);
+    assert_eq!(rig.world_ref().get_block(fresh.0, fresh.1, fresh.2), block::AIR, "no forged shelf");
+    assert_eq!(rig.world_ref().meta_at(fresh.0, fresh.1, fresh.2), 0);
+    // A fresh shelf with the honest byte (0) is an ordinary placement.
+    send(&mut rig, fresh, 0);
+    assert_eq!(rig.world_ref().get_block(fresh.0, fresh.1, fresh.2), block::COMMONS_SHELF);
+    assert_eq!(rig.world_ref().meta_at(fresh.0, fresh.1, fresh.2), 0);
 }

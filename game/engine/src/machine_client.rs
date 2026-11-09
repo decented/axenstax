@@ -72,6 +72,10 @@ impl GameState {
         // neighbourhood rebuild for settled machine changes, including smoke.
         let mut dirty = ahash::AHashSet::new();
         for change in &changes {
+            // A shelf's byte (fill, looted) never shapes or lights its cell.
+            if change.new_block == crate::block::COMMONS_SHELF {
+                continue;
+            }
             let (cx, cy, cz) = crate::world::World::block_to_chunk(change.x, change.y, change.z);
             for dx in -1..=1 {
                 for dy in -1..=1 {

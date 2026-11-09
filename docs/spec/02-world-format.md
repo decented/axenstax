@@ -2222,7 +2222,7 @@ against the slice before allocating.
     - **`SAVE_FORMAT_VERSION`** = `WORLD_SAVE_FIELD_COUNT` (60 since living world Tier 2 S5,
       2026-11-09: `quest_world` was 54, `worldgen_version` 55, `authority_clock` 56,
       `block_authors` 57, `region_use` 58, `plan_builds` 59, `plot_succession` 60) +
-      `SAVE_LAYOUT_REVISION` (7 today; see the block-ids bullets below) = 67. The current `SAVE_FORMAT_VERSION` is `67` (a test, `save_format::tests::spec_02_states_the_current_save_format_version`, fails if this sentence and the constant disagree, so a bump must edit this line). Two tripwire tests stop drift: serde's field list
+      `SAVE_LAYOUT_REVISION` (8 today; see the block-ids bullets below) = 68. The current `SAVE_FORMAT_VERSION` is `68` (a test, `save_format::tests::spec_02_states_the_current_save_format_version`, fails if this sentence and the constant disagree, so a bump must edit this line). Two tripwire tests stop drift: serde's field list
       for `WorldSave` must equal `WORLD_SAVE_FIELD_COUNT` (so appending a field
       without bumping the version fails), and the tolerant reader must consume every
       byte of a current save (so a field listed in its struct literal without a read
@@ -2324,6 +2324,23 @@ against the slice before allocating.
       revision 7 = 66; `FOOTER_FIELD_COUNTS` gains `(66, [59])`; a world written at footer 65 still opens.
       The block is kept out of the creative inventory and picks nothing (`pick_block::PICKS_NOTHING`). See
       `docs/superpowers/specs/2026-11-09-living-world-tier2.md` §8.
+    - **Layout revision 8 and the Commons Shelf (format 68, living world Tier 2 S6, 2026-11-09).** Block id
+      378, `COMMONS_SHELF` (a chest-sized container anyone may put into or take from: no owner, no lock; a
+      chest's top over crafting-table boards, existing texture layers only), follows the Blighted Crop, so the
+      revision moves 7 to 8 for the same reason as 4 to 7. No `WorldSave` field was added. Its contents are an
+      ordinary chest block entity (`BlockEntityData::Chest`) with `ChestData.tier = ChestTier::Shelf`, a variant
+      APPENDED after `Satori` (serde and the container wire both encode the variant index), 27 slots; they save
+      and reload with the world exactly as a chest's do. Its state byte rides the existing sparse `block_meta`
+      at its cell: the low seven bits are how full it is (0..=127, the share of slots holding anything,
+      rounded) and the top bit says it has been looted (`shelf.rs`). The byte is the authority's, kept true
+      by the shared machine phase (`sim_machines::step` calls `shelf::tick` each beat, which writes a byte only
+      when it differs), so a save carries the byte the world last had. Per-shelf "fill at the start of the
+      world day" is runtime only and is not saved: after a reload a day begins at whatever the shelf holds. The
+      block's meta byte is cleared (and its day mark dropped) by `World::set_block` whenever the block leaves
+      the cell. A chunk keeps a maintained count of its shelves (like pistons, hoppers and Commons Stones), so
+      the sweep and bloom's region scan read only the chunks that hold one. Footer arithmetic: field count 60 +
+      revision 8 = 68; `FOOTER_FIELD_COUNTS` gains `(68, [60])`; a world written at footer 67 still opens. See
+      `docs/superpowers/specs/2026-11-09-living-world-tier2.md` §6.
     - **The authority clock is saved (format 60, Keep slice 2a, 2026-11-02).** Field 56,
       `WorldSave.authority_clock: Option<sim_clock::SavedClock>`, carries `tick_counter`,
       `world_time`, the weather window (`rain_until`, `storm_until`), the trial lock it

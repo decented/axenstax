@@ -278,6 +278,7 @@ mod tally; // Living world S5 — the Tally: session counters and the container 
 mod tally_ui; // Living world S5 — the grown-up panel (F3): the Tally and world bloom.
 mod authorship; // Living world S2 — who built a block (spec Tier 2 §2).
 mod path_wear; // Living world Tier 2 S3 — grass walked over often becomes a Worn Path (spec §3).
+mod shelf; // Living world Tier 2 S6 — the Commons Shelf, its fill byte and bloom's tended-shelf term (spec §6).
 mod blight; // Living world Tier 2 S8 — monoculture blight on big single-crop fields (spec §8).
 mod region_people; // Living world Tier 2 S10 — joiners are told b and u per region (spec §10).
 mod use_record; // Living world Tier 2 S3 — lived days and nights slept per region (spec §3).

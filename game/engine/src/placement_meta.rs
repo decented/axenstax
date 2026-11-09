@@ -12,6 +12,13 @@ use crate::block::{self, BlockId};
 /// `World::set_block` leaves it).
 pub fn placement_meta(placed: BlockId, face: [i32; 3], fwd: glam::Vec3) -> Option<u8> {
     let mut stamped = None;
+    // Living world S6 (review SF1) — a Commons Shelf's byte is the authority's
+    // (fill and looted), so a new shelf starts at 0 whatever the cell held
+    // (`World::set_block` leaves the old meta: flowing water's aux, a broken
+    // stair's facing).
+    if placed == block::COMMONS_SHELF {
+        stamped = Some(0);
+    }
     // F1 — shaped-block orientation (slab half / stair facing) from the
     // clicked face + camera, so it renders + collides correctly.
     if crate::block_shape::is_shaped(placed) {
@@ -136,6 +143,7 @@ mod tests {
     fn plain_blocks_stamp_nothing_and_directional_blocks_face_the_look() {
         let north = glam::Vec3::new(0.0, 0.0, -1.0);
         assert_eq!(placement_meta(block::COBBLESTONE, [0, 1, 0], north), None, "a full cube keeps the cell's meta");
+        assert_eq!(placement_meta(block::COMMONS_SHELF, [0, 1, 0], north), Some(0), "a new shelf starts with a clean byte");
         let piston = placement_meta(block::DISPENSER, [0, 1, 0], glam::Vec3::new(0.0, -1.0, 0.0));
         assert_eq!(piston, Some(crate::meta::with_facing(0, crate::piston::facing_from_look(0.0, -1.0, 0.0))), "a dispenser faces the look, pitch included");
         assert_eq!(device_facing(glam::Vec3::new(1.0, 0.0, 0.2)), crate::meta::Facing::East);

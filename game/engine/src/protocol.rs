@@ -2921,6 +2921,13 @@ pub struct ServerAnnouncePacket {
 ///   at most every 10 s (`region_people`). Counts only, never a name or key. A
 ///   client without it would draw a joined world's bloom without the
 ///   built-together and lived-in terms, so the bump refuses it at join.
+/// - v100, also (2026-11-09, living world Tier 2 S6): **New block id 378** (Commons
+///   Shelf: a chest-sized shared container). No packet shape changed: it opens,
+///   updates and closes through the chest container packets
+///   (`ContainerKind::Chest { tier: ChestTier::Shelf }`, the tier APPENDED after
+///   Satori), and the authority's fill and looted byte rides `BlockChange.meta`
+///   and the chunk push like any block's. A client without it resolves the id to
+///   `AIR` and cannot read a `Shelf` tier, so the bump refuses it at join.
 pub const PROTOCOL_VERSION: u32 = 100;
 
 /// The `protocol_version` of a JoinRequest payload that doesn't decode as this
@@ -3128,6 +3135,7 @@ mod tests {
         // v98 — living world Tier 2 S3: block id 376 (Worn Path), no packet change.
         // v99 — living world Tier 2 S8: block id 377 (Blighted Crop), no packet change.
         // v100 — living world Tier 2 S10: RegionPeople (79), a new packet.
+        // v100 — living world Tier 2 S6: block id 378 (Commons Shelf), `ChestTier::Shelf`, no packet change.
         assert_eq!(super::PROTOCOL_VERSION, 100);
     }
 
@@ -3891,6 +3899,7 @@ mod tests {
         // v98 (living world Tier 2 S3): block id 376 (Worn Path), no packet change.
         // v99 (living world Tier 2 S8): block id 377 (Blighted Crop), no packet change.
         // v100 (living world Tier 2 S10): RegionPeople (79), a new packet.
+        // v100 (living world Tier 2 S6): block id 378 (Commons Shelf), `ChestTier::Shelf`, no packet change.
         assert_eq!(PROTOCOL_VERSION, 100);
     }
 

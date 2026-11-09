@@ -213,6 +213,8 @@ fn block_by_name(key: &str) -> Option<BlockId> {
         // Living world S3 — the Feast and Commons blocks.
         "feast_table" | "feasttable" | "feast" => Some(block::FEAST_TABLE),
         "commons_stone" | "commonsstone" | "commons" => Some(block::COMMONS_STONE),
+        // Living world Tier 2 S6 — the Commons Shelf.
+        "commons_shelf" | "commonsshelf" | "shelf" => Some(block::COMMONS_SHELF),
         // Smelting + redstone-equivalent blocks — added so Trials challenge kits
         // (Smith / Engineer) can hand them out. The engine-managed PISTON_HEAD is
         // deliberately NOT giveable.

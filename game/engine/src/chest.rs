@@ -29,10 +29,16 @@ pub enum ChestTier {
     Iron,
     Diamond,
     Satori,
+    /// The Commons Shelf (living world Tier 2 S6, `shelf.rs`): a wood chest's
+    /// 27 slots under its own block id. It is not a step on the capacity
+    /// ladder, so it is left out of [`ChestTier::ALL`]. APPEND ONLY: this is
+    /// wire data (`ContainerKind::Chest { tier }`) and part of the save.
+    Shelf,
 }
 
 impl ChestTier {
-    /// All tiers, lowest → highest (drives registration + recipe tables).
+    /// The capacity ladder, lowest → highest (drives the tier-chest recipe
+    /// tables). The Commons Shelf is a sibling of the wood chest, not a rung.
     pub const ALL: [ChestTier; 5] = [
         ChestTier::Wood,
         ChestTier::Copper,
@@ -44,11 +50,12 @@ impl ChestTier {
     /// Rows of 9 slots. The capacity ladder (numbers = playtest-tunable).
     pub fn rows(self) -> usize {
         match self {
-            ChestTier::Wood => 3,
             ChestTier::Copper => 4,
             ChestTier::Iron => 5,
             ChestTier::Diamond => 6,
             ChestTier::Satori => 8,
+            // One wood chest's worth.
+            ChestTier::Wood | ChestTier::Shelf => 3,
         }
     }
 
@@ -64,6 +71,7 @@ impl ChestTier {
             ChestTier::Iron => "Iron Chest",
             ChestTier::Diamond => "Diamond Chest",
             ChestTier::Satori => "Satori Chest",
+            ChestTier::Shelf => "Commons Shelf",
         }
     }
 
@@ -76,12 +84,16 @@ impl ChestTier {
             ChestTier::Iron => block::IRON_CHEST,
             ChestTier::Diamond => block::DIAMOND_CHEST,
             ChestTier::Satori => block::SATORI_CHEST,
+            ChestTier::Shelf => block::COMMONS_SHELF,
         }
     }
 
     /// The tier a block id represents, or `None` if it isn't a chest.
     pub fn from_block(b: crate::block::BlockId) -> Option<ChestTier> {
-        ChestTier::ALL.into_iter().find(|t| t.block_id() == b)
+        ChestTier::ALL
+            .into_iter()
+            .chain(std::iter::once(ChestTier::Shelf))
+            .find(|t| t.block_id() == b)
     }
 
     /// Whether a placed chest of this tier hoovers nearby dropped items.
@@ -468,6 +480,20 @@ mod tests {
         assert_eq!(ChestTier::Wood.block_id(), crate::block::CHEST);
         // A non-chest block is not a tier.
         assert_eq!(ChestTier::from_block(crate::block::STONE), None);
+    }
+
+    #[test]
+    fn the_commons_shelf_is_a_wood_chests_worth_under_its_own_block() {
+        // Not a rung of the ladder, but a tier all the same: it opens, saves and
+        // travels as a chest.
+        assert!(!ChestTier::ALL.contains(&ChestTier::Shelf));
+        assert_eq!(ChestTier::Shelf.slots(), ChestTier::Wood.slots());
+        assert_eq!(ChestTier::Shelf.block_id(), crate::block::COMMONS_SHELF);
+        assert_eq!(ChestTier::from_block(crate::block::COMMONS_SHELF), Some(ChestTier::Shelf));
+        assert_eq!(ChestTier::from_block(crate::block::CHEST), Some(ChestTier::Wood));
+        assert_eq!(ChestTier::Shelf.display_name(), "Commons Shelf");
+        assert!(!ChestTier::Shelf.auto_collects(), "a shelf does not hoover items up");
+        assert_eq!(ChestData::for_tier(ChestTier::Shelf).slots.len(), CHEST_SLOTS);
     }
 
     #[test]
