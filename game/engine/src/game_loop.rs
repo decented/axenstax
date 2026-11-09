@@ -17095,10 +17095,12 @@ impl super::GameState {
         // Lightning flash (2026-07-05): a decaying white blink layered on the
         // sky brightness — the P1 light split means it also relights terrain.
         if self.lightning_flash > 0.0 {
-            sky_brightness = (sky_brightness + self.lightning_flash * 0.8).min(1.4);
+            // Gentler since the v0.2.31 playtest ("the lightning is too
+            // intense"): +0.35 and a 0.25 white wash, not +0.8 and 0.7.
+            sky_brightness = (sky_brightness + self.lightning_flash * 0.35).min(1.15);
         }
         let (sky_r, sky_g, sky_b) = crate::camera::sky_color(sky_brightness.min(1.0));
-        let flash_white = f64::from((self.lightning_flash * 0.7).min(0.7));
+        let flash_white = f64::from((self.lightning_flash * 0.25).min(0.25));
         self.renderer.sky_color = [
             (sky_r + flash_white).min(1.0) as f32,
             (sky_g + flash_white).min(1.0) as f32,

@@ -29,8 +29,10 @@ pub const TRACK_RADIUS: i32 = 8;
 pub const SCANS_PER_TICK: usize = 4;
 /// Ticks between passive-mob censuses.
 pub const CENSUS_TICKS: u64 = 20;
-/// Natural-terrain regenerations per tick (see `natural.rs`).
-const NATURAL_GENS_PER_TICK: u32 = 1;
+/// One natural-terrain regeneration at most every this many ticks (see
+/// `natural.rs`): each is a full worldgen column on the main thread. It was one
+/// every tick until the v0.2.31 playtest's "laggier the longer I play".
+const NATURAL_GEN_EVERY_TICKS: u64 = 4;
 /// Seconds after the field starts before `PlaceWentGrey` may fire, so that
 /// loading a world never counts as an event.
 pub const GREY_GRACE_SECS: f32 = 60.0;
@@ -381,7 +383,7 @@ impl BloomField {
         if self.tick_no.is_multiple_of(CENSUS_TICKS) {
             self.take_census(input.ecs);
         }
-        let mut gens = NATURAL_GENS_PER_TICK;
+        let mut gens = u32::from(self.tick_no.is_multiple_of(NATURAL_GEN_EVERY_TICKS));
         self.scan_regions(input, &centres, &mut gens);
         self.scan_probes(input, &mut gens);
         self.advance_people_and_levels(input);
@@ -396,7 +398,7 @@ impl BloomField {
         let before = self.regions.len();
         self.regions.retain(|k, _| near(k));
         if self.regions.len() != before {
-            self.natural.retain(|k| self.regions.contains_key(&k));
+            self.natural.trim(super::natural::NATURAL_CACHE_MAX);
         }
         for c in centres {
             for dz in -TRACK_RADIUS..=TRACK_RADIUS {
@@ -465,7 +467,9 @@ impl BloomField {
                         continue;
                     }
                     *gens -= 1;
-                    self.natural.ensure(input.world, input.biome_gen, key);
+                    self.natural.ensure(input.world, input.biome_gen, key, self.tick_no);
+                } else {
+                    self.natural.touch(key, self.tick_no);
                 }
                 self.natural.get(key)
             } else {
@@ -550,7 +554,9 @@ impl BloomField {
                             return None;
                         }
                         *gens -= 1;
-                        self.natural.ensure(input.world, input.biome_gen, key);
+                        self.natural.ensure(input.world, input.biome_gen, key, self.tick_no);
+                    } else {
+                        self.natural.touch(key, self.tick_no);
                     }
                     self.natural.get(key)
                 } else {

@@ -118,8 +118,9 @@ pub fn apply_lock(current: Weather, lock: Option<&str>, lock_changed: bool, tick
 /// Advance the weather window for `tick`.
 ///
 /// While the sky is clear, once an in-game minute (1200 ticks) there is a ~22%
-/// chance of rain lasting 1–2.5 minutes, and ~1 rain in 3 upgrades to a
-/// thunderstorm for the same window.
+/// chance of rain lasting 1–2.5 minutes, and ~1 rain in 7 upgrades to a
+/// thunderstorm for the same window (1 in 3 until the v0.2.31 playtest:
+/// "lightning happens too often").
 ///
 /// When `has_weather` is false the result is [`Weather::CLEAR`] — which also
 /// cancels a window carried in from the world you just left, so walking from a
@@ -134,7 +135,8 @@ pub fn advance(current: Weather, tick: u64, has_weather: bool) -> Weather {
         if h % 100 < 22 {
             let dur = 1200 + (h % 4) * 600;
             out.rain_until = tick + dur;
-            if h.is_multiple_of(3) {
+            // Of the rain rolls (h % 100 < 22), the ones at 0, 10 and 20.
+            if h.is_multiple_of(10) {
                 out.storm_until = out.rain_until;
             }
         }
@@ -145,12 +147,18 @@ pub fn advance(current: Weather, tick: u64, has_weather: bool) -> Weather {
 /// Roll for a lightning strike on `tick`, returning the strike hash (the caller
 /// derives the ground position from it) or `None` for no bolt.
 ///
-/// Strikes are rolled every 8 s while storming, and land ~55% of those rolls.
+/// Strikes are rolled every 8 s while storming, and land ~55% of those rolls,
+/// so a storm's bolts come bunched together and then the sky clears. Storms
+/// themselves are rare (see [`advance`]); the playtest ask was "rarer, and
+/// bunched up in a storm", not fewer bolts per storm.
+/// Ticks between strike rolls while storming (8 s at 20 TPS).
+pub const STRIKE_EVERY_TICKS: u64 = 160;
+
 pub fn strike_roll(current: Weather, tick: u64, has_weather: bool) -> Option<u64> {
     if !has_weather {
         return None;
     }
-    if tick == 0 || tick >= current.storm_until || !tick.is_multiple_of(160) {
+    if tick == 0 || tick >= current.storm_until || !tick.is_multiple_of(STRIKE_EVERY_TICKS) {
         return None;
     }
     let h = tick.wrapping_mul(0xC4CE_B9FE_1A85_EC53) >> 31;

@@ -154,16 +154,18 @@ impl DayPhase {
 pub const SOUND_MIN_LEVEL: f32 = 0.3;
 
 /// Seconds between ambient one-shots at `level`, or `None` when the place is
-/// still. 20 s at 0.3, 12 s at 0.45, 3 s at 1.0 (piecewise linear).
+/// still. 60 s at 0.3, 35 s at 0.45, 20 s at 1.0 (piecewise linear). It was
+/// 20, 12 and 3 s until the v0.2.31 playtest: in Creative, whose floor keeps
+/// every place vivid, a chirp every 2 to 4 s was the complaint.
 pub fn sound_interval(level: f32) -> Option<f32> {
     if !level.is_finite() || level < SOUND_MIN_LEVEL {
         return None;
     }
     let l = level.min(1.0);
     Some(if l < 0.45 {
-        20.0 + (l - 0.3) / 0.15 * (12.0 - 20.0)
+        60.0 + (l - 0.3) / 0.15 * (35.0 - 60.0)
     } else {
-        12.0 + (l - 0.45) / 0.55 * (3.0 - 12.0)
+        35.0 + (l - 0.45) / 0.55 * (20.0 - 35.0)
     })
 }
 
@@ -485,10 +487,10 @@ mod tests {
     fn the_sound_interval_shrinks_with_level_and_is_none_when_still() {
         assert_eq!(sound_interval(0.0), None);
         assert_eq!(sound_interval(0.29), None);
-        assert!(close(sound_interval(0.3).unwrap(), 20.0));
-        assert!(close(sound_interval(0.45).unwrap(), 12.0));
-        assert!(close(sound_interval(1.0).unwrap(), 3.0));
-        assert!(close(sound_interval(7.0).unwrap(), 3.0), "clamped");
+        assert!(close(sound_interval(0.3).unwrap(), 60.0));
+        assert!(close(sound_interval(0.45).unwrap(), 35.0));
+        assert!(close(sound_interval(1.0).unwrap(), 20.0));
+        assert!(close(sound_interval(7.0).unwrap(), 20.0), "clamped");
         let mut last = f32::MAX;
         for k in 30..=100 {
             let iv = sound_interval(k as f32 / 100.0).unwrap();
@@ -511,12 +513,12 @@ mod tests {
     #[test]
     fn birds_by_day_insects_by_night_nothing_in_a_grey_place() {
         let mut p = BloomPresent::default();
-        let day = run(&mut p, 60.0, &[1.0], DayPhase::Day, true);
-        assert!(day.len() >= 8, "a lively day: {}", day.len());
+        let day = run(&mut p, 120.0, &[1.0], DayPhase::Day, true);
+        assert!(day.len() >= 4, "a lively day: {}", day.len());
         assert!(day.iter().all(|s| matches!(s, AmbientSound::Birdsong(_))));
         let mut p = BloomPresent::default();
-        let night = run(&mut p, 60.0, &[1.0], DayPhase::Night, true);
-        assert!(night.len() >= 8);
+        let night = run(&mut p, 120.0, &[1.0], DayPhase::Night, true);
+        assert!(night.len() >= 4);
         assert!(night.iter().all(|s| *s == AmbientSound::Insects));
         let mut p = BloomPresent::default();
         assert!(run(&mut p, 600.0, &[0.2], DayPhase::Day, true).is_empty(), "grey is still");
@@ -534,9 +536,9 @@ mod tests {
         };
         let (low, mid, high) = (count(0.4), count(0.6), count(1.0));
         assert!(low < mid && mid < high, "{low} {mid} {high}");
-        // Around 12 s at 0.45 and 3 s at 1.0, jitter averaging out.
-        assert!((35..=75).contains(&count(0.45)), "{}", count(0.45));
-        assert!((150..=250).contains(&high), "{high}");
+        // Around 35 s at 0.45 and 20 s at 1.0, jitter averaging out.
+        assert!((12..=24).contains(&count(0.45)), "{}", count(0.45));
+        assert!((22..=40).contains(&high), "{high}");
     }
 
     #[test]

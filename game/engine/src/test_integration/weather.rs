@@ -7,9 +7,11 @@
 //! `hosted_server.rs` builds packets through — see `test_harness.rs`).
 //!
 //! Tick 2400 is not arbitrary: it's the deterministic tick at which
-//! `weather::advance`'s hash first rolls rain (and, at this tick, a storm
-//! too) starting from a fresh `Weather::CLEAR` — found by walking the same
-//! formula `weather.rs::advance` uses. Picking a known tick keeps this test
+//! `weather::advance`'s hash first rolls rain starting from a fresh
+//! `Weather::CLEAR` — found by walking the same formula `weather.rs::advance`
+//! uses. Until v0.2.31 that rain (and the next two) was also a storm, so every
+//! new world opened with three thunderstorms in eight minutes; since storms
+//! became 1 rain in 7, the first storm is at tick 15600. Picking a known tick keeps this test
 //! fast (a few thousand real `GameServer::tick()` calls, not the 200_000
 //! the pure-function tests in `weather.rs` run) and deterministic.
 
@@ -26,25 +28,21 @@ fn a_hosted_world_broadcasts_a_counting_down_rain_window() {
         "must stay clear right up to the deterministic roll tick"
     );
 
-    // Tick 2400: the deterministic roll opens a rain (+ storm) window running
-    // to tick 3600 (see module doc for how this tick was found).
+    // Tick 2400: the deterministic roll opens a plain rain window running to
+    // tick 3600 (see module doc for how this tick was found).
     host.tick(1);
     let (rain_at_open, storm_at_open) = host.weather_ticks_left();
     assert!(rain_at_open > 0, "the server must broadcast a positive rain window once it rains");
-    assert!(storm_at_open > 0, "this particular roll also upgrades to a storm");
+    assert_eq!(storm_at_open, 0, "a new world's first rain is no longer a storm");
 
     // Ticking further must count DOWN, not re-roll or jump — the server
     // advances the SAME window every tick (`GameServer::tick`), it doesn't
     // draw a fresh one.
     host.tick(400);
-    let (rain_later, storm_later) = host.weather_ticks_left();
+    let (rain_later, _) = host.weather_ticks_left();
     assert!(
         rain_later < rain_at_open,
         "rain_ticks_left must count down tick over tick: {rain_at_open} -> {rain_later}"
-    );
-    assert!(
-        storm_later < storm_at_open,
-        "storm_ticks_left must count down tick over tick: {storm_at_open} -> {storm_later}"
     );
 
     // And once the window's fully elapsed (tick 3600), it's back to zero —

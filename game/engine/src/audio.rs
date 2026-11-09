@@ -117,37 +117,40 @@ pub(crate) fn layers(sound: Sound) -> &'static [Layer] {
         // Living-world ambience. Tiny, high, quiet: a bird is a few short
         // notes, a cricket is a run of ticks. Linear decay envelopes make each
         // note a soft chirp rather than a beep.
+        // Softer, lower and rarer since the v0.2.31 playtest ("a high-pitched
+        // twinkly sound every few seconds"): 1.7-2.8 kHz at about half the old
+        // volume, not 3-4.6 kHz. The cadence is `bloom::present::sound_interval`.
         Sound::Birdsong => &[
-            Layer::Tone { secs: 0.06, freq: 3400.0, volume: 0.07, delay: 0.0 },
-            Layer::Tone { secs: 0.07, freq: 4200.0, volume: 0.07, delay: 0.08 },
-            Layer::Tone { secs: 0.09, freq: 3800.0, volume: 0.06, delay: 0.17 },
+            Layer::Tone { secs: 0.06, freq: 2000.0, volume: 0.035, delay: 0.0 },
+            Layer::Tone { secs: 0.07, freq: 2500.0, volume: 0.035, delay: 0.08 },
+            Layer::Tone { secs: 0.09, freq: 2200.0, volume: 0.03, delay: 0.17 },
         ],
         Sound::BirdsongTrill => &[
-            Layer::Tone { secs: 0.035, freq: 4600.0, volume: 0.06, delay: 0.00 },
-            Layer::Tone { secs: 0.035, freq: 3900.0, volume: 0.06, delay: 0.05 },
-            Layer::Tone { secs: 0.035, freq: 4600.0, volume: 0.06, delay: 0.10 },
-            Layer::Tone { secs: 0.035, freq: 3900.0, volume: 0.06, delay: 0.15 },
-            Layer::Tone { secs: 0.035, freq: 4600.0, volume: 0.06, delay: 0.20 },
+            Layer::Tone { secs: 0.035, freq: 2800.0, volume: 0.03, delay: 0.00 },
+            Layer::Tone { secs: 0.035, freq: 2400.0, volume: 0.03, delay: 0.05 },
+            Layer::Tone { secs: 0.035, freq: 2800.0, volume: 0.03, delay: 0.10 },
+            Layer::Tone { secs: 0.035, freq: 2400.0, volume: 0.03, delay: 0.15 },
+            Layer::Tone { secs: 0.035, freq: 2800.0, volume: 0.03, delay: 0.20 },
         ],
         Sound::BirdsongWhistle => &[
-            Layer::Tone { secs: 0.10, freq: 2900.0, volume: 0.06, delay: 0.00 },
-            Layer::Tone { secs: 0.10, freq: 2500.0, volume: 0.06, delay: 0.09 },
-            Layer::Tone { secs: 0.14, freq: 2100.0, volume: 0.05, delay: 0.18 },
+            Layer::Tone { secs: 0.10, freq: 2200.0, volume: 0.03, delay: 0.00 },
+            Layer::Tone { secs: 0.10, freq: 1900.0, volume: 0.03, delay: 0.09 },
+            Layer::Tone { secs: 0.14, freq: 1700.0, volume: 0.025, delay: 0.18 },
         ],
         // Cricket trill: three short runs of four ticks.
         Sound::Insects => &[
-            Layer::Tone { secs: 0.025, freq: 4300.0, volume: 0.04, delay: 0.000 },
-            Layer::Tone { secs: 0.025, freq: 4300.0, volume: 0.04, delay: 0.035 },
-            Layer::Tone { secs: 0.025, freq: 4300.0, volume: 0.04, delay: 0.070 },
-            Layer::Tone { secs: 0.025, freq: 4300.0, volume: 0.04, delay: 0.105 },
-            Layer::Tone { secs: 0.025, freq: 4300.0, volume: 0.04, delay: 0.200 },
-            Layer::Tone { secs: 0.025, freq: 4300.0, volume: 0.04, delay: 0.235 },
-            Layer::Tone { secs: 0.025, freq: 4300.0, volume: 0.04, delay: 0.270 },
-            Layer::Tone { secs: 0.025, freq: 4300.0, volume: 0.04, delay: 0.305 },
-            Layer::Tone { secs: 0.025, freq: 4300.0, volume: 0.04, delay: 0.400 },
-            Layer::Tone { secs: 0.025, freq: 4300.0, volume: 0.04, delay: 0.435 },
-            Layer::Tone { secs: 0.025, freq: 4300.0, volume: 0.04, delay: 0.470 },
-            Layer::Tone { secs: 0.025, freq: 4300.0, volume: 0.04, delay: 0.505 },
+            Layer::Tone { secs: 0.025, freq: 3600.0, volume: 0.025, delay: 0.0 },
+            Layer::Tone { secs: 0.025, freq: 3600.0, volume: 0.025, delay: 0.035 },
+            Layer::Tone { secs: 0.025, freq: 3600.0, volume: 0.025, delay: 0.07 },
+            Layer::Tone { secs: 0.025, freq: 3600.0, volume: 0.025, delay: 0.105 },
+            Layer::Tone { secs: 0.025, freq: 3600.0, volume: 0.025, delay: 0.2 },
+            Layer::Tone { secs: 0.025, freq: 3600.0, volume: 0.025, delay: 0.235 },
+            Layer::Tone { secs: 0.025, freq: 3600.0, volume: 0.025, delay: 0.27 },
+            Layer::Tone { secs: 0.025, freq: 3600.0, volume: 0.025, delay: 0.305 },
+            Layer::Tone { secs: 0.025, freq: 3600.0, volume: 0.025, delay: 0.4 },
+            Layer::Tone { secs: 0.025, freq: 3600.0, volume: 0.025, delay: 0.435 },
+            Layer::Tone { secs: 0.025, freq: 3600.0, volume: 0.025, delay: 0.47 },
+            Layer::Tone { secs: 0.025, freq: 3600.0, volume: 0.025, delay: 0.505 },
         ],
     }
 }
@@ -497,7 +500,7 @@ mod tests {
     fn ambience_is_quiet_and_birdsong_has_three_distinct_variants() {
         for s in [Sound::Birdsong, Sound::BirdsongTrill, Sound::BirdsongWhistle, Sound::Insects] {
             let peak = render_mix(s, 1.0).iter().fold(0.0_f32, |m, v| m.max(v.abs()));
-            assert!(peak > 0.02 && peak <= 0.15, "{s:?} peak {peak}: ambience stays soft");
+            assert!(peak > 0.02 && peak <= 0.06, "{s:?} peak {peak}: ambience stays soft");
         }
         let seen: std::collections::BTreeSet<usize> =
             (0..64u64).map(|seed| Sound::birdsong_variant(seed).index()).collect();
