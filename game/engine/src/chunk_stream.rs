@@ -997,6 +997,11 @@ impl super::GameState {
 
     /// Remove every mesh of column `col` from the renderer.
     pub(crate) fn drop_column_meshes(&mut self, col: (i32, i32)) {
+        // Every way a joined client lets a column go passes here; the people
+        // terms its server told it for the column go with it (Tier 2 S10).
+        if let Some(rc) = self.remote_client.as_mut() {
+            rc.region_people_mut().forget(col.0, col.1);
+        }
         // Every mesh kind, including the transparent one (leaves, glass) and
         // the micro-model instance buffers and far billboards: else they leak
         // GPU buffers and render stale until the column reloads.

@@ -301,8 +301,9 @@ mod tests {
         for (byte, tag) in [(72, PacketType::Handover), (73, PacketType::PersonalSync), (74, PacketType::PackResult), (75, PacketType::PackView), (76, PacketType::QuestResult), (77, PacketType::QuestView)] {
             assert_eq!(deserialize_header(&[byte]).map(|(t, _)| t), Some(tag), "later tag {byte} appends without changing C3d");
         }
-        assert_eq!(deserialize_header(&[78]).map(|(t, _)| t), Some(PacketType::KeepPass), "the Keep's return pass is the last tag");
-        assert!(deserialize_header(&[79]).is_none(), "no tag past the Keep's return pass");
+        assert_eq!(deserialize_header(&[78]).map(|(t, _)| t), Some(PacketType::KeepPass), "the Keep's return pass keeps tag 78");
+        assert_eq!(deserialize_header(&[79]).map(|(t, _)| t), Some(PacketType::RegionPeople), "the people terms (v100) are the last tag");
+        assert!(deserialize_header(&[80]).is_none(), "no tag past the people terms");
     }
 
     /// C3d run 19 — the `ToggleBlock` layout with its appended

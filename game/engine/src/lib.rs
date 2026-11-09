@@ -279,6 +279,7 @@ mod tally_ui; // Living world S5 — the grown-up panel (F3): the Tally and worl
 mod authorship; // Living world S2 — who built a block (spec Tier 2 §2).
 mod path_wear; // Living world Tier 2 S3 — grass walked over often becomes a Worn Path (spec §3).
 mod blight; // Living world Tier 2 S8 — monoculture blight on big single-crop fields (spec §8).
+mod region_people; // Living world Tier 2 S10 — joiners are told b and u per region (spec §10).
 mod use_record; // Living world Tier 2 S3 — lived days and nights slept per region (spec §3).
 mod gardener_lines; // Living world Tier 2 S9 — Satoshi's lines for a Worn Path and a Blighted Crop (spec §11).
 mod succession; // Living world Tier 2 S5 — last seen and Plots passing on (spec §5).

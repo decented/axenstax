@@ -170,6 +170,13 @@ pub enum PacketType {
     /// (`deserialize_header` returns `None`, and the client's packet loop ignores it).
     /// A server never acts on one a client sends.
     KeepPass = 78,
+    /// Server → Client only (protocol v100, living world Tier 2 S10): the regions
+    /// whose built-together and lived-in numbers changed for this joiner
+    /// (`region_people::RegionPeoplePacket`). Counts only: a place, how many
+    /// distinct builders (at most 8) and `u` x 255, never a name or a key. Sent
+    /// at most every 10 s, for regions the joiner has been pushed. A server
+    /// never acts on one a client sends.
+    RegionPeople = 79,
 }
 
 /// The payload of [`PacketType::KeepPass`]: the Keep's runtime public key and the
@@ -2908,7 +2915,13 @@ pub struct ServerAnnouncePacket {
 ///   `BlockChange` whose `meta` is the index of the crop kind it came from). No
 ///   packet shape changed. A client without it resolves the id to `AIR` and
 ///   would show a hole in the field, so the bump refuses it at join.
-pub const PROTOCOL_VERSION: u32 = 99;
+/// - v100 (2026-11-09, living world Tier 2 S10): **New packet `RegionPeople`
+///   (tag 79)**, server to client: for the regions a joiner has been pushed, how
+///   many distinct people built there (at most 8) and `u` x 255, changed-only and
+///   at most every 10 s (`region_people`). Counts only, never a name or key. A
+///   client without it would draw a joined world's bloom without the
+///   built-together and lived-in terms, so the bump refuses it at join.
+pub const PROTOCOL_VERSION: u32 = 100;
 
 /// The `protocol_version` of a JoinRequest payload that doesn't decode as this
 /// build's `JoinRequestPacket` (an older or newer client's shape). It is the
@@ -2991,6 +3004,7 @@ pub fn deserialize_header(data: &[u8]) -> Option<(PacketType, &[u8])> {
         76 => PacketType::QuestResult,
         77 => PacketType::QuestView,
         78 => PacketType::KeepPass,
+        79 => PacketType::RegionPeople,
         _ => return None,
     };
     Some((tag, &data[1..]))
@@ -3113,7 +3127,8 @@ mod tests {
         // v97 — living world S3: block ids 373..=375, two ItemNote codes.
         // v98 — living world Tier 2 S3: block id 376 (Worn Path), no packet change.
         // v99 — living world Tier 2 S8: block id 377 (Blighted Crop), no packet change.
-        assert_eq!(super::PROTOCOL_VERSION, 99);
+        // v100 — living world Tier 2 S10: RegionPeople (79), a new packet.
+        assert_eq!(super::PROTOCOL_VERSION, 100);
     }
 
     #[test]
@@ -3875,7 +3890,8 @@ mod tests {
         // v97 (living world S3): block ids 373..=375 and two ItemNote codes, no packet change.
         // v98 (living world Tier 2 S3): block id 376 (Worn Path), no packet change.
         // v99 (living world Tier 2 S8): block id 377 (Blighted Crop), no packet change.
-        assert_eq!(PROTOCOL_VERSION, 99);
+        // v100 (living world Tier 2 S10): RegionPeople (79), a new packet.
+        assert_eq!(PROTOCOL_VERSION, 100);
     }
 
     fn sample_accept() -> JoinAcceptPacket {
@@ -4591,7 +4607,8 @@ mod tests {
             assert_eq!(deserialize_header(&[byte, 0]).map(|(p, _)| p), Some(tag), "appended carrier {byte}");
         }
         assert_eq!(deserialize_header(&[78, 0]).map(|(p, _)| p), Some(PacketType::KeepPass), "the Keep's return pass");
-        assert_eq!(deserialize_header(&[79, 0]), None, "no tag after the Keep's return pass");
+        assert_eq!(deserialize_header(&[79, 0]).map(|(p, _)| p), Some(PacketType::RegionPeople), "the people terms (v100)");
+        assert_eq!(deserialize_header(&[80, 0]), None, "no tag after the people terms");
     }
 
     /// The Keep's return pass (tag 78): 64 bytes after the tag, host key then secret, and

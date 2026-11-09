@@ -19,6 +19,8 @@ pub struct Harness {
     pub remote: Vec<Vec3>,
     pub creative: bool,
     pub allow_grey: bool,
+    /// Tier 2 S10 — `Some` makes this a joined client's field.
+    pub told: Option<crate::region_people::RemotePeople>,
 }
 
 impl Harness {
@@ -40,6 +42,7 @@ impl Harness {
             remote: Vec::new(),
             creative: false,
             allow_grey: true,
+            told: None,
         }
     }
 
@@ -59,6 +62,7 @@ impl Harness {
             creative: self.creative,
             dt: 0.05,
             allow_grey_event: self.allow_grey,
+            told_people: self.told.as_ref(),
         })
     }
 

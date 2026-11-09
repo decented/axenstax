@@ -571,3 +571,52 @@ fn reset_forgets_the_world() {
     assert!(h.field.probe(1).is_none());
     assert_eq!(h.field.world_summary().regions, 0);
 }
+
+// ── Tier 2 S10: a joined client reads the b and u it was told ─────────────
+
+#[test]
+fn a_joined_clients_built_together_and_lived_in_terms_equal_the_hosts_within_quantisation() {
+    use crate::region_people::{people_of, RegionPeople, RegionPeoplePacket, RemotePeople};
+
+    // The host: sixteen placed blocks, three of them by three different builders,
+    // six lived days and two nights.
+    let mut host = quarry();
+    build_sixteen(&mut host);
+    build_as(&mut host, &["a", "b", "c"]);
+    live_in(&mut host, 6, 2);
+    host.rescan(FOREST);
+    host.run(2);
+    let (_, p_host, _, target_host) = host.field.region_terms(FOREST).unwrap();
+    assert!(p_host > 0.3, "the host's bloom has both terms: {p_host}");
+
+    // The joined client: the same blocks, but no authorship and no use record
+    // (the authority keeps them), told only the two numbers.
+    let (builders, use_u) = people_of(&host.world, FOREST.0, FOREST.1);
+    assert_eq!(builders, 3);
+    assert!(use_u > 0);
+    let mut joined = quarry();
+    build_sixteen(&mut joined);
+    joined.rescan(FOREST);
+    joined.run(2);
+    assert_eq!(joined.field.region_terms(FOREST).unwrap().1, 0.0, "told nothing, a joiner reads 0, as before");
+
+    let mut told = RemotePeople::default();
+    told.apply(&RegionPeoplePacket { regions: vec![RegionPeople { cx: FOREST.0, cz: FOREST.1, builders, use_u }] });
+    joined.told = Some(told);
+    joined.rescan(FOREST);
+    joined.run(2);
+    let (_, p_joined, _, target_joined) = joined.field.region_terms(FOREST).unwrap();
+    assert!((p_joined - p_host).abs() < 0.01, "joiner {p_joined} vs host {p_host}");
+    assert!((target_joined - target_host).abs() < 0.01, "targets {target_joined} vs {target_host}");
+
+    // b alone, exactly the host's formula; u alone, within a byte.
+    for (who, n) in [(&["a", "b"][..], 2usize), (&["a", "b", "c", "d", "e"], 5)] {
+        let mut h = quarry();
+        build_as(&mut h, who);
+        let (b, _) = people_of(&h.world, FOREST.0, FOREST.1);
+        assert_eq!(usize::from(b), n);
+        assert_eq!(crate::region_people::built_term(b), crate::authorship::built_together(n));
+    }
+    let u_host = host.world.lived_in_term(FOREST.0, FOREST.1);
+    assert!((crate::region_people::lived_term(use_u) - u_host).abs() <= 0.5 / 255.0 + 1e-6);
+}
