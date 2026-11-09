@@ -54,8 +54,14 @@ For each of the region's 256 columns, take the highest non-air block (`World::hi
 **Natural terrain is never BARE.** A natural ravine, cave mouth, cliff or rocky bank in an untouched world must not read grey.
 As built (S1): the natural top of a column is found by **regenerating the region's chunk column into a throwaway twin of the
 world** (`World::generation_twin` + `generate_column`, the `chunk_verdict` trick) and keeping each column's top height and
-block (`bloom/natural.rs`, 256 entries per region, cached for the session). That is exact for every generator (v2, v3, v4,
-flat) and includes trees, villages and ravines. Classification of a non-living, non-placed top block:
+block (`bloom/natural.rs`, 256 entries per region). That is exact for every generator (v2, v3, v4,
+flat) and includes trees, villages and ravines. **Cost (fixed in v0.2.32):** each regeneration is a full worldgen column on
+the main thread, needed for every *touched* region (any edit outside worldgen, grass spread and leaf decay included, and every
+chunk loaded from a save), so the touched area grows with play. Until v0.2.32 it ran up to once a tick and the cache was
+trimmed to the tracked regions, so a player flying back and forth regenerated the same regions on every pass (the playtest's
+"laggier the longer I play"). Now at most one regeneration every 4 ticks (`NATURAL_GEN_EVERY_TICKS`; a changed region shows
+its colour a moment later), and the cache keeps up to 2,048 regions (about 2.7 MB), dropping the least recently used.
+Classification of a non-living, non-placed top block:
 - it **matches the natural top** (same block at the same height), or is snow cover: NATURAL (0.8);
 - otherwise dirt or tilled soil: SOIL (0.4);
 - otherwise BARE (0).
@@ -223,8 +229,11 @@ level 1 reads a saturated, warm green).
 - **Sound.** `Sound::Birdsong`, `BirdsongTrill` and `BirdsongWhistle` (the "variants", chosen by a seed) and `Sound::Insects`,
   all synthesised from tone layers, peaks under 0.15. `play_birdsong(seed)` and `play_insects()` exist on the native and web
   engines. Each local player has a timer: birdsong by day (sky brightness 0.5 and over), insects by night (0.2 and under), nothing
-  at twilight or in rain, nothing below level 0.3. The interval is 20 s at 0.3, 12 s at 0.45 and 3 s at 1.0, jittered by 30%
-  either way; the first sound comes 3 to 9 s after arriving. Several local players each have their own timer and share one
+  at twilight or in rain, nothing below level 0.3. The interval is 60 s at 0.3, 35 s at 0.45 and 20 s at 1.0, jittered by 30%
+  either way; the first sound comes 3 to 9 s after arriving. (v0.2.32, from the playtest's "a high-pitched twinkly sound every
+  few seconds": it was 20, 12 and 3 s, and in Creative, whose floor keeps places vivid, that was a chirp every 2 to 4 s. The
+  birdsong tones also dropped from 3 to 4.6 kHz to 1.7 to 2.8 kHz at about half the volume, the crickets from 4.3 to 3.6 kHz,
+  and ambience now peaks under 0.06.) Several local players each have their own timer and share one
   audio engine. Master volume and mute are the audio engine's own.
 - **Life.** `ParticleSystem::pollen_mote` (day) and `firefly` (night), both on `TEX_PARTICLE_SOFT`. `Particle` gained `blink`
   (pulses per second; 0 = steady): a blinking mote pulses its alpha on its own phase (taken from its unique `max_life`) and is not

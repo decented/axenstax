@@ -2113,11 +2113,17 @@ strip), fire spreading diagonally/upward MC-style.
 
 #### Thunderstorms + lightning — SHIPPED 2026-07-05
 
-~1 rain in 3 upgrades to a thunderstorm for the same window
-(`weather_storm_until`, transient like the rain timer — nothing saved). While
-storming, a strike rolls every 8 s (55%, deterministic tick hash) within ±24
-blocks of player 0: a white **sky flash** (decaying boost layered onto the sky
-brightness — the P1 light split means terrain relights for the blink), a
+~1 rain in 7 upgrades to a thunderstorm for the same window (`h % 10 == 0`
+among the rain rolls; it was 1 in 3 until v0.2.32, and the deterministic
+timeline then made a new world's first three rains, at 2, 5 and 8 minutes,
+all storms: the playtest's "lightning happens too often"; the first storm is
+now at about 13 minutes, then roughly every 40). (`weather_storm_until`,
+transient like the rain timer — nothing saved). While storming, a strike rolls
+every 8 s (55%, deterministic tick hash, `weather::STRIKE_EVERY_TICKS`), so a
+storm's bolts come bunched and then the sky clears, within ±24 blocks of player
+0: a white **sky flash** (decaying boost layered onto the sky brightness, +0.35
+and a 0.25 white wash since v0.2.32, which the playtest found "too intense" at
++0.8 and 0.7 — the P1 light split means terrain relights for the blink), a
 spark-column **bolt**, a long **thunder** rumble (`audio::play_thunder`), and
 the strike **starts a real fire** at the surface through `FireSystem::ignite`
 — so the fire toggle, burnout, rain-douse and cap rules all apply (a storm
