@@ -30,6 +30,16 @@ pub struct BloomFigures {
     pub life_permille: u16,
     /// People together: the mean people term.
     pub people_permille: u16,
+    /// Ideas (S9): Plan designs built at least once in this world, and the
+    /// builds in all. World totals; a snapshot from a build before S9 reads 0.
+    #[serde(default)]
+    pub ideas_designs: u32,
+    #[serde(default)]
+    pub ideas_builds: u32,
+    /// Time (S9): the mean lived-in term over places that have a use record;
+    /// `None` when none has one (and from a build before S9).
+    #[serde(default)]
+    pub time_permille: Option<u16>,
 }
 
 impl BloomFigures {
@@ -40,6 +50,21 @@ impl BloomFigures {
             level_permille: permille(s.mean_level),
             life_permille: permille(s.mean_eco),
             people_permille: permille(s.mean_people),
+            ..Self::default()
+        }
+    }
+
+    /// The same figures with the world's four named terms (S9) filled in:
+    /// ideas and time, and life and people from the one function the panel uses.
+    pub fn with_terms(self, t: &crate::bloom::WorldTerms) -> Self {
+        let permille = |x: f32| (x.clamp(0.0, 1.0) * 1000.0).round() as u16;
+        Self {
+            life_permille: permille(t.life),
+            people_permille: permille(t.people),
+            ideas_designs: t.ideas.0,
+            ideas_builds: t.ideas.1,
+            time_permille: t.time.map(permille),
+            ..self
         }
     }
 }
@@ -300,7 +325,7 @@ mod tests {
             runtime_npub: "npub1rt".into(),
             delegation_expires_unix: 0,
             protocol: crate::protocol::PROTOCOL_VERSION,
-            world_bloom: Some(BloomFigures { regions: 9, level_permille: 620, life_permille: 700, people_permille: 200 }),
+            world_bloom: Some(BloomFigures { regions: 9, level_permille: 620, life_permille: 700, people_permille: 200, ideas_designs: 4, ideas_builds: 11, time_permille: Some(350) }),
             tally: Some(TallyFigures { mined: 5, placed: 4, crafted: 0, smelted: 0, trades: 0 }),
         };
         let json = serde_json::to_string(&snap).unwrap();
@@ -315,7 +340,10 @@ mod tests {
     fn the_snapshot_carries_world_bloom_and_the_tally_and_reads_without_them() {
         let summary = crate::bloom::WorldSummary { mean_level: 0.6234, mean_eco: 0.7, mean_people: 1.4, regions: 9 };
         let bloom = BloomFigures::from_summary(&summary);
-        assert_eq!(bloom, BloomFigures { regions: 9, level_permille: 623, life_permille: 700, people_permille: 1000 });
+        assert_eq!(
+            bloom,
+            BloomFigures { regions: 9, level_permille: 623, life_permille: 700, people_permille: 1000, ..Default::default() }
+        );
         let tally = crate::tally::Tally { mined: 11, placed: 7, crafted: 3, smelted: 2, trades: 1 };
         let snap = build_snapshot(
             &ConsoleSettings::default(),
@@ -335,6 +363,29 @@ mod tests {
         json.as_object_mut().unwrap().remove("tally");
         let old: ConsoleSnapshot = serde_json::from_value(json).unwrap();
         assert_eq!((old.world_bloom, old.tally), (None, None));
+        // S9: the four named terms ride along, and a bloom entry from a build
+        // before them (no ideas or time keys) still reads, as absent.
+        let terms = crate::bloom::WorldTerms { life: 0.7, ideas: (4, 11), people: 0.2, time: Some(0.35) };
+        let full = bloom.with_terms(&terms);
+        assert_eq!(
+            (full.life_permille, full.people_permille, full.ideas_designs, full.ideas_builds, full.time_permille),
+            (700, 200, 4, 11, Some(350))
+        );
+        let none_time = bloom.with_terms(&crate::bloom::WorldTerms { time: None, ..terms });
+        assert_eq!(none_time.time_permille, None);
+        let mut snap2 = snap.clone();
+        snap2.world_bloom = Some(full);
+        let back: ConsoleSnapshot = serde_json::from_str(&serde_json::to_string(&snap2).unwrap()).unwrap();
+        assert_eq!(back, snap2);
+        let mut json = serde_json::to_value(&snap2).unwrap();
+        let wb = json["world_bloom"].as_object_mut().unwrap();
+        for k in ["ideas_designs", "ideas_builds", "time_permille"] {
+            assert!(wb.remove(k).is_some());
+        }
+        let old: ConsoleSnapshot = serde_json::from_value(json).unwrap();
+        let ob = old.world_bloom.unwrap();
+        assert_eq!((ob.ideas_designs, ob.ideas_builds, ob.time_permille), (0, 0, None));
+        assert_eq!((ob.life_permille, ob.people_permille), (700, 200));
         // A server that keeps none sends none.
         let none = build_snapshot(
             &ConsoleSettings::default(),

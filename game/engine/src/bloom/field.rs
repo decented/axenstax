@@ -85,6 +85,9 @@ struct Region {
     /// Lived in (Tier 2 S3): from the region's use record, refreshed with each
     /// region scan like `built`.
     lived: f32,
+    /// Does the region have a use record at all (S9: the "time" mean is over
+    /// these only)?
+    used: bool,
     level: f32,
     target: f32,
     last_scan: Option<u64>,
@@ -102,6 +105,7 @@ impl Region {
             commons: false,
             built: 0.0,
             lived: 0.0,
+            used: false,
             level: UNKNOWN_LEVEL,
             target: UNKNOWN_LEVEL,
             last_scan: None,
@@ -205,6 +209,18 @@ impl BloomField {
             mean_eco: known.iter().map(|r| r.eco).sum::<f32>() / n,
             mean_people: known.iter().map(|r| r.p()).sum::<f32>() / n,
             regions: known.len(),
+        }
+    }
+
+    /// Mean lived-in term `u` over the scanned regions that have a use record;
+    /// `None` when there are none (the grown-up panel says "—"). Part of
+    /// [`super::terms::world_terms`].
+    pub fn mean_lived(&self) -> Option<f32> {
+        let used: Vec<f32> = self.regions.values().filter(|r| r.known && r.used).map(|r| r.lived).collect();
+        if used.is_empty() {
+            None
+        } else {
+            Some(used.iter().sum::<f32>() / used.len() as f32)
         }
     }
 
@@ -443,6 +459,7 @@ impl BloomField {
             // Tier 2 S3 — u, on the same cadence. A joined client's table is
             // empty (the authority keeps it), so there it is 0.
             r.lived = input.world.lived_in_term(key.0, key.1);
+            r.used = input.world.has_use_record(key.0, key.1);
             if !r.known {
                 r.known = true;
                 r.target = level::target(r.eco, r.p(), input.creative);

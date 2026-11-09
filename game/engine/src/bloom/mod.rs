@@ -18,6 +18,7 @@ pub mod people;
 pub mod present;
 pub mod probe;
 pub mod scan;
+pub mod terms;
 
 mod glue;
 
@@ -31,6 +32,7 @@ pub use field::{BloomField, TickInput, TickOutput, WorldSummary};
 pub use level::Stage;
 pub use people::{CommonsArea, FeastMarker};
 pub use probe::{ProbeId, ProbeState};
+pub use terms::{world_terms, WorldTerms};
 
 /// One region: one chunk column, `(cx, cz)`.
 pub type RegionKey = (i32, i32);

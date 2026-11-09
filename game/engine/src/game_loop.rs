@@ -3223,6 +3223,7 @@ impl super::GameState {
         self.live_world = None;
         // Bloom state belongs to the world being left.
         self.bloom.reset();
+        self.gardener_told.reset();
         self.bloom_present.reset();
         self.tally.reset();
         self.tally_stock.reset();
@@ -6588,6 +6589,25 @@ impl super::GameState {
                     format!("Satoshi: {}", crate::succession::SATOSHI_PASSED_ON),
                     Instant::now() + Duration::from_secs(6),
                 ));
+            }
+        }
+        // Living world Tier 2 S9 — Satoshi's gardener lines: a Worn Path underfoot,
+        // a Blighted Crop nearby. Local seats only, about once a second, from this
+        // client's own copy of the world (so a joiner hears them too), and never
+        // over another toast or inside a trial.
+        if self.tick_counter.is_multiple_of(crate::gardener_lines::LOOK_EVERY_TICKS)
+            && self.scenario.is_none()
+            && self.toast.as_ref().is_none_or(|(_, until)| Instant::now() >= *until)
+        {
+            let seats: Vec<(usize, glam::Vec3)> = self
+                .players
+                .iter()
+                .enumerate()
+                .filter(|(_, slot)| !slot.combat.dead)
+                .map(|(i, slot)| (i, slot.player.pos))
+                .collect();
+            if let Some(line) = crate::gardener_lines::next_line(&self.world, &mut self.gardener_told, &seats) {
+                self.toast = Some((format!("Satoshi: {line}"), Instant::now() + Duration::from_secs(7)));
             }
         }
         // HP-3 — brigand AI pre-pass. Runs every tick BEFORE the main
@@ -21172,6 +21192,9 @@ impl super::GameState {
                 // takes the slot alone, or sits below the gauge when both show.
                 if self.show_debug && self.graphics.grownup_panel {
                     let stock = self.tally_stock.read(&self.world, Instant::now());
+                    // Tier 2 S9 — the four world terms, from the one function the
+                    // dedicated server's snapshot also calls.
+                    let terms = crate::bloom::world_terms(&self.bloom, &self.world.plan_builds);
                     crate::tally_ui::draw_grownup_panel(
                         &self.renderer.egui.ctx,
                         &screen.viewport,
@@ -21179,6 +21202,8 @@ impl super::GameState {
                         &self.tally,
                         stock,
                         &self.bloom.world_summary(),
+                        &terms,
+                        self.joined(),
                         if sats_gauge { crate::tally_ui::BELOW_RESERVE_GAUGE } else { 0.0 },
                     );
                 }

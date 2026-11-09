@@ -2268,7 +2268,10 @@ impl HostedServer {
                 // Living world S5 — a dedicated server reports its bloom and Tally.
                 let dedicated = self.server.measures_bloom();
                 (
-                    dedicated.then(|| crate::console_snapshot::BloomFigures::from_summary(&self.server.bloom.world_summary())),
+                    dedicated.then(|| {
+                        let terms = crate::bloom::world_terms(&self.server.bloom, &self.server.world.plan_builds);
+                        crate::console_snapshot::BloomFigures::from_summary(&self.server.bloom.world_summary()).with_terms(&terms)
+                    }),
                     dedicated.then(|| crate::console_snapshot::TallyFigures::from(&self.server.tally)),
                 )
             });
