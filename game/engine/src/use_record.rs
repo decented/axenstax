@@ -250,6 +250,11 @@ impl World {
             .sum()
     }
 
+    /// Does region `(cx, cz)` have a use record (a player has stood in it)?
+    pub fn has_use_record(&self, cx: i32, cz: i32) -> bool {
+        self.use_record.get((cx, cz)).is_some()
+    }
+
     /// Bloom's lived-in term for region `(cx, cz)` now.
     pub fn lived_in_term(&self, cx: i32, cz: i32) -> f32 {
         match self.use_record.get((cx, cz)) {

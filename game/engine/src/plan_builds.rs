@@ -131,7 +131,6 @@ impl PlanBuilds {
 
     /// World totals for bloom's "ideas" term and the grown-up panel: how many
     /// distinct designs have been built here, and how many builds in all.
-    #[allow(dead_code)] // BRIDGE: read by the S9 panel — remove this when it lands.
     pub fn ideas_total(&self) -> (u32, u32) {
         let designs = self.rows.values().filter(|c| c.built > 0).count() as u32;
         let builds = self.rows.values().fold(0u32, |n, c| n.saturating_add(c.built));
