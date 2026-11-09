@@ -27,13 +27,13 @@
 
     <header class="hero hero-marketing">
         <h1>Engineering<br>roadmap.</h1>
-        <p class="tagline">Where the project stands, what is waiting on people and real devices, and what comes later. As of 2 October 2026: native release <strong>v0.2.27</strong>, network protocol <strong>v64</strong>. The full roadmap lives on the <a href="{{ docs_url }}/roadmap" style="color:var(--copper);">docs site</a>; this is the short version.</p>
+        <p class="tagline">Where the project stands, what is waiting on people and real devices, and what comes later. As of 9 November 2026: source at <strong>v0.2.32</strong>. The full roadmap lives on the <a href="{{ docs_url }}/roadmap" style="color:var(--copper);">docs site</a>; this is the short version.</p>
     </header>
 
     <!-- WHERE WE ARE -->
     <section style="max-width:1000px;margin:0 auto;padding:2.5rem 2rem 0;">
         <h2 style="text-align:center;color:var(--copper);letter-spacing:1px;">Where we are</h2>
-        <p style="text-align:center;color:var(--stone-muted);max-width:680px;margin:0.4rem auto 0;">An open-source, self-hostable voxel sandbox with its own engine, client and server, written in Rust. The build queue is empty: everything that was ready to build has been built. What is left is work that needs a person or a real device, and a short list of design decisions.</p>
+        <p style="text-align:center;color:var(--stone-muted);max-width:680px;margin:0.4rem auto 0;">An open-source, self-hostable voxel sandbox with its own engine, client and server, written in Rust. What is left is mostly work that needs a person or a real device, and a short list of design decisions.</p>
     </section>
     <section class="features-grid">
         <div class="feature-card">
@@ -81,6 +81,10 @@
             <p>LAN co-op, split-screen and a headless dedicated server with an Operator Console. Online play by contact: join a friend's home-hosted world by their Signet persona or an invite. Relays carry connection setup only, then the connection is direct and strangers get silence. World chat is native-only. Signet QR sign-in and contacts sync are in. An operator can publish their own server through an opt-in Nostr announce; nothing is ever announced automatically.</p>
         </div>
         <div class="feature-card">
+            <h3>Living World</h3>
+            <p>Bloom shows how alive a place is, as colour, sound and life, never as a number (v0.2.30). The Feast, Commons ground, the Grey Quarry trial and a grown-up Tally panel came with it. v0.2.31 added who-built-it block credit, Commons protection, Worn Paths, the Commons Shelf, the Site Board, blight for one-crop fields, Plan credit counts and Plot succession.</p>
+        </div>
+        <div class="feature-card">
             <h3>Sites and distribution</h3>
             <p>Six public sites. A Linux AppImage with an in-place updater, a cross-platform packaging pipeline, and player documentation: wiki, learn journey, tutorials and operator guides.</p>
         </div>
@@ -105,12 +109,12 @@
             <p>Play-testing with volunteer children who are not family. Family play has been a bug hunt, not evidence that the game is fun, so fun is still unvalidated.</p>
         </div>
         <div class="feature-card">
-            <h3>Before the source goes public</h3>
-            <p>Sign-off of the draft privacy page and the Children's Code posture, a fresh public repository, and README and credits polish. Sign-in and pairing already default to decentralised public relays, with one relay list players can edit before they connect; the phone tests are pending.</p>
+            <h3>Privacy follow-ups</h3>
+            <p>A route for people to contact the project about their data, and the log-retention facts for the relay we run. Sign-in and pairing default to decentralised public relays, with one relay list players can edit before they connect; the phone tests are pending.</p>
         </div>
         <div class="feature-card">
             <h3>Release</h3>
-            <p>Native v0.2.27 is cut once the repository is public. Until then the published installer is older than the source.</p>
+            <p>The source is public and at v0.2.32. The published desktop download is still 0.2.18, so it is older than the source.</p>
         </div>
     </section>
 
@@ -121,16 +125,16 @@
     </section>
     <section class="features-grid">
         <div class="feature-card">
-            <h3>Late-joiner chunk streaming</h3>
-            <p>The server backfills entity spawns at join, but the client renders only dropped items from them. World edits and chunks for a late joiner need a call between edit-log replay and chunk push; multiplayer chunk compression rides on the same decision. Anti-X-ray chunk obfuscation is built and tested but not yet in the live send path; it lands with this.</p>
+            <h3>Anti-X-ray in the live send path</h3>
+            <p>Late joiners now get the world's chunks streamed to them. Anti-X-ray chunk obfuscation is built and tested but not applied to that stream yet; it only hides anything once the seed stops shipping to joiners, so it waits on an owner decision.</p>
         </div>
         <div class="feature-card">
             <h3>One simulation, not two</h3>
-            <p>Single-player still runs its own mob and falling-block simulation beside the server's. The fix is to route single-player through a local server, which needs a playtest with the client-side sim removed. The same change settles the host's own position trust.</p>
+            <p>A player who hosts a world now runs one simulation, lent to the server. Single-player still runs its own by default; an opt-in flag routes it through a local server, and making that the default waits on a playtest.</p>
         </div>
         <div class="feature-card">
             <h3>Server-authoritative saving</h3>
-            <p>The save path and the client use two overlapping player structures that will drift. They unify when saving becomes server-authoritative.</p>
+            <p>A joiner's save is now kept by the server that runs the world. The host's own local players still use a separate structure, and the server checks what a joiner holds only in a log for now. They unify when saving becomes fully server-authoritative.</p>
         </div>
         <div class="feature-card">
             <h3>Identity and chat boundaries</h3>
@@ -166,7 +170,7 @@
         </div>
         <div class="feature-card">
             <h3>A Bitcoin-enabled server layer</h3>
-            <p>Design only, and nothing is switched on. It would have to follow the rules below: off by default, parent-controlled, set per server, and driven by a deterministic work-meter.</p>
+            <p>Design only; nothing is switched on, and nothing in the game can be turned into sats. If an operator ever offers one, it is the operator's own optional layer, off by default.</p>
         </div>
     </section>
 
@@ -189,8 +193,8 @@
             <p>Not positioned or marketed as a social network, social media or a chat platform. Playing with friends means building together.</p>
         </div>
         <div class="feature-card">
-            <h3>No chance-based payouts</h3>
-            <p>Proof of Play is educational proof-of-work. Any real-money layer is off by default, parent-controlled and per server, with a deterministic work-meter and never a probabilistic threshold. And no how-to for turning safety off: sensitive features sit behind a real capability boundary, not a disclaimer.</p>
+            <h3>No earning</h3>
+            <p>Proof of Play is educational proof-of-work and nothing in the game converts to sats. Any Bitcoin layer is an optional operator layer on that operator's own server, off by default. And no how-to for turning safety off: sensitive features sit behind a real capability boundary, not a disclaimer.</p>
         </div>
         <div class="feature-card">
             <h3>Retired</h3>
@@ -200,18 +204,12 @@
 
     <section class="cta-block">
         <h2>Contributing</h2>
-        {% if source_url %}
         <p>The source is public on GitHub. Specs and ADRs are the place to understand how it all fits together before you dive in.</p>
-        {% else %}
-        <p>The source repository is private for now and <strong>opening soon</strong>. When it does, the public GitHub and a contributor on-ramp switch on here. Until then, the specs are the place to understand how it all fits together.</p>
-        {% endif %}
         <div class="cta-row">
             <a href="{{ docs_url }}/roadmap" class="cta cta-large">Full roadmap &rarr;</a>
             <a href="{{ docs_url }}" class="cta cta-large">Specs &amp; ADRs &rarr;</a>
             <a href="/built" class="cta cta-large">What's already built &rarr;</a>
-            {% if source_url %}
             <a href="{{ source_url }}" class="cta cta-large" target="_blank" rel="noopener">Source on GitHub &rarr;</a>
-            {% endif %}
         </div>
         <p class="hint" style="margin-top:1.2rem;">Curious what all this means for <em>players</em> rather than builders? That story lives over on <a href="{{ marketing_url }}/roadmap" style="color:var(--stone-muted);text-decoration:underline;">the product roadmap &rarr;</a></p>
     </section>
@@ -223,7 +221,7 @@
             <a href="/built">Built</a> ·
             <a href="/roadmap">Roadmap</a> ·
             <a href="{{ docs_url }}">Specs</a> ·
-            {% if source_url %}<a href="{{ source_url }}" target="_blank" rel="noopener">Source</a>{% else %}<span style="opacity:0.55;">Source (soon)</span>{% endif %} ·
+            <a href="{{ source_url }}" target="_blank" rel="noopener">Source</a> ·
             <a href="{{ marketing_url }}/privacy">Privacy</a>
         </p>
         <p class="hint">Built by Staxolottle &amp; Axolittle. Open source under the moonshot.</p>

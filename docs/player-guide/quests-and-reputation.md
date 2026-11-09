@@ -123,7 +123,7 @@ Reputation **persists across save/load**. The 20 minutes you spent grinding to B
 
 ## What sats are
 
-Quest rewards are scored in "sats" — but today, on every server, that's just an in-game number. Nothing converts to real money, there's no wallet, and no controls exist yet to change that. See **[Bitcoin & Sats](bitcoin-and-sats.md)** for the kid-friendly version and what's still to come.
+Quest rewards are scored in "sats" — but today, on every server, that's just an in-game number. Nothing converts to real money, there's no wallet, and no setting changes that. See **[Bitcoin & Sats](bitcoin-and-sats.md)** for the kid-friendly version.
 
 Either way the **items + reputation always pay out**. Even a Barter-mode kid gets the full gameplay reward — the sats line is just suppressed.
 

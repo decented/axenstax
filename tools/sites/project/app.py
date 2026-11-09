@@ -5,10 +5,8 @@ The builder front door: what the engine is, why it's a full custom build, how to
 run your own server, and where the specs live. Lives on axenstax.org in production
 (the .org = open-source project, .com = the product). Single page.
 
-NOTE: the source repo is PRIVATE for now (opening soon). The "Source" / contribute
-surface is therefore HELD — the page shows "source opening soon" instead of a
-public GitHub link that would 404 for outsiders. Flip SOURCE_URL on (env) the day
-the repo goes public; that's the only change needed here.
+NOTE: the source repo is public (https://github.com/decented/axenstax). SOURCE_URL
+defaults to it; set the env var only to point the "Source" links somewhere else.
 """
 
 import logging
@@ -33,9 +31,8 @@ DOCS_URL = os.environ.get("DOCS_URL", "https://localhost:8095")
 LEARN_URL = os.environ.get("LEARN_URL", "https://localhost:8098")
 WIKI_URL = os.environ.get("WIKI_URL", "https://localhost:8097")
 MARKETING_URL = os.environ.get("MARKETING_URL", "https://localhost:8096")
-# HELD until the repo is public. Blank => the template shows "source opening soon"
-# rather than a link that 404s. Set to https://github.com/decented/axenstax on open.
-SOURCE_URL = os.environ.get("SOURCE_URL", "").strip()
+# The repo is public. Override with the SOURCE_URL env var only to point elsewhere.
+SOURCE_URL = os.environ.get("SOURCE_URL", "").strip() or "https://github.com/decented/axenstax"
 
 app = FastAPI(title="Axe'n'Stax — Project")
 

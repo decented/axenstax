@@ -22,7 +22,7 @@ version = "0.2.32"                       # keep in step with game/engine/Cargo.t
 identifier = "com.axenstax.engine"      # reverse-DNS; alphanumeric/-/. only
 # Copy rule: sovereignty-first, never "earn"/"Bitcoin" on a public surface
 # (UK FCA promotion perimeter + permanent word guards — see CLAUDE.md red lines).
-description = "Axe'n'Stax — the sovereign voxel sandbox: build, explore, and host your own worlds."
+description = "Axe'n'Stax: a block-building world you own. Build, farm and explore, then make places come alive. Self-hostable."
 authors = ["Decented"]
 
 # Resolved from --out-dir at package time (the staged release binary).

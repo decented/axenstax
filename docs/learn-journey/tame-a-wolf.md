@@ -42,7 +42,7 @@ A tamed wolf is **loss, not loot** — if it's killed it drops **nothing**, and 
 
 You've got a companion. The world feels a lot less lonely — and a fair bit less dangerous — with a wolf at your heel.
 
-**→ Next: [What the Hash Means](what-the-hash-means.md)** — the secret running under every swing.
+**→ Next: [Where the Satori Hides](what-the-hash-means.md)** — the real maths that decides where the rarest gem is.
 
 ---
 

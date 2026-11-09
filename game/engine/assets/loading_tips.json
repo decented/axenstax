@@ -1,6 +1,6 @@
 [
   { "kind": "tip", "title": "Hold to mine", "body": "Press and hold on a block to keep mining — release when it breaks. Tougher blocks take longer." },
-  { "kind": "tip", "title": "Proof of Play", "body": "Every strike runs a real hash. Watch it flash on each hit — that's the proof of your work." },
+  { "kind": "tip", "title": "Proof of Play", "body": "Deep in the deepslate, a real cryptographic puzzle decides where the Satori hides." },
   { "kind": "tip", "title": "Your hotbar", "body": "Pick what's in your hand with the number keys 1 to 9 or the scroll wheel (on a touchscreen, tap the slots along the bottom)." },
   { "kind": "tip", "title": "Crafting table", "body": "Place a crafting table and open it for the full grid — far more recipes than your pocket crafting." },
   { "kind": "tip", "title": "Recipe book", "body": "Stuck on a recipe? Open the recipe book and tap a card to auto-fill the grid." },
@@ -21,5 +21,8 @@
   { "kind": "tip", "title": "Find any item", "body": "Press B to search every item in the game. In Creative, click one to put it in your hand." },
   { "kind": "tip", "title": "Forgot a key?", "body": "Press H for a controls cheat-sheet, or open the pause menu with Esc and choose Controls." },
   { "kind": "tip", "title": "Watch your landing", "body": "A fall of more than 3 blocks hurts: half a heart for every extra block. Land in water and it costs you nothing." },
-  { "kind": "tip", "title": "Hold your breath", "body": "You can stay underwater for about 15 seconds. Swim up for air before the bubbles run out." }
+  { "kind": "tip", "title": "Hold your breath", "body": "You can stay underwater for about 15 seconds. Swim up for air before the bubbles run out." },
+  { "kind": "tip", "title": "A feast", "body": "A feast needs four things to eat and someone to share them with." },
+  { "kind": "tip", "title": "Worn paths", "body": "Where people walk, the grass wears into a path." },
+  { "kind": "tip", "title": "A shared shelf", "body": "A shelf anyone can take from, and anyone can fill." }
 ]

@@ -2,7 +2,7 @@
 
 **A structured, LLM-readable knowledge base about the AxeNStax game world — built so an AI assistant can discuss the game, answer player questions, and generate tutorials on the fly, accurately and kid-safely.**
 
-- **Created:** 2026-06-22. **Verified against engine code on:** 2026-06-22.
+- **Created:** 2026-06-22. **Verified against engine code on:** 2026-06-22, except pages 11, 20 and 21, which were verified on 2026-11-09.
 - **Status:** Living. **Regenerate from the code whenever the game changes** (see Accuracy Rule).
 
 ---
@@ -14,7 +14,7 @@
 
 ## How to use it (for the assistant)
 1. **Load `00-assistant-persona-and-rules.md` first** — it is your behavioural contract (voice, kid-safety, the Bitcoin/earning rules, how to generate tutorials). It overrides anything else if they conflict.
-2. Answer from the **knowledge pages (01–18)**. They are code-verified.
+2. Answer from the **knowledge pages (01–18 and 21)**. They are code-verified.
 3. Whenever a "you can do X" claim is at stake, consult **`99-accuracy-and-deferred.md`** — the boundary between *in the game* and *deferred*. **Never promise a deferred feature.**
 4. To teach, use **`20-tutorial-seeds.md`** — grow a seed into a live, one-step-at-a-time tutorial; don't read a script.
 
@@ -47,6 +47,7 @@ This corpus is **verified against the engine source** (`game/engine/src/`). It i
 | `17-world-biomes-structures.md` | Biomes, world generation, structures (villages/mineshafts/ravines/hideouts), world creation, the Genesis Block. |
 | `18-economy-and-vendors.md` | Vendors, tip jar, plots, bazaar, market hubs, auctions, rail freight — **sovereignty-framed, notional sats, no real earning.** |
 | `20-tutorial-seeds.md` | A library of tutorial seeds the assistant expands on the fly (first 15 minutes, shelter before night, tool ladder, farming, taming, cooking, claim & trade, the Genesis Block). |
+| `21-the-living-world.md` | Act two: what grey / stirring / alive look and sound like, the Feast, Commons, Commons Shelf, Site Board, Worn Paths, blight, the Grey Quarry, the grown-up panel. **Never a score, never about a person.** |
 | `99-accuracy-and-deferred.md` | **The boundary.** What's IN the game vs PARTIAL vs DEFERRED. Consult whenever a claim is at stake. |
 
 *(Numbering leaves room: 0x = foundations, 1x = gameplay knowledge, 2x = teaching, 9x = meta/accuracy.)*

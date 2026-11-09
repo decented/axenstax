@@ -43,14 +43,11 @@ none of it real money.
 
 ## Whether the score shows as "sats" at all
 
-A server operator can flip a `bitcoin_enabled` setting, and there's a
-per-player flag that's meant to gate whether a signed-in kid sees sats
-framing at all — that's the design for a future parent-controlled toggle.
-Today that per-player flag has no switch anywhere: it's fixed off in the
-game's code, for every player, on every server, regardless of the operator
-setting. So right now trade value always shows as a plain in-game score,
-never as sats framing, and Vendor Block's Barter mode (swap items, no
-numbers) always works regardless.
+It doesn't. Trade value always shows as a plain in-game score,
+never as sats framing, on every world and every server. Nothing in the game
+converts to money. A server's operator can run their own optional Bitcoin layer on their own
+server, but it is theirs, and it is off by default. Vendor Block's Barter mode
+(swap items, no numbers) always works regardless.
 
 ## Tipping a Plaque
 

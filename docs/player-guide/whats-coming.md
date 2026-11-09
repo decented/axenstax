@@ -4,7 +4,7 @@ This page is a preview of what's **shipped recently**, what's **partway there**,
 what's **still to come** — so if you're wondering "is X in the game?", check here first.
 
 The game is in **alpha**. Things change fast. This page reflects the state as of
-**2026-10-04** (re-checked against the code in the gap audit; entries from before that date were left as written); the authoritative, up-to-the-minute list is `docs/foundations/README.md`.
+**2026-10-04** (re-checked against the code in the gap audit; entries from before that date were left as written), plus the Living World section below, added 2026-11-09; the authoritative, up-to-the-minute list is `docs/foundations/README.md`.
 
 ## Recently shipped (no longer "coming")
 
@@ -33,7 +33,7 @@ the relevant Player Guide pages:
   `/we` region tools (set/replace/walls/copy/paste/stack) plus Minecraft `.schem` import.
 - **Art galleries & exhibits** — show off hi-res art in-world with `/exhibit` + a kiosk
   showcase mode. See **[Art Galleries](art-galleries.md)**.
-- **Challenge Board (J)** and **Rig Studio (Y)** — around **45 authored Trials** that nudge
+- **Challenge Board (J)** and **Rig Studio (Y)** — over **30 authored Trials** that nudge
   you to try specific features across nearly every game system, and an in-game tool to author
   animated rigs that save with your world: pick a skeleton, pick a motion (Walk / Idle /
   Bounce), assign a block to each limb, Spawn. Limbs whose block has a baked micro-model are
@@ -113,7 +113,7 @@ And a lot more since then (August–September 2026):
   top of Walk/Idle. See **[Controls](controls.md)**.
 - **`.axeprofile`** — "Export everything" (web) bundles every browser world plus your
   Trials records into one file; "Import a web profile…" (desktop) brings them in, keeping
-  both copies if a name collides. See **[Cloud Saves & the Stash Column](cloud-and-stash.md)**.
+  both copies if a name collides. See **[Moving Your Worlds](cloud-and-stash.md)**.
 - **Crosshair hover labels** on every power device (fuel gauge, charge, on/off) — aim at
   one and it tells you its state without opening anything.
 - **Mipmaps + anisotropic filtering**, an opt-in Graphics dial that smooths distant
@@ -130,6 +130,28 @@ And a lot more since then (August–September 2026):
   your IP address and when you check for messages); the game itself connects the two
   computers directly, so you and your friend can see each other's IP addresses. **Brand new** — not yet tried by the team across two real houses.
   See **[Play with a friend online](play-with-a-friend-online.md)**.
+
+And the **Living World** (November 2026). Places in the world now show how alive they are,
+and people can look after them together:
+
+- **Bloom** — colour, birdsong, fireflies and swaying plants show how alive a place is. A
+  stripped place goes grey and still, and comes back as you plant, water and bring animals.
+  See **[How Places Come Alive](bloom.md)**.
+- **The Feast** — craft a Feast Table and share a meal with the players and villagers nearby.
+  See **[The Feast](the-feast.md)**.
+- **Commons** — a Commons Stone declares common ground that anyone can build on, and the
+  blocks people build there are looked after. See **[Commons](commons.md)**.
+- **The Grey Quarry** — a Trial about bringing a stripped quarry back to life. See
+  **[The Grey Quarry](grey-quarry.md)**.
+- **Blight** — a huge one-crop field can fall sick; mixed fields stay well. See
+  **[Blight](blight.md)**.
+- **The Commons Shelf** and **the Site Board** — a shared chest for a whole place, and a
+  shared job list for a crew. See **[The Commons Shelf](commons-shelf.md)** and
+  **[The Site Board](site-board.md)**.
+- **Who built it** — block credit kept on the world's own computer, credit lines and build
+  counts on a Plan's plaque, Worn Paths, and a friend's Plot passing to the village after 60
+  real days away. See **[Who Built It](who-built-it.md)**.
+- **The Tally** — an off-by-default panel for grown-ups. See **[The Tally](the-tally.md)**.
 
 ## Partially shipped — finish-the-loop work pending
 
@@ -168,13 +190,12 @@ economy are what's left of Phase 3.
 - **The wider player economies** — markets, services, combat, PvP, land, knowledge and
   spectator economies beyond farming.
 
-## Known gaps (checked 2026-10-04)
+## Known gaps (multiplayer line re-checked 2026-11-09)
 
 - **Mill, Oven and Aging Rack** blocks exist but cannot be used yet (no interaction, no recipes).
 - **Tin and Amethyst** have no source in the world yet, so Bronze cannot be made in Survival.
-- **Multiplayer:** a player who joins late sees items dropped on the ground but not the mobs or
-  carts that were already there, and does not receive earlier world edits. A dedicated server
-  does not run pistons, hoppers, kegs, dispensers or crops.
+- **Multiplayer:** a dedicated server still spawns no village population, and joined players
+  cannot take villager quests yet.
 - **Touch and gamepad** do not have every keyboard action yet (see **[Controls](controls.md)**).
 
 ## Blocked (waiting on the owner or upstream)
@@ -189,10 +210,10 @@ economy are what's left of Phase 3.
 - **Single-player → server unification** — single-player still runs a slightly different
   simulation path from multiplayer. Merging them is a high-risk refactor that wants Axolittle
   present for phase-by-phase regression.
-- **Real-money layer** — not built, and not promised. The Proof-of-Play hash, Satori veins and
-  Genesis Block are live as educational proof-of-work and in-game scoring; sats numbers in
-  trades are an internal score only. Any future layer would be off by default, per server and
-  parent-controlled.
+- **Real-money layer** — not built, and not promised. Nothing in the game converts to money.
+  Satori veins use a real Proof-of-Play hash, and the Genesis Block is live, as educational
+  proof-of-work and in-game scoring; sats numbers in trades are an internal score only. An
+  operator's own Bitcoin layer on their own server is theirs, optional and off by default.
 
 ## Want to track progress?
 
@@ -222,11 +243,11 @@ To prevent confusion:
 - **Llama.** Deferred. (Wolves, Cats, Foxes and Parrots are all in — see [Wolves](wolves.md) and [Combat & Mobs](combat-and-mobs.md).)
 - **Coloured wool / dyeing live sheep.** The dyes themselves **shipped** — but dyeing a live
   sheep or making coloured wool isn't in yet.
-- **Parental control over world chat.** World chat shipped (see above), but a guardian
-  dialling it down or off isn't wired yet — the plumbing it'll eventually use doesn't exist
-  upstream yet either.
+- **Parental control over world chat.** World chat shipped (see above), but there is no
+  guardian control over it. The only limit is a local policy file that can lower what a
+  player may do, never raise it.
 - **Authoring your own Experience.** You can adopt a skin or play an Experience someone else
-  has published (see **[Cloud Saves & the Stash Column](cloud-and-stash.md)**), but there's
+  has published (see **[Minigames](minigames.md)**), but there's
   no in-game tool yet for building a new Experience of your own to publish.
 - **Others seeing your worn skin in multiplayer.** Your skin shows on your own screen; other
   players seeing it too is on the way.

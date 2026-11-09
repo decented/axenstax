@@ -1,4 +1,4 @@
-<!-- SOURCE: synthesised from the verified corpus pages 10–18 + 99 | All steps must stay true to those pages. Verified 2026-06-22. -->
+<!-- SOURCE: synthesised from the verified corpus pages 10–18, 21 + 99 | All steps must stay true to those pages. Verified 2026-11-09. -->
 
 # 20 — Tutorial Seeds (for live, on-the-fly tutorials)
 
@@ -26,10 +26,10 @@
 ## Seed: From wood to better tools ("climb the tool ladder")
 - **Goal:** progress wood → stone → iron → diamond → Satori tools.
 - **Prerequisites:** a crafting table; a pickaxe.
-- **Step outline:** wooden pickaxe mines **stone** → stone pickaxe lets you harvest **iron ore** (smelt it in a **furnace** → iron ingots) → an **iron** pickaxe is what lets you harvest **diamond** → diamond (and the rare **Satori**) are the top tiers.
+- **Step outline:** wooden pickaxe mines **stone** → stone pickaxe lets you harvest **iron ore** (smelt it in a **furnace** → iron ingots) → an **iron** pickaxe is what lets you harvest **diamond** → a **diamond** pickaxe is what lets you find the rare **Satori** in deep deepslate.
 - **Age-notes:** the ladder is the fun — each tier unlocks the next. Celebrate each upgrade.
 - **Fun framing:** "Every better tool opens up the next treasure — want to go iron-hunting?"
-- **Accuracy (page 11):** the tier-gate is real — you need at least a **stone** pickaxe for iron, and an **iron** pickaxe for diamond/Satori. Wrong/too-weak tool = no drop. Only five tool materials exist (Wood/Stone/Iron/Diamond/**Satori**); there's **no gold tier**.
+- **Accuracy (page 11):** the tier-gate is real — you need at least a **stone** pickaxe for iron, an **iron** pickaxe for diamond ore, and a **diamond** (or better) pickaxe for the Satori hidden in deep deepslate. Wrong/too-weak tool = no drop. Only five tool materials exist (Wood/Stone/Iron/Diamond/**Satori**); there's **no gold tier**.
 
 ## Seed: Start a little farm ("grow your own food")
 - **Goal:** a working crop patch the player planted themselves.
@@ -65,8 +65,8 @@
 
 ## Seed: The legend of the first gem ("find the Genesis Block")
 - **Goal:** a long, optional, aspirational quest — uncover the world's first **Satori**.
-- **Prerequisites:** an **iron** pickaxe (Satori needs at least iron to harvest); willingness to dig deep.
-- **Step outline:** gear up (iron pickaxe, food, torches/light, maybe armour) → mine **deep** into the deepslate layers → search for the rare **Satori** veins → the **first Satori** uncovered triggers the **Genesis Block** — your world's founding moment.
+- **Prerequisites:** a **diamond** pickaxe (or better; Satori needs at least a diamond pickaxe, see page 11); willingness to dig deep.
+- **Step outline:** gear up (diamond pickaxe, food, torches/light, maybe armour) → mine **deep** into the deepslate layers → search for the rare **Satori** veins → the **first Satori** uncovered triggers the **Genesis Block** — your world's founding moment.
 - **Age-notes:** frame as an epic, far-off legend, not a chore. It's hard and deep — set expectations kindly.
 - **Fun framing:** "There's a legendary first gem hidden deep in every world — finding it marks the day your world's story really begins. Want to go deep one day?"
 - **Accuracy (pages 01, 11, 17):** the Genesis Block is a **one-per-world lore/achievement event** on the first Satori — **never** a payout or prize to cash in.

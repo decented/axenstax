@@ -99,7 +99,7 @@ In the Wardrobe panel:
 
 Each block holds up to **16** designs. Pin a 17th and the oldest design you aren't currently wearing is dropped to make room.
 
-> **Adopting others' designs.** A skin you adopt from someone else's Stash Column lands **in the Wardrobe, switched off** — open the Wardrobe (**K**) and **Set active** to wear it. It never silently replaces your active pick. See [Cloud Saves & the Stash Column](cloud-and-stash.md).
+> **Adopting others' designs.** A skin you adopt from someone else lands **in the Wardrobe, switched off** — open the Wardrobe (**K**) and **Set active** to wear it. It never silently replaces your active pick.
 
 ## Power-user chat commands
 
@@ -125,7 +125,7 @@ The blow-up gesture is the main way to work, but the older `/ws` chat commands s
 
 ## Sharing your designs
 
-Your designs are **yours** — each carries your Nostr name (npub) and a record of what it was based on. You can publish a design for others to find and adopt, and a published design is signed so nobody can forge one under your name. Adopting someone else's design is safe: it's checked over before it ever loads. This sharing flow is **fully live today**, not a preview — use `/ws follow`, `/ws browse`, and `/ws adopt` from chat to find and pull in others' published designs (see the command table above). The sharing side rides the same Stash plumbing as cloud saves — see [Cloud Saves & the Stash Column](cloud-and-stash.md).
+Your designs are **yours** — each carries your Nostr name (npub) and a record of what it was based on. You can publish a design for others to find and adopt, and a published design is signed so nobody can forge one under your name. Adopting someone else's design is safe: it's checked over before it ever loads. This sharing flow is **fully live today**, not a preview — use `/ws follow`, `/ws browse`, and `/ws adopt` from chat to find and pull in others' published designs (see the command table above).
 
 ## Coming soon
 
@@ -137,5 +137,4 @@ Your designs are **yours** — each carries your Nostr name (npub) and a record 
 
 - [Make It Your Own](https://learn.axenstax.com/docs/journey/learn-journey/make-it-your-own.md) — the hands-on first-reskin lesson.
 - [Dyes, Fibre & Magnesium](dyes-fibre-and-magnesium.md) — the 16 paint colours.
-- [Cloud Saves & the Stash Column](cloud-and-stash.md) — publishing and adopting designs.
 - [Cosmetics & Skins](cosmetics.md) — changing your own avatar's look.

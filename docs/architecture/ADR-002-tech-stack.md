@@ -1,5 +1,7 @@
 # ADR-002: Core Tech Stack
 
+> **SUPERSEDED 2026-11-08:** the work-meter and any proof-of-play payout are retired. Nothing in the game converts to sats. Kept for history.
+
 **Status**: Accepted
 **Date**: 2026-03-03
 

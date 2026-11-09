@@ -11,6 +11,7 @@
 
 <div class="doc-list">
     {% for doc in docs %}
+    {% if doc.group %}<h2 class="doc-group">{{ doc.group }}</h2>{% endif %}
     <a href="/docs/{{ section_slug }}/{{ doc.path }}" class="doc-item {% if not doc.exists %}doc-missing{% endif %}">
         <div class="doc-title">{{ doc.title }}</div>
         <div class="doc-short">{{ doc.short }}</div>

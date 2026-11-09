@@ -66,7 +66,18 @@ def test_privacy_page_scopes_claims_by_desktop_version():
     assert "complete list for the game and its sites" in text
     assert "carries its own notice" in text
     assert "If it isn't here, we don't collect it" not in text
-    assert "Last updated: 2 November 2026" in text
+    assert "Last updated: 9 November 2026" in text
+
+
+def test_privacy_page_discloses_the_per_block_author_record():
+    """2026-11-09 (Tier 2): a world remembers which signed-in player placed each
+    block. Code: saved with the world (`block_authors`), set to None on every
+    export (`world_archive`), and the joiner packet carries counts only."""
+    text = client.get("/privacy").text
+    assert "A world remembers which signed-in player placed each block" in text
+    assert "left out when a world is exported" in text
+    assert "is never sent to us" in text
+    assert "never shows it per person" in text
 
 
 def test_privacy_page_feedback_is_ended_and_says_what_0_2_18_did():

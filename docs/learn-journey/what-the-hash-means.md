@@ -1,32 +1,42 @@
-# What the Hash Means
+# Where the Satori Hides
 
-*Here's the secret hiding under the whole game: every single time your pickaxe hits a block, it works out a real piece of Bitcoin maths. Let's take a look at it.*
+*Deep underground, one gem is hidden better than all the rest. Here's how the game decides where, and a peek at the real maths behind it.*
 
-## See it for yourself
+## What is a hash?
 
-Press **F3** to open the info overlay, then mine a block and watch. You'll see a long string of letters and numbers flash up. That's a **hash** — a scramble the game works out from the block, from you, and from the exact moment you hit it. It's the **same kind of maths real Bitcoin mining uses.** Every swing of your pickaxe does a tiny bit of that work.
+A **hash** is a scramble. Feed some numbers into a hash and out comes a long string of letters and numbers. Change the input even a tiny bit and the whole string changes. Nobody can work it backwards, and nobody can guess it, so it makes a very good secret.
 
-That's what **"Proof of Play"** means: you're not pretending to mine, you really are. It's there to **show you how mining actually works** — by letting you do it. Hidden, but visible. Visible, but harmless.
+Bitcoin uses hashes like this. The game uses one called **SHA-256**.
 
-## The hash does real work, too
+## The Satori vein
 
-That same hash isn't just for show — it's the exact thing deciding whether the block you're swinging at, deep underground with a diamond pickaxe, turns up a **Satori**: the rarest find in the game. No luck potion, no shop, nothing to buy — just real effort, honestly checked.
+The **Satori** is the rarest gem in the game. There is no Satori ore. Instead, some **natural deepslate**, deep down in the dark, is a secret vein, and the game uses a real hash to decide which blocks.
+
+To find one:
+
+- Go **deep underground**, to the natural deepslate.
+- Carry a **Diamond pickaxe** or better. A weaker pickaxe finds nothing.
+- Mine into **fresh** deepslate rather than rock that's already standing open in a cave.
+
+Most deepslate is just deepslate. Some of it hides a Satori. You only learn which when you break it.
+
+Mining grass, dirt and ordinary stone doesn't run a hash at all. Only the deepslate hunt does.
+
+## Why it's a real hash
+
+This is **proof of work**, the same idea real Bitcoin is built on. It's there to **show you how proof-of-work works**, by letting you take part in a small piece of it. On a server, the secret behind it stays on the server, so nobody can peek and cheat.
+
+A Satori is a gem. You keep it, you can build tools and armour with it, and you can trade it by Barter. **It never pays anyone, and nothing in the game turns into money.**
 
 ## About "sats" and Bitcoin
 
-You might spot the word **sat** somewhere in the game — it's the tiniest piece of a Bitcoin. Bitcoin support in Axe'n'Stax is an optional layer a server's owner can choose to switch on for their own self-hosted world, and it's **off everywhere by default.** It isn't finished yet, so right now, on every world, no real money changes hands — full stop. There's no wallet, and nothing to bank.
+You might spot the word **sat** somewhere in the game. It's the smallest piece of a Bitcoin. In this game it is only a score: nothing you do turns into real money.
 
-Whenever it does land, the design stays the same as everything else here: a **parent switches it on**, never you, and any reward is a fixed, known amount for real effort — the same hash you just watched — never a roll of the dice.
+## 🎉 Nicely done
 
-## Don't play for the money
+You've seen the maths under the magic, and you know where the rarest gem hides.
 
-Even once that layer exists, this was never meant to be a way of making money — the point is that the maths behind every hash is **real**, and now you've seen it happen for yourself.
-
-## 🎉 You did it — that's the twelve!
-
-You've seen the maths under the magic. That hash on every swing is the one thing no other game has, and now you know exactly what it's for.
-
-And that's the whole journey done — you can mine, build, cook, survive, fight and farm, you've got your own chest and a wolf at your side. **Fancy more?** Try **[Save Your First Build](capture-a-schematic.md)**, **[Make It Your Own](make-it-your-own.md)** to paint your world however you like, or test yourself against **[Hash Dash](win-hash-dash.md)** and **[Satori Rush](win-satori-rush.md)**.
+One step left: **→ Next: [Bring a Place Back to Life](bring-a-place-back-to-life.md)**. It's the part of the game that's about what you *make*, and it's a lovely place to finish.
 
 ---
 

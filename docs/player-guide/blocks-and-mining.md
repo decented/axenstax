@@ -186,7 +186,7 @@ Placeable blocks you interact with to make, store, or trade things.
 | **Drafting Table** | Gives a villager the **Builder** profession. |
 | **Tip Jar** | Lets others tip you 1 / 5 / 25 / 100 sats. |
 | **Repair Bench** | Repairs a damaged tool with tier material plus a small sats tax. |
-| **Plot Marker** | Claims a 32×32 region as yours — anti-grief. |
+| **Plot Marker** | Claims a 33×33 region as yours — anti-grief. |
 | **Market Bell** | Marks out a 32-block Market Hub. |
 | **Auction Block** | Runs a timed auction. |
 | **Bazaar Block** | Sells your held stack for its trade value in sats — the market of last resort. |

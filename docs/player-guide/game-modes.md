@@ -60,7 +60,7 @@ Since Easy/Normal/Hard are functionally the same today, the difficulty pick most
 
 Regardless of mode:
 
-- **Bitcoin / sats.** Proof of Play hashes still run. Quest sats still pay. The Charter parent flag + server policy still apply.
+- **Bitcoin / sats.** Sats stay off in both modes, and nothing converts to money. Satori veins still use the Proof of Play hash. Quest scores still show.
 - **Villages.** Villagers, quests, reputation all work in both modes. Killing a villager still costs reputation in Creative.
 - **Saves.** Everything persists across save/load in both modes.
 

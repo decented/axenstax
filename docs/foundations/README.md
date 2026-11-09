@@ -4,8 +4,8 @@ This folder holds **foundation-level engine specs** that are ready for a fresh s
 
 When the user asks **"what next"**, list what's here with status `READY TO BUILD`.
 
-For feature *requests / ideas* that aren't yet ready-to-build specs (GitHub feature issues,
-playtest wishes), see the distilled front door: [`../feature-backlog.md`](../feature-backlog.md).
+Feature requests and ideas that are not yet ready-to-build specs are kept in the
+internal backlog, not in this repository.
 
 > **2026-07-09 — reconciliation pass.** The give-aliases-and-dead-stash spec
 > (below) **✅ SHIPPED same day**, `main@2a39c89a` — both tasks done, `check.sh`
@@ -22,6 +22,13 @@ playtest wishes), see the distilled front door: [`../feature-backlog.md`](../fea
 
 ## ▶ ACTIVE — ready to build now
 
+- **Living World (act two)** →
+  [`../superpowers/specs/2026-11-08-living-world-tier1.md`](../superpowers/specs/2026-11-08-living-world-tier1.md)
+  (bloom, the Feast, Commons, the Grey Quarry, the Tally) and
+  [`../superpowers/specs/2026-11-09-living-world-tier2.md`](../superpowers/specs/2026-11-09-living-world-tier2.md)
+  (authorship, Worn Paths, Plan lineage, succession, the Commons Shelf, Site Boards, blight)
+  — ✅ **BUILT** as v0.2.30 (Tier 1) and v0.2.31 (Tier 2). Not ready to build: further tiers
+  (consequences of bloom) are not specified. The numbered rules-at-a-glance are Spec 05 §16.
 - **C3: the server owns a joiner's inventory (real-multiplayer epic)** →
   [`2026-10-07-c3-server-owned-inventory.md`](2026-10-07-c3-server-owned-inventory.md)
   — ✅ **BUILT, no longer ready to build** (C3a to C3c and the per-npub sidecar are in;

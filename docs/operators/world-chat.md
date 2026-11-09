@@ -196,6 +196,8 @@ Stated plainly so you do not plan around it:
 - **Proximity voice** — not started, by design. It will get its own guardian
   permission; permitting typing is not permitting an open microphone.
 - **Charter comms clause** — Charter has no comms capability yet, so a child's
-  ceiling currently comes from a guardian-signed local file
-  (`~/.config/axenstax/guardian-policy.json`), signature-checked on load. An
-  unsigned or altered file is ignored entirely. The upstream ask is filed.
+  ceiling currently comes from a local policy file
+  (`~/.config/axenstax/guardian-policy.json`) that can only lower it below the
+  safe default, never raise it. The file carries no proof of who wrote it, and
+  the game does not check one: any signature or key in it is ignored. The
+  upstream ask is filed.

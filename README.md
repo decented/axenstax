@@ -3,6 +3,8 @@
 An open-source, self-hostable voxel sandbox. Custom engine, custom client,
 custom server — nothing forked or ceiling-limited from an existing project.
 
+When you can make anything, the game is making places alive: bloom, feasts and common ground, with credit that travels with every idea.
+
 **Sovereignty first.** You own your world, your identity, and the server it
 runs on. Play solo, self-host with friends, or run a public server — the
 game is fully playable, and fully fun, with no money involved at all. The

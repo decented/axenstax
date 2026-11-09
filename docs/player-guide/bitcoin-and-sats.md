@@ -9,48 +9,34 @@ that means today.
 A **sat** (satoshi) is the smallest unit of **Bitcoin**. That's it — a unit
 name, like "penny" or "cent."
 
-## Switched off everywhere, right now
+## Switched off everywhere
 
-Bitcoin is a designed-but-not-built layer. Today, on **every** world —
-sandbox or server, whatever a server operator sets — **no sats show up, no
-real money changes hands, and there's no wallet.** The plumbing that would
-one day turn a hash into a real Lightning payment isn't wired up yet, so
-nothing anywhere converts to anything spendable.
+The game itself has no Bitcoin in it. On **every** world, sandbox or server, **no sats show up, no real money changes hands, and there's no wallet.** Nothing in the game converts to anything spendable.
 
-You don't need Bitcoin switched on to enjoy the game. Items, reputation,
+If a server's operator ever runs a Bitcoin layer, it is **their own, optional layer on their own server**, and it is **off by default**. The game itself does not turn anything you do into sats.
+
+You don't need Bitcoin to enjoy the game. Items, reputation,
 quests, villages, Knights — all of it works fully with sats off. Barter mode
 covers trading without ever mentioning a number.
 
-## No controls to set yet
+## Nothing to turn on
 
-Some day this will be a parent's decision, per child, per server — that's
-the design. Right now there's nothing to turn on: the per-player flag that
-would let sats show up is fixed **off** in the game's code, and there's no
-menu, command, or setting anywhere that changes it. If you see older
-material (or an early build) mention a "guardian Bitcoin flag" being live,
-that's describing the plan, not something switched on today.
+There's no menu, command or setting anywhere that switches sats on. The per-player flag that would let sats show up is fixed **off** in the game's code. If you see older material (or an early build) mention a "guardian Bitcoin flag" being live, that's describing an old plan, not something in the game today.
 
 ## Proof of Play — real maths, not a payout
 
-Every pickaxe strike runs a real **HMAC-SHA256 hash** — the same kind of
-maths Bitcoin mining uses. Press **F3** to watch it happen. This is there to
-**show you how proof-of-work actually works**, by doing it, and on a
-server, what you find is decided by the server using a secret the game never
-sees. (Hiding buried ore from x-ray-style cheats is built but not
-switched on yet.) The hash itself has never paid anything out, on any world,
-ever — it just runs, visibly, for the education and the anti-cheat.
+**Proof of Play** is a real **HMAC-SHA256 hash** — the same kind of maths Bitcoin mining uses. It runs only in one place: when you break **natural deepslate**, deep underground, with a **Diamond pickaxe or better**. The hash decides whether that block hides a **Satori**, the rarest gem in the game.
+
+Plain mining runs no hash. Grass, dirt and ordinary stone do not, and nothing on screen shows a hash.
+
+It is there to **show you how proof-of-work actually works**. On a server, the secret behind the hash stays on the server, so nobody can peek at where a Satori hides. A Satori is a gem you keep and trade by Barter. It has no sats value, and it has never paid anything on any world. (Hiding buried ore from x-ray-style cheats is built but not switched on yet.)
 
 For the design spec, see `docs/spec/06-bitcoin-integration.md` (a design
 document — nothing in it is live).
 
 ## A word on safety
 
-Axe'n'Stax is **not a money transmitter**. The platform is designed never to
-hold your funds — the intention, once real Lightning settlement exists, is
-that sats flow straight to your own wallet, never through a central
-AxeNStax account. Right now that settlement step isn't built at all, so
-nothing moves as real money in any direction: you can't lose money playing,
-and today's game has no sats to show, let alone spend.
+Axe'n'Stax is **not a money transmitter**. The game never holds your funds, and nothing in it moves as real money in any direction. You can't lose money playing, and today's game has no sats to show, let alone spend.
 
 See **[Trade Value](trade-value.md)** for how the in-game economy scoring
 works without any Bitcoin involved.

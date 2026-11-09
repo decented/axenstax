@@ -35,8 +35,8 @@ DOCS_URL = os.environ.get("DOCS_URL", "https://localhost:8095")
 LEARN_URL = os.environ.get("LEARN_URL", "https://localhost:8098")
 WIKI_URL = os.environ.get("WIKI_URL", "https://localhost:8097")
 PROJECT_URL = os.environ.get("PROJECT_URL", "https://localhost:8099")
-# HELD until the source repo is public — blank shows "soon" instead of a 404.
-SOURCE_URL = os.environ.get("SOURCE_URL", "").strip()
+# The repo is public. Override with the SOURCE_URL env var only to point elsewhere.
+SOURCE_URL = os.environ.get("SOURCE_URL", "").strip() or "https://github.com/decented/axenstax"
 # Support page: Lightning tip target (LN address / LNURL — blank = "coming soon")
 # and the future online shop (blank = "coming soon"). The merch claim site is
 # deliberately NOT referenced here — it stays isolated, reachable only by code URL.

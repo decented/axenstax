@@ -11,10 +11,11 @@ to **Electricity** for remote and trap detonations.
 
 ## The one rule: demolition, not mining
 
-A blast **breaks** blocks but gives you **no drops** from them — and **no
-Proof-of-Play hash**. The careful **pickaxe** strike is still the *only* way to
-actually collect ore and run the Proof-of-Play hash on it. So you can blow a tunnel,
-but you **forfeit** whatever was in the wall. **Ore never drops from a blast.**
+A blast **breaks** blocks but gives you **no drops** from them — and it can
+never reveal a **Satori**. The careful **pickaxe** strike is still the *only* way to
+actually collect ore, and the only way to run the Proof-of-Play hash that decides where
+a Satori hides. So you can blow a tunnel, but you **forfeit** whatever was in the wall.
+**Ore never drops from a blast.**
 
 ## The supply chain — three ingredients
 

@@ -6,8 +6,8 @@ it, you're taken through it. Lives on learn.axenstax.com in production. Tonally
 this is marketing's friendly cousin, NOT the wiki's sibling — markety, never a
 manual. (The dense lookup reference is the wiki site, tools/sites/wiki/.)
 
-Content lives in docs/learn-journey/ — re-voiced from the old docs/tutorials/ into
-a warm, read-aloud, phone-glanceable guided journey (the tutorials are left intact).
+Content lives in docs/learn-journey/ — a warm, read-aloud, phone-glanceable guided
+journey (it replaced the old docs/tutorials/ manuals, which now hold only a pointer).
 One markdown source, many surfaces: web page, PDF/print, BYO-AI assistant, and
 eventually an in-game egui Guide tab — see
 docs/architecture/2026-06-06-domain-and-site-architecture.md (the delivery ladder).
@@ -89,8 +89,8 @@ def render_md(path: Path) -> tuple[str, str]:
 
 
 # --- Content: the guided journey ---
-# Re-voiced warm/guided content lives in docs/learn-journey/ (the old
-# docs/tutorials/ manuals are left untouched). Kept in the SECTIONS shape so the
+# Warm/guided content lives in docs/learn-journey/ (it replaced the old
+# docs/tutorials/ manuals). Kept in the SECTIONS shape so the
 # shared section.html / doc.html templates render it unchanged.
 SECTIONS = {
     "journey": {
@@ -109,7 +109,8 @@ SECTIONS = {
             {"path": "learn-journey/smelt-iron-in-a-furnace.md", "title": "Smelt Iron in a Furnace", "short": "Melt ore into metal and make iron tools"},
             {"path": "learn-journey/stand-your-ground.md", "title": "Stand Your Ground", "short": "Make a sword and win a fight"},
             {"path": "learn-journey/tame-a-wolf.md", "title": "Tame a Wolf", "short": "Win over a companion who fights on your side"},
-            {"path": "learn-journey/what-the-hash-means.md", "title": "What the Hash Means", "short": "The real Bitcoin maths under every swing"},
+            {"path": "learn-journey/what-the-hash-means.md", "title": "Where the Satori Hides", "short": "The real maths that decides where the rarest gem is"},
+            {"path": "learn-journey/bring-a-place-back-to-life.md", "title": "Bring a Place Back to Life", "short": "Plant, water and feast a grey patch of ground back to life"},
             {"path": "learn-journey/capture-a-schematic.md", "title": "Save Your First Build", "short": "Capture a build and rebuild it anywhere"},
             {"path": "learn-journey/build-with-shapes.md", "title": "Build with Shapes", "short": "Slabs, stairs, and a door that opens — turn a box into a building"},
             {"path": "learn-journey/make-it-your-own.md", "title": "Make It Your Own", "short": "Blow up a block, paint it, and reskin your world"},

@@ -99,6 +99,10 @@ It also grows wild along lake and ocean shorelines. Reeds become **Papyrus Sheet
 
 > **Coming soon:** planting and regrowing berry bushes. For now a wild bush is a one-shot — break it and it's gone.
 
+## Mix your crops
+
+A huge field of just one crop can fall to **blight**. A small or mixed field is safe. See **[Blight](blight.md)**.
+
 ## Tree saplings
 
 **Tree saplings** are live — plant one on **Dirt** or **Grass** and it grows into a full tree over time, matching its species. See **[Blocks and mining](blocks-and-mining.md)** for the block-and-tool details.
@@ -118,4 +122,5 @@ There's a much bigger farming roadmap planned (around 80 crops in the long run).
 - **[Start your first farm](https://learn.axenstax.com/docs/journey/learn-journey/your-first-farm.md)** — the step-by-step walkthrough
 - **[Dyes, Fibre & Magnesium](dyes-fibre-and-magnesium.md)** — fibre, dye and fertiliser chains
 - **[Food & Cooking](food-and-cooking.md)** — baking and eating your harvest
+- **[Blight](blight.md)** — why one crop is not enough
 - **[Nostrich](nostrich.md)** — taming with berries

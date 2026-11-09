@@ -1,6 +1,6 @@
 # Axe'n'Stax — Player Guide
 
-Welcome. This is the player's guide to Axe'n'Stax. It covers how to play, what every block and tool does, how villages and quests work, and how the sats economy fits in.
+Welcome. This is the player's guide to Axe'n'Stax. It covers how to play, what every block and tool does, how villages and quests work, and how places in the world come alive.
 
 It's written for players first. Everything here matches what the alpha build actually does today; when the game changes, this guide changes with it.
 
@@ -46,11 +46,26 @@ quick first-five-minutes summary.
 - **[Quests & Reputation](quests-and-reputation.md)** — the three quest types and how the village remembers you
 - **[Knights](iron-golems.md)** — the village's defender
 - **[Village Bell](village-bell.md)** — found your own village in the wild
+
+### A living world
+
+- **[How Places Come Alive (Bloom)](bloom.md)** — colour, birdsong and life: what makes a place thrive, and what makes it go grey
+- **[The Feast](the-feast.md)** — share a meal at a Feast Table and lift the place around it
+- **[Commons](commons.md)** — common ground anyone can build on, with the Commons Stone
+- **[Blight](blight.md)** — what happens to a huge one-crop field, and how to keep a place well
+- **[The Commons Shelf](commons-shelf.md)** — a shared chest for a whole place
+- **[The Site Board](site-board.md)** — a shared job list for a crew (not the J-key Challenge Board)
+- **[Who Built It](who-built-it.md)** — block credit, Plan credit lines on the plaque, and Worn Paths
+- **[The Grey Quarry](grey-quarry.md)** — a Trial: bring a stripped quarry back to life
+- **[The Tally](the-tally.md)** — the off-by-default grown-ups' panel
+
+### More reference
+
 - **[Bitcoin & Sats](bitcoin-and-sats.md)** — what the sat numbers mean, Vendor Block trade, Plaque tipping (in plain English)
-- **[Trade Value & the Sats Economy](trade-value.md)** — the complexity ladder, server economy modes, the Genesis Block
+- **[Trade Value & the In-Game Economy](trade-value.md)** — the complexity ladder, server economy modes, the Genesis Block
 - **[Game Modes](game-modes.md)** — Survival vs Creative
 - **[World Creation & Spawn](world-creation-and-spawn.md)** — picking where to start
-- **[Cloud Saves & the Stash Column](cloud-and-stash.md)** — back up worlds encrypted, browse & adopt from the Stash Column, and move worlds by hand (`.axeworld` / `.axeprofile` — taking your browser worlds to the desktop app)
+- **[Moving Your Worlds](cloud-and-stash.md)** — save a world to a file, bring worlds in, and take your browser worlds to the desktop app (`.axeworld` / `.axeprofile`)
 - **[Maps & Coordinates](maps-and-coords.md)** — reading your F3 position and finding your way
 - **[Chat & Commands](chat-and-commands.md)** — the in-game console and `/` commands
 - **[Cheats & Op Commands](cheats.md)** — which commands count as cheats and the integrity ledger

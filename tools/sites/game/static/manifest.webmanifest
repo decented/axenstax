@@ -1,7 +1,7 @@
 {
   "name": "Axe'n'Stax",
   "short_name": "Axe'n'Stax",
-  "description": "Axe'n'Stax: the sovereign voxel sandbox. Build, explore, and host your own worlds. A taster you can play offline.",
+  "description": "Axe'n'Stax: a block-building world you own. Build, farm and explore, then make places come alive. Self-hostable.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

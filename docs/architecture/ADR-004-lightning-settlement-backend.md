@@ -1,5 +1,7 @@
 # ADR-004: Lightning Settlement Backend — phoenixd vs LNbits + Amboss
 
+> **SUPERSEDED 2026-11-08:** the work-meter and any proof-of-play payout are retired. Nothing in the game converts to sats. Kept for history.
+
 **Status**: Accepted — **fork 1 resolved NON-CUSTODIAL (owner decision, 2026-06-10).** Forks 2–3 follow from it. Backend pick revised to phoenixd-forward.
 **Date**: 2026-05-24 (custody/settlement model resolved 2026-06-10)
 **Relates to**: ADR-002 §"Bitcoin Model: Hybrid", CLAUDE.md §"Key Architecture Decisions" (Payments / Liquidity lines), `docs/research/2026-03-05-payment-architecture-chat.md`, `docs/spec/06-bitcoin-integration.md`

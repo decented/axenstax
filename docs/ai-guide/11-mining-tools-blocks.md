@@ -1,4 +1,4 @@
-<!-- SOURCE: game/engine/src/crafting.rs, item.rs, block.rs, proof_of_play.rs, game_loop.rs (maybe_gem_drop + survival break path), block_interact.rs, crafting_catalogue.rs | Verified against code 2026-06-22 -->
+<!-- SOURCE: game/engine/src/crafting.rs, item.rs, block.rs, proof_of_play.rs, break_drops.rs (satori_drop, break_yield), game_loop.rs (survival break path), block_interact.rs, crafting_catalogue.rs | Verified against code 2026-11-09 -->
 
 # 11 — Mining, Tools & Blocks
 
@@ -119,7 +119,7 @@ There is **no random "did the ore drop?" roll** — meet the tier and the ore dr
 
 ## 5. Satori (the deep gem)
 
-Satori is the rarest material, found by mining **pure deepslate deep underground** with a **diamond (or better) pickaxe**. It does not sit in obvious ore blocks — it is hidden inside ordinary pure-deepslate and revealed by a deterministic vein algorithm at depth (`maybe_gem_drop` in `game_loop.rs`, using the vein helpers in `proof_of_play.rs`). Conditions, all required:
+Satori is the rarest material, found by mining **pure deepslate deep underground** with a **diamond (or better) pickaxe**. It does not sit in obvious ore blocks — it is hidden inside ordinary pure-deepslate and revealed by a deterministic vein algorithm at depth (`break_drops::satori_drop`, called from `break_drops::break_yield`, using the vein helpers in `proof_of_play.rs`). Conditions, all required:
 
 1. The block is **pure deepslate** and **deep enough** (below the depth gate).
 2. You hold a **diamond+ pickaxe**.
@@ -137,7 +137,7 @@ When a deep pure-deepslate block is checked for Satori, the game runs a **real H
 - **It is the same kind of cryptographic proof-of-work that secures Bitcoin** — a real primitive, used here as an honest **fairness foundation**, not a flashy on-screen demo. The player is **not** a miner of Bitcoin.
 - **It is deterministic, not chance.** The same block in the same world always produces the same hash. It is **not** a gamble, **not** a slot machine, **not** random luck.
 - **It is NOT earning.** It is **not** a payout, **not** sats, **not** money. There is nothing to cash out. (Real-money payouts are **deferred** and switched off — see `99-accuracy-and-deferred.md`.) **Never** frame mining as a way to earn or "get sats".
-- What it actually does today: it deterministically drives the **Satori vein** (a fair, world-fixed gem layout) — that's its one live job. Its *design* role also includes (1) **education** about proof-of-work, and (2) on a hypothetical Bitcoin-enabled server, gating effort-based payouts via a **work-meter** (effort accumulation), **never** a chance threshold. Neither of those is active or on-screen for players today; only the vein layout is.
+- What it actually does today: it deterministically drives the **Satori vein** (a fair, world-fixed gem layout) — that's its one live job. Its other role is **education** about how proof-of-work works. An older design also had a **work-meter** that turned effort into sats; it was **retired on 2026-11-08** and will not be built. Only the vein layout is live, and nothing is shown on screen.
 
 ### How to talk about it (if a curious player asks)
 "When you mine deep, the game quietly does a real cryptography puzzle — the same kind that keeps Bitcoin honest — to decide where the rarest gems hide. You don't see it happen; it's working in the background to keep things fair. It's not a way to earn money. And it always gives the same answer for the same block, so it's fair, never luck."

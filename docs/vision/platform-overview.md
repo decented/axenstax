@@ -2,30 +2,11 @@
 
 > **The thesis: AxeNStax is sovereign gaming. Freedom first.**
 >
-> The product is *freedom* — you own your world, your identity, your creations, and your
-> server. Everything else is downstream of that. *Because* you're sovereign, you **can** run
-> your own economy, transact peer-to-peer, and earn real value from play — but the economy
-> is a **side benefit that freedom unlocks, never the headline and never the reason to
-> play.** Lead with sovereignty; Bitcoin comes after rapport.
+> You own your world, your identity and your creations. You can run your own economy,
+> and nothing in the game converts to money. The game is about making a world come alive.
 >
-> This ordering is deliberate and load-bearing:
-> - It places AxeNStax in the **sovereign-platform** category — *out* of the play-to-earn
->   graveyard (Axie, the web3 cohort) where earning *was* the product and the game collapsed
->   the moment the earning stopped.
-> - It matches the demand evidence: the durable, reachable, *retaining* demand is for
->   sovereignty and ownership (the #SaveMinecraft grievance; creators wanting to own their
->   economy). The earn-from-play hook is unproven, and the broad "next voxel sandbox" hype is
->   largely vapour (Hytale's headline traction numbers were fabricated/unverifiable).
-> - It de-risks compliance and marketing: we sell *freedom to transact*, never
->   "earn free Bitcoin" (the FCA/ASA criminal-promotion line).
->
-> **The one discipline this demands:** the economy can never become the retention floor. The
-> solo, no-Bitcoin loop must be fully fun on its own — the game has to stand with Bitcoin
-> switched *off*. The moment "people stay because they're earning" creeps in, we've rebuilt
-> earn-to-play and we're back in the graveyard.
->
-> Sources: `docs/research/2026-06-22-minecraft-competitor-failures-and-axenstax-strategy.md`
-> (The Voxel Graveyard) + the 2026-06-22 demand study; memory `project_sovereign_gaming_positioning`.
+> The solo, no-Bitcoin game has to be fully fun on its own. Any Bitcoin layer is an
+> operator's own optional layer on their own server, off by default.
 
 ## 0. Project Posture
 
@@ -48,7 +29,7 @@ every scale, from a single offline world to a global event.
 Build an open-source, massively scalable voxel sandbox platform capable of:
 
 - Personal sandbox worlds (sleeping, near-zero idle cost)
-- Social mid-scale worlds
+- Shared mid-scale worlds
 - Large celebrity/event worlds
 - True open-source self-hosting
 - Player-owned identity (Nostr) and operator-owned economies — sovereignty by design
@@ -91,7 +72,7 @@ Only scaling policies differ.
 - Cold start acceptable
 - Storage-only cost when idle
 
-### 3.2 Social Worlds
+### 3.2 Shared Worlds
 - 20–200 players
 - Multiple regions
 - Moderate autoscaling
@@ -293,7 +274,7 @@ This project is not:
 - A single mega-world MMO
 - A closed hosting service
 - A texture-driven product
-- **A play-to-earn / earn-to-play game** — earning is a freedom-unlocked side benefit, never the point
+- **A play-to-earn game** — nothing in the game converts to money
 
 ---
 

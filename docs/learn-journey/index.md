@@ -8,7 +8,7 @@ You don't need to know anything yet. We'll walk you in one step at a time, and
 each step is short on purpose — keep it open beside the game, on your phone or
 right next to the window, and glance over whenever you'd like a hand.
 
-Ready? Here's the path — **twelve little steps**, in order. Each one builds on the last.
+Ready? Here's the path — **thirteen little steps**, in order. Each one builds on the last.
 
 1. **Getting Around** — find your feet: move, look around, and open your bag.
 2. **Your First Blocks** — break one, carry it, place it back down.
@@ -21,9 +21,10 @@ Ready? Here's the path — **twelve little steps**, in order. Each one builds on
 9. **Smelt Iron in a Furnace** — melt ore into metal and make iron tools.
 10. **Stand Your Ground** — make a sword and win a fight.
 11. **Tame a Wolf** — get yourself a companion who fights on your side.
-12. **What the Hash Means** — the real Bitcoin maths under every swing.
+12. **Where the Satori Hides** — the real maths that decides where the rarest gem is.
+13. **Bring a Place Back to Life** — plant, water and feast a grey patch of ground back to life.
 
-Got through all twelve? There's more to play with whenever you fancy it:
+Got through all thirteen? There's more to play with whenever you fancy it:
 
 - **Save Your First Build** — capture a build onto a blueprint and rebuild it anywhere.
 - **Build with Shapes** — slabs, stairs, and a door that opens; turn a plain box into a building.

@@ -127,7 +127,7 @@
                         ]
                         : [
                             'Install <strong>Chrome</strong>, <strong>Edge</strong>, or <strong>Brave</strong>.',
-                            'Open <code>' + window.location.origin + '</code> there and sign in again.',
+                            'Open <code>' + window.location.origin + '</code> there.',
                         ],
                     fallback: 'Firefox WebGPU support is shipping in stages — we\'ll add it when it\'s broadly available.',
                 };
@@ -145,7 +145,7 @@
                         ]
                         : [
                             'Install <strong>Chrome</strong>, <strong>Edge</strong>, or <strong>Brave</strong>.',
-                            'Open <code>' + window.location.origin + '</code> there and sign in again.',
+                            'Open <code>' + window.location.origin + '</code> there.',
                         ],
                 };
             case 'opera':
@@ -206,7 +206,7 @@
                         ]
                         : [
                             'Install a recent build of <strong>Chrome</strong>, <strong>Edge</strong>, or <strong>Brave</strong> on a desktop.',
-                            'Open <code>' + window.location.origin + '</code> there and sign in.',
+                            'Open <code>' + window.location.origin + '</code> there.',
                         ],
                 };
         }

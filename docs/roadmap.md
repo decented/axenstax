@@ -1,6 +1,6 @@
 # Axe'n'Stax Roadmap
 
-*As of 2026-11-03 — source v0.2.27, network protocol v96, save format 60. The repository is public.*
+*As of 2026-11-09 — source v0.2.32. The repository is public.*
 This file is **the** roadmap: where the project has come from, where it is, and where it is going.
 For "what do we build next", see `docs/foundations/README.md` (the build queue); feature requests and ideas enter through the internal feature backlog.
 
@@ -15,16 +15,17 @@ For "what do we build next", see `docs/foundations/README.md` (the build queue);
 - **2026-10-01 to 04: public.** Signet contacts sync, the player's own relay list, and the repository going public as a fresh single-commit snapshot with its security settings on. The privacy page was signed off with the controller published as *decented*, and the project's own relay stopped being a default in the native app or its tools (phone tests still pending, below).
 - **2026-10-06 to 31: real multiplayer.** The host lends its one world to its server (D1), joiners stopped running a private mob world (D2), and the server took over joiners' metabolism and inventory records (C2, C3). The clock, weather, mobs, deaths and machines moved into one shared simulation (D4). Single-player lending was built behind an opt-in flag (D3), and world handover landed.
 - **2026-10-22 to 25: Fray, new terrain, Keeps.** Host Game moved to Fray (protocol v92), terrain generator v3 and graphics settings shipped (2026-10-24), and `--keep-world` let a home Keep run one persistent world (2026-10-25).
-- **2026-11-02 to 03: hardening and Keep authority.** In-game feedback removed, access rules tightened, privacy copy corrected, and Keep authority slices 1, 2a and 2b landed. The checkpoint now binds every `world.dat` field and uses a tree of stored records, keeping its image under the cap as the world grows. The latest landed full gate passed with 7,347 tests and none failing.
+- **2026-11-07 to 09: the Living World.** Tier 1 (v0.2.30) made a place's life visible as colour, sound and animals, with the Feast, Commons ground, the Grey Quarry trial and a grown-up Tally. Tier 2 (v0.2.31) added who-built-it block credit, Commons protection, Worn Paths, the Commons Shelf, the Site Board, blight, Plan credit counts and Plot succession. v0.2.32 retuned birdsong, storms and the bloom field after the first playtest.
+- **2026-11-02 to 03: hardening and Keep authority.** In-game feedback removed, access rules tightened, privacy copy corrected, and Keep authority slices 1, 2a and 2b landed. The checkpoint now binds every `world.dat` field and uses a tree of stored records, keeping its image under the cap as the world grows.
 
 ---
 
 ## Where we are
 
-Axe'n'Stax is an open-source, self-hostable voxel sandbox with its own engine, client and server, written in Rust. The code is well ahead of what players can get: `main` holds the real-multiplayer work, Host Game on Fray, terrain v3, the access and privacy fixes and the first Keep slices, but the public download is still v0.2.18 and the live sites are the 2026-10-27 build. Closing that gap comes first. Nobody has tried the 2026-11-02 work in person yet.
+Axe'n'Stax is an open-source, self-hostable voxel sandbox with its own engine, client and server, written in Rust. The code is well ahead of what players can get: `main` holds the real-multiplayer work, Host Game on Fray, terrain v3, the access and privacy fixes, the first Keep slices and the Living World, but the public download is still v0.2.18. Closing that gap comes first. Nobody has tried the 2026-11-02 work in person yet.
 
-- **Version:** v0.2.27 in source, network protocol v96, save format 60. Worlds saved by this build won't open on older builds. The published desktop installer is still v0.2.18 until the release below is cut.
-- **Sites:** every deploy since 2026-10-28 has stopped at the step that syncs the sites to the server, so the live sites, including the web game and the privacy page corrections, are still the 2026-10-27 build. A push to `main` puts them live once that step passes.
+- **Version:** v0.2.32 in source. Worlds saved by this build won't open on older builds. The published desktop installer is still v0.2.18 until the release below is cut.
+- **Sites:** a push to `main` deploys them. The deploy has been failing since early November 2026, so the live sites and the public download (v0.2.18) are behind the source.
 - **Web (`play.axenstax.com`)** is an anonymous, local-only sandbox: a *taster*. No login, no multiplayer, no cloud save and no feedback channel on web. Worlds live in the browser and can be exported to the desktop app.
 - **Native (Linux AppImage)** is the full game: Signet sign-in, LAN play, online play by contact, and the dedicated server. Windows and macOS are not published as installers yet (build from source).
 - **Android** is ported onto main (the APK builds in CI, `android` input off by default, and a tapped `axenstax:` link opens the game), but nothing is published: release signing is owner-side, and updates will come through zap.store, not an in-app updater.
@@ -51,7 +52,8 @@ Everything below is on `main`. Much of it hasn't reached players yet (see above)
 - Terrain generator v3 for new worlds: continents, deep oceans, rivers, mountains and cliffs, in a world now 256 blocks tall. v3 is frozen as shipped, and each world records its generator, so older worlds keep their terrain unchanged. New worlds also start on dry land with headroom. Terrain generator v4 (v3 plus dry caves) is built but unreleased: no world is stamped with it yet.
 - Farming, fishing, composting, weather, water-driven and wind-driven machines.
 - Electricity: wires, switches, batteries, lamps, windmill, water wheel.
-- Proof of Play: every pickaxe strike runs an HMAC-SHA256 hash that is shown to the player as an educational proof-of-work primitive. It also drives optional rare drops. It is not a payout mechanism.
+- Proof of Play: a real HMAC-SHA256 hash decides where Satori veins are. It runs only when a Diamond or better pickaxe breaks natural deepslate deep underground, and plain mining runs no hash. It is educational, and nothing in the game converts to sats.
+- The Living World: bloom shows how alive each place is, as colour, sound and animals, never as a number (Tier 1, v0.2.30). The Feast, Commons ground, the Grey Quarry trial and a grown-up Tally panel (F3, off until you enable it in Settings) came with it. Tier 2 (v0.2.31) added who-built-it block credit (kept in the world's save, left out of exports), Commons protection in Survival, Worn Paths, the Commons Shelf, the Site Board, blight for huge one-crop fields, Plan credit counts and Plot succession.
 - Trials: timed races and explorer challenges, with an authoring guide and a lint that fails loudly on mistakes.
 - A guided onboarding companion (Satoshi) that is fun-first and optional.
 - Slash commands (`/time`, `/gamemode`, `/tp`, `/give`, `/we`, `/place` and more) and in-game chat.
@@ -84,7 +86,7 @@ Everything below is on `main`. Much of it hasn't reached players yet (see above)
 - Known limits, from `CLAUDE.md`'s known-debt list: a joiner's possession is only partly enforced (a placement check that is log-only, and the held item it claims for attacks, interactions and mined tools is believed, as is some of what it pays with, up to a bound); every server mode now runs species AI, breeding, Leads and animal products (D4 slice 3), so a dedicated server serves a joiner's feed, tame, Lead and pet command, but it spawns no village population; villager quests for joiners are not accepted (the D2c-3 foundation and later checkpoints are in source, while live delivery and verification are pending); a `--no-lend` host (one release only) keeps a second copy of the world.
 - One shared machine phase (`sim_machines`, D4 slice 5) runs hives, growth, dispensers, pistons, furnaces, composters, kegs, drying racks and villager workstation maintenance in every server mode; on a lending host the authority borrows the host's real world for it. Hoppers and projectiles have their own phases, and a tick's changes are split across size-bounded StateUpdates. Chest auto-collection and the NPC Builder commission lifecycle are still client-only. A lent world's clock, weather, mob simulation and death handling are the server's too (D4 slices 2 to 4).
 - Online play by contact (native): join a friend's home-hosted world by their Signet persona npub or a bearer invite. Nostr relays carry connection setup only; the connection is then direct. Strangers get silence. Relays never carry game traffic.
-- Server authority over remote players (movement, reach and block edits are validated; the server keeps its own copy of a joiner's inventory); join handshake with Signet-signed identity and the Fray join binding (v96).
+- Server authority over remote players (movement, reach and block edits are validated; the server keeps its own copy of a joiner's inventory); join handshake with Signet-signed identity and the Fray join binding.
 - World chat (native), tiered by contact relationship, with a ceiling that can only be tightened.
 - Signet sign-in by QR (mySignet pairing) and Signet contacts sync: Kin, Kith and blocks feed the address book, and a block removes a player from a running host.
 - Optional, self-published Nostr announce for an operator's own server. Nothing is ever announced automatically.
@@ -101,7 +103,7 @@ Everything below is on `main`. Much of it hasn't reached players yet (see above)
 - The game has no in-game feedback channel (web removed 2026-10-01, native removed 2026-11-01): `/bug`, `/idea`, `/mailbox`, the tester unlock and the Suggestion Box trial are gone.
 - Access rules tightened: a Signet block or a removed contact takes a player out of a hosted world, an empty allowlist admits nobody, `require_signin` must be exactly `true` or `false`, and delisting or blocking on a dedicated server removes players within about 5 seconds. A server with a WebSocket listener needs a public address to start, and `docker stop` now reaches the final save.
 - Crash-safe saves with damage quarantine, a staged data-directory migration, and a hardened updater.
-- Money words are guarded by permanent tests on every text surface; Proof of Play never appears as an earning mechanic.
+- Money words are guarded by tests on the README, the player guide and in-game text; Proof of Play never appears as an earning mechanic.
 - Public repository housekeeping: licence, security policy, contributing guide and a credits file are in place.
 
 ---
@@ -134,13 +136,13 @@ Everything here needs a person, a second machine or a real device, or a decision
 - Native QR sign-in on a phone with mySignet. This now also tests the relay change: the QR advertises the first three of "Your relays" (public by default), and editing the list from the sign-in screen rebuilds the QR.
 - Republishing the release event to the public relays so the in-app updater (which now reads the player's relays) finds it.
 - Playtest of the unverified trials, and the electricity switch test across two machines.
-- First-launch data-directory migration, the updater, and the current framing (v96, Host Game on Fray) on real hardware.
+- First-launch data-directory migration, the updater, and the current framing (Host Game on Fray) on real hardware.
 
 **Fun test**
 - Play-testing with voluntary children who are not family. Family play has been a bug-hunt, not evidence that the game is fun, so fun is unvalidated.
 
 **Release**
-- **Top priority: cut the native release.** The fixes reach players only when it is published, and until then `/download` serves v0.2.18 (with a notice that a newer release is being prepared). Native v0.2.27 (protocol v96): the owner cuts it with the owner-held signing keys. The release now covers far more than it did when it was planned at protocol v64: the relay and privacy changes, Host Game on Fray, the real-multiplayer work, terrain v3, graphics settings, building variants, the access fixes and save format 60. Its release notes, including what dedicated-server operators must check before upgrading, are in the 2026-11-02 test sheet. After publishing, republish the kind-30063 release event to the public relays.
+- **Top priority: cut the native release.** The fixes reach players only when it is published, and until then `/download` serves v0.2.18 (with a notice that a newer release is being prepared). Native v0.2.32: the owner cuts it with the owner-held signing keys. The release now covers far more than it did when first planned: the relay and privacy changes, Host Game on Fray, the real-multiplayer work, terrain v3, graphics settings, building variants, the access fixes and the Living World. Its release notes, including what dedicated-server operators must check before upgrading, are in the 2026-11-02 test sheet. After publishing, republish the kind-30063 release event to the public relays.
 
 **Privacy page**
 - The page has no contact route for data requests yet, and it says the relay's log retention is being confirmed. Both wait on the owner and the people who run that infrastructure.
@@ -193,7 +195,7 @@ Horizons, each one line. None is scheduled.
 - **Windows and macOS installers**, and an Android release.
 - **Console and small-box hardware targets** (Raspberry Pi 5, mini PCs) and a GPU-tier auto-detect.
 - **Texture-pack distribution** and WASM plugins for sandboxed server-side mods.
-- **A Bitcoin-enabled server layer** — design only; see the red lines for the rules it would have to follow.
+- **A Bitcoin-enabled server layer** — design only; nothing in the game can be turned into sats, and any such layer would be an operator's own optional layer on their own server, off by default.
 - **Historical-pivot and Genesis storylines** — the founding-myth arc (worthiness, not riches).
 - **VR** — a reminder to explore headset play some day. Nothing planned, no date.
 
@@ -207,7 +209,7 @@ The project does **not** and will **not**:
 - Operate game servers, or relays that carry a group's game traffic, presence or in-game chat. Worlds are self-hosted; multiplayer runs directly between players.
 - Collect children's data centrally, or collect age as raw data. The web taster stays anonymous and local, and the game has no feedback channel.
 - Position or market itself as a social network, social media or a chat platform. It is a building game; playing with friends means building together.
-- Offer chance-based real-money payouts. Proof of Play is educational proof-of-work. Any real-sats layer is off by default, parent-controlled, set per server, and driven by a deterministic work-meter, never a probabilistic threshold.
+- Turn play into money. Proof of Play is educational proof-of-work and nothing in the game converts to sats. Any Bitcoin layer is an optional operator layer on that operator's own server, off by default. The work-meter was retired on 2026-11-08 and will not be built.
 - Build a how-to for turning safety off. Sensitive features sit behind a real capability boundary, not a disclaimer.
 
 The original Phases 6–7 (paid hosting fleet, matchmaking, platform services, celebrity-scale events) are **retired**: they would make AxeNStax the operator of the service, which these lines exist to prevent.

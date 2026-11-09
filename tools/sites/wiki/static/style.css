@@ -246,6 +246,10 @@ a:hover { color: var(--copper-hover); }
     gap: 0.5rem;
 }
 
+.doc-group {
+    margin: 1.2rem 0 0.2rem;
+}
+
 .doc-item {
     display: block;
     padding: 1rem 1.25rem;

@@ -22,7 +22,7 @@ Press **F3** to toggle the debug overlay. It shows:
 
 - Current XYZ + facing direction
 - Frame timing + tick timing (perf samples)
-- Proof of Play readout — the hash produced by your latest pickaxe strike
+- **The Tally**, only if a grown-up has turned on **Grown-up panel (F3)** in Settings. See [The Tally](the-tally.md)
 - Biome at the player's current column
 
 F3 is local-only — it doesn't affect gameplay or other players, and

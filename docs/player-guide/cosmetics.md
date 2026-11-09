@@ -360,8 +360,8 @@ These are designed but **not built yet** — don't look for them while testing:
 > **Others seeing your worn skin in multiplayer** — your skin shows on **your** screen
 > today; sharing it so other players see you wearing it is on the way.
 
-> **Saving your wardrobe to the cloud (Stash)** so it follows you to another device — *web
-> keeps everything on this device for now; desktop cloud sync is on the way.*
+> **Your wardrobe stays on this device.** There is no cloud sync. To move worlds
+> between computers, see [Moving Your Worlds](cloud-and-stash.md).
 
 ---
 

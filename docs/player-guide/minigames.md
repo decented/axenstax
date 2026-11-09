@@ -2,9 +2,9 @@
 
 Axe'n'Stax has two built-in **Experiences** — **Hash Dash** and **Satori Rush** —
 run by the **Scenario** system. There are two ways to start one: type the
-`/scenario` command in the in-game chat (**T** or **/**), or **▶ Play** the
-**AxeNStax Official** entry in the lobby's **Stash Column** (which launches each
-into its own fresh arena — see [Cloud Saves & the Stash Column](cloud-and-stash.md)).
+`/scenario` command in the in-game chat (**T** or **/**), or press **Play** on the
+**AxeNStax Official** cards on the lobby's **More to play** page (which launches each
+into its own fresh arena, even with no network).
 This page is the quick **rules** reference — for a full *how to win* walkthrough,
 follow the tutorial links.
 
@@ -37,16 +37,18 @@ first Satori, your time is recorded and you can keep playing.
 
 ## The Challenge Board (Trials)
 
-Press **J** in-game to open the **Challenge Board**. It lists **Trials** — dozens
+Press **J** in-game to open the **Challenge Board**. This is the **Trials list**,
+not the **[Site Board](site-board.md)** block you can craft and place. It lists **Trials** — dozens
 of small, authored objectives that nudge you to go try a specific game feature
 you might not have found on your own ("plant and harvest a crop", "tame a wolf",
 "wire up a light with a lever", "sell something at a Vendor Block", "build
 something in the Workshop", "ride a cart down powered rail", and so on). There
-are around **45 Trials** spanning nearly every system in the game — farming,
+are over **30 Trials** spanning nearly every system in the game — farming,
 taming, combat, electricity, the vendor economy, the Workshop, rail riding, and
 more. Unlike Hash Dash and Satori Rush, Trials aren't races against a clock or
 each other — they're bite-sized "try this" prompts you can pick up and complete
-at your own pace on your own world.
+at your own pace on your own world. One of them, **[The Grey Quarry](grey-quarry.md)**,
+is about bringing a stripped place back to life.
 
 ---
 
