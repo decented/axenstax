@@ -867,6 +867,12 @@ that sent no value decodes as 0 and must read as a mismatch. On a mismatch the j
 ("Some terrain may look different until you update") and the host flags the player
 (`ServerPlayer::worldgen_mismatch`) so a later pass can push real chunks instead.
 
+**Generation output is frozen per generator (rule, 2026-11-09).** Since §7.5.1 a client save
+no longer stores explored-but-untouched land, so every existing world regenerates it from its
+pinned generator at each load: from now on any change to generation OUTPUT (bundled plans,
+decorations, loot, side-table seeding) ships as a new generator version kept alongside the old
+ones, never as an edit to an existing one (a version bump alone does not keep old worlds' output).
+
 **Generation is a pure function of (seed, world flags, fingerprint)** (Phase B0, 2026-10-06):
 independent of the order columns are generated in and of platform float maths. The rules that
 keep it so (break one and joiners desync silently):
@@ -1708,16 +1714,48 @@ sections. Example: a section mined out to air plus its pristine siblings is
 written as the siblings, the empty section has no file, and on reload the
 column is not generated, so the section stays air.
 
+*A column with only empty chunks is ungenerated (review fix 2026-11-09).* A
+loader generates a column unless it holds a NON-EMPTY chunk
+(`World::column_holds_blocks`, the test `is_column_present_at` uses), and the
+flat and Workshop floors, like the terrain fills, skip only a non-empty
+section. The load queue runs nearest first and lights each column as it goes,
+so an emitter near a column edge lights into the next, unsaved column before
+its turn, and light writes conjure empty sections there (as do
+`set_block(AIR)` and `set_placed`). The loader used to read any chunk as "read
+from disk": that neighbour was never generated, and in a flat world or the
+Workshop (which `is_void_column` never heals) it had no floor; once the player
+built there, its save made the hole permanent. A saved column always holds a
+real block: the break handler refuses bedrock, blasts leave it and pistons
+cannot push it. The one exception is a column a creative `/we set air`
+emptied entirely, bedrock included: no writer writes an empty chunk (none did
+before this change either), so it has no file and regenerates on
+load, as it always did (no way to tell it from an unsaved column without a
+format change). Test:
+`save_pristine_columns::a_lit_edit_at_a_column_edge_never_stops_the_untouched_neighbour_generating`.
+A web resume (the IndexedDB record unpacked before `begin_load`) marks every
+unpacked column loaded, as the folder load does: one outside the first load
+circle was otherwise streamed in later with `regen_present` and generated
+over (mined-out sections refilled, felled trees regrown; review 2026-11-09).
+
 *Why it can be skipped.* The same rule `evict_column` already relies on in a
 session: a pristine column regenerates block for block. Generation is a pure
 function of the column, the seed and the generator, writes only inside its own
-column, and runs in any order to the same blocks and side tables
-(`worldgen_golden::assert_order_independent`, the v2/v3/v4 golden tests). The
+column, side-table records included (an Architect Plaque's records are written
+only by the column holding the plaque cell; review fix 2026-11-09: every
+column of the village wrote them, so regenerating a pristine neighbour put a
+broken plaque's record back), and runs in any order to the same blocks and side
+tables (`worldgen_golden::assert_order_independent`, the v2/v3/v4 golden tests). The
 side tables it writes into are restored from `world.dat` before any column is
 generated (`load_world`: chunks, then `apply_world_save_state`; `step_load`
 later), and generation does not overwrite their state: a mineshaft or hideout
 chest, a wild hive and a hideout record are only inserted when absent; village
 anchors and Architect Plaques are put back with the same seed-derived value.
+"Frozen generator" pins the generator's code path, not every input it reads:
+villages sample the bundled plan registry, and v2/v3/v4 share the decoration
+passes. So from now on any change to generation OUTPUT (plans, decorations,
+loot, side-table seeding) must ship as a new generator version kept alongside
+the old ones, never as an edit to an existing one (§5.2): explored-but-untouched
+land of every existing world is regenerated at each load.
 
 *Before (bug fixed 2026-11-09).* Every writer took every non-empty chunk, so the
 first autosave wrote every pristine section in render distance, those files
@@ -1834,7 +1872,11 @@ host and a joined client) takes a WATER or LAVA cell as a source only when its
 meta byte reads as one (`fluids::is_source_meta`): no AUX flow level and no
 falling mark (STATE 1). What is saved is the block and that byte
 (`WorldSave.block_meta`, already persisted; no format change): a source's byte is
-0 (a placed bucket or block clears whatever the cell held), worldgen fluid has
+0 (a placed bucket or block clears whatever the cell held: every placer of a
+source, a hand's bucket, a dispenser's and an arena build, goes through
+`fluids::place_source`, and a placed fluid block through
+`fluids::reset_source_meta`; a dispenser and an arena kept a broken block's
+stale byte until the review fix), worldgen fluid has
 none, a sideways flow carries its level (water 1–7, lava 1–3, written by
 `tick_spread` / `lava::place_flow`), a falling cell the mark. Before, every water
 and lava cell registered, so after any reload or walk-away a poured water sheet

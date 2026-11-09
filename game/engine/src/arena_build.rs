@@ -35,14 +35,15 @@ fn put_cell(
     (x, y, z): (i32, i32, i32),
     block_id: crate::block::BlockId,
 ) {
-    world.set_block(x, y, z, block_id);
     // A placed liquid must be a SOURCE so it can fill a bucket / host a
-    // fishing spot — mirror the bucket-empty path's source registration.
-    if block_id == crate::block::WATER {
-        water.add_source(x, y, z);
-    } else if block_id == crate::block::LAVA {
-        lava.add_source(x, y, z);
-    } else if block_id == crate::block::VENDOR_BLOCK {
+    // fishing spot, after a reload too: the bucket-empty path's
+    // `fluids::place_source` (the block, a cleared meta byte, registration).
+    if crate::block::is_fluid(block_id) {
+        crate::fluids::place_source(world, water, lava, (x, y, z), block_id);
+        return;
+    }
+    world.set_block(x, y, z, block_id);
+    if block_id == crate::block::VENDOR_BLOCK {
         // An arena vendor belongs to a friendly NPC trader (a FOREIGN owner), so
         // the solo player is a BUYER — the owner view has no buy button, so a
         // player-owned vendor could never fire the sale. Pre-stock a simple

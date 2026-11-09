@@ -1478,7 +1478,17 @@ impl World {
     /// without its bedrock and stone in that slice (Phase B1 review).
     #[inline]
     pub fn is_column_present_at(&self, x: i32, z: i32) -> bool {
-        let (cx, cz) = (x.div_euclid(CHUNK_SIZE as i32), z.div_euclid(CHUNK_SIZE as i32));
+        self.column_holds_blocks(x.div_euclid(CHUNK_SIZE as i32), z.div_euclid(CHUNK_SIZE as i32))
+    }
+
+    /// Does live column `(cx, cz)` hold at least one real block? The one test
+    /// for "this column has been generated or loaded" ([`Self::is_column_present_at`]
+    /// by column index). Empty chunks never count: light, `set_block(AIR)` and
+    /// `set_placed` all conjure empty sections in a column nobody has generated
+    /// yet, and a loader that took those for a loaded column left it without
+    /// its terrain (Spec 02 §7.5.1).
+    #[inline]
+    pub fn column_holds_blocks(&self, cx: i32, cz: i32) -> bool {
         (0..=MAX_CHUNK_Y)
             .any(|cy| self.chunks.get(&(cx, cy, cz)).is_some_and(|c| !c.is_empty()))
     }
@@ -2949,7 +2959,10 @@ impl World {
         let floor_y = crate::workshop::WORKSHOP_FLOOR_Y;
         let cy = floor_y.div_euclid(CHUNK_SIZE as i32);
         let ly = floor_y.rem_euclid(CHUNK_SIZE as i32) as usize;
-        if self.chunks.contains_key(&(cx, cy, cz)) {
+        // Skip only a floor section that holds real blocks, as the terrain
+        // fills do: an empty one (light, or a `set_block(AIR)`, conjured it
+        // before this column's turn) still gets its floor.
+        if self.chunks.get(&(cx, cy, cz)).is_some_and(|c| !c.is_empty()) {
             return;
         }
         let mut chunk = Chunk::new();
@@ -2990,7 +3003,8 @@ impl World {
         let floor_y = crate::workshop::WORKSHOP_FLOOR_Y; // 79
         let cy = floor_y.div_euclid(CHUNK_SIZE as i32);
         let ly = floor_y.rem_euclid(CHUNK_SIZE as i32) as usize; // 15 for floor_y=79
-        if self.chunks.contains_key(&(cx, cy, cz)) {
+        // As the Workshop floor: an empty conjured section gets its floor.
+        if self.chunks.get(&(cx, cy, cz)).is_some_and(|c| !c.is_empty()) {
             return;
         }
 
@@ -3289,14 +3303,18 @@ impl World {
                                 && hz < col_min_z + cs
                                 && self.get_block(hx, hy, hz) == AIR
                             {
+                                // Asked BEFORE the block goes in: `set_block`
+                                // gives a hive block with no data a default
+                                // (empty) record, which would hide a fresh hive.
+                                let known = self.hive_at((hx, hy, hz)).is_some();
                                 self.set_block(hx, hy, hz, crate::block::BEE_HIVE);
                                 // Found hives start part-stocked so the first
                                 // discovery pays off without waiting a cycle.
-                                // Only when no hive data is there yet: the side
-                                // table outlives a pristine column that streams
-                                // out, and a re-entry must not refill a hive the
-                                // player has emptied.
-                                if self.hive_at((hx, hy, hz)).is_none() {
+                                // Only when no hive data was there already: the
+                                // side table outlives a pristine column that
+                                // streams out, and a re-entry must not refill a
+                                // hive the player has emptied.
+                                if !known {
                                     self.insert_hive(
                                         (hx, hy, hz),
                                         crate::bee_hive::HiveData { bees_inside: 1, honey_level: 2 },
@@ -3873,6 +3891,8 @@ mod tests {
         let (bg, mut w) = found.expect("some seed grows a wild hive in a 12x12 patch");
         let pos = w.iter_hives().map(|(p, _)| p).min().unwrap();
         assert_eq!(w.get_block(pos.0, pos.1, pos.2), crate::block::BEE_HIVE);
+        let fresh = w.hive_at(pos).unwrap();
+        assert_eq!((fresh.bees_inside, fresh.honey_level), (1, 2), "a found hive starts part-stocked");
         *w.hive_at_mut(pos).unwrap() = crate::bee_hive::HiveData { bees_inside: 0, honey_level: 0 };
         let cs = CHUNK_SIZE as i32;
         let (hcx, hcz) = (pos.0.div_euclid(cs), pos.2.div_euclid(cs));

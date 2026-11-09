@@ -505,9 +505,7 @@ impl super::GameState {
             }
 
             // Mark loaded columns from existing chunks
-            for (cx, _cy, cz) in self.world.chunk_positions() {
-                self.loaded_columns.insert((cx, cz));
-            }
+            mark_held_columns_loaded(&self.world, &mut self.loaded_columns);
 
             // Rail freight Phase 1 (Task 1.6) — re-spawn persisted carts into
             // the SAME ECS this client ticks (`cart::tick_carts` reads
@@ -614,6 +612,10 @@ impl super::GameState {
                 "Resuming preloaded world '{}' — skipping fresh-world setup.",
                 self.world_name
             );
+            // Every column the unpacked record holds is queued and loaded as
+            // it is, as the folder load above does: one outside the first
+            // load circle was otherwise generated over when it streamed in.
+            mark_held_columns_loaded(&self.world, &mut self.loaded_columns);
         }
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -683,25 +685,9 @@ impl super::GameState {
         // first. `step_load` drains it.
         let fpx = (self.players[0].player.pos.x.floor() as i32).div_euclid(cs);
         let fpz = (self.players[0].player.pos.z.floor() as i32).div_euclid(cs);
-        let mut set: ahash::AHashSet<(i32, i32)> = self.loaded_columns.iter().copied().collect();
         // A client on its own world loads the same circle `stream_chunks` keeps
         // (Perf B2); a joiner's ground is the server's square.
-        let round = !self.joined();
-        let reach = if round { round_load_columns(rd) } else { rd };
-        for dx in -reach..=reach {
-            for dz in -reach..=reach {
-                if round && !crate::camera::column_in_round_range(dx, dz, reach) {
-                    continue;
-                }
-                set.insert((fpx + dx, fpz + dz));
-            }
-        }
-        let mut cols: Vec<(i32, i32)> = set.into_iter().collect();
-        cols.sort_by_key(|&(cx, cz)| {
-            let dx = cx - fpx;
-            let dz = cz - fpz;
-            dx * dx + dz * dz
-        });
+        let mut cols = load_queue_order(&self.loaded_columns, (fpx, fpz), rd, !self.joined());
         // A push-only joiner (B2a) builds nothing itself: its loading screen
         // waits for the pushed spawn ring instead (`join_ring_pending`).
         if self.joined_push_only {
@@ -791,13 +777,7 @@ impl super::GameState {
     fn load_column_unmeshed(&mut self, cx: i32, cz: i32) {
         // Spec 02 §7.5 — restore an evicted column first (it wins over any
         // world-gen spill a neighbour left); generate only if neither.
-        load_column_blocks(&mut self.world, cx, cz, &self.biome_gen, false);
-        crate::lighting::run_initial_pass_for_column(&mut self.world, cx, cz, &self.registry);
-        self.water.register_column_sources(cx, cz, &self.world);
-        self.lava.register_column_sources(cx, cz, &self.world);
-        self.fire.register_column_fires(cx, cz, &self.world, self.tick_counter);
-        crate::entity::scatter_mobs_in_column(&mut self.ecs, cx, cz, &self.world, &self.biome_gen);
-        self.loaded_columns.insert((cx, cz));
+        self.column_sims().load_queued(cx, cz);
         self.chunk_intake.column_held((cx, cz));
     }
 
@@ -1448,6 +1428,24 @@ impl ColumnSims<'_> {
     /// the server, as its `initial_load` region has none either.
     pub(crate) fn load_terrain(&mut self, cx: i32, cz: i32) {
         load_column_blocks(self.world, cx, cz, self.biome_gen, true);
+        self.settle(cx, cz);
+    }
+
+    /// One column of a world load's queue (`GameState::step_load`): restore
+    /// it if evicted, else generate it unless it already holds blocks (read
+    /// from disk), then light it, register its water, lava and fire, scatter
+    /// its wildlife and mark it loaded. The queue runs nearest first, and a
+    /// column's light pass spills into the next columns before their turn
+    /// (`load_column_blocks` says why that must not stop them generating).
+    pub(crate) fn load_queued(&mut self, cx: i32, cz: i32) {
+        load_column_blocks(self.world, cx, cz, self.biome_gen, false);
+        self.settle(cx, cz);
+        crate::entity::scatter_mobs_in_column(self.ecs, cx, cz, self.world, self.biome_gen);
+    }
+
+    /// Light a column whose blocks are in, register its fluids and fires, and
+    /// mark it loaded.
+    fn settle(&mut self, cx: i32, cz: i32) {
         crate::lighting::run_initial_pass_for_column(self.world, cx, cz, self.registry);
         self.water.register_column_sources(cx, cz, self.world);
         self.lava.register_column_sources(cx, cz, self.world);
@@ -1526,6 +1524,48 @@ pub(crate) fn columns_outside_anchors(
     out
 }
 
+/// `begin_load`'s queue: every column in `held` (the saved columns the load
+/// put in, marked by [`mark_held_columns_loaded`]) and every column within
+/// load range of `centre` (a circle of [`round_load_columns`]`(rd)` when
+/// `round`, else the `rd` square), nearest first.
+pub(crate) fn load_queue_order(
+    held: &ahash::AHashSet<(i32, i32)>,
+    (fpx, fpz): (i32, i32),
+    rd: i32,
+    round: bool,
+) -> Vec<(i32, i32)> {
+    let mut set: ahash::AHashSet<(i32, i32)> = held.iter().copied().collect();
+    let reach = if round { round_load_columns(rd) } else { rd };
+    for dx in -reach..=reach {
+        for dz in -reach..=reach {
+            if round && !crate::camera::column_in_round_range(dx, dz, reach) {
+                continue;
+            }
+            set.insert((fpx + dx, fpz + dz));
+        }
+    }
+    let mut cols: Vec<(i32, i32)> = set.into_iter().collect();
+    cols.sort_by_key(|&(cx, cz)| {
+        let dx = cx - fpx;
+        let dz = cz - fpz;
+        dx * dx + dz * dz
+    });
+    cols
+}
+
+/// Mark every column holding a chunk of `world` loaded — what a load read in
+/// (a world folder, or the web build's unpacked IndexedDB record), so
+/// `begin_load` queues all of them, however far from the player, and
+/// `step_load` takes each as it is instead of generating over it. A saved
+/// column left unmarked was later streamed in by `stream_chunks`, whose
+/// `regen_present` generation refilled its mined-out sections and regrew its
+/// felled trees (review 2026-11-09, the web resume).
+pub(crate) fn mark_held_columns_loaded(world: &crate::world::World, loaded: &mut ahash::AHashSet<(i32, i32)>) {
+    for (cx, _cy, cz) in world.chunk_positions() {
+        loaded.insert((cx, cz));
+    }
+}
+
 /// World side of unloading a column (Spec 02 §7.5): edited / saved columns go
 /// to the evicted store, pristine ones are dropped. Renderer-free so the
 /// stream wiring is unit-tested.
@@ -1550,7 +1590,16 @@ pub(crate) fn load_column_blocks(
     if world.restore_column(cx, cz) {
         return true;
     }
-    if regen_present || !(0..=MAX_CHUNK_Y).any(|cy| world.has_chunk(cx, cy, cz)) {
+    // A column counts as read from disk only if it holds a real block: the
+    // load queue lights each column as it goes, and an emitter near an edge
+    // conjures empty light-only sections in the next, unsaved column before
+    // its turn (as do `set_block(AIR)` and `set_placed`). Taken for "loaded",
+    // that column was never generated (a flat world or the Workshop lost its
+    // floor; Spec 02 §7.5.1, review 2026-11-09). A saved column always holds
+    // a block (the break handler refuses bedrock and blasts leave it; no
+    // writer writes an empty chunk), short of a `/we set air` over a whole
+    // column, which no rule can tell from an unsaved one.
+    if regen_present || !world.column_holds_blocks(cx, cz) {
         world.generate_column(cx, cz, biome_gen);
     }
     false

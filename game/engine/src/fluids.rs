@@ -47,6 +47,41 @@ pub(crate) fn is_falling_at(world: &World, x: i32, y: i32, z: i32) -> bool {
     crate::meta::state(world.meta_at(x, y, z)) == FALLING_STATE
 }
 
+/// Pour a WATER or LAVA source at `pos` outside world-gen (a bucket emptied by
+/// a hand or a dispenser, an arena's liquid): write the block, clear the cell's
+/// meta byte and register the source with its sim. A break leaves the old
+/// block's byte behind (a snow layer's depth, a lever's or a slab's state), and
+/// read as a flow level or the falling mark it would make the new source a
+/// flow after a reload (`is_source_meta`, `register_column_sources`): no
+/// longer a source, refused by a bucket, its sheet unfed. Every placer of a
+/// source goes through here, or through [`reset_source_meta`] when it writes
+/// the block itself. A block that is not WATER or LAVA is written alone.
+pub(crate) fn place_source(
+    world: &mut World,
+    water: &mut WaterSystem,
+    lava: &mut LavaSystem,
+    (x, y, z): (i32, i32, i32),
+    liquid: crate::block::BlockId,
+) {
+    world.set_block(x, y, z, liquid);
+    reset_source_meta(world, (x, y, z), liquid);
+    match liquid {
+        WATER => water.add_source(x, y, z),
+        LAVA => lava.add_source(x, y, z),
+        _ => {}
+    }
+}
+
+/// The meta half of [`place_source`], for a placer that writes the fluid block
+/// itself (a player's block placement, which also flags the cell placed and
+/// records its builder): a source's byte is 0, whatever the cell held before.
+/// No-op for a block that is not a fluid.
+pub(crate) fn reset_source_meta(world: &mut World, pos: (i32, i32, i32), block: crate::block::BlockId) {
+    if crate::block::is_fluid(block) {
+        world.set_meta(pos, 0);
+    }
+}
+
 /// Mirror a block edit into both fluid systems' source bookkeeping, matching the
 /// client's inline place/break handling (see `game_loop.rs`). Covers three cases:
 /// placing a fluid registers a source; digging a fluid drops its source; opening

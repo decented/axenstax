@@ -445,9 +445,11 @@ fn build_workshop(
 /// plan's cells go in via `try_set` (column-filter aware); the Plaque
 /// goes in via `try_set` too so a plan that straddles a chunk
 /// boundary still places its plaque on the column-pass that contains
-/// the plaque cell. The plaque metadata write happens unconditionally
-/// — `World::architect_plaques` is keyed by world position, not by
-/// chunk, so duplicating it across column passes is idempotent.
+/// the plaque cell. The plaque's side-table records go in on that same
+/// pass only (Spec 02 §7.5.1: a column writes only inside itself, side
+/// tables included): written from every column of the village, a record
+/// came back over a broken plaque whenever a pristine neighbour column
+/// was generated again, and stayed in the save for ever at an AIR cell.
 fn place_plan_via_procgen(
     world: &mut World,
     plan: &crate::plan::PlanData,
@@ -470,6 +472,9 @@ fn place_plan_via_procgen(
     let plaque_x = ox;
     let plaque_y = oy + 1;
     let plaque_z = oz.saturating_sub(1);
+    if !bounds.contains(plaque_x, plaque_z) {
+        return;
+    }
     try_set(world, bounds, plaque_x, plaque_y, plaque_z, block::ARCHITECT_PLAQUE);
     world.architect_plaques.insert(
         (plaque_x, plaque_y, plaque_z),
@@ -971,6 +976,44 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Review 2026-11-09 — generating one column of a village writes the
+    /// Architect Plaque records of the plaques inside that column only: a
+    /// pristine neighbour regenerated at a load must not put back the record
+    /// of a plaque the player broke in an edited column.
+    #[test]
+    fn a_village_column_seeds_only_the_plaque_records_inside_it() {
+        let bg = BiomeGenerator::new(world_seed(), crate::biome::Generator::V2);
+        let cs = CHUNK_SIZE as i32;
+        let mut plaques = 0;
+        let mut villages = 0;
+        'search: for gx in -10..10 {
+            for gz in -10..10 {
+                let Some(layout) = layout_for_cell(world_seed(), gx, gz, &bg) else { continue };
+                villages += 1;
+                let [ax, _, az] = layout.anchor_world;
+                let (cx, cz) = (ax.div_euclid(cs), az.div_euclid(cs));
+                for col in (-3..=3).flat_map(|dx| (-3..=3).map(move |dz| (cx + dx, cz + dz))) {
+                    let mut w = World::new();
+                    w.generate_column(col.0, col.1, &bg);
+                    let keys = w.architect_plaques.keys().chain(w.procgen_plaque_sources.iter());
+                    for &(x, y, z) in keys {
+                        assert_eq!(
+                            (x.div_euclid(cs), z.div_euclid(cs)),
+                            col,
+                            "column {col:?} wrote the plaque record at {:?}, outside itself",
+                            (x, y, z)
+                        );
+                    }
+                    plaques += w.architect_plaques.len();
+                }
+                if villages >= 3 {
+                    break 'search;
+                }
+            }
+        }
+        assert!(plaques > 0, "the sampled villages place at least one plaque");
     }
 
     #[test]

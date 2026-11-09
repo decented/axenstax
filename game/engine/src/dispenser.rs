@@ -271,12 +271,9 @@ pub fn realise_order(
             // registered with its liquid sim, the empty Bucket is retained.
             // Blocked → the bucket is not used.
             if ctx.world.get_block(tx, ty, tz) == block::AIR {
-                ctx.world.set_block(tx, ty, tz, liquid);
-                if liquid == block::WATER {
-                    ctx.water.add_source(tx, ty, tz);
-                } else {
-                    ctx.lava.add_source(tx, ty, tz);
-                }
+                // The block, a cleared meta byte (an AIR cell can keep a
+                // broken block's) and the registration, as a hand pours.
+                crate::fluids::place_source(ctx.world, ctx.water, ctx.lava, (tx, ty, tz), liquid);
                 changes.push(crate::game_loop::broadcast_change(ctx.world, tx, ty, tz, liquid));
                 let empty = ItemStack::new_material(MaterialId::Bucket, 1);
                 return_or_toss(ctx.world, ctx.ecs, order.pos, spawn, dir, empty);
@@ -380,6 +377,60 @@ mod tests {
         w.set_meta(pos, crate::meta::with_facing(0, Facing::East));
         w.insert_dispenser(pos, DispenserData::new());
         (w, pos)
+    }
+
+    /// Review 2026-11-09 — a dispensed bucket pours a SOURCE even into an AIR
+    /// cell whose meta byte a broken block left behind (a snow layer's depth,
+    /// a lever's or a slab's state): the byte is cleared, so the column's
+    /// load registration still finds a source there after a reload.
+    #[test]
+    fn a_dispensed_bucket_onto_a_stale_meta_byte_is_still_a_source_after_a_reload() {
+        let stale = [crate::meta::with_aux(0, 3), crate::meta::with_state(0, 1)];
+        for (bucket, liquid) in [(MaterialId::WaterBucket, block::WATER), (MaterialId::LavaBucket, block::LAVA)] {
+            for byte in stale {
+                let (mut w, pos) = world_with_dispenser(block::DISPENSER);
+                let (dx, dy, dz) = Facing::East.offset();
+                let cell = (pos.0 + dx, pos.1 + dy, pos.2 + dz);
+                assert_eq!(w.get_block(cell.0, cell.1, cell.2), block::AIR);
+                w.set_meta(cell, byte);
+                let (mut ecs, mut water, mut lava, mut fire) = (
+                    hecs::World::new(),
+                    crate::water::WaterSystem::new(),
+                    crate::lava::LavaSystem::new(),
+                    crate::fire::FireSystem::new(),
+                );
+                let registry = block::BlockRegistry::new();
+                let mut ctx = crate::block_machines::MachineCtx {
+                    world: &mut w,
+                    ecs: &mut ecs,
+                    water: &mut water,
+                    lava: &mut lava,
+                    fire: &mut fire,
+                    registry: &registry,
+                    tick: 0,
+                };
+                let order = EjectOrder {
+                    pos,
+                    facing: Facing::East,
+                    stack: ItemStack::new_material(bucket, 1),
+                    kind: EjectKind::PlaceLiquid(liquid),
+                };
+                realise_order(&mut ctx, order);
+                assert_eq!(w.get_block(cell.0, cell.1, cell.2), liquid, "poured");
+                assert_eq!(w.meta_at(cell.0, cell.1, cell.2), 0, "stale byte {byte:#x} cleared");
+                // A reload registers the column afresh.
+                let mut water_back = crate::water::WaterSystem::new();
+                let mut lava_back = crate::lava::LavaSystem::new();
+                water_back.register_column_sources(0, 0, &w);
+                lava_back.register_column_sources(0, 0, &w);
+                let source = if liquid == block::WATER {
+                    water_back.is_source(cell.0, cell.1, cell.2)
+                } else {
+                    lava_back.is_source(cell.0, cell.1, cell.2)
+                };
+                assert!(source, "{liquid} poured onto stale byte {byte:#x} is a source after a reload");
+            }
+        }
     }
 
     /// Put an active lever right next to the dispenser so it reads powered.

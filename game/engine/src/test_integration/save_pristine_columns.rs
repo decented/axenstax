@@ -10,11 +10,14 @@ use std::path::Path;
 use glam::Vec3;
 
 use crate::biome::{BiomeGenerator, Generator};
-use crate::block::{AIR, GLASS};
-use crate::chunk_stream::load_column_blocks;
+use crate::block::{BlockRegistry, AIR, GLASS, TORCH};
+use crate::chunk_stream::{load_column_blocks, load_queue_order, mark_held_columns_loaded, ColumnSims};
+use crate::fire::FireSystem;
+use crate::lava::LavaSystem;
 use crate::player_slot::PlayerSlot;
 use crate::save::{self, WorldMeta, WorldsRootGuard};
-use crate::world::{World, MAX_CHUNK_Y};
+use crate::water::WaterSystem;
+use crate::world::{World, MAX_CHUNK_Y, WORLD_HEIGHT};
 use crate::world_open::{is_new_world, open_world, AutosavePolicy, OpenedWorld};
 
 const SEED: u32 = 4242;
@@ -228,6 +231,168 @@ fn the_live_pack_and_an_export_import_carry_the_edited_column_only_and_round_tri
     assert_eq!(back.get_block(EDIT.0, EDIT.1, EDIT.2), GLASS);
     for col in columns() {
         assert_eq!(column_bytes(&back, col), column_bytes(&w, col), "column {col:?} after export and import");
+    }
+}
+
+/// What a world entry does with a folder after `save::load_world` (or with
+/// the web build's unpacked record): `begin_load` marks the columns read in
+/// loaded and queues them with the load circle round the player's column
+/// `at`, nearest first; `step_load` takes each in turn
+/// (`ColumnSims::load_queued`: restore or generate, then light it at once).
+fn run_load_queue(back: &mut World, at: (i32, i32), round: bool, bg: &BiomeGenerator) -> ahash::AHashSet<(i32, i32)> {
+    let mut fx = Fixture::new(bg);
+    mark_held_columns_loaded(back, &mut fx.loaded);
+    let queue = load_queue_order(&fx.loaded, at, 2, round);
+    let mut sims = fx.sims(back);
+    for (cx, cz) in queue {
+        sims.load_queued(cx, cz);
+    }
+    fx.loaded
+}
+
+/// Review 2026-11-09 (BLOCKER) — the load queue runs nearest first and lights
+/// each column as it goes. A torch at the east edge of an edited column A
+/// lights into its untouched neighbour E before E's turn, which conjures
+/// empty light-only sections there. They must not count as "E was read from
+/// disk": E is generated all the same, floor included. Before the fix, a flat
+/// world or the Workshop lost E's floor for the session (and for good once
+/// the player built there), and a biome world E's bedrock until a stream pass
+/// healed it.
+#[test]
+fn a_lit_edit_at_a_column_edge_never_stops_the_untouched_neighbour_generating() {
+    for kind in ["flat", "workshop", "biome"] {
+        let _g = WorldsRootGuard::new(&format!("pristine_lit_edge_{kind}"));
+        let bg = bg();
+        let mut m = WorldMeta::new("w");
+        m.seed = SEED;
+        m.worldgen_version = Generator::V2.version();
+        match kind {
+            "flat" => {
+                m.world_type = "flat".into();
+                m.ground = "grass".into();
+            }
+            "workshop" => m.is_workshop = true,
+            _ => {}
+        }
+        save::save_world_meta("w", &m).unwrap();
+        let mut w = World::new();
+        w.apply_meta_rules(&m);
+        // The walk: W = (-1, 0), A = (0, 0), E = (1, 0).
+        for cx in -1..=1 {
+            w.generate_column(cx, 0, &bg);
+        }
+        // A torch on A's east edge, standing on A's ground (or on whatever
+        // tops it): its light crosses into E at x 16.
+        let top = (0..WORLD_HEIGHT).rev().find(|&y| w.get_block(15, y, 8) != AIR).expect("A has ground");
+        w.place_player_block(15, top + 1, 8, TORCH);
+        save("w", &w);
+
+        // Reload with the player standing in W, beyond A: W, then A (read from
+        // disk and lit, the torch with it), then E.
+        let mut back = w.generation_twin();
+        save::load_world("w", &mut back).expect("the save loads");
+        assert_eq!(loaded_columns(&back), BTreeSet::from([(0, 0)]), "{kind}: only A is read in");
+        run_load_queue(&mut back, (-1, 0), false, &bg);
+
+        assert_eq!(back.get_block(15, top + 1, 8), TORCH, "{kind}: the edit is kept");
+        let floor = if kind == "biome" { (24, 0, 8) } else { (24, crate::workshop::WORKSHOP_FLOOR_Y, 8) };
+        assert_ne!(back.get_block(floor.0, floor.1, floor.2), AIR, "{kind}: E has its floor");
+        let mut fresh = w.generation_twin();
+        fresh.generate_column(1, 0, &bg);
+        assert!(
+            crate::chunk_verdict::column_matches(&back, &fresh, (1, 0)),
+            "{kind}: the untouched neighbour E is generation's"
+        );
+    }
+}
+
+/// Review 2026-11-09 — the web build's resume (the poll branch unpacks the
+/// IndexedDB record, then `begin_load` runs its preloaded branch) marks every
+/// unpacked column loaded, as the folder load does, so a saved column outside
+/// the first load circle is queued and taken as it is. Left unmarked, the
+/// streamer later streamed it in with `regen_present`, refilling its mined-out
+/// section. (The poll branch itself is web-only; this drives the same World
+/// steps natively.)
+#[test]
+fn a_web_resume_queues_a_far_saved_column_and_never_generates_over_it() {
+    let bg = bg();
+    let mut w = explored();
+    // A base well outside the load circle: a glass block, and section cy 1
+    // (y 16..32) mined out to air.
+    let far = (12, 0);
+    w.generate_column(far.0, far.1, &bg);
+    let (bx, bz) = (far.0 * 16, far.1 * 16);
+    for x in bx..bx + 16 {
+        for y in 16..32 {
+            for z in bz..bz + 16 {
+                w.set_block(x, y, z, AIR);
+            }
+        }
+    }
+    w.set_block(bx + 5, 5, bz + 5, GLASS);
+    let packed = crate::world_archive::pack_world(&WorldMeta::new("w"), &save::minimal_world_save_for_tests(SEED), &w, &[])
+        .unwrap();
+    let mined = |world: &World| world.get_chunk(far.0, 1, far.1).is_none_or(|c| c.is_empty());
+
+    // What the old resume did: nothing marked, so the column waits for the
+    // streamer, which generates over it.
+    let mut old = World::new();
+    crate::world_archive::unpack_world_to_play(&packed, &mut old).unwrap();
+    let mut fx = Fixture::new(&bg);
+    fx.sims(&mut old).stream_in(far.0, far.1);
+    assert!(!mined(&old), "the old path regenerated the mined-out section (the loss this fixes)");
+
+    // The resume now: the column is queued and taken as it is.
+    let mut back = World::new();
+    crate::world_archive::unpack_world_to_play(&packed, &mut back).unwrap();
+    let loaded = run_load_queue(&mut back, (0, 0), true, &bg);
+    assert!(loaded.contains(&far), "the far saved column is loaded with the world");
+    assert!(mined(&back), "its mined-out section stays air");
+    assert_eq!(back.get_block(bx + 5, 5, bz + 5), GLASS);
+    // Walking away and back evicts and restores it, never generating it.
+    let mut fx = Fixture::new(&bg);
+    fx.sims(&mut back).stream_out(far.0, far.1);
+    fx.sims(&mut back).stream_in(far.0, far.1);
+    assert!(mined(&back), "still air after a stream out and back");
+    assert_eq!(back.get_block(bx + 5, 5, bz + 5), GLASS);
+}
+
+/// The sims a [`ColumnSims`] borrows besides the world.
+struct Fixture<'b> {
+    bg: &'b BiomeGenerator,
+    registry: BlockRegistry,
+    loaded: ahash::AHashSet<(i32, i32)>,
+    water: WaterSystem,
+    lava: LavaSystem,
+    fire: FireSystem,
+    ecs: hecs::World,
+}
+
+impl<'b> Fixture<'b> {
+    fn new(bg: &'b BiomeGenerator) -> Self {
+        Self {
+            bg,
+            registry: BlockRegistry::new(),
+            loaded: ahash::AHashSet::new(),
+            water: WaterSystem::new(),
+            lava: LavaSystem::new(),
+            fire: FireSystem::new(),
+            ecs: hecs::World::new(),
+        }
+    }
+
+    fn sims<'a>(&'a mut self, world: &'a mut World) -> ColumnSims<'a> {
+        ColumnSims {
+            world,
+            loaded: &mut self.loaded,
+            registry: &self.registry,
+            biome_gen: self.bg,
+            water: &mut self.water,
+            lava: &mut self.lava,
+            fire: &mut self.fire,
+            ecs: &mut self.ecs,
+            tick: 0,
+        }
     }
 }
 
