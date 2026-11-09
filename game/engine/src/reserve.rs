@@ -71,19 +71,6 @@ impl RichnessTier {
         }
     }
 
-    /// One-line description for the gauge tooltip / help text. No production
-    /// caller — `hud_ui::draw_reserve_gauge` shows only `label()` + the raw
-    /// percentage, no tooltip; exercised by the tests below.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn description(self) -> &'static str {
-        match self {
-            RichnessTier::Empty => "Mining payouts are paused — the Reserve needs sponsorship.",
-            RichnessTier::Thin => "The Reserve is low. Payouts are reduced.",
-            RichnessTier::Healthy => "The Reserve is healthy. Mining rewards near full rate.",
-            RichnessTier::Fat => "The Reserve is fat with sats. Mining at peak rate.",
-        }
-    }
-
     /// 0-based ordinal. Despite the original doc's claim, `biome::pick_deepslate_variant`
     /// picks the visual-variant BlockId directly from its own richness thresholds,
     /// not via this ordinal — no production caller today. Exercised by the tests below.
@@ -168,9 +155,8 @@ mod tests {
     }
 
     #[test]
-    fn tier_label_uses_uk_english() {
-        // Sanity guard against US-English imports — these labels are
-        // user-facing in the HUD gauge.
+    fn every_tier_has_a_label() {
+        // These labels are user-facing in the HUD gauge.
         for tier in [
             RichnessTier::Empty,
             RichnessTier::Thin,
@@ -179,10 +165,6 @@ mod tests {
         ] {
             let label = tier.label();
             assert!(!label.is_empty());
-            // No US-only spellings would appear in this short label set,
-            // but the description should also be checked.
-            let desc = tier.description();
-            assert!(desc.ends_with('.'), "{:?} description must end with period", tier);
         }
     }
 

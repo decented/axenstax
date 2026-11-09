@@ -637,7 +637,13 @@ independent of world size: pistons and hoppers read each chunk's maintained
 piston/hopper counter (`Chunk::has_pistons` / `has_hoppers`, kept in
 `Chunk::set` and `from_bytes`) and read cells only in chunks that hold one,
 instead of every cell of every loaded chunk (`World::chunks_with_pistons`,
-`chunks_with_hoppers`).
+`chunks_with_hoppers`). The growth pass (every 100 ticks) does the same with
+per-chunk crop, blighted-crop and sapling counters (`Chunk::has_crops` /
+`has_blighted` / `has_saplings`, kept in `Chunk::set` and `from_bytes`,
+runtime only): `growth::scan_crops` and `collect_sapling_positions` read cells
+only in chunks that hold one (`World::chunks_with_crops` /
+`chunks_with_saplings`), and the sapling scan runs only on the 200-tick passes
+where `advance_saplings` acts.
 
 ```rust
 const TICK_RATE: u32 = 20;

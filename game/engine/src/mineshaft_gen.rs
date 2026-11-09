@@ -228,13 +228,17 @@ fn build_in_column(
                 }
             }
         }
-        // Loot chest — placed once, in whichever column owns its cell. Don't
-        // overwrite an existing chest (protects a looted chest from a re-gen).
+        // Loot chest — in whichever column owns its cell. The BLOCK is always
+        // placed: the tunnel carve above just made the cell air, and a column
+        // that streams out untouched is dropped (its chest's contents stay in
+        // the side table), so skipping the block would lose the chest on
+        // re-entry. Only the CONTENTS are guarded, so a looted chest is not
+        // refilled by a re-gen (as `brigand_hideout_gen` does).
         if let Some((cxp, cyp, czp)) = chest
             && in_col(cxp, czp, xmin, zmin, xmax, zmax)
-                && world.chest_at((cxp, cyp, czp)).is_none()
-            {
-                world.set_block(cxp, cyp, czp, CHEST);
+        {
+            world.set_block(cxp, cyp, czp, CHEST);
+            if world.chest_at((cxp, cyp, czp)).is_none() {
                 let loot_seed = hash3((layout.ax as u32) ^ 0x5151, cxp, czp, arm_idx as u32);
                 let data = ChestData {
                     slots: loot_for_chest(loot_seed),
@@ -242,6 +246,7 @@ fn build_in_column(
                 };
                 world.insert_chest((cxp, cyp, czp), data);
             }
+        }
     }
 }
 
@@ -300,6 +305,39 @@ mod tests {
         assert!(a.iter().any(|s| s.is_some()), "a mineshaft chest should hold loot");
         // ItemStack isn't PartialEq; compare the Debug fingerprint for determinism.
         assert_eq!(format!("{a:?}"), format!("{b:?}"), "same seed → same loot");
+    }
+
+    #[test]
+    fn a_looted_chest_survives_its_pristine_column_streaming_out_and_back() {
+        let seed = 31337;
+        let (l, bg) = any_mineshaft(seed);
+        let mut world = World::new();
+        let cs = CHUNK_SIZE as i32;
+        let cx0 = l.ax.div_euclid(cs);
+        let cz0 = l.az.div_euclid(cs);
+        let columns: Vec<(i32, i32)> = (-4..=4)
+            .flat_map(|dcx| (-4..=4).map(move |dcz| (cx0 + dcx, cz0 + dcz)))
+            .collect();
+        for &(cx, cz) in &columns {
+            world.generate_column(cx, cz, &bg);
+        }
+        let pos = world.iter_chests().map(|(p, _)| p).min().expect("a shaft chest");
+        assert_eq!(world.get_block(pos.0, pos.1, pos.2), CHEST);
+        // Part-loot it: opening a chest writes no block, so the column stays pristine.
+        world.chest_at_mut(pos).unwrap().slots[0] = None;
+        let before = format!("{:?}", world.chest_at(pos).unwrap().slots);
+        for &(cx, cz) in &columns {
+            assert!(!world.evict_column(cx, cz), "an unedited column is dropped, not kept");
+        }
+        for &(cx, cz) in &columns {
+            world.generate_column(cx, cz, &bg);
+        }
+        assert_eq!(world.get_block(pos.0, pos.1, pos.2), CHEST, "the chest block must come back");
+        assert_eq!(
+            format!("{:?}", world.chest_at(pos).unwrap().slots),
+            before,
+            "the part-looted contents must not be regenerated"
+        );
     }
 
     #[test]

@@ -539,6 +539,10 @@ impl super::GameState {
                 self.leave_world_with_notice(crate::world_exit::SaveChoice::Abandon, format!("This world's quest givers couldn't be restored: {error}"));
                 return false;
             }
+            // Ordinary villagers are not saved but the village marks are: drop the
+            // marks of villages nobody restored into, so the village sweep
+            // repopulates them (Spec 05 §3.13).
+            crate::village_gen::forget_unattended_villages(&mut self.world, &self.ecs);
 
             // Heavy per-column work (lighting, water, gen-missing, meshing, mob
             // scatter) is deferred to `step_load`, driven by the queue built at

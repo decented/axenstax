@@ -28,8 +28,13 @@
 //!   honestly (a flat ban would forbid writing "no sats show up, no real
 //!   money changes hands").
 //!
-//! The player guide is therefore linted at [`EARNING_FRAME`] only. That is a
-//! judgement call, recorded here so it can be tightened.
+//! The player guide (and the other prose surfaces above) are therefore linted at
+//! [`EARNING_FRAME`] only. That is a judgement call, recorded here so it can be
+//! tightened.
+//!
+//! [`BANNED_PHRASES`] ("work-meter", "work meter") are banned on EVERY surface
+//! the lint covers: that mechanic was retired and never built, so copy must not
+//! describe it as live. A line that says it is retired is the one allowance.
 //!
 //! ## Exceptions
 //!
@@ -40,7 +45,10 @@
 //! ## Surfaces covered here
 //!
 //! * `README.md` — full union.
-//! * `docs/player-guide/**/*.md` — [`EARNING_FRAME`].
+//! * `docs/player-guide/**/*.md`, `docs/learn-journey/**/*.md`,
+//!   `docs/operators/**/*.md`, `docs/roadmap.md` and the page templates of
+//!   every site (`tools/sites/*/templates/*.html`, never `claim`, never a
+//!   `.venv`) — [`EARNING_FRAME`].
 //! * The string literals of every `src/*_ui.rs` and `src/menu.rs` (the egui
 //!   text surfaces: HUD, panels, dialogs, menus) — full union, except the
 //!   sats-gated economy panels ([`ECONOMY_UI_FILES`], earning + hard money).
@@ -80,6 +88,13 @@ pub(crate) const BANNED_MONEY_WORDS: &[&str] = &[
     // CURRENCY_VOCAB
     "sat", "sats", "bitcoin", "bitcoins", "buy", "sell",
 ];
+
+/// Phrases (not single words) banned on every linted surface: the deterministic
+/// work-meter was retired on 2026-11-08 and never built, so copy must not
+/// present it as a mechanic. Matched case-insensitively on whole words with any
+/// run of non-letters read as one space, so "work-meter" and "work meter" both hit.
+/// A line that says the thing is retired is excused (see [`scan`]).
+pub(crate) const BANNED_PHRASES: &[&str] = &["work meter"];
 
 /// Flatten several tiers (or any word slices) into one word list.
 pub(crate) fn words_of(tiers: &[&[&'static str]]) -> Vec<&'static str> {
@@ -125,6 +140,15 @@ pub(crate) fn tokenize_words(text: &str) -> HashSet<String> {
 pub(crate) fn banned_in<'a>(text: &str, words: &[&'a str]) -> Vec<&'a str> {
     let toks = tokenize_words(text);
     words.iter().copied().filter(|w| toks.contains(*w)).collect()
+}
+
+/// Which of [`BANNED_PHRASES`] occur in `text` as whole words (any run of
+/// non-letters reads as one space, case ignored: "work-meter", "Work Meter").
+pub(crate) fn banned_phrases_in(text: &str) -> Vec<&'static str> {
+    let lower = text.to_lowercase();
+    let words: Vec<&str> = lower.split(|c: char| !c.is_alphabetic()).filter(|w| !w.is_empty()).collect();
+    let flat = format!(" {} ", words.join(" "));
+    BANNED_PHRASES.iter().copied().filter(|p| flat.contains(&format!(" {p} "))).collect()
 }
 
 /// One line / literal of linted text and where it came from.
@@ -176,6 +200,31 @@ pub(crate) const ALLOWS: &[Allow] = &[
         word: "payout",
         contains: "not a payout",
         reason: "negation: the Genesis celebration is 'a one-time celebration, not a payout'",
+    },
+    // ── Roadmap + site page templates: denials of earning ──────────────────
+    Allow {
+        surface: "docs/roadmap.md",
+        at: "",
+        word: "earning",
+        contains: "never appears as an earning mechanic",
+        reason: "negation: the compliance bullet says Proof of Play 'never appears as an earning \
+                 mechanic' (and names the earning words the tests guard)",
+    },
+    Allow {
+        surface: "site templates",
+        at: "project/templates/roadmap.html",
+        word: "earning",
+        contains: "never an earning mechanic",
+        reason: "negation: 'Proof of Play is an educational proof-of-work primitive, never an \
+                 earning mechanic'",
+    },
+    Allow {
+        surface: "site templates",
+        at: "project/templates/roadmap.html",
+        word: "earning",
+        contains: "<h3>No earning</h3>",
+        reason: "negation: the roadmap card heading 'No earning' introduces the line that nothing \
+                 in the game converts to sats",
     },
     // ── Moonshot Phase A founding-myth lore (in-fiction, not real money) ───
     // docs/superpowers/specs/2026-06-22-moonshot-phase-a-theme-capture-build-spec.md:
@@ -250,6 +299,19 @@ pub(crate) fn scan(surface: &str, items: &[Item], words: &[&str]) -> Result<(), 
                 let shown: String = it.text.chars().take(120).collect();
                 problems.push(format!("  {} — banned word {word:?}: {shown}", it.at));
             }
+        }
+    }
+    for it in items {
+        for phrase in banned_phrases_in(&it.text) {
+            // The one allowance: a line that says the mechanic is retired.
+            if it.text.to_lowercase().contains("retired") {
+                continue;
+            }
+            let shown: String = it.text.chars().take(120).collect();
+            problems.push(format!(
+                "  {} — banned phrase {phrase:?} (retired mechanic; a line may name it only to say it is retired): {shown}",
+                it.at
+            ));
         }
     }
     for (k, a) in allows.iter().enumerate() {
@@ -567,6 +629,85 @@ fn player_guide_never_frames_play_as_earning() {
     scan("docs/player-guide", &items, EARNING_FRAME).unwrap_or_else(|e| panic!("{e}"));
 }
 
+/// One [`Item`] per non-empty line of every `*.md` under `rel_dir`.
+fn markdown_dir_items(rel_dir: &str) -> (usize, Vec<Item>) {
+    let files = markdown_files_under(rel_dir);
+    let mut items = Vec::new();
+    for f in &files {
+        let raw = std::fs::read_to_string(f)
+            .unwrap_or_else(|e| panic!("copy_lint: cannot read {} ({e})", f.display()));
+        let label = f.strip_prefix(manifest_dir().join("../..")).unwrap_or(f).display().to_string();
+        items.extend(markdown_items(&label, &raw));
+    }
+    (files.len(), items)
+}
+
+#[test]
+fn learn_journey_never_frames_play_as_earning() {
+    let (n, items) = markdown_dir_items("docs/learn-journey");
+    assert!(n > 15, "learn-journey scan found {n} files — wrong path?");
+    scan("docs/learn-journey", &items, EARNING_FRAME).unwrap_or_else(|e| panic!("{e}"));
+}
+
+#[test]
+fn operator_docs_never_frame_play_as_earning() {
+    let (n, items) = markdown_dir_items("docs/operators");
+    assert!(n >= 4, "operators scan found {n} files — wrong path?");
+    scan("docs/operators", &items, EARNING_FRAME).unwrap_or_else(|e| panic!("{e}"));
+}
+
+#[test]
+fn roadmap_never_frames_play_as_earning() {
+    let items = markdown_items("docs/roadmap.md", &read_repo_file("docs/roadmap.md"));
+    assert!(items.len() > 50, "roadmap scan covered almost nothing — wrong path?");
+    scan("docs/roadmap.md", &items, EARNING_FRAME).unwrap_or_else(|e| panic!("{e}"));
+}
+
+/// Every `tools/sites/*/templates/*.html`, one [`Item`] per non-empty line.
+/// `claim` is deliberately isolated (never linted, never linked), and a
+/// `.venv` is never walked: only the `templates` folder of each site is read.
+fn site_template_items() -> (usize, Vec<Item>) {
+    let sites = manifest_dir().join("../../tools/sites");
+    let mut dirs: Vec<PathBuf> = std::fs::read_dir(&sites)
+        .unwrap_or_else(|e| panic!("copy_lint: cannot list {} ({e})", sites.display()))
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir() && p.file_name().is_some_and(|n| n != "claim" && n != ".venv"))
+        .collect();
+    dirs.sort();
+    let mut files = Vec::new();
+    for d in dirs {
+        let templates = d.join("templates");
+        let Ok(rd) = std::fs::read_dir(&templates) else { continue };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_file() && p.extension().is_some_and(|x| x == "html") {
+                files.push(p);
+            }
+        }
+    }
+    files.sort();
+    let mut items = Vec::new();
+    for f in &files {
+        let raw = std::fs::read_to_string(f)
+            .unwrap_or_else(|e| panic!("copy_lint: cannot read {} ({e})", f.display()));
+        let label = f.strip_prefix(manifest_dir().join("../..")).unwrap_or(f).display().to_string();
+        items.extend(markdown_items(&label, &raw));
+    }
+    (files.len(), items)
+}
+
+#[test]
+fn site_templates_never_frame_play_as_earning() {
+    let (n, items) = site_template_items();
+    assert!(n >= 25, "site template scan found {n} files — wrong path?");
+    assert!(
+        items.iter().all(|i| !i.at.contains("tools/sites/claim/") && !i.at.contains(".venv")),
+        "the claim site and any .venv are never linted"
+    );
+    scan("site templates", &items, EARNING_FRAME).unwrap_or_else(|e| panic!("{e}"));
+}
+
 #[test]
 fn egui_ui_literals_have_no_money_or_earning_words() {
     let files = ui_source_files();
@@ -651,6 +792,21 @@ fn scan_bites_on_a_banned_word_and_honours_a_reasoned_allow() {
     let err = scan("README.md", &bad, BANNED_MONEY_WORDS).expect_err("must reject 'earn money'");
     assert!(err.contains("README.md:3") && err.contains("\"earn\"") && err.contains("\"money\""));
     assert!(!err.contains("README.md:1"), "an allowed line must not be reported");
+}
+
+#[test]
+fn the_work_meter_is_a_banned_phrase_unless_the_line_says_it_is_retired() {
+    for hit in ["The work-meter fills as you mine.", "your Work Meter", "a work\u{2011}meter"] {
+        assert_eq!(banned_phrases_in(hit), ["work meter"], "{hit:?}");
+    }
+    assert!(banned_phrases_in("a network meter, a workmeter").is_empty());
+    let bad = [
+        item("x.md:1", "Proof of Play fills a work-meter."),
+        item("x.md:2", "The work-meter was retired on 2026-11-08 and never built."),
+    ];
+    let err = scan("fake surface", &bad, EARNING_FRAME).expect_err("a live work-meter is banned");
+    assert!(err.contains("x.md:1") && err.contains("banned phrase"));
+    assert!(!err.contains("x.md:2"), "a line that says it is retired is allowed");
 }
 
 #[test]

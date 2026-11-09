@@ -643,6 +643,52 @@ pub fn spawn_initial_villagers(
     spawned
 }
 
+/// How near a village's anchor a restored quest giver must stand for the
+/// village to keep its `populated_villages` mark across a load: the same
+/// reach the wanderer migration uses for a bell (`tick_wanderer_migration`).
+pub const ATTENDED_VILLAGE_RADIUS: f32 = 64.0;
+
+/// On world load, forget the `populated_villages` mark of every village that
+/// has no living villager near its anchor, so [`spawn_initial_villagers`]
+/// (the once-a-second sweep) gives it a fresh cohort when it is next seen.
+///
+/// Why: ordinary villagers are not saved (`save::saved_mobs`: only tamed pets
+/// and authored mobs; `quest_npcs`: only engaged quest givers), but the mark
+/// is. Without this a visited village stood empty for good after its first
+/// reload. A village whose quest giver was restored (`quest_npcs::restore`,
+/// which must have run before this) keeps its mark, so that giver does not get
+/// a second cohort on top of it. Needs no save-format change. Returns how many
+/// marks were dropped.
+pub fn forget_unattended_villages(world: &mut World, ecs: &hecs::World) -> usize {
+    use crate::entity::{MobKind, Position};
+    use crate::villager::is_villager_kind;
+
+    let villagers: Vec<Vec3> = ecs
+        .query::<(&Position, &MobKind, &crate::quest_npcs::QuestNpcId)>()
+        .iter()
+        .filter(|(_, (_, kind, _))| is_villager_kind(kind.0))
+        .filter(|(entity, _)| {
+            !ecs.get::<&crate::combat::Health>(*entity).is_ok_and(|h| h.is_dead())
+        })
+        .map(|(_, (pos, _, _))| pos.0)
+        .collect();
+    let anchors = &world.village_anchors;
+    let before = world.populated_villages.len();
+    let kept: ahash::AHashSet<(i32, i32)> = world
+        .populated_villages
+        .iter()
+        .copied()
+        .filter(|cell| {
+            anchors.get(cell).is_some_and(|a| {
+                let at = Vec3::new(a[0] as f32 + 0.5, a[1] as f32 + 0.5, a[2] as f32 + 0.5);
+                villagers.iter().any(|p| (*p - at).length() <= ATTENDED_VILLAGE_RADIUS)
+            })
+        })
+        .collect();
+    world.populated_villages = kept;
+    before - world.populated_villages.len()
+}
+
 /// HP-4 — auto-spawn Knight village defenders for every village whose
 /// population meets the Spec 19 threshold (≥ 3 claimed villagers + ≥ 5
 /// houses); per-village cap of `max(1, villagers / 10)`. HP-6 retired the

@@ -2182,6 +2182,18 @@ impl World {
         self.chunks.iter().filter(|(_, c)| c.has_hoppers()).map(|(&k, c)| (k, c))
     }
 
+    /// The loaded chunks that hold a crop or a Blighted Crop (see
+    /// [`Self::chunks_with_pistons`]): what the growth pass walks.
+    pub(crate) fn chunks_with_crops(&self) -> impl Iterator<Item = ((i32, i32, i32), &Chunk)> {
+        self.chunks.iter().filter(|(_, c)| c.has_crops() || c.has_blighted()).map(|(&k, c)| (k, c))
+    }
+
+    /// The loaded chunks that hold a planted sapling (see
+    /// [`Self::chunks_with_pistons`]).
+    pub(crate) fn chunks_with_saplings(&self) -> impl Iterator<Item = ((i32, i32, i32), &Chunk)> {
+        self.chunks.iter().filter(|(_, c)| c.has_saplings()).map(|(&k, c)| (k, c))
+    }
+
     /// Note that a feast was held at `cell` for `guests` guests (see
     /// [`Self::feast_events`]).
     pub fn note_feast(&mut self, cell: (i32, i32, i32), guests: u8) {
@@ -3263,10 +3275,16 @@ impl World {
                                 self.set_block(hx, hy, hz, crate::block::BEE_HIVE);
                                 // Found hives start part-stocked so the first
                                 // discovery pays off without waiting a cycle.
-                                self.insert_hive(
-                                    (hx, hy, hz),
-                                    crate::bee_hive::HiveData { bees_inside: 1, honey_level: 2 },
-                                );
+                                // Only when no hive data is there yet: the side
+                                // table outlives a pristine column that streams
+                                // out, and a re-entry must not refill a hive the
+                                // player has emptied.
+                                if self.hive_at((hx, hy, hz)).is_none() {
+                                    self.insert_hive(
+                                        (hx, hy, hz),
+                                        crate::bee_hive::HiveData { bees_inside: 1, honey_level: 2 },
+                                    );
+                                }
                             }
                         }
                     }
@@ -3815,6 +3833,46 @@ mod tests {
         // Re-placed: an empty frame.
         assert!(w.apply_remote_block_change(&to(frame, block::ITEM_FRAME)));
         assert!(w.item_frame_at(frame).is_none_or(|f| f.is_empty()), "drawn empty, never the old item");
+    }
+
+    #[test]
+    fn an_emptied_wild_hive_stays_empty_when_its_pristine_column_streams_back_in() {
+        // Wild hives are inserted by worldgen into the side tables, which survive
+        // `evict_column`; re-entry must not refill a hive the player emptied.
+        let mut found = None;
+        'seeds: for seed in 1..40u32 {
+            let bg = crate::biome::BiomeGenerator::new(seed, crate::biome::Generator::V2);
+            let mut w = World::new();
+            for cx in -6..6 {
+                for cz in -6..6 {
+                    w.generate_column(cx, cz, &bg);
+                }
+            }
+            if w.iter_hives().next().is_some() {
+                found = Some((bg, w));
+                break 'seeds;
+            }
+        }
+        let (bg, mut w) = found.expect("some seed grows a wild hive in a 12x12 patch");
+        let pos = w.iter_hives().map(|(p, _)| p).min().unwrap();
+        assert_eq!(w.get_block(pos.0, pos.1, pos.2), crate::block::BEE_HIVE);
+        *w.hive_at_mut(pos).unwrap() = crate::bee_hive::HiveData { bees_inside: 0, honey_level: 0 };
+        let cs = CHUNK_SIZE as i32;
+        let (hcx, hcz) = (pos.0.div_euclid(cs), pos.2.div_euclid(cs));
+        for cx in -6..6 {
+            for cz in -6..6 {
+                w.evict_column(cx, cz);
+            }
+        }
+        assert!(!w.has_chunk(hcx, pos.1.div_euclid(cs), hcz), "the pristine column was dropped");
+        for cx in -6..6 {
+            for cz in -6..6 {
+                w.generate_column(cx, cz, &bg);
+            }
+        }
+        assert_eq!(w.get_block(pos.0, pos.1, pos.2), crate::block::BEE_HIVE, "the hive block returns");
+        let h = w.hive_at(pos).expect("hive data still there");
+        assert_eq!((h.bees_inside, h.honey_level), (0, 0), "an emptied hive must not refill on re-entry");
     }
 
     #[test]

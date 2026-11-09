@@ -57,6 +57,14 @@ pub struct Chunk {
     /// the counters above, so the shelf sweep and the bloom scan skip every
     /// chunk that has none (`World::shelf_cells_in_column`, `World::shelves`).
     shelves: u16,
+    /// Growth pass — how many cells hold a crop (any stage, `growth::is_crop`),
+    /// a Blighted Crop, and a planted sapling. Kept like the counters above, so
+    /// the 100-tick growth scans skip every chunk that has none
+    /// (`World::chunks_with_crops` / `chunks_with_saplings`) instead of reading
+    /// all 4096 cells of every loaded chunk. Runtime only: never saved.
+    crops: u16,
+    blighted: u16,
+    saplings: u16,
     /// Spec 30 — packed per-voxel light: `(sky_light << 4) | block_light`.
     /// Each nibble is 0..15. Initialised to 0 (dark); world-gen + place
     /// hooks fill in via the `lighting` BFS module. Not persisted on
@@ -89,6 +97,9 @@ impl Chunk {
             commons: 0,
             feast_markers: 0,
             shelves: 0,
+            crops: 0,
+            blighted: 0,
+            saplings: 0,
             light: [0; CHUNK_VOLUME],
             placed: [0; PLACED_WORDS],
             mesh_dirty: true,
@@ -168,7 +179,8 @@ impl Chunk {
         self.mesh_dirty = true;
     }
 
-    /// Keep the piston / hopper counters in step with a cell gaining
+    /// Keep the per-chunk block counters (machines, gatherings, shelves, crops,
+    /// blighted crops, saplings) in step with a cell gaining
     /// (`add`) or losing a block.
     #[inline]
     fn track_machine(&mut self, block: BlockId, add: bool) {
@@ -178,6 +190,9 @@ impl Chunk {
             crate::block::COMMONS_STONE => &mut self.commons,
             crate::block::FEAST_MARKER => &mut self.feast_markers,
             crate::block::COMMONS_SHELF => &mut self.shelves,
+            crate::block::BLIGHTED_CROP => &mut self.blighted,
+            b if crate::growth::is_crop(b) => &mut self.crops,
+            b if crate::block::is_sapling_block(b) => &mut self.saplings,
             _ => return,
         };
         if add {
@@ -215,6 +230,36 @@ impl Chunk {
     #[inline]
     pub(crate) fn has_shelves(&self) -> bool {
         self.shelves != 0
+    }
+
+    /// Does this chunk hold at least one crop (any stage)? O(1).
+    #[inline]
+    pub(crate) fn has_crops(&self) -> bool {
+        self.crops != 0
+    }
+
+    /// Does this chunk hold at least one Blighted Crop? O(1).
+    #[inline]
+    pub(crate) fn has_blighted(&self) -> bool {
+        self.blighted != 0
+    }
+
+    /// Does this chunk hold at least one planted sapling? O(1).
+    #[inline]
+    pub(crate) fn has_saplings(&self) -> bool {
+        self.saplings != 0
+    }
+
+    /// Full recount of (crops, blighted crops, saplings) — the oracle the
+    /// maintained counters are tested against. Test-only.
+    #[cfg(test)]
+    pub(crate) fn recount_farming(&self) -> (usize, usize, usize) {
+        let count = |f: fn(BlockId) -> bool| self.blocks.iter().filter(|&&b| f(b)).count();
+        (
+            count(crate::growth::is_crop),
+            count(|b| b == crate::block::BLIGHTED_CROP),
+            count(crate::block::is_sapling_block),
+        )
     }
 
     /// Full recount of (commons stones, feast markers) — the oracle the
@@ -435,6 +480,7 @@ impl Chunk {
         let (mut pistons, mut hoppers) = (0u16, 0u16);
         let (mut commons, mut feast_markers) = (0u16, 0u16);
         let mut shelves = 0u16;
+        let (mut crops, mut blighted, mut saplings) = (0u16, 0u16, 0u16);
         for (i, chunk) in data[..block_bytes].as_chunks::<2>().0.iter().enumerate() {
             blocks[i] = u16::from_le_bytes(*chunk);
             non_air += u16::from(blocks[i] != AIR);
@@ -444,6 +490,9 @@ impl Chunk {
                 crate::block::COMMONS_STONE => commons += 1,
                 crate::block::FEAST_MARKER => feast_markers += 1,
                 crate::block::COMMONS_SHELF => shelves += 1,
+                crate::block::BLIGHTED_CROP => blighted += 1,
+                b if crate::growth::is_crop(b) => crops += 1,
+                b if crate::block::is_sapling_block(b) => saplings += 1,
                 _ => {}
             }
         }
@@ -461,6 +510,9 @@ impl Chunk {
             commons,
             feast_markers,
             shelves,
+            crops,
+            blighted,
+            saplings,
             light: [0; CHUNK_VOLUME],
             placed,
             mesh_dirty: true,
@@ -776,6 +828,72 @@ mod tests {
         d.set(2, 1, 1, AIR);
         exact(&d, "swapped");
         assert!(!d.has_commons() && d.has_feast_markers());
+    }
+
+    // ── maintained crop / blighted crop / sapling counters ───────────
+
+    fn assert_farming_exact(c: &Chunk, what: &str) {
+        let (crops, blighted, saplings) = c.recount_farming();
+        assert_eq!(c.has_crops(), crops > 0, "{what}: has_crops != (recount > 0)");
+        assert_eq!(c.has_blighted(), blighted > 0, "{what}: has_blighted != (recount > 0)");
+        assert_eq!(c.has_saplings(), saplings > 0, "{what}: has_saplings != (recount > 0)");
+        assert_eq!(usize::from(c.crops), crops, "{what}: crop counter");
+        assert_eq!(usize::from(c.blighted), blighted, "{what}: blighted counter");
+        assert_eq!(usize::from(c.saplings), saplings, "{what}: sapling counter");
+    }
+
+    #[test]
+    fn farming_counts_match_a_full_recount_after_random_edits() {
+        use crate::block::{
+            BLIGHTED_CROP, CARROT_STAGE_3, CORNFLOWER, SAPLING_BIRCH, SAPLING_OAK, SAPLING_RUBBER,
+            WHEAT_STAGE_0,
+        };
+        let palette = [
+            AIR, STONE, WHEAT_STAGE_0, CARROT_STAGE_3, CORNFLOWER, BLIGHTED_CROP, SAPLING_OAK,
+            SAPLING_BIRCH, SAPLING_RUBBER, DIRT,
+        ];
+        let mut c = Chunk::new();
+        assert_farming_exact(&c, "new");
+        let mut rng = 0x5EED_1234_ABCD_9876u64;
+        for step in 0..20_000 {
+            let r = next(&mut rng);
+            let (x, y, z) = ((r & 15) as usize, ((r >> 4) & 15) as usize, ((r >> 8) & 15) as usize);
+            c.set(x, y, z, palette[((r >> 16) % palette.len() as u64) as usize]);
+            if step % 89 == 0 {
+                assert_farming_exact(&c, &format!("step {step}"));
+            }
+        }
+        assert_farming_exact(&c, "after 20,000 random edits");
+        // A byte round trip rebuilds the counters from the cells.
+        let back = Chunk::from_bytes(&c.as_bytes()).expect("round trip");
+        assert_farming_exact(&back, "from_bytes");
+        assert_eq!(back.recount_farming(), c.recount_farming());
+        // Replacing one kind with another (a crop growing a stage, a crop blighting,
+        // a sapling becoming a tree) moves the count between the right counters.
+        let mut d = Chunk::new();
+        d.set(1, 1, 1, WHEAT_STAGE_0);
+        d.set(1, 1, 1, WHEAT_STAGE_0);
+        assert_farming_exact(&d, "same block again");
+        d.set(1, 1, 1, CARROT_STAGE_3);
+        assert_farming_exact(&d, "crop -> another crop");
+        d.set(1, 1, 1, BLIGHTED_CROP);
+        assert_farming_exact(&d, "crop -> blighted");
+        assert!(d.has_blighted() && !d.has_crops());
+        d.set(1, 1, 1, SAPLING_OAK);
+        assert_farming_exact(&d, "blighted -> sapling");
+        d.set(1, 1, 1, AIR);
+        assert_farming_exact(&d, "sapling -> air");
+        assert!(!d.has_crops() && !d.has_blighted() && !d.has_saplings());
+        // Fully packed: 4096 fits the u16 counter.
+        for y in 0..CHUNK_SIZE {
+            for z in 0..CHUNK_SIZE {
+                for x in 0..CHUNK_SIZE {
+                    d.set(x, y, z, WHEAT_STAGE_0);
+                }
+            }
+        }
+        assert_farming_exact(&d, "all wheat");
+        assert_eq!(d.recount_farming().0, CHUNK_VOLUME);
     }
 
     // ── maintained piston / hopper counters ──────────────────────────

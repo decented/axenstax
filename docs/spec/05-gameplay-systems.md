@@ -1070,6 +1070,22 @@ load; the kid loses any in-flight quest on save/quit, which is fine for
 playtest while we figure out whether persistence here adds value or
 just complicates the kid's mental model.
 
+**Villagers across a reload (the `populated_villages` rule).** Ordinary
+villagers are never saved (only an engaged quest giver is, by
+`quest_npcs`), but the `populated_villages` mark that stops
+`spawn_initial_villagers` giving a village a second cohort is. Before the fix a
+visited village therefore stood empty for good after its first reload (no
+claimed workstations, no Knights, nobody to raid). The rule now: on every
+world load, after `quest_npcs::restore`, `village_gen::forget_unattended_villages`
+keeps a village's mark only if a living restored quest giver stands within 64
+blocks of its anchor, and drops every other mark. The once-a-second sweep then
+gives each dropped village a fresh cohort the first time its anchor chunk is
+loaded (once per session: the sweep marks the cell again), and a village
+whose quest giver came back keeps its mark so that giver gets no second cohort
+beside it. The call sits at all three load paths: `chunk_stream::begin_load`
+(solo and hosted-by-this-client), `GameServer::initial_load` (dedicated and
+lent-world servers) and the PWA resume in `game_loop`. No save-format change.
+
 ### 3.14 Farming — Tier 1.5 (Processed Economy)
 
 > **Status (2026-05-21):** Tier 1.5 DELIVERED on main, foundation
@@ -2363,6 +2379,9 @@ The fully-tested-but-never-called Spec 28d hive machinery is wired:
 - **Wild hives**: ~1 tree in 12 carries a `BEE_HIVE` on its trunk side at gen
   time (deterministic per (x,z,seed)), starting part-stocked (2 honey, 1 bee) —
   THE honey source; no crafting recipe (`bee_hive` block-entity inserted at gen).
+  The hive data is inserted only when none is there yet: block entities outlive
+  a pristine column that streams out, so a re-entry regenerates the block but
+  never refills a hive the player has emptied.
 - **Accumulate**: every 1200 ticks a hive with a Bee entity within 8 blocks
   gains 1 honey (`bee_hive::bee_within` + `deposit_honey`, cap 5). The full
   enter/leave-hive bee-AI wiring can replace this sweep without touching the

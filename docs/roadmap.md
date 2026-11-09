@@ -103,7 +103,7 @@ Everything below is on `main`. Much of it hasn't reached players yet (see above)
 - The game has no in-game feedback channel (web removed 2026-10-01, native removed 2026-11-01): `/bug`, `/idea`, `/mailbox`, the tester unlock and the Suggestion Box trial are gone.
 - Access rules tightened: a Signet block or a removed contact takes a player out of a hosted world, an empty allowlist admits nobody, `require_signin` must be exactly `true` or `false`, and delisting or blocking on a dedicated server removes players within about 5 seconds. A server with a WebSocket listener needs a public address to start, and `docker stop` now reaches the final save.
 - Crash-safe saves with damage quarantine, a staged data-directory migration, and a hardened updater.
-- Money words are guarded by tests on the README, the player guide and in-game text; Proof of Play never appears as an earning mechanic.
+- Money and earning words are guarded by tests: the full list on the README and the in-game text, and the earning words on the player guide, the learn journey, the operator docs, this roadmap and the site page templates (the claim site excepted). The retired work-meter may be named only to say it is retired. Proof of Play never appears as an earning mechanic.
 - Public repository housekeeping: licence, security policy, contributing guide and a credits file are in place.
 
 ---

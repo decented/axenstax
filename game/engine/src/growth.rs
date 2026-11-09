@@ -393,6 +393,14 @@ pub fn crop_break(blk: BlockId, rng_seed: u64, on_tilled: bool) -> Option<CropBr
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only: how many chunks the crop scan and the sapling scan walked cell
+    /// by cell on this thread (a chunk the counters rule out is not walked).
+    static CROP_CHUNKS_WALKED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static SAPLING_CHUNKS_WALKED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Collect every crop position in the currently-loaded chunks. Helper for
 /// the engine's per-tick growth pass.
 #[cfg(test)]
@@ -406,7 +414,11 @@ pub fn collect_crop_positions(world: &World) -> Vec<(i32, i32, i32)> {
 fn scan_crops(world: &World) -> (Vec<(i32, i32, i32)>, Vec<(i32, i32, i32)>) {
     let mut crops = Vec::new();
     let mut blighted = Vec::new();
-    for ((cx, cy, cz), chunk) in world.iter_chunks() {
+    // Only the chunks whose maintained counters say they hold a crop or a
+    // blighted crop: the rest are not read cell by cell.
+    for ((cx, cy, cz), chunk) in world.chunks_with_crops() {
+        #[cfg(test)]
+        CROP_CHUNKS_WALKED.with(|c| c.set(c.get() + 1));
         for ly in 0..crate::chunk::CHUNK_SIZE {
             for lz in 0..crate::chunk::CHUNK_SIZE {
                 for lx in 0..crate::chunk::CHUNK_SIZE {
@@ -433,10 +445,19 @@ fn scan_crops(world: &World) -> (Vec<(i32, i32, i32)>, Vec<(i32, i32, i32)>) {
 /// (~10 s per scan on the base cadence → ~5 min average).
 const SAPLING_GROW_ONE_IN: u64 = 30;
 
+/// Saplings roll to grow only on the base cadence (every 200 ticks), not on the
+/// faster watered-crop passes: [`advance_saplings`] is inert on any other tick,
+/// so [`tick_growth`] does not even collect them then.
+fn saplings_should_advance(tick: u64) -> bool {
+    tick != 0 && tick.is_multiple_of(CROP_GROWTH_TICKS_PER_STAGE)
+}
+
 /// Scan loaded chunks for planted sapling blocks (2026-07-04).
 pub fn collect_sapling_positions(world: &World) -> Vec<(i32, i32, i32)> {
     let mut out = Vec::new();
-    for ((cx, cy, cz), chunk) in world.iter_chunks() {
+    for ((cx, cy, cz), chunk) in world.chunks_with_saplings() {
+        #[cfg(test)]
+        SAPLING_CHUNKS_WALKED.with(|c| c.set(c.get() + 1));
         for ly in 0..crate::chunk::CHUNK_SIZE {
             for lz in 0..crate::chunk::CHUNK_SIZE {
                 for lx in 0..crate::chunk::CHUNK_SIZE {
@@ -467,7 +488,7 @@ pub fn advance_saplings(
     saplings: Vec<(i32, i32, i32)>,
 ) -> Vec<(i32, i32, i32)> {
     let mut dirty = Vec::new();
-    if tick == 0 || !tick.is_multiple_of(CROP_GROWTH_TICKS_PER_STAGE) {
+    if !saplings_should_advance(tick) {
         return dirty;
     }
     for (x, y, z) in saplings {
@@ -521,9 +542,10 @@ pub struct GrowthTick {
 /// The farming growth pass (Spec 16 crops + 2026-07-04 saplings), shared by the
 /// client loop and the dedicated server (T1-3, 2026-10-05) so neither forks the
 /// cadence or the scan. Hoists the [`crops_should_advance`] gate BEFORE the
-/// full-loaded-volume scans: `collect_crop_positions` / `collect_sapling_positions`
-/// are O(loaded chunks), but growth only fires on ~1 tick in 40 (engine audit
-/// 2026-06-04, B). Deterministic: crops advance on the tick cadence + light gate,
+/// scans: growth only fires on ~1 tick in 40 (engine audit 2026-06-04, B). The
+/// scans read cell by cell only the chunks whose maintained counters (`Chunk`:
+/// crops, blighted crops, saplings) say they hold something, and the sapling
+/// scan runs only on the 200-tick passes that advance saplings. Deterministic: crops advance on the tick cadence + light gate,
 /// saplings on a position+tick hash — no RNG state to share.
 ///
 /// `blight` (living world Tier 2 S8, `blight::allowed`: not creative, not in a
@@ -539,7 +561,9 @@ pub fn tick_growth(world: &mut World, tick: u64, raining: bool, seed: u32, bligh
     if blight {
         crop_changes.extend(crate::blight::spread(world, tick, blighted));
     }
-    let saplings = collect_sapling_positions(world);
+    // `advance_saplings` acts only on the base cadence (every 200 ticks), so the
+    // 100-tick watered passes skip the sapling scan.
+    let saplings = if saplings_should_advance(tick) { collect_sapling_positions(world) } else { Vec::new() };
     let grown_cells = advance_saplings(world, tick, seed, saplings);
     GrowthTick { crop_changes, grown_cells }
 }
@@ -547,6 +571,157 @@ pub fn tick_growth(world: &mut World, tick: u64, raining: bool, seed: u32, bligh
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn walked() -> (usize, usize) {
+        (CROP_CHUNKS_WALKED.with(|c| c.get()), SAPLING_CHUNKS_WALKED.with(|c| c.get()))
+    }
+
+    fn reset_walked() {
+        CROP_CHUNKS_WALKED.with(|c| c.set(0));
+        SAPLING_CHUNKS_WALKED.with(|c| c.set(0));
+    }
+
+    /// Lots of ground, and the farming blocks in a few chunks only:
+    /// crops in two, a blighted crop in one, saplings in two (one shared with a
+    /// crop), over negative and positive coordinates.
+    fn scattered_farm_world() -> World {
+        let mut w = World::new();
+        // 40 chunks of plain stone that hold nothing the scans look for.
+        for cx in -5..5 {
+            for cz in -2..2 {
+                w.set_block(cx * 16 + 3, 64, cz * 16 + 3, block::STONE);
+            }
+        }
+        let mut lit = |w: &mut World, x: i32, y: i32, z: i32, id: BlockId| {
+            w.set_block(x, y, z, id);
+            w.set_sky_light_at(x, y, z, 15);
+        };
+        // Crops: chunk (0,4,0) and chunk (-1,4,-1).
+        for i in 0..9 {
+            lit(&mut w, i, 64, 0, WHEAT_STAGE_0);
+            lit(&mut w, i, 64, 2, CARROT_STAGE_1);
+        }
+        lit(&mut w, -3, 64, -4, POTATO_STAGE_2);
+        lit(&mut w, -4, 65, -5, PAPYRUS_STAGE_0);
+        // A blighted crop in its own chunk.
+        lit(&mut w, 40, 64, 40, block::BLIGHTED_CROP);
+        // Saplings: one in a chunk with a crop, two elsewhere.
+        lit(&mut w, 5, 64, 5, block::SAPLING_OAK);
+        lit(&mut w, -33, 70, 20, block::SAPLING_BIRCH);
+        lit(&mut w, -34, 70, 21, block::SAPLING_SPRUCE);
+        w
+    }
+
+    #[test]
+    fn the_farming_scans_walk_only_chunks_that_hold_what_they_look_for() {
+        let w = scattered_farm_world();
+        assert!(w.iter_chunks().count() >= 40, "the world has many chunks to skip");
+        reset_walked();
+        let (crops, blighted) = scan_crops(&w);
+        let (crop_chunks, _) = walked();
+        assert_eq!(crops.len(), 9 + 9 + 2, "every crop is still found");
+        assert_eq!(blighted, vec![(40, 64, 40)]);
+        // (0,4,0) holds wheat and carrots; (-1,4,-1) the potato and the reed;
+        // (2,4,2) the blighted crop.
+        assert_eq!(crop_chunks, 3, "only chunks with a crop or a blighted crop are walked");
+        reset_walked();
+        let saplings = collect_sapling_positions(&w);
+        let (_, sapling_chunks) = walked();
+        assert_eq!(saplings.len(), 3);
+        assert_eq!(sapling_chunks, 2, "only chunks with a sapling are walked");
+    }
+
+    #[test]
+    fn tick_growth_collects_saplings_only_on_the_passes_that_advance_them() {
+        let mut w = scattered_farm_world();
+        reset_walked();
+        // Tick 100 is a watered-crop pass: crops advance, saplings do not.
+        let _ = tick_growth(&mut w, CROP_GROWTH_TICKS_PER_STAGE / WATER_GROWTH_DIVISOR, false, 7, false);
+        let (crop_chunks, sapling_chunks) = walked();
+        assert!(crop_chunks > 0, "the crop scan ran");
+        assert_eq!(sapling_chunks, 0, "no sapling scan on a pass that cannot grow one");
+        reset_walked();
+        let _ = tick_growth(&mut w, CROP_GROWTH_TICKS_PER_STAGE, false, 7, false);
+        assert_eq!(walked().1, 2, "the 200-tick pass scans the sapling chunks");
+    }
+
+    /// The pass as it was before the counters: full walks of every chunk.
+    fn full_walk_growth(world: &mut World, tick: u64, raining: bool, seed: u32, blight: bool) -> (Vec<BlockChange>, Vec<(i32, i32, i32)>) {
+        if !crops_should_advance(tick) {
+            return (Vec::new(), Vec::new());
+        }
+        let cs = crate::chunk::CHUNK_SIZE as i32;
+        let (mut crops, mut blighted, mut saplings) = (Vec::new(), Vec::new(), Vec::new());
+        let mut keys: Vec<_> = world.iter_chunks().map(|(k, _)| k).collect();
+        keys.sort_unstable();
+        for (cx, cy, cz) in keys {
+            for ly in 0..cs {
+                for lz in 0..cs {
+                    for lx in 0..cs {
+                        let (x, y, z) = (cx * cs + lx, cy * cs + ly, cz * cs + lz);
+                        let b = world.get_block(x, y, z);
+                        if b == block::BLIGHTED_CROP {
+                            blighted.push((x, y, z));
+                        } else if is_crop(b) {
+                            crops.push((x, y, z));
+                        }
+                        if crate::block::is_sapling_block(b) {
+                            saplings.push((x, y, z));
+                        }
+                    }
+                }
+            }
+        }
+        let monocultures = blight.then(|| crate::blight::find_monocultures(world, &crops));
+        let mut changes = advance_crops_blight(world, tick, raining, crops, monocultures.as_ref());
+        if blight {
+            changes.extend(crate::blight::spread(world, tick, blighted));
+        }
+        let grown = advance_saplings(world, tick, seed, saplings);
+        (changes, grown)
+    }
+
+    fn sorted<T: Ord>(mut v: Vec<T>) -> Vec<T> {
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn a_scattered_farm_grows_exactly_as_the_full_walk_grew_it() {
+        let mut a = scattered_farm_world();
+        let mut b = scattered_farm_world();
+        // A 12 x 8 wheat field in one region, so the blight roll has a monoculture to find.
+        for x in 100..112 {
+            for z in 100..108 {
+                for w in [&mut a, &mut b] {
+                    w.set_block(x, 64, z, WHEAT_STAGE_0);
+                    w.set_sky_light_at(x, 64, z, 15);
+                }
+            }
+        }
+        let mut grew = 0usize;
+        for pass in 1..=80u64 {
+            let tick = pass * 100;
+            let new = tick_growth(&mut a, tick, pass % 7 == 0, 11, true);
+            let (old_changes, old_grown) = full_walk_growth(&mut b, tick, pass % 7 == 0, 11, true);
+            let key = |c: &BlockChange| (c.x, c.y, c.z, c.new_block, c.meta);
+            assert_eq!(
+                sorted(new.crop_changes.iter().map(key).collect()),
+                sorted(old_changes.iter().map(key).collect()),
+                "tick {tick}: crop changes differ"
+            );
+            assert_eq!(sorted(new.grown_cells), sorted(old_grown), "tick {tick}: grown cells differ");
+            grew += new.crop_changes.len();
+        }
+        assert!(grew > 20, "the farm actually grew ({grew} changes)");
+        for x in -40..120 {
+            for z in -40..120 {
+                for y in 62..100 {
+                    assert_eq!(a.get_block(x, y, z), b.get_block(x, y, z), "world differs at ({x},{y},{z})");
+                }
+            }
+        }
+    }
 
     #[test]
     fn tick_growth_is_inert_off_cadence_and_grows_on_it() {

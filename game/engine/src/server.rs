@@ -1474,6 +1474,10 @@ impl GameServer {
             // cut can persist the selected world without its saved creatures.
             crate::steed_save::restore_pets(&mut self.ecs, &save_data.saved_mobs, false)?;
             if let Some(saved) = &save_data.quest_world { crate::quest_npcs::restore(&mut self.ecs, saved)?; }
+            // Ordinary villagers are not saved but the village marks are: drop the
+            // marks of villages nobody restored into, so the village sweep
+            // repopulates them (Spec 05 §3.13).
+            crate::village_gen::forget_unattended_villages(&mut self.world, &self.ecs);
 
             // Tick determinism (Spec 01 §4.1.4): the saved columns in
             // position order, not hash order — light crosses column seams,

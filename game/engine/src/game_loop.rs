@@ -9075,6 +9075,10 @@ impl super::GameState {
                                     self.leave_world_with_notice(crate::world_exit::SaveChoice::Abandon, crate::save_format::unopenable_message(&error));
                                     return;
                                 }
+                                // Ordinary villagers are not saved but the village marks
+                                // are (this path restores no quest givers, so every mark
+                                // goes): the village sweep repopulates them (Spec 05 §3.13).
+                                crate::village_gen::forget_unattended_villages(&mut self.world, &self.ecs);
                                 // Enter the live load screen (not Playing): the
                                 // world data + players are restored above; the
                                 // Loading branch then builds + meshes the chunk

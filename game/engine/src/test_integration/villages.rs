@@ -500,3 +500,109 @@ fn village_layout_carries_workshop_slots_for_alpha_professions() {
         "each workshop slot should host a distinct profession (no doubles in a single village)",
     );
 }
+
+// ── A reload and the villagers it does not restore ──────────────────────────
+//
+// Ordinary villagers are never saved; only engaged quest givers are
+// (`quest_npcs`). The `populated_villages` mark IS saved, so before the fix a
+// visited village stayed empty for good after the first reload.
+
+/// A seed whose village near the origin has a layout, with its grid cell,
+/// anchor and the chunk column the anchor sits in.
+fn village_world_seed() -> (u32, (i32, i32), [i32; 3], (i32, i32)) {
+    for seed in 1..400u32 {
+        let bg = crate::biome::BiomeGenerator::new(seed, crate::biome::Generator::V2);
+        for gx in -1..=1 {
+            for gz in -1..=1 {
+                if let Some(layout) = village_gen::layout_for_cell(seed, gx, gz, &bg) {
+                    let cs = crate::chunk::CHUNK_SIZE as i32;
+                    let a = layout.anchor_world;
+                    return (seed, (gx, gz), a, (a[0].div_euclid(cs), a[2].div_euclid(cs)));
+                }
+            }
+        }
+    }
+    panic!("no seed in 1..400 has a village within one cell of the origin");
+}
+
+fn villager_count(ecs: &hecs::World) -> usize {
+    ecs.query::<&MobKind>().iter().filter(|(_, k)| k.0 == MobType::Villager).count()
+}
+
+/// Generate the village's columns on a server and give it its first cohort.
+/// Returns how many villagers spawned.
+fn visit_village(
+    server: &mut crate::server::GameServer,
+    columns: (i32, i32),
+) -> u32 {
+    for dx in -3..=3 {
+        for dz in -3..=3 {
+            let (cx, cz) = (columns.0 + dx, columns.1 + dz);
+            if !server.world.has_chunk(cx, 0, cz) {
+                server.world.generate_column(cx, cz, &server.biome_gen);
+            }
+        }
+    }
+    village_gen::spawn_initial_villagers(&mut server.world, &server.biome_gen, &mut server.ecs)
+}
+
+#[test]
+fn a_populated_village_with_no_quest_giver_is_repopulated_once_after_a_reload() {
+    let (seed, cell, _anchor, columns) = village_world_seed();
+    let name = "__test_village_reload_repopulates__";
+    let _ = crate::save::delete_world(name);
+
+    let first = {
+        let mut server = crate::server::GameServer::new(1, name.to_string(), seed);
+        let n = visit_village(&mut server, columns);
+        assert!(n > 0, "the first visit spawns a cohort");
+        assert!(server.world.populated_villages.contains(&cell));
+        assert_eq!(village_gen::spawn_initial_villagers(&mut server.world, &server.biome_gen, &mut server.ecs), 0,
+            "never twice in one session");
+        server.try_save().expect("saves");
+        n
+    };
+
+    let mut server = crate::server::GameServer::new(1, name.to_string(), seed);
+    server.initial_load().expect("loads");
+    assert_eq!(villager_count(&server.ecs), 0, "ordinary villagers are not saved");
+    let again = visit_village(&mut server, columns);
+    assert_eq!(again, first, "the village is repopulated when it is next seen");
+    assert_eq!(
+        village_gen::spawn_initial_villagers(&mut server.world, &server.biome_gen, &mut server.ecs),
+        0,
+        "and not a second time in the same session"
+    );
+    assert_eq!(villager_count(&server.ecs), first as usize);
+    let _ = crate::save::delete_world(name);
+}
+
+#[test]
+fn a_village_whose_restored_quest_giver_stands_at_the_anchor_keeps_its_mark() {
+    let (seed, cell, anchor, columns) = village_world_seed();
+    let name = "__test_village_reload_keeps_attended__";
+    let _ = crate::save::delete_world(name);
+
+    {
+        let mut server = crate::server::GameServer::new(1, name.to_string(), seed);
+        assert!(visit_village(&mut server, columns) > 0);
+        // One of the cohort is mid-quest: it carries a quest-giver identity, so
+        // it is the one villager a save keeps.
+        server.world.quest_scope = Some([9; 16]);
+        let giver = spawn_villager_at(
+            &mut server.ecs,
+            Vec3::new(anchor[0] as f32 + 0.5, anchor[1] as f32 + 1.0, anchor[2] as f32 + 0.5),
+        );
+        server.ecs.insert_one(giver, crate::quest_npcs::QuestNpcId([7; 16])).unwrap();
+        server.try_save().expect("saves");
+    }
+
+    let mut server = crate::server::GameServer::new(1, name.to_string(), seed);
+    server.initial_load().expect("loads");
+    assert_eq!(villager_count(&server.ecs), 1, "only the quest giver came back");
+    assert!(server.world.populated_villages.contains(&cell), "the attended village keeps its mark");
+    let spawned = visit_village(&mut server, columns);
+    assert_eq!(spawned, 0, "no second cohort beside the restored quest giver");
+    assert_eq!(villager_count(&server.ecs), 1);
+    let _ = crate::save::delete_world(name);
+}
