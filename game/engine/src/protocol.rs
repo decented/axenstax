@@ -3924,7 +3924,7 @@ mod tests {
         // v99 (living world Tier 2 S8): block id 377 (Blighted Crop), no packet change.
         // v100 (living world Tier 2 S10): RegionPeople (79), a new packet.
         // v100 (living world Tier 2 S6): block id 378 (Commons Shelf), `ChestTier::Shelf`, no packet change.
-        // v100 (living world Tier 2 S7): block ids 378, 379; ItemAction::SiteBoard (= 15); BlockView::SiteBoard (= 5).
+        // v100 (living world Tier 2 S7): block id 379 (Site Board); ItemAction::SiteBoard (= 15); BlockView::SiteBoard (= 5).
         assert_eq!(PROTOCOL_VERSION, 100);
     }
 

@@ -418,7 +418,7 @@ mod tests {
     /// loading them as AIR and saving the holes back.
     #[test]
     fn a_world_written_now_carries_the_building_variants_version() {
-        // 69 as of living world Tier 2 S7 (the `site_boards` field and blocks 378, 379): 61 fields + layout revision 8.
+        // 69 as of living world Tier 2 S7 (the `site_boards` field and block 379; S6 took 378): 61 fields + layout revision 8.
         assert_eq!(SAVE_FORMAT_VERSION, 69, "61 fields + layout revision 8");
         // The world holds no new block, and still carries the new version.
         let bytes = encode_world_save(&minimal_world_save_for_tests(5)).unwrap();
