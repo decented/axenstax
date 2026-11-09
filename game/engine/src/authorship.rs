@@ -203,6 +203,40 @@ impl Authorship {
         self.chunks.remove(&chunk);
     }
 
+    /// Forget every cell `key` is the author of whose column lies in
+    /// `min_x..=max_x` by `min_z..=max_z` (any height), and every Plan starter
+    /// of theirs anchored there. The block stays; it becomes nobody's. Returns
+    /// how many entries went (succession, S5).
+    pub fn clear_key_in_box(&mut self, key: &AuthorKey, min_x: i32, max_x: i32, min_z: i32, max_z: i32) -> usize {
+        let Some(&id) = self.ids.get(key) else { return 0 };
+        let s = CHUNK_SIZE as i32;
+        let (cx0, cx1) = (min_x.div_euclid(s), max_x.div_euclid(s));
+        let (cz0, cz1) = (min_z.div_euclid(s), max_z.div_euclid(s));
+        let in_box = |x: i32, z: i32| x >= min_x && x <= max_x && z >= min_z && z <= max_z;
+        let touched: Vec<ChunkPos> = self
+            .chunks
+            .keys()
+            .filter(|&&(cx, _, cz)| cx >= cx0 && cx <= cx1 && cz >= cz0 && cz <= cz1)
+            .copied()
+            .collect();
+        let mut gone = 0usize;
+        for pos in touched {
+            let Some(map) = self.chunks.get_mut(&pos) else { continue };
+            let before = map.len();
+            map.retain(|&cell, a| {
+                let (lx, _, lz) = local_of(cell);
+                !(*a == id && in_box(pos.0 * s + lx as i32, pos.2 * s + lz as i32))
+            });
+            gone += before - map.len();
+            if map.is_empty() {
+                self.chunks.remove(&pos);
+            }
+        }
+        let before = self.starters.len();
+        self.starters.retain(|&(x, _, z), a| !(*a == id && in_box(x, z)));
+        gone + (before - self.starters.len())
+    }
+
     // ── Plan starters ────────────────────────────────────────────────
 
     /// Note who started the Plan build anchored at `anchor`.

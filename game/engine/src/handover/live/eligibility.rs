@@ -437,6 +437,22 @@ mod tests {
     }
 
     #[test]
+    fn handover_neutralise_keeps_when_each_plot_owner_was_last_seen() {
+        let mut t = crate::succession::Succession::default();
+        t.note_present(
+            &[crate::plot::PlotData::from_marker(crate::plot::PlotOwner::Npub("npub1owner".into()), 0, 64, 0)],
+            &["npub1owner".to_string()],
+            1_800_000_000,
+        );
+        let mut s = live_copy();
+        s.plot_succession = t.to_saved();
+        let before = s.plot_succession.clone();
+        assert!(before.is_some());
+        neutralise(&mut s, SOURCE).unwrap();
+        assert_eq!(s.plot_succession, before, "the table travels with the world, unchanged");
+    }
+
+    #[test]
     fn handover_neutralise_refuses_unattributable_slot_state() {
         let cases: [fn(&mut WorldSave); 4] = [
             |s| s.vendors.push(vendor(VendorOwner::LocalPlayer(1))),

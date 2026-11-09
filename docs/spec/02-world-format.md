@@ -2219,10 +2219,10 @@ against the slice before allocating.
       have made new saves unreadable to shipped builds, and a 4-byte header magic
       collides with a legacy save's leading `seed: u32`; an 8-byte trailing magic
       at the very end of a footer-less save is not a realistic collision.
-    - **`SAVE_FORMAT_VERSION`** = `WORLD_SAVE_FIELD_COUNT` (59 since living world Tier 2 S4,
+    - **`SAVE_FORMAT_VERSION`** = `WORLD_SAVE_FIELD_COUNT` (60 since living world Tier 2 S5,
       2026-11-09: `quest_world` was 54, `worldgen_version` 55, `authority_clock` 56,
-      `block_authors` 57, `region_use` 58, `plan_builds` 59) +
-      `SAVE_LAYOUT_REVISION` (7 today; see the block-ids bullets below) = 66. The current `SAVE_FORMAT_VERSION` is `66` (a test, `save_format::tests::spec_02_states_the_current_save_format_version`, fails if this sentence and the constant disagree, so a bump must edit this line). Two tripwire tests stop drift: serde's field list
+      `block_authors` 57, `region_use` 58, `plan_builds` 59, `plot_succession` 60) +
+      `SAVE_LAYOUT_REVISION` (7 today; see the block-ids bullets below) = 67. The current `SAVE_FORMAT_VERSION` is `67` (a test, `save_format::tests::spec_02_states_the_current_save_format_version`, fails if this sentence and the constant disagree, so a bump must edit this line). Two tripwire tests stop drift: serde's field list
       for `WorldSave` must equal `WORLD_SAVE_FIELD_COUNT` (so appending a field
       without bumping the version fails), and the tolerant reader must consume every
       byte of a current save (so a field listed in its struct literal without a read
@@ -2297,6 +2297,21 @@ against the slice before allocating.
       `log::warn!`; the live table evicts its least-counted row when a new design arrives at the bound;
       (4) *no identities*: a handover's transfer copy and an export both keep it as it is; (5) never on the
       wire. See `docs/superpowers/specs/2026-11-09-living-world-tier2.md` §4.
+    - **Last seen and passed-on Plots (format 67, living world Tier 2 S5, 2026-11-09).** Field 60,
+      `WorldSave.plot_succession: Option<succession::SavedSuccession>`, is
+      `{ last_seen: Vec<(npub: String, unix_secs: u64)>, passed_on: Vec<(i32, i32, i32)> }`: when each owner of a
+      joiner's Plot (a `PlotOwner::Npub`) was last in the world by the wall clock, and the markers of Plots that
+      have passed on to a Commons. No block was added, so the layout revision stays 7; footer arithmetic is
+      field count 60 + revision 7 = 67, and `FOOTER_FIELD_COUNTS` gains `(67, [60])` (footers 65 and 66 were
+      written with 59 fields and still load, with no table). Rules: (1) *absent means nothing recorded* (an older
+      save; an empty table is written as `None`); (2) *canonical*: rows sorted by npub, markers sorted, so the
+      same world is the same bytes (`sim_digest` digests the same form); (3) *never a refusal*: an empty or
+      over-long (> 128 byte) npub, a repeated npub or marker, or a row past the 4,096-row bound is dropped with a
+      `log::warn!`; (4) *only Plot owners have a row*: the next check prunes a row whose npub owns no Plot, and an
+      owner with no row is stamped "now" the first time the table is checked, so an upgraded world never passes a
+      Plot at once; (5) *identities and times*: an export (`pack_world_for_export`, which the web Backup download
+      also takes) and an import both drop the whole field, a handover's transfer copy keeps it, and it is never on
+      the wire or shown. See `docs/superpowers/specs/2026-11-09-living-world-tier2.md` §5.
     - **Layout revision 7 and the Blighted Crop (format 66, living world Tier 2 S8, 2026-11-09).** Block id
       377, `BLIGHTED_CROP` (a crop taken by blight: a plant, non-solid and transparent, on the straw-yellow
       wheat stage-2 texture layer; breaks to nothing; never "placed", so it carries no author), follows the

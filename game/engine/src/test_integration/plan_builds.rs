@@ -260,7 +260,9 @@ fn a_footer_64_save_loads_with_an_empty_table() {
     // A footer-64 writer (Tier 2 S3) had 58 fields: the same bytes without the new last one.
     let mut save = crate::save::minimal_world_save_for_tests(7);
     save.plan_builds = None;
+    save.plot_succession = None;
     let mut body = bincode::serialize(&save).unwrap();
+    assert_eq!(body.pop(), Some(0), "the absent succession table is one None byte");
     assert_eq!(body.pop(), Some(0), "the absent field is one None byte");
     body.extend_from_slice(&crate::save_format::footer_bytes(64));
     let (old, damaged) = crate::save::read_world_save_reporting(&body).expect("an older save loads");

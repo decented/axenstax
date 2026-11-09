@@ -1848,8 +1848,8 @@ mod quest_codec_tests {
         assert!(selected.quest_world.is_none());
         let mut body = bincode::serialize(&selected).unwrap();
         // A real footer-55 writer stopped at 53 fields (`local_personal`): none of
-        // `quest_world`, `worldgen_version`, `authority_clock`, `block_authors`, `region_use` or `plan_builds`, one `None` byte each, was written.
-        let appended = bincode::serialize(&(&selected.quest_world, &selected.worldgen_version, &selected.authority_clock, &selected.block_authors, &selected.region_use, &selected.plan_builds)).unwrap(); assert_eq!(appended, [0, 0, 0, 0, 0, 0]);
+        // `quest_world`, `worldgen_version`, `authority_clock`, `block_authors`, `region_use`, `plan_builds` or `plot_succession`, one `None` byte each, was written.
+        let appended = bincode::serialize(&(&selected.quest_world, &selected.worldgen_version, &selected.authority_clock, &selected.block_authors, &selected.region_use, &selected.plan_builds, &selected.plot_succession)).unwrap(); assert_eq!(appended, [0, 0, 0, 0, 0, 0, 0]);
         assert!(body.ends_with(&appended)); body.truncate(body.len() - appended.len());
         body.extend_from_slice(&55u32.to_le_bytes()); body.extend_from_slice(&crate::save_format::SAVE_FOOTER_MAGIC);
         let (old, partial) = crate::save::read_world_save_reporting(&body).unwrap();

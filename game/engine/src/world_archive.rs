@@ -103,6 +103,9 @@ pub fn pack_world_for_export(
     // npub) is the owner's own record and never leaves the machine in a shared
     // file; the blocks arrive anonymous.
     save.block_authors = None;
+    // Living world Tier 2 S5 — nor when each Plot owner was last here: it holds
+    // npubs and times. (The Plots themselves export as they always did.)
+    save.plot_succession = None;
     pack_world(&shared, &save, world, exhibit_images)
 }
 
@@ -119,6 +122,7 @@ pub fn unpack_world_for_import(
     // Living world S2 — and no incoming author table: an export carries none,
     // and a hand-made file's seat keys would otherwise become the importer's.
     save.block_authors = None;
+    save.plot_succession = None;
     Ok((meta, save, images))
 }
 
@@ -490,6 +494,7 @@ mod tests {
             block_authors: None,
             region_use: None,
             plan_builds: None,
+            plot_succession: None,
         }
     }
 
@@ -563,6 +568,31 @@ mod tests {
         assert_eq!(shared.plan_builds, rows, "an export keeps the counts");
         let (_, imported, _) = unpack_world_for_import(&exported, &mut World::new()).expect("import");
         assert_eq!(imported.plan_builds, rows, "and so does an import");
+    }
+
+    /// Living world Tier 2 S5 — when each Plot owner was last here holds npubs
+    /// and times: an export and an import carry none, the owner's own blob keeps it.
+    #[test]
+    fn export_and_import_drop_the_plot_succession_table() {
+        let world = World::new();
+        let meta = WorldMeta::new("succession-x");
+        let table = Some(crate::succession::SavedSuccession {
+            last_seen: vec![("npub1owner".into(), 1_800_000_000)],
+            passed_on: vec![(0, 64, 0)],
+        });
+        let mut save = minimal_world_save(1);
+        save.plot_succession = table.clone();
+        let kept = pack_world(&meta, &save, &world, &[]).expect("pack");
+        let (_, owner_copy, _) = unpack_world(&kept, &mut World::new()).expect("unpack");
+        assert_eq!(owner_copy.plot_succession, table, "the owner's own blob keeps it");
+        let exported = pack_world_for_export(&meta, save, &world, &[]).expect("pack");
+        let (_, shared, _) = unpack_world(&exported, &mut World::new()).expect("unpack");
+        assert!(shared.plot_succession.is_none(), "an export never carries when anyone was last here");
+        let mut handed = minimal_world_save(1);
+        handed.plot_succession = table;
+        let blob = pack_world(&meta, &handed, &world, &[]).expect("pack");
+        let (_, imported, _) = unpack_world_for_import(&blob, &mut World::new()).expect("import");
+        assert!(imported.plot_succession.is_none(), "an import never adopts a file's table");
     }
 
     #[test]

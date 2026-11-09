@@ -280,6 +280,7 @@ mod authorship; // Living world S2 — who built a block (spec Tier 2 §2).
 mod path_wear; // Living world Tier 2 S3 — grass walked over often becomes a Worn Path (spec §3).
 mod blight; // Living world Tier 2 S8 — monoculture blight on big single-crop fields (spec §8).
 mod use_record; // Living world Tier 2 S3 — lived days and nights slept per region (spec §3).
+mod succession; // Living world Tier 2 S5 — last seen and Plots passing on (spec §5).
 mod plan_builds; // Living world Tier 2 S4 — how often each Plan has been built here (spec §4).
 mod commons; // Living world S3 — Commons footprints and the Plot/Commons overlap rule (spec §4).
 mod growth;
@@ -1395,6 +1396,10 @@ pub(crate) struct GameState {
     /// `WorldMeta`, never serialized, resets to empty on every process start.
     /// See `game_loop::Hint` / `GameState::hint_once`.
     pub(crate) hints_shown: std::collections::HashSet<crate::game_loop::Hint>,
+    /// Living world Tier 2 S5 — the local seats that have already been told, this
+    /// session, that a Commons they walked into passed on from a Plot nobody
+    /// came back to (`succession::SATOSHI_PASSED_ON`). Runtime only.
+    pub(crate) passed_on_told: std::collections::HashSet<usize>,
     /// Phase 7 — first-person viewmodel swing window, per LOCAL player index.
     /// Counts down `SWING_TICKS..=0`; armed to `SWING_TICKS` on the rising edge
     /// of the player's own break/place intent so the held tool swings exactly
@@ -2241,6 +2246,7 @@ impl GameState {
             p1_gamepad: None,
             toast: None,
             hints_shown: std::collections::HashSet::new(),
+            passed_on_told: std::collections::HashSet::new(),
             local_swing: std::collections::HashMap::new(),
             local_sneak: std::collections::HashMap::new(),
             net_send_seq: 0,

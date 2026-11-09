@@ -380,6 +380,15 @@ pub struct WorldSave {
     /// refusal to load. APPEND LAST.
     #[serde(default)]
     pub plan_builds: Option<crate::plan_builds::SavedPlanBuilds>,
+    /// When each Plot owner was last in the world, and which Plots have passed
+    /// on (living world Tier 2 S5, `plot_succession`): `(npub, unix seconds)`
+    /// rows and passed-on markers. `None` = a save written before the field, or
+    /// nothing recorded. Canonical (sorted, an empty table is `None`). Holds
+    /// identities and times, so an export drops it; a handover's transfer copy
+    /// keeps it; never on the wire and never shown. A present-but-invalid row is
+    /// dropped with a warning at restore, never a refusal to load. APPEND LAST.
+    #[serde(default)]
+    pub plot_succession: Option<crate::succession::SavedSuccession>,
 }
 
 impl WorldSave {
@@ -408,6 +417,8 @@ impl WorldSave {
             region_use,
             // Already canonical (`PlanBuilds::to_saved` walks a BTreeMap).
             plan_builds: _,
+            // Already canonical (`Succession::to_saved` walks ordered sets).
+            plot_succession: _,
         } = self;
         if let Some(ru) = region_use {
             ru.regions.sort_by_key(|(key, _)| *key);
@@ -959,6 +970,7 @@ impl LegacyWorldSave {
             block_authors: None,
             region_use: None,
             plan_builds: None,
+            plot_succession: None,
             // Legacy saves predate Spec 34 — no tip jars.
             tip_jars: Vec::new(),
             auctions: Vec::new(),
@@ -2310,6 +2322,7 @@ pub fn build_world_save(
         block_authors: world.authors.to_saved(),
         region_use: world.use_record.to_saved(),
         plan_builds: world.plan_builds.to_saved(),
+        plot_succession: world.plot_succession.to_saved(),
         exhibits: world.exhibits.clone(),
         composters: world.iter_composters().map(|((x, y, z), data)| SavedComposter { x, y, z, data: data.clone() }).collect(),
         tip_jars,
@@ -2565,6 +2578,7 @@ pub fn save_world(
         block_authors: world.authors.to_saved(),
         region_use: world.use_record.to_saved(),
         plan_builds: world.plan_builds.to_saved(),
+        plot_succession: world.plot_succession.to_saved(),
         exhibits: world.exhibits.clone(),
         composters: world.iter_composters().map(|((x, y, z), data)| SavedComposter { x, y, z, data: data.clone() }).collect(),
         tip_jars,
@@ -2881,6 +2895,7 @@ fn deserialize_world_save_tolerant_reporting(
         block_authors: tail.field(&mut cur, "block_authors"),
         region_use: tail.field(&mut cur, "region_use"),
         plan_builds: tail.field(&mut cur, "plan_builds"),
+        plot_succession: tail.field(&mut cur, "plot_succession"),
     };
     Ok((save, tail.failed_at, cur.position(), 7 + tail.read))
 }
@@ -2902,6 +2917,7 @@ fn absent_tail_encoded_len(s: &WorldSave, read: u32) -> Option<usize> {
             57 => size(bincode::serialized_size(&s.block_authors))?,
             58 => size(bincode::serialized_size(&s.region_use))?,
             59 => size(bincode::serialized_size(&s.plan_builds))?,
+            60 => size(bincode::serialized_size(&s.plot_succession))?,
             _ => return None,
         };
         Some(total + n)
@@ -3483,6 +3499,8 @@ fn restore_world_save_state(world: &mut World, save: &WorldSave) {
     world.path_wear.clear();
     // Living world Tier 2 S4 — restore how often each Plan was built here.
     world.plan_builds = save.plan_builds.as_ref().map(crate::plan_builds::PlanBuilds::from_saved).unwrap_or_default();
+    // Living world Tier 2 S5 — restore when each Plot owner was last here.
+    world.plot_succession = save.plot_succession.as_ref().map(crate::succession::Succession::from_saved).unwrap_or_default();
     // Spec 37 Market Hubs — restore discovery zones (plain serde).
     world.market_hubs = save.market_hubs.clone();
     // Spec 33 Mob Bounty Board — restore the rotation + id allocator
@@ -4821,6 +4839,7 @@ pub(crate) fn autosave_world_with(
         block_authors: world.authors.to_saved(),
         region_use: world.use_record.to_saved(),
         plan_builds: world.plan_builds.to_saved(),
+        plot_succession: world.plot_succession.to_saved(),
         exhibits: world.exhibits.clone(),
         composters: world.iter_composters().map(|((x, y, z), data)| SavedComposter { x, y, z, data: data.clone() }).collect(),
         tip_jars,
@@ -5340,6 +5359,7 @@ pub(crate) fn minimal_world_save_for_tests(seed: u32) -> WorldSave {
             block_authors: None,
             region_use: None,
             plan_builds: None,
+            plot_succession: None,
     }
 }
 
@@ -5574,6 +5594,7 @@ mod tests {
             block_authors: None,
             region_use: None,
             plan_builds: None,
+            plot_succession: None,
         };
         let bytes = bincode::serialize(&save).unwrap();
         let back: WorldSave = bincode::deserialize(&bytes).unwrap();
@@ -6066,6 +6087,7 @@ mod tests {
             block_authors: None,
             region_use: None,
             plan_builds: None,
+            plot_succession: None,
         };
         let mut bytes = bincode::serialize(&save).unwrap();
         bytes.extend_from_slice(&[0xFFu8; 16]); // pretend: a future field's bytes
@@ -6325,7 +6347,7 @@ mod tests {
         // after `satoshi`: two more 8-byte empty-Vec prefixes to drop before the
         // truncation lands mid-workshop.
         // `local_personal`, `quest_world`, `worldgen_version` and
-        // `authority_clock`, `block_authors`, `region_use` and `plan_builds` close the tail: all `None` here, one tag byte each.
+        // `authority_clock`, `block_authors`, `region_use`, `plan_builds` and `plot_succession` close the tail: all `None` here, one tag byte each.
         // Computed, like `satoshi`.
         let option_tail_bytes = bincode::serialized_size(&(
             None::<crate::personal_value::LocalPersonalSave>,
@@ -6335,6 +6357,7 @@ mod tests {
             None::<crate::authorship::SavedAuthorship>,
             None::<crate::use_record::SavedRegionUse>,
             None::<crate::plan_builds::SavedPlanBuilds>,
+            None::<crate::succession::SavedSuccession>,
         ))
         .unwrap() as usize;
         bytes.truncate(bytes.len() - (8 * 15 + 2 + satoshi_bytes + option_tail_bytes));
@@ -7010,6 +7033,7 @@ mod tests {
             block_authors: None,
             region_use: None,
             plan_builds: None,
+            plot_succession: None,
         };
         assert_eq!(save.face_overlays.len(), 1, "one wallpaper face");
         assert_eq!(save.face_blueprints.len(), 1, "one blueprint face");
@@ -7118,6 +7142,7 @@ mod tests {
             block_authors: None,
             region_use: None,
             plan_builds: None,
+            plot_succession: None,
         };
 
         // Encode, then decode through the REAL production path.
@@ -7301,6 +7326,7 @@ mod tests {
             block_authors: None,
             region_use: None,
             plan_builds: None,
+            plot_succession: None,
         };
         let bytes = bincode::serialize(&save).unwrap();
         let back: WorldSave = bincode::deserialize(&bytes).unwrap();
@@ -7938,10 +7964,10 @@ mod tests {
         let dir = world_dir("w");
         fs::create_dir_all(&dir).unwrap();
         save_world_meta("w", &WorldMeta::new("w")).unwrap();
-        // Cut `rig_clips` mid-length-prefix (the seven `Option`s after it are one
-        // byte each, so 8 lands one byte into its prefix).
+        // Cut `rig_clips` mid-length-prefix (the eight `Option`s after it are one
+        // byte each, so 9 lands one byte into its prefix).
         let mut bytes = bincode::serialize(&minimal_world_save_for_tests(9)).unwrap();
-        bytes.truncate(bytes.len() - 8);
+        bytes.truncate(bytes.len() - 9);
         fs::write(dir.join("world.dat"), &bytes).unwrap();
 
         let mut world = World::new();
@@ -8059,14 +8085,14 @@ mod tests {
     fn older_version_footer_is_stripped_before_the_tail_decode() {
         // Accepted c280f41f wrote 52 fields, layout revision 0, footer 52.
         // Its last field was rig_clips; the later optional positional fields are
-        // local_personal, quest_world, worldgen_version, authority_clock, block_authors, region_use and plan_builds. No new nested mob carrier enters this fixture.
-        assert_eq!(crate::save_format::WORLD_SAVE_FIELD_COUNT, 59, "re-find the known 52-field fixture if another field appends");
+        // local_personal, quest_world, worldgen_version, authority_clock, block_authors, region_use, plan_builds and plot_succession. No new nested mob carrier enters this fixture.
+        assert_eq!(crate::save_format::WORLD_SAVE_FIELD_COUNT, 60, "re-find the known 52-field fixture if another field appends");
         let mut save = minimal_world_save_for_tests(9);
         save.rig_clips = vec![crate::anim_set::AnimClip::Bounce];
         assert!(save.saved_mobs.is_empty());
         assert!(save.local_personal.is_none());
-        let appended_none = bincode::serialize(&(&save.local_personal, &save.quest_world, &save.worldgen_version, &save.authority_clock, &save.block_authors, &save.region_use, &save.plan_builds)).unwrap();
-        assert_eq!(appended_none, [0, 0, 0, 0, 0, 0, 0], "the seven appended optional fields each encode None as one byte");
+        let appended_none = bincode::serialize(&(&save.local_personal, &save.quest_world, &save.worldgen_version, &save.authority_clock, &save.block_authors, &save.region_use, &save.plan_builds, &save.plot_succession)).unwrap();
+        assert_eq!(appended_none, [0, 0, 0, 0, 0, 0, 0, 0], "the eight appended optional fields each encode None as one byte");
         let mut bytes = bincode::serialize(&save).unwrap();
         assert!(bytes.ends_with(&appended_none));
         bytes.truncate(bytes.len() - appended_none.len());
@@ -8147,6 +8173,7 @@ mod tests {
             regions: vec![((0, 0), crate::use_record::RegionUse { days: 3, last_day: 4, nights: 1, last_night: Some(5) })],
         });
         save.plan_builds = Some(crate::plan_builds::SavedPlanBuilds { rows: vec![([1; 32], 2, 0), ([2; 32], 0, 3)] });
+        save.plot_succession = Some(crate::succession::SavedSuccession { last_seen: vec![("npub1owner".into(), 1_800_000_000)], passed_on: vec![(8, 64, 8)] });
         save
     }
 
@@ -8157,8 +8184,9 @@ mod tests {
         let save = save_with_populated_tail(seed);
         let mut expected = save_with_populated_tail(seed);
         let mut body = bincode::serialize(&save).unwrap();
-        for index in (n + 1..=59).rev() {
+        for index in (n + 1..=60).rev() {
             let len = match index {
+                60 => { expected.plot_succession = None; bincode::serialize(&save.plot_succession).unwrap().len() }
                 59 => { expected.plan_builds = None; bincode::serialize(&save.plan_builds).unwrap().len() }
                 58 => { expected.region_use = None; bincode::serialize(&save.region_use).unwrap().len() }
                 57 => { expected.block_authors = None; bincode::serialize(&save.block_authors).unwrap().len() }
@@ -8167,7 +8195,7 @@ mod tests {
                 54 => { expected.quest_world = None; bincode::serialize(&save.quest_world).unwrap().len() }
                 53 => { expected.local_personal = None; bincode::serialize(&save.local_personal).unwrap().len() }
                 52 => { expected.rig_clips = Vec::new(); bincode::serialize(&save.rig_clips).unwrap().len() }
-                other => panic!("fixture only knows fields 52..=59, not {other}"),
+                other => panic!("fixture only knows fields 52..=60, not {other}"),
             };
             body.truncate(body.len() - len);
         }
@@ -8251,7 +8279,7 @@ mod tests {
     #[test]
     fn regression_padded_or_unknown_footer_bodies_are_still_refused() {
         let seed = 24;
-        let (_, body) = writer_with_fields(seed, 59);
+        let (_, body) = writer_with_fields(seed, 60);
         // Trailing bytes past the last field (not the footer) are not a clean body.
         let mut padded = body.clone();
         padded.push(0);

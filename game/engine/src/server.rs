@@ -2132,6 +2132,25 @@ impl GameServer {
                 &feet,
             );
             self.pending_block_changes.extend(worn);
+            // Living world Tier 2 S5 — last seen and succession: the owners of
+            // Plots who are in the world are stamped about once a minute, and on
+            // a new world day (and once after a load) a Plot whose owner has been
+            // away for 60 real days passes on. Its stone rides the same broadcast.
+            let players = &self.players;
+            let passed = crate::succession::phase(
+                &mut self.world,
+                self.tick_counter,
+                self.night_calendar.tonight(),
+                crate::succession::now_unix_secs(),
+                || {
+                    players
+                        .iter()
+                        .filter(|sp| sp.is_in_world())
+                        .filter_map(|sp| crate::hosted_server::verified_npub(sp.verified_pubkey))
+                        .collect()
+                },
+            );
+            self.pending_block_changes.extend(passed);
         }
 
         // D4 slice 3 — the mob simulation (`sim_mobs`), phases 1-7 here and
@@ -3653,6 +3672,7 @@ impl GameServer {
             block_authors: self.world.authors.to_saved(),
             region_use: self.world.use_record.to_saved(),
             plan_builds: self.world.plan_builds.to_saved(),
+            plot_succession: self.world.plot_succession.to_saved(),
             exhibits: self.world.exhibits.clone(),
             composters: self
                 .world

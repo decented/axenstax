@@ -6553,6 +6553,40 @@ impl super::GameState {
             for (x, y, z) in crate::use_record::redraw_cells(&worn) {
                 self.rebuild_chunk_at(x, y, z);
             }
+            // Living world Tier 2 S5 — succession for a world with joiners' Plots
+            // opened by itself (the same pure phase the authority runs; no seat
+            // here carries an npub, so only the wall clock moves anything).
+            let passed = crate::succession::phase(
+                &mut self.world,
+                self.tick_counter,
+                self.night_calendar.tonight(),
+                crate::succession::now_unix_secs(),
+                Vec::new,
+            );
+            for (x, y, z) in crate::use_record::redraw_cells(&passed) {
+                self.rebuild_chunk_at(x, y, z);
+            }
+        }
+        // Living world Tier 2 S5 — Satoshi's line, once per seat per session, the
+        // first time it walks into a Commons that was a joiner's Plot. A joined
+        // client keeps no record (its server does), so it never fires there.
+        if !joined && self.tick_counter.is_multiple_of(20) && !self.world.plot_succession.is_empty() {
+            let mut told = false;
+            for (i, slot) in self.players.iter().enumerate() {
+                if !slot.combat.dead
+                    && !self.passed_on_told.contains(&i)
+                    && crate::succession::in_passed_on_commons(&self.world, slot.player.pos.x, slot.player.pos.z)
+                {
+                    self.passed_on_told.insert(i);
+                    told = true;
+                }
+            }
+            if told {
+                self.toast = Some((
+                    format!("Satoshi: {}", crate::succession::SATOSHI_PASSED_ON),
+                    Instant::now() + Duration::from_secs(6),
+                ));
+            }
         }
         // HP-3 — brigand AI pre-pass. Runs every tick BEFORE the main
         // mob_ai dispatch so tier-specific detect-range + flee-gate +
@@ -16879,10 +16913,12 @@ impl super::GameState {
                                     // it was taken, so it never gets here.)
                                     if block_to_place == block::PLOT_MARKER {
                                         let owner = crate::plot::PlotOwner::LocalPlayer(pidx);
-                                        self.world.plots.push(
-                                            crate::plot::PlotData::from_marker(
-                                                owner, place_x, place_y, place_z,
-                                            ),
+                                        crate::plot::register_claim(
+                                            &mut self.world.plots,
+                                            owner,
+                                            place_x,
+                                            place_y,
+                                            place_z,
                                         );
                                         let span = crate::plot::PLOT_HALF_EXTENT * 2 + 1;
                                         self.toast = Some((

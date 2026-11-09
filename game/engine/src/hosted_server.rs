@@ -6053,6 +6053,21 @@ impl HostedServer {
                 let author = self.joiner_author_key(i);
                 self.server.world.record_author(bc.x, bc.y, bc.z, author.as_ref());
             }
+            // Living world Tier 2 S5 — a verified joiner's Plot Marker claims a
+            // Plot in its npub's name (the validator has already refused one
+            // that overlaps another's); a guest's stays a plain block. Breaking
+            // the marker releases the claim (above).
+            if bc.new_block == crate::block::PLOT_MARKER
+                && let Some(npub) = verified_npub(self.server.players[i].verified_pubkey)
+            {
+                crate::plot::register_claim(
+                    &mut self.server.world.plots,
+                    crate::plot::PlotOwner::Npub(npub),
+                    bc.x,
+                    bc.y,
+                    bc.z,
+                );
+            }
         }
     }
 
@@ -6697,6 +6712,19 @@ impl HostedServer {
                     && crate::commons::plot_overlaps_a_commons(&world.commons_areas(), bc.x, bc.z))
             {
                 return Err(EditRefusal::Claimed);
+            }
+            // Living world Tier 2 S5 — a verified joiner's Plot Marker is a
+            // claim (`apply_edit_world` registers it): refused here, and the
+            // ghost put back, when its footprint would overlap another owner's
+            // Plot, by the same rule a seat's claim is judged (`plot::claim_refusal`;
+            // a Commons overlap was refused just above). A guest's marker claims
+            // nothing and stays a plain block.
+            if sp.server_simulated
+                && bc.new_block == crate::block::PLOT_MARKER
+                && let Some(npub) = verified_npub(sp.verified_pubkey)
+                && crate::plot::claim_would_conflict(&world.plots, &crate::plot::PlotOwner::Npub(npub), bc.x, bc.z)
+            {
+                return Err(EditRefusal::ForeignPlot);
             }
         }
         if sp.server_simulated {

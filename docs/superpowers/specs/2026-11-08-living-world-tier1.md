@@ -334,9 +334,9 @@ built as written; the details and the deviations:
 `pistons` and `hoppers` (maintained in `set` and `from_bytes`, pinned against a recount), and `World::commons_areas` /
 `World::feast_markers` walk only chunks with a non-zero counter. The local placement arm refuses with "This land is claimed."
 before the item is taken; `validate_block_edit` refuses the same two cases for any seat and play mode (`EditRefusal::Claimed`,
-note `NotHere`), against the authority's plots (a joiner's world holds none) and the loaded Commons. A Plot Marker a joiner
-places creates no `PlotData` today (the economy-owner convergence is open debt), so for a joiner the Plot half only keeps the
-marker block out of a Commons. `GameState::tick_gatherings` (called from `tick_bloom`, every client mode) feeds `BloomField`
+note `NotHere`), against the authority's plots and the loaded Commons. (Tier 2 S5 closed the old limit that a joiner could not own
+a Plot: a verified joiner's Plot Marker now claims a Plot in its npub, see the Tier 2 spec §5; a guest's marker is still a plain block
+that claims nothing.) `GameState::tick_gatherings` (called from `tick_bloom`, every client mode) feeds `BloomField`
 every tenth tick from those counters. Placing the stone fires `ClaimCommons` on a non-joined client and toasts
 "Commons declared. Anyone may build here."
 

@@ -340,6 +340,8 @@ impl GameServer {
         e.bytes(&bincode::serialize(&w.use_record.to_saved()).expect("use record encodes"));
         // Living world Tier 2 S4 — Plan build counts (a sorted map, canonical).
         e.bytes(&bincode::serialize(&w.plan_builds.to_saved()).expect("plan builds encode"));
+        // Living world Tier 2 S5 — last seen and passed-on Plots (ordered sets, canonical).
+        e.bytes(&bincode::serialize(&w.plot_succession.to_saved()).expect("plot succession encodes"));
         e.u64(w.total_work);
         e.u32(self.pop_epoch);
         e.debug(&self.column_streamer);

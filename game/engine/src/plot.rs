@@ -113,6 +113,18 @@ pub fn claim_would_conflict(plots: &[PlotData], owner: &PlotOwner, mx: i32, mz: 
     })
 }
 
+/// Record the claim of a Plot Marker that has landed at `(mx, my, mz)`. The one
+/// writer of a new Plot, for a seat on this machine and for a verified joiner
+/// alike. Idempotent per marker: a marker that already anchors a Plot adds
+/// nothing. Returns whether a Plot was added.
+pub fn register_claim(plots: &mut Vec<PlotData>, owner: PlotOwner, mx: i32, my: i32, mz: i32) -> bool {
+    if plots.iter().any(|p| p.marker == (mx, my, mz)) {
+        return false;
+    }
+    plots.push(PlotData::from_marker(owner, mx, my, mz));
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -206,5 +218,24 @@ mod tests {
         let far = PlotData::from_marker(PlotOwner::LocalPlayer(2), 1000, 64, 1000);
         assert!(a.overlaps(&b) && b.overlaps(&a), "adjacent plots overlap");
         assert!(!a.overlaps(&far) && !far.overlaps(&a), "distant plots don't");
+    }
+
+    #[test]
+    fn a_joiners_claim_conflicts_with_a_neighbour_but_not_with_its_own_land() {
+        let plots = vec![PlotData::from_marker(PlotOwner::Npub("npub1a".into()), 0, 64, 0)];
+        let b = PlotOwner::Npub("npub1b".into());
+        assert!(claim_would_conflict(&plots, &b, 32, 0), "32 apart still touches (inclusive)");
+        assert!(!claim_would_conflict(&plots, &b, 33, 0), "33 apart clears");
+        assert!(!claim_would_conflict(&plots, &PlotOwner::Npub("npub1a".into()), 20, 0), "your own neighbour");
+        assert!(claim_would_conflict(&plots, &PlotOwner::LocalPlayer(0), 20, 0), "a seat is not the joiner");
+    }
+
+    #[test]
+    fn register_claim_adds_one_plot_per_marker() {
+        let mut plots = Vec::new();
+        assert!(register_claim(&mut plots, PlotOwner::Npub("npub1a".into()), 5, 64, 5));
+        assert!(!register_claim(&mut plots, PlotOwner::Npub("npub1a".into()), 5, 64, 5));
+        assert_eq!(plots.len(), 1);
+        assert_eq!(plots[0].owner, PlotOwner::Npub("npub1a".into()));
     }
 }

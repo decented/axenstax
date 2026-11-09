@@ -209,6 +209,7 @@ fn neutral_save(seed: u32) -> WorldSave {
         block_authors: None,
         region_use: None,
         plan_builds: None,
+        plot_succession: None,
     }
 }
 
