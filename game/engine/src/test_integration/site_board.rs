@@ -72,9 +72,9 @@ fn a_joiner_adds_ticks_and_removes_and_every_joiner_sees_the_servers_list() {
         "the server's list, in the order it was asked"
     );
     // Anyone may tick anyone's job.
-    ok(&ask(&mut rig, 1, cell, Op::Toggle(0)));
-    ok(&ask(&mut rig, 0, cell, Op::Toggle(2)));
-    ok(&ask(&mut rig, 0, cell, Op::Remove(1)));
+    ok(&ask(&mut rig, 1, cell, Op::toggle(0, Job::DigWell)));
+    ok(&ask(&mut rig, 0, cell, Op::toggle(2, Job::Decorate)));
+    ok(&ask(&mut rig, 0, cell, Op::remove(1, Job::BuildRoof)));
     let want = tasks(&[(Job::DigWell, true), (Job::Decorate, true)]);
     assert_eq!(rig.world().site_boards[&pos(cell)].tasks, want);
     for n in 0..2 {
@@ -98,23 +98,53 @@ fn a_late_joiner_is_shown_the_board() {
     let cell = rig.place(2, block::SITE_BOARD);
     ok(&ask(&mut rig, 0, cell, Op::add(Job::PlantTrees)));
     ok(&ask(&mut rig, 0, cell, Op::add(Job::GatherWood)));
-    ok(&ask(&mut rig, 0, cell, Op::Toggle(1)));
+    ok(&ask(&mut rig, 0, cell, Op::toggle(1, Job::GatherWood)));
 
     // The late joiner: attached, stood by the board and holding its column (as
     // the chunk push would leave it), with the board's block in its world.
     let (transport, slot) = join_guest(&mut rig.hs, "Late");
     let mut world = std::mem::replace(&mut rig.hs.server.world, crate::world::World::new());
+    // (Standing the joiner clears the air above the floor, board included: put the
+    // block and its list back, as they were.)
+    let boards = world.site_boards.clone();
     let at = floor_and_stand(&mut world, &mut rig.hs, slot);
+    world.set_block(cell[0], cell[1], cell[2], block::SITE_BOARD);
+    world.site_boards = boards;
     rig.hs.server.world = world;
     rig.hs.hold_column_for_test(slot, crate::chunk_stream::column_of(at));
     let mut late = Client::new((transport, slot));
     late.world.set_block(cell[0], cell[1], cell[2], block::SITE_BOARD);
     rig.cs.push(late);
-    rig.ticks(3);
+    rig.ticks(8);
 
     let want = tasks(&[(Job::PlantTrees, false), (Job::GatherWood, true)]);
-    assert_eq!(rig.cs[1].world.site_boards.get(&pos(cell)).map(|b| &b.tasks), Some(&want), "shown the list on arrival");
+    assert_eq!(
+        rig.cs[1].world.site_boards.get(&pos(cell)).map(|b| &b.tasks),
+        Some(&want),
+        "shown the list on arrival"
+    );
     assert!(rig.cs[1].view_at(cell).is_some());
+}
+
+/// A joiner acting on a view that has gone stale (another joiner took a job off
+/// first) is refused rather than ticking or removing a different task.
+#[test]
+fn a_stale_view_cannot_tick_or_remove_another_task() {
+    let mut rig = Rig::dedicated("sb-stale", 2);
+    let cell = rig.place(2, block::SITE_BOARD);
+    for job in [Job::DigWell, Job::BuildRoof, Job::BuildWalls] {
+        ok(&ask(&mut rig, 0, cell, Op::add(job)));
+    }
+    // Joiner 0 sees [Dig, Roof, Walls]; joiner 1 takes Dig off. Joiner 0 acts on
+    // what it saw: "tick Roof" is index 1, which now holds Walls.
+    ok(&ask(&mut rig, 1, cell, Op::remove(0, Job::DigWell)));
+    let before = rig.world().site_boards[&pos(cell)].clone();
+    refused(&ask(&mut rig, 0, cell, Op::toggle(1, Job::BuildRoof)), ItemNote::NothingToTake);
+    refused(&ask(&mut rig, 0, cell, Op::remove(1, Job::BuildRoof)), ItemNote::NothingToTake);
+    assert_eq!(rig.world().site_boards[&pos(cell)], before, "nothing changed");
+    assert!(rig.world().feast_events.is_empty(), "and no surge");
+    // With the right index for the job it saw, it works.
+    ok(&ask(&mut rig, 0, cell, Op::toggle(0, Job::BuildRoof)));
 }
 
 /// Out of reach, a cell that is not a board, a ninth task, a missing task and a
@@ -131,11 +161,11 @@ fn refusals_change_nothing_and_say_why() {
     assert!(rig.world().site_boards.is_empty());
     // Not a board in the server's world even where the joiner's copy thinks so.
     rig.cs[0].world.set_block(stone[0], stone[1], stone[2], block::SITE_BOARD);
-    refused(&ask(&mut rig, 0, stone, Op::Toggle(0)), ItemNote::NotThatBlock);
+    refused(&ask(&mut rig, 0, stone, Op::toggle(0, Job::DigWell)), ItemNote::NotThatBlock);
 
     // A task that is not there, and a job we do not know.
-    refused(&ask(&mut rig, 0, cell, Op::Toggle(0)), ItemNote::NothingToTake);
-    refused(&ask(&mut rig, 0, cell, Op::Remove(3)), ItemNote::NothingToTake);
+    refused(&ask(&mut rig, 0, cell, Op::toggle(0, Job::DigWell)), ItemNote::NothingToTake);
+    refused(&ask(&mut rig, 0, cell, Op::remove(3, Job::DigWell)), ItemNote::NothingToTake);
     refused(&ask(&mut rig, 0, cell, Op::Add(200)), ItemNote::NothingToTake);
     assert!(rig.world().site_boards.is_empty(), "still no list");
 
@@ -159,18 +189,18 @@ fn a_done_tick_lifts_bloom_once_per_board_per_day_on_a_lending_host() {
     ok(&ask(&mut rig, 0, cell, Op::add(Job::BuildWalls)));
     ok(&ask(&mut rig, 0, cell, Op::add(Job::BuildRoof)));
     assert!(rig.world().feast_events.is_empty(), "adding a job lifts nothing");
-    ok(&ask(&mut rig, 0, cell, Op::Toggle(0)));
+    ok(&ask(&mut rig, 0, cell, Op::toggle(0, Job::BuildWalls)));
     assert_eq!(rig.world().feast_events, vec![(cell[0], cell[1], cell[2], SURGE_GUESTS)], "one surge, two guests");
     // Tick and untick over and over, the other job too: no more today.
     for _ in 0..6 {
-        ok(&ask(&mut rig, 0, cell, Op::Toggle(0)));
-        ok(&ask(&mut rig, 0, cell, Op::Toggle(1)));
+        ok(&ask(&mut rig, 0, cell, Op::toggle(0, Job::BuildWalls)));
+        ok(&ask(&mut rig, 0, cell, Op::toggle(1, Job::BuildRoof)));
     }
     assert_eq!(rig.world().feast_events.len(), 1, "spam cannot pump bloom");
     // The host's own seat uses the same rule on the lent world and the joiner sees it.
     let tonight = rig.hs.server.night_calendar.tonight();
     crate::site_board::use_board(rig.world(), pos(second), Op::add(Job::MakeGarden), tonight).unwrap();
-    crate::site_board::use_board(rig.world(), pos(second), Op::Toggle(0), tonight).unwrap();
+    crate::site_board::use_board(rig.world(), pos(second), Op::toggle(0, Job::MakeGarden), tonight).unwrap();
     assert_eq!(rig.world().feast_events.len(), 2, "another board has its own surge");
     rig.ticks(2);
     assert_eq!(rig.cs[0].world.site_boards[&pos(second)].tasks, tasks(&[(Job::MakeGarden, true)]), "the joiner sees the host's tick");

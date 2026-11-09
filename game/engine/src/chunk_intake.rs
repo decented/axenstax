@@ -815,7 +815,7 @@ impl ChunkIntake {
 }
 
 /// Remove the side data (`block_meta`, block entities, face attachments,
-/// drying racks — C3b-2-fix) of every cell of chunk `coord`: a push replaces
+/// drying racks — C3b-2-fix; Site Board lists — Tier 2 S7) of every cell of chunk `coord`: a push replaces
 /// it whole (a rack that stands comes back as its view, after the push).
 fn clear_side_data(world: &mut World, coord: ChunkCoord) {
     let racks: Vec<_> = cells_in(&world.drying_racks, coord).into_iter().map(|(_, c, _)| c).collect();
@@ -836,6 +836,12 @@ fn clear_side_data(world: &mut World, coord: ChunkCoord) {
     for c in faces {
         world.face_attachments.remove(&c);
     }
+    // Living world Tier 2 S7 — and a Site Board's list: the push replaces the
+    // chunk, so a list this client held for a board since broken (it was out of
+    // interest and heard nothing) must not outlive it. A board that stands comes
+    // back as its view, after the push.
+    let cs = crate::chunk::CHUNK_SIZE as i32;
+    world.site_boards.retain(|&(x, y, z), _| (x.div_euclid(cs), y.div_euclid(cs), z.div_euclid(cs)) != coord);
 }
 
 /// Write a packet's side data into `world`. Cells outside the chunk are
@@ -967,6 +973,25 @@ mod tests {
         assert_eq!(bytes.len(), 1);
         let (_, payload) = protocol::deserialize_header(&bytes[0]).unwrap();
         protocol::safe_deserialize(payload).unwrap()
+    }
+
+    /// Living world Tier 2 S7 — a push replaces its chunk, so a Site Board list this
+    /// client held for the chunk (a board since broken, unheard) goes with the
+    /// snapshot; another chunk's list stays. The view of a board that stands
+    /// comes after the push.
+    #[test]
+    fn a_push_clears_the_site_board_lists_in_its_chunk_only() {
+        let mut w = World::new();
+        let board = crate::site_board::SiteBoard {
+            tasks: vec![crate::site_board::Task { job: crate::site_board::Job::DigWell, done: true }],
+        };
+        for cell in [(1, 2, 3), (-1, 2, 3), (40, 2, 3)] {
+            w.site_boards.insert(cell, board.clone());
+        }
+        clear_side_data(&mut w, (0, 0, 0));
+        assert!(!w.site_boards.contains_key(&(1, 2, 3)), "inside the pushed chunk: gone");
+        assert!(w.site_boards.contains_key(&(-1, 2, 3)), "the chunk next door: kept");
+        assert!(w.site_boards.contains_key(&(40, 2, 3)), "a far chunk: kept");
     }
 
     /// C3b-2 — a block view sits in the world stream where its packet

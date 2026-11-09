@@ -12,6 +12,12 @@ use crate::site_board::Op;
 impl GameState {
     /// Player `pidx` asked for `op` on the Site Board at `cell`.
     pub(crate) fn apply_site_board_op(&mut self, pidx: usize, cell: (i32, i32, i32), op: Op) {
+        // Out of reach is nothing to do (the window closes itself when its user walks
+        // off; this covers an op that was already on its way).
+        let eye = self.players[pidx].player.eye_pos();
+        if !crate::container_window::container_in_reach(eye, [cell.0, cell.1, cell.2]) {
+            return;
+        }
         if self.joined() {
             self.send_site_board_op(pidx, [cell.0, cell.1, cell.2], op);
             return;

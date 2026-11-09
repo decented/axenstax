@@ -120,6 +120,14 @@ pub fn pick(
     out
 }
 
+/// The villagers a client draws moods on, as `(stable key, position)`: a joined
+/// client's are the mirror's own (`remote_mobs`; its sim ECS is purged of mobs
+/// every joined tick), anyone else's are the sim ECS's.
+pub fn crew_villagers(joined: bool, sim: &hecs::World, mirror: &hecs::World) -> Vec<(u64, Vec3)> {
+    let ecs = if joined { mirror } else { sim };
+    crate::feast::villagers_in(ecs).into_iter().map(|(e, at)| (e.to_bits().get(), at)).collect()
+}
+
 impl crate::GameState {
     /// Draw this pass's crew moods (every [`PASS_EVERY_TICKS`]). Reads the bloom
     /// field and the villagers in this client's ECS; spawns particles only.
@@ -128,10 +136,7 @@ impl crate::GameState {
             return;
         }
         let eyes: Vec<Vec3> = self.players.iter().map(|p| p.player.pos).collect();
-        let villagers: Vec<(u64, Vec3)> = crate::feast::villagers_in(&self.ecs)
-            .into_iter()
-            .map(|(e, at)| (e.to_bits().get(), at))
-            .collect();
+        let villagers = crew_villagers(self.joined(), &self.ecs, self.remote_mobs.ecs());
         if eyes.is_empty() || villagers.is_empty() {
             return;
         }
@@ -229,6 +234,27 @@ mod tests {
         // No eyes, no villagers: nothing.
         assert!(pick(&villagers, &[], 3, always).is_empty());
         assert!(pick(&[], &eyes, 3, always).is_empty());
+    }
+
+    #[test]
+    fn a_joined_client_draws_on_the_mirrored_villagers_not_its_empty_sim_ecs() {
+        use crate::protocol::{EntityKind, EntitySpawn, WireItem};
+        let mut mirror = crate::remote_mobs::RemoteMobs::default();
+        let spawn = |id: u32, kind: EntityKind, x: f32| EntitySpawn {
+            id, kind, x, y: 64.0, z: 0.0, yaw: 0.0, health: 10,
+            item_kind: 0, item_id: 0, item_count: 0, full_item: WireItem::None,
+        };
+        mirror.apply(&[spawn(1, EntityKind::Villager, 3.0), spawn(2, EntityKind::Cow, 4.0)], &[], &[]);
+        // A joiner's sim ECS holds no mobs (they are purged every joined tick).
+        let sim = hecs::World::new();
+        let found = crew_villagers(true, &sim, mirror.ecs());
+        assert_eq!(found.len(), 1, "the mirrored villager, not the cow");
+        assert_eq!(found[0].1, Vec3::new(3.0, 64.0, 0.0));
+        assert!(crew_villagers(false, &sim, mirror.ecs()).is_empty(), "a client with a world of its own reads its sim ECS");
+        // And the picker draws on it.
+        let eyes = [Vec3::new(0.0, 64.0, 0.0)];
+        let drew = (0..400u64).any(|beat| !pick(&found, &eyes, beat, |_| Some(Mood::Thriving)).is_empty());
+        assert!(drew, "a joiner's mirrored villager makes motes");
     }
 
     #[test]

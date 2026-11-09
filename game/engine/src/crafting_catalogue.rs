@@ -1672,7 +1672,8 @@ mod tests {
         // id (every wood's slab/stairs/door/trapdoor/gate, every stone's
         // slab/stairs/wall) that had no authored card.
         // 350 as of 2026-11-08 (living world S3): + the Feast Table and the Commons Stone.
-        assert_eq!(all_cards().len(), 350, "catalogue size changed to {}", all_cards().len());
+        // 351 as of 2026-11-09 (living world Tier 2 S7): + the Site Board.
+        assert_eq!(all_cards().len(), 351, "catalogue size changed to {}", all_cards().len());
     }
 
     /// UX polish sweep Task 3 — the non-obvious craftables (a kid can't

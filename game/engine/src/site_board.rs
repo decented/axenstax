@@ -111,20 +111,33 @@ pub struct SiteBoard {
 /// What a player asks of a board. On the wire (`ItemAction::SiteBoard`), so
 /// APPEND ONLY: Add = 0, Toggle = 1, Remove = 2. A job is the raw number, so a
 /// bad one is refused ([`Refusal::UnknownJob`]) rather than failing to decode.
+/// Toggle and Remove name the task by its index AND the job the asker saw
+/// there, so a list that changed under a stale view refuses
+/// ([`Refusal::NoSuchTask`]) instead of ticking or removing another task.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Op {
     /// Add the job with this number ([`Job::to_u8`]).
     Add(u8),
-    /// Flip the done tick of the task at this index.
-    Toggle(u8),
-    /// Take the task at this index off the board.
-    Remove(u8),
+    /// Flip the done tick of the task at index `.0`, which must hold job `.1`.
+    Toggle(u8, u8),
+    /// Take the task at index `.0` off the board; it must hold job `.1`.
+    Remove(u8, u8),
 }
 
 impl Op {
     /// Add `job`.
     pub fn add(job: Job) -> Op {
         Op::Add(job.to_u8())
+    }
+
+    /// Flip the task at `index`, which the asker saw holding `job`.
+    pub fn toggle(index: usize, job: Job) -> Op {
+        Op::Toggle(index as u8, job.to_u8())
+    }
+
+    /// Take off the task at `index`, which the asker saw holding `job`.
+    pub fn remove(index: usize, job: Job) -> Op {
+        Op::Remove(index as u8, job.to_u8())
     }
 }
 
@@ -168,14 +181,17 @@ pub fn apply(board: &mut SiteBoard, op: Op) -> Result<Outcome, Refusal> {
             board.tasks.push(Task { job, done: false });
             Ok(Outcome::Added)
         }
-        Op::Toggle(i) => {
+        Op::Toggle(i, job) => {
             let task = board.tasks.get_mut(usize::from(i)).ok_or(Refusal::NoSuchTask)?;
+            if task.job.to_u8() != job {
+                return Err(Refusal::NoSuchTask);
+            }
             task.done = !task.done;
             Ok(Outcome::Toggled { done: task.done })
         }
-        Op::Remove(i) => {
+        Op::Remove(i, job) => {
             let i = usize::from(i);
-            if i >= board.tasks.len() {
+            if board.tasks.get(i).is_none_or(|t| t.job.to_u8() != job) {
                 return Err(Refusal::NoSuchTask);
             }
             board.tasks.remove(i);
@@ -323,10 +339,10 @@ mod tests {
         assert_eq!(apply(&mut b, Op::add(Job::DigWell)), Ok(Outcome::Added));
         assert_eq!(apply(&mut b, Op::add(Job::BuildRoof)), Ok(Outcome::Added));
         assert_eq!(b.tasks.len(), 2);
-        assert_eq!(apply(&mut b, Op::Toggle(1)), Ok(Outcome::Toggled { done: true }));
+        assert_eq!(apply(&mut b, Op::toggle(1, Job::BuildRoof)), Ok(Outcome::Toggled { done: true }));
         assert!(b.tasks[1].done && !b.tasks[0].done);
-        assert_eq!(apply(&mut b, Op::Toggle(1)), Ok(Outcome::Toggled { done: false }));
-        assert_eq!(apply(&mut b, Op::Remove(0)), Ok(Outcome::Removed));
+        assert_eq!(apply(&mut b, Op::toggle(1, Job::BuildRoof)), Ok(Outcome::Toggled { done: false }));
+        assert_eq!(apply(&mut b, Op::remove(0, Job::DigWell)), Ok(Outcome::Removed));
         assert_eq!(b.tasks, vec![Task { job: Job::BuildRoof, done: false }]);
     }
 
@@ -339,32 +355,64 @@ mod tests {
         assert_eq!(apply(&mut b, Op::add(Job::Decorate)), Err(Refusal::Full));
         assert_eq!(b.tasks.len(), MAX_TASKS, "a refusal changes nothing");
         // Taking one off makes room again.
-        assert_eq!(apply(&mut b, Op::Remove(3)), Ok(Outcome::Removed));
+        assert_eq!(apply(&mut b, Op::remove(3, Job::Decorate)), Ok(Outcome::Removed));
         assert_eq!(apply(&mut b, Op::add(Job::Decorate)), Ok(Outcome::Added));
     }
 
     #[test]
     fn an_out_of_range_index_or_an_unknown_job_is_refused() {
         let mut b = SiteBoard::default();
-        assert_eq!(apply(&mut b, Op::Toggle(0)), Err(Refusal::NoSuchTask));
-        assert_eq!(apply(&mut b, Op::Remove(0)), Err(Refusal::NoSuchTask));
+        assert_eq!(apply(&mut b, Op::toggle(0, Job::DigWell)), Err(Refusal::NoSuchTask));
+        assert_eq!(apply(&mut b, Op::remove(0, Job::DigWell)), Err(Refusal::NoSuchTask));
         assert_eq!(apply(&mut b, Op::Add(12)), Err(Refusal::UnknownJob));
         assert_eq!(apply(&mut b, Op::Add(255)), Err(Refusal::UnknownJob));
         apply(&mut b, Op::add(Job::PlantTrees)).unwrap();
-        assert_eq!(apply(&mut b, Op::Toggle(1)), Err(Refusal::NoSuchTask));
-        assert_eq!(apply(&mut b, Op::Remove(255)), Err(Refusal::NoSuchTask));
+        assert_eq!(apply(&mut b, Op::toggle(1, Job::PlantTrees)), Err(Refusal::NoSuchTask));
+        assert_eq!(apply(&mut b, Op::remove(255, Job::PlantTrees)), Err(Refusal::NoSuchTask));
         assert_eq!(b.tasks, vec![Task { job: Job::PlantTrees, done: false }], "refusals changed nothing");
     }
 
     #[test]
+    fn a_stale_view_cannot_tick_or_remove_the_wrong_task() {
+        // A saw [Dig, Roof, Walls]; B removed Dig; A's "tick Roof" now names index 1,
+        // which holds Walls: refused, nothing changes.
+        let mut b = SiteBoard::default();
+        for job in [Job::DigWell, Job::BuildRoof, Job::BuildWalls] {
+            apply(&mut b, Op::add(job)).unwrap();
+        }
+        apply(&mut b, Op::remove(0, Job::DigWell)).unwrap();
+        let before = b.clone();
+        assert_eq!(apply(&mut b, Op::toggle(1, Job::BuildRoof)), Err(Refusal::NoSuchTask));
+        assert_eq!(apply(&mut b, Op::remove(1, Job::BuildRoof)), Err(Refusal::NoSuchTask));
+        assert_eq!(b, before, "a mismatch changes nothing");
+        // Naming the job it really holds works; so does the new index of the same job.
+        assert_eq!(apply(&mut b, Op::toggle(0, Job::BuildRoof)), Ok(Outcome::Toggled { done: true }));
+        assert_eq!(apply(&mut b, Op::remove(1, Job::BuildWalls)), Ok(Outcome::Removed));
+    }
+
+    #[test]
     fn the_op_encoding_is_pinned() {
-        // Add = 0, Toggle = 1, Remove = 2: the leading u32 variant index.
-        for (op, variant, arg) in [(Op::Add(7), 0u32, 7u8), (Op::Toggle(3), 1, 3), (Op::Remove(255), 2, 255)] {
+        // Add = 0, Toggle = 1, Remove = 2: the leading u32 variant index, then bytes.
+        for (op, variant, args) in [
+            (Op::Add(7), 0u32, vec![7u8]),
+            (Op::Toggle(3, 9), 1, vec![3, 9]),
+            (Op::Remove(255, 11), 2, vec![255, 11]),
+        ] {
             let bytes = bincode::serialize(&op).unwrap();
             assert_eq!(bytes[..4], variant.to_le_bytes(), "{op:?}");
-            assert_eq!(bytes[4], arg);
-            assert_eq!(bytes.len(), 5);
+            assert_eq!(&bytes[4..], &args[..]);
             assert_eq!(bincode::deserialize::<Op>(&bytes).unwrap(), op);
+        }
+    }
+
+    #[test]
+    fn the_job_labels_pass_the_money_word_lint() {
+        // The labels live here, outside the `*_ui.rs` files the copy lint scans.
+        for job in Job::ALL {
+            let words = crate::copy_lint::tokenize_words(job.label());
+            for banned in crate::copy_lint::BANNED_MONEY_WORDS {
+                assert!(!words.contains(*banned), "{:?}: {banned}", job.label());
+            }
         }
     }
 
@@ -377,7 +425,7 @@ mod tests {
         assert_eq!(w.site_boards[&(4, 64, 4)].tasks.len(), 1);
         // A refused op does not create an entry.
         let mut w = board_world();
-        assert_eq!(use_board(&mut w, (4, 64, 4), Op::Toggle(0), 1), Err(Refusal::NoSuchTask));
+        assert_eq!(use_board(&mut w, (4, 64, 4), Op::toggle(0, Job::DigWell), 1), Err(Refusal::NoSuchTask));
         assert!(w.site_boards.is_empty());
     }
 
@@ -405,24 +453,24 @@ mod tests {
         use_board(&mut w, cell, Op::add(Job::DigWell), 3).unwrap();
         assert!(w.feast_events.is_empty(), "adding a job surges nothing");
         // Tick it: one surge, two guests.
-        use_board(&mut w, cell, Op::Toggle(0), 3).unwrap();
+        use_board(&mut w, cell, Op::toggle(0, Job::DigWell), 3).unwrap();
         assert_eq!(w.feast_events, vec![(4, 64, 4, SURGE_GUESTS)]);
         // Untick, tick, untick, tick again the same day: nothing more.
         for _ in 0..10 {
-            use_board(&mut w, cell, Op::Toggle(0), 3).unwrap();
+            use_board(&mut w, cell, Op::toggle(0, Job::DigWell), 3).unwrap();
         }
         assert_eq!(w.feast_events.len(), 1, "ticking and unticking cannot pump bloom");
         // Ten flips leave it done again; unticking on a new day surges nothing.
-        use_board(&mut w, cell, Op::Toggle(0), 4).unwrap();
+        use_board(&mut w, cell, Op::toggle(0, Job::DigWell), 4).unwrap();
         let after_new_day = w.feast_events.len();
         assert_eq!(after_new_day, 1);
         // Another board has its own allowance on the same day.
         use_board(&mut w, (20, 64, 20), Op::add(Job::Decorate), 3).unwrap();
-        use_board(&mut w, (20, 64, 20), Op::Toggle(0), 3).unwrap();
+        use_board(&mut w, (20, 64, 20), Op::toggle(0, Job::Decorate), 3).unwrap();
         assert_eq!(w.feast_events.len(), after_new_day + 1, "a second board has its own surge");
         // A new day allows the first board to surge again.
         w.feast_events.clear();
-        use_board(&mut w, cell, Op::Toggle(0), 5).unwrap(); // undone -> done on day 5
+        use_board(&mut w, cell, Op::toggle(0, Job::DigWell), 5).unwrap(); // undone -> done on day 5
         assert_eq!(w.feast_events, vec![(4, 64, 4, SURGE_GUESTS)]);
     }
 
@@ -431,9 +479,9 @@ mod tests {
         let mut w = board_world();
         let cell = (4, 64, 4);
         use_board(&mut w, cell, Op::add(Job::DigWell), 1).unwrap();
-        use_board(&mut w, cell, Op::Toggle(0), 1).unwrap(); // done: surge
+        use_board(&mut w, cell, Op::toggle(0, Job::DigWell), 1).unwrap(); // done: surge
         w.feast_events.clear();
-        use_board(&mut w, cell, Op::Toggle(0), 2).unwrap(); // undone on a new day
+        use_board(&mut w, cell, Op::toggle(0, Job::DigWell), 2).unwrap(); // undone on a new day
         assert!(w.feast_events.is_empty(), "unticking does nothing to bloom");
     }
 
@@ -443,7 +491,7 @@ mod tests {
         let mut b = SiteBoard::default();
         apply(&mut b, Op::add(Job::BuildWalls)).unwrap();
         apply(&mut b, Op::add(Job::Decorate)).unwrap();
-        apply(&mut b, Op::Toggle(1)).unwrap();
+        apply(&mut b, Op::toggle(1, Job::Decorate)).unwrap();
         boards.insert((9, 70, -3), b.clone());
         boards.insert((-4, 64, 2), b.clone());
         boards.insert((0, 64, 0), SiteBoard::default()); // an emptied board saves nothing

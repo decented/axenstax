@@ -6706,6 +6706,12 @@ impl HostedServer {
         if sp.server_simulated && bc.new_block == crate::block::FEAST_MARKER {
             return Err(EditRefusal::Protected);
         }
+        // Living world Tier 2 S7 (review N6) — the inert gap at 378 is no block anyone
+        // places: a modified client could otherwise leave it in a saved world, to
+        // become the Commons Shelf's id with no shelf state once that slice merges.
+        if sp.server_simulated && bc.new_block == crate::block::RESERVED_378 {
+            return Err(EditRefusal::Protected);
+        }
         // Living world S3 — a Plot and a Commons may not overlap, either way
         // round (`commons`): judged for every seat and play mode, as the local
         // placement arm does (creative bypasses build protection, not a claim).

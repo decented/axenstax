@@ -19696,7 +19696,12 @@ impl super::GameState {
                 // by a block view); an op goes through `apply_site_board_op`.
                 let still_present =
                     self.world.get_block(board_pos.0, board_pos.1, board_pos.2) == block::SITE_BOARD;
-                if !still_present {
+                // The window closes when its user walks off, as a container's does.
+                let in_reach = crate::container_window::container_in_reach(
+                    self.players[pidx].player.eye_pos(),
+                    [board_pos.0, board_pos.1, board_pos.2],
+                );
+                if !still_present || !in_reach {
                     self.players[pidx].open_site_board = None;
                     if pidx == 0 { self.capture_cursor(); }
                 } else {

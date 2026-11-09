@@ -54,11 +54,11 @@ pub fn draw_site_board_ui(ctx: &egui::Context, player_index: usize, board: &Site
                 ui.horizontal(|ui| {
                     let mut done = task.done;
                     if ui.checkbox(&mut done, task.job.label()).changed() {
-                        outcome = SiteBoardUiOutcome::Op(Op::Toggle(i as u8));
+                        outcome = SiteBoardUiOutcome::Op(Op::toggle(i, task.job));
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.small_button("Remove").clicked() {
-                            outcome = SiteBoardUiOutcome::Op(Op::Remove(i as u8));
+                            outcome = SiteBoardUiOutcome::Op(Op::remove(i, task.job));
                         }
                     });
                 });

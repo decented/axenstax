@@ -2925,7 +2925,8 @@ pub struct ServerAnnouncePacket {
 /// - v100 (2026-11-09, living world Tier 2 S7): **New block ids 378 (an inert
 ///   gap; the Commons Shelf's id on another branch) and 379 (Site Board)**;
 ///   `ItemAction::SiteBoard { pos, op }` (= 15, appended: add a job, tick or
-///   untick a task, take one off) and `BlockViewKind::SiteBoard` (= 5) /
+///   untick a task, take one off; the last two name the task by index and the
+///   job the asker saw there, so a stale view is refused) and `BlockViewKind::SiteBoard` (= 5) /
 ///   `BlockView::SiteBoard { tasks }` (a board's job list as `(job number,
 ///   done)` pairs, sent on `StateUpdatePacket::block_views` and again after a
 ///   chunk push, so a late joiner is shown it). A client without them cannot
@@ -4352,8 +4353,8 @@ mod tests {
         // (Add = 0, Toggle = 1, Remove = 2, each a u32 index and a u8 argument).
         for (op, op_index, arg) in [
             (crate::site_board::Op::Add(7), 0u32, 7u8),
-            (crate::site_board::Op::Toggle(2), 1, 2),
-            (crate::site_board::Op::Remove(0), 2, 0),
+            (crate::site_board::Op::Toggle(2, 9), 1, 2),
+            (crate::site_board::Op::Remove(0, 4), 2, 0),
         ] {
             let board = ItemActionPacket { seq: 24, action: ItemAction::SiteBoard { pos: [-5, 70, 1_000_001], op }, events_applied: 9 };
             let bytes = serialize_packet(PacketType::ItemAction, &board);
@@ -4365,7 +4366,11 @@ mod tests {
             assert_eq!(&payload[16..20], &1_000_001i32.to_le_bytes());
             assert_eq!(&payload[20..24], &op_index.to_le_bytes(), "the op's index");
             assert_eq!(payload[24], arg, "its argument");
-            assert_eq!(&payload[25..], &9u32.to_le_bytes(), "events_applied closes it");
+            let extra = usize::from(op_index != 0); // Toggle and Remove carry the job they name too.
+            if extra == 1 {
+                assert_eq!(payload[25], if op_index == 1 { 9 } else { 4 }, "the job the asker saw there");
+            }
+            assert_eq!(&payload[25 + extra..], &9u32.to_le_bytes(), "events_applied closes it");
         }
 
         let outcome = ItemActionOutcomePacket {
