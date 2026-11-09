@@ -72,18 +72,19 @@ fn signed_claim(
 fn ordered_park_canonical_domains_match_independent_fixed_layout_goldens() {
     let (_, authority, fence, attachment) = fixture();
     // Independently calculated from the documented byte layouts, protocol96,
-    // and the secp256k1 generator's public x coordinate (secret scalar1). Protocol97
-    // (living world S3): the fence and message domains hash the protocol version, so
-    // those goldens were recomputed with 97 (the same independent computation
-    // reproduced the protocol-96 values before the bump); the authority and
-    // attachment digests do not hash it and are unchanged.
+    // and the secp256k1 generator's public x coordinate (secret scalar1). Protocol98
+    // (living world Tier 2 S3): the fence and message domains hash the protocol version,
+    // so those goldens were recomputed with 98 (the same independent computation, a
+    // short script over the layouts in `park.rs`, reproduced the protocol-97 values
+    // before the bump); the authority and attachment digests do not hash it and are
+    // unchanged.
     assert_eq!(
         hex::encode(authority_digest(&authority)),
         "30a50bb9c25270bddc7157141c13c3fbd7efc722c1cf66b8b043feee033b62c1"
     );
     assert_eq!(
         hex::encode(fence.digest(&authority).unwrap()),
-        "c5d56a5fdd1c59cbec1d2fe86539454645aa072814b0d1bb9028d51298cd9efc"
+        "bb8ae62ec9e1ee8df2c3e26358b6c7a40630234204847950681acd2df862ae53"
     );
     assert_eq!(
         hex::encode(attachment.digest()),
@@ -91,7 +92,7 @@ fn ordered_park_canonical_domains_match_independent_fixed_layout_goldens() {
     );
     assert_eq!(
         hex::encode(fence.message(&authority, attachment).unwrap()),
-        "67b80c891bf95b0c6cd03e06f30d86ac4e25b9331651911e1cbdfc8e59cb1c49"
+        "1d3af0f501b3b291842f91652c7e40d4d4f209533654a3a1c4299ceba0636253"
     );
     let imported = Attachment {
         context: GameplayContext::Imported(crate::personal_value::PersonalContext {
@@ -108,7 +109,7 @@ fn ordered_park_canonical_domains_match_independent_fixed_layout_goldens() {
     );
     assert_eq!(
         hex::encode(fence.message(&authority, imported).unwrap()),
-        "d85151a2c00590d8a47f616dbb734cd0a18bdf8dcb02dab9cc513e9803c2d0a3"
+        "813f8c3fe94daada4814a718cca01f9acc7eb04d3b4c1754b604c8989ea1c1f8"
     );
 }
 

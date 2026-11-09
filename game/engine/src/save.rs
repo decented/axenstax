@@ -362,6 +362,15 @@ pub struct WorldSave {
     /// LAST.
     #[serde(default)]
     pub block_authors: Option<crate::authorship::SavedAuthorship>,
+    /// How each region has been used: the lived-day counter and, per region,
+    /// the lived days a player was present and the nights slept (living world
+    /// Tier 2 S3, `use_record`). `None` = a save written before the field, or a
+    /// world nobody has played yet: nothing has been used. Canonical (regions
+    /// sorted, an empty record is `None`). Holds no identities, so a handover's
+    /// transfer copy keeps it; never on the wire. A present-but-invalid row is
+    /// dropped with a warning at restore, never a refusal to load. APPEND LAST.
+    #[serde(default)]
+    pub region_use: Option<crate::use_record::SavedRegionUse>,
 }
 
 impl WorldSave {
@@ -385,6 +394,8 @@ impl WorldSave {
             quest_world: _, worldgen_version: _, authority_clock: _,
             // Already canonical (`Authorship::to_saved` sorts keys, chunks, cells and starters).
             block_authors: _,
+            // Already canonical (`UseRecord::to_saved` walks a BTreeMap).
+            region_use: _,
         } = self;
         campfires.sort_unstable_by_key(|r| (r.x, r.y, r.z));
         furnaces.sort_unstable_by_key(|r| (r.x, r.y, r.z));
@@ -931,6 +942,7 @@ impl LegacyWorldSave {
             worldgen_version: None,
             authority_clock: None,
             block_authors: None,
+            region_use: None,
             // Legacy saves predate Spec 34 — no tip jars.
             tip_jars: Vec::new(),
             auctions: Vec::new(),
@@ -2280,6 +2292,7 @@ pub fn build_world_save(
         worldgen_version: Some(world.generator.version()),
         authority_clock: authority_clock.cloned(),
         block_authors: world.authors.to_saved(),
+        region_use: world.use_record.to_saved(),
         exhibits: world.exhibits.clone(),
         composters: world.iter_composters().map(|((x, y, z), data)| SavedComposter { x, y, z, data: data.clone() }).collect(),
         tip_jars,
@@ -2533,6 +2546,7 @@ pub fn save_world(
         worldgen_version: Some(world.generator.version()),
         authority_clock: authority_clock.cloned(),
         block_authors: world.authors.to_saved(),
+        region_use: world.use_record.to_saved(),
         exhibits: world.exhibits.clone(),
         composters: world.iter_composters().map(|((x, y, z), data)| SavedComposter { x, y, z, data: data.clone() }).collect(),
         tip_jars,
@@ -2847,6 +2861,7 @@ fn deserialize_world_save_tolerant_reporting(
         worldgen_version: tail.field(&mut cur, "worldgen_version"),
         authority_clock: tail.field(&mut cur, "authority_clock"),
         block_authors: tail.field(&mut cur, "block_authors"),
+        region_use: tail.field(&mut cur, "region_use"),
     };
     Ok((save, tail.failed_at, cur.position(), 7 + tail.read))
 }
@@ -2866,6 +2881,7 @@ fn absent_tail_encoded_len(s: &WorldSave, read: u32) -> Option<usize> {
             55 => size(bincode::serialized_size(&s.worldgen_version))?,
             56 => size(bincode::serialized_size(&s.authority_clock))?,
             57 => size(bincode::serialized_size(&s.block_authors))?,
+            58 => size(bincode::serialized_size(&s.region_use))?,
             _ => return None,
         };
         Some(total + n)
@@ -3441,6 +3457,10 @@ fn restore_world_save_state(world: &mut World, save: &WorldSave) {
     // this record) and starters whose build is gone are dropped now.
     world.authors = save.block_authors.as_ref().map(crate::authorship::Authorship::from_saved).unwrap_or_default();
     world.reconcile_authors();
+    // Living world Tier 2 S3 — restore how each region was used. An older save
+    // (no field) has used nothing yet. Runtime wear counts are not saved.
+    world.use_record = save.region_use.as_ref().map(crate::use_record::UseRecord::from_saved).unwrap_or_default();
+    world.path_wear.clear();
     // Spec 37 Market Hubs — restore discovery zones (plain serde).
     world.market_hubs = save.market_hubs.clone();
     // Spec 33 Mob Bounty Board — restore the rotation + id allocator
@@ -4777,6 +4797,7 @@ pub(crate) fn autosave_world_with(
         worldgen_version: Some(world.generator.version()),
         authority_clock: authority_clock.cloned(),
         block_authors: world.authors.to_saved(),
+        region_use: world.use_record.to_saved(),
         exhibits: world.exhibits.clone(),
         composters: world.iter_composters().map(|((x, y, z), data)| SavedComposter { x, y, z, data: data.clone() }).collect(),
         tip_jars,
@@ -5294,6 +5315,7 @@ pub(crate) fn minimal_world_save_for_tests(seed: u32) -> WorldSave {
         worldgen_version: None,
         authority_clock: None,
             block_authors: None,
+            region_use: None,
     }
 }
 
@@ -5526,6 +5548,7 @@ mod tests {
             worldgen_version: None,
             authority_clock: None,
             block_authors: None,
+            region_use: None,
         };
         let bytes = bincode::serialize(&save).unwrap();
         let back: WorldSave = bincode::deserialize(&bytes).unwrap();
@@ -6016,6 +6039,7 @@ mod tests {
             worldgen_version: None,
             authority_clock: None,
             block_authors: None,
+            region_use: None,
         };
         let mut bytes = bincode::serialize(&save).unwrap();
         bytes.extend_from_slice(&[0xFFu8; 16]); // pretend: a future field's bytes
@@ -6956,6 +6980,7 @@ mod tests {
             worldgen_version: None,
             authority_clock: None,
             block_authors: None,
+            region_use: None,
         };
         assert_eq!(save.face_overlays.len(), 1, "one wallpaper face");
         assert_eq!(save.face_blueprints.len(), 1, "one blueprint face");
@@ -7062,6 +7087,7 @@ mod tests {
             worldgen_version: None,
             authority_clock: None,
             block_authors: None,
+            region_use: None,
         };
 
         // Encode, then decode through the REAL production path.
@@ -7243,6 +7269,7 @@ mod tests {
             worldgen_version: None,
             authority_clock: None,
             block_authors: None,
+            region_use: None,
         };
         let bytes = bincode::serialize(&save).unwrap();
         let back: WorldSave = bincode::deserialize(&bytes).unwrap();
@@ -7880,10 +7907,10 @@ mod tests {
         let dir = world_dir("w");
         fs::create_dir_all(&dir).unwrap();
         save_world_meta("w", &WorldMeta::new("w")).unwrap();
-        // Cut `rig_clips` mid-length-prefix (the five `Option`s after it are one
-        // byte each, so 6 lands one byte into its prefix).
+        // Cut `rig_clips` mid-length-prefix (the six `Option`s after it are one
+        // byte each, so 7 lands one byte into its prefix).
         let mut bytes = bincode::serialize(&minimal_world_save_for_tests(9)).unwrap();
-        bytes.truncate(bytes.len() - 6);
+        bytes.truncate(bytes.len() - 7);
         fs::write(dir.join("world.dat"), &bytes).unwrap();
 
         let mut world = World::new();
@@ -8001,14 +8028,14 @@ mod tests {
     fn older_version_footer_is_stripped_before_the_tail_decode() {
         // Accepted c280f41f wrote 52 fields, layout revision 0, footer 52.
         // Its last field was rig_clips; the later optional positional fields are
-        // local_personal, quest_world, worldgen_version, authority_clock and block_authors. No new nested mob carrier enters this fixture.
-        assert_eq!(crate::save_format::WORLD_SAVE_FIELD_COUNT, 57, "re-find the known 52-field fixture if another field appends");
+        // local_personal, quest_world, worldgen_version, authority_clock, block_authors and region_use. No new nested mob carrier enters this fixture.
+        assert_eq!(crate::save_format::WORLD_SAVE_FIELD_COUNT, 58, "re-find the known 52-field fixture if another field appends");
         let mut save = minimal_world_save_for_tests(9);
         save.rig_clips = vec![crate::anim_set::AnimClip::Bounce];
         assert!(save.saved_mobs.is_empty());
         assert!(save.local_personal.is_none());
-        let appended_none = bincode::serialize(&(&save.local_personal, &save.quest_world, &save.worldgen_version, &save.authority_clock, &save.block_authors)).unwrap();
-        assert_eq!(appended_none, [0, 0, 0, 0, 0], "the five appended optional fields each encode None as one byte");
+        let appended_none = bincode::serialize(&(&save.local_personal, &save.quest_world, &save.worldgen_version, &save.authority_clock, &save.block_authors, &save.region_use)).unwrap();
+        assert_eq!(appended_none, [0, 0, 0, 0, 0, 0], "the six appended optional fields each encode None as one byte");
         let mut bytes = bincode::serialize(&save).unwrap();
         assert!(bytes.ends_with(&appended_none));
         bytes.truncate(bytes.len() - appended_none.len());
@@ -8083,6 +8110,11 @@ mod tests {
             chunks: vec![(0, 4, 0, vec![(3, 0)])],
             starters: Vec::new(),
         });
+        save.region_use = Some(crate::use_record::SavedRegionUse {
+            lived_day: 4,
+            last_world_day: Some(6),
+            regions: vec![((0, 0), crate::use_record::RegionUse { days: 3, last_day: 4, nights: 1, last_night: Some(5) })],
+        });
         save
     }
 
@@ -8093,15 +8125,16 @@ mod tests {
         let save = save_with_populated_tail(seed);
         let mut expected = save_with_populated_tail(seed);
         let mut body = bincode::serialize(&save).unwrap();
-        for index in (n + 1..=57).rev() {
+        for index in (n + 1..=58).rev() {
             let len = match index {
+                58 => { expected.region_use = None; bincode::serialize(&save.region_use).unwrap().len() }
                 57 => { expected.block_authors = None; bincode::serialize(&save.block_authors).unwrap().len() }
                 56 => { expected.authority_clock = None; bincode::serialize(&save.authority_clock).unwrap().len() }
                 55 => { expected.worldgen_version = None; bincode::serialize(&save.worldgen_version).unwrap().len() }
                 54 => { expected.quest_world = None; bincode::serialize(&save.quest_world).unwrap().len() }
                 53 => { expected.local_personal = None; bincode::serialize(&save.local_personal).unwrap().len() }
                 52 => { expected.rig_clips = Vec::new(); bincode::serialize(&save.rig_clips).unwrap().len() }
-                other => panic!("fixture only knows fields 52..=57, not {other}"),
+                other => panic!("fixture only knows fields 52..=58, not {other}"),
             };
             body.truncate(body.len() - len);
         }
@@ -8185,7 +8218,7 @@ mod tests {
     #[test]
     fn regression_padded_or_unknown_footer_bodies_are_still_refused() {
         let seed = 24;
-        let (_, body) = writer_with_fields(seed, 57);
+        let (_, body) = writer_with_fields(seed, 58);
         // Trailing bytes past the last field (not the footer) are not a clean body.
         let mut padded = body.clone();
         padded.push(0);

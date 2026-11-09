@@ -43,6 +43,10 @@ pub enum TopClass {
     Bare,
     /// A non-living block a player placed: left out of the average.
     Built,
+    /// A Worn Path (Tier 2 S3): grass trodden into a road. Left out of the
+    /// average like built ground, and also out of the wall term: a road is
+    /// honour, not damage.
+    Path,
 }
 
 /// Classify a column from its top block.
@@ -70,6 +74,8 @@ pub struct EcoTally {
     /// Columns that held any block at all (loaded columns).
     pub columns: u32,
     pub built: u32,
+    /// Columns topped by a Worn Path.
+    pub paths: u32,
     pub value_sum: f32,
     /// Bit-or of the kind bits of every living block seen.
     pub kinds: u64,
@@ -87,6 +93,7 @@ impl EcoTally {
             TopClass::Soil => self.value_sum += SOIL_VALUE,
             TopClass::Bare => {}
             TopClass::Built => self.built += 1,
+            TopClass::Path => self.paths += 1,
         }
     }
 
@@ -105,6 +112,7 @@ impl EcoTally {
     pub fn merge(&mut self, other: &EcoTally) {
         self.columns += other.columns;
         self.built += other.built;
+        self.paths += other.paths;
         self.value_sum += other.value_sum;
         self.kinds |= other.kinds;
         for (a, b) in self.crop_cells.iter_mut().zip(other.crop_cells) {
@@ -117,9 +125,9 @@ impl EcoTally {
         self.columns > 0
     }
 
-    /// The share of non-built columns that is alive, weighted by class.
+    /// The share of non-built, non-path columns that is alive, weighted by class.
     pub fn living_frac(&self) -> f32 {
-        let open = self.columns - self.built;
+        let open = self.columns - self.built - self.paths;
         if open == 0 {
             ALL_BUILT_LIVING
         } else {
@@ -143,10 +151,11 @@ impl EcoTally {
     }
 
     fn wall(&self) -> f32 {
-        if self.columns == 0 {
+        let ground = self.columns - self.paths;
+        if ground == 0 {
             return 1.0;
         }
-        let built_frac = self.built as f32 / self.columns as f32;
+        let built_frac = self.built as f32 / ground as f32;
         1.0 - WALL_SLOPE * (built_frac - WALL_FREE).max(0.0)
     }
 
@@ -244,6 +253,39 @@ mod tests {
             all.add_column(TopClass::Built);
         }
         assert_eq!(all.living_frac(), ALL_BUILT_LIVING);
+    }
+
+    #[test]
+    fn worn_paths_are_left_out_of_the_cover_average_and_the_wall_term() {
+        let mut t = tally(100, 0, 0, 4);
+        let base = t.eco(0);
+        for _ in 0..300 {
+            t.add_column(TopClass::Path);
+        }
+        // 300 of 400 columns are roads: the living share of the rest is unchanged,
+        // and a village of roads is not "walls".
+        assert!((t.eco(0) - base).abs() < 1e-5, "{} vs {base}", t.eco(0));
+        assert_eq!((t.columns, t.paths, t.built), (400, 300, 0));
+        // A field of nothing but paths reads as an all-built patch (0.5), not as bare ground.
+        let mut roads = EcoTally::default();
+        for _ in 0..256 {
+            roads.add_column(TopClass::Path);
+        }
+        assert_eq!(roads.living_frac(), ALL_BUILT_LIVING);
+        assert!(roads.eco(0) > 0.0);
+        assert!(roads.has_data());
+        // Built ground still counts in the wall term next to paths.
+        let mut mixed = EcoTally::default();
+        for _ in 0..100 {
+            mixed.add_column(TopClass::Path);
+        }
+        for _ in 0..156 {
+            mixed.add_column(TopClass::Built);
+        }
+        assert_eq!(mixed.wall(), 1.0 - WALL_SLOPE * (1.0 - WALL_FREE));
+        let mut merged = tally(0, 0, 0, 0);
+        merged.merge(&mixed);
+        assert_eq!(merged.paths, 100);
     }
 
     #[test]

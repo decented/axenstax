@@ -4895,3 +4895,20 @@ commissioner): the key is kept beside the anchor and saved with the world's auth
 table: `n` = distinct recorded authors of placed blocks in a region (capped at 8), `b = 0` for n < 2, else `1 - exp(-(n-1)/2)`, and
 `P = 1 - (1-c)(1-f)(1-k)(1-b)`. It is read when the region is scanned, and only a machine that owns the world has the table, so
 a joined client's `b` is 0 until S10.
+
+**Lived days, nights slept and Worn Paths (Tier 2 S3, 2026-11-09).** The world keeps, per bloom region, how it has been used (Spec 02 "Layout
+revision 6 and the use record"), on the machine that owns the world and never on the wire or on screen per person. *Lived days:* a world-level
+counter goes up by one the first time a player is present on a new world day (the night calendar's number), so an idle dedicated server, `/time` or a
+bed that skips the night cannot age a place; a region counts a lived day once however many players pass through it, and a sleeper counts as present in
+the bed's region. *Nights:* both sleep paths (the authority's `serve_sleep`, after a successful judge; the local bed arm, before the clock jumps to
+morning) add one night to the bed's region, once per night per region (`last_night`). *Presence* is noted about once a second from every present,
+living body (a dead joiner is not present). *The bloom `u` term:* `u = 0.6 (1 - e^(-(days + 2 nights)/10))`, only where the region holds at least 16
+placed blocks (counted on the scan cadence, `Chunk::placed_count`), faded linearly to 0 between 14 and 28 lived days since the region was last used;
+`P = 1 - (1-c)(1-f)(1-k)(1-b)(1-u)`. A joined client has an empty table, so its `u` is 0 until S10.
+*Worn Paths:* a footfall is a body on the ground, standing on a Grass block, entering a cell it was not in at its last grounded sample (standing
+still, or jumping on the spot, makes none); sampled every tick. At 24 footfalls the cell becomes a Worn Path (block 376, dirt textures, breaks like dirt
+and drops dirt, not placed, never reverts to grass, kept out of the creative inventory; a pick-block gives dirt). The partial counts are a runtime map
+(capped at 16,384 cells, least recently stepped forgotten first); off in creative; on in trial arenas. Bloom classes a Worn Path column apart
+(`TopClass::Path`): left out of the cover average like built ground and, unlike built ground, out of the wall term too, so a road is neither bare nor
+life and a village of roads is not "walls".
+

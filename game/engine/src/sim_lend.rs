@@ -127,10 +127,15 @@ pub enum SimSystem {
     Hoppers,
     /// Projectile flight/hits at the established post-death host boundary.
     Projectiles,
+    /// Living world Tier 2 S3 — the use record and path wear (`use_record::phase`):
+    /// each present, alive body's footfall every tick and its region's lived
+    /// day once a second. Every body is in the server's `players` (a lending
+    /// host's own seats too), so a lent world's is the server's.
+    UseRecord,
 }
 
 impl SimSystem {
-    pub const COUNT: usize = 28;
+    pub const COUNT: usize = 29;
 
     pub const ALL: [SimSystem; Self::COUNT] = [
         SimSystem::ActiveTicks,
@@ -161,6 +166,7 @@ impl SimSystem {
         SimSystem::Machines,
         SimSystem::Hoppers,
         SimSystem::Projectiles,
+        SimSystem::UseRecord,
     ];
 
     /// The side that runs this system while the world is lent (module docs).
@@ -193,7 +199,8 @@ impl SimSystem {
             | SimSystem::Develop
             | SimSystem::Machines
             | SimSystem::Hoppers
-            | SimSystem::Projectiles => SimSide::Server,
+            | SimSystem::Projectiles
+            | SimSystem::UseRecord => SimSide::Server,
         }
     }
 
@@ -602,6 +609,8 @@ mod tests {
             (SimSystem::EntityPhysics, Server),
             (SimSystem::Products, Server),
             (SimSystem::Population, Server),
+            // Living world Tier 2 S3 — the use record and path wear.
+            (SimSystem::UseRecord, Server),
             (SimSystem::Breeding, Server),
             (SimSystem::Species, Server),
             (SimSystem::Tethers, Server),

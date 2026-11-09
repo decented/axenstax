@@ -412,6 +412,19 @@ mod tests {
     }
 
     #[test]
+    fn handover_neutralise_keeps_the_use_record_it_holds_no_identity() {
+        let mut r = crate::use_record::UseRecord::default();
+        r.note_present_at(3, 40, 40);
+        r.note_slept_at(1, 40, 40);
+        let mut s = live_copy();
+        s.region_use = r.to_saved();
+        let before = s.region_use.clone();
+        assert!(before.is_some());
+        neutralise(&mut s, SOURCE).unwrap();
+        assert_eq!(s.region_use, before, "days and nights per region carry over untouched");
+    }
+
+    #[test]
     fn handover_neutralise_refuses_unattributable_slot_state() {
         let cases: [fn(&mut WorldSave); 4] = [
             |s| s.vendors.push(vendor(VendorOwner::LocalPlayer(1))),

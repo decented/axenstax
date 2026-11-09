@@ -6,7 +6,7 @@
 
 use std::ops::RangeInclusive;
 
-use super::eco::{classify, EcoTally};
+use super::eco::{classify, EcoTally, TopClass};
 use super::kinds::{crop_family, living_kind};
 use super::natural::NaturalRegion;
 use super::RegionKey;
@@ -97,6 +97,11 @@ pub fn scan_columns(
     for lz in lzs {
         for lx in lxs.clone() {
             let Some((top_y, top)) = chunks.top(lx, lz) else { continue };
+            // Tier 2 S3 — a Worn Path is a road: out of the cover average, neither bare nor life.
+            if top == block::WORN_PATH {
+                tally.add_column(TopClass::Path);
+                continue;
+            }
             let living = living_kind(top).is_some();
             let placed = chunks.placed(lx, top_y, lz);
             let is_natural = is_weather_cover(top)
@@ -180,6 +185,25 @@ mod tests {
         let mut t = EcoTally::default();
         scan_columns(&rc, None, &reg(), 2..=3, 2..=2, &mut t);
         assert_eq!((t.columns, t.built), (2, 1));
+    }
+
+    #[test]
+    fn a_worn_path_top_is_a_path_not_bare_ground_and_a_field_of_them_does_not_read_as_bare() {
+        let mut w = World::new();
+        for x in 0..8 {
+            w.set_block(x, 20, 2, block::WORN_PATH);
+        }
+        w.set_block(8, 20, 2, block::GRASS);
+        let rc = RegionChunks::of(&w, (0, 0));
+        let mut t = EcoTally::default();
+        scan_columns(&rc, None, &reg(), 0..=8, 2..=2, &mut t);
+        assert_eq!((t.columns, t.paths, t.built), (9, 8, 0));
+        // Only the grass is in the average, and it is alive.
+        assert_eq!(t.living_frac(), 1.0);
+        let mut all_paths = EcoTally::default();
+        scan_columns(&rc, None, &reg(), 0..=7, 2..=2, &mut all_paths);
+        assert_eq!(all_paths.paths, 8);
+        assert!(all_paths.eco(0) > 0.3, "{}", all_paths.eco(0));
     }
 
     #[test]

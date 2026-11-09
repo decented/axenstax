@@ -658,6 +658,12 @@ pub const FEAST_MARKER: BlockId = 374;
 /// Declares a Commons: the same 33 x 33 footprint as a Plot (`plot::PLOT_HALF_EXTENT`),
 /// open to everyone to build in. May not overlap any Plot.
 pub const COMMONS_STONE: BlockId = 375;
+// Living world, Tier 2 (S3, 2026-11-09). Spec: docs/superpowers/specs/2026-11-09-living-world-tier2.md §3.
+/// Grass walked over often (24 footfalls on one cell, `use_record::path_wear`).
+/// Never "placed" (so it never carries an author), breaks like dirt and drops
+/// dirt, and never turns back to grass. Bloom leaves it out of the cover
+/// average exactly like built ground. Kept out of the creative inventory.
+pub const WORN_PATH: BlockId = 376;
 
 /// The planted-sapling block for a species. Symmetric counterpart to
 /// `species_for_sapling` (which IS live, via `is_sapling_block`); this forward
@@ -3374,6 +3380,17 @@ impl BlockRegistry {
             color: [0.46, 0.56, 0.40],
             tex_top: TEX_GRASS_TOP, tex_bottom: TEX_COBBLESTONE, tex_side: TEX_COBBLESTONE,
         });
+        // Living world, Tier 2 (S3) — the Worn Path. Bare dirt on every face: a
+        // trodden track through grass reads as dirt (the salt-path top is
+        // white-speckled and gravel is grey, neither a dirt track), and the
+        // atlas has no free layer.
+        debug_assert_eq!(blocks.len(), WORN_PATH as usize, "the Worn Path follows the Commons Stone");
+        blocks.push(BlockDef { // 376 WORN_PATH
+            name: "genesis:worn_path",
+            solid: true, transparent: false, gravity: false,
+            color: [0.52, 0.38, 0.26],
+            tex_top: TEX_DIRT, tex_bottom: TEX_DIRT, tex_side: TEX_DIRT,
+        });
 
         Self { blocks, leaves_fast: false }
     }
@@ -3411,6 +3428,8 @@ impl BlockRegistry {
             // Living world S3 — a held feast leaves a marker; breaking it gives
             // back a table to lay the next one (the marker is never an item).
             FEAST_MARKER => ItemStack::new_block(FEAST_TABLE, 1),
+            // Living world Tier 2 S3 — a trodden path breaks like the dirt it was.
+            WORN_PATH => ItemStack::new_block(DIRT, 1),
             // Mob Bounty Board — drops itself as a placeable material.
             BOUNTY_BOARD => ItemStack::new_material(MaterialId::BountyBoardItem, 1),
             // Tip Jar — drops itself. Anti-grief on non-owner break is
@@ -3961,7 +3980,10 @@ mod tests {
         assert!(reg.is_known(FEAST_TABLE));
         assert!(reg.is_known(FEAST_MARKER));
         assert!(reg.is_known(COMMONS_STONE));
-        assert!(!reg.is_known(COMMONS_STONE + 1));
+        // Living world Tier 2 S3: the Worn Path (376) follows the Commons Stone.
+        assert_eq!(COMMONS_STONE + 1, WORN_PATH);
+        assert!(reg.is_known(WORN_PATH));
+        assert!(!reg.is_known(WORN_PATH + 1));
         assert!(!reg.is_known(u16::MAX));
     }
 

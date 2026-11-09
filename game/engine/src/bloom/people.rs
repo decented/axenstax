@@ -4,6 +4,10 @@
 //! co-presence `c`, the Feast `f` and Commons `k`. A solo player with no Feast
 //! and no Commons has `P = 0`: absent, never a penalty.
 //!
+//! Tier 2 S3 adds a fifth, `u`, lived in (`use_record::u_term`): the days a
+//! player was present and the nights slept, in a place with at least 16 placed
+//! blocks, fading over 14 to 28 lived days of disuse. It is read like `b`.
+//!
 //! Tier 2 S2 adds a fourth, `b`, built together (`P = 1 - (1-c)(1-f)(1-k)(1-b)`):
 //! the number of distinct recorded authors of the placed blocks in a region
 //! (`authorship::built_together`). It is read from the world's authorship table
@@ -118,9 +122,19 @@ impl PeopleState {
 
     /// `P` with the built-together term `b` (0..=1) as well.
     pub fn value_with(&self, floor: f32, in_commons: bool, b: f32) -> f32 {
+        self.value_full(floor, in_commons, b, 0.0)
+    }
+
+    /// `P` with the built-together term `b` and the lived-in term `u` (both
+    /// 0..=1): `1 - (1-c)(1-f)(1-k)(1-b)(1-u)` (Tier 2 S3 adds `u`).
+    pub fn value_full(&self, floor: f32, in_commons: bool, b: f32, u: f32) -> f32 {
         let f = self.surge.max(floor.min(MARKER_FLOOR_CAP));
         let k = if in_commons { COMMONS_K } else { 0.0 };
-        1.0 - (1.0 - self.c) * (1.0 - f) * (1.0 - k) * (1.0 - b.clamp(0.0, 1.0))
+        1.0 - (1.0 - self.c)
+            * (1.0 - f)
+            * (1.0 - k)
+            * (1.0 - b.clamp(0.0, 1.0))
+            * (1.0 - u.clamp(0.0, 1.0))
     }
 }
 

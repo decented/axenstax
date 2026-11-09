@@ -227,7 +227,7 @@ impl HostedServer {
         };
         // Judged above; Mirror's own run sets the spawn and heals.
         let server = &mut self.server;
-        let slept = crate::item_actions::serve_sleep(&mut server.players[i], &server.world, world_time, tonight, bed);
+        let slept = crate::item_actions::serve_sleep(&mut server.players[i], &mut server.world, world_time, tonight, bed);
         debug_assert!(slept.is_ok(), "judged before the result row");
         self.complete_typed_result(i, action, ActionFate::Accepted, result);
         self.send_to_joined_slot(i, &packet);

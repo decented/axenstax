@@ -641,10 +641,12 @@ pub fn serve_eat(sp: &mut ServerPlayer, held: Option<&Item>) -> Result<(), ItemN
 /// The server's `Sleep` for joiner `sp` in the bed at `bed`, on `world` at
 /// `world_time` on night `tonight`: judged, and if accepted the spawn point
 /// is the bed's (a later Respawn stands the body on it), the body is healed
-/// to full, hunger left alone, and the night is marked slept.
+/// to full, hunger left alone, and the night is marked slept. The night also
+/// counts for the bed's region in the world's use record (living world Tier 2
+/// S3), once per night per region.
 pub fn serve_sleep(
     sp: &mut ServerPlayer,
-    world: &World,
+    world: &mut World,
     world_time: u32,
     tonight: u32,
     bed: [i32; 3],
@@ -661,6 +663,7 @@ pub fn serve_sleep(
     let max = sp.combat.max_health;
     sp.combat.heal(max);
     sp.slept_night = Some(tonight);
+    world.use_record.note_slept_at(tonight, bed[0], bed[2]);
     Ok(())
 }
 

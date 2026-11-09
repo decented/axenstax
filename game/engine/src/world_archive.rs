@@ -488,6 +488,7 @@ mod tests {
             worldgen_version: None,
             authority_clock: None,
             block_authors: None,
+            region_use: None,
         }
     }
 

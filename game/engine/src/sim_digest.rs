@@ -335,6 +335,9 @@ impl GameServer {
         // Living world S2 — authorship, in the canonical (sorted) saved form, so
         // a lent host and its twin agree whatever order their hash maps hold.
         e.bytes(&bincode::serialize(&w.authors.to_saved()).expect("authorship encodes"));
+        // Living world Tier 2 S3 — the use record (a sorted map, canonical). The
+        // runtime wear counts are not digested: they are not world state.
+        e.bytes(&bincode::serialize(&w.use_record.to_saved()).expect("use record encodes"));
         e.u64(w.total_work);
         e.u32(self.pop_epoch);
         e.debug(&self.column_streamer);

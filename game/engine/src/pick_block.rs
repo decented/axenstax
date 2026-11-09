@@ -100,6 +100,8 @@ pub fn canonical_block(b: BlockId) -> BlockId {
         block::CABLE_LIT => block::CABLE,
         // A held feast's marker picks the table it came from (never a marker).
         block::FEAST_MARKER => block::FEAST_TABLE,
+        // A trodden path picks the dirt it breaks into (never a path item).
+        block::WORN_PATH => block::DIRT,
         block::ELECTRIC_LAMP_LIT => block::ELECTRIC_LAMP,
         block::STEAM_GENERATOR_LIT => block::STEAM_GENERATOR,
         other => other,

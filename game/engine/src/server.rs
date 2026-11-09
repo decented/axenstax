@@ -2100,6 +2100,34 @@ impl GameServer {
         // their position set directly from InputPacket by hosted_server.rs.
         self.tick_player_physics();
 
+        // Living world Tier 2 S3 — the use record and path wear, on every
+        // present, living body (a lending host's own seats are among them,
+        // position-trusted: they report no `on_ground`, so they pass `true`
+        // and `path_wear::ground_cell` judges by their feet). A lent world's
+        // is the server's alone (`SimSystem::UseRecord`); a worn cell rides
+        // `pending_block_changes` to joiners and to a lending host's screen.
+        if self.runs(SimSystem::UseRecord) {
+            let feet: Vec<crate::path_wear::Foot> = self
+                .players
+                .iter()
+                .enumerate()
+                .filter(|(_, sp)| sp.is_present_and_alive())
+                .map(|(i, sp)| crate::path_wear::Foot {
+                    key: i as u32,
+                    pos: sp.player.pos,
+                    on_ground: !sp.server_simulated || sp.player.on_ground,
+                })
+                .collect();
+            let worn = crate::use_record::phase(
+                &mut self.world,
+                self.tick_counter,
+                self.night_calendar.tonight(),
+                self.is_creative,
+                &feet,
+            );
+            self.pending_block_changes.extend(worn);
+        }
+
         // D4 slice 3 — the mob simulation (`sim_mobs`), phases 1-7 here and
         // 8-9 at the entity-physics step below: the ONE implementation a
         // standalone game runs in its client tick. On a lent world the host
@@ -3617,6 +3645,7 @@ impl GameServer {
             worldgen_version: Some(self.world.generator.version()),
             authority_clock: Some(self.saved_clock()),
             block_authors: self.world.authors.to_saved(),
+            region_use: self.world.use_record.to_saved(),
             exhibits: self.world.exhibits.clone(),
             composters: self
                 .world

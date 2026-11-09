@@ -2783,7 +2783,7 @@ impl HostedServer {
                 // changes nothing, and `tonight()` is this tick's night.
                 server.night_calendar.observe(server.world_time);
                 let (world, world_time, tonight) =
-                    (&server.world, server.world_time, server.night_calendar.tonight());
+                    (&mut server.world, server.world_time, server.night_calendar.tonight());
                 server
                     .players
                     .get_mut(i)

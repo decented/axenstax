@@ -31,7 +31,7 @@ use crate::save::WorldSave;
 /// `world_save_field_count_tripwire` test against serde's own field list, so
 /// appending a `WorldSave` field fails the test until this is bumped — which bumps
 /// [`SAVE_FORMAT_VERSION`] with it.
-pub const WORLD_SAVE_FIELD_COUNT: u32 = 57;
+pub const WORLD_SAVE_FIELD_COUNT: u32 = 58;
 
 /// Bump by hand for a wire change that is NOT an appended `WorldSave` field: a
 /// field or enum variant added inside a nested saved type, a retype. Such a change
@@ -49,7 +49,11 @@ pub const WORLD_SAVE_FIELD_COUNT: u32 = 57;
 /// Stone): the same reason as 4. Moves the version for every world this build
 /// writes, so builds before it refuse a world instead of reading a table or a
 /// Commons Stone as AIR and saving the hole back. No `WorldSave` field was added.
-pub const SAVE_LAYOUT_REVISION: u32 = 5;
+///
+/// 6 (living world Tier 2 S3, block id 376: the Worn Path): the same reason
+/// again. Together with the appended `region_use` field (58) this makes the
+/// footer 64, not 63: field and revision both moved.
+pub const SAVE_LAYOUT_REVISION: u32 = 6;
 
 /// The `world.dat` format version this build writes, and the newest it opens.
 /// Monotonic: both terms only ever increase.
@@ -82,7 +86,10 @@ pub const SAVE_FORMAT_VERSION: u32 = WORLD_SAVE_FIELD_COUNT + SAVE_LAYOUT_REVISI
 /// | 59     | 55     | 4        | ed9678f7 (merge of the two)                       | `worldgen_version`|
 /// | 60     | 56     | 4        | Keep slice 2a (the authority clock)               | `authority_clock` |
 /// | 61     | 56     | 5        | living world S3 (block ids 373..=375)             | `authority_clock` |
-/// | 62     | 57     | 5        | living world Tier 2 S2 (block authorship; this build) | `block_authors` |
+/// | 62     | 57     | 5        | living world Tier 2 S2 (block authorship)         | `block_authors`   |
+/// | 64     | 58     | 6        | living world Tier 2 S3 (use record, block 376; this build) | `region_use` |
+///
+/// (No commit wrote footer 63: S3 moved the field count and the layout revision together.)
 ///
 /// Footers 52 and below are not strictly checked. Sorted by footer, ascending.
 /// The newest entry is written as literals on purpose: bumping
@@ -99,6 +106,7 @@ pub const FOOTER_FIELD_COUNTS: &[(u32, &[u32])] = &[
     (60, &[56]),
     (61, &[56]),
     (62, &[57]),
+    (64, &[58]),
 ];
 
 /// The field counts a footer `version` was written with (empty for a footer the
@@ -387,17 +395,17 @@ mod tests {
     /// loading them as AIR and saving the holes back.
     #[test]
     fn a_world_written_now_carries_the_building_variants_version() {
-        // 62 as of living world Tier 2 S2 (the `block_authors` field): 57 fields + layout revision 5.
-        assert_eq!(SAVE_FORMAT_VERSION, 62, "57 fields + layout revision 5");
+        // 64 as of living world Tier 2 S3 (the `region_use` field and block id 376): 58 fields + layout revision 6.
+        assert_eq!(SAVE_FORMAT_VERSION, 64, "58 fields + layout revision 6");
         // The world holds no new block, and still carries the new version.
         let bytes = encode_world_save(&minimal_world_save_for_tests(5)).unwrap();
-        assert_eq!(split_save_footer(&bytes).1, Some(62));
+        assert_eq!(split_save_footer(&bytes).1, Some(64));
         assert!(check_version(split_save_footer(&bytes).1).is_ok(), "this build opens its own save");
-        // A build that stopped at 61 refuses this footer (62 > 61) the same
-        // way this build refuses 63: `check_version` is the one rule.
+        // A build that stopped at 62 refuses this footer (64 > 62) the same
+        // way this build refuses 65: `check_version` is the one rule.
         assert_eq!(
-            check_version(Some(62 + 1)),
-            Err(WorldSaveError::NewerVersion { found: 63, supported: 62 }),
+            check_version(Some(64 + 1)),
+            Err(WorldSaveError::NewerVersion { found: 65, supported: 64 }),
             "a footer one version past this build is refused"
         );
         let mut next = bincode::serialize(&minimal_world_save_for_tests(5)).unwrap();

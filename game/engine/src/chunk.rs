@@ -292,6 +292,25 @@ impl Chunk {
         }
     }
 
+    /// Living world Tier 2 S3 — how many non-air cells hold a player-placed
+    /// bit. A stale bit on a cell that has since become AIR (a known gap) is
+    /// not counted. Walks the set bits only, so an unbuilt chunk costs 64 word
+    /// reads.
+    pub fn placed_count(&self) -> u32 {
+        let mut n = 0;
+        for (w, &word) in self.placed.iter().enumerate() {
+            let mut bits = word;
+            while bits != 0 {
+                let idx = w * 64 + bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                if self.blocks[idx] != crate::block::AIR {
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
     // ── Spec 30 — per-voxel light data ─────────────────────────────
 
     /// Raw packed light byte at (x, y, z): `(sky << 4) | block`. Superseded

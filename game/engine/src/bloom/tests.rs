@@ -312,6 +312,110 @@ fn a_client_with_no_authorship_table_has_b_zero() {
     assert_eq!(h.field.region_terms(FOREST).unwrap().1, 0.0);
 }
 
+// ── Lived in (Tier 2 S3, `u`) and Worn Paths ─────────────────────────────
+
+/// Sixteen placed blocks in the region, so it is a place and not a field walked through.
+fn build_sixteen(h: &mut Harness) {
+    for i in 0..16 {
+        h.world.place_player_block(FOREST.0 * 16 + i, QUARRY_Y + 1, 3, block::COBBLESTONE);
+    }
+}
+
+/// `n` lived days of presence in the forest region, then the world on lived day `now`.
+fn live_in(h: &mut Harness, n: u32, nights: u32) {
+    for day in 0..n {
+        h.world.use_record.note_present_at(100 + day, FOREST.0 * 16 + 8, 8);
+    }
+    for night in 0..nights {
+        h.world.use_record.note_slept_at(night, FOREST.0 * 16 + 8, 8);
+    }
+}
+
+#[test]
+fn lived_in_lifts_p_only_where_sixteen_blocks_were_placed_and_follows_the_curve() {
+    let p_of = |placed: bool, days: u32, nights: u32| {
+        let mut h = quarry();
+        if placed {
+            build_sixteen(&mut h);
+        } else {
+            for i in 0..15 {
+                h.world.place_player_block(FOREST.0 * 16 + i, QUARRY_Y + 1, 3, block::COBBLESTONE);
+            }
+        }
+        live_in(&mut h, days, nights);
+        h.rescan(FOREST);
+        h.run(2);
+        h.field.region_terms(FOREST).unwrap().1
+    };
+    assert_eq!(p_of(false, 10, 0), 0.0, "fifteen placed blocks is a field walked through");
+    assert_eq!(p_of(true, 0, 0), 0.0, "nobody has lived there");
+    // 10 lived days: 0.6 (1 - e^-1). Two nights count as four days.
+    let want = 0.6 * (1.0 - (-1.0f32).exp());
+    assert!((p_of(true, 10, 0) - want).abs() < 1e-5, "{}", p_of(true, 10, 0));
+    assert!((p_of(true, 6, 2) - want).abs() < 1e-5, "{}", p_of(true, 6, 2));
+    assert!(p_of(true, 10, 0) < 0.6 + 1e-6);
+}
+
+#[test]
+fn lived_in_fades_with_lived_days_of_disuse_and_not_with_an_idle_calendar() {
+    let mut h = quarry();
+    build_sixteen(&mut h);
+    live_in(&mut h, 10, 0);
+    h.rescan(FOREST);
+    h.run(2);
+    let fresh = h.field.region_terms(FOREST).unwrap().1;
+    assert!(fresh > 0.3);
+    // Elsewhere in the world players live for 21 more lived days: this place is half faded.
+    for day in 0..21 {
+        h.world.use_record.note_present_at(500 + day, 10_000, 10_000);
+    }
+    h.rescan(FOREST);
+    h.run(2);
+    let half = h.field.region_terms(FOREST).unwrap().1;
+    // Last used on lived day 10; the world is on lived day 31: 21 days of disuse.
+    assert!((half - fresh / 2.0).abs() < 1e-5, "{half} vs {}", fresh / 2.0);
+    // An idle server's calendar running on changes nothing: no player, no lived day.
+    h.rescan(FOREST);
+    h.run(400);
+    assert!((h.field.region_terms(FOREST).unwrap().1 - half).abs() < 1e-5);
+}
+
+#[test]
+fn a_client_with_no_use_record_has_u_zero() {
+    let mut h = quarry();
+    build_sixteen(&mut h);
+    h.rescan(FOREST);
+    h.run(2);
+    assert_eq!(h.field.region_terms(FOREST).unwrap().1, 0.0);
+}
+
+#[test]
+fn a_field_of_worn_paths_does_not_read_as_bare() {
+    // The same quarry floor: bare stone reads as a wound...
+    let mut h = quarry();
+    assert_eq!(h.eco(FOREST), 0.0);
+    // ...and trodden into roads it is not (a road is honour, not damage).
+    for dz in 0..16 {
+        for dx in 0..16 {
+            h.world.set_block(FOREST.0 * 16 + dx, QUARRY_Y, FOREST.1 * 16 + dz, block::WORN_PATH);
+        }
+    }
+    let roads = h.eco(FOREST);
+    assert!(roads > 0.3, "{roads}");
+    // And a few roads through a living lawn leave the lawn's average where it was.
+    let mut lawn = forest();
+    let before = lawn.eco(FOREST);
+    for dx in 0..16 {
+        let (x, z) = (FOREST.0 * 16 + dx, FOREST.1 * 16 + 5);
+        let top = (0..=255).rev().find(|&y| lawn.world.get_block(x, y, z) != block::AIR).unwrap();
+        if lawn.world.get_block(x, top, z) == block::GRASS {
+            lawn.world.set_block(x, top, z, block::WORN_PATH);
+        }
+    }
+    let after = lawn.eco(FOREST);
+    assert!(after >= before - 0.05, "a road through the grass is not damage: {before} -> {after}");
+}
+
 #[test]
 fn feast_markers_leave_a_lasting_floor() {
     let mut h = quarry();

@@ -66,10 +66,13 @@ fn a_world_with_nothing_recorded_saves_the_field_absent() {
 
 #[test]
 fn a_save_from_before_the_field_loads_with_everything_anonymous() {
-    // A footer-61 writer had 56 fields: the same bytes without the new last one.
+    // A footer-61 writer had 56 fields: the same bytes without the two newest (authorship and
+    // the use record, one None byte each).
     let mut save = crate::save::minimal_world_save_for_tests(7);
     save.block_authors = None;
+    save.region_use = None;
     let mut body = bincode::serialize(&save).unwrap();
+    assert_eq!(body.pop(), Some(0), "the absent use record is one None byte");
     assert_eq!(body.pop(), Some(0), "the absent field is one None byte");
     body.extend_from_slice(&crate::save_format::footer_bytes(61));
     let (old, damaged) = crate::save::read_world_save_reporting(&body).expect("an older save loads");

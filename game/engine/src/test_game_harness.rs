@@ -181,6 +181,9 @@ mod tests {
     #[path = "authorship.rs"]
     mod authorship;
     #[cfg(not(target_arch = "wasm32"))]
+    #[path = "use_record.rs"]
+    mod use_record;
+    #[cfg(not(target_arch = "wasm32"))]
     #[path = "sim_machines.rs"]
     mod sim_machines;
     #[cfg(not(target_arch = "wasm32"))]

@@ -2897,7 +2897,13 @@ pub struct ServerAnnouncePacket {
 ///   client without them resolves the ids to `AIR` (the registry fallback),
 ///   drawing voids where a table or marker stands, so the bump refuses it at
 ///   join. A Feast Marker's guest count rides `BlockChange.meta`.
-pub const PROTOCOL_VERSION: u32 = 97;
+/// - v98 (2026-11-09, living world Tier 2 S3): **New block id 376** (Worn
+///   Path: grass walked over often, written by the authority as an ordinary
+///   `BlockChange`). No packet shape changed. A client without it resolves the
+///   id to `AIR` and would draw a hole in the grass, so the bump refuses it at
+///   join. The use record itself (days, nights) is authority-side and never
+///   on the wire.
+pub const PROTOCOL_VERSION: u32 = 98;
 
 /// The `protocol_version` of a JoinRequest payload that doesn't decode as this
 /// build's `JoinRequestPacket` (an older or newer client's shape). It is the
@@ -3100,7 +3106,8 @@ mod tests {
         // v95 — terrain T1: 256-block world, per-world terrain generator.
         // v96 — D2c-3 ordered park: FreezeFence (13) and Parked (14) frames.
         // v97 — living world S3: block ids 373..=375, two ItemNote codes.
-        assert_eq!(super::PROTOCOL_VERSION, 97);
+        // v98 — living world Tier 2 S3: block id 376 (Worn Path), no packet change.
+        assert_eq!(super::PROTOCOL_VERSION, 98);
     }
 
     #[test]
@@ -3860,7 +3867,8 @@ mod tests {
         // v95 (terrain T1): 256-block world, JoinAccept.generator, JoinRequest.generator_fingerprints.
         // v96 (D2c-3 ordered park): handover FreezeFence (13) and Parked (14) frames.
         // v97 (living world S3): block ids 373..=375 and two ItemNote codes, no packet change.
-        assert_eq!(PROTOCOL_VERSION, 97);
+        // v98 (living world Tier 2 S3): block id 376 (Worn Path), no packet change.
+        assert_eq!(PROTOCOL_VERSION, 98);
     }
 
     fn sample_accept() -> JoinAcceptPacket {

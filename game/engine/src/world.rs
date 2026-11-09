@@ -822,6 +822,14 @@ pub struct World {
     /// saved as `WorldSave.block_authors`, never sent on the wire, never shown
     /// per person. Its entries go with the placed bit (`set_placed(.., false)`).
     pub(crate) authors: crate::authorship::Authorship,
+    /// Living world Tier 2 S3 — how each region has been used (lived days,
+    /// nights slept; `use_record`). Authority-side: saved as
+    /// `WorldSave.region_use`, never sent on the wire, never shown per person.
+    pub(crate) use_record: crate::use_record::UseRecord,
+    /// Living world Tier 2 S3 — partial footfall counts on grass
+    /// (`path_wear`). Runtime only: never saved, never sent; the Worn Path
+    /// block it produces is what persists.
+    pub(crate) path_wear: crate::path_wear::PathWear,
     /// Spec 37 Market Hubs — vendor-discovery zones. Linear scan
     /// (alpha-scale). Persisted via WorldSave.market_hubs.
     pub market_hubs: Vec<crate::market_hub::MarketHubData>,
@@ -985,6 +993,8 @@ impl World {
             satoshi: crate::satoshi::SatoshiState::default(),
             plots: Vec::new(),
             authors: crate::authorship::Authorship::new(),
+            use_record: crate::use_record::UseRecord::default(),
+            path_wear: crate::path_wear::PathWear::default(),
             market_hubs: Vec::new(),
             face_attachments: AHashMap::new(),
             total_work: 0,
@@ -2064,6 +2074,8 @@ impl World {
         self.satoshi = crate::satoshi::SatoshiState::default();
         self.plots.clear();
         self.authors.clear();
+        self.use_record.clear();
+        self.path_wear.clear();
         self.market_hubs.clear();
         self.pop_exposure.clear();
         self.feast_events.clear();

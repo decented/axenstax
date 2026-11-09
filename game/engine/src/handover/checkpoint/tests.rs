@@ -207,6 +207,7 @@ fn neutral_save(seed: u32) -> WorldSave {
         worldgen_version: None,
         authority_clock: None,
         block_authors: None,
+        region_use: None,
     }
 }
 

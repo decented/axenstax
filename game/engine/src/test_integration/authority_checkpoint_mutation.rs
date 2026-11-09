@@ -102,6 +102,11 @@ save_fields! {
             chunks: vec![(0, 4, 0, vec![(7, 0)])],
             starters: Vec::new(),
         }),
+        region_use: |s| s.region_use = Some(crate::use_record::SavedRegionUse {
+            lived_day: 3,
+            last_world_day: Some(9),
+            regions: vec![((0, 0), crate::use_record::RegionUse { days: 2, last_day: 3, nights: 1, last_night: Some(8) })],
+        }),
     ],
 }
 
@@ -406,8 +411,10 @@ fn a_record_from_an_older_build_is_no_mismatch() {
     let mut save = read_world_save(&std::fs::read(&file).unwrap()).unwrap();
     save.authority_clock = None;
     save.block_authors = None;
+    save.region_use = None;
     let mut body = bincode::serialize(&save).unwrap();
-    body.pop(); // The authorship's `None`: a format 59 writer had no such field,
+    body.pop(); // The use record's `None`: a format 59 writer had no such field,
+    body.pop(); // nor the authorship's,
     body.pop(); // nor the clock's.
     body.extend_from_slice(&footer_bytes(59));
     std::fs::write(&file, &body).unwrap();

@@ -6524,6 +6524,32 @@ impl super::GameState {
                 );
             }
         }
+        // Living world Tier 2 S3 — the use record and path wear for the seats
+        // on this machine (`use_record::phase`). A joined client keeps no record
+        // (its server does); a lent world's is its server's, which has these
+        // seats in its `players` (`SimSystem::UseRecord`).
+        if !joined && self.sim_runs(SimSystem::UseRecord) {
+            let feet: Vec<crate::path_wear::Foot> = self
+                .players
+                .iter()
+                .enumerate()
+                .filter(|(_, slot)| !slot.combat.dead)
+                .map(|(i, slot)| crate::path_wear::Foot {
+                    key: i as u32,
+                    pos: slot.player.pos,
+                    on_ground: slot.player.on_ground,
+                })
+                .collect();
+            // The worn cells are already written to this world; no server
+            // broadcasts them, and the chunk remeshes from its dirty flag.
+            let _ = crate::use_record::phase(
+                &mut self.world,
+                self.tick_counter,
+                self.night_calendar.tonight(),
+                self.is_creative,
+                &feet,
+            );
+        }
         // HP-3 — brigand AI pre-pass. Runs every tick BEFORE the main
         // mob_ai dispatch so tier-specific detect-range + flee-gate +
         // day/night chase-gate overrides land before chase logic
@@ -16185,6 +16211,9 @@ impl super::GameState {
                             // 12000 = noon. So 7000 lands shortly after sunrise
                             // — past the brightness > 0.3 daylight threshold,
                             // so right-clicking again can't re-trigger sleep.
+                            // Living world Tier 2 S3 — the night counts for the bed's
+                            // region (before the clock jumps to morning).
+                            self.world.use_record.note_slept_at(self.night_calendar.tonight(), pos[0], pos[2]);
                             self.write_clock(7000, self.world_time_step);
                             self.players[pidx].spawn_pos = crate::item_actions::bed_spawn(pos);
                             let max = self.players[pidx].combat.max_health;

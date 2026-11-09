@@ -292,7 +292,7 @@ fn max_durability(material: ToolMaterial) -> u16 {
 pub fn block_hardness(block_id: BlockId) -> f32 {
     // Values = seconds to break with bare fist (speed 1.0).
     match block_id {
-        block::DIRT | block::GRASS => 2.5,  // Axolittle: 2.5s
+        block::DIRT | block::GRASS | block::WORN_PATH => 2.5,  // Axolittle: 2.5s
         block::SAND => 0.5,
         block::GRAVEL => 0.6,
         block::STONE => 10.0,               // Axolittle: 10s
@@ -376,7 +376,7 @@ pub fn best_tool_for(block_id: BlockId) -> Option<ToolType> {
         // the Pickaxe bonus. Match-guard form mirrors `break_time_ticks`
         // so Phase 3b's variant rollout is automatic.
         id if block::is_pure_deepslate_family(id) => Some(ToolType::Pickaxe),
-        block::DIRT | block::GRASS | block::SAND | block::GRAVEL | block::SNOW => Some(ToolType::Shovel),
+        block::DIRT | block::GRASS | block::WORN_PATH | block::SAND | block::GRAVEL | block::SNOW => Some(ToolType::Shovel),
         block::OAK_LOG | block::OAK_PLANKS | block::CRAFTING_TABLE
         | block::FEAST_TABLE | block::FEAST_MARKER => Some(ToolType::Axe),
         // Building variants: woods want an axe, stones a pickaxe.
