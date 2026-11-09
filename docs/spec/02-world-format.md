@@ -2219,10 +2219,10 @@ against the slice before allocating.
       have made new saves unreadable to shipped builds, and a 4-byte header magic
       collides with a legacy save's leading `seed: u32`; an 8-byte trailing magic
       at the very end of a footer-less save is not a realistic collision.
-    - **`SAVE_FORMAT_VERSION`** = `WORLD_SAVE_FIELD_COUNT` (60 since living world Tier 2 S5,
+    - **`SAVE_FORMAT_VERSION`** = `WORLD_SAVE_FIELD_COUNT` (61 since living world Tier 2 S7,
       2026-11-09: `quest_world` was 54, `worldgen_version` 55, `authority_clock` 56,
-      `block_authors` 57, `region_use` 58, `plan_builds` 59, `plot_succession` 60) +
-      `SAVE_LAYOUT_REVISION` (7 today; see the block-ids bullets below) = 67. The current `SAVE_FORMAT_VERSION` is `67` (a test, `save_format::tests::spec_02_states_the_current_save_format_version`, fails if this sentence and the constant disagree, so a bump must edit this line). Two tripwire tests stop drift: serde's field list
+      `block_authors` 57, `region_use` 58, `plan_builds` 59, `plot_succession` 60, `site_boards` 61) +
+      `SAVE_LAYOUT_REVISION` (8 today; see the block-ids bullets below) = 69. The current `SAVE_FORMAT_VERSION` is `69` (a test, `save_format::tests::spec_02_states_the_current_save_format_version`, fails if this sentence and the constant disagree, so a bump must edit this line). Two tripwire tests stop drift: serde's field list
       for `WorldSave` must equal `WORLD_SAVE_FIELD_COUNT` (so appending a field
       without bumping the version fails), and the tolerant reader must consume every
       byte of a current save (so a field listed in its struct literal without a read
@@ -2324,6 +2324,29 @@ against the slice before allocating.
       revision 7 = 66; `FOOTER_FIELD_COUNTS` gains `(66, [59])`; a world written at footer 65 still opens.
       The block is kept out of the creative inventory and picks nothing (`pick_block::PICKS_NOTHING`). See
       `docs/superpowers/specs/2026-11-09-living-world-tier2.md` §8.
+    - **Layout revision 8 and the Site Board (format 69, living world Tier 2 S7, 2026-11-09).** Block id
+      379, `SITE_BOARD` (a crew's job list; the Bounty Board's texture layer; drops itself; mined with an
+      axe like planks), follows an inert gap at 378 (the registry is a dense `Vec`, so the Commons Shelf's id
+      on another branch is held as `RESERVED_378`, air-like and never an item), so the revision moves 7 to 8
+      for the reason revisions 4 to 7 did (an older build reads the id as AIR and saves a hole). Field 61,
+      `WorldSave.site_boards: Option<site_board::SavedSiteBoards>`, is
+      `{ boards: Vec<((x, y, z): (i32, i32, i32), Vec<(job: u8, done: bool)>)> }`: each board's tasks in
+      order, at most 8, a job being a number from the fixed list (`site_board::Job`, APPEND ONLY: 0 plant
+      trees, 1 build walls, 2 build a roof, 3 dig a well, 4 light the way, 5 make a garden, 6 bring food,
+      7 gather wood, 8 clear the ground, 9 build a bridge, 10 fence the animals, 11 decorate). There is no
+      free text (T9). Footer arithmetic: field count 61 + revision 8 = 69; `FOOTER_FIELD_COUNTS` gains
+      `(69, [61])` (footer 68 is the Shelf's branch's; a world written at footer 67 still opens, with no
+      boards). Rules: (1) *absent means no lists* (an older save; a world where no board holds a task is
+      written as `None`); (2) *canonical*: rows sorted by cell, an emptied board is not written, so the same
+      world is the same bytes (`sim_digest` digests the same form); (3) *never a refusal*: an unknown job
+      number is dropped, a list past 8 is cut, a repeated cell is ignored, each with a `log::warn!`;
+      (4) *the block owns it*: `World::set_block` removes a cell's list when the cell stops being (or starts
+      being) a Site Board, so a break by any seat, a joiner's edit, a received change or a blast takes the
+      list and a board put back starts empty; a list on a cell that is no board is never shown;
+      (5) *no identities* (a job is a number, a tick a bool): an export and an import keep it, a handover's
+      transfer copy keeps it; (6) it reaches joiners as a block view (`BlockView::SiteBoard`, Spec 04), never
+      in the save a joiner holds. The once-a-day bloom surge table (`World.site_board_days`) is runtime only.
+      See `docs/superpowers/specs/2026-11-09-living-world-tier2.md` §7.
     - **The authority clock is saved (format 60, Keep slice 2a, 2026-11-02).** Field 56,
       `WorldSave.authority_clock: Option<sim_clock::SavedClock>`, carries `tick_counter`,
       `world_time`, the weather window (`rain_until`, `storm_until`), the trial lock it

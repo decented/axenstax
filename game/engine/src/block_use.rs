@@ -63,15 +63,17 @@ impl UseKind {
 }
 
 impl UseKind {
-    /// The kind a block view shows.
-    pub fn of_view(kind: crate::protocol::BlockViewKind) -> Self {
+    /// The kind a block view shows. `None` for a view of a block this module
+    /// does not rule (the Site Board: its list is `site_board`'s).
+    pub fn of_view(kind: crate::protocol::BlockViewKind) -> Option<Self> {
         use crate::protocol::BlockViewKind as V;
         match kind {
-            V::ItemFrame => UseKind::ItemFrame,
-            V::Campfire => UseKind::Campfire,
-            V::DryingRack => UseKind::DryingRack,
-            V::Composter => UseKind::Composter,
-            V::Hive => UseKind::Hive,
+            V::ItemFrame => Some(UseKind::ItemFrame),
+            V::Campfire => Some(UseKind::Campfire),
+            V::DryingRack => Some(UseKind::DryingRack),
+            V::Composter => Some(UseKind::Composter),
+            V::Hive => Some(UseKind::Hive),
+            V::SiteBoard => None,
         }
     }
 

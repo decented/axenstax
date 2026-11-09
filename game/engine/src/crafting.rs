@@ -300,7 +300,7 @@ pub fn block_hardness(block_id: BlockId) -> f32 {
         block::OAK_LOG => 4.5,              // Axolittle: 4.5s
         block::OAK_PLANKS | block::CRAFTING_TABLE => 2.0,
         // Living world S3 — a table is boards; the Commons Stone is cobblestone.
-        block::FEAST_TABLE | block::FEAST_MARKER | block::COMMONS_STONE => 2.0,
+        block::FEAST_TABLE | block::FEAST_MARKER | block::COMMONS_STONE | block::SITE_BOARD => 2.0,
         // Spec 48 Phase 4 — the Water Wheel is a plank build; mine it like planks.
         block::WATER_WHEEL | block::WATER_WHEEL_TURNING => 2.0,
         // Wind wave §2.2 — the Windmill is canvas on planks; same rung.
@@ -380,7 +380,7 @@ pub fn best_tool_for(block_id: BlockId) -> Option<ToolType> {
         id if block::is_pure_deepslate_family(id) => Some(ToolType::Pickaxe),
         block::DIRT | block::GRASS | block::WORN_PATH | block::SAND | block::GRAVEL | block::SNOW => Some(ToolType::Shovel),
         block::OAK_LOG | block::OAK_PLANKS | block::CRAFTING_TABLE
-        | block::FEAST_TABLE | block::FEAST_MARKER => Some(ToolType::Axe),
+        | block::FEAST_TABLE | block::FEAST_MARKER | block::SITE_BOARD => Some(ToolType::Axe),
         // Building variants: woods want an axe, stones a pickaxe.
         id => crate::building_variants::best_tool(id),
     }
@@ -1962,6 +1962,15 @@ pub fn match_recipe(grid: &[[CraftSlot; 3]; 3]) -> Option<ItemStack> {
             && grid[min_r + 2][min_c + 2] == stick;
         if ring_sticks && grid[min_r + 1][min_c + 1] == leather {
             return Some(ItemStack::new_block(block::ITEM_FRAME, 1));
+        }
+
+        // Living world Tier 2 S7 — Site Board: a column of three planks (any
+        // species) between two posts of sticks, three high → 1 board. No other
+        // 3x3 recipe has sticks down both outer columns.
+        let posts = (0..3).all(|r| grid[min_r + r][min_c] == stick && grid[min_r + r][min_c + 2] == stick);
+        let boards = (0..3).all(|r| matches!(grid[min_r + r][min_c + 1], CraftSlot::Block(b) if block::is_any_planks(b)));
+        if posts && boards {
+            return Some(ItemStack::new_block(block::SITE_BOARD, 1));
         }
 
         // Living world S3 — Commons Stone: 8 cobblestone round 1 sapling (any
@@ -3899,6 +3908,33 @@ mod tests {
         g[1][0] = CraftSlot::Material(MaterialId::Stick);
         g[1][2] = CraftSlot::Material(MaterialId::Stick);
         assert!(match_recipe(&g).is_none(), "a table needs its loaf");
+    }
+
+    #[test]
+    fn a_column_of_planks_between_two_stick_posts_makes_a_site_board() {
+        // Living world Tier 2 S7 — S P S three high, any plank species in the middle.
+        for plank in [block::OAK_PLANKS, block::BIRCH_PLANKS, block::SPRUCE_PLANKS] {
+            let mut g = empty_grid();
+            for r in 0..3 {
+                g[r][0] = CraftSlot::Material(MaterialId::Stick);
+                g[r][1] = CraftSlot::Block(plank);
+                g[r][2] = CraftSlot::Material(MaterialId::Stick);
+            }
+            let out = match_recipe(&g).expect("posts and planks -> site board");
+            assert_eq!((out.item, out.count), (Item::Block(block::SITE_BOARD), 1));
+        }
+        // A missing post, or a stick in the middle, is no board.
+        let mut g = empty_grid();
+        for r in 0..3 {
+            g[r][0] = CraftSlot::Material(MaterialId::Stick);
+            g[r][1] = CraftSlot::Block(block::OAK_PLANKS);
+        }
+        assert_ne!(match_recipe(&g).map(|s| s.item), Some(Item::Block(block::SITE_BOARD)));
+        g[0][2] = CraftSlot::Material(MaterialId::Stick);
+        g[1][2] = CraftSlot::Material(MaterialId::Stick);
+        g[2][2] = CraftSlot::Material(MaterialId::Stick);
+        g[1][1] = CraftSlot::Material(MaterialId::Stick);
+        assert_ne!(match_recipe(&g).map(|s| s.item), Some(Item::Block(block::SITE_BOARD)));
     }
 
     #[test]

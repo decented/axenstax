@@ -3675,6 +3675,7 @@ impl GameServer {
             region_use: self.world.use_record.to_saved(),
             plan_builds: self.world.plan_builds.to_saved(),
             plot_succession: self.world.plot_succession.to_saved(),
+            site_boards: crate::site_board::to_saved(&self.world.site_boards),
             exhibits: self.world.exhibits.clone(),
             composters: self
                 .world

@@ -7,6 +7,10 @@
 //! and the world's own ticks (cooking, seasoning, composting, bees). None of
 //! that is a block edit, so before v79 no joiner ever saw it. Now:
 //!
+//! Living world Tier 2 S7 adds a sixth: a Site Board's job list
+//! (`site_board`), shown the same way (a view in a chunk pushed since is sent
+//! again, so a late joiner is shown it).
+//!
 //! - **Server.** Once a tick, after the world's machines ran, the server
 //!   takes the view of every such block entity ([`views_in`]: only what the
 //!   block id and meta don't carry, with per-tick countdowns carried to the
@@ -96,17 +100,33 @@ pub fn rack_view(r: &crate::drying_rack::DryingRackData) -> BlockView {
     BlockView::DryingRack { slots }
 }
 
+/// The view of a Site Board's list (Tier 2 S7).
+pub fn site_board_view(board: &crate::site_board::SiteBoard) -> BlockView {
+    BlockView::SiteBoard { tasks: board.to_pairs() }
+}
+
+/// Does the block at `cell` in `world` stand as the kind of block `kind`
+/// shows? (C3b-2-fix M4: state a broken block left behind is never shown.)
+fn stands_as(kind: crate::protocol::BlockViewKind, world: &World, cell: (i32, i32, i32)) -> bool {
+    match crate::block_use::UseKind::of_view(kind) {
+        Some(use_kind) => use_kind.stands_at(world, cell),
+        None => world.get_block(cell.0, cell.1, cell.2) == crate::block::SITE_BOARD,
+    }
+}
+
 /// Every view in `world`: its item frames, campfires, composters and hives
-/// (`block_entities`) and its drying racks (`drying_racks`) — C3b-2-fix
-/// (M4): only where the block stands as the view's kind, so state a broken
-/// block left behind (an old save, a host's break before C3b-2-fix) is
-/// never shown.
+/// (`block_entities`), its drying racks (`drying_racks`) and its Site Boards
+/// (`site_boards`, sorted by cell) — C3b-2-fix (M4): only where the block
+/// stands as the view's kind, so state a broken block left behind (an old save,
+/// a host's break before C3b-2-fix) is never shown.
 pub fn views_in(world: &World) -> Vec<BlockEntityView> {
     let entities = world.block_entities.iter().filter_map(|(&cell, e)| view_of(e).map(|view| (cell, view)));
     let racks = world.drying_racks.iter().map(|(&cell, r)| (cell, rack_view(r)));
+    let boards = world.site_boards.iter().map(|(&cell, b)| (cell, site_board_view(b)));
     entities
         .chain(racks)
-        .filter(|(cell, view)| crate::block_use::UseKind::of_view(view.kind()).stands_at(world, *cell))
+        .chain(boards)
+        .filter(|(cell, view)| stands_as(view.kind(), world, *cell))
         .map(|((x, y, z), view)| BlockEntityView { cell: [x, y, z], kind: view.kind(), view })
         .collect()
 }
@@ -182,7 +202,7 @@ impl ViewsSent {
 /// packs several ticks), and it must not put state back on air.
 pub fn apply_view(world: &mut World, registry: &crate::block::BlockRegistry, v: &BlockEntityView) -> bool {
     let cell = (v.cell[0], v.cell[1], v.cell[2]);
-    if v.kind != v.view.kind() || !crate::block_use::UseKind::of_view(v.kind).stands_at(world, cell) {
+    if v.kind != v.view.kind() || !stands_as(v.kind, world, cell) {
         return false;
     }
     match &v.view {
@@ -223,6 +243,14 @@ pub fn apply_view(world: &mut World, registry: &crate::block::BlockRegistry, v: 
             let mut hive = world.hive_at(cell).copied().unwrap_or_default();
             hive.honey_level = (*honey_level).min(crate::bee_hive::MAX_HONEY_LEVEL);
             world.insert_hive(cell, hive);
+            false
+        }
+        // Tier 2 S7 — a Site Board's list becomes what the server showed. An
+        // unknown job number or a list past the cap is cut ([`SiteBoard::from_pairs`]);
+        // the board is drawn as one texture, so nothing remeshes.
+        BlockView::SiteBoard { tasks } => {
+            let (board, _) = crate::site_board::SiteBoard::from_pairs(tasks);
+            world.site_boards.insert(cell, board);
             false
         }
     }

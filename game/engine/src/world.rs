@@ -263,6 +263,8 @@ pub fn block_has_remote_apply_effects(b: BlockId) -> bool {
         // the bloom surge when it is SEEN, so a backlog must not fold it away.
         || b == block::FEAST_TABLE
         || b == block::FEAST_MARKER
+        // Living world Tier 2 S7 — a board's list leaves with its block (`set_block`).
+        || b == block::SITE_BOARD
 }
 
 impl BlockEntityData {
@@ -845,6 +847,17 @@ pub struct World {
     /// `WorldSave.plot_succession`, never sent on the wire, never shown, dropped
     /// from an export.
     pub(crate) plot_succession: crate::succession::Succession,
+    /// Living world Tier 2 S7 — each Site Board's job list, by the board's cell
+    /// (`site_board`). Created by a board's first accepted op, removed with the
+    /// block (`set_block`), saved as `WorldSave.site_boards` (sorted, an empty
+    /// board saves nothing) and sent to joiners as a block view. Holds no
+    /// identities, so an export and a handover keep it.
+    pub site_boards: std::collections::BTreeMap<(i32, i32, i32), crate::site_board::SiteBoard>,
+    /// Living world Tier 2 S7 — the night-calendar number on which each board
+    /// last lifted bloom, so a board surges at most once per world day however
+    /// often its tasks are ticked (`site_board::surge_if_due`). Authority-side
+    /// and transient: never persisted or sent, so a reload forgets it.
+    pub site_board_days: std::collections::BTreeMap<(i32, i32, i32), u32>,
     /// Spec 37 Market Hubs — vendor-discovery zones. Linear scan
     /// (alpha-scale). Persisted via WorldSave.market_hubs.
     pub market_hubs: Vec<crate::market_hub::MarketHubData>,
@@ -1013,6 +1026,8 @@ impl World {
             path_wear: crate::path_wear::PathWear::default(),
             plan_builds: crate::plan_builds::PlanBuilds::default(),
             plot_succession: crate::succession::Succession::default(),
+            site_boards: std::collections::BTreeMap::new(),
+            site_board_days: std::collections::BTreeMap::new(),
             market_hubs: Vec::new(),
             face_attachments: AHashMap::new(),
             total_work: 0,
@@ -2096,6 +2111,8 @@ impl World {
         self.path_wear.clear();
         self.plan_builds.clear();
         self.plot_succession.clear();
+        self.site_boards.clear();
+        self.site_board_days.clear();
         self.market_hubs.clear();
         self.pop_exposure.clear();
         self.feast_events.clear();
@@ -2536,6 +2553,14 @@ impl World {
             // it, so the next block put here does not start with a stale kind.
             if was == block::BLIGHTED_CROP && block != block::BLIGHTED_CROP {
                 self.set_meta((x, y, z), 0);
+            }
+            // Living world Tier 2 S7 — a Site Board's list is the block's own:
+            // whatever takes the board out of the cell (a break by any seat, a
+            // joiner's edit, a received change, a blast) takes the list, and a
+            // board put into a cell starts empty (a joiner's stale entry, from a
+            // break it was never told of, cannot come back to life).
+            if (was == block::SITE_BOARD) != (block == block::SITE_BOARD) {
+                self.site_boards.remove(&(x, y, z));
             }
             // C3b-fix-d (A-L5) — a table gone, for a server's table grace.
             if was == block::CRAFTING_TABLE
@@ -3558,7 +3583,7 @@ mod tests {
         for b in [
             CHEST, COPPER_CHEST, FURNACE, FURNACE_LIT, DISPENSER, GRAVE, VENDOR_BLOCK, TIP_JAR,
             AUCTION_BLOCK, LEVER, BATTERY, ELECTRIC_LAMP, ELECTRIC_LAMP_LIT, WINDMILL,
-            PLOT_MARKER, FEAST_TABLE, FEAST_MARKER,
+            PLOT_MARKER, FEAST_TABLE, FEAST_MARKER, SITE_BOARD,
         ] {
             assert!(block_has_remote_apply_effects(b), "block {b} carries apply side effects");
         }

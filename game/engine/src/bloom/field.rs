@@ -171,6 +171,14 @@ impl BloomField {
         self.known_level(key).unwrap_or(UNKNOWN_LEVEL)
     }
 
+    /// The level and the fading Feast surge (both 0..=1) of the scanned region
+    /// holding `(x, z)`; `None` where the region is unknown. Crew moods read it
+    /// (presentation only, `crew_mood`).
+    pub fn mood_inputs_at(&self, x: f32, z: f32) -> Option<(f32, f32)> {
+        let key = ((x / REGION as f32).floor() as i32, (z / REGION as f32).floor() as i32);
+        self.regions.get(&key).filter(|r| r.known).map(|r| (r.level, r.people.surge))
+    }
+
     fn known_level(&self, key: RegionKey) -> Option<f32> {
         self.regions.get(&key).filter(|r| r.known).map(|r| r.level)
     }

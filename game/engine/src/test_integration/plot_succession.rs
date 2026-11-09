@@ -399,7 +399,9 @@ fn a_footer_65_and_66_save_loads_with_no_table() {
     for footer in [65u32, 66] {
         let mut save = crate::save::minimal_world_save_for_tests(7);
         save.plot_succession = None;
+        save.site_boards = None;
         let mut body = bincode::serialize(&save).unwrap();
+        assert_eq!(body.pop(), Some(0), "the absent site boards are one None byte");
         assert_eq!(body.pop(), Some(0), "the absent field is one None byte");
         body.extend_from_slice(&crate::save_format::footer_bytes(footer));
         let (old, damaged) = crate::save::read_world_save_reporting(&body).expect("an older save loads");

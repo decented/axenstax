@@ -109,6 +109,7 @@ save_fields! {
         }),
         plan_builds: |s| s.plan_builds = Some(crate::plan_builds::SavedPlanBuilds { rows: vec![([4; 32], 2, 1)] }),
         plot_succession: |s| s.plot_succession = Some(crate::succession::SavedSuccession { last_seen: vec![("npub1owner".into(), 1_800_000_000)], passed_on: vec![(4, 64, 4)] }),
+        site_boards: |s| s.site_boards = Some(crate::site_board::SavedSiteBoards { boards: vec![((4, 64, 4), vec![(2, true)])] }),
     ],
 }
 
@@ -416,8 +417,10 @@ fn a_record_from_an_older_build_is_no_mismatch() {
     save.region_use = None;
     save.plan_builds = None;
     save.plot_succession = None;
+    save.site_boards = None;
     let mut body = bincode::serialize(&save).unwrap();
-    body.pop(); // The succession table's `None`: a format 59 writer had no such field,
+    body.pop(); // The site boards' `None`: a format 59 writer had no such field,
+    body.pop(); // nor the succession table's,
     body.pop(); // nor the Plan build counts',
     body.pop(); // nor the use record's,
     body.pop(); // nor the authorship's,

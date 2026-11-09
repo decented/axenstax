@@ -379,7 +379,7 @@ pub fn enumerate_all_items(registry: &BlockRegistry) -> Vec<ExplorerEntry> {
     for id in 0u16..registry.len() as u16 {
         // Living world S3 (review L7) — a Feast Marker is a record of a feast
         // held, never an item: breaking one gives back a table.
-        if id == AIR || id == crate::block::FEAST_MARKER || id == crate::block::WORN_PATH || id == crate::block::BLIGHTED_CROP || variants.is_new(id) {
+        if id == AIR || id == crate::block::FEAST_MARKER || id == crate::block::WORN_PATH || id == crate::block::BLIGHTED_CROP || id == crate::block::RESERVED_378 || variants.is_new(id) {
             continue;
         }
         for id in std::iter::once(id).chain(variants.after(id)) {
@@ -735,9 +735,9 @@ mod tests {
             .count();
         // Every block but air, the Feast Marker (a record, never an item), the
         // Worn Path (trodden ground; it breaks to dirt, never an item) and the
-        // Blighted Crop (a sickness; it breaks to nothing).
-        assert_eq!(block_count, registry.len() - 4);
-        assert!(entries.iter().all(|e| !matches!(&e.item, Item::Block(b) if *b == crate::block::FEAST_MARKER || *b == crate::block::WORN_PATH || *b == crate::block::BLIGHTED_CROP)));
+        // Blighted Crop (a sickness; it breaks to nothing) and the inert gap at 378.
+        assert_eq!(block_count, registry.len() - 5);
+        assert!(entries.iter().all(|e| !matches!(&e.item, Item::Block(b) if *b == crate::block::FEAST_MARKER || *b == crate::block::WORN_PATH || *b == crate::block::BLIGHTED_CROP || *b == crate::block::RESERVED_378)));
     }
 
     #[test]

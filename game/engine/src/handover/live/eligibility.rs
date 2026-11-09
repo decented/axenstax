@@ -453,6 +453,20 @@ mod tests {
     }
 
     #[test]
+    fn handover_neutralise_keeps_the_site_boards_they_hold_no_identity() {
+        let mut boards = std::collections::BTreeMap::new();
+        let mut b = crate::site_board::SiteBoard::default();
+        crate::site_board::apply(&mut b, crate::site_board::Op::add(crate::site_board::Job::DigWell)).unwrap();
+        boards.insert((3, 64, 3), b);
+        let mut s = live_copy();
+        s.site_boards = crate::site_board::to_saved(&boards);
+        let before = s.site_boards.clone();
+        assert!(before.is_some());
+        neutralise(&mut s, SOURCE).unwrap();
+        assert_eq!(s.site_boards, before, "a crew's job lists travel with the world, unchanged");
+    }
+
+    #[test]
     fn handover_neutralise_refuses_unattributable_slot_state() {
         let cases: [fn(&mut WorldSave); 4] = [
             |s| s.vendors.push(vendor(VendorOwner::LocalPlayer(1))),

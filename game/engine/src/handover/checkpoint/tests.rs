@@ -210,6 +210,7 @@ fn neutral_save(seed: u32) -> WorldSave {
         region_use: None,
         plan_builds: None,
         plot_succession: None,
+        site_boards: None,
     }
 }
 

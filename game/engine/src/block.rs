@@ -670,6 +670,15 @@ pub const WORN_PATH: BlockId = 376;
 /// is the index of the crop kind it came from (`blight::CropKind`), which the
 /// spread needs. Never "placed", never an item.
 pub const BLIGHTED_CROP: BlockId = 377;
+// Living world, Tier 2 (S7, 2026-11-09). Spec: docs/superpowers/specs/2026-11-09-living-world-tier2.md §7.
+/// Id 378 is the Commons Shelf (slice S6, on its own branch). The registry is a
+/// dense `Vec` indexed by id, so this branch holds an inert gap there; the
+/// merge replaces it with the Shelf. Never placed, never an item.
+pub const RESERVED_378: BlockId = 378;
+/// A crew's job list: right-click opens it, up to 8 picked jobs with a done
+/// tick (`site_board.rs`). Drops itself; its list is a world table keyed by its
+/// cell (`World::site_boards`) and goes with the block.
+pub const SITE_BOARD: BlockId = 379;
 
 /// The planted-sapling block for a species. Symmetric counterpart to
 /// `species_for_sapling` (which IS live, via `is_sapling_block`); this forward
@@ -3409,6 +3418,24 @@ impl BlockRegistry {
             color: [0.55, 0.50, 0.25],
             tex_top: TEX_WHEAT_STAGE_2, tex_bottom: TEX_WHEAT_STAGE_2, tex_side: TEX_WHEAT_STAGE_2,
         });
+        // Living world, Tier 2 (S7) — an inert gap at 378 (the Commons Shelf lands
+        // there from slice S6), then the Site Board at 379. The gap is air in every
+        // way: no collision, nothing drawn, no item.
+        debug_assert_eq!(blocks.len(), RESERVED_378 as usize, "the gap follows the Blighted Crop");
+        blocks.push(BlockDef { // 378 RESERVED_378
+            name: "genesis:reserved_378",
+            solid: false, transparent: true, gravity: false,
+            color: [0.0, 0.0, 0.0],
+            tex_top: 0, tex_bottom: 0, tex_side: 0,
+        });
+        // The Site Board reuses the Bounty Board's texture layer (the atlas is full).
+        debug_assert_eq!(blocks.len(), SITE_BOARD as usize, "the Site Board follows the gap");
+        blocks.push(BlockDef { // 379 SITE_BOARD
+            name: "genesis:site_board",
+            solid: true, transparent: false, gravity: false,
+            color: [0.55, 0.36, 0.20],
+            tex_top: TEX_BOUNTY_BOARD, tex_bottom: TEX_BOUNTY_BOARD, tex_side: TEX_BOUNTY_BOARD,
+        });
 
         Self { blocks, leaves_fast: false }
     }
@@ -3450,6 +3477,8 @@ impl BlockRegistry {
             WORN_PATH => ItemStack::new_block(DIRT, 1),
             // Living world Tier 2 S8 — a blighted crop breaks to nothing.
             BLIGHTED_CROP => ItemStack::empty(),
+            // Living world Tier 2 S7 — the inert gap at 378 is never an item.
+            RESERVED_378 => ItemStack::empty(),
             // Mob Bounty Board — drops itself as a placeable material.
             BOUNTY_BOARD => ItemStack::new_material(MaterialId::BountyBoardItem, 1),
             // Tip Jar — drops itself. Anti-grief on non-owner break is
@@ -4006,7 +4035,17 @@ mod tests {
         // Living world Tier 2 S8: the Blighted Crop (377) follows the Worn Path.
         assert_eq!(WORN_PATH + 1, BLIGHTED_CROP);
         assert!(reg.is_known(BLIGHTED_CROP));
-        assert!(!reg.is_known(BLIGHTED_CROP + 1));
+        // Living world Tier 2 S7: an inert gap (378, the Commons Shelf's id on
+        // another branch) and then the Site Board (379), the last registered id.
+        assert_eq!(BLIGHTED_CROP + 1, RESERVED_378);
+        assert_eq!(RESERVED_378 + 1, SITE_BOARD);
+        assert!(reg.is_known(RESERVED_378));
+        assert!(!reg.is_solid(RESERVED_378) && reg.is_transparent(RESERVED_378), "the gap is air-like");
+        assert!(reg.is_known(SITE_BOARD));
+        assert!(reg.is_solid(SITE_BOARD));
+        assert_eq!(reg.mine_drop(SITE_BOARD), crate::item::ItemStack::new_block(SITE_BOARD, 1), "a board drops itself");
+        assert_eq!(reg.mine_drop(RESERVED_378).count, 0);
+        assert!(!reg.is_known(SITE_BOARD + 1));
         assert!(!reg.is_known(u16::MAX));
     }
 

@@ -1177,10 +1177,11 @@ pub struct EntityInteractPacket {
 
 /// What an [`ItemActionPacket`] asks for (C2a; C2b `Craft` and `Drop`; v76
 /// `GrantUnfit`; v79 `UseBlock`; v81 `Shoot`, `PlaceCart`, `Cast`, `Reel`;
-/// v83 `PlanMinted`; v84 `Attach`, `Detach`; v86 `OpenGrave`; v87 `CreativeGive`). Wire-stable, APPEND ONLY: Eat = 0,
+/// v83 `PlanMinted`; v84 `Attach`, `Detach`; v86 `OpenGrave`; v87 `CreativeGive`;
+/// v100 `SiteBoard`). Wire-stable, APPEND ONLY: Eat = 0,
 /// Sleep = 1, Craft = 2, Drop = 3, GrantUnfit = 4, UseBlock = 5, Shoot = 6,
 /// PlaceCart = 7, Cast = 8, Reel = 9, PlanMinted = 10, Attach = 11, Detach = 12,
-/// OpenGrave = 13, CreativeGive = 14
+/// OpenGrave = 13, CreativeGive = 14, SiteBoard = 15
 /// (pinned on the wire bytes by `item_action_packets_round_trip`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ItemAction {
@@ -1300,6 +1301,14 @@ pub enum ItemAction {
     OpenGrave { x: i32, y: i32, z: i32 },
     /// v87 — Explorer give, authorised only in server creative mode.
     CreativeGive { item: WireStack },
+    /// v100 (living world Tier 2 S7) — an op on the Site Board at `pos`: add a
+    /// job, tick or untick a task, take one off (`site_board::Op`; the jobs are
+    /// numbers, never text). The server checks its body's reach and that the cell
+    /// is a Site Board on ITS world, applies the one rule (`site_board::use_board`)
+    /// and answers with an `ItemActionOutcome`; the board's new list reaches every
+    /// client holding the chunk as a `BlockView::SiteBoard`. Anyone may do any op.
+    /// Claims nothing from the hand.
+    SiteBoard { pos: [i32; 3], op: crate::site_board::Op },
 }
 
 /// C3c-2 (v81) — the weapon an [`ItemAction::Shoot`] fires. Wire-stable,
@@ -2139,7 +2148,7 @@ pub enum PushedEntity {
 
 /// C3b-2 (v79) — which block entity a [`BlockEntityView`] shows.
 /// Wire-stable, APPEND ONLY: ItemFrame = 0, Campfire = 1, DryingRack = 2,
-/// Composter = 3, Hive = 4.
+/// Composter = 3, Hive = 4, SiteBoard = 5 (v100).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum BlockViewKind {
     ItemFrame,
@@ -2147,6 +2156,7 @@ pub enum BlockViewKind {
     DryingRack,
     Composter,
     Hive,
+    SiteBoard,
 }
 
 /// C3b-2 (v79) — what a joiner is shown of one block entity: only what its
@@ -2175,6 +2185,9 @@ pub enum BlockView {
     Composter { input: WireSlot, output: WireSlot },
     /// A hive's honey level, 0..=5.
     Hive { honey_level: u8 },
+    /// v100 — a Site Board's job list as `(job number, done)` pairs, at most
+    /// `site_board::MAX_TASKS`; an unknown job number is dropped on receipt.
+    SiteBoard { tasks: Vec<(u8, bool)> },
 }
 
 impl BlockView {
@@ -2186,6 +2199,7 @@ impl BlockView {
             BlockView::DryingRack { .. } => BlockViewKind::DryingRack,
             BlockView::Composter { .. } => BlockViewKind::Composter,
             BlockView::Hive { .. } => BlockViewKind::Hive,
+            BlockView::SiteBoard { .. } => BlockViewKind::SiteBoard,
         }
     }
 }
@@ -2908,7 +2922,16 @@ pub struct ServerAnnouncePacket {
 ///   `BlockChange` whose `meta` is the index of the crop kind it came from). No
 ///   packet shape changed. A client without it resolves the id to `AIR` and
 ///   would show a hole in the field, so the bump refuses it at join.
-pub const PROTOCOL_VERSION: u32 = 99;
+/// - v100 (2026-11-09, living world Tier 2 S7): **New block ids 378 (an inert
+///   gap; the Commons Shelf's id on another branch) and 379 (Site Board)**;
+///   `ItemAction::SiteBoard { pos, op }` (= 15, appended: add a job, tick or
+///   untick a task, take one off) and `BlockViewKind::SiteBoard` (= 5) /
+///   `BlockView::SiteBoard { tasks }` (a board's job list as `(job number,
+///   done)` pairs, sent on `StateUpdatePacket::block_views` and again after a
+///   chunk push, so a late joiner is shown it). A client without them cannot
+///   decode the new variants (and would show a hole for the id), so the bump
+///   refuses it at join.
+pub const PROTOCOL_VERSION: u32 = 100;
 
 /// The `protocol_version` of a JoinRequest payload that doesn't decode as this
 /// build's `JoinRequestPacket` (an older or newer client's shape). It is the
@@ -3113,7 +3136,8 @@ mod tests {
         // v97 — living world S3: block ids 373..=375, two ItemNote codes.
         // v98 — living world Tier 2 S3: block id 376 (Worn Path), no packet change.
         // v99 — living world Tier 2 S8: block id 377 (Blighted Crop), no packet change.
-        assert_eq!(super::PROTOCOL_VERSION, 99);
+        // v100 — living world Tier 2 S7: Site Board (379), ItemAction::SiteBoard, BlockView::SiteBoard.
+        assert_eq!(super::PROTOCOL_VERSION, 100);
     }
 
     #[test]
@@ -3875,7 +3899,8 @@ mod tests {
         // v97 (living world S3): block ids 373..=375 and two ItemNote codes, no packet change.
         // v98 (living world Tier 2 S3): block id 376 (Worn Path), no packet change.
         // v99 (living world Tier 2 S8): block id 377 (Blighted Crop), no packet change.
-        assert_eq!(PROTOCOL_VERSION, 99);
+        // v100 (living world Tier 2 S7): block ids 378, 379; ItemAction::SiteBoard (= 15); BlockView::SiteBoard (= 5).
+        assert_eq!(PROTOCOL_VERSION, 100);
     }
 
     fn sample_accept() -> JoinAcceptPacket {
@@ -4323,6 +4348,25 @@ mod tests {
         assert_eq!(&payload[16..20], &(-3i32).to_le_bytes());
         assert_eq!(payload[20], 0, "the face");
         assert_eq!(&payload[21..], &8u32.to_le_bytes(), "events_applied closes it");
+        // v100 (living world Tier 2 S7) — SiteBoard = 15: the cell, then the op
+        // (Add = 0, Toggle = 1, Remove = 2, each a u32 index and a u8 argument).
+        for (op, op_index, arg) in [
+            (crate::site_board::Op::Add(7), 0u32, 7u8),
+            (crate::site_board::Op::Toggle(2), 1, 2),
+            (crate::site_board::Op::Remove(0), 2, 0),
+        ] {
+            let board = ItemActionPacket { seq: 24, action: ItemAction::SiteBoard { pos: [-5, 70, 1_000_001], op }, events_applied: 9 };
+            let bytes = serialize_packet(PacketType::ItemAction, &board);
+            let (_, payload) = deserialize_header(&bytes).unwrap();
+            assert_eq!(safe_deserialize::<ItemActionPacket>(payload).unwrap(), board);
+            assert_eq!(&payload[4..8], &15u32.to_le_bytes(), "SiteBoard = 15");
+            assert_eq!(&payload[8..12], &(-5i32).to_le_bytes(), "the cell");
+            assert_eq!(&payload[12..16], &70i32.to_le_bytes());
+            assert_eq!(&payload[16..20], &1_000_001i32.to_le_bytes());
+            assert_eq!(&payload[20..24], &op_index.to_le_bytes(), "the op's index");
+            assert_eq!(payload[24], arg, "its argument");
+            assert_eq!(&payload[25..], &9u32.to_le_bytes(), "events_applied closes it");
+        }
 
         let outcome = ItemActionOutcomePacket {
             seq: 12,
@@ -4370,6 +4414,7 @@ mod tests {
                 output: None,
             },
             BlockView::Hive { honey_level: 4 },
+            BlockView::SiteBoard { tasks: vec![(3, true), (11, false)] },
         ];
         for (index, view) in views.into_iter().enumerate() {
             let v = BlockEntityView { cell: [1, -2, 3], kind: view.kind(), view };
