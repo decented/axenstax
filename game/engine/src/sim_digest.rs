@@ -341,7 +341,12 @@ impl GameServer {
         // Living world Tier 2 S4 — Plan build counts (a sorted map, canonical).
         e.bytes(&bincode::serialize(&w.plan_builds.to_saved()).expect("plan builds encode"));
         // Living world Tier 2 S5 — last seen and passed-on Plots (ordered sets, canonical).
-        e.bytes(&bincode::serialize(&w.plot_succession.to_saved()).expect("plot succession encodes"));
+        // `last_running` is wall-clock bookkeeping, not world state: left out.
+        let succession = w.plot_succession.to_saved().map(|mut s| {
+            s.last_running = 0;
+            s
+        });
+        e.bytes(&bincode::serialize(&succession).expect("plot succession encodes"));
         e.u64(w.total_work);
         e.u32(self.pop_epoch);
         e.debug(&self.column_streamer);

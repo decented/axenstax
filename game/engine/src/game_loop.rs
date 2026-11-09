@@ -3224,6 +3224,8 @@ impl super::GameState {
         // Bloom state belongs to the world being left.
         self.bloom.reset();
         self.bloom_present.reset();
+        // A new world, a new first walk into a passed-on Commons.
+        self.passed_on_told.clear();
         self.tally.reset();
         self.tally_stock.reset();
         // Nothing about the last world's saves carries over (`begin_load`
@@ -6555,19 +6557,10 @@ impl super::GameState {
             for (x, y, z) in crate::use_record::redraw_cells(&worn) {
                 self.rebuild_chunk_at(x, y, z);
             }
-            // Living world Tier 2 S5 — succession for a world with joiners' Plots
-            // opened by itself (the same pure phase the authority runs; no seat
-            // here carries an npub, so only the wall clock moves anything).
-            let passed = crate::succession::phase(
-                &mut self.world,
-                self.tick_counter,
-                self.night_calendar.tonight(),
-                crate::succession::now_unix_secs(),
-                Vec::new,
-            );
-            for (x, y, z) in crate::use_record::redraw_cells(&passed) {
-                self.rebuild_chunk_at(x, y, z);
-            }
+            // Living world Tier 2 S5 — no succession here: a world played alone
+            // is closed to joiners, so its time does not count toward a Plot
+            // owner's 60 days (the next hosted run shifts the gap, see
+            // `succession::Succession::note_running`).
         }
         // Living world Tier 2 S5 — Satoshi's line, once per seat per session, the
         // first time it walks into a Commons that was a joiner's Plot. A joined
@@ -6584,9 +6577,12 @@ impl super::GameState {
                 }
             }
             if told {
-                self.toast = Some((
-                    format!("Satoshi: {}", crate::succession::SATOSHI_PASSED_ON),
-                    Instant::now() + Duration::from_secs(6),
+                // Satoshi's own card (the channel his Trial lines use), so the next
+                // toast does not replace the one-shot line.
+                self.satoshi_brief = Some((
+                    "Satoshi".to_string(),
+                    crate::succession::SATOSHI_PASSED_ON.to_string(),
+                    Instant::now() + Duration::from_secs(8),
                 ));
             }
         }
@@ -16913,7 +16909,10 @@ impl super::GameState {
                                     // region. (C3c-1 — one whose claim would
                                     // overlap a foreign plot was refused before
                                     // it was taken, so it never gets here.)
-                                    if block_to_place == block::PLOT_MARKER {
+                                    // Joined: the authority decides (and puts back a
+                                    // marker it refuses), so no local Plot and no
+                                    // "claimed" line here (`plot::claims_locally`).
+                                    if block_to_place == block::PLOT_MARKER && crate::plot::claims_locally(self.joined()) {
                                         let owner = crate::plot::PlotOwner::LocalPlayer(pidx);
                                         crate::plot::register_claim(
                                             &mut self.world.plots,

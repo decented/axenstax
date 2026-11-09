@@ -15,6 +15,7 @@ fn solo(tag: &str) -> (crate::save::WorldsRootGuard, HostedServer) {
 fn a_local_only_server_binds_listens_and_announces_nothing() {
     let (_g, hs) = solo("silent");
     assert!(hs.local_only());
+    assert!(!hs.server.open_to_joiners, "a world closed to joiners does not count toward a Plot owner's 60 days");
     assert!(hs.lends_host_world(), "solo-hosted lends the client's one world");
     assert_eq!(hs.port, 0, "nothing listens");
     assert_eq!(hs.max_remote_players, 0);

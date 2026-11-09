@@ -22,6 +22,19 @@ fn owner_plot(npub: &str, x: i32, y: i32, z: i32) -> PlotData {
     PlotData::from_marker(PlotOwner::Npub(npub.into()), x, y, z)
 }
 
+/// A server whose joiners' marker claims count: a dedicated one (no host client). `start_open_server` is an owning host with a local client, the
+/// `--no-lend` shape, where a joiner's claim is deliberately not taken.
+fn start_claiming_server(tag: &str) -> crate::hosted_server::HostedServer {
+    crate::hosted_server::HostedServer::start(
+        0,
+        format!("plot-succession-{tag}-{}", std::process::id()),
+        42,
+        0,
+        crate::hosted_server::RemoteTransport::WebSocket { port: 0 },
+    )
+    .expect("hosted server starts")
+}
+
 fn now() -> u64 {
     crate::succession::now_unix_secs().expect("native has a wall clock")
 }
@@ -29,8 +42,21 @@ fn now() -> u64 {
 // ── Claims ──────────────────────────────────────────────────────────
 
 #[test]
+fn a_no_lend_hosts_joiner_marker_claims_nothing_so_the_mirror_cannot_wipe_a_promise() {
+    let mut hs = start_open_server("s5-no-lend");
+    let (client, slot) = join_guest(&mut hs, "Visitor");
+    hs.server.players[slot].verified_pubkey = Some([0x3c; 32]);
+    let marker = cell_beside(&hs, slot, 2, 0, 0);
+    hs.server.world.set_block(marker.0, marker.1, marker.2, block::AIR);
+    send_edits(&hs, &client, slot, 1, &[(marker, block::PLOT_MARKER)]);
+    hs.tick();
+    assert_eq!(hs.server.world.get_block(marker.0, marker.1, marker.2), block::PLOT_MARKER, "a plain block");
+    assert!(hs.server.world.plots.is_empty(), "no Plot to be wiped a tick later");
+}
+
+#[test]
 fn a_verified_joiners_plot_marker_claims_a_plot_in_its_npub_and_breaking_it_releases() {
-    let mut hs = start_open_server("s5-claim");
+    let mut hs = start_claiming_server("s5-claim");
     let (client, slot) = join_guest(&mut hs, "Visitor");
     let pk = [0x3c; 32];
     hs.server.players[slot].verified_pubkey = Some(pk);
@@ -61,7 +87,7 @@ fn a_verified_joiners_plot_marker_claims_a_plot_in_its_npub_and_breaking_it_rele
 
 #[test]
 fn a_guests_plot_marker_stays_a_plain_block_that_claims_nothing() {
-    let mut hs = start_open_server("s5-guest");
+    let mut hs = start_claiming_server("s5-guest");
     let (client, slot) = join_guest(&mut hs, "Visitor");
     assert!(hs.server.players[slot].verified_pubkey.is_none());
     let marker = cell_beside(&hs, slot, 2, 0, 0);
@@ -74,7 +100,7 @@ fn a_guests_plot_marker_stays_a_plain_block_that_claims_nothing() {
 
 #[test]
 fn another_joiner_and_a_guest_cannot_build_or_break_in_a_joiners_plot_and_the_owner_can() {
-    let mut hs = start_open_server("s5-protect");
+    let mut hs = start_claiming_server("s5-protect");
     let (client, slot) = join_guest(&mut hs, "Visitor");
     let owner_pk = [0x3c; 32];
     hs.server.players[slot].verified_pubkey = Some(owner_pk);
@@ -121,7 +147,7 @@ fn another_joiner_and_a_guest_cannot_build_or_break_in_a_joiners_plot_and_the_ow
 
 #[test]
 fn a_claim_that_would_overlap_another_owners_plot_is_refused_and_the_ghost_put_back() {
-    let mut hs = start_open_server("s5-overlap");
+    let mut hs = start_claiming_server("s5-overlap");
     let (client, slot) = join_guest(&mut hs, "Visitor");
     let pk = [0x3c; 32];
     hs.server.players[slot].verified_pubkey = Some(pk);
@@ -152,7 +178,7 @@ fn a_claim_that_would_overlap_another_owners_plot_is_refused_and_the_ghost_put_b
 
 #[test]
 fn a_claim_beside_the_owners_own_plot_is_allowed_and_a_commons_refuses_a_joiners_claim() {
-    let mut hs = start_open_server("s5-own-commons");
+    let mut hs = start_claiming_server("s5-own-commons");
     let (client, slot) = join_guest(&mut hs, "Visitor");
     let pk = [0x3c; 32];
     hs.server.players[slot].verified_pubkey = Some(pk);
@@ -166,7 +192,7 @@ fn a_claim_beside_the_owners_own_plot_is_allowed_and_a_commons_refuses_a_joiners
     assert_eq!(hs.server.world.plots.len(), 2, "your own neighbour is no conflict");
 
     // A Commons beside it refuses a claim whose footprint touches it.
-    let mut hs = start_open_server("s5-commons");
+    let mut hs = start_claiming_server("s5-commons");
     let (client, slot) = join_guest(&mut hs, "Visitor");
     hs.server.players[slot].verified_pubkey = Some(pk);
     let marker = cell_beside(&hs, slot, 2, 0, 0);
@@ -180,7 +206,7 @@ fn a_claim_beside_the_owners_own_plot_is_allowed_and_a_commons_refuses_a_joiners
 
 #[test]
 fn creative_does_not_bypass_the_claim_rule_for_a_joiner() {
-    let mut hs = start_open_server("s5-creative");
+    let mut hs = start_claiming_server("s5-creative");
     hs.server.set_play_mode(crate::play_mode::PlayMode::Creative);
     let (client, slot) = join_guest(&mut hs, "Visitor");
     let pk = [0x3c; 32];
@@ -220,8 +246,14 @@ fn away_owner_world(tag: &str) -> (crate::hosted_server::HostedServer, crate::tr
     (hs, client, slot, at)
 }
 
+/// A table whose owner was last seen `days` ago while the world was RUNNING until
+/// a few seconds ago (the world's clock check shifts nothing; the absence is real).
 fn last_seen_days_ago(npub: &str, days: u64) -> Succession {
-    Succession::from_saved(&SavedSuccession { last_seen: vec![(npub.to_string(), now() - days * DAY)], passed_on: vec![] })
+    Succession::from_saved(&SavedSuccession {
+        last_seen: vec![(npub.to_string(), now() - days * DAY)],
+        passed_on: vec![],
+        last_running: now() - 10,
+    })
 }
 
 #[test]
@@ -300,12 +332,79 @@ fn succession_with_an_injected_clock_and_no_clock() {
     w.place_player_block(0, 64, 0, block::PLOT_MARKER);
     w.plots.push(owner_plot("npub1a", 0, 64, 0));
     let t0 = 1_800_000_000u64;
-    assert!(crate::succession::phase(&mut w, 1, 1, Some(t0), Vec::new).is_empty());
-    assert!(crate::succession::phase(&mut w, 2, 2, Some(t0 + GONE_SECS - 1), Vec::new).is_empty());
+    let step = |w: &mut World, tick: &mut u64, now: &mut u64, until: u64| {
+        let mut out = Vec::new();
+        while *now < until {
+            *now = (*now + 200).min(until);
+            *tick += 1;
+            out.extend(crate::succession::phase(w, *tick, ((*now - t0) / DAY) as u32 + 1, Some(*now), Vec::new));
+        }
+        out
+    };
+    let (mut tick, mut at) = (1u64, t0);
+    assert!(crate::succession::phase(&mut w, tick, 1, Some(t0), Vec::new).is_empty());
+    assert!(step(&mut w, &mut tick, &mut at, t0 + GONE_SECS - 1).is_empty());
     let none = crate::succession::phase(&mut w, 3, 3, None, Vec::new);
     assert!(none.is_empty() && w.plots.len() == 1, "no clock, nothing passes");
-    let done = crate::succession::phase(&mut w, 4, 4, Some(t0 + GONE_SECS), Vec::new);
-    assert_eq!(done.len(), 1);
+    assert_eq!(step(&mut w, &mut tick, &mut at, t0 + GONE_SECS + DAY).len(), 1, "sixty running days pass it");
+}
+
+#[test]
+fn sixty_one_days_offline_passes_nothing_on_the_first_server_tick_after_the_load() {
+    // The save says: owner last seen 61 days ago, world last ran 61 days ago.
+    let (mut hs, _client, _slot, at) = away_owner_world("s5-offline");
+    let long_ago = now() - 61 * DAY;
+    hs.server.world.plot_succession = Succession::from_saved(&SavedSuccession {
+        last_seen: vec![("npub1away".into(), long_ago)],
+        passed_on: vec![],
+        last_running: long_ago + 5,
+    });
+    hs.tick();
+    assert_eq!(hs.server.world.plots.len(), 1, "downtime is not absence");
+    assert_eq!(hs.server.world.get_block(at.0, at.1, at.2), block::PLOT_MARKER);
+    let seen = hs.server.world.plot_succession.last_seen_of("npub1away").unwrap();
+    assert!(seen >= now() - 20, "the row was pushed forward by the gap: {seen}");
+}
+
+#[test]
+fn sixty_one_days_running_with_the_owner_absent_passes_the_plot_on_the_server() {
+    let (mut hs, _client, _slot, at) = away_owner_world("s5-running");
+    // Injected clock: world ran at T, owner last seen 61 days before it.
+    let t = 1_900_000_000u64;
+    hs.server.succession_clock = Some(t);
+    hs.server.world.plot_succession = Succession::from_saved(&SavedSuccession {
+        last_seen: vec![("npub1away".into(), t - 61 * DAY)],
+        passed_on: vec![],
+        last_running: t - 1,
+    });
+    hs.tick();
+    assert!(hs.server.world.plots.is_empty());
+    assert_eq!(hs.server.world.get_block(at.0, at.1, at.2), block::COMMONS_STONE);
+}
+
+#[test]
+fn a_solo_session_of_sixty_one_days_then_hosting_passes_nothing() {
+    let (mut hs, _client, _slot, at) = away_owner_world("s5-solo");
+    let t = 1_900_000_000u64;
+    hs.server.world.plot_succession = Succession::from_saved(&SavedSuccession {
+        last_seen: vec![("npub1away".into(), t)],
+        passed_on: vec![],
+        last_running: t,
+    });
+    // 61 days at the keyboard alone: the world is closed to joiners (a local-only
+    // authority), the phase has no clock, and nothing is stamped.
+    hs.server.open_to_joiners = false;
+    hs.server.succession_clock = Some(t + 61 * DAY);
+    hs.tick();
+    assert_eq!(hs.server.world.plot_succession.last_seen_of("npub1away"), Some(t), "solo time moved nothing");
+    assert_eq!(hs.server.world.plots.len(), 1);
+    // Then the same world is hosted: the first hosted tick shifts the whole gap.
+    hs.server.open_to_joiners = true;
+    hs.server.succession_clock = Some(t + 61 * DAY + 200);
+    hs.tick();
+    assert_eq!(hs.server.world.plots.len(), 1, "the owner was never able to visit; nothing passes");
+    assert_eq!(hs.server.world.get_block(at.0, at.1, at.2), block::PLOT_MARKER);
+    assert_eq!(hs.server.world.plot_succession.last_seen_of("npub1away"), Some(t + 61 * DAY + 200), "shifted by the whole solo gap");
 }
 
 // ── Save ────────────────────────────────────────────────────────────
@@ -386,7 +485,7 @@ fn the_server_digest_covers_the_table() {
     let digest = |days: u64| {
         let _g = WorldsRootGuard::new(&format!("s5-digest-{days}"));
         let mut s = GameServer::new(0, "w".into(), 42);
-        s.world.plot_succession = Succession::from_saved(&SavedSuccession { last_seen: vec![("npub1a".into(), 1_000 + days)], passed_on: vec![] });
+        s.world.plot_succession = Succession::from_saved(&SavedSuccession { last_seen: vec![("npub1a".into(), 1_000 + days)], passed_on: vec![], last_running: 0 });
         s.sim_digest()
     };
     assert_eq!(digest(1), digest(1));
@@ -418,6 +517,7 @@ fn an_invalid_row_is_dropped_with_a_warning_never_a_refusal_to_load() {
     save.plot_succession = Some(SavedSuccession {
         last_seen: vec![("npub1ok".into(), 5), ("npub1ok".into(), 6), (String::new(), 7)],
         passed_on: vec![(1, 2, 3), (1, 2, 3)],
+        last_running: 0,
     });
     let bytes = crate::save_format::encode_world_save(&save).unwrap();
     let (back, damaged) = crate::save::read_world_save_reporting(&bytes).expect("the world still loads");

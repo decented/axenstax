@@ -1007,6 +1007,8 @@ impl HostedServer {
         // WebSocket dedicated path) starts with 0. A lent world's machines
         // are the host client's, so this is never set on a lending server.
         server.simulates_block_machines = num_local_players == 0;
+        // Only a world open to joiners counts toward a Plot owner's 60 days.
+        server.open_to_joiners = !local_only;
         // D4 slice 2 — an owned world's lightning is its server's only with no
         // host client (dedicated); an owning `--no-lend` host's client rolls
         // its own and sends the fires as edits. A lent world's strikes are the
@@ -1613,6 +1615,13 @@ impl HostedServer {
     /// than a copy of its own)?
     pub fn lends_host_world(&self) -> bool {
         self.host_world == HostWorld::Lent
+    }
+
+    /// BRIDGE (`--no-lend`, deleted with it): is this a host whose own client
+    /// world overwrites this server's Plots every tick
+    /// ([`Self::mirror_host_world_state`])? An owning server with a host client.
+    pub(crate) fn mirrors_host_plots(&self) -> bool {
+        self.host_world == HostWorld::Owned && self.num_local_players > 0
     }
 
     /// D1 review fix 1 — the column of every connected joiner's server body,
@@ -6057,7 +6066,14 @@ impl HostedServer {
             // Plot in its npub's name (the validator has already refused one
             // that overlaps another's); a guest's stays a plain block. Breaking
             // the marker releases the claim (above).
+            //
+            // BRIDGE: a `--no-lend` host's server copy has its Plots overwritten
+            // by the host's every tick (`mirror_host_world_state`), which would
+            // wipe this claim a tick later while the joiner believed it held
+            // it, so there a joiner's marker claims nothing, like a guest's —
+            // delete with `--no-lend`.
             if bc.new_block == crate::block::PLOT_MARKER
+                && !self.mirrors_host_plots()
                 && let Some(npub) = verified_npub(self.server.players[i].verified_pubkey)
             {
                 crate::plot::register_claim(

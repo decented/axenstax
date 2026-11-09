@@ -997,6 +997,15 @@ pub struct GameServer {
     /// opens ([`Self::run_clock_phase`]) and `tick` does not step it again.
     /// Never set on a dedicated server.
     pub lent: bool,
+    /// Living world Tier 2 S5 — is this world open to joiners (a lending host, a
+    /// dedicated server, a `--no-lend` host)? Only time it is open counts toward
+    /// a Plot owner's 60 days (`succession`): a local-only authority
+    /// (`--solo-hosted`) listens on nothing, so it does not run the succession
+    /// phase. True by default; `HostedServer` clears it for a local-only one.
+    pub open_to_joiners: bool,
+    /// The wall clock the succession phase reads, in unix seconds, when set
+    /// (tests drive it; `None` = the real clock).
+    pub succession_clock: Option<u64>,
     /// Living world S5 (spec section 1.8, 5) — a dedicated server's own bloom
     /// field, ticked round its present players for the `ConsoleSnapshot`
     /// figures only. Never ticked on a lent or hosted-owning server: a host
@@ -1222,6 +1231,8 @@ impl GameServer {
             simulates_block_machines: false,
             column_refill_per_tick: 0,
             lent: false,
+            open_to_joiners: true,
+            succession_clock: None,
             bloom: crate::bloom::BloomField::new(),
             tally: crate::tally::Tally::default(),
             leaf_decay: LeafDecaySystem::new(),
@@ -2139,11 +2150,12 @@ impl GameServer {
             // a new world day (and once after a load) a Plot whose owner has been
             // away for 60 real days passes on. Its stone rides the same broadcast.
             let players = &self.players;
+            let clock = if self.open_to_joiners { self.succession_clock.or_else(crate::succession::now_unix_secs) } else { None };
             let passed = crate::succession::phase(
                 &mut self.world,
                 self.tick_counter,
                 self.night_calendar.tonight(),
-                crate::succession::now_unix_secs(),
+                clock,
                 || {
                     players
                         .iter()

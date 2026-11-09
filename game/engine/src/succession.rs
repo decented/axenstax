@@ -16,6 +16,12 @@
 //!   times), a handover keeps it.
 //! * **A local seat's Plot never passes on** (the household's); only `Npub`
 //!   owners are tracked or judged.
+//! * **Only time the world is running counts (B1/S2).** `last_running` is the
+//!   wall clock at the last tick the succession phase ran, and it is saved. A
+//!   gap longer than [`MAX_GAP`] since then (a load after weeks off, a suspend, a
+//!   clock that jumped forward) is shifted onto every row, so the sixty days
+//!   only count hosted time. Single-player does not run the phase at all, so
+//!   a world played alone is "off" to the next hosted run.
 //! * **No wall clock, nothing happens.** [`now_unix_secs`] is `None` on wasm
 //!   (which has no joiners), and [`phase`] then updates and passes on nothing.
 //! * **Pure rules take `now`.** [`due`], [`Succession::check`] and [`phase`] are
@@ -37,6 +43,10 @@ use crate::world::World;
 pub const GONE_SECS: u64 = 60 * 86_400;
 /// Ticks between last-seen stamps of the owners present (a minute at 20 TPS).
 pub const STAMP_PERIOD: u64 = 1_200;
+/// Longest wall-clock gap between two ticks of the phase that is still "the
+/// world was running": a longer one (5 minutes) is downtime, and is added to
+/// every last-seen row.
+pub const MAX_GAP: u64 = 300;
 /// Most owners tracked. A new owner past it is simply not tracked (their Plot
 /// is then never judged gone; it is the safe side).
 pub const MAX_OWNERS: usize = 4_096;
@@ -58,6 +68,9 @@ pub struct Succession {
     /// The night-calendar day succession was last checked on. Runtime only:
     /// `None` after a load, so the first call checks (once on load).
     checked_day: Option<u32>,
+    /// The wall clock at the last tick the phase ran (saved). `None` = never
+    /// recorded (an upgraded record): the first run stamps it and shifts nothing.
+    last_running: Option<u64>,
 }
 
 /// The distinct npubs that own at least one Plot.
@@ -91,6 +104,37 @@ impl Succession {
     /// Nothing recorded (a runtime-only `checked_day` does not count).
     pub fn is_empty(&self) -> bool {
         self.last_seen.is_empty() && self.passed_on.is_empty()
+    }
+
+    /// The wall clock the phase last ran at (tests).
+    #[cfg(test)]
+    pub fn last_running(&self) -> Option<u64> {
+        self.last_running
+    }
+
+    /// Account for time the world was not running: when more than [`MAX_GAP`]
+    /// seconds passed since the last run (a load, a suspend, a forward clock
+    /// jump), push every row forward by the gap, so absence is counted only
+    /// while the world ran. A row never ends up past `now`, and a clock that
+    /// went backwards moves nothing forward (it only clamps rows into the past).
+    /// Stamps `last_running` and returns the gap shifted (0 = none).
+    pub fn note_running(&mut self, now: u64) -> u64 {
+        let mut shifted = 0;
+        if let Some(prev) = self.last_running {
+            if now > prev && now - prev > MAX_GAP {
+                shifted = now - prev;
+                for t in self.last_seen.values_mut() {
+                    *t = t.saturating_add(shifted);
+                }
+            }
+            if now < prev || shifted > 0 {
+                for t in self.last_seen.values_mut() {
+                    *t = (*t).min(now);
+                }
+            }
+        }
+        self.last_running = Some(now);
+        shifted
     }
 
     /// Forget everything (a world reset).
@@ -160,10 +204,11 @@ impl Succession {
         Some(SavedSuccession {
             last_seen: self.last_seen.iter().map(|(n, t)| (n.clone(), *t)).collect(),
             passed_on: self.passed_on.iter().copied().collect(),
+            last_running: self.last_running.unwrap_or(0),
         })
     }
 
-    /// Back from a save. A row with an empty or over-long npub, a repeat, or
+    /// Back from a save. A row with an empty or over-long npub, a time of 0, a repeat, or
     /// one past a table's bound is dropped with a warning; the table never
     /// refuses to load.
     pub fn from_saved(saved: &SavedSuccession) -> Self {
@@ -171,6 +216,7 @@ impl Succession {
         let mut dropped = 0usize;
         for (npub, seen) in &saved.last_seen {
             if npub.is_empty()
+                || *seen == 0
                 || npub.len() > MAX_NPUB_LEN
                 || out.last_seen.len() >= MAX_OWNERS
                 || out.last_seen.contains_key(npub)
@@ -185,6 +231,7 @@ impl Succession {
                 dropped += 1;
             }
         }
+        out.last_running = (saved.last_running != 0).then_some(saved.last_running);
         if dropped > 0 {
             log::warn!("world.dat: {dropped} invalid Plot succession row(s) dropped");
         }
@@ -201,6 +248,9 @@ pub struct SavedSuccession {
     pub last_seen: Vec<(String, u64)>,
     /// Markers that passed on, sorted.
     pub passed_on: Vec<Marker>,
+    /// Unix seconds the world last ran (0 = never recorded). Rows are pushed
+    /// forward by any gap since it when the world next runs.
+    pub last_running: u64,
 }
 
 /// The wall clock in unix seconds; `None` where there is none (wasm).
@@ -268,6 +318,7 @@ fn pass_on(world: &mut World, markers: &[Marker]) -> Vec<BlockChange> {
 /// the due Plots pass on. Returns the block changes to broadcast.
 pub fn phase(world: &mut World, tick: u64, world_day: u32, now: Option<u64>, present: impl FnOnce() -> Vec<String>) -> Vec<BlockChange> {
     let Some(now) = now else { return Vec::new() };
+    world.plot_succession.note_running(now);
     let stamp_due = tick.is_multiple_of(STAMP_PERIOD);
     let day_due = world.plot_succession.checked_day != Some(world_day);
     if !stamp_due && !day_due {
@@ -386,6 +437,7 @@ mod tests {
         let bad = SavedSuccession {
             last_seen: vec![("".into(), 1), ("npub1a".into(), 2), ("npub1a".into(), 3), ("x".repeat(200), 4)],
             passed_on: vec![(1, 1, 1), (1, 1, 1)],
+            last_running: 0,
         };
         let back = Succession::from_saved(&bad);
         assert_eq!(back.last_seen_of("npub1a"), Some(2), "the first row of a repeat wins");
@@ -400,38 +452,126 @@ mod tests {
         w
     }
 
+    /// A loaded world whose owner was last seen at `T0` and which ran until 10 s
+    /// before `T0 + 61 days` (so a phase call at that time is an ordinary tick,
+    /// not downtime).
+    fn age_row(w: &mut World, npub: &str) {
+        w.plot_succession.last_seen.insert(npub.into(), T0);
+        w.plot_succession.last_running = Some(T0 + 61 * DAY - 10);
+    }
+
+    /// Run the phase every 200 wall-clock seconds from `*now` for `secs` (a world
+    /// that is really running), the night calendar one day per real day. Returns
+    /// every change made.
+    fn run_for(w: &mut World, tick: &mut u64, now: &mut u64, secs: u64, present: &[String]) -> Vec<BlockChange> {
+        let end = *now + secs;
+        let mut out = Vec::new();
+        while *now < end {
+            *now = (*now + 200).min(end);
+            *tick += 1;
+            let day = ((*now - T0) / DAY) as u32 + 7;
+            out.extend(phase(w, *tick, day, Some(*now), || present.to_vec()));
+        }
+        out
+    }
+
     #[test]
-    fn the_phase_passes_a_plot_on_after_sixty_real_days_and_not_before() {
+    fn the_phase_passes_a_plot_on_after_sixty_running_days_and_not_before() {
         let mut w = world_with_plot("npub1a", 0);
+        let (mut tick, mut now) = (1, T0);
         // First call: stamps the owner, passes nothing.
-        assert!(phase(&mut w, 1, 7, Some(T0), Vec::new).is_empty());
+        assert!(phase(&mut w, tick, 7, Some(now), Vec::new).is_empty());
         assert_eq!(w.plot_succession.last_seen_of("npub1a"), Some(T0));
-        // Same day, nothing to do even with a huge clock.
-        assert!(phase(&mut w, 2, 7, Some(T0 + 99 * DAY), Vec::new).is_empty());
-        // A new day, 59 days on: not yet.
-        assert!(phase(&mut w, 3, 8, Some(T0 + 59 * DAY), Vec::new).is_empty());
+        // 59 days running: not yet.
+        assert!(run_for(&mut w, &mut tick, &mut now, 59 * DAY, &[]).is_empty());
         assert_eq!(w.plots.len(), 1);
-        // Another new day at 60: it passes.
-        let changes = phase(&mut w, 4, 9, Some(T0 + 60 * DAY), Vec::new);
+        // The rest of the sixty days, running: it passes.
+        let changes = run_for(&mut w, &mut tick, &mut now, DAY + 400, &[]);
         assert_eq!(changes, vec![BlockChange::with_meta(0, 64, 0, block::COMMONS_STONE, 0)]);
         assert!(w.plots.is_empty(), "released");
         assert_eq!(w.get_block(0, 64, 0), block::COMMONS_STONE);
         assert_eq!(w.commons_areas().len(), 1, "a real Commons");
         assert!(w.plot_succession.has_passed_on(&(0, 64, 0)));
         // The owner owns nothing now: the next check prunes their row.
-        phase(&mut w, 5, 10, Some(T0 + 61 * DAY), Vec::new);
+        run_for(&mut w, &mut tick, &mut now, 2 * DAY, &[]);
         assert!(w.plot_succession.last_seen.is_empty());
     }
 
     #[test]
     fn a_present_owner_is_never_passed_over() {
         let mut w = world_with_plot("npub1a", 0);
-        phase(&mut w, 1, 1, Some(T0), Vec::new);
-        // 90 days later the owner is online when the new day is checked.
-        let changes = phase(&mut w, 7, 2, Some(T0 + 90 * DAY), || vec!["npub1a".to_string()]);
+        let (mut tick, mut now) = (1, T0);
+        phase(&mut w, tick, 7, Some(now), Vec::new);
+        run_for(&mut w, &mut tick, &mut now, 60 * DAY - 200, &[]);
+        // The owner walks in just as the sixtieth day turns: stamped before the check.
+        let changes = run_for(&mut w, &mut tick, &mut now, 200, &["npub1a".to_string()]);
         assert!(changes.is_empty());
         assert_eq!(w.plots.len(), 1);
-        assert_eq!(w.plot_succession.last_seen_of("npub1a"), Some(T0 + 90 * DAY));
+        assert_eq!(w.plot_succession.last_seen_of("npub1a"), Some(now));
+    }
+
+    #[test]
+    fn a_world_that_was_off_for_sixty_one_days_passes_nothing_on_its_first_check() {
+        let mut w = world_with_plot("npub1a", 0);
+        // Saved: owner last seen at T0, the world last ran at T0 + 10.
+        w.plot_succession.last_seen.insert("npub1a".into(), T0);
+        w.plot_succession.last_running = Some(T0 + 10);
+        let saved = w.plot_succession.to_saved().expect("recorded");
+        let mut loaded = world_with_plot("npub1a", 0);
+        loaded.plot_succession = Succession::from_saved(&saved);
+        let boot = T0 + 61 * DAY;
+        assert!(phase(&mut loaded, 1, 40, Some(boot), Vec::new).is_empty(), "the first check after a long outage passes nothing");
+        assert_eq!(loaded.plots.len(), 1);
+        assert_eq!(loaded.plot_succession.last_seen_of("npub1a"), Some(boot - 10), "pushed forward by the 61 day gap");
+        // And the owner still has the full sixty days of running ahead of them.
+        let (mut tick, mut now) = (1, boot);
+        assert!(run_for(&mut loaded, &mut tick, &mut now, 59 * DAY, &[]).is_empty());
+        assert_eq!(run_for(&mut loaded, &mut tick, &mut now, DAY, &[]).len(), 1, "sixty running days pass it");
+    }
+
+    #[test]
+    fn a_suspend_gap_is_shifted_and_a_backward_clock_never_passes_anything() {
+        let mut w = world_with_plot("npub1a", 0);
+        let (mut tick, mut now) = (1, T0);
+        phase(&mut w, tick, 7, Some(now), Vec::new);
+        run_for(&mut w, &mut tick, &mut now, 30 * DAY, &[]);
+        // The laptop sleeps for 61 days mid-session.
+        now += 61 * DAY;
+        tick += 1;
+        assert!(phase(&mut w, tick, 99, Some(now), Vec::new).is_empty());
+        let seen = w.plot_succession.last_seen_of("npub1a").unwrap();
+        assert_eq!(seen, T0 + 61 * DAY, "shifted by the whole 61 day gap");
+        assert!(seen <= now, "never in the future");
+        // A clock that went back 20 days: rows stay in the past, nothing passes.
+        let back = now - 20 * DAY;
+        assert!(phase(&mut w, tick + 1, 100, Some(back), Vec::new).is_empty());
+        assert!(w.plot_succession.last_seen_of("npub1a").unwrap() <= back);
+        assert_eq!(w.plots.len(), 1);
+        // Running on from there the count continues: 10 days were already counted,
+        // so 49 more is 59 in all and 2 more passes it.
+        let (mut t, mut n) = (tick + 2, back);
+        assert!(run_for(&mut w, &mut t, &mut n, 49 * DAY, &[]).is_empty());
+        assert_eq!(run_for(&mut w, &mut t, &mut n, 2 * DAY, &[]).len(), 1);
+    }
+
+    #[test]
+    fn the_first_call_after_a_load_checks_once() {
+        let mut w = world_with_plot("npub1a", 0);
+        age_row(&mut w, "npub1a");
+        // A loaded world that was running a moment ago: checked_day is None, so the very first call judges.
+        let changes = phase(&mut w, 1, 40, Some(T0 + 61 * DAY), Vec::new);
+        assert_eq!(changes.len(), 1);
+    }
+
+    #[test]
+    fn a_record_with_no_last_running_stamps_now_and_shifts_nothing() {
+        let mut s = Succession::default();
+        s.last_seen.insert("npub1a".into(), T0);
+        let back = Succession::from_saved(&SavedSuccession { last_seen: vec![("npub1a".into(), T0)], passed_on: vec![], last_running: 0 });
+        assert_eq!(back.last_running(), None);
+        assert_eq!(s.note_running(T0 + 90 * DAY), 0);
+        assert_eq!(s.last_seen_of("npub1a"), Some(T0), "unchanged");
+        assert_eq!(s.last_running(), Some(T0 + 90 * DAY));
     }
 
     #[test]
@@ -450,20 +590,11 @@ mod tests {
     }
 
     #[test]
-    fn the_first_call_after_a_load_checks_once() {
-        let mut w = world_with_plot("npub1a", 0);
-        w.plot_succession.last_seen.insert("npub1a".into(), T0);
-        // A loaded world: checked_day is None, so the very first call judges.
-        let changes = phase(&mut w, 1, 40, Some(T0 + 61 * DAY), Vec::new);
-        assert_eq!(changes.len(), 1);
-    }
-
-    #[test]
     fn the_stone_is_left_out_when_it_would_be_refused_but_the_plot_still_goes() {
         let mut w = world_with_plot("npub1a", 0);
         // A foreign plot whose footprint touches this one's (a legacy overlap).
         w.plots.push(PlotData::from_marker(PlotOwner::LocalPlayer(0), 20, 64, 0));
-        w.plot_succession.last_seen.insert("npub1a".into(), T0);
+        age_row(&mut w, "npub1a");
         let changes = phase(&mut w, 1, 1, Some(T0 + 61 * DAY), Vec::new);
         assert!(changes.is_empty(), "no stone");
         assert_eq!(w.get_block(0, 64, 0), block::PLOT_MARKER, "the marker stays a plain block");
@@ -476,7 +607,7 @@ mod tests {
     fn a_marker_chunk_that_is_not_loaded_waits() {
         let mut w = World::new();
         w.plots.push(npub_plot("npub1a", 5_000));
-        w.plot_succession.last_seen.insert("npub1a".into(), T0);
+        age_row(&mut w, "npub1a");
         assert!(phase(&mut w, 1, 1, Some(T0 + 61 * DAY), Vec::new).is_empty());
         assert_eq!(w.plots.len(), 1, "not released: the stone could not be written");
     }
@@ -490,7 +621,7 @@ mod tests {
         w.place_player_block_as(-16, 65, 16, block::STONE, Some(&a)); // the footprint's far corner
         w.place_player_block_as(4, 65, 3, block::STONE, Some(&b));
         w.place_player_block_as(17, 65, 0, block::STONE, Some(&a)); // outside
-        w.plot_succession.last_seen.insert("npub1a".into(), T0);
+        age_row(&mut w, "npub1a");
         phase(&mut w, 1, 1, Some(T0 + 61 * DAY), Vec::new);
         assert_eq!(w.author_at(3, 65, 3), None, "the owner's blocks are anyone's now");
         assert_eq!(w.author_at(-16, 65, 16), None);
@@ -509,7 +640,7 @@ mod tests {
             w.place_player_block(x, 64, 0, block::PLOT_MARKER);
             w.plots.push(PlotData::from_marker(PlotOwner::Npub("npub1a".into()), x, 64, 0));
         }
-        w.plot_succession.last_seen.insert("npub1a".into(), T0);
+        age_row(&mut w, "npub1a");
         let changes = phase(&mut w, 1, 1, Some(T0 + 61 * DAY), Vec::new);
         assert_eq!(changes.len(), 2, "neither stone is refused by the other");
         assert!(w.plots.is_empty());
@@ -518,7 +649,7 @@ mod tests {
     #[test]
     fn the_satoshi_test_needs_the_stone_still_standing() {
         let mut w = world_with_plot("npub1a", 0);
-        w.plot_succession.last_seen.insert("npub1a".into(), T0);
+        age_row(&mut w, "npub1a");
         phase(&mut w, 1, 1, Some(T0 + 61 * DAY), Vec::new);
         assert!(in_passed_on_commons(&w, 5.5, -7.2));
         assert!(in_passed_on_commons(&w, 16.9, 16.0), "inside the footprint's edge");

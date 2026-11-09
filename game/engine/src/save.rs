@@ -8173,7 +8173,7 @@ mod tests {
             regions: vec![((0, 0), crate::use_record::RegionUse { days: 3, last_day: 4, nights: 1, last_night: Some(5) })],
         });
         save.plan_builds = Some(crate::plan_builds::SavedPlanBuilds { rows: vec![([1; 32], 2, 0), ([2; 32], 0, 3)] });
-        save.plot_succession = Some(crate::succession::SavedSuccession { last_seen: vec![("npub1owner".into(), 1_800_000_000)], passed_on: vec![(8, 64, 8)] });
+        save.plot_succession = Some(crate::succession::SavedSuccession { last_seen: vec![("npub1owner".into(), 1_800_000_000)], passed_on: vec![(8, 64, 8)], last_running: 1_800_000_100 });
         save
     }
 

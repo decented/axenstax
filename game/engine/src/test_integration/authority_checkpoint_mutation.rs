@@ -108,7 +108,7 @@ save_fields! {
             regions: vec![((0, 0), crate::use_record::RegionUse { days: 2, last_day: 3, nights: 1, last_night: Some(8) })],
         }),
         plan_builds: |s| s.plan_builds = Some(crate::plan_builds::SavedPlanBuilds { rows: vec![([4; 32], 2, 1)] }),
-        plot_succession: |s| s.plot_succession = Some(crate::succession::SavedSuccession { last_seen: vec![("npub1owner".into(), 1_800_000_000)], passed_on: vec![(4, 64, 4)] }),
+        plot_succession: |s| s.plot_succession = Some(crate::succession::SavedSuccession { last_seen: vec![("npub1owner".into(), 1_800_000_000)], passed_on: vec![(4, 64, 4)], last_running: 1_800_000_100 }),
     ],
 }
 

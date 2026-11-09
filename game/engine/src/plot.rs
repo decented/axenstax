@@ -103,6 +103,24 @@ pub fn is_in_foreign_plot_for_npub(plots: &[PlotData], x: i32, z: i32, npub: Opt
         .any(|p| p.contains_column(x, z) && !owner_is_npub(&p.owner, npub))
 }
 
+/// Does a Plot owned by `owner` belong to the author `key` (a seat's
+/// `AuthorKey::Local(n)` is `PlotOwner::LocalPlayer(n)`, a verified joiner's
+/// `AuthorKey::Npub` is `PlotOwner::Npub`)?
+pub fn owner_is_author(owner: &PlotOwner, key: &crate::authorship::AuthorKey) -> bool {
+    use crate::authorship::AuthorKey;
+    match (owner, key) {
+        (PlotOwner::LocalPlayer(p), AuthorKey::Local(n)) => *p == *n as usize,
+        (PlotOwner::Npub(a), AuthorKey::Npub(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// Is column `(x, z)` inside a Plot whose owner is not the author `key`? A Plan's
+/// build gate (S5 review fix S4): a build stamps no cell in someone else's Plot.
+pub fn is_in_plot_foreign_to_author(plots: &[PlotData], x: i32, z: i32, key: &crate::authorship::AuthorKey) -> bool {
+    plots.iter().any(|p| p.contains_column(x, z) && !owner_is_author(&p.owner, key))
+}
+
 /// Would a new plot anchored at `(mx, mz)` overlap any FOREIGN plot?
 /// Used at place-time to reject conflicting claims. Overlap with the
 /// claimant's own plots is allowed (a player can claim adjacent land).
@@ -111,6 +129,14 @@ pub fn claim_would_conflict(plots: &[PlotData], owner: &PlotOwner, mx: i32, mz: 
     plots.iter().any(|p| {
         candidate.overlaps(p) && p.owner != *owner
     })
+}
+
+/// Does a Plot Marker placed on THIS machine claim a Plot here? Only where this
+/// machine owns the world. A joined client's Plots are the authority's (it
+/// decides, and sends back a marker it refuses), so a marker placed there claims
+/// nothing locally and says nothing of protection (S5 review fix S1).
+pub fn claims_locally(joined: bool) -> bool {
+    !joined
 }
 
 /// Record the claim of a Plot Marker that has landed at `(mx, my, mz)`. The one
@@ -127,6 +153,12 @@ pub fn register_claim(plots: &mut Vec<PlotData>, owner: PlotOwner, mx: i32, my: 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_joined_client_claims_nothing_locally() {
+        assert!(super::claims_locally(false));
+        assert!(!super::claims_locally(true), "the authority decides a joiner's claim");
+    }
+
     use super::*;
 
     #[test]

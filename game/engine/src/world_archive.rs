@@ -579,6 +579,7 @@ mod tests {
         let table = Some(crate::succession::SavedSuccession {
             last_seen: vec![("npub1owner".into(), 1_800_000_000)],
             passed_on: vec![(0, 64, 0)],
+            last_running: 1_800_000_100,
         });
         let mut save = minimal_world_save(1);
         save.plot_succession = table.clone();

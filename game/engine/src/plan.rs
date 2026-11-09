@@ -1521,6 +1521,18 @@ pub fn tick_build_reporting(
             next_index += 1;
             continue;
         }
+        // Living world Tier 2 S5 (review fix S4) — nor inside a Plot that is not
+        // its starter's own (a seat's Plan into a joiner's Plot, or into another
+        // seat's): skipped the same way, its item back with the leftovers. A
+        // build whose starter is unknown (an older save, a commission with no
+        // commissioner) keeps the old behaviour: no Plot gate.
+        if let Some(key) = starter.as_ref()
+            && crate::plot::is_in_plot_foreign_to_author(&world.plots, wx, wz, key)
+        {
+            skipped.push(cell.block_id);
+            next_index += 1;
+            continue;
+        }
         // Spec 06 §2.2 — builder-stamped blocks are player-placed, so mining
         // the finished structure earns no proof-of-play work.
         world.place_player_block_as(wx, wy, wz, cell.block_id, starter.as_ref());
@@ -2948,6 +2960,60 @@ mod tests {
         assert!(matches!(items[0].1.item, crate::item::Item::Block(b) if b == block::COMMONS_STONE));
         assert_eq!(items[0].1.count, 2);
         assert!(items[0].0.x < 0.0 && items[0].0.z < 0.0, "one block outside the build's corner: {:?}", items[0].0);
+    }
+
+    /// Run a 3 x 3 stone survival build at the origin for `starter` with `plot`
+    /// standing over the site; returns the finished world and what came back.
+    fn build_under_a_plot(starter: Option<crate::authorship::AuthorKey>, plot: Option<crate::plot::PlotOwner>) -> (World, CompletedBuild) {
+        let reg = crate::block::BlockRegistry::new();
+        let mut world = world_with_3x3_solid_at((0, 60, 0), (2, 60, 2));
+        if let Some(owner) = plot {
+            world.plots.push(crate::plot::PlotData::from_marker(owner, 1, 60, 1));
+        }
+        let mut inv = inv_with_blocks(&[(block::STONE, 9)]);
+        start_build(&mut world, &reg, "survival", PlanData::debug_3x3_stone(), 0, (0, 60, 0), &mut inv, &[(100, 100, 100)]).unwrap();
+        world.authors.set_starter((0, 60, 0), starter.as_ref());
+        for _ in 0..10 {
+            tick_build(&mut world, (0, 60, 0));
+        }
+        let done = complete_build(&mut world, (0, 60, 0)).expect("the plaque is placed");
+        (world, done)
+    }
+
+    #[test]
+    fn a_plan_builds_nothing_inside_another_seats_plot_and_the_items_come_back() {
+        use crate::authorship::AuthorKey;
+        let (world, done) = build_under_a_plot(Some(AuthorKey::Local(1)), Some(crate::plot::PlotOwner::LocalPlayer(0)));
+        assert_eq!(world.get_block(0, 61, 0), block::AIR, "nothing stamped in seat 0's Plot");
+        assert_eq!(done.leftovers, vec![crate::item::ItemStack::new_block(block::STONE, 9)], "all nine come back");
+        // The Plot's own seat builds there as it always did.
+        let (world, done) = build_under_a_plot(Some(AuthorKey::Local(0)), Some(crate::plot::PlotOwner::LocalPlayer(0)));
+        assert_eq!(world.get_block(0, 61, 0), block::STONE);
+        assert!(done.leftovers.is_empty());
+    }
+
+    #[test]
+    fn a_seats_plan_builds_nothing_inside_a_joiners_plot_and_the_joiners_own_plan_may() {
+        use crate::authorship::AuthorKey;
+        let joiner = || crate::plot::PlotOwner::Npub("npub1joiner".into());
+        let (world, done) = build_under_a_plot(Some(AuthorKey::Local(0)), Some(joiner()));
+        assert_eq!(world.get_block(0, 61, 0), block::AIR);
+        assert_eq!(done.leftovers.len(), 1);
+        assert_eq!(done.leftovers[0].count, 9);
+        // Another joiner is as foreign as a seat.
+        let (world, _) = build_under_a_plot(Some(AuthorKey::Npub("npub1other".into())), Some(joiner()));
+        assert_eq!(world.get_block(0, 61, 0), block::AIR);
+        // The owner's own build is whole.
+        let (world, done) = build_under_a_plot(Some(AuthorKey::Npub("npub1joiner".into())), Some(joiner()));
+        assert_eq!(world.get_block(0, 61, 0), block::STONE);
+        assert!(done.leftovers.is_empty());
+    }
+
+    #[test]
+    fn a_build_with_no_known_starter_keeps_the_old_behaviour_inside_a_plot() {
+        let (world, done) = build_under_a_plot(None, Some(crate::plot::PlotOwner::Npub("npub1joiner".into())));
+        assert_eq!(world.get_block(0, 61, 0), block::STONE, "no starter, no Plot gate (noted limit)");
+        assert!(done.leftovers.is_empty());
     }
 
     #[test]
