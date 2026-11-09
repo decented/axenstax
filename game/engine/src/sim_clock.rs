@@ -175,6 +175,22 @@ pub const fn next_tick(tick: u64) -> u64 {
     tick.wrapping_add(1)
 }
 
+/// How often the machine phase (growth, saplings, blight, furnaces, ...) and
+/// the falling-block/fluid beat run, in ticks.
+pub const MACHINE_BEAT: u64 = 4;
+
+/// The value the beat counter (`falling_tick_counter`, which gates that phase
+/// on every [`MACHINE_BEAT`]th step) must hold when the world clock reads
+/// `tick_counter`, so the two keep one phase. A new world starts both at 0. A
+/// loaded one restores the clock mid-count while the beat counter restarts at 0;
+/// left alone, a clock restored off the beat never lands a tick that is a
+/// multiple of 100 on a machine beat, and crops, saplings and blight never
+/// advance (the growth cadence is a multiple of 100 and 100 is a multiple of
+/// the beat only from an aligned clock). Call this wherever the clock is restored.
+pub const fn beat_counter_for(tick_counter: u64) -> u32 {
+    (tick_counter % MACHINE_BEAT) as u32
+}
+
 /// The day clock's next value at `step` per tick (`/time speed`). A step of
 /// 0 (tests freezing the sky) holds the clock.
 pub const fn next_world_time(world_time: u32, step: u32) -> u32 {

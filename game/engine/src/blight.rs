@@ -263,7 +263,7 @@ fn spread_with(
 /// passes and no part of it starves.
 fn window(n: usize, tick: u64) -> (usize, usize) {
     let take = n.min(MAX_SPREAD_PER_PASS);
-    let start = if n > take { ((tick / 100) as usize).wrapping_mul(take) % n } else { 0 };
+    let start = if n > take { ((tick / 100).wrapping_mul(take as u64) % n as u64) as usize } else { 0 };
     (start, take)
 }
 

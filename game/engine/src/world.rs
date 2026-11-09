@@ -2325,7 +2325,10 @@ impl World {
         let pos = (bc.x, bc.y, bc.z);
         let old_block = self.get_block(bc.x, bc.y, bc.z);
         let block_changed = old_block != bc.new_block;
-        let meta_changed = self.meta_at(bc.x, bc.y, bc.z) != bc.meta;
+        // `set_block` clears a Blighted Crop's kind byte as it leaves, so the
+        // broadcast's meta is always applied after one.
+        let meta_changed = self.meta_at(bc.x, bc.y, bc.z) != bc.meta
+            || (block_changed && old_block == block::BLIGHTED_CROP);
         if block_changed {
             self.set_block(bc.x, bc.y, bc.z, bc.new_block);
             // Spec 48 (Electricity) — the block-entity behind a power block has
@@ -2526,6 +2529,13 @@ impl World {
             // placed bit set.
             if block == block::AIR && !self.authors.is_empty() {
                 self.authors.clear_cell((cx, cy, cz), crate::authorship::cell_of(x, y, z));
+            }
+            // Living world Tier 2 S8 — a Blighted Crop's meta byte is the crop kind
+            // it remembers, per-cell state of that block alone: whatever leaves
+            // the cell (a break by any seat, a blast, a flood, a piston) takes
+            // it, so the next block put here does not start with a stale kind.
+            if was == block::BLIGHTED_CROP && block != block::BLIGHTED_CROP {
+                self.set_meta((x, y, z), 0);
             }
             // C3b-fix-d (A-L5) — a table gone, for a server's table grace.
             if was == block::CRAFTING_TABLE

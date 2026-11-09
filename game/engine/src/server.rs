@@ -1771,6 +1771,8 @@ impl GameServer {
     pub(crate) fn restore_saved_clock(&mut self, saved: Option<&crate::sim_clock::SavedClock>) {
         let Some(saved) = saved else { return };
         self.tick_counter = saved.tick_counter;
+        // The machine beat keeps the clock's phase (`beat_counter_for`).
+        self.falling_tick_counter = crate::sim_clock::beat_counter_for(saved.tick_counter);
         self.world_time = saved.world_time;
         self.weather = crate::weather::Weather { rain_until: saved.rain_until, storm_until: saved.storm_until };
         self.weather_lock_applied.clone_from(&saved.weather_lock_applied);

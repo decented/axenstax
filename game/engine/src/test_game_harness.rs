@@ -187,6 +187,9 @@ mod tests {
     #[path = "sim_machines.rs"]
     mod sim_machines;
     #[cfg(not(target_arch = "wasm32"))]
+    #[path = "growth_reload.rs"]
+    mod growth_reload;
+    #[cfg(not(target_arch = "wasm32"))]
     #[path = "trials_island.rs"]
     mod trials_island;
     use super::*;

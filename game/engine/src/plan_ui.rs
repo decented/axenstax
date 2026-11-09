@@ -728,7 +728,10 @@ pub fn plaque_lines(chain: &[crate::plan::DerivationLink], counts: Option<crate:
         let head = if own.author_npub.is_empty() {
             "A local Plan".to_string()
         } else {
-            format!("From a Plan by {}\u{2026}", crate::plan::short_npub(&own.author_npub, 12))
+            let shown = crate::plan::short_npub(&own.author_npub, 12);
+            // An ellipsis only where something was cut off.
+            let cut = if shown.len() < own.author_npub.len() { "\u{2026}" } else { "" };
+            format!("From a Plan by {shown}{cut}")
         };
         let after = if earlier.is_empty() {
             String::new()
@@ -1009,6 +1012,8 @@ mod tests {
             vec!["From a Plan by npub1abcdefg\u{2026}, after Hut, Cabin"]
         );
         assert!(plaque_lines(&[], None).is_empty());
+        // A short author is shown whole, with no ellipsis.
+        assert_eq!(plaque_lines(&[plaque_link("Hut", "npub1abc")], None), vec!["From a Plan by npub1abc"]);
     }
 
     #[test]

@@ -54,14 +54,28 @@ pub struct PlanBuilds {
     rows: BTreeMap<PlanHash, PlanCounts>,
 }
 
+/// The hash a Plan's builds are counted under: the last link of its derivation
+/// chain, the hash frozen when it was captured, which is the key its plaque
+/// reads. `content_hash` is not that key for a licence copy (`vendor.rs` clears
+/// `is_master`, which the hash covers), so counting under the recomputed hash
+/// would put a copy's builds on a row nothing shows. A Plan with no chain falls
+/// back to the recomputed hash.
+pub fn build_key(plan: &PlanData) -> PlanHash {
+    plan.derivation_chain
+        .last()
+        .map_or_else(|| crate::plan::content_hash(plan), |link| link.plan_hash)
+}
+
 /// The distinct ancestor hashes of `plan`: every `plan_hash` in its derivation
-/// chain except its own, each once, in chain order, at most [`MAX_ANCESTORS`].
-/// A chain that repeats a hash, or a derivative whose cells equal its parent's
-/// (so the parent's hash is its own), credits nothing twice.
+/// chain before its own (last) link, except its own key, each once, in chain
+/// order, at most [`MAX_ANCESTORS`]. A chain that repeats a hash, or a
+/// derivative whose cells equal its parent's (so the parent's hash is its own),
+/// credits nothing twice.
 pub fn ancestors_of(plan: &PlanData) -> Vec<PlanHash> {
-    let own = crate::plan::content_hash(plan);
+    let own = build_key(plan);
+    let before_own = plan.derivation_chain.len().saturating_sub(1);
     let mut out: Vec<PlanHash> = Vec::new();
-    for link in &plan.derivation_chain {
+    for link in &plan.derivation_chain[..before_own] {
         if link.plan_hash != own && !out.contains(&link.plan_hash) {
             out.push(link.plan_hash);
             if out.len() >= MAX_ANCESTORS {
@@ -91,19 +105,26 @@ impl PlanBuilds {
 
     /// A build of the design `plan_hash` completed. `built` goes up for it and
     /// `built_from` for each distinct hash in `ancestors` (a repeat counts once,
-    /// and the design's own hash is not its own ancestor).
+    /// and the design's own hash is not its own ancestor). When the table is full,
+    /// room is made for the whole batch first, never at the expense of a row this
+    /// completion is writing.
     pub fn note_completed(&mut self, plan_hash: PlanHash, ancestors: &[PlanHash]) {
-        self.row(plan_hash).built = self.counts(&plan_hash).built.saturating_add(1);
-        let mut seen: Vec<PlanHash> = Vec::with_capacity(ancestors.len().min(MAX_ANCESTORS));
+        let mut keys: Vec<PlanHash> = Vec::with_capacity(1 + ancestors.len().min(MAX_ANCESTORS));
+        keys.push(plan_hash);
         for a in ancestors {
-            if *a == plan_hash || seen.contains(a) {
+            if keys.contains(a) {
                 continue;
             }
-            if seen.len() >= MAX_ANCESTORS {
+            if keys.len() > MAX_ANCESTORS {
                 break;
             }
-            seen.push(*a);
-            let row = self.row(*a);
+            keys.push(*a);
+        }
+        self.make_room(&keys);
+        let own = self.rows.entry(plan_hash).or_default();
+        own.built = own.built.saturating_add(1);
+        for a in &keys[1..] {
+            let row = self.rows.entry(*a).or_default();
             row.built_from = row.built_from.saturating_add(1);
         }
     }
@@ -117,19 +138,21 @@ impl PlanBuilds {
         (designs, builds)
     }
 
-    /// The row for `hash`, making room first if the table is full.
-    fn row(&mut self, hash: PlanHash) -> &mut PlanCounts {
-        if !self.rows.contains_key(&hash) && self.rows.len() >= MAX_ROWS {
+    /// Make room for the rows in `keys` that are not yet in the table: evict the
+    /// least-counted others (the lowest hash on a tie) until they all fit. A row
+    /// in `keys` is never the victim.
+    fn make_room(&mut self, keys: &[PlanHash]) {
+        let incoming = keys.iter().filter(|k| !self.rows.contains_key(*k)).count();
+        while self.rows.len() + incoming > MAX_ROWS {
             let victim = self
                 .rows
                 .iter()
+                .filter(|(h, _)| !keys.contains(h))
                 .min_by_key(|(h, c)| (c.weight(), **h))
                 .map(|(h, _)| *h);
-            if let Some(v) = victim {
-                self.rows.remove(&v);
-            }
+            let Some(v) = victim else { break };
+            self.rows.remove(&v);
         }
-        self.rows.entry(hash).or_default()
     }
 
     /// The canonical saved form; `None` when nothing is recorded.
@@ -279,5 +302,23 @@ mod tests {
         assert_eq!(t.rows.len(), MAX_ROWS);
         assert_eq!(t.counts(&fresh).built, 1);
         assert_eq!(t.counts(&[0u8; 32]).built, 2, "a well-counted design survives");
+    }
+
+    #[test]
+    fn a_full_table_never_evicts_a_row_the_completion_is_writing() {
+        let mut t = PlanBuilds::default();
+        for i in 1..=MAX_ROWS as u32 {
+            let mut hash = [0u8; 32];
+            hash[..4].copy_from_slice(&i.to_be_bytes());
+            t.note_completed(hash, &[]);
+        }
+        assert_eq!(t.rows.len(), MAX_ROWS);
+        // The new design has the lowest hash of the weight-1 rows, and its new
+        // ancestor must not push it straight out.
+        let (design, ancestor) = ([0u8; 32], [0xFEu8; 32]);
+        t.note_completed(design, &[ancestor]);
+        assert_eq!(t.counts(&design), PlanCounts { built: 1, built_from: 0 });
+        assert_eq!(t.counts(&ancestor), PlanCounts { built: 0, built_from: 1 });
+        assert_eq!(t.rows.len(), MAX_ROWS, "two rows in, two least-counted others out");
     }
 }

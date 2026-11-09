@@ -5212,6 +5212,8 @@ impl super::GameState {
         let mut clock = self.client_clock();
         crate::sim_clock::restore_saved_clock(&mut clock, saved);
         self.tick_counter = clock.tick_counter;
+        // The machine beat keeps the clock's phase (`beat_counter_for`).
+        self.falling_tick_counter = crate::sim_clock::beat_counter_for(clock.tick_counter);
         self.world_time = clock.world_time;
         self.weather_rain_until = clock.rain_until;
         self.weather_storm_until = clock.storm_until;

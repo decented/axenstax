@@ -69,12 +69,12 @@ impl Rig {
         }
     }
 
-    /// One growth pass: the clock one tick short of the next multiple of 200 and
-    /// the machine counter on the beat before a machine tick (the machine phase
-    /// runs every fourth tick), so this tick steps the clock onto the cadence.
+    /// One growth pass: the clock set one tick short of the next multiple of 200
+    /// (a clock restored mid-count, with the beat counter following it as a
+    /// restore does), so this tick steps the clock onto the cadence.
     fn pass(&mut self) {
         self.hs.server.tick_counter = (self.hs.server.tick_counter / 200 + 1) * 200 - 1;
-        self.hs.server.falling_tick_counter = 3;
+        self.hs.server.falling_tick_counter = crate::sim_clock::beat_counter_for(self.hs.server.tick_counter);
         self.tick();
     }
 
@@ -210,4 +210,44 @@ fn a_blighted_crop_breaks_to_nothing_for_every_breaker() {
     assert!(y.gem.is_none());
     assert!(!y.crop, "it is not harvested like a crop");
     assert_eq!(reg.mine_drop(block::BLIGHTED_CROP).count, 0);
+}
+
+#[test]
+fn whatever_takes_a_blighted_crop_away_takes_its_kind_byte_with_it() {
+    // `World::set_block` is the funnel every break reaches (a local seat, a
+    // lending host's, a joiner's edit on the server, a blast, a flood, a piston).
+    for replacement in [block::AIR, block::WHEAT_STAGE_0, block::STONE, block::WATER] {
+        let mut w = crate::world::World::new();
+        w.set_block(5, 70, 5, block::WHEAT_STAGE_1);
+        crate::blight::blight_cell(&mut w, 5, 70, 5, CropKind::Cotton);
+        assert_eq!(w.meta_at(5, 70, 5), CropKind::Cotton.index());
+        w.set_block(5, 70, 5, replacement);
+        assert_eq!(w.meta_at(5, 70, 5), 0, "the kind byte left with the crop (-> {replacement})");
+        // And what is put there next starts clean, and is sent clean.
+        w.set_block(5, 70, 5, block::WHEAT_STAGE_0);
+        assert_eq!(w.meta_at(5, 70, 5), 0);
+        assert_eq!(crate::protocol::BlockChange::with_meta(5, 70, 5, block::WHEAT_STAGE_0, w.meta_at(5, 70, 5)).meta, 0);
+        assert!(!w.block_meta.contains_key(&(5, 70, 5)), "nothing left to save for the cell");
+    }
+    // Setting the same blighted block again keeps its kind.
+    let mut w = crate::world::World::new();
+    crate::blight::blight_cell(&mut w, 1, 70, 1, CropKind::Carrot);
+    w.set_block(1, 70, 1, block::BLIGHTED_CROP);
+    assert_eq!(w.meta_at(1, 70, 1), CropKind::Carrot.index());
+}
+
+#[test]
+fn a_broadcast_replacing_a_blighted_crop_leaves_the_receiver_with_the_sent_meta() {
+    // A joiner (or a host's loopback) holds the kind byte too. A replacement
+    // carrying the very same byte value still lands as sent.
+    let mut w = crate::world::World::new();
+    crate::blight::blight_cell(&mut w, 2, 70, 2, CropKind::Wheat);
+    let sent = protocol::BlockChange::with_meta(2, 70, 2, block::WHEAT_STAGE_0, CropKind::Wheat.index());
+    assert!(w.apply_remote_block_change(&sent));
+    assert_eq!(w.meta_at(2, 70, 2), CropKind::Wheat.index(), "as sent");
+    let mut w = crate::world::World::new();
+    crate::blight::blight_cell(&mut w, 2, 70, 2, CropKind::Wheat);
+    let broke = protocol::BlockChange::with_meta(2, 70, 2, block::AIR, 0);
+    assert!(w.apply_remote_block_change(&broke));
+    assert_eq!(w.meta_at(2, 70, 2), 0);
 }

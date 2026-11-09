@@ -1636,7 +1636,7 @@ pub fn complete_build(
     // build never does, so it counts nothing.
     world
         .plan_builds
-        .note_completed(content_hash(&data.plan), &crate::plan_builds::ancestors_of(&data.plan));
+        .note_completed(crate::plan_builds::build_key(&data.plan), &crate::plan_builds::ancestors_of(&data.plan));
     let starter = world.authors.starter(anchor_pos).cloned();
     world.authors.clear_starter(anchor_pos);
     let (ax, ay, az) = data.anchor;

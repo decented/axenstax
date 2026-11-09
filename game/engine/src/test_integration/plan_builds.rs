@@ -92,6 +92,75 @@ fn a_player_build_completing_on_the_authority_counts_its_plan_and_each_ancestor_
     assert_eq!(h.server.world.plan_builds.counts(&[1; 32]).built_from, 2);
 }
 
+/// Run a creative build of `plan` to completion on a fresh dedicated host and
+/// return the host.
+fn complete_on_host(plan: PlanData) -> TestHost {
+    let mut h = TestHost::start_with(TestConfig::default());
+    h.server.simulates_block_machines = true;
+    let anchor = (6, Y, 6);
+    for x in anchor.0..anchor.0 + 3 {
+        for z in anchor.2..anchor.2 + 3 {
+            h.set_block(x, Y, z, block::STONE);
+        }
+    }
+    h.server.world.construction_anchors.insert(anchor, anchor_for(plan, anchor));
+    h.tick(24);
+    assert!(!h.server.world.construction_anchors.contains_key(&anchor), "the build completed");
+    h
+}
+
+#[test]
+fn a_licence_copy_counts_as_a_build_of_its_design_under_the_key_its_plaque_reads() {
+    // A master, and the copy a licence sale hands over: same cells and chain, but
+    // `is_master` cleared, which the recomputed content hash covers.
+    let mut master = PlanData::debug_3x3_stone();
+    master.is_master = true;
+    let m = content_hash(&master);
+    master.derivation_chain = vec![link("Tower", m)];
+    let mut copy = master.clone();
+    copy.is_master = false;
+    assert_ne!(content_hash(&copy), m, "the premise: a copy's recomputed hash is not the master's");
+
+    let h = complete_on_host(copy);
+    let t = &h.server.world.plan_builds;
+    let plaque = h.server.world.architect_plaques.values().next().expect("a plaque was placed");
+    let key = plaque.chain.last().expect("a chain").plan_hash;
+    assert_eq!(key, m);
+    // What the plaque reads: built once, and nothing was built from it.
+    let counts = t.counts(&key);
+    assert_eq!(counts, PlanCounts { built: 1, built_from: 0 }, "the master is not credited as an ancestor of its own copy");
+    let lines = crate::plan_ui::plaque_lines(&plaque.chain, Some(counts));
+    assert!(lines.contains(&"Built 1 time in this world.".to_string()), "{lines:?}");
+    assert!(!lines.iter().any(|l| l.contains("built from")), "{lines:?}");
+    // No stray row under the recomputed hash.
+    assert_eq!(t.ideas_total(), (1, 1));
+}
+
+#[test]
+fn a_derivative_of_a_licence_copy_still_credits_the_master_once() {
+    let mut master = PlanData::debug_3x3_stone();
+    let m = content_hash(&master);
+    master.derivation_chain = vec![link("Tower", m)];
+    // A derivative: its own captured hash D after the master's link.
+    let mut derived = master.clone();
+    derived.is_master = false;
+    derived.derivation_chain.push(link("Tower II", [9; 32]));
+    let h = complete_on_host(derived);
+    let t = &h.server.world.plan_builds;
+    assert_eq!(t.counts(&[9; 32]), PlanCounts { built: 1, built_from: 0 });
+    assert_eq!(t.counts(&m), PlanCounts { built: 0, built_from: 1 });
+}
+
+#[test]
+fn a_plan_with_no_chain_is_counted_under_its_recomputed_hash() {
+    let mut plan = PlanData::debug_3x3_stone();
+    plan.derivation_chain.clear();
+    let own = content_hash(&plan);
+    let h = complete_on_host(plan);
+    assert_eq!(h.server.world.plan_builds.counts(&own), PlanCounts { built: 1, built_from: 0 });
+    assert_eq!(h.server.world.plan_builds.ideas_total(), (1, 1));
+}
+
 #[test]
 fn a_build_still_going_counts_nothing_until_it_completes() {
     let mut h = TestHost::start_with(TestConfig::default());
