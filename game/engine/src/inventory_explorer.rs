@@ -736,7 +736,7 @@ mod tests {
         // Every block but air, the Feast Marker (a record, never an item), the
         // Worn Path (trodden ground; it breaks to dirt, never an item) and the
         // Blighted Crop (a sickness; it breaks to nothing).
-        assert_eq!(block_count, registry.len() - 5);
+        assert_eq!(block_count, registry.len() - 4);
         assert!(entries.iter().all(|e| !matches!(&e.item, Item::Block(b) if *b == crate::block::FEAST_MARKER || *b == crate::block::WORN_PATH || *b == crate::block::BLIGHTED_CROP)));
     }
 
