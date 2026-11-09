@@ -15,10 +15,12 @@
 //!   `SimSystem::UseRecord` phase (a dedicated server, a lending host, joiners'
 //!   bodies and the host's own seats alike) and by the standalone seat loop. It
 //!   writes the world and returns the `BlockChange`s the authority broadcasts.
-//! * **Grounded without `on_ground`.** A lending host's own seats are
-//!   position-trusted and never report `on_ground`, so a body counts as
-//!   standing when its feet rest on the top face of the block under it
-//!   ([`ground_cell`]), and a caller that cannot say passes `on_ground: true`.
+//! * **Grounded twice over.** A body counts as standing when it says it is
+//!   not in the air (`on_ground`, the body's own flag on every path: the
+//!   server's simulated bodies, and a lending host's seats through their
+//!   refreshed shadow) AND its feet rest on the top face of a SOLID block
+//!   ([`ground_cell`]). The apex of a hop over air rests on the air cell
+//!   above the grass, so it neither counts nor moves a body's last cell.
 //!
 //! A Worn Path is not "placed" (it carries no author), breaks like dirt, and
 //! never turns back to grass.
@@ -28,8 +30,12 @@ use std::collections::HashMap;
 use glam::Vec3;
 
 use crate::block;
+use crate::block::BlockRegistry;
 use crate::protocol::BlockChange;
 use crate::world::World;
+
+/// The block rules, for "is this cell solid" (built once).
+static REGISTRY: std::sync::LazyLock<BlockRegistry> = std::sync::LazyLock::new(BlockRegistry::new);
 
 /// Footfalls that wear a grass cell into a path.
 pub const FOOTFALLS: u16 = 24;
@@ -47,8 +53,8 @@ pub struct Foot {
     pub key: u32,
     /// Its foot position (bottom centre of the hitbox).
     pub pos: Vec3,
-    /// The body's own word that it is not in the air. The caller passes `true`
-    /// for a position-trusted body, which reports none.
+    /// The body's own word that it is not in the air (the real flag, for
+    /// every body: a position-trusted seat's is refreshed from its client).
     pub on_ground: bool,
 }
 
@@ -110,6 +116,11 @@ impl PathWear {
                 continue;
             }
             let Some(cell) = ground_cell(f.pos) else { continue };
+            // A hop's apex over grass sits on the top face of the AIR above
+            // it: not standing on anything, so it leaves `last` alone.
+            if !world.is_solid(cell[0], cell[1], cell[2], &REGISTRY) {
+                continue;
+            }
             if self.last.insert(f.key, cell) == Some(cell) {
                 continue;
             }
@@ -238,6 +249,37 @@ mod tests {
         }
         assert_eq!(w.path_wear.count([1, 39, 1]), 1);
         assert_eq!(w.get_block(1, 39, 1), block::GRASS);
+    }
+
+    #[test]
+    fn a_hop_over_grass_at_every_height_wears_nothing_even_when_it_says_it_is_grounded() {
+        let mut w = lawn();
+        // The body's jump arc (JUMP_VELOCITY .42, GRAVITY .08, no drag), one
+        // sample per tick, flagged on_ground = true throughout (the worst
+        // case: a caller that cannot say). It passes 41.02, the top face of
+        // the AIR cell above the grass.
+        for _ in 0..200 {
+            let (mut y, mut vy) = (40.0f32, 0.42f32);
+            loop {
+                tick_wear(&mut w, &[Foot { key: 0, pos: Vec3::new(1.5, y, 1.5), on_ground: true }], false);
+                y += vy;
+                vy -= 0.08;
+                if y <= 40.0 {
+                    break;
+                }
+            }
+            tick_wear(&mut w, &[at(0, 1.5, 1.5)], false);
+        }
+        // One real step onto the cell is all there ever was.
+        assert!(w.path_wear.count([1, 39, 1]) <= 1);
+        assert_eq!(w.get_block(1, 39, 1), block::GRASS);
+        // A single sample on the air cell over the grass changes nothing at all.
+        let mut w2 = lawn();
+        tick_wear(&mut w2, &[Foot { key: 0, pos: Vec3::new(1.5, 41.02, 1.5), on_ground: true }], false);
+        assert!(w2.path_wear.is_empty());
+        let mut wear = PathWear::default();
+        wear.step(&w2, &[Foot { key: 0, pos: Vec3::new(1.5, 41.02, 1.5), on_ground: true }], false);
+        assert!(wear.last.is_empty(), "an airborne sample over air moves no last cell");
     }
 
     #[test]

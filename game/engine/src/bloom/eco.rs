@@ -150,12 +150,14 @@ impl EcoTally {
         }
     }
 
+    /// The wall term. Worn Paths are open ground here (the denominator is
+    /// every column), so trodden roads never raise a village's penalty: a road
+    /// is honour, not damage.
     fn wall(&self) -> f32 {
-        let ground = self.columns - self.paths;
-        if ground == 0 {
+        if self.columns == 0 {
             return 1.0;
         }
-        let built_frac = self.built as f32 / ground as f32;
+        let built_frac = self.built as f32 / self.columns as f32;
         1.0 - WALL_SLOPE * (built_frac - WALL_FREE).max(0.0)
     }
 
@@ -274,7 +276,7 @@ mod tests {
         assert_eq!(roads.living_frac(), ALL_BUILT_LIVING);
         assert!(roads.eco(0) > 0.0);
         assert!(roads.has_data());
-        // Built ground still counts in the wall term next to paths.
+        // Built ground still counts in the wall term, over every column: paths are open ground.
         let mut mixed = EcoTally::default();
         for _ in 0..100 {
             mixed.add_column(TopClass::Path);
@@ -282,10 +284,50 @@ mod tests {
         for _ in 0..156 {
             mixed.add_column(TopClass::Built);
         }
-        assert_eq!(mixed.wall(), 1.0 - WALL_SLOPE * (1.0 - WALL_FREE));
+        let built_frac = 156.0f32 / 256.0;
+        assert_eq!(mixed.wall(), 1.0 - WALL_SLOPE * (built_frac - WALL_FREE));
         let mut merged = tally(0, 0, 0, 0);
         merged.merge(&mixed);
         assert_eq!(merged.paths, 100);
+    }
+
+    #[test]
+    fn a_ring_of_paths_round_a_village_leaves_its_eco_term_unchanged() {
+        // 140 built columns and 116 grass of 256: built share 0.547, inside WALL_FREE.
+        let mut before = tally(116, 0, 0, 4);
+        for _ in 0..140 {
+            before.add_column(TopClass::Built);
+        }
+        // Walk 40 of the grass columns into roads.
+        let mut after = tally(76, 0, 0, 4);
+        for _ in 0..140 {
+            after.add_column(TopClass::Built);
+        }
+        for _ in 0..40 {
+            after.add_column(TopClass::Path);
+        }
+        assert_eq!((after.columns, after.paths, after.built), (256, 40, 140));
+        assert_eq!(after.wall(), before.wall(), "roads do not raise the wall penalty");
+        assert!((after.eco(0) - before.eco(0)).abs() < 1e-5, "{} vs {}", after.eco(0), before.eco(0));
+        // And past WALL_FREE the walls are built ground alone: roads change nothing there either.
+        let mut dense = tally(0, 0, 0, 0);
+        for _ in 0..180 {
+            dense.add_column(TopClass::Built);
+        }
+        for _ in 0..76 {
+            dense.add_column(TopClass::Living);
+        }
+        let mut dense_roads = tally(0, 0, 0, 0);
+        for _ in 0..180 {
+            dense_roads.add_column(TopClass::Built);
+        }
+        for _ in 0..36 {
+            dense_roads.add_column(TopClass::Living);
+        }
+        for _ in 0..40 {
+            dense_roads.add_column(TopClass::Path);
+        }
+        assert_eq!(dense.wall(), dense_roads.wall());
     }
 
     #[test]

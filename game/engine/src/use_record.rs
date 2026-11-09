@@ -278,6 +278,13 @@ pub fn phase(world: &mut World, tick: u64, world_day: u32, creative: bool, feet:
     crate::path_wear::tick_wear(world, feet, creative)
 }
 
+/// The cells a client that wrote [`phase`]'s changes to its own world must
+/// redraw (a standalone game: no server sends them back as `BlockChange`s).
+/// One per change, in order; the call site hands each to `rebuild_chunk_at`.
+pub fn redraw_cells(changes: &[BlockChange]) -> impl Iterator<Item = (i32, i32, i32)> + '_ {
+    changes.iter().map(|c| (c.x, c.y, c.z))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -436,5 +443,30 @@ mod tests {
         assert_eq!(w.use_record.get((0, 0)).unwrap().days, 1);
         phase(&mut w, 40, 1, false, &feet);
         assert_eq!(w.use_record.get((0, 0)).unwrap().days, 1, "the same day counts once");
+    }
+
+    #[test]
+    fn a_standalone_seat_gets_every_worn_cell_back_to_redraw() {
+        // The standalone seat loop writes the world itself and redraws what
+        // `phase` returns: this is its seam. A grass lane paced 24 times each
+        // way wears; the one tick that wears a cell hands it back, and the
+        // world already reads the path there (what the redraw will mesh).
+        let mut w = World::new();
+        for x in 0..2 {
+            w.set_block(x, 39, 0, crate::block::GRASS);
+        }
+        let mut redrawn = Vec::new();
+        for i in 0..60u64 {
+            let x = if i % 2 == 0 { 0.5 } else { 1.5 };
+            let feet = [Foot { key: 0, pos: Vec3::new(x, 40.0, 0.5), on_ground: true }];
+            let worn = phase(&mut w, i + 1, 1, false, &feet);
+            for (cx, cy, cz) in redraw_cells(&worn) {
+                assert_eq!(w.get_block(cx, cy, cz), crate::block::WORN_PATH);
+                redrawn.push((cx, cy, cz));
+            }
+        }
+        redrawn.sort_unstable();
+        assert_eq!(redrawn, vec![(0, 39, 0), (1, 39, 0)], "each worn cell once, none missed");
+        assert_eq!(redraw_cells(&[]).count(), 0);
     }
 }

@@ -403,11 +403,15 @@ impl WorldSave {
             quest_world: _, worldgen_version: _, authority_clock: _,
             // Already canonical (`Authorship::to_saved` sorts keys, chunks, cells and starters).
             block_authors: _,
-            // Already canonical (`UseRecord::to_saved` walks a BTreeMap).
-            region_use: _,
+            // `UseRecord::to_saved` walks a BTreeMap, but a save re-encoded without a
+            // `World` (a handover's copy) keeps what is on disk: sorted by region here.
+            region_use,
             // Already canonical (`PlanBuilds::to_saved` walks a BTreeMap).
             plan_builds: _,
         } = self;
+        if let Some(ru) = region_use {
+            ru.regions.sort_by_key(|(key, _)| *key);
+        }
         campfires.sort_unstable_by_key(|r| (r.x, r.y, r.z));
         furnaces.sort_unstable_by_key(|r| (r.x, r.y, r.z));
         vendors.sort_unstable_by_key(|r| (r.x, r.y, r.z));

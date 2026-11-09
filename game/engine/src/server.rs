@@ -2102,11 +2102,17 @@ impl GameServer {
 
         // Living world Tier 2 S3 — the use record and path wear, on every
         // present, living body (a lending host's own seats are among them,
-        // position-trusted: they report no `on_ground`, so they pass `true`
-        // and `path_wear::ground_cell` judges by their feet). A lent world's
-        // is the server's alone (`SimSystem::UseRecord`); a worn cell rides
+        // position-trusted). Every body passes its real `on_ground`: a
+        // server-simulated body's is the sim's, a lending host's seat's is
+        // its client's, refreshed into the shadow each tick
+        // (`refresh_lent_local_shadows`). Only an owning `--no-lend` host's
+        // local shadow may not carry it, so that one passes `true`; either
+        // way `path_wear` also wants the sampled ground cell to be solid, so
+        // a hop's apex over air is no footfall. A lent world's is the
+        // server's alone (`SimSystem::UseRecord`); a worn cell rides
         // `pending_block_changes` to joiners and to a lending host's screen.
         if self.runs(SimSystem::UseRecord) {
+            let lent = self.lent;
             let feet: Vec<crate::path_wear::Foot> = self
                 .players
                 .iter()
@@ -2115,7 +2121,7 @@ impl GameServer {
                 .map(|(i, sp)| crate::path_wear::Foot {
                     key: i as u32,
                     pos: sp.player.pos,
-                    on_ground: !sp.server_simulated || sp.player.on_ground,
+                    on_ground: if lent || sp.server_simulated { sp.player.on_ground } else { true },
                 })
                 .collect();
             let worn = crate::use_record::phase(

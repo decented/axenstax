@@ -4906,11 +4906,11 @@ living body (a dead joiner is not present). *The bloom `u` term:* `u = 0.6 (1 - 
 placed blocks (counted on the scan cadence, `Chunk::placed_count`), faded linearly to 0 between 14 and 28 lived days since the region was last used;
 `P = 1 - (1-c)(1-f)(1-k)(1-b)(1-u)`. A joined client has an empty table, so its `u` is 0 until S10.
 *Worn Paths:* a footfall is a body on the ground, standing on a Grass block, entering a cell it was not in at its last grounded sample (standing
-still, or jumping on the spot, makes none); sampled every tick. At 24 footfalls the cell becomes a Worn Path (block 376, dirt textures, breaks like dirt
+still, or jumping on the spot, makes none: the body's real `on_ground` and a solid block under its feet are both needed); sampled every tick. At 24 footfalls the cell becomes a Worn Path (block 376, dirt textures, breaks like dirt
 and drops dirt, not placed, never reverts to grass, kept out of the creative inventory; a pick-block gives dirt). The partial counts are a runtime map
 (capped at 16,384 cells, least recently stepped forgotten first); off in creative; on in trial arenas. Bloom classes a Worn Path column apart
-(`TopClass::Path`): left out of the cover average like built ground and, unlike built ground, out of the wall term too, so a road is neither bare nor
-life and a village of roads is not "walls".
+(`TopClass::Path`): left out of the cover average like built ground and, unlike built ground, not counted as built in the wall term (whose denominator is every
+column), so a road is neither bare nor life, a village of roads is not "walls", and walking a ring of paths never lowers the village's bloom.
 
 **Plan build counts and the plaque (Tier 2 S4, 2026-11-09).** The world counts, per Plan design (its content hash), how many times it has been built
 and how many builds descended from it (Spec 02 "Plan build counts"), on the machine that owns the world, never on the wire and holding no

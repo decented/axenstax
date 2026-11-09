@@ -6540,15 +6540,19 @@ impl super::GameState {
                     on_ground: slot.player.on_ground,
                 })
                 .collect();
-            // The worn cells are already written to this world; no server
-            // broadcasts them, and the chunk remeshes from its dirty flag.
-            let _ = crate::use_record::phase(
+            // The worn cells are already written to this world and no server
+            // broadcasts them, so redraw each one here (`Chunk.mesh_dirty` has
+            // no reader; the remesh route is `rebuild_chunk_at`).
+            let worn = crate::use_record::phase(
                 &mut self.world,
                 self.tick_counter,
                 self.night_calendar.tonight(),
                 self.is_creative,
                 &feet,
             );
+            for (x, y, z) in crate::use_record::redraw_cells(&worn) {
+                self.rebuild_chunk_at(x, y, z);
+            }
         }
         // HP-3 — brigand AI pre-pass. Runs every tick BEFORE the main
         // mob_ai dispatch so tier-specific detect-range + flee-gate +

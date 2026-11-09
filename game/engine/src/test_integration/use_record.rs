@@ -375,11 +375,12 @@ fn on_a_lending_host_the_phase_runs_once_per_tick_and_the_hosts_own_seat_wears_p
     }
     let _ = block_changes_seen(&client);
     let tally = |host: &crate::sim_lend::OwnedSimParts| host.world.sim_tally.get(SimSystem::UseRecord);
-    // A position-trusted seat reports no `on_ground`; it paces the lane by being put there.
+    // The seat paces the lane by being put there; its client's refreshed shadow says it is grounded.
     let mut seen = Vec::new();
     for i in 0..60u32 {
         let x = if i % 2 == 0 { 40.5 } else { 41.5 };
         hs.server.players[0].player.pos = Vec3::new(x, 80.0, 40.5);
+        hs.server.players[0].player.on_ground = true;
         let before = tally(&host);
         host.lend_tick(&mut hs);
         assert_eq!(tally(&host) - before, 1, "tick {i}: once per lent tick, not twice (and not skipped)");
@@ -395,4 +396,60 @@ fn on_a_lending_host_the_phase_runs_once_per_tick_and_the_hosts_own_seat_wears_p
         assert!(seen.iter().any(|c| (c.x, c.y, c.z) == (x, 79, 40) && c.new_block == block::WORN_PATH));
     }
     let _ = slot;
+}
+
+/// A jump on the spot, sampled once a tick along the real arc (JUMP_VELOCITY 0.42,
+/// GRAVITY 0.08): the sample at 81.02 sits on the top face of the air above the grass.
+fn hop_arc() -> Vec<(f32, bool)> {
+    let mut out = vec![(80.0, true)];
+    let (mut y, mut vy) = (80.0f32, 0.42f32);
+    loop {
+        y += vy;
+        vy -= 0.08;
+        if y <= 80.0 {
+            break;
+        }
+        out.push((y, false));
+    }
+    out.push((80.0, true));
+    out
+}
+
+#[test]
+fn on_a_lending_host_jumping_on_the_spot_wears_nothing_even_if_the_flag_lags() {
+    let (mut hs, mut host) = super::lent_world::start_lent("use-record-hop");
+    for x in 39..=42 {
+        host.world.set_block(x, 79, 40, block::GRASS);
+        for y in 80..=84 {
+            host.world.set_block(x, y, 40, block::AIR);
+        }
+    }
+    let arc = hop_arc();
+    assert!(arc.iter().any(|&(y, _)| (y - 81.02).abs() < 0.01), "the arc passes the air cell's top face");
+    // Once with the shadow's flag as the physics has it, once with a flag that stays true throughout.
+    for lying in [false, true] {
+        for _ in 0..60 {
+            for &(y, grounded) in &arc {
+                hs.server.players[0].player.pos = Vec3::new(40.5, y, 40.5);
+                hs.server.players[0].player.on_ground = grounded || lying;
+                host.lend_tick(&mut hs);
+            }
+        }
+        assert_eq!(host.world.get_block(40, 79, 40), block::GRASS, "lying = {lying}: 60 hops wear nothing");
+        assert!(host.world.path_wear.count([40, 79, 40]) <= 1, "lying = {lying}");
+    }
+}
+
+#[test]
+fn sorting_a_save_orders_its_use_record_rows_by_region() {
+    let row = RegionUse { days: 1, last_day: 1, nights: 0, last_night: None };
+    let mut save = crate::save::minimal_world_save_for_tests(1);
+    save.region_use = Some(SavedRegionUse {
+        lived_day: 1,
+        last_world_day: Some(1),
+        regions: vec![((3, 0), row), ((-1, 2), row), ((0, 0), row)],
+    });
+    save.sort_unordered_rows();
+    let keys: Vec<_> = save.region_use.unwrap().regions.iter().map(|r| r.0).collect();
+    assert_eq!(keys, vec![(-1, 2), (0, 0), (3, 0)]);
 }
