@@ -3331,6 +3331,7 @@ impl super::GameState {
         // WorldMeta in the load path below; a NEW world correctly starts at zero.
         self.scenario = None;
         self.scenario_fresh_arena = false;
+        self.arena_spawn = None;
         self.world.total_work = 0;
         self.world.total_ticks = 0;
         self.world.pop_exposure.clear();
@@ -4801,6 +4802,11 @@ impl super::GameState {
         let Some(filled) = held.and_then(|h| crate::bucket::fill_result(&h, target_blk, is_source)) else {
             return false;
         };
+        // Living world S2 — a source someone else placed in a Commons is theirs:
+        // the click is taken (nothing falls through to a placement) and does nothing.
+        if self.commons_blocks_local_edit(pidx, pos) {
+            return true;
+        }
         // C3c-1 — the hand before the fill spends the bucket.
         let tag = self.use_tag(pidx, crate::use_edits::UseKind::BucketFill, pos);
         // C3c-1-fix (M-1) — a bucket a block use in flight claims (a hive's
@@ -12295,6 +12301,10 @@ impl super::GameState {
                                     if crate::block_shape::is_door(self.world.get_block(pos[0], cy, pos[2])) {
                                         self.world.set_block(pos[0], cy, pos[2], block::AIR);
                                         self.world.set_meta((pos[0], cy, pos[2]), 0);
+                                        // Living world S2 — the pair half goes with its
+                                        // placed bit (and so its author), as the server's
+                                        // `clear_door_pair` does.
+                                        self.world.set_placed(pos[0], cy, pos[2], false);
                                         // Joined authority derives the matching half from
                                         // the selected primary. Host/local broadcasts
                                         // still carry their already-applied pair.
@@ -12699,6 +12709,9 @@ impl super::GameState {
                                         {
                                             self.world.set_block(pos[0], cy, pos[2], block::AIR);
                                             self.world.set_meta((pos[0], cy, pos[2]), 0);
+                                            // Living world S2 — the pair half goes with its
+                                            // placed bit (and so its author).
+                                            self.world.set_placed(pos[0], cy, pos[2], false);
                                             // Joined authority derives the matching half;
                                             // only the primary carries the mined tag.
                                             // Host/local broadcasts still carry the pair.
@@ -15723,6 +15736,7 @@ impl super::GameState {
                                 &s.item,
                                 crate::item::Item::Tool(t) if t.tool_type == crate::crafting::ToolType::Eraser
                             ))
+                        && !self.commons_blocks_local_edit(pidx, pos)
                     {
                         // Rubber feature — right-click BLUEPRINT_PAPER with Eraser:
                         // mines the tile (block -> AIR), returns 1
@@ -15840,6 +15854,7 @@ impl super::GameState {
                                 crate::item::Item::Tool(t) if t.tool_type == crate::crafting::ToolType::Hoe
                             ))
                             .unwrap_or(false)
+                        && !self.commons_blocks_local_edit(pidx, pos)
                     {
                         // Farming Tier 1 (Wave 26): hoe + right-click on the
                         // TOP face of dirt or grass → tilled soil. Only the
@@ -15914,6 +15929,7 @@ impl super::GameState {
                                 crate::item::Item::Material(crate::item::MaterialId::Fertiliser)
                                     | crate::item::Item::Material(crate::item::MaterialId::Bonemeal),
                             ))
+                        && !self.commons_blocks_local_edit(pidx, pos)
                     {
                         // Crop accelerators right-clicked on a growing crop advance
                         // it and consume one. A mature crop (no next stage) doesn't
@@ -16010,6 +16026,7 @@ impl super::GameState {
                                 s.item,
                                 crate::item::Item::Material(crate::item::MaterialId::Bucket),
                             ))
+                        && !self.commons_blocks_local_edit(pidx, pos)
                     {
                         // Rubber feature — right-click empty Bucket on live
                         // RUBBER_LOG taps the tree. Bucket is NOT consumed
@@ -16077,6 +16094,7 @@ impl super::GameState {
                         // flight claims (an item frame's).
                         if let Some((liquid, filled)) = held
                             .and_then(|h| crate::bucket::empty_result(&h, self.world.get_block(dx, dy, dz)))
+                            && !self.commons_blocks_local_edit(pidx, [dx, dy, dz])
                             && self.hand_may_spend(pidx)
                             && self.players[pidx]
                                 .inventory
@@ -16122,6 +16140,7 @@ impl super::GameState {
                                 s.item,
                                 crate::item::Item::Material(crate::item::MaterialId::Salt),
                             ))
+                        && !self.commons_blocks_local_edit(pidx, pos)
                     {
                         // Salt feature — right-click Salt on GRASS/DIRT/SNOW
                         // top face converts the targeted block IN PLACE to
@@ -16479,6 +16498,12 @@ impl super::GameState {
                                     Instant::now() + Duration::from_secs(2),
                                 ));
                             }
+                            // Living world S2 (Tier 2 §2.1) — building over a block
+                            // is breaking it: a source someone else placed in a
+                            // Commons is theirs (the authority refuses a joiner the
+                            // same way). AIR is nobody's.
+                            let commons_place_blocked = existing != block::AIR
+                                && self.commons_blocks_local_edit(pidx, [place_x, place_y, place_z]);
 
                             // Rails and cables are surface-mounted, not a build
                             // surface — you can't stack a block (or another rail /
@@ -16500,7 +16525,7 @@ impl super::GameState {
                                     Instant::now() + Duration::from_secs(2),
                                 ));
                             }
-                            if !overlaps_any_player && !plot_place_blocked && !on_rail && !sapling_blocked && self.play_mode.can_edit_world() {
+                            if !overlaps_any_player && !plot_place_blocked && !commons_place_blocked && !on_rail && !sapling_blocked && self.play_mode.can_edit_world() {
                                 let hotbar = self.players[pidx].hotbar_slot;
                                 // C3c-1 — check first: a door with no headroom,
                                 // or a Plot Marker whose claim would overlap
@@ -23898,6 +23923,10 @@ impl super::GameState {
                     .push(broadcast_change(&self.world, x, y, z, blk));
                 self.rebuild_chunk_at(x, y, z);
             }
+            // Living world S2 — what the build skipped comes back to its commissioner.
+            if !outcome.skipped_materials.is_empty() {
+                self.return_commission_materials(&outcome.commissioner_npub, &outcome.skipped_materials);
+            }
             if let Some(plaque) = outcome.plaque {
                 #[cfg(not(target_arch = "wasm32"))]
                 self.pending_block_changes.push(broadcast_change(&self.world, plaque.0, plaque.1, plaque.2, crate::block::ARCHITECT_PLAQUE));
@@ -23922,6 +23951,30 @@ impl super::GameState {
         }
     }
 
+    /// Hand commission materials back to the commissioner's inventory (alpha
+    /// bridge: `local-player-{idx}`); what does not fit is dropped at their feet.
+    pub(crate) fn return_commission_materials(&mut self, commissioner_npub: &str, materials: &[(crate::block::BlockId, u32)]) {
+        let Some(pidx) = commissioner_npub
+            .strip_prefix("local-player-")
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|&i| i < self.players.len())
+        else {
+            return;
+        };
+        let overflow = {
+            let slot = &mut self.players[pidx];
+            crate::builder::refund_locked_materials(materials, &mut slot.inventory)
+        };
+        for (id, count) in overflow {
+            let pos = self.players[pidx].player.pos;
+            for _ in 0..count {
+                let stack = crate::item::ItemStack::new_block(id, 1);
+                let seed = self.tick_counter.wrapping_mul(2654435761) as u32;
+                crate::entity::spawn_item(&mut self.ecs, pos, stack, seed);
+            }
+        }
+    }
+
     /// Spec 26 Phase 13 — apply a refund intent. Finds the commissioner
     /// PlayerSlot by npub (alpha bridge: `local-player-{idx}`), returns
     /// materials to the inventory (overflow dropped at feet) and credits
@@ -23938,18 +23991,7 @@ impl super::GameState {
             return;
         }
         // Material refund.
-        let overflow = {
-            let slot = &mut self.players[pidx];
-            crate::builder::refund_locked_materials(&intent.materials, &mut slot.inventory)
-        };
-        for (id, count) in overflow {
-            let pos = self.players[pidx].player.pos;
-            for _ in 0..count {
-                let stack = crate::item::ItemStack::new_block(id, 1);
-                let seed = self.tick_counter.wrapping_mul(2654435761) as u32;
-                crate::entity::spawn_item(&mut self.ecs, pos, stack, seed);
-            }
-        }
+        self.return_commission_materials(&intent.commissioner_npub, &intent.materials);
         // Sats refund. Treated as a payout to the player so Charter
         // gating fires symmetrically with the original debit; on
         // suppression the sats simply don't move (they didn't leave

@@ -87,18 +87,23 @@ const MAX_EXHIBIT_IMAGE_BYTES: usize = 12 * 1024 * 1024;
 /// Pack a world for SHARING (export, replay, backup download): identical to
 /// [`pack_world`] but with the Proof-of-Play `pop_secret` stripped. The secret
 /// is host-only (Spec 06 §2.2): a shared file must never let its recipients
-/// map the original host's Satori drops. Only the owner's own persistence
+/// map the original host's Satori drops. The block-author table is stripped
+/// too (Tier 2 S2: who built what is the owner's, never exported). Only the owner's own persistence
 /// (the web IndexedDB blob and the encrypted Stash blob) keeps it — that path
 /// calls [`pack_world`] directly.
 pub fn pack_world_for_export(
     meta: &WorldMeta,
-    save: &WorldSave,
+    mut save: WorldSave,
     world: &World,
     exhibit_images: &[ExhibitImage],
 ) -> Result<Vec<u8>, String> {
     let mut shared = meta.clone();
     shared.pop_secret = None;
-    pack_world(&shared, save, world, exhibit_images)
+    // Living world S2 — the per-block author table (who placed which block, by
+    // npub) is the owner's own record and never leaves the machine in a shared
+    // file; the blocks arrive anonymous.
+    save.block_authors = None;
+    pack_world(&shared, &save, world, exhibit_images)
 }
 
 /// Unpack a world arriving from OUTSIDE (a `.axeworld` import, a web file
@@ -109,8 +114,11 @@ pub fn unpack_world_for_import(
     compressed: &[u8],
     world: &mut World,
 ) -> Result<(WorldMeta, WorldSave, Vec<ExhibitImage>), String> {
-    let (mut meta, save, images) = unpack_world(compressed, world)?;
+    let (mut meta, mut save, images) = unpack_world(compressed, world)?;
     meta.pop_secret = Some(crate::proof_of_play::gen_world_secret());
+    // Living world S2 — and no incoming author table: an export carries none,
+    // and a hand-made file's seat keys would otherwise become the importer's.
+    save.block_authors = None;
     Ok((meta, save, images))
 }
 
@@ -121,7 +129,7 @@ pub fn unpack_world_for_import(
 pub fn strip_secret_from_archive(compressed: &[u8]) -> Result<Vec<u8>, String> {
     let mut scratch = World::new();
     let (meta, save, images) = unpack_world(compressed, &mut scratch)?;
-    pack_world_for_export(&meta, &save, &scratch, &images)
+    pack_world_for_export(&meta, save, &scratch, &images)
 }
 
 /// Pack world state into a tar+gzip archive in memory.
@@ -489,7 +497,7 @@ mod tests {
         let mut meta = WorldMeta::new("secret-x");
         meta.pop_secret = Some([7u8; 32]);
         let save = minimal_world_save(1);
-        let bytes = pack_world_for_export(&meta, &save, &world, &[]).expect("pack");
+        let bytes = pack_world_for_export(&meta, minimal_world_save(1), &world, &[]).expect("pack");
         let mut fresh = World::new();
         let (back, _, _) = unpack_world(&bytes, &mut fresh).expect("unpack");
         assert_eq!(back.pop_secret, None, "an exported archive must not carry the secret");
@@ -501,6 +509,42 @@ mod tests {
         let stripped = strip_secret_from_archive(&owner).expect("strip");
         let (s, _, _) = unpack_world(&stripped, &mut World::new()).expect("unpack");
         assert_eq!(s.pop_secret, None);
+    }
+
+    /// Living world S2 (review SF5) — who placed which block (by npub) is the
+    /// owner's record: a shared file carries none, and an import drops any a
+    /// hand-made file brings. The owner's own blob keeps the table.
+    #[test]
+    fn export_carries_no_block_authors_and_import_drops_them() {
+        use crate::authorship::{AuthorKey, Authorship};
+        let world = World::new();
+        let meta = WorldMeta::new("authors-x");
+        let with_authors = || {
+            let mut a = Authorship::new();
+            a.set((0, 0, 0), 1, Some(&AuthorKey::Npub("npub1friend".into())));
+            a.set((0, 0, 0), 2, Some(&AuthorKey::Local(0)));
+            let mut save = minimal_world_save(1);
+            save.block_authors = a.to_saved();
+            assert!(save.block_authors.is_some());
+            save
+        };
+        // Owner persistence keeps the table.
+        let owner = pack_world(&meta, &with_authors(), &world, &[]).expect("pack");
+        let (_, kept, _) = unpack_world(&owner, &mut World::new()).expect("unpack");
+        assert!(kept.block_authors.is_some(), "the owner's own blob keeps it");
+        // A shared export has none, byte for byte.
+        let exported = pack_world_for_export(&meta, with_authors(), &world, &[]).expect("pack");
+        let (_, shared, _) = unpack_world(&exported, &mut World::new()).expect("unpack");
+        assert!(shared.block_authors.is_none(), "an export never carries who built what");
+        let anonymous = pack_world(&meta, &minimal_world_save(1), &world, &[]).expect("pack");
+        assert_eq!(archive_member(&exported, "world.dat"), archive_member(&anonymous, "world.dat"));
+        // Stripping an owner blob (the web Backup download) removes it.
+        let stripped = strip_secret_from_archive(&owner).expect("strip");
+        let (_, s, _) = unpack_world(&stripped, &mut World::new()).expect("unpack");
+        assert!(s.block_authors.is_none());
+        // An incoming file that still carries it is dropped on import.
+        let (_, imported, _) = unpack_world_for_import(&owner, &mut World::new()).expect("import");
+        assert!(imported.block_authors.is_none(), "an import never adopts a file's author table");
     }
 
     #[test]
@@ -515,7 +559,7 @@ mod tests {
         let got = imp.pop_secret.expect("an import is given a fresh secret");
         assert_ne!(got, [9u8; 32], "an import must not keep the source's secret");
         // A stripped archive also gets one.
-        let exp = pack_world_for_export(&meta, &save, &world, &[]).expect("pack");
+        let exp = pack_world_for_export(&meta, minimal_world_save(1), &world, &[]).expect("pack");
         let (imp2, _, _) = unpack_world_for_import(&exp, &mut World::new()).expect("unpack");
         assert!(imp2.pop_secret.is_some());
         assert_ne!(imp2.pop_secret, Some([9u8; 32]));
@@ -683,12 +727,13 @@ mod tests {
             ExhibitImage { image_ref: "two.jpg".into(), bytes: two.clone() },
         ];
 
-        let bytes = pack_world_for_export(&meta, &save, &world, &images).expect("export");
+        let exhibits_before = save.exhibits.clone();
+        let bytes = pack_world_for_export(&meta, save, &world, &images).expect("export");
         let mut fresh = World::new();
         let (meta2, save2, images2) =
             unpack_world_for_import(&bytes, &mut fresh).expect("import");
 
-        assert_eq!(save2.exhibits, save.exhibits, "exhibits must be identical");
+        assert_eq!(save2.exhibits, exhibits_before, "exhibits must be identical");
         assert_eq!(images2, images, "image bytes must be identical, in order");
         for e in &save2.exhibits {
             assert!(

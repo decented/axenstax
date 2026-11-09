@@ -445,3 +445,46 @@ fn try_again_relays_the_terraces_and_starts_the_quarry_grey_again() {
     let animals = r.ecs.query::<&crate::entity::MobKind>().iter().count();
     assert_eq!(animals, animals_before, "no duplicated animals");
 }
+
+/// Living world S1/S2 review (SF4) — the retry re-lays the terraces as the
+/// ARENA's terrain, not the player's: a cell the player built on is not left
+/// placed (and so not left with an author), so the second run's bloom scan
+/// reads exactly what the first run's did.
+#[test]
+fn try_again_leaves_no_player_placed_ground_so_the_second_scan_equals_the_first() {
+    use crate::authorship::AuthorKey;
+    let mut r = Rig::new();
+    let def = scenario::named_builtin_def("grey-quarry").unwrap();
+    let arena = def.arena.clone().unwrap();
+    let scan = |w: &World| {
+        let mut tally = crate::bloom::EcoTally::default();
+        let reg = BlockRegistry::new();
+        for cx in -2..=2 {
+            for cz in -2..=1 {
+                let chunks = crate::bloom::scan::RegionChunks::of(w, (cx, cz));
+                crate::bloom::scan::scan_columns(&chunks, None, &reg, 0..=15, 0..=15, &mut tally);
+            }
+        }
+        tally
+    };
+    let first = scan(&r.world);
+    assert!(first.columns > 0);
+
+    // The player digs terrace cells out and builds on them with their own blocks.
+    let cells = [r.at(16, T1_TOP, -3), r.at(17, T1_TOP, -3), r.at(18, T1_TOP, -3)];
+    for (x, y, z) in cells {
+        assert_eq!(r.world.get_block(x, y, z), block::STONE, "a terrace cell");
+        r.world.place_player_block_as(x, y, z, block::DIRT, Some(&AuthorKey::Local(0)));
+    }
+    assert!(!r.world.authors.is_empty());
+    assert_ne!(scan(&r.world), first, "built ground reads differently from bare terrace");
+
+    let mut lava = crate::lava::LavaSystem::new();
+    place_trial::rewind_arena(&mut r.world, &mut r.water, &mut lava, &mut r.bloom, &arena, ORIGIN);
+    for (x, y, z) in cells {
+        assert_eq!(r.world.get_block(x, y, z), block::STONE, "re-laid");
+        assert!(!r.world.is_placed(x, y, z), "and no longer placed");
+    }
+    assert!(r.world.authors.is_empty(), "no author is left on re-laid terrain");
+    assert_eq!(scan(&r.world), first, "the second run's bloom inputs equal the first's");
+}

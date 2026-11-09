@@ -58,7 +58,7 @@ pub fn export_world_native(name: &str) -> Result<Vec<u8>, String> {
     let images = read_exhibit_images_from_disk(name, &save);
     // Every caller shares the result (Save-As, world-transfer folder, replay
     // snapshot, publish), so the host-only PoP secret is stripped (Spec 06 §2.2).
-    pack_world_for_export(&meta, &save, &scratch, &images)
+    pack_world_for_export(&meta, save, &scratch, &images)
 }
 
 /// Write an unpacked archive into `worlds/<final_name>/`.

@@ -12,10 +12,11 @@
 //!   key: its blocks are anonymous, like every block placed before this build.
 //! * **Store.** [`Authorship`]: per chunk, a sparse map from the cell (u16) to an
 //!   [`AuthorId`] (u16) into a world key table.
-//! * **One clear funnel.** The author entry of a cell goes the moment its placed
-//!   bit is cleared (`World::set_placed(.., false)`, which every break, piston
-//!   move and falling block goes through). [`World::record_author`] is called
-//!   only at the sites that know who is acting.
+//! * **One funnel.** The author entry of a cell goes on every
+//!   `World::set_placed` call (a break, a piston move, a falling block, and a
+//!   placement alike), and when a cell becomes AIR (`World::set_block`).
+//!   [`World::record_author`] is called AFTER `set_placed(true)`, only at the
+//!   sites that know who is acting; a block that moves lands anonymous.
 //! * **Saved** as one appended `WorldSave` field ([`SavedAuthorship`]) in a
 //!   canonical order: keys sorted, chunks and cells sorted, so the same world
 //!   always encodes (and digests) to the same bytes.
@@ -430,6 +431,26 @@ pub fn is_someone_elses(recorded: Option<&AuthorKey>, who: Option<&AuthorKey>) -
 }
 
 impl crate::GameState {
+    /// Commons protection for a LOCAL seat's edit of the block at `cell`
+    /// (building over it, or using a tool or bucket on it): true, with the
+    /// "someone else built this" toast, when the cell is in a Commons and a
+    /// block another author built. Creative bypasses; a joined client's table
+    /// is empty (its server judges), so it never refuses here.
+    pub(crate) fn commons_blocks_local_edit(&mut self, pidx: usize, cell: [i32; 3]) -> bool {
+        if self.is_creative || self.world.authors.is_empty() {
+            return false;
+        }
+        let who = self.author_for_seat(pidx);
+        if !self.world.commons_protects(cell[0], cell[1], cell[2], who.as_ref()) {
+            return false;
+        }
+        self.toast = Some((
+            SOMEONE_ELSE_BUILT_TOAST.to_string(),
+            web_time::Instant::now() + std::time::Duration::from_secs(2),
+        ));
+        true
+    }
+
     /// The author key a local seat's placements are recorded under. `None` on a
     /// joined client: its copy of the world is the server's to record, and its
     /// own table stays empty.
@@ -450,9 +471,13 @@ impl crate::world::World {
     }
 
     /// The recorded author of the block at `(x, y, z)`, if its placed bit is
-    /// still set (a stale entry never answers).
+    /// still set and the cell holds a block (a stale entry, or one on AIR left
+    /// by a blast or a fire, never answers).
     pub fn author_at(&self, x: i32, y: i32, z: i32) -> Option<&AuthorKey> {
-        if self.authors.is_empty() || !self.is_placed(x, y, z) {
+        if self.authors.is_empty()
+            || !self.is_placed(x, y, z)
+            || self.get_block(x, y, z) == crate::block::AIR
+        {
             return None;
         }
         self.authors.get(chunk_of(x, y, z), cell_of(x, y, z))
@@ -473,6 +498,11 @@ impl crate::world::World {
             return false;
         }
         if !is_someone_elses(self.author_at(x, y, z), who) {
+            return false;
+        }
+        // The marker itself is anyone's to take down (the Tier 1 rule): a
+        // Commons nobody can remove would be a claim, not a shared place.
+        if self.get_block(x, y, z) == crate::block::COMMONS_STONE {
             return false;
         }
         self.commons_areas().iter().any(|c| c.overlaps(x, x, z, z))

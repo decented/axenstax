@@ -109,6 +109,10 @@ fn lay_fills(
                 for dx in lo[0]..=hi[0] {
                     let cell = (ox + dx, oy + dy, oz + dz);
                     put_cell(world, water, lava, cell, block_id);
+                    // The terrain is the arena's, not the player's: a cell the
+                    // player once placed into reads as natural again, with no
+                    // builder (so a second run scans as the first did).
+                    world.set_placed(cell.0, cell.1, cell.2, false);
                     note(cell);
                 }
             }

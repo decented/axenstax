@@ -537,6 +537,14 @@ pub struct CommissionTickOutcome {
     /// Plaque position dropped by a build-complete this tick. None
     /// when nothing was placed.
     pub plaque: Option<(i32, i32, i32)>,
+    /// The commissioner these outcomes belong to.
+    pub commissioner_npub: String,
+    /// Materials of the cells this tick's build step skipped (a claim the
+    /// placement arm refuses, or a block someone else built in a Commons).
+    /// The commission holds the whole plan's materials, so the caller hands
+    /// these back to the commissioner (`GameState::return_commission_materials`)
+    /// and nothing the build did not use is lost. Empty when nothing was skipped.
+    pub skipped_materials: Vec<(BlockId, u32)>,
 }
 
 /// Scan every villager with a `BuilderCommission`, walk one tick of the
@@ -573,13 +581,23 @@ pub fn process_builder_commissions(
 
         // Drive the build half-rate placement when in Building status.
         let mut placed = Vec::new();
+        let mut skipped_materials: Vec<(BlockId, u32)> = Vec::new();
         let placed_index_in_anchor = if matches!(
             commission.status,
             CommissionStatus::Building { .. }
         ) {
             let anchor_key = (commission.anchor[0], commission.anchor[1], commission.anchor[2]);
             if online {
-                placed = crate::plan::tick_build(world, anchor_key);
+                let step = crate::plan::tick_build_reporting(world, anchor_key);
+                placed = step.placed;
+                // The cells it skipped (a claim, or someone else's work in a
+                // Commons) cost nothing: their materials go back to the commissioner.
+                for block_id in step.skipped {
+                    match skipped_materials.iter_mut().find(|(b, _)| *b == block_id) {
+                        Some((_, n)) => *n += 1,
+                        None => skipped_materials.push((block_id, 1)),
+                    }
+                }
             }
             world
                 .construction_anchors
@@ -643,9 +661,11 @@ pub fn process_builder_commissions(
             }
             CommissionTickAction::BuildComplete => {
                 let anchor_key = (commission.anchor[0], commission.anchor[1], commission.anchor[2]);
-                // A commission locks no materials (the commission holds them), so
-                // there are no leftovers to hand back here.
-                plaque_out = crate::plan::complete_build(world, anchor_key).map(|done| done.plaque);
+                // A commission locks no materials on its anchor (the commission
+                // holds them); the cells it skipped were handed back as they were
+                // skipped (`CommissionTickOutcome::skipped_materials`), so there
+                // are no leftovers here.
+                plaque_out = crate::plan::complete_build(world, anchor_key).and_then(|done| done.plaque);
                 if let Ok(mut vc) = ecs.get::<&mut crate::villager::VillagerComponent>(id)
                     && let Some(c) = vc.commission.as_mut() {
                         c.status = CommissionStatus::Returning;
@@ -688,6 +708,8 @@ pub fn process_builder_commissions(
             action,
             placed,
             plaque: plaque_out,
+            commissioner_npub: commission.commissioner_npub.clone(),
+            skipped_materials,
         });
     }
 

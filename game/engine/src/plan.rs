@@ -1452,8 +1452,26 @@ pub fn tick_build(
     world: &mut World,
     anchor_pos: (i32, i32, i32),
 ) -> Vec<(i32, i32, i32, BlockId)> {
+    tick_build_reporting(world, anchor_pos).placed
+}
+
+/// What one [`tick_build_reporting`] step did: the cells it stamped, and the
+/// blocks of the cells it skipped (a claim the placement arm would refuse, or a
+/// block someone else built in a Commons), so a caller that holds the build's
+/// materials outside the anchor (an NPC commission) can hand those back.
+#[derive(Debug, Default)]
+pub struct BuildStep {
+    pub placed: Vec<(i32, i32, i32, BlockId)>,
+    pub skipped: Vec<BlockId>,
+}
+
+/// [`tick_build`], also reporting the skipped cells.
+pub fn tick_build_reporting(
+    world: &mut World,
+    anchor_pos: (i32, i32, i32),
+) -> BuildStep {
     let Some(data) = world.construction_anchors.get(&anchor_pos).cloned() else {
-        return Vec::new();
+        return BuildStep::default();
     };
     // Spec 26 pace gate. Always increment the counter; only place blocks
     // when the counter is on-beat. `pace_divider == 0` would divide by
@@ -1466,7 +1484,7 @@ pub fn tick_build(
         if let Some(d) = world.construction_anchors.get_mut(&anchor_pos) {
             d.pace_counter = next_counter;
         }
-        return Vec::new();
+        return BuildStep::default();
     }
     let ordered = order_cells_for_build(&rotate_cells(&data.plan.cells, data.rotations, data.plan.width, data.plan.depth));
     // Living world S2 — who started this build (kept beside the anchor and saved
@@ -1474,6 +1492,7 @@ pub fn tick_build(
     // tell when it would stamp over someone else's.
     let starter = world.authors.starter(anchor_pos).cloned();
     let mut placed = Vec::new();
+    let mut skipped = Vec::new();
     let mut next_index = data.placed_index;
     let mut new_locked = data.locked_materials.clone();
     for _ in 0..BLOCKS_PER_BUILD_TICK {
@@ -1490,6 +1509,7 @@ pub fn tick_build(
         // Marker over a Commons, a Feast Marker): the cell is left as it is
         // and costs no material.
         if crate::commons::placement_refused(world, cell.block_id, wx, wz) {
+            skipped.push(cell.block_id);
             next_index += 1;
             continue;
         }
@@ -1497,6 +1517,7 @@ pub fn tick_build(
         // else built inside a Commons: skipped the same way, at no material cost
         // (the items come back with the other leftovers).
         if world.commons_protects(wx, wy, wz, starter.as_ref()) {
+            skipped.push(cell.block_id);
             next_index += 1;
             continue;
         }
@@ -1527,7 +1548,7 @@ pub fn tick_build(
         d.locked_materials = new_locked;
         d.pace_counter = next_counter;
     }
-    placed
+    BuildStep { placed, skipped }
 }
 
 /// Spec 24 Phase 11 — cancel an in-progress build. Refunds any
@@ -1559,7 +1580,10 @@ pub fn cancel_build(
 #[derive(Clone, Debug, PartialEq)]
 pub struct CompletedBuild {
     /// The Architect's Plaque cell, for the caller to broadcast + rebuild.
-    pub plaque: (i32, i32, i32),
+    /// `None` when every cell the plaque could take (the eight above the
+    /// build's centre) holds a block someone else built in a Commons: the
+    /// plaque is then left out rather than put over their work.
+    pub plaque: Option<(i32, i32, i32)>,
     /// Locked materials left when the last cell was done: the items for the
     /// cells `tick_build` skipped because `commons::placement_refused` refused
     /// them (a Commons Stone over a Plot, a Plot Marker over a Commons). The
@@ -1616,16 +1640,18 @@ pub fn complete_build(
         _ => (data.plan.width, data.plan.depth),
     };
     let plaque_x = ax + (rotated_w / 2) as i32;
-    let mut plaque_y = ay + 1;
     let plaque_z = az + (rotated_d / 2) as i32;
+    let leftovers: Vec<crate::item::ItemStack> = data.locked_materials.into_iter().filter(|s| s.count > 0).collect();
     // Living world S2 — the plaque overrides its cell, so in a Commons it goes
     // above a block someone else built (the first free cell up, within a few).
-    for dy in 0..8 {
-        if !world.commons_protects(plaque_x, ay + 1 + dy, plaque_z, starter.as_ref()) {
-            plaque_y = ay + 1 + dy;
-            break;
-        }
-    }
+    // If all of them are someone else's, there is no plaque: it never replaces
+    // another builder's work.
+    let Some(plaque_y) = (0..8)
+        .map(|dy| ay + 1 + dy)
+        .find(|&y| !world.commons_protects(plaque_x, y, plaque_z, starter.as_ref()))
+    else {
+        return Some(CompletedBuild { plaque: None, leftovers });
+    };
     // Place plaque block. Note that this OVERRIDES whatever cell from
     // the plan sits at the central position. v1 accepts this; v2 could
     // pick a non-overlapping cell or set the plaque next to the build.
@@ -1639,8 +1665,8 @@ pub fn complete_build(
         ArchitectPlaqueData::from_plan_with_credit(&data.plan, data.builder_credit.clone()),
     );
     Some(CompletedBuild {
-        plaque: (plaque_x, plaque_y, plaque_z),
-        leftovers: data.locked_materials.into_iter().filter(|s| s.count > 0).collect(),
+        plaque: Some((plaque_x, plaque_y, plaque_z)),
+        leftovers,
     })
 }
 
@@ -2959,7 +2985,7 @@ mod tests {
         }
         let done = complete_build(&mut world, (0, 60, 0)).expect("plaque placed");
         assert!(done.leftovers.is_empty(), "nothing was skipped, nothing is left");
-        let plaque_pos = done.plaque;
+        let plaque_pos = done.plaque.expect("a plaque");
         // 3×3 footprint → centre = (anchor.x + 1, anchor.y + 1, anchor.z + 1) = (1, 61, 1).
         assert_eq!(plaque_pos, (1, 61, 1));
         assert_eq!(world.get_block(1, 61, 1), block::ARCHITECT_PLAQUE);

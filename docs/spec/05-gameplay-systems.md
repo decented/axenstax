@@ -4888,7 +4888,7 @@ block (`authorship`, Spec 02 "Who placed a block is saved"). Inside a Commons fo
 its author: the local break arm, beside the Plot check, refuses with the toast "Someone else built this." and the authority's
 `validate_block_edit` refuses a joiner's edit (`EditRefusal::SomeoneElsesBuild`, host-internal, not on the wire) and sends the
 authoritative block back as for `ForeignPlot`. A block with no recorded author (natural, placed before this build, a guest's) is free,
-creative bypasses, and the message never says who. Blasts, pistons, fire and falling blocks are not stopped. A Plan or a Builder
+creative bypasses, and the message never says who. Blasts, pistons, fire and falling blocks are not stopped. Building over a block or using a tool or bucket on it counts as breaking it (the local place and use arms ask the same rule the authority does), the Commons Stone itself is anyone's to remove, and a block that falls or is pushed by a piston lands with no author (free to anyone). A Plan's plaque is left out rather than put over another author's block, and an NPC commission hands the materials of any cell it skipped back to its commissioner. A Plan or a Builder
 commission stamping over another author's block in a Commons skips that cell, as it skips a claim (the item goes to the leftovers
 spill), and its plaque goes on the first free cell above. Whoever starts a Plan build is its author (a seat's key; a commission's
 commissioner): the key is kept beside the anchor and saved with the world's authorship. The bloom `b` term (below) reads the same

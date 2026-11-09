@@ -2250,13 +2250,15 @@ against the slice before allocating.
       guest's block and every block placed before the field have no author; (2) *canonical*: the keys are
       sorted and only the used ones are kept, chunks and cells are sorted, so the same world is the same
       bytes (the Keep checkpoint binds `world.dat`, `sim_digest` digests the same form); (3) *the placed bit
-      owns it*: an entry exists only for a cell whose placed bit is set. `World::set_placed(.., false)` is
-      the one clear funnel (breaks, pistons and falling blocks all go through it), and a restore drops any
+      owns it*: an entry exists only for a cell whose placed bit is set and which holds a block.
+      `World::set_placed` (any call, `true` included, so a moved block lands anonymous) and
+      `World::set_block(.., AIR)` are the funnel; a restore drops any
       entry whose bit is clear or whose chunk is gone (the chunk files and `world.dat` are written
       separately, so a crash can leave the record newer than a chunk); (4) *never a refusal*: a present
       but invalid record (an unknown key index, a cell past 4095, a repeated cell, a repeated key) is
       dropped with a `log::warn!`; (5) *bounds*: at most 4096 entries a chunk and 65,535 keys; past them a
-      new placement is anonymous. Never on the wire (no packet carries an author, no protocol change).
+      new placement is anonymous. Never on the wire (no packet carries an author, no protocol change), and never in a shared file:
+      `world_archive::pack_world_for_export` writes `None` and `unpack_world_for_import` drops an incoming table.
       Written from `World.authors` by every writer (a world is always passed), so it needs no extra
       argument the way the clock does. A handover's transfer copy maps the source's seat 0 to its npub and
       makes any other seat's blocks anonymous (`SavedAuthorship::neutralise`), and the checkpoint refuses

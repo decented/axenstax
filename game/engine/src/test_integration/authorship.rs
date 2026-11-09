@@ -217,7 +217,8 @@ fn a_plan_starter_is_credited_after_a_save_and_reload_mid_build() {
             assert_eq!(back.world.author_at(x, y, z), Some(&starter), "({x},{y},{z})");
         }
     }
-    assert_eq!(back.world.author_at(done.plaque.0, done.plaque.1, done.plaque.2), Some(&starter), "the plaque too");
+    let plaque = done.plaque.expect("a plaque");
+    assert_eq!(back.world.author_at(plaque.0, plaque.1, plaque.2), Some(&starter), "the plaque too");
     assert!(back.world.authors.starter(at).is_none(), "a finished build keeps no starter");
 }
 
@@ -293,7 +294,7 @@ fn a_plaque_never_replaces_someone_elses_block_in_a_commons() {
     assert_eq!(w.get_block(5, 65, 5), block::DIRT, "their block was skipped by the stamp");
     let done = crate::plan::complete_build(&mut w, at).unwrap();
     assert_eq!(w.get_block(5, 65, 5), block::DIRT, "and not replaced by the plaque");
-    assert_eq!(done.plaque, (5, 66, 5), "the plaque went above it");
+    assert_eq!(done.plaque, Some((5, 66, 5)), "the plaque went above it");
     assert_eq!(w.get_block(5, 66, 5), block::ARCHITECT_PLAQUE);
 }
 
@@ -463,4 +464,229 @@ fn outside_a_commons_a_joiner_may_break_anyones_block() {
     send_edits(&hs, &client, slot, 1, &[(theirs, block::AIR)]);
     hs.tick();
     assert_eq!(hs.server.world.get_block(theirs.0, theirs.1, theirs.2), block::AIR, "only a Commons protects");
+}
+
+// ── Review fixes (S1 + S2) ──────────────────────────────────────────
+
+fn plan_of_stone_row() -> PlanData {
+    let mut p = PlanData::debug_3x3_stone();
+    p.cells = (0..3).map(|rx| CapturedCell { rx, ry: 0, rz: 0, block_id: block::STONE }).collect();
+    p.width = 3;
+    p.depth = 1;
+    p
+}
+
+/// SF1 — an author entry on a cell that holds no block (a blast or a fire left
+/// the placed bit set) protects nothing and counts for nothing.
+#[test]
+fn an_author_entry_on_air_protects_nothing_and_counts_for_nothing() {
+    let mut w = commons_world();
+    let (me, other) = (AuthorKey::Local(0), AuthorKey::Npub("npub1other".into()));
+    // A blast: the block goes, and the entry goes with it.
+    w.place_player_block_as(5, 64, 5, block::STONE, Some(&other));
+    assert!(w.commons_protects(5, 64, 5, Some(&me)));
+    w.set_block(5, 64, 5, block::AIR);
+    assert!(w.authors.is_empty(), "a cell that becomes AIR has no builder any more");
+    // A stale entry made by hand (a crash, an older save) on an empty cell whose bit is set.
+    w.set_placed(6, 64, 5, true);
+    w.authors.set(crate::authorship::chunk_of(6, 64, 5), crate::authorship::cell_of(6, 64, 5), Some(&other));
+    w.place_player_block_as(7, 64, 5, block::STONE, Some(&AuthorKey::Npub("npub1third".into())));
+    assert_eq!(w.author_at(6, 64, 5), None);
+    assert!(!w.commons_protects(6, 64, 5, Some(&me)), "empty space is nobody's");
+    assert_eq!(w.authors_in_region(0, 0), 1, "only the live block counts toward b");
+}
+
+/// SF1 — and a placement into such a cell overwrites the stale entry with its
+/// own author (the authority path, through a real joiner).
+#[test]
+fn a_joiner_placing_into_a_cell_with_a_stale_entry_owns_the_new_block() {
+    let mut hs = start_open_server("authorship-stale");
+    let (client, slot) = join_guest(&mut hs, "Visitor");
+    let pk = [0x3c; 32];
+    hs.server.players[slot].verified_pubkey = Some(pk);
+    let mine = npub_key(&pk);
+    let stone = cell_beside(&hs, slot, 3, 0, 3);
+    hs.server.world.set_block(stone.0, stone.1, stone.2, block::COMMONS_STONE);
+    let cell = cell_beside(&hs, slot, 1, 0, 0);
+    hs.server.world.set_placed(cell.0, cell.1, cell.2, true);
+    hs.server.world.authors.set(crate::authorship::chunk_of(cell.0, cell.1, cell.2), crate::authorship::cell_of(cell.0, cell.1, cell.2), Some(&AuthorKey::Local(0)));
+    let _ = block_changes_seen(&client);
+    send_edits(&hs, &client, slot, 1, &[(cell, block::STONE)]);
+    hs.tick();
+    assert_eq!(hs.server.world.get_block(cell.0, cell.1, cell.2), block::STONE, "the empty cell was the joiner's to build in");
+    assert_eq!(hs.server.world.author_at(cell.0, cell.1, cell.2), Some(&mine), "and the block is theirs, not the stale entry's");
+    // A guest's placement into a stale cell clears the entry: the block is anonymous.
+    let cell2 = cell_beside(&hs, slot, 1, 0, 1);
+    hs.server.world.set_placed(cell2.0, cell2.1, cell2.2, true);
+    hs.server.world.authors.set(crate::authorship::chunk_of(cell2.0, cell2.1, cell2.2), crate::authorship::cell_of(cell2.0, cell2.1, cell2.2), Some(&AuthorKey::Local(0)));
+    hs.server.players[slot].verified_pubkey = None;
+    send_edits(&hs, &client, slot, 2, &[(cell2, block::STONE)]);
+    hs.tick();
+    assert_eq!(hs.server.world.get_block(cell2.0, cell2.1, cell2.2), block::STONE);
+    assert_eq!(hs.server.world.author_at(cell2.0, cell2.1, cell2.2), None, "a guest's block is anonymous");
+}
+
+/// SF2 — a block that falls lands anonymous. B's sand falling onto a cell
+/// where A once had an entry stays B's to break (and anyone's).
+#[test]
+fn a_falling_block_lands_anonymous_and_its_builder_can_still_break_it() {
+    let (a, b) = (AuthorKey::Npub("npub1aaa".into()), AuthorKey::Npub("npub1bbb".into()));
+    let mut w = commons_world();
+    // A's entry is left on the empty cell (5,64,5) with its bit set.
+    w.set_placed(5, 64, 5, true);
+    w.authors.set(crate::authorship::chunk_of(5, 64, 5), crate::authorship::cell_of(5, 64, 5), Some(&a));
+    // B places sand above it; it falls onto the cell.
+    w.place_player_block_as(5, 65, 5, block::SAND, Some(&b));
+    let mut water = crate::water::WaterSystem::new();
+    let reg = crate::block::BlockRegistry::new();
+    let changes = crate::falling_blocks::tick_falling_blocks(&mut w, &reg, &mut water, &[glam::Vec3::new(5.0, 64.0, 5.0)], 15);
+    assert!(!changes.is_empty());
+    assert_eq!(w.get_block(5, 64, 5), block::SAND, "the sand landed");
+    assert_eq!(w.get_block(5, 65, 5), block::AIR);
+    assert!(w.is_placed(5, 64, 5), "it is still player-placed (no Satori laundering)");
+    assert_eq!(w.author_at(5, 64, 5), None, "but it lands anonymous, not A's");
+    assert!(!w.commons_protects(5, 64, 5, Some(&b)), "B can break it");
+    assert!(!w.commons_protects(5, 64, 5, Some(&a)), "so can A: nobody's");
+}
+
+/// SF3 — the Commons Stone is anyone's to take down, as at Tier 1, even
+/// though it is placed (and so authored) like any other block.
+#[test]
+fn the_commons_stone_itself_can_be_broken_by_anyone() {
+    let (me, other) = (AuthorKey::Local(0), AuthorKey::Npub("npub1other".into()));
+    let mut w = World::new();
+    for x in 0..20 {
+        for z in 0..20 {
+            w.set_block(x, 63, z, block::STONE);
+        }
+    }
+    w.place_player_block_as(8, 64, 8, block::COMMONS_STONE, Some(&other));
+    w.place_player_block_as(9, 64, 8, block::STONE, Some(&other));
+    assert_eq!(w.commons_areas().len(), 1);
+    assert!(!w.commons_protects(8, 64, 8, Some(&me)), "the marker is anyone's to remove");
+    assert!(!w.commons_protects(8, 64, 8, None), "a guest's too");
+    assert!(w.commons_protects(9, 64, 8, Some(&me)), "while a block beside it is still protected");
+
+    // And through the authority: a joiner takes down the host's stone.
+    let mut hs = start_open_server("authorship-stone");
+    let (client, slot) = join_guest(&mut hs, "Visitor");
+    hs.server.players[slot].verified_pubkey = Some([0x3c; 32]);
+    let stone = cell_beside(&hs, slot, 3, 0, 3);
+    hs.server.world.place_player_block_as(stone.0, stone.1, stone.2, block::COMMONS_STONE, Some(&AuthorKey::Local(0)));
+    let _ = block_changes_seen(&client);
+    send_edits(&hs, &client, slot, 1, &[(stone, block::AIR)]);
+    hs.tick();
+    assert_eq!(hs.server.world.get_block(stone.0, stone.1, stone.2), block::AIR, "a joiner removed the host's Commons");
+}
+
+/// SF7 — building over an authored non-air block is breaking it, whatever
+/// replaces it: a placed water source, a snow layer. The authority refuses a
+/// joiner; the pure rule the local place arm asks says the same.
+#[test]
+fn building_over_someone_elses_replaceable_block_is_refused_like_a_break() {
+    let (me, other) = (AuthorKey::Local(1), AuthorKey::Local(0));
+    let mut w = commons_world();
+    w.place_player_block_as(5, 64, 5, block::WATER, Some(&other));
+    w.place_player_block_as(6, 64, 5, block::SNOW_LAYER, Some(&other));
+    for x in [5, 6] {
+        assert!(w.commons_protects(x, 64, 5, Some(&me)), "{x}: replacing it is breaking it");
+        assert!(!w.commons_protects(x, 64, 5, Some(&other)), "{x}: the builder may replace their own");
+    }
+    assert!(!w.commons_protects(7, 64, 5, Some(&me)), "an empty cell is free to build in");
+
+    let mut hs = start_open_server("authorship-replace");
+    let (client, slot) = join_guest(&mut hs, "Visitor");
+    hs.server.players[slot].verified_pubkey = Some([0x3c; 32]);
+    let stone = cell_beside(&hs, slot, 3, 0, 3);
+    hs.server.world.set_block(stone.0, stone.1, stone.2, block::COMMONS_STONE);
+    let water = cell_beside(&hs, slot, 1, 0, 0);
+    let snow = cell_beside(&hs, slot, 1, 0, 1);
+    hs.server.world.place_player_block_as(water.0, water.1, water.2, block::WATER, Some(&AuthorKey::Local(0)));
+    hs.server.world.place_player_block_as(snow.0, snow.1, snow.2, block::SNOW_LAYER, Some(&AuthorKey::Local(0)));
+    let _ = block_changes_seen(&client);
+    send_edits(&hs, &client, slot, 1, &[(water, block::STONE), (snow, block::STONE)]);
+    hs.tick();
+    assert_eq!(hs.server.world.get_block(water.0, water.1, water.2), block::WATER, "the host's source stands");
+    assert_eq!(hs.server.world.get_block(snow.0, snow.1, snow.2), block::SNOW_LAYER, "and the host's snow");
+    assert_eq!(hs.server.world.author_at(water.0, water.1, water.2), Some(&AuthorKey::Local(0)));
+}
+
+/// SF6 — an NPC commission that skips a cell in a Commons hands that cell's
+/// material back to the commissioner: stamped + returned = what the commission held.
+#[test]
+fn an_npc_commission_returns_the_materials_of_cells_it_skipped() {
+    use crate::builder::{BuilderCommission, CommissionStatus};
+    let other = AuthorKey::Npub("npub1other".into());
+    let mut world = World::new();
+    world.set_block(8, 63, 8, block::COMMONS_STONE);
+    // The row runs (1..=3, 65, 0); someone else built at (3,65,0).
+    world.place_player_block_as(3, 65, 0, block::STONE, Some(&other));
+    let mut ecs = hecs::World::new();
+    let workstation = [0, 64, 0];
+    let anchor = [1, 64, 0];
+    crate::entity::spawn_mob(&mut ecs, crate::mob::MobType::Villager, glam::Vec3::new(1.0, 64.0, 0.5));
+    let id = ecs.query::<&crate::entity::MobKind>().iter().map(|(id, _)| id).last().expect("villager spawned");
+    let commission = BuilderCommission {
+        plan: plan_of_stone_row(),
+        anchor,
+        rotations: 0,
+        locked_materials: vec![(block::STONE, 3)],
+        fee_sats: 0,
+        commissioner_npub: "local-player-0".to_string(),
+        village_id: None,
+        workstation,
+        status: CommissionStatus::PathingToSite,
+        created_tick: 0,
+        status_entered_tick: 0,
+    };
+    let vc = crate::villager::VillagerComponent {
+        profession: crate::villager::Profession::Builder,
+        claimed_workstation: Some(workstation),
+        commission: Some(commission),
+        ..Default::default()
+    };
+    let _ = ecs.insert_one(id, vc);
+    let (mut stamped, mut returned) = (0u32, 0u32);
+    let mut who = None;
+    for t in 1..=600u64 {
+        for o in crate::builder::process_builder_commissions(&mut ecs, &mut world, t, |_: &str| true) {
+            stamped += o.placed.len() as u32;
+            for (b, n) in &o.skipped_materials {
+                assert_eq!(*b, block::STONE);
+                returned += n;
+                who = Some(o.commissioner_npub.clone());
+            }
+        }
+        if !world.architect_plaques.is_empty() {
+            break;
+        }
+    }
+    assert!(!world.architect_plaques.is_empty(), "the build finished");
+    assert_eq!(world.author_at(3, 65, 0), Some(&other), "their block stands");
+    assert_eq!(returned, 1, "the skipped cell's stone is handed back");
+    assert_eq!(who.as_deref(), Some("local-player-0"), "to the commissioner");
+    assert_eq!(stamped + returned, 3, "nothing the commission held is lost or made twice");
+}
+
+/// NIT1 — when every cell the plaque could take holds someone else's block,
+/// there is no plaque rather than one over their work.
+#[test]
+fn no_plaque_is_better_than_one_over_someone_elses_work() {
+    let at = (4, 64, 4);
+    let mut w = commons_world();
+    let other = AuthorKey::Npub("npub1other".into());
+    // The plaque goes at (5, y, 5), y from 65 up through 72.
+    for y in 65..73 {
+        w.place_player_block_as(5, y, 5, block::DIRT, Some(&other));
+    }
+    w.construction_anchors.insert(at, anchor_for(PlanData::debug_3x3_stone(), at, true, Vec::new()));
+    w.authors.set_starter(at, Some(&AuthorKey::Local(0)));
+    run_build(&mut w, at);
+    let done = crate::plan::complete_build(&mut w, at).expect("the build completes");
+    assert_eq!(done.plaque, None, "no plaque");
+    assert!(w.architect_plaques.is_empty());
+    for y in 65..73 {
+        assert_eq!(w.get_block(5, y, 5), block::DIRT, "{y}: their column stands");
+        assert_eq!(w.author_at(5, y, 5), Some(&other));
+    }
 }

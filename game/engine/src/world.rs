@@ -2489,6 +2489,12 @@ impl World {
         chunk.set(lx, ly, lz, block);
         if edit {
             self.mark_edited((x, y, z));
+            // Living world S2 — a cell that becomes empty (a break, a blast, a
+            // fire, a drained source) has no builder any more, whatever left its
+            // placed bit set.
+            if block == block::AIR && !self.authors.is_empty() {
+                self.authors.clear_cell((cx, cy, cz), crate::authorship::cell_of(x, y, z));
+            }
             // C3b-fix-d (A-L5) — a table gone, for a server's table grace.
             if was == block::CRAFTING_TABLE
                 && let Some(log) = self.tables_gone.as_mut()
@@ -2540,10 +2546,12 @@ impl World {
         let ly = y.rem_euclid(CHUNK_SIZE as i32) as usize;
         let lz = z.rem_euclid(CHUNK_SIZE as i32) as usize;
         let in_worldgen = self.worldgen_depth > 0;
-        // Living world S2 — the one clear funnel: whatever clears the placed bit
-        // (a break, a piston move, a falling block) drops the cell's author, bit
-        // already clear or not.
-        if !placed && !self.authors.is_empty() {
+        // Living world S2 — the one author funnel: every call drops the cell's
+        // author, `true` included. A break clears the bit and the author; a
+        // block that moves (a piston, a falling block) lands anonymous; and a
+        // placement overwrites a stale entry (the recording writers call
+        // `record_author` AFTER `set_placed(true)`, see `place_player_block_as`).
+        if !self.authors.is_empty() {
             self.authors.clear_cell((cx, cy, cz), crate::authorship::cell_of(x, y, z));
         }
         let chunk = if placed {

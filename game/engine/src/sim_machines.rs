@@ -311,14 +311,15 @@ fn tick_construction(
                 // A Plan that skipped a claim cell hands its item back as a
                 // ground stack, on every path (the same world the build ran in).
                 crate::plan::spill_leftovers(ecs, anchor, done.leftovers);
-                let pos = done.plaque;
-                changes.push(crate::game_loop::broadcast_change(
-                    world,
-                    pos.0,
-                    pos.1,
-                    pos.2,
-                    block::ARCHITECT_PLAQUE,
-                ));
+                if let Some(pos) = done.plaque {
+                    changes.push(crate::game_loop::broadcast_change(
+                        world,
+                        pos.0,
+                        pos.1,
+                        pos.2,
+                        block::ARCHITECT_PLAQUE,
+                    ));
+                }
             }
         }
     }

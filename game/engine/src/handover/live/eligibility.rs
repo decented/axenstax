@@ -278,8 +278,13 @@ pub fn neutralise(save: &mut WorldSave, source_npub: &str) -> Result<(), Refusal
     }
     // Living world Tier 2 S2: the source's seat 0 authored blocks are its
     // npub's now; a split-screen seat's become anonymous (no proven identity).
-    if let Some(authors) = &mut save.block_authors {
+    let emptied = save.block_authors.as_mut().is_some_and(|authors| {
         authors.neutralise(source_npub);
+        *authors == crate::authorship::SavedAuthorship::default()
+    });
+    if emptied {
+        // Every entry was a split-screen seat's: the canonical "no record".
+        save.block_authors = None;
     }
     if !save.raid_kills.is_empty()
         || save.active_raids.iter().any(|r| !r.contribution_table.is_empty() || r.killing_blow.is_some())
@@ -342,6 +347,19 @@ mod tests {
     }
     fn vendor(owner: VendorOwner) -> SavedVendor {
         SavedVendor { x: 1, y: 2, z: 3, data: VendorData { owner: Some(owner), ..Default::default() } }
+    }
+
+    #[test]
+    fn handover_neutralise_leaves_no_record_when_only_split_screen_seats_built() {
+        use crate::authorship::{AuthorKey, Authorship};
+        let mut s = live_copy();
+        let mut a = Authorship::new();
+        a.set((0, 0, 0), 1, Some(&AuthorKey::Local(1)));
+        a.set((0, 0, 0), 2, Some(&AuthorKey::Local(2)));
+        s.block_authors = a.to_saved();
+        assert!(s.block_authors.is_some());
+        neutralise(&mut s, SOURCE).unwrap();
+        assert_eq!(s.block_authors, None, "the canonical 'no record', not an empty one");
     }
 
     #[test]
