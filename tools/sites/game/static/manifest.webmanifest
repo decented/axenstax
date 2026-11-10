@@ -1,7 +1,7 @@
 {
   "name": "Axe'n'Stax",
   "short_name": "Axe'n'Stax",
-  "description": "Axe'n'Stax: a block-building world you own. Build, farm and explore, then make places come alive. Self-hostable.",
+  "description": "Axe'n'Stax: a block-building world you own. Build, farm and explore, then bring grey places back to life.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

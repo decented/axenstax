@@ -22,7 +22,7 @@ Ready? Here's the path — **thirteen little steps**, in order. Each one builds 
 10. **Stand Your Ground** — make a sword and win a fight.
 11. **Tame a Wolf** — get yourself a companion who fights on your side.
 12. **Where the Satori Hides** — the real maths that decides where the rarest gem is.
-13. **Bring a Place Back to Life** — plant, water and feast a grey patch of ground back to life.
+13. **Bring a Place Back to Life** — plant, water and bring the animals home until a grey patch of ground comes back to life.
 
 Got through all thirteen? There's more to play with whenever you fancy it:
 

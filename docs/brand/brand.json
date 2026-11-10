@@ -10,7 +10,7 @@
         "Be honest about the odds",
         "Make the impossible sound exciting",
         "Use 'you' and 'your' — it's their world",
-        "Let the kid feel like a real miner"
+        "Let the kid feel a place is theirs to bring to life"
       ],
       "dont": [
         "Lecture or explain down",
@@ -21,10 +21,10 @@
       ]
     },
     "examples": {
-      "greeting": "Grab your axe. The whole Bitcoin network is out there. Let's see what you're up against.",
+      "greeting": "Grab your axe. There's a whole world out there, and some of it needs bringing back to life.",
       "success": "That's yours. You made it. Nobody else has that.",
-      "error": "Nothing this time. But you just did exactly what every miner on Earth does — real proof of work. The network noticed.",
-      "encouragement": "You've hashed more times than most adults ever will. Keep swinging.",
+      "error": "Nothing this time. Keep going: the deepest gems are rare on purpose.",
+      "encouragement": "Look at it. That colour wasn't there when you started.",
       "cta": "Your world is waiting. Pick up where you left off."
     }
   },
@@ -38,7 +38,7 @@
     "npm": { "name": "axenstax", "available": true }
   },
   "project": {
-    "description": "Open-source voxel platform where every swing of your axe is a real hash on the Bitcoin network. You will never find a block — and that's the lesson.",
+    "description": "Open-source block world where your world is yours to keep and places come alive when you look after them. Blocks stay where you put them; ideas copy free and keep their credit.",
     "lead": "Blocks (age 12)",
     "umbrella": "Decented",
     "colourTheme": {
