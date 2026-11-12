@@ -1,16 +1,36 @@
-# Axe'n'Stax test missions: build 0.2.33
+# Axe'n'Stax test missions: build 0.2.34
 
-This is the full guide behind the printed test sheet. The printed sheet is the short version; everything here is the detail a tester (or a co-host helping them) might need: what to type, exact numbers, what success looks like, and why something might not work.
+This is the test guide for the current build. A tester, or a chat assistant co-hosting their session, reads it for what to type, exact numbers, what success looks like, and why something might not work.
 
-Everything in this file was checked against the game's code for build 0.2.33. If the game and this guide disagree, that is worth reporting.
+Everything in this file was checked against the game's code for build 0.2.34. If the game and this guide disagree, that is worth reporting.
 
-- **Build:** 0.2.33 (desktop app, Linux)
-- **Sheet:** Mission Sheet 1, "On your own" (4 missions)
-- **Coming next:** Sheet 2 (at a village) and Sheet 3 (with a friend)
+- **Build:** 0.2.34 (desktop app, Linux)
+- **This session:** first the "Fixed since last time" re-checks (Mission 0), then the four missions "On your own"
+- **Coming next:** missions at a village, and missions with a friend
 
 ---
 
-## What is new in 0.2.33
+## Fixed since last time (re-check these first)
+
+These were found in the last playtest (build 0.2.33) and are fixed in 0.2.34. Check each one and say whether it now works. Mission 0 below covers the first two.
+
+1. **Torches look like torches.** Before, a placed torch was a dark brown block. Now it shows a yellow-orange flame on top of a brown wooden handle, by day and by night.
+2. **Torchlight is bright at night.** Before, a torch at night barely lit the blocks around it (they showed about a seventh of their normal colour). Now the blocks next to a torch show nearly their full colour at midnight, about the same as at noon, in a warm light that fades over the next few blocks.
+3. **Small blocks show the right picture.** A button shows its raised pad, a pressure plate shows its edge on all four sides, a lever's handle is wood-coloured, and a block in an item frame shows its whole picture on every side (a framed torch used to be a black cube).
+
+**Other changes in 0.2.34** (nothing to re-check, but good to know):
+
+- Rails and cables, powered ones too, no longer glow at night. They give off no light, so they now get as dark as the ground around them.
+- Water next to a torch is lit by it at night.
+
+**Known, not fixed yet** (if one of these happens, it is already known):
+
+- A torch in your hand, or dropped on the ground, still looks like a small dark cube with a torch picture on it. Only placed torches are fixed.
+- The world is split into columns 16 by 16 blocks wide. A sealed room built across the edge of one of those columns can stay lit like daytime inside at night, even with no torch.
+
+---
+
+## Also new in 0.2.33 (the last playtest build)
 
 - Villages that lost their villagers after a reload get villagers again.
 - Crops and saplings are only checked in the chunks that have them, and a save only writes land that something has changed. Both should cut lag in big worlds.
@@ -34,11 +54,28 @@ From 0.2.32 (the last playtest):
 2. **Press T** (or /) to open chat and type a command.
 3. **Type `/gm c`** to switch to Creative so you can fly. Find **flat, open grass with no trees**. Missions 1 to 3 all happen there.
 4. **Type `/gm s`** to switch back to Survival. The game must reply **"Switched to survival"** (or "already in survival").
-5. **Check the build number** at the bottom of the Settings menu. It should say **v0.2.33**. Use that number in the feedback.
+5. **Check the build number** at the bottom of the Settings menu. It should say **v0.2.34**. Use that number in the feedback.
 
 **Good to know:** hunger drops 1 point (half an icon on the hunger bar) every 30 seconds, whatever you are doing. A full bar lasts about 10 minutes, so take some food (berries, bread or cooked meat), or use `/give bread 16` in a test world.
 
 **Why step 4 matters:** worn paths and blight (missions 1 and 2) never happen in Creative. Creative also stops places from looking grey. If you can still fly, you are in Creative and those missions will not work.
+
+---
+
+## Mission 0: Torch at midnight (re-check)
+
+**What it tests:** a torch shows its flame and lights the blocks around it at night.
+
+1. In your test world, stand on open grass and type `/time set midnight` (the darkest time).
+2. Type `/give torch 4` if you have no torches, and place one on the grass.
+3. Step back two or three blocks and look at it.
+4. Place the other three torches in a line, about 4 blocks apart, to light a path.
+
+**Success:** the torch shows a yellow-orange flame on a brown handle. The grass right next to it is clearly lit in a warm light and you can see it is green; it gets darker over the next few blocks. Then type `/time set day` to go back to daytime.
+
+**If it does not work:**
+- The torch is a plain dark block: check the build number at the bottom of Settings says **v0.2.34**. An older build still has the bug.
+- It is too dark to tell: try it inside a cave, or in a hole you dig, where there is no moonlight at all.
 
 ---
 
@@ -193,7 +230,7 @@ That plants a square field of wheat sprouts (about 17 by 17, nearly 300 plants) 
   - Places are only tracked within about 128 blocks of you.
 - In Creative, places never look grey.
 
-### Other Living World things (for later sheets)
+### Other Living World things (for later missions)
 
 - **Feast:**
   - Place a Feast Table, hold 4 or more things to eat, and right-click it.
@@ -213,7 +250,7 @@ That plants a square field of wheat sprouts (about 17 by 17, nearly 300 plants) 
 
 ---
 
-## Commands used on these sheets
+## Commands used in these missions
 
 | Command | What it does |
 |---|---|
@@ -223,17 +260,19 @@ That plants a square field of wheat sprouts (about 17 by 17, nearly 300 plants) 
 | `/we set <block>` | Fills the marked box, e.g. `/we set wheat_stage_0` or `/we set air` (clears it) |
 | `/we size` | Says how big the marked box is |
 | `/trial list` / `/trial <id>` / `/trial off` | Lists trials, starts one, leaves one |
-| `/time set day` / `/time set night` | Daytime / night-time |
+| `/time set day` / `/time set night` / `/time set midnight` | Daytime / night-time / the darkest time |
 | **F3** | Shows the debug overlay, including **FPS** (frames per second) |
 
 ---
 
 ## Feedback
 
-At the end, write a short list like this, one line per mission, and hand it to the grown-up who looks after the game:
+At the end, write a short list like this, one line per mission, and hand it to the grown-up who looks after the game. A co-host writes its report in the shape its instructions give instead.
 
 ```
 Build (bottom of Settings):
+Re-checks: torch looks right / torchlight bright at night / small blocks: works / doesn't. What happened:
+Mission 0 Torch at midnight: worked / didn't. What happened:
 Mission 1 Path: worked / didn't. What happened:
 Mission 2 Wheat field: worked / didn't. What happened:
 Mission 3 Site Board: worked / didn't. What happened:
