@@ -16,7 +16,7 @@
 //! Bitcoin, earning, payouts, wallets, money, or rewards-as-money. His currency
 //! is *fun and care*. There is NO live AI, no network, no free-text input.
 
-use crate::block;
+use crate::block::{self, BlockId, BlockRegistry};
 use crate::chunk::CHUNK_SIZE;
 use crate::plan::{CapturedCell, PlanData};
 use crate::world::World;
@@ -61,21 +61,137 @@ pub struct SatoshiState {
 #[cfg_attr(not(test), allow(dead_code))]
 pub const SATOSHI_INITIATE_COOLDOWN_TICKS: u64 = 24_000;
 
-// ── House placement (a short, deterministic walk from the world spawn) ──
-const HOUSE_OX: i32 = 4; // house origin, a few blocks off the (0,0) spawn
+// ── House placement (a deterministic search outward from the world spawn) ──
+/// Where the search first tries the house origin, relative to the world spawn
+/// column: a few blocks off it, as the house always stood off the (0,0) spawn.
+const HOUSE_OX: i32 = 4;
 const HOUSE_OZ: i32 = 3;
 const HUT_W: u8 = 5; // square footprint (x and z)
 const HUT_H: u8 = 4; // floor → roof: ry 0..=3 (floor, 2 walls, roof)
+/// How far (blocks, on each axis) the site search reaches from the first try.
+const SITE_REACH: i32 = 24;
+/// The most the dry ground may differ in height across the footprint for the
+/// first pass of the search; a second pass takes [`MAX_STEP_RELAXED`].
+const MAX_STEP: i32 = 1;
+const MAX_STEP_RELAXED: i32 = 3;
 
-/// Centre column of the house footprint (for the surface probe + spawn point).
-const fn centre() -> (i32, i32) {
-    (HOUSE_OX + HUT_W as i32 / 2, HOUSE_OZ + HUT_W as i32 / 2)
+/// Centre column of a house whose origin is `(ox, oz)` (for the stand spot).
+const fn centre_of(ox: i32, oz: i32) -> (i32, i32) {
+    (ox + HUT_W as i32 / 2, oz + HUT_W as i32 / 2)
 }
 
-/// Satoshi's stand position: centre of the house, one block above the floor.
-fn satoshi_pos(floor_y: i32) -> Vec3 {
-    let (cx, cz) = centre();
+/// Satoshi's stand position: centre of the house at origin `(ox, oz)`, one
+/// block above the floor `floor_y`.
+fn satoshi_pos(ox: i32, floor_y: i32, oz: i32) -> Vec3 {
+    let (cx, cz) = centre_of(ox, oz);
     Vec3::new(cx as f32 + 0.5, floor_y as f32 + 1.0, cz as f32 + 0.5)
+}
+
+/// Where the house goes: its origin, its floor height, and the top of the
+/// ground under each footprint column (`tops[dz][dx]`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct HouseSite {
+    ox: i32,
+    oy: i32,
+    oz: i32,
+    tops: [[i32; HUT_W as usize]; HUT_W as usize],
+}
+
+/// The top of the dry ground in column `(x, z)`: the first solid, non-liquid
+/// block walking down from the column's top, past air and plants. `None` for a
+/// column that is not loaded and one topped by water or lava. A tree (leaves or
+/// a trunk above the ground) is no place to build on, so a column with one is
+/// `None` too, unless `through_trees`: then the walk goes on past leaves and
+/// logs to the ground under them (the last pass of the search, so a forest
+/// does not leave Satoshi with no house at all; the stamp clears what is in the
+/// footprint's volume).
+fn ground_top(world: &World, registry: &BlockRegistry, x: i32, z: i32, through_trees: bool) -> Option<i32> {
+    let mut y = world.column_top_y(x, z);
+    while y > 0 {
+        let b = world.get_block(x, y, z);
+        if block::is_fluid(b) {
+            return None;
+        }
+        let tree = block::is_any_leaves(b) || block::is_any_log_block(b);
+        if tree && !through_trees {
+            return None;
+        }
+        if b != block::AIR && !tree && registry.is_solid(b) {
+            return Some(y);
+        }
+        y -= 1;
+    }
+    None
+}
+
+/// The house site at origin `(ox, oz)`, if every footprint column is dry
+/// ground (`ground_top`) within `max_step` blocks of the others. The floor
+/// sits one above the highest of them, so nothing is buried and any lower
+/// column is filled up to it by [`build_house`].
+fn site_at(
+    world: &World,
+    registry: &BlockRegistry,
+    memo: &mut ahash::AHashMap<(i32, i32), Option<i32>>,
+    (ox, oz): (i32, i32),
+    max_step: i32,
+    through_trees: bool,
+) -> Option<HouseSite> {
+    let mut tops = [[0; HUT_W as usize]; HUT_W as usize];
+    let (mut lo, mut hi) = (i32::MAX, i32::MIN);
+    for dz in 0..HUT_W as i32 {
+        for dx in 0..HUT_W as i32 {
+            let (x, z) = (ox + dx, oz + dz);
+            let top = *memo
+                .entry((x, z))
+                .or_insert_with(|| ground_top(world, registry, x, z, through_trees));
+            let top = top?;
+            tops[dz as usize][dx as usize] = top;
+            lo = lo.min(top);
+            hi = hi.max(top);
+        }
+    }
+    (hi - lo <= max_step).then_some(HouseSite { ox, oy: hi + 1, oz, tops })
+}
+
+/// Find the house site near the world spawn column `spawn`: the first try is
+/// `spawn + (HOUSE_OX, HOUSE_OZ)`, then square rings outward (a fixed order,
+/// so the answer is the same for a world on every machine) on the first pass's
+/// flat enough ground, then again with the relaxed step, then once more with
+/// the relaxed step looking through trees (never through water or lava). The first try's
+/// footprint must be loaded, or `None`: the ground is not there yet and the
+/// next pass tries again (nothing here generates). A site never overlaps
+/// the spawn column, where a player starts.
+fn find_site(world: &World, registry: &BlockRegistry, spawn: (i32, i32)) -> Option<HouseSite> {
+    let first = (spawn.0 + HOUSE_OX, spawn.1 + HOUSE_OZ);
+    let cs = CHUNK_SIZE as i32;
+    let held = |x: i32, z: i32| world.column_holds_blocks(x.div_euclid(cs), z.div_euclid(cs));
+    let w = HUT_W as i32 - 1;
+    if ![(0, 0), (w, 0), (0, w), (w, w)].iter().all(|&(dx, dz)| held(first.0 + dx, first.1 + dz)) {
+        return None;
+    }
+    for (max_step, through_trees) in [(MAX_STEP, false), (MAX_STEP_RELAXED, false), (MAX_STEP_RELAXED, true)] {
+        // The ground of a column depends on whether trees are looked through.
+        let mut memo = ahash::AHashMap::new();
+        for ring in 0..=SITE_REACH {
+            for dz in -ring..=ring {
+                for dx in -ring..=ring {
+                    if dx.abs().max(dz.abs()) != ring {
+                        continue;
+                    }
+                    let origin = (first.0 + dx, first.1 + dz);
+                    let covers_spawn = (origin.0 - 1..=origin.0 + HUT_W as i32).contains(&spawn.0)
+                        && (origin.1 - 1..=origin.1 + HUT_W as i32).contains(&spawn.1);
+                    if covers_spawn {
+                        continue;
+                    }
+                    if let Some(site) = site_at(world, registry, &mut memo, origin, max_step, through_trees) {
+                        return Some(site);
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 /// The structural cells of the humble **wooden** hut, relative to the lowest-XZ
@@ -126,35 +242,82 @@ pub fn starter_hut_plan() -> PlanData {
     )
 }
 
-/// Build Satoshi's wooden hut at floor `oy`: clear the volume, place the shared
+/// Writes to the world that remember what each cell was, so the caller can
+/// relight and remesh exactly what changed: one entry per cell, the block it
+/// held before the first write and the block it holds now (a cell written twice
+/// is one entry; one that ends as it began is none).
+struct Stamp<'a> {
+    world: &'a mut World,
+    cells: Vec<crate::lighting::CellChange>,
+    index: ahash::AHashMap<(i32, i32, i32), usize>,
+}
+
+impl<'a> Stamp<'a> {
+    fn new(world: &'a mut World) -> Self {
+        Self { world, cells: Vec::new(), index: ahash::AHashMap::new() }
+    }
+
+    fn set(&mut self, x: i32, y: i32, z: i32, to: BlockId) {
+        match self.index.get(&(x, y, z)) {
+            Some(&i) => self.cells[i].2 = to,
+            None => {
+                let prev = self.world.get_block(x, y, z);
+                self.index.insert((x, y, z), self.cells.len());
+                self.cells.push(((x, y, z), prev, to));
+            }
+        }
+        self.world.set_block(x, y, z, to);
+    }
+
+    /// The cells whose block really changed, in the order first written.
+    fn finish(self) -> Vec<crate::lighting::CellChange> {
+        self.cells.into_iter().filter(|(_, prev, now)| prev != now).collect()
+    }
+}
+
+/// Build Satoshi's wooden hut on `site`: clear the volume, fill any column
+/// lower than the floor up to it with a cobblestone foundation, place the shared
 /// [`hut_cells`], add glass windows on the three non-door walls + a roof torch
-/// beacon. Idempotent in effect (writes the same blocks for a given `oy`).
-fn build_house(world: &mut World, oy: i32) {
-    let (ox, oz) = (HOUSE_OX, HOUSE_OZ);
+/// beacon. Idempotent in effect (writes the same blocks for a given site).
+/// Returns every cell it changed (`lighting::CellChange`): the caller owns the
+/// relight and the remesh, because a raw `World::set_block` does neither.
+fn build_house(world: &mut World, site: &HouseSite) -> Vec<crate::lighting::CellChange> {
+    let (ox, oy, oz) = (site.ox, site.oy, site.oz);
     let w = HUT_W as i32;
     let h = HUT_H as i32;
+    let mut stamp = Stamp::new(world);
     // Clear the interior + walls volume so terrain doesn't intrude.
     for dy in 0..=h {
         for dz in 0..w {
             for dx in 0..w {
-                world.set_block(ox + dx, oy + dy, oz + dz, block::AIR);
+                stamp.set(ox + dx, oy + dy, oz + dz, block::AIR);
+            }
+        }
+    }
+    // A column lower than the floor stands on a foundation, so every floor cell
+    // has solid ground under it.
+    for dz in 0..w {
+        for dx in 0..w {
+            for y in (site.tops[dz as usize][dx as usize] + 1)..oy {
+                stamp.set(ox + dx, y, oz + dz, block::COBBLESTONE);
             }
         }
     }
     // Place the structural hut (identical to the gifted plan).
     for c in hut_cells() {
-        world.set_block(ox + c.rx as i32, oy + c.ry as i32, oz + c.rz as i32, c.block_id);
+        stamp.set(ox + c.rx as i32, oy + c.ry as i32, oz + c.rz as i32, c.block_id);
     }
     // Glass windows on the three non-door walls (mid-height) + a roof torch.
     let dc = HUT_W as i32 / 2;
-    world.set_block(ox + dc, oy + 2, oz + w - 1, block::GLASS); // back wall
-    world.set_block(ox, oy + 2, oz + dc, block::GLASS); // left wall
-    world.set_block(ox + w - 1, oy + 2, oz + dc, block::GLASS); // right wall
-    world.set_block(ox + dc, oy + h, oz + dc, block::TORCH); // beacon on the roof
+    stamp.set(ox + dc, oy + 2, oz + w - 1, block::GLASS); // back wall
+    stamp.set(ox, oy + 2, oz + dc, block::GLASS); // left wall
+    stamp.set(ox + w - 1, oy + 2, oz + dc, block::GLASS); // right wall
+    stamp.set(ox + dc, oy + h, oz + dc, block::TORCH); // beacon on the roof
     // Interior hearth-glow — a warm corner light so the hut reads "someone wise
     // lives here" from within (atmosphere; entities don't sample block-light, so
     // this lights the room, not Satoshi himself — his glow is his amulet).
-    world.set_block(ox + 1, oy + 1, oz + 1, block::TORCH);
+    stamp.set(ox + 1, oy + 1, oz + 1, block::TORCH);
+    stamp.finish()
 }
 
 /// Spawn the Satoshi villager entity + tag it. `VillagerComponent`
@@ -215,8 +378,8 @@ pub fn tick_summon(world: &World, ecs: &mut hecs::World, player_pos: Vec3) {
         // targeting it (and snapping to its highest block) would put him on the
         // roof. The centre is where he spawns.
         match world.satoshi.home {
-            Some(_) => {
-                let (cx, cz) = centre();
+            Some([hx, _, hz]) => {
+                let (cx, cz) = centre_of(hx, hz);
                 (cx as f32 + 0.5, cz as f32 + 0.5)
             }
             None => return,
@@ -265,31 +428,41 @@ pub fn tick_summon(world: &World, ecs: &mut hecs::World, player_pos: Vec3) {
 /// hut on first entry to an enabled world, then re-spawns the (non-persisted)
 /// entity at his home on reload. Idempotent. Only acts in worlds explicitly
 /// created to host him — never an existing world, never the Workshop.
-pub fn tick_spawn(world: &mut World, ecs: &mut hecs::World) {
+///
+/// A house not built yet goes on dry ground near the world spawn column
+/// `spawn` ([`find_site`]); one already built stays where `home` says. Returns
+/// the cells the new house changed: the caller relights and remeshes them (and,
+/// on a hosted world, tells the joiners). Empty on every other pass.
+pub fn tick_spawn(
+    world: &mut World,
+    ecs: &mut hecs::World,
+    spawn: (i32, i32),
+    registry: &BlockRegistry,
+) -> Vec<crate::lighting::CellChange> {
     if !world.satoshi.enabled || world.is_workshop {
-        return;
+        return Vec::new();
     }
     match world.satoshi.home {
         None => {
-            let (cx, cz) = centre();
-            let Some((surf_y, _)) = world.highest_block(cx, cz) else {
-                return; // ground not loaded yet — try again next cadence
+            let Some(site) = find_site(world, registry, spawn) else {
+                return Vec::new(); // ground not loaded yet — try again next cadence
             };
-            let floor_y = surf_y + 1;
-            build_house(world, floor_y);
-            spawn_satoshi(ecs, satoshi_pos(floor_y));
-            world.satoshi.home = Some([HOUSE_OX, floor_y, HOUSE_OZ]);
+            let changes = build_house(world, &site);
+            spawn_satoshi(ecs, satoshi_pos(site.ox, site.oy, site.oz));
+            world.satoshi.home = Some([site.ox, site.oy, site.oz]);
+            changes
         }
-        Some([_, floor_y, _]) => {
+        Some([ox, floor_y, oz]) => {
             if satoshi_exists(ecs) {
-                return;
+                return Vec::new();
             }
-            let (cx, cz) = centre();
+            let (cx, cz) = centre_of(ox, oz);
             let cs = CHUNK_SIZE as i32;
             if !world.has_chunk(cx.div_euclid(cs), floor_y.div_euclid(cs), cz.div_euclid(cs)) {
-                return;
+                return Vec::new();
             }
-            spawn_satoshi(ecs, satoshi_pos(floor_y));
+            spawn_satoshi(ecs, satoshi_pos(ox, floor_y, oz));
+            Vec::new()
         }
     }
 }
@@ -470,6 +643,12 @@ pub fn should_initiate(s: &SatoshiState, now_tick: u64) -> bool {
 mod tests {
     use super::*;
 
+    /// One spawn pass for a world whose spawn column is (0, 0): the house is
+    /// first tried at (HOUSE_OX, HOUSE_OZ).
+    fn spawn_pass(world: &mut World, ecs: &mut hecs::World) -> Vec<crate::lighting::CellChange> {
+        tick_spawn(world, ecs, (0, 0), &BlockRegistry::new())
+    }
+
     /// A world configured to host Satoshi (as a new normal world would be).
     fn flat_ground(world: &mut World, y: i32) {
         world.satoshi.enabled = true;
@@ -551,7 +730,7 @@ mod tests {
         let mut world = World::new();
         flat_ground(&mut world, 64);
         let mut ecs = hecs::World::new();
-        tick_spawn(&mut world, &mut ecs); // builds the hut (roof + walls) + spawns him
+        spawn_pass(&mut world, &mut ecs); // builds the hut (roof + walls) + spawns him
         let id = ecs
             .query::<&SatoshiMarker>()
             .iter()
@@ -576,7 +755,7 @@ mod tests {
             floor_y + 1,
             p.y
         );
-        let (cx, cz) = centre();
+        let (cx, cz) = centre_of(HOUSE_OX, HOUSE_OZ);
         let d = ((p.x - (cx as f32 + 0.5)).powi(2) + (p.z - (cz as f32 + 0.5)).powi(2)).sqrt();
         assert!(d < 0.5, "returns to his centre stand spot, got dist {d}");
     }
@@ -633,7 +812,7 @@ mod tests {
         let mut ecs = hecs::World::new();
         flat_ground(&mut world, 64);
 
-        tick_spawn(&mut world, &mut ecs);
+        spawn_pass(&mut world, &mut ecs);
 
         assert_eq!(
             ecs.query::<&SatoshiMarker>().iter().count(),
@@ -641,7 +820,7 @@ mod tests {
             "exactly one Satoshi after the first spawn pass"
         );
         assert_eq!(world.satoshi.home, Some([HOUSE_OX, 65, HOUSE_OZ]));
-        let (cx, cz) = centre();
+        let (cx, cz) = centre_of(HOUSE_OX, HOUSE_OZ);
         assert_eq!(world.get_block(cx, 65, cz), block::OAK_PLANKS, "house floor laid");
         assert_eq!(
             world.get_block(HOUSE_OX + 1, 66, HOUSE_OZ + 1),
@@ -649,7 +828,7 @@ mod tests {
             "the hut is lit from within (interior hearth torch)"
         );
 
-        tick_spawn(&mut world, &mut ecs);
+        spawn_pass(&mut world, &mut ecs);
         assert_eq!(
             ecs.query::<&SatoshiMarker>().iter().count(),
             1,
@@ -657,16 +836,230 @@ mod tests {
         );
     }
 
+    /// A world whose origin is open sea, with the columns round its real spawn
+    /// column and the origin generated as a new world has them.
+    fn sea_origin_world() -> (World, crate::biome::BiomeGenerator, u32) {
+        let seed = crate::spawn_search::sea_origin_seed();
+        let bg = crate::biome::BiomeGenerator::new(seed, crate::biome::Generator::V3);
+        let mut world = World::new();
+        let (sx, sz) = crate::chunk_stream::world_spawn_xz(&world, &bg);
+        let (cx, cz) = (sx.div_euclid(16), sz.div_euclid(16));
+        for dx in -3..=3 {
+            for dz in -3..=3 {
+                world.generate_column(cx + dx, cz + dz, &bg);
+            }
+        }
+        for (cx, cz) in [(0, 0), (-1, 0), (0, -1), (-1, -1)] {
+            world.generate_column(cx, cz, &bg);
+        }
+        world.satoshi.enabled = true;
+        (world, bg, seed)
+    }
+
+    /// Satoshi's house on a world whose origin is open sea: it goes near the
+    /// world spawn, on dry ground, and every cell of its floor has solid,
+    /// non-liquid ground under it, never water.
+    #[test]
+    fn a_house_on_a_sea_origin_world_stands_on_dry_ground_near_the_spawn() {
+        let (mut world, bg, seed) = sea_origin_world();
+        let mut ecs = hecs::World::new();
+        let spawn = crate::chunk_stream::world_spawn_xz(&world, &bg);
+        assert_ne!(spawn, (0, 0), "control: seed {seed} spawns away from its sea origin");
+        let registry = BlockRegistry::new();
+        let changes = tick_spawn(&mut world, &mut ecs, spawn, &registry);
+        assert!(!changes.is_empty(), "the house was built");
+        let [ox, oy, oz] = world.satoshi.home.expect("the house was placed");
+        assert!(
+            (ox - spawn.0).abs() <= SITE_REACH + HOUSE_OX && (oz - spawn.1).abs() <= SITE_REACH + HOUSE_OZ,
+            "seed {seed}: the house at {:?} is near the spawn {spawn:?}",
+            [ox, oy, oz]
+        );
+        for dz in 0..HUT_W as i32 {
+            for dx in 0..HUT_W as i32 {
+                let under = world.get_block(ox + dx, oy - 1, oz + dz);
+                assert!(
+                    registry.is_solid(under) && !block::is_fluid(under),
+                    "seed {seed}: floor cell ({dx},{dz}) of the house at {:?} sits on block {under}",
+                    [ox, oy, oz]
+                );
+                assert_eq!(world.get_block(ox + dx, oy, oz + dz), block::OAK_PLANKS, "the floor is laid");
+            }
+        }
+        assert!(satoshi_exists(&ecs), "Satoshi stands in it");
+    }
+
+    /// The old fixed site, a few blocks off the origin, is the sea: the pass
+    /// must not build there, so `home` is not near the origin.
+    #[test]
+    fn a_sea_origin_world_gets_no_house_over_the_water() {
+        let (mut world, bg, seed) = sea_origin_world();
+        let mut ecs = hecs::World::new();
+        // The spawn passed is the origin, as a v2 world's: all of its reach is sea.
+        let registry = BlockRegistry::new();
+        let changes = tick_spawn(&mut world, &mut ecs, (0, 0), &registry);
+        if let Some([ox, oy, oz]) = world.satoshi.home {
+            for dz in 0..HUT_W as i32 {
+                for dx in 0..HUT_W as i32 {
+                    let under = world.get_block(ox + dx, oy - 1, oz + dz);
+                    assert!(
+                        registry.is_solid(under) && !block::is_fluid(under),
+                        "seed {seed}: sits on block {under}"
+                    );
+                }
+            }
+        } else {
+            assert!(changes.is_empty() && !satoshi_exists(&ecs), "no site: nothing built, no Satoshi");
+        }
+        let _ = bg;
+    }
+
+    /// The changes `build_house` returns are exactly the cells that changed,
+    /// every one of them (so none is left invisible), and each names the block
+    /// it held and the block it holds now.
+    #[test]
+    fn the_stamp_reports_every_cell_it_changes() {
+        let mut world = World::new();
+        let mut ecs = hecs::World::new();
+        flat_ground(&mut world, 64);
+        // Rock under the grass, a hollow in the grass the foundation fills, and
+        // a plant on the ground the clearing replaces.
+        for z in (HOUSE_OZ - 2)..(HOUSE_OZ + HUT_W as i32 + 2) {
+            for x in (HOUSE_OX - 2)..(HOUSE_OX + HUT_W as i32 + 2) {
+                for y in 58..64 {
+                    world.set_block(x, y, z, block::STONE);
+                }
+            }
+        }
+        world.set_block(HOUSE_OX + 4, 64, HOUSE_OZ + 4, block::AIR);
+        world.set_block(HOUSE_OX + 1, 65, HOUSE_OZ + 3, block::TALL_GRASS);
+        let region = |w: &World| {
+            let mut m = std::collections::BTreeMap::new();
+            for y in 60..75 {
+                for z in (HOUSE_OZ - 3)..(HOUSE_OZ + HUT_W as i32 + 3) {
+                    for x in (HOUSE_OX - 3)..(HOUSE_OX + HUT_W as i32 + 3) {
+                        m.insert((x, y, z), w.get_block(x, y, z));
+                    }
+                }
+            }
+            m
+        };
+        let before = region(&world);
+        let changes = spawn_pass(&mut world, &mut ecs);
+        let after = region(&world);
+        let changed: std::collections::BTreeSet<_> =
+            before.iter().filter(|(p, b)| after[*p] != **b).map(|(p, _)| *p).collect();
+        let reported: std::collections::BTreeSet<_> = changes.iter().map(|c| c.0).collect();
+        assert_eq!(reported, changed, "the changes cover every cell the house changed, and no other");
+        assert_eq!(reported.len(), changes.len(), "each cell once");
+        for &(pos, prev, now) in &changes {
+            assert_eq!(before[&pos], prev, "{pos:?}: the block it held");
+            assert_eq!(after[&pos], now, "{pos:?}: the block it holds");
+        }
+        assert!(
+            changes.iter().any(|&(p, _, now)| p == (HOUSE_OX + 4, 64, HOUSE_OZ + 4) && now == block::COBBLESTONE),
+            "the hollow under the floor is filled"
+        );
+        // Every section the changes sit in is marked for remesh, and the rest
+        // within one of them are queued (the light reaches them).
+        let plan = crate::block_interact::runtime_edit_remesh(changes.iter().map(|c| c.0));
+        for (pos, ..) in &changes {
+            assert!(plan.now.contains(&World::block_to_chunk(pos.0, pos.1, pos.2)), "{pos:?}");
+        }
+        assert!(plan.later.is_disjoint(&plan.now));
+        assert!(!plan.later.is_empty());
+    }
+
+    /// A house site over water is never taken: a lake on the first try moves
+    /// the house to dry ground; nothing dry in reach builds nothing.
+    #[test]
+    fn a_house_is_never_sited_over_water_or_lava_or_trees() {
+        let registry = BlockRegistry::new();
+        let mut world = World::new();
+        flat_ground(&mut world, 64);
+        // A pond over the first try's footprint.
+        for z in HOUSE_OZ..HOUSE_OZ + HUT_W as i32 {
+            for x in HOUSE_OX..HOUSE_OX + HUT_W as i32 {
+                world.set_block(x, 65, z, block::WATER);
+            }
+        }
+        let site = find_site(&world, &registry, (0, 0));
+        assert!(site.is_none() || {
+            let s = site.clone().unwrap();
+            (s.ox, s.oz) != (HOUSE_OX, HOUSE_OZ)
+        }, "not over the pond: {site:?}");
+        // Lava is no ground either.
+        let mut lava = World::new();
+        flat_ground(&mut lava, 64);
+        lava.set_block(HOUSE_OX + 2, 65, HOUSE_OZ + 2, block::LAVA);
+        let site = find_site(&lava, &registry, (0, 0));
+        assert!(site.is_none_or(|s| (s.ox, s.oz) != (HOUSE_OX, HOUSE_OZ)));
+        // A tree in the footprint.
+        let mut wood = World::new();
+        flat_ground(&mut wood, 64);
+        wood.set_block(HOUSE_OX + 1, 65, HOUSE_OZ + 1, block::OAK_LOG);
+        let site = find_site(&wood, &registry, (0, 0));
+        assert!(site.is_none_or(|s| (s.ox, s.oz) != (HOUSE_OX, HOUSE_OZ)));
+    }
+
+    /// A forest does not leave Satoshi without a house: with a canopy over the
+    /// whole reach the last pass looks through it to the ground, and the stamp
+    /// clears the footprint's volume.
+    #[test]
+    fn a_house_is_still_built_under_a_canopy() {
+        let registry = BlockRegistry::new();
+        let mut world = World::new();
+        let mut ecs = hecs::World::new();
+        flat_ground(&mut world, 64);
+        // Two leaf layers over the whole reach, one under the roof line.
+        for z in (HOUSE_OZ - 2)..(HOUSE_OZ + HUT_W as i32 + 2) {
+            for x in (HOUSE_OX - 2)..(HOUSE_OX + HUT_W as i32 + 2) {
+                world.set_block(x, 68, z, block::OAK_LEAVES);
+                world.set_block(x, 66, z, block::OAK_LEAVES);
+            }
+        }
+        // A trunk standing in the footprint.
+        world.set_block(HOUSE_OX + 2, 65, HOUSE_OZ + 2, block::OAK_LOG);
+        assert!(find_site(&world, &registry, (0, 0)).is_some(), "found through the canopy");
+        let changes = spawn_pass(&mut world, &mut ecs);
+        assert!(!changes.is_empty() && satoshi_exists(&ecs), "the house is built");
+        let [ox, oy, oz] = world.satoshi.home.expect("placed");
+        for dz in 0..HUT_W as i32 {
+            for dx in 0..HUT_W as i32 {
+                let under = world.get_block(ox + dx, oy - 1, oz + dz);
+                assert!(registry.is_solid(under) && !block::is_fluid(under), "floor ({dx},{dz}) on {under}");
+            }
+        }
+        assert_eq!(world.get_block(HOUSE_OX + 2, 65, HOUSE_OZ + 2), block::OAK_PLANKS, "the trunk is gone");
+    }
+
+    /// A house already built stays where it is, whatever the world spawn says,
+    /// and an old save's home (the fixed origin offset) keeps working.
+    #[test]
+    fn a_house_already_built_stays_where_it_was() {
+        let mut world = World::new();
+        let mut ecs = hecs::World::new();
+        flat_ground(&mut world, 64);
+        spawn_pass(&mut world, &mut ecs);
+        let home = world.satoshi.home;
+        assert_eq!(home, Some([HOUSE_OX, 65, HOUSE_OZ]));
+        ecs = hecs::World::new();
+        // The world spawn is somewhere else entirely now: the entity returns home.
+        let changes = tick_spawn(&mut world, &mut ecs, (500, -500), &BlockRegistry::new());
+        assert!(changes.is_empty(), "nothing is rebuilt");
+        assert_eq!(world.satoshi.home, home);
+        assert!(satoshi_exists(&ecs));
+    }
+
     #[test]
     fn respawns_at_home_after_a_reload_drops_the_entity() {
         let mut world = World::new();
         let mut ecs = hecs::World::new();
         flat_ground(&mut world, 64);
-        tick_spawn(&mut world, &mut ecs);
+        spawn_pass(&mut world, &mut ecs);
         ecs = hecs::World::new(); // simulate a reload: entity gone, `home` kept
         assert!(!satoshi_exists(&ecs));
 
-        tick_spawn(&mut world, &mut ecs);
+        spawn_pass(&mut world, &mut ecs);
         assert!(satoshi_exists(&ecs), "Satoshi re-spawns at his home on reload");
     }
 
@@ -681,7 +1074,7 @@ mod tests {
             }
         }
         // NOTE: enabled deliberately left false.
-        tick_spawn(&mut world, &mut ecs);
+        spawn_pass(&mut world, &mut ecs);
         assert!(!satoshi_exists(&ecs), "no Satoshi in a world not created to host him");
         assert_eq!(world.satoshi.home, None);
     }
@@ -692,7 +1085,7 @@ mod tests {
         world.is_workshop = true;
         let mut ecs = hecs::World::new();
         flat_ground(&mut world, 64); // sets enabled=true
-        tick_spawn(&mut world, &mut ecs);
+        spawn_pass(&mut world, &mut ecs);
         assert!(!satoshi_exists(&ecs), "no Satoshi in the Workshop editor");
         assert_eq!(world.satoshi.home, None);
     }

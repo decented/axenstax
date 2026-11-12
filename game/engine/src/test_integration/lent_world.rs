@@ -215,6 +215,39 @@ fn a_server_made_change_comes_back_for_the_host_to_remesh() {
     assert!(sim.iter().any(|bc| (bc.x, bc.y, bc.z) == below && bc.new_block == block::SAND));
 }
 
+/// Satoshi's house on a lent world: the server's population pass stamps it
+/// into the host's world, relit, and the cells come back for the host's remesh
+/// (`take_lent_changes`) and reach a joiner standing at the spawn, who has been
+/// pushed that ground. (Before, the writes were raw `set_block`: no change
+/// anywhere, so nothing was remeshed and no joiner was told.)
+#[test]
+fn satoshis_house_built_on_a_lent_world_reaches_the_host_remesh_and_a_joiner() {
+    let (mut hs, mut host) = start_lent("satoshi-house");
+    let (client, _slot) = join_guest_lent(&mut hs, &mut host, "Guest");
+    let _ = block_changes_seen(&client);
+    host.world.satoshi.enabled = true;
+    host.world.satoshi.home = None;
+    let mut sim = Vec::new();
+    let mut told = Vec::new();
+    for _ in 0..25 {
+        host.lend_tick(&mut hs);
+        sim.extend(hs.take_lent_changes().0);
+        told.extend(block_changes_seen(&client));
+    }
+    let [ox, oy, oz] = host.world.satoshi.home.expect("the lent server built the house");
+    // Every floor cell is a change the host remeshes and the joiner is told of.
+    for dz in 0..5 {
+        for dx in 0..5 {
+            let at = (ox + dx, oy, oz + dz);
+            let is_floor = |bc: &protocol::BlockChange| (bc.x, bc.y, bc.z) == at && bc.new_block == block::OAK_PLANKS;
+            assert!(sim.iter().any(is_floor), "{at:?}: not handed back for the host's remesh");
+            assert!(told.iter().any(is_floor), "{at:?}: the joiner was not told");
+        }
+    }
+    // Relit: the hearth torch lights its room.
+    assert!(host.world.block_light_at(ox + 1, oy + 2, oz + 1) > 0, "the house was relit");
+}
+
 #[test]
 fn a_joiner_break_spills_the_hosts_live_chest_once() {
     let (mut hs, mut host) = start_lent("live-chest");

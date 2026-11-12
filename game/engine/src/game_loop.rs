@@ -6516,7 +6516,20 @@ impl super::GameState {
         // server's (`SimSystem::Population`).
         if !joined && crate::sim_mobs::population_due(self.tick_counter) {
             if self.sim_runs(SimSystem::Population) {
-                crate::sim_mobs::population(&mut self.world, &self.biome_gen, &mut self.ecs, self.tick_counter);
+                let changes = crate::sim_mobs::population(
+                    &mut self.world,
+                    &self.biome_gen,
+                    &self.registry,
+                    &mut self.ecs,
+                    self.tick_counter,
+                );
+                // Satoshi's house: raw block writes, relit by `population`. Draw
+                // it now, as a player's own edit would be. (A lent world's
+                // house is its server's pass, which tells the joiners and the
+                // host's remesh itself. A `--no-lend` host's server holds its
+                // own copy of the world, which never gets the house; that
+                // BRIDGE goes with the flag.)
+                self.remesh_runtime_edits(changes.iter().map(|bc| (bc.x, bc.y, bc.z)));
             }
             // HP-3 — Brigand Hideout replenisher. Same 20-tick cadence
             // as the village checks; respects the per-hideout 24 000-

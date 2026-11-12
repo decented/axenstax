@@ -354,6 +354,25 @@ impl super::GameState {
         }
     }
 
+    /// Draw cells a runtime system wrote with raw `World::set_block` (Satoshi's
+    /// house), already relit: each section a cell is in remeshes now, as a
+    /// player's own edit does ([`Self::rebuild_chunk_at`]), and the sections
+    /// round them, which the new light reaches (and a face seam), queue for the
+    /// budgeted drain ([`Self::rebuild_chunks_for_lighting`]). Without this the
+    /// blocks exist, collide and are outlined, yet no mesh has them until some
+    /// later edit nearby remeshes the section.
+    pub(crate) fn remesh_runtime_edits(&mut self, cells: impl IntoIterator<Item = (i32, i32, i32)>) {
+        let plan = runtime_edit_remesh(cells);
+        for &(cx, cy, cz) in &plan.now {
+            let meshes = build_chunk_meshes(cx, cy, cz, &self.world, &self.registry);
+            self.renderer.upload_chunk((cx, cy, cz), &meshes);
+            self.dirty_mesh_chunks.remove(&(cx, cy, cz));
+        }
+        for pos in plan.later {
+            self.mark_chunk_dirty(pos);
+        }
+    }
+
     /// Queue a chunk for a budgeted mesh rebuild (Spec 39 A4).
     pub(crate) fn mark_chunk_dirty(&mut self, pos: (i32, i32, i32)) {
         self.dirty_mesh_chunks.insert(pos);
@@ -387,6 +406,40 @@ impl super::GameState {
             }
         }
     }
+}
+
+/// Which sections to remesh for a set of cells a runtime system wrote.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct RuntimeRemesh {
+    /// The sections holding a cell: rebuilt at once.
+    pub now: ahash::AHashSet<(i32, i32, i32)>,
+    /// Every other section within one of them (the light of an emitter reaches
+    /// 14 blocks, a face seam hides its neighbour's faces): the budgeted queue
+    /// (`GameState::mark_chunk_dirty`).
+    pub later: ahash::AHashSet<(i32, i32, i32)>,
+}
+
+/// The remesh plan for `cells`, the same sections `GameState::rebuild_chunk_at`
+/// and `GameState::rebuild_chunks_for_lighting` would touch for each, once
+/// each however many cells share one. Pure.
+pub(crate) fn runtime_edit_remesh(cells: impl IntoIterator<Item = (i32, i32, i32)>) -> RuntimeRemesh {
+    let mut plan = RuntimeRemesh::default();
+    for (x, y, z) in cells {
+        plan.now.insert(World::block_to_chunk(x, y, z));
+    }
+    for &(cx, cy, cz) in &plan.now {
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                for dz in -1..=1 {
+                    let pos = (cx + dx, cy + dy, cz + dz);
+                    if pos.1 >= 0 && pos.1 <= crate::world::MAX_CHUNK_Y && !plan.now.contains(&pos) {
+                        plan.later.insert(pos);
+                    }
+                }
+            }
+        }
+    }
+    plan
 }
 
 #[cfg(test)]

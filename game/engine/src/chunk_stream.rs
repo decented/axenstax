@@ -1675,6 +1675,22 @@ pub(crate) fn world_spawn_point(
     glam::Vec3::new(sx as f32 + 0.5, sy as f32, sz as f32 + 0.5)
 }
 
+/// The block column of the world spawn: the fixed floor of a flat/Workshop
+/// world, else the column the spawn search chose ([`crate::spawn_search`]; the
+/// origin on a v2 world). A pure query: reads no block. Where Satoshi's house
+/// is placed from.
+pub(crate) fn world_spawn_xz(
+    world: &crate::world::World,
+    biome_gen: &crate::biome::BiomeGenerator,
+) -> (i32, i32) {
+    if world.is_workshop || world.has_flat_floor() {
+        (8, 8)
+    } else {
+        let col = crate::spawn_search::world_spawn_column(biome_gen);
+        (col.x, col.z)
+    }
+}
+
 /// The nine chunk columns round the world spawn that [`world_spawn_point`]
 /// reads (the +-6 block clear-ground search stays inside them). Generate these
 /// before asking for the spawn. A flat/Workshop world and a v2 world: the 3x3

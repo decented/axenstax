@@ -2191,7 +2191,17 @@ impl GameServer {
             && crate::sim_mobs::population_due(self.tick_counter)
             && self.runs(SimSystem::Population)
         {
-            crate::sim_mobs::population(&mut self.world, &self.biome_gen, &mut self.ecs, self.tick_counter);
+            // Satoshi's house is raw block writes: they come back as block
+            // changes, which reach the joiners and (`take_lent_changes`) the
+            // host's remesh, as a mob's cell change does (`SimEvent::CellChanged`).
+            let changes = crate::sim_mobs::population(
+                &mut self.world,
+                &self.biome_gen,
+                &self.registry,
+                &mut self.ecs,
+                self.tick_counter,
+            );
+            self.pending_block_changes.extend(changes);
         }
         // HP-3 — the brigand pre-pass, then the defenders, then the generic
         // AI, all chasing `targets` (living bodies; a spawn-protected joiner
@@ -3259,6 +3269,12 @@ impl GameServer {
         if !sp.combat.dead || sp.dead_ticks < MIN_DEAD_TICKS_BEFORE_RESPAWN {
             return None;
         }
+        // The one respawn rule (`spawn_safety::safe_respawn_point`), shared
+        // with the single-player respawn: on dry ground, loading what it reads
+        // when this server owns its world.
+        let asked = sp.spawn_pos;
+        let spawn = crate::spawn_safety::safe_respawn_point(self, asked);
+        let sp = &mut self.players[idx];
         // MP-D2c-1 — a respawn never keeps a seat (its death already ended
         // the ride, `end_dead_riders`; this is the backstop): the follow
         // must not pin the body back to the mount.
@@ -3269,12 +3285,6 @@ impl GameServer {
         crate::spawn_protection::arm(sp);
         sp.death_handled = false;
         sp.combat.just_died = false;
-        // The one respawn rule (`spawn_safety::safe_respawn_point`), shared
-        // with the single-player respawn: on dry ground, loading what it reads
-        // when this server owns its world.
-        let asked = sp.spawn_pos;
-        let spawn = crate::spawn_safety::safe_respawn_point(self, asked);
-        let sp = &mut self.players[idx];
         sp.dead_ticks = 0;
         sp.player.pos = spawn;
         sp.player.velocity = Vec3::ZERO;
