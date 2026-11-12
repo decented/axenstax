@@ -81,7 +81,7 @@ impl SettingsRig {
 
     /// The Window's own rectangle.
     fn window(&self) -> egui::Rect {
-        self.ctx.memory(|m| m.area_rect(egui::Id::new("Graphics"))).expect("the Settings window was not drawn")
+        self.ctx.memory(|m| m.area_rect(egui::Id::new("Settings"))).expect("the Settings window was not drawn")
     }
 
     fn scroll_to_end(&mut self) {
@@ -106,7 +106,7 @@ fn settings_back_is_on_screen_with_no_scrolling_on_every_phone_size() {
     for size in PHONES {
         let rig = SettingsRig::new(size, Some(true));
         assert!(rig.on_screen("Back"), "Back is not on the {size:?} screen: {:?}", texts(&rig.output));
-        assert!(rig.on_screen("Graphics"), "the title is not on the {size:?} screen");
+        assert!(rig.on_screen("Settings"), "the title is not on the {size:?} screen");
         assert!(rig.on_screen(&format!("Preset: {}", rig.gfx.preset().label())), "the first line is not on screen at {size:?}");
         let window = rig.window();
         assert!(screen_of(size).contains_rect(window), "the Settings window {window:?} is not inside the {size:?} screen");
@@ -269,7 +269,7 @@ fn the_rest_of_the_pause_menu_scrolls_into_view_on_every_phone_size() {
         // The last control of a survival world's menu is at the end of the scroll.
         assert!(rig.on_screen("Switch to Creative"), "the last control did not scroll into view at {size:?}: {:?}", texts(&rig.output));
         // ...and every other control comes into view on the way down.
-        for label in ["Controls", "Graphics", "Your look"] {
+        for label in ["Controls", "Settings", "Your look"] {
             let mut rig = PauseRig::new(size, false);
             rig.reveal(label);
         }
@@ -298,9 +298,9 @@ fn a_phone_taps_save_and_quit_and_resume() {
         assert_eq!(rig.clicked, PAUSE_SAVE_QUIT, "Save and Quit at {size:?}");
         rig.tap("Resume");
         assert_eq!(rig.clicked, PAUSE_RESUME, "Resume at {size:?}");
-        rig.reveal("Graphics");
-        rig.tap("Graphics");
-        assert_eq!(rig.clicked, PAUSE_OPEN_SETTINGS, "Graphics at {size:?}");
+        rig.reveal("Settings");
+        rig.tap("Settings");
+        assert_eq!(rig.clicked, PAUSE_OPEN_SETTINGS, "Settings at {size:?}");
     }
 }
 
@@ -347,7 +347,7 @@ fn a_tall_window_keeps_the_pause_menu_as_it_was() {
     let y = |label: &str| placed(&rig.output, label).unwrap_or_else(|| panic!("no {label:?}")).0.center().y;
     // The title sits 100 points down, then Difficulty, Stash, the leave buttons, Controls...
     assert!(y("Paused") > 100.0);
-    let order = ["Paused", "Difficulty", "Resume", "Save", "Save and Quit", "Controls", "Graphics", "Your look", "Switch to Creative"];
+    let order = ["Paused", "Difficulty", "Resume", "Save", "Save and Quit", "Controls", "Settings", "Your look", "Switch to Creative"];
     for pair in order.windows(2) {
         assert!(y(pair[0]) < y(pair[1]), "{} is not above {}", pair[0], pair[1]);
     }

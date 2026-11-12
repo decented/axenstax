@@ -140,6 +140,14 @@ pub const SENSITIVITY_MAX: f32 = 0.01;
 pub const BRIGHTNESS_MIN: f32 = 0.6;
 pub const BRIGHTNESS_MAX: f32 = 2.0;
 pub const DEFAULT_BRIGHTNESS: f32 = 1.0;
+/// Chat text size: a multiplier on the chat overlay's 13 pt monospace (log, input
+/// line, Tab suggestions). 100% is the old size; the default is 150% because the
+/// old size read too small. Shown in the Settings panel as 100% to 300% in
+/// quarter steps. A personal preference like brightness: it never flips the preset.
+pub const CHAT_TEXT_SCALE_MIN: f32 = 1.0;
+pub const CHAT_TEXT_SCALE_MAX: f32 = 3.0;
+pub const DEFAULT_CHAT_TEXT_SCALE: f32 = 1.5;
+pub const CHAT_TEXT_SCALE_STEP: f32 = 0.25;
 /// Master volume slider range (`0.0` = silent, `1.0` = sounds as authored).
 /// The audio engine squares it (`audio::effective_gain`) so the lower half of
 /// the slider is usable.
@@ -403,6 +411,11 @@ pub struct GraphicsSettings {
     /// shader as `pow(colour, 1/brightness)`. Personal pref — excluded from
     /// preset detection. Clamped to `BRIGHTNESS_MIN..=BRIGHTNESS_MAX` on load.
     pub brightness: f32,
+    /// Chat text size multiplier. A settings file written before this existed
+    /// loads the default (150%) through `#[serde(default)]`. Personal pref,
+    /// excluded from preset detection. Clamped to `CHAT_TEXT_SCALE_MIN..=MAX`
+    /// on load (NaN becomes the default).
+    pub chat_text_scale: f32,
     /// #6 — show the corner minimap. On by default (discoverable). Personal
     /// pref, excluded from preset detection.
     pub minimap_enabled: bool,
@@ -603,6 +616,8 @@ impl GraphicsSettings {
             auto_refill: true,
             // Neutral brightness — the look is unchanged until the player slides it.
             brightness: DEFAULT_BRIGHTNESS,
+            // Chat text a size and a half up from egui's 13 pt unless the player changes it.
+            chat_text_scale: DEFAULT_CHAT_TEXT_SCALE,
             // #6 — minimap on by default; default zoom shows ~10 chunks across.
             minimap_enabled: true,
             minimap_zoom: DEFAULT_MINIMAP_ZOOM,
@@ -681,6 +696,11 @@ impl GraphicsSettings {
         self.zoom_fov = self.zoom_fov.clamp(ZOOM_FOV_MIN, ZOOM_FOV_MAX);
         // Brightness slider — clamp so a hand-edited file can't blow out / black out.
         self.brightness = self.brightness.clamp(BRIGHTNESS_MIN, BRIGHTNESS_MAX);
+        // Chat text size. `f32::clamp` passes NaN through, so repair that first.
+        if !self.chat_text_scale.is_finite() {
+            self.chat_text_scale = DEFAULT_CHAT_TEXT_SCALE;
+        }
+        self.chat_text_scale = self.chat_text_scale.clamp(CHAT_TEXT_SCALE_MIN, CHAT_TEXT_SCALE_MAX);
         // #6 — minimap zoom (blocks per pixel).
         self.minimap_zoom = self.minimap_zoom.clamp(MINIMAP_ZOOM_MIN, MINIMAP_ZOOM_MAX);
         // Master volume — a hand-edited file can't amplify or go negative.
@@ -994,6 +1014,61 @@ mod tests {
         let json = r#"{ "render_distance": 8 }"#;
         let s: GraphicsSettings = serde_json::from_str(json).unwrap();
         assert_eq!(s.brightness, 1.0);
+    }
+
+    #[test]
+    fn chat_text_scale_defaults_to_a_size_and_a_half() {
+        assert_eq!(DEFAULT_CHAT_TEXT_SCALE, 1.5);
+        assert_eq!(GraphicsSettings::default().chat_text_scale, 1.5);
+        for p in GraphicsPreset::ALL {
+            assert_eq!(GraphicsSettings::from_preset(p).chat_text_scale, 1.5);
+        }
+        assert_eq!((CHAT_TEXT_SCALE_MIN, CHAT_TEXT_SCALE_MAX, CHAT_TEXT_SCALE_STEP), (1.0, 3.0, 0.25));
+    }
+
+    #[test]
+    fn an_old_settings_file_loads_chat_text_at_the_default() {
+        // A file written before the field existed, and a localStorage blob
+        // with other keys, must both load 150%.
+        let s: GraphicsSettings = serde_json::from_str(r#"{ "render_distance": 8 }"#).unwrap();
+        assert_eq!(s.chat_text_scale, 1.5);
+        let s: GraphicsSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(s.chat_text_scale, 1.5);
+        // A complete current file with only that key removed.
+        let mut value = serde_json::to_value(GraphicsSettings::default()).unwrap();
+        assert!(value.as_object_mut().unwrap().remove("chat_text_scale").is_some());
+        let s = load_json(&value.to_string());
+        assert_eq!(s.chat_text_scale, 1.5);
+    }
+
+    #[test]
+    fn chat_text_scale_clamps_and_repairs_nan() {
+        let mut s = GraphicsSettings::default();
+        s.chat_text_scale = 9.0;
+        s.clamp();
+        assert_eq!(s.chat_text_scale, CHAT_TEXT_SCALE_MAX);
+        s.chat_text_scale = 0.2;
+        s.clamp();
+        assert_eq!(s.chat_text_scale, CHAT_TEXT_SCALE_MIN);
+        s.chat_text_scale = f32::NAN;
+        s.clamp();
+        assert_eq!(s.chat_text_scale, DEFAULT_CHAT_TEXT_SCALE);
+        s.chat_text_scale = f32::INFINITY;
+        s.clamp();
+        assert_eq!(s.chat_text_scale, DEFAULT_CHAT_TEXT_SCALE);
+    }
+
+    #[test]
+    fn chat_text_scale_is_a_personal_pref_that_survives_presets_and_a_round_trip() {
+        let mut s = GraphicsSettings::from_preset(GraphicsPreset::High);
+        s.chat_text_scale = 2.25;
+        // Not part of what makes a preset, so the label does not change...
+        assert_eq!(s.preset(), GraphicsPreset::High);
+        // ...and picking a preset leaves it alone.
+        s.apply_preset(GraphicsPreset::Low);
+        assert_eq!(s.chat_text_scale, 2.25);
+        let back = load_json(&serde_json::to_string(&s).unwrap());
+        assert_eq!(back.chat_text_scale, 2.25);
     }
 
     #[test]

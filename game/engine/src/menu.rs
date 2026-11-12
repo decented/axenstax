@@ -3672,7 +3672,7 @@ pub const PAUSE_CUSTOMISE_SKIN: i32 = 6;
 /// The Stash toggle was flipped — caller persists the new `cloud_save` value
 /// (the menu mutated it in place) and keeps the pause menu open.
 pub const PAUSE_STASH_TOGGLED: i32 = 7;
-/// Open the Graphics settings panel (Spec 39). Cross-platform.
+/// Open the Settings panel (Spec 39; labelled "Graphics" until the panel also held sound, chat and camera). Cross-platform.
 pub const PAUSE_OPEN_SETTINGS: i32 = 8;
 /// Trial pause menu: restart the active trial/challenge in place (fresh run).
 pub const PAUSE_TRY_AGAIN: i32 = 9;
@@ -4012,7 +4012,7 @@ pub fn draw_pause_menu(ctx: &egui::Context, world_name: &str, confirm_quit: &mut
                     // quality-dials panel in place of the pause buttons.
                     {
                         let gfx_btn = egui::Button::new(
-                            egui::RichText::new("Graphics")
+                            egui::RichText::new("Settings")
                                 .size(16.0)
                                 .color(egui::Color32::from_rgb(150, 200, 160)),
                         )
@@ -4789,7 +4789,7 @@ pub fn version_line() -> String {
 /// frame, the pinned Back button and the margin to the screen edges.
 const SETTINGS_COMPACT_CHROME: f32 = 150.0;
 
-/// Draw the Graphics settings panel. Mutates `gfx` in place and returns
+/// Draw the Settings panel (graphics, chat, sound, camera). Mutates `gfx` in place and returns
 /// `Changed` when any dial/preset moved (caller applies live + persists), or
 /// `Back` when the player closes it. Pure egui, mirrors `draw_skin_panel`.
 pub fn draw_settings_panel(
@@ -4803,7 +4803,8 @@ pub fn draw_settings_panel(
         FREELOOK_SENS_MIN, RENDER_DISTANCE_MAX, RENDER_DISTANCE_MIN, RENDER_SCALE_MAX,
         RENDER_SCALE_MIN, SENSITIVITY_MAX, SENSITIVITY_MIN, TP_DISTANCE_MAX, TP_DISTANCE_MIN,
         ZOOM_FOV_MAX, ZOOM_FOV_MIN, BRIGHTNESS_MAX, BRIGHTNESS_MIN, MINIMAP_ZOOM_MAX,
-        MINIMAP_ZOOM_MIN, MASTER_VOLUME_MAX, MASTER_VOLUME_MIN,
+        MINIMAP_ZOOM_MIN, MASTER_VOLUME_MAX, MASTER_VOLUME_MIN, CHAT_TEXT_SCALE_MAX,
+        CHAT_TEXT_SCALE_MIN, CHAT_TEXT_SCALE_STEP,
     };
     // The relay manager (its only use of `state`) is native-only.
     #[cfg(target_arch = "wasm32")]
@@ -4819,7 +4820,7 @@ pub fn draw_settings_panel(
     // Inside the TV-safe area (home page overhaul §2), so the pinned Back is on screen.
     let settings_scroll_h = (crate::ui_safe_area::rect(ctx).height() - SETTINGS_COMPACT_CHROME).max(120.0);
 
-    egui::Window::new("Graphics")
+    egui::Window::new("Settings")
         .max_width(crate::ui_safe_area::rect(ctx).width() - 24.0)
         .collapsible(false)
         .resizable(false)
@@ -5124,6 +5125,42 @@ pub fn draw_settings_panel(
             {
                 changed = true;
             }
+
+            // Chat — text size. A multiplier on the chat overlay's own 13 pt
+            // monospace, shown as a percentage (100% to 300% in quarter steps).
+            // Applies live (the next chat frame reads it) and persists like
+            // Brightness. The preview line is drawn at the chosen size.
+            ui.add_space(8.0);
+            ui.separator();
+            ui.add_space(6.0);
+            ui.label(
+                egui::RichText::new("Chat")
+                    .size(14.0)
+                    .color(TITLE_COLOR),
+            );
+            ui.add_space(4.0);
+            let mut chat_pct = gfx.chat_text_scale * 100.0;
+            if ui
+                .add(
+                    egui::Slider::new(
+                        &mut chat_pct,
+                        (CHAT_TEXT_SCALE_MIN * 100.0)..=(CHAT_TEXT_SCALE_MAX * 100.0),
+                    )
+                    .step_by(f64::from(CHAT_TEXT_SCALE_STEP * 100.0))
+                    .fixed_decimals(0)
+                    .suffix("%")
+                    .text("Chat text size"),
+                )
+                .changed()
+            {
+                gfx.chat_text_scale = (chat_pct / 100.0).clamp(CHAT_TEXT_SCALE_MIN, CHAT_TEXT_SCALE_MAX);
+                changed = true;
+            }
+            ui.label(
+                egui::RichText::new("/give torch 4")
+                    .font(egui::FontId::monospace(13.0 * gfx.chat_text_scale))
+                    .color(egui::Color32::from_rgb(196, 196, 212)),
+            );
 
             // Sound — master volume + mute. Persisted per-device on both targets
             // and applied live (`AudioEngine::set_master`). The slider is shown
