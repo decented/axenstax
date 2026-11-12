@@ -927,6 +927,7 @@ fn satoshi_state_round_trips_through_save() {
         waved_off: true,
         last_initiated_tick: 1234,
         enabled: true,
+        no_site: None,
     };
     let bytes = bincode::serialize(&full).expect("serialize");
     let loaded = save::read_world_save(&bytes).expect("decode via the real tolerant path");

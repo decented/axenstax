@@ -237,9 +237,15 @@ pub(crate) trait RespawnWorld {
     /// The world, its registry and its generator.
     fn respawn_parts(&self) -> (&World, &BlockRegistry, &crate::biome::BiomeGenerator);
     /// Make column `(cx, cz)` exist (restore it if evicted, else generate it,
-    /// light it): a no-op when it is loaded, and for a world this owner may
-    /// not generate into (a joiner's, a lent host's server).
-    fn ensure_respawn_column(&mut self, cx: i32, cz: i32);
+    /// light it) without meshing it: a no-op when it is loaded, and for a world
+    /// this owner may not generate into (a joiner's, a lent host's server).
+    /// `true` when this call loaded it.
+    fn ensure_respawn_column(&mut self, cx: i32, cz: i32) -> bool;
+    /// The columns this respawn loaded, once, when it is done: the owner draws
+    /// them (the client queues their meshes the way streaming does, so a
+    /// respawn never meshes a dozen columns in one frame). Nothing to do on a
+    /// server.
+    fn respawn_loaded(&mut self, _columns: &[(i32, i32)]) {}
 }
 
 /// The columns [`safe_respawn_point`] reads round `spawn`: its own 3x3.
@@ -275,10 +281,78 @@ fn standing_in_column(world: &World, spawn: Vec3) -> Option<Vec3> {
     Some(Vec3::new(spawn.x, y as f32 + 1.0, spawn.z))
 }
 
+/// A spawn cell that is not itself clear (a bed in a room two cells high: the
+/// ceiling is where the head goes) first tries the cells BESIDE it, as a bed
+/// respawn does in Minecraft: ring 1, then ring 2 (a fixed order), at the
+/// spawn's level less one (a body standing on the floor beside the bed) and at
+/// the spawn's level. Without it the vertical nudge in [`fix_up`] climbs past
+/// the ceiling and puts the body on the roof. `None` when the spawn is clear
+/// already or no cell beside it is.
+fn beside_spawn(world: &World, registry: &BlockRegistry, at: Vec3) -> Option<Vec3> {
+    if !at.is_finite() {
+        return None;
+    }
+    let (x, fy, z) = (at.x.floor() as i32, at.y.floor() as i32, at.z.floor() as i32);
+    if stands_clear(world, registry, x, fy, z) {
+        return None;
+    }
+    // Nearest first: ring 1 before ring 2, and within a ring the cells straight
+    // beside the spawn before the diagonal ones (a bed in a hut's corner steps
+    // into the room, not out through the doorway), then a fixed order.
+    let mut offsets: Vec<(i32, i32)> = (-BESIDE_RADIUS..=BESIDE_RADIUS)
+        .flat_map(|dz| (-BESIDE_RADIUS..=BESIDE_RADIUS).map(move |dx| (dx, dz)))
+        .filter(|&(dx, dz)| (dx, dz) != (0, 0))
+        .collect();
+    offsets.sort_by_key(|&(dx, dz)| (dx.abs().max(dz.abs()), dx * dx + dz * dz, dz, dx));
+    for (dx, dz) in offsets {
+        let (nx, nz) = (x.saturating_add(dx), z.saturating_add(dz));
+        for y in [fy.saturating_sub(1), fy] {
+            if stands_clear(world, registry, nx, y, nz) {
+                return Some(Vec3::new(nx as f32 + 0.5, y as f32, nz as f32 + 0.5));
+            }
+        }
+    }
+    None
+}
+
+/// How far (blocks) [`beside_spawn`] looks round a spawn cell that is not clear.
+const BESIDE_RADIUS: i32 = 2;
+
 /// Where a body put at `spawn` stands, by what is loaded: its column's ground
-/// ([`standing_in_column`]), then [`fix_up`].
+/// ([`standing_in_column`]), then the cells beside it if it is not clear
+/// ([`beside_spawn`]), then [`fix_up`].
 fn settle(world: &World, registry: &BlockRegistry, spawn: Vec3) -> Vec3 {
-    fix_up(world, registry, standing_in_column(world, spawn).unwrap_or(spawn))
+    let ground = standing_in_column(world, spawn).unwrap_or(spawn);
+    beside_spawn(world, registry, ground).unwrap_or_else(|| fix_up(world, registry, ground))
+}
+
+/// How far (blocks) [`dry_land_near`] looks round a world spawn that is not dry.
+const DRY_SEARCH_RADIUS: i32 = 32;
+
+/// The nearest dry standing spot within [`DRY_SEARCH_RADIUS`] of `near`, over
+/// the columns that are loaded (rings outward in a fixed order; a column that
+/// is not loaded or is water-topped is skipped). The floor of the respawn
+/// guarantee for a world whose own spawn is sea: land close by, if the loaded
+/// ground holds any.
+fn dry_land_near(world: &World, registry: &BlockRegistry, near: Vec3) -> Option<Vec3> {
+    if !near.is_finite() {
+        return None;
+    }
+    let (x, z) = (near.x.floor() as i32, near.z.floor() as i32);
+    for ring in 0..=DRY_SEARCH_RADIUS {
+        for dz in -ring..=ring {
+            for dx in -ring..=ring {
+                if dx.abs().max(dz.abs()) != ring {
+                    continue;
+                }
+                let (nx, nz) = (x.saturating_add(dx), z.saturating_add(dz));
+                if let Some(y) = surface_feet(world, registry, nx, nz) {
+                    return Some(Vec3::new(nx as f32 + 0.5, y as f32, nz as f32 + 0.5));
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Is `pos` a place to stand on dry land: feet and head cells open, and a
@@ -298,20 +372,38 @@ pub(crate) fn is_dry_standing(world: &World, registry: &BlockRegistry, pos: Vec3
 /// a body that dies with `spawn` as its respawn point stands up.
 ///
 /// 1. Make the 3x3 columns round `spawn` exist (the owner's rule: see
-///    [`RespawnWorld::ensure_respawn_column`]).
+///    [`RespawnWorld::ensure_respawn_column`]); blocks and light only, the owner
+///    draws what it loaded afterwards ([`RespawnWorld::respawn_loaded`]).
 /// 2. Stand it on `spawn`'s ground: in its own column from the spawn's height
-///    (a bed under a roof stays under the roof), else the column's top, else
-///    the nearest clear column within [`SEARCH_RADIUS`] ([`settle`]).
+///    (a bed under a roof stays under the roof), then, if that is not clear,
+///    the cells beside it ([`beside_spawn`]: a bed in a small room respawns
+///    beside the bed, not on the roof), else the column's top, else the nearest
+///    clear column within [`SEARCH_RADIUS`] ([`settle`]).
 /// 3. If that is not dry ground (the column is sea or lava, or has no ground at
 ///    all: [`is_dry_standing`]), use the world spawn instead: the dry land the
 ///    new-world search picks (`chunk_stream::world_spawn_point`), its columns
 ///    made to exist first, settled the same way.
+/// 4. If the world spawn is not dry either (a sea origin nothing dry within
+///    the search's reach could replace), the nearest dry land within
+///    [`DRY_SEARCH_RADIUS`] of it over the LOADED columns ([`dry_land_near`]).
+///    Only if that finds nothing is the body left where step 2 put it. That is
+///    the floor of the guarantee: a world with no dry land loaded within 32
+///    blocks of its spawn still respawns above water.
 ///
 /// A spawn that cannot be read (not finite, columns the owner may not load) comes
 /// back as [`fix_up`] leaves it. Nothing here reads whether the spawn came from
 /// a bed: a bed that is gone is a spawn with no ground under it, so it falls
 /// through step 2 to the nearest ground or to step 3.
 pub(crate) fn safe_respawn_point(ctx: &mut impl RespawnWorld, spawn: Vec3) -> Vec3 {
+    let mut loaded = Vec::new();
+    let at = respawn_point(ctx, spawn, &mut loaded);
+    if !loaded.is_empty() {
+        ctx.respawn_loaded(&loaded);
+    }
+    at
+}
+
+fn respawn_point(ctx: &mut impl RespawnWorld, spawn: Vec3, loaded: &mut Vec<(i32, i32)>) -> Vec3 {
     // Not a number, or past the playable limit (`/tp` and a saved spawn clamp to
     // it): nothing there to read, and no column worth generating.
     let limit = crate::commands::builtins::tp::MAX_COORD;
@@ -319,7 +411,9 @@ pub(crate) fn safe_respawn_point(ctx: &mut impl RespawnWorld, spawn: Vec3) -> Ve
         return spawn;
     }
     for (cx, cz) in columns_round(spawn) {
-        ctx.ensure_respawn_column(cx, cz);
+        if ctx.ensure_respawn_column(cx, cz) {
+            loaded.push((cx, cz));
+        }
     }
     let here = {
         let (world, registry, _) = ctx.respawn_parts();
@@ -336,25 +430,40 @@ pub(crate) fn safe_respawn_point(ctx: &mut impl RespawnWorld, spawn: Vec3) -> Ve
         crate::chunk_stream::spawn_pregen_columns(world, biome_gen).to_vec()
     };
     for (cx, cz) in wanted {
-        ctx.ensure_respawn_column(cx, cz);
+        if ctx.ensure_respawn_column(cx, cz) {
+            loaded.push((cx, cz));
+        }
     }
     let (world, registry, biome_gen) = ctx.respawn_parts();
     let world_spot = settle(world, registry, crate::chunk_stream::world_spawn_point(world, biome_gen));
-    if is_dry_standing(world, registry, world_spot) { world_spot } else { here }
+    if is_dry_standing(world, registry, world_spot) {
+        return world_spot;
+    }
+    dry_land_near(world, registry, world_spot).unwrap_or(here)
 }
 
-impl RespawnWorld for crate::server::GameServer {
+/// A server asked to respawn a body: the server, and whether it may load the
+/// columns the rule reads. `may_load` comes from whoever knows how the server
+/// holds its world (`HostedServer`: an owning server loads, a lending host's
+/// columns are its client's streamer's, and the server's own world between
+/// windows is an empty placeholder no column may be generated into).
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+pub(crate) struct ServerRespawn<'a> {
+    pub server: &'a mut crate::server::GameServer,
+    pub may_load: bool,
+}
+
+impl RespawnWorld for ServerRespawn<'_> {
     fn respawn_parts(&self) -> (&World, &BlockRegistry, &crate::biome::BiomeGenerator) {
-        (&self.world, &self.registry, &self.biome_gen)
+        (&self.server.world, &self.server.registry, &self.server.biome_gen)
     }
 
-    /// An owning server loads the column itself; a lent world's columns are
-    /// the host client's streamer's (`ensure_column_loaded` there would be a
-    /// second generator on the host's world).
-    fn ensure_respawn_column(&mut self, cx: i32, cz: i32) {
-        if !self.lent {
-            self.ensure_column_loaded(cx, cz);
+    fn ensure_respawn_column(&mut self, cx: i32, cz: i32) -> bool {
+        if !self.may_load || self.server.loaded_columns.contains(&(cx, cz)) {
+            return false;
         }
+        self.server.ensure_column_loaded(cx, cz);
+        true
     }
 }
 
@@ -364,13 +473,22 @@ impl RespawnWorld for crate::GameState {
     }
 
     /// A column this client holds is left alone; any other is restored or
-    /// generated, lit and meshed (`load_one_column`, which restores an evicted
-    /// column before it generates, so a far bed's saved edits survive). A joined
-    /// client generates nothing: its ground is what the server pushes.
-    fn ensure_respawn_column(&mut self, cx: i32, cz: i32) {
-        if !self.joined() && !self.loaded_columns.contains(&(cx, cz)) {
-            self.load_one_column(cx, cz);
+    /// generated and lit, not meshed (`load_column_unmeshed`, which restores an
+    /// evicted column before it generates, so a far bed's saved edits survive).
+    /// A joined client generates nothing: its ground is what the server pushes.
+    fn ensure_respawn_column(&mut self, cx: i32, cz: i32) -> bool {
+        if self.joined() || self.loaded_columns.contains(&(cx, cz)) {
+            return false;
         }
+        self.load_column_unmeshed(cx, cz);
+        true
+    }
+
+    /// The columns' meshes go through the streaming path: a bounded few
+    /// sections now, the rest (and the seams) in the dirty-mesh queue the frame
+    /// loop drains, not a dozen columns in one frame.
+    fn respawn_loaded(&mut self, columns: &[(i32, i32)]) {
+        self.mesh_stream_batch(columns, crate::stream_mesh::MeshPolicy::STREAMING);
     }
 }
 

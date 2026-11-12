@@ -53,7 +53,26 @@ pub struct SatoshiState {
     /// Survival/Creative worlds. Existing/flat/gallery/workshop worlds and
     /// Adventure/Spectator never set it, so he never appears there.
     pub enabled: bool,
+    /// Session-only note (never saved: `serde(skip)`, so the save layout is
+    /// unchanged): the last full site search found no place, when and with how
+    /// many sections loaded. [`tick_spawn`] searches again only after
+    /// [`NO_SITE_RETRY_TICKS`] or when the loaded set changed, not every second.
+    #[serde(skip)]
+    pub no_site: Option<NoSiteNote>,
 }
+
+/// What a search that found no site noted: see [`SatoshiState::no_site`].
+#[derive(Default, Clone, Debug, PartialEq, Eq)]
+pub struct NoSiteNote {
+    /// The tick the search ran.
+    pub tick: u64,
+    /// How many sections the search's columns held then ([`reach_sections`]).
+    pub loaded_sections: usize,
+}
+
+/// How long (ticks, ~30 s) a search that found nothing is not repeated while
+/// the loaded set stays as it was.
+const NO_SITE_RETRY_TICKS: u64 = 600;
 
 /// Minimum ticks between any Satoshi-initiated cue (~1 in-game day) — anti-Navi.
 /// MVP keeps initiation off in practice (see `should_initiate` below) —
@@ -153,22 +172,123 @@ fn site_at(
     (hi - lo <= max_step).then_some(HouseSite { ox, oy: hi + 1, oz, tops })
 }
 
+/// What a site search came to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SiteSearch {
+    /// A chunk column the search reads is not loaded: try again later.
+    Waiting,
+    /// Every column is loaded and nothing in reach is acceptable.
+    NoSite,
+    Found(HouseSite),
+}
+
+impl SiteSearch {
+    #[cfg(test)]
+    fn site(self) -> Option<HouseSite> {
+        match self {
+            Self::Found(site) => Some(site),
+            _ => None,
+        }
+    }
+}
+
+/// Is every chunk column a search from `first` can read held (blocks in it)?
+/// The reach is `SITE_REACH` each way from the first try, a footprint wide
+/// and one block of halo, so about 5 x 5 columns. Without this the answer
+/// would depend on which columns happen to have streamed in by then (and
+/// where the player came from), not on the seed and the world's edits alone.
+fn search_columns_held(world: &World, first: (i32, i32)) -> bool {
+    let (mut xs, zs) = search_columns(first);
+    xs.all(|cx| zs.clone().all(|cz| world.column_holds_blocks(cx, cz)))
+}
+
+/// The chunk columns (x range, z range) a search from `first` reads.
+fn search_columns(first: (i32, i32)) -> (std::ops::RangeInclusive<i32>, std::ops::RangeInclusive<i32>) {
+    let cs = CHUNK_SIZE as i32;
+    let (reach, far) = (SITE_REACH + 1, SITE_REACH + HUT_W as i32);
+    (
+        (first.0 - reach).div_euclid(cs)..=(first.0 + far).div_euclid(cs),
+        (first.1 - reach).div_euclid(cs)..=(first.1 + far).div_euclid(cs),
+    )
+}
+
+/// How many sections the search's columns hold: what changes when ground
+/// streams in or out, so a search that found nothing runs again only then.
+fn reach_sections(world: &World, first: (i32, i32)) -> usize {
+    let (xs, zs) = search_columns(first);
+    xs.map(|cx| {
+        zs.clone()
+            .map(|cz| (0..=crate::world::MAX_CHUNK_Y).filter(|&cy| world.has_chunk(cx, cy, cz)).count())
+            .sum::<usize>()
+    })
+    .sum()
+}
+
+/// Would building on `site` touch anything a player made? Looks at every cell
+/// of the footprint and its one-block halo, from each column's ground up to the
+/// top of the house: a block a player placed, a block entity (a chest, a
+/// furnace...), or any section edited since generation (a field, torches,
+/// decoration: whatever a save keeps). Natural terrain and trees pass. The
+/// stamp clears its volume and buries what is under its floor, so a world with
+/// someone's base on it never gets a house over it.
+fn site_touches_player_work(world: &World, registry: &BlockRegistry, site: &HouseSite) -> bool {
+    let cs = CHUNK_SIZE as i32;
+    let w = HUT_W as i32;
+    let top = site.oy + HUT_H as i32;
+    // Each column's lowest cell to look at: the ground under a footprint
+    // column (the foundation is written above it); a halo column's ground, or
+    // the floor level when it has none (water, unloaded), never above the floor.
+    let mut cols: Vec<(i32, i32, i32)> = Vec::with_capacity(((w + 2) * (w + 2)) as usize);
+    for dz in -1..=w {
+        for dx in -1..=w {
+            let (x, z) = (site.ox + dx, site.oz + dz);
+            let from = if (0..w).contains(&dx) && (0..w).contains(&dz) {
+                site.tops[dz as usize][dx as usize]
+            } else {
+                ground_top(world, registry, x, z, true).unwrap_or(site.oy - 1).min(site.oy - 1)
+            };
+            cols.push((x, z, from));
+        }
+    }
+    // Sections first: it is the cheap test, and the usual reason.
+    let low = cols.iter().map(|c| c.2).min().unwrap_or(site.oy);
+    for cy in low.div_euclid(cs)..=top.div_euclid(cs) {
+        for cx in (site.ox - 1).div_euclid(cs)..=(site.ox + w).div_euclid(cs) {
+            for cz in (site.oz - 1).div_euclid(cs)..=(site.oz + w).div_euclid(cs) {
+                if world.section_edited(cx, cy, cz) {
+                    return true;
+                }
+            }
+        }
+    }
+    cols.iter().any(|&(x, z, from)| {
+        (from.max(0)..=top).any(|y| world.is_placed(x, y, z) || world.block_entities.contains_key(&(x, y, z)))
+    })
+}
+
 /// Find the house site near the world spawn column `spawn`: the first try is
 /// `spawn + (HOUSE_OX, HOUSE_OZ)`, then square rings outward (a fixed order,
 /// so the answer is the same for a world on every machine) on the first pass's
 /// flat enough ground, then again with the relaxed step, then once more with
-/// the relaxed step looking through trees (never through water or lava). The first try's
-/// footprint must be loaded, or `None`: the ground is not there yet and the
-/// next pass tries again (nothing here generates). A site never overlaps
-/// the spawn column, where a player starts.
-fn find_site(world: &World, registry: &BlockRegistry, spawn: (i32, i32)) -> Option<HouseSite> {
+/// the relaxed step looking through trees (never through water or lava).
+///
+/// Every chunk column the search reads must be loaded first
+/// ([`search_columns_held`]), or [`SiteSearch::Waiting`]: nothing here
+/// generates. A site is rejected when its footprint plus one block of halo
+/// holds a cell in `avoid` (the spawn column, the player's real start, every
+/// live player) or touches anything a player made
+/// ([`site_touches_player_work`]); if nothing acceptable is in reach, the
+/// answer is [`SiteSearch::NoSite`] and no house is built.
+fn find_site(world: &World, registry: &BlockRegistry, spawn: (i32, i32), avoid: &[(i32, i32)]) -> SiteSearch {
     let first = (spawn.0 + HOUSE_OX, spawn.1 + HOUSE_OZ);
-    let cs = CHUNK_SIZE as i32;
-    let held = |x: i32, z: i32| world.column_holds_blocks(x.div_euclid(cs), z.div_euclid(cs));
-    let w = HUT_W as i32 - 1;
-    if ![(0, 0), (w, 0), (0, w), (w, w)].iter().all(|&(dx, dz)| held(first.0 + dx, first.1 + dz)) {
-        return None;
+    if !search_columns_held(world, first) {
+        return SiteSearch::Waiting;
     }
+    let near_avoided = |origin: (i32, i32)| {
+        std::iter::once(&spawn).chain(avoid).any(|&(x, z)| {
+            (origin.0 - 1..=origin.0 + HUT_W as i32).contains(&x) && (origin.1 - 1..=origin.1 + HUT_W as i32).contains(&z)
+        })
+    };
     for (max_step, through_trees) in [(MAX_STEP, false), (MAX_STEP_RELAXED, false), (MAX_STEP_RELAXED, true)] {
         // The ground of a column depends on whether trees are looked through.
         let mut memo = ahash::AHashMap::new();
@@ -179,19 +299,19 @@ fn find_site(world: &World, registry: &BlockRegistry, spawn: (i32, i32)) -> Opti
                         continue;
                     }
                     let origin = (first.0 + dx, first.1 + dz);
-                    let covers_spawn = (origin.0 - 1..=origin.0 + HUT_W as i32).contains(&spawn.0)
-                        && (origin.1 - 1..=origin.1 + HUT_W as i32).contains(&spawn.1);
-                    if covers_spawn {
+                    if near_avoided(origin) {
                         continue;
                     }
-                    if let Some(site) = site_at(world, registry, &mut memo, origin, max_step, through_trees) {
-                        return Some(site);
+                    if let Some(site) = site_at(world, registry, &mut memo, origin, max_step, through_trees)
+                        && !site_touches_player_work(world, registry, &site)
+                    {
+                        return SiteSearch::Found(site);
                     }
                 }
             }
         }
     }
-    None
+    SiteSearch::NoSite
 }
 
 /// The structural cells of the humble **wooden** hut, relative to the lowest-XZ
@@ -430,7 +550,8 @@ pub fn tick_summon(world: &World, ecs: &mut hecs::World, player_pos: Vec3) {
 /// created to host him — never an existing world, never the Workshop.
 ///
 /// A house not built yet goes on dry ground near the world spawn column
-/// `spawn` ([`find_site`]); one already built stays where `home` says. Returns
+/// `spawn` ([`find_site`], keeping clear of `avoid`: the player's real start and
+/// every live player's cell); one already built stays where `home` says. Returns
 /// the cells the new house changed: the caller relights and remeshes them (and,
 /// on a hosted world, tells the joiners). Empty on every other pass.
 pub fn tick_spawn(
@@ -438,15 +559,35 @@ pub fn tick_spawn(
     ecs: &mut hecs::World,
     spawn: (i32, i32),
     registry: &BlockRegistry,
+    avoid: &[(i32, i32)],
+    tick: u64,
 ) -> Vec<crate::lighting::CellChange> {
     if !world.satoshi.enabled || world.is_workshop {
         return Vec::new();
     }
     match world.satoshi.home {
         None => {
-            let Some(site) = find_site(world, registry, spawn) else {
-                return Vec::new(); // ground not loaded yet — try again next cadence
+            // A search that found nothing is not repeated every second: only
+            // after about 30 s, or once the loaded set has changed.
+            let loaded_sections = reach_sections(world, (spawn.0 + HOUSE_OX, spawn.1 + HOUSE_OZ));
+            if let Some(note) = &world.satoshi.no_site
+                && tick.saturating_sub(note.tick) < NO_SITE_RETRY_TICKS
+                && note.loaded_sections == loaded_sections
+            {
+                return Vec::new();
+            }
+            let site = match find_site(world, registry, spawn, avoid) {
+                SiteSearch::Found(site) => site,
+                // Ground not loaded yet: try again next cadence.
+                SiteSearch::Waiting => return Vec::new(),
+                // No place in reach: no house (he stays unplaced, as he does
+                // while the spawn ground never loads).
+                SiteSearch::NoSite => {
+                    world.satoshi.no_site = Some(NoSiteNote { tick, loaded_sections });
+                    return Vec::new();
+                }
             };
+            world.satoshi.no_site = None;
             let changes = build_house(world, &site);
             spawn_satoshi(ecs, satoshi_pos(site.ox, site.oy, site.oz));
             world.satoshi.home = Some([site.ox, site.oy, site.oz]);
@@ -644,19 +785,60 @@ mod tests {
     use super::*;
 
     /// One spawn pass for a world whose spawn column is (0, 0): the house is
-    /// first tried at (HOUSE_OX, HOUSE_OZ).
+    /// first tried at (HOUSE_OX, HOUSE_OZ). Nobody to keep clear of, tick 0.
     fn spawn_pass(world: &mut World, ecs: &mut hecs::World) -> Vec<crate::lighting::CellChange> {
-        tick_spawn(world, ecs, (0, 0), &BlockRegistry::new())
+        tick_spawn(world, ecs, (0, 0), &BlockRegistry::new(), &[], 0)
     }
 
-    /// A world configured to host Satoshi (as a new normal world would be).
+    /// `find_site` for a spawn column (0, 0), nobody to keep clear of.
+    fn site_of(world: &World) -> SiteSearch {
+        find_site(world, &BlockRegistry::new(), (0, 0), &[])
+    }
+
+    /// The block span a search from the first try reads (its reach, a footprint
+    /// and a halo, and a little more): every chunk column in it must be held.
+    fn reach_span() -> (std::ops::RangeInclusive<i32>, std::ops::RangeInclusive<i32>) {
+        let more = 2;
+        (
+            (HOUSE_OX - SITE_REACH - more)..=(HOUSE_OX + SITE_REACH + HUT_W as i32 + more),
+            (HOUSE_OZ - SITE_REACH - more)..=(HOUSE_OZ + SITE_REACH + HUT_W as i32 + more),
+        )
+    }
+
+    /// A world configured to host Satoshi (as a new normal world would be) and
+    /// flat grass at height `y` over the whole span a search reads, as a freshly
+    /// generated world: nothing in it has been edited.
     fn flat_ground(world: &mut World, y: i32) {
         world.satoshi.enabled = true;
-        for z in (HOUSE_OZ - 2)..(HOUSE_OZ + HUT_W as i32 + 2) {
-            for x in (HOUSE_OX - 2)..(HOUSE_OX + HUT_W as i32 + 2) {
+        let (xs, zs) = reach_span();
+        for z in zs {
+            for x in xs.clone() {
                 world.set_block(x, y, z, block::GRASS);
             }
         }
+        world.forget_edits();
+    }
+
+    /// Nothing a house stands on or in may be water, lava or a log, in any
+    /// column of its footprint, from the ground to the roof.
+    fn assert_footprint_is_dry_and_clear(world: &World, site: &HouseSite) {
+        for dz in 0..HUT_W as usize {
+            for dx in 0..HUT_W as usize {
+                let (x, z) = (site.ox + dx as i32, site.oz + dz as i32);
+                for y in site.tops[dz][dx]..=site.oy + HUT_H as i32 {
+                    let b = world.get_block(x, y, z);
+                    assert!(
+                        !block::is_fluid(b) && !block::is_any_log_block(b),
+                        "column ({x}, {z}) holds block {b} at y {y} (site {site:?})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Is block column `(x, z)` in the footprint of `site` or its one-block halo?
+    fn in_halo(site: &HouseSite, (x, z): (i32, i32)) -> bool {
+        (site.ox - 1..=site.ox + HUT_W as i32).contains(&x) && (site.oz - 1..=site.oz + HUT_W as i32).contains(&z)
     }
 
     /// Every authored, player-facing string — the compliance test scans these.
@@ -849,8 +1031,12 @@ mod tests {
                 world.generate_column(cx + dx, cz + dz, &bg);
             }
         }
-        for (cx, cz) in [(0, 0), (-1, 0), (0, -1), (-1, -1)] {
-            world.generate_column(cx, cz, &bg);
+        // And every column a search from the origin reads (a v2 world's spawn).
+        let (xs, zs) = search_columns((HOUSE_OX, HOUSE_OZ));
+        for cx in xs {
+            for cz in zs.clone() {
+                world.generate_column(cx, cz, &bg);
+            }
         }
         world.satoshi.enabled = true;
         (world, bg, seed)
@@ -866,7 +1052,9 @@ mod tests {
         let spawn = crate::chunk_stream::world_spawn_xz(&world, &bg);
         assert_ne!(spawn, (0, 0), "control: seed {seed} spawns away from its sea origin");
         let registry = BlockRegistry::new();
-        let changes = tick_spawn(&mut world, &mut ecs, spawn, &registry);
+        let start = crate::chunk_stream::world_spawn_point(&world, &bg);
+        let start = (start.x.floor() as i32, start.z.floor() as i32);
+        let changes = tick_spawn(&mut world, &mut ecs, spawn, &registry, &[start], 0);
         assert!(!changes.is_empty(), "the house was built");
         let [ox, oy, oz] = world.satoshi.home.expect("the house was placed");
         assert!(
@@ -889,26 +1077,40 @@ mod tests {
     }
 
     /// The old fixed site, a few blocks off the origin, is the sea: the pass
-    /// must not build there, so `home` is not near the origin.
+    /// must not build there. Every column the search reads round the origin is
+    /// loaded, so the answer is conclusive, and it is asserted which one it is:
+    /// either a site on dry ground (found, and then every floor cell stands on
+    /// solid, non-liquid ground), or no site at all (nothing built, no Satoshi,
+    /// the "no site" note kept). Never "ground not loaded" (that would make
+    /// this test say nothing).
     #[test]
     fn a_sea_origin_world_gets_no_house_over_the_water() {
         let (mut world, bg, seed) = sea_origin_world();
-        let mut ecs = hecs::World::new();
-        // The spawn passed is the origin, as a v2 world's: all of its reach is sea.
         let registry = BlockRegistry::new();
-        let changes = tick_spawn(&mut world, &mut ecs, (0, 0), &registry);
-        if let Some([ox, oy, oz]) = world.satoshi.home {
-            for dz in 0..HUT_W as i32 {
-                for dx in 0..HUT_W as i32 {
-                    let under = world.get_block(ox + dx, oy - 1, oz + dz);
-                    assert!(
-                        registry.is_solid(under) && !block::is_fluid(under),
-                        "seed {seed}: sits on block {under}"
-                    );
+        // The spawn passed is the origin, as a v2 world's.
+        let found = find_site(&world, &registry, (0, 0), &[]);
+        assert_ne!(found, SiteSearch::Waiting, "seed {seed}: every column the search reads is loaded");
+        let mut ecs = hecs::World::new();
+        let changes = tick_spawn(&mut world, &mut ecs, (0, 0), &registry, &[], 0);
+        match found {
+            SiteSearch::Found(site) => {
+                assert!(!changes.is_empty() && satoshi_exists(&ecs), "seed {seed}: a site was found, so it is built");
+                for dz in 0..HUT_W as i32 {
+                    for dx in 0..HUT_W as i32 {
+                        let under = world.get_block(site.ox + dx, site.oy - 1, site.oz + dz);
+                        assert!(
+                            registry.is_solid(under) && !block::is_fluid(under),
+                            "seed {seed}: ({dx},{dz}) of the house at {site:?} sits on block {under}"
+                        );
+                    }
                 }
             }
-        } else {
-            assert!(changes.is_empty() && !satoshi_exists(&ecs), "no site: nothing built, no Satoshi");
+            SiteSearch::NoSite => {
+                assert!(changes.is_empty() && !satoshi_exists(&ecs), "seed {seed}: no site: nothing built, no Satoshi");
+                assert_eq!(world.satoshi.home, None);
+                assert!(world.satoshi.no_site.is_some(), "and the search is noted, not repeated every second");
+            }
+            SiteSearch::Waiting => unreachable!(),
         }
         let _ = bg;
     }
@@ -932,6 +1134,7 @@ mod tests {
         }
         world.set_block(HOUSE_OX + 4, 64, HOUSE_OZ + 4, block::AIR);
         world.set_block(HOUSE_OX + 1, 65, HOUSE_OZ + 3, block::TALL_GRASS);
+        world.forget_edits();
         let region = |w: &World| {
             let mut m = std::collections::BTreeMap::new();
             for y in 60..75 {
@@ -969,36 +1172,207 @@ mod tests {
         assert!(!plan.later.is_empty());
     }
 
-    /// A house site over water is never taken: a lake on the first try moves
-    /// the house to dry ground; nothing dry in reach builds nothing.
+    /// A house site over water, lava or a trunk is never taken: the first try
+    /// is rejected, a site elsewhere is found (the reach is flat grass all
+    /// round, so one exists), and no column of what is chosen holds water, lava
+    /// or a log from the ground to the roof.
     #[test]
     fn a_house_is_never_sited_over_water_or_lava_or_trees() {
-        let registry = BlockRegistry::new();
+        let first_try = |site: &HouseSite| (site.ox, site.oz) == (HOUSE_OX, HOUSE_OZ);
+        // A pond over the first try's footprint.
         let mut world = World::new();
         flat_ground(&mut world, 64);
-        // A pond over the first try's footprint.
         for z in HOUSE_OZ..HOUSE_OZ + HUT_W as i32 {
             for x in HOUSE_OX..HOUSE_OX + HUT_W as i32 {
                 world.set_block(x, 65, z, block::WATER);
             }
         }
-        let site = find_site(&world, &registry, (0, 0));
-        assert!(site.is_none() || {
-            let s = site.clone().unwrap();
-            (s.ox, s.oz) != (HOUSE_OX, HOUSE_OZ)
-        }, "not over the pond: {site:?}");
-        // Lava is no ground either.
+        world.forget_edits();
+        let site = site_of(&world).site().expect("dry ground is in reach");
+        assert!(!first_try(&site), "not over the pond: {site:?}");
+        assert_footprint_is_dry_and_clear(&world, &site);
+        // Lava is no ground either: one lava cell in the first try's footprint.
         let mut lava = World::new();
         flat_ground(&mut lava, 64);
         lava.set_block(HOUSE_OX + 2, 65, HOUSE_OZ + 2, block::LAVA);
-        let site = find_site(&lava, &registry, (0, 0));
-        assert!(site.is_none_or(|s| (s.ox, s.oz) != (HOUSE_OX, HOUSE_OZ)));
-        // A tree in the footprint.
+        lava.forget_edits();
+        let site = site_of(&lava).site().expect("dry ground is in reach");
+        assert!(!first_try(&site), "not over the lava: {site:?}");
+        assert_footprint_is_dry_and_clear(&lava, &site);
+        // A tree in the footprint: the first pass does not take it.
         let mut wood = World::new();
         flat_ground(&mut wood, 64);
         wood.set_block(HOUSE_OX + 1, 65, HOUSE_OZ + 1, block::OAK_LOG);
-        let site = find_site(&wood, &registry, (0, 0));
-        assert!(site.is_none_or(|s| (s.ox, s.oz) != (HOUSE_OX, HOUSE_OZ)));
+        wood.forget_edits();
+        let site = site_of(&wood).site().expect("clear ground is in reach");
+        assert!(!first_try(&site), "not through the trunk: {site:?}");
+        assert_footprint_is_dry_and_clear(&wood, &site);
+    }
+
+    /// Satoshi's house never goes over a player's work. A block a player placed
+    /// in the first try's footprint moves the house; one in its halo does too;
+    /// the stamp's whole volume and a one-block margin are protected.
+    #[test]
+    fn a_house_is_never_built_over_a_block_a_player_placed() {
+        for (what, cell) in [
+            ("in the footprint", (HOUSE_OX + 2, 65, HOUSE_OZ + 2)),
+            ("on the ground of the footprint", (HOUSE_OX + 4, 64, HOUSE_OZ)),
+            ("in the halo", (HOUSE_OX - 1, 65, HOUSE_OZ + 2)),
+            ("high in the volume", (HOUSE_OX + 2, 65 + HUT_H as i32, HOUSE_OZ + 2)),
+        ] {
+            let mut world = World::new();
+            flat_ground(&mut world, 64);
+            world.place_player_block(cell.0, cell.1, cell.2, block::STONE);
+            world.forget_edits(); // only the placed bit is left to see
+            assert!(world.is_placed(cell.0, cell.1, cell.2), "control");
+            let site = site_of(&world).site().expect("a clear site is in reach");
+            assert_ne!((site.ox, site.oz), (HOUSE_OX, HOUSE_OZ), "{what}: not the first try");
+            assert!(!in_halo(&site, (cell.0, cell.2)), "{what}: the house at {site:?} covers the placed block");
+            let mut ecs = hecs::World::new();
+            spawn_pass(&mut world, &mut ecs);
+            assert!(world.is_placed(cell.0, cell.1, cell.2));
+            assert_ne!(world.get_block(cell.0, cell.1, cell.2), block::AIR, "{what}: the player's block is still there");
+        }
+    }
+
+    /// A block entity (a chest) is player work too, whether or not anything
+    /// marked its section.
+    #[test]
+    fn a_house_is_never_built_over_a_block_entity() {
+        let mut world = World::new();
+        flat_ground(&mut world, 64);
+        let cell = (HOUSE_OX + 3, 65, HOUSE_OZ + 1);
+        world.set_block(cell.0, cell.1, cell.2, block::CHEST);
+        world.insert_chest(cell, Default::default());
+        world.forget_edits();
+        let site = site_of(&world).site().expect("a clear site is in reach");
+        assert!(!in_halo(&site, (cell.0, cell.2)), "{site:?} covers the chest");
+    }
+
+    /// A section edited since generation is not built in at all: whatever is in
+    /// it (a field, torches), the stamp would wreck it. A block high above the
+    /// house in the same section is an edit, and the house goes elsewhere.
+    #[test]
+    fn a_house_is_never_built_in_a_chunk_that_was_edited() {
+        let mut world = World::new();
+        flat_ground(&mut world, 64);
+        // One edit, in the section the first try is in, above the house.
+        let edit = (HOUSE_OX + 2, 75, HOUSE_OZ + 2);
+        world.set_block(edit.0, edit.1, edit.2, block::TORCH); // not ground: only the edit is in the way
+        let (cx, cy, cz) = World::block_to_chunk(edit.0, edit.1, edit.2);
+        assert!(world.section_edited(cx, cy, cz), "control: the edit marks its section");
+        let site = site_of(&world).site().expect("a site in an untouched section is in reach");
+        // Not one block column of the house or its halo is in the edited chunk's
+        // columns (its section spans the heights the house uses).
+        let (x0, z0) = (cx * 16, cz * 16);
+        let overlaps = (site.ox - 1..=site.ox + HUT_W as i32).any(|x| (x0..x0 + 16).contains(&x))
+            && (site.oz - 1..=site.oz + HUT_W as i32).any(|z| (z0..z0 + 16).contains(&z));
+        assert!(!overlaps, "the house at {site:?} stands in the edited chunk");
+        // A section of the same column that the house does not reach (high up)
+        // is no reason to refuse: the volume is what counts.
+        let mut other = World::new();
+        flat_ground(&mut other, 64);
+        other.set_block(HOUSE_OX + 2, 200, HOUSE_OZ + 2, block::TORCH);
+        assert_eq!(site_of(&other).site().map(|s| (s.ox, s.oz)), Some((HOUSE_OX, HOUSE_OZ)));
+    }
+
+    /// With every section in reach edited there is nowhere to build: no house,
+    /// no Satoshi, and the search is not repeated every second: it waits about
+    /// 30 s, or for the loaded set to change.
+    #[test]
+    fn with_no_acceptable_site_nothing_is_built_and_the_search_is_not_repeated() {
+        let registry = BlockRegistry::new();
+        let mut world = World::new();
+        flat_ground(&mut world, 64);
+        // One edit in the house's height band of every chunk column in reach.
+        for cx in -2..=2 {
+            for cz in -2..=2 {
+                world.set_block(cx * 16 + 1, 70, cz * 16 + 1, block::TORCH); // not ground: only the edit is in the way
+            }
+        }
+        let mut ecs = hecs::World::new();
+        let mut pass = |world: &mut World, tick: u64| tick_spawn(world, &mut ecs, (0, 0), &registry, &[], tick);
+        assert!(pass(&mut world, 100).is_empty());
+        assert_eq!(world.satoshi.home, None, "no house when no site is acceptable");
+        assert_eq!(world.satoshi.no_site.as_ref().map(|n| n.tick), Some(100), "noted");
+        // Inside the wait, with the same ground: not searched again.
+        pass(&mut world, 100 + NO_SITE_RETRY_TICKS - 1);
+        assert_eq!(world.satoshi.no_site.as_ref().map(|n| n.tick), Some(100));
+        // After it: searched again (and noted again).
+        pass(&mut world, 100 + NO_SITE_RETRY_TICKS);
+        assert_eq!(world.satoshi.no_site.as_ref().map(|n| n.tick), Some(100 + NO_SITE_RETRY_TICKS));
+        // The loaded set changing inside the wait: searched at once.
+        let t = 100 + NO_SITE_RETRY_TICKS + 5;
+        world.set_block(HOUSE_OX, 140, HOUSE_OZ, block::TORCH); // a new section in reach
+        pass(&mut world, t);
+        assert_eq!(world.satoshi.no_site.as_ref().map(|n| n.tick), Some(t), "the loaded set changed: searched again");
+        // The note is session-only: never in a save.
+        let bytes = bincode::serialize(&world.satoshi).expect("serialize");
+        let back: SatoshiState = bincode::deserialize(&bytes).expect("deserialize");
+        assert_eq!(back.no_site, None);
+    }
+
+    /// A site never covers the player's real start or a live player, halo
+    /// included, however far from the spawn column that is.
+    #[test]
+    fn a_house_keeps_clear_of_the_start_and_of_every_player() {
+        let registry = BlockRegistry::new();
+        let mut world = World::new();
+        flat_ground(&mut world, 64);
+        for cell in [(HOUSE_OX + 2, HOUSE_OZ + 2), (HOUSE_OX - 1, HOUSE_OZ - 1), (HOUSE_OX + 5, HOUSE_OZ + 5)] {
+            let site = find_site(&world, &registry, (0, 0), &[cell]).site().expect("a site in reach");
+            assert!(!in_halo(&site, cell), "{cell:?}: the house at {site:?} covers it");
+            assert_ne!((site.ox, site.oz), (HOUSE_OX, HOUSE_OZ), "{cell:?}: the first try is covered");
+        }
+        // Several at once.
+        let cells = [(HOUSE_OX + 2, HOUSE_OZ + 2), (HOUSE_OX + 9, HOUSE_OZ + 2), (HOUSE_OX + 2, HOUSE_OZ + 9)];
+        let site = find_site(&world, &registry, (0, 0), &cells).site().expect("a site in reach");
+        assert!(cells.iter().all(|&c| !in_halo(&site, c)), "{site:?}");
+    }
+
+    /// The site depends on the world and its edits, not on which columns have
+    /// streamed in: a column the search reads that is not loaded means no
+    /// answer yet; once all are loaded the answer is the same whether or not
+    /// columns beyond the reach are loaded as well, or in what order.
+    #[test]
+    fn the_site_waits_for_every_column_it_reads_and_then_does_not_depend_on_more() {
+        let registry = BlockRegistry::new();
+        let mut world = World::new();
+        world.satoshi.enabled = true;
+        let (xs, zs) = reach_span();
+        let missing = (32..48, 32..48); // the chunk column (2, 2), inside the reach
+        for z in zs.clone() {
+            for x in xs.clone() {
+                if !(missing.0.contains(&x) && missing.1.contains(&z)) {
+                    world.set_block(x, 64, z, block::GRASS);
+                }
+            }
+        }
+        world.forget_edits();
+        assert_eq!(site_of(&world), SiteSearch::Waiting, "a column in reach is missing");
+        let mut ecs = hecs::World::new();
+        assert!(spawn_pass(&mut world, &mut ecs).is_empty(), "nothing built while it waits");
+        assert_eq!(world.satoshi.no_site, None, "and waiting is not noted as no site");
+        world.set_block(40, 64, 40, block::GRASS);
+        world.forget_edits();
+        let a = site_of(&world).site().expect("every column is loaded now");
+        // The same ground, built in the opposite order and with columns far
+        // beyond the reach as well.
+        let mut other = World::new();
+        other.satoshi.enabled = true;
+        for z in zs.rev() {
+            for x in xs.clone().rev() {
+                if !(missing.0.contains(&x) && missing.1.contains(&z)) {
+                    other.set_block(x, 64, z, block::GRASS);
+                }
+            }
+        }
+        other.set_block(40, 64, 40, block::GRASS);
+        for far in [(120, 120), (-200, 40), (300, -300)] {
+            other.set_block(far.0, 64, far.1, block::GRASS);
+        }
+        other.forget_edits();
+        assert_eq!(site_of(&other).site(), Some(a), "the same world gives the same house");
     }
 
     /// A forest does not leave Satoshi without a house: with a canopy over the
@@ -1011,15 +1385,17 @@ mod tests {
         let mut ecs = hecs::World::new();
         flat_ground(&mut world, 64);
         // Two leaf layers over the whole reach, one under the roof line.
-        for z in (HOUSE_OZ - 2)..(HOUSE_OZ + HUT_W as i32 + 2) {
-            for x in (HOUSE_OX - 2)..(HOUSE_OX + HUT_W as i32 + 2) {
+        let (xs, zs) = reach_span();
+        for z in zs {
+            for x in xs.clone() {
                 world.set_block(x, 68, z, block::OAK_LEAVES);
                 world.set_block(x, 66, z, block::OAK_LEAVES);
             }
         }
         // A trunk standing in the footprint.
         world.set_block(HOUSE_OX + 2, 65, HOUSE_OZ + 2, block::OAK_LOG);
-        assert!(find_site(&world, &registry, (0, 0)).is_some(), "found through the canopy");
+        world.forget_edits();
+        assert!(site_of(&world).site().is_some(), "found through the canopy");
         let changes = spawn_pass(&mut world, &mut ecs);
         assert!(!changes.is_empty() && satoshi_exists(&ecs), "the house is built");
         let [ox, oy, oz] = world.satoshi.home.expect("placed");
@@ -1044,7 +1420,7 @@ mod tests {
         assert_eq!(home, Some([HOUSE_OX, 65, HOUSE_OZ]));
         ecs = hecs::World::new();
         // The world spawn is somewhere else entirely now: the entity returns home.
-        let changes = tick_spawn(&mut world, &mut ecs, (500, -500), &BlockRegistry::new());
+        let changes = tick_spawn(&mut world, &mut ecs, (500, -500), &BlockRegistry::new(), &[], 0);
         assert!(changes.is_empty(), "nothing is rebuilt");
         assert_eq!(world.satoshi.home, home);
         assert!(satoshi_exists(&ecs));

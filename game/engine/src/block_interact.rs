@@ -373,6 +373,16 @@ impl super::GameState {
         }
     }
 
+    /// Only the second half of [`Self::remesh_runtime_edits`]: queue the
+    /// sections round `cells` (the light reaches them) for the budgeted drain.
+    /// For a caller that has already rebuilt the sections holding the cells.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) fn queue_runtime_edit_neighbours(&mut self, cells: impl IntoIterator<Item = (i32, i32, i32)>) {
+        for pos in runtime_edit_remesh(cells).later {
+            self.mark_chunk_dirty(pos);
+        }
+    }
+
     /// Queue a chunk for a budgeted mesh rebuild (Spec 39 A4).
     pub(crate) fn mark_chunk_dirty(&mut self, pos: (i32, i32, i32)) {
         self.dirty_mesh_chunks.insert(pos);

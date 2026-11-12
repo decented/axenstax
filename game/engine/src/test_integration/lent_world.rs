@@ -244,6 +244,22 @@ fn satoshis_house_built_on_a_lent_world_reaches_the_host_remesh_and_a_joiner() {
             assert!(told.iter().any(is_floor), "{at:?}: the joiner was not told");
         }
     }
+    // Exactly once: every cell the house changed reaches the host's remesh and
+    // the joiner once, not twice (one broadcast path: the changes are copied
+    // for the host before the drain, then drained into one StateUpdate).
+    let volume = |bc: &protocol::BlockChange| {
+        (ox..ox + 5).contains(&bc.x) && (oy - 3..=oy + 4).contains(&bc.y) && (oz..oz + 5).contains(&bc.z)
+    };
+    for (who, seen) in [("the host's remesh", &sim), ("the joiner", &told)] {
+        let mut per_cell: std::collections::BTreeMap<(i32, i32, i32), usize> = Default::default();
+        for bc in seen.iter().filter(|bc| volume(bc)) {
+            *per_cell.entry((bc.x, bc.y, bc.z)).or_default() += 1;
+        }
+        assert!(!per_cell.is_empty(), "{who} saw the house");
+        for (cell, n) in per_cell {
+            assert_eq!(n, 1, "{who}: {cell:?} was delivered {n} times");
+        }
+    }
     // Relit: the hearth torch lights its room.
     assert!(host.world.block_light_at(ox + 1, oy + 2, oz + 1) > 0, "the house was relit");
 }
