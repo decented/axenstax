@@ -368,7 +368,8 @@ fn vs_micro(in: MicroVertexInput) -> VertexOutput {
 
 @fragment
 fn fs_plant(in: VertexOutput) -> @location(0) vec4<f32> {
-    let tex_color = textureSample(block_textures, block_sampler, in.uv, i32(in.tex_layer));
+    // The layer is tex_layer's low 16 bits; bit 18 (GREY_FLAG) greys a plant.
+    let tex_color = textureSample(block_textures, block_sampler, in.uv, i32(in.tex_layer & LEAF_LAYER_MASK));
     // Alpha cutout — the cross billboard's transparent texels are dropped so
     // the plant reads as a stem, not a quad. (The chunk fs_main forces
     // alpha=1, which is fine for cubes but wrong for billboards.)
@@ -379,7 +380,14 @@ fn fs_plant(in: VertexOutput) -> @location(0) vec4<f32> {
     // The one light rule (Spec 03 §4.7), like fs_main. `light` is the block
     // channel and `sky_light` the sky channel; the normal is straight up
     // (vs_plant), so the block term is unshaded.
-    let lit = bloom_grade(tex_color.rgb * world_light(in.normal, in.light, in.sky_light), in.world_pos.xz);
+    var lit = tex_color.rgb * world_light(in.normal, in.light, in.sky_light);
+    // The Blighted Crop (GREY_FLAG): ash grey, the lit colour's luminance
+    // darkened a little, so it reads grey beside healthy crops by day and by
+    // torchlight alike (greyed before the light, a torch would tint it warm).
+    if ((in.tex_layer & GREY_FLAG) != 0u) {
+        lit = vec3<f32>(dot(lit, LUMA) * BLIGHT_GREY);
+    }
+    lit = bloom_grade(lit, in.world_pos.xz);
 
     let underwater = camera.camera_pos.w > 0.5;
     let dist = distance(in.world_pos, camera.camera_pos.xyz);
@@ -419,6 +427,13 @@ const LEAF_LAYER_MASK: u32 = 0xFFFFu;
 // sprite item. fs_main drops a texel whose full-size alpha is below 0.5, so a
 // flat item shows its silhouette, not the square it is painted on.
 const CUTOUT_FLAG: u32 = 0x20000u;
+// The Blighted Crop (`mesh::GREY_FLAG`, bit 18 of a plant instance's
+// tex_layer): fs_plant draws it ash grey, the lit colour's luminance times
+// BLIGHT_GREY. The atlas has no free layer for a grey crop.
+const GREY_FLAG: u32 = 0x40000u;
+const BLIGHT_GREY: f32 = 0.85;
+// Rec. 709 luminance weights (as bloom_grade_level uses).
+const LUMA: vec3<f32> = vec3<f32>(0.2126, 0.7152, 0.0722);
 
 fn fast_leaf_fill(uv: vec2<f32>, layer: i32) -> vec3<f32> {
     let avg = textureSampleLevel(block_textures, block_sampler, uv, layer, 4.0).rgb;

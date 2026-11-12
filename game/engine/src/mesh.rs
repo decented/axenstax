@@ -280,6 +280,12 @@ pub const LEAF_FILL_FLAG: u32 = 1 << 16;
 /// only: `world_light::AVATAR_BLOCK_BITS`.)
 pub const CUTOUT_FLAG: u32 = 1 << 17;
 
+/// Bit set in a plant instance's `tex_layer` for the Blighted Crop. `fs_plant`
+/// masks it off the layer index and draws the plant ash grey (the lit
+/// colour's luminance, darkened a little): the atlas has no free layer for a
+/// grey crop, and the texture it borrows is half-grown wheat's.
+pub const GREY_FLAG: u32 = 1 << 18;
+
 /// How the chunk mesher draws a block: the one rule `emit_non_solid_blocks`
 /// branches on, which the item model reads too (`item_model::block_look`), so
 /// an item looks like its block. A block with a placed micro-model (a
@@ -872,6 +878,9 @@ fn emit_non_solid_blocks(
                 } else if class == RenderClass::Smoke {
                     emit_small_cube(min, max, tex_layer, light_f, sky_f, vertices, indices);
                 } else {
+                    // Living world Tier 2: the Blighted Crop draws ash grey.
+                    let tex_layer =
+                        if block_id == block::BLIGHTED_CROP { tex_layer | GREY_FLAG } else { tex_layer };
                     plants.push(PlantInstance {
                         pos: min,
                         // Size from the raw offsets, not world-space min/max,
@@ -3206,6 +3215,29 @@ mod tests {
     }
 
     #[test]
+    fn the_blighted_crop_is_drawn_grey_and_wheat_is_not() {
+        // Living world Tier 2: the Blighted Crop borrows half-grown wheat's
+        // texture (the atlas is full) and is greyed by `fs_plant` through the
+        // GREY_FLAG bit; healthy wheat is not. It keeps its half size.
+        let reg = BlockRegistry::new();
+        let mut w = World::new();
+        w.set_block(3, 3, 3, block::BLIGHTED_CROP);
+        w.set_block(6, 3, 3, block::WHEAT_STAGE_2);
+        let m = build_chunk_meshes(0, 0, 0, &w, &reg);
+        assert_eq!(m.plants.len(), 2, "two plant instances");
+        let at = |x: f32| *m.plants.iter().find(|p| p.pos[0].floor() == x).expect("a plant there");
+        let (blight, wheat) = (at(3.0), at(6.0));
+        assert_ne!(blight.tex_layer & GREY_FLAG, 0, "the Blighted Crop carries the grey flag");
+        assert_eq!(blight.tex_layer & !GREY_FLAG, block::TEX_WHEAT_STAGE_2, "on its borrowed texture");
+        assert_eq!(wheat.tex_layer, block::TEX_WHEAT_STAGE_2, "healthy wheat is not greyed");
+        assert!(
+            (blight.size[0] - 0.5).abs() < 1e-6 && (blight.size[1] - 0.45).abs() < 1e-6,
+            "still stunted, 0.5 wide and 0.45 high: {:?}",
+            blight.size
+        );
+    }
+
+    #[test]
     fn a_framed_torch_lies_flat_on_the_plate_facing_out() {
         // For every way a frame can face: the torch's sprite stays in the
         // frame's cell, lies 1/16 of its width deep with its back on the
@@ -3279,9 +3311,9 @@ mod tests {
 
     #[test]
     fn the_shader_reads_the_same_flag_bits() {
-        // fs_main tests these bits; they must be the mesher's.
+        // fs_main / fs_plant test these bits; they must be the mesher's.
         let src = include_str!("shader.wgsl");
-        for (name, bit) in [("LEAF_FILL_FLAG", LEAF_FILL_FLAG), ("CUTOUT_FLAG", CUTOUT_FLAG)] {
+        for (name, bit) in [("LEAF_FILL_FLAG", LEAF_FILL_FLAG), ("CUTOUT_FLAG", CUTOUT_FLAG), ("GREY_FLAG", GREY_FLAG)] {
             let want = format!("const {name}: u32 = {bit:#x}u;");
             assert!(src.contains(&want), "shader.wgsl must declare `{want}`");
         }
