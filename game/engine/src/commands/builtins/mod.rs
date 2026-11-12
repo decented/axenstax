@@ -8,6 +8,8 @@ pub mod tp;
 pub mod seed;
 pub mod clear;
 pub mod give;
+#[cfg(test)]
+mod give_golden_tests;
 pub mod spawnpoint;
 pub mod heal;
 pub mod kill;
