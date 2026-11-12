@@ -1,61 +1,60 @@
-# Axe'n'Stax test missions: build 0.2.34
+# Axe'n'Stax test missions: build 0.2.35
 
 This is the test guide for the current build. A tester, or a chat assistant co-hosting their session, reads it for what to type, exact numbers, what success looks like, and why something might not work.
 
-Everything in this file was checked against the game's code for build 0.2.34. If the game and this guide disagree, that is worth reporting.
+Everything in this file was checked against the game's code for build 0.2.35. If the game and this guide disagree, that is worth reporting.
 
-- **Build:** 0.2.34 (desktop app, Linux)
-- **This session:** first the "Fixed since last time" re-checks (Mission 0), then the four missions "On your own"
+- **Build:** 0.2.35 (desktop app, Linux)
+- **This session:** first the "Fixed since last time" re-checks (Mission 0), then any of the missions "On your own"
 - **Coming next:** missions at a village, and missions with a friend
 
 ---
 
 ## Fixed since last time (re-check these first)
 
-These were found in the last playtest (build 0.2.33) and are fixed in 0.2.34. Check each one and say whether it now works. Mission 0 below covers the first two.
+These were found in the last playtest (build 0.2.34) and are fixed in 0.2.35. Check each one and say whether it now works. Mission 0 below walks through them.
 
-1. **Torches look like torches.** Before, a placed torch was a dark brown block. Now it shows a yellow-orange flame on top of a brown wooden handle, by day and by night.
-2. **Torchlight is bright at night.** Before, a torch at night barely lit the blocks around it (they showed about a seventh of their normal colour). Now the blocks next to a torch show nearly their full colour at midnight, about the same as at noon, in a warm light that fades over the next few blocks.
-3. **Small blocks show the right picture.** A button shows its raised pad, a pressure plate shows its edge on all four sides, a lever's handle is wood-coloured, and a block in an item frame shows its whole picture on every side (a framed torch used to be a black cube).
+1. **A torch in an item frame looks right.** It lies flat on the frame showing the whole torch, from the front, the side and above, with no black box round it.
+2. **A torch dropped on the ground, or held in your hand, is a flat torch, not a dark cube.** To see what you are holding, press **F5** for the camera behind you. The same goes for flowers, saplings, rails and tall grass.
+3. **Blighted crops are grey.** A blighted crop is ash grey and half the size of a healthy one, so it is easy to spot next to yellow wheat.
+4. **Respawning without a bed puts you on dry land**, near where the world started. Before, it could drop you from the sky into the sea. Worlds made before this build are fixed when they load, unless you set a spawn with a bed or `/sp`.
+5. **Satoshi's house is built on dry ground near where you start, and shows up at once.** Before, it could float on the sea and stay invisible until you broke a block nearby. It is never built on top of anything you placed. A house that was already built stays where it is.
+6. **Respawning at a bed puts you next to the bed**, inside the room, not on the roof.
 
-**Other changes in 0.2.34** (nothing to re-check, but good to know):
+**New in 0.2.35:**
 
-- Rails and cables, powered ones too, no longer glow at night. They give off no light, so they now get as dark as the ground around them.
-- Water next to a torch is lit by it at night.
-- The Workshop is always daytime now, so working copies never go dark.
+- **Bigger chat text.** Chat and commands are 1.5 times bigger. To make them bigger still, press **Esc**, then **Settings**, then move the **Chat text size** slider (100% to 300%).
+- **The Esc menu button that used to say "Graphics" now says "Settings".**
+- **Tab finishes commands, like Minecraft.** Type `/gi` and press **Tab** to get `/give`. Type `/give tor` and press **Tab** to get `/give torch`. Press **Tab** again for the next suggestion, **Shift+Tab** to go back. The suggestions show above the chat line, and you can also click one.
+- **Tall grass** in the world now shows only its blades, with no dark green square behind them.
 
 **Known, not fixed yet** (if one of these happens, it is already known):
 
-- A torch in your hand, or dropped on the ground, still looks like a small dark cube with a torch picture on it. Only placed torches are fixed.
+- In first person, your hand sits mostly below the screen, so you cannot see what you are holding. Press **F5** to see it.
 - The world is split into columns 16 by 16 blocks wide. A sealed room built across the edge of one of those columns can stay lit like daytime inside at night, even with no torch.
+- A Satoshi house that was already built over the sea stays there.
+- Thunder is loud and comes all at once. There is no `/weather` command yet.
+
+**Good to know:** brigands cannot take or carry your items. If your whole inventory disappears, you died: your things are in a grave block where it happened.
 
 ---
 
-## Also new in 0.2.33 (the last playtest build)
+## Changed in 0.2.34 (the last playtest build)
 
-- Villages that lost their villagers after a reload get villagers again.
-- Crops and saplings are only checked in the chunks that have them, and a save only writes land that something has changed. Both should cut lag in big worlds.
-- Birdsong and pollen only happen under open sky.
-- Storms no longer arrive at the same minutes in every world.
-- The Grey Quarry only finishes inside its own trial world.
-- Water you pour drains properly after a reload, and lava no longer creeps further every time a world loads.
-- A mineshaft chest and an emptied wild beehive stay the same when you walk away and come back.
-
-From 0.2.32 (the last playtest):
-
-- Birdsong plays less often (about every 60, 35 or 20 seconds, depending on how lively a place is), lower and softer.
-- Storms are rarer (about 1 rain in 7 is a storm), and the lightning flash is gentler.
-- Flying over land you changed no longer re-runs the world generator every tick (this was a lag cause).
+- Torches show their flame and handle, and torchlight at night is about as bright as at noon.
+- Buttons, pressure plates and levers show the right picture.
+- Rails and cables no longer glow at night, and water next to a torch is lit by it.
+- The Workshop is always daytime.
 
 ---
 
 ## Before every mission (do this once)
 
 1. **Make a new Survival world just for testing.** The missions use chat commands, and commands mark a world as "cheats used". Keep them out of your real world.
-2. **Press T** (or /) to open chat and type a command.
+2. **Press T** (or /) to open chat and type a command. Press **Tab** to finish a command or an item name.
 3. **Type `/gm c`** to switch to Creative so you can fly. Find **flat, open grass with no trees**. Missions 1 to 3 all happen there.
 4. **Type `/gm s`** to switch back to Survival. The game must reply **"Switched to survival"** (or "already in survival").
-5. **Check the build number** at the bottom of the Settings menu. It should say **v0.2.34**. Use that number in the feedback.
+5. **Check the build number** at the bottom of the Settings menu. It should say **v0.2.35**. Use that number in the feedback.
 
 **Good to know:** hunger drops 1 point (half an icon on the hunger bar) every 30 seconds, whatever you are doing. A full bar lasts about 10 minutes, so take some food (berries, bread or cooked meat), or use `/give bread 16` in a test world.
 
@@ -63,20 +62,21 @@ From 0.2.32 (the last playtest):
 
 ---
 
-## Mission 0: Torch at midnight (re-check)
+## Mission 0: Re-checks for 0.2.35
 
-**What it tests:** a torch shows its flame and lights the blocks around it at night.
+**What it tests:** the fixes in "Fixed since last time".
 
-1. In your test world, stand on open grass and type `/time set midnight` (the darkest time).
-2. Type `/give torch 4` if you have no torches, and place one on the grass.
-3. Step back two or three blocks and look at it.
-4. Place the other three torches in a line, about 4 blocks apart, to light a path.
+1. **Item frame:** type `/give item_frame` and `/give torch 4`. Place the frame on a wall, then right-click the frame with the torch in your hand to put it in. Look at it from the front, from the side and from above.
+2. **Dropped and held torch:** press **Q** with a torch selected to drop one, and look at it on the ground. Then press **F5** to see yourself holding a torch (press F5 again to go back).
+3. **Blight:** if you still have a giant wheat field from last time, look for grey plants. Otherwise do Mission 2 and check the colour.
+4. **Respawn:** in your test world, with no bed, type `/kill` or let something defeat you, then respawn. Say where you came back.
+5. **Chat:** type `/gi` and press **Tab**. Then try `/give tor` and **Tab**, and **Tab** again. Then change **Esc, Settings, Chat text size** and see the chat get bigger.
 
-**Success:** the torch shows a yellow-orange flame on a brown handle. The grass right next to it is clearly lit in a warm light and you can see it is green; it gets darker over the next few blocks. Then type `/time set day` to go back to daytime.
+**Success:** the framed torch is a flat torch from every side with no black box; the dropped and held torch are flat torches; blighted wheat is grey; you respawn standing on dry land; Tab finishes the words and the chat text size changes.
 
 **If it does not work:**
-- The torch is a plain dark block: check the build number at the bottom of Settings says **v0.2.34**. An older build still has the bug.
-- It is too dark to tell: try it inside a cave, or in a hole you dig, where there is no moonlight at all.
+- Anything still looks like the old build: check the build number at the bottom of Settings says **v0.2.35**.
+- Tab does nothing: Tab only completes lines that start with `/`.
 
 ---
 
@@ -262,6 +262,10 @@ That plants a square field of wheat sprouts (about 17 by 17, nearly 300 plants) 
 | `/we size` | Says how big the marked box is |
 | `/trial list` / `/trial <id>` / `/trial off` | Lists trials, starts one, leaves one |
 | `/time set day` / `/time set night` / `/time set midnight` | Daytime / night-time / the darkest time |
+| `/sp` | Sets where you respawn to where you stand |
+| `/kill` | Defeats you straight away (to test respawning) |
+| **Tab** / **Shift+Tab** | Finishes a command or item name / goes back one suggestion |
+| **F5** | Camera behind you (see what you are holding) |
 | **F3** | Shows the debug overlay, including **FPS** (frames per second) |
 
 ---
@@ -272,8 +276,8 @@ At the end, write a short list like this, one line per mission, and hand it to t
 
 ```
 Build (bottom of Settings):
-Re-checks: torch looks right / torchlight bright at night / small blocks: works / doesn't. What happened:
-Mission 0 Torch at midnight: worked / didn't. What happened:
+Re-checks: framed torch / dropped and held torch / grey blight / respawn on dry land / bed respawn / chat Tab and text size: works / doesn't. What happened:
+Mission 0 Re-checks: worked / didn't. What happened:
 Mission 1 Path: worked / didn't. What happened:
 Mission 2 Wheat field: worked / didn't. What happened:
 Mission 3 Site Board: worked / didn't. What happened:
