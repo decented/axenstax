@@ -21565,10 +21565,24 @@ impl super::GameState {
         // goes over the network when a server exists — see
         // `ChatAction::Submit` below. Drawn after HUD so the log sits above
         // the hotbar without occluding it.
+        // Tab completion: the command table, the player's op level (someone
+        // else's world is `None`) and, when joined, who is in the world.
+        let roster_names: Vec<String> = self
+            .remote_client
+            .as_ref()
+            .map(|c| c.roster().values().map(|who| who.handle.clone()).collect())
+            .unwrap_or_default();
+        let completion = crate::commands::CompletionContext {
+            op_level: crate::world_exit::local_command_op_level(self.remote_client.is_some()),
+            registry: &self.cmd_registry,
+            roster_names: &roster_names,
+        };
         let chat_action = crate::chat_ui::draw_chat(
             &self.renderer.egui.ctx,
             &mut self.chat,
             self.tick_counter,
+            self.graphics.chat_text_scale,
+            Some(&completion),
         );
         match chat_action {
             crate::chat_ui::ChatAction::Cancel => {
