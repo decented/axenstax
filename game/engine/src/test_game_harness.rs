@@ -195,6 +195,9 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[path = "torch_diag.rs"]
     mod torch_diag;
+    #[cfg(not(target_arch = "wasm32"))]
+    #[path = "item_render.rs"]
+    mod item_render;
     use super::*;
 
     /// Point `AXENSTAX_WORLDS_DIR` at one pid-scoped temp dir shared by every
