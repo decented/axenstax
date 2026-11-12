@@ -8,6 +8,7 @@
 //!
 //! Registered NATIVE ONLY: there is no online play on the web taster.
 
+use crate::commands::complete::{matching, CompletionContext};
 use crate::commands::dispatch::{CommandContext, CommandResult};
 use crate::commands::registry::{Command, OpLevel};
 
@@ -42,6 +43,12 @@ impl Command for OnlineCommand {
     }
     fn is_cheat(&self) -> bool {
         false
+    }
+    fn complete(&self, args_before: &[&str], partial: &str, _ctx: &CompletionContext) -> Vec<String> {
+        match args_before {
+            [] => matching(["copy"], partial),
+            _ => Vec::new(),
+        }
     }
     fn execute(&self, _ctx: &mut CommandContext, args: &[String]) -> CommandResult {
         self.result_for(args)

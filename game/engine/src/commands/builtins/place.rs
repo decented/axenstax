@@ -5,6 +5,7 @@
 //! re-appears every time the world loads — and, having no `Scattered` marker,
 //! it survives chunk unload during a session.
 
+use crate::commands::complete::{matching, CompletionContext};
 use crate::commands::dispatch::{CommandContext, CommandResult};
 use crate::commands::registry::Command;
 use crate::mob::MobType;
@@ -23,6 +24,12 @@ impl Command for PlaceCommand {
     }
     fn usage(&self) -> &'static str {
         "/place <cow|pig|sheep|chicken|horse|donkey|mule|rabbit|fox|cat|parrot|...>"
+    }
+    fn complete(&self, args_before: &[&str], partial: &str, _ctx: &CompletionContext) -> Vec<String> {
+        match args_before {
+            [] => matching(MobType::NAMES.iter().map(|(names, _)| names[0]), partial),
+            _ => Vec::new(),
+        }
     }
     fn execute(&self, ctx: &mut CommandContext, args: &[String]) -> CommandResult {
         let name = match args.first() {

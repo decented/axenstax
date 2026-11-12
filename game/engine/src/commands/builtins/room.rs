@@ -16,10 +16,14 @@
 //! game always joins as a member, never the keeper. Asking for it says so
 //! plainly rather than pretending.
 
+use crate::commands::complete::{matching, CompletionContext};
 use crate::commands::dispatch::{CommandContext, CommandResult};
 use crate::commands::registry::{Command, OpLevel};
 
 pub struct RoomCommand;
+
+/// The sub-commands `execute` accepts (`rotate` is answered with a refusal, so it is not offered).
+const SUBCOMMANDS: &[&str] = &["join", "leave", "invite"];
 
 impl Command for RoomCommand {
     fn name(&self) -> &'static str {
@@ -38,6 +42,12 @@ impl Command for RoomCommand {
     }
     fn is_cheat(&self) -> bool {
         false
+    }
+    fn complete(&self, args_before: &[&str], partial: &str, _ctx: &CompletionContext) -> Vec<String> {
+        match args_before {
+            [] => matching(SUBCOMMANDS, partial),
+            _ => Vec::new(),
+        }
     }
     fn execute(&self, ctx: &mut CommandContext, args: &[String]) -> CommandResult {
         match args.first().map(|s| s.to_lowercase()).as_deref() {

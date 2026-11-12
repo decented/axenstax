@@ -22,6 +22,7 @@
 //! - `/ws revert` — revert all your reskins/reshapes back to stock art. (NOT the
 //!   same as the Lobby "Reset Workshop" button, which wipes the room's blocks.)
 
+use crate::commands::complete::{matching, CompletionContext};
 use crate::commands::dispatch::{CommandContext, CommandResult};
 use crate::commands::registry::{Command, OpLevel};
 use crate::override_registry::AuthoredFaces;
@@ -96,6 +97,11 @@ fn resolve_id(ctx: &CommandContext, explicit: Option<u32>) -> Option<u32> {
     explicit.or_else(|| ctx.world.workshop.iter().last().map(|p| p.id))
 }
 
+/// The sub-commands in `usage` that `execute` switches on.
+const SUBCOMMANDS: &[&str] = &[
+    "place", "edit", "paint", "pump", "deflate", "pin", "play", "reshape", "gallery", "list", "revert",
+];
+
 impl Command for WorkshopCommand {
     fn name(&self) -> &'static str {
         "ws"
@@ -113,6 +119,13 @@ impl Command for WorkshopCommand {
         OpLevel::Op
     }
 
+    fn complete(&self, args_before: &[&str], partial: &str, _ctx: &CompletionContext) -> Vec<String> {
+        match args_before {
+            [] => matching(SUBCOMMANDS, partial),
+            [sub] if sub.eq_ignore_ascii_case("play") => matching(["on", "off"], partial),
+            _ => Vec::new(),
+        }
+    }
     fn execute(&self, ctx: &mut CommandContext, args: &[String]) -> CommandResult {
         let sub = match args.first() {
             Some(s) => s.to_lowercase(),

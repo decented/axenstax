@@ -13,6 +13,7 @@
 //! The mutation ops live in `crate::worldedit`; this just parses + routes.
 
 use crate::block::BlockId;
+use crate::commands::complete::{matching, CompletionContext};
 use crate::commands::dispatch::{CommandContext, CommandResult};
 use crate::commands::registry::{Command, OpLevel};
 use crate::worldedit;
@@ -43,6 +44,13 @@ fn selection(ctx: &CommandContext) -> Result<([i32; 3], [i32; 3]), String> {
     }
 }
 
+/// The sub-commands `execute` switches on.
+const SUBCOMMANDS: &[&str] =
+    &["pos1", "pos2", "set", "replace", "walls", "copy", "paste", "stack", "size", "clear"];
+
+/// The axes `/we stack <n> [x|y|z]` takes.
+const STACK_AXES: &[&str] = &["x", "y", "z"];
+
 impl Command for WorldEditCommand {
     fn name(&self) -> &'static str {
         "we"
@@ -63,6 +71,20 @@ impl Command for WorldEditCommand {
         true
     }
 
+    fn complete(&self, args_before: &[&str], partial: &str, _ctx: &CompletionContext) -> Vec<String> {
+        match args_before {
+            [] => matching(SUBCOMMANDS, partial),
+            // Each block argument goes through `resolve_block`, so only names that give a block.
+            [sub] if ["set", "walls"].iter().any(|s| sub.eq_ignore_ascii_case(s)) => {
+                matching(super::give::block_names(), partial)
+            }
+            [sub] | [sub, _] if sub.eq_ignore_ascii_case("replace") => {
+                matching(super::give::block_names(), partial)
+            }
+            [sub, _] if sub.eq_ignore_ascii_case("stack") => matching(STACK_AXES, partial),
+            _ => Vec::new(),
+        }
+    }
     fn execute(&self, ctx: &mut CommandContext, args: &[String]) -> CommandResult {
         let err = |ctx: &mut CommandContext, m: String| -> CommandResult {
             ctx.error(m.clone());

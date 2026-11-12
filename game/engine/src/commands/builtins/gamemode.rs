@@ -1,7 +1,18 @@
+use crate::commands::complete::{matching, CompletionContext};
 use crate::commands::dispatch::{CommandContext, CommandResult};
 use crate::commands::registry::Command;
+use crate::play_mode::PlayMode;
 
 pub struct GamemodeCommand;
+
+/// Every word `/gamemode` accepts. The first name of a row is the one Tab
+/// offers; the short forms and numbers still work when typed.
+const MODES: &[(&[&str], PlayMode)] = &[
+    (&["survival", "s", "0"], PlayMode::Survival),
+    (&["creative", "c", "1"], PlayMode::Creative),
+    (&["adventure", "a", "2"], PlayMode::Adventure),
+    (&["spectator", "sp", "spec", "3"], PlayMode::Spectator),
+];
 
 impl Command for GamemodeCommand {
     fn name(&self) -> &'static str {
@@ -16,8 +27,13 @@ impl Command for GamemodeCommand {
     fn usage(&self) -> &'static str {
         "/gamemode <survival|creative|adventure|spectator> | /gm <s|c|a|sp>"
     }
+    fn complete(&self, args_before: &[&str], partial: &str, _ctx: &CompletionContext) -> Vec<String> {
+        match args_before {
+            [] => matching(MODES.iter().map(|(names, _)| names[0]), partial),
+            _ => Vec::new(),
+        }
+    }
     fn execute(&self, ctx: &mut CommandContext, args: &[String]) -> CommandResult {
-        use crate::play_mode::PlayMode;
         let target = match args.first() {
             Some(s) => s.to_lowercase(),
             None => {
@@ -26,14 +42,11 @@ impl Command for GamemodeCommand {
                 return CommandResult::Error(msg);
             }
         };
-        let mode = match target.as_str() {
-            "survival" | "s" | "0" => PlayMode::Survival,
-            "creative" | "c" | "1" => PlayMode::Creative,
-            "adventure" | "a" | "2" => PlayMode::Adventure,
-            "spectator" | "sp" | "spec" | "3" => PlayMode::Spectator,
-            other => {
+        let mode = match MODES.iter().find(|(names, _)| names.contains(&target.as_str())) {
+            Some((_, mode)) => *mode,
+            None => {
                 let msg = format!(
-                    "unknown mode: {other} (survival|creative|adventure|spectator)"
+                    "unknown mode: {target} (survival|creative|adventure|spectator)"
                 );
                 ctx.error(msg.clone());
                 return CommandResult::Error(msg);

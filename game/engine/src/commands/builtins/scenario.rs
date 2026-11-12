@@ -6,6 +6,7 @@
 //! gives the kit, sets the runner state, resets tick timing. Goal 1 ships the
 //! built-in `test` scenario; Goals 3/4 add their defs (here or via JSON).
 
+use crate::commands::complete::{matching, CompletionContext};
 use crate::commands::dispatch::{CommandContext, CommandResult};
 use crate::commands::registry::Command;
 
@@ -26,6 +27,15 @@ impl Command for ScenarioCommand {
     }
     fn usage(&self) -> &'static str {
         "/experience <name>   e.g. /experience test   (also: /scenario)"
+    }
+    fn complete(&self, args_before: &[&str], partial: &str, _ctx: &CompletionContext) -> Vec<String> {
+        match args_before {
+            [] => matching(
+                std::iter::once("list").chain(crate::scenario::builtin_names()),
+                partial,
+            ),
+            _ => Vec::new(),
+        }
     }
     fn is_cheat(&self) -> bool {
         // A deliberate mode launcher (like picking a game from a menu), not a

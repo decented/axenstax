@@ -7,10 +7,19 @@
 //! across reloads is a follow-up — for now a reload restores the world's saved
 //! value (blank-canvas worlds default it on at creation).
 
+use crate::commands::complete::{matching, CompletionContext};
 use crate::commands::dispatch::{CommandContext, CommandResult};
 use crate::commands::registry::{Command, OpLevel};
 
 pub struct KeepInventoryCommand;
+
+/// Every word `/keepinventory` accepts. The first name of a row is the one Tab
+/// offers.
+const SWITCH: &[(&[&str], bool)] = &[(&["on", "true", "1"], true), (&["off", "false", "0"], false)];
+
+fn parse_switch(word: &str) -> Option<bool> {
+    SWITCH.iter().find(|(names, _)| names.contains(&word)).map(|(_, v)| *v)
+}
 
 impl Command for KeepInventoryCommand {
     fn name(&self) -> &'static str { "keepinventory" }
@@ -21,17 +30,24 @@ impl Command for KeepInventoryCommand {
     fn usage(&self) -> &'static str { "/keepinventory [on|off] | /ki [on|off]" }
     fn min_op_level(&self) -> OpLevel { OpLevel::Op }
     fn is_cheat(&self) -> bool { true }
+    fn complete(&self, args_before: &[&str], partial: &str, _ctx: &CompletionContext) -> Vec<String> {
+        match args_before {
+            [] => matching(SWITCH.iter().map(|(names, _)| names[0]), partial),
+            _ => Vec::new(),
+        }
+    }
     fn execute(&self, ctx: &mut CommandContext, args: &[String]) -> CommandResult {
         let new_value = match args.first().map(|s| s.to_lowercase()) {
-            Some(ref s) if s == "on" || s == "true" || s == "1" => true,
-            Some(ref s) if s == "off" || s == "false" || s == "0" => false,
             // No argument → toggle the current state.
             None => !ctx.world.keep_inventory,
-            Some(other) => {
-                let msg = format!("usage: /keepinventory [on|off] (got '{other}')");
-                ctx.error(msg.clone());
-                return CommandResult::Error(msg);
-            }
+            Some(word) => match parse_switch(&word) {
+                Some(value) => value,
+                None => {
+                    let msg = format!("usage: /keepinventory [on|off] (got '{word}')");
+                    ctx.error(msg.clone());
+                    return CommandResult::Error(msg);
+                }
+            },
         };
         ctx.world.keep_inventory = new_value;
         ctx.success(format!(

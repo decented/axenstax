@@ -1,3 +1,4 @@
+use crate::commands::complete::{matching, CompletionContext};
 use crate::commands::dispatch::{CommandContext, CommandResult};
 use crate::commands::registry::Command;
 
@@ -12,18 +13,24 @@ use crate::commands::registry::Command;
 /// playtest bug. Values below are Minecraft semantics shifted +6000
 /// (mod 24000) so the words mean what the player expects.
 pub(crate) fn time_for_keyword(kw: &str) -> Option<u32> {
-    Some(match kw {
-        // Minecraft "day" (1000, bright morning) + 6000.
-        "day" | "sunrise" | "dawn" => 7000,
-        // Sun at its peak.
-        "noon" => 12000,
-        // Minecraft "night" (13000, after dusk) + 6000 → properly dark.
-        "night" | "sunset" | "dusk" => 19000,
-        // Darkest point.
-        "midnight" => 0,
-        _ => return None,
-    })
+    TIME_KEYWORDS.iter().find(|(names, _)| names.contains(&kw)).map(|(_, tick)| *tick)
 }
+
+/// Every word `/time set` accepts, with its tick. `time_for_keyword` and Tab
+/// completion both read this, so a keyword cannot be accepted but not offered.
+const TIME_KEYWORDS: &[(&[&str], u32)] = &[
+    // Minecraft "day" (1000, bright morning) + 6000.
+    (&["day", "sunrise", "dawn"], 7000),
+    // Sun at its peak.
+    (&["noon"], 12000),
+    // Minecraft "night" (13000, after dusk) + 6000 → properly dark.
+    (&["night", "sunset", "dusk"], 19000),
+    // Darkest point.
+    (&["midnight"], 0),
+];
+
+/// The sub-commands `execute` switches on (`get` is also the no-argument form).
+const SUBCOMMANDS: &[&str] = &["get", "set", "speed"];
 
 pub struct TimeCommand;
 
@@ -36,6 +43,15 @@ impl Command for TimeCommand {
     }
     fn usage(&self) -> &'static str {
         "/time get | /time set <day|noon|night|midnight|0..23999> | /time speed <1..64>"
+    }
+    fn complete(&self, args_before: &[&str], partial: &str, _ctx: &CompletionContext) -> Vec<String> {
+        match args_before {
+            [] => matching(SUBCOMMANDS, partial),
+            [sub] if sub.eq_ignore_ascii_case("set") => {
+                matching(TIME_KEYWORDS.iter().flat_map(|(names, _)| names.iter()), partial)
+            }
+            _ => Vec::new(),
+        }
     }
     fn is_cheat(&self) -> bool {
         // get is informational; set / speed are cheats. We override on a

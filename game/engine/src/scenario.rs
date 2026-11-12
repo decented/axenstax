@@ -1854,18 +1854,40 @@ pub fn challenge_pack() -> Vec<ScenarioDef> {
 /// runner ships `test`; official mods (`hash-dash`, `satori-rush`) are embedded
 /// DATA here for offline dev/test, and delivered live via the open-stash (Goal 5).
 pub fn named_builtin_def(name: &str) -> Option<ScenarioDef> {
-    match name {
-        "test" => Some(builtin_test_def()),
-        "hash-dash" | "hashdash" => load_scenario_def(HASH_DASH_JSON).ok(),
-        "satori-rush" | "satorirush" => load_scenario_def(SATORI_RUSH_JSON).ok(),
-        "trials-island" => load_scenario_def(TRIALS_ISLAND_JSON).ok(),
-        "onboarding" | "getting-started" => load_scenario_def(ONBOARDING_JSON).ok(),
-        // Explorer challenges by their short name (e.g. `/scenario tame-wolf`).
-        other => EXPLORER_CHALLENGES
-            .iter()
-            .find(|(n, _)| *n == other)
-            .and_then(|(_, bytes)| load_scenario_def(bytes).ok()),
+    if let Some((_, load)) = NAMED_BUILTINS.iter().find(|(names, _)| names.contains(&name)) {
+        return load();
     }
+    // Explorer challenges by their short name (e.g. `/scenario tame-wolf`).
+    EXPLORER_CHALLENGES
+        .iter()
+        .find(|(n, _)| *n == name)
+        .and_then(|(_, bytes)| load_scenario_def(bytes).ok())
+}
+
+/// The named built-ins `named_builtin_def` resolves before the explorer
+/// challenges. The first name of a row is canonical (what Tab offers).
+const NAMED_BUILTINS: &[(&[&str], fn() -> Option<ScenarioDef>)] = &[
+    (&["test"], || Some(builtin_test_def())),
+    (&["hash-dash", "hashdash"], || load_scenario_def(HASH_DASH_JSON).ok()),
+    (&["satori-rush", "satorirush"], || load_scenario_def(SATORI_RUSH_JSON).ok()),
+    (&["trials-island"], || load_scenario_def(TRIALS_ISLAND_JSON).ok()),
+    (&["onboarding", "getting-started"], || load_scenario_def(ONBOARDING_JSON).ok()),
+];
+
+/// Every canonical name `named_builtin_def` accepts (what `/scenario` Tab
+/// completion offers), without loading any scenario.
+pub fn builtin_names() -> Vec<&'static str> {
+    NAMED_BUILTINS
+        .iter()
+        .map(|(names, _)| names[0])
+        .chain(EXPLORER_CHALLENGES.iter().map(|(name, _)| *name))
+        .collect()
+}
+
+/// The names `challenge_listing` shows (onboarding plus the explorer cards),
+/// without loading any scenario: what `/trial` Tab completion offers.
+pub fn challenge_names() -> Vec<&'static str> {
+    std::iter::once("onboarding").chain(EXPLORER_CHALLENGES.iter().map(|(name, _)| *name)).collect()
 }
 
 /// One-shot launch request for a Stash Column "Play": parked on `GameState`
@@ -2252,6 +2274,18 @@ mod tests {
         assert!(named_builtin_def("test").is_some());
         assert!(named_builtin_def("hash-dash").is_some());
         assert!(named_builtin_def("nope").is_none());
+    }
+
+    #[test]
+    fn the_name_lists_match_what_resolves_and_what_is_listed() {
+        for name in builtin_names() {
+            assert!(named_builtin_def(name).is_some(), "{name} must start");
+        }
+        let listed: Vec<&str> = challenge_listing().iter().map(|(n, _)| *n).collect();
+        assert_eq!(challenge_names(), listed);
+        // Aliases still resolve though they are not offered.
+        assert!(named_builtin_def("hashdash").is_some() && named_builtin_def("getting-started").is_some());
+        assert!(named_builtin_def("no-such-scenario").is_none());
     }
 
     #[test]

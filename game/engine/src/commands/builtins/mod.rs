@@ -8,6 +8,7 @@ pub mod tp;
 pub mod seed;
 pub mod clear;
 pub mod give;
+mod give_names;
 #[cfg(test)]
 mod give_golden_tests;
 pub mod spawnpoint;

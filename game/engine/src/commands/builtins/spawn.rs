@@ -1,35 +1,38 @@
+use crate::commands::complete::{matching, CompletionContext};
 use crate::commands::dispatch::{CommandContext, CommandResult};
 use crate::commands::registry::Command;
 use crate::mob::MobType;
 
 pub struct SpawnCommand;
 
+/// Every mob `/spawn` accepts. `mob_by_name` and Tab completion both read it.
+const SPAWN_MOBS: &[(&str, MobType)] = &[
+    ("cow", MobType::Cow),
+    ("pig", MobType::Pig),
+    ("sheep", MobType::Sheep),
+    ("chicken", MobType::Chicken),
+    // HP-3 brigand-family hostiles — the live hostile roster.
+    ("brigand", MobType::Brigand),
+    ("marauder", MobType::Marauder),
+    ("berserker", MobType::Berserker),
+    // Spec 28d.wolves — debug-spawnable. Live behaviour is the
+    // untamed wander path until bone-taming + ECS spawning land.
+    ("wolf", MobType::Wolf),
+    // Spec 28d chunk 3 — debug-spawnable. Live AI is the pure
+    // tick functions in `horse_ai.rs` / `rabbit_ai.rs`; wander
+    // path until ECS wire-up.
+    ("horse", MobType::Horse),
+    ("rabbit", MobType::Rabbit),
+    // Spec 28d chunk 4 — passive-with-charge in `goat_ai.rs`.
+    ("goat", MobType::Goat),
+    // Spec 28d chunk 5 — flying neutral; see `bee_ai.rs`.
+    ("bee", MobType::Bee),
+    // Spec 28d chunk 6 — aquatic passive; see `squid_ai.rs`.
+    ("squid", MobType::Squid),
+];
+
 fn mob_by_name(key: &str) -> Option<MobType> {
-    match key {
-        "cow" => Some(MobType::Cow),
-        "pig" => Some(MobType::Pig),
-        "sheep" => Some(MobType::Sheep),
-        "chicken" => Some(MobType::Chicken),
-        // HP-3 brigand-family hostiles — the live hostile roster.
-        "brigand" => Some(MobType::Brigand),
-        "marauder" => Some(MobType::Marauder),
-        "berserker" => Some(MobType::Berserker),
-        // Spec 28d.wolves — debug-spawnable. Live behaviour is the
-        // untamed wander path until bone-taming + ECS spawning land.
-        "wolf" => Some(MobType::Wolf),
-        // Spec 28d chunk 3 — debug-spawnable. Live AI is the pure
-        // tick functions in `horse_ai.rs` / `rabbit_ai.rs`; wander
-        // path until ECS wire-up.
-        "horse" => Some(MobType::Horse),
-        "rabbit" => Some(MobType::Rabbit),
-        // Spec 28d chunk 4 — passive-with-charge in `goat_ai.rs`.
-        "goat" => Some(MobType::Goat),
-        // Spec 28d chunk 5 — flying neutral; see `bee_ai.rs`.
-        "bee" => Some(MobType::Bee),
-        // Spec 28d chunk 6 — aquatic passive; see `squid_ai.rs`.
-        "squid" => Some(MobType::Squid),
-        _ => None,
-    }
+    SPAWN_MOBS.iter().find(|(name, _)| *name == key).map(|(_, kind)| *kind)
 }
 
 impl Command for SpawnCommand {
@@ -44,6 +47,12 @@ impl Command for SpawnCommand {
     }
     fn usage(&self) -> &'static str {
         "/spawn <cow|pig|sheep|chicken|brigand|marauder|berserker|wolf|horse|rabbit|goat|bee|squid>"
+    }
+    fn complete(&self, args_before: &[&str], partial: &str, _ctx: &CompletionContext) -> Vec<String> {
+        match args_before {
+            [] => matching(SPAWN_MOBS.iter().map(|(name, _)| *name), partial),
+            _ => Vec::new(),
+        }
     }
     fn execute(&self, ctx: &mut CommandContext, args: &[String]) -> CommandResult {
         let name = match args.first() {

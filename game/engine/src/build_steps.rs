@@ -48,13 +48,16 @@ impl StepMode {
 
     /// Parse a mode word off a command argument. `None` for anything else.
     pub fn parse(word: &str) -> Option<StepMode> {
-        match word {
-            "whole" | "all" | "plan" => Some(StepMode::Whole),
-            "block" | "blocks" | "blockbyblock" => Some(StepMode::BlockByBlock),
-            "layer" | "layers" | "step" | "steps" => Some(StepMode::Layers),
-            _ => None,
-        }
+        Self::NAMES.iter().find(|(names, _)| names.contains(&word)).map(|(_, mode)| *mode)
     }
+
+    /// Every word `parse` accepts. The first name of a row is canonical (what
+    /// Tab completion offers); the rest still work when typed.
+    pub const NAMES: &'static [(&'static [&'static str], StepMode)] = &[
+        (&["whole", "all", "plan"], StepMode::Whole),
+        (&["block", "blocks", "blockbyblock"], StepMode::BlockByBlock),
+        (&["layer", "layers", "step", "steps"], StepMode::Layers),
+    ];
 
     /// Does this mode walk a step cursor? `Whole` does not.
     pub fn is_stepped(self) -> bool {

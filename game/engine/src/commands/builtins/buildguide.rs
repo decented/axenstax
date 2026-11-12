@@ -11,10 +11,14 @@
 //! Not a cheat (a builder aid; places nothing) — `OpLevel::None`. The actual
 //! ghost render + the material-list panel read `GameState.build_guide`.
 
+use crate::commands::complete::{matching, CompletionContext};
 use crate::commands::dispatch::{CommandContext, CommandResult};
 use crate::commands::registry::{Command, OpLevel};
 
 pub struct BuildGuideCommand;
+
+/// The fixed first words `execute` switches on (`stop` also works for `off`).
+const SUBCOMMANDS: &[&str] = &["list", "mode", "off"];
 
 impl Command for BuildGuideCommand {
     fn name(&self) -> &'static str {
@@ -33,6 +37,19 @@ impl Command for BuildGuideCommand {
         OpLevel::None
     }
 
+    fn complete(&self, args_before: &[&str], partial: &str, _ctx: &CompletionContext) -> Vec<String> {
+        match args_before {
+            // A plan name is free text in the world's plan list (names may hold spaces);
+            // only the fixed words are offered.
+            [] => matching(SUBCOMMANDS, partial),
+            ["mode"] => matching(crate::build_steps::StepMode::NAMES.iter().map(|(n, _)| n[0]), partial),
+            // `/buildguide <plan> [block|layer|whole]`: the mode word follows a plan name.
+            [first] if !SUBCOMMANDS.contains(&first.to_lowercase().as_str()) => {
+                matching(crate::build_steps::StepMode::NAMES.iter().map(|(n, _)| n[0]), partial)
+            }
+            _ => Vec::new(),
+        }
+    }
     fn execute(&self, ctx: &mut CommandContext, args: &[String]) -> CommandResult {
         match args.first().map(|s| s.to_lowercase()).as_deref() {
             None | Some("list") => {

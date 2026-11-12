@@ -1,3 +1,4 @@
+use crate::commands::complete::{matching, CompletionContext};
 use crate::commands::dispatch::{CommandContext, CommandResult};
 use crate::commands::registry::{Command, OpLevel};
 
@@ -21,6 +22,19 @@ impl Command for HelpCommand {
     }
     fn is_cheat(&self) -> bool {
         false
+    }
+    fn complete(&self, args_before: &[&str], partial: &str, ctx: &CompletionContext) -> Vec<String> {
+        match args_before {
+            // `/help /time` works too, so a leading slash is not part of the word.
+            [] => matching(
+                ctx.registry
+                    .iter()
+                    .filter(|c| ctx.op_level >= c.min_op_level())
+                    .map(|c| c.name()),
+                partial.trim_start_matches('/'),
+            ),
+            _ => Vec::new(),
+        }
     }
     fn execute(&self, ctx: &mut CommandContext, args: &[String]) -> CommandResult {
         if let Some(target) = args.first() {

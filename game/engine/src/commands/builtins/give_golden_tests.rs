@@ -701,3 +701,84 @@ fn golden_count_goes_to_stackables_and_is_ignored_for_tools_and_plans() {
     // A block named like a material wins (checked first).
     assert!(matches!(resolve_item("copper", 1).unwrap().item, Item::Block(id) if id == block::COPPER_ORE));
 }
+
+// ---- The suggestion list (`item_names`) ----------------------------------------------------
+
+use super::give::{block_names, item_names};
+use super::give_names::CATALOGUE;
+
+/// Blocks `/give` can give that Tab deliberately does not offer.
+const NOT_SUGGESTED_BLOCKS: &[BlockId] = &[block::CAMPFIRE_SMOKE];
+
+#[test]
+fn every_suggested_name_resolves_to_an_item_nothing_else_is_suggested_for() {
+    let names = item_names();
+    assert!(names.len() > 300, "only {} names", names.len());
+    let mut sorted = names.to_vec();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(names, &sorted[..], "item_names() must be sorted and duplicate-free");
+
+    let mut seen: std::collections::HashMap<String, &str> = std::collections::HashMap::new();
+    for (name, item) in CATALOGUE.iter() {
+        let got = resolve_item(name, 1).unwrap_or_else(|e| panic!("suggested '{name}' does not resolve: {e}"));
+        assert_eq!(&got.item, item, "'{name}' gives a different item than the list says");
+        // The round trip: the item's canonical name is this entry, so two
+        // different suggestions never give the same item.
+        if let Some(other) = seen.insert(format!("{item:?}"), name) {
+            panic!("'{other}' and '{name}' are both suggested for the same item");
+        }
+    }
+    assert_eq!(CATALOGUE.len(), names.len());
+}
+
+#[test]
+fn everything_give_can_give_is_suggested_unless_excluded_on_purpose() {
+    let suggested: Vec<&Item> = CATALOGUE.iter().map(|(_, item)| item).collect();
+    for (name, expect) in GOLDEN {
+        let item = want(expect);
+        if matches!(item, Item::Block(id) if NOT_SUGGESTED_BLOCKS.contains(&id)) {
+            continue;
+        }
+        assert!(suggested.contains(&&item), "'{name}' gives an item no suggested name gives");
+    }
+    // The excluded ones still work when typed, they are just not offered.
+    for id in NOT_SUGGESTED_BLOCKS {
+        assert!(resolve_item("campfire_smoke", 1).is_ok());
+        assert!(!CATALOGUE.iter().any(|(_, item)| *item == Item::Block(*id)));
+    }
+    assert!(!item_names().iter().any(|n| n == "air"), "air is not giveable");
+}
+
+#[test]
+fn canonical_spellings_are_suggested_and_aliases_are_not() {
+    let has = |n: &str| item_names().iter().any(|x| x == n);
+    // Tools: wooden_*, not wood_*; every material x kind.
+    for mat in ["wooden", "stone", "iron", "diamond", "satori"] {
+        for kind in ["pickaxe", "axe", "sword", "shovel", "hoe"] {
+            assert!(has(&format!("{mat}_{kind}")), "{mat}_{kind}");
+        }
+    }
+    for alias in ["wood_pickaxe", "gem_pickaxe", "orange_gem_hoe", "log", "cobble", "workbench"] {
+        assert!(!has(alias), "alias '{alias}' should not be suggested");
+        assert!(resolve_item(alias, 1).is_ok(), "alias '{alias}' must keep working");
+    }
+    for canon in ["oak_log", "cobblestone", "crafting_table", "torch", "spruce_stairs", "granite_wall",
+                  "dark_oak_door", "bow", "satori", "hut_plan", "debug_plan"] {
+        assert!(has(canon), "{canon}");
+    }
+    // `copper_cable` is a block alias of `cable`; the MATERIAL is reached as
+    // `coppercable`, so that is the spelling suggested for it.
+    assert!(has("cable") && has("coppercable") && !has("copper_cable"));
+}
+
+#[test]
+fn block_names_is_the_placeable_subset() {
+    let blocks = block_names();
+    assert!(blocks.iter().any(|n| n == "torch") && blocks.iter().any(|n| n == "spruce_stairs"));
+    assert!(!blocks.iter().any(|n| n == "wooden_pickaxe" || n == "bow" || n == "coal"));
+    for name in blocks {
+        assert!(item_names().contains(name));
+        assert!(matches!(resolve_item(name, 1).unwrap().item, Item::Block(_)), "{name}");
+    }
+}

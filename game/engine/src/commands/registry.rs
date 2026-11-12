@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 
+use super::complete::CompletionContext;
 use super::dispatch::{CommandContext, CommandResult};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -29,6 +30,15 @@ pub trait Command: Send + Sync {
         true
     }
     fn execute(&self, ctx: &mut CommandContext, args: &[String]) -> CommandResult;
+    /// Tab completion for the word being typed after this command's name.
+    /// `args_before` are the finished words between the command name and that
+    /// word; `partial` is what has been typed of it (empty when the line ends
+    /// in a space). Return values this command's own `execute` accepts,
+    /// ranked with `complete::matching`. The default completes nothing, which
+    /// is right for free-text and numeric arguments.
+    fn complete(&self, _args_before: &[&str], _partial: &str, _ctx: &CompletionContext) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 pub struct CommandRegistry {

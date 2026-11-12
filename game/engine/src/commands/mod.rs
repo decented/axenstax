@@ -10,9 +10,13 @@ pub mod parser;
 pub mod registry;
 pub mod dispatch;
 pub mod builtins;
+pub mod complete;
+#[cfg(test)]
+pub(crate) mod test_support;
 
 // Short-path re-exports used by consumers (game_loop, chat_ui, main).
 // Items not re-exported here are still reachable via their submodule path,
 // e.g. `commands::parser::parse`.
 pub use registry::{CommandRegistry, OpLevel};
+pub use complete::CompletionContext;
 pub use dispatch::{CommandContext, CommandResult, ChatLine, ChatLineKind, dispatch};

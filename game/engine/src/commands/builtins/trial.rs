@@ -4,6 +4,7 @@
 //! marker, ghost load, arming the run) is a `StartTrial` side-effect the game
 //! loop performs — the command stays GameState-free.
 
+use crate::commands::complete::{matching, CompletionContext};
 use crate::commands::dispatch::{CommandContext, CommandResult};
 use crate::commands::registry::{Command, OpLevel};
 
@@ -28,6 +29,19 @@ impl Command for TrialCommand {
     }
     fn is_cheat(&self) -> bool {
         false
+    }
+    fn complete(&self, args_before: &[&str], partial: &str, _ctx: &CompletionContext) -> Vec<String> {
+        match args_before {
+            // The two keywords, the ⚡ Race ids, and the Challenge names `/trial list` shows.
+            [] => matching(
+                ["list", "off"]
+                    .into_iter()
+                    .chain(crate::trials::CATALOG.iter().map(|d| d.id))
+                    .chain(crate::scenario::challenge_names()),
+                partial,
+            ),
+            _ => Vec::new(),
+        }
     }
     fn execute(&self, ctx: &mut CommandContext, args: &[String]) -> CommandResult {
         let arg = args.first().map(|s| s.as_str()).unwrap_or("list");

@@ -8,12 +8,17 @@
 //! Navigation is not a cheat, so this is available to all players (`OpLevel::
 //! None`); only the creative-gated teleport changes the world state.
 
+use crate::commands::complete::{matching, CompletionContext};
 use crate::commands::dispatch::{CommandContext, CommandResult};
 use crate::commands::registry::{Command, OpLevel};
 use crate::waypoint;
 use glam::Vec3;
 
 pub struct WaypointCommand;
+
+/// The sub-commands `execute` switches on, canonical spelling (`rm`/`del` and
+/// `goto` still work). Waypoint names are free text and may hold spaces.
+const SUBCOMMANDS: &[&str] = &["add", "list", "remove", "tp"];
 
 impl Command for WaypointCommand {
     fn name(&self) -> &'static str {
@@ -32,6 +37,12 @@ impl Command for WaypointCommand {
         OpLevel::None
     }
 
+    fn complete(&self, args_before: &[&str], partial: &str, _ctx: &CompletionContext) -> Vec<String> {
+        match args_before {
+            [] => matching(SUBCOMMANDS, partial),
+            _ => Vec::new(),
+        }
+    }
     fn execute(&self, ctx: &mut CommandContext, args: &[String]) -> CommandResult {
         let usage = "usage: /waypoint add <name> | list | remove <name> | tp <name>";
         match args.first().map(|s| s.to_lowercase()).as_deref() {

@@ -7,6 +7,7 @@
 //! Authoring is creative power, so editing subcommands are `OpLevel::Op` and
 //! flag the World Integrity Ledger (`is_cheat`). `/exhibit list` is read-only.
 
+use crate::commands::complete::{matching, CompletionContext};
 use crate::commands::dispatch::{CommandContext, CommandResult};
 use crate::commands::registry::{Command, OpLevel};
 use crate::exhibit::{self, EditError, Exhibit, Presentation};
@@ -39,6 +40,9 @@ fn explain(e: EditError) -> String {
     }
 }
 
+/// The sub-commands `execute` switches on (`remove`/`del` also work for `delete`).
+const SUBCOMMANDS: &[&str] = &["place", "list", "move", "resize", "yaw", "image", "label", "delete"];
+
 impl Command for ExhibitCommand {
     fn name(&self) -> &'static str {
         "exhibit"
@@ -62,6 +66,14 @@ impl Command for ExhibitCommand {
         true
     }
 
+    fn complete(&self, args_before: &[&str], partial: &str, _ctx: &CompletionContext) -> Vec<String> {
+        match args_before {
+            [] => matching(SUBCOMMANDS, partial),
+            // `/exhibit place <image> <wall|standing>`
+            ["place", _] => matching(["wall", "standing"], partial),
+            _ => Vec::new(),
+        }
+    }
     fn execute(&self, ctx: &mut CommandContext, args: &[String]) -> CommandResult {
         let sub = match args.first() {
             Some(s) => s.to_lowercase(),

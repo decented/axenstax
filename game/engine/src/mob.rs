@@ -149,40 +149,43 @@ impl MobType {
     /// commands (`/place donkey`, #129) and the TOML loader (which wraps it with
     /// a panic). A couple of friendly no-underscore aliases are accepted too.
     pub fn from_name(id: &str) -> Option<MobType> {
-        Some(match id {
-            "cow" => MobType::Cow,
-            "chicken" => MobType::Chicken,
-            "pig" => MobType::Pig,
-            "sheep" => MobType::Sheep,
-            "villager" => MobType::Villager,
-            "peddler" => MobType::Peddler,
-            "wolf" => MobType::Wolf,
-            "horse" => MobType::Horse,
-            "rabbit" => MobType::Rabbit,
-            "goat" => MobType::Goat,
-            "bee" => MobType::Bee,
-            "squid" => MobType::Squid,
-            "nostrich" => MobType::Nostrich,
-            "bear" => MobType::Bear,
-            "hyena" => MobType::Hyena,
-            "brigand" => MobType::Brigand,
-            "marauder" => MobType::Marauder,
-            "berserker" => MobType::Berserker,
-            "knight" => MobType::Knight,
-            "fish" => MobType::Fish,
-            "shark" => MobType::Shark,
-            "glow_squid" | "glowsquid" => MobType::GlowSquid,
-            "fox" => MobType::Fox,
-            "polar_bear" | "polarbear" => MobType::PolarBear,
-            "reindeer" => MobType::Reindeer,
-            "cat" => MobType::Cat,
-            "parrot" => MobType::Parrot,
-            "donkey" => MobType::Donkey,
-            "mule" => MobType::Mule,
-            "crab" => MobType::Crab,
-            _ => return None,
-        })
+        Self::NAMES.iter().find(|(names, _)| names.contains(&id)).map(|(_, kind)| *kind)
     }
+
+    /// Every id `from_name` accepts. The first name of a row is canonical (the
+    /// one Tab completion offers); the rest are friendly no-underscore aliases.
+    pub const NAMES: &'static [(&'static [&'static str], MobType)] = &[
+        (&["cow"], MobType::Cow),
+        (&["chicken"], MobType::Chicken),
+        (&["pig"], MobType::Pig),
+        (&["sheep"], MobType::Sheep),
+        (&["villager"], MobType::Villager),
+        (&["peddler"], MobType::Peddler),
+        (&["wolf"], MobType::Wolf),
+        (&["horse"], MobType::Horse),
+        (&["rabbit"], MobType::Rabbit),
+        (&["goat"], MobType::Goat),
+        (&["bee"], MobType::Bee),
+        (&["squid"], MobType::Squid),
+        (&["nostrich"], MobType::Nostrich),
+        (&["bear"], MobType::Bear),
+        (&["hyena"], MobType::Hyena),
+        (&["brigand"], MobType::Brigand),
+        (&["marauder"], MobType::Marauder),
+        (&["berserker"], MobType::Berserker),
+        (&["knight"], MobType::Knight),
+        (&["fish"], MobType::Fish),
+        (&["shark"], MobType::Shark),
+        (&["glow_squid", "glowsquid"], MobType::GlowSquid),
+        (&["fox"], MobType::Fox),
+        (&["polar_bear", "polarbear"], MobType::PolarBear),
+        (&["reindeer"], MobType::Reindeer),
+        (&["cat"], MobType::Cat),
+        (&["parrot"], MobType::Parrot),
+        (&["donkey"], MobType::Donkey),
+        (&["mule"], MobType::Mule),
+        (&["crab"], MobType::Crab),
+    ];
 
     fn from_toml_id(id: &str) -> Self {
         Self::from_name(id)
