@@ -168,7 +168,7 @@ For each block that has a visible model (air and invisible blocks are skipped), 
 
 1. **Interior face culling.** If the adjacent block in that direction is a fully opaque solid block, do not emit the face.
 2. **Chunk boundary faces.** If the adjacent block is in a different sub-chunk, load the neighbouring sub-chunk's block data to perform the same test. If the neighbour sub-chunk is not loaded, emit the face (assume visible).
-3. **Transparent block handling.** A solid + `transparent` block emits faces in the **transparent-solid mesh pass** (`mesh.rs::greedy_transparent_face`, #131), culling a face only where the neighbour is (1) a fully-opaque solid [hidden behind it] or (3) the **same** block type [glass-next-to-glass merge]. So glass shows against air / water / a different transparent type, but not against stone or more of its own kind. That geometry rides the `ChunkMeshes.transparent` bucket. Its fully opaque sampled texels first write depth without colour (`fs_solid_depth`, alpha ≥0.9999); cutout holes and partly translucent texels discard in that prepass. Its alpha-blended colour pass then uses `LessEqual` against that depth (`transparent_pipeline` + `fs_transparent`, texture's own alpha, no water tint), before water (§3). The same paired pipelines run in live and headless worlds. This fixes distant water painting over opaque leaf pixels while keeping holes, translucent glass and nearer water visible. `fs_transparent` also uses the same combined-light factor as terrain/plants: `min(max(max(block, sky × daylight), 0.08), 1)`. Its separate sky vertex attribute had been emitted correctly but ignored, clamping un-torched noon foliage to 0.08. Torch light remains unscaled by daylight; entity/avatar lighting is unaffected. Actual matched opaque/leaf GPU references cover day, night and torch-lit night. The additional depth draws count towards the actual draw-call/cull statistics; partial-alpha face ordering remains a separate rendering limit. The opaque greedy pass still `continue`s past `is_transparent` cells, and the non-solid small-cube pass still skips solids — the transparent pass is what catches them.
+3. **Transparent block handling.** A solid + `transparent` block emits faces in the **transparent-solid mesh pass** (`mesh.rs::greedy_transparent_face`, #131), culling a face only where the neighbour is (1) a fully-opaque solid [hidden behind it] or (3) the **same** block type [glass-next-to-glass merge]. So glass shows against air / water / a different transparent type, but not against stone or more of its own kind. That geometry rides the `ChunkMeshes.transparent` bucket. Its fully opaque sampled texels first write depth without colour (`fs_solid_depth`, alpha ≥0.9999); cutout holes and partly translucent texels discard in that prepass. Its alpha-blended colour pass then uses `LessEqual` against that depth (`transparent_pipeline` + `fs_transparent`, texture's own alpha, no water tint), before water (§3). The same paired pipelines run in live and headless worlds. This fixes distant water painting over opaque leaf pixels while keeping holes, translucent glass and nearer water visible. `fs_transparent` lights with the same rule as terrain and plants (§4.7). Its separate sky vertex attribute had once been emitted correctly but ignored, clamping un-torched noon foliage to 0.08. Actual matched opaque/leaf GPU references cover day, night and torch-lit night. The additional depth draws count towards the actual draw-call/cull statistics; partial-alpha face ordering remains a separate rendering limit. The opaque greedy pass still `continue`s past `is_transparent` cells, and the non-solid small-cube pass still skips solids — the transparent pass is what catches them.
 
 > **History (#130 → #131, 2026-06-22).** Before #131 there was **no pass for solid + transparent blocks at all** — the opaque greedy pass skipped `is_transparent` and the small-cube pass skipped solids, so such blocks emitted no geometry and rendered **invisible while still colliding**. This bit the five non-oak leaf species (`transparent: true` → invisible "leaves you bash through"); #130's stopgap made all leaves `transparent: false` (opaque) so they render via the greedy pass. **#131** built the transparent-solid pass above, which fixes the latent **glass** invisibility (glass = solid + transparent, alpha texture → renders see-through). **#131 fancy-leaf flip (shipped):** all six leaf species are back to `transparent: true` (solid, so still walkable-on) and their textures carry ~`LEAF_CUTOUT_PCT`% (20%) **cutout-alpha holes** (`texture_gen::gen_species_leaves`), so canopies render see-through via `fs_transparent`'s `alpha < 0.04` discard. The third-person camera passes through them automatically — `camera_occlusion::default_for(solid, transparent)` returns `PassThrough` for a transparent solid, no per-block exception needed. The pass culls leaf faces against same-type neighbours (rule 3), so a dense canopy shows its holed outer shell rather than every internal leaf face; a layered (no-same-type-cull) leaf look + cutout-density tuning are open feel-tweaks for an Axo playtest.
 
@@ -542,6 +542,12 @@ The sampler uses `FilterMode::Linear` for both min and mag, and `FilterMode::Lin
 > behind the opt-in `mipmaps` Graphics dial; with it off the array is
 > `mip_level_count: 1` and the sampler is Nearest throughout. See §9.4b.
 
+> **Known issue (2026-11-12).** With mipmaps on, a small cube that shows only a
+> window of its texture still minifies from the whole layer: at a distance the
+> torch's flame-and-handle window (§4.7, Fixed 2026-11-12) blends in the dark
+> background round it (Nearest mag, Linear min and mip). Not fixed; a cropped
+> torch layer or a per-window mip clamp would cure it.
+
 ---
 
 ## 4. Lighting & Shadows
@@ -565,16 +571,37 @@ let sky_light  = f32((packed >> 16u) & 0xFu) / 15.0;
 let block_light = f32((packed >> 20u) & 0xFu) / 15.0;
 ```
 
+**As built.** `mesh::Vertex` carries the two channels as separate `f32` attributes:
+`light` (block light, location 4) and `sky_light` (location 5), each `level / 15`. A
+`light` above 1.5 is the emissive sentinel (`Vertex::EMISSIVE`, 2.0). There is no packed
+nibble and no AO. The fragment rule that turns them into colour is §4.7.
+
 **Non-terrain light consumers (2026-07-05, deferred-lists wave):** the sky/block split is
 consumed by every visible surface, not just chunk meshes —
 - **Entities** (mobs, dropped items, projectiles, carts, rigs) sample
   `World::light_channels_at` once per entity at build time (mid-body cell) and bake the
-  two channels into their verts; the GlowSquid and Satoshi's amulet stay emissive.
-- **Player avatars** carry a CPU-resolved `max(block, sky·sun.w)` scalar in the (otherwise
-  unused) `sky_light` attribute — their `light` channel remains the fade-dither alpha —
-  and `fs_avatar` multiplies by `max(sky_light, 0.08)`. `push_skin_quad` defaults the
-  attribute to 1.0, so preview/workshop feeders stay bright unless a call site dims them.
-- **First-person viewmodel** (arm + held item) samples at the eye cell.
+  two channels into their verts; the GlowSquid and Satoshi's amulet carry the emissive
+  sentinel instead.
+- **Player avatars** are lit by the same rule (§4.7), with the channels moved because
+  their `light` channel is the fade-dither alpha:
+  `entity_model::set_avatar_light(verts, (block, sky), sky_brightness)` puts sky already
+  scaled by the day's brightness in `sky_light` (`fs_avatar` does not multiply it by
+  `sun.w` again) and the block level, rounded to 0..15, in **bits 20..23 of
+  `tex_layer`**. `fs_avatar` samples the skin layer from the low 16 bits
+  (`AVATAR_LAYER_MASK` 0xFFFF; skin layers run 0..7, the last one the preview layer) and
+  reads the level as `(tex_layer >> 20u) & 0xFu` (precedent: the fast-leaf flag in
+  bit 16, §2.2). Only `avatar_pipeline` draws these verts. `push_skin_quad` defaults
+  (`sky_light` 1.0, no block bits) give the sky term alone, so preview, thumbnail and
+  Workshop avatar feeders render as before unless a call site dims them.
+- **First-person viewmodel** (arm + held item) samples at the eye cell. Its camera
+  uniform pins `sun.w` to 1.0, so the sky channel is scaled by the frame's sky
+  brightness on the CPU: the arm through `set_avatar_light`, the held item as
+  `(block, sky × sky_brightness)`.
+- **Every feeder passes real channels.** Under §4.7 a final brightness in `light` with
+  `sky_light` 0 renders as torchlight (warm, not sun-shaded, as bright at midnight as at
+  noon). Rails and cables carry `(block, sky)` (they used to put `max(block, sky)` in the
+  block channel), and the Workshop's block and mob working copies carry `(0, 1)` (lit like
+  open ground).
 - **Plant + micro instances** carry split channels (`PlantInstance.sky` attr 6,
   `MicroInstance.sky` attr 10) instead of the old combined bake-time snapshot; the
   small-cube and face-decal emitters bake both channels; emission always rides BLOCK.
@@ -637,6 +664,13 @@ frag_colour = texture_colour * light_factor * ao_factor;
 
 At midnight, `sky_brightness` drops to approximately 0.15 (moonlight), making torch-lit areas (block light) visually dominant.
 
+> **As built (2026-11-12).** `sky_brightness` is `sun.w` from `camera::compute_sun`: 1.0 at
+> noon, about 0.15 at sunset, 0.05 at midnight (its clamp), and up to 1.15 during a
+> lightning flash. It scales the **sky channel only**; block light has no time input. There
+> is no `pow` light curve and no AO factor, and the max is taken per colour channel after
+> each channel has been coloured and shaded, not on the raw levels. The formula is in
+> §4.7, with the fix that made block light time-independent (Fixed 2026-11-12).
+
 ### 4.6 Dynamic Shadows (Tier High, Optional)
 
 On Tier High, a single cascaded shadow map is rendered from the sun's direction:
@@ -692,6 +726,87 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     return vec4<f32>(final_colour, tex_colour.a);
 }
 ```
+
+**As built: one light rule (`shader.wgsl` `world_light`, CPU twin and tests
+`world_light.rs`, 2026-11-12).** Every lit world surface uses it: `fs_main` (chunk opaque,
+micro-models, entities, the first-person held item), `fs_plant`, `fs_transparent`,
+`fs_decal`, `fs_avatar`, and the block half of `fs_water`. With `n` the face normal,
+`b = sun.w` (§4.5), `sun` the normalised sun direction, and the vertex channels `block`
+(`Vertex.light`) and `sky` (`Vertex.sky_light`), each 0..1:
+
+```text
+sky_shade(n) = (0.12, 0.13, 0.18) + (0.28, 0.29, 0.32)·b + (1.0, 0.98, 0.9)·b·max(n·sun, 0)·0.6
+sky_term     = sky_shade(n) · clamp(sky·b, 0.08, 1)
+block_term   = (1.0, 0.9, 0.7) · min(block, 1) · face(n)
+face(n)      = top 1.0, bottom 0.5, north/south 0.8, east/west 0.6 (Minecraft's fixed shade);
+               other normals mix these by the squares of their components; a zero normal is 1.0
+light        = max(sky_term, block_term), per colour channel, branch-free
+colour       = texture · light → emissive mix → bloom grade → fog → user brightness
+```
+
+- **Emissive.** A vertex with `light > 1.5` (`Vertex::EMISSIVE` = 2.0: a torch's own faces,
+  Satoshi's amulet, the GlowSquid) draws `mix(lit, texture, 0.85)` in `fs_main`.
+- **Sky-only and unlit surfaces are unchanged** from the rule before 2026-11-12 (equal within
+  float rounding). A `world_light` test pins this at times 12000, 19000 and 0.
+- **`fs_avatar`** takes `sky_light` as already scaled by `b` and the block level from
+  `tex_layer` bits 20..23 (§4.2).
+- **`fs_water`**: `texture · (0.3, 0.5, 0.9) · max((0.3 + 0.7·b)·0.08, block_term)`, the
+  day-dimmed floor as before, and block light without time input.
+- **`fs_decal`** uses the same rule as the wall under it. Wallpaper and blueprints therefore
+  take the sun-and-ambient face shade too: in daylight they darken to match their wall,
+  where they used to read brighter than it.
+- **Feeder contract.** Every vertex carries its real `(block, sky)` (§4.2). Something lit
+  like open ground passes `(0, 1)`.
+- **Not built from the design above:** AO, shadows, the `pow` curve, and a `step`-picked
+  light colour (a hard pick seams where the two channels cross; the per-channel max blends).
+- **Tests** (`world_light`): block light gives the same colour at noon and midnight on all six
+  faces at level 14; with no block light the rule equals the old one at 12000, 19000 and 0;
+  a floor beside a torch shows at least 0.7 linear luma of its texture at midnight; the avatar
+  bits round-trip; a drift guard checks that `shader.wgsl` carries the same constants and
+  that no fragment function keeps the old merged form.
+
+> **Fixed 2026-11-12 (torch light).** At night a torch barely lit its surroundings, and the
+> torch itself showed as a dark stick. There were four causes:
+> 1. **Torch UV window.** The torch's small cube sampled its texture from the (0, 0) corner
+>    (u 0..0.2, v 0..0.6), which in `texture_gen::gen_torch` is the dark background. It now
+>    shows columns 7..9 of its art (`mesh.rs` `TORCH_UVS`): the sides run rows 3..16 from the
+>    flame's tip to the handle's foot, the top shows the hot core (rows 4..6) and the bottom
+>    the handle's foot (rows 14..16). Each window is inset 0.02 texel against bleed under
+>    nearest sampling, and columns 6 and 9 (background beside the handle) are left out.
+> 2. **Self-lit torch.** Its faces carry the emissive sentinel (`Vertex::EMISSIVE`), so the
+>    flame keeps its colour at night and before the light pass reaches its cell. Sky light
+>    still rides its own channel.
+> 3. **Block light scaled by the sun.** The old rule merged the channels first,
+>    `max(block, sky · sun.w)`, then multiplied the merged value by `sky_shade`. At midnight
+>    that shade's luma is about 0.15, so a stone floor beside a torch showed about 0.13 of its
+>    texture colour in linear terms. With its own time-independent term the same floor shows
+>    about 0.79 (13/15 × luma(1.0, 0.9, 0.7)).
+> 4. **Small-cube UVs.** Every small cube used the corner window, so other art-drawn small
+>    cubes were wrong as well. A cuboid now takes one UV rect per face group (`mesh.rs`
+>    `emit_cuboid` with `CubeUvs { top, bottom, x_sides, z_sides }`; `shaped_cuboid_uvs`
+>    picks it per shape). A button and a pressure plate are `anchored`: each face shows the
+>    part of the art under it, so the button shows its raised pad, the plate its bevel on all
+>    four edges, and side art is the right way up. The lever's handle stub shows texels
+>    7..9 × 7..9, which are wood (it showed the grey plate). A framed block in an item frame
+>    shows its whole texture on every face; it had shown the top-left quarter, so a framed
+>    torch was a black cube. Slabs, stairs, walls, doors, campfire smoke and the other tiling
+>    textures keep the corner window bit for bit.
+>
+> Under the new rule, feeders that had put a final brightness in the block channel would
+> have read as torchlight, so they now pass real channels: rails and cables, the first-person
+> held item, the Workshop's working copies, the GlowSquid (now emissive) and avatars (§4.2).
+> The regression tests are `test_integration/torch_render.rs` (the texels each small-cube
+> face shows) and `world_light` (above).
+
+**Known issues (2026-11-12).**
+- **`fs_water` reads no sky channel.** The water mesh bakes both channels, but the shader
+  uses only `light`, so by day water is the 0.08 floor times its tint. This predates the
+  light rule and is a separate defect.
+- **Particles** carry no split channels and dim by their own night factor (§7.6), which also
+  dims torch-lit particles at night.
+- **Measuring.** Textures and the render target are `Rgba8UnormSrgb`, so "fraction of
+  texture colour" means linear values: decode a captured PNG to linear before comparing.
+- **WebGPU (Dawn)** output can only be judged in a browser; `check.sh` opens none by default.
 
 ---
 
@@ -815,8 +930,8 @@ rather than a full cube. `block_shape::render_cuboids(shape, meta)` returns the 
 boxes for a block's shape + orientation (the *same* source as its collision boxes, Spec 05
 §1.4 — geometry and physics never drift). The mesher excludes shaped blocks from the greedy
 pass (`block_shape::is_shaped`, exactly as it excludes micro-models) and emits each box in
-`emit_non_solid_blocks` via `emit_small_cube_textured` (independent top / side / bottom
-texture layers per box). Orientation is read from the meta byte (Spec 02), so two adjacent
+`emit_non_solid_blocks` via `emit_cuboid` (independent top / side / bottom
+texture layers per box, and a UV window per face group, §4.7 Fixed 2026-11-12). Orientation is read from the meta byte (Spec 02), so two adjacent
 slabs of different facing stay distinct. First shapes: `STONE_SLAB`, `STONE_STAIRS`. Design:
 `docs/foundations/2026-06-16-building-detail-blocks.md`.
 
@@ -1292,6 +1407,11 @@ Particles (block break fragments, torch sparks, bubble columns, critical hit sta
 - Particle simulation runs on the CPU. Particles are sorted back-to-front and rendered with alpha blending.
 - Maximum particle count: 10,000. Particles beyond this limit are not spawned (oldest are culled).
 - Particle textures are stored in the block atlas (they use block texture fragments for break particles) or in a small dedicated particle texture (8x8, 4 frames for generic particles).
+
+> **Known issue (2026-11-12).** As built, a particle carries one colour premultiplied by its
+> cell's light (`particles.rs`, floor 0.25), not the split `(block, sky)` channels of §4.2, and
+> `fs_particle` multiplies by a night factor, `mix(0.35, 1.0, sun.w)`. So a torch-lit particle
+> also dims at night, unlike a torch-lit surface (§4.7).
 
 ---
 
@@ -2718,12 +2838,16 @@ transparent/glass, water) write real split values; `fs_main` combines them as
 `max(block, sky * sun_dir.w)` — so **nights actually darken sky-lit terrain
 while torch-light holds**, fixing "sky light is baked at gen; doesn't dim at
 night". `sun_dir.w` (compute_sun brightness, night floor 0.15) already reached
-the shader per-frame; no new uniforms.
+the shader per-frame; no new uniforms. *(Superseded 2026-11-12: the merged value was still
+multiplied by the sun-and-ambient shade, which scaled torchlight by the sun; the
+one light rule in §4.7 keeps block light out of it.)*
 
 Non-terrain paths (entity models, plant/micro instancing, rails/cables/torch
 crosses and the other `non_solid` emitters) still pass a single combined value
 in `light` with `sky_light = 0` — their look is UNCHANGED (they don't dim);
-splitting them is a follow-up. The micro-model instance attributes moved to
+splitting them is a follow-up. *(Superseded: split on 2026-07-05, §4.2. Since
+2026-11-12 a combined value with `sky_light` 0 would render as torchlight, so
+the last such feeders were moved to real channels; the rule is §4.7.)* The micro-model instance attributes moved to
 locations 6–9 (buffer 0 grew location 5). Emissive sentinel (light > 1.5)
 unaffected.
 
