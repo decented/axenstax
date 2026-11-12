@@ -236,3 +236,202 @@ fn game_harness_spawn_satoshis_house_stands_on_dry_land_and_is_meshed_straight_a
         assert_eq!(have, want, "section {sec:?}: the drawn mesh is not the world's");
     }
 }
+
+// ── Does a new world that is really ticking get Satoshi's house? ──────────────
+//
+// `satoshi::site_touches_player_work` refuses a site whose sections were edited
+// since generation (`World::section_edited`), and every non-worldgen
+// `set_block` marks its chunk. These tests enter a NEW world the way the lobby
+// does (meta on disk, then the queued `LoadWorld`), run one frame and one tick
+// at a time for 60 game seconds (streaming, random ticks, fluids, leaf decay,
+// the once-a-second population pass), and count the houses. Many seeds, land and
+// sea; and a world saved and reloaded before its house exists.
+
+/// Seeds spread over the range, land and sea origins; the first is the sea
+/// origin the other spawn tests use.
+fn house_seeds() -> Vec<u32> {
+    let mut seeds = vec![crate::spawn_search::sea_origin_seed()];
+    seeds.extend([1, 7, 42, 1234, 31337, 99991, 271828, 314159, 8675309, 123456789, 987654321, 0xDEAD_BEEF, 0x1234_5678, 4_000_000_000]);
+    seeds
+}
+
+const HOUSE_TICKS: u64 = 1200;
+
+/// Write a new normal Survival world's meta as the lobby's Create does, then open it
+/// through the lobby's own "Play".
+fn new_world_via_lobby(name: &str, seed: u32) -> HeadlessGame {
+    let _ = crate::save::delete_world(name);
+    let mut meta = crate::save::WorldMeta::new(name);
+    meta.seed = seed;
+    meta.worldgen_version = crate::biome::Generator::V3.version();
+    meta.satoshi_enabled = meta.world_type == "normal" && meta.game_mode == "survival";
+    crate::save::save_world_meta(name, &meta).expect("meta written");
+    let state = pollster::block_on(crate::GameState::new_headless_routed(
+        1280,
+        720,
+        crate::local_routing::LocalRouting::Standalone,
+    ));
+    let mut hg = HeadlessGame { state };
+    // A fresh boot shows the splash; the lobby is where a world is opened from.
+    hg.state.mode = crate::GameMode::Menu(Box::new(crate::menu::MenuState::new()));
+    hg.reopen_world(name);
+    assert!(hg.state.world.satoshi.enabled, "control: the new world hosts Satoshi");
+    assert_eq!(hg.state.biome_gen.seed, seed, "control: the lobby's seed is the world's");
+    hg
+}
+
+/// What a run of ticks ended with.
+#[derive(Debug, Clone, PartialEq)]
+enum HouseOutcome {
+    /// Built, this many ticks after the run began.
+    Built(u64),
+    /// The search ran and found no site in reach.
+    NoSite,
+    /// Never found its ground loaded.
+    Waiting,
+}
+
+/// Run `ticks` logical ticks, a real frame (chunk streaming, meshing, UI) before
+/// each tick, and say what became of the house.
+fn tick_for_house(hg: &mut HeadlessGame, ticks: u64) -> HouseOutcome {
+    let t0 = hg.state.tick_counter;
+    let mut built = None;
+    while hg.state.tick_counter - t0 < ticks {
+        hg.frames(1);
+        if built.is_none() && hg.state.world.satoshi.home.is_some() {
+            built = Some(hg.state.tick_counter - t0);
+        }
+        hg.ticks(1);
+        if built.is_none() && hg.state.world.satoshi.home.is_some() {
+            built = Some(hg.state.tick_counter - t0);
+        }
+    }
+    match built {
+        Some(t) => HouseOutcome::Built(t),
+        None if hg.state.world.satoshi.no_site.is_some() => HouseOutcome::NoSite,
+        None => HouseOutcome::Waiting,
+    }
+}
+
+/// Whether the world's origin is open sea or land, read the way `sea_origin_seed` reads it.
+fn origin_kind(bg: &crate::biome::BiomeGenerator) -> &'static str {
+    let sea = (-3..=3).all(|i| (-3..=3).all(|j| bg.surface_y(i * 4, j * 4) < 63 && bg.terrain_height(i * 4, j * 4) < 63));
+    if sea { "sea" } else if bg.terrain_height(0, 0) < 63 { "coast" } else { "land" }
+}
+
+/// Which sections near the house's first try are marked edited, for a failure message.
+fn edited_sections_near_spawn(hg: &HeadlessGame) -> Vec<(i32, i32, i32)> {
+    let cs = crate::chunk::CHUNK_SIZE as i32;
+    let (sx, sz) = crate::chunk_stream::world_spawn_xz(&hg.state.world, &hg.state.biome_gen);
+    let (c0x, c0z) = ((sx - 28).div_euclid(cs), (sz - 28).div_euclid(cs));
+    let (c1x, c1z) = ((sx + 32).div_euclid(cs), (sz + 32).div_euclid(cs));
+    let mut out = Vec::new();
+    for cx in c0x..=c1x {
+        for cz in c0z..=c1z {
+            for cy in 0..=crate::world::MAX_CHUNK_Y {
+                if hg.state.world.section_edited(cx, cy, cz) {
+                    out.push((cx, cy, cz));
+                }
+            }
+        }
+    }
+    out
+}
+
+#[test]
+#[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test --lib -- --ignored game_harness_spawn"]
+fn game_harness_spawn_every_new_world_gets_satoshis_house_within_a_minute() {
+    super::isolate_saves();
+    let mut failures = Vec::new();
+    for (i, seed) in house_seeds().into_iter().enumerate() {
+        let name = format!("harness-spawn-house-seed-{i}");
+        let mut hg = new_world_via_lobby(&name, seed);
+        let col = crate::spawn_search::world_spawn_column(&hg.state.biome_gen);
+        let origin = origin_kind(&hg.state.biome_gen);
+        // Where the world stands the moment it is playable, before one tick of ours.
+        let (t_entry, home_at_entry) = (hg.state.tick_counter, hg.state.world.satoshi.home.is_some());
+        let outcome = tick_for_house(&mut hg, HOUSE_TICKS);
+        println!(
+            "HOUSE seed={seed} origin={origin} spawn=({},{}) kind={:?} tick_at_entry={t_entry} house_at_entry={home_at_entry} -> {outcome:?} final_tick={}",
+            col.x, col.z, col.kind, hg.state.tick_counter
+        );
+        if !matches!(outcome, HouseOutcome::Built(_)) {
+            let edited = edited_sections_near_spawn(&hg);
+            println!("HOUSE seed={seed} edited sections near the house site: {edited:?}");
+            failures.push(format!("seed {seed}: {outcome:?}"));
+        }
+        let _ = hg.state.leave_world(crate::world_exit::SaveChoice::Discard, crate::world_exit::ExitTo::Lobby);
+        let _ = crate::save::delete_world(&name);
+    }
+    assert!(failures.is_empty(), "new worlds without a house after {HOUSE_TICKS} ticks: {failures:?}");
+}
+
+#[test]
+#[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test --lib -- --ignored game_harness_spawn"]
+fn game_harness_spawn_a_new_world_saved_and_reloaded_before_its_house_still_gets_it() {
+    super::isolate_saves();
+    let seeds = house_seeds();
+    let mut failures = Vec::new();
+    for (i, seed) in [seeds[0], seeds[2], seeds[6]].into_iter().enumerate() {
+        let name = format!("harness-spawn-house-reload-{i}");
+        let mut hg = new_world_via_lobby(&name, seed);
+        // The player quits the moment the world is playable.
+        let built_early = hg.state.world.satoshi.home.is_some();
+        println!("RELOAD seed={seed} at first entry: tick={} house={built_early}", hg.state.tick_counter);
+        assert!(
+            !built_early,
+            "seed {seed}: the house is already built when the world first becomes playable (tick {}), so no save before it is reachable",
+            hg.state.tick_counter
+        );
+        assert!(
+            hg.state.leave_world(crate::world_exit::SaveChoice::Save, crate::world_exit::ExitTo::Lobby),
+            "the world saves"
+        );
+        let meta = crate::save::load_world_meta(&name);
+        assert!(meta.satoshi_enabled && meta.seed == seed, "control: the saved meta is still this new world's");
+        hg.reopen_world(&name);
+        assert_eq!(hg.state.biome_gen.seed, seed, "control: the reloaded world is the same world");
+        let had_house_on_reload = hg.state.world.satoshi.home.is_some();
+        println!(
+            "RELOAD seed={seed} after reload: tick={} house={had_house_on_reload} no_site={} edited near site: {:?}",
+            hg.state.tick_counter,
+            hg.state.world.satoshi.no_site.is_some(),
+            edited_sections_near_spawn(&hg)
+        );
+        let outcome = tick_for_house(&mut hg, HOUSE_TICKS);
+        let ok = had_house_on_reload || matches!(outcome, HouseOutcome::Built(_));
+        println!("RELOAD seed={seed} built_before_quit={built_early} home_after_reload={had_house_on_reload} -> {outcome:?}");
+        if !ok {
+            println!("RELOAD seed={seed} edited sections near the house site: {:?}", edited_sections_near_spawn(&hg));
+            failures.push(format!("seed {seed}: {outcome:?}"));
+        }
+        let _ = hg.state.leave_world(crate::world_exit::SaveChoice::Discard, crate::world_exit::ExitTo::Lobby);
+        let _ = crate::save::delete_world(&name);
+    }
+    assert!(failures.is_empty(), "reloaded new worlds without a house: {failures:?}");
+}
+
+#[test]
+#[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test --lib -- --ignored game_harness_spawn"]
+fn game_harness_spawn_a_house_sited_a_minute_late_still_finds_a_site() {
+    super::isolate_saves();
+    let mut failures = Vec::new();
+    for (i, seed) in house_seeds().into_iter().enumerate() {
+        let name = format!("harness-spawn-house-late-{i}");
+        let mut hg = new_world_via_lobby(&name, seed);
+        // Satoshi sits out the first minute (a world whose ground was slow to
+        // load), so the world has ticked for real before any site is chosen.
+        hg.state.world.satoshi.enabled = false;
+        let _ = tick_for_house(&mut hg, HOUSE_TICKS);
+        let edited_before = edited_sections_near_spawn(&hg);
+        hg.state.world.satoshi.enabled = true;
+        let outcome = tick_for_house(&mut hg, 100);
+        println!("LATE seed={seed} edited sections near the site before siting: {edited_before:?} -> {outcome:?}");
+        if !matches!(outcome, HouseOutcome::Built(_)) {
+            failures.push(format!("seed {seed}: {outcome:?}"));
+        }
+        let _ = hg.state.leave_world(crate::world_exit::SaveChoice::Discard, crate::world_exit::ExitTo::Lobby);
+        let _ = crate::save::delete_world(&name);
+    }
+    assert!(failures.is_empty(), "worlds that ticked a minute first and then got no house: {failures:?}");
+}
