@@ -2259,6 +2259,9 @@ hashed vs. hashing the tick directly) was resolved by the "Weather sync (P9)"
 work below** — the server now runs the exact same `advance` the client does,
 so `server_raining` (and the divergence) no longer exist.
 
+
+**The Workshop is always day (2026-11-12).** `World::effective_world_time` returns solar noon whenever `is_workshop` is set, whatever the `time_lock` says, because the one light rule (Spec 03 §4.7) leaves a Workshop's working copies nearly black at midnight and a Workshop is an authoring room, not a place to wait out the night; `WorldMeta::mark_workshop` also writes `time_lock = "day"` into new Workshop metas, and the runtime flag covers saved Workshops (still `"cycle"` on disk) without a migration.
+
 #### Wind — SHIPPED 2026-09-07 (Wind, Copper & Electricity wave)
 
 `wind.rs` is a **pure, deterministic** derived signal — never saved, never

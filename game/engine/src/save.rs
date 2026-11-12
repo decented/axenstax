@@ -4084,6 +4084,9 @@ impl WorldMeta {
     pub fn mark_workshop(&mut self) {
         self.is_workshop = true;
         self.mark_creative();
+        // Always daytime (a new Workshop's meta says so; `World::effective_world_time`
+        // enforces it for Workshops saved before this, whose meta still says "cycle").
+        self.time_lock = "day".to_string();
         // A creative authoring room never has mobs (owner report 2026-06-18).
         // The spawner hard-guards on `is_workshop` regardless, but keep the meta
         // honest so anything reading `mobs_enabled` sees the truth.
@@ -6068,6 +6071,30 @@ mod tests {
         assert!(meta.is_workshop, "mark_workshop flags the Workshop");
         assert!(!meta.mobs_enabled, "the Workshop must disable mobs");
         assert_eq!(meta.game_mode, "creative", "the Workshop is creative");
+    }
+
+    #[test]
+    fn workshop_is_always_day_new_and_loaded() {
+        // New: mark_workshop writes the day lock into the meta.
+        let json = r#"{"display_name":"ws","description":"","game_mode":"survival","created_at":"","icon":null}"#;
+        let mut fresh: WorldMeta = serde_json::from_str(json).expect("meta must parse");
+        fresh.mark_workshop();
+        assert_eq!(fresh.time_lock, "day");
+        let mut world = crate::world::World::new();
+        world.apply_meta_rules(&fresh);
+        assert_eq!(world.effective_world_time(0), 12000, "midnight reads as noon");
+
+        // Loaded: a Workshop saved before the rule keeps time_lock "cycle" on
+        // disk, yet its live world still reports the day lock at every hour.
+        let old = r#"{"display_name":"ws","description":"","game_mode":"creative","created_at":"","icon":null,"is_workshop":true}"#;
+        let loaded: WorldMeta = serde_json::from_str(old).expect("old meta must parse");
+        assert!(loaded.is_workshop);
+        assert_eq!(loaded.time_lock, "cycle", "precondition: the old meta is unlocked");
+        let mut world = crate::world::World::new();
+        world.apply_meta_rules(&loaded);
+        for raw in [0, 6000, 12000, 18000, 23999] {
+            assert_eq!(world.effective_world_time(raw), 12000);
+        }
     }
 
     #[test]

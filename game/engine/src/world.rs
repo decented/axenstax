@@ -1079,11 +1079,18 @@ impl World {
     /// - `"day"`   — returns `12000` (solar noon, peak brightness).
     /// - `"night"` — returns `0` (midnight, minimum brightness).
     ///
+    /// The Workshop is always day, whatever its `time_lock` says: it is a
+    /// creative authoring room, and its saved metas (made before this rule,
+    /// still `"cycle"`) must not go dark at midnight under the light rule.
+    ///
     /// All consumers that need day/night information should call this rather than
     /// using the raw world-time directly, so blank-canvas worlds with a locked
     /// time work consistently across sky colour, mob spawning, and brigand AI.
     #[inline]
     pub fn effective_world_time(&self, raw: u32) -> u32 {
+        if self.is_workshop {
+            return 12000;
+        }
         match self.time_lock.as_str() {
             "day"   => 12000,
             "night" => 0,
