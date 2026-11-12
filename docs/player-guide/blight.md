@@ -15,7 +15,7 @@ Mature crops count towards the 64. Wheat, carrots, potatoes, corn, papyrus, cott
 
 ## What it looks like
 
-A single plant in the field turns into a **Blighted Crop**: a small, stunted, straw-coloured plant that looks wrong beside its healthy neighbours.
+A single plant in the field turns into a **Blighted Crop**: a small, stunted, ash-grey plant that looks wrong beside its healthy neighbours.
 
 - Each growing crop in a one-crop field has a small chance of blighting each growth step. About one in forty.
 - Once a Blighted Crop is there, it **spreads to the same kind of crop right next to it**, about one in eight per neighbour each growth step. That happens wherever it is, even if the field is mixed by then.

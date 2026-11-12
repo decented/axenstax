@@ -2448,8 +2448,8 @@ against the slice before allocating.
       also takes) and an import both drop the whole field, a handover's transfer copy keeps it, and it is never on
       the wire or shown. See `docs/superpowers/specs/2026-11-09-living-world-tier2.md` §5.
     - **Layout revision 7 and the Blighted Crop (format 66, living world Tier 2 S8, 2026-11-09).** Block id
-      377, `BLIGHTED_CROP` (a crop taken by blight: a plant, non-solid and transparent, on the straw-yellow
-      wheat stage-2 texture layer; breaks to nothing; never "placed", so it carries no author), follows the
+      377, `BLIGHTED_CROP` (a crop taken by blight: a plant, non-solid and transparent, on the
+      wheat stage-2 texture layer, drawn ash grey since 2026-11-12, Spec 03 §7.5a; breaks to nothing; never "placed", so it carries no author), follows the
       Worn Path, so the revision moves 6 to 7 for the reason revisions 4, 5 and 6 did (an older build reads
       the id as AIR and saves a hole in the field). No `WorldSave` field was added: the crop kind it came
       from rides the existing sparse `block_meta` byte at its cell (`blight::CropKind` index 0..=9: wheat,

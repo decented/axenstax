@@ -9,7 +9,7 @@
 use super::*;
 use crate::block;
 
-fn ground_y(hg: &HeadlessGame, x: i32, z: i32, from: i32) -> i32 {
+pub(super) fn ground_y(hg: &HeadlessGame, x: i32, z: i32, from: i32) -> i32 {
     let reg = &hg.state.registry;
     let mut y = from;
     while y > 0 {
@@ -22,7 +22,7 @@ fn ground_y(hg: &HeadlessGame, x: i32, z: i32, from: i32) -> i32 {
     panic!("no ground at {x},{z}");
 }
 
-fn place(hg: &mut HeadlessGame, x: i32, y: i32, z: i32, id: block::BlockId) {
+pub(super) fn place(hg: &mut HeadlessGame, x: i32, y: i32, z: i32, id: block::BlockId) {
     let prev = hg.state.world.get_block(x, y, z);
     hg.state.world.set_block(x, y, z, id);
     hg.state.world.set_placed(x, y, z, true);
@@ -30,7 +30,7 @@ fn place(hg: &mut HeadlessGame, x: i32, y: i32, z: i32, id: block::BlockId) {
     hg.state.rebuild_chunks_for_lighting(x, y, z);
 }
 
-fn settle(hg: &mut HeadlessGame) {
+pub(super) fn settle(hg: &mut HeadlessGame) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
     loop {
         hg.frames(3);
@@ -43,7 +43,7 @@ fn settle(hg: &mut HeadlessGame) {
 }
 
 /// Stand so the EYE is at `eye`, looking along yaw/pitch.
-fn pose_eye(hg: &mut HeadlessGame, eye: [f32; 3], yaw: f32, pitch: f32) {
+pub(super) fn pose_eye(hg: &mut HeadlessGame, eye: [f32; 3], yaw: f32, pitch: f32) {
     let p = &mut hg.state.players[0];
     p.player.pos = glam::Vec3::new(eye[0], eye[1] - 1.62, eye[2]);
     p.player.velocity = glam::Vec3::ZERO;
@@ -114,7 +114,7 @@ fn texture_mean(tex: &[Vec<u8>], layer: u32, label: &str) {
     );
 }
 
-fn set_time(hg: &mut HeadlessGame, t: u32) {
+pub(super) fn set_time(hg: &mut HeadlessGame, t: u32) {
     hg.state.write_clock(t, 0);
     hg.state.lightning_flash = 0.0;
     hg.frames(4);

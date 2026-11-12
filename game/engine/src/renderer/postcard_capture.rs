@@ -107,6 +107,7 @@ impl Renderer {
             &self.chunk_meshes,
             &self.water_meshes,
             &self.transparent_meshes,
+            &self.cutout_meshes,
             &self.plant_pipeline,
             &self.plant_geo_vbuf,
             &self.plant_geo_ibuf,

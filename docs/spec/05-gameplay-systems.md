@@ -5052,6 +5052,7 @@ Module `blight.rs`. Block `BLIGHTED_CROP` 377. T2 §8.
 - In the farming pass, a region (chunk column) with at least `MONO_MIN_CROPS` = 64 farmed crops, 90% or more of one kind (`MONO_SHARE_PCT`), is a monoculture. Each crop of that kind that would grow rolls a position-and-tick hash and 1 time in 40 (`BLIGHT_ONE_IN`) becomes a Blighted Crop. A child's first patch or a mixed field never blights.
 - A Blighted Crop remembers its kind in `block_meta` and spreads to a same-kind horizontal neighbour 1 time in 8 (`SPREAD_ONE_IN`) per pass, whatever the region's mix. At most 512 blighted crops spread per pass.
 - It never grows, breaks to nothing, takes no bone meal and is not an item. Bloom reads its column as bare. Off in creative and while a trial runs.
+- It looks ash grey and stunted: half size (0.5 wide, 0.45 high), on half-grown wheat's texture (the atlas has no free layer) greyed in the plant shader (`mesh::GREY_FLAG`, Spec 03 §7.5a), so it stands out from a healthy field of any stage, by day and by torchlight.
 
 ### 16.7 Plan lineage and counts, succession
 

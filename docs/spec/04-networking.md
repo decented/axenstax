@@ -995,7 +995,7 @@ struct PlayerState {
 - **`held_kind`/`held_id`** encode an `ItemRef` (tool-capable: blocks, tools,
   and materials, not just block ids). This replaced the old block-only
   `held_item: u16`. The client maps the pair back to a mesh via
-  `held_item_model::held_item_mesh` for the avatar's hand.
+  `item_model::held_item_mesh` for the avatar's hand.
 - **`anim_state`** is locomotion only: `0` idle, `1` walk, `2` jump. **Crouch is
   a flag, not a state** (`player_flags::CROUCHING`), so it can combine with any
   locomotion state.
