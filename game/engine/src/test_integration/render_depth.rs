@@ -140,6 +140,11 @@ fn game_harness_foliage_matches_opaque_day_night_and_torch_lighting() {
         ));
     }
     for (index, label) in ["day", "night", "torch"].into_iter().enumerate() {
+        // Logged so a lighting change can quote these values before and after.
+        eprintln!(
+            "RENDERDEPTH {label}: foliage={:?} stone={:?}",
+            foliage[index], references[index]
+        );
         for (leaf, opaque) in foliage[index].iter().zip(&references[index]) {
             for channel in 0..3 {
                 assert!(

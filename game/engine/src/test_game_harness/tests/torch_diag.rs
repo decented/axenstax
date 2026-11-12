@@ -1,6 +1,10 @@
-//! DIAGNOSTIC ONLY (torch "black stick" / "dim at night" report). Not for merge.
+//! Torch light diagnostic (ignored: needs a GPU adapter holding the atlas).
 //! Places a torch (and a salt lamp + paper lantern for comparison) in a fresh
-//! world through the real relight + remesh path, then screenshots day/night.
+//! world through the real relight + remesh path, then screenshots day/night;
+//! last, closes a stone box round the torch (no sky light) and shoots it at
+//! noon and midnight, with and without the torch. Each shot also logs the
+//! screen position of named world points (`TORCHDIAG probe ...`) so a probe can
+//! sample the same surface before and after a change.
 //! Run: TORCH_SHOTS_OUT=<dir> cargo test --lib -- --ignored game_harness_torch_diag --nocapture
 use super::*;
 use crate::block;
@@ -48,7 +52,7 @@ fn pose_eye(hg: &mut HeadlessGame, eye: [f32; 3], yaw: f32, pitch: f32) {
     p.camera.pitch = pitch;
 }
 
-fn shot(hg: &mut HeadlessGame, name: &str) {
+fn shot(hg: &mut HeadlessGame, name: &str, points: &[(&str, [f32; 3])]) {
     let Ok(dir) = std::env::var("TORCH_SHOTS_OUT") else { return };
     std::fs::create_dir_all(&dir).unwrap();
     let path = format!("{dir}/{name}.png");
@@ -56,6 +60,47 @@ fn shot(hg: &mut HeadlessGame, name: &str) {
         hg.state.renderer.render_view_to_png(&path, 0, |_, _| {});
     }
     eprintln!("TORCHDIAG shot {path}");
+    // Project each named world point with the view the shot was drawn from.
+    let vp = hg.state.renderer.player_gpu[0].last_view_proj;
+    let (w, h) = (hg.state.renderer.width as f32, hg.state.renderer.height as f32);
+    for (label, p) in points {
+        let c = vp * glam::Vec4::new(p[0], p[1], p[2], 1.0);
+        if c.w <= 0.0 {
+            continue;
+        }
+        let (sx, sy) = ((c.x / c.w + 1.0) * 0.5 * w, (1.0 - c.y / c.w) * 0.5 * h);
+        let cell = (p[0].floor() as i32, p[1].floor() as i32, p[2].floor() as i32);
+        eprintln!(
+            "TORCHDIAG probe {name} {label} px={:.0} py={:.0} bl={} sl={}",
+            sx,
+            sy,
+            hg.state.world.block_light_at(cell.0, cell.1, cell.2),
+            hg.state.world.sky_light_at(cell.0, cell.1, cell.2),
+        );
+    }
+}
+
+/// Mean linear-space RGB of a 16x16 texture layer, printed so a probe can
+/// express a pixel as a fraction of its texture's own colour.
+fn texture_mean(tex: &[Vec<u8>], layer: u32, label: &str) {
+    let t = &tex[layer as usize];
+    let lin = |c: u8| {
+        let s = c as f32 / 255.0;
+        if s <= 0.04045 { s / 12.92 } else { ((s + 0.055) / 1.055).powf(2.4) }
+    };
+    let mut sum = [0.0f32; 3];
+    for px in t.chunks_exact(4) {
+        for c in 0..3 {
+            sum[c] += lin(px[c]);
+        }
+    }
+    let n = (t.len() / 4) as f32;
+    eprintln!(
+        "TORCHDIAG texmean {label} layer={layer} linear=[{:.4}, {:.4}, {:.4}]",
+        sum[0] / n,
+        sum[1] / n,
+        sum[2] / n
+    );
 }
 
 fn set_time(hg: &mut HeadlessGame, t: u32) {
@@ -93,6 +138,8 @@ fn game_harness_torch_diag() {
     eprintln!("TORCHDIAG top-face sampled region u0..4 v0..4 avg {:?}", avg(0, 4, 0, 4));
     eprintln!("TORCHDIAG flame+handle region u6..10 v2..16 avg {:?}", avg(6, 10, 2, 16));
     eprintln!("TORCHDIAG texture_count {}", crate::texture_gen::texture_count());
+    texture_mean(&tex, hg.state.registry.tex_top(block::MARBLE), "marble");
+    texture_mean(&tex, hg.state.registry.tex_side(block::STONE), "stone");
 
     // Fly in Creative so posing sticks; let the spawn area stream + mesh first.
     hg.state.set_play_mode(crate::play_mode::PlayMode::Creative);
@@ -130,6 +177,20 @@ fn game_harness_torch_diag() {
     // Wide: eye 6 south, 3.5 up — shows the light pool on the pad.
     let wide = [tx as f32 + 0.5, ty as f32 + 3.5, tz as f32 + 0.5 + 6.0];
     let wide_pitch = -(3.4f32 / 6.0).atan();
+    // Named surfaces each shot reports the screen position of (top faces sit
+    // at gy + 1; the torch pole spans x/z 0.4..0.6 and y 0..0.6 of its cell).
+    let (fx, fy, fz) = (tx as f32, ty as f32, tz as f32);
+    let pad_y = gy as f32 + 1.0;
+    let points: Vec<(&str, [f32; 3])> = vec![
+        ("pad-under-emitter", [fx + 0.15, pad_y, fz + 0.85]),
+        ("pad-south-1", [fx + 0.5, pad_y, fz + 1.5]),
+        ("pad-east-1", [fx + 1.5, pad_y, fz + 0.5]),
+        ("pad-east-3", [fx + 3.5, pad_y, fz + 0.5]),
+        ("pad-east-6", [fx + 6.5, pad_y, fz + 0.5]),
+        ("pad-far-sw", [fx - 6.5, pad_y, fz + 3.5]),
+        ("torch-flame", [fx + 0.5, fy + 0.5, fz + 0.6]),
+        ("torch-handle", [fx + 0.5, fy + 0.15, fz + 0.6]),
+    ];
 
     let stages: [(&str, block::BlockId); 4] = [
         ("none", block::AIR),
@@ -162,12 +223,65 @@ fn game_harness_torch_diag() {
             if name != "none" {
                 pose_eye(&mut hg, close, 0.0, close_pitch);
                 hg.frames(3);
-                shot(&mut hg, &format!("{name}-close-{label}"));
+                shot(&mut hg, &format!("{name}-close-{label}"), &points);
             }
             pose_eye(&mut hg, wide, 0.0, wide_pitch);
             hg.frames(3);
-            shot(&mut hg, &format!("{name}-wide-{label}"));
+            shot(&mut hg, &format!("{name}-wide-{label}"), &points);
         }
     }
     eprintln!("TORCHDIAG stage centre ({tx},{ty},{tz})");
+
+    // Enclosed: a closed stone box on the pad round the emitter cell (interior
+    // x/z -2..=2, y ty..=ty+4; the marble pad is its floor), so no sky light
+    // reaches inside. Shot from inside at noon and midnight, empty, then with
+    // the torch. Runs after the open-sky shots so it cannot shade them.
+    if hg.state.world.get_block(tx, ty, tz) != block::AIR {
+        place(&mut hg, tx, ty, tz, block::AIR);
+    }
+    for dx in -3..=3i32 {
+        for dz in -3..=3i32 {
+            for dy in 0..=5 {
+                let shell = dx.abs() == 3 || dz.abs() == 3 || dy == 5;
+                if shell && hg.state.world.get_block(tx + dx, ty + dy, tz + dz) != block::STONE {
+                    place(&mut hg, tx + dx, ty + dy, tz + dz, block::STONE);
+                }
+            }
+        }
+    }
+    settle(&mut hg);
+    let inside = [fx + 0.5, fy + 2.5, fz + 2.5];
+    let inside_pitch = -(2.2f32 / 2.0).atan();
+    let box_points: Vec<(&str, [f32; 3])> = vec![
+        ("pad-under-emitter", [fx + 0.15, pad_y, fz + 0.85]),
+        ("pad-south-1", [fx + 0.5, pad_y, fz + 1.5]),
+        ("pad-east-1", [fx + 1.5, pad_y, fz + 0.5]),
+        ("pad-west-2", [fx - 1.5, pad_y, fz - 1.5]),
+        ("wall-north", [fx + 0.5, fy + 1.5, fz - 2.0]),
+        ("wall-west", [fx - 2.0, fy + 1.0, fz + 0.5]),
+        ("torch-flame", [fx + 0.5, fy + 0.5, fz + 0.6]),
+        ("torch-handle", [fx + 0.5, fy + 0.15, fz + 0.6]),
+    ];
+    for (name, id) in [("none", block::AIR), ("torch", block::TORCH)] {
+        if id != block::AIR {
+            place(&mut hg, tx, ty, tz, id);
+        }
+        settle(&mut hg);
+        let w = &hg.state.world;
+        let sky_inside: Vec<_> = (-2..=2)
+            .flat_map(|dx| (-2..=2).map(move |dz| (dx, dz)))
+            .map(|(dx, dz)| w.sky_light_at(tx + dx, ty + 2, tz + dz))
+            .collect();
+        eprintln!(
+            "TORCHDIAG enclosed={name} max sky light inside={} emitter bl={}",
+            sky_inside.iter().max().copied().unwrap_or(0),
+            w.block_light_at(tx, ty, tz),
+        );
+        for (label, t) in [("day", 12000u32), ("midnight", 0u32)] {
+            set_time(&mut hg, t);
+            pose_eye(&mut hg, inside, 0.0, inside_pitch);
+            hg.frames(3);
+            shot(&mut hg, &format!("enclosed-{name}-{label}"), &box_points);
+        }
+    }
 }
