@@ -5,8 +5,20 @@ This is the test guide for the current build. A tester, or a chat assistant co-h
 Everything in this file was checked against the game's code for build 0.2.35. If the game and this guide disagree, that is worth reporting.
 
 - **Build:** 0.2.35 (desktop app, Linux)
-- **This session:** first the "Fixed since last time" re-checks (Mission 0), then any of the missions "On your own"
+- **This session:** first the "Ask first" questions, then the "Fixed since last time" re-checks (Mission 0), then any of the missions "On your own"
 - **Coming next:** missions at a village, and missions with a friend
+
+---
+
+## Ask first: questions from last time
+
+**Co-host:** ask these at the start of the session, before Mission 0, and put the answers in your report under Re-checks.
+
+Last time, the whole inventory disappeared during a fight with brigands. Brigands cannot take items, so we want to find out what happened:
+
+1. When all your things disappeared, did a **"You Died!"** screen come up?
+2. Around then, did you type `/gm c`, or switch to Creative some other way?
+3. Can you go back to where it happened? Is there a **grave** block there? If there is, right-click it: are your things inside?
 
 ---
 
@@ -33,7 +45,7 @@ These were found in the last playtest (build 0.2.34) and are fixed in 0.2.35. Ch
 - In first person, your hand sits mostly below the screen, so you cannot see what you are holding. Press **F5** to see it.
 - The world is split into columns 16 by 16 blocks wide. A sealed room built across the edge of one of those columns can stay lit like daytime inside at night, even with no torch.
 - A Satoshi house that was already built over the sea stays there.
-- Thunder is loud and comes all at once. There is no `/weather` command yet.
+- Thunder is loud and comes all at once. There is no `/weather` command yet. Both are planned for the next build.
 
 **Good to know:** brigands cannot take or carry your items. If your whole inventory disappears, you died: your things are in a grave block where it happened.
 
@@ -276,6 +288,7 @@ At the end, write a short list like this, one line per mission, and hand it to t
 
 ```
 Build (bottom of Settings):
+Ask first (brigand fight): "You Died!" screen? / typed /gm c? / grave there, things inside?:
 Re-checks: framed torch / dropped and held torch / grey blight / respawn on dry land / bed respawn / chat Tab and text size: works / doesn't. What happened:
 Mission 0 Re-checks: worked / didn't. What happened:
 Mission 1 Path: worked / didn't. What happened:
