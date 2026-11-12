@@ -1242,11 +1242,11 @@ fn gen_tent(seed: u32) -> Vec<u8> {
     px
 }
 
-/// Track block face — two parallel steel rails running top-to-bottom over a
-/// dark-brown sleeper (railroad-tie) base, with lighter cross-ties every few
-/// rows so it reads as laid track from above. Single texture used on every
-/// face; the block renders as a thin ground slab (`mesh.rs`) so only the top
-/// view matters in practice. Fully opaque pixels.
+/// Track block face — two parallel steel rails running top-to-bottom over
+/// lighter cross-ties every few rows, so it reads as laid track from above.
+/// The dark-brown ballast between the ties is transparent (alpha 0, its colour
+/// kept): this is the track's inventory icon and item sprite (`item_model`);
+/// placed track draws its own rail and bed layers (`mesh.rs`).
 fn gen_track(seed: u32) -> Vec<u8> {
     let mut px = vec![0u8; PIXELS];
     let base = [74, 56, 38];  // dark-brown sleeper/ballast
@@ -1258,7 +1258,7 @@ fn gen_track(seed: u32) -> Vec<u8> {
         for x in 0..SIZE {
             let h = px_hash(x, y, seed);
             let noise = (h % 7) as i32 - 3;
-            let c = if y % 5 == 0 { tie } else { base };
+            let (c, a) = if y % 5 == 0 { (tie, 255) } else { (base, 0) };
             set_px(
                 &mut px,
                 x,
@@ -1266,7 +1266,7 @@ fn gen_track(seed: u32) -> Vec<u8> {
                 clamp_u8(c[0] + noise),
                 clamp_u8(c[1] + noise),
                 clamp_u8(c[2] + noise),
-                255,
+                a,
             );
         }
     }
@@ -1667,6 +1667,10 @@ fn gen_cyanotype_print() -> Vec<u8> {
 // ─────────────────────────────────────────────────────────────────────────
 
 /// Cable (385) — a dark rubber sheath with a copper core stripe down the middle.
+/// Only a strip across the middle is the cable (rows 5..=10: two sheath rows
+/// each side of the core); the rows above and below are transparent (alpha 0,
+/// colour kept). This is the cable's inventory icon and item sprite; placed
+/// cable draws its own copper layer (`mesh.rs`).
 fn gen_cable() -> Vec<u8> {
     let mut px = vec![0u8; PIXELS];
     for y in 0..SIZE {
@@ -1680,13 +1684,16 @@ fn gen_cable() -> Vec<u8> {
                 g = clamp_u8(108 + n);
                 b = clamp_u8(58 + n);
             }
-            set_px(&mut px, x, y, r, g, b, 255);
+            let a = if (5..=10).contains(&y) { 255 } else { 0 };
+            set_px(&mut px, x, y, r, g, b, a);
         }
     }
     px
 }
 
 /// Cable lit (386) — the energised cable: copper core glows, faint orange bloom.
+/// Like the cable, only a strip across the middle is opaque (rows 4..=12: the
+/// core, its bloom and one sheath row each side); the rest is transparent.
 fn gen_cable_lit() -> Vec<u8> {
     let mut px = vec![0u8; PIXELS];
     for y in 0..SIZE {
@@ -1705,7 +1712,8 @@ fn gen_cable_lit() -> Vec<u8> {
                 g = clamp_u8(80 + n);
                 b = clamp_u8(40 + n);
             }
-            set_px(&mut px, x, y, r, g, b, 255);
+            let a = if dist <= 4 { 255 } else { 0 };
+            set_px(&mut px, x, y, r, g, b, a);
         }
     }
     px
@@ -3732,9 +3740,14 @@ fn gen_item_arrow() -> Vec<u8> {
 
 fn gen_tall_grass() -> Vec<u8> {
     let mut px = vec![0u8; PIXELS];
-    // Dark green-ish background reads as "grass tuft on a face"; vertical
-    // bright-green strands suggest the grass blades.
+    // The background is transparent (alpha 0) and keeps its old dark green, so
+    // the plant billboard (`fs_plant` cuts alpha) and the item sprite
+    // (`item_model`) show just the blades; vertical bright-green strands are
+    // the grass blades.
     fill_color(&mut px, 32, 60, 24);
+    for texel in px.chunks_exact_mut(4) {
+        texel[3] = 0;
+    }
     // Vertical strands at x = 3, 7, 11 of varying height.
     let strands = [(3u32, 5u32, 14u32), (7, 2, 14), (11, 4, 14)];
     for (sx, top, bot) in strands.iter().copied() {
@@ -3871,7 +3884,8 @@ fn gen_torch() -> Vec<u8> {
     // A transparent background (alpha 0) that keeps its old dark colour, so a
     // path that ignores alpha looks as it did: the placed torch samples only
     // the art (`mesh::TORCH_UVS`); the item sprite (`item_model`, cut out by
-    // `fs_main`) and the inventory icon (egui blends alpha) show just the torch.
+    // `fs_main_cutout`) and the inventory icon (egui blends alpha) show just the
+    // torch.
     fill_color(&mut px, 18, 14, 10);
     for texel in px.chunks_exact_mut(4) {
         texel[3] = 0;
@@ -5055,15 +5069,18 @@ fn gen_construction_anchor() -> Vec<u8> {
         for x in 0..SIZE {
             let h = px_hash(x, y, 3110);
             let noise = (h % 7) as i32 - 3;
-            // Shadow background.
+            // Shadow background: transparent (alpha 0), its colour kept, so the
+            // billboard and the item sprite show just the flag on its pole.
             let mut r = clamp_u8(55 + noise);
             let mut g = clamp_u8(45 + noise);
             let mut b = clamp_u8(38 + noise);
+            let mut a = 0;
             // Vertical pole — column 7 from y=2 to y=14.
             if x == 7 && (2..=14).contains(&y) {
                 r = clamp_u8(140 + noise);
                 g = clamp_u8(100 + noise);
                 b = clamp_u8(60 + noise);
+                a = 255;
             }
             // Flag triangle — pixels from (8, 2) to (12, 5).
             let in_flag = (8..=12).contains(&x) && (2..=5).contains(&y)
@@ -5072,8 +5089,9 @@ fn gen_construction_anchor() -> Vec<u8> {
                 r = clamp_u8(220 + noise);
                 g = clamp_u8(60 + noise);
                 b = clamp_u8(60 + noise);
+                a = 255;
             }
-            set_px(&mut px, x, y, r, g, b, 255);
+            set_px(&mut px, x, y, r, g, b, a);
         }
     }
     px
@@ -6170,6 +6188,45 @@ mod tests {
         }
         // The handle (2 x 8 texels) and the flame (3 + 4 + 4 + 4 + 3).
         assert_eq!(art, 34, "the torch's art");
+    }
+
+    #[test]
+    fn sprite_icon_backgrounds_are_transparent_and_keep_their_colour() {
+        // Tall grass, the construction anchor, the track and the two cables
+        // are item sprites (`item_model`): their background is alpha 0 with
+        // its old colour kept, and their art is opaque.
+        let t = generate_textures();
+        let px = |layer: u32, x: u32, y: u32| -> [u8; 4] {
+            let i = ((y * SIZE + x) * 4) as usize;
+            t[layer as usize][i..i + 4].try_into().unwrap()
+        };
+        let near = |p: [u8; 4], rgb: [i32; 3], tol: i32| (0..3).all(|c| (p[c] as i32 - rgb[c]).abs() <= tol);
+        use crate::block::{TEX_CABLE, TEX_CABLE_LIT, TEX_CONSTRUCTION_ANCHOR, TEX_TALL_GRASS, TEX_TRACK};
+        // Tall grass: the old dark green background, a blade at (7, 8).
+        assert_eq!(px(TEX_TALL_GRASS, 0, 0), [32, 60, 24, 0]);
+        assert_eq!(px(TEX_TALL_GRASS, 7, 8)[3], 255);
+        // Construction anchor: the shadow, the pole at (7, 8), the flag at (9, 3).
+        let shadow = px(TEX_CONSTRUCTION_ANCHOR, 0, 0);
+        assert!(shadow[3] == 0 && near(shadow, [55, 45, 38], 3), "{shadow:?}");
+        assert_eq!(px(TEX_CONSTRUCTION_ANCHOR, 7, 8)[3], 255);
+        assert_eq!(px(TEX_CONSTRUCTION_ANCHOR, 9, 3)[3], 255);
+        // Track: ballast between the ties, a tie row, a rail.
+        let ballast = px(TEX_TRACK, 1, 1);
+        assert!(ballast[3] == 0 && near(ballast, [74, 56, 38], 3), "{ballast:?}");
+        assert_eq!(px(TEX_TRACK, 1, 5)[3], 255, "a cross-tie");
+        assert_eq!(px(TEX_TRACK, 4, 1)[3], 255, "a rail");
+        // Cables: sheath outside the strip, the copper core inside it.
+        for (layer, sheath, core_row) in [(TEX_CABLE, [38, 38, 42], 7), (TEX_CABLE_LIT, [46, 42, 40], 8)] {
+            let outside = px(layer, 0, 0);
+            assert!(outside[3] == 0 && near(outside, sheath, 4), "{outside:?}");
+            assert_eq!(px(layer, 0, core_row)[3], 255);
+        }
+        // Each still has art and a background.
+        for layer in [TEX_TALL_GRASS, TEX_CONSTRUCTION_ANCHOR, TEX_TRACK, TEX_CABLE, TEX_CABLE_LIT] {
+            let a: Vec<u8> = t[layer as usize].chunks_exact(4).map(|p| p[3]).collect();
+            assert!(a.iter().all(|&a| a == 0 || a == 255), "layer {layer}: alpha is 0 or 255");
+            assert!(a.contains(&0) && a.contains(&255), "layer {layer}: art on a background");
+        }
     }
 
     #[test]

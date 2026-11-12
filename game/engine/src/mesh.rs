@@ -273,11 +273,14 @@ pub const LEAF_FILL_FLAG: u32 = 1 << 16;
 
 /// Bit set in a vertex's `tex_layer` on every face of an item sprite
 /// (`item_model`: a framed, held or dropped torch, flower, crop, rail, ...).
-/// `fs_main` masks it off the layer index (like [`LEAF_FILL_FLAG`]) and
+/// `fs_main_cutout` masks it off the layer index (like [`LEAF_FILL_FLAG`]) and
 /// discards a texel whose full-size alpha is below 0.5, so a flat item shows
 /// its silhouette, not the square it is painted on. Only item-sprite vertices
-/// set it. (Bits 20..23 carry an avatar's block light, on the avatar pipeline
-/// only: `world_light::AVATAR_BLOCK_BITS`.)
+/// set it, and only pipelines whose fragment entry is `fs_main_cutout` draw
+/// them: the entity pipeline (held and dropped items) and, for a framed
+/// sprite, the chunk's own cutout bucket ([`ChunkMeshes::cutout`]). The
+/// terrain's `fs_main` never discards. (Bits 20..23 carry an avatar's block
+/// light, on the avatar pipeline only: `world_light::AVATAR_BLOCK_BITS`.)
 pub const CUTOUT_FLAG: u32 = 1 << 17;
 
 /// Bit set in a plant instance's `tex_layer` for the Blighted Crop. `fs_plant`
@@ -342,6 +345,13 @@ pub struct ChunkMeshes {
     /// geometry and render invisible. Drawn in the alpha-blended, depth-read-only
     /// transparent pass alongside water (back-to-front), so glass shows as glass.
     pub transparent: ChunkMesh,
+    /// Framed item sprites (`item_model`: a torch, a flower, a rail, ... lying
+    /// on an item frame's plate), every vertex carrying [`CUTOUT_FLAG`]. Kept
+    /// out of `opaque` so the terrain's fragment shader never has to discard;
+    /// the renderer draws this bucket with the entity pipeline, whose
+    /// `fs_main_cutout` cuts the transparent texels (`draw_cutout_sections`).
+    /// Meshed with the chunk; empty in almost every section.
+    pub cutout: ChunkMesh,
     pub plants: Vec<PlantInstance>,
     /// Owner-inbox #1/2/3 — wallpaper face-overlay decal quads for this chunk.
     /// One quad (6 verts) per painted face, drawn in a dedicated alpha-blended,
@@ -452,17 +462,18 @@ pub fn build_chunk_meshes(
     let empty = || ChunkMesh { vertices: vec![], indices: vec![] };
     let chunk = match world.get_chunk(cx, cy, cz) {
         Some(c) => c,
-        None => return ChunkMeshes { opaque: empty(), water: empty(), transparent: empty(), plants: vec![], decals: vec![], micro_instances: vec![], micro_billboards: vec![] },
+        None => return ChunkMeshes { opaque: empty(), water: empty(), transparent: empty(), cutout: empty(), plants: vec![], decals: vec![], micro_instances: vec![], micro_billboards: vec![] },
     };
     // An all-air section has no geometry of any kind (every pass below reads
     // the section's own cells; decals need a solid block in it), and
     // `Chunk::is_empty` is O(1): skip ~25k cells x 6 faces of neighbour lookups.
     if chunk.is_empty() {
-        return ChunkMeshes { opaque: empty(), water: empty(), transparent: empty(), plants: vec![], decals: vec![], micro_instances: vec![], micro_billboards: vec![] };
+        return ChunkMeshes { opaque: empty(), water: empty(), transparent: empty(), cutout: empty(), plants: vec![], decals: vec![], micro_instances: vec![], micro_billboards: vec![] };
     }
 
     let mut vertices = Vec::new();
     let mut indices = Vec::new();
+    let mut cutout = empty();
     let mut plants = Vec::new();
     let mut micro_instances = Vec::new();
     let mut micro_billboards = Vec::new();
@@ -498,6 +509,7 @@ pub fn build_chunk_meshes(
         registry,
         &mut vertices,
         &mut indices,
+        &mut cutout,
         &mut plants,
         &mut micro_instances,
         &mut micro_billboards,
@@ -512,7 +524,7 @@ pub fn build_chunk_meshes(
     let mut decals = Vec::new();
     emit_face_decals(origin_x, origin_y, origin_z, world, registry, &mut decals);
 
-    ChunkMeshes { opaque, water, transparent, plants, decals, micro_instances, micro_billboards }
+    ChunkMeshes { opaque, water, transparent, cutout, plants, decals, micro_instances, micro_billboards }
 }
 
 /// Spec 30 Phase A — returns the per-block min/max offsets (each in
@@ -621,6 +633,7 @@ fn emit_non_solid_blocks(
     registry: &BlockRegistry,
     vertices: &mut Vec<Vertex>,
     indices: &mut Vec<u32>,
+    cutout: &mut ChunkMesh,
     plants: &mut Vec<PlantInstance>,
     micro_instances: &mut Vec<(BlockId, MicroInstance)>,
     micro_billboards: &mut Vec<PlantInstance>,
@@ -726,7 +739,8 @@ fn emit_non_solid_blocks(
                     // one item model (`item_model`): a cube item is the small cube
                     // off the plate, the whole texture on every face, like a held
                     // or dropped block; a sprite item (a torch, a flower, a rail,
-                    // ...) lies flat on the plate, parallel to the wall.
+                    // ...) lies flat on the plate, parallel to the wall, in the
+                    // chunk's cutout bucket (`ChunkMeshes::cutout`), not here.
                     if shape == crate::block_shape::BlockShape::ItemFrame
                         && let Some(crate::item::Item::Block(fb)) = world
                             .item_frame_at((wx, wy, wz))
@@ -740,8 +754,8 @@ fn emit_non_solid_blocks(
                                     layer,
                                     light_f,
                                     sky_f,
-                                    vertices,
-                                    indices,
+                                    &mut cutout.vertices,
+                                    &mut cutout.indices,
                                 ),
                                 crate::item_model::ItemLook::Cube { top, side, bottom } => {
                                     let cube = crate::block_shape::item_frame_item_cube(facing);
@@ -1284,8 +1298,9 @@ fn emit_small_cube(
 /// A framed sprite item (`item_model`): the sprite lies flat on the item
 /// frame's plate in the cell whose min corner is `cell`, centred, parallel to
 /// the wall, its front facing out (`block_shape::item_frame_sprite`). Every
-/// vertex carries [`CUTOUT_FLAG`] and the frame cell's light. Four vertices
-/// and two triangles per face, wound for the back-face-culled chunk pass.
+/// vertex carries [`CUTOUT_FLAG`] and the frame cell's light; the caller puts
+/// it in the chunk's cutout bucket. Four vertices and two triangles per face,
+/// each wound to face out (counter-clockwise seen from its normal's side).
 fn emit_framed_sprite(
     cell: [f32; 3],
     facing: crate::meta::Facing,
@@ -3242,8 +3257,8 @@ mod tests {
         // For every way a frame can face: the torch's sprite stays in the
         // frame's cell, lies 1/16 of its width deep with its back on the
         // plate, each triangle winds (from its positions, in index order) the
-        // way its normal says so the back-face-culled chunk pass keeps the
-        // faces that look out, its front faces out of the wall, and its
+        // way its normal says, so a back-face-culled pass would keep the faces
+        // that look out, its front faces out of the wall, and its
         // picture stands upright on a wall (top toward north on a floor or
         // ceiling).
         use crate::meta::Facing;
@@ -3270,11 +3285,10 @@ mod tests {
             // Distance from the wall, the cell face opposite `out`.
             let off = |p: Vec3| (p - Vec3::splat(0.5)).dot(out) + 0.5;
             let (mut lo, mut hi, mut front) = (f32::MAX, f32::MIN, Vec::new());
-            for tri in m.opaque.indices.chunks_exact(3) {
-                let [a, b, c] = [tri[0], tri[1], tri[2]].map(|i| m.opaque.vertices[i as usize]);
-                if a.tex_layer & CUTOUT_FLAG == 0 {
-                    continue;
-                }
+            assert!(!m.cutout.indices.is_empty(), "{facing:?}: the framed torch is in the cutout bucket");
+            for tri in m.cutout.indices.chunks_exact(3) {
+                let [a, b, c] = [tri[0], tri[1], tri[2]].map(|i| m.cutout.vertices[i as usize]);
+                assert_ne!(a.tex_layer & CUTOUT_FLAG, 0, "{facing:?}: every cutout vertex carries the bit");
                 assert_eq!(a.tex_layer & !CUTOUT_FLAG, block::TEX_TORCH, "{facing:?}: the torch icon");
                 let [pa, pb, pc] = [&a, &b, &c].map(local);
                 for p in [pa, pb, pc] {
@@ -3310,8 +3324,47 @@ mod tests {
     }
 
     #[test]
+    fn framed_sprites_are_meshed_apart_from_the_terrain() {
+        // The terrain buckets (drawn by `fs_main`, which never discards) never
+        // hold a cut-out vertex; the cutout bucket holds only cut-out vertices,
+        // and only a framed sprite puts any there.
+        let reg = BlockRegistry::new();
+        let mut w = World::new();
+        for (i, id) in [block::TORCH, block::STONE, block::GLASS, block::OAK_LEAVES, block::WHEAT_STAGE_3, crate::rail::TRACK, block::WATER]
+            .into_iter()
+            .enumerate()
+        {
+            w.set_block(1 + 2 * i as i32, 2, 1, id);
+        }
+        let frame = |w: &mut World, at: (i32, i32, i32), id: BlockId| {
+            w.set_block(at.0, at.1, at.2, block::ITEM_FRAME);
+            w.set_meta(at, crate::meta::with_facing(0, crate::meta::Facing::South));
+            let mut f = crate::item_frame::ItemFrameData::new();
+            assert!(f.try_insert(crate::item::ItemStack::new_block(id, 1)));
+            w.insert_item_frame(at, f);
+        };
+        frame(&mut w, (3, 6, 3), block::STONE);
+        let m = build_chunk_meshes(0, 0, 0, &w, &reg);
+        assert!(m.cutout.vertices.is_empty() && m.cutout.indices.is_empty(), "no framed sprite, no cutout geometry");
+        frame(&mut w, (7, 6, 3), block::TORCH);
+        frame(&mut w, (9, 6, 3), block::CORNFLOWER);
+        let m = build_chunk_meshes(0, 0, 0, &w, &reg);
+        for (name, bucket) in [("opaque", &m.opaque), ("transparent", &m.transparent), ("water", &m.water)] {
+            assert!(!bucket.vertices.is_empty(), "the scene has {name} geometry");
+            assert!(bucket.vertices.iter().all(|v| v.tex_layer & CUTOUT_FLAG == 0), "the {name} bucket holds no cut-out vertex");
+        }
+        assert!(m.decals.iter().all(|v| v.tex_layer & CUTOUT_FLAG == 0));
+        assert!(!m.cutout.vertices.is_empty(), "the framed torch and cornflower are in the cutout bucket");
+        assert!(m.cutout.vertices.iter().all(|v| v.tex_layer & CUTOUT_FLAG != 0), "every cutout vertex carries the bit");
+        assert!(m.cutout.indices.iter().all(|&i| (i as usize) < m.cutout.vertices.len()));
+        let layers: std::collections::BTreeSet<u32> = m.cutout.vertices.iter().map(|v| v.tex_layer & !CUTOUT_FLAG).collect();
+        assert_eq!(layers.len(), 2, "two framed sprites: {layers:?}");
+    }
+
+    #[test]
     fn the_shader_reads_the_same_flag_bits() {
-        // fs_main / fs_plant test these bits; they must be the mesher's.
+        // fs_main / fs_main_cutout / fs_plant test these bits; they must be the
+        // mesher's.
         let src = include_str!("shader.wgsl");
         for (name, bit) in [("LEAF_FILL_FLAG", LEAF_FILL_FLAG), ("CUTOUT_FLAG", CUTOUT_FLAG), ("GREY_FLAG", GREY_FLAG)] {
             let want = format!("const {name}: u32 = {bit:#x}u;");

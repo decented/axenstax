@@ -424,8 +424,9 @@ const LEAF_LAYER_MASK: u32 = 0xFFFFu;
 
 // Item sprites (`item_model`): the mesher and the item builders set bit 17 of
 // tex_layer (`mesh::CUTOUT_FLAG`) on every face of a framed, held or dropped
-// sprite item. fs_main drops a texel whose full-size alpha is below 0.5, so a
-// flat item shows its silhouette, not the square it is painted on.
+// sprite item. fs_main_cutout drops a texel whose full-size alpha is below 0.5,
+// so a flat item shows its silhouette, not the square it is painted on. The
+// terrain's fs_main never reads the bit (it must not discard).
 const CUTOUT_FLAG: u32 = 0x20000u;
 // The Blighted Crop (`mesh::GREY_FLAG`, bit 18 of a plant instance's
 // tex_layer): fs_plant draws it ash grey, the lit colour's luminance times
@@ -441,21 +442,19 @@ fn fast_leaf_fill(uv: vec2<f32>, layer: i32) -> vec3<f32> {
     return select(avg, vec3<f32>(0.05, 0.14, 0.04), dark) * 0.6;
 }
 
-@fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    // Sample block texture
+// The block texel under a fragment (tex_layer's low 16 bits are the layer).
+fn sample_block(in: VertexOutput) -> vec4<f32> {
+    return textureSample(block_textures, block_sampler, in.uv, i32(in.tex_layer & LEAF_LAYER_MASK));
+}
+
+// The one body of fs_main and fs_main_cutout, everything after the texture
+// sample: the fast-leaf fill, the light rule, the emissive mix, fog and the
+// underwater tint. One copy, so the two entry points can't drift apart.
+fn shade_block(in: VertexOutput, tex_sample: vec4<f32>) -> vec4<f32> {
     let layer = i32(in.tex_layer & LEAF_LAYER_MASK);
-    let tex_sample = textureSample(block_textures, block_sampler, in.uv, layer);
     var tex_color = tex_sample;
     if ((in.tex_layer & LEAF_FILL_FLAG) != 0u && tex_sample.a < 0.5) {
         tex_color = vec4<f32>(fast_leaf_fill(in.uv, layer), 1.0);
-    }
-    // An item sprite (CUTOUT_FLAG) drops its transparent texels. The test reads
-    // the full-size texel (mip level 0): a two-texel torch handle averages to
-    // half alpha one mip down and would vanish at a distance.
-    if ((in.tex_layer & CUTOUT_FLAG) != 0u
-        && textureSampleLevel(block_textures, block_sampler, in.uv, layer, 0.0).a < 0.5) {
-        discard;
     }
 
     let brightness = camera.sun_dir.w;
@@ -499,6 +498,33 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     return vec4<f32>(apply_user_brightness(final_color), 1.0);
+}
+
+// Opaque terrain (the chunk pipeline) and micro-model shells. It never
+// discards: a fragment shader that may discard costs early depth testing on
+// many GPUs, and much more on tile-based mobile GPUs, and terrain is most of a
+// frame's fragments. Cut-out item sprites go through fs_main_cutout instead.
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    return shade_block(in, sample_block(in));
+}
+
+// fs_main plus the item-sprite cutout, for the pipelines that draw item
+// sprites: the entity pipeline (held and dropped items, the first-person held
+// item, and each chunk's framed sprites, `ChunkMeshes::cutout`). A vertex with
+// CUTOUT_FLAG drops a texel whose alpha is below 0.5; anything else is drawn
+// as fs_main draws it. The test reads the full-size texel (mip level 0): a
+// two-texel torch handle averages to half alpha one mip down and would vanish
+// at a distance. The colour still comes from the mipmapped sample, taken
+// first, in uniform control flow.
+@fragment
+fn fs_main_cutout(in: VertexOutput) -> @location(0) vec4<f32> {
+    let tex_sample = sample_block(in);
+    if ((in.tex_layer & CUTOUT_FLAG) != 0u
+        && textureSampleLevel(block_textures, block_sampler, in.uv, i32(in.tex_layer & LEAF_LAYER_MASK), 0.0).a < 0.5) {
+        discard;
+    }
+    return shade_block(in, tex_sample);
 }
 
 // Avatar fragment shader — identical lighting/fog/underwater to `fs_main`, but

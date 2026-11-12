@@ -323,7 +323,8 @@ static SATOSHI_MODEL: std::sync::LazyLock<Vec<ModelPart>> =
     std::sync::LazyLock::new(|| roster::sage(satoshi_model()));
 
 /// Vertex-`light` sentinel that marks a self-glowing (emissive) part. The
-/// fragment shader (`shader.wgsl` `fs_main`) renders any vertex with
+/// fragment shader (`shader.wgsl` `shade_block`, behind `fs_main` and the
+/// entity pipeline's `fs_main_cutout`) renders any vertex with
 /// `light > 1.5` mostly unlit, so it glows even in a dim hut. All other
 /// geometry uses `light <= 1.0`, so the sentinel is inert for everything else.
 pub const SATOSHI_GLOW_LIGHT: f32 = 2.0;
@@ -885,8 +886,8 @@ fn shark_model() -> Vec<ModelPart> {
 }
 
 /// Campaign N (2026-07-05) — overwrite freshly built verts with a sampled
-/// world-light pair `(block/15, sky/15)` so the entity pipeline's `fs_main`
-/// night formula applies to entities exactly as it does to terrain. One
+/// world-light pair `(block/15, sky/15)` so the entity pipeline's
+/// `fs_main_cutout` (the terrain's `fs_main` body) night formula applies to entities exactly as it does to terrain. One
 /// sample per entity (the Minecraft-parity look). Emissive verts carrying a
 /// `> 1.5` sentinel (Satoshi's amulet glow) are preserved.
 pub(crate) fn apply_light_channels(verts: &mut [Vertex], light: (f32, f32)) {

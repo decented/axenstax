@@ -22,6 +22,42 @@ pub struct GpuChunkMesh {
     pub index_count: u32,
 }
 
+/// Draw each visible section's framed item sprites (`ChunkMeshes::cutout`) in
+/// the world pass, straight after its opaque terrain. They are meshed with the
+/// chunk (once, not per frame) but kept out of the opaque buffer, because the
+/// terrain pipeline's `fs_main` must never discard: a shader that may discard
+/// costs early depth testing across all terrain, worst on tile-based mobile
+/// GPUs. They draw with the entity pipeline: it already has the chunk's vertex
+/// layout, bind groups and depth state (write, `Less`), and its fragment entry
+/// is `fs_main_cutout`, so depth stays right and no pipeline is added. It
+/// doesn't cull back faces, which only adds a sprite's back faces: they cut out
+/// the same texels and lie behind its front. A section with no framed sprite
+/// has no entry, so this costs nothing in the usual case. Returns (draw calls,
+/// sections culled).
+fn draw_cutout_sections(
+    pass: &mut wgpu::RenderPass<'_>,
+    entity_pipeline: &wgpu::RenderPipeline,
+    cutout_meshes: &ahash::AHashMap<(i32, i32, i32), GpuChunkMesh>,
+    visible: impl Fn(i32, i32, i32) -> bool,
+) -> (u32, u32) {
+    if cutout_meshes.is_empty() {
+        return (0, 0);
+    }
+    pass.set_pipeline(entity_pipeline);
+    let (mut draws, mut culled) = (0, 0);
+    for (&(cx, cy, cz), gpu_mesh) in cutout_meshes {
+        if !visible(cx, cy, cz) {
+            culled += 1;
+            continue;
+        }
+        pass.set_vertex_buffer(0, gpu_mesh.vertex_buffer.slice(..));
+        pass.set_index_buffer(gpu_mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+        pass.draw_indexed(0..gpu_mesh.index_count, 0, 0..1);
+        draws += 1;
+    }
+    (draws, culled)
+}
+
 /// Coupled solid-transparency pipelines for native and headless worlds:
 /// opaque texels write depth without colour, then the alpha-blended colour
 /// pass uses LessEqual to paint those same texels. Holes and partial glass
@@ -520,6 +556,7 @@ macro_rules! per_section_mesh_maps {
         { let $m = &mut r.chunk_meshes; $body; }
         { let $m = &mut r.water_meshes; $body; }
         { let $m = &mut r.transparent_meshes; $body; }
+        { let $m = &mut r.cutout_meshes; $body; }
         { let $m = &mut r.plant_meshes; $body; }
         { let $m = &mut r.decal_meshes; $body; }
         { let $m = &mut r.micro_meshes; $body; }
@@ -627,6 +664,9 @@ pub struct Renderer {
     /// Opaque texels of solid transparent blocks occlude later water/solids.
     transparent_depth_pipeline: wgpu::RenderPipeline,
     pub transparent_meshes: ahash::AHashMap<(i32, i32, i32), GpuChunkMesh>,
+    /// Framed item sprites (`ChunkMeshes::cutout`), one entry per section that
+    /// has any; drawn by [`draw_cutout_sections`].
+    pub cutout_meshes: ahash::AHashMap<(i32, i32, i32), GpuChunkMesh>,
     // Instanced plants (flowers/grass/crops) — cross billboards
     pub plant_pipeline: wgpu::RenderPipeline,
     plant_geo_vbuf: wgpu::Buffer,
@@ -1292,6 +1332,10 @@ impl Renderer {
         });
 
         // --- Entity pipeline (same as chunk but NO back-face culling) ---
+        // Its fragment entry is `fs_main_cutout`: it draws every item sprite
+        // (held, dropped, the first-person held item and each chunk's framed
+        // sprites, `draw_cutout_sections`). Entity fragments are few, so the
+        // possible discard costs little here; terrain's `fs_main` never discards.
         let entity_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("entity_render_pipeline"),
             layout: Some(&pipeline_layout),
@@ -1303,7 +1347,7 @@ impl Renderer {
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
-                entry_point: Some("fs_main"),
+                entry_point: Some("fs_main_cutout"),
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: surface_format,
@@ -1566,6 +1610,7 @@ impl Renderer {
             transparent_pipeline,
             transparent_depth_pipeline,
             transparent_meshes: ahash::AHashMap::new(),
+            cutout_meshes: ahash::AHashMap::new(),
             plant_pipeline,
             plant_geo_vbuf,
             plant_geo_ibuf,
@@ -2050,6 +2095,29 @@ impl Renderer {
         );
     }
 
+    /// Upload a chunk's framed item sprites (`ChunkMeshes::cutout`). An empty
+    /// mesh clears the chunk's entry, so a section with none costs nothing.
+    pub fn upload_cutout_mesh(&mut self, pos: (i32, i32, i32), mesh: &ChunkMesh) {
+        if mesh.vertices.is_empty() {
+            self.cutout_meshes.remove(&pos);
+            return;
+        }
+        let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("cutout_vertex_buffer"),
+            contents: bytemuck::cast_slice(&mesh.vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("cutout_index_buffer"),
+            contents: bytemuck::cast_slice(&mesh.indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        self.cutout_meshes.insert(
+            pos,
+            GpuChunkMesh { vertex_buffer, index_buffer, index_count: mesh.indices.len() as u32 },
+        );
+    }
+
     /// Upload a chunk's instanced plants (flowers/grass/crops). An empty
     /// slice clears the chunk's plant buffer.
     /// Particle framework (2026-07-05): rewrite the persistent instance
@@ -2119,6 +2187,7 @@ impl Renderer {
         self.upload_chunk_mesh(pos, &meshes.opaque);
         self.upload_water_mesh(pos, &meshes.water);
         self.upload_transparent_mesh(pos, &meshes.transparent);
+        self.upload_cutout_mesh(pos, &meshes.cutout);
         self.upload_plant_instances(pos, &meshes.plants);
         self.upload_chunk_decals(pos, &meshes.decals);
         self.upload_micro_instances(pos, &meshes.micro_instances);
@@ -3173,6 +3242,7 @@ impl Renderer {
                         &self.chunk_meshes,
                         &self.water_meshes,
                         &self.transparent_meshes,
+                        &self.cutout_meshes,
                         &self.plant_pipeline,
                         &self.plant_geo_vbuf,
                         &self.plant_geo_ibuf,
@@ -3667,6 +3737,10 @@ impl Renderer {
         });
 
         // --- Entity pipeline (same as chunk but NO back-face culling) ---
+        // Its fragment entry is `fs_main_cutout`: it draws every item sprite
+        // (held, dropped, the first-person held item and each chunk's framed
+        // sprites, `draw_cutout_sections`). Entity fragments are few, so the
+        // possible discard costs little here; terrain's `fs_main` never discards.
         let entity_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("entity_render_pipeline"),
             layout: Some(&pipeline_layout),
@@ -3678,7 +3752,7 @@ impl Renderer {
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
-                entry_point: Some("fs_main"),
+                entry_point: Some("fs_main_cutout"),
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
@@ -3935,6 +4009,7 @@ impl Renderer {
             transparent_pipeline,
             transparent_depth_pipeline,
             transparent_meshes: ahash::AHashMap::new(),
+            cutout_meshes: ahash::AHashMap::new(),
             plant_pipeline,
             plant_geo_vbuf,
             plant_geo_ibuf,
@@ -4102,6 +4177,7 @@ impl Renderer {
                     .set_index_buffer(gpu_mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 render_pass.draw_indexed(0..gpu_mesh.index_count, 0, 0..1);
             }
+            draw_cutout_sections(&mut render_pass, &self.entity_pipeline, &self.cutout_meshes, |_, _, _| true);
             // Solid alpha texels write only depth; cutout holes and translucent
             // glass leave it intact. Later water can then respect the foliage.
             render_pass.set_pipeline(&self.transparent_depth_pipeline);
@@ -4496,6 +4572,7 @@ fn render_world_viewport(
     chunk_meshes: &ahash::AHashMap<(i32, i32, i32), GpuChunkMesh>,
     water_meshes: &ahash::AHashMap<(i32, i32, i32), GpuChunkMesh>,
     transparent_meshes: &ahash::AHashMap<(i32, i32, i32), GpuChunkMesh>,
+    cutout_meshes: &ahash::AHashMap<(i32, i32, i32), GpuChunkMesh>,
     plant_pipeline: &wgpu::RenderPipeline,
     plant_geo_vbuf: &wgpu::Buffer,
     plant_geo_ibuf: &wgpu::Buffer,
@@ -4629,6 +4706,9 @@ fn render_world_viewport(
                 stats.draw_calls += 1;
             }
         }
+        let (draws, culled) = draw_cutout_sections(&mut pass, entity_pipeline, cutout_meshes, chunk_visible);
+        stats.draw_calls += draws;
+        stats.culled += culled;
         // Opaque solid texels must occlude later transparent colour/water.
         pass.set_pipeline(transparent_depth_pipeline);
         for (&(cx, cy, cz), gpu_mesh) in transparent_meshes.iter() {
@@ -6514,6 +6594,105 @@ mod shader_tests {
         validator
             .validate(&module)
             .unwrap_or_else(|e| panic!("shader.wgsl validation error: {e:?}"));
+    }
+
+    /// Whether `body`, or any function it calls, can `discard`.
+    fn may_discard(module: &naga::Module, body: &naga::Block) -> bool {
+        use naga::Statement as S;
+        body.iter().any(|st| match st {
+            S::Kill => true,
+            S::Block(b) => may_discard(module, b),
+            S::If { accept, reject, .. } => may_discard(module, accept) || may_discard(module, reject),
+            S::Switch { cases, .. } => cases.iter().any(|c| may_discard(module, &c.body)),
+            S::Loop { body, continuing, .. } => may_discard(module, body) || may_discard(module, continuing),
+            S::Call { function, .. } => may_discard(module, &module.functions[*function].body),
+            _ => false,
+        })
+    }
+
+    /// Whether `body` calls the function named `name` (directly or nested).
+    fn calls(module: &naga::Module, body: &naga::Block, name: &str) -> bool {
+        use naga::Statement as S;
+        body.iter().any(|st| match st {
+            S::Block(b) => calls(module, b, name),
+            S::If { accept, reject, .. } => calls(module, accept, name) || calls(module, reject, name),
+            S::Switch { cases, .. } => cases.iter().any(|c| calls(module, &c.body, name)),
+            S::Loop { body, continuing, .. } => calls(module, body, name) || calls(module, continuing, name),
+            S::Call { function, .. } => module.functions[*function].name.as_deref() == Some(name),
+            _ => false,
+        })
+    }
+
+    /// The function of entry point `name`.
+    fn entry_function<'m>(module: &'m naga::Module, name: &str) -> &'m naga::Function {
+        &module.entry_points.iter().find(|e| e.name == name).unwrap_or_else(|| panic!("no entry point {name}")).function
+    }
+
+    /// The fragment entry point of each pipeline labelled `label` in the
+    /// renderer source, in source order (whitespace ignored, so formatting
+    /// can't hide one).
+    fn fragment_entries(src: &str, label: &str) -> Vec<String> {
+        let flat: String = src.chars().filter(|c| !c.is_whitespace()).collect();
+        let key = format!("label:Some(\"{label}\")");
+        let (mut out, mut at) = (Vec::new(), 0);
+        while let Some(i) = flat[at..].find(&key) {
+            at += i + key.len();
+            let rest = &flat[at..];
+            let frag = rest.find("fragment:Some(wgpu::FragmentState{").unwrap_or_else(|| panic!("{label}: no fragment stage"));
+            assert!(!rest[..frag].contains("label:"), "{label}: its fragment stage is another pipeline's");
+            let k = "entry_point:Some(\"";
+            let e = frag + rest[frag..].find(k).expect("an entry point") + k.len();
+            out.push(rest[e..e + rest[e..].find('"').unwrap()].to_string());
+        }
+        out
+    }
+
+    #[test]
+    fn terrain_never_discards_and_item_sprites_cut_out() {
+        // A fragment shader that may discard costs early depth testing on many
+        // GPUs (more on tile-based mobile ones), and terrain is most of a
+        // frame's fragments: the chunk pipeline's entry point, and the body it
+        // shares with the cutout entry, hold no `discard`. Item sprites go
+        // through pipelines whose entry is `fs_main_cutout`.
+        let renderer = include_str!("renderer.rs");
+        let chunk = fragment_entries(renderer, "chunk_render_pipeline");
+        assert_eq!(chunk, ["fs_main", "fs_main"], "the windowed and headless chunk pipelines");
+        assert_eq!(fragment_entries(renderer, "micro_model_pipeline"), ["fs_main"]);
+        assert_eq!(
+            fragment_entries(renderer, "entity_render_pipeline"),
+            ["fs_main_cutout", "fs_main_cutout"],
+            "held and dropped items, and the chunks' framed sprites, draw with the entity pipeline"
+        );
+        let flat: String = renderer.chars().filter(|c| !c.is_whitespace()).collect();
+        let quoted = |name: &str| flat.matches(&format!("Some(\"{name}\")")).count();
+        assert_eq!(quoted("fs_main_cutout"), 2, "only the entity pipelines use fs_main_cutout");
+
+        let src = include_str!("shader.wgsl");
+        let module = naga::front::wgsl::parse_str(src)
+            .unwrap_or_else(|e| panic!("shader.wgsl parse error:\n{}", e.emit_to_string(src)));
+        let entry = |name: &str| entry_function(&module, name);
+        let shared = module
+            .functions
+            .iter()
+            .find(|(_, f)| f.name.as_deref() == Some("shade_block"))
+            .map(|(_, f)| f)
+            .expect("the shared body shade_block");
+        assert!(!may_discard(&module, &entry(&chunk[0]).body), "{} (terrain) must never discard", chunk[0]);
+        assert!(!may_discard(&module, &shared.body), "shade_block must never discard");
+        assert!(may_discard(&module, &entry("fs_main_cutout").body), "fs_main_cutout cuts out item sprites");
+        for name in ["fs_main", "fs_main_cutout"] {
+            assert!(calls(&module, &entry(name).body, "shade_block"), "{name} shades through the one shared body");
+        }
+
+        // The chunks' framed sprites (`cutout_meshes`) are drawn only by
+        // `draw_cutout_sections`, and each call hands it the entity pipeline.
+        let helper = flat.find("fndraw_cutout_sections(").expect("the cutout draw helper");
+        assert!(flat[helper..].find("pass.set_pipeline(entity_pipeline)").is_some_and(|i| i < 900));
+        let call = concat!("draw_cutout_sections(", "&mut");
+        let sites: Vec<String> = flat.match_indices(call).map(|(i, _)| flat[i..].chars().take(80).collect()).collect();
+        assert_eq!(sites.len(), 2, "the shared world pass and the headless pass: {sites:?}");
+        assert!(sites.iter().all(|s| s.contains("entity_pipeline,")), "{sites:?}");
+        assert_eq!(flat.matches(concat!("in", "cutout_meshes")).count(), 1, "one loop over the framed sprites");
     }
 }
 

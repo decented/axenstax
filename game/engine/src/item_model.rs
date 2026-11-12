@@ -12,8 +12,13 @@
 //!   ([`ItemLook::Sprite`], Minecraft's item look): the front and back show
 //!   the icon, the thickness is 1/16 of the width, and the edges are the
 //!   1-texel border strips of the icon's opaque texels, merged into runs.
-//!   Every sprite vertex carries [`crate::mesh::CUTOUT_FLAG`], so `fs_main`
-//!   drops the icon's transparent texels.
+//!   Every sprite vertex carries [`crate::mesh::CUTOUT_FLAG`], and every
+//!   sprite is drawn by a pipeline whose fragment entry is `fs_main_cutout`
+//!   (the entity pipeline), which drops the icon's transparent texels. Every
+//!   sprite icon has a transparent background;
+//! - except the few cross-billboard blocks whose texture is a full tile of
+//!   material with no background to cut away ([`FULL_TILE_BLOCKS`]): a sprite
+//!   of them would be a square card, so they keep the small cube.
 //!
 //! Tools, materials, plans and armour keep their slab and cube looks.
 //!
@@ -69,14 +74,25 @@ pub const DROP_SPRITE_WIDTH: f32 = 0.4;
 /// Width of a framed sprite: the half-cell square a framed block fills.
 pub const FRAME_SPRITE_WIDTH: f32 = 0.5;
 
+/// Blocks the mesher draws as a cross billboard whose texture is a full tile
+/// of material, with no background to cut away: rubber leaves, carpet, the
+/// logic gate's relay plate and lava (which borrows the lit furnace's face).
+/// A sprite of one would be a square card, so as items they keep the small
+/// cube. Every other sprite's icon has a transparent background
+/// (`every_sprite_icon_has_a_transparent_background`); a block whose icon gains
+/// one should leave this list (`full_tile_blocks_have_no_background`).
+pub const FULL_TILE_BLOCKS: [BlockId; 4] =
+    [crate::block::RUBBER_LEAVES, crate::block::CARPET, crate::block::LOGIC_GATE, crate::block::LAVA];
+
 /// The look of block `id` as an item: a sprite when the mesher draws the block
-/// as a cross billboard, a flat rail or cable, or the torch; otherwise the
-/// small cube with the block's own top, side and bottom layers. An unknown id
-/// is the cube of the registry's fallback, as before.
+/// as a cross billboard, a flat rail or cable, or the torch (unless its
+/// texture is a full tile, [`FULL_TILE_BLOCKS`]); otherwise the small cube with
+/// the block's own top, side and bottom layers. An unknown id is the cube of
+/// the registry's fallback, as before.
 pub fn block_look(id: BlockId, registry: &BlockRegistry) -> ItemLook {
     let def = registry.get(id);
     let cube = ItemLook::Cube { top: def.tex_top, side: def.tex_side, bottom: def.tex_bottom };
-    if !registry.is_known(id) {
+    if !registry.is_known(id) || FULL_TILE_BLOCKS.contains(&id) {
         return cube;
     }
     match crate::mesh::render_class(id, registry) {
@@ -238,7 +254,7 @@ const ICON: usize = 16;
 const EDGE_INSET: f32 = 0.02;
 
 /// Opaque texels of an icon: bit `x` of `mask[y]` is texel (column `x`, row
-/// `y`, row 0 at the top) with alpha >= 128, the cut `fs_main` makes.
+/// `y`, row 0 at the top) with alpha >= 128, the cut `fs_main_cutout` makes.
 type Mask = [u16; ICON];
 
 /// Every texel opaque: a plain square card.
@@ -588,9 +604,12 @@ mod tests {
         framed(&mut w, (2, 6, 2), block::STONE);
         let m = build_chunk_meshes(0, 0, 0, &w, &reg);
         assert!(!m.opaque.vertices.iter().chain(&m.transparent.vertices).any(cut), "no placed block is cut out");
+        assert!(m.cutout.vertices.is_empty(), "a framed stone is a cube, in the opaque pass");
         framed(&mut w, (6, 6, 2), block::TORCH);
         let m = build_chunk_meshes(0, 0, 0, &w, &reg);
-        let flagged: Vec<&Vertex> = m.opaque.vertices.iter().filter(|&v| cut(v)).collect();
+        assert!(!m.opaque.vertices.iter().chain(&m.transparent.vertices).any(cut), "the terrain buckets never hold the bit");
+        let flagged: Vec<&Vertex> = m.cutout.vertices.iter().filter(|&v| cut(v)).collect();
+        assert_eq!(flagged.len(), m.cutout.vertices.len(), "the cutout bucket holds only cut-out vertices");
         assert_eq!(flagged.len(), 4 * sprite_quads(block::TEX_TORCH, FRAME_SPRITE_WIDTH).len(), "the framed torch's sprite");
         assert!(flagged.iter().all(|v| (6.0..=7.0).contains(&v.position[0]) && (6.0..=7.0).contains(&v.position[1])));
     }
@@ -620,7 +639,13 @@ mod tests {
             let look = block_look(id, &reg);
             let class = mesh::render_class(id, &reg);
             let sprite = matches!(look, ItemLook::Sprite { .. });
-            assert_eq!(sprite, meshed_as_sprite(id, &reg), "block {id} ({}) is {class:?}, item {look:?}", reg.get(id).name);
+            let full_tile = FULL_TILE_BLOCKS.contains(&id);
+            assert_eq!(
+                sprite,
+                meshed_as_sprite(id, &reg) && !full_tile,
+                "block {id} ({}) is {class:?}, item {look:?}",
+                reg.get(id).name
+            );
             if let ItemLook::Sprite { layer } = look {
                 assert_eq!(layer, reg.tex_top(id), "a sprite shows the inventory icon");
                 sprites.push(id);
@@ -632,30 +657,75 @@ mod tests {
         for id in [block::STONE, block::GLASS, block::OAK_LEAVES, block::ITEM_FRAME, block::CAMPFIRE_SMOKE] {
             assert!(!sprites.contains(&id), "block {id} ({}) is a cube", reg.get(id).name);
         }
+        // The full-tile exceptions are billboards in the world, cubes as items.
+        for id in FULL_TILE_BLOCKS {
+            assert!(meshed_as_sprite(id, &reg), "block {id} ({}) is a billboard in the world", reg.get(id).name);
+            assert!(matches!(block_look(id, &reg), ItemLook::Cube { .. }), "block {id} ({}) is a cube item", reg.get(id).name);
+        }
+    }
+
+    /// Opaque texels of `mask`.
+    fn opaque_count(mask: &Mask) -> u32 {
+        mask.iter().map(|row| row.count_ones()).sum()
+    }
+
+    #[test]
+    fn every_sprite_icon_has_a_transparent_background() {
+        // Every block an item shows as a sprite samples an icon whose art
+        // stands on a transparent background (cut out by `fs_main_cutout`), so
+        // no sprite is a square card: some of the icon is art, at least an
+        // eighth of it is transparent (the densest stock icon, a mature cotton
+        // plant, is 42 texels of 256), and the transparency reaches the
+        // icon's border, around the art, not only holes inside it.
+        let reg = test_registry();
+        let n = ICON as i32;
+        let mut bad = Vec::new();
+        for id in 0..reg.len() as BlockId {
+            let ItemLook::Sprite { layer } = block_look(id, &reg) else { continue };
+            let mask = layer_mask(layer);
+            let art = opaque_count(&mask);
+            let border_clear = (0..n)
+                .flat_map(|i| (0..n).map(move |j| (i, j)))
+                .filter(|&(x, y)| x == 0 || y == 0 || x == n - 1 || y == n - 1)
+                .filter(|&(x, y)| !opaque(&mask, x, y))
+                .count();
+            if art == 0 || art > 224 || border_clear == 0 {
+                bad.push((reg.get(id).name, art, border_clear));
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "sprite icons without a transparent background (name, opaque texels of 256, clear border texels of 60): {bad:?}"
+        );
+    }
+
+    #[test]
+    fn full_tile_blocks_have_no_background() {
+        // The cube exceptions are exactly the billboards whose texture has no
+        // transparent texel: once one gains a background it should be a
+        // sprite like the rest.
+        let reg = test_registry();
+        for id in FULL_TILE_BLOCKS {
+            assert_eq!(layer_mask(reg.tex_top(id)), SOLID, "block {id} ({}) has a background now", reg.get(id).name);
+        }
     }
 
     #[test]
     fn sprite_sizes_stay_bounded() {
         // Every sprite-class block's sprite, edges merged into runs, stays well
-        // under one quad per texel. Also lists the icons that have no
-        // transparent texel at all (they show as a square card).
+        // under one quad per texel.
         let reg = test_registry();
         let mut most = (0usize, 0 as BlockId);
-        let mut cards = Vec::new();
         for id in 0..reg.len() as BlockId {
             if let ItemLook::Sprite { layer } = block_look(id, &reg) {
                 let n = sprite_quads(layer, 1.0).len();
                 if n > most.0 {
                     most = (n, id);
                 }
-                if layer_mask(layer) == SOLID {
-                    cards.push(reg.get(id).name);
-                }
             }
         }
-        eprintln!("ITEMMODEL most quads: {} ({}); square-card icons: {cards:?}", most.0, reg.get(most.1).name);
+        eprintln!("ITEMMODEL most quads: {} ({})", most.0, reg.get(most.1).name);
         assert!(most.0 <= 256, "{} quads for {}", most.0, reg.get(most.1).name);
-        assert!(!cards.contains(&reg.get(block::TORCH).name), "the torch icon has a transparent background");
     }
 
     #[test]

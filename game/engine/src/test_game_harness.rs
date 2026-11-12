@@ -412,6 +412,7 @@ mod tests {
             r.chunk_meshes.is_empty()
                 && r.water_meshes.is_empty()
                 && r.transparent_meshes.is_empty()
+                && r.cutout_meshes.is_empty()
                 && r.plant_meshes.is_empty()
                 && r.decal_meshes.is_empty()
                 && r.micro_meshes.is_empty()
@@ -433,10 +434,17 @@ mod tests {
         {
             st.world.set_block(2 + 2 * i as i32, pos.1 * 16 + 5, 5, b);
         }
+        // And a framed torch, whose sprite is the section's cutout mesh.
+        let frame_at = (12, pos.1 * 16 + 5, 5);
+        st.world.set_block(frame_at.0, frame_at.1, frame_at.2, crate::block::ITEM_FRAME);
+        let mut frame = crate::item_frame::ItemFrameData::new();
+        assert!(frame.try_insert(crate::item::ItemStack::new_block(crate::block::TORCH, 1)));
+        st.world.insert_item_frame(frame_at, frame);
         let meshes = crate::mesh::build_chunk_meshes(pos.0, pos.1, pos.2, &st.world, &st.registry);
         st.renderer.upload_chunk(pos, &meshes);
         assert!(st.renderer.chunk_meshes.contains_key(&pos), "opaque meshed");
         assert!(st.renderer.transparent_meshes.contains_key(&pos), "glass and leaves meshed");
+        assert!(st.renderer.cutout_meshes.contains_key(&pos), "the framed torch meshed");
         assert!(!all_empty(&st.renderer));
         // The real world-change reset.
         st.reset_for_world_change();
