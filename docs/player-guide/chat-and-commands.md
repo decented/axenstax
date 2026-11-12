@@ -21,6 +21,14 @@ While chat is open:
 
 When chat closes, any held movement keys re-engage — if you were holding W when you opened chat, you don't stay frozen.
 
+## Finishing a command with Tab
+
+Press **Tab** to finish a command or item name; press it again for the next one (**Shift+Tab** goes back). While you type a `/` line, the matches show in a list above the input, and you can click one instead. Only commands you are allowed to run are listed.
+
+## Making the chat text bigger or smaller
+
+Esc, Settings, **Chat text size**: 100% to 300% (it starts at 150%). The log, the input line and the Tab list all change together, and the other menus stay as they are.
+
 ## The chat overlay
 
 Bottom-left of the screen. Three regions:

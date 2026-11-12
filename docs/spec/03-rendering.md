@@ -2669,7 +2669,7 @@ drop it.
 ### 9.4a Settings panel (IMPLEMENTED, Phase 4, 2026-06-03)
 
 `menu.rs::draw_settings_panel` is the in-game Graphics panel, opened from the
-pause menu via the `PAUSE_OPEN_SETTINGS` code (a "Graphics" button) and drawn in
+pause menu via the `PAUSE_OPEN_SETTINGS` code (the button is labelled "Settings"; it said "Graphics" until the panel also held sound, chat text size and camera) and drawn in
 place of the pause buttons while `GameState.settings_panel.open` (mirrors the
 "Your look" skin panel). Preset buttons highlight the derived current preset;
 sliders cover render distance / render scale / FOV / sensitivity; selectable rows

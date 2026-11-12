@@ -93,10 +93,10 @@ Every villager has a gossip line below their quest in the dialogue. It refreshes
 - **F3** shows you coordinates, biome, performance, current targeted block. Use it to figure out "where am I?" or "what's that block called?".
 - **Esc** is the universal back button. Close menu / close dialogue / open pause.
 
-## Graphics — Esc → Graphics
+## Settings — Esc → Settings
 
-The **Graphics** panel (pause menu → **Graphics**) is where you trade prettiness
-for frame rate. Pick a preset (Potato / Low / Medium / High / Ultra) or turn the
+The **Settings** panel (pause menu → **Settings**) is where you trade prettiness
+for frame rate, and where the chat text size, sound and camera live too. Pick a preset (Potato / Low / Medium / High / Ultra) or turn the
 individual dials — everything applies straight away, no restart, and it's
 remembered on this device.
 
@@ -107,6 +107,7 @@ remembered on this device.
 | **Frame limit** | VSync / capped / uncapped. |
 | **Field of view** + **Sensitivity** | Personal comfort — these never change your preset. |
 | **Brightness** | "It's too dark" lives here. |
+| **Chat text size** | How big the chat text is, 100% to 300% (the default is 150%). Esc, Settings, Chat text size. |
 | **Fog** | Distance haze. |
 | **Particles** | Off / Reduced / Full. |
 | **Mipmaps** | Smooths *distant* textures so far-off ground and walls stop shimmering as you walk. Blocks right next to you stay pixel-sharp. **Off by default** — turn it on, look at the horizon, and keep whichever you prefer. |
