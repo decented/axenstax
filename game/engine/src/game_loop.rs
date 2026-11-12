@@ -6516,7 +6516,20 @@ impl super::GameState {
         // server's (`SimSystem::Population`).
         if !joined && crate::sim_mobs::population_due(self.tick_counter) {
             if self.sim_runs(SimSystem::Population) {
-                crate::sim_mobs::population(&mut self.world, &self.biome_gen, &mut self.ecs, self.tick_counter);
+                let changes = crate::sim_mobs::population(
+                    &mut self.world,
+                    &self.biome_gen,
+                    &self.registry,
+                    &mut self.ecs,
+                    self.tick_counter,
+                );
+                // Satoshi's house: raw block writes, relit by `population`. Draw
+                // it now, as a player's own edit would be. (A lent world's
+                // house is its server's pass, which tells the joiners and the
+                // host's remesh itself. A `--no-lend` host's server holds its
+                // own copy of the world, which never gets the house; that
+                // BRIDGE goes with the flag.)
+                self.remesh_runtime_edits(changes.iter().map(|bc| (bc.x, bc.y, bc.z)));
             }
             // HP-3 — Brigand Hideout replenisher. Same 20-tick cadence
             // as the village checks; respects the per-hideout 24 000-
@@ -7692,12 +7705,20 @@ impl super::GameState {
 
             // Respawn once the player chose it on the death screen (button,
             // Enter, or their pad's A) — never on a timer (W2 owner decision
-            // 2026-10-06). Spawn-point is PlayerSlot::spawn_pos (set at world
-            // load to wherever the player started); future bed-settable spawn
-            // lands later.
+            // 2026-10-06). Spawn-point is PlayerSlot::spawn_pos (a new world's
+            // start, or a bed's, or `/spawnpoint`'s). The body stands where the
+            // one respawn rule puts it (`spawn_safety::safe_respawn_point`, the
+            // same as a joiner's on the server): on dry ground, never in the sea
+            // or in the air, loading what it reads. A joined client generates
+            // nothing: the server places it and says where (`Respawned`).
             if self.players[i].combat.should_respawn() {
                 self.players[i].combat.respawn();
-                let spawn = self.players[i].spawn_pos;
+                let asked = self.players[i].spawn_pos;
+                let spawn = if self.joined() {
+                    asked
+                } else {
+                    crate::spawn_safety::safe_respawn_point(self, asked)
+                };
                 self.players[i].player.pos = spawn;
                 self.players[i].player.velocity = glam::Vec3::ZERO;
                 // W2 — a death mid-fall must not land at the spawn point.

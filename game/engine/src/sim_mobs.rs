@@ -230,16 +230,28 @@ pub fn population_due(tick: u64) -> bool {
 /// (idempotent); the Knight, the village defender (HP-4); Wandering
 /// Villagers spawning and migrating toward bells (Phase 10). The brigand
 /// hideouts' replenisher is its own system (`SimSystem::Hideouts`).
+///
+/// Returns the block changes the pass made (Satoshi's house, the first time),
+/// already relit in `world`: the caller tells whoever draws or holds a copy of
+/// the world (remesh the touched sections; on a hosted world, queue them for
+/// the joiners). Raw `World::set_block` does none of that.
 pub fn population(
     world: &mut World,
     biome_gen: &crate::biome::BiomeGenerator,
+    registry: &BlockRegistry,
     ecs: &mut hecs::World,
     tick: u64,
-) {
+) -> Vec<crate::protocol::BlockChange> {
     crate::village_gen::spawn_initial_villagers(world, biome_gen, ecs);
-    crate::satoshi::tick_spawn(world, ecs);
+    let spawn = crate::chunk_stream::world_spawn_xz(world, biome_gen);
+    let house = crate::satoshi::tick_spawn(world, ecs, spawn, registry);
+    crate::lighting::relight_stamped(world, registry, &house);
     crate::village_gen::tick_knight_spawn(world, biome_gen, ecs);
     crate::village_gen::tick_wanderer_migration(world, ecs, tick);
+    house
+        .into_iter()
+        .map(|((x, y, z), _, now)| crate::protocol::BlockChange::with_meta(x, y, z, now, world.meta_at(x, y, z)))
+        .collect()
 }
 
 /// Phase 3 — HP-3 brigand pre-pass, before the generic AI so its

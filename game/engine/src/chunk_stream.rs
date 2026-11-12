@@ -580,10 +580,11 @@ impl super::GameState {
             // Place the player on solid ground — never on tree canopy (#9) or in
             // water. Flat/Workshop worlds use the known fixed floor (avoids the
             // biome-height scan starting below y=79 and missing the flat floor).
+            // The start is also the respawn point: a new world used to leave
+            // `spawn_pos` at the fresh-slot default over the origin, so a death
+            // with no bed dropped the player there, often into the sea.
             let spawn = world_spawn_point(&self.world, &self.biome_gen);
-            self.players[0].player.pos = spawn;
-            self.players[0].player.velocity = glam::Vec3::ZERO;
-            self.players[0].player.reset_fall();
+            self.players[0].start_at(spawn);
             log::info!("Fresh world spawn at {spawn}.");
 
             // New creative world starts with an EMPTY hotbar (owner 2026-07-02).
@@ -632,6 +633,10 @@ impl super::GameState {
         // ── Common tail (all paths) ─────────────────────────────────────────
         // Rebuild the derived render registry (official + wardrobe + override).
         self.reapply_overrides();
+
+        // A saved respawn point that is the legacy default was never chosen:
+        // it is the world spawn (`spawn_safety::restored_spawn`).
+        self.repair_legacy_spawns();
 
         let cs = CHUNK_SIZE as i32;
         // A joined session starts where the HOST placed us (JoinAccept spawn,
@@ -695,6 +700,22 @@ impl super::GameState {
         }
         self.load_queue = cols.into();
         true
+    }
+
+    /// [`repair_legacy_spawn_slots`] on this session's world and local slots.
+    /// A joined client's spawn point is the server's: nothing to repair.
+    fn repair_legacy_spawns(&mut self) {
+        if self.joined() || self.joined_push_only {
+            return;
+        }
+        repair_legacy_spawn_slots(
+            &mut self.world,
+            &self.biome_gen,
+            &self.registry,
+            &mut self.loaded_columns,
+            &mut self.chunk_intake,
+            &mut self.players,
+        );
     }
 
     /// Move player 0 to `pos` (at rest) and pre-generate + light the 5×5
@@ -1636,6 +1657,59 @@ pub(crate) fn world_spawn_point(
         find_surface_spawn(world, biome_gen, col.x, col.z)
     };
     glam::Vec3::new(sx as f32 + 0.5, sy as f32, sz as f32 + 0.5)
+}
+
+/// Replace every slot's respawn point that is exactly the legacy default
+/// ([`crate::spawn_safety::LEGACY_DEFAULT_SPAWN`]) with the world spawn, the same
+/// point a new world starts its player on, which the next save then writes. A
+/// spawn from a bed or `/spawnpoint` is any other value and is never touched. The
+/// spawn columns are restored or generated first (lit, and noted as loaded and
+/// held, as the pregeneration of a fresh world does), but never generated over a
+/// column that holds saved blocks (`regen_present = false`). Renderer-free, so a
+/// real save loaded into a bare `World` tests it.
+pub(crate) fn repair_legacy_spawn_slots(
+    world: &mut crate::world::World,
+    biome_gen: &crate::biome::BiomeGenerator,
+    registry: &crate::block::BlockRegistry,
+    loaded_columns: &mut ahash::AHashSet<(i32, i32)>,
+    intake: &mut crate::chunk_intake::ChunkIntake,
+    players: &mut [crate::player_slot::PlayerSlot],
+) {
+    use crate::spawn_safety::{restored_spawn, LEGACY_DEFAULT_SPAWN};
+    if !players.iter().any(|slot| slot.spawn_pos.to_array() == LEGACY_DEFAULT_SPAWN) {
+        return;
+    }
+    // The bed that would stand exactly under the default point.
+    let bed_here = world.get_block(0, 79, 0) == crate::block::BED;
+    for (cx, cz) in spawn_pregen_columns(world, biome_gen) {
+        if !loaded_columns.contains(&(cx, cz)) {
+            load_column_blocks(world, cx, cz, biome_gen, false);
+            crate::lighting::run_initial_pass_for_column(world, cx, cz, registry);
+            loaded_columns.insert((cx, cz));
+            intake.column_held((cx, cz));
+        }
+    }
+    let world_spawn = world_spawn_point(world, biome_gen);
+    for slot in players {
+        let last = slot.player.pos;
+        slot.spawn_pos = restored_spawn(Some(slot.spawn_pos.to_array()), last, bed_here, || world_spawn);
+    }
+}
+
+/// The block column of the world spawn: the fixed floor of a flat/Workshop
+/// world, else the column the spawn search chose ([`crate::spawn_search`]; the
+/// origin on a v2 world). A pure query: reads no block. Where Satoshi's house
+/// is placed from.
+pub(crate) fn world_spawn_xz(
+    world: &crate::world::World,
+    biome_gen: &crate::biome::BiomeGenerator,
+) -> (i32, i32) {
+    if world.is_workshop || world.has_flat_floor() {
+        (8, 8)
+    } else {
+        let col = crate::spawn_search::world_spawn_column(biome_gen);
+        (col.x, col.z)
+    }
 }
 
 /// The nine chunk columns round the world spawn that [`world_spawn_point`]

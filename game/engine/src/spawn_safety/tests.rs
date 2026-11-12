@@ -178,6 +178,26 @@ fn a_respawn_at_a_buried_spawn_point_stands_clear() {
     body_fits(&s, at).unwrap();
 }
 
+/// A world whose origin is open sea, and a player whose saved respawn point is
+/// the default over that origin (what a new world used to save): a respawn
+/// with no bed must land on dry ground, not drop into the sea (or stay at the
+/// default, in the air over columns nobody has loaded).
+#[test]
+fn a_respawn_with_no_bed_on_a_sea_origin_world_lands_on_dry_ground() {
+    let seed = crate::spawn_search::sea_origin_seed();
+    let mut s = keep_like(seed);
+    let _ = s.world_spawn();
+    let mut sp = crate::server::ServerPlayer::new(Vec3::new(0.5, 80.0, 0.5));
+    sp.server_simulated = true;
+    sp.combat.die(crate::survival::DamageCause::Generic);
+    sp.dead_ticks = crate::server::MIN_DEAD_TICKS_BEFORE_RESPAWN;
+    s.players.push(sp);
+    let at = s.respawn_player(0).expect("respawned");
+    body_fits(&s, at).unwrap_or_else(|why| panic!("seed {seed}: {why}"));
+    let ground = s.world.get_block(at.x.floor() as i32, at.y.floor() as i32 - 1, at.z.floor() as i32);
+    assert!(!block::is_fluid(ground), "seed {seed}: standing on a liquid at {at:?}");
+}
+
 #[test]
 fn a_camera_on_the_same_spawn_cell_is_inside_the_other_avatar() {
     let feet = Vec3::new(0.5, 65.0, 0.5);
@@ -330,4 +350,259 @@ fn an_unloaded_column_or_a_position_that_isnt_a_place_fails_closed() {
         assert!(!stands(&w, &r, big, big, big));
         assert!(!stands(&w, &r, 0.5, big, 0.5));
     }
+}
+
+// ---- The one respawn rule (`safe_respawn_point`) and the saved spawn point ----
+
+/// A sea-origin seed's server, with its spawn columns loaded as a joiner's are.
+fn sea_server() -> (GameServer, u32, Vec3) {
+    let seed = crate::spawn_search::sea_origin_seed();
+    let mut s = keep_like(seed);
+    let world_spawn = s.world_spawn();
+    (s, seed, world_spawn)
+}
+
+fn assert_dry_standing(s: &GameServer, at: Vec3, what: &str) {
+    assert!(is_dry_standing(&s.world, &s.registry, at), "{what}: {at:?} is not dry standing ground");
+    body_fits(s, at).unwrap_or_else(|why| panic!("{what}: {why}"));
+}
+
+/// The shared function, over the sea: a respawn point in a sea column (the old
+/// default over a sea origin) stands on the world spawn's dry land, loading
+/// what it reads, whatever the height asked for.
+#[test]
+fn the_respawn_rule_leaves_a_sea_column_for_the_world_spawn() {
+    let (mut s, seed, world_spawn) = sea_server();
+    for y in [80.0, 64.0, 63.0, 30.0, 200.0] {
+        let at = safe_respawn_point(&mut s, Vec3::new(0.5, y, 0.5));
+        assert_dry_standing(&s, at, &format!("seed {seed} y {y}"));
+        assert_eq!(at, world_spawn, "seed {seed} y {y}: the world spawn, the point a new world starts on");
+    }
+}
+
+/// Land is not touched: a dry spot stays where it is, and the rule only
+/// stands a body, never moves a saved spawn (it returns a spot, not a spawn).
+#[test]
+fn the_respawn_rule_keeps_a_spawn_that_already_stands_on_dry_ground() {
+    let (mut s, _, world_spawn) = sea_server();
+    assert_eq!(safe_respawn_point(&mut s, world_spawn), world_spawn);
+    // A bed under a roof (the spawn cell is under a ceiling, on a bed) stays
+    // under the roof: the rule never lifts it onto the roof.
+    let (x, y, z) = (world_spawn.x.floor() as i32, world_spawn.y.floor() as i32, world_spawn.z.floor() as i32);
+    s.world.set_block(x, y - 1, z, block::BED);
+    for dx in -1..=1 {
+        for dz in -1..=1 {
+            s.world.set_block(x + dx, y + 3, z + dz, block::STONE);
+        }
+    }
+    assert_eq!(safe_respawn_point(&mut s, world_spawn), world_spawn, "the bed's spot, under its roof");
+    // The bed gone: the body stands where the floor now is, still under the roof.
+    s.world.set_block(x, y - 1, z, block::AIR);
+    s.world.set_block(x, y - 2, z, block::STONE);
+    let at = safe_respawn_point(&mut s, world_spawn);
+    assert!(is_dry_standing(&s.world, &s.registry, at), "{at:?}");
+    assert!(at.y < (y + 3) as f32, "not on the roof: {at:?}");
+}
+
+/// A spawn nobody has loaded the columns of: an owning server loads them (it
+/// restores, else generates) and then decides; a lent world's server may not
+/// generate, so it leaves the spot as it was.
+#[test]
+fn the_respawn_rule_loads_what_it_reads_unless_the_world_is_lent() {
+    let (mut s, seed, _) = sea_server();
+    let far = Vec3::new(1200.5, 90.0, -900.5);
+    assert!(!s.world.is_column_present_at(1200, -901));
+    let at = safe_respawn_point(&mut s, far);
+    assert!(s.world.is_column_present_at(1200, -901), "the owning server loaded the spawn's column");
+    assert_dry_standing(&s, at, &format!("seed {seed} far spawn"));
+
+    // A lent world's server may not generate into the host's world: it reads
+    // what the host holds (the world spawn's ring) and generates nothing.
+    let (mut lent, _, world_spawn) = sea_server();
+    lent.lent = true;
+    let at = safe_respawn_point(&mut lent, far);
+    assert!(!lent.world.is_column_present_at(1200, -901), "a lent world's server generated nothing");
+    assert_eq!(at, world_spawn, "the unloaded spawn falls back to the world spawn it holds");
+}
+
+/// What cannot be read comes back unchanged and never panics.
+#[test]
+fn the_respawn_rule_takes_a_spawn_that_is_not_a_number_as_it_comes() {
+    let (mut s, _, _) = sea_server();
+    let before = s.world.chunk_positions().count();
+    for pos in [Vec3::new(f32::NAN, 70.0, 0.5), Vec3::new(f32::INFINITY, 70.0, 0.5), Vec3::new(f32::MAX, f32::MAX, f32::MIN), Vec3::new(3.0e9, 70.0, 0.5)] {
+        let at = safe_respawn_point(&mut s, pos);
+        assert!(at.x.is_nan() == pos.x.is_nan() && (at.x.is_nan() || at == pos), "{pos:?} -> {at:?}");
+    }
+    assert_eq!(s.world.chunk_positions().count(), before, "and generates nothing out there");
+}
+
+/// The server's respawn and the single-player respawn are the one function:
+/// the server's answer is exactly `safe_respawn_point`'s, and neither
+/// `server.rs` nor `game_loop.rs` carries a rule of its own any more.
+#[test]
+fn the_server_respawn_and_the_single_player_respawn_share_one_function() {
+    let (mut s, seed, _) = sea_server();
+    let default = Vec3::new(0.5, 80.0, 0.5);
+    let mut sp = crate::server::ServerPlayer::new(default);
+    sp.server_simulated = true;
+    sp.combat.die(crate::survival::DamageCause::Generic);
+    sp.dead_ticks = crate::server::MIN_DEAD_TICKS_BEFORE_RESPAWN;
+    s.players.push(sp);
+    let expected = safe_respawn_point(&mut s, default);
+    let at = s.respawn_player(0).expect("respawned");
+    assert_eq!(at, expected, "seed {seed}: one rule");
+    assert_dry_standing(&s, at, "server respawn");
+    assert_eq!(s.players[0].spawn_pos, default, "the saved spawn point itself is left alone");
+
+    let server_src = include_str!("../server.rs");
+    assert!(!server_src.contains("fn standing_spot"), "no second copy of the rule in server.rs");
+    assert!(server_src.contains("spawn_safety::safe_respawn_point(self"), "the server calls the shared rule");
+    let game_src = include_str!("../game_loop.rs");
+    assert!(game_src.contains("spawn_safety::safe_respawn_point(self"), "the single-player respawn calls it too");
+}
+
+/// A living player's Respawn is no free teleport, and asking loads nothing.
+#[test]
+fn a_respawn_asked_by_a_living_player_does_nothing() {
+    let (mut s, _, _) = sea_server();
+    s.players.push(crate::server::ServerPlayer::new(Vec3::new(1200.5, 90.0, -900.5)));
+    assert_eq!(s.respawn_player(0), None);
+    assert!(!s.world.is_column_present_at(1200, -901), "and loads no column");
+}
+
+/// A new world's start is its respawn point, on a seed whose origin is sea:
+/// the same position, on solid, non-liquid ground with two air cells above it.
+#[test]
+fn a_new_world_on_a_sea_origin_seed_starts_and_respawns_on_the_same_dry_ground() {
+    let seed = crate::spawn_search::sea_origin_seed();
+    let bg = crate::biome::BiomeGenerator::new(seed, crate::biome::Generator::V3);
+    let mut world = World::new();
+    for (cx, cz) in crate::chunk_stream::spawn_pregen_columns(&world, &bg) {
+        world.generate_column(cx, cz, &bg);
+    }
+    let registry = BlockRegistry::new();
+    let mut slot = crate::player_slot::PlayerSlot::new(0, Vec3::new(0.5, 80.0, 0.5), 1.0);
+    assert_eq!(slot.spawn_pos.to_array(), LEGACY_DEFAULT_SPAWN, "control: a fresh slot holds the legacy default");
+    let spawn = crate::chunk_stream::world_spawn_point(&world, &bg);
+    slot.start_at(spawn);
+    assert_eq!(slot.spawn_pos, slot.player.pos, "seed {seed}: the respawn point is the start");
+    assert_ne!(slot.spawn_pos.to_array(), LEGACY_DEFAULT_SPAWN);
+    assert!(is_dry_standing(&world, &registry, slot.spawn_pos), "seed {seed}: {spawn:?}");
+    let (x, y, z) = (spawn.x.floor() as i32, spawn.y.floor() as i32, spawn.z.floor() as i32);
+    let ground = world.get_block(x, y - 1, z);
+    // Solid ground, or a plant standing on it (the spawn search counts a plant as
+    // the ground it grows from, and the feet are then one cell above it).
+    assert!(registry.is_solid(ground) || registry.is_solid(world.get_block(x, y - 2, z)), "seed {seed}");
+    assert!(!block::is_fluid(ground), "seed {seed}: standing on a liquid");
+    assert_eq!((world.get_block(x, y, z), world.get_block(x, y + 1, z)), (block::AIR, block::AIR));
+}
+
+/// The saved spawn point: the legacy default is "unset", anything else is the
+/// player's and is never touched.
+#[test]
+fn a_saved_spawn_that_is_the_legacy_default_is_repaired_and_any_other_is_untouched() {
+    let world_spawn = Vec3::new(120.5, 71.0, -44.5);
+    let last = Vec3::new(10.0, 64.0, 10.0);
+    let repaired = |saved: Option<[f32; 3]>, bed_here: bool| restored_spawn(saved, last, bed_here, || world_spawn);
+
+    assert_eq!(repaired(Some(LEGACY_DEFAULT_SPAWN), false), world_spawn, "the exact default is unset");
+    // A spawn a player set: a bed's cell, `/spawnpoint`, near the default but not it.
+    for set in [
+        [10.5, 70.0, -3.25],
+        [0.5, 81.0, 0.5],
+        [0.5, 80.0, 0.6],
+        [0.5000001, 80.0, 0.5],
+        [-0.5, 80.0, 0.5],
+        [0.5, 79.99, 0.5],
+        [4.0e5, 64.0, -4.0e5],
+    ] {
+        assert_eq!(repaired(Some(set), false), Vec3::from_array(set), "{set:?} is a chosen spawn");
+    }
+    // A bed at (0, 79, 0) makes the default's exact floats: that one is a bed.
+    assert_eq!(repaired(Some(LEGACY_DEFAULT_SPAWN), true), Vec3::from_array(LEGACY_DEFAULT_SPAWN));
+    // A legacy save with no spawn field falls back to where the player was.
+    assert_eq!(repaired(None, false), last);
+    // The world spawn is only asked for when it is needed.
+    let _ = restored_spawn(Some([10.5, 70.0, -3.25]), last, false, || panic!("not needed"));
+    let _ = restored_spawn(None, last, false, || panic!("not needed"));
+}
+
+/// Through the real save file: the world saved with the legacy default comes
+/// back repaired (the world spawn), one saved with a bed's or `/spawnpoint`'s
+/// spawn comes back as it was, and the repaired value saves as it is (no
+/// format change: the field is the same `Option<[f32; 3]>`).
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_world_saved_with_the_legacy_spawn_loads_repaired_and_a_chosen_one_loads_untouched() {
+    use crate::player_slot::PlayerSlot;
+    let name = format!("__test_spawn_repair_{}__", std::process::id());
+    let _ = crate::save::delete_world(&name);
+    let world = World::new();
+    let mut slot0 = PlayerSlot::new(0, Vec3::new(30.5, 66.0, 12.5), 1.0);
+    let mut chosen = PlayerSlot::new(1, Vec3::new(31.5, 66.0, 12.5), 1.0);
+    chosen.spawn_pos = Vec3::new(-40.5, 71.0, 88.25);
+    slot0.spawn_pos = Vec3::from_array(LEGACY_DEFAULT_SPAWN);
+    crate::save::save_world(&name, &world, &[slot0, chosen], 42, &[], &[], None, None).expect("save_world");
+
+    let mut loaded = World::new();
+    let (save, _) = crate::save::load_world(&name, &mut loaded).expect("load_world");
+    let world_spawn = Vec3::new(120.5, 71.0, -44.5);
+    let spawns: Vec<Vec3> = save
+        .players
+        .iter()
+        .map(|p| restored_spawn(p.spawn_pos, Vec3::new(p.x, p.y, p.z), false, || world_spawn))
+        .collect();
+    assert_eq!(spawns[0], world_spawn, "the legacy default loads as the world spawn");
+    assert_eq!(spawns[1], Vec3::new(-40.5, 71.0, 88.25), "a chosen spawn loads untouched");
+    let _ = crate::save::delete_world(&name);
+}
+
+/// The load's own repair, on a real saved world: the legacy default becomes the
+/// world spawn, the chosen spawn is left, and a saved column holding an edit is
+/// not generated over to find the spawn (`chunk_stream::repair_legacy_spawn_slots`,
+/// what `begin_load` runs for every local slot).
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn the_load_repair_uses_the_saved_columns_and_fixes_only_the_legacy_default() {
+    use crate::player_slot::PlayerSlot;
+    let seed = crate::spawn_search::sea_origin_seed();
+    let bg = crate::biome::BiomeGenerator::new(seed, crate::biome::Generator::V3);
+    let name = format!("__test_spawn_load_repair_{}__", std::process::id());
+    let _ = crate::save::delete_world(&name);
+    let mut world = World::new();
+    for (cx, cz) in crate::chunk_stream::spawn_pregen_columns(&world, &bg) {
+        world.generate_column(cx, cz, &bg);
+    }
+    let expected = crate::chunk_stream::world_spawn_point(&world, &bg);
+    // An edit deep under the spawn: the column is saved whole, as an edited one is.
+    let marker = (expected.x.floor() as i32, 10, expected.z.floor() as i32);
+    world.set_block(marker.0, marker.1, marker.2, block::GLASS);
+    let mut legacy = PlayerSlot::new(0, expected, 1.0);
+    legacy.spawn_pos = Vec3::from_array(LEGACY_DEFAULT_SPAWN);
+    let mut chosen = PlayerSlot::new(1, expected, 1.0);
+    chosen.spawn_pos = Vec3::new(-40.5, 71.0, 88.25);
+    crate::save::save_world(&name, &world, &[legacy, chosen], seed, &[], &[], None, None).expect("save_world");
+
+    let mut loaded = World::new();
+    let (save, _) = crate::save::load_world(&name, &mut loaded).expect("load_world");
+    let mut slots: Vec<PlayerSlot> = save
+        .players
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let mut slot = PlayerSlot::new(i, Vec3::new(p.x, p.y, p.z), 1.0);
+            slot.spawn_pos = p.spawn_pos.map_or(slot.player.pos, Vec3::from_array);
+            slot
+        })
+        .collect();
+    assert_eq!(slots[0].spawn_pos.to_array(), LEGACY_DEFAULT_SPAWN, "control: the file holds the legacy default");
+    let mut columns = ahash::AHashSet::new();
+    crate::chunk_stream::mark_held_columns_loaded(&loaded, &mut columns);
+    let mut intake = crate::chunk_intake::ChunkIntake::default();
+    crate::chunk_stream::repair_legacy_spawn_slots(&mut loaded, &bg, &BlockRegistry::new(), &mut columns, &mut intake, &mut slots);
+    assert_eq!(slots[0].spawn_pos, expected, "seed {seed}: the legacy default loads as the world spawn");
+    assert_eq!(slots[1].spawn_pos, Vec3::new(-40.5, 71.0, 88.25), "a chosen spawn is untouched");
+    assert_eq!(loaded.get_block(marker.0, marker.1, marker.2), block::GLASS, "the saved column was not generated over");
+    let _ = crate::save::delete_world(&name);
 }

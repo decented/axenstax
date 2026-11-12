@@ -1359,6 +1359,11 @@ seed. A v2 world keeps its exact spawn (±6 round the origin, scan start `terrai
 (`spawn_pref`) skip wet columns on v3, estimate y from `surface_y`, and `snap_spawn_to_ground` settles the player on
 the generated blocks (v2 untouched); "At origin" uses the world-spawn column. A saved world keeps its saved player
 position and spawn point: the search runs only for a fresh world and for a dedicated server's new joiner.
+A fresh world also saves that start as the player's respawn point (`PlayerSlot::spawn_pos`, `PlayerSaveData.spawn_pos`, same
+field and format as before; it used to be left at the fresh slot's default (0.5, 80, 0.5), the sky over the origin). A
+saved spawn point that is exactly (0.5, 80, 0.5) is that legacy default and is read as unset on load: it becomes the world
+spawn, saved next time (`spawn_safety::restored_spawn`; a bed or `/spawnpoint` is any other value and is never changed).
+A respawn stands the body on dry ground through `spawn_safety::safe_respawn_point` (Spec 05 §6.7 item 5).
 
 **v4: the dry caves (`worldgen_v3/caves.rs`, `Generator::V4`, revision 0, unreleased).** v4 is
 exactly v3 (shape, surface, labels, height 256, v2's decoration, structures, spawn, snowfall, mobs,

@@ -28,7 +28,7 @@ const NUDGE: i32 = 2;
 
 /// Can a body stand at `(x, feet_y, z)`: feet and head cells neither solid
 /// nor fluid, and a block under the feet that is not air or fluid (the ground
-/// `standing_spot` stands a body on: a bed or a slab counts as well as stone).
+/// `safe_respawn_point` stands a body on: a bed or a slab counts as well as stone).
 pub fn stands_clear(world: &World, registry: &BlockRegistry, x: i32, feet_y: i32, z: i32) -> bool {
     let open = |y: i32| {
         let b = world.get_block(x, y, z);
@@ -224,6 +224,189 @@ impl crate::server::GameServer {
         }
         self.safe_spawn_loading(pos, load);
         can_stand_exactly(&self.world, &self.registry, pos)
+    }
+}
+
+// ---- The one respawn rule ------------------------------------------------
+
+/// What [`safe_respawn_point`] needs of whoever respawns a body: the world it
+/// reads, and a way to make a column exist before it does. One impl per owner
+/// of a world (the client's `GameState`, the server's `GameServer`), so the
+/// single-player respawn and a joiner's go through the same function.
+pub(crate) trait RespawnWorld {
+    /// The world, its registry and its generator.
+    fn respawn_parts(&self) -> (&World, &BlockRegistry, &crate::biome::BiomeGenerator);
+    /// Make column `(cx, cz)` exist (restore it if evicted, else generate it,
+    /// light it): a no-op when it is loaded, and for a world this owner may
+    /// not generate into (a joiner's, a lent host's server).
+    fn ensure_respawn_column(&mut self, cx: i32, cz: i32);
+}
+
+/// The columns [`safe_respawn_point`] reads round `spawn`: its own 3x3.
+fn columns_round(spawn: Vec3) -> impl Iterator<Item = (i32, i32)> {
+    let (cx, cz) = crate::chunk_stream::column_of(spawn);
+    (-1..=1).flat_map(move |dx| (-1..=1).map(move |dz| (cx.saturating_add(dx), cz.saturating_add(dz))))
+}
+
+/// A body at `spawn` falls (or is lifted) in its own column: down to the first
+/// non-air cell at or below it, or, from a spawn cell buried in the ground, up
+/// out of the buried run. Reads only the column; `None` for a column with
+/// nothing below the spawn to stand on (unloaded, or a void). The first step of
+/// [`settle`]; a liquid is not told from ground here, [`fix_up`] and the dry
+/// check after it do that.
+fn standing_in_column(world: &World, spawn: Vec3) -> Option<Vec3> {
+    let (x, z) = (spawn.x.floor() as i32, spawn.z.floor() as i32);
+    // Above the column's highest block every cell is air.
+    let top = world.column_top_y(x, z).max(0);
+    let mut y = (spawn.y.floor() as i32).clamp(0, top + 1);
+    let air = |y: i32| world.get_block(x, y, z) == block::AIR;
+    if !air(y) {
+        while y <= top && !air(y) {
+            y += 1;
+        }
+        return Some(Vec3::new(spawn.x, y as f32, spawn.z));
+    }
+    while y > 0 && air(y) {
+        y -= 1;
+    }
+    if air(y) {
+        return None;
+    }
+    Some(Vec3::new(spawn.x, y as f32 + 1.0, spawn.z))
+}
+
+/// Where a body put at `spawn` stands, by what is loaded: its column's ground
+/// ([`standing_in_column`]), then [`fix_up`].
+fn settle(world: &World, registry: &BlockRegistry, spawn: Vec3) -> Vec3 {
+    fix_up(world, registry, standing_in_column(world, spawn).unwrap_or(spawn))
+}
+
+/// Is `pos` a place to stand on dry land: feet and head cells open, and a
+/// non-air, non-liquid block under the feet ([`stands_clear`] at `pos`).
+pub(crate) fn is_dry_standing(world: &World, registry: &BlockRegistry, pos: Vec3) -> bool {
+    pos.is_finite()
+        && stands_clear(
+            world,
+            registry,
+            pos.x.floor() as i32,
+            pos.y.floor() as i32,
+            pos.z.floor() as i32,
+        )
+}
+
+/// THE respawn rule, for the single-player respawn and a joiner's alike: where
+/// a body that dies with `spawn` as its respawn point stands up.
+///
+/// 1. Make the 3x3 columns round `spawn` exist (the owner's rule: see
+///    [`RespawnWorld::ensure_respawn_column`]).
+/// 2. Stand it on `spawn`'s ground: in its own column from the spawn's height
+///    (a bed under a roof stays under the roof), else the column's top, else
+///    the nearest clear column within [`SEARCH_RADIUS`] ([`settle`]).
+/// 3. If that is not dry ground (the column is sea or lava, or has no ground at
+///    all: [`is_dry_standing`]), use the world spawn instead: the dry land the
+///    new-world search picks (`chunk_stream::world_spawn_point`), its columns
+///    made to exist first, settled the same way.
+///
+/// A spawn that cannot be read (not finite, columns the owner may not load) comes
+/// back as [`fix_up`] leaves it. Nothing here reads whether the spawn came from
+/// a bed: a bed that is gone is a spawn with no ground under it, so it falls
+/// through step 2 to the nearest ground or to step 3.
+pub(crate) fn safe_respawn_point(ctx: &mut impl RespawnWorld, spawn: Vec3) -> Vec3 {
+    // Not a number, or past the playable limit (`/tp` and a saved spawn clamp to
+    // it): nothing there to read, and no column worth generating.
+    let limit = crate::commands::builtins::tp::MAX_COORD;
+    if !spawn.is_finite() || spawn.abs().max_element() > limit {
+        return spawn;
+    }
+    for (cx, cz) in columns_round(spawn) {
+        ctx.ensure_respawn_column(cx, cz);
+    }
+    let here = {
+        let (world, registry, _) = ctx.respawn_parts();
+        settle(world, registry, spawn)
+    };
+    {
+        let (world, registry, _) = ctx.respawn_parts();
+        if is_dry_standing(world, registry, here) {
+            return here;
+        }
+    }
+    let wanted: Vec<(i32, i32)> = {
+        let (world, _, biome_gen) = ctx.respawn_parts();
+        crate::chunk_stream::spawn_pregen_columns(world, biome_gen).to_vec()
+    };
+    for (cx, cz) in wanted {
+        ctx.ensure_respawn_column(cx, cz);
+    }
+    let (world, registry, biome_gen) = ctx.respawn_parts();
+    let world_spot = settle(world, registry, crate::chunk_stream::world_spawn_point(world, biome_gen));
+    if is_dry_standing(world, registry, world_spot) { world_spot } else { here }
+}
+
+impl RespawnWorld for crate::server::GameServer {
+    fn respawn_parts(&self) -> (&World, &BlockRegistry, &crate::biome::BiomeGenerator) {
+        (&self.world, &self.registry, &self.biome_gen)
+    }
+
+    /// An owning server loads the column itself; a lent world's columns are
+    /// the host client's streamer's (`ensure_column_loaded` there would be a
+    /// second generator on the host's world).
+    fn ensure_respawn_column(&mut self, cx: i32, cz: i32) {
+        if !self.lent {
+            self.ensure_column_loaded(cx, cz);
+        }
+    }
+}
+
+impl RespawnWorld for crate::GameState {
+    fn respawn_parts(&self) -> (&World, &BlockRegistry, &crate::biome::BiomeGenerator) {
+        (&self.world, &self.registry, &self.biome_gen)
+    }
+
+    /// A column this client holds is left alone; any other is restored or
+    /// generated, lit and meshed (`load_one_column`, which restores an evicted
+    /// column before it generates, so a far bed's saved edits survive). A joined
+    /// client generates nothing: its ground is what the server pushes.
+    fn ensure_respawn_column(&mut self, cx: i32, cz: i32) {
+        if !self.joined() && !self.loaded_columns.contains(&(cx, cz)) {
+            self.load_one_column(cx, cz);
+        }
+    }
+}
+
+// ---- A saved spawn point: the legacy default is "unset" -------------------
+
+/// The respawn point every world used to save when its player never slept in a
+/// bed or typed `/spawnpoint`: `PlayerSlot::new` at the fixed fresh-slot
+/// position (0.5, 80, 0.5), which the new-world search never overwrote.
+pub(crate) const LEGACY_DEFAULT_SPAWN: [f32; 3] = [0.5, 80.0, 0.5];
+
+/// The respawn point to restore for a saved slot: `saved` as it is, except the
+/// exact legacy default, which was never anyone's choice and is the world spawn
+/// (`world_spawn`, asked only then). No saved spawn at all (a legacy save)
+/// keeps its own rule: the last position.
+///
+/// Why the exact value is a safe marker: a player's own spawn is a bed's cell
+/// above it (`item_actions::bed_spawn`: block centre, one up) or what
+/// `/spawnpoint` stored (a typed coordinate, or the player's own float position
+/// with no arguments). Only a bed at (0, 79, 0) can make the default's exact
+/// floats, and `bed_here` (the block under the default is a bed) leaves that
+/// one alone. `/spawnpoint 0.5 80 0.5`, typed or taken standing at exactly that
+/// float, is the one spot a player could have chosen that is also the marker:
+/// the repair then moves it to the world spawn, which for a world whose ground
+/// at the origin is at y 79 is that very point, and otherwise puts it on dry
+/// ground where the default point hung in the air. No save-format change is
+/// needed: the field already exists, and the repaired value is saved next time.
+pub(crate) fn restored_spawn(
+    saved: Option<[f32; 3]>,
+    last_pos: Vec3,
+    bed_here: bool,
+    world_spawn: impl FnOnce() -> Vec3,
+) -> Vec3 {
+    match saved {
+        Some(s) if s == LEGACY_DEFAULT_SPAWN && !bed_here => world_spawn(),
+        Some(s) => Vec3::from_array(s),
+        None => last_pos,
     }
 }
 

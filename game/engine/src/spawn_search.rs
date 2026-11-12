@@ -150,6 +150,28 @@ pub fn world_spawn_column(bg: &BiomeGenerator) -> SpawnColumn {
     *bg.spawn_search.get_or_init(|| search(bg))
 }
 
+/// A seed whose v3 origin is open sea (the real top of every sampled column
+/// within 12 blocks of it is under the sea level) while the world still has a
+/// preferred dry spawn column elsewhere. Found in a fixed list, and the search
+/// asserts one exists, so a test built on it cannot silently stop testing
+/// anything.
+#[cfg(test)]
+pub(crate) fn sea_origin_seed() -> u32 {
+    (0..400u32)
+        .map(|i| i.wrapping_mul(2_654_435_761))
+        .find(|&seed| {
+            let bg = BiomeGenerator::new(seed, Generator::V3);
+            let sea = (-3..=3).all(|i| {
+                (-3..=3).all(|j| {
+                    let (x, z) = (i * 4, j * 4);
+                    bg.surface_y(x, z) < DRY_TOP && bg.terrain_height(x, z) < DRY_TOP
+                })
+            });
+            sea && world_spawn_column(&bg).kind == SpawnKind::Preferred
+        })
+        .expect("a seed in the list starts at sea")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -2191,7 +2191,17 @@ impl GameServer {
             && crate::sim_mobs::population_due(self.tick_counter)
             && self.runs(SimSystem::Population)
         {
-            crate::sim_mobs::population(&mut self.world, &self.biome_gen, &mut self.ecs, self.tick_counter);
+            // Satoshi's house is raw block writes: they come back as block
+            // changes, which reach the joiners and (`take_lent_changes`) the
+            // host's remesh, as a mob's cell change does (`SimEvent::CellChanged`).
+            let changes = crate::sim_mobs::population(
+                &mut self.world,
+                &self.biome_gen,
+                &self.registry,
+                &mut self.ecs,
+                self.tick_counter,
+            );
+            self.pending_block_changes.extend(changes);
         }
         // HP-3 — the brigand pre-pass, then the defenders, then the generic
         // AI, all chasing `targets` (living bodies; a spawn-protected joiner
@@ -3247,7 +3257,7 @@ impl GameServer {
 
     /// The player chose Respawn (MP-A3, `PacketType::Respawn`). If the server
     /// holds them dead: full health, hunger and breath, standing in their
-    /// spawn point's column ([`Self::standing_spot`]), at rest, no fall in
+    /// spawn point's ground (`spawn_safety::safe_respawn_point`), at rest, no fall in
     /// progress and no stale moves queued. Returns where they now stand, or
     /// `None` (and changes nothing) for a living player — otherwise Respawn
     /// would be a free teleport home — and for one dead for fewer than
@@ -3255,12 +3265,16 @@ impl GameServer {
     /// reports zero health and asks at once from teleporting home at full
     /// health (its own resend covers an honest quick click).
     pub fn respawn_player(&mut self, idx: usize) -> Option<Vec3> {
-        let spawn = self.standing_spot(self.players.get(idx)?.spawn_pos);
-        let spawn = crate::spawn_safety::fix_up(&self.world, &self.registry, spawn);
-        let sp = &mut self.players[idx];
+        let sp = self.players.get(idx)?;
         if !sp.combat.dead || sp.dead_ticks < MIN_DEAD_TICKS_BEFORE_RESPAWN {
             return None;
         }
+        // The one respawn rule (`spawn_safety::safe_respawn_point`), shared
+        // with the single-player respawn: on dry ground, loading what it reads
+        // when this server owns its world.
+        let asked = sp.spawn_pos;
+        let spawn = crate::spawn_safety::safe_respawn_point(self, asked);
+        let sp = &mut self.players[idx];
         // MP-D2c-1 — a respawn never keeps a seat (its death already ended
         // the ride, `end_dead_riders`; this is the backstop): the follow
         // must not pin the body back to the mount.
@@ -3278,33 +3292,6 @@ impl GameServer {
         sp.pending_intent = None;
         sp.intent_queue.clear();
         Some(spawn)
-    }
-
-    /// Where a body put at `spawn` actually stands: the same column, feet on
-    /// the first non-air block at or below it — or, when the spawn cell is
-    /// buried, on top of the buried run — the rule `initial_load` places
-    /// players by. A joiner's spawn is the air above the world spawn
-    /// (`attach_remote_transport`), so without this every respawn would start
-    /// with a damaging fall. `spawn` unchanged when the column is empty.
-    fn standing_spot(&self, spawn: Vec3) -> Vec3 {
-        let (x, z) = (spawn.x.floor() as i32, spawn.z.floor() as i32);
-        // Above the column's highest block section every cell is air.
-        let top = self.world.column_top_y(x, z).max(0);
-        let mut y = (spawn.y.floor() as i32).clamp(0, top + 1);
-        let air = |y: i32| self.world.get_block(x, y, z) == block::AIR;
-        if !air(y) {
-            while y <= top && !air(y) {
-                y += 1;
-            }
-            return Vec3::new(spawn.x, y as f32, spawn.z);
-        }
-        while y > 0 && air(y) {
-            y -= 1;
-        }
-        if air(y) {
-            return spawn;
-        }
-        Vec3::new(spawn.x, y as f32 + 1.0, spawn.z)
     }
 
     /// Load the column `(cx, cz)` — terrain, light, its fluid sources and

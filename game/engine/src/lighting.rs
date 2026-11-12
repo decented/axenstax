@@ -288,6 +288,57 @@ pub fn initial_block_light_for_column(
     propagate_block_light_from(world, sources, registry);
 }
 
+/// One cell a runtime writer changed: `((x, y, z), the block it held, the
+/// block it holds now)`.
+pub type CellChange = ((i32, i32, i32), BlockId, BlockId);
+
+/// Light a stamp of many cells at once (a structure written with raw
+/// `World::set_block`, which relights nothing). One pass over the stamp, not one
+/// per cell: `update_for_block_change` re-runs the whole column's sky pass for
+/// every cell whose opacity flips, and re-runs only the placed block's own
+/// column, so light left in a neighbour column before a roof went on would
+/// spread back in. Here the old emitters go out first, then every column the
+/// stamp touches has its sky light cleared (all of them before any reseeds, so
+/// none reseeds from another's stale cells) and is reseeded, then the new
+/// emitters spread.
+pub fn relight_stamped(world: &mut World, registry: &BlockRegistry, changes: &[CellChange]) {
+    if changes.is_empty() {
+        return;
+    }
+    for &(pos, prev, _) in changes {
+        let emission = registry.light_emission(prev);
+        if emission > 0 {
+            remove_block_light_at(world, pos, emission, registry);
+        }
+    }
+    let cs = CHUNK_SIZE as i32;
+    let mut columns: Vec<(i32, i32)> = changes
+        .iter()
+        .map(|&((x, _, z), _, _)| (x.div_euclid(cs), z.div_euclid(cs)))
+        .collect();
+    columns.sort_unstable();
+    columns.dedup();
+    let tops: Vec<i32> = columns.iter().map(|&(cx, cz)| world.light_top(cx, cz)).collect();
+    for (&(cx, cz), &top) in columns.iter().zip(&tops) {
+        for lz in 0..cs {
+            for lx in 0..cs {
+                for y in 0..=top {
+                    world.set_sky_light_at(cx * cs + lx, y, cz * cs + lz, 0);
+                }
+            }
+        }
+    }
+    for (&(cx, cz), &top) in columns.iter().zip(&tops) {
+        initial_sky_light_for_column(world, cx, cz, (0, top), registry);
+    }
+    let emitters: Vec<(i32, i32, i32)> = changes
+        .iter()
+        .filter(|&&(_, _, now)| registry.light_emission(now) > 0)
+        .map(|&(pos, _, _)| pos)
+        .collect();
+    propagate_block_light_from(world, emitters, registry);
+}
+
 /// Spec 30 Phase F — apply lighting updates for a block place/break.
 /// Call after the world's block state has been mutated. Handles:
 ///   * block-light removal if `prev_block` was an emitter,
