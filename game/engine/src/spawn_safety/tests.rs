@@ -557,3 +557,52 @@ fn a_world_saved_with_the_legacy_spawn_loads_repaired_and_a_chosen_one_loads_unt
     assert_eq!(spawns[1], Vec3::new(-40.5, 71.0, 88.25), "a chosen spawn loads untouched");
     let _ = crate::save::delete_world(&name);
 }
+
+/// The load's own repair, on a real saved world: the legacy default becomes the
+/// world spawn, the chosen spawn is left, and a saved column holding an edit is
+/// not generated over to find the spawn (`chunk_stream::repair_legacy_spawn_slots`,
+/// what `begin_load` runs for every local slot).
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn the_load_repair_uses_the_saved_columns_and_fixes_only_the_legacy_default() {
+    use crate::player_slot::PlayerSlot;
+    let seed = crate::spawn_search::sea_origin_seed();
+    let bg = crate::biome::BiomeGenerator::new(seed, crate::biome::Generator::V3);
+    let name = format!("__test_spawn_load_repair_{}__", std::process::id());
+    let _ = crate::save::delete_world(&name);
+    let mut world = World::new();
+    for (cx, cz) in crate::chunk_stream::spawn_pregen_columns(&world, &bg) {
+        world.generate_column(cx, cz, &bg);
+    }
+    let expected = crate::chunk_stream::world_spawn_point(&world, &bg);
+    // An edit deep under the spawn: the column is saved whole, as an edited one is.
+    let marker = (expected.x.floor() as i32, 10, expected.z.floor() as i32);
+    world.set_block(marker.0, marker.1, marker.2, block::GLASS);
+    let mut legacy = PlayerSlot::new(0, expected, 1.0);
+    legacy.spawn_pos = Vec3::from_array(LEGACY_DEFAULT_SPAWN);
+    let mut chosen = PlayerSlot::new(1, expected, 1.0);
+    chosen.spawn_pos = Vec3::new(-40.5, 71.0, 88.25);
+    crate::save::save_world(&name, &world, &[legacy, chosen], seed, &[], &[], None, None).expect("save_world");
+
+    let mut loaded = World::new();
+    let (save, _) = crate::save::load_world(&name, &mut loaded).expect("load_world");
+    let mut slots: Vec<PlayerSlot> = save
+        .players
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let mut slot = PlayerSlot::new(i, Vec3::new(p.x, p.y, p.z), 1.0);
+            slot.spawn_pos = p.spawn_pos.map_or(slot.player.pos, Vec3::from_array);
+            slot
+        })
+        .collect();
+    assert_eq!(slots[0].spawn_pos.to_array(), LEGACY_DEFAULT_SPAWN, "control: the file holds the legacy default");
+    let mut columns = ahash::AHashSet::new();
+    crate::chunk_stream::mark_held_columns_loaded(&loaded, &mut columns);
+    let mut intake = crate::chunk_intake::ChunkIntake::default();
+    crate::chunk_stream::repair_legacy_spawn_slots(&mut loaded, &bg, &BlockRegistry::new(), &mut columns, &mut intake, &mut slots);
+    assert_eq!(slots[0].spawn_pos, expected, "seed {seed}: the legacy default loads as the world spawn");
+    assert_eq!(slots[1].spawn_pos, Vec3::new(-40.5, 71.0, 88.25), "a chosen spawn is untouched");
+    assert_eq!(loaded.get_block(marker.0, marker.1, marker.2), block::GLASS, "the saved column was not generated over");
+    let _ = crate::save::delete_world(&name);
+}

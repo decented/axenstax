@@ -83,7 +83,15 @@ fn game_harness_spawn_a_legacy_default_spawn_is_repaired_on_load_and_a_chosen_on
     ] {
         hg.state.players[0].spawn_pos = spawn;
         assert!(hg.state.leave_world(crate::world_exit::SaveChoice::Save, crate::world_exit::ExitTo::Lobby));
-        hg.reopen_world(&format!("harness-spawn-{seed}-false"));
+        // The reopen reads the world's seed and generator from its meta, which a
+        // harness world has not been given: name them, or it opens another world.
+        let name = format!("harness-spawn-{seed}-false");
+        let mut meta = crate::save::load_world_meta(&name);
+        meta.seed = seed;
+        meta.worldgen_version = crate::biome::Generator::V3.version();
+        crate::save::save_world_meta(&name, &meta).expect("meta written");
+        hg.reopen_world(&name);
+        assert_eq!(hg.state.biome_gen.seed, seed, "control: the reopened world is the same world");
         let got = hg.state.players[0].spawn_pos;
         if repaired {
             assert_eq!(got, start, "the legacy default loads as the world spawn");
