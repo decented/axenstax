@@ -49,29 +49,33 @@ fn target_by_name(key: &str) -> Option<WorkshopTarget> {
     if let Some(mob) = key.strip_prefix("mob:") {
         return mob_by_name(mob).map(WorkshopTarget::Mob);
     }
-    let id = match key {
-        "flower" | "cornflower" => crate::block::CORNFLOWER,
-        "poppy" => crate::block::FIELD_POPPY,
-        "buttercup" => crate::block::BUTTERCUP,
-        "stone" => crate::block::STONE,
-        "dirt" => crate::block::DIRT,
-        "grass" => crate::block::GRASS,
-        "sand" => crate::block::SAND,
-        "log" | "wood" => crate::block::OAK_LOG,
-        _ => return None,
-    };
-    Some(WorkshopTarget::Block(id))
+    let (_, id) = BLOCK_ASSETS.iter().find(|(names, _)| names.contains(&key))?;
+    Some(WorkshopTarget::Block(*id))
 }
 
+/// The blocks `target_by_name` accepts (and Tab offers). The first name of a
+/// row is canonical; the rest still work when typed.
+const BLOCK_ASSETS: &[(&[&str], crate::block::BlockId)] = &[
+    (&["flower", "cornflower"], crate::block::CORNFLOWER),
+    (&["poppy"], crate::block::FIELD_POPPY),
+    (&["buttercup"], crate::block::BUTTERCUP),
+    (&["stone"], crate::block::STONE),
+    (&["dirt"], crate::block::DIRT),
+    (&["grass"], crate::block::GRASS),
+    (&["sand"], crate::block::SAND),
+    (&["log", "wood"], crate::block::OAK_LOG),
+];
+
+/// The mobs `target_by_name` accepts after `mob:`.
+const MOB_ASSETS: &[(&str, crate::mob::MobType)] = &[
+    ("cow", crate::mob::MobType::Cow),
+    ("pig", crate::mob::MobType::Pig),
+    ("sheep", crate::mob::MobType::Sheep),
+    ("chicken", crate::mob::MobType::Chicken),
+];
+
 fn mob_by_name(key: &str) -> Option<crate::mob::MobType> {
-    use crate::mob::MobType;
-    match key {
-        "cow" => Some(MobType::Cow),
-        "pig" => Some(MobType::Pig),
-        "sheep" => Some(MobType::Sheep),
-        "chicken" => Some(MobType::Chicken),
-        _ => None,
-    }
+    MOB_ASSETS.iter().find(|(name, _)| *name == key).map(|(_, kind)| *kind)
 }
 
 /// Accept an npub (bech32) OR raw 64-hex; return canonical lowercase hex, else None.
@@ -123,6 +127,18 @@ impl Command for WorkshopCommand {
         match args_before {
             [] => matching(SUBCOMMANDS, partial),
             [sub] if sub.eq_ignore_ascii_case("play") => matching(["on", "off"], partial),
+            // The assets `target_by_name` accepts; `mob:<name>` places a mob (not for reshape: it
+            // rebuilds a block).
+            [sub] if sub.eq_ignore_ascii_case("place") || sub.eq_ignore_ascii_case("edit") => matching(
+                BLOCK_ASSETS
+                    .iter()
+                    .map(|(names, _)| names[0].to_string())
+                    .chain(MOB_ASSETS.iter().map(|(name, _)| format!("mob:{name}"))),
+                partial,
+            ),
+            [sub] if sub.eq_ignore_ascii_case("reshape") => {
+                matching(BLOCK_ASSETS.iter().map(|(names, _)| names[0]), partial)
+            }
             _ => Vec::new(),
         }
     }

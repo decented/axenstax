@@ -147,6 +147,9 @@ const PROBES: &[(&str, &[&str])] = &[
     ("buildguide", &["mode"]),
     ("ws", &[]),
     ("ws", &["play"]),
+    ("ws", &["place"]),
+    ("ws", &["edit"]),
+    ("ws", &["reshape"]),
     ("exhibit", &[]),
     ("exhibit", &["place", "pic"]),
     #[cfg(not(target_arch = "wasm32"))]
@@ -203,6 +206,87 @@ fn the_filtering_completers_agree_with_the_ranking_rule() {
         for partial in ["s", "t", "mo"] {
             let got = cmd.complete(before, partial, &ctx);
             assert_eq!(got, matching(&all, partial), "/{name} {before:?} + '{partial}'");
+        }
+    }
+}
+
+// ---- A keyword `execute` accepts that no completer lists must fail a test -------------------
+//
+// Sub-command words sit in match arms. This scans the arms of each command's
+// own source and requires every word it finds to be either offered by the
+// command's completer or named below as accepted-but-not-offered (an alias, a
+// spelling variant, or a legacy word the usage line does not advertise). A new
+// arm therefore fails here until it is offered or listed.
+
+/// The source of the function that matches a command's words, up to its test module.
+fn matcher_source(file: &'static str, from: &str) -> &'static str {
+    let start = file.find(from).unwrap_or_else(|| panic!("no `{from}`"));
+    let end = file.find("#[cfg(test)]").unwrap_or(file.len());
+    &file[start..end]
+}
+
+/// Every quoted word in the pattern of a match arm that starts a line:
+/// `"add" =>`, `Some("rm") | Some("del") =>`.
+fn arm_words(src: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in src.lines() {
+        let line = line.trim_start();
+        if !(line.starts_with('"') || line.starts_with("Some(\"")) {
+            continue;
+        }
+        let Some((pattern, _)) = line.split_once("=>") else { continue };
+        out.extend(pattern.split('"').skip(1).step_by(2).map(str::to_string));
+    }
+    out
+}
+
+#[test]
+fn every_word_a_command_matches_is_offered_or_named_as_deliberately_not_offered() {
+    let reg = full_registry();
+    let ctx = CompletionContext { op_level: OpLevel::Op, registry: &reg, roster_names: &[] };
+    // (command, its source, where its matching starts, words accepted but not offered)
+    let rows: Vec<(&str, &str, &str, &[&str])> = vec![
+        ("time", include_str!("builtins/time.rs"), "fn execute(", &[]),
+        ("waypoint", include_str!("builtins/waypoint.rs"), "fn execute(", &["rm", "del", "goto"]),
+        ("we", include_str!("builtins/worldedit.rs"), "fn execute(", &[]),
+        ("buildguide", include_str!("builtins/buildguide.rs"), "fn execute(", &["stop"]),
+        (
+            "ws",
+            include_str!("builtins/workshop.rs"),
+            "fn execute(",
+            &[
+                "true", "1", "false", "0",
+                // Legacy PWA beacon words: not in the usage line, so not advertised.
+                "publish", "follow", "unfollow", "following", "browse", "adopt",
+            ],
+        ),
+        (
+            "exhibit",
+            include_str!("builtins/exhibit.rs"),
+            "fn execute(",
+            &["remove", "del", "w", "stand", "s"],
+        ),
+        ("scenario", include_str!("builtins/scenario.rs"), "fn execute(", &[]),
+        ("trial", include_str!("builtins/trial.rs"), "fn execute(", &["ls", "stop", "cancel"]),
+        #[cfg(not(target_arch = "wasm32"))]
+        ("room", include_str!("builtins/room.rs"), "fn execute(", &["rotate"]),
+        #[cfg(not(target_arch = "wasm32"))]
+        ("online", include_str!("builtins/online.rs"), "pub fn result_for(", &[]),
+    ];
+    for (name, file, from, not_offered) in rows {
+        let cmd = reg.lookup(name).unwrap();
+        // Everything the completer offers anywhere for this command.
+        let mut offered: Vec<String> = Vec::new();
+        for (probe_cmd, before) in PROBES.iter().filter(|(c, _)| *c == name) {
+            let _ = probe_cmd;
+            offered.extend(cmd.complete(before, "", &ctx));
+        }
+        // The assets and block names are values, not match arms.
+        for word in arm_words(matcher_source(file, from)) {
+            assert!(
+                offered.contains(&word) || not_offered.contains(&word.as_str()),
+                "/{name}: `execute` matches \"{word}\" but Tab does not offer it; offer it or list it as not offered"
+            );
         }
     }
 }

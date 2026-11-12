@@ -773,6 +773,33 @@ fn canonical_spellings_are_suggested_and_aliases_are_not() {
 }
 
 #[test]
+fn the_canonical_names_not_offered_under_their_own_spelling_are_exactly_these() {
+    use super::give_names::{BLOCK_NAMES, BOW_NAMES, MATERIAL_NAMES};
+    let rows = BLOCK_NAMES
+        .iter()
+        .map(|(names, _)| *names)
+        .chain(MATERIAL_NAMES.iter().map(|(names, _)| *names))
+        .chain(BOW_NAMES.iter().map(|(names, _)| *names));
+    let mut missing: Vec<&str> = rows
+        .map(|names| names[0])
+        .filter(|canonical| !item_names().iter().any(|n| n == canonical))
+        .collect();
+    missing.sort();
+    assert_eq!(
+        missing,
+        [
+            // Left out on purpose (NOT_SUGGESTED).
+            "campfire_smoke",
+            // The block `cable` shadows this material row's canonical name;
+            // the material is offered as `coppercable`.
+            "copper_cable",
+            // The same block as `fence_post`, which comes first.
+            "oak_fence_post",
+        ]
+    );
+}
+
+#[test]
 fn block_names_is_the_placeable_subset() {
     let blocks = block_names();
     assert!(blocks.iter().any(|n| n == "torch") && blocks.iter().any(|n| n == "spruce_stairs"));

@@ -23,7 +23,7 @@ fn lookup<T: Copy>(table: &[(&[&str], T)], key: &str) -> Option<T> {
 }
 
 /// Every block `/give` names, in resolution order.
-static BLOCK_NAMES: &[(&[&str], BlockId)] = &[
+pub(super) static BLOCK_NAMES: &[(&[&str], BlockId)] = &[
     (&["stone"], block::STONE),
     (&["dirt"], block::DIRT),
     (&["grass"], block::GRASS),
@@ -207,7 +207,7 @@ pub(super) fn block_by_name(key: &str) -> Option<BlockId> {
 
 /// Every crafting material `/give` names. Tried AFTER blocks, tools and bows,
 /// so a name a block also uses (`cable`, `nitre`) gives the block.
-static MATERIAL_NAMES: &[(&[&str], M)] = &[
+pub(super) static MATERIAL_NAMES: &[(&[&str], M)] = &[
     (&["bellows"], M::Bellows), // Spec 40 — the Workshop inflate tool
     // Spec 49 (Explosives).
     (&["sulphur", "sulfur"], M::Sulphur),
@@ -398,7 +398,7 @@ pub(super) fn tool_by_name(key: &str) -> Option<(ToolType, ToolMaterial)> {
 /// Single-tier tools (`/give bow`, Wave 23, and the rest): not tier-based like
 /// pickaxes, so they get their own table. The underscore-multi-word names
 /// don't fit `tool_by_name`'s `<material>_<tool>` split.
-static BOW_NAMES: &[(&[&str], (ToolType, ToolMaterial))] = &[
+pub(super) static BOW_NAMES: &[(&[&str], (ToolType, ToolMaterial))] = &[
     (&["bow"], (ToolType::Bow, ToolMaterial::Wood)),
     // Wave 27.
     (&["flint_and_steel", "flintandsteel", "lighter"], (ToolType::FlintAndSteel, ToolMaterial::Iron)),

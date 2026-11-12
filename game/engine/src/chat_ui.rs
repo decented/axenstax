@@ -984,18 +984,64 @@ mod tests {
 
     #[test]
     fn the_overlay_is_never_wider_than_the_screen_and_the_log_never_taller_than_45_percent() {
-        for (size, scale) in [(egui::vec2(360.0, 640.0), 3.0), (egui::vec2(640.0, 360.0), 3.0), (egui::vec2(1280.0, 720.0), 3.0)] {
+        // (screen, scale, whether the whole overlay can fit above the
+        // bottom offset: 640 x 360 at 300% cannot, and egui then slides it.)
+        for (size, scale, fits) in [
+            (egui::vec2(360.0, 640.0), 3.0, true),
+            (egui::vec2(640.0, 360.0), 3.0, false),
+            (egui::vec2(1280.0, 720.0), 3.0, true),
+            (egui::vec2(1280.0, 720.0), 1.5, true),
+        ] {
             let mut rig = Rig::new(size, scale, "/g");
             for i in 0..8 {
                 rig.state.push_log(ChatLine::info(format!("line {i} with some words in it"), 0));
             }
             rig.frame(vec![], egui::Modifiers::NONE);
             rig.frame(vec![], egui::Modifiers::NONE);
-            let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
             let r = overlay_rect(&rig);
             assert!(r.left() >= 0.0 && r.right() <= size.x - 16.0 + 0.5, "{size:?} x{scale}: {r:?} is wider than the screen minus 16 each side");
-            assert!(screen.contains_rect(r), "{size:?} x{scale}: {r:?} left the screen");
+            // The log lives in a scroll area; its clip rectangle is the log's visible height.
+            let (_, clip) = placed(&rig.output, "line 7 with some words in it").expect("the newest line is drawn");
+            assert!(clip.height() <= size.y * 0.45 + 0.5, "{size:?} x{scale}: the log is {} tall", clip.height());
+            if fits {
+                assert!(r.top() >= 0.0 && r.bottom() <= size.y + 0.5, "{size:?} x{scale}: {r:?} left the screen");
+            }
         }
+    }
+
+    /// The centre of a text drawn this frame.
+    fn centre_of(rig: &Rig, label: &str) -> egui::Pos2 {
+        placed(&rig.output, label).unwrap_or_else(|| panic!("'{label}' is not on screen")).0.center()
+    }
+
+    #[test]
+    fn headless_clicking_a_suggestion_accepts_it_and_keeps_focus() {
+        let mut rig = Rig::new(egui::vec2(1280.0, 720.0), 1.5, "/give tor");
+        let at = centre_of(&rig, "torch");
+        let button = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        rig.frame(vec![egui::Event::PointerMoved(at)], egui::Modifiers::NONE);
+        rig.frame(vec![button(true)], egui::Modifiers::NONE);
+        rig.frame(vec![button(false)], egui::Modifiers::NONE);
+        for _ in 0..3 {
+            rig.frame(vec![], egui::Modifiers::NONE);
+        }
+        assert_eq!(rig.state.input, "/give torch");
+        assert!(rig.focused(), "a click on a row must not leave the input unfocused");
+        assert_eq!(rig.cursor(), Some("/give torch".chars().count()));
+    }
+
+    #[test]
+    fn headless_up_arrow_is_still_chat_history_while_the_list_is_showing() {
+        let mut rig = Rig::new(egui::vec2(1280.0, 720.0), 1.5, "/gi");
+        rig.state.push_history("/time set noon".to_string());
+        rig.key(egui::Key::ArrowUp, egui::Modifiers::NONE);
+        assert_eq!(rig.state.input, "/time set noon");
+        assert!(rig.state.cycle.is_none(), "history does not start a Tab cycle");
     }
 
     #[test]
