@@ -34,6 +34,9 @@ From 0.2.32 (the last playtest):
 2. **Press T** (or /) to open chat and type a command.
 3. **Type `/gm c`** to switch to Creative so you can fly. Find **flat, open grass with no trees**. Missions 1 to 3 all happen there.
 4. **Type `/gm s`** to switch back to Survival. The game must reply **"Switched to survival"** (or "already in survival").
+5. **Check the build number** at the bottom of the Settings menu. It should say **v0.2.33**. Use that number in the feedback.
+
+**Good to know:** hunger drops 1 point (half an icon on the hunger bar) every 30 seconds, whatever you are doing. A full bar lasts about 10 minutes, so take some food (berries, bread or cooked meat), or use `/give bread 16` in a test world.
 
 **Why step 4 matters:** worn paths and blight (missions 1 and 2) never happen in Creative. Creative also stops places from looking grey. If you can still fly, you are in Creative and those missions will not work.
 
@@ -44,17 +47,18 @@ From 0.2.32 (the last playtest):
 **What it tests:** grass that is walked over a lot turns into a worn dirt path.
 
 **Do:**
-- Pick a straight line of grass about **7 blocks** long.
-- Walk to one end and back **15 times**. Walk; do not jump or fly.
+- Pick a straight line of grass **9 blocks** long.
+- **Walk along the line**, from one end to the other and back, **12 times**. Walking or running is fine; do not jump or fly.
+- Walking or jumping on one spot never counts. You have to keep moving from block to block.
 - Do it in one go without leaving the world.
 
-**Look for:** the middle of the line turns into a **dirt path** first, then the blocks near the ends.
+**Look for:** after the 12th trip, **every block except the 2 ends** (the ones you turn round on) turns into a **Worn Path**. A Worn Path looks just like plain dirt, and breaking one drops dirt; that is how it is meant to be. The 2 end blocks, where you turn round, take twice as long (24 trips), so it is normal that they are still grass.
 
 **The rules behind it:**
 - A "footfall" is stepping onto a grass block from a different block, with your feet on the ground.
 - A grass block that gets **24 footfalls** becomes a Worn Path.
-- Standing still does not count. Jumping on the spot does not count. Flying does not count.
-- Walking a line there and back steps on the middle blocks twice per trip, so 15 trips gives them 30 footfalls. The end blocks get fewer, which is why the middle goes first.
+- Standing still does not count. Walking or jumping on the spot does not count. Flying does not count.
+- One trip there and back steps on each middle block twice, so 12 trips gives them 24 footfalls. You turn round on the end blocks, so they get only one footfall per trip.
 - Only plain grass blocks wear (not dirt, sand or tall grass).
 - Off in Creative.
 - The game remembers partly-worn blocks only while the world is open. Leaving the world or restarting forgets the counts (a finished path block is saved).
@@ -64,7 +68,8 @@ From 0.2.32 (the last playtest):
 - Check you are in Survival (`/gm s`).
 - Check you are walking on grass blocks, not dirt or tall grass.
 - Do not jump while walking.
-- Do all 15 trips without leaving the world.
+- Do all 12 trips without leaving the world.
+- Only the 2 end blocks are still grass? That is normal (see "Look for").
 
 ---
 
@@ -228,12 +233,13 @@ That plants a square field of wheat sprouts (about 17 by 17, nearly 300 plants) 
 At the end, write a short list like this, one line per mission, and hand it to the grown-up who looks after the game:
 
 ```
-Build: 0.2.33
+Build (bottom of Settings):
 Mission 1 Path: worked / didn't. What happened:
 Mission 2 Wheat field: worked / didn't. What happened:
 Mission 3 Site Board: worked / didn't. What happened:
 Mission 4 Grey Quarry: worked / didn't. Words reached:   Time taken:
-Sound, lightning, lag: better / same / worse. FPS if laggy:
+Sound, lightning, lag: better / same / worse.
+If laggy: where (e.g. mountains), and press F3 and read out FPS, Frame, Tick and Draws:
 Best thing:
 Anything broken:
 ```
