@@ -112,6 +112,7 @@ pub mod touched_columns;
 // The joiner harness the chunk-push suites share.
 pub mod push_joiner;
 pub mod render_depth;
+mod torch_render; // Small cubes show the right part of their texture: torch, button, plate, lever handle, framed block.
 pub mod building_variants; // Building variants — every wood's and stone's slab, stairs, door, trapdoor, gate and wall.
 pub mod machine_index;
 // Terrain T1 — the 256-block world and the per-world terrain generator.
