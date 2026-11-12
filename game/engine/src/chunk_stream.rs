@@ -580,10 +580,11 @@ impl super::GameState {
             // Place the player on solid ground — never on tree canopy (#9) or in
             // water. Flat/Workshop worlds use the known fixed floor (avoids the
             // biome-height scan starting below y=79 and missing the flat floor).
+            // The start is also the respawn point: a new world used to leave
+            // `spawn_pos` at the fresh-slot default over the origin, so a death
+            // with no bed dropped the player there, often into the sea.
             let spawn = world_spawn_point(&self.world, &self.biome_gen);
-            self.players[0].player.pos = spawn;
-            self.players[0].player.velocity = glam::Vec3::ZERO;
-            self.players[0].player.reset_fall();
+            self.players[0].start_at(spawn);
             log::info!("Fresh world spawn at {spawn}.");
 
             // New creative world starts with an EMPTY hotbar (owner 2026-07-02).
@@ -632,6 +633,10 @@ impl super::GameState {
         // ── Common tail (all paths) ─────────────────────────────────────────
         // Rebuild the derived render registry (official + wardrobe + override).
         self.reapply_overrides();
+
+        // A saved respawn point that is the legacy default was never chosen:
+        // it is the world spawn (`spawn_safety::restored_spawn`).
+        self.repair_legacy_spawns();
 
         let cs = CHUNK_SIZE as i32;
         // A joined session starts where the HOST placed us (JoinAccept spawn,
@@ -695,6 +700,38 @@ impl super::GameState {
         }
         self.load_queue = cols.into();
         true
+    }
+
+    /// Replace every local slot's respawn point that is exactly the legacy
+    /// default ([`crate::spawn_safety::LEGACY_DEFAULT_SPAWN`]) with the world
+    /// spawn, the same point a new world starts its player on, which the next
+    /// save then writes. A spawn from a bed or `/spawnpoint` is any other value
+    /// and is never touched; a joined client's is the server's. The spawn
+    /// columns are restored or generated first, but never generated over a
+    /// column that holds saved blocks (`regen_present = false`).
+    fn repair_legacy_spawns(&mut self) {
+        use crate::spawn_safety::{restored_spawn, LEGACY_DEFAULT_SPAWN};
+        if self.joined() || self.joined_push_only {
+            return;
+        }
+        if !self.players.iter().any(|slot| slot.spawn_pos.to_array() == LEGACY_DEFAULT_SPAWN) {
+            return;
+        }
+        // The bed that would stand exactly under the default point.
+        let bed_here = self.world.get_block(0, 79, 0) == crate::block::BED;
+        for (cx, cz) in spawn_pregen_columns(&self.world, &self.biome_gen) {
+            if !self.loaded_columns.contains(&(cx, cz)) {
+                load_column_blocks(&mut self.world, cx, cz, &self.biome_gen, false);
+                crate::lighting::run_initial_pass_for_column(&mut self.world, cx, cz, &self.registry);
+                self.loaded_columns.insert((cx, cz));
+                self.chunk_intake.column_held((cx, cz));
+            }
+        }
+        let world_spawn = world_spawn_point(&self.world, &self.biome_gen);
+        for slot in &mut self.players {
+            let last = slot.player.pos;
+            slot.spawn_pos = restored_spawn(Some(slot.spawn_pos.to_array()), last, bed_here, || world_spawn);
+        }
     }
 
     /// Move player 0 to `pos` (at rest) and pre-generate + light the 5×5

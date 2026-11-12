@@ -105,8 +105,11 @@ pub struct PlayerSlot {
     /// instant, so without this a held button smashes one block every tick
     /// (~20/s). Mirrors `place_cooldown`. Transient (not saved). Spec 05.
     pub break_cooldown: u32,
-    /// Where the player respawns on death. Initialised from the world spawn
-    /// point at PlayerSlot creation; bed-settable (P4) by sleeping in a bed.
+    /// Where the player respawns on death. A new world sets it to the player's
+    /// start ([`Self::start_at`]); bed-settable (P4) by sleeping in a bed;
+    /// `/spawnpoint` sets it too. It is the point asked for, not the spot the
+    /// body stands on: the respawn settles it on dry ground
+    /// (`spawn_safety::safe_respawn_point`) and leaves the saved value alone.
     pub spawn_pos: Vec3,
     /// P6 — an in-progress fishing cast (None = not fishing). Transient: a cast
     /// doesn't survive a save, like other runtime player state.
@@ -360,6 +363,15 @@ pub struct PlayerSlot {
 }
 
 impl PlayerSlot {
+    /// Start the player at `pos`, at rest, and make it the respawn point: what a
+    /// new world does with the spawn the search chose.
+    pub fn start_at(&mut self, pos: Vec3) {
+        self.player.pos = pos;
+        self.player.velocity = Vec3::ZERO;
+        self.player.reset_fall();
+        self.spawn_pos = pos;
+    }
+
     pub(crate) fn mark_gameplay_incomplete(&mut self) { self.gameplay_carry_incomplete = true; }
     #[cfg(any(test, not(target_arch = "wasm32")))]
     pub(crate) fn gameplay_carry_complete(&self) -> bool { !self.gameplay_carry_incomplete }

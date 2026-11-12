@@ -7692,12 +7692,20 @@ impl super::GameState {
 
             // Respawn once the player chose it on the death screen (button,
             // Enter, or their pad's A) — never on a timer (W2 owner decision
-            // 2026-10-06). Spawn-point is PlayerSlot::spawn_pos (set at world
-            // load to wherever the player started); future bed-settable spawn
-            // lands later.
+            // 2026-10-06). Spawn-point is PlayerSlot::spawn_pos (a new world's
+            // start, or a bed's, or `/spawnpoint`'s). The body stands where the
+            // one respawn rule puts it (`spawn_safety::safe_respawn_point`, the
+            // same as a joiner's on the server): on dry ground, never in the sea
+            // or in the air, loading what it reads. A joined client generates
+            // nothing: the server places it and says where (`Respawned`).
             if self.players[i].combat.should_respawn() {
                 self.players[i].combat.respawn();
-                let spawn = self.players[i].spawn_pos;
+                let asked = self.players[i].spawn_pos;
+                let spawn = if self.joined() {
+                    asked
+                } else {
+                    crate::spawn_safety::safe_respawn_point(self, asked)
+                };
                 self.players[i].player.pos = spawn;
                 self.players[i].player.velocity = glam::Vec3::ZERO;
                 // W2 — a death mid-fall must not land at the spawn point.

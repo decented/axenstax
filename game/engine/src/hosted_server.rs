@@ -1656,7 +1656,7 @@ impl HostedServer {
     /// Final review fix 1 — the spawn column of every DEAD joiner, on a world
     /// this host lends (empty otherwise; sorted, deduplicated). A respawn
     /// stands the body on the first solid block of its spawn point's column
-    /// (`GameServer::standing_spot`), which reads only air while that column is
+    /// (`spawn_safety::safe_respawn_point`), which reads only air while that column is
     /// unloaded — and after a long trip with the host that column is: the
     /// streamer kept it for the host's own players and the joiner's body, both
     /// far away by now. The host client's streamer anchors each at a ring of
@@ -4289,7 +4289,7 @@ impl HostedServer {
     ///
     /// Final review fix 1 — also ignored until the column of their spawn point
     /// is loaded: the respawn stands the body on that column's ground
-    /// (`GameServer::standing_spot`), which reads only air from an unloaded
+    /// (`spawn_safety::safe_respawn_point`), which reads only air from an unloaded
     /// one (a lent world after a long trip: the host's streamer has dropped
     /// it), and the body would be put in the air above ground that arrives a
     /// frame later. The host's streamer anchors the spawn column of every dead

@@ -414,7 +414,7 @@ fn respawns_seen(client: &ChannelClientTransport) -> Vec<glam::Vec3> {
 /// where it joined, the host having walked there with it. Its spawn column was
 /// kept by nobody (the host's anchors and the joiner's body are both far off),
 /// so it is unloaded — and a respawn would stand the body in air above the raw
-/// spawn point (`GameServer::standing_spot` reads only what is loaded), the
+/// spawn point (`spawn_safety::safe_respawn_point` reads only what is loaded on a lent world), the
 /// streamer loading the ground a frame too late: buried, stuck, or falling
 /// with damage. A dead joiner's spawn column now anchors the host's streamer,
 /// and the server ignores the Respawn (the client re-sends it until
