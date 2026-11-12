@@ -50,9 +50,20 @@ fn pose_eye(hg: &mut HeadlessGame, eye: [f32; 3], yaw: f32, pitch: f32) {
     p.player.flying = true;
     p.camera.yaw = yaw;
     p.camera.pitch = pitch;
+    // The camera follows the body only inside a game tick, and the harness's
+    // wall-clock frames may run none before the shot (straight after
+    // `settle`, none did: the shot showed the old position at the new pitch).
+    p.camera.position = p.player.eye_pos();
 }
 
-fn shot(hg: &mut HeadlessGame, name: &str, points: &[(&str, [f32; 3])]) {
+fn shot(hg: &mut HeadlessGame, name: &str, eye: [f32; 3], points: &[(&str, [f32; 3])]) {
+    // Every shot is drawn from exactly the posed eye, however many game ticks
+    // the wall-clock frames ran, so runs on two trees compare pixel for pixel.
+    let cam = hg.state.players[0].camera.position;
+    assert!(
+        (cam - glam::Vec3::from_array(eye)).length() < 1e-3,
+        "{name}: the camera is at {cam}, not the posed eye {eye:?}"
+    );
     let Ok(dir) = std::env::var("TORCH_SHOTS_OUT") else { return };
     std::fs::create_dir_all(&dir).unwrap();
     let path = format!("{dir}/{name}.png");
@@ -171,9 +182,11 @@ fn game_harness_torch_diag() {
     settle(&mut hg);
 
     // Cameras, all inside the cleared volume.
-    // Close-up: eye 1.8 south of the emitter, 1.0 above its base.
-    let close = [tx as f32 + 0.5, ty as f32 + 1.0, tz as f32 + 0.5 + 1.8];
-    let close_pitch = -(0.7f32 / 1.8).atan();
+    // Close-up: eye 1.8 south of the emitter, 1.7 above its base, aimed at the
+    // pole's middle. (At 1.0 up the body sank 0.62 into the pad, and a game
+    // tick, when one ran before the shot, pushed it out: the camera moved.)
+    let close = [tx as f32 + 0.5, ty as f32 + 1.7, tz as f32 + 0.5 + 1.8];
+    let close_pitch = -(1.4f32 / 1.8).atan();
     // Wide: eye 6 south, 3.5 up — shows the light pool on the pad.
     let wide = [tx as f32 + 0.5, ty as f32 + 3.5, tz as f32 + 0.5 + 6.0];
     let wide_pitch = -(3.4f32 / 6.0).atan();
@@ -223,11 +236,11 @@ fn game_harness_torch_diag() {
             if name != "none" {
                 pose_eye(&mut hg, close, 0.0, close_pitch);
                 hg.frames(3);
-                shot(&mut hg, &format!("{name}-close-{label}"), &points);
+                shot(&mut hg, &format!("{name}-close-{label}"), close, &points);
             }
             pose_eye(&mut hg, wide, 0.0, wide_pitch);
             hg.frames(3);
-            shot(&mut hg, &format!("{name}-wide-{label}"), &points);
+            shot(&mut hg, &format!("{name}-wide-{label}"), wide, &points);
         }
     }
     eprintln!("TORCHDIAG stage centre ({tx},{ty},{tz})");
@@ -249,6 +262,46 @@ fn game_harness_torch_diag() {
             }
         }
     }
+    // The box straddles chunk-column borders (the stage centre is a column
+    // corner), and `lighting::update_for_block_change` re-runs the sky pass
+    // for the placed block's own column only: light left in a neighbour column
+    // before its roof went on spreads back in, so the sealed box held sky
+    // light 14. Relight every column the box touches from scratch, clearing
+    // all of them before any sky pass so none reseeds from another's stale
+    // cells.
+    let cs = crate::chunk::CHUNK_SIZE as i32;
+    let mut columns: Vec<(i32, i32)> = Vec::new();
+    for dx in [-3, 3] {
+        for dz in [-3, 3] {
+            columns.push(((tx + dx).div_euclid(cs), (tz + dz).div_euclid(cs)));
+        }
+    }
+    columns.sort_unstable();
+    columns.dedup();
+    let tops: Vec<i32> = columns.iter().map(|&(cx, cz)| hg.state.world.light_top(cx, cz)).collect();
+    for (&(cx, cz), &top) in columns.iter().zip(&tops) {
+        for lx in 0..cs {
+            for lz in 0..cs {
+                for y in 0..=top {
+                    hg.state.world.set_sky_light_at(cx * cs + lx, y, cz * cs + lz, 0);
+                }
+            }
+        }
+    }
+    for (&(cx, cz), &top) in columns.iter().zip(&tops) {
+        crate::lighting::initial_sky_light_for_column(&mut hg.state.world, cx, cz, (0, top), &hg.state.registry);
+    }
+    for dx in [-3, 3] {
+        for dz in [-3, 3] {
+            hg.state.rebuild_chunks_for_lighting(tx + dx, ty + 2, tz + dz);
+        }
+    }
+    let leak = (-2..=2)
+        .flat_map(|dx| (0..=4).flat_map(move |dy| (-2..=2).map(move |dz| (dx, dy, dz))))
+        .map(|(dx, dy, dz)| hg.state.world.sky_light_at(tx + dx, ty + dy, tz + dz))
+        .max()
+        .unwrap_or(0);
+    assert_eq!(leak, 0, "the sealed box must hold no sky light after the relight");
     settle(&mut hg);
     let inside = [fx + 0.5, fy + 2.5, fz + 2.5];
     let inside_pitch = -(2.2f32 / 2.0).atan();
@@ -281,7 +334,7 @@ fn game_harness_torch_diag() {
             set_time(&mut hg, t);
             pose_eye(&mut hg, inside, 0.0, inside_pitch);
             hg.frames(3);
-            shot(&mut hg, &format!("enclosed-{name}-{label}"), &box_points);
+            shot(&mut hg, &format!("enclosed-{name}-{label}"), inside, &box_points);
         }
     }
 }
