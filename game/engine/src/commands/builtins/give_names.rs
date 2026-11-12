@@ -430,13 +430,19 @@ const NOT_SUGGESTED: &[&str] = &[
 /// name. The name is the canonical (first) spelling, or the first later
 /// spelling that really resolves to the item when a block shadows the
 /// canonical one (`copper_cable` gives the cable BLOCK; the material is
-/// `coppercable`).
+/// `coppercable`). Each item appears once, under the name of the first table
+/// row that gives it.
 pub(super) static CATALOGUE: LazyLock<Vec<(String, Item)>> = LazyLock::new(build_catalogue);
 
 fn build_catalogue() -> Vec<(String, Item)> {
     let mut out: BTreeMap<String, Item> = BTreeMap::new();
     let mut offer = |names: &[&str], item: Item| {
         if NOT_SUGGESTED.contains(&names[0]) {
+            return;
+        }
+        // One name per item: when two rows give the same item (`oak_fence_post`
+        // is the same block as `fence_post`), the first row keeps it.
+        if out.values().any(|offered| *offered == item) {
             return;
         }
         let resolves = |n: &str| super::give::resolve_item(n, 1).is_ok_and(|stack| stack.item == item);
