@@ -22,6 +22,7 @@ These were found in the last playtest (build 0.2.33) and are fixed in 0.2.34. Ch
 
 - Rails and cables, powered ones too, no longer glow at night. They give off no light, so they now get as dark as the ground around them.
 - Water next to a torch is lit by it at night.
+- The Workshop is always daytime now, so working copies never go dark.
 
 **Known, not fixed yet** (if one of these happens, it is already known):
 
