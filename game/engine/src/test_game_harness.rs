@@ -192,6 +192,9 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[path = "trials_island.rs"]
     mod trials_island;
+    #[cfg(not(target_arch = "wasm32"))]
+    #[path = "torch_diag.rs"]
+    mod torch_diag;
     use super::*;
 
     /// Point `AXENSTAX_WORLDS_DIR` at one pid-scoped temp dir shared by every
