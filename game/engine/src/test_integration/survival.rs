@@ -164,14 +164,14 @@ fn a_server_copy_killed_by_a_fall_stays_dead_until_respawn_is_requested() {
     // Only the joiner's explicit Respawn brings it back: in its spawn point's
     // column, standing on the floor — not in the air above it.
     let spawn = host.server.players[0].spawn_pos;
-    let stood = host.server.respawn_player(0).expect("dead → respawned");
+    let stood = host.server.respawn_player(0, true).expect("dead → respawned");
     assert_eq!((stood.x, stood.z), (spawn.x, spawn.z), "the spawn point's column");
     assert_eq!(stood.y, 5.0, "on the stone floor (top face y = 5)");
     let sp = &host.server.players[0];
     assert!(!sp.combat.dead);
     assert_eq!(sp.combat.health, sp.combat.max_health);
     assert_eq!(sp.player.pos, stood);
-    assert_eq!(host.server.respawn_player(0), None, "a living player has nothing to respawn");
+    assert_eq!(host.server.respawn_player(0, true), None, "a living player has nothing to respawn");
 }
 
 #[test]
@@ -183,9 +183,9 @@ fn a_server_copy_must_have_been_dead_20_ticks_before_a_respawn_is_honoured() {
 
     // Dead on tick 1 of its death; the counter reads n after n ticks.
     tick_with_idle_input(&mut host, 19);
-    assert_eq!(host.server.respawn_player(0), None, "19 ticks dead is too soon");
+    assert_eq!(host.server.respawn_player(0, true), None, "19 ticks dead is too soon");
     assert!(host.server.players[0].combat.dead, "and changes nothing");
     tick_with_idle_input(&mut host, 1);
-    assert!(host.server.respawn_player(0).is_some(), "20 ticks dead is enough");
+    assert!(host.server.respawn_player(0, true).is_some(), "20 ticks dead is enough");
     assert!(!host.server.players[0].combat.dead);
 }

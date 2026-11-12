@@ -5988,6 +5988,7 @@ impl super::GameState {
         };
         crate::sim_lend::LentSim::lend(&mut *hs, parts, clock).tick();
         let (sim_changes, edit_cells) = hs.take_lent_changes();
+        let stamped = hs.take_lent_stamp_cells();
         // D4 slice 2 — the strike the server's weather landed in this world.
         let lent_strike = hs.server.take_lent_strike();
         // D4 slice 3 — what the server's mob simulation did to this client's
@@ -6002,6 +6003,9 @@ impl super::GameState {
                 .map(|bc| (bc.x, bc.y, bc.z))
                 .chain(edit_cells.iter().copied()),
         );
+        // A runtime stamp (Satoshi's house) also lights the sections round it:
+        // queue them for the budgeted remesh, as the standalone path does.
+        self.queue_runtime_edit_neighbours(stamped);
         self.fire_power_challenges(&sim_changes);
         if let Some(strike) = lent_strike {
             self.present_strike(strike);
@@ -6516,12 +6520,15 @@ impl super::GameState {
         // server's (`SimSystem::Population`).
         if !joined && crate::sim_mobs::population_due(self.tick_counter) {
             if self.sim_runs(SimSystem::Population) {
+                let live_bodies: Vec<glam::Vec3> =
+                    self.players.iter().filter(|s| !s.combat.dead).map(|s| s.player.pos).collect();
                 let changes = crate::sim_mobs::population(
                     &mut self.world,
                     &self.biome_gen,
                     &self.registry,
                     &mut self.ecs,
                     self.tick_counter,
+                    &live_bodies,
                 );
                 // Satoshi's house: raw block writes, relit by `population`. Draw
                 // it now, as a player's own edit would be. (A lent world's

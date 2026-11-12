@@ -1500,6 +1500,25 @@ impl World {
             .any(|cy| self.chunks.get(&(cx, cy, cz)).is_some_and(|c| !c.is_empty()))
     }
 
+    /// Has the section `(cx, cy, cz)` been edited since generation, or did it
+    /// come from a save or the network: its chunk's persist mark (what a save
+    /// writes a column for), or any chunk of it held in the evicted store? A
+    /// section nobody has touched reads `false`, as does one that is not loaded.
+    pub fn section_edited(&self, cx: i32, cy: i32, cz: i32) -> bool {
+        self.evicted_columns.contains(&(cx, cz))
+            || self.evicted.contains_key(&(cx, cy, cz))
+            || self.chunks.get(&(cx, cy, cz)).is_some_and(|c| c.persist())
+    }
+
+    /// Test setup: forget every edit made while building the scene, as if the
+    /// world had just been generated (`set_block` marks a chunk for saving).
+    #[cfg(test)]
+    pub(crate) fn forget_edits(&mut self) {
+        for c in self.chunks.values_mut() {
+            c.clear_persist();
+        }
+    }
+
     /// The chunk a block/placed-bit write at `(cx, cy, cz)` lands in: the
     /// evicted store for an evicted column (write-through — never a stray in
     /// `chunks` that restore/save would silently discard), else `chunks`.

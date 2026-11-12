@@ -65,11 +65,14 @@ impl super::GameState {
             .as_ref()
             .map(|hs| hs.lent_joiner_columns())
             .unwrap_or_default();
-        let respawn_cols = self
-            .hosted_server
-            .as_ref()
-            .map(|hs| hs.lent_respawn_columns())
-            .unwrap_or_default();
+        // A dead joiner's spawn column, and the world spawn's (its fallback).
+        let respawn_cols = respawn_anchor_columns(
+            self.hosted_server
+                .as_ref()
+                .map(|hs| hs.lent_respawn_columns())
+                .unwrap_or_default(),
+            world_spawn_chunk(&self.world, &self.biome_gen),
+        );
         let anchors = client_stream_anchors(&player_cols, rd, !self.joined(), &joiner_cols, &respawn_cols);
         let mut nearest_to = vec![(pcx0, pcz0)];
         nearest_to.extend_from_slice(&joiner_cols);
@@ -378,6 +381,11 @@ impl super::GameState {
         // poll branch already restored world + players (`world_preloaded`), so
         // running FRESH would clobber the restored position + kit slots.
         let load_ok = load_result.is_some();
+        // A brand-new world of this machine's own (not a resume, not a joined
+        // session): its start is its respawn point, whatever spawn preference
+        // then moves it (`start_at`, and again after that move below).
+        #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
+        let mut fresh = fresh_setup_wanted(load_ok, world_preloaded) && !self.joined();
         if let Some((save_data, _chunk_count)) = load_result {
             // Before the load queue stamps anything with the tick (fires).
             self.restore_saved_clock(save_data.clock());
@@ -624,6 +632,8 @@ impl super::GameState {
             match crate::handover::live::personal_adapter::install(&save, &mut self.players[0]) {
                 Ok(binding) => {
                     self.local_personal = Some(binding);
+                    // A personal save has set this slot's position and spawn.
+                    fresh = false;
                     self.players[0].gameplay_clock.restore(self.tick_counter);
                 },
                 Err(why) => { self.leave_world_with_notice(crate::world_exit::SaveChoice::Abandon, format!("This world couldn't be opened: {why}")); return false; }
@@ -683,6 +693,14 @@ impl super::GameState {
                 }
             }
             self.pending_spawn_pref = crate::spawn_pref::SpawnPref::Default;
+        }
+        // The start the player was finally given (a "Near village" or biome
+        // preference moves it off the world spawn `start_at` recorded) is the
+        // respawn point, so a first death does not send them back to a world
+        // spawn that may be hundreds of blocks away. Loads and joins are not
+        // `fresh`: their saved or host-given spawn stands.
+        if fresh {
+            self.players[0].spawn_pos = self.players[0].player.pos;
         }
 
         // Build the load queue: every column within render distance around the
@@ -795,7 +813,7 @@ impl super::GameState {
     /// [`Self::load_one_column`] without the meshing: restore or generate,
     /// light, register fluids and fire, scatter wildlife, mark loaded. The
     /// caller meshes the column (alone or with its batch) afterwards.
-    fn load_column_unmeshed(&mut self, cx: i32, cz: i32) {
+    pub(crate) fn load_column_unmeshed(&mut self, cx: i32, cz: i32) {
         // Spec 02 §7.5 — restore an evicted column first (it wins over any
         // world-gen spill a neighbour left); generate only if neither.
         self.column_sims().load_queued(cx, cz);
@@ -1712,6 +1730,35 @@ pub(crate) fn world_spawn_xz(
     }
 }
 
+/// The chunk column the world spawn is in (before the clear-ground search): the
+/// origin's for a flat/Workshop or v2 world, else the dry column the spawn search chose.
+pub(crate) fn world_spawn_chunk(
+    world: &crate::world::World,
+    biome_gen: &crate::biome::BiomeGenerator,
+) -> (i32, i32) {
+    if world.is_workshop || world.has_flat_floor() {
+        (0, 0)
+    } else {
+        crate::spawn_search::world_spawn_column(biome_gen).chunk()
+    }
+}
+
+/// The columns a lending host's streamer anchors for its dead joiners: each
+/// one's spawn column (`dead_spawn_cols`), and, whenever there is one, the
+/// world spawn's column too. A respawn whose own spawn is sea falls back to the
+/// world spawn (`spawn_safety::safe_respawn_point`), and a lent world loads
+/// nothing for it, so the ring it reads must already be there. Same anchor
+/// radius ([`RESPAWN_ANCHOR_RADIUS`], one column: the spawn's 3x3).
+pub(crate) fn respawn_anchor_columns(
+    mut dead_spawn_cols: Vec<(i32, i32)>,
+    spawn_chunk: (i32, i32),
+) -> Vec<(i32, i32)> {
+    if !dead_spawn_cols.is_empty() && !dead_spawn_cols.contains(&spawn_chunk) {
+        dead_spawn_cols.push(spawn_chunk);
+    }
+    dead_spawn_cols
+}
+
 /// The nine chunk columns round the world spawn that [`world_spawn_point`]
 /// reads (the +-6 block clear-ground search stays inside them). Generate these
 /// before asking for the spawn. A flat/Workshop world and a v2 world: the 3x3
@@ -1721,11 +1768,7 @@ pub(crate) fn spawn_pregen_columns(
     world: &crate::world::World,
     biome_gen: &crate::biome::BiomeGenerator,
 ) -> [(i32, i32); 9] {
-    let (cx, cz) = if world.is_workshop || world.has_flat_floor() {
-        (0, 0)
-    } else {
-        crate::spawn_search::world_spawn_column(biome_gen).chunk()
-    };
+    let (cx, cz) = world_spawn_chunk(world, biome_gen);
     let mut out = [(0, 0); 9];
     let mut i = 0;
     for dx in -1..=1 {

@@ -174,7 +174,7 @@ fn a_respawn_at_a_buried_spawn_point_stands_clear() {
     sp.combat.die(crate::survival::DamageCause::Generic);
     sp.dead_ticks = crate::server::MIN_DEAD_TICKS_BEFORE_RESPAWN;
     s.players.push(sp);
-    let at = s.respawn_player(0).expect("respawned");
+    let at = s.respawn_player(0, true).expect("respawned");
     body_fits(&s, at).unwrap();
 }
 
@@ -192,7 +192,7 @@ fn a_respawn_with_no_bed_on_a_sea_origin_world_lands_on_dry_ground() {
     sp.combat.die(crate::survival::DamageCause::Generic);
     sp.dead_ticks = crate::server::MIN_DEAD_TICKS_BEFORE_RESPAWN;
     s.players.push(sp);
-    let at = s.respawn_player(0).expect("respawned");
+    let at = s.respawn_player(0, true).expect("respawned");
     body_fits(&s, at).unwrap_or_else(|why| panic!("seed {seed}: {why}"));
     let ground = s.world.get_block(at.x.floor() as i32, at.y.floor() as i32 - 1, at.z.floor() as i32);
     assert!(!block::is_fluid(ground), "seed {seed}: standing on a liquid at {at:?}");
@@ -362,6 +362,11 @@ fn sea_server() -> (GameServer, u32, Vec3) {
     (s, seed, world_spawn)
 }
 
+/// The rule on an owning server: it may load the columns it reads.
+fn rule(s: &mut GameServer, spawn: Vec3) -> Vec3 {
+    safe_respawn_point(&mut ServerRespawn { server: s, may_load: true }, spawn)
+}
+
 fn assert_dry_standing(s: &GameServer, at: Vec3, what: &str) {
     assert!(is_dry_standing(&s.world, &s.registry, at), "{what}: {at:?} is not dry standing ground");
     body_fits(s, at).unwrap_or_else(|why| panic!("{what}: {why}"));
@@ -374,7 +379,7 @@ fn assert_dry_standing(s: &GameServer, at: Vec3, what: &str) {
 fn the_respawn_rule_leaves_a_sea_column_for_the_world_spawn() {
     let (mut s, seed, world_spawn) = sea_server();
     for y in [80.0, 64.0, 63.0, 30.0, 200.0] {
-        let at = safe_respawn_point(&mut s, Vec3::new(0.5, y, 0.5));
+        let at = rule(&mut s, Vec3::new(0.5, y, 0.5));
         assert_dry_standing(&s, at, &format!("seed {seed} y {y}"));
         assert_eq!(at, world_spawn, "seed {seed} y {y}: the world spawn, the point a new world starts on");
     }
@@ -385,7 +390,7 @@ fn the_respawn_rule_leaves_a_sea_column_for_the_world_spawn() {
 #[test]
 fn the_respawn_rule_keeps_a_spawn_that_already_stands_on_dry_ground() {
     let (mut s, _, world_spawn) = sea_server();
-    assert_eq!(safe_respawn_point(&mut s, world_spawn), world_spawn);
+    assert_eq!(rule(&mut s, world_spawn), world_spawn);
     // A bed under a roof (the spawn cell is under a ceiling, on a bed) stays
     // under the roof: the rule never lifts it onto the roof.
     let (x, y, z) = (world_spawn.x.floor() as i32, world_spawn.y.floor() as i32, world_spawn.z.floor() as i32);
@@ -395,11 +400,11 @@ fn the_respawn_rule_keeps_a_spawn_that_already_stands_on_dry_ground() {
             s.world.set_block(x + dx, y + 3, z + dz, block::STONE);
         }
     }
-    assert_eq!(safe_respawn_point(&mut s, world_spawn), world_spawn, "the bed's spot, under its roof");
+    assert_eq!(rule(&mut s, world_spawn), world_spawn, "the bed's spot, under its roof");
     // The bed gone: the body stands where the floor now is, still under the roof.
     s.world.set_block(x, y - 1, z, block::AIR);
     s.world.set_block(x, y - 2, z, block::STONE);
-    let at = safe_respawn_point(&mut s, world_spawn);
+    let at = rule(&mut s, world_spawn);
     assert!(is_dry_standing(&s.world, &s.registry, at), "{at:?}");
     assert!(at.y < (y + 3) as f32, "not on the roof: {at:?}");
 }
@@ -412,15 +417,14 @@ fn the_respawn_rule_loads_what_it_reads_unless_the_world_is_lent() {
     let (mut s, seed, _) = sea_server();
     let far = Vec3::new(1200.5, 90.0, -900.5);
     assert!(!s.world.is_column_present_at(1200, -901));
-    let at = safe_respawn_point(&mut s, far);
+    let at = rule(&mut s, far);
     assert!(s.world.is_column_present_at(1200, -901), "the owning server loaded the spawn's column");
     assert_dry_standing(&s, at, &format!("seed {seed} far spawn"));
 
     // A lent world's server may not generate into the host's world: it reads
     // what the host holds (the world spawn's ring) and generates nothing.
     let (mut lent, _, world_spawn) = sea_server();
-    lent.lent = true;
-    let at = safe_respawn_point(&mut lent, far);
+    let at = safe_respawn_point(&mut ServerRespawn { server: &mut lent, may_load: false }, far);
     assert!(!lent.world.is_column_present_at(1200, -901), "a lent world's server generated nothing");
     assert_eq!(at, world_spawn, "the unloaded spawn falls back to the world spawn it holds");
 }
@@ -431,7 +435,7 @@ fn the_respawn_rule_takes_a_spawn_that_is_not_a_number_as_it_comes() {
     let (mut s, _, _) = sea_server();
     let before = s.world.chunk_positions().count();
     for pos in [Vec3::new(f32::NAN, 70.0, 0.5), Vec3::new(f32::INFINITY, 70.0, 0.5), Vec3::new(f32::MAX, f32::MAX, f32::MIN), Vec3::new(3.0e9, 70.0, 0.5)] {
-        let at = safe_respawn_point(&mut s, pos);
+        let at = rule(&mut s, pos);
         assert!(at.x.is_nan() == pos.x.is_nan() && (at.x.is_nan() || at == pos), "{pos:?} -> {at:?}");
     }
     assert_eq!(s.world.chunk_positions().count(), before, "and generates nothing out there");
@@ -449,15 +453,15 @@ fn the_server_respawn_and_the_single_player_respawn_share_one_function() {
     sp.combat.die(crate::survival::DamageCause::Generic);
     sp.dead_ticks = crate::server::MIN_DEAD_TICKS_BEFORE_RESPAWN;
     s.players.push(sp);
-    let expected = safe_respawn_point(&mut s, default);
-    let at = s.respawn_player(0).expect("respawned");
+    let expected = rule(&mut s, default);
+    let at = s.respawn_player(0, true).expect("respawned");
     assert_eq!(at, expected, "seed {seed}: one rule");
     assert_dry_standing(&s, at, "server respawn");
     assert_eq!(s.players[0].spawn_pos, default, "the saved spawn point itself is left alone");
 
     let server_src = include_str!("../server.rs");
     assert!(!server_src.contains("fn standing_spot"), "no second copy of the rule in server.rs");
-    assert!(server_src.contains("spawn_safety::safe_respawn_point(self"), "the server calls the shared rule");
+    assert!(server_src.contains("spawn_safety::safe_respawn_point("), "the server calls the shared rule");
     let game_src = include_str!("../game_loop.rs");
     assert!(game_src.contains("spawn_safety::safe_respawn_point(self"), "the single-player respawn calls it too");
 }
@@ -467,7 +471,7 @@ fn the_server_respawn_and_the_single_player_respawn_share_one_function() {
 fn a_respawn_asked_by_a_living_player_does_nothing() {
     let (mut s, _, _) = sea_server();
     s.players.push(crate::server::ServerPlayer::new(Vec3::new(1200.5, 90.0, -900.5)));
-    assert_eq!(s.respawn_player(0), None);
+    assert_eq!(s.respawn_player(0, true), None);
     assert!(!s.world.is_column_present_at(1200, -901), "and loads no column");
 }
 
@@ -605,4 +609,143 @@ fn the_load_repair_uses_the_saved_columns_and_fixes_only_the_legacy_default() {
     assert_eq!(slots[1].spawn_pos, Vec3::new(-40.5, 71.0, 88.25), "a chosen spawn is untouched");
     assert_eq!(loaded.get_block(marker.0, marker.1, marker.2), block::GLASS, "the saved column was not generated over");
     let _ = crate::save::delete_world(&name);
+}
+
+// ---- A bed in a small room (S2), and a spawn that is sea all round (S9) ----
+
+/// A world made of just what a test puts in it, and no generator reach.
+struct PlainWorld {
+    world: World,
+    registry: BlockRegistry,
+    biome_gen: crate::biome::BiomeGenerator,
+}
+
+impl PlainWorld {
+    fn new(world: World) -> Self {
+        Self {
+            world,
+            registry: BlockRegistry::new(),
+            biome_gen: crate::biome::BiomeGenerator::new(1, crate::biome::Generator::V2),
+        }
+    }
+}
+
+impl RespawnWorld for PlainWorld {
+    fn respawn_parts(&self) -> (&World, &BlockRegistry, &crate::biome::BiomeGenerator) {
+        (&self.world, &self.registry, &self.biome_gen)
+    }
+    fn ensure_respawn_column(&mut self, _cx: i32, _cz: i32) -> bool {
+        false
+    }
+}
+
+/// Satoshi's own hut (the shared `hut_cells`: floor, two wall rows, roof) with
+/// its floor at `(ox, oy, oz)`, on stone.
+fn hut_world(ox: i32, oy: i32, oz: i32) -> World {
+    let mut w = World::new();
+    for z in oz - 3..oz + 8 {
+        for x in ox - 3..ox + 8 {
+            for y in oy - 4..oy {
+                w.set_block(x, y, z, block::STONE);
+            }
+        }
+    }
+    for c in crate::satoshi::hut_cells() {
+        w.set_block(ox + c.rx as i32, oy + c.ry as i32, oz + c.rz as i32, c.block_id);
+    }
+    w
+}
+
+/// A bed inside the hut `build_house` makes: the respawn stays inside the hut,
+/// on its floor, beside the bed. Before, the body went on the roof (the cell
+/// above the bed has the ceiling for a head, so the vertical nudge climbed
+/// past it).
+#[test]
+fn a_bed_in_satoshis_hut_respawns_beside_the_bed_on_the_floor() {
+    let (ox, oy, oz) = (10, 64, 20);
+    for rz in 1..=3 {
+        for rx in 1..=3 {
+            let mut ctx = PlainWorld::new(hut_world(ox, oy, oz));
+            let bed = [ox + rx, oy + 1, oz + rz];
+            ctx.world.set_block(bed[0], bed[1], bed[2], block::BED);
+            let spawn = crate::item_actions::bed_spawn(bed);
+            let at = safe_respawn_point(&mut ctx, spawn);
+            let what = format!("bed at hut cell ({rx},{rz}): respawn {at:?}");
+            // Inside the hut's footprint (its doorway is part of it).
+            assert!(at.x >= ox as f32 && at.x < (ox + 5) as f32, "{what}: inside the hut");
+            assert!(at.z >= oz as f32 && at.z < (oz + 5) as f32, "{what}: inside the hut");
+            assert_eq!(at.y, (oy + 1) as f32, "{what}: on the floor, not the roof");
+            assert!(
+                (at.x.floor() as i32, at.z.floor() as i32) != (bed[0], bed[2]),
+                "{what}: beside the bed, not in it"
+            );
+            assert!(is_dry_standing(&ctx.world, &ctx.registry, at), "{what}");
+        }
+    }
+}
+
+/// A spawn that is already clear is never moved sideways.
+#[test]
+fn a_clear_spawn_is_not_moved_beside_anything() {
+    let mut ctx = PlainWorld::new(hut_world(10, 64, 20));
+    let spawn = Vec3::new(12.5, 65.0, 22.5);
+    assert_eq!(safe_respawn_point(&mut ctx, spawn), spawn, "standing on the hut floor already");
+}
+
+/// An island of dry land in a lake: the nearest dry standing spot within the
+/// reach is found, and only within it.
+#[test]
+fn the_dry_land_search_finds_land_within_its_reach_only() {
+    let registry = BlockRegistry::new();
+    let mut lake = World::new();
+    for z in -40..=40 {
+        for x in -40..=40 {
+            for y in 58..=62 {
+                lake.set_block(x, y, z, block::STONE);
+            }
+            lake.set_block(x, 63, z, block::WATER);
+        }
+    }
+    let near = Vec3::new(0.5, 64.0, 0.5);
+    assert_eq!(dry_land_near(&lake, &registry, near), None, "all water: nothing dry");
+    // Land 25 blocks off: found, standing on it.
+    lake.set_block(25, 63, 0, block::STONE);
+    assert_eq!(dry_land_near(&lake, &registry, near), Some(Vec3::new(25.5, 64.0, 0.5)));
+    // Land only 40 blocks off: out of reach.
+    lake.set_block(25, 63, 0, block::WATER);
+    lake.set_block(40, 63, 0, block::STONE);
+    assert_eq!(dry_land_near(&lake, &registry, near), None, "past the search radius");
+}
+
+/// A world whose own spawn is sea, with land a few blocks beyond: the respawn
+/// lands on that land instead of falling back to `here`, over the water.
+#[test]
+fn a_world_spawn_that_is_sea_respawns_on_the_nearest_loaded_land() {
+    let (mut s, seed, world_spawn) = sea_server();
+    let (x, y, z) = (world_spawn.x.floor() as i32, world_spawn.y.floor() as i32, world_spawn.z.floor() as i32);
+    // Drown the spawn and everything round it to 8 blocks, ground and all, so
+    // the spawn search's own +-6 reach finds nothing dry either.
+    for dz in -8..=8 {
+        for dx in -8..=8 {
+            for dy in -40..=34 {
+                s.world.set_block(x + dx, y + dy, z + dz, block::WATER);
+            }
+        }
+    }
+    // A spawn in a sea column far off falls to the world spawn, which is wet now.
+    let at = rule(&mut s, Vec3::new(0.5, 80.0, 0.5));
+    assert!(is_dry_standing(&s.world, &s.registry, at), "seed {seed}: {at:?} is dry standing ground");
+    let (dx, dz) = ((at.x - world_spawn.x).abs(), (at.z - world_spawn.z).abs());
+    assert!(dx.max(dz) <= DRY_SEARCH_RADIUS as f32 + 1.0, "seed {seed}: {at:?} within reach of the spawn {world_spawn:?}");
+    assert!(dx.max(dz) > 8.0, "seed {seed}: and outside the flooded patch: {at:?}, spawn {world_spawn:?}");
+}
+
+/// A lending host's streamer anchors a dead joiner's spawn column and the
+/// world spawn's, so the fallback's ring is loaded when a lent respawn reads it.
+#[test]
+fn a_lending_host_anchors_the_world_spawn_ring_for_a_dead_joiner() {
+    use crate::chunk_stream::respawn_anchor_columns;
+    assert!(respawn_anchor_columns(vec![], (3, 4)).is_empty(), "nobody dead: nothing extra to keep");
+    assert_eq!(respawn_anchor_columns(vec![(9, 9)], (3, 4)), vec![(9, 9), (3, 4)]);
+    assert_eq!(respawn_anchor_columns(vec![(3, 4)], (3, 4)), vec![(3, 4)], "not twice");
 }

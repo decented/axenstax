@@ -234,17 +234,33 @@ pub fn population_due(tick: u64) -> bool {
 /// Returns the block changes the pass made (Satoshi's house, the first time),
 /// already relit in `world`: the caller tells whoever draws or holds a copy of
 /// the world (remesh the touched sections; on a hosted world, queue them for
-/// the joiners). Raw `World::set_block` does none of that.
+/// the joiners). Raw `World::set_block` does none of that. `players`: the
+/// positions of the live bodies in this world.
 pub fn population(
     world: &mut World,
     biome_gen: &crate::biome::BiomeGenerator,
     registry: &BlockRegistry,
     ecs: &mut hecs::World,
     tick: u64,
+    players: &[glam::Vec3],
 ) -> Vec<crate::protocol::BlockChange> {
     crate::village_gen::spawn_initial_villagers(world, biome_gen, ecs);
     let spawn = crate::chunk_stream::world_spawn_xz(world, biome_gen);
-    let house = crate::satoshi::tick_spawn(world, ecs, spawn, registry);
+    // Where Satoshi's house must not stand: the cell a player really starts
+    // on (the spawn search's clear-ground spot, which can be a few blocks off
+    // the spawn column) and every live player's cell. Only worked out while
+    // he has no house to place.
+    let avoid: Vec<(i32, i32)> = if world.satoshi.enabled && world.satoshi.home.is_none() {
+        let start = crate::chunk_stream::world_spawn_point(world, biome_gen);
+        std::iter::once(start)
+            .chain(players.iter().copied())
+            .filter(|p| p.is_finite())
+            .map(|p| (p.x.floor() as i32, p.z.floor() as i32))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let house = crate::satoshi::tick_spawn(world, ecs, spawn, registry, &avoid, tick);
     crate::lighting::relight_stamped(world, registry, &house);
     crate::village_gen::tick_knight_spawn(world, biome_gen, ecs);
     crate::village_gen::tick_wanderer_migration(world, ecs, tick);

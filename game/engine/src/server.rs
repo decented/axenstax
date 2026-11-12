@@ -1097,6 +1097,11 @@ pub struct GameServer {
     /// eventually player actions). Drained by the snapshot builder in
     /// hosted_server.rs into StateUpdatePacket.block_changes.
     pub pending_block_changes: Vec<crate::protocol::BlockChange>,
+    /// Lent only: the cells a runtime stamp (Satoshi's house) wrote since the
+    /// host client last drained them (`HostedServer::take_lent_stamp_cells`).
+    /// The host remeshes the sections they touch and queues the ones round them.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) lent_stamp_cells: Vec<(i32, i32, i32)>,
     /// Stacks granted by THIS tick's server-side item pickup (death-drops
     /// phase 2b), keyed by player index. Per-tick data: cleared at the top of
     /// each pickup pass, drained by `hosted_server.rs` right after
@@ -1261,6 +1266,7 @@ impl GameServer {
             play_mode: crate::play_mode::PlayMode::Survival,
             is_creative: false,
             pending_block_changes: Vec::new(),
+            lent_stamp_cells: Vec::new(),
             pending_item_grants: Vec::new(),
             pending_kill_events: Vec::new(),
             night_calendar: crate::item_actions::NightCalendar::default(),
@@ -2200,7 +2206,16 @@ impl GameServer {
                 &self.registry,
                 &mut self.ecs,
                 self.tick_counter,
+                &bodies
+                    .positions
+                    .iter()
+                    .copied()
+                    .filter(|p| *p != crate::species_ai::ABSENT_PLAYER)
+                    .collect::<Vec<_>>(),
             );
+            // The host's own remesh of the sections round the house (the light
+            // reaches them), which `take_lent_changes` does not cover.
+            self.lent_stamp_cells.extend(changes.iter().map(|bc| (bc.x, bc.y, bc.z)));
             self.pending_block_changes.extend(changes);
         }
         // HP-3 — the brigand pre-pass, then the defenders, then the generic
@@ -3263,17 +3278,24 @@ impl GameServer {
     /// would be a free teleport home — and for one dead for fewer than
     /// [`MIN_DEAD_TICKS_BEFORE_RESPAWN`] ticks, which stops a client that
     /// reports zero health and asks at once from teleporting home at full
-    /// health (its own resend covers an honest quick click).
-    pub fn respawn_player(&mut self, idx: usize) -> Option<Vec3> {
+    /// health (its own resend covers an honest quick click). `may_load`: whether
+    /// the rule may load the columns it reads (see the body).
+    pub fn respawn_player(&mut self, idx: usize, may_load: bool) -> Option<Vec3> {
         let sp = self.players.get(idx)?;
         if !sp.combat.dead || sp.dead_ticks < MIN_DEAD_TICKS_BEFORE_RESPAWN {
             return None;
         }
         // The one respawn rule (`spawn_safety::safe_respawn_point`), shared
         // with the single-player respawn: on dry ground, loading what it reads
-        // when this server owns its world.
+        // when `may_load`. The caller says so (`HostedServer` knows how this
+        // server holds its world): an owning server loads; a lending host's
+        // columns are its client's streamer's, and the server's own world
+        // outside the lend window is an empty placeholder to generate nothing into.
         let asked = sp.spawn_pos;
-        let spawn = crate::spawn_safety::safe_respawn_point(self, asked);
+        let spawn = crate::spawn_safety::safe_respawn_point(
+            &mut crate::spawn_safety::ServerRespawn { server: self, may_load },
+            asked,
+        );
         let sp = &mut self.players[idx];
         // MP-D2c-1 — a respawn never keeps a seat (its death already ended
         // the ride, `end_dead_riders`; this is the backstop): the follow

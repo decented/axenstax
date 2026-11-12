@@ -547,7 +547,7 @@ fn a_riders_death_ends_the_ride_and_its_respawn_finds_no_seat() {
     rig.tick(crate::server::MIN_DEAD_TICKS_BEFORE_RESPAWN + 1);
     rig.hs.server.players[slot].riding = Some(horse);
     rig.ecs_mut().insert_one(horse, Ridden).unwrap();
-    let spawn = rig.hs.server.respawn_player(slot).expect("respawned");
+    let spawn = rig.hs.server.respawn_player(slot, true).expect("respawned");
     assert!(rig.riding(0).is_none());
     assert!(rig.ecs().get::<&Ridden>(horse).is_err());
     rig.tick(2);

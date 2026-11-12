@@ -135,7 +135,7 @@ fn a_respawn_arms_it_again() {
     rig.sp().combat.die(crate::survival::DamageCause::Mob(MobType::Berserker));
     rig.sp().dead_ticks = crate::server::MIN_DEAD_TICKS_BEFORE_RESPAWN;
     let slot = rig.slot;
-    let spawn = rig.hs.server.respawn_player(slot).expect("respawned");
+    let spawn = rig.hs.server.respawn_player(slot, true).expect("respawned");
     assert_eq!(rig.sp().spawn_protection, PROTECTION_TICKS, "a respawn arms the full window");
     rig.at = spawn;
     let mob = rig.spawn(MobType::Berserker, BESIDE);

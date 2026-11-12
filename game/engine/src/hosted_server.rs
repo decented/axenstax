@@ -1818,6 +1818,15 @@ impl HostedServer {
         )
     }
 
+    /// D1, lent only — the cells a runtime stamp (Satoshi's house) wrote in the
+    /// host's world this tick, for the host client to queue the sections round
+    /// them for a later remesh (the light the stamp adds reaches them). Cleared
+    /// by the call; empty on an owning server.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub fn take_lent_stamp_cells(&mut self) -> Vec<(i32, i32, i32)> {
+        std::mem::take(&mut self.server.lent_stamp_cells)
+    }
+
     /// Queue block changes the host client made itself (a `/we` region batch)
     /// for the next broadcast, without the host remeshing them again.
     pub fn queue_host_broadcast(&mut self, changes: impl IntoIterator<Item = protocol::BlockChange>) {
@@ -4326,7 +4335,7 @@ impl HostedServer {
         if !self.server.loaded_columns.contains(&column) {
             return;
         }
-        if let Some(at) = self.server.respawn_player(i) {
+        if let Some(at) = self.server.respawn_player(i, !self.lends_host_world()) {
             // FU4a (FU3 verify L1) — a new life: edits still waiting from the
             // last one are sent back, not applied (`process_edit_group`).
             self.server.players[i].respawns = next_respawns;
@@ -10328,7 +10337,7 @@ pub(crate) mod tests {
         send_signed_join(&second, [66;32], Some([34;32])); hs.tick();
         let i = hs.server.players.len()-1;
         assert!(hs.server.players[i].combat.dead); assert!(hs.server.players[i].death_handled);
-        assert!(hs.server.respawn_player(i).is_none(), "dead rejoin cannot bypass the respawn guard");
+        assert!(hs.server.respawn_player(i, true).is_none(), "dead rejoin cannot bypass the respawn guard");
         let mut events = Vec::new(); let mut syncs = 0;
         while let Some(pkt) = second.try_recv_from_server() {
             match protocol::deserialize_header(&pkt) {
@@ -10342,7 +10351,7 @@ pub(crate) mod tests {
         assert_eq!(hs.server.world.iter_graves().count(),1);
         assert_eq!(hs.server.world.grave_at(cell).unwrap().slots[0].as_ref().unwrap().count,3);
         assert_eq!(crate::window_events::effective_window(&hs.server.players[i]).cursor.as_ref().unwrap().count,2);
-        assert!(hs.server.respawn_player(i).is_some()); assert!(!hs.server.players[i].combat.dead);
+        assert!(hs.server.respawn_player(i, true).is_some()); assert!(!hs.server.players[i].combat.dead);
     }
 
     #[test]
