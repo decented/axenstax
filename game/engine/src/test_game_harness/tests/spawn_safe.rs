@@ -9,9 +9,12 @@ use crate::block;
 use crate::spawn_safety::{is_dry_standing, LEGACY_DEFAULT_SPAWN};
 use glam::Vec3;
 
-/// A headless game whose next world is a new v3 world on `seed` (the seed the
-/// lobby would have read from the world's meta), Satoshi `satoshi`.
-fn boot_new_world(seed: u32, satoshi: bool) -> HeadlessGame {
+/// A headless game whose next world, `name`, is a new v3 world on `seed` (the
+/// seed the lobby would have read from the world's meta), Satoshi `satoshi`.
+/// Each test names its own world: they share one saves folder, and a world a
+/// sibling saved is a saved world, not a new one.
+fn boot_new_world(name: &str, seed: u32, satoshi: bool) -> HeadlessGame {
+    let _ = crate::save::delete_world(name);
     let state = pollster::block_on(crate::GameState::new_headless_routed(
         1280,
         720,
@@ -22,7 +25,7 @@ fn boot_new_world(seed: u32, satoshi: bool) -> HeadlessGame {
     hg.state.biome_gen = crate::biome::BiomeGenerator::new(seed, generator);
     hg.state.world.generator = generator;
     hg.state.world.satoshi.enabled = satoshi;
-    hg.enter_world(&format!("harness-spawn-{seed}-{satoshi}"));
+    hg.enter_world(name);
     hg
 }
 
@@ -47,7 +50,7 @@ fn dry(hg: &HeadlessGame, p: Vec3) -> bool {
 fn game_harness_spawn_a_sea_origin_world_starts_and_respawns_on_dry_ground() {
     super::isolate_saves();
     let seed = crate::spawn_search::sea_origin_seed();
-    let mut hg = boot_new_world(seed, false);
+    let mut hg = boot_new_world("harness-spawn-respawn", seed, false);
 
     // The start is the respawn point, and it is dry ground, not the legacy default.
     let start = hg.state.players[0].player.pos;
@@ -74,7 +77,8 @@ fn game_harness_spawn_a_sea_origin_world_starts_and_respawns_on_dry_ground() {
 fn game_harness_spawn_a_legacy_default_spawn_is_repaired_on_load_and_a_chosen_one_is_not() {
     super::isolate_saves();
     let seed = crate::spawn_search::sea_origin_seed();
-    let mut hg = boot_new_world(seed, false);
+    let name = "harness-spawn-repair";
+    let mut hg = boot_new_world(name, seed, false);
     let start = hg.state.players[0].player.pos;
     // Save it the way an old build did (the default), then as a bed sets it.
     for (spawn, repaired) in [
@@ -85,12 +89,11 @@ fn game_harness_spawn_a_legacy_default_spawn_is_repaired_on_load_and_a_chosen_on
         assert!(hg.state.leave_world(crate::world_exit::SaveChoice::Save, crate::world_exit::ExitTo::Lobby));
         // The reopen reads the world's seed and generator from its meta, which a
         // harness world has not been given: name them, or it opens another world.
-        let name = format!("harness-spawn-{seed}-false");
-        let mut meta = crate::save::load_world_meta(&name);
+        let mut meta = crate::save::load_world_meta(name);
         meta.seed = seed;
         meta.worldgen_version = crate::biome::Generator::V3.version();
-        crate::save::save_world_meta(&name, &meta).expect("meta written");
-        hg.reopen_world(&name);
+        crate::save::save_world_meta(name, &meta).expect("meta written");
+        hg.reopen_world(name);
         assert_eq!(hg.state.biome_gen.seed, seed, "control: the reopened world is the same world");
         let got = hg.state.players[0].spawn_pos;
         if repaired {
@@ -109,7 +112,7 @@ fn game_harness_spawn_satoshis_house_stands_on_dry_land_and_is_meshed_straight_a
     // Satoshi off while the world loads and settles: the house is then built
     // after every section round it has its mesh, the order that used to leave
     // it invisible.
-    let mut hg = boot_new_world(seed, false);
+    let mut hg = boot_new_world("harness-spawn-house", seed, false);
     settle(&mut hg);
     hg.state.world.satoshi.enabled = true;
     hg.state.world.satoshi.home = None;
