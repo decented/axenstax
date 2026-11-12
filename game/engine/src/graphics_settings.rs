@@ -154,6 +154,12 @@ pub const CHAT_TEXT_SCALE_STEP: f32 = 0.25;
 pub const MASTER_VOLUME_MIN: f32 = 0.0;
 pub const MASTER_VOLUME_MAX: f32 = 1.0;
 pub const DEFAULT_MASTER_VOLUME: f32 = 1.0;
+/// Thunder slider range. It multiplies with the master volume and mute (and the
+/// distance fall-off), and is squared like the master slider
+/// (`audio::effective_gain`). `1.0` = the new, softer thunder as authored.
+pub const THUNDER_VOLUME_MIN: f32 = 0.0;
+pub const THUNDER_VOLUME_MAX: f32 = 1.0;
+pub const DEFAULT_THUNDER_VOLUME: f32 = 1.0;
 
 /// Minimap zoom = world blocks per map pixel. Lower = more zoomed in (fewer
 /// blocks per pixel). A personal preference like brightness — it never flips the
@@ -456,6 +462,12 @@ pub struct GraphicsSettings {
     pub master_volume: f32,
     /// Mute switch — silences all sound without losing the volume setting.
     pub audio_muted: bool,
+    /// Thunder volume, `THUNDER_VOLUME_MIN..=THUNDER_VOLUME_MAX` (Settings,
+    /// Sound). Multiplies with `master_volume` and `audio_muted`; changes only
+    /// thunder. A settings file written before this existed loads 100% through
+    /// the struct's `#[serde(default)]`. Personal pref, excluded from preset
+    /// detection. Clamped on load (NaN becomes the default).
+    pub thunder_volume: f32,
     /// Whether this device has already been shown the one-time controls card
     /// (first spawn). Per-device like `has_seen_license_onboarding`, so it
     /// survives a web reload. The pause menu's "Controls" button reopens the
@@ -628,6 +640,7 @@ impl GraphicsSettings {
             online_port: DEFAULT_ONLINE_PORT,
             master_volume: DEFAULT_MASTER_VOLUME,
             audio_muted: false,
+            thunder_volume: DEFAULT_THUNDER_VOLUME,
             controls_card_seen: false,
             grownup_panel: false,
         }
@@ -705,6 +718,10 @@ impl GraphicsSettings {
         self.minimap_zoom = self.minimap_zoom.clamp(MINIMAP_ZOOM_MIN, MINIMAP_ZOOM_MAX);
         // Master volume — a hand-edited file can't amplify or go negative.
         self.master_volume = self.master_volume.clamp(MASTER_VOLUME_MIN, MASTER_VOLUME_MAX);
+        if !self.thunder_volume.is_finite() {
+            self.thunder_volume = DEFAULT_THUNDER_VOLUME;
+        }
+        self.thunder_volume = self.thunder_volume.clamp(THUNDER_VOLUME_MIN, THUNDER_VOLUME_MAX);
         // An empty or all-rubbish relay list would make online play silently
         // impossible, so repair rather than accept it.
         self.online_relays = sanitise_relays(std::mem::take(&mut self.online_relays));
@@ -1069,6 +1086,45 @@ mod tests {
         assert_eq!(s.chat_text_scale, 2.25);
         let back = load_json(&serde_json::to_string(&s).unwrap());
         assert_eq!(back.chat_text_scale, 2.25);
+    }
+
+    #[test]
+    fn thunder_volume_defaults_to_full_and_an_old_settings_file_loads_it_at_100_percent() {
+        assert_eq!(DEFAULT_THUNDER_VOLUME, 1.0);
+        assert_eq!(GraphicsSettings::default().thunder_volume, 1.0);
+        for p in GraphicsPreset::ALL {
+            assert_eq!(GraphicsSettings::from_preset(p).thunder_volume, 1.0);
+        }
+        // A file written before the field existed, and a blob with other keys.
+        let s: GraphicsSettings = serde_json::from_str(r#"{ "render_distance": 8, "master_volume": 0.5 }"#).unwrap();
+        assert_eq!(s.thunder_volume, 1.0);
+        assert_eq!(s.master_volume, 0.5);
+        let s: GraphicsSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(s.thunder_volume, 1.0);
+        // A complete current file with only that key removed.
+        let mut value = serde_json::to_value(GraphicsSettings::default()).unwrap();
+        assert!(value.as_object_mut().unwrap().remove("thunder_volume").is_some());
+        assert_eq!(load_json(&value.to_string()).thunder_volume, 1.0);
+    }
+
+    #[test]
+    fn thunder_volume_clamps_repairs_nan_and_survives_presets_and_a_round_trip() {
+        let mut s = GraphicsSettings::default();
+        s.thunder_volume = 7.0;
+        s.clamp();
+        assert_eq!(s.thunder_volume, THUNDER_VOLUME_MAX);
+        s.thunder_volume = -1.0;
+        s.clamp();
+        assert_eq!(s.thunder_volume, THUNDER_VOLUME_MIN);
+        s.thunder_volume = f32::NAN;
+        s.clamp();
+        assert_eq!(s.thunder_volume, DEFAULT_THUNDER_VOLUME);
+        let mut s = GraphicsSettings::from_preset(GraphicsPreset::High);
+        s.thunder_volume = 0.25;
+        assert_eq!(s.preset(), GraphicsPreset::High, "not part of what makes a preset");
+        s.apply_preset(GraphicsPreset::Low);
+        assert_eq!(s.thunder_volume, 0.25);
+        assert_eq!(load_json(&serde_json::to_string(&s).unwrap()).thunder_volume, 0.25);
     }
 
     #[test]

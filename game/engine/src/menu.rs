@@ -4803,7 +4803,7 @@ pub fn draw_settings_panel(
         FREELOOK_SENS_MIN, RENDER_DISTANCE_MAX, RENDER_DISTANCE_MIN, RENDER_SCALE_MAX,
         RENDER_SCALE_MIN, SENSITIVITY_MAX, SENSITIVITY_MIN, TP_DISTANCE_MAX, TP_DISTANCE_MIN,
         ZOOM_FOV_MAX, ZOOM_FOV_MIN, BRIGHTNESS_MAX, BRIGHTNESS_MIN, MINIMAP_ZOOM_MAX,
-        MINIMAP_ZOOM_MIN, MASTER_VOLUME_MAX, MASTER_VOLUME_MIN, CHAT_TEXT_SCALE_MAX,
+        MINIMAP_ZOOM_MIN, MASTER_VOLUME_MAX, MASTER_VOLUME_MIN, THUNDER_VOLUME_MAX, THUNDER_VOLUME_MIN, CHAT_TEXT_SCALE_MAX,
         CHAT_TEXT_SCALE_MIN, CHAT_TEXT_SCALE_STEP,
     };
     // The relay manager (its only use of `state`) is native-only.
@@ -5189,6 +5189,22 @@ pub fn draw_settings_panel(
                 changed = true;
             }
             if ui.checkbox(&mut gfx.audio_muted, "Mute all sound").changed() {
+                changed = true;
+            }
+            // Thunder only: on top of Volume and Mute. Read when each rumble
+            // plays, so it applies live with no engine call.
+            let mut thunder_pct = gfx.thunder_volume * 100.0;
+            if ui
+                .add(
+                    egui::Slider::new(&mut thunder_pct, 0.0..=100.0)
+                        .fixed_decimals(0)
+                        .suffix("%")
+                        .text("Thunder"),
+                )
+                .changed()
+            {
+                gfx.thunder_volume = (thunder_pct / 100.0)
+                    .clamp(THUNDER_VOLUME_MIN, THUNDER_VOLUME_MAX);
                 changed = true;
             }
 

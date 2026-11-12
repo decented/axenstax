@@ -50,6 +50,7 @@ mod rebase_assembly;
 mod staged_window;
 mod strict_admission;
 mod audio;
+mod thunder;
 mod controls;
 mod biome;
 mod bloom;
@@ -1227,6 +1228,9 @@ pub(crate) struct GameState {
     /// Lightning flash intensity 0..1, decays per frame; briefly boosts sky
     /// brightness + sky colour so the whole world blinks white.
     pub(crate) lightning_flash: f32,
+    /// Thunder rumbles held back until the flash has been seen (`thunder.rs`).
+    /// Presentation only; a countdown stepped once per logic tick.
+    pub(crate) thunder_queue: crate::thunder::ThunderQueue,
     /// Previous-frame in-water flags for ECS entities (mob/item splash edge
     /// detect). Client-visual bookkeeping only; rebuilt every frame.
     pub(crate) entity_was_in_water: ahash::AHashMap<hecs::Entity, bool>,
@@ -2166,6 +2170,7 @@ impl GameState {
             particle_ambient_accum: 0.0,
             weather_storm_until: 0,
             lightning_flash: 0.0,
+            thunder_queue: Default::default(),
             entity_was_in_water: ahash::AHashMap::new(),
             leaf_decay: LeafDecaySystem::new(),
             ecs: hecs::World::new(),

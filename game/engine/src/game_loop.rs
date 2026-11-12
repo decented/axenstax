@@ -3322,6 +3322,7 @@ impl super::GameState {
         self.weather_storm_until = 0;
         self.weather_lock_applied = None;
         self.lightning_flash = 0.0;
+        self.thunder_queue.clear();
         self.falling_tick_counter = 0;
         // D4 slice 2 — a lending server staged for this load outlives the
         // reset: it takes THIS world's clock (from its save, or morning, tick 0, clear) at its
@@ -5821,10 +5822,21 @@ impl super::GameState {
     /// The bolt, the flash and the thunder of a strike (this client's own, or
     /// — on a lent world — the one its server landed), and the remesh round
     /// the fire's light when one took. Presentation only: it rolls nothing.
+    ///
+    /// The flash and bolt are immediate; the rumble is scheduled, not played:
+    /// it starts `0.25 s + 0.02 s per block` later and is quieter the farther
+    /// the bolt (`thunder.rs`). The delay is DELIBERATELY not the speed of
+    /// sound: it lets the flash warn the player before the sound arrives.
+    /// Standalone, a lending host and a joiner's presentation-only bolts all
+    /// reach this one function, so they all get it.
     fn present_strike(&mut self, strike: crate::sim_clock::StrikeEvent) {
         self.lightning_flash = 1.0;
         self.particles.bolt(strike.ground, 40.0, strike.hash);
-        self.audio.play_thunder();
+        let distance = self
+            .players
+            .first()
+            .map_or(0.0, |p| p.player.eye_pos().distance(strike.ground));
+        self.thunder_queue.schedule(distance);
         if strike.ignited {
             self.rebuild_chunks_for_lighting(strike.cell.0, strike.cell.1, strike.cell.2);
         }
@@ -6090,6 +6102,12 @@ impl super::GameState {
         // points, but both have fully restored the world by the first play tick.
         if self.pending_workshop_reset {
             self.reset_workshop_space();
+        }
+        // Thunder whose delay has run out (scheduled by `present_strike`): the
+        // distance fall-off was fixed then, the Thunder slider is read now.
+        let thunder_slider = crate::audio::effective_gain(self.graphics.thunder_volume, false);
+        for distance_gain in self.thunder_queue.tick() {
+            self.audio.play_thunder(distance_gain * thunder_slider);
         }
         // Stash Column (Prague) — install a pending arena scenario now the fresh
         // world is fully loaded + players spawned (same first-play-tick hook as
@@ -6391,6 +6409,7 @@ impl super::GameState {
             // Kill a flash carried in from the world you just left, so entering
             // the Workshop mid-storm doesn't strobe the sky on the way in.
             self.lightning_flash = 0.0;
+            self.thunder_queue.clear();
         }
 
         // The strike this client rolled: the bolt, flash and thunder, and —

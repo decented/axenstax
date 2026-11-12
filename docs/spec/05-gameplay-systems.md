@@ -2160,7 +2160,8 @@ storm's bolts come bunched and then the sky clears, within ±24 blocks of player
 0: a white **sky flash** (decaying boost layered onto the sky brightness, +0.35
 and a 0.25 white wash since v0.2.32, which the playtest found "too intense" at
 +0.8 and 0.7 — the P1 light split means terrain relights for the blink), a
-spark-column **bolt**, a long **thunder** rumble (`audio::play_thunder`), and
+spark-column **bolt**, a **thunder** rumble (`audio::play_thunder`; softened
+2026-11-12, see "Thunder sound" below), and
 the strike **starts a real fire** at the surface through `FireSystem::ignite`
 — so the fire toggle, burnout, rain-douse and cap rules all apply (a storm
 usually douses its own fires: rain is falling). The strike roll + presentation
@@ -2171,6 +2172,15 @@ player bypasses GameServer"): a remote client's own lightning bolt is not
 server-broadcast to other players, and its ignite-through-`FireSystem` call
 races the server's own fire sim rather than being routed through it. Left as
 is; fixing it is the general dual-sim unification, not a weather-specific fix.
+
+**Thunder sound (softened 2026-11-12).** The first playtest of 0.2.35 called thunder "basically a jump scare": the old recipe was a 52 Hz tone plus *white* noise, both at full amplitude at t = 0 (peak about 0.70, against 0.3 for a block break), played in the same tick as the flash at the same loudness wherever the bolt landed, so on laptop speakers (which cannot play 52 Hz) it was a sudden hiss. The rules now:
+- **Envelope.** A rumble that swells and rolls off: both layers start at exactly zero, rise on a smoothstep to a peak 0.30 to 0.35 s in (50% of peak at about 0.18 s, never before 150 ms), then roll off to nothing at 2.0 s.
+- **Recipe** (`audio::THUNDER_LAYERS`): a 100 Hz tone (volume 0.09) under noise low-passed at 400 Hz by two one-pole filters (volume 0.15, scaled back to white noise's RMS so the volume is comparable). Peak absolute sample at most 0.35, about half the old one. Mid-band (150 Hz to 1 kHz) energy is higher than before, high-frequency (above 2 kHz) energy far lower.
+- **Distance.** Gain falls with the distance `d` from the player's eye to the bolt's ground point: `1 / (1 + (d - 3) / 18)` for `d` over 3 blocks, so `gain(3) = 1`, `gain(30) = 0.4`, `gain(34) = 0.37` (`thunder::gain`). A far bolt is not made duller (no extra filter; the quieter level carries the distance).
+- **Flash first, then the rumble.** The rumble starts `0.25 s + 0.02 s per block` after the flash (`thunder::delay_secs`; about 0.3 s close, 0.93 s at 34 blocks), held in whole 20 TPS ticks by a countdown queue on the client (`thunder::ThunderQueue`, stepped once per logic tick, cleared on a world change). **This delay is deliberately not physical**: real thunder would arrive within a hundredth of a second at these distances. It exists so that the flash warns the player before the sound does. Every presented strike goes through `GameState::present_strike`, so standalone, a lending host's server strikes and a joiner's presentation-only bolts all get the distance and the delay.
+- **Thunder slider.** Settings, Sound, "Thunder", 0 to 100% (`GraphicsSettings::thunder_volume`, default 100% of the new sound; a settings file without the field loads at 100%). It is squared like the master slider (`audio::effective_gain`) and multiplies with the master volume, Mute and the distance gain; it is read when each rumble plays.
+- **Both backends** play the same synthesised samples. Native renders the recipe at the product of the master gain and the per-strike gain. Web renders it once at unit gain into the cached `AudioBuffer` and plays it through a throwaway `GainNode` (per-strike gain) into the master node; the delay is the client's tick countdown on both.
+- **Tests** (`audio.rs`, `thunder.rs`, `graphics_settings.rs`): attack, peak, high-frequency ratio against the retired recipe (kept in the test module, so the checks fail on it), a mid-band floor at 30 blocks so "quieter" cannot pass by being silent, the gain, the delay and the queue, and the slider's default and old-file load.
 
 #### Weather sync (P9) — SHIPPED 2026-09-03
 
@@ -3963,7 +3973,7 @@ Particles are **client-side visual effects** with server-triggered events. The s
 
 **Status: a small procedural sound-effect layer. There is no sound-asset pipeline, no music, no positional audio, no category mixer.** The earlier draft of this section described a full audio system (nine volume categories, 3D positional audio, an OGG asset pipeline, a trait with `play_music` / `set_listener`); none of that exists. What does exist is `game/engine/src/audio.rs`:
 
-**Seven synthesised sounds.** No audio files exist anywhere in the repo or the bundle. Each sound is a short recipe of sine-tone and white-noise layers with a linear decay envelope (`audio::layers`), rendered to mono 44.1 kHz PCM by the pure function `audio::render_mix` — the **same samples on every target**.
+**Seven synthesised sounds.** No audio files exist anywhere in the repo or the bundle. Each sound is a short recipe of sine-tone and white-noise layers with a linear decay envelope (`audio::layers`; the thunder uses swell-envelope tone and low-passed-noise layers instead), rendered to mono 44.1 kHz PCM by the pure function `audio::render_mix` — the **same samples on every target**.
 
 | Sound | Recipe | Call |
 |---|---|---|
@@ -3971,7 +3981,7 @@ Particles are **client-side visual effects** with server-triggered events. The s
 | Block place | 600 Hz tone 0.06 s, vol 0.25 | `play_place` |
 | Footstep | noise 0.04 s, vol 0.15 | `play_footstep(sprinting)` (throttled: 0.45 s walking, 0.35 s sprinting) |
 | Explosion (Blasting Keg, Spec 49) | 70 Hz tone 0.45 s + noise 0.50 s | `play_explosion` |
-| Thunder | 52 Hz tone 1.1 s + noise 1.4 s | `play_thunder` |
+| Thunder | 100 Hz tone + 400 Hz low-passed noise, 2.0 s swell (peak <= 0.35); per-strike gain and delay, see "Thunder sound" in the Thunderstorms section | `play_thunder(gain)` |
 | Gem pickup (routine Satori) | 880 Hz tone 0.12 s | `play_gem_pickup` |
 | Genesis Block fanfare (first Satori in a world) | C5 → E5 → G5 → C6 arpeggio, 0.2 s notes 0.1 s apart | `play_genesis_block` |
 
@@ -3979,7 +3989,7 @@ Particles are **client-side visual effects** with server-triggered events. The s
 
 ### 11.4 Master volume and mute (built)
 
-One master volume (`0..=1`, default 1.0) and one mute switch, both in `GraphicsSettings` (`master_volume`, `audio_muted`) — per-device, persisted on both targets (native `settings.json`, web `localStorage` `axenstax_gfx`), clamped on load, untouched by graphics-preset clicks. The Settings panel ("Graphics", reachable from the lobby and the pause menu) has a **Sound** section: a percentage slider and a "Mute all sound" checkbox, applied live. The engine squares the slider (`audio::effective_gain`: 50% → 0.25 amplitude) so the lower half of the travel is usable; 100% leaves the sounds exactly as authored. The setting reaches the engine through `AudioEngine::set_master` on three paths: GameState start-up, `sync_graphics_to_engine` (world entry + the in-game panel) and the lobby panel.
+One master volume (`0..=1`, default 1.0) and one mute switch, both in `GraphicsSettings` (`master_volume`, `audio_muted`) — per-device, persisted on both targets (native `settings.json`, web `localStorage` `axenstax_gfx`), clamped on load, untouched by graphics-preset clicks. The Settings panel ("Graphics", reachable from the lobby and the pause menu) has a **Sound** section: a percentage slider, a "Mute all sound" checkbox and a **Thunder** slider (`thunder_volume`, default 100%, multiplies with the master volume and Mute, thunder only), applied live. The engine squares the slider (`audio::effective_gain`: 50% → 0.25 amplitude) so the lower half of the travel is usable; 100% leaves the sounds exactly as authored. The setting reaches the engine through `AudioEngine::set_master` on three paths: GameState start-up, `sync_graphics_to_engine` (world entry + the in-game panel) and the lobby panel.
 
 ### 11.5 Cross-platform audio (built)
 
@@ -4043,7 +4053,7 @@ Sound design is critical for game feel. Every interaction must have audio feedba
 | Friendly | Cow moo, chicken cluck | Separate slider. |
 | Players | Footsteps, damage grunts | Separate slider. |
 | Ambient | Wind, cave drips, underwater hum | Separate slider. |
-| Weather | Rain, thunder | Separate slider. |
+| Weather | Rain, thunder | Separate slider. (Thunder has its own slider since 2026-11-12; rain has no sound yet.) |
 | UI | Button clicks, inventory sounds | Separate slider. |
 
 #### Positional audio
