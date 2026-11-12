@@ -23,27 +23,32 @@ pub struct Vertex {
     pub tex_layer: u32,
     pub uv: [f32; 2],
     /// Block-light channel (torch/lava/lamp), 0..=1 (+ the >1.5 emissive
-    /// sentinel). For non-terrain paths this is the FINAL brightness and
-    /// `sky_light` is 0.
+    /// sentinel). The shader lights it warm, with a fixed per-face shade and
+    /// no time input (Spec 03 §4.7, `world_light`). Every feeder passes the
+    /// real block level here: a final brightness with `sky_light` 0 would
+    /// render as torchlight (warm, unshaded, as bright at midnight as at noon).
+    /// On the avatar pipeline this is the fade alpha instead.
     pub light: f32,
     /// Sky-light channel, 0..=1 — scaled by time-of-day in the shader
-    /// (`sky * sun_brightness`), so nights actually darken sky-lit faces
-    /// while torch-light keeps working (P1, 2026-07-04). Non-terrain
-    /// paths pass 0 (their `light` already holds the combined value).
+    /// (`sky * sun_brightness`) and shaded by the sun, so nights actually
+    /// darken sky-lit faces while torch-light keeps working (P1, 2026-07-04).
+    /// Something lit like open ground passes `(0.0, 1.0)`. On the avatar
+    /// pipeline this is sky already scaled by the day's brightness.
     pub sky_light: f32,
 }
 
 impl Vertex {
-    /// Full brightness — used by the small-cube path, water mesh,
-    /// and entity meshes while lighting BFS isn't sampling them.
-    /// Spec 30 Phase E swaps this out for `chunk.light_at(adj)`
-    /// inside `greedy_face`.
+    /// A builder's placeholder `light` (with `sky_light` 0) before the real
+    /// channels are stamped on: entity parts get the sampled `(block, sky)`
+    /// (`entity_model::apply_light_channels`), micro-model shells take their
+    /// instance's light in `vs_micro`. Left unstamped it renders as full
+    /// torchlight (Spec 03 §4.7), so no feeder may ship it as is.
     pub const FULL_BRIGHT: f32 = 1.0;
 
     /// Emissive sentinel for `light`: `fs_main` draws a vertex with
     /// `light > 1.5` mostly unlit, so a self-lit part (a torch, Satoshi's
-    /// amulet) shows its own colour at night and in a dark hut. The same value
-    /// as `entity_model::SATOSHI_GLOW_LIGHT`.
+    /// amulet, the GlowSquid) shows its own colour at night and in a dark hut.
+    /// The same value as `entity_model::SATOSHI_GLOW_LIGHT`.
     pub const EMISSIVE: f32 = crate::entity_model::SATOSHI_GLOW_LIGHT;
 
     const ATTRIBS: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
@@ -51,8 +56,8 @@ impl Vertex {
         1 => Float32x3,  // normal
         2 => Uint32,     // tex_layer
         3 => Float32x2,  // uv
-        4 => Float32,    // block light
-        5 => Float32,    // sky light (0 on non-terrain paths)
+        4 => Float32,    // block light (avatar pipeline: fade alpha)
+        5 => Float32,    // sky light
     ];
 
     pub fn layout() -> wgpu::VertexBufferLayout<'static> {
@@ -87,7 +92,7 @@ pub struct PlantInstance {
     pub tex_layer: u32,
     pub light: f32,
     /// Campaign N — sky-light channel (0..=1), split from `light` so the
-    /// shader's `max(block, sky * sun.w)` dims plants at night.
+    /// shader's light rule (Spec 03 §4.7) dims plants at night.
     pub sky: f32,
 }
 
@@ -704,9 +709,13 @@ fn emit_non_solid_blocks(
                             b == block::CABLE || b == block::CABLE_LIT
                         }
                     };
-                    let bl = chunk.block_light_at(x, y, z);
-                    let sl = chunk.sky_light_at(x, y, z);
-                    let light_f = (bl.max(sl) as f32) / 15.0;
+                    // Both channels, so the shader's light rule shades and dims
+                    // them like the floor they lie on (a merged max(block, sky)
+                    // in the block channel would glow like torchlight at night).
+                    let light_f = (
+                        chunk.block_light_at(x, y, z) as f32 / 15.0,
+                        chunk.sky_light_at(x, y, z) as f32 / 15.0,
+                    );
                     // Track gets a sleeper/ballast bed under the rails; cables don't.
                     let base_tex = if is_track { Some(block::TEX_RAIL_BASE) } else { None };
                     // Track: a rail with a rail one block up-and-over ramps toward
@@ -1205,10 +1214,11 @@ const RAIL_Y: f32 = 0.07; // height above the cell floor
 const RAIL_GAP: f32 = 0.20; // track: each of the two rails offset ± this from centre
 
 /// One flat, double-sided quad from four XZ corners (world space), up normal.
+/// `light` is the cell's `(block, sky)` channels, each 0..=1.
 fn emit_flat_quad(
     c: [[f32; 3]; 4],
     tex_layer: u32,
-    light: f32,
+    light: (f32, f32),
     vertices: &mut Vec<Vertex>,
     indices: &mut Vec<u32>,
 ) {
@@ -1220,8 +1230,8 @@ fn emit_flat_quad(
             normal: [0.0, 1.0, 0.0],
             tex_layer,
             uv: uvs[i],
-            light,
-            sky_light: 0.0,
+            light: light.0,
+            sky_light: light.1,
         });
     }
     // front + back windings so the floor ribbon shows from above and below.
@@ -1236,7 +1246,7 @@ fn emit_ribbon_arc(
     bx: f32, bz: f32, y: f32,
     cx: f32, cz: f32, r: f32, hw: f32,
     a0: f32, a1: f32,
-    tex: u32, light: f32,
+    tex: u32, light: (f32, f32),
     vertices: &mut Vec<Vertex>, indices: &mut Vec<u32>,
 ) {
     let steps = 8;
@@ -1262,7 +1272,7 @@ fn emit_connected_rail(
     bx: f32, by: f32, bz: f32,
     mask: u8,
     offsets: &[f32], hw: f32,
-    tex: u32, base_tex: Option<u32>, light: f32,
+    tex: u32, base_tex: Option<u32>, light: (f32, f32),
     vertices: &mut Vec<Vertex>, indices: &mut Vec<u32>,
 ) {
     use crate::block_shape::{CONN_E, CONN_N, CONN_S, CONN_W};
@@ -1382,7 +1392,7 @@ fn emit_ramp_rail(
     bx: f32, by: f32, bz: f32,
     dir: (i32, i32),
     offsets: &[f32], hw: f32,
-    tex: u32, base_tex: Option<u32>, light: f32,
+    tex: u32, base_tex: Option<u32>, light: (f32, f32),
     vertices: &mut Vec<Vertex>, indices: &mut Vec<u32>,
 ) {
     let ylo = by + RAIL_Y;
@@ -2148,8 +2158,8 @@ mod tests {
     #[test]
     fn plant_instances_carry_split_light_channels() {
         // Campaign N (2026-07-05) — plants still freeze a bake-time light
-        // snapshot, but now in TWO channels, so the shader's
-        // `max(block, sky * sun.w)` formula dims them at night like terrain.
+        // snapshot, but now in TWO channels, so the shader's light rule
+        // (Spec 03 §4.7) dims them at night like terrain.
         let reg = BlockRegistry::new();
         let mut w = World::new();
         w.set_block(3, 3, 3, block::TALL_GRASS);
@@ -2801,7 +2811,7 @@ mod tests {
         use crate::block_shape::{CONN_E, CONN_N, CONN_S, CONN_W};
         let count = |mask: u8, offsets: &[f32]| {
             let (mut v, mut i) = (Vec::new(), Vec::new());
-            super::emit_connected_rail(0.0, 0.0, 0.0, mask, offsets, 0.045, 0, None, 1.0, &mut v, &mut i);
+            super::emit_connected_rail(0.0, 0.0, 0.0, mask, offsets, 0.045, 0, None, (0.0, 1.0), &mut v, &mut i);
             v.len()
         };
         let straight = count(CONN_N | CONN_S, &[-0.2, 0.2]);

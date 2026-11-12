@@ -17588,10 +17588,7 @@ impl super::GameState {
                     );
                     // Campaign N — your own body dims with the world's light.
                     let ch = light_at(glam::Vec3::new(ps_self.x, ps_self.y, ps_self.z));
-                    crate::entity_model::set_avatar_light(
-                        &mut skin_v,
-                        crate::entity_model::combined_light(ch, sky_brightness),
-                    );
+                    crate::entity_model::set_avatar_light(&mut skin_v, ch, sky_brightness);
                     crate::entity_model::apply_light_channels(&mut held_v, ch);
                     avatar_verts.extend(skin_v);
                     entity_verts.extend(held_v);
@@ -17715,10 +17712,7 @@ impl super::GameState {
                     );
                     // Campaign N — remote players dim with the world's light.
                     let ch = light_at(avatar_pos);
-                    crate::entity_model::set_avatar_light(
-                        &mut skin_v,
-                        crate::entity_model::combined_light(ch, sky_brightness),
-                    );
+                    crate::entity_model::set_avatar_light(&mut skin_v, ch, sky_brightness);
                     crate::entity_model::apply_light_channels(&mut held_v, ch);
                     // Skin -> avatar pipeline; held item -> block-textured entity pipeline.
                     avatar_verts.extend(skin_v);
@@ -17770,10 +17764,7 @@ impl super::GameState {
                     );
                     // Campaign N — split-screen bodies dim with the world's light.
                     let ch = light_at(pos);
-                    crate::entity_model::set_avatar_light(
-                        &mut skin_v,
-                        crate::entity_model::combined_light(ch, sky_brightness),
-                    );
+                    crate::entity_model::set_avatar_light(&mut skin_v, ch, sky_brightness);
                     crate::entity_model::apply_light_channels(&mut held_v, ch);
                     avatar_verts.extend(skin_v);
                     entity_verts.extend(held_v);
@@ -17833,14 +17824,18 @@ impl super::GameState {
                 // Campaign N — your own hand + held tool dim in caves / at
                 // night, sampled at the eye cell (subtract the sampler's 0.9
                 // mid-body lift so we read the cell the head is actually in).
-                // Review fix: the viewmodel camera uniform pins sun.w to 1.0,
-                // so the held item gets the CPU-resolved combined value in the
-                // BLOCK channel (sky 0) — same resolution as the arm.
+                // The viewmodel camera uniform pins sun.w to 1.0, so the sky
+                // channel is scaled by this frame's sky brightness here, on the
+                // CPU, for both the arm and the held item; the block channel
+                // stays the block level (Spec 03 §4.7: putting a merged value
+                // in the block channel would light the item like a torch).
                 let eye = slot.player.eye_pos();
                 let ch = self.world.light_channels_at(eye.x, eye.y - 0.9, eye.z);
-                let combined = crate::entity_model::combined_light(ch, sky_brightness);
-                crate::entity_model::set_avatar_light(&mut arm_verts, combined);
-                crate::entity_model::apply_light_channels(&mut held_verts, (combined, 0.0));
+                crate::entity_model::set_avatar_light(&mut arm_verts, ch, sky_brightness);
+                crate::entity_model::apply_light_channels(
+                    &mut held_verts,
+                    (ch.0, ch.1 * sky_brightness),
+                );
                 let aspect = screen.viewport.width as f32
                     / screen.viewport.height.max(1) as f32;
                 self.renderer.update_viewmodel_camera(pidx, aspect);

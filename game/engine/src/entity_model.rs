@@ -899,22 +899,23 @@ pub(crate) fn apply_light_channels(verts: &mut [Vertex], light: (f32, f32)) {
     }
 }
 
-/// Campaign N — avatar-pipeline verts carry a CPU-resolved combined light in
-/// `sky_light` (their `light` channel is the Phase-3 fade alpha, untouchable);
-/// `fs_avatar` multiplies rgb by `max(sky_light, 0.08)`. `push_skin_quad`
-/// defaults it to 1.0, so preview/workshop feeders stay bright unless a call
-/// site dims them explicitly.
-pub(crate) fn set_avatar_light(verts: &mut [Vertex], combined: f32) {
+/// Campaign N / Spec 03 §4.7 — light avatar-pipeline verts with sampled
+/// `(block, sky)` channels under the one light rule. Their `light` channel is
+/// the Phase-3 fade alpha (untouchable), so the channels go elsewhere: sky,
+/// scaled here by the frame's `sky_brightness` (`fs_avatar` does not scale it
+/// again), into `sky_light`; the block level, rounded to 0..=15, into bits
+/// 20..23 of `tex_layer` (`world_light::avatar_block_bits`; `fs_avatar` reads
+/// the skin layer from the low 16 bits). Idempotent: old block bits are
+/// cleared first. `push_skin_quad` defaults (sky 1.0, no block bits) keep
+/// preview/workshop feeders lit as before unless a call site dims them.
+pub(crate) fn set_avatar_light(verts: &mut [Vertex], channels: (f32, f32), sky_brightness: f32) {
+    use crate::world_light::{avatar_block_bits, AVATAR_BLOCK_BITS};
+    let sky = channels.1 * sky_brightness;
+    let bits = avatar_block_bits(channels.0);
     for v in verts {
-        v.sky_light = combined;
+        v.sky_light = sky;
+        v.tex_layer = (v.tex_layer & !AVATAR_BLOCK_BITS) | bits;
     }
-}
-
-/// Resolve the avatar combined-light scalar from sampled `(block, sky)`
-/// channels + the frame's sky brightness — the same `max(block, sky * sun.w)`
-/// formula `fs_main` runs on the GPU for entities.
-pub(crate) fn combined_light(channels: (f32, f32), sky_brightness: f32) -> f32 {
-    channels.0.max(channels.1 * sky_brightness)
 }
 
 /// Mobs this close to the viewer (blocks) are never culled by the frustum:
@@ -1111,8 +1112,14 @@ pub fn build_entity_model_vertices_culled(
         }
 
         // Campaign N — mobs dim with the world's light. The GlowSquid is the
-        // game's living lamp and stays full-bright by design.
-        if kind.0 != MobType::GlowSquid {
+        // game's living lamp: it carries the emissive sentinel, so it shows its
+        // own colour at any hour (a plain FULL_BRIGHT with no sky channel would
+        // read as a warm torchlit squid under the light rule, Spec 03 §4.7).
+        if kind.0 == MobType::GlowSquid {
+            for v in &mut verts[verts_start..] {
+                v.light = Vertex::EMISSIVE;
+            }
+        } else {
             apply_light_channels(&mut verts[verts_start..], light_at(pos.0));
         }
     }
@@ -1310,6 +1317,11 @@ pub fn build_workshop_inworld_vertices(
             crate::workshop::WorkshopTarget::Avatar => {}
         }
     }
+    // Working copies are lit like open ground (full sky, no block light): the
+    // builders bake a FULL_BRIGHT placeholder with no sky channel, which the
+    // light rule would draw as a warm torchlit cast at any hour (Spec 03 §4.7).
+    // After the loop, so every `continue` path above is covered.
+    apply_light_channels(&mut verts, (0.0, 1.0));
     verts
 }
 
@@ -3468,22 +3480,31 @@ mod tests {
 
     #[test]
     fn avatar_light_rides_sky_channel_and_preserves_fade() {
-        // Campaign N — avatar verts carry combined light in `sky_light`; the
-        // `light` channel is the Phase-3 fade alpha and must never be touched.
+        // Spec 03 §4.7 — avatar verts carry sky (already scaled by the day's
+        // brightness) in `sky_light` and the block level in bits 20..23 of
+        // `tex_layer`; the `light` channel is the Phase-3 fade alpha and must
+        // never be touched, nor the skin layer in the low 16 bits.
+        use crate::world_light::{AVATAR_BLOCK_MASK, AVATAR_BLOCK_SHIFT, AVATAR_LAYER_MASK};
         let mut verts = vec![Vertex {
             position: [0.0; 3],
             normal: [0.0, 1.0, 0.0],
-            tex_layer: 0,
+            tex_layer: 3,
             uv: [0.0, 0.0],
             light: 0.4, // a mid-fade value
             sky_light: 1.0,
         }];
-        set_avatar_light(&mut verts, 0.3);
-        assert_eq!(verts[0].sky_light, 0.3);
+        let block_level = |v: &Vertex| (v.tex_layer >> AVATAR_BLOCK_SHIFT) & AVATAR_BLOCK_MASK;
+        // A torchlit cell at dusk: block 12/15, sky 1.0, sun.w 0.5.
+        set_avatar_light(&mut verts, (12.0 / 15.0, 1.0), 0.5);
+        assert!((verts[0].sky_light - 0.5).abs() < 1e-6, "sky is scaled by the day's brightness");
+        assert_eq!(block_level(&verts[0]), 12, "block level rides bits 20..23");
+        assert_eq!(verts[0].tex_layer & AVATAR_LAYER_MASK, 3, "skin layer untouched");
         assert_eq!(verts[0].light, 0.4, "fade alpha untouched");
-        // combined = max(block, sky * sky_brightness) — same formula as fs_main.
-        assert!((combined_light((0.2, 1.0), 0.5) - 0.5).abs() < 1e-6);
-        assert!((combined_light((0.8, 1.0), 0.5) - 0.8).abs() < 1e-6);
+        // Re-lighting replaces the level rather than OR-ing into it.
+        set_avatar_light(&mut verts, (1.0 / 15.0, 0.0), 1.0);
+        assert_eq!(block_level(&verts[0]), 1);
+        assert_eq!(verts[0].sky_light, 0.0);
+        assert_eq!(verts[0].tex_layer & AVATAR_LAYER_MASK, 3);
     }
 
     #[test]
@@ -3522,13 +3543,13 @@ mod tests {
             "every cow vertex carries the sampled (block, sky) channels"
         );
 
-        // GlowSquid stays full-bright regardless of the sample.
+        // GlowSquid carries the emissive sentinel regardless of the sample.
         let squid = spawn(MobType::GlowSquid);
         let sv = build_entity_model_vertices(&squid, 0, far, &empty, |_| (0.1, 0.0));
         assert!(!sv.is_empty());
         assert!(
-            sv.iter().all(|v| v.light == Vertex::FULL_BRIGHT),
-            "GlowSquid is exempt — the living lamp never dims"
+            sv.iter().all(|v| v.light > 1.5),
+            "GlowSquid is self-lit — the living lamp never dims"
         );
 
         // Satoshi: his amulet keeps the emissive sentinel (> 1.5) while the

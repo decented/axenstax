@@ -127,6 +127,67 @@ fn sky_horizon() -> vec3<f32> {
     return bloom_grade_camera(base);
 }
 
+// ── One light rule (Spec 03 §4.7) ────────────────────────────────────────────
+// CPU twin + tests: `world_light.rs` (the drift guard there checks these
+// constants). A surface has two light channels, block (torches, lava, lamps)
+// and sky, each 0..1, and they light it in two different ways:
+//   sky term   = sky_shade(n) * clamp(sky * sun.w, LIGHT_FLOOR, 1)
+//   block term = BLOCK_LIGHT_COLOUR * min(block, 1) * face_shade(n)
+//   light      = per-channel max of the two
+// The block term has no time input: a torch lights a room the same at noon and
+// midnight. (Until 2026-11-12 the channels were merged first and the merged
+// value scaled by sky_shade, so torchlight dimmed with the sun.) Branch-free.
+const SKY_AMBIENT_NIGHT: vec3<f32> = vec3<f32>(0.12, 0.13, 0.18);
+const SKY_AMBIENT_DAY: vec3<f32> = vec3<f32>(0.28, 0.29, 0.32);
+const SUN_COLOUR: vec3<f32> = vec3<f32>(1.0, 0.98, 0.9);
+const SUN_WEIGHT: f32 = 0.6;
+const LIGHT_FLOOR: f32 = 0.08;
+const BLOCK_LIGHT_COLOUR: vec3<f32> = vec3<f32>(1.0, 0.9, 0.7);
+const FACE_SHADE_TOP: f32 = 1.0;
+const FACE_SHADE_BOTTOM: f32 = 0.5;
+const FACE_SHADE_Z: f32 = 0.8;
+const FACE_SHADE_X: f32 = 0.6;
+// Avatar vertices keep the skin layer in the low 16 bits of tex_layer and the
+// block-light level (0..15) in bits 20..23 (their `light` is the fade alpha).
+const AVATAR_LAYER_MASK: u32 = 0xFFFFu;
+const AVATAR_BLOCK_SHIFT: u32 = 20u;
+const AVATAR_BLOCK_MASK: u32 = 0xFu;
+
+// The sun-and-ambient shade of a face (what sky light is multiplied by).
+fn sky_shade(n: vec3<f32>) -> vec3<f32> {
+    let b = camera.sun_dir.w;
+    let ambient = SKY_AMBIENT_NIGHT + SKY_AMBIENT_DAY * b;
+    let ndotl = max(dot(n, normalize(camera.sun_dir.xyz)), 0.0);
+    return ambient + SUN_COLOUR * b * ndotl * SUN_WEIGHT;
+}
+
+// `sky_level` is already scaled by the day's brightness (sky * sun.w).
+fn sky_term(n: vec3<f32>, sky_level: f32) -> vec3<f32> {
+    return sky_shade(n) * min(max(sky_level, LIGHT_FLOOR), 1.0);
+}
+
+// Minecraft's fixed face shade for block light: top 1.0, bottom 0.5, north and
+// south 0.8, east and west 0.6. Other normals mix by their squared components;
+// a zero normal is unshaded. Both select arms are evaluated, so the divisor is
+// kept away from zero.
+fn face_shade(n: vec3<f32>) -> f32 {
+    let n2 = n * n;
+    let len2 = n2.x + n2.y + n2.z;
+    let y_shade = select(FACE_SHADE_BOTTOM, FACE_SHADE_TOP, n.y > 0.0);
+    let weighted = n2.x * FACE_SHADE_X + n2.y * y_shade + n2.z * FACE_SHADE_Z;
+    return select(1.0, weighted / max(len2, 0.000001), len2 > 0.000001);
+}
+
+fn block_term(n: vec3<f32>, block_level: f32) -> vec3<f32> {
+    return BLOCK_LIGHT_COLOUR * (min(block_level, 1.0) * face_shade(n));
+}
+
+// The rule for a surface carrying the two raw channels (`light` = block,
+// `sky_light` = sky): what its texture colour is multiplied by.
+fn world_light(n: vec3<f32>, block_level: f32, sky_level: f32) -> vec3<f32> {
+    return max(sky_term(n, sky_level * camera.sun_dir.w), block_term(n, block_level));
+}
+
 struct SkyOutput {
     @builtin(position) clip: vec4<f32>,
     @location(0) ndc: vec2<f32>,
@@ -192,10 +253,15 @@ struct VertexInput {
     @location(1) normal: vec3<f32>,
     @location(2) tex_layer: u32,
     @location(3) uv: vec2<f32>,
+    // Block-light channel (torches, lava, lamps), 0..1, or the > 1.5 emissive
+    // sentinel. On the avatar pipeline: the fade alpha instead.
     @location(4) light: f32,
-    // P1 (2026-07-04): separate sky-light channel — scaled by time-of-day in
-    // fs_main so nights darken sky-lit terrain while torches keep working.
-    // Non-terrain paths pass 0 (their `light` already holds the final value).
+    // P1 (2026-07-04): separate sky-light channel, scaled by time-of-day in the
+    // light rule (`world_light`) so nights darken sky-lit surfaces while
+    // torches keep working. Every feeder passes real (block, sky) channels: a
+    // `light` with `sky_light` 0 renders as torchlight (warm, unshaded, as
+    // bright at midnight as at noon). On the avatar pipeline: sky already
+    // scaled by the day's brightness.
     @location(5) sky_light: f32,
 };
 
@@ -309,16 +375,11 @@ fn fs_plant(in: VertexOutput) -> @location(0) vec4<f32> {
     if (tex_color.a < 0.5) {
         discard;
     }
-    let sun_dir = normalize(camera.sun_dir.xyz);
     let brightness = camera.sun_dir.w;
-    let sun_color = vec3<f32>(1.0, 0.98, 0.9) * brightness;
-    let ambient = vec3<f32>(0.12, 0.13, 0.18) + vec3<f32>(0.28, 0.29, 0.32) * brightness;
-    let ndotl = max(dot(in.normal, sun_dir), 0.0);
-    // Campaign N review fix — `light` is BLOCK-only now (sky rides its own
-    // channel), so combine with sky * sun.w exactly like fs_main; without this
-    // every sky-lit plant rendered at the 0.08 floor in broad daylight.
-    let block_light = min(max(max(in.light, in.sky_light * camera.sun_dir.w), 0.08), 1.0);
-    let lit = bloom_grade(tex_color.rgb * (ambient + sun_color * ndotl * 0.6) * block_light, in.world_pos.xz);
+    // The one light rule (Spec 03 §4.7), like fs_main. `light` is the block
+    // channel and `sky_light` the sky channel; the normal is straight up
+    // (vs_plant), so the block term is unshaded.
+    let lit = bloom_grade(tex_color.rgb * world_light(in.normal, in.light, in.sky_light), in.world_pos.xz);
 
     let underwater = camera.camera_pos.w > 0.5;
     let dist = distance(in.world_pos, camera.camera_pos.xyz);
@@ -369,27 +430,17 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         tex_color = vec4<f32>(fast_leaf_fill(in.uv, layer), 1.0);
     }
 
-    // Dynamic sun light from uniform
-    let sun_dir = normalize(camera.sun_dir.xyz);
     let brightness = camera.sun_dir.w;
-    let sun_color = vec3<f32>(1.0, 0.98, 0.9) * brightness;
-    let ambient = vec3<f32>(0.12, 0.13, 0.18) + vec3<f32>(0.28, 0.29, 0.32) * brightness;
-
-    let ndotl = max(dot(in.normal, sun_dir), 0.0);
-    // Spec 30 — block-light factor (0..1) from the BFS lighting pass.
-    // Caves with no torches drop to MIN_AMBIENT so they don't go fully
-    // black; sky-lit + torch-lit areas stay at full brightness.
-    // P1 (2026-07-04): sky-light dims with time-of-day (sun_dir.w carries the
-    // day/night brightness, night floor 0.15) while torch/block light doesn't —
-    // nights get dark, torches finally matter. Non-terrain paths pass
-    // sky_light 0 and are unchanged.
-    let combined = max(in.light, in.sky_light * camera.sun_dir.w);
-    let block_light = min(max(combined, 0.08), 1.0);
-    let lit_normal = tex_color.rgb * (ambient + sun_color * ndotl * 0.6) * block_light;
-    // Emissive sentinel: a vertex `light` > 1.5 marks a self-glowing part (e.g.
-    // Satoshi's amulet, stamped with entity_model::SATOSHI_GLOW_LIGHT). Render it
-    // mostly unlit so it glows even in a dim hut. All other geometry uses
-    // light <= 1.0, so this branch is inert for everything else.
+    // Spec 30 / Spec 03 §4.7 — the one light rule. `light` is the block
+    // channel (torches, lava, lamps; BFS-propagated), `sky_light` the sky
+    // channel. Sky light dims with the day (sun.w) and is shaded by the sun;
+    // block light keeps its warm colour and a fixed per-face shade at any hour.
+    // A sealed cave with neither drops to the LIGHT_FLOOR, not to black.
+    let lit_normal = tex_color.rgb * world_light(in.normal, in.light, in.sky_light);
+    // Emissive sentinel: a vertex `light` > 1.5 marks a self-glowing part (a
+    // torch's own faces, Satoshi's amulet, the GlowSquid; `Vertex::EMISSIVE`).
+    // Render it mostly unlit so it glows even in a dim hut. All other geometry
+    // uses light <= 1.0, so this mix is inert for everything else.
     let lit = bloom_grade(mix(lit_normal, tex_color.rgb, step(1.5, in.light) * 0.85), in.world_pos.xz);
 
     // Underwater detection (packed in camera_pos.w)
@@ -430,8 +481,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 @fragment
 fn fs_avatar(in: VertexOutput) -> @location(0) vec4<f32> {
     // Sample the per-avatar skin texture array (mirrors the block-array idiom;
-    // tex_layer selects this player's skin — 0 = local player, Phase 2 default).
-    let tex_color = textureSample(skin_texture, skin_sampler, in.uv, i32(in.tex_layer));
+    // the low 16 bits of tex_layer select this player's skin — 0 = local
+    // player, Phase 2 default; bits 20..23 carry the block-light level).
+    let tex_color = textureSample(skin_texture, skin_sampler, in.uv, i32(in.tex_layer & AVATAR_LAYER_MASK));
     // Alpha cutout — drop transparent skin texels (no model matrix here, so we
     // discard rather than blend; REPLACE blending can't fade these out).
     if (tex_color.a < 0.5) {
@@ -462,19 +514,17 @@ fn fs_avatar(in: VertexOutput) -> @location(0) vec4<f32> {
         }
     }
 
-    // Dynamic sun light from uniform
-    let sun_dir = normalize(camera.sun_dir.xyz);
     let brightness = camera.sun_dir.w;
-    let sun_color = vec3<f32>(1.0, 0.98, 0.9) * brightness;
-    let ambient = vec3<f32>(0.12, 0.13, 0.18) + vec3<f32>(0.28, 0.29, 0.32) * brightness;
-
-    let ndotl = max(dot(in.normal, sun_dir), 0.0);
-    // Campaign N — the `light` channel carries the Phase-3 fade alpha
-    // (consumed by the dither above); `sky_light` carries a CPU-resolved
-    // combined world-light scalar (`entity_model::set_avatar_light`; feeders
-    // default to 1.0 via `push_skin_quad`). Same 0.08 floor as terrain.
-    let block_light = min(max(in.sky_light, 0.08), 1.0);
-    let lit = tex_color.rgb * (ambient + sun_color * ndotl * 0.6) * block_light;
+    // The one light rule (Spec 03 §4.7), with the channels where an avatar
+    // keeps them: the `light` channel is the Phase-3 fade alpha (consumed by
+    // the dither above), so `sky_light` carries sky ALREADY scaled by the day's
+    // brightness on the CPU (not multiplied by sun.w again here) and the
+    // block-light level rides in bits 20..23 of tex_layer
+    // (`entity_model::set_avatar_light`). `push_skin_quad`'s defaults (sky 1.0,
+    // no block bits) give the sky term alone, as before.
+    let block_level = f32((in.tex_layer >> AVATAR_BLOCK_SHIFT) & AVATAR_BLOCK_MASK) / 15.0;
+    let shade = max(sky_term(in.normal, in.sky_light), block_term(in.normal, block_level));
+    let lit = tex_color.rgb * shade;
 
     // Underwater detection (packed in camera_pos.w)
     let underwater = camera.camera_pos.w > 0.5;
@@ -525,10 +575,10 @@ fn fs_decal(in: VertexOutput) -> @location(0) vec4<f32> {
     if (c.a < 0.5) {
         discard;
     }
-    // Campaign N review fix — `light` is BLOCK-only; combine with the sky
-    // channel like fs_main so sun-lit wallpaper/blueprints don't go black.
-    let combined = max(in.light, in.sky_light * camera.sun_dir.w);
-    return vec4<f32>(c.rgb * min(max(combined, 0.08), 1.0), c.a);
+    // The one light rule (Spec 03 §4.7), the same as the wall under it. Since
+    // 2026-11-12 the paper also takes the sun-and-ambient face shade, so in
+    // daylight it darkens to match its wall instead of reading brighter.
+    return vec4<f32>(c.rgb * world_light(in.normal, in.light, in.sky_light), c.a);
 }
 
 // The Gallery — hung painting. Samples the dedicated hi-res texture and lights
@@ -587,10 +637,15 @@ fn fs_water(in: VertexOutput) -> @location(0) vec4<f32> {
     let tex_color = textureSample(block_textures, block_sampler, in.uv, i32(in.tex_layer));
 
     let brightness = camera.sun_dir.w;
-    let water_tint = vec3<f32>(0.3, 0.5, 0.9) * (0.3 + 0.7 * brightness);
-    // Spec 30 — water also darkens in caves; reuse the same block-light.
-    let block_light = max(in.light, 0.08);
-    let lit = bloom_grade(tex_color.rgb * water_tint * block_light, in.world_pos.xz);
+    let water_tint = vec3<f32>(0.3, 0.5, 0.9);
+    // Spec 30 / Spec 03 §4.7 — water darkens in caves. Its sky half is the
+    // floor, dimmed with the day as before ((0.3 + 0.7 * sun.w) * LIGHT_FLOOR);
+    // it still reads no sky channel (a known gap, Spec 03 §4.7). Its block half
+    // is the shared block term, with no time input, so a torch lights water the
+    // same at noon and midnight.
+    let sky_floor = (0.3 + 0.7 * brightness) * LIGHT_FLOOR;
+    let shade = max(vec3<f32>(sky_floor), block_term(in.normal, in.light));
+    let lit = bloom_grade(tex_color.rgb * water_tint * shade, in.world_pos.xz);
 
     // Fog
     let dist = distance(in.world_pos, camera.camera_pos.xyz);
@@ -623,16 +678,9 @@ fn fs_transparent(in: VertexOutput) -> @location(0) vec4<f32> {
     let tex_color = textureSample(block_textures, block_sampler, in.uv, i32(in.tex_layer));
     if (tex_color.a < 0.04) { discard; }
 
-    let sun_dir = normalize(camera.sun_dir.xyz);
-    let brightness = camera.sun_dir.w;
-    let sun_color = vec3<f32>(1.0, 0.98, 0.9) * brightness;
-    let ambient = vec3<f32>(0.12, 0.13, 0.18) + vec3<f32>(0.28, 0.29, 0.32) * brightness;
-    let ndotl = max(dot(in.normal, sun_dir), 0.0);
-    // Solid transparent surfaces receive the same two channels as terrain.
-    // Scale sky by daylight while keeping torch/block light independent.
-    let combined = max(in.light, in.sky_light * brightness);
-    let block_light = min(max(combined, 0.08), 1.0);
-    let lit = bloom_grade(tex_color.rgb * (ambient + sun_color * ndotl * 0.6) * block_light, in.world_pos.xz);
+    // Solid transparent surfaces receive the same two channels as terrain and
+    // the same light rule (Spec 03 §4.7).
+    let lit = bloom_grade(tex_color.rgb * world_light(in.normal, in.light, in.sky_light), in.world_pos.xz);
 
     let dist = distance(in.world_pos, camera.camera_pos.xyz);
     let fog_start = camera.fog.x;

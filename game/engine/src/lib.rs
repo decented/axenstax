@@ -99,6 +99,7 @@ mod texture_gen;
 mod texture_packs_web;
 mod texture_registry;
 mod world;
+mod world_light;
 mod worldgen_v3;
 mod campfire_ui;
 mod power_ui;
@@ -4267,8 +4268,9 @@ fn run_shot_3p(args: &[String]) {
 
     // ── Campaign N (2026-07-05) — night dimming smoke ────────────────────────
     // Same over-the-shoulder scene at midnight (sun.w ≈ 0.05): the self-avatar
-    // carries a sampled combined light in `sky_light` and the terrain/plants
-    // read `sky * sun.w`, so the whole frame must go dark and the magenta body
+    // carries its sampled sky (scaled by sun.w) in `sky_light` and its block
+    // level in `tex_layer` bits 20..23, and the terrain/plants read
+    // `sky * sun.w`, so the whole frame must go dark and the magenta body
     // must stop reading as bright magenta. Guards the entity/avatar/plant
     // night-light plumbing end-to-end (bake → attribute → shader).
     {
@@ -4284,10 +4286,7 @@ fn run_shot_3p(args: &[String]) {
         let (mut skin_v, _held) =
             crate::entity_model::self_avatar_vertices(camera.mode, &ps, 0.0, 0, 0, 1.0, &registry, crate::skin_uv::ArmModel::Classic);
         let ch = world.light_channels_at(foot.x, foot.y, foot.z);
-        crate::entity_model::set_avatar_light(
-            &mut skin_v,
-            crate::entity_model::combined_light(ch, night_brightness),
-        );
+        crate::entity_model::set_avatar_light(&mut skin_v, ch, night_brightness);
         renderer.upload_avatar_vertices(0, &skin_v);
         let mut cu = CameraUniform::from_camera(&camera);
         cu.sun_dir[3] = night_brightness;

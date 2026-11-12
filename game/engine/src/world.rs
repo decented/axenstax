@@ -2806,8 +2806,9 @@ impl World {
 
     /// Per-entity light sample: `(block/15, sky/15)` at the cell 0.9 above
     /// the given FEET position (mid-body — never the solid ground block).
-    /// The two channels feed the shader's `max(block, sky * sun.w)` night
-    /// formula, so callers bake them into `Vertex.light` / `Vertex.sky_light`
+    /// The two channels feed the shader's light rule (Spec 03 §4.7: sky
+    /// scaled by sun.w, block light time-independent), so callers bake them
+    /// into `Vertex.light` / `Vertex.sky_light`
     /// verbatim. Unloaded chunks inherit the per-channel fallbacks (block 0,
     /// sky 15) so distant entities render daylit rather than black.
     pub fn light_channels_at(&self, x: f32, y: f32, z: f32) -> (f32, f32) {

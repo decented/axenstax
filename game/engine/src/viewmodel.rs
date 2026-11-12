@@ -152,11 +152,11 @@ pub fn build_viewmodel_vertices(
         * Mat4::from_translation(-shoulder);
 
     // Transform the whole assembly into view space. Positions go through the
-    // full matrix; normals through its rotation only. Viewmodel lighting is
-    // full-bright (set per-vertex by the part/item builders) so we don't need
-    // accurate normals for shading — but we still rotate them to keep the data
-    // sane for any future lit-viewmodel pass. The SAME matrices apply to the arm
-    // and the held item so they move together.
+    // full matrix; normals through its rotation only. The caller lights both
+    // with the eye cell's (block, sky) channels under the shared light rule
+    // (Spec 03 §4.7), which shades by these view-space normals: the sun term
+    // against the viewmodel camera's fixed sun, the block term by face. The
+    // SAME matrices apply to the arm and the held item so they move together.
     let xform = viewmodel_transform(bob) * swing_about_shoulder;
     // correct for rotation-only xform; if scale is added, use transpose(inverse) for normals.
     let normal_rot = Mat4::from_mat3(glam::Mat3::from_mat4(xform));
