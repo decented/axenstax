@@ -728,9 +728,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 }
 ```
 
+As built, the terrain's `fs_main` never discards (a cut-out leaf texel in the opaque pass is
+filled instead, §2.2; item sprites cut out in `fs_main_cutout`, §7.5a).
+
 **As built: one light rule (`shader.wgsl` `world_light`, CPU twin and tests
 `world_light.rs`, 2026-11-12).** Every lit world surface uses it: `fs_main` (chunk opaque,
-micro-models, entities, the first-person held item), `fs_plant`, `fs_transparent`,
+micro-models) and `fs_main_cutout` (the same body, `shade_block`, plus the item-sprite
+cutout: entities, the first-person held item, framed sprites; §7.5a), `fs_plant`, `fs_transparent`,
 `fs_decal`, `fs_avatar`, and the block half of `fs_water`. With `n` the face normal,
 `b = sun.w` (§4.5), `sun` the normalised sun direction, and the vertex channels `block`
 (`Vertex.light`) and `sky` (`Vertex.sky_light`), each 0..1:
@@ -1408,7 +1412,8 @@ third-person avatar hand) and on the ground (local and server-broadcast drops).
   branch `emit_non_solid_blocks` takes for a block (`None` for air and water,
   `Cube` for the greedy passes, `Shaped`, `Flat` rails and cables, `Torch`,
   `Smoke`, `Cross` for the plant billboard), and `item_model::block_look` maps
-  it with an exhaustive match: `Cross`, `Flat` and `Torch` are a **sprite**;
+  it with an exhaustive match: `Cross`, `Flat` and `Torch` are a **sprite**
+  (except the four full-tile billboards below);
   every other class keeps the **small cube** with the block's top, side and
   bottom layers on full UVs (held 0.4, dropped 0.2, framed the 0.5 x 0.5 x
   0.1875 box off the plate). So a block can't look one way in the world and
@@ -1431,20 +1436,57 @@ third-person avatar hand) and on the ground (local and server-broadcast drops).
 - **The cutout bit.** `mesh::CUTOUT_FLAG` is bit 17 of `Vertex.tex_layer` (bit
   16 is the fast-leaf fill, §2.2; bits 20..23 an avatar's block light, §4.2;
   texture layers are < 512). Every sprite vertex sets it and nothing else does.
-  `fs_main` masks the layer to the low 16 bits and discards a texel whose alpha
-  at mip level 0 is below 0.5. It reads level 0 so that a torch handle two
-  texels wide doesn't average below the cut one mip down and vanish at a
-  distance. The one shader path covers the frame (chunk opaque pass), the drops
-  (entity pass) and the hand (viewmodel and avatar entity passes).
+  Only the fragment entry **`fs_main_cutout`** reads it: it masks the layer to
+  the low 16 bits and discards a texel whose alpha at mip level 0 is below 0.5
+  (level 0, so a torch handle two texels wide doesn't average below the cut one
+  mip down and vanish at a distance; the colour still comes from the mipmapped
+  sample, taken first). `fs_main_cutout` and `fs_main` share one body
+  (`shade_block`: leaf fill, light rule, emissive, fog), so they can't drift.
+- **Terrain never discards (follow-up, 2026-11-12).** A fragment shader that
+  may `discard` loses early depth testing on many GPUs, and costs much more on
+  the tile-based GPUs of phones (Android is a target); terrain is most of a
+  frame's fragments. So `fs_main`, the entry of `chunk_render_pipeline` (and
+  of `micro_model_pipeline`), holds no `discard`, not even behind a branch.
+  Only pipelines that draw item sprites use `fs_main_cutout`:
+  `entity_render_pipeline` (both renderers), which draws held items (the
+  first-person viewmodel and the third-person avatar hand), dropped items, and
+  each chunk's framed sprites. Entity fragments are few, so the discard costs
+  little there. Every other pipeline keeps its own entry. The test
+  `renderer::shader_tests::terrain_never_discards_and_item_sprites_cut_out`
+  reads the pipeline sites in `renderer.rs` (whitespace ignored) and walks
+  `fs_main` and `shade_block` in naga's IR (with every function they call) for
+  a `discard`.
 - **The frame.** A framed sprite lies flat on the plate, centred and parallel
   to the wall, its back on the plate and its front facing out
   (`block_shape::item_frame_sprite`: upright on a wall, its top toward north
-  on a floor or a ceiling). Its faces are wound for the back-face-culled chunk
-  pass. A framed cube is unchanged.
+  on a floor or a ceiling). Its faces wind outward. It is meshed with the
+  chunk, once, but into its own bucket, `ChunkMeshes::cutout`, never into
+  `opaque`; the renderer keeps one `cutout_meshes` entry per section that has
+  any and draws them in the world pass right after that viewport's opaque
+  terrain, frustum-culled per section, with the entity pipeline
+  (`draw_cutout_sections`). That pipeline already has the chunk's vertex
+  layout, bind groups and depth state (write, `Less`), so depth stays right and
+  no pipeline is added; it doesn't cull back faces, which only adds the
+  sprite's back faces (they cut out the same texels and lie behind its front).
+  A section with no framed sprite has no entry and costs nothing. A framed cube
+  is unchanged (opaque bucket).
 - **The torch texture** has an alpha-0 background that keeps its old dark
   colour (18, 14, 10). The placed torch samples only its art (`TORCH_UVS`), so
   it looks exactly as before, and the hotbar icon (egui blends alpha) now
   shows just the torch.
+- **Every sprite icon has a transparent background** (follow-up, 2026-11-12).
+  Five icons that were drawn on an opaque background now have an alpha-0
+  background that keeps its colour: tall grass (its dark green), the
+  construction anchor (its shadow), the track (the ballast between the ties),
+  the cable (all but rows 5..=10) and the lit cable (all but rows 4..=12). The
+  track and the cables are icon-only layers (placed rails and cables draw
+  their own layers). Tall grass and the construction anchor are their placed
+  billboards' layers too, so **placed tall grass now shows its blades only**
+  (`fs_plant` cuts alpha), not two dark green squares, and the anchor shows
+  its flag on its pole. Four billboards are a full tile of material with no
+  background to cut away: rubber leaves, carpet, the logic gate and lava
+  (which borrows the lit furnace's face). Their items keep the small cube
+  (`item_model::FULL_TILE_BLOCKS`).
 - **The grey blight.** A Blighted Crop's plant instance carries
   `mesh::GREY_FLAG`, bit 18 of its `tex_layer`. `fs_plant` masks the layer and
   draws the lit colour's Rec. 709 luminance times 0.85 (`BLIGHT_GREY`), so the
@@ -1454,21 +1496,21 @@ third-person avatar hand) and on the ground (local and server-broadcast drops).
   high). Healthy crops and micro-model billboards never set the bit.
 - **Tests.** `item_model` (every block id's look against what the mesher
   really emits, sprite depth, the cutout bit only on sprites, edge strips only
-  on opaque texels, winding), `mesh` (a framed torch for all six facings, the
-  grey flag, a drift guard on the shader's flag constants), `texture_gen` (the
-  torch's alpha) and the GPU harness `game_harness_item_looks` (its log holds
-  the numbers).
-- **Known.** An icon drawn on an opaque background is a square card: tall
-  grass, rubber leaves, the track, carpet, the two cables and the logic gate
-  (the `sprite_sizes_stay_bounded` test lists them). The busiest sprite is
-  papyrus stage 2 at 170 quads. A pack that redraws a stock icon keeps the
+  on opaque texels, winding, every sprite icon at least an eighth transparent
+  with a clear texel on its border,
+  the full-tile list exactly the billboards with no transparent texel),
+  `mesh` (a framed torch for all six facings, in the cutout bucket; no
+  cut-out vertex in the opaque, transparent or water buckets; the grey flag; a
+  drift guard on the shader's flag constants), `texture_gen` (the torch's alpha
+  and the five new transparent backgrounds), `renderer::shader_tests` (above)
+  and the GPU harness `game_harness_item_looks` (its log holds the numbers; it
+  also shoots a dropped and a placed tall grass).
+- **Known.** The busiest sprite is papyrus stage 2 at 170 quads. A pack that redraws a stock icon keeps the
   stock outline's edge geometry (the cutout drops whatever the new art leaves
   transparent). In first person the hand end of the arm sits below the screen
   edge (`viewmodel_transform`), so a held item, cube or sprite, is mostly out
   of view there (a mid-swing shot shows none of the torch); the third-person
   avatar shows it beside the fist.
-  `fs_main` now holds a `discard`, which some tile-based GPUs pay for across
-  the whole opaque pass.
 
 ### 7.6 Particle System
 
