@@ -40,6 +40,12 @@ impl Vertex {
     /// inside `greedy_face`.
     pub const FULL_BRIGHT: f32 = 1.0;
 
+    /// Emissive sentinel for `light`: `fs_main` draws a vertex with
+    /// `light > 1.5` mostly unlit, so a self-lit part (a torch, Satoshi's
+    /// amulet) shows its own colour at night and in a dark hut. The same value
+    /// as `entity_model::SATOSHI_GLOW_LIGHT`.
+    pub const EMISSIVE: f32 = crate::entity_model::SATOSHI_GLOW_LIGHT;
+
     const ATTRIBS: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
         0 => Float32x3,  // position
         1 => Float32x3,  // normal
@@ -627,10 +633,14 @@ fn emit_non_solid_blocks(
                         world.meta_at(wx, wy, wz)
                     };
                     let (obx, oby, obz) = (wx as f32, wy as f32, wz as f32);
-                    let tex_top = registry.tex_top(block_id);
-                    let tex_side = registry.tex_side(block_id);
-                    let tex_bottom = registry.tex_bottom(block_id);
-                    for cuboid in crate::block_shape::render_cuboids(shape, m) {
+                    let tex = [
+                        registry.tex_top(block_id),
+                        registry.tex_side(block_id),
+                        registry.tex_bottom(block_id),
+                    ];
+                    for (index, cuboid) in
+                        crate::block_shape::render_cuboids(shape, m).into_iter().enumerate()
+                    {
                         let mn = [
                             obx + cuboid.min[0],
                             oby + cuboid.min[1],
@@ -641,13 +651,13 @@ fn emit_non_solid_blocks(
                             oby + cuboid.max[1],
                             obz + cuboid.max[2],
                         ];
-                        emit_small_cube_textured(
-                            mn, mx, tex_top, tex_side, tex_bottom, light_f, sky_f, vertices, indices,
-                        );
+                        let uvs = shaped_cuboid_uvs(shape, index, cuboid, mn, mx);
+                        emit_cuboid(mn, mx, tex, &uvs, light_f, sky_f, vertices, indices);
                     }
                     // Wave 2c — a filled Item Frame draws its framed *block* item
                     // as a small cube off the plate (non-block items show only on
-                    // the read-on-look HUD). The block's own textures identify it.
+                    // the read-on-look HUD). The block's own textures identify it:
+                    // the whole texture on every face, like a held or dropped block.
                     if shape == crate::block_shape::BlockShape::ItemFrame
                         && let Some(crate::item::Item::Block(fb)) = world
                             .item_frame_at((wx, wy, wz))
@@ -656,12 +666,11 @@ fn emit_non_solid_blocks(
                             let cube = crate::block_shape::item_frame_item_cube(
                                 crate::meta::facing(m),
                             );
-                            emit_small_cube_textured(
+                            emit_cuboid(
                                 [obx + cube.min[0], oby + cube.min[1], obz + cube.min[2]],
                                 [obx + cube.max[0], oby + cube.max[1], obz + cube.max[2]],
-                                registry.tex_top(fb),
-                                registry.tex_side(fb),
-                                registry.tex_bottom(fb),
+                                [registry.tex_top(fb), registry.tex_side(fb), registry.tex_bottom(fb)],
+                                &CubeUvs::WHOLE,
                                 light_f,
                                 sky_f,
                                 vertices,
@@ -769,7 +778,22 @@ fn emit_non_solid_blocks(
                 // here, drawn in the renderer's dedicated plant pass); only
                 // the genuinely volumetric non-solids (torch pole, smoke
                 // column) keep the 6-faced small cube baked into the mesh.
-                if matches!(block_id, block::TORCH | block::CAMPFIRE_SMOKE) {
+                if block_id == block::TORCH {
+                    // The torch is its own light: its faces carry the emissive
+                    // sentinel, so `fs_main` draws its art mostly unlit, at night
+                    // and before the BFS light reaches the cell. Sky still rides
+                    // its own channel. Its faces show the flame and handle window.
+                    emit_cuboid(
+                        min,
+                        max,
+                        [tex_layer; 3],
+                        &TORCH_UVS,
+                        Vertex::EMISSIVE,
+                        sky_f,
+                        vertices,
+                        indices,
+                    );
+                } else if block_id == block::CAMPFIRE_SMOKE {
                     emit_small_cube(min, max, tex_layer, light_f, sky_f, vertices, indices);
                 } else {
                     plants.push(PlantInstance {
@@ -929,9 +953,228 @@ fn split_cell_light(
     ((bl as f32) / 15.0, (sl as f32) / 15.0)
 }
 
-/// Emit a 6-faced small cube with the given world-space min/max.
-/// Used for sub-block geometry (torch pole, tall grass, future
-/// flowers). Winding matches `emit_quad` for consistent culling.
+/// A window of a block texture in UV space (0..1 spans the whole 16x16
+/// texture). On a side face `u0`/`u1` are the u at its low and high edge (+X
+/// on the Z faces, +Z on the X faces) and `v0`/`v1` the v at its top and
+/// bottom edge; on the top and bottom faces u runs with +X and v with +Z.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct UvRect {
+    u0: f32,
+    v0: f32,
+    u1: f32,
+    v1: f32,
+}
+
+/// How far (in texels) an explicit texel window is pulled in from its texel
+/// edges, so nearest sampling at a face's edge never bleeds into the texel
+/// beside the window.
+const UV_INSET_TEXELS: f32 = 0.02;
+
+impl UvRect {
+    /// The whole texture.
+    const WHOLE: UvRect = UvRect { u0: 0.0, v0: 0.0, u1: 1.0, v1: 1.0 };
+
+    /// Columns `x0..x1` by rows `y0..y1` of a 16x16 texture (half-open, as the
+    /// loops in `texture_gen` draw them), inset by `UV_INSET_TEXELS`.
+    const fn texels(x0: f32, y0: f32, x1: f32, y1: f32) -> UvRect {
+        const SIDE: f32 = 16.0;
+        UvRect {
+            u0: (x0 + UV_INSET_TEXELS) / SIDE,
+            v0: (y0 + UV_INSET_TEXELS) / SIDE,
+            u1: (x1 - UV_INSET_TEXELS) / SIDE,
+            v1: (y1 - UV_INSET_TEXELS) / SIDE,
+        }
+    }
+}
+
+/// The texture window each face of a cuboid shows: one for the top, one for
+/// the bottom, one for both X faces and one for both Z faces.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CubeUvs {
+    top: UvRect,
+    bottom: UvRect,
+    x_sides: UvRect,
+    z_sides: UvRect,
+}
+
+impl CubeUvs {
+    /// The whole texture on every face (a framed block, like a held or dropped
+    /// block item).
+    const WHOLE: CubeUvs = CubeUvs::uniform(UvRect::WHOLE);
+
+    /// The same window on every face.
+    const fn uniform(r: UvRect) -> CubeUvs {
+        CubeUvs { top: r, bottom: r, x_sides: r, z_sides: r }
+    }
+
+    /// Each face shows the texture from its (0, 0) corner, one texture per
+    /// block of extent: (0, 0)..(dx, dz) on the top and bottom, (0, 0)..(dx, dy)
+    /// on the Z faces and (0, 0)..(dz, dy) on the X faces. Right for tiling
+    /// material textures (slabs, stairs, walls, doors). Takes the WORLD
+    /// min/max, as the small-cube path always has, so the UVs stay
+    /// bit-identical at any coordinate.
+    fn corner(min: [f32; 3], max: [f32; 3]) -> CubeUvs {
+        let dx = max[0] - min[0];
+        let dy = max[1] - min[1];
+        let dz = max[2] - min[2];
+        let flat = UvRect { u0: 0.0, v0: 0.0, u1: dx, v1: dz };
+        CubeUvs {
+            top: flat,
+            bottom: flat,
+            x_sides: UvRect { u0: 0.0, v0: 0.0, u1: dz, v1: dy },
+            z_sides: UvRect { u0: 0.0, v0: 0.0, u1: dx, v1: dy },
+        }
+    }
+
+    /// Each face shows the part of the texture under it when the texture is
+    /// laid over the whole block (Minecraft's default): u = local x (local z
+    /// on the X faces), v = local z on the top and bottom and 1 - local y on
+    /// the sides, so a side's top edge samples the top of the texture. For art
+    /// drawn as a whole block face (a button's pad, a plate's bevel). Takes the
+    /// cuboid's BLOCK-LOCAL min/max, in 0..1.
+    fn anchored(min: [f32; 3], max: [f32; 3]) -> CubeUvs {
+        let flat = UvRect { u0: min[0], v0: min[2], u1: max[0], v1: max[2] };
+        CubeUvs {
+            top: flat,
+            bottom: flat,
+            x_sides: UvRect { u0: min[2], v0: 1.0 - max[1], u1: max[2], v1: 1.0 - min[1] },
+            z_sides: UvRect { u0: min[0], v0: 1.0 - max[1], u1: max[0], v1: 1.0 - min[1] },
+        }
+    }
+}
+
+/// The torch shows its art, not the dark background round it
+/// (`texture_gen::gen_torch`: the handle is columns 7..9 on rows 8..16, the
+/// flame rows 3..8, the hot core columns 7..9 on rows 4..6). Two texels wide:
+/// columns 6 and 9 are background beside the handle. Sides run from the
+/// flame's tip to the handle's foot, the top shows the core, the bottom the
+/// handle's foot.
+const TORCH_UVS: CubeUvs = CubeUvs {
+    top: UvRect::texels(7.0, 4.0, 9.0, 6.0),
+    bottom: UvRect::texels(7.0, 14.0, 9.0, 16.0),
+    x_sides: UvRect::texels(7.0, 3.0, 9.0, 16.0),
+    z_sides: UvRect::texels(7.0, 3.0, 9.0, 16.0),
+};
+
+/// The lever's handle stub (box 1 of its `render_cuboids`) shows the middle
+/// of the art's wooden diagonal (`texture_gen::gen_lever`: texels 7..9 by
+/// 7..9 are all wood). The base keeps the corner window (grey plate).
+const LEVER_HANDLE_UVS: CubeUvs = CubeUvs::uniform(UvRect::texels(7.0, 7.0, 9.0, 9.0));
+
+/// The texture window for box `index` of a shaped block's `render_cuboids`:
+/// `local` is the box in block space, `min`/`max` the same box in world space.
+fn shaped_cuboid_uvs(
+    shape: crate::block_shape::BlockShape,
+    index: usize,
+    local: crate::block_shape::Aabb,
+    min: [f32; 3],
+    max: [f32; 3],
+) -> CubeUvs {
+    use crate::block_shape::BlockShape;
+    match (shape, index) {
+        // Art drawn as a whole block face: each face shows the part under it.
+        (BlockShape::Button | BlockShape::PressurePlate, _) => {
+            CubeUvs::anchored(local.min, local.max)
+        }
+        (BlockShape::Lever, 1) => LEVER_HANDLE_UVS,
+        // Tiling material textures (slabs, stairs, walls, doors, the lever's
+        // base, the item frame's plate, ...).
+        _ => CubeUvs::corner(min, max),
+    }
+}
+
+/// Emit a 6-faced cuboid with the given world-space min/max, textured
+/// `tex = [top, side, bottom]`, each face showing its window of `uvs`.
+/// Winding matches `emit_quad` for consistent culling. UV orientation: top and
+/// bottom u with +X, v with +Z; Z faces u with +X; X faces u with +Z; a side's
+/// `v0` is its top edge. The rect's values go straight into the corners.
+#[allow(clippy::too_many_arguments)]
+fn emit_cuboid(
+    min: [f32; 3],
+    max: [f32; 3],
+    tex: [u32; 3],
+    uvs: &CubeUvs,
+    light: f32,
+    sky: f32,
+    vertices: &mut Vec<Vertex>,
+    indices: &mut Vec<u32>,
+) {
+    let [x0, y0, z0] = min;
+    let [x1, y1, z1] = max;
+    let [tex_top, tex_side, tex_bottom] = tex;
+
+    let mut emit_face =
+        |corners: [[f32; 3]; 4], face_uvs: [[f32; 2]; 4], normal: [f32; 3], tex_layer: u32| {
+            let base = vertices.len() as u32;
+            for i in 0..4 {
+                vertices.push(Vertex {
+                    position: corners[i],
+                    normal,
+                    tex_layer,
+                    uv: face_uvs[i],
+                    light,
+                    sky_light: sky,
+                });
+            }
+            indices.push(base);
+            indices.push(base + 1);
+            indices.push(base + 2);
+            indices.push(base);
+            indices.push(base + 2);
+            indices.push(base + 3);
+        };
+
+    // Top (+Y)
+    let r = uvs.top;
+    emit_face(
+        [[x0, y1, z0], [x0, y1, z1], [x1, y1, z1], [x1, y1, z0]],
+        [[r.u0, r.v0], [r.u0, r.v1], [r.u1, r.v1], [r.u1, r.v0]],
+        [0.0, 1.0, 0.0],
+        tex_top,
+    );
+    // Bottom (-Y)
+    let r = uvs.bottom;
+    emit_face(
+        [[x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1]],
+        [[r.u0, r.v0], [r.u1, r.v0], [r.u1, r.v1], [r.u0, r.v1]],
+        [0.0, -1.0, 0.0],
+        tex_bottom,
+    );
+    // North (-Z)
+    let r = uvs.z_sides;
+    emit_face(
+        [[x1, y0, z0], [x0, y0, z0], [x0, y1, z0], [x1, y1, z0]],
+        [[r.u1, r.v1], [r.u0, r.v1], [r.u0, r.v0], [r.u1, r.v0]],
+        [0.0, 0.0, -1.0],
+        tex_side,
+    );
+    // South (+Z)
+    emit_face(
+        [[x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]],
+        [[r.u0, r.v1], [r.u1, r.v1], [r.u1, r.v0], [r.u0, r.v0]],
+        [0.0, 0.0, 1.0],
+        tex_side,
+    );
+    // East (+X)
+    let r = uvs.x_sides;
+    emit_face(
+        [[x1, y0, z1], [x1, y0, z0], [x1, y1, z0], [x1, y1, z1]],
+        [[r.u1, r.v1], [r.u0, r.v1], [r.u0, r.v0], [r.u1, r.v0]],
+        [1.0, 0.0, 0.0],
+        tex_side,
+    );
+    // West (-X)
+    emit_face(
+        [[x0, y0, z0], [x0, y0, z1], [x0, y1, z1], [x0, y1, z0]],
+        [[r.u0, r.v1], [r.u1, r.v1], [r.u1, r.v0], [r.u0, r.v0]],
+        [-1.0, 0.0, 0.0],
+        tex_side,
+    );
+}
+
+/// Emit a 6-faced small cube with the given world-space min/max, one texture
+/// on every face, shown from its (0, 0) corner (`CubeUvs::corner`). Used for
+/// the campfire smoke column. Winding matches `emit_quad`.
 fn emit_small_cube(
     min: [f32; 3],
     max: [f32; 3],
@@ -941,67 +1184,15 @@ fn emit_small_cube(
     vertices: &mut Vec<Vertex>,
     indices: &mut Vec<u32>,
 ) {
-    let [x0, y0, z0] = min;
-    let [x1, y1, z1] = max;
-    let dx = x1 - x0;
-    let dy = y1 - y0;
-    let dz = z1 - z0;
-
-    let mut emit_face = |corners: [[f32; 3]; 4], uvs: [[f32; 2]; 4], normal: [f32; 3]| {
-        let base = vertices.len() as u32;
-        for i in 0..4 {
-            vertices.push(Vertex {
-                position: corners[i],
-                normal,
-                tex_layer,
-                uv: uvs[i],
-                light,
-                sky_light: sky,
-            });
-        }
-        indices.push(base);
-        indices.push(base + 1);
-        indices.push(base + 2);
-        indices.push(base);
-        indices.push(base + 2);
-        indices.push(base + 3);
-    };
-
-    // Top (+Y)
-    emit_face(
-        [[x0, y1, z0], [x0, y1, z1], [x1, y1, z1], [x1, y1, z0]],
-        [[0.0, 0.0], [0.0, dz], [dx, dz], [dx, 0.0]],
-        [0.0, 1.0, 0.0],
-    );
-    // Bottom (-Y)
-    emit_face(
-        [[x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1]],
-        [[0.0, 0.0], [dx, 0.0], [dx, dz], [0.0, dz]],
-        [0.0, -1.0, 0.0],
-    );
-    // North (-Z)
-    emit_face(
-        [[x1, y0, z0], [x0, y0, z0], [x0, y1, z0], [x1, y1, z0]],
-        [[dx, dy], [0.0, dy], [0.0, 0.0], [dx, 0.0]],
-        [0.0, 0.0, -1.0],
-    );
-    // South (+Z)
-    emit_face(
-        [[x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]],
-        [[0.0, dy], [dx, dy], [dx, 0.0], [0.0, 0.0]],
-        [0.0, 0.0, 1.0],
-    );
-    // East (+X)
-    emit_face(
-        [[x1, y0, z1], [x1, y0, z0], [x1, y1, z0], [x1, y1, z1]],
-        [[dz, dy], [0.0, dy], [0.0, 0.0], [dz, 0.0]],
-        [1.0, 0.0, 0.0],
-    );
-    // West (-X)
-    emit_face(
-        [[x0, y0, z0], [x0, y0, z1], [x0, y1, z1], [x0, y1, z0]],
-        [[0.0, dy], [dz, dy], [dz, 0.0], [0.0, 0.0]],
-        [-1.0, 0.0, 0.0],
+    emit_cuboid(
+        min,
+        max,
+        [tex_layer; 3],
+        &CubeUvs::corner(min, max),
+        light,
+        sky,
+        vertices,
+        indices,
     );
 }
 
@@ -1239,92 +1430,6 @@ fn emit_ramp_rail(
             tex, light, vertices, indices,
         );
     }
-}
-
-/// F1 — like `emit_small_cube` but textures the top (+Y), bottom (-Y) and the
-/// four sides independently, so a slab/stair sub-cuboid shows its block's real
-/// top vs side face. Winding matches `emit_small_cube`/`emit_quad`.
-#[allow(clippy::too_many_arguments)]
-fn emit_small_cube_textured(
-    min: [f32; 3],
-    max: [f32; 3],
-    tex_top: u32,
-    tex_side: u32,
-    tex_bottom: u32,
-    light: f32,
-    sky: f32,
-    vertices: &mut Vec<Vertex>,
-    indices: &mut Vec<u32>,
-) {
-    let [x0, y0, z0] = min;
-    let [x1, y1, z1] = max;
-    let dx = x1 - x0;
-    let dy = y1 - y0;
-    let dz = z1 - z0;
-
-    let mut emit_face =
-        |corners: [[f32; 3]; 4], uvs: [[f32; 2]; 4], normal: [f32; 3], tex_layer: u32| {
-            let base = vertices.len() as u32;
-            for i in 0..4 {
-                vertices.push(Vertex {
-                    position: corners[i],
-                    normal,
-                    tex_layer,
-                    uv: uvs[i],
-                    light,
-                    sky_light: sky,
-                });
-            }
-            indices.push(base);
-            indices.push(base + 1);
-            indices.push(base + 2);
-            indices.push(base);
-            indices.push(base + 2);
-            indices.push(base + 3);
-        };
-
-    // Top (+Y)
-    emit_face(
-        [[x0, y1, z0], [x0, y1, z1], [x1, y1, z1], [x1, y1, z0]],
-        [[0.0, 0.0], [0.0, dz], [dx, dz], [dx, 0.0]],
-        [0.0, 1.0, 0.0],
-        tex_top,
-    );
-    // Bottom (-Y)
-    emit_face(
-        [[x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1]],
-        [[0.0, 0.0], [dx, 0.0], [dx, dz], [0.0, dz]],
-        [0.0, -1.0, 0.0],
-        tex_bottom,
-    );
-    // North (-Z)
-    emit_face(
-        [[x1, y0, z0], [x0, y0, z0], [x0, y1, z0], [x1, y1, z0]],
-        [[dx, dy], [0.0, dy], [0.0, 0.0], [dx, 0.0]],
-        [0.0, 0.0, -1.0],
-        tex_side,
-    );
-    // South (+Z)
-    emit_face(
-        [[x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]],
-        [[0.0, dy], [dx, dy], [dx, 0.0], [0.0, 0.0]],
-        [0.0, 0.0, 1.0],
-        tex_side,
-    );
-    // East (+X)
-    emit_face(
-        [[x1, y0, z1], [x1, y0, z0], [x1, y1, z0], [x1, y1, z1]],
-        [[dz, dy], [0.0, dy], [0.0, 0.0], [dz, 0.0]],
-        [1.0, 0.0, 0.0],
-        tex_side,
-    );
-    // West (-X)
-    emit_face(
-        [[x0, y0, z0], [x0, y0, z1], [x0, y1, z1], [x0, y1, z0]],
-        [[0.0, dy], [dz, dy], [dz, 0.0], [0.0, 0.0]],
-        [-1.0, 0.0, 0.0],
-        tex_side,
-    );
 }
 
 /// Build mesh for water blocks only.
@@ -2058,18 +2163,19 @@ mod tests {
 
     #[test]
     fn torch_small_cube_splits_emission_from_sky() {
-        // The torch pole keeps its emission in the BLOCK channel (still
-        // bright at night); the sky contribution rides the sky channel.
+        // The torch pole is its own light: its BLOCK channel carries the
+        // emissive sentinel (fs_main draws it mostly unlit, so the flame shows
+        // its colour at night and before the BFS light reaches it), and the
+        // sky contribution still rides the sky channel.
         let reg = BlockRegistry::new();
         let mut w = World::new();
         w.set_block(5, 3, 5, block::TORCH);
         w.set_sky_light_at(5, 3, 5, 15);
-        let emission = reg.light_emission(block::TORCH) as f32 / 15.0;
-        assert!(emission > 0.0, "torch emits light");
         let m = build_chunk_meshes(0, 0, 0, &w, &reg);
         assert!(!m.opaque.vertices.is_empty(), "torch pole small cube emitted");
         for v in &m.opaque.vertices {
-            assert!((v.light - emission).abs() < 1e-6, "emission in block channel");
+            assert!(v.light > 1.5, "the torch's faces carry the emissive sentinel, got {}", v.light);
+            assert_eq!(v.light, Vertex::EMISSIVE, "the sentinel is Vertex::EMISSIVE");
             assert!((v.sky_light - 1.0).abs() < 1e-6, "sky rides its own channel");
         }
     }
