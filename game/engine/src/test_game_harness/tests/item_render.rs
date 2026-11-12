@@ -16,6 +16,8 @@
 //! - the framed torch shows (changed pixels from the front and the side), and
 //!   seen from the side it is not a dark box (few near-black pixels where the
 //!   framed item sits);
+//! - the torch held in the hand, seen from behind in third person, shows and
+//!   has no near-black pixels (not a dark cube);
 //! - the blighted crop is grey: its pixels are far less saturated than the
 //!   healthy wheat's, at noon and by torchlight.
 //!
@@ -267,6 +269,7 @@ fn game_harness_item_looks() {
     settle(&mut hg);
     set_time(&mut hg, 12000);
     let (mut side_frac, mut side_shown, mut front_shown) = (1.0f32, 0u32, 0u32);
+    let (mut held_3p_shown, mut held_3p_dark) = (0u32, u32::MAX);
     for ((v, eye), empty) in views.iter().zip(&empties) {
         let name = format!("frame-{v}");
         let img = shot(&mut hg, &out, &name, *eye, item_centre);
@@ -337,6 +340,9 @@ fn game_harness_item_looks() {
             let (shown, dark_shown) =
                 empty.as_ref().map_or((0, 0), |e| (changed(e, &img, whole), dark_changed(e, &img, whole)));
             eprintln!("ITEMDIAG {name} near_black={dark} changed_vs_empty={shown} dark_changed={dark_shown}");
+            if name == "held-3p-torch" {
+                (held_3p_shown, held_3p_dark) = (shown, dark_shown);
+            }
             if empty.is_none() {
                 empty = Some(img);
             }
@@ -449,6 +455,10 @@ fn game_harness_item_looks() {
         side_frac < 0.10,
         "the framed torch seen from the side is a dark box: {:.1}% of its space is near-black",
         side_frac * 100.0
+    );
+    assert!(
+        held_3p_shown >= 600 && held_3p_dark == 0,
+        "the held torch seen from behind: {held_3p_shown} changed pixels, {held_3p_dark} of them near-black"
     );
     for (label, [wheat_s, blight_s]) in [("noon", noon), ("torchlight", torchlit)] {
         assert!(

@@ -58,6 +58,12 @@ impl ItemLook {
 pub const SPRITE_DEPTH: f32 = 1.0 / 16.0;
 /// Width of a sprite held in the hand (a held block is a 0.4 cube).
 pub const HELD_SPRITE_WIDTH: f32 = 0.6;
+/// Where a held sprite's centre sits from the hand (the hand end of the arm;
+/// +X is outward from the body, +Y up the arm): beside the fist on the
+/// outside and a little up, so a torch's art clears the arm (0.25 wide plus
+/// its sleeve) instead of hiding its flame inside it. A held cube stays
+/// centred on the hand.
+pub const HELD_SPRITE_OFFSET: Vec3 = Vec3::new(0.25, 0.1, 0.0);
 /// Width of a dropped sprite (a dropped block is a 0.2 cube).
 pub const DROP_SPRITE_WIDTH: f32 = 0.4;
 /// Width of a framed sprite: the half-cell square a framed block fills.
@@ -124,15 +130,22 @@ pub fn item_ref_look(item: ItemRef, registry: &BlockRegistry) -> Option<ItemLook
     }
 }
 
-/// Local-space mesh (centred at the origin, about unit scale) for a held item,
-/// a triangle list. The caller moves it to the hand anchor or the first-person
-/// viewmodel slot. A cuboid is 6 faces x 2 triangles x 3 vertices = **36
-/// vertices**; a block sprite is [`sprite_triangles`].
+/// Local-space mesh (about unit scale, the hand at the origin) for a held
+/// item, a triangle list. The caller moves it to the hand anchor or the
+/// first-person viewmodel slot. A cuboid is centred on the hand, 6 faces x 2
+/// triangles x 3 vertices = **36 vertices**; a block sprite is
+/// [`sprite_triangles`] moved to [`HELD_SPRITE_OFFSET`].
 pub fn held_item_mesh(item: ItemRef, registry: &BlockRegistry) -> Vec<Vertex> {
     match item {
         ItemRef::Empty => Vec::new(),
         ItemRef::Block(id) => match block_look(id, registry) {
-            ItemLook::Sprite { layer } => sprite_triangles(layer, HELD_SPRITE_WIDTH),
+            ItemLook::Sprite { layer } => {
+                let mut verts = sprite_triangles(layer, HELD_SPRITE_WIDTH);
+                for v in &mut verts {
+                    v.position = (Vec3::from(v.position) + HELD_SPRITE_OFFSET).to_array();
+                }
+                verts
+            }
             ItemLook::Cube { top, side, bottom } => {
                 let mut verts = Vec::with_capacity(36);
                 push_cuboid(&mut verts, Vec3::ZERO, Vec3::splat(0.4), top, side, bottom);
@@ -505,6 +518,22 @@ mod tests {
                     assert_eq!(texel(tex, x, y)[3], 255, "edge {:?} samples transparent texel ({x}, {y})", q.normal);
                 }
             }
+        }
+    }
+
+    #[test]
+    fn a_held_torch_clears_the_arm() {
+        // The avatar's right arm is 0.25 wide round the hand anchor, with its
+        // sleeve overlay a hair outside that. The torch's art (its edge quads
+        // trace the outline) lies wholly outside the arm, on the outer side, so
+        // its flame isn't hidden inside the forearm.
+        let arm = &crate::entity_model::player_model_for(crate::skin_uv::ArmModel::Classic)[3];
+        let clear = arm.size.x * 0.5 + 0.04;
+        let verts = held_item_mesh(ItemRef::Block(block::TORCH), &test_registry());
+        // Six vertices a quad; the first two quads are the front and back squares.
+        assert!(verts.len() > 12);
+        for v in &verts[12..] {
+            assert!(v.position[0] > clear, "torch art at {:?} is inside the arm (half width {clear})", v.position);
         }
     }
 

@@ -1423,7 +1423,11 @@ third-person avatar hand) and on the ground (local and server-broadcast drops).
   picture. The opaque texels come from the stock textures (`texture_gen`,
   alpha >= 128, worked out once). A layer past the stock set is a plain card.
   The torch is 12 quads. Widths: held 0.6, dropped 0.4 (standing up, spinning
-  and bobbing like the cube, its foot as high), framed 0.5.
+  and bobbing like the cube, its foot as high), framed 0.5. A held sprite sits
+  beside the fist on the outside and a little up (`HELD_SPRITE_OFFSET`, 0.25
+  out and 0.1 up from the hand), so a torch's art clears the 0.25-wide arm
+  instead of hiding its flame in the forearm; a held cube stays centred on the
+  hand.
 - **The cutout bit.** `mesh::CUTOUT_FLAG` is bit 17 of `Vertex.tex_layer` (bit
   16 is the fast-leaf fill, §2.2; bits 20..23 an avatar's block light, §4.2;
   texture layers are < 512). Every sprite vertex sets it and nothing else does.
@@ -1460,8 +1464,9 @@ third-person avatar hand) and on the ground (local and server-broadcast drops).
   papyrus stage 2 at 170 quads. A pack that redraws a stock icon keeps the
   stock outline's edge geometry (the cutout drops whatever the new art leaves
   transparent). In first person the hand end of the arm sits below the screen
-  edge (`viewmodel_transform`), so a held item is mostly out of view there; the
-  third-person avatar shows it, hanging from the fist, centred on the hand.
+  edge (`viewmodel_transform`), so a held item, cube or sprite, is mostly out
+  of view there (a mid-swing shot shows none of the torch); the third-person
+  avatar shows it beside the fist.
   `fs_main` now holds a `discard`, which some tile-based GPUs pay for across
   the whole opaque pass.
 
