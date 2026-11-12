@@ -4,7 +4,7 @@
 //! the screen, bobbing while walking and swinging on mine/place. This is the
 //! player seeing their own tool in hand — the counterpart to the remote-player
 //! avatars (Phase 6), which reuse the same `player_model()` right arm and the
-//! same `held_item_model::held_item_mesh` so the in-hand item always agrees
+//! same `item_model::held_item_mesh` so the in-hand item always agrees
 //! with what other players see.
 //!
 //! Geometry is assembled in the right arm's LOCAL/model space, then
@@ -135,7 +135,7 @@ pub fn build_viewmodel_vertices(
     let mut held_verts = Vec::new();
     if !matches!(held, ItemRef::Empty) {
         let hand_anchor = Vec3::new(0.0, -arm.size.y * 0.5, 0.0);
-        let mut item_verts = crate::held_item_model::held_item_mesh(held, registry);
+        let mut item_verts = crate::item_model::held_item_mesh(held, registry);
         for v in &mut item_verts {
             let p = Vec3::from(v.position) + hand_anchor;
             v.position = p.to_array();

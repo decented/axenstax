@@ -414,6 +414,12 @@ fn fs_plant(in: VertexOutput) -> @location(0) vec4<f32> {
 const LEAF_FILL_FLAG: u32 = 0x10000u;
 const LEAF_LAYER_MASK: u32 = 0xFFFFu;
 
+// Item sprites (`item_model`): the mesher and the item builders set bit 17 of
+// tex_layer (`mesh::CUTOUT_FLAG`) on every face of a framed, held or dropped
+// sprite item. fs_main drops a texel whose full-size alpha is below 0.5, so a
+// flat item shows its silhouette, not the square it is painted on.
+const CUTOUT_FLAG: u32 = 0x20000u;
+
 fn fast_leaf_fill(uv: vec2<f32>, layer: i32) -> vec3<f32> {
     let avg = textureSampleLevel(block_textures, block_sampler, uv, layer, 4.0).rgb;
     let dark = max(avg.r, max(avg.g, avg.b)) < 0.02;
@@ -428,6 +434,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var tex_color = tex_sample;
     if ((in.tex_layer & LEAF_FILL_FLAG) != 0u && tex_sample.a < 0.5) {
         tex_color = vec4<f32>(fast_leaf_fill(in.uv, layer), 1.0);
+    }
+    // An item sprite (CUTOUT_FLAG) drops its transparent texels. The test reads
+    // the full-size texel (mip level 0): a two-texel torch handle averages to
+    // half alpha one mip down and would vanish at a distance.
+    if ((in.tex_layer & CUTOUT_FLAG) != 0u
+        && textureSampleLevel(block_textures, block_sampler, in.uv, layer, 0.0).a < 0.5) {
+        discard;
     }
 
     let brightness = camera.sun_dir.w;

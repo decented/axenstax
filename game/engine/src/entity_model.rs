@@ -8,7 +8,6 @@ use glam::Vec3;
 use crate::mesh::Vertex;
 use crate::mob::MobType;
 use crate::entity::{Hitbox, ItemEntity, MobKind, Position, Velocity};
-use crate::item::Item;
 use crate::mob_ai::MobAi;
 use crate::combat::Health;
 
@@ -1563,7 +1562,7 @@ pub fn build_player_avatar_vertices_with(
             right_arm.origin.z,
         );
         let arm_pivot = right_arm.pivot;
-        let mut item_verts = crate::held_item_model::held_item_mesh(item, registry);
+        let mut item_verts = crate::item_model::held_item_mesh(item, registry);
         let x_rot = arm_swing.unwrap_or(0.0);
         let (sin_x, cos_x) = x_rot.sin_cos();
         let (sin_y, cos_y) = yaw.sin_cos();
@@ -1614,11 +1613,10 @@ pub fn build_player_avatar_vertices(
     )
 }
 
-/// Build vertices for every dropped-item entity. Each item becomes a small
-/// floating cube that bobs gently on Y and slowly spins on Y so it reads as
-/// "loot" at a glance. Block items use their block's textures; other items
-/// (materials, tools) currently fall back to a generic plank texture — Wave
-/// 2b polish pass adds per-material textures + a per-tool one.
+/// Build vertices for every dropped-item entity. Each item is drawn by the one
+/// item model (`item_model::item_look`): a small floating cube, or a flat
+/// sprite for a block the mesher draws as a billboard, a rail or the torch. It
+/// bobs gently on Y and slowly spins on Y so it reads as "loot" at a glance.
 pub fn build_item_entity_vertices(
     ecs: &hecs::World,
     registry: &crate::block::BlockRegistry,
@@ -1634,55 +1632,30 @@ pub fn build_item_entity_vertices(
         if (pos.0 - player_pos).length_squared() < 0.05 {
             continue;
         }
-        let (tex_top, tex_side, tex_bottom) = item_textures(&item.stack.item, registry);
-
-        push_item_drop_cube(
-            &mut verts,
-            (tex_top, tex_side, tex_bottom),
-            pos.0,
-            anim_time,
-            light_at(pos.0),
-        );
+        let look = crate::item_model::item_look(&item.stack.item, registry);
+        push_item_drop(&mut verts, look, pos.0, anim_time, light_at(pos.0));
     }
 
     verts
 }
 
-/// Drop-cube textures for one inventory `Item`. Material/tool drops use the
-/// dedicated `TEX_ITEM_*` layers; block drops use the block's own textures.
-/// Shared by the local `ItemEntity` pass and the remote-item pass, so a
-/// server-broadcast tool/armour drop looks identical to a local one
+/// Emit one dropped item in its look (`item_model`): the drop cube, or the
+/// flat sprite. Shared by the local `ItemEntity` pass and the remote-item
+/// pass, so a server-broadcast drop looks identical to a local one
 /// (death-drops phase 3).
-fn item_textures(item: &Item, registry: &crate::block::BlockRegistry) -> (u32, u32, u32) {
-    match item {
-        Item::Block(id) => {
-            let def = registry.get(*id);
-            (def.tex_top, def.tex_side, def.tex_bottom)
+fn push_item_drop(
+    verts: &mut Vec<Vertex>,
+    look: crate::item_model::ItemLook,
+    pos: Vec3,
+    anim_time: f32,
+    light: (f32, f32),
+) {
+    match look {
+        crate::item_model::ItemLook::Cube { top, side, bottom } => {
+            push_item_drop_cube(verts, (top, side, bottom), pos, anim_time, light)
         }
-        Item::Material(mid) => {
-            let tex = material_texture(*mid);
-            (tex, tex, tex)
-        }
-        Item::Tool(t) => {
-            let tex = tool_texture(t.material);
-            (tex, tex, tex)
-        }
-        Item::Plan(_) => {
-            // Spec 24 — ground-dropped Plan item. Render as a
-            // small parchment scroll cube using the Blueprint Paper top
-            // texture for the parchment face + the plaque side
-            // texture for the wood-rolled-edge sides.
-            (
-                crate::block::TEX_BLUEPRINT_PAPER_TOP,
-                crate::block::TEX_ARCHITECT_PLAQUE_SIDE,
-                crate::block::TEX_BLUEPRINT_PAPER_TOP,
-            )
-        }
-        Item::Armour(_) => {
-            // Spec 28e — ground-dropped armour. BRIDGE: reuse iron-
-            // ingot texture for all tiers; per-slot icons land with
-            // the live armour HUD work.
-            (TEX_ITEM_IRON_INGOT, TEX_ITEM_IRON_INGOT, TEX_ITEM_IRON_INGOT)
+        crate::item_model::ItemLook::Sprite { layer } => {
+            push_item_drop_sprite(verts, layer, pos, anim_time, light)
         }
     }
 }
@@ -1741,40 +1714,24 @@ fn push_item_drop_cube(
     apply_light_channels(&mut verts[verts_start..], light);
 }
 
-/// Resolve a wire `ItemRef` to drop-cube textures. `None` = nothing sound to
-/// render: unknown/hostile block ids (the registry's AIR fallback would draw
-/// a ghost cube), unknown material discriminants, `Empty`. Tool tiers map the
-/// same way as `held_item_model::held_item_mesh` so a dropped tool matches
-/// its held look.
-fn item_ref_textures(
-    item: crate::protocol::ItemRef,
-    registry: &crate::block::BlockRegistry,
-) -> Option<(u32, u32, u32)> {
-    use crate::crafting::ToolMaterial;
-    use crate::protocol::ItemRef;
-    match item {
-        ItemRef::Block(id) if registry.is_known(id) => {
-            let def = registry.get(id);
-            Some((def.tex_top, def.tex_side, def.tex_bottom))
-        }
-        ItemRef::Material(id) => crate::item::MaterialId::try_from(id).ok().map(|m| {
-            let tex = material_texture(m);
-            (tex, tex, tex)
-        }),
-        ItemRef::Tool(tier) => {
-            let mat = match tier {
-                0 => ToolMaterial::Wood,
-                1 => ToolMaterial::Stone,
-                2 => ToolMaterial::Iron,
-                3 => ToolMaterial::Diamond,
-                4 => ToolMaterial::Satori,
-                _ => return None,
-            };
-            let tex = tool_texture(mat);
-            Some((tex, tex, tex))
-        }
-        _ => None,
+/// Emit one dropped sprite item (`item_model`): the flat sprite standing up,
+/// bobbing and spinning like the drop cube, its foot as high above the ground
+/// as the cube's.
+fn push_item_drop_sprite(verts: &mut Vec<Vertex>, layer: u32, pos: Vec3, anim_time: f32, light: (f32, f32)) {
+    let verts_start = verts.len();
+    let bob = (anim_time * 2.0).sin() * 0.06;
+    let yaw = anim_time * 0.9;
+    let width = crate::item_model::DROP_SPRITE_WIDTH;
+    // The drop cube's centre is 0.18 up and its half size 0.1: its foot 0.08 up.
+    let centre = pos + Vec3::new(0.0, 0.08 + width * 0.5 + bob, 0.0);
+    let (sin_y, cos_y) = yaw.sin_cos();
+    let spin = |p: Vec3| Vec3::new(p.x * cos_y - p.z * sin_y, p.y, p.x * sin_y + p.z * cos_y);
+    for mut v in crate::item_model::sprite_triangles(layer, width) {
+        v.position = (spin(Vec3::from(v.position)) + centre).to_array();
+        v.normal = spin(Vec3::from(v.normal)).to_array();
+        verts.push(v);
     }
+    apply_light_channels(&mut verts[verts_start..], light);
 }
 
 /// Build vertices for the server-broadcast remote item entities (death-drops
@@ -1800,14 +1757,14 @@ pub fn build_remote_item_vertices(
         // resolution, so a server-broadcast iron pickaxe looks exactly like
         // one dropped by the client's own sim. Otherwise fall back to the
         // legacy `(kind, id)` pair.
-        let tex = match crate::inventory::item_from_wire_full(&it.full) {
-            Some(item) => item_textures(&item, registry),
-            None => match item_ref_textures(it.item, registry) {
-                Some(t) => t,
+        let look = match crate::inventory::item_from_wire_full(&it.full) {
+            Some(item) => crate::item_model::item_look(&item, registry),
+            None => match crate::item_model::item_ref_look(it.item, registry) {
+                Some(look) => look,
                 None => continue,
             },
         };
-        push_item_drop_cube(&mut verts, tex, it.pos, anim_time, light_at(it.pos));
+        push_item_drop(&mut verts, look, it.pos, anim_time, light_at(it.pos));
     }
     verts
 }
@@ -3393,7 +3350,7 @@ mod tests {
     fn remote_armour_and_tool_render_from_the_full_payload() {
         // Death-drops phase 3 — armour's legacy pair is `Empty`, so it used
         // to render nothing at all. With `full_item` it draws the same cube a
-        // LOCAL armour drop does (item_textures is shared by both paths).
+        // LOCAL armour drop does (`item_model::item_look` serves both paths).
         use crate::armour::{ArmourItem, ArmourMaterial, ArmourSlot};
         use crate::crafting::{Tool, ToolMaterial, ToolType};
         use crate::protocol::{EntityKind, EntitySpawn};

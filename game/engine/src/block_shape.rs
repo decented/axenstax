@@ -508,6 +508,39 @@ pub fn item_frame_item_cube(facing: Facing) -> Aabb {
     }
 }
 
+/// Thickness of the item frame's plate (`item_frame_plate`).
+const ITEM_FRAME_PLATE: f32 = 0.0625;
+
+/// Where a framed *sprite* item lies (`item_model`): flat on the plate,
+/// centred, parallel to the wall. `right` and `up` are the picture's right and
+/// top as a viewer facing the frame sees them (upright on a wall, its top
+/// toward north on a floor or ceiling), `out` its front normal (`facing`, out
+/// of the wall), `right x up = out`; `centre` (block-local) is the sprite's
+/// middle for a sprite `depth` thick, its back on the plate.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FramedSprite {
+    pub centre: [f32; 3],
+    pub right: [f32; 3],
+    pub up: [f32; 3],
+    pub out: [f32; 3],
+}
+
+/// See [`FramedSprite`].
+pub fn item_frame_sprite(facing: Facing, depth: f32) -> FramedSprite {
+    let (right, up, out) = match facing {
+        Facing::South => ([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]),
+        Facing::North => ([-1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, -1.0]),
+        Facing::East => ([0.0, 0.0, -1.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]),
+        Facing::West => ([0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0]),
+        Facing::Up => ([1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]),
+        Facing::Down => ([-1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, -1.0, 0.0]),
+    };
+    // The wall is the cell face opposite `out`; the plate lies against it.
+    let lift = ITEM_FRAME_PLATE + depth * 0.5;
+    let centre = out.map(|o: f32| 0.5 - o * 0.5 + o * lift);
+    FramedSprite { centre, right, up, out }
+}
+
 /// Map a clicked face's outward normal to the `Facing` a wall-mounted shape
 /// (button, lever) should protrude toward. `[0,1,0]` (top) → `Up`, etc.
 pub fn facing_from_face_normal(face_normal: [i32; 3]) -> Facing {

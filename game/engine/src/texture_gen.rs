@@ -3868,10 +3868,14 @@ fn gen_item_cooked_mutton() -> Vec<u8> {
 
 fn gen_torch() -> Vec<u8> {
     let mut px = vec![0u8; PIXELS];
-    // Dark transparent-ish background so the torch reads as a slim shape on
-    // a cube face. Using full-alpha here because the renderer's block path
-    // doesn't blend per-pixel; future polish: switch to a cross-mesh shape.
+    // A transparent background (alpha 0) that keeps its old dark colour, so a
+    // path that ignores alpha looks as it did: the placed torch samples only
+    // the art (`mesh::TORCH_UVS`); the item sprite (`item_model`, cut out by
+    // `fs_main`) and the inventory icon (egui blends alpha) show just the torch.
     fill_color(&mut px, 18, 14, 10);
+    for texel in px.chunks_exact_mut(4) {
+        texel[3] = 0;
+    }
     // Wooden handle column (centre 2 pixels wide, lower 8 rows)
     for y in 8..SIZE {
         for x in 7..9 {
@@ -6152,6 +6156,22 @@ mod tests {
     /// The texture array is created with `texture_count()` layers and then
     /// each generated texture is uploaded by index — the two MUST agree or the
     /// upload writes past the array (panic) or leaves dead layers. Lock it.
+    #[test]
+    fn the_torch_background_is_transparent_and_keeps_its_colour() {
+        let tex = &generate_textures()[crate::block::TEX_TORCH as usize];
+        let mut art = 0;
+        for texel in tex.chunks_exact(4) {
+            if texel[..3] == [18, 14, 10] {
+                assert_eq!(texel[3], 0, "the background is transparent");
+            } else {
+                assert_eq!(texel[3], 255, "the art is opaque: {texel:?}");
+                art += 1;
+            }
+        }
+        // The handle (2 x 8 texels) and the flame (3 + 4 + 4 + 4 + 3).
+        assert_eq!(art, 34, "the torch's art");
+    }
+
     #[test]
     fn generated_count_matches_texture_count() {
         assert_eq!(generate_textures().len(), texture_count() as usize);

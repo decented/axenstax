@@ -271,6 +271,59 @@ pub fn plant_unit_cross() -> (Vec<PlantGeoVertex>, Vec<u32>) {
 /// hole. Texture layers are < 512, so the bit is clear of every real layer.
 pub const LEAF_FILL_FLAG: u32 = 1 << 16;
 
+/// Bit set in a vertex's `tex_layer` on every face of an item sprite
+/// (`item_model`: a framed, held or dropped torch, flower, crop, rail, ...).
+/// `fs_main` masks it off the layer index (like [`LEAF_FILL_FLAG`]) and
+/// discards a texel whose full-size alpha is below 0.5, so a flat item shows
+/// its silhouette, not the square it is painted on. Only item-sprite vertices
+/// set it. (Bits 20..23 carry an avatar's block light, on the avatar pipeline
+/// only: `world_light::AVATAR_BLOCK_BITS`.)
+pub const CUTOUT_FLAG: u32 = 1 << 17;
+
+/// How the chunk mesher draws a block: the one rule `emit_non_solid_blocks`
+/// branches on, which the item model reads too (`item_model::block_look`), so
+/// an item looks like its block. A block with a placed micro-model (a
+/// per-world registry) draws its baked shell instead, whatever its class.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RenderClass {
+    /// Nothing of its own in this pass: air, and water (the water mesh).
+    None,
+    /// A full cube from the greedy passes: opaque, or the transparent bucket
+    /// (glass, leaves).
+    Cube,
+    /// A shaped block's authored sub-cuboids (`block_shape::shape_of` is not
+    /// `FullCube`: slabs, stairs, buttons, plates, doors, the item frame, ...).
+    Shaped,
+    /// Flat auto-connecting rails and cables.
+    Flat,
+    /// The torch's small emissive pole.
+    Torch,
+    /// The campfire smoke column, a small cube.
+    Smoke,
+    /// An instanced cross billboard: crops, flowers, saplings, tall grass and
+    /// every other non-solid transparent block.
+    Cross,
+}
+
+/// The [`RenderClass`] of block `id`.
+pub fn render_class(id: BlockId, registry: &BlockRegistry) -> RenderClass {
+    if id == AIR || id == WATER {
+        RenderClass::None
+    } else if crate::block_shape::shape_of(id) != crate::block_shape::BlockShape::FullCube {
+        RenderClass::Shaped
+    } else if id == crate::rail::TRACK || id == block::CABLE || id == block::CABLE_LIT {
+        RenderClass::Flat
+    } else if registry.is_solid(id) || !registry.is_transparent(id) {
+        RenderClass::Cube
+    } else if id == block::TORCH {
+        RenderClass::Torch
+    } else if id == block::CAMPFIRE_SMOKE {
+        RenderClass::Smoke
+    } else {
+        RenderClass::Cross
+    }
+}
+
 /// Dual mesh output: opaque geometry + transparent water geometry, plus the
 /// chunk's instanced plants (flowers/grass/crops — drawn as cross billboards
 /// in a dedicated instanced pass rather than baked into `opaque`).
@@ -623,8 +676,11 @@ fn emit_non_solid_blocks(
                 // solid-skip below so it works whether solid or not. Light:
                 // a solid cell's own light is 0, so sample the brightest
                 // face-neighbour (same as a solid micro-model).
+                // The branch is the block's render class (`render_class`, the
+                // rule the item model shares).
+                let class = render_class(block_id, registry);
                 let shape = crate::block_shape::shape_of(block_id);
-                if shape != crate::block_shape::BlockShape::FullCube {
+                if class == RenderClass::Shaped {
                     let (wx, wy, wz) =
                         (origin_x + x as i32, origin_y + y as i32, origin_z + z as i32);
                     // Campaign N — split channels (shared helper).
@@ -660,27 +716,41 @@ fn emit_non_solid_blocks(
                         emit_cuboid(mn, mx, tex, &uvs, light_f, sky_f, vertices, indices);
                     }
                     // Wave 2c — a filled Item Frame draws its framed *block* item
-                    // as a small cube off the plate (non-block items show only on
-                    // the read-on-look HUD). The block's own textures identify it:
-                    // the whole texture on every face, like a held or dropped block.
+                    // (non-block items show only on the read-on-look HUD) by the
+                    // one item model (`item_model`): a cube item is the small cube
+                    // off the plate, the whole texture on every face, like a held
+                    // or dropped block; a sprite item (a torch, a flower, a rail,
+                    // ...) lies flat on the plate, parallel to the wall.
                     if shape == crate::block_shape::BlockShape::ItemFrame
                         && let Some(crate::item::Item::Block(fb)) = world
                             .item_frame_at((wx, wy, wz))
                             .and_then(|f| f.item.as_ref().map(|s| s.item.clone()))
                         {
-                            let cube = crate::block_shape::item_frame_item_cube(
-                                crate::meta::facing(m),
-                            );
-                            emit_cuboid(
-                                [obx + cube.min[0], oby + cube.min[1], obz + cube.min[2]],
-                                [obx + cube.max[0], oby + cube.max[1], obz + cube.max[2]],
-                                [registry.tex_top(fb), registry.tex_side(fb), registry.tex_bottom(fb)],
-                                &CubeUvs::WHOLE,
-                                light_f,
-                                sky_f,
-                                vertices,
-                                indices,
-                            );
+                            let facing = crate::meta::facing(m);
+                            match crate::item_model::block_look(fb, registry) {
+                                crate::item_model::ItemLook::Sprite { layer } => emit_framed_sprite(
+                                    [obx, oby, obz],
+                                    facing,
+                                    layer,
+                                    light_f,
+                                    sky_f,
+                                    vertices,
+                                    indices,
+                                ),
+                                crate::item_model::ItemLook::Cube { top, side, bottom } => {
+                                    let cube = crate::block_shape::item_frame_item_cube(facing);
+                                    emit_cuboid(
+                                        [obx + cube.min[0], oby + cube.min[1], obz + cube.min[2]],
+                                        [obx + cube.max[0], oby + cube.max[1], obz + cube.max[2]],
+                                        [top, side, bottom],
+                                        &CubeUvs::WHOLE,
+                                        light_f,
+                                        sky_f,
+                                        vertices,
+                                        indices,
+                                    );
+                                }
+                            }
                         }
                     continue;
                 }
@@ -688,10 +758,7 @@ fn emit_non_solid_blocks(
                 // Shape derives live from same-family cardinal neighbours (like
                 // Wall/Pane): straights, curved bends, T-junctions, crosses. Clean
                 // solid-colour geometry (no per-shape texture). Carts unchanged.
-                if block_id == crate::rail::TRACK
-                    || block_id == block::CABLE
-                    || block_id == block::CABLE_LIT
-                {
+                if class == RenderClass::Flat {
                     let (wx, wy, wz) =
                         (origin_x + x as i32, origin_y + y as i32, origin_z + z as i32);
                     let is_track = block_id == crate::rail::TRACK;
@@ -746,7 +813,7 @@ fn emit_non_solid_blocks(
                 }
                 // Only candidates: non-solid + transparent. Solid
                 // transparent (e.g. glass) keeps the greedy path.
-                if registry.is_solid(block_id) || !registry.is_transparent(block_id) {
+                if matches!(class, RenderClass::None | RenderClass::Cube) {
                     continue;
                 }
                 let (min_off, max_off) = match non_solid_shape_for(block_id) {
@@ -787,7 +854,7 @@ fn emit_non_solid_blocks(
                 // here, drawn in the renderer's dedicated plant pass); only
                 // the genuinely volumetric non-solids (torch pole, smoke
                 // column) keep the 6-faced small cube baked into the mesh.
-                if block_id == block::TORCH {
+                if class == RenderClass::Torch {
                     // The torch is its own light: its faces carry the emissive
                     // sentinel, so `fs_main` draws its art mostly unlit, at night
                     // and before the BFS light reaches the cell. Sky still rides
@@ -802,7 +869,7 @@ fn emit_non_solid_blocks(
                         vertices,
                         indices,
                     );
-                } else if block_id == block::CAMPFIRE_SMOKE {
+                } else if class == RenderClass::Smoke {
                     emit_small_cube(min, max, tex_layer, light_f, sky_f, vertices, indices);
                 } else {
                     plants.push(PlantInstance {
@@ -1203,6 +1270,45 @@ fn emit_small_cube(
         vertices,
         indices,
     );
+}
+
+/// A framed sprite item (`item_model`): the sprite lies flat on the item
+/// frame's plate in the cell whose min corner is `cell`, centred, parallel to
+/// the wall, its front facing out (`block_shape::item_frame_sprite`). Every
+/// vertex carries [`CUTOUT_FLAG`] and the frame cell's light. Four vertices
+/// and two triangles per face, wound for the back-face-culled chunk pass.
+fn emit_framed_sprite(
+    cell: [f32; 3],
+    facing: crate::meta::Facing,
+    layer: u32,
+    light: f32,
+    sky: f32,
+    vertices: &mut Vec<Vertex>,
+    indices: &mut Vec<u32>,
+) {
+    use glam::Vec3;
+    let width = crate::item_model::FRAME_SPRITE_WIDTH;
+    let place = crate::block_shape::item_frame_sprite(facing, width * crate::item_model::SPRITE_DEPTH);
+    let [right, up, out] = [place.right, place.up, place.out].map(Vec3::from_array);
+    let centre = Vec3::from_array(cell) + Vec3::from_array(place.centre);
+    // Sprite space (x right, y up, z out of the picture) to the cell's axes;
+    // a rotation (right x up = out), so the windings keep facing out.
+    let to_cell = |p: Vec3| right * p.x + up * p.y + out * p.z;
+    for q in crate::item_model::sprite_quads(layer, width) {
+        let base = vertices.len() as u32;
+        let normal = to_cell(q.normal).to_array();
+        for (corner, uv) in q.corners.iter().zip(q.uvs) {
+            vertices.push(Vertex {
+                position: (centre + to_cell(*corner)).to_array(),
+                normal,
+                tex_layer: layer | CUTOUT_FLAG,
+                uv,
+                light,
+                sky_light: sky,
+            });
+        }
+        indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
 }
 
 // --- Rail/cable connecting-arms geometry (v2) ---------------------------------
@@ -3097,5 +3203,87 @@ mod tests {
             meshes.decals.iter().all(|v| v.tex_layer == block::TEX_BLUEPRINT_PAPER_TOP),
             "blank draughting-paper decal uses the cream blueprint-paper texture layer",
         );
+    }
+
+    #[test]
+    fn a_framed_torch_lies_flat_on_the_plate_facing_out() {
+        // For every way a frame can face: the torch's sprite stays in the
+        // frame's cell, lies 1/16 of its width deep with its back on the
+        // plate, each triangle winds (from its positions, in index order) the
+        // way its normal says so the back-face-culled chunk pass keeps the
+        // faces that look out, its front faces out of the wall, and its
+        // picture stands upright on a wall (top toward north on a floor or
+        // ceiling).
+        use crate::meta::Facing;
+        use glam::Vec3;
+        let reg = BlockRegistry::new();
+        let at = (5, 5, 5);
+        let width = crate::item_model::FRAME_SPRITE_WIDTH;
+        for (facing, out, top) in [
+            (Facing::South, Vec3::Z, Vec3::Y),
+            (Facing::North, Vec3::NEG_Z, Vec3::Y),
+            (Facing::East, Vec3::X, Vec3::Y),
+            (Facing::West, Vec3::NEG_X, Vec3::Y),
+            (Facing::Up, Vec3::Y, Vec3::NEG_Z),
+            (Facing::Down, Vec3::NEG_Y, Vec3::NEG_Z),
+        ] {
+            let mut w = World::new();
+            w.set_block(at.0, at.1, at.2, block::ITEM_FRAME);
+            w.set_meta(at, crate::meta::with_facing(0, facing));
+            let mut frame = crate::item_frame::ItemFrameData::new();
+            assert!(frame.try_insert(crate::item::ItemStack::new_block(block::TORCH, 1)));
+            w.insert_item_frame(at, frame);
+            let m = build_chunk_meshes(0, 0, 0, &w, &reg);
+            let local = |v: &Vertex| Vec3::from_array(v.position) - Vec3::new(5.0, 5.0, 5.0);
+            // Distance from the wall, the cell face opposite `out`.
+            let off = |p: Vec3| (p - Vec3::splat(0.5)).dot(out) + 0.5;
+            let (mut lo, mut hi, mut front) = (f32::MAX, f32::MIN, Vec::new());
+            for tri in m.opaque.indices.chunks_exact(3) {
+                let [a, b, c] = [tri[0], tri[1], tri[2]].map(|i| m.opaque.vertices[i as usize]);
+                if a.tex_layer & CUTOUT_FLAG == 0 {
+                    continue;
+                }
+                assert_eq!(a.tex_layer & !CUTOUT_FLAG, block::TEX_TORCH, "{facing:?}: the torch icon");
+                let [pa, pb, pc] = [&a, &b, &c].map(local);
+                for p in [pa, pb, pc] {
+                    assert!(p.min_element() >= -1e-5 && p.max_element() <= 1.0 + 1e-5, "{facing:?}: {p} leaves the cell");
+                    lo = lo.min(off(p));
+                    hi = hi.max(off(p));
+                }
+                let n = Vec3::from_array(a.normal);
+                let wind = (pb - pa).cross(pc - pa);
+                assert!(wind.dot(n) > 0.0, "{facing:?}: a triangle winds against its normal {n}");
+                if wind.normalize().dot(out) > 0.999 {
+                    front.extend([a, b, c]);
+                }
+            }
+            assert!((lo - 0.0625).abs() < 1e-5, "{facing:?}: the back lies on the plate, {lo} from the wall");
+            assert!((hi - lo - width / 16.0).abs() < 1e-5, "{facing:?}: {} deep, not 1/16 of {width}", hi - lo);
+            assert!(!front.is_empty(), "{facing:?}: a face looks out of the wall");
+            // The front face's top edge (v = 0) lies a whole width toward `top`
+            // from its bottom edge (v = 1).
+            let picture: Vec<Vertex> = front.iter().copied().filter(|v| (off(local(v)) - hi).abs() < 1e-5).collect();
+            let along = |v_edge: f32| -> Vec<f32> {
+                picture.iter().filter(|v| (v.uv[1] - v_edge).abs() < 1e-6).map(|v| local(v).dot(top)).collect()
+            };
+            let (top_edge, bottom_edge) = (along(0.0), along(1.0));
+            assert!(!top_edge.is_empty() && !bottom_edge.is_empty(), "{facing:?}: the front shows the whole icon");
+            let lowest_top = top_edge.iter().copied().fold(f32::MAX, f32::min);
+            let highest_bottom = bottom_edge.iter().copied().fold(f32::MIN, f32::max);
+            assert!(
+                (lowest_top - highest_bottom - width).abs() < 1e-5,
+                "{facing:?}: the picture is upright ({lowest_top} over {highest_bottom} along {top})"
+            );
+        }
+    }
+
+    #[test]
+    fn the_shader_reads_the_same_flag_bits() {
+        // fs_main tests these bits; they must be the mesher's.
+        let src = include_str!("shader.wgsl");
+        for (name, bit) in [("LEAF_FILL_FLAG", LEAF_FILL_FLAG), ("CUTOUT_FLAG", CUTOUT_FLAG)] {
+            let want = format!("const {name}: u32 = {bit:#x}u;");
+            assert!(src.contains(&want), "shader.wgsl must declare `{want}`");
+        }
     }
 }

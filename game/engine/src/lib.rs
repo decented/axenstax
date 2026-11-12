@@ -257,7 +257,7 @@ mod retired_files;
 // Signet contacts sync (native only) — docs/foundations/2026-10-01-signet-contacts-sync.md.
 #[cfg(not(target_arch = "wasm32"))]
 mod signet_contacts;
-mod held_item_model;
+mod item_model;
 mod brand;
 mod splash_ui;
 mod loading_screen;
