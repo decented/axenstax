@@ -4,10 +4,11 @@
 //! from the front, the side and above, each also with the frame empty), a
 //! torch and a stone block held in the hand (first person mid-swing, when the
 //! hand comes into view, and third person from behind, each also empty-handed),
-//! a dropped torch and a dropped stone block on the ground, a blighted crop
-//! next to a mature wheat crop at noon and by torchlight at midnight, and a
-//! placed torch at noon and midnight (it must look the same before and after
-//! an item change).
+//! a dropped torch, stone block and tall grass on the ground, a placed tall
+//! grass at noon (log only: its texture's background is transparent since
+//! the item-model follow-up), a blighted crop next to a mature wheat crop at
+//! noon and by torchlight at midnight, and a placed torch at noon and midnight
+//! (it must look the same before and after an item change).
 //!
 //! Each measurement is logged as `ITEMDIAG ...`: near-black pixels, and the
 //! pixels that changed against the item-free shot (the item's own pixels, and
@@ -357,12 +358,15 @@ fn game_harness_item_looks() {
     let drops_base = shot(&mut hg, &out, "drops-base", drop_eye, drop_target);
     let torch_drop = glam::Vec3::new(fx - 3.5, fy + 0.3, fz + 3.5);
     let stone_drop = glam::Vec3::new(fx - 1.5, fy + 0.3, fz + 3.5);
+    let grass_drop = glam::Vec3::new(fx - 0.5, fy + 0.3, fz + 3.5);
     crate::entity::spawn_item(&mut hg.state.ecs, torch_drop, ItemStack::new_block(block::TORCH, 1), 0);
     crate::entity::spawn_item(&mut hg.state.ecs, stone_drop, ItemStack::new_block(block::STONE, 1), 0);
+    crate::entity::spawn_item(&mut hg.state.ecs, grass_drop, ItemStack::new_block(block::TALL_GRASS, 1), 0);
     // Put each just above its spot with no hop, and let it land: 3 s of ticks.
     let ours = |item: &crate::item::Item| match item {
         crate::item::Item::Block(id) if *id == block::TORCH => Some(torch_drop),
         crate::item::Item::Block(id) if *id == block::STONE => Some(stone_drop),
+        crate::item::Item::Block(id) if *id == block::TALL_GRASS => Some(grass_drop),
         _ => None,
     };
     for (_, (pos, vel, it)) in hg
@@ -400,7 +404,7 @@ fn game_harness_item_looks() {
     hg.frames(1);
     eprintln!("ITEMDIAG drops spin counter={} (was {c0})", hg.state.falling_tick_counter);
     let img = snap(&mut hg, &out, "drops", drop_eye);
-    for (label, id) in [("torch", block::TORCH), ("stone", block::STONE)] {
+    for (label, id) in [("torch", block::TORCH), ("stone", block::STONE), ("tall-grass", block::TALL_GRASS)] {
         let pos = drops
             .iter()
             .find(|d| d.0 == crate::item::Item::Block(id))
@@ -415,6 +419,33 @@ fn game_harness_item_looks() {
             dark_changed(&drops_base, &img, rect),
         );
     }
+
+    // ── A placed tall grass at noon (log only) ──────────────────────────────
+    // Its texture is the item's icon too; the measure is how much of its cell
+    // it covers (a cross of two opaque squares covers most of it).
+    let grass_at = (tx - 6, ty, tz);
+    let (gx, gy2, gz) = (grass_at.0 as f32, grass_at.1 as f32, grass_at.2 as f32);
+    let grass_eye = [gx + 0.5, gy2 + 1.2, gz + 0.5 + 2.2];
+    let grass_mid = [gx + 0.5, gy2 + 0.4, gz + 0.5];
+    set_time(&mut hg, 12000);
+    let base = shot(&mut hg, &out, "tall-grass-base", grass_eye, grass_mid);
+    place(&mut hg, grass_at.0, grass_at.1, grass_at.2, block::TALL_GRASS);
+    settle(&mut hg);
+    set_time(&mut hg, 12000);
+    let img = shot(&mut hg, &out, "tall-grass", grass_eye, grass_mid);
+    let rect = screen_rect(&hg, [gx, gy2, gz], [gx + 1.0, gy2 + 1.0, gz + 1.0]);
+    let (_, area) = near_black(&img, rect);
+    let (n, s, v, rgb) = plant_stats(&base, &img, rect);
+    eprintln!(
+        "ITEMDIAG tall-grass-placed rect={rect:?} area={area} plant_px={n} cover={:.3} mean_S={s:.3} mean_V={v:.3} mean_rgb=[{:.0}, {:.0}, {:.0}] dark_changed={}",
+        n as f32 / area.max(1) as f32,
+        rgb[0],
+        rgb[1],
+        rgb[2],
+        dark_changed(&base, &img, rect),
+    );
+    place(&mut hg, grass_at.0, grass_at.1, grass_at.2, block::AIR);
+    settle(&mut hg);
 
     // ── Blight: a blighted crop beside a mature wheat crop ──────────────────
     let crop_eye = [fx + 4.5, fy + 1.7, fz - 2.5 + 2.0];
