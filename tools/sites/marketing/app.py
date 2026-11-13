@@ -167,10 +167,11 @@ async def experiences(request: Request):
 
 @app.get("/more-games", response_class=HTMLResponse)
 async def more_games(request: Request):
-    """More games — Android APK downloads for Stampede and Twang Thang.
+    """More games — Android APK downloads for Stampede, Twang Thang and Cluster Flock.
+    Each card has an anchor (stampede, twang-thang, cluster-flock) that the in-game lobby links to.
     The background catalogue follows the games' signed release announcements."""
     ctx = _base_context()
-    ctx["games"] = [dict(g, size_mb=round(g["size_bytes"] / 1_000_000)) for g in catalogue.view()]
+    ctx["games"] = [dict(g, size_mb=round(g["size_bytes"] / 1_000_000), slug=g["name"].lower().replace(" ", "-")) for g in catalogue.view()]
     return templates.TemplateResponse(request=request, name="more_games.html", context=ctx)
 
 

@@ -48,7 +48,7 @@ A file made to share, back up or move leaves out the private record of who place
 
 The lobby's **More to play** page holds the two official games, **Hash Dash** and **Satori Rush**. Press **Play** on a card and it launches into its own fresh arena. They are built into the game, so they work with no network at all. See **[Minigames](minigames.md)**.
 
-On the **web** build the page also has **Look up a creator**. Paste someone's **npub** and press **Look up** to see the experiences and skins they have shared, and to try them on. The desktop app shows just the official games.
+On the **web** build the page also has **Look up a creator**. Paste someone's **npub** and press **Look up** to see the experiences and skins they have shared, and to try them on. The desktop app shows just the official games, and, below them, **More games**: Stampede, Twang Thang and Cluster Flock, three Android games from the same makers. Press **See it** on a card and your browser opens the More games page on axenstax.com, where the download is. (The web build has no More games section.)
 
 ## See also
 

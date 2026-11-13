@@ -22,7 +22,7 @@ REFRESH_SECONDS = 300
 RELAY_TIMEOUT = 8
 MAX_EVENT_BYTES = 64 * 1024
 MAX_APK_BYTES = 256 * 1024 * 1024
-RELAYS = ("wss://relay.damus.io", "wss://nos.lol", "wss://relay.primal.net")
+RELAYS = ("wss://relay.damus.io", "wss://relay.ditto.pub", "wss://relay.primal.net")
 HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 BLOSSOM_URL = re.compile(r"https://[A-Za-z0-9.-]+(?::[0-9]{1,5})?/([0-9a-f]{64})(?:\.[A-Za-z0-9]{1,8})?\Z")
 
@@ -52,6 +52,18 @@ MORE_GAMES = [
         "sha256": "cfbe2fabca932f6c0e1d2d13afe126879d0c912faa90fa77ab9f0f026dc22926",
         "size_bytes": 12045165,
         "icon": "/static/games/twangthang.png",
+    },
+    {
+        "name": "Cluster Flock",
+        "tagline": "Three-lane ostrich farm run, with ghost saboteurs.",
+        "package": "org.decented.gameflock",
+        "channel": "gameflock-android-apk",
+        "pubkey": "01b0f270e290f5cd48aa537392de04e4b22124c16d696de96158395a60343b0f",
+        "cert": "46fd4f7a80b700cd7d951c04e38fa3344405759d53d161de3e4dd06120fb3ace",
+        "version": "0.2.1", "version_code": 2001,
+        "sha256": "893218af0edef806a192535cda51b8b6eba695673ea13fe3a10457fa75a61849",
+        "size_bytes": 10931051,
+        "icon": "/static/games/gameflock.png",
     },
 ]
 for _game in MORE_GAMES:

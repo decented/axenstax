@@ -4,7 +4,7 @@ Axe'n'Stax has two built-in **Experiences** — **Hash Dash** and **Satori Rush*
 run by the **Scenario** system. There are two ways to start one: type the
 `/scenario` command in the in-game chat (**T** or **/**), or press **Play** on the
 **AxeNStax Official** cards on the lobby's **More to play** page (which launches each
-into its own fresh arena, even with no network).
+into its own fresh arena, even with no network). Below them, on the desktop and Android apps, **More games** lists three other Android games from the same makers (Stampede, Twang Thang and Cluster Flock); its **See it** buttons open their page on the website and are not part of the Experiences.
 This page is the quick **rules** reference — for a full *how to win* walkthrough,
 follow the tutorial links.
 

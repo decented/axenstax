@@ -32,6 +32,11 @@ pub(crate) mod words {
     pub const OFFICIAL: &str = "AxeNStax Official";
     pub const OFFICIAL_LEAD: &str = "Always here, even offline.";
     pub const PLAY: &str = "Play";
+    /// The native-only section below it: the other games from the same makers.
+    pub const MORE_GAMES: &str = "More games";
+    pub const MORE_GAMES_LEAD: &str = "From the people who make Axe'n'Stax. Android phones and tablets.";
+    pub const SEE_IT: &str = "See it";
+    pub const ANDROID: &str = "Android";
     /// One plain line per official game (no scores, no counts).
     pub const HASH_DASH_LINE: &str = "Mine as much as you can in three minutes.";
     pub const SATORI_RUSH_LINE: &str = "Race to mine your first Satori. Leave any time and carry on later.";
@@ -371,6 +376,10 @@ mod tests {
             OFFICIAL,
             OFFICIAL_LEAD,
             PLAY,
+            MORE_GAMES,
+            MORE_GAMES_LEAD,
+            SEE_IT,
+            ANDROID,
             HASH_DASH_LINE,
             SATORI_RUSH_LINE,
             LOOK_UP_LEAD,
@@ -409,6 +418,8 @@ mod tests {
             include_str!("lobby_pages_ui.rs"),
             include_str!("play_together_ui.rs"),
             include_str!("stash_page_ui.rs"),
+            include_str!("more_games.rs"),
+            include_str!("more_games_ui.rs"),
         ] {
             let body = src.split("#[cfg(test)]").next().unwrap();
             for lit in body.split('"').skip(1).step_by(2) {
