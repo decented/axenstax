@@ -3227,6 +3227,8 @@ impl super::GameState {
         self.bloom_present.reset();
         // A new world, a new first walk into a passed-on Commons.
         self.passed_on_told.clear();
+        // Chat is per world: a load, or the same world reloaded, starts empty.
+        self.chat.clear_for_new_world();
         self.tally.reset();
         self.tally_stock.reset();
         // Nothing about the last world's saves carries over (`begin_load`
@@ -3447,6 +3449,8 @@ impl super::GameState {
     /// become this session's world meta (never saved — the world is the
     /// host's), and its spawn is where `begin_load` places player 0.
     fn enter_joined_world(&mut self, joined: crate::remote_client::JoinedWorld) {
+        // Chat is per world: a joined world starts with an empty chat too.
+        self.chat.clear_for_new_world();
         let mut meta = joined.to_meta();
         self.apply_world_seed(crate::remote_client::JOINED_WORLD_FOLDER, &mut meta);
         self.apply_world_rules(&meta);
