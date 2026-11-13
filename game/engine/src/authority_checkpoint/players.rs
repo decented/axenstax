@@ -191,6 +191,14 @@ fn every_field_is_accounted_for(sp: &ServerPlayer) {
         seat_input: _,
         // encoded (through the seat section)
         local_seated: _,
+        // left out: the raised flag is re-sent by the client's next input and the server counts the raise itself
+        shield_latch: _,
+        // left out: a raise count, rebuilt from the latch (a restored body starts lowered)
+        shield_ticks: _,
+        // left out: a wear tally for the tick, drained into window events the same tick
+        shield_wear: _,
+        // left out: a log-once flag
+        shield_flag_logged: _,
     } = sp;
 }
 

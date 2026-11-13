@@ -1450,7 +1450,7 @@ mod tests {
                     RequestOutcome::PersonalSync { window_event: 13, actor_respawns: 1 },
                 ],
                 vec![grant(12)],
-                vec![(1, 10)],
+                vec![(Wear::Armour(1), 10)],
                 (0, 0),
             )
             .unwrap();

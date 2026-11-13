@@ -2203,7 +2203,9 @@ mod tests {
 mod shield_block_tests {
     use super::*;
     use crate::crafting::{Tool, ToolMaterial, ToolType};
+    use crate::entity;
     use crate::item::ItemStack;
+    use crate::mob::MobType;
     use crate::shield::RAISE_TICKS;
 
     const NORMAL: crate::survival::Difficulty = crate::survival::Difficulty::Normal;

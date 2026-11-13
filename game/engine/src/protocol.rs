@@ -3503,6 +3503,7 @@ mod tests {
                 tool: WireItem::Tool { tool_type: 9, material: 1, durability: 50 },
                 unfit: 1, hand: crate::hands::Hand::Main,
             }], held_tool: crate::protocol::HeldWire::NO_TOOL, off_id: 0, off_kind: 0, off_tool: crate::protocol::HeldWire::NO_TOOL,
+            shield_raised: true,
         };
         let bytes = bincode::serialize(&pkt).unwrap();
         let back: InputPacket = safe_deserialize(&bytes).unwrap();

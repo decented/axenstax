@@ -1242,13 +1242,17 @@ pub(crate) fn paint_shield_icon(ui: &egui::Ui, icon_rect: egui::Rect, egui_integ
     let board = egui::Rect::from_center_size(icon_rect.center(), egui::vec2(h * 0.78, h));
     let iron = egui::Color32::from_rgb(170, 172, 178);
     match egui_integration.block_texture(crate::block::TEX_OAK_PLANKS) {
-        Some(tex_id) => painter.image(
-            tex_id,
-            board,
-            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-            egui::Color32::WHITE,
-        ),
-        None => painter.rect_filled(board, 2.0, egui::Color32::from_rgb(175, 140, 92)),
+        Some(tex_id) => {
+            painter.image(
+                tex_id,
+                board,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
+            );
+        }
+        None => {
+            painter.rect_filled(board, 2.0, egui::Color32::from_rgb(175, 140, 92));
+        }
     }
     painter.rect_stroke(board, 2.0, egui::Stroke::new((h * 0.09).max(1.5), iron), egui::StrokeKind::Inside);
     painter.circle_filled(board.center(), h * 0.15, iron);
