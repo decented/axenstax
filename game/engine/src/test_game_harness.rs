@@ -221,6 +221,9 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[path = "viewmodel_shots.rs"]
     mod viewmodel_shots;
+    #[cfg(not(target_arch = "wasm32"))]
+    #[path = "offhand_shots.rs"]
+    mod offhand_shots;
     use super::*;
 
     /// Point `AXENSTAX_WORLDS_DIR` at one pid-scoped temp dir shared by every
