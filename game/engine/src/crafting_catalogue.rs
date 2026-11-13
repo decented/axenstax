@@ -993,6 +993,12 @@ fn push_more_literal_cards(out: &mut Vec<RecipeCard>) {
     out.push(tool_card("Slingshot", Tool::new(ToolType::Slingshot, ToolMaterial::Wood),
         vec![mat(M::Stick, 3), mat(M::Rubber, 1)],
         grid(&[(0, 0, STICK), (0, 2, STICK), (1, 1, m_at(M::Rubber)), (2, 1, STICK)]), RecipeCategory::Combat));
+    // Off-hand release (slice 5) — the Shield, Minecraft's Y: planks, iron, planks over a
+    // row of planks over a single plank. Needs the workbench (three wide and three tall).
+    out.push(tool_card("Shield", Tool::new(ToolType::Shield, ToolMaterial::Wood),
+        vec![blk(block::OAK_PLANKS, 6), mat(M::IronIngot, 1)],
+        grid(&[(0, 0, p), (0, 1, iron), (0, 2, p), (1, 0, p), (1, 1, p), (1, 2, p), (2, 1, p)]), RecipeCategory::Combat)
+        .with_usage("Hold it in either hand. Hold right-click (or the use button) to raise it: it blocks hits that come from in front of you, and wears a little with each block."));
 
     // ── 1×3 horizontal ────────────────────────────────────────────────────
     out.push(card("Papyrus Sheet", ItemStack::new_material(M::PapyrusSheet, 3), vec![mat(M::PapyrusReed, 3)],
@@ -1698,7 +1704,8 @@ mod tests {
         // 351 as of 2026-11-09 (living world Tier 2 S7): + the Site Board.
         // 352 as of the Tier 2 integration: the Commons Shelf and the Site Board together.
         // 353 as of the off-hand release (slice 4): + the Lantern.
-        assert_eq!(all_cards().len(), 353, "catalogue size changed to {}", all_cards().len());
+        // 354 as of the off-hand release (slice 5): + the Shield.
+        assert_eq!(all_cards().len(), 354, "catalogue size changed to {}", all_cards().len());
     }
 
     /// UX polish sweep Task 3 — the non-obvious craftables (a kid can't

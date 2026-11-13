@@ -316,7 +316,7 @@ pub fn dispatch_bees(
                 set_facing(ecs, id, Vec3::new(dir.x, 0.0, dir.z));
             }
             BeeAction::StingImpact { target_id } => {
-                stings.push(BeeSting { target_slot: target_id as usize, bee: id });
+                stings.push(BeeSting { target_slot: target_id as usize, bee: id, bee_pos: pos });
             }
             BeeAction::NoOp => {}
         }
@@ -330,6 +330,8 @@ pub fn dispatch_bees(
 pub struct BeeSting {
     pub target_slot: usize,
     pub bee: hecs::Entity,
+    /// Where the bee was when it stung (the direction a shield judges).
+    pub bee_pos: Vec3,
 }
 
 /// Damage a bee sting deals (half a heart — an irritant, not a threat).

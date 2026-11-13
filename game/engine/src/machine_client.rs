@@ -153,7 +153,7 @@ impl GameState {
                             .filter(|(_, damage)| *damage > 0.0)
                             .collect();
                         for slot in
-                            crate::explosion::apply_player_blast_damage(&mut self.players, &hits)
+                            crate::explosion::apply_player_blast_damage(&mut self.players, &hits, pos)
                         {
                             self.dismount_parrots_on_owner_damage(slot);
                         }

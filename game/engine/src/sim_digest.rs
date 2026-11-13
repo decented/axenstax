@@ -531,6 +531,7 @@ impl GameServer {
             e.u32(c.attack_cooldown);
             e.u32(c.flash_timer);
             e.u32(c.invincible_timer);
+            e.u32(c.shield_window);
             e.f32(c.last_hit_damage);
             e.bool(c.dead);
             e.bool(c.respawn_requested);
@@ -554,6 +555,10 @@ impl GameServer {
             e.u32(sp.spawn_protection);
             e.u8(sp.armour_points);
             e.u8(sp.armour_wear_hits);
+            // Off-hand release (slice 5) — the raise the server counts, the block it owes.
+            e.bool(sp.shield_latch);
+            e.u32(sp.shield_ticks);
+            e.u32(u32::from(sp.shield_wear));
             e.u32(sp.interact_cooldown);
             e.u32(sp.eat_cooldown);
             e.u32(sp.attach_gen);

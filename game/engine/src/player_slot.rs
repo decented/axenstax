@@ -333,6 +333,13 @@ pub struct PlayerSlot {
     /// on the server is `ServerPlayer.offhand` (saved in the joiner sidecar,
     /// v6; protocol 101).
     pub offhand: Option<ItemStack>,
+    /// Off-hand release (slice 5) — consecutive ticks this body's shield has been
+    /// raised (`shield::next_raised_ticks`); the shield blocks from
+    /// `shield::RAISE_TICKS`. Runtime only.
+    pub shield_ticks: u32,
+    /// Wearing blocks since the game loop last played the clack: it drains this
+    /// ([`Self::take_shield_clacks`]). Runtime only.
+    pub shield_clacks: u8,
     /// Spec 26 — Builder villager entity whose Commission dialog is
     /// currently open for this player. `Some` while the dialog is
     /// visible (including during the Pick-build-site sub-flow, in which
@@ -527,6 +534,8 @@ impl PlayerSlot {
             nostrich_vow: None,
             armour_slots: [None, None, None, None],
             offhand: None,
+            shield_ticks: 0,
+            shield_clacks: 0,
             open_commission_villager: None,
             pending_commission: None,
             riding: None,
@@ -679,6 +688,66 @@ impl PlayerSlot {
             crate::hands::Hand::Main => self.inventory.hotbar_slot(self.hotbar_slot),
             crate::hands::Hand::Off => self.offhand.as_ref(),
         }
+    }
+
+    /// Off-hand release (slice 5) — this body's raised shield for the one block
+    /// rule (`shield::blocks`): none unless it is alive and holds a shield in
+    /// either hand. Whether the shield is *raised* is the count in
+    /// `shield_ticks` (the rule wants [`crate::shield::RAISE_TICKS`]).
+    pub fn shield_guard(&self) -> Option<crate::shield::Guard> {
+        if self.combat.dead {
+            return None;
+        }
+        let (main, off) = self.hands_items();
+        crate::shield::guard_hand(main, off)?;
+        Some(crate::shield::Guard {
+            victim: self.player.pos,
+            look: crate::shield::look_from_yaw(self.camera.yaw),
+            raised_for: self.shield_ticks,
+        })
+    }
+
+    /// The shield's side of landing hits on this body.
+    pub fn shield_ctx(&self) -> crate::shield::ShieldCtx {
+        crate::shield::ShieldCtx::with(self.shield_guard())
+    }
+
+    /// Settle what a shield blocked while hits were landed: wear the guarding
+    /// shield (`shield::wear`) and queue the clacks.
+    pub fn settle_shield(&mut self, tally: crate::shield::BlockTally) {
+        if tally.wear > 0 {
+            let (main, off) = self.hands_items();
+            if let Some(hand) = crate::shield::guard_hand(main, off) {
+                let slot = self.hotbar_slot;
+                crate::shield::wear(&mut self.inventory, slot, &mut self.offhand, hand, tally.wear);
+            }
+        }
+        self.shield_clacks = self.shield_clacks.saturating_add(tally.clacks);
+    }
+
+    /// Drain the clacks to play (one sound however many blocked this tick).
+    pub fn take_shield_clacks(&mut self) -> u8 {
+        std::mem::take(&mut self.shield_clacks)
+    }
+
+    /// A hit from `from` with `raw` damage before armour: stopped by a raised
+    /// shield (no damage, no knockback), or landed through the armour. Returns
+    /// whether it landed. `knock` is added to the velocity unless blocked.
+    pub fn take_hit_from(
+        &mut self,
+        raw: f32,
+        cause: crate::survival::DamageCause,
+        from: glam::Vec3,
+        knock: glam::Vec3,
+    ) -> bool {
+        let mut shield = self.shield_ctx();
+        if !self.combat.dead && self.combat.shield_blocks(&mut shield, from, raw) {
+            self.settle_shield(shield.tally);
+            return false;
+        }
+        let landed = self.take_damage_with_armour_from(raw, cause);
+        self.player.velocity += knock;
+        landed
     }
 
     /// The main-hand item and the off-hand item, as [`crate::hands::use_hand`] reads them.

@@ -780,6 +780,15 @@ pub struct InputPacket {
     pub off_kind: u8,
     pub off_id: u16,
     pub off_tool: u8,
+    /// v101 (off-hand plan, slice 5) — this player's shield is raised: the use
+    /// button is held with a shield in either hand and nothing else to use it
+    /// on (`hands::use_hand`). An APPENDED field of 101 (the version is not
+    /// released), not a bump. Client-asserted: the server slows the body by it
+    /// (the client predicts the same slow-down, `PlayerIntent::guarding`) and
+    /// counts the raise itself; it protects only while the server's copy of the
+    /// window holds a shield (`ServerPlayer::shield_guard`), so a lying client
+    /// gains nothing a modified client could not claim already.
+    pub shield_raised: bool,
 }
 
 /// v76 (C3a-fix-1) — one edit's hand ([`InputPacket::edit_hands`]): the
@@ -921,6 +930,10 @@ pub mod player_flags {
     /// v85 (MP-D2c-1) — on a mount or cart: the position is the seat the
     /// server (or, for a host's own seat, its client) pinned the body to.
     pub const SEATED: u8 = 8;
+    /// v101 (off-hand plan, slice 5) — a shield is raised: peers draw the guard
+    /// pose. The relayed raise, from the player's latest input flag (a flags bit,
+    /// no layout change); presentation only.
+    pub const GUARDING: u8 = 0x10;
 }
 
 /// Per-player state as seen by other clients.
@@ -2359,13 +2372,19 @@ pub enum PlayerEventType {
     Bred { offspring: EntityKind },
     /// Location of the real shared grave made for this death.
     GraveAt { x: i32, y: i32, z: i32 },
+    /// v101 (off-hand plan, slice 5) — blocks the server's rule made with this
+    /// joiner's raised shield since the last report cost `amount` durability
+    /// (`1 + floor(damage)` per wearing block) on the shield in `hand` (the main
+    /// hand names hotbar slot `slot`; `shield::wear`): a window event, applied in the client's order like
+    /// `ArmourWorn`, and the cue for the clack. Sent to that player alone.
+    ShieldWorn { slot: u8, hand: crate::hands::Hand, amount: u16 },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PlayerEventPacket {
     pub player_index: u32,
     pub event: PlayerEventType,
-    /// v76 (C3a-fix-1) — the window event an `ArmourWorn` is
+    /// v76 (C3a-fix-1) — the window event an `ArmourWorn` (v101: or a `ShieldWorn`) is
     /// ([`InventoryGrantPacket::window_event`]); 0 for every other event.
     #[serde(default)]
     pub window_event: u32,
@@ -5156,6 +5175,7 @@ mod tests {
             PlayerEventType::DiedOf { cause: WireDamageCause::Mob(EntityKind::Shark) },
             PlayerEventType::ArmourWorn { hits: 3 },
             PlayerEventType::Bred { offspring: EntityKind::Mule },
+            PlayerEventType::ShieldWorn { slot: 3, hand: crate::hands::Hand::Off, amount: 11 },
         ] {
             let pkt = PlayerEventPacket { player_index: 4, event, window_event: 0x0102_0304 };
             let bytes = serialize_packet(PacketType::PlayerEvent, &pkt);
@@ -5450,13 +5470,14 @@ mod oc_wire_tests {
                 T::Slingshot => 9,
                 T::Eraser => 10,
                 T::DraftingStamp => 11,
+                T::Shield => 12,
             }
         }
         let all = [
             T::Pickaxe, T::Axe, T::Sword, T::Shovel, T::Bow, T::Hoe, T::FlintAndSteel,
-            T::Shears, T::FishingRod, T::Slingshot, T::Eraser, T::DraftingStamp,
+            T::Shears, T::FishingRod, T::Slingshot, T::Eraser, T::DraftingStamp, T::Shield,
         ];
-        let mut seen = [false; 12];
+        let mut seen = [false; 13];
         let mut bytes = std::collections::HashSet::new();
         for t in all {
             seen[place(t)] = true;
@@ -5479,7 +5500,7 @@ mod oc_wire_tests {
             }
         }
         assert!(seen.iter().all(|s| *s), "every tool type is listed");
-        assert_eq!(bytes.len(), 12, "one byte per type, whatever the material");
+        assert_eq!(bytes.len(), 13, "one byte per type, whatever the material");
         // Not a tool: no tool byte. An empty hand: the empty pair.
         for item in [crate::item::Item::Block(crate::block::TORCH), crate::item::Item::Material(crate::item::MaterialId::Stick)] {
             let wire = HeldWire::of(Some(&item));
@@ -5510,5 +5531,44 @@ mod oc_wire_tests {
         assert_eq!((back.off_kind, back.off_id, back.off_tool), (torch.kind, torch.id, torch.tool));
         assert_eq!(back.edit_hands, input.edit_hands);
         assert_eq!(back.edit_hands[0].3, Hand::Off);
+    }
+
+    /// v101 (off-hand plan, slice 5) — `shield_raised` is the LAST field of the input
+    /// (appended, protocol 101 is not released: no bump), and the relayed pose is the
+    /// 0x10 bit of `PlayerState.flags`, with no change to the struct's layout.
+    #[test]
+    fn the_input_packet_appends_shield_raised_and_the_pose_is_a_flags_bit() {
+        for raised in [true, false] {
+            let input = InputPacket { shield_raised: raised, health: 20.0, ..Default::default() };
+            let bytes = serialize_packet(PacketType::ClientInput, &input);
+            let back: InputPacket = safe_deserialize(&bytes[1..]).unwrap();
+            assert_eq!(back.shield_raised, raised);
+            assert_eq!(*bytes.last().unwrap(), raised as u8, "the flag is the last byte: appended after off_tool");
+        }
+        // The default (an input built with `..Default::default()`) is lowered.
+        assert!(!InputPacket::default().shield_raised);
+        // The guarding bit is distinct from the others and survives a PlayerState round trip.
+        use player_flags as pf;
+        assert_eq!(pf::GUARDING, 0x10);
+        assert_eq!([pf::SWINGING, pf::CROUCHING, pf::ON_GROUND, pf::SEATED].iter().fold(0, |a, b| a | b) & pf::GUARDING, 0);
+        let state = PlayerState {
+            player_index: 2, x: 1.0, y: 64.0, z: 2.0, yaw: 0.5, pitch: 0.0, health: 20.0,
+            held_kind: 0, held_id: 0, anim_state: 0, flags: pf::GUARDING | pf::ON_GROUND, skin_key: 0,
+            held_tool: HeldWire::NO_TOOL, off_kind: 0, off_id: 0, off_tool: HeldWire::NO_TOOL,
+        };
+        let back: PlayerState = safe_deserialize(&bincode::serialize(&state).unwrap()).unwrap();
+        assert_ne!(back.flags & pf::GUARDING, 0);
+        assert_eq!(bincode::serialize(&state).unwrap().len(), bincode::serialize(&PlayerState { flags: 0, ..state.clone() }).unwrap().len(), "a flags bit changes no length");
+    }
+
+    /// v101 — the shield's wear report is the variant appended after `GraveAt`, so no
+    /// older variant's tag moves.
+    #[test]
+    fn shield_worn_is_appended_after_the_last_player_event() {
+        let tag = |e: &PlayerEventType| u32::from_le_bytes(bincode::serialize(e).unwrap()[..4].try_into().unwrap());
+        let grave = tag(&PlayerEventType::GraveAt { x: 0, y: 0, z: 0 });
+        let worn = tag(&PlayerEventType::ShieldWorn { slot: 0, hand: crate::hands::Hand::Main, amount: 1 });
+        assert_eq!(worn, grave + 1);
+        assert_eq!(tag(&PlayerEventType::ArmourWorn { hits: 1 }), 5, "the armour report keeps its place");
     }
 }

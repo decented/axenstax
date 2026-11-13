@@ -1232,6 +1232,29 @@ fn draw_hotbar(
     }
 }
 
+/// Off-hand release (slice 5) — the shield's inventory icon: a board of the oak
+/// planks tile with an iron rim and a boss, painted from the existing planks layer
+/// (no new texture). Shared by the hotbar, the off-hand box and the inventory screen.
+pub(crate) fn paint_shield_icon(ui: &egui::Ui, icon_rect: egui::Rect, egui_integration: &EguiIntegration) {
+    let painter = ui.painter();
+    // A shield is taller than wide: a board in the middle of the slot.
+    let h = icon_rect.height();
+    let board = egui::Rect::from_center_size(icon_rect.center(), egui::vec2(h * 0.78, h));
+    let iron = egui::Color32::from_rgb(170, 172, 178);
+    match egui_integration.block_texture(crate::block::TEX_OAK_PLANKS) {
+        Some(tex_id) => painter.image(
+            tex_id,
+            board,
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            egui::Color32::WHITE,
+        ),
+        None => painter.rect_filled(board, 2.0, egui::Color32::from_rgb(175, 140, 92)),
+    }
+    painter.rect_stroke(board, 2.0, egui::Stroke::new((h * 0.09).max(1.5), iron), egui::StrokeKind::Inside);
+    painter.circle_filled(board.center(), h * 0.15, iron);
+    painter.circle_stroke(board.center(), h * 0.15, egui::Stroke::new(1.0, egui::Color32::from_rgb(90, 92, 98)));
+}
+
 /// One stack drawn inside a slot rect: its icon, count badge and durability
 /// bar. Shared by the hotbar slots and the off-hand box.
 fn draw_stack_in_slot(
@@ -1255,6 +1278,9 @@ fn draw_stack_in_slot(
                     egui::Color32::WHITE,
                 );
             }
+        }
+        Item::Tool(tool) if tool.tool_type == crate::crafting::ToolType::Shield => {
+            paint_shield_icon(ui, icon_rect, egui_integration);
         }
         Item::Tool(tool) => {
             // Coloured rectangle for tools
@@ -1280,6 +1306,7 @@ fn draw_stack_in_slot(
                 crate::crafting::ToolType::Slingshot => "Sl",
                 crate::crafting::ToolType::Eraser => "Er",
                 crate::crafting::ToolType::DraftingStamp => "Ds",
+                crate::crafting::ToolType::Shield => "Sd",
             };
             ui.painter().text(
                 icon_rect.left_top() + egui::vec2(2.0, 2.0),

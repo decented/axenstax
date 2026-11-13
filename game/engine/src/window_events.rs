@@ -146,6 +146,14 @@ pub enum WindowEvent {
     WearArmour {
         hits: u8,
     },
+    /// Off-hand release (slice 5) — blocks the server's rule made with the
+    /// joiner's raised shield wear it by `amount` (`shield::wear`: the main hand
+    /// names hotbar slot `slot`). Both copies of the window apply the one rule.
+    WearShield {
+        slot: usize,
+        hand: crate::hands::Hand,
+        amount: u16,
+    },
     /// An accepted swing wears `tool` where it now is
     /// (`joiner_actions::where_now` from `slot`).
     WearWeapon {
@@ -465,6 +473,10 @@ fn apply_to(parts: &mut Parts, debt: &mut crate::container_window::CorrectionDeb
             for _ in 0..*hits {
                 crate::window::wear_armour(parts.armour);
             }
+            Effect::Wore
+        }
+        WindowEvent::WearShield { slot, hand, amount } => {
+            crate::shield::wear(parts.inv, *slot, parts.offhand, *hand, *amount);
             Effect::Wore
         }
         WindowEvent::WearWeapon { hand, slot, tool } => {
@@ -1028,6 +1040,18 @@ pub enum InboxItem {
     Grant(InventoryGrantPacket),
     /// `ArmourWorn { hits }`, window event `event`.
     ArmourWorn { hits: u8, event: u32 },
+    /// Off-hand release (slice 5) — `ShieldWorn`, window event `event`: wear the
+    /// shield in `hand` (the main hand names hotbar slot `slot`) by `amount`.
+    ShieldWorn { slot: u8, hand: crate::hands::Hand, amount: u16, event: u32 },
+}
+
+/// A server-landed wear the client applies as a numbered window event: armour hits
+/// (`ArmourWorn`) or, since slice 5 of the off-hand release, blocks that wore a
+/// raised shield (`ShieldWorn`). They share one ordered queue in the inbox.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Wear {
+    Armour(u8),
+    Shield { slot: u8, hand: crate::hands::Hand, amount: u16 },
 }
 
 impl InboxItem {
@@ -1036,7 +1060,7 @@ impl InboxItem {
         match self {
             InboxItem::Outcome(outcome) => outcome_event(outcome),
             InboxItem::Grant(g) => g.window_event,
-            InboxItem::ArmourWorn { event, .. } => *event,
+            InboxItem::ArmourWorn { event, .. } | InboxItem::ShieldWorn { event, .. } => *event,
         }
     }
 }
@@ -1090,7 +1114,7 @@ pub struct WindowInbox {
     personal_fences: Vec<crate::personal_inbox::PersonalFenceIdentity>,
     outcomes: Vec<RequestOutcome>,
     grants: Vec<InventoryGrantPacket>,
-    armour: Vec<(u8, u32)>,
+    armour: Vec<(Wear, u32)>,
     ack: Option<u64>,
     /// C3b-fix-a — what this client's window owes from correction takes it
     /// couldn't pay (`container_window::CorrectionDebt`; the server keeps
@@ -1134,7 +1158,7 @@ pub(crate) fn window_carrier_bytes(
     std::mem::size_of::<RequestOutcome>()
         .saturating_mul(outcomes.capacity())
         .saturating_add(std::mem::size_of::<InventoryGrantPacket>().saturating_mul(grants.capacity()))
-        .saturating_add(std::mem::size_of::<(u8, u32)>().saturating_mul(armour_capacity))
+        .saturating_add(std::mem::size_of::<(Wear, u32)>().saturating_mul(armour_capacity))
         .saturating_add(outcomes.iter().map(outcome_owned_bytes).fold(0usize, usize::saturating_add))
 }
 
@@ -1195,7 +1219,7 @@ impl WindowInbox {
     }
 
     /// Add one poll's carriers, each list in arrival order.
-    pub fn add(&mut self, outcomes: Vec<RequestOutcome>, grants: Vec<InventoryGrantPacket>, armour: Vec<(u8, u32)>) {
+    pub fn add(&mut self, outcomes: Vec<RequestOutcome>, grants: Vec<InventoryGrantPacket>, armour: Vec<(Wear, u32)>) {
         self.outcomes.extend(outcomes);
         self.grants.extend(grants);
         self.armour.extend(armour);
@@ -1208,7 +1232,7 @@ impl WindowInbox {
         &mut self,
         outcomes: Vec<RequestOutcome>,
         grants: Vec<InventoryGrantPacket>,
-        armour: Vec<(u8, u32)>,
+        armour: Vec<(Wear, u32)>,
         external: (usize, usize),
     ) -> Result<(), String> {
         let count = self
@@ -1231,7 +1255,7 @@ impl WindowInbox {
             outcome_capacity
                 .saturating_mul(std::mem::size_of::<RequestOutcome>())
                 .saturating_add(grant_capacity.saturating_mul(std::mem::size_of::<InventoryGrantPacket>()))
-                .saturating_add(armour_capacity.saturating_mul(std::mem::size_of::<(u8, u32)>()))
+                .saturating_add(armour_capacity.saturating_mul(std::mem::size_of::<(Wear, u32)>()))
                 .saturating_add(nested)
                 .saturating_add(external.1)
                 .saturating_add(self.debt.allocated_entries().saturating_mul(std::mem::size_of::<(Item, u32)>()))
@@ -1316,7 +1340,13 @@ impl WindowInbox {
         let mut outcomes: VecDeque<InboxItem> = self.outcomes.drain(..).map(InboxItem::Outcome).collect();
         let mut grants: VecDeque<InboxItem> = self.grants.drain(..).map(InboxItem::Grant).collect();
         let mut armour: VecDeque<InboxItem> =
-            self.armour.drain(..).map(|(hits, event)| InboxItem::ArmourWorn { hits, event }).collect();
+            self.armour
+                .drain(..)
+                .map(|(wear, event)| match wear {
+                    Wear::Armour(hits) => InboxItem::ArmourWorn { hits, event },
+                    Wear::Shield { slot, hand, amount } => InboxItem::ShieldWorn { slot, hand, amount, event },
+                })
+                .collect();
         let mut out = Vec::with_capacity(outcomes.len() + grants.len() + armour.len());
         loop {
             let pick = [&outcomes, &grants, &armour]
@@ -1578,9 +1608,9 @@ mod tests {
     fn d2c2_held_inbox_bounds_all_numbered_carriers_across_frames() {
         let mut inbox = WindowInbox::default();
         for event in 1..=crate::action_journal::MAX_EVENT_ENTRIES as u32 {
-            inbox.add_bounded(Vec::new(), Vec::new(), vec![(1, event)], (0, 0)).unwrap();
+            inbox.add_bounded(Vec::new(), Vec::new(), vec![(Wear::Armour(1), event)], (0, 0)).unwrap();
         }
-        assert!(inbox.add_bounded(Vec::new(), Vec::new(), vec![(1, 1025)], (0, 0)).is_err());
+        assert!(inbox.add_bounded(Vec::new(), Vec::new(), vec![(Wear::Armour(1), 1025)], (0, 0)).is_err());
         let (items, _) = inbox.take_ordered();
         assert_eq!(
             items.len(),
@@ -1907,7 +1937,7 @@ mod tests {
         let mut inbox = WindowInbox::default();
         // On the wire: grant 1, eat (2), armour 3, a refused swing (0), the
         // milk take (4), its milk (5), armour 6.
-        inbox.add(vec![eat(10, 2), interact(11, 0), interact(12, 4)], vec![grant(1), grant(5)], vec![(1, 3), (2, 6)]);
+        inbox.add(vec![eat(10, 2), interact(11, 0), interact(12, 4)], vec![grant(1), grant(5)], vec![(Wear::Armour(1), 3), (Wear::Armour(2), 6)]);
         inbox.acknowledged(7);
         inbox.acknowledged(5);
         let (items, ack) = inbox.take_ordered();
@@ -1920,7 +1950,7 @@ mod tests {
         assert_eq!(ack, Some(7), "the latest acknowledgement");
         assert!(inbox.is_empty());
         // Leaving the world drops whatever waits (`world_exit`).
-        inbox.add(vec![eat(1, 1)], vec![grant(2)], vec![(1, 3)]);
+        inbox.add(vec![eat(1, 1)], vec![grant(2)], vec![(Wear::Armour(1), 3)]);
         inbox.acknowledged(9);
         inbox.clear();
         assert!(inbox.is_empty());

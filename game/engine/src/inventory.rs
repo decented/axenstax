@@ -91,6 +91,8 @@ fn tool_type_to_wire(t: crate::crafting::ToolType) -> u8 {
         T::Slingshot => 9,
         T::Eraser => 10,
         T::DraftingStamp => 11,
+        // Off-hand release (slice 5): appended, wire byte 12.
+        T::Shield => 12,
     }
 }
 
@@ -127,6 +129,7 @@ fn tool_type_from_wire(b: u8) -> Option<crate::crafting::ToolType> {
         9 => T::Slingshot,
         10 => T::Eraser,
         11 => T::DraftingStamp,
+        12 => T::Shield,
         _ => return None,
     })
 }
@@ -1398,6 +1401,7 @@ mod tests {
             ToolType::Slingshot,
             ToolType::Eraser,
             ToolType::DraftingStamp,
+            ToolType::Shield,
         ];
         let mats = [
             ToolMaterial::Wood,

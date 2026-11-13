@@ -412,7 +412,10 @@ impl Player {
         // Determine target speed. Task 15 — Rubber Boots scale sprint only
         // (`sprint_boots_mult`, refreshed by the caller each tick from the
         // equipped Boots material); walking/sneaking are unaffected.
-        let speed = if input.sprint {
+        // Off-hand release (slice 5) — a raised shield: sneak speed, no sprint.
+        let speed = if input.guarding {
+            SNEAK_SPEED
+        } else if input.sprint {
             SPRINT_SPEED * self.sprint_boots_mult
         } else if input.sneak {
             SNEAK_SPEED
@@ -476,7 +479,7 @@ impl Player {
             self.on_ground = false;
 
             // Sprint-jump: boost forward velocity for ~4 block jump distance
-            if input.sprint && move_dir.length_squared() > 0.0 {
+            if input.sprint && !input.guarding && move_dir.length_squared() > 0.0 {
                 let boost_dir = move_dir.normalize();
                 self.velocity.x += boost_dir.x * 0.2;
                 self.velocity.z += boost_dir.z * 0.2;
@@ -1468,6 +1471,53 @@ mod tests {
         // room, but 1.4 keeps booted sprint-jump (≈0.597 b/tick peak) well
         // clear; full rationale on `armour::sprint_multiplier`.
         assert!(mult <= 1.4, "boots multiplier must stay capped at 1.4, got {mult}");
+    }
+
+    /// Off-hand release (slice 5) — a raised shield walks at sneak speed and does not
+    /// sprint, with none of sneak's edge protection.
+    #[test]
+    fn a_raised_shield_walks_at_sneak_speed_and_does_not_sprint() {
+        let (world, registry, cam) = runway_setup();
+        let run = |intent: PlayerIntent| {
+            let mut p = Player::new(Vec3::new(0.0, 64.0, 0.0));
+            for _ in 0..60 {
+                p.tick(&intent, &cam, &world, &registry, PlayMode::Survival);
+            }
+            assert!(p.on_ground);
+            p.velocity.length()
+        };
+        let walk = run(PlayerIntent { move_right: 1.0, ..Default::default() });
+        let sneak = run(PlayerIntent { move_right: 1.0, sneak: true, ..Default::default() });
+        let sprint = run(PlayerIntent { move_right: 1.0, sprint: true, ..Default::default() });
+        let guard = run(PlayerIntent { move_right: 1.0, guarding: true, ..Default::default() });
+        let guard_sprint = run(PlayerIntent { move_right: 1.0, guarding: true, sprint: true, ..Default::default() });
+        assert!(sneak < walk && walk < sprint, "the speeds are ordered ({sneak} < {walk} < {sprint})");
+        assert!((guard - sneak).abs() < 1e-4, "guarding walks at sneak speed ({guard} vs {sneak})");
+        assert!((guard_sprint - sneak).abs() < 1e-4, "and a sprint held with it does not sprint ({guard_sprint})");
+    }
+
+    /// A guard is not a crouch: no ledge protection, so a body walks off an edge.
+    #[test]
+    fn a_raised_shield_has_no_sneak_edge_protection() {
+        let registry = BlockRegistry::new();
+        let mut world = World::new();
+        for x in -3..=0 {
+            for z in -2..=2 {
+                world.set_block(x, 63, z, block::STONE);
+            }
+        }
+        let cam = Camera::new(Vec3::new(0.0, 64.0, 0.0), 1.0);
+        let walk_off = |intent: PlayerIntent| {
+            let mut p = Player::new(Vec3::new(-0.5, 64.0, 0.0));
+            for _ in 0..60 {
+                p.tick(&intent, &cam, &world, &registry, PlayMode::Survival);
+            }
+            p.pos.x
+        };
+        let sneaking = walk_off(PlayerIntent { move_right: 1.0, sneak: true, ..Default::default() });
+        let guarding = walk_off(PlayerIntent { move_right: 1.0, guarding: true, ..Default::default() });
+        assert!(sneaking < 1.4, "a sneaking body stops at the edge ({sneaking})");
+        assert!(guarding > 1.5, "a guarding body walks off it ({guarding})");
     }
 
     #[test]

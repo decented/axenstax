@@ -269,6 +269,28 @@ fn parts(tool: ToolType, material: ToolMaterial) -> Vec<Part> {
             part(0.0, 0.0, 0.17, 0.07, 0.12, 0.0, steel),
             part(0.0, -0.20, 0.17, 0.04, 0.12, 0.0, steel),
         ],
+        // Off-hand release (slice 5) — a board of four planks (the oak planks tile's
+        // light and dark texels), an iron rim round it and an iron boss on the +Z
+        // face. The board lies in the X-Y plane, centred on the origin; the views
+        // place it (`shield_pose`): upright and facing the camera in a first-person
+        // hand, turned out on the forearm in a lowered third-person one, lifted in
+        // front of the body when raised.
+        ToolType::Shield => {
+            let plank_light = Paint { layer: crate::block::TEX_OAK_PLANKS, texel: (8, 6) };
+            let plank_dark = Paint { layer: crate::block::TEX_OAK_PLANKS, texel: (8, 8) };
+            let mut v = Vec::new();
+            for (i, y) in [-0.2325_f32, -0.0775, 0.0775, 0.2325].into_iter().enumerate() {
+                v.push(part(0.0, y, 0.46, 0.155, 0.06, 0.0, if i % 2 == 0 { plank_light } else { plank_dark }));
+            }
+            // The rim: top and bottom bars and the two sides, a touch deeper than the board.
+            v.push(part(0.0, 0.31, 0.52, 0.04, 0.08, 0.0, steel));
+            v.push(part(0.0, -0.31, 0.52, 0.04, 0.08, 0.0, steel));
+            v.push(part(0.25, 0.0, 0.04, 0.58, 0.08, 0.0, steel));
+            v.push(part(-0.25, 0.0, 0.04, 0.58, 0.08, 0.0, steel));
+            // The boss.
+            v.push(part(0.0, 0.0, 0.14, 0.14, 0.11, 0.0, steel));
+            v
+        }
         // A knob and a stem on a wide flat base.
         ToolType::DraftingStamp => vec![
             part(0.0, 0.30, 0.13, 0.08, 0.13, 0.0, grip()),
@@ -470,5 +492,46 @@ pub(crate) mod tests {
                 assert!(sign(&tool_model(t, ToolMaterial::Iron, side)).iter().all(|s| *s), "{t:?} {side:?}: a face winds differently from the slab");
             }
         }
+    }
+
+    /// Off-hand release (slice 5) — the shield is a board of planks texels with an iron rim
+    /// and boss, from layers that already exist (no new texture layer: the web budget is full).
+    #[test]
+    fn the_shield_is_a_planks_board_with_an_iron_rim_and_boss_from_existing_layers() {
+        let v = tool_model(ToolType::Shield, ToolMaterial::Wood, HandSide::Right);
+        let planks: Vec<_> = v.iter().filter(|q| q.tex_layer == crate::block::TEX_OAK_PLANKS).collect();
+        let iron = metal();
+        let rim: Vec<_> = v.iter().filter(|q| q.tex_layer == iron.layer && q.uv == iron.uv()).collect();
+        assert!(!planks.is_empty() && !rim.is_empty(), "planks board and iron fittings");
+        assert_eq!(planks.len() + rim.len(), v.len(), "nothing else is drawn");
+        let extent = |pts: &[&Vertex], axis: usize| {
+            let lo = pts.iter().map(|q| q.position[axis]).fold(f32::MAX, f32::min);
+            let hi = pts.iter().map(|q| q.position[axis]).fold(f32::MIN, f32::max);
+            hi - lo
+        };
+        assert!(extent(&planks, 0) >= 0.44 && extent(&planks, 1) >= 0.6, "a board about half a block wide and tall");
+        assert!(extent(&planks, 2) <= 0.08, "and thin");
+        // The boss stands out of the +Z face, further than the board.
+        let board_front = planks.iter().map(|q| q.position[2]).fold(f32::MIN, f32::max);
+        let boss_front = rim.iter().map(|q| q.position[2]).fold(f32::MIN, f32::max);
+        assert!(boss_front > board_front, "the boss stands proud of the board ({boss_front} > {board_front})");
+        // A planks texel is a light plank or a dark seam, both opaque.
+        for texel in [(8u32, 6u32), (8, 8)] {
+            assert_eq!(crate::item_model::layer_mask(crate::block::TEX_OAK_PLANKS)[texel.1 as usize] >> texel.0 & 1, 1, "{texel:?}");
+        }
+        assert_eq!(crate::texture_gen::texture_count(), 512, "the layer count is exactly the web budget: no layer was added");
+    }
+
+    #[test]
+    fn the_shield_is_symmetric_so_both_hands_hold_the_same_board() {
+        let l = tool_model(ToolType::Shield, ToolMaterial::Wood, HandSide::Left);
+        let r = tool_model(ToolType::Shield, ToolMaterial::Wood, HandSide::Right);
+        let set = |v: &[Vertex]| {
+            let mut p: Vec<[i32; 3]> = v.iter().map(|q| q.position.map(|c| (c * 1000.0).round() as i32)).collect();
+            p.sort();
+            p.dedup();
+            p
+        };
+        assert_eq!(set(&l), set(&r));
     }
 }

@@ -1484,6 +1484,24 @@ pub fn build_player_avatar_vertices_with(
     // and the held-item transform so the item tracks the hand.
     let arm_swing = if swing_progress > 0.0 { Some(swing_angle(swing_progress)) } else { None };
 
+    // Off-hand release (slice 5) — a raised shield: the hand that holds it (the main
+    // hand's shield first, as `shield::guard_hand` picks) lifts its arm forward and
+    // the board stands in front of the hand. Only when the avatar's flags say so.
+    let main_wire = crate::protocol::HeldWire { kind: ps.held_kind, id: ps.held_id, tool: ps.held_tool };
+    let off_wire = crate::protocol::HeldWire { kind: ps.off_kind, id: ps.off_id, tool: ps.off_tool };
+    let guard_side = if ps.flags & player_flags::GUARDING != 0 {
+        let is_shield = |w: crate::protocol::HeldWire| w.tool_type() == Some(crate::crafting::ToolType::Shield);
+        if is_shield(main_wire) {
+            Some(crate::viewmodel::HandSide::Right)
+        } else if is_shield(off_wire) {
+            Some(crate::viewmodel::HandSide::Left)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     // Box-unwrap UV tables — owned arrays; compute once, index by part i.
     let base_uv = crate::skin_uv::base_faces(opts.arm_model);
     let overlay_uv = crate::skin_uv::overlay_faces(opts.arm_model);
@@ -1510,7 +1528,13 @@ pub fn build_player_avatar_vertices_with(
         } else {
             0.0
         };
-        let arm_override = if i == RIGHT_ARM_INDEX { arm_swing } else { None };
+        let mut arm_override = if i == RIGHT_ARM_INDEX { arm_swing } else { None };
+        // The guard lifts the shield's arm, over a swing (a raised shield swings no arm).
+        if (i == RIGHT_ARM_INDEX && guard_side == Some(crate::viewmodel::HandSide::Right))
+            || (i == LEFT_ARM_INDEX && guard_side == Some(crate::viewmodel::HandSide::Left))
+        {
+            arm_override = Some(crate::shield_pose::GUARD_ARM_ANGLE);
+        }
         let pose = PartPose { walk_swing, head_pitch: ps.pitch, arm_override, ..Default::default() };
         // Limbs-apart displaces the part in MODEL space. The part builder applies
         // R_y(yaw) then translates by entity_pos, so the offset must be rotated
@@ -1552,16 +1576,8 @@ pub fn build_player_avatar_vertices_with(
     // does not swing (a remote peer's off-hand use is not on the wire).
     let (sin_y, cos_y) = yaw.sin_cos();
     for (side, held, swing) in [
-        (
-            crate::viewmodel::HandSide::Right,
-            crate::protocol::HeldWire { kind: ps.held_kind, id: ps.held_id, tool: ps.held_tool },
-            arm_swing,
-        ),
-        (
-            crate::viewmodel::HandSide::Left,
-            crate::protocol::HeldWire { kind: ps.off_kind, id: ps.off_id, tool: ps.off_tool },
-            None,
-        ),
+        (crate::viewmodel::HandSide::Right, main_wire, arm_swing),
+        (crate::viewmodel::HandSide::Left, off_wire, None),
     ] {
         let held = crate::item_model::HeldItem::from_wire(held);
         if held.is_empty() {
@@ -1571,6 +1587,22 @@ pub fn build_player_avatar_vertices_with(
         let hand_anchor = Vec3::new(arm.origin.x, arm.origin.y - arm.size.y * 0.5, arm.origin.z);
         let arm_pivot = arm.pivot;
         let mut item_verts = crate::item_model::held_item_mesh(held, registry, side);
+        // Off-hand release (slice 5) — a shield is placed by its own pose (worn on
+        // the outside of the forearm, or lifted in front of the raised arm), not
+        // hung from the hand anchor.
+        if held.tool == Some(crate::crafting::ToolType::Shield) {
+            let raised = guard_side == Some(side);
+            let m = crate::shield_pose::avatar_transform(arm.origin, arm.size, arm.pivot, side, raised);
+            crate::shield_pose::transform_vertices(&mut item_verts, &m);
+            for v in &mut item_verts {
+                let p = Vec3::from(v.position);
+                let rx = p.x * cos_y - p.z * sin_y;
+                let rz = p.x * sin_y + p.z * cos_y;
+                v.position = [rx + foot_pos.x, p.y + foot_pos.y, rz + foot_pos.z];
+            }
+            held_verts.extend(item_verts);
+            continue;
+        }
         let x_rot = swing.unwrap_or(0.0);
         let (sin_x, cos_x) = x_rot.sin_cos();
         for v in &mut item_verts {
@@ -4708,5 +4740,72 @@ mod tests {
         ecs.insert_one(behind_cow, crate::entity::Ridden).unwrap();
         let ridden = build_entity_model_vertices_culled(&ecs, 0, eye, &empty, |_| (1.0, 1.0), Some(&cull));
         assert_eq!(ridden.len(), kept.len() * 2, "the ridden mount is never culled");
+    }
+
+    /// Off-hand release (slice 5) — a peer's shield: worn on the outside of the forearm
+    /// when lowered, lifted in front of a raised arm when the avatar's flags say GUARDING.
+    /// Built with `ps.yaw = -pi/2` and the avatar at the origin, so the output is in model
+    /// space (arms at +-X, front toward -Z), as the workshop test above relies on.
+    fn shield_avatar(off_hand: bool, flags: u8) -> (Vec<Vertex>, Vec<Vertex>) {
+        use crate::crafting::{Tool, ToolMaterial, ToolType};
+        let registry = crate::block::BlockRegistry::new();
+        let shield = crate::protocol::HeldWire::of(Some(&crate::item::Item::Tool(Tool::new(ToolType::Shield, ToolMaterial::Wood))));
+        let sword = crate::protocol::HeldWire::of(Some(&crate::item::Item::Tool(Tool::new(ToolType::Sword, ToolMaterial::Iron))));
+        let (main, off) = if off_hand { (sword, shield) } else { (shield, crate::protocol::HeldWire::EMPTY) };
+        let ps = crate::protocol::PlayerState {
+            player_index: 1, x: 0.0, y: 0.0, z: 0.0, yaw: -std::f32::consts::FRAC_PI_2, pitch: 0.0, health: 20.0,
+            held_kind: main.kind, held_id: main.id, held_tool: main.tool,
+            off_kind: off.kind, off_id: off.id, off_tool: off.tool,
+            anim_state: 0, flags, skin_key: 0,
+        };
+        build_player_avatar_vertices(&ps, 0.0, 0, 0, 1.0, &registry, crate::skin_uv::ArmModel::Classic)
+    }
+
+    fn shield_verts(held: &[Vertex]) -> Vec<[f32; 3]> {
+        held.iter().filter(|v| v.tex_layer == crate::block::TEX_OAK_PLANKS).map(|v| v.position).collect()
+    }
+
+    #[test]
+    fn a_lowered_shield_is_worn_on_the_outside_of_the_arm() {
+        for (off_hand, sign) in [(true, -1.0_f32), (false, 1.0)] {
+            let (_, held) = shield_avatar(off_hand, 0);
+            let pts = shield_verts(&held);
+            assert!(!pts.is_empty());
+            assert!(pts.iter().all(|p| p[0] * sign > 0.375), "off_hand={off_hand}: outside the arm's centre line");
+            assert!(pts.iter().all(|p| (0.5..=1.4).contains(&p[1])), "at the forearm's height");
+        }
+    }
+
+    #[test]
+    fn a_guarding_avatar_lifts_the_shield_arm_and_holds_the_shield_in_front() {
+        use crate::protocol::player_flags::GUARDING;
+        let arm_front = |skin: &[Vertex], left: bool| {
+            // Arm verts are the left/right arm's boxes: take those on its side of the body.
+            skin.iter().filter(|v| (v.position[0] < 0.0) == left && v.position[1] > 0.5 && v.position[1] < 1.6)
+                .map(|v| v.position[2]).fold(f32::MAX, f32::min)
+        };
+        let (rest_skin, _) = shield_avatar(true, 0);
+        let (up_skin, up_held) = shield_avatar(true, GUARDING);
+        assert!(arm_front(&up_skin, true) < arm_front(&rest_skin, true) - 0.4, "the left arm swung forward");
+        assert!((arm_front(&up_skin, false) - arm_front(&rest_skin, false)).abs() < 1e-3, "the right arm stayed");
+        let pts = shield_verts(&up_held);
+        assert!(pts.iter().all(|p| p[2] < -0.5), "the board stands in front of the body (the front is -Z)");
+        assert!(pts.iter().all(|p| (0.7..=1.6).contains(&p[1])), "at chest height");
+        // A main-hand shield lifts the right arm.
+        let (rest, _) = shield_avatar(false, 0);
+        let (up, _) = shield_avatar(false, GUARDING);
+        assert!(arm_front(&up, false) < arm_front(&rest, false) - 0.4, "the right arm swung forward");
+        // The flag with no shield in either hand lifts nothing.
+        let (no_shield, _) = {
+            let registry = crate::block::BlockRegistry::new();
+            let ps = crate::protocol::PlayerState {
+                player_index: 1, x: 0.0, y: 0.0, z: 0.0, yaw: -std::f32::consts::FRAC_PI_2, pitch: 0.0, health: 20.0,
+                held_kind: 0, held_id: 0, held_tool: crate::protocol::HeldWire::NO_TOOL,
+                off_kind: 0, off_id: 0, off_tool: crate::protocol::HeldWire::NO_TOOL,
+                anim_state: 0, flags: GUARDING, skin_key: 0,
+            };
+            build_player_avatar_vertices(&ps, 0.0, 0, 0, 1.0, &registry, crate::skin_uv::ArmModel::Classic)
+        };
+        assert!((arm_front(&no_shield, true) - arm_front(&rest_skin, true)).abs() < 1e-3, "no shield, no guard pose");
     }
 }

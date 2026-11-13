@@ -1197,6 +1197,7 @@ fn a_species_hit_lands_on_a_joiners_body_wears_its_armour_and_names_the_species(
         2.0,
         crate::survival::DamageCause::Mob(MobType::Bee),
         Vec3::new(0.4, 0.0, 0.0),
+        None,
     ));
     assert_eq!(rig.hs.server.players[slot].combat.health, 18.0);
     assert!(rig.hs.server.players[slot].player.velocity.x > 0.0, "knocked back");
@@ -1210,6 +1211,7 @@ fn a_species_hit_lands_on_a_joiners_body_wears_its_armour_and_names_the_species(
         50.0,
         crate::survival::DamageCause::Mob(MobType::Shark),
         Vec3::ZERO,
+        None,
     ));
     rig.tick(1);
     assert!(rig.joiners[0].inbox.events.contains(&PlayerEventType::DiedOf {
@@ -1221,6 +1223,7 @@ fn a_species_hit_lands_on_a_joiners_body_wears_its_armour_and_names_the_species(
         2.0,
         crate::survival::DamageCause::Mob(MobType::Bee),
         Vec3::ZERO,
+        None,
     ));
 }
 
@@ -1380,3 +1383,4 @@ fn a_swing_wears_the_weapon_where_it_now_is_on_both_sides() {
 }
 
 mod animal_life;
+mod shield; // Off-hand release (slice 5) — the shield for a joiner: the server decides.

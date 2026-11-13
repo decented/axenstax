@@ -1024,6 +1024,7 @@ fn a_server_hit_wears_the_servers_armour_as_the_client_wears_its_own() {
         2.0,
         crate::survival::DamageCause::Mob(crate::mob::MobType::Bee),
         Vec3::ZERO,
+        None,
     ));
     rig.tick();
     assert_eq!(rig.c.worn, 1, "the client was told of one hit");
@@ -1045,6 +1046,7 @@ fn a_server_hit_wears_the_servers_armour_as_the_client_wears_its_own() {
         1.0,
         crate::survival::DamageCause::Mob(crate::mob::MobType::Bee),
         Vec3::ZERO,
+        None,
     ));
     rig.tick();
     rig.tick();
@@ -1166,6 +1168,7 @@ fn armour_wear_crossing_an_unequip_wears_the_same_on_both_sides() {
         2.0,
         crate::survival::DamageCause::Mob(crate::mob::MobType::Bee),
         Vec3::ZERO,
+        None,
     ));
     rig.tick();
     rig.click(WindowClick::Armour { slot: 0 });

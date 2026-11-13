@@ -46,7 +46,7 @@ pub const DAMAGE_FLASH_TICKS: u32 = 6;
 /// model tint reads.
 pub const PLAYER_HURT_FLASH_TICKS: u32 = 8;
 /// Invincibility frames after being hit (ticks).
-const INVINCIBILITY_TICKS: u32 = 10;
+pub(crate) const INVINCIBILITY_TICKS: u32 = 10;
 
 // --- Health component for mobs ---
 
@@ -243,6 +243,11 @@ pub struct PlayerCombat {
     pub attack_cooldown: u32,
     pub flash_timer: u32,
     pub invincible_timer: u32,
+    /// Off-hand release (slice 5) — ticks left on the window a wearing shield
+    /// block opened: a front hit inside it is blocked without wear or sound
+    /// (`shield::BLOCK_WINDOW_TICKS`; hostile melee has no cooldown of its own,
+    /// so without this one mob in front would wear the shield every tick).
+    pub shield_window: u32,
     /// Damage of the hit that started the current invulnerability window
     /// (post-armour). Minecraft rule: a hit arriving inside the window only
     /// applies the amount by which it exceeds this. Meaningful only while
@@ -323,6 +328,7 @@ impl PlayerCombat {
             attack_cooldown: 0,
             flash_timer: 0,
             invincible_timer: 0,
+            shield_window: 0,
             last_hit_damage: 0.0,
             dead: false,
             respawn_requested: false,
@@ -374,6 +380,33 @@ impl PlayerCombat {
         if self.invincible_timer > 0 {
             self.invincible_timer -= 1;
         }
+        if self.shield_window > 0 {
+            self.shield_window -= 1;
+        }
+    }
+
+    /// Off-hand release (slice 5) — does a raised shield stop this hit? `guard`
+    /// is the body's raised shield (none: nothing is stopped), `attacker` where
+    /// the hit comes from, `raw` its damage before armour. A blocked hit does no
+    /// damage and starts no i-frame window; the first block of a window wears the
+    /// shield (`1 + floor(raw)` into `tally`, one clack) and opens the window,
+    /// the rest of it blocks free. Returns whether the hit was blocked.
+    pub fn shield_blocks(
+        &mut self,
+        shield: &mut crate::shield::ShieldCtx,
+        attacker: Vec3,
+        raw: f32,
+    ) -> bool {
+        let Some(guard) = shield.guard else { return false };
+        if !guard.blocks(attacker) {
+            return false;
+        }
+        if self.shield_window == 0 {
+            self.shield_window = crate::shield::BLOCK_WINDOW_TICKS;
+            shield.tally.wear = shield.tally.wear.saturating_add(crate::shield::wear_for(raw));
+            shield.tally.clacks = shield.tally.clacks.saturating_add(1);
+        }
+        true
     }
 
     /// One tick of poison, hunger drain, natural regen and starvation.
@@ -1046,12 +1079,13 @@ pub fn hostile_melee_tick(
     combat: &mut PlayerCombat,
     armour_points: u8,
     difficulty: crate::survival::Difficulty,
+    shield: &mut crate::shield::ShieldCtx,
 ) -> Vec<hecs::Entity> {
     if combat.dead {
         return Vec::new();
     }
     let contacts = hostiles_in_reach(ecs, player_pos);
-    land_hostile_contacts(&contacts, player_vel, combat, armour_points, difficulty)
+    land_hostile_contacts(&contacts, player_vel, combat, armour_points, difficulty, shield)
 }
 
 /// D4 slice 3 — one hostile mob in melee reach of a player body: the mob,
@@ -1089,23 +1123,32 @@ pub fn hostiles_in_reach(ecs: &hecs::World, player_pos: Vec3) -> Vec<MeleeContac
 /// The other half of [`hostile_melee_tick`]: each contact hits for the
 /// baseline melee damage (difficulty-scaled, armour-soaked) while the
 /// i-frame window lets it, and a hit that lands knocks the body back.
-/// Returns the mobs whose hit landed.
+/// Off-hand release (slice 5) — a contact from the front half of a raised
+/// shield is blocked first (`PlayerCombat::shield_blocks`): no damage, no
+/// knockback, not in the returned list (the mob did not land a hit), the
+/// shield's wear in `shield.tally`. Returns the mobs whose hit landed.
 pub fn land_hostile_contacts(
     contacts: &[MeleeContact],
     player_vel: &mut Vec3,
     combat: &mut PlayerCombat,
     armour_points: u8,
     difficulty: crate::survival::Difficulty,
+    shield: &mut crate::shield::ShieldCtx,
 ) -> Vec<hecs::Entity> {
     let mut landed: Vec<hecs::Entity> = Vec::new();
     if combat.dead {
         return landed;
     }
-    let damage = crate::armour::damage_after_armour(
-        crate::survival::scale_mob_damage(HOSTILE_MELEE_DAMAGE, difficulty),
-        armour_points,
-    );
+    let raw = crate::survival::scale_mob_damage(HOSTILE_MELEE_DAMAGE, difficulty);
+    let damage = crate::armour::damage_after_armour(raw, armour_points);
     for c in contacts {
+        // The attacker's position is the body's less the offset the contact
+        // carries (`to_player = player_pos - mob_pos`).
+        if let Some(guard) = shield.guard
+            && combat.shield_blocks(shield, guard.victim - c.to_player, raw)
+        {
+            continue;
+        }
         if combat.take_damage_from(damage, crate::survival::DamageCause::Mob(c.kind)) {
             // Knockback away from the attacker.
             let kb_dir = Vec3::new(c.to_player.x, 0.0, c.to_player.z).normalize_or_zero();
@@ -1144,10 +1187,12 @@ pub fn land_mob_attacks(
     difficulty: crate::survival::Difficulty,
 ) -> Vec<hecs::Entity> {
     let points = slot.total_armour_points();
-    let landed = land_hostile_contacts(contacts, &mut slot.player.velocity, &mut slot.combat, points, difficulty);
+    let mut shield = slot.shield_ctx();
+    let landed = land_hostile_contacts(contacts, &mut slot.player.velocity, &mut slot.combat, points, difficulty, &mut shield);
     for _ in &landed {
         slot.wear_armour();
     }
+    slot.settle_shield(shield.tally);
     landed
 }
 
@@ -2148,5 +2193,206 @@ mod tests {
         assert!(slot.armour_slots[ArmourSlot::Helmet as usize].is_none(),
             "broken helmet must auto-unequip");
         assert_eq!(slot.total_armour_points(), 0);
+    }
+}
+
+/// Off-hand release (slice 5) — a raised shield on a local body: hostile melee,
+/// species hits and blasts from the front half are stopped, from behind they land
+/// as before, and the shield wears. The pure arc and delay rules are in `shield`.
+#[cfg(test)]
+mod shield_block_tests {
+    use super::*;
+    use crate::crafting::{Tool, ToolMaterial, ToolType};
+    use crate::item::ItemStack;
+    use crate::shield::RAISE_TICKS;
+
+    const NORMAL: crate::survival::Difficulty = crate::survival::Difficulty::Normal;
+
+    fn shield_item() -> ItemStack {
+        ItemStack::new_tool(Tool::new(ToolType::Shield, ToolMaterial::Wood))
+    }
+
+    /// A body at (0, 64, 0) facing -Z (yaw 0), a shield in the main hand
+    /// raised for `ticks` ticks.
+    fn guarded(ticks: u32) -> crate::player_slot::PlayerSlot {
+        let mut slot = crate::player_slot::PlayerSlot::new(0, Vec3::new(0.0, 64.0, 0.0), 1.0);
+        slot.inventory.set_slot(0, Some(shield_item()));
+        slot.hotbar_slot = 0;
+        slot.shield_ticks = ticks;
+        slot
+    }
+
+    fn shield_durability(slot: &crate::player_slot::PlayerSlot) -> Option<u16> {
+        match slot.inventory.slot(0).map(|s| &s.item) {
+            Some(crate::item::Item::Tool(t)) => Some(t.durability),
+            _ => None,
+        }
+    }
+
+    /// A brigand 1 block in front of the body (-Z) or behind it (+Z).
+    fn brigand(front: bool) -> (hecs::World, hecs::Entity) {
+        let mut ecs = hecs::World::new();
+        let z = if front { -1.0 } else { 1.0 };
+        let e = entity::spawn_mob(&mut ecs, MobType::Brigand, Vec3::new(0.0, 64.0, z));
+        (ecs, e)
+    }
+
+    #[test]
+    fn a_hostile_in_front_is_blocked_with_no_damage_no_knockback_and_wear() {
+        let (ecs, _) = brigand(true);
+        let mut slot = guarded(RAISE_TICKS);
+        let hp = slot.combat.health;
+        let landed = tick_mob_attacks(&ecs, &mut slot, NORMAL);
+        assert!(landed.is_empty(), "the mob landed nothing");
+        assert_eq!(slot.combat.health, hp, "no damage");
+        assert_eq!(slot.player.velocity, Vec3::ZERO, "no knockback");
+        assert_eq!(slot.combat.invincible_timer, 0, "a block starts no i-frame window");
+        let raw = crate::survival::scale_mob_damage(HOSTILE_MELEE_DAMAGE, NORMAL);
+        assert_eq!(
+            shield_durability(&slot),
+            Some(crate::crafting::SHIELD_DURABILITY - crate::shield::wear_for(raw)),
+            "1 + floor(damage) durability",
+        );
+        assert_eq!(slot.take_shield_clacks(), 1, "one clack");
+        assert_eq!(slot.take_shield_clacks(), 0, "drained");
+    }
+
+    #[test]
+    fn an_attack_from_behind_does_damage_as_before() {
+        let (ecs, mob) = brigand(false);
+        let mut slot = guarded(RAISE_TICKS);
+        let hp = slot.combat.health;
+        let landed = tick_mob_attacks(&ecs, &mut slot, NORMAL);
+        assert_eq!(landed, vec![mob]);
+        assert!(slot.combat.health < hp);
+        assert!(slot.player.velocity.length() > 0.0, "knocked back");
+        assert_eq!(shield_durability(&slot), Some(crate::crafting::SHIELD_DURABILITY), "the shield did not wear");
+        assert_eq!(slot.take_shield_clacks(), 0);
+    }
+
+    #[test]
+    fn a_shield_raised_four_ticks_is_not_yet_effective_five_is() {
+        let (ecs, _) = brigand(true);
+        let mut early = guarded(RAISE_TICKS - 1);
+        let hp = early.combat.health;
+        tick_mob_attacks(&ecs, &mut early, NORMAL);
+        assert!(early.combat.health < hp, "4 ticks: the hit lands");
+        let mut ready = guarded(RAISE_TICKS);
+        let hp = ready.combat.health;
+        tick_mob_attacks(&ecs, &mut ready, NORMAL);
+        assert_eq!(ready.combat.health, hp, "5 ticks: blocked");
+    }
+
+    #[test]
+    fn a_lowered_or_absent_shield_blocks_nothing() {
+        let (ecs, _) = brigand(true);
+        let mut lowered = guarded(0);
+        let hp = lowered.combat.health;
+        tick_mob_attacks(&ecs, &mut lowered, NORMAL);
+        assert!(lowered.combat.health < hp, "a shield not raised protects nothing");
+        let mut none = crate::player_slot::PlayerSlot::new(0, Vec3::new(0.0, 64.0, 0.0), 1.0);
+        none.shield_ticks = 20;
+        let hp = none.combat.health;
+        tick_mob_attacks(&ecs, &mut none, NORMAL);
+        assert!(none.combat.health < hp, "no shield in either hand protects nothing");
+    }
+
+    #[test]
+    fn a_shield_in_the_off_hand_guards_too() {
+        let (ecs, _) = brigand(true);
+        let mut slot = crate::player_slot::PlayerSlot::new(0, Vec3::new(0.0, 64.0, 0.0), 1.0);
+        slot.offhand = Some(shield_item());
+        slot.shield_ticks = RAISE_TICKS;
+        let hp = slot.combat.health;
+        tick_mob_attacks(&ecs, &mut slot, NORMAL);
+        assert_eq!(slot.combat.health, hp);
+        match slot.offhand.as_ref().map(|s| &s.item) {
+            Some(crate::item::Item::Tool(t)) => assert!(t.durability < crate::crafting::SHIELD_DURABILITY, "the off-hand shield wore"),
+            other => panic!("the off-hand shield is still there: {other:?}"),
+        }
+    }
+
+    /// Hostile melee has no cooldown of its own, so a mob in front would hit every
+    /// tick: the block window makes it cost one wear and one clack per window.
+    #[test]
+    fn a_mob_standing_in_front_costs_one_wear_per_window_not_one_per_tick() {
+        let (ecs, _) = brigand(true);
+        let mut slot = guarded(RAISE_TICKS);
+        let hp = slot.combat.health;
+        let raw = crate::survival::scale_mob_damage(HOSTILE_MELEE_DAMAGE, NORMAL);
+        let mut clacks = 0;
+        for _ in 0..40 {
+            tick_mob_attacks(&ecs, &mut slot, NORMAL);
+            slot.combat.tick_timers();
+            clacks += slot.take_shield_clacks();
+        }
+        assert_eq!(slot.combat.health, hp, "forty ticks of blows, none through");
+        let windows = 40 / crate::shield::BLOCK_WINDOW_TICKS as u16;
+        assert_eq!(clacks as u16, windows, "one clack a window");
+        assert_eq!(
+            shield_durability(&slot),
+            Some(crate::crafting::SHIELD_DURABILITY - windows * crate::shield::wear_for(raw)),
+            "one wear a window",
+        );
+    }
+
+    #[test]
+    fn a_shield_breaks_at_zero_like_any_tool() {
+        let (ecs, _) = brigand(true);
+        let mut slot = guarded(RAISE_TICKS);
+        slot.inventory.set_slot(0, Some(ItemStack::new_tool(Tool { durability: 3, ..Tool::new(ToolType::Shield, ToolMaterial::Wood) })));
+        tick_mob_attacks(&ecs, &mut slot, NORMAL);
+        assert!(slot.inventory.slot(0).is_none(), "worn to nothing and gone");
+        // With the shield gone the next hit lands.
+        slot.combat.tick_timers();
+        let hp = slot.combat.health;
+        for _ in 0..crate::shield::BLOCK_WINDOW_TICKS {
+            slot.combat.tick_timers();
+        }
+        tick_mob_attacks(&ecs, &mut slot, NORMAL);
+        assert!(slot.combat.health < hp, "no shield, no protection");
+    }
+
+    #[test]
+    fn a_species_hit_from_the_front_is_blocked_and_from_behind_lands_with_its_knock() {
+        let knock = Vec3::new(0.0, 0.0, 0.5);
+        let cause = crate::survival::DamageCause::Mob(MobType::Goat);
+        let mut slot = guarded(RAISE_TICKS);
+        let hp = slot.combat.health;
+        assert!(!slot.take_hit_from(4.0, cause, Vec3::new(0.0, 64.0, -2.0), knock), "front: blocked");
+        assert_eq!(slot.combat.health, hp);
+        assert_eq!(slot.player.velocity, Vec3::ZERO, "no knockback");
+        assert_eq!(shield_durability(&slot), Some(crate::crafting::SHIELD_DURABILITY - 5), "wear 1 + floor(4)");
+        let mut behind = guarded(RAISE_TICKS);
+        assert!(behind.take_hit_from(4.0, cause, Vec3::new(0.0, 64.0, 2.0), knock), "behind: lands");
+        assert!(behind.combat.health < hp);
+        assert_eq!(behind.player.velocity, knock);
+    }
+
+    #[test]
+    fn a_blast_whose_centre_is_in_front_is_blocked_and_one_behind_lands() {
+        // The keg's cell centre is at +0.5: a cell at z -3 is in front of a body at z 0.
+        let mut front = vec![guarded(RAISE_TICKS)];
+        let hp = front[0].combat.health;
+        let landed = crate::explosion::apply_player_blast_damage(&mut front, &[(0, 10.0)], (0, 64, -3));
+        assert!(landed.is_empty(), "blocked");
+        assert_eq!(front[0].combat.health, hp);
+        assert_eq!(shield_durability(&front[0]), Some(crate::crafting::SHIELD_DURABILITY - 11), "wear 1 + floor(10)");
+        let mut behind = vec![guarded(RAISE_TICKS)];
+        let landed = crate::explosion::apply_player_blast_damage(&mut behind, &[(0, 10.0)], (0, 64, 3));
+        assert_eq!(landed, vec![0], "a blast from behind lands");
+        assert!(behind[0].combat.health < hp);
+    }
+
+    #[test]
+    fn lava_fall_and_starvation_are_never_blocked() {
+        use crate::survival::DamageCause;
+        for cause in [DamageCause::Lava, DamageCause::Fall, DamageCause::Generic] {
+            let mut slot = guarded(RAISE_TICKS);
+            let hp = slot.combat.health;
+            assert!(slot.take_damage_with_armour_from(2.0, cause), "{cause:?} carries no attacker");
+            assert!(slot.combat.health < hp);
+            assert_eq!(shield_durability(&slot), Some(crate::crafting::SHIELD_DURABILITY), "and wears nothing");
+        }
     }
 }

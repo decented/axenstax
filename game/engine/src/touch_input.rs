@@ -221,6 +221,9 @@ pub struct TouchInput {
     // Hold buttons track their OWN touch id so lifting another finger (e.g. the
     // joystick) doesn't release them — the bug in the previous overlay.
     break_id: Option<u64>,
+    /// Off-hand release (slice 5) — the finger holding the Place button, so
+    /// `place_held` (a raised shield) releases when ITS finger lifts.
+    place_id: Option<u64>,
     sneak_id: Option<u64>,
     zoom_id: Option<u64>,
 
@@ -228,6 +231,9 @@ pub struct TouchInput {
     pub jump_pressed: bool,
     pub break_held: bool,
     pub place_pressed: bool,
+    /// The Place button is held down (a hold, where `place_pressed` is the
+    /// one-frame edge): raises a shield (`PlayerIntent::use_held`).
+    pub place_held: bool,
     pub sneak_held: bool,
     pub zoom_held: bool,
     pub pause_pressed: bool,
@@ -273,11 +279,13 @@ impl TouchInput {
             look_dx: 0.0,
             look_dy: 0.0,
             break_id: None,
+            place_id: None,
             sneak_id: None,
             zoom_id: None,
             jump_pressed: false,
             break_held: false,
             place_pressed: false,
+            place_held: false,
             sneak_held: false,
             zoom_held: false,
             pause_pressed: false,
@@ -385,7 +393,11 @@ impl TouchInput {
             TouchZone::Offhand => self.swap_hands = true,
             TouchZone::Button(kind) => match kind {
                 ButtonKind::Jump => self.jump_pressed = true,
-                ButtonKind::Place => self.place_pressed = true,
+                ButtonKind::Place => {
+                    self.place_pressed = true;
+                    self.place_held = true;
+                    self.place_id = Some(id);
+                }
                 ButtonKind::Inventory => self.inventory_pressed = true,
                 ButtonKind::Pause => self.pause_pressed = true,
                 ButtonKind::Chat => self.chat_pressed = true,
@@ -436,6 +448,10 @@ impl TouchInput {
             self.break_held = false;
             self.break_id = None;
         }
+        if self.place_id == Some(id) {
+            self.place_held = false;
+            self.place_id = None;
+        }
         if self.sneak_id == Some(id) {
             self.sneak_held = false;
             self.sneak_id = None;
@@ -467,6 +483,8 @@ impl TouchInput {
             toggle_flight: false,
             break_block: self.break_held,
             place_block: self.place_pressed,
+            use_held: self.place_held,
+            guarding: false,
             toggle_inventory: self.inventory_pressed,
             drop_item: false, // BRIDGE: touch UI has no Q-equivalent yet
             pause: self.pause_pressed,
@@ -716,6 +734,7 @@ pub fn draw_touch_overlay(ctx: &egui::Context, touch: &TouchInput) {
                 let r = egui::Rect::from_min_max(egui::pos2(rect.x0, rect.y0), egui::pos2(rect.x1, rect.y1));
                 let active = match kind {
                     ButtonKind::Break => touch.break_held,
+                    ButtonKind::Place => touch.place_held,
                     ButtonKind::Sneak => touch.sneak_held,
                     ButtonKind::Zoom => touch.zoom_held,
                     _ => false,
@@ -850,6 +869,29 @@ mod tests {
         t.on_touch_start(1, (r.x0 + r.x1) * 0.5, (r.y0 + r.y1) * 0.5);
         assert!(t.inventory_pressed, "inventory button sets the press");
         assert!(t.to_intent().toggle_inventory, "→ toggle_inventory intent");
+    }
+
+    /// Off-hand release (slice 5) — the Place button is a hold as well as an edge:
+    /// holding it raises a shield (`use_held`), and the one-frame `place_block` is
+    /// unchanged (a held touch finger still places once, not every frame).
+    #[test]
+    fn holding_the_place_button_is_a_use_hold_until_its_finger_lifts() {
+        let mut t = TouchInput::new();
+        t.set_screen_size(1280.0, 720.0);
+        let pr = rect_for(ButtonKind::Place, 1280.0, 720.0);
+        t.on_touch_start(20, (pr.x0 + pr.x1) * 0.5, (pr.y0 + pr.y1) * 0.5);
+        let first = t.to_intent();
+        assert!(first.place_block && first.use_held, "the touch frame places once and holds");
+        t.end_frame();
+        let later = t.to_intent();
+        assert!(!later.place_block, "the edge is one frame");
+        assert!(later.use_held, "the hold stays while the finger is down");
+        // Another finger lifting does not release it; its own finger does.
+        t.on_touch_start(21, 1280.0 * 0.12, 720.0 * 0.75);
+        t.on_touch_end(21);
+        assert!(t.to_intent().use_held);
+        t.on_touch_end(20);
+        assert!(!t.to_intent().use_held, "released when its finger lifts");
     }
 
     #[test]

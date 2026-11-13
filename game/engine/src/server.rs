@@ -219,6 +219,22 @@ pub struct ServerPlayer {
     /// `PlayerEventType::ArmourWorn` (each wears its client-held armour once,
     /// the single-player rule). Drained by `HostedServer` every tick.
     pub armour_wear_hits: u8,
+    /// Off-hand release (slice 5) — the raised flag of this joiner's latest input
+    /// (`InputPacket.shield_raised`), latched like `last_sneak`. Client-asserted:
+    /// it protects only while the server's copy of the window holds a shield
+    /// ([`Self::shield_guard`]) and only by the server's own tick count.
+    pub shield_latch: bool,
+    /// Consecutive server ticks the latch has been set with a shield held in
+    /// the server's copy (`shield::next_raised_ticks`): the server counts the
+    /// raise itself and never takes a client's count.
+    pub shield_ticks: u32,
+    /// Durability the server's blocks owe this joiner's shield since the last
+    /// `PlayerEventType::ShieldWorn` (`1 + floor(damage)` per wearing block).
+    /// Drained by `HostedServer` every tick, like `armour_wear_hits`.
+    pub shield_wear: u16,
+    /// The flag was raised with no shield in the server's copy, and it has been
+    /// said so in the log (once per connection).
+    pub shield_flag_logged: bool,
     /// MP-D2b — ticks until this joiner's next one-shot mob interaction is
     /// taken (`EntityInteract`): the server's copy of the client's 8-tick
     /// right-click cooldown, less a little network jitter.
@@ -548,6 +564,10 @@ pub fn collect_player_state(sp: &ServerPlayer, idx: u32) -> crate::protocol::Pla
         use crate::protocol::player_flags as pf;
         anim_state = 0;
         flags = (flags & pf::SWINGING) | pf::SEATED;
+    } else if sp.shield_latch {
+        // Off-hand release (slice 5) — the raise the player's input reports,
+        // relayed as a flags bit for the guard pose (presentation only).
+        flags |= crate::protocol::player_flags::GUARDING;
     }
     crate::protocol::PlayerState {
         player_index: idx,
@@ -627,6 +647,10 @@ impl ServerPlayer {
             spawn_protection: 0,
             armour_points: 0,
             armour_wear_hits: 0,
+            shield_latch: false,
+            shield_ticks: 0,
+            shield_wear: 0,
+            shield_flag_logged: false,
             interact_cooldown: 0,
             attach_gen: 0,
             next_swing_tick: 0,
@@ -719,6 +743,9 @@ impl ServerPlayer {
         self.combat.just_died = false;
         self.dead_ticks = 0;
         self.armour_wear_hits = 0;
+        self.shield_ticks = 0;
+        self.shield_wear = 0;
+        self.combat.shield_window = 0;
         self.player.reset_fall();
         crate::spawn_protection::arm(self);
     }
@@ -793,6 +820,60 @@ pub fn sanitise_reported_health_change(delta: f32) -> f32 {
 }
 
 impl ServerPlayer {
+    /// Off-hand release (slice 5) — which hand of the server's copy of this
+    /// joiner's window holds a shield (the main hand's selected slot, then the
+    /// off-hand): the shield the joiner's raise counts for, and the one a block
+    /// wears. `None` for a local slot (its client runs its own shield) and for a
+    /// copy that holds none, though the client's flag is set.
+    pub fn shield_hand(&self) -> Option<crate::hands::Hand> {
+        if !self.server_simulated {
+            return None;
+        }
+        crate::shield::guard_hand(
+            self.inventory.hotbar_slot(self.hotbar_slot).map(|s| &s.item),
+            self.offhand.as_ref().map(|s| &s.item),
+        )
+    }
+
+    /// This joiner's raised shield for the one block rule: its server body's
+    /// position and yaw, the server's own raised count, and a shield in the
+    /// server's copy. No shield there means no protection, whatever the flag.
+    pub fn shield_guard(&self) -> Option<crate::shield::Guard> {
+        self.shield_hand()?;
+        Some(crate::shield::Guard {
+            victim: self.player.pos,
+            look: crate::shield::look_from_yaw(self.yaw),
+            raised_for: self.shield_ticks,
+        })
+    }
+
+    /// The shield's side of landing hits on this joiner.
+    pub fn shield_ctx(&self) -> crate::shield::ShieldCtx {
+        crate::shield::ShieldCtx::with(self.shield_guard())
+    }
+
+    /// What a block owes: the wear is queued for the joiner's client and the
+    /// server's copy (`announce_joiner_hits_and_kills`).
+    pub fn settle_shield(&mut self, tally: crate::shield::BlockTally) {
+        self.shield_wear = self.shield_wear.saturating_add(tally.wear);
+    }
+
+    /// One server tick of this joiner's raise: the count continues while the
+    /// flag is latched and the server's copy holds a shield, and drops to zero
+    /// otherwise (release, no shield, death). A raised flag with no shield in
+    /// the server's copy is logged once.
+    pub fn tick_shield(&mut self) {
+        let holds = self.shield_hand().is_some();
+        let raised = self.shield_latch && holds && self.is_present_and_alive();
+        if self.shield_latch && !holds && self.server_simulated && !self.shield_flag_logged {
+            self.shield_flag_logged = true;
+            log::info!(
+                "shield: a joiner raised a shield its server copy does not hold; it gets no protection (the inventory shadow may have drifted)"
+            );
+        }
+        self.shield_ticks = crate::shield::next_raised_ticks(self.shield_ticks, raised);
+    }
+
     /// Take one client input. The first waits in `pending_intent`; more
     /// arriving before the next tick queue behind it (bounded, oldest
     /// dropped). `GameServer::tick_player_physics` consumes one per tick, more
@@ -2559,6 +2640,7 @@ impl GameServer {
             }
             sp.interact_cooldown = sp.interact_cooldown.saturating_sub(1);
             sp.eat_cooldown = sp.eat_cooldown.saturating_sub(1);
+            sp.tick_shield();
             crate::window_ops::watch_table(sp, &self.world);
         }
 
@@ -2991,11 +3073,11 @@ impl GameServer {
         let mut events = events;
         for event in events.take() {
             match event {
-                SimEvent::Hit { slot, damage, cause, knock } => {
+                SimEvent::Hit { slot, damage, cause, knock, from } => {
                     if self.players.get(slot).is_some_and(|sp| sp.server_simulated) {
-                        self.land_hit_on_joiner(slot, damage, cause, knock);
+                        self.land_hit_on_joiner(slot, damage, cause, knock, Some(from));
                     } else if self.lent {
-                        self.sim_events.push(SimEvent::Hit { slot, damage, cause, knock });
+                        self.sim_events.push(SimEvent::Hit { slot, damage, cause, knock, from });
                     }
                 }
                 SimEvent::BabyBorn(mut baby) => {
@@ -3057,6 +3139,7 @@ impl GameServer {
             // (`combat::tick_mob_attacks`, `take_damage_with_armour_from`).
             if hostiles_attack && !crate::spawn_protection::shielded(sp) {
                 let pos = sp.player.pos;
+                let mut shield = sp.shield_ctx();
                 let landed = crate::combat::hostile_melee_tick(
                     &self.ecs,
                     pos,
@@ -3064,7 +3147,9 @@ impl GameServer {
                     &mut sp.combat,
                     sp.armour_points,
                     self.difficulty,
+                    &mut shield,
                 );
+                sp.settle_shield(shield.tally);
                 sp.armour_wear_hits = sp.armour_wear_hits.saturating_add(landed.len() as u8);
             }
             if let Some((raw, cause)) = crate::survival::contact_hazard(
@@ -3096,6 +3181,7 @@ impl GameServer {
         raw: f32,
         cause: crate::survival::DamageCause,
         knock: Vec3,
+        from: Option<Vec3>,
     ) -> bool {
         if self.play_mode.flies() {
             return false;
@@ -3111,6 +3197,18 @@ impl GameServer {
                 if crate::mob::mob_def(kind).category == crate::mob::MobCategory::Hostile)
         {
             return false;
+        }
+        // Off-hand release (slice 5) — a raised shield stops a hit that comes
+        // from its front half: no damage, no knockback, no armour wear. A hit
+        // with no attacker position (the Nostrich's kick-back, the player's own
+        // swing) is never blocked.
+        if let Some(from) = from {
+            let mut shield = sp.shield_ctx();
+            let blocked = sp.combat.shield_blocks(&mut shield, from, raw);
+            sp.settle_shield(shield.tally);
+            if blocked {
+                return false;
+            }
         }
         let damage = crate::armour::damage_after_armour(raw, sp.armour_points);
         let landed = sp.combat.take_damage_from(damage, cause);

@@ -73,6 +73,43 @@ pub fn block_takes_held_item(b: BlockId) -> bool {
     )
 }
 
+/// Blocks a right-click does something with besides placing against them (a
+/// screen, a toggle, a trade, a bell...): the chain's block arms. A shield is not
+/// raised against one (it is the click's other use), and a hand item that wants to
+/// place still places. Errs toward fewer entries: a block missing here only means
+/// the shield rises as the arm runs, since raising never stops the chain.
+pub fn block_has_use(b: BlockId) -> bool {
+    block_takes_held_item(b)
+        || crate::chest::ChestTier::from_block(b).is_some()
+        || crate::block_shape::is_toggleable(b)
+        || matches!(
+            b,
+            block::CRAFTING_TABLE
+                | block::FURNACE
+                | block::FURNACE_LIT
+                | block::DISPENSER
+                | block::DROPPER
+                | block::BED
+                | block::BLASTING_KEG
+                | block::DRAFTING_TABLE
+                | block::REPAIR_BENCH
+                | block::VENDOR_BLOCK
+                | block::TIP_JAR
+                | block::BAZAAR_BLOCK
+                | block::AUCTION_BLOCK
+                | block::BOUNTY_BOARD
+                | block::OAK_SIGN
+                | block::VILLAGE_BELL
+                | block::MARKET_BELL
+                | block::SITE_BOARD
+                | block::GRAVE
+                | block::COMMONS_STONE
+                | block::ARCHITECT_PLAQUE
+                | block::FEAST_MARKER
+                | block::LATENT_PRINT
+        )
+}
+
 /// The hand a right-click uses: the main hand unless its item has no use for
 /// `target` and the off-hand item does (Minecraft's rule). An empty main hand
 /// has no use. A block that takes the held item ([`block_takes_held_item`])
@@ -148,6 +185,10 @@ pub fn item_has_use(item: &Item, target: &UseTarget) -> bool {
             | ToolType::DraftingStamp => true,
             // Melee and digging tools have no right-click use.
             ToolType::Pickaxe | ToolType::Axe | ToolType::Sword | ToolType::Shovel => false,
+            // Off-hand release (slice 5) — a shield's use is the raise: what a click
+            // does when nothing else claims it. A mob, a chest, a door and the other
+            // block arms still win.
+            ToolType::Shield => !target.mob && !target.block.is_some_and(block_has_use),
         },
         Item::Material(m) => {
             if item.is_food() {
@@ -323,6 +364,48 @@ mod tests {
         let pick = tool(ToolType::Pickaxe);
         assert_eq!(use_hand(Some(&pick), None, &stone_target()), Hand::Main);
         assert_eq!(use_hand(None, None, &stone_target()), Hand::Main);
+    }
+
+    // --- Off-hand release (slice 5): which click raises a shield ---
+
+    #[test]
+    fn a_shield_in_the_off_hand_takes_a_click_the_main_item_has_no_use_for() {
+        let sword = tool(ToolType::Sword);
+        let shield = tool(ToolType::Shield);
+        assert_eq!(use_hand(Some(&sword), Some(&shield), &stone_target()), Hand::Off, "aimed at stone");
+        assert_eq!(use_hand(Some(&sword), Some(&shield), &UseTarget::default()), Hand::Off, "aimed at the air");
+    }
+
+    #[test]
+    fn a_shield_in_the_main_hand_keeps_the_click_in_the_open() {
+        let shield = tool(ToolType::Shield);
+        let torch = Item::Block(block::TORCH);
+        assert_eq!(use_hand(Some(&shield), Some(&torch), &UseTarget::default()), Hand::Main);
+        assert!(item_has_use(&shield, &stone_target()));
+    }
+
+    #[test]
+    fn a_chest_a_door_or_a_mob_under_the_crosshair_wins_over_the_shield() {
+        let shield = tool(ToolType::Shield);
+        let sword = tool(ToolType::Sword);
+        for b in [block::CHEST, block::CRAFTING_TABLE, block::OAK_DOOR, block::FURNACE, block::BED] {
+            let t = UseTarget { block: Some(b), ..UseTarget::default() };
+            assert!(!item_has_use(&shield, &t), "{b}: the block's own use wins");
+            assert_eq!(use_hand(Some(&sword), Some(&shield), &t), Hand::Main, "{b}: not routed to the shield");
+        }
+        let mob = UseTarget { mob: true, ..UseTarget::default() };
+        assert!(!item_has_use(&shield, &mob), "a mob wins");
+        assert_eq!(use_hand(Some(&sword), Some(&shield), &mob), Hand::Main);
+    }
+
+    #[test]
+    fn a_block_in_hand_places_and_leaves_the_shield_down() {
+        let torch = Item::Block(block::TORCH);
+        let shield = tool(ToolType::Shield);
+        // Aimed at a block: the torch has a place to go, so it keeps the click.
+        assert_eq!(use_hand(Some(&torch), Some(&shield), &stone_target()), Hand::Main);
+        // Aimed at the air the torch has nowhere to go: the shield rises.
+        assert_eq!(use_hand(Some(&torch), Some(&shield), &UseTarget::default()), Hand::Off);
     }
 
     #[test]

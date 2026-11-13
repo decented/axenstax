@@ -389,14 +389,18 @@ pub fn apply_mob_blast_damage(
 /// Apply computed blast hits `(player_index, raw_damage)` to player slots.
 /// Returns the indices whose hit actually LANDED (armour-gated, i-frame-gated)
 /// so the caller can run the on-owner-damage follow-ups (parrot dismount).
+/// Off-hand release (slice 5) — `center` is the blast's cell: a raised shield
+/// stops a blast whose centre is in its front half (no damage, so not landed).
 pub fn apply_player_blast_damage(
     players: &mut [crate::player_slot::PlayerSlot],
     hits: &[(usize, f32)],
+    center: (i32, i32, i32),
 ) -> Vec<usize> {
     let mut landed = Vec::new();
+    let c = glam::Vec3::new(center.0 as f32 + 0.5, center.1 as f32 + 0.5, center.2 as f32 + 0.5);
     for &(i, d) in hits {
         if let Some(slot) = players.get_mut(i)
-            && slot.take_damage_with_armour_from(d, crate::survival::DamageCause::Explosion)
+            && slot.take_hit_from(d, crate::survival::DamageCause::Explosion, c, glam::Vec3::ZERO)
         {
             landed.push(i);
         }
@@ -436,6 +440,16 @@ pub fn apply_joiner_blast_damage(
         let ep = (sp.player.pos.x, sp.player.pos.y, sp.player.pos.z);
         let los = line_of_sight_factor(c, ep, |x, y, z| registry.is_solid(world.get_block(x, y, z)));
         let raw = blast_damage(c, ep, BLAST_RADIUS, KEG_BLAST_DAMAGE, los);
+        // Off-hand release (slice 5) — a blast whose centre is in the front half
+        // of a raised shield is stopped (the server's own count and copy).
+        if raw > 0.0 {
+            let mut shield = sp.shield_ctx();
+            let blocked = sp.combat.shield_blocks(&mut shield, glam::Vec3::new(c.0, c.1, c.2), raw);
+            sp.settle_shield(shield.tally);
+            if blocked {
+                continue;
+            }
+        }
         if raw > 0.0
             && sp.combat.take_damage_from(
                 crate::armour::damage_after_armour(raw, sp.armour_points),
@@ -743,7 +757,7 @@ mod tests {
         let start = slot.combat.health;
         let mut players = vec![slot];
 
-        let landed = apply_player_blast_damage(&mut players, &[(0, 10.0)]);
+        let landed = apply_player_blast_damage(&mut players, &[(0, 10.0)], (0, 0, 0));
 
         assert_eq!(landed, vec![0], "the armoured hit still lands");
         assert!(
@@ -764,7 +778,7 @@ mod tests {
         slot.combat.dead = true;
         let mut players = vec![slot];
 
-        let landed = apply_player_blast_damage(&mut players, &[(0, 10.0)]);
+        let landed = apply_player_blast_damage(&mut players, &[(0, 10.0)], (0, 0, 0));
 
         assert!(landed.is_empty(), "a dead player takes no blast follow-ups");
     }

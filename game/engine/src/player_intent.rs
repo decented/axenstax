@@ -30,6 +30,14 @@ pub struct PlayerIntent {
     /// Sneak modifier.
     pub sneak: bool,
 
+    /// Off-hand release (slice 5) — a shield is raised: the body walks at sneak
+    /// speed and does not sprint, with none of sneak's edge protection, ladder
+    /// descent or crouch pose. Set per tick by the game loop from the raise
+    /// (`shield::next_raised_ticks`); a joiner's `InputPacket.shield_raised` fills
+    /// it on the server, so queued and replayed inputs simulate the same on both
+    /// copies.
+    pub guarding: bool,
+
     /// Jump held (for swimming up, flying up).
     pub jump_held: bool,
 
@@ -46,6 +54,12 @@ pub struct PlayerIntent {
 
     /// Place block / use (right click / right trigger).
     pub place_block: bool,
+
+    /// The use button is HELD (off-hand release, slice 5). Touch's Place button is
+    /// a one-frame `place_block` edge; this is its hold, so a shield can be raised
+    /// by holding it. Mouse and gamepad leave it false: their `place_block` is
+    /// already a hold.
+    pub use_held: bool,
 
     /// Toggle inventory/crafting UI.
     pub toggle_inventory: bool,
@@ -153,6 +167,7 @@ impl PlayerIntent {
             look_dy: 0.0,
             sprint: pkt.sprint,
             sneak: pkt.sneak,
+            guarding: pkt.shield_raised,
             jump_held: pkt.jump,
             // jump_pressed is an edge event. Treating the held flag as a press
             // every tick would mis-fire double-tap-jump → flight toggle while
@@ -162,6 +177,7 @@ impl PlayerIntent {
             toggle_flight: pkt.toggle_flight,
             break_block: pkt.break_block,
             place_block: pkt.place_block,
+            use_held: false,
             toggle_inventory: pkt.toggle_inventory,
             drop_item: pkt.drop_item,
             pause: false,
@@ -219,6 +235,7 @@ impl PlayerIntent {
         self.toggle_flight = self.toggle_flight || other.toggle_flight;
         self.break_block = self.break_block || other.break_block;
         self.place_block = self.place_block || other.place_block;
+        self.use_held = self.use_held || other.use_held;
         self.toggle_inventory = self.toggle_inventory || other.toggle_inventory;
         self.drop_item = self.drop_item || other.drop_item;
         self.pause = self.pause || other.pause;

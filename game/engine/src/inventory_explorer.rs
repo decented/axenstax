@@ -319,6 +319,8 @@ pub fn all_tool_combos() -> Vec<(ToolType, ToolMaterial)> {
     out.push((ToolType::Slingshot, ToolMaterial::Wood));
     out.push((ToolType::Eraser, ToolMaterial::Wood));
     out.push((ToolType::DraftingStamp, ToolMaterial::Wood));
+    // Off-hand release (slice 5) — the Shield.
+    out.push((ToolType::Shield, ToolMaterial::Wood));
     out
 }
 
@@ -812,7 +814,8 @@ mod tests {
         // 5 tiered tool types × 5 tiers + Bow(Wood) + FlintAndSteel(Iron)
         // + Shears(Iron) + FishingRod(Wood) + Slingshot/Eraser/DraftingStamp
         // (Wood) = 32 (2026-06-18: +3 single-tier utility tools).
-        assert_eq!(combos.len(), 32);
+        // 33 as of the off-hand release (slice 5): + Shield(Wood).
+        assert_eq!(combos.len(), 33);
         assert!(combos.contains(&(ToolType::Pickaxe, ToolMaterial::Satori)));
         assert!(combos.contains(&(ToolType::Bow, ToolMaterial::Wood)));
         assert!(combos.contains(&(ToolType::FlintAndSteel, ToolMaterial::Iron)));
@@ -821,6 +824,7 @@ mod tests {
         assert!(combos.contains(&(ToolType::Slingshot, ToolMaterial::Wood)));
         assert!(combos.contains(&(ToolType::Eraser, ToolMaterial::Wood)));
         assert!(combos.contains(&(ToolType::DraftingStamp, ToolMaterial::Wood)));
+        assert!(combos.contains(&(ToolType::Shield, ToolMaterial::Wood)));
         // Single-tier tools should not appear in other tiers.
         assert!(!combos.contains(&(ToolType::Bow, ToolMaterial::Iron)));
         assert!(!combos.contains(&(ToolType::FlintAndSteel, ToolMaterial::Diamond)));

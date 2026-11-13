@@ -70,7 +70,17 @@ pub enum ToolType {
     /// capture it as a Plan item. Reusable: the use path does NOT call
     /// use_tool(), so durability is never decremented in practice.
     DraftingStamp,
+    /// Off-hand release (slice 5) — the Shield. Single-tier (`ToolMaterial::Wood`
+    /// by convention, like the Slingshot); held in either hand and raised by a
+    /// held right-click, it blocks an attack from the front (`shield.rs`).
+    /// APPEND ONLY: saves store the variant index (wire tool byte 12).
+    Shield,
 }
+
+/// Off-hand release (slice 5) — Shield durability. 336 uses, Minecraft's
+/// number; one durability per block plus one per whole point of damage blocked
+/// (`shield::wear_for`).
+pub const SHIELD_DURABILITY: u16 = 336;
 
 /// Single-tier durability for `FlintAndSteel`. Mirrors Minecraft's 65
 /// uses; lives separate from `max_durability` so the per-tier ladder
@@ -122,6 +132,7 @@ impl Tool {
             ToolType::Slingshot => SLINGSHOT_DURABILITY,
             ToolType::Eraser => ERASER_DURABILITY,
             ToolType::DraftingStamp => DRAFTING_STAMP_DURABILITY,
+            ToolType::Shield => SHIELD_DURABILITY,
             _ => max_durability(material),
         };
         Self { tool_type, material, durability }
@@ -142,6 +153,7 @@ impl Tool {
             ToolType::Slingshot => SLINGSHOT_DURABILITY,
             ToolType::Eraser => ERASER_DURABILITY,
             ToolType::DraftingStamp => DRAFTING_STAMP_DURABILITY,
+            ToolType::Shield => SHIELD_DURABILITY,
             _ => max_durability(self.material),
         }
     }
@@ -264,6 +276,8 @@ impl Tool {
             (_, ToolType::Eraser) => "Eraser",
             // Blueprint feature — Drafting Stamp, single-tier.
             (_, ToolType::DraftingStamp) => "Drafting Stamp",
+            // Off-hand release (slice 5) — the Shield, single-tier.
+            (_, ToolType::Shield) => "Shield",
         }
     }
 
@@ -1976,6 +1990,26 @@ pub fn match_recipe(grid: &[[CraftSlot; 3]; 3]) -> Option<ItemStack> {
             && grid[min_r + 2][min_c + 2] == stick;
         if ring_sticks && grid[min_r + 1][min_c + 1] == leather {
             return Some(ItemStack::new_block(block::ITEM_FRAME, 1));
+        }
+
+        // Off-hand release (slice 5) — the Shield, Minecraft's Y at the workbench:
+        //   planks  iron  planks
+        //   planks planks planks
+        //   .      planks .
+        // Any plank species. Nothing else has an iron ingot over a plank row
+        // and a lone plank foot, so no other 3x3 arm can claim it.
+        {
+            let any_planks = |r: usize, c: usize| {
+                matches!(grid[min_r + r][min_c + c], CraftSlot::Block(b) if block::is_any_planks(b))
+            };
+            let iron_top = grid[min_r][min_c + 1] == CraftSlot::Material(MaterialId::IronIngot);
+            let board = any_planks(0, 0) && any_planks(0, 2)
+                && any_planks(1, 0) && any_planks(1, 1) && any_planks(1, 2)
+                && any_planks(2, 1);
+            let corners_clear = grid[min_r + 2][min_c] == e && grid[min_r + 2][min_c + 2] == e;
+            if iron_top && board && corners_clear {
+                return Some(ItemStack::new_tool(Tool::new(ToolType::Shield, ToolMaterial::Wood)));
+            }
         }
 
         // Living world Tier 2 S7 — Site Board: a column of three planks (any
@@ -4015,6 +4049,60 @@ mod tests {
         g[0][1] = torch;
         g[1][0] = iron;
         assert!(!lantern(&g), "a 2x2 shape");
+    }
+
+    /// Off-hand release (slice 5) — the Shield, Minecraft's Y at the workbench.
+    fn shield_grid(p: CraftSlot, iron: CraftSlot) -> [[CraftSlot; 3]; 3] {
+        let mut g = empty_grid();
+        g[0] = [p, iron, p];
+        g[1] = [p, p, p];
+        g[2][1] = p;
+        g
+    }
+
+    fn is_shield(s: Option<ItemStack>) -> bool {
+        matches!(s, Some(ItemStack { item: Item::Tool(t), count: 1 }) if t.tool_type == ToolType::Shield && t.durability == SHIELD_DURABILITY)
+    }
+
+    #[test]
+    fn planks_and_an_iron_ingot_in_a_y_make_one_shield_at_the_workbench() {
+        let planks = CraftSlot::Block(block::OAK_PLANKS);
+        let iron = CraftSlot::Material(MaterialId::IronIngot);
+        assert!(is_shield(match_recipe(&shield_grid(planks, iron))), "the Y shape");
+        // Any plank species.
+        assert!(is_shield(match_recipe(&shield_grid(CraftSlot::Block(block::BIRCH_PLANKS), iron))));
+        assert!(is_shield(match_recipe(&shield_grid(CraftSlot::Block(block::DARK_OAK_PLANKS), iron))));
+        // Not with the ingot elsewhere, a missing plank, the wrong ingot or a filled foot corner.
+        let mut g = shield_grid(planks, iron);
+        g[0][1] = planks;
+        g[1][1] = iron;
+        assert!(!is_shield(match_recipe(&g)), "the ingot belongs top middle");
+        let mut g = shield_grid(planks, iron);
+        g[2][1] = CraftSlot::Empty;
+        assert!(!is_shield(match_recipe(&g)), "the foot plank is needed");
+        let mut g = shield_grid(planks, iron);
+        g[2][0] = planks;
+        assert!(!is_shield(match_recipe(&g)), "the corners of the foot row stay empty");
+        assert!(!is_shield(match_recipe(&shield_grid(planks, CraftSlot::Material(MaterialId::CopperIngot)))), "iron, not copper");
+        // The shape needs three rows and three columns, so the 2x2 player grid cannot hold it.
+        let mut small = empty_grid();
+        small[0] = [planks, iron, CraftSlot::Empty];
+        small[1] = [planks, planks, CraftSlot::Empty];
+        assert!(!is_shield(match_recipe(&small)));
+        // Placed anywhere the bounding box allows (the grid is exactly 3x3): shifted down
+        // is out of range, so only the one placement exists.
+    }
+
+    #[test]
+    fn the_shield_card_needs_the_workbench_and_its_example_crafts_it() {
+        let cards = crate::crafting_catalogue::all_cards();
+        let card = cards
+            .iter()
+            .find(|c| matches!(&c.output.item, Item::Tool(t) if t.tool_type == ToolType::Shield))
+            .expect("a shield card");
+        assert_eq!(card.station, crate::crafting_catalogue::CraftStation::Workbench, "three wide and three tall");
+        assert_eq!(card.output.count, 1);
+        assert!(is_shield(match_recipe(&card.example_grid)));
     }
 
     #[test]

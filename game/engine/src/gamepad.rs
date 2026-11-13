@@ -234,6 +234,8 @@ pub fn state_to_intent(gp: &GamepadState, dt: f32) -> Option<PlayerIntent> {
         toggle_flight: gp.toggle_flight,
         break_block: gp.right_trigger > 0.5, // RT = break/punch (Minecraft standard)
         place_block: gp.left_trigger > 0.5,  // LT = place block
+        use_held: false, // the trigger is already a hold (`place_block`); `use_held` is touch's
+        guarding: false, // set per tick by the game loop (a raised shield)
         toggle_inventory: gp.b_pressed,
         drop_item: gp.dpad_down, // D-pad down = drop one (Bedrock standard); in
         // menus the d-pad drives `inject_gamepad_nav` instead, and the

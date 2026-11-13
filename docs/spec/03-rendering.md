@@ -1532,6 +1532,34 @@ third-person avatar hand) and on the ground (local and server-broadcast drops).
   guess. `held_tool_model::parts` is an exhaustive `match`: the shield
   (`ToolType::Shield`, off-hand plan slice 5) fails to compile there until it has
   a shape.
+- **The shield's look and poses (off-hand plan slice 5).** `ToolType::Shield` is a board of four
+  planks (the oak planks tile's light and dark texels, flat colour like every held tool box) with an
+  iron rim round it and an iron boss on its +Z face, about 0.5 wide and 0.62 tall, centred on the
+  origin: existing layers only, `texture_count()` stays 512 (a test pins it). The board lies in the
+  model's X-Y plane and is symmetric, so both hands hold the same mesh; `shield_pose.rs` puts it
+  where each view needs it.
+  - *First person, lowered:* the generic upright placement, the board facing the camera above the
+    fist (the layout specs run it for both hands at all four aspects). *Raised*
+    (`shield_pose::raise_first_person`): the shield and the arm that holds it come in toward the
+    middle of the view and up; the board is turned 18 degrees toward the centre and leans in 8, and
+    the pair is shifted until the board's edge nearest the centre is 0.12 NDC from it and its middle
+    is at -0.10 NDC high, so it covers the lower middle of the view (at least 30% of its height)
+    and the crosshair's centre +-5% stays clear at every aspect. The shift is computed per aspect (a
+    phone in portrait is narrow, so the same board is wider on screen) and scaled by the raise's
+    progress (`shield_ticks / RAISE_TICKS`), so the pose eases in over the five ticks. A raised
+    shield swings no hand.
+  - *Third person (the self-avatar and every peer),* in the avatar's model space (arms at +-X, the
+    front toward -Z): **lowered**, worn on the outside of the forearm with the boss facing out;
+    **raised** (the avatar's `GUARDING` flag, `player_flags` 0x10, with a shield in the hand
+    `shield::guard_hand` names): that arm lifts forward about its shoulder by 1.25 rad
+    (`shield_pose::GUARD_ARM_ANGLE`, over a swing) and the board stands in front of the hand,
+    boss forward, at chest height, a little toward the body's centre line. The flag with no shield
+    in either hand lifts nothing.
+  - *The inventory icon* is painted, not a tier tile and a letter: `hud_ui::paint_shield_icon`
+    lays the oak planks layer in a board a little taller than wide with an iron-grey rim and a
+    round boss; the hotbar, the off-hand box and the inventory screen's slots share it (the two
+    places that draw a tool as its tier colour and a letter: the "Sd" letter arm is only the
+    exhaustive match's fallback).
 - **Held materials and the polished sword and rod (2026-11-13).** A material in
   the hand (bread, a stick, an ingot, ...) is the flat cut-out sprite of its icon,
   the path a held torch takes (`item_model::held_item_mesh`, `HELD_MATERIAL_WIDTH` 0.45

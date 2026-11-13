@@ -546,6 +546,10 @@ impl InputState {
             toggle_flight: self.toggle_flight,
             break_block: self.left_held,
             place_block: self.right_held,
+            // Mouse: `place_block` is already a hold; `use_held` is touch's. Not guarding yet
+            // (the game loop sets it each tick from the raise).
+            use_held: false,
+            guarding: false,
             toggle_inventory: self.inventory_toggle,
             drop_item: self.drop_item,
             pause: false, // Escape is handled in main.rs event loop, not here

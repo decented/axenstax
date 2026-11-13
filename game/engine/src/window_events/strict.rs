@@ -47,6 +47,7 @@ fn marker_event(event: &WindowEvent, registry: &crate::block::BlockRegistry) -> 
         },
         WindowEvent::WearArmour { hits } => WindowEvent::WearArmour { hits: *hits },
         WindowEvent::WearWeapon { hand, slot, tool } => WindowEvent::WearWeapon { hand: *hand, slot: *slot, tool: *tool },
+        WindowEvent::WearShield { slot, hand, amount } => WindowEvent::WearShield { slot: *slot, hand: *hand, amount: *amount },
         WindowEvent::ContainerView(_) | WindowEvent::PackView => return Ok(None),
         #[cfg(not(target_arch = "wasm32"))]
         WindowEvent::PersonalSync(_) => return Ok(None),
@@ -131,7 +132,7 @@ pub fn admit_staged(sp: &ServerPlayer, registry: &crate::block::BlockRegistry, r
         let before = prefix.slots();
         let expected = apply_marker_event(&mut prefix, &event)?;
         let after = prefix.slots();
-        if matches!(event, WindowEvent::WearWeapon { .. } | WindowEvent::WearArmour { .. }) {
+        if matches!(event, WindowEvent::WearWeapon { .. } | WindowEvent::WearArmour { .. } | WindowEvent::WearShield { .. }) {
             backing.observe_authorised_wear(&before, &after);
         }
         backing.observe_prefix(&after);
@@ -229,7 +230,7 @@ fn stage_strict_effects_on(sp: &ServerPlayer, registry: &crate::block::BlockRegi
         let previous = prefix.slots();
         let expected = apply_marker_event(&mut prefix, &event)?;
         let after = prefix.slots();
-        if matches!(event, WindowEvent::WearWeapon { .. } | WindowEvent::WearArmour { .. }) { backing.observe_authorised_wear(&previous, &after); }
+        if matches!(event, WindowEvent::WearWeapon { .. } | WindowEvent::WearArmour { .. } | WindowEvent::WearShield { .. }) { backing.observe_authorised_wear(&previous, &after); }
         backing.observe_prefix(&after);
         if apply_marker_event(&mut candidate, &event)? != expected { return Err(StrictStageError::Fit); }
     }
@@ -292,7 +293,7 @@ fn event_heap_bytes(event: &WindowEvent) -> Result<usize, StrictStageError> {
     match event {
         WindowEvent::Grant(stack) | WindowEvent::RewardGrant { stack, .. } => item_bytes(&stack.item),
         WindowEvent::Take { item, .. } => item_bytes(item),
-        WindowEvent::WearArmour { .. } | WindowEvent::WearWeapon { .. } | WindowEvent::PackView => Ok(0),
+        WindowEvent::WearArmour { .. } | WindowEvent::WearWeapon { .. } | WindowEvent::WearShield { .. } | WindowEvent::PackView => Ok(0),
         // These require their own complete typed allocation reservation. Never
         // treat unknown correction/view allocations as a zero-byte event.
         WindowEvent::Replace { .. } | WindowEvent::PackCanonical { .. } => Err(StrictStageError::Replacement),

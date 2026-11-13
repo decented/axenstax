@@ -94,8 +94,10 @@ pub struct LocalSeat {
 #[derive(Clone, Debug, PartialEq)]
 pub enum SimEvent {
     /// A species attack (a bee sting, a goat's gore, a shark bite) on the body
-    /// at `slot`: `damage` before armour, `knock` added to its velocity.
-    Hit { slot: usize, damage: f32, cause: crate::survival::DamageCause, knock: Vec3 },
+    /// at `slot`: `damage` before armour, `knock` added to its velocity. `from`
+    /// is the attacker's position (off-hand release, slice 5): the direction a
+    /// raised shield judges, a blocked hit does neither damage nor knockback.
+    Hit { slot: usize, damage: f32, cause: crate::survival::DamageCause, knock: Vec3, from: Vec3 },
     /// The hostile mobs in melee reach of a local body after this tick's
     /// physics (`combat::hostiles_in_reach`): landed on its `PlayerSlot` by
     /// its own client (armour, i-frames, wear, the pets' revenge).
@@ -328,6 +330,7 @@ pub fn species(
             damage: scale_mob_damage(crate::species_ai::BEE_STING_DAMAGE, difficulty),
             cause: DamageCause::Mob(crate::mob::MobType::Bee),
             knock: Vec3::ZERO,
+            from: sting.bee_pos,
         });
         // The bee dies after stinging (Minecraft parity).
         let _ = ecs.despawn(sting.bee);
@@ -344,6 +347,7 @@ pub fn species(
                 crate::species_ai::GOAT_KNOCKBACK_UP,
                 push.z * crate::species_ai::GOAT_KNOCKBACK,
             ),
+            from: imp.goat_pos,
         });
     }
     // Animals Wave 2 — horse herd-wander (skips ridden).
@@ -379,6 +383,7 @@ pub fn species(
             damage: scale_mob_damage(crate::species_ai::SHARK_BITE_DAMAGE, difficulty),
             cause: DamageCause::Mob(crate::mob::MobType::Shark),
             knock: Vec3::new(push.x * 0.4, 0.0, push.z * 0.4),
+            from: bite.shark_pos,
         });
     }
     for eff in crate::species_ai::dispatch_bears(ecs, world, &hostile_positions, tick) {

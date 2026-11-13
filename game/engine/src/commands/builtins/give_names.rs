@@ -406,6 +406,8 @@ pub(super) static BOW_NAMES: &[(&[&str], (ToolType, ToolMaterial))] = &[
     (&["flint_and_steel", "flintandsteel", "lighter"], (ToolType::FlintAndSteel, ToolMaterial::Iron)),
     // Rubber feature — single-tier tools.
     (&["slingshot", "sling"], (ToolType::Slingshot, ToolMaterial::Wood)),
+    // Off-hand release (slice 5) — the Shield.
+    (&["shield"], (ToolType::Shield, ToolMaterial::Wood)),
     (&["eraser", "rubber_eraser"], (ToolType::Eraser, ToolMaterial::Wood)),
     // Blueprint feature — Drafting Stamp.
     (&["drafting_stamp", "stamp"], (ToolType::DraftingStamp, ToolMaterial::Wood)),

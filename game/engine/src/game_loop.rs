@@ -2558,8 +2558,12 @@ impl super::GameState {
         // Live sneak captured this tick (see `local_sneak`); slot.input is
         // vestigial so it can't be read here. Default false if absent.
         let sneaking = self.local_sneak.get(&idx).copied().unwrap_or(false);
-        let (anim_state, flags) =
+        let (anim_state, mut flags) =
             crate::server::player_anim_fields(speed, on_ground, sneaking, acting);
+        // Off-hand release (slice 5) — the guard pose, from this body's own raise.
+        if slot.shield_ticks > 0 {
+            flags |= crate::protocol::player_flags::GUARDING;
+        }
         crate::protocol::PlayerState {
             player_index: idx as u32,
             x: slot.player.pos.x,
@@ -3261,6 +3265,7 @@ impl super::GameState {
         self.local_swing.clear();
         self.local_off_swing.clear();
         self.local_off_use.clear();
+        self.local_guard.clear();
         self.local_sneak.clear();
         self.entity_was_in_water.clear();
         // The explored-map cache is keyed by chunk column only, so world B
@@ -4605,6 +4610,33 @@ impl super::GameState {
             .is_none_or(|s| self.joiner_actions.can_spend(&p.inventory, &p.crafting_ui, &p.offhand, &s.item, 1))
     }
 
+    /// What player `pidx` is aiming at and how they are, for the hand rule
+    /// ([`crate::hands::use_hand`]): the block under the crosshair, a mob under it
+    /// (a joined client asks its mirrored mobs), and what a click could use.
+    fn use_target(&self, pidx: usize) -> crate::hands::UseTarget {
+        let p = &self.players[pidx];
+        crate::hands::UseTarget {
+            block: p.target_block.map(|b| self.world.get_block(b[0], b[1], b[2])),
+            // A joined client's mobs live in the render-only mirror, not in
+            // `self.ecs`: ask it the way the joined mob arm finds its mob, so the
+            // hand rule sees the same mob in local play and joined (off-hand
+            // review M2).
+            mob: if self.joined() {
+                self.joined_mob_under_crosshair(pidx).is_some()
+            } else {
+                matches!(
+                    crate::combat::find_attack_target(&self.ecs, p.player.eye_pos(), p.camera.forward()),
+                    Some((_, Some(_)))
+                )
+            },
+            wants_to_eat: p.combat.hunger < p.combat.max_hunger || p.combat.health < p.combat.max_health,
+            arrows: p.inventory.count_material(crate::item::MaterialId::Arrow) > 0
+                || crate::shot::offhand_has_ammo(crate::protocol::ShotWeapon::Bow, p.offhand.as_ref()),
+            rubber_balls: p.inventory.count_material(crate::item::MaterialId::RubberBall) > 0
+                || crate::shot::offhand_has_ammo(crate::protocol::ShotWeapon::Slingshot, p.offhand.as_ref()),
+        }
+    }
+
     /// Does this client's block edit (and its `mined` tag) reach the server it
     /// joined? True only when joined AND native: a joined client's edits and
     /// mined tags are queued for the server on native only (L-web-edit, the
@@ -4988,11 +5020,10 @@ impl super::GameState {
         use crate::sim_mobs::SimEvent;
         for event in events {
             match event {
-                SimEvent::Hit { slot, damage, cause, knock } => {
+                SimEvent::Hit { slot, damage, cause, knock, from } => {
                     let mut landed = false;
                     if let Some(p) = self.players.get_mut(slot) {
-                        landed = p.take_damage_with_armour_from(damage, cause);
-                        p.player.velocity += knock;
+                        landed = p.take_hit_from(damage, cause, from, knock);
                     }
                     if landed {
                         self.dismount_parrots_on_owner_damage(slot);
@@ -7185,6 +7216,7 @@ impl super::GameState {
                 intent.toggle_flight = false;
                 intent.break_block = false;
                 intent.place_block = false;
+                intent.use_held = false;
                 intent.drop_item = false;
                 intent.pick_block = false;
                 // Gamepad X is the crafting UI's "split stack" button — without
@@ -7194,6 +7226,14 @@ impl super::GameState {
                 // pre-pass); don't ALSO toggle the F3 debug overlay behind it.
                 intent.toggle_debug = false;
             }
+            // Off-hand release (slice 5) — a raised shield: the frame path latched
+            // that this held use button has a shield to raise; it holds only while
+            // the button does (a menu or a released cursor drops it).
+            intent.guarding = self.local_guard.contains(&i)
+                && (intent.place_block || intent.use_held)
+                && intent.cursor_captured
+                && !self.players[i].combat.dead
+                && !self.players[i].seated();
         }
 
         // Stash player 0's final (post-gate) intent so network_send_input can
@@ -7211,6 +7251,10 @@ impl super::GameState {
         for (i, intent) in intents.iter().enumerate() {
             if i >= self.players.len() { break; }
             let slot = &mut self.players[i];
+            // Off-hand release (slice 5) — count the raise: consecutive ticks the
+            // shield has been held up (it blocks from `shield::RAISE_TICKS`).
+            let raised = intent.guarding && slot.shield_guard().is_some();
+            slot.shield_ticks = crate::shield::next_raised_ticks(slot.shield_ticks, raised);
             // Ride-along — a seated player is carried by its mount, not by
             // walk/gravity physics. Skip the physics tick entirely; the
             // post-physics follow (`apply_riding_follow`) pins their eye to
@@ -7270,11 +7314,19 @@ impl super::GameState {
             if i >= self.players.len() { break; }
             // A right-click that routes to the off-hand swings the left hand
             // only; everything else swings the right (`hands::swing_hands`).
+            // Off-hand release (slice 5) — raising a shield is a held pose, not a
+            // use swing: the click that raises it swings neither hand.
+            let guarding = intent.guarding;
             let (main_acts, off_acts) = crate::hands::swing_hands(
                 intent.break_block,
-                intent.place_block,
+                intent.place_block && !guarding,
                 self.local_off_use.contains(&i),
             );
+            // A shield that blocked since the last tick clacks (once, however
+            // many blocked): a wearing block on a local body.
+            if self.players[i].take_shield_clacks() > 0 {
+                self.audio.play_place();
+            }
             let entry = self.local_swing.entry(i).or_insert(0);
             if main_acts && intent.cursor_captured && *entry == 0 {
                 *entry = crate::entity_model::SWING_TICKS;
@@ -13697,29 +13749,32 @@ impl super::GameState {
                 crate::hands::Hand::Main
             } else {
                 let p = &self.players[pidx];
-                let target = crate::hands::UseTarget {
-                    block: p.target_block.map(|b| self.world.get_block(b[0], b[1], b[2])),
-                    // A joined client's mobs live in the render-only mirror,
-                    // not in `self.ecs`: ask it the way the joined mob arm
-                    // below finds its mob, so the hand rule sees the same mob
-                    // in local play and joined (off-hand review M2).
-                    mob: if self.joined() {
-                        self.joined_mob_under_crosshair(pidx).is_some()
-                    } else {
-                        matches!(
-                            crate::combat::find_attack_target(&self.ecs, p.player.eye_pos(), p.camera.forward()),
-                            Some((_, Some(_)))
-                        )
-                    },
-                    wants_to_eat: p.combat.hunger < p.combat.max_hunger || p.combat.health < p.combat.max_health,
-                    arrows: p.inventory.count_material(crate::item::MaterialId::Arrow) > 0
-                        || crate::shot::offhand_has_ammo(crate::protocol::ShotWeapon::Bow, p.offhand.as_ref()),
-                    rubber_balls: p.inventory.count_material(crate::item::MaterialId::RubberBall) > 0
-                        || crate::shot::offhand_has_ammo(crate::protocol::ShotWeapon::Slingshot, p.offhand.as_ref()),
-                };
+                let target = self.use_target(pidx);
                 let (main, off) = p.hands_items();
                 crate::hands::use_hand(main, off, &target)
             };
+            // Off-hand release (slice 5) — a held use button raises a shield when
+            // the click has no other use: the hand `use_hand` picks holds a shield.
+            // The chain below still runs (a shield has no arm to take the click),
+            // so raising is a latch the tick turns into `guarding`, never a swallow.
+            let use_down = (intent.place_block || intent.use_held) && intent.cursor_captured;
+            let raise = use_down && !self.players[pidx].combat.dead && {
+                let (main, off) = self.players[pidx].hands_items();
+                (crate::shield::is_shield(main) || crate::shield::is_shield(off)) && {
+                    let target = self.use_target(pidx);
+                    let (main, off) = self.players[pidx].hands_items();
+                    let picked = crate::hands::use_hand(main, off, &target);
+                    crate::shield::is_shield(match picked {
+                        crate::hands::Hand::Main => main,
+                        crate::hands::Hand::Off => off,
+                    })
+                }
+            };
+            if raise {
+                self.local_guard.insert(pidx);
+            } else {
+                self.local_guard.remove(&pidx);
+            }
             // The swing arming in `tick` reads this: a held right-click that
             // routes to the off-hand swings the left hand (first person).
             if intent.place_block && intent.cursor_captured && hand == crate::hands::Hand::Off {
@@ -17978,8 +18033,23 @@ impl super::GameState {
                 // is narrow), so the aspect goes to the builder and the camera.
                 let aspect = screen.viewport.width as f32
                     / screen.viewport.height.max(1) as f32;
+                // Off-hand release (slice 5) — a raised shield lifts in front: its
+                // hand (the main hand's shield first) and how far the raise has
+                // come, eased by the count of raised ticks.
+                let guard = if slot.shield_ticks > 0 {
+                    let (main_item, off_item) = slot.hands_items();
+                    crate::shield::guard_hand(main_item, off_item).map(|h| {
+                        let side = match h {
+                            crate::hands::Hand::Main => crate::viewmodel::HandSide::Right,
+                            crate::hands::Hand::Off => crate::viewmodel::HandSide::Left,
+                        };
+                        (side, (slot.shield_ticks as f32 / crate::shield::RAISE_TICKS as f32).min(1.0))
+                    })
+                } else {
+                    None
+                };
                 let (mut arm_verts, mut held_verts) = crate::viewmodel::build_viewmodel_hands(
-                    held, off_held, bob, swing, swing_off,
+                    held, off_held, bob, swing, swing_off, guard,
                     crate::pure_helpers::skin_layer_of(pidx),
                     &self.registry,
                     // Your own hand follows YOUR skin's Arms setting.
@@ -22480,7 +22550,7 @@ impl super::GameState {
         // back too, and is a no-op) — enter the death screen, whose Respawn
         // asks the server. `Respawned`: it put us at the spawn point it holds;
         // stand there. Creative bodies never die (the death loop agrees).
-        let mut armour_worn: Vec<(u8, u32)> = Vec::new();
+        let mut armour_worn: Vec<(crate::window_events::Wear, u32)> = Vec::new();
         if !self.players.is_empty() {
             for ev in &pending_life_events {
                 match *ev {
@@ -22511,7 +22581,12 @@ impl super::GameState {
                     // applied in arrival order with the others
                     // (`apply_window_inbox`).
                     crate::remote_client::OwnLifeEvent::ArmourWorn(hits, event) => {
-                        armour_worn.push((hits, event));
+                        armour_worn.push((crate::window_events::Wear::Armour(hits), event));
+                    }
+                    // Off-hand release (slice 5) — the blocks the server's rule
+                    // made with our raised shield wear it, in the same order.
+                    crate::remote_client::OwnLifeEvent::ShieldWorn { slot, hand, amount, event } => {
+                        armour_worn.push((crate::window_events::Wear::Shield { slot, hand, amount }, event));
                     }
                     crate::remote_client::OwnLifeEvent::Respawned { at, respawns } => {
                         if let Some(client) = self.remote_client.as_mut() && !client.apply_actor_respawn(respawns) { continue; }
@@ -23957,6 +24032,13 @@ impl super::GameState {
                         self.players[0].wear_armour();
                     }
                 }
+                // Off-hand release (slice 5) — the same wear the server's copy makes
+                // (`shield::wear`), and the clack the block makes.
+                crate::window_events::InboxItem::ShieldWorn { slot, hand, amount, .. } => {
+                    let p = &mut self.players[0];
+                    crate::shield::wear(&mut p.inventory, slot as usize, &mut p.offhand, hand, amount);
+                    self.audio.play_place();
+                }
             }
             if let Some(client) = self.remote_client.as_mut() {
                 client.note_window_event(event);
@@ -24100,6 +24182,9 @@ impl super::GameState {
             off_kind: off_wire.kind,
             off_id: off_wire.id,
             off_tool: off_wire.tool,
+            // v101 — the raise the tick latched on this input's intent (a shield
+            // held up): the server slows the body by it and counts the raise.
+            shield_raised: self.net_local_intent.guarding,
         };
 
         // Serialize once, send to whichever transport is active

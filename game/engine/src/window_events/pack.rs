@@ -102,7 +102,7 @@ pub fn admit_pack_staged(sp: &ServerPlayer, registry: &crate::block::BlockRegist
         let before = original.slots();
         let expected = fold(&mut original, &mut original_debt, &event);
         let after = original.slots();
-        if matches!(&*event, WindowEvent::WearWeapon { .. } | WindowEvent::WearArmour { .. }) {
+        if matches!(&*event, WindowEvent::WearWeapon { .. } | WindowEvent::WearArmour { .. } | WindowEvent::WearShield { .. }) {
             backing.observe_authorised_wear(&before, &after);
         }
         backing.observe_prefix(&after);
@@ -157,7 +157,7 @@ fn event_heap_bytes(event: &WindowEvent) -> Result<usize, super::strict::StrictS
         WindowEvent::Replace { window, debt, .. } | WindowEvent::PackCanonical { window, debt, .. } => replace_heap_bytes(window, debt),
         WindowEvent::Grant(stack) | WindowEvent::RewardGrant { stack, .. } => item_heap_bytes(&stack.item),
         WindowEvent::Take { item, .. } => item_heap_bytes(item),
-        WindowEvent::WearArmour { .. } | WindowEvent::WearWeapon { .. } | WindowEvent::PackView => Ok(0),
+        WindowEvent::WearArmour { .. } | WindowEvent::WearWeapon { .. } | WindowEvent::WearShield { .. } | WindowEvent::PackView => Ok(0),
         #[cfg(not(target_arch = "wasm32"))]
         WindowEvent::PersonalSync(snapshot) => snapshot.bytes.capacity().checked_mul(2).and_then(|bytes| bytes.checked_add(2 * std::mem::size_of::<crate::protocol::PersonalSnapshot>())).ok_or(StrictStageError::Fit),
         WindowEvent::ContainerView(view) => view_heap_bytes(view, &item_heap_bytes),

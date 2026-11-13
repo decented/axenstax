@@ -1806,6 +1806,9 @@ fn draw_item_slot(
                     );
                 }
             }
+            Item::Tool(tool) if tool.tool_type == crate::crafting::ToolType::Shield => {
+                crate::hud_ui::paint_shield_icon(ui, icon_rect, egui_integration);
+            }
             Item::Tool(tool) => {
                 let color = stack.item.color(registry);
                 let tool_color = egui::Color32::from_rgb(
@@ -1827,6 +1830,7 @@ fn draw_item_slot(
                     crate::crafting::ToolType::Slingshot => "Sl",
                     crate::crafting::ToolType::Eraser => "Er",
                     crate::crafting::ToolType::DraftingStamp => "Ds",
+                    crate::crafting::ToolType::Shield => "Sd",
                 };
                 ui.painter().text(
                     icon_rect.left_top() + egui::vec2(2.0, 2.0),

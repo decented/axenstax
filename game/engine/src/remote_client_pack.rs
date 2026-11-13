@@ -218,7 +218,7 @@ mod tests {
             assert!(remote.pack_request_pending(), "physical mutation still waits for its applied fence");
             let mut inbox = crate::window_events::WindowInbox::default();
             let grants = std::mem::take(&mut remote.pending_grants);
-            let armour = std::mem::take(&mut remote.pending_life_events).into_iter().filter_map(|event| match event { super::super::OwnLifeEvent::ArmourWorn(hits, number) => Some((hits, number)), _ => None }).collect();
+            let armour = std::mem::take(&mut remote.pending_life_events).into_iter().filter_map(|event| match event { super::super::OwnLifeEvent::ArmourWorn(hits, number) => Some((crate::window_events::Wear::Armour(hits), number)), _ => None }).collect();
             inbox.add_bounded(vec![super::super::RequestOutcome::Pack(actual)], grants, armour, remote.pack_retained_usage()).unwrap();
             assert_eq!(remote.pack_buffer.count, 1, "moving to the inbox retains ownership accounting");
             let (items, _) = inbox.take_ordered();

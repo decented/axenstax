@@ -266,6 +266,24 @@ pub fn build_viewmodel_vertices(
     arm_model: crate::skin_uv::ArmModel,
     aspect: f32,
 ) -> (Vec<Vertex>, Vec<Vertex>) {
+    build_hand(side, held, bob, swing, 0.0, skin_layer, registry, arm_model, aspect)
+}
+
+/// [`build_viewmodel_vertices`] with `guard`: how far a shield in this hand has
+/// been raised (0 lowered, 1 up; `shield_pose::raise_first_person`). Ignored for
+/// any other item.
+#[allow(clippy::too_many_arguments)]
+fn build_hand(
+    side: HandSide,
+    held: HeldItem,
+    bob: f32,
+    swing: f32,
+    guard: f32,
+    skin_layer: u32,
+    registry: &BlockRegistry,
+    arm_model: crate::skin_uv::ArmModel,
+    aspect: f32,
+) -> (Vec<Vertex>, Vec<Vertex>) {
     // The hand you see is YOUR hand: a slim ("Alex") skin gets the 3-px arm and
     // the 3-px sleeve rects here too, not just on the third-person body.
     let arm_index = side.arm_index();
@@ -339,6 +357,12 @@ pub fn build_viewmodel_vertices(
         v.normal = n.to_array();
     }
 
+    // Off-hand release (slice 5) — a raised shield and the arm that holds it come
+    // in toward the middle of the view, clear of the crosshair.
+    if guard > 0.0 && held.tool == Some(crate::crafting::ToolType::Shield) {
+        crate::shield_pose::raise_first_person(&mut arm_verts, &mut held_verts, side, aspect, guard);
+    }
+
     (arm_verts, held_verts)
 }
 
@@ -346,7 +370,9 @@ pub fn build_viewmodel_vertices(
 /// (a bare fist when `main` is empty) and, only when the off-hand holds an item,
 /// the left arm with that item. `swing_main` and `swing_off` are the hands' own
 /// swing angles (radians). Returns `(arm_skin_verts, held_verts)` for both hands
-/// together, the right hand's first, ready for the same two uploads.
+/// together, the right hand's first, ready for the same two uploads. `guard` says
+/// which hand's shield is raised and how far (0..=1, `shield_pose`); a raised
+/// shield swings no hand.
 #[allow(clippy::too_many_arguments)]
 pub fn build_viewmodel_hands(
     main: HeldItem,
@@ -354,16 +380,18 @@ pub fn build_viewmodel_hands(
     bob: f32,
     swing_main: f32,
     swing_off: f32,
+    guard: Option<(HandSide, f32)>,
     skin_layer: u32,
     registry: &BlockRegistry,
     arm_model: crate::skin_uv::ArmModel,
     aspect: f32,
 ) -> (Vec<Vertex>, Vec<Vertex>) {
+    let raised = |side: HandSide| guard.filter(|(s, _)| *s == side).map_or(0.0, |(_, t)| t);
     let (mut arm, mut held) =
-        build_viewmodel_vertices(HandSide::Right, main, bob, swing_main, skin_layer, registry, arm_model, aspect);
+        build_hand(HandSide::Right, main, bob, swing_main, raised(HandSide::Right), skin_layer, registry, arm_model, aspect);
     if let Some(off) = off.filter(|o| !o.is_empty()) {
         let (left_arm, left_held) =
-            build_viewmodel_vertices(HandSide::Left, off, bob, swing_off, skin_layer, registry, arm_model, aspect);
+            build_hand(HandSide::Left, off, bob, swing_off, raised(HandSide::Left), skin_layer, registry, arm_model, aspect);
         arm.extend(left_arm);
         held.extend(left_held);
     }
@@ -773,7 +801,7 @@ mod layout_tests {
     fn both(aspect: f32, swing_main: f32, swing_off: f32) -> (Vec<Vertex>, Vec<Vertex>) {
         let pick = HeldItem::of(&crate::item::Item::Tool(Tool::new(ToolType::Pickaxe, ToolMaterial::Iron)));
         let torch: HeldItem = ItemRef::Block(block::TORCH).into();
-        build_viewmodel_hands(pick, Some(torch), 0.0, swing_main, swing_off, 0, &BlockRegistry::new(), ArmModel::Classic, aspect)
+        build_viewmodel_hands(pick, Some(torch), 0.0, swing_main, swing_off, None, 0, &BlockRegistry::new(), ArmModel::Classic, aspect)
     }
 
     #[test]
@@ -805,13 +833,13 @@ mod layout_tests {
     fn an_empty_off_hand_draws_nothing_on_the_left() {
         let reg = BlockRegistry::new();
         let pick: HeldItem = ItemRef::Tool(2).into();
-        let alone = build_viewmodel_hands(pick, None, 0.0, 0.0, 0.0, 0, &reg, ArmModel::Classic, 16.0 / 9.0);
+        let alone = build_viewmodel_hands(pick, None, 0.0, 0.0, 0.0, None, 0, &reg, ArmModel::Classic, 16.0 / 9.0);
         let right_only = build_viewmodel_vertices(HandSide::Right, pick, 0.0, 0.0, 0, &reg, ArmModel::Classic, 16.0 / 9.0);
         assert_eq!(alone.0.len(), right_only.0.len(), "no left arm");
         assert_eq!(alone.1.len(), right_only.1.len(), "no left item");
         assert!(alone.0.iter().chain(&alone.1).all(|v| v.position[0] > 0.0), "everything is on the right half");
         // An off-hand slot that holds an empty ref is empty too.
-        let still = build_viewmodel_hands(pick, Some(HeldItem::EMPTY), 0.0, 0.0, 0.0, 0, &reg, ArmModel::Classic, 16.0 / 9.0);
+        let still = build_viewmodel_hands(pick, Some(HeldItem::EMPTY), 0.0, 0.0, 0.0, None, 0, &reg, ArmModel::Classic, 16.0 / 9.0);
         assert_eq!(still.0.len(), right_only.0.len());
         // A full off-hand adds a left arm (two boxes) and its item.
         let (arm, held) = both(16.0 / 9.0, 0.0, 0.0);
@@ -835,5 +863,63 @@ mod layout_tests {
             assert!(moved(&rest_arm, &m_arm, false) && moved(&rest_held, &m_held, false));
             assert!(!moved(&rest_arm, &m_arm, true) && !moved(&rest_held, &m_held, true), "the left hand stays");
         }
+    }
+
+    // Off-hand release (slice 5): a raised shield.
+
+    fn shield() -> HeldItem {
+        HeldItem::of(&crate::item::Item::Tool(Tool::new(ToolType::Shield, ToolMaterial::Wood)))
+    }
+
+    #[test]
+    fn a_raised_shield_covers_part_of_the_view_and_keeps_the_crosshair_clear() {
+        for side in SIDES {
+            for aspect in ASPECTS {
+                let reg = BlockRegistry::new();
+                let (arm, held) = build_hand(side, shield(), 0.0, 0.0, 1.0, 0, &reg, ArmModel::Classic, aspect);
+                let (arm, held) = (view_positions(&arm), view_positions(&held));
+                assert!(!covers_centre(&held, aspect, 0.05), "{side:?} shield covers the centre +-5% @{aspect:.2}");
+                assert!(!covers_centre(&arm, aspect, 0.05), "{side:?} arm covers the centre +-5% @{aspect:.2}");
+                assert!(held.iter().chain(&arm).all(|p| p.z < 0.0), "in front of the camera");
+                let (lo, hi) = bbox(&held, aspect);
+                let height = (hi.y - lo.y) * 0.5;
+                assert!(height >= 0.30, "{}: a raised shield covers at least 30% of the view's height", describe("raised shield", side, aspect, &held));
+                let (inner, outer) = if side == HandSide::Right { (lo.x, hi.x) } else { (-hi.x, -lo.x) };
+                assert!(inner >= 0.05 && outer <= 1.0, "{}: on its own side of the centre and on screen", describe("raised shield", side, aspect, &held));
+                // It comes in toward the centre and up from where the lowered one sits.
+                let (_, rest) = build_hand(side, shield(), 0.0, 0.0, 0.0, 0, &reg, ArmModel::Classic, aspect);
+                let (rlo, rhi) = bbox(&view_positions(&rest), aspect);
+                let (rc, c) = ((rlo + rhi) * 0.5, (lo + hi) * 0.5);
+                assert!(c.x * side.sign() < rc.x * side.sign(), "{side:?} @{aspect:.2}: nearer the centre than lowered ({c:?} vs {rc:?})");
+                assert!(c.y > rc.y, "{side:?} @{aspect:.2}: higher than lowered ({c:?} vs {rc:?})");
+            }
+        }
+    }
+
+    #[test]
+    fn the_raise_eases_in_with_the_count() {
+        let reg = BlockRegistry::new();
+        let centre_x = |t: f32| {
+            let (_, h) = build_hand(HandSide::Right, shield(), 0.0, 0.0, t, 0, &reg, ArmModel::Classic, 16.0 / 9.0);
+            let (lo, hi) = bbox(&view_positions(&h), 16.0 / 9.0);
+            (lo.x + hi.x) * 0.5
+        };
+        let (a, b, c) = (centre_x(0.0), centre_x(0.5), centre_x(1.0));
+        assert!(a > b && b > c, "each step comes further in: {a} {b} {c}");
+    }
+
+    #[test]
+    fn the_shield_hand_is_the_hand_the_guard_names_and_the_other_hand_is_unmoved() {
+        let reg = BlockRegistry::new();
+        let aspect = 16.0 / 9.0;
+        let sword = HeldItem::of(&crate::item::Item::Tool(Tool::new(ToolType::Sword, ToolMaterial::Iron)));
+        let rest = build_viewmodel_hands(sword, Some(shield()), 0.0, 0.0, 0.0, None, 0, &reg, ArmModel::Classic, aspect);
+        let up = build_viewmodel_hands(sword, Some(shield()), 0.0, 0.0, 0.0, Some((HandSide::Left, 1.0)), 0, &reg, ArmModel::Classic, aspect);
+        let moved = |a: &[Vertex], b: &[Vertex], left: bool| a.iter().zip(b).filter(|(x, _)| (x.position[0] < 0.0) == left).any(|(x, y)| x.position != y.position);
+        assert!(moved(&rest.0, &up.0, true) && moved(&rest.1, &up.1, true), "the left arm and shield rose");
+        assert!(!moved(&rest.0, &up.0, false) && !moved(&rest.1, &up.1, false), "the right hand's sword stays put");
+        // A guard named for a hand that holds no shield changes nothing.
+        let none = build_viewmodel_hands(sword, Some(shield()), 0.0, 0.0, 0.0, Some((HandSide::Right, 1.0)), 0, &reg, ArmModel::Classic, aspect);
+        assert!(!moved(&rest.0, &none.0, true) && !moved(&rest.1, &none.1, true) && !moved(&rest.1, &none.1, false), "a sword is not raised");
     }
 }

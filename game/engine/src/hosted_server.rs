@@ -2538,6 +2538,30 @@ impl HostedServer {
         let now = self.server.tick_counter;
         for i in 0..self.server.players.len() {
             let sp = &mut self.server.players[i];
+            // Off-hand release (slice 5) — the blocks a raised shield made this tick
+            // wear it: a numbered window event for the server's copy (applied once
+            // the client says it wore its own, the armour's rule) and a
+            // `ShieldWorn` to that joiner alone, which wears its shield and clacks.
+            let owed = std::mem::take(&mut sp.shield_wear);
+            if owed > 0 && sp.server_simulated {
+                let hand = sp.shield_hand().unwrap_or(crate::hands::Hand::Main);
+                let slot = sp.hotbar_slot;
+                let window_event = crate::window_events::queue(
+                    sp,
+                    crate::window_events::WindowEvent::WearShield { slot, hand, amount: owed },
+                    now,
+                );
+                let pkt = protocol::serialize_packet(
+                    protocol::PacketType::PlayerEvent,
+                    &protocol::PlayerEventPacket {
+                        player_index: i as u32,
+                        event: protocol::PlayerEventType::ShieldWorn { slot: slot as u8, hand, amount: owed },
+                        window_event,
+                    },
+                );
+                self.send_to_joined_slot(i, &pkt);
+            }
+            let sp = &mut self.server.players[i];
             let hits = std::mem::take(&mut sp.armour_wear_hits);
             if hits == 0 || !sp.server_simulated {
                 continue;
@@ -5651,7 +5675,9 @@ impl HostedServer {
                         // consumed by tick_player_physics before broadcast,
                         // so the broadcast can't read it; stash it here.
                         sp.last_sneak = input.sneak;
-                        sp.last_acting = input.break_block || input.place_block;
+                        // Off-hand release (slice 5) — the raise is a held pose, not a swing.
+                        sp.shield_latch = input.shield_raised;
+                        sp.last_acting = input.break_block || (input.place_block && !input.shield_raised);
                         sp.last_move_mag =
                             (input.move_forward.powi(2) + input.move_right.powi(2)).sqrt();
 

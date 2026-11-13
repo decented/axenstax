@@ -321,6 +321,8 @@ mod hostile_acts;
 mod grave;
 mod death;
 mod hands;
+mod shield; // Off-hand slice 5 — the shield: the front-arc block rule, wear and the raise.
+mod shield_pose; // Off-hand slice 5 — where the shield's mesh goes in each view and pose.
 mod starter_kit;
 mod inventory_sync;
 mod joiner_save;
@@ -1442,6 +1444,12 @@ pub(crate) struct GameState {
     /// off-hand, written by the frame path's hand decision each frame it runs
     /// and read by the tick's swing arming. First-person feedback only.
     pub(crate) local_off_use: std::collections::HashSet<usize>,
+    /// Off-hand release (slice 5) — local player indices whose held use button
+    /// currently raises a shield (the use rule picked a shield hand: nothing else
+    /// to use the click on), written by the frame path each frame it runs; the
+    /// tick turns it into `PlayerIntent::guarding` and counts the raise
+    /// (`PlayerSlot::shield_ticks`). Also suppresses the use swing.
+    pub(crate) local_guard: std::collections::HashSet<usize>,
     /// Phase 3 (cosmetics) — live sneak signal per LOCAL player index, captured
     /// each tick from the post-gate intent. Read by `local_player_state` to drive
     /// a split-screen peer's CROUCHING flag. `PlayerSlot.input` is vestigial in
@@ -2290,6 +2298,7 @@ impl GameState {
             local_swing: std::collections::HashMap::new(),
             local_off_swing: std::collections::HashMap::new(),
             local_off_use: std::collections::HashSet::new(),
+            local_guard: std::collections::HashSet::new(),
             local_sneak: std::collections::HashMap::new(),
             net_send_seq: 0,
             own_prediction: crate::prediction::OwnPrediction::new(),

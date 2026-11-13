@@ -227,6 +227,9 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[path = "carried_light_shots.rs"]
     mod carried_light_shots;
+    #[cfg(not(target_arch = "wasm32"))]
+    #[path = "shield_shots.rs"]
+    mod shield_shots;
     use super::*;
 
     /// Point `AXENSTAX_WORLDS_DIR` at one pid-scoped temp dir shared by every
