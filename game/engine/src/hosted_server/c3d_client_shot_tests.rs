@@ -38,7 +38,7 @@ fn shot_of(inv: &crate::inventory::Inventory, hot: usize) -> (Pending, protocol:
 /// The legacy request, as `GameState::send_use_request` sends it.
 fn send_legacy(rc: &mut RemoteClient, actions: &mut JoinerActions, pending: Pending, action: protocol::ItemAction) {
     let seq = actions.record(pending, rc.next_input_seq());
-    rc.send_item_action(&protocol::ItemActionPacket { seq, action, events_applied: 0 });
+    rc.send_item_action(&protocol::ItemActionPacket { seq, action, events_applied: 0, hand: crate::hands::Hand::Main });
 }
 
 /// Shoot from hotbar `hot` on the Strict rig, routed as the game loop does.

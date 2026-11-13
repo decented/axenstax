@@ -29,9 +29,9 @@ fn holding_event<'a>(event: &'a WindowEvent, registry: &crate::block::BlockRegis
     match event {
         WindowEvent::Grant(stack) => Ok(Cow::Owned(WindowEvent::Grant(exact(stack)?))),
         WindowEvent::RewardGrant { stack, origin } => Ok(Cow::Owned(WindowEvent::RewardGrant { stack: exact(stack)?, origin: *origin })),
-        WindowEvent::Take { slot, item, n, how } => {
+        WindowEvent::Take { hand: crate::hands::Hand::Main, slot, item, n, how } => {
             let marker = exact(&ItemStack { item: marker_item(item), count: 1 })?;
-            Ok(Cow::Owned(WindowEvent::Take { slot: *slot, item: marker.item, n: *n, how }))
+            Ok(Cow::Owned(WindowEvent::Take { hand: crate::hands::Hand::Main, slot: *slot, item: marker.item, n: *n, how }))
         }
         WindowEvent::Correction(c) => {
             // Existing shared-container deltas never move Plans. Refuse a
@@ -57,8 +57,8 @@ fn marker_item(item: &Item) -> Item {
 }
 
 fn into_window(window: MarkerWindow) -> Box<EffectiveWindow> {
-    let (inv, armour, cursor, grid) = window.into_parts();
-    Box::new(EffectiveWindow { inv, armour, cursor, grid })
+    let (inv, armour, offhand, cursor, grid) = window.into_parts();
+    Box::new(EffectiveWindow { inv, armour, offhand, cursor, grid })
 }
 
 /// Compare actual per-place removals/additions, including exact piece/marker
@@ -227,7 +227,7 @@ mod tests {
         for mode in [InventoryMode::Mirror, InventoryMode::Strict] {
             let mut sp = player(mode);
             sp.inventory.set_slot(0, Some(ItemStack::new_block(crate::block::STONE, 1)));
-            queue(&mut sp, WindowEvent::Take { slot: 0, item: Item::Block(crate::block::STONE), n: 1, how: "pack test" }, 0);
+            queue(&mut sp, WindowEvent::Take { hand: crate::hands::Hand::Main, slot: 0, item: Item::Block(crate::block::STONE), n: 1, how: "pack test" }, 0);
             queue(&mut sp, WindowEvent::Grant(ItemStack::new_block(crate::block::STONE, 1)), 0);
             let raw = pack_raw_marker(&sp, &registry).unwrap();
             let mut pack = ContainerData::Chest(crate::chest::ChestData::new());
@@ -247,7 +247,7 @@ mod tests {
             old.durability = 5;
             let new = old;
             sp.inventory.set_slot(1, Some(ItemStack { item: Item::Tool(old), count: 1 }));
-            queue(&mut sp, WindowEvent::Take { slot: 0, item: Item::Tool(old), n: 1, how: "pack tool payment" }, 0);
+            queue(&mut sp, WindowEvent::Take { hand: crate::hands::Hand::Main, slot: 0, item: Item::Tool(old), n: 1, how: "pack tool payment" }, 0);
             let raw = pack_raw_marker(&sp, &registry).unwrap();
             let mut chest = crate::chest::ChestData::new();
             chest.slots[0] = Some(ItemStack { item: Item::Tool(new), count: 1 });

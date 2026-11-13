@@ -38,8 +38,7 @@ fn cursor_grid_and_unacknowledged_grants_cannot_fund_unlimited_raw_q_drops() {
                         held_kind,
                         held_id,
                         held_full: protocol::WireItem::None,
-                    },
-                },
+                    }, hand: crate::hands::Hand::Main },
             ));
         }
         hs.tick();

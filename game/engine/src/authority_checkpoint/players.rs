@@ -155,6 +155,12 @@ fn every_field_is_accounted_for(sp: &ServerPlayer) {
         progression_credits: _,
         // encoded (through the window section)
         armour: _,
+        // encoded (through the window section, schema 7)
+        offhand: _,
+        // left out: presentation only, relayed from the next input
+        held_tool: _,
+        // left out: presentation only, relayed from the next input
+        off_held: _,
         // encoded (through the window section)
         cursor: _,
         // encoded (through the window section)
@@ -547,6 +553,7 @@ fn write_window(w: &mut Writer, sp: &ServerPlayer) -> Result<(), String> {
             w.blob(&bincode::serialize(piece).expect("an armour piece encodes"));
         });
     }
+    write_stack(w, sp.offhand.as_ref())?;
     write_stack(w, sp.cursor.as_ref())?;
     for stack in sp.craft_grid.iter().flatten() {
         write_stack(w, stack.as_ref())?;
@@ -575,6 +582,7 @@ fn read_window(r: &mut Reader<'_>, sp: &mut ServerPlayer) -> Result<(), Malforme
     for piece in &mut sp.armour {
         *piece = r.opt(|r| bincode::deserialize(r.blob()?).map_err(|_| Malformed("an armour piece that doesn't decode")))?;
     }
+    sp.offhand = read_stack(r)?;
     sp.cursor = read_stack(r)?;
     for stack in sp.craft_grid.iter_mut().flatten() {
         *stack = read_stack(r)?;

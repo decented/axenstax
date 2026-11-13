@@ -46,7 +46,7 @@ impl Client {
             match protocol::deserialize_header(&pkt) {
                 Some((protocol::PacketType::InventorySync, p)) => {
                     let sync: protocol::InventorySyncPacket = protocol::safe_deserialize(p).unwrap();
-                    let mut w = crate::window::WindowMut { inv: &mut self.inv, armour: &mut self.armour, cursor: &mut self.cursor, grid: &mut self.grid, container: None };
+                    let mut w = crate::window::WindowMut { inv: &mut self.inv, armour: &mut self.armour, offhand: &mut self.offhand, cursor: &mut self.cursor, grid: &mut self.grid, container: None };
                     let station = crate::inventory_sync::apply(&mut w, &sync, &reg, &mut crate::use_edits::SentUses::default(), &mut self.debt, crate::action_identity::InventoryMode::Strict).unwrap();
                     self.ui.adopt_station(station.expect("a Strict session adopts the station"));
                     self.applied = self.applied.max(sync.window_event);

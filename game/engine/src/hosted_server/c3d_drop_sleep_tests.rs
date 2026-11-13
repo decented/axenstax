@@ -120,7 +120,7 @@ fn bed(j: &mut Joined) -> [i32; 3] {
 
 fn sleep(j: &mut Joined, bed: [i32; 3]) -> ActionHeader {
     let pending = Pending { kind: Asked::Sleep { bed }, mob: None, hotbar_slot: 0, held: None };
-    let packet = protocol::ItemActionPacket { seq: 0, action: protocol::ItemAction::Sleep { bed }, events_applied: 0 };
+    let packet = protocol::ItemActionPacket { seq: 0, action: protocol::ItemAction::Sleep { bed }, events_applied: 0, hand: crate::hands::Hand::Main };
     let window = j.ui.digest(&j.inv, &j.armour);
     let header = route_item(Some(&mut j.rc), &mut j.ui, &j.inv, &j.armour, &mut j.actions, pending, packet).expect("routed").expect("a Strict seat sends the sleep typed");
     assert_eq!(j.ui.digest(&j.inv, &j.armour), window, "routing predicted nothing");

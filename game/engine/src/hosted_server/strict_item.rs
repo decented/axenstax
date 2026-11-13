@@ -48,7 +48,7 @@ impl HostedServer {
             Ok(value) => value,
             Err(note) => return self.refuse_item_world_fact(i, action, req, note),
         };
-        let events: Box<[WindowEvent]> = Box::new([WindowEvent::Take { slot, item: food.clone(), n: 1, how: "by eating" }]);
+        let events: Box<[WindowEvent]> = Box::new([WindowEvent::Take { hand: crate::hands::Hand::Main, slot, item: food.clone(), n: 1, how: "by eating" }]);
         if let Some(stop) = self.stage_strict_item_events(i, action, &events, "eat") { return stop; }
         let Some(included) = self.server.players[i].window_events.last_number().checked_add(1) else {
             self.pause_typed_action(i, StrictTeardown::FellBehind, "Eat window event numbers are exhausted"); return false;

@@ -274,7 +274,7 @@ impl Rig {
     ) -> (UseTag, protocol::BlockChange, protocol::EditHand, Option<ItemStack>) {
         let hot = self.c.hot;
         let held = self.c.inv.hotbar_slot(hot).map(|s| s.item.clone());
-        let mut tag = crate::use_edits::tag(kind, cell, hot, held.as_ref());
+        let mut tag = crate::use_edits::tag(kind, cell, hot, crate::hands::Hand::Main, held.as_ref());
         let old = self.block(cell);
         let leftover = client_steps(&mut self.c.inv, kind, hot, old);
         // C3c-1-fix (M-2) — the arm says what didn't fit (`push_use_edit`),
@@ -535,7 +535,7 @@ fn a_joiners_door_reaches_the_server_and_another_joiner_whole() {
     let (slot, (k, id)) = rig.hand_now();
     let bottom = protocol::BlockChange { x: ABOVE[0], y: ABOVE[1], z: ABOVE[2], new_block: block::OAK_DOOR, meta: 0 };
     let top_meta = crate::use_edits::door_top_meta(0);
-    let tag = crate::use_edits::tag(UseKind::DoorUpper, top, 0, None);
+    let tag = crate::use_edits::tag(UseKind::DoorUpper, top, 0, crate::hands::Hand::Main, None);
     let upper = protocol::BlockChange { x: top[0], y: top[1], z: top[2], new_block: block::OAK_DOOR, meta: top_meta };
     let hand = (slot as u8, k, id);
     rig.send_input(vec![bottom, upper.clone()], vec![hand, hand], vec![tag]);
@@ -575,7 +575,7 @@ fn an_illegal_bone_meal_outcome_is_tallied_and_still_applied() {
 fn water_poured_from_an_empty_bucket_is_tallied_and_still_applied() {
     let mut rig = Rig::dedicated("illegal-pour");
     rig.give(0, mat(MaterialId::Bucket), 3);
-    let tag = crate::use_edits::tag(UseKind::BucketEmpty, ABOVE, 0, Some(&mat(MaterialId::Bucket)));
+    let tag = crate::use_edits::tag(UseKind::BucketEmpty, ABOVE, 0, crate::hands::Hand::Main, Some(&mat(MaterialId::Bucket)));
     let pour = protocol::BlockChange { x: ABOVE[0], y: ABOVE[1], z: ABOVE[2], new_block: block::WATER, meta: 0 };
     let hand = rig.hand_now();
     rig.send_input(vec![pour], vec![(0, hand.1 .0, hand.1 .1)], vec![tag]);
@@ -719,11 +719,11 @@ fn through_the_real_send_path_uses_keep_their_tags_and_their_order() {
     hs.server.players[slot].possession = Default::default();
     // One send: the empty, then (the same cell) the fill.
     let mut pending = crate::window_ops::PendingEdits::default();
-    let pour_tag = crate::use_edits::tag(UseKind::BucketEmpty, ABOVE, 0, inv.hotbar_slot(0).map(|s| &s.item));
+    let pour_tag = crate::use_edits::tag(UseKind::BucketEmpty, ABOVE, 0, crate::hands::Hand::Main, inv.hotbar_slot(0).map(|s| &s.item));
     client_steps(&mut inv, UseKind::BucketEmpty, 0, block::AIR);
     pending.push_use(protocol::BlockChange { x: ABOVE[0], y: ABOVE[1], z: ABOVE[2], new_block: block::WATER, meta: 0 }, pour_tag);
     // The empty bucket came back to the stack in slot 5; select it.
-    let fill_tag = crate::use_edits::tag(UseKind::BucketFill, ABOVE, 5, inv.slot(5).map(|s| &s.item));
+    let fill_tag = crate::use_edits::tag(UseKind::BucketFill, ABOVE, 5, crate::hands::Hand::Main, inv.slot(5).map(|s| &s.item));
     // (Spent from slot 5 by the arm's own rule: the hotbar is 0..9.)
     assert!(inv.consume_one_material(5, MaterialId::Bucket));
     assert!(inv.add_item(ItemStack::new_material(MaterialId::WaterBucket, 1)).is_none());
@@ -763,14 +763,14 @@ fn through_the_real_send_path_uses_keep_their_tags_and_their_order() {
     let before = inv.clone();
     let mut ui = CraftingUi::new();
     let mut armour: [Option<ArmourItem>; 4] = [None; 4];
-    let tap_tag = crate::use_edits::tag(UseKind::TapRubber, log, 5, inv.slot(5).map(|s| &s.item));
+    let tap_tag = crate::use_edits::tag(UseKind::TapRubber, log, 5, crate::hands::Hand::Main, inv.slot(5).map(|s| &s.item));
     assert_eq!(client_steps(&mut inv, UseKind::TapRubber, 5, block::RUBBER_LOG), None);
     pending.push_use(protocol::BlockChange { x: log[0], y: log[1], z: log[2], new_block: block::RUBBER_LOG_TAPPED, meta: 0 }, tap_tag);
     ui.open_player_crafting(&inv, &armour);
     for click in [WindowClick::Slot { slot: 1, right: false }, WindowClick::Slot { slot: 20, right: false }] {
         assert!(ui.apply_click(&mut inv, &mut armour, &click, false, Vec3::ZERO, |_| block::AIR).ok());
     }
-    let erase_tag = crate::use_edits::tag(UseKind::Erase, paper, 6, inv.slot(6).map(|s| &s.item));
+    let erase_tag = crate::use_edits::tag(UseKind::Erase, paper, 6, crate::hands::Hand::Main, inv.slot(6).map(|s| &s.item));
     assert_eq!(client_steps(&mut inv, UseKind::Erase, 6, block::BLUEPRINT_PAPER), None);
     pending.push_use(protocol::BlockChange { x: paper[0], y: paper[1], z: paper[2], new_block: block::AIR, meta: 0 }, erase_tag);
     assert_eq!(inv.slot(1), Some(&ItemStack::new_material(MaterialId::PapyrusSheet, 1)), "after the op, slot 1 was the first empty");
@@ -873,7 +873,7 @@ fn a_modified_clients_unfit_claims_stop_at_the_believed_bound() {
         rig.sp().player.pos = at;
         rig.sp().player.velocity = Vec3::ZERO;
         rig.water_source(ABOVE);
-        let mut tag = crate::use_edits::tag(UseKind::BucketFill, ABOVE, 0, Some(&bucket));
+        let mut tag = crate::use_edits::tag(UseKind::BucketFill, ABOVE, 0, crate::hands::Hand::Main, Some(&bucket));
         tag.unfit = 1;
         let edit = protocol::BlockChange { x: ABOVE[0], y: ABOVE[1], z: ABOVE[2], new_block: block::AIR, meta: 0 };
         let (k, id) = crate::inventory::item_to_ref(&bucket).to_wire();
@@ -1022,7 +1022,7 @@ fn a_refused_use_deferred_past_the_edit_budget_is_still_undone() {
 fn a_door_top_half_over_air_is_refused() {
     let mut rig = Rig::dedicated("door-over-air");
     let top = [ABOVE[0], ABOVE[1] + 1, ABOVE[2]];
-    let tag = crate::use_edits::tag(UseKind::DoorUpper, top, 0, None);
+    let tag = crate::use_edits::tag(UseKind::DoorUpper, top, 0, crate::hands::Hand::Main, None);
     let upper = protocol::BlockChange { x: top[0], y: top[1], z: top[2], new_block: block::OAK_DOOR, meta: crate::use_edits::door_top_meta(0) };
     let (_, (k, id)) = rig.hand_now();
     rig.send_input(vec![upper], vec![(0, k, id)], vec![tag]);
@@ -1046,7 +1046,7 @@ fn a_door_top_half_over_a_top_half_is_refused() {
     rig.set(top, block::OAK_DOOR);
     rig.world().set_meta((top[0], top[1], top[2]), crate::use_edits::door_top_meta(0));
     rig.tick();
-    let tag = crate::use_edits::tag(UseKind::DoorUpper, third, 0, None);
+    let tag = crate::use_edits::tag(UseKind::DoorUpper, third, 0, crate::hands::Hand::Main, None);
     let upper = protocol::BlockChange { x: third[0], y: third[1], z: third[2], new_block: block::OAK_DOOR, meta: crate::use_edits::door_top_meta(0) };
     let (_, (k, id)) = rig.hand_now();
     rig.send_input(vec![upper], vec![(0, k, id)], vec![tag]);
@@ -1218,7 +1218,7 @@ fn a_tag_that_cant_explain_its_edit_falls_back_to_the_ordinary_check() {
     let mut rig = Rig::dedicated("unexplained");
     rig.give(0, Item::Block(block::STONE), 3);
     rig.c.inv.set_slot(0, Some(ItemStack::new_block(block::STONE, 2)));
-    let tag = crate::use_edits::tag(UseKind::Till, ABOVE, 0, rig.c.inv.slot(0).map(|s| &s.item));
+    let tag = crate::use_edits::tag(UseKind::Till, ABOVE, 0, crate::hands::Hand::Main, rig.c.inv.slot(0).map(|s| &s.item));
     let place = protocol::BlockChange { x: ABOVE[0], y: ABOVE[1], z: ABOVE[2], new_block: block::STONE, meta: 0 };
     let (_, (k, id)) = rig.hand_now();
     rig.send_input(vec![place], vec![(0, k, id)], vec![tag]);
@@ -1338,7 +1338,7 @@ impl Rig {
     fn send_action(&mut self, action: protocol::ItemAction) {
         let c = &mut self.c;
         // Any request number (it is never answered); not the op sequence.
-        let pkt = protocol::ItemActionPacket { seq: 1000 + c.input_seq as u32, action, events_applied: c.events };
+        let pkt = protocol::ItemActionPacket { seq: 1000 + c.input_seq as u32, action, events_applied: c.events, hand: crate::hands::Hand::Main };
         c.transport.send_to_server(&protocol::serialize_packet(protocol::PacketType::ItemAction, &pkt));
         self.tick();
     }
@@ -1598,7 +1598,7 @@ fn smallfix_air_erase_never_mints_copy_or_real_unfit_sheet() {
         if full { for k in 1..36 { rig.give(k, Item::Block(block::STONE), 64); } }
         // A modified tag claiming an AIR erase, with an unfit sheet if full.
         let held = rig.c.inv.hotbar_slot(0).unwrap().item.clone();
-        let mut tag = crate::use_edits::tag(UseKind::Erase, ABOVE, 0, Some(&held));
+        let mut tag = crate::use_edits::tag(UseKind::Erase, ABOVE, 0, crate::hands::Hand::Main, Some(&held));
         tag.unfit = u8::from(full);
         let (hot, (k, id)) = rig.hand_now();
         let edit = protocol::BlockChange { x: ABOVE[0], y: ABOVE[1], z: ABOVE[2], new_block: block::AIR, meta: 0 };

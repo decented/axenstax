@@ -160,6 +160,9 @@ pub struct Pending {
     pub hotbar_slot: usize,
     /// What it was (`None` = an empty hand).
     pub held: Option<Item>,
+    /// v101 (off-hand plan, slice 2) — the hand it was in (`Off`: the
+    /// off-hand; the payment searches it first, [`take_owed_search`]).
+    pub hand: crate::hands::Hand,
 }
 
 /// C3b-fix-d (A-L1) — the `ends_at_input` of a request queued behind unsent
@@ -376,12 +379,15 @@ impl JoinerActions {
     /// more uses left than the shots in flight will wear ([`wear_held`]), so
     /// a bow on its last use fires once, not again for a round trip after it
     /// breaks.
-    pub fn can_afford(&self, inv: &Inventory, ui: &CraftingUi, kind: Asked, held: Option<&Item>) -> bool {
+    ///
+    /// v101 (off-hand plan, slice 2) — `offhand` is the player's off-hand,
+    /// counted with the window: an owed take pays from it too.
+    pub fn can_afford(&self, inv: &Inventory, ui: &CraftingUi, offhand: &Option<ItemStack>, kind: Asked, held: Option<&Item>) -> bool {
         if self.full_of_claims() {
             return false;
         }
         if let Some(weapon) = kind.shot_weapon()
-            && wear_held(inv, &weapon) <= self.wear_claimed(&weapon)
+            && wear_held(inv, offhand, &weapon) <= self.wear_claimed(&weapon)
         {
             return false;
         }
@@ -390,7 +396,7 @@ impl JoinerActions {
             return true;
         }
         let Some(item) = held else { return false };
-        self.can_spend(inv, ui, item, u32::from(need))
+        self.can_spend(inv, ui, offhand, item, u32::from(need))
     }
 
     /// C2b — may the client spend `n` of `item` itself (a Q-drop, a craft)?
@@ -398,12 +404,12 @@ impl JoinerActions {
     /// still covers every claim of the requests in flight on that item.
     /// C3c-2-fix (L3) — for a weapon, its wear too: the uses left after `n`
     /// of it go must still cover the shots in flight.
-    pub fn can_spend(&self, inv: &Inventory, ui: &CraftingUi, item: &Item, n: u32) -> bool {
-        if count_held(inv, ui, item) < self.claimed(item).saturating_add(n) {
+    pub fn can_spend(&self, inv: &Inventory, ui: &CraftingUi, offhand: &Option<ItemStack>, item: &Item, n: u32) -> bool {
+        if count_held(inv, ui, offhand, item) < self.claimed(item).saturating_add(n) {
             return false;
         }
         let worn = self.wear_claimed(item);
-        worn == 0 || wear_held(inv, item).saturating_sub(n.saturating_mul(uses_left(item))) >= worn
+        worn == 0 || wear_held(inv, offhand, item).saturating_sub(n.saturating_mul(uses_left(item))) >= worn
     }
 
     /// C3c-2-fix (L3) — the units of wear the shots still claiming will take
@@ -419,7 +425,7 @@ impl JoinerActions {
     /// C2b — may the result-slot click craft? It consumes one from every
     /// non-empty grid cell, so each distinct ingredient is spent once per
     /// cell holding it ([`Self::can_spend`]).
-    pub fn may_craft(&self, inv: &Inventory, ui: &CraftingUi) -> bool {
+    pub fn may_craft(&self, inv: &Inventory, ui: &CraftingUi, offhand: &Option<ItemStack>) -> bool {
         let mut spent: Vec<(&Item, u32)> = Vec::new();
         for stack in ui.grid.iter().flatten().flatten() {
             match spent.iter_mut().find(|(item, _)| same_item(item, &stack.item)) {
@@ -427,7 +433,7 @@ impl JoinerActions {
                 None => spent.push((&stack.item, 1)),
             }
         }
-        spent.iter().all(|(item, n)| self.can_spend(inv, ui, item, *n))
+        spent.iter().all(|(item, n)| self.can_spend(inv, ui, offhand, item, *n))
     }
 
     /// How many of `item` the requests still claiming would use.
@@ -522,9 +528,10 @@ fn uses_left(item: &Item) -> u32 {
 /// C3c-2-fix (L3) — the uses left in every tool of `tool`'s kind in the
 /// client's 36 slots: where a shot's wear lands ([`where_now`], on both
 /// copies; a bow on the cursor or in the grid can't be worn).
-fn wear_held(inv: &Inventory, tool: &Item) -> u32 {
+fn wear_held(inv: &Inventory, offhand: &Option<ItemStack>, tool: &Item) -> u32 {
     inv.slots_iter()
         .flatten()
+        .chain(offhand.as_ref())
         .filter(|s| same_item(&s.item, tool))
         .map(|s| uses_left(&s.item).saturating_mul(u32::from(s.count)))
         .sum()
@@ -557,12 +564,13 @@ fn count_of(inv: &Inventory, item: &Item) -> u32 {
 
 /// C2b — how many of `item` the client holds: its 36 slots, the crafting
 /// grid and the cursor (the window the server mirrors since C3a-2a).
-fn count_held(inv: &Inventory, ui: &CraftingUi, item: &Item) -> u32 {
+fn count_held(inv: &Inventory, ui: &CraftingUi, offhand: &Option<ItemStack>, item: &Item) -> u32 {
     let outside: u32 = ui
         .grid
         .iter()
         .flatten()
         .chain(std::iter::once(&ui.cursor_item))
+        .chain(std::iter::once(offhand))
         .flatten()
         .filter(|s| same_item(&s.item, item))
         .map(|s| u32::from(s.count))
@@ -585,6 +593,36 @@ pub fn where_now(inv: &crate::inventory::Inventory, slot: usize, held: &Item) ->
         return Some(slot);
     }
     (0..36).find(|&i| holds(i))
+}
+
+/// v101 (off-hand plan, slice 2) — where a hand's item is: an inventory
+/// slot or the off-hand.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HeldAt {
+    Slot(usize),
+    Offhand,
+}
+
+/// v101 — [`where_now`] for a use made with `hand`: an off-hand use finds
+/// its item in the off-hand if that still holds it, else where `where_now`
+/// finds it in the 36 slots (the hand was swapped in flight); a main-hand use
+/// looks in the 36 slots first ([`where_now`]), then the off-hand. One rule for
+/// both copies of a joiner's window, as `where_now` is.
+pub fn where_now_hand(
+    inv: &crate::inventory::Inventory,
+    offhand: &Option<ItemStack>,
+    hand: crate::hands::Hand,
+    slot: usize,
+    held: &Item,
+) -> Option<HeldAt> {
+    let off = offhand.as_ref().is_some_and(|s| same_item(&s.item, held));
+    if hand == crate::hands::Hand::Off && off {
+        return Some(HeldAt::Offhand);
+    }
+    if let Some(at) = where_now(inv, slot, held) {
+        return Some(HeldAt::Slot(at));
+    }
+    off.then_some(HeldAt::Offhand)
 }
 
 /// C3d run 16 (run-15 review MEDIUM-1, decided) — the ONE Strict rule for
@@ -611,9 +649,11 @@ pub fn strict_wear_target(inv: &crate::inventory::Inventory, slot: usize, held: 
 /// C3b-fix-c (decision 2) — THE owed-take search, one fn for every take of a
 /// joiner's window, run the same way by both copies of it (a LOCKSTEP rule:
 /// client and server must call this, or they diverge). It looks, in order:
-/// the hint slot `hint`, then the 36 slots, then the crafting grid
-/// (row-major), then the cursor, then the armour slots — each only where the
-/// caller passes it. C3b-fix-e (L1) — first for an exact match (`==`,
+/// the hint slot `hint`, then the 36 slots, then (v101) the off-hand, then
+/// the crafting grid (row-major), then the cursor, then the armour slots —
+/// each only where the caller passes it. v101 (off-hand plan, slice 2) — a
+/// use made with the off-hand (`hand == Off`) looks in the off-hand first
+/// instead of the hint slot, then the 36 slots and the rest in that order. C3b-fix-e (L1) — first for an exact match (`==`,
 /// durability included) in every one of those places, and only then, in the
 /// same order, for a match by kind ([`same_item`]): so a tool owed is that
 /// tool wherever it can be told apart, never the player's own one of its
@@ -626,13 +666,24 @@ pub(crate) fn take_owed_search(
     mut grid: Option<&mut crate::window::CraftGrid>,
     mut cursor: Option<&mut Option<ItemStack>>,
     mut armour: Option<&mut [Option<ArmourItem>; 4]>,
+    mut offhand: Option<&mut Option<ItemStack>>,
     hint: Option<usize>,
+    hand: crate::hands::Hand,
     held: &Item,
     n: u8,
 ) -> Vec<ItemStack> {
     let mut taken: Vec<ItemStack> = Vec::new();
     for _ in 0..n {
-        let Some(item) = take_one_owed(inv, grid.as_deref_mut(), cursor.as_deref_mut(), armour.as_deref_mut(), hint, held)
+        let Some(item) = take_one_owed(
+            inv,
+            grid.as_deref_mut(),
+            cursor.as_deref_mut(),
+            armour.as_deref_mut(),
+            offhand.as_deref_mut(),
+            hint,
+            hand,
+            held,
+        )
         else {
             break;
         };
@@ -658,7 +709,9 @@ fn take_one_owed(
     mut grid: Option<&mut crate::window::CraftGrid>,
     mut cursor: Option<&mut Option<ItemStack>>,
     mut armour: Option<&mut [Option<ArmourItem>; 4]>,
+    mut offhand: Option<&mut Option<ItemStack>>,
     hint: Option<usize>,
+    hand: crate::hands::Hand,
     held: &Item,
 ) -> Option<Item> {
     let exact = |s: &ItemStack| match (&s.item, held) {
@@ -668,7 +721,16 @@ fn take_one_owed(
     let kind = |s: &ItemStack| same_item(&s.item, held);
     let passes: [&dyn Fn(&ItemStack) -> bool; 2] = [&exact, &kind];
     passes.into_iter().find_map(|matches| {
-        take_one_where(inv, grid.as_deref_mut(), cursor.as_deref_mut(), armour.as_deref_mut(), hint, matches)
+        take_one_where(
+            inv,
+            grid.as_deref_mut(),
+            cursor.as_deref_mut(),
+            armour.as_deref_mut(),
+            offhand.as_deref_mut(),
+            hint,
+            hand,
+            matches,
+        )
     })
 }
 
@@ -679,10 +741,20 @@ fn take_one_where(
     grid: Option<&mut crate::window::CraftGrid>,
     cursor: Option<&mut Option<ItemStack>>,
     armour: Option<&mut [Option<ArmourItem>; 4]>,
+    mut offhand: Option<&mut Option<ItemStack>>,
     hint: Option<usize>,
+    hand: crate::hands::Hand,
     matches: &dyn Fn(&ItemStack) -> bool,
 ) -> Option<Item> {
+    let off_first = hand == crate::hands::Hand::Off;
+    if off_first
+        && let Some(off) = offhand.as_deref_mut()
+        && off.as_ref().is_some_and(matches)
+    {
+        return take_one_from(off);
+    }
     let slot = hint
+        .filter(|_| !off_first)
         .filter(|&h| h < 36 && inv.slot(h).is_some_and(matches))
         .or_else(|| (0..36).find(|&i| inv.slot(i).is_some_and(matches)));
     if let Some(at) = slot {
@@ -693,6 +765,12 @@ fn take_one_where(
             inv.set_slot(at, Some(stack));
         }
         return Some(item);
+    }
+    if !off_first
+        && let Some(off) = offhand
+        && off.as_ref().is_some_and(matches)
+    {
+        return take_one_from(off);
     }
     if let Some(grid) = grid
         && let Some(k) = (0..9).find(|&k| grid[k / 3][k % 3].as_ref().is_some_and(matches))
@@ -734,7 +812,21 @@ fn units(taken: &[ItemStack]) -> u8 {
 /// joiner's window run for an accepted outcome. Also the server's rule for a
 /// Q-drop's item (`item_actions::serve_drop`).
 pub fn take_owed(inv: &mut crate::inventory::Inventory, slot: usize, held: &Item, n: u8) -> u8 {
-    units(&take_owed_search(inv, None, None, None, Some(slot), held, n))
+    units(&take_owed_search(inv, None, None, None, None, Some(slot), crate::hands::Hand::Main, held, n))
+}
+
+/// v101 — [`take_owed`] for a use made with `hand`: the 36 slots and the
+/// off-hand (the off-hand first for `Off`, [`take_owed_search`]). A block-edit
+/// use's cost (`use_edits::settle`) on both copies.
+pub fn take_owed_hand(
+    inv: &mut crate::inventory::Inventory,
+    offhand: &mut Option<ItemStack>,
+    slot: usize,
+    hand: crate::hands::Hand,
+    held: &Item,
+    n: u8,
+) -> u8 {
+    units(&take_owed_search(inv, None, None, None, Some(offhand), Some(slot), hand, held, n))
 }
 
 /// The owed payment (C2b decision 5; C3a-2a: one rule for both copies of a
@@ -748,15 +840,18 @@ pub fn take_owed(inv: &mut crate::inventory::Inventory, slot: usize, held: &Item
 /// a `window_events::WindowEvent::Take`) once the client reports it applied
 /// that outcome (C3a-fix-1): the same point in the client's order on both
 /// sides, whatever window ops crossed the outcome in flight.
+#[allow(clippy::too_many_arguments)]
 pub fn take_owed_window(
     inv: &mut Inventory,
     grid: &mut crate::window::CraftGrid,
     cursor: &mut Option<crate::item::ItemStack>,
+    offhand: &mut Option<crate::item::ItemStack>,
     slot: usize,
+    hand: crate::hands::Hand,
     held: &Item,
     n: u8,
 ) -> u8 {
-    units(&take_owed_search(inv, Some(grid), Some(cursor), None, Some(slot), held, n))
+    units(&take_owed_search(inv, Some(grid), Some(cursor), None, Some(offhand), Some(slot), hand, held, n))
 }
 
 /// C3b-fix-c (decision 2) — a correction's take
@@ -770,17 +865,36 @@ pub fn take_correction(
     grid: &mut crate::window::CraftGrid,
     cursor: &mut Option<crate::item::ItemStack>,
     armour: &mut [Option<ArmourItem>; 4],
+    offhand: &mut Option<crate::item::ItemStack>,
     hint: usize,
     held: &Item,
     n: u8,
 ) -> u8 {
-    units(&take_owed_search(inv, Some(grid), Some(cursor), Some(armour), Some(hint), held, n))
+    units(&take_owed_search(
+        inv,
+        Some(grid),
+        Some(cursor),
+        Some(armour),
+        Some(offhand),
+        Some(hint),
+        crate::hands::Hand::Main,
+        held,
+        n,
+    ))
 }
 
 /// The client's owed payment: [`take_owed_window`] on its window (`inv`, and
 /// `ui`'s grid and cursor), then the result shown is recomputed.
-pub fn take_owed_held(inv: &mut Inventory, ui: &mut CraftingUi, slot: usize, held: &Item, n: u8) -> u8 {
-    let taken = take_owed_window(inv, &mut ui.grid, &mut ui.cursor_item, slot, held, n);
+pub fn take_owed_held(
+    inv: &mut Inventory,
+    ui: &mut CraftingUi,
+    offhand: &mut Option<ItemStack>,
+    slot: usize,
+    hand: crate::hands::Hand,
+    held: &Item,
+    n: u8,
+) -> u8 {
+    let taken = take_owed_window(inv, &mut ui.grid, &mut ui.cursor_item, offhand, slot, hand, held, n);
     ui.update_result();
     taken
 }
@@ -796,6 +910,7 @@ pub fn take_owed_held(inv: &mut Inventory, ui: &mut CraftingUi, slot: usize, hel
 pub fn apply_outcome(
     inv: &mut Inventory,
     ui: &mut CraftingUi,
+    offhand: &mut Option<ItemStack>,
     request: &Pending,
     outcome: &InteractOutcomePacket,
 ) -> Applied {
@@ -813,7 +928,8 @@ pub fn apply_outcome(
             }
         }
         Asked::Interact(_) => {
-            applied.consumed = take_owed_held(inv, ui, request.hotbar_slot, held, outcome.consume_held)
+            applied.consumed =
+                take_owed_held(inv, ui, offhand, request.hotbar_slot, request.hand, held, outcome.consume_held)
         }
         // Not an interaction's answer.
         Asked::Eat
@@ -843,6 +959,7 @@ pub fn apply_outcome(
 pub fn apply_item_outcome(
     inv: &mut Inventory,
     ui: &mut CraftingUi,
+    offhand: &mut Option<ItemStack>,
     request: &Pending,
     outcome: &ItemActionOutcomePacket,
 ) -> u8 {
@@ -863,7 +980,19 @@ pub fn apply_item_outcome(
     let Some(held) = request.held.as_ref() else {
         return 0;
     };
-    take_owed_held(inv, ui, request.hotbar_slot, held, outcome.consume_held)
+    take_owed_held(inv, ui, offhand, request.hotbar_slot, owed_hand(request), held, outcome.consume_held)
+}
+
+/// v101 — the hand an accepted request's payment searches first: its own,
+/// except a shot's ammo, which is the off-hand's first whatever hand the
+/// weapon is in (the local rule, `shot::take_ammo`): the weapon's hand never
+/// holds its ammo. The server's take runs the same ([`Asked::Shoot`] is
+/// queued with this hand).
+pub fn owed_hand(request: &Pending) -> crate::hands::Hand {
+    match request.kind {
+        Asked::Shoot { .. } => crate::hands::Hand::Off,
+        _ => request.hand,
+    }
 }
 
 /// C3b-2 — an accepted block use that wore its tool (`wear_held`: shears on
@@ -874,6 +1003,7 @@ pub fn apply_item_outcome(
 /// nothing wore.
 pub fn apply_use_wear(
     inv: &mut Inventory,
+    offhand: &mut Option<ItemStack>,
     request: &Pending,
     outcome: &ItemActionOutcomePacket,
 ) -> Option<crate::inventory::ToolUseInfo> {
@@ -885,8 +1015,10 @@ pub fn apply_use_wear(
         Asked::Shoot { .. } => request.kind.shot_weapon()?,
         _ => return None,
     };
-    let at = where_now(inv, request.hotbar_slot, &tool)?;
-    inv.use_tool_at(at)
+    match where_now_hand(inv, offhand, request.hand, request.hotbar_slot, &tool)? {
+        HeldAt::Slot(at) => inv.use_tool_at(at),
+        HeldAt::Offhand => crate::inventory::use_tool_cell(offhand),
+    }
 }
 
 #[cfg(test)]
@@ -956,11 +1088,11 @@ mod tests {
         assert_eq!(shoot.shot_weapon(), Some(Item::Tool(bow)));
         let mut a = JoinerActions::default();
         let ui = CraftingUi::new();
-        assert!(a.can_afford(&inv, &ui, shoot, Some(&arrow)));
+        assert!(a.can_afford(&inv, &ui, &None, shoot, Some(&arrow)));
         let req = Pending { kind: shoot, mob: None, hotbar_slot: 0, held: Some(arrow.clone()) };
         a.record(req.clone(), 3);
-        assert!(!a.can_afford(&inv, &ui, shoot, Some(&arrow)), "the only arrow is in flight");
-        assert!(!a.can_spend(&inv, &ui, &arrow, 1), "and can't be dropped meanwhile");
+        assert!(!a.can_afford(&inv, &ui, &None, shoot, Some(&arrow)), "the only arrow is in flight");
+        assert!(!a.can_spend(&inv, &ui, &None, &arrow, 1), "and can't be dropped meanwhile");
         let out = |accepted| ItemActionOutcomePacket {
             seq: 1,
             accepted,
@@ -1261,13 +1393,13 @@ mod tests {
             a.acknowledged(acked);
         }
         assert!(a.eat_in_flight(), "still queued: nothing the server read covers it");
-        assert!(!a.can_spend(&inv, &ui, &bread, 1), "a Q-drop of the bread it claims is refused");
+        assert!(!a.can_spend(&inv, &ui, &None, &bread, 1), "a Q-drop of the bread it claims is refused");
         // Sent right after input 14: it rides ahead of input 15.
         a.rebase(eat, 15);
         a.acknowledged(14);
-        assert!(!a.can_spend(&inv, &ui, &bread, 1), "an acknowledgement from before the send ends nothing");
+        assert!(!a.can_spend(&inv, &ui, &None, &bread, 1), "an acknowledgement from before the send ends nothing");
         a.acknowledged(15);
-        assert!(a.can_spend(&inv, &ui, &bread, 1), "read by the server: the bread is free");
+        assert!(a.can_spend(&inv, &ui, &None, &bread, 1), "read by the server: the bread is free");
         assert!(!a.eat_in_flight());
         assert!(a.take(eat).is_some(), "the entry stays for its answer");
         // A seq with no entry (an unanswered Drop) moves nothing.
@@ -1293,11 +1425,11 @@ mod tests {
             held: Some(bucket.clone()),
         };
         a.record(milk, UNTIL_SENT);
-        assert!(!a.can_spend(&inv, &ui, &bread, 1) && !a.can_spend(&inv, &ui, &bucket, 1));
+        assert!(!a.can_spend(&inv, &ui, &None, &bread, 1) && !a.can_spend(&inv, &ui, &None, &bucket, 1));
         a.release(eat);
-        assert!(a.can_spend(&inv, &ui, &bread, 1), "the discarded Eat's bread is free");
+        assert!(a.can_spend(&inv, &ui, &None, &bread, 1), "the discarded Eat's bread is free");
         assert!(!a.eat_in_flight());
-        assert!(!a.can_spend(&inv, &ui, &bucket, 1), "the other request still claims its bucket");
+        assert!(!a.can_spend(&inv, &ui, &None, &bucket, 1), "the other request still claims its bucket");
         assert_eq!(a.len(), 1);
         a.release(999);
         assert_eq!(a.len(), 1, "a seq with no entry releases nothing");
@@ -1360,14 +1492,14 @@ mod tests {
         let inv = inv_with(0, ItemStack::new_material(MaterialId::Bucket, 1));
         let ui = CraftingUi::new();
         let mut a = JoinerActions::default();
-        assert!(a.can_spend(&inv, &ui, &bucket, 1), "nothing claims it yet");
+        assert!(a.can_spend(&inv, &ui, &None, &bucket, 1), "nothing claims it yet");
         let milk = milk_pending(&mut a);
-        assert!(!a.can_spend(&inv, &ui, &bucket, 1), "the Q-drop is gated");
+        assert!(!a.can_spend(&inv, &ui, &None, &bucket, 1), "the Q-drop is gated");
         let two = inv_with(0, ItemStack::new_material(MaterialId::Bucket, 2));
-        assert!(a.can_spend(&two, &ui, &bucket, 1), "a spare bucket may go");
-        assert!(a.can_spend(&inv, &ui, &Item::Material(MaterialId::Wheat), 0));
+        assert!(a.can_spend(&two, &ui, &None, &bucket, 1), "a spare bucket may go");
+        assert!(a.can_spend(&inv, &ui, &None, &Item::Material(MaterialId::Wheat), 0));
         a.take(milk);
-        assert!(a.can_spend(&inv, &ui, &bucket, 1), "answered: free again");
+        assert!(a.can_spend(&inv, &ui, &None, &bucket, 1), "answered: free again");
     }
 
     /// Decision 4 — a pending Feed claims the only wheat... and the player
@@ -1387,24 +1519,24 @@ mod tests {
         ui.update_result();
         assert!(ui.result.is_some(), "three wheat make bread");
         let mut a = JoinerActions::default();
-        assert!(a.may_craft(&inv, &ui));
+        assert!(a.may_craft(&inv, &ui, &None));
         let feed = a.record(
             Pending { kind: Asked::Interact(InteractKind::Feed), mob: Some(MobType::Cow), hotbar_slot: 0, held: Some(wheat) },
             1,
         );
-        assert!(!a.may_craft(&inv, &ui), "crafting would spend the wheat the feed needs");
+        assert!(!a.may_craft(&inv, &ui, &None), "crafting would spend the wheat the feed needs");
         // A fourth wheat in the inventory covers the claim: the craft goes.
         let spare = inv_with(9, ItemStack::new_material(MaterialId::Wheat, 1));
-        assert!(a.may_craft(&spare, &ui));
+        assert!(a.may_craft(&spare, &ui, &None));
         // A craft from other items is never gated by the wheat claim.
         let mut planks = CraftingUi::new();
         planks.open_player_crafting(&Inventory::new(), &[None; 4]);
         for (r, c) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
             planks.grid[r][c] = Some(ItemStack::new_block(crate::block::OAK_PLANKS, 1));
         }
-        assert!(a.may_craft(&inv, &planks));
+        assert!(a.may_craft(&inv, &planks, &None));
         a.take(feed);
-        assert!(a.may_craft(&inv, &ui));
+        assert!(a.may_craft(&inv, &ui, &None));
     }
 
     /// Decision 5 — a claim counts the grid and the cursor too: the only
@@ -1416,13 +1548,13 @@ mod tests {
         let mut ui = CraftingUi::new();
         let milk = Asked::Interact(InteractKind::Milk);
         let mut a = JoinerActions::default();
-        assert!(!a.can_afford(&inv, &ui, milk, Some(&bucket)), "no bucket anywhere");
+        assert!(!a.can_afford(&inv, &ui, &None, milk, Some(&bucket)), "no bucket anywhere");
         ui.cursor_item = Some(ItemStack::new_material(MaterialId::Bucket, 1));
-        assert!(a.can_afford(&inv, &ui, milk, Some(&bucket)), "the cursor's bucket counts");
+        assert!(a.can_afford(&inv, &ui, &None, milk, Some(&bucket)), "the cursor's bucket counts");
         milk_pending(&mut a);
-        assert!(!a.can_afford(&inv, &ui, milk, Some(&bucket)));
+        assert!(!a.can_afford(&inv, &ui, &None, milk, Some(&bucket)));
         ui.grid[0][0] = Some(ItemStack::new_material(MaterialId::Bucket, 1));
-        assert!(a.can_afford(&inv, &ui, milk, Some(&bucket)), "and so does the grid's");
+        assert!(a.can_afford(&inv, &ui, &None, milk, Some(&bucket)), "and so does the grid's");
     }
 
     /// Decision 5 (and C2a verify L6) — an accepted outcome is paid from the
@@ -1553,24 +1685,24 @@ mod tests {
         // `take` drained nothing older than an entry it didn't find: the Eat
         // still claims one of the two loaves.
         assert!(a.eat_in_flight(), "the Eat still claims");
-        assert!(a.can_spend(&inv, &ui, &bread, 1), "one loaf is unclaimed");
-        assert!(!a.can_spend(&inv, &ui, &bread, 2), "a Q-drop of the claimed loaf is refused");
+        assert!(a.can_spend(&inv, &ui, &None, &bread, 1), "one loaf is unclaimed");
+        assert!(!a.can_spend(&inv, &ui, &None, &bread, 2), "a Q-drop of the claimed loaf is refused");
         // C3c-2-fix (L4) — a swing claims nothing, so it is recorded as
         // non-claiming: the ledger isn't full of claims, and a new claim may
         // go — it evicts a swing, never the queued Eat.
-        assert!(a.can_afford(&inv, &ui, Asked::Interact(InteractKind::Feed), Some(&bread)), "the swings claim nothing");
-        assert!(a.can_afford(&inv, &ui, Asked::Swing, Some(&sword())), "one that claims nothing may still go");
+        assert!(a.can_afford(&inv, &ui, &None, Asked::Interact(InteractKind::Feed), Some(&bread)), "the swings claim nothing");
+        assert!(a.can_afford(&inv, &ui, &None, Asked::Swing, Some(&sword())), "one that claims nothing may still go");
         a.record(Pending { kind: Asked::Interact(InteractKind::Feed), mob: Some(MobType::Pig), hotbar_slot: 0, held: Some(bread.clone()) }, 7);
         assert_eq!(a.len(), MAX_PENDING);
         assert!(a.eat_in_flight(), "the Eat still claims: a swing went instead");
-        assert!(!a.can_spend(&inv, &ui, &bread, 1), "both loaves are claimed now");
+        assert!(!a.can_spend(&inv, &ui, &None, &bread, 1), "both loaves are claimed now");
         // The queue drains: the Eat goes out ahead of input 8, and the
         // server reads every input up to it.
         a.rebase(eat, 8);
         a.acknowledged(8);
         assert!(!a.eat_in_flight());
-        assert!(a.can_spend(&inv, &ui, &bread, 2), "the claims ended: both loaves are free");
-        assert!(a.can_afford(&inv, &ui, Asked::Interact(InteractKind::Feed), Some(&bread)), "and a new claim may go");
+        assert!(a.can_spend(&inv, &ui, &None, &bread, 2), "the claims ended: both loaves are free");
+        assert!(a.can_afford(&inv, &ui, &None, Asked::Interact(InteractKind::Feed), Some(&bread)), "and a new claim may go");
     }
 
     /// C3b-fix-e (L7) — the send path's one decision about a request's
@@ -1590,20 +1722,20 @@ mod tests {
         let seq = eat(&mut a);
         a.settle(Some(seq), RequestFate::Sent { next_input_seq: 12 });
         a.acknowledged(11);
-        assert!(!a.can_spend(&inv, &ui, &bread, 1), "an acknowledgement from before the send ends nothing");
+        assert!(!a.can_spend(&inv, &ui, &None, &bread, 1), "an acknowledgement from before the send ends nothing");
         a.acknowledged(12);
-        assert!(a.can_spend(&inv, &ui, &bread, 1), "read: free");
+        assert!(a.can_spend(&inv, &ui, &None, &bread, 1), "read: free");
         assert!(a.take(seq).is_some(), "the entry stays for its answer");
         // Discarded from the queue (the link closed): released at once.
         let mut a = JoinerActions::default();
         let seq = eat(&mut a);
         a.settle(Some(seq), RequestFate::Discarded);
-        assert!(a.can_spend(&inv, &ui, &bread, 1) && a.len() == 0, "released");
+        assert!(a.can_spend(&inv, &ui, &None, &bread, 1) && a.len() == 0, "released");
         // No connection to send it on: released at once.
         let mut a = JoinerActions::default();
         let seq = eat(&mut a);
         a.settle(Some(seq), RequestFate::NoConnection);
-        assert!(a.can_spend(&inv, &ui, &bread, 1) && a.len() == 0, "released");
+        assert!(a.can_spend(&inv, &ui, &None, &bread, 1) && a.len() == 0, "released");
         // No seq: nothing settles.
         let mut a = JoinerActions::default();
         eat(&mut a);
@@ -1654,10 +1786,10 @@ mod tests {
         for _ in 0..MAX_PENDING {
             a.record(eat(), UNTIL_SENT);
         }
-        assert!(!a.can_afford(&inv, &ui, Asked::Cast, Some(&rod)), "a cast would evict a queued Eat");
-        assert!(!a.can_afford(&inv, &ui, Asked::Reel, Some(&rod)));
+        assert!(!a.can_afford(&inv, &ui, &None, Asked::Cast, Some(&rod)), "a cast would evict a queued Eat");
+        assert!(!a.can_afford(&inv, &ui, &None, Asked::Reel, Some(&rod)));
         let light = Asked::Light { cell: [1, 2, 3], lighter: crate::block_use::Lighter::Firestarter };
-        assert!(!a.can_afford(&inv, &ui, light, Some(&firestarter)));
+        assert!(!a.can_afford(&inv, &ui, &None, light, Some(&firestarter)));
         // A cast recorded first, then 63 Eats: one more Eat may go, and the
         // cast is what it evicts.
         let mut b = JoinerActions::default();
@@ -1666,10 +1798,10 @@ mod tests {
         for _ in 0..MAX_PENDING - 1 {
             eats.push(b.record(eat(), UNTIL_SENT));
         }
-        assert!(b.can_afford(&inv, &ui, Asked::Eat, Some(&bread)), "the cast claims nothing");
+        assert!(b.can_afford(&inv, &ui, &None, Asked::Eat, Some(&bread)), "the cast claims nothing");
         eats.push(b.record(eat(), UNTIL_SENT));
         assert_eq!(b.len(), MAX_PENDING);
-        assert!(!b.can_spend(&inv, &ui, &bread, 1), "all 64 Eats still claim");
+        assert!(!b.can_spend(&inv, &ui, &None, &bread, 1), "all 64 Eats still claim");
         b.release(cast);
         assert_eq!(b.len(), MAX_PENDING, "the cast was the one evicted");
     }
@@ -1691,20 +1823,20 @@ mod tests {
         let mut inv = inv_with(0, ItemStack::new_tool(last));
         inv.set_slot(9, Some(ItemStack::new_material(MaterialId::Arrow, 10)));
         let mut a = JoinerActions::default();
-        assert!(a.can_afford(&inv, &ui, shoot, Some(&arrow)));
+        assert!(a.can_afford(&inv, &ui, &None, shoot, Some(&arrow)));
         a.record(shot(), 5);
-        assert!(!a.can_afford(&inv, &ui, shoot, Some(&arrow)), "its last use is claimed");
-        assert!(!a.can_spend(&inv, &ui, &Item::Tool(last), 1), "nor can it be dropped meanwhile");
-        assert!(a.can_spend(&inv, &ui, &arrow, 9), "the other nine arrows are free");
+        assert!(!a.can_afford(&inv, &ui, &None, shoot, Some(&arrow)), "its last use is claimed");
+        assert!(!a.can_spend(&inv, &ui, &None, &Item::Tool(last), 1), "nor can it be dropped meanwhile");
+        assert!(a.can_spend(&inv, &ui, &None, &arrow, 9), "the other nine arrows are free");
         a.acknowledged(5);
-        assert!(a.can_afford(&inv, &ui, shoot, Some(&arrow)), "read: free again");
+        assert!(a.can_afford(&inv, &ui, &None, shoot, Some(&arrow)), "read: free again");
         // A fresh bow: shots in flight up to its uses left.
         let fresh = Tool::new(ToolType::Bow, ToolMaterial::Wood);
         let mut inv = inv_with(0, ItemStack::new_tool(fresh));
         inv.set_slot(9, Some(ItemStack::new_material(MaterialId::Arrow, 10)));
         let mut b = JoinerActions::default();
         for _ in 0..5 {
-            assert!(b.can_afford(&inv, &ui, shoot, Some(&arrow)), "wear to spare");
+            assert!(b.can_afford(&inv, &ui, &None, shoot, Some(&arrow)), "wear to spare");
             b.record(shot(), 5);
         }
         // A second bow of the kind carries the dropped one's claims.
@@ -1712,6 +1844,6 @@ mod tests {
         two.set_slot(1, Some(ItemStack::new_tool(last)));
         let mut c = JoinerActions::default();
         c.record(shot(), 5);
-        assert!(c.can_spend(&two, &ui, &Item::Tool(last), 1), "the fresh bow still covers the shot");
+        assert!(c.can_spend(&two, &ui, &None, &Item::Tool(last), 1), "the fresh bow still covers the shot");
     }
 }

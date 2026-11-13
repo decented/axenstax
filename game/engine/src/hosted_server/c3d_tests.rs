@@ -301,7 +301,7 @@ fn c3d_actual_hosted_lost_receipt_teardown_saves_the_pending_grant_and_take() {
     sp.inventory.set_slot(0, Some(crate::item::ItemStack::new_block(crate::block::STONE, 5)));
     let stone = crate::item::Item::Block(crate::block::STONE);
     crate::window_events::queue(sp, crate::window_events::WindowEvent::Grant(crate::item::ItemStack::new_block(crate::block::DIRT, 3)), 0);
-    crate::window_events::queue(sp, crate::window_events::WindowEvent::Take { slot: 0, item: stone, n: 2, how: "test" }, 0);
+    crate::window_events::queue(sp, crate::window_events::WindowEvent::Take { hand: crate::hands::Hand::Main, slot: 0, item: stone, n: 2, how: "test" }, 0);
     assert_eq!(sp.window_events.waiting(), 2, "a Grant and a Take wait at teardown");
     let cell = |n: i32| protocol::BlockChange::with_meta(n % 1000, 200, n / 1000, crate::block::STONE, 0);
     let backlog: Vec<_> = (0..8_000).map(cell).collect();

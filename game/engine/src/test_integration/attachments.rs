@@ -33,7 +33,7 @@ impl Client {
         let (held_kind, held_id) = held.as_ref().map_or(protocol::ItemRef::Empty.to_wire(), |i| crate::inventory::item_to_ref(i).to_wire());
         let held_full = held.as_ref().map_or(protocol::WireItem::None, crate::inventory::item_to_wire_full);
         let asked = Asked::Attach { cell, face: face as u8 };
-        if !self.actions.can_afford(&self.inv, &self.ui, asked, held.as_ref()) {
+        if !self.actions.can_afford(&self.inv, &self.ui, &None, asked, held.as_ref()) {
             return false;
         }
         let seq = self.actions.record(Pending { kind: asked, mob: None, hotbar_slot: hot, held }, self.input_seq + 1);
@@ -47,7 +47,7 @@ impl Client {
             held_id,
             held_full,
         };
-        let pkt = protocol::ItemActionPacket { seq, action, events_applied: self.events };
+        let pkt = protocol::ItemActionPacket { seq, action, events_applied: self.events, hand: crate::hands::Hand::Main };
         self.transport.send_to_server(&protocol::serialize_packet(protocol::PacketType::ItemAction, &pkt));
         true
     }
@@ -57,7 +57,7 @@ impl Client {
         let asked = Asked::Detach { cell, face: face as u8 };
         let seq = self.actions.record(Pending { kind: asked, mob: None, hotbar_slot: 0, held: None }, self.input_seq + 1);
         let action = ItemAction::Detach { x: cell[0], y: cell[1], z: cell[2], face: face as u8 };
-        let pkt = protocol::ItemActionPacket { seq, action, events_applied: self.events };
+        let pkt = protocol::ItemActionPacket { seq, action, events_applied: self.events, hand: crate::hands::Hand::Main };
         self.transport.send_to_server(&protocol::serialize_packet(protocol::PacketType::ItemAction, &pkt));
         true
     }
@@ -328,8 +328,7 @@ fn a_joiners_capture_commit_spends_the_servers_paper_once() {
             spent: None,
             plan: protocol::WireItem::Plan { marker, developed: false },
         },
-        events_applied: rig.cs[0].events,
-    };
+        events_applied: rig.cs[0].events, hand: crate::hands::Hand::Main };
     rig.cs[0].transport.send_to_server(&protocol::serialize_packet(protocol::PacketType::ItemAction, &pkt));
     rig.ticks(3);
     for t in tiles {
@@ -494,7 +493,7 @@ fn smallfix_capture_commit_preflights_reach_extent_and_every_plot_before_removin
         let pkt = protocol::ItemActionPacket { seq: 1, events_applied: rig.cs[0].events,
             action: ItemAction::PlanMinted { source: crate::plan_mint::MintSource::CaptureCommit.to_wire(),
                 x: start[0], y: start[1], z: start[2], face: TOP as u8, hotbar_slot: 0, spent: None,
-                plan: protocol::WireItem::Plan { marker: [19; 32], developed: false } } };
+                plan: protocol::WireItem::Plan { marker: [19; 32], developed: false } }, hand: crate::hands::Hand::Main };
         rig.cs[0].transport.send_to_server(&protocol::serialize_packet(protocol::PacketType::ItemAction, &pkt));
         rig.ticks(3);
         for t in tiles { assert_eq!(rig.holds(t, TOP), Some(FaceAttachment::BlueprintBlank), "case {case} leaves all paper intact"); }

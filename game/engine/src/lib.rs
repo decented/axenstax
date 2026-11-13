@@ -2119,7 +2119,7 @@ impl GameState {
         // `GameMode::Playing` below. Used by the dev-side screenshot capture
         // path when no input-injection tool (xdotool) is available.
         if std::env::var("AXENSTAX_AUTO_INVENTORY").ok().as_deref() == Some("1") {
-            player0.crafting_ui.open_player_crafting(&player0.inventory, &player0.armour_slots);
+            player0.crafting_ui.open_player_crafting(&player0.inventory, &player0.armour_slots, &player0.offhand);
             log::info!("AXENSTAX_AUTO_INVENTORY=1 — booting into Playing with crafting UI open");
         }
         let screens = crate::screen::compute_screen_layout(1, renderer.width, renderer.height);

@@ -48,8 +48,7 @@ fn send_shot(j: &mut Joiner, tool: crate::crafting::Tool) -> ActionHeader {
     let req = protocol::ItemActionPacket {
         seq: shot.seq as u32,
         action: protocol::ItemAction::Shoot { weapon: protocol::ShotWeapon::Bow, hotbar_slot: 0, held_kind, held_id, held_full: crate::inventory::item_to_wire_full(&item), yaw: 0.0, pitch: 0.0, charge: 20 },
-        events_applied: shot.events_applied,
-    };
+        events_applied: shot.events_applied, hand: crate::hands::Hand::Main };
     j.client.send_to_server(&protocol::serialize_packet(protocol::PacketType::Action, &ActionPacket { action: shot, intent: ActionIntent::Item(req) }));
     shot
 }

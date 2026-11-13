@@ -225,6 +225,18 @@ impl HostedServer {
                 // C3d run 6 — a plain placement or a mined break
                 // (`strict_edit.rs`); a use-tagged edit still waits for its
                 // typed class.
+                // v101 (off-hand plan, slice 2) — a Strict seat's typed
+                // actions are judged by the main hand only; an off-hand claim
+                // is never believed (an honest Strict client sends none).
+                ActionIntent::Edit { hand, .. } if self.strict_slot(i) && hand.3 == crate::hands::Hand::Off => {
+                    return self.pause_typed_action(i, StrictTeardown::Untyped, "An off-hand edit is not typed on a Strict seat");
+                }
+                ActionIntent::Item(req) if self.strict_slot(i) && req.hand == crate::hands::Hand::Off => {
+                    return self.pause_typed_action(i, StrictTeardown::Untyped, "An off-hand item action is not typed on a Strict seat");
+                }
+                ActionIntent::Interact(req) if self.strict_slot(i) && req.hand == crate::hands::Hand::Off => {
+                    return self.pause_typed_action(i, StrictTeardown::Untyped, "An off-hand interaction is not typed on a Strict seat");
+                }
                 ActionIntent::Edit { change, hand, mined, use_tag: None, old, .. } if self.strict_slot(i) => {
                     if !self.serve_strict_edit(i, packet.action, &change, hand, mined.as_ref(), old, budget) { return; }
                 }
@@ -532,8 +544,8 @@ impl HostedServer {
             self.refuse_typed_action(i, action); return false;
         }
         let events = vec![
-            crate::window_events::WindowEvent::Take { slot: slot as usize, item: Item::Material(crate::shot::ammo_for(weapon)), n: 1, how: "on a shot" },
-            crate::window_events::WindowEvent::WearWeapon { slot: slot as usize, tool: historical },
+            crate::window_events::WindowEvent::Take { hand: crate::hands::Hand::Main, slot: slot as usize, item: Item::Material(crate::shot::ammo_for(weapon)), n: 1, how: "on a shot" },
+            crate::window_events::WindowEvent::WearWeapon { hand: crate::hands::Hand::Main, slot: slot as usize, tool: historical },
         ].into_boxed_slice();
         match crate::window_events::stage_strict_effects(sp, &self.server.registry, &events) {
             Ok(()) => {}
@@ -686,7 +698,7 @@ pub(super) mod commit_fault {
     }
     pub fn after_commit(sp: &mut crate::server::ServerPlayer) {
         if SHORT_TAKE_AFTER_COMMIT.with(|f| f.get()) {
-            let take = crate::window_events::WindowEvent::Take { slot: 35, item: crate::item::Item::Block(crate::block::BEDROCK), n: 1, how: "fault seam" };
+            let take = crate::window_events::WindowEvent::Take { hand: crate::hands::Hand::Main, slot: 35, item: crate::item::Item::Block(crate::block::BEDROCK), n: 1, how: "fault seam" };
             crate::window_events::queue(sp, take, 0);
         }
         if OWE_AFTER_COMMIT.with(|f| f.get()) {

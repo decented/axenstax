@@ -14,7 +14,7 @@ pub(crate) enum CraftClose {
 }
 
 impl GameState {
-    fn strict_window_connection(&self) -> bool {
+    pub(crate) fn strict_window_connection(&self) -> bool {
         self.remote_client.as_ref().is_some_and(|r| r.inventory_mode == InventoryMode::Strict)
     }
     /// C3d run 6 — a Strict joiner whose body is dead, or whose Respawn is
@@ -38,16 +38,24 @@ impl GameState {
         log::warn!("Joined window action could not be retained: {error}");
         self.toast = Some(("Inventory action is waiting; try again.".into(), web_time::Instant::now() + web_time::Duration::from_secs(2)));
     }
+    /// F, or a tap on the off-hand box: swap player `pidx`'s selected hotbar
+    /// slot with its off-hand, as a window click (`WindowClick::SwapHands`),
+    /// so a joined client's server copy swaps by the same rule.
+    pub(crate) fn swap_hands(&mut self, pidx: usize) -> ClickResult {
+        let slot = self.players[pidx].hotbar_slot;
+        self.apply_window_click(pidx, &WindowClick::SwapHands { slot })
+    }
+
     pub(crate) fn apply_window_click(&mut self, pidx: usize, click: &WindowClick) -> ClickResult {
         if self.pack_window_frozen(pidx) { return ClickResult::Refused; }
         if pidx == 0 && self.remote_client.as_ref().is_some_and(|r| !r.personal_ready()) { return ClickResult::Refused; }
         if !self.strict_window_connection() {
             let p = &mut self.players[pidx];
-            return p.crafting_ui.apply_click(&mut p.inventory, &mut p.armour_slots, click, self.is_creative, p.player.eye_pos(), |cell| self.world.get_block(cell[0], cell[1], cell[2]));
+            return p.crafting_ui.apply_click(&mut p.inventory, &mut p.armour_slots, &mut p.offhand, click, self.is_creative, p.player.eye_pos(), |cell| self.world.get_block(cell[0], cell[1], cell[2]));
         }
         let p = &mut self.players[pidx];
         let ctx = ClickCtx::new(self.is_creative, p.crafting_ui.station(), p.player.eye_pos(), |cell| self.world.get_block(cell[0], cell[1], cell[2]));
-        let result = p.crafting_ui.apply_joined_click(self.remote_client.as_mut().expect("strict connection"), &mut p.inventory, &mut p.armour_slots, click, &ctx, &self.registry);
+        let result = p.crafting_ui.apply_joined_click(self.remote_client.as_mut().expect("strict connection"), &mut p.inventory, &mut p.armour_slots, &mut p.offhand, click, &ctx, &self.registry);
         match result { Ok(result) => result, Err(error) => { self.window_action_failed(error); ClickResult::Refused } }
     }
     /// Close player `pidx`'s crafting screen (Esc, E, a pause): the grid and
@@ -57,10 +65,10 @@ impl GameState {
         if self.strict_window_frozen(pidx) { return CraftClose::Frozen; }
         let closed = if !self.strict_window_connection() {
             let p = &mut self.players[pidx];
-            p.crafting_ui.close(&mut p.inventory, &mut p.armour_slots)
+            p.crafting_ui.close(&mut p.inventory, &mut p.armour_slots, &mut p.offhand)
         } else {
             let p = &mut self.players[pidx];
-            let result = p.crafting_ui.close_joined(self.remote_client.as_mut().expect("strict connection"), &mut p.inventory, &mut p.armour_slots, &self.registry);
+            let result = p.crafting_ui.close_joined(self.remote_client.as_mut().expect("strict connection"), &mut p.inventory, &mut p.armour_slots, &mut p.offhand, &self.registry);
             match result { Ok(closed) => closed, Err(error) => { self.window_action_failed(error); false } }
         };
         if closed { CraftClose::Closed } else { CraftClose::Refused }
@@ -83,10 +91,10 @@ impl GameState {
         if self.strict_window_frozen(pidx) { return false; }
         if !self.strict_window_connection() {
             let p = &mut self.players[pidx];
-            return p.crafting_ui.force_close(&mut p.inventory, &mut p.armour_slots, new_tick);
+            return p.crafting_ui.force_close(&mut p.inventory, &mut p.armour_slots, &mut p.offhand, new_tick);
         }
         let p = &mut self.players[pidx];
-        let result = p.crafting_ui.force_close_joined(self.remote_client.as_mut().expect("strict connection"), &mut p.inventory, &mut p.armour_slots, &self.registry, new_tick);
+        let result = p.crafting_ui.force_close_joined(self.remote_client.as_mut().expect("strict connection"), &mut p.inventory, &mut p.armour_slots, &mut p.offhand, &self.registry, new_tick);
         match result { Ok(closed) => closed, Err(error) => { self.window_action_failed(error); false } }
     }
     /// Open player `pidx`'s 2×2 grid (E) or the crafting table at `table`:
@@ -103,10 +111,10 @@ impl GameState {
         if pidx == 0 && self.remote_client.as_ref().is_some_and(|r| !r.personal_ready()) { return; }
         let p = &mut self.players[pidx];
         if !self.remote_client.as_ref().is_some_and(|r| r.inventory_mode == InventoryMode::Strict) {
-            p.crafting_ui.open_crafting(table, &mut p.inventory, &mut p.armour_slots);
+            p.crafting_ui.open_crafting(table, &mut p.inventory, &mut p.armour_slots, &mut p.offhand);
             return;
         }
-        let result = p.crafting_ui.open_joined(self.remote_client.as_mut().expect("strict connection"), table, &mut p.inventory, &mut p.armour_slots, &self.registry);
+        let result = p.crafting_ui.open_joined(self.remote_client.as_mut().expect("strict connection"), table, &mut p.inventory, &mut p.armour_slots, &mut p.offhand, &self.registry);
         if let Err(error) = result { self.window_action_failed(error); }
     }
     /// A joiner asks to open the shared container at `cell` (logged in
@@ -116,10 +124,10 @@ impl GameState {
         if pidx == 0 && self.remote_client.as_ref().is_some_and(|r| !r.personal_ready()) { return; }
         let p = &mut self.players[pidx];
         if !self.remote_client.as_ref().is_some_and(|r| r.inventory_mode == InventoryMode::Strict) {
-            p.crafting_ui.log_open_container(cell, &p.inventory, &p.armour_slots);
+            p.crafting_ui.log_open_container(cell, &p.inventory, &p.armour_slots, &p.offhand);
             return;
         }
-        let result = p.crafting_ui.open_container_joined(self.remote_client.as_mut().expect("strict connection"), cell, &p.inventory, &p.armour_slots);
+        let result = p.crafting_ui.open_container_joined(self.remote_client.as_mut().expect("strict connection"), cell, &p.inventory, &p.armour_slots, &p.offhand);
         if let Err(error) = result { self.window_action_failed(error); }
     }
     /// One click on player `pidx`'s shared container mirror. In Strict the
@@ -135,9 +143,9 @@ impl GameState {
         let Some(cell) = mirror.block_cell() else { return refused() };
         let p = &mut self.players[pidx];
         if !self.remote_client.as_ref().is_some_and(|r| r.inventory_mode == InventoryMode::Strict) {
-            return p.crafting_ui.apply_container_click(&mut p.inventory, &mut p.armour_slots, mirror.as_mut(), click, ctx);
+            return p.crafting_ui.apply_container_click(&mut p.inventory, &mut p.armour_slots, &mut p.offhand, mirror.as_mut(), click, ctx);
         }
-        let result = p.crafting_ui.apply_container_click_joined(self.remote_client.as_mut().expect("strict connection"), &mut p.inventory, &mut p.armour_slots, mirror.as_mut(), cell, click, ctx, &self.registry);
+        let result = p.crafting_ui.apply_container_click_joined(self.remote_client.as_mut().expect("strict connection"), &mut p.inventory, &mut p.armour_slots, &mut p.offhand, mirror.as_mut(), cell, click, ctx, &self.registry);
         match result {
             Ok(applied) => applied,
             Err(error) => { self.window_action_failed(error); crate::container_window::ContainerApplied { result: ClickResult::Refused, touched: Vec::new() } }
@@ -150,10 +158,10 @@ impl GameState {
         if self.pack_window_frozen(pidx) { return; }
         let p = &mut self.players[pidx];
         if !self.remote_client.as_ref().is_some_and(|r| r.inventory_mode == InventoryMode::Strict) {
-            p.crafting_ui.close_container(&mut p.inventory, &mut p.armour_slots);
+            p.crafting_ui.close_container(&mut p.inventory, &mut p.armour_slots, &mut p.offhand);
             return;
         }
-        let result = p.crafting_ui.close_container_joined(self.remote_client.as_mut().expect("strict connection"), &mut p.inventory, &mut p.armour_slots, &self.registry);
+        let result = p.crafting_ui.close_container_joined(self.remote_client.as_mut().expect("strict connection"), &mut p.inventory, &mut p.armour_slots, &mut p.offhand, &self.registry);
         if let Err(error) = result { self.window_action_failed(error); }
     }
 }

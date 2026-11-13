@@ -1661,7 +1661,7 @@ mod tests {
         assert!(!hg.state.joiner_actions.eat_in_flight(), "its claim is released");
         let p = &hg.state.players[0];
         let bread = Item::Material(MaterialId::Bread);
-        assert!(hg.state.joiner_actions.can_spend(&p.inventory, &p.crafting_ui, &bread, 1), "the bread is free");
+        assert!(hg.state.joiner_actions.can_spend(&p.inventory, &p.crafting_ui, &p.offhand, &bread, 1), "the bread is free");
     }
 
     /// C1 — a joiner's break through its REAL client: the survival break arm
@@ -4841,7 +4841,7 @@ mod tests {
             pack_wait(&mut server, &mut hg, |server, hg| !hg.state.pack_window_frozen(0) && server.server.players[slot].pack_flight.is_none() && floor(server) == 1);
             assert_eq!(hg.state.players[0].inventory.slots_iter().flatten().filter(|stack| stack.item == crate::item::Item::Block(crate::block::STONE)).map(|stack| u32::from(stack.count)).sum::<u32>(), 0);
             assert_eq!(server.server.players[slot].window_events.tally.unfit_returned, 1);
-            hg.state.remote_client.as_mut().unwrap().send_item_action(&crate::protocol::ItemActionPacket { seq: 0, action: crate::protocol::ItemAction::GrantUnfit { event: grant_event, count: 1 }, events_applied: 0 });
+            hg.state.remote_client.as_mut().unwrap().send_item_action(&crate::protocol::ItemActionPacket { seq: 0, action: crate::protocol::ItemAction::GrantUnfit { event: grant_event, count: 1 }, events_applied: 0, hand: crate::hands::Hand::Main });
             harness_step(&mut server, &mut hg);
             assert!(hg.state.remote_client.as_ref().unwrap().is_connected());
             assert!(server.server.players[slot].is_in_world());

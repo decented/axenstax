@@ -215,7 +215,7 @@ impl RemoteSetup {
         crate::pack_client::apply_canonical_window(
             &mut crate::window::WindowMut {
                 inv: &mut actor.inventory,
-                armour: &mut actor.armour_slots,
+                armour: &mut actor.armour_slots, offhand: &mut actor.offhand,
                 cursor: &mut actor.crafting_ui.cursor_item,
                 grid: &mut actor.crafting_ui.grid,
                 container: None,
@@ -380,7 +380,7 @@ fn native_cut(tag: &str, decline: bool) -> NativeCut {
     crate::inventory_sync::apply(
         &mut crate::window::WindowMut {
             inv: &mut actor.inventory,
-            armour: &mut actor.armour_slots,
+            armour: &mut actor.armour_slots, offhand: &mut actor.offhand,
             cursor: &mut actor.crafting_ui.cursor_item,
             grid: &mut actor.crafting_ui.grid,
             container: None,

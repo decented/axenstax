@@ -3,7 +3,12 @@
 
 use crate::{armour::ArmourItem, inventory::Inventory, item::{Item, ItemStack}, protocol::{WireSlot, WireStack}, window::{self, ClickCtx, ClickResult, CraftGrid, WindowClick, WindowMut, WindowSlot}};
 
-pub const PLAYER_PLACES: usize = 50;
+/// The player window's places, in wire order: the 36 slots (0..36), the four
+/// armour slots (36..40), the cursor ([`CURSOR`]), the nine grid cells
+/// (41..50) and (v101, off-hand plan slice 2) the off-hand ([`OFFHAND`]).
+pub const PLAYER_PLACES: usize = 51;
+/// v101 — the off-hand's place.
+pub const OFFHAND: usize = 50;
 pub const CURSOR: usize = 40;
 pub type MarkerSlots = [WireSlot; PLAYER_PLACES];
 
@@ -13,6 +18,7 @@ pub type MarkerSlots = [WireSlot; PLAYER_PLACES];
 pub struct MarkerWindow {
     inv: Inventory,
     armour: [Option<ArmourItem>; 4],
+    offhand: Option<ItemStack>,
     cursor: Option<ItemStack>,
     grid: CraftGrid,
 }
@@ -20,10 +26,10 @@ pub struct MarkerWindow {
 impl MarkerWindow {
     #[cfg_attr(not(test), expect(dead_code, reason = "C3d client reserve-before-predict milestone (stages the client's own WindowMut)"))]
     pub fn capture(view: &WindowMut, registry: &crate::block::BlockRegistry) -> Self {
-        Self::capture_parts(view.inv, view.armour, view.cursor, view.grid, registry)
+        Self::capture_parts(view.inv, view.armour, view.offhand, view.cursor, view.grid, registry)
     }
 
-    pub fn capture_parts(inv: &Inventory, armour: &[Option<ArmourItem>; 4], cursor: &Option<ItemStack>, grid: &CraftGrid, registry: &crate::block::BlockRegistry) -> Self {
+    pub fn capture_parts(inv: &Inventory, armour: &[Option<ArmourItem>; 4], offhand: &Option<ItemStack>, cursor: &Option<ItemStack>, grid: &CraftGrid, registry: &crate::block::BlockRegistry) -> Self {
         let marker = |s: &ItemStack| crate::inventory::stack_from_wire(&crate::inventory::stack_to_wire(s), registry, crate::inventory::PlanDecode::Marker);
         let mut copied = Inventory::new();
         copied.auto_refill = inv.auto_refill;
@@ -31,7 +37,7 @@ impl MarkerWindow {
             copied.set_slot(slot, inv.slot(slot).and_then(marker));
             if inv.is_locked(slot) { copied.toggle_lock(slot); }
         }
-        Self { inv: copied, armour: *armour, cursor: cursor.as_ref().and_then(marker),
+        Self { inv: copied, armour: *armour, offhand: offhand.as_ref().and_then(marker), cursor: cursor.as_ref().and_then(marker),
             grid: std::array::from_fn(|r| std::array::from_fn(|c| grid[r][c].as_ref().and_then(marker))) }
     }
 
@@ -42,28 +48,28 @@ impl MarkerWindow {
     /// armour piece, an unregistered block, a clamped durability) is
     /// `None`: the caller refuses with a typed fate before any commit,
     /// never dropping or clamping it silently.
-    pub fn try_capture_parts(inv: &Inventory, armour: &[Option<ArmourItem>; 4], cursor: &Option<ItemStack>, grid: &CraftGrid, registry: &crate::block::BlockRegistry) -> Option<Self> {
+    pub fn try_capture_parts(inv: &Inventory, armour: &[Option<ArmourItem>; 4], offhand: &Option<ItemStack>, cursor: &Option<ItemStack>, grid: &CraftGrid, registry: &crate::block::BlockRegistry) -> Option<Self> {
         let exact = |s: &ItemStack| exact_marker(s, registry).is_some();
         let armour_ok = armour.iter().flatten().all(|a| exact(&ItemStack { item: Item::Armour(*a), count: 1 }));
-        let all = (0..36).filter_map(|i| inv.slot(i)).chain(cursor.as_ref()).chain(grid.iter().flatten().flatten());
+        let all = (0..36).filter_map(|i| inv.slot(i)).chain(offhand.as_ref()).chain(cursor.as_ref()).chain(grid.iter().flatten().flatten());
         let places_ok = all.into_iter().all(exact);
-        (armour_ok && places_ok).then(|| Self::capture_parts(inv, armour, cursor, grid, registry))
+        (armour_ok && places_ok).then(|| Self::capture_parts(inv, armour, offhand, cursor, grid, registry))
     }
 
     /// Moves marker-only holdings into the server's raw window after admission.
-    pub(crate) fn into_parts(self) -> (Inventory, [Option<ArmourItem>; 4], Option<ItemStack>, CraftGrid) {
-        (self.inv, self.armour, self.cursor, self.grid)
+    pub(crate) fn into_parts(self) -> (Inventory, [Option<ArmourItem>; 4], Option<ItemStack>, Option<ItemStack>, CraftGrid) {
+        (self.inv, self.armour, self.offhand, self.cursor, self.grid)
     }
 
     pub fn view(&mut self) -> WindowMut<'_> {
-        WindowMut { inv: &mut self.inv, armour: &mut self.armour, cursor: &mut self.cursor, grid: &mut self.grid, container: None }
+        WindowMut { inv: &mut self.inv, armour: &mut self.armour, offhand: &mut self.offhand, cursor: &mut self.cursor, grid: &mut self.grid, container: None }
     }
 
     /// The window digest (`window::digest_with`) at `station`, with the
     /// container `container` as the screen shows it (a Strict container op's
     /// digest covers the mirror, C3d shared containers).
     pub fn digest_with(&self, station: window::Station, container: Option<crate::container_window::ContainerRef>) -> u32 {
-        window::digest_with(&self.inv, &self.armour, &self.cursor, &self.grid, station, container)
+        window::digest_with(&self.inv, &self.armour, &self.offhand, &self.cursor, &self.grid, station, container)
     }
 
     /// A Strict `SetAutoRefill` stages the setting on the scratch copy.
@@ -74,6 +80,7 @@ impl MarkerWindow {
             0..36 => self.inv.slot(at).map(crate::inventory::stack_to_wire),
             36..40 => self.armour[at - 36].map(|a| crate::inventory::stack_to_wire(&ItemStack { item: Item::Armour(a), count: 1 })),
             CURSOR => self.cursor.as_ref().map(crate::inventory::stack_to_wire),
+            OFFHAND => self.offhand.as_ref().map(crate::inventory::stack_to_wire),
             _ => self.grid[(at - 41) / 3][(at - 41) % 3].as_ref().map(crate::inventory::stack_to_wire),
         })
     }
@@ -151,7 +158,7 @@ pub fn stage_with(raw: &MarkerWindow, click: &WindowClick, station: window::Stat
 pub fn stage_container(raw: &MarkerWindow, container: &mut crate::container_window::ContainerData, click: &crate::container_window::ContainerClick, ctx: &ClickCtx) -> StagedClick {
     let mut after = raw.clone();
     let applied = {
-        let mut view = WindowMut { inv: &mut after.inv, armour: &mut after.armour, cursor: &mut after.cursor, grid: &mut after.grid, container: Some(container.as_mut()) };
+        let mut view = WindowMut { inv: &mut after.inv, armour: &mut after.armour, offhand: &mut after.offhand, cursor: &mut after.cursor, grid: &mut after.grid, container: Some(container.as_mut()) };
         crate::container_window::apply_container(&mut view, click, ctx)
     };
     let before = raw.slots();
@@ -218,7 +225,7 @@ fn same_identity(a: &WireStack, b: &WireStack) -> bool {
 mod tests {
     use super::*;
     fn raw(inv: &mut Inventory, grid: &mut CraftGrid, cursor: &mut Option<ItemStack>) -> MarkerWindow {
-        MarkerWindow::capture(&WindowMut { inv, armour: &mut [None; 4], cursor, grid, container: None }, &crate::block::BlockRegistry::new())
+        MarkerWindow::capture(&WindowMut { inv, armour: &mut [None; 4], offhand: &mut None, cursor, grid, container: None }, &crate::block::BlockRegistry::new())
     }
     fn ctx() -> ClickCtx { ClickCtx::new(false, window::Station::Player, glam::Vec3::ZERO, |_| crate::block::AIR) }
 

@@ -30,11 +30,11 @@ impl Client {
     /// slot `hot`, as `GameState::send_use_request` does: claimed, recorded,
     /// sent. `false` when the claim stops it (nothing sent).
     fn request(&mut self, asked: Asked, held: Option<Item>, hot: usize, action: ItemAction) -> bool {
-        if !self.actions.can_afford(&self.inv, &self.ui, asked, held.as_ref()) {
+        if !self.actions.can_afford(&self.inv, &self.ui, &None, asked, held.as_ref()) {
             return false;
         }
         let seq = self.actions.record(Pending { kind: asked, mob: None, hotbar_slot: hot, held }, self.input_seq + 1);
-        let pkt = protocol::ItemActionPacket { seq, action, events_applied: self.events };
+        let pkt = protocol::ItemActionPacket { seq, action, events_applied: self.events, hand: crate::hands::Hand::Main };
         self.transport.send_to_server(&protocol::serialize_packet(protocol::PacketType::ItemAction, &pkt));
         true
     }
@@ -339,7 +339,7 @@ fn a_second_shot_in_flight_cannot_spend_the_first_shots_arrow() {
     rig.hs.server.players[slot].next_shot_tick = 0;
     let (_, held_kind, held_id, held_full) = rig.cs[0].claim(0);
     let action = ItemAction::Shoot { weapon: ShotWeapon::Bow, hotbar_slot: 0, held_kind, held_id, held_full, yaw: 0.0, pitch: 1.5, charge: 0 };
-    let pkt = protocol::ItemActionPacket { seq: 900, action, events_applied: 0 };
+    let pkt = protocol::ItemActionPacket { seq: 900, action, events_applied: 0, hand: crate::hands::Hand::Main };
     rig.cs[0].transport.send_to_server(&protocol::serialize_packet(protocol::PacketType::ItemAction, &pkt));
     rig.hs.tick();
     rig.ticks(3);

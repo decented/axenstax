@@ -317,6 +317,24 @@ impl PendingEdits {
         self.stamps.first().copied()
     }
 
+    /// v101 (off-hand plan, slice 2) — an edit made with the off-hand: the
+    /// edits before it keep the selection they were made under (`before`),
+    /// and this one is stamped with its own hand now (`hand`, `Off`), so the
+    /// server charges it to the off-hand.
+    pub fn push_stamped(&mut self, edit: BlockChange, before: EditHand, hand: EditHand) {
+        self.stamp_hands(before);
+        self.push(edit);
+        self.hands.push(hand);
+    }
+
+    /// v101 — [`Self::push_use`] for a use made with the off-hand, stamped
+    /// as [`Self::push_stamped`] stamps.
+    pub fn push_use_stamped(&mut self, edit: BlockChange, tag: UseTag, before: EditHand, hand: EditHand) {
+        self.stamp_hands(before);
+        self.push_use(edit, tag);
+        self.hands.push(hand);
+    }
+
     /// Every edit without a hand yet was made with `hand` (the selection is
     /// about to change, or the input is going out).
     pub fn stamp_hands(&mut self, hand: EditHand) {
@@ -715,7 +733,7 @@ pub fn serve_op(
     }
     let mut view = WindowMut {
         inv: &mut sp.inventory,
-        armour: &mut sp.armour,
+        armour: &mut sp.armour, offhand: &mut sp.offhand,
         cursor: &mut sp.cursor,
         grid: &mut sp.craft_grid,
         container: None,
@@ -922,7 +940,7 @@ fn serve_container(
     let own = {
         let mut view = WindowMut {
             inv: &mut sp.inventory,
-            armour: &mut sp.armour,
+            armour: &mut sp.armour, offhand: &mut sp.offhand,
             cursor: &mut sp.cursor,
             grid: &mut sp.craft_grid,
             container: Some(own_after.as_mut()),
@@ -1087,14 +1105,14 @@ fn believed_units(sp: &ServerPlayer, r_gain: &container_window::ItemCounts) -> V
 }
 
 /// Units of `item` window `w` holds by exact identity (`==`) in the places
-/// an owed take can pay from: the 36 slots, the grid, the cursor and the
-/// armour slots ([`believed_units`], [`believe_pay`]).
+/// an owed take can pay from: the 36 slots, the grid, the cursor, (v101) the
+/// off-hand and the armour slots ([`believed_units`], [`believe_pay`]).
 fn held_units(w: &crate::window_events::EffectiveWindow, item: &crate::item::Item) -> u64 {
     let of = |s: Option<&ItemStack>| s.filter(|s| &s.item == item).map_or(0, |s| u64::from(s.count));
     let inv: u64 = w.inv.slots_iter().map(of).sum();
     let grid: u64 = w.grid.iter().flatten().map(|c| of(c.as_ref())).sum();
     let armour = w.armour.iter().flatten().filter(|p| &crate::item::Item::Armour(**p) == item).count() as u64;
-    inv + grid + of(w.cursor.as_ref()) + armour
+    inv + grid + of(w.cursor.as_ref()) + of(w.offhand.as_ref()) + armour
 }
 
 /// C3b-2-fix (M2) — joiner `sp`'s request pays `n` of `item` (an accepted
@@ -1136,7 +1154,10 @@ pub fn wear_short(sp: &ServerPlayer, tool: &crate::crafting::Tool) -> u32 {
     let like = |s: Option<&ItemStack>| {
         matches!(s.map(|s| &s.item), Some(crate::item::Item::Tool(t)) if t.tool_type == tool.tool_type && t.material == tool.material)
     };
-    let held = w.inv.slots_iter().any(like) || w.grid.iter().flatten().any(|c| like(c.as_ref())) || like(w.cursor.as_ref());
+    let held = w.inv.slots_iter().any(like)
+        || w.grid.iter().flatten().any(|c| like(c.as_ref()))
+        || like(w.cursor.as_ref())
+        || like(w.offhand.as_ref());
     u32::from(!held)
 }
 

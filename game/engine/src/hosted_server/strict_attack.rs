@@ -79,7 +79,7 @@ impl HostedServer {
                     self.refuse_typed_action(i, action); return false;
                 }
                 let damage = Item::Tool(*surviving).attack_damage();
-                (damage, vec![crate::window_events::WindowEvent::WearWeapon { slot, tool: *tool }])
+                (damage, vec![crate::window_events::WindowEvent::WearWeapon { hand: crate::hands::Hand::Main, slot, tool: *tool }])
             }
             Some(item) => (item.attack_damage(), Vec::new()),
             None => (1.0, Vec::new()),

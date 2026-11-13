@@ -134,6 +134,9 @@ pub enum WindowEvent {
     /// `n` of `item`, from `slot` first. `how` ends the shortfall's log line.
     Take {
         slot: usize,
+        /// v101 — the hand the use was made with: `Off` searches the
+        /// off-hand first (`joiner_actions::take_owed_search`).
+        hand: crate::hands::Hand,
         item: Item,
         n: u8,
         how: &'static str,
@@ -147,6 +150,8 @@ pub enum WindowEvent {
     /// (`joiner_actions::where_now` from `slot`).
     WearWeapon {
         slot: usize,
+        /// v101 — the hand the tool was used from (`Off`: the off-hand).
+        hand: crate::hands::Hand,
         tool: Tool,
     },
     /// C3b-fix-a (v78, C-M1) — a container view sent to the joiner (an
@@ -407,6 +412,7 @@ impl WindowEvents {
 struct Parts<'a> {
     inv: &'a mut Inventory,
     armour: &'a mut [Option<ArmourItem>; 4],
+    offhand: &'a mut Option<ItemStack>,
     cursor: &'a mut Option<ItemStack>,
     grid: &'a mut CraftGrid,
 }
@@ -442,6 +448,7 @@ fn apply_to(parts: &mut Parts, debt: &mut crate::container_window::CorrectionDeb
             // client installs the same); auto-refill stays the copy's own.
             parts.inv.set_locked_from(&w.inv.locked_indices());
             *parts.armour = w.armour;
+            *parts.offhand = w.offhand.clone();
             *parts.cursor = w.cursor.clone();
             *parts.grid = w.grid.clone();
             *debt = carried.clone();
@@ -451,8 +458,8 @@ fn apply_to(parts: &mut Parts, debt: &mut crate::container_window::CorrectionDeb
             let rest = parts.inv.add_item(stack.clone()).map_or(0, |r| r.count);
             Effect::Granted { landed: stack.count.saturating_sub(rest) }
         }
-        WindowEvent::Take { slot, item, n, .. } => Effect::Took {
-            taken: crate::joiner_actions::take_owed_window(parts.inv, parts.grid, parts.cursor, *slot, item, *n),
+        WindowEvent::Take { slot, hand, item, n, .. } => Effect::Took {
+            taken: crate::joiner_actions::take_owed_window(parts.inv, parts.grid, parts.cursor, parts.offhand, *slot, *hand, item, *n),
         },
         WindowEvent::WearArmour { hits } => {
             for _ in 0..*hits {
@@ -460,9 +467,10 @@ fn apply_to(parts: &mut Parts, debt: &mut crate::container_window::CorrectionDeb
             }
             Effect::Wore
         }
-        WindowEvent::WearWeapon { slot, tool } => {
-            let check = match crate::joiner_actions::where_now(parts.inv, *slot, &Item::Tool(*tool)) {
-                Some(at) => crate::joiner_inventory::wear_tool(parts.inv, at, tool),
+        WindowEvent::WearWeapon { hand, slot, tool } => {
+            let check = match crate::joiner_actions::where_now_hand(parts.inv, parts.offhand, *hand, *slot, &Item::Tool(*tool)) {
+                Some(crate::joiner_actions::HeldAt::Slot(at)) => crate::joiner_inventory::wear_tool(parts.inv, at, tool),
+                Some(crate::joiner_actions::HeldAt::Offhand) => crate::joiner_inventory::wear_offhand_tool(parts.offhand, tool),
                 None => crate::joiner_inventory::WearCheck::Mismatched,
             };
             Effect::Weapon(check)
@@ -471,7 +479,7 @@ fn apply_to(parts: &mut Parts, debt: &mut crate::container_window::CorrectionDeb
         #[cfg(not(target_arch = "wasm32"))]
         WindowEvent::PersonalSync(_) => Effect::Viewed,
         WindowEvent::Correction(c) => Effect::Corrected(
-            c.own.as_ref().map(|own| debt.apply(parts.inv, parts.grid, parts.cursor, parts.armour, own)),
+            c.own.as_ref().map(|own| debt.apply(parts.inv, parts.grid, parts.cursor, parts.armour, parts.offhand, own)),
         ),
     }
 }
@@ -594,7 +602,13 @@ fn apply_front(sp: &mut ServerPlayer, now: u64, forced: bool) {
     let mirror_locks = (!strict && matches!(w.event, WindowEvent::Replace { .. } | WindowEvent::PackCanonical { .. }))
         .then(|| sp.inventory.locked_indices());
     let mut parts =
-        Parts { inv: &mut sp.inventory, armour: &mut sp.armour, cursor: &mut sp.cursor, grid: &mut sp.craft_grid };
+        Parts {
+            inv: &mut sp.inventory,
+            armour: &mut sp.armour,
+            offhand: &mut sp.offhand,
+            cursor: &mut sp.cursor,
+            grid: &mut sp.craft_grid,
+        };
     let effect = apply_to(&mut parts, &mut sp.window_events.debt, &w.event);
     if let Some(locks) = mirror_locks {
         sp.inventory.set_locked_from(&locks);
@@ -851,6 +865,7 @@ pub fn effective_window_and_debt(sp: &ServerPlayer) -> EffectiveFold {
     let mut window = EffectiveWindow {
         inv: sp.inventory.clone(),
         armour: sp.armour,
+        offhand: sp.offhand.clone(),
         cursor: sp.cursor.clone(),
         grid: sp.craft_grid.clone(),
     };
@@ -860,6 +875,7 @@ pub fn effective_window_and_debt(sp: &ServerPlayer) -> EffectiveFold {
         let mut parts = Parts {
             inv: &mut window.inv,
             armour: &mut window.armour,
+            offhand: &mut window.offhand,
             cursor: &mut window.cursor,
             grid: &mut window.grid,
         };
@@ -882,6 +898,8 @@ pub fn effective_window_and_debt(sp: &ServerPlayer) -> EffectiveFold {
 pub struct EffectiveWindow {
     pub inv: Inventory,
     pub armour: [Option<ArmourItem>; 4],
+    /// v101 — the off-hand.
+    pub offhand: Option<ItemStack>,
     pub cursor: Option<ItemStack>,
     pub grid: CraftGrid,
 }
@@ -891,6 +909,7 @@ impl std::fmt::Debug for EffectiveWindow {
         f.debug_struct("EffectiveWindow")
             .field("inventory", &self.inv.slots_iter().collect::<Vec<_>>())
             .field("armour", &self.armour)
+            .field("offhand", &self.offhand)
             .field("cursor", &self.cursor)
             .field("grid", &self.grid)
             .finish()
@@ -1360,7 +1379,7 @@ mod tests {
 
         let registry = crate::block::BlockRegistry::new();
         let empty =
-            EffectiveWindow { inv: Inventory::new(), armour: [None; 4], cursor: None, grid: Default::default() };
+            EffectiveWindow { inv: Inventory::new(), armour: [None; 4], offhand: None, cursor: None, grid: Default::default() };
         let cost = crate::quest_wire::QuestResult {
             actor_respawns: 0,
             action: crate::action_identity::ActionHeader {
@@ -1441,7 +1460,7 @@ mod tests {
     fn handover_initial_replace_keeps_later_grant_owned_and_applies_it_after_baseline() {
         let registry = crate::block::BlockRegistry::new();
         let mut source =
-            EffectiveWindow { inv: Inventory::new(), armour: [None; 4], cursor: None, grid: Default::default() };
+            EffectiveWindow { inv: Inventory::new(), armour: [None; 4], offhand: None, cursor: None, grid: Default::default() };
         source.inv.set_slot(4, Some(ItemStack::new_block(crate::block::GLASS, 9)));
         let sync = crate::inventory_sync::packet(&source, &Default::default(), 1);
         let later = InventoryGrantPacket {
@@ -1482,7 +1501,7 @@ mod tests {
             "late Sync must apply before the higher owned prefix"
         );
         let mut client =
-            EffectiveWindow { inv: Inventory::new(), armour: [None; 4], cursor: None, grid: Default::default() };
+            EffectiveWindow { inv: Inventory::new(), armour: [None; 4], offhand: None, cursor: None, grid: Default::default() };
         let mut uses = Default::default();
         let mut debt = Default::default();
         for item in items {
@@ -1491,7 +1510,7 @@ mod tests {
                     crate::inventory_sync::apply(
                         &mut crate::window::WindowMut {
                             inv: &mut client.inv,
-                            armour: &mut client.armour,
+                            armour: &mut client.armour, offhand: &mut client.offhand,
                             cursor: &mut client.cursor,
                             grid: &mut client.grid,
                             container: None,
@@ -1536,7 +1555,7 @@ mod tests {
             sp.respawns = 2;
             sp.inventory.set_slot(0, Some(bread(7)));
             let old =
-                EffectiveWindow { inv: Inventory::new(), armour: [None; 4], cursor: None, grid: Default::default() };
+                EffectiveWindow { inv: Inventory::new(), armour: [None; 4], offhand: None, cursor: None, grid: Default::default() };
             let event = queue(
                 &mut sp,
                 WindowEvent::PackCanonical { actor_respawns: 1, window: Box::new(old), debt: Default::default() },
@@ -1627,7 +1646,7 @@ mod tests {
         sp.inventory.set_slot(3, Some(bread(1)));
         queue(
             &mut sp,
-            WindowEvent::Take { slot: 3, item: Item::Material(MaterialId::Bread), n: 1, how: "by eating" },
+            WindowEvent::Take { hand: crate::hands::Hand::Main, slot: 3, item: Item::Material(MaterialId::Bread), n: 1, how: "by eating" },
             0,
         );
         queue(&mut sp, WindowEvent::Grant(ItemStack::new_block(crate::block::STONE, 5)), 0);
@@ -1660,7 +1679,7 @@ mod tests {
         sp.inventory.set_slot(0, Some(bread(1)));
         queue(
             &mut sp,
-            WindowEvent::Take { slot: 0, item: Item::Material(MaterialId::Bread), n: 2, how: "by eating" },
+            WindowEvent::Take { hand: crate::hands::Hand::Main, slot: 0, item: Item::Material(MaterialId::Bread), n: 2, how: "by eating" },
             0,
         );
         apply_through(&mut sp, 1, 0);
@@ -1675,9 +1694,9 @@ mod tests {
         sp.inventory.set_slot(4, Some(ItemStack::new_tool(sword)));
         let helmet = ArmourItem::new(ArmourSlot::Helmet, ArmourMaterial::Iron);
         sp.armour[0] = Some(helmet);
-        queue(&mut sp, WindowEvent::WearWeapon { slot: 2, tool: sword }, 0);
+        queue(&mut sp, WindowEvent::WearWeapon { hand: crate::hands::Hand::Main, slot: 2, tool: sword }, 0);
         queue(&mut sp, WindowEvent::WearArmour { hits: 2 }, 0);
-        queue(&mut sp, WindowEvent::WearWeapon { slot: 0, tool: Tool::new(ToolType::Axe, ToolMaterial::Wood) }, 0);
+        queue(&mut sp, WindowEvent::WearWeapon { hand: crate::hands::Hand::Main, slot: 0, tool: Tool::new(ToolType::Axe, ToolMaterial::Wood) }, 0);
         apply_through(&mut sp, 3, 0);
         let worn = match sp.inventory.slot(4).map(|s| &s.item) {
             Some(Item::Tool(t)) => t.durability,

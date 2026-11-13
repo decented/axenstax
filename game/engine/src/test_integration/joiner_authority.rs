@@ -152,8 +152,7 @@ pub(super) fn report_window_events(client: &ChannelClientTransport) {
     let pkt = protocol::ItemActionPacket {
         seq: 0,
         action: protocol::ItemAction::GrantUnfit { event: 0, count: 0 },
-        events_applied: u32::MAX,
-    };
+        events_applied: u32::MAX, hand: crate::hands::Hand::Main };
     client.send_to_server(&protocol::serialize_packet(protocol::PacketType::ItemAction, &pkt));
 }
 

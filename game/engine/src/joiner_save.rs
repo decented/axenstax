@@ -24,8 +24,12 @@ use serde::{Deserialize, Serialize};
 use crate::personal_value::PersonalContext;
 use crate::personal_value::LocalPersonalSave;
 
-/// The layout the writer writes (OC).
-const VERSION: u8 = 5;
+/// The layout the writer writes (OC). v6 (off-hand plan, slice 2): v5's
+/// fields, then the off-hand.
+const VERSION: u8 = 6;
+/// v5: the layout before the off-hand ([`JoinerSaveV5`]), read with the
+/// off-hand empty.
+const VERSION_V5: u8 = 5;
 const VERSION_V4: u8 = 4;
 const VERSION_V3: u8 = 3;
 const VERSION_V2: u8 = 2;
@@ -306,6 +310,27 @@ pub(crate) struct JoinerSave {
     /// with no server body to keep (a local seat), or a dead body (it respawns
     /// at its spawn anyway).
     pose: Option<JoinerPose>,
+    /// v6 (off-hand plan, slice 2) — the off-hand (`ServerPlayer.offhand`),
+    /// appended last. A v5 or older save loads it empty.
+    offhand: Slot,
+}
+
+/// v5 — the exact layout v5 wrote (v4 plus `pose`), read and upgraded with an
+/// empty off-hand ([`JoinerSave::from_v5`]). Never written.
+#[derive(Serialize, Deserialize)]
+struct JoinerSaveV5 {
+    version: u8,
+    slots: Vec<Slot>,
+    armour: [Option<crate::save::SavedArmourPiece>; 4],
+    health: f32,
+    hunger: u8,
+    spawn: [f32; 3],
+    calendar_id: [u8; 16],
+    slept_night: Option<u32>,
+    owed: Vec<OwedEntry>,
+    obligation_history: ObligationHistory,
+    personal: Option<BoundPersonal>,
+    pose: Option<JoinerPose>,
 }
 
 impl JoinerSave {
@@ -345,6 +370,7 @@ impl JoinerSave {
             obligation_history: ObligationHistory::Complete,
             personal: None,
             pose: None,
+            offhand: Slot::capture(window.offhand.as_ref()),
         }
     }
 
@@ -434,6 +460,10 @@ impl JoinerSave {
             Some(&VERSION) => options()
                 .deserialize::<JoinerSave>(bytes)
                 .map_err(|e| e.to_string())?,
+            Some(&VERSION_V5) => {
+                let old: JoinerSaveV5 = options().deserialize(bytes).map_err(|e| e.to_string())?;
+                Self::from_v5(old)?
+            }
             Some(&VERSION_V4) => {
                 let old: JoinerSaveV4 = options().deserialize(bytes).map_err(|e| e.to_string())?;
                 Self::from_v4(old)?
@@ -462,11 +492,20 @@ impl JoinerSave {
         Ok(saved)
     }
 
+    fn from_v5(old: JoinerSaveV5) -> Result<Self, String> {
+        if old.version != VERSION_V5 { return Err("invalid v5 joiner save".into()); }
+        Ok(Self { version: VERSION, slots: old.slots, armour: old.armour, health: old.health,
+            hunger: old.hunger, spawn: old.spawn, calendar_id: old.calendar_id, slept_night: old.slept_night,
+            owed: old.owed, obligation_history: old.obligation_history, personal: old.personal, pose: old.pose,
+            offhand: Slot::capture(None) })
+    }
+
     fn from_v4(old: JoinerSaveV4) -> Result<Self, String> {
         if old.version != VERSION_V4 { return Err("invalid v4 joiner save".into()); }
         Ok(Self { version: VERSION, slots: old.slots, armour: old.armour, health: old.health,
             hunger: old.hunger, spawn: old.spawn, calendar_id: old.run_id, slept_night: old.slept_night,
-            owed: old.owed, obligation_history: old.obligation_history, personal: old.personal, pose: None })
+            owed: old.owed, obligation_history: old.obligation_history, personal: old.personal, pose: None,
+            offhand: Slot::capture(None) })
     }
 
     fn from_v3(old: JoinerSaveV3) -> Result<Self, String> {
@@ -481,7 +520,8 @@ impl JoinerSave {
         };
         Ok(Self { version: VERSION, slots: old.slots, armour: old.armour, health: old.health,
             hunger: old.hunger, spawn: old.spawn, calendar_id: old.run_id, slept_night: old.slept_night,
-            owed: old.owed, obligation_history: old.obligation_history, personal, pose: None })
+            owed: old.owed, obligation_history: old.obligation_history, personal, pose: None,
+            offhand: Slot::capture(None) })
     }
 
     pub(crate) fn from_v1(v1: JoinerSaveV1) -> Result<Self, String> {
@@ -501,6 +541,7 @@ impl JoinerSave {
             obligation_history: ObligationHistory::Incomplete(IncompleteCause::LegacyV1),
             personal: None,
             pose: None,
+            offhand: Slot::capture(None),
         })
     }
 
@@ -518,6 +559,7 @@ impl JoinerSave {
             obligation_history: v2.obligation_history,
             personal: None,
             pose: None,
+            offhand: Slot::capture(None),
         }
     }
 
@@ -563,6 +605,7 @@ impl JoinerSave {
         let mut w = EffectiveWindow {
             inv: crate::inventory::Inventory::new(),
             armour: crate::save::restore_armour_slots(&self.armour),
+            offhand: self.offhand.restore()?,
             cursor: None,
             grid: Default::default(),
         };
@@ -607,10 +650,10 @@ impl JoinerSave {
 
     /// Does a record file lead with a version that can carry bound personal
     /// progress and that this build still accepts in place: the current one
-    /// (v5) or v4, which differs only by lacking a position. v2 (the immutable
+    /// (v6), v5, which lacks the off-hand, or v4, which also lacks a position. v2 (the immutable
     /// checkpoint seed) and v3 are not.
     pub(crate) fn is_current_bound_version(bytes: &[u8]) -> bool {
-        matches!(bytes.first(), Some(&VERSION) | Some(&VERSION_V4))
+        matches!(bytes.first(), Some(&VERSION) | Some(&VERSION_V5) | Some(&VERSION_V4))
     }
 
     /// A genuine v4 body of this record (the layout the last build wrote), for

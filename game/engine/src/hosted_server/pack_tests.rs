@@ -403,7 +403,7 @@ fn d2c2_earlier_grant_feedback_waits_for_canonical_ack_and_returns_once_in_both_
             rig.hs.grant_to_joiner(rig.joiner.i, [ItemStack::new_block(block::STONE, 1)]);
             let event = rig.hs.server.players[rig.joiner.i].window_events.last_number();
             let (_, opened) = rig.execute(PackOperation::Open);
-            let feedback = protocol::ItemActionPacket { seq: 0, action: protocol::ItemAction::GrantUnfit { event, count: 1 }, events_applied: event };
+            let feedback = protocol::ItemActionPacket { seq: 0, action: protocol::ItemAction::GrantUnfit { event, count: 1 }, events_applied: event, hand: crate::hands::Hand::Main };
             let bytes = protocol::serialize_packet(protocol::PacketType::ItemAction, &feedback);
             rig.joiner.client.send_to_server(&bytes);
             rig.hs.tick();

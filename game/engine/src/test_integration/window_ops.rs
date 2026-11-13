@@ -236,7 +236,7 @@ impl Rig {
     /// One item action from the client, reporting the events it applied.
     fn send_action(&mut self, action: protocol::ItemAction) {
         let seq = self.c.actions.unanswered();
-        let pkt = protocol::ItemActionPacket { seq, action, events_applied: self.c.events };
+        let pkt = protocol::ItemActionPacket { seq, action, events_applied: self.c.events, hand: crate::hands::Hand::Main };
         self.c.transport.send_to_server(&protocol::serialize_packet(protocol::PacketType::ItemAction, &pkt));
     }
 
@@ -286,7 +286,7 @@ impl Rig {
             held_id,
             held_full: protocol::WireItem::None,
         };
-        let pkt = protocol::ItemActionPacket { seq, action, events_applied: self.c.events };
+        let pkt = protocol::ItemActionPacket { seq, action, events_applied: self.c.events, hand: crate::hands::Hand::Main };
         self.c.transport.send_to_server(&protocol::serialize_packet(protocol::PacketType::ItemAction, &pkt));
     }
 

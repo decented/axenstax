@@ -98,7 +98,7 @@ pub struct InputHand {
     pub use_tags: Vec<UseTag>,
 }
 
-/// The hand one edit was made with: four bytes, kept beside each waiting
+/// The hand one edit was made with: five bytes, kept beside each waiting
 /// edit (the queue's memory bound counts them).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Hand {
@@ -107,6 +107,9 @@ pub struct Hand {
     /// The held item's wire pair.
     kind: u8,
     id: u16,
+    /// v101 (off-hand plan, slice 2) — which hand: an off-hand edit's pair
+    /// is the off-hand item, charged to the off-hand.
+    hand: crate::hands::Hand,
 }
 
 impl Hand {
@@ -118,8 +121,8 @@ impl Hand {
     fn of(input: &InputHand, k: usize) -> Self {
         let input_slot = input.hotbar_slot.filter(|&s| s < 9).unwrap_or(Self::LATEST);
         match input.edit_hands.get(k) {
-            Some(&(slot, kind, id)) => Hand { slot: if slot < 9 { slot } else { input_slot }, kind, id },
-            None => Hand { slot: input_slot, kind: input.held.0, id: input.held.1 },
+            Some(&(slot, kind, id, hand)) => Hand { slot: if slot < 9 { slot } else { input_slot }, kind, id, hand },
+            None => Hand { slot: input_slot, kind: input.held.0, id: input.held.1, hand: crate::hands::Hand::Main },
         }
     }
 
@@ -131,6 +134,11 @@ impl Hand {
     /// The held item's wire pair (`item_kind`, id).
     pub fn held(self) -> (u8, u16) {
         (self.kind, self.id)
+    }
+
+    /// v101 — the hand the edit was made with.
+    pub fn hand(self) -> crate::hands::Hand {
+        self.hand
     }
 }
 
@@ -558,7 +566,7 @@ mod tests {
         // No input slot either: the latest input's, at processing.
         let (mut g, _) = EditGroup::new(vec![edit(1, STONE)], usize::MAX, &[], InputHand::default(), 0, |_, _, _| AIR);
         assert_eq!(g.pop_front().map(|(_, _, h)| h.slot()), Some(None));
-        assert_eq!(std::mem::size_of::<Hand>(), 4, "four bytes beside each waiting edit");
+        assert_eq!(std::mem::size_of::<Hand>(), 6, "five bytes (six with padding) beside each waiting edit");
     }
 
     /// FU4a (FU3 verify M1) — the M1 scenario: the queue at the cap, then

@@ -203,7 +203,7 @@ impl Session {
                 InboxItem::Outcome(RequestOutcome::Sync(pkt)) => {
                     let mut w = crate::window::WindowMut {
                         inv: &mut self.inv,
-                        armour: &mut self.armour,
+                        armour: &mut self.armour, offhand: &mut self.offhand,
                         cursor: &mut self.ui.cursor_item,
                         grid: &mut self.ui.grid,
                         container: None,

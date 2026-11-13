@@ -138,8 +138,7 @@ fn d2c3_actual_completion_reward_overflow_uses_original_dead_giver_once_in_both_
                     event: reply.grants[0].window_event,
                     count: 255,
                 },
-                events_applied: rig.applied,
-            },
+                events_applied: rig.applied, hand: crate::hands::Hand::Main },
         ));
         rig.host.tick();
         assert_eq!(

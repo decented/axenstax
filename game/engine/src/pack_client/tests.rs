@@ -6,7 +6,7 @@ fn empty() -> EffectiveWindow {
     EffectiveWindow { inv: crate::inventory::Inventory::new(), armour: Default::default(), cursor: None, grid: Default::default() }
 }
 fn apply(window: &mut EffectiveWindow, packet: &PackWindow, uses: &crate::use_edits::SentUses, debt: &mut CorrectionDebt, mode: InventoryMode) -> Result<(), String> {
-    apply_canonical_window(&mut WindowMut { inv: &mut window.inv, armour: &mut window.armour, cursor: &mut window.cursor, grid: &mut window.grid, container: None }, packet, &crate::block::BlockRegistry::new(), uses, debt, mode)
+    apply_canonical_window(&mut WindowMut { inv: &mut window.inv, armour: &mut window.armour, offhand: &mut window.offhand, cursor: &mut window.cursor, grid: &mut window.grid, container: None }, packet, &crate::block::BlockRegistry::new(), uses, debt, mode)
 }
 fn plan(stack: &ItemStack) -> &crate::plan::PlanData {
     let Item::Plan(body) = &stack.item else { panic!("canonical place lost its Plan") };

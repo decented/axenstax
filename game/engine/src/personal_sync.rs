@@ -388,8 +388,7 @@ mod tests {
         let packet = crate::protocol::ItemActionPacket {
             seq: 1,
             action: crate::protocol::ItemAction::OpenGrave { x: 1, y: 2, z: 3 },
-            events_applied: 0,
-        };
+            events_applied: 0, hand: crate::hands::Hand::Main };
         client.send_item_action(&packet);
         assert!(server.try_recv_from_client().is_none(), "authorising packet escaped before personal installation");
         let value = snapshot(&bound(), [8; 16], 0, 1, 2).unwrap();
@@ -425,7 +424,7 @@ mod tests {
         crate::inventory_sync::apply(
             &mut crate::window::WindowMut {
                 inv: &mut slot.inventory,
-                armour: &mut slot.armour_slots,
+                armour: &mut slot.armour_slots, offhand: &mut slot.offhand,
                 cursor: &mut slot.crafting_ui.cursor_item,
                 grid: &mut slot.crafting_ui.grid,
                 container: None,

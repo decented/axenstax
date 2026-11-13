@@ -96,7 +96,7 @@ fn d2c3_quest_cost_reuses_both_mode_prefix_source_backing_without_shortfall() {
         .unwrap();
         window_events::queue(
             &mut sp,
-            window_events::WindowEvent::Take {
+            window_events::WindowEvent::Take { hand: crate::hands::Hand::Main,
                 slot: 0,
                 item: Item::Material(MaterialId::Wheat),
                 n: 3,
@@ -130,7 +130,7 @@ fn d2c3_quest_cost_reuses_both_mode_prefix_source_backing_without_shortfall() {
         .unwrap();
         window_events::queue(
             &mut valid,
-            window_events::WindowEvent::Take {
+            window_events::WindowEvent::Take { hand: crate::hands::Hand::Main,
                 slot: 0,
                 item: Item::Material(MaterialId::Wheat),
                 n: 1,

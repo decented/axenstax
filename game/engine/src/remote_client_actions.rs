@@ -21,13 +21,13 @@ pub fn flush_strict_window_ops(
     client: &mut RemoteClient,
     ui: &mut crate::craft_ui::CraftingUi,
     inv: &crate::inventory::Inventory,
-    armour: &[Option<crate::armour::ArmourItem>; 4],
+    armour: &[Option<crate::armour::ArmourItem>; 4], offhand: &Option<crate::item::ItemStack>,
 ) -> bool {
     // Run 4 (run-3 review M1) — the session-start setting goes only once
     // the join's window sync (always event 1 when there is one) is applied;
     // before that, the first window action carries it (entry points).
     if client.applied_window_boundary() >= 1
-        && let Err(error) = ui.sync_auto_refill_joined(client, inv, armour) {
+        && let Err(error) = ui.sync_auto_refill_joined(client, inv, armour, offhand) {
         log::debug!("Strict auto-refill setting could not be reserved: {error}");
     }
     let stray = ui.ops.take_before(None);

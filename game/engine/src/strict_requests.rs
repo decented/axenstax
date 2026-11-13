@@ -57,18 +57,18 @@ pub fn route_shot(
     remote: Option<&mut RemoteClient>,
     ui: &mut CraftingUi,
     inv: &Inventory,
-    armour: &[Option<ArmourItem>; 4],
+    armour: &[Option<ArmourItem>; 4], offhand: &Option<crate::item::ItemStack>,
     actions: &mut JoinerActions,
     pending: Pending,
     action: &protocol::ItemAction,
 ) -> Result<ShotRoute, String> {
     let Some(remote) = remote.filter(|r| shot_goes_typed(Some(&**r))) else { return Ok(ShotRoute::Legacy) };
     let protocol::ItemAction::Shoot { weapon, hotbar_slot, .. } = action else { return Err("Only a shot is typed here".into()) };
-    if !actions.can_afford(inv, ui, pending.kind, pending.held.as_ref()) {
+    if !actions.can_afford(inv, ui, offhand, pending.kind, pending.held.as_ref()) {
         return Ok(ShotRoute::Unaffordable);
     }
-    ui.sync_auto_refill_joined(remote, inv, armour)?;
-    let recipe = ShotRecipe { slot: *hotbar_slot, weapon: *weapon, digest: ui.digest(inv, armour) };
+    ui.sync_auto_refill_joined(remote, inv, armour, offhand)?;
+    let recipe = ShotRecipe { slot: *hotbar_slot, weapon: *weapon, digest: ui.digest(inv, armour, offhand) };
     let recipe = bincode::serialize(&recipe).map_err(|e| e.to_string())?.into_boxed_slice();
     // The claim ends with the next input's acknowledgement, as a request
     // sent at once does; the typed packet never waits in the request queue.
@@ -76,8 +76,7 @@ pub fn route_shot(
     let intent = crate::action_wire::ActionIntent::Item(protocol::ItemActionPacket {
         seq,
         action: action.clone(),
-        events_applied: remote.applied_window_boundary(),
-    });
+        events_applied: remote.applied_window_boundary(), hand: crate::hands::Hand::Main });
     let header = match remote.reserve_action(intent, recipe, Box::new([])) {
         Ok(header) => header,
         Err(error) => {
@@ -118,14 +117,14 @@ pub fn route_attack(
     remote: Option<&mut RemoteClient>,
     ui: &mut CraftingUi,
     inv: &Inventory,
-    armour: &[Option<ArmourItem>; 4],
+    armour: &[Option<ArmourItem>; 4], offhand: &Option<crate::item::ItemStack>,
     actions: &mut JoinerActions,
     pending: Pending,
     mut packet: protocol::EntityAttackPacket,
 ) -> Result<Option<ActionHeader>, String> {
     let Some(remote) = remote.filter(|r| shot_goes_typed(Some(&**r))) else { return Ok(None) };
-    ui.sync_auto_refill_joined(remote, inv, armour)?;
-    let recipe = AttackRecipe { slot: packet.hotbar_slot, digest: ui.digest(inv, armour) };
+    ui.sync_auto_refill_joined(remote, inv, armour, offhand)?;
+    let recipe = AttackRecipe { slot: packet.hotbar_slot, digest: ui.digest(inv, armour, offhand) };
     let recipe = bincode::serialize(&recipe).map_err(|e| e.to_string())?.into_boxed_slice();
     packet.seq = actions.record(pending, remote.next_input_seq());
     packet.events_applied = remote.applied_window_boundary();
@@ -172,14 +171,14 @@ pub fn route_interact(
     remote: Option<&mut RemoteClient>,
     ui: &mut CraftingUi,
     inv: &Inventory,
-    armour: &[Option<ArmourItem>; 4],
+    armour: &[Option<ArmourItem>; 4], offhand: &Option<crate::item::ItemStack>,
     actions: &mut JoinerActions,
     pending: Pending,
     mut packet: protocol::EntityInteractPacket,
 ) -> Result<Option<ActionHeader>, String> {
     let Some(remote) = remote.filter(|r| shot_goes_typed(Some(&**r))) else { return Ok(None) };
-    ui.sync_auto_refill_joined(remote, inv, armour)?;
-    let recipe = InteractRecipe { slot: packet.hotbar_slot, digest: ui.digest(inv, armour) };
+    ui.sync_auto_refill_joined(remote, inv, armour, offhand)?;
+    let recipe = InteractRecipe { slot: packet.hotbar_slot, digest: ui.digest(inv, armour, offhand) };
     let recipe = bincode::serialize(&recipe).map_err(|e| e.to_string())?.into_boxed_slice();
     packet.seq = actions.record(pending, remote.next_input_seq());
     packet.events_applied = remote.applied_window_boundary();
@@ -224,16 +223,16 @@ pub fn route_item(
     remote: Option<&mut RemoteClient>,
     ui: &mut CraftingUi,
     inv: &Inventory,
-    armour: &[Option<ArmourItem>; 4],
+    armour: &[Option<ArmourItem>; 4], offhand: &Option<crate::item::ItemStack>,
     actions: &mut JoinerActions,
     pending: Pending,
     mut packet: protocol::ItemActionPacket,
 ) -> Result<Option<ActionHeader>, String> {
     let Some(remote) = remote.filter(|r| shot_goes_typed(Some(&**r))) else { return Ok(None) };
     debug_assert!(matches!(packet.action, protocol::ItemAction::Eat { .. } | protocol::ItemAction::CreativeGive { .. } | protocol::ItemAction::Sleep { .. }), "route_item carries an eat, a give or a sleep");
-    ui.sync_auto_refill_joined(remote, inv, armour)?;
+    ui.sync_auto_refill_joined(remote, inv, armour, offhand)?;
     let slot = u8::try_from(pending.hotbar_slot).unwrap_or(u8::MAX);
-    let recipe = ItemRecipe { slot, digest: ui.digest(inv, armour) };
+    let recipe = ItemRecipe { slot, digest: ui.digest(inv, armour, offhand) };
     let recipe = bincode::serialize(&recipe).map_err(|e| e.to_string())?.into_boxed_slice();
     packet.seq = actions.record(pending, remote.next_input_seq());
     packet.events_applied = remote.applied_window_boundary();
@@ -275,7 +274,7 @@ pub fn route_drop(
     remote: Option<&mut RemoteClient>,
     ui: &mut CraftingUi,
     inv: &mut Inventory,
-    armour: &mut [Option<ArmourItem>; 4],
+    armour: &mut [Option<ArmourItem>; 4], offhand: &mut Option<crate::item::ItemStack>,
     slot: usize,
     registry: &crate::block::BlockRegistry,
 ) -> Result<Option<ActionHeader>, String> {
@@ -283,9 +282,9 @@ pub fn route_drop(
     let slot_u8 = u8::try_from(slot).ok().filter(|s| *s < 9).ok_or("A drop needs a hotbar slot")?;
     let Some(held) = inv.hotbar_slot(slot).map(|s| s.item.clone()) else { return Ok(None) };
     if matches!(held, crate::item::Item::Plan(_)) { return Ok(None); }
-    ui.sync_auto_refill_joined(remote, inv, armour)?;
+    ui.sync_auto_refill_joined(remote, inv, armour, offhand)?;
     crate::window_prediction::retain_private_window(inv, &ui.cursor_item, &ui.grid)?;
-    let raw = crate::staged_window::MarkerWindow::capture_parts(inv, armour, &ui.cursor_item, &ui.grid, registry);
+    let raw = crate::staged_window::MarkerWindow::capture_parts(inv, armour, offhand, &ui.cursor_item, &ui.grid, registry);
     let mut after = raw.clone();
     let _ = after.view().inv.take_one_from_hotbar(slot);
     let (before, now) = (raw.slots(), after.slots());
@@ -299,8 +298,7 @@ pub fn route_drop(
     let packet = protocol::ItemActionPacket {
         seq: 0,
         action: protocol::ItemAction::Drop { hotbar_slot: slot_u8, held_kind, held_id, held_full },
-        events_applied: remote.applied_window_boundary(),
-    };
+        events_applied: remote.applied_window_boundary(), hand: crate::hands::Hand::Main };
     let intent = crate::action_wire::ActionIntent::Item(packet);
     debug_assert!(!intent.predicts_nothing(), "a drop is predicted: its refusals are corrected");
     let header = remote.reserve_action(intent, recipe, Box::new([]))?;
@@ -323,13 +321,13 @@ pub fn route_device(
     remote: Option<&mut RemoteClient>,
     ui: &mut CraftingUi,
     inv: &Inventory,
-    armour: &[Option<ArmourItem>; 4],
+    armour: &[Option<ArmourItem>; 4], offhand: &Option<crate::item::ItemStack>,
     cell: [i32; 3],
     hotbar_slot: u8,
 ) -> Result<Option<ActionHeader>, String> {
     let Some(remote) = remote.filter(|r| shot_goes_typed(Some(&**r))) else { return Ok(None) };
-    ui.sync_auto_refill_joined(remote, inv, armour)?;
-    let recipe = ItemRecipe { slot: hotbar_slot, digest: ui.digest(inv, armour) };
+    ui.sync_auto_refill_joined(remote, inv, armour, offhand)?;
+    let recipe = ItemRecipe { slot: hotbar_slot, digest: ui.digest(inv, armour, offhand) };
     let recipe = bincode::serialize(&recipe).map_err(|e| e.to_string())?.into_boxed_slice();
     let intent = crate::action_wire::ActionIntent::Device { cell, hotbar_slot };
     debug_assert!(intent.predicts_nothing());
@@ -356,15 +354,15 @@ pub struct NoPrediction {
 
 impl NoPrediction {
     /// On a Strict seat, the window's digest before `what`; else `None`.
-    pub fn begin(remote: Option<&RemoteClient>, ui: &CraftingUi, inv: &Inventory, armour: &[Option<ArmourItem>; 4], what: &'static str) -> Option<Self> {
+    pub fn begin(remote: Option<&RemoteClient>, ui: &CraftingUi, inv: &Inventory, armour: &[Option<ArmourItem>; 4], offhand: &Option<crate::item::ItemStack>, what: &'static str) -> Option<Self> {
         // C3d run 18 (DECIDED after the run-17 review) — the digests run in
         // debug builds only; a release build computes nothing here.
-        (cfg!(debug_assertions) && shot_goes_typed(remote)).then(|| NoPrediction { digest: ui.digest(inv, armour), what })
+        (cfg!(debug_assertions) && shot_goes_typed(remote)).then(|| NoPrediction { digest: ui.digest(inv, armour, offhand), what })
     }
 
     /// `Err` when the window changed since [`Self::begin`].
-    pub fn end(self, ui: &CraftingUi, inv: &Inventory, armour: &[Option<ArmourItem>; 4]) -> Result<(), String> {
-        let now = ui.digest(inv, armour);
+    pub fn end(self, ui: &CraftingUi, inv: &Inventory, armour: &[Option<ArmourItem>; 4], offhand: &Option<crate::item::ItemStack>) -> Result<(), String> {
+        let now = ui.digest(inv, armour, offhand);
         if now == self.digest {
             Ok(())
         } else {
@@ -374,10 +372,10 @@ impl NoPrediction {
 
     /// [`Self::end`] where the game loop runs it: an error is logged, and a
     /// debug build stops.
-    pub fn check(guard: Option<Self>, ui: &CraftingUi, inv: &Inventory, armour: &[Option<ArmourItem>; 4]) {
+    pub fn check(guard: Option<Self>, ui: &CraftingUi, inv: &Inventory, armour: &[Option<ArmourItem>; 4], offhand: &Option<crate::item::ItemStack>) {
         #[cfg(test)]
         if let Some(g) = &guard { checked::note(g.what); }
-        if let Some(guard) = guard && let Err(error) = guard.end(ui, inv, armour) {
+        if let Some(guard) = guard && let Err(error) = guard.end(ui, inv, armour, offhand) {
             log::error!("{error}");
             debug_assert!(false, "{error}");
         }

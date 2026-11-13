@@ -21,8 +21,10 @@ use crate::block::{self, BlockId};
 use crate::crafting::ToolType;
 use crate::item::{material_as_placeable_block, Item, ItemStack, MaterialId};
 
-/// Which hand an action uses.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// Which hand an action uses. On the wire since v101 (a joiner's use packets,
+/// `protocol::EditHand`, `UseTag`): wire-stable, APPEND ONLY, Main = 0,
+/// Off = 1.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Hand {
     /// The selected hotbar slot.
     #[default]
@@ -152,6 +154,17 @@ pub fn item_has_use(item: &Item, target: &UseTarget) -> bool {
             }
             target.mob
         }
+    }
+}
+
+/// The block a click with `item` would place (a block, or a material
+/// flagged placeable), without taking it: `Inventory::hotbar_placeable_id`'s
+/// rule for any one stack.
+pub fn placeable_id(item: &Item) -> Option<BlockId> {
+    match item {
+        Item::Block(b) => Some(*b),
+        Item::Material(m) => material_as_placeable_block(*m),
+        _ => None,
     }
 }
 

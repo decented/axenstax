@@ -28,8 +28,7 @@ impl Client {
         let pkt = protocol::ItemActionPacket {
             seq,
             action: protocol::ItemAction::SiteBoard { pos: cell, op },
-            events_applied: self.events,
-        };
+            events_applied: self.events, hand: crate::hands::Hand::Main };
         self.transport.send_to_server(&protocol::serialize_packet(protocol::PacketType::ItemAction, &pkt));
     }
 }

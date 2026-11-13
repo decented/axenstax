@@ -108,7 +108,7 @@ impl Client {
                     let set: WindowSlotSetPacket = protocol::safe_deserialize(payload).unwrap();
                     let mut view = window::WindowMut {
                         inv: &mut self.inv,
-                        armour: &mut self.armour,
+                        armour: &mut self.armour, offhand: &mut self.offhand,
                         cursor: &mut self.ui.cursor_item,
                         grid: &mut self.ui.grid,
                         container: self.mirror.as_mut().map(|m| m.as_mut()),
@@ -124,8 +124,7 @@ impl Client {
                         let pkt = protocol::ItemActionPacket {
                             seq: self.actions,
                             action: protocol::ItemAction::GrantUnfit { event: set.window_event, count },
-                            events_applied: self.events,
-                        };
+                            events_applied: self.events, hand: crate::hands::Hand::Main };
                         self.transport.send_to_server(&protocol::serialize_packet(protocol::PacketType::ItemAction, &pkt));
                     }
                     self.slot_sets.push(set);
@@ -480,7 +479,7 @@ impl Rig {
     fn send_action(&mut self, n: usize, action: protocol::ItemAction) {
         let c = &mut self.cs[n];
         c.actions += 1;
-        let pkt = protocol::ItemActionPacket { seq: c.actions, action, events_applied: c.events };
+        let pkt = protocol::ItemActionPacket { seq: c.actions, action, events_applied: c.events, hand: crate::hands::Hand::Main };
         c.transport.send_to_server(&protocol::serialize_packet(protocol::PacketType::ItemAction, &pkt));
     }
 

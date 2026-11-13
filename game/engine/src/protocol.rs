@@ -769,13 +769,28 @@ pub struct InputPacket {
     /// then use tags up to it).
     #[serde(default)]
     pub use_tags: Vec<UseTag>,
+    /// v101 (off-hand plan, slice 2) — the held item's tool type
+    /// ([`HeldWire::tool`]): the `held_kind`/`held_id` pair collapses a
+    /// tool to its material tier. Client-asserted, relayed like `held_kind`.
+    pub held_tool: u8,
+    /// v101 — what this player holds in its off-hand, as the held item is
+    /// encoded (`(item_kind, id, tool)`, [`HeldWire`]). Client-asserted and
+    /// presentation only (drawing the left hand, a carried light): the
+    /// server's possession shadow keeps its own off-hand.
+    pub off_kind: u8,
+    pub off_id: u16,
+    pub off_tool: u8,
 }
 
 /// v76 (C3a-fix-1) — one edit's hand ([`InputPacket::edit_hands`]): the
 /// hotbar slot it was made at (below 9), then the held item's `ItemRef`
 /// wire pair (`item_kind`, id), as `InputPacket.held_kind`/`held_id`
-/// encode it.
-pub type EditHand = (u8, u8, u16);
+/// encode it. v101 (off-hand plan, slice 2) — then the hand
+/// ([`crate::hands::Hand`]): `Off` says the edit was made with the
+/// off-hand item (a torch placed while holding a pickaxe), and the pair is
+/// that item; the slot is still the selected hotbar slot, which an
+/// off-hand edit does not touch.
+pub type EditHand = (u8, u8, u16, crate::hands::Hand);
 
 /// A local column whose generation differed from the server's (v71, Phase
 /// B2b): which one, the hash the server's note carried and the hash of the
@@ -822,6 +837,9 @@ pub struct UseTag {
     pub used: WireSlot,
     pub tool: WireItem,
     pub unfit: u8,
+    /// v101 (off-hand plan, slice 2) — the hand the use was made with:
+    /// `Off` pays `used` from the off-hand first and wears `tool` there.
+    pub hand: crate::hands::Hand,
 }
 
 /// C3c-1-fix (v82) — the server refused one of this client's use-tagged
@@ -926,6 +944,46 @@ pub struct PlayerState {
     /// out-of-band (gated; no native upload source today, so native broadcasts
     /// currently send `0`). Foundation for a networked/Signet-verified skin path.
     pub skin_key: u64,
+    /// v101 (off-hand plan, slice 2) — the held item's tool type
+    /// ([`HeldWire::tool`]), so a remote avatar can draw each tool as itself.
+    pub held_tool: u8,
+    /// v101 — the off-hand item, as the held item is encoded ([`HeldWire`]).
+    /// Presentation only: drawing the left hand and a carried light.
+    pub off_kind: u8,
+    pub off_id: u16,
+    pub off_tool: u8,
+}
+
+/// v101 (off-hand plan, slice 2) — one hand's item as the avatar wire carries
+/// it: the `ItemRef` pair (`item_kind`, id), plus the tool type byte the pair
+/// loses (`inventory::tool_type_to_wire`, the full-fidelity item wire's own
+/// append-only table), or [`HeldWire::NO_TOOL`] for anything but a tool.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HeldWire {
+    pub kind: u8,
+    pub id: u16,
+    pub tool: u8,
+}
+
+impl HeldWire {
+    /// The tool byte of a hand that holds no tool.
+    pub const NO_TOOL: u8 = u8::MAX;
+    /// An empty hand.
+    pub const EMPTY: HeldWire = HeldWire { kind: item_kind::EMPTY, id: 0, tool: HeldWire::NO_TOOL };
+
+    /// The wire form of what a hand holds (`None`: empty).
+    pub fn of(item: Option<&crate::item::Item>) -> Self {
+        let Some(item) = item else { return Self::EMPTY };
+        let (kind, id) = crate::inventory::item_to_ref(item).to_wire();
+        HeldWire { kind, id, tool: crate::inventory::held_tool_to_wire(item) }
+    }
+
+    /// The tool type this hand's tool byte names; `None` for a hand without
+    /// a tool, or a byte this build doesn't know (a newer peer: draw it as
+    /// the plain tier slab, never guess).
+    pub fn tool_type(self) -> Option<crate::crafting::ToolType> {
+        crate::inventory::tool_type_from_held_wire(self.tool)
+    }
 }
 
 /// Item-kind discriminator for the tool-capable held-item wire encoding.
@@ -1180,6 +1238,10 @@ pub struct EntityInteractPacket {
     /// v76 — the highest window event the client had applied when it sent
     /// this ([`InputPacket::events_applied`]).
     pub events_applied: u32,
+    /// v101 (off-hand plan, slice 2) — the hand the held item is in. `Off`:
+    /// `held_*` is the off-hand item, and what an accepted interaction owes
+    /// is taken from the off-hand first (`joiner_actions::take_owed_search`).
+    pub hand: crate::hands::Hand,
 }
 
 /// What an [`ItemActionPacket`] asks for (C2a; C2b `Craft` and `Drop`; v76
@@ -1358,6 +1420,14 @@ pub struct ItemActionPacket {
     /// v76 — the highest window event the client had applied when it sent
     /// this ([`InputPacket::events_applied`]).
     pub events_applied: u32,
+    /// v101 (off-hand plan, slice 2) — the hand the action's held item is
+    /// in (one field for every variant: the variant bytes stay where
+    /// `peek_item_action_variant` reads them). `Off`: the claim
+    /// (`held_*`) is the off-hand item and what the action owes is taken
+    /// from the off-hand first; `hotbar_slot` stays the selected slot. A
+    /// `Shoot`'s ammo is searched off-hand first whatever the hand. Read
+    /// only by the variants that claim a held item.
+    pub hand: crate::hands::Hand,
 }
 
 /// One window op (C3a-2a, [`WindowOpPacket`]). Wire-stable, APPEND ONLY:
@@ -1399,12 +1469,13 @@ pub const MAX_CONTAINER_SLOTS: usize = 72;
 
 /// C3b-1 — the most slots one [`WindowSlotSetPacket`] names (and one
 /// container op reports touched): a whole container, the 36 slots, the 4
-/// armour slots, the cursor and the 9 grid cells.
-pub const MAX_WINDOW_SLOTS: usize = MAX_CONTAINER_SLOTS + 36 + 4 + 1 + 9;
+/// armour slots, (v101) the off-hand, the cursor and the 9 grid cells.
+pub const MAX_WINDOW_SLOTS: usize = MAX_CONTAINER_SLOTS + 36 + 4 + 1 + 1 + 9;
 
 /// C3b-1 — one slot of a joiner's window, as a correction or a push names
 /// it, and as a container op reports it touched. Wire-stable, APPEND ONLY:
-/// Inv = 0, Armour = 1, Cursor = 2, Grid = 3, Container = 4.
+/// Inv = 0, Armour = 1, Cursor = 2, Grid = 3, Container = 4, (v101)
+/// Offhand = 5.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum WireWindowSlot {
     /// Inventory slot 0..36.
@@ -1418,6 +1489,8 @@ pub enum WireWindowSlot {
     /// Slot of the open container: a chest's index, or a furnace's input (0),
     /// fuel (1) and output (2).
     Container(u8),
+    /// v101 (off-hand plan, slice 2) — the off-hand.
+    Offhand,
 }
 
 /// C3b-1 — a full-fidelity stack on the wire: the `(item_kind, item_id)`
@@ -2951,7 +3024,19 @@ pub struct ServerAnnouncePacket {
 ///   chunk push, so a late joiner is shown it). A client without them cannot
 ///   decode the new variants (and would show a hole for the id), so the bump
 ///   refuses it at join.
-pub const PROTOCOL_VERSION: u32 = 100;
+/// - v101 (2026-11-13, off-hand plan slice 2): **the off-hand reaches the
+///   wire.** `WindowClick::Offhand { right }` (= 11) and
+///   `WindowClick::SwapHands { slot }` (= 12, the F key) are appended, and
+///   `WireWindowSlot::Offhand` (= 5) names the slot in corrections, pushes and
+///   the join-time sync; the window digest hashes the off-hand after the
+///   armour. Every use packet carries its hand (`hands::Hand`, Main = 0,
+///   Off = 1): `ItemActionPacket.hand` and `EntityInteractPacket.hand`
+///   (appended after `events_applied`), `EditHand` gains a fourth element and
+///   `UseTag` appends `hand`. The avatar wire carries the tool type and the
+///   off-hand: `InputPacket` and `PlayerState` append `held_tool`, `off_kind`,
+///   `off_id`, `off_tool` ([`HeldWire`]). Every shape above changed, so a v100
+///   peer cannot decode them; the bump refuses it at join.
+pub const PROTOCOL_VERSION: u32 = 101;
 
 /// The `protocol_version` of a JoinRequest payload that doesn't decode as this
 /// build's `JoinRequestPacket` (an older or newer client's shape). It is the
@@ -4142,7 +4227,7 @@ mod tests {
             WireStack { item_kind: item_kind::PLAN, item_id: 0, count: 1,
                 full_item: WireItem::Plan { marker: [0x5A;32], developed: true } },
         ] {
-            let request = ItemActionPacket { seq: 7, action: ItemAction::CreativeGive { item }, events_applied: 9 };
+            let request = ItemActionPacket { seq: 7, action: ItemAction::CreativeGive { item }, events_applied: 9, hand: crate::hands::Hand::Main };
             let wire = serialize_packet(PacketType::ItemAction, &request);
             assert!(wire.len() <= MAX_WIRE_PACKET_LEN);
             let (kind, payload) = deserialize_header(&wire).unwrap();
@@ -4170,8 +4255,7 @@ mod tests {
                 held_id: 17,
                 held_full: WireItem::None,
             },
-            events_applied: 0x0102_0304,
-        };
+            events_applied: 0x0102_0304, hand: crate::hands::Hand::Main };
         let bytes = serialize_packet(PacketType::ItemAction, &eat);
         assert_eq!(bytes[0], 62, "wire-stable tag");
         let (ptype, payload) = deserialize_header(&bytes).unwrap();
@@ -4183,7 +4267,7 @@ mod tests {
         assert_eq!(&payload[payload.len() - 4..], &0x0102_0304u32.to_le_bytes());
 
         let sleep =
-            ItemActionPacket { seq: 12, action: ItemAction::Sleep { bed: [-5, 70, 1_000_000] }, events_applied: 0 };
+            ItemActionPacket { seq: 12, action: ItemAction::Sleep { bed: [-5, 70, 1_000_000] }, events_applied: 0, hand: crate::hands::Hand::Main };
         let bytes = serialize_packet(PacketType::ItemAction, &sleep);
         let (_, payload) = deserialize_header(&bytes).unwrap();
         assert_eq!(safe_deserialize::<ItemActionPacket>(payload).unwrap(), sleep);
@@ -4194,7 +4278,7 @@ mod tests {
         grid[0] = (item_kind::MATERIAL, 3);
         grid[4] = (item_kind::BLOCK, 5);
         for table in [None, Some([7, 64, -9])] {
-            let craft = ItemActionPacket { seq: 13, action: ItemAction::Craft { grid, table }, events_applied: 0 };
+            let craft = ItemActionPacket { seq: 13, action: ItemAction::Craft { grid, table }, events_applied: 0, hand: crate::hands::Hand::Main };
             let bytes = serialize_packet(PacketType::ItemAction, &craft);
             let (_, payload) = deserialize_header(&bytes).unwrap();
             assert_eq!(safe_deserialize::<ItemActionPacket>(payload).unwrap(), craft);
@@ -4209,8 +4293,7 @@ mod tests {
                 held_id: 2,
                 held_full: WireItem::Tool { tool_type: 1, material: 2, durability: 77 },
             },
-            events_applied: 0,
-        };
+            events_applied: 0, hand: crate::hands::Hand::Main };
         let bytes = serialize_packet(PacketType::ItemAction, &drop);
         assert_eq!(bytes[0], 62, "still the ItemAction tag: no new PacketType");
         let (_, payload) = deserialize_header(&bytes).unwrap();
@@ -4220,7 +4303,7 @@ mod tests {
         assert_eq!(peek_item_action_variant(&payload[..7]), None, "too short to say");
         // v76 (C3a-fix-1) — GrantUnfit = 4, appended after Drop: the grant's
         // window event (u32), then the count (u8).
-        let unfit = ItemActionPacket { seq: 15, action: ItemAction::GrantUnfit { event: 0x0506_0708, count: 9 }, events_applied: 3 };
+        let unfit = ItemActionPacket { seq: 15, action: ItemAction::GrantUnfit { event: 0x0506_0708, count: 9 }, events_applied: 3, hand: crate::hands::Hand::Main };
         let bytes = serialize_packet(PacketType::ItemAction, &unfit);
         let (_, payload) = deserialize_header(&bytes).unwrap();
         assert_eq!(safe_deserialize::<ItemActionPacket>(payload).unwrap(), unfit);
@@ -4239,8 +4322,7 @@ mod tests {
                 held_id: 1,
                 held_full: WireItem::Tool { tool_type: 9, material: 2, durability: 40 },
             },
-            events_applied: 6,
-        };
+            events_applied: 6, hand: crate::hands::Hand::Main };
         let bytes = serialize_packet(PacketType::ItemAction, &use_block);
         assert_eq!(bytes[0], 62, "still the ItemAction tag: no new PacketType");
         let (_, payload) = deserialize_header(&bytes).unwrap();
@@ -4264,8 +4346,7 @@ mod tests {
                 pitch: -0.5,
                 charge: 20,
             },
-            events_applied: 7,
-        };
+            events_applied: 7, hand: crate::hands::Hand::Main };
         let bytes = serialize_packet(PacketType::ItemAction, &shoot);
         assert_eq!(bytes[0], 62, "still the ItemAction tag: no new PacketType");
         let (_, payload) = deserialize_header(&bytes).unwrap();
@@ -4276,15 +4357,14 @@ mod tests {
         assert_ne!(peek_item_action_variant(payload), Some(item_action_variant::DROP), "not paced as a drop");
         let (held_kind, held_id, held_full) = claim();
         let bow = ItemAction::Shoot { weapon: ShotWeapon::Bow, hotbar_slot: 0, held_kind, held_id, held_full, yaw: 0.0, pitch: 0.0, charge: 0 };
-        let bytes = serialize_packet(PacketType::ItemAction, &ItemActionPacket { seq: 18, action: bow, events_applied: 0 });
+        let bytes = serialize_packet(PacketType::ItemAction, &ItemActionPacket { seq: 18, action: bow, events_applied: 0, hand: crate::hands::Hand::Main });
         let (_, payload) = deserialize_header(&bytes).unwrap();
         assert_eq!(&payload[8..12], &0u32.to_le_bytes(), "Bow = 0");
         let (held_kind, held_id, held_full) = claim();
         let cart = ItemActionPacket {
             seq: 19,
             action: ItemAction::PlaceCart { cell: [9, -64, 3], hotbar_slot: 2, held_kind, held_id, held_full },
-            events_applied: 0,
-        };
+            events_applied: 0, hand: crate::hands::Hand::Main };
         let bytes = serialize_packet(PacketType::ItemAction, &cart);
         let (_, payload) = deserialize_header(&bytes).unwrap();
         assert_eq!(safe_deserialize::<ItemActionPacket>(payload).unwrap(), cart);
@@ -4294,7 +4374,7 @@ mod tests {
             (8u32, ItemAction::Cast { hotbar_slot: 5, held_kind: item_kind::TOOL, held_id: 1, held_full: WireItem::None }),
             (9, ItemAction::Reel { hotbar_slot: 5, held_kind: item_kind::TOOL, held_id: 1, held_full: WireItem::None }),
         ] {
-            let pkt = ItemActionPacket { seq: 20, action, events_applied: 0 };
+            let pkt = ItemActionPacket { seq: 20, action, events_applied: 0, hand: crate::hands::Hand::Main };
             let bytes = serialize_packet(PacketType::ItemAction, &pkt);
             let (_, payload) = deserialize_header(&bytes).unwrap();
             assert_eq!(safe_deserialize::<ItemActionPacket>(payload).unwrap(), pkt);
@@ -4318,8 +4398,7 @@ mod tests {
                 spent: Some(paper),
                 plan: WireItem::Plan { marker: [0xAB; 32], developed: false },
             },
-            events_applied: 0x0A0B_0C0D,
-        };
+            events_applied: 0x0A0B_0C0D, hand: crate::hands::Hand::Main };
         let bytes = serialize_packet(PacketType::ItemAction, &minted);
         assert_eq!(bytes[0], 62, "still the ItemAction tag: no new PacketType");
         let (_, payload) = deserialize_header(&bytes).unwrap();
@@ -4351,8 +4430,7 @@ mod tests {
                 held_id: 0x0203,
                 held_full: WireItem::None,
             },
-            events_applied: 7,
-        };
+            events_applied: 7, hand: crate::hands::Hand::Main };
         let bytes = serialize_packet(PacketType::ItemAction, &attach);
         let (_, payload) = deserialize_header(&bytes).unwrap();
         assert_eq!(safe_deserialize::<ItemActionPacket>(payload).unwrap(), attach);
@@ -4364,7 +4442,7 @@ mod tests {
         assert_eq!(&payload[23..25], &0x0203u16.to_le_bytes(), "the held id");
         assert_eq!(&payload[25..29], &0u32.to_le_bytes(), "held_full: None");
         assert_eq!(&payload[29..], &7u32.to_le_bytes(), "events_applied closes it");
-        let detach = ItemActionPacket { seq: 23, action: ItemAction::Detach { x: -1, y: 2, z: -3, face: 0 }, events_applied: 8 };
+        let detach = ItemActionPacket { seq: 23, action: ItemAction::Detach { x: -1, y: 2, z: -3, face: 0 }, events_applied: 8, hand: crate::hands::Hand::Main };
         let bytes = serialize_packet(PacketType::ItemAction, &detach);
         let (_, payload) = deserialize_header(&bytes).unwrap();
         assert_eq!(safe_deserialize::<ItemActionPacket>(payload).unwrap(), detach);
@@ -4380,7 +4458,7 @@ mod tests {
             (crate::site_board::Op::Toggle(2, 9), 1, 2),
             (crate::site_board::Op::Remove(0, 4), 2, 0),
         ] {
-            let board = ItemActionPacket { seq: 24, action: ItemAction::SiteBoard { pos: [-5, 70, 1_000_001], op }, events_applied: 9 };
+            let board = ItemActionPacket { seq: 24, action: ItemAction::SiteBoard { pos: [-5, 70, 1_000_001], op }, events_applied: 9, hand: crate::hands::Hand::Main };
             let bytes = serialize_packet(PacketType::ItemAction, &board);
             let (_, payload) = deserialize_header(&bytes).unwrap();
             assert_eq!(safe_deserialize::<ItemActionPacket>(payload).unwrap(), board);
@@ -5247,7 +5325,7 @@ mod tests {
         assert_eq!(safe_deserialize::<InventorySyncPacket>(payload).unwrap(),sync);
         let oversized = InventorySyncPacket { slots:vec![(WireWindowSlot::Cursor,None); MAX_WINDOW_SLOTS+1],..sync };
         assert!(safe_deserialize::<InventorySyncPacket>(&serialize_packet(PacketType::InventorySync,&oversized)[1..]).is_err());
-        let open = ItemActionPacket { seq:3,action:ItemAction::OpenGrave { x:1,y:80,z:2 },events_applied:9 };
+        let open = ItemActionPacket { seq:3,action:ItemAction::OpenGrave { x:1,y:80,z:2 },events_applied:9, hand: crate::hands::Hand::Main };
         let bytes = serialize_packet(PacketType::ItemAction,&open);
         assert_eq!(peek_item_action_variant(&bytes[1..]),Some(13));
         let decoded:ItemActionPacket = safe_deserialize(&bytes[1..]).unwrap();

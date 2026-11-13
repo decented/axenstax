@@ -555,6 +555,7 @@ pub(crate) fn install(
     let window = save.window()?;
     slot.inventory = window.inv;
     slot.armour_slots = window.armour;
+    slot.offhand = window.offhand;
     slot.crafting_ui.cursor_item = window.cursor;
     slot.crafting_ui.grid = window.grid;
     slot.crafting_ui.open = false;
@@ -582,6 +583,7 @@ pub(crate) fn install(
         .cursor_item
         .iter_mut()
         .chain(slot.crafting_ui.grid.iter_mut().flatten().flatten())
+        .chain(slot.offhand.iter_mut())
     {
         resolve(stack);
     }

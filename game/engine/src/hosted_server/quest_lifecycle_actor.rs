@@ -176,7 +176,7 @@ impl Actor {
                     let station = crate::inventory_sync::apply(
                         &mut crate::window::WindowMut {
                             inv: &mut p.inventory,
-                            armour: &mut p.armour_slots,
+                            armour: &mut p.armour_slots, offhand: &mut p.offhand,
                             cursor: &mut p.crafting_ui.cursor_item,
                             grid: &mut p.crafting_ui.grid,
                             container: None,
@@ -196,7 +196,7 @@ impl Actor {
                     crate::pack_client::apply_canonical_window(
                         &mut crate::window::WindowMut {
                             inv: &mut p.inventory,
-                            armour: &mut p.armour_slots,
+                            armour: &mut p.armour_slots, offhand: &mut p.offhand,
                             cursor: &mut p.crafting_ui.cursor_item,
                             grid: &mut p.crafting_ui.grid,
                             container: None,

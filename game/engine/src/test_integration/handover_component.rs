@@ -176,7 +176,7 @@ impl Application {
                         crate::inventory_sync::apply(
                             &mut crate::window::WindowMut {
                                 inv: &mut slot.inventory,
-                                armour: &mut slot.armour_slots,
+                                armour: &mut slot.armour_slots, offhand: &mut slot.offhand,
                                 cursor: &mut slot.crafting_ui.cursor_item,
                                 grid: &mut slot.crafting_ui.grid,
                                 container: None,

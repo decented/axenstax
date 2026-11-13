@@ -586,6 +586,7 @@ impl GameServer {
                 e.debug(&slot);
             }
             e.debug(&sp.armour);
+            e.debug(&sp.offhand);
             e.debug(&sp.cursor);
             e.debug(&sp.craft_grid);
             e.debug(&sp.station);

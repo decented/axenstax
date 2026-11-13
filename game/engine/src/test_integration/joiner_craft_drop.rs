@@ -155,7 +155,7 @@ impl Rig {
         joiner.seq += 1;
         // C3a-fix-1 — a test client that applies every window event the
         // moment the server sends it.
-        let pkt = protocol::ItemActionPacket { seq: joiner.seq, action, events_applied: u32::MAX };
+        let pkt = protocol::ItemActionPacket { seq: joiner.seq, action, events_applied: u32::MAX, hand: crate::hands::Hand::Main };
         joiner.client.send_to_server(&protocol::serialize_packet(protocol::PacketType::ItemAction, &pkt));
     }
 

@@ -51,6 +51,7 @@ fn local0_window(slot: &PlayerSlot) -> crate::window_events::EffectiveWindow {
     crate::window_events::EffectiveWindow {
         inv: slot.inventory.clone(),
         armour: slot.armour_slots,
+        offhand: slot.offhand.clone(),
         cursor: slot.crafting_ui.cursor_item.clone(),
         grid: slot.crafting_ui.grid.clone(),
     }

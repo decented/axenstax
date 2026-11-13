@@ -145,14 +145,14 @@ impl CraftingUi {
     /// copy and the save kept it). A Close a full bag refused opens nothing
     /// new: the screen shows what is left at its own station
     /// ([`Self::show_held_grid`]). Returns whether the asked screen opened.
-    pub fn open_crafting(&mut self, table: Option<[i32; 3]>, inv: &mut Inventory, armour: &mut [Option<ArmourItem>; 4]) -> bool {
-        if self.grid_holds_items() && !self.close(inv, armour) {
+    pub fn open_crafting(&mut self, table: Option<[i32; 3]>, inv: &mut Inventory, armour: &mut [Option<ArmourItem>; 4], offhand: &mut Option<crate::item::ItemStack>) -> bool {
+        if self.grid_holds_items() && !self.close(inv, armour, offhand) {
             self.show_held_grid();
             return false;
         }
         match table {
-            Some(cell) => self.open_table_crafting(cell, inv, armour),
-            None => self.open_player_crafting(inv, armour),
+            Some(cell) => self.open_table_crafting(cell, inv, armour, offhand),
+            None => self.open_player_crafting(inv, armour, offhand),
         }
         true
     }
@@ -186,9 +186,9 @@ impl CraftingUi {
     /// Open the player's own 2×2 grid (E). Logged as a window op
     /// (`OpenPlayer`, C3a-2a): `inv` and `armour` are the player's, for its
     /// digest.
-    pub fn open_player_crafting(&mut self, inv: &Inventory, armour: &[Option<ArmourItem>; 4]) {
+    pub fn open_player_crafting(&mut self, inv: &Inventory, armour: &[Option<ArmourItem>; 4], offhand: &Option<crate::item::ItemStack>) {
         self.reset_screen(None);
-        self.log_op(crate::protocol::WireWindowOp::OpenPlayer, inv, armour);
+        self.log_op(crate::protocol::WireWindowOp::OpenPlayer, inv, armour, offhand);
     }
 
     /// The screen opens at `table` (or the player's 2×2). C3d run 8 (review
@@ -211,7 +211,7 @@ impl CraftingUi {
     /// reserved `SetAutoRefill` action before any window action that the
     /// setting's digest covers (the session starts by sending it, as the
     /// Mirror op log does).
-    pub fn sync_auto_refill_joined(&mut self, remote: &mut crate::remote_client::RemoteClient, inv: &Inventory, armour: &[Option<ArmourItem>; 4]) -> Result<(), String> {
+    pub fn sync_auto_refill_joined(&mut self, remote: &mut crate::remote_client::RemoteClient, inv: &Inventory, armour: &[Option<ArmourItem>; 4], offhand: &Option<crate::item::ItemStack>) -> Result<(), String> {
         if remote.pack_request_pending() { return Ok(()); }
         // Run 14 — a refused setting (its `Refused` receipt retired) is sent
         // again: the correction `Replace` keeps each copy's refill setting.
@@ -221,7 +221,7 @@ impl CraftingUi {
         if self.ops.auto_refill_sent() == Some(inv.auto_refill) {
             return Ok(());
         }
-        let digest = self.digest(inv, armour);
+        let digest = self.digest(inv, armour, offhand);
         let action = crate::window_prediction::reserve_op(remote, crate::protocol::WireWindowOp::SetAutoRefill { on: inv.auto_refill }, digest, true, Box::new([]))?;
         self.ops.note_auto_refill_sent(inv.auto_refill);
         remote.send_reserved_action(action)
@@ -236,14 +236,14 @@ impl CraftingUi {
     /// grid), and the open digests the real grid, never an empty one: the
     /// client never discards grid items locally. A Close a full bag refused
     /// opens nothing new ([`Self::show_held_grid`]; `Ok(false)`).
-    pub fn open_joined(&mut self, remote: &mut crate::remote_client::RemoteClient, table: Option<[i32; 3]>, inv: &mut Inventory, armour: &mut [Option<ArmourItem>; 4], registry: &crate::block::BlockRegistry) -> Result<bool, String> {
-        self.sync_auto_refill_joined(remote, inv, armour)?;
-        if self.grid_holds_items() && !self.close_joined(remote, inv, armour, registry)? {
+    pub fn open_joined(&mut self, remote: &mut crate::remote_client::RemoteClient, table: Option<[i32; 3]>, inv: &mut Inventory, armour: &mut [Option<ArmourItem>; 4], offhand: &mut Option<crate::item::ItemStack>, registry: &crate::block::BlockRegistry) -> Result<bool, String> {
+        self.sync_auto_refill_joined(remote, inv, armour, offhand)?;
+        if self.grid_holds_items() && !self.close_joined(remote, inv, armour, offhand, registry)? {
             self.show_held_grid();
             return Ok(false);
         }
         let station = table.map_or(Station::Player, |cell| Station::Table { cell });
-        let digest = window::digest_parts(inv, armour, &self.cursor_item, &self.grid, station);
+        let digest = window::digest_parts(inv, armour, offhand, &self.cursor_item, &self.grid, station);
         let (op, cells) = match table {
             Some(cell) => (crate::protocol::WireWindowOp::OpenTable { cell }, vec![cell].into_boxed_slice()),
             None => (crate::protocol::WireWindowOp::OpenPlayer, Box::new([]) as Box<[[i32; 3]]>),
@@ -257,9 +257,9 @@ impl CraftingUi {
     /// C3d — a Strict client asks to open the container at `cell`: reserved,
     /// with the window's digest unchanged (nothing opens until the server
     /// answers). Nothing is logged.
-    pub fn open_container_joined(&mut self, remote: &mut crate::remote_client::RemoteClient, cell: [i32; 3], inv: &Inventory, armour: &[Option<ArmourItem>; 4]) -> Result<(), String> {
-        self.sync_auto_refill_joined(remote, inv, armour)?;
-        let digest = self.digest(inv, armour);
+    pub fn open_container_joined(&mut self, remote: &mut crate::remote_client::RemoteClient, cell: [i32; 3], inv: &Inventory, armour: &[Option<ArmourItem>; 4], offhand: &Option<crate::item::ItemStack>) -> Result<(), String> {
+        self.sync_auto_refill_joined(remote, inv, armour, offhand)?;
+        let digest = self.digest(inv, armour, offhand);
         let action = crate::window_prediction::reserve_op(remote, crate::protocol::WireWindowOp::OpenContainer { cell }, digest, true, vec![cell].into_boxed_slice())?;
         remote.send_reserved_action(action)
     }
@@ -272,22 +272,22 @@ impl CraftingUi {
         &mut self,
         remote: &mut crate::remote_client::RemoteClient,
         inv: &mut Inventory,
-        armour: &mut [Option<ArmourItem>; 4],
+        armour: &mut [Option<ArmourItem>; 4], offhand: &mut Option<crate::item::ItemStack>,
         container: crate::container_window::ContainerMut,
         cell: [i32; 3],
         click: &crate::container_window::ContainerClick,
         ctx: &ClickCtx,
         registry: &crate::block::BlockRegistry,
     ) -> Result<crate::container_window::ContainerApplied, String> {
-        self.sync_auto_refill_joined(remote, inv, armour)?;
+        self.sync_auto_refill_joined(remote, inv, armour, offhand)?;
         crate::window_prediction::retain_private_window(inv, &self.cursor_item, &self.grid)?;
-        let raw = crate::staged_window::MarkerWindow::capture_parts(inv, armour, &self.cursor_item, &self.grid, registry);
+        let raw = crate::staged_window::MarkerWindow::capture_parts(inv, armour, offhand, &self.cursor_item, &self.grid, registry);
         let mut scratch = crate::container_window::ContainerData::of(container.as_ref());
         let staged = crate::staged_window::stage_container(&raw, &mut scratch, click, ctx);
         let digest = staged.after.digest_with(self.station(), Some(scratch.as_ref()));
         let op = crate::protocol::WireWindowOp::Container(click.clone());
         let action = crate::window_prediction::reserve_op(remote, op, digest, staged.result.ok(), vec![cell].into_boxed_slice())?;
-        let mut view = WindowMut { inv, armour, cursor: &mut self.cursor_item, grid: &mut self.grid, container: Some(container) };
+        let mut view = WindowMut { inv, armour, offhand, cursor: &mut self.cursor_item, grid: &mut self.grid, container: Some(container) };
         let applied = crate::container_window::apply_container(&mut view, click, ctx);
         self.update_result();
         remote.send_reserved_action(action)?;
@@ -296,17 +296,17 @@ impl CraftingUi {
 
     /// C3d — [`Self::close_container`] for a Strict client: a reserved
     /// `WindowClick::Close`; the screen's own open state is left alone.
-    pub fn close_container_joined(&mut self, remote: &mut crate::remote_client::RemoteClient, inv: &mut Inventory, armour: &mut [Option<ArmourItem>; 4], registry: &crate::block::BlockRegistry) -> Result<ClickResult, String> {
+    pub fn close_container_joined(&mut self, remote: &mut crate::remote_client::RemoteClient, inv: &mut Inventory, armour: &mut [Option<ArmourItem>; 4], offhand: &mut Option<crate::item::ItemStack>, registry: &crate::block::BlockRegistry) -> Result<ClickResult, String> {
         let ctx = ClickCtx::new(false, self.station(), glam::Vec3::ZERO, |_| crate::block::AIR);
-        self.apply_joined_click(remote, inv, armour, &WindowClick::Close, &ctx, registry)
+        self.apply_joined_click(remote, inv, armour, offhand, &WindowClick::Close, &ctx, registry)
     }
 
     /// Open the 3×3 grid of the crafting table at `table`. The caller opens
     /// one only while it is in reach (`window::table_in_reach`, the rule its
     /// screen closes by). Logged as a window op (`OpenTable`, C3a-2a).
-    pub fn open_table_crafting(&mut self, table: [i32; 3], inv: &Inventory, armour: &[Option<ArmourItem>; 4]) {
+    pub fn open_table_crafting(&mut self, table: [i32; 3], inv: &Inventory, armour: &[Option<ArmourItem>; 4], offhand: &Option<crate::item::ItemStack>) {
         self.reset_screen(Some(table));
-        self.log_op(crate::protocol::WireWindowOp::OpenTable { cell: table }, inv, armour);
+        self.log_op(crate::protocol::WireWindowOp::OpenTable { cell: table }, inv, armour, offhand);
     }
 
     /// Is the screen a crafting table's 3×3 grid?
@@ -326,8 +326,8 @@ impl CraftingUi {
     /// auto-refill setting it was applied under is logged first if it
     /// changed (`window_ops::OpLog::sync_auto_refill`) — before this op, so
     /// with the digest of the window as it was.
-    fn log_op(&mut self, op: crate::protocol::WireWindowOp, inv: &Inventory, armour: &[Option<ArmourItem>; 4]) {
-        let now = window::digest_parts(inv, armour, &self.cursor_item, &self.grid, self.station());
+    fn log_op(&mut self, op: crate::protocol::WireWindowOp, inv: &Inventory, armour: &[Option<ArmourItem>; 4], offhand: &Option<crate::item::ItemStack>) {
+        let now = window::digest_parts(inv, armour, offhand, &self.cursor_item, &self.grid, self.station());
         self.ops.sync_auto_refill(inv.auto_refill, || now);
         self.ops.record(op, now, true);
     }
@@ -335,8 +335,8 @@ impl CraftingUi {
     /// C3a-2a — the window ops logged since the last call, for a joined
     /// client to send in order; auto-refill's setting is logged first if it
     /// changed since the last op (`window_ops::OpLog::take`).
-    pub fn take_ops(&mut self, inv: &Inventory, armour: &[Option<ArmourItem>; 4]) -> Vec<crate::window_ops::LoggedOp> {
-        let now = self.digest(inv, armour);
+    pub fn take_ops(&mut self, inv: &Inventory, armour: &[Option<ArmourItem>; 4], offhand: &Option<crate::item::ItemStack>) -> Vec<crate::window_ops::LoggedOp> {
+        let now = self.digest(inv, armour, offhand);
         self.ops.take(inv.auto_refill, now)
     }
 
@@ -344,9 +344,9 @@ impl CraftingUi {
     /// joiner's personal state becomes ready: a Mirror session that just
     /// became ready logs its window's settings for the server's copy
     /// ([`Self::log_settings_for_server`]); otherwise nothing.
-    pub fn settle_initial_settings(&mut self, remote: &mut crate::remote_client::RemoteClient, inv: &Inventory, armour: &[Option<ArmourItem>; 4]) {
+    pub fn settle_initial_settings(&mut self, remote: &mut crate::remote_client::RemoteClient, inv: &Inventory, armour: &[Option<ArmourItem>; 4], offhand: &Option<crate::item::ItemStack>) {
         if let Some(locks) = remote.take_initial_settings_reconcile() {
-            self.log_settings_for_server(inv, armour, locks);
+            self.log_settings_for_server(inv, armour, offhand, locks);
         }
     }
 
@@ -360,16 +360,16 @@ impl CraftingUi {
     /// is logged with the digest the server's copy has after it (this
     /// window's contents, the locks toggled so far), so the last one's is
     /// this window's own.
-    pub fn log_settings_for_server(&mut self, inv: &Inventory, armour: &[Option<ArmourItem>; 4], server_locks: u64) {
+    pub fn log_settings_for_server(&mut self, inv: &Inventory, armour: &[Option<ArmourItem>; 4], offhand: &Option<crate::item::ItemStack>, server_locks: u64) {
         let mut server_copy = inv.clone();
         server_copy.set_locked_mask(server_locks);
-        let digest = self.digest(&server_copy, armour);
+        let digest = self.digest(&server_copy, armour, offhand);
         self.ops.discard();
         self.ops.sync_auto_refill(inv.auto_refill, || digest);
         for slot in 0..window::SLOTS {
             if server_copy.is_locked(slot) != inv.is_locked(slot) {
                 server_copy.toggle_lock(slot);
-                let digest = self.digest(&server_copy, armour);
+                let digest = self.digest(&server_copy, armour, offhand);
                 self.ops.record(crate::protocol::WireWindowOp::Click(WindowClick::ToggleLock { slot }), digest, true);
             }
         }
@@ -377,8 +377,8 @@ impl CraftingUi {
 
     /// C3a-fix-1 — the window's digest now (`window::digest_parts`), at this
     /// screen's station.
-    pub fn digest(&self, inv: &Inventory, armour: &[Option<ArmourItem>; 4]) -> u32 {
-        window::digest_parts(inv, armour, &self.cursor_item, &self.grid, self.station())
+    pub fn digest(&self, inv: &Inventory, armour: &[Option<ArmourItem>; 4], offhand: &Option<crate::item::ItemStack>) -> u32 {
+        window::digest_parts(inv, armour, offhand, &self.cursor_item, &self.grid, self.station())
     }
 
     /// C3b-1 — apply one container click: the shared rule
@@ -394,17 +394,17 @@ impl CraftingUi {
     pub fn apply_container_click(
         &mut self,
         inv: &mut Inventory,
-        armour: &mut [Option<ArmourItem>; 4],
+        armour: &mut [Option<ArmourItem>; 4], offhand: &mut Option<crate::item::ItemStack>,
         container: crate::container_window::ContainerMut,
         click: &crate::container_window::ContainerClick,
         ctx: &ClickCtx,
     ) -> crate::container_window::ContainerApplied {
         let station = self.station();
         self.ops.sync_auto_refill(inv.auto_refill, || {
-            window::digest_parts(inv, armour, &self.cursor_item, &self.grid, station)
+            window::digest_parts(inv, armour, offhand, &self.cursor_item, &self.grid, station)
         });
-        let before = crate::container_window::PlayerSlots::of(inv, armour, &self.cursor_item, &self.grid);
-        let mut view = WindowMut { inv, armour, cursor: &mut self.cursor_item, grid: &mut self.grid, container: Some(container) };
+        let before = crate::container_window::PlayerSlots::of(inv, armour, offhand, &self.cursor_item, &self.grid);
+        let mut view = WindowMut { inv, armour, offhand, cursor: &mut self.cursor_item, grid: &mut self.grid, container: Some(container) };
         let applied = crate::container_window::apply_container(&mut view, click, ctx);
         let after = window::digest(&view, station);
         let claims = crate::container_window::claim_slots(click, &applied.touched)
@@ -424,8 +424,8 @@ impl CraftingUi {
     /// C3b-1 — a joined client asked to open the container at `cell`
     /// (`OpenContainer`): logged as a window op, with the window's digest
     /// (no container yet: nothing opens until the server answers).
-    pub fn log_open_container(&mut self, cell: [i32; 3], inv: &Inventory, armour: &[Option<ArmourItem>; 4]) {
-        self.log_op(crate::protocol::WireWindowOp::OpenContainer { cell }, inv, armour);
+    pub fn log_open_container(&mut self, cell: [i32; 3], inv: &Inventory, armour: &[Option<ArmourItem>; 4], offhand: &Option<crate::item::ItemStack>) {
+        self.log_op(crate::protocol::WireWindowOp::OpenContainer { cell }, inv, armour, offhand);
     }
 
     /// C3b-1 — a container screen closed (the player, or the reach/kind
@@ -433,9 +433,9 @@ impl CraftingUi {
     /// the server closes the container too. The grid and cursor it returns
     /// are empty while a container is open; this screen's own open state is
     /// left alone.
-    pub fn close_container(&mut self, inv: &mut Inventory, armour: &mut [Option<ArmourItem>; 4]) -> ClickResult {
+    pub fn close_container(&mut self, inv: &mut Inventory, armour: &mut [Option<ArmourItem>; 4], offhand: &mut Option<crate::item::ItemStack>) -> ClickResult {
         let ctx = ClickCtx::new(false, self.station(), glam::Vec3::ZERO, |_| crate::block::AIR);
-        self.apply_ctx(inv, armour, &WindowClick::Close, &ctx)
+        self.apply_ctx(inv, armour, offhand, &WindowClick::Close, &ctx)
     }
 
     /// C3a-1 — apply one window click: the pure rule (`window::apply`) over
@@ -447,22 +447,22 @@ impl CraftingUi {
     pub fn apply_click(
         &mut self,
         inv: &mut Inventory,
-        armour: &mut [Option<ArmourItem>; 4],
+        armour: &mut [Option<ArmourItem>; 4], offhand: &mut Option<crate::item::ItemStack>,
         click: &WindowClick,
         creative: bool,
         eye: glam::Vec3,
         block_at: impl Fn([i32; 3]) -> BlockId,
     ) -> ClickResult {
         let ctx = ClickCtx::new(creative, self.station(), eye, block_at);
-        self.apply_ctx(inv, armour, click, &ctx)
+        self.apply_ctx(inv, armour, offhand, click, &ctx)
     }
 
     /// The real joined transition reserves its complete marker recipe before
     /// window::apply. At a failed reservation every holding remains unchanged.
-    pub fn apply_joined_click(&mut self, remote: &mut crate::remote_client::RemoteClient, inv: &mut Inventory, armour: &mut [Option<ArmourItem>; 4], click: &WindowClick, ctx: &ClickCtx, registry: &crate::block::BlockRegistry) -> Result<ClickResult, String> {
-        self.sync_auto_refill_joined(remote, inv, armour)?;
-        let action = crate::window_prediction::reserve_click(remote, inv, armour, &self.cursor_item, &self.grid, click, ctx, registry)?;
-        let mut view = WindowMut { inv, armour, cursor: &mut self.cursor_item, grid: &mut self.grid, container: None };
+    pub fn apply_joined_click(&mut self, remote: &mut crate::remote_client::RemoteClient, inv: &mut Inventory, armour: &mut [Option<ArmourItem>; 4], offhand: &mut Option<crate::item::ItemStack>, click: &WindowClick, ctx: &ClickCtx, registry: &crate::block::BlockRegistry) -> Result<ClickResult, String> {
+        self.sync_auto_refill_joined(remote, inv, armour, offhand)?;
+        let action = crate::window_prediction::reserve_click(remote, inv, armour, offhand, &self.cursor_item, &self.grid, click, ctx, registry)?;
+        let mut view = WindowMut { inv, armour, offhand, cursor: &mut self.cursor_item, grid: &mut self.grid, container: None };
         let result = window::apply(&mut view, click, ctx);
         self.update_result();
         // A send failure never releases the reserved identity or body keys.
@@ -474,15 +474,15 @@ impl CraftingUi {
     fn apply_ctx(
         &mut self,
         inv: &mut Inventory,
-        armour: &mut [Option<ArmourItem>; 4],
+        armour: &mut [Option<ArmourItem>; 4], offhand: &mut Option<crate::item::ItemStack>,
         click: &WindowClick,
         ctx: &ClickCtx,
     ) -> ClickResult {
         let station = self.station();
         self.ops.sync_auto_refill(inv.auto_refill, || {
-            window::digest_parts(inv, armour, &self.cursor_item, &self.grid, station)
+            window::digest_parts(inv, armour, offhand, &self.cursor_item, &self.grid, station)
         });
-        let mut view = WindowMut { inv, armour, cursor: &mut self.cursor_item, grid: &mut self.grid, container: None };
+        let mut view = WindowMut { inv, armour, offhand, cursor: &mut self.cursor_item, grid: &mut self.grid, container: None };
         let out = window::apply(&mut view, click, ctx);
         // C3a-fix-1 — digested at the station after the op: a close that
         // returned everything is back at the player's grid (`close` resets
@@ -507,9 +507,9 @@ impl CraftingUi {
     ///
     /// C3a-2a — `armour` is the player's, for the close's window-op digest
     /// (`WindowClick::Close` reads no reach, so no body is needed).
-    pub fn close(&mut self, inventory: &mut Inventory, armour: &mut [Option<ArmourItem>; 4]) -> bool {
+    pub fn close(&mut self, inventory: &mut Inventory, armour: &mut [Option<ArmourItem>; 4], offhand: &mut Option<crate::item::ItemStack>) -> bool {
         let ctx = ClickCtx::new(false, self.station(), glam::Vec3::ZERO, |_| crate::block::AIR);
-        let all_placed = self.apply_ctx(inventory, armour, &WindowClick::Close, &ctx).ok();
+        let all_placed = self.apply_ctx(inventory, armour, offhand, &WindowClick::Close, &ctx).ok();
         if all_placed { self.finish_close(); }
         all_placed
     }
@@ -537,25 +537,25 @@ impl CraftingUi {
             self.pinned_recipe_stack.clear();
     }
 
-    pub fn close_joined(&mut self, remote: &mut crate::remote_client::RemoteClient, inv: &mut Inventory, armour: &mut [Option<ArmourItem>; 4], registry: &crate::block::BlockRegistry) -> Result<bool, String> {
+    pub fn close_joined(&mut self, remote: &mut crate::remote_client::RemoteClient, inv: &mut Inventory, armour: &mut [Option<ArmourItem>; 4], offhand: &mut Option<crate::item::ItemStack>, registry: &crate::block::BlockRegistry) -> Result<bool, String> {
         let ctx = ClickCtx::new(false, self.station(), glam::Vec3::ZERO, |_| crate::block::AIR);
-        let closed = self.apply_joined_click(remote, inv, armour, &WindowClick::Close, &ctx, registry)?.ok();
+        let closed = self.apply_joined_click(remote, inv, armour, offhand, &WindowClick::Close, &ctx, registry)?.ok();
         if closed { self.finish_close(); }
         Ok(closed)
     }
 
-    pub fn force_close_joined(&mut self, remote: &mut crate::remote_client::RemoteClient, inv: &mut Inventory, armour: &mut [Option<ArmourItem>; 4], registry: &crate::block::BlockRegistry, new_tick: bool) -> Result<bool, String> {
-        if let Some(refused_at) = self.forced_close_refused && (!new_tick || self.digest(inv, armour) == refused_at) { return Ok(false); }
+    pub fn force_close_joined(&mut self, remote: &mut crate::remote_client::RemoteClient, inv: &mut Inventory, armour: &mut [Option<ArmourItem>; 4], offhand: &mut Option<crate::item::ItemStack>, registry: &crate::block::BlockRegistry, new_tick: bool) -> Result<bool, String> {
+        if let Some(refused_at) = self.forced_close_refused && (!new_tick || self.digest(inv, armour, offhand) == refused_at) { return Ok(false); }
         // Review L4 — a reservation error is paced like a refused close: the
         // retry waits for the next tick and a change of the window.
-        let closed = match self.close_joined(remote, inv, armour, registry) {
+        let closed = match self.close_joined(remote, inv, armour, offhand, registry) {
             Ok(closed) => closed,
             Err(error) => {
-                self.forced_close_refused = Some(self.digest(inv, armour));
+                self.forced_close_refused = Some(self.digest(inv, armour, offhand));
                 return Err(error);
             }
         };
-        self.forced_close_refused = (!closed).then(|| self.digest(inv, armour));
+        self.forced_close_refused = (!closed).then(|| self.digest(inv, armour, offhand));
         Ok(closed)
     }
 
@@ -571,14 +571,14 @@ impl CraftingUi {
     /// otherwise it would log a `Close` op per frame, flooding the joiner's own
     /// inputs behind the server's per-tick op budget. Returns whether the
     /// screen closed.
-    pub fn force_close(&mut self, inventory: &mut Inventory, armour: &mut [Option<ArmourItem>; 4], new_tick: bool) -> bool {
+    pub fn force_close(&mut self, inventory: &mut Inventory, armour: &mut [Option<ArmourItem>; 4], offhand: &mut Option<crate::item::ItemStack>, new_tick: bool) -> bool {
         if let Some(refused_at) = self.forced_close_refused
-            && (!new_tick || self.digest(inventory, armour) == refused_at)
+            && (!new_tick || self.digest(inventory, armour, offhand) == refused_at)
         {
             return false;
         }
-        let closed = self.close(inventory, armour);
-        self.forced_close_refused = (!closed).then(|| self.digest(inventory, armour));
+        let closed = self.close(inventory, armour, offhand);
+        self.forced_close_refused = (!closed).then(|| self.digest(inventory, armour, offhand));
         closed
     }
 
@@ -588,7 +588,7 @@ impl CraftingUi {
     fn apply_test_click(
         &mut self,
         inv: &mut Inventory,
-        armour: &mut [Option<ArmourItem>; 4],
+        armour: &mut [Option<ArmourItem>; 4], offhand: &mut Option<crate::item::ItemStack>,
         click: &WindowClick,
     ) -> ClickResult {
         let station = self.station();
@@ -597,7 +597,7 @@ impl CraftingUi {
             Station::Player => glam::Vec3::ZERO,
         };
         let ctx = ClickCtx::new(false, station, eye, |_| crate::block::CRAFTING_TABLE);
-        self.apply_ctx(inv, armour, click, &ctx)
+        self.apply_ctx(inv, armour, offhand, click, &ctx)
     }
 
     /// Tests: [`Self::apply_test_click`] for a click that never touches the
@@ -689,8 +689,8 @@ impl ClickTarget {
             ClickTarget::SortInventory => WindowClick::Sort,
             ClickTarget::ToggleLock(slot) => WindowClick::ToggleLock { slot },
             ClickTarget::TrashCursor => WindowClick::Trash,
+            ClickTarget::OffhandSlot(right) => WindowClick::Offhand { right },
             ClickTarget::None
-            | ClickTarget::OffhandSlot(_)
             | ClickTarget::OpenBook
             | ClickTarget::FillPinned
             | ClickTarget::DismissPinned

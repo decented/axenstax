@@ -103,7 +103,7 @@ impl crate::GameState {
         for body in self.sent_uses.private_plans() {
             if let Err(error) = crate::plan_store::remember_checked(body, 0) { log::warn!("Pack request could not retain use history: {error}"); return false; }
         }
-        let Some(raw) = crate::staged_window::MarkerWindow::try_capture_parts(&p.inventory, &p.armour_slots, &p.crafting_ui.cursor_item, &p.crafting_ui.grid, &self.registry) else { return false };
+        let Some(raw) = crate::staged_window::MarkerWindow::try_capture_parts(&p.inventory, &p.armour_slots, &p.offhand, &p.crafting_ui.cursor_item, &p.crafting_ui.grid, &self.registry) else { return false };
         let request = crate::pack_wire::PackRequest { actor_respawns, target, hotbar_slot: p.hotbar_slot.min(8) as u8, before: raw.digest_with(p.crafting_ui.station(), None), operation };
         let reserved = self.remote_client.as_mut().expect("connected remote was checked").reserve_pack_request(request);
         match reserved {
@@ -138,7 +138,7 @@ impl crate::GameState {
         if let Some(view) = &packet.view { view.decode_contents(&self.registry)?; }
         let mode = remote.inventory_mode;
         let p = &mut self.players[0];
-        apply_canonical_window(&mut WindowMut { inv: &mut p.inventory, armour: &mut p.armour_slots, cursor: &mut p.crafting_ui.cursor_item, grid: &mut p.crafting_ui.grid, container: None }, &packet.window, &self.registry, &self.sent_uses, &mut self.window_inbox.debt, mode)?;
+        apply_canonical_window(&mut WindowMut { inv: &mut p.inventory, armour: &mut p.armour_slots, offhand: &mut p.offhand, cursor: &mut p.crafting_ui.cursor_item, grid: &mut p.crafting_ui.grid, container: None }, &packet.window, &self.registry, &self.sent_uses, &mut self.window_inbox.debt, mode)?;
         p.crafting_ui.update_result();
         self.install_pack_view(packet.view.clone(), packet.actor_respawns)?;
         let message = packet.note.message();
@@ -167,7 +167,7 @@ impl crate::GameState {
                 let Ok(mut data) = self.ecs.get::<&mut crate::horse_ai::HorseData>(entity) else { return };
                 let Some(pack) = data.pack.as_mut() else { return };
                 let p = &mut self.players[pidx];
-                let mut view = WindowMut { inv: &mut p.inventory, armour: &mut p.armour_slots, cursor: &mut p.crafting_ui.cursor_item, grid: &mut p.crafting_ui.grid, container: Some(crate::container_window::ContainerMut::Chest(pack)) };
+                let mut view = WindowMut { inv: &mut p.inventory, armour: &mut p.armour_slots, offhand: &mut p.offhand, cursor: &mut p.crafting_ui.cursor_item, grid: &mut p.crafting_ui.grid, container: Some(crate::container_window::ContainerMut::Chest(pack)) };
                 !crate::container_window::apply_container(&mut view, click, &ctx).touched.is_empty()
             };
             if changed { let _ = self.ecs.insert_one(entity, crate::pack_state::PackRevision(next_revision)); }

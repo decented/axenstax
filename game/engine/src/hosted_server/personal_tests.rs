@@ -12,7 +12,7 @@ fn initial_installation(heard: &super::super::c3d_tests::Heard) -> (protocol::Pe
     assert_eq!(first.window_event, 2);
     let mut slot = crate::player_slot::PlayerSlot::new(0, glam::Vec3::ZERO, 1.0);
     crate::inventory_sync::apply(&mut crate::window::WindowMut {
-        inv: &mut slot.inventory, armour: &mut slot.armour_slots,
+        inv: &mut slot.inventory, armour: &mut slot.armour_slots, offhand: &mut slot.offhand,
         cursor: &mut slot.crafting_ui.cursor_item, grid: &mut slot.crafting_ui.grid, container: None,
     }, sync, &crate::block::BlockRegistry::new(), &mut Default::default(), &mut Default::default(), accept.inventory_mode).unwrap();
     let mut inbox = crate::personal_sync::Inbox::new(accept.action_session, 0);

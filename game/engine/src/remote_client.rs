@@ -4571,8 +4571,7 @@ mod tests {
                 held_id: 0,
                 held_full: protocol::WireItem::None,
             },
-            events_applied: 0,
-        })
+            events_applied: 0, hand: crate::hands::Hand::Main })
     }
 
     /// The packet types the server end holds, in the order they were sent.

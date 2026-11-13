@@ -183,7 +183,7 @@ impl crate::GameState {
         let slot = &self.players[pidx];
         let raw = crate::staged_window::MarkerWindow::try_capture_parts(
             &slot.inventory,
-            &slot.armour_slots,
+            &slot.armour_slots, &slot.offhand,
             &slot.crafting_ui.cursor_item,
             &slot.crafting_ui.grid,
             &self.registry,

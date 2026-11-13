@@ -42,11 +42,11 @@ fn marker_event(event: &WindowEvent, registry: &crate::block::BlockRegistry) -> 
     Ok(Some(match event {
         WindowEvent::Grant(stack) => WindowEvent::Grant(marker_stack(stack, registry)?),
         WindowEvent::RewardGrant { stack, origin } => WindowEvent::RewardGrant { stack: marker_stack(stack, registry)?, origin: *origin },
-        WindowEvent::Take { slot, item, n, how } => WindowEvent::Take {
+        WindowEvent::Take { hand, slot, item, n, how } => WindowEvent::Take { hand: *hand,
             slot: *slot, item: marker_item(item), n: *n, how,
         },
         WindowEvent::WearArmour { hits } => WindowEvent::WearArmour { hits: *hits },
-        WindowEvent::WearWeapon { slot, tool } => WindowEvent::WearWeapon { slot: *slot, tool: *tool },
+        WindowEvent::WearWeapon { hand, slot, tool } => WindowEvent::WearWeapon { hand: *hand, slot: *slot, tool: *tool },
         WindowEvent::ContainerView(_) | WindowEvent::PackView => return Ok(None),
         #[cfg(not(target_arch = "wasm32"))]
         WindowEvent::PersonalSync(_) => return Ok(None),
@@ -60,7 +60,7 @@ enum FoldFact { Grant(u8), Take(u8), Wear }
 
 fn apply_marker_event(window: &mut MarkerWindow, event: &WindowEvent) -> Result<FoldFact, StrictStageError> {
     let view = window.view();
-    if let WindowEvent::WearWeapon { slot, tool } = event {
+    if let WindowEvent::WearWeapon { hand: crate::hands::Hand::Main, slot, tool } = event {
         let item = Item::Tool(*tool);
         // C3d run 16 (run-15 review MEDIUM-1) — the named held slot first;
         // ambiguous only when it doesn't hold the kind and several do.
@@ -198,7 +198,7 @@ fn stage_strict_effects_on(sp: &ServerPlayer, registry: &crate::block::BlockRegi
     for original in all {
         let event = marker_event(original, registry)?.ok_or(StrictStageError::Replacement)?;
         let prior = candidate.slots();
-        let wear_at = if let WindowEvent::WearWeapon { slot, tool } = &event {
+        let wear_at = if let WindowEvent::WearWeapon { hand: crate::hands::Hand::Main, slot, tool } = &event {
             crate::joiner_actions::where_now(candidate.view().inv, *slot, &Item::Tool(*tool))
         } else { None };
         raw_facts.push(apply_marker_event(&mut candidate, &event)?);
@@ -442,7 +442,7 @@ mod tests {
         let mut sp = player();
         sp.inventory.set_slot(0, Some(ItemStack::new_block(crate::block::STONE, 1)));
         sp.inventory.set_slot(1, Some(ItemStack::new_block(crate::block::STONE, 64)));
-        queue(&mut sp, WindowEvent::Take { slot: 0, item: Item::Block(crate::block::STONE), n: 1, how: "test owed take" }, 0);
+        queue(&mut sp, WindowEvent::Take { hand: crate::hands::Hand::Main, slot: 0, item: Item::Block(crate::block::STONE), n: 1, how: "test owed take" }, 0);
         queue(&mut sp, WindowEvent::Grant(ItemStack::new_block(crate::block::STONE, 1)), 0);
         let registry = crate::block::BlockRegistry::new();
         assert!(matches!(stage_strict_click(&sp, &registry, &crate::window::WindowClick::Slot { slot: 0, right: false }, &ctx(), true), Err(StrictStageError::Source)));
@@ -466,11 +466,11 @@ mod tests {
         let mut tool = crate::crafting::Tool::new(crate::crafting::ToolType::Bow, crate::crafting::ToolMaterial::Wood);
         tool.durability = 3;
         sp.inventory.set_slot(0, Some(ItemStack { item: Item::Tool(tool), count: 1 }));
-        queue(&mut sp, WindowEvent::WearWeapon { slot: 0, tool }, 0);
+        queue(&mut sp, WindowEvent::WearWeapon { hand: crate::hands::Hand::Main, slot: 0, tool }, 0);
         let registry = crate::block::BlockRegistry::new();
         let mut effective = strict_effective_marker(&sp, &registry).unwrap();
         assert!(matches!(effective.view().inv.slot(0).unwrap().item, Item::Tool(t) if t.durability == 2));
-        assert!(stage_strict_effects(&sp, &registry, &[WindowEvent::WearWeapon { slot: 0, tool }]).is_ok());
+        assert!(stage_strict_effects(&sp, &registry, &[WindowEvent::WearWeapon { hand: crate::hands::Hand::Main, slot: 0, tool }]).is_ok());
         assert!(matches!(sp.inventory.slot(0).unwrap().item, Item::Tool(t) if t.durability == 3));
         // Run 16 (run-15 review MEDIUM-1) — a second piece of the kind
         // elsewhere: the named slot still holds one, so it is not ambiguous
@@ -488,7 +488,7 @@ mod tests {
         sp.inventory.set_slot(0, named);
         sp.inventory.set_slot(1, None);
         sp.inventory.set_slot(0, Some(ItemStack { item: Item::Tool(crate::crafting::Tool { durability: 1, ..tool }), count: 1 }));
-        assert!(matches!(stage_strict_effects(&sp, &registry, &[WindowEvent::WearWeapon { slot: 0, tool }]), Err(StrictStageError::Source | StrictStageError::AmbiguousWear)));
+        assert!(matches!(stage_strict_effects(&sp, &registry, &[WindowEvent::WearWeapon { hand: crate::hands::Hand::Main, slot: 0, tool }]), Err(StrictStageError::Source | StrictStageError::AmbiguousWear)));
     }
     #[test]
     fn c3d_actual_close_pending_product_fit_crossing_leaves_all_raw_places_intact() {
@@ -540,7 +540,7 @@ mod tests {
     fn c3d_actual_event_deque_reserves_both_shot_effects_without_forcing_an_old_event() {
         let mut sp = player();
         for _ in 0..1023 { queue(&mut sp, WindowEvent::WearArmour { hits: 1 }, 0); }
-        let events = vec![WindowEvent::Take { slot: 0, item: Item::Block(crate::block::STONE), n: 1, how: "test" }, WindowEvent::WearArmour { hits: 1 }].into_boxed_slice();
+        let events = vec![WindowEvent::Take { hand: crate::hands::Hand::Main, slot: 0, item: Item::Block(crate::block::STONE), n: 1, how: "test" }, WindowEvent::WearArmour { hits: 1 }].into_boxed_slice();
         assert!(matches!(prepare_strict_events(&mut sp, events), Err(StrictStageError::Fit)));
         assert_eq!(sp.window_events.waiting.len(), 1023);
         assert_eq!(sp.window_events.last_number(), 1023);

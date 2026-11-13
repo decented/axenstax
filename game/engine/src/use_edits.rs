@@ -278,7 +278,7 @@ fn product(kind: UseKind, old: BlockId) -> Option<ItemStack> {
 /// holding `held` — read BEFORE the use spends or wears it: `used` is one of
 /// `held` when the kind consumes it, `tool` is `held`'s state when the kind
 /// wears it.
-pub fn tag(kind: UseKind, cell: [i32; 3], slot: usize, held: Option<&Item>) -> UseTag {
+pub fn tag(kind: UseKind, cell: [i32; 3], slot: usize, hand: crate::hands::Hand, held: Option<&Item>) -> UseTag {
     let used = kind
         .consumes()
         .then(|| held.map(|item| crate::inventory::stack_to_wire(&ItemStack { item: item.clone(), count: 1 })))
@@ -297,6 +297,7 @@ pub fn tag(kind: UseKind, cell: [i32; 3], slot: usize, held: Option<&Item>) -> U
         tool,
         // Set by the arm once its `add_item` has said what didn't fit.
         unfit: 0,
+        hand,
     }
 }
 
@@ -611,8 +612,16 @@ pub struct Settled {
 /// is only counted, `copy_overflow`), and the `unfit` part is handed back
 /// ([`Settled::unfit`]) for the caller to spawn. Never called for an
 /// [`Verdict::Unexplained`] use.
-pub fn settle(inv: &mut Inventory, kind: UseKind, tag: &UseTag, used: Option<&Item>, judged: &Judged) -> Settled {
+pub fn settle(
+    inv: &mut Inventory,
+    offhand: &mut Option<ItemStack>,
+    kind: UseKind,
+    tag: &UseTag,
+    used: Option<&Item>,
+    judged: &Judged,
+) -> Settled {
     let slot = usize::from(tag.slot);
+    let off = tag.hand == crate::hands::Hand::Off;
     let mut miss = match judged.verdict {
         Verdict::Legal => None,
         Verdict::Drift => Some(UseMiss::Drift),
@@ -621,9 +630,11 @@ pub fn settle(inv: &mut Inventory, kind: UseKind, tag: &UseTag, used: Option<&It
     };
     let mut paid = true;
     if kind.consumes() {
-        paid = used.is_some_and(|item| crate::joiner_actions::take_owed(inv, slot, item, 1) == 1);
+        // v101 — an off-hand use pays from the off-hand first.
+        paid = used.is_some_and(|item| crate::joiner_actions::take_owed_hand(inv, offhand, slot, tag.hand, item, 1) == 1);
     } else if kind == UseKind::TapRubber {
-        paid = matches!(inv.slot(slot).map(|s| &s.item), Some(Item::Material(MaterialId::Bucket)));
+        let held = if off { offhand.as_ref() } else { inv.slot(slot) };
+        paid = matches!(held.map(|s| &s.item), Some(Item::Material(MaterialId::Bucket)));
     }
     if !paid {
         miss = miss.or(Some(UseMiss::NothingToTake));
@@ -633,7 +644,14 @@ pub fn settle(inv: &mut Inventory, kind: UseKind, tag: &UseTag, used: Option<&It
             Some(Item::Tool(t)) if wears_with(kind, &t) => Some(t),
             _ => None,
         };
-        let worn = tool.is_some_and(|t| crate::joiner_inventory::wear_tool(inv, slot, &t) != WearCheck::Mismatched);
+        let worn = tool.is_some_and(|t| {
+            let check = if off {
+                crate::joiner_inventory::wear_offhand_tool(offhand, &t)
+            } else {
+                crate::joiner_inventory::wear_tool(inv, slot, &t)
+            };
+            check != WearCheck::Mismatched
+        });
         if !worn {
             paid = false;
             miss = miss.or(Some(UseMiss::NoTool));
@@ -709,6 +727,9 @@ pub struct UseRecord {
     pub kind: u8,
     /// The hotbar slot it was made from.
     pub slot: usize,
+    /// v101 — the hand it was made with (`Off`: the cost goes back to the
+    /// off-hand, and the product is searched there first).
+    pub hand: crate::hands::Hand,
     /// What it consumed (one), if anything.
     pub cost: Option<Item>,
     /// What of its product the bag took (`product − unfit`), if anything.
@@ -848,6 +869,7 @@ pub struct Undone {
 pub fn undo(
     inv: &mut Inventory,
     ui: &mut crate::craft_ui::CraftingUi,
+    offhand: &mut Option<ItemStack>,
     parked: &mut Vec<ItemStack>,
     record: &UseRecord,
 ) -> Undone {
@@ -858,14 +880,16 @@ pub fn undo(
         let mut preview_inv = inv.clone();
         let mut preview_grid = ui.grid.clone();
         let mut preview_cursor = ui.cursor_item.clone();
+        let mut preview_off = offhand.clone();
         let taken = crate::joiner_actions::take_owed_window(
-            &mut preview_inv, &mut preview_grid, &mut preview_cursor,
-            record.slot, &landed.item, landed.count,
+            &mut preview_inv, &mut preview_grid, &mut preview_cursor, &mut preview_off,
+            record.slot, record.hand, &landed.item, landed.count,
         );
         if taken == landed.count {
             *inv = preview_inv;
             ui.grid = preview_grid;
             ui.cursor_item = preview_cursor;
+            *offhand = preview_off;
             ui.update_result();
         }
         undone.short = landed.count.saturating_sub(taken);
@@ -874,7 +898,10 @@ pub fn undo(
         && undone.short == 0
     {
         let one = ItemStack { item: cost.clone(), count: 1 };
-        let lost = give_back(inv, record.slot, one.clone());
+        let lost = match record.hand {
+            crate::hands::Hand::Off => give_back_offhand(inv, offhand, one.clone()),
+            crate::hands::Hand::Main => give_back(inv, record.slot, one.clone()),
+        };
         if lost > 0 && matches!(one.item, Item::Plan(_)) {
             if ui.cursor_item.is_none() {
                 ui.cursor_item = Some(one);
@@ -915,6 +942,22 @@ pub fn undo_refused(
 pub fn below_holds_a_door_bottom(world: &World, bc: &BlockChange) -> bool {
     crate::block_shape::is_door(world.get_block(bc.x, bc.y - 1, bc.z))
         && !crate::block_shape::door_is_top(world.meta_at(bc.x, bc.y - 1, bc.z))
+}
+
+/// v101 — [`give_back`] for an off-hand use: into the off-hand if it is empty
+/// or holds a stack it joins with, else wherever `add_item` puts it.
+fn give_back_offhand(inv: &mut Inventory, offhand: &mut Option<ItemStack>, stack: ItemStack) -> u8 {
+    match offhand {
+        None => {
+            *offhand = Some(stack);
+            0
+        }
+        Some(s) if s.item.can_stack_with(&stack.item) && s.count < s.item.max_stack() => {
+            s.count += 1;
+            0
+        }
+        _ => inv.add_item(stack).map_or(0, |r| r.count),
+    }
 }
 
 /// Put `stack` back in `slot` if it is empty or holds a stack it joins with
@@ -1324,7 +1367,7 @@ mod tests {
     }
 
     fn record(cell: [i32; 3], kind: UseKind, made_at: u64) -> UseRecord {
-        UseRecord {
+        UseRecord { hand: crate::hands::Hand::Main,
             cell,
             kind: kind.to_wire(),
             slot: 0,
@@ -1370,7 +1413,7 @@ mod tests {
         // in the first empty slot (0).
         assert!(inv.consume_one_material(0, MaterialId::Bucket));
         assert!(inv.add_item(ItemStack::new_material(MaterialId::LavaBucket, 1)).is_none());
-        let rec = UseRecord {
+        let rec = UseRecord { hand: crate::hands::Hand::Main,
             cell: [0, 70, 0],
             kind: UseKind::BucketFill.to_wire(),
             slot: 0,
@@ -1414,7 +1457,7 @@ mod tests {
     #[test]
     fn a_refused_hang_with_the_bag_full_keeps_the_real_plan() {
         let plan = crate::plan::PlanData::debug_3x3_stone();
-        let rec = UseRecord {
+        let rec = UseRecord { hand: crate::hands::Hand::Main,
             cell: [0, 70, 0],
             kind: UseKind::HangPrint.to_wire(),
             slot: 0,
@@ -1514,7 +1557,7 @@ mod tests {
         // The fill: the bucket spent, the water bucket landed in slot 0.
         assert!(inv.consume_one_material(0, MaterialId::Bucket));
         assert!(inv.add_item(ItemStack::new_material(MaterialId::WaterBucket, 1)).is_none());
-        uses.record(UseRecord {
+        uses.record(UseRecord { hand: crate::hands::Hand::Main,
             cell: pond,
             kind: UseKind::BucketFill.to_wire(),
             slot: 0,
@@ -1525,7 +1568,7 @@ mod tests {
         // The empty: the water bucket spent, the bucket back.
         assert!(inv.consume_one_material(0, MaterialId::WaterBucket));
         assert!(inv.add_item(ItemStack::new_material(MaterialId::Bucket, 1)).is_none());
-        uses.record(UseRecord {
+        uses.record(UseRecord { hand: crate::hands::Hand::Main,
             cell: edge,
             kind: UseKind::BucketEmpty.to_wire(),
             slot: 0,
@@ -1554,7 +1597,7 @@ mod tests {
                 _ => ui.cursor_item = Some(product),
             }
             let before = (inv.slots_iter().map(|s| s.cloned()).collect::<Vec<_>>(), ui.grid.clone(), ui.cursor_item.clone());
-            let record = UseRecord { cell: [0, 70, 0], kind: UseKind::BucketFill.to_wire(), slot: 0,
+            let record = UseRecord { hand: crate::hands::Hand::Main, cell: [0, 70, 0], kind: UseKind::BucketFill.to_wire(), slot: 0,
                 cost: Some(mat(MaterialId::Bucket)), landed: Some(ItemStack::new_material(MaterialId::LavaBucket, 2)), made_at: 1 };
             let out = undo(&mut inv, &mut ui, &mut Vec::new(), &record);
             assert_eq!(out.short, 1);
@@ -1569,9 +1612,9 @@ mod tests {
         let mut ui = crate::craft_ui::CraftingUi::new();
         inv.set_slot(0, Some(ItemStack::new_material(MaterialId::Bucket, 1)));
         let mut uses = SentUses::default();
-        uses.record(UseRecord { cell: [0, 70, 0], kind: UseKind::BucketFill.to_wire(), slot: 0,
+        uses.record(UseRecord { hand: crate::hands::Hand::Main, cell: [0, 70, 0], kind: UseKind::BucketFill.to_wire(), slot: 0,
             cost: Some(mat(MaterialId::Bucket)), landed: Some(ItemStack::new_material(MaterialId::LavaBucket, 1)), made_at: 1 });
-        uses.record(UseRecord { cell: [1, 70, 0], kind: UseKind::BucketEmpty.to_wire(), slot: 0,
+        uses.record(UseRecord { hand: crate::hands::Hand::Main, cell: [1, 70, 0], kind: UseKind::BucketEmpty.to_wire(), slot: 0,
             cost: Some(mat(MaterialId::LavaBucket)), landed: Some(ItemStack::new_material(MaterialId::Bucket, 1)), made_at: 2 });
         let notice = |x, kind: UseKind| crate::protocol::RefusedUse { x, y: 70, z: 0, kind: kind.to_wire(), note: 0 };
         undo_refused(&mut uses, &mut inv, &mut ui, &[notice(0, UseKind::BucketFill)]);

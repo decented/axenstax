@@ -21,9 +21,9 @@ pub fn retain_private_window(inv: &Inventory, cursor: &Option<crate::item::ItemS
     Ok(())
 }
 
-pub fn reserve_click(remote: &mut crate::remote_client::RemoteClient, inv: &Inventory, armour: &[Option<ArmourItem>; 4], cursor: &Option<crate::item::ItemStack>, grid: &CraftGrid, click: &WindowClick, ctx: &ClickCtx, registry: &crate::block::BlockRegistry) -> Result<crate::action_identity::ActionHeader, String> {
+pub fn reserve_click(remote: &mut crate::remote_client::RemoteClient, inv: &Inventory, armour: &[Option<ArmourItem>; 4], offhand: &Option<crate::item::ItemStack>, cursor: &Option<crate::item::ItemStack>, grid: &CraftGrid, click: &WindowClick, ctx: &ClickCtx, registry: &crate::block::BlockRegistry) -> Result<crate::action_identity::ActionHeader, String> {
     retain_private_window(inv, cursor, grid)?;
-    let raw = crate::staged_window::MarkerWindow::capture_parts(inv, armour, cursor, grid, registry);
+    let raw = crate::staged_window::MarkerWindow::capture_parts(inv, armour, offhand, cursor, grid, registry);
     let mut staged = crate::staged_window::stage(&raw, click, ctx);
     let station = crate::window::station_after(ctx.station, click, &staged.result);
     let digest = crate::window::digest(&staged.after.view(), station);

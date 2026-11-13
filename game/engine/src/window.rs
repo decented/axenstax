@@ -51,6 +51,11 @@ pub struct WindowMut<'a> {
     /// The four armour slots (`PlayerSlot.armour_slots`), indexed by
     /// `ArmourSlot as usize`.
     pub armour: &'a mut [Option<ArmourItem>; 4],
+    /// The off-hand (`PlayerSlot.offhand`; the server's copy,
+    /// `ServerPlayer.offhand`): any item, beside the armour (off-hand plan,
+    /// slice 2). [`WindowClick::Offhand`] and [`WindowClick::SwapHands`]
+    /// reach it, and [`digest`] covers it.
+    pub offhand: &'a mut Option<ItemStack>,
     /// The stack carried on the mouse cursor.
     pub cursor: &'a mut Option<ItemStack>,
     /// The crafting grid (its usable size comes from [`ClickCtx::station`]).
@@ -230,6 +235,16 @@ pub enum WindowClick {
     /// Closing the screen: return the grid and cursor to the inventory.
     /// What doesn't fit stays where it was (and the screen stays open).
     Close,
+    /// v101 (off-hand plan, slice 2) — click the off-hand slot, with the
+    /// same left/right rules as `Slot` (`hands::click_offhand`). Any item may
+    /// sit there.
+    Offhand { right: bool },
+    /// v101 — swap hotbar slot `slot` (0..9, the selected one: the selection
+    /// is not in the digest, so the click names it) with the off-hand: the F
+    /// key, a tap on the off-hand box (`hands::swap`, the local rule; a lock
+    /// only keeps a slot out of sort and refill, as for every click). A slot
+    /// outside the hotbar is refused.
+    SwapHands { slot: usize },
 }
 
 /// The wire bound on a drag's slot list ([`MAX_DRAG_SLOTS`]): a longer list
@@ -343,6 +358,20 @@ pub fn apply(view: &mut WindowMut, click: &WindowClick, ctx: &ClickCtx) -> Click
         WindowClick::Slot { slot, right } => click_slot(view, *slot, *right),
         WindowClick::Grid { row, col, right } => click_grid(view, *row, *col, *right, ctx.station),
         WindowClick::Armour { slot } => click_armour(view, *slot),
+        WindowClick::Offhand { right } => {
+            let before = (view.offhand.clone(), view.cursor.clone());
+            crate::hands::click_offhand(view.offhand, view.cursor, *right);
+            done_if((view.offhand.clone(), view.cursor.clone()) != before)
+        }
+        WindowClick::SwapHands { slot } => {
+            if *slot >= BAG_START {
+                return ClickResult::Refused;
+            }
+            let mut main = view.inv.take_slot(*slot);
+            let moved = crate::hands::swap(&mut main, view.offhand);
+            view.inv.set_slot(*slot, main);
+            done_if(moved)
+        }
         WindowClick::Result if !ctx.table_present() => ClickResult::Refused,
         WindowClick::Result => click_result(view, ctx.station),
         WindowClick::Trash => match view.cursor.take() {
@@ -899,11 +928,11 @@ pub fn station_after(station: Station, click: &WindowClick, result: &ClickResult
 /// C3b-1 — with the open container's slots when the view has one
 /// ([`digest_with`]).
 pub fn digest(view: &WindowMut, station: Station) -> u32 {
-    digest_with(view.inv, view.armour, view.cursor, view.grid, station, view.container.as_ref().map(|c| c.as_ref()))
+    digest_with(view.inv, view.armour, view.offhand, view.cursor, view.grid, station, view.container.as_ref().map(|c| c.as_ref()))
 }
 
 /// C3a-2a — a stable 32-bit hash of a window: the 36 slots, the four armour
-/// slots, the cursor and the grid (each slot's kind, id, count and
+/// slots, (v101) the off-hand, the cursor and the grid (each slot's kind, id, count and
 /// durability), then `auto_refill`. A joined client sends it with each
 /// window op, after applying it; the server compares its own copy's
 /// (log-only, `PossessionTally::window_mismatch`).
@@ -925,11 +954,12 @@ pub fn digest(view: &WindowMut, station: Station) -> u32 {
 pub fn digest_parts(
     inv: &Inventory,
     armour: &[Option<ArmourItem>; 4],
+    offhand: &Option<ItemStack>,
     cursor: &Option<ItemStack>,
     grid: &CraftGrid,
     station: Station,
 ) -> u32 {
-    digest_with(inv, armour, cursor, grid, station, None)
+    digest_with(inv, armour, offhand, cursor, grid, station, None)
 }
 
 /// C3b-1 — [`digest_parts`], then, when a container is open, a presence
@@ -941,6 +971,7 @@ pub fn digest_parts(
 pub fn digest_with(
     inv: &Inventory,
     armour: &[Option<ArmourItem>; 4],
+    offhand: &Option<ItemStack>,
     cursor: &Option<ItemStack>,
     grid: &CraftGrid,
     station: Station,
@@ -956,6 +987,7 @@ pub fn digest_with(
             None => h.byte(0),
         }
     }
+    h.stack(offhand.as_ref());
     h.stack(cursor.as_ref());
     for cell in grid.iter().flatten() {
         h.stack(cell.as_ref());
@@ -1097,7 +1129,7 @@ mod tests {
         fn by(&mut self, station: Station, eye: glam::Vec3, table_block: block::BlockId, click: WindowClick) -> ClickResult {
             let mut view = WindowMut {
                 inv: &mut self.inv,
-                armour: &mut self.armour,
+                armour: &mut self.armour, offhand: &mut self.offhand,
                 cursor: &mut self.cursor,
                 grid: &mut self.grid,
                 container: None,

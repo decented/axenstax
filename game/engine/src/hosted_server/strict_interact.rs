@@ -54,7 +54,7 @@ impl HostedServer {
         if consume > 0 {
             // A cost with nothing in hand can't be paid: the window disagrees.
             let Some(item) = historical.clone() else { self.refuse_typed_action(i, action); return false };
-            events.push(WindowEvent::Take { slot, item, n: consume, how: "in an interaction" });
+            events.push(WindowEvent::Take { hand: crate::hands::Hand::Main, slot, item, n: consume, how: "in an interaction" });
         }
         events.extend(give.iter().cloned().map(WindowEvent::Grant));
         let sp = &self.server.players[i];

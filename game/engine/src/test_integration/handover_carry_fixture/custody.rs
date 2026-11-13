@@ -289,8 +289,7 @@ fn grant(source: &mut HeadlessGame, peer: &mut HeadlessGame, stack: ItemStack, s
         crate::protocol::ItemActionPacket {
             seq: 0,
             action: crate::protocol::ItemAction::CreativeGive { item: wire },
-            events_applied: 0,
-        },
+            events_applied: 0, hand: crate::hands::Hand::Main },
     )
     .unwrap()
     .expect("the actual joined grant must use a retained Strict action");

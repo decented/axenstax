@@ -71,8 +71,7 @@ fn death_materialises_waiting_grants_once_and_refuses_stale_requests() {
             held_kind,
             held_id,
             held_full: crate::inventory::item_to_wire_full(&stone),
-        },
-    };
+        }, hand: crate::hands::Hand::Main };
     client.send_to_server(&protocol::serialize_packet(
         protocol::PacketType::ItemAction,
         &drop,
@@ -99,8 +98,7 @@ fn death_materialises_waiting_grants_once_and_refuses_stale_requests() {
             x: cell.0,
             y: cell.1,
             z: cell.2,
-        },
-    };
+        }, hand: crate::hands::Hand::Main };
     hs.server.players[slot].player.pos = at;
     client.send_to_server(&protocol::serialize_packet(
         protocol::PacketType::ItemAction,
@@ -183,8 +181,7 @@ fn q_drop_past_believed_bound_cannot_materialise_claimed_items() {
                 held_kind,
                 held_id,
                 held_full: crate::inventory::item_to_wire_full(&stone),
-            },
-        },
+            }, hand: crate::hands::Hand::Main },
     ));
     hs.tick();
     assert_eq!(hs.server.players[slot].possession.drops, 0);
@@ -327,8 +324,7 @@ fn another_joiner_can_partially_retrieve_a_grave_and_unfit_returns_to_it() {
             x: cell.0,
             y: cell.1,
             z: cell.2,
-        },
-    };
+        }, hand: crate::hands::Hand::Main };
     other.send_to_server(&protocol::serialize_packet(
         protocol::PacketType::ItemAction,
         &req,
@@ -372,8 +368,7 @@ fn another_joiner_can_partially_retrieve_a_grave_and_unfit_returns_to_it() {
     let req = protocol::ItemActionPacket {
         seq: 2,
         events_applied: event,
-        action: protocol::ItemAction::GrantUnfit { event, count: 4 },
-    };
+        action: protocol::ItemAction::GrantUnfit { event, count: 4 }, hand: crate::hands::Hand::Main };
     other.send_to_server(&protocol::serialize_packet(
         protocol::PacketType::ItemAction,
         &req,

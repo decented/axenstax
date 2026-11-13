@@ -2652,7 +2652,7 @@ impl HostedServer {
         let now = self.server.tick_counter;
         let sp = &mut self.server.players[i];
         let slot = if req.hotbar_slot < 9 { usize::from(req.hotbar_slot) } else { sp.hotbar_slot };
-        crate::window_events::queue(sp, crate::window_events::WindowEvent::WearWeapon { slot, tool }, now)
+        crate::window_events::queue(sp, crate::window_events::WindowEvent::WearWeapon { hand: crate::hands::Hand::Main, slot, tool }, now)
     }
 
     fn land_joiner_swing(&mut self, i: usize, req: &protocol::EntityAttackPacket) -> bool {
@@ -2762,7 +2762,8 @@ impl HostedServer {
             && consume > 0
             && let Some(held) = held_item_from_wire(req.held_kind, req.held_id, &req.held_full, &self.server.registry)
         {
-            window_event = self.shadow_take_owed(i, usize::from(req.hotbar_slot), &held, consume, "in an interaction");
+            window_event =
+                self.shadow_take_owed(i, usize::from(req.hotbar_slot), req.hand, &held, consume, "in an interaction");
         }
         self.send_outcome(i, req.seq, req.entity, Some(req.kind), accepted, consume, note, window_event);
         if let Some(r) = result
@@ -2798,7 +2799,7 @@ impl HostedServer {
                 if eaten.is_ok()
                     && let Some(held) = &held
                 {
-                    window_event = self.shadow_take_owed(i, usize::from(*hotbar_slot), held, 1, "by eating");
+                    window_event = self.shadow_take_owed(i, usize::from(*hotbar_slot), req.hand, held, 1, "by eating");
                 }
                 eaten.map(|()| 1)
             }
@@ -2853,11 +2854,11 @@ impl HostedServer {
             protocol::ItemAction::Shoot { weapon, hotbar_slot, held_kind, held_id, held_full, yaw, pitch, charge } => {
                 let held = held_item_from_wire(*held_kind, *held_id, held_full, &self.server.registry);
                 let aim = Aim { yaw: *yaw, pitch: *pitch, charge: *charge };
-                return self.serve_shoot(i, req.seq, *weapon, *hotbar_slot, held, aim);
+                return self.serve_shoot(i, req.seq, *weapon, *hotbar_slot, req.hand, held, aim);
             }
             protocol::ItemAction::PlaceCart { cell, hotbar_slot, held_kind, held_id, held_full } => {
                 let held = held_item_from_wire(*held_kind, *held_id, held_full, &self.server.registry);
-                return self.serve_place_cart(i, req.seq, *cell, *hotbar_slot, held);
+                return self.serve_place_cart(i, req.seq, *cell, *hotbar_slot, req.hand, held);
             }
             protocol::ItemAction::Cast { held_kind, held_id, held_full, .. } => {
                 let held = held_item_from_wire(*held_kind, *held_id, held_full, &self.server.registry);
@@ -2865,7 +2866,7 @@ impl HostedServer {
             }
             protocol::ItemAction::Reel { hotbar_slot, held_kind, held_id, held_full } => {
                 let held = held_item_from_wire(*held_kind, *held_id, held_full, &self.server.registry);
-                return self.serve_reel(i, req.seq, *hotbar_slot, held);
+                return self.serve_reel(i, req.seq, *hotbar_slot, req.hand, held);
             }
             // C3c-3a (v83) — a Plan the client minted in its own window,
             // mirrored on the server's copy by marker. Never answered.
@@ -2876,7 +2877,7 @@ impl HostedServer {
             // peeled: on the server's world, by the shared rule.
             protocol::ItemAction::Attach { x, y, z, face, hotbar_slot, held_kind, held_id, held_full } => {
                 let held = held_item_from_wire(*held_kind, *held_id, held_full, &self.server.registry);
-                return self.serve_attach(i, req.seq, [*x, *y, *z], *face, *hotbar_slot, held);
+                return self.serve_attach(i, req.seq, [*x, *y, *z], *face, *hotbar_slot, req.hand, held);
             }
             protocol::ItemAction::CreativeGive { item } => {
                 return self.serve_creative_give(i, req.seq, item);
@@ -2993,7 +2994,17 @@ impl HostedServer {
     /// (past it refused, `NothingToTake`); a creative joiner pays nothing, as
     /// single-player's creative paint takes nothing. Refused: nothing changes;
     /// the note says why.
-    fn serve_attach(&mut self, i: usize, seq: u32, cell: [i32; 3], face: u8, hotbar_slot: u8, held: Option<crate::item::Item>) {
+    #[allow(clippy::too_many_arguments)]
+    fn serve_attach(
+        &mut self,
+        i: usize,
+        seq: u32,
+        cell: [i32; 3],
+        face: u8,
+        hotbar_slot: u8,
+        hand: crate::hands::Hand,
+        held: Option<crate::item::Item>,
+    ) {
         use crate::item_actions::ItemNote;
         let now = self.server.tick_counter;
         let creative = self.server.play_mode.is_creative();
@@ -3043,7 +3054,7 @@ impl HostedServer {
             0
         } else {
             let slot = self.action_slot(i, hotbar_slot);
-            self.shadow_take_owed(i, slot, &item, 1, "on a wall or floor")
+            self.shadow_take_owed(i, slot, hand, &item, 1, "on a wall or floor")
         };
         let out = protocol::ItemActionOutcomePacket {
             seq,
@@ -3175,6 +3186,7 @@ impl HostedServer {
         seq: u32,
         weapon: protocol::ShotWeapon,
         hotbar_slot: u8,
+        hand: crate::hands::Hand,
         held: Option<crate::item::Item>,
         aim: Aim,
     ) {
@@ -3192,8 +3204,12 @@ impl HostedServer {
             return self.refuse_item_action(i, seq, ItemNote::NothingToTake);
         }
         let slot = self.action_slot(i, hotbar_slot);
-        let ammo = crate::item::Item::Material(crate::shot::ammo_for(weapon));
         let Some(sp) = self.server.players.get_mut(i) else { return };
+        // v101 — the round the client's rule spends: the off-hand's when it
+        // holds ammo this weapon shoots, else the weapon's own from the bag
+        // (`shot::round_for`), taken off-hand first on both copies
+        // (`joiner_actions::owed_hand`).
+        let ammo = crate::shot::round_for(weapon, sp.offhand.as_ref());
         if now + crate::shot::SHOT_JITTER_TICKS < sp.next_shot_tick {
             sp.possession.shot_too_soon = sp.possession.shot_too_soon.saturating_add(1);
             return self.refuse_item_action(i, seq, ItemNote::TooSoon);
@@ -3232,10 +3248,10 @@ impl HostedServer {
             self.note_believed_request(i, believed, tool_believed, false, now);
         }
         if believed == 0 {
-            self.shadow_take_owed(i, slot, &ammo, 1, "on a shot");
+            self.shadow_take_owed(i, slot, crate::hands::Hand::Off, &ammo, 1, "on a shot");
         }
         let window_event = match self.server.players.get_mut(i) {
-            Some(sp) => crate::window_events::queue(sp, crate::window_events::WindowEvent::WearWeapon { slot, tool }, now),
+            Some(sp) => crate::window_events::queue(sp, crate::window_events::WindowEvent::WearWeapon { hand, slot, tool }, now),
             None => 0,
         };
         let out = protocol::ItemActionOutcomePacket {
@@ -3260,7 +3276,15 @@ impl HostedServer {
     /// world, which every joiner sees through the entity mirror. The item is
     /// paid as a block use's is: an owed take, or believed within the bound
     /// (past it refused, `NothingToTake`).
-    fn serve_place_cart(&mut self, i: usize, seq: u32, cell: [i32; 3], hotbar_slot: u8, held: Option<crate::item::Item>) {
+    fn serve_place_cart(
+        &mut self,
+        i: usize,
+        seq: u32,
+        cell: [i32; 3],
+        hotbar_slot: u8,
+        hand: crate::hands::Hand,
+        held: Option<crate::item::Item>,
+    ) {
         use crate::item_actions::ItemNote;
         let now = self.server.tick_counter;
         let creative = self.server.play_mode.is_creative();
@@ -3312,7 +3336,7 @@ impl HostedServer {
             0
         } else {
             let slot = self.action_slot(i, hotbar_slot);
-            self.shadow_take_owed(i, slot, &item, 1, "placing a cart")
+            self.shadow_take_owed(i, slot, hand, &item, 1, "placing a cart")
         };
         let out = protocol::ItemActionOutcomePacket {
             seq,
@@ -3383,7 +3407,7 @@ impl HostedServer {
     /// (`grant_to_joiner`: what the client can't hold comes back as a ground
     /// item, never lost), and the rod wears once (`wear_held`, a window
     /// event).
-    fn serve_reel(&mut self, i: usize, seq: u32, hotbar_slot: u8, held: Option<crate::item::Item>) {
+    fn serve_reel(&mut self, i: usize, seq: u32, hotbar_slot: u8, hand: crate::hands::Hand, held: Option<crate::item::Item>) {
         use crate::item_actions::ItemNote;
         if !self.joiner_may_act(i) {
             return self.refuse_item_action(i, seq, ItemNote::NotNow);
@@ -3404,7 +3428,7 @@ impl HostedServer {
         if !crate::fishing::hooked(now, bite) {
             return self.refuse_item_action(i, seq, ItemNote::NothingBit);
         }
-        let window_event = crate::window_events::queue(sp, crate::window_events::WindowEvent::WearWeapon { slot, tool: rod }, now);
+        let window_event = crate::window_events::queue(sp, crate::window_events::WindowEvent::WearWeapon { hand, slot, tool: rod }, now);
         let out = protocol::ItemActionOutcomePacket {
             seq,
             accepted: true,
@@ -3582,13 +3606,13 @@ impl HostedServer {
             // never held it (as a believed container deposit's).
             let owed = pay.saturating_sub(u8::try_from(believed).unwrap_or(u8::MAX));
             if owed > 0 {
-                window_event = self.shadow_take_owed(i, slot, held, owed, "on a block");
+                window_event = self.shadow_take_owed(i, slot, crate::hands::Hand::Main, held, owed, "on a block");
             } else if wear
                 && let crate::item::Item::Tool(tool) = held
                 && let Some(sp) = self.server.players.get_mut(i)
             {
                 let now = self.server.tick_counter;
-                let event = crate::window_events::WindowEvent::WearWeapon { slot, tool: *tool };
+                let event = crate::window_events::WindowEvent::WearWeapon { hand: crate::hands::Hand::Main, slot, tool: *tool };
                 window_event = crate::window_events::queue(sp, event, now);
             }
         }
@@ -3798,10 +3822,18 @@ impl HostedServer {
     /// applied once the client says it paid its own: returns the event's
     /// number for the outcome to carry (0 for a seat that isn't a joiner).
     /// The shortfall is logged when it is applied.
-    fn shadow_take_owed(&mut self, i: usize, slot: usize, held: &crate::item::Item, n: u8, how: &'static str) -> u32 {
+    fn shadow_take_owed(
+        &mut self,
+        i: usize,
+        slot: usize,
+        hand: crate::hands::Hand,
+        held: &crate::item::Item,
+        n: u8,
+        how: &'static str,
+    ) -> u32 {
         let now = self.server.tick_counter;
         let Some(sp) = self.server.players.get_mut(i) else { return 0 };
-        let event = crate::window_events::WindowEvent::Take { slot, item: held.clone(), n, how };
+        let event = crate::window_events::WindowEvent::Take { slot, hand, item: held.clone(), n, how };
         crate::window_events::queue(sp, event, now)
     }
 
@@ -5926,7 +5958,7 @@ impl HostedServer {
             // C3a-fix-1 (C-M1) — and the slot and hand the edit itself was
             // made with, when its input said (`InputPacket.edit_hands`).
             let slot = hand.slot().map_or_else(|| self.server.players[i].hotbar_slot, usize::from);
-            self.process_one_edit(i, &bc, tag, hand.held(), slot, budget);
+            self.process_one_edit(i, &bc, tag, hand.held(), slot, hand.hand(), budget);
         }
     }
 
@@ -5942,6 +5974,7 @@ impl HostedServer {
         tag: Option<protocol::EditTag>,
         hand: (u8, u16),
         slot: usize,
+        use_hand: crate::hands::Hand,
         budget: &mut EditTickBudget,
     ) {
         let remote = self.server.players[i].server_simulated;
@@ -6025,7 +6058,7 @@ impl HostedServer {
         };
         self.apply_edit_world(i, bc, old_block, remote, break_yield.is_some());
         if let Some(edit) = joiner_edit {
-            self.settle_joiner_edit(i, bc, slot, edit, break_yield);
+            self.settle_joiner_edit(i, bc, slot, use_hand, edit, break_yield);
         }
         if let Some(judged) = joiner_use {
             self.settle_joiner_use(i, bc, judged);
@@ -6426,7 +6459,7 @@ impl HostedServer {
         let settled = if judged.verdict == Verdict::Unexplained {
             Settled { miss: Some(UseMiss::Unexplained), copy_overflow: 0, unfit: None }
         } else {
-            crate::use_edits::settle(&mut sp.inventory, kind, &tag, used.as_ref(), &judged)
+            crate::use_edits::settle(&mut sp.inventory, &mut sp.offhand, kind, &tag, used.as_ref(), &judged)
         };
         if sp.possession.note_use(kind, settled.miss) {
             let miss = settled.miss.map_or("", |m| m.label());
@@ -6578,6 +6611,7 @@ impl HostedServer {
         i: usize,
         bc: &protocol::BlockChange,
         slot: usize,
+        use_hand: crate::hands::Hand,
         edit: crate::joiner_inventory::JoinerEdit,
         break_yield: Option<crate::break_drops::BreakYield>,
     ) {
@@ -6599,7 +6633,9 @@ impl HostedServer {
             }
             (JoinerEdit::Place, _) => {
                 let sp = &mut self.server.players[i];
-                match crate::joiner_inventory::check_placement(&mut sp.inventory, slot, bc.new_block) {
+                // v101 — an off-hand placement is checked against, and
+                // paid from, the copy's off-hand (log-only, as the main hand).
+                match crate::joiner_inventory::check_placement_hand(&mut sp.inventory, &mut sp.offhand, use_hand, slot, bc.new_block) {
                     PlaceCheck::Matched => sp.possession.matched += 1,
                     PlaceCheck::Mismatched { held } => {
                         let due = sp.possession.note_mismatch(tick);
@@ -6607,10 +6643,14 @@ impl HostedServer {
                         let held = held.map_or("nothing placeable", |b| registry.get(b).name);
                         log::log!(
                             crate::joiner_inventory::mismatch_log_level(due),
-                            "possession check (log-only): {} placed {} from hotbar slot {slot}; \
+                            "possession check (log-only): {} placed {} from {}; \
                              the server's copy of that slot holds {held}{} — accepted",
                             sp.display_name,
                             registry.get(bc.new_block).name,
+                            match use_hand {
+                                crate::hands::Hand::Main => format!("hotbar slot {slot}"),
+                                crate::hands::Hand::Off => "the off-hand".to_string(),
+                            },
                             held_back_note(due),
                         );
                     }
@@ -9890,7 +9930,7 @@ pub(crate) mod tests {
         crate::inventory_sync::apply(
             &mut crate::window::WindowMut {
                 inv: &mut actor.inventory,
-                armour: &mut actor.armour_slots,
+                armour: &mut actor.armour_slots, offhand: &mut actor.offhand,
                 cursor: &mut actor.crafting_ui.cursor_item,
                 grid: &mut actor.crafting_ui.grid,
                 container: None,
@@ -9974,7 +10014,7 @@ pub(crate) mod tests {
         crate::inventory_sync::apply(
             &mut crate::window::WindowMut {
                 inv: &mut actor.inventory,
-                armour: &mut actor.armour_slots,
+                armour: &mut actor.armour_slots, offhand: &mut actor.offhand,
                 cursor: &mut actor.crafting_ui.cursor_item,
                 grid: &mut actor.crafting_ui.grid,
                 container: None,
@@ -10467,7 +10507,7 @@ pub(crate) mod tests {
         let i=hs.server.players.len()-1;
         let mut wire=crate::inventory::stack_to_wire(&crate::item::ItemStack {item:crate::item::Item::Plan(crate::plan::PlanData::debug_3x3_stone()),count:1}); wire.count=2;
         let before=crate::inventory_sync::packet(&crate::window_events::effective_window(&hs.server.players[i]),&Default::default(),1);
-        client.send_to_server(&protocol::serialize_packet(protocol::PacketType::ItemAction,&protocol::ItemActionPacket {seq:1,action:protocol::ItemAction::CreativeGive {item:wire},events_applied:0})); hs.tick();
+        client.send_to_server(&protocol::serialize_packet(protocol::PacketType::ItemAction,&protocol::ItemActionPacket {seq:1,action:protocol::ItemAction::CreativeGive {item:wire},events_applied:0, hand: crate::hands::Hand::Main })); hs.tick();
         let mut outcome=None; let mut grants=0;
         while let Some(pkt)=client.try_recv_from_server() {match protocol::deserialize_header(&pkt) {
             Some((protocol::PacketType::ItemActionOutcome,bytes)) => outcome=Some(protocol::safe_deserialize::<protocol::ItemActionOutcomePacket>(bytes).unwrap()),
@@ -10562,7 +10602,7 @@ pub(crate) mod tests {
         let item = crate::inventory::stack_to_wire(&crate::item::ItemStack::new_block(crate::block::STONE, 12));
         for (seq, mode, accepted) in [(1, crate::play_mode::PlayMode::Survival, false), (2, crate::play_mode::PlayMode::Creative, true)] {
             hs.server.play_mode = mode;
-            client.send_to_server(&protocol::serialize_packet(protocol::PacketType::ItemAction, &protocol::ItemActionPacket { seq, action: protocol::ItemAction::CreativeGive { item: item.clone() }, events_applied: 0 })); hs.tick();
+            client.send_to_server(&protocol::serialize_packet(protocol::PacketType::ItemAction, &protocol::ItemActionPacket { seq, action: protocol::ItemAction::CreativeGive { item: item.clone() }, events_applied: 0, hand: crate::hands::Hand::Main })); hs.tick();
             let mut outcome = None;
             while let Some(pkt) = client.try_recv_from_server() {
                 if let Some((protocol::PacketType::ItemActionOutcome, bytes)) = protocol::deserialize_header(&pkt) { outcome = Some(protocol::safe_deserialize::<protocol::ItemActionOutcomePacket>(bytes).unwrap()); }

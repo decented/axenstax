@@ -379,7 +379,7 @@ fn game_harness_d2c3_world_local_remote_cut_returns_through_actual_native_load()
     crate::inventory_sync::apply(
         &mut crate::window::WindowMut {
             inv: &mut joined_seat.inventory,
-            armour: &mut joined_seat.armour_slots,
+            armour: &mut joined_seat.armour_slots, offhand: &mut joined_seat.offhand,
             cursor: &mut joined_seat.crafting_ui.cursor_item,
             grid: &mut joined_seat.crafting_ui.grid,
             container: None,

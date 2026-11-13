@@ -57,7 +57,7 @@ impl Rig {
         crate::inventory_sync::apply(
             &mut crate::window::WindowMut {
                 inv: &mut actor.inventory,
-                armour: &mut actor.armour_slots,
+                armour: &mut actor.armour_slots, offhand: &mut actor.offhand,
                 cursor: &mut actor.crafting_ui.cursor_item,
                 grid: &mut actor.crafting_ui.grid,
                 container: None,
@@ -226,7 +226,7 @@ impl Rig {
         crate::pack_client::apply_canonical_window(
             &mut crate::window::WindowMut {
                 inv: &mut p.inventory,
-                armour: &mut p.armour_slots,
+                armour: &mut p.armour_slots, offhand: &mut p.offhand,
                 cursor: &mut p.crafting_ui.cursor_item,
                 grid: &mut p.crafting_ui.grid,
                 container: None,
@@ -254,8 +254,7 @@ impl Rig {
                             event: grant.window_event,
                             count: unfit,
                         },
-                        events_applied: grant.window_event,
-                    },
+                        events_applied: grant.window_event, hand: crate::hands::Hand::Main },
                 ));
             }
         }

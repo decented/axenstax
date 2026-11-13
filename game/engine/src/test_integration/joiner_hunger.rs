@@ -119,7 +119,7 @@ impl Rig {
         self.seq += 1;
         // C3a-fix-1 — a test client that applies every window event the
         // moment the server sends it.
-        let pkt = protocol::ItemActionPacket { seq: self.seq, action, events_applied: u32::MAX };
+        let pkt = protocol::ItemActionPacket { seq: self.seq, action, events_applied: u32::MAX, hand: crate::hands::Hand::Main };
         self.client.send_to_server(&protocol::serialize_packet(protocol::PacketType::ItemAction, &pkt));
         self.seq
     }
@@ -476,7 +476,7 @@ fn a_joiner_sleeping_on_a_lent_world_never_skips_the_night() {
     inbox.drain(&client, slot);
     hs.server.players[slot].combat.health = 8.0;
     let sleep = |seq: u32| {
-        let pkt = protocol::ItemActionPacket { seq, action: ItemAction::Sleep { bed }, events_applied: u32::MAX };
+        let pkt = protocol::ItemActionPacket { seq, action: ItemAction::Sleep { bed }, events_applied: u32::MAX, hand: crate::hands::Hand::Main };
         client.send_to_server(&protocol::serialize_packet(protocol::PacketType::ItemAction, &pkt));
     };
     let t0 = hs.server.world_time;
@@ -685,7 +685,7 @@ fn an_outcome_arrives_before_the_state_update_that_acknowledges_the_input_after_
     let mut ja = JoinerActions::default();
     let next_input = 1_u64; // the first input of the session
     let ask = Pending { kind: Asked::Eat, mob: None, hotbar_slot: 0, held: Some(bread()) };
-    assert!(ja.can_afford(&inv, &ui, Asked::Eat, Some(&bread())));
+    assert!(ja.can_afford(&inv, &ui, &None, Asked::Eat, Some(&bread())));
     let seq = ja.record(ask, next_input);
     assert_eq!(rig.eat(&bread()), seq, "the request goes out under the seq it was recorded with");
     assert!(ja.eat_in_flight(), "the request is in flight");
@@ -751,7 +751,7 @@ fn an_outcome_arrives_before_the_state_update_that_acknowledges_the_input_after_
     // C3a-fix-1 — the server takes it once the client says it paid.
     rig.report();
     assert_eq!(rig.shadow_count(MaterialId::Bread), 1, "the server took the same one");
-    assert!(ja.can_afford(&inv, &ui, Asked::Eat, Some(&bread())), "the second bread is free to eat");
+    assert!(ja.can_afford(&inv, &ui, &None, Asked::Eat, Some(&bread())), "the second bread is free to eat");
 }
 
 fn count(inv: &crate::inventory::Inventory) -> u32 {

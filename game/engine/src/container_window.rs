@@ -434,13 +434,26 @@ pub fn claim_slots(click: &ContainerClick, touched: &[WireWindowSlot]) -> Vec<Wi
 pub struct PlayerSlots {
     inv: Vec<Option<ItemStack>>,
     armour: [Option<ArmourItem>; 4],
+    offhand: Option<ItemStack>,
     cursor: Option<ItemStack>,
     grid: CraftGrid,
 }
 
 impl PlayerSlots {
-    pub fn of(inv: &Inventory, armour: &[Option<ArmourItem>; 4], cursor: &Option<ItemStack>, grid: &CraftGrid) -> Self {
-        PlayerSlots { inv: (0..SLOTS).map(|i| inv.slot(i).cloned()).collect(), armour: *armour, cursor: cursor.clone(), grid: grid.clone() }
+    pub fn of(
+        inv: &Inventory,
+        armour: &[Option<ArmourItem>; 4],
+        offhand: &Option<ItemStack>,
+        cursor: &Option<ItemStack>,
+        grid: &CraftGrid,
+    ) -> Self {
+        PlayerSlots {
+            inv: (0..SLOTS).map(|i| inv.slot(i).cloned()).collect(),
+            armour: *armour,
+            offhand: offhand.clone(),
+            cursor: cursor.clone(),
+            grid: grid.clone(),
+        }
     }
 
     /// Player slot `at`'s stack; `None` for a container slot or one past
@@ -451,6 +464,7 @@ impl PlayerSlots {
             WireWindowSlot::Armour(i) => {
                 self.armour.get(usize::from(i))?.map(|p| ItemStack { item: Item::Armour(p), count: 1 })
             }
+            WireWindowSlot::Offhand => self.offhand.clone(),
             WireWindowSlot::Cursor => self.cursor.clone(),
             WireWindowSlot::Grid(r, c) if r < 3 && c < 3 => self.grid[usize::from(r)][usize::from(c)].clone(),
             _ => return None,
@@ -485,6 +499,9 @@ fn blocker() -> ItemStack {
 pub struct ClaimedWindow {
     inv: Inventory,
     armour: [Option<ArmourItem>; 4],
+    /// v101 — never claimed (no container click reaches the off-hand), so it
+    /// stays empty: the re-run never moves the off-hand.
+    offhand: Option<ItemStack>,
     cursor: Option<ItemStack>,
     grid: CraftGrid,
     /// The player slots claimed, in claim order.
@@ -497,7 +514,7 @@ impl ClaimedWindow {
         for i in 0..SLOTS {
             inv.set_slot(i, Some(blocker()));
         }
-        let mut w = ClaimedWindow { inv, armour: [None; 4], cursor: None, grid: Default::default(), claimed: Vec::new() };
+        let mut w = ClaimedWindow { inv, armour: [None; 4], offhand: None, cursor: None, grid: Default::default(), claimed: Vec::new() };
         for (at, value) in claims {
             if !is_player_slot(*at) || w.claimed.contains(at) {
                 continue;
@@ -544,7 +561,7 @@ impl ClaimedWindow {
     pub fn apply(&mut self, container: ContainerMut, click: &ContainerClick, ctx: &ClickCtx) -> ContainerApplied {
         let mut view = WindowMut {
             inv: &mut self.inv,
-            armour: &mut self.armour,
+            armour: &mut self.armour, offhand: &mut self.offhand,
             cursor: &mut self.cursor,
             grid: &mut self.grid,
             container: Some(container),
@@ -922,12 +939,21 @@ impl CorrectionDebt {
         grid: &mut CraftGrid,
         cursor: &mut Option<ItemStack>,
         armour: &mut [Option<ArmourItem>; 4],
+        offhand: &mut Option<ItemStack>,
         delta: &ItemDelta,
     ) -> DebtApplied {
         let mut out = DebtApplied::default();
         for (hint, stack) in &delta.take {
-            let taken =
-                crate::joiner_actions::take_correction(inv, grid, cursor, armour, usize::from(*hint), &stack.item, stack.count);
+            let taken = crate::joiner_actions::take_correction(
+                inv,
+                grid,
+                cursor,
+                armour,
+                offhand,
+                usize::from(*hint),
+                &stack.item,
+                stack.count,
+            );
             if taken < stack.count {
                 let short = u32::from(stack.count - taken);
                 match self.owed.iter_mut().find(|(i, _)| i == &stack.item) {
@@ -1196,7 +1222,7 @@ pub fn apply_slot_set(
     }
     let delta = ItemDelta::from_wire(&pkt.take, &pkt.give, registry);
     if !delta.is_empty() {
-        let settled = debt.apply(view.inv, view.grid, view.cursor, view.armour, &delta).settled;
+        let settled = debt.apply(view.inv, view.grid, view.cursor, view.armour, view.offhand, &delta).settled;
         out.unfit = delta.give.iter().zip(settled).map(|(g, s)| g.count - s).collect();
     }
     out
@@ -1317,7 +1343,7 @@ mod tests {
         fn chest(&mut self, click: ContainerClick, shared: bool) -> ContainerApplied {
             let mut view = WindowMut {
                 inv: &mut self.inv,
-                armour: &mut self.armour,
+                armour: &mut self.armour, offhand: &mut self.offhand,
                 cursor: &mut self.cursor,
                 grid: &mut self.grid,
                 container: Some(ContainerMut::Chest(&mut self.chest)),
@@ -1328,7 +1354,7 @@ mod tests {
         fn furnace(&mut self, click: ContainerClick) -> ContainerApplied {
             let mut view = WindowMut {
                 inv: &mut self.inv,
-                armour: &mut self.armour,
+                armour: &mut self.armour, offhand: &mut self.offhand,
                 cursor: &mut self.cursor,
                 grid: &mut self.grid,
                 container: Some(ContainerMut::Furnace(&mut self.furnace)),
@@ -1339,7 +1365,7 @@ mod tests {
         fn none(&mut self, click: ContainerClick) -> ContainerApplied {
             let mut view = WindowMut {
                 inv: &mut self.inv,
-                armour: &mut self.armour,
+                armour: &mut self.armour, offhand: &mut self.offhand,
                 cursor: &mut self.cursor,
                 grid: &mut self.grid,
                 container: None,
@@ -1507,7 +1533,7 @@ mod tests {
         let mut debt = CorrectionDebt::default();
         let mut view = WindowMut {
             inv: &mut w.inv,
-            armour: &mut w.armour,
+            armour: &mut w.armour, offhand: &mut w.offhand,
             cursor: &mut w.cursor,
             grid: &mut w.grid,
             container: Some(ContainerMut::Chest(&mut w.chest)),

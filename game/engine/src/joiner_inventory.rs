@@ -182,6 +182,30 @@ pub enum PlaceCheck {
 /// from that slot exactly as the client's placement did
 /// (`take_placeable_from_hotbar`, auto-refill included). On a mismatch it
 /// takes nothing — the check is log-only and never corrects the shadow.
+/// v101 (off-hand plan, slice 2) — [`check_placement`] for an edit made with
+/// `hand`: an off-hand placement is checked against the shadow's off-hand
+/// and, on a match, takes one from it by the client's own off-hand rule
+/// (`inventory::take_placeable_cell`, no refill). Log-only, as the main hand.
+pub fn check_placement_hand(
+    inv: &mut Inventory,
+    offhand: &mut Option<crate::item::ItemStack>,
+    hand: crate::hands::Hand,
+    hotbar_slot: usize,
+    placed: BlockId,
+) -> PlaceCheck {
+    if hand == crate::hands::Hand::Main {
+        return check_placement(inv, hotbar_slot, placed);
+    }
+    let held = offhand.as_ref().and_then(|s| crate::hands::placeable_id(&s.item));
+    match held {
+        Some(b) if b == placed => {
+            crate::inventory::take_placeable_cell(offhand);
+            PlaceCheck::Matched
+        }
+        held => PlaceCheck::Mismatched { held },
+    }
+}
+
 pub fn check_placement(inv: &mut Inventory, hotbar_slot: usize, placed: BlockId) -> PlaceCheck {
     match inv.hotbar_placeable_id(hotbar_slot) {
         Some(b) if b == placed => {
@@ -219,6 +243,23 @@ pub fn wear_tool(inv: &mut Inventory, slot: usize, tool: &Tool) -> WearCheck {
         return WearCheck::Mismatched;
     }
     match inv.use_tool_at(slot) {
+        Some(info) => WearCheck::Worn { broke: info.just_broke },
+        None => WearCheck::Mismatched,
+    }
+}
+
+/// v101 (off-hand plan, slice 2) — [`wear_tool`] on the off-hand: the same
+/// rule (a tool of the same type and material wears, by
+/// `inventory::use_tool_cell`, the cell rule the hotbar slots run).
+pub fn wear_offhand_tool(offhand: &mut Option<crate::item::ItemStack>, tool: &Tool) -> WearCheck {
+    let holds = matches!(
+        offhand.as_ref().map(|s| &s.item),
+        Some(Item::Tool(t)) if t.tool_type == tool.tool_type && t.material == tool.material
+    );
+    if !holds {
+        return WearCheck::Mismatched;
+    }
+    match crate::inventory::use_tool_cell(offhand) {
         Some(info) => WearCheck::Worn { broke: info.just_broke },
         None => WearCheck::Mismatched,
     }

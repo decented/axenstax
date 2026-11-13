@@ -173,7 +173,7 @@ pub fn place_door_joined(
     remote: &mut RemoteClient,
     ui: &mut CraftingUi,
     inv: &mut Inventory,
-    armour: &mut [Option<ArmourItem>; 4],
+    armour: &mut [Option<ArmourItem>; 4], offhand: &mut Option<crate::item::ItemStack>,
     slot: usize,
     bottom: [i32; 3],
     facing: u8,
@@ -181,9 +181,9 @@ pub fn place_door_joined(
 ) -> Result<Option<BlockId>, String> {
     let slot_u8 = u8::try_from(slot).ok().filter(|s| *s < 9).ok_or("A door placement needs a hotbar slot")?;
     let halves = door_halves(bottom, facing).ok_or("A door faces a horizontal direction")?;
-    ui.sync_auto_refill_joined(remote, inv, armour)?;
+    ui.sync_auto_refill_joined(remote, inv, armour, offhand)?;
     crate::window_prediction::retain_private_window(inv, &ui.cursor_item, &ui.grid)?;
-    let raw = crate::staged_window::MarkerWindow::capture_parts(inv, armour, &ui.cursor_item, &ui.grid, registry);
+    let raw = crate::staged_window::MarkerWindow::capture_parts(inv, armour, offhand, &ui.cursor_item, &ui.grid, registry);
     let mut after = raw.clone();
     crate::strict_edits::place_window(after.view().inv, slot);
     let recipe = crate::strict_edits::EditRecipe::new_place(slot_u8, &raw, &after, ui.station())?;
@@ -203,8 +203,8 @@ pub fn place_door_joined(
 /// The caller predicts [`toggle_metas`] with [`OpenRule::Canonical`] (the
 /// server's rule). No window change.
 #[allow(clippy::too_many_arguments)]
-pub fn toggle_joined(remote: &mut RemoteClient, ui: &mut CraftingUi, inv: &Inventory, armour: &[Option<ArmourItem>; 4], world: &World, primary: [i32; 3], expected: BlockId, slot: usize) -> Result<(), String> {
-    ui.sync_auto_refill_joined(remote, inv, armour)?;
+pub fn toggle_joined(remote: &mut RemoteClient, ui: &mut CraftingUi, inv: &Inventory, armour: &[Option<ArmourItem>; 4], offhand: &Option<crate::item::ItemStack>, world: &World, primary: [i32; 3], expected: BlockId, slot: usize) -> Result<(), String> {
+    ui.sync_auto_refill_joined(remote, inv, armour, offhand)?;
     reserve_toggle(remote, world, primary, expected, slot)
 }
 

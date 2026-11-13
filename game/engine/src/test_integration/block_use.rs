@@ -109,8 +109,7 @@ impl Client {
                         let pkt = protocol::ItemActionPacket {
                             seq,
                             action: protocol::ItemAction::GrantUnfit { event: grant.window_event, count: unfit },
-                            events_applied: self.events,
-                        };
+                            events_applied: self.events, hand: crate::hands::Hand::Main };
                         self.transport.send_to_server(&protocol::serialize_packet(protocol::PacketType::ItemAction, &pkt));
                     }
                 }
@@ -143,7 +142,7 @@ impl Client {
     pub(super) fn use_block(&mut self, cell: [i32; 3], kind: UseKind, hot: usize) -> bool {
         let held = self.inv.hotbar_slot(hot).map(|s| s.item.clone());
         let asked = Asked::UseBlock { cell, kind, claim: crate::block_use::claim(kind, held.as_ref()) };
-        if !self.actions.can_afford(&self.inv, &self.ui, asked, held.as_ref()) {
+        if !self.actions.can_afford(&self.inv, &self.ui, &None, asked, held.as_ref()) {
             return false;
         }
         let (held_kind, held_id) = held.as_ref().map_or(protocol::ItemRef::Empty.to_wire(), |i| {
@@ -154,8 +153,7 @@ impl Client {
         let pkt = protocol::ItemActionPacket {
             seq,
             action: protocol::ItemAction::UseBlock { cell, hotbar_slot: hot as u8, held_kind, held_id, held_full },
-            events_applied: self.events,
-        };
+            events_applied: self.events, hand: crate::hands::Hand::Main };
         self.transport.send_to_server(&protocol::serialize_packet(protocol::PacketType::ItemAction, &pkt));
         true
     }
@@ -169,8 +167,7 @@ impl Client {
         let pkt = protocol::ItemActionPacket {
             seq,
             action: protocol::ItemAction::UseBlock { cell, hotbar_slot: hot as u8, held_kind, held_id, held_full },
-            events_applied: self.events,
-        };
+            events_applied: self.events, hand: crate::hands::Hand::Main };
         self.transport.send_to_server(&protocol::serialize_packet(protocol::PacketType::ItemAction, &pkt));
     }
 

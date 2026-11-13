@@ -94,6 +94,22 @@ fn tool_type_to_wire(t: crate::crafting::ToolType) -> u8 {
     }
 }
 
+/// v101 (off-hand plan, slice 2) — the avatar wire's tool byte for a held
+/// item (`protocol::HeldWire::tool`): [`tool_type_to_wire`] for a tool,
+/// `HeldWire::NO_TOOL` for anything else.
+pub fn held_tool_to_wire(item: &crate::item::Item) -> u8 {
+    match item {
+        crate::item::Item::Tool(t) => tool_type_to_wire(t.tool_type),
+        _ => crate::protocol::HeldWire::NO_TOOL,
+    }
+}
+
+/// v101 — the inverse of [`held_tool_to_wire`]: `None` for `NO_TOOL` or a
+/// byte this build doesn't know.
+pub fn tool_type_from_held_wire(b: u8) -> Option<crate::crafting::ToolType> {
+    tool_type_from_wire(b)
+}
+
 /// Inverse of [`tool_type_to_wire`]. Unrecognised bytes (a newer peer) yield
 /// `None`, which refuses the whole item rather than guessing.
 fn tool_type_from_wire(b: u8) -> Option<crate::crafting::ToolType> {

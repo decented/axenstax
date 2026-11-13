@@ -87,6 +87,18 @@ pub fn offhand_has_ammo(weapon: ShotWeapon, off: Option<&ItemStack>) -> bool {
     off.is_some_and(|s| shoots(weapon, &s.item))
 }
 
+/// v101 (off-hand plan, slice 2) — the round a shot spends, as [`take_ammo`]
+/// picks it: the off-hand's item when it holds ammo `weapon` can shoot (a
+/// Nostrich Arrow included), else the weapon's own ammo ([`ammo_for`]) from
+/// the bag. A joiner's shot claims it and both copies of its window take it
+/// off-hand first (`joiner_actions::owed_hand`).
+pub fn round_for(weapon: ShotWeapon, off: Option<&ItemStack>) -> Item {
+    match off {
+        Some(s) if shoots(weapon, &s.item) => s.item.clone(),
+        _ => Item::Material(ammo_for(weapon)),
+    }
+}
+
 /// Take one round of ammo for a local shot (single-player and a host's own
 /// seats): from the off-hand first, when it holds ammo `weapon` can shoot, then
 /// from the bag as before (`find_ammo`, no auto-refill). Returns whether a round

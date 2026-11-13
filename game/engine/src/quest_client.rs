@@ -76,7 +76,7 @@ impl crate::GameState {
         }
         let Some(raw) = crate::staged_window::MarkerWindow::try_capture_parts(
             &slot.inventory,
-            &slot.armour_slots,
+            &slot.armour_slots, &slot.offhand,
             &slot.crafting_ui.cursor_item,
             &slot.crafting_ui.grid,
             &self.registry,
@@ -118,7 +118,7 @@ impl crate::GameState {
         crate::pack_client::apply_canonical_window(
             &mut WindowMut {
                 inv: &mut slot.inventory,
-                armour: &mut slot.armour_slots,
+                armour: &mut slot.armour_slots, offhand: &mut slot.offhand,
                 cursor: &mut slot.crafting_ui.cursor_item,
                 grid: &mut slot.crafting_ui.grid,
                 container: None,

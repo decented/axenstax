@@ -292,8 +292,7 @@ fn c3d_strict_config_open_shoot_close_and_fabricated_deposit() {
     let req = protocol::ItemActionPacket {
         seq: shot.seq as u32,
         action: protocol::ItemAction::Shoot { weapon: protocol::ShotWeapon::Bow, hotbar_slot: 0, held_kind, held_id, held_full: crate::inventory::item_to_wire_full(&item), yaw: 0.0, pitch: 0.0, charge: 20 },
-        events_applied: shot.events_applied,
-    };
+        events_applied: shot.events_applied, hand: crate::hands::Hand::Main };
     j.client.send_to_server(&protocol::serialize_packet(protocol::PacketType::Action, &ActionPacket { action: shot, intent: ActionIntent::Item(req) }));
     hs.tick();
     let heard = hear(&j.client);
@@ -354,7 +353,7 @@ fn c3d_strict_container_deposit_of_a_source_a_pending_take_owns_commits_nothing(
     j.op(&mut hs, protocol::WireWindowOp::OpenContainer { cell }, digest, true);
     j.apply_all(&mut hs);
     let _ = hear(&j.client);
-    let owed = crate::window_events::WindowEvent::Take { slot: 9, item: worn_pickaxe().item, n: 1, how: "test pending take" };
+    let owed = crate::window_events::WindowEvent::Take { hand: crate::hands::Hand::Main, slot: 9, item: worn_pickaxe().item, n: 1, how: "test pending take" };
     crate::window_events::queue(&mut hs.server.players[j.i], owed, 0);
     let window = server_places(&hs.server.players[j.i]);
     let chest = chest_slots(&hs, cell);

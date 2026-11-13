@@ -8,7 +8,7 @@
 //!
 //! ```text
 //! magic         b"axenstax/authority-checkpoint\0"
-//! schema        u16 (6)
+//! schema        u16 (7)
 //! protocol      u32   PROTOCOL_VERSION
 //! save format   u32   SAVE_FORMAT_VERSION
 //! worldgen      u32   the world's generator version
@@ -90,8 +90,10 @@ pub(crate) use records::{FILE_PIECE_BYTES, MAX_RECORD_BYTES, Tree};
 pub(crate) const CHECKPOINT_MAGIC: &[u8] = b"axenstax/authority-checkpoint\0";
 /// 5: `world.dat` bound in fixed pieces, and all that grows with the world in stored
 /// records. 6: lava's stable queue pieces, monotonic cursors and source sections.
+/// 7: a joiner's window section carries its off-hand after the armour (off-hand
+/// plan, slice 2), so a schema-6 player record is refused, never misread.
 /// Nothing relies on an earlier one.
-pub(crate) const SCHEMA: u16 = 6;
+pub(crate) const SCHEMA: u16 = 7;
 /// The session-image cap of migration v0.1 (handoff §6, choice 1).
 pub(crate) const MAX_CHECKPOINT_BYTES: usize = 1 << 20;
 

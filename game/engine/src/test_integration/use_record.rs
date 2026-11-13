@@ -329,7 +329,7 @@ fn bed_ahead(rig: &mut Rig) -> [i32; 3] {
 
 fn sleep(rig: &mut Rig, bed: [i32; 3]) -> protocol::ItemActionOutcomePacket {
     rig.seq += 1;
-    let pkt = protocol::ItemActionPacket { seq: rig.seq, action: ItemAction::Sleep { bed }, events_applied: u32::MAX };
+    let pkt = protocol::ItemActionPacket { seq: rig.seq, action: ItemAction::Sleep { bed }, events_applied: u32::MAX, hand: crate::hands::Hand::Main };
     rig.client.send_to_server(&protocol::serialize_packet(protocol::PacketType::ItemAction, &pkt));
     rig.tick();
     let seq = rig.seq;

@@ -111,7 +111,7 @@ impl HostedServer {
         }
         let consume = if creative { 0 } else { feast.pay };
         let owed = consume.saturating_sub(u8::try_from(believed).unwrap_or(u8::MAX));
-        let window_event = if owed > 0 { self.shadow_take_owed(i, slot, &item, owed, "at a feast") } else { 0 };
+        let window_event = if owed > 0 { self.shadow_take_owed(i, slot, crate::hands::Hand::Main, &item, owed, "at a feast") } else { 0 };
         self.feast_outcome(i, seq, true, consume, ItemNote::None, window_event);
     }
 }

@@ -156,7 +156,7 @@ fn d2c3_empty_fresh_signed_and_guest_receive_real_sync1_before_personal_fence() 
             crate::inventory_sync::apply(
                 &mut crate::window::WindowMut {
                     inv: &mut slot.inventory,
-                    armour: &mut slot.armour_slots,
+                    armour: &mut slot.armour_slots, offhand: &mut slot.offhand,
                     cursor: &mut slot.crafting_ui.cursor_item,
                     grid: &mut slot.crafting_ui.grid,
                     container: None,

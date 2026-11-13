@@ -73,6 +73,13 @@ pub struct ServerPlayer {
     /// EMPTY/0 until the first input arrives.
     pub held_kind: u8,
     pub held_id: u16,
+    /// v101 (off-hand plan, slice 2) — the held item's tool type and the
+    /// off-hand item, relayed from the client's InputPacket for every player
+    /// (`held_tool`, `off_kind`/`off_id`/`off_tool`): presentation only, the
+    /// avatar broadcast's. Client-asserted, like `held_kind`; the possession
+    /// shadow's off-hand is [`Self::offhand`].
+    pub held_tool: u8,
+    pub off_held: crate::protocol::HeldWire,
     /// The next input to simulate for this player (remote clients only; local
     /// players are position-authoritative). Consumed by
     /// `GameServer::tick_player_physics` when present.
@@ -275,6 +282,12 @@ pub struct ServerPlayer {
     /// client's word, [`Self::armour_points`], until C3d. Empty for a local
     /// slot.
     pub armour: [Option<crate::armour::ArmourItem>; 4],
+    /// v101 (off-hand plan, slice 2) — the server's copy of a joiner's
+    /// off-hand, a window place beside the armour: moved by its window ops
+    /// (`WindowClick::Offhand`, `SwapHands`), paid from by its off-hand uses
+    /// (`joiner_actions::take_owed_search`), saved in the sidecar (v6).
+    /// Empty for a local slot.
+    pub offhand: Option<crate::item::ItemStack>,
     /// C3a-2a — the server's copy of the stack on the joiner's cursor.
     pub cursor: Option<crate::item::ItemStack>,
     /// C3a-2a — the server's copy of the joiner's crafting grid.
@@ -559,6 +572,8 @@ impl ServerPlayer {
             held_item: 0,
             held_kind: crate::protocol::item_kind::EMPTY,
             held_id: 0,
+            held_tool: crate::protocol::HeldWire::NO_TOOL,
+            off_held: crate::protocol::HeldWire::EMPTY,
             pending_intent: None,
             intent_queue: std::collections::VecDeque::new(),
             step_credit: 0,
@@ -609,6 +624,7 @@ impl ServerPlayer {
             personal_delivery: Default::default(),
             progression_credits: 0,
             armour: [None; 4],
+            offhand: None,
             cursor: None,
             craft_grid: Default::default(),
             station: crate::window::Station::Player,

@@ -212,7 +212,7 @@ fn reserve(
     remote: &mut RemoteClient,
     ui: &CraftingUi,
     inv: &Inventory,
-    armour: &[Option<ArmourItem>; 4],
+    armour: &[Option<ArmourItem>; 4], offhand: &Option<crate::item::ItemStack>,
     kind: EditKind,
     slot: usize,
     change: protocol::BlockChange,
@@ -222,7 +222,7 @@ fn reserve(
 ) -> Result<crate::action_identity::ActionHeader, String> {
     let slot_u8 = u8::try_from(slot).ok().filter(|s| *s < 9).ok_or("A typed edit needs a hotbar slot")?;
     crate::window_prediction::retain_private_window(inv, &ui.cursor_item, &ui.grid)?;
-    let raw = crate::staged_window::MarkerWindow::capture_parts(inv, armour, &ui.cursor_item, &ui.grid, registry);
+    let raw = crate::staged_window::MarkerWindow::capture_parts(inv, armour, offhand, &ui.cursor_item, &ui.grid, registry);
     let mut after = raw.clone();
     {
         let view = after.view();
@@ -267,14 +267,14 @@ pub fn place_joined(
     remote: &mut RemoteClient,
     ui: &mut CraftingUi,
     inv: &mut Inventory,
-    armour: &mut [Option<ArmourItem>; 4],
+    armour: &mut [Option<ArmourItem>; 4], offhand: &mut Option<crate::item::ItemStack>,
     slot: usize,
     change: protocol::BlockChange,
     old: (BlockId, u8),
     registry: &crate::block::BlockRegistry,
 ) -> Result<Option<BlockId>, String> {
-    ui.sync_auto_refill_joined(remote, inv, armour)?;
-    let action = reserve(remote, ui, inv, armour, EditKind::Place, slot, change, None, old, registry)?;
+    ui.sync_auto_refill_joined(remote, inv, armour, offhand)?;
+    let action = reserve(remote, ui, inv, armour, offhand, EditKind::Place, slot, change, None, old, registry)?;
     let placed = place_window(inv, slot);
     send_reserved(remote, action);
     Ok(placed)
@@ -291,21 +291,21 @@ pub fn break_joined(
     remote: &mut RemoteClient,
     ui: &mut CraftingUi,
     inv: &mut Inventory,
-    armour: &mut [Option<ArmourItem>; 4],
+    armour: &mut [Option<ArmourItem>; 4], offhand: &mut Option<crate::item::ItemStack>,
     slot: usize,
     change: protocol::BlockChange,
     old: (BlockId, u8),
     claimed: Option<crate::crafting::Tool>,
     registry: &crate::block::BlockRegistry,
 ) -> Result<Option<ToolUseInfo>, String> {
-    ui.sync_auto_refill_joined(remote, inv, armour)?;
+    ui.sync_auto_refill_joined(remote, inv, armour, offhand)?;
     let mined = protocol::MinedBlock {
         x: change.x,
         y: change.y,
         z: change.z,
         tool: claimed.map_or(protocol::WireItem::None, |t| crate::inventory::item_to_wire_full(&Item::Tool(t))),
     };
-    let action = reserve(remote, ui, inv, armour, EditKind::Break, slot, change, Some(mined), old, registry)?;
+    let action = reserve(remote, ui, inv, armour, offhand, EditKind::Break, slot, change, Some(mined), old, registry)?;
     let wear = break_window(inv, slot);
     send_reserved(remote, action);
     Ok(wear)
@@ -339,7 +339,7 @@ pub fn route_place(
     remote: Option<&mut RemoteClient>,
     ui: &mut CraftingUi,
     inv: &mut Inventory,
-    armour: &mut [Option<ArmourItem>; 4],
+    armour: &mut [Option<ArmourItem>; 4], offhand: &mut Option<crate::item::ItemStack>,
     slot: usize,
     change: protocol::BlockChange,
     old: (BlockId, u8),
@@ -349,7 +349,7 @@ pub fn route_place(
     let held = inv.slot(slot).map(|s| s.item.clone());
     let judged = judge(old.0, &change, None, slot, held.as_ref(), false, None);
     match remote {
-        Some(remote) if sends_typed(Some(remote), &judged) => place_joined(remote, ui, inv, armour, slot, change, old, registry).map(Routed::Typed),
+        Some(remote) if sends_typed(Some(remote), &judged) => place_joined(remote, ui, inv, armour, offhand, slot, change, old, registry).map(Routed::Typed),
         _ => Ok(Routed::Legacy),
     }
 }
@@ -363,7 +363,7 @@ pub fn route_break(
     remote: Option<&mut RemoteClient>,
     ui: &mut CraftingUi,
     inv: &mut Inventory,
-    armour: &mut [Option<ArmourItem>; 4],
+    armour: &mut [Option<ArmourItem>; 4], offhand: &mut Option<crate::item::ItemStack>,
     slot: usize,
     change: protocol::BlockChange,
     old: (BlockId, u8),
@@ -375,7 +375,7 @@ pub fn route_break(
     let mined = protocol::MinedBlock { x: change.x, y: change.y, z: change.z, tool: protocol::WireItem::None };
     let judged = judge(old.0, &change, Some(&mined), slot, held.as_ref(), false, None);
     match remote {
-        Some(remote) if sends_typed(Some(remote), &judged) => break_joined(remote, ui, inv, armour, slot, change, old, tool, registry).map(Routed::Typed),
+        Some(remote) if sends_typed(Some(remote), &judged) => break_joined(remote, ui, inv, armour, offhand, slot, change, old, tool, registry).map(Routed::Typed),
         _ => Ok(Routed::Legacy),
     }
 }
@@ -446,7 +446,7 @@ impl crate::GameState {
             let facing = crate::meta::facing(meta).to_bits();
             let p = &mut self.players[pidx];
             let remote = self.remote_client.as_mut().expect("a Strict seat is joined");
-            return match crate::strict_doors::place_door_joined(remote, &mut p.crafting_ui, &mut p.inventory, &mut p.armour_slots, hotbar, cell, facing, &self.registry) {
+            return match crate::strict_doors::place_door_joined(remote, &mut p.crafting_ui, &mut p.inventory, &mut p.armour_slots, &mut p.offhand, hotbar, cell, facing, &self.registry) {
                 Ok(placed) => PlaceRoute::Typed(placed),
                 Err(error) => { self.typed_edit_failed(error); PlaceRoute::Wait }
             };
@@ -454,7 +454,7 @@ impl crate::GameState {
         let change = protocol::BlockChange { x: cell[0], y: cell[1], z: cell[2], new_block: new, meta };
         let seen = (existing, self.world.meta_at(cell[0], cell[1], cell[2]));
         let p = &mut self.players[pidx];
-        match route_place(self.remote_client.as_mut(), &mut p.crafting_ui, &mut p.inventory, &mut p.armour_slots, hotbar, change, seen, &self.registry) {
+        match route_place(self.remote_client.as_mut(), &mut p.crafting_ui, &mut p.inventory, &mut p.armour_slots, &mut p.offhand, hotbar, change, seen, &self.registry) {
             Ok(Routed::Legacy) => PlaceRoute::Legacy(p.inventory.take_placeable_from_hotbar(hotbar)),
             Ok(Routed::Typed(placed)) => PlaceRoute::Typed(placed),
             Err(error) => { self.typed_edit_failed(error); PlaceRoute::Wait }
@@ -478,7 +478,7 @@ impl crate::GameState {
         let seen = (blk, self.world.meta_at(pos[0], pos[1], pos[2]));
         let p = &mut self.players[pidx];
         let slot = p.hotbar_slot;
-        match route_break(self.remote_client.as_mut(), &mut p.crafting_ui, &mut p.inventory, &mut p.armour_slots, slot, change, seen, &self.registry) {
+        match route_break(self.remote_client.as_mut(), &mut p.crafting_ui, &mut p.inventory, &mut p.armour_slots, &mut p.offhand, slot, change, seen, &self.registry) {
             Ok(Routed::Legacy) => BreakRoute::Legacy,
             Ok(Routed::Typed(wear)) => BreakRoute::Typed(wear),
             Err(error) => {

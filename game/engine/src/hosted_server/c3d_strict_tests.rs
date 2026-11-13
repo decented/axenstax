@@ -106,7 +106,7 @@ impl ClientWindow {
     /// Apply `click` as the client does; its digest and verdict.
     fn click(&mut self, hs: &HostedServer, eye: glam::Vec3, click: &WindowClick) -> (u32, bool) {
         let ctx = crate::window::ClickCtx::new(hs.server.play_mode.is_creative(), self.station, eye, |c| hs.server.world.get_block(c[0], c[1], c[2]));
-        let mut view = crate::window::WindowMut { inv: &mut self.inv, armour: &mut self.armour, cursor: &mut self.cursor, grid: &mut self.grid, container: None };
+        let mut view = crate::window::WindowMut { inv: &mut self.inv, armour: &mut self.armour, offhand: &mut self.offhand, cursor: &mut self.cursor, grid: &mut self.grid, container: None };
         let result = crate::window::apply(&mut view, click, &ctx);
         self.station = crate::window::station_after(self.station, click, &result);
         (crate::window::digest(&view, self.station), result.ok())
@@ -283,8 +283,7 @@ fn shoot(r: &mut Rig, tool: crate::crafting::Tool) -> ActionHeader {
     let req = protocol::ItemActionPacket {
         seq: action.seq as u32,
         action: protocol::ItemAction::Shoot { weapon: protocol::ShotWeapon::Bow, hotbar_slot: 0, held_kind, held_id, held_full, yaw: 0.0, pitch: 0.0, charge: 20 },
-        events_applied: action.events_applied,
-    };
+        events_applied: action.events_applied, hand: crate::hands::Hand::Main };
     r.send(action, ActionIntent::Item(req));
     action
 }
@@ -331,7 +330,7 @@ fn c3d_strict_shot_through_real_dispatch_spawns_one_projectile_and_two_events() 
     assert!(matches!(
         &waiting[..],
         [crate::window_events::WindowEvent::Take { slot: 0, item: Item::Material(crate::item::MaterialId::Arrow), n: 1, .. },
-         crate::window_events::WindowEvent::WearWeapon { slot: 0, tool: t }] if t == &tool
+         crate::window_events::WindowEvent::WearWeapon { hand: crate::hands::Hand::Main, slot: 0, tool: t }] if t == &tool
     ), "Take then Wear: {waiting:?}");
     assert_eq!(server_places(sp), raw, "raw R waits for the client's applied events");
     assert_eq!(heard.receipts.len(), 1);
@@ -532,7 +531,7 @@ fn c3d_strict_honest_craft_at_the_table_reach_edge_is_accepted() {
 fn c3d_strict_unpayable_pending_take_is_an_obligation_at_staging_and_after_commit() {
     let mut r = strict_rig("short-take-staging");
     stock(&mut r.hs.server.players[r.i]);
-    crate::window_events::queue(&mut r.hs.server.players[r.i], crate::window_events::WindowEvent::Take { slot: 35, item: Item::Block(crate::block::BEDROCK), n: 1, how: "test" }, 0);
+    crate::window_events::queue(&mut r.hs.server.players[r.i], crate::window_events::WindowEvent::Take { hand: crate::hands::Hand::Main, slot: 35, item: Item::Block(crate::block::BEDROCK), n: 1, how: "test" }, 0);
     assert!(r.sp().obligations_proven_zero(), "the correction-debt fold alone misses it");
     let mut cw = ClientWindow::of(r.sp());
     let before = server_places(r.sp());
@@ -606,7 +605,7 @@ fn c3d_strict_short_take_applied_at_the_boundary_is_torn_down_with_a_reason() {
     stock(&mut r.hs.server.players[r.i]);
     let mut cw = ClientWindow::of(r.sp());
     let sp = &mut r.hs.server.players[r.i];
-    let take = crate::window_events::WindowEvent::Take { slot: 35, item: Item::Block(crate::block::BEDROCK), n: 1, how: "test short take" };
+    let take = crate::window_events::WindowEvent::Take { hand: crate::hands::Hand::Main, slot: 35, item: Item::Block(crate::block::BEDROCK), n: 1, how: "test short take" };
     r.applied = crate::window_events::queue(sp, take, 0);
     let before = server_places(r.sp());
     let action = click_packet(&mut r, &mut cw, WindowClick::Slot { slot: 1, right: false }, false);

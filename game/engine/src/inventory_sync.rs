@@ -12,10 +12,11 @@ pub fn packet(
     debt: &crate::container_window::CorrectionDebt,
     window_event: u32,
 ) -> InventorySyncPacket {
-    let slots = crate::container_window::PlayerSlots::of(&w.inv, &w.armour, &w.cursor, &w.grid);
+    let slots = crate::container_window::PlayerSlots::of(&w.inv, &w.armour, &w.offhand, &w.cursor, &w.grid);
     let ats = (0..36)
         .map(WireWindowSlot::Inv)
         .chain((0..4).map(WireWindowSlot::Armour))
+        .chain(std::iter::once(WireWindowSlot::Offhand))
         .chain(std::iter::once(WireWindowSlot::Cursor))
         .chain((0..3).flat_map(|r| (0..3).map(move |c| WireWindowSlot::Grid(r, c))));
     InventorySyncPacket {
@@ -65,9 +66,10 @@ pub fn apply(
     let carried = crate::container_window::CorrectionDebt::from_wire(&pkt.owed, reg)?;
     if pkt.locks >> 36 != 0 { return Err("Inventory sync locks a slot that doesn't exist".into()); }
     let predicted_plans = uses.retire_for_replace();
-    let old = crate::container_window::PlayerSlots::of(w.inv, w.armour, w.cursor, w.grid);
+    let old = crate::container_window::PlayerSlots::of(w.inv, w.armour, w.offhand, w.cursor, w.grid);
     let plans: Vec<_> = (0..36)
         .map(WireWindowSlot::Inv)
+        .chain(std::iter::once(WireWindowSlot::Offhand))
         .chain(std::iter::once(WireWindowSlot::Cursor))
         .chain((0..3).flat_map(|r| (0..3).map(move |c| WireWindowSlot::Grid(r, c))))
         .filter_map(|at| match old.stack(at).flatten() {
@@ -125,6 +127,7 @@ pub fn apply(
                     }
                 })
             }
+            WireWindowSlot::Offhand => *w.offhand = stack,
             WireWindowSlot::Cursor => *w.cursor = stack,
             WireWindowSlot::Grid(r, c) if r < 3 && c < 3 => {
                 w.grid[usize::from(r)][usize::from(c)] = stack

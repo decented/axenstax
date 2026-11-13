@@ -4596,7 +4596,7 @@ impl super::GameState {
         let p = &self.players[pidx];
         p.inventory
             .hotbar_slot(p.hotbar_slot)
-            .is_none_or(|s| self.joiner_actions.can_spend(&p.inventory, &p.crafting_ui, &s.item, 1))
+            .is_none_or(|s| self.joiner_actions.can_spend(&p.inventory, &p.crafting_ui, &p.offhand, &s.item, 1))
     }
 
     /// Does this client's block edit (and its `mined` tag) reach the server it
@@ -4614,10 +4614,17 @@ impl super::GameState {
     /// hotbar slot and what it holds there NOW, before the use spends or
     /// wears it (`use_edits::tag`). Call it before the use's
     /// `consume_one_material` / `use_hotbar_tool`.
-    fn use_tag(&self, pidx: usize, kind: crate::use_edits::UseKind, cell: [i32; 3]) -> crate::protocol::UseTag {
+    fn use_tag(
+        &self,
+        pidx: usize,
+        hand: crate::hands::Hand,
+        kind: crate::use_edits::UseKind,
+        cell: [i32; 3],
+    ) -> crate::protocol::UseTag {
         let hot = self.players[pidx].hotbar_slot;
-        let held = self.players[pidx].inventory.hotbar_slot(hot).map(|s| &s.item);
-        crate::use_edits::tag(kind, cell, hot, held)
+        // v101 — the item of the hand the use is made with.
+        let held = self.players[pidx].held_for_use(hand).map(|s| &s.item);
+        crate::use_edits::tag(kind, cell, hot, hand, held)
     }
 
     /// C3c-1 — queue a use's edit for the server with its tag: the block now
@@ -4677,12 +4684,21 @@ impl super::GameState {
                     cell,
                     kind: tag.kind,
                     slot: usize::from(tag.slot),
+                    hand: tag.hand,
                     cost,
                     landed,
                     made_at,
                 });
             }
-            self.pending_block_changes.push_use(broadcast_change(&self.world, cell[0], cell[1], cell[2], new_block), tag);
+            let change = broadcast_change(&self.world, cell[0], cell[1], cell[2], new_block);
+            if tag.hand == crate::hands::Hand::Off {
+                // v101 — stamped with the off-hand now (the hand before the
+                // use, as the tag is): the server charges it there.
+                let (before, off) = (self.edit_hand_now(), self.edit_hand_of(crate::hands::Hand::Off));
+                self.pending_block_changes.push_use_stamped(change, tag, before, off);
+            } else {
+                self.pending_block_changes.push_use(change, tag);
+            }
         }
         #[cfg(target_arch = "wasm32")]
         let _ = (cell, new_block, tag, cost, product);
@@ -4813,7 +4829,7 @@ impl super::GameState {
             return true;
         }
         // C3c-1 — the hand before the fill spends the bucket.
-        let tag = self.use_tag(pidx, crate::use_edits::UseKind::BucketFill, pos);
+        let tag = self.use_tag(pidx, hand, crate::use_edits::UseKind::BucketFill, pos);
         // C3c-1-fix (M-1) — a bucket a block use in flight claims (a hive's
         // honey) isn't spent here too: the click does nothing (and is
         // claimed, so nothing further down the chain spends it either).
@@ -11458,24 +11474,15 @@ impl super::GameState {
 
             // F — swap the main-hand item with the off-hand (`hands::swap`).
             // F is also the skin painter's Fill tool, so a paint session owns it.
-            // BRIDGE: a joined client has no off-hand yet (its window and use
-            // packets carry none) — replace when slice 2 of the off-hand plan
-            // lands; until then F says so rather than doing nothing.
+            // v101 (off-hand plan, slice 2) — a window click
+            // (`WindowClick::SwapHands`, the selected slot named), so a joined
+            // client's server copy swaps by the same rule.
             if intent.swap_hands
                 && intent.cursor_captured
                 && self.skin_paint.is_none()
                 && !self.players[pidx].crafting_ui.open
             {
-                if self.joined() {
-                    if pidx == 0 {
-                        self.toast = Some((
-                            "The off-hand isn't available in joined games yet.".to_string(),
-                            Instant::now() + Duration::from_secs(2),
-                        ));
-                    }
-                } else {
-                    self.players[pidx].swap_hands();
-                }
+                self.swap_hands(pidx);
             }
 
             // Spec 28f — Inventory Explorer overlay (B key). Toggles
@@ -12015,7 +12022,7 @@ impl super::GameState {
                 // C3d run 17 — a Strict swing predicts nothing (checked below).
                 let no_prediction = if joined_target.is_some() {
                     let p = &self.players[pidx];
-                    crate::strict_requests::NoPrediction::begin(self.remote_client.as_ref(), &p.crafting_ui, &p.inventory, &p.armour_slots, "swing")
+                    crate::strict_requests::NoPrediction::begin(self.remote_client.as_ref(), &p.crafting_ui, &p.inventory, &p.armour_slots, &p.offhand, "swing")
                 } else {
                     None
                 };
@@ -12104,7 +12111,7 @@ impl super::GameState {
                 }
                 {
                     let p = &self.players[pidx];
-                    crate::strict_requests::NoPrediction::check(no_prediction, &p.crafting_ui, &p.inventory, &p.armour_slots);
+                    crate::strict_requests::NoPrediction::check(no_prediction, &p.crafting_ui, &p.inventory, &p.armour_slots, &p.offhand);
                 }
 
                 // If no entity was hit, try breaking a block
@@ -13657,11 +13664,12 @@ impl super::GameState {
             // Which hand this click uses (`hands::use_hand`): the main hand
             // unless its item has no use for what is aimed at and the off-hand
             // item has. Every held-item read and take below goes through
-            // `held_for_use(hand)` and its `*_for(hand)` takes. BRIDGE: a joined
-            // client's use packets carry no hand yet, so it always uses the
-            // main hand — replace when the off-hand reaches the wire (slice 2
-            // of the off-hand plan).
-            let hand = if self.joined()
+            // `held_for_use(hand)` and its `*_for(hand)` takes.
+            // v101 (off-hand plan, slice 2) — a joined Mirror client's use
+            // packets carry the hand. A Strict seat keeps the main hand: its
+            // typed actions don't carry one yet, and the server refuses an
+            // off-hand claim from it rather than believe it.
+            let hand = if self.strict_window_connection()
                 || self.players[pidx].offhand.is_none()
                 || !(intent.place_block && intent.cursor_captured)
             {
@@ -13717,7 +13725,7 @@ impl super::GameState {
                 match click {
                     crate::remote_mobs::MirrorClick::Interact(kind) => {
                         self.players[pidx].place_cooldown = 8;
-                        self.send_entity_interact(pidx, mob, kind, intent.sneak);
+                        self.send_entity_interact(pidx, mob, kind, intent.sneak, hand);
                     }
                     crate::remote_mobs::MirrorClick::QuestTalk => {
                         self.players[pidx].place_cooldown = 8;
@@ -13748,7 +13756,7 @@ impl super::GameState {
                     })
             {
                 self.players[pidx].place_cooldown = 8;
-                self.send_lead_to_post(pidx, [pos[0], pos[1], pos[2]], intent.sneak);
+                self.send_lead_to_post(pidx, [pos[0], pos[1], pos[2]], intent.sneak, hand);
                 continue;
             }
 
@@ -14009,7 +14017,7 @@ impl super::GameState {
                 if holding_rod && self.joined() {
                     // C3c-2 — a joiner's cast and reel are the server's: it
                     // casts from its body, draws the bite and rolls the catch.
-                    self.send_fishing(pidx);
+                    self.send_fishing(pidx, hand);
                     fished = true;
                 } else if holding_rod {
                     match self.players[pidx].fishing {
@@ -14479,7 +14487,7 @@ impl super::GameState {
                     // is eaten, fed or healed here; an accepted outcome takes
                     // the food (`apply_item_action_outcome`) and the server's
                     // heal and hunger arrive with its state.
-                    self.send_eat_request(pidx);
+                    self.send_eat_request(pidx, hand);
                     self.players[pidx].start_eat_cooldown();
                     ate = true;
                 } else if can_eat
@@ -14518,15 +14526,15 @@ impl super::GameState {
                             // C3d run 17 — a Strict shot predicts nothing.
                             let no_prediction = {
                                 let p = &self.players[pidx];
-                                crate::strict_requests::NoPrediction::begin(self.remote_client.as_ref(), &p.crafting_ui, &p.inventory, &p.armour_slots, "shot")
+                                crate::strict_requests::NoPrediction::begin(self.remote_client.as_ref(), &p.crafting_ui, &p.inventory, &p.armour_slots, &p.offhand, "shot")
                             };
-                            if self.send_shot(pidx, weapon) {
+                            if self.send_shot(pidx, weapon, hand) {
                                 self.players[pidx].arm_shot(now);
                                 self.players[pidx].place_cooldown = 8;
                                 fired_arrow = true;
                             }
                             let p = &self.players[pidx];
-                            crate::strict_requests::NoPrediction::check(no_prediction, &p.crafting_ui, &p.inventory, &p.armour_slots);
+                            crate::strict_requests::NoPrediction::check(no_prediction, &p.crafting_ui, &p.inventory, &p.armour_slots, &p.offhand);
                         // One round of ammo: from the off-hand first when it holds
                         // some the weapon can shoot, then the bag (no auto-refill).
                         } else if self.players[pidx].take_shot_ammo(weapon) {
@@ -14601,7 +14609,7 @@ impl super::GameState {
                                             // spends the Plan (its tag names it
                                             // by marker).
                                             let cell = [place.0, place.1, place.2];
-                                            let tag = self.use_tag(pidx, crate::use_edits::UseKind::HangPrint, cell);
+                                            let tag = self.use_tag(pidx, hand, crate::use_edits::UseKind::HangPrint, cell);
                                             // Spec 06 §2.2 — a mounted print is
                                             // player-placed: no work when re-mined.
                                             let author = self.author_for_seat(pidx);
@@ -14780,7 +14788,7 @@ impl super::GameState {
                         } else if self.strict_remote(pidx) {
                             let remote = self.remote_client.as_mut().expect("a Strict seat is joined");
                             let p = &mut self.players[pidx];
-                            match crate::strict_doors::toggle_joined(remote, &mut p.crafting_ui, &p.inventory, &p.armour_slots, &self.world, pos, target_blk, slot) {
+                            match crate::strict_doors::toggle_joined(remote, &mut p.crafting_ui, &p.inventory, &p.armour_slots, &p.offhand, &self.world, pos, target_blk, slot) {
                                 Ok(()) => Some(crate::strict_doors::OpenRule::Canonical),
                                 Err(error) => {
                                     self.typed_edit_failed(error);
@@ -15335,7 +15343,7 @@ impl super::GameState {
                         // the depot's freight) and seats us when the hand is
                         // empty; `own_riding` says when we are on.
                         self.players[pidx].place_cooldown = 8;
-                        self.send_interaction(pidx, None, cart, crate::protocol::InteractKind::Mount, intent.sneak);
+                        self.send_interaction(pidx, None, cart, crate::protocol::InteractKind::Mount, intent.sneak, crate::hands::Hand::Main);
                         continue;
                     } else if target_blk == crate::rail::TRACK
                         && !self.play_mode.is_spectator()
@@ -15417,7 +15425,7 @@ impl super::GameState {
                         // entities (`cart::cart_here`), spawns the real cart
                         // and takes the item on the outcome.
                         if self.joined() {
-                            self.send_place_cart(pidx, [pos[0], pos[1], pos[2]]);
+                            self.send_place_cart(pidx, [pos[0], pos[1], pos[2]], hand);
                             continue;
                         }
                         let cell = (pos[0], pos[1], pos[2]);
@@ -15454,7 +15462,7 @@ impl super::GameState {
                         let above = [pos[0], pos[1] + 1, pos[2]];
                         let above_blk = self.world.get_block(above[0], above[1], above[2]);
                         if crate::use_edits::grows_tall_grass(target_blk, above_blk) {
-                            let tag = self.use_tag(pidx, crate::use_edits::UseKind::GrowGrass, above);
+                            let tag = self.use_tag(pidx, hand, crate::use_edits::UseKind::GrowGrass, above);
                             // C3c-1-fix (M-1) — not bone meal a block use in
                             // flight claims.
                             if self.hand_may_spend(pidx)
@@ -15954,7 +15962,7 @@ impl super::GameState {
                         // durability by 1. Players reclaim paper from
                         // mistake placements without losing the eraser.
                         // C3c-1 — the Eraser as it was before this use wore it.
-                        let tag = self.use_tag(pidx, crate::use_edits::UseKind::Erase, pos);
+                        let tag = self.use_tag(pidx, hand, crate::use_edits::UseKind::Erase, pos);
                         let info = self.players[pidx].use_tool_for(hand);
                         self.handle_tool_use(info);
                         self.world.set_block(pos[0], pos[1], pos[2], block::AIR);
@@ -16066,7 +16074,7 @@ impl super::GameState {
                         // top face tills (Minecraft parity); side-face clicks
                         // fall through harmlessly. Hoe loses 1 durability.
                         // C3c-1 — the hoe as it was before this use wore it.
-                        let tag = self.use_tag(pidx, crate::use_edits::UseKind::Till, pos);
+                        let tag = self.use_tag(pidx, hand, crate::use_edits::UseKind::Till, pos);
                         self.world.set_block(pos[0], pos[1], pos[2], block::TILLED_SOIL);
                         self.push_use_edit(pos, block::TILLED_SOIL, tag, None, 0);
                         self.rebuild_chunk_at(pos[0], pos[1], pos[2]);
@@ -16093,7 +16101,7 @@ impl super::GameState {
                         if let Some((seed_id, stage_0)) = seed_kind {
                             let above = [pos[0], pos[1] + 1, pos[2]];
                             let above_blk = self.world.get_block(above[0], above[1], above[2]);
-                            let tag = self.use_tag(pidx, crate::use_edits::UseKind::Sow, above);
+                            let tag = self.use_tag(pidx, hand, crate::use_edits::UseKind::Sow, above);
                             if self.play_mode.can_edit_world()
                                 && above_blk == block::AIR
                                 && self.hand_may_spend(pidx)
@@ -16155,7 +16163,7 @@ impl super::GameState {
                                 crate::growth::next_stage(target_blk),
                             )
                         };
-                        let tag = self.use_tag(pidx, crate::use_edits::UseKind::GrowCrop, pos);
+                        let tag = self.use_tag(pidx, hand, crate::use_edits::UseKind::GrowCrop, pos);
                         if let Some(next) = next
                             && self.hand_may_spend(pidx)
                             && self.players[pidx].consume_one_material_for(hand, material)
@@ -16190,7 +16198,7 @@ impl super::GameState {
                         // adjacency check. The placement-base check is in the
                         // papyrus module so the rules stay testable in isolation.
                         let reed_cell = [pos[0], pos[1] + 1, pos[2]];
-                        let tag = self.use_tag(pidx, crate::use_edits::UseKind::PlantPapyrus, reed_cell);
+                        let tag = self.use_tag(pidx, hand, crate::use_edits::UseKind::PlantPapyrus, reed_cell);
                         if self.play_mode.can_edit_world()
                             && crate::papyrus::is_valid_planting_base(&self.world, pos[0], pos[1], pos[2])
                             && self.hand_may_spend(pidx)
@@ -16224,7 +16232,7 @@ impl super::GameState {
                         // with world_time (cyclic) here means the two
                         // clocks diverge and the cooldown fires at random.
                         let tap_tick = self.tick_counter;
-                        let tag = self.use_tag(pidx, crate::use_edits::UseKind::TapRubber, pos);
+                        let tag = self.use_tag(pidx, hand, crate::use_edits::UseKind::TapRubber, pos);
                         if crate::rubber::apply_tap(
                             &mut self.world, (pos[0], pos[1], pos[2]), tap_tick,
                         ) {
@@ -16269,7 +16277,7 @@ impl super::GameState {
                         let (dx, dy, dz) = (pos[0] + face[0], pos[1] + face[1], pos[2] + face[2]);
                         let held = self.players[pidx].held_for_use(hand)
                             .map(|s| s.item.clone());
-                        let tag = self.use_tag(pidx, crate::use_edits::UseKind::BucketEmpty, [dx, dy, dz]);
+                        let tag = self.use_tag(pidx, hand, crate::use_edits::UseKind::BucketEmpty, [dx, dy, dz]);
                         // C3c-1-fix (M-1) — not a filled bucket a block use in
                         // flight claims (an item frame's).
                         if let Some((liquid, filled)) = held
@@ -16323,7 +16331,7 @@ impl super::GameState {
                         // consumed from the held stack regardless of which
                         // base block was converted. Snowfall painter
                         // naturally skips SALT_PATH (it's not GRASS/DIRT).
-                        let tag = self.use_tag(pidx, crate::use_edits::UseKind::Salt, pos);
+                        let tag = self.use_tag(pidx, hand, crate::use_edits::UseKind::Salt, pos);
                         // C3c-1-fix (M-1) — not salt a block use in flight
                         // claims.
                         if self.hand_may_spend(pidx)
@@ -16504,7 +16512,7 @@ impl super::GameState {
                                 && self.play_mode.can_edit_world()
                                 && self.joined()
                             {
-                                self.send_attach(pidx, pos, fi);
+                                self.send_attach(pidx, pos, fi, hand);
                                 continue;
                             }
                             if self.play_mode.can_edit_world() {
@@ -16566,7 +16574,7 @@ impl super::GameState {
                                 // (`ItemAction::Attach`) and sees it through the
                                 // server's stream; nothing changes here.
                                 if self.play_mode.can_edit_world() && self.joined() {
-                                    self.send_attach(pidx, pos, fi);
+                                    self.send_attach(pidx, pos, fi, hand);
                                 } else if self.play_mode.can_edit_world() {
                                     self.world.set_face_attachment(
                                         (pos[0], pos[1], pos[2]),
@@ -16745,15 +16753,26 @@ impl super::GameState {
                                 // predicted by the server's own rule, never on
                                 // the movement packet (`take_for_placement`).
                                 let mut typed_place = false;
+                                let mut off_edit_hand: Option<crate::protocol::EditHand> = None;
                                 let block_to_place = if refusal.is_some() {
                                     None
                                 } else if self.is_creative {
                                     self.players[pidx].placeable_id_for(hand)
                                 } else if hand == crate::hands::Hand::Off {
-                                    // The off-hand is never a joined client's (`hand`
-                                    // is Main while joined), so no request to hold:
-                                    // take it as the hotbar's legacy path does.
-                                    self.players[pidx].take_placeable_for(hand)
+                                    // v101 — the off-hand's own rule (no refill).
+                                    // A joined client stamps the edit with the
+                                    // off-hand before the take (`off_edit_hand`),
+                                    // so the server charges it there; nothing a
+                                    // request in flight claims is spent.
+                                    if self.joined() {
+                                        off_edit_hand = Some(self.edit_hand_of(hand));
+                                    }
+                                    let p = &self.players[pidx];
+                                    let claimed = self.joined()
+                                        && p.offhand.as_ref().is_some_and(|s| {
+                                            !self.joiner_actions.can_spend(&p.inventory, &p.crafting_ui, &p.offhand, &s.item, 1)
+                                        });
+                                    if claimed { None } else { self.players[pidx].take_placeable_for(hand) }
                                 } else if self.hand_may_spend(pidx) {
                                     match self.take_for_placement(pidx, hotbar, [place_x, place_y, place_z], existing, face) {
                                         crate::strict_edits::PlaceRoute::Legacy(taken) => taken,
@@ -17105,7 +17124,15 @@ impl super::GameState {
                                         {
                                             let standing =
                                                 self.world.get_block(place_x, place_y, place_z);
-                                            self.pending_block_changes.push(broadcast_change(&self.world, place_x, place_y, place_z, standing));
+                                            let change = broadcast_change(&self.world, place_x, place_y, place_z, standing);
+                                            match off_edit_hand {
+                                                // v101 — an off-hand placement, charged there.
+                                                Some(off) => {
+                                                    let before = self.edit_hand_now();
+                                                    self.pending_block_changes.push_stamped(change, before, off);
+                                                }
+                                                None => self.pending_block_changes.push(change),
+                                            }
                                         }
                                     }
                                     // C3c-1 — and a door's top half, after its
@@ -17118,7 +17145,7 @@ impl super::GameState {
                                     // typed `DoorPlace` (both halves); no
                                     // `DoorUpper` coupon (Decision 20).
                                     if let Some(top) = door_top.filter(|_| !typed_place) {
-                                        let tag = crate::use_edits::tag(crate::use_edits::UseKind::DoorUpper, top, hotbar, None);
+                                        let tag = crate::use_edits::tag(crate::use_edits::UseKind::DoorUpper, top, hotbar, crate::hands::Hand::Main, None);
                                         self.push_use_edit(top, block_to_place, tag, None, 0);
                                     }
                                     self.rebuild_chunk_at(place_x, place_y, place_z);
@@ -18288,13 +18315,11 @@ impl super::GameState {
                         &mut player.crafting_ui,
                         &player.inventory,
                         &player.armour_slots,
-                        // No off-hand slot while joined (BRIDGE: the server's
-                        // window has none — replace when slice 2 of the
-                        // off-hand plan lands).
-                        match (&player.offhand, self.remote_client.is_some()) {
-                            (_, true) => crate::hud_ui::OffhandBox::Hidden,
-                            (Some(stack), false) => crate::hud_ui::OffhandBox::Holding(stack),
-                            (None, false) => crate::hud_ui::OffhandBox::Empty,
+                        // v101 (off-hand plan, slice 2) — joined too: the
+                        // server's copy of the window has the off-hand.
+                        match &player.offhand {
+                            Some(stack) => crate::hud_ui::OffhandBox::Holding(stack),
+                            None => crate::hud_ui::OffhandBox::Empty,
                         },
                         &self.registry,
                         &self.renderer.egui,
@@ -19609,7 +19634,7 @@ impl super::GameState {
                             if let Some(f) = world.furnace_at_mut(furnace_pos) {
                                 let _ = p.crafting_ui.apply_container_click(
                                     &mut p.inventory,
-                                    &mut p.armour_slots,
+                                    &mut p.armour_slots, &mut p.offhand,
                                     crate::container_window::ContainerMut::Furnace(f),
                                     &click,
                                     &ctx,
@@ -19651,7 +19676,7 @@ impl super::GameState {
                         if let Some(d) = world.dispenser_at_mut(disp_pos) {
                             p.crafting_ui.apply_container_click(
                                 &mut p.inventory,
-                                &mut p.armour_slots,
+                                &mut p.armour_slots, &mut p.offhand,
                                 crate::container_window::ContainerMut::Chest(&mut d.chest),
                                 click,
                                 &ctx,
@@ -19750,7 +19775,7 @@ impl super::GameState {
                         if let Some(c) = world.chest_at_mut(chest_pos) {
                             p.crafting_ui.apply_container_click(
                                 &mut p.inventory,
-                                &mut p.armour_slots,
+                                &mut p.armour_slots, &mut p.offhand,
                                 crate::container_window::ContainerMut::Chest(c),
                                 click,
                                 &ctx,
@@ -20941,12 +20966,9 @@ impl super::GameState {
                     pidx,
                     &slot.inventory,
                     slot.hotbar_slot,
-                    // No box while joined (BRIDGE: the off-hand is not on the
-                    // wire yet — replace when slice 2 of the off-hand plan lands).
-                    match (&slot.offhand, self.joined()) {
-                        (_, true) => crate::hud_ui::OffhandBox::Hidden,
-                        (Some(stack), false) => crate::hud_ui::OffhandBox::Holding(stack),
-                        (None, false) => crate::hud_ui::OffhandBox::Empty,
+                    match &slot.offhand {
+                        Some(stack) => crate::hud_ui::OffhandBox::Holding(stack),
+                        None => crate::hud_ui::OffhandBox::Empty,
                     },
                     &self.registry,
                     &self.renderer.egui,
@@ -21733,7 +21755,7 @@ impl super::GameState {
                     // is a window op like any other: the server applies the
                     // same result rule to its copy of the window.
                     let p = &self.players[pidx];
-                    if self.joined() && !self.joiner_actions.may_craft(&p.inventory, &p.crafting_ui) {
+                    if self.joined() && !self.joiner_actions.may_craft(&p.inventory, &p.crafting_ui, &p.offhand) {
                         continue;
                     }
                     // UX polish sweep Task 2 — what was crafted, so a
@@ -21795,11 +21817,7 @@ impl super::GameState {
                     }
                 }
                 crate::craft_ui::ClickTarget::OffhandSlot(right) => {
-                    // Local players only: the slot is not drawn while joined.
-                    if !self.joined() {
-                        let p = &mut self.players[pidx];
-                        crate::hands::click_offhand(&mut p.offhand, &mut p.crafting_ui.cursor_item, right);
-                    }
+                    self.apply_window_click(pidx, &crate::window::WindowClick::Offhand { right });
                 }
                 crate::craft_ui::ClickTarget::OpenBook => {
                     self.players[pidx].crafting_ui.open_book();
@@ -22629,10 +22647,12 @@ impl super::GameState {
 
     /// MP-D2b — the item in player `pidx`'s active hotbar slot, and the
     /// wire form a request claims it with (`ItemRef` pair + full fidelity).
-    fn held_for_request(&self, pidx: usize) -> (usize, Option<crate::item::Item>, u8, u16, crate::protocol::WireItem) {
+    fn held_for_request(&self, pidx: usize, hand: crate::hands::Hand) -> (usize, Option<crate::item::Item>, u8, u16, crate::protocol::WireItem) {
         let slot = &self.players[pidx];
         let hot = slot.hotbar_slot;
-        let held = slot.inventory.hotbar_slot(hot).map(|s| s.item.clone());
+        // v101 — the item of the hand the use is made with (`hand`); the
+        // hotbar slot stays the selected one, which an off-hand use leaves be.
+        let held = slot.held_for_use(hand).map(|s| s.item.clone());
         let (kind, id) = match &held {
             Some(item) => crate::inventory::item_to_ref(item).to_wire(),
             None => crate::protocol::ItemRef::Empty.to_wire(),
@@ -22645,12 +22665,13 @@ impl super::GameState {
     /// decides, and the weapon wears when it confirms (`InteractOutcome`).
     pub(crate) fn send_entity_attack(&mut self, pidx: usize, target: crate::remote_mobs::MirrorTarget, sprint: bool, sneak: bool) {
         if self.pack_window_frozen(pidx) { return; }
-        let (hot, held, held_kind, held_id, held_full) = self.held_for_request(pidx);
+        let (hot, held, held_kind, held_id, held_full) = self.held_for_request(pidx, crate::hands::Hand::Main);
         let pending = crate::joiner_actions::Pending {
             kind: crate::joiner_actions::Asked::Swing,
             mob: Some(target.kind),
             hotbar_slot: hot,
             held,
+            hand: crate::hands::Hand::Main,
         };
         let packet = crate::protocol::EntityAttackPacket {
             seq: 0,
@@ -22671,7 +22692,7 @@ impl super::GameState {
         // request below, unchanged.
         if crate::strict_requests::shot_goes_typed(self.remote_client.as_ref()) {
             let p = &mut self.players[pidx];
-            if let Err(error) = crate::strict_requests::route_attack(self.remote_client.as_mut(), &mut p.crafting_ui, &p.inventory, &p.armour_slots, &mut self.joiner_actions, pending, packet) {
+            if let Err(error) = crate::strict_requests::route_attack(self.remote_client.as_mut(), &mut p.crafting_ui, &p.inventory, &p.armour_slots, &p.offhand, &mut self.joiner_actions, pending, packet) {
                 log::warn!("Strict attack could not be reserved: {error}");
             }
             return;
@@ -22689,15 +22710,16 @@ impl super::GameState {
         target: crate::remote_mobs::MirrorTarget,
         kind: crate::protocol::InteractKind,
         sneak: bool,
+        hand: crate::hands::Hand,
     ) {
-        self.send_interaction(pidx, Some(target.kind), target.id, kind, sneak);
+        self.send_interaction(pidx, Some(target.kind), target.id, kind, sneak, hand);
     }
 
     /// Review D2b B3 — ask the server to tie our leashed mob nearest the fence
     /// post at `post` to it (`InteractKind::LeadToPost`, a joiner); the Lead
     /// comes out of the hand only on an accepted outcome.
-    fn send_lead_to_post(&mut self, pidx: usize, post: [i32; 3], sneak: bool) {
-        self.send_interaction(pidx, None, 0, crate::protocol::InteractKind::LeadToPost { post }, sneak);
+    fn send_lead_to_post(&mut self, pidx: usize, post: [i32; 3], sneak: bool, hand: crate::hands::Hand) {
+        self.send_interaction(pidx, None, 0, crate::protocol::InteractKind::LeadToPost { post }, sneak, hand);
     }
 
     /// One `EntityInteract` with what the hand holds. Review D2b LOW-1 — not
@@ -22710,15 +22732,16 @@ impl super::GameState {
         entity: u32,
         kind: crate::protocol::InteractKind,
         sneak: bool,
+        hand: crate::hands::Hand,
     ) {
         if self.pack_window_frozen(pidx) { return; }
-        let (hot, held, held_kind, held_id, held_full) = self.held_for_request(pidx);
+        let (hot, held, held_kind, held_id, held_full) = self.held_for_request(pidx, hand);
         let asked = crate::joiner_actions::Asked::Interact(kind);
         let p = &self.players[pidx];
-        if !self.joiner_actions.can_afford(&p.inventory, &p.crafting_ui, asked, held.as_ref()) {
+        if !self.joiner_actions.can_afford(&p.inventory, &p.crafting_ui, &p.offhand, asked, held.as_ref()) {
             return;
         }
-        let pending = crate::joiner_actions::Pending { kind: asked, mob, hotbar_slot: hot, held };
+        let pending = crate::joiner_actions::Pending { kind: asked, mob, hotbar_slot: hot, held, hand };
         let packet = crate::protocol::EntityInteractPacket {
             seq: 0,
             entity,
@@ -22731,20 +22754,21 @@ impl super::GameState {
             // Stamped by `RemoteClient::send_entity_interact` (Mirror) or
             // `strict_requests::route_interact` (Strict).
             events_applied: 0,
+            hand,
         };
         // C3d run 23 — nothing is predicted for an interaction on either
         // seat, and a Strict server relies on it (a world-fact refusal is a
         // receipt and its note alone): the bracket observes it.
         let no_prediction = {
             let p = &self.players[pidx];
-            crate::strict_requests::NoPrediction::begin(self.remote_client.as_ref(), &p.crafting_ui, &p.inventory, &p.armour_slots, "interaction")
+            crate::strict_requests::NoPrediction::begin(self.remote_client.as_ref(), &p.crafting_ui, &p.inventory, &p.armour_slots, &p.offhand, "interaction")
         };
         // A Strict seat reserves ONE typed interaction
         // (`strict_requests::route_interact`); Mirror sends the legacy
         // request, unchanged.
         if crate::strict_requests::shot_goes_typed(self.remote_client.as_ref()) {
             let p = &mut self.players[pidx];
-            if let Err(error) = crate::strict_requests::route_interact(self.remote_client.as_mut(), &mut p.crafting_ui, &p.inventory, &p.armour_slots, &mut self.joiner_actions, pending, packet) {
+            if let Err(error) = crate::strict_requests::route_interact(self.remote_client.as_mut(), &mut p.crafting_ui, &p.inventory, &p.armour_slots, &p.offhand, &mut self.joiner_actions, pending, packet) {
                 log::warn!("Strict interaction could not be reserved: {error}");
             }
         } else {
@@ -22753,7 +22777,7 @@ impl super::GameState {
             self.send_request(crate::remote_client::Request::Interact(crate::protocol::EntityInteractPacket { seq, ..packet }));
         }
         let p = &self.players[pidx];
-        crate::strict_requests::NoPrediction::check(no_prediction, &p.crafting_ui, &p.inventory, &p.armour_slots);
+        crate::strict_requests::NoPrediction::check(no_prediction, &p.crafting_ui, &p.inventory, &p.armour_slots, &p.offhand);
     }
 
     /// C2a — ask the server to let player `pidx` (a joiner) eat the food in
@@ -22761,26 +22785,26 @@ impl super::GameState {
     /// can't be eaten twice on a slow link, `JoinerActions::can_afford`);
     /// taken only on an accepted `ItemActionOutcome`. Nothing is sent while
     /// every one in hand is already claimed.
-    pub(crate) fn send_eat_request(&mut self, pidx: usize) {
+    pub(crate) fn send_eat_request(&mut self, pidx: usize, hand: crate::hands::Hand) {
         if self.pack_window_frozen(pidx) { return; }
-        let (hot, held, held_kind, held_id, held_full) = self.held_for_request(pidx);
+        let (hot, held, held_kind, held_id, held_full) = self.held_for_request(pidx, hand);
         let asked = crate::joiner_actions::Asked::Eat;
         let p = &self.players[pidx];
-        if !self.joiner_actions.can_afford(&p.inventory, &p.crafting_ui, asked, held.as_ref()) {
+        if !self.joiner_actions.can_afford(&p.inventory, &p.crafting_ui, &p.offhand, asked, held.as_ref()) {
             return;
         }
-        let pending = crate::joiner_actions::Pending { kind: asked, mob: None, hotbar_slot: hot, held };
+        let pending = crate::joiner_actions::Pending { kind: asked, mob: None, hotbar_slot: hot, held, hand };
         let action = crate::protocol::ItemAction::Eat { hotbar_slot: hot as u8, held_kind, held_id, held_full };
         // C3d run 24 — nothing is predicted for an eat on either seat (the
         // food goes, and the body is fed, by the server's answer), and a
         // Strict server relies on it: the bracket observes it.
         let no_prediction = {
             let p = &self.players[pidx];
-            crate::strict_requests::NoPrediction::begin(self.remote_client.as_ref(), &p.crafting_ui, &p.inventory, &p.armour_slots, "eat")
+            crate::strict_requests::NoPrediction::begin(self.remote_client.as_ref(), &p.crafting_ui, &p.inventory, &p.armour_slots, &p.offhand, "eat")
         };
         self.route_item_request(pidx, pending, action);
         let p = &self.players[pidx];
-        crate::strict_requests::NoPrediction::check(no_prediction, &p.crafting_ui, &p.inventory, &p.armour_slots);
+        crate::strict_requests::NoPrediction::check(no_prediction, &p.crafting_ui, &p.inventory, &p.armour_slots, &p.offhand);
     }
 
     /// C3d run 24 — record and send player `pidx`'s (a joiner's) eat or
@@ -22790,20 +22814,22 @@ impl super::GameState {
     fn route_item_request(&mut self, pidx: usize, pending: crate::joiner_actions::Pending, action: crate::protocol::ItemAction) {
         if self.pack_window_frozen(pidx) { return; }
         if crate::strict_requests::shot_goes_typed(self.remote_client.as_ref()) {
-            let packet = crate::protocol::ItemActionPacket { seq: 0, action, events_applied: 0 };
+            let packet = crate::protocol::ItemActionPacket { seq: 0, action, events_applied: 0, hand: pending.hand };
             let p = &mut self.players[pidx];
-            if let Err(error) = crate::strict_requests::route_item(self.remote_client.as_mut(), &mut p.crafting_ui, &p.inventory, &p.armour_slots, &mut self.joiner_actions, pending, packet) {
+            if let Err(error) = crate::strict_requests::route_item(self.remote_client.as_mut(), &mut p.crafting_ui, &p.inventory, &p.armour_slots, &p.offhand, &mut self.joiner_actions, pending, packet) {
                 log::warn!("Strict item action could not be reserved: {error}");
             }
             return;
         }
         let next_input = self.request_input_seq();
+        let hand = pending.hand;
         let seq = self.joiner_actions.record(pending, next_input);
         self.send_request(crate::remote_client::Request::Item(crate::protocol::ItemActionPacket {
             seq,
             action,
             // Stamped by `RemoteClient::send_item_action`.
             events_applied: 0,
+            hand,
         }));
     }
 
@@ -22823,7 +22849,7 @@ impl super::GameState {
             return;
         }
         let Some(held) = p.inventory.hotbar_slot(slot).map(|s| s.item.clone()) else { return };
-        if !self.joiner_actions.can_spend(&p.inventory, &p.crafting_ui, &held, 1) {
+        if !self.joiner_actions.can_spend(&p.inventory, &p.crafting_ui, &p.offhand, &held, 1) {
             return;
         }
         // C3d run 25 — a Strict seat reserves ONE typed drop BEFORE the
@@ -22831,7 +22857,7 @@ impl super::GameState {
         // corrected) and sends it (`strict_requests::route_drop`).
         if crate::strict_requests::shot_goes_typed(self.remote_client.as_ref()) {
             let p = &mut self.players[pidx];
-            match crate::strict_requests::route_drop(self.remote_client.as_mut(), &mut p.crafting_ui, &mut p.inventory, &mut p.armour_slots, slot, &self.registry) {
+            match crate::strict_requests::route_drop(self.remote_client.as_mut(), &mut p.crafting_ui, &mut p.inventory, &mut p.armour_slots, &mut p.offhand, slot, &self.registry) {
                 Ok(Some(_)) => p.drop_ready_tick = now + crate::item_actions::DROP_INTERVAL_TICKS,
                 Ok(None) => {}
                 Err(error) => log::warn!("Strict drop could not be reserved: {error}"),
@@ -22853,8 +22879,7 @@ impl super::GameState {
         self.send_request(crate::remote_client::Request::Item(crate::protocol::ItemActionPacket {
             seq,
             action: crate::protocol::ItemAction::Drop { hotbar_slot: slot as u8, held_kind, held_id, held_full },
-            events_applied: 0,
-        }));
+            events_applied: 0, hand: crate::hands::Hand::Main }));
     }
 
     /// Spec 24 Phase 5 — player `pidx` confirmed the Capture dialog: commit
@@ -22998,8 +23023,7 @@ impl super::GameState {
                 plan,
             },
             // Stamped by `RemoteClient::send_item_action`.
-            events_applied: 0,
-        }));
+            events_applied: 0, hand: crate::hands::Hand::Main }));
     }
 
     /// C2a — ask the server to let player `pidx` (a joiner) sleep in the bed
@@ -23016,15 +23040,16 @@ impl super::GameState {
             mob: None,
             hotbar_slot: hot,
             held: None,
+            hand: crate::hands::Hand::Main,
         };
         let action = crate::protocol::ItemAction::Sleep { bed };
         let no_prediction = {
             let p = &self.players[pidx];
-            crate::strict_requests::NoPrediction::begin(self.remote_client.as_ref(), &p.crafting_ui, &p.inventory, &p.armour_slots, "sleep")
+            crate::strict_requests::NoPrediction::begin(self.remote_client.as_ref(), &p.crafting_ui, &p.inventory, &p.armour_slots, &p.offhand, "sleep")
         };
         self.route_item_request(pidx, pending, action);
         let p = &self.players[pidx];
-        crate::strict_requests::NoPrediction::check(no_prediction, &p.crafting_ui, &p.inventory, &p.armour_slots);
+        crate::strict_requests::NoPrediction::check(no_prediction, &p.crafting_ui, &p.inventory, &p.armour_slots, &p.offhand);
     }
 
     /// C3b-2 — player `pidx` (a joiner) right-clicked the `kind` block at
@@ -23080,14 +23105,14 @@ impl super::GameState {
     ) -> bool {
         if self.pack_window_frozen(pidx) { return false; }
         self.players[pidx].place_cooldown = 8;
-        let (hot, held, held_kind, held_id, held_full) = self.held_for_request(pidx);
+        let (hot, held, held_kind, held_id, held_full) = self.held_for_request(pidx, crate::hands::Hand::Main);
         if matches!(held, Some(crate::item::Item::Plan(_))) {
             self.toast = Some(("Put the Plan away first.".to_string(), Instant::now() + Duration::from_secs(2)));
             return false;
         }
         let asked = asked(held.as_ref());
         let action = crate::protocol::ItemAction::UseBlock { cell, hotbar_slot: hot as u8, held_kind, held_id, held_full };
-        self.send_use_request(pidx, asked, held, hot, action)
+        self.send_use_request(pidx, asked, held, hot, crate::hands::Hand::Main, action)
     }
 
     /// Ask the authority to add an Explorer item to this window.
@@ -23101,17 +23126,17 @@ impl super::GameState {
         // its numbered `InventoryGrant`.
         let asked = crate::joiner_actions::Asked::CreativeGive;
         let p = &self.players[pidx];
-        if !self.joiner_actions.can_afford(&p.inventory, &p.crafting_ui, asked, None) {
+        if !self.joiner_actions.can_afford(&p.inventory, &p.crafting_ui, &p.offhand, asked, None) {
             return;
         }
         let no_prediction = {
             let p = &self.players[pidx];
-            crate::strict_requests::NoPrediction::begin(self.remote_client.as_ref(), &p.crafting_ui, &p.inventory, &p.armour_slots, "creative give")
+            crate::strict_requests::NoPrediction::begin(self.remote_client.as_ref(), &p.crafting_ui, &p.inventory, &p.armour_slots, &p.offhand, "creative give")
         };
-        let pending = crate::joiner_actions::Pending { kind: asked, mob: None, hotbar_slot: 0, held: None };
+        let pending = crate::joiner_actions::Pending { kind: asked, mob: None, hotbar_slot: 0, held: None, hand: crate::hands::Hand::Main };
         self.route_item_request(pidx, pending, action);
         let p = &self.players[pidx];
-        crate::strict_requests::NoPrediction::check(no_prediction, &p.crafting_ui, &p.inventory, &p.armour_slots);
+        crate::strict_requests::NoPrediction::check(no_prediction, &p.crafting_ui, &p.inventory, &p.armour_slots, &p.offhand);
     }
 
     /// C3c-2 — record and send player `pidx`'s (a joiner's) item action
@@ -23125,16 +23150,17 @@ impl super::GameState {
         asked: crate::joiner_actions::Asked,
         held: Option<crate::item::Item>,
         hot: usize,
+        hand: crate::hands::Hand,
         action: crate::protocol::ItemAction,
     ) -> bool {
         if self.pack_window_frozen(pidx) { return false; }
         let p = &self.players[pidx];
-        if !self.joiner_actions.can_afford(&p.inventory, &p.crafting_ui, asked, held.as_ref()) {
+        if !self.joiner_actions.can_afford(&p.inventory, &p.crafting_ui, &p.offhand, asked, held.as_ref()) {
             return false;
         }
         let next_input = self.request_input_seq();
         let seq = self.joiner_actions.record(
-            crate::joiner_actions::Pending { kind: asked, mob: None, hotbar_slot: hot, held },
+            crate::joiner_actions::Pending { kind: asked, mob: None, hotbar_slot: hot, held, hand },
             next_input,
         );
         self.send_request(crate::remote_client::Request::Item(crate::protocol::ItemActionPacket {
@@ -23142,6 +23168,7 @@ impl super::GameState {
             action,
             // Stamped by `RemoteClient::send_item_action`.
             events_applied: 0,
+            hand,
         }));
         true
     }
@@ -23153,14 +23180,18 @@ impl super::GameState {
     /// projectile from its body and the outcome takes the ammo and wears the
     /// weapon. Returns whether the shot was asked for (otherwise the click
     /// goes on, as single-player's with no arrow does).
-    pub(crate) fn send_shot(&mut self, pidx: usize, weapon: crate::protocol::ShotWeapon) -> bool {
+    pub(crate) fn send_shot(&mut self, pidx: usize, weapon: crate::protocol::ShotWeapon, hand: crate::hands::Hand) -> bool {
         if self.pack_window_frozen(pidx) { return false; }
-        let (hot, held, held_kind, held_id, held_full) = self.held_for_request(pidx);
+        let (hot, held, held_kind, held_id, held_full) = self.held_for_request(pidx, hand);
         let Some(crate::item::Item::Tool(tool)) = held else { return false };
-        if crate::shot::find_ammo(&self.players[pidx].inventory, weapon).is_none() {
+        // v101 — off-hand ammo first (the local rule, `shot::take_ammo`),
+        // then the bag; the round claimed is the one that would be taken.
+        let p = &self.players[pidx];
+        let off = p.offhand.as_ref();
+        if !crate::shot::offhand_has_ammo(weapon, off) && crate::shot::find_ammo(&p.inventory, weapon).is_none() {
             return false;
         }
-        let ammo = crate::item::Item::Material(crate::shot::ammo_for(weapon));
+        let ammo = crate::shot::round_for(weapon, off);
         let cam = &self.players[pidx].camera;
         let action = crate::protocol::ItemAction::Shoot {
             weapon,
@@ -23175,12 +23206,12 @@ impl super::GameState {
         let asked = crate::joiner_actions::Asked::Shoot { weapon, material: tool.material };
         // C3d run 13 — a Strict seat reserves ONE typed shot and predicts
         // nothing (`strict_requests`); Mirror sends the legacy request.
-        let pending = crate::joiner_actions::Pending { kind: asked, mob: None, hotbar_slot: hot, held: Some(ammo.clone()) };
+        let pending = crate::joiner_actions::Pending { kind: asked, mob: None, hotbar_slot: hot, held: Some(ammo.clone()), hand };
         let p = &mut self.players[pidx];
-        match crate::strict_requests::route_shot(self.remote_client.as_mut(), &mut p.crafting_ui, &p.inventory, &p.armour_slots, &mut self.joiner_actions, pending, &action) {
+        match crate::strict_requests::route_shot(self.remote_client.as_mut(), &mut p.crafting_ui, &p.inventory, &p.armour_slots, &p.offhand, &mut self.joiner_actions, pending, &action) {
             Ok(crate::strict_requests::ShotRoute::Typed(_)) => true,
             Ok(crate::strict_requests::ShotRoute::Unaffordable) => false,
-            Ok(crate::strict_requests::ShotRoute::Legacy) => self.send_use_request(pidx, asked, Some(ammo), hot, action),
+            Ok(crate::strict_requests::ShotRoute::Legacy) => self.send_use_request(pidx, asked, Some(ammo), hot, hand, action),
             Err(error) => {
                 log::warn!("Strict shot could not be reserved: {error}");
                 false
@@ -23192,11 +23223,11 @@ impl super::GameState {
     /// at `cell` (`ItemAction::PlaceCart`): the server checks its own
     /// entities for a cart there and spawns the real one, which reaches us
     /// through the entity mirror; the outcome takes the item.
-    pub(crate) fn send_place_cart(&mut self, pidx: usize, cell: [i32; 3]) {
+    pub(crate) fn send_place_cart(&mut self, pidx: usize, cell: [i32; 3], hand: crate::hands::Hand) {
         self.players[pidx].place_cooldown = 8;
-        let (hot, held, held_kind, held_id, held_full) = self.held_for_request(pidx);
+        let (hot, held, held_kind, held_id, held_full) = self.held_for_request(pidx, hand);
         let action = crate::protocol::ItemAction::PlaceCart { cell, hotbar_slot: hot as u8, held_kind, held_id, held_full };
-        self.send_use_request(pidx, crate::joiner_actions::Asked::PlaceCart { cell }, held, hot, action);
+        self.send_use_request(pidx, crate::joiner_actions::Asked::PlaceCart { cell }, held, hot, hand, action);
     }
 
     /// C3c-3b — player `pidx` (a joiner) paints the wallpaper, or lays the
@@ -23206,14 +23237,14 @@ impl super::GameState {
     /// block (the outcome); we see it through the attachment stream. Claimed
     /// like a cart (one block); a second click on the same face while the
     /// first is in flight sends nothing.
-    pub(crate) fn send_attach(&mut self, pidx: usize, cell: [i32; 3], face: usize) {
+    pub(crate) fn send_attach(&mut self, pidx: usize, cell: [i32; 3], face: usize, hand: crate::hands::Hand) {
         self.players[pidx].place_cooldown = 8;
         let face = face.min(5) as u8;
         let asked = crate::joiner_actions::Asked::Attach { cell, face };
         if self.joiner_actions.is_asking(asked) {
             return;
         }
-        let (hot, held, held_kind, held_id, held_full) = self.held_for_request(pidx);
+        let (hot, held, held_kind, held_id, held_full) = self.held_for_request(pidx, hand);
         let action = crate::protocol::ItemAction::Attach {
             x: cell[0],
             y: cell[1],
@@ -23224,7 +23255,7 @@ impl super::GameState {
             held_id,
             held_full,
         };
-        self.send_use_request(pidx, asked, held, hot, action);
+        self.send_use_request(pidx, asked, held, hot, hand, action);
     }
 
     /// Living world Tier 2 S7 — player `pidx` (a joiner) asks the authority for
@@ -23233,7 +23264,7 @@ impl super::GameState {
     pub(crate) fn send_site_board_op(&mut self, pidx: usize, cell: [i32; 3], op: crate::site_board::Op) {
         let asked = crate::joiner_actions::Asked::SiteBoard { cell };
         let hot = self.players[pidx].hotbar_slot;
-        self.send_use_request(pidx, asked, None, hot, crate::protocol::ItemAction::SiteBoard { pos: cell, op });
+        self.send_use_request(pidx, asked, None, hot, crate::hands::Hand::Main, crate::protocol::ItemAction::SiteBoard { pos: cell, op });
     }
 
     /// Ask the server to grant what fits from this shared grave. One request
@@ -23242,7 +23273,7 @@ impl super::GameState {
         let asked = crate::joiner_actions::Asked::OpenGrave { cell };
         if self.joiner_actions.is_asking(asked) { return; }
         let hot = self.players[pidx].hotbar_slot;
-        self.send_use_request(pidx, asked, None, hot, crate::protocol::ItemAction::OpenGrave { x: cell[0], y: cell[1], z: cell[2] });
+        self.send_use_request(pidx, asked, None, hot, crate::hands::Hand::Main, crate::protocol::ItemAction::OpenGrave { x: cell[0], y: cell[1], z: cell[2] });
     }
 
     /// C3c-3b — player `pidx` (a joiner) peels the wallpaper or blank paper
@@ -23258,7 +23289,7 @@ impl super::GameState {
         }
         let hot = self.players[pidx].hotbar_slot;
         let action = crate::protocol::ItemAction::Detach { x: cell[0], y: cell[1], z: cell[2], face };
-        self.send_use_request(pidx, asked, None, hot, action);
+        self.send_use_request(pidx, asked, None, hot, crate::hands::Hand::Main, action);
     }
 
     /// C3c-2 — player `pidx` (a joiner) casts the rod in hand
@@ -23266,8 +23297,8 @@ impl super::GameState {
     /// server casts from its body and rolls the bite and the catch; here a
     /// cast puts a line out waiting for the server's bite time (the outcome's
     /// `bite_after`), and a reel takes it in at once, as single-player's does.
-    pub(crate) fn send_fishing(&mut self, pidx: usize) {
-        let (hot, held, held_kind, held_id, held_full) = self.held_for_request(pidx);
+    pub(crate) fn send_fishing(&mut self, pidx: usize, hand: crate::hands::Hand) {
+        let (hot, held, held_kind, held_id, held_full) = self.held_for_request(pidx, hand);
         let slot = hot as u8;
         let reel = self.players[pidx].fishing.is_some();
         let (asked, action) = if reel {
@@ -23276,7 +23307,7 @@ impl super::GameState {
             (crate::joiner_actions::Asked::Cast, crate::protocol::ItemAction::Cast { hotbar_slot: slot, held_kind, held_id, held_full })
         };
         self.players[pidx].place_cooldown = 10;
-        if self.send_use_request(pidx, asked, held, hot, action) {
+        if self.send_use_request(pidx, asked, held, hot, hand, action) {
             // A cast's line waits for the server's bite; a reel's comes in.
             self.players[pidx].fishing =
                 (!reel).then_some(crate::fishing::FishingLine { catch_at_tick: u64::MAX, hooked: false });
@@ -23564,14 +23595,14 @@ impl super::GameState {
                     // through the reserving entry points (nothing is logged).
                     // A logged one is a breach: it leaves the world with a
                     // plain reason (run 4), never a silent discard.
-                    crate::remote_client::flush_strict_window_ops(client, &mut p.crafting_ui, &p.inventory, &p.armour_slots);
+                    crate::remote_client::flush_strict_window_ops(client, &mut p.crafting_ui, &p.inventory, &p.armour_slots, &p.offhand);
                     Vec::new()
                 } else {
                     // Mirror: the window's settings were logged when the
                     // personal state became ready (`apply_personal_inbox`).
                     match client.first_carried_stamp() {
                         Some(cut) => p.crafting_ui.ops.take_before(Some(cut)),
-                        None => p.crafting_ui.take_ops(&p.inventory, &p.armour_slots),
+                        None => p.crafting_ui.take_ops(&p.inventory, &p.armour_slots, &p.offhand),
                     }
                 };
                 for logged in ops {
@@ -23663,22 +23694,29 @@ impl super::GameState {
         }
         let Some(p) = self.players.first_mut() else { return };
         let hot = u8::try_from(p.hotbar_slot).unwrap_or(u8::MAX);
-        let no_prediction = crate::strict_requests::NoPrediction::begin(self.remote_client.as_ref(), &p.crafting_ui, &p.inventory, &p.armour_slots, "device");
-        if let Err(error) = crate::strict_requests::route_device(self.remote_client.as_mut(), &mut p.crafting_ui, &p.inventory, &p.armour_slots, [pos.0, pos.1, pos.2], hot) {
+        let no_prediction = crate::strict_requests::NoPrediction::begin(self.remote_client.as_ref(), &p.crafting_ui, &p.inventory, &p.armour_slots, &p.offhand, "device");
+        if let Err(error) = crate::strict_requests::route_device(self.remote_client.as_mut(), &mut p.crafting_ui, &p.inventory, &p.armour_slots, &p.offhand, [pos.0, pos.1, pos.2], hot) {
             log::warn!("Strict device right-click could not be reserved: {error}");
         }
-        crate::strict_requests::NoPrediction::check(no_prediction, &p.crafting_ui, &p.inventory, &p.armour_slots);
+        crate::strict_requests::NoPrediction::check(no_prediction, &p.crafting_ui, &p.inventory, &p.armour_slots, &p.offhand);
     }
 
     /// C3a-fix-1 — player 0's hotbar slot and the item in it, as an edit's
     /// hand (`InputPacket.edit_hands`).
     fn edit_hand_now(&self) -> crate::protocol::EditHand {
-        let Some(slot) = self.players.first() else { return (u8::MAX, 0, 0) };
-        let (kind, id) = match slot.inventory.hotbar_slot(slot.hotbar_slot) {
+        self.edit_hand_of(crate::hands::Hand::Main)
+    }
+
+    /// v101 — player 0's edit hand for a use made with `hand`: the selected
+    /// hotbar slot, the item of that hand and the hand
+    /// (`window_ops::PendingEdits::push_stamped`).
+    fn edit_hand_of(&self, hand: crate::hands::Hand) -> crate::protocol::EditHand {
+        let Some(slot) = self.players.first() else { return (u8::MAX, 0, 0, hand) };
+        let (kind, id) = match slot.held_for_use(hand) {
             Some(stack) => crate::inventory::item_to_ref(&stack.item).to_wire(),
             None => crate::protocol::ItemRef::Empty.to_wire(),
         };
-        (slot.hotbar_slot.min(usize::from(u8::MAX)) as u8, kind, id)
+        (slot.hotbar_slot.min(usize::from(u8::MAX)) as u8, kind, id, hand)
     }
 
     /// C3a-fix-1 (C-M1) — the edits made so far keep the hotbar slot and
@@ -23775,7 +23813,7 @@ impl super::GameState {
                     let mode = self.remote_client.as_ref().map_or(crate::action_identity::InventoryMode::Mirror, |c| c.inventory_mode);
                     let p = &mut self.players[0];
                     let applied = crate::inventory_sync::apply(&mut crate::window::WindowMut { inv: &mut p.inventory,
-                        armour: &mut p.armour_slots, cursor: &mut p.crafting_ui.cursor_item,
+                        armour: &mut p.armour_slots, offhand: &mut p.offhand, cursor: &mut p.crafting_ui.cursor_item,
                         grid: &mut p.crafting_ui.grid, container: None }, &pkt, &self.registry, &mut self.sent_uses,
                         &mut self.window_inbox.debt, mode);
                     if let Ok(Some(station)) = applied { p.crafting_ui.adopt_station(station); }
@@ -23871,8 +23909,7 @@ impl super::GameState {
                     client.send_item_action(&crate::protocol::ItemActionPacket {
                         seq,
                         action: crate::protocol::ItemAction::GrantUnfit { event, count },
-                        events_applied: 0,
-                    });
+                        events_applied: 0, hand: crate::hands::Hand::Main });
                 }
             }
         }

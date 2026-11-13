@@ -97,7 +97,7 @@ fn exact_slot(slot: &WireSlot, registry: &crate::block::BlockRegistry) -> Result
 
 impl PackWindow {
     pub fn capture(window: &EffectiveWindow, debt: &crate::container_window::CorrectionDebt, registry: &crate::block::BlockRegistry) -> Result<Self, String> {
-        let marker = crate::staged_window::MarkerWindow::try_capture_parts(&window.inv, &window.armour, &window.cursor, &window.grid, registry).ok_or("The personal window cannot be carried exactly")?;
+        let marker = crate::staged_window::MarkerWindow::try_capture_parts(&window.inv, &window.armour, &window.offhand, &window.cursor, &window.grid, registry).ok_or("The personal window cannot be carried exactly")?;
         let owed = debt.to_wire();
         if crate::container_window::CorrectionDebt::from_wire(&owed, registry)? != *debt { return Err("The personal debt cannot be carried exactly".into()); }
         Ok(Self { slots: BoundedList::new(marker.slots().into_iter().collect()).map_err(str::to_string)?, owed: BoundedList::new(owed).map_err(str::to_string)?, locks: window.inv.locked_indices().iter().fold(0, |mask, slot| mask | (1u64 << slot)) })
@@ -105,10 +105,10 @@ impl PackWindow {
 
     /// Decode every place and the whole debt before the caller changes one.
     pub fn decode_window(&self, registry: &crate::block::BlockRegistry) -> Result<PackWindowStage, String> {
-        if self.slots.as_slice().len() != 50 || self.locks >> 36 != 0 { return Err("A pack window is incomplete".into()); }
+        if self.slots.as_slice().len() != crate::staged_window::PLAYER_PLACES || self.locks >> 36 != 0 { return Err("A pack window is incomplete".into()); }
         let debt = crate::container_window::CorrectionDebt::from_wire(self.owed.as_slice(), registry)?;
         let stacks = self.slots.as_slice().iter().map(|slot| exact_slot(slot, registry)).collect::<Result<Vec<_>, _>>()?;
-        let mut window = EffectiveWindow { inv: crate::inventory::Inventory::new(), armour: [None; 4], cursor: None, grid: Default::default() };
+        let mut window = EffectiveWindow { inv: crate::inventory::Inventory::new(), armour: [None; 4], offhand: None, cursor: None, grid: Default::default() };
         for (at, stack) in stacks.into_iter().enumerate() {
             match at {
                 0..36 => window.inv.set_slot(at, stack),
@@ -120,6 +120,7 @@ impl PackWindow {
                     };
                 }
                 40 => window.cursor = stack,
+                crate::staged_window::OFFHAND => window.offhand = stack,
                 _ => window.grid[(at - 41) / 3][(at - 41) % 3] = stack,
             }
         }

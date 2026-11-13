@@ -215,7 +215,7 @@ impl crate::GameState {
                 // they precede any later click. A death fence still pending
                 // on the server drops them, as it drops any Mirror op while
                 // dead.
-                slot.crafting_ui.settle_initial_settings(client, &slot.inventory, &slot.armour_slots);
+                slot.crafting_ui.settle_initial_settings(client, &slot.inventory, &slot.armour_slots, &slot.offhand);
             }
             Err(error) => client.state = crate::remote_client::ConnectionState::Failed(error),
         }
