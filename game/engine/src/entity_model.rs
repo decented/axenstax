@@ -14,13 +14,6 @@ use crate::combat::Health;
 mod animals;
 mod roster;
 
-/// Overlay inflation for the RIGHT ARM specifically — the one part the
-/// first-person viewmodel draws (`crate::viewmodel`). Per-part overlay inflate
-/// now lives in [`crate::skin_pose`] (Minecraft-exact: head 0.03125, limbs
-/// 0.015625 per side); new code should call `skin_pose::overlay_inflate(part)`
-/// directly rather than reaching for a constant.
-pub(crate) const RIGHT_ARM_OVERLAY_INFLATE: f32 = 0.015625;
-
 /// How to build an avatar's skin mesh. [`Default`] is the WORN avatar: parts at
 /// rest, Minecraft-exact overlay inflate, clothes drawn.
 #[derive(Clone, Copy, Debug)]
