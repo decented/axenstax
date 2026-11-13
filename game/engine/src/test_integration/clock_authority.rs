@@ -28,7 +28,7 @@ fn dedicated(tag: &str) -> HostedServer {
 /// A storm over every tick of the test, and the first tick at or after
 /// `from` on which it throws a bolt.
 fn storm_and_strike_tick(from: u64, seed: u32) -> (Weather, u64) {
-    let storm = Weather { rain_until: from + 100_000, storm_until: from + 100_000 };
+    let storm = Weather { rain_until: from + 100_000, storm_until: from + 100_000, clear_until: 0 };
     let t = (from..from + 100_000)
         .find(|&t| crate::weather::strike_roll(storm, t, true, seed).is_some())
         .expect("a storm throws a bolt within minutes");
@@ -124,7 +124,7 @@ fn a_weather_lock_pins_and_releases_on_the_authority_and_the_workshop_never_rain
     assert_eq!(released.weather, Weather::CLEAR, "released at once");
     assert_eq!(released.weather_lock_applied, None);
     // The Workshop: no weather at all, whatever the window held.
-    hs.server.weather = Weather { rain_until: u64::MAX, storm_until: u64::MAX };
+    hs.server.weather = Weather { rain_until: u64::MAX, storm_until: u64::MAX, clear_until: 0 };
     for _ in 0..3 {
         let back = phase(&mut hs, &mut host, &mut tally, false, None);
         assert_eq!(back.weather, Weather::CLEAR);

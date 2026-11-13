@@ -56,13 +56,24 @@ const MAX_SAVED_LOCK_LEN: usize = 64;
 
 /// A world's authority clock as `world.dat` carries it
 /// (`WorldSave.authority_clock`). Positional bincode inside an append-only
-/// field: a change here moves `save_format::SAVE_LAYOUT_REVISION`.
+/// field: a change to the encoded layout here moves
+/// `save_format::SAVE_LAYOUT_REVISION` and misreads every older save's clock,
+/// so a new clock field rides its own appended `WorldSave` field instead
+/// (`clear_until`, below).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SavedClock {
     pub tick_counter: u64,
     pub world_time: u32,
     pub rain_until: u64,
     pub storm_until: u64,
+    /// The `/weather clear` hold (`Weather::clear_until`). NOT part of this
+    /// record's encoding (`serde(skip)`): it is saved as the appended
+    /// `WorldSave.weather_clear_until` field: written from here by
+    /// [`SavedClock::clear_hold_for_save`] and folded back in by the reader with
+    /// [`SavedClock::fold_clear_hold`]. `0` = no hold, and what a save from
+    /// before the field loads.
+    #[serde(skip)]
+    pub clear_until: u64,
     pub weather_lock_applied: Option<String>,
     pub nights: u32,
     pub was_night: Option<bool>,
@@ -78,12 +89,31 @@ pub struct SavedClock {
 }
 
 impl SavedClock {
+    /// The appended `WorldSave.weather_clear_until` value for this clock: `None`
+    /// (one byte) when there is no hold, so a world that never used `/weather`
+    /// saves canonically.
+    pub fn clear_hold_for_save(&self) -> Option<u64> {
+        (self.clear_until != 0).then_some(self.clear_until)
+    }
+
+    /// Fold a loaded `WorldSave.weather_clear_until` into the clock it belongs
+    /// to. `None` (a save from before the field) is no hold. A hold further
+    /// past the clock's tick than a window can ever be is a damaged file and is
+    /// dropped, never kept: it would hold the sky clear for good (the same
+    /// bound as the rain and storm windows, [`MAX_SAVED_WEATHER_AHEAD`]).
+    pub fn fold_clear_hold(&mut self, saved: Option<u64>) {
+        let hold = saved.unwrap_or(0);
+        self.clear_until =
+            if hold <= self.tick_counter.saturating_add(MAX_SAVED_WEATHER_AHEAD) { hold } else { 0 };
+    }
+
     /// Could a build have written this? A clock that fails (a damaged or
     /// hostile file) is not restored: the world loads as an old save does.
     pub fn is_valid(&self) -> bool {
         self.tick_counter <= MAX_SAVED_TICK
             && self.rain_until <= self.tick_counter + MAX_SAVED_WEATHER_AHEAD
             && self.storm_until <= self.tick_counter + MAX_SAVED_WEATHER_AHEAD
+            && self.clear_until <= self.tick_counter + MAX_SAVED_WEATHER_AHEAD
             && self.world_time < DAY_TICKS
             && self.day_remainder < crate::reputation_day::SOLAR_UNITS_PER_DAY
             && self.day_last_tick.is_none_or(|t| t <= self.tick_counter)
@@ -100,6 +130,7 @@ pub struct ClientClock {
     pub world_time: u32,
     pub rain_until: u64,
     pub storm_until: u64,
+    pub clear_until: u64,
     pub weather_lock_applied: Option<String>,
     pub night_calendar: crate::item_actions::NightCalendar,
     pub calendar_id: [u8; 16],
@@ -122,6 +153,7 @@ pub fn clock_to_save(
         world_time: clock.world_time,
         rain_until: clock.rain_until,
         storm_until: clock.storm_until,
+        clear_until: clock.clear_until,
         weather_lock_applied: clock.weather_lock_applied.clone(),
         nights,
         was_night,
@@ -142,6 +174,7 @@ pub fn restore_saved_clock(clock: &mut ClientClock, saved: Option<&SavedClock>) 
         world_time,
         rain_until,
         storm_until,
+        clear_until,
         weather_lock_applied,
         nights,
         was_night,
@@ -153,6 +186,7 @@ pub fn restore_saved_clock(clock: &mut ClientClock, saved: Option<&SavedClock>) 
     clock.world_time = *world_time;
     clock.rain_until = *rain_until;
     clock.storm_until = *storm_until;
+    clock.clear_until = *clear_until;
     clock.weather_lock_applied.clone_from(weather_lock_applied);
     clock.night_calendar = crate::item_actions::NightCalendar::from_saved(*nights, *was_night);
     clock.calendar_id = *calendar_id;
@@ -375,6 +409,7 @@ mod tests {
             world_time: 15_000,
             rain_until: 91_000,
             storm_until: 90_500,
+            clear_until: 95_000,
             weather_lock_applied: Some("storm".into()),
             night_calendar: crate::item_actions::NightCalendar::from_saved(12, Some(true)),
             calendar_id: [7; 16],
@@ -389,6 +424,7 @@ mod tests {
             world_time: 6_000,
             rain_until: 0,
             storm_until: 0,
+            clear_until: 0,
             weather_lock_applied: None,
             night_calendar: crate::item_actions::NightCalendar::default(),
             calendar_id: [0; 16],
@@ -404,11 +440,20 @@ mod tests {
         let before = saved_example();
         let saved = clock_to_save(&before, None);
         assert!(saved.is_valid());
-        // Through the file's own encoding, not just the struct.
-        let bytes = bincode::serialize(&saved).unwrap();
-        let read: SavedClock = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(saved.clear_until, 95_000);
+        // Through the file's own encoding, not just the struct: the hold rides
+        // the appended `WorldSave.weather_clear_until`, not the clock record
+        // (`clear_until` is `serde(skip)`), so the round trip is a whole save.
+        let mut file = crate::save::minimal_world_save_for_tests(1);
+        file.weather_clear_until = saved.clear_hold_for_save();
+        file.authority_clock = Some(saved.clone());
+        let bytes = crate::save_format::encode_world_save(&file).unwrap();
+        let read = crate::save::read_world_save(&bytes).unwrap();
+        let read = read.clock().expect("a valid saved clock").clone();
+        assert_eq!(read, saved, "the whole clock, hold included");
         let mut after = blank();
         restore_saved_clock(&mut after, Some(&read));
+        assert_eq!(after.clear_until, before.clear_until);
         assert_eq!(after.tick_counter, before.tick_counter);
         assert_eq!(after.world_time, before.world_time);
         assert_eq!(after.rain_until, before.rain_until);
@@ -437,7 +482,7 @@ mod tests {
     }
 
     fn storm(until: u64) -> Weather {
-        Weather { rain_until: until, storm_until: until }
+        Weather { rain_until: until, storm_until: until, clear_until: 0 }
     }
 
     #[test]

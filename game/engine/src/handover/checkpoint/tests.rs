@@ -211,6 +211,7 @@ fn neutral_save(seed: u32) -> WorldSave {
         plan_builds: None,
         plot_succession: None,
         site_boards: None,
+        weather_clear_until: None,
     }
 }
 
@@ -1433,6 +1434,7 @@ fn handover_checkpoint_carries_the_authority_clock_and_a_sleep_mark_under_its_ca
         world_time: 15_000,
         rain_until: 91_000,
         storm_until: 90_500,
+        clear_until: 0,
         weather_lock_applied: Some("storm".into()),
         nights: 12,
         was_night: Some(true),
@@ -1496,6 +1498,7 @@ fn handover_checkpoint_refuses_a_clock_no_build_could_have_written() {
         world_time: 0,
         rain_until: u64::MAX,
         storm_until: 0,
+        clear_until: 0,
         weather_lock_applied: None,
         nights: 0,
         was_night: None,

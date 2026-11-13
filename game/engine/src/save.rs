@@ -398,6 +398,17 @@ pub struct WorldSave {
     /// APPEND LAST.
     #[serde(default)]
     pub site_boards: Option<crate::site_board::SavedSiteBoards>,
+    /// The `/weather clear` hold (`Weather::clear_until`): the `tick_counter`
+    /// until which no new rain is rolled. It belongs to the clock but rides its
+    /// own appended field, because `SavedClock` sits mid-stream (`authority_clock`)
+    /// and a longer encoding would misread every older save's clock. Written
+    /// from the clock by `SavedClock::clear_hold_for_save` and folded back in on
+    /// read (`SavedClock::fold_clear_hold`, by the one reader
+    /// `deserialize_world_save_tolerant_reporting`), so the rest of the engine
+    /// sees `SavedClock::clear_until` and never this field. `None` = a save
+    /// written before the field, or no hold. Never on the wire. APPEND LAST.
+    #[serde(default)]
+    pub weather_clear_until: Option<u64>,
 }
 
 impl WorldSave {
@@ -430,6 +441,8 @@ impl WorldSave {
             plot_succession: _,
             // Already canonical (`site_board::to_saved` walks a BTreeMap).
             site_boards: _,
+            // One optional number.
+            weather_clear_until: _,
         } = self;
         if let Some(ru) = region_use {
             ru.regions.sort_by_key(|(key, _)| *key);
@@ -983,6 +996,7 @@ impl LegacyWorldSave {
             plan_builds: None,
             plot_succession: None,
             site_boards: None,
+            weather_clear_until: None,
             // Legacy saves predate Spec 34 — no tip jars.
             tip_jars: Vec::new(),
             auctions: Vec::new(),
@@ -2369,6 +2383,7 @@ pub fn build_world_save(
         quest_world: quest_world.cloned(),
         worldgen_version: Some(world.generator.version()),
         authority_clock: authority_clock.cloned(),
+        weather_clear_until: authority_clock.and_then(|c| c.clear_hold_for_save()),
         block_authors: world.authors.to_saved(),
         region_use: world.use_record.to_saved(),
         plan_builds: world.plan_builds.to_saved(),
@@ -2626,6 +2641,7 @@ pub fn save_world(
         quest_world: quest_world.cloned(),
         worldgen_version: Some(world.generator.version()),
         authority_clock: authority_clock.cloned(),
+        weather_clear_until: authority_clock.and_then(|c| c.clear_hold_for_save()),
         block_authors: world.authors.to_saved(),
         region_use: world.use_record.to_saved(),
         plan_builds: world.plan_builds.to_saved(),
@@ -2856,7 +2872,7 @@ fn deserialize_world_save_tolerant_reporting(
     let mut cur = std::io::Cursor::new(data);
     // Fields from `carts` on are decoded "stop at first failure": see `TailReader`.
     let mut tail = TailReader::default();
-    let save = WorldSave {
+    let mut save = WorldSave {
         // Required prefix — fields 1-7. A failure here means the stream is not a
         // modern WorldSave (e.g. a genuine legacy 8-field save); propagate so the
         // caller can try `LegacyWorldSave`.
@@ -2949,7 +2965,15 @@ fn deserialize_world_save_tolerant_reporting(
         plan_builds: tail.field(&mut cur, "plan_builds"),
         plot_succession: tail.field(&mut cur, "plot_succession"),
         site_boards: tail.field(&mut cur, "site_boards"),
+        weather_clear_until: tail.field(&mut cur, "weather_clear_until"),
     };
+    // The clock's `/weather clear` hold lives in the appended field; fold it
+    // into the clock every reader looks at (one place on read, `save` builds
+    // the field on write).
+    let hold = save.weather_clear_until;
+    if let Some(clock) = save.authority_clock.as_mut() {
+        clock.fold_clear_hold(hold);
+    }
     Ok((save, tail.failed_at, cur.position(), 7 + tail.read))
 }
 
@@ -2972,6 +2996,7 @@ fn absent_tail_encoded_len(s: &WorldSave, read: u32) -> Option<usize> {
             59 => size(bincode::serialized_size(&s.plan_builds))?,
             60 => size(bincode::serialized_size(&s.plot_succession))?,
             61 => size(bincode::serialized_size(&s.site_boards))?,
+            62 => size(bincode::serialized_size(&s.weather_clear_until))?,
             _ => return None,
         };
         Some(total + n)
@@ -4897,6 +4922,7 @@ pub(crate) fn autosave_world_with(
         quest_world: quest_world.cloned(),
         worldgen_version: Some(world.generator.version()),
         authority_clock: authority_clock.cloned(),
+        weather_clear_until: authority_clock.and_then(|c| c.clear_hold_for_save()),
         block_authors: world.authors.to_saved(),
         region_use: world.use_record.to_saved(),
         plan_builds: world.plan_builds.to_saved(),
@@ -5423,6 +5449,7 @@ pub(crate) fn minimal_world_save_for_tests(seed: u32) -> WorldSave {
             plan_builds: None,
             plot_succession: None,
             site_boards: None,
+            weather_clear_until: None,
     }
 }
 
@@ -5659,6 +5686,7 @@ mod tests {
             plan_builds: None,
             plot_succession: None,
             site_boards: None,
+            weather_clear_until: None,
         };
         let bytes = bincode::serialize(&save).unwrap();
         let back: WorldSave = bincode::deserialize(&bytes).unwrap();
@@ -6177,6 +6205,7 @@ mod tests {
             plan_builds: None,
             plot_succession: None,
             site_boards: None,
+            weather_clear_until: None,
         };
         let mut bytes = bincode::serialize(&save).unwrap();
         bytes.extend_from_slice(&[0xFFu8; 16]); // pretend: a future field's bytes
@@ -7125,6 +7154,7 @@ mod tests {
             plan_builds: None,
             plot_succession: None,
             site_boards: None,
+            weather_clear_until: None,
         };
         assert_eq!(save.face_overlays.len(), 1, "one wallpaper face");
         assert_eq!(save.face_blueprints.len(), 1, "one blueprint face");
@@ -7235,6 +7265,7 @@ mod tests {
             plan_builds: None,
             plot_succession: None,
             site_boards: None,
+            weather_clear_until: None,
         };
 
         // Encode, then decode through the REAL production path.
@@ -7420,6 +7451,7 @@ mod tests {
             plan_builds: None,
             plot_succession: None,
             site_boards: None,
+            weather_clear_until: None,
         };
         let bytes = bincode::serialize(&save).unwrap();
         let back: WorldSave = bincode::deserialize(&bytes).unwrap();
@@ -8057,10 +8089,10 @@ mod tests {
         let dir = world_dir("w");
         fs::create_dir_all(&dir).unwrap();
         save_world_meta("w", &WorldMeta::new("w")).unwrap();
-        // Cut `rig_clips` mid-length-prefix (the nine `Option`s after it are one
-        // byte each, so 10 lands one byte into its prefix).
+        // Cut `rig_clips` mid-length-prefix (the ten `Option`s after it are one
+        // byte each, so 11 lands one byte into its prefix).
         let mut bytes = bincode::serialize(&minimal_world_save_for_tests(9)).unwrap();
-        bytes.truncate(bytes.len() - 10);
+        bytes.truncate(bytes.len() - 11);
         fs::write(dir.join("world.dat"), &bytes).unwrap();
 
         let mut world = World::new();
@@ -8178,14 +8210,14 @@ mod tests {
     fn older_version_footer_is_stripped_before_the_tail_decode() {
         // Accepted c280f41f wrote 52 fields, layout revision 0, footer 52.
         // Its last field was rig_clips; the later optional positional fields are
-        // local_personal, quest_world, worldgen_version, authority_clock, block_authors, region_use, plan_builds, plot_succession and site_boards. No new nested mob carrier enters this fixture.
-        assert_eq!(crate::save_format::WORLD_SAVE_FIELD_COUNT, 61, "re-find the known 52-field fixture if another field appends");
+        // local_personal, quest_world, worldgen_version, authority_clock, block_authors, region_use, plan_builds, plot_succession, site_boards and weather_clear_until. No new nested mob carrier enters this fixture.
+        assert_eq!(crate::save_format::WORLD_SAVE_FIELD_COUNT, 62, "re-find the known 52-field fixture if another field appends");
         let mut save = minimal_world_save_for_tests(9);
         save.rig_clips = vec![crate::anim_set::AnimClip::Bounce];
         assert!(save.saved_mobs.is_empty());
         assert!(save.local_personal.is_none());
-        let appended_none = bincode::serialize(&(&save.local_personal, &save.quest_world, &save.worldgen_version, &save.authority_clock, &save.block_authors, &save.region_use, &save.plan_builds, &save.plot_succession, &save.site_boards)).unwrap();
-        assert_eq!(appended_none, [0, 0, 0, 0, 0, 0, 0, 0, 0], "the nine appended optional fields each encode None as one byte");
+        let appended_none = bincode::serialize(&(&save.local_personal, &save.quest_world, &save.worldgen_version, &save.authority_clock, &save.block_authors, &save.region_use, &save.plan_builds, &save.plot_succession, &save.site_boards, &save.weather_clear_until)).unwrap();
+        assert_eq!(appended_none, [0, 0, 0, 0, 0, 0, 0, 0, 0, 0], "the ten appended optional fields each encode None as one byte");
         let mut bytes = bincode::serialize(&save).unwrap();
         assert!(bytes.ends_with(&appended_none));
         bytes.truncate(bytes.len() - appended_none.len());
@@ -8248,6 +8280,7 @@ mod tests {
             world_time: 7,
             rain_until: 0,
             storm_until: 0,
+            clear_until: 9,
             weather_lock_applied: None,
             nights: 1,
             was_night: Some(false),
@@ -8255,6 +8288,7 @@ mod tests {
             day_remainder: 7,
             day_last_tick: Some(5),
         });
+        save.weather_clear_until = Some(9);
         save.block_authors = Some(crate::authorship::SavedAuthorship {
             keys: vec![crate::authorship::AuthorKey::Npub("npub1populated".into())],
             chunks: vec![(0, 4, 0, vec![(3, 0)])],
@@ -8278,8 +8312,9 @@ mod tests {
         let save = save_with_populated_tail(seed);
         let mut expected = save_with_populated_tail(seed);
         let mut body = bincode::serialize(&save).unwrap();
-        for index in (n + 1..=61).rev() {
+        for index in (n + 1..=62).rev() {
             let len = match index {
+                62 => { expected.weather_clear_until = None; bincode::serialize(&save.weather_clear_until).unwrap().len() }
                 61 => { expected.site_boards = None; bincode::serialize(&save.site_boards).unwrap().len() }
                 60 => { expected.plot_succession = None; bincode::serialize(&save.plot_succession).unwrap().len() }
                 59 => { expected.plan_builds = None; bincode::serialize(&save.plan_builds).unwrap().len() }
@@ -8290,7 +8325,7 @@ mod tests {
                 54 => { expected.quest_world = None; bincode::serialize(&save.quest_world).unwrap().len() }
                 53 => { expected.local_personal = None; bincode::serialize(&save.local_personal).unwrap().len() }
                 52 => { expected.rig_clips = Vec::new(); bincode::serialize(&save.rig_clips).unwrap().len() }
-                other => panic!("fixture only knows fields 52..=61, not {other}"),
+                other => panic!("fixture only knows fields 52..=62, not {other}"),
             };
             body.truncate(body.len() - len);
         }
@@ -8374,7 +8409,7 @@ mod tests {
     #[test]
     fn regression_padded_or_unknown_footer_bodies_are_still_refused() {
         let seed = 24;
-        let (_, body) = writer_with_fields(seed, 61);
+        let (_, body) = writer_with_fields(seed, 62);
         // Trailing bytes past the last field (not the footer) are not a clean body.
         let mut padded = body.clone();
         padded.push(0);

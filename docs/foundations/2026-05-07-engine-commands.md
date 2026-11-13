@@ -288,6 +288,13 @@ Each command is one file in `src/commands/builtins/`. All implement `Command`. R
 
 **Side effect**: this lets the user replace the World time 4× speed BRIDGE without a rebuild. Set the default to 4 today; flipping the default to 1 is a one-line change later. AS-007 is folded into this command.
 
+### `weather.rs` (added 2026-11-13)
+- `/weather <clear|rain|storm|thunder> [seconds]`; `thunder` is the Minecraft word and means `storm`. `min_op_level: Op`, `is_cheat: true` (marks the World Integrity Ledger like `/time set`; a joiner on someone else's world gets `permission denied: /weather`, exactly what `/time set` gives, and nothing changes). Tab completes the four words.
+- Duration: with no number, `clear` lasts 20 minutes (24,000 ticks) and `rain` / `storm` 5 minutes (6,000 ticks). With a number: 1 to 3600 seconds; more is capped to 3600 with "(capped from N seconds)", as `/give` caps a count; 0, a negative number or a non-number is an error with the usage line. Reply is one sentence, e.g. "Clear skies for 20 minutes"; afterwards the natural cycle resumes.
+- Semantics (`weather::command_window`): `clear` sets no rain, no storm and a hold, `Weather::clear_until`, that stops `weather::advance` rolling new rain (ending the rain alone would not: it re-rolls every minute); `rain` sets rain and zeroes `storm_until` (so it ends a storm, and the storm window stays a subset of the rain window); `storm` sets both windows. Rain and storm clear the hold.
+- Refusals (nothing changes, no ledger mark): in the Workshop ("The Workshop has no weather") and while a trial's `weather_lock` pins the sky ("This trial sets the weather").
+- It parses in the command and returns `CommandResult::SetWeather(WeatherRequest)`; the game loop applies it through `GameState::write_weather`, the weather's counterpart of `write_clock`: on a lent world that is the authority's window (`GameServer::write_weather`), which the next clock phase steps from and reads back (with the hold), so a client-only write would be overwritten. See Spec 05 "`/weather`".
+
 ### `gamemode.rs`
 - Aliases: `gm`
 - `min_op_level: Op`

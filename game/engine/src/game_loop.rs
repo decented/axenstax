@@ -3318,8 +3318,8 @@ impl super::GameState {
         // loaded raining — and, if the old window was a storm, being struck by
         // lightning every 8 s from the first tick, each bolt igniting a fire.
         // Found in review 2026-09-03.
-        self.weather_rain_until = 0;
-        self.weather_storm_until = 0;
+        // (`/weather clear`'s hold goes too: it is the old world's.)
+        self.set_weather(crate::weather::Weather::CLEAR);
         self.weather_lock_applied = None;
         self.lightning_flash = 0.0;
         self.thunder_queue.clear();
@@ -5160,10 +5160,7 @@ impl super::GameState {
             world_time: self.world_time,
             world_time_step: self.world_time_step,
             tick_counter: self.tick_counter,
-            weather: crate::weather::Weather {
-                rain_until: self.weather_rain_until,
-                storm_until: self.weather_storm_until,
-            },
+            weather: self.weather(),
             weather_lock_applied: self.weather_lock_applied.clone(),
             night_calendar: self.night_calendar,
             calendar_id: self.calendar_id,
@@ -5197,6 +5194,7 @@ impl super::GameState {
             world_time: self.world_time,
             rain_until: self.weather_rain_until,
             storm_until: self.weather_storm_until,
+            clear_until: self.weather_clear_until,
             weather_lock_applied: self.weather_lock_applied.clone(),
             night_calendar: self.night_calendar,
             calendar_id: self.calendar_id,
@@ -5221,6 +5219,7 @@ impl super::GameState {
         self.world_time = clock.world_time;
         self.weather_rain_until = clock.rain_until;
         self.weather_storm_until = clock.storm_until;
+        self.weather_clear_until = clock.clear_until;
         self.weather_lock_applied = clock.weather_lock_applied;
         self.night_calendar = clock.night_calendar;
         self.calendar_id = clock.calendar_id;
@@ -5233,8 +5232,10 @@ impl super::GameState {
         self.world_time = back.world_time;
         self.world_time_step = back.world_time_step;
         self.tick_counter = back.tick_counter;
-        self.weather_rain_until = back.weather.rain_until;
-        self.weather_storm_until = back.weather.storm_until;
+        // The whole window, the `/weather clear` hold with it: a read-back that
+        // dropped it would let the next tick's seed hand the server a window
+        // without the hold.
+        self.set_weather(back.weather);
         self.weather_lock_applied.clone_from(&back.weather_lock_applied);
         self.night_calendar = back.night_calendar;
     }
@@ -5255,6 +5256,9 @@ impl super::GameState {
         // D4 slice 2 — `/time set|speed` write the clock through the
         // one write path (`write_clock`): on a lent world, the server's.
         let (mut clock_time, mut clock_step) = (self.world_time, self.world_time_step);
+        // `/weather` — the parsed request, applied below once `ctx` no longer
+        // borrows the state (the same shape as `write_clock`).
+        let mut weather_request: Option<crate::weather::WeatherRequest> = None;
         {
             let mut ctx = crate::commands::CommandContext {
                 world: &mut self.world,
@@ -5755,6 +5759,13 @@ impl super::GameState {
                         let _ = pubkey_hex;
                     }
                 }
+                crate::commands::CommandResult::SetWeather(request) => {
+                    // `/weather`: the authority's window, written after the
+                    // dispatch (the context borrows this state). A refusal
+                    // (a trial's weather lock) changes nothing and takes
+                    // back the ledger mark dispatch set for the success.
+                    weather_request = Some(request);
+                }
                 crate::commands::CommandResult::BeaconAdopt { blob_hash } => {
                     // Spec 40 Phase D3 — download the chosen shared blob; the drain
                     // applies it beneath the texture-array cap + re-meshes.
@@ -5776,6 +5787,16 @@ impl super::GameState {
         }
         if (clock_time, clock_step) != (self.world_time, self.world_time_step) {
             self.write_clock(clock_time, clock_step);
+        }
+        if let Some(request) = weather_request {
+            match self.apply_weather_request(request) {
+                Ok(reply) => local_log.push(crate::commands::ChatLine::success(reply, current_tick)),
+                Err(why) => {
+                    local_log.push(crate::commands::ChatLine::error(why, current_tick));
+                    // Nothing changed, so nothing is a cheat.
+                    cheats_marker = false;
+                }
+            }
         }
         self.chat.extend_log(local_log);
         self.chat.close();
@@ -5802,6 +5823,57 @@ impl super::GameState {
                 log::warn!("Failed to persist world meta after command: {e}");
             }
         }
+    }
+
+    /// This client's weather window: rain, storm and the `/weather clear` hold
+    /// as one value. Every site that hands the window to the clock phase, the
+    /// roll or the save reads it here, so a field cannot be left behind in a
+    /// copy made from the loose `weather_*_until` numbers.
+    pub(crate) fn weather(&self) -> crate::weather::Weather {
+        crate::weather::Weather {
+            rain_until: self.weather_rain_until,
+            storm_until: self.weather_storm_until,
+            clear_until: self.weather_clear_until,
+        }
+    }
+
+    /// Write this client's copy of the weather window (see [`Self::weather`]).
+    pub(crate) fn set_weather(&mut self, w: crate::weather::Weather) {
+        self.weather_rain_until = w.rain_until;
+        self.weather_storm_until = w.storm_until;
+        self.weather_clear_until = w.clear_until;
+    }
+
+    /// `/weather` — the ONE write path for the weather outside the tick, as
+    /// [`Self::write_clock`] is for the day clock: on a lent world the
+    /// authority's window (which the next phase steps from and reads back — a
+    /// client-only write would be overwritten on the next tick), and this
+    /// client's copy in every mode. A `--no-lend` host's server copy is
+    /// refreshed from the client's each tick, and a standalone world has only
+    /// the client's.
+    pub(crate) fn write_weather(&mut self, weather: crate::weather::Weather) {
+        self.set_weather(weather);
+        if let Some(hs) = self.hosted_server.as_mut().filter(|hs| hs.lends_host_world()) {
+            hs.server.write_weather(weather);
+        }
+    }
+
+    /// `/weather` — apply a parsed request: the lock and Workshop refusals,
+    /// then the window through [`Self::write_weather`]. `Ok` carries the reply
+    /// sentence; `Err` the refusal, with nothing changed.
+    pub(crate) fn apply_weather_request(
+        &mut self,
+        request: crate::weather::WeatherRequest,
+    ) -> Result<String, &'static str> {
+        let has_weather = crate::weather::world_has_weather(self.world.is_workshop);
+        let lock: Option<String> = self
+            .scenario
+            .as_ref()
+            .filter(|_| has_weather)
+            .and_then(|sc| sc.def().weather_lock.clone());
+        let window = crate::weather::plan_command(request, self.tick_counter, has_weather, lock.as_deref())?;
+        self.write_weather(window);
+        Ok(crate::weather::command_reply(request))
     }
 
     /// D4 slice 2 — the ONE write path for the day clock outside the tick
@@ -5906,6 +5978,8 @@ impl super::GameState {
                 host.local_gameplay_preparation = Some(prepared);
             }
         }
+        // The client's window as one value, read before `hs` borrows the state.
+        let weather_now = self.weather();
         let Some(hs) = self.hosted_server.as_mut() else {
             return report;
         };
@@ -5938,16 +6012,16 @@ impl super::GameState {
             // SERVER's tick frame: its `tick_counter` need not equal ours (it
             // starts at 0 when hosting starts), and `broadcast_state` measures
             // ticks-left against the server's counter.
-            let host_window = crate::weather::Weather {
-                rain_until: self.weather_rain_until,
-                storm_until: self.weather_storm_until,
-            };
+            let host_window = weather_now;
             let (rain_left, storm_left) = host_window.ticks_left(self.tick_counter);
+            // `from_ticks_left` is the wire's (no hold); the host's `/weather
+            // clear` hold is translated into the server's frame too.
             hs.server.weather = crate::weather::Weather::from_ticks_left(
                 hs.server.tick_counter,
                 rain_left,
                 storm_left,
-            );
+            )
+            .with_clear_ticks_left(hs.server.tick_counter, host_window.clear_ticks_left(self.tick_counter));
             // The host's client owns chest / vendor / plot state; keep the
             // owning server's copy live so joiner breaks and gates see it
             // (review B1/S1). BRIDGE: goes with `--no-lend`.
@@ -5981,10 +6055,7 @@ impl super::GameState {
             tick_counter: self.tick_counter,
             reputation_owner: self.reputation_day.owner(),
             reputation_offer: offer,
-            weather: crate::weather::Weather {
-                rain_until: self.weather_rain_until,
-                storm_until: self.weather_storm_until,
-            },
+            weather: weather_now,
             night_calendar: self.night_calendar,
             calendar_id: self.calendar_id,
         };
@@ -6383,16 +6454,12 @@ impl super::GameState {
                 .filter(|_| has_weather)
                 .and_then(|sc| sc.def().weather_lock.clone());
             let after_lock = crate::sim_clock::step_weather(
-                crate::weather::Weather {
-                    rain_until: self.weather_rain_until,
-                    storm_until: self.weather_storm_until,
-                },
+                self.weather(),
                 self.tick_counter,
                 crate::sim_clock::WeatherRules { has_weather, roll, lock: active_lock.as_deref(), seed: self.biome_gen.seed },
                 &mut self.weather_lock_applied,
             );
-            self.weather_rain_until = after_lock.rain_until;
-            self.weather_storm_until = after_lock.storm_until;
+            self.set_weather(after_lock);
             // Lightning (2026-07-05): while storming, roll a strike every 8 s,
             // from the POST-lock window, so a storm-locked trial gets its
             // lightning from its very first tick and a released lock stops
@@ -7411,10 +7478,7 @@ impl super::GameState {
         // whoever runs the sim: the windmill renderer reads it too.
         self.wind = crate::wind::sample(
             self.tick_counter,
-            crate::weather::Weather {
-                rain_until: self.weather_rain_until,
-                storm_until: self.weather_storm_until,
-            },
+            self.weather(),
             self.biome_gen.seed,
             crate::biome::SEA_LEVEL,
         );
@@ -22304,8 +22368,9 @@ impl super::GameState {
                 state.rain_ticks_left,
                 state.storm_ticks_left,
             );
-            self.weather_rain_until = synced.rain_until;
-            self.weather_storm_until = synced.storm_until;
+            // A joiner's copy is presentation only and holds no `/weather clear`
+            // (`from_ticks_left`: the wire carries rain and storm, never the hold).
+            self.set_weather(synced);
             // One day/night cycle for everyone: the joiner's sky follows the
             // host's clock instead of starting its own at 7500 on join.
             self.world_time = state.world_time % 24000;

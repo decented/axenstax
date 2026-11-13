@@ -3,6 +3,7 @@
 
 pub mod help;
 pub mod time;
+pub mod weather;
 pub mod gamemode;
 pub mod tp;
 pub mod seed;
@@ -64,6 +65,7 @@ use super::registry::CommandRegistry;
 pub fn register_all(registry: &mut CommandRegistry) {
     registry.register(Box::new(help::HelpCommand));
     registry.register(Box::new(time::TimeCommand));
+    registry.register(Box::new(weather::WeatherCommand));
     registry.register(Box::new(gamemode::GamemodeCommand));
     registry.register(Box::new(keepinventory::KeepInventoryCommand));
     registry.register(Box::new(waypoint::WaypointCommand));

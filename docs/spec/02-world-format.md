@@ -2354,10 +2354,11 @@ against the slice before allocating.
       have made new saves unreadable to shipped builds, and a 4-byte header magic
       collides with a legacy save's leading `seed: u32`; an 8-byte trailing magic
       at the very end of a footer-less save is not a realistic collision.
-    - **`SAVE_FORMAT_VERSION`** = `WORLD_SAVE_FIELD_COUNT` (61 since living world Tier 2 S7,
-      2026-11-09: `quest_world` was 54, `worldgen_version` 55, `authority_clock` 56,
-      `block_authors` 57, `region_use` 58, `plan_builds` 59, `plot_succession` 60, `site_boards` 61) +
-      `SAVE_LAYOUT_REVISION` (8 today; see the block-ids bullets below) = 69. The current `SAVE_FORMAT_VERSION` is `69` (a test, `save_format::tests::spec_02_states_the_current_save_format_version`, fails if this sentence and the constant disagree, so a bump must edit this line). Two tripwire tests stop drift: serde's field list
+    - **`SAVE_FORMAT_VERSION`** = `WORLD_SAVE_FIELD_COUNT` (62 since the `/weather clear` hold,
+      2026-11-13: `quest_world` was 54, `worldgen_version` 55, `authority_clock` 56,
+      `block_authors` 57, `region_use` 58, `plan_builds` 59, `plot_succession` 60, `site_boards` 61,
+      `weather_clear_until` 62) +
+      `SAVE_LAYOUT_REVISION` (8 today; see the block-ids bullets below) = 70. The current `SAVE_FORMAT_VERSION` is `70` (a test, `save_format::tests::spec_02_states_the_current_save_format_version`, fails if this sentence and the constant disagree, so a bump must edit this line). Two tripwire tests stop drift: serde's field list
       for `WorldSave` must equal `WORLD_SAVE_FIELD_COUNT` (so appending a field
       without bumping the version fails), and the tolerant reader must consume every
       byte of a current save (so a field listed in its struct literal without a read
@@ -2498,6 +2499,19 @@ against the slice before allocating.
       transfer copy keeps it; (6) it reaches joiners as a block view (`BlockView::SiteBoard`, Spec 04), never
       in the save a joiner holds. The once-a-day bloom surge table (`World.site_board_days`) is runtime only.
       See `docs/superpowers/specs/2026-11-09-living-world-tier2.md` §7.
+    - **The `/weather clear` hold and field 62 (format 70, 2026-11-13).** `Weather::clear_until`
+      (`weather.rs`) is the `tick_counter` until which `weather::advance` rolls no new rain; `/weather clear`
+      sets it, `/weather rain|storm` clears it, and with it set the natural cycle resumes when the tick passes
+      it. It belongs to the authority clock but is saved as its own appended field 62,
+      `WorldSave.weather_clear_until: Option<u64>` (`None` when there is no hold), **not** inside
+      `SavedClock`: the clock record is positional bincode mid-stream (field 56), so a longer encoding would
+      misread every older save's clock (and move `SAVE_LAYOUT_REVISION`). `SavedClock.clear_until` is
+      `#[serde(skip)]`: the builders write field 62 from it (`SavedClock::clear_hold_for_save`) and the one
+      reader folds it back in (`SavedClock::fold_clear_hold`), dropping a hold further ahead than a
+      weather window can be (the same bound as `rain_until`). Footer arithmetic: field count 62 + revision 8
+      = 70; `FOOTER_FIELD_COUNTS` gains `(70, [62])`; a world written at footer 69 or older still opens,
+      with no hold. Not on the wire (a joiner rolls no weather; the ticks-left sync carries rain and storm)
+      and not in the Keep checkpoint's hand-written clock record (a dedicated server has no `/weather`).
     - **The authority clock is saved (format 60, Keep slice 2a, 2026-11-02).** Field 56,
       `WorldSave.authority_clock: Option<sim_clock::SavedClock>`, carries `tick_counter`,
       `world_time`, the weather window (`rain_until`, `storm_until`), the trial lock it

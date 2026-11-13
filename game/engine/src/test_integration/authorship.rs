@@ -75,6 +75,7 @@ fn a_save_from_before_the_field_loads_with_everything_anonymous() {
     save.plot_succession = None;
     save.site_boards = None;
     let mut body = bincode::serialize(&save).unwrap();
+    assert_eq!(body.pop(), Some(0), "the absent weather hold is one None byte");
     assert_eq!(body.pop(), Some(0), "the absent site boards are one None byte");
     assert_eq!(body.pop(), Some(0), "the absent succession table is one None byte");
     assert_eq!(body.pop(), Some(0), "the absent Plan build counts are one None byte");

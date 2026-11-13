@@ -201,8 +201,8 @@ fn an_old_format_save_fixture_loads_with_todays_defaults() {
     let _g = WorldsRootGuard::new("clock-save-footer59");
     let bytes = WORLD_FOOTER_59;
     assert_eq!(crate::save_format::split_save_footer(bytes).1, Some(59));
-    // 69 since living world Tier 2 S7 (the `site_boards` field, layout revision 8): 59 is an older format still.
-    assert_eq!(crate::save_format::SAVE_FORMAT_VERSION, 69, "59 is an older format than this one");
+    // 70 since the `/weather clear` hold (the `weather_clear_until` field, layout revision 8): 59 is an older format still.
+    assert_eq!(crate::save_format::SAVE_FORMAT_VERSION, 70, "59 is an older format than this one");
     let (save, damaged) = crate::save::read_world_save_reporting(bytes).expect("the old save is read");
     assert!(!damaged);
     assert_eq!(save.seed, 42);
@@ -261,6 +261,7 @@ fn full_clock() -> crate::sim_clock::SavedClock {
         world_time: 15_000,
         rain_until: 91_000,
         storm_until: 90_500,
+        clear_until: 0,
         weather_lock_applied: Some("storm".into()),
         nights: 12,
         was_night: Some(true),
@@ -279,7 +280,7 @@ fn a_servers_whole_clock_survives_a_save_and_load() {
     let mut s = GameServer::new(0, "w".into(), 42);
     s.tick_counter = saved.tick_counter;
     s.world_time = saved.world_time;
-    s.weather = crate::weather::Weather { rain_until: saved.rain_until, storm_until: saved.storm_until };
+    s.weather = crate::weather::Weather { rain_until: saved.rain_until, storm_until: saved.storm_until, clear_until: 0 };
     s.weather_lock_applied = saved.weather_lock_applied.clone();
     s.night_calendar = crate::item_actions::NightCalendar::from_saved(saved.nights, saved.was_night);
     s.calendar_id = saved.calendar_id;
@@ -340,11 +341,75 @@ fn an_out_of_range_saved_clock_is_not_restored() {
         // A window that never ends: rain with no re-roll, for good.
         crate::sim_clock::SavedClock { rain_until: u64::MAX, ..good.clone() },
         crate::sim_clock::SavedClock { storm_until: good.tick_counter + (1 << 32) + 1, ..good.clone() },
+        // A `/weather clear` hold that never ends would hold the sky clear for good.
+        crate::sim_clock::SavedClock { clear_until: good.tick_counter + (1 << 32) + 1, ..good.clone() },
     ] {
         let mut save = crate::save::minimal_world_save_for_tests(1);
         save.authority_clock = Some(bad.clone());
         assert_eq!(save.clock(), None, "{bad:?}");
     }
+}
+
+/// `/weather clear`'s hold rides the appended field 62 (`weather_clear_until`),
+/// not the clock record: a new save carries it round trip through every save
+/// path and a server restart; a save from before the field loads with no hold;
+/// a damaged hold is dropped rather than holding the sky clear for good.
+#[test]
+fn a_clear_hold_round_trips_and_an_old_save_loads_with_none() {
+    let _g = WorldsRootGuard::new("clock-save-hold");
+    let held = crate::sim_clock::SavedClock { clear_until: 102_000, ..full_clock() };
+    assert!(held.is_valid());
+
+    // The dedicated path: server -> file -> new server.
+    let mut s = GameServer::new(0, "w".into(), 42);
+    s.restore_saved_clock(Some(&held));
+    assert_eq!(s.weather.clear_until, 102_000);
+    s.try_save().unwrap();
+    let dat = std::fs::read(crate::save::world_dir("w").join("world.dat")).unwrap();
+    let read = crate::save::read_world_save(&dat).unwrap();
+    assert_eq!(read.weather_clear_until, Some(102_000));
+    assert_eq!(read.clock().map(|c| c.clear_until), Some(102_000));
+    let mut back = GameServer::new(0, "w".into(), 42);
+    back.initial_load().unwrap();
+    assert_eq!(back.weather.clear_until, 102_000, "a restart keeps the hold");
+
+    // The client's save paths.
+    let world = crate::world::World::new();
+    let slot = crate::player_slot::PlayerSlot::new(0, Vec3::new(0.5, 80.0, 0.5), 1.0);
+    let seats = std::slice::from_ref(&slot);
+    crate::save::autosave_world("w2", &world, seats, 1, &[], &[], None, Some(&held)).unwrap();
+    let autosave = std::fs::read(crate::save::world_dir("w2").join("autosave/world.dat")).unwrap();
+    assert_eq!(crate::save::read_world_save(&autosave).unwrap().clock(), Some(&held));
+    crate::save::save_world_superseding_autosave("w2", &world, seats, 1, &[], &[], None, Some(&held)).unwrap();
+    let primary = std::fs::read(crate::save::world_dir("w2").join("world.dat")).unwrap();
+    assert_eq!(crate::save::read_world_save(&primary).unwrap().clock(), Some(&held));
+
+    // No hold is written as the one `None` byte, and loads as no hold.
+    let none = crate::sim_clock::SavedClock { clear_until: 0, ..held.clone() };
+    assert_eq!(none.clear_hold_for_save(), None);
+    crate::save::save_world_superseding_autosave("w3", &world, seats, 1, &[], &[], None, Some(&none)).unwrap();
+    let plain = std::fs::read(crate::save::world_dir("w3").join("world.dat")).unwrap();
+    assert_eq!(crate::save::read_world_save(&plain).unwrap().clock(), Some(&none));
+
+    // An OLD save (footer 69: 61 fields, no `weather_clear_until`) holding a clock loads with the
+    // hold at 0 and is not reported damaged.
+    let mut file = crate::save::minimal_world_save_for_tests(3);
+    file.authority_clock = Some(none.clone());
+    let mut body = bincode::serialize(&file).unwrap();
+    assert_eq!(body.pop(), Some(0), "the new last field is the one `None` byte");
+    body.extend_from_slice(&crate::save_format::footer_bytes(69));
+    let (old, damaged) = crate::save::read_world_save_reporting(&body).expect("a footer-69 save still loads");
+    assert!(!damaged);
+    assert_eq!(old.weather_clear_until, None);
+    assert_eq!(old.clock().map(|c| (c.clear_until, c.rain_until, c.tick_counter)), Some((0, 91_000, 90_000)));
+
+    // A hold further ahead than a window can be is dropped, the rest of the clock kept.
+    let mut file = crate::save::minimal_world_save_for_tests(3);
+    file.authority_clock = Some(none.clone());
+    file.weather_clear_until = Some(none.tick_counter + (1 << 32) + 1);
+    let bytes = crate::save_format::encode_world_save(&file).unwrap();
+    let read = crate::save::read_world_save(&bytes).unwrap();
+    assert_eq!(read.clock().map(|c| (c.clear_until, c.tick_counter)), Some((0, 90_000)));
 }
 
 /// A restored tick must not expire every rubber tap at once: the cooldown still

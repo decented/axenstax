@@ -338,7 +338,7 @@ impl DayRig {
         crate::sim_lend::HostClock {
             world_time: s.world_time,
             tick_counter: s.tick_counter,
-            weather: crate::weather::Weather { rain_until: s.weather_rain_until, storm_until: s.weather_storm_until },
+            weather: s.weather(),
             reputation_owner: s.reputation_day.owner(),
             reputation_offer: offer,
             night_calendar: s.night_calendar,

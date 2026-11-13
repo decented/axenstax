@@ -97,6 +97,22 @@ fn time_completes_subcommands_then_values() {
 }
 
 #[test]
+fn weather_completes_its_four_words_after_the_command() {
+    let reg = full_registry();
+    assert_eq!(names(&at(&reg, OpLevel::Op, "/weather ")), ["clear", "rain", "storm", "thunder"]);
+    assert_eq!(names(&at(&reg, OpLevel::Op, "/weather th")), ["thunder"]);
+    assert_eq!(names(&at(&reg, OpLevel::Op, "/weather R")), ["rain"]);
+    assert_eq!(at(&reg, OpLevel::Op, "/weather ").replace_from, "/weather ".len());
+    // The command name itself completes for an op, and is not offered (nor its words) to a joiner.
+    assert!(names(&at(&reg, OpLevel::Op, "/wea")).contains(&"weather"));
+    assert!(!names(&at(&reg, OpLevel::None, "/wea")).contains(&"weather"));
+    assert!(at(&reg, OpLevel::None, "/weather ").candidates.is_empty());
+    // After the sky word there is only a number: nothing to offer, the usage line instead.
+    let c = at(&reg, OpLevel::Op, "/weather clear ");
+    assert!(c.candidates.is_empty() && c.usage_hint.is_some());
+}
+
+#[test]
 fn word_start_matches_come_after_prefix_matches() {
     assert_eq!(
         matching(["redstone_torch", "torch", "torchflower", "stone"], "torch"),
@@ -129,6 +145,7 @@ const PROBES: &[(&str, &[&str])] = &[
     ("gamemode", &[]),
     ("time", &[]),
     ("time", &["set"]),
+    ("weather", &[]),
     ("keepinventory", &[]),
     ("give", &[]),
     ("spawn", &[]),
@@ -247,6 +264,7 @@ fn every_word_a_command_matches_is_offered_or_named_as_deliberately_not_offered(
     // (command, its source, where its matching starts, words accepted but not offered)
     let rows: Vec<(&str, &str, &str, &[&str])> = vec![
         ("time", include_str!("builtins/time.rs"), "fn execute(", &[]),
+        ("weather", include_str!("builtins/weather.rs"), "fn execute(", &[]),
         ("waypoint", include_str!("builtins/waypoint.rs"), "fn execute(", &["rm", "del", "goto"]),
         ("we", include_str!("builtins/worldedit.rs"), "fn execute(", &[]),
         ("buildguide", include_str!("builtins/buildguide.rs"), "fn execute(", &["stop"]),

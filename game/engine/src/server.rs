@@ -1777,6 +1777,7 @@ impl GameServer {
             world_time: self.world_time,
             rain_until: self.weather.rain_until,
             storm_until: self.weather.storm_until,
+            clear_until: self.weather.clear_until,
             weather_lock_applied: self.weather_lock_applied.clone(),
             nights,
             was_night,
@@ -1795,12 +1796,26 @@ impl GameServer {
         // The machine beat keeps the clock's phase (`beat_counter_for`).
         self.falling_tick_counter = crate::sim_clock::beat_counter_for(saved.tick_counter);
         self.world_time = saved.world_time;
-        self.weather = crate::weather::Weather { rain_until: saved.rain_until, storm_until: saved.storm_until };
+        self.weather = crate::weather::Weather {
+            rain_until: saved.rain_until,
+            storm_until: saved.storm_until,
+            clear_until: saved.clear_until,
+        };
         self.weather_lock_applied.clone_from(&saved.weather_lock_applied);
         self.night_calendar = crate::item_actions::NightCalendar::from_saved(saved.nights, saved.was_night);
         self.calendar_id = saved.calendar_id;
         self.reputation_day.resume(saved.day_remainder, saved.day_last_tick);
         self.wire_tick_seed = Some(saved.tick_counter);
+    }
+
+    /// `/weather` — set this server's weather window. The ONE write path for the
+    /// authority's weather outside its own phase (`GameState::write_weather`,
+    /// as `write_clock` is for the day clock): the next clock phase steps from
+    /// it (`sim_clock::step_weather`), and a host that is lent reads it back.
+    /// A server that has not taken its host client's clock yet adopts the
+    /// client's copy at its first phase, which the caller wrote the same.
+    pub(crate) fn write_weather(&mut self, weather: crate::weather::Weather) {
+        self.weather = weather;
     }
 
     /// D4 slice 2 — the host client changed world under this lending server
@@ -3701,6 +3716,7 @@ impl GameServer {
             plan_builds: self.world.plan_builds.to_saved(),
             plot_succession: self.world.plot_succession.to_saved(),
             site_boards: crate::site_board::to_saved(&self.world.site_boards),
+            weather_clear_until: self.saved_clock().clear_hold_for_save(),
             exhibits: self.world.exhibits.clone(),
             composters: self
                 .world

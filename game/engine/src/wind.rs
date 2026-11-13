@@ -189,10 +189,10 @@ mod tests {
     const START: f32 = 0.35;
 
     fn storm(until: u64) -> Weather {
-        Weather { rain_until: until, storm_until: until }
+        Weather { rain_until: until, storm_until: until, clear_until: 0 }
     }
     fn rain(until: u64) -> Weather {
-        Weather { rain_until: until, storm_until: 0 }
+        Weather { rain_until: until, storm_until: 0, clear_until: 0 }
     }
 
     #[test]

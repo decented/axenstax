@@ -822,6 +822,7 @@ impl TestHost {
         self.server.weather = crate::weather::Weather {
             rain_until: now + ticks,
             storm_until: now + ticks,
+            clear_until: 0,
         };
     }
 

@@ -282,6 +282,11 @@ fn read_clock(r: &mut Reader<'_>) -> Result<SavedClock, Malformed> {
         world_time: r.u32()?,
         rain_until: r.u64()?,
         storm_until: r.u64()?,
+        // BRIDGE: the `/weather clear` hold is not in this record — it is a
+        // local command's, so a dedicated server (the only server a checkpoint
+        // is taken of) never holds one, and a changed layout would be a wire
+        // change. Replace when a command can set it on a dedicated server.
+        clear_until: 0,
         weather_lock_applied: r.opt(|r| r.string())?,
         nights: r.u32()?,
         was_night: r.opt(|r| r.bool())?,

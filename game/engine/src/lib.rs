@@ -1349,6 +1349,11 @@ pub(crate) struct GameState {
     /// it's raining while `tick_counter < weather_rain_until`. Saved with the
     /// world's clock (`sim_clock::SavedClock`); a save from before that starts clear.
     pub(crate) weather_rain_until: u64,
+    /// `/weather clear` — the `tick_counter` until which no new rain is rolled
+    /// (`Weather::clear_until`). Saved with the clock (`WorldSave.weather_clear_until`,
+    /// read and written through `GameState::weather` / `set_weather`); a joiner's
+    /// copy is always 0 (it rolls no weather).
+    pub(crate) weather_clear_until: u64,
     /// Wind, Copper & Electricity wave §4 — the `weather_lock` applied on the
     /// PREVIOUS tick, so the loop can tell a lock being held from one being
     /// released. A pinned window is re-stamped a full in-game minute ahead every
@@ -2223,6 +2228,7 @@ impl GameState {
             },
             autosave_counter: 0,
             weather_rain_until: 0,
+            weather_clear_until: 0,
             weather_lock_applied: None,
             wind: crate::wind::WindSample::CALM,
             graphics,

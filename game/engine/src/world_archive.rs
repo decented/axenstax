@@ -500,6 +500,7 @@ mod tests {
             plan_builds: None,
             plot_succession: None,
             site_boards: None,
+            weather_clear_until: None,
         }
     }
 

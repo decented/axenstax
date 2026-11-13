@@ -309,6 +309,49 @@ fn game_harness_solo_hosted_time_set_and_speed_write_the_authority() {
     assert_eq!(game.state.world_time, 18_024, "the authority's clock, read back");
 }
 
+/// `/weather clear` on a solo-hosted world writes the authority's window
+/// (`write_weather`), and the hold survives the server's phase and the client's
+/// read-back across a tick that would roll rain; standalone writes the client's
+/// own copy and holds it the same way. (Compile-checked here; needs the GPU
+/// harness to run.)
+#[test]
+#[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+fn game_harness_weather_clear_holds_across_a_would_roll_tick_in_both_routings() {
+    use crate::weather::{advance, Sky, Weather, WeatherRequest};
+    let would_roll = |from: u64, seed: u32| {
+        (from.div_ceil(1200)..).map(|k| k * 1200).find(|&t| t > 0 && advance(Weather::CLEAR, t, true, seed).rain_until > t).unwrap()
+    };
+    let request = WeatherRequest { sky: Sky::Clear, seconds: 600, capped_from: None };
+    // Solo-hosted: the authority's window.
+    let (_name, mut game) = solo("weather");
+    assert_one_sim(&game.logical_ticks(1));
+    let seed = authority(&game).biome_gen.seed;
+    let now = game.state.tick_counter;
+    let t = would_roll(now + 2, seed);
+    let reply = game.state.apply_weather_request(request).expect("a plain world takes /weather");
+    assert!(reply.starts_with("Clear skies"), "{reply}");
+    assert_eq!(authority(&game).weather.clear_until, now + 12_000, "written through the authority");
+    game.state.hosted_server.as_mut().unwrap().server.tick_counter = t - 1;
+    assert_one_sim(&game.logical_ticks(1));
+    assert_eq!(game.state.tick_counter, t);
+    assert_eq!(authority(&game).weather.rain_until, 0, "the would-roll tick rolled nothing");
+    assert_eq!(game.state.weather_rain_until, 0);
+    assert_eq!(game.state.weather_clear_until, now + 12_000, "the client's read-back kept the hold");
+    // Standalone: the client's own window.
+    isolate_saves();
+    let name = unique("weather-standalone");
+    let _ = std::fs::remove_dir_all(crate::save::world_dir(&name));
+    let mut game = HeadlessGame::boot_into_world(&name);
+    let seed = game.state.biome_gen.seed;
+    let now = game.state.tick_counter;
+    let t = would_roll(now + 2, seed);
+    game.state.apply_weather_request(request).expect("a plain world takes /weather");
+    game.state.tick_counter = t - 1;
+    game.ticks(1);
+    assert_eq!(game.state.weather_rain_until, 0, "standalone holds the sky too");
+    assert_eq!(game.state.weather_clear_until, now + 12_000);
+}
+
 /// The local bed on a solo-hosted world: at night it sets the morning (7000)
 /// on the authority, the bed spawn and a full heal, once; by day it refuses.
 #[test]
@@ -352,7 +395,7 @@ fn game_harness_a_storm_strikes_once_in_both_routings() {
     let (_name, mut game) = solo("storm");
     assert_one_sim(&game.logical_ticks(1));
     let base = authority(&game).tick_counter;
-    let storm = crate::weather::Weather { rain_until: base + 100_000, storm_until: base + 100_000 };
+    let storm = crate::weather::Weather { rain_until: base + 100_000, storm_until: base + 100_000, clear_until: 0 };
     let t = storm_tick(base + 1, storm, authority(&game).biome_gen.seed);
     {
         let server = &mut game.state.hosted_server.as_mut().unwrap().server;
@@ -370,7 +413,7 @@ fn game_harness_a_storm_strikes_once_in_both_routings() {
     let _ = std::fs::remove_dir_all(crate::save::world_dir(&name));
     let mut game = HeadlessGame::boot_into_world(&name);
     let base = game.state.tick_counter;
-    let storm = crate::weather::Weather { rain_until: base + 100_000, storm_until: base + 100_000 };
+    let storm = crate::weather::Weather { rain_until: base + 100_000, storm_until: base + 100_000, clear_until: 0 };
     let t = storm_tick(base + 1, storm, game.state.biome_gen.seed);
     game.state.weather_rain_until = storm.rain_until;
     game.state.weather_storm_until = storm.storm_until;

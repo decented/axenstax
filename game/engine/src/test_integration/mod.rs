@@ -78,6 +78,7 @@ pub mod trials_lint;
 pub mod packaging_copy_lint;
 pub mod weather;
 mod clock_authority; // D4 slice 2 — clock + weather owned by the server on a lent world.
+mod weather_command; // `/weather` on a lent world: written through the authority, held across its phase.
 pub mod chat;
 pub mod block_machines; // T1-3 — dedicated server ticks the block machines.
 // W2 survival basics — server-side fall damage + drowning for remote players.

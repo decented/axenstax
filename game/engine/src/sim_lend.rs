@@ -802,7 +802,7 @@ mod tests {
         let mut stale = host.clock;
         stale.world_time = 9;
         stale.tick_counter = 9;
-        stale.weather = crate::weather::Weather { rain_until: 99_999, storm_until: 99_999 };
+        stale.weather = crate::weather::Weather { rain_until: 99_999, storm_until: 99_999, clear_until: 0 };
         LentSim::lend(&mut hs, host.parts(), stale).tick();
         assert_eq!((hs.server.world_time, hs.server.tick_counter), (1001, 5001));
         assert_eq!(hs.server.weather, crate::weather::Weather::CLEAR);

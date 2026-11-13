@@ -1074,6 +1074,9 @@ mod tests {
         for cheat in [
             "/give diamond_block 64",
             "/gamemode creative",
+            // The weather is the host's: a joiner gets what `/time set` gives it.
+            "/weather clear",
+            "/time set night",
             "/scenario scavenger",
             // Review W3 S2: a Race teleports + places beacons; a Challenge
             // can grant a kit. Both are refused to a joiner.
@@ -1091,6 +1094,7 @@ mod tests {
         assert!(!matches!(r, crate::commands::CommandResult::Error(_)), "/help got {r:?}");
         drop(ctx);
         assert!(!creative, "a refused /gamemode must not flip the mode");
+        assert!(!c, "a refused /weather or /time must not mark the ledger");
         assert_eq!(players[0].inventory.distinct_item_kinds(), 0, "a refused /give must not grant");
     }
 

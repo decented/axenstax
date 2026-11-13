@@ -173,6 +173,12 @@ pub enum CommandResult {
     /// World chat §4.5 — `/room invite` side-effect: print the current room
     /// link so it can be copied.
     RoomInvite,
+    /// `/weather` — the parsed request. The weather is the authority's, so the
+    /// game loop applies it (`GameState::apply_weather_request`), writes the
+    /// reply, and refuses it while a trial's `weather_lock` holds the sky
+    /// (taking back the cheat mark dispatch set). A cheat on success, like
+    /// `/time set`.
+    SetWeather(crate::weather::WeatherRequest),
     /// `/online` — the game loop prints the invite link, the reachability
     /// summary and the relay count into chat, and opens the Online panel.
     OnlineStatus,
@@ -293,6 +299,7 @@ pub fn dispatch(
             | CommandResult::PlaceAuthoredMob(_, _)
             | CommandResult::SpawnCart
             | CommandResult::ClearItems
+            | CommandResult::SetWeather(_)
             | CommandResult::PublishOverrideSet { .. }
             | CommandResult::BeaconAdopt { .. }
     ) {

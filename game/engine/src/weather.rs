@@ -26,11 +26,25 @@ pub struct Weather {
     /// The rain is a thunderstorm while `tick < storm_until` (always a subset of
     /// the rain window).
     pub storm_until: u64,
+    /// `/weather clear` holds the sky clear until this tick: [`advance`] rolls
+    /// no new rain while `tick < clear_until`. Ending the rain alone does not do
+    /// that (`advance` rolls again the next minute), so the hold is its own
+    /// field. Saved with the clock (`WorldSave.weather_clear_until`) but NOT on
+    /// the wire: a joiner never rolls, so its presentation-only copy
+    /// ([`Weather::from_ticks_left`]) has none. `0` = no hold.
+    pub clear_until: u64,
 }
 
 impl Weather {
     /// A clear sky.
-    pub const CLEAR: Weather = Weather { rain_until: 0, storm_until: 0 };
+    pub const CLEAR: Weather = Weather { rain_until: 0, storm_until: 0, clear_until: 0 };
+
+    /// Ticks left of the `/weather clear` hold, as of `tick` (saturating). Not on
+    /// the wire; used where a window is translated into another tick frame
+    /// (a `--no-lend` host's owning server).
+    pub fn clear_ticks_left(self, tick: u64) -> u32 {
+        self.clear_until.saturating_sub(tick).min(u64::from(u32::MAX)) as u32
+    }
 
     /// Ticks remaining in the rain and storm windows, as of `tick`. This is
     /// how the server puts its weather on the wire (`StateUpdatePacket`):
@@ -48,11 +62,23 @@ impl Weather {
     /// (in the *receiver's* absolute-tick space) from a
     /// `(rain_ticks_left, storm_ticks_left)` pair read off a `StateUpdatePacket`,
     /// relative to the receiver's own current `tick`.
+    ///
+    /// The result has NO `/weather clear` hold (`clear_until` 0): the wire
+    /// carries only rain and storm, because the authority decides the weather
+    /// and a joiner rolls none of its own. A caller that must keep the hold
+    /// (a `--no-lend` host's translated window) adds it back with
+    /// [`Weather::with_clear_ticks_left`].
     pub fn from_ticks_left(tick: u64, rain_ticks_left: u32, storm_ticks_left: u32) -> Weather {
         Weather {
             rain_until: tick + u64::from(rain_ticks_left),
             storm_until: tick + u64::from(storm_ticks_left),
+            clear_until: 0,
         }
+    }
+
+    /// This window with a `/weather clear` hold of `ticks_left` ticks from `tick`.
+    pub fn with_clear_ticks_left(self, tick: u64, ticks_left: u32) -> Weather {
+        Weather { clear_until: tick + u64::from(ticks_left), ..self }
     }
 }
 
@@ -86,8 +112,8 @@ pub fn locked_window(lock: Option<&str>, tick: u64) -> Option<Weather> {
     let ahead = tick + LOCK_HORIZON;
     match lock? {
         "clear" => Some(Weather::CLEAR),
-        "rain" => Some(Weather { rain_until: ahead, storm_until: 0 }),
-        "storm" => Some(Weather { rain_until: ahead, storm_until: ahead }),
+        "rain" => Some(Weather { rain_until: ahead, storm_until: 0, clear_until: 0 }),
+        "storm" => Some(Weather { rain_until: ahead, storm_until: ahead, clear_until: 0 }),
         _ => None,
     }
 }
@@ -117,6 +143,112 @@ pub fn apply_lock(current: Weather, lock: Option<&str>, lock_changed: bool, tick
     current
 }
 
+// ── The `/weather` command ──────────────────────────────────────────────
+
+/// The sky a `/weather` command asks for. `thunder` (the Minecraft word) is
+/// [`Sky::Storm`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sky {
+    Clear,
+    Rain,
+    Storm,
+}
+
+/// A parsed `/weather <sky> [seconds]`: what the command hands the game loop,
+/// which applies it through the authority (`GameState::apply_weather_request`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WeatherRequest {
+    pub sky: Sky,
+    /// How long it lasts, 1 to [`MAX_COMMAND_SECONDS`] (already capped).
+    pub seconds: u32,
+    /// The number the player typed, when it was above the cap.
+    pub capped_from: Option<u64>,
+}
+
+/// Game ticks per real second.
+const TICKS_PER_SECOND: u64 = 20;
+
+/// The longest `/weather` duration, in seconds. More is capped, as `/give` caps a count.
+pub const MAX_COMMAND_SECONDS: u64 = 3600;
+
+impl Sky {
+    /// The duration used when the command gives none: a clear sky lasts 20
+    /// minutes, rain and storms 5.
+    pub const fn default_seconds(self) -> u32 {
+        match self {
+            Sky::Clear => 1200,
+            Sky::Rain | Sky::Storm => 300,
+        }
+    }
+}
+
+/// The window `/weather` sets at `now`, replacing the whole current window:
+/// - `Clear`: no rain, no storm, and a hold that stops `advance` rolling new rain;
+/// - `Rain`: rain for `seconds`, and NO storm (so `/weather rain` during a storm
+///   ends the thunder, and the storm window stays a subset of the rain window);
+/// - `Storm`: rain and storm for `seconds`.
+///
+/// Rain and storm clear the hold. After the window ends the natural cycle resumes.
+pub fn command_window(sky: Sky, seconds: u32, now: u64) -> Weather {
+    let until = now + u64::from(seconds) * TICKS_PER_SECOND;
+    match sky {
+        Sky::Clear => Weather { rain_until: 0, storm_until: 0, clear_until: until },
+        Sky::Rain => Weather { rain_until: until, storm_until: 0, clear_until: 0 },
+        Sky::Storm => Weather { rain_until: until, storm_until: until, clear_until: 0 },
+    }
+}
+
+/// Why `/weather` must change nothing here, if it must: the Workshop has no
+/// weather, and a trial's `weather_lock` is re-pinned every tick, so a command
+/// would be undone the next tick. A lock this build does not recognise pins
+/// nothing ([`locked_window`]), so it does not refuse.
+pub fn command_refusal(has_weather: bool, lock: Option<&str>) -> Option<&'static str> {
+    if !has_weather {
+        return Some("The Workshop has no weather");
+    }
+    locked_window(lock, 0).map(|_| "This trial sets the weather")
+}
+
+/// The window a `/weather` request makes at `now` in a world, or why not.
+pub fn plan_command(
+    request: WeatherRequest,
+    now: u64,
+    has_weather: bool,
+    lock: Option<&str>,
+) -> Result<Weather, &'static str> {
+    match command_refusal(has_weather, lock) {
+        Some(why) => Err(why),
+        None => Ok(command_window(request.sky, request.seconds, now)),
+    }
+}
+
+/// The sentence `/weather` answers with.
+pub fn command_reply(request: WeatherRequest) -> String {
+    let secs = request.seconds;
+    let how_long = if secs.is_multiple_of(60) {
+        let m = secs / 60;
+        format!("{m} minute{}", if m == 1 { "" } else { "s" })
+    } else if secs < 60 {
+        format!("{secs} second{}", if secs == 1 { "" } else { "s" })
+    } else {
+        let (m, r) = (secs / 60, secs % 60);
+        format!(
+            "{m} minute{} {r} second{}",
+            if m == 1 { "" } else { "s" },
+            if r == 1 { "" } else { "s" }
+        )
+    };
+    let what = match request.sky {
+        Sky::Clear => "Clear skies",
+        Sky::Rain => "Rain",
+        Sky::Storm => "A thunderstorm",
+    };
+    match request.capped_from {
+        Some(n) => format!("{what} for {how_long} (capped from {n} seconds)"),
+        None => format!("{what} for {how_long}"),
+    }
+}
+
 /// The roll's hash: splitmix64's finaliser over the tick and the world seed.
 /// `salt` keeps the rain roll and the strike roll independent of each other.
 /// (Until the v0.2.32 review the roll hashed the tick alone, so every world had
@@ -143,7 +275,12 @@ pub fn advance(current: Weather, tick: u64, has_weather: bool, seed: u32) -> Wea
         return Weather::CLEAR;
     }
     let mut out = current;
-    if tick >= current.rain_until && tick > 0 && tick.is_multiple_of(1200) {
+    // `/weather clear` holds the sky: no new rain is rolled until the hold ends.
+    if tick >= current.rain_until
+        && tick >= current.clear_until
+        && tick > 0
+        && tick.is_multiple_of(1200)
+    {
         let h = roll_hash(tick, seed, 0x5241_494E) >> 33;
         if h % 100 < 22 {
             let dur = 1200 + (h % 4) * 600;
@@ -239,7 +376,7 @@ mod tests {
     /// the window carried in from the previous world is cancelled, not waited out.
     #[test]
     fn entering_the_workshop_cancels_weather_carried_in() {
-        let storming = Weather { rain_until: 9_000, storm_until: 9_000 };
+        let storming = Weather { rain_until: 9_000, storm_until: 9_000, clear_until: 0 };
         assert_eq!(
             advance(storming, 1_000, false, SEED),
             Weather::CLEAR,
@@ -250,7 +387,7 @@ mod tests {
     /// Even mid-storm, the Workshop rolls no strike.
     #[test]
     fn a_carried_in_storm_still_cannot_strike_the_workshop() {
-        let storming = Weather { rain_until: 9_000, storm_until: 9_000 };
+        let storming = Weather { rain_until: 9_000, storm_until: 9_000, clear_until: 0 };
         for t in (160..9_000).step_by(160) {
             assert!(
                 strike_roll(storming, t, false, SEED).is_none(),
@@ -263,7 +400,7 @@ mod tests {
     /// unlocks strikes, and plain rain must stay quiet.
     #[test]
     fn plain_rain_produces_no_lightning() {
-        let raining = Weather { rain_until: 9_000, storm_until: 0 };
+        let raining = Weather { rain_until: 9_000, storm_until: 0, clear_until: 0 };
         for t in (160..9_000).step_by(160) {
             assert!(strike_roll(raining, t, true, SEED).is_none(), "plain rain must not strike");
         }
@@ -294,7 +431,7 @@ mod tests {
     /// the next `advance()` call clears them.
     #[test]
     fn ticks_left_saturates_past_the_window() {
-        let w = Weather { rain_until: 50, storm_until: 40 };
+        let w = Weather { rain_until: 50, storm_until: 40, clear_until: 0 };
         assert_eq!(w.ticks_left(100), (0, 0), "an elapsed window must not underflow");
     }
 
@@ -304,7 +441,7 @@ mod tests {
     /// absolute window relative to ITS tick.
     #[test]
     fn ticks_left_round_trips_through_from_ticks_left() {
-        let w = Weather { rain_until: 150, storm_until: 130 };
+        let w = Weather { rain_until: 150, storm_until: 130, clear_until: 0 };
         let (rain, storm) = w.ticks_left(100);
         assert_eq!((rain, storm), (50, 30));
         assert_eq!(Weather::from_ticks_left(100, rain, storm), w);
@@ -318,7 +455,7 @@ mod tests {
     /// `storm_until` (0) is behind `tick` (8000) to begin with.
     #[test]
     fn ticks_left_reports_plain_rain_with_no_storm() {
-        let w = Weather { rain_until: 9_000, storm_until: 0 };
+        let w = Weather { rain_until: 9_000, storm_until: 0, clear_until: 0 };
         let (rain, storm) = w.ticks_left(8_000);
         assert_eq!((rain, storm), (1_000, 0));
         let back = Weather::from_ticks_left(8_000, rain, storm);
@@ -412,7 +549,7 @@ mod tests {
     fn an_unlocked_world_keeps_its_own_rolled_window() {
         // The no-lock path must not touch the world's own weather. `advance`
         // owns that window; `apply_lock` only ever steps in for a trial.
-        let own = Weather { rain_until: 12_000, storm_until: 11_000 };
+        let own = Weather { rain_until: 12_000, storm_until: 11_000, clear_until: 0 };
         assert_eq!(apply_lock(own, None, false, 10_000), own);
     }
 
@@ -460,7 +597,7 @@ mod tests {
         assert_eq!(all.len(), 16, "no two of 16 worlds share a storm timeline");
 
         // And the bolts of a storm differ by world too.
-        let storm = Weather { rain_until: u64::MAX, storm_until: u64::MAX };
+        let storm = Weather { rain_until: u64::MAX, storm_until: u64::MAX, clear_until: 0 };
         let bolts = |seed| -> Vec<Option<u64>> { (1..400).map(|k| strike_roll(storm, k * STRIKE_EVERY_TICKS, true, seed)).collect() };
         assert_ne!(bolts(1), bolts(2));
         assert_eq!(bolts(7), bolts(7), "but one world always rolls the same");
@@ -491,5 +628,121 @@ mod tests {
         assert!(kinds.len() >= 3, "storm counts in 40 minutes should vary by world: {kinds:?}");
         let mean = counts.iter().sum::<usize>() as f64 / counts.len() as f64;
         assert!(mean < 2.0, "a storm every 20 minutes on average is too many: {mean}");
+    }
+
+    // ── `/weather` (2026-11-13) ──────────────────────────────────────────
+
+    /// The first minute from `from` on where `advance` rolls rain out of a clear sky.
+    fn first_roll_from(seed: u32, from: u64) -> u64 {
+        (from.div_ceil(1200)..)
+            .map(|k| k * 1200)
+            .find(|&t| t > 0 && advance(Weather::CLEAR, t, true, seed).rain_until > t)
+            .unwrap()
+    }
+
+    #[test]
+    fn a_clear_hold_stops_advance_rolling_rain_and_the_cycle_resumes_after_it() {
+        let t = first_roll_from(SEED, 1200);
+        // Control: the same tick, no hold, rolls rain.
+        assert!(advance(Weather::CLEAR, t, true, SEED).rain_until > t);
+        // `/weather clear 600` set the tick before: 12,000 ticks of hold.
+        let held = command_window(Sky::Clear, 600, t - 1);
+        assert_eq!(held.clear_until, t - 1 + 12_000, "600 s is 12,000 ticks");
+        let mut w = held;
+        let mut rolls_inside = 0;
+        for tick in t..held.clear_until {
+            w = advance(w, tick, true, SEED);
+            assert!(tick >= w.rain_until, "tick {tick}: no rain inside the hold");
+            if tick % 1200 == 0 && advance(Weather::CLEAR, tick, true, SEED).rain_until > tick {
+                rolls_inside += 1;
+            }
+        }
+        assert!(rolls_inside >= 1, "the hold crossed at least one tick that would have rolled rain");
+        assert_eq!(w.clear_until, held.clear_until, "advance keeps the hold");
+        // Then the natural cycle resumes: a later would-roll minute rolls rain again.
+        let later = first_roll_from(SEED, held.clear_until);
+        let w = advance(w, later, true, SEED);
+        assert!(w.rain_until > later, "the cycle resumes after the hold");
+    }
+
+    #[test]
+    fn a_hold_ends_exactly_at_clear_until() {
+        let t = first_roll_from(SEED, 1200);
+        let w = Weather { clear_until: t, ..Weather::CLEAR };
+        assert!(advance(w, t, true, SEED).rain_until > t, "at `clear_until` the roll is live again");
+        let w = Weather { clear_until: t + 1, ..Weather::CLEAR };
+        assert_eq!(advance(w, t, true, SEED).rain_until, 0, "one tick short, it is held");
+    }
+
+    #[test]
+    fn rain_and_storm_set_their_windows_and_clear_their_hold() {
+        let now = 5_000;
+        let rain = command_window(Sky::Rain, 60, now);
+        assert_eq!(rain, Weather { rain_until: now + 1_200, storm_until: 0, clear_until: 0 });
+        let storm = command_window(Sky::Storm, 300, now);
+        assert_eq!(storm, Weather { rain_until: now + 6_000, storm_until: now + 6_000, clear_until: 0 });
+        let clear = command_window(Sky::Clear, 1200, now);
+        assert_eq!(clear, Weather { rain_until: 0, storm_until: 0, clear_until: now + 24_000 });
+        // The storm window is a subset of the rain window.
+        for w in [rain, storm, clear] {
+            assert!(w.storm_until <= w.rain_until);
+        }
+    }
+
+    #[test]
+    fn rain_during_a_storm_with_more_storm_left_zeroes_the_storm() {
+        let now = 9_000;
+        let storm = command_window(Sky::Storm, 3600, now);
+        assert!(storm.storm_until > now + 50_000);
+        let rain = command_window(Sky::Rain, 60, now);
+        assert_eq!(rain.storm_until, 0, "storm_until is 0 afterwards");
+        assert!((now..now + 60_000).all(|t| strike_roll(rain, t, true, SEED).is_none()), "no thunder from the old window");
+    }
+
+    #[test]
+    fn the_hold_is_not_on_the_wire_and_the_translated_window_keeps_it() {
+        let w = Weather { rain_until: 150, storm_until: 130, clear_until: 5_000 };
+        // The wire carries rain and storm only.
+        let (rain, storm) = w.ticks_left(100);
+        let joiner = Weather::from_ticks_left(100, rain, storm);
+        assert_eq!(joiner, Weather { rain_until: 150, storm_until: 130, clear_until: 0 }, "a joiner's copy has no hold");
+        // A `--no-lend` host's translation adds it back.
+        let kept = Weather::from_ticks_left(7, rain, storm).with_clear_ticks_left(7, w.clear_ticks_left(100));
+        assert_eq!(kept.clear_until, 7 + 4_900);
+        assert_eq!(Weather::CLEAR.clear_ticks_left(10), 0);
+        assert_eq!(w.clear_ticks_left(9_999), 0, "saturating once the hold is over");
+    }
+
+    #[test]
+    fn a_trial_lock_pins_its_own_window_and_a_command_is_refused_under_it() {
+        for lock in ["clear", "rain", "storm"] {
+            assert_eq!(command_refusal(true, Some(lock)), Some("This trial sets the weather"), "{lock}");
+        }
+        assert_eq!(command_refusal(true, None), None);
+        // A lock this build does not know pins nothing, so it does not refuse.
+        assert_eq!(command_refusal(true, Some("blizzard")), None);
+        // The Workshop wins, with its own words.
+        assert_eq!(command_refusal(false, None), Some("The Workshop has no weather"));
+        assert_eq!(command_refusal(false, Some("storm")), Some("The Workshop has no weather"));
+        // The locked windows are never holds.
+        for lock in ["clear", "rain", "storm"] {
+            assert_eq!(locked_window(Some(lock), 10).unwrap().clear_until, 0);
+        }
+        let req = WeatherRequest { sky: Sky::Rain, seconds: 60, capped_from: None };
+        assert_eq!(plan_command(req, 100, true, Some("storm")), Err("This trial sets the weather"));
+        assert_eq!(plan_command(req, 100, false, None), Err("The Workshop has no weather"));
+        assert_eq!(plan_command(req, 100, true, None), Ok(command_window(Sky::Rain, 60, 100)));
+    }
+
+    #[test]
+    fn the_reply_is_a_plain_sentence() {
+        let r = |sky, seconds, capped_from| command_reply(WeatherRequest { sky, seconds, capped_from });
+        assert_eq!(r(Sky::Clear, 1200, None), "Clear skies for 20 minutes");
+        assert_eq!(r(Sky::Rain, 300, None), "Rain for 5 minutes");
+        assert_eq!(r(Sky::Storm, 60, None), "A thunderstorm for 1 minute");
+        assert_eq!(r(Sky::Rain, 45, None), "Rain for 45 seconds");
+        assert_eq!(r(Sky::Rain, 1, None), "Rain for 1 second");
+        assert_eq!(r(Sky::Rain, 90, None), "Rain for 1 minute 30 seconds");
+        assert_eq!(r(Sky::Clear, 3600, Some(9_000)), "Clear skies for 60 minutes (capped from 9000 seconds)");
     }
 }
