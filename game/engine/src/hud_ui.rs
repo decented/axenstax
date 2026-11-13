@@ -827,6 +827,15 @@ pub(crate) struct HotbarGeom {
     pub total_w: f32,
 }
 
+impl HotbarGeom {
+    /// The off-hand box's rect (`x`, `y`, side): one slot left of the hotbar
+    /// with a double gap between, as in Minecraft. The single source for
+    /// drawing it ([`draw_hotbar`]) and tapping it (`touch_input::classify_zone`).
+    pub fn offhand_box(&self) -> (f32, f32, f32) {
+        (self.x - self.gap * 2.0 - self.slot, self.y, self.slot)
+    }
+}
+
 pub(crate) fn hotbar_geom(vp_x: f32, vp_y: f32, vp_w: f32, vp_h: f32) -> HotbarGeom {
     let scale = hud_scale(vp_w);
     let slot = 48.0 * scale;
@@ -996,6 +1005,17 @@ pub struct DebugReadout {
     pub wind: crate::wind::WindSample,
 }
 
+/// What the HUD shows in the off-hand box left of the hotbar.
+#[derive(Clone, Copy)]
+pub enum OffhandBox<'a> {
+    /// No box: a joined client has no off-hand yet (slice 2 of the off-hand plan).
+    Hidden,
+    /// The box, with nothing in it.
+    Empty,
+    /// The box, holding a stack.
+    Holding(&'a crate::item::ItemStack),
+}
+
 /// Draw the full in-game HUD.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_hud(
@@ -1004,6 +1024,7 @@ pub fn draw_hud(
     player_index: usize,
     inventory: &Inventory,
     selected_slot: usize,
+    offhand: OffhandBox,
     registry: &BlockRegistry,
     egui_integration: &EguiIntegration,
     current_hp: f32,
@@ -1020,7 +1041,7 @@ pub fn draw_hud(
     perf: PerfSamples,
     debug: DebugReadout,
 ) {
-    draw_hotbar(ctx, viewport, player_index, inventory, selected_slot, registry, egui_integration);
+    draw_hotbar(ctx, viewport, player_index, inventory, selected_slot, offhand, registry, egui_integration);
     // Survival-only vitals. Creative takes no damage and never gets hungry,
     // so the hearts + hunger bars were just clutter there (2026-05-30
     // playtest: "in creative there is still hearts and hunger").
@@ -1126,6 +1147,7 @@ fn draw_hotbar(
     player_index: usize,
     inventory: &Inventory,
     selected: usize,
+    offhand: OffhandBox,
     registry: &BlockRegistry,
     egui_integration: &EguiIntegration,
 ) {
@@ -1163,135 +1185,177 @@ fn draw_hotbar(
 
                     // Item icon
                     if let Some(stack) = inventory.hotbar_slot(i) {
-                        let icon_rect = rect.shrink(4.0);
-
-                        match &stack.item {
-                            Item::Block(id) => {
-                                let tex_layer = registry.tex_top(*id);
-                                if let Some(tex_id) = egui_integration.block_texture(tex_layer) {
-                                    ui.painter().image(
-                                        tex_id,
-                                        icon_rect,
-                                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                                        egui::Color32::WHITE,
-                                    );
-                                }
-                            }
-                            Item::Tool(tool) => {
-                                // Coloured rectangle for tools
-                                let color = stack.item.color(registry);
-                                let tool_color = egui::Color32::from_rgb(
-                                    (color[0] * 255.0) as u8,
-                                    (color[1] * 255.0) as u8,
-                                    (color[2] * 255.0) as u8,
-                                );
-                                ui.painter().rect_filled(icon_rect, 2.0, tool_color);
-
-                                // Tool type indicator
-                                let indicator = match tool.tool_type {
-                                    crate::crafting::ToolType::Sword => "S",
-                                    crate::crafting::ToolType::Pickaxe => "P",
-                                    crate::crafting::ToolType::Axe => "A",
-                                    crate::crafting::ToolType::Shovel => "V",
-                                    crate::crafting::ToolType::Bow => "B",
-                                    crate::crafting::ToolType::Hoe => "H",
-                                    crate::crafting::ToolType::FlintAndSteel => "F",
-                                    crate::crafting::ToolType::Shears => "Sh",
-                                    crate::crafting::ToolType::FishingRod => "Fr",
-                                    crate::crafting::ToolType::Slingshot => "Sl",
-                                    crate::crafting::ToolType::Eraser => "Er",
-                                    crate::crafting::ToolType::DraftingStamp => "Ds",
-                                };
-                                ui.painter().text(
-                                    icon_rect.left_top() + egui::vec2(2.0, 2.0),
-                                    egui::Align2::LEFT_TOP,
-                                    indicator,
-                                    egui::FontId::proportional(12.0),
-                                    egui::Color32::WHITE,
-                                );
-                            }
-                            Item::Material(_) => {
-                                let color = stack.item.color(registry);
-                                let mat_color = egui::Color32::from_rgb(
-                                    (color[0] * 255.0) as u8,
-                                    (color[1] * 255.0) as u8,
-                                    (color[2] * 255.0) as u8,
-                                );
-                                ui.painter().rect_filled(icon_rect, 2.0, mat_color);
-                            }
-                            Item::Plan(_) => {
-                                // Spec 24 — Plan item. Dark-gold parchment
-                                // swatch + "P" label so the hotbar entry
-                                // reads as "I have a plan ready to place".
-                                let color = stack.item.color(registry);
-                                let plan_color = egui::Color32::from_rgb(
-                                    (color[0] * 255.0) as u8,
-                                    (color[1] * 255.0) as u8,
-                                    (color[2] * 255.0) as u8,
-                                );
-                                ui.painter().rect_filled(icon_rect, 2.0, plan_color);
-                                ui.painter().text(
-                                    icon_rect.left_top() + egui::vec2(2.0, 2.0),
-                                    egui::Align2::LEFT_TOP,
-                                    "P",
-                                    egui::FontId::proportional(12.0),
-                                    egui::Color32::WHITE,
-                                );
-                            }
-                            Item::Armour(_) => {
-                                // Spec 28e — armour piece. Tier-tinted swatch
-                                // with a slot-shorthand label until per-slot
-                                // icons land.
-                                let color = stack.item.color(registry);
-                                let arm_color = egui::Color32::from_rgb(
-                                    (color[0] * 255.0) as u8,
-                                    (color[1] * 255.0) as u8,
-                                    (color[2] * 255.0) as u8,
-                                );
-                                ui.painter().rect_filled(icon_rect, 2.0, arm_color);
-                                ui.painter().text(
-                                    icon_rect.left_top() + egui::vec2(2.0, 2.0),
-                                    egui::Align2::LEFT_TOP,
-                                    "A",
-                                    egui::FontId::proportional(12.0),
-                                    egui::Color32::WHITE,
-                                );
-                            }
-                        }
-
-                        // Stack count
-                        if stack.count > 1 {
-                            let text = format!("{}", stack.count);
-                            let font = egui::FontId::proportional((14.0 * hud_scale(vp.width)).max(12.0));
-                            let galley = ui.painter().layout_no_wrap(text, font, egui::Color32::WHITE);
-                            let origin = rect.right_bottom() - galley.size() - egui::vec2(4.0, 4.0);
-                            let badge = egui::Rect::from_min_size(origin, galley.size()).expand(2.0);
-                            ui.painter().rect_filled(badge, 2.0, egui::Color32::from_rgba_unmultiplied(13, 27, 30, 235));
-                            ui.painter().galley(origin, galley, egui::Color32::WHITE);
-                        }
-
-                        // Durability bar for tools
-                        if let Item::Tool(tool) = &stack.item {
-                            let max_dur = crate::crafting::Tool::new(tool.tool_type, tool.material).durability;
-                            if tool.durability < max_dur {
-                                let pct = tool.durability as f32 / max_dur as f32;
-                                let bar_h = 3.0;
-                                let bar_rect = egui::Rect::from_min_size(
-                                    egui::pos2(rect.left() + 2.0, rect.bottom() - bar_h - 2.0),
-                                    egui::vec2(rect.width() - 4.0, bar_h),
-                                );
-                                ui.painter().rect_filled(bar_rect, 1.0, egui::Color32::from_rgb(200, 50, 50));
-                                let fill_rect = egui::Rect::from_min_size(
-                                    bar_rect.left_top(),
-                                    egui::vec2(bar_rect.width() * pct, bar_h),
-                                );
-                                ui.painter().rect_filled(fill_rect, 1.0, egui::Color32::from_rgb(50, 200, 50));
-                            }
-                        }
+                        draw_stack_in_slot(ui, rect, stack, registry, egui_integration, vp.width);
                     }
                 }
             });
         });
+
+    // The off-hand box, one slot left of the hotbar. A tap on it swaps hands
+    // (`touch_input::TouchZone::Offhand`); the F key does the same.
+    if !matches!(offhand, OffhandBox::Hidden) {
+        let (ox, oy, side) = g.offhand_box();
+        egui::Area::new(egui::Id::new(("offhand_box", player_index)))
+            .fixed_pos(egui::pos2(ox, oy))
+            .interactable(false)
+            .show(ctx, |ui| {
+                let (rect, _response) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::hover());
+                ui.painter().rect_filled(rect, 3.0, SLOT_BG);
+                ui.painter().rect_stroke(rect, 3.0, egui::Stroke::new(1.0_f32, SLOT_BORDER), egui::StrokeKind::Inside);
+                match offhand {
+                    OffhandBox::Holding(stack) => {
+                        draw_stack_in_slot(ui, rect, stack, registry, egui_integration, vp.width);
+                    }
+                    // A faint "F" names the key on an empty box.
+                    _ => {
+                        ui.painter().text(
+                            rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            "F",
+                            egui::FontId::proportional((14.0 * hud_scale(vp.width)).max(11.0)),
+                            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 70),
+                        );
+                    }
+                }
+            });
+    }
+}
+
+/// One stack drawn inside a slot rect: its icon, count badge and durability
+/// bar. Shared by the hotbar slots and the off-hand box.
+fn draw_stack_in_slot(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    stack: &crate::item::ItemStack,
+    registry: &BlockRegistry,
+    egui_integration: &EguiIntegration,
+    vp_width: f32,
+) {
+    let icon_rect = rect.shrink(4.0);
+
+    match &stack.item {
+        Item::Block(id) => {
+            let tex_layer = registry.tex_top(*id);
+            if let Some(tex_id) = egui_integration.block_texture(tex_layer) {
+                ui.painter().image(
+                    tex_id,
+                    icon_rect,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    egui::Color32::WHITE,
+                );
+            }
+        }
+        Item::Tool(tool) => {
+            // Coloured rectangle for tools
+            let color = stack.item.color(registry);
+            let tool_color = egui::Color32::from_rgb(
+                (color[0] * 255.0) as u8,
+                (color[1] * 255.0) as u8,
+                (color[2] * 255.0) as u8,
+            );
+            ui.painter().rect_filled(icon_rect, 2.0, tool_color);
+
+            // Tool type indicator
+            let indicator = match tool.tool_type {
+                crate::crafting::ToolType::Sword => "S",
+                crate::crafting::ToolType::Pickaxe => "P",
+                crate::crafting::ToolType::Axe => "A",
+                crate::crafting::ToolType::Shovel => "V",
+                crate::crafting::ToolType::Bow => "B",
+                crate::crafting::ToolType::Hoe => "H",
+                crate::crafting::ToolType::FlintAndSteel => "F",
+                crate::crafting::ToolType::Shears => "Sh",
+                crate::crafting::ToolType::FishingRod => "Fr",
+                crate::crafting::ToolType::Slingshot => "Sl",
+                crate::crafting::ToolType::Eraser => "Er",
+                crate::crafting::ToolType::DraftingStamp => "Ds",
+            };
+            ui.painter().text(
+                icon_rect.left_top() + egui::vec2(2.0, 2.0),
+                egui::Align2::LEFT_TOP,
+                indicator,
+                egui::FontId::proportional(12.0),
+                egui::Color32::WHITE,
+            );
+        }
+        Item::Material(_) => {
+            let color = stack.item.color(registry);
+            let mat_color = egui::Color32::from_rgb(
+                (color[0] * 255.0) as u8,
+                (color[1] * 255.0) as u8,
+                (color[2] * 255.0) as u8,
+            );
+            ui.painter().rect_filled(icon_rect, 2.0, mat_color);
+        }
+        Item::Plan(_) => {
+            // Spec 24 — Plan item. Dark-gold parchment
+            // swatch + "P" label so the hotbar entry
+            // reads as "I have a plan ready to place".
+            let color = stack.item.color(registry);
+            let plan_color = egui::Color32::from_rgb(
+                (color[0] * 255.0) as u8,
+                (color[1] * 255.0) as u8,
+                (color[2] * 255.0) as u8,
+            );
+            ui.painter().rect_filled(icon_rect, 2.0, plan_color);
+            ui.painter().text(
+                icon_rect.left_top() + egui::vec2(2.0, 2.0),
+                egui::Align2::LEFT_TOP,
+                "P",
+                egui::FontId::proportional(12.0),
+                egui::Color32::WHITE,
+            );
+        }
+        Item::Armour(_) => {
+            // Spec 28e — armour piece. Tier-tinted swatch
+            // with a slot-shorthand label until per-slot
+            // icons land.
+            let color = stack.item.color(registry);
+            let arm_color = egui::Color32::from_rgb(
+                (color[0] * 255.0) as u8,
+                (color[1] * 255.0) as u8,
+                (color[2] * 255.0) as u8,
+            );
+            ui.painter().rect_filled(icon_rect, 2.0, arm_color);
+            ui.painter().text(
+                icon_rect.left_top() + egui::vec2(2.0, 2.0),
+                egui::Align2::LEFT_TOP,
+                "A",
+                egui::FontId::proportional(12.0),
+                egui::Color32::WHITE,
+            );
+        }
+    }
+
+    // Stack count
+    if stack.count > 1 {
+        let text = format!("{}", stack.count);
+        let font = egui::FontId::proportional((14.0 * hud_scale(vp_width)).max(12.0));
+        let galley = ui.painter().layout_no_wrap(text, font, egui::Color32::WHITE);
+        let origin = rect.right_bottom() - galley.size() - egui::vec2(4.0, 4.0);
+        let badge = egui::Rect::from_min_size(origin, galley.size()).expand(2.0);
+        ui.painter().rect_filled(badge, 2.0, egui::Color32::from_rgba_unmultiplied(13, 27, 30, 235));
+        ui.painter().galley(origin, galley, egui::Color32::WHITE);
+    }
+
+    // Durability bar for tools
+    if let Item::Tool(tool) = &stack.item {
+        let max_dur = crate::crafting::Tool::new(tool.tool_type, tool.material).durability;
+        if tool.durability < max_dur {
+            let pct = tool.durability as f32 / max_dur as f32;
+            let bar_h = 3.0;
+            let bar_rect = egui::Rect::from_min_size(
+                egui::pos2(rect.left() + 2.0, rect.bottom() - bar_h - 2.0),
+                egui::vec2(rect.width() - 4.0, bar_h),
+            );
+            ui.painter().rect_filled(bar_rect, 1.0, egui::Color32::from_rgb(200, 50, 50));
+            let fill_rect = egui::Rect::from_min_size(
+                bar_rect.left_top(),
+                egui::vec2(bar_rect.width() * pct, bar_h),
+            );
+            ui.painter().rect_filled(fill_rect, 1.0, egui::Color32::from_rgb(50, 200, 50));
+        }
+    }
 }
 
 /// Draw health hearts above the hotbar.

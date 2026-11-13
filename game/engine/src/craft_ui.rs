@@ -690,6 +690,7 @@ impl ClickTarget {
             ClickTarget::ToggleLock(slot) => WindowClick::ToggleLock { slot },
             ClickTarget::TrashCursor => WindowClick::Trash,
             ClickTarget::None
+            | ClickTarget::OffhandSlot(_)
             | ClickTarget::OpenBook
             | ClickTarget::FillPinned
             | ClickTarget::DismissPinned
@@ -716,6 +717,10 @@ pub enum ClickTarget {
     DragGrid(usize, usize, bool),
     /// Spec 28e — armour panel slot (0=Helmet, 1=Chestplate, 2=Leggings, 3=Boots).
     ArmourSlot(usize),
+    /// The off-hand slot beside the boots; `right` = a right click (one item).
+    /// Not a window transition (`window_click` is `None`): `game_loop` applies
+    /// `hands::click_offhand` for a local player.
+    OffhandSlot(bool),
     /// Recipe book (2026-06-12) — the "📖 Recipes" button was clicked; open
     /// the book panel.
     OpenBook,
@@ -917,6 +922,7 @@ pub fn draw_crafting_ui(
     ui_state: &mut CraftingUi,
     inventory: &Inventory,
     armour_slots: &[Option<ArmourItem>; 4],
+    offhand: crate::hud_ui::OffhandBox,
     registry: &BlockRegistry,
     egui_integration: &EguiIntegration,
 ) -> ClickTarget {
@@ -993,7 +999,9 @@ pub fn draw_crafting_ui(
                 // Armour column (4 vertical slots) + crafting grid + arrow + result.
                 // Armour column is left of the grid — Minecraft's canonical placement.
                 ui.horizontal(|ui| {
-                    let total_w = (slot_size + gap) + 16.0 + 300.0;
+                    // The off-hand slot is a second column beside the boots.
+                    let offhand_w = if matches!(offhand, crate::hud_ui::OffhandBox::Hidden) { 0.0 } else { slot_size + gap };
+                    let total_w = (slot_size + gap) + offhand_w + 16.0 + 300.0;
                     ui.add_space((ui.available_width() - total_w) / 2.0);
 
                     // Armour column
@@ -1013,6 +1021,32 @@ pub fn draw_crafting_ui(
                             }
                         }
                     });
+
+                    // Off-hand slot, level with the boots (Minecraft's place for
+                    // it). Click rules: `hands::click_offhand`. BRIDGE: gamepad
+                    // slot-cursor skips it (gamepad is parked).
+                    if !matches!(offhand, crate::hud_ui::OffhandBox::Hidden) {
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing = egui::vec2(gap, gap);
+                            ui.add_space(3.0 * (slot_size + gap));
+                            let held = match offhand {
+                                crate::hud_ui::OffhandBox::Holding(stack) => Some(stack.clone()),
+                                _ => None,
+                            };
+                            let response = draw_item_slot(
+                                ui, &held, registry, egui_integration, slot_size, false, false, false,
+                            );
+                            if held.is_none() {
+                                paint_shield_silhouette(ui.painter(), response.rect);
+                            }
+                            if response.clicked() {
+                                click_target = ClickTarget::OffhandSlot(false);
+                            } else if response.secondary_clicked() {
+                                click_target = ClickTarget::OffhandSlot(true);
+                            }
+                            response.on_hover_text("Off-hand (F swaps it with your hand)");
+                        });
+                    }
 
                     ui.add_space(16.0);
 
@@ -1694,6 +1728,28 @@ fn paint_mini_cell(
     if let Some(s) = stack {
         paint_item_icon(painter, rect.shrink(3.0), &s, registry, egui_integration);
     }
+}
+
+/// A faint shield outline on an empty off-hand slot (the slot's hint, as
+/// Minecraft shows one on its off-hand slot).
+fn paint_shield_silhouette(painter: &egui::Painter, rect: egui::Rect) {
+    let c = rect.center();
+    let u = rect.width() / 48.0;
+    let pt = |dx: f32, dy: f32| egui::pos2(c.x + dx * u, c.y + dy * u);
+    let outline = vec![
+        pt(-11.0, -14.0),
+        pt(11.0, -14.0),
+        pt(11.0, 2.0),
+        pt(7.0, 10.0),
+        pt(0.0, 15.0),
+        pt(-7.0, 10.0),
+        pt(-11.0, 2.0),
+    ];
+    painter.add(egui::Shape::convex_polygon(
+        outline,
+        egui::Color32::from_rgba_unmultiplied(255, 255, 255, 18),
+        egui::Stroke::new(1.5_f32, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 60)),
+    ));
 }
 
 fn draw_item_slot(

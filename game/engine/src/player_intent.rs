@@ -115,6 +115,10 @@ pub struct PlayerIntent {
     pub workshop_tool_cycle: bool,
     /// F: toggle the skin-paint Fill tool on/off. Client-local.
     pub workshop_fill: bool,
+    /// F: swap the main-hand item with the off-hand. Shares F with
+    /// `workshop_fill`; `game_loop` ignores it during a paint session.
+    /// Client-local — never over the wire.
+    pub swap_hands: bool,
     /// L: show/hide the skin painter's texel grid + hover footprint.
     /// Client-local — never over the wire.
     pub workshop_grid: bool,
@@ -186,6 +190,7 @@ impl PlayerIntent {
             workshop_limbs: false,
             workshop_tool_cycle: false,
             workshop_fill: false,
+            swap_hands: false,
             workshop_grid: false,
             shift_down: false,
             // Camera perspective is purely client-side render; the server never
@@ -232,6 +237,7 @@ impl PlayerIntent {
         self.workshop_limbs = self.workshop_limbs || other.workshop_limbs;
         self.workshop_tool_cycle = self.workshop_tool_cycle || other.workshop_tool_cycle;
         self.workshop_fill = self.workshop_fill || other.workshop_fill;
+        self.swap_hands = self.swap_hands || other.swap_hands;
         self.workshop_grid = self.workshop_grid || other.workshop_grid;
         self.shift_down = self.shift_down || other.shift_down;
         self.camera_cycle = self.camera_cycle || other.camera_cycle;

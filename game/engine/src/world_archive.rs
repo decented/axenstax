@@ -501,6 +501,7 @@ mod tests {
             plot_succession: None,
             site_boards: None,
             weather_clear_until: None,
+            player_offhands: None,
         }
     }
 

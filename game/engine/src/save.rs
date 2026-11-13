@@ -409,6 +409,17 @@ pub struct WorldSave {
     /// written before the field, or no hold. Never on the wire. APPEND LAST.
     #[serde(default)]
     pub weather_clear_until: Option<u64>,
+    /// Each local player's off-hand item (`PlayerSlot.offhand`), index-aligned
+    /// to `players`: element `i` is player `i`'s off-hand (`SavedSlot::Empty`
+    /// for none). It rides its own appended field because `PlayerSaveData` is
+    /// nested and positional, so a longer element would misread every older
+    /// save's players. `None` = a save written before the field, or no player
+    /// holds an off-hand item (the writer emits `None` then, so an all-empty
+    /// off-hand costs one byte). Local slots only: a joiner's off-hand rides the
+    /// sidecar (slice 2 of the off-hand plan), never this field. Never on the
+    /// wire. APPEND LAST.
+    #[serde(default)]
+    pub player_offhands: Option<Vec<SavedSlot>>,
 }
 
 impl WorldSave {
@@ -443,6 +454,8 @@ impl WorldSave {
             site_boards: _,
             // One optional number.
             weather_clear_until: _,
+            // Index-aligned to `players` (already in player order).
+            player_offhands: _,
         } = self;
         if let Some(ru) = region_use {
             ru.regions.sort_by_key(|(key, _)| *key);
@@ -997,6 +1010,7 @@ impl LegacyWorldSave {
             plot_succession: None,
             site_boards: None,
             weather_clear_until: None,
+            player_offhands: None,
             // Legacy saves predate Spec 34 — no tip jars.
             tip_jars: Vec::new(),
             auctions: Vec::new(),
@@ -1831,29 +1845,49 @@ pub fn restore_armour_slots(
 }
 
 fn serialize_inventory(inventory: &Inventory) -> Vec<SavedSlot> {
-    (0..36).map(|i| {
-        match inventory.slot(i) {
-            Some(stack) => match &stack.item {
-                Item::Block(id) => SavedSlot::Block { block_id: *id, count: stack.count },
-                Item::Tool(tool) => SavedSlot::Tool {
-                    tool_type: tool.tool_type,
-                    material: tool.material,
-                    durability: tool.durability,
-                },
-                Item::Material(mat_id) => SavedSlot::Material {
-                    material_id: *mat_id,
-                    count: stack.count,
-                },
-                Item::Plan(data) => SavedSlot::Plan { data: data.clone() },
-                Item::Armour(a) => SavedSlot::Armour {
-                    slot: a.slot,
-                    material: a.material,
-                    durability: a.durability,
-                },
+    (0..36).map(|i| saved_slot_of(inventory.slot(i))).collect()
+}
+
+/// One item stack (or none) as its saved form. The one conversion behind the
+/// 36 inventory slots and the off-hand.
+fn saved_slot_of(stack: Option<&ItemStack>) -> SavedSlot {
+    match stack {
+        Some(stack) => match &stack.item {
+            Item::Block(id) => SavedSlot::Block { block_id: *id, count: stack.count },
+            Item::Tool(tool) => SavedSlot::Tool {
+                tool_type: tool.tool_type,
+                material: tool.material,
+                durability: tool.durability,
             },
-            None => SavedSlot::Empty,
-        }
-    }).collect()
+            Item::Material(mat_id) => SavedSlot::Material {
+                material_id: *mat_id,
+                count: stack.count,
+            },
+            Item::Plan(data) => SavedSlot::Plan { data: data.clone() },
+            Item::Armour(a) => SavedSlot::Armour {
+                slot: a.slot,
+                material: a.material,
+                durability: a.durability,
+            },
+        },
+        None => SavedSlot::Empty,
+    }
+}
+
+/// The off-hand column of [`WorldSave::player_offhands`]: each local player's
+/// `PlayerSlot.offhand`, in player order. `None` when no player holds an
+/// off-hand item, so an unused off-hand writes one byte.
+pub fn serialize_offhands(players: &[crate::player_slot::PlayerSlot]) -> Option<Vec<SavedSlot>> {
+    if players.iter().all(|p| p.offhand.is_none()) {
+        return None;
+    }
+    Some(players.iter().map(|p| saved_slot_of(p.offhand.as_ref())).collect())
+}
+
+/// Player `index`'s off-hand from a loaded [`WorldSave::player_offhands`]:
+/// `None` for an older save (no field), a missing entry, or an empty one.
+pub fn restore_offhand(saved: Option<&Vec<SavedSlot>>, index: usize) -> Option<ItemStack> {
+    saved.and_then(|v| v.get(index)).and_then(stack_from_saved)
 }
 
 /// Partition the currently-loaded chunks into (non-empty → write, empty →
@@ -2384,6 +2418,7 @@ pub fn build_world_save(
         worldgen_version: Some(world.generator.version()),
         authority_clock: authority_clock.cloned(),
         weather_clear_until: authority_clock.and_then(|c| c.clear_hold_for_save()),
+        player_offhands: serialize_offhands(players),
         block_authors: world.authors.to_saved(),
         region_use: world.use_record.to_saved(),
         plan_builds: world.plan_builds.to_saved(),
@@ -2642,6 +2677,7 @@ pub fn save_world(
         worldgen_version: Some(world.generator.version()),
         authority_clock: authority_clock.cloned(),
         weather_clear_until: authority_clock.and_then(|c| c.clear_hold_for_save()),
+        player_offhands: serialize_offhands(players),
         block_authors: world.authors.to_saved(),
         region_use: world.use_record.to_saved(),
         plan_builds: world.plan_builds.to_saved(),
@@ -2966,6 +3002,7 @@ fn deserialize_world_save_tolerant_reporting(
         plot_succession: tail.field(&mut cur, "plot_succession"),
         site_boards: tail.field(&mut cur, "site_boards"),
         weather_clear_until: tail.field(&mut cur, "weather_clear_until"),
+        player_offhands: tail.field(&mut cur, "player_offhands"),
     };
     // The clock's `/weather clear` hold lives in the appended field; fold it
     // into the clock every reader looks at (one place on read, `save` builds
@@ -2997,6 +3034,7 @@ fn absent_tail_encoded_len(s: &WorldSave, read: u32) -> Option<usize> {
             60 => size(bincode::serialized_size(&s.plot_succession))?,
             61 => size(bincode::serialized_size(&s.site_boards))?,
             62 => size(bincode::serialized_size(&s.weather_clear_until))?,
+            63 => size(bincode::serialized_size(&s.player_offhands))?,
             _ => return None,
         };
         Some(total + n)
@@ -3612,33 +3650,37 @@ fn restore_world_save_state(world: &mut World, save: &WorldSave) {
 pub fn restore_inventory(inventory: &mut Inventory, slots: &[SavedSlot]) {
     for (i, slot) in slots.iter().enumerate() {
         if i >= 36 { break; }
-        match slot {
-            SavedSlot::Empty => inventory.set_slot(i, None),
-            SavedSlot::Block { block_id, count } => {
-                // Clamp to max_stack so a legacy / hand-edited over-max count
-                // can't enter the inventory (engine audit 2026-06-04, A).
-                let mut s = ItemStack::new_block(*block_id, *count);
-                s.count = s.count.min(s.item.max_stack());
-                inventory.set_slot(i, Some(s));
-            }
-            SavedSlot::Tool { tool_type, material, durability } => {
-                let mut tool = Tool::new(*tool_type, *material);
-                tool.durability = *durability;
-                inventory.set_slot(i, Some(ItemStack::new_tool(tool)));
-            }
-            SavedSlot::Material { material_id, count } => {
-                let mut s = ItemStack::new_material(*material_id, *count);
-                s.count = s.count.min(s.item.max_stack());
-                inventory.set_slot(i, Some(s));
-            }
-            SavedSlot::Plan { data } => {
-                inventory.set_slot(i, Some(ItemStack { item: Item::Plan(data.clone()), count: 1 }));
-            }
-            SavedSlot::Armour { slot, material, durability } => {
-                let mut piece = crate::armour::ArmourItem::new(*slot, *material);
-                piece.durability = *durability;
-                inventory.set_slot(i, Some(ItemStack { item: Item::Armour(piece), count: 1 }));
-            }
+        inventory.set_slot(i, stack_from_saved(slot));
+    }
+}
+
+/// A saved slot as the stack it holds (`None` for `Empty`). Counts are clamped
+/// to the item's max stack so a legacy or hand-edited over-max count can't
+/// enter the game (engine audit 2026-06-04, A). The one conversion behind
+/// [`restore_inventory`] and [`restore_offhand`].
+fn stack_from_saved(slot: &SavedSlot) -> Option<ItemStack> {
+    match slot {
+        SavedSlot::Empty => None,
+        SavedSlot::Block { block_id, count } => {
+            let mut s = ItemStack::new_block(*block_id, *count);
+            s.count = s.count.min(s.item.max_stack());
+            Some(s)
+        }
+        SavedSlot::Tool { tool_type, material, durability } => {
+            let mut tool = Tool::new(*tool_type, *material);
+            tool.durability = *durability;
+            Some(ItemStack::new_tool(tool))
+        }
+        SavedSlot::Material { material_id, count } => {
+            let mut s = ItemStack::new_material(*material_id, *count);
+            s.count = s.count.min(s.item.max_stack());
+            Some(s)
+        }
+        SavedSlot::Plan { data } => Some(ItemStack { item: Item::Plan(data.clone()), count: 1 }),
+        SavedSlot::Armour { slot, material, durability } => {
+            let mut piece = crate::armour::ArmourItem::new(*slot, *material);
+            piece.durability = *durability;
+            Some(ItemStack { item: Item::Armour(piece), count: 1 })
         }
     }
 }
@@ -4923,6 +4965,7 @@ pub(crate) fn autosave_world_with(
         worldgen_version: Some(world.generator.version()),
         authority_clock: authority_clock.cloned(),
         weather_clear_until: authority_clock.and_then(|c| c.clear_hold_for_save()),
+        player_offhands: serialize_offhands(players),
         block_authors: world.authors.to_saved(),
         region_use: world.use_record.to_saved(),
         plan_builds: world.plan_builds.to_saved(),
@@ -5450,6 +5493,7 @@ pub(crate) fn minimal_world_save_for_tests(seed: u32) -> WorldSave {
             plot_succession: None,
             site_boards: None,
             weather_clear_until: None,
+            player_offhands: None,
     }
 }
 
@@ -5687,6 +5731,7 @@ mod tests {
             plot_succession: None,
             site_boards: None,
             weather_clear_until: None,
+            player_offhands: None,
         };
         let bytes = bincode::serialize(&save).unwrap();
         let back: WorldSave = bincode::deserialize(&bytes).unwrap();
@@ -6206,6 +6251,7 @@ mod tests {
             plot_succession: None,
             site_boards: None,
             weather_clear_until: None,
+            player_offhands: None,
         };
         let mut bytes = bincode::serialize(&save).unwrap();
         bytes.extend_from_slice(&[0xFFu8; 16]); // pretend: a future field's bytes
@@ -6477,6 +6523,8 @@ mod tests {
             None::<crate::plan_builds::SavedPlanBuilds>,
             None::<crate::succession::SavedSuccession>,
             None::<crate::site_board::SavedSiteBoards>,
+            None::<u64>,
+            None::<Vec<SavedSlot>>,
         ))
         .unwrap() as usize;
         bytes.truncate(bytes.len() - (8 * 15 + 2 + satoshi_bytes + option_tail_bytes));
@@ -7155,6 +7203,7 @@ mod tests {
             plot_succession: None,
             site_boards: None,
             weather_clear_until: None,
+            player_offhands: None,
         };
         assert_eq!(save.face_overlays.len(), 1, "one wallpaper face");
         assert_eq!(save.face_blueprints.len(), 1, "one blueprint face");
@@ -7266,6 +7315,7 @@ mod tests {
             plot_succession: None,
             site_boards: None,
             weather_clear_until: None,
+            player_offhands: None,
         };
 
         // Encode, then decode through the REAL production path.
@@ -7452,6 +7502,7 @@ mod tests {
             plot_succession: None,
             site_boards: None,
             weather_clear_until: None,
+            player_offhands: None,
         };
         let bytes = bincode::serialize(&save).unwrap();
         let back: WorldSave = bincode::deserialize(&bytes).unwrap();
@@ -8089,10 +8140,10 @@ mod tests {
         let dir = world_dir("w");
         fs::create_dir_all(&dir).unwrap();
         save_world_meta("w", &WorldMeta::new("w")).unwrap();
-        // Cut `rig_clips` mid-length-prefix (the ten `Option`s after it are one
-        // byte each, so 11 lands one byte into its prefix).
+        // Cut `rig_clips` mid-length-prefix (the eleven `Option`s after it are one
+        // byte each, so 12 lands one byte into its prefix).
         let mut bytes = bincode::serialize(&minimal_world_save_for_tests(9)).unwrap();
-        bytes.truncate(bytes.len() - 11);
+        bytes.truncate(bytes.len() - 12);
         fs::write(dir.join("world.dat"), &bytes).unwrap();
 
         let mut world = World::new();
@@ -8210,14 +8261,14 @@ mod tests {
     fn older_version_footer_is_stripped_before_the_tail_decode() {
         // Accepted c280f41f wrote 52 fields, layout revision 0, footer 52.
         // Its last field was rig_clips; the later optional positional fields are
-        // local_personal, quest_world, worldgen_version, authority_clock, block_authors, region_use, plan_builds, plot_succession, site_boards and weather_clear_until. No new nested mob carrier enters this fixture.
-        assert_eq!(crate::save_format::WORLD_SAVE_FIELD_COUNT, 62, "re-find the known 52-field fixture if another field appends");
+        // local_personal, quest_world, worldgen_version, authority_clock, block_authors, region_use, plan_builds, plot_succession, site_boards, weather_clear_until and player_offhands. No new nested mob carrier enters this fixture.
+        assert_eq!(crate::save_format::WORLD_SAVE_FIELD_COUNT, 63, "re-find the known 52-field fixture if another field appends");
         let mut save = minimal_world_save_for_tests(9);
         save.rig_clips = vec![crate::anim_set::AnimClip::Bounce];
         assert!(save.saved_mobs.is_empty());
         assert!(save.local_personal.is_none());
-        let appended_none = bincode::serialize(&(&save.local_personal, &save.quest_world, &save.worldgen_version, &save.authority_clock, &save.block_authors, &save.region_use, &save.plan_builds, &save.plot_succession, &save.site_boards, &save.weather_clear_until)).unwrap();
-        assert_eq!(appended_none, [0, 0, 0, 0, 0, 0, 0, 0, 0, 0], "the ten appended optional fields each encode None as one byte");
+        let appended_none = bincode::serialize(&(&save.local_personal, &save.quest_world, &save.worldgen_version, &save.authority_clock, &save.block_authors, &save.region_use, &save.plan_builds, &save.plot_succession, &save.site_boards, &save.weather_clear_until, &save.player_offhands)).unwrap();
+        assert_eq!(appended_none, [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], "the eleven appended optional fields each encode None as one byte");
         let mut bytes = bincode::serialize(&save).unwrap();
         assert!(bytes.ends_with(&appended_none));
         bytes.truncate(bytes.len() - appended_none.len());
@@ -8289,6 +8340,7 @@ mod tests {
             day_last_tick: Some(5),
         });
         save.weather_clear_until = Some(9);
+        save.player_offhands = Some(vec![SavedSlot::Material { material_id: crate::item::MaterialId::Stick, count: 2 }]);
         save.block_authors = Some(crate::authorship::SavedAuthorship {
             keys: vec![crate::authorship::AuthorKey::Npub("npub1populated".into())],
             chunks: vec![(0, 4, 0, vec![(3, 0)])],
@@ -8312,8 +8364,9 @@ mod tests {
         let save = save_with_populated_tail(seed);
         let mut expected = save_with_populated_tail(seed);
         let mut body = bincode::serialize(&save).unwrap();
-        for index in (n + 1..=62).rev() {
+        for index in (n + 1..=63).rev() {
             let len = match index {
+                63 => { expected.player_offhands = None; bincode::serialize(&save.player_offhands).unwrap().len() }
                 62 => { expected.weather_clear_until = None; bincode::serialize(&save.weather_clear_until).unwrap().len() }
                 61 => { expected.site_boards = None; bincode::serialize(&save.site_boards).unwrap().len() }
                 60 => { expected.plot_succession = None; bincode::serialize(&save.plot_succession).unwrap().len() }
@@ -8325,7 +8378,7 @@ mod tests {
                 54 => { expected.quest_world = None; bincode::serialize(&save.quest_world).unwrap().len() }
                 53 => { expected.local_personal = None; bincode::serialize(&save.local_personal).unwrap().len() }
                 52 => { expected.rig_clips = Vec::new(); bincode::serialize(&save.rig_clips).unwrap().len() }
-                other => panic!("fixture only knows fields 52..=62, not {other}"),
+                other => panic!("fixture only knows fields 52..=63, not {other}"),
             };
             body.truncate(body.len() - len);
         }
@@ -8409,7 +8462,7 @@ mod tests {
     #[test]
     fn regression_padded_or_unknown_footer_bodies_are_still_refused() {
         let seed = 24;
-        let (_, body) = writer_with_fields(seed, 62);
+        let (_, body) = writer_with_fields(seed, 63);
         // Trailing bytes past the last field (not the footer) are not a clean body.
         let mut padded = body.clone();
         padded.push(0);

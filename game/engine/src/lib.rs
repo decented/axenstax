@@ -317,6 +317,7 @@ mod rig_studio_ui;
 mod hostile_acts;
 mod grave;
 mod death;
+mod hands;
 mod starter_kit;
 mod inventory_sync;
 mod joiner_save;
@@ -4120,7 +4121,7 @@ fn run_screenshot(args: &[String]) {
         let viewport = crate::screen::ViewportRect { x: 0, y: 0, width, height };
         renderer.render_to_png_with_hud(output_path, |ctx, assets| {
             crate::hud_ui::draw_hud(
-                ctx, &viewport, 0, &inventory, 0, &registry, assets,
+                ctx, &viewport, 0, &inventory, 0, crate::hud_ui::OffhandBox::Hidden, &registry, assets,
                 13.0, 20.0, 11, 20, 6, false, false,
                 eye, world_time, false, None, crate::hud_ui::PerfSamples::default(),
                 crate::hud_ui::DebugReadout {

@@ -201,6 +201,8 @@ enum TouchZone {
     Joystick,
     Look,
     Hotbar(usize),
+    /// The off-hand box left of the hotbar (`hud_ui::HotbarGeom::offhand_box`).
+    Offhand,
     Button(ButtonKind),
 }
 
@@ -232,6 +234,8 @@ pub struct TouchInput {
     pub chat_pressed: bool,
     pub inventory_pressed: bool,
     pub camera_cycle: bool,
+    /// A tap on the off-hand box this frame (swap hands). Edge, cleared by `end_frame`.
+    pub swap_hands: bool,
     pub hotbar_select: Option<usize>,
 
     // Screen size in PHYSICAL px (winit reports touch + size in physical px).
@@ -280,6 +284,7 @@ impl TouchInput {
             chat_pressed: false,
             inventory_pressed: false,
             camera_cycle: false,
+            swap_hands: false,
             hotbar_select: None,
             screen_w: 1280.0,
             screen_h: 720.0,
@@ -336,6 +341,13 @@ impl TouchInput {
         let y0 = g.y * ppp;
         let slot_px = (g.slot + g.gap) * ppp;
         let total_px = g.total_w * ppp;
+        // The off-hand box shares the hotbar's geometry (`offhand_box`), so the
+        // box you tap is the one drawn; it beats the joystick quadrant it sits in.
+        let (ox, oy, side) = g.offhand_box();
+        let (ox, oy, side) = (ox * ppp, oy * ppp, side * ppp);
+        if x >= ox && x <= ox + side && y >= oy && y <= oy + side {
+            return TouchZone::Offhand;
+        }
         // Tappable anywhere on the hotbar row down to the screen bottom.
         if y >= y0 && x >= x0 && x <= x0 + total_px {
             let slot = ((x - x0) / slot_px) as usize;
@@ -370,6 +382,7 @@ impl TouchInput {
             TouchZone::Hotbar(slot) => {
                 self.hotbar_select = Some(slot);
             }
+            TouchZone::Offhand => self.swap_hands = true,
             TouchZone::Button(kind) => match kind {
                 ButtonKind::Jump => self.jump_pressed = true,
                 ButtonKind::Place => self.place_pressed = true,
@@ -479,6 +492,7 @@ impl TouchInput {
             workshop_grid: false, // BRIDGE: ditto
             shift_down: false, // BRIDGE: touch has no modifier key
             camera_cycle: self.camera_cycle,
+            swap_hands: self.swap_hands,
             pick_block: false, // BRIDGE: no touch binding — keyboard + mouse only
         }
     }
@@ -515,6 +529,7 @@ impl TouchInput {
         self.hotbar_select = None;
         self.inventory_pressed = false;
         self.camera_cycle = false;
+        self.swap_hands = false;
     }
 }
 

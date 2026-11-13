@@ -4750,9 +4750,8 @@ impl super::GameState {
     /// chain, which sees it as it always did. Every path runs this: single
     /// player, a host's own seats and a joiner (whose fill is the same
     /// `broadcast_change` edit as ever; the server's edit check owns the rest).
-    fn try_bucket_fill(&mut self, pidx: usize) -> bool {
-        let hot = self.players[pidx].hotbar_slot;
-        let empty_bucket = self.players[pidx].inventory.hotbar_slot(hot).is_some_and(|s| {
+    fn try_bucket_fill(&mut self, pidx: usize, hand: crate::hands::Hand) -> bool {
+        let empty_bucket = self.players[pidx].held_for_use(hand).is_some_and(|s| {
             matches!(s.item, crate::item::Item::Material(crate::item::MaterialId::Bucket))
         });
         if !empty_bucket || !self.play_mode.can_edit_world() {
@@ -4779,7 +4778,7 @@ impl super::GameState {
         );
         match hit {
             Some(h) if h.block == block::WATER || h.block == block::LAVA => {
-                self.fill_bucket_at(pidx, h.block_pos, h.block)
+                self.fill_bucket_at(pidx, hand, h.block_pos, h.block)
             }
             _ => false,
         }
@@ -4791,8 +4790,7 @@ impl super::GameState {
     /// sim for source-ness and, when it fills, mirror the mine path
     /// (remove_source + notify so adjacent liquid retracts), clear the block,
     /// and swap the empty Bucket for the filled one. True when it filled.
-    fn fill_bucket_at(&mut self, pidx: usize, pos: [i32; 3], target_blk: block::BlockId) -> bool {
-        let hotbar = self.players[pidx].hotbar_slot;
+    fn fill_bucket_at(&mut self, pidx: usize, hand: crate::hands::Hand, pos: [i32; 3], target_blk: block::BlockId) -> bool {
         let is_water = target_blk == block::WATER;
         let is_source = if is_water {
             self.water.is_source(pos[0], pos[1], pos[2])
@@ -4800,8 +4798,7 @@ impl super::GameState {
             self.lava.is_source(pos[0], pos[1], pos[2])
         };
         let held = self.players[pidx]
-            .inventory
-            .hotbar_slot(hotbar)
+            .held_for_use(hand)
             .map(|s| s.item.clone());
         let Some(filled) = held.and_then(|h| crate::bucket::fill_result(&h, target_blk, is_source)) else {
             return false;
@@ -4819,8 +4816,7 @@ impl super::GameState {
         let may_spend = self.hand_may_spend(pidx);
         if !may_spend
             || !self.players[pidx]
-                .inventory
-                .consume_one_material(hotbar, crate::item::MaterialId::Bucket)
+                .consume_one_material_for(hand, crate::item::MaterialId::Bucket)
         {
             return !may_spend;
         }
@@ -9148,6 +9144,7 @@ impl super::GameState {
                                         slot.hotbar_slot = ps.hotbar_slot;
                                         crate::save::restore_inventory(&mut slot.inventory, &ps.inventory);
                                         slot.armour_slots = crate::save::restore_armour_slots(&ps.armour_slots);
+                                        slot.offhand = crate::save::restore_offhand(save_data.player_offhands.as_ref(), i);
                                         // Spec 19 — restore per-village reputation.
                                         slot.reputation = crate::reputation::Reputation::default();
                                         for &(vid, score) in &ps.reputation {
@@ -11455,6 +11452,28 @@ impl super::GameState {
                 }
             }
 
+            // F — swap the main-hand item with the off-hand (`hands::swap`).
+            // F is also the skin painter's Fill tool, so a paint session owns it.
+            // BRIDGE: a joined client has no off-hand yet (its window and use
+            // packets carry none) — replace when slice 2 of the off-hand plan
+            // lands; until then F says so rather than doing nothing.
+            if intent.swap_hands
+                && intent.cursor_captured
+                && self.skin_paint.is_none()
+                && !self.players[pidx].crafting_ui.open
+            {
+                if self.joined() {
+                    if pidx == 0 {
+                        self.toast = Some((
+                            "The off-hand isn't available in joined games yet.".to_string(),
+                            Instant::now() + Duration::from_secs(2),
+                        ));
+                    }
+                } else {
+                    self.players[pidx].swap_hands();
+                }
+            }
+
             // Spec 28f — Inventory Explorer overlay (B key). Toggles
             // open/closed per player; cursor releases on open + recaptures
             // on close (same pattern as crafting UI).
@@ -13631,6 +13650,36 @@ impl super::GameState {
                 }
             }
 
+            // Which hand this click uses (`hands::use_hand`): the main hand
+            // unless its item has no use for what is aimed at and the off-hand
+            // item has. Every held-item read and take below goes through
+            // `held_for_use(hand)` and its `*_for(hand)` takes. BRIDGE: a joined
+            // client's use packets carry no hand yet, so it always uses the
+            // main hand — replace when the off-hand reaches the wire (slice 2
+            // of the off-hand plan).
+            let hand = if self.joined()
+                || self.players[pidx].offhand.is_none()
+                || !(intent.place_block && intent.cursor_captured)
+            {
+                crate::hands::Hand::Main
+            } else {
+                let p = &self.players[pidx];
+                let target = crate::hands::UseTarget {
+                    block: p.target_block.map(|b| self.world.get_block(b[0], b[1], b[2])),
+                    mob: matches!(
+                        crate::combat::find_attack_target(&self.ecs, p.player.eye_pos(), p.camera.forward()),
+                        Some((_, Some(_)))
+                    ),
+                    wants_to_eat: p.combat.hunger < p.combat.max_hunger || p.combat.health < p.combat.max_health,
+                    arrows: p.inventory.count_material(crate::item::MaterialId::Arrow) > 0
+                        || crate::shot::offhand_has_ammo(crate::protocol::ShotWeapon::Bow, p.offhand.as_ref()),
+                    rubber_balls: p.inventory.count_material(crate::item::MaterialId::RubberBall) > 0
+                        || crate::shot::offhand_has_ammo(crate::protocol::ShotWeapon::Slingshot, p.offhand.as_ref()),
+                };
+                let (main, off) = p.hands_items();
+                crate::hands::use_hand(main, off, &target)
+            };
+
             // Spec 36 Lead tether (2026-05-28) — right-click while holding
             // a Lead is context-sensitive on the target. Targeting a
             // passive mob attaches it to the player (the mob now follows);
@@ -13656,9 +13705,7 @@ impl super::GameState {
                 && self.joined()
                 && let Some(mob) = self.joined_mob_under_crosshair(pidx)
                 && let Some(click) = {
-                    let held = self.players[pidx]
-                        .inventory
-                        .hotbar_slot(self.players[pidx].hotbar_slot)
+                    let held = self.players[pidx].held_for_use(hand)
                         .map(|s| &s.item);
                     mob.right_click_action(held, intent.sneak)
                 }
@@ -13691,9 +13738,7 @@ impl super::GameState {
                 && self.joined()
                 && let Some(pos) = self.players[pidx].target_block
                 && crate::block::is_fence_post(self.world.get_block(pos[0], pos[1], pos[2]))
-                && self.players[pidx]
-                    .inventory
-                    .hotbar_slot(self.players[pidx].hotbar_slot)
+                && self.players[pidx].held_for_use(hand)
                     .is_some_and(|s| {
                         s.item == crate::item::Item::Material(crate::item::MaterialId::Lead)
                     })
@@ -13708,9 +13753,7 @@ impl super::GameState {
                 && intent.cursor_captured
                 && self.players[pidx].place_cooldown == 0
             {
-                let holding_lead = self.players[pidx]
-                    .inventory
-                    .hotbar_slot(self.players[pidx].hotbar_slot)
+                let holding_lead = self.players[pidx].held_for_use(hand)
                     .map(|s| matches!(
                         &s.item,
                         crate::item::Item::Material(crate::item::MaterialId::Lead)
@@ -13722,8 +13765,7 @@ impl super::GameState {
                     // Path A — targeting a passive mob → attach
                     // (`mob_interact::lead_attach`, shared with a joiner's
                     // `EntityInteract` on the server, MP-D2b).
-                    let hot = self.players[pidx].hotbar_slot;
-                    let held = self.players[pidx].inventory.hotbar_slot(hot).map(|s| s.item.clone());
+                    let held = self.players[pidx].held_for_use(hand).map(|s| s.item.clone());
                     let key = crate::tameable::local_owner_key(pidx);
                     let actor = crate::mob_interact::Actor {
                         owner_key: Some(&key),
@@ -13741,7 +13783,7 @@ impl super::GameState {
                         )
                         .is_some()
                         {
-                            let _ = self.players[pidx].inventory.take_one_from_hotbar(hot);
+                            let _ = self.players[pidx].take_one_for(hand);
                             self.audio.play_place();
                             self.players[pidx].place_cooldown = 8;
                             lead_consumed = true;
@@ -13761,7 +13803,7 @@ impl super::GameState {
                         )
                         .is_some()
                     {
-                        let _ = self.players[pidx].inventory.take_one_from_hotbar(hot);
+                        let _ = self.players[pidx].take_one_for(hand);
                         self.audio.play_place();
                         self.players[pidx].place_cooldown = 8;
                         lead_consumed = true;
@@ -13787,10 +13829,7 @@ impl super::GameState {
                 && intent.cursor_captured
                 && self.players[pidx].place_cooldown == 0
             {
-                let hot = self.players[pidx].hotbar_slot;
-                let held_mat = self.players[pidx]
-                    .inventory
-                    .hotbar_slot(hot)
+                let held_mat = self.players[pidx].held_for_use(hand)
                     .and_then(|s| match &s.item {
                         crate::item::Item::Material(m) => Some(*m),
                         _ => None,
@@ -13812,7 +13851,7 @@ impl super::GameState {
                         )
                         .is_some()
                         {
-                            self.players[pidx].inventory.consume_one_material(hot, mat);
+                            self.players[pidx].consume_one_material_for(hand, mat);
                             self.audio.play_place();
                             self.players[pidx].place_cooldown = 8;
                             breeding_fed = true;
@@ -13857,11 +13896,12 @@ impl super::GameState {
                 && crate::local_mob_click::plan_at_crosshair(
                     &self.ecs,
                     &self.players[pidx],
+                    hand,
                     intent.sneak,
                     tick,
                 ) == crate::local_mob_click::MobArm::Refused;
             if let Some(click) =
-                crate::local_mob_click::harvest(&mut self.ecs, &mut self.players[pidx], clicked, tick)
+                crate::local_mob_click::harvest(&mut self.ecs, &mut self.players[pidx], hand, clicked, tick)
             {
                 let eats_click = click.eats_click();
                 let (target, kind, r) = (click.target, click.kind, click.interaction);
@@ -13915,6 +13955,7 @@ impl super::GameState {
             if let Some(click) = crate::local_mob_click::tame_companion(
                 &mut self.ecs,
                 &mut self.players[pidx],
+                hand,
                 pidx,
                 clicked && !mob_refused,
                 tick,
@@ -13955,9 +13996,7 @@ impl super::GameState {
                 && self.players[pidx].place_cooldown == 0
             {
                 let hot = self.players[pidx].hotbar_slot;
-                let holding_rod = self.players[pidx]
-                    .inventory
-                    .hotbar_slot(hot)
+                let holding_rod = self.players[pidx].held_for_use(hand)
                     .is_some_and(|s| matches!(
                         &s.item,
                         crate::item::Item::Tool(t)
@@ -14020,7 +14059,11 @@ impl super::GameState {
                                 // C3c-2 — the shared reel: the catch in, then the
                                 // rod's wear by `use_hotbar_tool` (a rod at 0
                                 // breaks); what doesn't fit drops at the player.
-                                let reeled = crate::fishing::reel_in(&mut self.players[pidx].inventory, hot, seed);
+                                let p = &mut self.players[pidx];
+                                let reeled = match hand {
+                                    crate::hands::Hand::Main => crate::fishing::reel_in(&mut p.inventory, hot, seed),
+                                    crate::hands::Hand::Off => crate::fishing::reel_in_with(&mut p.inventory, &mut p.offhand, seed),
+                                };
                                 let name = reeled.catch.item.name(&self.registry);
                                 let n = reeled.catch.count;
                                 let full = reeled.leftover.is_some();
@@ -14072,8 +14115,7 @@ impl super::GameState {
                 && self.players[pidx].riding.is_none()
                 && !mob_refused
             {
-                let hot = self.players[pidx].hotbar_slot;
-                let held_slot = self.players[pidx].inventory.hotbar_slot(hot);
+                let held_slot = self.players[pidx].held_for_use(hand);
                 let held_chest = held_slot
                     .is_some_and(|s| matches!(&s.item, crate::item::Item::Block(b) if *b == block::CHEST) && s.count != 0);
                 let held_empty = held_slot.is_none();
@@ -14091,7 +14133,7 @@ impl super::GameState {
                                 && hd.is_kept()
                                 && hd.pack.is_none()
                                 && next_revision.is_some()
-                                && self.players[pidx].inventory.take_block_from_hotbar(hot) == Some(block::CHEST)
+                                && self.players[pidx].take_block_for(hand) == Some(block::CHEST)
                             {
                                 hd.pack = Some(crate::chest::ChestData::default());
                                 equipped = true;
@@ -14195,9 +14237,7 @@ impl super::GameState {
                 && self.players[pidx].place_cooldown == 0
                 && !mob_refused
             {
-                let holding_lead = self.players[pidx]
-                    .inventory
-                    .hotbar_slot(self.players[pidx].hotbar_slot)
+                let holding_lead = self.players[pidx].held_for_use(hand)
                     .map(|s| matches!(
                         &s.item,
                         crate::item::Item::Material(crate::item::MaterialId::Lead)
@@ -14206,9 +14246,7 @@ impl super::GameState {
                 if !holding_lead {
                     let look_dir = self.players[pidx].camera.forward();
                     let eye = self.players[pidx].player.eye_pos();
-                    let held = self.players[pidx]
-                        .inventory
-                        .hotbar_slot(self.players[pidx].hotbar_slot)
+                    let held = self.players[pidx].held_for_use(hand)
                         .map(|s| s.item.clone());
                     if let Some((target, Some(_kind))) =
                         crate::combat::find_attack_target(&self.ecs, eye, look_dir)
@@ -14331,8 +14369,7 @@ impl super::GameState {
                         // (Companion TAMING is the earlier companion-tame
                         // block.) All through `mob_interact`, shared with a
                         // joiner's `EntityInteract` (MP-D2b).
-                        let hotbar = self.players[pidx].hotbar_slot;
-                        let held = self.players[pidx].inventory.hotbar_slot(hotbar).map(|s| s.item.clone());
+                        let held = self.players[pidx].held_for_use(hand).map(|s| s.item.clone());
                         let key = crate::tameable::local_owner_key(pidx);
                         let actor = crate::mob_interact::Actor {
                             owner_key: Some(&key),
@@ -14359,7 +14396,7 @@ impl super::GameState {
                             if r.consume > 0
                                 && let Some(crate::item::Item::Material(m)) = held
                             {
-                                self.players[pidx].inventory.consume_one_material(hotbar, m);
+                                self.players[pidx].consume_one_material_for(hand, m);
                             }
                             if let Some(ev) = r.challenge {
                                 self.fire_challenge(ev);
@@ -14402,7 +14439,6 @@ impl super::GameState {
                 && intent.cursor_captured
                 && self.players[pidx].place_cooldown == 0
             {
-                let hotbar = self.players[pidx].hotbar_slot;
                 // Living world S3 (review M1) — food held at a Feast Table or
                 // a Feast Marker is for the feast (or for reading the marker),
                 // never eaten: the click falls through to the use chain below.
@@ -14410,9 +14446,7 @@ impl super::GameState {
                     crate::feast::is_feast_block(self.world.get_block(b[0], b[1], b[2]))
                 });
                 let is_food = !at_feast
-                    && self.players[pidx]
-                        .inventory
-                        .hotbar_slot(hotbar)
+                    && self.players[pidx].held_for_use(hand)
                         .map(|s| s.item.is_food())
                         .unwrap_or(false);
                 // A joiner reads these from the server's copy: its hunger
@@ -14445,7 +14479,7 @@ impl super::GameState {
                     self.players[pidx].start_eat_cooldown();
                     ate = true;
                 } else if can_eat
-                    && let Some((value, poison)) = self.players[pidx].inventory.try_eat_hotbar(hotbar) {
+                    && let Some((value, poison)) = self.players[pidx].try_eat_for(hand) {
                         crate::item_actions::eat(&mut self.players[pidx].combat, value, poison);
                         self.fire_challenge(crate::scenario::ChallengeEvent::EatFood);
                         // Eating is a deliberate action — small cooldown so
@@ -14471,7 +14505,7 @@ impl super::GameState {
                 // frame rate. Between shots the held click is still the bow's:
                 // it doesn't fall through to placing or opening.
                 if !ate {
-                    let held = self.players[pidx].inventory.hotbar_slot(hotbar).map(|s| s.item.clone());
+                    let held = self.players[pidx].held_for_use(hand).map(|s| s.item.clone());
                     let now = self.tick_counter;
                     if let Some(weapon) = crate::shot::weapon_of(held.as_ref()) {
                         if !self.players[pidx].shot_ready(now) {
@@ -14489,19 +14523,16 @@ impl super::GameState {
                             }
                             let p = &self.players[pidx];
                             crate::strict_requests::NoPrediction::check(no_prediction, &p.crafting_ui, &p.inventory, &p.armour_slots);
-                        } else if let Some(slot_idx) = crate::shot::find_ammo(&self.players[pidx].inventory, weapon)
-                            && let Some(mut stack) = self.players[pidx].inventory.slot(slot_idx).cloned()
-                        {
-                            // Consume one from that stack (no auto-refill).
-                            stack.count = stack.count.saturating_sub(1);
-                            self.players[pidx].inventory.set_slot(slot_idx, (stack.count > 0).then_some(stack));
+                        // One round of ammo: from the off-hand first when it holds
+                        // some the weapon can shoot, then the bag (no auto-refill).
+                        } else if self.players[pidx].take_shot_ammo(weapon) {
                             // Fire from the player's eye along the camera.
                             let eye = self.players[pidx].player.eye_pos();
                             let dir = self.players[pidx].camera.forward();
                             let shot = crate::shot::launch(weapon, eye, dir, crate::shot::max_charge(weapon));
                             crate::shot::spawn(&mut self.ecs, &shot, Some(crate::entity::Shooter::local(pidx)));
                             // Weapon durability + the shot's cadence.
-                            let info = self.players[pidx].inventory.use_hotbar_tool(hotbar);
+                            let info = self.players[pidx].use_tool_for(hand);
                             self.handle_tool_use(info);
                             self.players[pidx].arm_shot(now);
                             self.players[pidx].place_cooldown = 8;
@@ -14528,9 +14559,7 @@ impl super::GameState {
                 // plans aren't valid place-as-block items but both
                 // outcomes still want a useful right-click action.
                 let hot = self.players[pidx].hotbar_slot;
-                let plan_held = self.players[pidx]
-                    .inventory
-                    .hotbar_slot(hot)
+                let plan_held = self.players[pidx].held_for_use(hand)
                     .and_then(|s| match &s.item {
                         crate::item::Item::Plan(p) => Some(p.clone()),
                         _ => None,
@@ -14577,9 +14606,7 @@ impl super::GameState {
                                                 crate::block::CYANOTYPE_PRINT,
                                                 author.as_ref(),
                                             );
-                                            let _ = self.players[pidx]
-                                                .inventory
-                                                .take_one_from_hotbar(hot);
+                                            let _ = self.players[pidx].take_one_for(hand);
                                             let spent = Some(crate::item::Item::Plan(plan.clone()));
                                             self.push_use_edit_costing(cell, crate::block::CYANOTYPE_PRINT, tag, spent, None, 0);
                                             self.rebuild_chunk_at(place.0, place.1, place.2);
@@ -14627,9 +14654,7 @@ impl super::GameState {
                                             plan,
                                         );
                                         if laid {
-                                            let _ = self.players[pidx]
-                                                .inventory
-                                                .take_one_from_hotbar(hot);
+                                            let _ = self.players[pidx].take_one_for(hand);
                                             self.rebuild_chunk_at(pos[0], pos[1], pos[2]);
                                         }
                                     }
@@ -14652,9 +14677,7 @@ impl super::GameState {
                 // consumed, just a short cooldown. The `continue` claims the
                 // click (same pattern as the plan-lay branch above) so the
                 // target_block chain can't also process it.
-                let whistle_held = self.players[pidx]
-                    .inventory
-                    .hotbar_slot(hot)
+                let whistle_held = self.players[pidx].held_for_use(hand)
                     .is_some_and(|s| matches!(
                         s.item,
                         crate::item::Item::Material(crate::item::MaterialId::RecallWhistle),
@@ -14707,7 +14730,7 @@ impl super::GameState {
                 // fluid-aware ray (`try_bucket_fill`); `target_block`'s ray
                 // passes through water, so the chain below could never see a
                 // pond. After every mob arm above: a ready cow still milks.
-                if self.try_bucket_fill(pidx) {
+                if self.try_bucket_fill(pidx, hand) {
                     continue;
                 }
 
@@ -15049,9 +15072,8 @@ impl super::GameState {
                             continue;
                         }
                         let pos_key = (pos[0], pos[1], pos[2]);
-                        let hot = self.players[pidx].hotbar_slot;
                         if let Some(held) =
-                            self.players[pidx].inventory.hotbar_slot(hot).cloned()
+                            self.players[pidx].held_for_use(hand).cloned()
                         {
                             // Placed generators register on place; lazily ensure
                             // the device exists for any that don't.
@@ -15071,9 +15093,7 @@ impl super::GameState {
                                     crate::power::try_load_generator_fuel(d, &held)
                                 });
                             if loaded {
-                                let _ = self.players[pidx]
-                                    .inventory
-                                    .take_one_from_hotbar(hot);
+                                let _ = self.players[pidx].take_one_for(hand);
                                 self.world.mark_dirty(pos_key);
                                 self.world.notify_neighbours(pos_key);
                             }
@@ -15092,8 +15112,7 @@ impl super::GameState {
                             continue;
                         }
                         let pos_key = (pos[0], pos[1], pos[2]);
-                        let hotbar = self.players[pidx].hotbar_slot;
-                        let held = self.players[pidx].inventory.hotbar_slot(hotbar).cloned();
+                        let held = self.players[pidx].held_for_use(hand).cloned();
                         let used = crate::block_use::use_block(
                             &mut self.world,
                             pos_key,
@@ -15105,7 +15124,7 @@ impl super::GameState {
                             Ok(used) => {
                                 // A bucket is taken (the milking idiom).
                                 if used.pay > 0 {
-                                    let _ = self.players[pidx].inventory.take_one_from_hotbar(hotbar);
+                                    let _ = self.players[pidx].take_one_for(hand);
                                 }
                                 for item in used.gain {
                                     if let Some(leftover) = self.players[pidx].inventory.add_item(item) {
@@ -15117,7 +15136,7 @@ impl super::GameState {
                                 }
                                 // Shears wear.
                                 if used.wear {
-                                    let info = self.players[pidx].inventory.use_hotbar_tool(hotbar);
+                                    let info = self.players[pidx].use_tool_for(hand);
                                     self.handle_tool_use(info);
                                 }
                                 self.audio.play_place();
@@ -15206,8 +15225,7 @@ impl super::GameState {
                             continue;
                         }
                         let pos_key = (pos[0], pos[1], pos[2]);
-                        let hot = self.players[pidx].hotbar_slot;
-                        let held = self.players[pidx].inventory.hotbar_slot(hot).cloned();
+                        let held = self.players[pidx].held_for_use(hand).cloned();
                         if let Ok(used) = crate::block_use::use_block(
                             &mut self.world,
                             pos_key,
@@ -15216,7 +15234,7 @@ impl super::GameState {
                             &|_| true,
                         ) {
                             if used.pay > 0 {
-                                let _ = self.players[pidx].inventory.take_one_from_hotbar(hot);
+                                let _ = self.players[pidx].take_one_for(hand);
                                 self.audio.play_place();
                             }
                             for stack in used.gain {
@@ -15253,8 +15271,7 @@ impl super::GameState {
                             continue;
                         }
                         let pos_key = (pos[0], pos[1], pos[2]);
-                        let hot = self.players[pidx].hotbar_slot;
-                        let held = self.players[pidx].inventory.hotbar_slot(hot).cloned();
+                        let held = self.players[pidx].held_for_use(hand).cloned();
                         // The item is taken only once the frame has it, so a
                         // held item is never lost.
                         if let Ok(used) = crate::block_use::use_block(
@@ -15265,7 +15282,7 @@ impl super::GameState {
                             &|_| true,
                         ) && used.pay > 0
                         {
-                            let _ = self.players[pidx].inventory.take_one_from_hotbar(hot);
+                            let _ = self.players[pidx].take_one_for(hand);
                         }
                         self.rebuild_chunk_at(pos[0], pos[1], pos[2]);
                         self.players[pidx].place_cooldown = 8;
@@ -15343,9 +15360,7 @@ impl super::GameState {
                         // difference is whether we also pin a rider reference.
                         let cell = (pos[0], pos[1], pos[2]);
                         let look = self.players[pidx].camera.forward();
-                        let empty_hand = self.players[pidx]
-                            .inventory
-                            .hotbar_slot(self.players[pidx].hotbar_slot)
+                        let empty_hand = self.players[pidx].held_for_use(hand)
                             .is_none();
                         if let Some(cart_entity) =
                             crate::cart::dispatch_cart(&mut self.ecs, &mut self.world, cell, look)
@@ -15364,9 +15379,7 @@ impl super::GameState {
                         continue;
                     } else if target_blk == crate::rail::TRACK
                         && self.play_mode.can_edit_world()
-                        && self.players[pidx]
-                            .inventory
-                            .hotbar_slot(self.players[pidx].hotbar_slot)
+                        && self.players[pidx].held_for_use(hand)
                             .and_then(|s| match &s.item {
                                 crate::item::Item::Material(m) => {
                                     crate::cart::cart_hull_for_item(*m)
@@ -15404,15 +15417,12 @@ impl super::GameState {
                             continue;
                         }
                         let cell = (pos[0], pos[1], pos[2]);
-                        let hotbar = self.players[pidx].hotbar_slot;
                         // Re-resolve the hull + its material id from the held item.
                         // The `else if` guard above already proved this is a cart
                         // item, so both unwraps are infallible here; we recompute
                         // (rather than thread a value out of the guard) to keep the
                         // arm self-contained.
-                        let placed = self.players[pidx]
-                            .inventory
-                            .hotbar_slot(hotbar)
+                        let placed = self.players[pidx].held_for_use(hand)
                             .and_then(|s| match &s.item {
                                 crate::item::Item::Material(m) => {
                                     crate::cart::cart_hull_for_item(*m).map(|h| (h, *m))
@@ -15424,15 +15434,11 @@ impl super::GameState {
                             crate::cart::spawn_cart_with_hull(&mut self.ecs, cell, hull);
                             // Consume exactly one cart item (validates the material,
                             // clears the slot at zero) — mirrors the bonemeal path.
-                            let _ = self.players[pidx]
-                                .inventory
-                                .consume_one_material(hotbar, mat);
+                            let _ = self.players[pidx].consume_one_material_for(hand, mat);
                             self.players[pidx].place_cooldown = 8;
                         }
                         continue;
-                    } else if self.play_mode.can_edit_world() && target_blk == block::GRASS && self.players[pidx]
-                        .inventory
-                        .hotbar_slot(self.players[pidx].hotbar_slot)
+                    } else if self.play_mode.can_edit_world() && target_blk == block::GRASS && self.players[pidx].held_for_use(hand)
                         .map(|s| matches!(s.item, crate::item::Item::Material(crate::item::MaterialId::Bonemeal)))
                         .unwrap_or(false)
                     {
@@ -15444,14 +15450,11 @@ impl super::GameState {
                         let above = [pos[0], pos[1] + 1, pos[2]];
                         let above_blk = self.world.get_block(above[0], above[1], above[2]);
                         if crate::use_edits::grows_tall_grass(target_blk, above_blk) {
-                            let hotbar = self.players[pidx].hotbar_slot;
                             let tag = self.use_tag(pidx, crate::use_edits::UseKind::GrowGrass, above);
                             // C3c-1-fix (M-1) — not bone meal a block use in
                             // flight claims.
                             if self.hand_may_spend(pidx)
-                                && self.players[pidx]
-                                    .inventory
-                                    .consume_one_material(hotbar, crate::item::MaterialId::Bonemeal)
+                                && self.players[pidx].consume_one_material_for(hand, crate::item::MaterialId::Bonemeal)
                             {
                                 self.world.set_block(above[0], above[1], above[2], block::TALL_GRASS);
                                 self.push_use_edit(above, block::TALL_GRASS, tag, None, 0);
@@ -15468,10 +15471,7 @@ impl super::GameState {
                         // Held fuel item → add fuel ticks (no auto-ignite).
                         // Held raw meat → place in first empty slot.
                         // Empty hand → pick up first cooked-meat slot.
-                        let hotbar = self.players[pidx].hotbar_slot;
-                        let held = self.players[pidx]
-                            .inventory
-                            .hotbar_slot(hotbar)
+                        let held = self.players[pidx].held_for_use(hand)
                             .cloned();
                         let pos_arr = [pos[0], pos[1], pos[2]];
                         let pos_key = (pos[0], pos[1], pos[2]);
@@ -15561,7 +15561,7 @@ impl super::GameState {
                             // F&S clears the slot. (The Firestarter never
                             // wears.)
                             if wore {
-                                let info = self.players[pidx].inventory.use_hotbar_tool(hotbar);
+                                let info = self.players[pidx].use_tool_for(hand);
                                 self.handle_tool_use(info);
                             }
                             self.players[pidx].place_cooldown = 8;
@@ -15590,7 +15590,7 @@ impl super::GameState {
                                     self.audio.play_place();
                                 }
                             // Tool wear (parity with the campfire ignite path).
-                            let info = self.players[pidx].inventory.use_hotbar_tool(hotbar);
+                            let info = self.players[pidx].use_tool_for(hand);
                             self.handle_tool_use(info);
                             self.players[pidx].place_cooldown = 8;
                             self.players[pidx].friction_target = None;
@@ -15624,7 +15624,7 @@ impl super::GameState {
                                     broadcast_change(&self.world, fx, fy, fz, block::FIRE),
                                 );
                                 self.audio.play_place();
-                                let info = self.players[pidx].inventory.use_hotbar_tool(hotbar);
+                                let info = self.players[pidx].use_tool_for(hand);
                                 self.handle_tool_use(info);
                                 self.players[pidx].place_cooldown = 8;
                                 self.players[pidx].friction_target = None;
@@ -15703,9 +15703,7 @@ impl super::GameState {
                                     let success = matches!(&lit, Some(Ok(used)) if used.relit);
                                     // Consume one stick regardless.
                                     if matches!(&lit, Some(Ok(used)) if used.pay > 0) {
-                                        self.players[pidx].inventory.consume_one_material(
-                                            hotbar,
-                                            crate::item::MaterialId::Stick,
+                                        self.players[pidx].consume_one_material_for(hand, crate::item::MaterialId::Stick,
                                         );
                                     }
                                     if success {
@@ -15809,11 +15807,11 @@ impl super::GameState {
                                         // is, so auto-refill pulls the next stack
                                         // in when the slot empties.
                                         if used.pay > 0 {
-                                            let inv = &mut self.players[pidx].inventory;
+                                            let p = &mut self.players[pidx];
                                             if matches!(held.as_ref().map(|s| &s.item), Some(crate::item::Item::Block(_))) {
-                                                let _ = inv.take_block_from_hotbar(hotbar);
+                                                let _ = p.take_block_for(hand);
                                             } else {
-                                                let _ = inv.take_one_from_hotbar(hotbar);
+                                                let _ = p.take_one_for(hand);
                                             }
                                         }
                                         // Spec 30 — a smouldering campfire + fuel =
@@ -15874,8 +15872,7 @@ impl super::GameState {
                         // C3b-2 — the rule is `block_use::use_drying_rack`,
                         // shared with the server; a joiner asks it to use the
                         // real rack (only with a green log or an empty hand).
-                        let hotbar = self.players[pidx].hotbar_slot;
-                        let held = self.players[pidx].inventory.hotbar_slot(hotbar).cloned();
+                        let held = self.players[pidx].held_for_use(hand).cloned();
                         if self.joined() {
                             if held.is_none()
                                 || crate::block_use::claim(crate::block_use::UseKind::DryingRack, held.as_ref().map(|s| &s.item)) > 0
@@ -15899,7 +15896,7 @@ impl super::GameState {
                         match used {
                             Ok(used) => {
                                 if used.pay > 0 {
-                                    let _ = self.players[pidx].inventory.take_one_from_hotbar(hotbar);
+                                    let _ = self.players[pidx].take_one_for(hand);
                                 }
                                 for stack in used.gain {
                                     let _ = self.players[pidx].inventory.add_item(stack);
@@ -15940,9 +15937,7 @@ impl super::GameState {
                         self.players[pidx].place_cooldown = 8;
                     } else if self.play_mode.can_edit_world()
                         && crate::use_edits::erases(target_blk)
-                        && self.players[pidx]
-                            .inventory
-                            .hotbar_slot(self.players[pidx].hotbar_slot)
+                        && self.players[pidx].held_for_use(hand)
                             .is_some_and(|s| matches!(
                                 &s.item,
                                 crate::item::Item::Tool(t) if t.tool_type == crate::crafting::ToolType::Eraser
@@ -15954,10 +15949,9 @@ impl super::GameState {
                         // PapyrusSheet to inventory, decrements Eraser
                         // durability by 1. Players reclaim paper from
                         // mistake placements without losing the eraser.
-                        let hotbar = self.players[pidx].hotbar_slot;
                         // C3c-1 — the Eraser as it was before this use wore it.
                         let tag = self.use_tag(pidx, crate::use_edits::UseKind::Erase, pos);
-                        let info = self.players[pidx].inventory.use_hotbar_tool(hotbar);
+                        let info = self.players[pidx].use_tool_for(hand);
                         self.handle_tool_use(info);
                         self.world.set_block(pos[0], pos[1], pos[2], block::AIR);
                         // Owner-inbox #1/2/3 — erasing the tile clears its
@@ -15977,9 +15971,7 @@ impl super::GameState {
                         self.push_use_edit(pos, block::AIR, tag, Some(paper), unfit);
                         self.audio.play_break();
                         self.players[pidx].place_cooldown = 8;
-                    } else if self.players[pidx]
-                        .inventory
-                        .hotbar_slot(self.players[pidx].hotbar_slot)
+                    } else if self.players[pidx].held_for_use(hand)
                         .is_some_and(|s| matches!(
                             &s.item,
                             crate::item::Item::Tool(t)
@@ -16057,9 +16049,7 @@ impl super::GameState {
                     } else if self.play_mode.can_edit_world()
                         && crate::use_edits::tills(target_blk)
                         && self.players[pidx].target_face == [0, 1, 0]
-                        && self.players[pidx]
-                            .inventory
-                            .hotbar_slot(self.players[pidx].hotbar_slot)
+                        && self.players[pidx].held_for_use(hand)
                             .map(|s| matches!(
                                 &s.item,
                                 crate::item::Item::Tool(t) if t.tool_type == crate::crafting::ToolType::Hoe
@@ -16071,13 +16061,12 @@ impl super::GameState {
                         // TOP face of dirt or grass → tilled soil. Only the
                         // top face tills (Minecraft parity); side-face clicks
                         // fall through harmlessly. Hoe loses 1 durability.
-                        let hotbar = self.players[pidx].hotbar_slot;
                         // C3c-1 — the hoe as it was before this use wore it.
                         let tag = self.use_tag(pidx, crate::use_edits::UseKind::Till, pos);
                         self.world.set_block(pos[0], pos[1], pos[2], block::TILLED_SOIL);
                         self.push_use_edit(pos, block::TILLED_SOIL, tag, None, 0);
                         self.rebuild_chunk_at(pos[0], pos[1], pos[2]);
-                        let info = self.players[pidx].inventory.use_hotbar_tool(hotbar);
+                        let info = self.players[pidx].use_tool_for(hand);
                         self.handle_tool_use(info);
                         self.audio.play_place();
                         self.players[pidx].place_cooldown = 8;
@@ -16090,12 +16079,9 @@ impl super::GameState {
                         // air block above. Tilled-soil top face only; side
                         // faces fall through to block-placement which is the
                         // standard "stack a block on top of this" path.
-                        let hotbar = self.players[pidx].hotbar_slot;
                         // C3c-1 — the seed table is `use_edits::sown_crop`,
                         // the rule the server judges a joiner's sowing by.
-                        let seed_kind = self.players[pidx]
-                            .inventory
-                            .hotbar_slot(hotbar)
+                        let seed_kind = self.players[pidx].held_for_use(hand)
                             .and_then(|s| match &s.item {
                                 crate::item::Item::Material(m) => crate::use_edits::sown_crop(*m).map(|b| (*m, b)),
                                 _ => None,
@@ -16107,9 +16093,7 @@ impl super::GameState {
                             if self.play_mode.can_edit_world()
                                 && above_blk == block::AIR
                                 && self.hand_may_spend(pidx)
-                                && self.players[pidx]
-                                    .inventory
-                                    .consume_one_material(hotbar, seed_id)
+                                && self.players[pidx].consume_one_material_for(hand, seed_id)
                             {
                                 // Spec 06 §2.2 — a sown crop is player-placed:
                                 // the flag rides through growth (set_block stage
@@ -16132,9 +16116,7 @@ impl super::GameState {
                         }
                     } else if self.play_mode.can_edit_world()
                         && crate::growth::is_crop(target_blk)
-                        && self.players[pidx]
-                            .inventory
-                            .hotbar_slot(self.players[pidx].hotbar_slot)
+                        && self.players[pidx].held_for_use(hand)
                             .is_some_and(|s| matches!(
                                 s.item,
                                 crate::item::Item::Material(crate::item::MaterialId::Fertiliser)
@@ -16147,10 +16129,7 @@ impl super::GameState {
                         // consume — no waste. Spec 37 Fertiliser (Epsom salt) = +1
                         // stage; Bonemeal (Minecraft parity, P1 gap-closure) is the
                         // stronger, recognisable accelerator at +1–2 stages (seeded).
-                        let hotbar = self.players[pidx].hotbar_slot;
-                        let is_bonemeal = self.players[pidx]
-                            .inventory
-                            .hotbar_slot(hotbar)
+                        let is_bonemeal = self.players[pidx].held_for_use(hand)
                             .is_some_and(|s| matches!(
                                 s.item,
                                 crate::item::Item::Material(crate::item::MaterialId::Bonemeal),
@@ -16175,9 +16154,7 @@ impl super::GameState {
                         let tag = self.use_tag(pidx, crate::use_edits::UseKind::GrowCrop, pos);
                         if let Some(next) = next
                             && self.hand_may_spend(pidx)
-                            && self.players[pidx]
-                                .inventory
-                                .consume_one_material(hotbar, material)
+                            && self.players[pidx].consume_one_material_for(hand, material)
                             {
                                 self.world.set_block(pos[0], pos[1], pos[2], next);
                                 self.push_use_edit(pos, next, tag, None, 0);
@@ -16197,9 +16174,7 @@ impl super::GameState {
                         || target_blk == block::SAND)
                         && self.players[pidx].target_face == [0, 1, 0]
                         && !self.players[pidx].biting()
-                        && self.players[pidx]
-                            .inventory
-                            .hotbar_slot(self.players[pidx].hotbar_slot)
+                        && self.players[pidx].held_for_use(hand)
                             .is_some_and(|s| matches!(
                                 s.item,
                                 crate::item::Item::Material(crate::item::MaterialId::PapyrusReed),
@@ -16210,15 +16185,12 @@ impl super::GameState {
                         // the air block above, gated by `papyrus.rs`'s water-
                         // adjacency check. The placement-base check is in the
                         // papyrus module so the rules stay testable in isolation.
-                        let hotbar = self.players[pidx].hotbar_slot;
                         let reed_cell = [pos[0], pos[1] + 1, pos[2]];
                         let tag = self.use_tag(pidx, crate::use_edits::UseKind::PlantPapyrus, reed_cell);
                         if self.play_mode.can_edit_world()
                             && crate::papyrus::is_valid_planting_base(&self.world, pos[0], pos[1], pos[2])
                             && self.hand_may_spend(pidx)
-                            && self.players[pidx]
-                                .inventory
-                                .consume_one_material(hotbar, crate::item::MaterialId::PapyrusReed)
+                            && self.players[pidx].consume_one_material_for(hand, crate::item::MaterialId::PapyrusReed)
                         {
                             // Spec 06 §2.2 — planted papyrus is player-placed.
                             let author = self.author_for_seat(pidx);
@@ -16230,9 +16202,7 @@ impl super::GameState {
                         }
                     } else if self.play_mode.can_edit_world()
                         && target_blk == block::RUBBER_LOG
-                        && self.players[pidx]
-                            .inventory
-                            .hotbar_slot(self.players[pidx].hotbar_slot)
+                        && self.players[pidx].held_for_use(hand)
                             .is_some_and(|s| matches!(
                                 s.item,
                                 crate::item::Item::Material(crate::item::MaterialId::Bucket),
@@ -16278,9 +16248,7 @@ impl super::GameState {
                             }
                         }
                     } else if self.play_mode.can_edit_world()
-                        && self.players[pidx]
-                            .inventory
-                            .hotbar_slot(self.players[pidx].hotbar_slot)
+                        && self.players[pidx].held_for_use(hand)
                             .is_some_and(|s| matches!(
                                 s.item,
                                 crate::item::Item::Material(crate::item::MaterialId::WaterBucket)
@@ -16293,12 +16261,9 @@ impl super::GameState {
                         // `bucket::empty_result`; the liquid sim flows from the new
                         // source next tick, and water beside lava makes obsidian
                         // via the existing rule.
-                        let hotbar = self.players[pidx].hotbar_slot;
                         let face = self.players[pidx].target_face;
                         let (dx, dy, dz) = (pos[0] + face[0], pos[1] + face[1], pos[2] + face[2]);
-                        let held = self.players[pidx]
-                            .inventory
-                            .hotbar_slot(hotbar)
+                        let held = self.players[pidx].held_for_use(hand)
                             .map(|s| s.item.clone());
                         let tag = self.use_tag(pidx, crate::use_edits::UseKind::BucketEmpty, [dx, dy, dz]);
                         // C3c-1-fix (M-1) — not a filled bucket a block use in
@@ -16307,9 +16272,7 @@ impl super::GameState {
                             .and_then(|h| crate::bucket::empty_result(&h, self.world.get_block(dx, dy, dz)))
                             && !self.commons_blocks_local_edit(pidx, [dx, dy, dz])
                             && self.hand_may_spend(pidx)
-                            && self.players[pidx]
-                                .inventory
-                                .consume_one_material(hotbar, filled)
+                            && self.players[pidx].consume_one_material_for(hand, filled)
                             {
                                 // The block, a meta byte of 0 (`fluids::is_source_meta`,
                                 // whatever an earlier block left in the cell; the
@@ -16342,9 +16305,7 @@ impl super::GameState {
                             }
                     } else if self.play_mode.can_edit_world()
                         && crate::snowfall::target_block_accepts_salt_path(target_blk)
-                        && self.players[pidx]
-                            .inventory
-                            .hotbar_slot(self.players[pidx].hotbar_slot)
+                        && self.players[pidx].held_for_use(hand)
                             .is_some_and(|s| matches!(
                                 s.item,
                                 crate::item::Item::Material(crate::item::MaterialId::Salt),
@@ -16358,14 +16319,11 @@ impl super::GameState {
                         // consumed from the held stack regardless of which
                         // base block was converted. Snowfall painter
                         // naturally skips SALT_PATH (it's not GRASS/DIRT).
-                        let hotbar = self.players[pidx].hotbar_slot;
                         let tag = self.use_tag(pidx, crate::use_edits::UseKind::Salt, pos);
                         // C3c-1-fix (M-1) — not salt a block use in flight
                         // claims.
                         if self.hand_may_spend(pidx)
-                            && self.players[pidx]
-                                .inventory
-                                .consume_one_material(hotbar, crate::item::MaterialId::Salt)
+                            && self.players[pidx].consume_one_material_for(hand, crate::item::MaterialId::Salt)
                         {
                             self.world.set_block(pos[0], pos[1], pos[2], block::SALT_PATH);
                             self.push_use_edit(pos, block::SALT_PATH, tag, None, 0);
@@ -16442,9 +16400,7 @@ impl super::GameState {
                         // blank Blueprint Paper flat on the floor; capture
                         // itself is the Drafting Stamp now, not empty-hand).
                         let hot_art = self.players[pidx].hotbar_slot;
-                        let holding_blueprint_paper = self.players[pidx]
-                            .inventory
-                            .hotbar_slot(hot_art)
+                        let holding_blueprint_paper = self.players[pidx].held_for_use(hand)
                             .is_some_and(|s| matches!(
                                 &s.item,
                                 crate::item::Item::Block(b) if *b == crate::block::BLUEPRINT_PAPER,
@@ -16486,7 +16442,7 @@ impl super::GameState {
                                     continue;
                                 }
                                 if self.players[pidx].inventory.add_item(plan_stack).is_none() {
-                                    let paper = self.players[pidx].inventory.take_one_from_hotbar(hot_art);
+                                    let paper = self.players[pidx].take_one_for(hand);
                                     // C3c-3a — the server mirrors the mint on its
                                     // copy of our window: the Plan's marker
                                     // placeholder lands, then the paper goes.
@@ -16518,10 +16474,7 @@ impl super::GameState {
                         // consume/sound/cooldown. Capture itself is a separate
                         // gesture — the Drafting Stamp (see paper_tile_under) —
                         // not triggered here.
-                        let hot_bp = self.players[pidx].hotbar_slot;
-                        let holding_blank_paper = self.players[pidx]
-                            .inventory
-                            .hotbar_slot(hot_bp)
+                        let holding_blank_paper = self.players[pidx].held_for_use(hand)
                             .is_some_and(|s| matches!(
                                 &s.item,
                                 crate::item::Item::Block(b) if *b == crate::block::BLUEPRINT_PAPER,
@@ -16559,9 +16512,7 @@ impl super::GameState {
                                 );
                                 if laid {
                                     if !self.is_creative {
-                                        let _ = self.players[pidx]
-                                            .inventory
-                                            .take_one_from_hotbar(hot_bp);
+                                        let _ = self.players[pidx].take_one_for(hand);
                                     }
                                     self.rebuild_chunk_at(pos[0], pos[1], pos[2]);
                                     self.audio.play_place();
@@ -16580,10 +16531,7 @@ impl super::GameState {
                         // `pos`, not the adjacent air cell). An already-papered
                         // face or a non-solid target falls through to the generic
                         // solid-block place below (the WALLPAPER_* cube is kept).
-                        let hot_wp = self.players[pidx].hotbar_slot;
-                        let wallpaper_block = self.players[pidx]
-                            .inventory
-                            .hotbar_slot(hot_wp)
+                        let wallpaper_block = self.players[pidx].held_for_use(hand)
                             .and_then(|s| match &s.item {
                                 crate::item::Item::Block(b) if crate::block::is_wallpaper(*b) => {
                                     Some(*b)
@@ -16622,9 +16570,7 @@ impl super::GameState {
                                         crate::world::FaceAttachment::Wallpaper(wp_block),
                                     );
                                     if !self.is_creative {
-                                        let _ = self.players[pidx]
-                                            .inventory
-                                            .take_one_from_hotbar(hot_wp);
+                                        let _ = self.players[pidx].take_one_for(hand);
                                     }
                                     self.rebuild_chunk_at(pos[0], pos[1], pos[2]);
                                     self.audio.play_place();
@@ -16647,9 +16593,7 @@ impl super::GameState {
                             // on the ground", #cable-ground). Empty/non-placeable
                             // hand counts as solid so the step-back toast below
                             // still explains the dead click.
-                            let would_place = self.players[pidx]
-                                .inventory
-                                .hotbar_placeable_id(self.players[pidx].hotbar_slot);
+                            let would_place = self.players[pidx].placeable_id_for(hand);
                             let would_place_solid = would_place
                                 .map(|b| self.registry.is_solid(b))
                                 .unwrap_or(true);
@@ -16746,7 +16690,7 @@ impl super::GameState {
                                 // or sent (it used to be placed, then undone
                                 // and refunded — a take and a refund the server
                                 // never saw). Single-player and joined alike.
-                                let refusal = match self.players[pidx].inventory.hotbar_placeable_id(hotbar) {
+                                let refusal = match self.players[pidx].placeable_id_for(hand) {
                                     // C3d run 21 (run-18 review L4) — joined, a top
                                     // above the world is refused too (before: a Mirror
                                     // half door, a Strict corrected refusal per click).
@@ -16800,7 +16744,12 @@ impl super::GameState {
                                 let block_to_place = if refusal.is_some() {
                                     None
                                 } else if self.is_creative {
-                                    self.players[pidx].inventory.hotbar_placeable_id(hotbar)
+                                    self.players[pidx].placeable_id_for(hand)
+                                } else if hand == crate::hands::Hand::Off {
+                                    // The off-hand is never a joined client's (`hand`
+                                    // is Main while joined), so no request to hold:
+                                    // take it as the hotbar's legacy path does.
+                                    self.players[pidx].take_placeable_for(hand)
                                 } else if self.hand_may_spend(pidx) {
                                     match self.take_for_placement(pidx, hotbar, [place_x, place_y, place_z], existing, face) {
                                         crate::strict_edits::PlaceRoute::Legacy(taken) => taken,
@@ -18332,6 +18281,14 @@ impl super::GameState {
                         &mut player.crafting_ui,
                         &player.inventory,
                         &player.armour_slots,
+                        // No off-hand slot while joined (BRIDGE: the server's
+                        // window has none — replace when slice 2 of the
+                        // off-hand plan lands).
+                        match (&player.offhand, self.remote_client.is_some()) {
+                            (_, true) => crate::hud_ui::OffhandBox::Hidden,
+                            (Some(stack), false) => crate::hud_ui::OffhandBox::Holding(stack),
+                            (None, false) => crate::hud_ui::OffhandBox::Empty,
+                        },
                         &self.registry,
                         &self.renderer.egui,
                     );
@@ -20977,6 +20934,13 @@ impl super::GameState {
                     pidx,
                     &slot.inventory,
                     slot.hotbar_slot,
+                    // No box while joined (BRIDGE: the off-hand is not on the
+                    // wire yet — replace when slice 2 of the off-hand plan lands).
+                    match (&slot.offhand, self.joined()) {
+                        (_, true) => crate::hud_ui::OffhandBox::Hidden,
+                        (Some(stack), false) => crate::hud_ui::OffhandBox::Holding(stack),
+                        (None, false) => crate::hud_ui::OffhandBox::Empty,
+                    },
                     &self.registry,
                     &self.renderer.egui,
                     slot.combat.health,
@@ -21821,6 +21785,13 @@ impl super::GameState {
                 | crate::craft_ui::ClickTarget::ToggleLock(_) => {
                     if let Some(click) = click_target.window_click() {
                         self.apply_window_click(pidx, &click);
+                    }
+                }
+                crate::craft_ui::ClickTarget::OffhandSlot(right) => {
+                    // Local players only: the slot is not drawn while joined.
+                    if !self.joined() {
+                        let p = &mut self.players[pidx];
+                        crate::hands::click_offhand(&mut p.offhand, &mut p.crafting_ui.cursor_item, right);
                     }
                 }
                 crate::craft_ui::ClickTarget::OpenBook => {

@@ -196,6 +196,9 @@ mod tests {
     #[path = "torch_diag.rs"]
     mod torch_diag;
     #[cfg(not(target_arch = "wasm32"))]
+    #[path = "offhand.rs"]
+    mod offhand;
+    #[cfg(not(target_arch = "wasm32"))]
     #[path = "spawn_safe.rs"]
     mod spawn_safe;
     #[cfg(not(target_arch = "wasm32"))]
@@ -4575,7 +4578,7 @@ mod tests {
             let p = &mut hg.state.players[0];
             p.crafting_ui.pad_focus = None;
             actual_click = crate::craft_ui::draw_crafting_ui(&ctx, &viewport, 0, &mut p.crafting_ui,
-                &p.inventory, &p.armour_slots, &hg.state.registry, &hg.state.renderer.egui);
+                &p.inventory, &p.armour_slots, crate::hud_ui::OffhandBox::Hidden, &hg.state.registry, &hg.state.renderer.egui);
             let _ = ctx.end_pass();
         }
         assert!(matches!(actual_click, crate::craft_ui::ClickTarget::InventorySlot(5, false)),

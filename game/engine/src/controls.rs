@@ -99,6 +99,7 @@ pub const KEYBOARD_SECTIONS: &[ControlSection] = &[
             row("1 to 9, or scroll wheel", "Choose the item in your hand", "input.rs key_pressed Digit1..9; lib.rs MouseWheel -> scroll"),
             row("E", "Open your inventory and crafting", "input.rs key_pressed KeyE -> inventory_toggle"),
             row("Q", "Drop one of the item in your hand", "input.rs key_pressed KeyQ -> drop_item"),
+            row("F", "Swap the item in your hand with your off-hand (right click uses the off-hand when your main hand has no use)", "input.rs key_pressed KeyF -> swap_hands"),
             row("B", "Search every item (Creative: click one to take it)", "input.rs key_pressed KeyB -> explorer_toggle"),
         ],
     },
@@ -147,6 +148,7 @@ pub const TOUCH_SECTIONS: &[ControlSection] = &[
             row("Place button", "Place a block, use what you hold, open things", "touch_input.rs ButtonKind::Place"),
             row("Number slots along the bottom", "Choose the item in your hand", "touch_input.rs TouchZone::Hotbar"),
             row("Inventory button", "Open your inventory and crafting", "touch_input.rs ButtonKind::Inventory"),
+            row("Off-hand box (left of the number slots)", "Tap to swap it with the item in your hand", "touch_input.rs TouchZone::Offhand"),
         ],
     },
     ControlSection {
@@ -348,6 +350,8 @@ mod tests {
         assert!(i.inventory_toggle, "E opens the inventory");
         i.key_pressed(KeyCode::KeyQ);
         assert!(i.drop_item, "Q drops");
+        i.key_pressed(KeyCode::KeyF);
+        assert!(i.swap_hands, "F swaps the hands");
         i.key_pressed(KeyCode::KeyB);
         assert!(i.explorer_toggle, "B opens the item search");
         i.key_pressed(KeyCode::KeyH);

@@ -643,24 +643,8 @@ impl Inventory {
     /// a tree-fell without a 1:1 crafting conversion.
     pub fn take_placeable_from_hotbar(&mut self, slot: usize) -> Option<BlockId> {
         if slot >= 9 { return None; }
-        let block_id = {
-            let stack_ref = self.slots[slot].as_ref()?;
-            match &stack_ref.item {
-                crate::item::Item::Block(b) => *b,
-                crate::item::Item::Material(m) => crate::item::material_as_placeable_block(*m)?,
-                crate::item::Item::Tool(_) => return None,
-                // Spec 24 — Plans aren't placeable like blocks; they
-                // enter Ghost mode via the Inspect dialog instead.
-                crate::item::Item::Plan(_) => return None,
-                // Spec 28e — armour is equip-only, not placeable.
-                crate::item::Item::Armour(_) => return None,
-            }
-        };
-        let stack = self.slots[slot].as_mut()?;
-        stack.count -= 1;
-        if stack.count == 0 {
-            let used = stack.item.clone();
-            self.slots[slot] = None;
+        let (block_id, used_up) = take_placeable_cell(&mut self.slots[slot])?;
+        if let Some(used) = used_up {
             self.auto_refill_hotbar(slot, &used);
         }
         Some(block_id)
@@ -695,18 +679,7 @@ impl Inventory {
     /// so this returns the full tool stack and clears the slot.
     pub fn take_one_from_hotbar(&mut self, slot: usize) -> Option<ItemStack> {
         if slot >= 9 { return None; }
-        let stack = self.slots[slot].as_mut()?;
-        match &stack.item {
-            crate::item::Item::Tool(_) => self.slots[slot].take(),
-            _ => {
-                let dropped = ItemStack { item: stack.item.clone(), count: 1 };
-                stack.count -= 1;
-                if stack.count == 0 {
-                    self.slots[slot] = None;
-                }
-                Some(dropped)
-            }
-        }
+        take_one_cell(&mut self.slots[slot])
     }
 
     /// Decrement the count of the named hotbar-slot material by one, clearing
@@ -714,19 +687,7 @@ impl Inventory {
     /// Used by right-click "use item" actions like bonemeal-on-grass.
     pub fn consume_one_material(&mut self, slot: usize, expected: crate::item::MaterialId) -> bool {
         if slot >= 9 { return false; }
-        let stack = match self.slots[slot].as_mut() {
-            Some(s) => s,
-            None => return false,
-        };
-        match &stack.item {
-            crate::item::Item::Material(id) if *id == expected => {}
-            _ => return false,
-        }
-        stack.count -= 1;
-        if stack.count == 0 {
-            self.slots[slot] = None;
-        }
-        true
+        consume_one_material_cell(&mut self.slots[slot], expected)
     }
 
     /// #44 P2 — number of empty slots across the 36-slot inventory. Surfaced as
@@ -795,14 +756,7 @@ impl Inventory {
     /// the poison side-effect.
     pub fn try_eat_hotbar(&mut self, slot: usize) -> Option<(f32, u32)> {
         if slot >= 9 { return None; }
-        let stack = self.slots[slot].as_mut()?;
-        let value = stack.item.food_value()?;
-        let poison = stack.item.eat_poison_ticks();
-        stack.count -= 1;
-        if stack.count == 0 {
-            self.slots[slot] = None;
-        }
-        Some((value, poison))
+        try_eat_cell(&mut self.slots[slot])
     }
 
     /// Use the tool in the selected hotbar slot (reduce durability).
@@ -820,21 +774,8 @@ impl Inventory {
     /// confirms after the sword moved out of the hotbar still wears it
     /// (`joiner_actions::apply_outcome`, review D2b LOW-1).
     pub fn use_tool_at(&mut self, index: usize) -> Option<ToolUseInfo> {
-        let slot = index;
-        if slot >= 36 { return None; }
-        let stack = self.slots[slot].as_mut()?;
-        let tool = stack.item.as_tool_mut()?;
-        let max = crate::crafting::Tool::new(tool.tool_type, tool.material).durability as f32;
-        let before_pct = if max > 0.0 { tool.durability as f32 / max } else { 0.0 };
-        tool.use_tool();
-        let after_pct = if max > 0.0 { tool.durability as f32 / max } else { 0.0 };
-        let just_broke = tool.is_broken();
-        let display_name = format!("{:?} {:?}",
-            tool.material, tool.tool_type);
-        if just_broke {
-            self.slots[slot] = None;
-        }
-        Some(ToolUseInfo { before_pct, after_pct, just_broke, display_name })
+        if index >= 36 { return None; }
+        use_tool_cell(&mut self.slots[index])
     }
 
     /// Get the display name of the item in a hotbar slot.
@@ -928,6 +869,98 @@ pub fn sort_slots(slots: &[Option<ItemStack>], locked: &[bool]) -> Vec<Option<It
         result[pos] = Some(stack);
     }
     result
+}
+
+// ---------------------------------------------------------------------------
+// One-cell rules. The hotbar methods above and the off-hand
+// (`PlayerSlot::*_for`, `hands.rs`) run the same rule on one `Option<ItemStack>`,
+// so a use consumes from a hand exactly as it does from the hotbar.
+// ---------------------------------------------------------------------------
+
+/// [`Inventory::take_placeable_from_hotbar`] on one cell: the block id to place
+/// (a block, or a material flagged placeable) with one taken from the stack.
+/// The second value is the item that just ran out (the cell is now empty), for
+/// the hotbar's auto-refill.
+pub(crate) fn take_placeable_cell(cell: &mut Option<ItemStack>) -> Option<(BlockId, Option<crate::item::Item>)> {
+    let block_id = match &cell.as_ref()?.item {
+        crate::item::Item::Block(b) => *b,
+        crate::item::Item::Material(m) => crate::item::material_as_placeable_block(*m)?,
+        crate::item::Item::Tool(_) => return None,
+        // Spec 24 — Plans aren't placeable like blocks; they
+        // enter Ghost mode via the Inspect dialog instead.
+        crate::item::Item::Plan(_) => return None,
+        // Spec 28e — armour is equip-only, not placeable.
+        crate::item::Item::Armour(_) => return None,
+    };
+    let stack = cell.as_mut()?;
+    stack.count -= 1;
+    let used_up = if stack.count == 0 {
+        let used = stack.item.clone();
+        *cell = None;
+        Some(used)
+    } else {
+        None
+    };
+    Some((block_id, used_up))
+}
+
+/// [`Inventory::take_one_from_hotbar`] on one cell: one of the item (a tool
+/// whole), the cell emptied at zero.
+pub(crate) fn take_one_cell(cell: &mut Option<ItemStack>) -> Option<ItemStack> {
+    let stack = cell.as_mut()?;
+    match &stack.item {
+        crate::item::Item::Tool(_) => cell.take(),
+        _ => {
+            let dropped = ItemStack { item: stack.item.clone(), count: 1 };
+            stack.count -= 1;
+            if stack.count == 0 {
+                *cell = None;
+            }
+            Some(dropped)
+        }
+    }
+}
+
+/// [`Inventory::consume_one_material`] on one cell.
+pub(crate) fn consume_one_material_cell(cell: &mut Option<ItemStack>, expected: crate::item::MaterialId) -> bool {
+    let Some(stack) = cell.as_mut() else { return false };
+    match &stack.item {
+        crate::item::Item::Material(id) if *id == expected => {}
+        _ => return false,
+    }
+    stack.count -= 1;
+    if stack.count == 0 {
+        *cell = None;
+    }
+    true
+}
+
+/// [`Inventory::try_eat_hotbar`] on one cell: `(food_value, poison_ticks)`.
+pub(crate) fn try_eat_cell(cell: &mut Option<ItemStack>) -> Option<(f32, u32)> {
+    let stack = cell.as_mut()?;
+    let value = stack.item.food_value()?;
+    let poison = stack.item.eat_poison_ticks();
+    stack.count -= 1;
+    if stack.count == 0 {
+        *cell = None;
+    }
+    Some((value, poison))
+}
+
+/// [`Inventory::use_tool_at`] on one cell: wear the tool, empty the cell when it breaks.
+pub(crate) fn use_tool_cell(cell: &mut Option<ItemStack>) -> Option<ToolUseInfo> {
+    let stack = cell.as_mut()?;
+    let tool = stack.item.as_tool_mut()?;
+    let max = crate::crafting::Tool::new(tool.tool_type, tool.material).durability as f32;
+    let before_pct = if max > 0.0 { tool.durability as f32 / max } else { 0.0 };
+    tool.use_tool();
+    let after_pct = if max > 0.0 { tool.durability as f32 / max } else { 0.0 };
+    let just_broke = tool.is_broken();
+    let display_name = format!("{:?} {:?}", tool.material, tool.tool_type);
+    if just_broke {
+        *cell = None;
+    }
+    Some(ToolUseInfo { before_pct, after_pct, just_broke, display_name })
 }
 
 #[cfg(test)]

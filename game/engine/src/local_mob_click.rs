@@ -115,8 +115,8 @@ pub fn plan_right_click(ctx: &ArmCtx) -> MobArm {
 /// [`plan_right_click`] for the mob in `slot`'s crosshair (the cone
 /// `combat::find_attack_target` picks, the one every arm uses), reading the
 /// state the decision needs off its ECS. [`MobArm::Later`] when no mob is there.
-pub fn plan_at_crosshair(ecs: &hecs::World, slot: &PlayerSlot, sneak: bool, tick: u64) -> MobArm {
-    let held = slot.inventory.hotbar_slot(slot.hotbar_slot).map(|s| &s.item);
+pub fn plan_at_crosshair(ecs: &hecs::World, slot: &PlayerSlot, hand: crate::hands::Hand, sneak: bool, tick: u64) -> MobArm {
+    let held = slot.held_for_use(hand).map(|s| &s.item);
     let eye = slot.player.eye_pos();
     let look_dir = slot.camera.forward();
     let Some((target, Some(kind))) = crate::combat::find_attack_target(ecs, eye, look_dir) else {
@@ -164,14 +164,14 @@ impl MobClick {
 pub fn harvest(
     ecs: &mut hecs::World,
     slot: &mut PlayerSlot,
+    hand: crate::hands::Hand,
     clicked: bool,
     tick: u64,
 ) -> Option<MobClick> {
     if !clicked {
         return None;
     }
-    let hot = slot.hotbar_slot;
-    let held = slot.inventory.hotbar_slot(hot).map(|s| s.item.clone());
+    let held = slot.held_for_use(hand).map(|s| s.item.clone());
     let eye = slot.player.eye_pos();
     let look_dir = slot.camera.forward();
     let (target, Some(kind)) = crate::combat::find_attack_target(ecs, eye, look_dir)? else {
@@ -183,7 +183,7 @@ pub fn harvest(
         if interaction.consume > 0
             && let Some(Item::Material(m)) = held
         {
-            slot.inventory.consume_one_material(hot, m);
+            slot.consume_one_material_for(hand, m);
         }
         for stack in interaction.give.iter().cloned() {
             if let Some(leftover) = slot.inventory.add_item(stack) {
@@ -201,6 +201,7 @@ pub fn harvest(
 pub fn tame_companion(
     ecs: &mut hecs::World,
     slot: &mut PlayerSlot,
+    hand: crate::hands::Hand,
     pidx: usize,
     clicked: bool,
     tick: u64,
@@ -208,8 +209,7 @@ pub fn tame_companion(
     if !clicked {
         return None;
     }
-    let hot = slot.hotbar_slot;
-    let mat: MaterialId = match slot.inventory.hotbar_slot(hot).map(|s| &s.item) {
+    let mat: MaterialId = match slot.held_for_use(hand).map(|s| &s.item) {
         Some(Item::Material(m)) => *m,
         _ => return None,
     };
@@ -226,7 +226,7 @@ pub fn tame_companion(
     };
     let held = Item::Material(mat);
     let interaction = crate::mob_interact::tame_companion(ecs, target, kind, Some(&held), &actor, tick)?;
-    slot.inventory.consume_one_material(hot, mat);
+    slot.consume_one_material_for(hand, mat);
     Some(MobClick { target, kind, interaction })
 }
 
@@ -261,11 +261,11 @@ mod tests {
     fn a_bucket_held_on_a_cow_without_a_click_milks_nothing() {
         let (mut ecs, mut slot, _cow) = facing(MobType::Cow, ItemStack::new_material(MaterialId::Bucket, 1));
         for frame in 0..300 {
-            assert!(harvest(&mut ecs, &mut slot, false, frame).is_none());
+            assert!(harvest(&mut ecs, &mut slot, crate::hands::Hand::Main, false, frame).is_none());
         }
         assert_eq!(count(&slot), 1, "no click: the bucket stays");
         assert_eq!(slot.inventory.count_material(MaterialId::MilkBucket), 0);
-        let click = harvest(&mut ecs, &mut slot, true, 300).expect("the click reaches the cow");
+        let click = harvest(&mut ecs, &mut slot, crate::hands::Hand::Main, true, 300).expect("the click reaches the cow");
         assert!(click.interaction.done);
         assert_eq!(slot.inventory.count_material(MaterialId::Bucket), 0);
         assert_eq!(slot.inventory.count_material(MaterialId::MilkBucket), 1);
@@ -277,11 +277,11 @@ mod tests {
     fn companion_food_held_without_a_click_is_never_eaten() {
         let (mut ecs, mut slot, cat) = facing(MobType::Cat, ItemStack::new_material(MaterialId::RawFish, 16));
         for frame in 0..300 {
-            assert!(tame_companion(&mut ecs, &mut slot, 0, false, frame).is_none());
+            assert!(tame_companion(&mut ecs, &mut slot, crate::hands::Hand::Main, 0, false, frame).is_none());
         }
         assert_eq!(count(&slot), 16, "no click: no food eaten");
         assert!(crate::tameable::pet_owner_of(&ecs, cat).is_none(), "and no tame");
-        let click = tame_companion(&mut ecs, &mut slot, 0, true, 300).expect("the click reaches the cat");
+        let click = tame_companion(&mut ecs, &mut slot, crate::hands::Hand::Main, 0, true, 300).expect("the click reaches the cat");
         assert_eq!(click.interaction.consume, 1);
         assert_eq!(count(&slot), 15, "the click's roll eats one");
     }
@@ -347,21 +347,21 @@ mod tests {
     fn the_plan_reads_the_crosshair_mobs_state() {
         let (mut ecs, slot, cow) = facing(MobType::Cow, ItemStack::new_material(MaterialId::Bucket, 1));
         ecs.insert_one(cow, crate::tether::Tethered { target: crate::tether::TetherTarget::Player(0) }).unwrap();
-        assert_eq!(plan_at_crosshair(&ecs, &slot, false, 100), MobArm::Milk, "a fresh cow is ready");
+        assert_eq!(plan_at_crosshair(&ecs, &slot, crate::hands::Hand::Main, false, 100), MobArm::Milk, "a fresh cow is ready");
         ecs.get::<&mut crate::animal_products::AnimalProductState>(cow).unwrap().last_action_tick = Some(100);
-        assert_eq!(plan_at_crosshair(&ecs, &slot, false, 101), MobArm::Refused, "just milked");
+        assert_eq!(plan_at_crosshair(&ecs, &slot, crate::hands::Hand::Main, false, 101), MobArm::Refused, "just milked");
         assert!(ecs.get::<&crate::tether::Tethered>(cow).is_ok(), "deciding unties nothing");
 
         let (mut ecs, slot, cow) = facing(MobType::Cow, ItemStack::new_material(MaterialId::Wheat, 4));
-        assert_eq!(plan_at_crosshair(&ecs, &slot, false, 100), MobArm::Feed);
+        assert_eq!(plan_at_crosshair(&ecs, &slot, crate::hands::Hand::Main, false, 100), MobArm::Feed);
         ecs.insert_one(cow, crate::breeding::InLove { until_tick: 999, fed_by: None }).unwrap();
-        assert_eq!(plan_at_crosshair(&ecs, &slot, false, 100), MobArm::Later, "already in love: not a feed");
+        assert_eq!(plan_at_crosshair(&ecs, &slot, crate::hands::Hand::Main, false, 100), MobArm::Later, "already in love: not a feed");
 
         let (ecs, slot, _) = facing(MobType::Cow, ItemStack::new_material(MaterialId::Bucket, 1));
         let mut empty = slot;
         empty.hotbar_slot = 5; // nothing there, and no mob in front of a different aim
         empty.camera.yaw = std::f32::consts::PI;
-        assert_eq!(plan_at_crosshair(&ecs, &empty, false, 100), MobArm::Later, "no mob in the crosshair");
+        assert_eq!(plan_at_crosshair(&ecs, &empty, crate::hands::Hand::Main, false, 100), MobArm::Later, "no mob in the crosshair");
     }
 
     /// The gate is the other branches' gate: pressed, captured, off cooldown.
@@ -383,9 +383,9 @@ mod tests {
     #[test]
     fn a_refused_milk_or_shear_does_not_eat_the_click() {
         let (mut ecs, mut slot, _cow) = facing(MobType::Cow, ItemStack::new_material(MaterialId::Bucket, 2));
-        let first = harvest(&mut ecs, &mut slot, true, 100).expect("the cow is ready");
+        let first = harvest(&mut ecs, &mut slot, crate::hands::Hand::Main, true, 100).expect("the cow is ready");
         assert!(first.interaction.done && first.eats_click(), "milking uses the click up");
-        let again = harvest(&mut ecs, &mut slot, true, 101).expect("the cow is in the cone: refused");
+        let again = harvest(&mut ecs, &mut slot, crate::hands::Hand::Main, true, 101).expect("the cow is in the cone: refused");
         assert!(!again.interaction.done && !again.eats_click(), "not ready: the click falls through");
         assert_eq!(slot.inventory.count_material(MaterialId::Bucket), 1, "the refusal took nothing");
         assert_eq!(slot.inventory.count_material(MaterialId::MilkBucket), 1, "and gave nothing");
@@ -395,9 +395,9 @@ mod tests {
                 crate::crafting::ToolType::Shears,
                 crate::crafting::ToolMaterial::Iron,
             )));
-        let shorn = harvest(&mut ecs, &mut slot, true, 100).expect("the sheep is ready");
+        let shorn = harvest(&mut ecs, &mut slot, crate::hands::Hand::Main, true, 100).expect("the sheep is ready");
         assert!(shorn.eats_click());
-        let regrowing = harvest(&mut ecs, &mut slot, true, 101).expect("refused: wool growing back");
+        let regrowing = harvest(&mut ecs, &mut slot, crate::hands::Hand::Main, true, 101).expect("refused: wool growing back");
         assert!(!regrowing.eats_click());
     }
 }

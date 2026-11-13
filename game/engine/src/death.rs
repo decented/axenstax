@@ -45,4 +45,23 @@ mod tests {
         assert!(grave[8].is_some());
         assert!(kept.iter().all(Option::is_none));
     }
+
+    /// The off-hand is not one of the 36 slots, so a death never sees it: like
+    /// the armour, it stays on the body (it is not in the grave, and
+    /// `keep_inventory` has nothing to say about it).
+    #[test]
+    fn the_off_hand_item_stays_on_the_body_at_death() {
+        let torches = ItemStack::new_block(crate::block::TORCH, 12);
+        let mut slot = crate::player_slot::PlayerSlot::new(0, glam::Vec3::ZERO, 1.0);
+        slot.inventory.set_slot(2, Some(ItemStack::new_block(crate::block::STONE, 7)));
+        slot.offhand = Some(torches.clone());
+        // The one split both death paths use (the local death in `game_loop`).
+        let (grave, kept) = split_window(&slot.inventory, false);
+        assert_eq!(grave[2].as_ref().map(|s| s.count), Some(7), "the bag goes to the grave");
+        assert!(
+            grave.iter().chain(kept.iter()).flatten().all(|s| s.item != torches.item),
+            "the off-hand item is in neither the grave nor the kept window"
+        );
+        assert_eq!(slot.offhand, Some(torches), "and it is still in the hand");
+    }
 }

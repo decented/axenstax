@@ -258,6 +258,7 @@ pub fn state_to_intent(gp: &GamepadState, dt: f32) -> Option<PlayerIntent> {
             workshop_limbs: false,       // BRIDGE: ditto
             workshop_tool_cycle: false,  // BRIDGE: ditto
             workshop_fill: false,        // BRIDGE: ditto
+            swap_hands: false,        // BRIDGE: no pad binding (gamepad parked) — keyboard and touch only
             workshop_grid: false,        // BRIDGE: ditto
             shift_down: false,           // BRIDGE: no gamepad modifier chord
         camera_cycle: gp.x_pressed,    // X / West → cycle third-person perspective

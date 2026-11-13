@@ -111,6 +111,7 @@ save_fields! {
         plot_succession: |s| s.plot_succession = Some(crate::succession::SavedSuccession { last_seen: vec![("npub1owner".into(), 1_800_000_000)], passed_on: vec![(4, 64, 4)], last_running: 1_800_000_100 }),
         site_boards: |s| s.site_boards = Some(crate::site_board::SavedSiteBoards { boards: vec![((4, 64, 4), vec![(2, true)])] }),
         weather_clear_until: |s| s.weather_clear_until = Some(4_000),
+        player_offhands: |s| s.player_offhands = Some(vec![crate::save::SavedSlot::Block { block_id: crate::block::TORCH, count: 3 }]),
     ],
 }
 
@@ -420,7 +421,8 @@ fn a_record_from_an_older_build_is_no_mismatch() {
     save.plot_succession = None;
     save.site_boards = None;
     let mut body = bincode::serialize(&save).unwrap();
-    body.pop(); // The weather hold's `None`: a format 59 writer had no such field,
+    body.pop(); // The off-hand column's `None`: a format 59 writer had no such field,
+    body.pop(); // nor the weather hold's,
     body.pop(); // nor the site boards',
     body.pop(); // nor the succession table's,
     body.pop(); // nor the Plan build counts',
@@ -517,10 +519,10 @@ fn a_partly_decoded_world_dat_is_refused_and_nothing_is_written() {
     let file = dir.join("world.dat");
     let save = read_world_save(&std::fs::read(&file).unwrap()).unwrap();
     // No footer, as the oldest saves, and cut inside a field: the five newest
-    // (authorship, use record, Plan build counts, succession, site boards, weather hold) are one
-    // `None` byte each, so seven bytes reaches into the clock before them.
+    // (authorship, use record, Plan build counts, succession, site boards, weather hold, off-hand column) are one
+    // `None` byte each, so eight bytes reaches into the clock before them.
     let mut body = bincode::serialize(&save).unwrap();
-    body.truncate(body.len() - 7);
+    body.truncate(body.len() - 8);
     assert!(read_world_save_reporting(&body).expect("reads").1, "the fixture is a partly decoded record");
     std::fs::write(&file, &body).unwrap();
     h.server.stored_records.note_world_dat(&name);

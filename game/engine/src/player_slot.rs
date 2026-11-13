@@ -11,6 +11,7 @@ use crate::combat::PlayerCombat;
 use crate::craft_ui::CraftingUi;
 use crate::input::InputState;
 use crate::inventory::Inventory;
+use crate::item::ItemStack;
 use crate::physics::Player;
 
 /// Ticks the creative break cooldown holds between block breaks. At 20 TPS,
@@ -324,6 +325,14 @@ pub struct PlayerSlot {
     /// silently auto-unequipped to None by the damage path so they
     /// never linger as visual clutter.
     pub armour_slots: [Option<ArmourItem>; 4],
+    /// The off-hand item (Minecraft's second hand). Any item can sit here; it
+    /// is not slot 36 of `inventory` but rides beside the armour, like it
+    /// (`hands.rs` holds the rules: which hand a right-click uses, the swap).
+    /// Stays on the body at death, like armour (`death::split_window` never
+    /// sees it). Saved as `WorldSave.player_offhands`. Local slots only for now:
+    /// a joined client's off-hand is not carried to the server yet (slice 2 of
+    /// the off-hand plan), so the UI and the F swap are off while joined.
+    pub offhand: Option<ItemStack>,
     /// Spec 26 — Builder villager entity whose Commission dialog is
     /// currently open for this player. `Some` while the dialog is
     /// visible (including during the Pick-build-site sub-flow, in which
@@ -517,6 +526,7 @@ impl PlayerSlot {
             explorer_state: None,
             nostrich_vow: None,
             armour_slots: [None, None, None, None],
+            offhand: None,
             open_commission_villager: None,
             pending_commission: None,
             riding: None,
@@ -658,6 +668,103 @@ impl PlayerSlot {
     /// post-bite block is separate ([`Self::biting`]).
     pub fn tick_place_cooldown(&mut self) {
         self.place_cooldown = self.place_cooldown.saturating_sub(1);
+    }
+
+    // ── The two hands (`hands.rs`) ──────────────────────────────────────────
+
+    /// The stack in `hand`: the selected hotbar slot, or the off-hand. The one
+    /// accessor the right-click chain reads its held item through.
+    pub fn held_for_use(&self, hand: crate::hands::Hand) -> Option<&ItemStack> {
+        match hand {
+            crate::hands::Hand::Main => self.inventory.hotbar_slot(self.hotbar_slot),
+            crate::hands::Hand::Off => self.offhand.as_ref(),
+        }
+    }
+
+    /// The main-hand item and the off-hand item, as [`crate::hands::use_hand`] reads them.
+    pub fn hands_items(&self) -> (Option<&crate::item::Item>, Option<&crate::item::Item>) {
+        (
+            self.inventory.hotbar_slot(self.hotbar_slot).map(|s| &s.item),
+            self.offhand.as_ref().map(|s| &s.item),
+        )
+    }
+
+    /// F / a tap on the off-hand box: trade the selected hotbar slot with the
+    /// off-hand (a deliberate act, so a locked slot trades too). Returns
+    /// whether anything moved.
+    pub fn swap_hands(&mut self) -> bool {
+        let mut main = self.inventory.take_slot(self.hotbar_slot);
+        let moved = crate::hands::swap(&mut main, &mut self.offhand);
+        self.inventory.set_slot(self.hotbar_slot, main);
+        moved
+    }
+
+    /// [`Inventory::consume_one_material`] for `hand`.
+    pub fn consume_one_material_for(&mut self, hand: crate::hands::Hand, expected: crate::item::MaterialId) -> bool {
+        match hand {
+            crate::hands::Hand::Main => self.inventory.consume_one_material(self.hotbar_slot, expected),
+            crate::hands::Hand::Off => crate::inventory::consume_one_material_cell(&mut self.offhand, expected),
+        }
+    }
+
+    /// [`Inventory::take_one_from_hotbar`] for `hand`.
+    pub fn take_one_for(&mut self, hand: crate::hands::Hand) -> Option<ItemStack> {
+        match hand {
+            crate::hands::Hand::Main => self.inventory.take_one_from_hotbar(self.hotbar_slot),
+            crate::hands::Hand::Off => crate::inventory::take_one_cell(&mut self.offhand),
+        }
+    }
+
+    /// [`Inventory::try_eat_hotbar`] for `hand`.
+    pub fn try_eat_for(&mut self, hand: crate::hands::Hand) -> Option<(f32, u32)> {
+        match hand {
+            crate::hands::Hand::Main => self.inventory.try_eat_hotbar(self.hotbar_slot),
+            crate::hands::Hand::Off => crate::inventory::try_eat_cell(&mut self.offhand),
+        }
+    }
+
+    /// [`Inventory::use_hotbar_tool`] for `hand`.
+    pub fn use_tool_for(&mut self, hand: crate::hands::Hand) -> Option<crate::inventory::ToolUseInfo> {
+        match hand {
+            crate::hands::Hand::Main => self.inventory.use_hotbar_tool(self.hotbar_slot),
+            crate::hands::Hand::Off => crate::inventory::use_tool_cell(&mut self.offhand),
+        }
+    }
+
+    /// [`Inventory::take_placeable_from_hotbar`] for `hand` (the off-hand does
+    /// not auto-refill from the bag).
+    pub fn take_placeable_for(&mut self, hand: crate::hands::Hand) -> Option<crate::block::BlockId> {
+        match hand {
+            crate::hands::Hand::Main => self.inventory.take_placeable_from_hotbar(self.hotbar_slot),
+            crate::hands::Hand::Off => crate::inventory::take_placeable_cell(&mut self.offhand).map(|(id, _)| id),
+        }
+    }
+
+    /// [`Inventory::take_block_from_hotbar`] for `hand`: one of a held block
+    /// (not a placeable material), its id.
+    pub fn take_block_for(&mut self, hand: crate::hands::Hand) -> Option<crate::block::BlockId> {
+        match hand {
+            crate::hands::Hand::Main => self.inventory.take_block_from_hotbar(self.hotbar_slot),
+            crate::hands::Hand::Off => {
+                self.offhand.as_ref()?.item.as_block()?;
+                crate::inventory::take_placeable_cell(&mut self.offhand).map(|(id, _)| id)
+            }
+        }
+    }
+
+    /// One round of ammo for a local shot: the off-hand first, then the bag
+    /// (`shot::take_ammo`).
+    pub fn take_shot_ammo(&mut self, weapon: crate::protocol::ShotWeapon) -> bool {
+        crate::shot::take_ammo(&mut self.inventory, &mut self.offhand, weapon)
+    }
+
+    /// [`Inventory::hotbar_placeable_id`] for `hand`: what a click would place, without taking it.
+    pub fn placeable_id_for(&self, hand: crate::hands::Hand) -> Option<crate::block::BlockId> {
+        match self.held_for_use(hand)?.item {
+            crate::item::Item::Block(b) => Some(b),
+            crate::item::Item::Material(m) => crate::item::material_as_placeable_block(m),
+            _ => None,
+        }
     }
 }
 
@@ -861,4 +968,120 @@ mod tests {
         assert!(slot.shot_ready(3), "a restarted tick counter: the old schedule is stale");
     }
 
+    // ── The two hands (`hands.rs`): the routing every right-click arm uses ──
+
+    use crate::crafting::{Tool, ToolMaterial, ToolType};
+    use crate::hands::{use_hand, Hand, UseTarget};
+    use crate::item::MaterialId;
+
+    /// The hand a click aimed at `target` uses, from this slot's real items.
+    fn hand_for(slot: &PlayerSlot, target: &UseTarget) -> Hand {
+        let (main, off) = slot.hands_items();
+        use_hand(main, off, target)
+    }
+
+    fn aimed_at_stone() -> UseTarget {
+        UseTarget { block: Some(crate::block::STONE), ..UseTarget::default() }
+    }
+
+    #[test]
+    fn a_pickaxe_in_hand_places_the_off_hand_torch_from_the_off_hand() {
+        let mut slot = fresh_slot();
+        let pick = ItemStack::new_tool(Tool::new(ToolType::Pickaxe, ToolMaterial::Iron));
+        slot.inventory.set_slot(slot.hotbar_slot, Some(pick.clone()));
+        slot.offhand = Some(ItemStack::new_block(crate::block::TORCH, 5));
+
+        let hand = hand_for(&slot, &aimed_at_stone());
+        assert_eq!(hand, Hand::Off, "the pickaxe has no use here: the off-hand's torch does");
+        assert_eq!(slot.held_for_use(hand).map(|s| &s.item), Some(&crate::item::Item::Block(crate::block::TORCH)));
+        assert_eq!(slot.placeable_id_for(hand), Some(crate::block::TORCH));
+        assert_eq!(slot.take_placeable_for(hand), Some(crate::block::TORCH));
+        assert_eq!(slot.offhand, Some(ItemStack::new_block(crate::block::TORCH, 4)), "taken from the off-hand");
+        assert_eq!(slot.inventory.hotbar_slot(slot.hotbar_slot), Some(&pick), "the main hand is untouched");
+        // The last torch empties the off-hand and nothing refills it from the bag.
+        slot.inventory.set_slot(20, Some(ItemStack::new_block(crate::block::TORCH, 9)));
+        for _ in 0..4 {
+            assert_eq!(slot.take_placeable_for(Hand::Off), Some(crate::block::TORCH));
+        }
+        assert_eq!(slot.offhand, None);
+        assert_eq!(slot.inventory.slot(20), Some(&ItemStack::new_block(crate::block::TORCH, 9)));
+        assert_eq!(slot.take_placeable_for(Hand::Off), None);
+    }
+
+    #[test]
+    fn food_in_the_main_hand_eats_from_the_main_hand() {
+        let mut slot = fresh_slot();
+        slot.inventory.set_slot(slot.hotbar_slot, Some(ItemStack::new_material(MaterialId::Bread, 3)));
+        slot.offhand = Some(ItemStack::new_material(MaterialId::Bread, 7));
+        let hungry = UseTarget { wants_to_eat: true, ..aimed_at_stone() };
+
+        let hand = hand_for(&slot, &hungry);
+        assert_eq!(hand, Hand::Main);
+        assert!(slot.try_eat_for(hand).is_some());
+        assert_eq!(slot.inventory.hotbar_slot(slot.hotbar_slot).map(|s| s.count), Some(2), "one bite from the main stack");
+        assert_eq!(slot.offhand.as_ref().map(|s| s.count), Some(7), "the off-hand is untouched");
+    }
+
+    #[test]
+    fn food_in_the_off_hand_is_eaten_when_the_main_hand_has_no_use() {
+        let mut slot = fresh_slot();
+        slot.inventory.set_slot(slot.hotbar_slot, Some(ItemStack::new_tool(Tool::new(ToolType::Sword, ToolMaterial::Iron))));
+        slot.offhand = Some(ItemStack::new_material(MaterialId::Bread, 2));
+        let hungry = UseTarget { wants_to_eat: true, ..UseTarget::default() };
+
+        let hand = hand_for(&slot, &hungry);
+        assert_eq!(hand, Hand::Off);
+        assert!(slot.try_eat_for(hand).is_some());
+        assert_eq!(slot.offhand.as_ref().map(|s| s.count), Some(1));
+        assert!(slot.try_eat_for(hand).is_some());
+        assert_eq!(slot.offhand, None, "the last bite empties the off-hand");
+        assert!(slot.inventory.hotbar_slot(slot.hotbar_slot).is_some(), "the sword stays");
+    }
+
+    #[test]
+    fn a_block_in_the_main_hand_places_from_the_main_hand() {
+        let mut slot = fresh_slot();
+        slot.inventory.set_slot(slot.hotbar_slot, Some(ItemStack::new_block(crate::block::STONE, 9)));
+        slot.offhand = Some(ItemStack::new_block(crate::block::TORCH, 5));
+
+        let hand = hand_for(&slot, &aimed_at_stone());
+        assert_eq!(hand, Hand::Main);
+        assert_eq!(slot.take_placeable_for(hand), Some(crate::block::STONE));
+        assert_eq!(slot.inventory.hotbar_slot(slot.hotbar_slot).map(|s| s.count), Some(8));
+        assert_eq!(slot.offhand, Some(ItemStack::new_block(crate::block::TORCH, 5)), "the torches stay");
+    }
+
+    #[test]
+    fn a_tool_in_the_off_hand_wears_there_and_breaks_there() {
+        let mut slot = fresh_slot();
+        slot.offhand = Some(ItemStack::new_tool(Tool::new(ToolType::Shears, ToolMaterial::Iron)));
+        let first = slot.use_tool_for(Hand::Off).expect("a tool wears");
+        assert!(first.after_pct < first.before_pct);
+        let mut worn = Tool::new(ToolType::Shears, ToolMaterial::Iron);
+        worn.durability = 1;
+        slot.offhand = Some(ItemStack::new_tool(worn));
+        assert!(slot.use_tool_for(Hand::Off).expect("it wears").just_broke);
+        assert_eq!(slot.offhand, None, "a broken off-hand tool is gone");
+    }
+
+    #[test]
+    fn swapping_hands_trades_the_selected_slot_and_the_off_hand() {
+        let mut slot = fresh_slot();
+        let sel = slot.hotbar_slot;
+        slot.inventory.set_slot(sel, Some(ItemStack::new_block(crate::block::STONE, 9)));
+        slot.offhand = Some(ItemStack::new_block(crate::block::TORCH, 5));
+        assert!(slot.swap_hands());
+        assert_eq!(slot.inventory.hotbar_slot(sel), Some(&ItemStack::new_block(crate::block::TORCH, 5)));
+        assert_eq!(slot.offhand, Some(ItemStack::new_block(crate::block::STONE, 9)));
+        assert!(slot.swap_hands());
+        assert_eq!(slot.inventory.hotbar_slot(sel), Some(&ItemStack::new_block(crate::block::STONE, 9)));
+        assert_eq!(slot.offhand, Some(ItemStack::new_block(crate::block::TORCH, 5)));
+        // An empty hand swaps in the off-hand item; two empty hands swap nothing.
+        slot.inventory.set_slot(sel, None);
+        assert!(slot.swap_hands());
+        assert_eq!(slot.inventory.hotbar_slot(sel), Some(&ItemStack::new_block(crate::block::TORCH, 5)));
+        assert_eq!(slot.offhand, None);
+        slot.inventory.set_slot(sel, None);
+        assert!(!slot.swap_hands());
+    }
 }

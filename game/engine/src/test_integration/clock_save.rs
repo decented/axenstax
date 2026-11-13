@@ -201,8 +201,8 @@ fn an_old_format_save_fixture_loads_with_todays_defaults() {
     let _g = WorldsRootGuard::new("clock-save-footer59");
     let bytes = WORLD_FOOTER_59;
     assert_eq!(crate::save_format::split_save_footer(bytes).1, Some(59));
-    // 70 since the `/weather clear` hold (the `weather_clear_until` field, layout revision 8): 59 is an older format still.
-    assert_eq!(crate::save_format::SAVE_FORMAT_VERSION, 70, "59 is an older format than this one");
+    // 71 since the off-hand slot (the `player_offhands` field, layout revision 8): 59 is an older format still.
+    assert_eq!(crate::save_format::SAVE_FORMAT_VERSION, 71, "59 is an older format than this one");
     let (save, damaged) = crate::save::read_world_save_reporting(bytes).expect("the old save is read");
     assert!(!damaged);
     assert_eq!(save.seed, 42);
@@ -396,7 +396,8 @@ fn a_clear_hold_round_trips_and_an_old_save_loads_with_none() {
     let mut file = crate::save::minimal_world_save_for_tests(3);
     file.authority_clock = Some(none.clone());
     let mut body = bincode::serialize(&file).unwrap();
-    assert_eq!(body.pop(), Some(0), "the new last field is the one `None` byte");
+    assert_eq!(body.pop(), Some(0), "the newest field (the off-hand column) is one `None` byte");
+    assert_eq!(body.pop(), Some(0), "and the weather hold before it");
     body.extend_from_slice(&crate::save_format::footer_bytes(69));
     let (old, damaged) = crate::save::read_world_save_reporting(&body).expect("a footer-69 save still loads");
     assert!(!damaged);

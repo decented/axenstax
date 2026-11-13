@@ -25,7 +25,7 @@ use glam::Vec3;
 
 use crate::crafting::ToolType;
 use crate::inventory::Inventory;
-use crate::item::{Item, MaterialId};
+use crate::item::{Item, ItemStack, MaterialId};
 use crate::protocol::ShotWeapon;
 
 /// The cooldown between shots, in GAME ticks (0.4 s: 2.5 shots a second),
@@ -69,6 +69,44 @@ pub fn ammo_for(weapon: ShotWeapon) -> MaterialId {
 pub fn find_ammo(inv: &Inventory, weapon: ShotWeapon) -> Option<usize> {
     let ammo = Item::Material(ammo_for(weapon));
     (0..36).find(|&i| inv.slot(i).is_some_and(|s| s.item == ammo))
+}
+
+/// Can `weapon` shoot `item`? The bow: an Arrow or a Nostrich Arrow; the
+/// slingshot: its Rubber Ball. Only the off-hand is asked this: the bag's
+/// search ([`find_ammo`]) is unchanged.
+pub fn shoots(weapon: ShotWeapon, item: &Item) -> bool {
+    matches!(
+        (weapon, item),
+        (ShotWeapon::Bow, Item::Material(MaterialId::Arrow | MaterialId::NostrichArrow))
+            | (ShotWeapon::Slingshot, Item::Material(MaterialId::RubberBall))
+    )
+}
+
+/// Does the off-hand hold ammo `weapon` can shoot?
+pub fn offhand_has_ammo(weapon: ShotWeapon, off: Option<&ItemStack>) -> bool {
+    off.is_some_and(|s| shoots(weapon, &s.item))
+}
+
+/// Take one round of ammo for a local shot (single-player and a host's own
+/// seats): from the off-hand first, when it holds ammo `weapon` can shoot, then
+/// from the bag as before (`find_ammo`, no auto-refill). Returns whether a round
+/// was taken. A joiner's shot is the server's and finds its ammo in the window
+/// (the off-hand is not on the wire yet).
+pub fn take_ammo(inv: &mut Inventory, off: &mut Option<ItemStack>, weapon: ShotWeapon) -> bool {
+    if offhand_has_ammo(weapon, off.as_ref()) {
+        if let Some(stack) = off.as_mut() {
+            stack.count = stack.count.saturating_sub(1);
+            if stack.count == 0 {
+                *off = None;
+            }
+        }
+        return true;
+    }
+    let Some(slot_idx) = find_ammo(inv, weapon) else { return false };
+    let Some(mut stack) = inv.slot(slot_idx).cloned() else { return false };
+    stack.count = stack.count.saturating_sub(1);
+    inv.set_slot(slot_idx, (stack.count > 0).then_some(stack));
+    true
 }
 
 /// The draw a click fires at: the bow has no draw (it always fires at full
@@ -123,7 +161,46 @@ pub fn spawn(ecs: &mut hecs::World, shot: &Launch, owner: Option<crate::entity::
 mod tests {
     use super::*;
     use crate::crafting::{Tool, ToolMaterial};
-    use crate::item::ItemStack;
+
+    #[test]
+    fn a_bow_in_hand_takes_its_arrow_from_the_off_hand_first() {
+        let mut inv = Inventory::new();
+        inv.set_slot(0, Some(ItemStack::new_tool(Tool::new(ToolType::Bow, ToolMaterial::Wood))));
+        inv.set_slot(12, Some(ItemStack::new_material(MaterialId::Arrow, 8)));
+        let mut off = Some(ItemStack::new_material(MaterialId::Arrow, 2));
+        assert!(weapon_of(inv.slot(0).map(|s| &s.item)).is_some());
+        assert!(take_ammo(&mut inv, &mut off, ShotWeapon::Bow));
+        assert_eq!(off, Some(ItemStack::new_material(MaterialId::Arrow, 1)), "the off-hand arrow is spent");
+        assert_eq!(inv.slot(12), Some(&ItemStack::new_material(MaterialId::Arrow, 8)), "the bag's are not");
+        assert!(take_ammo(&mut inv, &mut off, ShotWeapon::Bow));
+        assert_eq!(off, None);
+        assert!(take_ammo(&mut inv, &mut off, ShotWeapon::Bow), "then the bag, as today");
+        assert_eq!(inv.slot(12), Some(&ItemStack::new_material(MaterialId::Arrow, 7)));
+    }
+
+    #[test]
+    fn the_off_hand_ammo_must_suit_the_weapon() {
+        let mut inv = Inventory::new();
+        inv.set_slot(12, Some(ItemStack::new_material(MaterialId::Arrow, 1)));
+        // A torch, or a rubber ball for a bow, is not ammo: the bag is used.
+        for held in [ItemStack::new_block(crate::block::TORCH, 3), ItemStack::new_material(MaterialId::RubberBall, 3)] {
+            let mut off = Some(held.clone());
+            assert!(take_ammo(&mut inv, &mut off, ShotWeapon::Bow));
+            assert_eq!(off, Some(held));
+            inv.set_slot(12, Some(ItemStack::new_material(MaterialId::Arrow, 1)));
+        }
+        // A Nostrich Arrow is a bow's; a rubber ball is the slingshot's.
+        let mut off = Some(ItemStack::new_material(MaterialId::NostrichArrow, 1));
+        assert!(take_ammo(&mut inv, &mut off, ShotWeapon::Bow));
+        assert_eq!(off, None);
+        let mut off = Some(ItemStack::new_material(MaterialId::RubberBall, 1));
+        assert!(take_ammo(&mut inv, &mut off, ShotWeapon::Slingshot));
+        assert_eq!(off, None);
+        // No ammo anywhere: nothing taken.
+        let mut empty = Inventory::new();
+        let mut off = None;
+        assert!(!take_ammo(&mut empty, &mut off, ShotWeapon::Bow));
+    }
 
     #[test]
     fn a_bow_fires_arrows_and_a_slingshot_rubber_balls() {

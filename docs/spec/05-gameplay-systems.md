@@ -572,7 +572,7 @@ The player inventory is an ECS component (`Inventory`) on the player entity, con
 | Hotbar | 9 | Quick-access bar, always visible at screen bottom. |
 | Main inventory | 27 (3 rows of 9) | General storage, accessible via inventory screen. |
 | Armour slots | 4 | Helmet, chestplate, leggings, boots. |
-| Offhand | 1 | Shield or secondary item. |
+| Offhand | 1 | Any item (Minecraft's second hand): a torch placed while a pickaxe is held, food eaten while a sword is held. **Built for local players** (see §3.4); shield and lantern are later pieces. |
 | Crafting input (player) | 4 (2x2 grid) | Small crafting, always available in inventory screen. |
 | Crafting output | 1 | Result slot for the 2x2 grid. |
 
@@ -660,14 +660,20 @@ struct Inventory {
     hotbar: [Option<ItemStack>; 9],
     main: [Option<ItemStack>; 27],
     armour: [Option<ItemStack>; 4],          // BUILT elsewhere — as-built it lives on PlayerSlot.armour_slots (see below), not in Inventory
-    offhand: Option<ItemStack>,              // DEFERRED — offhand mechanic not yet wired
+    offhand: Option<ItemStack>,              // BUILT elsewhere — as-built it lives on PlayerSlot.offhand (see below), not in Inventory
     crafting_input: [Option<ItemStack>; 4],  // 2x2 — DEFERRED — handled via separate crafting-table UI today
     crafting_output: Option<ItemStack>,      // DEFERRED — see above
     selected_slot: u8,  // 0-8, active hotbar slot
 }
 ```
 
-**Current ship state (as of Wave 25):** the engine implements the **hotbar + main = 36 slots** flat (`game/engine/src/inventory.rs:11`). The `armour`, `offhand`, and `crafting_*` fields above are spec'd for the destination shape but not yet wired — armour is **built** but stored as `PlayerSlot.armour_slots: [Option<ArmourItem>; 4]` (equip UI in `craft_ui.rs`, HUD readout, damage reduction, saved), not inside `Inventory`; offhand is still unbuilt; offhand and crafting-input/output land when their respective UI surfaces do. Save-format compatibility is preserved by keeping the slot count at 36 until those fields go live.
+**Current ship state (as of Wave 25):** the engine implements the **hotbar + main = 36 slots** flat (`game/engine/src/inventory.rs:11`). The `armour`, `offhand`, and `crafting_*` fields above are spec'd for the destination shape but not yet wired — armour is **built** but stored as `PlayerSlot.armour_slots: [Option<ArmourItem>; 4]` (equip UI in `craft_ui.rs`, HUD readout, damage reduction, saved), not inside `Inventory`; the **off-hand is built for local players** (below), stored as `PlayerSlot.offhand: Option<ItemStack>` beside the armour; crafting-input/output land when their respective UI surfaces do.
+
+**The off-hand (as built, local players; 2026-11-13).** `PlayerSlot.offhand` holds one stack of any item (not slot 36 of `Inventory`: the 36-slot window rule, the server's shadow and the joiner save are untouched). It is saved as the appended `WorldSave.player_offhands` (field 63, Spec 02) and stays on the body at death, like armour: it is not in the grave and `keep_inventory` does not apply to it.
+- **Which hand a right-click uses** (`hands::use_hand`, Minecraft's rule): the main hand (the selected hotbar slot) first; only when its item has no use for what is aimed at does the off-hand item's use run. `hands::item_has_use` lists what the right-click chain's arms do with a held item (place a block, eat food when hungry or hurt, fire a bow or slingshot with ammo, a Lead, bonemeal, buckets, a hoe, flint and steel, shears, a rod, a seed on soil, a stick at a campfire, any material at a mob...). A pickaxe, sword, axe, shovel, armour or a plain material has none, so a torch in the off-hand is placed while a pickaxe is held, and food in the main hand is eaten from the main hand. The chain reads the chosen hand's item through one accessor, `PlayerSlot::held_for_use(hand)`, and takes from it with `consume_one_material_for`, `take_one_for`, `take_block_for`, `take_placeable_for`, `try_eat_for` and `use_tool_for` (the same one-cell rules as the hotbar's, `inventory.rs`). The off-hand never auto-refills from the bag. In Creative a placement does not spend the off-hand item, as it does not spend the main hand's.
+- **Swap:** **F** (`PlayerIntent.swap_hands`, edge, shares the key with the skin painter's Fill tool, which owns it during a paint session) or a tap on the off-hand box (touch) swaps the selected hotbar slot's stack with the off-hand.
+- **UI:** the off-hand box sits left of the hotbar (`hud_ui::HotbarGeom::offhand_box`, shared with touch hit-testing). In the inventory screen its slot sits beside the boots, with a faint shield outline when empty; clicks follow every slot's rules (`hands::click_offhand`: left whole stack, right one; pick up, put down, merge, swap).
+- **Not yet (later slices):** a joined client has no off-hand (the box, the slot and the F swap are off; its use packets carry no hand), shift-click and drag-paint into the slot (the window rule's `WindowClick`/`WindowSlot` are wire data), the left hand drawn in first and third person, the lantern and the shield. Save-format compatibility is preserved by keeping the slot count at 36 until those fields go live.
 
 The inventory system is a dedicated ECS system that:
 - Processes `InventoryAction` events (move, swap, drop, pick up).

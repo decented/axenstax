@@ -150,6 +150,64 @@ fn armour_slots_round_trip_through_save_with_full_iron_set() {
     scrub(name);
 }
 
+/// The off-hand rides the appended WorldSave field 63 (`player_offhands`): each
+/// local player's off-hand comes back as saved, a tool keeps its wear, and a
+/// player with none stays empty.
+#[test]
+fn offhand_round_trips_through_save_for_each_local_player() {
+    let name = "__test_save_offhand_round_trip__";
+    scrub(name);
+
+    let world = World::new();
+    let mut p1 = make_slot(0, Vec3::new(0.0, 80.0, 0.0), 0.0, 0.0, 20.0);
+    let p2 = make_slot(1, Vec3::new(4.0, 80.0, 0.0), 0.0, 0.0, 20.0);
+    p1.offhand = Some(ItemStack::new_block(crate::block::TORCH, 23));
+    let mut p3 = make_slot(2, Vec3::new(8.0, 80.0, 0.0), 0.0, 0.0, 20.0);
+    let mut worn = Tool::new(ToolType::Sword, ToolMaterial::Iron);
+    worn.durability -= 11;
+    p3.offhand = Some(ItemStack::new_tool(worn.clone()));
+
+    save::save_world(name, &world, &[p1, p2, p3], 7, &[], &[], None, None).expect("save_world");
+
+    let mut loaded_world = World::new();
+    let (save, _chunks) = save::load_world(name, &mut loaded_world).expect("load_world");
+    let col = save.player_offhands.as_ref();
+    assert_eq!(save::restore_offhand(col, 0), Some(ItemStack::new_block(crate::block::TORCH, 23)));
+    assert_eq!(save::restore_offhand(col, 1), None, "player 2 holds nothing in the off-hand");
+    assert_eq!(save::restore_offhand(col, 2), Some(ItemStack::new_tool(worn)), "a tool's wear survives");
+    assert_eq!(save::restore_offhand(col, 3), None, "a short column reads as empty");
+
+    scrub(name);
+}
+
+/// A world nobody holds an off-hand item in writes `None` (one byte), and a
+/// save written before the field loads every off-hand empty.
+#[test]
+fn old_saves_and_unused_offhands_load_empty() {
+    let name = "__test_save_offhand_old__";
+    scrub(name);
+
+    let world = World::new();
+    let p1 = make_slot(0, Vec3::new(0.0, 80.0, 0.0), 0.0, 0.0, 20.0);
+    save::save_world(name, &world, &[p1], 7, &[], &[], None, None).expect("save_world");
+    let mut loaded_world = World::new();
+    let (save, _chunks) = save::load_world(name, &mut loaded_world).expect("load_world");
+    assert!(save.player_offhands.is_none(), "no off-hand item: the column is None");
+    assert_eq!(save::restore_offhand(save.player_offhands.as_ref(), 0), None);
+    scrub(name);
+
+    // An old save (footer 70: 62 fields, no `player_offhands`): the field reads as absent.
+    let mut file = crate::save::minimal_world_save_for_tests(3);
+    file.player_offhands = Some(vec![SavedSlot::Block { block_id: crate::block::TORCH, count: 5 }]);
+    let mut bytes = bincode::serialize(&file).unwrap();
+    let tail = bincode::serialize(&file.player_offhands).unwrap().len();
+    bytes.truncate(bytes.len() - tail);
+    bytes.extend_from_slice(&crate::save_format::footer_bytes(70));
+    let (old, ..) = crate::save::read_world_save_reporting(&bytes).expect("a footer-70 save opens");
+    assert!(old.player_offhands.is_none());
+    assert_eq!(save::restore_offhand(old.player_offhands.as_ref(), 0), None);
+}
+
 #[test]
 fn legacy_single_player_save_synthesises_one_player_entry() {
     // A save with an empty `players` Vec (pre-multi-player format) must
@@ -222,6 +280,7 @@ fn legacy_single_player_save_synthesises_one_player_entry() {
         plot_succession: None,
         site_boards: None,
         weather_clear_until: None,
+        player_offhands: None,
     };
 
     // Round-trip via bincode to mimic the on-disk path. Defensive: a
@@ -813,13 +872,13 @@ fn flower_micro_model_survives_save_load() {
 /// before all three face tables. Encode the actual appended fields rather
 /// than guessing their size; nested fixed tuples add no bincode length prefix.
 fn pre_overlay_world_save_bytes(full: &WorldSave) -> Vec<u8> {
-    assert_eq!(crate::save_format::WORLD_SAVE_FIELD_COUNT, 62, "re-find the appended suffix if another world field is added");
+    assert_eq!(crate::save_format::WORLD_SAVE_FIELD_COUNT, 63, "re-find the appended suffix if another world field is added");
     assert!(full.face_overlays.is_empty() && full.face_blueprints.is_empty() && full.face_blueprint_blanks.is_empty());
-    assert!(full.local_personal.is_none() && full.quest_world.is_none() && full.authority_clock.is_none() && full.block_authors.is_none() && full.region_use.is_none() && full.plan_builds.is_none() && full.plot_succession.is_none() && full.site_boards.is_none() && full.weather_clear_until.is_none());
+    assert!(full.local_personal.is_none() && full.quest_world.is_none() && full.authority_clock.is_none() && full.block_authors.is_none() && full.region_use.is_none() && full.plan_builds.is_none() && full.plot_succession.is_none() && full.site_boards.is_none() && full.weather_clear_until.is_none() && full.player_offhands.is_none());
     let suffix = bincode::serialize(&(
         (&full.face_overlays, &full.face_blueprints, &full.face_blueprint_blanks, &full.workshop, &full.carts, &full.graves, &full.waypoints, &full.block_meta),
         (&full.power_devices, &full.signs, &full.item_frames, &full.locked_slots, &full.hostile_acts, &full.rigs, &full.exhibits, &full.composters),
-        (&full.saved_mobs, &full.satoshi, &full.dispensers, &full.rig_clips, &full.local_personal, &full.quest_world, &full.worldgen_version, &full.authority_clock, &full.block_authors, &full.region_use, &full.plan_builds, &full.plot_succession, &full.site_boards, &full.weather_clear_until),
+        (&full.saved_mobs, &full.satoshi, &full.dispensers, &full.rig_clips, &full.local_personal, &full.quest_world, &full.worldgen_version, &full.authority_clock, &full.block_authors, &full.region_use, &full.plan_builds, &full.plot_succession, &full.site_boards, &full.weather_clear_until, &full.player_offhands),
     )).expect("encode the actual appended suffix");
     let mut bytes = bincode::serialize(full).expect("serialize WorldSave");
     assert!(bytes.ends_with(&suffix), "the retained old fields must precede the exact appended suffix");

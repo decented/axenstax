@@ -475,6 +475,9 @@ impl super::GameState {
                     slot.player.flying = false;
                     crate::save::restore_inventory(&mut slot.inventory, &p_save.inventory);
                     slot.armour_slots = crate::save::restore_armour_slots(&p_save.armour_slots);
+                    // The off-hand rides the appended field 63; an older save
+                    // has none, so it loads empty.
+                    slot.offhand = crate::save::restore_offhand(save_data.player_offhands.as_ref(), i);
                     // Spec 19 — reputation rebuild from the flattened save
                     // Vec. Legacy saves arrive with an empty Vec so the
                     // restore is a no-op (rep starts at Neutral with every

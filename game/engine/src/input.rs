@@ -104,6 +104,11 @@ pub struct InputState {
     /// F press → toggle the skin-paint Fill tool on/off (back to Brush).
     /// Edge-triggered; avatar paint session only. F is otherwise unbound.
     pub workshop_fill: bool,
+    /// F press → swap the main-hand item with the off-hand (`hands.rs`).
+    /// Edge-triggered, one frame. F is shared with the skin painter's Fill
+    /// tool (`workshop_fill`): the paint session consumes that one, and
+    /// `game_loop` ignores this one while a paint session is open.
+    pub swap_hands: bool,
     /// L press → show/hide the skin painter's texel grid + hover footprint.
     /// Edge-triggered; consumed ONLY while an avatar paint session is open, so
     /// L stays free everywhere else. (G would read better but is the
@@ -184,6 +189,7 @@ impl InputState {
             workshop_limbs: false,
             workshop_tool_cycle: false,
             workshop_fill: false,
+            swap_hands: false,
             workshop_grid: false,
             camera_cycle: false,
             pick_block: false,
@@ -249,6 +255,7 @@ impl InputState {
         // (F5/F6/F8-F12 are function keys, not KeyF).
         if key == KeyCode::KeyF {
             self.workshop_fill = true;
+            self.swap_hands = true;
         }
 
         // Skin painter (2026-09-06) — L shows/hides the texel grid + the hover
@@ -445,6 +452,7 @@ impl InputState {
         self.workshop_limbs = false;
         self.workshop_tool_cycle = false;
         self.workshop_fill = false;
+        self.swap_hands = false;
         self.workshop_grid = false;
         self.map_toggle = false;
         self.challenge_board_toggle = false;
@@ -560,6 +568,7 @@ impl InputState {
             workshop_limbs: self.workshop_limbs,
             workshop_tool_cycle: self.workshop_tool_cycle,
             workshop_fill: self.workshop_fill,
+            swap_hands: self.swap_hands,
             workshop_grid: self.workshop_grid,
             shift_down: self.shift_held(),
             camera_cycle: self.camera_cycle,

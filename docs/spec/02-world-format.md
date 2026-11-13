@@ -2354,11 +2354,11 @@ against the slice before allocating.
       have made new saves unreadable to shipped builds, and a 4-byte header magic
       collides with a legacy save's leading `seed: u32`; an 8-byte trailing magic
       at the very end of a footer-less save is not a realistic collision.
-    - **`SAVE_FORMAT_VERSION`** = `WORLD_SAVE_FIELD_COUNT` (62 since the `/weather clear` hold,
+    - **`SAVE_FORMAT_VERSION`** = `WORLD_SAVE_FIELD_COUNT` (63 since the off-hand slot,
       2026-11-13: `quest_world` was 54, `worldgen_version` 55, `authority_clock` 56,
       `block_authors` 57, `region_use` 58, `plan_builds` 59, `plot_succession` 60, `site_boards` 61,
-      `weather_clear_until` 62) +
-      `SAVE_LAYOUT_REVISION` (8 today; see the block-ids bullets below) = 70. The current `SAVE_FORMAT_VERSION` is `70` (a test, `save_format::tests::spec_02_states_the_current_save_format_version`, fails if this sentence and the constant disagree, so a bump must edit this line). Two tripwire tests stop drift: serde's field list
+      `weather_clear_until` 62, `player_offhands` 63) +
+      `SAVE_LAYOUT_REVISION` (8 today; see the block-ids bullets below) = 71. The current `SAVE_FORMAT_VERSION` is `71` (a test, `save_format::tests::spec_02_states_the_current_save_format_version`, fails if this sentence and the constant disagree, so a bump must edit this line). Two tripwire tests stop drift: serde's field list
       for `WorldSave` must equal `WORLD_SAVE_FIELD_COUNT` (so appending a field
       without bumping the version fails), and the tolerant reader must consume every
       byte of a current save (so a field listed in its struct literal without a read
@@ -2499,6 +2499,17 @@ against the slice before allocating.
       transfer copy keeps it; (6) it reaches joiners as a block view (`BlockView::SiteBoard`, Spec 04), never
       in the save a joiner holds. The once-a-day bloom surge table (`World.site_board_days`) is runtime only.
       See `docs/superpowers/specs/2026-11-09-living-world-tier2.md` §7.
+    - **The off-hand slot and field 63 (format 71, 2026-11-13).** A local player's off-hand item
+      (`PlayerSlot.offhand: Option<ItemStack>`, beside the armour, not slot 36 of the inventory) is saved as the
+      appended field 63, `WorldSave.player_offhands: Option<Vec<SavedSlot>>`, element `i` = local player `i`'s
+      off-hand (`SavedSlot::Empty` for none). It is **not** a field of `PlayerSaveData`: that record is nested
+      positional bincode, so a longer element would misread every older save's players (and its `serde(default)`s
+      are inert). The writer emits `None` when no player holds an off-hand item; a save written before the field
+      (or with a short column) loads every off-hand empty, and the stack is clamped to its item's max stack like
+      any restored slot. Local slots only: a joiner's off-hand will ride the joiner sidecar (a later slice), and
+      nothing here is on the wire. Footer arithmetic: field count 63 + revision 8 = 71; `FOOTER_FIELD_COUNTS`
+      gains `(71, [63])`; a world written at footer 70 or older still opens, with every off-hand empty. The
+      appended field adds no block id and no enum variant, so `SAVE_LAYOUT_REVISION` does not move for it.
     - **The `/weather clear` hold and field 62 (format 70, 2026-11-13).** `Weather::clear_until`
       (`weather.rs`) is the `tick_counter` until which `weather::advance` rolls no new rain; `/weather clear`
       sets it, `/weather rain|storm` clears it, and with it set the natural cycle resumes when the tick passes

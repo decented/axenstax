@@ -280,6 +280,7 @@ fn a_footer_67_save_loads_with_no_boards() {
     let mut save = crate::save::minimal_world_save_for_tests(7);
     save.site_boards = None;
     let mut body = bincode::serialize(&save).unwrap();
+    assert_eq!(body.pop(), Some(0), "the absent off-hand column is one None byte");
     assert_eq!(body.pop(), Some(0), "the absent weather hold is one None byte");
     assert_eq!(body.pop(), Some(0), "the absent field is one None byte");
     body.extend_from_slice(&crate::save_format::footer_bytes(67));

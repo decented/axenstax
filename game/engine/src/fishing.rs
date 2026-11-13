@@ -90,6 +90,15 @@ pub fn reel_in(inv: &mut crate::inventory::Inventory, hot: usize, seed: u64) -> 
     Reeled { catch, leftover, wear }
 }
 
+/// [`reel_in`] with the rod in some other cell than a hotbar slot (the
+/// off-hand, `hands.rs`): the catch goes into `inv`, the rod in `rod` wears.
+pub fn reel_in_with(inv: &mut crate::inventory::Inventory, rod: &mut Option<ItemStack>, seed: u64) -> Reeled {
+    let catch = roll_catch(seed);
+    let leftover = inv.add_item(catch.clone());
+    let wear = crate::inventory::use_tool_cell(rod);
+    Reeled { catch, leftover, wear }
+}
+
 /// Randomised wait (ticks) until a bite. Seeded so it's deterministic +
 /// replay-stable (typically `tick ^ player-something`).
 pub fn wait_ticks(seed: u64) -> u64 {

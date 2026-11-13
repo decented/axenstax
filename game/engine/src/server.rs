@@ -3717,6 +3717,7 @@ impl GameServer {
             plot_succession: self.world.plot_succession.to_saved(),
             site_boards: crate::site_board::to_saved(&self.world.site_boards),
             weather_clear_until: self.saved_clock().clear_hold_for_save(),
+            player_offhands: None,
             exhibits: self.world.exhibits.clone(),
             composters: self
                 .world
