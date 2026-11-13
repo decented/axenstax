@@ -1437,6 +1437,13 @@ fn handover_checkpoint_an_empty_off_hand_seed_is_the_v2_layout_byte_for_byte() {
         (442, "6541d10fea7df1d9094d5ab26991603613041b35032a68e8399ef3275bea6e64"),
     );
     super::bounded_decode::sidecar(&seed).unwrap();
+    // The off-hand seed's form with an empty off-hand is not canonical (v2 is
+    // that seed's one form): refused by Ready and by the record reader.
+    let mut forged = seed.clone();
+    forged[0] = crate::joiner_save::SEED_OFFHAND;
+    forged.extend(bincode::serialize(&SavedItemSlot::capture(None)).unwrap());
+    assert!(super::bounded_decode::sidecar(&forged).is_err(), "Ready accepted a second form of a v2 seed");
+    assert!(crate::joiner_save::JoinerSave::decode(&forged).is_err());
 }
 
 /// Off-hand review B2: a seat whose off-hand holds an item is frozen in a seed

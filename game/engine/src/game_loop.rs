@@ -13699,10 +13699,18 @@ impl super::GameState {
                 let p = &self.players[pidx];
                 let target = crate::hands::UseTarget {
                     block: p.target_block.map(|b| self.world.get_block(b[0], b[1], b[2])),
-                    mob: matches!(
-                        crate::combat::find_attack_target(&self.ecs, p.player.eye_pos(), p.camera.forward()),
-                        Some((_, Some(_)))
-                    ),
+                    // A joined client's mobs live in the render-only mirror,
+                    // not in `self.ecs`: ask it the way the joined mob arm
+                    // below finds its mob, so the hand rule sees the same mob
+                    // in local play and joined (off-hand review M2).
+                    mob: if self.joined() {
+                        self.joined_mob_under_crosshair(pidx).is_some()
+                    } else {
+                        matches!(
+                            crate::combat::find_attack_target(&self.ecs, p.player.eye_pos(), p.camera.forward()),
+                            Some((_, Some(_)))
+                        )
+                    },
                     wants_to_eat: p.combat.hunger < p.combat.max_hunger || p.combat.health < p.combat.max_health,
                     arrows: p.inventory.count_material(crate::item::MaterialId::Arrow) > 0
                         || crate::shot::offhand_has_ammo(crate::protocol::ShotWeapon::Bow, p.offhand.as_ref()),
