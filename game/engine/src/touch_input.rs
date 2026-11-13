@@ -823,6 +823,25 @@ mod tests {
         }
     }
 
+    /// A tap inside the off-hand box (shared geometry with the HUD) swaps the
+    /// hands for one frame, and is not a joystick, look or hotbar touch.
+    #[test]
+    fn a_tap_on_the_offhand_box_swaps_hands() {
+        for (w, h) in [(1280.0, 720.0), (800.0, 360.0), (2400.0, 1080.0)] {
+            let mut t = TouchInput::new();
+            t.set_screen_size(w, h);
+            t.set_pixels_per_point(1.0);
+            let g = crate::hud_ui::hotbar_geom(0.0, 0.0, w, h);
+            let (ox, oy, side) = g.offhand_box();
+            t.on_touch_start(1, ox + side * 0.5, oy + side * 0.5);
+            assert!(t.swap_hands, "{w}x{h}: the tap sets swap_hands");
+            assert!(t.hotbar_select.is_none() && t.joystick_id.is_none() && t.look_id.is_none());
+            assert!(t.to_intent().swap_hands && t.to_intent().cursor_captured, "→ the swap intent");
+            t.end_frame();
+            assert!(!t.to_intent().swap_hands, "an edge: cleared at the end of the frame");
+        }
+    }
+
     #[test]
     fn inventory_button_toggles_inventory() {
         let mut t = TouchInput::new();

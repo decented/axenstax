@@ -47,10 +47,38 @@ pub struct UseTarget {
     pub rubber_balls: bool,
 }
 
+/// Blocks whose right-click arm in `game_loop` takes or reads the HELD item
+/// whatever it is: a Steam Generator's fuel, a hive's bucket or shears, a
+/// Composter's scraps, an Item Frame's item, a campfire's fuel or food, a drying
+/// rack's, the Feast Table's stack, and a Track (freight, or an empty hand to
+/// ride). Aimed at one, the main hand keeps the click (Minecraft's block use
+/// runs with the main hand first), empty or not, so a torch in the off-hand is
+/// never fed to a composter or hung in a frame while a pickaxe is held. Add a
+/// block here when its arm gains a read of the held item.
+pub fn block_takes_held_item(b: BlockId) -> bool {
+    matches!(
+        b,
+        block::STEAM_GENERATOR
+            | block::STEAM_GENERATOR_LIT
+            | block::BEE_HIVE
+            | block::COMPOSTER
+            | block::ITEM_FRAME
+            | block::CAMPFIRE
+            | block::CAMPFIRE_UNLIT
+            | block::DRYING_RACK
+            | block::FEAST_TABLE
+            | crate::rail::TRACK
+    )
+}
+
 /// The hand a right-click uses: the main hand unless its item has no use for
 /// `target` and the off-hand item does (Minecraft's rule). An empty main hand
-/// has no use.
+/// has no use. A block that takes the held item ([`block_takes_held_item`])
+/// always keeps the main hand.
 pub fn use_hand(main: Option<&Item>, off: Option<&Item>, target: &UseTarget) -> Hand {
+    if target.block.is_some_and(block_takes_held_item) {
+        return Hand::Main;
+    }
     let main_used = main.is_some_and(|m| item_has_use(m, target));
     if main_used {
         return Hand::Main;
@@ -301,6 +329,40 @@ mod tests {
         let torch = Item::Block(block::TORCH);
         let cow = UseTarget { mob: true, ..UseTarget::default() };
         assert_eq!(use_hand(Some(&wheat), Some(&torch), &cow), Hand::Main);
+    }
+
+    #[test]
+    fn a_block_that_takes_the_held_item_keeps_the_main_hand_whatever_it_is() {
+        let torch = Item::Block(block::TORCH);
+        let pick = tool(ToolType::Pickaxe);
+        let sword = tool(ToolType::Sword);
+        let bread = Item::Material(MaterialId::Bread);
+        let wheat = Item::Material(MaterialId::Wheat);
+        for b in [
+            block::STEAM_GENERATOR,
+            block::STEAM_GENERATOR_LIT,
+            block::BEE_HIVE,
+            block::COMPOSTER,
+            block::ITEM_FRAME,
+            block::CAMPFIRE,
+            block::CAMPFIRE_UNLIT,
+            block::DRYING_RACK,
+            block::FEAST_TABLE,
+            crate::rail::TRACK,
+        ] {
+            assert!(block_takes_held_item(b));
+            let at = UseTarget { block: Some(b), ..UseTarget::default() };
+            for main in [&pick, &sword, &bread, &wheat] {
+                assert_eq!(use_hand(Some(main), Some(&torch), &at), Hand::Main, "block {b}, main {main:?}");
+            }
+            assert_eq!(use_hand(None, Some(&torch), &at), Hand::Main, "block {b}: an empty hand keeps the click (a Track mounts)");
+        }
+        // Full and unhurt food at a campfire or a Feast Table is not stolen by the torch.
+        let at_feast = UseTarget { block: Some(block::FEAST_TABLE), ..UseTarget::default() };
+        assert_eq!(use_hand(Some(&bread), Some(&torch), &at_feast), Hand::Main);
+        // An ordinary block does not.
+        assert!(!block_takes_held_item(block::STONE));
+        assert_eq!(use_hand(Some(&pick), Some(&torch), &stone_target()), Hand::Off);
     }
 
     #[test]

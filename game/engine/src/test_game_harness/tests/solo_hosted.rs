@@ -81,6 +81,8 @@ fn save_and_reopen(seats: usize) {
     }
     for i in 0..seats {
         assert!(game.state.players[i].inventory.add_item(crate::item::ItemStack::new_block(crate::block::STONE, (i + 1) as u8)).is_none());
+        // The off-hand is the local seat's own: it rides the lent world's save too.
+        game.state.players[i].offhand = Some(crate::item::ItemStack::new_block(crate::block::TORCH, (i + 10) as u8));
     }
     assert_one_sim(&game.logical_ticks(5));
     {
@@ -100,6 +102,9 @@ fn save_and_reopen(seats: usize) {
     assert_eq!(game.state.players.len(), seats, "every seat is restored");
     let after: Vec<u32> = game.state.players.iter().map(|p| stone_in(&p.inventory)).collect();
     assert_eq!(after, before);
+    for (i, p) in game.state.players.iter().enumerate() {
+        assert_eq!(p.offhand, Some(crate::item::ItemStack::new_block(crate::block::TORCH, (i + 10) as u8)), "seat {i}'s off-hand is restored");
+    }
     assert_eq!(game.state.session_mode(), SessionMode::LocalAuthority);
     assert_eq!(server_tick(&game), 0, "a reopen's authority has not ticked yet");
     let saved_tick = game.state.tick_counter;

@@ -815,6 +815,8 @@ pub(crate) fn hud_scale(viewport_width_pts: f32) -> f32 {
 /// `touch_input::layout_buttons` gives the action buttons.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct HotbarGeom {
+    /// Left edge of the viewport this was laid out in.
+    pub vp_x: f32,
     /// Left edge of slot 0.
     pub x: f32,
     /// Top edge of the slot row.
@@ -831,8 +833,16 @@ impl HotbarGeom {
     /// The off-hand box's rect (`x`, `y`, side): one slot left of the hotbar
     /// with a double gap between, as in Minecraft. The single source for
     /// drawing it ([`draw_hotbar`]) and tapping it (`touch_input::classify_zone`).
+    ///
+    /// On a viewport too narrow to leave room beside the hotbar it sits above
+    /// the first slot instead, so the box is always on screen.
     pub fn offhand_box(&self) -> (f32, f32, f32) {
-        (self.x - self.gap * 2.0 - self.slot, self.y, self.slot)
+        let left = self.x - self.gap * 2.0 - self.slot;
+        if left >= self.vp_x {
+            (left, self.y, self.slot)
+        } else {
+            (self.x, self.y - self.gap * 2.0 - self.slot, self.slot)
+        }
     }
 }
 
@@ -842,6 +852,7 @@ pub(crate) fn hotbar_geom(vp_x: f32, vp_y: f32, vp_w: f32, vp_h: f32) -> HotbarG
     let gap = 4.0 * scale;
     let total_w = 9.0 * slot + 8.0 * gap;
     HotbarGeom {
+        vp_x,
         x: vp_x + vp_w / 2.0 - total_w / 2.0,
         y: vp_y + vp_h - 16.0 - slot,
         slot,
@@ -3045,6 +3056,25 @@ mod tests {
         let scale = hud_scale(480.0);
         let total_w = 9.0 * 48.0 * scale + 8.0 * 4.0 * scale;
         assert!(total_w < 480.0 - 32.0, "scaled hotbar {} must leave slack", total_w);
+    }
+
+    /// The off-hand box is on screen and clear of the hotbar at every
+    /// viewport the HUD lays out for, including quad quadrants and a phone.
+    #[test]
+    fn the_offhand_box_is_on_screen_and_never_overlaps_the_hotbar() {
+        for (vp_x, w, h) in [(0.0, 1280.0, 720.0), (0.0, 800.0, 360.0), (0.0, 640.0, 360.0), (0.0, 480.0, 270.0), (640.0, 640.0, 360.0), (0.0, 360.0, 640.0)] {
+            let g = hotbar_geom(vp_x, 0.0, w, h);
+            let (ox, oy, side) = g.offhand_box();
+            assert!(ox >= vp_x && ox + side <= vp_x + w && oy >= 0.0 && oy + side <= h, "{w}x{h}: the box ({ox},{oy}) is on screen");
+            let hotbar = (g.x, g.y, g.x + g.total_w, g.y + g.slot);
+            let disjoint = ox + side <= hotbar.0 || ox >= hotbar.2 || oy + side <= hotbar.1 || oy >= hotbar.3;
+            assert!(disjoint, "{w}x{h}: the box does not cover a hotbar slot");
+        }
+        // Wide enough: it sits level with the hotbar, left of slot 0.
+        let g = hotbar_geom(0.0, 0.0, 1280.0, 720.0);
+        let (ox, oy, side) = g.offhand_box();
+        assert_eq!((oy, side), (g.y, g.slot));
+        assert!(ox + side < g.x);
     }
 
     // ── Reserve gauge helpers ────────────────────────────────────────
