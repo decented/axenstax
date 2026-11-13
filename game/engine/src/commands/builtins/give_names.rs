@@ -187,6 +187,8 @@ pub(super) static BLOCK_NAMES: &[(&[&str], BlockId)] = &[
     // Living world Tier 2 S6 — the Commons Shelf.
     (&["commons_shelf", "commonsshelf", "shelf"], block::COMMONS_SHELF),
     (&["site_board", "siteboard"], block::SITE_BOARD),
+    // Off-hand slice 4 — the hand lantern.
+    (&["lantern", "hand_lantern"], block::LANTERN),
     // Smelting + redstone-equivalent blocks — added so Trials challenge kits
     // (Smith / Engineer) can hand them out. The engine-managed PISTON_HEAD is
     // deliberately NOT giveable.

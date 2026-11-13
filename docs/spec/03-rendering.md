@@ -770,6 +770,38 @@ colour       = texture · light → emissive mix → bloom grade → fog → use
   bits round-trip; a drift guard checks that `shader.wgsl` carries the same constants and
   that no fragment function keeps the old merged form.
 
+**As built: carried light, the point lights and the light rule's one added input (off-hand
+plan slice 4, 2026-11-13; Spec 05 §4.7).** A light a player holds in either hand lights the
+world round them without touching the voxel light arrays. The camera uniform gains
+`carried: [vec4; 9]` (`CameraUniform::carried`, 144 bytes; the uniform is 1360): element 0 holds
+the count in `x`, elements 1 to 8 hold up to **eight** lights as `(world x, y, z, level 0..15)`,
+the nearest to the camera first (`carried_light::nearest`). Every uniform built by hand has
+`CARRIED_LIGHTS_OFF` (count 0), and so does the viewmodel pass, whose `world_pos` is view
+space: a first-person hand is lit on the CPU instead, its block channel raised to
+`carried_light::viewmodel_level` (the brighter hand's level less 0.7 block) before
+`set_avatar_light` and `apply_light_channels`. The one light rule gains one input before it
+runs, in every fragment function that lights a world surface (`fs_main` through `shade_block`,
+`fs_plant`, `fs_decal`, `fs_transparent`, `fs_avatar` and the block half of `fs_water`):
+
+```text
+carried(p)   = max over the lights of  max(level - |p - light|, 0) / 15      (one level per block)
+block        = max(vertex block light, carried(p))
+light        = max(sky_term, block_term(n, block))        (unchanged)
+```
+
+So terrain, mobs, avatars, dropped items and the first-person hand all take it, a surface already
+lit brighter keeps its colour (a max, never a sum), and the emissive sentinel (> 1.5) still wins.
+It is the same one rule: warm colour, the fixed per-face shade, no time input. `world_light::carried_block`
+is the CPU twin and the drift guard checks the WGSL constants (`CARRIED_MAX` 8, `CARRIED_LEVELS` 15)
+and that every call site goes through it. **Sources** (`carried_light.rs`): each hand that holds a
+light is one light at that hand (0.4 out to its side, 0.8 up from the holder's feet, turned with its
+yaw), for every local slot and every peer's `PlayerState` (`held_*`, `off_*`: nothing new on the
+wire); a block gives its `light_emission`, a Sparkler 12 and a Flare 15. **Cost and limits.** Per
+fragment a count-guarded loop of at most eight distance tests (zero in the usual case); no remesh,
+no BFS, no simulation effect; the uniform stays far under WebGPU's 64 KiB. There is no occlusion
+and no facing test, so a carried light can glow faintly through a thin wall (accepted), and the
+cap means a ninth, farther light is simply not drawn. The lantern's own look is §5.10.
+
 > **Fixed 2026-11-12 (torch light).** At night a torch barely lit its surroundings, and the
 > torch itself showed as a dark stick. There were four causes:
 > 1. **Torch UV window.** The torch's small cube sampled its texture from the (0, 0) corner
@@ -1502,8 +1534,8 @@ third-person avatar hand) and on the ground (local and server-broadcast drops).
   a shape.
 - **Held materials and the polished sword and rod (2026-11-13).** A material in
   the hand (bread, a stick, an ingot, ...) is the flat cut-out sprite of its icon,
-  the path a held torch takes (`item_model::held_item_mesh`, `HELD_SPRITE_WIDTH`,
-  the sprite offset; the first-person view takes the offset out and stands it
+  the path a held torch takes (`item_model::held_item_mesh`, `HELD_MATERIAL_WIDTH` 0.45
+  against the torch's 0.6, the sprite offset; the first-person view takes the offset out and stands it
   upright, `item_model::held_is_sprite`), when its icon has a transparent
   background to cut away (`icon_has_clear_background`); an icon with none keeps
   the small cube. Before, a held material was always a cube, and a bread icon's
@@ -1516,6 +1548,18 @@ third-person avatar hand) and on the ground (local and server-broadcast drops).
   envelope (y -0.34 .. 0.35), which caps how long the blade can be. The fishing rod
   has a line hanging from its tip with a small red float and a hook below it, from
   the string, red-dye and iron tiles.
+- **The hand lantern's look (off-hand plan slice 4).** Block 380 is a micro-model (§7.5a's
+  baked shells, `micro_model.rs`), painted from existing layers only: wallpaper-black for the
+  frame, wallpaper-grey for the cap, wallpaper-yellow for the core, all flat paint layers. The
+  registry holds two shells, the standing one under the block's own id and the hanging one
+  (the body lifted a sixteenth on a two-sixteenth chain up to the top of the cell) under
+  `lantern::HANGING_MODEL_KEY` (`0x8000 | 380`, never a block id); the mesher picks the key by
+  the cell's meta bit (`lantern::model_key`) and the far-LOD billboard is the generic one, a
+  half-cell footprint. In a hand (`item_model::held_item_mesh`, routed before `block_look`) it is the
+  standing shell baked once, scaled 0.55 and centred on itself (about 0.45 tall), in the entity
+  pass with no cut-out bit: a small model, not a sprite. As a dropped or framed item it is the
+  small cube (`FULL_TILE_BLOCKS`: its layers are full tiles). The web build's 512 layers are
+  untouched (a test pins `texture_count() == 512`).
 - **The avatar's two hands.** `entity_model::build_player_avatar_vertices_with`
   holds the main-hand item (`held_*`) at the right arm's hand anchor and the
   off-hand item (`off_*`) at the left arm's (index 2), each through the same

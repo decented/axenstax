@@ -76,6 +76,8 @@ mod place_trial; // Living world S4 — `Objective::Place`: bloom probes, the re
 mod inventory;
 mod mesh;
 mod micro_model;
+mod carried_light; // Off-hand slice 4 — the glow of a light a player holds in either hand.
+mod lantern; // Off-hand slice 4 — the hand lantern: held, placed and hung.
 mod micro_model_assets;
 mod micro_model_registry;
 mod mipmap;
@@ -3940,6 +3942,7 @@ fn run_shot_workshop(args: &[String]) {
         cam_up: [0.0, 1.0, 0.0, 0.0],
         bloom_origin: crate::camera::BLOOM_ORIGIN_OFF,
         bloom_grid: crate::camera::BLOOM_GRID_NEUTRAL,
+        carried: crate::camera::CARRIED_LIGHTS_OFF,
     };
     renderer.update_camera(0, &camera_uniform);
     renderer.render_to_png(&out_path);
@@ -4073,6 +4076,7 @@ fn run_screenshot(args: &[String]) {
         cam_up: [0.0, 1.0, 0.0, 0.0],
         bloom_origin: crate::camera::BLOOM_ORIGIN_OFF,
         bloom_grid: crate::camera::BLOOM_GRID_NEUTRAL,
+        carried: crate::camera::CARRIED_LIGHTS_OFF,
     };
     // Test hook: `--bloom <level>` forces every bloom cell to that level
     // (0 = grey, 1 = vivid) so the colour grade can be looked at.

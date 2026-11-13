@@ -328,6 +328,8 @@ pub fn block_hardness(block_id: BlockId) -> f32 {
         block::BED => 0.2,
         block::GLASS => 0.3,
         block::TORCH => 0.0,
+        // Off-hand slice 4 — an iron-and-glass hand lantern comes off a little slower than a torch.
+        block::LANTERN => 0.3,
         // Living world Tier 2 S8 — a blighted plant is pulled up at once (no work credit).
         block::BLIGHTED_CROP => 0.0,
         // Building variants (slabs, stairs, doors, …): the table's per-material number.
@@ -2181,6 +2183,12 @@ pub fn match_recipe(grid: &[[CraftSlot; 3]; 3]) -> Option<ItemStack> {
         if col == [iron, stick, plank] {
             return Some(ItemStack::new_block(block::VILLAGE_BELL, 1));
         }
+        // Off-hand slice 4 — the hand lantern: an iron ingot over a torch over an
+        // iron ingot, a vertical column at the workbench (a 3-tall column does not fit
+        // the 2x2 player grid) → 1 lantern.
+        if col == [iron, CraftSlot::Block(block::TORCH), iron] {
+            return Some(ItemStack::new_block(block::LANTERN, 1));
+        }
         // Spec 48 (Electricity) — power-block 3×1 column recipes.
         let copper = CraftSlot::Material(MaterialId::CopperIngot);
         let coal = CraftSlot::Material(MaterialId::Coal);
@@ -3964,6 +3972,58 @@ mod tests {
         g[1][0] = CraftSlot::Material(MaterialId::Stick);
         g[1][2] = CraftSlot::Material(MaterialId::Stick);
         assert!(match_recipe(&g).is_none(), "a table needs its loaf");
+    }
+
+    #[test]
+    fn an_iron_ingot_over_a_torch_over_an_iron_ingot_makes_one_lantern_at_the_workbench() {
+        let iron = CraftSlot::Material(MaterialId::IronIngot);
+        let torch = CraftSlot::Block(block::TORCH);
+        // The column in each of the three workbench columns, and shifted down a row
+        // only if it still fits (it is three tall, so rows are fixed).
+        for c in 0..3 {
+            let mut g = empty_grid();
+            g[0][c] = iron;
+            g[1][c] = torch;
+            g[2][c] = iron;
+            let out = match_recipe(&g).expect("iron over torch over iron");
+            assert_eq!((out.item, out.count), (Item::Block(block::LANTERN), 1), "column {c}");
+        }
+        // Not elsewhere: another order, a missing ingot or another light, a row, or a
+        // 2x2 shape (the player grid cannot hold three in a column).
+        let lantern = |g: &[[CraftSlot; 3]; 3]| match_recipe(g).map(|s| s.item) == Some(Item::Block(block::LANTERN));
+        let mut g = empty_grid();
+        g[0][0] = torch;
+        g[1][0] = iron;
+        g[2][0] = iron;
+        assert!(!lantern(&g), "torch on top");
+        let mut g = empty_grid();
+        g[0][0] = iron;
+        g[1][0] = torch;
+        assert!(!lantern(&g), "no bottom ingot");
+        let mut g = empty_grid();
+        g[0][0] = iron;
+        g[1][0] = CraftSlot::Block(block::PAPER_LANTERN_YELLOW);
+        g[2][0] = iron;
+        assert!(!lantern(&g), "a paper lantern is not a torch");
+        let mut g = empty_grid();
+        g[0][0] = iron;
+        g[0][1] = torch;
+        g[0][2] = iron;
+        assert!(!lantern(&g), "a row is not a column");
+        let mut g = empty_grid();
+        g[0][0] = iron;
+        g[0][1] = torch;
+        g[1][0] = iron;
+        assert!(!lantern(&g), "a 2x2 shape");
+    }
+
+    #[test]
+    fn the_lantern_card_needs_the_workbench() {
+        let cards = crate::crafting_catalogue::all_cards();
+        let card = cards.iter().find(|c| c.output.item == Item::Block(block::LANTERN)).expect("a lantern card");
+        assert_eq!(card.station, crate::crafting_catalogue::CraftStation::Workbench, "three tall: not the 2x2 grid");
+        assert_eq!(card.output.count, 1);
+        assert_eq!(match_recipe(&card.example_grid).map(|s| s.item), Some(Item::Block(block::LANTERN)));
     }
 
     #[test]

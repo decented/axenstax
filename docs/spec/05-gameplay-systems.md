@@ -572,7 +572,7 @@ The player inventory is an ECS component (`Inventory`) on the player entity, con
 | Hotbar | 9 | Quick-access bar, always visible at screen bottom. |
 | Main inventory | 27 (3 rows of 9) | General storage, accessible via inventory screen. |
 | Armour slots | 4 | Helmet, chestplate, leggings, boots. |
-| Offhand | 1 | Any item (Minecraft's second hand): a torch placed while a pickaxe is held, food eaten while a sword is held. **Built for local players and for joiners** (see §3.4); shield and lantern are later pieces. |
+| Offhand | 1 | Any item (Minecraft's second hand): a torch placed while a pickaxe is held, food eaten while a sword is held. **Built for local players and for joiners** (see §3.4); the hand lantern is built (§4.7); the shield is a later piece. |
 | Crafting input (player) | 4 (2x2 grid) | Small crafting, always available in inventory screen. |
 | Crafting output | 1 | Result slot for the 2x2 grid. |
 
@@ -674,7 +674,7 @@ struct Inventory {
 - **Swap:** **F** (`PlayerIntent.swap_hands`, edge, shares the key with the skin painter's Fill tool, which owns it during a paint session) or a tap on the off-hand box (touch) swaps the selected hotbar slot's stack with the off-hand.
 - **UI:** the off-hand box sits left of the hotbar (`hud_ui::HotbarGeom::offhand_box`, shared with touch hit-testing). In the inventory screen its slot sits beside the boots, with a faint shield outline when empty; clicks follow every slot's rules (`hands::click_offhand`: left whole stack, right one; pick up, put down, merge, swap).
 - **Joiners (v101, protocol 101; 2026-11-13).** A joined client has the off-hand: the HUD box, the inventory slot and **F** work on a joined client. Right-click uses the main hand first, then the off-hand, by the same `hands::use_hand` rule, and the use packets carry the hand (`ItemAction`, `EntityInteract`, a placement's `EditHand` and a use tag's `hand`, Spec 04 v101). The authority is the server's possession shadow, which holds an off-hand copy (`ServerPlayer.offhand`): a placement, an eat, a feed, a cast or a tool's wear made with the off-hand is taken from, and worn in, that copy, with the same log-only check and the same believed-units and believed-ammo bounds as the main hand (never looser: a take the shadow can't cover is counted and, past the bound, refused). F and the slot click are window clicks (`WindowClick::SwapHands { slot }` and `WindowClick::Offhand { right }`), mirrored on the server's copy by the client's own rule and digested with the window. A bow or slingshot takes its ammo from the off-hand first, on both copies (a Strict seat's shot too, since the off-hand review). A chest in the off-hand never takes a click aimed at a mob, in local play or joined: a steed's pack goes on from the main hand (`hands::use_hand`; a joiner's pack request names the hotbar slot). A world handover carries each participant's off-hand in its own seed (Spec 04 v101). The off-hand is saved in the joiner's sidecar (v6; an older sidecar loads with it empty) and comes back in the join sync. The avatar wire carries the held item's tool type and the off-hand item (presentation only, for drawing the left hand and, later, a carried light). **Strict seats (BRIDGE):** a Strict seat's typed actions carry no hand yet, so its client keeps the main hand, the F swap and the slot click still work as window clicks, and the server closes the action session if a Strict seat claims an off-hand use instead of believing it (`// BRIDGE: off-hand use for Strict seats — replace when Strict seats get the off-hand use path`).
-- **Not yet (later slices):** shift-click and drag-paint into the slot (the window rule's `WindowClick`/`WindowSlot` are wire data), the left hand drawn in first and third person (slice 3: draw the held item by `HeldWire::tool_type()`, only where its `kind` is `TOOL`), the lantern and the shield. Save-format compatibility is preserved by keeping the slot count at 36 until those fields go live.
+- **Not yet (later slices):** shift-click and drag-paint into the slot (the window rule's `WindowClick`/`WindowSlot` are wire data), the shield (the left hand is drawn (Spec 03 §5.10) and the lantern is built, §4.7). Save-format compatibility is preserved by keeping the slot count at 36 until those fields go live.
 
 The inventory system is a dedicated ECS system that:
 - Processes `InventoryAction` events (move, swap, drop, pick up).
@@ -1316,6 +1316,43 @@ The furnace is a block entity with three slots: input, fuel, and output. **Spec 
 - Server authoritative: the unlock state is stored per-player in the server's player data.
 
 **Divergence from Minecraft**: Axe'n'Stax shows **all recipes** by default (togglable). New players should not feel lost. The "unlocked" state controls a "new!" indicator, not visibility. This is a deliberate accessibility improvement — Genesis (the 12-year-old) already knows most recipes from Minecraft, but new players should not need a wiki open in another tab.
+
+### 4.7 The Hand Lantern and Carried Light (off-hand plan slice 4, 2026-11-13)
+
+**The block.** `LANTERN` (block id 380, `lantern.rs`) is one id that is held, placed and hung: an `Item::Block`, so it
+sits in either hand, a chest or the creative inventory like any block, and drops itself. Placed, it gives **light 15**
+(`BlockRegistry::light_emission`; the torch stays 14 and the paper lanterns 12), so a lantern lights one block further
+than a torch. It is non-solid and transparent, like a torch (you walk through it), and it is broken in about a third of a
+second by hand.
+
+- **Stand or hang.** Placing it on the top of a block (or a side face) stands it on the floor of its cell; clicking the
+  **underside** of a block hangs it from the ceiling of its cell on a short chain. The difference is one state bit
+  (`meta::state` bit 0) that `placement_meta::placement_meta` stamps, a joiner's placement carries in its `BlockChange.meta`,
+  and the mesher reads to pick the standing or the hanging shell (`lantern::model_key`).
+- **No support rule.** It stays if the block it stands on or hangs from is broken, exactly as a torch does. A general
+  support rule (a torch, a sign, a lantern that drops when its block goes) is a later piece of work for all of them.
+- **Recipe (workbench).** An iron ingot over a torch over an iron ingot, a vertical column, makes **1 lantern**. A
+  three-tall column does not fit the 2x2 player grid, so it is workbench-only; the recipe book card says so
+  (`crafting_catalogue`, usage line: hold it for light, put it down, or click the underside of a block to hang it).
+- **Look (Spec 03 §5.10).** A small sub-voxel model (a dark iron frame, a grey cap, a warm yellow core between four
+  corner posts, and a bail), painted from existing texture layers only: the web build's array is exactly full at 512
+  layers. In a hand it is drawn as that small model, not as a flat sprite. A dropped or framed one is the small cube.
+
+**Carried light (presentation only).** A light held in either hand lights the world round its holder, for every player
+who can see it.
+
+- **Sources.** A block by its `light_emission` (torch 14, lantern 15, a paper lantern 12, a lit lamp, lava, fire and
+  every other emitter, with no list to keep), and the two handheld materials: **Sparkler 12** and **Flare 15** (the Flare
+  keeps its existing use). The local player's two hands, and every other visible player's main hand and off-hand from the
+  avatar wire (`PlayerState.held_*` and `off_*`), so nothing new is sent.
+- **Rule.** The surface's block light is the **max of the voxel block light and the carried light**, and the existing
+  light rule runs on that: a carried light lights a dark cave, never dims a lit place, and does not add up with another
+  light (the brightest wins). It falls off **one level per block** of distance, like voxel light. It lights terrain,
+  mobs, other players' avatars, dropped items, and your own first-person hand and held item.
+- **Limits.** At most **8** lights per camera, the nearest to the camera first (a hand that holds a light is one light,
+  at that hand: 0.4 block out to its own side and 0.8 up from the holder's feet, turned with the holder). There is no mob-spawn, crop-growth
+  or any other simulation effect (those read the voxel arrays, which are untouched) and no remesh. A carried light is
+  not blocked by walls, so it can glow faintly through a thin wall: accepted.
 
 ---
 

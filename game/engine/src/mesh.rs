@@ -535,6 +535,9 @@ fn non_solid_shape_for(block_id: BlockId) -> Option<([f32; 3], [f32; 3])> {
     match block_id {
         // Thin tall pole — narrow XZ, ~half block tall, base at y=0.
         block::TORCH => Some(([0.4, 0.0, 0.4], [0.6, 0.6, 0.6])),
+        // Off-hand slice 4 — the hand lantern's footprint (far-LOD billboard and the
+        // small-cube pass): the middle half of the cell, most of its height.
+        block::LANTERN => Some(([0.25, 0.0, 0.25], [0.75, 0.8, 0.75])),
         // Wider but shorter — fills most of the X-Z footprint.
         block::TALL_GRASS => Some(([0.15, 0.0, 0.15], [0.85, 0.85, 0.85])),
         // Living world Tier 2 S8 — a blighted crop: stunted, half a block high
@@ -672,8 +675,15 @@ fn emit_non_solid_blocks(
                     let by = wy as f32;
                     let bz = wz as f32;
                     let tex_layer = registry.tex_side(block_id); // far-LOD billboard tint only
+                    // A lantern draws its standing or its hanging shell by its meta
+                    // bit (`lantern::model_key`); every other block its own.
+                    let model_key = if block_id == block::LANTERN {
+                        crate::lantern::model_key(world.meta_at(wx, wy, wz))
+                    } else {
+                        block_id
+                    };
                     micro_instances.push((
-                        block_id,
+                        model_key,
                         MicroInstance { pos: [bx, by, bz], size: [1.0, 1.0, 1.0], tex_layer, light: light_f, sky: sky_f },
                     ));
                     // `non_solid_shape_for` is total (catch-all `_`), so the default
@@ -2666,6 +2676,27 @@ mod tests {
         assert_eq!(meshes.micro_billboards.len(), 1, "far-LOD billboard emitted");
         let bw = meshes.micro_billboards[0].size[0];
         assert!((bw - 0.4).abs() < 1e-5, "far billboard width {bw} should be the inset 0.4, not 1.0");
+    }
+
+    #[test]
+    fn a_lantern_routes_to_its_standing_or_hanging_shell_by_its_meta_bit_and_lights_its_cell() {
+        // Off-hand slice 4 — one block id, two registered shells: the meta bit the
+        // placement stamped picks the key the instance is batched under.
+        let (mut world, registry) = empty_world_with_chunk();
+        crate::lantern::register_models(&mut world.micro_registry, &registry);
+        world.set_block(1, 1, 1, block::LANTERN);
+        world.set_meta((1, 1, 1), crate::lantern::placement_meta([0, 1, 0]));
+        world.set_block(5, 5, 5, block::LANTERN);
+        world.set_meta((5, 5, 5), crate::lantern::placement_meta([0, -1, 0]));
+        let meshes = build_chunk_meshes(0, 0, 0, &world, &registry);
+        assert_eq!(meshes.micro_instances.len(), 2);
+        let key_at = |p: [f32; 3]| meshes.micro_instances.iter().find(|(_, i)| i.pos == p).map(|(k, _)| *k);
+        assert_eq!(key_at([1.0, 1.0, 1.0]), Some(block::LANTERN), "on top of a block: the standing shell");
+        assert_eq!(key_at([5.0, 5.0, 5.0]), Some(crate::lantern::HANGING_MODEL_KEY), "under a block: the hanging shell");
+        assert!(meshes.plants.is_empty(), "a lantern is a shell, not a plant billboard");
+        assert_eq!(meshes.micro_billboards.len(), 2, "each has a far-LOD footprint");
+        let bw = meshes.micro_billboards[0].size[0];
+        assert!((bw - 0.5).abs() < 1e-5, "the lantern's footprint is the middle half: {bw}");
     }
 
     #[test]

@@ -434,7 +434,7 @@ mod tests {
         assert!(u.bloom_grid.iter().flatten().all(|&l| close(l, NEUTRAL)));
         // And the uniform is a whole number of vec4s (WGSL layout).
         assert_eq!(std::mem::size_of::<CameraUniform>() % 16, 0);
-        assert_eq!(std::mem::size_of::<CameraUniform>(), 64 + 16 * 6 + 16 + 1024);
+        assert_eq!(std::mem::size_of::<CameraUniform>(), 64 + 16 * 6 + 16 + 1024 + 16 * 9);
     }
 
     #[test]

@@ -98,6 +98,8 @@ pub fn register_builtin_micro_models(reg: &mut MicroModelRegistry, blocks: &Bloc
     reg.register(block::CORNFLOWER, cornflower_model(), blocks);
     reg.register(block::FIELD_POPPY, field_poppy_model(), blocks);
     reg.register(block::BUTTERCUP, buttercup_model(), blocks);
+    // Off-hand slice 4 — the hand lantern's standing and hanging shells.
+    crate::lantern::register_models(reg, blocks);
 }
 
 #[cfg(test)]
@@ -150,11 +152,13 @@ mod tests {
     }
 
     #[test]
-    fn register_builtins_adds_the_three_flowers() {
+    fn register_builtins_adds_the_three_flowers_and_the_lantern_shells() {
         let blocks = BlockRegistry::new();
         let mut reg = MicroModelRegistry::new();
         register_builtin_micro_models(&mut reg, &blocks);
-        assert_eq!(reg.len(), 3);
+        assert_eq!(reg.len(), 5, "three flowers, the standing lantern and the hanging lantern");
+        assert!(reg.contains(block::LANTERN));
+        assert!(reg.contains(crate::lantern::HANGING_MODEL_KEY));
         assert!(reg.contains(block::CORNFLOWER));
         assert!(reg.contains(block::FIELD_POPPY));
         assert!(reg.contains(block::BUTTERCUP));

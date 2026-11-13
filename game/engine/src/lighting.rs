@@ -523,6 +523,26 @@ mod tests {
     }
 
     #[test]
+    fn a_placed_lantern_lights_at_15_standing_or_hanging_and_a_torch_stays_14() {
+        // Off-hand slice 4 — the placed lantern's light is level 15, and its meta (the
+        // hanging bit) changes nothing about it: one more than a torch.
+        for hanging in [false, true] {
+            let (mut w, r) = fresh();
+            w.set_block(5, 5, 5, block::LANTERN);
+            w.set_meta((5, 5, 5), crate::lantern::placement_meta(if hanging { [0, -1, 0] } else { [0, 1, 0] }));
+            propagate_block_light_from(&mut w, [(5, 5, 5)], &r);
+            assert_eq!(w.block_light_at(5, 5, 5), 15, "hanging {hanging}");
+            assert_eq!(w.block_light_at(6, 5, 5), 14);
+            assert_eq!(w.block_light_at(5 + 14, 5, 5), 1);
+            assert_eq!(w.block_light_at(5 + 15, 5, 5), 0);
+        }
+        let (mut w, r) = fresh();
+        w.set_block(5, 5, 5, block::TORCH);
+        propagate_block_light_from(&mut w, [(5, 5, 5)], &r);
+        assert_eq!(w.block_light_at(5, 5, 5), 14, "a torch is still 14");
+    }
+
+    #[test]
     fn opaque_block_blocks_propagation_into_itself() {
         // A torch surrounded on all 6 cardinal faces by stone has the
         // torch cell lit (it's the emitter) but every neighbour stays

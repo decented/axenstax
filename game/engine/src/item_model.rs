@@ -112,6 +112,9 @@ impl ItemLook {
 pub const SPRITE_DEPTH: f32 = 1.0 / 16.0;
 /// Width of a sprite held in the hand (a held block is a 0.4 cube).
 pub const HELD_SPRITE_WIDTH: f32 = 0.6;
+/// Width of a material held in the hand as a sprite (a bread icon fills its whole
+/// tile, so at the torch's 0.6 it would be a plate in front of the screen).
+pub const HELD_MATERIAL_WIDTH: f32 = 0.45;
 /// Where a held sprite's centre sits from the hand (the hand end of the arm;
 /// +X is outward from the body, +Y up the arm): beside the fist on the
 /// outside and a little up, so a torch's art clears the arm (0.25 wide plus
@@ -131,11 +134,19 @@ pub const FRAME_SPRITE_WIDTH: f32 = 0.5;
 /// of material, with no background to cut away: rubber leaves, carpet, the
 /// logic gate's relay plate and lava (which borrows the lit furnace's face).
 /// A sprite of one would be a square card, so as items they keep the small
-/// cube. Every other sprite's icon has a transparent background
+/// cube (the hand lantern too: its layers are full tiles). Every other sprite's icon has a transparent background
 /// (`every_sprite_icon_has_a_transparent_background`); a block whose icon gains
 /// one should leave this list (`full_tile_blocks_have_no_background`).
-pub const FULL_TILE_BLOCKS: [BlockId; 4] =
-    [crate::block::RUBBER_LEAVES, crate::block::CARPET, crate::block::LOGIC_GATE, crate::block::LAVA];
+pub const FULL_TILE_BLOCKS: [BlockId; 5] = [
+    crate::block::RUBBER_LEAVES,
+    crate::block::CARPET,
+    crate::block::LOGIC_GATE,
+    crate::block::LAVA,
+    // The hand lantern (off-hand slice 4): a micro-model in the world, a block of
+    // full-tile layers as an item. A dropped or framed one is the small cube; in
+    // the hand it is its model (`lantern::held_mesh`).
+    crate::block::LANTERN,
+];
 
 /// The look of block `id` as an item: a sprite when the mesher draws the block
 /// as a cross billboard, a flat rail or cable, or the torch (unless its
@@ -222,6 +233,8 @@ fn tier_material(tier: u16) -> ToolMaterial {
 pub fn held_item_mesh(held: HeldItem, registry: &BlockRegistry, side: HandSide) -> Vec<Vertex> {
     match held.item {
         ItemRef::Empty => Vec::new(),
+        // The hand lantern is drawn as its own small model, not a sprite.
+        ItemRef::Block(id) if id == crate::block::LANTERN && registry.is_known(id) => crate::lantern::held_mesh(registry),
         ItemRef::Block(id) => match block_look(id, registry) {
             ItemLook::Sprite { layer } => {
                 let mut verts = sprite_triangles(layer, HELD_SPRITE_WIDTH);
@@ -264,7 +277,7 @@ pub fn held_item_mesh(held: HeldItem, registry: &BlockRegistry, side: HandSide) 
             // the transparent texels as black). An icon with no background to
             // cut away keeps the small cube.
             if icon_has_clear_background(tex) {
-                let mut verts = sprite_triangles(tex, HELD_SPRITE_WIDTH);
+                let mut verts = sprite_triangles(tex, HELD_MATERIAL_WIDTH);
                 let offset = sprite_offset(side);
                 for v in &mut verts {
                     v.position = (Vec3::from(v.position) + offset).to_array();
@@ -586,7 +599,7 @@ mod tests {
         assert!(held_is_sprite(ItemRef::Material(bread), &reg));
         let mesh = held_item_mesh(ItemRef::Material(bread).into(), &reg, HandSide::Right);
         let (min_x, max_x) = mesh.iter().fold((f32::MAX, f32::MIN), |a, v| (a.0.min(v.position[0]), a.1.max(v.position[0])));
-        assert!(min_x > 0.25 - HELD_SPRITE_WIDTH / 2.0 - 0.01 && max_x <= 0.25 + HELD_SPRITE_WIDTH / 2.0 + 0.01, "sprite sits beside the fist: {min_x}..{max_x}");
+        assert!(min_x > 0.25 - HELD_MATERIAL_WIDTH / 2.0 - 0.01 && max_x <= 0.25 + HELD_MATERIAL_WIDTH / 2.0 + 0.01, "sprite sits beside the fist: {min_x}..{max_x}");
         let thick = mesh.iter().map(|v| v.position[2].abs()).fold(0.0f32, f32::max);
         assert!(thick < 0.03, "a sprite is thin ({thick})");
     }

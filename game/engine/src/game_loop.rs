@@ -17541,6 +17541,31 @@ impl super::GameState {
             camera_uniform.params[0] = self.graphics.brightness;
             // Living world: this viewport's bloom grid, centred on its camera.
             crate::bloom::present::fill_uniform(&mut camera_uniform, &self.bloom, self.bloom_present.clock());
+            // Carried light (off-hand plan slice 4, Spec 03 §4.7a): the nearest eight
+            // lights held in any visible player's hands, in this viewport's own
+            // uniform. Presentation only; the world's light arrays are untouched.
+            // Every local slot (yaw turned to the avatar's convention, as the own
+            // avatar's is) and every peer but this viewport's own player.
+            {
+                let mut states: Vec<crate::protocol::PlayerState> =
+                    Vec::with_capacity(self.players.len() + self.remote_players.len());
+                for j in 0..self.players.len() {
+                    let mut ps = self.local_player_state(j);
+                    let fwd = self.players[j].camera.forward();
+                    ps.yaw = crate::entity_model::yaw_facing(fwd.x, fwd.z);
+                    states.push(ps);
+                }
+                let local_idx = match self.remote_client.as_ref() {
+                    Some(c) => c.player_index().unwrap_or(0),
+                    None => pidx as u32,
+                };
+                states.extend(self.remote_players.iter().filter(|rp| rp.player_index != local_idx).cloned());
+                let cam = glam::Vec3::new(camera_uniform.camera_pos[0], camera_uniform.camera_pos[1], camera_uniform.camera_pos[2]);
+                camera_uniform.carried = crate::carried_light::pack(&crate::carried_light::nearest(
+                    cam,
+                    crate::carried_light::sources(&states, &self.registry),
+                ));
+            }
             self.renderer.update_camera(pidx, &camera_uniform);
 
             // Block highlight (already set in per-player frame loop above)
@@ -17971,6 +17996,12 @@ impl super::GameState {
                 // in the block channel would light the item like a torch).
                 let eye = slot.player.eye_pos();
                 let ch = self.world.light_channels_at(eye.x, eye.y - 0.9, eye.z);
+                // A light in your own hands lights them: the viewmodel pass has no
+                // world-space lights, so the block channel is raised here through the
+                // same twin (`carried_light::viewmodel_level`), for both hands.
+                let own_main = crate::carried_light::item_level(held.item, &self.registry);
+                let own_off = off_held.map_or(0, |h| crate::carried_light::item_level(h.item, &self.registry));
+                let ch = (ch.0.max(crate::carried_light::viewmodel_level(own_main, own_off)), ch.1);
                 crate::entity_model::set_avatar_light(&mut arm_verts, ch, sky_brightness);
                 crate::entity_model::apply_light_channels(
                     &mut held_verts,

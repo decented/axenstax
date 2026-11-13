@@ -19,6 +19,11 @@ pub fn placement_meta(placed: BlockId, face: [i32; 3], fwd: glam::Vec3) -> Optio
     if placed == block::COMMONS_SHELF {
         stamped = Some(0);
     }
+    // Off-hand slice 4 — a lantern hangs when the click was on the underside of a
+    // block (`lantern::placement_meta`), and stands on any other face.
+    if placed == block::LANTERN {
+        stamped = Some(crate::lantern::placement_meta(face));
+    }
     // F1 — shaped-block orientation (slab half / stair facing) from the
     // clicked face + camera, so it renders + collides correctly.
     if crate::block_shape::is_shaped(placed) {
@@ -148,5 +153,19 @@ mod tests {
         assert_eq!(piston, Some(crate::meta::with_facing(0, crate::piston::facing_from_look(0.0, -1.0, 0.0))), "a dispenser faces the look, pitch included");
         assert_eq!(device_facing(glam::Vec3::new(1.0, 0.0, 0.2)), crate::meta::Facing::East);
         assert_eq!(device_facing(north), crate::meta::Facing::North);
+    }
+
+    #[test]
+    fn a_lantern_hangs_when_placed_under_a_block_and_stands_on_top_of_one() {
+        let north = glam::Vec3::new(0.0, 0.0, -1.0);
+        let hung = placement_meta(block::LANTERN, [0, -1, 0], north).expect("a lantern always stamps its meta");
+        assert!(crate::lantern::is_hanging(hung), "clicking the underside of a block hangs it");
+        for face in [[0, 1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1]] {
+            let m = placement_meta(block::LANTERN, face, north).expect("stamps");
+            assert!(!crate::lantern::is_hanging(m), "face {face:?} stands it");
+        }
+        // It stamps over whatever the cell held: a cell that was a hanging lantern's
+        // is not still hanging for a lantern placed on top of a block.
+        assert_eq!(placement_meta(block::LANTERN, [0, 1, 0], north), Some(0));
     }
 }

@@ -1183,6 +1183,7 @@ impl Renderer {
         cam_up: [0.0, 1.0, 0.0, 0.0],
         bloom_origin: crate::camera::BLOOM_ORIGIN_OFF,
         bloom_grid: crate::camera::BLOOM_GRID_NEUTRAL,
+        carried: crate::camera::CARRIED_LIGHTS_OFF,
         };
         let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("camera_uniform"),
@@ -1940,6 +1941,7 @@ impl Renderer {
         cam_up: [0.0, 1.0, 0.0, 0.0],
         bloom_origin: crate::camera::BLOOM_ORIGIN_OFF,
         bloom_grid: crate::camera::BLOOM_GRID_NEUTRAL,
+        carried: crate::camera::CARRIED_LIGHTS_OFF,
         };
         let camera_buffer = self.device.create_buffer_init(
             &wgpu::util::BufferInitDescriptor {
@@ -2972,6 +2974,7 @@ impl Renderer {
         cam_up: [0.0, 1.0, 0.0, 0.0],
         bloom_origin: crate::camera::BLOOM_ORIGIN_OFF,
         bloom_grid: crate::camera::BLOOM_GRID_NEUTRAL,
+        carried: crate::camera::CARRIED_LIGHTS_OFF,
         };
 
         let device = &self.device;
@@ -3091,6 +3094,7 @@ impl Renderer {
         cam_up: [0.0, 1.0, 0.0, 0.0],
         bloom_origin: crate::camera::BLOOM_ORIGIN_OFF,
         bloom_grid: crate::camera::BLOOM_GRID_NEUTRAL,
+        carried: crate::camera::CARRIED_LIGHTS_OFF,
             };
             self.queue.write_buffer(
                 &gpu.viewmodel_camera_buffer,
@@ -3584,6 +3588,7 @@ impl Renderer {
         cam_up: [0.0, 1.0, 0.0, 0.0],
         bloom_origin: crate::camera::BLOOM_ORIGIN_OFF,
         bloom_grid: crate::camera::BLOOM_GRID_NEUTRAL,
+        carried: crate::camera::CARRIED_LIGHTS_OFF,
         };
         let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("camera_uniform"),
@@ -5545,6 +5550,7 @@ fn make_viewmodel_camera(
         cam_up: [0.0, 1.0, 0.0, 0.0],
         bloom_origin: crate::camera::BLOOM_ORIGIN_OFF,
         bloom_grid: crate::camera::BLOOM_GRID_NEUTRAL,
+        carried: crate::camera::CARRIED_LIGHTS_OFF,
     };
     let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("viewmodel_camera_uniform"),

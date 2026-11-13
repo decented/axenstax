@@ -66,7 +66,13 @@ pub const WORLD_SAVE_FIELD_COUNT: u32 = 63;
 /// Revision 8 also covers living world Tier 2 S7 (block id 379: the Site Board). With its
 /// appended `site_boards` field (61) the footer is 69 = 61 fields + revision 8; S6 and S7
 /// were integrated into the one revision 8 (the Commons Shelf at 378, the Site Board at 379).
-pub const SAVE_LAYOUT_REVISION: u32 = 8;
+///
+/// 9 (off-hand plan slice 4, block id 380: the hand lantern): the same reason again. No
+/// `WorldSave` field was added (a lantern's hanging bit rides the existing `block_meta`),
+/// so the footer is 72 = 63 fields + revision 9. The off-hand release's shield
+/// (`ToolType::Shield`, an appended variant inside the nested item save) lands in the same
+/// revision 9: one bump for the one release, never two.
+pub const SAVE_LAYOUT_REVISION: u32 = 9;
 
 /// The `world.dat` format version this build writes, and the newest it opens.
 /// Monotonic: both terms only ever increase.
@@ -107,7 +113,8 @@ pub const SAVE_FORMAT_VERSION: u32 = WORLD_SAVE_FIELD_COUNT + SAVE_LAYOUT_REVISI
 /// | 68     | 60     | 8        | living world Tier 2 S6 (block 378)               | `plot_succession` |
 /// | 69     | 61     | 8        | living world Tier 2 S7 (Site Boards, block 379)   | `site_boards`     |
 /// | 70     | 62     | 8        | `/weather clear` hold                             | `weather_clear_until` |
-/// | 71     | 63     | 8        | the off-hand slot (this build)                    | `player_offhands` |
+/// | 71     | 63     | 8        | the off-hand slot (0.2.37 branch, before the lantern) | `player_offhands` |
+/// | 72     | 63     | 9        | the hand lantern, block 380 (this build)          | `player_offhands` |
 ///
 /// (No commit wrote footer 63: S3 moved the field count and the layout revision together.)
 ///
@@ -134,6 +141,7 @@ pub const FOOTER_FIELD_COUNTS: &[(u32, &[u32])] = &[
     (69, &[61]),
     (70, &[62]),
     (71, &[63]),
+    (72, &[63]),
 ];
 
 /// The field counts a footer `version` was written with (empty for a footer the
@@ -422,17 +430,17 @@ mod tests {
     /// loading them as AIR and saving the holes back.
     #[test]
     fn a_world_written_now_carries_the_building_variants_version() {
-        // 71 as of the off-hand slot (the `player_offhands` field, over 70 = the `/weather clear` hold's `weather_clear_until` field and 69 = living world Tier 2 S7's `site_boards` field and block 379; S6 took 378): 63 fields + layout revision 8.
-        assert_eq!(SAVE_FORMAT_VERSION, 71, "63 fields + layout revision 8");
+        // 72 as of the hand lantern (block 380, layout revision 9, over 71 = the off-hand slot's `player_offhands` field, 70 = the `/weather clear` hold's `weather_clear_until` field and 69 = living world Tier 2 S7's `site_boards` field and block 379; S6 took 378): 63 fields + layout revision 9.
+        assert_eq!(SAVE_FORMAT_VERSION, 72, "63 fields + layout revision 9");
         // The world holds no new block, and still carries the new version.
         let bytes = encode_world_save(&minimal_world_save_for_tests(5)).unwrap();
-        assert_eq!(split_save_footer(&bytes).1, Some(71));
+        assert_eq!(split_save_footer(&bytes).1, Some(72));
         assert!(check_version(split_save_footer(&bytes).1).is_ok(), "this build opens its own save");
-        // A build that stopped at 70 refuses this footer (71 > 70) the same
-        // way this build refuses 72: `check_version` is the one rule.
+        // A build that stopped at 71 refuses this footer (72 > 71) the same
+        // way this build refuses 73: `check_version` is the one rule.
         assert_eq!(
-            check_version(Some(71 + 1)),
-            Err(WorldSaveError::NewerVersion { found: 72, supported: 71 }),
+            check_version(Some(72 + 1)),
+            Err(WorldSaveError::NewerVersion { found: 73, supported: 72 }),
             "a footer one version past this build is refused"
         );
         let mut next = bincode::serialize(&minimal_world_save_for_tests(5)).unwrap();

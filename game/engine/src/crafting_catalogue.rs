@@ -1097,6 +1097,11 @@ fn push_more_literal_cards(out: &mut Vec<RecipeCard>) {
     out.push(card("Village Bell", ItemStack::new_block(block::VILLAGE_BELL, 1),
         vec![mat(M::IronIngot, 1), mat(M::Stick, 1), blk(block::OAK_PLANKS, 1)],
         grid(&[(0, 0, iron), (1, 0, STICK), (2, 0, p)]), RecipeCategory::Stations));
+    // Off-hand slice 4 — iron over a torch over iron, at the workbench.
+    out.push(card("Lantern", ItemStack::new_block(block::LANTERN, 1),
+        vec![mat(M::IronIngot, 2), blk(block::TORCH, 1)],
+        grid(&[(0, 0, iron), (1, 0, CraftSlot::Block(block::TORCH)), (2, 0, iron)]), RecipeCategory::Decoration)
+        .with_usage("Hold it for light in your hand (either hand), put it on the ground to stand, or click the underside of a block to hang it."));
     out.push(card("Market Bell", ItemStack::new_material(M::MarketBellItem, 1),
         vec![mat(M::IronIngot, 2), blk(block::OAK_PLANKS, 1)],
         grid(&[(0, 0, iron), (1, 0, iron), (2, 0, p)]), RecipeCategory::Stations));
@@ -1692,7 +1697,8 @@ mod tests {
         // 351 as of 2026-11-09 (living world Tier 2 S6): + the Commons Shelf.
         // 351 as of 2026-11-09 (living world Tier 2 S7): + the Site Board.
         // 352 as of the Tier 2 integration: the Commons Shelf and the Site Board together.
-        assert_eq!(all_cards().len(), 352, "catalogue size changed to {}", all_cards().len());
+        // 353 as of the off-hand release (slice 4): + the Lantern.
+        assert_eq!(all_cards().len(), 353, "catalogue size changed to {}", all_cards().len());
     }
 
     /// UX polish sweep Task 3 — the non-obvious craftables (a kid can't

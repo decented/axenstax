@@ -212,6 +212,8 @@ pub fn arm_transform(aspect: f32, side: HandSide, bob: f32, swing: f32) -> Mat4 
 fn item_lift(held: ItemRef, registry: &BlockRegistry) -> f32 {
     match held {
         ItemRef::Tool(_) => 0.2,
+        // The hand lantern stands up out of the fist so its glowing core clears the arm.
+        ItemRef::Block(id) if id == crate::block::LANTERN => 0.32,
         other if item_model::held_is_sprite(other, registry) => 0.2,
         _ => 0.15,
     }
@@ -530,6 +532,8 @@ mod layout_tests {
             ("iron slab".into(), ItemRef::Tool(2).into(), 0.15),
             ("stone block".into(), ItemRef::Block(block::STONE).into(), 0.12),
             ("oak sapling".into(), ItemRef::Block(block::SAPLING_OAK).into(), 0.15),
+            // Off-hand slice 4: the hand lantern, a small model, not a sprite.
+            ("lantern".into(), ItemRef::Block(block::LANTERN).into(), 0.12),
         ];
         for t in crate::held_tool_model::tests::all_tool_types() {
             let item = crate::item::Item::Tool(Tool::new(t, ToolMaterial::Iron));

@@ -602,6 +602,12 @@ pub struct CameraUniform {
     /// Living-world bloom: a 16 x 16 grid of region levels, row-major in z then
     /// x, packed four to a vec4 (`bloom::present::pack_grid`).
     pub bloom_grid: [[f32; 4]; 64],
+    /// Carried light (off-hand plan slice 4, Spec 03 §4.7a): element 0 holds the
+    /// number of lights in `x` (0 to 8), elements 1 to 8 the lights as
+    /// `(world x, y, z, level 0 to 15)`. All zero on every path with no carried
+    /// light, and always on the viewmodel pass (its `world_pos` is view space; the
+    /// first-person hand is lit on the CPU instead).
+    pub carried: [[f32; 4]; 9],
 }
 
 /// `bloom_origin` for every path with no bloom: cell size 0 = grid off.
@@ -610,6 +616,9 @@ pub const BLOOM_ORIGIN_OFF: [f32; 4] = [0.0; 4];
 /// `bloom_grid` for every path with no bloom: all 0.6 (the unknown level,
 /// which grades nothing).
 pub const BLOOM_GRID_NEUTRAL: [[f32; 4]; 64] = [[0.6; 4]; 64];
+
+/// `carried` for every path with no carried light: the count (element 0) is 0.
+pub const CARRIED_LIGHTS_OFF: [[f32; 4]; 9] = [[0.0; 4]; 9];
 
 impl CameraUniform {
     pub fn from_camera(camera: &Camera) -> Self {
@@ -641,6 +650,7 @@ impl CameraUniform {
             cam_up: [up.x, up.y, up.z, 0.0],
             bloom_origin: BLOOM_ORIGIN_OFF,
             bloom_grid: BLOOM_GRID_NEUTRAL,
+            carried: CARRIED_LIGHTS_OFF,
         }
     }
 }

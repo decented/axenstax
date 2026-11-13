@@ -681,6 +681,12 @@ pub const COMMONS_SHELF: BlockId = 378;
 /// tick (`site_board.rs`). Drops itself; its list is a world table keyed by its
 /// cell (`World::site_boards`) and goes with the block.
 pub const SITE_BOARD: BlockId = 379;
+// Off-hand plan, slice 4 (2026-11-13). Spec 05 §4 "The hand lantern".
+/// The hand lantern (`lantern.rs`): held, placed and hung, one id. Light 15
+/// (`light_emission`; the torch stays 14, the paper lanterns 12). It stands on the
+/// top of a block and hangs from the underside of one (a state bit stamped at
+/// placement); it has no support rule and no collision, like a torch. Drops itself.
+pub const LANTERN: BlockId = 380;
 
 /// The planted-sapling block for a species. Symmetric counterpart to
 /// `species_for_sapling` (which IS live, via `is_sapling_block`); this forward
@@ -3437,6 +3443,18 @@ impl BlockRegistry {
             color: [0.55, 0.36, 0.20],
             tex_top: TEX_BOUNTY_BOARD, tex_bottom: TEX_BOUNTY_BOARD, tex_side: TEX_BOUNTY_BOARD,
         });
+        // The hand lantern: drawn by its micro-model in the world and in the hand
+        // (`lantern.rs`); the layers here are only what the dropped item (a small
+        // cube), the far-LOD billboard and the hotbar colour use, and all of them
+        // exist already (the atlas is full): the paper lantern's glowing yellow on
+        // the sides, the wallpaper-black paint layer for the lid and the base.
+        debug_assert_eq!(blocks.len(), LANTERN as usize, "the Lantern follows the Site Board");
+        blocks.push(BlockDef { // 380 LANTERN
+            name: "genesis:lantern",
+            solid: false, transparent: true, gravity: false,
+            color: [0.93, 0.74, 0.30],
+            tex_top: TEX_PAINT_SOLID_BASE + 1, tex_bottom: TEX_PAINT_SOLID_BASE + 1, tex_side: TEX_PAPER_LANTERN_YELLOW,
+        });
 
         Self { blocks, leaves_fast: false }
     }
@@ -3813,6 +3831,8 @@ impl BlockRegistry {
             // broadcasts also drives the lighting BFS on / off.
             ELECTRIC_LAMP_LIT => 14,
             STEAM_GENERATOR_LIT => 11,
+            // Off-hand plan slice 4 — the hand lantern, one level over a torch.
+            LANTERN => crate::lantern::LIGHT_LEVEL,
             // Lava (future) — would emit 15. Glowstone-equivalent
             // would emit 15. No emitters today besides the above.
             _ => 0,
@@ -4037,12 +4057,18 @@ mod tests {
         // Living world Tier 2 S6: the Commons Shelf (378) follows the Blighted Crop.
         assert_eq!(BLIGHTED_CROP + 1, COMMONS_SHELF);
         assert!(reg.is_known(COMMONS_SHELF));
-        // Living world Tier 2 S7: the Site Board (379) follows the Shelf and is the last registered id.
+        // Living world Tier 2 S7: the Site Board (379) follows the Shelf.
         assert_eq!(COMMONS_SHELF + 1, SITE_BOARD);
         assert!(reg.is_known(SITE_BOARD));
         assert!(reg.is_solid(SITE_BOARD));
         assert_eq!(reg.mine_drop(SITE_BOARD), crate::item::ItemStack::new_block(SITE_BOARD, 1), "a board drops itself");
-        assert!(!reg.is_known(SITE_BOARD + 1));
+        // Off-hand slice 4: the Lantern (380) follows the Site Board and is the last registered id.
+        assert_eq!(SITE_BOARD + 1, LANTERN);
+        assert!(reg.is_known(LANTERN));
+        assert!(!reg.is_solid(LANTERN) && reg.is_transparent(LANTERN), "light passes and you walk through it, like a torch");
+        assert_eq!(reg.light_emission(LANTERN), 15);
+        assert_eq!(reg.mine_drop(LANTERN), crate::item::ItemStack::new_block(LANTERN, 1), "a lantern drops itself");
+        assert!(!reg.is_known(LANTERN + 1));
         assert!(!reg.is_known(u16::MAX));
     }
 

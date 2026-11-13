@@ -2358,7 +2358,7 @@ against the slice before allocating.
       2026-11-13: `quest_world` was 54, `worldgen_version` 55, `authority_clock` 56,
       `block_authors` 57, `region_use` 58, `plan_builds` 59, `plot_succession` 60, `site_boards` 61,
       `weather_clear_until` 62, `player_offhands` 63) +
-      `SAVE_LAYOUT_REVISION` (8 today; see the block-ids bullets below) = 71. The current `SAVE_FORMAT_VERSION` is `71` (a test, `save_format::tests::spec_02_states_the_current_save_format_version`, fails if this sentence and the constant disagree, so a bump must edit this line). Two tripwire tests stop drift: serde's field list
+      `SAVE_LAYOUT_REVISION` (9 today; see the block-ids bullets below) = 72. The current `SAVE_FORMAT_VERSION` is `72` (a test, `save_format::tests::spec_02_states_the_current_save_format_version`, fails if this sentence and the constant disagree, so a bump must edit this line). Two tripwire tests stop drift: serde's field list
       for `WorldSave` must equal `WORLD_SAVE_FIELD_COUNT` (so appending a field
       without bumping the version fails), and the tolerant reader must consume every
       byte of a current save (so a field listed in its struct literal without a read
@@ -2499,6 +2499,19 @@ against the slice before allocating.
       transfer copy keeps it; (6) it reaches joiners as a block view (`BlockView::SiteBoard`, Spec 04), never
       in the save a joiner holds. The once-a-day bloom surge table (`World.site_board_days`) is runtime only.
       See `docs/superpowers/specs/2026-11-09-living-world-tier2.md` §7.
+    - **Layout revision 9 and the hand lantern (format 72, off-hand plan slice 4, 2026-11-13).** Block id
+      380, `LANTERN` (`lantern.rs`; non-solid and transparent like a torch; light 15; drops itself; broken in
+      about a third of a second by hand), follows the Site Board at 379, so the revision moves to 9 (an older
+      build would read the id as AIR and save a hole, the reason for revisions 4 to 8). No `WorldSave` field was
+      added: whether a placed lantern hangs rides the existing `block_meta` byte (state bit 0, `meta::state`,
+      stamped by `placement_meta::placement_meta` when the click was on the underside of a block), and a
+      lantern in a hand or a chest is an ordinary `Item::Block(380)`. Footer arithmetic: field count 63 +
+      revision 9 = 72; `FOOTER_FIELD_COUNTS` gains `(72, [63])` (footer 71, this branch's own before the
+      bump, keeps its row with 63 fields; a world written at footer 70, the 0.2.37 release's, or 71 still opens:
+      `a_footer_71_save_from_before_the_lantern_and_a_footer_70_save_from_0_2_37_still_load`). The off-hand
+      release's shield (`ToolType::Shield`, an appended variant inside the nested item save) lands in this same
+      revision 9: one bump for the one release. The look needs no save: the standing and hanging shells are
+      render-only micro-models painted from existing texture layers (Spec 03 §5.10). See Spec 05 §4.
     - **The off-hand slot and field 63 (format 71, 2026-11-13).** A local player's off-hand item
       (`PlayerSlot.offhand: Option<ItemStack>`, beside the armour, not slot 36 of the inventory) is saved as the
       appended field 63, `WorldSave.player_offhands: Option<Vec<SavedSlot>>`, element `i` = local player `i`'s

@@ -8409,6 +8409,34 @@ mod tests {
         }
     }
 
+    /// The hand lantern moved the footer to 72 (layout revision 9, block 380) with no
+    /// new field. A save this branch wrote before the bump (footer 71, 63 fields) and
+    /// one from the 0.2.37 release (footer 70, 62 fields: no off-hand column) both
+    /// still load, the absent field defaulting; neither carries the new block id, so
+    /// the older footers lose nothing.
+    #[test]
+    fn a_footer_71_save_from_before_the_lantern_and_a_footer_70_save_from_0_2_37_still_load() {
+        assert_eq!(crate::save_format::SAVE_FORMAT_VERSION, 72, "the build under test writes footer 72");
+        for (version, fields) in [(71u32, 63u32), (70, 62)] {
+            let (expected, body) = writer_with_fields(41, fields);
+            let (back, damaged) = read_world_save_reporting(&with_footer(body, version))
+                .unwrap_or_else(|e| panic!("a footer-{version} save must load: {e}"));
+            assert!(!damaged, "footer {version}: no damage reported");
+            assert_eq!(back.seed, 41);
+            assert_eq!(
+                bincode::serialize(&back).unwrap(),
+                bincode::serialize(&expected).unwrap(),
+                "footer {version}: the same data, the absent field defaulted"
+            );
+            assert!(crate::save_format::allowed_field_counts(version).contains(&fields), "the table keeps footer {version}'s row");
+        }
+        // The two older footers still load through the plain entry point as well, and a
+        // footer one past this build's is the newer-version refusal.
+        let (_, body) = writer_with_fields(42, 63);
+        assert!(read_world_save(&with_footer(body.clone(), 71)).is_ok());
+        assert!(read_world_save(&with_footer(body, 73)).err().expect("a newer footer is refused").is_newer_version());
+    }
+
     #[test]
     fn regression_a_current_version_save_still_round_trips_through_the_strict_check() {
         let save = save_with_populated_tail(22);

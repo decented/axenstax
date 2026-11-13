@@ -23,6 +23,11 @@ struct CameraUniform {
     // region levels, row-major in z then x, four to a vec4.
     bloom_origin: vec4<f32>,
     bloom_grid: array<vec4<f32>, 64>,
+    // Carried light (off-hand plan slice 4, Spec 03 §4.7a). carried[0].x = how many
+    // lights (0..8); carried[1..=8] = (world x, y, z, level 0..15), nearest the
+    // camera first. All zero on a pass with no carried light, always the viewmodel
+    // pass (its world_pos is view space; the first-person hand is lit on the CPU).
+    carried: array<vec4<f32>, 9>,
 };
 
 @group(0) @binding(0)
@@ -176,6 +181,23 @@ fn face_shade(n: vec3<f32>) -> f32 {
     let y_shade = select(FACE_SHADE_BOTTOM, FACE_SHADE_TOP, n.y > 0.0);
     let weighted = n2.x * FACE_SHADE_X + n2.y * y_shade + n2.z * FACE_SHADE_Z;
     return select(1.0, weighted / max(len2, 0.000001), len2 > 0.000001);
+}
+
+// Carried light (CPU twin `world_light::carried_block`): the block channel of a
+// surface at `p` is the max of its voxel block light and every carried light's
+// level less one per block of distance (voxel light's own falloff), 0..1. No
+// occlusion and no facing test: a carried light can glow faintly through a thin
+// wall. Presentation only; the emissive sentinel (> 1.5) passes through the max.
+const CARRIED_MAX: u32 = 8u;
+const CARRIED_LEVELS: f32 = 15.0;
+fn carried_block(p: vec3<f32>, block_level: f32) -> f32 {
+    let count = min(u32(camera.carried[0].x), CARRIED_MAX);
+    var level = block_level;
+    for (var i = 0u; i < count; i = i + 1u) {
+        let l = camera.carried[i + 1u];
+        level = max(level, max(l.w - distance(p, l.xyz), 0.0) / CARRIED_LEVELS);
+    }
+    return level;
 }
 
 fn block_term(n: vec3<f32>, block_level: f32) -> vec3<f32> {
@@ -380,7 +402,7 @@ fn fs_plant(in: VertexOutput) -> @location(0) vec4<f32> {
     // The one light rule (Spec 03 §4.7), like fs_main. `light` is the block
     // channel and `sky_light` the sky channel; the normal is straight up
     // (vs_plant), so the block term is unshaded.
-    var lit = tex_color.rgb * world_light(in.normal, in.light, in.sky_light);
+    var lit = tex_color.rgb * world_light(in.normal, carried_block(in.world_pos, in.light), in.sky_light);
     // The Blighted Crop (GREY_FLAG): ash grey, the lit colour's luminance
     // darkened a little, so it reads grey beside healthy crops by day and by
     // torchlight alike (greyed before the light, a torch would tint it warm).
@@ -463,7 +485,7 @@ fn shade_block(in: VertexOutput, tex_sample: vec4<f32>) -> vec4<f32> {
     // channel. Sky light dims with the day (sun.w) and is shaded by the sun;
     // block light keeps its warm colour and a fixed per-face shade at any hour.
     // A sealed cave with neither drops to the LIGHT_FLOOR, not to black.
-    let lit_normal = tex_color.rgb * world_light(in.normal, in.light, in.sky_light);
+    let lit_normal = tex_color.rgb * world_light(in.normal, carried_block(in.world_pos, in.light), in.sky_light);
     // Emissive sentinel: a vertex `light` > 1.5 marks a self-glowing part (a
     // torch's own faces, Satoshi's amulet, the GlowSquid; `Vertex::EMISSIVE`).
     // Render it mostly unlit so it glows even in a dim hut. All other geometry
@@ -576,7 +598,7 @@ fn fs_avatar(in: VertexOutput) -> @location(0) vec4<f32> {
     // block-light level rides in bits 20..23 of tex_layer
     // (`entity_model::set_avatar_light`). `push_skin_quad`'s defaults (sky 1.0,
     // no block bits) give the sky term alone, as before.
-    let block_level = f32((in.tex_layer >> AVATAR_BLOCK_SHIFT) & AVATAR_BLOCK_MASK) / 15.0;
+    let block_level = carried_block(in.world_pos, f32((in.tex_layer >> AVATAR_BLOCK_SHIFT) & AVATAR_BLOCK_MASK) / 15.0);
     let shade = max(sky_term(in.normal, in.sky_light), block_term(in.normal, block_level));
     let lit = tex_color.rgb * shade;
 
@@ -632,7 +654,7 @@ fn fs_decal(in: VertexOutput) -> @location(0) vec4<f32> {
     // The one light rule (Spec 03 §4.7), the same as the wall under it. Since
     // 2026-11-12 the paper also takes the sun-and-ambient face shade, so in
     // daylight it darkens to match its wall instead of reading brighter.
-    return vec4<f32>(c.rgb * world_light(in.normal, in.light, in.sky_light), c.a);
+    return vec4<f32>(c.rgb * world_light(in.normal, carried_block(in.world_pos, in.light), in.sky_light), c.a);
 }
 
 // The Gallery — hung painting. Samples the dedicated hi-res texture and lights
@@ -698,7 +720,7 @@ fn fs_water(in: VertexOutput) -> @location(0) vec4<f32> {
     // is the shared block term, with no time input, so a torch lights water the
     // same at noon and midnight.
     let sky_floor = (0.3 + 0.7 * brightness) * LIGHT_FLOOR;
-    let shade = max(vec3<f32>(sky_floor), block_term(in.normal, in.light));
+    let shade = max(vec3<f32>(sky_floor), block_term(in.normal, carried_block(in.world_pos, in.light)));
     let lit = bloom_grade(tex_color.rgb * water_tint * shade, in.world_pos.xz);
 
     // Fog
@@ -734,7 +756,7 @@ fn fs_transparent(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // Solid transparent surfaces receive the same two channels as terrain and
     // the same light rule (Spec 03 §4.7).
-    let lit = bloom_grade(tex_color.rgb * world_light(in.normal, in.light, in.sky_light), in.world_pos.xz);
+    let lit = bloom_grade(tex_color.rgb * world_light(in.normal, carried_block(in.world_pos, in.light), in.sky_light), in.world_pos.xz);
 
     let dist = distance(in.world_pos, camera.camera_pos.xyz);
     let fog_start = camera.fog.x;
