@@ -979,9 +979,15 @@ impl HeldWire {
     }
 
     /// The tool type this hand's tool byte names; `None` for a hand without
-    /// a tool, or a byte this build doesn't know (a newer peer: draw it as
+    /// a tool (whatever the byte), or a byte this build doesn't know (a newer peer: draw it as
     /// the plain tier slab, never guess).
+    #[cfg_attr(not(test), allow(dead_code))] // Slice 3 (left-hand rendering) draws the tool type a peer sends.
     pub fn tool_type(self) -> Option<crate::crafting::ToolType> {
+        // Only a hand that holds a tool says a type: a default-built packet
+        // carries tool byte 0 (a pickaxe) beside an empty pair.
+        if self.kind != item_kind::TOOL {
+            return None;
+        }
         crate::inventory::tool_type_from_held_wire(self.tool)
     }
 }
@@ -3245,7 +3251,8 @@ mod tests {
         // v100 — living world Tier 2 S10: RegionPeople (79), a new packet.
         // v100 — living world Tier 2 S6: block id 378 (Commons Shelf), `ChestTier::Shelf`, no packet change.
         // v100 — living world Tier 2 S7: Site Board (379), ItemAction::SiteBoard, BlockView::SiteBoard.
-        assert_eq!(super::PROTOCOL_VERSION, 100);
+        // v101 — off-hand plan slice 2: the hand on every use packet, WindowClick::Offhand (= 11) and SwapHands (= 12), WireWindowSlot::Offhand (= 5), the tool type and the off-hand on the avatar wire.
+        assert_eq!(super::PROTOCOL_VERSION, 101);
     }
 
     #[test]
@@ -4010,7 +4017,8 @@ mod tests {
         // v100 (living world Tier 2 S10): RegionPeople (79), a new packet.
         // v100 (living world Tier 2 S6): block id 378 (Commons Shelf), `ChestTier::Shelf`, no packet change.
         // v100 (living world Tier 2 S7): block id 379 (Site Board); ItemAction::SiteBoard (= 15); BlockView::SiteBoard (= 5).
-        assert_eq!(PROTOCOL_VERSION, 100);
+        // v101 (off-hand plan slice 2): the hand on every use packet, WindowClick::Offhand (= 11) and SwapHands (= 12), WireWindowSlot::Offhand (= 5), the tool type and the off-hand on the avatar wire.
+        assert_eq!(PROTOCOL_VERSION, 101);
     }
 
     fn sample_accept() -> JoinAcceptPacket {
@@ -5407,5 +5415,89 @@ mod oc_wire_tests {
         ] {
             assert!(round_trip(&InventorySyncPacket { owed, ..base.clone() }).is_err(), "{why}");
         }
+    }
+
+    /// v101 (off-hand plan, slice 2) — the held-item wire carries the tool
+    /// type: every `ToolType` survives `HeldWire`, and a hand that holds no
+    /// tool says so. The exhaustive match fails to compile when a tool type
+    /// is added, so the wire table (`inventory::tool_type_to_wire`, append
+    /// only) can't be forgotten.
+    #[test]
+    fn the_held_item_wire_round_trips_the_tool_type_for_every_tool_type() {
+        use crate::crafting::{Tool, ToolMaterial, ToolType as T};
+        fn place(t: T) -> usize {
+            match t {
+                T::Pickaxe => 0,
+                T::Axe => 1,
+                T::Sword => 2,
+                T::Shovel => 3,
+                T::Bow => 4,
+                T::Hoe => 5,
+                T::FlintAndSteel => 6,
+                T::Shears => 7,
+                T::FishingRod => 8,
+                T::Slingshot => 9,
+                T::Eraser => 10,
+                T::DraftingStamp => 11,
+            }
+        }
+        let all = [
+            T::Pickaxe, T::Axe, T::Sword, T::Shovel, T::Bow, T::Hoe, T::FlintAndSteel,
+            T::Shears, T::FishingRod, T::Slingshot, T::Eraser, T::DraftingStamp,
+        ];
+        let mut seen = [false; 12];
+        let mut bytes = std::collections::HashSet::new();
+        for t in all {
+            seen[place(t)] = true;
+            for m in [ToolMaterial::Wood, ToolMaterial::Stone, ToolMaterial::Iron, ToolMaterial::Diamond, ToolMaterial::Satori] {
+                let item = crate::item::Item::Tool(Tool::new(t, m));
+                let wire = HeldWire::of(Some(&item));
+                assert_eq!(wire.tool_type(), Some(t), "{t:?} {m:?}");
+                assert_eq!((wire.kind, wire.id), crate::inventory::item_to_ref(&item).to_wire(), "the pair is the item's ref");
+                assert_ne!(wire.tool, HeldWire::NO_TOOL);
+                bytes.insert((t as usize, wire.tool));
+                // The avatar wire carries it, in either hand.
+                let state = PlayerState {
+                    player_index: 1, x: 0.0, y: 0.0, z: 0.0, yaw: 0.0, pitch: 0.0, health: 20.0,
+                    held_kind: wire.kind, held_id: wire.id, anim_state: 0, flags: 0, skin_key: 0,
+                    held_tool: wire.tool, off_kind: wire.kind, off_id: wire.id, off_tool: wire.tool,
+                };
+                let back: PlayerState = safe_deserialize(&bincode::serialize(&state).unwrap()).unwrap();
+                assert_eq!(HeldWire { kind: back.held_kind, id: back.held_id, tool: back.held_tool }.tool_type(), Some(t));
+                assert_eq!(HeldWire { kind: back.off_kind, id: back.off_id, tool: back.off_tool }.tool_type(), Some(t));
+            }
+        }
+        assert!(seen.iter().all(|s| *s), "every tool type is listed");
+        assert_eq!(bytes.len(), 12, "one byte per type, whatever the material");
+        // Not a tool: no tool byte. An empty hand: the empty pair.
+        for item in [crate::item::Item::Block(crate::block::TORCH), crate::item::Item::Material(crate::item::MaterialId::Stick)] {
+            let wire = HeldWire::of(Some(&item));
+            assert_eq!((wire.tool, wire.tool_type()), (HeldWire::NO_TOOL, None), "{item:?}");
+        }
+        assert_eq!(HeldWire::of(None), HeldWire::EMPTY);
+        assert_eq!(HeldWire::EMPTY.tool_type(), None);
+        assert_eq!(HeldWire { kind: item_kind::EMPTY, id: 0, tool: 0 }.tool_type(), None, "a default-built input's zeroes name no tool");
+        // A byte this build doesn't know (a newer peer's tool): the plain slab, never a guess.
+        assert_eq!(HeldWire { kind: item_kind::TOOL, id: 1, tool: 200 }.tool_type(), None);
+    }
+
+    /// v101 — the client's input carries the tool type and the off-hand, and
+    /// the hand of each edit, intact over the wire.
+    #[test]
+    fn the_input_packet_carries_the_off_hand_and_each_edits_hand() {
+        use crate::hands::Hand;
+        let torch = HeldWire::of(Some(&crate::item::Item::Block(crate::block::TORCH)));
+        let pick = HeldWire::of(Some(&crate::item::Item::Tool(crate::crafting::Tool::new(crate::crafting::ToolType::Pickaxe, crate::crafting::ToolMaterial::Iron))));
+        let input = InputPacket {
+            held_kind: pick.kind, held_id: pick.id, held_tool: pick.tool,
+            off_kind: torch.kind, off_id: torch.id, off_tool: torch.tool,
+            edit_hands: vec![(2, torch.kind, torch.id, Hand::Off), (2, pick.kind, pick.id, Hand::Main)],
+            ..Default::default()
+        };
+        let back: InputPacket = safe_deserialize(&serialize_packet(PacketType::ClientInput, &input)[1..]).unwrap();
+        assert_eq!(back.held_tool, pick.tool);
+        assert_eq!((back.off_kind, back.off_id, back.off_tool), (torch.kind, torch.id, torch.tool));
+        assert_eq!(back.edit_hands, input.edit_hands);
+        assert_eq!(back.edit_hands[0].3, Hand::Off);
     }
 }

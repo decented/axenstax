@@ -452,14 +452,18 @@ pub fn broadcast_held_ref(sp: &ServerPlayer) -> (u8, u16) {
 /// v101 — the held item and the off-hand item to broadcast for a player, as
 /// the avatar wire carries them ([`crate::protocol::HeldWire`]): relayed from
 /// the client's input for a server-simulated player, resolved from the live
-/// body for a local one (its off-hand is the slot's own).
+/// body for a local one (its off-hand, either way, is what its client's input
+/// said: `off_held`).
 pub fn broadcast_held_wires(sp: &ServerPlayer) -> (crate::protocol::HeldWire, crate::protocol::HeldWire) {
     use crate::protocol::HeldWire;
+    let (kind, id) = broadcast_held_ref(sp);
     if sp.server_simulated {
-        (HeldWire { kind: sp.held_kind, id: sp.held_id, tool: sp.held_tool }, sp.off_held)
+        (HeldWire { kind, id, tool: sp.held_tool }, sp.off_held)
     } else {
-        let main = HeldWire::of(sp.inventory.hotbar_slot(sp.hotbar_slot).map(|s| &s.item));
-        (main, HeldWire::of(sp.offhand.as_ref().map(|s| &s.item)))
+        let tool = sp.inventory.hotbar_slot(sp.hotbar_slot).map_or(HeldWire::NO_TOOL, |s| crate::inventory::held_tool_to_wire(&s.item));
+        // A host's own seat keeps no off-hand copy here (the shadow's
+        // `offhand` is a joiner's): its client's input fills `off_held`.
+        (HeldWire { kind, id, tool }, sp.off_held)
     }
 }
 

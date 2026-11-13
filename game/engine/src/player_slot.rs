@@ -329,9 +329,9 @@ pub struct PlayerSlot {
     /// is not slot 36 of `inventory` but rides beside the armour, like it
     /// (`hands.rs` holds the rules: which hand a right-click uses, the swap).
     /// Stays on the body at death, like armour (`death::split_window` never
-    /// sees it). Saved as `WorldSave.player_offhands`. Local slots only for now:
-    /// a joined client's off-hand is not carried to the server yet (slice 2 of
-    /// the off-hand plan), so the UI and the F swap are off while joined.
+    /// sees it). Saved as `WorldSave.player_offhands`. A joined client's copy
+    /// on the server is `ServerPlayer.offhand` (saved in the joiner sidecar,
+    /// v6; protocol 101).
     pub offhand: Option<ItemStack>,
     /// Spec 26 — Builder villager entity whose Commission dialog is
     /// currently open for this player. `Some` while the dialog is
@@ -689,14 +689,25 @@ impl PlayerSlot {
         )
     }
 
-    /// F / a tap on the off-hand box: trade the selected hotbar slot with the
-    /// off-hand (a deliberate act, so a locked slot trades too). Returns
-    /// whether anything moved.
-    pub fn swap_hands(&mut self) -> bool {
-        let mut main = self.inventory.take_slot(self.hotbar_slot);
-        let moved = crate::hands::swap(&mut main, &mut self.offhand);
-        self.inventory.set_slot(self.hotbar_slot, main);
-        moved
+    /// What a joiner's request claims it holds in `hand` (v101): the selected
+    /// hotbar slot (an off-hand use leaves the selection be), the item, and
+    /// its wire forms (the `ItemRef` pair, then full fidelity).
+    pub fn request_claim(&self, hand: crate::hands::Hand) -> (usize, Option<crate::item::Item>, u8, u16, crate::protocol::WireItem) {
+        let held = self.held_for_use(hand).map(|s| s.item.clone());
+        let (kind, id) = match &held {
+            Some(item) => crate::inventory::item_to_ref(item).to_wire(),
+            None => crate::protocol::ItemRef::Empty.to_wire(),
+        };
+        let full = held.as_ref().map_or(crate::protocol::WireItem::None, crate::inventory::item_to_wire_full);
+        (self.hotbar_slot, held, kind, id, full)
+    }
+
+    /// An edit's hand on the input wire (v101, [`crate::protocol::EditHand`]):
+    /// the selected hotbar slot, the `ItemRef` pair of the item in `hand`,
+    /// and the hand itself.
+    pub fn edit_hand(&self, hand: crate::hands::Hand) -> crate::protocol::EditHand {
+        let (_, _, kind, id, _) = self.request_claim(hand);
+        (self.hotbar_slot.min(usize::from(u8::MAX)) as u8, kind, id, hand)
     }
 
     /// [`Inventory::consume_one_material`] for `hand`.
@@ -1064,24 +1075,69 @@ mod tests {
         assert_eq!(slot.offhand, None, "a broken off-hand tool is gone");
     }
 
+    /// F / a tap on the off-hand box, as the game does it: the window rule
+    /// ([`crate::window::WindowClick::SwapHands`], `window_actions`).
+    fn swap_hands(slot: &mut PlayerSlot) -> bool {
+        let sel = slot.hotbar_slot;
+        let ctx = crate::window::ClickCtx::new(false, crate::window::Station::Player, glam::Vec3::ZERO, |_| crate::block::AIR);
+        let mut view = crate::window::WindowMut {
+            inv: &mut slot.inventory,
+            armour: &mut slot.armour_slots,
+            offhand: &mut slot.offhand,
+            cursor: &mut slot.crafting_ui.cursor_item,
+            grid: &mut slot.crafting_ui.grid,
+            container: None,
+        };
+        crate::window::apply(&mut view, &crate::window::WindowClick::SwapHands { slot: sel }, &ctx).ok()
+    }
+
+    /// v101 — what a joined client stamps on an edit and claims in a request:
+    /// the off-hand's item with `Hand::Off`, the selection untouched, the
+    /// pickaxe in hand named only when the hand is the main one.
+    #[test]
+    fn the_client_stamps_the_hand_and_claims_the_item_of_that_hand() {
+        use crate::hands::Hand;
+        let mut slot = fresh_slot();
+        let sel = slot.hotbar_slot;
+        let pick = ItemStack::new_tool(Tool::new(ToolType::Pickaxe, ToolMaterial::Iron));
+        slot.inventory.set_slot(sel, Some(pick.clone()));
+        slot.offhand = Some(ItemStack::new_block(crate::block::TORCH, 5));
+        let torch_ref = crate::inventory::item_to_ref(&crate::item::Item::Block(crate::block::TORCH)).to_wire();
+        let pick_ref = crate::inventory::item_to_ref(&pick.item).to_wire();
+        assert_eq!(slot.edit_hand(Hand::Off), (sel as u8, torch_ref.0, torch_ref.1, Hand::Off));
+        assert_eq!(slot.edit_hand(Hand::Main), (sel as u8, pick_ref.0, pick_ref.1, Hand::Main));
+        let (hot, held, kind, id, full) = slot.request_claim(Hand::Off);
+        assert_eq!((hot, kind, id), (sel, torch_ref.0, torch_ref.1), "the selection is left be");
+        assert_eq!(held, Some(crate::item::Item::Block(crate::block::TORCH)));
+        assert_eq!(full, crate::inventory::item_to_wire_full(&crate::item::Item::Block(crate::block::TORCH)));
+        // An empty off-hand claims nothing.
+        slot.offhand = None;
+        let (_, held, kind, id, full) = slot.request_claim(Hand::Off);
+        assert_eq!((held, (kind, id), full), (None, crate::protocol::ItemRef::Empty.to_wire(), crate::protocol::WireItem::None));
+        // After F the claims follow the items.
+        assert!(swap_hands(&mut slot));
+        assert_eq!(slot.request_claim(Hand::Off).1, Some(pick.item.clone()));
+        assert_eq!(slot.edit_hand(Hand::Off).3, Hand::Off);
+    }
+
     #[test]
     fn swapping_hands_trades_the_selected_slot_and_the_off_hand() {
         let mut slot = fresh_slot();
         let sel = slot.hotbar_slot;
         slot.inventory.set_slot(sel, Some(ItemStack::new_block(crate::block::STONE, 9)));
         slot.offhand = Some(ItemStack::new_block(crate::block::TORCH, 5));
-        assert!(slot.swap_hands());
+        assert!(swap_hands(&mut slot));
         assert_eq!(slot.inventory.hotbar_slot(sel), Some(&ItemStack::new_block(crate::block::TORCH, 5)));
         assert_eq!(slot.offhand, Some(ItemStack::new_block(crate::block::STONE, 9)));
-        assert!(slot.swap_hands());
+        assert!(swap_hands(&mut slot));
         assert_eq!(slot.inventory.hotbar_slot(sel), Some(&ItemStack::new_block(crate::block::STONE, 9)));
         assert_eq!(slot.offhand, Some(ItemStack::new_block(crate::block::TORCH, 5)));
         // An empty hand swaps in the off-hand item; two empty hands swap nothing.
         slot.inventory.set_slot(sel, None);
-        assert!(slot.swap_hands());
+        assert!(swap_hands(&mut slot));
         assert_eq!(slot.inventory.hotbar_slot(sel), Some(&ItemStack::new_block(crate::block::TORCH, 5)));
         assert_eq!(slot.offhand, None);
         slot.inventory.set_slot(sel, None);
-        assert!(!slot.swap_hands());
+        assert!(!swap_hands(&mut slot));
     }
 }

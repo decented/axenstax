@@ -228,6 +228,7 @@ impl HostedServer {
                 // v101 (off-hand plan, slice 2) — a Strict seat's typed
                 // actions are judged by the main hand only; an off-hand claim
                 // is never believed (an honest Strict client sends none).
+                // BRIDGE: off-hand use for Strict seats — replace when Strict seats get the off-hand use path
                 ActionIntent::Edit { hand, .. } if self.strict_slot(i) && hand.3 == crate::hands::Hand::Off => {
                     return self.pause_typed_action(i, StrictTeardown::Untyped, "An off-hand edit is not typed on a Strict seat");
                 }

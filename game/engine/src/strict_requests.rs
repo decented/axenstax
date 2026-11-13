@@ -259,7 +259,7 @@ pub fn route_item(
 pub struct DropRecipe {
     pub slot: u8,
     pub digest: u32,
-    pub sources: crate::action_wire::BoundedList<protocol::WireSlot, 50>,
+    pub sources: crate::action_wire::BoundedList<protocol::WireSlot, { crate::staged_window::PLAYER_PLACES }>,
 }
 
 /// C3d run 25 — route player 0's Q-drop of one of what is in hotbar `slot`

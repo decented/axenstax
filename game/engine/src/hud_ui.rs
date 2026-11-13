@@ -1019,7 +1019,7 @@ pub struct DebugReadout {
 /// What the HUD shows in the off-hand box left of the hotbar.
 #[derive(Clone, Copy)]
 pub enum OffhandBox<'a> {
-    /// No box: a joined client has no off-hand yet (slice 2 of the off-hand plan).
+    /// No box: a draw with no off-hand to show (previews and tests).
     Hidden,
     /// The box, with nothing in it.
     Empty,

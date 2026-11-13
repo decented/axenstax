@@ -185,10 +185,9 @@ pub fn swap(main: &mut Option<ItemStack>, off: &mut Option<ItemStack>) -> bool {
 /// swap); right works on one (pick up the ceil-half, put one down, or add
 /// one). Lossless: nothing is created or destroyed. Any item may sit here.
 ///
-/// BRIDGE: this is the window rule for a local player only. A joined client's
-/// window is the server's copy, which has no off-hand slot yet — replace with a
-/// `WindowClick::Offhand` in `window::apply` when the slot reaches the wire
-/// (slice 2 of the off-hand plan).
+/// The one rule for the slot's click: `window::apply` runs it for
+/// [`crate::window::WindowClick::Offhand`], so a joined client's click and the
+/// server's copy of it (v101) are the same function.
 pub fn click_offhand(off: &mut Option<ItemStack>, cursor: &mut Option<ItemStack>, right: bool) {
     let Some(carried) = cursor.take() else {
         // Empty cursor: pick up. Left = whole, right = ceil-half.

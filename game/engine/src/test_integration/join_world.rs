@@ -247,3 +247,31 @@ fn an_older_clients_join_request_gets_the_mismatch_reason_not_silence() {
     }
     assert_eq!(reason, Some(protocol::protocol_mismatch_reason(64)));
 }
+
+/// v101 (off-hand plan, slice 2) — a protocol-100 client's JoinRequest still
+/// decodes (the join packets did not change), so it is refused by the version
+/// check with the readable reason, never left waiting and never let in to
+/// misread the new use-packet shapes.
+#[test]
+fn a_protocol_100_client_is_refused_cleanly() {
+    let mut hs = start_open_server("t101-join-v100", 7);
+    let client = hs.attach_test_remote();
+    let mut req = build_join_request_guest("OldBuild", 0);
+    req.protocol_version = 100;
+    client.send_to_server(&protocol::serialize_packet(protocol::PacketType::JoinRequest, &req));
+    hs.tick();
+    let mut reason = None;
+    let mut accepted = false;
+    while let Some(pkt) = client.try_recv_from_server() {
+        match protocol::deserialize_header(&pkt) {
+            Some((protocol::PacketType::JoinReject, payload)) => {
+                reason = protocol::safe_deserialize::<protocol::JoinRejectPacket>(payload).ok().map(|r| r.reason);
+            }
+            Some((protocol::PacketType::JoinAccept, _)) => accepted = true,
+            _ => {}
+        }
+    }
+    assert!(!accepted, "never let in");
+    assert_eq!(reason, Some(protocol::protocol_mismatch_reason(100)));
+    assert!(protocol::protocol_mismatch_reason(100).contains("100"), "and the reason names the version");
+}

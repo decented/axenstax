@@ -676,6 +676,27 @@ impl JoinerSave {
         bincode::serialize(&v4).unwrap()
     }
 
+    /// A genuine v5 body of this record (the layout the build before the
+    /// off-hand wrote), for tests of what must still be read.
+    #[cfg(test)]
+    pub(crate) fn encode_v5_for_tests(&self) -> Vec<u8> {
+        let v5 = JoinerSaveV5 {
+            version: VERSION_V5,
+            slots: self.slots.clone(),
+            armour: self.armour,
+            health: self.health,
+            hunger: self.hunger,
+            spawn: self.spawn,
+            calendar_id: self.calendar_id,
+            slept_night: self.slept_night,
+            owed: self.owed.clone(),
+            obligation_history: self.obligation_history,
+            personal: self.personal.clone(),
+            pose: self.pose,
+        };
+        bincode::serialize(&v5).unwrap()
+    }
+
     /// v5 — where the body was when this was saved, if the record says and
     /// the spot is within the playable range.
     pub(crate) fn pose(&self) -> Option<JoinerPose> {
@@ -1040,19 +1061,53 @@ mod tests {
         }
         assert_eq!(snapshot(&dir), before, "a refused path wrote into the retired world");
     }
-    /// Which leading bytes a local seat may take a bound record under: v5 and
-    /// v4. The v2 checkpoint seed and v3 stay refused.
+    /// Which leading bytes a local seat may take a bound record under: v6,
+    /// v5 and v4. The v2 checkpoint seed and v3 stay refused.
     #[test]
-    fn only_v4_and_v5_records_are_current_bound_versions() {
+    fn only_v4_v5_and_v6_records_are_current_bound_versions() {
         let s = server();
-        let v5 = JoinerSave::capture(&s.players[0], [1; 16]).encode().unwrap();
-        assert!(JoinerSave::is_current_bound_version(&v5));
+        let v6 = JoinerSave::capture(&s.players[0], [1; 16]).encode().unwrap();
+        assert!(JoinerSave::is_current_bound_version(&v6));
+        assert!(JoinerSave::is_current_bound_version(&JoinerSave::capture(&s.players[0], [1; 16]).encode_v5_for_tests()));
         assert!(JoinerSave::is_current_bound_version(&JoinerSave::capture(&s.players[0], [1; 16]).encode_v4_for_tests()));
-        for other in [0u8, 1, 2, 3, 6] {
+        for other in [0u8, 1, 2, 3, 7] {
             assert!(!JoinerSave::is_current_bound_version(&[other]), "v{other}");
         }
         assert!(!JoinerSave::is_current_bound_version(&[]));
         JoinerSave::decode(&JoinerSave::capture(&s.players[0], [1; 16]).encode_v4_for_tests()).expect("the v4 body reads");
+    }
+
+    /// v101 (off-hand plan, slice 2) — the sidecar (v6) round-trips the
+    /// off-hand, and a v5 sidecar, which has none, still loads: with the
+    /// off-hand empty and everything else as it was.
+    #[test]
+    fn the_sidecar_round_trips_the_off_hand_and_a_v5_sidecar_loads_it_empty() {
+        let mut s = server();
+        let torch = ItemStack::new_block(crate::block::TORCH, 5);
+        s.players[0].offhand = Some(torch.clone());
+        s.players[0].inventory.set_slot(0, Some(ItemStack::new_block(crate::block::STONE, 7)));
+        s.players[0].combat.hunger = 9;
+        let saved = JoinerSave::capture(&s.players[0], [1; 16]);
+        let bytes = saved.encode().unwrap();
+        assert_eq!(bytes[0], 6, "the writer writes v6");
+        let back = JoinerSave::decode(&bytes).unwrap().window().unwrap();
+        assert_eq!(back.offhand, Some(torch), "the off-hand comes back");
+        assert_eq!(back.inv.slot(0), Some(&ItemStack::new_block(crate::block::STONE, 7)));
+        // The v5 body of the same record.
+        let old = saved.encode_v5_for_tests();
+        assert_eq!(old[0], 5);
+        let loaded = JoinerSave::decode(&old).expect("a v5 sidecar still loads");
+        let window = loaded.window().unwrap();
+        assert_eq!(window.offhand, None, "no off-hand in a v5 record");
+        assert_eq!(window.inv.slot(0), Some(&ItemStack::new_block(crate::block::STONE, 7)), "the rest is as it was");
+        assert_eq!(loaded.hunger, 9);
+        assert_eq!(loaded.encode().unwrap()[0], 6, "and is written as v6 from then on");
+        // v4 and older upgrade with the off-hand empty too.
+        assert_eq!(JoinerSave::decode(&saved.encode_v4_for_tests()).unwrap().window().unwrap().offhand, None);
+        // A v6 body cut short (a v5 body under a v6 label) is refused, not misread.
+        let mut forged = old.clone();
+        forged[0] = 6;
+        assert!(JoinerSave::decode(&forged).is_err(), "a v5 layout labelled v6 is refused");
     }
 
     /// A record keeps a body's position only while that body is alive and the

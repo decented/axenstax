@@ -416,7 +416,7 @@ pub struct WorldSave {
     /// save's players. `None` = a save written before the field, or no player
     /// holds an off-hand item (the writer emits `None` then, so an all-empty
     /// off-hand costs one byte). Local slots only: a joiner's off-hand rides the
-    /// sidecar (slice 2 of the off-hand plan), never this field. Never on the
+    /// sidecar (v6), never this field. Never on the
     /// wire. APPEND LAST.
     #[serde(default)]
     pub player_offhands: Option<Vec<SavedSlot>>,

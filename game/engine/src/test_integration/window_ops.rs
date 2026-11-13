@@ -71,6 +71,8 @@ struct Client {
     grants: u32,
     /// `GrantUnfit` units reported back.
     unfit: u32,
+    /// Every item-action outcome received, in order.
+    outcomes: Vec<protocol::ItemActionOutcomePacket>,
 }
 
 /// One joiner standing on a stone floor round (40, 80, 40), on a dedicated
@@ -139,6 +141,7 @@ impl Rig {
             input_seq: 0,
             grants: 0,
             unfit: 0,
+            outcomes: Vec::new(),
         };
         let mut rig = Rig { hs, host, c, at };
         rig.tick();
@@ -198,6 +201,7 @@ impl Rig {
                     let c = &mut self.c;
                     crate::joiner_actions::apply_item_outcome(&mut c.inv, &mut c.ui, &mut c.offhand, &request, &out);
                 }
+                self.c.outcomes.push(out.clone());
                 out.window_event
             }
             protocol::PacketType::InteractOutcome => {
@@ -267,6 +271,64 @@ impl Rig {
             ..Default::default()
         };
         self.c.transport.send_to_server(&protocol::serialize_packet(protocol::PacketType::ClientInput, &input));
+    }
+
+    /// v101 — one input carrying a placement made with `hand`: the input's
+    /// held pair is what the main hand holds (`main`), and the edit's own
+    /// hand names `used` (the off-hand item for `Hand::Off`), as the game
+    /// loop's `edit_hand_of` stamps it. The selected slot stays 0.
+    fn send_placement_hand(&mut self, cell: (i32, i32, i32), placed: block::BlockId, main: &Item, used: &Item, hand: crate::hands::Hand) {
+        self.c.input_seq += 1;
+        let sp = &self.hs.server.players[self.c.slot];
+        let (kind, id) = crate::inventory::item_to_ref(main).to_wire();
+        let (used_kind, used_id) = crate::inventory::item_to_ref(used).to_wire();
+        let off = protocol::HeldWire::of(self.c.offhand.as_ref().map(|s| &s.item));
+        let input = protocol::InputPacket {
+            tick: self.c.input_seq,
+            x: sp.player.pos.x,
+            y: sp.player.pos.y,
+            z: sp.player.pos.z,
+            yaw: sp.yaw,
+            pitch: sp.pitch,
+            health: 20.0,
+            held_kind: kind,
+            held_id: id,
+            off_kind: off.kind,
+            off_id: off.id,
+            off_tool: off.tool,
+            hotbar_slot: Some(0),
+            block_changes: vec![protocol::BlockChange { x: cell.0, y: cell.1, z: cell.2, new_block: placed, meta: 0 }],
+            edit_hands: vec![(0, used_kind, used_id, hand)],
+            events_applied: self.c.events,
+            ..Default::default()
+        };
+        self.c.transport.send_to_server(&protocol::serialize_packet(protocol::PacketType::ClientInput, &input));
+    }
+
+    /// Put `count` of `item` in the off-hand on both sides.
+    fn give_off(&mut self, item: Item, count: u8) {
+        let stack = ItemStack { item, count };
+        self.c.offhand = Some(stack.clone());
+        self.sp().offhand = Some(stack);
+    }
+
+    /// [`Self::eat`] with the food in `hand` (hotbar slot 0 stays selected).
+    fn eat_hand(&mut self, hand: crate::hands::Hand, held: Item) {
+        let (held_kind, held_id) = crate::inventory::item_to_ref(&held).to_wire();
+        let held = Some(held);
+        let seq = self.c.actions.record(Pending { kind: Asked::Eat, mob: None, hotbar_slot: 0, held, hand }, u64::MAX);
+        let action = protocol::ItemAction::Eat { hotbar_slot: 0, held_kind, held_id, held_full: protocol::WireItem::None };
+        let pkt = protocol::ItemActionPacket { seq, action, events_applied: self.c.events, hand };
+        self.c.transport.send_to_server(&protocol::serialize_packet(protocol::PacketType::ItemAction, &pkt));
+    }
+
+    /// Spend joiner's believed-units bound, so a take its server copy can't
+    /// cover is refused, not believed.
+    fn spend_believed(&mut self) {
+        let now = self.hs.server.tick_counter + 1;
+        let views = &mut self.sp().container_sent;
+        while views.believed.try_take(1, now) {}
+        while views.believed_ammo.try_take(1, now) {}
     }
 
     /// A Q-drop of one `held` from hotbar slot `slot`, as `send_drop_request`
@@ -1440,4 +1502,156 @@ fn an_open_at_a_table_that_broke_longer_ago_than_the_grace_gets_none() {
     craft_at_a_table_the_client_still_sees(&mut rig, table);
     assert!(rig.sp().cursor.is_none(), "the server crafted nothing");
     assert!(rig.tally().window_refused >= 1, "and counts the refusal");
+}
+
+// ── v101 (off-hand plan, slice 2): the off-hand over the wire ───────────
+
+fn iron_pick() -> Item {
+    Item::Tool(Tool::new(ToolType::Pickaxe, ToolMaterial::Iron))
+}
+
+/// F is a window click the server's copy applies by the same rule: the
+/// selected slot and the off-hand trade, on both sides, in lockstep.
+#[test]
+fn an_f_swap_updates_the_servers_shadow_and_stays_in_lockstep() {
+    for lent in [false, true] {
+        let mut rig = if lent { Rig::lent("f-swap") } else { Rig::dedicated("f-swap") };
+        let torch = Item::Block(block::TORCH);
+        rig.give(0, iron_pick(), 1);
+        rig.give_off(torch.clone(), 5);
+        rig.assert_lockstep("before");
+        assert!(rig.step("F", WindowClick::SwapHands { slot: 0 }).ok());
+        assert_eq!(rig.sp().offhand.as_ref().map(|s| &s.item), Some(&iron_pick()), "lent {lent}: the pickaxe is in the shadow's off-hand");
+        assert_eq!(rig.sp().inventory.slot(0), Some(&ItemStack { item: torch.clone(), count: 5 }), "lent {lent}: the torches are in its hand");
+        assert!(rig.step("F again", WindowClick::SwapHands { slot: 0 }).ok());
+        assert_eq!(rig.sp().offhand.as_ref().map(|s| &s.item), Some(&torch), "lent {lent}: and back");
+        // An empty main hand takes the off-hand item; two empty hands swap nothing.
+        rig.sp().inventory.set_slot(0, None);
+        rig.c.inv.set_slot(0, None);
+        assert!(rig.step("F into an empty hand", WindowClick::SwapHands { slot: 0 }).ok());
+        assert_eq!(rig.sp().offhand, None);
+        assert_eq!(rig.sp().inventory.slot(0).map(|s| s.count), Some(5));
+        // A slot above the hotbar names no hand: refused on both sides.
+        rig.give(20, Item::Block(block::DIRT), 1);
+        assert_eq!(rig.step("F at a bag slot", WindowClick::SwapHands { slot: 20 }), ClickResult::Refused);
+        assert_eq!(rig.tally().window_mismatch, 0);
+    }
+}
+
+/// The off-hand box in the inventory screen is a window slot: pick up, put
+/// down, merge and swap with the cursor, mirrored click for click.
+#[test]
+fn the_off_hand_slot_click_is_mirrored_in_lockstep() {
+    let mut rig = Rig::dedicated("off-click");
+    rig.give(3, Item::Block(block::TORCH), 4);
+    rig.give(4, Item::Block(block::DIRT), 9);
+    rig.open_player();
+    rig.step("take the torches", slot(3, false));
+    assert!(rig.step("put them in the off-hand", WindowClick::Offhand { right: false }).ok());
+    assert_eq!(rig.sp().offhand.as_ref().map(|s| s.count), Some(4));
+    rig.step("take the dirt", slot(4, false));
+    // The dirt swaps with the torches: the torches come to the cursor.
+    assert!(rig.step("swap with the cursor", WindowClick::Offhand { right: false }).ok());
+    assert_eq!(rig.sp().offhand.as_ref().map(|s| &s.item), Some(&Item::Block(block::DIRT)));
+    // A right click with the torches on the cursor and dirt in the off-hand
+    // (different items) swaps too; an empty click on an empty pair is refused.
+    assert!(rig.step("swap back", WindowClick::Offhand { right: true }).ok());
+    rig.step("put the dirt down", slot(4, false));
+    assert_eq!(rig.step("an empty click", WindowClick::Offhand { right: false }), ClickResult::Refused);
+    rig.close();
+    rig.flush();
+    rig.tick();
+    rig.assert_lockstep("closed");
+}
+
+/// A torch placed from the off-hand while a pickaxe is held: the edit says
+/// it was made with the off-hand, so the server takes it from the shadow's
+/// off-hand (log-only, as the main hand) and leaves the pickaxe alone.
+#[test]
+fn an_off_hand_torch_placement_while_holding_a_pickaxe_is_taken_from_the_off_hand() {
+    let mut rig = Rig::dedicated("off-torch");
+    let torch = Item::Block(block::TORCH);
+    rig.give(0, iron_pick(), 1);
+    rig.give_off(torch.clone(), 3);
+    // The client's own effect, as the placement tail's off-hand branch has it.
+    assert!(crate::inventory::take_placeable_cell(&mut rig.c.offhand).is_some());
+    rig.send_placement_hand(PLACE_AT, block::TORCH, &iron_pick(), &torch, crate::hands::Hand::Off);
+    for _ in 0..3 {
+        rig.tick();
+    }
+    assert_eq!(rig.world().get_block(PLACE_AT.0, PLACE_AT.1, PLACE_AT.2), block::TORCH, "placed");
+    assert_eq!(rig.sp().offhand.as_ref().map(|s| s.count), Some(2), "one taken from the shadow's off-hand");
+    assert_eq!(rig.sp().inventory.slot(0).map(|s| &s.item), Some(&iron_pick()), "the pickaxe is untouched");
+    assert_eq!((rig.tally().matched, rig.tally().mismatched), (1, 0));
+    assert_eq!(rig.tally().use_believed, 0, "an honest off-hand placement draws on no believed bound");
+    rig.assert_lockstep("an off-hand placement");
+}
+
+/// Decision 3 — the off-hand is as strict as the main hand: a placement the
+/// shadow's off-hand can't cover is tallied and, being log-only, accepted;
+/// the shadow is never corrected, and its pickaxe is not charged for it.
+#[test]
+fn an_off_hand_placement_the_shadow_lacks_is_tallied_mismatched_and_accepted() {
+    let mut rig = Rig::dedicated("off-torch-lacks");
+    let torch = Item::Block(block::TORCH);
+    rig.give(0, iron_pick(), 1);
+    rig.send_placement_hand(PLACE_AT, block::TORCH, &iron_pick(), &torch, crate::hands::Hand::Off);
+    for _ in 0..3 {
+        rig.tick();
+    }
+    assert_eq!(rig.world().get_block(PLACE_AT.0, PLACE_AT.1, PLACE_AT.2), block::TORCH, "log-only: accepted");
+    assert_eq!((rig.tally().matched, rig.tally().mismatched), (0, 1));
+    assert_eq!(rig.sp().offhand, None, "never corrected");
+    assert_eq!(rig.sp().inventory.slot(0).map(|s| &s.item), Some(&iron_pick()));
+    // The same claim made with the MAIN hand (a torch the pickaxe slot doesn't hold) is no better.
+    rig.send_placement_hand((42, 80, 40), block::TORCH, &torch, &torch, crate::hands::Hand::Main);
+    for _ in 0..3 {
+        rig.tick();
+    }
+    assert_eq!(rig.tally().mismatched, 2);
+}
+
+/// Food in the off-hand is eaten from the off-hand, with a sword in hand:
+/// the server's copy and the client's both take it there, and the main
+/// hand is left alone.
+#[test]
+fn an_off_hand_food_is_eaten_from_the_off_hand() {
+    let mut rig = Rig::dedicated("off-eat");
+    let bread = Item::Material(MaterialId::Bread);
+    let sword = Item::Tool(Tool::new(ToolType::Sword, ToolMaterial::Iron));
+    rig.give(0, sword.clone(), 1);
+    rig.give_off(bread.clone(), 2);
+    rig.sp().combat.hunger = 10;
+    rig.spend_believed();
+    rig.eat_hand(crate::hands::Hand::Off, bread.clone());
+    rig.tick();
+    let out = rig.c.outcomes.last().cloned().expect("answered");
+    assert!(out.accepted, "{out:?}");
+    assert_eq!(out.consume_held, 1);
+    // The take waits for the client's word: it paid from its off-hand on the
+    // outcome, then said so.
+    assert_eq!(rig.c.offhand.as_ref().map(|s| s.count), Some(1), "the client paid from its off-hand");
+    rig.tick();
+    assert_eq!(rig.sp().offhand.as_ref().map(|s| s.count), Some(1), "and so did the shadow");
+    assert_eq!(rig.sp().inventory.slot(0).map(|s| &s.item), Some(&sword), "the sword is untouched");
+    assert!(rig.sp().combat.hunger > 10, "it ate");
+    assert_eq!(rig.tally().mismatched, 0, "nothing short");
+    assert_eq!(rig.tally().use_believed, 0, "an honest take, even with the bound spent");
+    rig.assert_lockstep("an off-hand eat");
+}
+
+/// The off-hand is no free pantry: food the client says is in its off-hand
+/// and the shadow lacks is a mismatched take the server counts (the main
+/// hand's claim is counted the same), never made up in the shadow.
+#[test]
+fn an_off_hand_eat_the_shadow_cannot_pay_is_counted_and_made_up_from_nowhere() {
+    let mut rig = Rig::dedicated("off-eat-lacks");
+    let bread = Item::Material(MaterialId::Bread);
+    rig.c.offhand = Some(ItemStack { item: bread.clone(), count: 2 });
+    rig.sp().combat.hunger = 10;
+    rig.eat_hand(crate::hands::Hand::Off, bread);
+    rig.tick();
+    rig.tick();
+    assert_eq!(rig.sp().offhand, None, "nothing appears in the shadow");
+    assert!(rig.tally().mismatched >= 1, "the unpaid take is counted: {:?}", rig.tally());
 }

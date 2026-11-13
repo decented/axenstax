@@ -13672,6 +13672,7 @@ impl super::GameState {
             // packets carry the hand. A Strict seat keeps the main hand: its
             // typed actions don't carry one yet, and the server refuses an
             // off-hand claim from it rather than believe it.
+            // BRIDGE: off-hand use for Strict seats — replace when Strict seats get the off-hand use path
             let hand = if self.strict_window_connection()
                 || self.players[pidx].offhand.is_none()
                 || !(intent.place_block && intent.cursor_captured)
@@ -22652,17 +22653,7 @@ impl super::GameState {
     /// MP-D2b — the item in player `pidx`'s active hotbar slot, and the
     /// wire form a request claims it with (`ItemRef` pair + full fidelity).
     fn held_for_request(&self, pidx: usize, hand: crate::hands::Hand) -> (usize, Option<crate::item::Item>, u8, u16, crate::protocol::WireItem) {
-        let slot = &self.players[pidx];
-        let hot = slot.hotbar_slot;
-        // v101 — the item of the hand the use is made with (`hand`); the
-        // hotbar slot stays the selected one, which an off-hand use leaves be.
-        let held = slot.held_for_use(hand).map(|s| s.item.clone());
-        let (kind, id) = match &held {
-            Some(item) => crate::inventory::item_to_ref(item).to_wire(),
-            None => crate::protocol::ItemRef::Empty.to_wire(),
-        };
-        let full = held.as_ref().map_or(crate::protocol::WireItem::None, crate::inventory::item_to_wire_full);
-        (hot, held, kind, id, full)
+        self.players[pidx].request_claim(hand)
     }
 
     /// MP-D2b — swing at the server's mob `target` (a joiner): the server
@@ -23716,11 +23707,7 @@ impl super::GameState {
     /// (`window_ops::PendingEdits::push_stamped`).
     fn edit_hand_of(&self, hand: crate::hands::Hand) -> crate::protocol::EditHand {
         let Some(slot) = self.players.first() else { return (u8::MAX, 0, 0, hand) };
-        let (kind, id) = match slot.held_for_use(hand) {
-            Some(stack) => crate::inventory::item_to_ref(&stack.item).to_wire(),
-            None => crate::protocol::ItemRef::Empty.to_wire(),
-        };
-        (slot.hotbar_slot.min(usize::from(u8::MAX)) as u8, kind, id, hand)
+        slot.edit_hand(hand)
     }
 
     /// C3a-fix-1 (C-M1) — the edits made so far keep the hotbar slot and

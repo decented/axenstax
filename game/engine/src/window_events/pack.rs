@@ -29,9 +29,9 @@ fn holding_event<'a>(event: &'a WindowEvent, registry: &crate::block::BlockRegis
     match event {
         WindowEvent::Grant(stack) => Ok(Cow::Owned(WindowEvent::Grant(exact(stack)?))),
         WindowEvent::RewardGrant { stack, origin } => Ok(Cow::Owned(WindowEvent::RewardGrant { stack: exact(stack)?, origin: *origin })),
-        WindowEvent::Take { hand: crate::hands::Hand::Main, slot, item, n, how } => {
+        WindowEvent::Take { hand, slot, item, n, how } => {
             let marker = exact(&ItemStack { item: marker_item(item), count: 1 })?;
-            Ok(Cow::Owned(WindowEvent::Take { hand: crate::hands::Hand::Main, slot: *slot, item: marker.item, n: *n, how }))
+            Ok(Cow::Owned(WindowEvent::Take { hand: *hand, slot: *slot, item: marker.item, n: *n, how }))
         }
         WindowEvent::Correction(c) => {
             // Existing shared-container deltas never move Plans. Refuse a

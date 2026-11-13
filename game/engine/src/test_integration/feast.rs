@@ -351,7 +351,7 @@ fn the_save_and_the_wire_moved_with_the_new_block_ids() {
     // S8's Blighted Crop (377) took it to 7; S6's Commons Shelf (378) took it to 8, and S7's Site Board (379) joined it.
     assert_eq!(crate::save_format::SAVE_LAYOUT_REVISION, 8);
     assert_eq!(crate::save_format::SAVE_FORMAT_VERSION, 71, "63 fields + layout revision 8");
-    assert_eq!(crate::protocol::PROTOCOL_VERSION, 100);
+    assert_eq!(crate::protocol::PROTOCOL_VERSION, 101);
     let reg = block::BlockRegistry::new();
     for b in [block::FEAST_TABLE, block::FEAST_MARKER, block::COMMONS_STONE] {
         assert!(reg.is_known(b));

@@ -25,7 +25,7 @@ pub struct PackRequest {
 /// A counted complete personal window, with no unrelated history reset.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PackWindow {
-    pub slots: BoundedList<WireSlot, 50>,
+    pub slots: BoundedList<WireSlot, { crate::staged_window::PLAYER_PLACES }>,
     pub owed: BoundedList<(WireStack, u32), { crate::protocol::MAX_SYNC_OWED }>,
     pub locks: u64,
 }
@@ -169,7 +169,7 @@ mod tests {
 
     #[test]
     fn d2c2_pack_wire_pins_tags_and_appended_unpredicted_intent() {
-        assert_eq!(crate::protocol::PROTOCOL_VERSION, 100);
+        assert_eq!(crate::protocol::PROTOCOL_VERSION, 101);
         assert_eq!(crate::protocol::PacketType::PackResult as u8, 74);
         assert_eq!(crate::protocol::PacketType::PackView as u8, 75);
         assert_eq!(crate::protocol::entity_flags::PACK, 128);
@@ -208,12 +208,13 @@ mod tests {
 
     #[test]
     fn d2c2_pack_wire_refuses_excess_or_incomplete_places_and_whole_bad_debt() {
-        let bytes = bincode::serialize(&vec![None::<WireStack>; 51]).unwrap();
-        assert!(crate::protocol::safe_deserialize::<BoundedList<WireSlot, 50>>(&bytes).is_err());
+        let bytes = bincode::serialize(&vec![None::<WireStack>; crate::staged_window::PLAYER_PLACES + 1]).unwrap();
+        assert!(crate::protocol::safe_deserialize::<BoundedList<WireSlot, { crate::staged_window::PLAYER_PLACES }>>(&bytes).is_err());
         let registry = crate::block::BlockRegistry::new();
         let mut packet = PackWindow { slots: BoundedList::new(vec![None; 49]).unwrap(), owed: BoundedList::new(Vec::new()).unwrap(), locks: 0 };
         assert!(packet.decode_window(&registry).is_err());
-        packet.slots = BoundedList::new(vec![None; 50]).unwrap();
+        assert!(PackWindow { slots: BoundedList::new(vec![None; 50]).unwrap(), owed: BoundedList::new(Vec::new()).unwrap(), locks: 0 }.decode_window(&registry).is_err(), "the 50-place window of protocol 100 is incomplete now");
+        packet.slots = BoundedList::new(vec![None; crate::staged_window::PLAYER_PLACES]).unwrap();
         let wire = crate::inventory::stack_to_wire(&crate::item::ItemStack::new_block(crate::block::STONE, 1));
         packet.owed = BoundedList::new(vec![(wire, 0)]).unwrap();
         assert!(packet.decode_window(&registry).is_err(), "an invalid obligation is refused whole");

@@ -52,7 +52,8 @@ impl Client {
     fn shoot(&mut self, weapon: ShotWeapon, hot: usize, yaw: f32, pitch: f32) -> bool {
         let (held, held_kind, held_id, held_full) = self.claim(hot);
         let Some(Item::Tool(tool)) = held else { return false };
-        let ammo = Item::Material(crate::shot::ammo_for(weapon));
+        // v101 — the round it claims: the off-hand's, when it shoots.
+        let ammo = crate::shot::round_for(weapon, self.offhand.as_ref());
         let action = ItemAction::Shoot {
             weapon,
             hotbar_slot: hot as u8,
@@ -207,6 +208,56 @@ fn a_joiners_shots_are_the_servers_and_land_on_its_mobs() {
     assert_eq!(rig.cs[0].count(&mat(MaterialId::RubberBall)), balls - 1);
     assert!(rig.projectiles().iter().any(|(_, p)| p.is_blunt), "a rubber ball in flight");
     rig.assert_lockstep(0, "a slingshot shot");
+}
+
+/// v101 (off-hand plan, slice 2) — a bow takes its ammo from the off-hand
+/// first, on both copies of the window: the server's (`shot::round_for`, the
+/// owed take's hand) and the client's, the bag only once the off-hand has none.
+#[test]
+fn a_joiners_shot_takes_its_ammo_from_the_off_hand_first() {
+    let mut rig = Rig::dedicated("shoot-offhand", 1);
+    let slot = rig.cs[0].slot;
+    rig.give(0, 0, tool(ToolType::Bow), 1);
+    rig.give(0, 12, mat(MaterialId::Arrow), 3);
+    rig.give_offhand(0, mat(MaterialId::Arrow), 2);
+    let off = |rig: &Rig| rig.hs.server.players[slot].offhand.as_ref().map(|s| s.count);
+    for (shot, expect_off, expect_bag) in [(1, Some(1), 3), (2, None, 3), (3, None, 2)] {
+        rig.hs.server.players[slot].next_shot_tick = 0;
+        accepted(&rig.ask(0, |c| c.shoot(ShotWeapon::Bow, 0, 0.0, 1.5)), 1);
+        assert_eq!(off(&rig), expect_off, "shot {shot}: the shadow's off-hand");
+        assert_eq!(rig.cs[0].offhand.as_ref().map(|s| s.count), expect_off, "shot {shot}: the client's off-hand");
+        let bag = |inv: &crate::inventory::Inventory| inv.slots_iter().flatten().filter(|s| s.item == mat(MaterialId::Arrow)).map(|s| u32::from(s.count)).sum::<u32>();
+        assert_eq!(bag(&rig.hs.server.players[slot].inventory), expect_bag, "shot {shot}: the shadow's bag");
+        assert_eq!(bag(&rig.cs[0].inv), expect_bag, "shot {shot}: the client's bag");
+        rig.assert_lockstep(0, &format!("shot {shot}"));
+    }
+    assert_eq!(rig.projectiles().len(), 3, "three real arrows in the server's world");
+}
+
+/// Decision 3 — the off-hand's ammo is believed no further than the bag's:
+/// with the believed-ammo bound spent, a shot claiming off-hand arrows the
+/// shadow doesn't hold is refused (`NoAmmo`) and spends nothing, while an
+/// honest off-hand shot is not charged to the bound.
+#[test]
+fn off_hand_ammo_is_believed_no_further_than_the_bags() {
+    let mut rig = Rig::dedicated("shoot-offhand-believed", 1);
+    let slot = rig.cs[0].slot;
+    rig.give(0, 0, tool(ToolType::Bow), 1);
+    // Only the client says it holds them.
+    rig.cs[0].offhand = Some(ItemStack::new_material(MaterialId::Arrow, 4));
+    rig.spend_bound(0);
+    refused(&rig.ask(0, |c| c.shoot(ShotWeapon::Bow, 0, 0.0, 1.5)), ItemNote::NoAmmo);
+    assert!(rig.projectiles().is_empty(), "nothing fired");
+    assert_eq!(rig.cs[0].offhand.as_ref().map(|s| s.count), Some(4), "the client keeps its arrows");
+    assert_eq!(rig.hs.server.players[slot].offhand, None, "nothing appears in the shadow");
+    // An honest shot, bound still spent: accepted, off-hand first.
+    rig.give_offhand(0, mat(MaterialId::Arrow), 2);
+    rig.hs.server.players[slot].next_shot_tick = 0;
+    rig.spend_bound(0);
+    accepted(&rig.ask(0, |c| c.shoot(ShotWeapon::Bow, 0, 0.0, 1.5)), 1);
+    assert_eq!(rig.hs.server.players[slot].offhand.as_ref().map(|s| s.count), Some(1));
+    assert_eq!(rig.hs.server.players[slot].possession.ammo_believed, 0, "an honest shot draws on no believed bound");
+    rig.assert_lockstep(0, "an honest off-hand shot");
 }
 
 /// A shot with no ammo the server's copy holds or can believe is refused

@@ -10091,6 +10091,38 @@ pub(crate) mod tests {
         assert!((hs.server.players[i].combat.health - 8.0).abs() < 0.01);
     }
 
+    /// v101 (off-hand plan, slice 2) — a returning joiner's off-hand comes
+    /// back with the rest of its window: the sidecar (v6) holds it and the
+    /// join sync names it (`WireWindowSlot::Offhand`).
+    #[test]
+    fn the_off_hand_survives_leave_and_a_signed_reconnect_and_is_named_in_the_join_sync() {
+        use crate::transport::ClientTransport as _;
+        let _g = crate::save::WorldsRootGuard::new("sidecar-offhand-reconnect");
+        let mut hs = start_room_test_server("sidecar-offhand", 0);
+        hs.server.difficulty = crate::survival::Difficulty::Peaceful;
+        let first = hs.attach_test_remote_with_binding(Some([17;32]));
+        send_signed_join(&first, [66;32], Some([17;32])); hs.tick();
+        let i = hs.server.players.len()-1;
+        let torch = crate::item::ItemStack::new_block(crate::block::TORCH, 5);
+        hs.server.players[i].offhand = Some(torch.clone());
+        hs.server.players[i].inventory.set_slot(0, Some(crate::item::ItemStack::new_block(crate::block::STONE, 3)));
+        let expected = crate::inventory_sync::packet(&crate::window_events::effective_window(&hs.server.players[i]),&Default::default(),1);
+        assert!(expected.slots.iter().any(|(slot, stack)| *slot == protocol::WireWindowSlot::Offhand && stack.is_some()), "the sync names the off-hand");
+        // It leaves; the sidecar written on leave holds the off-hand.
+        hs.release_slot(i, None);
+        assert_eq!(hs.server.load_joiner(i).unwrap().window().unwrap().offhand, Some(torch.clone()));
+        let second = hs.attach_test_remote_with_binding(Some([34;32]));
+        send_signed_join(&second, [66;32], Some([34;32])); hs.tick();
+        let i = hs.server.players.len()-1;
+        let mut sync = None;
+        while let Some(pkt) = second.try_recv_from_server() {
+            let Some((kind, bytes)) = protocol::deserialize_header(&pkt) else { continue; };
+            if kind == protocol::PacketType::InventorySync { sync = Some(protocol::safe_deserialize::<protocol::InventorySyncPacket>(bytes).unwrap()); }
+        }
+        assert_eq!(sync.unwrap(), expected, "the same window, off-hand included");
+        assert_eq!(hs.server.players[i].offhand, Some(torch), "and the server's copy holds it again");
+    }
+
     /// A returning joiner whose saved spawn point needs a fix-up (a bed under
     /// a low ceiling, say) is stood on clear ground, but the saved spawn point
     /// itself is kept: it is not moved for good (`spawn_safety`).

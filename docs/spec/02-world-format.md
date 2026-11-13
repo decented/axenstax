@@ -2506,7 +2506,7 @@ against the slice before allocating.
       positional bincode, so a longer element would misread every older save's players (and its `serde(default)`s
       are inert). The writer emits `None` when no player holds an off-hand item; a save written before the field
       (or with a short column) loads every off-hand empty, and the stack is clamped to its item's max stack like
-      any restored slot. Local slots only: a joiner's off-hand will ride the joiner sidecar (a later slice), and
+      any restored slot. Local slots only: a joiner's off-hand rides the joiner sidecar (v6, protocol 101: see Spec 04), and
       nothing here is on the wire. Footer arithmetic: field count 63 + revision 8 = 71; `FOOTER_FIELD_COUNTS`
       gains `(71, [63])`; a world written at footer 70 or older still opens, with every off-hand empty. The
       appended field adds no block id and no enum variant, so `SAVE_LAYOUT_REVISION` does not move for it.

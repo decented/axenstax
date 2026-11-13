@@ -1037,3 +1037,49 @@ fn a_joiners_reach_claw_break_counts_from_the_servers_copy_of_its_slot() {
         }
     }
 }
+
+/// v101 (off-hand plan, slice 2) — what a joiner's avatar shows other
+/// players: the tool type of what it holds and the off-hand item, relayed
+/// from its input (presentation only: the possession shadow is not touched).
+#[test]
+fn a_joiners_tool_type_and_off_hand_are_relayed_on_the_avatar_wire() {
+    let mut rig = Rig::dedicated("avatar");
+    let pick = Item::Tool(pick(ToolMaterial::Iron));
+    let torch = Item::Block(block::TORCH);
+    let (main, off) = (protocol::HeldWire::of(Some(&pick)), protocol::HeldWire::of(Some(&torch)));
+    rig.input += 1;
+    let input = protocol::InputPacket {
+        tick: rig.input,
+        x: rig.at.x,
+        y: rig.at.y,
+        z: rig.at.z,
+        health: 20.0,
+        held_kind: main.kind,
+        held_id: main.id,
+        held_tool: main.tool,
+        off_kind: off.kind,
+        off_id: off.id,
+        off_tool: off.tool,
+        hotbar_slot: Some(0),
+        ..Default::default()
+    };
+    rig.client.send_to_server(&protocol::serialize_packet(protocol::PacketType::ClientInput, &input));
+    rig.tick();
+    let sp = &rig.hs.server.players[rig.slot];
+    let state = crate::server::collect_player_state(sp, rig.slot as u32);
+    let shown_main = protocol::HeldWire { kind: state.held_kind, id: state.held_id, tool: state.held_tool };
+    let shown_off = protocol::HeldWire { kind: state.off_kind, id: state.off_id, tool: state.off_tool };
+    assert_eq!(shown_main.tool_type(), Some(ToolType::Pickaxe), "its pickaxe is drawn as a pickaxe");
+    assert_eq!(shown_main, main);
+    assert_eq!(shown_off, off, "and its torch is in the left hand");
+    assert_eq!(sp.offhand, None, "the shadow's off-hand is the possession check's, not the avatar's");
+    // Empty hands say so.
+    rig.input += 1;
+    let empty = protocol::InputPacket { tick: rig.input, x: rig.at.x, y: rig.at.y, z: rig.at.z, health: 20.0, hotbar_slot: Some(0), ..Default::default() };
+    rig.client.send_to_server(&protocol::serialize_packet(protocol::PacketType::ClientInput, &empty));
+    rig.tick();
+    let state = crate::server::collect_player_state(&rig.hs.server.players[rig.slot], rig.slot as u32);
+    assert_eq!(protocol::HeldWire { kind: state.held_kind, id: state.held_id, tool: state.held_tool }.tool_type(), None);
+    assert_eq!(protocol::HeldWire { kind: state.off_kind, id: state.off_id, tool: state.off_tool }.tool_type(), None);
+    assert_eq!(state.off_kind, protocol::item_kind::EMPTY);
+}
