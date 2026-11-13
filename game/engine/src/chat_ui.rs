@@ -91,6 +91,15 @@ impl ChatState {
         }
     }
 
+    /// Forget everything chat holds: the log, the up-arrow history, the input
+    /// line and any Tab cycle. Chat belongs to one world: entering a world
+    /// (a new one, a load, the same world reloaded, the Workshop, a trial, or
+    /// joining someone else's) starts with an empty chat, so lines and commands
+    /// from another world, or from before a reload, never show.
+    pub fn clear_for_new_world(&mut self) {
+        *self = Self::new();
+    }
+
     /// Open with an optional prefix already filled (e.g. `/` for slash-key
     /// open). Cursor sits at end.
     pub fn open_with_prefix(&mut self, prefix: &str) {
@@ -580,6 +589,20 @@ pub fn draw_chat(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clear_for_new_world_forgets_the_log_history_and_input() {
+        let mut s = ChatState::new();
+        s.push_log(crate::commands::ChatLine::system("from the last world", 0));
+        s.push_history("/time set day".to_string());
+        s.open_with_prefix("/gi");
+        s.pending_submit = Some("/give torch".to_string());
+        assert!(s.history_prev().is_some());
+        s.clear_for_new_world();
+        assert!(s.log.is_empty(), "no line from another world or before the reload");
+        assert!(s.history.is_empty() && s.history_cursor.is_none(), "up-arrow history is per world too");
+        assert!(!s.open && s.input.is_empty() && s.pending_submit.is_none() && s.cycle.is_none());
+    }
 
     #[test]
     fn open_with_prefix_sets_input() {

@@ -201,6 +201,9 @@ mod tests {
     #[path = "growth_reload.rs"]
     mod growth_reload;
     #[cfg(not(target_arch = "wasm32"))]
+    #[path = "chat_world.rs"]
+    mod chat_world;
+    #[cfg(not(target_arch = "wasm32"))]
     #[path = "trials_island.rs"]
     mod trials_island;
     #[cfg(not(target_arch = "wasm32"))]
