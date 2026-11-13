@@ -981,7 +981,6 @@ impl HeldWire {
     /// The tool type this hand's tool byte names; `None` for a hand without
     /// a tool (whatever the byte), or a byte this build doesn't know (a newer peer: draw it as
     /// the plain tier slab, never guess).
-    #[cfg_attr(not(test), allow(dead_code))] // Slice 3 (left-hand rendering) draws the tool type a peer sends.
     pub fn tool_type(self) -> Option<crate::crafting::ToolType> {
         // Only a hand that holds a tool says a type: a default-built packet
         // carries tool byte 0 (a pickaxe) beside an empty pair.

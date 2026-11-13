@@ -94,6 +94,14 @@ pub fn use_hand(main: Option<&Item>, off: Option<&Item>, target: &UseTarget) -> 
     }
 }
 
+/// Which hands swing when the player acts: `(main, off)`. Mining and attacking
+/// (`break_block`) always swing the main hand; a use (`place_block`) swings the
+/// hand [`use_hand`] chose, so a right-click that routes to the off-hand swings
+/// the left hand and leaves the right still. First-person feedback only.
+pub fn swing_hands(break_block: bool, place_block: bool, place_uses_off_hand: bool) -> (bool, bool) {
+    (break_block || (place_block && !place_uses_off_hand), place_block && place_uses_off_hand)
+}
+
 /// Materials a right-click does something with wherever they are aimed (the
 /// right-click chain reads each of them): a Lead, bonemeal and fertiliser, a
 /// reed, the buckets, salt, the whistle and the firestarter.
@@ -236,6 +244,17 @@ pub fn click_offhand(off: &mut Option<ItemStack>, cursor: &mut Option<ItemStack>
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_off_hand_use_swings_the_left_hand_only() {
+        use super::swing_hands;
+        assert_eq!(swing_hands(false, true, true), (false, true), "a right-click routed to the off-hand");
+        assert_eq!(swing_hands(false, true, false), (true, false), "a right-click on the main hand");
+        assert_eq!(swing_hands(true, false, false), (true, false), "mining swings the main hand");
+        assert_eq!(swing_hands(true, false, true), (true, false), "the off-hand never mines");
+        assert_eq!(swing_hands(true, true, true), (true, true), "both buttons: both hands");
+        assert_eq!(swing_hands(false, false, true), (false, false), "no click, no swing");
+    }
+
     use super::*;
     use crate::crafting::{Tool, ToolMaterial};
 

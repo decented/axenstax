@@ -258,6 +258,7 @@ mod retired_files;
 // Signet contacts sync (native only) — docs/foundations/2026-10-01-signet-contacts-sync.md.
 #[cfg(not(target_arch = "wasm32"))]
 mod signet_contacts;
+mod held_tool_model;
 mod item_model;
 mod brand;
 mod splash_ui;
@@ -1431,6 +1432,14 @@ pub(crate) struct GameState {
     /// of the player's own break/place intent so the held tool swings exactly
     /// like the remote-avatar arm (mirrors `remote_swing`, but for self).
     pub(crate) local_swing: std::collections::HashMap<usize, u32>,
+    /// The off-hand's own swing window (left hand), per LOCAL player index: the
+    /// same countdown as `local_swing`, armed only by a right-click that routes
+    /// to the off-hand (`hands::use_hand` is `Hand::Off`, `hands::swing_hands`).
+    pub(crate) local_off_swing: std::collections::HashMap<usize, u32>,
+    /// Local player indices whose held right-click currently routes to the
+    /// off-hand, written by the frame path's hand decision each frame it runs
+    /// and read by the tick's swing arming. First-person feedback only.
+    pub(crate) local_off_use: std::collections::HashSet<usize>,
     /// Phase 3 (cosmetics) — live sneak signal per LOCAL player index, captured
     /// each tick from the post-gate intent. Read by `local_player_state` to drive
     /// a split-screen peer's CROUCHING flag. `PlayerSlot.input` is vestigial in
@@ -2277,6 +2286,8 @@ impl GameState {
             passed_on_told: std::collections::HashSet::new(),
             gardener_told: crate::gardener_lines::Told::default(),
             local_swing: std::collections::HashMap::new(),
+            local_off_swing: std::collections::HashMap::new(),
+            local_off_use: std::collections::HashSet::new(),
             local_sneak: std::collections::HashMap::new(),
             net_send_seq: 0,
             own_prediction: crate::prediction::OwnPrediction::new(),

@@ -106,7 +106,6 @@ pub fn held_tool_to_wire(item: &crate::item::Item) -> u8 {
 
 /// v101 — the inverse of [`held_tool_to_wire`]: `None` for `NO_TOOL` or a
 /// byte this build doesn't know.
-#[cfg_attr(not(test), allow(dead_code))] // Slice 3 (left-hand rendering) draws the tool type a peer sends.
 pub fn tool_type_from_held_wire(b: u8) -> Option<crate::crafting::ToolType> {
     tool_type_from_wire(b)
 }

@@ -1546,28 +1546,40 @@ pub fn build_player_avatar_vertices_with(
         }
     }
 
-    // Held item: anchor to the right hand. The right arm (player_model[3])
-    // has pivot (0.375, 1.4, 0.0) and its hand-end sits at the bottom of the
-    // arm cuboid (origin.y - size.y/2 = 1.05 - 0.35 = 0.70). We build the
-    // local-space item mesh centred at the hand, rotate by the arm swing
-    // about the arm pivot (X), then by yaw (Y), then translate to foot_pos —
-    // matching the part-builder transform order so the item rides the hand.
-    let item = crate::protocol::ItemRef::from_wire(ps.held_kind, ps.held_id);
-    if !matches!(item, crate::protocol::ItemRef::Empty) {
-        // Derived from the right-arm part rather than hand-typed, so a slim
-        // arm's hand (narrower and half a pixel lower) still holds the item.
-        // For classic these evaluate to the historical (0.375, 0.70) / (0.375, 1.4).
-        let right_arm = &parts[RIGHT_ARM_INDEX];
-        let hand_anchor = Vec3::new(
-            right_arm.origin.x,
-            right_arm.origin.y - right_arm.size.y * 0.5,
-            right_arm.origin.z,
-        );
-        let arm_pivot = right_arm.pivot;
-        let mut item_verts = crate::item_model::held_item_mesh(item, registry);
-        let x_rot = arm_swing.unwrap_or(0.0);
+    // Held items: the main hand is the right arm (index 3) and the off-hand the
+    // left (index 2); the avatar wire carries each as a `HeldWire` (the item
+    // pair plus the tool type, which a tool draws its own shape from).
+    //
+    // A hand's anchor is the bottom of its arm cuboid (the right arm, classic:
+    // origin.y - size.y/2 = 1.05 - 0.35 = 0.70; a slim arm's hand is narrower and
+    // half a pixel lower, which is why it is derived from the part). The
+    // local-space item mesh is centred at the hand, rotated by the arm swing about
+    // the arm pivot (X), then by yaw (Y), then translated to foot_pos — matching
+    // the part-builder transform order so the item rides the hand. The left arm
+    // does not swing (a remote peer's off-hand use is not on the wire).
+    let (sin_y, cos_y) = yaw.sin_cos();
+    for (side, held, swing) in [
+        (
+            crate::viewmodel::HandSide::Right,
+            crate::protocol::HeldWire { kind: ps.held_kind, id: ps.held_id, tool: ps.held_tool },
+            arm_swing,
+        ),
+        (
+            crate::viewmodel::HandSide::Left,
+            crate::protocol::HeldWire { kind: ps.off_kind, id: ps.off_id, tool: ps.off_tool },
+            None,
+        ),
+    ] {
+        let held = crate::item_model::HeldItem::from_wire(held);
+        if held.is_empty() {
+            continue;
+        }
+        let arm = &parts[side.arm_index()];
+        let hand_anchor = Vec3::new(arm.origin.x, arm.origin.y - arm.size.y * 0.5, arm.origin.z);
+        let arm_pivot = arm.pivot;
+        let mut item_verts = crate::item_model::held_item_mesh(held, registry, side);
+        let x_rot = swing.unwrap_or(0.0);
         let (sin_x, cos_x) = x_rot.sin_cos();
-        let (sin_y, cos_y) = yaw.sin_cos();
         for v in &mut item_verts {
             // Translate local-space item to the hand anchor.
             let mut p = Vec3::from(v.position) + hand_anchor;
@@ -4077,6 +4089,64 @@ mod tests {
         let ps = avatar_state(item_kind::TOOL, 2, 0);
         let (_skin, held) = self_avatar_vertices(CameraMode::OverShoulder, &ps, 0.0, 10, 0, 1.0, &reg, crate::skin_uv::ArmModel::Classic);
         assert_eq!(held.len(), 36, "third-person self-avatar shows the held tool");
+    }
+
+    /// An avatar at the origin facing so that its yaw rotation is the identity
+    /// (the builder adds a quarter turn to `ps.yaw`), holding `main` in the
+    /// right hand and `off` in the left.
+    fn two_handed(main: crate::protocol::HeldWire, off: crate::protocol::HeldWire) -> Vec<Vertex> {
+        let mut ps = avatar_state(main.kind, main.id, 0);
+        ps.yaw = -std::f32::consts::FRAC_PI_2;
+        ps.anim_state = 0;
+        ps.held_tool = main.tool;
+        ps.off_kind = off.kind;
+        ps.off_id = off.id;
+        ps.off_tool = off.tool;
+        let reg = crate::block::BlockRegistry::new();
+        build_player_avatar_vertices(&ps, 0.0, 0, 0, 1.0, &reg, crate::skin_uv::ArmModel::Classic).1
+    }
+
+    fn centre_x(v: &[Vertex]) -> f32 {
+        v.iter().map(|v| v.position[0]).sum::<f32>() / v.len() as f32
+    }
+
+    #[test]
+    fn the_avatar_holds_the_main_item_in_the_right_hand_and_the_off_hand_item_in_the_left() {
+        use crate::crafting::{Tool, ToolMaterial, ToolType};
+        use crate::protocol::HeldWire;
+        let pick = HeldWire::of(Some(&crate::item::Item::Tool(Tool::new(ToolType::Pickaxe, ToolMaterial::Iron))));
+        let torch = HeldWire::of(Some(&crate::item::Item::Block(crate::block::TORCH)));
+        let both = two_handed(pick, torch);
+        let only_main = two_handed(pick, HeldWire::EMPTY);
+        let only_off = two_handed(HeldWire::EMPTY, torch);
+        assert!(!only_main.is_empty() && !only_off.is_empty());
+        assert_eq!(both.len(), only_main.len() + only_off.len(), "one item per hand, nothing else");
+        // Model space (yaw 0): the body centre is x = 0, the right arm's hand
+        // anchor x = +0.375 and the left's -0.375; a held sprite sits outside.
+        let (right, left): (Vec<_>, Vec<_>) = both.iter().copied().partition(|v| v.position[0] > 0.0);
+        assert_eq!(right.len(), only_main.len(), "the main item is all on the right of the body centre");
+        assert_eq!(left.len(), only_off.len(), "the off-hand item is all on the left");
+        assert!(centre_x(&right) > 0.3, "the right item's centre is at the right hand: {}", centre_x(&right));
+        assert!(centre_x(&left) < -0.5, "the off-hand sprite is outside the left hand: {}", centre_x(&left));
+        // The off-hand item sits where the same item sits in the right hand,
+        // mirrored about the body centre (a sprite's own art is not symmetric, so
+        // a few hundredths of slack).
+        let right_torch = two_handed(torch, HeldWire::EMPTY);
+        assert!((centre_x(&right_torch) + centre_x(&left)).abs() < 0.05, "mirror images about the body centre: {} vs {}", centre_x(&right_torch), centre_x(&left));
+    }
+
+    #[test]
+    fn an_empty_off_hand_draws_no_item_and_a_remote_tool_draws_its_type() {
+        use crate::protocol::{item_kind, HeldWire};
+        let slab = two_handed(HeldWire { kind: item_kind::TOOL, id: 2, tool: HeldWire::NO_TOOL }, HeldWire::EMPTY);
+        assert_eq!(slab.len(), 36, "an unknown tool type is the plain slab");
+        for byte in 0..=11u8 {
+            let m = two_handed(HeldWire { kind: item_kind::TOOL, id: 2, tool: byte }, HeldWire::EMPTY);
+            assert!(m.len() > 36 || m.iter().zip(&slab).any(|(a, b)| a.position != b.position), "tool byte {byte} draws its own shape");
+            assert!(m.iter().all(|v| v.position[0] > -0.3), "nothing in the left hand");
+        }
+        let off = two_handed(HeldWire::EMPTY, HeldWire { kind: item_kind::TOOL, id: 2, tool: 2 });
+        assert!(!off.is_empty() && off.iter().all(|v| v.position[0] < 0.0), "an off-hand sword is all in the left hand");
     }
 
     // ── Third-person camera — Phase 3 (L2: avatar verts carry the fade alpha) ─

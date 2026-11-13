@@ -33,13 +33,58 @@ use std::sync::OnceLock;
 use glam::Vec3;
 
 use crate::block::{BlockId, BlockRegistry};
-use crate::crafting::ToolMaterial;
+use crate::crafting::{ToolMaterial, ToolType};
 use crate::entity_model::{
     material_texture, push_textured_quad, tool_texture, TEX_ITEM_IRON_INGOT, TEX_ITEM_STICK,
 };
 use crate::item::{Item, MaterialId};
 use crate::mesh::{RenderClass, Vertex, CUTOUT_FLAG};
-use crate::protocol::ItemRef;
+use crate::protocol::{HeldWire, ItemRef};
+use crate::viewmodel::HandSide;
+
+/// What a hand holds, as the held-item mesh needs it: the wire `ItemRef`
+/// (`item_to_ref`, which keeps a tool's tier and loses its type) plus the tool
+/// type, so a held tool draws as its own shape ([`crate::held_tool_model`]).
+/// `tool` is `Some` only for a tool whose type is known; `None` draws the
+/// plain tier slab, never a guess.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HeldItem {
+    pub item: ItemRef,
+    pub tool: Option<ToolType>,
+}
+
+impl HeldItem {
+    /// An empty hand.
+    pub const EMPTY: HeldItem = HeldItem { item: ItemRef::Empty, tool: None };
+
+    /// A hand that holds `item`: the local player's, which knows the real type.
+    pub fn of(item: &Item) -> Self {
+        HeldItem {
+            item: crate::inventory::item_to_ref(item),
+            tool: match item {
+                Item::Tool(t) => Some(t.tool_type),
+                _ => None,
+            },
+        }
+    }
+
+    /// A hand as a peer's avatar wire says it. `tool` is `None` for anything
+    /// but a tool, and for a tool byte this build doesn't know (a newer peer).
+    pub fn from_wire(w: HeldWire) -> Self {
+        HeldItem { item: ItemRef::from_wire(w.kind, w.id), tool: w.tool_type() }
+    }
+
+    pub fn is_empty(self) -> bool {
+        matches!(self.item, ItemRef::Empty)
+    }
+}
+
+/// A bare `ItemRef` is a hand without a known tool type.
+impl From<ItemRef> for HeldItem {
+    fn from(item: ItemRef) -> Self {
+        HeldItem { item, tool: None }
+    }
+}
 
 /// How an item is drawn in a frame, in the hand and on the ground.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -69,6 +114,10 @@ pub const HELD_SPRITE_WIDTH: f32 = 0.6;
 /// its sleeve) instead of hiding its flame inside it. A held cube stays
 /// centred on the hand.
 pub const HELD_SPRITE_OFFSET: Vec3 = Vec3::new(0.25, 0.1, 0.0);
+/// [`HELD_SPRITE_OFFSET`] for the hand `side`: on the outside of that hand.
+pub fn sprite_offset(side: HandSide) -> Vec3 {
+    Vec3::new(HELD_SPRITE_OFFSET.x * side.sign(), HELD_SPRITE_OFFSET.y, HELD_SPRITE_OFFSET.z)
+}
 /// Width of a dropped sprite (a dropped block is a 0.2 cube).
 pub const DROP_SPRITE_WIDTH: f32 = 0.4;
 /// Width of a framed sprite: the half-cell square a framed block fills.
@@ -146,25 +195,41 @@ pub fn item_ref_look(item: ItemRef, registry: &BlockRegistry) -> Option<ItemLook
     }
 }
 
-/// Local-space mesh (about unit scale, the hand at the origin) for a held
-/// item, a triangle list. The caller moves it to the hand anchor or the
-/// first-person viewmodel slot. A cuboid is centred on the hand, 6 faces x 2
-/// triangles x 3 vertices = **36 vertices**; a block sprite is
-/// [`sprite_triangles`] moved to [`HELD_SPRITE_OFFSET`].
-pub fn held_item_mesh(item: ItemRef, registry: &BlockRegistry) -> Vec<Vertex> {
-    match item {
+/// The tool material a wire tier names (`ItemRef::Tool(tier)`): tier 4 is
+/// Satori, and so is any future tier this build doesn't know.
+fn tier_material(tier: u16) -> ToolMaterial {
+    match tier {
+        0 => ToolMaterial::Wood,
+        1 => ToolMaterial::Stone,
+        2 => ToolMaterial::Iron,
+        3 => ToolMaterial::Diamond,
+        _ => ToolMaterial::Satori,
+    }
+}
+
+/// Local-space mesh (about unit scale, the hand at the origin) for an item held
+/// in the hand `side`, a triangle list. The caller moves it to the hand anchor
+/// or the first-person viewmodel slot. A cuboid is centred on the hand, 6 faces
+/// x 2 triangles x 3 vertices = **36 vertices**; a block sprite is
+/// [`sprite_triangles`] moved to [`HELD_SPRITE_OFFSET`], on the outside of the
+/// hand (+X for the right, -X for the left); a tool of a known type is its own
+/// shape ([`crate::held_tool_model::tool_model`]), a tool of an unknown type
+/// the plain slab of its tier.
+pub fn held_item_mesh(held: HeldItem, registry: &BlockRegistry, side: HandSide) -> Vec<Vertex> {
+    match held.item {
         ItemRef::Empty => Vec::new(),
         ItemRef::Block(id) => match block_look(id, registry) {
             ItemLook::Sprite { layer } => {
                 let mut verts = sprite_triangles(layer, HELD_SPRITE_WIDTH);
+                let offset = sprite_offset(side);
                 for v in &mut verts {
-                    v.position = (Vec3::from(v.position) + HELD_SPRITE_OFFSET).to_array();
+                    v.position = (Vec3::from(v.position) + offset).to_array();
                 }
                 verts
             }
-            ItemLook::Cube { top, side, bottom } => {
+            ItemLook::Cube { top, side: wall, bottom } => {
                 let mut verts = Vec::with_capacity(36);
-                push_cuboid(&mut verts, Vec3::ZERO, Vec3::splat(0.4), top, side, bottom);
+                push_cuboid(&mut verts, Vec3::ZERO, Vec3::splat(0.4), top, wall, bottom);
                 verts
             }
         },
@@ -172,13 +237,10 @@ pub fn held_item_mesh(item: ItemRef, registry: &BlockRegistry) -> Vec<Vertex> {
             // Map the wire tier back to a ToolMaterial, then defer to the
             // authoritative texture lookup so a held tool always matches its
             // dropped-item icon (e.g. Satori has its own texture, not diamond).
-            let mat = match tier {
-                0 => ToolMaterial::Wood,
-                1 => ToolMaterial::Stone,
-                2 => ToolMaterial::Iron,
-                3 => ToolMaterial::Diamond,
-                _ => ToolMaterial::Satori, // tier 4 (Satori) + any future tier
-            };
+            let mat = tier_material(tier);
+            if let Some(tool) = held.tool {
+                return crate::held_tool_model::tool_model(tool, mat, side);
+            }
             let tex = tool_texture(mat);
             // Thin slab oriented along Y so it reads as a tool shaft when the
             // caller tilts it into the hand.
@@ -255,7 +317,7 @@ const EDGE_INSET: f32 = 0.02;
 
 /// Opaque texels of an icon: bit `x` of `mask[y]` is texel (column `x`, row
 /// `y`, row 0 at the top) with alpha >= 128, the cut `fs_main_cutout` makes.
-type Mask = [u16; ICON];
+pub(crate) type Mask = [u16; ICON];
 
 /// Every texel opaque: a plain square card.
 const SOLID: Mask = [0xFFFF; ICON];
@@ -286,7 +348,7 @@ fn stock_masks() -> &'static [Mask] {
 /// Workshop design or a pack appends at run time) is a plain card; a pack that
 /// redraws a stock layer keeps the stock outline, and the cutout bit on every
 /// sprite face drops whatever of it the new art leaves transparent.
-fn layer_mask(layer: u32) -> Mask {
+pub(crate) fn layer_mask(layer: u32) -> Mask {
     stock_masks().get(layer as usize).copied().unwrap_or(SOLID)
 }
 
@@ -424,27 +486,27 @@ mod tests {
 
     #[test]
     fn empty_has_no_verts() {
-        assert!(held_item_mesh(ItemRef::Empty, &test_registry()).is_empty());
+        assert!(held_item_mesh(ItemRef::Empty.into(), &test_registry(), HandSide::Right).is_empty());
     }
 
     #[test]
     fn block_makes_a_cube() {
-        assert_eq!(held_item_mesh(ItemRef::Block(1), &test_registry()).len(), 36);
+        assert_eq!(held_item_mesh(ItemRef::Block(1).into(), &test_registry(), HandSide::Right).len(), 36);
     }
 
     #[test]
     fn tool_makes_nonempty_slab() {
-        assert_eq!(held_item_mesh(ItemRef::Tool(2), &test_registry()).len(), 36);
+        assert_eq!(held_item_mesh(ItemRef::Tool(2).into(), &test_registry(), HandSide::Right).len(), 36);
     }
 
     #[test]
     fn satori_tier_falls_back_not_panics() {
-        let _ = held_item_mesh(ItemRef::Tool(4), &test_registry());
+        let _ = held_item_mesh(ItemRef::Tool(4).into(), &test_registry(), HandSide::Right);
     }
 
     #[test]
     fn material_makes_nonempty_cube() {
-        assert_eq!(held_item_mesh(ItemRef::Material(0), &test_registry()).len(), 36);
+        assert_eq!(held_item_mesh(ItemRef::Material(0).into(), &test_registry(), HandSide::Right).len(), 36);
     }
 
     #[test]
@@ -482,8 +544,8 @@ mod tests {
             }
         );
         // The held stone is still the 36-vertex cube; the held torch is not.
-        assert_eq!(held_item_mesh(ItemRef::Block(block::STONE), &reg).len(), 36);
-        let torch = held_item_mesh(ItemRef::Block(block::TORCH), &reg);
+        assert_eq!(held_item_mesh(ItemRef::Block(block::STONE).into(), &reg, HandSide::Right).len(), 36);
+        let torch = held_item_mesh(ItemRef::Block(block::TORCH).into(), &reg, HandSide::Right);
         assert!(!torch.is_empty() && torch.len() != 36, "a held torch is a sprite, not a cube");
     }
 
@@ -545,7 +607,7 @@ mod tests {
         // its flame isn't hidden inside the forearm.
         let arm = &crate::entity_model::player_model_for(crate::skin_uv::ArmModel::Classic)[3];
         let clear = arm.size.x * 0.5 + 0.04;
-        let verts = held_item_mesh(ItemRef::Block(block::TORCH), &test_registry());
+        let verts = held_item_mesh(ItemRef::Block(block::TORCH).into(), &test_registry(), HandSide::Right);
         // Six vertices a quad; the first two quads are the front and back squares.
         assert!(verts.len() > 12);
         for v in &verts[12..] {
@@ -558,7 +620,7 @@ mod tests {
         // The chunk pipeline culls back faces: each triangle's winding (from
         // its positions) must face the way its normal says.
         let reg = test_registry();
-        let verts = held_item_mesh(ItemRef::Block(block::TORCH), &reg);
+        let verts = held_item_mesh(ItemRef::Block(block::TORCH).into(), &reg, HandSide::Right);
         assert!(verts.len().is_multiple_of(3));
         for tri in verts.chunks_exact(3) {
             let [a, b, c] = [tri[0], tri[1], tri[2]].map(|v| Vec3::from(v.position));
@@ -572,11 +634,11 @@ mod tests {
         let reg = test_registry();
         let cut = |v: &Vertex| v.tex_layer & CUTOUT_FLAG != 0;
         // Held.
-        let torch = held_item_mesh(ItemRef::Block(block::TORCH), &reg);
+        let torch = held_item_mesh(ItemRef::Block(block::TORCH).into(), &reg, HandSide::Right);
         assert!(torch.iter().all(cut), "every held-torch vertex is cut out");
         assert_eq!(torch[0].tex_layer & 0xFFFF, block::TEX_TORCH);
         for item in [ItemRef::Block(block::STONE), ItemRef::Tool(2), ItemRef::Material(0)] {
-            assert!(!held_item_mesh(item, &reg).iter().any(cut), "{item:?} carries no cutout bit");
+            assert!(!held_item_mesh(item.into(), &reg, HandSide::Right).iter().any(cut), "{item:?} carries no cutout bit");
         }
         // Dropped.
         let mut ecs = hecs::World::new();
@@ -733,5 +795,59 @@ mod tests {
         let past = crate::texture_gen::texture_count() + 7;
         let quads = sprite_quads(past, 1.0);
         assert_eq!(quads.len(), 6, "front, back and the four border edges");
+    }
+
+    fn pos_set(v: &[Vertex]) -> Vec<[i32; 3]> {
+        let mut p: Vec<[i32; 3]> = v.iter().map(|v| v.position.map(|c| (c * 1000.0).round() as i32)).collect();
+        p.sort_unstable();
+        p.dedup();
+        p
+    }
+
+    #[test]
+    fn a_remote_hand_names_its_tool_type_only_for_a_tool() {
+        use crate::protocol::item_kind;
+        let tool = |kind, tool| HeldItem::from_wire(HeldWire { kind, id: 2, tool }).tool;
+        assert_eq!(tool(item_kind::TOOL, 0), Some(ToolType::Pickaxe));
+        assert_eq!(tool(item_kind::TOOL, 2), Some(ToolType::Sword));
+        // Not a tool (a default-built packet carries tool byte 0 beside an empty pair).
+        assert_eq!(tool(item_kind::EMPTY, 0), None);
+        assert_eq!(tool(item_kind::BLOCK, 0), None);
+        assert_eq!(tool(item_kind::TOOL, HeldWire::NO_TOOL), None);
+    }
+
+    #[test]
+    fn a_remote_tool_with_an_unknown_tool_byte_draws_the_plain_slab() {
+        use crate::protocol::item_kind;
+        let reg = test_registry();
+        let slab = pos_set(&held_item_mesh(ItemRef::Tool(2).into(), &reg, HandSide::Right));
+        for byte in [12u8, 99, 200, 254] {
+            let held = HeldItem::from_wire(HeldWire { kind: item_kind::TOOL, id: 2, tool: byte });
+            assert_eq!(held.tool, None, "byte {byte}");
+            assert_eq!(pos_set(&held_item_mesh(held, &reg, HandSide::Right)), slab, "byte {byte} is the slab");
+        }
+        // And a known byte is not.
+        let pick = HeldItem::from_wire(HeldWire { kind: item_kind::TOOL, id: 2, tool: 0 });
+        assert_ne!(pos_set(&held_item_mesh(pick, &reg, HandSide::Right)), slab);
+    }
+
+    #[test]
+    fn the_local_players_tool_knows_its_type() {
+        let sword = Item::Tool(crate::crafting::Tool::new(ToolType::Sword, ToolMaterial::Iron));
+        let held = HeldItem::of(&sword);
+        assert_eq!(held, HeldItem { item: ItemRef::Tool(2), tool: Some(ToolType::Sword) });
+        let wire = HeldWire::of(Some(&sword));
+        assert_eq!(HeldItem::from_wire(wire), held, "the local item and its wire form draw the same");
+    }
+
+    #[test]
+    fn the_held_sprite_sits_on_the_outside_of_each_hand() {
+        let reg = test_registry();
+        let centre_x = |side| {
+            let v = held_item_mesh(ItemRef::Block(block::TORCH).into(), &reg, side);
+            v.iter().map(|v| v.position[0]).sum::<f32>() / v.len() as f32
+        };
+        assert!(centre_x(HandSide::Right) > 0.2, "right-hand sprite is outside, +X");
+        assert!(centre_x(HandSide::Left) < -0.2, "left-hand sprite is outside, -X");
     }
 }

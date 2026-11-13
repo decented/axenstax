@@ -3259,6 +3259,8 @@ impl super::GameState {
         self.own_health.reset();
         self.remote_players.clear();
         self.local_swing.clear();
+        self.local_off_swing.clear();
+        self.local_off_use.clear();
         self.local_sneak.clear();
         self.entity_was_in_water.clear();
         // The explored-map cache is keyed by chunk column only, so world B
@@ -7266,12 +7268,24 @@ impl super::GameState {
         // each completed swing), then decrement toward 0 every tick.
         for (i, intent) in intents.iter().enumerate() {
             if i >= self.players.len() { break; }
-            let acting = (intent.break_block || intent.place_block) && intent.cursor_captured;
+            // A right-click that routes to the off-hand swings the left hand
+            // only; everything else swings the right (`hands::swing_hands`).
+            let (main_acts, off_acts) = crate::hands::swing_hands(
+                intent.break_block,
+                intent.place_block,
+                self.local_off_use.contains(&i),
+            );
             let entry = self.local_swing.entry(i).or_insert(0);
-            if acting && *entry == 0 {
+            if main_acts && intent.cursor_captured && *entry == 0 {
                 *entry = crate::entity_model::SWING_TICKS;
             } else if *entry > 0 {
                 *entry -= 1;
+            }
+            let off_entry = self.local_off_swing.entry(i).or_insert(0);
+            if off_acts && intent.cursor_captured && *off_entry == 0 {
+                *off_entry = crate::entity_model::SWING_TICKS;
+            } else if *off_entry > 0 {
+                *off_entry -= 1;
             }
             // ── Phase 3 cosmetics: capture the live sneak signal ─────────────
             // The post-gate intent carries the real per-player sneak (menu-open
@@ -7281,6 +7295,8 @@ impl super::GameState {
             self.local_sneak.insert(i, intent.sneak);
         }
         self.local_swing.retain(|idx, _| *idx < self.players.len());
+        self.local_off_swing.retain(|idx, _| *idx < self.players.len());
+        self.local_off_use.retain(|idx| *idx < self.players.len());
         self.local_sneak.retain(|idx, _| *idx < self.players.len());
 
         // ── Part H: Pause from any player (tick-side) ────────────────────────
@@ -13696,6 +13712,13 @@ impl super::GameState {
                 let (main, off) = p.hands_items();
                 crate::hands::use_hand(main, off, &target)
             };
+            // The swing arming in `tick` reads this: a held right-click that
+            // routes to the off-hand swings the left hand (first person).
+            if intent.place_block && intent.cursor_captured && hand == crate::hands::Hand::Off {
+                self.local_off_use.insert(pidx);
+            } else {
+                self.local_off_use.remove(&pidx);
+            }
 
             // Spec 36 Lead tether (2026-05-28) — right-click while holding
             // a Lead is context-sensitive on the target. Targeting a
@@ -17881,12 +17904,15 @@ impl super::GameState {
             // hand from a first-person frame stops drawing once the camera pulls back.
             if crate::viewmodel::SHOW_VIEWMODEL && self.players[pidx].camera.mode.shows_viewmodel() {
                 let slot = &self.players[pidx];
-                // Held item: same resolver the network input path uses, so the
-                // in-hand item agrees with what remote peers render.
+                // Held items: the same resolver the network input path uses, so
+                // the in-hand items agree with what remote peers render. The
+                // local player knows each tool's real type; an empty off-hand
+                // draws no left hand at all.
                 let held = match slot.inventory.hotbar_slot(slot.hotbar_slot) {
-                    Some(stack) => crate::inventory::item_to_ref(&stack.item),
-                    None => crate::protocol::ItemRef::Empty,
+                    Some(stack) => crate::item_model::HeldItem::of(&stack.item),
+                    None => crate::item_model::HeldItem::EMPTY,
                 };
+                let off_held = slot.offhand.as_ref().map(|s| crate::item_model::HeldItem::of(&s.item));
                 // Bob: horizontal speed drives a walk-phase sine. velocity is
                 // per-tick displacement; scale by ~10 so a normal walk gives a
                 // visible-but-gentle sway. Phase advances with the tick counter.
@@ -17896,18 +17922,19 @@ impl super::GameState {
                 let phase = self.falling_tick_counter as f32 * 0.45;
                 let bob = phase.sin() * crate::viewmodel::BOB_AMP * walk_amt;
                 // Swing: map the local swing window across 0..=1 like the avatar.
-                let remaining = self.local_swing.get(&pidx).copied().unwrap_or(0);
-                let swing_progress = if remaining > 0 {
-                    (crate::entity_model::SWING_TICKS - remaining) as f32
-                        / (crate::entity_model::SWING_TICKS - 1).max(1) as f32
-                } else {
-                    0.0
+                // Each hand has its own window: the right swings on mining and
+                // main-hand uses, the left only on an off-hand use.
+                let swing_of = |remaining: u32| {
+                    if remaining > 0 {
+                        let progress = (crate::entity_model::SWING_TICKS - remaining) as f32
+                            / (crate::entity_model::SWING_TICKS - 1).max(1) as f32;
+                        crate::entity_model::swing_angle(progress)
+                    } else {
+                        0.0
+                    }
                 };
-                let swing = if remaining > 0 {
-                    crate::entity_model::swing_angle(swing_progress)
-                } else {
-                    0.0
-                };
+                let swing = swing_of(self.local_swing.get(&pidx).copied().unwrap_or(0));
+                let swing_off = swing_of(self.local_off_swing.get(&pidx).copied().unwrap_or(0));
                 // Arm -> avatar_pipeline/skin atlas (shows your uploaded skin on
                 // your own hand); held item -> entity_pipeline/block textures.
                 // Phase 3 (cosmetics): this viewport's first-person hand wears
@@ -17918,8 +17945,8 @@ impl super::GameState {
                 // is narrow), so the aspect goes to the builder and the camera.
                 let aspect = screen.viewport.width as f32
                     / screen.viewport.height.max(1) as f32;
-                let (mut arm_verts, mut held_verts) = crate::viewmodel::build_viewmodel_vertices(
-                    held, bob, swing,
+                let (mut arm_verts, mut held_verts) = crate::viewmodel::build_viewmodel_hands(
+                    held, off_held, bob, swing, swing_off,
                     crate::pure_helpers::skin_layer_of(pidx),
                     &self.registry,
                     // Your own hand follows YOUR skin's Arms setting.

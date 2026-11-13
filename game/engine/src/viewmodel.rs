@@ -1,10 +1,12 @@
 //! First-person held-tool viewmodel (Phase 7).
 //!
 //! Renders the LOCAL player's own right arm + equipped item in the lower right
-//! of the screen, bobbing while walking and swinging on mine/place. This is the
-//! player seeing their own tool in hand — the counterpart to the remote-player
-//! avatars (Phase 6), which reuse the same `player_model()` right arm and the
-//! same `item_model::held_item_mesh` so the in-hand item always agrees
+//! of the screen, bobbing while walking and swinging on mine/place, and, when
+//! the off-hand holds something, the left arm + that item in the lower left (the
+//! same layout mirrored in x; an empty off-hand draws nothing on the left). This
+//! is the player seeing their own tool in hand — the counterpart to the
+//! remote-player avatars (Phase 6), which reuse the same `player_model()` arms
+//! and the same `item_model::held_item_mesh` so the in-hand item always agrees
 //! with what other players see.
 //!
 //! Geometry is assembled in the right arm's LOCAL/model space, then
@@ -32,20 +34,32 @@
 //! check both, at 16:9, 16:10, 4:3 and phone portrait.
 //!
 //! The slot depends on the viewport's aspect ratio ([`slot_depth`]) and on the
-//! hand side ([`HandSide`]; the off-hand is the same layout mirrored in x, not
-//! drawn yet).
+//! hand side ([`HandSide`]; the off-hand's left arm is the same layout mirrored
+//! in x, built from the left arm part and mirrored translations and tilts, never
+//! a negative scale, which would flip the winding and the normals).
+//!
+//! The two hands swing on their own timers ([`build_viewmodel_hands`]): a
+//! right-click that routes to the off-hand (`hands::use_hand`) swings the left
+//! hand only; mining, attacking and a main-hand use swing the right.
+//!
+//! A held tool draws as its own shape (`held_tool_model`). Its one-sided feature
+//! (an axe's blade) points in toward the centre of the screen in first person, so
+//! the item is built for the opposite hand's side than the hand it is in; in the
+//! third-person hand the feature points outward.
 
 use glam::{Mat4, Vec3};
 
 use crate::block::BlockRegistry;
 use crate::entity_model::{self, PartPose};
-use crate::item_model;
+use crate::item_model::{self, HeldItem};
 use crate::mesh::Vertex;
 use crate::protocol::ItemRef;
 
 /// Index of the RIGHT ARM `ModelPart` in `entity_model::player_model()`.
 /// (head, body, left arm, right arm, left leg, right leg.)
 pub const RIGHT_ARM_INDEX: usize = 3;
+/// Index of the LEFT ARM `ModelPart` in `entity_model::player_model()`.
+pub const LEFT_ARM_INDEX: usize = 2;
 
 /// Walk-bob amplitude (view-space units). Small so it reads as a gentle sway,
 /// not a seasick lurch. Visual feel unverified — tune in playtest.
@@ -71,19 +85,33 @@ pub fn viewmodel_projection(aspect: f32) -> Mat4 {
     )
 }
 
-/// Which hand a viewmodel is. Only the right hand is drawn today; Spec 05 has an
-/// off-hand that is not built. Its slot is this layout mirrored in x, so every
-/// part of the slot below takes the side instead of assuming the right.
+/// Which hand a viewmodel (or an avatar's held item) is: the main hand is the
+/// right, the off-hand the left. The left slot is the right layout mirrored in
+/// x, so every part of the slot below takes the side instead of assuming the
+/// right.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HandSide {
     Right,
-    // BRIDGE: the off-hand viewmodel (Spec 05's off-hand, not built) — remove the
-    // allow when a left hand is drawn. Only tests build a left slot today.
-    #[allow(dead_code)]
     Left,
 }
 
 impl HandSide {
+    /// The other hand.
+    pub fn opposite(self) -> HandSide {
+        match self {
+            HandSide::Right => HandSide::Left,
+            HandSide::Left => HandSide::Right,
+        }
+    }
+
+    /// The arm part of `entity_model::player_model()` this hand is.
+    pub fn arm_index(self) -> usize {
+        match self {
+            HandSide::Right => RIGHT_ARM_INDEX,
+            HandSide::Left => LEFT_ARM_INDEX,
+        }
+    }
+
     /// +1 for the right hand, -1 for the left: the x mirror.
     pub fn sign(self) -> f32 {
         match self {
@@ -209,10 +237,10 @@ fn held_item_placement(held: ItemRef, registry: &BlockRegistry, side: HandSide) 
         * Mat4::from_translation(Vec3::new(0.0, item_lift(held, registry), 0.0))
 }
 
-/// Build the LOCAL player's viewmodel mesh in VIEW space, split by render path.
+/// Build one hand's viewmodel mesh in VIEW space, split by render path.
 ///
 /// Returns `(arm_skin_verts, held_verts)`:
-/// - **`arm_skin_verts`** — the right-arm part box-unwrapped onto the 64x64
+/// - **`arm_skin_verts`** — the arm part of `side` box-unwrapped onto the 64x64
 ///   skin atlas: the solid **base** layer (`base_faces()`, inflate 0.0) plus the
 ///   **sleeve overlay** layer (`overlay_faces()`, inflate `0.03` so it sits just
 ///   outside the base and the alpha-cutout shader shows the arm through
@@ -229,8 +257,10 @@ fn held_item_placement(held: ItemRef, registry: &BlockRegistry, side: HandSide) 
 /// depends on it (see [`slot_depth`]). Vertices are ready to render with an
 /// identity view matrix and the [`viewmodel_projection`], which draws the arm and
 /// the item in one depth-cleared pass so they self-occlude correctly.
+#[allow(clippy::too_many_arguments)]
 pub fn build_viewmodel_vertices(
-    held: ItemRef,
+    side: HandSide,
+    held: HeldItem,
     bob: f32,
     swing: f32,
     skin_layer: u32,
@@ -238,18 +268,18 @@ pub fn build_viewmodel_vertices(
     arm_model: crate::skin_uv::ArmModel,
     aspect: f32,
 ) -> (Vec<Vertex>, Vec<Vertex>) {
-    let side = HandSide::Right;
     // The hand you see is YOUR hand: a slim ("Alex") skin gets the 3-px arm and
     // the 3-px sleeve rects here too, not just on the third-person body.
-    let arm = &entity_model::player_model_for(arm_model)[RIGHT_ARM_INDEX];
+    let arm_index = side.arm_index();
+    let arm = &entity_model::player_model_for(arm_model)[arm_index];
 
-    // Right-arm part in local/model space, centred on its own origin so the
+    // The arm part in local/model space, centred on its own origin so the
     // whole thing sits at the view-space slot rather than the avatar's body
     // offset. Built UN-swung: the whole arm+item assembly is swung once about
     // the shoulder in `arm_transform`.
     //
     // Skin path: base body layer + sleeve overlay, the same two boxes (and the
-    // same OVERLAY_INFLATE) the remote-avatar builder emits per part.
+    // same overlay inflate) the remote-avatar builder emits per part.
     let pose = PartPose {
         walk_swing: 0.0,
         head_pitch: 0.0,
@@ -259,11 +289,11 @@ pub fn build_viewmodel_vertices(
     let base_uv = crate::skin_uv::base_faces(arm_model);
     let overlay_uv = crate::skin_uv::overlay_faces(arm_model);
     let mut arm_verts =
-        entity_model::build_skin_part_local(arm, &base_uv[RIGHT_ARM_INDEX], 0.0, pose, skin_layer);
+        entity_model::build_skin_part_local(arm, &base_uv[arm_index], 0.0, pose, skin_layer);
     arm_verts.extend(entity_model::build_skin_part_local(
         arm,
-        &overlay_uv[RIGHT_ARM_INDEX],
-        crate::entity_model::RIGHT_ARM_OVERLAY_INFLATE,
+        &overlay_uv[arm_index],
+        crate::skin_pose::overlay_inflate(arm_index),
         pose,
         skin_layer,
     ));
@@ -272,18 +302,23 @@ pub fn build_viewmodel_vertices(
     // Built into its OWN vec so it can render through the block-texture
     // pipeline, not the skin one.
     let mut held_verts = Vec::new();
-    if !matches!(held, ItemRef::Empty) {
-        let placement = held_item_placement(held, registry, side);
+    if !held.is_empty() {
+        let placement = held_item_placement(held.item, registry, side);
         // `item_model` puts a held sprite beside the fist (HELD_SPRITE_OFFSET) so
-        // its flame clears the hanging third-person arm. Held upright in front of
-        // the player that offset would push it off to the side, so take it out.
-        let is_sprite = matches!(held, ItemRef::Block(id)
+        // its flame clears the hanging third-person arm, and a one-sided tool
+        // reaches out to its hand's own side. Held upright in front of the player
+        // the sprite offset would push it off to the side, so take it out; and a
+        // tool is built for the OTHER hand so its feature points in toward the
+        // centre of the screen.
+        let mesh_side = side.opposite();
+        let is_sprite = matches!(held.item, ItemRef::Block(id)
             if matches!(item_model::block_look(id, registry), item_model::ItemLook::Sprite { .. }));
-        let mut item_verts = item_model::held_item_mesh(held, registry);
+        let offset = item_model::sprite_offset(mesh_side);
+        let mut item_verts = item_model::held_item_mesh(held, registry, mesh_side);
         for v in &mut item_verts {
             let mut p = Vec3::from(v.position);
             if is_sprite {
-                p -= item_model::HELD_SPRITE_OFFSET;
+                p -= offset;
             }
             v.position = placement.transform_point3(p).to_array();
             v.normal = placement.transform_vector3(Vec3::from(v.normal)).normalize_or_zero().to_array();
@@ -308,6 +343,34 @@ pub fn build_viewmodel_vertices(
     }
 
     (arm_verts, held_verts)
+}
+
+/// Both hands of the first-person view: the right arm with the main-hand item
+/// (a bare fist when `main` is empty) and, only when the off-hand holds an item,
+/// the left arm with that item. `swing_main` and `swing_off` are the hands' own
+/// swing angles (radians). Returns `(arm_skin_verts, held_verts)` for both hands
+/// together, the right hand's first, ready for the same two uploads.
+#[allow(clippy::too_many_arguments)]
+pub fn build_viewmodel_hands(
+    main: HeldItem,
+    off: Option<HeldItem>,
+    bob: f32,
+    swing_main: f32,
+    swing_off: f32,
+    skin_layer: u32,
+    registry: &BlockRegistry,
+    arm_model: crate::skin_uv::ArmModel,
+    aspect: f32,
+) -> (Vec<Vertex>, Vec<Vertex>) {
+    let (mut arm, mut held) =
+        build_viewmodel_vertices(HandSide::Right, main, bob, swing_main, skin_layer, registry, arm_model, aspect);
+    if let Some(off) = off.filter(|o| !o.is_empty()) {
+        let (left_arm, left_held) =
+            build_viewmodel_vertices(HandSide::Left, off, bob, swing_off, skin_layer, registry, arm_model, aspect);
+        arm.extend(left_arm);
+        held.extend(left_held);
+    }
+    (arm, held)
 }
 
 #[cfg(test)]
@@ -374,8 +437,8 @@ mod tests {
         // in viewmodel_transform. A non-zero swing must move the geometry. Both
         // the arm-skin mesh (.0) and the held-item mesh (.1) get the same swing.
         let reg = BlockRegistry::new();
-        let (rest_arm, rest_held) = build_viewmodel_vertices(ItemRef::Tool(2), 0.0, 0.0, 0, &reg, crate::skin_uv::ArmModel::Classic, 16.0 / 9.0);
-        let (swung_arm, swung_held) = build_viewmodel_vertices(ItemRef::Tool(2), 0.0, 0.6, 0, &reg, crate::skin_uv::ArmModel::Classic, 16.0 / 9.0);
+        let (rest_arm, rest_held) = build_viewmodel_vertices(HandSide::Right, ItemRef::Tool(2).into(), 0.0, 0.0, 0, &reg, crate::skin_uv::ArmModel::Classic, 16.0 / 9.0);
+        let (swung_arm, swung_held) = build_viewmodel_vertices(HandSide::Right, ItemRef::Tool(2).into(), 0.0, 0.6, 0, &reg, crate::skin_uv::ArmModel::Classic, 16.0 / 9.0);
         assert_eq!(rest_arm.len(), swung_arm.len(), "swing must not change arm vertex count");
         assert_eq!(rest_held.len(), swung_held.len(), "swing must not change held vertex count");
         let arm_moved = rest_arm.iter().zip(&swung_arm).any(|(a, b)| a.position != b.position);
@@ -394,8 +457,8 @@ mod tests {
     #[test]
     fn empty_hand_builds_just_the_arm() {
         let reg = BlockRegistry::new();
-        let (arm_empty, held_empty) = build_viewmodel_vertices(ItemRef::Empty, 0.0, 0.0, 0, &reg, crate::skin_uv::ArmModel::Classic, 16.0 / 9.0);
-        let (arm_block, held_block) = build_viewmodel_vertices(ItemRef::Block(1), 0.0, 0.0, 0, &reg, crate::skin_uv::ArmModel::Classic, 16.0 / 9.0);
+        let (arm_empty, held_empty) = build_viewmodel_vertices(HandSide::Right, ItemRef::Empty.into(), 0.0, 0.0, 0, &reg, crate::skin_uv::ArmModel::Classic, 16.0 / 9.0);
+        let (arm_block, held_block) = build_viewmodel_vertices(HandSide::Right, ItemRef::Block(1).into(), 0.0, 0.0, 0, &reg, crate::skin_uv::ArmModel::Classic, 16.0 / 9.0);
         // Arm = base + sleeve overlay = 2 boxes × 36 = 72 verts, in .0; it is
         // identical whether or not an item is held (the item never touches .0).
         assert_eq!(arm_empty.len(), 72, "arm = base + overlay = 72 verts");
@@ -417,7 +480,7 @@ mod tests {
         // of vertices, which the 22° yaw preserves ordering on.
         let reg = BlockRegistry::new();
         let width = |arm: crate::skin_uv::ArmModel| {
-            let (v, _) = build_viewmodel_vertices(ItemRef::Empty, 0.0, 0.0, 0, &reg, arm, 16.0 / 9.0);
+            let (v, _) = build_viewmodel_vertices(HandSide::Right, ItemRef::Empty.into(), 0.0, 0.0, 0, &reg, arm, 16.0 / 9.0);
             let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
             for p in v.iter().map(|v| v.position) {
                 lo = lo.min(p[0]);
@@ -437,7 +500,7 @@ mod tests {
         // front of the camera (-z) so it's not clipped behind the near plane /
         // culled to the back.
         let reg = BlockRegistry::new();
-        let (arm, held) = build_viewmodel_vertices(ItemRef::Tool(2), 0.0, 0.0, 0, &reg, crate::skin_uv::ArmModel::Classic, 16.0 / 9.0);
+        let (arm, held) = build_viewmodel_vertices(HandSide::Right, ItemRef::Tool(2).into(), 0.0, 0.0, 0, &reg, crate::skin_uv::ArmModel::Classic, 16.0 / 9.0);
         assert!(!arm.is_empty());
         assert!(!held.is_empty());
         for v in arm.iter().chain(&held) {
@@ -447,28 +510,37 @@ mod tests {
 }
 
 /// Where the first-person hand and its item land on screen (spec 2026-11-13,
-/// "held items visible in first person"). CPU projection tests: the vertices
-/// go through [`viewmodel_projection`], the matrix the render pass uses, with an
-/// identity view, at rest (bob 0, swing 0) unless a test says it is at the peak.
+/// "held items visible in first person", and the off-hand's mirror of it). CPU
+/// projection tests: the vertices go through [`viewmodel_projection`], the matrix
+/// the render pass uses, with an identity view, at rest (bob 0, swing 0) unless a
+/// test says it is at the peak. Every test runs for both hands: the left hand's
+/// numbers are the right's with x negated (`side.sign()`).
 #[cfg(test)]
 mod layout_tests {
     use super::*;
     use crate::block;
+    use crate::crafting::{Tool, ToolMaterial, ToolType};
     use crate::skin_uv::ArmModel;
 
     /// The aspect ratios people play at: 16:9, 16:10, 4:3 and phone portrait.
     const ASPECTS: [f32; 4] = [16.0 / 9.0, 16.0 / 10.0, 4.0 / 3.0, 9.0 / 16.0];
+    const SIDES: [HandSide; 2] = [HandSide::Right, HandSide::Left];
 
     /// What is held, with the least height its projected box must have (as a
     /// fraction of the viewport height: the spec's 12% and, for the tall items,
-    /// 15%).
-    fn items() -> Vec<(&'static str, ItemRef, f32)> {
-        vec![
-            ("torch", ItemRef::Block(block::TORCH), 0.15),
-            ("iron sword", ItemRef::Tool(2), 0.15),
-            ("stone block", ItemRef::Block(block::STONE), 0.12),
-            ("oak sapling", ItemRef::Block(block::SAPLING_OAK), 0.15),
-        ]
+    /// 15%). Every tool type is here, in iron.
+    fn items() -> Vec<(String, HeldItem, f32)> {
+        let mut v: Vec<(String, HeldItem, f32)> = vec![
+            ("torch".into(), ItemRef::Block(block::TORCH).into(), 0.15),
+            ("iron slab".into(), ItemRef::Tool(2).into(), 0.15),
+            ("stone block".into(), ItemRef::Block(block::STONE).into(), 0.12),
+            ("oak sapling".into(), ItemRef::Block(block::SAPLING_OAK).into(), 0.15),
+        ];
+        for t in crate::held_tool_model::tests::all_tool_types() {
+            let item = crate::item::Item::Tool(Tool::new(t, ToolMaterial::Iron));
+            v.push((format!("iron {t:?}"), HeldItem::of(&item), 0.15));
+        }
+        v
     }
 
     /// The largest swing angle `entity_model::swing_angle` reaches.
@@ -489,16 +561,16 @@ mod layout_tests {
         v.iter().map(|v| Vec3::from(v.position)).collect()
     }
 
-    fn build(held: ItemRef, aspect: f32, swing: f32, arm: ArmModel) -> (Vec<Vec3>, Vec<Vec3>) {
-        let (a, h) = build_viewmodel_vertices(held, 0.0, swing, 0, &BlockRegistry::new(), arm, aspect);
+    fn build(side: HandSide, held: HeldItem, aspect: f32, swing: f32, arm: ArmModel) -> (Vec<Vec3>, Vec<Vec3>) {
+        let (a, h) = build_viewmodel_vertices(side, held, 0.0, swing, 0, &BlockRegistry::new(), arm, aspect);
         (view_positions(&a), view_positions(&h))
     }
 
     /// The four corners of the arm box's hand end and of its shoulder end, in
     /// view space.
-    fn arm_ends(aspect: f32, swing: f32, arm: ArmModel) -> ([Vec3; 4], [Vec3; 4]) {
-        let size = entity_model::player_model_for(arm)[RIGHT_ARM_INDEX].size;
-        let m = arm_transform(aspect, HandSide::Right, 0.0, swing);
+    fn arm_ends(side: HandSide, aspect: f32, swing: f32, arm: ArmModel) -> ([Vec3; 4], [Vec3; 4]) {
+        let size = entity_model::player_model_for(arm)[side.arm_index()].size;
+        let m = arm_transform(aspect, side, 0.0, swing);
         let ends = |y: f32| {
             [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]
                 .map(|(sx, sz)| m.transform_point3(Vec3::new(sx * size.x * 0.5, y, sz * size.z * 0.5)))
@@ -518,12 +590,12 @@ mod layout_tests {
         p.x.abs() <= limit && p.y.abs() <= limit
     }
 
-    /// The shoulder end is out of view when every corner is beyond the right or
-    /// the bottom edge.
-    fn shoulder_outside(shoulder: &[Vec3; 4], aspect: f32) -> bool {
+    /// The shoulder end is out of view when every corner is beyond the hand's
+    /// own side edge or the bottom edge.
+    fn shoulder_outside(side: HandSide, shoulder: &[Vec3; 4], aspect: f32) -> bool {
         shoulder.iter().all(|p| {
             let n = ndc(*p, aspect);
-            n.x > 1.0 || n.y < -1.0
+            n.x * side.sign() > 1.0 || n.y < -1.0
         })
     }
 
@@ -547,11 +619,11 @@ mod layout_tests {
         false
     }
 
-    fn describe(name: &str, aspect: f32, pts: &[Vec3]) -> String {
+    fn describe(name: &str, side: HandSide, aspect: f32, pts: &[Vec3]) -> String {
         let (lo, hi) = bbox(pts, aspect);
         let c = (lo + hi) * 0.5;
         format!(
-            "{name} @{aspect:.2}: ndc x {:.2}..{:.2}, y {:.2}..{:.2}, height {:.0}%, centre ({:.2}, {:.2})",
+            "{side:?} {name} @{aspect:.2}: ndc x {:.2}..{:.2}, y {:.2}..{:.2}, height {:.0}%, centre ({:.2}, {:.2})",
             lo.x, hi.x, lo.y, hi.y, (hi.y - lo.y) * 50.0, c.x, c.y
         )
     }
@@ -560,19 +632,20 @@ mod layout_tests {
     /// Always passes; run with --nocapture.
     #[test]
     fn viewmodel_layout_numbers() {
-        for aspect in ASPECTS {
-            let (hand, shoulder) = arm_ends(aspect, 0.0, ArmModel::Classic);
-            let sh: Vec<_> = shoulder.iter().map(|p| ndc(*p, aspect)).collect();
-            let hn: Vec<_> = hand.iter().map(|p| ndc(*p, aspect)).collect();
-            eprintln!(
-                "VMLAYOUT aspect {aspect:.2}: fist ndc {hn:.2?}  shoulder ndc {sh:.2?}  shoulder_outside={}",
-                shoulder_outside(&shoulder, aspect)
-            );
-            for (name, held, _) in items() {
-                for (label, swing) in [("rest", 0.0), ("peak", swing_peak())] {
-                    let (arm, item) = build(held, aspect, swing, ArmModel::Classic);
-                    eprintln!("VMLAYOUT {label} {}", describe(name, aspect, &item));
-                    let _ = arm;
+        for side in SIDES {
+            for aspect in ASPECTS {
+                let (hand, shoulder) = arm_ends(side, aspect, 0.0, ArmModel::Classic);
+                let sh: Vec<_> = shoulder.iter().map(|p| ndc(*p, aspect)).collect();
+                let hn: Vec<_> = hand.iter().map(|p| ndc(*p, aspect)).collect();
+                eprintln!(
+                    "VMLAYOUT {side:?} aspect {aspect:.2}: fist ndc {hn:.2?}  shoulder ndc {sh:.2?}  shoulder_outside={}",
+                    shoulder_outside(side, &shoulder, aspect)
+                );
+                for (name, held, _) in items() {
+                    for (label, swing) in [("rest", 0.0), ("peak", swing_peak())] {
+                        let (_, item) = build(side, held, aspect, swing, ArmModel::Classic);
+                        eprintln!("VMLAYOUT {label} {}", describe(&name, side, aspect, &item));
+                    }
                 }
             }
         }
@@ -581,34 +654,38 @@ mod layout_tests {
     // 1. Every vertex of the held item is inside the viewport.
     #[test]
     fn spec1_every_held_vertex_is_in_the_viewport() {
-        for aspect in ASPECTS {
-            for (name, held, _) in items() {
-                let (_, item) = build(held, aspect, 0.0, ArmModel::Classic);
-                assert!(item.iter().all(|p| p.z < -0.02), "{name}: vertex too close to the camera");
-                let outside: Vec<_> = item
-                    .iter()
-                    .map(|p| ndc(*p, aspect))
-                    .filter(|n| !inside_viewport(*n, 0.98))
-                    .collect();
-                assert!(outside.is_empty(), "{}; {} of {} vertices outside +-0.98", describe(name, aspect, &item), outside.len(), item.len());
+        for side in SIDES {
+            for aspect in ASPECTS {
+                for (name, held, _) in items() {
+                    let (_, item) = build(side, held, aspect, 0.0, ArmModel::Classic);
+                    assert!(item.iter().all(|p| p.z < -0.02), "{name}: vertex too close to the camera");
+                    let outside: Vec<_> = item
+                        .iter()
+                        .map(|p| ndc(*p, aspect))
+                        .filter(|n| !inside_viewport(*n, 0.98))
+                        .collect();
+                    assert!(outside.is_empty(), "{}; {} of {} vertices outside +-0.98", describe(&name, side, aspect, &item), outside.len(), item.len());
+                }
             }
         }
     }
 
-    // 2. Big enough, and in the lower-right quadrant.
+    // 2. Big enough, and in the lower quadrant on the hand's own side.
     #[test]
-    fn spec2_item_box_is_tall_enough_and_lower_right() {
-        for aspect in ASPECTS {
-            for (name, held, min_h) in items() {
-                let (_, item) = build(held, aspect, 0.0, ArmModel::Classic);
-                let (lo, hi) = bbox(&item, aspect);
-                let c = (lo + hi) * 0.5;
-                // The part of the box that is on screen: an item that mostly hangs
-                // below the bottom edge is not "tall" in view.
-                let seen_h = (hi.y.min(1.0) - lo.y.max(-1.0)).max(0.0) * 0.5;
-                assert!(seen_h >= min_h, "{}: needs >= {:.0}% tall on screen, has {:.0}%", describe(name, aspect, &item), min_h * 100.0, seen_h * 100.0);
-                assert!(c.x > 0.15 && c.y < -0.15, "{}: centre must be lower-right (x > 0.15, y < -0.15)", describe(name, aspect, &item));
-                assert!(inside_viewport(c, 1.0), "{}: centre must be on screen", describe(name, aspect, &item));
+    fn spec2_item_box_is_tall_enough_and_in_the_hands_lower_quadrant() {
+        for side in SIDES {
+            for aspect in ASPECTS {
+                for (name, held, min_h) in items() {
+                    let (_, item) = build(side, held, aspect, 0.0, ArmModel::Classic);
+                    let (lo, hi) = bbox(&item, aspect);
+                    let c = (lo + hi) * 0.5;
+                    // The part of the box that is on screen: an item that mostly hangs
+                    // below the bottom edge is not "tall" in view.
+                    let seen_h = (hi.y.min(1.0) - lo.y.max(-1.0)).max(0.0) * 0.5;
+                    assert!(seen_h >= min_h, "{}: needs >= {:.0}% tall on screen, has {:.0}%", describe(&name, side, aspect, &item), min_h * 100.0, seen_h * 100.0);
+                    assert!(c.x * side.sign() > 0.15 && c.y < -0.15, "{}: centre must be lower-{side:?} (|x| > 0.15 on the hand's side, y < -0.15)", describe(&name, side, aspect, &item));
+                    assert!(inside_viewport(c, 1.0), "{}: centre must be on screen", describe(&name, side, aspect, &item));
+                }
             }
         }
     }
@@ -616,12 +693,14 @@ mod layout_tests {
     // 3. The fist (the hand end of the arm box) is in the viewport.
     #[test]
     fn spec3_fist_is_in_the_viewport() {
-        for aspect in ASPECTS {
-            for arm in [ArmModel::Classic, ArmModel::Slim] {
-                let (hand, _) = arm_ends(aspect, 0.0, arm);
-                for p in hand {
-                    let n = ndc(p, aspect);
-                    assert!(inside_viewport(n, 1.0), "{arm:?} fist corner at ndc ({:.2}, {:.2}) @{aspect:.2} is outside the viewport", n.x, n.y);
+        for side in SIDES {
+            for aspect in ASPECTS {
+                for arm in [ArmModel::Classic, ArmModel::Slim] {
+                    let (hand, _) = arm_ends(side, aspect, 0.0, arm);
+                    for p in hand {
+                        let n = ndc(p, aspect);
+                        assert!(inside_viewport(n, 1.0), "{side:?} {arm:?} fist corner at ndc ({:.2}, {:.2}) @{aspect:.2} is outside the viewport", n.x, n.y);
+                    }
                 }
             }
         }
@@ -630,12 +709,14 @@ mod layout_tests {
     // 4. The shoulder end is out of the viewport (#15's guard).
     #[test]
     fn spec4_shoulder_stays_off_screen() {
-        for aspect in ASPECTS {
-            for arm in [ArmModel::Classic, ArmModel::Slim] {
-                let (_, shoulder) = arm_ends(aspect, 0.0, arm);
-                assert!(shoulder.iter().all(|p| p.z < -0.05), "{arm:?} shoulder too close to the camera: {shoulder:?}");
-                let n: Vec<_> = shoulder.iter().map(|p| ndc(*p, aspect)).collect();
-                assert!(shoulder_outside(&shoulder, aspect), "{arm:?} shoulder corners at ndc {n:.2?} @{aspect:.2} are not all beyond the right or bottom edge");
+        for side in SIDES {
+            for aspect in ASPECTS {
+                for arm in [ArmModel::Classic, ArmModel::Slim] {
+                    let (_, shoulder) = arm_ends(side, aspect, 0.0, arm);
+                    assert!(shoulder.iter().all(|p| p.z < -0.05), "{side:?} {arm:?} shoulder too close to the camera: {shoulder:?}");
+                    let n: Vec<_> = shoulder.iter().map(|p| ndc(*p, aspect)).collect();
+                    assert!(shoulder_outside(side, &shoulder, aspect), "{side:?} {arm:?} shoulder corners at ndc {n:.2?} @{aspect:.2} are not all beyond the side or bottom edge");
+                }
             }
         }
     }
@@ -649,7 +730,10 @@ mod layout_tests {
         let size = entity_model::player_model_for(ArmModel::Classic)[RIGHT_ARM_INDEX].size;
         let top = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]
             .map(|(sx, sz)| old.transform_point3(Vec3::new(sx * size.x * 0.5, size.y * 0.5, sz * size.z * 0.5)));
-        assert!(!shoulder_outside(&top, 16.0 / 9.0), "the old slot's shoulder is on screen, so the guard must report it");
+        assert!(!shoulder_outside(HandSide::Right, &top, 16.0 / 9.0), "the old slot's shoulder is on screen, so the guard must report it");
+        // The same slot mirrored is the left hand's old place: the guard bites there too.
+        let mirrored = top.map(|p| Vec3::new(-p.x, p.y, p.z));
+        assert!(!shoulder_outside(HandSide::Left, &mirrored, 16.0 / 9.0));
     }
 
     // 5. Nothing of the arm or item covers the centre +-5% of the viewport.
@@ -657,27 +741,100 @@ mod layout_tests {
     fn spec5_the_crosshair_stays_clear() {
         // +-5% of the viewport either side of the centre is +-0.10 in NDC.
         const HALF: f32 = 0.10;
-        for aspect in ASPECTS {
-            for (name, held, _) in items() {
-                let (arm, item) = build(held, aspect, 0.0, ArmModel::Classic);
-                assert!(!covers_centre(&arm, aspect, HALF), "arm covers the centre with {name} @{aspect:.2}");
-                assert!(!covers_centre(&item, aspect, HALF), "{name} covers the centre @{aspect:.2}");
+        for side in SIDES {
+            for aspect in ASPECTS {
+                for (name, held, _) in items() {
+                    let (arm, item) = build(side, held, aspect, 0.0, ArmModel::Classic);
+                    assert!(!covers_centre(&arm, aspect, HALF), "{side:?} arm covers the centre with {name} @{aspect:.2}");
+                    assert!(!covers_centre(&item, aspect, HALF), "{side:?} {name} covers the centre @{aspect:.2}");
+                }
+                let (arm, _) = build(side, ItemRef::Empty.into(), aspect, 0.0, ArmModel::Classic);
+                assert!(!covers_centre(&arm, aspect, HALF), "the empty {side:?} hand's arm covers the centre @{aspect:.2}");
             }
-            let (arm, _) = build(ItemRef::Empty, aspect, 0.0, ArmModel::Classic);
-            assert!(!covers_centre(&arm, aspect, HALF), "the empty hand's arm covers the centre @{aspect:.2}");
         }
     }
 
     // 6. At the swing peak some of the item is still in view.
     #[test]
     fn spec6_item_stays_partly_in_view_at_the_swing_peak() {
-        for aspect in ASPECTS {
-            for (name, held, _) in items() {
-                let (_, item) = build(held, aspect, swing_peak(), ArmModel::Classic);
-                let (lo, hi) = bbox(&item, aspect);
-                let overlaps = lo.x < 1.0 && hi.x > -1.0 && lo.y < 1.0 && hi.y > -1.0;
-                assert!(overlaps, "{} at the swing peak is entirely outside the viewport", describe(name, aspect, &item));
+        for side in SIDES {
+            for aspect in ASPECTS {
+                for (name, held, _) in items() {
+                    let (_, item) = build(side, held, aspect, swing_peak(), ArmModel::Classic);
+                    let (lo, hi) = bbox(&item, aspect);
+                    let overlaps = lo.x < 1.0 && hi.x > -1.0 && lo.y < 1.0 && hi.y > -1.0;
+                    assert!(overlaps, "{} at the swing peak is entirely outside the viewport", describe(&name, side, aspect, &item));
+                }
             }
+        }
+    }
+
+    // Both hands at once.
+
+    fn both(aspect: f32, swing_main: f32, swing_off: f32) -> (Vec<Vertex>, Vec<Vertex>) {
+        let pick = HeldItem::of(&crate::item::Item::Tool(Tool::new(ToolType::Pickaxe, ToolMaterial::Iron)));
+        let torch: HeldItem = ItemRef::Block(block::TORCH).into();
+        build_viewmodel_hands(pick, Some(torch), 0.0, swing_main, swing_off, 0, &BlockRegistry::new(), ArmModel::Classic, aspect)
+    }
+
+    #[test]
+    fn with_both_hands_full_neither_enters_the_centre_box() {
+        for aspect in ASPECTS {
+            let (arm, held) = both(aspect, 0.0, 0.0);
+            let (arm, held) = (view_positions(&arm), view_positions(&held));
+            assert!(!covers_centre(&arm, aspect, 0.05), "an arm covers the centre +-5% @{aspect:.2}");
+            assert!(!covers_centre(&held, aspect, 0.05), "an item covers the centre +-5% @{aspect:.2}");
+        }
+    }
+
+    #[test]
+    fn the_left_item_is_in_the_lower_left_and_the_main_item_stays_lower_right() {
+        for aspect in ASPECTS {
+            let (_, held) = both(aspect, 0.0, 0.0);
+            let (left, right): (Vec<_>, Vec<_>) = view_positions(&held).into_iter().partition(|p| p.x < 0.0);
+            assert!(!left.is_empty() && !right.is_empty(), "@{aspect:.2}: an item in each hand");
+            let (lo, hi) = bbox(&left, aspect);
+            let c = (lo + hi) * 0.5;
+            assert!(c.x < -0.15 && c.y < -0.15, "left item centre must be lower-left @{aspect:.2}: {c:?}");
+            let (lo, hi) = bbox(&right, aspect);
+            let c = (lo + hi) * 0.5;
+            assert!(c.x > 0.15 && c.y < -0.15, "main item centre must stay lower-right @{aspect:.2}: {c:?}");
+        }
+    }
+
+    #[test]
+    fn an_empty_off_hand_draws_nothing_on_the_left() {
+        let reg = BlockRegistry::new();
+        let pick: HeldItem = ItemRef::Tool(2).into();
+        let alone = build_viewmodel_hands(pick, None, 0.0, 0.0, 0.0, 0, &reg, ArmModel::Classic, 16.0 / 9.0);
+        let right_only = build_viewmodel_vertices(HandSide::Right, pick, 0.0, 0.0, 0, &reg, ArmModel::Classic, 16.0 / 9.0);
+        assert_eq!(alone.0.len(), right_only.0.len(), "no left arm");
+        assert_eq!(alone.1.len(), right_only.1.len(), "no left item");
+        assert!(alone.0.iter().chain(&alone.1).all(|v| v.position[0] > 0.0), "everything is on the right half");
+        // An off-hand slot that holds an empty ref is empty too.
+        let still = build_viewmodel_hands(pick, Some(HeldItem::EMPTY), 0.0, 0.0, 0.0, 0, &reg, ArmModel::Classic, 16.0 / 9.0);
+        assert_eq!(still.0.len(), right_only.0.len());
+        // A full off-hand adds a left arm (two boxes) and its item.
+        let (arm, held) = both(16.0 / 9.0, 0.0, 0.0);
+        assert_eq!(arm.len(), 72 * 2, "two arms");
+        assert!(held.len() > right_only.1.len(), "and two items");
+    }
+
+    #[test]
+    fn an_off_hand_swing_moves_the_left_hand_only() {
+        for aspect in [16.0 / 9.0, 9.0 / 16.0] {
+            let (rest_arm, rest_held) = both(aspect, 0.0, 0.0);
+            let (swung_arm, swung_held) = both(aspect, 0.0, 0.6);
+            assert_eq!(rest_arm.len(), swung_arm.len());
+            let moved = |a: &[Vertex], b: &[Vertex], left: bool| {
+                a.iter().zip(b).filter(|(x, _)| (x.position[0] < 0.0) == left).any(|(x, y)| x.position != y.position)
+            };
+            assert!(moved(&rest_arm, &swung_arm, true) && moved(&rest_held, &swung_held, true), "the left hand swings");
+            assert!(!moved(&rest_arm, &swung_arm, false) && !moved(&rest_held, &swung_held, false), "the right hand stays");
+            // And the main swing moves the right hand only.
+            let (m_arm, m_held) = both(aspect, 0.6, 0.0);
+            assert!(moved(&rest_arm, &m_arm, false) && moved(&rest_held, &m_held, false));
+            assert!(!moved(&rest_arm, &m_arm, true) && !moved(&rest_held, &m_held, true), "the left hand stays");
         }
     }
 }
