@@ -34,7 +34,18 @@ impl HeadlessGame {
         world_name: &str,
         routing: crate::local_routing::LocalRouting,
     ) -> Self {
-        let state = pollster::block_on(crate::GameState::new_headless_routed(1280, 720, routing));
+        Self::boot_into_world_sized(world_name, 1280, 720, routing)
+    }
+
+    /// [`Self::boot_into_world_routed`] at a chosen window size (a phone-portrait
+    /// shot needs 720x1280).
+    pub(crate) fn boot_into_world_sized(
+        world_name: &str,
+        width: u32,
+        height: u32,
+        routing: crate::local_routing::LocalRouting,
+    ) -> Self {
+        let state = pollster::block_on(crate::GameState::new_headless_routed(width, height, routing));
         let mut game = Self { state };
         game.enter_world(world_name);
         game
@@ -201,6 +212,9 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[path = "item_render.rs"]
     mod item_render;
+    #[cfg(not(target_arch = "wasm32"))]
+    #[path = "viewmodel_shots.rs"]
+    mod viewmodel_shots;
     use super::*;
 
     /// Point `AXENSTAX_WORLDS_DIR` at one pid-scoped temp dir shared by every

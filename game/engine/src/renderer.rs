@@ -3079,12 +3079,7 @@ impl Renderer {
     /// stable on-screen size regardless of split-screen layout.
     pub fn update_viewmodel_camera(&self, player_index: usize, aspect: f32) {
         if let Some(gpu) = self.player_gpu.get(player_index) {
-            let proj = glam::camera::rh::proj::directx::perspective(
-                crate::viewmodel::VIEWMODEL_FOV_Y.to_radians(),
-                aspect.max(0.0001),
-                0.01,
-                10.0,
-            );
+            let proj = crate::viewmodel::viewmodel_projection(aspect);
             let uniform = CameraUniform {
                 view_proj: proj.to_cols_array_2d(),
                 camera_pos: [0.0, 0.0, 0.0, 0.0],
